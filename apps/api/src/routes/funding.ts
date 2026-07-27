@@ -68,6 +68,7 @@ type FundingDestinationQuery = Readonly<{
   purpose: "fund" | "buy" | "sell" | "redeem" | "withdraw";
   marketContextId?: string | null;
   marketClass?: string | null;
+  positionActionRef?: string | null;
   controllerWalletRef?: string | null;
 }>;
 
@@ -122,6 +123,7 @@ export type FundingRouteDependencies = Readonly<{
       purpose: PreparationPurpose;
       marketContextId: string | null;
       marketClass: string | null;
+      positionActionRef?: string | null;
     }>,
   ): Promise<PreparationResult>;
   prepare(
@@ -131,6 +133,7 @@ export type FundingRouteDependencies = Readonly<{
       purpose: PreparationPurpose;
       marketContextId: string | null;
       marketClass: string | null;
+      positionActionRef?: string | null;
       operationId: string;
       expectedInspectionRevision: string;
     }>,
@@ -180,9 +183,10 @@ export type FundingRouteDependencies = Readonly<{
       attemptId: string;
       action: NormalizedAction;
       actionFingerprint: string;
+      controllerWalletRef: string;
       executorId: string;
-      executionMode: "web_client" | "privy_authorization";
-      payerRequirement: "user" | "privy_sponsor";
+      executionMode: "web_client" | "privy_authorization" | "venue_relayer";
+      payerRequirement: "user" | "privy_sponsor" | "provider";
       sponsorshipPolicyId: string | null;
     }>
   >;
@@ -253,6 +257,18 @@ function publicOperationStep(step: FundingOperationStep) {
       step.state === "action_required" &&
       (step.dependsOnStepId === null || step.dependencyState === "succeeded"),
   };
+}
+
+function publicOperationSteps(steps: readonly FundingOperationStep[]) {
+  return steps
+    .filter(
+      (step) =>
+        !(
+          step.state === "planned" &&
+          step.actionValidationResult.activation === "after_verified_ingress"
+        ),
+    )
+    .map(publicOperationStep);
 }
 
 function errorStatus(error: unknown): number {
@@ -354,7 +370,7 @@ async function handleFundingRequest<T>(
   try {
     return await execute(userId);
   } catch (error) {
-    request.log.error({ error, userId }, input.logMessage);
+    request.log.error({ err: error, userId }, input.logMessage);
     reply.code(errorStatus(error)).send({
       error: input.publicError,
       code: errorCode(error),
@@ -712,9 +728,9 @@ export function registerFundingRoutes(
           return reply.send({
             ok: true,
             operation: publicOperation(committed.operation),
-            steps: (
-              await dependencies.operationSteps(userId, committed.operation.id)
-            ).map(publicOperationStep),
+            steps: publicOperationSteps(
+              await dependencies.operationSteps(userId, committed.operation.id),
+            ),
             ingress: publicIngress(committed.operation),
             replayed: committed.replayed,
           });
@@ -749,9 +765,9 @@ export function registerFundingRoutes(
           return reply.send({
             ok: true,
             operation: publicOperation(operation),
-            steps: (
-              await dependencies.operationSteps(userId, operation.id)
-            ).map(publicOperationStep),
+            steps: publicOperationSteps(
+              await dependencies.operationSteps(userId, operation.id),
+            ),
             ingress: publicIngress(operation),
           });
         },
@@ -791,9 +807,9 @@ export function registerFundingRoutes(
           return reply.send({
             ok: true,
             operation: publicOperation(operation),
-            steps: (
-              await dependencies.operationSteps(userId, operation.id)
-            ).map(publicOperationStep),
+            steps: publicOperationSteps(
+              await dependencies.operationSteps(userId, operation.id),
+            ),
             ingress: publicIngress(operation),
             consumerReservation: publicConsumerReservation(
               await dependencies.consumerReservation(userId, request.params.id),

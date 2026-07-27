@@ -384,6 +384,129 @@ async function readMergeUser(userId: string): Promise<MergeUserRow> {
   return row;
 }
 
+async function testDirectIngressWithDeferredPreparationCommit(): Promise<void> {
+  const userId = await insertUser(pool);
+  const destinationLocationId = opaque("destination-location");
+  const plan: FundingCommitPlan = {
+    operation: {
+      purpose: "add_funds",
+      initialState: {
+        status: "awaiting_external_funds",
+        stage: "source_action",
+      },
+      experienceMode: "prepare_first",
+      planKind: "direct_external_handoff",
+      sourceSnapshot: {
+        kind: "external_ingress",
+        ingressKind: "manual",
+      },
+      destinationTargetSnapshot: {
+        kind: "owned_location",
+        locationId: destinationLocationId,
+      },
+      externalRecipientId: null,
+      venueId: "polymarket",
+      marketId: null,
+      marketContextSnapshot: null,
+      venueBindingSnapshot: {
+        venueId: "polymarket",
+      },
+      walletExecutionSnapshot: {
+        profileId: opaque("wallet-profile"),
+      },
+      placementSnapshot: {},
+      requestedSourceAmount: money("1000000"),
+      requestedDestinationAmount: money("1000000"),
+      supportMetadata: {
+        preparationKind: "polymarket_funding_router",
+      },
+    },
+    segments: [],
+    steps: [
+      {
+        ordinal: 0,
+        segmentOrdinal: null,
+        stepKind: "venue_preparation",
+        state: "planned",
+        actionFingerprint: hash("d"),
+        executorId: "wallet_profile_evm_v1",
+        payerRequirement: "privy_sponsor",
+        dependsOnOrdinal: null,
+        normalizedAction: {
+          kind: "polymarket_funding_router",
+        },
+        actionValidationResult: {
+          valid: true,
+          activation: "after_verified_ingress",
+        },
+      },
+    ],
+    reservations: [
+      {
+        segmentOrdinal: null,
+        componentId: opaque("direct-pusd"),
+        locationId: destinationLocationId,
+        networkId: ASSET.networkId,
+        assetId: ASSET.assetId,
+        assetDecimals: ASSET.decimals,
+        rawAmount: "1000000",
+        mode: "advisory_destination",
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      },
+      {
+        segmentOrdinal: null,
+        componentId: opaque("direct-usdce"),
+        locationId: destinationLocationId,
+        networkId: ASSET.networkId,
+        assetId: "erc20:0x0000000000000000000000000000000000000002",
+        assetDecimals: ASSET.decimals,
+        rawAmount: "1000000",
+        mode: "advisory_destination",
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      },
+    ],
+  };
+  const consentToken = opaque("consent");
+  const quote = await createFundingQuote(
+    pool,
+    quoteInput(userId, plan, consentToken),
+  );
+  let operationId: string | null = null;
+  try {
+    const committed = await commitFundingOperation(
+      pool,
+      commitInput(userId, quote.id, consentToken, plan),
+    );
+    operationId = committed.operation.id;
+    assert.equal(committed.operation.planKind, "direct_external_handoff");
+    const shape = await pool.query<{
+      reservation_count: string;
+      step_count: string;
+    }>(
+      `
+        select
+          (
+            select count(*)::text
+            from funding_operation_steps
+            where operation_id = $1
+          ) as step_count,
+          (
+            select count(*)::text
+            from balance_reservations
+            where operation_id = $1
+          ) as reservation_count
+      `,
+      [operationId],
+    );
+    assert.deepEqual(shape.rows[0], {
+      reservation_count: "2",
+      step_count: "1",
+    });
+  } finally {
+    await cleanupCommittedOperation(operationId, quote.id, userId);
+  }
+}
+
 async function testTerminalFundingMergeLifecycle(): Promise<void> {
   const sourceId = await insertUser(pool);
   const targetId = await insertUser(pool);
@@ -1836,6 +1959,10 @@ console.log(
 await testAtomicRollbackAfterPartialInsert();
 console.log(
   "[funding-persistence-integration-tests] ok atomic rollback after partial insert",
+);
+await testDirectIngressWithDeferredPreparationCommit();
+console.log(
+  "[funding-persistence-integration-tests] ok direct ingress with deferred preparation commit",
 );
 await testTerminalFundingMergeLifecycle();
 console.log(

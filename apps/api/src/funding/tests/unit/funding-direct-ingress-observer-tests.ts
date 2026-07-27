@@ -5,6 +5,7 @@ import type { Pool } from "@hunch/infra";
 import {
   directIngressSatisfiedAmount,
   DirectIngressDestinationObserver,
+  selectDirectIngressVariant,
   type DirectIngressObservationTarget,
 } from "../../reconciliation/direct-ingress-observer.js";
 
@@ -14,16 +15,37 @@ const target: DirectIngressObservationTarget = {
   purpose: "add_funds",
   marketId: null,
   venueBindingOptionId: "binding-option",
-  destinationLocationId: "location",
-  destinationAddress: "0x0000000000000000000000000000000000000001",
   requestedAsset: {
     networkId: "evm:137",
     assetId: "0x0000000000000000000000000000000000000002",
     decimals: 6,
   },
   requestedRaw: "3000000",
-  baselineRaw: "1000000",
-  baselineRevision: "baseline-revision",
+  operationVersion: 1,
+  operationState: {
+    status: "awaiting_external_funds",
+    stage: "source_action",
+  },
+  variants: [
+    {
+      variantId: "variant-pusd",
+      networkId: "evm:137",
+      asset: {
+        networkId: "evm:137",
+        assetId: "0x0000000000000000000000000000000000000002",
+        decimals: 6,
+      },
+      destinationLocationId: "location",
+      destinationAddress: "0x0000000000000000000000000000000000000001",
+      baselineRaw: "1000000",
+      baselineRevision: "baseline-revision",
+      observation: {
+        adapterId: "owned_destination_spendability_v1",
+        payload: {},
+      },
+      completion: { kind: "direct_destination_credit" },
+    },
+  ],
 };
 
 assert.equal(
@@ -51,17 +73,90 @@ assert.equal(
   "3000000",
 );
 
+const pusdVariant = target.variants[0];
+assert.ok(pusdVariant);
+const usdceVariant = {
+  ...pusdVariant,
+  variantId: "variant-usdce",
+  asset: {
+    networkId: "evm:137",
+    assetId: "0x0000000000000000000000000000000000000003",
+    decimals: 6,
+  },
+  baselineRaw: "500000",
+  observation: {
+    adapterId: "polymarket_deposit_wallet_assets_v1",
+    payload: { field: "depositUsdceRaw" },
+  },
+  completion: {
+    kind: "committed_venue_preparation" as const,
+    stepOrdinal: 0,
+  },
+};
+const twoVariants = [...target.variants, usdceVariant];
+const usdceSelection = selectDirectIngressVariant({
+  variants: twoVariants,
+  requestedRaw: "3000000",
+  observations: [
+    {
+      variantId: "variant-pusd",
+      observedRaw: "1000000",
+      revision: "revision-1",
+      observedAt: "2026-07-24T12:00:00.000Z",
+    },
+    {
+      variantId: "variant-usdce",
+      observedRaw: "3500000",
+      revision: "revision-1",
+      observedAt: "2026-07-24T12:00:00.000Z",
+    },
+  ],
+});
+assert.equal(usdceSelection.kind, "satisfied");
+if (usdceSelection.kind === "satisfied") {
+  assert.equal(usdceSelection.variant.variantId, "variant-usdce");
+}
+assert.deepEqual(
+  selectDirectIngressVariant({
+    variants: twoVariants,
+    requestedRaw: "3000000",
+    observations: [
+      {
+        variantId: "variant-pusd",
+        observedRaw: "1000001",
+        revision: "revision-2",
+        observedAt: "2026-07-24T12:00:01.000Z",
+      },
+      {
+        variantId: "variant-usdce",
+        observedRaw: "3500000",
+        revision: "revision-2",
+        observedAt: "2026-07-24T12:00:01.000Z",
+      },
+    ],
+  }),
+  {
+    kind: "ambiguous",
+    positiveVariantIds: ["variant-pusd", "variant-usdce"],
+  },
+);
+
 let persisted = 0;
 const observer = new DirectIngressDestinationObserver({
   loadTarget: async () => target,
   observe: async () => ({
-    observedRaw: "4000000",
-    revision: "observed-revision",
-    observedAt: "2026-07-24T12:00:00.000Z",
+    variants: [
+      {
+        variantId: "variant-pusd",
+        observedRaw: "4000000",
+        revision: "observed-revision",
+        observedAt: "2026-07-24T12:00:00.000Z",
+      },
+    ],
   }),
   persist: async (_pool, input) => {
     assert.equal(input.target.operationId, target.operationId);
-    assert.equal(input.observation.observedRaw, "4000000");
+    assert.equal(input.observation.variants[0]?.observedRaw, "4000000");
     persisted += 1;
     return true;
   },
@@ -69,6 +164,31 @@ const observer = new DirectIngressDestinationObserver({
 const result = await observer.pollOperation({} as Pool, target.operationId);
 assert.deepEqual(result, { destinationsPolled: 1 });
 assert.equal(persisted, 1);
+
+let adapterObserved = 0;
+const adapterDriven = new DirectIngressDestinationObserver({
+  loadTarget: async () => target,
+  observationAdapters: [
+    {
+      adapterId: "owned_destination_spendability_v1",
+      observe: async (_pool, _target, variants) => {
+        adapterObserved += 1;
+        return variants.map((variant) => ({
+          variantId: variant.variantId,
+          observedRaw: "4000000",
+          revision: "adapter-revision",
+          observedAt: "2026-07-24T12:00:02.000Z",
+        }));
+      },
+    },
+  ],
+  persist: async () => true,
+});
+assert.deepEqual(
+  await adapterDriven.pollOperation({} as Pool, target.operationId),
+  { destinationsPolled: 1 },
+);
+assert.equal(adapterObserved, 1);
 
 const unrelated = new DirectIngressDestinationObserver({
   loadTarget: async () => null,
@@ -79,5 +199,5 @@ assert.deepEqual(
 );
 
 console.log(
-  "[funding-direct-ingress-observer-tests] minimum delta and scoped polling passed",
+  "[funding-direct-ingress-observer-tests] variant minimum delta, pluggable observer adapter, and scoped polling passed",
 );

@@ -278,15 +278,29 @@ export class RelayWalletQuoteAdapter {
     if (input.route.sourceVm === "evm") {
       const scenario = input.route.rehearsalScenario;
       if (!scenario) throw new Error("Relay EVM route scenario missing");
-      const validated = validateRelayRehearsalQuote({
-        amount: BigInt(input.sourceAmount.raw),
-        minimumOutputFloor: BigInt(input.minimumOutput.raw),
-        quote,
-        recipient: recipientAddress,
-        scenario,
-        user: userAddress,
-      });
+      let validated;
+      try {
+        validated = validateRelayRehearsalQuote({
+          amount: BigInt(input.sourceAmount.raw),
+          amountMode: input.route.quoteMode,
+          minimumOutputFloor: BigInt(input.minimumOutput.raw),
+          quote,
+          recipient: recipientAddress,
+          scenario,
+          user: userAddress,
+        });
+      } catch (error) {
+        if (
+          error instanceof Error &&
+          (error.message.includes("authorized cap") ||
+            error.message.includes("authorized floor"))
+        ) {
+          throw new RelayQuoteEconomicsError(error.message);
+        }
+        throw error;
+      }
       requestId = validated.requestId;
+      sourceAmountRaw = validated.sourceAmountRaw;
       expectedOutputRaw = validated.expectedOutputRaw;
       minimumOutputRaw = validated.minimumOutputRaw;
       routeShape = validated.routeShape;

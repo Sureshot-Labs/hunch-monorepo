@@ -109,6 +109,7 @@ export type DestinationOptionsInput = Readonly<{
   purpose: PreparationPurpose;
   marketContextId: string | null;
   marketClass: string | null;
+  positionActionRef?: string | null;
   compatibleVenueBindingOptionIds: readonly string[] | null;
   controllerWalletRef?: string | null;
 }>;

@@ -119,6 +119,7 @@ export type LimitlessRuntimeEvidence = Readonly<{
   clobApproval: boolean;
   negRiskClobApproval: boolean;
   ammApproval: boolean;
+  marketAdapterRequired: boolean;
   marketAdapterApproval: boolean;
   observedAt: string;
   expiresAt: string;
@@ -211,9 +212,24 @@ function required(input: {
   };
 }
 
+function nonNegativeRaw(value: string | null): value is string {
+  return value != null && /^(0|[1-9][0-9]*)$/.test(value);
+}
+
 function positiveRaw(value: string | null): boolean {
-  if (!value || !/^(0|[1-9][0-9]*)$/.test(value)) return false;
+  if (!nonNegativeRaw(value)) return false;
   return BigInt(value) > 0n;
+}
+
+function observedAvailableRaw(
+  observed: boolean,
+  balance: string | null,
+  locked: string | null,
+): boolean {
+  if (!observed || !nonNegativeRaw(balance) || !nonNegativeRaw(locked)) {
+    return false;
+  }
+  return BigInt(balance) >= BigInt(locked);
 }
 
 function spendableRaw(balance: string | null, locked: string | null): boolean {
@@ -646,7 +662,8 @@ export function buildPolymarketRuntimeFacts(
     evidence.topology === "signer"
       ? ("evm_transaction" as const)
       : ("external_handoff" as const);
-  const collateralSpendable = spendableRaw(
+  const collateralAvailabilityObserved = observedAvailableRaw(
+    evidence.collateralObserved,
     evidence.collateralRaw,
     evidence.collateralLockedRaw,
   );
@@ -672,14 +689,21 @@ export function buildPolymarketRuntimeFacts(
         ),
     credential,
     ...market,
-    collateralSpendable
-      ? satisfied("collateral_spendable", "Polymarket collateral is spendable")
+    collateralAvailabilityObserved
+      ? satisfied(
+          "collateral_spendable",
+          "Polymarket collateral availability was calculated",
+        )
       : unavailable(
           "collateral_spendable",
-          positiveRaw(evidence.collateralRaw)
-            ? "Polymarket collateral is locked"
-            : "No spendable Polymarket collateral is available",
-          positiveRaw(evidence.collateralRaw)
+          evidence.collateralObserved &&
+            nonNegativeRaw(evidence.collateralRaw) &&
+            nonNegativeRaw(evidence.collateralLockedRaw)
+            ? "Polymarket collateral locks exceed the observed balance"
+            : "Polymarket collateral availability is unknown",
+          evidence.collateralObserved &&
+            nonNegativeRaw(evidence.collateralRaw) &&
+            nonNegativeRaw(evidence.collateralLockedRaw)
             ? "locked_funds"
             : "cash_availability_unknown",
         ),
@@ -781,7 +805,11 @@ export function buildLimitlessRuntimeFacts(
     internal,
   );
   const market = marketChecks(evidence.market);
-  const cashSpendable = spendableRaw(evidence.cashRaw, evidence.cashLockedRaw);
+  const cashAvailabilityObserved = observedAvailableRaw(
+    evidence.cashObserved,
+    evidence.cashRaw,
+    evidence.cashLockedRaw,
+  );
   const position = positionChecks(
     evidence.position,
     input.marketClass?.includes("neg_risk")
@@ -848,14 +876,21 @@ export function buildLimitlessRuntimeFacts(
           "Canonical Limitless AMM is unavailable",
           "market_evidence_unavailable",
         ),
-    cashSpendable
-      ? satisfied("cash_spendable", "Limitless cash is spendable")
+    cashAvailabilityObserved
+      ? satisfied(
+          "cash_spendable",
+          "Limitless cash availability was calculated",
+        )
       : unavailable(
           "cash_spendable",
-          positiveRaw(evidence.cashRaw)
-            ? "Limitless cash is locked"
-            : "No spendable Limitless cash is available",
-          positiveRaw(evidence.cashRaw)
+          evidence.cashObserved &&
+            nonNegativeRaw(evidence.cashRaw) &&
+            nonNegativeRaw(evidence.cashLockedRaw)
+            ? "Limitless cash locks exceed the observed balance"
+            : "Limitless cash availability is unknown",
+          evidence.cashObserved &&
+            nonNegativeRaw(evidence.cashRaw) &&
+            nonNegativeRaw(evidence.cashLockedRaw)
             ? "locked_funds"
             : "cash_availability_unknown",
         ),
@@ -911,12 +946,17 @@ export function buildLimitlessRuntimeFacts(
       internal,
       safeLabel: "Approve conditional tokens for the canonical Limitless AMM",
     }),
-    approvalCheck({
-      checkId: "market_adapter_approval",
-      approved: evidence.marketAdapterApproval,
-      internal,
-      safeLabel: "Approve the canonical Limitless market adapter",
-    }),
+    evidence.marketAdapterRequired
+      ? approvalCheck({
+          checkId: "market_adapter_approval",
+          approved: evidence.marketAdapterApproval,
+          internal,
+          safeLabel: "Approve the canonical Limitless market adapter",
+        })
+      : satisfied(
+          "market_adapter_approval",
+          "A separate Limitless market adapter approval is not required",
+        ),
     evidence.position?.operatorApproved !== false
       ? satisfied(
           "redemption_operator_approval",

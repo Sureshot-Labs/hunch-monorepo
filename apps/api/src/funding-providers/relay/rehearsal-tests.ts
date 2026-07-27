@@ -445,6 +445,32 @@ for (const [name, quote] of [
 
 {
   const validated = validateRelayRehearsalQuote({
+    amount: 1_100_000n,
+    amountMode: "expected_output",
+    minimumOutputFloor: 900_000n,
+    quote: erc20Quote(),
+    scenario: relayRehearsalScenarios["polygon-pusd-to-base-usdc"],
+    user,
+  });
+  assert.equal(validated.sourceAmountRaw, 1_000_000n);
+  assert.equal(validated.minimumOutputRaw, 920_000n);
+}
+
+assert.throws(
+  () =>
+    validateRelayRehearsalQuote({
+      amount: 999_999n,
+      amountMode: "expected_output",
+      minimumOutputFloor: 900_000n,
+      quote: erc20Quote(),
+      scenario: relayRehearsalScenarios["polygon-pusd-to-base-usdc"],
+      user,
+    }),
+  /source amount exceeds authorized cap/,
+);
+
+{
+  const validated = validateRelayRehearsalQuote({
     amount: 2_000_000_000_000_000_000n,
     minimumOutputFloor: 1_100_000n,
     quote: crossVmNativeQuote(),

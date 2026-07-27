@@ -2,7 +2,10 @@ import type { AccountValueReadModel } from "../../account-value/runtime-service.
 import { stableOpaqueId } from "../../account-value/canonical.js";
 import { multiplyRawByUnitPrice } from "../../account-value/decimal.js";
 import { env } from "../../env.js";
-import { buildPolymarketFundingPlan } from "../../services/polymarket-funding-router.js";
+import {
+  buildPolymarketFundingPlan,
+  PolymarketFundingPlanError,
+} from "../../services/polymarket-funding-router.js";
 import type {
   AssetLocation,
   AssetRef,
@@ -151,25 +154,34 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
       BigInt(snapshot.depositPusdRaw) > BigInt(snapshot.depositLockedRaw)
         ? BigInt(snapshot.depositPusdRaw) - BigInt(snapshot.depositLockedRaw)
         : 0n;
-    const plan = buildPolymarketFundingPlan({
-      signer: snapshot.signerAddress,
-      depositWallet: snapshot.depositWallet,
-      routerAddress: snapshot.routerAddress,
-      routerNonce: BigInt(snapshot.routerNonceRaw),
-      requiredRaw: depositAvailableRaw + BigInt(input.requiredAmount.raw),
-      depositPusdRaw: BigInt(snapshot.depositPusdRaw),
-      depositLockedRaw: BigInt(snapshot.depositLockedRaw),
-      depositUsdceRaw: BigInt(snapshot.depositUsdceRaw),
-      depositRouterUsdceAllowanceRaw: BigInt(
-        snapshot.depositRouterUsdceAllowanceRaw,
-      ),
-      signerPusdRaw: BigInt(snapshot.signerPusdRaw),
-      signerLockedRaw: 0n,
-      signerUsdceRaw: BigInt(snapshot.signerUsdceRaw),
-      routerPusdAllowanceRaw: BigInt(snapshot.routerPusdAllowanceRaw),
-      routerUsdceAllowanceRaw: BigInt(snapshot.routerUsdceAllowanceRaw),
-      fundingCapRaw: BigInt(snapshot.fundingCapRaw),
-    });
+    let plan;
+    try {
+      plan = buildPolymarketFundingPlan({
+        signer: snapshot.signerAddress,
+        depositWallet: snapshot.depositWallet,
+        routerAddress: snapshot.routerAddress,
+        routerNonce: BigInt(snapshot.routerNonceRaw),
+        requiredRaw: depositAvailableRaw + BigInt(input.requiredAmount.raw),
+        depositPusdRaw: BigInt(snapshot.depositPusdRaw),
+        depositLockedRaw: BigInt(snapshot.depositLockedRaw),
+        depositUsdceRaw: BigInt(snapshot.depositUsdceRaw),
+        depositRouterUsdceAllowanceRaw: BigInt(
+          snapshot.depositRouterUsdceAllowanceRaw,
+        ),
+        signerPusdRaw: BigInt(snapshot.signerPusdRaw),
+        signerLockedRaw: 0n,
+        signerUsdceRaw: BigInt(snapshot.signerUsdceRaw),
+        routerPusdAllowanceRaw: BigInt(snapshot.routerPusdAllowanceRaw),
+        routerUsdceAllowanceRaw: BigInt(snapshot.routerUsdceAllowanceRaw),
+        fundingCapRaw: BigInt(snapshot.fundingCapRaw),
+      });
+    } catch (error) {
+      // A stale/missing balance, cap, or allowance makes this exact source
+      // unavailable; it must not abort discovery of independent sources such
+      // as direct external ingress.
+      if (error instanceof PolymarketFundingPlanError) return null;
+      throw error;
+    }
     if (
       !plan ||
       plan.totalAmountRaw !== input.requiredAmount.raw ||

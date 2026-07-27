@@ -19,7 +19,13 @@ export type FundingStepReceiptTarget = Readonly<{
   stepId: string;
   segmentId: string | null;
   attemptId: string;
-  stepKind: "transaction" | "venue_preparation";
+  stepKind: "transaction" | "external_handoff" | "venue_preparation";
+  payerRequirement:
+    | "none"
+    | "user"
+    | "provider"
+    | "privy_sponsor"
+    | "hunch_sponsor";
   stepState:
     | "submitted"
     | "succeeded"
@@ -122,6 +128,7 @@ export async function listFundingStepReceiptTargets(
     segment_id: string | null;
     attempt_id: string;
     step_kind: FundingStepReceiptTarget["stepKind"];
+    payer_requirement: FundingStepReceiptTarget["payerRequirement"];
     step_state: FundingStepReceiptTarget["stepState"];
     normalized_action: JsonRecord;
     action_validation_result: JsonRecord;
@@ -151,6 +158,7 @@ export async function listFundingStepReceiptTargets(
         step.segment_id,
         attempt.id as attempt_id,
         step.step_kind,
+        step.payer_requirement,
         step.state as step_state,
         step.normalized_action,
         step.action_validation_result,
@@ -203,7 +211,8 @@ export async function listFundingStepReceiptTargets(
     ) as unknown as NormalizedAction;
     if (
       action.kind !== "evm_transaction" &&
-      action.kind !== "svm_transaction"
+      action.kind !== "svm_transaction" &&
+      action.kind !== "external_handoff"
     ) {
       throw new FundingPersistenceError(
         "quote_mismatch",
@@ -244,6 +253,7 @@ export async function listFundingStepReceiptTargets(
       segmentId: row.segment_id,
       attemptId: row.attempt_id,
       stepKind: row.step_kind,
+      payerRequirement: row.payer_requirement,
       stepState: row.step_state,
       networkId: action.networkId,
       action,

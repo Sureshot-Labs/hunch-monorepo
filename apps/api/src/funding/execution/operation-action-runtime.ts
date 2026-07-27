@@ -29,6 +29,7 @@ import { WithdrawalDestinationRuntime } from "./withdrawal-destination-runtime.j
 
 const EXECUTOR_BY_ACTION_KIND = {
   evm_transaction: "wallet_profile_evm_v1",
+  external_handoff: "polymarket_deposit_wallet_relayer_v1",
   svm_transaction: "wallet_profile_svm_v1",
 } as const;
 
@@ -66,8 +67,41 @@ function assertClientExecutable(
   profiles: readonly WalletExecutionProfile[],
 ): Readonly<{
   controllerWalletRef: string;
-  sponsorship: ResolvedActionSponsorship;
+  executionMode: "web_client" | "privy_authorization" | "venue_relayer";
+  payerRequirement: "user" | "privy_sponsor" | "provider";
+  sponsorshipPolicyId: string | null;
 }> {
+  if (action.kind === "external_handoff") {
+    if (
+      action.networkId !== "evm:137" ||
+      action.handoffKind !== "polymarket_deposit_wallet_transfer" ||
+      executorId !== EXECUTOR_BY_ACTION_KIND.external_handoff
+    ) {
+      throw new FundingPersistenceError(
+        "quote_mismatch",
+        "committed external handoff is not an allowlisted client executor",
+      );
+    }
+    const profile = exactWalletProfile(profiles, action);
+    if (
+      !profile ||
+      profile.source === "external" ||
+      !profile.controllerWalletRef ||
+      (!profile.signingModes.includes("web_client") &&
+        !profile.signingModes.includes("privy_authorization"))
+    ) {
+      throw new FundingPersistenceError(
+        "quote_invalidated",
+        "committed Polymarket handoff actor is no longer owned and executable",
+      );
+    }
+    return {
+      controllerWalletRef: profile.controllerWalletRef,
+      executionMode: "venue_relayer",
+      payerRequirement: "provider",
+      sponsorshipPolicyId: null,
+    };
+  }
   if (action.kind !== "evm_transaction" && action.kind !== "svm_transaction") {
     throw new FundingPersistenceError(
       "quote_mismatch",
@@ -97,9 +131,15 @@ function assertClientExecutable(
       "committed signer has no authenticated wallet reference",
     );
   }
+  const sponsorship: ResolvedActionSponsorship = resolveActionSponsorship({
+    action,
+    profile,
+  });
   return {
     controllerWalletRef: profile.controllerWalletRef,
-    sponsorship: resolveActionSponsorship({ action, profile }),
+    executionMode: sponsorship.signingMode,
+    payerRequirement: sponsorship.payerRequirement,
+    sponsorshipPolicyId: sponsorship.policyId,
   };
 }
 
@@ -154,8 +194,8 @@ export class FundingOperationActionRuntime {
       actionFingerprint: string;
       controllerWalletRef: string;
       executorId: string;
-      executionMode: "web_client" | "privy_authorization";
-      payerRequirement: "user" | "privy_sponsor";
+      executionMode: "web_client" | "privy_authorization" | "venue_relayer";
+      payerRequirement: "user" | "privy_sponsor" | "provider";
       sponsorshipPolicyId: string | null;
     }>
   > {
@@ -230,9 +270,9 @@ export class FundingOperationActionRuntime {
       actionFingerprint: fingerprint,
       controllerWalletRef: execution.controllerWalletRef,
       executorId: step.executorId,
-      executionMode: execution.sponsorship.signingMode,
-      payerRequirement: execution.sponsorship.payerRequirement,
-      sponsorshipPolicyId: execution.sponsorship.policyId,
+      executionMode: execution.executionMode,
+      payerRequirement: execution.payerRequirement,
+      sponsorshipPolicyId: execution.sponsorshipPolicyId,
     };
   }
 
@@ -268,11 +308,12 @@ export class FundingOperationActionRuntime {
     ) as unknown as NormalizedAction;
     if (
       action.kind !== "evm_transaction" &&
-      action.kind !== "svm_transaction"
+      action.kind !== "svm_transaction" &&
+      action.kind !== "external_handoff"
     ) {
       throw new FundingPersistenceError(
         "quote_mismatch",
-        "this endpoint accepts only Relay transaction reports",
+        "this endpoint accepts only committed transaction or relayer reports",
       );
     }
     const mayHaveBroadcast =

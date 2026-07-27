@@ -442,6 +442,7 @@ export type FundingQuoteSummary = Readonly<{
   venueBindingOptionId: string | null;
   planKind: FundingExecutionPlan["kind"];
   experienceMode: "instant" | "inline_funding" | "prepare_first";
+  consentMode: "trade_intent" | "explicit_economic_review" | "external_action";
   sourceAmounts: readonly Readonly<{
     safeLabel: string;
     amount: Money;
@@ -508,6 +509,26 @@ export type ExternalIngressInstruction = Readonly<{
   ingressKind: ExternalIngressKind;
   sourceNetworkId: NetworkId | null;
   sourceAsset: AssetRef | null;
+  /**
+   * An ingress intent may expose several independently verified receive
+   * targets. Assets listed on the same target share its network and address;
+   * another EVM network or Solana is represented by another target rather
+   * than by overloading one address.
+   *
+   * Legacy/provider ingress contracts may omit this field and remain exact to
+   * sourceNetworkId/sourceAsset/destinationAddress.
+   */
+  receiveTargets?: readonly Readonly<{
+    receiveTargetId: string;
+    networkId: NetworkId;
+    destinationAddress: string;
+    acceptedAssets: readonly Readonly<{
+      asset: AssetRef;
+      handling: "direct" | "automatic_conversion";
+    }>[];
+    safeInstructions: readonly string[];
+  }>[];
+  recommendedReceiveTargetId?: string | null;
   destinationOptionId: string;
   destinationAddress: string;
   requestedAmount: Money | null;

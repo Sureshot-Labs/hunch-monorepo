@@ -9,7 +9,6 @@ import {
   isOrderable,
   type ApiTradeMarket,
 } from "../../services/api-trading-market-repo.js";
-import { resolvePolymarketBotPolicyFundingCapRaw } from "../../services/api-trading-common.js";
 import {
   fetchLimitlessAccountRoute,
   inspectLimitlessPartnerAccountProfile,
@@ -77,6 +76,7 @@ import {
   type PolymarketRuntimeEvidence,
   type RuntimeCredentialEvidence,
   type RuntimeMarketEvidence,
+  type RuntimePositionEvidence,
   type RuntimeWalletAuthority,
 } from "./runtime-facts.js";
 import {
@@ -113,6 +113,7 @@ export type RuntimeVenueInspectionInput = Readonly<{
   purpose: DestinationOptionsInput["purpose"];
   marketContextId: string | null;
   marketClass: string | null;
+  positionActionRef: string | null;
 }>;
 
 export interface WalletPreparationRuntimeDriver {
@@ -154,6 +155,57 @@ function sameAddress(
     normalizeAddress(left) &&
     normalizeAddress(left) === normalizeAddress(right),
   );
+}
+
+async function loadRuntimePositionEvidence(input: {
+  db: Pool;
+  accountId: string;
+  venueId: VenueId;
+  positionActionRef: string | null;
+  binding: VenueAccountBinding;
+}): Promise<RuntimePositionEvidence | null> {
+  if (!input.positionActionRef) return null;
+  const { rows } = await input.db.query<{
+    size_raw: string;
+    venue: string;
+    wallet_address: string | null;
+  }>(
+    `
+      select size::text as size_raw, venue, wallet_address
+      from positions
+      where user_id = $1
+        and id = $2
+        and position_scope = 'own'
+        and coalesce(is_hidden, false) = false
+      limit 1
+    `,
+    [input.accountId, input.positionActionRef],
+  );
+  const position = rows[0];
+  if (
+    !position ||
+    position.venue !== input.venueId ||
+    !position.wallet_address
+  ) {
+    return null;
+  }
+  let balanceRaw: string | null = null;
+  try {
+    balanceRaw = ethers.parseUnits(position.size_raw, 6).toString();
+  } catch {
+    balanceRaw = null;
+  }
+  return {
+    ownerMatchesBinding: sameAddress(
+      position.wallet_address,
+      input.binding.accountRef,
+    ),
+    balanceRaw,
+    lockedRaw: "0",
+    conditionResolved: null,
+    canonicalPlanAvailable: false,
+    operatorApproved: null,
+  };
 }
 
 function readPath(value: unknown, path: readonly string[]): unknown {
@@ -861,6 +913,7 @@ export class WalletPreparationRuntimeService {
     purpose: DestinationOptionsInput["purpose"];
     marketContextId: string | null;
     marketClass: string | null;
+    positionActionRef: string | null;
   }): Promise<PreparedRuntimeDestination> {
     const now = this.clock();
     const expiresAt = new Date(now.getTime() + PREPARATION_TTL_MS);
@@ -944,6 +997,13 @@ export class WalletPreparationRuntimeService {
       locationId: binding.settlementLocation.locationId,
       asset: binding.settlementLocation.asset,
     });
+    const position = await loadRuntimePositionEvidence({
+      db: this.db,
+      accountId: input.accountId,
+      venueId: "polymarket",
+      positionActionRef: input.positionActionRef,
+      binding,
+    });
     const funderExecutionKind =
       resolvePolymarketFunderExecutionKindForMaxSpend(candidate);
     const l2Credentials = clob.l2Credentials;
@@ -959,7 +1019,10 @@ export class WalletPreparationRuntimeService {
                 creds: l2Credentials,
                 funder,
                 funderExecutionKind,
-                fundingCapRaw: await resolvePolymarketBotPolicyFundingCapRaw(),
+                // Generic user funding inspection must not depend on the
+                // delegated bot-buy policy. The planner applies the exact,
+                // user-confirmed operation bound when it commits a route.
+                fundingCapRaw: null,
                 negRisk: effectiveMarketClass === "neg_risk",
                 pool: this.db,
                 signer: input.wallet.walletAddress,
@@ -1011,7 +1074,7 @@ export class WalletPreparationRuntimeService {
       ownerVerified: topology.ownerVerified,
       credentials: clob.credentials,
       market: marketContext.evidence,
-      position: null,
+      position,
       withdrawal: null,
       collateralObserved: collateralRaw != null,
       collateralRaw,
@@ -1139,6 +1202,7 @@ export class WalletPreparationRuntimeService {
     purpose: DestinationOptionsInput["purpose"];
     marketContextId: string | null;
     marketClass: string | null;
+    positionActionRef: string | null;
   }): Promise<PreparedRuntimeDestination> {
     const now = this.clock();
     const expiresAt = new Date(now.getTime() + PREPARATION_TTL_MS);
@@ -1197,6 +1261,13 @@ export class WalletPreparationRuntimeService {
       locationId: binding.settlementLocation.locationId,
       asset: binding.settlementLocation.asset,
     });
+    const position = await loadRuntimePositionEvidence({
+      db: this.db,
+      accountId: input.accountId,
+      venueId: "limitless",
+      positionActionRef: input.positionActionRef,
+      binding,
+    });
     const credentials: RuntimeCredentialEvidence = {
       present: Boolean(credentialsInfo && authContext),
       boundToExactWallet: Boolean(
@@ -1231,7 +1302,7 @@ export class WalletPreparationRuntimeService {
       ownerVerified: input.wallet.isVerified,
       credentials,
       market: marketContext.evidence,
-      position: null,
+      position,
       withdrawal: null,
       cashObserved: cashRaw != null,
       cashRaw,
@@ -1263,6 +1334,7 @@ export class WalletPreparationRuntimeService {
           "isApprovedForAll",
           "amm",
         ]) === true,
+      marketAdapterRequired: Boolean(marketContext.adapterAddress),
       marketAdapterApproval:
         readBoolean(payload, [
           "conditionalTokens",
@@ -1282,6 +1354,7 @@ export class WalletPreparationRuntimeService {
         cashRaw: cashRaw ?? "unknown",
         reservedRaw,
         marketRef: marketContext.evidence.safeMarketRef,
+        marketAdapterRequired: Boolean(marketContext.adapterAddress),
       },
     };
     const inspectionInput: PreparationInspectionInput = {
@@ -1347,6 +1420,7 @@ export class WalletPreparationRuntimeService {
                 purpose: input.purpose,
                 marketContextId: input.marketContextId,
                 marketClass: input.marketClass,
+                positionActionRef: input.positionActionRef ?? null,
               })
               .catch(() => null),
           ),
@@ -1391,6 +1465,7 @@ export class WalletPreparationRuntimeService {
           purpose: "redeem",
           marketContextId: input.marketContextId,
           marketClass: input.marketClass,
+          positionActionRef: null,
         }),
       ),
     );

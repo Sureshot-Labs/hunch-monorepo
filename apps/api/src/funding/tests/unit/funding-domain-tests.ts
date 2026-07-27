@@ -615,6 +615,25 @@ await test("accepts a fully registered production route", () => {
   );
 });
 
+await test("allows staged continuation only with all execution and evidence gates", () => {
+  const enabled = activeRoutePolicy();
+  enabled.automation.stagedContinuation = true;
+  const accepted = validateFundingRuntimePolicy(
+    enabled,
+    productionTestRegistry(),
+  );
+  assert.equal(
+    accepted.ok,
+    true,
+    accepted.ok ? undefined : JSON.stringify(accepted.issues),
+  );
+
+  enabled.gates.polling = false;
+  assert.ok(
+    issueCodes(enabled).includes("staged_continuation_dependency_missing"),
+  );
+});
+
 await test("rejects ambiguous duplicate Relay wallet route mappings", () => {
   const candidate = activeRoutePolicy();
   const exactRoute = candidate.routes[0];

@@ -271,6 +271,7 @@ export type ResolvedRouteDestination = Readonly<{
   destinationLocationPatternId: string;
   target: FundingTarget;
   requiredAsset: AssetRef;
+  spendability: FrozenSpendabilityEvidence | null;
   venueId: string | null;
   venueBindingOption: VenueBindingOption | null;
   externalRecipientId: string | null;
@@ -285,6 +286,7 @@ export function toResolvedRouteDestination(
     destinationLocationPatternId: candidate.destinationLocationPatternId,
     target: candidate.target,
     requiredAsset: candidate.option.requiredAsset,
+    spendability: candidate.spendability,
     venueId: candidate.option.venueId,
     venueBindingOption: candidate.bindingOption,
     externalRecipientId: null,

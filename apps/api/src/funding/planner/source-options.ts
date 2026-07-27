@@ -1,4 +1,5 @@
 import type {
+  AssetLocation,
   FundingDiscoveryRequest,
   FundingExecutionPlan,
   FundingReasonCode,
@@ -53,6 +54,7 @@ export type RelayFirstSelection = Readonly<{
 
 export type RelayEligibleSourceFact = Readonly<{
   componentId: string;
+  reservationLocationId?: string;
   sourceLocationPatternId: string;
   safeLabel: string;
   source: FundingSourceRef;
@@ -67,6 +69,13 @@ export type RelayEligibleSourceFact = Readonly<{
   nativeGasReady: boolean;
   suggestionPreferred?: boolean;
   freshness: "fresh" | "stale";
+  preRouteHandoff?: Readonly<{
+    kind: "polymarket_deposit_wallet_to_controller_v1";
+    sourceLocation: AssetLocation;
+    funderAddress: string;
+    controllerAddress: string;
+    tokenAddress: string;
+  }>;
 }>;
 
 export type RelayPlanningQuote = Readonly<{
@@ -191,9 +200,12 @@ export function buildRelayWalletSourceOption(
   if (expectedRaw === 0n || minimumRaw > expectedRaw) {
     throw new Error("Relay quote output economics are invalid");
   }
-  const slippageBps = Number(
-    ((expectedRaw - minimumRaw) * 10_000n + expectedRaw - 1n) / expectedRaw,
-  );
+  // Provider minimums are integer token units. Compare against the floored
+  // policy boundary so a sub-unit rounding difference cannot turn an exact
+  // 1% quote into an apparent 101 bps quote.
+  const minimumAtSlippageLimit =
+    (expectedRaw * BigInt(10_000 - input.maximumSlippageBps)) / 10_000n;
+  const slippageAllowed = minimumRaw >= minimumAtSlippageLimit;
   const destinationPriceUnknown = input.minimumDestinationEstimatedUsd == null;
   const feeBpsExceeded =
     input.minimumDestinationEstimatedUsd != null &&
@@ -231,9 +243,7 @@ export function buildRelayWalletSourceOption(
         ? (["funding_cost_warning"] as const)
         : []),
       ...(destinationBelowMinimum ? (["minimum_output_not_met"] as const) : []),
-      ...(slippageBps > input.maximumSlippageBps
-        ? (["minimum_output_not_met"] as const)
-        : []),
+      ...(!slippageAllowed ? (["minimum_output_not_met"] as const) : []),
     ]),
   ];
   const economicsAllowed =
@@ -241,7 +251,7 @@ export function buildRelayWalletSourceOption(
     !destinationPriceUnknown &&
     !feeLimitExceeded &&
     !destinationBelowMinimum &&
-    slippageBps <= input.maximumSlippageBps;
+    slippageAllowed;
   return {
     sourceOptionId: input.sourceOptionId,
     kind: "wallet_asset",
@@ -624,6 +634,21 @@ export class RelayFirstSourcePlanner {
                 sponsorship:
                   action.kind === "evm_transaction" ? "requested" : "none",
               })),
+            };
+          }
+          if (source.preRouteHandoff) {
+            option = {
+              ...option,
+              requiredActions: [
+                {
+                  kind: "external_handoff",
+                  safeLabel: "Authorize the Polymarket balance transfer",
+                  actor: "user",
+                  valueMoving: true,
+                  sponsorship: "none",
+                },
+                ...option.requiredActions,
+              ],
             };
           }
           const experienceMode =

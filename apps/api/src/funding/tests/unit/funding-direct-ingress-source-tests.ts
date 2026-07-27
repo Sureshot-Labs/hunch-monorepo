@@ -2,10 +2,13 @@
 
 import assert from "node:assert/strict";
 
+import type { AccountValueReadModel } from "../../../account-value/runtime-service.js";
 import { sourceOptionSchema } from "../../../schemas/funding.js";
+import { PRIVY_USER_AUTHORIZED_EVM_SPONSORSHIP_POLICY_ID } from "../../execution/sponsorship-policy.js";
 import { DirectIngressFundingSourceAdapter } from "../../planner/direct-ingress-source-adapter.js";
 import type { FundingSourcePlanningInput } from "../../planner/source-adapter.js";
 import type { FundingRuntimePolicy } from "../../policies/funding-policy.js";
+import { polymarketFundingEvidence } from "../../preparation/polymarket-funding-snapshot.js";
 
 const NOW = new Date("2026-07-24T12:00:00.000Z");
 const ASSET = {
@@ -14,6 +17,13 @@ const ASSET = {
   decimals: 6,
 } as const;
 const ADDRESS = "0x0000000000000000000000000000000000000002";
+const SIGNER = "0x0000000000000000000000000000000000000003";
+const ROUTER = "0x0000000000000000000000000000000000000004";
+const USDCE = {
+  networkId: "evm:137",
+  assetId: "0x0000000000000000000000000000000000000005",
+  decimals: 6,
+} as const;
 const BINDING_OPTION = {
   venueBindingOptionId: "binding_option_direct_ingress_12345678",
   safeLabel: "Polymarket Trading Wallet",
@@ -30,6 +40,26 @@ function policy(privyEnabled: boolean): FundingRuntimePolicy {
   return {
     version: 1,
     creationMode: "on",
+    automation: {
+      automaticRebalance: false,
+      stagedContinuation: true,
+    },
+    assets: [
+      {
+        asset: ASSET,
+        enabled: true,
+        observationEnabled: true,
+        valuationEnabled: true,
+        pricePolicyId: "usd_stable",
+      },
+      {
+        asset: USDCE,
+        enabled: true,
+        observationEnabled: true,
+        valuationEnabled: true,
+        pricePolicyId: "usd_stable",
+      },
+    ],
     ttl: { quoteMs: 30_000, reservationMs: 300_000 },
     locations: [
       {
@@ -57,7 +87,11 @@ function policy(privyEnabled: boolean): FundingRuntimePolicy {
   } as unknown as FundingRuntimePolicy;
 }
 
-function input(privyEnabled: boolean): FundingSourcePlanningInput {
+function input(
+  privyEnabled: boolean,
+  purpose: FundingSourcePlanningInput["request"]["purpose"] = "add_funds",
+  multiAsset = false,
+): FundingSourcePlanningInput {
   const target = {
     kind: "owned_location" as const,
     location: {
@@ -71,7 +105,7 @@ function input(privyEnabled: boolean): FundingSourcePlanningInput {
   return {
     accountId: "account_direct_ingress_12345678",
     request: {
-      purpose: "add_funds",
+      purpose,
       requestedDestinationAmount: { asset: ASSET, raw: "3000000" },
       confirmedSourceAmount: null,
       marketContextId: null,
@@ -96,21 +130,63 @@ function input(privyEnabled: boolean): FundingSourcePlanningInput {
         asOf: NOW.toISOString(),
         expiresAt: new Date(NOW.getTime() + 30_000).toISOString(),
       },
-      option: {} as never,
+      option: {
+        venueId: "polymarket",
+        destinationOptionId: "destination_direct_ingress_12345678",
+        requiredAsset: ASSET,
+      } as never,
       bindingOption: BINDING_OPTION,
       target,
       availableNow: { asset: ASSET, raw: "1000000" },
       preparationActions: [],
       completeness: "complete",
       freshness: "fresh",
-      venueBinding: {} as never,
-      sourcePlanningEvidence: null,
+      venueBinding: {
+        bindingId: "binding_direct_ingress_12345678",
+        venueId: "polymarket",
+        controllerWalletId: "wallet_direct_ingress_12345678",
+        executionWalletId: "wallet_direct_ingress_12345678",
+        accountRef: ADDRESS,
+        settlementLocation: target.location,
+        signingMode: "privy_authorization",
+      },
+      sourcePlanningEvidence: multiAsset
+        ? polymarketFundingEvidence({
+            signerAddress: SIGNER,
+            depositWallet: ADDRESS,
+            depositPusdRaw: "1000000",
+            depositLockedRaw: "0",
+            depositUsdceRaw: "500000",
+            signerPusdRaw: "0",
+            signerUsdceRaw: "0",
+            // A generic UI funding snapshot has no delegated bot-policy cap.
+            // The committed ingress operation supplies its own exact bound.
+            fundingCapRaw: "0",
+            routerAddress: ROUTER,
+            routerNonceRaw: "7",
+            depositRouterUsdceAllowanceRaw: "5000000",
+            routerPusdAllowanceRaw: "0",
+            routerUsdceAllowanceRaw: "0",
+            clobPusdRaw: "1000000",
+            observedAt: NOW.toISOString(),
+          })
+        : null,
     },
     destination: {
       destinationId: "destination_direct_ingress_12345678",
       destinationLocationPatternId: "polymarket-venue-cash-v1",
       target,
       requiredAsset: ASSET,
+      spendability: {
+        observedAmount: { asset: ASSET, raw: "1000000" },
+        lockedRaw: "0",
+        reservedRaw: "0",
+        submittedDebitRaw: "0",
+        availableAmount: { asset: ASSET, raw: "1000000" },
+        revision: "spendability_direct_ingress_12345678",
+        asOf: NOW.toISOString(),
+        expiresAt: new Date(NOW.getTime() + 30_000).toISOString(),
+      },
       venueId: "polymarket",
       venueBindingOption: BINDING_OPTION,
       externalRecipientId: null,
@@ -173,6 +249,53 @@ assert.equal(withPrivy[1]?.option.ingress?.ingressKind, "privy");
 assert.equal(withPrivy[1]?.option.recommended, false);
 sourceOptionSchema.parse(withPrivy[1]?.option);
 
+const tradeShortfall = await adapter.list(input(true, "trade_shortfall"));
+assert.deepEqual(tradeShortfall, []);
+
+const account = {
+  ownership: {
+    wallets: [
+      {
+        walletId: "wallet_direct_ingress_12345678",
+        networkId: "evm:137",
+        address: SIGNER,
+        source: "embedded",
+        signingModes: ["web_client", "privy_authorization"],
+        serverWalletRef: "privy_direct_ingress_12345678",
+        sponsorshipPolicyIds: [PRIVY_USER_AUTHORIZED_EVM_SPONSORSHIP_POLICY_ID],
+      },
+    ],
+  },
+} as unknown as AccountValueReadModel;
+const multiAssetAdapter = new DirectIngressFundingSourceAdapter(account, {
+  canonicalRouterAddress: ROUTER,
+  usdceAsset: USDCE,
+});
+const [multiAsset] = await multiAssetAdapter.list(
+  input(false, "add_funds", true),
+);
+assert.ok(multiAsset);
+assert.deepEqual(
+  multiAsset.option.ingress?.receiveTargets?.[0]?.acceptedAssets.map(
+    (accepted) => ({
+      assetId: accepted.asset.assetId,
+      handling: accepted.handling,
+    }),
+  ),
+  [
+    { assetId: ASSET.assetId, handling: "direct" },
+    { assetId: USDCE.assetId, handling: "automatic_conversion" },
+  ],
+);
+assert.equal(multiAsset.commitPlan.steps[0]?.state, "planned");
+assert.equal(multiAsset.commitPlan.steps[0]?.stepKind, "venue_preparation");
+assert.equal(multiAsset.commitPlan.reservations.length, 2);
+assert.equal(
+  multiAsset.commitPlan.operation.supportMetadata?.preparationKind,
+  "polymarket_funding_router",
+);
+sourceOptionSchema.parse(multiAsset.option);
+
 console.log(
-  "[funding-direct-ingress-source-tests] minimum-target manual Receive and policy-gated Privy handoff passed",
+  "[funding-direct-ingress-source-tests] minimum-target ingress, Polygon pUSD/USDC.e variants, committed follow-up, Privy gating, and trade-shortfall isolation passed",
 );

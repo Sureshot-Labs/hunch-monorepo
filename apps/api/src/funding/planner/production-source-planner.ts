@@ -1,17 +1,19 @@
 import type { Pool } from "@hunch/infra";
-import { ZeroAddress } from "ethers";
+import { Interface, ZeroAddress } from "ethers";
 
 import type { AccountValueReadModel } from "../../account-value/runtime-service.js";
 import {
   multiplyRawByUnitPrice,
   scaleUnsignedDecimalByRawRatio,
 } from "../../account-value/decimal.js";
+import { stableOpaqueId } from "../../account-value/canonical.js";
 import { createRelayReferenceCodec } from "../../funding-providers/relay/reference-codec.js";
 import {
   RelayClient,
   RelayClientError,
 } from "../../funding-providers/relay/client.js";
 import {
+  isRelayPinnedStableAsset,
   RELAY_PINNED_ASSETS,
   RELAY_ROUTE_SPECS,
   type RelayRouteSpec,
@@ -25,6 +27,7 @@ import { getCredentialsEncryptionKey } from "../../lib/credentials-encryption.js
 import type {
   AssetLocation,
   AssetRef,
+  ExternalHandoffAction,
   FundingDiscoveryRequest,
   FundingExecutionPlan,
   JsonValue,
@@ -58,6 +61,11 @@ import { listAdaptedFundingSources } from "./source-adapter.js";
 
 const ROUTE_EXPERIENCE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1_000;
 export const SOLANA_NATIVE_EXECUTION_RESERVE_LAMPORTS = 3_000_000n;
+const POLYMARKET_DEPOSIT_WALLET_HANDOFF_EXECUTOR_ID =
+  "polymarket_deposit_wallet_relayer_v1";
+const ERC20_TRANSFER_INTERFACE = new Interface([
+  "function transfer(address recipient,uint256 amount)",
+]);
 
 function jsonRecord(value: unknown): Readonly<Record<string, JsonValue>> {
   return value as Readonly<Record<string, JsonValue>>;
@@ -89,6 +97,81 @@ function profileForLocation(
         profile.address.toLowerCase() === address.toLowerCase(),
     ) ?? null
   );
+}
+
+function profileForExactAddress(
+  account: AccountValueReadModel,
+  networkId: string,
+  address: string,
+): WalletExecutionProfile | null {
+  if (!account.ownership) return null;
+  const matches = account.ownership.wallets.filter(
+    (profile) =>
+      profile.networkId === networkId &&
+      profile.address.toLowerCase() === address.toLowerCase(),
+  );
+  return matches.length === 1 ? (matches[0] ?? null) : null;
+}
+
+function walletExecutionLocation(
+  location: AssetLocation,
+  profile: WalletExecutionProfile,
+): AssetLocation | null {
+  const walletId = detail(location, "walletId");
+  const address = detail(location, "address");
+  if (
+    !walletId ||
+    !address ||
+    walletId !== profile.walletId ||
+    address.toLowerCase() !== profile.address.toLowerCase() ||
+    location.asset.networkId !== profile.networkId
+  ) {
+    return null;
+  }
+  if (location.kind === "wallet") return location;
+  if (location.kind !== "venue_account" || profile.source === "external") {
+    return null;
+  }
+  // Keep accounting and execution identities separate. A managed venue cash
+  // component is reserved by its original location, while Relay receives the
+  // exact wallet/address capability that can actually sign the transfer.
+  return {
+    kind: "wallet",
+    locationId: stableOpaqueId(
+      "location",
+      `${location.locationId}:wallet_execution`,
+    ),
+    accountId: location.accountId,
+    asset: location.asset,
+    details: {
+      ...location.details,
+      address,
+      walletId,
+      balanceLocationId: location.locationId,
+    },
+  };
+}
+
+function linkedControllerExecutionLocation(
+  location: AssetLocation,
+  profile: WalletExecutionProfile,
+): AssetLocation {
+  return {
+    kind: "wallet",
+    locationId: stableOpaqueId(
+      "location",
+      `${location.locationId}:${profile.walletId}:controller_execution`,
+    ),
+    accountId: location.accountId,
+    asset: location.asset,
+    details: {
+      address: profile.address,
+      walletId: profile.walletId,
+      balanceLocationId: location.locationId,
+      linkedAddress: profile.address,
+      balanceClass: "polymarket_handoff",
+    },
+  };
 }
 
 function nativeAssetId(asset: AssetRef): string {
@@ -131,20 +214,6 @@ function hasNativeGas(
   });
 }
 
-function isPinnedStableAsset(asset: AssetRef): boolean {
-  const normalized = asset.assetId.toLowerCase();
-  return (
-    (asset.networkId === "evm:8453" &&
-      normalized === RELAY_PINNED_ASSETS.baseUsdc) ||
-    (asset.networkId === "evm:137" &&
-      (normalized === RELAY_PINNED_ASSETS.polygonPusd ||
-        normalized === RELAY_PINNED_ASSETS.polygonUsdc ||
-        normalized === RELAY_PINNED_ASSETS.polygonUsdce)) ||
-    (asset.networkId === "solana:mainnet" &&
-      asset.assetId === RELAY_PINNED_ASSETS.solanaUsdc)
-  );
-}
-
 function isSolanaNativeAsset(asset: AssetRef): boolean {
   return (
     asset.networkId === "solana:mainnet" &&
@@ -154,7 +223,7 @@ function isSolanaNativeAsset(asset: AssetRef): boolean {
 }
 
 function stableUsdValue(amount: Money): string | null {
-  return isPinnedStableAsset(amount.asset)
+  return isRelayPinnedStableAsset(amount.asset)
     ? multiplyRawByUnitPrice({
         raw: amount.raw,
         decimals: amount.asset.decimals,
@@ -247,17 +316,22 @@ function sourceFactsForComponent(input: {
   account: AccountValueReadModel;
   policy: FundingRuntimePolicy;
   component: AccountValueReadModel["projection"]["components"][number];
+  executionLocation: AssetLocation;
   profile: WalletExecutionProfile;
+  safeLabel?: string;
+  preRouteHandoff?: RelayEligibleSourceFact["preRouteHandoff"];
   availableRaw: string;
   requiredAmount: Money;
+  destinationLocationPatternId?: string;
   maximumSlippageBps: number;
   requiredCapability: "execution_source" | "withdrawal_source";
   suggestionPreferred: boolean;
 }): RelayEligibleSourceFact[] {
   const nativeSolSource = isSolanaNativeAsset(input.component.amount.asset);
   if (
-    (!isPinnedStableAsset(input.component.amount.asset) && !nativeSolSource) ||
-    !isPinnedStableAsset(input.requiredAmount.asset)
+    (!isRelayPinnedStableAsset(input.component.amount.asset) &&
+      !nativeSolSource) ||
+    !isRelayPinnedStableAsset(input.requiredAmount.asset)
   ) {
     return [];
   }
@@ -265,6 +339,9 @@ function sourceFactsForComponent(input: {
     (route) =>
       route.enabled &&
       route.providerId === "relay" &&
+      (input.destinationLocationPatternId == null ||
+        route.destinationLocationPatternId ===
+          input.destinationLocationPatternId) &&
       sameAsset(route.sourceAsset, input.component.amount.asset) &&
       sameAsset(route.destinationAsset, input.requiredAmount.asset),
   );
@@ -330,13 +407,18 @@ function sourceFactsForComponent(input: {
           : null;
       return {
         componentId: input.component.componentId,
+        reservationLocationId: input.component.location.locationId,
         sourceLocationPatternId: location.locationPatternId,
-        safeLabel: nativeSolSource
-          ? "SOL on Solana"
-          : `${input.component.amount.asset.networkId} wallet`,
+        safeLabel:
+          input.safeLabel ??
+          (nativeSolSource
+            ? "SOL on Solana"
+            : input.component.location.kind === "venue_account"
+              ? "Trading balance"
+              : `${input.component.amount.asset.networkId} wallet`),
         source: {
           kind: "owned_location" as const,
-          location: input.component.location,
+          location: input.executionLocation,
         },
         quoteInputAmount: {
           asset: input.component.amount.asset,
@@ -359,6 +441,9 @@ function sourceFactsForComponent(input: {
           : hasNativeGas(input.account, input.profile),
         suggestionPreferred: input.suggestionPreferred,
         freshness: "fresh" as const,
+        ...(input.preRouteHandoff
+          ? { preRouteHandoff: input.preRouteHandoff }
+          : {}),
       };
     })
     .filter(
@@ -373,6 +458,7 @@ export function deriveProductionRelayEligibleSourceFacts(input: {
   account: AccountValueReadModel;
   policy: FundingRuntimePolicy;
   requiredAmount: Money;
+  destinationLocationPatternId?: string;
   purpose?: FundingDiscoveryRequest["purpose"];
   maximumSlippageBps?: number;
 }): readonly RelayEligibleSourceFact[] {
@@ -385,11 +471,48 @@ export function deriveProductionRelayEligibleSourceFacts(input: {
   const facts: RelayEligibleSourceFact[] = [];
   for (const component of input.account.projection.components) {
     const availability = availabilityByComponent.get(component.componentId);
-    const profile = profileForLocation(input.account, component.location);
+    const directProfile = profileForLocation(input.account, component.location);
+    const funderAddress = detail(component.location, "address");
+    const linkedAddress = detail(component.location, "linkedAddress");
+    const isPolymarketDepositWalletSource =
+      input.purpose !== "withdrawal" &&
+      component.location.kind === "venue_account" &&
+      detail(component.location, "venueId") === "polymarket" &&
+      detail(component.location, "polymarketFunderKind") === "deposit_wallet" &&
+      component.amount.asset.networkId === "evm:137" &&
+      component.amount.asset.assetId.toLowerCase() ===
+        RELAY_PINNED_ASSETS.polygonPusd.toLowerCase() &&
+      Boolean(funderAddress) &&
+      Boolean(linkedAddress) &&
+      funderAddress?.toLowerCase() !== linkedAddress?.toLowerCase() &&
+      directProfile?.source === "smart" &&
+      directProfile.signingModes.length === 0;
+    const handoffControllerProfile =
+      isPolymarketDepositWalletSource && linkedAddress
+        ? profileForExactAddress(
+            input.account,
+            component.amount.asset.networkId,
+            linkedAddress,
+          )
+        : null;
+    const usesPolymarketHandoff =
+      Boolean(handoffControllerProfile) &&
+      handoffControllerProfile?.source !== "external" &&
+      Boolean(handoffControllerProfile?.controllerWalletRef) &&
+      (handoffControllerProfile?.signingModes.includes("web_client") ||
+        handoffControllerProfile?.signingModes.includes("privy_authorization"));
+    const profile = usesPolymarketHandoff
+      ? handoffControllerProfile
+      : directProfile;
+    const executionLocation =
+      usesPolymarketHandoff && profile
+        ? linkedControllerExecutionLocation(component.location, profile)
+        : profile
+          ? walletExecutionLocation(component.location, profile)
+          : null;
     const nativeSolSource = isSolanaNativeAsset(component.amount.asset);
     if (
       component.location.accountId !== input.accountId ||
-      component.location.kind !== "wallet" ||
       component.category === "in_transit" ||
       component.observationFreshness !== "fresh" ||
       component.observationError ||
@@ -400,6 +523,7 @@ export function deriveProductionRelayEligibleSourceFacts(input: {
           availability.reasonCodes.includes("cash_availability_unknown"))) ||
       BigInt(availability.availableRaw) <= 0n ||
       !profile ||
+      !executionLocation ||
       // Linked external wallets are inventory evidence, not default Add Funds
       // sources. They need a separate explicit advanced signer contract; the
       // initial flow accepts external money only through direct ingress.
@@ -416,9 +540,23 @@ export function deriveProductionRelayEligibleSourceFacts(input: {
         account: input.account,
         policy: input.policy,
         component,
+        executionLocation,
         profile,
+        ...(usesPolymarketHandoff && funderAddress && linkedAddress && profile
+          ? {
+              safeLabel: "Polymarket balance",
+              preRouteHandoff: {
+                kind: "polymarket_deposit_wallet_to_controller_v1" as const,
+                sourceLocation: component.location,
+                funderAddress,
+                controllerAddress: profile.address,
+                tokenAddress: component.amount.asset.assetId,
+              },
+            }
+          : {}),
         availableRaw: availability.availableRaw,
         requiredAmount: input.requiredAmount,
+        destinationLocationPatternId: input.destinationLocationPatternId,
         maximumSlippageBps:
           input.maximumSlippageBps ?? input.policy.placement.maximumSlippageBps,
         requiredCapability:
@@ -485,6 +623,89 @@ async function validatedSteps(input: {
   return output;
 }
 
+export function buildPolymarketPreRouteHandoffSteps(input: {
+  source: RelayEligibleSourceFact;
+  sourceAmount: Money;
+  profile: WalletExecutionProfile;
+  steps: Awaited<ReturnType<typeof validatedSteps>>;
+}) {
+  const handoff = input.source.preRouteHandoff;
+  if (!handoff) return input.steps;
+  if (
+    handoff.kind !== "polymarket_deposit_wallet_to_controller_v1" ||
+    input.sourceAmount.asset.networkId !== "evm:137" ||
+    input.sourceAmount.asset.assetId.toLowerCase() !==
+      handoff.tokenAddress.toLowerCase() ||
+    handoff.controllerAddress.toLowerCase() !==
+      input.profile.address.toLowerCase() ||
+    BigInt(input.sourceAmount.raw) <= 0n
+  ) {
+    throw new Error("Polymarket pre-route handoff differs from Relay source");
+  }
+  const transferData = ERC20_TRANSFER_INTERFACE.encodeFunctionData("transfer", [
+    handoff.controllerAddress,
+    BigInt(input.sourceAmount.raw),
+  ]);
+  const action: ExternalHandoffAction = {
+    kind: "external_handoff",
+    actionId: stableOpaqueId(
+      "funding_action",
+      canonicalJsonHash({
+        kind: handoff.kind,
+        funderAddress: handoff.funderAddress,
+        controllerAddress: handoff.controllerAddress,
+        tokenAddress: handoff.tokenAddress,
+        amountRaw: input.sourceAmount.raw,
+      }),
+    ),
+    networkId: input.sourceAmount.asset.networkId,
+    actorWalletId: input.profile.walletId,
+    handoffKind: "polymarket_deposit_wallet_transfer",
+    payload: {
+      topology: "deposit_wallet",
+      funder: handoff.funderAddress,
+      recipient: handoff.controllerAddress,
+      token: handoff.tokenAddress,
+      amountRaw: input.sourceAmount.raw,
+      calls: [
+        {
+          target: handoff.tokenAddress,
+          value: "0",
+          data: transferData,
+        },
+      ],
+    },
+  };
+  return [
+    {
+      ordinal: 0,
+      segmentOrdinal: 0,
+      stepKind: "external_handoff" as const,
+      state: "action_required" as const,
+      actionFingerprint: canonicalJsonHash(action),
+      executorId: POLYMARKET_DEPOSIT_WALLET_HANDOFF_EXECUTOR_ID,
+      payerRequirement: "provider" as const,
+      dependsOnOrdinal: null,
+      normalizedAction: jsonRecord(action),
+      actionValidationResult: jsonRecord({
+        signerAddress: input.profile.address,
+        executionEnvelope: handoff.kind,
+        funderAddress: handoff.funderAddress,
+        recipientAddress: handoff.controllerAddress,
+        tokenAddress: handoff.tokenAddress,
+        amountRaw: input.sourceAmount.raw,
+        transferData,
+      }),
+    },
+    ...input.steps.map((step) => ({
+      ...step,
+      ordinal: step.ordinal + 1,
+      dependsOnOrdinal:
+        step.dependsOnOrdinal == null ? 0 : step.dependsOnOrdinal + 1,
+    })),
+  ];
+}
+
 export class ProductionFundingSourcePlanner {
   constructor(
     private readonly db: Pool,
@@ -539,6 +760,8 @@ export class ProductionFundingSourcePlanner {
       account: this.account,
       policy: this.currentPolicy(),
       requiredAmount: input.requiredAmount,
+      destinationLocationPatternId:
+        input.destination.destinationLocationPatternId,
       purpose: input.request.purpose,
       maximumSlippageBps: Math.min(
         input.request.maxSlippageBps ??
@@ -586,13 +809,21 @@ export class ProductionFundingSourcePlanner {
         timeoutMs: Math.min(input.timeoutMs, 10_000),
       }),
     );
+    const relayRoute = routeSpec(input.route);
+    const quoteSourceAmount =
+      relayRoute.quoteMode === "expected_output"
+        ? {
+            ...input.sourceAmount,
+            raw: input.source.maximumSourceRaw,
+          }
+        : input.sourceAmount;
     let quote;
     try {
       quote = await adapter.quote({
-        route: routeSpec(input.route),
+        route: relayRoute,
         source: input.source.source,
         destination: input.destination.target,
-        sourceAmount: input.sourceAmount,
+        sourceAmount: quoteSourceAmount,
         minimumOutput: input.minimumOutput,
         userAddress,
         recipientAddress: destinationAddress(input.destination),
@@ -611,7 +842,7 @@ export class ProductionFundingSourcePlanner {
       throw error;
     }
     if (input.signal.aborted) return null;
-    const steps = await validatedSteps({
+    const relaySteps = await validatedSteps({
       actions: quote.actions,
       minimumOutput: quote.candidate.minimumOutput,
       policyRevision: input.policyRevision,
@@ -619,6 +850,12 @@ export class ProductionFundingSourcePlanner {
       route: input.route,
       sourceAmount: quote.sourceAmount,
       profile,
+    });
+    const steps = buildPolymarketPreRouteHandoffSteps({
+      source: input.source,
+      sourceAmount: quote.sourceAmount,
+      profile,
+      steps: relaySteps,
     });
     const plan = {
       operation: {
@@ -646,6 +883,25 @@ export class ProductionFundingSourcePlanner {
           routeId: input.route.routeId,
           requestFingerprint: quote.requestFingerprint,
           routeShape: quote.routeShape,
+          ...(input.destination.target.kind === "owned_location" &&
+          input.destination.spendability
+            ? {
+                destinationObservation: {
+                  observerId: input.route.destinationObserverId,
+                  locationId: input.destination.target.location.locationId,
+                  asset: jsonRecord(input.destination.target.location.asset),
+                  baselineRaw:
+                    input.destination.spendability.observedAmount.raw,
+                  baselineRevision: input.destination.spendability.revision,
+                  baselineAsOf: input.destination.spendability.asOf,
+                },
+              }
+            : {}),
+          ...(input.source.preRouteHandoff
+            ? {
+                preRouteHandoff: jsonRecord(input.source.preRouteHandoff),
+              }
+            : {}),
         },
       },
       segments: [
@@ -678,7 +934,8 @@ export class ProductionFundingSourcePlanner {
         {
           segmentOrdinal: 0,
           componentId: input.source.componentId,
-          locationId: sourceLocation.locationId,
+          locationId:
+            input.source.reservationLocationId ?? sourceLocation.locationId,
           networkId: quote.sourceAmount.asset.networkId,
           assetId: quote.sourceAmount.asset.assetId,
           assetDecimals: quote.sourceAmount.asset.decimals,

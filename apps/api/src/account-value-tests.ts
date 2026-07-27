@@ -218,6 +218,29 @@ await test("ownership profiles and venue bindings have canonical unique ids", as
   assert.equal(graph.venueBindings[0]?.venueId, "polymarket");
 });
 
+await test("source-only smart accounts do not inherit controller execution", async () => {
+  const resolver = new ExistingFactsOwnershipResolver({
+    wallets: [
+      {
+        address: "0x00000000000000000000000000000000000000bb",
+        walletType: "ethereum",
+        source: "smart",
+        linkedAddress: "0x00000000000000000000000000000000000000aa",
+        controllerWalletRef: "00000000-0000-4000-8000-000000000001",
+        serverWalletRef: null,
+      },
+    ],
+    venueBindings: [],
+    now: () => NOW,
+  });
+  const graph = await resolver.resolve("account_00000001");
+  assert.equal(graph.wallets.length, 2);
+  assert.ok(graph.wallets.every((wallet) => wallet.signingModes.length === 0));
+  assert.ok(
+    graph.wallets.every((wallet) => wallet.sponsorshipPolicyIds.length === 0),
+  );
+});
+
 await test("exact stable policy values only the configured contract", async () => {
   const component = await valuedAsset({ id: "stable", raw: "1234567" });
   assert.equal(component.estimatedUsd?.value, "1.234567");

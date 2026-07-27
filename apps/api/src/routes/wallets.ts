@@ -64,6 +64,7 @@ export type BalanceWalletResolution = {
   walletType: string | null | undefined;
   linkedWalletAddress: string;
   source: "linked" | "derived_funder";
+  polymarketFunderKind?: "safe" | "magic" | "deposit_wallet" | null;
 };
 
 const SOLANA_CHAIN_ID = "7565164";
@@ -550,17 +551,31 @@ export async function loadBalanceWalletLookup(
                 wallet.walletAddress,
               ),
             )
-            .map((candidate) => candidate.funder);
+            .map((candidate) => ({
+              address: candidate.funder,
+              kind: resolvePolymarketFunderExecutionKind(candidate),
+            }));
+          const storedCandidate =
+            funderDerive.candidates.find(
+              (candidate) =>
+                candidate.funder.toLowerCase() ===
+                creds?.funderAddress?.toLowerCase(),
+            ) ?? null;
           return {
             signerWalletAddress: wallet.walletAddress,
             funderAddress: creds?.funderAddress ?? null,
+            funderKind: resolvePolymarketFunderExecutionKind(storedCandidate),
             safeFunders,
           };
         } catch {
           return {
             signerWalletAddress: wallet.walletAddress,
             funderAddress: null,
-            safeFunders: [] as string[],
+            funderKind: null,
+            safeFunders: [] as ReadonlyArray<{
+              address: string;
+              kind: "safe" | "magic" | "deposit_wallet" | null;
+            }>,
           };
         }
       },
@@ -576,9 +591,11 @@ export async function loadBalanceWalletLookup(
         walletType: "ethereum",
         linkedWalletAddress: candidate.signerWalletAddress,
         source: "derived_funder",
+        polymarketFunderKind: candidate.funderKind,
       });
 
-      for (const safeFunderAddress of candidate.safeFunders) {
+      for (const safeFunder of candidate.safeFunders) {
+        const safeFunderAddress = safeFunder.address;
         const safeKey = normalizeWalletLookupKey(safeFunderAddress);
         if (!safeKey || lookup.has(safeKey)) continue;
         lookup.set(safeKey, {
@@ -586,6 +603,7 @@ export async function loadBalanceWalletLookup(
           walletType: "ethereum",
           linkedWalletAddress: candidate.signerWalletAddress,
           source: "derived_funder",
+          polymarketFunderKind: safeFunder.kind,
         });
       }
     }

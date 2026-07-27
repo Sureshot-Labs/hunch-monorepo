@@ -1,6 +1,7 @@
 #!/usr/bin/env tsx
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 
 import type { PreparationInspectionInput } from "../../domain/contracts.js";
 import type {
@@ -199,6 +200,15 @@ await test("backend Deposit Wallet derivation matches the current relayer SDK", 
     }),
     "0x431B416cdf155D0F975ee479793348e1137A6fF4",
   );
+});
+
+await test("generic Polymarket funding inspection is independent of delegated bot policy", () => {
+  const source = readFileSync(
+    new URL("../../preparation/runtime-service.ts", import.meta.url),
+    "utf8",
+  );
+  assert.doesNotMatch(source, /resolvePolymarketBotPolicyFundingCapRaw/);
+  assert.match(source, /fundingCapRaw: null/);
 });
 
 await test("Polymarket accepts supported signer, 1/1 Safe, Magic, and Deposit Wallet rows", async () => {

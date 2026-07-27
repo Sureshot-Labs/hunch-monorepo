@@ -204,6 +204,7 @@ function limitlessEvidence(
     clobApproval: true,
     negRiskClobApproval: true,
     ammApproval: true,
+    marketAdapterRequired: true,
     marketAdapterApproval: true,
     observedAt: OBSERVED_AT,
     expiresAt: EXPIRES_AT,
@@ -393,6 +394,108 @@ await test("Limitless CLOB and AMM approval evidence is not interchangeable", as
   const amm = await adapter.inspect(input(exactBinding, "buy", "amm"));
   assert.equal(clob.status, "ready");
   assert.equal(amm.status, "setup_required");
+});
+
+await test("Limitless AMM sell does not require an absent market adapter", async () => {
+  const exactBinding = binding("limitless");
+  const evidence = limitlessEvidence({
+    binding: exactBinding,
+    ammApproval: false,
+    marketAdapterRequired: false,
+    marketAdapterApproval: false,
+  });
+  const adapter = new LimitlessWalletPreparationAdapter(
+    async (request) => buildLimitlessRuntimeFacts(request, evidence),
+    () => NOW,
+  );
+  const result = await adapter.inspect(input(exactBinding, "sell", "amm"));
+  assert.equal(result.status, "setup_required");
+  assert.deepEqual(result.reasonCodes, ["operator_approval_required"]);
+  assert.equal(result.requiredActions.length, 1);
+  assert.equal(
+    result.requiredActions[0]?.safeLabel,
+    "Approve conditional tokens for the canonical Limitless AMM",
+  );
+});
+
+await test("known zero venue cash remains a selectable Buy destination", async () => {
+  const limitlessBinding = binding("limitless");
+  const limitless = new LimitlessWalletPreparationAdapter(
+    async (request) =>
+      buildLimitlessRuntimeFacts(
+        request,
+        limitlessEvidence({
+          binding: limitlessBinding,
+          cashRaw: "0",
+          cashLockedRaw: "0",
+        }),
+      ),
+    () => NOW,
+  );
+  const limitlessBuy = await limitless.inspect(
+    input(limitlessBinding, "buy", "amm"),
+  );
+  assert.equal(limitlessBuy.status, "ready");
+  assert.ok(!limitlessBuy.reasonCodes.includes("cash_availability_unknown"));
+
+  const polymarketBinding = binding("polymarket");
+  const polymarket = new PolymarketWalletPreparationAdapter(
+    async (request) =>
+      buildPolymarketRuntimeFacts(
+        request,
+        polymarketEvidence({
+          binding: polymarketBinding,
+          collateralRaw: "0",
+          collateralLockedRaw: "0",
+        }),
+      ),
+    () => NOW,
+  );
+  const polymarketBuy = await polymarket.inspect(
+    input(polymarketBinding, "buy", "standard"),
+  );
+  assert.equal(polymarketBuy.status, "ready");
+  assert.ok(!polymarketBuy.reasonCodes.includes("cash_availability_unknown"));
+});
+
+await test("zero Limitless cash exposes only the required automatic approval", async () => {
+  const exactBinding = binding("limitless");
+  const adapter = new LimitlessWalletPreparationAdapter(
+    async (request) =>
+      buildLimitlessRuntimeFacts(
+        request,
+        limitlessEvidence({
+          binding: exactBinding,
+          cashRaw: "0",
+          cashLockedRaw: "0",
+          ammAllowance: false,
+        }),
+      ),
+    () => NOW,
+  );
+  const result = await adapter.inspect(input(exactBinding, "buy", "amm"));
+  assert.equal(result.status, "setup_required");
+  assert.deepEqual(result.reasonCodes, ["operator_approval_required"]);
+});
+
+await test("unknown venue cash still fails closed", async () => {
+  const exactBinding = binding("limitless");
+  const adapter = new LimitlessWalletPreparationAdapter(
+    async (request) =>
+      buildLimitlessRuntimeFacts(
+        request,
+        limitlessEvidence({
+          binding: exactBinding,
+          cashObserved: false,
+          cashRaw: null,
+          cashLockedRaw: "0",
+        }),
+      ),
+    () => NOW,
+  );
+  const result = await adapter.inspect(input(exactBinding, "buy", "amm"));
+  assert.equal(result.status, "unavailable");
+  assert.ok(result.reasonCodes.includes("cash_availability_unknown"));
 });
 
 console.log("[funding-runtime-facts-tests] complete");

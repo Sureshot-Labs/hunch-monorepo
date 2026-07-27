@@ -23,6 +23,7 @@ type JsonRecord = Readonly<Record<string, JsonValue>>;
 
 export type PolymarketFundingPostconditionTarget = Readonly<{
   operationId: string;
+  planKind: "venue_preparation" | "direct_external_handoff";
   userId: string;
   stepId: string;
   attemptId: string;
@@ -165,6 +166,7 @@ async function loadTarget(
 ): Promise<PolymarketFundingPostconditionTarget | null> {
   const { rows } = await db.query<{
     operation_id: string;
+    plan_kind: PolymarketFundingPostconditionTarget["planKind"];
     user_id: string;
     step_id: string;
     attempt_id: string;
@@ -183,6 +185,7 @@ async function loadTarget(
     `
       select
         operation.id as operation_id,
+        operation.plan_kind,
         operation.user_id,
         step.id as step_id,
         attempt.id as attempt_id,
@@ -212,7 +215,10 @@ async function loadTarget(
        and receipt.canonical
        and receipt.finalized_at is not null
       where operation.id = $1
-        and operation.plan_kind = 'venue_preparation'
+        and operation.plan_kind in (
+          'venue_preparation',
+          'direct_external_handoff'
+        )
         and operation.support_metadata->>'preparationKind'
           = 'polymarket_funding_router'
         and operation.status not in (
@@ -241,11 +247,16 @@ async function loadTarget(
   const requested = row.requested_destination_amount;
   return {
     operationId: row.operation_id,
+    planKind: row.plan_kind,
     userId: row.user_id,
     stepId: row.step_id,
     attemptId: row.attempt_id,
     stepState: row.step_state,
-    binding: parseBinding(row.venue_binding_snapshot),
+    binding: parseBinding(
+      row.plan_kind === "direct_external_handoff"
+        ? metadata.venueBinding
+        : row.venue_binding_snapshot,
+    ),
     plan: parseFundingPlan(metadata.fundingPlan),
     before: parseBefore(metadata.before),
     destinationAsset: parseAsset(requested.asset),
@@ -296,6 +307,31 @@ async function persistSatisfiedPostcondition(
       checks: input.checks,
     },
   });
+  if (input.target.planKind === "direct_external_handoff") {
+    await allocateFundingObservationInTransaction(client, {
+      operationId: input.target.operationId,
+      segmentId: null,
+      kind: "destination_credit",
+      networkId: input.target.destinationAsset.networkId,
+      assetId: input.target.destinationAsset.assetId,
+      txHash: input.transactionHash,
+      eventIndex: "converted-destination-credit",
+      fromAddress: input.target.signerAddress,
+      toAddress: input.target.plan.depositWallet,
+      rawAmount: input.target.plan.totalAmountRaw,
+      observedAt: new Date(input.after.observedAt),
+      ledgerHeight: input.target.ledgerHeight,
+      blockHash: input.target.blockHash,
+      finalityStatus: "finalized",
+      finalizedAt: input.target.finalizedAt,
+      metadata: {
+        completionKind: "committed_venue_preparation",
+        receiptAttemptId: input.target.attemptId,
+        sourceAssetConverted: true,
+        expectedDepositPusdRaw: input.expectedDepositPusdRaw,
+      },
+    });
+  }
   if (input.target.stepState !== "succeeded") {
     const updated = await client.query(
       `

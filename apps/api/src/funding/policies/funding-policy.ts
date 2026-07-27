@@ -68,6 +68,10 @@ export const PRODUCTION_FUNDING_REGISTRY: FundingStaticRegistry = deepFreeze({
   ],
   reconcilers: [
     { id: "relay_status_v3", runtimeKind: "production" },
+    {
+      id: "polymarket_funding_router_postcondition_v1",
+      runtimeKind: "production",
+    },
     { id: "across_legacy", runtimeKind: "production" },
     { id: "bungee_legacy", runtimeKind: "production" },
     { id: "debridge_dln_legacy", runtimeKind: "production" },
@@ -80,6 +84,18 @@ export const PRODUCTION_FUNDING_REGISTRY: FundingStaticRegistry = deepFreeze({
     },
   ],
   destinationObservers: [
+    {
+      id: "owned_multi_asset_balance_delta_v1",
+      runtimeKind: "production",
+    },
+    {
+      id: "owned_destination_spendability_v1",
+      runtimeKind: "production",
+    },
+    {
+      id: "polymarket_deposit_wallet_assets_v1",
+      runtimeKind: "production",
+    },
     {
       id: "relay_owned_destination_observation_v1",
       runtimeKind: "production",
@@ -442,7 +458,7 @@ export type FundingPolicyValidationIssueCode =
   | "preparation_signer_missing"
   | "position_owner_binding_required"
   | "automatic_rebalance_forbidden"
-  | "staged_continuation_forbidden"
+  | "staged_continuation_dependency_missing"
   | "headline_execution_coupling_forbidden"
   | "headline_override_forbidden"
   | "remembered_wallet_forbidden"
@@ -949,12 +965,24 @@ function validateParsedFundingPolicy(
     );
   }
   if (policy.automation.stagedContinuation) {
-    addIssue(
-      issues,
-      "staged_continuation_forbidden",
-      "automation.stagedContinuation",
-      "two-segment staged continuation is disabled initially",
-    );
+    const requiredGates = [
+      "quoteCreation",
+      "commit",
+      "startUnsubmittedAction",
+      "reconciliation",
+      "polling",
+      "recovery",
+    ] as const;
+    for (const gate of requiredGates) {
+      if (!policy.gates[gate]) {
+        addIssue(
+          issues,
+          "staged_continuation_dependency_missing",
+          `gates.${gate}`,
+          `staged continuation requires ${gate}`,
+        );
+      }
+    }
   }
   if (policy.headline.referencedByExecutableLiquidity) {
     addIssue(

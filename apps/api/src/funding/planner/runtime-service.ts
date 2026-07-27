@@ -23,6 +23,7 @@ import type { PreparationResult } from "../domain/contracts.js";
 import { FundingPlanner } from "./planner.js";
 import { FundingQuoteService } from "./quote-service.js";
 import { FundingOperationService } from "./operation-service.js";
+import { canonicalMarketUpdatedAt } from "./market-context-revision.js";
 import { FundingPlannerError } from "./money.js";
 import { sameAsset } from "./money.js";
 import { WalletPreparationRuntimeService } from "../preparation/runtime-service.js";
@@ -80,6 +81,7 @@ export class FundingPlanningRuntime {
       purpose: "fund" | "buy" | "sell" | "redeem" | "withdraw";
       marketContextId?: string | null;
       marketClass?: string | null;
+      positionActionRef?: string | null;
       controllerWalletRef?: string | null;
     }>,
   ): Promise<readonly FundingDestinationOption[]> {
@@ -88,6 +90,7 @@ export class FundingPlanningRuntime {
       purpose: query.purpose,
       marketContextId: query.marketContextId ?? null,
       marketClass: query.marketClass ?? null,
+      positionActionRef: query.positionActionRef ?? null,
       compatibleVenueBindingOptionIds: null,
       controllerWalletRef: query.controllerWalletRef ?? null,
     });
@@ -100,6 +103,7 @@ export class FundingPlanningRuntime {
       purpose: PreparationPurpose;
       marketContextId: string | null;
       marketClass: string | null;
+      positionActionRef?: string | null;
     }>,
   ): Promise<PreparationResult> {
     return this.preparationRuntime.inspectBindingOption({
@@ -108,6 +112,7 @@ export class FundingPlanningRuntime {
       purpose: request.purpose,
       marketContextId: request.marketContextId,
       marketClass: request.marketClass,
+      positionActionRef: request.positionActionRef ?? null,
       compatibleVenueBindingOptionIds: [request.venueBindingOptionId],
     });
   }
@@ -119,6 +124,7 @@ export class FundingPlanningRuntime {
       purpose: PreparationPurpose;
       marketContextId: string | null;
       marketClass: string | null;
+      positionActionRef?: string | null;
       operationId: string;
       expectedInspectionRevision: string;
     }>,
@@ -134,6 +140,7 @@ export class FundingPlanningRuntime {
       purpose: request.purpose,
       marketContextId: request.marketContextId,
       marketClass: request.marketClass,
+      positionActionRef: request.positionActionRef ?? null,
       compatibleVenueBindingOptionIds: [request.venueBindingOptionId],
       operationId: request.operationId,
       expectedInspectionRevision: request.expectedInspectionRevision,
@@ -203,7 +210,7 @@ export class FundingPlanningRuntime {
               side: market.side,
               status: market.market_status,
               acceptingOrders: market.pm_accepting_orders,
-              updatedAt: market.updated_at,
+              updatedAt: canonicalMarketUpdatedAt(market.updated_at),
             }),
           ),
           collateralAsset: requestedAmount.asset,
@@ -221,7 +228,7 @@ export class FundingPlanningRuntime {
       listSources: (sourceInput) =>
         new ProductionFundingSourcePlanner(this.db, account, [
           new PolymarketFundingSourceAdapter(account),
-          new DirectIngressFundingSourceAdapter(),
+          new DirectIngressFundingSourceAdapter(account),
         ]).list(sourceInput),
       store: this.planningStore,
     });

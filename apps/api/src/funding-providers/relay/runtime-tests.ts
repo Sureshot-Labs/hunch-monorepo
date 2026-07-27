@@ -340,6 +340,41 @@ const destination: FundingTarget = {
 }
 
 {
+  let observedBody: Record<string, unknown> = {};
+  const client = new RelayClient({
+    apiKey: "relay-test-secret",
+    fetchImpl: async (_input, init) => {
+      observedBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return response(nativeWalletQuote());
+    },
+  });
+  const normalized = await new RelayWalletQuoteAdapter(client).quote({
+    route: { ...route, quoteMode: "expected_output" },
+    source,
+    destination,
+    sourceAmount: {
+      asset: route.source,
+      raw: "2000000000000000000",
+    },
+    minimumOutput: {
+      asset: route.destination,
+      raw: "27000000000000",
+    },
+    userAddress: user,
+    recipientAddress: user,
+    senderWalletId: "wallet-1",
+    quoteCorrelationId: "quote-correlation-expected-output-1",
+    deadline: new Date(Date.now() + 120_000),
+    maximumSlippageBps: 100,
+  });
+  assert.equal(observedBody.tradeType, "EXPECTED_OUTPUT");
+  assert.equal(observedBody.slippageTolerance, "100");
+  assert.ok(BigInt(String(observedBody.amount)) > 27_000_000_000_000n);
+  assert.equal(normalized.candidate.amountMode, "exact_output");
+  assert.equal(normalized.sourceAmount.raw, "1000000000000000000");
+}
+
+{
   const startedAt = new Date("2030-01-01T00:00:00.000Z");
   const deadline = new Date(startedAt.getTime() + 1_000);
   let clock = startedAt;
@@ -878,6 +913,14 @@ const destination: FundingTarget = {
       "solana-sol-to-polygon-pusd",
       "solana-usdc-to-polygon-pusd",
     ].sort(),
+  );
+  assert.equal(
+    RELAY_ROUTE_SPECS["polygon-pusd-to-base-usdc"]?.quoteMode,
+    "expected_output",
+  );
+  assert.equal(
+    RELAY_ROUTE_SPECS["base-usdc-to-polygon-pusd"]?.quoteMode,
+    "expected_output",
   );
   assert.deepEqual(
     PRODUCTION_FUNDING_REGISTRY.networkExecutors.map(({ id }) => id).sort(),

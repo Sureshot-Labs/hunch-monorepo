@@ -8,6 +8,7 @@ import type { FundingRuntimePolicy } from "../../policies/funding-policy.js";
 import { PRIVY_USER_AUTHORIZED_EVM_SPONSORSHIP_POLICY_ID } from "../../execution/sponsorship-policy.js";
 import {
   SOLANA_NATIVE_EXECUTION_RESERVE_LAMPORTS,
+  buildPolymarketPreRouteHandoffSteps,
   deriveProductionRelayEligibleSourceFacts,
 } from "../../planner/production-source-planner.js";
 
@@ -281,6 +282,51 @@ assert.equal(sponsored[0]?.quoteMinimumOutput?.raw, "3000000");
 assert.equal(sponsored[0]?.maximumSourceRaw, "4000000");
 assert.equal(sponsored[0]?.nativeGasReady, true);
 
+{
+  const base = account();
+  const component = base.projection.components[0];
+  assert.ok(component);
+  const managedVenueLocation = {
+    ...component.location,
+    kind: "venue_account",
+    details: {
+      ...component.location.details,
+      venueId: "polymarket",
+      accountRef: component.location.details.address,
+    },
+  } as const;
+  const managedVenueAccount = {
+    ...base,
+    projection: {
+      ...base.projection,
+      components: [{ ...component, location: managedVenueLocation }],
+    },
+  } as AccountValueReadModel;
+  const managedVenueFacts = deriveProductionRelayEligibleSourceFacts({
+    accountId: ACCOUNT_ID,
+    account: managedVenueAccount,
+    policy: policy(),
+    requiredAmount: { asset: POLYGON_PUSD, raw: "3000000" },
+  });
+  assert.equal(managedVenueFacts.length, 1);
+  assert.equal(
+    managedVenueFacts[0]?.reservationLocationId,
+    managedVenueLocation.locationId,
+  );
+  assert.equal(
+    managedVenueFacts[0]?.source.kind === "owned_location"
+      ? managedVenueFacts[0].source.location.kind
+      : null,
+    "wallet",
+  );
+  assert.equal(
+    managedVenueFacts[0]?.source.kind === "owned_location"
+      ? managedVenueFacts[0].source.location.details.balanceLocationId
+      : null,
+    managedVenueLocation.locationId,
+  );
+}
+
 const externalWalletIsNotADefaultSource =
   deriveProductionRelayEligibleSourceFacts({
     accountId: ACCOUNT_ID,
@@ -289,6 +335,229 @@ const externalWalletIsNotADefaultSource =
     requiredAmount: { asset: POLYGON_PUSD, raw: "3000000" },
   });
 assert.equal(externalWalletIsNotADefaultSource.length, 0);
+
+{
+  const sourceOnly = account();
+  const sourceOnlyOwnership = sourceOnly.ownership;
+  if (!sourceOnlyOwnership) {
+    throw new Error("source-only fixture is missing ownership");
+  }
+  const sourceOnlyAccount = {
+    ...sourceOnly,
+    ownership: {
+      ...sourceOnlyOwnership,
+      wallets: sourceOnlyOwnership.wallets.map((wallet) => ({
+        ...wallet,
+        source: "smart" as const,
+        signingModes: [],
+        serverWalletRef: null,
+        sponsorshipPolicyIds: [],
+      })),
+    },
+  } as AccountValueReadModel;
+  const sourceOnlyFacts = deriveProductionRelayEligibleSourceFacts({
+    accountId: ACCOUNT_ID,
+    account: sourceOnlyAccount,
+    policy: policy(),
+    requiredAmount: { asset: POLYGON_PUSD, raw: "3000000" },
+  });
+  assert.equal(sourceOnlyFacts.length, 1);
+  assert.equal(sourceOnlyFacts[0]?.walletExecutionReady, false);
+  assert.equal(sourceOnlyFacts[0]?.nativeGasReady, false);
+}
+
+{
+  const base = account();
+  const baseComponent = base.projection.components[0];
+  const baseAvailability = base.cashAvailability.components[0];
+  const baseEstimatedUsd = baseComponent?.estimatedUsd;
+  const baseOwnership = base.ownership;
+  assert.ok(baseComponent);
+  assert.ok(baseAvailability);
+  assert.ok(baseEstimatedUsd);
+  assert.ok(baseOwnership);
+  const funderWalletId = "wallet_polymarket_funder_12345678";
+  const controllerWalletId = "wallet_polymarket_controller_12345678";
+  const funderAddress = "0x00000000000000000000000000000000000000f1";
+  const controllerAddress = "0x00000000000000000000000000000000000000c1";
+  const location = {
+    kind: "venue_account",
+    locationId: "location_polymarket_funder_12345678",
+    accountId: ACCOUNT_ID,
+    asset: POLYGON_PUSD,
+    details: {
+      walletId: funderWalletId,
+      address: funderAddress,
+      linkedAddress: controllerAddress,
+      venueId: "polymarket",
+      polymarketFunderKind: "deposit_wallet",
+      balanceClass: "polymarket",
+    },
+  } as const;
+  const component = {
+    ...baseComponent,
+    componentId: "component_polymarket_funder_12345678",
+    location,
+    amount: { asset: POLYGON_PUSD, raw: "2000000" },
+    estimatedUsd: {
+      ...baseEstimatedUsd,
+      value: "2",
+    },
+  } as const;
+  const handoffPolicy = policy({
+    locations: [
+      {
+        ...policy().locations[0],
+        locationPatternId: "wallet_polygon_pusd",
+        asset: POLYGON_PUSD,
+      },
+    ],
+    routes: [
+      {
+        ...policy().routes[0],
+        routeId: "polygon-pusd-to-base-usdc",
+        sourceLocationPatternId: "wallet_polygon_pusd",
+        destinationLocationPatternId: "venue_limitless_usdc",
+        sourceAsset: POLYGON_PUSD,
+        destinationAsset: BASE_USDC,
+      },
+    ],
+  });
+  const handoffAccount = {
+    ...base,
+    projection: { ...base.projection, components: [component] },
+    cashAvailability: {
+      ...base.cashAvailability,
+      components: [
+        {
+          ...baseAvailability,
+          componentId: component.componentId,
+          amount: component.amount,
+          availableRaw: "2000000",
+          availableEstimatedUsd: "2",
+        },
+      ],
+    },
+    runtimePolicy: handoffPolicy,
+    ownership: {
+      ...baseOwnership,
+      wallets: [
+        {
+          walletId: funderWalletId,
+          networkId: "evm:137",
+          address: funderAddress,
+          source: "smart",
+          signingModes: [],
+          serverWalletRef: null,
+          controllerWalletRef: "8571f3cb-381e-4e55-8f4c-ecc4c7f2abb9",
+          sponsorshipPolicyIds: [],
+        },
+        {
+          walletId: controllerWalletId,
+          networkId: "evm:137",
+          address: controllerAddress,
+          source: "embedded",
+          signingModes: ["web_client", "privy_authorization"],
+          serverWalletRef: "privy_wallet_controller_12345678",
+          controllerWalletRef: "8571f3cb-381e-4e55-8f4c-ecc4c7f2abb9",
+          sponsorshipPolicyIds: [
+            PRIVY_USER_AUTHORIZED_EVM_SPONSORSHIP_POLICY_ID,
+          ],
+        },
+      ],
+    },
+    assetPreferences: {},
+  } as unknown as AccountValueReadModel;
+  const handoffFacts = deriveProductionRelayEligibleSourceFacts({
+    accountId: ACCOUNT_ID,
+    account: handoffAccount,
+    policy: handoffPolicy,
+    destinationLocationPatternId: "venue_limitless_usdc",
+    requiredAmount: { asset: BASE_USDC, raw: "1000000" },
+    purpose: "trade_shortfall",
+  });
+  assert.equal(handoffFacts.length, 1);
+  const handoffFact = handoffFacts[0];
+  assert.ok(handoffFact);
+  assert.equal(handoffFact.safeLabel, "Polymarket balance");
+  assert.equal(handoffFact.reservationLocationId, location.locationId);
+  assert.equal(
+    handoffFact.source.kind === "owned_location"
+      ? handoffFact.source.location.details.address
+      : null,
+    controllerAddress,
+  );
+  assert.deepEqual(handoffFact.preRouteHandoff, {
+    kind: "polymarket_deposit_wallet_to_controller_v1",
+    sourceLocation: location,
+    funderAddress,
+    controllerAddress,
+    tokenAddress: POLYGON_PUSD.assetId,
+  });
+  assert.equal(handoffFact.walletExecutionReady, true);
+  assert.equal(handoffFact.nativeGasReady, true);
+  const controllerProfile = handoffAccount.ownership?.wallets.find(
+    (wallet) => wallet.walletId === controllerWalletId,
+  );
+  assert.ok(controllerProfile);
+  const handoffSteps = buildPolymarketPreRouteHandoffSteps({
+    source: handoffFact,
+    sourceAmount: { asset: POLYGON_PUSD, raw: "1010102" },
+    profile: controllerProfile,
+    steps: [],
+  });
+  assert.equal(handoffSteps.length, 1);
+  assert.equal(handoffSteps[0]?.stepKind, "external_handoff");
+  assert.equal(
+    handoffSteps[0]?.executorId,
+    "polymarket_deposit_wallet_relayer_v1",
+  );
+  assert.equal(handoffSteps[0]?.payerRequirement, "provider");
+  assert.equal(
+    handoffSteps[0]?.normalizedAction.handoffKind,
+    "polymarket_deposit_wallet_transfer",
+  );
+  assert.equal(
+    deriveProductionRelayEligibleSourceFacts({
+      accountId: ACCOUNT_ID,
+      account: handoffAccount,
+      policy: handoffPolicy,
+      destinationLocationPatternId: "venue_limitless_usdc",
+      requiredAmount: { asset: BASE_USDC, raw: "1000000" },
+      purpose: "withdrawal",
+    }).length,
+    0,
+  );
+  const unsupportedSafeAccount = {
+    ...handoffAccount,
+    projection: {
+      ...handoffAccount.projection,
+      components: [
+        {
+          ...component,
+          location: {
+            ...location,
+            details: {
+              ...location.details,
+              polymarketFunderKind: "safe",
+            },
+          },
+        },
+      ],
+    },
+  } as AccountValueReadModel;
+  const unsupportedSafeFacts = deriveProductionRelayEligibleSourceFacts({
+    accountId: ACCOUNT_ID,
+    account: unsupportedSafeAccount,
+    policy: handoffPolicy,
+    destinationLocationPatternId: "venue_limitless_usdc",
+    requiredAmount: { asset: BASE_USDC, raw: "1000000" },
+    purpose: "trade_shortfall",
+  });
+  assert.equal(unsupportedSafeFacts.length, 1);
+  assert.equal(unsupportedSafeFacts[0]?.preRouteHandoff, undefined);
+  assert.equal(unsupportedSafeFacts[0]?.walletExecutionReady, false);
+}
 
 const excludedByPreference = deriveProductionRelayEligibleSourceFacts({
   accountId: ACCOUNT_ID,
@@ -419,6 +688,27 @@ assert.equal(
     requiredAmount: { asset: POLYGON_PUSD, raw: "3000000" },
   }).length,
   0,
+);
+
+const destinationDisambiguatedPolicy = policy({
+  routes: [
+    originalRoute,
+    {
+      ...originalRoute,
+      routeId: "withdrawal",
+      destinationLocationPatternId: "external_polygon_pusd",
+    },
+  ],
+});
+assert.equal(
+  deriveProductionRelayEligibleSourceFacts({
+    accountId: ACCOUNT_ID,
+    account: account(),
+    policy: destinationDisambiguatedPolicy,
+    destinationLocationPatternId: originalRoute.destinationLocationPatternId,
+    requiredAmount: { asset: POLYGON_PUSD, raw: "3000000" },
+  }).length,
+  1,
 );
 
 assert.equal(

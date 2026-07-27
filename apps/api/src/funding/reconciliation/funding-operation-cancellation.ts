@@ -3,10 +3,30 @@ import { tx, type Pool } from "@hunch/infra";
 import {
   fetchFundingOperationForUser,
   FundingPersistenceError,
+  transitionFundingOperationInTransaction,
   type FundingOperationRow,
 } from "../persistence/funding-operation-repository.js";
 import { releaseFundingReservationForAbandonedTradeInTransaction } from "../persistence/funding-evidence-repository.js";
 import { reduceFundingOperationInTransaction } from "./funding-reducer.js";
+
+export function isSafelyCancellableStepLessIngress(
+  input: Readonly<{
+    operation: Pick<
+      FundingOperationRow,
+      "planKind" | "progressStage" | "status"
+    >;
+    stepCount: number;
+    hasUnsafeExternalEffects: boolean;
+  }>,
+): boolean {
+  return (
+    !input.hasUnsafeExternalEffects &&
+    input.stepCount === 0 &&
+    input.operation.planKind === "direct_external_handoff" &&
+    input.operation.status === "awaiting_external_funds" &&
+    input.operation.progressStage === "source_action"
+  );
+}
 
 export async function cancelFundingOperationForUser(
   pool: Pool,
@@ -92,7 +112,7 @@ export async function cancelFundingOperationForUser(
       return released;
     }
 
-    await client.query(
+    const steps = await client.query<{ id: string }>(
       `
         select id
         from funding_operation_steps
@@ -122,7 +142,8 @@ export async function cancelFundingOperationForUser(
       `,
       [input.operationId],
     );
-    if (unsafe.rows[0]?.unsafe) {
+    const hasUnsafeExternalEffects = unsafe.rows[0]?.unsafe === true;
+    if (hasUnsafeExternalEffects) {
       throw new FundingPersistenceError(
         "invalid_state_transition",
         "funding operation may have external effects and must reconcile before cancellation",
@@ -139,10 +160,29 @@ export async function cancelFundingOperationForUser(
       [input.operationId, now],
     );
     if ((cancelledSteps.rowCount ?? 0) === 0) {
-      throw new FundingPersistenceError(
-        "invalid_state_transition",
-        "funding operation has no safely cancellable action",
-      );
+      if (
+        !isSafelyCancellableStepLessIngress({
+          operation,
+          stepCount: steps.rowCount ?? 0,
+          hasUnsafeExternalEffects,
+        })
+      ) {
+        throw new FundingPersistenceError(
+          "invalid_state_transition",
+          "funding operation has no safely cancellable action",
+        );
+      }
+      await transitionFundingOperationInTransaction(client, {
+        operationId: operation.id,
+        scope: { kind: "user", userId: input.userId },
+        expectedVersion: operation.version,
+        expectedState: {
+          status: operation.status,
+          stage: operation.progressStage,
+        },
+        nextState: { status: "cancelled", stage: "terminal" },
+        now,
+      });
     }
     await reduceFundingOperationInTransaction(client, {
       operationId: input.operationId,

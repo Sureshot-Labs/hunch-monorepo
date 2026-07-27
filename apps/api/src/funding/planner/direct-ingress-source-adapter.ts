@@ -1,16 +1,32 @@
+import type { AccountValueReadModel } from "../../account-value/runtime-service.js";
 import { multiplyRawByUnitPrice } from "../../account-value/decimal.js";
 import { stableOpaqueId } from "../../account-value/canonical.js";
+import { env } from "../../env.js";
+import {
+  buildPolymarketFundingPlan,
+  PolymarketFundingPlanError,
+} from "../../services/polymarket-funding-router.js";
 import type {
+  AssetRef,
   ExternalIngressInstruction,
   JsonValue,
   SourceOption,
+  WalletExecutionProfile,
 } from "../domain/types.js";
+import { resolveActionSponsorship } from "../execution/sponsorship-policy.js";
 import { canonicalJsonHash } from "../persistence/canonical.js";
+import type {
+  FundingCommitPlan,
+  FundingCommitReservation,
+} from "../persistence/funding-operation-repository.js";
+import { buildPolymarketFundingFollowupAction } from "../preparation/polymarket-funding-followup.js";
+import { parsePolymarketFundingEvidence } from "../preparation/polymarket-funding-snapshot.js";
 import type {
   FundingSourceAdapter,
   FundingSourcePlanningInput,
 } from "./source-adapter.js";
 import type { PlannedSourceOption } from "./planning-types.js";
+import { sameAsset } from "./money.js";
 
 function jsonRecord(value: unknown): Readonly<Record<string, JsonValue>> {
   return value as Readonly<Record<string, JsonValue>>;
@@ -31,11 +47,335 @@ function exactDestinationPolicy(input: FundingSourcePlanningInput) {
       location.capabilities.includes("venue_settlement") &&
       location.locationPatternId ===
         input.destination.destinationLocationPatternId &&
-      location.asset.networkId === input.requiredAmount.asset.networkId &&
-      location.asset.assetId.toLowerCase() ===
-        input.requiredAmount.asset.assetId.toLowerCase() &&
-      location.asset.decimals === input.requiredAmount.asset.decimals,
+      sameAsset(location.asset, input.requiredAmount.asset),
   );
+}
+
+type DirectIngressVariant = Readonly<{
+  variantId: string;
+  networkId: string;
+  asset: AssetRef;
+  destinationAddress: string;
+  destinationLocationId: string;
+  baselineRaw: string;
+  baselineRevision: string;
+  observation: Readonly<{
+    adapterId: string;
+    payload: Readonly<Record<string, JsonValue>>;
+  }>;
+  completion:
+    | Readonly<{ kind: "direct_destination_credit" }>
+    | Readonly<{
+        kind: "committed_venue_preparation";
+        stepOrdinal: number;
+      }>;
+}>;
+
+type DirectIngressCompletion = Readonly<{
+  variants: readonly DirectIngressVariant[];
+  step: FundingCommitPlan["steps"][number];
+  walletExecutionSnapshot: Readonly<Record<string, JsonValue>>;
+  supportMetadata: Readonly<Record<string, JsonValue>>;
+}>;
+
+function profileForExactWallet(input: {
+  account: AccountValueReadModel;
+  walletId: string;
+  networkId: string;
+  address: string;
+}): WalletExecutionProfile | null {
+  return (
+    input.account.ownership?.wallets.find(
+      (profile) =>
+        profile.walletId === input.walletId &&
+        profile.networkId === input.networkId &&
+        profile.address.toLowerCase() === input.address.toLowerCase(),
+    ) ?? null
+  );
+}
+
+function exactIngressVariant(
+  input: FundingSourcePlanningInput,
+): DirectIngressVariant {
+  if (input.destination.target.kind !== "owned_location") {
+    throw new Error("direct ingress requires an owned destination");
+  }
+  const destinationAddress = detail(input, "address");
+  if (!destinationAddress || !input.destinationFacts) {
+    throw new Error("direct ingress requires an observable destination");
+  }
+  return {
+    variantId: stableOpaqueId(
+      "ingress_variant",
+      canonicalJsonHash({
+        destinationAddress: destinationAddress.toLowerCase(),
+        asset: input.requiredAmount.asset,
+        completion: "direct_destination_credit",
+      }),
+    ),
+    networkId: input.requiredAmount.asset.networkId,
+    asset: input.requiredAmount.asset,
+    destinationAddress,
+    destinationLocationId: input.destination.target.location.locationId,
+    baselineRaw: input.destinationFacts.spendability.observedAmount.raw,
+    baselineRevision: input.destinationFacts.spendability.revision,
+    observation: {
+      adapterId: "owned_destination_spendability_v1",
+      payload: {},
+    },
+    completion: { kind: "direct_destination_credit" },
+  };
+}
+
+function buildPolymarketIngressCompletion(input: {
+  account: AccountValueReadModel;
+  planning: FundingSourcePlanningInput;
+  canonicalRouterAddress: string | null;
+  usdceAsset: AssetRef;
+}): DirectIngressCompletion | null {
+  const facts = input.planning.destinationFacts;
+  const usdcePolicy = input.planning.policy.assets.find((candidate) =>
+    sameAsset(candidate.asset, input.usdceAsset),
+  );
+  const snapshot = parsePolymarketFundingEvidence(
+    facts?.sourcePlanningEvidence ?? null,
+  );
+  const destinationAddress = detail(input.planning, "address");
+  if (
+    facts?.option.venueId !== "polymarket" ||
+    facts.target.kind !== "owned_location" ||
+    !snapshot ||
+    !destinationAddress ||
+    destinationAddress.toLowerCase() !== snapshot.depositWallet.toLowerCase() ||
+    snapshot.routerAddress.toLowerCase() !==
+      input.canonicalRouterAddress?.toLowerCase() ||
+    !sameAsset(
+      input.planning.requiredAmount.asset,
+      facts.option.requiredAsset,
+    ) ||
+    input.planning.requiredAmount.asset.networkId !== "evm:137" ||
+    input.usdceAsset.networkId !== "evm:137" ||
+    input.usdceAsset.decimals !==
+      input.planning.requiredAmount.asset.decimals ||
+    !input.planning.policy.automation.stagedContinuation ||
+    !usdcePolicy?.enabled ||
+    !usdcePolicy.observationEnabled ||
+    BigInt(input.planning.requiredAmount.raw) <= 0n
+  ) {
+    return null;
+  }
+  const profile = profileForExactWallet({
+    account: input.account,
+    walletId: facts.venueBinding.executionWalletId,
+    networkId: "evm:137",
+    address: snapshot.signerAddress,
+  });
+  if (
+    !profile ||
+    (!profile.signingModes.includes("web_client") &&
+      !profile.signingModes.includes("privy_authorization"))
+  ) {
+    return null;
+  }
+  const depositAvailableRaw =
+    BigInt(snapshot.depositPusdRaw) > BigInt(snapshot.depositLockedRaw)
+      ? BigInt(snapshot.depositPusdRaw) - BigInt(snapshot.depositLockedRaw)
+      : 0n;
+  let plan;
+  try {
+    plan = buildPolymarketFundingPlan({
+      signer: snapshot.signerAddress,
+      depositWallet: snapshot.depositWallet,
+      routerAddress: snapshot.routerAddress,
+      routerNonce: BigInt(snapshot.routerNonceRaw),
+      requiredRaw:
+        depositAvailableRaw + BigInt(input.planning.requiredAmount.raw),
+      depositPusdRaw: BigInt(snapshot.depositPusdRaw),
+      depositLockedRaw: BigInt(snapshot.depositLockedRaw),
+      // This branch is frozen against the amount this operation is waiting
+      // to receive. Existing USDC.e is intentionally not swept.
+      depositUsdceRaw: BigInt(input.planning.requiredAmount.raw),
+      depositRouterUsdceAllowanceRaw: BigInt(
+        snapshot.depositRouterUsdceAllowanceRaw,
+      ),
+      signerPusdRaw: 0n,
+      signerLockedRaw: 0n,
+      signerUsdceRaw: 0n,
+      routerPusdAllowanceRaw: 0n,
+      routerUsdceAllowanceRaw: 0n,
+      // The external ingress operation is already frozen to the exact amount
+      // the user confirmed. Bound this follow-up to that amount instead of a
+      // delegated bot-buy policy cap; the router allowance is checked
+      // independently above.
+      fundingCapRaw: BigInt(input.planning.requiredAmount.raw),
+    });
+  } catch (error) {
+    if (error instanceof PolymarketFundingPlanError) return null;
+    throw error;
+  }
+  if (
+    !plan ||
+    plan.totalAmountRaw !== input.planning.requiredAmount.raw ||
+    plan.depositUsdceAmountRaw !== input.planning.requiredAmount.raw ||
+    plan.pUsdAmountRaw !== "0" ||
+    plan.signerUsdceAmountRaw !== "0"
+  ) {
+    return null;
+  }
+  const quoteCorrelationId = stableOpaqueId(
+    "funding_quote",
+    canonicalJsonHash({
+      accountId: input.planning.accountId,
+      adapterId: "direct_owned_multi_asset_receive_v1",
+      destinationOptionId: facts.option.destinationOptionId,
+      fundingPlan: plan,
+      policyRevision: input.planning.policyRevision,
+      requiredAmount: input.planning.requiredAmount,
+    }),
+  );
+  const action = buildPolymarketFundingFollowupAction({
+    binding: facts.venueBinding,
+    canonicalRouterAddress: snapshot.routerAddress,
+    inspectionRevision: facts.bindingOption.inspectionRevision,
+    operationId: quoteCorrelationId,
+    plan,
+  });
+  const sponsorship = resolveActionSponsorship({ action, profile });
+  const baselineRevision = canonicalJsonHash({
+    schema: "polymarket_ingress_baseline_v1",
+    snapshot,
+  });
+  const common = {
+    networkId: "evm:137",
+    destinationAddress: snapshot.depositWallet,
+    destinationLocationId: facts.target.location.locationId,
+    baselineRevision,
+  } as const;
+  const variants: readonly DirectIngressVariant[] = [
+    {
+      ...common,
+      variantId: stableOpaqueId(
+        "ingress_variant",
+        canonicalJsonHash({
+          destinationAddress: snapshot.depositWallet.toLowerCase(),
+          asset: input.planning.requiredAmount.asset,
+          completion: "direct_destination_credit",
+        }),
+      ),
+      asset: input.planning.requiredAmount.asset,
+      baselineRaw: snapshot.depositPusdRaw,
+      observation: {
+        adapterId: "polymarket_deposit_wallet_assets_v1",
+        payload: { field: "depositPusdRaw" },
+      },
+      completion: { kind: "direct_destination_credit" },
+    },
+    {
+      ...common,
+      variantId: stableOpaqueId(
+        "ingress_variant",
+        canonicalJsonHash({
+          destinationAddress: snapshot.depositWallet.toLowerCase(),
+          asset: input.usdceAsset,
+          completion: "committed_venue_preparation",
+        }),
+      ),
+      asset: input.usdceAsset,
+      baselineRaw: snapshot.depositUsdceRaw,
+      observation: {
+        adapterId: "polymarket_deposit_wallet_assets_v1",
+        payload: { field: "depositUsdceRaw" },
+      },
+      completion: {
+        kind: "committed_venue_preparation",
+        stepOrdinal: 0,
+      },
+    },
+  ];
+  return {
+    variants,
+    step: {
+      ordinal: 0,
+      segmentOrdinal: null,
+      stepKind: "venue_preparation",
+      state: "planned",
+      actionFingerprint: canonicalJsonHash(action),
+      executorId: "wallet_profile_evm_v1",
+      payerRequirement: sponsorship.payerRequirement,
+      dependsOnOrdinal: null,
+      normalizedAction: jsonRecord(action),
+      actionValidationResult: {
+        valid: true,
+        signerAddress: profile.address,
+        canonicalRouterAddress: snapshot.routerAddress,
+        expectedNonceRaw: plan.routerNonce,
+        expectedTotalAmountRaw: plan.totalAmountRaw,
+        fundingPlanHash: canonicalJsonHash(plan),
+        sponsorshipPolicyId: sponsorship.policyId,
+        signingMode: sponsorship.signingMode,
+        activation: "after_verified_ingress",
+      },
+    },
+    walletExecutionSnapshot: jsonRecord(profile),
+    supportMetadata: {
+      preparationKind: "polymarket_funding_router",
+      venueBinding: jsonRecord(facts.venueBinding),
+      fundingPlan: jsonRecord(plan),
+      before: {
+        routerNonceRaw: snapshot.routerNonceRaw,
+        depositPusdRaw: snapshot.depositPusdRaw,
+        clobPusdRaw: snapshot.clobPusdRaw,
+        observedAt: snapshot.observedAt,
+      },
+    },
+  };
+}
+
+function receiveTargets(
+  variants: readonly DirectIngressVariant[],
+): NonNullable<ExternalIngressInstruction["receiveTargets"]> {
+  const grouped = new Map<
+    string,
+    {
+      networkId: string;
+      destinationAddress: string;
+      acceptedAssets: {
+        asset: AssetRef;
+        handling: "direct" | "automatic_conversion";
+      }[];
+    }
+  >();
+  for (const variant of variants) {
+    const key = `${variant.networkId}:${variant.destinationAddress.toLowerCase()}`;
+    const target = grouped.get(key) ?? {
+      networkId: variant.networkId,
+      destinationAddress: variant.destinationAddress,
+      acceptedAssets: [],
+    };
+    target.acceptedAssets.push({
+      asset: variant.asset,
+      handling:
+        variant.completion.kind === "direct_destination_credit"
+          ? "direct"
+          : "automatic_conversion",
+    });
+    grouped.set(key, target);
+  }
+  return [...grouped.values()].map((target) => ({
+    receiveTargetId: stableOpaqueId(
+      "receive_target",
+      canonicalJsonHash(target),
+    ),
+    networkId: target.networkId,
+    destinationAddress: target.destinationAddress,
+    acceptedAssets: target.acceptedAssets,
+    safeInstructions: [
+      "Send only one of the listed assets on this network.",
+      "Do not mix different assets in one funding operation.",
+      "Several transfers of the same asset may satisfy the target.",
+      "Any excess remains available in your Hunch balance.",
+    ],
+  }));
 }
 
 function instruction(input: {
@@ -44,22 +384,27 @@ function instruction(input: {
   expiresAt: string;
   ingressKind: "manual" | "privy";
   planning: FundingSourcePlanningInput;
+  variants: readonly DirectIngressVariant[];
 }): ExternalIngressInstruction {
   const amount = input.planning.requiredAmount;
+  const targets = receiveTargets(input.variants);
   return {
     ingressKind: input.ingressKind,
     sourceNetworkId: amount.asset.networkId,
     sourceAsset: amount.asset,
+    receiveTargets: targets,
+    recommendedReceiveTargetId: targets[0]?.receiveTargetId ?? null,
     destinationOptionId: input.destinationOptionId,
     destinationAddress: input.destinationAddress,
     requestedAmount: amount,
     amountSemantics: "minimum",
     expiresAt: input.expiresAt,
     safeInstructions: [
-      "Use only the selected asset on the selected network.",
-      "You may make several smaller transfers until the requested amount is reached.",
+      "Use only a displayed asset on its displayed network.",
+      "Do not mix different assets in the same funding operation.",
+      "You may make several smaller transfers of one asset until the requested amount is reached.",
       "Any excess remains available in your Hunch balance.",
-      "Funding completes only after backend observation and reconciliation.",
+      "Hunch observes the deposit and completes any required conversion before marking funds ready.",
     ],
   };
 }
@@ -72,6 +417,7 @@ function sourceOption(input: {
   expiresAt: string;
   destinationAddress: string;
   recommended: boolean;
+  variants: readonly DirectIngressVariant[];
 }): SourceOption {
   const ingress = instruction({
     planning: input.planning,
@@ -79,6 +425,7 @@ function sourceOption(input: {
     destinationAddress: input.destinationAddress,
     destinationOptionId: input.planning.destination.destinationId,
     expiresAt: input.expiresAt,
+    variants: input.variants,
   });
   const source = {
     kind: "external_ingress" as const,
@@ -135,6 +482,8 @@ function sourceOption(input: {
 function plannedSource(
   input: FundingSourcePlanningInput,
   option: SourceOption,
+  variants: readonly DirectIngressVariant[],
+  completion: DirectIngressCompletion | null,
 ): PlannedSourceOption {
   const destinationFacts = input.destinationFacts;
   if (input.destination.target.kind !== "owned_location") {
@@ -170,37 +519,39 @@ function plannedSource(
           ? jsonRecord(input.marketContext)
           : null,
         venueBindingSnapshot: jsonRecord(input.destination.venueBindingOption),
-        walletExecutionSnapshot: null,
+        walletExecutionSnapshot: completion?.walletExecutionSnapshot ?? null,
         placementSnapshot: jsonRecord(input.placement),
         requestedSourceAmount: jsonRecord(input.requiredAmount),
         requestedDestinationAmount: jsonRecord(input.requiredAmount),
         supportMetadata: {
           adapterId: "direct_owned_receive_v1",
-          destinationObserverId: "owned_destination_balance_delta_v2",
+          destinationObserverId: "owned_multi_asset_balance_delta_v1",
+          ingressVariants: variants.map((variant) => jsonRecord(variant)),
           destinationBaselineRaw:
             destinationFacts?.spendability.observedAmount.raw ?? null,
           destinationBaselineRevision:
             destinationFacts?.spendability.revision ?? null,
+          ...(completion?.supportMetadata ?? {}),
         },
       },
       segments: [],
-      steps: [],
-      reservations: [
-        {
+      steps: completion ? [completion.step] : [],
+      reservations: variants.map(
+        (variant): FundingCommitReservation => ({
           segmentOrdinal: null,
           componentId: stableOpaqueId(
             "direct_ingress",
-            `${destinationLocation.locationId}:${input.requiredAmount.asset.networkId}:${input.requiredAmount.asset.assetId.toLowerCase()}`,
+            `${destinationLocation.locationId}:${variant.asset.networkId}:${variant.asset.assetId.toLowerCase()}`,
           ),
           locationId: destinationLocation.locationId,
-          networkId: input.requiredAmount.asset.networkId,
-          assetId: input.requiredAmount.asset.assetId,
-          assetDecimals: input.requiredAmount.asset.decimals,
+          networkId: variant.asset.networkId,
+          assetId: variant.asset.assetId,
+          assetDecimals: variant.asset.decimals,
           rawAmount: input.requiredAmount.raw,
           mode: "advisory_destination",
           expiresAt: reservationExpiresAt,
-        },
-      ],
+        }),
+      ),
     },
   };
 }
@@ -208,12 +559,27 @@ function plannedSource(
 export class DirectIngressFundingSourceAdapter implements FundingSourceAdapter {
   readonly adapterId = "direct_owned_receive_v1";
 
+  constructor(
+    private readonly account: AccountValueReadModel | null = null,
+    private readonly config: Readonly<{
+      canonicalRouterAddress: string | null;
+      usdceAsset: AssetRef;
+    }> = {
+      canonicalRouterAddress:
+        env.polymarketFundingRouterAddress?.trim() || null,
+      usdceAsset: {
+        networkId: "evm:137",
+        assetId: env.polymarketUsdceAddress,
+        decimals: 6,
+      },
+    },
+  ) {}
+
   async list(
     input: FundingSourcePlanningInput,
   ): Promise<readonly PlannedSourceOption[]> {
     if (
       input.request.purpose !== "add_funds" &&
-      input.request.purpose !== "trade_shortfall" &&
       input.request.purpose !== "manual_rebalance"
     ) {
       return [];
@@ -232,6 +598,15 @@ export class DirectIngressFundingSourceAdapter implements FundingSourceAdapter {
     const expiresAt = new Date(
       input.now.getTime() + input.policy.ttl.quoteMs,
     ).toISOString();
+    const completion = this.account
+      ? buildPolymarketIngressCompletion({
+          account: this.account,
+          planning: input,
+          canonicalRouterAddress: this.config.canonicalRouterAddress,
+          usdceAsset: this.config.usdceAsset,
+        })
+      : null;
+    const variants = completion?.variants ?? [exactIngressVariant(input)];
     const manual = sourceOption({
       planning: input,
       kind: "manual_receive",
@@ -240,18 +615,18 @@ export class DirectIngressFundingSourceAdapter implements FundingSourceAdapter {
       expiresAt,
       destinationAddress,
       recommended: true,
+      variants,
     });
-    const sources: PlannedSourceOption[] = [plannedSource(input, manual)];
+    const sources: PlannedSourceOption[] = [
+      plannedSource(input, manual, variants, completion),
+    ];
     const privyEnabled = input.policy.privyFundingMethods.some(
       (method) =>
         method.enabled &&
         method.locallyConfigured &&
         method.destinationLocationPatternId ===
           input.destination.destinationLocationPatternId &&
-        method.asset.networkId === input.requiredAmount.asset.networkId &&
-        method.asset.assetId.toLowerCase() ===
-          input.requiredAmount.asset.assetId.toLowerCase() &&
-        method.asset.decimals === input.requiredAmount.asset.decimals,
+        sameAsset(method.asset, input.requiredAmount.asset),
     );
     if (privyEnabled) {
       const privy = sourceOption({
@@ -262,8 +637,9 @@ export class DirectIngressFundingSourceAdapter implements FundingSourceAdapter {
         expiresAt,
         destinationAddress,
         recommended: false,
+        variants,
       });
-      sources.push(plannedSource(input, privy));
+      sources.push(plannedSource(input, privy, variants, completion));
     }
     return sources;
   }

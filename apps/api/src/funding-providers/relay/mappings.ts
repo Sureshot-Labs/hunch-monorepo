@@ -76,6 +76,7 @@ const route = (
   routeId: RelayRehearsalScenarioId,
   sourceDecimals: number,
   destinationDecimals: number,
+  quoteMode: RelayRouteSpec["quoteMode"] = "exact_input",
 ): RelayRouteSpec => {
   const scenario = relayRehearsalScenarios[routeId];
   return {
@@ -98,15 +99,25 @@ const route = (
     },
     sourceVm: "evm",
     destinationVm: scenario.destinationVm,
-    quoteMode: "exact_input",
+    quoteMode,
     rehearsalScenario: scenario,
   };
 };
 
 export const RELAY_ROUTE_SPECS: Readonly<Record<string, RelayRouteSpec>> = {
   "polygon-pol-to-base-eth": route("polygon-pol-to-base-eth", 18, 18),
-  "polygon-pusd-to-base-usdc": route("polygon-pusd-to-base-usdc", 6, 6),
-  "base-usdc-to-polygon-pusd": route("base-usdc-to-polygon-pusd", 6, 6),
+  "polygon-pusd-to-base-usdc": route(
+    "polygon-pusd-to-base-usdc",
+    6,
+    6,
+    "expected_output",
+  ),
+  "base-usdc-to-polygon-pusd": route(
+    "base-usdc-to-polygon-pusd",
+    6,
+    6,
+    "expected_output",
+  ),
   "polygon-pol-to-solana-sol": route("polygon-pol-to-solana-sol", 18, 9),
   "polygon-pusd-to-solana-usdc": route("polygon-pusd-to-solana-usdc", 6, 6),
   "solana-usdc-to-polygon-pusd": {
@@ -155,6 +166,27 @@ export const RELAY_PINNED_ASSETS = {
   solanaNative: SOLANA_NATIVE,
   solanaUsdc: SOLANA_USDC,
 } as const;
+
+/**
+ * Economic classification for the currently pinned Relay collateral set.
+ * Route planning and quote consent both consume this single registry helper so
+ * adding a network cannot silently make one layer treat a volatile asset as
+ * equivalent stable collateral.
+ */
+export function isRelayPinnedStableAsset(asset: AssetRef): boolean {
+  if (asset.decimals !== 6) return false;
+  const normalized = asset.assetId.toLowerCase();
+  return (
+    (asset.networkId === "evm:8453" &&
+      normalized === RELAY_PINNED_ASSETS.baseUsdc) ||
+    (asset.networkId === "evm:137" &&
+      (normalized === RELAY_PINNED_ASSETS.polygonPusd ||
+        normalized === RELAY_PINNED_ASSETS.polygonUsdc ||
+        normalized === RELAY_PINNED_ASSETS.polygonUsdce)) ||
+    (asset.networkId === "solana:mainnet" &&
+      asset.assetId === RELAY_PINNED_ASSETS.solanaUsdc)
+  );
+}
 
 const RELAY_PINNED_ASSET_IDS_BY_NETWORK: Readonly<
   Record<NetworkId, ReadonlySet<string>>

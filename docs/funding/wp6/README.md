@@ -157,6 +157,14 @@ The contract must distinguish:
 - receipt confirmation from venue-visible collateral/readiness;
 - a recovery marker from settlement evidence.
 
+For a Buy destination, a fresh observed balance of zero (or a balance fully
+covered by valid reservations) is not an unavailable preparation state.
+Preparation proves that the balance/lock inputs are fresh and consistent;
+Funding Planner owns available-now and shortfall arithmetic. Unknown, stale,
+malformed, or contradictory balance/lock evidence still fails closed. This
+prevents the circular requirement that a destination must already contain the
+collateral that the Funding Router is being asked to deliver.
+
 No caller may interpret a generic `ready: true` without the exact purpose,
 binding, revision, and readiness evidence.
 
@@ -274,6 +282,22 @@ derivation, code inspection, Safe ownership/threshold, contract kind, and
 signature type. A transient RPC failure is not proof that a stored funder
 ceased to exist and must not clear it.
 
+A derived funder or venue contract address is never a normal wallet execution
+profile merely because it has a linked controller. Direct `web_client` or
+`privy_authorization` execution is available only when the exact on-chain
+action sender is the exact controlled wallet address. Safe, Magic, and Deposit
+Wallet balances require their topology-specific relayer/handoff source adapter;
+until that source adapter is committed and observable, they remain valued but
+fail closed as generic Relay wallet sources.
+
+Sponsored EVM receipt reconciliation must verify the execution envelope as well
+as the requested call. For the currently observed Privy path this means the
+pinned EntryPoint v0.7 `handleOps` wrapper, exactly one expected smart-account
+sender, one ERC-7579 single `execute`, exact inner target/value/calldata, and a
+successful matching `UserOperationEvent`. Comparing only the outer bundler
+transaction is invalid, while accepting only the inner calldata without the
+expected smart-account sender is unsafe.
+
 ### 4.2 Internal wallet bootstrap
 
 `AuthPolymarketWalletBootstrap` currently targets backend-linked internal EVM
@@ -330,6 +354,22 @@ The current Funding Router plan is exact and must remain intact:
 The router may use Deposit Wallet USDC.e first, then signer pUSD, then signer
 USDC.e. It never sweeps unrelated funds. Router readiness is not an order
 submission and is not inferred from a successful transaction alone.
+
+For external owned-address ingress, WP6/WP7 now freeze a conditional
+Polymarket continuation before commit. One Polygon Deposit Wallet receive
+target lists pUSD (`direct`) and USDC.e (`automatic_conversion`). The
+multi-asset observer compares both token balances with immutable baselines:
+pUSD writes the final destination credit directly, while USDC.e writes a source
+credit and activates the already-committed Funding Router step. The prebuilt
+plan treats only the requested newly received USDC.e amount as input; it does
+not sweep a pre-existing Deposit Wallet USDC.e balance. Receipt plus pUSD and
+CLOB readiness then writes the final destination credit.
+
+This is the adapter contract for future EVM/Solana ingress, not blanket
+cross-chain support. Each additional target needs an owned or strict-provider
+address, explicit asset allowlist, observer/finality adapter, precommitted
+conversion, refund/recovery semantics, fixtures, and live evidence. Mixed
+assets in one operation fail closed.
 
 ### 4.5 Composite source legs
 

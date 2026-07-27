@@ -536,9 +536,8 @@ export class FundingPlanner {
       ownershipRevision: string;
     }>,
   ): Promise<IntentLiquidityProjection> {
-    const now = this.now();
     if (input.request.purpose === "withdrawal") {
-      return this.discoverWithdrawal(input, now);
+      return this.discoverWithdrawal(input, this.now());
     }
     const marketContext = input.request.marketContextId
       ? await this.dependencies.resolveMarketContext({
@@ -546,13 +545,18 @@ export class FundingPlanner {
           marketContextId: input.request.marketContextId,
         })
       : null;
-    validateMarketContext(input.request, marketContext, now);
 
     const allCandidates = await this.dependencies.listDestinations({
       accountId: input.accountId,
       request: input.request,
       marketContext,
     });
+    // Destination adapters freeze evidence after their async observations
+    // complete. Evaluate that evidence against a clock captured afterwards;
+    // otherwise a valid asOf timestamp can appear to be in the future relative
+    // to a request-start clock and fail closed as stale.
+    const now = this.now();
+    validateMarketContext(input.request, marketContext, now);
     const candidates = selectedCandidates({
       request: input.request,
       marketContext,
@@ -928,6 +932,7 @@ export class FundingPlanner {
       destinationLocationPatternId: recipientLocation.locationPatternId,
       target,
       requiredAsset: amount.asset,
+      spendability: null,
       venueId: null,
       venueBindingOption: null,
       externalRecipientId: recipient.recipientId,

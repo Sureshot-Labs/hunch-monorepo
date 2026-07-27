@@ -55,6 +55,7 @@ const preparationRequestBaseSchema = z
     purpose: preparationPurposeSchema,
     marketContextId: marketReferenceSchema.nullable(),
     marketClass: z.string().trim().min(1).max(80).nullable(),
+    positionActionRef: z.string().uuid().nullable().optional(),
   })
   .strict();
 
@@ -137,6 +138,46 @@ export const externalIngressInstructionSchema = z
     ingressKind: z.enum(["controlled_wallet", "exchange", "privy", "manual"]),
     sourceNetworkId: z.string().trim().min(2).max(160).nullable(),
     sourceAsset: assetRefSchema.nullable(),
+    receiveTargets: z
+      .array(
+        z
+          .object({
+            receiveTargetId: opaqueIdSchema,
+            networkId: z.string().trim().min(2).max(160),
+            destinationAddress: z.string().trim().min(16).max(256),
+            acceptedAssets: z
+              .array(
+                z
+                  .object({
+                    asset: assetRefSchema,
+                    handling: z.enum(["direct", "automatic_conversion"]),
+                  })
+                  .strict(),
+              )
+              .min(1)
+              .max(16),
+            safeInstructions: z
+              .array(z.string().trim().min(1).max(240))
+              .max(16),
+          })
+          .strict()
+          .superRefine((target, context) => {
+            for (const [index, accepted] of target.acceptedAssets.entries()) {
+              if (accepted.asset.networkId !== target.networkId) {
+                context.addIssue({
+                  code: "custom",
+                  path: ["acceptedAssets", index, "asset", "networkId"],
+                  message:
+                    "accepted ingress asset must use its receive target network",
+                });
+              }
+            }
+          }),
+      )
+      .min(1)
+      .max(16)
+      .optional(),
+    recommendedReceiveTargetId: opaqueIdSchema.nullable().optional(),
     destinationOptionId: opaqueIdSchema,
     destinationAddress: z.string().trim().min(16).max(256),
     requestedAmount: moneySchema.nullable(),
@@ -144,7 +185,40 @@ export const externalIngressInstructionSchema = z
     expiresAt: z.string().datetime().nullable(),
     safeInstructions: z.array(z.string().trim().min(1).max(240)).max(16),
   })
-  .strict();
+  .strict()
+  .superRefine((instruction, context) => {
+    if (!instruction.receiveTargets) {
+      if (instruction.recommendedReceiveTargetId !== undefined) {
+        context.addIssue({
+          code: "custom",
+          path: ["recommendedReceiveTargetId"],
+          message:
+            "recommended receive target requires an explicit target list",
+        });
+      }
+      return;
+    }
+    const targetIds = instruction.receiveTargets.map(
+      (target) => target.receiveTargetId,
+    );
+    if (new Set(targetIds).size !== targetIds.length) {
+      context.addIssue({
+        code: "custom",
+        path: ["receiveTargets"],
+        message: "receive target identifiers must be unique",
+      });
+    }
+    if (
+      instruction.recommendedReceiveTargetId == null ||
+      !targetIds.includes(instruction.recommendedReceiveTargetId)
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["recommendedReceiveTargetId"],
+        message: "recommended receive target must identify an available target",
+      });
+    }
+  });
 
 const sourceOptionLegSchema = z
   .object({
@@ -463,6 +537,11 @@ export const fundingQuoteSummarySchema = z
       "composite_route",
     ]),
     experienceMode: z.enum(["instant", "inline_funding", "prepare_first"]),
+    consentMode: z.enum([
+      "trade_intent",
+      "explicit_economic_review",
+      "external_action",
+    ]),
     sourceAmounts: z
       .array(
         z
@@ -491,6 +570,7 @@ export const fundingDestinationsQuerySchema = z
     purpose: preparationPurposeSchema.default("fund"),
     marketContextId: marketReferenceSchema.nullable().optional(),
     marketClass: z.string().trim().min(1).max(80).nullable().optional(),
+    positionActionRef: z.string().uuid().nullable().optional(),
     controllerWalletRef: z.string().uuid().nullable().optional(),
   })
   .strict();
@@ -624,8 +704,12 @@ export const fundingOperationActionPrepareResponseSchema = z
     actionFingerprint: z.string().trim().min(32).max(192),
     controllerWalletRef: z.string().uuid(),
     executorId: z.string().trim().min(2).max(160),
-    executionMode: z.enum(["web_client", "privy_authorization"]),
-    payerRequirement: z.enum(["user", "privy_sponsor"]),
+    executionMode: z.enum([
+      "web_client",
+      "privy_authorization",
+      "venue_relayer",
+    ]),
+    payerRequirement: z.enum(["user", "privy_sponsor", "provider"]),
     sponsorshipPolicyId: z.string().trim().min(2).max(160).nullable(),
   })
   .strict();

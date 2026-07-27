@@ -159,6 +159,7 @@ function quote(): FundingQuoteSummary {
     venueBindingOptionId: "binding_poly_12345678",
     planKind: "wallet_route",
     experienceMode: "prepare_first",
+    consentMode: "explicit_economic_review",
     sourceAmounts: [
       {
         safeLabel: "Polygon wallet",
@@ -353,6 +354,32 @@ await test("destinations accept short backend market references", async () => {
       observedQuery?.controllerWalletRef,
       "8571f3cb-381e-4e55-8f4c-ecc4c7f2abb9",
     );
+  } finally {
+    await app.close();
+  }
+});
+
+await test("sell destination discovery forwards the owner-scoped position reference", async () => {
+  const positionActionRef = "20000000-0000-4000-8000-000000000001";
+  let observedQuery:
+    | Parameters<FundingRouteDependencies["destinations"]>[1]
+    | undefined;
+  const app = await buildApp({
+    destinations: async (_userId, query) => {
+      observedQuery = query;
+      return [destination()];
+    },
+  });
+  try {
+    const response = await app.inject({
+      method: "GET",
+      url:
+        "/funding/destinations?purpose=sell&marketContextId=561251" +
+        `&positionActionRef=${positionActionRef}`,
+    });
+    assert.equal(response.statusCode, 200);
+    assert.equal(observedQuery?.purpose, "sell");
+    assert.equal(observedQuery?.positionActionRef, positionActionRef);
   } finally {
     await app.close();
   }
@@ -561,9 +588,12 @@ await test("typed source-selection failures remain fail closed", async () => {
 
 await test("preparation inspection is account-bound and returns sanitized evidence", async () => {
   let observedUserId: string | null = null;
+  let observedPositionActionRef: string | null | undefined;
+  const positionActionRef = "20000000-0000-4000-8000-000000000001";
   const app = await buildApp({
-    inspectPreparation: async (userId) => {
+    inspectPreparation: async (userId, request) => {
       observedUserId = userId;
+      observedPositionActionRef = request.positionActionRef;
       return preparation();
     },
   });
@@ -576,10 +606,12 @@ await test("preparation inspection is account-bound and returns sanitized eviden
         purpose: "fund",
         marketContextId: null,
         marketClass: null,
+        positionActionRef,
       },
     });
     assert.equal(response.statusCode, 200);
     assert.equal(observedUserId, USER_ID);
+    assert.equal(observedPositionActionRef, positionActionRef);
     assert.equal(
       response.json().preparation.inspectionRevision,
       "inspection_poly_runtime_12345678",
@@ -590,8 +622,11 @@ await test("preparation inspection is account-bound and returns sanitized eviden
 });
 
 await test("preparation rejects stale revisions before action construction", async () => {
+  let observedPositionActionRef: string | null | undefined;
+  const positionActionRef = "20000000-0000-4000-8000-000000000001";
   const app = await buildApp({
-    prepare: async () => {
+    prepare: async (_userId, request) => {
+      observedPositionActionRef = request.positionActionRef;
       throw new PreparationContractError(
         "evidence_stale",
         "inspection changed",
@@ -607,12 +642,14 @@ await test("preparation rejects stale revisions before action construction", asy
         purpose: "fund",
         marketContextId: null,
         marketClass: null,
+        positionActionRef,
         operationId: "operation_prepare_12345678",
         expectedInspectionRevision: "inspection_poly_runtime_12345678",
       },
     });
     assert.equal(response.statusCode, 409);
     assert.equal(response.json().code, "evidence_stale");
+    assert.equal(observedPositionActionRef, positionActionRef);
   } finally {
     await app.close();
   }
@@ -699,6 +736,34 @@ await test("operation reads expose safe resumable state, not internal snapshots"
       asset: ASSET,
       expiresAt: new Date(NOW.getTime() + 60_000).toISOString(),
     });
+  } finally {
+    await app.close();
+  }
+});
+
+await test("operation reads hide dormant ingress completion until funds select it", async () => {
+  const dormantCompletionStep: FundingOperationStep = {
+    ...operationSteps()[0],
+    id: "step_dormant_completion_12345678",
+    ordinal: 1,
+    state: "planned",
+    actionValidationResult: {
+      activation: "after_verified_ingress",
+    },
+  };
+  const app = await buildApp({
+    operationSteps: async () => [...operationSteps(), dormantCompletionStep],
+  });
+  try {
+    const response = await app.inject({
+      method: "GET",
+      url: "/funding/operations/operation_id_12345678",
+    });
+    assert.equal(response.statusCode, 200);
+    assert.deepEqual(
+      response.json().steps.map((step: { stepId: string }) => step.stepId),
+      ["step_id_12345678"],
+    );
   } finally {
     await app.close();
   }

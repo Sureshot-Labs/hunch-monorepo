@@ -274,6 +274,11 @@ function buildObservation(inputs: {
       linkedAddress: inputs.resolution.linkedWalletAddress,
       balanceClass: inputs.entry.venueId ?? "wallet",
       ...(inputs.entry.venueId ? { venueId: inputs.entry.venueId } : {}),
+      ...(inputs.resolution.polymarketFunderKind
+        ? {
+            polymarketFunderKind: inputs.resolution.polymarketFunderKind,
+          }
+        : {}),
     },
   } as const;
   return {
@@ -505,14 +510,20 @@ export async function buildAccountValueReadModel(inputs: {
           normalizeAddress(wallet.walletAddress) ===
           normalizeAddress(resolution.linkedWalletAddress),
       );
+      const directlyControlled =
+        normalizeAddress(resolution.walletAddress) ===
+        normalizeAddress(resolution.linkedWalletAddress);
       return {
         address: resolution.walletAddress,
         walletType: resolution.walletType === "solana" ? "solana" : "ethereum",
-        source: linked ? sourceForWallet(linked) : "smart",
+        source:
+          directlyControlled && linked ? sourceForWallet(linked) : "smart",
         linkedAddress: resolution.linkedWalletAddress,
         controllerWalletRef: linked?.id ?? null,
         serverWalletRef:
-          linked?.isInternalWallet === true ? linked.privyWalletId : null,
+          directlyControlled && linked?.isInternalWallet === true
+            ? linked.privyWalletId
+            : null,
       };
     },
   );

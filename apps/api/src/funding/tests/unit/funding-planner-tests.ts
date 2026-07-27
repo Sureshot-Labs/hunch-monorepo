@@ -31,6 +31,7 @@ import {
   recommendFundingDestinations,
   toResolvedRouteDestination,
 } from "../../planner/destination-adapters.js";
+import { DirectIngressFundingSourceAdapter } from "../../planner/direct-ingress-source-adapter.js";
 import { decidePlacement } from "../../planner/placement-policy.js";
 import {
   classifyRouteExperience,
@@ -43,7 +44,10 @@ import {
   selectRelayFirstSourceOptions,
 } from "../../planner/source-options.js";
 import { FundingPlanner } from "../../planner/planner.js";
-import { FundingQuoteService } from "../../planner/quote-service.js";
+import {
+  classifyFundingQuoteConsent,
+  FundingQuoteService,
+} from "../../planner/quote-service.js";
 import { FundingOperationService } from "../../planner/operation-service.js";
 import { canonicalJsonHash } from "../../persistence/canonical.js";
 import {
@@ -68,6 +72,71 @@ async function test(name: string, run: () => void | Promise<void>) {
   await run();
   console.log(`[funding-planner-tests] ok ${name}`);
 }
+
+await test("quote consent reuses Buy only for pinned stable collateral", () => {
+  const polygonPusd: AssetRef = {
+    networkId: "evm:137",
+    assetId: "0xc011a7e12a19f7b1f670d46f03b03f3342e82dfb",
+    decimals: 6,
+  };
+  const baseUsdc: AssetRef = {
+    networkId: "evm:8453",
+    assetId: "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+    decimals: 6,
+  };
+  const sol: AssetRef = {
+    networkId: "solana:mainnet",
+    assetId: "11111111111111111111111111111111",
+    decimals: 9,
+  };
+  assert.equal(
+    classifyFundingQuoteConsent({
+      purpose: "trade_shortfall",
+      ingress: false,
+      sourceAmounts: [{ amount: { asset: polygonPusd, raw: "1000000" } }],
+      expectedDestination: { asset: baseUsdc, raw: "990000" },
+      minimumDestination: { asset: baseUsdc, raw: "980000" },
+    }),
+    "trade_intent",
+  );
+  assert.equal(
+    classifyFundingQuoteConsent({
+      purpose: "trade_shortfall",
+      ingress: false,
+      sourceAmounts: [{ amount: { asset: sol, raw: "10000000" } }],
+      expectedDestination: { asset: baseUsdc, raw: "990000" },
+      minimumDestination: { asset: baseUsdc, raw: "980000" },
+    }),
+    "explicit_economic_review",
+  );
+  assert.equal(
+    classifyFundingQuoteConsent({
+      purpose: "trade_shortfall",
+      ingress: false,
+      sourceAmounts: [
+        {
+          amount: {
+            asset: { ...polygonPusd, decimals: 18 },
+            raw: "1000000000000000000",
+          },
+        },
+      ],
+      expectedDestination: { asset: baseUsdc, raw: "990000" },
+      minimumDestination: { asset: baseUsdc, raw: "980000" },
+    }),
+    "explicit_economic_review",
+  );
+  assert.equal(
+    classifyFundingQuoteConsent({
+      purpose: "trade_shortfall",
+      ingress: true,
+      sourceAmounts: [{ amount: { asset: polygonPusd, raw: "1000000" } }],
+      expectedDestination: { asset: baseUsdc, raw: "990000" },
+      minimumDestination: { asset: baseUsdc, raw: "980000" },
+    }),
+    "external_action",
+  );
+});
 
 type DeepMutable<T> = T extends readonly (infer Item)[]
   ? DeepMutable<Item>[]
@@ -644,7 +713,7 @@ await test("frozen adapters preserve venue topology and accept a new registry en
   assert.equal(mutations, 0);
 });
 
-await test("unknown or slow route experience is Prepare Funds", () => {
+await test("unknown or slow route experience is operational prepare_first", () => {
   const policy = structuredClone(DEFAULT_FUNDING_RUNTIME_POLICY);
   const route = {
     routeId: "relay_polygon_pusd",
@@ -1228,6 +1297,31 @@ await test("source economics fail closed on unknown fee, fee cap, or slippage", 
     "minimum_output_not_met",
   ]);
   assert.equal(build("0.05", "0.1", 100).selectable, false);
+  const integerRoundedMinimum = buildRelayWalletSourceOption({
+    sourceOptionId: "source_relay_expected_output_12345678",
+    safeLabel: "Wallet pUSD",
+    maximumSourceRaw: "2000000",
+    estimatedUsd: "1.04",
+    quote: {
+      ...quote,
+      amountMode: "exact_output",
+      expectedOutput: { asset: POLYGON_PUSD, raw: "1010102" },
+      minimumOutput: { asset: POLYGON_PUSD, raw: "1000000" },
+    },
+    feeUsd: ["0.04"],
+    route,
+    routeObservation: null,
+    routeExperiencePolicy: DEFAULT_FUNDING_RUNTIME_POLICY.routeExperience,
+    maximumFeeUsd: "0.1",
+    maximumFeeBps: 10_000,
+    warningFeeUsd: "100",
+    warningFeeBps: 10_000,
+    minimumDestinationUsd: "0",
+    maximumSlippageBps: 100,
+    minimumDestinationEstimatedUsd: "1",
+  });
+  assert.equal(integerRoundedMinimum.selectable, true);
+  assert.deepEqual(integerRoundedMinimum.reasonCodes, []);
   assert.deepEqual(
     build("0.25", "10", 500, { maximumFeeBps: 2_000 }).reasonCodes,
     ["fee_limit_exceeded"],
@@ -1356,6 +1450,85 @@ await test("single destination values exact liquidity without inventing consent"
   assert.equal(projection.freshness, "fresh");
 });
 
+await test("planner evaluates collected evidence at a current clock and permits known-zero direct ingress", async () => {
+  const policy = mutablePolicy();
+  policy.creationMode = "on";
+  policy.locations = [
+    {
+      locationPatternId: "polymarket-venue-cash-v1",
+      locationKind: "venue_account",
+      asset: POLYGON_PUSD,
+      ownership: "owned",
+      observable: true,
+      capabilities: ["observe", "venue_settlement"],
+      enabled: true,
+    },
+  ];
+  const evidenceAt = new Date(NOW.getTime() + 5);
+  const evidenceExpiresAt = new Date(evidenceAt.getTime() + policy.ttl.quoteMs);
+  const exactCandidate = candidate({
+    destinationLocationPatternId: "polymarket-venue-cash-v1",
+    availableNow: { asset: POLYGON_PUSD, raw: "0" },
+    collateralValuation: {
+      unitPriceUsd: "1",
+      pricePolicyId: "exact-stable-policy-v1",
+      asOf: evidenceAt.toISOString(),
+      expiresAt: evidenceExpiresAt.toISOString(),
+    },
+    spendability: {
+      observedAmount: { asset: POLYGON_PUSD, raw: "0" },
+      lockedRaw: "0",
+      reservedRaw: "0",
+      submittedDebitRaw: "0",
+      availableAmount: { asset: POLYGON_PUSD, raw: "0" },
+      revision: "availability_known_zero_12345678",
+      asOf: evidenceAt.toISOString(),
+      expiresAt: evidenceExpiresAt.toISOString(),
+    },
+  });
+  const adapter = new DirectIngressFundingSourceAdapter();
+  let clock = NOW;
+  let sourceCalls = 0;
+  const projection = await new FundingPlanner({
+    listDestinations: async () => {
+      clock = evidenceAt;
+      return [exactCandidate];
+    },
+    resolveMarketContext: async () => null,
+    listSources: async (input) => {
+      sourceCalls += 1;
+      return adapter.list(input);
+    },
+    store: new MemoryPlanningStore(),
+    now: () => clock,
+  }).discover({
+    accountId: USER_ID,
+    request: intent("add_funds", "1000000"),
+    policy,
+    policyRevision: "policy_revision_12345678",
+    ownershipRevision: "ownership_revision_12345678",
+  });
+
+  assert.equal(sourceCalls, 1);
+  assert.equal(projection.mode, "prepare_first");
+  assert.equal(projection.availableNowRaw, "0");
+  assert.equal(projection.shortfallRaw, "1000000");
+  assert.equal(projection.requestedUsd, "1");
+  assert.deepEqual(
+    projection.sourceOptions.map((option) => option.kind),
+    ["manual_receive"],
+  );
+  assert.equal(
+    projection.reasonCodes.includes("cash_availability_unknown"),
+    false,
+  );
+  assert.equal(projection.reasonCodes.includes("trusted_price_stale"), false);
+  assert.equal(
+    projection.reasonCodes.includes("insufficient_liquidity"),
+    false,
+  );
+});
+
 await test("stale availability or valuation fails planner closed before quoting", async () => {
   const policy = mutablePolicy();
   policy.creationMode = "on";
@@ -1388,6 +1561,19 @@ await test("stale availability or valuation fails planner closed before quoting"
   assert.ok(
     staleAvailability.reasonCodes.includes("cash_availability_unknown"),
   );
+
+  const stalePrice = await run(
+    candidate({
+      collateralValuation: {
+        unitPriceUsd: "1",
+        pricePolicyId: "exact-stable-policy-v1",
+        asOf: "2026-07-24T11:58:00.000Z",
+        expiresAt: "2026-07-24T11:59:00.000Z",
+      },
+    }),
+  );
+  assert.equal(stalePrice.mode, "unavailable");
+  assert.ok(stalePrice.reasonCodes.includes("trusted_price_stale"));
 
   const unpriced = await run(candidate({ collateralValuation: null }));
   assert.equal(unpriced.mode, "unavailable");
@@ -1851,6 +2037,168 @@ await test("quote freezes one selected source and rejects changed raw amounts", 
       }),
     /raw amounts differ/,
   );
+});
+
+await test("direct ingress receives a fresh commit window after review", async () => {
+  const store = new MemoryPlanningStore();
+  const exactDestination = candidate();
+  const request = intent("add_funds", "1000000");
+  const placement = decidePlacement({
+    intent: request,
+    target: exactDestination.target,
+    targetVenueId: "polymarket",
+    targetRequirement: { asset: POLYGON_PUSD, raw: "1000000" },
+    availableNow: exactDestination.availableNow,
+    selectionReason: "explicit",
+    policy: DEFAULT_FUNDING_RUNTIME_POLICY,
+  });
+  const ingress = {
+    ingressKind: "manual" as const,
+    sourceNetworkId: POLYGON_PUSD.networkId,
+    sourceAsset: POLYGON_PUSD,
+    destinationOptionId: exactDestination.option.destinationOptionId,
+    destinationAddress: "0x00000000000000000000000000000000000000aa",
+    requestedAmount: { asset: POLYGON_PUSD, raw: "1000000" },
+    amountSemantics: "minimum" as const,
+    expiresAt: "2026-07-24T12:00:30.000Z",
+    safeInstructions: ["Send only pUSD on Polygon."],
+  };
+  const option = sourceOption("1000000", {
+    kind: "manual_receive",
+    safeLabel: "Deposit crypto",
+    source: {
+      kind: "external_ingress",
+      ingressKind: "manual",
+      networkId: POLYGON_PUSD.networkId,
+      asset: POLYGON_PUSD,
+      controlledSender: false,
+    },
+    ingress,
+    experienceMode: "prepare_first",
+    requiredActions: [
+      {
+        kind: "external_handoff",
+        safeLabel: "Explicitly send from your external wallet",
+        actor: "user",
+        valueMoving: true,
+        sponsorship: "none",
+      },
+    ],
+    expiresAt: ingress.expiresAt,
+  });
+  const exactPlan: FundingCommitPlan = {
+    operation: {
+      purpose: "add_funds",
+      initialState: {
+        status: "awaiting_external_funds",
+        stage: "source_action",
+      },
+      experienceMode: "prepare_first",
+      planKind: "direct_external_handoff",
+      sourceSnapshot: option as never,
+      destinationTargetSnapshot: exactDestination.target as never,
+      externalRecipientId: null,
+      venueId: "polymarket",
+      marketId: null,
+      marketContextSnapshot: null,
+      venueBindingSnapshot: exactDestination.bindingOption as never,
+      walletExecutionSnapshot: null,
+      placementSnapshot: placement as never,
+      requestedSourceAmount: {
+        asset: POLYGON_PUSD,
+        raw: "1000000",
+      } as never,
+      requestedDestinationAmount: {
+        asset: POLYGON_PUSD,
+        raw: "1000000",
+      } as never,
+    },
+    segments: [],
+    steps: [],
+    reservations: [],
+  };
+  const projection = {
+    ...liquidityProjectionFixture(),
+    liquidityProjectionId: "projection_00000000-0000-4000-8000-000000000010",
+    sourceOptions: [option],
+    destinationOptions: [exactDestination.option],
+  };
+  await store.create({
+    userId: USER_ID,
+    request,
+    projection,
+    plannerSnapshot: {
+      request,
+      marketContext: null,
+      destination: exactDestination,
+      withdrawalRecipient: null,
+      placement,
+      sources: [
+        {
+          option,
+          commitPlan: exactPlan,
+          routeId: null,
+          providerId: null,
+        },
+      ],
+      projection,
+      policyRevision: "policy_revision_12345678",
+      ownershipRevision: "ownership_revision_12345678",
+    },
+    policyVersion: 1,
+    policyRevision: "policy_revision_12345678",
+    ownershipRevision: "ownership_revision_12345678",
+    expiresAt: new Date(ingress.expiresAt),
+  });
+  const policy = mutablePolicy();
+  policy.creationMode = "on";
+  policy.gates.quoteCreation = true;
+  const quoteNow = new Date("2026-07-24T12:00:29.000Z");
+  let storedExpiresAtIso = "";
+  const service = new FundingQuoteService({
+    db: {} as never,
+    planningStore: store,
+    now: () => quoteNow,
+    createQuote: async (_db, input) => {
+      storedExpiresAtIso = input.expiresAt.toISOString();
+      return {
+        id: "quote_direct_ingress_12345678",
+        userId: input.userId,
+        discoveryProjectionId: input.discoveryProjectionId,
+        selectedSourceOptionSnapshot: input.selectedSourceOptionSnapshot,
+        marketContextSnapshot: input.marketContextSnapshot,
+        destinationOptionSnapshot: input.destinationOptionSnapshot,
+        venueBindingSnapshot: input.venueBindingSnapshot,
+        planSnapshot: input.planSnapshot,
+        policyVersion: input.policyVersion,
+        policyRevision: input.policyRevision,
+        canonicalRequestHash: "b".repeat(64),
+        planHash: canonicalJsonHash(input.planSnapshot),
+        consentTokenHash: "c".repeat(64),
+        expiresAt: input.expiresAt,
+        consumedAt: null,
+        invalidatedAt: null,
+      };
+    },
+  });
+  const summary = await service.quote({
+    userId: USER_ID,
+    request: {
+      liquidityProjectionId: projection.liquidityProjectionId,
+      selectedSourceOptionId: option.sourceOptionId,
+      confirmedSourceAmount: null,
+      requestedDestinationAmount: {
+        asset: POLYGON_PUSD,
+        raw: "1000000",
+      },
+    },
+    policy,
+    policyRevision: "policy_revision_12345678",
+    ownershipRevision: "ownership_revision_12345678",
+  });
+
+  assert.equal(storedExpiresAtIso, "2026-07-24T12:00:59.000Z");
+  assert.equal(summary.expiresAt, "2026-07-24T12:00:59.000Z");
 });
 
 await test("commit revalidates policy and ownership under the locked quote", async () => {

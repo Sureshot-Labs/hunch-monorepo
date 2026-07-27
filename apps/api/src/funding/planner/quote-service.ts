@@ -16,6 +16,7 @@ import {
   canonicalJsonEqual,
   canonicalJsonHash,
 } from "../persistence/canonical.js";
+import { isRelayPinnedStableAsset } from "../../funding-providers/relay/mappings.js";
 import type { FundingPlanningStore } from "./planning-types.js";
 import { FundingPlannerError, assertSameAsset } from "./money.js";
 
@@ -59,6 +60,27 @@ function planMoney(
     return null;
   }
   return { asset: { networkId, assetId, decimals }, raw };
+}
+
+export function classifyFundingQuoteConsent(
+  input: Readonly<{
+    purpose: string;
+    ingress: boolean;
+    sourceAmounts: readonly Readonly<{ amount: Money }>[];
+    expectedDestination: Money;
+    minimumDestination: Money;
+  }>,
+): FundingQuoteSummary["consentMode"] {
+  if (input.ingress) return "external_action";
+  const stableTradeRoute =
+    input.purpose === "trade_shortfall" &&
+    input.sourceAmounts.length > 0 &&
+    input.sourceAmounts.every((source) =>
+      isRelayPinnedStableAsset(source.amount.asset),
+    ) &&
+    isRelayPinnedStableAsset(input.expectedDestination.asset) &&
+    isRelayPinnedStableAsset(input.minimumDestination.asset);
+  return stableTradeRoute ? "trade_intent" : "explicit_economic_review";
 }
 
 export class FundingQuoteService {
@@ -258,12 +280,17 @@ export class FundingQuoteService {
     };
 
     const consentToken = `consent_${randomBytes(32).toString("base64url")}`;
+    const directExternalHandoff =
+      plan.operation.planKind === "direct_external_handoff" &&
+      selected.option.source.kind === "external_ingress";
     const expiresAt = new Date(
-      Math.min(
-        planning.expiresAt.getTime(),
-        Date.parse(selected.option.expiresAt),
-        now.getTime() + input.policy.ttl.quoteMs,
-      ),
+      directExternalHandoff
+        ? now.getTime() + input.policy.ttl.quoteMs
+        : Math.min(
+            planning.expiresAt.getTime(),
+            Date.parse(selected.option.expiresAt),
+            now.getTime() + input.policy.ttl.quoteMs,
+          ),
     );
     if (expiresAt.getTime() <= now.getTime()) {
       throw new FundingPlannerError(
@@ -299,6 +326,20 @@ export class FundingQuoteService {
         "stored plan lacks exact destination economics",
       );
     }
+    const sourceAmounts =
+      selected.option.kind === "composite"
+        ? (selected.option.sourceLegs ?? []).map((leg) => ({
+            safeLabel: leg.safeLabel,
+            amount: leg.sourceAmount,
+          }))
+        : plannedSource
+          ? [
+              {
+                safeLabel: selected.option.safeLabel,
+                amount: plannedSource,
+              },
+            ]
+          : [];
     return {
       quoteId: stored.id,
       liquidityProjectionId: planning.id,
@@ -311,20 +352,14 @@ export class FundingQuoteService {
         plan.operation.experienceMode === "inline"
           ? "inline_funding"
           : plan.operation.experienceMode,
-      sourceAmounts:
-        selected.option.kind === "composite"
-          ? (selected.option.sourceLegs ?? []).map((leg) => ({
-              safeLabel: leg.safeLabel,
-              amount: leg.sourceAmount,
-            }))
-          : plannedSource
-            ? [
-                {
-                  safeLabel: selected.option.safeLabel,
-                  amount: plannedSource,
-                },
-              ]
-            : [],
+      consentMode: classifyFundingQuoteConsent({
+        purpose: planning.request.purpose,
+        ingress: Boolean(selected.option.ingress),
+        sourceAmounts,
+        expectedDestination: expected,
+        minimumDestination: minimum,
+      }),
+      sourceAmounts,
       expectedDestination: expected,
       minimumDestination: minimum,
       fees: selected.option.fees,

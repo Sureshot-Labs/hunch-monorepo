@@ -170,6 +170,7 @@ export type ValidatedRelayQuote = {
     | "relay-router-v3-native"
     | "relay-approval-proxy-v3-erc20"
     | "relay-depository-v2-erc20";
+  sourceAmountRaw: bigint;
 };
 
 function record(value: unknown, label: string): UnknownRecord {
@@ -785,6 +786,7 @@ function validateV2Erc20Deposit(
 
 export function validateRelayRehearsalQuote(input: {
   amount: bigint;
+  amountMode?: "exact_input" | "expected_output";
   minimumOutputFloor: bigint;
   quote: unknown;
   recipient?: string;
@@ -817,13 +819,19 @@ export function validateRelayRehearsalQuote(input: {
       "details.recipient",
     );
   }
-  parseCurrencyAmount(details, "currencyIn", {
+  const source = parseCurrencyAmount(details, "currencyIn", {
     address: input.scenario.originCurrency,
-    amount: input.amount,
+    ...(input.amountMode === "expected_output" ? {} : { amount: input.amount }),
     chainId: input.scenario.originChainId,
     decimals: input.scenario.originDecimals,
     vm: input.scenario.originVm,
   });
+  if (source.amount <= 0n) {
+    throw new Error("quote source amount must be positive");
+  }
+  if (input.amountMode === "expected_output" && source.amount > input.amount) {
+    throw new Error("quote source amount exceeds authorized cap");
+  }
   const output = parseCurrencyAmount(details, "currencyOut", {
     address: input.scenario.destinationCurrency,
     chainId: input.scenario.destinationChainId,
@@ -864,7 +872,7 @@ export function validateRelayRehearsalQuote(input: {
     validateNativeDeposit(
       required(actions[0], "native deposit action"),
       input.scenario,
-      input.amount,
+      source.amount,
       input.user,
       input.recipient ?? input.user,
     );
@@ -896,14 +904,19 @@ export function validateRelayRehearsalQuote(input: {
         expectedSpender,
         "approve spender",
       );
-      if (bigint(decoded.amount, "approve amount") !== input.amount) {
+      if (bigint(decoded.amount, "approve amount") !== source.amount) {
         throw new Error("approval amount must equal exact input");
       }
     }
     if (usesV3) {
-      validateErc20Deposit(deposit, input.scenario, input.amount, input.user);
+      validateErc20Deposit(deposit, input.scenario, source.amount, input.user);
     } else {
-      validateV2Erc20Deposit(deposit, input.scenario, input.amount, input.user);
+      validateV2Erc20Deposit(
+        deposit,
+        input.scenario,
+        source.amount,
+        input.user,
+      );
     }
   }
 
@@ -923,5 +936,6 @@ export function validateRelayRehearsalQuote(input: {
           )
         ? "relay-approval-proxy-v3-erc20"
         : "relay-depository-v2-erc20",
+    sourceAmountRaw: source.amount,
   };
 }

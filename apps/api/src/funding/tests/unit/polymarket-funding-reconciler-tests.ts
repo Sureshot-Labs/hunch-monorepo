@@ -37,6 +37,7 @@ assert.ok(plan);
 
 const target: PolymarketFundingPostconditionTarget = {
   operationId: "operation_pm_postcondition_12345678",
+  planKind: "venue_preparation",
   userId: "user_pm_postcondition_12345678",
   stepId: "step_pm_postcondition_12345678",
   attemptId: "attempt_pm_postcondition_12345678",

@@ -50,7 +50,7 @@ function walletProfile(
         ? ["web_client"]
         : fact.serverWalletRef
           ? ["web_client", "privy_authorization"]
-          : ["web_client"],
+          : [],
     serverWalletRef: fact.serverWalletRef,
     sponsorshipPolicyIds:
       internallyManaged && networkId.startsWith("evm:")

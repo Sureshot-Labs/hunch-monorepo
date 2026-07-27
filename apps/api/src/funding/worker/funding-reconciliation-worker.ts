@@ -17,6 +17,7 @@ import { createFundingTransactionReferenceCodec } from "../execution/transaction
 import { PolymarketFundingPostconditionDriver } from "../preparation/polymarket-funding-reconciler.js";
 import { pollFundingPostconditions } from "../preparation/postcondition-driver.js";
 import { DirectIngressDestinationObserver } from "../reconciliation/direct-ingress-observer.js";
+import { OwnedRouteDestinationObserver } from "../reconciliation/owned-route-destination-observer.js";
 
 export type RelayFundingWorkerConfig = Readonly<{
   apiKey: string;
@@ -78,11 +79,21 @@ export async function runFundingReconciliationJob(
   }
   const relay = options.relay;
   const directIngressObserver = new DirectIngressDestinationObserver();
+  const ownedRouteObserver = new OwnedRouteDestinationObserver();
+  const pollDestination = async (operationId: string, now: Date) => {
+    const [direct, ownedRoute] = await Promise.all([
+      directIngressObserver.pollOperation(pool, operationId, now),
+      ownedRouteObserver.pollOperation(pool, operationId, now),
+    ]);
+    return {
+      destinationsPolled:
+        direct.destinationsPolled + ownedRoute.destinationsPolled,
+    };
+  };
   if (!relay) {
     return runFundingReconciliationBatch(pool, {
       ...options,
-      destinationPoll: (operationId, now) =>
-        directIngressObserver.pollOperation(pool, operationId, now),
+      destinationPoll: pollDestination,
     });
   }
   const encryptionKey = decodeCredentialsEncryptionKey(
@@ -120,8 +131,7 @@ export async function runFundingReconciliationJob(
         operationId,
         now,
       ),
-    destinationPoll: (operationId, now) =>
-      directIngressObserver.pollOperation(pool, operationId, now),
+    destinationPoll: pollDestination,
   });
 }
 

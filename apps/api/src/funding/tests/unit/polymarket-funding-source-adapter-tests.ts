@@ -86,7 +86,7 @@ function account(includeSignerUsdce = true): AccountValueReadModel {
   } as unknown as AccountValueReadModel;
 }
 
-function planningInput(): FundingSourcePlanningInput {
+function planningInput(fundingCapRaw = "4000000"): FundingSourcePlanningInput {
   const settlementLocation = {
     kind: "venue_account",
     locationId: "location_pm_deposit_12345678",
@@ -138,7 +138,7 @@ function planningInput(): FundingSourcePlanningInput {
         depositUsdceRaw: "1000000",
         signerPusdRaw: "1500000",
         signerUsdceRaw: "1500000",
-        fundingCapRaw: "4000000",
+        fundingCapRaw,
         routerAddress: ROUTER,
         routerNonceRaw: "7",
         depositRouterUsdceAllowanceRaw: "1000000",
@@ -196,6 +196,8 @@ const missingExactInput = new PolymarketFundingSourceAdapter(account(false), {
 });
 assert.deepEqual(await missingExactInput.list(planningInput()), []);
 
+assert.deepEqual(await adapter.list(planningInput("0")), []);
+
 console.log(
-  "[polymarket-funding-source-adapter-tests] exact multi-input plan, sponsorship, and fail-closed reservations passed",
+  "[polymarket-funding-source-adapter-tests] exact multi-input plan, sponsorship, fail-closed cap/allowance handling, and reservations passed",
 );
