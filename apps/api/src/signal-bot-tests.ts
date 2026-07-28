@@ -2276,7 +2276,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
               [
                 {
                   icon_custom_emoji_id: TELEGRAM_CUSTOM_EMOJI.polymarket.id,
-                  text: "Open market",
+                  text: "Open on Hunch",
                   url: "https://t.me/hunch_bot/hunch",
                 },
               ],
@@ -10103,7 +10103,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           .flat()
           .map((button) => button.text)
           .join(" "),
-        /Wallet|Open market/,
+        /Wallet|Open on Hunch/,
       );
       assert.match(
         message.text,
@@ -12290,7 +12290,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
-    name: "publish removes Buy from terminal-price notes and keeps Open market",
+    name: "publish removes Buy from terminal-price notes and keeps Open on Hunch",
     run: async () => {
       const redis = new FakeRedis();
       await enableSignalBotChat({
@@ -12346,7 +12346,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(telegram.messages.length, 1);
       assert.equal(
         telegram.messages[0]?.reply_markup?.inline_keyboard[0]?.[0]?.text,
-        "↗️ Open market",
+        "Open on Hunch",
       );
     },
   },
@@ -12744,7 +12744,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         false,
       );
       assert.equal(
-        updateButtons.some((button) => button.text === "↗️ Open market"),
+        updateButtons.some((button) => button.text === "Open on Hunch"),
         true,
       );
       const delivery = db.queries
@@ -12821,7 +12821,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         true,
       );
       assert.equal(
-        buttons.some((button) => button.text === "↗️ Open market"),
+        buttons.some((button) => button.text === "Open on Hunch"),
         false,
       );
     },
@@ -14374,7 +14374,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
-    name: "test-only preparation bypasses an old snapshot without exposing Buy",
+    name: "stale snapshot bypass exposes Buy only for an explicit test preview",
     run: async () => {
       const db = new FakeDb();
       const staleNote = note({
@@ -14407,9 +14407,33 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       if (preview.status === "ready") {
         assert.equal(preview.audit.stalePriceSnapshotBypassed, true);
         assert.equal(preview.deliveryTarget, null);
+        const openButton = preview.keyboard?.inline_keyboard.flat()[0];
+        assert.equal(
+          openButton?.icon_custom_emoji_id,
+          TELEGRAM_CUSTOM_EMOJI.hunch.id,
+        );
+        assert.doesNotMatch(openButton?.text ?? "", /↗/);
         assert.deepEqual(
           preview.keyboard?.inline_keyboard.flat().map((button) => button.text),
-          ["↗️ Open market"],
+          ["Open on Hunch"],
+        );
+      }
+
+      const buyPreview = await prepareSignalBotDelivery({
+        ...input,
+        allowStaleBuyCtaForTest: true,
+        allowStalePriceSnapshot: true,
+        redis: new FakeRedis(),
+      });
+      assert.equal(buyPreview.status, "ready");
+      if (buyPreview.status === "ready") {
+        assert.equal(buyPreview.audit.stalePriceSnapshotBypassed, true);
+        assert.equal(buyPreview.deliveryTarget?.price, 0.41);
+        assert.deepEqual(
+          buyPreview.keyboard?.inline_keyboard
+            .flat()
+            .map((button) => button.text),
+          ["Buy YES · Poly 41¢"],
         );
       }
     },
@@ -14451,7 +14475,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         telegram.messages[0]?.reply_markup?.inline_keyboard
           .flat()
           .map((button) => button.text),
-        ["↗️ Open market"],
+        ["Buy YES · Poly 41¢"],
       );
       assert.deepEqual(await getSignalBotChatState(redis, "-100"), before);
       assert.equal(
@@ -14489,6 +14513,11 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       });
       assert.deepEqual(sent, { reason: null, sent: true });
       const keyboard = telegram.messages[0]?.reply_markup?.inline_keyboard;
+      assert.equal(keyboard?.[0]?.[0]?.text, "Buy YES · Poly 41¢");
+      assert.equal(
+        keyboard?.[0]?.[0]?.icon_custom_emoji_id,
+        TELEGRAM_CUSTOM_EMOJI.polymarket.id,
+      );
       assert.equal(keyboard?.[0]?.[0]?.url, undefined);
       const payload = decodeStartAppPayload(
         readWebAppStartParam(keyboard?.[0]?.[0]),

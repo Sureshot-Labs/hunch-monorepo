@@ -52,5 +52,5 @@ export function formatSignalBotCheaperButtonText(input: {
 export function formatSignalBotOpenButtonText(channel: boolean): string {
   return channel
     ? `${TELEGRAM_CUSTOM_EMOJI.hunch.fallback} Open on Hunch`
-    : "↗️ Open market";
+    : "Open on Hunch";
 }

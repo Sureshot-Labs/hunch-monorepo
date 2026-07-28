@@ -4772,6 +4772,7 @@ async function loadSignalBotSourceReadinessWithoutRedis(input: {
 }
 
 export async function prepareSignalBotDelivery(input: {
+  allowStaleBuyCtaForTest?: boolean;
   allowStalePriceSnapshot?: boolean;
   appBaseUrl: string;
   buyAmountUsd: number;
@@ -4889,7 +4890,8 @@ export async function prepareSignalBotDelivery(input: {
     stalePriceSnapshot && input.allowStalePriceSnapshot === true;
   const requestedBuy =
     !input.forceOpenMarket &&
-    !stalePriceSnapshotBypassed &&
+    (!stalePriceSnapshotBypassed ||
+      (input.allowStaleBuyCtaForTest === true && input.redis != null)) &&
     (input.messageKind === "initial" || update?.ctaIntent === "buy");
   let allowBuyCta = false;
   let priceGuard: SignalBotPriceGuardResult = {
@@ -4921,7 +4923,7 @@ export async function prepareSignalBotDelivery(input: {
           db: input.db,
           note: input.note,
         });
-    if (priceGuard.defer) {
+    if (priceGuard.defer && input.allowStaleBuyCtaForTest !== true) {
       return {
         audit: {
           ...baseAudit,
@@ -4945,7 +4947,7 @@ export async function prepareSignalBotDelivery(input: {
       ? {
           eventId: input.note.eventId,
           marketId: input.note.marketId,
-          price: priceSnapshot[buySide].ask as number,
+          price: priceGuard.buyPrice ?? (priceSnapshot[buySide].ask as number),
           side: buySide,
           venue: input.note.marketVenue ?? "unknown",
         }
@@ -6302,6 +6304,7 @@ export async function sendLatestSignalBotTestSignal(input: {
   if (!note) return { reason: "no_eligible_note", sent: false };
   const copyPolicy = await resolveSignalPostCopyPolicy(input.db);
   const preparation = await prepareSignalBotDelivery({
+    allowStaleBuyCtaForTest: true,
     allowStalePriceSnapshot: true,
     appBaseUrl: input.config.appBaseUrl,
     buyAmountUsd: input.config.buyAmountUsd,
