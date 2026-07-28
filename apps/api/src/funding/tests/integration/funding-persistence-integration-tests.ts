@@ -26,6 +26,7 @@ import {
   fetchFundingWithdrawalDestinationForUser,
   finishFundingRouteObservationInTransaction,
   finishFundingStepAttemptInTransaction,
+  releaseFundingReservationForAbandonedTradeInTransaction,
   registerFundingWithdrawalDestination,
   registerFundingWithdrawalDestinationInTransaction,
   revokeFundingWithdrawalDestinationInTransaction,
@@ -52,6 +53,10 @@ import {
   type FundingCommitPlan,
   type FundingQuoteInsert,
 } from "../../persistence/funding-operation-repository.js";
+import {
+  claimFundingTradeAttemptInTransaction,
+  markFundingTradeAttemptSubmissionStartedInTransaction,
+} from "../../persistence/funding-trade-attempt-repository.js";
 import { ingestFundingObservationInTransaction } from "../../reconciliation/funding-observation-ingestion.js";
 import { reduceFundingOperationInTransaction } from "../../reconciliation/funding-reducer.js";
 
@@ -1613,6 +1618,73 @@ async function testTransactionalPersistenceContracts(): Promise<void> {
       "operation_not_found",
     );
     await client.query("rollback to savepoint wrong_trade_consumer_scope");
+    const tradeExecutionReference = opaque("trade-execution");
+    const tradeClaimInput = {
+      userId: userB,
+      operationId: committedB.operation.id,
+      reservationId: reservationBId,
+      venueId: "polymarket",
+      marketId,
+      executionPath: "polymarket_clob",
+      idempotencyKey: `polymarket-clob:${tradeExecutionReference}`,
+      canonicalFingerprint: hash("t"),
+      externalReference: tradeExecutionReference,
+    } as const;
+    const tradeClaim = await claimFundingTradeAttemptInTransaction(
+      client,
+      tradeClaimInput,
+    );
+    assert.equal(tradeClaim.claimed, true);
+    const replayedTradeClaim = await claimFundingTradeAttemptInTransaction(
+      client,
+      {
+        ...tradeClaimInput,
+        now: new Date(tradeClaim.attempt.claimedAt.getTime() + 1_000),
+      },
+    );
+    assert.equal(replayedTradeClaim.claimed, false);
+    assert.equal(replayedTradeClaim.attempt.id, tradeClaim.attempt.id);
+    const reclaimedTradeClaim = await claimFundingTradeAttemptInTransaction(
+      client,
+      {
+        ...tradeClaimInput,
+        now: new Date(tradeClaim.attempt.claimLeaseUntil.getTime() + 1),
+      },
+    );
+    assert.equal(reclaimedTradeClaim.claimed, true);
+    assert.equal(reclaimedTradeClaim.reason, "reclaimed_before_submission");
+    assert.notEqual(
+      reclaimedTradeClaim.attempt.claimToken,
+      tradeClaim.attempt.claimToken,
+    );
+    const startedTrade =
+      await markFundingTradeAttemptSubmissionStartedInTransaction(client, {
+        userId: userB,
+        operationId: committedB.operation.id,
+        reservationId: reservationBId,
+        attemptId: tradeClaim.attempt.id,
+        claimToken: reclaimedTradeClaim.attempt.claimToken,
+      });
+    assert.equal(startedTrade.state, "submission_started");
+    await expectFundingError(
+      releaseFundingReservationForAbandonedTradeInTransaction(client, {
+        userId: userB,
+        link: {
+          operationId: committedB.operation.id,
+          reservationId: reservationBId,
+        },
+        outcomeReason: "concurrent_cancel",
+      }),
+      "trade_submission_reconciling",
+    );
+    await client.query(
+      `
+        update balance_reservations
+        set expires_at = now() - interval '1 second'
+        where id = $1
+      `,
+      [reservationBId],
+    );
     const executionInput = {
       userId: userB,
       walletAddress: "0x00000000000000000000000000000000000000b1",
@@ -1620,11 +1692,12 @@ async function testTransactionalPersistenceContracts(): Promise<void> {
       unifiedMarketId: marketId,
       side: "BUY",
       status: "confirmed",
-      txSignature: opaque("trade-execution"),
+      txSignature: tradeExecutionReference,
       fundingReservation: {
         operationId: committedB.operation.id,
         reservationId: reservationBId,
       },
+      fundingTradeAttemptId: tradeClaim.attempt.id,
     } as const;
     const execution = await storeExecutionInTransaction(client, executionInput);
     assert.equal(execution.funding_operation_id, committedB.operation.id);

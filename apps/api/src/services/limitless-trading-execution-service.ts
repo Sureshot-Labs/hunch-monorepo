@@ -6,7 +6,14 @@ import { env } from "../env.js";
 import {
   assertFundingReservationReadyForTrade,
   releaseFundingReservationForAbandonedTrade,
+  releaseFundingReservationForDefinitiveTradeFailure,
 } from "../funding/persistence/funding-evidence-repository.js";
+import { canonicalJsonHash } from "../funding/persistence/canonical.js";
+import {
+  claimFundingTradeAttempt,
+  markFundingTradeAttemptSubmissionStarted,
+  recordFundingTradeAttemptOutcome,
+} from "../funding/persistence/funding-trade-attempt-repository.js";
 import { isRecord } from "../lib/type-guards.js";
 import {
   normalizeLimitlessRawTokenId,
@@ -242,6 +249,18 @@ type LimitlessAmmOrderBody = {
   size: number;
   tokenId: string;
   txHash: string;
+  fundingTradeAttemptId?: string;
+};
+
+type LimitlessAmmFundingClaimBody = {
+  amountUsdRaw: string;
+  fundingOperationId: string;
+  fundingReservationId: string;
+  idempotencyKey: string;
+  marketAddress: string;
+  marketSlug?: string | null;
+  tokenId: string;
+  transactionData: string;
 };
 
 type LimitlessOpenOrdersQuery = {
@@ -3506,10 +3525,105 @@ export async function submitLimitlessClientSignedOrder(input: {
     }
   }
 
-  const upstream = await submitLimitlessClobOrderToVenue({
-    body: orderPayload,
-    requestAuth,
-  });
+  let fundingTradeAttemptId: string | null = null;
+  let fundingTradeClaimToken: string | null = null;
+  if (fundingReservation) {
+    const marketId = marketTokens?.marketId ?? null;
+    if (!marketId) {
+      return {
+        ok: false,
+        statusCode: 409,
+        payload: { error: "Funding reservation market binding is unavailable" },
+      };
+    }
+    const canonicalFingerprint = canonicalJsonHash({
+      executionPath: "limitless_clob",
+      marketId,
+      marketSlug: input.body.marketSlug,
+      order: orderForUpstream,
+      orderType: input.body.orderType,
+      signer: signer.toLowerCase(),
+    });
+    try {
+      const claim = await claimFundingTradeAttempt(input.pool, {
+        userId: input.userId,
+        operationId: fundingReservation.operationId,
+        reservationId: fundingReservation.reservationId,
+        venueId: "limitless",
+        marketId,
+        executionPath: "limitless_clob",
+        idempotencyKey: `limitless-clob:${canonicalFingerprint}`,
+        canonicalFingerprint,
+        externalReference: clientOrderId,
+      });
+      if (!claim.claimed) {
+        return {
+          ok: false,
+          statusCode: 409,
+          payload: {
+            error:
+              "This funding reservation already has a trade attempt that must reconcile.",
+          },
+        };
+      }
+      fundingTradeAttemptId = claim.attempt.id;
+      fundingTradeClaimToken = claim.attempt.claimToken;
+    } catch (error) {
+      return {
+        ok: false,
+        statusCode: 409,
+        payload: {
+          error:
+            error instanceof Error
+              ? error.message
+              : "Funding reservation claim failed",
+        },
+      };
+    }
+  }
+
+  if (fundingReservation && fundingTradeAttemptId && fundingTradeClaimToken) {
+    try {
+      await markFundingTradeAttemptSubmissionStarted(input.pool, {
+        userId: input.userId,
+        operationId: fundingReservation.operationId,
+        reservationId: fundingReservation.reservationId,
+        attemptId: fundingTradeAttemptId,
+        claimToken: fundingTradeClaimToken,
+      });
+    } catch (error) {
+      return {
+        ok: false,
+        statusCode: 409,
+        payload: {
+          error:
+            error instanceof Error
+              ? error.message
+              : "Funding trade submission could not start",
+        },
+      };
+    }
+  }
+
+  let upstream: Awaited<ReturnType<typeof submitLimitlessClobOrderToVenue>>;
+  try {
+    upstream = await submitLimitlessClobOrderToVenue({
+      body: orderPayload,
+      requestAuth,
+    });
+  } catch (error) {
+    if (fundingTradeAttemptId) {
+      await recordFundingTradeAttemptOutcome(input.pool, {
+        userId: input.userId,
+        attemptId: fundingTradeAttemptId,
+        outcome: "ambiguous",
+        externalReference: clientOrderId,
+        errorCode: "limitless_submit_state_unknown",
+        broadcastMayHaveOccurred: true,
+      });
+    }
+    throw error;
+  }
 
   if (!upstream.ok) {
     const upstreamMessage = extractLimitlessMessage(upstream.payload);
@@ -3530,17 +3644,43 @@ export async function submitLimitlessClientSignedOrder(input: {
         userId: input.userId,
         venueOrderId,
       });
-      if (fundingReservation) {
-        await releaseFundingReservationForAbandonedTrade(input.pool, {
+      if (fundingReservation && fundingTradeAttemptId) {
+        await releaseFundingReservationForDefinitiveTradeFailure(input.pool, {
           userId: input.userId,
           link: fundingReservation,
+          tradeAttemptId: fundingTradeAttemptId,
           outcomeReason: "trade_no_fill",
+          errorCode: "trade_no_fill",
+          externalReference: venueOrderId ?? clientOrderId,
+          broadcastMayHaveOccurred: true,
         });
       }
       return {
         ok: true,
         payload: noFill,
       };
+    }
+    if (fundingReservation && fundingTradeAttemptId) {
+      if (upstream.status >= 500) {
+        await recordFundingTradeAttemptOutcome(input.pool, {
+          userId: input.userId,
+          attemptId: fundingTradeAttemptId,
+          outcome: "ambiguous",
+          externalReference: clientOrderId,
+          errorCode: "limitless_submit_state_unknown",
+          broadcastMayHaveOccurred: true,
+        });
+      } else {
+        await releaseFundingReservationForDefinitiveTradeFailure(input.pool, {
+          userId: input.userId,
+          link: fundingReservation,
+          tradeAttemptId: fundingTradeAttemptId,
+          outcomeReason: "trade_rejected",
+          errorCode: "limitless_trade_rejected",
+          externalReference: clientOrderId,
+          broadcastMayHaveOccurred: true,
+        });
+      }
     }
     return {
       ok: false,
@@ -3571,11 +3711,15 @@ export async function submitLimitlessClientSignedOrder(input: {
       userId: input.userId,
       venueOrderId,
     });
-    if (fundingReservation) {
-      await releaseFundingReservationForAbandonedTrade(input.pool, {
+    if (fundingReservation && fundingTradeAttemptId) {
+      await releaseFundingReservationForDefinitiveTradeFailure(input.pool, {
         userId: input.userId,
         link: fundingReservation,
+        tradeAttemptId: fundingTradeAttemptId,
         outcomeReason: "trade_no_fill",
+        errorCode: "trade_no_fill",
+        externalReference: venueOrderId ?? clientOrderId,
+        broadcastMayHaveOccurred: true,
       });
     }
     return {
@@ -3585,6 +3729,16 @@ export async function submitLimitlessClientSignedOrder(input: {
   }
 
   if (!venueOrderId) {
+    if (fundingTradeAttemptId) {
+      await recordFundingTradeAttemptOutcome(input.pool, {
+        userId: input.userId,
+        attemptId: fundingTradeAttemptId,
+        outcome: "ambiguous",
+        externalReference: parsedResult.txHash ?? clientOrderId,
+        errorCode: "limitless_order_id_missing",
+        broadcastMayHaveOccurred: true,
+      });
+    }
     return {
       ok: false,
       statusCode: 502,
@@ -3637,8 +3791,21 @@ export async function submitLimitlessClientSignedOrder(input: {
     orderPayload: storedOrderPayload,
     orderHash: parsedResult.txHash,
     fundingReservation,
+    fundingTradeAttemptId,
     lastUpdate: confirmedFillAt,
     filledAt: confirmedFillAt,
+  }).catch(async (error) => {
+    if (fundingTradeAttemptId) {
+      await recordFundingTradeAttemptOutcome(input.pool, {
+        userId: input.userId,
+        attemptId: fundingTradeAttemptId,
+        outcome: "ambiguous",
+        externalReference: parsedResult.txHash ?? venueOrderId,
+        errorCode: "limitless_local_persistence_failed",
+        broadcastMayHaveOccurred: true,
+      }).catch(() => {});
+    }
+    throw error;
   });
 
   if (confirmedFillAt && confirmedImmediateFill) {
@@ -3858,6 +4025,175 @@ export async function quoteLimitlessAmmRoute(input: {
   }
 }
 
+async function resolveLimitlessFundingMarketId(
+  pool: ApiTradingApplicationServiceInput["pool"],
+  input: Readonly<{ marketSlug?: string | null; tokenId: string }>,
+): Promise<string | null> {
+  const marketResult = await pool.query<{ id: string }>(
+    `
+      select distinct market.id
+      from unified_markets market
+      left join unified_tokens token
+        on token.market_id = market.id
+       and token.venue = 'limitless'
+      where market.venue = 'limitless'
+        and (
+          ($1::text is not null and market.slug = $1)
+          or token.token_id = $2
+        )
+      order by market.id
+      limit 2
+    `,
+    [
+      input.marketSlug?.trim() || null,
+      normalizeLimitlessScopedTokenId(input.tokenId),
+    ],
+  );
+  return marketResult.rows.length === 1
+    ? (marketResult.rows[0]?.id ?? null)
+    : null;
+}
+
+export async function claimLimitlessAmmFundingTrade(input: {
+  body: LimitlessAmmFundingClaimBody;
+  pool: ApiTradingApplicationServiceInput["pool"];
+  signer: string;
+  userId: string;
+}) {
+  const marketId = await resolveLimitlessFundingMarketId(input.pool, {
+    marketSlug: input.body.marketSlug,
+    tokenId: input.body.tokenId,
+  });
+  if (!marketId) {
+    return {
+      ok: false as const,
+      statusCode: 409,
+      payload: { error: "Funding reservation market binding is unavailable" },
+    };
+  }
+  const canonicalFingerprint = canonicalJsonHash({
+    amountUsdRaw: input.body.amountUsdRaw,
+    executionPath: "limitless_amm",
+    marketAddress: input.body.marketAddress.toLowerCase(),
+    marketId,
+    signer: input.signer.toLowerCase(),
+    tokenId: normalizeLimitlessScopedTokenId(input.body.tokenId),
+    transactionData: input.body.transactionData.toLowerCase(),
+  });
+  try {
+    const claim = await claimFundingTradeAttempt(input.pool, {
+      userId: input.userId,
+      operationId: input.body.fundingOperationId,
+      reservationId: input.body.fundingReservationId,
+      venueId: "limitless",
+      marketId,
+      executionPath: "limitless_amm",
+      idempotencyKey: input.body.idempotencyKey,
+      canonicalFingerprint,
+    });
+    if (!claim.claimed) {
+      return {
+        ok: false as const,
+        statusCode: 409,
+        payload: {
+          error:
+            "This funding reservation already has a trade attempt that must reconcile.",
+          attemptId: claim.attempt.id,
+          state: claim.attempt.state,
+        },
+      };
+    }
+    return {
+      ok: true as const,
+      payload: {
+        ok: true,
+        attemptId: claim.attempt.id,
+        claimToken: claim.attempt.claimToken,
+        state: claim.attempt.state,
+      },
+    };
+  } catch (error) {
+    return {
+      ok: false as const,
+      statusCode: 409,
+      payload: {
+        error:
+          error instanceof Error
+            ? error.message
+            : "Funding reservation claim failed",
+      },
+    };
+  }
+}
+
+export async function recordLimitlessAmmFundingTradeOutcome(input: {
+  attemptId: string;
+  errorCode?: string | null;
+  outcome: "ambiguous" | "not_broadcast";
+  pool: ApiTradingApplicationServiceInput["pool"];
+  txHash?: string | null;
+  userId: string;
+}) {
+  try {
+    const attempt = await recordFundingTradeAttemptOutcome(input.pool, {
+      userId: input.userId,
+      attemptId: input.attemptId,
+      outcome:
+        input.outcome === "ambiguous" ? "ambiguous" : "definitive_failure",
+      externalReference: input.txHash,
+      errorCode: input.errorCode,
+      broadcastMayHaveOccurred: input.outcome === "ambiguous",
+    });
+    return {
+      ok: true as const,
+      payload: { ok: true, attemptId: attempt.id, state: attempt.state },
+    };
+  } catch (error) {
+    return {
+      ok: false as const,
+      statusCode: 409,
+      payload: {
+        error:
+          error instanceof Error ? error.message : "Trade outcome was rejected",
+      },
+    };
+  }
+}
+
+export async function startLimitlessAmmFundingTrade(input: {
+  attemptId: string;
+  claimToken: string;
+  fundingOperationId: string;
+  fundingReservationId: string;
+  pool: ApiTradingApplicationServiceInput["pool"];
+  userId: string;
+}) {
+  try {
+    const attempt = await markFundingTradeAttemptSubmissionStarted(input.pool, {
+      userId: input.userId,
+      operationId: input.fundingOperationId,
+      reservationId: input.fundingReservationId,
+      attemptId: input.attemptId,
+      claimToken: input.claimToken,
+    });
+    return {
+      ok: true as const,
+      payload: { ok: true, attemptId: attempt.id, state: attempt.state },
+    };
+  } catch (error) {
+    return {
+      ok: false as const,
+      statusCode: 409,
+      payload: {
+        error:
+          error instanceof Error
+            ? error.message
+            : "Trade submission could not start",
+      },
+    };
+  }
+}
+
 export async function recordLimitlessAmmOrder(input: {
   body: LimitlessAmmOrderBody;
   log?: LimitlessRouteLogger | null;
@@ -3866,6 +4202,7 @@ export async function recordLimitlessAmmOrder(input: {
   settlementMode?: "confirmed" | "legacy_assume_filled";
   source?: Record<string, unknown> | null;
   fundingReservation?: TradeIntent["fundingReservation"];
+  fundingTradeAttemptId?: string | null;
   signer: string;
   userId: string;
 }): Promise<LimitlessAmmRecordRouteResult> {
@@ -3895,31 +4232,18 @@ export async function recordLimitlessAmmOrder(input: {
       payload: { error: "Funding reservations can only be linked to buys" },
     };
   }
+  if (input.fundingReservation && !input.fundingTradeAttemptId) {
+    return {
+      ok: false,
+      statusCode: 409,
+      payload: { error: "Funding trade attempt claim is required" },
+    };
+  }
   if (input.fundingReservation) {
-    const marketResult = await input.pool.query<{ id: string }>(
-      `
-        select distinct market.id
-        from unified_markets market
-        left join unified_tokens token
-          on token.market_id = market.id
-         and token.venue = 'limitless'
-        where market.venue = 'limitless'
-          and (
-            ($1::text is not null and market.slug = $1)
-            or token.token_id = $2
-          )
-        order by market.id
-        limit 2
-      `,
-      [
-        input.body.marketSlug?.trim() || null,
-        normalizeLimitlessScopedTokenId(input.body.tokenId),
-      ],
-    );
-    const marketId =
-      marketResult.rows.length === 1
-        ? (marketResult.rows[0]?.id ?? null)
-        : null;
+    const marketId = await resolveLimitlessFundingMarketId(input.pool, {
+      marketSlug: input.body.marketSlug,
+      tokenId: input.body.tokenId,
+    });
     try {
       await assertFundingReservationReadyForTrade(input.pool, {
         userId: input.userId,
@@ -4011,6 +4335,7 @@ export async function recordLimitlessAmmOrder(input: {
     },
     orderHash: txHash,
     fundingReservation: input.fundingReservation,
+    fundingTradeAttemptId: input.fundingTradeAttemptId,
     postedAt: now,
     lastUpdate: now,
     filledAt,
@@ -5374,6 +5699,7 @@ async function persistTrade(
       pool: ctx.pool,
       source: buildTelegramTradeSourceMetadata(input),
       fundingReservation: input.intent.fundingReservation,
+      fundingTradeAttemptId: input.intent.fundingTradeAttemptId,
       signer: input.intent.walletAddress,
       userId: input.intent.actor.userId,
     });
@@ -5435,6 +5761,7 @@ async function persistTrade(
       input.submitResult.status === "no_fill"
         ? null
         : input.intent.fundingReservation,
+    fundingTradeAttemptId: input.intent.fundingTradeAttemptId,
     filledAt,
   });
   if (filledAt) {

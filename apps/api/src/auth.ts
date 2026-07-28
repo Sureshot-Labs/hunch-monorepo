@@ -1592,11 +1592,13 @@ export class AuthService {
         active_funding_movement: boolean;
         active_legacy_bridge: boolean;
         active_position_action: boolean;
+        active_receive_session: boolean;
         active_telegram_intent: boolean;
         deposit_evidence: boolean;
         funding_evidence: boolean;
         legacy_bridge_evidence: boolean;
         position_action_evidence: boolean;
+        receive_evidence: boolean;
         trading_evidence: boolean;
       }>(
         `
@@ -1646,6 +1648,16 @@ export class AuthService {
                 where route.user_id = $1
                   and route.outcome = 'in_progress'
               )
+              or exists (
+                select 1
+                from funding_trade_attempts attempt
+                where attempt.user_id = $1
+                  and attempt.state in (
+                    'claimed',
+                    'submission_started',
+                    'ambiguous'
+                  )
+              )
             ) as active_funding_movement,
             exists (
               select 1
@@ -1653,6 +1665,23 @@ export class AuthService {
               where action.user_id = $1
                 and action.status not in ('completed', 'failed', 'cancelled')
             ) as active_position_action,
+            exists (
+              select 1
+              from funding_receive_sessions session
+              where session.user_id = $1
+                and (
+                  session.status in (
+                    'open',
+                    'processing',
+                    'review_required',
+                    'recovery_required'
+                  )
+                  or (
+                    session.status in ('expired', 'cancelled')
+                    and session.observe_until > now()
+                  )
+                )
+            ) as active_receive_session,
             exists (
               select 1
               from bridge_orders bridge
@@ -1681,8 +1710,16 @@ export class AuthService {
               select 1 from balance_reservations where user_id = $1
               union all
               select 1 from funding_route_observations where user_id = $1
+              union all
+              select 1 from funding_trade_attempts where user_id = $1
               limit 1
             ) as funding_evidence,
+            exists (
+              select 1 from funding_receive_sessions where user_id = $1
+              union all
+              select 1 from funding_receive_receipts where user_id = $1
+              limit 1
+            ) as receive_evidence,
             exists (
               select 1
               from position_action_operations
@@ -1712,16 +1749,19 @@ export class AuthService {
       const activeMovement =
         references.active_funding_movement ||
         references.active_position_action ||
+        references.active_receive_session ||
         references.active_legacy_bridge ||
         references.active_telegram_intent;
       const protectedReasons = [
         references.funding_evidence ? "funding_evidence" : null,
         references.position_action_evidence ? "position_action_evidence" : null,
+        references.receive_evidence ? "receive_evidence" : null,
         references.legacy_bridge_evidence ? "legacy_bridge_evidence" : null,
         references.deposit_evidence ? "deposit_evidence" : null,
         references.trading_evidence ? "trading_evidence" : null,
         references.active_funding_movement ? "active_funding_movement" : null,
         references.active_position_action ? "active_position_action" : null,
+        references.active_receive_session ? "active_receive_session" : null,
         references.active_legacy_bridge ? "active_legacy_bridge" : null,
         references.active_telegram_intent ? "active_telegram_intent" : null,
       ].filter((reason): reason is string => reason !== null);

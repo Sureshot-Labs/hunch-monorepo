@@ -22,6 +22,7 @@ import {
   cancelLimitlessOrderRoute,
   cancelLimitlessOrdersBatchRoute,
   connectLimitlessPartnerAccountRoute,
+  claimLimitlessAmmFundingTrade,
   fetchLimitlessAccountRoute,
   fetchLimitlessMarketExchangeRoute,
   fetchLimitlessOpenOrdersRoute,
@@ -30,7 +31,9 @@ import {
   fetchLimitlessSigningMessageRoute,
   quoteLimitlessAmmRoute,
   recordLimitlessAmmOrder,
+  recordLimitlessAmmFundingTradeOutcome,
   resolveLimitlessEmbeddedOrderSigningContext,
+  startLimitlessAmmFundingTrade,
   submitLimitlessClientSignedOrder,
   syncLimitlessOpenOrdersRoute,
   syncLimitlessOrderHistoryRoute,
@@ -56,6 +59,9 @@ import {
   limitlessAuthLoginBodySchema,
   limitlessAccountQuerySchema,
   limitlessAmmQuoteQuerySchema,
+  limitlessAmmFundingClaimBodySchema,
+  limitlessAmmFundingOutcomeBodySchema,
+  limitlessAmmFundingStartBodySchema,
   limitlessAmmOrderBodySchema,
   limitlessCancelBatchBodySchema,
   limitlessClobQuoteQuerySchema,
@@ -1026,6 +1032,98 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
   );
 
   /**
+   * POST /orders/amm/funding-claim
+   * Claim a funding reservation before the browser can broadcast an AMM buy.
+   */
+  z.post(
+    "/orders/amm/funding-claim",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: { body: limitlessAmmFundingClaimBodySchema },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      const signer = request.walletAddress;
+      if (!user || !signer) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+      const result = await claimLimitlessAmmFundingTrade({
+        body: request.body,
+        pool,
+        signer,
+        userId: user.id,
+      });
+      if (!result.ok) {
+        reply.code(result.statusCode);
+      }
+      return reply.send(result.payload);
+    },
+  );
+
+  /**
+   * POST /orders/amm/funding-start
+   * Persist the browser broadcast boundary before requesting a wallet send.
+   */
+  z.post(
+    "/orders/amm/funding-start",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: { body: limitlessAmmFundingStartBodySchema },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      if (!user) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+      const result = await startLimitlessAmmFundingTrade({
+        attemptId: request.body.attemptId,
+        claimToken: request.body.claimToken,
+        fundingOperationId: request.body.fundingOperationId,
+        fundingReservationId: request.body.fundingReservationId,
+        pool,
+        userId: user.id,
+      });
+      if (!result.ok) {
+        reply.code(result.statusCode);
+      }
+      return reply.send(result.payload);
+    },
+  );
+
+  /**
+   * POST /orders/amm/funding-outcome
+   * Resolve a claimed browser attempt when local recording did not complete.
+   */
+  z.post(
+    "/orders/amm/funding-outcome",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: { body: limitlessAmmFundingOutcomeBodySchema },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      if (!user) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+      const result = await recordLimitlessAmmFundingTradeOutcome({
+        attemptId: request.body.attemptId,
+        errorCode: request.body.errorCode,
+        outcome: request.body.outcome,
+        pool,
+        txHash: request.body.txHash,
+        userId: user.id,
+      });
+      if (!result.ok) {
+        reply.code(result.statusCode);
+      }
+      return reply.send(result.payload);
+    },
+  );
+
+  /**
    * POST /orders/amm
    * Store on-chain AMM executions as filled orders for portfolio/position sync.
    */
@@ -1061,6 +1159,7 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
                 reservationId: request.body.fundingReservationId,
               }
             : null,
+        fundingTradeAttemptId: request.body.fundingTradeAttemptId ?? null,
         settlementMode: "legacy_assume_filled",
         signer,
         userId: user.id,

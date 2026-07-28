@@ -1,7 +1,6 @@
 import type { Pool } from "@hunch/infra";
 
 import { AuthService } from "../auth.js";
-import { env } from "../env.js";
 import type {
   AccountValueProjection,
   AssetRef,
@@ -15,6 +14,7 @@ import type {
   FundingRuntimePolicy,
 } from "../funding/policies/funding-policy.js";
 import { resolveFundingPolicy } from "../funding/policies/funding-policy-service.js";
+import { fundingSidecarRuntimeConfig } from "../funding/runtime/sidecar-runtime-config.js";
 import { fetchOpenOrderCollateralLocks } from "../services/open-order-collateral.js";
 import { POLYGON_NATIVE_USDC_ADDRESS } from "../services/polymarket-onchain.js";
 import {
@@ -112,7 +112,7 @@ function exactStableCatalog(): AccountAssetCatalogEntry[] {
     {
       asset: {
         networkId: "evm:137",
-        assetId: env.polymarketUsdcAddress,
+        assetId: fundingSidecarRuntimeConfig.polymarketUsdcAddress,
         decimals: 6,
       },
       category: "cash",
@@ -124,7 +124,7 @@ function exactStableCatalog(): AccountAssetCatalogEntry[] {
     {
       asset: {
         networkId: "evm:137",
-        assetId: env.polymarketUsdceAddress,
+        assetId: fundingSidecarRuntimeConfig.polymarketUsdceAddress,
         decimals: 6,
       },
       category: "cash",
@@ -148,7 +148,7 @@ function exactStableCatalog(): AccountAssetCatalogEntry[] {
     {
       asset: {
         networkId: "evm:8453",
-        assetId: env.limitlessUsdcAddress,
+        assetId: fundingSidecarRuntimeConfig.limitlessUsdcAddress,
         decimals: 6,
       },
       category: "cash",
@@ -160,7 +160,7 @@ function exactStableCatalog(): AccountAssetCatalogEntry[] {
     {
       asset: {
         networkId: "solana:mainnet",
-        assetId: env.solanaUsdcMint,
+        assetId: fundingSidecarRuntimeConfig.solanaUsdcMint,
         decimals: 6,
       },
       category: "cash",
@@ -492,7 +492,7 @@ export async function buildAccountValueReadModel(inputs: {
     (entry) =>
       entry.venueId === "polymarket" &&
       normalizeAddress(entry.asset.assetId) ===
-        normalizeAddress(env.polymarketUsdcAddress),
+        normalizeAddress(fundingSidecarRuntimeConfig.polymarketUsdcAddress),
   )?.asset;
   const limitlessAsset = exactCatalog.find(
     (entry) => entry.venueId === "limitless",
@@ -754,7 +754,7 @@ export async function buildAccountValueReadModel(inputs: {
       const isPolymarketCollateral =
         venueId === "polymarket" &&
         normalizeAddress(component.amount.asset.assetId) ===
-          normalizeAddress(env.polymarketUsdcAddress);
+          normalizeAddress(fundingSidecarRuntimeConfig.polymarketUsdcAddress);
       const lockedRaw =
         isPolymarketCollateral && address
           ? (locks.polymarket.get(address) ?? 0n).toString()

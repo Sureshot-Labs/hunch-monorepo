@@ -325,6 +325,18 @@ async function buildApp(overrides: Partial<FundingRouteDependencies> = {}) {
       } as NonNullable<typeof request.user>;
     },
     rateLimit: async () => true,
+    capabilities: async () => ({
+      fundingApiVersion: 1,
+      receiveSessionsVersion: 1,
+      creationMode: "on",
+      supportedActionKinds: [
+        "add_funds",
+        "trade_shortfall",
+        "convert_asset",
+        "withdrawal",
+        "redeem",
+      ],
+    }),
     registerWithdrawalDestination: async () => ({
       recipientId: "recipient_withdrawal_12345678",
       networkId: "evm:137",
@@ -410,6 +422,32 @@ async function buildApp(overrides: Partial<FundingRouteDependencies> = {}) {
   await app.ready();
   return app;
 }
+
+await test("funding capabilities publish the rollout contract", async () => {
+  const app = await buildApp();
+  try {
+    const response = await app.inject({
+      method: "GET",
+      url: "/funding/capabilities",
+    });
+    assert.equal(response.statusCode, 200);
+    assert.deepEqual(response.json(), {
+      ok: true,
+      fundingApiVersion: 1,
+      receiveSessionsVersion: 1,
+      creationMode: "on",
+      supportedActionKinds: [
+        "add_funds",
+        "trade_shortfall",
+        "convert_asset",
+        "withdrawal",
+        "redeem",
+      ],
+    });
+  } finally {
+    await app.close();
+  }
+});
 
 await test("funding routes derive ownership only from authenticated session", async () => {
   let observedUserId: string | null = null;

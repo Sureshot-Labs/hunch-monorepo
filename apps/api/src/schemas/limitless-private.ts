@@ -154,6 +154,7 @@ export const limitlessAmmOrderBodySchema = z
       .regex(/^0x[a-fA-F0-9]{64}$/, "Invalid tx hash format"),
     fundingOperationId: z.string().uuid().optional(),
     fundingReservationId: z.string().uuid().optional(),
+    fundingTradeAttemptId: z.string().uuid().optional(),
   })
   .superRefine((value, context) => {
     if (
@@ -163,6 +164,54 @@ export const limitlessAmmOrderBodySchema = z
         code: z.ZodIssueCode.custom,
         message:
           "fundingOperationId and fundingReservationId must be provided together",
+      });
+    }
+    if (
+      Boolean(value.fundingOperationId) !== Boolean(value.fundingTradeAttemptId)
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          "fundingTradeAttemptId is required exactly when funding reservation fields are provided",
+      });
+    }
+  });
+
+export const limitlessAmmFundingClaimBodySchema = z.object({
+  amountUsdRaw: z.string().regex(/^[1-9][0-9]*$/, "amountUsdRaw is invalid"),
+  fundingOperationId: z.string().uuid(),
+  fundingReservationId: z.string().uuid(),
+  idempotencyKey: z.string().trim().min(8).max(192),
+  marketAddress: zEthAddressRequired,
+  marketSlug: zLimitlessSlug.optional(),
+  tokenId: zRequiredString("tokenId is required"),
+  transactionData: z
+    .string()
+    .regex(/^0x[a-fA-F0-9]+$/, "transactionData is invalid"),
+});
+
+export const limitlessAmmFundingStartBodySchema = z.object({
+  attemptId: z.string().uuid(),
+  claimToken: z.string().uuid(),
+  fundingOperationId: z.string().uuid(),
+  fundingReservationId: z.string().uuid(),
+});
+
+export const limitlessAmmFundingOutcomeBodySchema = z
+  .object({
+    attemptId: z.string().uuid(),
+    outcome: z.enum(["ambiguous", "not_broadcast"]),
+    txHash: z
+      .string()
+      .regex(/^0x[a-fA-F0-9]{64}$/, "Invalid tx hash format")
+      .optional(),
+    errorCode: z.string().trim().min(1).max(128).optional(),
+  })
+  .superRefine((value, context) => {
+    if (value.outcome === "not_broadcast" && value.txHash) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "not_broadcast outcome cannot include txHash",
       });
     }
   });

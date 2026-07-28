@@ -1,4 +1,3 @@
-import { env } from "../../env.js";
 import {
   fetchErc20TransferLogs,
   fetchEvmBlockNumber,
@@ -7,6 +6,7 @@ import {
 import type { JsonValue } from "../domain/types.js";
 import type { DirectIngressObservationVariant } from "../reconciliation/direct-ingress-observer.js";
 import { canonicalFundingReceiveObserverId } from "./canonical-receive-capabilities.js";
+import { fundingSidecarRuntimeConfig } from "../runtime/sidecar-runtime-config.js";
 
 type JsonRecord = Readonly<Record<string, JsonValue>>;
 
@@ -44,14 +44,14 @@ function receiveNetwork(networkId: string): EvmReceiveNetwork | null {
   }
   if (networkId === "evm:137") {
     return {
-      rpcUrl: env.polygonRpcUrl,
-      timeoutMs: env.polygonRpcTimeoutMs,
+      rpcUrl: fundingSidecarRuntimeConfig.polygonRpcUrl,
+      timeoutMs: fundingSidecarRuntimeConfig.polygonRpcTimeoutMs,
     };
   }
   if (networkId === "evm:8453") {
     return {
-      rpcUrl: env.baseRpcUrl,
-      timeoutMs: env.baseRpcTimeoutMs,
+      rpcUrl: fundingSidecarRuntimeConfig.baseRpcUrl,
+      timeoutMs: fundingSidecarRuntimeConfig.baseRpcTimeoutMs,
     };
   }
   // A registered EVM network without runtime configuration stays fail-closed.

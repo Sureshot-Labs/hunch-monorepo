@@ -29,6 +29,21 @@ type FundingReconciliationResult = {
   operationIds: readonly string[];
   skipped?: true;
   skipReason?: string;
+  receiveObservation?: Readonly<{
+    sessionsPolled: number;
+    receiptsRecorded: number;
+    recoveriesRequired: number;
+    retryableErrors: number;
+  }> | null;
+  receiveRouting?: Readonly<{
+    receiptsInspected: number;
+    operationsCreated: number;
+    receiptsReady: number;
+    recoveriesRequired: number;
+    reviewsRequired: number;
+    retriesScheduled: number;
+    retryableErrors: number;
+  }> | null;
 };
 
 type FundingWorkerModule = {

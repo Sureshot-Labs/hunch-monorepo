@@ -2,7 +2,6 @@ import type { Pool } from "@hunch/infra";
 import { ethers } from "ethers";
 
 import { AuthService, type UserWallet } from "../../auth.js";
-import { env } from "../../env.js";
 import { isRecord } from "../../lib/type-guards.js";
 import {
   findTradeMarketByRefForVenue,
@@ -57,6 +56,7 @@ import type {
   VenueId,
 } from "../domain/types.js";
 import { canonicalJsonHash } from "../persistence/canonical.js";
+import { fundingSidecarRuntimeConfig } from "../runtime/sidecar-runtime-config.js";
 import type {
   FrozenPreparationDestination,
   ResolvedDestinationCandidate,
@@ -265,12 +265,12 @@ function assetFor(venue: RuntimeVenue): AssetRef {
   return venue === "polymarket"
     ? {
         networkId: "evm:137",
-        assetId: env.polymarketUsdcAddress,
+        assetId: fundingSidecarRuntimeConfig.polymarketUsdcAddress,
         decimals: 6,
       }
     : {
         networkId: "evm:8453",
-        assetId: env.limitlessUsdcAddress,
+        assetId: fundingSidecarRuntimeConfig.limitlessUsdcAddress,
         decimals: 6,
       };
 }
@@ -476,8 +476,8 @@ async function loadRuntimeMarketContext(input: {
           "neg_risk_adapter",
         )
       : isNegRisk(market)
-        ? env.polymarketNegRiskAdapterAddress || null
-        : env.polymarketConditionalTokensAddress;
+        ? fundingSidecarRuntimeConfig.polymarketNegRiskAdapterAddress || null
+        : fundingSidecarRuntimeConfig.polymarketConditionalTokensAddress;
   const routeResolved =
     input.venue === "polymarket"
       ? Boolean(market.token_yes && market.token_no)
@@ -488,15 +488,15 @@ async function loadRuntimeMarketContext(input: {
     input.venue === "polymarket"
       ? Boolean(
           isNegRisk(market)
-            ? env.polymarketNegRiskExchangeAddress
-            : env.polymarketExchangeAddress,
+            ? fundingSidecarRuntimeConfig.polymarketNegRiskExchangeAddress
+            : fundingSidecarRuntimeConfig.polymarketExchangeAddress,
         )
       : marketClass.startsWith("amm")
         ? Boolean(ammAddress)
         : Boolean(
             isNegRisk(market)
-              ? env.limitlessNegRiskAddress
-              : env.limitlessClobAddress,
+              ? fundingSidecarRuntimeConfig.limitlessNegRiskAddress
+              : fundingSidecarRuntimeConfig.limitlessClobAddress,
           );
   return {
     market,
@@ -650,7 +650,7 @@ async function inspectPolymarketClob(input: {
   });
   try {
     const response = await polymarketL2Request({
-      baseUrl: env.polymarketClobBase,
+      baseUrl: fundingSidecarRuntimeConfig.polymarketClobBase,
       timeoutMs: 10_000,
       address: input.walletAddress,
       creds: l2Credentials,
@@ -927,8 +927,8 @@ export class WalletPreparationRuntimeService {
       try {
         deposit = await inspectPolymarketDepositWallet({
           owner: input.wallet.walletAddress,
-          rpcUrl: env.polygonRpcUrl,
-          timeoutMs: env.polygonRpcTimeoutMs,
+          rpcUrl: fundingSidecarRuntimeConfig.polygonRpcUrl,
+          timeoutMs: fundingSidecarRuntimeConfig.polygonRpcTimeoutMs,
         });
       } catch {
         deposit = null;
@@ -1012,7 +1012,7 @@ export class WalletPreparationRuntimeService {
       topology.deployed === true &&
       funderExecutionKind === "deposit_wallet" &&
       l2Credentials &&
-      env.polymarketFundingRouterAddress
+      fundingSidecarRuntimeConfig.polymarketFundingRouterAddress
         ? await (async () => {
             try {
               const funds = await resolvePolymarketMaxSpendFunds({
@@ -1045,7 +1045,8 @@ export class WalletPreparationRuntimeService {
                 signerPusdRaw: funds.signerPusdTopUpRaw.toString(),
                 signerUsdceRaw: funds.signerUsdceTopUpRaw.toString(),
                 fundingCapRaw: funds.fundingCapRaw.toString(),
-                routerAddress: env.polymarketFundingRouterAddress,
+                routerAddress:
+                  fundingSidecarRuntimeConfig.polymarketFundingRouterAddress,
                 routerNonceRaw: funds.fundingRouterNonce.toString(),
                 depositRouterUsdceAllowanceRaw:
                   funds.fundingRouterDepositUsdceAllowance.toString(),
@@ -1082,11 +1083,13 @@ export class WalletPreparationRuntimeService {
       fundingRouter:
         topology.topology === "deposit_wallet"
           ? {
-              configured: Boolean(env.polymarketFundingRouterAddress),
+              configured: Boolean(
+                fundingSidecarRuntimeConfig.polymarketFundingRouterAddress,
+              ),
               routerAddress: readString(payload, ["fundingRouter", "address"]),
               canonical: sameAddress(
                 readString(payload, ["fundingRouter", "address"]),
-                env.polymarketFundingRouterAddress,
+                fundingSidecarRuntimeConfig.polymarketFundingRouterAddress,
               ),
               nonceRaw: rawAt(payload, ["fundingRouter", "nonce"]),
               depositUsdceAllowanceRaw: rawAt(payload, [

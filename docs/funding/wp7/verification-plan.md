@@ -1,5 +1,9 @@
 # WP7 verification plan
 
+The current source/unit readiness snapshot and exact remaining activation
+blockers are recorded in
+[`local-full-test-readiness.md`](./local-full-test-readiness.md).
+
 Status: blocked on the WP7 UX/open-ingress correction phases in `README.md`.
 The existing amount-specific router may continue to be tested, but the full
 product verification below must not be reported as passing until the corrected

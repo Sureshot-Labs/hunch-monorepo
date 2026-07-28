@@ -128,6 +128,7 @@ export type TradeIntent = {
     operationId: string;
     reservationId: string;
   }> | null;
+  fundingTradeAttemptId?: string | null;
   idempotencyKey: string;
   raw?: unknown;
 };

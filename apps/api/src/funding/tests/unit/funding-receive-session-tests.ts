@@ -10,7 +10,10 @@ import type {
 } from "../../reconciliation/direct-ingress-observer.js";
 import type { FundingQuoteSummary } from "../../domain/types.js";
 import { buildFundingReceiveTargets } from "../../planner/receive-targets.js";
-import { deriveActiveFundingReceiveSessionStatus } from "../../persistence/funding-receive-session-repository.js";
+import {
+  deriveActiveFundingReceiveSessionStatus,
+  selectFundingReceiveCanonicalEventTarget,
+} from "../../persistence/funding-receive-session-repository.js";
 import {
   quoteWithinReceiveAutomationPolicy,
   receiveReceiptRoutingAmounts,
@@ -354,7 +357,7 @@ assert.deepEqual(
     overlappingActive,
     otherUserSameStream,
   ]).map((candidate) => candidate.candidateId),
-  ["active", "separate"],
+  ["active", "older", "other-user", "separate"],
 );
 const sameTimeLargerId = {
   ...overlappingActive,
@@ -377,7 +380,7 @@ assert.deepEqual(
     sameTimeLargerId,
     sameTimeSmallerId,
   ]).map((candidate) => candidate.candidateId),
-  ["same-time-a"],
+  ["same-time-a", "same-time-z"],
 );
 const invalidPersistedSession = {
   ...overlappingActive,
@@ -399,6 +402,128 @@ assert.deepEqual(
     separateStream,
   ]).map((candidate) => candidate.candidateId),
   ["separate"],
+);
+
+const olderCursorSession = {
+  ...overlappingOlder,
+  candidateId: "older-cursor",
+  observationVariants: [
+    {
+      ...overlappingOlder.observationVariants[0],
+      observation: {
+        ...overlappingOlder.observationVariants[0]?.observation,
+        payload: {
+          ...overlappingOlder.observationVariants[0]?.observation?.payload,
+          eventCursorBlock: "100",
+          eventIdentity: "evm_erc20_transfer_v1",
+        },
+      },
+    },
+  ],
+};
+const newerCursorSession = {
+  ...overlappingActive,
+  candidateId: "newer-cursor",
+  observationVariants: [
+    {
+      ...overlappingActive.observationVariants[0],
+      observation: {
+        ...overlappingActive.observationVariants[0]?.observation,
+        payload: {
+          ...overlappingActive.observationVariants[0]?.observation?.payload,
+          eventCursorBlock: "102",
+          eventIdentity: "evm_erc20_transfer_v1",
+        },
+      },
+    },
+  ],
+};
+assert.deepEqual(
+  selectFundingReceiveSessionsForPolling([
+    newerCursorSession,
+    olderCursorSession,
+  ]).map((candidate) => candidate.candidateId),
+  ["older-cursor", "newer-cursor"],
+  "the older stream cursor must scan first so an event at block 101 cannot be skipped",
+);
+
+function allocationStartVariant(variantId: string, eventCursorBlock: string) {
+  return {
+    ...variant(variantId, "0"),
+    observation: {
+      ...variant(variantId, "0").observation,
+      payload: {
+        eventCursorBlock,
+        eventIdentity: "evm_erc20_transfer_v1",
+      },
+    },
+  };
+}
+
+const allocationCandidates = [
+  {
+    receiveSessionId: "00000000-0000-4000-8000-000000000101",
+    userId: "00000000-0000-4000-8000-000000000001",
+    openedAt: new Date("2026-07-27T11:00:00.000Z"),
+    observationStartVariants: [
+      allocationStartVariant("ingress_variant_allocation_old_12345678", "100"),
+    ],
+  },
+  {
+    receiveSessionId: "00000000-0000-4000-8000-000000000102",
+    userId: "00000000-0000-4000-8000-000000000001",
+    openedAt: new Date("2026-07-27T12:00:00.000Z"),
+    observationStartVariants: [
+      allocationStartVariant("ingress_variant_allocation_new_12345678", "102"),
+    ],
+  },
+] as const;
+const allocationInput = {
+  networkId: ASSET.networkId,
+  assetId: ASSET.assetId,
+  destinationAddress: direct.destinationAddress,
+  candidates: allocationCandidates,
+};
+assert.deepEqual(
+  selectFundingReceiveCanonicalEventTarget({
+    ...allocationInput,
+    ledgerHeight: "101",
+  }),
+  {
+    targetReceiveSessionId: "00000000-0000-4000-8000-000000000101",
+    errorCode: null,
+  },
+  "a late-finalized event before the newer start cursor belongs to the older session",
+);
+assert.deepEqual(
+  selectFundingReceiveCanonicalEventTarget({
+    ...allocationInput,
+    ledgerHeight: "103",
+  }),
+  {
+    targetReceiveSessionId: "00000000-0000-4000-8000-000000000102",
+    errorCode: null,
+  },
+  "an event after the newer start cursor belongs to the newer session",
+);
+assert.deepEqual(
+  selectFundingReceiveCanonicalEventTarget({
+    ...allocationInput,
+    ledgerHeight: "103",
+    candidates: [
+      ...allocationCandidates,
+      {
+        ...allocationCandidates[0],
+        receiveSessionId: "00000000-0000-4000-8000-000000000103",
+        userId: "00000000-0000-4000-8000-000000000002",
+      },
+    ],
+  }),
+  {
+    targetReceiveSessionId: null,
+    errorCode: "ambiguous_receive_session_owner",
+  },
+  "a shared canonical stream across users must quarantine instead of assigning by race order",
 );
 
 const eventRpc: FundingReceiveEventRpc = {

@@ -1,7 +1,9 @@
 #!/usr/bin/env tsx
 
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import type { Pool } from "@hunch/infra";
 
 import { env, parseFundingReferenceLookupKeyVersion } from "./env.js";
@@ -36,6 +38,7 @@ const apiPackage = JSON.parse(
 ) as {
   exports?: Record<string, string | Record<string, string>>;
 };
+const repositoryRoot = fileURLToPath(new URL("../../../", import.meta.url));
 
 function buildTestEnv(overrides: Partial<typeof env> = {}): typeof env {
   return {
@@ -67,6 +70,29 @@ const tests: TestCase[] = [
         source: "./src/funding/worker/funding-reconciliation-worker.ts",
         import: "./dist/funding/worker/funding-reconciliation-worker.js",
       });
+    },
+  },
+  {
+    name: "funding worker imports without API-wide required secrets",
+    run: () => {
+      const output = execFileSync(
+        process.execPath,
+        [
+          "--import",
+          "tsx",
+          "-e",
+          'import("./apps/api/src/funding/worker/funding-reconciliation-worker.ts").then(() => process.stdout.write("ok"))',
+        ],
+        {
+          cwd: repositoryRoot,
+          encoding: "utf8",
+          env: {
+            HUNCH_RUNTIME_SECRETS_LOADED: "1",
+            PATH: process.env.PATH,
+          },
+        },
+      );
+      assert.equal(output.trim(), "ok");
     },
   },
   {
@@ -138,6 +164,33 @@ const tests: TestCase[] = [
       assert.equal(job.jitterSec, 0);
       assert.equal(job.isNoopResult?.({ claimed: 0 }), true);
       assert.equal(job.isNoopResult?.({ claimed: 1 }), false);
+      assert.equal(
+        job.isNoopResult?.({
+          claimed: 0,
+          receiveObservation: {
+            sessionsPolled: 1,
+            receiptsRecorded: 1,
+            recoveriesRequired: 0,
+            retryableErrors: 0,
+          },
+        }),
+        false,
+      );
+      assert.equal(
+        job.isNoopResult?.({
+          claimed: 0,
+          receiveRouting: {
+            receiptsInspected: 1,
+            operationsCreated: 0,
+            receiptsReady: 0,
+            recoveriesRequired: 0,
+            reviewsRequired: 0,
+            retriesScheduled: 1,
+            retryableErrors: 0,
+          },
+        }),
+        false,
+      );
     },
   },
   {

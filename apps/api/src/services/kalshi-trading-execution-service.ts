@@ -971,6 +971,7 @@ async function persistTrade(
       input.submitResult.status === "no_fill"
         ? null
         : input.intent.fundingReservation,
+    fundingTradeAttemptId: input.intent.fundingTradeAttemptId,
     raw: mergeKalshiExecutionRaw(input.submitResult.raw, {
       ...buildTelegramTradeSourceMetadata(input),
       purpose: "trade",

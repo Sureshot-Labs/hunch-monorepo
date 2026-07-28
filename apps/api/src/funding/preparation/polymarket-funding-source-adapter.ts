@@ -1,7 +1,6 @@
 import type { AccountValueReadModel } from "../../account-value/runtime-service.js";
 import { stableOpaqueId } from "../../account-value/canonical.js";
 import { multiplyRawByUnitPrice } from "../../account-value/decimal.js";
-import { env } from "../../env.js";
 import {
   buildPolymarketFundingPlan,
   PolymarketFundingPlanError,
@@ -20,6 +19,7 @@ import type {
   FundingSourceAdapter,
   FundingSourcePlanningInput,
 } from "../planner/source-adapter.js";
+import { fundingSidecarRuntimeConfig } from "../runtime/sidecar-runtime-config.js";
 import type { PlannedSourceOption } from "../planner/planning-types.js";
 import { buildPolymarketFundingFollowupAction } from "./polymarket-funding-followup.js";
 import {
@@ -64,10 +64,10 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
       usdceAsset: AssetRef;
     }> = {
       canonicalRouterAddress:
-        env.polymarketFundingRouterAddress?.trim() || null,
+        fundingSidecarRuntimeConfig.polymarketFundingRouterAddress || null,
       usdceAsset: {
         networkId: "evm:137",
-        assetId: env.polymarketUsdceAddress,
+        assetId: fundingSidecarRuntimeConfig.polymarketUsdceAddress,
         decimals: 6,
       },
     },

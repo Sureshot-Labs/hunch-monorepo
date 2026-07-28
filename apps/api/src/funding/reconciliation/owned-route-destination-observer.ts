@@ -12,7 +12,6 @@ import {
   allocateFundingObservationInTransaction,
   FundingPersistenceError,
 } from "../persistence/funding-operation-repository.js";
-import { WalletPreparationRuntimeService } from "../preparation/runtime-service.js";
 import { sameAsset } from "../planner/money.js";
 
 type JsonRecord = Readonly<Record<string, JsonValue>>;
@@ -364,6 +363,8 @@ async function observeDestination(
   pool: Pool,
   target: OwnedRouteDestinationTarget,
 ): Promise<OwnedRouteDestinationObservation | null> {
+  const { WalletPreparationRuntimeService } =
+    await import("../preparation/runtime-service.js");
   const candidates = await new WalletPreparationRuntimeService(
     pool,
   ).resolvedCandidates({

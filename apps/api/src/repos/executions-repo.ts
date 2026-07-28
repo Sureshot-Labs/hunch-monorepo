@@ -23,6 +23,7 @@ export type ExecutionRow = {
   raw: unknown;
   funding_operation_id: string | null;
   funding_reservation_id: string | null;
+  funding_trade_attempt_id: string | null;
   created_at: Date;
   updated_at: Date;
 };
@@ -79,6 +80,7 @@ export type StoreExecutionInput = {
     operationId: string;
     reservationId: string;
   }> | null;
+  fundingTradeAttemptId?: string | null;
 };
 
 export async function storeExecutionInTransaction(
@@ -114,13 +116,14 @@ export async function storeExecutionInTransaction(
         raw,
         funding_operation_id,
         funding_reservation_id,
+        funding_trade_attempt_id,
         created_at,
         updated_at
       )
       values (
         gen_random_uuid(),
         $1, $2, $3, $4, $5, $6, $7, $8, $9,
-        $10, $11, $12, $13, $14, $15, $16, $17, $18, $19,
+        $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, null,
         now(), now()
       )
       on conflict on constraint executions_user_id_wallet_address_venue_tx_signature_key
@@ -168,6 +171,7 @@ export async function storeExecutionInTransaction(
         raw,
         funding_operation_id,
         funding_reservation_id,
+        funding_trade_attempt_id,
         created_at,
         updated_at
     `,
@@ -212,6 +216,7 @@ export async function storeExecutionInTransaction(
     await consumeFundingReservationForLinkedConsumerInTransaction(client, {
       userId: inputs.userId,
       reservationId: inputs.fundingReservation.reservationId,
+      tradeAttemptId: inputs.fundingTradeAttemptId,
       consumer: { kind: "execution", executionId: execution.id },
       outcomeReason: "trade_execution_recorded",
     });

@@ -2,7 +2,6 @@ import { Connection, PublicKey, SystemProgram } from "@solana/web3.js";
 import type { Pool } from "@hunch/infra";
 import { ethers } from "ethers";
 
-import { env } from "../../env.js";
 import { getCredentialsEncryptionKey } from "../../lib/credentials-encryption.js";
 import { fetchEvmCode } from "../../services/polygon-rpc.js";
 import type { AssetRef, ResolvedExternalRecipient } from "../domain/types.js";
@@ -13,6 +12,7 @@ import {
 } from "../persistence/funding-evidence-repository.js";
 import { resolveFundingPolicy } from "../policies/funding-policy-service.js";
 import type { FundingRuntimePolicy } from "../policies/funding-policy.js";
+import { fundingSidecarRuntimeConfig } from "../runtime/sidecar-runtime-config.js";
 import {
   createWithdrawalDestinationCodec,
   type WithdrawalDestinationCodec,
@@ -100,12 +100,15 @@ function evmRpc(networkId: string): Readonly<{
 }> | null {
   if (networkId === "evm:137") {
     return {
-      rpcUrl: env.polygonRpcUrl,
-      timeoutMs: env.polygonRpcTimeoutMs,
+      rpcUrl: fundingSidecarRuntimeConfig.polygonRpcUrl,
+      timeoutMs: fundingSidecarRuntimeConfig.polygonRpcTimeoutMs,
     };
   }
   if (networkId === "evm:8453") {
-    return { rpcUrl: env.baseRpcUrl, timeoutMs: env.baseRpcTimeoutMs };
+    return {
+      rpcUrl: fundingSidecarRuntimeConfig.baseRpcUrl,
+      timeoutMs: fundingSidecarRuntimeConfig.baseRpcTimeoutMs,
+    };
   }
   return null;
 }
@@ -189,7 +192,7 @@ export async function inspectWithdrawalAddress(
     let account: Awaited<ReturnType<Connection["getAccountInfo"]>>;
     try {
       account = await new Connection(
-        env.solanaRpcUrl,
+        fundingSidecarRuntimeConfig.solanaRpcUrl,
         "confirmed",
       ).getAccountInfo(publicKey, "confirmed");
     } catch {

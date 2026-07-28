@@ -1,7 +1,6 @@
 import { tx, type Pool, type PoolClient } from "@hunch/infra";
 import { Interface } from "ethers";
 
-import { env } from "../../env.js";
 import { isRecord } from "../../lib/type-guards.js";
 import { fetchEvmMulticall } from "../../services/polygon-rpc.js";
 import {
@@ -22,9 +21,9 @@ import {
   FundingPersistenceError,
   transitionFundingOperationInTransaction,
 } from "../persistence/funding-operation-repository.js";
-import { WalletPreparationRuntimeService } from "../preparation/runtime-service.js";
 import { parsePolymarketFundingEvidence } from "../preparation/polymarket-funding-snapshot.js";
 import { sameAsset } from "../planner/money.js";
+import { fundingSidecarRuntimeConfig } from "../runtime/sidecar-runtime-config.js";
 
 type JsonRecord = Readonly<Record<string, JsonValue>>;
 
@@ -311,6 +310,8 @@ async function resolveSinglePreparationCandidate(
   target: DirectIngressObservationTarget,
   variants: readonly DirectIngressObservationVariant[],
 ) {
+  const { WalletPreparationRuntimeService } =
+    await import("../preparation/runtime-service.js");
   const candidates = await new WalletPreparationRuntimeService(
     pool,
   ).resolvedCandidates({
@@ -427,36 +428,32 @@ async function observeOwnedWalletAsset(
     ) {
       return (
         await fetchSolanaBalanceLamports({
-          rpcUrls: env.solanaRpcUrls,
+          rpcUrls: [...fundingSidecarRuntimeConfig.solanaRpcUrls],
           owner: variant.destinationAddress,
-          timeoutMs: env.solanaRpcTimeoutMs,
+          timeoutMs: fundingSidecarRuntimeConfig.solanaRpcTimeoutMs,
         })
       ).toString();
     }
     const balance = await fetchSolanaTokenBalanceByOwnerAndMint({
-      rpcUrls: env.solanaRpcUrls,
+      rpcUrls: [...fundingSidecarRuntimeConfig.solanaRpcUrls],
       owner: variant.destinationAddress,
       mint: variant.asset.assetId,
-      timeoutMs: env.solanaRpcTimeoutMs,
+      timeoutMs: fundingSidecarRuntimeConfig.solanaRpcTimeoutMs,
     });
     return (balance?.amount ?? 0n).toString();
   }
   const rpc =
     variant.networkId === "evm:137"
       ? {
-          url: env.polygonRpcUrl,
-          timeoutMs: env.polygonRpcTimeoutMs,
-          multicallAddress:
-            env.polygonMulticallAddress?.trim() ||
-            "0xca11bde05977b3631167028862be2a173976ca11",
+          url: fundingSidecarRuntimeConfig.polygonRpcUrl,
+          timeoutMs: fundingSidecarRuntimeConfig.polygonRpcTimeoutMs,
+          multicallAddress: fundingSidecarRuntimeConfig.polygonMulticallAddress,
         }
       : variant.networkId === "evm:8453"
         ? {
-            url: env.baseRpcUrl,
-            timeoutMs: env.baseRpcTimeoutMs,
-            multicallAddress:
-              env.baseMulticallAddress?.trim() ||
-              "0xca11bde05977b3631167028862be2a173976ca11",
+            url: fundingSidecarRuntimeConfig.baseRpcUrl,
+            timeoutMs: fundingSidecarRuntimeConfig.baseRpcTimeoutMs,
+            multicallAddress: fundingSidecarRuntimeConfig.baseMulticallAddress,
           }
         : null;
   if (!rpc) throw new Error("receive observation network is not supported");

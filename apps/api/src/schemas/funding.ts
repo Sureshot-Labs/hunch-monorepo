@@ -682,6 +682,26 @@ export const fundingDestinationsResponseSchema = z
   })
   .strict();
 
+export const fundingCapabilitiesResponseSchema = z
+  .object({
+    ok: z.literal(true),
+    fundingApiVersion: z.literal(1),
+    receiveSessionsVersion: z.literal(1),
+    creationMode: z.enum(["off", "on"]),
+    supportedActionKinds: z
+      .array(
+        z.enum([
+          "add_funds",
+          "trade_shortfall",
+          "convert_asset",
+          "withdrawal",
+          "redeem",
+        ]),
+      )
+      .max(5),
+  })
+  .strict();
+
 export const fundingLiquidityResponseSchema = z
   .object({
     ok: z.literal(true),

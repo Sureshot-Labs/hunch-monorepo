@@ -75,6 +75,22 @@ export class FundingPlanningRuntime {
     return this.withdrawalRuntime.revoke(userId, recipientId);
   }
 
+  async capabilities() {
+    const resolvedPolicy = await resolveFundingPolicy(this.db);
+    return {
+      fundingApiVersion: 1 as const,
+      receiveSessionsVersion: 1 as const,
+      creationMode: resolvedPolicy.policy.creationMode,
+      supportedActionKinds: [
+        "add_funds",
+        "trade_shortfall",
+        "convert_asset",
+        "withdrawal",
+        "redeem",
+      ] as const,
+    };
+  }
+
   async destinations(
     userId: string,
     query: Readonly<{

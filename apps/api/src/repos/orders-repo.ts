@@ -5,6 +5,7 @@ import {
   normalizeWalletForStorage,
 } from "../lib/wallet-address.js";
 import { consumeFundingReservationForLinkedConsumerInTransaction } from "../funding/persistence/funding-evidence-repository.js";
+import { recoverFundingTradeAttemptForOrderInTransaction } from "../funding/persistence/funding-trade-attempt-repository.js";
 import type { OrderHistoryRow, OrderRow, PgParams } from "../server-types.js";
 
 const POSITION_DELTA_APPLIED_MARKER = "_hunchPositionDeltaAppliedAt";
@@ -120,6 +121,38 @@ function extractPayloadAddress(
     return trimmed;
   }
   return null;
+}
+
+function collectPayloadClientOrderIds(payload: unknown, depth = 0): string[] {
+  if (
+    !payload ||
+    typeof payload !== "object" ||
+    Array.isArray(payload) ||
+    depth > 4
+  ) {
+    return [];
+  }
+  const record = payload as Record<string, unknown>;
+  const result: string[] = [];
+  if (
+    typeof record.clientOrderId === "string" &&
+    record.clientOrderId.trim().length >= 8
+  ) {
+    result.push(record.clientOrderId.trim());
+  }
+  for (const key of [
+    "submitted",
+    "payload",
+    "_hunchSubmitted",
+    "_hunchUpstream",
+    "execution",
+    "order",
+    "data",
+    "reconcileKeys",
+  ]) {
+    result.push(...collectPayloadClientOrderIds(record[key], depth + 1));
+  }
+  return result;
 }
 
 export function hasPositionDeltaApplied(payload: unknown, depth = 0): boolean {
@@ -269,6 +302,7 @@ export type StoreOrderInput = {
     operationId: string;
     reservationId: string;
   }> | null;
+  fundingTradeAttemptId?: string | null;
   postedAt?: Date | null;
   lastUpdate?: Date | null;
   filledAt?: Date | null;
@@ -290,6 +324,35 @@ export async function storeOrderInTransaction(
   const resolvedSignerAddress = normalizeOptionalWalletForStorage(
     inputs.signerAddress ?? payloadSigner,
   );
+  let resolvedFundingReservation = inputs.fundingReservation ?? null;
+  let resolvedFundingTradeAttemptId = inputs.fundingTradeAttemptId ?? null;
+  if (
+    !resolvedFundingReservation &&
+    !resolvedFundingTradeAttemptId &&
+    inputs.side === "BUY" &&
+    inputs.tokenId
+  ) {
+    const recovered = await recoverFundingTradeAttemptForOrderInTransaction(
+      client,
+      {
+        userId: inputs.userId,
+        venueId: inputs.venue,
+        tokenId: inputs.tokenId,
+        externalReferences: [
+          inputs.orderHash ?? "",
+          inputs.venueOrderId,
+          ...collectPayloadClientOrderIds(inputs.orderPayload),
+        ],
+      },
+    );
+    if (recovered) {
+      resolvedFundingReservation = {
+        operationId: recovered.operationId,
+        reservationId: recovered.reservationId,
+      };
+      resolvedFundingTradeAttemptId = recovered.attemptId;
+    }
+  }
   await client.query("select pg_advisory_xact_lock(hashtextextended($1, 0))", [
     `orders:${inputs.userId}:${inputs.venue}:${inputs.venueOrderId}`,
   ]);
@@ -307,9 +370,10 @@ export async function storeOrderInTransaction(
     fee_policy_snapshot: unknown | null;
     funding_operation_id: string | null;
     funding_reservation_id: string | null;
+    funding_trade_attempt_id: string | null;
   }>(
     `SELECT id, wallet_address, signer_address, price, size, status, posted_at, order_payload, order_payload_version, fee_policy_snapshot,
-            funding_operation_id, funding_reservation_id
+            funding_operation_id, funding_reservation_id, funding_trade_attempt_id
      FROM orders
      WHERE venue = $1 AND venue_order_id = $2 AND user_id = $3
      ORDER BY
@@ -329,7 +393,7 @@ export async function storeOrderInTransaction(
     const params: PgParams = [];
     let paramCount = 0;
     const signerAddress = resolvedSignerAddress;
-    const funding = inputs.fundingReservation ?? null;
+    const funding = resolvedFundingReservation;
     if (
       funding &&
       ((existing.funding_operation_id &&
@@ -338,6 +402,15 @@ export async function storeOrderInTransaction(
           existing.funding_reservation_id !== funding.reservationId))
     ) {
       throw new Error("Order is already linked to another funding reservation");
+    }
+    if (
+      resolvedFundingTradeAttemptId &&
+      existing.funding_trade_attempt_id &&
+      existing.funding_trade_attempt_id !== resolvedFundingTradeAttemptId
+    ) {
+      throw new Error(
+        "Order is already linked to another funding trade attempt",
+      );
     }
 
     if (
@@ -398,6 +471,7 @@ export async function storeOrderInTransaction(
       await consumeFundingReservationForLinkedConsumerInTransaction(client, {
         userId: inputs.userId,
         reservationId: funding.reservationId,
+        tradeAttemptId: resolvedFundingTradeAttemptId,
         consumer: { kind: "web_order", orderId: existing.id },
         outcomeReason: "trade_order_recorded",
       });
@@ -456,8 +530,8 @@ export async function storeOrderInTransaction(
       inputs.feeCollectorAddress ?? null,
       inputs.feeDeadline ?? null,
       inputs.feePolicySnapshot ?? null,
-      inputs.fundingReservation?.operationId ?? null,
-      inputs.fundingReservation?.reservationId ?? null,
+      resolvedFundingReservation?.operationId ?? null,
+      resolvedFundingReservation?.reservationId ?? null,
       inputs.filledAt ?? null,
       inputs.cancelledAt ?? null,
       inputs.postedAt ?? null,
@@ -466,10 +540,11 @@ export async function storeOrderInTransaction(
   );
   const inserted = result.rows[0];
   if (!inserted) throw new Error("Failed to store order");
-  if (inputs.fundingReservation) {
+  if (resolvedFundingReservation) {
     await consumeFundingReservationForLinkedConsumerInTransaction(client, {
       userId: inputs.userId,
-      reservationId: inputs.fundingReservation.reservationId,
+      reservationId: resolvedFundingReservation.reservationId,
+      tradeAttemptId: resolvedFundingTradeAttemptId,
       consumer: { kind: "web_order", orderId: inserted.id },
       outcomeReason: "trade_order_recorded",
     });

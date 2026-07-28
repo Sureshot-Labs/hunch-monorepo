@@ -7,8 +7,14 @@ import { env } from "../env.js";
 import { markHotTokens } from "../lib/hot-tokens.js";
 import {
   assertFundingReservationReadyForTrade,
-  releaseFundingReservationForAbandonedTrade,
+  releaseFundingReservationForDefinitiveTradeFailure,
 } from "../funding/persistence/funding-evidence-repository.js";
+import { canonicalJsonHash } from "../funding/persistence/canonical.js";
+import {
+  claimFundingTradeAttempt,
+  markFundingTradeAttemptSubmissionStarted,
+  recordFundingTradeAttemptOutcome,
+} from "../funding/persistence/funding-trade-attempt-repository.js";
 import { requestPriceRefreshForTokens } from "../lib/price-refresh.js";
 import { isRecord } from "../lib/type-guards.js";
 import { fetchPolymarketMarketInfo } from "../repos/polymarket-markets.js";
@@ -6859,19 +6865,115 @@ export async function submitPolymarketClientSignedOrder(input: {
     apiPassphrase: creds.apiPassphrase,
   };
 
-  const upstream = await submitPolymarketClobOrderWithRetry({
-    address: signer,
-    body: payload,
-    creds: clobCreds,
-    log: input.log,
-    logContext: {
-      signer,
-      funder,
-      tokenId: orderTokenId,
-      orderType,
+  let fundingTradeAttemptId: string | null = null;
+  let fundingTradeClaimToken: string | null = null;
+  if (fundingReservation) {
+    const marketId = marketInfo?.unified_market_id ?? null;
+    if (!marketId) {
+      return {
+        ok: false,
+        statusCode: 409,
+        payload: { error: "Funding reservation market binding is unavailable" },
+      };
+    }
+    const canonicalFingerprint = canonicalJsonHash({
+      exchangeAddress: exchangeAddress.toLowerCase(),
+      executionPath: "polymarket_clob",
+      marketId,
+      order: normalizedForHash,
       orderHash,
-    },
-  });
+      orderType,
+      signer: signer.toLowerCase(),
+    });
+    try {
+      const claim = await claimFundingTradeAttempt(input.pool, {
+        userId: input.userId,
+        operationId: fundingReservation.operationId,
+        reservationId: fundingReservation.reservationId,
+        venueId: "polymarket",
+        marketId,
+        executionPath: "polymarket_clob",
+        idempotencyKey: `polymarket-clob:${orderHash}`,
+        canonicalFingerprint,
+        externalReference: orderHash,
+      });
+      if (!claim.claimed) {
+        return {
+          ok: false,
+          statusCode: 409,
+          payload: {
+            error:
+              "This funding reservation already has a trade attempt that must reconcile.",
+          },
+        };
+      }
+      fundingTradeAttemptId = claim.attempt.id;
+      fundingTradeClaimToken = claim.attempt.claimToken;
+    } catch (error) {
+      return {
+        ok: false,
+        statusCode: 409,
+        payload: {
+          error:
+            error instanceof Error
+              ? error.message
+              : "Funding reservation claim failed",
+        },
+      };
+    }
+  }
+
+  if (fundingReservation && fundingTradeAttemptId && fundingTradeClaimToken) {
+    try {
+      await markFundingTradeAttemptSubmissionStarted(input.pool, {
+        userId: input.userId,
+        operationId: fundingReservation.operationId,
+        reservationId: fundingReservation.reservationId,
+        attemptId: fundingTradeAttemptId,
+        claimToken: fundingTradeClaimToken,
+      });
+    } catch (error) {
+      return {
+        ok: false,
+        statusCode: 409,
+        payload: {
+          error:
+            error instanceof Error
+              ? error.message
+              : "Funding trade submission could not start",
+        },
+      };
+    }
+  }
+
+  let upstream: Awaited<ReturnType<typeof submitPolymarketClobOrderWithRetry>>;
+  try {
+    upstream = await submitPolymarketClobOrderWithRetry({
+      address: signer,
+      body: payload,
+      creds: clobCreds,
+      log: input.log,
+      logContext: {
+        signer,
+        funder,
+        tokenId: orderTokenId,
+        orderType,
+        orderHash,
+      },
+    });
+  } catch (error) {
+    if (fundingTradeAttemptId) {
+      await recordFundingTradeAttemptOutcome(input.pool, {
+        userId: input.userId,
+        attemptId: fundingTradeAttemptId,
+        outcome: "ambiguous",
+        externalReference: orderHash,
+        errorCode: "polymarket_submit_state_unknown",
+        broadcastMayHaveOccurred: true,
+      });
+    }
+    throw error;
+  }
 
   if (!upstream.ok) {
     if (
@@ -6883,6 +6985,17 @@ export async function submitPolymarketClientSignedOrder(input: {
         log: input.log,
       })
     ) {
+      if (fundingReservation && fundingTradeAttemptId) {
+        await releaseFundingReservationForDefinitiveTradeFailure(input.pool, {
+          userId: input.userId,
+          link: fundingReservation,
+          tradeAttemptId: fundingTradeAttemptId,
+          outcomeReason: "trade_rejected",
+          errorCode: POLYMARKET_CREDENTIALS_INVALID_CODE,
+          externalReference: orderHash,
+          broadcastMayHaveOccurred: true,
+        });
+      }
       return {
         ok: false,
         statusCode: 401,
@@ -6915,6 +7028,28 @@ export async function submitPolymarketClientSignedOrder(input: {
         : upstream.status >= 400
           ? upstream.status
           : 400;
+    if (fundingReservation && fundingTradeAttemptId) {
+      if (upstream.status >= 500) {
+        await recordFundingTradeAttemptOutcome(input.pool, {
+          userId: input.userId,
+          attemptId: fundingTradeAttemptId,
+          outcome: "ambiguous",
+          externalReference: orderHash,
+          errorCode: "polymarket_submit_state_unknown",
+          broadcastMayHaveOccurred: true,
+        });
+      } else {
+        await releaseFundingReservationForDefinitiveTradeFailure(input.pool, {
+          userId: input.userId,
+          link: fundingReservation,
+          tradeAttemptId: fundingTradeAttemptId,
+          outcomeReason: "trade_rejected",
+          errorCode: "polymarket_trade_rejected",
+          externalReference: orderHash,
+          broadcastMayHaveOccurred: true,
+        });
+      }
+    }
     return {
       ok: false,
       statusCode: responseStatus,
@@ -6934,6 +7069,17 @@ export async function submitPolymarketClientSignedOrder(input: {
   }
 
   if (isRecord(upstream.payload) && upstream.payload.success === false) {
+    if (fundingReservation && fundingTradeAttemptId) {
+      await releaseFundingReservationForDefinitiveTradeFailure(input.pool, {
+        userId: input.userId,
+        link: fundingReservation,
+        tradeAttemptId: fundingTradeAttemptId,
+        outcomeReason: "trade_rejected",
+        errorCode: "polymarket_trade_rejected",
+        externalReference: orderHash,
+        broadcastMayHaveOccurred: true,
+      });
+    }
     return {
       ok: false,
       statusCode: 400,
@@ -6946,6 +7092,16 @@ export async function submitPolymarketClientSignedOrder(input: {
 
   const venueOrderId = extractOrderId(upstream.payload);
   if (!venueOrderId) {
+    if (fundingTradeAttemptId) {
+      await recordFundingTradeAttemptOutcome(input.pool, {
+        userId: input.userId,
+        attemptId: fundingTradeAttemptId,
+        outcome: "ambiguous",
+        externalReference: orderHash,
+        errorCode: "polymarket_order_id_missing",
+        broadcastMayHaveOccurred: true,
+      });
+    }
     return {
       ok: false,
       statusCode: 502,
@@ -7006,6 +7162,22 @@ export async function submitPolymarketClientSignedOrder(input: {
     }
   }
 
+  if (
+    fundingReservation &&
+    fundingTradeAttemptId &&
+    isPolymarketClobNoFillTerminalStatus(status)
+  ) {
+    await releaseFundingReservationForDefinitiveTradeFailure(input.pool, {
+      userId: input.userId,
+      link: fundingReservation,
+      tradeAttemptId: fundingTradeAttemptId,
+      outcomeReason: "trade_no_fill",
+      errorCode: "trade_no_fill",
+      externalReference: orderHash,
+      broadcastMayHaveOccurred: true,
+    });
+  }
+
   const stored = await storeOrder(input.pool, {
     userId: input.userId,
     walletAddress: funder,
@@ -7032,15 +7204,25 @@ export async function submitPolymarketClientSignedOrder(input: {
     fundingReservation: isPolymarketClobNoFillTerminalStatus(status)
       ? null
       : fundingReservation,
+    fundingTradeAttemptId: isPolymarketClobNoFillTerminalStatus(status)
+      ? null
+      : fundingTradeAttemptId,
+  }).catch(async (error) => {
+    if (
+      fundingTradeAttemptId &&
+      !isPolymarketClobNoFillTerminalStatus(status)
+    ) {
+      await recordFundingTradeAttemptOutcome(input.pool, {
+        userId: input.userId,
+        attemptId: fundingTradeAttemptId,
+        outcome: "ambiguous",
+        externalReference: orderHash,
+        errorCode: "polymarket_local_persistence_failed",
+        broadcastMayHaveOccurred: true,
+      }).catch(() => {});
+    }
+    throw error;
   });
-  if (fundingReservation && isPolymarketClobNoFillTerminalStatus(status)) {
-    await releaseFundingReservationForAbandonedTrade(input.pool, {
-      userId: input.userId,
-      link: fundingReservation,
-      outcomeReason: "trade_no_fill",
-    });
-  }
-
   const referralFirstTrade =
     stored.kind === "stored" && status === "matched"
       ? await tryRecordReferralFirstTradeConversion(input.pool, {
@@ -8134,6 +8316,7 @@ async function persistTrade(
       input.submitResult.status === "no_fill"
         ? null
         : input.intent.fundingReservation,
+    fundingTradeAttemptId: input.intent.fundingTradeAttemptId,
     filledAt: input.submitResult.status === "filled" ? new Date() : null,
   });
   return {

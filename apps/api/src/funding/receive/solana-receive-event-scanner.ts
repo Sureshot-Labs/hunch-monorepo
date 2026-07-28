@@ -4,7 +4,6 @@ import {
 } from "@solana/spl-token";
 import { PublicKey, SystemProgram } from "@solana/web3.js";
 
-import { env } from "../../env.js";
 import { isRecord } from "../../lib/type-guards.js";
 import {
   fetchSolanaAddressSignatures,
@@ -19,6 +18,7 @@ import type {
   FundingReceiveCanonicalEvent,
   FundingReceiveEventScan,
 } from "./evm-receive-event-scanner.js";
+import { fundingSidecarRuntimeConfig } from "../runtime/sidecar-runtime-config.js";
 
 type JsonRecord = Readonly<Record<string, JsonValue>>;
 
@@ -74,8 +74,8 @@ const DEFAULT_SOLANA_EVENT_RPC: SolanaReceiveEventRpc = {
 
 function solanaNetwork(): SolanaReceiveNetwork {
   return {
-    rpcUrls: env.solanaRpcUrls,
-    timeoutMs: env.solanaRpcTimeoutMs,
+    rpcUrls: fundingSidecarRuntimeConfig.solanaRpcUrls,
+    timeoutMs: fundingSidecarRuntimeConfig.solanaRpcTimeoutMs,
   };
 }
 

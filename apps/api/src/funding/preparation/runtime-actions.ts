@@ -1,7 +1,6 @@
 import { Interface } from "ethers";
 
 import type { UserWallet } from "../../auth.js";
-import { env } from "../../env.js";
 import { buildEmbeddedPersonalSignRequest } from "../../services/embedded-privy.js";
 import { fetchLimitlessSigningMessageRoute } from "../../services/limitless-trading-execution-service.js";
 import {
@@ -10,6 +9,7 @@ import {
 } from "../../services/polymarket-embedded.js";
 import type { JsonObject } from "../domain/types.js";
 import { canonicalJsonHash } from "../persistence/canonical.js";
+import { fundingSidecarRuntimeConfig } from "../runtime/sidecar-runtime-config.js";
 import type {
   PreparationActionMaterializer,
   PreparationActionTemplate,
@@ -70,53 +70,53 @@ function spenderForPolymarketCheck(
 ): { token: string; spender: string; kind: "erc20" | "erc1155" } | null {
   if (checkId === "erc20_exchange_allowance") {
     return {
-      token: env.polymarketUsdcAddress,
-      spender: env.polymarketExchangeAddress,
+      token: fundingSidecarRuntimeConfig.polymarketUsdcAddress,
+      spender: fundingSidecarRuntimeConfig.polymarketExchangeAddress,
       kind: "erc20",
     };
   }
   if (checkId === "erc20_neg_risk_exchange_allowance") {
     return {
-      token: env.polymarketUsdcAddress,
-      spender: env.polymarketNegRiskExchangeAddress,
+      token: fundingSidecarRuntimeConfig.polymarketUsdcAddress,
+      spender: fundingSidecarRuntimeConfig.polymarketNegRiskExchangeAddress,
       kind: "erc20",
     };
   }
   if (checkId === "erc20_neg_risk_adapter_allowance") {
-    return env.polymarketNegRiskAdapterAddress
+    return fundingSidecarRuntimeConfig.polymarketNegRiskAdapterAddress
       ? {
-          token: env.polymarketUsdcAddress,
-          spender: env.polymarketNegRiskAdapterAddress,
+          token: fundingSidecarRuntimeConfig.polymarketUsdcAddress,
+          spender: fundingSidecarRuntimeConfig.polymarketNegRiskAdapterAddress,
           kind: "erc20",
         }
       : null;
   }
   if (checkId === "ctf_exchange_approval") {
     return {
-      token: env.polymarketConditionalTokensAddress,
-      spender: env.polymarketExchangeAddress,
+      token: fundingSidecarRuntimeConfig.polymarketConditionalTokensAddress,
+      spender: fundingSidecarRuntimeConfig.polymarketExchangeAddress,
       kind: "erc1155",
     };
   }
   if (checkId === "ctf_neg_risk_exchange_approval") {
     return {
-      token: env.polymarketConditionalTokensAddress,
-      spender: env.polymarketNegRiskExchangeAddress,
+      token: fundingSidecarRuntimeConfig.polymarketConditionalTokensAddress,
+      spender: fundingSidecarRuntimeConfig.polymarketNegRiskExchangeAddress,
       kind: "erc1155",
     };
   }
   if (checkId === "ctf_neg_risk_adapter_approval") {
-    return env.polymarketNegRiskAdapterAddress
+    return fundingSidecarRuntimeConfig.polymarketNegRiskAdapterAddress
       ? {
-          token: env.polymarketConditionalTokensAddress,
-          spender: env.polymarketNegRiskAdapterAddress,
+          token: fundingSidecarRuntimeConfig.polymarketConditionalTokensAddress,
+          spender: fundingSidecarRuntimeConfig.polymarketNegRiskAdapterAddress,
           kind: "erc1155",
         }
       : null;
   }
   if (checkId === "redemption_operator_approval" && redemptionOperator) {
     return {
-      token: env.polymarketConditionalTokensAddress,
+      token: fundingSidecarRuntimeConfig.polymarketConditionalTokensAddress,
       spender: redemptionOperator,
       kind: "erc1155",
     };
@@ -138,26 +138,26 @@ function polymarketFundingRouterApproval(actionKey: string): {
   token: string;
   spender: string;
 } | null {
-  const spender = env.polymarketFundingRouterAddress?.trim() ?? "";
+  const spender = fundingSidecarRuntimeConfig.polymarketFundingRouterAddress;
   if (!spender) return null;
   if (actionKey === "approve-funding-router-deposit-usdce") {
     return {
       owner: "deposit_wallet",
-      token: env.polymarketUsdceAddress,
+      token: fundingSidecarRuntimeConfig.polymarketUsdceAddress,
       spender,
     };
   }
   if (actionKey === "approve-funding-router-signer-pusd") {
     return {
       owner: "signer",
-      token: env.polymarketUsdcAddress,
+      token: fundingSidecarRuntimeConfig.polymarketUsdcAddress,
       spender,
     };
   }
   if (actionKey === "approve-funding-router-signer-usdce") {
     return {
       owner: "signer",
-      token: env.polymarketUsdceAddress,
+      token: fundingSidecarRuntimeConfig.polymarketUsdceAddress,
       spender,
     };
   }
@@ -330,7 +330,7 @@ function spenderForLimitlessCheck(
   const erc20 = (spender: string | null | undefined) =>
     spender
       ? {
-          token: env.limitlessUsdcAddress,
+          token: fundingSidecarRuntimeConfig.limitlessUsdcAddress,
           spender,
           kind: "erc20" as const,
         }
@@ -338,23 +338,23 @@ function spenderForLimitlessCheck(
   const erc1155 = (spender: string | null | undefined) =>
     spender
       ? {
-          token: env.limitlessConditionalTokensAddress,
+          token: fundingSidecarRuntimeConfig.limitlessConditionalTokensAddress,
           spender,
           kind: "erc1155" as const,
         }
       : null;
   if (checkId === "clob_usdc_allowance") {
-    return erc20(env.limitlessClobAddress);
+    return erc20(fundingSidecarRuntimeConfig.limitlessClobAddress);
   }
   if (checkId === "clob_neg_risk_usdc_allowance") {
-    return erc20(env.limitlessNegRiskAddress);
+    return erc20(fundingSidecarRuntimeConfig.limitlessNegRiskAddress);
   }
   if (checkId === "amm_usdc_allowance") return erc20(input.ammAddress);
   if (checkId === "clob_operator_approval") {
-    return erc1155(env.limitlessClobAddress);
+    return erc1155(fundingSidecarRuntimeConfig.limitlessClobAddress);
   }
   if (checkId === "clob_neg_risk_operator_approval") {
-    return erc1155(env.limitlessNegRiskAddress);
+    return erc1155(fundingSidecarRuntimeConfig.limitlessNegRiskAddress);
   }
   if (checkId === "amm_operator_approval") {
     return erc1155(input.ammAddress);

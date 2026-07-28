@@ -30,7 +30,8 @@ export type FundingPersistenceErrorCode =
   | "quote_expired"
   | "quote_invalidated"
   | "quote_mismatch"
-  | "quote_not_found";
+  | "quote_not_found"
+  | "trade_submission_reconciling";
 
 export class FundingPersistenceError extends Error {
   constructor(

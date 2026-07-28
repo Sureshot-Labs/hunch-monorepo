@@ -4,7 +4,6 @@ import {
   canonicalAssetKey,
   stableOpaqueId,
 } from "../../account-value/canonical.js";
-import { env } from "../../env.js";
 import {
   buildPolymarketFundingPlan,
   PolymarketFundingPlanError,
@@ -37,6 +36,7 @@ import type { PlannedSourceOption } from "./planning-types.js";
 import { buildFundingReceiveTargets } from "./receive-targets.js";
 import { sameAsset } from "./money.js";
 import { supportsCanonicalFundingReceiveEvents } from "../receive/canonical-receive-capabilities.js";
+import { fundingSidecarRuntimeConfig } from "../runtime/sidecar-runtime-config.js";
 
 function jsonRecord(value: unknown): Readonly<Record<string, JsonValue>> {
   return value as Readonly<Record<string, JsonValue>>;
@@ -753,10 +753,10 @@ export class DirectIngressFundingSourceAdapter implements FundingSourceAdapter {
       usdceAsset: AssetRef;
     }> = {
       canonicalRouterAddress:
-        env.polymarketFundingRouterAddress?.trim() || null,
+        fundingSidecarRuntimeConfig.polymarketFundingRouterAddress || null,
       usdceAsset: {
         networkId: "evm:137",
-        assetId: env.polymarketUsdceAddress,
+        assetId: fundingSidecarRuntimeConfig.polymarketUsdceAddress,
         decimals: 6,
       },
     },

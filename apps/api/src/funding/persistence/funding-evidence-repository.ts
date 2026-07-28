@@ -9,6 +9,11 @@ import {
   transitionFundingOperationInTransaction,
   wakeFundingReconciliationInTransaction,
 } from "./funding-operation-repository.js";
+import {
+  acceptFundingTradeAttemptInTransaction,
+  hasUnresolvedFundingTradeAttemptInTransaction,
+  recordFundingTradeAttemptOutcomeInTransaction,
+} from "./funding-trade-attempt-repository.js";
 
 type JsonRecord = Readonly<Record<string, JsonValue>>;
 
@@ -1080,6 +1085,7 @@ export async function consumeFundingReservationForLinkedConsumerInTransaction(
   input: Readonly<{
     userId: string;
     reservationId: string;
+    tradeAttemptId?: string | null;
     consumer: FundingReservationConsumer;
     outcomeReason: string;
     now?: Date;
@@ -1099,13 +1105,14 @@ export async function consumeFundingReservationForLinkedConsumerInTransaction(
 
   let consumerKind: string;
   let consumerRef: string;
+  let externalReference: string;
   let linked = false;
   if (input.consumer.kind === "web_order") {
     consumerKind = "web_order";
     consumerRef = input.consumer.orderId;
-    const result = await client.query(
+    const result = await client.query<{ external_reference: string }>(
       `
-        select 1
+        select coalesce(order_hash, venue_order_id, id::text) as external_reference
         from orders
         where id = $1
           and user_id = $2
@@ -1131,12 +1138,13 @@ export async function consumeFundingReservationForLinkedConsumerInTransaction(
       ],
     );
     linked = result.rowCount === 1;
+    externalReference = result.rows[0]?.external_reference ?? consumerRef;
   } else if (input.consumer.kind === "execution") {
     consumerKind = "execution";
     consumerRef = input.consumer.executionId;
-    const result = await client.query(
+    const result = await client.query<{ external_reference: string }>(
       `
-        select 1
+        select coalesce(tx_signature, venue_order_id, id::text) as external_reference
         from executions
         where id = $1
           and user_id = $2
@@ -1156,12 +1164,13 @@ export async function consumeFundingReservationForLinkedConsumerInTransaction(
       ],
     );
     linked = result.rowCount === 1;
+    externalReference = result.rows[0]?.external_reference ?? consumerRef;
   } else {
     consumerKind = "telegram_trade_intent";
     consumerRef = input.consumer.intentId;
-    const result = await client.query(
+    const result = await client.query<{ external_reference: string }>(
       `
-        select 1
+        select coalesce(tx_signature, venue_order_id, id::text) as external_reference
         from telegram_trade_intents
         where id = $1
           and user_id = $2
@@ -1181,6 +1190,7 @@ export async function consumeFundingReservationForLinkedConsumerInTransaction(
       ],
     );
     linked = result.rowCount === 1;
+    externalReference = result.rows[0]?.external_reference ?? consumerRef;
   }
   if (!linked) {
     throw new FundingPersistenceError(
@@ -1190,13 +1200,36 @@ export async function consumeFundingReservationForLinkedConsumerInTransaction(
   }
 
   const now = input.now ?? new Date();
-  if (
-    scope.reservation_state === "active" &&
-    scope.expires_at.getTime() <= now.getTime()
-  ) {
-    throw new FundingPersistenceError(
-      "invalid_state_transition",
-      "funding reservation expired before trade persistence",
+  const attempt = await acceptFundingTradeAttemptInTransaction(client, {
+    userId: input.userId,
+    operationId,
+    reservationId: input.reservationId,
+    attemptId: input.tradeAttemptId,
+    externalReference,
+    consumerKind: consumerKind as
+      | "web_order"
+      | "execution"
+      | "telegram_trade_intent",
+    consumerRef,
+    now,
+  });
+  if (input.consumer.kind === "web_order") {
+    await client.query(
+      `
+        update orders
+        set funding_trade_attempt_id = $2
+        where id = $1 and user_id = $3
+      `,
+      [consumerRef, attempt.id, input.userId],
+    );
+  } else if (input.consumer.kind === "execution") {
+    await client.query(
+      `
+        update executions
+        set funding_trade_attempt_id = $2
+        where id = $1 and user_id = $3
+      `,
+      [consumerRef, attempt.id, input.userId],
     );
   }
   await completeReadyFundingOperation(client, {
@@ -1224,6 +1257,15 @@ export async function releaseFundingReservationForAbandonedTradeInTransaction(
     now?: Date;
   }>,
 ): Promise<void> {
+  await client.query(
+    `
+      select id
+      from funding_operations
+      where id = $1 and user_id = $2
+      for update
+    `,
+    [input.link.operationId, input.userId],
+  );
   const scope = await loadFundingTradeReservationScope(client, {
     userId: input.userId,
     operationId: input.link.operationId,
@@ -1237,6 +1279,33 @@ export async function releaseFundingReservationForAbandonedTradeInTransaction(
     );
   }
   const now = input.now ?? new Date();
+  await client.query(
+    `
+      update funding_trade_attempts
+      set state = 'definitive_failure',
+          broadcast_may_have_occurred = false,
+          error_code = 'cancelled_before_submission',
+          resolved_at = $4,
+          updated_at = $4
+      where user_id = $1
+        and operation_id = $2
+        and reservation_id = $3
+        and state = 'claimed'
+    `,
+    [input.userId, input.link.operationId, input.link.reservationId, now],
+  );
+  if (
+    await hasUnresolvedFundingTradeAttemptInTransaction(client, {
+      userId: input.userId,
+      operationId: input.link.operationId,
+      reservationId: input.link.reservationId,
+    })
+  ) {
+    throw new FundingPersistenceError(
+      "trade_submission_reconciling",
+      "funding reservation has an unresolved trade attempt and must reconcile before release",
+    );
+  }
   await completeReadyFundingOperation(client, {
     userId: input.userId,
     operationId: input.link.operationId,
@@ -1259,6 +1328,38 @@ export async function releaseFundingReservationForAbandonedTrade(
   await tx(pool, (client) =>
     releaseFundingReservationForAbandonedTradeInTransaction(client, input),
   );
+}
+
+export async function releaseFundingReservationForDefinitiveTradeFailure(
+  pool: Pool,
+  input: Readonly<{
+    userId: string;
+    link: FundingTradeReservationLink;
+    tradeAttemptId: string;
+    outcomeReason: string;
+    errorCode?: string | null;
+    externalReference?: string | null;
+    broadcastMayHaveOccurred: boolean;
+    now?: Date;
+  }>,
+): Promise<void> {
+  await tx(pool, async (client) => {
+    await recordFundingTradeAttemptOutcomeInTransaction(client, {
+      userId: input.userId,
+      attemptId: input.tradeAttemptId,
+      outcome: "definitive_failure",
+      externalReference: input.externalReference,
+      errorCode: input.errorCode,
+      broadcastMayHaveOccurred: input.broadcastMayHaveOccurred,
+      now: input.now,
+    });
+    await releaseFundingReservationForAbandonedTradeInTransaction(client, {
+      userId: input.userId,
+      link: input.link,
+      outcomeReason: input.outcomeReason,
+      now: input.now,
+    });
+  });
 }
 
 export type FundingRouteOutcome =

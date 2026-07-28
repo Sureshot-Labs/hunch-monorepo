@@ -8,6 +8,7 @@ import { polymarketPlaceOrderBodySchema } from "../../../schemas/polymarket-priv
 
 const OPERATION_ID = "00000000-0000-4000-8000-000000000001";
 const RESERVATION_ID = "00000000-0000-4000-8000-000000000002";
+const TRADE_ATTEMPT_ID = "00000000-0000-4000-8000-000000000003";
 const ADDRESS = "0x0000000000000000000000000000000000000001";
 const TX_HASH = `0x${"a".repeat(64)}`;
 
@@ -95,6 +96,7 @@ assert.equal(
     txHash: TX_HASH,
     fundingOperationId: OPERATION_ID,
     fundingReservationId: RESERVATION_ID,
+    fundingTradeAttemptId: TRADE_ATTEMPT_ID,
   }).success,
   true,
 );

@@ -36,7 +36,15 @@ export type FundingReconciliationJobOptions =
     }>;
 
 export type FundingReconciliationJobResult =
-  | FundingReconciliationBatchResult
+  | (FundingReconciliationBatchResult &
+      Readonly<{
+        receiveObservation: Awaited<
+          ReturnType<FundingReceiveSessionObserver["pollBatch"]>
+        >;
+        receiveRouting: Awaited<
+          ReturnType<FundingReceiveReceiptRouter["runBatch"]>
+        >;
+      }>)
   | Readonly<{
       skipped: true;
       skipReason: "funding_schema_not_ready";
@@ -46,6 +54,8 @@ export type FundingReconciliationJobResult =
       failed: 0;
       deadLettered: 0;
       operationIds: readonly [];
+      receiveObservation: null;
+      receiveRouting: null;
     }>;
 
 export async function isFundingReconciliationSchemaReady(
@@ -77,13 +87,16 @@ export async function runFundingReconciliationJob(
       failed: 0,
       deadLettered: 0,
       operationIds: [],
+      receiveObservation: null,
+      receiveRouting: null,
     };
   }
-  await new FundingReceiveSessionObserver().pollBatch(pool, {
-    limit: options.limit ?? 25,
-    now: options.now,
-  });
-  await new FundingReceiveReceiptRouter(pool).runBatch({
+  const receiveObservation =
+    await new FundingReceiveSessionObserver().pollBatch(pool, {
+      limit: options.limit ?? 25,
+      now: options.now,
+    });
+  const receiveRouting = await new FundingReceiveReceiptRouter(pool).runBatch({
     limit: options.limit ?? 25,
     now: options.now,
   });
@@ -101,10 +114,11 @@ export async function runFundingReconciliationJob(
     };
   };
   if (!relay) {
-    return runFundingReconciliationBatch(pool, {
+    const result = await runFundingReconciliationBatch(pool, {
       ...options,
       destinationPoll: pollDestination,
     });
+    return { ...result, receiveObservation, receiveRouting };
   }
   const encryptionKey = decodeCredentialsEncryptionKey(
     relay.credentialsEncryptionKey,
@@ -128,7 +142,7 @@ export async function runFundingReconciliationJob(
   );
   const polymarketPostconditionDriver =
     new PolymarketFundingPostconditionDriver(transactionCodec);
-  return runFundingReconciliationBatch(pool, {
+  const result = await runFundingReconciliationBatch(pool, {
     ...options,
     providerPoll: (operationId, now) =>
       driver.pollOperation(pool, operationId, now),
@@ -143,6 +157,7 @@ export async function runFundingReconciliationJob(
       ),
     destinationPoll: pollDestination,
   });
+  return { ...result, receiveObservation, receiveRouting };
 }
 
 export type {

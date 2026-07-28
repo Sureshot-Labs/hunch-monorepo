@@ -6,7 +6,7 @@ import {
   sleep,
 } from "@hunch/shared";
 import { Interface, ethers } from "ethers";
-import { env } from "../env.js";
+import { fundingSidecarRuntimeConfig } from "../funding/runtime/sidecar-runtime-config.js";
 import { abis } from "../lib/contracts.js";
 import { isRecord } from "../lib/type-guards.js";
 
@@ -37,8 +37,8 @@ const multicallIface = new Interface([
   "function aggregate3(tuple(address target, bool allowFailure, bytes callData)[] calls) view returns (tuple(bool success, bytes returnData)[] returnData)",
 ]);
 
-const CODE_CACHE_TTL_MS = env.evmCodeCacheTtlMs;
-const APPROVAL_CACHE_TTL_MS = env.evmApprovalCacheTtlMs;
+const CODE_CACHE_TTL_MS = fundingSidecarRuntimeConfig.evmCodeCacheTtlMs;
+const APPROVAL_CACHE_TTL_MS = fundingSidecarRuntimeConfig.evmApprovalCacheTtlMs;
 
 type CacheEntry<T> = { value: T; expiresAt: number };
 
@@ -105,14 +105,18 @@ function computeBackoffMs(
     return Math.min(
       retryAfterMs,
       Math.max(
-        env.walletIntelRetryBaseBackoffMs,
-        env.walletIntelRetryMaxBackoffMs,
+        fundingSidecarRuntimeConfig.walletIntelRetryBaseBackoffMs,
+        fundingSidecarRuntimeConfig.walletIntelRetryMaxBackoffMs,
       ),
     );
   }
   const exponential =
-    env.walletIntelRetryBaseBackoffMs * Math.max(1, 2 ** Math.max(0, attempt));
-  return Math.min(exponential, env.walletIntelRetryMaxBackoffMs);
+    fundingSidecarRuntimeConfig.walletIntelRetryBaseBackoffMs *
+    Math.max(1, 2 ** Math.max(0, attempt));
+  return Math.min(
+    exponential,
+    fundingSidecarRuntimeConfig.walletIntelRetryMaxBackoffMs,
+  );
 }
 
 async function ethRpcRequest<T>(inputs: {
@@ -122,7 +126,10 @@ async function ethRpcRequest<T>(inputs: {
   params: unknown[];
 }): Promise<T> {
   let lastError: unknown = null;
-  const maxAttempts = Math.max(1, env.walletIntelRetryMaxAttempts);
+  const maxAttempts = Math.max(
+    1,
+    fundingSidecarRuntimeConfig.walletIntelRetryMaxAttempts,
+  );
 
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     const controller = new AbortController();

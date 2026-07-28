@@ -111,6 +111,7 @@ function createMergeDb(fixture: MergeDbFixture) {
             funding_idempotency_conflicts: String(
               conflicts.fundingIdempotencyConflicts ?? 0,
             ),
+            funding_trade_attempts: String(conflicts.fundingTradeAttempts ?? 0),
             live_funding_reservations: String(
               conflicts.liveFundingReservations ?? 0,
             ),
@@ -123,6 +124,10 @@ function createMergeDb(fixture: MergeDbFixture) {
             non_terminal_telegram_trade_intents: String(
               conflicts.nonTerminalTelegramTradeIntents ?? 0,
             ),
+            position_action_evidence: String(
+              conflicts.positionActionEvidence ?? 0,
+            ),
+            receive_evidence: String(conflicts.receiveEvidence ?? 0),
           },
         ] as unknown as T[]);
       }
@@ -226,6 +231,9 @@ const tests: Array<{ name: string; run: () => Promise<void> }> = [
           nonTerminalFundingOperations: 4,
           nonTerminalLegacyBridgeOrders: 5,
           nonTerminalTelegramTradeIntents: 6,
+          fundingTradeAttempts: 8,
+          positionActionEvidence: 9,
+          receiveEvidence: 10,
         },
       });
 
@@ -245,10 +253,13 @@ const tests: Array<{ name: string; run: () => Promise<void> }> = [
             ambiguousFundingAttempts: 2,
             fundingConsentConflicts: 0,
             fundingIdempotencyConflicts: 0,
+            fundingTradeAttempts: 8,
             liveFundingReservations: 3,
             nonTerminalFundingOperations: 4,
             nonTerminalLegacyBridgeOrders: 5,
             nonTerminalTelegramTradeIntents: 6,
+            positionActionEvidence: 9,
+            receiveEvidence: 10,
           });
           return true;
         },

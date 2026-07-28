@@ -3,7 +3,6 @@ import type { Pool } from "@hunch/infra";
 import bs58 from "bs58";
 import { ethers } from "ethers";
 
-import { env } from "../../env.js";
 import type {
   EvmTransactionAction,
   ExternalHandoffAction,
@@ -17,6 +16,7 @@ import {
   type FundingStepReceiptObservation,
   type FundingStepReceiptTarget,
 } from "../persistence/funding-step-receipt-repository.js";
+import { fundingSidecarRuntimeConfig } from "../runtime/sidecar-runtime-config.js";
 import type { FundingTransactionReferenceCodec } from "./transaction-reference-codec.js";
 
 type JsonRecord = Readonly<Record<string, JsonValue>>;
@@ -815,16 +815,17 @@ export function evaluateSvmActionReceipt(
 }
 
 function evmRpcUrl(chainId: number): string | null {
-  const override = env.evmRpcUrlsByChain[String(chainId)];
+  const override =
+    fundingSidecarRuntimeConfig.evmRpcUrlsByChain[String(chainId)];
   if (override?.trim()) return override.trim();
-  if (chainId === 137) return env.polygonRpcUrl;
-  if (chainId === 8453) return env.baseRpcUrl;
-  if (chainId === 1) return env.ethereumRpcUrl;
-  if (chainId === 10) return env.optimismRpcUrl;
-  if (chainId === 56) return env.bscRpcUrl;
-  if (chainId === 42161) return env.arbitrumRpcUrl;
-  if (chainId === 43114) return env.avalancheRpcUrl;
-  if (chainId === 59144) return env.lineaRpcUrl;
+  if (chainId === 137) return fundingSidecarRuntimeConfig.polygonRpcUrl;
+  if (chainId === 8453) return fundingSidecarRuntimeConfig.baseRpcUrl;
+  if (chainId === 1) return fundingSidecarRuntimeConfig.ethereumRpcUrl;
+  if (chainId === 10) return fundingSidecarRuntimeConfig.optimismRpcUrl;
+  if (chainId === 56) return fundingSidecarRuntimeConfig.bscRpcUrl;
+  if (chainId === 42161) return fundingSidecarRuntimeConfig.arbitrumRpcUrl;
+  if (chainId === 43114) return fundingSidecarRuntimeConfig.avalancheRpcUrl;
+  if (chainId === 59144) return fundingSidecarRuntimeConfig.lineaRpcUrl;
   return null;
 }
 
@@ -962,7 +963,10 @@ async function inspectSvmTarget(
       "committed Solana receipt inspection context is incomplete",
     );
   }
-  const connection = new Connection(env.solanaRpcUrl, "confirmed");
+  const connection = new Connection(
+    fundingSidecarRuntimeConfig.solanaRpcUrl,
+    "confirmed",
+  );
   const statusResponse = await connection.getSignatureStatuses([reference], {
     searchTransactionHistory: true,
   });

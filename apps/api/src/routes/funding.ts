@@ -43,6 +43,7 @@ import { checkRateLimit } from "../lib/rate-limit.js";
 import {
   fundingApiErrorResponseSchema,
   fundingCommitRequestSchema,
+  fundingCapabilitiesResponseSchema,
   fundingDestinationsQuerySchema,
   fundingDestinationsResponseSchema,
   fundingLiquidityResponseSchema,
@@ -85,6 +86,20 @@ type FundingDestinationQuery = Readonly<{
 export type FundingRouteDependencies = Readonly<{
   authenticate: preHandlerHookHandler;
   rateLimit(userId: string, endpoint: string): Promise<boolean>;
+  capabilities(): Promise<
+    Readonly<{
+      fundingApiVersion: 1;
+      receiveSessionsVersion: 1;
+      creationMode: "off" | "on";
+      supportedActionKinds: readonly (
+        | "add_funds"
+        | "trade_shortfall"
+        | "convert_asset"
+        | "withdrawal"
+        | "redeem"
+      )[];
+    }>
+  >;
   registerWithdrawalDestination(
     userId: string,
     request: Readonly<{
@@ -428,6 +443,36 @@ export function registerFundingRoutes(
     500: fundingApiErrorResponseSchema,
     503: fundingApiErrorResponseSchema,
   };
+
+  z.get(
+    "/funding/capabilities",
+    {
+      preHandler: dependencies.authenticate,
+      schema: {
+        response: { 200: fundingCapabilitiesResponseSchema, ...errors },
+      },
+    },
+    (request, reply) =>
+      handleFundingRequest(
+        request,
+        reply,
+        dependencies,
+        {
+          endpoint: "capabilities",
+          logMessage: "Funding capabilities failed",
+          publicError: "Funding capabilities are unavailable",
+        },
+        async () => {
+          const capabilities = await dependencies.capabilities();
+          return reply.send(
+            fundingCapabilitiesResponseSchema.parse({
+              ok: true,
+              ...capabilities,
+            }),
+          );
+        },
+      ),
+  );
 
   z.post(
     "/funding/withdrawal-destinations",
@@ -1088,6 +1133,7 @@ export const fundingRoutes: FastifyPluginAsync = async (app) => {
       checkRateLimit(`funding:${endpoint}:${userId}`, 30, 60_000, {
         onError: "fail_closed",
       }),
+    capabilities: () => runtime.capabilities(),
     destinations: (userId, query) => runtime.destinations(userId, query),
     registerWithdrawalDestination: (userId, request) =>
       runtime.registerWithdrawalDestination(userId, request),

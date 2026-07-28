@@ -91,10 +91,13 @@ export type FundingMergeConflictSummary = Readonly<{
   ambiguousFundingAttempts: number;
   fundingConsentConflicts: number;
   fundingIdempotencyConflicts: number;
+  fundingTradeAttempts: number;
   liveFundingReservations: number;
   nonTerminalFundingOperations: number;
   nonTerminalLegacyBridgeOrders: number;
   nonTerminalTelegramTradeIntents: number;
+  positionActionEvidence: number;
+  receiveEvidence: number;
 }>;
 
 export class FundingMergeConflictError extends Error {
@@ -139,10 +142,13 @@ async function fetchFundingMergeConflicts(
     ambiguous_funding_attempts: string;
     funding_consent_conflicts: string;
     funding_idempotency_conflicts: string;
+    funding_trade_attempts: string;
     live_funding_reservations: string;
     non_terminal_funding_operations: string;
     non_terminal_legacy_bridge_orders: string;
     non_terminal_telegram_trade_intents: string;
+    position_action_evidence: string;
+    receive_evidence: string;
   }>(
     `
       select
@@ -217,6 +223,21 @@ async function fetchFundingMergeConflicts(
         ) as non_terminal_telegram_trade_intents,
         (
           select count(*)::text
+          from funding_trade_attempts attempt
+          where attempt.user_id = any($1::uuid[])
+        ) as funding_trade_attempts,
+        (
+          select count(*)::text
+          from position_action_operations action
+          where action.user_id = any($1::uuid[])
+        ) as position_action_evidence,
+        (
+          select count(*)::text
+          from funding_receive_sessions session
+          where session.user_id = any($1::uuid[])
+        ) as receive_evidence,
+        (
+          select count(*)::text
           from funding_operations source
           join funding_operations target
             on target.user_id = $3
@@ -242,6 +263,7 @@ async function fetchFundingMergeConflicts(
     ambiguousFundingAttempts: Number(row.ambiguous_funding_attempts),
     fundingConsentConflicts: Number(row.funding_consent_conflicts),
     fundingIdempotencyConflicts: Number(row.funding_idempotency_conflicts),
+    fundingTradeAttempts: Number(row.funding_trade_attempts),
     liveFundingReservations: Number(row.live_funding_reservations),
     nonTerminalFundingOperations: Number(row.non_terminal_funding_operations),
     nonTerminalLegacyBridgeOrders: Number(
@@ -250,6 +272,8 @@ async function fetchFundingMergeConflicts(
     nonTerminalTelegramTradeIntents: Number(
       row.non_terminal_telegram_trade_intents,
     ),
+    positionActionEvidence: Number(row.position_action_evidence),
+    receiveEvidence: Number(row.receive_evidence),
   };
 }
 

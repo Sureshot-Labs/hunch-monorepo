@@ -715,8 +715,11 @@ Account Value, and no legacy path receives new business logic.
 
 ## Updated closure evidence
 
-WP7 is core-mechanics-complete but UX/open-ingress-correction-pending until all
-of the following are green:
+The 2026-07-28 source/unit closure pass is recorded in
+[`local-full-test-readiness.md`](./local-full-test-readiness.md). WP7 is ready
+to enter the local full-test matrix, but production activation remains blocked
+until the database, restart, live-value, visual, and timing evidence below is
+green:
 
 1. frontend funding/confirmation tests, typecheck, lint, format, and build;
 2. backend funding source/planner/reservation/order tests, typecheck, lint, and
@@ -753,9 +756,11 @@ frozen in [`verification-plan.md`](./verification-plan.md).
 
 ## Activation and next work
 
-The durable WP7 router/reservation core is ready for continued guarded
-verification, but the normal product surface is not ready for production
-activation until the correction phases above close. WP8 adopts the corrected
-contracts for Telegram and exact Privy delegated policy enforcement. WP9 owns
-production-style activation/rollback evidence and the decision to remove
-compatibility components.
+The durable WP7 router/reservation core and corrected frontend contracts are
+ready for local full testing. They are not ready for production activation
+until the remaining gates in
+[`local-full-test-readiness.md`](./local-full-test-readiness.md) and
+[`verification-plan.md`](./verification-plan.md) close. WP8 adopts the
+corrected contracts for Telegram and exact Privy delegated policy enforcement.
+WP9 owns production-style activation/rollback evidence and the decision to
+remove compatibility components.

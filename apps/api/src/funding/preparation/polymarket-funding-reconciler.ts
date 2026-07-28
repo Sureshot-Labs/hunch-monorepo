@@ -16,10 +16,24 @@ import {
   verifyPolymarketFundingPostconditions,
   type PolymarketFundingObservation,
 } from "./polymarket-funding-followup.js";
-import { observePolymarketFundingRuntime } from "./runtime-service.js";
 import type { FundingPostconditionDriver } from "./postcondition-driver.js";
 
 type JsonRecord = Readonly<Record<string, JsonValue>>;
+type PolymarketFundingRuntimeObserver = (
+  input: Readonly<{
+    userId: string;
+    signerAddress: string;
+    depositWallet: string;
+  }>,
+) => Promise<PolymarketFundingObservation | null>;
+
+async function observePolymarketFundingRuntimeLazy(
+  input: Parameters<PolymarketFundingRuntimeObserver>[0],
+): ReturnType<PolymarketFundingRuntimeObserver> {
+  const { observePolymarketFundingRuntime } =
+    await import("./runtime-service.js");
+  return observePolymarketFundingRuntime(input);
+}
 
 export type PolymarketFundingPostconditionTarget = Readonly<{
   operationId: string;
@@ -363,7 +377,7 @@ export class PolymarketFundingPostconditionDriver implements FundingPostconditio
     >,
     private readonly dependencies: Readonly<{
       loadTarget?: typeof loadTarget;
-      observe?: typeof observePolymarketFundingRuntime;
+      observe?: PolymarketFundingRuntimeObserver;
       persistSatisfied?: (
         pool: Pool,
         input: Readonly<{
@@ -404,7 +418,7 @@ export class PolymarketFundingPostconditionDriver implements FundingPostconditio
       );
     }
     const after = await (
-      this.dependencies.observe ?? observePolymarketFundingRuntime
+      this.dependencies.observe ?? observePolymarketFundingRuntimeLazy
     )({
       userId: target.userId,
       signerAddress: target.signerAddress,

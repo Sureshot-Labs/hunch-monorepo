@@ -6,8 +6,17 @@ import type {
 } from "./api-trading-types.js";
 import {
   assertFundingReservationReadyForTrade,
-  releaseFundingReservationForAbandonedTrade,
+  releaseFundingReservationForDefinitiveTradeFailure,
 } from "../funding/persistence/funding-evidence-repository.js";
+import { canonicalJsonHash } from "../funding/persistence/canonical.js";
+import {
+  claimFundingTradeAttempt,
+  FundingTradeAttemptError,
+  markFundingTradeAttemptSubmissionStarted,
+  recordFundingTradeAttemptOutcome,
+  type FundingTradeExecutionPath,
+} from "../funding/persistence/funding-trade-attempt-repository.js";
+import { isRecord } from "../lib/type-guards.js";
 import { createKalshiTradingExecutionService } from "./kalshi-trading-execution-service.js";
 import { createLimitlessTradingExecutionService } from "./limitless-trading-execution-service.js";
 import { createPolymarketTradingExecutionService } from "./polymarket-trading-execution-service.js";
@@ -113,29 +122,206 @@ export function createApiTradingApplicationService(
     await assertIntentAllowed(intent);
     await assertFundingReady(intent);
   };
+  const executionPathResolvers: Readonly<
+    Record<
+      SupportedBotTradingVenue,
+      (venuePayload: unknown) => FundingTradeExecutionPath
+    >
+  > = {
+    polymarket: () => "polymarket_clob",
+    kalshi: () => "kalshi_dflow",
+    limitless: (venuePayload) =>
+      isRecord(venuePayload) && venuePayload.tradeType === "amm"
+        ? "limitless_amm"
+        : "limitless_clob",
+  };
+  const executionPathFor = (
+    venue: SupportedBotTradingVenue,
+    venuePayload: unknown,
+  ): FundingTradeExecutionPath => executionPathResolvers[venue](venuePayload);
+  const externalReferenceFor = (input: {
+    orderHash?: string | null;
+    txSignature?: string | null;
+    venueOrderId?: string | null;
+  }): string | null =>
+    input.orderHash ?? input.txSignature ?? input.venueOrderId ?? null;
 
   return {
     applyTradeEffects: (effectsInput) =>
       executorFor(effectsInput.intent.venue).applyTradeEffects(effectsInput),
     executePreparedTrade: async (executeInput) => {
-      const intent = executeInput.prepared.intent;
+      const intent: TradeIntent = { ...executeInput.prepared.intent };
+      const prepared = { ...executeInput.prepared, intent };
       await assertReadyIntent(intent);
-      const executed = await executorFor(
-        executeInput.prepared.venue,
-      ).executePreparedTrade(executeInput);
-      if (
-        intent.fundingReservation &&
-        ["cancelled", "failed", "no_fill"].includes(
-          executed.submitResult.status,
-        )
-      ) {
-        await releaseFundingReservationForAbandonedTrade(input.pool, {
-          userId: intent.actor.userId,
-          link: intent.fundingReservation,
-          outcomeReason: `trade_${executed.submitResult.status}`,
+      let attemptId: string | null = null;
+      let attemptClaimToken: string | null = null;
+      try {
+        const executed = await executorFor(
+          executeInput.prepared.venue,
+        ).executePreparedTrade({
+          ...executeInput,
+          prepared,
+          onBeforeBroadcast: async () => {
+            if (intent.fundingReservation) {
+              if (!intent.target.marketId) {
+                throw new TradingServiceError({
+                  code: "invalid_trade_request",
+                  message:
+                    "Funding reservation trade is missing an exact market.",
+                  statusCode: 409,
+                  venue: intent.venue,
+                });
+              }
+              const canonicalFingerprint = canonicalJsonHash({
+                action: intent.action,
+                amount: intent.amount,
+                idempotencyKey: intent.idempotencyKey,
+                reconcileKeys: prepared.reconcileKeys,
+                target: {
+                  marketId: intent.target.marketId,
+                  outcome: intent.target.outcome,
+                  tokenId: intent.target.tokenId,
+                  venueMarketId: intent.target.venueMarketId,
+                },
+                venue: intent.venue,
+              });
+              const externalReference = [
+                prepared.reconcileKeys.orderHash,
+                prepared.reconcileKeys.clientOrderId,
+                prepared.reconcileKeys.txHash,
+                prepared.reconcileKeys.txSignature,
+              ].find(
+                (value): value is string =>
+                  typeof value === "string" && value.trim().length >= 8,
+              );
+              const claim = await claimFundingTradeAttempt(input.pool, {
+                userId: intent.actor.userId,
+                operationId: intent.fundingReservation.operationId,
+                reservationId: intent.fundingReservation.reservationId,
+                venueId: intent.venue,
+                marketId: intent.target.marketId,
+                executionPath: executionPathFor(
+                  executeInput.prepared.venue,
+                  prepared.venuePayload,
+                ),
+                idempotencyKey: `trade:${canonicalJsonHash({
+                  actor: intent.actor.userId,
+                  key: intent.idempotencyKey,
+                })}`,
+                canonicalFingerprint,
+                externalReference,
+              }).catch((error: unknown) => {
+                if (!(error instanceof FundingTradeAttemptError)) throw error;
+                throw new TradingServiceError({
+                  code:
+                    error.code === "reservation_unavailable"
+                      ? "insufficient_readiness"
+                      : "reconcile_required",
+                  message: error.message,
+                  statusCode: 409,
+                  venue: intent.venue,
+                });
+              });
+              if (!claim.claimed) {
+                throw new TradingServiceError({
+                  code: "reconcile_required",
+                  message:
+                    "This funding reservation already has a trade attempt that must reconcile.",
+                  statusCode: 409,
+                  venue: intent.venue,
+                });
+              }
+              attemptId = claim.attempt.id;
+              attemptClaimToken = claim.attempt.claimToken;
+              intent.fundingTradeAttemptId = attemptId;
+            }
+            try {
+              await executeInput.onBeforeBroadcast?.();
+            } catch (error) {
+              if (intent.fundingReservation && attemptId) {
+                await releaseFundingReservationForDefinitiveTradeFailure(
+                  input.pool,
+                  {
+                    userId: intent.actor.userId,
+                    link: intent.fundingReservation,
+                    tradeAttemptId: attemptId,
+                    outcomeReason: "trade_pre_submit_failed",
+                    errorCode: "pre_submit_failed",
+                    broadcastMayHaveOccurred: false,
+                  },
+                );
+                attemptId = null;
+                attemptClaimToken = null;
+                intent.fundingTradeAttemptId = null;
+              }
+              throw error;
+            }
+            if (intent.fundingReservation && attemptId && attemptClaimToken) {
+              await markFundingTradeAttemptSubmissionStarted(input.pool, {
+                userId: intent.actor.userId,
+                operationId: intent.fundingReservation.operationId,
+                reservationId: intent.fundingReservation.reservationId,
+                attemptId,
+                claimToken: attemptClaimToken,
+              }).catch((error: unknown) => {
+                if (!(error instanceof FundingTradeAttemptError)) throw error;
+                throw new TradingServiceError({
+                  code: "reconcile_required",
+                  message: error.message,
+                  statusCode: 409,
+                  venue: intent.venue,
+                });
+              });
+            }
+          },
         });
+        if (
+          intent.fundingReservation &&
+          attemptId &&
+          ["cancelled", "failed", "no_fill"].includes(
+            executed.submitResult.status,
+          )
+        ) {
+          await releaseFundingReservationForDefinitiveTradeFailure(input.pool, {
+            userId: intent.actor.userId,
+            link: intent.fundingReservation,
+            tradeAttemptId: attemptId,
+            outcomeReason: `trade_${executed.submitResult.status}`,
+            errorCode: `trade_${executed.submitResult.status}`,
+            externalReference: externalReferenceFor(executed.submitResult),
+            broadcastMayHaveOccurred: true,
+          });
+          attemptId = null;
+          attemptClaimToken = null;
+          intent.fundingTradeAttemptId = null;
+        } else if (
+          intent.fundingReservation &&
+          attemptId &&
+          executed.postSubmitError &&
+          !executed.persisted
+        ) {
+          await recordFundingTradeAttemptOutcome(input.pool, {
+            userId: intent.actor.userId,
+            attemptId,
+            outcome: "ambiguous",
+            externalReference: externalReferenceFor(executed.submitResult),
+            errorCode: executed.postSubmitError.code,
+            broadcastMayHaveOccurred: true,
+          });
+        }
+        return executed;
+      } catch (error) {
+        if (intent.fundingReservation && attemptId) {
+          await recordFundingTradeAttemptOutcome(input.pool, {
+            userId: intent.actor.userId,
+            attemptId,
+            outcome: "ambiguous",
+            errorCode: "trade_submit_state_unknown",
+            broadcastMayHaveOccurred: true,
+          }).catch(() => {});
+        }
+        throw error;
       }
-      return executed;
     },
     ensureReadiness: async (readinessInput) => {
       const executor = executorFor(readinessInput.venue);

@@ -38,6 +38,38 @@ function resolveFundsLockKey(chainId?: string): string {
   return chainId ? `funds:${chainId}` : "funds:all";
 }
 
+function hasPositiveActivity(
+  value: unknown,
+  fields: readonly string[],
+): boolean {
+  if (typeof value !== "object" || value === null) return false;
+  const record = value as Record<string, unknown>;
+  return fields.some(
+    (field) => typeof record[field] === "number" && record[field] > 0,
+  );
+}
+
+function isFundingReconciliationNoop(result: unknown): boolean {
+  if (typeof result !== "object" || result === null) return false;
+  const record = result as Record<string, unknown>;
+  if (record.claimed !== 0) return false;
+  return (
+    !hasPositiveActivity(record.receiveObservation, [
+      "receiptsRecorded",
+      "recoveriesRequired",
+      "retryableErrors",
+    ]) &&
+    !hasPositiveActivity(record.receiveRouting, [
+      "operationsCreated",
+      "receiptsReady",
+      "recoveriesRequired",
+      "reviewsRequired",
+      "retriesScheduled",
+      "retryableErrors",
+    ])
+  );
+}
+
 type FinanceWorkerEnv = typeof env;
 
 export function buildJobs(workerEnv: FinanceWorkerEnv = env): ScheduledJob[] {
@@ -62,11 +94,7 @@ export function buildJobs(workerEnv: FinanceWorkerEnv = env): ScheduledJob[] {
       // threshold for tens of seconds between reconciliation passes.
       jitterSec: 0,
       run: () => runFundingReconciliationJob(),
-      isNoopResult: (result) =>
-        typeof result === "object" &&
-        result !== null &&
-        "claimed" in result &&
-        result.claimed === 0,
+      isNoopResult: isFundingReconciliationNoop,
     },
     {
       name: "api_cache_warm",

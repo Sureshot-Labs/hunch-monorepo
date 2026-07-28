@@ -5,6 +5,12 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 
+import {
+  fetchUser,
+  FundingMergeConflictError,
+  mergeUsers,
+} from "../../../admin-merge-user-core.js";
+import { AuthService } from "../../../auth.js";
 import { pool } from "../../../db.js";
 import {
   createOrReuseFundingReceiveSession,
@@ -114,6 +120,7 @@ function sessionInput(userId: string) {
 }
 
 const userId = await insertUser();
+let mergeTargetId: string | null = null;
 try {
   const [first, second] = await Promise.all([
     createOrReuseFundingReceiveSession(pool, sessionInput(userId)),
@@ -474,9 +481,42 @@ try {
     receiveSessionId: replacement.snapshot.session.receiveSessionId,
   });
   assert.equal(expiredProcessing?.session.status, "expired");
+  mergeTargetId = await insertUser();
+  const [sourceUser, targetUser] = await Promise.all([
+    fetchUser(userId),
+    fetchUser(mergeTargetId),
+  ]);
+  assert.ok(sourceUser);
+  assert.ok(targetUser);
+  await assert.rejects(
+    mergeUsers(
+      sourceUser,
+      targetUser,
+      { dryRun: false, keepSource: false },
+      pool,
+    ),
+    (error: unknown) => {
+      assert.ok(error instanceof FundingMergeConflictError);
+      assert.ok(error.conflicts.receiveEvidence > 0);
+      return true;
+    },
+  );
+  const deletion = await AuthService.deleteUser(userId);
+  assert.equal(deletion.disposition, "deactivated");
+  assert.equal(deletion.activeMovement, true);
+  assert.equal(deletion.privyDeletionAllowed, false);
+  assert.ok(deletion.protectedReasons.includes("receive_evidence"));
+  assert.ok(deletion.protectedReasons.includes("active_receive_session"));
+  assert.ok(
+    await fetchFundingReceiveSessionForUser(pool, {
+      userId,
+      receiveSessionId: replacement.snapshot.session.receiveSessionId,
+    }),
+    "account deletion must preserve receive sessions and receipts",
+  );
 
   console.log(
-    "[funding-receive-session-persistence-integration-tests] concurrent open, durable restore, global canonical-event replay, multi-receipt continuation, review-required persistence, policy replacement, and active-session expiry passed",
+    "[funding-receive-session-persistence-integration-tests] concurrent open, durable restore, global canonical-event replay, multi-receipt continuation, review-required persistence, policy replacement, late-window account retention, and active-session expiry passed",
   );
 } finally {
   const cleanup = await pool.connect();
@@ -492,6 +532,9 @@ try {
       [userId],
     );
     await cleanup.query("delete from users where id = $1", [userId]);
+    if (mergeTargetId) {
+      await cleanup.query("delete from users where id = $1", [mergeTargetId]);
+    }
     await cleanup.query("commit");
   } catch (error) {
     await cleanup.query("rollback");

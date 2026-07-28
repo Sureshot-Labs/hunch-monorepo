@@ -115,6 +115,7 @@ function buildExecution(overrides: Partial<ExecutionRow> = {}): ExecutionRow {
     ...overrides,
     funding_operation_id: overrides.funding_operation_id ?? null,
     funding_reservation_id: overrides.funding_reservation_id ?? null,
+    funding_trade_attempt_id: overrides.funding_trade_attempt_id ?? null,
   };
 }
 
