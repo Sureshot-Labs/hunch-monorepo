@@ -21,7 +21,11 @@ type EditorialResearchDelta =
       positionChangeUsd: number;
       scope: "representative_wallet" | "selected_side_cluster";
     }
-  | { kind: "price_move"; priceMoveCents: number }
+  | {
+      holderPositionState?: "increased" | "reduced" | "unchanged" | "unknown";
+      kind: "price_move";
+      priceMoveCents: number;
+    }
   | { kind: "wallet_count_change" };
 
 function formatCents(value: number): string {
@@ -174,6 +178,41 @@ export function buildSignalBotStructuredNarrative(input: {
     return [
       `${priceTarget.market} is priced at ${probability}, but ${holderName} has increased its NO position${profitAction}.`,
       `${state.slice(0, -1).join(", ")}${state.length > 1 ? ", and " : ""}${state.at(-1)}.`,
+    ];
+  }
+
+  if (
+    input.messageKind === "research_update" &&
+    input.headlineTemplateKey === "research_profitable_trader_hold_v13" &&
+    input.researchDelta?.kind === "price_move" &&
+    input.researchDelta.priceMoveCents > 0 &&
+    input.side != null &&
+    input.price != null &&
+    trackRecordUsd != null &&
+    input.note.holderPositionUsd != null &&
+    input.note.holderPositionUsd > 0 &&
+    input.note.holderOpenPnlUsd != null &&
+    input.note.holderOpenPnlUsd > 0
+  ) {
+    const move = `${Math.max(1, Math.round(input.researchDelta.priceMoveCents))}¢`;
+    const position = formatSignalBotPreciseCompactUsd(
+      input.note.holderPositionUsd,
+    );
+    const openProfit = formatSignalBotPreciseCompactUsd(
+      input.note.holderOpenPnlUsd,
+      true,
+    );
+    const traderState =
+      input.researchDelta.holderPositionState === "unchanged"
+        ? `Rather than locking in gains, ${holderName} continues to hold ${position}`
+        : input.researchDelta.holderPositionState === "reduced"
+          ? `${sentenceActor(holderName)} has trimmed the position but still holds ${position}`
+          : input.researchDelta.holderPositionState === "increased"
+            ? `${sentenceActor(holderName)} has added after the move and now holds ${position}`
+            : `${sentenceActor(holderName)} is still holding ${position}`;
+    return [
+      `Since the original call, ${input.side} has climbed ${move} to ${formatCents(input.price)}.`,
+      `${traderState} on ${input.side}, with ${openProfit} in open profit after making ${formatSignalBotPreciseCompactUsd(trackRecordUsd)} over the last ${horizonDays} days.`,
     ];
   }
 

@@ -757,10 +757,12 @@ const tests: Array<{ name: string; run: () => void }> = [
         currentPrice: 0.84,
         editorialProbability: 0.17,
         editorialSubject: "Bitcoin hitting $70K in July",
+        holderPositionUsd: 16_100,
         kind: "research_update",
         positionDirection: "against",
         researchDelta: {
           currentPrice: 0.84,
+          holderPositionState: "unchanged",
           kind: "price_move",
           priceMoveCents: 6,
         },
@@ -777,6 +779,144 @@ const tests: Array<{ name: string; run: () => void }> = [
       assert.equal(
         result.text,
         "📈 Bitcoin is now just 17% to hit $70K in July. A trader up $112K still hasn't taken profit.",
+      );
+    },
+  },
+  {
+    name: "profitable trader hold turns a grouped ceasefire deadline into a FOMO headline",
+    run: () => {
+      const ceasefire = subject({
+        eventTitle: "Israel x Iran ceasefire continues through...?",
+        marketTitle: "July 31",
+        side: "YES",
+      });
+      assert.equal(
+        ceasefire.text,
+        "Israel–Iran ceasefire lasting through July 31",
+      );
+      const result = buildSignalNotificationHeadline({
+        actorMode: "single_holder",
+        actorOpenPnlUsd: 3_200,
+        actorPnlUsd: 247_700,
+        currentPrice: 0.94,
+        editorialProbability: 0.94,
+        editorialSubject: ceasefire.text,
+        holderPositionUsd: 8_600,
+        kind: "research_update",
+        positionDirection: "backing",
+        researchDelta: {
+          currentPrice: 0.94,
+          holderPositionState: "unchanged",
+          kind: "price_move",
+          priceMoveCents: 7,
+        },
+        subject: ceasefire,
+      });
+      assert.equal(result.templateKey, "research_profitable_trader_hold_v13");
+      assert.equal(
+        result.text,
+        "📈 The Israel–Iran ceasefire is now 94% to last through July 31. A trader up $248K still hasn't taken profit.",
+      );
+    },
+  },
+  {
+    name: "profitable price moves do not promote incomplete child labels into live hooks",
+    run: () => {
+      for (const market of [
+        {
+          eventTitle: "Will NATO and Russia clash?",
+          marketTitle: "December 31",
+        },
+        {
+          eventTitle: "Spain vs. Argentina - More Markets",
+          marketTitle: "O/U 2.5 total goals",
+          outcomes: ["Over", "Under"],
+        },
+      ]) {
+        const marketSubject = subject({ ...market, side: "YES" });
+        const result = buildSignalNotificationHeadline({
+          actorMode: "single_holder",
+          actorOpenPnlUsd: 3_200,
+          actorPnlUsd: 247_700,
+          currentPrice: 0.64,
+          editorialProbability: 0.64,
+          editorialSubject: marketSubject.text,
+          holderPositionUsd: 8_600,
+          kind: "research_update",
+          positionDirection: "backing",
+          researchDelta: {
+            currentPrice: 0.64,
+            holderPositionState: "unchanged",
+            kind: "price_move",
+            priceMoveCents: 7,
+          },
+          subject: marketSubject,
+        });
+        assert.equal(result.templateKey, "research_price_move_v7");
+        assert.doesNotMatch(
+          result.text,
+          /December 31 is now priced|total goals is now priced/,
+        );
+        assert.match(result.text, /NATO and Russia|Spain vs\. Argentina/);
+      }
+    },
+  },
+  {
+    name: "profitable hold wording follows proved position behavior",
+    run: () => {
+      const ceasefire = subject({
+        eventTitle: "Israel x Iran ceasefire continues through...?",
+        marketTitle: "July 31",
+        side: "YES",
+      });
+      const headline = (
+        holderPositionState: "increased" | "reduced" | "unchanged" | "unknown",
+      ) =>
+        buildSignalNotificationHeadline({
+          actorMode: "single_holder",
+          actorOpenPnlUsd: 3_200,
+          actorPnlUsd: 247_700,
+          currentPrice: 0.94,
+          editorialProbability: 0.94,
+          editorialSubject: ceasefire.text,
+          holderPositionUsd: 8_600,
+          kind: "research_update",
+          positionDirection: "backing",
+          researchDelta: {
+            currentPrice: 0.94,
+            holderPositionState,
+            kind: "price_move",
+            priceMoveCents: 7,
+          },
+          subject: ceasefire,
+        }).text;
+      assert.match(headline("unchanged"), /still hasn't taken profit/);
+      assert.match(headline("reduced"), /has trimmed but is still holding YES/);
+      assert.match(headline("increased"), /has added and is still holding YES/);
+      assert.match(headline("unknown"), /is still holding YES/);
+
+      const withoutPosition = buildSignalNotificationHeadline({
+        actorMode: "single_holder",
+        actorOpenPnlUsd: 3_200,
+        actorPnlUsd: 247_700,
+        currentPrice: 0.94,
+        editorialProbability: 0.94,
+        editorialSubject: ceasefire.text,
+        holderPositionUsd: 0,
+        kind: "research_update",
+        positionDirection: "backing",
+        researchDelta: {
+          currentPrice: 0.94,
+          holderPositionState: "unknown",
+          kind: "price_move",
+          priceMoveCents: 7,
+        },
+        subject: ceasefire,
+      });
+      assert.equal(withoutPosition.templateKey, "research_price_move_v7");
+      assert.doesNotMatch(
+        withoutPosition.text,
+        /hasn't taken profit|still holding/,
       );
     },
   },
@@ -889,6 +1029,62 @@ const tests: Array<{ name: string; run: () => void }> = [
         [
           "Bitcoin hitting $70K in July is priced at 23%, but gmtrader has increased its NO position instead of taking profit.",
           "The trader is now holding $14.9K on NO, is sitting on +$1.2K open PnL, and has made $107.7K over the last 30 days.",
+        ],
+      );
+
+      assert.deepEqual(
+        buildSignalBotStructuredNarrative({
+          editorialProbability: 0.94,
+          evidenceRows: trackRecordEvidence(247_700),
+          headlineTemplateKey: "research_profitable_trader_hold_v13",
+          marketLabel: "Israel–Iran ceasefire lasting through July 31",
+          messageKind: "research_update",
+          note: {
+            holderDisplayName: null,
+            holderIdentityDisplayName: null,
+            holderOpenPnlUsd: 3_200,
+            holderPositionUsd: 8_600,
+          },
+          price: 0.94,
+          researchDelta: {
+            holderPositionState: "unchanged",
+            kind: "price_move",
+            priceMoveCents: 7,
+          },
+          side: "YES",
+          sideLabel: "YES",
+        }),
+        [
+          "Since the original call, YES has climbed 7¢ to 94¢.",
+          "Rather than locking in gains, the trader continues to hold $8.6K on YES, with +$3.2K in open profit after making $247.7K over the last 30 days.",
+        ],
+      );
+
+      assert.deepEqual(
+        buildSignalBotStructuredNarrative({
+          editorialProbability: 0.06,
+          evidenceRows: trackRecordEvidence(247_700),
+          headlineTemplateKey: "research_profitable_trader_hold_v13",
+          marketLabel: "Israel–Iran ceasefire lasting through July 31",
+          messageKind: "research_update",
+          note: {
+            holderDisplayName: null,
+            holderIdentityDisplayName: null,
+            holderOpenPnlUsd: 3_200,
+            holderPositionUsd: 8_600,
+          },
+          price: 0.94,
+          researchDelta: {
+            holderPositionState: "unchanged",
+            kind: "price_move",
+            priceMoveCents: 7,
+          },
+          side: "NO",
+          sideLabel: "NO",
+        }),
+        [
+          "Since the original call, NO has climbed 7¢ to 94¢.",
+          "Rather than locking in gains, the trader continues to hold $8.6K on NO, with +$3.2K in open profit after making $247.7K over the last 30 days.",
         ],
       );
 

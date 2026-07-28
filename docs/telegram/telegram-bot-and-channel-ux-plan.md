@@ -593,7 +593,7 @@ production migration, deployment ownership, observability, and device QA.
 
 Remaining backend work is intentionally maintained as bounded task documents:
 
-- Signal Post V10 backend completion and rollout (legacy filename retained):
+- Signal Post V11 backend completion and rollout (legacy filename retained):
   `backend-signal-post-copy-v4.md`;
 - typed holder-research update delta and canonical identity:
   `backend-holder-research-update-contract.md`;
@@ -680,7 +680,7 @@ with an emoji has no hierarchy.
 Keep a small semantic vocabulary:
 
 - `💰` — material net flow or a material tracked position;
-- `🔥` — a strong fade/against angle or unusually strong confluence;
+- `🔥` — a strong against angle or unusually strong confluence;
 - `👀` — a performance-led or undernoticed angle when no more specific market
   icon fits;
 - `🏆` / `⚽` / `🪙` — winner, matchup, and price-target stories;
@@ -698,11 +698,11 @@ each receive a random emoji.
 ### Headline rules
 
 - The headline is standalone and never a hyperlink. Only its short hook is
-  marked; the market explanation remains regular weight.
+  bold; the market explanation remains regular weight.
 - Use sentence case.
 - Treat the first line as the mobile push-notification preview, not only as the
   heading of an opened post.
-- Build it like a YouTube thumbnail plus title on one line: the marked hook is
+- Build it like a YouTube thumbnail plus title on one line: the bold hook is
   truthful cover copy; the plain continuation delivers the payoff.
 - Put a strong meaningful number first when it is the best hook, but compare it
   against human tension first. `22 early wallets are cashing out` can be more
@@ -759,10 +759,10 @@ Since the call:
 YES: 80¢ → 91¢ (+11¢)
 Est. open PnL: +$208K
 
-The market moved with the call and tracked wallets have not fully faded it yet.
+The market moved with the call, but tracked positions remain open.
 ```
 
-Rich V10 structure:
+Rich V11 structure:
 
 ```text
 ⚠️ **+$67.7K bought. 8 wallets cut.** Tracked wallets remain split on NO on
@@ -808,11 +808,11 @@ evidence—while the terminal table verifies the exact figures.
 ### Initial-signal structure
 
 ```text
-⚽ **+$542K in 30 days.** This wallet is backing Spain over Argentina.
+⚽ **+$542K in 30 days.** This trader is backing Spain over Argentina.
 
 Most tracked money is on Argentina, but this wallet is holding $20.5K on Spain.
 
-The market prefers Argentina. This wallet does not.
+The market prefers Argentina. This trader does not.
 
 ┌──────────────────────────────────┐
 │ Market       Spain over Argentina│
@@ -839,7 +839,7 @@ market`.
   omit it from unrelated probability and crowd-disagreement cards.
 - Avoid mechanically restating the whole title in prose, but allow the proof
   block to repeat the exact scoped metric behind rounded cover copy.
-- A decisive metric may appear in the marked hook, narrative, and table when
+- A decisive metric may appear in the bold hook, narrative, and table when
   each appearance does a different job: attention, interpretation, and exact
   proof. Do not remove `still holding` or `hasn't backed away` merely because
   the position also appears in the table.

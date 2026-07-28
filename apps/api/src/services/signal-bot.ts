@@ -32,6 +32,7 @@ import {
   parseHolderResearchUpdateV1,
   parseSignalPriceSnapshotV1,
   parseTelegramMarketIdentityV1,
+  resolveHolderResearchPositionState,
   type HolderResearchUpdateV1,
   type SignalPriceSnapshotV1,
   type TelegramMarketIdentityV1,
@@ -614,6 +615,7 @@ type SignalBotResearchDelta =
   | {
       currentPrice: number;
       kind: "price_move";
+      holderPositionState: "increased" | "reduced" | "unchanged" | "unknown";
       priceMoveCents: number;
       supportsBuy: boolean;
     }
@@ -699,7 +701,7 @@ const UUID_RE =
 const SEND_FAILURE_COOLDOWN_SEC = 300;
 const FOLLOWTHROUGH_RETRY_COOLDOWN_MS = 15 * 60_000;
 const FOLLOWTHROUGH_MIN_LATEST_SNAPSHOT_FRESH_MS = 24 * 60 * 60 * 1_000;
-const SIGNAL_BOT_COPY_VERSION = "signal_bot_copy_v10";
+const SIGNAL_BOT_COPY_VERSION = "signal_bot_copy_v11";
 export const SIGNAL_BOT_MENU_CALLBACK_PREFIX = "hm:v1:";
 const HOLDER_LINK_STOP_LABELS = new Set([
   "ATRACKEDWALLET",
@@ -984,10 +986,11 @@ function createSignalBotBodyTextRenderer(
       const matches: Array<
         SignalBotHolderLinkMatch & { kind: "holder" | "market"; url: string }
       > = [];
-      if (holderUrl && !didLinkHolder && holderCandidates.length > 0) {
-        const match = findSignalBotHolderLinkMatch(
+      if (holderUrl && !didLinkHolder) {
+        const match = findSignalBotHolderReferenceMatch(
           sanitizedValue,
           holderCandidates,
+          note.holderActorMode === "single_holder",
         );
         if (match) matches.push({ ...match, kind: "holder", url: holderUrl });
       }
@@ -1010,6 +1013,10 @@ function createSignalBotBodyTextRenderer(
         if (match.index < cursor) continue;
         rendered.push(
           escapeTelegramMarkdownV2(sanitizedValue.slice(cursor, match.index)),
+          ...(match.kind === "holder" &&
+          !sanitizedValue.slice(0, match.index).trimEnd().endsWith("👤")
+            ? ["👤 "]
+            : []),
           formatTelegramLink(
             sanitizedValue.slice(match.index, match.index + match.label.length),
             match.url,
@@ -1030,10 +1037,15 @@ function createSignalBotRichBodyTextRenderer(
   holderUrl: string | null,
   marketUrl: string | null,
   marketCandidates: string[],
+  holderBody: string | null,
 ): SignalBotRichBodyTextRenderer {
   const holderCandidates = holderUrl
     ? buildSignalBotHolderLinkCandidates(note)
     : [];
+  const allowGenericHolderReference =
+    note.holderActorMode === "single_holder" &&
+    (!holderBody ||
+      !findSignalBotHolderLinkMatch(holderBody, holderCandidates));
   const safeMarketCandidates = marketUrl
     ? [
         ...new Set(
@@ -1056,10 +1068,11 @@ function createSignalBotRichBodyTextRenderer(
       const matches: Array<
         SignalBotHolderLinkMatch & { kind: "holder" | "market"; url: string }
       > = [];
-      if (holderUrl && !didLinkHolder && holderCandidates.length > 0) {
-        const match = findSignalBotHolderLinkMatch(
+      if (holderUrl && !didLinkHolder) {
+        const match = findSignalBotHolderReferenceMatch(
           sanitizedValue,
           holderCandidates,
+          allowGenericHolderReference,
         );
         if (match) matches.push({ ...match, kind: "holder", url: holderUrl });
       }
@@ -1080,6 +1093,12 @@ function createSignalBotRichBodyTextRenderer(
         if (match.index < cursor) continue;
         const before = sanitizedValue.slice(cursor, match.index);
         if (before) rendered.push(before);
+        if (
+          match.kind === "holder" &&
+          !sanitizedValue.slice(0, match.index).trimEnd().endsWith("👤")
+        ) {
+          rendered.push("👤 ");
+        }
         rendered.push(
           telegramRichUrl(
             sanitizedValue.slice(match.index, match.index + match.label.length),
@@ -1211,6 +1230,23 @@ function findSignalBotHolderLinkMatch(
     }
   }
   return best;
+}
+
+function findSignalBotHolderReferenceMatch(
+  value: string,
+  candidates: string[],
+  allowGeneric = true,
+): SignalBotHolderLinkMatch | null {
+  const named = findSignalBotHolderLinkMatch(value, candidates);
+  if (named) return named;
+  if (!allowGeneric) return null;
+  const generic =
+    /\b(?:this|the same|the|a) trader\b(?!['’]s)(?=\s+(?:is|has|holds?|continues?|keeps?|backs?|bets?|refuses?|remains?|enters?|entered|increases?|reduces?|adds?|cuts?))/i.exec(
+      value,
+    );
+  return generic?.index == null
+    ? null
+    : { index: generic.index, label: generic[0] };
 }
 
 function isSignalBotHolderLinkMatchAllowed(
@@ -1422,30 +1458,6 @@ export function buildSignalBotMessage(input: {
         sideCopy: buySideCopy,
       })
     : null;
-  const bodyRenderer = createSignalBotBodyTextRenderer(
-    note,
-    holderMiniAppUrl,
-    marketMiniAppUrl,
-    [
-      buySideCopy?.rawOutcomeLabel ?? null,
-      buySideCopy?.sideLabel ?? null,
-      buySide ? presentation.positions[buySide].canonicalLabel : null,
-      note.marketTitle,
-      note.eventTitle,
-    ].filter((value): value is string => Boolean(value)),
-  );
-  const richBodyRenderer = createSignalBotRichBodyTextRenderer(
-    note,
-    holderMiniAppUrl,
-    marketMiniAppUrl,
-    [
-      buySideCopy?.rawOutcomeLabel ?? null,
-      buySideCopy?.sideLabel ?? null,
-      buySide ? presentation.positions[buySide].canonicalLabel : null,
-      note.marketTitle,
-      note.eventTitle,
-    ].filter((value): value is string => Boolean(value)),
-  );
   const sanitizedDescription =
     messageKind === "research_update"
       ? sanitizeSignalBotResearchDescription(note.description, note, buySide)
@@ -1478,6 +1490,26 @@ export function buildSignalBotMessage(input: {
   const description = structuredNarrative
     ? structuredNarrative.join("\n\n")
     : fallbackDescription;
+  const bodyMarketCandidates = [
+    buySideCopy?.rawOutcomeLabel ?? null,
+    buySideCopy?.sideLabel ?? null,
+    buySide ? presentation.positions[buySide].canonicalLabel : null,
+    note.marketTitle,
+    note.eventTitle,
+  ].filter((value): value is string => Boolean(value));
+  const bodyRenderer = createSignalBotBodyTextRenderer(
+    note,
+    holderMiniAppUrl,
+    marketMiniAppUrl,
+    bodyMarketCandidates,
+  );
+  const richBodyRenderer = createSignalBotRichBodyTextRenderer(
+    note,
+    holderMiniAppUrl,
+    marketMiniAppUrl,
+    bodyMarketCandidates,
+    description,
+  );
   const summary = description ? bodyRenderer.render(description) : null;
   const richSummaryParagraphs =
     structuredNarrative ??
@@ -7268,7 +7300,9 @@ function formatSignalBotFollowthroughLead(input: {
   if (
     stats.priceMoveCents != null &&
     stats.priceMoveCents > 0 &&
-    stats.netSignalSideFlowUsd > 0
+    stats.netSignalSideFlowUsd > 0 &&
+    stats.exitedWallets === 0 &&
+    stats.trimmedWallets === 0
   ) {
     if (stats.entryPrice != null && stats.markPrice != null) {
       return `The market has moved from ${formatCents(
@@ -7283,7 +7317,7 @@ function formatSignalBotFollowthroughLead(input: {
     stats.exitedWallets > 0 ||
     stats.trimmedWallets > stats.joinedOrAddedWallets
   ) {
-    return "The group behind the original call is getting smaller, even if some positions remain open.";
+    return "Some wallets have reduced exposure since the original call, even if other tracked money remains in the trade.";
   }
   return "Tracked positioning has changed since the original call, but the setup is not resolved yet.";
 }
@@ -8611,6 +8645,13 @@ function resolveSignalBotResearchDelta(
   ) {
     return {
       currentPrice: reason.after,
+      holderPositionState: resolveHolderResearchPositionState({
+        current: note.decisionSnapshot,
+        previous: note.previousDecisionSnapshot,
+        side,
+        update: contract,
+        walletId: note.holderWalletId,
+      }),
       kind: "price_move",
       priceMoveCents: reason.delta * 100,
       supportsBuy: contract.ctaIntent === "buy",

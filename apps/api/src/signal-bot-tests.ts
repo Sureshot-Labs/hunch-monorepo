@@ -10668,7 +10668,72 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           /\[TB14\]\(https:\/\/t\.me\/hunch_signal_bot\/hunch\?startapp=wt_/g,
         ) ?? [];
       assert.equal(holderLinks.length, 1);
+      assert.match(message.text, /👤 __\[TB14\]\(/);
+      assert.doesNotMatch(message.text, /\[👤/);
+      assert.match(JSON.stringify(message.richMessage), /"👤 "/);
       assert.doesNotMatch(firstLine, /tracking\/wallet/);
+    },
+  },
+  {
+    name: "message linkifies a generic trader reference with a separate icon and no extra CTA",
+    run: () => {
+      const message = buildSignalBotMessage({
+        appBaseUrl: "https://app.hunch.trade",
+        buyAmountUsd: 10,
+        note: note({
+          description:
+            "This trader is still holding $8.6K after the move. The trader has not taken profit.",
+        }),
+        telegramMiniAppLinkBase: "https://t.me/hunch_signal_bot/hunch",
+      });
+      assert.match(
+        message.text,
+        /👤 __\[This trader\]\(https:\/\/t\.me\/hunch_signal_bot\/hunch\?startapp=wt_[^)]+\)__/,
+      );
+      assert.equal((message.text.match(/startapp=wt_/g) ?? []).length, 1);
+      assert.doesNotMatch(message.text, /\[👤/);
+      const buttons = message.keyboard?.inline_keyboard.flat() ?? [];
+      assert.equal(buttons.length, 1);
+      assert.doesNotMatch(buttons[0]?.text ?? "", /Trader|Wallet/);
+      const richJson = JSON.stringify(message.richMessage);
+      assert.match(richJson, /"👤 "/);
+      assert.match(
+        richJson,
+        /"text":(?:"This trader"|\["This trader"\]),"type":"underline"/,
+      );
+      assert.doesNotMatch(richJson, /"text":"👤 This trader"/);
+    },
+  },
+  {
+    name: "generic trader link prefers an action phrase and stays off cluster copy",
+    run: () => {
+      const single = buildSignalBotMessage({
+        appBaseUrl: "https://app.hunch.trade",
+        buyAmountUsd: 10,
+        note: note({
+          description:
+            "The market moved in the trader's favor. The trader is still holding after the move.",
+        }),
+        telegramMiniAppLinkBase: "https://t.me/hunch_signal_bot/hunch",
+      });
+      assert.doesNotMatch(single.text, /in 👤/);
+      assert.match(
+        single.text,
+        /👤 __\[The trader\]\([^)]+\)__ is still holding/,
+      );
+
+      const cluster = buildSignalBotMessage({
+        appBaseUrl: "https://app.hunch.trade",
+        buyAmountUsd: 10,
+        note: note({
+          description: "The trader is still holding after the move.",
+          holderActorMode: "sharp_cluster",
+          holderClusterSharpHolders: 2,
+          holderClusterSharpUsd: 20_000,
+        }),
+        telegramMiniAppLinkBase: "https://t.me/hunch_signal_bot/hunch",
+      });
+      assert.doesNotMatch(cluster.text, /startapp=wt_|👤/);
     },
   },
   {
@@ -10689,7 +10754,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.doesNotMatch(message.text, /\[24124\]%/);
       assert.match(
         message.text,
-        /then __\[24124\]\(https:\/\/t\.me\/hunch_signal_bot\/hunch\?startapp=wt_[^)]+\)__/,
+        /then 👤 __\[24124\]\(https:\/\/t\.me\/hunch_signal_bot\/hunch\?startapp=wt_[^)]+\)__/,
       );
       assert.equal((message.text.match(/\[24124\]\(/g) ?? []).length, 1);
     },
@@ -11016,8 +11081,9 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       );
       assert.match(
         message.text,
-        /trader entered before this signal, so their open PnL and the −11¢ move since the call use different starting prices/i,
+        /entered before this signal, so their open PnL and the −11¢ move since the call use different starting prices/i,
       );
+      assert.match(message.text, /👤 __\[The trader\]\(/);
       assert.ok(
         message.text.includes(
           "*Wallet position*: $5\\.8K on NO · 61¢ now · Wallet open PnL \\+$1\\.5K",
@@ -11025,6 +11091,191 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         message.text,
       );
       assert.doesNotMatch(message.text, /Est\\\. open PnL/);
+    },
+  },
+  {
+    name: "research update applies manager FOMO framing to a profitable ceasefire hold",
+    run: () => {
+      const message = buildSignalBotMessage({
+        appBaseUrl: "https://app.hunch.trade",
+        buyAmountUsd: 10,
+        messageKind: "research_update",
+        note: note({
+          description:
+            "YES trades near 94¢ after a one-day jump, turning a crowded favorite into a conviction-through-the-move read.",
+          direction: "up",
+          eventTitle: "Israel x Iran ceasefire continues through...?",
+          holderCredentialBullets: ["Up $247.7K over the last 30 days"],
+          holderOpenPnlUsd: 3_200,
+          holderPositionUsd: 8_600,
+          holderSide: "YES",
+          marketTitle: "July 31",
+          meaningfulDeltaReasons: ["odds_move"],
+          metrics: {
+            signalEvidenceVersion: 1,
+            signalEvidence: [
+              {
+                asOf: "2026-07-28T00:00:00.000Z",
+                context: null,
+                horizonDays: 30,
+                id: "representative_wallet:track_record:30d",
+                kind: "track_record",
+                measurement: {
+                  kind: "scalar",
+                  unit: "usd",
+                  value: 247_700,
+                },
+                quality: "verified",
+                sampleSize: null,
+                scope: "representative_wallet",
+                source: {
+                  kind: "hunch_wallet_intel",
+                  label: "Representative wallet",
+                  url: null,
+                },
+              },
+            ],
+          },
+          decisionSnapshot: researchSnapshot({
+            holderPositionUsd: 8_600,
+            side: "YES",
+            yesProbability: 0.94,
+          }),
+          previousDecisionSnapshot: researchSnapshot({
+            holderPositionUsd: 8_600,
+            side: "YES",
+            yesProbability: 0.87,
+          }),
+          revisionKind: "research_update",
+        }),
+        telegramMiniAppLinkBase: "https://t.me/your_hunch_bot",
+      });
+
+      assert.match(
+        message.text.split("\n")[0] ?? "",
+        /^📈 \*The Israel–Iran ceasefire is now 94% to last through July 31\\\.\* A trader up \$248K still hasn't taken profit\\\.$/,
+      );
+      assert.match(
+        message.text,
+        /Since the original call, YES has climbed 7¢ to 94¢/,
+      );
+      assert.match(message.text, /👤 __\[the trader\]\(/);
+      assert.match(message.text, /continues to hold \$8\\\.6K on YES/);
+      assert.match(message.text, /\\\+\$3\\\.2K in open profit/);
+      assert.match(message.text, /\$247\\\.7K over the last 30 days/);
+      assert.doesNotMatch(
+        message.text,
+        /moved with the call|crowded favorite|conviction-through-the-move/i,
+      );
+      const buttons = message.keyboard?.inline_keyboard.flat() ?? [];
+      assert.equal(buttons.length, 1);
+      assert.doesNotMatch(buttons[0]?.text ?? "", /Trader|Wallet/);
+    },
+  },
+  {
+    name: "research update reports a concurrent trim instead of claiming no profit-taking",
+    run: () => {
+      const priceReason: HolderResearchUpdateReason = {
+        after: 0.94,
+        asOf: TEST_SIGNAL_PRICE_AS_OF,
+        before: 0.87,
+        delta: 0.07,
+        kind: "price_moved_with_thesis",
+        side: "YES",
+        unit: "probability",
+      };
+      const positionReason: HolderResearchUpdateReason = {
+        after: 8_600,
+        asOf: TEST_SIGNAL_PRICE_AS_OF,
+        before: 10_000,
+        delta: -1_400,
+        kind: "position_reduced",
+        scope: "representative_wallet",
+        side: "YES",
+        unit: "usd",
+        walletId: "wallet-1",
+      };
+      const message = buildSignalBotMessage({
+        appBaseUrl: "https://app.hunch.trade",
+        buyAmountUsd: 10,
+        messageKind: "research_update",
+        note: note({
+          bestAsk: 0.95,
+          bestBid: 0.93,
+          direction: "up",
+          eventTitle: "Israel x Iran ceasefire continues through...?",
+          holderOpenPnlUsd: 3_200,
+          holderPositionUsd: 8_600,
+          holderResearchUpdateV1: {
+            baselineAsOf: "2026-07-27T00:00:00.000Z",
+            baselineNoteId: "00000000-0000-4000-8000-000000000001",
+            changedAt: TEST_SIGNAL_PRICE_AS_OF,
+            ctaIntent: "buy",
+            fingerprint: "price-up-position-trimmed",
+            materialityPolicy: {
+              revision: "test-v1",
+              thresholds: {},
+              version: 1,
+            },
+            primaryReason: priceReason,
+            reasons: [priceReason, positionReason],
+            selectedSide: "YES",
+            version: 1,
+          },
+          holderSide: "YES",
+          marketTitle: "July 31",
+          metrics: {
+            signalEvidenceVersion: 1,
+            signalEvidence: [
+              {
+                asOf: "2026-07-28T00:00:00.000Z",
+                context: null,
+                horizonDays: 30,
+                id: "representative_wallet:track_record:30d",
+                kind: "track_record",
+                measurement: {
+                  kind: "scalar",
+                  unit: "usd",
+                  value: 247_700,
+                },
+                quality: "verified",
+                sampleSize: null,
+                scope: "representative_wallet",
+                source: {
+                  kind: "hunch_wallet_intel",
+                  label: "Representative wallet",
+                  url: null,
+                },
+              },
+            ],
+          },
+          decisionSnapshot: researchSnapshot({
+            holderPositionUsd: 8_600,
+            side: "YES",
+            yesProbability: 0.94,
+          }),
+          previousDecisionSnapshot: researchSnapshot({
+            holderPositionUsd: 10_000,
+            side: "YES",
+            yesProbability: 0.87,
+          }),
+          revisionKind: "research_update",
+        }),
+        telegramMiniAppLinkBase: "https://t.me/your_hunch_bot",
+      });
+
+      assert.match(
+        message.text.split("\n")[0] ?? "",
+        /has trimmed but is still holding YES/,
+      );
+      assert.match(
+        message.text,
+        /has trimmed the position but still holds \$8\\\.6K on YES/,
+      );
+      assert.doesNotMatch(
+        message.text,
+        /hasn't taken profit|Rather than locking in gains/,
+      );
     },
   },
   {
@@ -12912,7 +13163,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       };
       assert.equal(metrics.fallbackStandalone, true);
       assert.equal(metrics.noteKind, "research_update");
-      assert.equal(metrics.copy?.copyVersion, "signal_bot_copy_v10");
+      assert.equal(metrics.copy?.copyVersion, "signal_bot_copy_v11");
       assert.equal(
         metrics.copy?.notification?.headline?.storyKind,
         "price_move",
@@ -13195,6 +13446,72 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         query.sql.includes("from wallet_activity_events"),
       );
       assert.equal(flowQuery?.params[3], "polymarket");
+    },
+  },
+  {
+    name: "mixed positive followthrough does not claim every wallet kept building",
+    run: async () => {
+      const redis = new FakeRedis();
+      await enableFollowthroughTestChat(redis);
+      const db = new FakeFollowthroughDb();
+      db.runtimePayload = {
+        signalBotFollowthroughEnabled: true,
+        signalBotFollowthroughTypes: ["stats"],
+        signalBotFollowthroughMinJoinedOrAdded: 99,
+        signalBotFollowthroughMinNetFlowUsd: 1_000,
+        signalBotFollowthroughMinPriceMoveCents: 1,
+      };
+      db.candidateRows = [followthroughCandidateRow()];
+      db.flowRows = [
+        followthroughFlowRow({
+          baseline_shares: "0",
+          latest_shares: "500",
+          latest_size_usd: "30000",
+          net_shares: "500",
+          net_usd: "30000",
+          positive_usd: "30000",
+          wallet_id: "joined",
+        }),
+        followthroughFlowRow({
+          baseline_shares: "200",
+          latest_shares: "0",
+          latest_size_usd: "0",
+          negative_usd: "10000",
+          net_shares: "-200",
+          net_usd: "-10000",
+          positive_usd: "0",
+          wallet_id: "exited",
+        }),
+      ];
+      const richMessages: TelegramSendRichMessageInput[] = [];
+      const telegram = Object.assign(new FakeTelegram(), {
+        sendRichMessage: async (
+          message: TelegramSendRichMessageInput,
+        ): Promise<TelegramSendResult> => {
+          richMessages.push(message);
+          return { messageId: 101, ok: true };
+        },
+      });
+      const result = await publishSignalBotFollowthroughTick({
+        config: parseSignalBotConfig({
+          HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
+          HUNCH_SIGNAL_BOT_TELEGRAM_MINI_APP_LINK_BASE:
+            TEST_TELEGRAM_MINI_APP_LINK_BASE,
+          HUNCH_SIGNAL_BOT_TOKEN: "token",
+        }),
+        db,
+        now: new Date("2026-01-02T01:00:00.000Z"),
+        redis,
+        telegram,
+      });
+
+      const rich = JSON.stringify(richMessages[0]?.rich_message);
+      assert.equal(result.sent, 1);
+      assert.match(rich, /Some wallets have reduced exposure/);
+      assert.doesNotMatch(
+        rich,
+        /continue building their position instead of taking profit/,
+      );
     },
   },
   {
