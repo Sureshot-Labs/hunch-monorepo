@@ -10,6 +10,7 @@ import {
 import type {
   FundingDestinationOption,
   FundingQuoteSummary,
+  FundingReceiveSession,
   IntentLiquidityProjection,
   NormalizedAction,
 } from "../../domain/types.js";
@@ -232,6 +233,86 @@ function operationSteps(): readonly FundingOperationStep[] {
   ];
 }
 
+function receiveSession(): FundingReceiveSession {
+  const receiveTarget = {
+    receiveTargetId: "receive_target_12345678",
+    networkId: "evm:137",
+    destinationAddress: "0x0000000000000000000000000000000000000002",
+    acceptedAssets: [{ asset: ASSET, handling: "direct" as const }],
+    safeInstructions: ["Send only the displayed asset on Polygon."],
+  };
+  const receiveIngress = (ingressKind: "manual" | "privy") => ({
+    ingressKind,
+    sourceNetworkId: ingressKind === "privy" ? ASSET.networkId : null,
+    sourceAsset: ingressKind === "privy" ? ASSET : null,
+    receiveTargets: [receiveTarget],
+    recommendedReceiveTargetId: receiveTarget.receiveTargetId,
+    destinationOptionId: destination().destinationOptionId,
+    destinationAddress: receiveTarget.destinationAddress,
+    requestedAmount: null,
+    amountSemantics: "minimum" as const,
+    expiresAt: new Date(NOW.getTime() + 86_400_000).toISOString(),
+    safeInstructions: ["Send only the displayed asset on Polygon."],
+  });
+  return {
+    receiveSessionId: "20000000-0000-4000-8000-000000000001",
+    status: "open",
+    venueId: "polymarket",
+    destinationOptionId: destination().destinationOptionId,
+    venueBindingOptionId: destination().venueBindingOptionId,
+    destinationAsset: ASSET,
+    methods: [
+      {
+        methodId: "receive_method_manual_12345678",
+        kind: "manual",
+        safeLabel: "Send crypto",
+        ingress: receiveIngress("manual"),
+      },
+      {
+        methodId: "receive_method_privy_12345678",
+        kind: "privy",
+        safeLabel: "Fund with Privy",
+        ingress: receiveIngress("privy"),
+      },
+    ],
+    receiveTargets: [receiveTarget],
+    selectedReceiveTargetId: "receive_target_12345678",
+    automationPolicy: {
+      stableConversion: "automatic_within_caps",
+      volatileConversion: "review_required",
+      maximumFeeUsd: "1",
+      maximumFeeBps: 500,
+      maximumSlippageBps: 100,
+    },
+    version: 1,
+    openedAt: NOW.toISOString(),
+    lastObservedAt: null,
+    expiresAt: new Date(NOW.getTime() + 86_400_000).toISOString(),
+    observeUntil: new Date(NOW.getTime() + 8 * 86_400_000).toISOString(),
+    closedAt: null,
+  };
+}
+
+function receiveReceipt() {
+  return {
+    receiptId: "00000000-0000-4000-8000-000000000051",
+    receiveSessionId: receiveSession().receiveSessionId,
+    variantId: "ingress_variant_review_12345678",
+    asset: {
+      networkId: "solana:mainnet",
+      assetId: "11111111111111111111111111111111",
+      decimals: 9,
+    },
+    destinationAddress: "9xQeWvG816bUx9EPfB1G6QxgXLKWMuD5YpLQwJwN6JY",
+    rawAmount: "10000000",
+    observationRevision: "solana_transfer_review_12345678",
+    observedAt: NOW.toISOString(),
+    status: "review_required" as const,
+    handling: "review_required" as const,
+    childFundingOperationId: null,
+  };
+}
+
 async function buildApp(overrides: Partial<FundingRouteDependencies> = {}) {
   const app = Fastify({ logger: false });
   app.setValidatorCompiler(validatorCompiler);
@@ -293,6 +374,36 @@ async function buildApp(overrides: Partial<FundingRouteDependencies> = {}) {
       accepted: true,
       stepState: "submitted",
     }),
+    openReceiveSession: async () => ({
+      session: receiveSession(),
+      receipts: [],
+      replayed: false,
+    }),
+    receiveSession: async () => ({
+      session: receiveSession(),
+      receipts: [],
+      replayed: true,
+    }),
+    cancelReceiveSession: async () => ({
+      session: {
+        ...receiveSession(),
+        status: "cancelled",
+        closedAt: NOW.toISOString(),
+      },
+      receipts: [],
+      replayed: false,
+    }),
+    reviewReceiveReceipt: async () => ({
+      receipt: receiveReceipt(),
+      quote: {
+        ...quote(),
+        consentMode: "explicit_economic_review",
+      },
+    }),
+    commitReceiveReceiptReview: async () => ({
+      operation: operation(),
+      replayed: false,
+    }),
     ...overrides,
   };
   registerFundingRoutes(app, dependencies);
@@ -326,6 +437,142 @@ await test("funding routes derive ownership only from authenticated session", as
       ),
       false,
     );
+  } finally {
+    await app.close();
+  }
+});
+
+await test("receive session opens without a requested amount", async () => {
+  let observedUserId: string | null = null;
+  let observedBody: unknown = null;
+  const app = await buildApp({
+    openReceiveSession: async (userId, request) => {
+      observedUserId = userId;
+      observedBody = request;
+      return {
+        session: receiveSession(),
+        receipts: [],
+        replayed: false,
+      };
+    },
+  });
+  try {
+    const response = await app.inject({
+      method: "POST",
+      url: "/funding/receive-sessions",
+      payload: {
+        destinationOptionId: destination().destinationOptionId,
+        venueBindingOptionId: destination().venueBindingOptionId,
+        selectedReceiveTargetId: null,
+      },
+    });
+    assert.equal(response.statusCode, 200);
+    assert.equal(observedUserId, USER_ID);
+    assert.deepEqual(observedBody, {
+      destinationOptionId: destination().destinationOptionId,
+      venueBindingOptionId: destination().venueBindingOptionId,
+      selectedReceiveTargetId: null,
+    });
+    assert.equal(
+      response.json().session.receiveSessionId,
+      receiveSession().receiveSessionId,
+    );
+    assert.deepEqual(response.json().session.methods, receiveSession().methods);
+    assert.equal("amount" in (observedBody as object), false);
+  } finally {
+    await app.close();
+  }
+});
+
+await test("receive session reads only through the authenticated owner", async () => {
+  let observedUserId: string | null = null;
+  const app = await buildApp({
+    receiveSession: async (userId) => {
+      observedUserId = userId;
+      return {
+        session: receiveSession(),
+        receipts: [],
+        replayed: true,
+      };
+    },
+  });
+  try {
+    const response = await app.inject({
+      method: "GET",
+      url: `/funding/receive-sessions/${receiveSession().receiveSessionId}`,
+    });
+    assert.equal(response.statusCode, 200);
+    assert.equal(observedUserId, USER_ID);
+  } finally {
+    await app.close();
+  }
+});
+
+await test("volatile receive receipt review uses the authenticated receipt identity", async () => {
+  let observed: Readonly<{
+    userId: string;
+    sessionId: string;
+    receiptId: string;
+  }> | null = null;
+  const app = await buildApp({
+    reviewReceiveReceipt: async (userId, sessionId, receiptId) => {
+      observed = { userId, sessionId, receiptId };
+      return {
+        receipt: receiveReceipt(),
+        quote: quote(),
+      };
+    },
+  });
+  try {
+    const response = await app.inject({
+      method: "POST",
+      url: `/funding/receive-sessions/${receiveSession().receiveSessionId}/receipts/${receiveReceipt().receiptId}/quote`,
+    });
+    assert.equal(response.statusCode, 200);
+    assert.deepEqual(observed, {
+      userId: USER_ID,
+      sessionId: receiveSession().receiveSessionId,
+      receiptId: receiveReceipt().receiptId,
+    });
+    assert.equal(response.json().quote.consentMode, "explicit_economic_review");
+    assert.equal(response.json().receipt.handling, "review_required");
+  } finally {
+    await app.close();
+  }
+});
+
+await test("volatile receive receipt commit remains on the standard operation contract", async () => {
+  let observedRequest: unknown = null;
+  const app = await buildApp({
+    commitReceiveReceiptReview: async (
+      userId,
+      receiveSessionId,
+      receiptId,
+      request,
+    ) => {
+      observedRequest = { userId, receiveSessionId, receiptId, request };
+      return { operation: operation(), replayed: false };
+    },
+  });
+  try {
+    const request = {
+      quoteId: quote().quoteId,
+      consentToken: quote().consentToken,
+      idempotencyKey: "receive_review_commit_12345678",
+    };
+    const response = await app.inject({
+      method: "POST",
+      url: `/funding/receive-sessions/${receiveSession().receiveSessionId}/receipts/${receiveReceipt().receiptId}/commit`,
+      payload: request,
+    });
+    assert.equal(response.statusCode, 200);
+    assert.deepEqual(observedRequest, {
+      userId: USER_ID,
+      receiveSessionId: receiveSession().receiveSessionId,
+      receiptId: receiveReceipt().receiptId,
+      request,
+    });
+    assert.equal(response.json().operation.operationId, operation().id);
   } finally {
     await app.close();
   }

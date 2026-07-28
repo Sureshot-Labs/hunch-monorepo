@@ -184,7 +184,8 @@ function evaluateSponsoredErc4337Action(
       candidate.value === BigInt(input.action.valueRaw) &&
       normalizedHex(candidate.data) === normalizedHex(input.action.data),
   );
-  if (matchingOperations.length !== 1) {
+  const [matchingOperation] = matchingOperations;
+  if (matchingOperations.length !== 1 || !matchingOperation) {
     return {
       actionMatches: false,
       userOperationSucceeded: null,
@@ -194,7 +195,7 @@ function evaluateSponsoredErc4337Action(
           : "sponsored_inner_action_mismatch",
     };
   }
-  const operation = matchingOperations[0]!.operation;
+  const operation = matchingOperation.operation;
   if (!input.receipt || !input.receipt.succeeded) {
     return {
       actionMatches: true,

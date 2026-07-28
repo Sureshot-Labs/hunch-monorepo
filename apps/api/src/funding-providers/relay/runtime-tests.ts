@@ -910,7 +910,9 @@ const destination: FundingTarget = {
     Object.keys(RELAY_ROUTE_SPECS).sort(),
     [
       ...Object.keys(relayRehearsalScenarios),
+      "solana-sol-to-base-usdc",
       "solana-sol-to-polygon-pusd",
+      "solana-usdc-to-base-usdc",
       "solana-usdc-to-polygon-pusd",
     ].sort(),
   );
@@ -920,6 +922,14 @@ const destination: FundingTarget = {
   );
   assert.equal(
     RELAY_ROUTE_SPECS["base-usdc-to-polygon-pusd"]?.quoteMode,
+    "expected_output",
+  );
+  assert.equal(
+    RELAY_ROUTE_SPECS["solana-sol-to-base-usdc"]?.quoteMode,
+    "expected_output",
+  );
+  assert.equal(
+    RELAY_ROUTE_SPECS["solana-usdc-to-base-usdc"]?.quoteMode,
     "expected_output",
   );
   assert.deepEqual(

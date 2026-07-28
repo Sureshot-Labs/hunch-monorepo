@@ -178,6 +178,137 @@ export const SOLANA_SPL_TOKEN_PROGRAM_ID =
 export const SOLANA_TOKEN_2022_PROGRAM_ID =
   "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
 
+export type SolanaAddressSignature = Readonly<{
+  signature: string;
+  slot: bigint;
+  blockTime: number | null;
+  failed: boolean;
+}>;
+
+export async function fetchSolanaFinalizedSlot(inputs: {
+  rpcUrls: string[];
+  timeoutMs: number;
+}): Promise<bigint> {
+  const result = await solanaRpcRequest<number>({
+    rpcUrls: inputs.rpcUrls,
+    timeoutMs: inputs.timeoutMs,
+    method: "getSlot",
+    params: [{ commitment: "finalized" }],
+  });
+  if (
+    typeof result !== "number" ||
+    !Number.isSafeInteger(result) ||
+    result < 0
+  ) {
+    throw new Error("Solana RPC: invalid finalized slot");
+  }
+  return BigInt(result);
+}
+
+export async function fetchSolanaAddressSignatures(inputs: {
+  rpcUrls: string[];
+  timeoutMs: number;
+  address: string;
+  before?: string | null;
+  until?: string | null;
+  limit?: number;
+}): Promise<readonly SolanaAddressSignature[]> {
+  const limit = Math.max(1, Math.min(1_000, Math.trunc(inputs.limit ?? 1_000)));
+  const config: Record<string, unknown> = {
+    commitment: "finalized",
+    limit,
+  };
+  if (inputs.before) config.before = inputs.before;
+  if (inputs.until) config.until = inputs.until;
+  const result = await solanaRpcRequest<unknown[]>({
+    rpcUrls: inputs.rpcUrls,
+    timeoutMs: inputs.timeoutMs,
+    method: "getSignaturesForAddress",
+    params: [inputs.address, config],
+  });
+  if (!Array.isArray(result)) {
+    throw new Error("Solana RPC: invalid address signatures response");
+  }
+  return result.map((entry) => {
+    if (!isRecord(entry)) {
+      throw new Error("Solana RPC: invalid address signature");
+    }
+    const signature = entry.signature;
+    const slot = entry.slot;
+    const blockTime = entry.blockTime;
+    if (
+      typeof signature !== "string" ||
+      signature.trim().length === 0 ||
+      typeof slot !== "number" ||
+      !Number.isSafeInteger(slot) ||
+      slot < 0 ||
+      (blockTime !== null &&
+        blockTime !== undefined &&
+        (typeof blockTime !== "number" || !Number.isFinite(blockTime)))
+    ) {
+      throw new Error("Solana RPC: invalid address signature");
+    }
+    return {
+      signature,
+      slot: BigInt(slot),
+      blockTime: typeof blockTime === "number" ? Math.trunc(blockTime) : null,
+      failed: entry.err != null,
+    };
+  });
+}
+
+export async function fetchSolanaParsedTransaction(inputs: {
+  rpcUrls: string[];
+  timeoutMs: number;
+  signature: string;
+}): Promise<unknown | null> {
+  return solanaRpcRequest<unknown | null>({
+    rpcUrls: inputs.rpcUrls,
+    timeoutMs: inputs.timeoutMs,
+    method: "getTransaction",
+    params: [
+      inputs.signature,
+      {
+        encoding: "jsonParsed",
+        commitment: "finalized",
+        maxSupportedTransactionVersion: 0,
+      },
+    ],
+  });
+}
+
+export async function fetchSolanaBlockhash(inputs: {
+  rpcUrls: string[];
+  timeoutMs: number;
+  slot: bigint;
+}): Promise<string | null> {
+  if (inputs.slot < 0n || inputs.slot > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new Error("Solana RPC: slot is outside the safe integer range");
+  }
+  const result = await solanaRpcRequest<unknown | null>({
+    rpcUrls: inputs.rpcUrls,
+    timeoutMs: inputs.timeoutMs,
+    method: "getBlock",
+    params: [
+      Number(inputs.slot),
+      {
+        commitment: "finalized",
+        transactionDetails: "none",
+        rewards: false,
+        maxSupportedTransactionVersion: 0,
+      },
+    ],
+  });
+  if (result == null) return null;
+  if (!isRecord(result)) {
+    throw new Error("Solana RPC: invalid block response");
+  }
+  const blockhash = result.blockhash;
+  return typeof blockhash === "string" && blockhash.trim().length > 0
+    ? blockhash
+    : null;
+}
+
 export type SolanaTokenBalance = {
   mint: string;
   amount: string;

@@ -510,12 +510,16 @@ route choices into the UI.
 
 1. Opens a market and sees estimated assets plus `Available now`.
 2. If short and allowlisted Solana USDC can cover it inside the frozen limits,
-   the same `Buy` prepares the Trading Balance and submits after destination
+   the same `Buy` selects the exact one-leg route for the requested venue:
+   Solana USDC → Polygon pUSD for Polymarket or Solana USDC → Base USDC for
+   Limitless. It prepares the Trading Balance and submits after destination
    observation and a fresh market quote.
 3. If native SOL or another volatile asset must be sold, Hunch shows one simple
    economic review: amount sold, minimum received, fee/price impact, ETA, and
    expiry. The user accepts or declines that sale; no technical route is
-   selected.
+   selected. For native SOL, the direct Limitless route is Solana SOL → Base
+   USDC; it must not detour through Polygon pUSD when that exact route is
+   enabled and healthy.
 4. A slow internal route remains passive Buy progress and may be resumed after
    reload. Only an external transfer becomes a separate `Add funds` action.
 
@@ -526,7 +530,9 @@ No destination chain, token address, or provider choice is required.
 1. Opens Add Funds from web or Telegram handoff.
 2. Chooses `Deposit crypto`; Hunch shows only verified receive targets. One
    target binds one network and address and lists every asset that is safe to
-   send there. Assets on the same target are not separate route choices.
+   send there. The user may explicitly choose the asset/network they intend to
+   send so the instructions are unambiguous; that presentation choice never
+   exposes or delegates selection of a technical route.
 3. The initial completed target is the canonical Polygon Polymarket Deposit
    Wallet and accepts either pUSD or Polygon USDC.e. pUSD is credited directly;
    verified USDC.e activates the immutable Funding Router continuation already
@@ -553,11 +559,30 @@ The initial product contract is intentionally narrow:
 | an external wallet or exchange on another EVM network or Solana                                 | no initial one-operation option                    | fail closed until that typed receive target and its observer/router/recovery path are activated        |
 
 An owned Receive target is not a Relay deposit address. It accepts only its
-displayed network and asset allowlist. Its displayed amount is a minimum target,
-not an invoice: underpayment in one asset remains pending, overpayment remains
-available, and several transfers of the same asset may satisfy the operation.
-The first detected asset locks the variant. Mixed-asset deposits in one
-operation enter typed recovery; they are never silently summed or converted.
+displayed network and exact-contract asset allowlist. It supports two distinct
+product contracts:
+
+- **open top-up**: no amount is required before the address is shown. A durable
+  Receive Session observes one or more transfer receipts. Each receipt creates
+  an immutable amount-specific child Funding Operation. Direct destination
+  collateral credits immediately; allowlisted equivalent stable collateral may
+  continue automatically only inside the fee/slippage/action caps accepted when
+  the session was created;
+- **minimum-target funding**: a trade shortfall or another explicitly bounded
+  intent supplies a minimum destination amount. Underpayment in one asset
+  remains pending, overpayment remains ordinary Account Value, and several
+  transfers of the same asset may satisfy the operation.
+
+The UI must not ask for an amount merely because the current planner requires a
+`requestedDestinationAmount`. Amount is required only by the selected product
+contract: an exact/minimum consumer need, a quote-bound provider address, or an
+economically material conversion review.
+
+For an open session, different transfer receipts are independently identified
+and reconciled; depositing two accepted assets does not corrupt the whole
+session. For one minimum-target or exact quote-bound operation, the first
+detected asset locks the variant and mixed-asset fulfillment still enters typed
+recovery rather than being silently summed or converted.
 
 A strict Relay Deposit Address is a different, exact-amount provider contract.
 It is disabled by default and never masquerades as owned Receive. Chained owned
@@ -567,7 +592,9 @@ variant; it may not discover or substitute a new route after funds arrive.
 
 #### Multi-asset observer and chained completion contract
 
-The durable ingress contract is generic even though activation is incremental:
+The following durable contract governs amount-specific minimum/exact ingress
+operations. Amount-free top-up uses the Receive Session and exact child
+operation contract in the next subsection. Activation remains incremental:
 
 - `ExternalIngressInstruction.receiveTargets[]` groups one network/address with
   its accepted assets and handling (`direct | automatic_conversion`);
@@ -596,10 +623,81 @@ First activated slice:
 | Polymarket Deposit Wallet on Polygon | pUSD           | observed minimum balance delta → destination credit                         |
 | Polymarket Deposit Wallet on Polygon | USDC.e         | observed minimum balance delta → committed Funding Router → pUSD/CLOB ready |
 
-Native Polygon USDC, Base/Ethereum stablecoins, Solana USDC, and native SOL are
-future adapters, not symbol aliases for this slice. Each must provide route
-fixtures, finality, decimal/price semantics, timeout/recovery behavior, and live
-evidence before it appears in `receiveTargets`.
+The local WP7 correction adds capability-gated receive targets backed by a
+unique controlled execution profile: Base USDC or Solana USDC may feed Polygon
+pUSD, Polygon pUSD may feed Base USDC, and direct Solana USDC/native SOL may
+feed Base USDC without a Polygon intermediate. Native SOL is also a typed
+Solana Receive variant with canonical System Program transfer identity, but
+its receipt enters `review_required` instead of automatic conversion. All
+remain rollout-disabled until fresh baseline observation, child-operation
+execution, and tiny-value live evidence pass. Native Polygon USDC without an
+exact registered route and other unregistered assets remain future adapters,
+not symbol aliases. Native SOL is never auto-sold merely because it arrived.
+
+#### Open top-up session and child-operation contract
+
+Open top-up is a durable receive contract, not an amount-zero Funding
+Operation:
+
+1. The user selects a destination venue, funding method, and one supported
+   asset/network presentation.
+2. Backend creates a scoped Receive Session with an exact destination binding,
+   receive address, accepted exact-contract assets, observer cursor, expiry,
+   route class, and consent/policy caps. Tracking starts before the address/QR
+   appears.
+3. A canonical chain receipt is allocated once by
+   `(network, transaction, event index, recipient, asset)`. An address scanner
+   ingests receipts once and fans them out to sessions; the system does not
+   poll the same wallet independently per browser or operation.
+4. The observed asset and raw amount create an immutable child Funding
+   Operation. Direct collateral settles directly. Equivalent stable collateral
+   may be quoted and committed automatically only within the session's frozen
+   route class, maximum fee/slippage, amount cap, signer, and destination
+   policy.
+5. Volatile assets such as native SOL may be received and counted in Account
+   Value, but are never sold from an amount-free session without a later exact
+   economic review. If the user wants a prequoted SOL-to-collateral transfer,
+   the amount is required before showing a strict quote-bound provider address.
+6. A late receipt is never lost because a UI session expired. It remains owned
+   Account Value and is either associated with a recoverable session or shown
+   as received value awaiting destination/conversion review.
+
+This split preserves immutable execution and idempotency without forcing an
+ordinary top-up to invent an amount in advance.
+
+#### Funding and conversion presentation contract
+
+Normal Buy, Add Funds, and Convert share the same planner and operation
+contracts but remain different user journeys:
+
+- **Buy**: sufficient venue cash and an automatically coverable internal stable
+  shortfall both show the ordinary green `Buy Now` CTA. No card such as
+  `Hunch will prepare this Buy`, no alternate `Buy`, and no source/route choice
+  appears before the click. After the click, inline progress immediately shows
+  `Move funds` only when required, then `Confirm balance` and `Place order`.
+  A second confirmation appears only for materially changed trade economics or
+  an economically material volatile conversion.
+- **External shortfall**: `Add funds` replaces `Buy Now` only when no eligible
+  existing Hunch value can cover the exact shortfall and a user-controlled
+  external transfer/payment is required.
+- **General Add Funds**: show every venue directly while fewer than five are
+  available. With five or more, show the recommended/recent venues first and
+  place the rest behind `More venues`; never hide the only alternative as
+  `Other venues (1)`.
+- **Deposit crypto**: after venue and method, show a human asset/network picker.
+  Default to the recommended proven option, but expose every other activated
+  option with direct/automatic-conversion/review-required semantics. Then show
+  the exact network, asset contract label, address, QR, copy action, warnings,
+  and durable status. Unsupported routes are absent, not optimistic.
+- **Convert**: use the canonical large `From`/`To` balance cards, venue and
+  asset/network labels, amount plus `Max`, computed receive amount, fee,
+  price impact, ETA, expiry, and an optional advanced slippage control. Raw
+  component IDs, `evm:137`, wallet IDs, and a user-entered `Minimum destination
+amount` never appear in the primary form.
+
+The normal UI uses existing design tokens and shared responsive primitives.
+Desktop and mobile may lay out those primitives differently but do not own
+separate funding state machines or route logic.
 
 #### Existing Polymarket trader
 
@@ -2883,6 +2981,24 @@ Sell/Redeem.
 9. Observe venue readiness; complete Add Funds.
 10. Approximately 95 USD remains ordinary Polymarket cash after a later 5 USD buy.
 
+### 19.1a SOL or Solana USDC to Limitless
+
+1. Destination resolver fixes the selected Limitless Trading Wallet and Base
+   USDC requirement.
+2. Planner prefers the exact direct `solana-sol-to-base-usdc` or
+   `solana-usdc-to-base-usdc` route. It must not compose
+   Solana → Polygon pUSD → Base USDC while the direct route is enabled,
+   quoteable, and inside policy.
+3. Relay `EXPECTED_OUTPUT` derives the bounded source input required for the
+   Base USDC shortfall and returns one SVM transaction. Solana USDC may proceed
+   automatically inside equivalent-stable caps; native SOL requires explicit
+   economic consent.
+4. The fail-closed validator binds source amount, protocol order ID, controlled
+   Solana signer, Base USDC recipient/refund, instruction discriminator, and
+   address-lookup-table shape before execution.
+5. Reconciliation observes Base USDC at the exact Limitless destination,
+   refreshes readiness and the market quote, and submits the original Buy once.
+
 ### 19.2 Polymarket shortfall funded from existing Limitless cash
 
 1. Trade intent computes Polymarket available amount and exact shortfall.
@@ -4257,7 +4373,8 @@ Completion evidence:
 - reload resumes backend state;
 - one destination/source proceeds directly, while real alternatives remain discoverable;
 - a Buy shortfall stays in the section 2.10 Buy caller instead of opening the
-  generic Deposit wizard; its primary CTA remains `Buy`;
+  generic Deposit wizard; its primary CTA remains the ordinary `Buy Now`, with
+  no pre-click internal-funding explanation or second technical confirmation;
 - direct external ingress requires an explicit transfer/handoff and backend
   observation; any future connected-wallet source requires an explicit
   signature and is never silently pulled;
@@ -4506,13 +4623,31 @@ stops new selection but preserves status polling/webhooks.
     composite may contain multiple independent legs targeting the same
     destination; no provider leg consumes another provider leg's output. A
     provider-output-dependent continuation starts from a fresh quote and
-    separate explicit consent. The bounded owned-ingress exception may activate
-    a deterministic exact action frozen before commit after its allowlisted
-    asset is observed; it performs no post-receipt discovery or substitution.
+    separate explicit consent. A minimum/exact bounded owned-ingress operation
+    may activate only a deterministic action frozen before commit. An open
+    Receive Session instead creates a new immutable exact child operation after
+    a canonical receipt; automatic stable continuation is allowed only inside
+    the session's previously accepted route class and economic/action caps.
 38. `users.id`/`user_id` is the only account identity; all account/funding APIs
     derive it from authentication and enforce ownership on every opaque ID.
 39. Reconciliation/webhook/polling/recovery remain active when creation mode is off.
 40. Privy-to-Relay Deposit Address and CEX-to-Relay Deposit Address are disabled.
+41. General Add Funds uses an amount-free Receive Session when the chosen owned
+    target can safely accept an open amount. Each canonical receipt creates an
+    exact child Funding Operation; an amount is not synthesized as zero.
+42. Exact/minimum amount remains mandatory for trade shortfall, strict
+    provider Deposit Address, and quote-bound economic conversion contracts.
+43. Equivalent stable collateral may auto-route only inside explicit frozen
+    policy caps. Volatile collateral is never sold without an exact economic
+    review, even when it arrived through an amount-free Receive Session.
+44. With fewer than five destination venues, Add Funds renders every venue
+    directly. Collapsing one of only two venues is a presentation defect.
+45. A coverable internal shortfall does not change the Buy CTA or add an
+    explanatory missing-step card. `Add funds` appears only when an external
+    user action is actually required.
+46. Funding presentation is human-readable and capability-driven. Raw
+    component, wallet, network, provider, and location identifiers remain in
+    diagnostics only; unsupported asset/network routes are not selectable.
 
 ## 29. Definition of Done
 

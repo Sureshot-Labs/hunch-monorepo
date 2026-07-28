@@ -18,6 +18,8 @@ import { PolymarketFundingPostconditionDriver } from "../preparation/polymarket-
 import { pollFundingPostconditions } from "../preparation/postcondition-driver.js";
 import { DirectIngressDestinationObserver } from "../reconciliation/direct-ingress-observer.js";
 import { OwnedRouteDestinationObserver } from "../reconciliation/owned-route-destination-observer.js";
+import { FundingReceiveSessionObserver } from "../receive/receive-session-observer.js";
+import { FundingReceiveReceiptRouter } from "../receive/receive-receipt-router.js";
 
 export type RelayFundingWorkerConfig = Readonly<{
   apiKey: string;
@@ -77,6 +79,14 @@ export async function runFundingReconciliationJob(
       operationIds: [],
     };
   }
+  await new FundingReceiveSessionObserver().pollBatch(pool, {
+    limit: options.limit ?? 25,
+    now: options.now,
+  });
+  await new FundingReceiveReceiptRouter(pool).runBatch({
+    limit: options.limit ?? 25,
+    now: options.now,
+  });
   const relay = options.relay;
   const directIngressObserver = new DirectIngressDestinationObserver();
   const ownedRouteObserver = new OwnedRouteDestinationObserver();

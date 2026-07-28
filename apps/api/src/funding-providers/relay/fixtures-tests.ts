@@ -60,6 +60,15 @@ const manifestFiles = array(manifest.files, "manifest.files").map((value) =>
   assert.equal(authorizedNativeSolQuoteOnly.walletSignaturesCreated, 0);
   assert.equal(authorizedNativeSolQuoteOnly.transactionsBroadcast, 0);
   assert.equal(authorizedNativeSolQuoteOnly.depositAddressModeRequests, 0);
+  const authorizedSolanaBaseQuoteOnly = object(
+    capturePhases.authorizedSolanaBaseQuoteOnly,
+    "manifest.capturePhases.authorizedSolanaBaseQuoteOnly",
+  );
+  assert.equal(authorizedSolanaBaseQuoteOnly.externalStateChanges, true);
+  assert.equal(authorizedSolanaBaseQuoteOnly.quoteRequestsCreated, 10);
+  assert.equal(authorizedSolanaBaseQuoteOnly.walletSignaturesCreated, 0);
+  assert.equal(authorizedSolanaBaseQuoteOnly.transactionsBroadcast, 0);
+  assert.equal(authorizedSolanaBaseQuoteOnly.depositAddressModeRequests, 0);
   const authorizedLiveRehearsal = object(
     capturePhases.authorizedLiveRehearsal,
     "manifest.capturePhases.authorizedLiveRehearsal",
@@ -274,6 +283,77 @@ const manifestFiles = array(manifest.files, "manifest.files").map((value) =>
   );
   assert.equal(allowances.polygonPusdToRelayV3Raw, "0");
   assert.equal(allowances.baseUsdcToRelayV2Raw, "0");
+}
+
+{
+  const direct = await fixture("quote-v2-solana-base-usdc.live-sanitized.json");
+  const metadata = object(direct._fixture, "solanaBase._fixture");
+  assert.equal(metadata.quoteRequestsCreated, 10);
+  assert.equal(metadata.walletSignaturesCreated, 0);
+  assert.equal(metadata.transactionsBroadcast, 0);
+  const routes = array(direct.routes, "solanaBase.routes").map((value, index) =>
+    object(value, `solanaBase.routes[${index}]`),
+  );
+  assert.deepEqual(
+    routes.map((route) => route.routeId),
+    ["solana-sol-to-base-usdc", "solana-usdc-to-base-usdc"],
+  );
+  for (const route of routes) {
+    const request = object(route.request, "solanaBase.request");
+    assert.deepEqual(request.tradeTypesObserved, [
+      "EXPECTED_OUTPUT",
+      "EXACT_INPUT",
+    ]);
+    assert.equal(request.selectedTradeType, "EXPECTED_OUTPUT");
+    assert.equal(request.useDepositAddress, false);
+    const quote = object(
+      route.latestExpectedOutputQuote,
+      "solanaBase.latestExpectedOutputQuote",
+    );
+    assert.equal(quote.httpStatus, 200);
+    assert.equal(quote.minimumDestinationRaw, "1000000");
+    assert.ok(
+      BigInt(string(quote.requiredSourceRaw, "solanaBase source raw")) > 0n,
+    );
+    assert.equal(quote.timeEstimateSeconds, 3);
+    const action = object(route.actionShape, "solanaBase.actionShape");
+    assert.equal(action.transactionCount, 1);
+    assert.equal(action.instructionCount, 1);
+    assert.equal(
+      action.programId,
+      "99vQwtBwYtrqqD9YSXbdum3KBdxPAVxYTaQ3cfnJSrN2",
+    );
+    assert.equal(action.addressLookupTableCount, 1);
+    assert.equal(action.instructionDataBytes, 48);
+  }
+  const security = object(direct.security, "solanaBase.security");
+  assert.equal(security.publicBurnerAddressesPersistedInFixture, false);
+  assert.equal(security.walletSecretsPersisted, false);
+  assert.equal(security.rawProviderRequestReferencesPersisted, false);
+  assert.equal(security.rawInstructionDataPersisted, false);
+  assert.equal(security.signed, false);
+  assert.equal(security.broadcast, false);
+  const adapter = object(
+    direct.productionAdapterValidation,
+    "solanaBase.productionAdapterValidation",
+  );
+  assert.equal(adapter.quoteRequestsCreated, 2);
+  assert.equal(adapter.walletSignaturesCreated, 0);
+  assert.equal(adapter.transactionsBroadcast, 0);
+  const adapterRoutes = array(adapter.routes, "solanaBase.adapterRoutes").map(
+    (value, index) => object(value, `solanaBase.adapterRoutes[${index}]`),
+  );
+  assert.deepEqual(
+    adapterRoutes.map((route) => route.routeShape),
+    [
+      "relay-solana-native-direct-depository-v1",
+      "relay-solana-spl-direct-depository-v1",
+    ],
+  );
+  assert.deepEqual(
+    adapterRoutes.map((route) => route.actionCount),
+    [1, 1],
+  );
 }
 
 {

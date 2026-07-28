@@ -524,7 +524,7 @@ export type ExternalIngressInstruction = Readonly<{
     destinationAddress: string;
     acceptedAssets: readonly Readonly<{
       asset: AssetRef;
-      handling: "direct" | "automatic_conversion";
+      handling: FundingReceiveHandling;
     }>[];
     safeInstructions: readonly string[];
   }>[];
@@ -536,6 +536,73 @@ export type ExternalIngressInstruction = Readonly<{
   expiresAt: string | null;
   safeInstructions: readonly string[];
 }>;
+
+export type FundingReceiveSessionStatus =
+  | "open"
+  | "processing"
+  | "review_required"
+  | "completed"
+  | "expired"
+  | "cancelled"
+  | "recovery_required";
+
+export type FundingReceiveMethod = Readonly<{
+  methodId: string;
+  kind: "manual" | "privy";
+  safeLabel: string;
+  ingress: ExternalIngressInstruction;
+}>;
+
+export type FundingReceiveAutomationPolicy = Readonly<{
+  stableConversion: "automatic_within_caps";
+  volatileConversion: "review_required";
+  maximumFeeUsd: string;
+  maximumFeeBps: number;
+  maximumSlippageBps: number;
+}>;
+
+export type FundingReceiveSession = Readonly<{
+  receiveSessionId: string;
+  status: FundingReceiveSessionStatus;
+  venueId: VenueId;
+  destinationOptionId: string;
+  venueBindingOptionId: string;
+  destinationAsset: AssetRef;
+  methods: readonly FundingReceiveMethod[];
+  receiveTargets: NonNullable<ExternalIngressInstruction["receiveTargets"]>;
+  selectedReceiveTargetId: string | null;
+  automationPolicy: FundingReceiveAutomationPolicy;
+  version: number;
+  openedAt: string;
+  lastObservedAt: string | null;
+  expiresAt: string;
+  observeUntil: string;
+  closedAt: string | null;
+}>;
+
+export type FundingReceiveReceipt = Readonly<{
+  receiptId: string;
+  receiveSessionId: string;
+  variantId: string;
+  asset: AssetRef;
+  destinationAddress: string;
+  rawAmount: RawAmount;
+  observationRevision: string;
+  observedAt: string;
+  status:
+    | "observed"
+    | "review_required"
+    | "routing"
+    | "ready"
+    | "recovery_required";
+  handling: FundingReceiveHandling;
+  childFundingOperationId: string | null;
+}>;
+
+export type FundingReceiveHandling =
+  | "direct"
+  | "automatic_conversion"
+  | "review_required";
 
 export type FundingExecutionPlan =
   | Readonly<{

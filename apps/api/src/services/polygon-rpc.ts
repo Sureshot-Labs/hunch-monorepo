@@ -200,6 +200,209 @@ async function ethRpcRequest<T>(inputs: {
   throw lastError ?? new Error(`Polygon RPC ${inputs.method} failed`);
 }
 
+export type EvmErc20TransferLog = Readonly<{
+  transactionHash: string;
+  logIndex: number;
+  blockNumber: bigint;
+  blockHash: string;
+  fromAddress: string;
+  toAddress: string;
+  rawAmount: bigint;
+}>;
+
+type EvmRpcLog = Readonly<{
+  address: string;
+  topics: readonly string[];
+  data: string;
+  blockNumber: string;
+  transactionHash: string;
+  transactionIndex: string;
+  blockHash: string;
+  logIndex: string;
+  removed?: boolean;
+}>;
+
+const ERC20_TRANSFER_TOPIC = ethers.id("Transfer(address,address,uint256)");
+
+function rpcQuantity(value: bigint): string {
+  if (value < 0n) throw new Error("EVM RPC quantity cannot be negative");
+  return `0x${value.toString(16)}`;
+}
+
+function parseRpcQuantity(value: string, field: string): bigint {
+  if (!/^0x[0-9a-f]+$/i.test(value)) {
+    throw new Error(`EVM RPC ${field} is invalid`);
+  }
+  return BigInt(value);
+}
+
+function addressTopic(address: string): string {
+  return ethers.zeroPadValue(ethers.getAddress(address), 32).toLowerCase();
+}
+
+export async function fetchEvmBlockNumber(inputs: {
+  rpcUrl: string;
+  timeoutMs: number;
+}): Promise<bigint> {
+  const result = await ethRpcRequest<string>({
+    rpcUrl: inputs.rpcUrl,
+    timeoutMs: inputs.timeoutMs,
+    method: "eth_blockNumber",
+    params: [],
+  });
+  return parseRpcQuantity(result, "block number");
+}
+
+export async function fetchErc20TransferLogs(inputs: {
+  rpcUrl: string;
+  timeoutMs: number;
+  contractAddress: string;
+  recipientAddress: string;
+  fromBlock: bigint;
+  toBlock: bigint;
+}): Promise<readonly EvmErc20TransferLog[]> {
+  if (inputs.toBlock < inputs.fromBlock) return [];
+  const contractAddress = ethers.getAddress(inputs.contractAddress);
+  const recipientAddress = ethers.getAddress(inputs.recipientAddress);
+  const logs = await ethRpcRequest<readonly EvmRpcLog[]>({
+    rpcUrl: inputs.rpcUrl,
+    timeoutMs: inputs.timeoutMs,
+    method: "eth_getLogs",
+    params: [
+      {
+        address: contractAddress,
+        fromBlock: rpcQuantity(inputs.fromBlock),
+        toBlock: rpcQuantity(inputs.toBlock),
+        topics: [ERC20_TRANSFER_TOPIC, null, addressTopic(recipientAddress)],
+      },
+    ],
+  });
+  const transferInterface = new Interface([
+    "event Transfer(address indexed from,address indexed to,uint256 value)",
+  ]);
+  return logs.flatMap((log): EvmErc20TransferLog[] => {
+    if (log.removed) return [];
+    if (
+      log.address.toLowerCase() !== contractAddress.toLowerCase() ||
+      log.topics[0]?.toLowerCase() !== ERC20_TRANSFER_TOPIC.toLowerCase()
+    ) {
+      return [];
+    }
+    const decoded = transferInterface.parseLog({
+      topics: [...log.topics],
+      data: log.data,
+    });
+    if (!decoded) return [];
+    const from = decoded.args.from;
+    const to = decoded.args.to;
+    const value = decoded.args.value;
+    if (
+      typeof from !== "string" ||
+      typeof to !== "string" ||
+      typeof value !== "bigint" ||
+      to.toLowerCase() !== recipientAddress.toLowerCase()
+    ) {
+      return [];
+    }
+    const logIndex = parseRpcQuantity(log.logIndex, "log index");
+    if (logIndex > BigInt(Number.MAX_SAFE_INTEGER)) {
+      throw new Error("EVM RPC log index exceeds the safe integer range");
+    }
+    return [
+      {
+        transactionHash: log.transactionHash.toLowerCase(),
+        logIndex: Number(logIndex),
+        blockNumber: parseRpcQuantity(log.blockNumber, "block number"),
+        blockHash: log.blockHash.toLowerCase(),
+        fromAddress: ethers.getAddress(from),
+        toAddress: ethers.getAddress(to),
+        rawAmount: value,
+      },
+    ];
+  });
+}
+
+async function fetchErc1155BalanceBatch(inputs: {
+  rpcUrl: string;
+  timeoutMs: number;
+  contractAddress: string;
+  pairs: readonly Readonly<{ owner: string; tokenId: string }>[];
+  onRpcCall?: (() => void) | null;
+}): Promise<readonly (bigint | null)[]> {
+  const data = erc1155Iface.encodeFunctionData("balanceOfBatch", [
+    inputs.pairs.map((pair) => pair.owner),
+    inputs.pairs.map((pair) => BigInt(pair.tokenId)),
+  ]);
+  inputs.onRpcCall?.();
+  const result = await ethRpcRequest<string>({
+    rpcUrl: inputs.rpcUrl,
+    timeoutMs: inputs.timeoutMs,
+    method: "eth_call",
+    params: [{ to: inputs.contractAddress, data }, "latest"],
+  });
+  const decoded = erc1155Iface.decodeFunctionResult(
+    "balanceOfBatch",
+    result,
+  ) as unknown;
+  const balances = Array.isArray(decoded) ? decoded[0] : null;
+  if (!Array.isArray(balances)) {
+    throw new Error("Polygon RPC: invalid balanceOfBatch result");
+  }
+  return inputs.pairs.map((_, index) => {
+    const raw = balances[index] as unknown;
+    return typeof raw === "bigint" ? raw : null;
+  });
+}
+
+type Erc1155OwnedTokenPair = Readonly<{
+  owner: string;
+  ownerKey: string;
+  tokenId: string;
+}>;
+
+function mergeErc1155BalanceBatch(
+  output: Map<string, Map<string, bigint>>,
+  pairs: readonly Erc1155OwnedTokenPair[],
+  balances: readonly (bigint | null)[],
+): void {
+  for (let index = 0; index < pairs.length; index += 1) {
+    const pair = pairs[index];
+    const value = balances[index] ?? null;
+    if (!pair || value == null) continue;
+    const ownerBalances = output.get(pair.ownerKey) ?? new Map();
+    ownerBalances.set(pair.tokenId, value);
+    output.set(pair.ownerKey, ownerBalances);
+  }
+}
+
+async function fetchErc1155OwnedTokenPairBalances(inputs: {
+  rpcUrl: string;
+  timeoutMs: number;
+  contractAddress: string;
+  pairs: readonly Erc1155OwnedTokenPair[];
+  maxPairsPerCall?: number;
+  onRpcCall?: (() => void) | null;
+}): Promise<Map<string, Map<string, bigint>>> {
+  const contractAddress = ethers.getAddress(inputs.contractAddress);
+  const maxPairsPerCall = Math.max(
+    1,
+    Math.trunc(inputs.maxPairsPerCall ?? 1000),
+  );
+  const output = new Map<string, Map<string, bigint>>();
+  for (let i = 0; i < inputs.pairs.length; i += maxPairsPerCall) {
+    const chunk = inputs.pairs.slice(i, i + maxPairsPerCall);
+    const balances = await fetchErc1155BalanceBatch({
+      rpcUrl: inputs.rpcUrl,
+      timeoutMs: inputs.timeoutMs,
+      contractAddress,
+      pairs: chunk,
+      onRpcCall: inputs.onRpcCall,
+    });
+    mergeErc1155BalanceBatch(output, chunk, balances);
+  }
+  return output;
+}
+
 export async function fetchErc1155BalancesByOwner(inputs: {
   rpcUrl: string;
   timeoutMs: number;
@@ -212,31 +415,17 @@ export async function fetchErc1155BalancesByOwner(inputs: {
   const contractAddress = ethers.getAddress(inputs.contractAddress);
   const owner = ethers.getAddress(inputs.owner);
 
-  const owners = inputs.tokenIds.map(() => owner);
-  const ids = inputs.tokenIds.map((id) => BigInt(id));
-
-  const data = erc1155Iface.encodeFunctionData("balanceOfBatch", [owners, ids]);
-  const result = await ethRpcRequest<string>({
+  const balances = await fetchErc1155BalanceBatch({
     rpcUrl: inputs.rpcUrl,
     timeoutMs: inputs.timeoutMs,
-    method: "eth_call",
-    params: [{ to: contractAddress, data }, "latest"],
+    contractAddress,
+    pairs: inputs.tokenIds.map((tokenId) => ({ owner, tokenId })),
   });
-
-  const decoded = erc1155Iface.decodeFunctionResult(
-    "balanceOfBatch",
-    result,
-  ) as unknown;
-  const balances = Array.isArray(decoded) ? decoded[0] : null;
-  if (!Array.isArray(balances)) {
-    throw new Error("Polygon RPC: invalid balanceOfBatch result");
-  }
 
   const output = new Map<string, bigint>();
   for (let i = 0; i < inputs.tokenIds.length; i += 1) {
     const tokenId = inputs.tokenIds[i];
-    const raw = balances[i] as unknown;
-    const value = typeof raw === "bigint" ? raw : null;
+    const value = balances[i] ?? null;
     if (!tokenId || value == null) continue;
     output.set(tokenId, value);
   }
@@ -270,12 +459,7 @@ export async function fetchErc1155BalancesByOwners(inputs: {
   );
   if (owners.length === 0 || tokenIds.length === 0) return new Map();
 
-  const contractAddress = ethers.getAddress(inputs.contractAddress);
-  const maxPairsPerCall = Math.max(
-    1,
-    Math.trunc(inputs.maxPairsPerCall ?? 1000),
-  );
-  const pairs: Array<{ owner: string; ownerKey: string; tokenId: string }> = [];
+  const pairs: Erc1155OwnedTokenPair[] = [];
   for (const owner of owners) {
     const ownerKey = owner.toLowerCase();
     for (const tokenId of tokenIds) {
@@ -283,44 +467,10 @@ export async function fetchErc1155BalancesByOwners(inputs: {
     }
   }
 
-  const output = new Map<string, Map<string, bigint>>();
-  for (let i = 0; i < pairs.length; i += maxPairsPerCall) {
-    const chunk = pairs.slice(i, i + maxPairsPerCall);
-    const accounts = chunk.map((pair) => pair.owner);
-    const ids = chunk.map((pair) => BigInt(pair.tokenId));
-    const data = erc1155Iface.encodeFunctionData("balanceOfBatch", [
-      accounts,
-      ids,
-    ]);
-    inputs.onRpcCall?.();
-    const result = await ethRpcRequest<string>({
-      rpcUrl: inputs.rpcUrl,
-      timeoutMs: inputs.timeoutMs,
-      method: "eth_call",
-      params: [{ to: contractAddress, data }, "latest"],
-    });
-
-    const decoded = erc1155Iface.decodeFunctionResult(
-      "balanceOfBatch",
-      result,
-    ) as unknown;
-    const balances = Array.isArray(decoded) ? decoded[0] : null;
-    if (!Array.isArray(balances)) {
-      throw new Error("Polygon RPC: invalid balanceOfBatch result");
-    }
-
-    for (let index = 0; index < chunk.length; index += 1) {
-      const pair = chunk[index];
-      const raw = balances[index] as unknown;
-      const value = typeof raw === "bigint" ? raw : null;
-      if (!pair || value == null) continue;
-      const ownerBalances = output.get(pair.ownerKey) ?? new Map();
-      ownerBalances.set(pair.tokenId, value);
-      output.set(pair.ownerKey, ownerBalances);
-    }
-  }
-
-  return output;
+  return fetchErc1155OwnedTokenPairBalances({
+    ...inputs,
+    pairs,
+  });
 }
 
 export async function fetchErc1155BalancesForOwnerTokenPairs(inputs: {
@@ -350,50 +500,10 @@ export async function fetchErc1155BalancesForOwnerTokenPairs(inputs: {
   );
   if (pairs.length === 0) return new Map();
 
-  const contractAddress = ethers.getAddress(inputs.contractAddress);
-  const maxPairsPerCall = Math.max(
-    1,
-    Math.trunc(inputs.maxPairsPerCall ?? 1000),
-  );
-
-  const output = new Map<string, Map<string, bigint>>();
-  for (let i = 0; i < pairs.length; i += maxPairsPerCall) {
-    const chunk = pairs.slice(i, i + maxPairsPerCall);
-    const accounts = chunk.map((pair) => pair.owner);
-    const ids = chunk.map((pair) => BigInt(pair.tokenId));
-    const data = erc1155Iface.encodeFunctionData("balanceOfBatch", [
-      accounts,
-      ids,
-    ]);
-    inputs.onRpcCall?.();
-    const result = await ethRpcRequest<string>({
-      rpcUrl: inputs.rpcUrl,
-      timeoutMs: inputs.timeoutMs,
-      method: "eth_call",
-      params: [{ to: contractAddress, data }, "latest"],
-    });
-
-    const decoded = erc1155Iface.decodeFunctionResult(
-      "balanceOfBatch",
-      result,
-    ) as unknown;
-    const balances = Array.isArray(decoded) ? decoded[0] : null;
-    if (!Array.isArray(balances)) {
-      throw new Error("Polygon RPC: invalid balanceOfBatch result");
-    }
-
-    for (let index = 0; index < chunk.length; index += 1) {
-      const pair = chunk[index];
-      const raw = balances[index] as unknown;
-      const value = typeof raw === "bigint" ? raw : null;
-      if (!pair || value == null) continue;
-      const ownerBalances = output.get(pair.ownerKey) ?? new Map();
-      ownerBalances.set(pair.tokenId, value);
-      output.set(pair.ownerKey, ownerBalances);
-    }
-  }
-
-  return output;
+  return fetchErc1155OwnedTokenPairBalances({
+    ...inputs,
+    pairs,
+  });
 }
 
 export async function fetchEvmCode(inputs: {

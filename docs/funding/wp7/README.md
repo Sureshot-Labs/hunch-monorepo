@@ -390,10 +390,333 @@ volatile or out-of-bound refreshed economics require a new review. The generic
 Add Funds dialog is retained only as an explicit fallback when discovery
 reports that existing eligible Hunch balances cannot cover the shortfall.
 
-## Pending closure evidence
+## UX and open-ingress correction plan — 2026-07-27
 
-WP7 is implementation-complete but evidence-pending until all of the following
-are green:
+Live review proved that the durable router/observer mechanics are ahead of the
+normal product surface, but WP7 is **not** UX-complete. The current frontend
+overloads the amount-specific Funding Operation as a general Add Funds form,
+collapses Limitless when only two venues exist, leaks technical asset/location
+labels into Convert, and renders an automatically coverable Buy shortfall as a
+separate explanatory missing step. The initial plan also specified only a
+minimum-target owned Receive operation, so the general amount-free top-up gap is
+a plan defect rather than a styling-only regression.
+
+The correction is deliberately one architecture, not a second funding stack.
+
+Practical execution order is: Phase A; the contract-independent parts of
+Phases C, D, and E (Buy CTA/card removal, two-venue visibility, and human
+Convert presentation); Phase B; the remaining amount-free/multi-network work
+in Phase D; then Phase F and the complete verification matrix. This lands the
+obvious UX regressions without coupling them to the larger receive-session
+migration, while the new Add Funds promise is not exposed before its backend
+contract exists.
+
+Local implementation status on 2026-07-27:
+
+- ordinary internal shortfall now keeps the normal green `Buy Now` CTA and
+  renders no explanatory funding card. An executable internal route takes
+  precedence over the current venue-wallet cash deficit; only the absence of
+  such a route plus a proven external cash shortfall exposes `Add funds`.
+  While route discovery is still loading, the footer keeps the same disabled
+  `Buy Now` instead of rendering a technical “Hunch is finding…” status card;
+- general Add Funds opens an amount-free Receive Session, shows all venues
+  until the five-venue collapse threshold, and presents one explicit
+  asset/network choice with address, QR, and copy action;
+- migration `0190_funding_receive_sessions.sql` adds durable sessions and
+  immutable receipts linked to child Funding Operations. Polygon Receive
+  receipts carry canonical ERC-20 identity
+  `(networkId, transactionHash, logIndex)`, block evidence, exact event
+  amount, and a database-wide uniqueness constraint;
+- an address stops being presented when its 24-hour receive session expires or
+  is cancelled, while a separate seven-day `observeUntil` recovery window
+  continues detecting late transfers. Automatic conversion is never resumed
+  from expired consent; direct collateral remains visible and non-direct value
+  enters recovery;
+- Polygon pUSD direct and Polygon USDC.e → pUSD remain registered canonical
+  receive targets. Limitless Base USDC direct receive and an exact owned Base
+  USDC → destination stable route are now code-complete behind the same
+  `evm_erc20_transfer_v1` capability. The planner advertises the Base variant
+  only when one exact owned source-location policy, one enabled route, wallet
+  ownership, signing mode, observer capability, and destination binding all
+  agree; route evidence or an aggregate wallet balance alone is insufficient.
+  Solana USDC and native SOL are now code-registered behind the shared
+  `solana_transfer_v1` canonical event capability. The scanner freezes a
+  finalized slot before showing the owner address, watches the derived USDC
+  token account for SPL transfers or the exact owned address for System Program
+  transfers, parses exact outer/inner instruction coordinates, and stores
+  `(signature, instruction coordinate, slot, containing blockhash)` identity.
+  Either asset is advertised only with the same exact owned
+  wallet/location/route evidence as Base. The EVM scanner freezes its
+  block cursor before the balance snapshot and before showing the address,
+  waits for configured external-ingress finality, and scans accepted tokens'
+  canonical `Transfer` events. The same funding controller loads and continues
+  every stable child operation; the frontend does not gain a second executor;
+- Relay quote-only evidence captured on 2026-07-27 proves direct
+  `solana-sol-to-base-usdc` and `solana-usdc-to-base-usdc` availability in both
+  `EXPECTED_OUTPUT` and `EXACT_INPUT` modes. Production adapter validation
+  selected `EXPECTED_OUTPUT` and accepted exactly one SVM instruction plus one
+  lookup table for each route, with observed quote latency of 1.043 seconds for
+  SOL and 0.506 seconds for Solana USDC and provider ETA of 3–9 seconds. The
+  direct route is the required Limitless preference; a
+  Solana → Polygon pUSD → Base USDC chain is not used while the direct route is
+  enabled and healthy;
+- every Receive Session freezes the current funding-policy revision and its
+  stable/volatile automation decision, maximum fee USD, maximum fee BPS, and
+  maximum slippage BPS. An observed stable receipt can create an exact child
+  operation only when the fresh quote remains inside all frozen caps; unknown
+  economics fail closed. Completing one child receipt returns an amount-free
+  session to `open`, so later canonical receipts can be accepted without
+  reopening or inventing another operation;
+- native SOL remains an explicit WP7 requirement and is code-complete as a
+  `review_required` Receive variant; it is not misclassified as an automatic
+  stable path. Its receive option is emitted only with canonical native
+  transfer identity, an exact owned Solana wallet, and an allowlisted Relay
+  route. Receipt ownership becomes Account Value first; the UI then asks once
+  for economic consent showing SOL sold, minimum collateral received, fee,
+  price impact, expiry, and refusal. Acceptance reuses the same
+  liquidity/quote/commit and Funding Operation controller as every other route.
+  The quote keeps a conservative 0.003 SOL reserve outside its input for source
+  execution costs. Runtime activation still requires a service restart, active
+  control-plane route publication, database persistence checks, and tiny-value
+  execution/settlement evidence;
+- this code is not runtime-activated until migration, service restart, database
+  integration, and live route evidence pass. For Polygon Receive Sessions the
+  worker scans at most one active/recovery session for each global
+  network/asset/address stream, prioritizes the newest active session, advances
+  a durable block cursor, and allocates every transfer event once under the
+  database-wide canonical identity. The older exact-balance-delta observer
+  remains only as a compatibility path for pre-Receive funding operations; it
+  is not the identity source for new Receive Sessions. A provider-scale shared
+  stream index may replace per-session cursors later for throughput, but is no
+  longer required for correctness or route activation.
+
+The 2026-07-27 post-extraction deterministic production-code audit covered the
+Funding UI, funding hooks, and backend Funding subsystem with tests excluded:
+112 files, 37,036 source lines, and 176,424 analyzed tokens. At the required
+60-token/5-line threshold, combined Type 1 duplicate coverage is 2.31% with
+1.17% estimated redundancy (28 clone classes); Type 2 coverage is 12.95% with
+7.92% estimated redundancy (243 clone classes). Frontend-only Type 1/Type 2
+coverage is 0.74%/7.59%; backend-only coverage is 2.66%/14.07%. Type 1 found no
+second Funding UI/controller stack. The actionable frontend exact clone is
+asset-option presentation shared by the Receive and Convert surfaces. The
+largest backend exact clone is ERC-1155 `balanceOfBatch` batching, while the
+largest structural classes are repeated SQL row mapping and route-handler
+scaffolding. Those should be extracted as narrow primitives, not used as a
+reason for a funding-stack rewrite.
+
+The two actionable exact clones were then removed with narrow shared
+primitives: Receive and Convert now share one asset selector/option renderer,
+and the Polygon RPC service now shares one ERC-1155 pair-batching primitive.
+The required post-change scans report 0 Type 1 and 0 Type 2 clone classes
+across the two Funding asset-selector files, and 0 Type 1 clone classes in
+`polygon-rpc.ts`. The broader Type 2 RPC/SQL shapes remain review candidates,
+not authorization for a generalized repository or RPC rewrite.
+
+The post-native-SOL scan includes production code plus Funding tests across
+both repositories: 146 files, 49,925 source lines, and 238,945 tokens. At the
+same 60-token/5-line threshold, Type 1 coverage is 2.54% with 1.34% estimated
+redundancy; Type 2 coverage is 12.10% with 6.84% estimated redundancy. The
+native SOL path did not introduce another frontend controller or
+liquidity/quote/commit implementation. Its observer is a network adapter and
+its review endpoints are owner-scoped wrappers over the existing Funding
+Operation pipeline. The remaining exact Polymarket receive/preparation overlap
+is a narrow follow-up extraction candidate, not evidence of two state
+machines.
+
+The subsequent presentation extraction moved quote review and
+fallback/manual-ingress states into `FundingReviewPanel` and
+`FundingFallbackPanel`; `FundingFlow` remains the sole owner of
+`useFundingController`, execution refs, polling, and recovery effects. A
+focused scan of `FundingFlow` plus all 17 Funding presentation modules found
+zero Type 1 clone classes; Type 2 coverage is 1.42% with 0.73% estimated
+redundancy. Contract tests explicitly fail if a presentation component imports
+the controller or creates a reducer. The corrected frontend passes 79 Funding
+tests, typecheck, lint, format, and the production build with all 36 static
+pages generated.
+
+Structured activation review compared four strategies: enabling every
+balance-delta route now, blocking every new route until a complete scanner,
+forcing all new ingress through quote-bound Relay addresses, and retaining the
+verified Polygon path while adding canonical event ingestion route by route.
+The coarse risk-adjusted model ranked incremental event-backed activation first
+(4.95) and scanner-first blocking second (4.30), but sensitivity changed their
+order when implementation cost varied. The robust conclusion is narrower:
+**do not activate Base/Solana/general multi-asset ingress on per-session balance
+polling alone**. Either scanner strategy is acceptable; this plan uses
+route-by-route activation so the existing verified Polygon UX need not wait for
+unrelated networks.
+
+The frozen constraint journal
+`wp7-funding-architecture-audit-2026-07-27` also produced satisfiable witnesses
+for Polygon-only, Polygon+Base, and Polygon+Base+Solana capability sets. Every
+witness requires canonical per-network receipts, the existing
+planner/quote/commit pipeline, frozen session caps, exact review for volatile
+conversion, and one frontend controller. No satisfying witness permits a
+second funding pipeline, public balance-delta ingress, or a broad rewrite.
+Solver witness counts are logical coverage only and are not probabilities.
+
+### Phase A — freeze the product and API contracts
+
+1. Separate five user-visible cases:
+   - sufficient venue balance → ordinary `Buy Now`;
+   - internal equivalent-stable shortfall → ordinary `Buy Now`, then automatic
+     inline preparation and order submission;
+   - internal volatile shortfall → ordinary `Buy Now`, then one exact economic
+     conversion review before any sale;
+   - external shortfall → `Add funds`, with the exact missing destination value;
+   - general top-up → venue/method/asset-network/address without a mandatory
+     amount when the receive contract supports an open amount.
+2. Add a presentation-only ingress capability model. It must provide opaque
+   receive-option ID, human asset/network metadata, exact contract identity,
+   handling (`direct`, `automatic_stable_conversion`,
+   `review_after_receipt`, or `quote_bound`), amount policy
+   (`optional`, `minimum`, or `exact`), route-proof state, fee/ETA class, and
+   safe instructions. An address is returned only after creating the receive
+   contract.
+3. Keep current `FundingOperation` immutable and amount-specific. Introduce a
+   durable Receive Session for amount-free owned-address observation; each
+   canonical receipt creates one exact child operation.
+4. Preserve strict Relay Deposit Address as a separate quote-bound contract.
+   It still requires amount, expiry, refund semantics, and provider evidence.
+5. Keep all new APIs additive so the previously deployed frontend can continue
+   using the current minimum-target endpoints during rollout.
+
+Exit gate: request/response schemas, state transitions, consent boundaries,
+late-arrival behavior, and compatibility tests are reviewed before UI work.
+
+### Phase B — backend open-ingress and capability registry
+
+1. Add additive persistence for receive sessions, accepted asset/network
+   variants, observer cursors, canonical receipts, session-to-child-operation
+   links, durable user-facing funding methods, consent caps, and
+   expiry/recovery state. Reload must restore the same policy-gated
+   `Send crypto` / Privy choices instead of rediscovering or guessing them in
+   the browser. Every stored method carries its exact server-validated safe
+   ingress presentation; the browser must not reconstruct provider/network/
+   asset behavior from the destination asset.
+2. Ingest each address/network/asset stream once. Allocate receipts
+   idempotently by chain transaction/event identity instead of polling the same
+   wallet independently for every browser session.
+3. Create an exact child operation after observing the actual asset and amount:
+   - destination collateral → direct credit/readiness;
+   - equivalent stable asset → automatic route only inside frozen
+     fee/slippage/action/amount caps;
+   - volatile asset → Account Value credit plus exact conversion review;
+   - unproven or out-of-cap route → owned value remains safe and the session
+     becomes recoverable/review-required, never silently substituted.
+4. Implement capability adapters incrementally:
+   - retain Polymarket Polygon pUSD direct and USDC.e → pUSD;
+   - expose Limitless Base USDC direct receive when its exact destination,
+     observer, and readiness evidence pass;
+   - add native Polygon USDC, other EVM stablecoins, Solana USDC, and native SOL
+     only one exact contract/network route at a time after fixtures, finality,
+     execution profile, timeout, refund/recovery, and tiny-value evidence.
+5. Use route-specific finality. Same-owner internal EVM movement should normally
+   proceed after one confirmed receipt; external ingress may require two when
+   policy says so. Twelve-confirmation waits are not a default for internal
+   balance preparation.
+6. Close the action-attempt crash window: persist prepared/broadcast identity
+   before or atomically with reporting, reconcile ambiguous `started` attempts,
+   and never duplicate a broadcast after tab close, API restart, or worker
+   restart.
+
+Exit gate: unit, database integration, concurrency, duplicate-receipt,
+late-receipt, mixed-asset, restart, and fail-closed tests pass without enabling
+an unproven route.
+
+### Phase C — ordinary Buy UX
+
+1. Remove the visible `Hunch will prepare this Buy` missing-step card and its
+   alternate `Buy` CTA.
+2. Render the same green `Buy Now` CTA for sufficient balance and automatically
+   coverable internal shortfall. Resolve the executable internal route before
+   interpreting a venue-wallet cash deficit as external shortfall.
+3. Start preparation and show the existing three-stage progress immediately
+   after the click; do not briefly reveal another button or emit transient
+   status cards below the progress surface.
+4. Keep the original market/outcome/amount frozen. Automatically submit after
+   readiness and fresh quote when still inside authorization.
+5. Render `Add funds` only when discovery proves that no eligible existing
+   Hunch value can cover the shortfall. Render an economic review only when a
+   volatile sale or changed economics actually requires consent.
+
+Exit gate: desktop/mobile component tests cover sufficient balance, internal
+stable shortfall, volatile review, external shortfall, route checking, route
+failure, reload, and double-click. There is always a stable footer height and
+exactly one actionable primary CTA.
+
+### Phase D — Add Funds UX
+
+1. `Where to add`: render Polymarket and Limitless as peer venue cards while
+   there are fewer than five venues. At five or more, show recommended/recent
+   venues and `More venues`.
+2. `How to add`: show only real methods such as `Send crypto` and a configured
+   Privy method. Funding Activity remains secondary history, not a primary
+   step.
+3. `What are you sending`: show a human asset/network selector backed only by
+   activated capabilities. For Polymarket the initial default is Polygon pUSD;
+   Polygon USDC.e is an explicit alternative. Solana options appear only after
+   their exact route is activated.
+4. Amount rules:
+   - general owned-address top-up: no required amount; an optional planned
+     amount may improve the estimate but cannot make the address unsafe;
+   - external Buy shortfall: exact/minimum missing amount is supplied by Buy;
+   - strict provider address or prequoted volatile route: exact amount required.
+5. Address state: network, selected asset, exact address, QR, copy, accepted
+   alternatives, fee/ETA semantics, and warnings are visible together.
+   Tracking starts before the address appears; the user may send immediately.
+6. Status is a single stable surface:
+   `Waiting for transfer` → `Received` → `Converting` when needed →
+   `Ready to trade`. Closing the dialog never loses tracking.
+
+Exit gate: no raw IDs, no amount `0`, no hidden second venue, no unsupported
+asset selector, no `Start tracking, then send`, and no dead-end completed state.
+
+### Phase E — Convert visual and interaction restoration
+
+1. Keep the new backend planner/controller; do not restore legacy business
+   orchestration.
+2. Extract reusable presentation primitives from the established Deposit UI:
+   large `From`/`To` cards, venue/asset/network identity, balance, `Max`,
+   direction affordance, quote summary, and primary review CTA.
+3. Replace the raw component select with human labels and icons. Hide wallet,
+   component, provider, and `evm:*` identifiers behind optional technical
+   details.
+4. The user enters source amount only. Destination amount, minimum receive,
+   fees, price impact, ETA, expiry, and default slippage are quote outputs.
+   Advanced slippage is disclosed only when it is useful and safe to edit.
+5. Use the canonical product tokens and shared responsive primitives. Do not
+   introduce an orange/green palette specific to Funding and do not maintain
+   separate desktop/mobile state machines.
+
+Exit gate: reviewed desktop/mobile visual snapshots match the canonical product
+hierarchy, keyboard/focus behavior works, and the new controller is the only
+business-logic owner.
+
+### Phase F — structure, rollout, and compatibility
+
+1. Split the current monolithic Funding renderer into thin, data-driven
+   surfaces: shell, venue picker, method picker, asset/network picker, receive
+   panel, convert panel, operation progress, and secondary activity. Keep one
+   reducer/controller and one set of selectors.
+2. Run the deterministic duplication audit before and after extraction. Reuse
+   presentation primitives; do not import the legacy Deposit flow wholesale or
+   copy its routing logic.
+3. Roll out backend migration/API/worker capability first, then frontend. The
+   frontend renders only capabilities advertised by the running backend and
+   falls back to the existing minimum-target flow when the new contract is
+   absent.
+4. Keep creation flags route-specific. No Solana/EVM option is enabled merely
+   because Relay can quote it in isolation.
+
+Exit gate: old-frontend/new-backend contract tests pass, new frontend fails
+closed against an old backend, rollback leaves received assets visible as
+Account Value, and no legacy path receives new business logic.
+
+## Updated closure evidence
+
+WP7 is core-mechanics-complete but UX/open-ingress-correction-pending until all
+of the following are green:
 
 1. frontend funding/confirmation tests, typecheck, lint, format, and build;
 2. backend funding source/planner/reservation/order tests, typecheck, lint, and
@@ -410,14 +733,29 @@ are green:
 8. database evidence that successful BUY consumes the reservation, definitive
    no-fill or abandonment releases it, and no duplicate operation/order is
    produced.
+9. ordinary Buy shows `Buy Now` for sufficient and internally coverable
+   shortfall cases, with no pre-click funding card or alternate CTA;
+10. two-venue Add Funds displays Polymarket and Limitless directly;
+11. amount-free open top-up creates exact receipt child operations and handles
+    late/multiple receipts without loss or double allocation;
+12. Polygon pUSD, Polygon USDC.e, Limitless Base USDC, and every subsequently
+    activated EVM/Solana receive option pass exact address/asset/finality/live
+    evidence;
+13. Convert desktop/mobile visual review contains no raw IDs or user-entered
+    minimum output and preserves the established From/To hierarchy;
+14. measured telemetry separates planner, user/external transfer, provider,
+    chain confirmation, Hunch reconciliation, destination readiness, and order
+    submission latency. UI feedback begins within 100 ms and Hunch-controlled
+    post-receipt reconciliation targets p95 <= 3 seconds.
 
 The executable order, expected observations, and bounded live-value budget are
 frozen in [`verification-plan.md`](./verification-plan.md).
 
 ## Activation and next work
 
-The code is ready for the pending local and guarded tiny-value verification
-above, but production funding creation remains a policy decision. WP8 adopts
-the same contracts for Telegram and exact Privy delegated policy enforcement.
-WP9 owns production-style activation/rollback evidence and the decision to
-remove compatibility components.
+The durable WP7 router/reservation core is ready for continued guarded
+verification, but the normal product surface is not ready for production
+activation until the correction phases above close. WP8 adopts the corrected
+contracts for Telegram and exact Privy delegated policy enforcement. WP9 owns
+production-style activation/rollback evidence and the decision to remove
+compatibility components.

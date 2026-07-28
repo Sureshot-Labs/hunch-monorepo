@@ -1,0 +1,171 @@
+{
+  "_fixture": {
+    "kind": "live-quote-only-sanitized",
+    "sourceId": "relay-solana-base-quote-v2-live",
+    "capturedAt": "2026-07-27T23:51:19.392Z/2026-07-27T23:56:09.898Z",
+    "quoteRequestsCreated": 10,
+    "requestIdsPersisted": false,
+    "responseBodiesRetained": false,
+    "walletSignaturesCreated": 0,
+    "transactionsBroadcast": 0,
+    "routeAvailabilityScope": "quote-and-action-shape-only",
+    "warning": "Execution and settlement require a separately authorized minimal live rehearsal."
+  },
+  "routes": [
+    {
+      "routeId": "solana-sol-to-base-usdc",
+      "request": {
+        "originChainId": 792703809,
+        "originCurrency": "11111111111111111111111111111111",
+        "originDecimals": 9,
+        "destinationChainId": 8453,
+        "destinationCurrency": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+        "destinationDecimals": 6,
+        "tradeTypesObserved": ["EXPECTED_OUTPUT", "EXACT_INPUT"],
+        "selectedTradeType": "EXPECTED_OUTPUT",
+        "useDepositAddress": false
+      },
+      "latestExpectedOutputQuote": {
+        "httpStatus": 200,
+        "latencyMs": 1157,
+        "requestedDestinationRaw": "1010102",
+        "minimumDestinationRaw": "1000000",
+        "requiredSourceRaw": "13971011",
+        "requiredSourceFormatted": "0.013971011",
+        "requiredSourceUsd": "1.035311",
+        "timeEstimateSeconds": 3,
+        "fees": [
+          {
+            "kind": "gas",
+            "asset": "SOL",
+            "raw": "16084",
+            "estimatedUsd": "0.001192"
+          },
+          {
+            "kind": "relayer",
+            "asset": "SOL",
+            "raw": "324126",
+            "estimatedUsd": "0.024019"
+          }
+        ]
+      },
+      "actionShape": {
+        "transactionCount": 1,
+        "instructionCount": 1,
+        "programId": "99vQwtBwYtrqqD9YSXbdum3KBdxPAVxYTaQ3cfnJSrN2",
+        "addressLookupTableCount": 1,
+        "instructionDataBytes": 48,
+        "instructionDiscriminator": "0d9e0ddf5fd51c06",
+        "instructionBindings": [
+          "sourceAmountRaw",
+          "protocolOrderId",
+          "controlledSigner"
+        ],
+        "keyCount": 5,
+        "signerKeyIndexes": [1],
+        "writableKeyIndexes": [1, 3]
+      }
+    },
+    {
+      "routeId": "solana-usdc-to-base-usdc",
+      "request": {
+        "originChainId": 792703809,
+        "originCurrency": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+        "originDecimals": 6,
+        "destinationChainId": 8453,
+        "destinationCurrency": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+        "destinationDecimals": 6,
+        "tradeTypesObserved": ["EXPECTED_OUTPUT", "EXACT_INPUT"],
+        "selectedTradeType": "EXPECTED_OUTPUT",
+        "useDepositAddress": false
+      },
+      "latestExpectedOutputQuote": {
+        "httpStatus": 200,
+        "latencyMs": 703,
+        "requestedDestinationRaw": "1010102",
+        "minimumDestinationRaw": "1000000",
+        "requiredSourceRaw": "1031093",
+        "requiredSourceFormatted": "1.031093",
+        "requiredSourceUsd": "1.030984",
+        "timeEstimateSeconds": 3,
+        "fees": [
+          {
+            "kind": "gas",
+            "asset": "SOL",
+            "raw": "13511",
+            "estimatedUsd": "0.001001"
+          },
+          {
+            "kind": "relayer",
+            "asset": "USDC",
+            "raw": "20991",
+            "estimatedUsd": "0.020989"
+          }
+        ]
+      },
+      "actionShape": {
+        "transactionCount": 1,
+        "instructionCount": 1,
+        "programId": "99vQwtBwYtrqqD9YSXbdum3KBdxPAVxYTaQ3cfnJSrN2",
+        "addressLookupTableCount": 1,
+        "instructionDataBytes": 48,
+        "instructionDiscriminator": "0b9c60da27a3b413",
+        "instructionBindings": [
+          "sourceAmountRaw",
+          "protocolOrderId",
+          "controlledSigner",
+          "derivedSourceUsdcAta"
+        ],
+        "keyCount": 10,
+        "signerKeyIndexes": [1],
+        "writableKeyIndexes": [1, 5, 6]
+      }
+    }
+  ],
+  "security": {
+    "publicBurnerAddressesSentToRelay": true,
+    "publicBurnerAddressesPersistedInFixture": false,
+    "walletSecretsPersisted": false,
+    "relayApiCredentialPersisted": false,
+    "rawProviderRequestReferencesPersisted": false,
+    "rawInstructionDataPersisted": false,
+    "signed": false,
+    "broadcast": false
+  },
+  "productionAdapterValidation": {
+    "checkedAt": "2026-07-27T23:59:31.391Z",
+    "quoteRequestsCreated": 2,
+    "routes": [
+      {
+        "routeId": "solana-sol-to-base-usdc",
+        "latencyMs": 1043,
+        "amountMode": "exact_output",
+        "routeShape": "relay-solana-native-direct-depository-v1",
+        "actionKinds": ["svm_transaction"],
+        "actionCount": 1,
+        "instructionCount": 1,
+        "addressLookupTableCount": 1,
+        "etaSeconds": {
+          "minimum": 3,
+          "maximum": 9
+        }
+      },
+      {
+        "routeId": "solana-usdc-to-base-usdc",
+        "latencyMs": 506,
+        "amountMode": "exact_output",
+        "routeShape": "relay-solana-spl-direct-depository-v1",
+        "actionKinds": ["svm_transaction"],
+        "actionCount": 1,
+        "instructionCount": 1,
+        "addressLookupTableCount": 1,
+        "etaSeconds": {
+          "minimum": 3,
+          "maximum": 9
+        }
+      }
+    ],
+    "walletSignaturesCreated": 0,
+    "transactionsBroadcast": 0
+  }
+}

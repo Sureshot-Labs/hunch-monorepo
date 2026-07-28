@@ -1,7 +1,15 @@
 import { tx, type Pool, type PoolClient } from "@hunch/infra";
+import { Interface } from "ethers";
 
-import { canonicalJsonHash } from "../persistence/canonical.js";
+import { env } from "../../env.js";
 import { isRecord } from "../../lib/type-guards.js";
+import { fetchEvmMulticall } from "../../services/polygon-rpc.js";
+import {
+  fetchSolanaBalanceLamports,
+  fetchSolanaTokenBalanceByOwnerAndMint,
+} from "../../services/solana-rpc.js";
+import { RELAY_PINNED_ASSETS } from "../../funding-providers/relay/mappings.js";
+import { canonicalJsonHash } from "../persistence/canonical.js";
 import type {
   AssetRef,
   FundingPurpose,
@@ -34,6 +42,7 @@ export type DirectIngressObservationVariant = Readonly<{
   }>;
   completion:
     | Readonly<{ kind: "direct_destination_credit" }>
+    | Readonly<{ kind: "child_funding_operation" }>
     | Readonly<{
         kind: "committed_venue_preparation";
         stepOrdinal: number;
@@ -93,7 +102,9 @@ function parseAsset(value: unknown): AssetRef {
   };
 }
 
-function parseVariant(value: unknown): DirectIngressObservationVariant {
+export function parseDirectIngressObservationVariant(
+  value: unknown,
+): DirectIngressObservationVariant {
   if (
     !isRecord(value) ||
     !isRecord(value.observation) ||
@@ -128,6 +139,8 @@ function parseVariant(value: unknown): DirectIngressObservationVariant {
   const completionKind = value.completion.kind;
   let completion: DirectIngressObservationVariant["completion"];
   if (completionKind === "direct_destination_credit") {
+    completion = { kind: completionKind };
+  } else if (completionKind === "child_funding_operation") {
     completion = { kind: completionKind };
   } else if (
     completionKind === "committed_venue_preparation" &&
@@ -260,7 +273,7 @@ async function loadTarget(
   };
   const rawVariants = row.support_metadata.ingressVariants;
   const variants = Array.isArray(rawVariants)
-    ? rawVariants.map(parseVariant)
+    ? rawVariants.map(parseDirectIngressObservationVariant)
     : [fallbackVariant];
   if (
     variants.length === 0 ||
@@ -400,10 +413,119 @@ const polymarketDepositWalletAssetsAdapter: DirectIngressObservationAdapter = {
   },
 };
 
-const DEFAULT_OBSERVATION_ADAPTERS: readonly DirectIngressObservationAdapter[] =
-  [ownedDestinationSpendabilityAdapter, polymarketDepositWalletAssetsAdapter];
+const ERC20_BALANCE_INTERFACE = new Interface([
+  "function balanceOf(address owner) view returns (uint256)",
+]);
 
-async function observeDestination(
+async function observeOwnedWalletAsset(
+  variant: DirectIngressObservationVariant,
+): Promise<string> {
+  if (variant.networkId === "solana:mainnet") {
+    if (
+      variant.asset.assetId === RELAY_PINNED_ASSETS.solanaNative &&
+      variant.asset.decimals === 9
+    ) {
+      return (
+        await fetchSolanaBalanceLamports({
+          rpcUrls: env.solanaRpcUrls,
+          owner: variant.destinationAddress,
+          timeoutMs: env.solanaRpcTimeoutMs,
+        })
+      ).toString();
+    }
+    const balance = await fetchSolanaTokenBalanceByOwnerAndMint({
+      rpcUrls: env.solanaRpcUrls,
+      owner: variant.destinationAddress,
+      mint: variant.asset.assetId,
+      timeoutMs: env.solanaRpcTimeoutMs,
+    });
+    return (balance?.amount ?? 0n).toString();
+  }
+  const rpc =
+    variant.networkId === "evm:137"
+      ? {
+          url: env.polygonRpcUrl,
+          timeoutMs: env.polygonRpcTimeoutMs,
+          multicallAddress:
+            env.polygonMulticallAddress?.trim() ||
+            "0xca11bde05977b3631167028862be2a173976ca11",
+        }
+      : variant.networkId === "evm:8453"
+        ? {
+            url: env.baseRpcUrl,
+            timeoutMs: env.baseRpcTimeoutMs,
+            multicallAddress:
+              env.baseMulticallAddress?.trim() ||
+              "0xca11bde05977b3631167028862be2a173976ca11",
+          }
+        : null;
+  if (!rpc) throw new Error("receive observation network is not supported");
+  const [result] = await fetchEvmMulticall({
+    rpcUrl: rpc.url,
+    timeoutMs: rpc.timeoutMs,
+    multicallAddress: rpc.multicallAddress,
+    calls: [
+      {
+        target: variant.asset.assetId,
+        callData: ERC20_BALANCE_INTERFACE.encodeFunctionData("balanceOf", [
+          variant.destinationAddress,
+        ]),
+        allowFailure: false,
+      },
+    ],
+  });
+  if (!result?.success) {
+    throw new Error("receive ERC-20 balance observation failed");
+  }
+  const decoded = ERC20_BALANCE_INTERFACE.decodeFunctionResult(
+    "balanceOf",
+    result.returnData,
+  );
+  const raw = decoded[0];
+  if (typeof raw !== "bigint") {
+    throw new Error("receive ERC-20 balance observation is invalid");
+  }
+  return raw.toString();
+}
+
+const ownedWalletLiquidBalancesAdapter: DirectIngressObservationAdapter = {
+  adapterId: "owned_wallet_liquid_balances_v1",
+  async observe(_pool, _target, variants) {
+    const observedAt = new Date().toISOString();
+    return Promise.all(
+      variants.map(
+        async (variant): Promise<DirectIngressVariantObservation> => {
+          if (typeof variant.observation.payload.balanceKey !== "string") {
+            throw new Error("receive balance key is missing");
+          }
+          const observedRaw = await observeOwnedWalletAsset(variant);
+          return {
+            variantId: variant.variantId,
+            observedRaw,
+            revision: canonicalJsonHash({
+              schema: "owned_wallet_liquid_balance_observation_v1",
+              networkId: variant.networkId,
+              address: variant.destinationAddress,
+              asset: variant.asset,
+              raw: observedRaw,
+              observedAt,
+            }),
+            observedAt,
+          };
+        },
+      ),
+    );
+  },
+};
+
+const DEFAULT_OBSERVATION_ADAPTERS: readonly DirectIngressObservationAdapter[] =
+  [
+    ownedDestinationSpendabilityAdapter,
+    polymarketDepositWalletAssetsAdapter,
+    ownedWalletLiquidBalancesAdapter,
+  ];
+
+export async function observeDirectIngressDestination(
   pool: Pool,
   target: DirectIngressObservationTarget,
   adapters: readonly DirectIngressObservationAdapter[] = DEFAULT_OBSERVATION_ADAPTERS,
@@ -636,7 +758,7 @@ export class DirectIngressDestinationObserver {
   constructor(
     private readonly dependencies: Readonly<{
       loadTarget?: typeof loadTarget;
-      observe?: typeof observeDestination;
+      observe?: typeof observeDirectIngressDestination;
       observationAdapters?: readonly DirectIngressObservationAdapter[];
       persist?: (
         pool: Pool,
@@ -661,7 +783,7 @@ export class DirectIngressDestinationObserver {
     if (!target) return { destinationsPolled: 0 };
     const observation = this.dependencies.observe
       ? await this.dependencies.observe(pool, target)
-      : await observeDestination(
+      : await observeDirectIngressDestination(
           pool,
           target,
           this.dependencies.observationAdapters,

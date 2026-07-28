@@ -322,6 +322,7 @@ function sourceFactsForComponent(input: {
   preRouteHandoff?: RelayEligibleSourceFact["preRouteHandoff"];
   availableRaw: string;
   requiredAmount: Money;
+  confirmedSourceAmount?: Money | null;
   destinationLocationPatternId?: string;
   maximumSlippageBps: number;
   requiredCapability: "execution_source" | "withdrawal_source";
@@ -365,7 +366,32 @@ function sourceFactsForComponent(input: {
         : availableRaw;
       let raw: string;
       let minimumDestinationRaw: string;
-      if (nativeSolSource) {
+      const confirmedSourceRaw =
+        input.confirmedSourceAmount &&
+        sameAsset(
+          input.confirmedSourceAmount.asset,
+          input.component.amount.asset,
+        )
+          ? BigInt(input.confirmedSourceAmount.raw)
+          : null;
+      if (confirmedSourceRaw != null) {
+        raw =
+          confirmedSourceRaw > 0n && confirmedSourceRaw <= spendableRaw
+            ? confirmedSourceRaw.toString()
+            : "0";
+        const grossDestinationRaw = rescaleStableRaw(
+          raw,
+          input.requiredAmount.asset.decimals,
+          input.component.amount.asset.decimals,
+        );
+        const boundedMinimum =
+          (BigInt(grossDestinationRaw) *
+            BigInt(10_000 - input.maximumSlippageBps)) /
+          10_000n;
+        minimumDestinationRaw = (
+          boundedMinimum > 0n ? boundedMinimum : 1n
+        ).toString();
+      } else if (nativeSolSource) {
         raw = spendableRaw.toString();
         minimumDestinationRaw = input.requiredAmount.raw;
       } else {
@@ -458,6 +484,7 @@ export function deriveProductionRelayEligibleSourceFacts(input: {
   account: AccountValueReadModel;
   policy: FundingRuntimePolicy;
   requiredAmount: Money;
+  confirmedSourceAmount?: Money | null;
   destinationLocationPatternId?: string;
   purpose?: FundingDiscoveryRequest["purpose"];
   maximumSlippageBps?: number;
@@ -556,6 +583,7 @@ export function deriveProductionRelayEligibleSourceFacts(input: {
           : {}),
         availableRaw: availability.availableRaw,
         requiredAmount: input.requiredAmount,
+        confirmedSourceAmount: input.confirmedSourceAmount,
         destinationLocationPatternId: input.destinationLocationPatternId,
         maximumSlippageBps:
           input.maximumSlippageBps ?? input.policy.placement.maximumSlippageBps,
@@ -760,6 +788,7 @@ export class ProductionFundingSourcePlanner {
       account: this.account,
       policy: this.currentPolicy(),
       requiredAmount: input.requiredAmount,
+      confirmedSourceAmount: input.request.confirmedSourceAmount,
       destinationLocationPatternId:
         input.destination.destinationLocationPatternId,
       purpose: input.request.purpose,

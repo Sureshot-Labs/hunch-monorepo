@@ -19,8 +19,15 @@ import {
 } from "./mappings.js";
 import { normalizeRelayFees, normalizeRelayFeeUsd } from "./fees.js";
 import { rejectDisabledRelayCapabilities } from "./schemas.js";
-import { validateRelayRehearsalQuote } from "./rehearsal.js";
-import { validateRelaySolanaRehearsalQuote } from "./solana-rehearsal.js";
+import {
+  SOLANA_NATIVE,
+  SOLANA_USDC,
+  validateRelayRehearsalQuote,
+} from "./rehearsal.js";
+import {
+  validateRelaySolanaDirectBaseQuote,
+  validateRelaySolanaRehearsalQuote,
+} from "./solana-rehearsal.js";
 import { validateRelaySolanaNativeQuote } from "./solana-native-validator.js";
 
 export const RELAY_PROVIDER_DESCRIPTOR: ProviderDescriptor = {
@@ -321,6 +328,75 @@ export class RelayWalletQuoteAdapter {
           gasLimitRaw: action.gasLimit.toString(),
         };
       });
+    } else if (
+      input.route.quoteMode === "expected_output" &&
+      input.route.destination.networkId === "evm:8453"
+    ) {
+      const sourceCurrency =
+        input.route.source.assetId === SOLANA_NATIVE
+          ? SOLANA_NATIVE
+          : input.route.source.assetId === SOLANA_USDC
+            ? SOLANA_USDC
+            : null;
+      if (!sourceCurrency) {
+        throw new Error("direct Solana route source asset is not allowlisted");
+      }
+      let validated;
+      try {
+        validated = validateRelaySolanaDirectBaseQuote({
+          maximumSourceAmountRaw: BigInt(input.sourceAmount.raw),
+          expectedOutputTargetRaw: BigInt(expectedOutputTargetRaw),
+          minimumOutputFloorRaw: BigInt(input.minimumOutput.raw),
+          quote,
+          recipient: recipientAddress,
+          sourceCurrency,
+          user: userAddress,
+        });
+      } catch (error) {
+        if (
+          error instanceof Error &&
+          (error.message.includes("authorized source cap") ||
+            error.message.includes("authorized floor"))
+        ) {
+          throw new RelayQuoteEconomicsError(error.message);
+        }
+        throw error;
+      }
+      requestId = validated.requestId;
+      sourceAmountRaw = validated.sourceAmountRaw;
+      sourceEstimatedUsd = validated.sourceEstimatedUsd;
+      expectedOutputRaw = validated.expectedOutputRaw;
+      minimumOutputRaw = validated.minimumOutputRaw;
+      routeShape =
+        sourceCurrency === SOLANA_NATIVE
+          ? "relay-solana-native-direct-depository-v1"
+          : "relay-solana-spl-direct-depository-v1";
+      const requestFingerprint = canonicalJsonHash({
+        provider: "relay",
+        requestId,
+      });
+      actions = [
+        {
+          kind: "svm_transaction",
+          actionId: `relay:${requestFingerprint}:deposit`,
+          networkId: input.route.source.networkId,
+          signerWalletId: input.senderWalletId,
+          instructions: [
+            {
+              programId: validated.instruction.programId,
+              accounts: validated.instruction.keys.map((key) => ({
+                address: key.pubkey,
+                signer: key.isSigner,
+                writable: key.isWritable,
+              })),
+              data: Buffer.from(validated.instruction.data).toString("hex"),
+              dataEncoding: "hex",
+            },
+          ],
+          addressLookupTables:
+            validated.instruction.addressLookupTableAddresses,
+        },
+      ];
     } else if (input.route.quoteMode === "expected_output") {
       let validated;
       try {

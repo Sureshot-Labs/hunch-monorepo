@@ -282,6 +282,28 @@ assert.equal(sponsored[0]?.quoteMinimumOutput?.raw, "3000000");
 assert.equal(sponsored[0]?.maximumSourceRaw, "4000000");
 assert.equal(sponsored[0]?.nativeGasReady, true);
 
+const exactReceivedSource = deriveProductionRelayEligibleSourceFacts({
+  accountId: ACCOUNT_ID,
+  account: account(),
+  policy: policy(),
+  requiredAmount: { asset: POLYGON_PUSD, raw: "1" },
+  confirmedSourceAmount: { asset: BASE_USDC, raw: "3000000" },
+});
+assert.equal(exactReceivedSource.length, 1);
+assert.equal(exactReceivedSource[0]?.quoteInputAmount.raw, "3000000");
+assert.equal(exactReceivedSource[0]?.quoteMinimumOutput?.raw, "2970000");
+
+const unavailableExactReceivedSource = deriveProductionRelayEligibleSourceFacts(
+  {
+    accountId: ACCOUNT_ID,
+    account: account(),
+    policy: policy(),
+    requiredAmount: { asset: POLYGON_PUSD, raw: "1" },
+    confirmedSourceAmount: { asset: BASE_USDC, raw: "5000000" },
+  },
+);
+assert.equal(unavailableExactReceivedSource.length, 0);
+
 {
   const base = account();
   const component = base.projection.components[0];
@@ -673,6 +695,41 @@ assert.equal(excludedByPreference.length, 0);
   assert.equal(nativeFacts[0]?.maximumSourceRaw, "17000000");
   assert.equal(nativeFacts[0]?.safeLabel, "SOL on Solana");
   assert.equal(nativeFacts[0]?.nativeGasReady, true);
+
+  const directNativePolicy = policy({
+    ...nativePolicy,
+    routes: [
+      {
+        ...nativePolicy.routes[0],
+        routeId: "solana-sol-to-base-usdc",
+        destinationLocationPatternId: "venue_limitless_usdc",
+        destinationAsset: BASE_USDC,
+        fixtureIds: [
+          "relay_wallet_solana_sol_to_base_usdc_quote_live",
+          "relay_status_lifecycle_v3",
+        ],
+      },
+    ],
+  });
+  const directNativeFacts = deriveProductionRelayEligibleSourceFacts({
+    accountId: ACCOUNT_ID,
+    account: {
+      ...nativeAccount,
+      runtimePolicy: directNativePolicy,
+    } as AccountValueReadModel,
+    policy: directNativePolicy,
+    destinationLocationPatternId: "venue_limitless_usdc",
+    requiredAmount: { asset: BASE_USDC, raw: "1000000" },
+  });
+  assert.equal(directNativeFacts.length, 1);
+  assert.equal(
+    directNativeFacts[0]?.sourceLocationPatternId,
+    "wallet_solana_native",
+  );
+  assert.equal(
+    directNativeFacts[0]?.quoteMinimumOutput?.asset.networkId,
+    "evm:8453",
+  );
 }
 
 const originalRoute = policy().routes[0];

@@ -133,47 +133,48 @@ const etaSchema = z
   .strict()
   .refine((value) => value.maxSeconds >= value.minSeconds);
 
+const fundingReceiveTargetSchema = z
+  .object({
+    receiveTargetId: opaqueIdSchema,
+    networkId: z.string().trim().min(2).max(160),
+    destinationAddress: z.string().trim().min(16).max(256),
+    acceptedAssets: z
+      .array(
+        z
+          .object({
+            asset: assetRefSchema,
+            handling: z.enum([
+              "direct",
+              "automatic_conversion",
+              "review_required",
+            ]),
+          })
+          .strict(),
+      )
+      .min(1)
+      .max(16),
+    safeInstructions: z.array(z.string().trim().min(1).max(240)).max(16),
+  })
+  .strict()
+  .superRefine((target, context) => {
+    for (const [index, accepted] of target.acceptedAssets.entries()) {
+      if (accepted.asset.networkId !== target.networkId) {
+        context.addIssue({
+          code: "custom",
+          path: ["acceptedAssets", index, "asset", "networkId"],
+          message: "accepted ingress asset must use its receive target network",
+        });
+      }
+    }
+  });
+
 export const externalIngressInstructionSchema = z
   .object({
     ingressKind: z.enum(["controlled_wallet", "exchange", "privy", "manual"]),
     sourceNetworkId: z.string().trim().min(2).max(160).nullable(),
     sourceAsset: assetRefSchema.nullable(),
     receiveTargets: z
-      .array(
-        z
-          .object({
-            receiveTargetId: opaqueIdSchema,
-            networkId: z.string().trim().min(2).max(160),
-            destinationAddress: z.string().trim().min(16).max(256),
-            acceptedAssets: z
-              .array(
-                z
-                  .object({
-                    asset: assetRefSchema,
-                    handling: z.enum(["direct", "automatic_conversion"]),
-                  })
-                  .strict(),
-              )
-              .min(1)
-              .max(16),
-            safeInstructions: z
-              .array(z.string().trim().min(1).max(240))
-              .max(16),
-          })
-          .strict()
-          .superRefine((target, context) => {
-            for (const [index, accepted] of target.acceptedAssets.entries()) {
-              if (accepted.asset.networkId !== target.networkId) {
-                context.addIssue({
-                  code: "custom",
-                  path: ["acceptedAssets", index, "asset", "networkId"],
-                  message:
-                    "accepted ingress asset must use its receive target network",
-                });
-              }
-            }
-          }),
-      )
+      .array(fundingReceiveTargetSchema)
       .min(1)
       .max(16)
       .optional(),
@@ -219,6 +220,105 @@ export const externalIngressInstructionSchema = z
       });
     }
   });
+
+export const fundingReceiveSessionOpenRequestSchema = z
+  .object({
+    destinationOptionId: opaqueIdSchema,
+    venueBindingOptionId: opaqueIdSchema,
+    selectedReceiveTargetId: opaqueIdSchema.nullable().optional(),
+  })
+  .strict();
+
+export const fundingReceiveSessionParamsSchema = z
+  .object({ id: z.string().uuid() })
+  .strict();
+
+export const fundingReceiveReceiptParamsSchema = z
+  .object({
+    id: z.string().uuid(),
+    receiptId: z.string().uuid(),
+  })
+  .strict();
+
+export const fundingReceiveSessionPublicSchema = z
+  .object({
+    receiveSessionId: z.string().uuid(),
+    status: z.enum([
+      "open",
+      "processing",
+      "review_required",
+      "completed",
+      "expired",
+      "cancelled",
+      "recovery_required",
+    ]),
+    venueId: z.string().trim().min(2).max(160),
+    destinationOptionId: opaqueIdSchema,
+    venueBindingOptionId: opaqueIdSchema,
+    destinationAsset: assetRefSchema,
+    methods: z
+      .array(
+        z
+          .object({
+            methodId: opaqueIdSchema,
+            kind: z.enum(["manual", "privy"]),
+            safeLabel: z.string().trim().min(2).max(120),
+            ingress: externalIngressInstructionSchema,
+          })
+          .strict(),
+      )
+      .min(1)
+      .max(8),
+    receiveTargets: z.array(fundingReceiveTargetSchema).min(1).max(16),
+    selectedReceiveTargetId: opaqueIdSchema.nullable(),
+    automationPolicy: z
+      .object({
+        stableConversion: z.literal("automatic_within_caps"),
+        volatileConversion: z.literal("review_required"),
+        maximumFeeUsd: usdAmountSchema,
+        maximumFeeBps: z.number().int().min(0).max(10_000),
+        maximumSlippageBps: z.number().int().min(0).max(500),
+      })
+      .strict(),
+    version: z.number().int().positive(),
+    openedAt: z.string().datetime(),
+    lastObservedAt: z.string().datetime().nullable(),
+    expiresAt: z.string().datetime(),
+    observeUntil: z.string().datetime(),
+    closedAt: z.string().datetime().nullable(),
+  })
+  .strict();
+
+export const fundingReceiveReceiptPublicSchema = z
+  .object({
+    receiptId: z.string().uuid(),
+    receiveSessionId: z.string().uuid(),
+    variantId: opaqueIdSchema,
+    asset: assetRefSchema,
+    destinationAddress: z.string().trim().min(16).max(256),
+    rawAmount: rawAmountSchema,
+    observationRevision: z.string().trim().min(8).max(256),
+    observedAt: z.string().datetime(),
+    status: z.enum([
+      "observed",
+      "review_required",
+      "routing",
+      "ready",
+      "recovery_required",
+    ]),
+    handling: z.enum(["direct", "automatic_conversion", "review_required"]),
+    childFundingOperationId: z.string().uuid().nullable(),
+  })
+  .strict();
+
+export const fundingReceiveSessionResponseSchema = z
+  .object({
+    ok: z.literal(true),
+    session: fundingReceiveSessionPublicSchema,
+    receipts: z.array(fundingReceiveReceiptPublicSchema).max(256),
+    replayed: z.boolean(),
+  })
+  .strict();
 
 const sourceOptionLegSchema = z
   .object({
@@ -592,6 +692,14 @@ export const fundingLiquidityResponseSchema = z
 export const fundingQuoteResponseSchema = z
   .object({
     ok: z.literal(true),
+    quote: fundingQuoteSummarySchema,
+  })
+  .strict();
+
+export const fundingReceiveReceiptReviewQuoteResponseSchema = z
+  .object({
+    ok: z.literal(true),
+    receipt: fundingReceiveReceiptPublicSchema,
     quote: fundingQuoteSummarySchema,
   })
   .strict();

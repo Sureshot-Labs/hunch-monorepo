@@ -1,12 +1,20 @@
 import type { AccountValueReadModel } from "../../account-value/runtime-service.js";
 import { multiplyRawByUnitPrice } from "../../account-value/decimal.js";
-import { stableOpaqueId } from "../../account-value/canonical.js";
+import {
+  canonicalAssetKey,
+  stableOpaqueId,
+} from "../../account-value/canonical.js";
 import { env } from "../../env.js";
 import {
   buildPolymarketFundingPlan,
   PolymarketFundingPlanError,
 } from "../../services/polymarket-funding-router.js";
+import {
+  isRelayPinnedStableAsset,
+  RELAY_PINNED_ASSETS,
+} from "../../funding-providers/relay/mappings.js";
 import type {
+  AssetLocation,
   AssetRef,
   ExternalIngressInstruction,
   JsonValue,
@@ -26,7 +34,9 @@ import type {
   FundingSourcePlanningInput,
 } from "./source-adapter.js";
 import type { PlannedSourceOption } from "./planning-types.js";
+import { buildFundingReceiveTargets } from "./receive-targets.js";
 import { sameAsset } from "./money.js";
+import { supportsCanonicalFundingReceiveEvents } from "../receive/canonical-receive-capabilities.js";
 
 function jsonRecord(value: unknown): Readonly<Record<string, JsonValue>> {
   return value as Readonly<Record<string, JsonValue>>;
@@ -34,7 +44,11 @@ function jsonRecord(value: unknown): Readonly<Record<string, JsonValue>> {
 
 function detail(input: FundingSourcePlanningInput, key: string): string | null {
   if (input.destination.target.kind !== "owned_location") return null;
-  const value = input.destination.target.location.details[key];
+  return locationDetail(input.destination.target.location, key);
+}
+
+function locationDetail(location: AssetLocation, key: string): string | null {
+  const value = location.details[key];
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
@@ -65,6 +79,7 @@ type DirectIngressVariant = Readonly<{
   }>;
   completion:
     | Readonly<{ kind: "direct_destination_credit" }>
+    | Readonly<{ kind: "child_funding_operation" }>
     | Readonly<{
         kind: "committed_venue_preparation";
         stepOrdinal: number;
@@ -331,51 +346,201 @@ function buildPolymarketIngressCompletion(input: {
   };
 }
 
-function receiveTargets(
-  variants: readonly DirectIngressVariant[],
-): NonNullable<ExternalIngressInstruction["receiveTargets"]> {
-  const grouped = new Map<
-    string,
-    {
-      networkId: string;
-      destinationAddress: string;
-      acceptedAssets: {
-        asset: AssetRef;
-        handling: "direct" | "automatic_conversion";
-      }[];
-    }
-  >();
-  for (const variant of variants) {
-    const key = `${variant.networkId}:${variant.destinationAddress.toLowerCase()}`;
-    const target = grouped.get(key) ?? {
-      networkId: variant.networkId,
-      destinationAddress: variant.destinationAddress,
-      acceptedAssets: [],
-    };
-    target.acceptedAssets.push({
-      asset: variant.asset,
-      handling:
-        variant.completion.kind === "direct_destination_credit"
-          ? "direct"
-          : "automatic_conversion",
-    });
-    grouped.set(key, target);
+function isNativeSolAsset(asset: AssetRef): boolean {
+  return (
+    asset.networkId === "solana:mainnet" &&
+    asset.assetId === RELAY_PINNED_ASSETS.solanaNative &&
+    asset.decimals === 9
+  );
+}
+
+function buildRoutedReceiveVariants(input: {
+  account: AccountValueReadModel;
+  planning: FundingSourcePlanningInput;
+  existing: readonly DirectIngressVariant[];
+}): readonly DirectIngressVariant[] {
+  if (
+    !input.planning.policy.automation.stagedContinuation ||
+    !isRelayPinnedStableAsset(input.planning.requiredAmount.asset)
+  ) {
+    return [];
   }
-  return [...grouped.values()].map((target) => ({
-    receiveTargetId: stableOpaqueId(
-      "receive_target",
-      canonicalJsonHash(target),
+  const existing = new Set(
+    input.existing.map(
+      (variant) =>
+        `${variant.networkId}:${variant.asset.assetId.toLowerCase()}:${variant.destinationAddress.toLowerCase()}`,
     ),
-    networkId: target.networkId,
-    destinationAddress: target.destinationAddress,
-    acceptedAssets: target.acceptedAssets,
-    safeInstructions: [
-      "Send only one of the listed assets on this network.",
-      "Do not mix different assets in one funding operation.",
-      "Several transfers of the same asset may satisfy the target.",
-      "Any excess remains available in your Hunch balance.",
-    ],
-  }));
+  );
+  const componentVariants = (
+    input.account.projection?.components ?? []
+  ).flatMap((component) => {
+    if (
+      component.category === "in_transit" ||
+      component.location.kind !== "wallet" ||
+      component.location.accountId !== input.planning.accountId ||
+      component.observationFreshness !== "fresh" ||
+      component.observationError ||
+      (!isRelayPinnedStableAsset(component.amount.asset) &&
+        !isNativeSolAsset(component.amount.asset)) ||
+      !supportsCanonicalFundingReceiveEvents(component.amount.asset.networkId)
+    ) {
+      return [];
+    }
+    const routes = input.planning.policy.routes.filter(
+      (route) =>
+        route.enabled &&
+        route.providerId === "relay" &&
+        route.destinationLocationPatternId ===
+          input.planning.destination.destinationLocationPatternId &&
+        sameAsset(route.sourceAsset, component.amount.asset) &&
+        sameAsset(route.destinationAsset, input.planning.requiredAmount.asset),
+    );
+    if (routes.length !== 1) return [];
+    const route = routes[0];
+    if (!route) return [];
+    const sourcePolicies = input.planning.policy.locations.filter(
+      (location) =>
+        location.enabled &&
+        location.locationPatternId === route.sourceLocationPatternId &&
+        location.locationKind === "wallet" &&
+        location.ownership === "owned" &&
+        location.observable &&
+        location.capabilities.includes("execution_source") &&
+        sameAsset(location.asset, component.amount.asset),
+    );
+    if (sourcePolicies.length !== 1) return [];
+    const walletId = locationDetail(component.location, "walletId");
+    const address = locationDetail(component.location, "address");
+    if (!walletId || !address) return [];
+    const profile = profileForExactWallet({
+      account: input.account,
+      walletId,
+      networkId: component.amount.asset.networkId,
+      address,
+    });
+    if (
+      !profile ||
+      profile.source === "external" ||
+      profile.signingModes.length === 0
+    ) {
+      return [];
+    }
+    const key = `${component.amount.asset.networkId}:${component.amount.asset.assetId.toLowerCase()}:${address.toLowerCase()}`;
+    if (existing.has(key)) return [];
+    existing.add(key);
+    return [
+      {
+        variantId: stableOpaqueId(
+          "ingress_variant",
+          canonicalJsonHash({
+            destinationAddress: address.toLowerCase(),
+            asset: component.amount.asset,
+            completion: "child_funding_operation",
+            routeId: route.routeId,
+          }),
+        ),
+        networkId: component.amount.asset.networkId,
+        asset: component.amount.asset,
+        destinationAddress: address,
+        destinationLocationId: component.location.locationId,
+        baselineRaw: component.amount.raw,
+        baselineRevision: canonicalJsonHash({
+          schema: "owned_receive_component_baseline_v1",
+          componentId: component.componentId,
+          observedAt: component.observedAt,
+          raw: component.amount.raw,
+        }),
+        observation: {
+          adapterId: "owned_destination_spendability_v1",
+          payload: { routeId: route.routeId },
+        },
+        completion: { kind: "child_funding_operation" as const },
+      },
+    ];
+  });
+  const capabilityVariants = (input.planning.policy.routes ?? []).flatMap(
+    (route) => {
+      if (
+        !route.enabled ||
+        route.providerId !== "relay" ||
+        route.destinationLocationPatternId !==
+          input.planning.destination.destinationLocationPatternId ||
+        !sameAsset(
+          route.destinationAsset,
+          input.planning.requiredAmount.asset,
+        ) ||
+        (!isRelayPinnedStableAsset(route.sourceAsset) &&
+          !isNativeSolAsset(route.sourceAsset)) ||
+        !supportsCanonicalFundingReceiveEvents(route.sourceAsset.networkId)
+      ) {
+        return [];
+      }
+      const sourcePolicies = input.planning.policy.locations.filter(
+        (location) =>
+          location.enabled &&
+          location.locationPatternId === route.sourceLocationPatternId &&
+          location.locationKind === "wallet" &&
+          location.ownership === "owned" &&
+          location.observable &&
+          location.capabilities.includes("execution_source") &&
+          sameAsset(location.asset, route.sourceAsset),
+      );
+      if (sourcePolicies.length !== 1) return [];
+      const profiles = (input.account.ownership?.wallets ?? []).filter(
+        (profile) =>
+          profile.networkId === route.sourceAsset.networkId &&
+          profile.source !== "external" &&
+          profile.signingModes.length > 0,
+      );
+      if (profiles.length !== 1) return [];
+      const profile = profiles[0];
+      if (!profile) return [];
+      const key = `${route.sourceAsset.networkId}:${route.sourceAsset.assetId.toLowerCase()}:${profile.address.toLowerCase()}`;
+      if (existing.has(key)) return [];
+      existing.add(key);
+      return [
+        {
+          variantId: stableOpaqueId(
+            "ingress_variant",
+            canonicalJsonHash({
+              destinationAddress: profile.address.toLowerCase(),
+              asset: route.sourceAsset,
+              completion: "child_funding_operation",
+              routeId: route.routeId,
+            }),
+          ),
+          networkId: route.sourceAsset.networkId,
+          asset: route.sourceAsset,
+          destinationAddress: profile.address,
+          destinationLocationId: stableOpaqueId(
+            "location",
+            [
+              input.planning.accountId,
+              "wallet",
+              profile.address.toLowerCase(),
+              canonicalAssetKey(route.sourceAsset),
+            ].join(":"),
+          ),
+          baselineRaw: "0",
+          baselineRevision: canonicalJsonHash({
+            schema: "owned_receive_capability_baseline_v1",
+            walletId: profile.walletId,
+            routeId: route.routeId,
+            asset: route.sourceAsset,
+          }),
+          observation: {
+            adapterId: "owned_wallet_liquid_balances_v1",
+            payload: {
+              routeId: route.routeId,
+              balanceKey: canonicalAssetKey(route.sourceAsset),
+            },
+          },
+          completion: { kind: "child_funding_operation" as const },
+        },
+      ];
+    },
+  );
+  return [...componentVariants, ...capabilityVariants];
 }
 
 function instruction(input: {
@@ -387,11 +552,26 @@ function instruction(input: {
   variants: readonly DirectIngressVariant[];
 }): ExternalIngressInstruction {
   const amount = input.planning.requiredAmount;
-  const targets = receiveTargets(input.variants);
+  const targets = buildFundingReceiveTargets(input.variants);
+  const sourceNetworks = new Set(
+    input.variants.map((variant) => variant.asset.networkId),
+  );
+  const sourceAssets = new Map(
+    input.variants.map((variant) => [
+      `${variant.asset.networkId}:${variant.asset.assetId.toLowerCase()}:${variant.asset.decimals}`,
+      variant.asset,
+    ]),
+  );
   return {
     ingressKind: input.ingressKind,
-    sourceNetworkId: amount.asset.networkId,
-    sourceAsset: amount.asset,
+    sourceNetworkId:
+      sourceNetworks.size === 1
+        ? (sourceNetworks.values().next().value ?? null)
+        : null,
+    sourceAsset:
+      sourceAssets.size === 1
+        ? (sourceAssets.values().next().value ?? null)
+        : null,
     receiveTargets: targets,
     recommendedReceiveTargetId: targets[0]?.receiveTargetId ?? null,
     destinationOptionId: input.destinationOptionId,
@@ -430,8 +610,8 @@ function sourceOption(input: {
   const source = {
     kind: "external_ingress" as const,
     ingressKind: input.ingressKind,
-    networkId: input.planning.requiredAmount.asset.networkId,
-    asset: input.planning.requiredAmount.asset,
+    networkId: ingress.sourceNetworkId,
+    asset: ingress.sourceAsset,
     controlledSender: false,
   };
   return {
@@ -484,6 +664,7 @@ function plannedSource(
   option: SourceOption,
   variants: readonly DirectIngressVariant[],
   completion: DirectIngressCompletion | null,
+  receiveSessionVariants: readonly DirectIngressVariant[] = variants,
 ): PlannedSourceOption {
   const destinationFacts = input.destinationFacts;
   if (input.destination.target.kind !== "owned_location") {
@@ -527,6 +708,12 @@ function plannedSource(
           adapterId: "direct_owned_receive_v1",
           destinationObserverId: "owned_multi_asset_balance_delta_v1",
           ingressVariants: variants.map((variant) => jsonRecord(variant)),
+          receiveSessionVariants: receiveSessionVariants.map((variant) =>
+            jsonRecord(variant),
+          ),
+          receiveSessionTargets: buildFundingReceiveTargets(
+            receiveSessionVariants,
+          ).map((target) => jsonRecord(target)),
           destinationBaselineRaw:
             destinationFacts?.spendability.observedAmount.raw ?? null,
           destinationBaselineRevision:
@@ -607,6 +794,23 @@ export class DirectIngressFundingSourceAdapter implements FundingSourceAdapter {
         })
       : null;
     const variants = completion?.variants ?? [exactIngressVariant(input)];
+    // Receive targets are limited to networks with an exact canonical event
+    // observer. Polygon and Base share the EVM Transfer scanner. Solana SPL
+    // and native SOL use exact finalized instruction identity. A Relay quote
+    // or aggregate wallet balance is never sufficient receipt identity.
+    const receiveSessionVariants = [
+      ...variants,
+      ...(this.account
+        ? buildRoutedReceiveVariants({
+            account: this.account,
+            planning: input,
+            existing: variants,
+          })
+        : []),
+    ].filter((variant) =>
+      supportsCanonicalFundingReceiveEvents(variant.networkId),
+    );
+    if (receiveSessionVariants.length === 0) return [];
     const manual = sourceOption({
       planning: input,
       kind: "manual_receive",
@@ -615,10 +819,16 @@ export class DirectIngressFundingSourceAdapter implements FundingSourceAdapter {
       expiresAt,
       destinationAddress,
       recommended: true,
-      variants,
+      variants: receiveSessionVariants,
     });
     const sources: PlannedSourceOption[] = [
-      plannedSource(input, manual, variants, completion),
+      plannedSource(
+        input,
+        manual,
+        variants,
+        completion,
+        receiveSessionVariants,
+      ),
     ];
     const privyEnabled = input.policy.privyFundingMethods.some(
       (method) =>
@@ -639,7 +849,7 @@ export class DirectIngressFundingSourceAdapter implements FundingSourceAdapter {
         recommended: false,
         variants,
       });
-      sources.push(plannedSource(input, privy, variants, completion));
+      sources.push(plannedSource(input, privy, variants, completion, variants));
     }
     return sources;
   }

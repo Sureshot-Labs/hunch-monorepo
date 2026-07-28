@@ -2,9 +2,11 @@ import { getAssociatedTokenAddressSync } from "@solana/spl-token";
 import { PublicKey } from "@solana/web3.js";
 import { getAddress } from "ethers";
 import {
+  BASE_USDC,
   POLYGON_PUSD,
   RELAY_SOLANA_CHAIN_ID,
   RELAY_SOLVER,
+  SOLANA_NATIVE,
   SOLANA_USDC,
 } from "./rehearsal.js";
 
@@ -35,6 +37,18 @@ export type ValidatedSolanaRelayQuote = {
   minimumOutputRaw: bigint;
   requestId: string;
 };
+
+export type ValidatedSolanaDirectRelayQuote = {
+  expectedOutputRaw: bigint;
+  instruction: ValidatedSolanaInstruction;
+  minimumOutputRaw: bigint;
+  requestId: string;
+  sourceAmountRaw: bigint;
+  sourceEstimatedUsd: string | null;
+};
+
+const RELAY_DEPOSIT_NATIVE_DISCRIMINATOR = "0d9e0ddf5fd51c06";
+const RELAY_DEPOSIT_SPL_DISCRIMINATOR = "0b9c60da27a3b413";
 
 function record(value: unknown, label: string): UnknownRecord {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -68,6 +82,14 @@ function unsigned(value: unknown, label: string): bigint {
     throw new Error(`${label} must be an unsigned integer`);
   }
   return BigInt(String(value));
+}
+
+function bytes32(value: unknown, label: string): Buffer {
+  const encoded = string(value, label);
+  if (!/^0x[0-9a-f]{64}$/iu.test(encoded)) {
+    throw new Error(`${label} must be a bytes32 value`);
+  }
+  return Buffer.from(encoded.slice(2), "hex");
 }
 
 function publicKey(value: unknown, label: string): string {
@@ -150,14 +172,19 @@ function currencyAmount(
 
 function validateProtocol(input: {
   amount: bigint;
+  destinationChain: "base" | "polygon";
+  destinationCurrency: string;
+  destinationRefundCurrency: string;
   expectedOutputRaw: bigint;
   minimumOutputRaw: bigint;
   protocolValue: unknown;
   recipient: string;
+  sourceCurrency: string;
   user: string;
-}): void {
+}): Buffer {
   const protocol = record(input.protocolValue, "protocol");
   const v2 = record(protocol.v2, "protocol.v2");
+  const orderId = bytes32(v2.orderId, "protocol.v2.orderId");
   assertExact(v2.hubType, "onchain", "protocol.v2.hubType");
   const payment = record(v2.paymentDetails, "protocol.v2.paymentDetails");
   assertExact(payment.chainId, "solana", "paymentDetails.chainId");
@@ -168,7 +195,7 @@ function validateProtocol(input: {
   );
   assertExact(
     publicKey(payment.currency, "paymentDetails.currency"),
-    SOLANA_USDC,
+    input.sourceCurrency,
     "paymentDetails.currency",
   );
   if (unsigned(payment.amount, "paymentDetails.amount") !== input.amount) {
@@ -199,7 +226,7 @@ function validateProtocol(input: {
   assertExact(orderPayment.chainId, "solana", "input.payment.chainId");
   assertExact(
     publicKey(orderPayment.currency, "input.payment.currency"),
-    SOLANA_USDC,
+    input.sourceCurrency,
     "input.payment.currency",
   );
   if (unsigned(orderPayment.amount, "input.payment.amount") !== input.amount) {
@@ -211,10 +238,10 @@ function validateProtocol(input: {
   const solanaRefund = refunds
     .map((value, index) => record(value, `refunds[${index}]`))
     .find((refund) => refund.chainId === "solana");
-  const polygonRefund = refunds
+  const destinationRefund = refunds
     .map((value, index) => record(value, `refunds[${index}]`))
-    .find((refund) => refund.chainId === "polygon");
-  if (!solanaRefund || !polygonRefund) {
+    .find((refund) => refund.chainId === input.destinationChain);
+  if (!solanaRefund || !destinationRefund) {
     throw new Error("required controlled refund paths missing");
   }
   assertExact(
@@ -224,28 +251,28 @@ function validateProtocol(input: {
   );
   assertExact(
     publicKey(solanaRefund.currency, "solana refund currency"),
-    SOLANA_USDC,
+    input.sourceCurrency,
     "solana refund currency",
   );
   if (
     !sameEvmAddress(
-      evmAddress(polygonRefund.recipient, "polygon refund recipient"),
+      evmAddress(destinationRefund.recipient, "destination refund recipient"),
       input.recipient,
     )
   ) {
-    throw new Error("polygon refund recipient mismatch");
+    throw new Error("destination refund recipient mismatch");
   }
   if (
     !sameEvmAddress(
-      evmAddress(polygonRefund.currency, "polygon refund currency"),
-      POLYGON_USDCE,
+      evmAddress(destinationRefund.currency, "destination refund currency"),
+      input.destinationRefundCurrency,
     )
   ) {
-    throw new Error("polygon refund currency mismatch");
+    throw new Error("destination refund currency mismatch");
   }
 
   const output = record(orderData.output, "orderData.output");
-  assertExact(output.chainId, "polygon", "output.chainId");
+  assertExact(output.chainId, input.destinationChain, "output.chainId");
   if (array(output.calls, "output.calls").length !== 0) {
     throw new Error("output.calls must be empty");
   }
@@ -263,7 +290,7 @@ function validateProtocol(input: {
   if (
     !sameEvmAddress(
       evmAddress(outputPayment.currency, "output currency"),
-      POLYGON_PUSD,
+      input.destinationCurrency,
     )
   ) {
     throw new Error("output currency mismatch");
@@ -276,6 +303,252 @@ function validateProtocol(input: {
   ) {
     throw new Error("output amount correlation mismatch");
   }
+  return orderId;
+}
+
+export function validateRelaySolanaDirectBaseQuote(input: {
+  expectedOutputTargetRaw: bigint;
+  maximumSourceAmountRaw: bigint;
+  minimumOutputFloorRaw: bigint;
+  quote: unknown;
+  recipient: string;
+  sourceCurrency: typeof SOLANA_NATIVE | typeof SOLANA_USDC;
+  user: string;
+}): ValidatedSolanaDirectRelayQuote {
+  if (
+    input.maximumSourceAmountRaw <= 0n ||
+    input.expectedOutputTargetRaw <= 0n ||
+    input.minimumOutputFloorRaw <= 0n
+  ) {
+    throw new Error("direct Solana quote amounts must be positive");
+  }
+  const user = publicKey(input.user, "user");
+  const recipient = evmAddress(input.recipient, "recipient");
+  const quote = record(input.quote, "quote");
+  if (
+    quote.depositAddress !== undefined &&
+    quote.depositAddress !== "" &&
+    quote.depositAddress !== null
+  ) {
+    throw new Error("Deposit Address mode is forbidden");
+  }
+  const details = record(quote.details, "details");
+  assertExact(
+    publicKey(details.sender, "details.sender"),
+    user,
+    "details.sender",
+  );
+  if (
+    !sameEvmAddress(
+      evmAddress(details.recipient, "details.recipient"),
+      recipient,
+    )
+  ) {
+    throw new Error("details.recipient mismatch");
+  }
+  const source = currencyAmount(details, "currencyIn", {
+    address: input.sourceCurrency,
+    chainId: RELAY_SOLANA_CHAIN_ID,
+    decimals: input.sourceCurrency === SOLANA_NATIVE ? 9 : 6,
+    vm: "svm",
+  });
+  if (
+    source.amount <= 0n ||
+    source.amount > input.maximumSourceAmountRaw ||
+    source.minimumAmount !== source.amount
+  ) {
+    throw new Error("direct Solana input exceeds the authorized source cap");
+  }
+  const output = currencyAmount(details, "currencyOut", {
+    address: BASE_USDC,
+    chainId: 8453,
+    decimals: 6,
+    vm: "evm",
+  });
+  if (
+    output.amount !== input.expectedOutputTargetRaw ||
+    output.minimumAmount < input.minimumOutputFloorRaw ||
+    output.minimumAmount > output.amount
+  ) {
+    throw new Error("direct Base USDC output is below the authorized floor");
+  }
+  const orderId = validateProtocol({
+    amount: source.amount,
+    destinationChain: "base",
+    destinationCurrency: BASE_USDC,
+    destinationRefundCurrency: BASE_USDC,
+    expectedOutputRaw: output.amount,
+    minimumOutputRaw: output.minimumAmount,
+    protocolValue: quote.protocol,
+    recipient,
+    sourceCurrency: input.sourceCurrency,
+    user,
+  });
+
+  const steps = array(quote.steps, "steps");
+  if (steps.length !== 1) throw new Error("unexpected Relay step count");
+  const step = record(steps[0], "steps[0]");
+  assertExact(step.id, "deposit", "step.id");
+  assertExact(step.kind, "transaction", "step.kind");
+  const requestId = string(step.requestId, "step.requestId");
+  const items = array(step.items, "step.items");
+  if (items.length !== 1) throw new Error("deposit item count mismatch");
+  const item = record(items[0], "step.items[0]");
+  assertExact(item.status, "incomplete", "deposit item status");
+  const check = record(item.check, "deposit.check");
+  assertExact(check.method, "GET", "deposit.check.method");
+  const correlatedRequestId = new URL(
+    string(check.endpoint, "deposit.check.endpoint"),
+    "https://api.relay.link",
+  ).searchParams.get("requestId");
+  if (correlatedRequestId !== requestId) {
+    throw new Error("deposit request correlation mismatch");
+  }
+  const data = record(item.data, "deposit.data");
+  if (
+    Object.keys(data).sort().join(",") !==
+    "addressLookupTableAddresses,instructions"
+  ) {
+    throw new Error("unexpected Solana action capability");
+  }
+  const lookupTables = array(
+    data.addressLookupTableAddresses,
+    "addressLookupTableAddresses",
+  ).map((value, index) => publicKey(value, `lookupTables[${index}]`));
+  if (lookupTables.length !== 1) {
+    throw new Error("direct Solana route requires one address lookup table");
+  }
+  const instructions = array(data.instructions, "instructions");
+  if (instructions.length !== 1) {
+    throw new Error("direct Solana route requires one Relay instruction");
+  }
+  const instruction = record(instructions[0], "instructions[0]");
+  const programId = publicKey(instruction.programId, "instruction.programId");
+  assertExact(programId, RELAY_SOLANA_DEPOSITORY, "instruction.programId");
+  const encodedData = string(instruction.data, "instruction.data");
+  if (!/^[0-9a-f]{96}$/iu.test(encodedData)) {
+    throw new Error("instruction.data must be 48-byte hex without a prefix");
+  }
+  const decodedData = Buffer.from(encodedData, "hex");
+  const expectedDiscriminator =
+    input.sourceCurrency === SOLANA_NATIVE
+      ? RELAY_DEPOSIT_NATIVE_DISCRIMINATOR
+      : RELAY_DEPOSIT_SPL_DISCRIMINATOR;
+  if (
+    decodedData.subarray(0, 8).toString("hex") !== expectedDiscriminator ||
+    decodedData.readBigUInt64LE(8) !== source.amount ||
+    !decodedData.subarray(16).equals(orderId)
+  ) {
+    throw new Error("direct Solana instruction economics binding mismatch");
+  }
+  const keys = array(instruction.keys, "instruction.keys").map(
+    (value, index) => {
+      const key = record(value, `instruction.keys[${index}]`);
+      if (
+        typeof key.isSigner !== "boolean" ||
+        typeof key.isWritable !== "boolean"
+      ) {
+        throw new Error(`instruction.keys[${index}] flags invalid`);
+      }
+      return {
+        pubkey: publicKey(key.pubkey, `instruction.keys[${index}].pubkey`),
+        isSigner: key.isSigner,
+        isWritable: key.isWritable,
+      };
+    },
+  );
+  const signerIndexes = keys.flatMap((key, index) =>
+    key.isSigner ? [index] : [],
+  );
+  if (signerIndexes.length !== 1 || signerIndexes[0] !== 1) {
+    throw new Error("only the controlled Solana wallet may sign");
+  }
+  assertExact(required(keys[1], "signer account").pubkey, user, "signer");
+  assertExact(
+    required(keys[1], "signer account").isWritable,
+    true,
+    "signer writable flag",
+  );
+  assertExact(required(keys[2], "depositor account").pubkey, user, "depositor");
+  assertExact(
+    required(keys[2], "depositor account").isWritable,
+    false,
+    "depositor writable flag",
+  );
+
+  if (input.sourceCurrency === SOLANA_NATIVE) {
+    if (keys.length !== 5) {
+      throw new Error("native SOL direct account layout mismatch");
+    }
+    assertExact(
+      required(keys[4], "native currency account").pubkey,
+      SOLANA_SYSTEM_PROGRAM,
+      "native currency account",
+    );
+    const writableIndexes = keys.flatMap((key, index) =>
+      key.isWritable ? [index] : [],
+    );
+    if (writableIndexes.join(",") !== "1,3") {
+      throw new Error("unexpected native SOL writable account set");
+    }
+  } else {
+    if (keys.length !== 10) {
+      throw new Error("Solana USDC direct account layout mismatch");
+    }
+    assertExact(
+      required(keys[4], "mint account").pubkey,
+      SOLANA_USDC,
+      "mint account",
+    );
+    const expectedSourceAta = getAssociatedTokenAddressSync(
+      new PublicKey(SOLANA_USDC),
+      new PublicKey(user),
+    ).toBase58();
+    assertExact(
+      required(keys[5], "source token account").pubkey,
+      expectedSourceAta,
+      "source token account",
+    );
+    assertExact(
+      required(keys[7], "token program").pubkey,
+      SPL_TOKEN_PROGRAM,
+      "token program",
+    );
+    assertExact(
+      required(keys[8], "associated token program").pubkey,
+      SPL_ASSOCIATED_TOKEN_PROGRAM,
+      "associated token program",
+    );
+    assertExact(
+      required(keys[9], "system program").pubkey,
+      SOLANA_SYSTEM_PROGRAM,
+      "system program",
+    );
+    const writableIndexes = keys.flatMap((key, index) =>
+      key.isWritable ? [index] : [],
+    );
+    if (writableIndexes.join(",") !== "1,5,6") {
+      throw new Error("unexpected Solana USDC writable account set");
+    }
+  }
+
+  return {
+    expectedOutputRaw: output.amount,
+    instruction: {
+      addressLookupTableAddresses: lookupTables,
+      data: decodedData,
+      keys,
+      programId,
+    },
+    minimumOutputRaw: output.minimumAmount,
+    requestId,
+    sourceAmountRaw: source.amount,
+    sourceEstimatedUsd:
+      typeof record(details.currencyIn, "details.currencyIn").amountUsd ===
+      "string"
+        ? String(record(details.currencyIn, "details.currencyIn").amountUsd)
+        : null,
+  };
 }
 
 export function validateRelaySolanaRehearsalQuote(input: {
@@ -328,10 +601,14 @@ export function validateRelaySolanaRehearsalQuote(input: {
   }
   validateProtocol({
     amount: input.amount,
+    destinationChain: "polygon",
+    destinationCurrency: POLYGON_PUSD,
+    destinationRefundCurrency: POLYGON_USDCE,
     expectedOutputRaw: output.amount,
     minimumOutputRaw: output.minimumAmount,
     protocolValue: quote.protocol,
     recipient,
+    sourceCurrency: SOLANA_USDC,
     user,
   });
 

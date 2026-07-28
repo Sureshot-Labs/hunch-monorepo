@@ -22,6 +22,11 @@ import type {
 import type { PreparationResult } from "../funding/domain/contracts.js";
 import { FundingPlannerError } from "../funding/planner/money.js";
 import { FundingPlanningRuntime } from "../funding/planner/runtime-service.js";
+import {
+  FundingReceiveSessionService,
+  type FundingReceiveSessionResponse,
+  type OpenFundingReceiveSessionRequest,
+} from "../funding/receive/receive-session-service.js";
 import { PreparationContractError } from "../funding/preparation/core-adapter.js";
 import { WithdrawalDestinationError } from "../funding/execution/withdrawal-destination-runtime.js";
 import { cancelFundingOperationForUser } from "../funding/reconciliation/funding-operation-cancellation.js";
@@ -56,6 +61,11 @@ import {
   fundingPreparationInspectResponseSchema,
   fundingPreparationPrepareRequestSchema,
   fundingPreparationPrepareResponseSchema,
+  fundingReceiveSessionOpenRequestSchema,
+  fundingReceiveReceiptParamsSchema,
+  fundingReceiveReceiptReviewQuoteResponseSchema,
+  fundingReceiveSessionParamsSchema,
+  fundingReceiveSessionResponseSchema,
   fundingValidationErrorResponseSchema,
   fundingWithdrawalDestinationParamsSchema,
   fundingWithdrawalDestinationRequestSchema,
@@ -206,6 +216,29 @@ export type FundingRouteDependencies = Readonly<{
       stepState: "submitted" | "reconcile_required" | "failed" | "cancelled";
     }>
   >;
+  openReceiveSession(
+    userId: string,
+    request: OpenFundingReceiveSessionRequest,
+  ): Promise<FundingReceiveSessionResponse>;
+  receiveSession(
+    userId: string,
+    receiveSessionId: string,
+  ): Promise<FundingReceiveSessionResponse | null>;
+  cancelReceiveSession(
+    userId: string,
+    receiveSessionId: string,
+  ): Promise<FundingReceiveSessionResponse | null>;
+  reviewReceiveReceipt(
+    userId: string,
+    receiveSessionId: string,
+    receiptId: string,
+  ): ReturnType<FundingReceiveSessionService["reviewQuote"]>;
+  commitReceiveReceiptReview(
+    userId: string,
+    receiveSessionId: string,
+    receiptId: string,
+    request: FundingCommitRequest,
+  ): Promise<Readonly<{ operation: FundingOperationRow; replayed: boolean }>>;
 }>;
 
 function publicOperation(operation: FundingOperationRow) {
@@ -497,6 +530,198 @@ export function registerFundingRoutes(
           return reply.send(
             fundingDestinationsResponseSchema.parse({ ok: true, options }),
           );
+        },
+      ),
+  );
+
+  z.post(
+    "/funding/receive-sessions",
+    {
+      preHandler: dependencies.authenticate,
+      schema: {
+        body: fundingReceiveSessionOpenRequestSchema,
+        response: { 200: fundingReceiveSessionResponseSchema, ...errors },
+      },
+    },
+    (request, reply) =>
+      handleFundingRequest(
+        request,
+        reply,
+        dependencies,
+        {
+          endpoint: "receive-session-open",
+          logMessage: "Funding receive session open failed",
+          publicError: "Receive options could not be prepared",
+        },
+        async (userId) => {
+          const opened = await dependencies.openReceiveSession(
+            userId,
+            request.body,
+          );
+          return reply.send(
+            fundingReceiveSessionResponseSchema.parse({
+              ok: true,
+              ...opened,
+            }),
+          );
+        },
+      ),
+  );
+
+  z.get(
+    "/funding/receive-sessions/:id",
+    {
+      preHandler: dependencies.authenticate,
+      schema: {
+        params: fundingReceiveSessionParamsSchema,
+        response: { 200: fundingReceiveSessionResponseSchema, ...errors },
+      },
+    },
+    (request, reply) =>
+      handleFundingRequest(
+        request,
+        reply,
+        dependencies,
+        {
+          endpoint: "receive-session-read",
+          logMessage: "Funding receive session read failed",
+          publicError: "Receive status could not be read",
+        },
+        async (userId) => {
+          const found = await dependencies.receiveSession(
+            userId,
+            request.params.id,
+          );
+          if (!found) {
+            return reply.code(404).send({
+              error: "Receive session not found",
+              code: "receive_session_not_found",
+            });
+          }
+          return reply.send(
+            fundingReceiveSessionResponseSchema.parse({
+              ok: true,
+              ...found,
+            }),
+          );
+        },
+      ),
+  );
+
+  z.post(
+    "/funding/receive-sessions/:id/cancel",
+    {
+      preHandler: dependencies.authenticate,
+      schema: {
+        params: fundingReceiveSessionParamsSchema,
+        response: { 200: fundingReceiveSessionResponseSchema, ...errors },
+      },
+    },
+    (request, reply) =>
+      handleFundingRequest(
+        request,
+        reply,
+        dependencies,
+        {
+          endpoint: "receive-session-cancel",
+          logMessage: "Funding receive session cancellation failed",
+          publicError: "Receive session could not be cancelled",
+        },
+        async (userId) => {
+          const cancelled = await dependencies.cancelReceiveSession(
+            userId,
+            request.params.id,
+          );
+          if (!cancelled) {
+            return reply.code(409).send({
+              error: "Receive session can no longer be cancelled",
+              code: "receive_session_not_cancellable",
+            });
+          }
+          return reply.send(
+            fundingReceiveSessionResponseSchema.parse({
+              ok: true,
+              ...cancelled,
+            }),
+          );
+        },
+      ),
+  );
+
+  z.post(
+    "/funding/receive-sessions/:id/receipts/:receiptId/quote",
+    {
+      preHandler: dependencies.authenticate,
+      schema: {
+        params: fundingReceiveReceiptParamsSchema,
+        response: {
+          200: fundingReceiveReceiptReviewQuoteResponseSchema,
+          ...errors,
+        },
+      },
+    },
+    (request, reply) =>
+      handleFundingRequest(
+        request,
+        reply,
+        dependencies,
+        {
+          endpoint: "receive-receipt-review-quote",
+          logMessage: "Funding receive receipt review quote failed",
+          publicError: "Conversion review could not be prepared",
+        },
+        async (userId) => {
+          const reviewed = await dependencies.reviewReceiveReceipt(
+            userId,
+            request.params.id,
+            request.params.receiptId,
+          );
+          return reply.send(
+            fundingReceiveReceiptReviewQuoteResponseSchema.parse({
+              ok: true,
+              ...reviewed,
+            }),
+          );
+        },
+      ),
+  );
+
+  z.post(
+    "/funding/receive-sessions/:id/receipts/:receiptId/commit",
+    {
+      preHandler: dependencies.authenticate,
+      schema: {
+        params: fundingReceiveReceiptParamsSchema,
+        body: fundingCommitRequestSchema,
+        response: { 200: fundingOperationResponseSchema, ...errors },
+      },
+    },
+    (request, reply) =>
+      handleFundingRequest(
+        request,
+        reply,
+        dependencies,
+        {
+          endpoint: "receive-receipt-review-commit",
+          logMessage: "Funding receive receipt review commit failed",
+          publicError: "Reviewed conversion could not be started",
+        },
+        async (userId) => {
+          const committed = await dependencies.commitReceiveReceiptReview(
+            userId,
+            request.params.id,
+            request.params.receiptId,
+            request.body,
+          );
+          return reply.send({
+            ok: true,
+            operation: publicOperation(committed.operation),
+            steps: publicOperationSteps(
+              await dependencies.operationSteps(userId, committed.operation.id),
+            ),
+            ingress: publicIngress(committed.operation),
+            replayed: committed.replayed,
+          });
         },
       ),
   );
@@ -856,6 +1081,7 @@ export function registerFundingRoutes(
 
 export const fundingRoutes: FastifyPluginAsync = async (app) => {
   const runtime = new FundingPlanningRuntime(pool);
+  const receiveSessions = new FundingReceiveSessionService(pool);
   registerFundingRoutes(app, {
     authenticate: createAuthMiddleware(),
     rateLimit: (userId, endpoint) =>
@@ -888,5 +1114,25 @@ export const fundingRoutes: FastifyPluginAsync = async (app) => {
       runtime.prepareOperationAction(userId, input),
     reportOperationAction: (userId, input) =>
       runtime.reportOperationAction(userId, input),
+    openReceiveSession: (userId, request) =>
+      receiveSessions.open(userId, request),
+    receiveSession: (userId, receiveSessionId) =>
+      receiveSessions.get(userId, receiveSessionId),
+    cancelReceiveSession: (userId, receiveSessionId) =>
+      receiveSessions.cancel(userId, receiveSessionId),
+    reviewReceiveReceipt: (userId, receiveSessionId, receiptId) =>
+      receiveSessions.reviewQuote(userId, receiveSessionId, receiptId),
+    commitReceiveReceiptReview: (
+      userId,
+      receiveSessionId,
+      receiptId,
+      request,
+    ) =>
+      receiveSessions.commitReview(
+        userId,
+        receiveSessionId,
+        receiptId,
+        request,
+      ),
   });
 };

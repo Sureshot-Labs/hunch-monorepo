@@ -19,6 +19,14 @@
       "transactionsBroadcast": 0,
       "depositAddressModeRequests": 0
     },
+    "authorizedSolanaBaseQuoteOnly": {
+      "externalStateChanges": true,
+      "externalStateScope": "ten Relay quote request/log records only",
+      "quoteRequestsCreated": 10,
+      "walletSignaturesCreated": 0,
+      "transactionsBroadcast": 0,
+      "depositAddressModeRequests": 0
+    },
     "authorizedLiveRehearsal": {
       "externalStateChanges": true,
       "externalStateScope": "guarded dedicated-burner Relay EVM and Solana rehearsal only",
@@ -65,6 +73,15 @@
     "Polymarket/Limitless venue settlement, order, or readiness mutations"
   ],
   "sources": [
+    {
+      "id": "relay-solana-base-quote-v2-live",
+      "kind": "live-quote-only-sanitized",
+      "url": "https://api.relay.link/quote/v2",
+      "retrievedAt": "2026-07-27T23:51:19.392Z/2026-07-27T23:56:09.898Z",
+      "quoteRequestsCreated": 10,
+      "requestIdsPersisted": false,
+      "transactionsBroadcast": 0
+    },
     {
       "id": "relay-solana-native-quote-v2-live",
       "kind": "live-quote-only-sanitized",
@@ -157,6 +174,7 @@
     "quote-v2-base-usdc-polygon-usdc.live-sanitized.json",
     "quote-v2-solana-usdc-polygon-usdc.live-sanitized.json",
     "quote-v2-solana-sol-polygon-pusd.live-sanitized.json",
+    "quote-v2-solana-base-usdc.live-sanitized.json",
     "quote-v2-base-usdc-polygon-pusd.live-sanitized.json",
     "rehearsal-evm-roundtrip.live-sanitized.json",
     "rehearsal-solana-roundtrip.live-sanitized.json",

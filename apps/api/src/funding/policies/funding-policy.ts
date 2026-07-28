@@ -97,6 +97,10 @@ export const PRODUCTION_FUNDING_REGISTRY: FundingStaticRegistry = deepFreeze({
       runtimeKind: "production",
     },
     {
+      id: "owned_wallet_liquid_balances_v1",
+      runtimeKind: "production",
+    },
+    {
       id: "relay_owned_destination_observation_v1",
       runtimeKind: "production",
     },
@@ -105,6 +109,8 @@ export const PRODUCTION_FUNDING_REGISTRY: FundingStaticRegistry = deepFreeze({
     "relay_quote_v2_wallet_docs",
     "relay_wallet_evm_roundtrip_live",
     "relay_wallet_solana_roundtrip_live",
+    "relay_wallet_solana_sol_to_base_usdc_quote_live",
+    "relay_wallet_solana_usdc_to_base_usdc_quote_live",
     "relay_wallet_solana_native_to_pusd_quote_live",
     "relay_status_lifecycle_v3",
     "relay_webhook_status_updated",
