@@ -60,6 +60,7 @@ export type RelayEligibleSourceFact = Readonly<{
   source: FundingSourceRef;
   quoteInputAmount: Money;
   quoteMinimumOutput?: Money;
+  quoteModeOverride?: "exact_input";
   maximumSourceRaw: string;
   maximumSlippageBps: number;
   estimatedUsd: string | null;
@@ -895,7 +896,10 @@ export function selectRelayFirstSourceOptions(
       if (rawAmount(expected.raw) < rawAmount(minimum.raw)) {
         throw new Error("source option output economics are inconsistent");
       }
-      if (rawAmount(minimum.raw) < rawAmount(input.requiredDestination.raw)) {
+      if (
+        option.amountMode !== "exact_input" &&
+        rawAmount(minimum.raw) < rawAmount(input.requiredDestination.raw)
+      ) {
         option = {
           ...option,
           experienceMode: "unavailable",

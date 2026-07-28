@@ -327,6 +327,7 @@ const destination: FundingTarget = {
   });
   assert.match(observedUrl, /\/quote\/v2$/u);
   assert.equal(observedBody.tradeType, "EXACT_INPUT");
+  assert.equal(observedBody.slippageTolerance, "100");
   assert.equal(observedBody.useDepositAddress, false);
   assert.equal(normalized.requestId, requestId);
   assert.equal(normalized.actions.length, 1);

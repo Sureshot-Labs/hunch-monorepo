@@ -760,6 +760,119 @@ assert.equal(
   "102",
 );
 
+const adaptiveRangeCalls: Array<
+  Readonly<{ fromBlock: bigint; toBlock: bigint }>
+> = [];
+const adaptiveRangeScan = await scanFundingReceiveCanonicalEvents(
+  eventInitialized ? [eventInitialized] : [],
+  new Date("2026-07-27T12:00:01.000Z"),
+  {
+    async blockNumber() {
+      return 131n;
+    },
+    async transferLogs(input) {
+      adaptiveRangeCalls.push({
+        fromBlock: input.fromBlock,
+        toBlock: input.toBlock,
+      });
+      if (adaptiveRangeCalls.length === 1) {
+        throw new Error(
+          "Under the Free tier plan, you can make eth_getLogs requests with up to a 10 block range.",
+        );
+      }
+      return [];
+    },
+  },
+);
+assert.deepEqual(adaptiveRangeCalls, [
+  { fromBlock: 101n, toBlock: 130n },
+  { fromBlock: 101n, toBlock: 110n },
+]);
+assert.equal(
+  adaptiveRangeScan?.variants[0]?.observation.payload.eventCursorBlock,
+  "110",
+  "the cursor must advance only through the provider-accepted range",
+);
+
+let concurrentEvmScans = 0;
+let maximumConcurrentEvmScans = 0;
+const secondPolygonVariant = eventInitialized
+  ? {
+      ...eventInitialized,
+      variantId: "ingress_variant_polygon_second_12345678",
+      asset: {
+        ...eventInitialized.asset,
+        assetId: "0x0000000000000000000000000000000000000009",
+      },
+    }
+  : null;
+await scanFundingReceiveCanonicalEvents(
+  eventInitialized && secondPolygonVariant
+    ? [eventInitialized, secondPolygonVariant]
+    : [],
+  new Date("2026-07-27T12:00:02.000Z"),
+  {
+    async blockNumber() {
+      return 103n;
+    },
+    async transferLogs() {
+      concurrentEvmScans += 1;
+      maximumConcurrentEvmScans = Math.max(
+        maximumConcurrentEvmScans,
+        concurrentEvmScans,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      concurrentEvmScans -= 1;
+      return [];
+    },
+  },
+);
+assert.equal(
+  maximumConcurrentEvmScans,
+  1,
+  "accepted EVM assets must not burst the shared RPC endpoint",
+);
+
+let concurrentSolanaScans = 0;
+let maximumConcurrentSolanaScans = 0;
+await scanSolanaFundingReceiveCanonicalEvents(
+  [initializedSolana[0], initializedSolana[0]]
+    .filter((candidate): candidate is NonNullable<typeof candidate> =>
+      Boolean(candidate),
+    )
+    .map((candidate, index) => ({
+      ...candidate,
+      variantId: `ingress_variant_solana_sequential_${index}_12345678`,
+    })),
+  new Date("2026-07-27T12:00:03.000Z"),
+  {
+    async finalizedSlot() {
+      return 501n;
+    },
+    async signatures() {
+      concurrentSolanaScans += 1;
+      maximumConcurrentSolanaScans = Math.max(
+        maximumConcurrentSolanaScans,
+        concurrentSolanaScans,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      concurrentSolanaScans -= 1;
+      return [];
+    },
+    async transaction() {
+      return null;
+    },
+    async blockhash() {
+      return null;
+    },
+  },
+);
+assert.equal(
+  maximumConcurrentSolanaScans,
+  1,
+  "accepted Solana assets must not burst provider compute units",
+);
+
 const quote = (feeUsd: string | null): FundingQuoteSummary =>
   ({
     minimumDestination: {

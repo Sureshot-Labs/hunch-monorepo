@@ -56,6 +56,33 @@ const tests: readonly Test[] = [
     },
   },
   {
+    name: "receive-session polling is durably throttled and claimed across workers",
+    run: () => {
+      const source = readFileSync(
+        new URL(
+          "../../persistence/funding-receive-session-repository.ts",
+          import.meta.url,
+        ),
+        "utf8",
+      );
+      const start = source.indexOf(
+        "export async function claimObservableFundingReceiveSessions",
+      );
+      const end = source.indexOf(
+        "export async function listFundingReceiveReceiptsForUser",
+        start,
+      );
+      assert.ok(start >= 0 && end > start);
+      const claim = source.slice(start, end);
+      assert.match(claim, /for update skip locked/i);
+      assert.match(
+        claim,
+        /coalesce\(last_observed_at, opened_at\)[\s\S]*interval '1 millisecond'/i,
+      );
+      assert.match(claim, /set last_observed_at = \$1/i);
+    },
+  },
+  {
     name: "canonical JSON is key-order independent and rejects non-JSON values",
     run: () => {
       assert.equal(

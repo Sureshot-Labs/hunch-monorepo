@@ -10,6 +10,10 @@ import type { Pool } from "@hunch/infra";
 import { ethers } from "ethers";
 
 import { env } from "./env.js";
+import {
+  fetchErc20TransferLogs,
+  parseEvmGetLogsBlockRangeLimit,
+} from "./services/polygon-rpc.js";
 import { createApiTradingApplicationService } from "./services/api-trading-service.js";
 import type { PrivyPolicyMetadata } from "./privy-service.js";
 import {
@@ -413,6 +417,63 @@ function sourceSlice(
 }
 
 const tests: TestCase[] = [
+  {
+    name: "Polygon RPC preserves provider getLogs range errors for adaptive scanning",
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = async () =>
+        new Response(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            error: {
+              code: -32600,
+              message:
+                "Under the Free tier plan, you can make eth_getLogs requests with up to a 10 block range.",
+            },
+          }),
+          {
+            status: 400,
+            statusText: "Bad Request",
+            headers: { "content-type": "application/json" },
+          },
+        );
+      try {
+        await assert.rejects(
+          fetchErc20TransferLogs({
+            rpcUrl: "https://polygon-range-test.example",
+            timeoutMs: 100,
+            contractAddress: "0x0000000000000000000000000000000000000001",
+            recipientAddress: "0x0000000000000000000000000000000000000002",
+            fromBlock: 1n,
+            toBlock: 20n,
+          }),
+          (error: unknown) => parseEvmGetLogsBlockRangeLimit(error) === 10n,
+        );
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    },
+  },
+  {
+    name: "embedded Polymarket preparation classifies RPC throttling as retryable service unavailability",
+    run: () => {
+      assert.deepEqual(
+        polymarketTradingExecutionTestHooks.embeddedPreparationFailure(
+          new Error("Polygon RPC error: 429 Too Many Requests"),
+        ),
+        {
+          ok: false,
+          statusCode: 503,
+          payload: {
+            error: "Polygon RPC error: 429 Too Many Requests",
+            code: "polymarket_rpc_rate_limited",
+            retryable: true,
+          },
+        },
+      );
+    },
+  },
   {
     name: "Limitless AMM quote retries HTTP 429 and coalesces identical reads",
     run: async () => {

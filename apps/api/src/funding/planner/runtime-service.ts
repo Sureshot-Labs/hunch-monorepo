@@ -168,6 +168,10 @@ export class FundingPlanningRuntime {
       resolveFundingPolicy(this.db),
       buildAccountValueReadModel({ pool: this.db, userId }),
     ]);
+    const sourcePlanner = new ProductionFundingSourcePlanner(this.db, account, [
+      new PolymarketFundingSourceAdapter(account),
+      new DirectIngressFundingSourceAdapter(account),
+    ]);
     const planner = new FundingPlanner({
       listDestinations: async ({ accountId, request, marketContext }) =>
         this.preparationRuntime.resolvedCandidates({
@@ -241,11 +245,9 @@ export class FundingPlanningRuntime {
       },
       resolveWithdrawalRecipient: async ({ accountId, recipientId }) =>
         this.withdrawalRuntime.resolve(accountId, recipientId),
-      listSources: (sourceInput) =>
-        new ProductionFundingSourcePlanner(this.db, account, [
-          new PolymarketFundingSourceAdapter(account),
-          new DirectIngressFundingSourceAdapter(account),
-        ]).list(sourceInput),
+      listSources: (sourceInput) => sourcePlanner.list(sourceInput),
+      listSourceBlockers: (sourceInput) =>
+        sourcePlanner.listBlockingReasonCodes(sourceInput),
       store: this.planningStore,
     });
     return planner.discover({

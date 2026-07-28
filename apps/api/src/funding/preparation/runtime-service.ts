@@ -83,6 +83,7 @@ import {
   createLimitlessRuntimeActionMaterializer,
   createPolymarketRuntimeActionMaterializer,
 } from "./runtime-actions.js";
+import { collectDestinationInspectionCoverage } from "./destination-inspection-coverage.js";
 
 const PREPARATION_TTL_MS = 45_000;
 const PROFILE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1_000;
@@ -1411,27 +1412,37 @@ export class WalletPreparationRuntimeService {
         wallet.isVerified &&
         (!input.controllerWalletRef || wallet.id === input.controllerWalletRef),
     );
-    const results = await Promise.all(
-      this.venueDrivers.flatMap((driver) =>
-        wallets
-          .filter((wallet) => driver.supportsWallet(wallet))
-          .map((wallet) =>
-            driver
-              .inspect({
-                accountId: input.accountId,
-                wallet,
-                purpose: input.purpose,
-                marketContextId: input.marketContextId,
-                marketClass: input.marketClass,
-                positionActionRef: input.positionActionRef ?? null,
-              })
-              .catch(() => null),
-          ),
-      ),
+    const attempts = this.venueDrivers.flatMap((driver) =>
+      wallets
+        .filter((wallet) => driver.supportsWallet(wallet))
+        .map((wallet) => ({ driver, wallet })),
     );
-    return results.filter(
-      (result): result is PreparedRuntimeDestination => result != null,
+    const outcomes = await Promise.allSettled(
+      attempts.map(({ driver, wallet }) =>
+        driver.inspect({
+          accountId: input.accountId,
+          wallet,
+          purpose: input.purpose,
+          marketContextId: input.marketContextId,
+          marketClass: input.marketClass,
+          positionActionRef: input.positionActionRef ?? null,
+        })
+      )
     );
+    const coverage = collectDestinationInspectionCoverage(
+      attempts.map(({ driver, wallet }, index) => ({
+        venueId: driver.venueId,
+        internalWallet: wallet.isInternalWallet,
+        outcome: outcomes[index],
+      }))
+    );
+    if (coverage.incompleteVenueIds.length > 0) {
+      throw new PreparationContractError(
+        "preparation_unavailable",
+        `venue destination inspection is incomplete: ${coverage.incompleteVenueIds.join(",")}`
+      );
+    }
+    return coverage.values;
   }
 
   async resolveOwnerPreparation(

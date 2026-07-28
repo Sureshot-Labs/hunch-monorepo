@@ -29,6 +29,11 @@ const SOLANA_NATIVE = {
   assetId: RELAY_PINNED_ASSETS.solanaNative,
   decimals: 9,
 } as const;
+const SOLANA_USDC = {
+  networkId: "solana:mainnet",
+  assetId: RELAY_PINNED_ASSETS.solanaUsdc,
+  decimals: 6,
+} as const;
 
 function policy(
   overrides: Partial<FundingRuntimePolicy> = {},
@@ -292,6 +297,20 @@ const exactReceivedSource = deriveProductionRelayEligibleSourceFacts({
 assert.equal(exactReceivedSource.length, 1);
 assert.equal(exactReceivedSource[0]?.quoteInputAmount.raw, "3000000");
 assert.equal(exactReceivedSource[0]?.quoteMinimumOutput?.raw, "2970000");
+assert.equal(exactReceivedSource[0]?.quoteModeOverride, undefined);
+
+const exactInputConversionSource = deriveProductionRelayEligibleSourceFacts({
+  accountId: ACCOUNT_ID,
+  account: account(),
+  policy: policy(),
+  requiredAmount: { asset: POLYGON_PUSD, raw: "1" },
+  confirmedSourceAmount: { asset: BASE_USDC, raw: "3000000" },
+  purpose: "convert_asset",
+});
+assert.equal(exactInputConversionSource.length, 1);
+assert.equal(exactInputConversionSource[0]?.quoteInputAmount.raw, "3000000");
+assert.equal(exactInputConversionSource[0]?.quoteMinimumOutput?.raw, "1");
+assert.equal(exactInputConversionSource[0]?.quoteModeOverride, "exact_input");
 
 const unavailableExactReceivedSource = deriveProductionRelayEligibleSourceFacts(
   {
@@ -730,6 +749,147 @@ assert.equal(excludedByPreference.length, 0);
     directNativeFacts[0]?.quoteMinimumOutput?.asset.networkId,
     "evm:8453",
   );
+}
+
+{
+  const tokenPolicy = policy({
+    locations: [
+      {
+        locationPatternId: "wallet_solana_usdc",
+        locationKind: "wallet",
+        ownership: "owned",
+        observable: true,
+        capabilities: ["observe", "value", "execution_source"],
+        asset: SOLANA_USDC,
+        enabled: true,
+      },
+    ],
+    routes: [
+      {
+        ...policy().routes[0],
+        routeId: "solana-usdc-to-polygon-pusd",
+        sourceLocationPatternId: "wallet_solana_usdc",
+        sourceAsset: SOLANA_USDC,
+        actionValidatorId: "relay_svm_action_v1",
+        networkExecutorId: "wallet_profile_svm_v1",
+        fixtureIds: ["relay_wallet_solana_usdc_to_pusd_quote_live"],
+      },
+    ],
+  });
+  const base = account();
+  const sourceAddress = "78Hpb2CbmvW2Gp2aJGZec8nphXdqtRdfjPwwLfxKgo6t";
+  const walletId = "wallet_solana_usdc_12345678";
+  const sourceLocation = {
+    kind: "wallet",
+    locationId: "location_solana_usdc_12345678",
+    accountId: ACCOUNT_ID,
+    asset: SOLANA_USDC,
+    details: { walletId, address: sourceAddress },
+  } as const;
+  const nativeLocation = {
+    ...sourceLocation,
+    locationId: "location_solana_native_gas_12345678",
+    asset: SOLANA_NATIVE,
+  } as const;
+  const sourceComponent = {
+    ...base.projection.components[0],
+    componentId: "component_solana_usdc_12345678",
+    location: sourceLocation,
+    amount: { asset: SOLANA_USDC, raw: "5000000" },
+  } as const;
+  const nativeComponent = {
+    ...base.projection.components[0],
+    componentId: "component_solana_native_gas_12345678",
+    location: nativeLocation,
+    amount: {
+      asset: SOLANA_NATIVE,
+      raw: (SOLANA_NATIVE_EXECUTION_RESERVE_LAMPORTS - 1n).toString(),
+    },
+  } as const;
+  const belowReserveAccount = {
+    ...base,
+    projection: {
+      ...base.projection,
+      components: [sourceComponent, nativeComponent],
+    },
+    cashAvailability: {
+      ...base.cashAvailability,
+      components: [
+        {
+          ...base.cashAvailability.components[0],
+          componentId: sourceComponent.componentId,
+          amount: sourceComponent.amount,
+          availableRaw: "4000000",
+        },
+        {
+          ...base.cashAvailability.components[0],
+          componentId: nativeComponent.componentId,
+          amount: nativeComponent.amount,
+          availableRaw: nativeComponent.amount.raw,
+        },
+      ],
+    },
+    runtimePolicy: tokenPolicy,
+    ownership: {
+      ...base.ownership,
+      wallets: [
+        {
+          walletId,
+          networkId: "solana:mainnet",
+          address: sourceAddress,
+          source: "embedded",
+          signingModes: ["web_client"],
+          serverWalletRef: null,
+          sponsorshipPolicyIds: [],
+        },
+      ],
+    },
+    assetPreferences: {},
+  } as unknown as AccountValueReadModel;
+  const belowReserveFacts = deriveProductionRelayEligibleSourceFacts({
+    accountId: ACCOUNT_ID,
+    account: belowReserveAccount,
+    policy: tokenPolicy,
+    requiredAmount: { asset: POLYGON_PUSD, raw: "1000000" },
+  });
+  assert.equal(belowReserveFacts.length, 1);
+  assert.equal(belowReserveFacts[0]?.nativeGasReady, false);
+
+  const fundedNativeComponent = {
+    ...nativeComponent,
+    amount: {
+      asset: SOLANA_NATIVE,
+      raw: SOLANA_NATIVE_EXECUTION_RESERVE_LAMPORTS.toString(),
+    },
+  };
+  const atReserveAccount = {
+    ...belowReserveAccount,
+    projection: {
+      ...belowReserveAccount.projection,
+      components: [sourceComponent, fundedNativeComponent],
+    },
+    cashAvailability: {
+      ...belowReserveAccount.cashAvailability,
+      components: belowReserveAccount.cashAvailability.components.map(
+        (component) =>
+          component.componentId === fundedNativeComponent.componentId
+            ? {
+                ...component,
+                amount: fundedNativeComponent.amount,
+                availableRaw: fundedNativeComponent.amount.raw,
+              }
+            : component,
+      ),
+    },
+  } as AccountValueReadModel;
+  const atReserveFacts = deriveProductionRelayEligibleSourceFacts({
+    accountId: ACCOUNT_ID,
+    account: atReserveAccount,
+    policy: tokenPolicy,
+    requiredAmount: { asset: POLYGON_PUSD, raw: "1000000" },
+  });
+  assert.equal(atReserveFacts.length, 1);
+  assert.equal(atReserveFacts[0]?.nativeGasReady, true);
 }
 
 const originalRoute = policy().routes[0];

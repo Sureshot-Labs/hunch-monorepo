@@ -14,11 +14,11 @@ import {
 } from "../reconciliation/direct-ingress-observer.js";
 import {
   claimFundingReceiveCanonicalEventAllocation,
+  claimObservableFundingReceiveSessions,
   derivePersistedFundingReceiveSessionStatus,
   finalizeFundingReceiveCanonicalEventAllocation,
   insertFundingReceiveReceipt,
   expireFundingReceiveSessions,
-  listObservableFundingReceiveSessions,
   updateClosedFundingReceiveSessionObservation,
   updateFundingReceiveSessionObservation,
   type FundingReceiveSessionSnapshot,
@@ -308,7 +308,11 @@ export function advanceFundingReceiveObservationBaselines(
 export class FundingReceiveSessionObserver {
   async pollBatch(
     pool: Pool,
-    input: Readonly<{ limit?: number; now?: Date }> = {},
+    input: Readonly<{
+      limit?: number;
+      minimumPollIntervalMs?: number;
+      now?: Date;
+    }> = {},
   ): Promise<FundingReceiveSessionObservationResult> {
     if (!(await isFundingReceiveSessionSchemaReady(pool))) {
       return {
@@ -321,10 +325,11 @@ export class FundingReceiveSessionObserver {
     const now = input.now ?? new Date();
     await expireFundingReceiveSessions(pool, { now });
     const batchLimit = input.limit ?? 25;
-    const observableSessions = await listObservableFundingReceiveSessions(
+    const observableSessions = await claimObservableFundingReceiveSessions(
       pool,
       {
         limit: Math.min(1_000, batchLimit * 8),
+        minimumPollIntervalMs: input.minimumPollIntervalMs ?? 10_000,
         now,
       },
     );

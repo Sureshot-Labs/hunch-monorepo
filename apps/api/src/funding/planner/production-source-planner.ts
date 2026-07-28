@@ -33,9 +33,11 @@ import type {
   JsonValue,
   Money,
   NormalizedAction,
+  FundingReasonCode,
   WalletExecutionProfile,
 } from "../domain/types.js";
 import type { FundingRuntimePolicy } from "../policies/funding-policy.js";
+import type { FundingSourcePlanningRequest } from "./planner.js";
 import {
   fetchFundingRouteExperience,
   fundingRouteExperienceFingerprint,
@@ -209,7 +211,10 @@ function hasNativeGas(
         nativeAssetId(component.amount.asset).toLowerCase() &&
       address?.toLowerCase() === profile.address.toLowerCase() &&
       available?.freshness === "fresh" &&
-      BigInt(available.availableRaw) > 0n
+      BigInt(available.availableRaw) >=
+        (profile.networkId === "solana:mainnet"
+          ? SOLANA_NATIVE_EXECUTION_RESERVE_LAMPORTS
+          : 1n)
     );
   });
 }
@@ -323,6 +328,7 @@ function sourceFactsForComponent(input: {
   availableRaw: string;
   requiredAmount: Money;
   confirmedSourceAmount?: Money | null;
+  purpose?: FundingDiscoveryRequest["purpose"];
   destinationLocationPatternId?: string;
   maximumSlippageBps: number;
   requiredCapability: "execution_source" | "withdrawal_source";
@@ -379,18 +385,26 @@ function sourceFactsForComponent(input: {
           confirmedSourceRaw > 0n && confirmedSourceRaw <= spendableRaw
             ? confirmedSourceRaw.toString()
             : "0";
-        const grossDestinationRaw = rescaleStableRaw(
-          raw,
-          input.requiredAmount.asset.decimals,
-          input.component.amount.asset.decimals,
-        );
-        const boundedMinimum =
-          (BigInt(grossDestinationRaw) *
-            BigInt(10_000 - input.maximumSlippageBps)) /
-          10_000n;
-        minimumDestinationRaw = (
-          boundedMinimum > 0n ? boundedMinimum : 1n
-        ).toString();
+        if (input.purpose === "convert_asset") {
+          // Convert is exact-input UX. Relay owns the executable minimum
+          // derived from its live quote; this pre-quote value only identifies
+          // the positive destination asset and must not turn the entered
+          // source amount into an exact-output request.
+          minimumDestinationRaw = "1";
+        } else {
+          const grossDestinationRaw = rescaleStableRaw(
+            raw,
+            input.requiredAmount.asset.decimals,
+            input.component.amount.asset.decimals,
+          );
+          const boundedMinimum =
+            (BigInt(grossDestinationRaw) *
+              BigInt(10_000 - input.maximumSlippageBps)) /
+            10_000n;
+          minimumDestinationRaw = (
+            boundedMinimum > 0n ? boundedMinimum : 1n
+          ).toString();
+        }
       } else if (nativeSolSource) {
         raw = spendableRaw.toString();
         minimumDestinationRaw = input.requiredAmount.raw;
@@ -454,6 +468,9 @@ function sourceFactsForComponent(input: {
           asset: input.requiredAmount.asset,
           raw: minimumDestinationRaw,
         },
+        ...(input.purpose === "convert_asset"
+          ? { quoteModeOverride: "exact_input" as const }
+          : {}),
         maximumSourceRaw: spendableRaw.toString(),
         maximumSlippageBps: input.maximumSlippageBps,
         estimatedUsd,
@@ -584,6 +601,7 @@ export function deriveProductionRelayEligibleSourceFacts(input: {
         availableRaw: availability.availableRaw,
         requiredAmount: input.requiredAmount,
         confirmedSourceAmount: input.confirmedSourceAmount,
+        purpose: input.purpose,
         destinationLocationPatternId: input.destinationLocationPatternId,
         maximumSlippageBps:
           input.maximumSlippageBps ?? input.policy.placement.maximumSlippageBps,
@@ -751,6 +769,77 @@ export class ProductionFundingSourcePlanner {
     return [...adapted, ...relay];
   }
 
+  async listBlockingReasonCodes(
+    input: FundingSourcePlanningRequest,
+  ): Promise<readonly FundingReasonCode[]> {
+    const facts = this.relaySourceFacts({
+      accountId: input.accountId,
+      request: input.request,
+      destination: input.destination,
+      requiredAmount: input.requiredAmount,
+      policyRevision: input.policyRevision,
+      now: input.now,
+    });
+    const otherwiseExecutableWithoutGas = facts.some(
+      (fact) =>
+        !fact.nativeGasReady &&
+        fact.transferable &&
+        fact.riskEligible &&
+        fact.walletExecutionReady &&
+        fact.freshness === "fresh" &&
+        BigInt(fact.quoteInputAmount.raw) > 0n &&
+        BigInt(fact.maximumSourceRaw) >= BigInt(fact.quoteInputAmount.raw),
+    );
+    return otherwiseExecutableWithoutGas ||
+      this.confirmedNativeSolanaAmountConsumesReserve(input)
+      ? ["insufficient_gas"]
+      : [];
+  }
+
+  private confirmedNativeSolanaAmountConsumesReserve(
+    input: FundingSourcePlanningRequest,
+  ): boolean {
+    const confirmed = input.request.confirmedSourceAmount;
+    if (!confirmed || !isSolanaNativeAsset(confirmed.asset)) return false;
+    const exactRouteExists = input.policy.routes.some(
+      (route) =>
+        route.enabled &&
+        route.providerId === "relay" &&
+        route.destinationLocationPatternId ===
+          input.destination.destinationLocationPatternId &&
+        sameAsset(route.sourceAsset, confirmed.asset) &&
+        sameAsset(route.destinationAsset, input.requiredAmount.asset),
+    );
+    if (!exactRouteExists) return false;
+    const availabilityByComponent = new Map(
+      this.account.cashAvailability.components.map((component) => [
+        component.componentId,
+        component,
+      ]),
+    );
+    const requestedRaw = BigInt(confirmed.raw);
+    return this.account.projection.components.some((component) => {
+      if (!sameAsset(component.amount.asset, confirmed.asset)) return false;
+      const availability = availabilityByComponent.get(component.componentId);
+      const profile = profileForLocation(this.account, component.location);
+      if (
+        !availability ||
+        availability.freshness !== "fresh" ||
+        !profile ||
+        (!profile.signingModes.includes("web_client") &&
+          !profile.signingModes.includes("privy_authorization"))
+      ) {
+        return false;
+      }
+      const availableRaw = BigInt(availability.availableRaw);
+      const spendableRaw =
+        availableRaw > SOLANA_NATIVE_EXECUTION_RESERVE_LAMPORTS
+          ? availableRaw - SOLANA_NATIVE_EXECUTION_RESERVE_LAMPORTS
+          : 0n;
+      return requestedRaw > spendableRaw && requestedRaw <= availableRaw;
+    });
+  }
+
   private relayPlanner(): RelayFirstSourcePlanner {
     return new RelayFirstSourcePlanner({
       listEligibleSources: (input) => this.listEligibleSources(input),
@@ -783,6 +872,19 @@ export class ProductionFundingSourcePlanner {
       now: Date;
     }>,
   ): Promise<readonly RelayEligibleSourceFact[]> {
+    return this.relaySourceFacts(input);
+  }
+
+  private relaySourceFacts(
+    input: Readonly<{
+      accountId: string;
+      request: FundingDiscoveryRequest;
+      destination: ResolvedRouteDestination;
+      requiredAmount: Money;
+      policyRevision: string;
+      now: Date;
+    }>,
+  ): readonly RelayEligibleSourceFact[] {
     return deriveProductionRelayEligibleSourceFacts({
       accountId: input.accountId,
       account: this.account,
@@ -838,7 +940,11 @@ export class ProductionFundingSourcePlanner {
         timeoutMs: Math.min(input.timeoutMs, 10_000),
       }),
     );
-    const relayRoute = routeSpec(input.route);
+    const mappedRelayRoute = routeSpec(input.route);
+    const relayRoute =
+      input.source.quoteModeOverride === "exact_input"
+        ? { ...mappedRelayRoute, quoteMode: "exact_input" as const }
+        : mappedRelayRoute;
     const quoteSourceAmount =
       relayRoute.quoteMode === "expected_output"
         ? {

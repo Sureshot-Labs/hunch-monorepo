@@ -120,6 +120,35 @@ export type FundingDestinationSelectionResult = Readonly<{
 }>;
 
 /**
+ * Destination option IDs are scoped to an inspection revision. The venue
+ * binding option is the stable identity across a fresh inspection, so a stale
+ * destination may be rebound only when that binding has one selectable match.
+ */
+export function resolveFundingDestinationChoice(
+  input: Readonly<{
+    options: readonly FundingDestinationOption[];
+    destinationOptionId: string;
+    venueBindingOptionId: string | null;
+  }>,
+): FundingDestinationOption | null {
+  const selectable = input.options.filter((option) => option.selectable);
+  const exact = selectable.find(
+    (option) => option.destinationOptionId === input.destinationOptionId,
+  );
+  if (exact) {
+    return !input.venueBindingOptionId ||
+      exact.venueBindingOptionId === input.venueBindingOptionId
+      ? exact
+      : null;
+  }
+  if (!input.venueBindingOptionId) return null;
+  const rebound = selectable.filter(
+    (option) => option.venueBindingOptionId === input.venueBindingOptionId,
+  );
+  return rebound.length === 1 ? (rebound[0] ?? null) : null;
+}
+
+/**
  * A recommendation is display metadata only. More than one valid destination
  * always requires an opaque explicit selection.
  */

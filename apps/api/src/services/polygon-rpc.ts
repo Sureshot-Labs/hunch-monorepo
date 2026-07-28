@@ -20,6 +20,30 @@ type JsonRpcResponse<T> =
   | { jsonrpc: "2.0"; id: number; result: T }
   | { jsonrpc: "2.0"; id: number; error: JsonRpcError };
 
+function rpcErrorMessageFromBody(body: string): string | null {
+  if (!body.trim()) return null;
+  try {
+    const parsed = JSON.parse(body) as unknown;
+    if (!isRecord(parsed) || !isRecord(parsed.error)) return null;
+    const message = parsed.error.message;
+    return typeof message === "string" && message.trim()
+      ? message.trim()
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+export function parseEvmGetLogsBlockRangeLimit(error: unknown): bigint | null {
+  const message = error instanceof Error ? error.message : String(error);
+  const match =
+    /up to (?:a )?(\d+) block range/i.exec(message) ??
+    /block range (?:is )?(?:limited to|maximum|max)[:\s]+(\d+)/i.exec(message);
+  if (!match?.[1]) return null;
+  const value = BigInt(match[1]);
+  return value > 0n ? value : null;
+}
+
 const erc1155Iface = new Interface([
   "function balanceOfBatch(address[] accounts, uint256[] ids) view returns (uint256[])",
   "function isApprovedForAll(address owner,address operator) view returns (bool)",
@@ -149,8 +173,15 @@ async function ethRpcRequest<T>(inputs: {
       });
 
       if (!response.ok) {
+        const responseBody = await response.text().catch(() => "");
+        const providerMessage = rpcErrorMessageFromBody(responseBody);
         const error = new Error(
-          `Polygon RPC error: ${response.status} ${response.statusText}`,
+          [
+            `Polygon RPC error: ${response.status} ${response.statusText}`,
+            providerMessage,
+          ]
+            .filter(Boolean)
+            .join(": "),
         );
         lastError = error;
         const retryAfterMs = parseRetryAfterMs(

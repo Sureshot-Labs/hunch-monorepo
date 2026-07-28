@@ -7,6 +7,7 @@ import {
 } from "./core-adapter.js";
 
 const COMMON = ["wallet_provisioned", "binding_owned", "rpc_fresh"] as const;
+const FUNDING_TARGET = ["wallet_provisioned", "binding_owned"] as const;
 const CONNECTION = [...COMMON, "partner_profile_valid"] as const;
 const MARKET = [
   ...CONNECTION,
@@ -16,10 +17,10 @@ const MARKET = [
 
 export const LIMITLESS_PREPARATION_REQUIREMENTS = {
   fund: {
-    clob: [...COMMON, "cash_observed", "cash_receipt_observed"],
-    clob_neg_risk: [...COMMON, "cash_observed", "cash_receipt_observed"],
-    amm: [...COMMON, "cash_observed", "cash_receipt_observed"],
-    amm_neg_risk: [...COMMON, "cash_observed", "cash_receipt_observed"],
+    clob: FUNDING_TARGET,
+    clob_neg_risk: FUNDING_TARGET,
+    amm: FUNDING_TARGET,
+    amm_neg_risk: FUNDING_TARGET,
   },
   buy: {
     clob: [

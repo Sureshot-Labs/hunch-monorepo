@@ -354,74 +354,80 @@ export async function scanSolanaFundingReceiveCanonicalEvents(
     return null;
   }
   let cursorAdvanced = false;
-  const groups = await Promise.all(
-    variants.map(async (variant) => {
-      const signatures = await listNewSignatures(variant, rpc);
-      if (signatures.length === 0) {
-        return { variant, events: [] as FundingReceiveCanonicalEvent[] };
+  const groups: Array<{
+    variant: DirectIngressObservationVariant;
+    events: FundingReceiveCanonicalEvent[];
+  }> = [];
+  // A receive session can expose several Solana asset variants. Query them in
+  // sequence so the worker cannot exhaust provider compute units in one burst.
+  for (const variant of variants) {
+    const signatures = await listNewSignatures(variant, rpc);
+    if (signatures.length === 0) {
+      groups.push({ variant, events: [] as FundingReceiveCanonicalEvent[] });
+      continue;
+    }
+    const network = solanaNetwork();
+    const blockhashBySlot = new Map<string, Promise<string | null>>();
+    const events: FundingReceiveCanonicalEvent[] = [];
+    for (const signature of [...signatures].reverse()) {
+      if (signature.failed) continue;
+      const transaction = await rpc.transaction({
+        ...network,
+        signature: signature.signature,
+      });
+      if (transaction == null) {
+        throw new Error(
+          `Solana finalized transaction ${signature.signature} is unavailable`,
+        );
       }
-      const network = solanaNetwork();
-      const blockhashBySlot = new Map<string, Promise<string | null>>();
-      const events: FundingReceiveCanonicalEvent[] = [];
-      for (const signature of [...signatures].reverse()) {
-        if (signature.failed) continue;
-        const transaction = await rpc.transaction({
-          ...network,
-          signature: signature.signature,
+      const transfers = parseTransactionTransfers(transaction, { variant });
+      if (transfers == null) {
+        throw new Error(
+          `Solana finalized transaction ${signature.signature} is malformed`,
+        );
+      }
+      let blockhash = blockhashBySlot.get(signature.slot.toString());
+      if (!blockhash) {
+        blockhash = rpc.blockhash({ ...network, slot: signature.slot });
+        blockhashBySlot.set(signature.slot.toString(), blockhash);
+      }
+      const resolvedBlockhash = await blockhash;
+      if (!resolvedBlockhash) {
+        throw new Error(
+          `Solana finalized block ${signature.slot.toString()} is unavailable`,
+        );
+      }
+      for (const transfer of transfers) {
+        events.push({
+          variant,
+          transactionHash: signature.signature,
+          eventIndex: transfer.eventIndex,
+          blockNumber: signature.slot.toString(),
+          blockHash: resolvedBlockhash,
+          sourceAddress: transfer.sourceAddress,
+          destinationAddress: variant.destinationAddress,
+          rawAmount: transfer.rawAmount.toString(),
+          observedAt:
+            signature.blockTime == null
+              ? now.toISOString()
+              : new Date(signature.blockTime * 1_000).toISOString(),
         });
-        if (transaction == null) {
-          throw new Error(
-            `Solana finalized transaction ${signature.signature} is unavailable`,
-          );
-        }
-        const transfers = parseTransactionTransfers(transaction, { variant });
-        if (transfers == null) {
-          throw new Error(
-            `Solana finalized transaction ${signature.signature} is malformed`,
-          );
-        }
-        let blockhash = blockhashBySlot.get(signature.slot.toString());
-        if (!blockhash) {
-          blockhash = rpc.blockhash({ ...network, slot: signature.slot });
-          blockhashBySlot.set(signature.slot.toString(), blockhash);
-        }
-        const resolvedBlockhash = await blockhash;
-        if (!resolvedBlockhash) {
-          throw new Error(
-            `Solana finalized block ${signature.slot.toString()} is unavailable`,
-          );
-        }
-        for (const transfer of transfers) {
-          events.push({
-            variant,
-            transactionHash: signature.signature,
-            eventIndex: transfer.eventIndex,
-            blockNumber: signature.slot.toString(),
-            blockHash: resolvedBlockhash,
-            sourceAddress: transfer.sourceAddress,
-            destinationAddress: variant.destinationAddress,
-            rawAmount: transfer.rawAmount.toString(),
-            observedAt:
-              signature.blockTime == null
-                ? now.toISOString()
-                : new Date(signature.blockTime * 1_000).toISOString(),
-          });
-        }
       }
-      const newest = signatures[0];
-      if (!newest) {
-        return { variant, events };
-      }
-      cursorAdvanced = true;
-      return {
-        events,
-        variant: withCursor(variant, {
-          slot: newest.slot,
-          signature: newest.signature,
-        }),
-      };
-    }),
-  );
+    }
+    const newest = signatures[0];
+    if (!newest) {
+      groups.push({ variant, events });
+      continue;
+    }
+    cursorAdvanced = true;
+    groups.push({
+      events,
+      variant: withCursor(variant, {
+        slot: newest.slot,
+        signature: newest.signature,
+      }),
+    });
+  }
   return {
     events: groups.flatMap((group) => group.events),
     variants: groups.map((group) => group.variant),

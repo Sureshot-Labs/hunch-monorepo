@@ -33,6 +33,7 @@ export type FundingReconciliationJobOptions =
   FundingReconciliationBatchOptions &
     Readonly<{
       relay?: RelayFundingWorkerConfig;
+      receivePollDelayMs?: number;
     }>;
 
 export type FundingReconciliationJobResult =
@@ -94,6 +95,7 @@ export async function runFundingReconciliationJob(
   const receiveObservation =
     await new FundingReceiveSessionObserver().pollBatch(pool, {
       limit: options.limit ?? 25,
+      minimumPollIntervalMs: options.receivePollDelayMs ?? 10_000,
       now: options.now,
     });
   const receiveRouting = await new FundingReceiveReceiptRouter(pool).runBatch({

@@ -148,6 +148,15 @@ export class FundingQuoteService {
         "exactly one owned selectable source option is required",
       );
     }
+    if (
+      planning.request.purpose === "convert_asset" &&
+      selected.option.amountMode !== "exact_input"
+    ) {
+      throw new FundingPersistenceError(
+        "quote_mismatch",
+        "Convert quote must use the frozen exact input amount",
+      );
+    }
     const storedPlan = selected.commitPlan;
     const withdrawalIntent = planning.request.purpose === "withdrawal";
     const externalRecipientId = storedPlan.operation.externalRecipientId;

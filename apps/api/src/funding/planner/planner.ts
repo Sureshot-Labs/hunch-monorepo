@@ -12,6 +12,7 @@ import type {
   ValidatedExternalRecipient,
 } from "../domain/types.js";
 import {
+  resolveFundingDestinationChoice,
   selectFundingDestination,
   selectVenueBindingForCurrentIntent,
 } from "../domain/selections.js";
@@ -34,6 +35,19 @@ import type {
   PlannedSourceOption,
 } from "./planning-types.js";
 
+export type FundingSourcePlanningRequest = Readonly<{
+  accountId: string;
+  request: FundingDiscoveryRequest;
+  marketContext: MarketContextBinding | null;
+  destinationFacts: ResolvedDestinationCandidate | null;
+  destination: ResolvedRouteDestination;
+  placement: PlacementDecision;
+  requiredAmount: Money;
+  policy: FundingRuntimePolicy;
+  policyRevision: string;
+  now: Date;
+}>;
+
 export type FundingPlannerDependencies = Readonly<{
   listDestinations(
     input: Readonly<{
@@ -55,19 +69,11 @@ export type FundingPlannerDependencies = Readonly<{
     }>,
   ): Promise<ResolvedExternalRecipient | null>;
   listSources(
-    input: Readonly<{
-      accountId: string;
-      request: FundingDiscoveryRequest;
-      marketContext: MarketContextBinding | null;
-      destinationFacts: ResolvedDestinationCandidate | null;
-      destination: ResolvedRouteDestination;
-      placement: PlacementDecision;
-      requiredAmount: Money;
-      policy: FundingRuntimePolicy;
-      policyRevision: string;
-      now: Date;
-    }>,
+    input: FundingSourcePlanningRequest,
   ): Promise<readonly PlannedSourceOption[]>;
+  listSourceBlockers?(
+    input: FundingSourcePlanningRequest,
+  ): Promise<readonly FundingReasonCode[]>;
   store: FundingPlanningStore;
   now?: () => Date;
 }>;
@@ -100,6 +106,7 @@ function validatePlannedSources(
   sources: readonly PlannedSourceOption[],
   requiredAmount: Money,
   now: Date,
+  purpose: FundingDiscoveryRequest["purpose"],
 ): readonly PlannedSourceOption[] {
   const ids = new Set<string>();
   return sources.map((source) => {
@@ -110,6 +117,15 @@ function validatePlannedSources(
       );
     }
     ids.add(source.option.sourceOptionId);
+    if (
+      purpose === "convert_asset" &&
+      source.option.amountMode !== "exact_input"
+    ) {
+      throw new FundingPlannerError(
+        "invalid_policy",
+        "Convert source options must freeze exact input economics",
+      );
+    }
     const segmentCount = source.commitPlan.segments.length;
     const planKind = source.commitPlan.operation.planKind;
     const composite =
@@ -274,7 +290,9 @@ function validatePlannedSources(
       );
       if (
         rawAmount(expected.raw) < rawAmount(minimum.raw) ||
-        rawAmount(minimum.raw) < rawAmount(requiredAmount.raw)
+        rawAmount(minimum.raw) === 0n ||
+        (source.option.amountMode !== "exact_input" &&
+          rawAmount(minimum.raw) < rawAmount(requiredAmount.raw))
       ) {
         throw new FundingPlannerError(
           "invalid_policy",
@@ -301,6 +319,29 @@ function requestAmount(
   request: FundingDiscoveryRequest,
   marketContext: MarketContextBinding | null,
 ): Money | null {
+  if (
+    request.purpose === "convert_asset" &&
+    request.confirmedSourceAmount &&
+    request.requestedDestinationAmount
+  ) {
+    const source = BigInt(request.confirmedSourceAmount.raw);
+    const sourceDecimals = request.confirmedSourceAmount.asset.decimals;
+    const destinationDecimals =
+      request.requestedDestinationAmount.asset.decimals;
+    const raw =
+      sourceDecimals === destinationDecimals
+        ? source
+        : sourceDecimals < destinationDecimals
+          ? source * 10n ** BigInt(destinationDecimals - sourceDecimals)
+          : (source +
+              10n ** BigInt(sourceDecimals - destinationDecimals) -
+              1n) /
+            10n ** BigInt(sourceDecimals - destinationDecimals);
+    return {
+      asset: request.requestedDestinationAmount.asset,
+      raw: raw.toString(),
+    };
+  }
   if (request.requestedDestinationAmount) {
     return request.requestedDestinationAmount;
   }
@@ -478,19 +519,19 @@ function selectedCandidates(
     );
   }
   if (input.request.destinationOptionId) {
-    const explicit = candidates.find(
-      (candidate) =>
-        candidate.option.destinationOptionId ===
-        input.request.destinationOptionId,
-    );
-    if (!explicit) return candidates;
-    if (
-      input.request.venueBindingOptionId &&
-      input.request.venueBindingOptionId !==
-        explicit.bindingOption.venueBindingOptionId
-    ) {
-      return [];
-    }
+    const resolved = resolveFundingDestinationChoice({
+      options: candidates.map((candidate) => candidate.option),
+      destinationOptionId: input.request.destinationOptionId,
+      venueBindingOptionId: input.request.venueBindingOptionId,
+    });
+    const explicit = resolved
+      ? (candidates.find(
+          (candidate) =>
+            candidate.option.destinationOptionId ===
+            resolved.destinationOptionId,
+        ) ?? null)
+      : null;
+    if (!explicit) return [];
     return candidates.map((candidate) =>
       candidate === explicit
         ? candidate
@@ -562,9 +603,14 @@ export class FundingPlanner {
       marketContext,
       candidates: allCandidates,
     });
+    const effectiveDestinationOptionId =
+      input.request.destinationOptionId != null
+        ? (candidates.find((candidate) => candidate.option.selectable)?.option
+            .destinationOptionId ?? input.request.destinationOptionId)
+        : null;
     const destinationSelection = selectFundingDestination({
       options: candidates.map((candidate) => candidate.option),
-      explicitDestinationOptionId: input.request.destinationOptionId,
+      explicitDestinationOptionId: effectiveDestinationOptionId,
     });
     const selected = destinationSelection.selected
       ? (candidates.find(
@@ -682,24 +728,29 @@ export class FundingPlanner {
         reason != null && reasons.indexOf(reason) === index,
     );
     const needsFunding = rawAmount(shortfallRaw) > 0n;
-    const discoveredSources =
+    const sourcePlanningRequest: FundingSourcePlanningRequest = {
+      accountId: input.accountId,
+      request: input.request,
+      marketContext,
+      destinationFacts: selected,
+      destination: toResolvedRouteDestination(selected),
+      placement,
+      requiredAmount: {
+        asset: amount.asset,
+        raw: shortfallRaw,
+      },
+      policy: input.policy,
+      policyRevision: input.policyRevision,
+      now,
+    };
+    const [discoveredSources, sourceBlockers] =
       needsFunding && input.policy.creationMode === "on" && planningFactsUsable
-        ? await this.dependencies.listSources({
-            accountId: input.accountId,
-            request: input.request,
-            marketContext,
-            destinationFacts: selected,
-            destination: toResolvedRouteDestination(selected),
-            placement,
-            requiredAmount: {
-              asset: amount.asset,
-              raw: shortfallRaw,
-            },
-            policy: input.policy,
-            policyRevision: input.policyRevision,
-            now,
-          })
-        : [];
+        ? await Promise.all([
+            this.dependencies.listSources(sourcePlanningRequest),
+            this.dependencies.listSourceBlockers?.(sourcePlanningRequest) ??
+              Promise.resolve([]),
+          ])
+        : [[], []];
     const sources = validatePlannedSources(
       discoveredSources,
       {
@@ -707,6 +758,7 @@ export class FundingPlanner {
         raw: shortfallRaw,
       },
       now,
+      input.request.purpose,
     );
     const recommended = recommendedSource(sources);
     const sourceOptions = sources.map((source) => ({
@@ -739,6 +791,7 @@ export class FundingPlanner {
         ? (["cash_availability_unknown"] as const)
         : []),
       ...valuationReasons,
+      ...sourceBlockers,
       ...(needsFunding && !sourceOptions.some((source) => source.selectable)
         ? (["insufficient_liquidity"] as const)
         : []),
@@ -953,6 +1006,7 @@ export class FundingPlanner {
       }),
       amount,
       now,
+      input.request.purpose,
     );
     const recommended = recommendedSource(sources);
     const sourceOptions = sources.map((source) => ({

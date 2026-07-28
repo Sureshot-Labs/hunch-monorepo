@@ -736,6 +736,8 @@ await test("account routes require auth and preference response denies authority
   assert.equal(firstAssetsPage.json().items.length, 1);
   assert.equal(firstAssetsPage.json().total, 2);
   assert.equal(typeof firstAssetsPage.json().nextCursor, "string");
+  assert.equal(firstAssetsPage.json().valuationCompleteness, "complete");
+  assert.deepEqual(firstAssetsPage.json().collectorErrors, []);
 
   const secondAssetsPage = await app.inject({
     method: "GET",

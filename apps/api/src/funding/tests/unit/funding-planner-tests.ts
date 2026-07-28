@@ -21,6 +21,7 @@ import type {
   VenueAccountBinding,
   VenueBindingOption,
 } from "../../domain/types.js";
+import { resolveFundingDestinationChoice } from "../../domain/selections.js";
 import type {
   FrozenPreparationDestination,
   ResolvedDestinationCandidate,
@@ -44,6 +45,7 @@ import {
   selectRelayFirstSourceOptions,
 } from "../../planner/source-options.js";
 import { FundingPlanner } from "../../planner/planner.js";
+import { FundingPlannerError } from "../../planner/money.js";
 import {
   classifyFundingQuoteConsent,
   FundingQuoteService,
@@ -854,6 +856,27 @@ await test("Relay-first source selection rejects another provider and second seg
   assert.equal(selected.sources.length, 1);
   assert.equal(selected.sources[0]?.providerId, "relay");
 
+  const exactInput = selectRelayFirstSourceOptions({
+    candidates: [
+      {
+        routeId: route.routeId,
+        providerId: "relay",
+        routeEnabled: true,
+        sourceOption: sourceOption("1000000", {
+          amountMode: "exact_input",
+          expectedDestination: { asset: POLYGON_PUSD, raw: "990000" },
+          minimumDestination: { asset: POLYGON_PUSD, raw: "980000" },
+        }),
+        executionPlan,
+        commitPlan: plan,
+      },
+    ],
+    requiredDestination: { asset: POLYGON_PUSD, raw: "1000000" },
+    policy,
+  });
+  assert.equal(exactInput.sources[0]?.option.selectable, true);
+  assert.deepEqual(exactInput.sources[0]?.option.reasonCodes, []);
+
   const twoSegments = {
     kind: "wallet_route",
     segments: [
@@ -1450,6 +1473,30 @@ await test("single destination values exact liquidity without inventing consent"
   assert.equal(projection.freshness, "fresh");
 });
 
+await test("planner exposes missing native gas instead of only reporting no liquidity", async () => {
+  const policy = mutablePolicy();
+  policy.creationMode = "on";
+  const projection = await new FundingPlanner({
+    listDestinations: async () => [candidate()],
+    resolveMarketContext: async () => null,
+    listSources: async () => [],
+    listSourceBlockers: async () => ["insufficient_gas"],
+    store: new MemoryPlanningStore(),
+    now: () => NOW,
+  }).discover({
+    accountId: USER_ID,
+    request: intent("add_funds", "1000000"),
+    policy,
+    policyRevision: "policy_revision_12345678",
+    ownershipRevision: "ownership_revision_12345678",
+  });
+
+  assert.equal(projection.mode, "unavailable");
+  assert.equal(projection.sourceOptions.length, 0);
+  assert.equal(projection.reasonCodes.includes("insufficient_gas"), true);
+  assert.equal(projection.reasonCodes.includes("insufficient_liquidity"), true);
+});
+
 await test("planner evaluates collected evidence at a current clock and permits known-zero direct ingress", async () => {
   const policy = mutablePolicy();
   policy.creationMode = "on";
@@ -1632,6 +1679,166 @@ await test("explicit unavailable destination never falls back to another venue",
   assert.equal(projection.mode, "unavailable");
   assert.equal(projection.destinationOptionId, null);
   assert.deepEqual(projection.reasonCodes, ["destination_unavailable"]);
+});
+
+await test("planner rebinds a refreshed destination through the exact stable binding", async () => {
+  const policy = mutablePolicy();
+  policy.creationMode = "on";
+  const refreshed = candidate({
+    option: destinationOption({
+      destinationOptionId: "destination_refreshed_12345678",
+      inspectionRevision: "inspection_refreshed_12345678",
+    }),
+    bindingOption: bindingOption({
+      inspectionRevision: "inspection_refreshed_12345678",
+    }),
+  });
+  const projection = await new FundingPlanner({
+    listDestinations: async () => [refreshed],
+    resolveMarketContext: async () => null,
+    listSources: async ({ requiredAmount }) => [
+      plannedSource(requiredAmount.raw),
+    ],
+    store: new MemoryPlanningStore(),
+    now: () => NOW,
+  }).discover({
+    accountId: USER_ID,
+    request: intent("add_funds", "1000000", {
+      destinationOptionId: "destination_stale_12345678",
+      venueBindingOptionId: refreshed.bindingOption.venueBindingOptionId,
+    }),
+    policy,
+    policyRevision: "policy_revision_12345678",
+    ownershipRevision: "ownership_revision_12345678",
+  });
+
+  assert.equal(
+    projection.destinationOptionId,
+    refreshed.option.destinationOptionId,
+  );
+  assert.equal(
+    projection.venueBindingOptionId,
+    refreshed.bindingOption.venueBindingOptionId,
+  );
+  assert.ok(!projection.reasonCodes.includes("destination_unavailable"));
+});
+
+await test("destination identity rebinds only one selectable stable binding", () => {
+  const refreshed = destinationOption({
+    destinationOptionId: "destination_refreshed_12345678",
+  });
+  assert.equal(
+    resolveFundingDestinationChoice({
+      options: [refreshed],
+      destinationOptionId: "destination_stale_12345678",
+      venueBindingOptionId: refreshed.venueBindingOptionId,
+    })?.destinationOptionId,
+    refreshed.destinationOptionId,
+  );
+  assert.equal(
+    resolveFundingDestinationChoice({
+      options: [
+        refreshed,
+        {
+          ...refreshed,
+          destinationOptionId: "destination_ambiguous_12345678",
+        },
+      ],
+      destinationOptionId: "destination_stale_12345678",
+      venueBindingOptionId: refreshed.venueBindingOptionId,
+    }),
+    null,
+  );
+  assert.equal(
+    resolveFundingDestinationChoice({
+      options: [refreshed],
+      destinationOptionId: refreshed.destinationOptionId,
+      venueBindingOptionId: "binding_other_12345678",
+    }),
+    null,
+  );
+});
+
+await test("Convert rejects a source plan with exact-output economics", async () => {
+  const policy = mutablePolicy();
+  policy.creationMode = "on";
+  await assert.rejects(
+    () =>
+      new FundingPlanner({
+        listDestinations: async () => [candidate()],
+        resolveMarketContext: async () => null,
+        listSources: async ({ requiredAmount }) => [
+          plannedSource(requiredAmount.raw),
+        ],
+        store: new MemoryPlanningStore(),
+        now: () => NOW,
+      }).discover({
+        accountId: USER_ID,
+        request: intent("convert_asset", "1", {
+          confirmedSourceAmount: {
+            asset: POLYGON_PUSD,
+            raw: "1000000",
+          },
+        }),
+        policy,
+        policyRevision: "policy_revision_12345678",
+        ownershipRevision: "ownership_revision_12345678",
+      }),
+    (error: unknown) =>
+      error instanceof FundingPlannerError &&
+      error.code === "invalid_policy" &&
+      error.message.includes("exact input"),
+  );
+});
+
+await test("Convert derives target units from its exact source, not the placeholder output", async () => {
+  const policy = mutablePolicy();
+  policy.creationMode = "on";
+  let requiredRaw = "not-called";
+  const projection = await new FundingPlanner({
+    listDestinations: async () => [candidate()],
+    resolveMarketContext: async () => null,
+    listSources: async ({ requiredAmount }) => {
+      requiredRaw = requiredAmount.raw;
+      const source = plannedSource(requiredAmount.raw);
+      return [
+        {
+          ...source,
+          option: {
+            ...source.option,
+            amountMode: "exact_input",
+            expectedDestination: {
+              asset: requiredAmount.asset,
+              raw: "990000",
+            },
+            minimumDestination: {
+              asset: requiredAmount.asset,
+              raw: "980000",
+            },
+          },
+        },
+      ];
+    },
+    store: new MemoryPlanningStore(),
+    now: () => NOW,
+  }).discover({
+    accountId: USER_ID,
+    request: intent("convert_asset", "1", {
+      confirmedSourceAmount: {
+        asset: POLYGON_PUSD,
+        raw: "1000000",
+      },
+    }),
+    policy,
+    policyRevision: "policy_revision_12345678",
+    ownershipRevision: "ownership_revision_12345678",
+  });
+
+  assert.equal(requiredRaw, "1000000");
+  assert.equal(projection.requestedCollateralRaw, "1000000");
+  assert.equal(projection.shortfallRaw, "1000000");
+  assert.equal(projection.sourceOptions[0]?.amountMode, "exact_input");
+  assert.equal(projection.sourceOptions[0]?.minimumDestination?.raw, "980000");
 });
 
 await test("planner preserves Add Funds exact amount and trade shortfall", async () => {

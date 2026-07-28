@@ -150,6 +150,8 @@ export function registerAccountValueRoutes(
           accountAssetsResponseSchema.parse({
             ok: true,
             asOf: account.projection.asOf,
+            valuationCompleteness: account.projection.valuationCompleteness,
+            collectorErrors: account.projection.collectorErrors,
             items,
             total: filteredItems.length,
             nextCursor,

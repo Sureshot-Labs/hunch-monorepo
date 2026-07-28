@@ -372,30 +372,54 @@ export async function expireFundingReceiveSessions(
   return result.rowCount ?? 0;
 }
 
-export async function listObservableFundingReceiveSessions(
+export async function claimObservableFundingReceiveSessions(
   db: Pick<Pool, "query">,
-  input: Readonly<{ limit: number; now: Date }>,
+  input: Readonly<{
+    limit: number;
+    minimumPollIntervalMs: number;
+    now: Date;
+  }>,
 ): Promise<readonly FundingReceiveSessionSnapshot[]> {
+  const minimumPollIntervalMs = Math.max(
+    1_000,
+    Math.trunc(input.minimumPollIntervalMs),
+  );
   const { rows } = await db.query<ReceiveSessionRow>(
     `
+      with candidates as (
+        select id
+        from funding_receive_sessions
+        where (
+            (
+              status in ('open', 'processing', 'review_required')
+              and expires_at > $1
+            )
+            or (
+              status in ('expired', 'cancelled')
+              and observe_until > $1
+            )
+          )
+          and coalesce(last_observed_at, opened_at)
+            <= $1 - ($3::bigint * interval '1 millisecond')
+        order by coalesce(last_observed_at, opened_at) asc
+        for update skip locked
+        limit $2
+      ),
+      claimed as (
+        update funding_receive_sessions session
+        set last_observed_at = $1
+        from candidates
+        where session.id = candidates.id
+        returning session.*
+      )
       select ${sessionColumns}
-      from funding_receive_sessions
-      where (
-          status in ('open', 'processing', 'review_required')
-          and expires_at > $1
-        )
-        or (
-          status in ('expired', 'cancelled')
-          and observe_until > $1
-        )
+      from claimed
       order by coalesce(last_observed_at, opened_at) asc
-      limit $2
     `,
-    [input.now, input.limit],
+    [input.now, input.limit, minimumPollIntervalMs],
   );
   return rows.map(snapshot);
 }
-
 export async function listFundingReceiveReceiptsForUser(
   db: Pick<Pool, "query">,
   input: Readonly<{ userId: string; receiveSessionId: string }>,

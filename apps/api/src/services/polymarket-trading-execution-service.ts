@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { isRpcRateLimit } from "@hunch/shared";
 import { ethers } from "ethers";
 
 import { AuthService, type User } from "../auth.js";
@@ -690,6 +691,27 @@ export function buildEmbeddedPolymarketEnsureReadyResponse(args: {
   };
 }
 
+function embeddedPolymarketPreparationFailure(
+  error: unknown,
+): Extract<PolymarketRouteOperationResult, { ok: false }> {
+  const message =
+    error instanceof Error
+      ? error.message
+      : "Embedded setup preparation failed";
+  const rateLimited = isRpcRateLimit(error);
+  return {
+    ok: false,
+    statusCode: rateLimited ? 503 : 500,
+    payload: {
+      error: message,
+      code: rateLimited
+        ? "polymarket_rpc_rate_limited"
+        : "polymarket_embedded_preparation_failed",
+      retryable: rateLimited,
+    },
+  };
+}
+
 export async function prepareEmbeddedPolymarketEnsureReadyRoute(input: {
   body: PolymarketEmbeddedEnsureReadyBody;
   log?: PolymarketRouteLogger | null;
@@ -778,16 +800,7 @@ export async function prepareEmbeddedPolymarketEnsureReadyRoute(input: {
       { error, userId: input.user.id, signer: input.signer },
       "Failed to prepare embedded Polymarket readiness",
     );
-    return {
-      ok: false,
-      statusCode: 500,
-      payload: {
-        error:
-          error instanceof Error
-            ? error.message
-            : "Embedded setup preparation failed",
-      },
-    };
+    return embeddedPolymarketPreparationFailure(error);
   }
 }
 
@@ -5911,6 +5924,7 @@ export const polymarketTradingExecutionTestHooks = {
   buildSignedOrderPayloads: buildPolymarketSignedOrderPayloads,
   evaluateCredentialReadiness: evaluatePolymarketCredentialReadiness,
   evaluateFundsReadiness: evaluatePolymarketFundsReadiness,
+  embeddedPreparationFailure: embeddedPolymarketPreparationFailure,
   inspectPreparedQuote: inspectPolymarketPreparedQuote,
   inspectFunderReadiness: inspectPolymarketFunderReadiness,
   normalizeOrderForPayload,

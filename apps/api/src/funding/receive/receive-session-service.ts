@@ -11,6 +11,7 @@ import type {
   FundingReceiveSession,
   JsonValue,
 } from "../domain/types.js";
+import { resolveFundingDestinationChoice } from "../domain/selections.js";
 import { FundingPlannerError } from "../planner/money.js";
 import { FundingPlanningRuntime } from "../planner/runtime-service.js";
 import { buildFundingReceiveTargets } from "../planner/receive-targets.js";
@@ -237,23 +238,15 @@ export class FundingReceiveSessionService {
     const destinations = await this.runtime.destinations(userId, {
       purpose: "fund",
     });
-    const matches = destinations.filter(
-      (option) =>
-        option.selectable &&
-        option.destinationOptionId === request.destinationOptionId &&
-        option.venueBindingOptionId === request.venueBindingOptionId,
-    );
-    if (matches.length !== 1) {
-      throw new FundingPlannerError(
-        "destination_unavailable",
-        "receive session requires one exact selectable destination",
-      );
-    }
-    const destination = matches[0];
+    const destination = resolveFundingDestinationChoice({
+      options: destinations,
+      destinationOptionId: request.destinationOptionId,
+      venueBindingOptionId: request.venueBindingOptionId,
+    });
     if (!destination) {
       throw new FundingPlannerError(
         "destination_unavailable",
-        "receive session destination is unavailable",
+        "receive session requires one selectable destination for the stable binding",
       );
     }
     const oneRaw = "1";

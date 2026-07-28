@@ -262,9 +262,7 @@ export class RelayWalletQuoteAdapter {
         input.route.quoteMode === "expected_output"
           ? ("EXPECTED_OUTPUT" as const)
           : ("EXACT_INPUT" as const),
-      ...(input.route.quoteMode === "expected_output"
-        ? { slippageTolerance: (input.maximumSlippageBps ?? 100).toString() }
-        : {}),
+      slippageTolerance: (input.maximumSlippageBps ?? 100).toString(),
       useDepositAddress: false,
     };
     const quote = await this.client.quote(request);

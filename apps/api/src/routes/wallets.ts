@@ -720,16 +720,6 @@ function sleep(ms: number) {
   return new Promise<void>((resolve) => setTimeout(resolve, ms));
 }
 
-function isRpcRateLimitError(error: unknown) {
-  if (!(error instanceof Error)) return false;
-  const message = error.message.toLowerCase();
-  return (
-    message.includes("429") ||
-    message.includes("too many requests") ||
-    message.includes("rate limit")
-  );
-}
-
 async function mapWithConcurrency<T, R>(
   items: T[],
   concurrency: number,
@@ -962,9 +952,12 @@ async function resolveWalletBalancesForWallet(inputs: {
           await resolveEntryBalance(entry);
           return;
         } catch (error) {
-          const canRetry =
-            isRpcRateLimitError(error) &&
-            attempt < env.walletBalancesRpcMaxAttempts;
+          // Every error thrown from resolveEntryBalance is scoped to one
+          // bounded RPC balance read. Timeouts and transient transport errors
+          // are at least as retryable as explicit rate limits; dropping the
+          // token after the first non-429 failure makes account value flicker
+          // to zero and produces inconsistent balances across UI surfaces.
+          const canRetry = attempt < env.walletBalancesRpcMaxAttempts;
           if (canRetry) {
             const delayMs = Math.min(
               env.walletBalancesRpcRetryBaseMs * 2 ** (attempt - 1),

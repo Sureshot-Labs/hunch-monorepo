@@ -458,6 +458,34 @@ await test("known zero venue cash remains a selectable Buy destination", async (
   assert.ok(!polymarketBuy.reasonCodes.includes("cash_availability_unknown"));
 });
 
+await test("Limitless funding target does not depend on current RPC cash observation", async () => {
+  const exactBinding = binding("limitless");
+  const adapter = new LimitlessWalletPreparationAdapter(
+    async (request) =>
+      buildLimitlessRuntimeFacts(
+        request,
+        limitlessEvidence({
+          binding: exactBinding,
+          rpcAvailable: false,
+          cashObserved: false,
+          cashRaw: null,
+          cashLockedRaw: "0",
+        }),
+      ),
+    () => NOW,
+  );
+
+  const result = await adapter.inspect(input(exactBinding, "fund", null));
+
+  assert.equal(result.status, "ready");
+  assert.deepEqual(
+    result.evidence.checks.map((check) => check.checkId),
+    ["wallet_provisioned", "binding_owned"],
+  );
+  assert.ok(!result.reasonCodes.includes("rpc_unavailable"));
+  assert.ok(!result.reasonCodes.includes("cash_availability_unknown"));
+});
+
 await test("zero Limitless cash exposes only the required automatic approval", async () => {
   const exactBinding = binding("limitless");
   const adapter = new LimitlessWalletPreparationAdapter(

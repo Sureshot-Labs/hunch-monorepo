@@ -1,6 +1,7 @@
 import {
   fetchErc20TransferLogs,
   fetchEvmBlockNumber,
+  parseEvmGetLogsBlockRangeLimit,
   type EvmErc20TransferLog,
 } from "../../services/polygon-rpc.js";
 import type { JsonValue } from "../domain/types.js";
@@ -12,6 +13,7 @@ type JsonRecord = Readonly<Record<string, JsonValue>>;
 
 const EXTERNAL_INGRESS_CONFIRMATIONS = 2n;
 const MAX_BLOCK_RANGE = 2_000n;
+const learnedBlockRangeByRpcUrl = new Map<string, bigint>();
 
 type EvmReceiveNetwork = Readonly<{
   rpcUrl: string;
@@ -150,45 +152,74 @@ export async function scanFundingReceiveCanonicalEvents(
   if (variants.length === 0) return null;
   const networks = new Map<string, Promise<bigint>>();
   let cursorAdvanced = false;
-  const eventGroups = await Promise.all(
-    variants.map(async (variant) => {
-      const network = receiveNetwork(variant.networkId);
-      const cursor = eventCursorBlock(variant);
-      if (!network || cursor == null) return null;
-      let latest = networks.get(variant.networkId);
-      if (!latest) {
-        latest = rpc.blockNumber(network);
-        networks.set(variant.networkId, latest);
-      }
-      const latestBlock = await latest;
-      const safeHead =
-        latestBlock >= EXTERNAL_INGRESS_CONFIRMATIONS - 1n
-          ? latestBlock - (EXTERNAL_INGRESS_CONFIRMATIONS - 1n)
-          : 0n;
-      if (safeHead <= cursor) {
-        return { events: [] as FundingReceiveCanonicalEvent[], variant };
-      }
-      const fromBlock = cursor + 1n;
-      const toBlock =
-        safeHead < cursor + MAX_BLOCK_RANGE
-          ? safeHead
-          : cursor + MAX_BLOCK_RANGE;
-      const logs = await rpc.transferLogs({
+  const eventGroups: Array<{
+    events: FundingReceiveCanonicalEvent[];
+    variant: DirectIngressObservationVariant;
+  } | null> = [];
+  // Receive variants share provider capacity. Serial scans avoid turning one
+  // worker pass into an RPC burst when a session accepts several assets.
+  for (const variant of variants) {
+    const network = receiveNetwork(variant.networkId);
+    const cursor = eventCursorBlock(variant);
+    if (!network || cursor == null) {
+      eventGroups.push(null);
+      continue;
+    }
+    let latest = networks.get(variant.networkId);
+    if (!latest) {
+      latest = rpc.blockNumber(network);
+      networks.set(variant.networkId, latest);
+    }
+    const latestBlock = await latest;
+    const safeHead =
+      latestBlock >= EXTERNAL_INGRESS_CONFIRMATIONS - 1n
+        ? latestBlock - (EXTERNAL_INGRESS_CONFIRMATIONS - 1n)
+        : 0n;
+    if (safeHead <= cursor) {
+      eventGroups.push({
+        events: [] as FundingReceiveCanonicalEvent[],
+        variant,
+      });
+      continue;
+    }
+    const fromBlock = cursor + 1n;
+    let maximumRange =
+      learnedBlockRangeByRpcUrl.get(network.rpcUrl) ?? MAX_BLOCK_RANGE;
+    let toBlock =
+      safeHead < cursor + maximumRange ? safeHead : cursor + maximumRange;
+    let logs: readonly EvmErc20TransferLog[];
+    try {
+      logs = await rpc.transferLogs({
         ...network,
         contractAddress: variant.asset.assetId,
         recipientAddress: variant.destinationAddress,
         fromBlock,
         toBlock,
       });
-      cursorAdvanced = true;
-      return {
-        events: logs
-          .filter((log) => log.rawAmount > 0n)
-          .map((log) => canonicalEvent(variant, log, now.toISOString())),
-        variant: withEventCursor(variant, toBlock),
-      };
-    }),
-  );
+    } catch (error) {
+      const providerLimit = parseEvmGetLogsBlockRangeLimit(error);
+      if (providerLimit == null || toBlock <= fromBlock) throw error;
+      maximumRange =
+        providerLimit < MAX_BLOCK_RANGE ? providerLimit : MAX_BLOCK_RANGE;
+      learnedBlockRangeByRpcUrl.set(network.rpcUrl, maximumRange);
+      toBlock =
+        safeHead < cursor + maximumRange ? safeHead : cursor + maximumRange;
+      logs = await rpc.transferLogs({
+        ...network,
+        contractAddress: variant.asset.assetId,
+        recipientAddress: variant.destinationAddress,
+        fromBlock,
+        toBlock,
+      });
+    }
+    cursorAdvanced = true;
+    eventGroups.push({
+      events: logs
+        .filter((log) => log.rawAmount > 0n)
+        .map((log) => canonicalEvent(variant, log, now.toISOString())),
+      variant: withEventCursor(variant, toBlock),
+    });
+  }
   if (eventGroups.some((group) => group == null)) return null;
   const groups = eventGroups.filter(
     (
