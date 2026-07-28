@@ -2026,7 +2026,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
-    name: "Telegram UI configuration registers scoped commands and Mini App menu button",
+    name: "Telegram UI configuration registers scoped commands and native command menu button",
     run: async () => {
       const commandCalls: Array<
         Parameters<TelegramBotApiClient["setMyCommands"]>[0]
@@ -2068,11 +2068,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       );
       assert.deepEqual(menuCalls, [
         {
-          menu_button: {
-            text: "Open Hunch",
-            type: "web_app",
-            web_app: { url: "https://app.hunch.trade/tg" },
-          },
+          menu_button: { type: "commands" },
         },
       ]);
     },
@@ -10551,10 +10547,10 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       });
       const buttons = message.keyboard?.inline_keyboard.flat() ?? [];
       assert.equal(buttons.length, 1);
-      assert.equal(buttons[0]?.text, "🟠 Buy NO on Hunch · 70¢");
+      assert.equal(buttons[0]?.text, "Buy NO on Hunch · 70¢");
       assert.equal(
-        buttons.some((button) => button.icon_custom_emoji_id != null),
-        false,
+        buttons[0]?.icon_custom_emoji_id,
+        TELEGRAM_CUSTOM_EMOJI.hunch.id,
       );
     },
   },
@@ -12126,11 +12122,21 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(result.deliverySkipped, 0);
       assert.match(
         telegram.messages[0]?.reply_markup?.inline_keyboard[0]?.[0]?.text ?? "",
-        /^🟠 Buy YES on Hunch · 41¢$/,
+        /^Buy YES on Hunch · 41¢$/,
       );
       assert.match(
         telegram.messages[1]?.reply_markup?.inline_keyboard[0]?.[0]?.text ?? "",
-        /^🟠 Buy YES on Hunch · 29¢$/,
+        /^Buy YES on Hunch · 29¢$/,
+      );
+      assert.equal(
+        telegram.messages[0]?.reply_markup?.inline_keyboard[0]?.[0]
+          ?.icon_custom_emoji_id,
+        TELEGRAM_CUSTOM_EMOJI.hunch.id,
+      );
+      assert.equal(
+        telegram.messages[1]?.reply_markup?.inline_keyboard[0]?.[0]
+          ?.icon_custom_emoji_id,
+        TELEGRAM_CUSTOM_EMOJI.hunch.id,
       );
       const polymarketPayload = decodeStartAppPayload(
         readStartAppParam(
@@ -13142,7 +13148,11 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       );
       const keyboard = telegram.messages[0]?.reply_markup?.inline_keyboard;
       assert.equal(keyboard?.length, 1);
-      assert.equal(keyboard?.[0]?.[0]?.text, "🟠 Open on Hunch");
+      assert.equal(keyboard?.[0]?.[0]?.text, "Open on Hunch");
+      assert.equal(
+        keyboard?.[0]?.[0]?.icon_custom_emoji_id,
+        TELEGRAM_CUSTOM_EMOJI.hunch.id,
+      );
       assert.match(keyboard?.[0]?.[0]?.url ?? "", /^https:\/\/t\.me\//);
       const startParam = readStartAppParam(keyboard?.[0]?.[0]?.url);
       assert.match(startParam, /^m_/);
@@ -13647,7 +13657,11 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.match(text, />NYG price {2}40¢ → 55¢ {2}\*\\\+15¢\*/);
       const keyboard = telegram.messages[0]?.reply_markup?.inline_keyboard;
       assert.equal(keyboard?.length, 1);
-      assert.equal(keyboard?.[0]?.[0]?.text, "🟠 Open on Hunch");
+      assert.equal(keyboard?.[0]?.[0]?.text, "Open on Hunch");
+      assert.equal(
+        keyboard?.[0]?.[0]?.icon_custom_emoji_id,
+        TELEGRAM_CUSTOM_EMOJI.hunch.id,
+      );
     },
   },
   {
@@ -13947,7 +13961,11 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       );
       const keyboard = telegram.messages[0]?.reply_markup?.inline_keyboard;
       assert.equal(keyboard?.length, 1);
-      assert.equal(keyboard?.[0]?.[0]?.text, "🟠 Open on Hunch");
+      assert.equal(keyboard?.[0]?.[0]?.text, "Open on Hunch");
+      assert.equal(
+        keyboard?.[0]?.[0]?.icon_custom_emoji_id,
+        TELEGRAM_CUSTOM_EMOJI.hunch.id,
+      );
     },
   },
   {

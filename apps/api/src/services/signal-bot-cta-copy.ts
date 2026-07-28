@@ -1,5 +1,3 @@
-import { TELEGRAM_CUSTOM_EMOJI } from "./telegram-custom-emoji.js";
-
 function formatCents(value: number): string {
   return `${Math.max(0, Math.min(100, Math.round(value * 100)))}¢`;
 }
@@ -30,7 +28,7 @@ export function formatSignalBotBuyButtonText(input: {
 }): string {
   const price = input.price == null ? null : formatCents(input.price);
   if (input.channel) {
-    return `${TELEGRAM_CUSTOM_EMOJI.hunch.fallback} Buy ${input.sideLabel} on Hunch${price ? ` · ${price}` : ""}`;
+    return `Buy ${input.sideLabel} on Hunch${price ? ` · ${price}` : ""}`;
   }
   const marker = input.side === "YES" ? "🟠" : "⚪";
   const venue = formatVenueLabel(input.venue);
@@ -49,8 +47,6 @@ export function formatSignalBotCheaperButtonText(input: {
   return `${input.useNativeMarker ? "💸 " : ""}Cheaper: ${venue} ${input.sideLabel} ${formatCents(input.alternative.price)}`;
 }
 
-export function formatSignalBotOpenButtonText(channel: boolean): string {
-  return channel
-    ? `${TELEGRAM_CUSTOM_EMOJI.hunch.fallback} Open on Hunch`
-    : "Open on Hunch";
+export function formatSignalBotOpenButtonText(): string {
+  return "Open on Hunch";
 }

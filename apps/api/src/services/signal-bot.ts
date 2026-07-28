@@ -1300,7 +1300,6 @@ function buildSignalBotTelegramButton(input: {
   ) {
     return buildHunchMiniAppWebButton({
       appBaseUrl: input.appBaseUrl,
-      customEmojiEnabled: input.chatType !== "channel",
       enabled: true,
       iconCustomEmojiId: input.iconCustomEmojiId,
       startParam: input.startParam,
@@ -1308,7 +1307,6 @@ function buildSignalBotTelegramButton(input: {
     });
   }
   return buildHunchMiniAppDeepLinkButton({
-    customEmojiEnabled: input.chatType !== "channel",
     iconCustomEmojiId: input.iconCustomEmojiId,
     miniAppLinkBase: input.miniAppLinkBase,
     startParam: input.startParam,
@@ -1630,7 +1628,10 @@ export function buildSignalBotMessage(input: {
       side: buySide,
       venue: note.marketVenue ?? "unknown",
     };
-    const tradeTargetIcon = telegramCustomEmojiIdForVenue(tradeTarget.venue);
+    const tradeTargetIcon =
+      input.chatType === "channel"
+        ? telegramCustomEmojiId("hunch")
+        : telegramCustomEmojiIdForVenue(tradeTarget.venue);
     const tradeSideLabel =
       tradeTarget.side === buySide
         ? presentation.positions[buySide].shortLabel
@@ -1702,7 +1703,7 @@ export function buildSignalBotMessage(input: {
         chatType: input.chatType,
         miniAppLinkBase: input.telegramMiniAppLinkBase,
         startParam: deliveryMarketStartParam,
-        text: formatSignalBotOpenButtonText(input.chatType === "channel"),
+        text: formatSignalBotOpenButtonText(),
       }),
     );
   }
@@ -1825,7 +1826,10 @@ function buildSignalBotFollowthroughKeyboard(input: {
         stats: input.stats,
       })
     ) {
-      const targetIcon = telegramCustomEmojiIdForVenue(target.venue);
+      const targetIcon =
+        input.chatType === "channel"
+          ? telegramCustomEmojiId("hunch")
+          : telegramCustomEmojiIdForVenue(target.venue);
       addedBuyButton = pushSignalBotButtonRow(
         rows,
         buildSignalBotTelegramButton({
@@ -1870,7 +1874,7 @@ function buildSignalBotFollowthroughKeyboard(input: {
           marketId,
           side,
         }),
-        text: formatSignalBotOpenButtonText(input.chatType === "channel"),
+        text: formatSignalBotOpenButtonText(),
       }),
     );
   }
@@ -8475,22 +8479,9 @@ export async function configureSignalBotTelegramUi(input: {
       }),
     );
   }
-  const menuButton = buildHunchMiniAppWebButton({
-    appBaseUrl: input.config.appBaseUrl,
-    enabled: input.config.telegramMiniAppLinkBase != null,
-    path: SIGNAL_BOT_TELEGRAM_WEB_APP_ENTRY_PATH,
-    text: "Open Hunch",
-  });
   await attempt("menu-button:default", () =>
     input.telegram.setChatMenuButton({
-      menu_button:
-        menuButton && "web_app" in menuButton
-          ? {
-              text: menuButton.text,
-              type: "web_app",
-              web_app: menuButton.web_app,
-            }
-          : { type: "commands" },
+      menu_button: { type: "commands" },
     }),
   );
   return { configured, failures };
