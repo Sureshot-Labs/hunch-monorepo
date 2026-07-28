@@ -40,7 +40,37 @@ function capitalize(value: string): string {
 
 function publicHolderLabel(value: string | null | undefined): string | null {
   const label = value?.trim().replace(/\s+/g, " ").replace(/^@+/, "").trim();
-  return label || null;
+  if (!label || /^(?:(?:a|the)\s+)?(?:trader|wallet)$/i.test(label))
+    return null;
+  return label;
+}
+
+function sentenceActor(value: string): string {
+  return value === "the trader" ? "The trader" : value;
+}
+
+function possessiveActor(value: string): string {
+  if (value === "the trader") return "the trader's";
+  return /s$/i.test(value) ? `${value}'` : `${value}'s`;
+}
+
+function negativeMoveSubject(marketLabel: string): string {
+  const cleaned = cleanPublicMarketText(marketLabel) ?? marketLabel.trim();
+  if (/^\d+(?:\.\d+)?\s*bps\s+increase\b/i.test(cleaned)) {
+    return `The probability of no ${cleaned}`;
+  }
+  return `The NO price on ${cleaned}`;
+}
+
+export function normalizeSignalBotPublicLanguage(value: string): string {
+  return value
+    .replace(/\bfading\b/gi, "betting against")
+    .replace(/\bfades\b/gi, "bets against")
+    .replace(/\bfaded\b/gi, "backed away from")
+    .replace(/\bfade\b/gi, "bet against")
+    .replace(/\bthis wallet\b/gi, "this trader")
+    .replace(/\bthe wallet\b/gi, "the trader")
+    .replace(/\ba wallet\b/gi, "a trader");
 }
 
 function scalarEvidenceValue(
@@ -112,7 +142,7 @@ export function buildSignalBotStructuredNarrative(input: {
   const holderName =
     publicHolderLabel(
       input.note.holderIdentityDisplayName ?? input.note.holderDisplayName,
-    ) ?? "the wallet";
+    ) ?? "the trader";
   const priceTarget = resolvePriceTargetNarrative(input.marketLabel);
 
   if (
@@ -134,7 +164,7 @@ export function buildSignalBotStructuredNarrative(input: {
         ? " instead of taking profit"
         : "";
     const state = [
-      `The wallet is now holding ${formatSignalBotPreciseCompactUsd(input.researchDelta.afterUsd)} on NO`,
+      `The trader is now holding ${formatSignalBotPreciseCompactUsd(input.researchDelta.afterUsd)} on NO`,
       input.note.holderOpenPnlUsd != null &&
       Math.abs(input.note.holderOpenPnlUsd) >= 1
         ? `is sitting on ${formatSignalBotPreciseCompactUsd(input.note.holderOpenPnlUsd, true)} open PnL`
@@ -149,7 +179,10 @@ export function buildSignalBotStructuredNarrative(input: {
 
   if (
     input.messageKind === "research_update" &&
-    input.headlineTemplateKey === "research_profitable_price_target_hold_v11" &&
+    (input.headlineTemplateKey ===
+      "research_profitable_price_target_hold_v11" ||
+      input.headlineTemplateKey ===
+        "research_profitable_price_target_hold_v12") &&
     input.researchDelta?.kind === "price_move" &&
     input.side != null &&
     input.price != null &&
@@ -163,19 +196,58 @@ export function buildSignalBotStructuredNarrative(input: {
       Math.min(1, input.price - input.researchDelta.priceMoveCents / 100),
     );
     const favorable = input.researchDelta.priceMoveCents > 0;
+    const sharp = Math.abs(input.researchDelta.priceMoveCents) >= 10;
     const profitable =
       input.note.holderOpenPnlUsd != null && input.note.holderOpenPnlUsd > 0;
-    const firstParagraph = profitable
-      ? `The market has moved in the wallet's ${favorable ? "favor" : "opposite direction"}, with ${input.side} moving from ${formatCents(beforePrice)} to ${formatCents(input.price)}, but ${holderName} hasn't taken profit.`
-      : `${input.side} moved from ${formatCents(beforePrice)} to ${formatCents(input.price)}, but ${holderName} is still holding.`;
-    const openPnl =
+    const firstParagraph = favorable
+      ? `The market has moved ${sharp ? "sharply " : ""}in the trader's favor, with ${input.side} rising from ${formatCents(beforePrice)} to ${formatCents(input.price)} since the original call.`
+      : `The market has moved against the trader, with ${input.side} falling from ${formatCents(beforePrice)} to ${formatCents(input.price)} since the original call.`;
+    const actor = sentenceActor(holderName);
+    const position = formatSignalBotPreciseCompactUsd(
+      input.note.holderPositionUsd,
+    );
+    const pnl =
       input.note.holderOpenPnlUsd != null &&
       Math.abs(input.note.holderOpenPnlUsd) >= 1
-        ? ` and is now sitting on ${formatSignalBotPreciseCompactUsd(input.note.holderOpenPnlUsd, true)} open ${input.note.holderOpenPnlUsd > 0 ? "profit" : "loss"}`
-        : "";
+        ? input.note.holderOpenPnlUsd > 0
+          ? formatSignalBotPreciseCompactUsd(input.note.holderOpenPnlUsd, true)
+          : formatSignalBotPreciseCompactUsd(
+              Math.abs(input.note.holderOpenPnlUsd),
+            )
+        : null;
     return [
       firstParagraph,
-      `${profitable ? "Instead, the" : "The"} wallet is still holding ${formatSignalBotPreciseCompactUsd(input.note.holderPositionUsd)} on ${input.side}${openPnl} after making ${formatSignalBotPreciseCompactUsd(trackRecordUsd)} over the last ${horizonDays} days.`,
+      profitable && pnl
+        ? `Despite sitting on ${pnl} in open profit, ${holderName} is still holding ${position} on ${input.side} after making ${formatSignalBotPreciseCompactUsd(trackRecordUsd)} over the last ${horizonDays} days.`
+        : `${actor} is still holding ${position} on ${input.side}${pnl ? ` despite an open loss of ${pnl}` : ""} after making ${formatSignalBotPreciseCompactUsd(trackRecordUsd)} over the last ${horizonDays} days.`,
+    ];
+  }
+
+  if (
+    input.messageKind === "research_update" &&
+    input.headlineTemplateKey === "research_profitable_trader_underwater_v12" &&
+    input.researchDelta?.kind === "price_move" &&
+    input.side === "NO" &&
+    input.price != null &&
+    trackRecordUsd != null &&
+    input.note.holderPositionUsd != null &&
+    input.note.holderPositionUsd > 0 &&
+    input.note.holderOpenPnlUsd != null &&
+    input.note.holderOpenPnlUsd < 0
+  ) {
+    const beforePrice = Math.max(
+      0,
+      Math.min(1, input.price - input.researchDelta.priceMoveCents / 100),
+    );
+    const position = formatSignalBotPreciseCompactUsd(
+      input.note.holderPositionUsd,
+    );
+    const loss = formatSignalBotPreciseCompactUsd(
+      Math.abs(input.note.holderOpenPnlUsd),
+    );
+    return [
+      `${negativeMoveSubject(input.marketLabel)} has dropped from ${formatCents(beforePrice)} to ${formatCents(input.price)}, but ${holderName} continues to hold a ${position} position despite being down ${loss}.`,
+      `After making ${formatSignalBotPreciseCompactUsd(trackRecordUsd)} over the last ${horizonDays} days, ${possessiveActor(holderName)} continued conviction is what makes this position worth watching.`,
     ];
   }
 
@@ -192,7 +264,7 @@ export function buildSignalBotStructuredNarrative(input: {
       input.note.holderPositionUsd,
     );
     return [
-      `${input.sideLabel} is already a heavy favorite, but this wallet has still built a ${position} position while making ${formatSignalBotPreciseCompactUsd(trackRecordUsd)} over the last ${horizonDays} days.`,
+      `${input.sideLabel} is already a heavy favorite, but this trader has still built a ${position} position while making ${formatSignalBotPreciseCompactUsd(trackRecordUsd)} over the last ${horizonDays} days.`,
       `At ${formatCents(input.price)}, there is little room left for error, so risking ${position} is a strong statement of conviction.`,
     ];
   }

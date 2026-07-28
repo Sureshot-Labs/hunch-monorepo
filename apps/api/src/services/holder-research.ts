@@ -5952,7 +5952,7 @@ export function applyHolderResearchPublishQualityGate(input: {
   if (quality.riskTags.includes("negative_single_minority")) {
     return asContextHolderResearchOutput(
       output,
-      "Single-holder minority fades with negative recent holder PnL are context-only.",
+      "Single-holder minority bets with negative recent holder PnL are context-only.",
     );
   }
   if (

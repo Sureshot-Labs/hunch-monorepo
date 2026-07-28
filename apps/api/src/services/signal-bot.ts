@@ -119,10 +119,17 @@ import {
 } from "./signal-delivery-target.js";
 import { resolveSignalBotVenueLifecycle } from "./signal-bot-venue-lifecycle.js";
 import {
+  formatSignalBotBuyButtonText,
+  formatSignalBotCheaperButtonText,
+  formatSignalBotOpenButtonText,
+  formatVenueLabel,
+} from "./signal-bot-cta-copy.js";
+import {
   buildSignalBotStructuredNarrative,
   emphasizeSignalBotNarrativeText,
   formatSignalBotPreciseCompactUsd,
   formatSignalNotificationHeadlineRichText,
+  normalizeSignalBotPublicLanguage,
   splitSignalBotNarrative,
 } from "./signal-bot-editorial-copy.js";
 import {
@@ -1643,6 +1650,7 @@ export function buildSignalBotMessage(input: {
           side: tradeTarget.side,
         }),
         text: formatSignalBotBuyButtonText({
+          channel: input.chatType === "channel",
           price: input.deliveryTarget ? tradeTarget.price : price,
           side: tradeTarget.side,
           sideLabel: tradeSideLabel,
@@ -1653,6 +1661,7 @@ export function buildSignalBotMessage(input: {
       }),
     );
     if (
+      input.chatType !== "channel" &&
       !input.deliveryTarget &&
       input.cheaperAlternative &&
       input.cheaperAlternative.side === buySide
@@ -1693,7 +1702,7 @@ export function buildSignalBotMessage(input: {
         chatType: input.chatType,
         miniAppLinkBase: input.telegramMiniAppLinkBase,
         startParam: deliveryMarketStartParam,
-        text: "↗️ Open market",
+        text: formatSignalBotOpenButtonText(input.chatType === "channel"),
       }),
     );
   }
@@ -1832,6 +1841,7 @@ function buildSignalBotFollowthroughKeyboard(input: {
             side,
           }),
           text: formatSignalBotBuyButtonText({
+            channel: input.chatType === "channel",
             price: buyPrice,
             side,
             sideLabel:
@@ -1860,7 +1870,7 @@ function buildSignalBotFollowthroughKeyboard(input: {
           marketId,
           side,
         }),
-        text: "↗️ Open market",
+        text: formatSignalBotOpenButtonText(input.chatType === "channel"),
       }),
     );
   }
@@ -7088,7 +7098,7 @@ function formatSignalBotFollowthroughRead(input: {
       input.stats.exitedWallets === 0 &&
       input.stats.trimmedWallets <= input.stats.joinedOrAddedWallets
     ) {
-      return `Fresh buying kept coming in as ${marketLabel} rose, suggesting conviction has not faded after the rally.`;
+      return `Fresh buying kept coming in as ${marketLabel} rose, suggesting conviction remains after the rally.`;
     }
     if (input.dominantConfluence) {
       const outcome =
@@ -8811,9 +8821,9 @@ function resolveSignalBotCurrentSideLabel(input: {
   sideCopy: MarketSideCopy | null;
 }): string {
   if (input.sideCopy?.copyKind === "team_yes_no") {
+    if (input.side === "NO") return "NO";
     const semantic = input.sideCopy.plainPosition
       .replace(/^backing\s+/i, "")
-      .replace(/^fading\s+/i, "against ")
       .trim();
     if (semantic && !/^(?:against\s+)?[↑↓]/.test(semantic)) return semantic;
   }
@@ -9354,45 +9364,6 @@ function buildSignalBotFollowthroughCopyAudit(input: {
   };
 }
 
-function formatVenueLabel(value: string | null | undefined): string | null {
-  const normalized = value?.trim().toLowerCase();
-  switch (normalized) {
-    case "polymarket":
-      return "Poly";
-    case "kalshi":
-      return "Kalshi";
-    case "limitless":
-      return "Limitless";
-    default:
-      return value?.trim() || null;
-  }
-}
-
-function formatSignalBotBuyButtonText(input: {
-  price: number | null;
-  side: "NO" | "YES";
-  sideLabel: string;
-  useNativeMarker: boolean;
-  venue: string | null;
-}): string {
-  const marker = input.side === "YES" ? "🟠" : "⚪";
-  const venue = formatVenueLabel(input.venue);
-  const price = input.price == null ? null : formatCents(input.price);
-  const marketLabel =
-    venue && price ? `${venue} ${price}` : (venue ?? price ?? null);
-  return `${input.useNativeMarker ? `${marker} ` : ""}Buy ${input.sideLabel}${marketLabel ? ` · ${marketLabel}` : ""}`;
-}
-
-function formatSignalBotCheaperButtonText(input: {
-  alternative: SignalBotCheaperAlternative;
-  sideLabel: string;
-  useNativeMarker: boolean;
-}): string {
-  const venue =
-    formatVenueLabel(input.alternative.venue) ?? input.alternative.venue;
-  return `${input.useNativeMarker ? "💸 " : ""}Cheaper: ${venue} ${input.sideLabel} ${formatCents(input.alternative.price)}`;
-}
-
 function formatPercent(value: number): string {
   return `${Math.max(0, Math.min(100, Math.round(value * 100)))}%`;
 }
@@ -9429,9 +9400,10 @@ function formatCompactAmount(value: number): string {
 }
 
 function sanitizeSignalBotInitialDescription(value: string): string | null {
-  const normalized =
+  const normalized = normalizeSignalBotPublicLanguage(
     cleanPublicMarketText(value.replace(/\b(\d{1,3}(?:\.\d+)?)c\b/gi, "$1¢")) ??
-    "";
+      "",
+  );
   const sentences = normalized.split(/(?<=[.!?])\s+/);
   const kept = sentences.filter((sentence) => {
     const genericRecommendation =
@@ -9456,9 +9428,10 @@ function sanitizeSignalBotResearchDescription(
   _note: SignalBotNote,
   _side: "NO" | "YES" | null,
 ): string | null {
-  const normalized =
+  const normalized = normalizeSignalBotPublicLanguage(
     cleanPublicMarketText(value.replace(/\b(\d{1,3}(?:\.\d+)?)c\b/gi, "$1¢")) ??
-    "";
+      "",
+  );
   const sanitized = normalized
     .split(/(?<=[.!?])\s+/)
     .filter((sentence) => {
@@ -9524,7 +9497,7 @@ function formatSignalBotResearchDescriptionFallback(
   ) {
     return null;
   }
-  return `The wallet entered before this signal, so its open PnL and the ${formatSignedCentsMove(
+  return `The trader entered before this signal, so their open PnL and the ${formatSignedCentsMove(
     researchDelta.priceMoveCents,
   )} move since the call use different starting prices.`;
 }

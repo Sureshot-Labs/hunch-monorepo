@@ -90,12 +90,12 @@ function buildSignalBotRichPreviewFixtures(
 ): TelegramInputRichMessage[] {
   const production: TelegramInputRichMessage[] = [
     richPreviewStory({
-      continuation: "This wallet is backing Spain over Argentina.",
+      continuation: "This trader is backing Spain over Argentina.",
       emoji: "👀",
       hook: "+$542K last month.",
       paragraphs: [
-        "Most tracked money is on Argentina, but this wallet is holding $20.5K on Spain.",
-        "The market prefers Argentina. This wallet does not.",
+        "Most tracked money is on Argentina, but this trader is holding $20.5K on Spain.",
+        "The market prefers Argentina. This trader does not.",
       ],
       rows: [
         { label: "Market", value: "Spain to advance against Argentina" },
@@ -106,12 +106,12 @@ function buildSignalBotRichPreviewFixtures(
       ],
     }),
     richPreviewStory({
-      continuation: "A wallet up $67K is still betting on it.",
+      continuation: "A trader up $67K is still betting on it.",
       emoji: "🪙",
       hook: "Ethereum crashing to $1,000 is priced at 16%.",
       paragraphs: [
         "The market gives Ethereum only a 16% chance of touching $1,000, but LlamaLoco0000 is still holding $53.2K on YES despite being down $8.1K on the trade.",
-        "The wallet has traded more than $539K over the last 30 days and has not backed away from one of its most contrarian positions.",
+        "The trader has traded more than $539K over the last 30 days and has not backed away from one of their most contrarian positions.",
       ],
       rows: [
         { label: "Market", value: "Ethereum to hit $1,000 before 2027" },
@@ -125,7 +125,7 @@ function buildSignalBotRichPreviewFixtures(
       continuation:
         "Three profitable wallets are holding $277K on the other side.",
       emoji: "🏆",
-      hook: "Most tracked money is fading England.",
+      hook: "Most tracked money is betting against England.",
       paragraphs: [
         "Most tracked money is betting against England, but three of the strongest wallets are still holding the other side.",
         "Together, they made $644K over the last 30 days. Their conviction makes England's 22% chance more interesting than the market price alone suggests.",
@@ -177,7 +177,7 @@ function buildSignalBotRichPreviewFixtures(
       hook: "A U.S. invasion of Iran is priced at 20%.",
       paragraphs: [
         "The market prices the chance at just 20%, while most tracked money is positioned on NO.",
-        "Trashpilot is still holding $32.5K on YES after making $43.7K over the last 30 days. It is a high-risk minority bet, but one backed by a wallet with recent momentum.",
+        "Trashpilot is still holding $32.5K on YES after making $43.7K over the last 30 days. It is a high-risk minority bet, but one backed by a trader with recent momentum.",
       ],
       rows: [
         { label: "Market", value: "U.S. to invade Iran before 2027" },
@@ -207,10 +207,10 @@ function buildSignalBotRichPreviewFixtures(
     richPreviewStory({
       continuation: "It is backing France to win the World Cup.",
       emoji: "🐋",
-      hook: "A wallet up $168K has built a $305K position.",
+      hook: "A trader up $168K has built a $305K position.",
       paragraphs: [
         "Mentionmarket has kept the full position despite heavier tracked money betting against France.",
-        "The wallet traded $1.2M over the last 30 days and is still holding one of the largest tracked positions in the market.",
+        "The trader has $1.2M in 30-day volume and is still holding one of the largest tracked positions in the market.",
       ],
       rows: [
         { label: "Market", value: "France to win the World Cup" },
@@ -272,7 +272,7 @@ function buildSignalBotRichPreviewFixtures(
       ],
     }),
     richPreviewStory({
-      continuation: "This wallet still refuses to flip.",
+      continuation: "This trader still refuses to flip.",
       emoji: "📉",
       hook: "Bitcoin is moving closer to $67.5K.",
       paragraphs: [
@@ -310,16 +310,16 @@ function buildSignalBotRichPreviewFixtures(
     }),
   ];
   const headingCopy = {
-    continuation: "This wallet is backing Spain over Argentina.",
+    continuation: "This trader is backing Spain over Argentina.",
     emoji: "👀",
     hook: "+$542K last month.",
   };
   const headingBody = telegramRichText(
     emphasizeNarrative(
-      "Most tracked money is on Argentina, but this wallet is holding $20.5K on Spain.",
+      "Most tracked money is on Argentina, but this trader is holding $20.5K on Spain.",
     ),
     "\n\n",
-    "The market prefers Argentina. This wallet does not.",
+    "The market prefers Argentina. This trader does not.",
   );
   const headingTable = () =>
     richPreviewPositionTable([

@@ -257,7 +257,7 @@ function buildFallbackCopy(input: MarketSideCopyInput): MarketSideCopy {
     copyKind === "team_yes_no" && genericTitle
       ? input.side === "YES"
         ? `backing ${genericTitle}`
-        : `fading ${genericTitle}`
+        : `betting against ${genericTitle}`
       : sideLabel;
   return {
     buttonLabel: readableLabel(fullLabel),

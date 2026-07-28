@@ -391,7 +391,7 @@ const tests: Array<{ name: string; run: () => void }> = [
       const cases = [
         {
           expected:
-            "🪙 Ethereum has just a 16% chance of hitting $1K. A wallet up $67K is still betting on it.",
+            "🪙 Ethereum has just a 16% chance of hitting $1K. A trader up $67K is still betting on it.",
           input: {
             actorMode: "single_holder" as const,
             actorOpenPnlUsd: -8_100,
@@ -473,7 +473,7 @@ const tests: Array<{ name: string; run: () => void }> = [
         },
         {
           expected:
-            "🐋 A wallet up $168K has built a $305K position. It is betting on France to win the World Cup.",
+            "🐋 A trader up $168K has built a $305K position. It is betting on France to win the World Cup.",
           input: {
             actorMode: "single_holder" as const,
             actorPnlHorizonDays: 30,
@@ -495,7 +495,7 @@ const tests: Array<{ name: string; run: () => void }> = [
         },
         {
           expected:
-            "🌐 A U.S. invasion of Iran is priced at 20%. A wallet up $44K is still betting on it.",
+            "🌐 A U.S. invasion of Iran is priced at 20%. A trader up $44K is still betting on it.",
           input: {
             actorMode: "single_holder" as const,
             actorPnlHorizonDays: 30,
@@ -607,7 +607,7 @@ const tests: Array<{ name: string; run: () => void }> = [
       });
       assert.equal(
         resistance.text,
-        "📉 Bitcoin is moving closer to $67.5K. This wallet still refuses to flip.",
+        "📉 Bitcoin is moving closer to $67.5K. This trader still refuses to flip.",
       );
     },
   },
@@ -711,7 +711,7 @@ const tests: Array<{ name: string; run: () => void }> = [
       });
       assert.equal(
         positionChange.text,
-        "💰 +$49.4K added. One wallet increased its Under 2.5 total goals in Spain vs. Argentina position.",
+        "💰 +$49.4K added. One trader increased their Under 2.5 total goals in Spain vs. Argentina position.",
       );
     },
   },
@@ -743,7 +743,7 @@ const tests: Array<{ name: string; run: () => void }> = [
       assert.equal(result.templateKey, "research_profitable_wallet_added_v11");
       assert.equal(
         result.text,
-        "💰 A wallet up $108K just added to its bet that Bitcoin won't hit $70K in July.",
+        "💰 A trader up $108K just added to their bet that Bitcoin won't hit $70K in July.",
       );
     },
   },
@@ -752,6 +752,7 @@ const tests: Array<{ name: string; run: () => void }> = [
     run: () => {
       const result = buildSignalNotificationHeadline({
         actorMode: "single_holder",
+        actorOpenPnlUsd: 2_100,
         actorPnlUsd: 111_800,
         currentPrice: 0.84,
         editorialProbability: 0.17,
@@ -771,11 +772,41 @@ const tests: Array<{ name: string; run: () => void }> = [
       });
       assert.equal(
         result.templateKey,
-        "research_profitable_price_target_hold_v11",
+        "research_profitable_price_target_hold_v12",
       );
       assert.equal(
         result.text,
-        "📈 Bitcoin is now just 17% to hit $70K in July. A wallet up $112K is still holding NO.",
+        "📈 Bitcoin is now just 17% to hit $70K in July. A trader up $112K still hasn't taken profit.",
+      );
+    },
+  },
+  {
+    name: "profitable trader holding through a loss leads with persistence",
+    run: () => {
+      const result = buildSignalNotificationHeadline({
+        actorMode: "single_holder",
+        actorOpenPnlUsd: -1_100,
+        actorPnlUsd: 247_100,
+        currentPrice: 0.73,
+        editorialProbability: 0.27,
+        editorialSubject: "25 bps increase",
+        holderPositionUsd: 10_500,
+        kind: "research_update",
+        positionDirection: "against",
+        researchDelta: {
+          currentPrice: 0.73,
+          kind: "price_move",
+          priceMoveCents: -7,
+        },
+        subject: subject({ marketTitle: "25 bps increase", side: "NO" }),
+      });
+      assert.equal(
+        result.templateKey,
+        "research_profitable_trader_underwater_v12",
+      );
+      assert.equal(
+        result.text,
+        "📉 The market turned against this trade. A trader up $247K still hasn't backed away.",
       );
     },
   },
@@ -800,7 +831,7 @@ const tests: Array<{ name: string; run: () => void }> = [
       assert.equal(result.templateKey, "initial_expensive_favorite_v11");
       assert.equal(
         result.text,
-        "⚽ A wallet up $208K is risking $27.1K on Spirit despite 94¢ odds.",
+        "⚽ A trader up $208K is risking $27.1K on Spirit despite 94¢ odds.",
       );
     },
   },
@@ -857,31 +888,55 @@ const tests: Array<{ name: string; run: () => void }> = [
         }),
         [
           "Bitcoin hitting $70K in July is priced at 23%, but gmtrader has increased its NO position instead of taking profit.",
-          "The wallet is now holding $14.9K on NO, is sitting on +$1.2K open PnL, and has made $107.7K over the last 30 days.",
+          "The trader is now holding $14.9K on NO, is sitting on +$1.2K open PnL, and has made $107.7K over the last 30 days.",
         ],
       );
 
       assert.deepEqual(
         buildSignalBotStructuredNarrative({
-          editorialProbability: 0.17,
-          evidenceRows: trackRecordEvidence(111_800),
-          headlineTemplateKey: "research_profitable_price_target_hold_v11",
-          marketLabel: "Bitcoin hitting $70K in July",
+          editorialProbability: 0.1,
+          evidenceRows: trackRecordEvidence(88_800),
+          headlineTemplateKey: "research_profitable_price_target_hold_v12",
+          marketLabel: "Bitcoin hitting $67.5K in July",
           messageKind: "research_update",
           note: {
             holderDisplayName: "gmtrader",
             holderIdentityDisplayName: "gmtrader",
-            holderOpenPnlUsd: 2_100,
-            holderPositionUsd: 16_100,
+            holderOpenPnlUsd: 8_400,
+            holderPositionUsd: 14_500,
           },
-          price: 0.84,
-          researchDelta: { kind: "price_move", priceMoveCents: 6 },
+          price: 0.91,
+          researchDelta: { kind: "price_move", priceMoveCents: 26 },
           side: "NO",
-          sideLabel: "NO on BTC hitting $70K in July",
+          sideLabel: "NO on BTC hitting $67.5K in July",
         }),
         [
-          "The market has moved in the wallet's favor, with NO moving from 78¢ to 84¢, but gmtrader hasn't taken profit.",
-          "Instead, the wallet is still holding $16.1K on NO and is now sitting on +$2.1K open profit after making $111.8K over the last 30 days.",
+          "The market has moved sharply in the trader's favor, with NO rising from 65¢ to 91¢ since the original call.",
+          "Despite sitting on +$8.4K in open profit, gmtrader is still holding $14.5K on NO after making $88.8K over the last 30 days.",
+        ],
+      );
+
+      assert.deepEqual(
+        buildSignalBotStructuredNarrative({
+          editorialProbability: 0.27,
+          evidenceRows: trackRecordEvidence(247_100),
+          headlineTemplateKey: "research_profitable_trader_underwater_v12",
+          marketLabel: "25 bps increase",
+          messageKind: "research_update",
+          note: {
+            holderDisplayName: "charlatta",
+            holderIdentityDisplayName: "charlatta",
+            holderOpenPnlUsd: -1_100,
+            holderPositionUsd: 10_500,
+          },
+          price: 0.73,
+          researchDelta: { kind: "price_move", priceMoveCents: -7 },
+          side: "NO",
+          sideLabel: "NO",
+        }),
+        [
+          "The probability of no 25 bps increase has dropped from 80¢ to 73¢, but charlatta continues to hold a $10.5K position despite being down $1.1K.",
+          "After making $247.1K over the last 30 days, charlatta's continued conviction is what makes this position worth watching.",
         ],
       );
 
@@ -893,7 +948,7 @@ const tests: Array<{ name: string; run: () => void }> = [
           marketLabel: "Spirit over OG",
           messageKind: "initial",
           note: {
-            holderDisplayName: "a wallet",
+            holderDisplayName: "a trader",
             holderIdentityDisplayName: null,
             holderOpenPnlUsd: -773,
             holderPositionUsd: 27_100,
@@ -904,7 +959,7 @@ const tests: Array<{ name: string; run: () => void }> = [
           sideLabel: "Spirit",
         }),
         [
-          "Spirit is already a heavy favorite, but this wallet has still built a $27.1K position while making $208.1K over the last 30 days.",
+          "Spirit is already a heavy favorite, but this trader has still built a $27.1K position while making $208.1K over the last 30 days.",
           "At 94¢, there is little room left for error, so risking $27.1K is a strong statement of conviction.",
         ],
       );

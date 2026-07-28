@@ -10160,6 +10160,35 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
+    name: "generic NO position table uses NO instead of action grammar",
+    run: () => {
+      const message = buildSignalBotMessage({
+        appBaseUrl: "https://app.hunch.trade",
+        buyAmountUsd: 10,
+        note: note({
+          bestAsk: 0.28,
+          bestBid: 0.26,
+          direction: "down",
+          eventTitle: "Fed decision in July",
+          holderSide: "NO",
+          marketTitle: "25 bps increase",
+        }),
+      });
+      const table = message.richMessage.blocks.find(
+        (block) => block.type === "table",
+      );
+      assert.equal(table?.type, "table");
+      if (table?.type === "table") {
+        const positionRow = table.cells.find(
+          (row) => row[0]?.text === "Position",
+        );
+        const position = JSON.stringify(positionRow?.[1]?.text);
+        assert.match(position, /\$12\.3K on NO/);
+        assert.doesNotMatch(position, /on against|fading/i);
+      }
+    },
+  },
+  {
     name: "message strips leading at-sign from holder identity mentions",
     run: () => {
       const message = buildSignalBotMessage({
@@ -10183,6 +10212,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
 
       assert.doesNotMatch(message.text, /@Valen9/);
       assert.match(message.text, /Valen9/);
+      assert.match(message.text, /betting against the deadline/i);
+      assert.doesNotMatch(message.text, /\bfad(?:e|es|ed|ing)\b/i);
       assert.doesNotMatch(message.text, /is still holding NO/i);
       assert.doesNotMatch(message.text, /Public news does not explain/);
     },
@@ -10334,7 +10365,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
 
       assert.match(
         message.text.split("\n")[0] ?? "",
-        /^⚽ \*\\\+\$542K in 30 days\\\.\* This wallet is backing Spain over Argentina\\\.$/,
+        /^⚽ \*\\\+\$542K in 30 days\\\.\* This trader is backing Spain over Argentina\\\.$/,
       );
       assert.match(message.text, /▸ PnL.*542K.*30d/);
       assert.match(message.text, /▸ Recent results.*18\\\.4 pts vs market/);
@@ -10503,7 +10534,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
-    name: "channel signal buttons omit custom emoji fields",
+    name: "channel signal buttons use one Hunch-branded CTA",
     run: () => {
       const message = buildSignalBotMessage({
         appBaseUrl: "https://app.hunch.trade",
@@ -10512,16 +10543,15 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         cheaperAlternative: {
           eventId: "kalshi:event-1",
           marketId: "kalshi:market-1",
-          price: 0.29,
-          side: "YES",
+          price: 0.65,
+          side: "NO",
           venue: "kalshi",
         },
-        note: note(),
+        note: note({ direction: "down", holderSide: "NO" }),
       });
       const buttons = message.keyboard?.inline_keyboard.flat() ?? [];
-      assert.ok(buttons.length > 0);
-      assert.equal(buttons[0]?.text, "🟠 Buy YES · Poly 32¢");
-      assert.equal(buttons[1]?.text, "💸 Cheaper: Kalshi YES 29¢");
+      assert.equal(buttons.length, 1);
+      assert.equal(buttons[0]?.text, "🟠 Buy NO on Hunch · 70¢");
       assert.equal(
         buttons.some((button) => button.icon_custom_emoji_id != null),
         false,
@@ -10897,7 +10927,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
 
       assert.match(
         message.text.split("\n")[0] ?? "",
-        /^📈 \*Bitcoin is now just 18% to hit \$70K in July\\\.\* A wallet up \$118K is still holding NO\\\.$/,
+        /^📈 \*Bitcoin is now just 18% to hit \$70K in July\\\.\* A trader up \$118K still hasn't taken profit\\\.$/,
       );
       assert.ok(
         message.text.includes(
@@ -10908,11 +10938,10 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(message.publishable, true);
       assert.doesNotMatch(message.text, /different starting prices/i);
       assert.doesNotMatch(message.text, /Beat resolved prices|Wallet edge/);
-      assert.match(message.text, /market has moved in the wallet's favor/i);
+      assert.match(message.text, /market has moved in the trader's favor/i);
       assert.match(message.text, /gmtrader/i);
-      assert.match(message.text, /hasn't taken profit/i);
       assert.match(message.text, /still holding \$7\\\.5K on NO/i);
-      assert.match(message.text, /\+\$829 open profit/i);
+      assert.match(message.text, /\\\+\$829 in open profit/i);
       assert.match(message.text, /\$118K over the last 30 days/i);
       assert.doesNotMatch(message.text, /New research|repeat read/i);
       assert.doesNotMatch(message.text, /No cited external evidence|📰/i);
@@ -10987,11 +11016,11 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
 
       assert.match(
         message.text.split("\n")[0] ?? "",
-        /^📉 \*Bitcoin is moving closer to \$67\\\.5K\\\.\* This wallet still refuses to flip\\\.$/,
+        /^📉 \*Bitcoin is moving closer to \$67\\\.5K\\\.\* This trader still refuses to flip\\\.$/,
       );
       assert.match(
         message.text,
-        /wallet entered before this signal, so its open PnL and the −11¢ move since the call use different starting prices/i,
+        /trader entered before this signal, so their open PnL and the −11¢ move since the call use different starting prices/i,
       );
       assert.ok(
         message.text.includes(
@@ -11145,7 +11174,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
 
       assert.match(
         message.text.split("\n")[0] ?? "",
-        /^👀 \*\\\+\$35K in 30 days\\\.\* This wallet is backing Under 4\\\.5 total goals in Spain vs\\\. Argentina\\\.$/,
+        /^👀 \*\\\+\$35K in 30 days\\\.\* This trader is backing Under 4\\\.5 total goals in Spain vs\\\. Argentina\\\.$/,
       );
       assert.match(message.text, /\[Under 4\\\.5 total goals\]\(/);
       assert.match(
@@ -11215,7 +11244,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
 
       assert.match(
         message.text.split("\n")[0] ?? "",
-        /^💰 \*\\\+\$49\\\.4K added\\\.\* One wallet increased its Under 2\\\.5 total goals in Spain vs\\\. Argentina position\\\.$/,
+        /^💰 \*\\\+\$49\\\.4K added\\\.\* One trader increased their Under 2\\\.5 total goals in Spain vs\\\. Argentina position\\\.$/,
       );
       assert.ok(
         message.text.includes(
@@ -12097,12 +12126,34 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(result.deliverySkipped, 0);
       assert.match(
         telegram.messages[0]?.reply_markup?.inline_keyboard[0]?.[0]?.text ?? "",
-        /Buy YES · Poly 41¢$/,
+        /^🟠 Buy YES on Hunch · 41¢$/,
       );
       assert.match(
         telegram.messages[1]?.reply_markup?.inline_keyboard[0]?.[0]?.text ?? "",
-        /Buy YES · Limitless 29¢$/,
+        /^🟠 Buy YES on Hunch · 29¢$/,
       );
+      const polymarketPayload = decodeStartAppPayload(
+        readStartAppParam(
+          telegram.messages[0]?.reply_markup?.inline_keyboard[0]?.[0]?.url,
+        ),
+      ).split("|");
+      const limitlessPayload = decodeStartAppPayload(
+        readStartAppParam(
+          telegram.messages[1]?.reply_markup?.inline_keyboard[0]?.[0]?.url,
+        ),
+      ).split("|");
+      assert.deepEqual(polymarketPayload.slice(0, 4), [
+        "p:event-1",
+        "market-1",
+        "Y",
+        "10",
+      ]);
+      assert.deepEqual(limitlessPayload.slice(0, 4), [
+        "l:event-2",
+        "market-2",
+        "Y",
+        "10",
+      ]);
       const views = db.queries
         .filter((query) =>
           query.sql.includes("insert into signal_bot_messages"),
@@ -13091,7 +13142,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       );
       const keyboard = telegram.messages[0]?.reply_markup?.inline_keyboard;
       assert.equal(keyboard?.length, 1);
-      assert.equal(keyboard?.[0]?.[0]?.text, "↗️ Open market");
+      assert.equal(keyboard?.[0]?.[0]?.text, "🟠 Open on Hunch");
       assert.match(keyboard?.[0]?.[0]?.url ?? "", /^https:\/\/t\.me\//);
       const startParam = readStartAppParam(keyboard?.[0]?.[0]?.url);
       assert.match(startParam, /^m_/);
@@ -13596,7 +13647,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.match(text, />NYG price {2}40¢ → 55¢ {2}\*\\\+15¢\*/);
       const keyboard = telegram.messages[0]?.reply_markup?.inline_keyboard;
       assert.equal(keyboard?.length, 1);
-      assert.equal(keyboard?.[0]?.[0]?.text, "↗️ Open market");
+      assert.equal(keyboard?.[0]?.[0]?.text, "🟠 Open on Hunch");
     },
   },
   {
@@ -13896,7 +13947,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       );
       const keyboard = telegram.messages[0]?.reply_markup?.inline_keyboard;
       assert.equal(keyboard?.length, 1);
-      assert.equal(keyboard?.[0]?.[0]?.text, "↗️ Open market");
+      assert.equal(keyboard?.[0]?.[0]?.text, "🟠 Open on Hunch");
     },
   },
   {
