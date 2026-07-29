@@ -1,5 +1,6 @@
 // apps/api/src/metrics.ts
 import { monitorEventLoopDelay, performance } from "node:perf_hooks";
+import { getContentProcessMetrics } from "./services/content-observability.js";
 const h = monitorEventLoopDelay({ resolution: 20 });
 h.enable();
 
@@ -15,5 +16,9 @@ export function onReqEnd(start: number) {
 export function getMetrics() {
   const p95 = h.percentile(95) / 1e6; // ms
   const lagMs = Math.round(p95);
-  return { last_response_ms: Math.round(lastRespMs), event_loop_p95_ms: lagMs };
+  return {
+    last_response_ms: Math.round(lastRespMs),
+    event_loop_p95_ms: lagMs,
+    content: getContentProcessMetrics(),
+  };
 }

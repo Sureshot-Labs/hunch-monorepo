@@ -53,6 +53,9 @@ fi
 "${compose[@]}" run --rm api \
   node /app/packages/config/dist/run-with-secrets.js \
   /app/packages/db/dist/migrate.js
+"${compose[@]}" run --rm api \
+  node /app/packages/config/dist/run-with-secrets.js \
+  /app/packages/db/dist/content-migrate.js
 
 "${compose[@]}" up -d
 if [[ -n "${ARCHIVE}" ]]; then

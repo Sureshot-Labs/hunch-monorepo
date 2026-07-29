@@ -12,7 +12,81 @@ permissions:
   contents: read
 
 jobs:
+  verify-content-backend:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: hunch_content_test
+          POSTGRES_PASSWORD: hunch_content_test
+          POSTGRES_DB: hunch_content_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U hunch_content_test -d hunch_content_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      HUNCH_RUNTIME_SECRETS_LOADED: "1"
+      NODE_ENV: test
+      DATABASE_URL: postgresql://hunch_content_test:hunch_content_test@127.0.0.1:5432/hunch_content_test
+      CONTENT_DATABASE_URL: postgresql://hunch_content_test:hunch_content_test@127.0.0.1:5432/hunch_content_test
+      CONTENT_TEST_DATABASE_URL: postgresql://hunch_content_test:hunch_content_test@127.0.0.1:5432/hunch_content_test
+      JWT_SECRET: content-ci-jwt-secret
+      PRIVY_APP_ID: content-ci
+      PRIVY_APP_SECRET: content-ci-secret
+      CONTENT_WORKER_ENABLED: "false"
+      CONTENT_PERF_ROWS: "20000"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.8.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build test dependency
+        run: pnpm --filter @hunch/infra run build
+
+      - name: Lint and typecheck content backend
+        run: |
+          pnpm --filter api run lint
+          pnpm --filter api run typecheck
+          pnpm --filter @hunch/db run lint
+          pnpm --filter @hunch/db run typecheck
+
+      - name: Apply content migrations twice
+        run: |
+          pnpm --filter @hunch/db run migrate:content
+          pnpm --filter @hunch/db run migrate:content
+
+      - name: Run content unit tests
+        run: node --import tsx apps/api/src/content-tests.ts
+
+      - name: Run content database and media tests
+        run: |
+          node --import tsx apps/api/src/content-integration-tests.ts
+          node --import tsx apps/api/src/content-batching-tests.ts
+          node --import tsx apps/api/src/content-concurrency-tests.ts
+          node --import tsx apps/api/src/content-media-integration-tests.ts
+
+      - name: Enforce content SQL performance plans
+        run: node --import tsx apps/api/src/content-performance-tests.ts
+
   deploy:
+    needs: verify-content-backend
     runs-on: ubuntu-24.04-arm
     env:
       SSH_HOST: ${{ secrets.SSH_HOST }}

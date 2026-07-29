@@ -32,6 +32,9 @@ export type AdminPermission =
   | "finance:write"
   | "intel:read"
   | "intel:write"
+  | "content:read"
+  | "content:write"
+  | "content:publish"
   | "rewards:read"
   | "rewards:write";
 
@@ -44,6 +47,9 @@ const ALL_ADMIN_PERMISSIONS = [
   "finance:write",
   "intel:read",
   "intel:write",
+  "content:read",
+  "content:write",
+  "content:publish",
   "rewards:read",
   "rewards:write",
 ] as const satisfies readonly AdminPermission[];
@@ -58,6 +64,7 @@ const ADMIN_ROLE_PERMISSIONS: Record<AdminRole, readonly AdminPermission[]> = {
     "users:read",
     "finance:read",
     "intel:read",
+    "content:read",
     "rewards:read",
   ],
   // Analyst is intentionally a panel-login role only for now. It can

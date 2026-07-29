@@ -11,6 +11,8 @@ import { ZodError } from "zod";
 import { onReqEnd, onReqStart } from "./metrics.js";
 import { closeRedis } from "./redis.js";
 import { registerRoutes } from "./routes/index.js";
+import { closeContentPools, contentWorkerPool } from "./content-db.js";
+import { startContentWorker } from "./services/content-worker.js";
 import { enforceGlobalRateLimit } from "./lib/global-rate-limit.js";
 import { flushPendingMarketRefreshes } from "./lib/market-refresh.js";
 import { isRecord } from "./lib/type-guards.js";
@@ -180,6 +182,12 @@ export async function buildApp() {
   }
 
   await registerRoutes(app);
+
+  const stopContentWorker = startContentWorker(contentWorkerPool, app.log);
+  app.addHook("onClose", async () => {
+    stopContentWorker();
+    await closeContentPools();
+  });
 
   return app;
 }

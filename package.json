@@ -17,6 +17,7 @@
     "format": "prettier -w apps packages --ignore-path .gitignore --ignore-unknown",
     "format:check": "prettier -c apps packages --ignore-path .gitignore --ignore-unknown",
     "migrate": "pnpm --filter @hunch/db migrate",
+    "migrate:content": "pnpm --filter @hunch/db migrate:content",
     "infra:up": "docker-compose --env-file .env -f ops/docker-compose.yml up -d postgres redis",
     "infra:down": "docker-compose --env-file .env -f ops/docker-compose.yml down",
     "logs": "docker-compose -f ops/docker-compose.yml logs -f --tail=200",

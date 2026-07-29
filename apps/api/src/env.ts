@@ -3,6 +3,7 @@ import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
 import { resolveAggMarketCredential } from "./lib/agg-market-credentials.js";
 import { parseUsdcToMicro, usdcMicroToDecimalString } from "./lib/usdc.js";
+import { CONTENT_RENDERER_CONTRACT_ID } from "./schemas/content-blocks.js";
 
 const envPath = resolve(
   dirname(fileURLToPath(import.meta.url)),
@@ -416,6 +417,122 @@ const adminSessionTtlMs = optionalPositiveInt(
   8 * 60 * 60 * 1000,
 );
 const adminTotpIssuer = process.env.ADMIN_TOTP_ISSUER?.trim() || "Hunch Admin";
+const contentRevalidateUrl = process.env.CONTENT_REVALIDATE_URL?.trim() || "";
+const contentRevalidateSecret =
+  process.env.CONTENT_REVALIDATE_SECRET?.trim() || "";
+const contentPreviewSecret = process.env.CONTENT_PREVIEW_SECRET?.trim() || "";
+if (contentRevalidateSecret && contentRevalidateSecret.length < 32) {
+  throw new Error(
+    "[env] CONTENT_REVALIDATE_SECRET must be at least 32 characters",
+  );
+}
+if (contentPreviewSecret && contentPreviewSecret.length < 32) {
+  throw new Error(
+    "[env] CONTENT_PREVIEW_SECRET must be at least 32 characters",
+  );
+}
+if (Boolean(contentRevalidateUrl) !== Boolean(contentRevalidateSecret)) {
+  throw new Error(
+    "[env] CONTENT_REVALIDATE_URL and CONTENT_REVALIDATE_SECRET must be configured together",
+  );
+}
+if (contentRevalidateUrl) {
+  const parsed = new URL(contentRevalidateUrl);
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+    throw new Error("[env] CONTENT_REVALIDATE_URL must be an HTTP(S) URL");
+  }
+  if (nodeEnv.toLowerCase() === "production" && parsed.protocol !== "https:") {
+    throw new Error(
+      "[env] CONTENT_REVALIDATE_URL must use HTTPS in production",
+    );
+  }
+}
+const explicitContentDatabaseUrl =
+  process.env.CONTENT_DATABASE_URL?.trim() || "";
+if (nodeEnv.toLowerCase() === "production" && !explicitContentDatabaseUrl) {
+  throw new Error(
+    "[env] CONTENT_DATABASE_URL is required in production so content cannot consume the application database pool",
+  );
+}
+const contentDatabaseUrl = explicitContentDatabaseUrl || req("DATABASE_URL");
+const contentPublishingEnabled =
+  parseOptionalBool(process.env.CONTENT_PUBLISHING_ENABLED) ?? false;
+const contentRequireApproval =
+  parseOptionalBool(process.env.CONTENT_REQUIRE_APPROVAL) ?? true;
+const contentRendererContractId =
+  process.env.CONTENT_RENDERER_CONTRACT_ID?.trim() || "";
+const contentWorkerEnabled =
+  parseOptionalBool(process.env.CONTENT_WORKER_ENABLED) ?? true;
+const contentAssetS3Endpoint =
+  process.env.CONTENT_ASSET_S3_ENDPOINT?.trim().replace(/\/+$/, "") || "";
+const contentAssetS3Region =
+  process.env.CONTENT_ASSET_S3_REGION?.trim() || "auto";
+const contentAssetS3Bucket = process.env.CONTENT_ASSET_S3_BUCKET?.trim() || "";
+const contentAssetS3AccessKeyId =
+  process.env.CONTENT_ASSET_S3_ACCESS_KEY_ID?.trim() || "";
+const contentAssetS3SecretAccessKey =
+  process.env.CONTENT_ASSET_S3_SECRET_ACCESS_KEY?.trim() || "";
+const contentAssetPublicBaseUrl =
+  process.env.CONTENT_ASSET_PUBLIC_BASE_URL?.trim().replace(/\/+$/, "") || "";
+const contentAssetS3ForcePathStyle =
+  parseOptionalBool(process.env.CONTENT_ASSET_S3_FORCE_PATH_STYLE) ?? true;
+const contentAssetConfigValues = [
+  contentAssetS3Endpoint,
+  contentAssetS3Bucket,
+  contentAssetS3AccessKeyId,
+  contentAssetS3SecretAccessKey,
+  contentAssetPublicBaseUrl,
+];
+if (contentPublishingEnabled) {
+  if (contentRendererContractId !== CONTENT_RENDERER_CONTRACT_ID) {
+    throw new Error(
+      `[env] CONTENT_RENDERER_CONTRACT_ID must equal ${CONTENT_RENDERER_CONTRACT_ID} when publishing is enabled`,
+    );
+  }
+  if (!contentWorkerEnabled) {
+    throw new Error(
+      "[env] CONTENT_WORKER_ENABLED must be true when content publishing is enabled",
+    );
+  }
+  if (!contentRevalidateUrl || !contentRevalidateSecret) {
+    throw new Error(
+      "[env] content revalidation must be configured when publishing is enabled",
+    );
+  }
+  if (!contentAssetConfigValues.every(Boolean)) {
+    throw new Error(
+      "[env] content object storage must be configured when publishing is enabled",
+    );
+  }
+  if (nodeEnv.toLowerCase() === "production" && adminAuthLegacyFallback) {
+    throw new Error(
+      "[env] ADMIN_AUTH_LEGACY_FALLBACK must be false before content publishing is enabled",
+    );
+  }
+}
+if (
+  contentAssetConfigValues.some(Boolean) &&
+  !contentAssetConfigValues.every(Boolean)
+) {
+  throw new Error(
+    "[env] CONTENT_ASSET_S3_ENDPOINT, CONTENT_ASSET_S3_BUCKET, " +
+      "CONTENT_ASSET_S3_ACCESS_KEY_ID, CONTENT_ASSET_S3_SECRET_ACCESS_KEY, " +
+      "and CONTENT_ASSET_PUBLIC_BASE_URL must be configured together",
+  );
+}
+for (const [name, value] of [
+  ["CONTENT_ASSET_S3_ENDPOINT", contentAssetS3Endpoint],
+  ["CONTENT_ASSET_PUBLIC_BASE_URL", contentAssetPublicBaseUrl],
+] as const) {
+  if (!value) continue;
+  const parsed = new URL(value);
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+    throw new Error(`[env] ${name} must be an HTTP(S) URL`);
+  }
+  if (nodeEnv.toLowerCase() === "production" && parsed.protocol !== "https:") {
+    throw new Error(`[env] ${name} must use HTTPS in production`);
+  }
+}
 const aiMarketMapEnabled =
   parseOptionalBool(process.env.AI_MARKET_MAP_ENABLED) ?? false;
 const aiMarketMapTriggerMode = parseEnum(
@@ -885,6 +1002,103 @@ export const env = {
   adminEnrollmentTtlMs,
   adminSessionTtlMs,
   adminTotpIssuer,
+  contentRevalidateUrl,
+  contentRevalidateSecret,
+  contentPreviewSecret,
+  contentRevalidateTimeoutMs: optionalPositiveInt(
+    "CONTENT_REVALIDATE_TIMEOUT_MS",
+    5_000,
+  ),
+  contentDatabaseUrl,
+  contentPublishingEnabled,
+  contentRequireApproval,
+  contentRendererContractId,
+  contentDbPublicPoolMax: optionalIntInRange(
+    "CONTENT_DB_PUBLIC_POOL_MAX",
+    2,
+    1,
+    10,
+  ),
+  contentDbAdminPoolMax: optionalIntInRange(
+    "CONTENT_DB_ADMIN_POOL_MAX",
+    2,
+    1,
+    10,
+  ),
+  contentDbWorkerPoolMax: optionalIntInRange(
+    "CONTENT_DB_WORKER_POOL_MAX",
+    1,
+    1,
+    5,
+  ),
+  contentDbPublicStatementTimeoutMs: optionalIntInRange(
+    "CONTENT_DB_PUBLIC_STATEMENT_TIMEOUT_MS",
+    750,
+    100,
+    10_000,
+  ),
+  contentDbAdminStatementTimeoutMs: optionalIntInRange(
+    "CONTENT_DB_ADMIN_STATEMENT_TIMEOUT_MS",
+    2_500,
+    250,
+    15_000,
+  ),
+  contentDbWorkerStatementTimeoutMs: optionalIntInRange(
+    "CONTENT_DB_WORKER_STATEMENT_TIMEOUT_MS",
+    5_000,
+    500,
+    30_000,
+  ),
+  contentDbLockTimeoutMs: optionalIntInRange(
+    "CONTENT_DB_LOCK_TIMEOUT_MS",
+    750,
+    100,
+    5_000,
+  ),
+  contentWorkerEnabled,
+  contentWorkerPollMs: optionalIntInRange(
+    "CONTENT_WORKER_POLL_MS",
+    5_000,
+    1_000,
+    60_000,
+  ),
+  contentWorkerBatchSize: optionalIntInRange(
+    "CONTENT_WORKER_BATCH_SIZE",
+    10,
+    1,
+    100,
+  ),
+  contentWorkerMaxAttempts: optionalIntInRange(
+    "CONTENT_WORKER_MAX_ATTEMPTS",
+    8,
+    1,
+    20,
+  ),
+  contentRetentionDays: optionalIntInRange(
+    "CONTENT_RETENTION_DAYS",
+    180,
+    30,
+    3_650,
+  ),
+  contentAuditRetentionDays: optionalIntInRange(
+    "CONTENT_AUDIT_RETENTION_DAYS",
+    730,
+    90,
+    3_650,
+  ),
+  contentAssetS3Endpoint,
+  contentAssetS3Region,
+  contentAssetS3Bucket,
+  contentAssetS3AccessKeyId,
+  contentAssetS3SecretAccessKey,
+  contentAssetS3ForcePathStyle,
+  contentAssetPublicBaseUrl,
+  contentAssetUploadTtlSec: optionalIntInRange(
+    "CONTENT_ASSET_UPLOAD_TTL_SEC",
+    900,
+    60,
+    3_600,
+  ),
   marketMapTtlSec: optionalNonNegativeInt("API_MARKET_MAP_TTL_SEC", 10),
   walletIntelTtlSec: optionalNonNegativeInt("API_WALLET_INTEL_TTL_SEC", 30),
   holdersTtlSec: Number(process.env.API_HOLDERS_TTL_SEC ?? "300"),
