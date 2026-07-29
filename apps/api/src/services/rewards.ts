@@ -3,6 +3,7 @@ import type { Pool } from "pg";
 import type { DbQuery } from "../db.js";
 import {
   clearUserReferralCodeIfMatches,
+  countReferralsForUser,
   countReferralCodeReferrerMismatches,
   countReferralsForReferralCode,
   createCampaignReferralCode,
@@ -56,6 +57,7 @@ import {
   normalizeRewardsChainId,
   type RewardsChainId,
 } from "../lib/rewards-chain.js";
+import { REWARDS_REFERRAL_QUALIFICATION_POINTS } from "../lib/rewards-referral-policy.js";
 import {
   parseUsdcToMicroFloor,
   usdcMicroToDecimalString,
@@ -94,14 +96,12 @@ const DEFAULT_POLICY = {
   ],
 };
 
-const OBSERVER_THRESHOLD = 500;
-
 function resolveEffectiveReferralStatus(inputs: {
   storedStatus: string;
   referrerPoints: number;
   referredPoints: number;
   threshold: number;
-}): string {
+}): "blocked" | "pending" | "qualified" {
   if (inputs.storedStatus === "blocked") return "blocked";
   return inputs.referrerPoints >= inputs.threshold &&
     inputs.referredPoints >= inputs.threshold
@@ -168,6 +168,9 @@ export type RewardsPolicy = {
   effectiveAt: Date | null;
   tiers: RewardsTier[];
   referralBonus: ReferralBonus[];
+  referralQualification: {
+    pointsRequired: number;
+  };
 };
 
 export type RewardsLeaderboardEntry = RewardsLeaderboardRow & {
@@ -458,6 +461,9 @@ export async function getRewardsPolicy(pool: DbQuery): Promise<RewardsPolicy> {
       effectiveAt: null,
       tiers: sortTiers(DEFAULT_POLICY.tiers),
       referralBonus: DEFAULT_POLICY.referralBonus,
+      referralQualification: {
+        pointsRequired: REWARDS_REFERRAL_QUALIFICATION_POINTS,
+      },
     };
   }
   const parsed = parsePolicy({
@@ -470,6 +476,9 @@ export async function getRewardsPolicy(pool: DbQuery): Promise<RewardsPolicy> {
       effectiveAt: row.effective_at,
       tiers: sortTiers(DEFAULT_POLICY.tiers),
       referralBonus: DEFAULT_POLICY.referralBonus,
+      referralQualification: {
+        pointsRequired: REWARDS_REFERRAL_QUALIFICATION_POINTS,
+      },
     };
   }
 
@@ -477,6 +486,9 @@ export async function getRewardsPolicy(pool: DbQuery): Promise<RewardsPolicy> {
     effectiveAt: row.effective_at,
     tiers: sortTiers(parsed.tiers),
     referralBonus: parsed.referralBonus,
+    referralQualification: {
+      pointsRequired: REWARDS_REFERRAL_QUALIFICATION_POINTS,
+    },
   };
 }
 
@@ -636,6 +648,12 @@ export async function getReferralAttachmentStatus(
   pool: DbQuery,
   inputs: { userId: string },
 ): Promise<ReferralAttachmentState> {
+  const state = await buildReferralAttachmentState(pool, inputs.userId);
+  if (state.status !== "pending" || !state.referrer?.userId) return state;
+  await markQualifiedReferralsForUser(pool, {
+    userId: state.referrer.userId,
+    threshold: REWARDS_REFERRAL_QUALIFICATION_POINTS,
+  });
   return buildReferralAttachmentState(pool, inputs.userId);
 }
 
@@ -1415,7 +1433,7 @@ export async function getRewardsSummary(
   );
   const qualifiedCount = await fetchQualifiedReferralCount(pool, {
     userId: inputs.userId,
-    threshold: OBSERVER_THRESHOLD,
+    threshold: REWARDS_REFERRAL_QUALIFICATION_POINTS,
   });
   const bonus = resolveReferralBonus(qualifiedCount, policy.referralBonus);
   const bonusBps = bonus?.bonusBps ?? 0;
@@ -1504,7 +1522,7 @@ export async function getRewardsReferrals(
   referrals: Array<{
     id: string;
     walletAddress: string | null;
-    status: string;
+    status: "blocked" | "pending" | "qualified";
     qualifiedAt: Date | null;
     createdAt: Date;
     tier: RewardsTier;
@@ -1512,6 +1530,10 @@ export async function getRewardsReferrals(
     bonus: number;
   }>;
   policy: RewardsPolicy;
+  total: number;
+  limit: number;
+  offset: number;
+  hasMore: boolean;
 }> {
   const [policy, referrerQualificationPoints] = await Promise.all([
     getRewardsPolicy(pool),
@@ -1519,17 +1541,20 @@ export async function getRewardsReferrals(
   ]);
   await markQualifiedReferralsForUser(pool, {
     userId: inputs.userId,
-    threshold: OBSERVER_THRESHOLD,
+    threshold: REWARDS_REFERRAL_QUALIFICATION_POINTS,
   });
 
-  const rows = await fetchReferralsForUser(pool, inputs);
+  const [rows, total] = await Promise.all([
+    fetchReferralsForUser(pool, inputs),
+    countReferralsForUser(pool, inputs.userId),
+  ]);
   const referrals = rows.map((row) => {
     const tier = resolveTier(row.tierPoints, policy.tiers);
     const status = resolveEffectiveReferralStatus({
       storedStatus: row.status,
       referrerPoints: referrerQualificationPoints,
       referredPoints: row.qualificationPoints,
-      threshold: OBSERVER_THRESHOLD,
+      threshold: REWARDS_REFERRAL_QUALIFICATION_POINTS,
     });
     return {
       id: row.id,
@@ -1543,7 +1568,14 @@ export async function getRewardsReferrals(
     };
   });
 
-  return { referrals, policy };
+  return {
+    referrals,
+    policy,
+    total,
+    limit: inputs.limit,
+    offset: inputs.offset,
+    hasMore: inputs.offset + referrals.length < total,
+  };
 }
 
 function mapRewardsLeaderboardEntry(

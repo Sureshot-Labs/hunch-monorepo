@@ -1,10 +1,10 @@
-# Backend Task: Roll Out Signal Post V10
+# Backend Task: Roll Out Signal Post V11
 
-Status: V10 editorial-headline pass and producer/delivery contracts implemented locally; live device QA remains
+Status: V11 editorial-headline, trader-context, and evidence-aware holding copy implemented locally; live device QA remains
 Priority: P0 before the next public-channel copy rollout
 Owner: backend / signal platform
 
-The filename is retained so existing handoff links do not break. V10 turns the
+The filename is retained so existing handoff links do not break. V11 turns the
 first line into editorial “cover copy”: it chooses the strongest verified human
 tension instead of forcing every signal through the same metric-first card.
 
@@ -12,16 +12,16 @@ tension instead of forcing every signal through the same metric-first card.
 
 Ship public Telegram signal posts that read as useful market alerts in the
 notification preview and remain internally consistent after opening the post.
-The locally implemented V10 renderer is the baseline. This task is not a request
+The locally implemented V11 renderer is the baseline. This task is not a request
 to rebuild its formatting from scratch.
 
 ## Implemented Baseline
 
 The current worktree contains:
 
-- `signal_bot_copy_v10`, `signal_notification_subject_v3`,
+- `signal_bot_copy_v11`, `signal_notification_subject_v3`,
   `telegram_market_presentation_v1`, and `signal_evidence_v1` copy audits;
-- a typed two-part first line: `emoji + marked cover hook + regular payoff`; the
+- a typed two-part first line: `emoji + bold cover hook + regular payoff`; the
   LLM does not control emoji, Markdown, or story priority;
 - an editorial angle selector for low-probability bets, crowd-versus-wallet
   disagreement, favourite-versus-contrarian matchups, unusually large
@@ -34,7 +34,7 @@ The current worktree contains:
 - natural Bitcoin price-target and total-market subjects plus safe generic
   fallbacks that do not invent the opposite of a NO contract;
 - one standalone, non-linked headline with no duplicate `📍` market block;
-- native Rich Message delivery with a marked two-part headline, contextual
+- native Rich Message delivery with a bold two-part headline, contextual
   inline links, and captionless bordered striped position, since-call, and
   result tables;
 - no quote/pull-quote blocks and no invisible separators in the primary rich
@@ -90,6 +90,16 @@ Cup`) over the internal contract side (`YES on Spain`);
   exact exits, adverse moves, or thin evidence;
 - contextual Mini App links on natural market/wallet mentions, with no generic
   `Market details` or `Wallet context` footer;
+- single-holder prose uses `trader`, links the first safe named or action-oriented
+  trader reference, and keeps the separate `👤` marker outside the link;
+- price-move persistence copy distinguishes an unchanged, increased, reduced,
+  or unknown representative position; `hasn't taken profit` is allowed only
+  when the same wallet's position is proved unchanged across snapshots;
+- live-probability hooks are limited to complete structured propositions, so a
+  child label such as `December 31` or `Over 2.5 total goals` cannot lose its
+  event context and become the whole notification subject;
+- public prose uses `betting against` rather than the ambiguous trading term
+  `fading`;
 - Buy-only CTA behavior when trading is available; neutral/negative research
   updates use Open market, and positive research updates still pass the normal
   execution/price guard before Buy;
@@ -102,7 +112,7 @@ Primary files:
 - `apps/api/src/signal-notification-headline-tests.ts`;
 - `apps/api/src/signal-bot-tests.ts`.
 
-V10 itself requires no database migration. `emoji`, `hook`, `continuation`,
+V11 itself requires no database migration. `emoji`, `hook`, `continuation`,
 `primaryEvidenceId`, `evidenceKindsUsed`, story/template, and copy version are
 persisted inside the existing JSON copy audit. Existing
 notification/preferences migrations are a separate rollout concern. New
@@ -126,14 +136,14 @@ the body must immediately provide the exact actor, value, timeframe, and side.
 Priority and examples:
 
 ```text
-⚽ **+$542K in 30 days.** This wallet is backing Spain over Argentina.
+⚽ **+$542K in 30 days.** This trader is backing Spain over Argentina.
 🏆 **Argentina has just a 17% chance of winning the World Cup.** Four wallets
 up nearly $1M are still backing Argentina.
 🔥 **Messi has only an 8% chance of winning the Golden Boot.** Two profitable
 wallets are betting against Messi.
 ⚠️ **22 early wallets are cashing out.** Mbappé reached 99¢ to win the Golden
 Boot.
-📉 **Bitcoin is moving closer to $67.5K.** This wallet still refuses to flip.
+📉 **Bitcoin is moving closer to $67.5K.** This trader still refuses to flip.
 📈 **+$43K bought. −1¢ anyway.** Spain and tracked wallets still disagree.
 🔥 **+$45K bought. +7¢.** Spain is moving with tracked wallets.
 ⚠️ **3 exits. $31K sold.** Tracked support for Spain is weakening.
@@ -143,7 +153,7 @@ Boot.
 
 Rules:
 
-- treat the marked hook like YouTube thumbnail copy: maximise the desire to open
+- treat the bold hook like YouTube thumbnail copy: maximise the desire to open
   the post, while staying faithful to structured facts;
 - prefer a strong number at the front when it is the best hook, but do not let
   that mechanical rule suppress a stronger human event such as early wallets
@@ -199,11 +209,11 @@ The price barely moved, so the disagreement remains unresolved.
 Initial signal:
 
 ```text
-⚽ **+$542K in 30 days.** This wallet is backing Spain over Argentina.
+⚽ **+$542K in 30 days.** This trader is backing Spain over Argentina.
 
 Most tracked money is on Argentina, but this wallet is holding $20.5K on Spain.
 
-The market prefers Argentina. This wallet does not.
+The market prefers Argentina. This trader does not.
 
 | Market          | Spain over Argentina |
 | --------------- | -------------------: |
@@ -222,7 +232,7 @@ as $1M per wallet.
 Research update:
 
 ```text
-📉 **Bitcoin is moving closer to $67.5K.** This wallet still refuses to flip.
+📉 **Bitcoin is moving closer to $67.5K.** This trader still refuses to flip.
 
 The price of NO fell by 11¢ to 61¢, meaning the market has become more
 confident that Bitcoin could reach $67.5K before the end of July.
@@ -263,7 +273,7 @@ The body must not reprint the market title immediately below the headline. It
 must not end with generic navigation chrome. If a market or wallet link has no
 natural body location, omit the body link; the CTA may still provide the route.
 
-## V10 Backend Contract
+## V11 Backend Contract
 
 ### 1. Canonical Telegram market identity
 
@@ -382,7 +392,7 @@ Cover:
 - long market subjects, Unicode, named outcomes, totals, and complex NO;
 - initial single wallet and wallet cluster;
 - mixed breadth, exits, negative flow, adverse price, and thin evidence;
-- marked-hook rendering, borders, striping, long-market wrapping, alignment,
+- bold-hook rendering, borders, striping, long-market wrapping, alignment,
   and the absence of redundant table captions;
 - confirmation that the primary rich output contains no visible quotation
   glyph and no invisible placeholder row;
@@ -398,7 +408,7 @@ survive the preview.
 
 ### 6. Rollout telemetry
 
-V10 records the following by copy/policy version; production validation is
+V11 records the following by copy/policy version; production validation is
 still required:
 
 - story/template distribution;
@@ -434,7 +444,7 @@ Mini App market and Buy payloads may carry the opaque
 - Market-wide activity cannot masquerade as selected-side flow.
 - Initial, research-update, follow-through, and resolution posts end in their
   proof table; interpretation never trails it as an accidental footnote.
-- Device fixtures pass and rollout telemetry distinguishes V10 from older copy.
+- Device fixtures pass and rollout telemetry distinguishes V11 from older copy.
 
 ## Out of Scope
 

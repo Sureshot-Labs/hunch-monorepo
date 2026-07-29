@@ -139,13 +139,6 @@ function parseEnum<T extends string>(
   return match ?? fallback;
 }
 
-function optionalIsoDate(value: string | undefined, fallback: Date): Date {
-  if (!value) return fallback;
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) return fallback;
-  return parsed;
-}
-
 const JWT_EXPIRES_IN_UNIT_MS: Record<string, number> = {
   ms: 1,
   msec: 1,
@@ -747,11 +740,6 @@ const analyticsServerForwardingMode = parseEnum(
   ["database", "off"] as const,
   analyticsServerForwardingEnabled ? "database" : "off",
 );
-const postSignupOnboardingEligibleAfter = optionalIsoDate(
-  process.env.POST_SIGNUP_ONBOARDING_ELIGIBLE_AFTER,
-  new Date("2026-04-09T00:00:00.000Z"),
-);
-
 const POLYMARKET_PUSD_ADDRESS = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB";
 const POLYMARKET_USDCE_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
 const POLYMARKET_EXCHANGE_V2_ADDRESS =
@@ -897,7 +885,6 @@ export const env = {
   adminEnrollmentTtlMs,
   adminSessionTtlMs,
   adminTotpIssuer,
-  postSignupOnboardingEligibleAfter,
   marketMapTtlSec: optionalNonNegativeInt("API_MARKET_MAP_TTL_SEC", 10),
   walletIntelTtlSec: optionalNonNegativeInt("API_WALLET_INTEL_TTL_SEC", 30),
   holdersTtlSec: Number(process.env.API_HOLDERS_TTL_SEC ?? "300"),

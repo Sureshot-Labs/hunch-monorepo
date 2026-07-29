@@ -50,6 +50,14 @@ export function buildSignalBotEventStartParam(eventId: string): string | null {
   );
 }
 
+export function buildSignalBotReferralStartParam(
+  referralCode: string,
+): string | null {
+  const normalized = referralCode.trim().toUpperCase();
+  if (!/^[A-Z0-9]{3,32}$/.test(normalized)) return null;
+  return fitSignalBotStartParam(`ref_${normalized}`);
+}
+
 export function buildSignalBotBuyStartParam(input: {
   amountUsd?: number | null;
   deliveryRef?: string | null;

@@ -73,7 +73,7 @@ const tests: Array<{ name: string; run: () => void }> = [
 
       assert.equal(copy.buttonLabel, "NO");
       assert.equal(copy.sideLabel, "NO");
-      assert.equal(copy.plainPosition, "fading France");
+      assert.equal(copy.plainPosition, "betting against France");
       assert.equal(copy.priceLabel, "NO");
       assert.equal(copy.marketLine, "World Cup Winner · France");
       assert.equal(copy.copyKind, "team_yes_no");

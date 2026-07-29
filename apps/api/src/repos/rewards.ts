@@ -1664,6 +1664,21 @@ export async function fetchQualifiedReferralCount(
   return Number(rows[0]?.total ?? 0);
 }
 
+export async function countReferralsForUser(
+  pool: DbQuery,
+  userId: string,
+): Promise<number> {
+  const { rows } = await pool.query<{ total: string }>(
+    `
+      select count(*)::text as total
+      from referrals
+      where referrer_user_id = $1
+    `,
+    [userId],
+  );
+  return Number(rows[0]?.total ?? 0);
+}
+
 export async function fetchClaimedTotalsByChain(
   pool: DbQuery,
   inputs: { userId: string },

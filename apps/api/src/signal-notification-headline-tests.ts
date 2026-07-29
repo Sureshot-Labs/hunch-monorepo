@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 
+import type { SignalEvidenceMetricV1 } from "./services/holder-research-signal-evidence.js";
 import { buildMarketSideCopy } from "./services/market-side-copy.js";
+import { buildSignalBotStructuredNarrative } from "./services/signal-bot-editorial-copy.js";
 import {
   buildSignalNotificationHeadline,
   buildSignalNotificationSubject,
@@ -30,6 +32,27 @@ function subject(input: {
     side,
     sideCopy,
   });
+}
+
+function trackRecordEvidence(value: number): SignalEvidenceMetricV1[] {
+  return [
+    {
+      asOf: "2026-07-27T00:00:00.000Z",
+      context: null,
+      horizonDays: 30,
+      id: "representative_wallet:track_record:30d",
+      kind: "track_record",
+      measurement: { kind: "scalar", unit: "usd", value },
+      quality: "verified",
+      sampleSize: null,
+      scope: "representative_wallet",
+      source: {
+        kind: "hunch_wallet_intel",
+        label: "Representative wallet",
+        url: null,
+      },
+    },
+  ];
 }
 
 const tests: Array<{ name: string; run: () => void }> = [
@@ -368,7 +391,7 @@ const tests: Array<{ name: string; run: () => void }> = [
       const cases = [
         {
           expected:
-            "🪙 Ethereum has just a 16% chance of hitting $1K. A wallet up $67K is still betting on it.",
+            "🪙 Ethereum has just a 16% chance of hitting $1K. A trader up $67K is still betting on it.",
           input: {
             actorMode: "single_holder" as const,
             actorOpenPnlUsd: -8_100,
@@ -450,7 +473,7 @@ const tests: Array<{ name: string; run: () => void }> = [
         },
         {
           expected:
-            "🐋 A wallet up $168K has built a $305K position. It is betting on France to win the World Cup.",
+            "🐋 A trader up $168K has built a $305K position. It is betting on France to win the World Cup.",
           input: {
             actorMode: "single_holder" as const,
             actorPnlHorizonDays: 30,
@@ -472,7 +495,7 @@ const tests: Array<{ name: string; run: () => void }> = [
         },
         {
           expected:
-            "🌐 A U.S. invasion of Iran is priced at 20%. A wallet up $44K is still betting on it.",
+            "🌐 A U.S. invasion of Iran is priced at 20%. A trader up $44K is still betting on it.",
           input: {
             actorMode: "single_holder" as const,
             actorPnlHorizonDays: 30,
@@ -584,7 +607,7 @@ const tests: Array<{ name: string; run: () => void }> = [
       });
       assert.equal(
         resistance.text,
-        "📉 Bitcoin is moving closer to $67.5K. This wallet still refuses to flip.",
+        "📉 Bitcoin is moving closer to $67.5K. This trader still refuses to flip.",
       );
     },
   },
@@ -688,7 +711,478 @@ const tests: Array<{ name: string; run: () => void }> = [
       });
       assert.equal(
         positionChange.text,
-        "💰 +$49.4K added. One tracked wallet increased its Under 2.5 total goals in Spain vs. Argentina position.",
+        "💰 +$49.4K added. One trader increased their Under 2.5 total goals in Spain vs. Argentina position.",
+      );
+
+      const clusterPositionChange = buildSignalNotificationHeadline({
+        currentPrice: 0.75,
+        editorialSubject: "25 bps increase",
+        kind: "research_update",
+        positionDirection: "against",
+        positionLabel: "NO on 25 bps increase",
+        researchDelta: {
+          afterUsd: 7_500_000,
+          beforeUsd: 5_600_000,
+          kind: "position_change",
+          positionChangeUsd: 1_900_000,
+          scope: "selected_side_cluster",
+          walletId: null,
+        },
+        subject: subject({
+          eventTitle: "Fed decision in July?",
+          marketTitle: "25 bps increase",
+          side: "NO",
+        }),
+      });
+      assert.equal(
+        clusterPositionChange.text,
+        "💰 +$1.9M added. Traders are betting against a 25 bps increase.",
+      );
+    },
+  },
+  {
+    name: "profitable wallet add leads with credibility and states the action",
+    run: () => {
+      const result = buildSignalNotificationHeadline({
+        actorMode: "single_holder",
+        actorPnlUsd: 107_700,
+        currentPrice: 0.78,
+        editorialProbability: 0.23,
+        editorialSubject: "Bitcoin hitting $70K in July",
+        kind: "research_update",
+        positionDirection: "against",
+        researchDelta: {
+          afterUsd: 14_900,
+          beforeUsd: 7_000,
+          kind: "position_change",
+          positionChangeUsd: 7_900,
+          scope: "representative_wallet",
+          walletId: "gmtrader",
+        },
+        subject: subject({
+          eventTitle: "What price will Bitcoin hit in July?",
+          marketTitle: "↑ 70,000",
+          side: "NO",
+        }),
+      });
+      assert.equal(result.templateKey, "research_profitable_wallet_added_v11");
+      assert.equal(
+        result.text,
+        "💰 A trader up $108K just added to their bet that Bitcoin won't hit $70K in July.",
+      );
+    },
+  },
+  {
+    name: "profitable wallet hold leads with live probability after the move",
+    run: () => {
+      const result = buildSignalNotificationHeadline({
+        actorMode: "single_holder",
+        actorOpenPnlUsd: 2_100,
+        actorPnlUsd: 111_800,
+        currentPrice: 0.84,
+        editorialProbability: 0.17,
+        editorialSubject: "Bitcoin hitting $70K in July",
+        holderPositionUsd: 16_100,
+        kind: "research_update",
+        positionDirection: "against",
+        researchDelta: {
+          currentPrice: 0.84,
+          holderPositionState: "unchanged",
+          kind: "price_move",
+          priceMoveCents: 6,
+        },
+        subject: subject({
+          eventTitle: "What price will Bitcoin hit in July?",
+          marketTitle: "↑ 70,000",
+          side: "NO",
+        }),
+      });
+      assert.equal(
+        result.templateKey,
+        "research_profitable_price_target_hold_v12",
+      );
+      assert.equal(
+        result.text,
+        "📈 Bitcoin is now just 17% to hit $70K in July. A trader up $112K still hasn't taken profit.",
+      );
+    },
+  },
+  {
+    name: "profitable trader hold turns a grouped ceasefire deadline into a FOMO headline",
+    run: () => {
+      const ceasefire = subject({
+        eventTitle: "Israel x Iran ceasefire continues through...?",
+        marketTitle: "July 31",
+        side: "YES",
+      });
+      assert.equal(
+        ceasefire.text,
+        "Israel–Iran ceasefire lasting through July 31",
+      );
+      const result = buildSignalNotificationHeadline({
+        actorMode: "single_holder",
+        actorOpenPnlUsd: 3_200,
+        actorPnlUsd: 247_700,
+        currentPrice: 0.94,
+        editorialProbability: 0.94,
+        editorialSubject: ceasefire.text,
+        holderPositionUsd: 8_600,
+        kind: "research_update",
+        positionDirection: "backing",
+        researchDelta: {
+          currentPrice: 0.94,
+          holderPositionState: "unchanged",
+          kind: "price_move",
+          priceMoveCents: 7,
+        },
+        subject: ceasefire,
+      });
+      assert.equal(result.templateKey, "research_profitable_trader_hold_v13");
+      assert.equal(
+        result.text,
+        "📈 The Israel–Iran ceasefire is now 94% to last through July 31. A trader up $248K still hasn't taken profit.",
+      );
+    },
+  },
+  {
+    name: "profitable price moves do not promote incomplete child labels into live hooks",
+    run: () => {
+      for (const market of [
+        {
+          eventTitle: "Will NATO and Russia clash?",
+          marketTitle: "December 31",
+        },
+        {
+          eventTitle: "Spain vs. Argentina - More Markets",
+          marketTitle: "O/U 2.5 total goals",
+          outcomes: ["Over", "Under"],
+        },
+      ]) {
+        const marketSubject = subject({ ...market, side: "YES" });
+        const result = buildSignalNotificationHeadline({
+          actorMode: "single_holder",
+          actorOpenPnlUsd: 3_200,
+          actorPnlUsd: 247_700,
+          currentPrice: 0.64,
+          editorialProbability: 0.64,
+          editorialSubject: marketSubject.text,
+          holderPositionUsd: 8_600,
+          kind: "research_update",
+          positionDirection: "backing",
+          researchDelta: {
+            currentPrice: 0.64,
+            holderPositionState: "unchanged",
+            kind: "price_move",
+            priceMoveCents: 7,
+          },
+          subject: marketSubject,
+        });
+        assert.equal(result.templateKey, "research_price_move_v7");
+        assert.doesNotMatch(
+          result.text,
+          /December 31 is now priced|total goals is now priced/,
+        );
+        assert.match(result.text, /NATO and Russia|Spain vs\. Argentina/);
+      }
+    },
+  },
+  {
+    name: "profitable hold wording follows proved position behavior",
+    run: () => {
+      const ceasefire = subject({
+        eventTitle: "Israel x Iran ceasefire continues through...?",
+        marketTitle: "July 31",
+        side: "YES",
+      });
+      const headline = (
+        holderPositionState: "increased" | "reduced" | "unchanged" | "unknown",
+      ) =>
+        buildSignalNotificationHeadline({
+          actorMode: "single_holder",
+          actorOpenPnlUsd: 3_200,
+          actorPnlUsd: 247_700,
+          currentPrice: 0.94,
+          editorialProbability: 0.94,
+          editorialSubject: ceasefire.text,
+          holderPositionUsd: 8_600,
+          kind: "research_update",
+          positionDirection: "backing",
+          researchDelta: {
+            currentPrice: 0.94,
+            holderPositionState,
+            kind: "price_move",
+            priceMoveCents: 7,
+          },
+          subject: ceasefire,
+        }).text;
+      assert.match(headline("unchanged"), /still hasn't taken profit/);
+      assert.match(headline("reduced"), /has trimmed but is still holding YES/);
+      assert.match(headline("increased"), /has added and is still holding YES/);
+      assert.match(headline("unknown"), /is still holding YES/);
+
+      const withoutPosition = buildSignalNotificationHeadline({
+        actorMode: "single_holder",
+        actorOpenPnlUsd: 3_200,
+        actorPnlUsd: 247_700,
+        currentPrice: 0.94,
+        editorialProbability: 0.94,
+        editorialSubject: ceasefire.text,
+        holderPositionUsd: 0,
+        kind: "research_update",
+        positionDirection: "backing",
+        researchDelta: {
+          currentPrice: 0.94,
+          holderPositionState: "unknown",
+          kind: "price_move",
+          priceMoveCents: 7,
+        },
+        subject: ceasefire,
+      });
+      assert.equal(withoutPosition.templateKey, "research_price_move_v7");
+      assert.doesNotMatch(
+        withoutPosition.text,
+        /hasn't taken profit|still holding/,
+      );
+    },
+  },
+  {
+    name: "profitable trader holding through a loss leads with persistence",
+    run: () => {
+      const result = buildSignalNotificationHeadline({
+        actorMode: "single_holder",
+        actorOpenPnlUsd: -1_100,
+        actorPnlUsd: 247_100,
+        currentPrice: 0.73,
+        editorialProbability: 0.27,
+        editorialSubject: "25 bps increase",
+        holderPositionUsd: 10_500,
+        kind: "research_update",
+        positionDirection: "against",
+        researchDelta: {
+          currentPrice: 0.73,
+          kind: "price_move",
+          priceMoveCents: -7,
+        },
+        subject: subject({ marketTitle: "25 bps increase", side: "NO" }),
+      });
+      assert.equal(
+        result.templateKey,
+        "research_profitable_trader_underwater_v12",
+      );
+      assert.equal(
+        result.text,
+        "📉 The market turned against this trade. A trader up $247K still hasn't backed away.",
+      );
+    },
+  },
+  {
+    name: "expensive favorite leads with wallet quality and capital at risk",
+    run: () => {
+      const result = buildSignalNotificationHeadline({
+        actorMode: "single_holder",
+        actorPnlUsd: 208_100,
+        currentPrice: 0.94,
+        editorialProbability: 0.94,
+        editorialSubject: "Spirit over OG",
+        holderPositionUsd: 27_100,
+        kind: "initial",
+        positionDirection: "backing",
+        subject: subject({
+          eventTitle: "Spirit vs OG",
+          marketTitle: "Spirit",
+          side: "YES",
+        }),
+      });
+      assert.equal(result.templateKey, "initial_expensive_favorite_v11");
+      assert.equal(
+        result.text,
+        "⚽ A trader up $208K is risking $27.1K on Spirit despite 94¢ odds.",
+      );
+    },
+  },
+  {
+    name: "price and fresh buying lead with the market event, not raw deltas",
+    run: () => {
+      const result = buildSignalNotificationHeadline({
+        currentPrice: 0.3,
+        editorialProbability: 0.3,
+        editorialSubject: "a NATO–Russia clash",
+        joinedWallets: 1,
+        kind: "stats",
+        netCopyFlowUsd: 9_000,
+        positionDirection: "backing",
+        priceMoveCents: 12,
+        subject: subject({
+          eventTitle: "Will NATO and Russia clash?",
+          marketTitle: "December 31",
+          side: "YES",
+        }),
+      });
+      assert.equal(result.templateKey, "price_wallets_still_adding_v11");
+      assert.equal(
+        result.text,
+        "📈 A NATO–Russia clash is now priced at 30%. Large wallets are still adding.",
+      );
+    },
+  },
+  {
+    name: "manager scenarios render human prose without inventing evidence",
+    run: () => {
+      assert.deepEqual(
+        buildSignalBotStructuredNarrative({
+          editorialProbability: 0.23,
+          evidenceRows: trackRecordEvidence(107_700),
+          headlineTemplateKey: "research_profitable_wallet_added_v11",
+          marketLabel: "Bitcoin hitting $70K in July",
+          messageKind: "research_update",
+          note: {
+            holderDisplayName: "gmtrader",
+            holderIdentityDisplayName: "gmtrader",
+            holderOpenPnlUsd: 1_200,
+            holderPositionUsd: 14_900,
+          },
+          price: 0.78,
+          researchDelta: {
+            afterUsd: 14_900,
+            kind: "position_change",
+            positionChangeUsd: 7_900,
+            scope: "representative_wallet",
+          },
+          side: "NO",
+          sideLabel: "NO on BTC hitting $70K in July",
+        }),
+        [
+          "Bitcoin hitting $70K in July is priced at 23%, but gmtrader has increased its NO position instead of taking profit.",
+          "The trader is now holding $14.9K on NO, is sitting on +$1.2K open PnL, and has made $107.7K over the last 30 days.",
+        ],
+      );
+
+      assert.deepEqual(
+        buildSignalBotStructuredNarrative({
+          editorialProbability: 0.94,
+          evidenceRows: trackRecordEvidence(247_700),
+          headlineTemplateKey: "research_profitable_trader_hold_v13",
+          marketLabel: "Israel–Iran ceasefire lasting through July 31",
+          messageKind: "research_update",
+          note: {
+            holderDisplayName: null,
+            holderIdentityDisplayName: null,
+            holderOpenPnlUsd: 3_200,
+            holderPositionUsd: 8_600,
+          },
+          price: 0.94,
+          researchDelta: {
+            holderPositionState: "unchanged",
+            kind: "price_move",
+            priceMoveCents: 7,
+          },
+          side: "YES",
+          sideLabel: "YES",
+        }),
+        [
+          "Since the original call, YES has climbed 7¢ to 94¢.",
+          "Rather than locking in gains, the trader continues to hold $8.6K on YES, with +$3.2K in open profit after making $247.7K over the last 30 days.",
+        ],
+      );
+
+      assert.deepEqual(
+        buildSignalBotStructuredNarrative({
+          editorialProbability: 0.06,
+          evidenceRows: trackRecordEvidence(247_700),
+          headlineTemplateKey: "research_profitable_trader_hold_v13",
+          marketLabel: "Israel–Iran ceasefire lasting through July 31",
+          messageKind: "research_update",
+          note: {
+            holderDisplayName: null,
+            holderIdentityDisplayName: null,
+            holderOpenPnlUsd: 3_200,
+            holderPositionUsd: 8_600,
+          },
+          price: 0.94,
+          researchDelta: {
+            holderPositionState: "unchanged",
+            kind: "price_move",
+            priceMoveCents: 7,
+          },
+          side: "NO",
+          sideLabel: "NO",
+        }),
+        [
+          "Since the original call, NO has climbed 7¢ to 94¢.",
+          "Rather than locking in gains, the trader continues to hold $8.6K on NO, with +$3.2K in open profit after making $247.7K over the last 30 days.",
+        ],
+      );
+
+      assert.deepEqual(
+        buildSignalBotStructuredNarrative({
+          editorialProbability: 0.1,
+          evidenceRows: trackRecordEvidence(88_800),
+          headlineTemplateKey: "research_profitable_price_target_hold_v12",
+          marketLabel: "Bitcoin hitting $67.5K in July",
+          messageKind: "research_update",
+          note: {
+            holderDisplayName: "gmtrader",
+            holderIdentityDisplayName: "gmtrader",
+            holderOpenPnlUsd: 8_400,
+            holderPositionUsd: 14_500,
+          },
+          price: 0.91,
+          researchDelta: { kind: "price_move", priceMoveCents: 26 },
+          side: "NO",
+          sideLabel: "NO on BTC hitting $67.5K in July",
+        }),
+        [
+          "The market has moved sharply in the trader's favor, with NO rising from 65¢ to 91¢ since the original call.",
+          "Despite sitting on +$8.4K in open profit, gmtrader is still holding $14.5K on NO after making $88.8K over the last 30 days.",
+        ],
+      );
+
+      assert.deepEqual(
+        buildSignalBotStructuredNarrative({
+          editorialProbability: 0.27,
+          evidenceRows: trackRecordEvidence(247_100),
+          headlineTemplateKey: "research_profitable_trader_underwater_v12",
+          marketLabel: "25 bps increase",
+          messageKind: "research_update",
+          note: {
+            holderDisplayName: "charlatta",
+            holderIdentityDisplayName: "charlatta",
+            holderOpenPnlUsd: -1_100,
+            holderPositionUsd: 10_500,
+          },
+          price: 0.73,
+          researchDelta: { kind: "price_move", priceMoveCents: -7 },
+          side: "NO",
+          sideLabel: "NO",
+        }),
+        [
+          "The probability of no 25 bps increase has dropped from 80¢ to 73¢, but charlatta continues to hold a $10.5K position despite being down $1.1K.",
+          "After making $247.1K over the last 30 days, charlatta's continued conviction is what makes this position worth watching.",
+        ],
+      );
+
+      assert.deepEqual(
+        buildSignalBotStructuredNarrative({
+          editorialProbability: 0.94,
+          evidenceRows: trackRecordEvidence(208_100),
+          headlineTemplateKey: "initial_expensive_favorite_v11",
+          marketLabel: "Spirit over OG",
+          messageKind: "initial",
+          note: {
+            holderDisplayName: "a trader",
+            holderIdentityDisplayName: null,
+            holderOpenPnlUsd: -773,
+            holderPositionUsd: 27_100,
+          },
+          price: 0.94,
+          researchDelta: null,
+          side: "YES",
+          sideLabel: "Spirit",
+        }),
+        [
+          "Spirit is already a heavy favorite, but this trader has still built a $27.1K position while making $208.1K over the last 30 days.",
+          "At 94¢, there is little room left for error, so risking $27.1K is a strong statement of conviction.",
+        ],
       );
     },
   },

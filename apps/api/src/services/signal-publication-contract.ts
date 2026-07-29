@@ -155,6 +155,12 @@ export type HolderResearchUpdateSnapshot = {
   yesProbability: number | null;
 };
 
+export type HolderResearchPositionState =
+  | "increased"
+  | "reduced"
+  | "unchanged"
+  | "unknown";
+
 export type HolderResearchUpdateMateriality = {
   minMeaningfulHolderPctDelta: number;
   minMeaningfulHolderUsdDelta: number;
@@ -173,6 +179,64 @@ function cleanString(value: unknown): string | null {
 function finiteNumber(value: unknown): number | null {
   const parsed = typeof value === "number" ? value : Number(value);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function snapshotHolderPosition(input: {
+  side: PublicationSide;
+  snapshot: unknown;
+  walletId: string;
+}): number | null {
+  const holders = asRecord(input.snapshot)?.evidenceHolders;
+  if (!Array.isArray(holders)) return null;
+  for (const value of holders) {
+    const holder = asRecord(value);
+    const position = finiteNumber(holder?.positionUsd);
+    if (
+      cleanString(holder?.walletId) === input.walletId &&
+      publicationSide(holder?.side) === input.side &&
+      position != null &&
+      position >= 0
+    ) {
+      return position;
+    }
+  }
+  return null;
+}
+
+export function resolveHolderResearchPositionState(input: {
+  current: unknown;
+  previous: unknown;
+  side: PublicationSide;
+  update: HolderResearchUpdateV1 | null | undefined;
+  walletId: string | null | undefined;
+}): HolderResearchPositionState {
+  const walletId = cleanString(input.walletId);
+  const positionReason = input.update?.reasons.find(
+    (reason) =>
+      (reason.kind === "position_increased" ||
+        reason.kind === "position_reduced") &&
+      reason.scope === "representative_wallet" &&
+      reason.side === input.side &&
+      (!walletId || reason.walletId === walletId),
+  );
+  if (positionReason?.kind === "position_increased") return "increased";
+  if (positionReason?.kind === "position_reduced") return "reduced";
+  if (!walletId) return "unknown";
+  const before = snapshotHolderPosition({
+    side: input.side,
+    snapshot: input.previous,
+    walletId,
+  });
+  const after = snapshotHolderPosition({
+    side: input.side,
+    snapshot: input.current,
+    walletId,
+  });
+  return before != null &&
+    after != null &&
+    approximatelyEqual(after, before, 0.01)
+    ? "unchanged"
+    : "unknown";
 }
 
 function probability(value: unknown): number | null {

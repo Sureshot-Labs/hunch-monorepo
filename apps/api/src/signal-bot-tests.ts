@@ -1758,9 +1758,33 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         "👤 My trading",
         "Deposit",
         "🔔 Notifications",
+        "🎁 Rewards & referrals",
         "⚙️ Settings",
         "❓ Help",
+        "Open Hunch Mini App",
       ]);
+      const rewardsRow = regular.keyboard.inline_keyboard[5];
+      assert.equal(rewardsRow?.length, 1);
+      const rewardsButton = rewardsRow?.[0];
+      assert.ok(rewardsButton);
+      assert.equal(rewardsButton.text, "🎁 Rewards & referrals");
+      assert.equal("icon_custom_emoji_id" in rewardsButton, false);
+      assert.equal(
+        "callback_data" in rewardsButton ? rewardsButton.callback_data : null,
+        "hm:v1:rewards",
+      );
+      const mainMiniAppRow = regular.keyboard.inline_keyboard[7];
+      assert.equal(mainMiniAppRow?.length, 1);
+      const mainMiniAppButton = mainMiniAppRow?.[0];
+      assert.ok(mainMiniAppButton);
+      assert.equal(
+        mainMiniAppButton.icon_custom_emoji_id,
+        TELEGRAM_CUSTOM_EMOJI.hunch.id,
+      );
+      if (!("web_app" in mainMiniAppButton) || !mainMiniAppButton.web_app) {
+        assert.fail("main menu CTA must use a Mini App button");
+      }
+      assert.equal(mainMiniAppButton.web_app.url, "https://app.hunch.trade/tg");
       assert.equal(
         regularButtons.find((button) => button.text === "Deposit")
           ?.icon_custom_emoji_id,
@@ -2002,7 +2026,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
-    name: "Telegram UI configuration registers scoped commands and Mini App menu button",
+    name: "Telegram UI configuration registers scoped commands and native command menu button",
     run: async () => {
       const commandCalls: Array<
         Parameters<TelegramBotApiClient["setMyCommands"]>[0]
@@ -2044,11 +2068,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       );
       assert.deepEqual(menuCalls, [
         {
-          menu_button: {
-            text: "Open Hunch",
-            type: "web_app",
-            web_app: { url: "https://app.hunch.trade/tg" },
-          },
+          menu_button: { type: "commands" },
         },
       ]);
     },
@@ -2252,7 +2272,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
               [
                 {
                   icon_custom_emoji_id: TELEGRAM_CUSTOM_EMOJI.polymarket.id,
-                  text: "Open market",
+                  text: "Open on Hunch",
                   url: "https://t.me/hunch_bot/hunch",
                 },
               ],
@@ -3010,11 +3030,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         initial?.blocks.map((block) => block.type),
         ["paragraph", "table"],
       );
-      assert.match(JSON.stringify(initial), /marked/);
-      assert.doesNotMatch(
-        JSON.stringify(initial),
-        /"text":\{"text":"\+\$542K last month\.","type":"marked"\},"type":"bold"/,
-      );
+      assert.match(JSON.stringify(initial), /"type":"bold"/);
+      assert.doesNotMatch(JSON.stringify(initial), /"type":"marked"/);
       assert.match(JSON.stringify(initial), /\\n\\n/);
       const initialTable = initial?.blocks[1];
       assert.equal(initialTable?.type, "table");
@@ -9065,6 +9082,109 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
+    name: "rewards menu supports native navigation and confirmed referral code changes",
+    run: async () => {
+      const redis = new FakeRedis();
+      const telegram = new FakeTelegram();
+      const config = parseSignalBotConfig({
+        HUNCH_SIGNAL_BOT_TELEGRAM_MINI_APP_LINK_BASE:
+          "https://t.me/hunch_bot/hunch",
+        HUNCH_SIGNAL_BOT_TOKEN: "token",
+      });
+      const db = {
+        query: async () => ({ rows: [{ linked: true }] }),
+      } as never;
+      const loaded: Array<{
+        notice?: string | null;
+        view: { kind: string };
+      }> = [];
+      const loadRewards = async (input: {
+        notice?: string | null;
+        telegramUserId: number;
+        view: { kind: string };
+      }) => {
+        loaded.push({ notice: input.notice, view: input.view });
+        return {
+          parse_mode: "MarkdownV2" as const,
+          reply_markup: { inline_keyboard: [] },
+          text: `🎁 *${input.view.kind}*`,
+        };
+      };
+      const callback = (data: string): TelegramBotCallbackQuery => ({
+        data,
+        from: { id: 999 },
+        id: `callback-${data}`,
+        message: { chat: { id: 999, type: "private" }, message_id: 90 },
+      });
+
+      assert.equal(
+        await handleSignalBotMenuCallback({
+          callbackQuery: callback("hm:v1:rewards"),
+          config,
+          db,
+          loadRewards,
+          redis,
+          sendTestSignal: async () => false,
+          telegram,
+        }),
+        true,
+      );
+      assert.equal(loaded.at(-1)?.view.kind, "overview");
+      assert.match(telegram.edits.at(-1)?.text ?? "", /overview/);
+
+      await handleSignalBotMenuCallback({
+        callbackQuery: callback("hm:v1:rw:c"),
+        config,
+        db,
+        loadRewards,
+        redis,
+        sendTestSignal: async () => false,
+        telegram,
+      });
+      assert.match(telegram.edits.at(-1)?.text ?? "", /Change referral code/);
+
+      assert.equal(
+        await handleSignalBotMenuInput({
+          config,
+          db,
+          message: {
+            chat: { id: 999, type: "private" },
+            from: { id: 999 },
+            message_id: 91,
+            text: "alpha7",
+          },
+          prepareRewardsReferralCodeChange: async ({ code }) => ({
+            currentCode: "HUNCH42",
+            nextCode: code,
+            status: "ready" as const,
+          }),
+          redis,
+          telegram,
+        }),
+        true,
+      );
+      assert.match(telegram.edits.at(-1)?.text ?? "", /HUNCH42/);
+      assert.match(telegram.edits.at(-1)?.text ?? "", /ALPHA7/);
+
+      await handleSignalBotMenuCallback({
+        callbackQuery: callback("hm:v1:rw:ok:c"),
+        config,
+        db,
+        loadRewards,
+        redis,
+        sendTestSignal: async () => false,
+        telegram,
+        updateRewardsReferralCode: async ({ code }) => ({
+          code,
+          status: "changed" as const,
+        }),
+      });
+      assert.equal(loaded.at(-1)?.view.kind, "overview");
+      assert.equal(loaded.at(-1)?.notice, "Referral code changed to ALPHA7.");
+      assert.equal(redis.strings.size, 0);
+    },
+  },
+  {
     name: "current, stale, and unauthorized menu callbacks recover to a usable home screen",
     run: async () => {
       const config = parseSignalBotConfig({
@@ -9979,7 +10099,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           .flat()
           .map((button) => button.text)
           .join(" "),
-        /Wallet|Open market/,
+        /Wallet|Open on Hunch/,
       );
       assert.match(
         message.text,
@@ -10011,11 +10131,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       const lead = message.richMessage.blocks[0];
       assert.equal(lead?.type, "paragraph");
       if (lead?.type === "paragraph") {
-        assert.match(JSON.stringify(lead.text), /marked/);
-        assert.doesNotMatch(
-          JSON.stringify(lead.text),
-          /"text":\{"text":"\$12\.3K backs YES on “Will test resolve Yes”\.\s*","type":"marked"\},"type":"bold"/,
-        );
+        assert.match(JSON.stringify(lead.text), /"type":"bold"/);
+        assert.doesNotMatch(JSON.stringify(lead.text), /"type":"marked"/);
         assert.match(JSON.stringify(lead.text), /\\n\\n/);
       }
       const metrics = message.richMessage.blocks[1];
@@ -10036,6 +10153,35 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         );
       }
       assert.doesNotMatch(JSON.stringify(message.richMessage), /blockquote/);
+    },
+  },
+  {
+    name: "generic NO position table uses NO instead of action grammar",
+    run: () => {
+      const message = buildSignalBotMessage({
+        appBaseUrl: "https://app.hunch.trade",
+        buyAmountUsd: 10,
+        note: note({
+          bestAsk: 0.28,
+          bestBid: 0.26,
+          direction: "down",
+          eventTitle: "Fed decision in July",
+          holderSide: "NO",
+          marketTitle: "25 bps increase",
+        }),
+      });
+      const table = message.richMessage.blocks.find(
+        (block) => block.type === "table",
+      );
+      assert.equal(table?.type, "table");
+      if (table?.type === "table") {
+        const positionRow = table.cells.find(
+          (row) => row[0]?.text === "Position",
+        );
+        const position = JSON.stringify(positionRow?.[1]?.text);
+        assert.match(position, /\$12\.3K on NO/);
+        assert.doesNotMatch(position, /on against|fading/i);
+      }
     },
   },
   {
@@ -10062,6 +10208,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
 
       assert.doesNotMatch(message.text, /@Valen9/);
       assert.match(message.text, /Valen9/);
+      assert.match(message.text, /betting against the deadline/i);
+      assert.doesNotMatch(message.text, /\bfad(?:e|es|ed|ing)\b/i);
       assert.doesNotMatch(message.text, /is still holding NO/i);
       assert.doesNotMatch(message.text, /Public news does not explain/);
     },
@@ -10213,7 +10361,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
 
       assert.match(
         message.text.split("\n")[0] ?? "",
-        /^⚽ \*\\\+\$542K in 30 days\\\.\* This wallet is backing Spain over Argentina\\\.$/,
+        /^⚽ \*A trader up \$542K is backing Spain over Argentina\\\.\*$/,
       );
       assert.match(message.text, /▸ PnL.*542K.*30d/);
       assert.match(message.text, /▸ Recent results.*18\\\.4 pts vs market/);
@@ -10382,7 +10530,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
-    name: "channel signal buttons omit custom emoji fields",
+    name: "channel signal buttons use one Hunch-branded CTA",
     run: () => {
       const message = buildSignalBotMessage({
         appBaseUrl: "https://app.hunch.trade",
@@ -10391,20 +10539,16 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         cheaperAlternative: {
           eventId: "kalshi:event-1",
           marketId: "kalshi:market-1",
-          price: 0.29,
-          side: "YES",
+          price: 0.65,
+          side: "NO",
           venue: "kalshi",
         },
-        note: note(),
+        note: note({ direction: "down", holderSide: "NO" }),
       });
       const buttons = message.keyboard?.inline_keyboard.flat() ?? [];
-      assert.ok(buttons.length > 0);
-      assert.equal(buttons[0]?.text, "🟠 Buy YES · Poly 32¢");
-      assert.equal(buttons[1]?.text, "💸 Cheaper: Kalshi YES 29¢");
-      assert.equal(
-        buttons.some((button) => button.icon_custom_emoji_id != null),
-        false,
-      );
+      assert.equal(buttons.length, 1);
+      assert.equal(buttons[0]?.text, "🟠 Buy NO on Hunch · 70¢");
+      assert.equal(buttons[0]?.icon_custom_emoji_id, undefined);
     },
   },
   {
@@ -10521,7 +10665,72 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           /\[TB14\]\(https:\/\/t\.me\/hunch_signal_bot\/hunch\?startapp=wt_/g,
         ) ?? [];
       assert.equal(holderLinks.length, 1);
+      assert.match(message.text, /👤 __\[TB14\]\(/);
+      assert.doesNotMatch(message.text, /\[👤/);
+      assert.match(JSON.stringify(message.richMessage), /"👤 "/);
       assert.doesNotMatch(firstLine, /tracking\/wallet/);
+    },
+  },
+  {
+    name: "message linkifies a generic trader reference with a separate icon and no extra CTA",
+    run: () => {
+      const message = buildSignalBotMessage({
+        appBaseUrl: "https://app.hunch.trade",
+        buyAmountUsd: 10,
+        note: note({
+          description:
+            "This trader is still holding $8.6K after the move. The trader has not taken profit.",
+        }),
+        telegramMiniAppLinkBase: "https://t.me/hunch_signal_bot/hunch",
+      });
+      assert.match(
+        message.text,
+        /👤 __\[This trader\]\(https:\/\/t\.me\/hunch_signal_bot\/hunch\?startapp=wt_[^)]+\)__/,
+      );
+      assert.equal((message.text.match(/startapp=wt_/g) ?? []).length, 1);
+      assert.doesNotMatch(message.text, /\[👤/);
+      const buttons = message.keyboard?.inline_keyboard.flat() ?? [];
+      assert.equal(buttons.length, 1);
+      assert.doesNotMatch(buttons[0]?.text ?? "", /Trader|Wallet/);
+      const richJson = JSON.stringify(message.richMessage);
+      assert.match(richJson, /"👤 "/);
+      assert.match(
+        richJson,
+        /"text":(?:"This trader"|\["This trader"\]),"type":"underline"/,
+      );
+      assert.doesNotMatch(richJson, /"text":"👤 This trader"/);
+    },
+  },
+  {
+    name: "generic trader link prefers an action phrase and stays off cluster copy",
+    run: () => {
+      const single = buildSignalBotMessage({
+        appBaseUrl: "https://app.hunch.trade",
+        buyAmountUsd: 10,
+        note: note({
+          description:
+            "The market moved in the trader's favor. The trader is still holding after the move.",
+        }),
+        telegramMiniAppLinkBase: "https://t.me/hunch_signal_bot/hunch",
+      });
+      assert.doesNotMatch(single.text, /in 👤/);
+      assert.match(
+        single.text,
+        /👤 __\[The trader\]\([^)]+\)__ is still holding/,
+      );
+
+      const cluster = buildSignalBotMessage({
+        appBaseUrl: "https://app.hunch.trade",
+        buyAmountUsd: 10,
+        note: note({
+          description: "The trader is still holding after the move.",
+          holderActorMode: "sharp_cluster",
+          holderClusterSharpHolders: 2,
+          holderClusterSharpUsd: 20_000,
+        }),
+        telegramMiniAppLinkBase: "https://t.me/hunch_signal_bot/hunch",
+      });
+      assert.doesNotMatch(cluster.text, /startapp=wt_|👤/);
     },
   },
   {
@@ -10542,7 +10751,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.doesNotMatch(message.text, /\[24124\]%/);
       assert.match(
         message.text,
-        /then __\[24124\]\(https:\/\/t\.me\/hunch_signal_bot\/hunch\?startapp=wt_[^)]+\)__/,
+        /then 👤 __\[24124\]\(https:\/\/t\.me\/hunch_signal_bot\/hunch\?startapp=wt_[^)]+\)__/,
       );
       assert.equal((message.text.match(/\[24124\]\(/g) ?? []).length, 1);
     },
@@ -10776,7 +10985,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
 
       assert.match(
         message.text.split("\n")[0] ?? "",
-        /^📈 \*\\\+8¢ to 83¢\\\.\* NO on BTC hitting \$70K in July moved with the call\\\.$/,
+        /^📈 \*Bitcoin is now just 18% to hit \$70K in July\\\.\* A trader up \$118K still hasn't taken profit\\\.$/,
       );
       assert.ok(
         message.text.includes(
@@ -10787,9 +10996,11 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(message.publishable, true);
       assert.doesNotMatch(message.text, /different starting prices/i);
       assert.doesNotMatch(message.text, /Beat resolved prices|Wallet edge/);
-      assert.match(message.text, /market now gives/i);
+      assert.match(message.text, /market has moved in the trader's favor/i);
       assert.match(message.text, /gmtrader/i);
-      assert.match(message.text, /still holding NO after the drop/i);
+      assert.match(message.text, /still holding \$7\\\.5K on NO/i);
+      assert.match(message.text, /\\\+\$829 in open profit/i);
+      assert.match(message.text, /\$118K over the last 30 days/i);
       assert.doesNotMatch(message.text, /New research|repeat read/i);
       assert.doesNotMatch(message.text, /No cited external evidence|📰/i);
       const positionTable = message.richMessage.blocks.find(
@@ -10800,7 +11011,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         assert.equal(positionTable.caption, undefined);
         assert.deepEqual(
           positionTable.cells.map((row) => row[0]?.text),
-          ["Market", "Position", "NO price", "Open PnL"],
+          ["Market", "Position", "NO price", "Open PnL", "Wallet 30d PnL"],
         );
         assert.ok(
           positionTable.cells.every((row) =>
@@ -10863,12 +11074,13 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
 
       assert.match(
         message.text.split("\n")[0] ?? "",
-        /^📉 \*Bitcoin is moving closer to \$67\\\.5K\\\.\* This wallet still refuses to flip\\\.$/,
+        /^📉 \*Bitcoin is moving closer to \$67\\\.5K\\\.\* This trader still refuses to flip\\\.$/,
       );
       assert.match(
         message.text,
-        /wallet entered before this signal, so its open PnL and the −11¢ move since the call use different starting prices/i,
+        /entered before this signal, so their open PnL and the −11¢ move since the call use different starting prices/i,
       );
+      assert.match(message.text, /👤 __\[The trader\]\(/);
       assert.ok(
         message.text.includes(
           "*Wallet position*: $5\\.8K on NO · 61¢ now · Wallet open PnL \\+$1\\.5K",
@@ -10876,6 +11088,191 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         message.text,
       );
       assert.doesNotMatch(message.text, /Est\\\. open PnL/);
+    },
+  },
+  {
+    name: "research update applies manager FOMO framing to a profitable ceasefire hold",
+    run: () => {
+      const message = buildSignalBotMessage({
+        appBaseUrl: "https://app.hunch.trade",
+        buyAmountUsd: 10,
+        messageKind: "research_update",
+        note: note({
+          description:
+            "YES trades near 94¢ after a one-day jump, turning a crowded favorite into a conviction-through-the-move read.",
+          direction: "up",
+          eventTitle: "Israel x Iran ceasefire continues through...?",
+          holderCredentialBullets: ["Up $247.7K over the last 30 days"],
+          holderOpenPnlUsd: 3_200,
+          holderPositionUsd: 8_600,
+          holderSide: "YES",
+          marketTitle: "July 31",
+          meaningfulDeltaReasons: ["odds_move"],
+          metrics: {
+            signalEvidenceVersion: 1,
+            signalEvidence: [
+              {
+                asOf: "2026-07-28T00:00:00.000Z",
+                context: null,
+                horizonDays: 30,
+                id: "representative_wallet:track_record:30d",
+                kind: "track_record",
+                measurement: {
+                  kind: "scalar",
+                  unit: "usd",
+                  value: 247_700,
+                },
+                quality: "verified",
+                sampleSize: null,
+                scope: "representative_wallet",
+                source: {
+                  kind: "hunch_wallet_intel",
+                  label: "Representative wallet",
+                  url: null,
+                },
+              },
+            ],
+          },
+          decisionSnapshot: researchSnapshot({
+            holderPositionUsd: 8_600,
+            side: "YES",
+            yesProbability: 0.94,
+          }),
+          previousDecisionSnapshot: researchSnapshot({
+            holderPositionUsd: 8_600,
+            side: "YES",
+            yesProbability: 0.87,
+          }),
+          revisionKind: "research_update",
+        }),
+        telegramMiniAppLinkBase: "https://t.me/your_hunch_bot",
+      });
+
+      assert.match(
+        message.text.split("\n")[0] ?? "",
+        /^📈 \*The Israel–Iran ceasefire is now 94% to last through July 31\\\.\* A trader up \$248K still hasn't taken profit\\\.$/,
+      );
+      assert.match(
+        message.text,
+        /Since the original call, YES has climbed 7¢ to 94¢/,
+      );
+      assert.match(message.text, /👤 __\[the trader\]\(/);
+      assert.match(message.text, /continues to hold \$8\\\.6K on YES/);
+      assert.match(message.text, /\\\+\$3\\\.2K in open profit/);
+      assert.match(message.text, /\$247\\\.7K over the last 30 days/);
+      assert.doesNotMatch(
+        message.text,
+        /moved with the call|crowded favorite|conviction-through-the-move/i,
+      );
+      const buttons = message.keyboard?.inline_keyboard.flat() ?? [];
+      assert.equal(buttons.length, 1);
+      assert.doesNotMatch(buttons[0]?.text ?? "", /Trader|Wallet/);
+    },
+  },
+  {
+    name: "research update reports a concurrent trim instead of claiming no profit-taking",
+    run: () => {
+      const priceReason: HolderResearchUpdateReason = {
+        after: 0.94,
+        asOf: TEST_SIGNAL_PRICE_AS_OF,
+        before: 0.87,
+        delta: 0.07,
+        kind: "price_moved_with_thesis",
+        side: "YES",
+        unit: "probability",
+      };
+      const positionReason: HolderResearchUpdateReason = {
+        after: 8_600,
+        asOf: TEST_SIGNAL_PRICE_AS_OF,
+        before: 10_000,
+        delta: -1_400,
+        kind: "position_reduced",
+        scope: "representative_wallet",
+        side: "YES",
+        unit: "usd",
+        walletId: "wallet-1",
+      };
+      const message = buildSignalBotMessage({
+        appBaseUrl: "https://app.hunch.trade",
+        buyAmountUsd: 10,
+        messageKind: "research_update",
+        note: note({
+          bestAsk: 0.95,
+          bestBid: 0.93,
+          direction: "up",
+          eventTitle: "Israel x Iran ceasefire continues through...?",
+          holderOpenPnlUsd: 3_200,
+          holderPositionUsd: 8_600,
+          holderResearchUpdateV1: {
+            baselineAsOf: "2026-07-27T00:00:00.000Z",
+            baselineNoteId: "00000000-0000-4000-8000-000000000001",
+            changedAt: TEST_SIGNAL_PRICE_AS_OF,
+            ctaIntent: "buy",
+            fingerprint: "price-up-position-trimmed",
+            materialityPolicy: {
+              revision: "test-v1",
+              thresholds: {},
+              version: 1,
+            },
+            primaryReason: priceReason,
+            reasons: [priceReason, positionReason],
+            selectedSide: "YES",
+            version: 1,
+          },
+          holderSide: "YES",
+          marketTitle: "July 31",
+          metrics: {
+            signalEvidenceVersion: 1,
+            signalEvidence: [
+              {
+                asOf: "2026-07-28T00:00:00.000Z",
+                context: null,
+                horizonDays: 30,
+                id: "representative_wallet:track_record:30d",
+                kind: "track_record",
+                measurement: {
+                  kind: "scalar",
+                  unit: "usd",
+                  value: 247_700,
+                },
+                quality: "verified",
+                sampleSize: null,
+                scope: "representative_wallet",
+                source: {
+                  kind: "hunch_wallet_intel",
+                  label: "Representative wallet",
+                  url: null,
+                },
+              },
+            ],
+          },
+          decisionSnapshot: researchSnapshot({
+            holderPositionUsd: 8_600,
+            side: "YES",
+            yesProbability: 0.94,
+          }),
+          previousDecisionSnapshot: researchSnapshot({
+            holderPositionUsd: 10_000,
+            side: "YES",
+            yesProbability: 0.87,
+          }),
+          revisionKind: "research_update",
+        }),
+        telegramMiniAppLinkBase: "https://t.me/your_hunch_bot",
+      });
+
+      assert.match(
+        message.text.split("\n")[0] ?? "",
+        /has trimmed but is still holding YES/,
+      );
+      assert.match(
+        message.text,
+        /has trimmed the position but still holds \$8\\\.6K on YES/,
+      );
+      assert.doesNotMatch(
+        message.text,
+        /hasn't taken profit|Rather than locking in gains/,
+      );
     },
   },
   {
@@ -11021,7 +11418,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
 
       assert.match(
         message.text.split("\n")[0] ?? "",
-        /^👀 \*\\\+\$35K in 30 days\\\.\* This wallet is backing Under 4\\\.5 total goals in Spain vs\\\. Argentina\\\.$/,
+        /^👀 \*A trader up \$35K is backing Under 4\\\.5 total goals in Spain vs\\\. Argentina\\\.\*$/,
       );
       assert.match(message.text, /\[Under 4\\\.5 total goals\]\(/);
       assert.match(
@@ -11091,7 +11488,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
 
       assert.match(
         message.text.split("\n")[0] ?? "",
-        /^💰 \*\\\+\$49\\\.4K added\\\.\* One tracked wallet increased its Under 2\\\.5 total goals in Spain vs\\\. Argentina position\\\.$/,
+        /^💰 \*\\\+\$49\\\.4K added\\\.\* One trader increased their Under 2\\\.5 total goals in Spain vs\\\. Argentina position\\\.$/,
       );
       assert.ok(
         message.text.includes(
@@ -11973,12 +12370,44 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(result.deliverySkipped, 0);
       assert.match(
         telegram.messages[0]?.reply_markup?.inline_keyboard[0]?.[0]?.text ?? "",
-        /Buy YES · Poly 41¢$/,
+        /^🟠 Buy YES on Hunch · 41¢$/,
       );
       assert.match(
         telegram.messages[1]?.reply_markup?.inline_keyboard[0]?.[0]?.text ?? "",
-        /Buy YES · Limitless 29¢$/,
+        /^🟠 Buy YES on Hunch · 29¢$/,
       );
+      assert.equal(
+        telegram.messages[0]?.reply_markup?.inline_keyboard[0]?.[0]
+          ?.icon_custom_emoji_id,
+        undefined,
+      );
+      assert.equal(
+        telegram.messages[1]?.reply_markup?.inline_keyboard[0]?.[0]
+          ?.icon_custom_emoji_id,
+        undefined,
+      );
+      const polymarketPayload = decodeStartAppPayload(
+        readStartAppParam(
+          telegram.messages[0]?.reply_markup?.inline_keyboard[0]?.[0]?.url,
+        ),
+      ).split("|");
+      const limitlessPayload = decodeStartAppPayload(
+        readStartAppParam(
+          telegram.messages[1]?.reply_markup?.inline_keyboard[0]?.[0]?.url,
+        ),
+      ).split("|");
+      assert.deepEqual(polymarketPayload.slice(0, 4), [
+        "p:event-1",
+        "market-1",
+        "Y",
+        "10",
+      ]);
+      assert.deepEqual(limitlessPayload.slice(0, 4), [
+        "l:event-2",
+        "market-2",
+        "Y",
+        "10",
+      ]);
       const views = db.queries
         .filter((query) =>
           query.sql.includes("insert into signal_bot_messages"),
@@ -12115,7 +12544,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
-    name: "publish removes Buy from terminal-price notes and keeps Open market",
+    name: "publish removes Buy from terminal-price notes and keeps Open on Hunch",
     run: async () => {
       const redis = new FakeRedis();
       await enableSignalBotChat({
@@ -12171,7 +12600,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(telegram.messages.length, 1);
       assert.equal(
         telegram.messages[0]?.reply_markup?.inline_keyboard[0]?.[0]?.text,
-        "↗️ Open market",
+        "Open on Hunch",
       );
     },
   },
@@ -12569,7 +12998,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         false,
       );
       assert.equal(
-        updateButtons.some((button) => button.text === "↗️ Open market"),
+        updateButtons.some((button) => button.text === "Open on Hunch"),
         true,
       );
       const delivery = db.queries
@@ -12646,7 +13075,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         true,
       );
       assert.equal(
-        buttons.some((button) => button.text === "↗️ Open market"),
+        buttons.some((button) => button.text === "Open on Hunch"),
         false,
       );
     },
@@ -12731,7 +13160,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       };
       assert.equal(metrics.fallbackStandalone, true);
       assert.equal(metrics.noteKind, "research_update");
-      assert.equal(metrics.copy?.copyVersion, "signal_bot_copy_v10");
+      assert.equal(metrics.copy?.copyVersion, "signal_bot_copy_v11");
       assert.equal(
         metrics.copy?.notification?.headline?.storyKind,
         "price_move",
@@ -12944,7 +13373,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(telegram.messages[0]?.reply_parameters?.message_id, 77);
       assert.match(
         telegram.messages[0]?.text ?? "",
-        /^📈 \*\\\+15¢ to 55¢\\\.\* YES on .* moved with the call/,
+        /^📈 \*Test resolve Yes is now priced at 55%\\\.\* Large wallets are still adding/,
       );
       assert.match(telegram.messages[0]?.text ?? "", />Wallets {2}\*2\* added/);
       assert.match(telegram.messages[0]?.text ?? "", />\*Since the call\*/);
@@ -12958,7 +13387,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       );
       assert.match(
         telegram.messages[0]?.text ?? "",
-        /backed by fresh wallet flow/,
+        /Fresh buying kept coming in/,
       );
       assert.match(telegram.messages[0]?.text ?? "", /\*Read\*:/);
       assert.match(
@@ -12967,7 +13396,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       );
       const keyboard = telegram.messages[0]?.reply_markup?.inline_keyboard;
       assert.equal(keyboard?.length, 1);
-      assert.equal(keyboard?.[0]?.[0]?.text, "↗️ Open market");
+      assert.equal(keyboard?.[0]?.[0]?.text, "🟠 Open on Hunch");
+      assert.equal(keyboard?.[0]?.[0]?.icon_custom_emoji_id, undefined);
       assert.match(keyboard?.[0]?.[0]?.url ?? "", /^https:\/\/t\.me\//);
       const startParam = readStartAppParam(keyboard?.[0]?.[0]?.url);
       assert.match(startParam, /^m_/);
@@ -13010,6 +13440,72 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         query.sql.includes("from wallet_activity_events"),
       );
       assert.equal(flowQuery?.params[3], "polymarket");
+    },
+  },
+  {
+    name: "mixed positive followthrough does not claim every wallet kept building",
+    run: async () => {
+      const redis = new FakeRedis();
+      await enableFollowthroughTestChat(redis);
+      const db = new FakeFollowthroughDb();
+      db.runtimePayload = {
+        signalBotFollowthroughEnabled: true,
+        signalBotFollowthroughTypes: ["stats"],
+        signalBotFollowthroughMinJoinedOrAdded: 99,
+        signalBotFollowthroughMinNetFlowUsd: 1_000,
+        signalBotFollowthroughMinPriceMoveCents: 1,
+      };
+      db.candidateRows = [followthroughCandidateRow()];
+      db.flowRows = [
+        followthroughFlowRow({
+          baseline_shares: "0",
+          latest_shares: "500",
+          latest_size_usd: "30000",
+          net_shares: "500",
+          net_usd: "30000",
+          positive_usd: "30000",
+          wallet_id: "joined",
+        }),
+        followthroughFlowRow({
+          baseline_shares: "200",
+          latest_shares: "0",
+          latest_size_usd: "0",
+          negative_usd: "10000",
+          net_shares: "-200",
+          net_usd: "-10000",
+          positive_usd: "0",
+          wallet_id: "exited",
+        }),
+      ];
+      const richMessages: TelegramSendRichMessageInput[] = [];
+      const telegram = Object.assign(new FakeTelegram(), {
+        sendRichMessage: async (
+          message: TelegramSendRichMessageInput,
+        ): Promise<TelegramSendResult> => {
+          richMessages.push(message);
+          return { messageId: 101, ok: true };
+        },
+      });
+      const result = await publishSignalBotFollowthroughTick({
+        config: parseSignalBotConfig({
+          HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
+          HUNCH_SIGNAL_BOT_TELEGRAM_MINI_APP_LINK_BASE:
+            TEST_TELEGRAM_MINI_APP_LINK_BASE,
+          HUNCH_SIGNAL_BOT_TOKEN: "token",
+        }),
+        db,
+        now: new Date("2026-01-02T01:00:00.000Z"),
+        redis,
+        telegram,
+      });
+
+      const rich = JSON.stringify(richMessages[0]?.rich_message);
+      assert.equal(result.sent, 1);
+      assert.match(rich, /Some wallets have reduced exposure/);
+      assert.doesNotMatch(
+        rich,
+        /continue building their position instead of taking profit/,
+      );
     },
   },
   {
@@ -13472,7 +13968,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.match(text, />NYG price {2}40¢ → 55¢ {2}\*\\\+15¢\*/);
       const keyboard = telegram.messages[0]?.reply_markup?.inline_keyboard;
       assert.equal(keyboard?.length, 1);
-      assert.equal(keyboard?.[0]?.[0]?.text, "↗️ Open market");
+      assert.equal(keyboard?.[0]?.[0]?.text, "🟠 Open on Hunch");
+      assert.equal(keyboard?.[0]?.[0]?.icon_custom_emoji_id, undefined);
     },
   },
   {
@@ -13772,7 +14269,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       );
       const keyboard = telegram.messages[0]?.reply_markup?.inline_keyboard;
       assert.equal(keyboard?.length, 1);
-      assert.equal(keyboard?.[0]?.[0]?.text, "↗️ Open market");
+      assert.equal(keyboard?.[0]?.[0]?.text, "🟠 Open on Hunch");
+      assert.equal(keyboard?.[0]?.[0]?.icon_custom_emoji_id, undefined);
     },
   },
   {
@@ -14199,7 +14697,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
-    name: "test-only preparation bypasses an old snapshot without exposing Buy",
+    name: "stale snapshot bypass exposes Buy only for an explicit test preview",
     run: async () => {
       const db = new FakeDb();
       const staleNote = note({
@@ -14232,9 +14730,33 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       if (preview.status === "ready") {
         assert.equal(preview.audit.stalePriceSnapshotBypassed, true);
         assert.equal(preview.deliveryTarget, null);
+        const openButton = preview.keyboard?.inline_keyboard.flat()[0];
+        assert.equal(
+          openButton?.icon_custom_emoji_id,
+          TELEGRAM_CUSTOM_EMOJI.hunch.id,
+        );
+        assert.doesNotMatch(openButton?.text ?? "", /↗/);
         assert.deepEqual(
           preview.keyboard?.inline_keyboard.flat().map((button) => button.text),
-          ["↗️ Open market"],
+          ["Open on Hunch"],
+        );
+      }
+
+      const buyPreview = await prepareSignalBotDelivery({
+        ...input,
+        allowStaleBuyCtaForTest: true,
+        allowStalePriceSnapshot: true,
+        redis: new FakeRedis(),
+      });
+      assert.equal(buyPreview.status, "ready");
+      if (buyPreview.status === "ready") {
+        assert.equal(buyPreview.audit.stalePriceSnapshotBypassed, true);
+        assert.equal(buyPreview.deliveryTarget?.price, 0.41);
+        assert.deepEqual(
+          buyPreview.keyboard?.inline_keyboard
+            .flat()
+            .map((button) => button.text),
+          ["Buy YES · Poly 41¢"],
         );
       }
     },
@@ -14276,7 +14798,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         telegram.messages[0]?.reply_markup?.inline_keyboard
           .flat()
           .map((button) => button.text),
-        ["↗️ Open market"],
+        ["Buy YES · Poly 41¢"],
       );
       assert.deepEqual(await getSignalBotChatState(redis, "-100"), before);
       assert.equal(
@@ -14314,6 +14836,11 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       });
       assert.deepEqual(sent, { reason: null, sent: true });
       const keyboard = telegram.messages[0]?.reply_markup?.inline_keyboard;
+      assert.equal(keyboard?.[0]?.[0]?.text, "Buy YES · Poly 41¢");
+      assert.equal(
+        keyboard?.[0]?.[0]?.icon_custom_emoji_id,
+        TELEGRAM_CUSTOM_EMOJI.polymarket.id,
+      );
       assert.equal(keyboard?.[0]?.[0]?.url, undefined);
       const payload = decodeStartAppPayload(
         readWebAppStartParam(keyboard?.[0]?.[0]),
