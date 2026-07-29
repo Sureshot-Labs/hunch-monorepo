@@ -92,6 +92,27 @@ jobs:
             exit 1
           fi
 
-          docker restart hunch-nginx >/dev/null 2>&1 || true
+          "${compose[@]}" up -d --no-build nginx
+
+          edge_healthy=0
+          for _ in $(seq 1 30); do
+            if curl -fsS \
+              --resolve api.hunch.trade:443:127.0.0.1 \
+              https://api.hunch.trade/health >/dev/null 2>&1; then
+              edge_healthy=1
+              break
+            fi
+            sleep 1
+          done
+          if [[ "${edge_healthy}" != "1" ]]; then
+            "${compose[@]}" ps >&2 || true
+            docker logs --tail 160 hunch-nginx >&2 2>&1 || true
+            exit 1
+          fi
+
+          "${compose[@]}" ps
           curl -fsS http://127.0.0.1:3001/health
+          curl -fsS \
+            --resolve api.hunch.trade:443:127.0.0.1 \
+            https://api.hunch.trade/health
           REMOTE
