@@ -56,6 +56,23 @@ const tests: readonly Test[] = [
     },
   },
   {
+    name: "terminal metadata patches preserve the first completion timestamp",
+    run: () => {
+      const source = readFileSync(
+        new URL(
+          "../../persistence/funding-operation-repository.ts",
+          import.meta.url,
+        ),
+        "utf8",
+      );
+      assert.match(
+        source,
+        /when \$9::boolean then coalesce\(completed_at, \$10::timestamptz\)/i,
+      );
+      assert.doesNotMatch(source, /when \$9::boolean then \$10::timestamptz/i);
+    },
+  },
+  {
     name: "receive-session polling is durably throttled and claimed across workers",
     run: () => {
       const source = readFileSync(

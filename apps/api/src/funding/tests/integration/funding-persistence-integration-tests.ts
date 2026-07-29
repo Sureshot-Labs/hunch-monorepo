@@ -1360,6 +1360,41 @@ async function testTransactionalPersistenceContracts(): Promise<void> {
       status: "completed",
       stage: "terminal",
     });
+    const completedOperation = await fetchFundingOperationForUser(
+      client as never,
+      {
+        userId: userA,
+        operationId: committedA.operation.id,
+      },
+    );
+    assert.ok(completedOperation?.completedAt);
+    const terminalPatchedAt = new Date(
+      completedOperation.completedAt.getTime() + 60_000,
+    );
+    const terminalMetadataPatch = await transitionFundingOperationInTransaction(
+      client,
+      {
+        operationId: committedA.operation.id,
+        scope: { kind: "worker" },
+        expectedVersion: completedOperation.version,
+        expectedState: {
+          status: "completed",
+          stage: "terminal",
+        },
+        nextState: {
+          status: "completed",
+          stage: "terminal",
+        },
+        supportMetadataPatch: {
+          terminalReconciliationCheckedAt: terminalPatchedAt.toISOString(),
+        },
+        now: terminalPatchedAt,
+      },
+    );
+    assert.equal(
+      terminalMetadataPatch.completedAt?.toISOString(),
+      completedOperation.completedAt.toISOString(),
+    );
     const segmentAfterDestination = await client.query<{
       actual_output: { raw?: string } | null;
       status: string;

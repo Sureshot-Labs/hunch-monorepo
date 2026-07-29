@@ -1240,7 +1240,7 @@ export async function transitionFundingOperationInTransaction(
           end,
           support_metadata = support_metadata || $8::jsonb,
           completed_at = case
-            when $9::boolean then $10::timestamptz
+            when $9::boolean then coalesce(completed_at, $10::timestamptz)
             else null
           end,
           version = version + 1

@@ -13,6 +13,7 @@ import type {
   Money,
   PlacementDecision,
   ResolvedExternalRecipient,
+  SourceOption,
   ValidatedExternalRecipient,
 } from "../domain/types.js";
 import {
@@ -106,6 +107,17 @@ function recommendedSource(
         Number(right.option.recommended) - Number(left.option.recommended) ||
         left.option.sourceOptionId.localeCompare(right.option.sourceOptionId),
     )[0] ?? null
+  );
+}
+
+function isSelectableOwnedSource(option: SourceOption): boolean {
+  if (!option.selectable) return false;
+  if (option.source.kind === "owned_location") return true;
+  if (option.source.kind !== "composite") return false;
+  return (
+    option.sourceLegs != null &&
+    option.sourceLegs.length > 0 &&
+    option.sourceLegs.every((leg) => leg.source.kind === "owned_location")
   );
 }
 
@@ -825,6 +837,11 @@ export class FundingPlanner {
       recommended:
         recommended?.option.sourceOptionId === source.option.sourceOptionId,
     }));
+    const convertibleRaw = sourceOptions.some(isSelectableOwnedSource)
+      ? shortfallRaw
+      : "0";
+    const convertibleUsd =
+      convertibleRaw === "0" ? "0" : shortfallValuation.estimatedUsd;
     const preparationNeedsWork = selected.option.preparationStatus !== "ready";
     const mode: IntentLiquidityProjection["mode"] =
       input.policy.creationMode === "off"
@@ -869,11 +886,11 @@ export class FundingPlanner {
       requestedCollateralRaw: amount.raw,
       availableNowRaw: availableNow.raw,
       shortfallRaw,
-      convertibleRaw: "0",
+      convertibleRaw,
       requestedUsd: requestedValuation.estimatedUsd,
       availableNowUsd: availableValuation.estimatedUsd,
       shortfallUsd: shortfallValuation.estimatedUsd,
-      convertibleUsd: "0",
+      convertibleUsd,
       mode,
       eta: recommended?.option.eta ?? null,
       requiredActions,

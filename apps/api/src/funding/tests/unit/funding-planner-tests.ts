@@ -1564,6 +1564,8 @@ await test("single destination values exact liquidity without inventing consent"
   assert.equal(projection.requestedUsd, "100");
   assert.equal(projection.availableNowUsd, "2");
   assert.equal(projection.shortfallUsd, "100");
+  assert.equal(projection.convertibleRaw, "100000000");
+  assert.equal(projection.convertibleUsd, "100");
   assert.equal(projection.completeness, "complete");
   assert.equal(projection.freshness, "fresh");
 });
@@ -1660,6 +1662,8 @@ await test("planner evaluates collected evidence at a current clock and permits 
     projection.sourceOptions.map((option) => option.kind),
     ["manual_receive"],
   );
+  assert.equal(projection.convertibleRaw, "0");
+  assert.equal(projection.convertibleUsd, "0");
   assert.equal(
     projection.reasonCodes.includes("cash_availability_unknown"),
     false,
@@ -1986,6 +1990,8 @@ await test("planner preserves Add Funds exact amount and trade shortfall", async
   };
   const add = await run(intent("add_funds", "100000000"), "5000000");
   assert.equal(add.shortfallRaw, "100000000");
+  assert.equal(add.convertibleRaw, "100000000");
+  assert.equal(add.convertibleUsd, "100");
   assert.equal(add.sourceOptions[0]?.minimumDestination?.raw, "100000000");
 
   const trade = await run(
@@ -1995,6 +2001,9 @@ await test("planner preserves Add Funds exact amount and trade shortfall", async
     "2000000",
   );
   assert.equal(trade.shortfallRaw, "3000000");
+  assert.equal(trade.availableNowRaw, "2000000");
+  assert.equal(trade.convertibleRaw, "3000000");
+  assert.equal(trade.convertibleUsd, "3");
   assert.equal(trade.sourceOptions[0]?.minimumDestination?.raw, "3000000");
 });
 
