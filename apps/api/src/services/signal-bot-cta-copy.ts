@@ -28,7 +28,7 @@ export function formatSignalBotBuyButtonText(input: {
 }): string {
   const price = input.price == null ? null : formatCents(input.price);
   if (input.channel) {
-    return `Buy ${input.sideLabel} on Hunch${price ? ` · ${price}` : ""}`;
+    return `🟠 Buy ${input.sideLabel} on Hunch${price ? ` · ${price}` : ""}`;
   }
   const marker = input.side === "YES" ? "🟠" : "⚪";
   const venue = formatVenueLabel(input.venue);
@@ -47,6 +47,8 @@ export function formatSignalBotCheaperButtonText(input: {
   return `${input.useNativeMarker ? "💸 " : ""}Cheaper: ${venue} ${input.sideLabel} ${formatCents(input.alternative.price)}`;
 }
 
-export function formatSignalBotOpenButtonText(): string {
-  return "Open on Hunch";
+export function formatSignalBotOpenButtonText(input?: {
+  channel?: boolean;
+}): string {
+  return `${input?.channel ? "🟠 " : ""}Open on Hunch`;
 }
