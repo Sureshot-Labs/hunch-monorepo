@@ -614,6 +614,7 @@ test("keeps the content database fallback and deployment preflight fail-safe", (
     deployWorkflow,
     /inputs\.production_action == 'DEPLOY_PRODUCTION'/,
   );
+  assert.match(deployWorkflow, /github\.event_name == 'push'/);
   assert.match(deployWorkflow, /github\.ref == 'refs\/heads\/main'/);
   assert.match(deployWorkflow, /cancel-in-progress: false/);
   assert.match(
