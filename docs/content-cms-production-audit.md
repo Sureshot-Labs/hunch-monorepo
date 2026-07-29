@@ -348,6 +348,10 @@ bounded plan shape. CI now seeds 50,000 rows and uses intentionally much looser
 thresholds (75-300 ms), so it catches sequential-scan regressions without
 depending on runner speed.
 
+The clean CI runner builds the complete API workspace dependency closure with
+`pnpm --filter "api^..." run build` before typechecking. This prevents local
+`dist` artifacts from hiding missing `@hunch/contracts` or `@hunch/db` builds.
+
 ## Load containment and timeout rationale
 
 Content does not share a connection pool with trading traffic. Production
@@ -430,4 +434,7 @@ That response can only come from an API revision that has not registered the
 content routes. The landing build is deliberately independent of upstream
 availability, but publishing must stay disabled until a backend redeploy makes
 both endpoints return the documented contract and the signed staging webhook
-has been observed end to end.
+has been observed end to end. The first two content-enabled deploy runs failed
+before deployment because their clean runners built only `@hunch/infra`; the
+workflow now builds the complete API workspace dependency closure before its
+lint and typecheck gate.

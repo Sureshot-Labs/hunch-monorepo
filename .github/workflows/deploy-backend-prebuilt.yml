@@ -57,8 +57,8 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Build test dependency
-        run: pnpm --filter @hunch/infra run build
+      - name: Build API workspace dependencies
+        run: pnpm --filter "api^..." run build
 
       - name: Lint and typecheck content backend
         run: |
