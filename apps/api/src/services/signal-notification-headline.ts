@@ -928,18 +928,17 @@ function buildInitialEditorialAngle(input: {
     input.direction === "against"
       ? `betting against ${subject.text}`
       : `backing ${subject.text}`;
+  const singleTrader = input.actorMode === "single_holder";
   return {
-    continuation: `${actorReference} ${
-      input.actorMode === "single_holder" ? "is" : "are"
-    } ${action}.`,
+    continuation: singleTrader ? "" : `${actorReference} are ${action}.`,
     emoji,
-    hook: `${clickbaitPnlHook(input.actorPnlUsd)}${
-      input.actorMode === "sharp_cluster" ? " combined" : ""
-    }${
-      input.actorPnlHorizonDays != null
-        ? ` in ${input.actorPnlHorizonDays} days`
-        : ""
-    }.`,
+    hook: singleTrader
+      ? `A trader up ${clickbaitPnl(input.actorPnlUsd)} is ${action}.`
+      : `${clickbaitPnlHook(input.actorPnlUsd)} combined${
+          input.actorPnlHorizonDays != null
+            ? ` in ${input.actorPnlHorizonDays} days`
+            : ""
+        }.`,
     primaryMetric: formatCompactUsd(input.actorPnlUsd),
     supportingMetric:
       input.holderPositionUsd > 0

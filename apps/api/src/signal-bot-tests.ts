@@ -10361,7 +10361,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
 
       assert.match(
         message.text.split("\n")[0] ?? "",
-        /^⚽ \*\\\+\$542K in 30 days\\\.\* A trader is backing Spain over Argentina\\\.$/,
+        /^⚽ \*A trader up \$542K is backing Spain over Argentina\\\.\*$/,
       );
       assert.match(message.text, /▸ PnL.*542K.*30d/);
       assert.match(message.text, /▸ Recent results.*18\\\.4 pts vs market/);
@@ -11418,7 +11418,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
 
       assert.match(
         message.text.split("\n")[0] ?? "",
-        /^👀 \*\\\+\$35K in 30 days\\\.\* A trader is backing Under 4\\\.5 total goals in Spain vs\\\. Argentina\\\.$/,
+        /^👀 \*A trader up \$35K is backing Under 4\\\.5 total goals in Spain vs\\\. Argentina\\\.\*$/,
       );
       assert.match(message.text, /\[Under 4\\\.5 total goals\]\(/);
       assert.match(

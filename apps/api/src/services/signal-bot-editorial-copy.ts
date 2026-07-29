@@ -385,8 +385,8 @@ export function buildSignalBotStructuredNarrative(input: {
         ? `${matchup.favorite} against ${matchup.opponent}`
         : input.sideLabel;
     return [
-      `${input.sideLabel} is priced around ${formatCents(input.price)}, and ${holderName} is holding ${position} on ${positionSubject}.`,
-      `Over the last ${horizonDays} days, they are up ${formatSignalBotPreciseCompactUsd(trackRecordUsd)} and still hold the position.`,
+      `${input.sideLabel} is priced at ${formatCents(input.price)}, and ${holderName} has built a ${position} position on ${positionSubject}.`,
+      `With ${formatSignalBotPreciseCompactUsd(trackRecordUsd)} in profit over the last ${horizonDays} days, their ${position} position stands out as a meaningful vote of confidence rather than a routine bet.`,
     ];
   }
 
