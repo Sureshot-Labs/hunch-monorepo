@@ -88,6 +88,7 @@ export class PolymarketQuoteError extends Error {
       | "invalid_orderbook"
       | "missing_top_of_book"
       | "market_not_accepting_orders"
+      | "quote_timeout"
       | "invalid_price"
       | "missing_amount"
       | "amount_too_small",

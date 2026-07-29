@@ -1,21 +1,24 @@
 import type { Pool } from "@hunch/infra";
 import { ethers } from "ethers";
 
-import { AuthService, type UserWallet } from "../../auth.js";
+import {
+  AuthService,
+  type UserWallet,
+  type VenueCredentials,
+} from "../../auth.js";
 import { isRecord } from "../../lib/type-guards.js";
 import {
+  findTradeMarketByRef,
   findTradeMarketByRefForVenue,
   isOrderable,
   type ApiTradeMarket,
 } from "../../services/api-trading-market-repo.js";
 import {
-  fetchLimitlessAccountRoute,
-  inspectLimitlessPartnerAccountProfile,
-} from "../../services/limitless-trading-execution-service.js";
-import {
   extractLimitlessPartnerAccountProfile,
   resolveLimitlessAuthContext,
 } from "../../services/limitless-auth.js";
+import { isLimitlessPartnerHmacConfigured } from "../../services/limitless-client.js";
+import { fetchLimitlessOnchainSnapshot } from "../../services/limitless-onchain.js";
 import {
   polymarketL2Request,
   type PolymarketL2Credentials,
@@ -30,8 +33,10 @@ import {
 } from "../../services/polymarket-funder.js";
 import {
   fetchPolymarketAccountRoute,
+  fetchPolymarketMaxSpendLiveOpenOrderLocks,
   resolvePolymarketFunderExecutionKindForMaxSpend,
   resolvePolymarketMaxSpendFunds,
+  type PolymarketMaxSpendOnchainSnapshot,
 } from "../../services/polymarket-trading-execution-service.js";
 import {
   polymarketFundingEvidence,
@@ -72,6 +77,7 @@ import type { PolymarketFundingObservation } from "./polymarket-funding-followup
 import {
   buildLimitlessRuntimeFacts,
   buildPolymarketRuntimeFacts,
+  storedCredentialEvidence,
   type LimitlessRuntimeEvidence,
   type PolymarketRuntimeEvidence,
   type RuntimeCredentialEvidence,
@@ -83,13 +89,19 @@ import {
   createLimitlessRuntimeActionMaterializer,
   createPolymarketRuntimeActionMaterializer,
 } from "./runtime-actions.js";
-import { collectDestinationInspectionCoverage } from "./destination-inspection-coverage.js";
+import {
+  collectDestinationInspectionCoverage,
+  isDestinationDriverApplicable,
+} from "./destination-inspection-coverage.js";
 
 const PREPARATION_TTL_MS = 45_000;
+const DESTINATION_INSPECTION_REUSE_MS = 30_000;
+const DESTINATION_INSPECTION_TIMEOUT_MS = 20_000;
 const PROFILE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1_000;
 const MAX_APPROVAL = (1n << 255n).toString();
 
 type RuntimeVenue = "limitless" | "polymarket";
+type UserWalletLoader = (accountId: string) => Promise<readonly UserWallet[]>;
 
 type RuntimeMarketContext = Readonly<{
   market: ApiTradeMarket | null;
@@ -115,6 +127,7 @@ export type RuntimeVenueInspectionInput = Readonly<{
   marketContextId: string | null;
   marketClass: string | null;
   positionActionRef: string | null;
+  resolvedMarketContext?: RuntimeMarketContext;
 }>;
 
 export interface WalletPreparationRuntimeDriver {
@@ -156,6 +169,29 @@ function sameAddress(
     normalizeAddress(left) &&
     normalizeAddress(left) === normalizeAddress(right),
   );
+}
+
+async function withinDestinationInspectionDeadline<T>(
+  promise: Promise<T>,
+): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | null = null;
+  const deadline = new Promise<never>((_, reject) => {
+    timeout = setTimeout(
+      () =>
+        reject(
+          new PreparationContractError(
+            "preparation_unavailable",
+            "venue destination inspection exceeded its interactive deadline",
+          ),
+        ),
+      DESTINATION_INSPECTION_TIMEOUT_MS,
+    );
+  });
+  try {
+    return await Promise.race([promise, deadline]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
 }
 
 async function loadRuntimePositionEvidence(input: {
@@ -315,16 +351,6 @@ function bindingFor(input: {
   };
 }
 
-function profileStale(observedAt: Date | null | undefined, now: Date): boolean {
-  if (!observedAt) return true;
-  const timestamp = observedAt.getTime();
-  return (
-    !Number.isFinite(timestamp) ||
-    timestamp > now.getTime() ||
-    now.getTime() - timestamp > PROFILE_MAX_AGE_MS
-  );
-}
-
 function metadataBoolean(
   metadata: unknown,
   ...keys: readonly string[]
@@ -390,6 +416,103 @@ function classForMarket(venue: RuntimeVenue, market: ApiTradeMarket): string {
   return isNegRisk(market) ? `${prefix}_neg_risk` : prefix;
 }
 
+function unavailableRuntimeMarketContext(
+  marketContextId: string,
+  requestedMarketClass: string | null,
+): RuntimeMarketContext {
+  return {
+    market: null,
+    marketClass: requestedMarketClass,
+    adapterAddress: null,
+    ammAddress: null,
+    evidence: {
+      resolved: false,
+      orderable: false,
+      adapterResolved: false,
+      exchangeResolved: false,
+      quoteGuardAvailable: false,
+      safeMarketRef: marketContextId,
+    },
+  };
+}
+
+function runtimeMarketContextFromMarket(input: {
+  venue: RuntimeVenue;
+  market: ApiTradeMarket;
+  requestedMarketClass: string | null;
+}): RuntimeMarketContext {
+  const marketClass = classForMarket(input.venue, input.market);
+  const classMatches =
+    input.requestedMarketClass == null ||
+    input.requestedMarketClass === marketClass;
+  const ammAddress =
+    input.venue === "limitless" && marketClass.startsWith("amm")
+      ? metadataString(
+          input.market.metadata,
+          "address",
+          "marketAddress",
+          "market_address",
+          "ammAddress",
+          "amm_address",
+        )
+      : null;
+  const adapterAddress =
+    input.venue === "limitless"
+      ? metadataString(
+          input.market.metadata,
+          "adapter",
+          "adapterAddress",
+          "adapter_address",
+          "negRiskAdapter",
+          "neg_risk_adapter",
+        )
+      : isNegRisk(input.market)
+        ? fundingSidecarRuntimeConfig.polymarketNegRiskAdapterAddress || null
+        : fundingSidecarRuntimeConfig.polymarketConditionalTokensAddress;
+  const routeResolved =
+    input.venue === "polymarket"
+      ? Boolean(input.market.token_yes && input.market.token_no)
+      : marketClass.startsWith("amm")
+        ? Boolean(ammAddress && input.market.token_yes && input.market.token_no)
+        : Boolean(
+            input.market.slug &&
+            input.market.token_yes &&
+            input.market.token_no,
+          );
+  const exchangeResolved =
+    input.venue === "polymarket"
+      ? Boolean(
+          isNegRisk(input.market)
+            ? fundingSidecarRuntimeConfig.polymarketNegRiskExchangeAddress
+            : fundingSidecarRuntimeConfig.polymarketExchangeAddress,
+        )
+      : marketClass.startsWith("amm")
+        ? Boolean(ammAddress)
+        : Boolean(
+            isNegRisk(input.market)
+              ? fundingSidecarRuntimeConfig.limitlessNegRiskAddress
+              : fundingSidecarRuntimeConfig.limitlessClobAddress,
+          );
+  return {
+    market: input.market,
+    marketClass,
+    adapterAddress,
+    ammAddress,
+    evidence: {
+      resolved: classMatches && routeResolved,
+      orderable: classMatches && isOrderable(input.market),
+      adapterResolved:
+        classMatches &&
+        (marketClass.includes("neg_risk")
+          ? Boolean(adapterAddress)
+          : routeResolved),
+      exchangeResolved: classMatches && exchangeResolved,
+      quoteGuardAvailable: classMatches && routeResolved && exchangeResolved,
+      safeMarketRef: input.market.id,
+    },
+  };
+}
+
 async function loadRuntimeMarketContext(input: {
   db: Pool;
   venue: RuntimeVenue;
@@ -420,103 +543,22 @@ async function loadRuntimeMarketContext(input: {
       input.venue,
     );
   } catch {
-    return {
-      market: null,
-      marketClass: input.requestedMarketClass,
-      adapterAddress: null,
-      ammAddress: null,
-      evidence: {
-        resolved: false,
-        orderable: false,
-        adapterResolved: false,
-        exchangeResolved: false,
-        quoteGuardAvailable: false,
-        safeMarketRef: input.marketContextId,
-      },
-    };
+    return unavailableRuntimeMarketContext(
+      input.marketContextId,
+      input.requestedMarketClass,
+    );
   }
   if (!market) {
-    return {
-      market: null,
-      marketClass: input.requestedMarketClass,
-      adapterAddress: null,
-      ammAddress: null,
-      evidence: {
-        resolved: false,
-        orderable: false,
-        adapterResolved: false,
-        exchangeResolved: false,
-        quoteGuardAvailable: false,
-        safeMarketRef: input.marketContextId,
-      },
-    };
+    return unavailableRuntimeMarketContext(
+      input.marketContextId,
+      input.requestedMarketClass,
+    );
   }
-  const marketClass = classForMarket(input.venue, market);
-  const classMatches =
-    input.requestedMarketClass == null ||
-    input.requestedMarketClass === marketClass;
-  const ammAddress =
-    input.venue === "limitless" && marketClass.startsWith("amm")
-      ? metadataString(
-          market.metadata,
-          "address",
-          "marketAddress",
-          "market_address",
-          "ammAddress",
-          "amm_address",
-        )
-      : null;
-  const adapterAddress =
-    input.venue === "limitless"
-      ? metadataString(
-          market.metadata,
-          "adapter",
-          "adapterAddress",
-          "adapter_address",
-          "negRiskAdapter",
-          "neg_risk_adapter",
-        )
-      : isNegRisk(market)
-        ? fundingSidecarRuntimeConfig.polymarketNegRiskAdapterAddress || null
-        : fundingSidecarRuntimeConfig.polymarketConditionalTokensAddress;
-  const routeResolved =
-    input.venue === "polymarket"
-      ? Boolean(market.token_yes && market.token_no)
-      : marketClass.startsWith("amm")
-        ? Boolean(ammAddress && market.token_yes && market.token_no)
-        : Boolean(market.slug && market.token_yes && market.token_no);
-  const exchangeResolved =
-    input.venue === "polymarket"
-      ? Boolean(
-          isNegRisk(market)
-            ? fundingSidecarRuntimeConfig.polymarketNegRiskExchangeAddress
-            : fundingSidecarRuntimeConfig.polymarketExchangeAddress,
-        )
-      : marketClass.startsWith("amm")
-        ? Boolean(ammAddress)
-        : Boolean(
-            isNegRisk(market)
-              ? fundingSidecarRuntimeConfig.limitlessNegRiskAddress
-              : fundingSidecarRuntimeConfig.limitlessClobAddress,
-          );
-  return {
+  return runtimeMarketContextFromMarket({
+    venue: input.venue,
     market,
-    marketClass,
-    adapterAddress,
-    ammAddress,
-    evidence: {
-      resolved: classMatches && routeResolved,
-      orderable: classMatches && isOrderable(market),
-      adapterResolved:
-        classMatches &&
-        (marketClass.includes("neg_risk")
-          ? Boolean(adapterAddress)
-          : routeResolved),
-      exchangeResolved: classMatches && exchangeResolved,
-      quoteGuardAvailable: classMatches && routeResolved && exchangeResolved,
-      safeMarketRef: market.id,
-    },
-  };
+    requestedMarketClass: input.requestedMarketClass,
+  });
 }
 
 function matchingFunderCandidate(
@@ -605,6 +647,7 @@ function polymarketTopology(input: {
 }
 
 async function inspectPolymarketClob(input: {
+  credentials?: VenueCredentials | null;
   userId: string;
   walletAddress: string;
   signatureType: number;
@@ -614,11 +657,14 @@ async function inspectPolymarketClob(input: {
   collateralVisible: boolean;
   safeBalanceRaw: string | null;
 }> {
-  const credentials = await AuthService.getVenueCredentials(
-    input.userId,
-    "polymarket",
-    input.walletAddress,
-  );
+  const credentials =
+    input.credentials === undefined
+      ? await AuthService.getVenueCredentials(
+          input.userId,
+          "polymarket",
+          input.walletAddress,
+        )
+      : input.credentials;
   const bound = credentials
     ? sameAddress(credentials.walletAddress, input.walletAddress)
     : false;
@@ -687,6 +733,83 @@ async function inspectPolymarketClob(input: {
       safeBalanceRaw: null,
     };
   }
+}
+
+function nonNegativeBigIntAt(
+  payload: unknown,
+  path: readonly string[],
+): bigint | null {
+  const raw = rawAt(payload, path);
+  if (raw == null || !/^(0|[1-9][0-9]*)$/.test(raw)) return null;
+  return BigInt(raw);
+}
+
+function polymarketMaxSpendSnapshotFromAccount(
+  payload: unknown,
+): PolymarketMaxSpendOnchainSnapshot | null {
+  const pusdBalance = nonNegativeBigIntAt(payload, ["pusd", "balanceRaw"]);
+  const usdceBalance = nonNegativeBigIntAt(payload, ["usdce", "balanceRaw"]);
+  const signerPusdBalance = nonNegativeBigIntAt(payload, [
+    "signerPusd",
+    "balanceRaw",
+  ]);
+  const signerUsdceBalance = nonNegativeBigIntAt(payload, [
+    "signerUsdce",
+    "balanceRaw",
+  ]);
+  const allowanceExchange = nonNegativeBigIntAt(payload, [
+    "pusd",
+    "allowance",
+    "exchange",
+    "allowanceRaw",
+  ]);
+  const allowanceNegRisk = nonNegativeBigIntAt(payload, [
+    "pusd",
+    "allowance",
+    "negRiskExchange",
+    "allowanceRaw",
+  ]);
+  if (
+    pusdBalance == null ||
+    usdceBalance == null ||
+    signerPusdBalance == null ||
+    signerUsdceBalance == null ||
+    allowanceExchange == null ||
+    allowanceNegRisk == null
+  ) {
+    return null;
+  }
+
+  return {
+    pusdBalance,
+    usdceBalance,
+    signerPusdBalance,
+    signerUsdceBalance,
+    allowanceExchange,
+    allowanceNegRisk,
+    allowanceNegRiskAdapter: nonNegativeBigIntAt(payload, [
+      "pusd",
+      "allowance",
+      "negRiskAdapter",
+      "allowanceRaw",
+    ]),
+    fundingRouterNonce: nonNegativeBigIntAt(payload, [
+      "fundingRouter",
+      "nonce",
+    ]),
+    fundingRouterDepositUsdceAllowance: nonNegativeBigIntAt(payload, [
+      "fundingRouter",
+      "depositUsdceAllowanceRaw",
+    ]),
+    fundingRouterPusdAllowance: nonNegativeBigIntAt(payload, [
+      "fundingRouter",
+      "pUsdAllowanceRaw",
+    ]),
+    fundingRouterUsdceAllowance: nonNegativeBigIntAt(payload, [
+      "fundingRouter",
+      "usdceAllowanceRaw",
+    ]),
+  };
 }
 
 async function reservedRawForLocation(input: {
@@ -834,13 +957,28 @@ export async function observePolymarketFundingRuntime(
 
 export class WalletPreparationRuntimeService {
   private readonly venueDrivers: readonly WalletPreparationRuntimeDriver[];
+  private readonly loadWallets: UserWalletLoader;
+  private readonly destinationInspectionInflight = new Map<
+    string,
+    Promise<PreparedRuntimeDestination>
+  >();
+  private readonly destinationInspectionCache = new Map<
+    string,
+    Readonly<{
+      value: PreparedRuntimeDestination;
+      reusableUntil: number;
+    }>
+  >();
 
   constructor(
     private readonly db: Pool,
     private readonly clock: () => Date = () => new Date(),
     venueDrivers?: readonly WalletPreparationRuntimeDriver[],
+    loadWallets: UserWalletLoader = (accountId) =>
+      AuthService.getUserWallets(accountId),
   ) {
     this.venueDrivers = venueDrivers ?? this.defaultVenueDrivers();
+    this.loadWallets = loadWallets;
     const venueIds = new Set(this.venueDrivers.map((driver) => driver.venueId));
     if (
       this.venueDrivers.length === 0 ||
@@ -908,23 +1046,75 @@ export class WalletPreparationRuntimeService {
     ];
   }
 
-  private async inspectPolymarket(input: {
-    accountId: string;
+  private inspectDestinationWithReuse(input: {
+    driver: WalletPreparationRuntimeDriver;
     wallet: UserWallet;
-    purpose: DestinationOptionsInput["purpose"];
-    marketContextId: string | null;
-    marketClass: string | null;
-    positionActionRef: string | null;
+    request: DestinationOptionsInput;
+    canonicalMarketContextId: string | null;
+    resolvedMarketContext?: RuntimeMarketContext;
   }): Promise<PreparedRuntimeDestination> {
+    const key = JSON.stringify({
+      accountId: input.request.accountId,
+      venueId: input.driver.venueId,
+      walletId: input.wallet.id,
+      purpose: input.request.purpose,
+      marketContextId:
+        input.canonicalMarketContextId ?? input.request.marketContextId,
+      marketClass: input.request.marketClass,
+      positionActionRef: input.request.positionActionRef ?? null,
+    });
+    const now = this.clock().getTime();
+    const cached = this.destinationInspectionCache.get(key);
+    if (cached && cached.reusableUntil > now) {
+      return Promise.resolve(cached.value);
+    }
+    if (cached) this.destinationInspectionCache.delete(key);
+    const pending = this.destinationInspectionInflight.get(key);
+    if (pending) return pending;
+
+    const inspection = input.driver
+      .inspect({
+        accountId: input.request.accountId,
+        wallet: input.wallet,
+        purpose: input.request.purpose,
+        marketContextId: input.request.marketContextId,
+        marketClass: input.request.marketClass,
+        positionActionRef: input.request.positionActionRef ?? null,
+        resolvedMarketContext: input.resolvedMarketContext,
+      })
+      .then((value) => {
+        const completedAt = this.clock().getTime();
+        const evidenceExpiresAt = Date.parse(
+          value.frozen.preparation.expiresAt,
+        );
+        const reusableUntil = Math.min(
+          completedAt + DESTINATION_INSPECTION_REUSE_MS,
+          evidenceExpiresAt,
+        );
+        if (reusableUntil > completedAt) {
+          this.destinationInspectionCache.set(key, { value, reusableUntil });
+        }
+        return value;
+      })
+      .finally(() => {
+        this.destinationInspectionInflight.delete(key);
+      });
+    this.destinationInspectionInflight.set(key, inspection);
+    return inspection;
+  }
+
+  private async inspectPolymarket(
+    input: RuntimeVenueInspectionInput,
+  ): Promise<PreparedRuntimeDestination> {
     const now = this.clock();
     const expiresAt = new Date(now.getTime() + PREPARATION_TTL_MS);
-    const credentialsInfo = await AuthService.getVenueCredentialsInfo(
+    const credentials = await AuthService.getVenueCredentials(
       input.accountId,
       "polymarket",
       input.wallet.walletAddress,
     );
     let deposit: PolymarketDepositWalletDerivation | null = null;
-    if (!credentialsInfo?.funderAddress && input.wallet.isInternalWallet) {
+    if (!credentials?.funderAddress && input.wallet.isInternalWallet) {
       try {
         deposit = await inspectPolymarketDepositWallet({
           owner: input.wallet.walletAddress,
@@ -936,29 +1126,48 @@ export class WalletPreparationRuntimeService {
       }
     }
     const funder =
-      credentialsInfo?.funderAddress ??
+      credentials?.funderAddress ??
       deposit?.address ??
       input.wallet.walletAddress;
-    const [marketContext, funderResult, accountResult] = await Promise.all([
-      loadRuntimeMarketContext({
-        db: this.db,
-        venue: "polymarket",
-        marketContextId: input.marketContextId,
-        requestedMarketClass: input.marketClass,
-      }),
-      derivePolymarketFunders({
-        signer: input.wallet.walletAddress,
-        storedFunder: funder,
-        includeMagicProxy: true,
-        bypassCodeCache: true,
-      }).catch(() => null),
-      fetchPolymarketAccountRoute({
-        userId: input.accountId,
-        signer: input.wallet.walletAddress,
-        query: { funderAddress: funder, refresh: true },
-      }),
-    ]);
-    const effectiveMarketClass = input.marketClass ?? marketContext.marketClass;
+    const storedL2Credentials =
+      credentials?.apiKey &&
+      credentials.apiSecret &&
+      credentials.apiPassphrase &&
+      sameAddress(credentials.walletAddress, input.wallet.walletAddress)
+        ? {
+            apiKey: credentials.apiKey,
+            apiSecret: credentials.apiSecret,
+            apiPassphrase: credentials.apiPassphrase,
+          }
+        : null;
+    const marketContextPromise = input.resolvedMarketContext
+      ? Promise.resolve(input.resolvedMarketContext)
+      : loadRuntimeMarketContext({
+          db: this.db,
+          venue: "polymarket",
+          marketContextId: input.marketContextId,
+          requestedMarketClass: input.marketClass,
+        });
+    const funderResultPromise = derivePolymarketFunders({
+      signer: input.wallet.walletAddress,
+      storedFunder: funder,
+      includeMagicProxy: true,
+      bypassCodeCache: false,
+    }).catch(() => null);
+    const accountResultPromise = fetchPolymarketAccountRoute({
+      credentialsInfo: credentials,
+      userId: input.accountId,
+      signer: input.wallet.walletAddress,
+      query: { funderAddress: funder, refresh: false },
+    });
+    const liveCollateralLocksPromise = storedL2Credentials
+      ? fetchPolymarketMaxSpendLiveOpenOrderLocks({
+          signer: input.wallet.walletAddress,
+          creds: storedL2Credentials,
+          wallets: [funder, input.wallet.walletAddress],
+        }).catch(() => null)
+      : Promise.resolve(null);
+    const funderResult = await funderResultPromise;
     const candidate = funderResult
       ? matchingFunderCandidate(funderResult.candidates, funder)
       : null;
@@ -977,12 +1186,29 @@ export class WalletPreparationRuntimeService {
               topology.topology === "safe_unsupported"
             ? 2
             : 3;
-    const clob = await inspectPolymarketClob({
+    const clobPromise = inspectPolymarketClob({
+      credentials,
       userId: input.accountId,
       walletAddress: input.wallet.walletAddress,
       signatureType,
     });
+    /*
+     * Account/RPC evidence and CLOB credential evidence are independent once
+     * the exact signer/funder topology is known. Keeping them concurrent avoids
+     * adding a full CLOB round trip after the onchain snapshot.
+     */
+    const [marketContext, accountResult, clob, liveCollateralLocks] =
+      await Promise.all([
+        marketContextPromise,
+        accountResultPromise,
+        clobPromise,
+        liveCollateralLocksPromise,
+      ]);
+    const effectiveMarketClass = input.marketClass ?? marketContext.marketClass;
     const payload = accountResult.ok ? accountResult.payload : null;
+    const onchainSnapshot = polymarketMaxSpendSnapshotFromAccount(
+      accountResult.payload,
+    );
     const rpcAvailable = accountResult.ok;
     const collateralRaw = rawAt(payload, ["pusd", "balanceRaw"]);
     const binding = bindingFor({
@@ -1028,6 +1254,8 @@ export class WalletPreparationRuntimeService {
                 pool: this.db,
                 signer: input.wallet.walletAddress,
                 userId: input.accountId,
+                ...(liveCollateralLocks ? { liveCollateralLocks } : {}),
+                ...(onchainSnapshot ? { onchainSnapshot } : {}),
               });
               if (
                 funds.fundingRouterNonce == null ||
@@ -1200,58 +1428,55 @@ export class WalletPreparationRuntimeService {
     };
   }
 
-  private async inspectLimitless(input: {
-    accountId: string;
-    wallet: UserWallet;
-    purpose: DestinationOptionsInput["purpose"];
-    marketContextId: string | null;
-    marketClass: string | null;
-    positionActionRef: string | null;
-  }): Promise<PreparedRuntimeDestination> {
+  private async inspectLimitless(
+    input: RuntimeVenueInspectionInput,
+  ): Promise<PreparedRuntimeDestination> {
     const now = this.clock();
     const expiresAt = new Date(now.getTime() + PREPARATION_TTL_MS);
-    const marketContext = await loadRuntimeMarketContext({
-      db: this.db,
-      venue: "limitless",
-      marketContextId: input.marketContextId,
-      requestedMarketClass: input.marketClass,
-    });
+    const marketContextPromise = input.resolvedMarketContext
+      ? Promise.resolve(input.resolvedMarketContext)
+      : loadRuntimeMarketContext({
+          db: this.db,
+          venue: "limitless",
+          marketContextId: input.marketContextId,
+          requestedMarketClass: input.marketClass,
+        });
+    const authContextPromise = resolveLimitlessAuthContext(
+      input.accountId,
+      input.wallet.walletAddress,
+    );
+    const marketContext = await marketContextPromise;
     const effectiveMarketClass = input.marketClass ?? marketContext.marketClass;
-    const credentialsInfo = await AuthService.getVenueCredentialsInfo(
-      input.accountId,
-      "limitless",
-      input.wallet.walletAddress,
-    );
-    const authContext = await resolveLimitlessAuthContext(
-      input.accountId,
-      input.wallet.walletAddress,
-    );
-    const liveProfile = authContext
-      ? await inspectLimitlessPartnerAccountProfile({
-          account: input.wallet.walletAddress,
-          clientType: "eoa",
-        }).catch(() => null)
+    const snapshotPromise = fetchLimitlessOnchainSnapshot({
+      rpcUrl: fundingSidecarRuntimeConfig.baseRpcUrl,
+      timeoutMs: fundingSidecarRuntimeConfig.baseRpcTimeoutMs,
+      owner: input.wallet.walletAddress,
+      clobAddress: fundingSidecarRuntimeConfig.limitlessClobAddress,
+      negRiskAddress: fundingSidecarRuntimeConfig.limitlessNegRiskAddress,
+      adapterAddress: marketContext.adapterAddress,
+      ammAddress: marketContext.ammAddress,
+      conditionalTokensAddress:
+        fundingSidecarRuntimeConfig.limitlessConditionalTokensAddress,
+    }).catch(() => null);
+    const [authContext, snapshot] = await Promise.all([
+      authContextPromise,
+      snapshotPromise,
+    ]);
+    const credentialsInfo = authContext?.creds ?? null;
+    const profile = credentialsInfo
+      ? extractLimitlessPartnerAccountProfile(
+          credentialsInfo.additionalData,
+          input.wallet.walletAddress,
+        )
       : null;
-    const profile =
-      liveProfile?.profile ??
-      (credentialsInfo
-        ? extractLimitlessPartnerAccountProfile(
-            credentialsInfo.additionalData,
-            input.wallet.walletAddress,
-          )
-        : null);
-    const accountResult = await fetchLimitlessAccountRoute({
-      userId: input.accountId,
-      signerRaw: input.wallet.walletAddress,
-      query: {
-        refresh: true,
-        adapterSpender: marketContext.adapterAddress,
-        ammSpender: marketContext.ammAddress,
-        tokenId: null,
-      },
-    });
-    const payload = accountResult.ok ? accountResult.payload : null;
-    const cashRaw = rawAt(payload, ["usdc", "balanceRaw"]);
+    const accountHasCredentials = Boolean(
+      authContext &&
+      profile?.id &&
+      (!profile.account ||
+        sameAddress(profile.account, input.wallet.walletAddress)) &&
+      isLimitlessPartnerHmacConfigured(),
+    );
+    const cashRaw = snapshot?.usdcBalance.toString() ?? null;
     const binding = bindingFor({
       accountId: input.accountId,
       venue: "limitless",
@@ -1272,8 +1497,10 @@ export class WalletPreparationRuntimeService {
       positionActionRef: input.positionActionRef,
       binding,
     });
-    const credentials: RuntimeCredentialEvidence = {
-      present: Boolean(credentialsInfo && authContext),
+    const credentials: RuntimeCredentialEvidence = storedCredentialEvidence({
+      present: Boolean(
+        credentialsInfo && authContext && profile && accountHasCredentials,
+      ),
       boundToExactWallet: Boolean(
         credentialsInfo &&
         sameAddress(
@@ -1283,13 +1510,10 @@ export class WalletPreparationRuntimeService {
         (!profile?.account ||
           sameAddress(profile.account, input.wallet.walletAddress)),
       ),
-      verified: Boolean(liveProfile?.profile),
-      observedAt: liveProfile ? now.toISOString() : null,
-      stale:
-        credentialsInfo != null &&
-        (profileStale(credentialsInfo.updatedAt, now) ||
-          (liveProfile != null && !liveProfile.profile)),
-    };
+      observedAt: credentialsInfo?.updatedAt ?? null,
+      now,
+      maxAgeMs: PROFILE_MAX_AGE_MS,
+    });
     const evidence: LimitlessRuntimeEvidence = {
       binding,
       wallet: walletAuthority(input.wallet),
@@ -1302,7 +1526,7 @@ export class WalletPreparationRuntimeService {
       executionMode: input.wallet.isInternalWallet
         ? "privy_authorization"
         : "web_client",
-      rpcAvailable: accountResult.ok,
+      rpcAvailable: snapshot != null,
       ownerVerified: input.wallet.isVerified,
       credentials,
       market: marketContext.evidence,
@@ -1311,40 +1535,23 @@ export class WalletPreparationRuntimeService {
       cashObserved: cashRaw != null,
       cashRaw,
       cashLockedRaw: reservedRaw,
-      clobAllowance: allowanceEnough(
-        rawAt(payload, ["usdc", "allowance", "clob", "allowanceRaw"]),
-      ),
-      negRiskClobAllowance: allowanceEnough(
-        rawAt(payload, ["usdc", "allowance", "negRisk", "allowanceRaw"]),
-      ),
-      ammAllowance: allowanceEnough(
-        rawAt(payload, ["usdc", "allowance", "amm", "allowanceRaw"]),
-      ),
-      clobApproval:
-        readBoolean(payload, [
-          "conditionalTokens",
-          "isApprovedForAll",
-          "clob",
-        ]) === true,
-      negRiskClobApproval:
-        readBoolean(payload, [
-          "conditionalTokens",
-          "isApprovedForAll",
-          "negRisk",
-        ]) === true,
-      ammApproval:
-        readBoolean(payload, [
-          "conditionalTokens",
-          "isApprovedForAll",
-          "amm",
-        ]) === true,
+      clobAllowance:
+        snapshot != null && snapshot.allowanceClob != null
+          ? snapshot.allowanceClob > 0n
+          : false,
+      negRiskClobAllowance:
+        snapshot != null && snapshot.allowanceNegRisk != null
+          ? snapshot.allowanceNegRisk > 0n
+          : false,
+      ammAllowance:
+        snapshot != null && snapshot.allowanceAmm != null
+          ? snapshot.allowanceAmm > 0n
+          : false,
+      clobApproval: snapshot?.approvedClob === true,
+      negRiskClobApproval: snapshot?.approvedNegRisk === true,
+      ammApproval: snapshot?.approvedAmm === true,
       marketAdapterRequired: Boolean(marketContext.adapterAddress),
-      marketAdapterApproval:
-        readBoolean(payload, [
-          "conditionalTokens",
-          "isApprovedForAll",
-          "adapter",
-        ]) === true,
+      marketAdapterApproval: snapshot?.approvedAdapter === true,
       observedAt: now.toISOString(),
       expiresAt: expiresAt.toISOString(),
       safeEvidence: {
@@ -1398,48 +1605,93 @@ export class WalletPreparationRuntimeService {
 
   async frozenDestinations(
     input: DestinationOptionsInput,
+    resolvedMarket: ApiTradeMarket | null = null,
   ): Promise<readonly FrozenPreparationDestination[]> {
-    return (await this.preparedDestinations(input)).map(
+    return (await this.preparedDestinations(input, resolvedMarket)).map(
       (result) => result.frozen,
     );
   }
 
   private async preparedDestinations(
     input: DestinationOptionsInput,
+    resolvedMarket: ApiTradeMarket | null = null,
   ): Promise<readonly PreparedRuntimeDestination[]> {
-    const wallets = (await AuthService.getUserWallets(input.accountId)).filter(
+    const wallets = (await this.loadWallets(input.accountId)).filter(
       (wallet) =>
         wallet.isVerified &&
         (!input.controllerWalletRef || wallet.id === input.controllerWalletRef),
     );
-    const attempts = this.venueDrivers.flatMap((driver) =>
-      wallets
-        .filter((wallet) => driver.supportsWallet(wallet))
-        .map((wallet) => ({ driver, wallet })),
-    );
+    if (
+      resolvedMarket &&
+      input.marketContextId &&
+      resolvedMarket.id !== input.marketContextId
+    ) {
+      throw new PreparationContractError(
+        "evidence_invalid",
+        "resolved market context does not match the requested canonical market",
+      );
+    }
+    const targetMarket =
+      resolvedMarket ??
+      (input.marketContextId
+        ? await findTradeMarketByRef(this.db, input.marketContextId)
+        : null);
+    const targetVenueId = targetMarket?.venue ?? null;
+    const targetRuntimeVenue =
+      targetVenueId === "polymarket" || targetVenueId === "limitless"
+        ? targetVenueId
+        : null;
+    const resolvedMarketContext =
+      targetMarket && targetRuntimeVenue
+        ? runtimeMarketContextFromMarket({
+            venue: targetRuntimeVenue,
+            market: targetMarket,
+            requestedMarketClass: input.marketClass,
+          })
+        : input.marketContextId
+          ? unavailableRuntimeMarketContext(
+              input.marketContextId,
+              input.marketClass,
+            )
+          : undefined;
+    const attempts = this.venueDrivers
+      .filter((driver) =>
+        isDestinationDriverApplicable({
+          driverVenueId: driver.venueId,
+          supportedMarketClasses: driver.supportedMarketClasses,
+          requestedMarketClass: input.marketClass,
+          targetVenueId,
+        }),
+      )
+      .flatMap((driver) =>
+        wallets
+          .filter((wallet) => driver.supportsWallet(wallet))
+          .map((wallet) => ({ driver, wallet })),
+      );
     const outcomes = await Promise.allSettled(
       attempts.map(({ driver, wallet }) =>
-        driver.inspect({
-          accountId: input.accountId,
-          wallet,
-          purpose: input.purpose,
-          marketContextId: input.marketContextId,
-          marketClass: input.marketClass,
-          positionActionRef: input.positionActionRef ?? null,
-        })
-      )
+        withinDestinationInspectionDeadline(
+          this.inspectDestinationWithReuse({
+            driver,
+            wallet,
+            request: input,
+            canonicalMarketContextId: targetMarket?.id ?? null,
+            resolvedMarketContext,
+          }),
+        ),
+      ),
     );
     const coverage = collectDestinationInspectionCoverage(
       attempts.map(({ driver, wallet }, index) => ({
         venueId: driver.venueId,
         internalWallet: wallet.isInternalWallet,
         outcome: outcomes[index],
-      }))
+      })),
     );
     if (coverage.incompleteVenueIds.length > 0) {
       throw new PreparationContractError(
         "preparation_unavailable",
-        `venue destination inspection is incomplete: ${coverage.incompleteVenueIds.join(",")}`
+        `venue destination inspection is incomplete: ${coverage.incompleteVenueIds.join(",")}`,
       );
     }
     return coverage.values;
@@ -1463,7 +1715,7 @@ export class WalletPreparationRuntimeService {
         "requested venue has no registered preparation runtime driver",
       );
     }
-    const wallets = (await AuthService.getUserWallets(input.accountId)).filter(
+    const wallets = (await this.loadWallets(input.accountId)).filter(
       (wallet) => wallet.isVerified,
     );
     const ownerCandidates = await driver.ownerCandidates({
@@ -1578,8 +1830,9 @@ export class WalletPreparationRuntimeService {
 
   async resolvedCandidates(
     input: DestinationOptionsInput,
+    resolvedMarket: ApiTradeMarket | null = null,
   ): Promise<readonly ResolvedDestinationCandidate[]> {
-    const facts = await this.frozenDestinations(input);
+    const facts = await this.frozenDestinations(input, resolvedMarket);
     const resolver = this.destinationResolver(facts);
     const options = await resolver.listOptions(input);
     return options.flatMap((option): ResolvedDestinationCandidate[] => {

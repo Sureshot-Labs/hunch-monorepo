@@ -9,6 +9,7 @@ import { PolymarketWalletPreparationAdapter } from "../../preparation/polymarket
 import {
   buildLimitlessRuntimeFacts,
   buildPolymarketRuntimeFacts,
+  storedCredentialEvidence,
   type LimitlessRuntimeEvidence,
   type PolymarketRuntimeEvidence,
 } from "../../preparation/runtime-facts.js";
@@ -73,6 +74,44 @@ function input(
         : null,
   };
 }
+
+await test("stored credentials avoid a live profile lookup while fresh", () => {
+  assert.deepEqual(
+    storedCredentialEvidence({
+      present: true,
+      boundToExactWallet: true,
+      observedAt: new Date("2026-07-24T11:59:00.000Z"),
+      now: NOW,
+      maxAgeMs: 60_000,
+    }),
+    {
+      present: true,
+      boundToExactWallet: true,
+      verified: true,
+      observedAt: "2026-07-24T11:59:00.000Z",
+      stale: false,
+    },
+  );
+});
+
+await test("stored credentials fail closed when stale", () => {
+  assert.deepEqual(
+    storedCredentialEvidence({
+      present: true,
+      boundToExactWallet: true,
+      observedAt: new Date("2026-07-24T11:58:59.999Z"),
+      now: NOW,
+      maxAgeMs: 60_000,
+    }),
+    {
+      present: true,
+      boundToExactWallet: true,
+      verified: false,
+      observedAt: null,
+      stale: true,
+    },
+  );
+});
 
 function polymarketEvidence(
   overrides: Partial<PolymarketRuntimeEvidence> = {},

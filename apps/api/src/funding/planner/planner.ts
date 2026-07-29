@@ -1,6 +1,9 @@
 import { randomUUID } from "node:crypto";
 
-import { multiplyRawByUnitPrice } from "../../account-value/decimal.js";
+import {
+  multiplyRawByUnitPrice,
+  rawForUsdCeil,
+} from "../../account-value/decimal.js";
 import type {
   FundingDiscoveryRequest,
   FundingReasonCode,
@@ -26,6 +29,7 @@ import {
   FundingPlannerError,
   assertSameAsset,
   rawAmount,
+  sameAsset,
   subtractFloor,
 } from "./money.js";
 import { decidePlacement } from "./placement-policy.js";
@@ -417,6 +421,26 @@ function valueCollateral(
   }
 }
 
+function minimumExecutableDestination(
+  candidate: ResolvedDestinationCandidate,
+  policy: FundingRuntimePolicy,
+): Money | null {
+  const valuation = candidate.collateralValuation;
+  if (!valuation) return null;
+  try {
+    return {
+      asset: candidate.option.requiredAsset,
+      raw: rawForUsdCeil({
+        usd: policy.placement.minimumDestinationUsd,
+        decimals: candidate.option.requiredAsset.decimals,
+        unitPriceUsd: valuation.unitPriceUsd,
+      }),
+    };
+  } catch {
+    return null;
+  }
+}
+
 function spendabilityUsable(
   candidate: ResolvedDestinationCandidate,
   now: Date,
@@ -574,13 +598,13 @@ export class FundingPlanner {
       request: FundingDiscoveryRequest;
       policy: FundingRuntimePolicy;
       policyRevision: string;
-      ownershipRevision: string;
+      ownershipRevision: string | Promise<string>;
     }>,
   ): Promise<IntentLiquidityProjection> {
     if (input.request.purpose === "withdrawal") {
       return this.discoverWithdrawal(input, this.now());
     }
-    const marketContext = input.request.marketContextId
+    let marketContext = input.request.marketContextId
       ? await this.dependencies.resolveMarketContext({
           accountId: input.accountId,
           marketContextId: input.request.marketContextId,
@@ -592,6 +616,30 @@ export class FundingPlanner {
       request: input.request,
       marketContext,
     });
+    if (
+      marketContext &&
+      marketContext.compatibleVenueBindingOptionIds.length === 0
+    ) {
+      const compatibleVenueBindingOptionIds = [
+        ...new Set(
+          allCandidates
+            .filter(
+              (candidate) =>
+                candidate.option.selectable &&
+                candidate.option.venueId === marketContext?.venueId &&
+                sameAsset(
+                  candidate.option.requiredAsset,
+                  marketContext.collateralAsset,
+                ),
+            )
+            .map((candidate) => candidate.bindingOption.venueBindingOptionId),
+        ),
+      ];
+      marketContext =
+        compatibleVenueBindingOptionIds.length > 0
+          ? { ...marketContext, compatibleVenueBindingOptionIds }
+          : null;
+    }
     // Destination adapters freeze evidence after their async observations
     // complete. Evaluate that evidence against a clock captured afterwards;
     // otherwise a valid asOf timestamp can appear to be in the future relative
@@ -678,7 +726,7 @@ export class FundingPlanner {
         sources: [],
         projection,
         policyRevision: input.policyRevision,
-        ownershipRevision: input.ownershipRevision,
+        ownershipRevision: await input.ownershipRevision,
         expiresAt,
       });
     }
@@ -701,16 +749,22 @@ export class FundingPlanner {
       targetVenueId: selected.option.venueId,
       targetRequirement: amount,
       availableNow,
+      minimumExecutableDestination:
+        input.request.purpose === "trade_shortfall"
+          ? minimumExecutableDestination(selected, input.policy)
+          : null,
       selectionReason,
       policy: input.policy,
     });
     const shortfallRaw =
+      input.request.purpose === "add_funds" ||
+      input.request.purpose === "convert_asset"
+        ? amount.raw
+        : subtractFloor(amount.raw, availableNow.raw);
+    const fundingRequirement =
       input.request.purpose === "trade_shortfall"
-        ? placement.destinationRequirement.raw
-        : input.request.purpose === "add_funds" ||
-            input.request.purpose === "convert_asset"
-          ? amount.raw
-          : subtractFloor(amount.raw, availableNow.raw);
+        ? placement.destinationRequirement
+        : { asset: amount.asset, raw: shortfallRaw };
     const requestedValuation = valueCollateral(selected, amount.raw, now);
     const availableValuation = valueCollateral(selected, availableNow.raw, now);
     const shortfallValuation = valueCollateral(selected, shortfallRaw, now);
@@ -735,10 +789,7 @@ export class FundingPlanner {
       destinationFacts: selected,
       destination: toResolvedRouteDestination(selected),
       placement,
-      requiredAmount: {
-        asset: amount.asset,
-        raw: shortfallRaw,
-      },
+      requiredAmount: fundingRequirement,
       policy: input.policy,
       policyRevision: input.policyRevision,
       now,
@@ -753,10 +804,7 @@ export class FundingPlanner {
         : [[], []];
     const sources = validatePlannedSources(
       discoveredSources,
-      {
-        asset: amount.asset,
-        raw: shortfallRaw,
-      },
+      fundingRequirement,
       now,
       input.request.purpose,
     );
@@ -845,7 +893,7 @@ export class FundingPlanner {
       sources,
       projection,
       policyRevision: input.policyRevision,
-      ownershipRevision: input.ownershipRevision,
+      ownershipRevision: await input.ownershipRevision,
       expiresAt,
     });
   }
@@ -898,7 +946,7 @@ export class FundingPlanner {
       request: FundingDiscoveryRequest;
       policy: FundingRuntimePolicy;
       policyRevision: string;
-      ownershipRevision: string;
+      ownershipRevision: string | Promise<string>;
     }>,
     now: Date,
   ): Promise<IntentLiquidityProjection> {
@@ -1075,7 +1123,7 @@ export class FundingPlanner {
       sources,
       projection,
       policyRevision: input.policyRevision,
-      ownershipRevision: input.ownershipRevision,
+      ownershipRevision: await input.ownershipRevision,
       expiresAt,
     });
   }

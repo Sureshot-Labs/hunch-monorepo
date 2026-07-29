@@ -6,7 +6,9 @@ import type { Pool } from "@hunch/infra";
 
 import {
   bestAskForToken,
+  findTradeMarketByRef,
   findTradeMarketByRefForVenue,
+  resolveTradeMarketByRef,
   type ApiTradeMarket,
 } from "./services/api-trading-market-repo.js";
 
@@ -59,8 +61,8 @@ await test("bestAskForToken applies strict canonical freshness", async () => {
 });
 
 await test("market ref lookup is constrained to the requested venue", async () => {
-  let capturedSql = "";
-  let capturedValues: readonly unknown[] = [];
+  const queries: { sql: string; values: readonly unknown[] }[] = [];
+  let queryCount = 0;
   const market = {
     id: "polymarket:561251",
     venue: "polymarket",
@@ -68,8 +70,15 @@ await test("market ref lookup is constrained to the requested venue", async () =
   } as ApiTradeMarket;
   const pool = {
     query: async (sql: string, values: readonly unknown[]) => {
-      capturedSql = sql;
-      capturedValues = values;
+      queryCount += 1;
+      queries.push({ sql, values });
+      if (queryCount === 1) {
+        assert.match(sql, /WHERE m\.id = \$1/i);
+        return { rows: [], rowCount: 0 };
+      }
+      if (queryCount === 2) {
+        return { rows: [{ id: market.id }], rowCount: 1 };
+      }
       return { rows: [market], rowCount: 1 };
     },
   } as unknown as Pool;
@@ -78,7 +87,89 @@ await test("market ref lookup is constrained to the requested venue", async () =
     await findTradeMarketByRefForVenue(pool, "561251", "polymarket"),
     market,
   );
-  assert.deepEqual(capturedValues, ["561251", "polymarket"]);
-  assert.match(capturedSql, /m\.venue = \$2/i);
-  assert.match(capturedSql, /m\.venue_market_id = \$1/i);
+  assert.equal(queryCount, 3);
+  assert.deepEqual(queries[1]?.values, ["561251", "polymarket"]);
+  assert.match(queries[1]?.sql ?? "", /venue_market_id = \$1/i);
+  assert.match(queries[1]?.sql ?? "", /venue = \$2/i);
+  assert.match(queries[2]?.sql ?? "", /WHERE m\.id = \$1/i);
+  assert.deepEqual(queries[2]?.values, [market.id]);
+});
+
+await test("canonical market ref uses only the indexed ID lookup", async () => {
+  const market = {
+    id: "polymarket:616902",
+    venue: "polymarket",
+    venue_market_id: "616902",
+  } as ApiTradeMarket;
+  const queries: string[] = [];
+  const pool = {
+    query: async (sql: string) => {
+      queries.push(sql);
+      return { rows: [market], rowCount: 1 };
+    },
+  } as unknown as Pool;
+
+  assert.equal(await findTradeMarketByRef(pool, market.id), market);
+  assert.equal(
+    await findTradeMarketByRefForVenue(pool, market.id, "polymarket"),
+    market,
+  );
+  assert.equal(queries.length, 2);
+  for (const sql of queries) {
+    assert.match(sql, /WHERE m\.id = \$1/i);
+    assert.doesNotMatch(sql, /m\.venue_market_id = \$1/i);
+  }
+});
+
+await test("market ref lookup resolves canonical YES and NO token IDs", async () => {
+  const market = {
+    id: "polymarket:616902",
+    venue: "polymarket",
+    venue_market_id: "616902",
+  } as ApiTradeMarket;
+
+  for (const side of ["YES", "NO"] as const) {
+    const queries: string[] = [];
+    const pool = {
+      query: async (sql: string) => {
+        queries.push(sql);
+        if (/WHERE m\.id = \$1/i.test(sql) && queries.length === 1) {
+          return { rows: [], rowCount: 0 };
+        }
+        if (/WHERE venue_market_id = \$1/i.test(sql)) {
+          return { rows: [], rowCount: 0 };
+        }
+        if (/WHERE slug = \$1/i.test(sql)) {
+          return { rows: [], rowCount: 0 };
+        }
+        if (
+          /FROM unified_market_tokens/i.test(sql) &&
+          /WHERE token_id = \$1/i.test(sql)
+        ) {
+          return {
+            rows: [{ market_id: market.id, outcome_side: side }],
+            rowCount: 1,
+          };
+        }
+        assert.match(sql, /WHERE m\.id = \$1/i);
+        return { rows: [market], rowCount: 1 };
+      },
+    } as unknown as Pool;
+
+    const resolved = await resolveTradeMarketByRef(
+      pool,
+      `token-${side.toLowerCase()}`,
+    );
+    assert.equal(resolved?.market, market);
+    assert.equal(resolved?.side, side);
+    assert.equal(queries.length, 5);
+    assert.match(queries[3] ?? "", /FROM unified_market_tokens/i);
+    assert.match(queries[3] ?? "", /WHERE token_id = \$1/i);
+    assert.match(queries[4] ?? "", /WHERE m\.id = \$1/i);
+    for (const sql of queries) {
+      assert.doesNotMatch(sql, /\bOR\b/i);
+      const whereSql = sql.slice(sql.indexOf("WHERE"));
+      assert.doesNotMatch(whereSql, /select umt\.token_id/i);
+    }
+  }
 });

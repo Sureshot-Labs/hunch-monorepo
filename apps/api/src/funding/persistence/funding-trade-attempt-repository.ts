@@ -287,8 +287,8 @@ export async function claimFundingTradeAttemptInTransaction(
           `
             update funding_trade_attempts
             set claim_token = gen_random_uuid(),
-                claim_lease_until = $2 + interval '15 seconds',
-                updated_at = $2
+                claim_lease_until = $2::timestamptz + interval '15 seconds',
+                updated_at = $2::timestamptz
             where id = $1 and state = 'claimed'
             returning ${ATTEMPT_COLUMNS}
           `,
@@ -377,7 +377,7 @@ export async function claimFundingTradeAttemptInTransaction(
         )
         values (
           $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
-          $12 + interval '15 seconds', $12
+          $12::timestamptz + interval '15 seconds', $12::timestamptz
         )
         returning ${ATTEMPT_COLUMNS}
       `,
@@ -457,7 +457,7 @@ export async function markFundingTradeAttemptSubmissionStartedInTransaction(
           and operation.user_id = attempt.user_id
           and operation.status = 'ready'
           and operation.progress_stage = 'ready_for_consumer'
-        returning ${ATTEMPT_COLUMNS}
+        returning attempt.*
       `,
     [
       input.attemptId,

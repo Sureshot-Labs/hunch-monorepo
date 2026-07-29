@@ -63,6 +63,7 @@ const multicallIface = new Interface([
 
 const CODE_CACHE_TTL_MS = fundingSidecarRuntimeConfig.evmCodeCacheTtlMs;
 const APPROVAL_CACHE_TTL_MS = fundingSidecarRuntimeConfig.evmApprovalCacheTtlMs;
+const BLOCK_NUMBER_CACHE_TTL_MS = 1_000;
 
 type CacheEntry<T> = { value: T; expiresAt: number };
 
@@ -116,6 +117,8 @@ function createTimedCache<T>(ttlMs: number) {
 
 const codeCache = createTimedCache<string>(CODE_CACHE_TTL_MS);
 const approvalCache = createTimedCache<boolean>(APPROVAL_CACHE_TTL_MS);
+const blockNumberCache = createTimedCache<bigint>(BLOCK_NUMBER_CACHE_TTL_MS);
+const rpcReadInflight = new Map<string, Promise<unknown>>();
 
 function computeBackoffMs(
   attempt: number,
@@ -143,7 +146,7 @@ function computeBackoffMs(
   );
 }
 
-async function ethRpcRequest<T>(inputs: {
+async function executeEthRpcRequest<T>(inputs: {
   rpcUrl: string;
   timeoutMs: number;
   method: string;
@@ -238,6 +241,28 @@ async function ethRpcRequest<T>(inputs: {
   throw lastError ?? new Error(`Polygon RPC ${inputs.method} failed`);
 }
 
+async function ethRpcRequest<T>(inputs: {
+  rpcUrl: string;
+  timeoutMs: number;
+  method: string;
+  params: unknown[];
+}): Promise<T> {
+  const key = JSON.stringify([
+    inputs.rpcUrl,
+    inputs.timeoutMs,
+    inputs.method,
+    inputs.params,
+  ]);
+  const pending = rpcReadInflight.get(key);
+  if (pending) return pending as Promise<T>;
+
+  const request = executeEthRpcRequest<T>(inputs).finally(() => {
+    rpcReadInflight.delete(key);
+  });
+  rpcReadInflight.set(key, request);
+  return request;
+}
+
 export type EvmErc20TransferLog = Readonly<{
   transactionHash: string;
   logIndex: number;
@@ -282,13 +307,15 @@ export async function fetchEvmBlockNumber(inputs: {
   rpcUrl: string;
   timeoutMs: number;
 }): Promise<bigint> {
-  const result = await ethRpcRequest<string>({
-    rpcUrl: inputs.rpcUrl,
-    timeoutMs: inputs.timeoutMs,
-    method: "eth_blockNumber",
-    params: [],
+  return blockNumberCache.load(inputs.rpcUrl, async () => {
+    const result = await ethRpcRequest<string>({
+      rpcUrl: inputs.rpcUrl,
+      timeoutMs: inputs.timeoutMs,
+      method: "eth_blockNumber",
+      params: [],
+    });
+    return parseRpcQuantity(result, "block number");
   });
-  return parseRpcQuantity(result, "block number");
 }
 
 export async function fetchErc20TransferLogs(inputs: {
@@ -652,46 +679,6 @@ export async function fetchErc20Allowance(inputs: {
   const value = Array.isArray(decoded) ? decoded[0] : null;
   if (typeof value !== "bigint") {
     throw new Error("Polygon RPC: invalid allowance result");
-  }
-  return value;
-}
-
-export async function fetchPolymarketOrderHashV2(inputs: {
-  rpcUrl: string;
-  timeoutMs: number;
-  exchangeAddress: string;
-  order: {
-    salt: string | number | bigint;
-    maker: string;
-    signer: string;
-    tokenId: string | number | bigint;
-    makerAmount: string | number | bigint;
-    takerAmount: string | number | bigint;
-    side: number;
-    signatureType: number;
-    timestamp: string | number | bigint;
-    metadata: string;
-    builder: string;
-    signature: string;
-  };
-}): Promise<string> {
-  const exchangeAddress = ethers.getAddress(inputs.exchangeAddress);
-  const data = polymarketExchangeV2Iface.encodeFunctionData("hashOrder", [
-    inputs.order,
-  ]);
-  const result = await ethRpcRequest<string>({
-    rpcUrl: inputs.rpcUrl,
-    timeoutMs: inputs.timeoutMs,
-    method: "eth_call",
-    params: [{ to: exchangeAddress, data }, "latest"],
-  });
-  const decoded = polymarketExchangeV2Iface.decodeFunctionResult(
-    "hashOrder",
-    result,
-  ) as unknown;
-  const value = Array.isArray(decoded) ? decoded[0] : null;
-  if (typeof value !== "string") {
-    throw new Error("Polygon RPC: invalid V2 hashOrder result");
   }
   return value;
 }

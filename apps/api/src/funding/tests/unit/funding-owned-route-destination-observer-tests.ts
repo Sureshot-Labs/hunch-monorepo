@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import type { Pool } from "@hunch/infra";
 
 import {
+  observeOwnedRouteDestination,
   ownedRouteSatisfiedAmount,
   OwnedRouteDestinationObserver,
   type OwnedRouteDestinationTarget,
@@ -42,6 +43,21 @@ assert.equal(
   }),
   "1000000",
 );
+
+let narrowObservationCalls = 0;
+const narrowObservation = await observeOwnedRouteDestination(
+  target,
+  async (input) => {
+    narrowObservationCalls += 1;
+    assert.equal(input.networkId, target.asset.networkId);
+    assert.deepEqual(input.asset, target.asset);
+    assert.equal(input.destinationAddress, target.destinationAddress);
+    return "1000000";
+  },
+);
+assert.equal(narrowObservationCalls, 1);
+assert.equal(narrowObservation?.observedRaw, "1000000");
+assert.match(narrowObservation?.revision ?? "", /^[a-f0-9]{64}$/);
 assert.equal(
   ownedRouteSatisfiedAmount({
     baselineRaw: "0",

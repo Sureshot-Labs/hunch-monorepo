@@ -9,6 +9,32 @@ export type DestinationInspectionCoverage<T> = Readonly<{
   incompleteVenueIds: readonly string[];
 }>;
 
+export function supportsDestinationMarketClass(
+  supportedMarketClasses: readonly string[],
+  requestedMarketClass: string | null,
+): boolean {
+  return (
+    requestedMarketClass == null ||
+    supportedMarketClasses.includes(requestedMarketClass)
+  );
+}
+
+export function isDestinationDriverApplicable(input: {
+  driverVenueId: string;
+  supportedMarketClasses: readonly string[];
+  requestedMarketClass: string | null;
+  targetVenueId: string | null;
+}): boolean {
+  return (
+    (input.targetVenueId == null ||
+      input.driverVenueId === input.targetVenueId) &&
+    supportsDestinationMarketClass(
+      input.supportedMarketClasses,
+      input.requestedMarketClass,
+    )
+  );
+}
+
 /**
  * A venue snapshot is complete when at least one relevant wallet inspection
  * succeeds. Internal wallets take precedence because those are the

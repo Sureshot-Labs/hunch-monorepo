@@ -126,6 +126,7 @@ export const fundingDiscoveryRequestSchema = z
     destinationOptionId: opaqueIdSchema.nullable(),
     withdrawalRecipientId: opaqueIdSchema.nullable(),
     venueBindingOptionId: opaqueIdSchema.nullable(),
+    controllerWalletRef: z.string().uuid().nullable().optional(),
     maxFeeUsd: usdAmountSchema.nullable(),
     maxSlippageBps: z.number().int().min(0).max(10_000).nullable(),
     deadline: z.string().datetime().nullable(),

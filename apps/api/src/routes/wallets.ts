@@ -1776,7 +1776,7 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
                   response.polymarket = polymarketStatus.value;
                 } else {
                   app.log.warn(
-                    { error: polymarketStatus.reason, walletAddress },
+                    { err: polymarketStatus.reason, walletAddress },
                     "Polymarket venue status lookup failed",
                   );
                   response.polymarket = {

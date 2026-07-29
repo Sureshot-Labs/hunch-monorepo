@@ -83,6 +83,29 @@ export function multiplyRawByUnitPrice(inputs: {
   return formatUnsignedDecimal(coefficient, inputs.decimals + price.scale);
 }
 
+export function rawForUsdCeil(inputs: {
+  usd: string;
+  decimals: number;
+  unitPriceUsd: string;
+}): string {
+  if (
+    !Number.isInteger(inputs.decimals) ||
+    inputs.decimals < 0 ||
+    inputs.decimals > 36
+  ) {
+    throw new Error(`decimal scale is out of range: ${inputs.decimals}`);
+  }
+  const usd = parseUnsignedDecimal(inputs.usd);
+  const price = parseUnsignedDecimal(inputs.unitPriceUsd);
+  if (price.coefficient === 0n) {
+    throw new Error("unit price must be positive");
+  }
+  const numerator =
+    usd.coefficient * 10n ** BigInt(inputs.decimals + price.scale);
+  const denominator = price.coefficient * 10n ** BigInt(usd.scale);
+  return ((numerator + denominator - 1n) / denominator).toString();
+}
+
 export function multiplyUnsignedDecimals(left: string, right: string): string {
   const leftParsed = parseUnsignedDecimal(left);
   const rightParsed = parseUnsignedDecimal(right);

@@ -1759,23 +1759,9 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
           const providerPayload = isRecord(acrossResult.providerPayload)
             ? acrossResult.providerPayload
             : {};
-          const txMeta =
-            isRecord(normalizedPayload.tx) &&
-            normalizedPayload.tx.kind === "evm"
-              ? {
-                  to:
-                    typeof normalizedPayload.tx.to === "string"
-                      ? normalizedPayload.tx.to
-                      : null,
-                  value:
-                    typeof normalizedPayload.tx.value === "string"
-                      ? normalizedPayload.tx.value
-                      : null,
-                  kind: normalizedPayload.tx.kind,
-                }
-              : isRecord(normalizedPayload.tx)
-                ? { kind: normalizedPayload.tx.kind ?? null }
-                : null;
+          const txMeta = isRecord(normalizedPayload.tx)
+            ? normalizedPayload.tx
+            : null;
           const insertResult = await pool.query<{ id: string }>(
             `
                 insert into bridge_orders (
@@ -1990,16 +1976,7 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
             ? upstream.payload.orderId
             : null;
         if (isRecord(upstream.payload.tx)) {
-          txMeta = {
-            to:
-              typeof upstream.payload.tx.to === "string"
-                ? upstream.payload.tx.to
-                : null,
-            value:
-              typeof upstream.payload.tx.value === "string"
-                ? upstream.payload.tx.value
-                : null,
-          };
+          txMeta = upstream.payload.tx;
         }
         if (upstream.payload.estimation !== undefined) {
           estimation = upstream.payload.estimation;
@@ -2069,7 +2046,14 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
           orderId,
           "created",
           fees,
-          { tx: txMeta, estimation, tokenIn, tokenOut },
+          {
+            tx: txMeta,
+            senderAddress: addresses.senderAddress,
+            recipientAddress: addresses.recipientAddress,
+            estimation,
+            tokenIn,
+            tokenOut,
+          },
           resolveLegacyCreationAdapterVersion({
             provider: "debridge",
             swapType,

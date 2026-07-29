@@ -12,6 +12,7 @@ import { ethers } from "ethers";
 import { env } from "./env.js";
 import {
   fetchErc20TransferLogs,
+  fetchEvmBlockNumber,
   parseEvmGetLogsBlockRangeLimit,
 } from "./services/polygon-rpc.js";
 import { createApiTradingApplicationService } from "./services/api-trading-service.js";
@@ -417,6 +418,45 @@ function sourceSlice(
 }
 
 const tests: TestCase[] = [
+  {
+    name: "EVM block head reads are shared across one worker scan wave",
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      let calls = 0;
+      globalThis.fetch = async () => {
+        calls += 1;
+        return new Response(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            result: "0x64",
+          }),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          },
+        );
+      };
+      try {
+        const rpcUrl = "https://polygon-block-cache-test.example";
+        assert.deepEqual(
+          await Promise.all([
+            fetchEvmBlockNumber({ rpcUrl, timeoutMs: 100 }),
+            fetchEvmBlockNumber({ rpcUrl, timeoutMs: 100 }),
+            fetchEvmBlockNumber({ rpcUrl, timeoutMs: 100 }),
+          ]),
+          [100n, 100n, 100n],
+        );
+        assert.equal(
+          await fetchEvmBlockNumber({ rpcUrl, timeoutMs: 100 }),
+          100n,
+        );
+        assert.equal(calls, 1);
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    },
+  },
   {
     name: "Polygon RPC preserves provider getLogs range errors for adaptive scanning",
     run: async () => {
@@ -1233,6 +1273,7 @@ const tests: TestCase[] = [
         title: "Market",
         token_no: "no-token",
         token_yes: "yes-token",
+        updated_at: new Date(),
         venue: "polymarket",
         venue_market_id: "market-1",
       };
@@ -1275,7 +1316,7 @@ const tests: TestCase[] = [
       }
       assert.match(
         queries[1]?.sql ?? "",
-        /CASE WHEN m\.id = \$1 THEN 0 WHEN m\.venue_market_id = \$1 THEN 1 ELSE 2 END/,
+        /CASE\s+WHEN m\.id = \$1 THEN 0\s+WHEN m\.venue_market_id = \$1 THEN 1\s+WHEN m\.slug = \$1 THEN 2/,
       );
       assert.deepEqual(queries[1]?.params, [market.slug]);
       assert.deepEqual(queries[2]?.params, [market.id]);

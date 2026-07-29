@@ -178,12 +178,19 @@ try {
   const segmentId = segmentResult.rows[0]?.id;
   assert.ok(segmentId);
 
+  let statusStarted = false;
   const client = new RelayClient({
     apiKey: "relay-integration-api-key",
     fetchImpl: async (input) => {
       const url = new URL(input.toString());
       if (url.pathname === "/requests/v2") {
         assert.equal(url.searchParams.get("includeChildRequests"), "true");
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        assert.equal(
+          statusStarted,
+          true,
+          "known Relay status and deposit-address discovery must start concurrently",
+        );
         return new Response(
           JSON.stringify({
             requests: [
@@ -203,6 +210,7 @@ try {
         );
       }
       assert.equal(url.pathname, "/intents/status/v3");
+      statusStarted = true;
       const requested = url.searchParams.get("requestId");
       return new Response(
         JSON.stringify({
@@ -223,11 +231,12 @@ try {
   );
   const firstPoll = await driver.pollOperation(pool, operationId);
   assert.deepEqual(firstPoll, {
-    requestsPolled: 2,
+    requestsPolled: 1,
     childrenDiscovered: 1,
   });
   const secondPoll = await driver.pollOperation(pool, operationId);
   assert.equal(secondPoll.childrenDiscovered, 0);
+  assert.equal(secondPoll.requestsPolled, 2);
 
   const requests = await pool.query<{
     request_kind: string;
@@ -362,7 +371,7 @@ try {
     stage: "committed",
   });
   console.log(
-    "[relay-reconciliation-integration-tests] child discovery, encrypted correlation, replay/stale webhook suppression, and observation-only terminality ok",
+    "[relay-reconciliation-integration-tests] concurrent polling, child discovery, encrypted correlation, replay/stale webhook suppression, and observation-only terminality ok",
   );
 } finally {
   const cleanupClient = await pool.connect();

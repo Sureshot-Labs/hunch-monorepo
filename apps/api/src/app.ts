@@ -127,7 +127,7 @@ export async function buildApp() {
       return;
     }
 
-    request.log.error({ error }, "Unhandled error");
+    request.log.error({ err: error }, "Unhandled error");
     const rawStatusCode =
       isRecord(error) && typeof error.statusCode === "number"
         ? error.statusCode

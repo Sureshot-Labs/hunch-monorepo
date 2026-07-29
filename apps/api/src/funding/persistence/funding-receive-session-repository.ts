@@ -377,12 +377,27 @@ export async function claimObservableFundingReceiveSessions(
   input: Readonly<{
     limit: number;
     minimumPollIntervalMs: number;
+    inactivePollIntervalMs?: number;
+    closedPollIntervalMs?: number;
+    activeWindowMs?: number;
     now: Date;
   }>,
 ): Promise<readonly FundingReceiveSessionSnapshot[]> {
   const minimumPollIntervalMs = Math.max(
     1_000,
     Math.trunc(input.minimumPollIntervalMs),
+  );
+  const inactivePollIntervalMs = Math.max(
+    minimumPollIntervalMs,
+    Math.trunc(input.inactivePollIntervalMs ?? 60_000),
+  );
+  const closedPollIntervalMs = Math.max(
+    inactivePollIntervalMs,
+    Math.trunc(input.closedPollIntervalMs ?? 300_000),
+  );
+  const activeWindowMs = Math.max(
+    minimumPollIntervalMs,
+    Math.trunc(input.activeWindowMs ?? 15 * 60_000),
   );
   const { rows } = await db.query<ReceiveSessionRow>(
     `
@@ -400,7 +415,14 @@ export async function claimObservableFundingReceiveSessions(
             )
           )
           and coalesce(last_observed_at, opened_at)
-            <= $1 - ($3::bigint * interval '1 millisecond')
+            <= $1 - (
+              case
+                when status in ('expired', 'cancelled') then $5::bigint
+                when opened_at <= $1 - ($6::bigint * interval '1 millisecond')
+                  then $4::bigint
+                else $3::bigint
+              end * interval '1 millisecond'
+            )
         order by coalesce(last_observed_at, opened_at) asc
         for update skip locked
         limit $2
@@ -416,7 +438,14 @@ export async function claimObservableFundingReceiveSessions(
       from claimed
       order by coalesce(last_observed_at, opened_at) asc
     `,
-    [input.now, input.limit, minimumPollIntervalMs],
+    [
+      input.now,
+      input.limit,
+      minimumPollIntervalMs,
+      inactivePollIntervalMs,
+      closedPollIntervalMs,
+      activeWindowMs,
+    ],
   );
   return rows.map(snapshot);
 }

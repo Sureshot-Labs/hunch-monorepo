@@ -13,6 +13,9 @@ const erc20Iface = new Interface([
   "function balanceOf(address owner) view returns (uint256)",
   "function allowance(address owner,address spender) view returns (uint256)",
 ]);
+const erc1155Iface = new Interface([
+  "function isApprovedForAll(address owner,address operator) view returns (bool)",
+]);
 
 const limitlessAmmIface = new Interface([
   "function calcBuyAmount(uint256 investmentAmount,uint256 outcomeIndex) view returns (uint256)",
@@ -40,6 +43,10 @@ const limitlessSnapshotInflight = new Map<
     allowanceClob: bigint | null;
     allowanceNegRisk: bigint | null;
     allowanceAmm: bigint | null;
+    approvedClob: boolean | null;
+    approvedNegRisk: boolean | null;
+    approvedAdapter: boolean | null;
+    approvedAmm: boolean | null;
   }>
 >();
 
@@ -47,6 +54,15 @@ function decodeBigInt(iface: Interface, fn: string, data: string): bigint {
   const decoded = iface.decodeFunctionResult(fn, data) as unknown;
   const value = Array.isArray(decoded) ? decoded[0] : null;
   if (typeof value !== "bigint") {
+    throw new Error(`Invalid ${fn} result`);
+  }
+  return value;
+}
+
+function decodeBoolean(iface: Interface, fn: string, data: string): boolean {
+  const decoded = iface.decodeFunctionResult(fn, data) as unknown;
+  const value = Array.isArray(decoded) ? decoded[0] : null;
+  if (typeof value !== "boolean") {
     throw new Error(`Invalid ${fn} result`);
   }
   return value;
@@ -293,22 +309,33 @@ export async function fetchLimitlessOnchainSnapshot(inputs: {
   clobAddress?: string | null;
   negRiskAddress?: string | null;
   ammAddress?: string | null;
+  adapterAddress?: string | null;
+  conditionalTokensAddress?: string | null;
 }): Promise<{
   usdcBalance: bigint;
   allowanceClob: bigint | null;
   allowanceNegRisk: bigint | null;
   allowanceAmm: bigint | null;
+  approvedClob: boolean | null;
+  approvedNegRisk: boolean | null;
+  approvedAdapter: boolean | null;
+  approvedAmm: boolean | null;
 }> {
   const owner = ethers.getAddress(inputs.owner);
   const clobAddress = inputs.clobAddress?.trim() || "";
   const negRiskAddress = inputs.negRiskAddress?.trim() || "";
   const ammAddress = inputs.ammAddress?.trim() || "";
+  const adapterAddress = inputs.adapterAddress?.trim() || "";
+  const conditionalTokensAddress =
+    inputs.conditionalTokensAddress?.trim() || "";
   const key = [
     inputs.rpcUrl,
     owner.toLowerCase(),
     clobAddress.toLowerCase(),
     negRiskAddress.toLowerCase(),
     ammAddress.toLowerCase(),
+    adapterAddress.toLowerCase(),
+    conditionalTokensAddress.toLowerCase(),
   ].join("|");
   const pending = limitlessSnapshotInflight.get(key);
   if (pending) return pending;
@@ -359,6 +386,30 @@ export async function fetchLimitlessOnchainSnapshot(inputs: {
       });
     }
 
+    const addConditionalApproval = (operator: string) => {
+      entries.push({
+        target: conditionalTokensAddress,
+        callData: erc1155Iface.encodeFunctionData("isApprovedForAll", [
+          owner,
+          operator,
+        ]),
+        decode: (data) => decodeBoolean(erc1155Iface, "isApprovedForAll", data),
+        fallback: false,
+      });
+    };
+    if (conditionalTokensAddress && clobAddress) {
+      addConditionalApproval(clobAddress);
+    }
+    if (conditionalTokensAddress && negRiskAddress) {
+      addConditionalApproval(negRiskAddress);
+    }
+    if (conditionalTokensAddress && adapterAddress) {
+      addConditionalApproval(adapterAddress);
+    }
+    if (conditionalTokensAddress && ammAddress) {
+      addConditionalApproval(ammAddress);
+    }
+
     const results = await fetchEvmMulticall({
       rpcUrl: inputs.rpcUrl,
       timeoutMs: inputs.timeoutMs,
@@ -387,12 +438,32 @@ export async function fetchLimitlessOnchainSnapshot(inputs: {
       ? (decoded[cursor++] as bigint)
       : null;
     const allowanceAmm = ammAddress ? (decoded[cursor++] as bigint) : null;
+    const approvedClob =
+      conditionalTokensAddress && clobAddress
+        ? (decoded[cursor++] as boolean)
+        : null;
+    const approvedNegRisk =
+      conditionalTokensAddress && negRiskAddress
+        ? (decoded[cursor++] as boolean)
+        : null;
+    const approvedAdapter =
+      conditionalTokensAddress && adapterAddress
+        ? (decoded[cursor++] as boolean)
+        : null;
+    const approvedAmm =
+      conditionalTokensAddress && ammAddress
+        ? (decoded[cursor++] as boolean)
+        : null;
 
     return {
       usdcBalance,
       allowanceClob,
       allowanceNegRisk,
       allowanceAmm,
+      approvedClob,
+      approvedNegRisk,
+      approvedAdapter,
+      approvedAmm,
     };
   })().finally(() => {
     limitlessSnapshotInflight.delete(key);

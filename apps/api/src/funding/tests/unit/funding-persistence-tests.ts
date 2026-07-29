@@ -79,7 +79,39 @@ const tests: readonly Test[] = [
         claim,
         /coalesce\(last_observed_at, opened_at\)[\s\S]*interval '1 millisecond'/i,
       );
+      assert.match(
+        claim,
+        /status in \('expired', 'cancelled'\) then \$5::bigint/i,
+      );
+      assert.match(
+        claim,
+        /opened_at <= \$1 - \(\$6::bigint \* interval '1 millisecond'\)[\s\S]*then \$4::bigint/i,
+      );
       assert.match(claim, /set last_observed_at = \$1/i);
+    },
+  },
+  {
+    name: "trade-attempt lease arithmetic pins timestamp parameters before adding intervals",
+    run: () => {
+      const source = readFileSync(
+        new URL(
+          "../../persistence/funding-trade-attempt-repository.ts",
+          import.meta.url,
+        ),
+        "utf8",
+      );
+      assert.match(
+        source,
+        /claim_lease_until = \$2::timestamptz \+ interval '15 seconds'/i,
+      );
+      assert.match(
+        source,
+        /\$12::timestamptz \+ interval '15 seconds', \$12::timestamptz/i,
+      );
+      assert.doesNotMatch(
+        source,
+        /claim_lease_until = \$2 \+ interval '15 seconds'/i,
+      );
     },
   },
   {

@@ -1,7 +1,15 @@
 #!/usr/bin/env tsx
 
 import assert from "node:assert/strict";
+import { ethers } from "ethers";
 
+import { env } from "./env.js";
+import {
+  assertEmbeddedEvmSponsorshipAllowed,
+  buildEmbeddedEvmTransactionFingerprint,
+  embeddedEvmSponsorshipTestHooks,
+  type EmbeddedEvmSponsorshipDependencies,
+} from "./services/embedded-evm-sponsorship.js";
 import {
   buildEmbeddedEthereumSendTransactionRequest,
   prepareEmbeddedEthereumTransactionRequests,
@@ -26,6 +34,16 @@ const walletContext: EmbeddedEthereumWalletContext = {
   },
 };
 
+const denyDynamicDependencies: EmbeddedEvmSponsorshipDependencies = {
+  isAuthorizedDestination: async () => false,
+  isKnownLimitlessMarket: async () => false,
+  isSupportedBridgeToken: async () => false,
+  matchesBridgeOrder: async () => false,
+  matchesFundingAction: async () => false,
+};
+
+const TEST_USER_ID = "00000000-0000-0000-0000-000000000001";
+
 const tests: TestCase[] = [
   {
     name: "embedded ethereum transaction request uses sponsored Privy RPC payload",
@@ -39,6 +57,7 @@ const tests: TestCase[] = [
           to: "0x1111111111111111111111111111111111111111",
           data: "0xabcdef12",
           value: "1000000",
+          gas: "21000",
         },
       });
 
@@ -52,6 +71,7 @@ const tests: TestCase[] = [
             to: string;
             data: string;
             value?: string;
+            gas_limit?: string;
           };
         };
       };
@@ -70,6 +90,7 @@ const tests: TestCase[] = [
       );
       assert.equal(body.params.transaction.data, "0xabcdef12");
       assert.equal(body.params.transaction.value, "0xf4240");
+      assert.equal(body.params.transaction.gas_limit, "0x5208");
     },
   },
   {
@@ -105,6 +126,295 @@ const tests: TestCase[] = [
       };
       assert.equal(secondBody.caip2, "eip155:137");
       assert.equal(secondBody.sponsor, false);
+    },
+  },
+  {
+    name: "sponsorship rejects an arbitrary client-selected contract call",
+    run: async () => {
+      await assert.rejects(
+        () =>
+          assertEmbeddedEvmSponsorshipAllowed({
+            userId: TEST_USER_ID,
+            signer: walletContext.signer,
+            chainId: 8453,
+            transactions: [
+              {
+                id: "arbitrary-call",
+                label: "Arbitrary call",
+                to: "0x1111111111111111111111111111111111111111",
+                data: "0xabcdef12",
+              },
+            ],
+            dependencies: denyDynamicDependencies,
+          }),
+        /not an allowed Hunch operation/,
+      );
+    },
+  },
+  {
+    name: "explicitly self-paid transactions keep the backwards-compatible generic path",
+    run: async () => {
+      await assert.doesNotReject(() =>
+        assertEmbeddedEvmSponsorshipAllowed({
+          userId: TEST_USER_ID,
+          signer: walletContext.signer,
+          chainId: 8453,
+          transactions: [
+            {
+              id: "self-paid-call",
+              label: "Self-paid call",
+              to: "0x1111111111111111111111111111111111111111",
+              data: "0xabcdef12",
+              sponsor: false,
+            },
+          ],
+          dependencies: denyDynamicDependencies,
+        }),
+      );
+    },
+  },
+  {
+    name: "Polymarket wrap is sponsored only for the canonical contract and an authorized recipient",
+    run: async () => {
+      const recipient = walletContext.signer;
+      const wrap = new ethers.Interface([
+        "function wrap(address asset,address recipient,uint256 amount)",
+      ]).encodeFunctionData("wrap", [
+        env.polymarketUsdceAddress,
+        recipient,
+        1_000_000n,
+      ]);
+      const dependencies: EmbeddedEvmSponsorshipDependencies = {
+        ...denyDynamicDependencies,
+        isAuthorizedDestination: async (address) =>
+          address.toLowerCase() === recipient.toLowerCase(),
+      };
+
+      await assert.doesNotReject(() =>
+        assertEmbeddedEvmSponsorshipAllowed({
+          userId: TEST_USER_ID,
+          signer: walletContext.signer,
+          chainId: 137,
+          transactions: [
+            {
+              id: "polymarket-wrap",
+              label: "Wrap pUSD",
+              to: env.polymarketCollateralOnrampAddress,
+              data: wrap,
+            },
+          ],
+          dependencies,
+        }),
+      );
+      await assert.rejects(
+        () =>
+          assertEmbeddedEvmSponsorshipAllowed({
+            userId: TEST_USER_ID,
+            signer: walletContext.signer,
+            chainId: 137,
+            transactions: [
+              {
+                id: "polymarket-wrap-wrong-recipient",
+                label: "Wrap pUSD",
+                to: env.polymarketCollateralOnrampAddress,
+                data: new ethers.Interface([
+                  "function wrap(address asset,address recipient,uint256 amount)",
+                ]).encodeFunctionData("wrap", [
+                  env.polymarketUsdceAddress,
+                  "0x2222222222222222222222222222222222222222",
+                  1_000_000n,
+                ]),
+              },
+            ],
+            dependencies,
+          }),
+        /not an allowed Hunch operation/,
+      );
+    },
+  },
+  {
+    name: "Limitless AMM call requires a Hunch-known market address",
+    run: async () => {
+      const market = "0x3333333333333333333333333333333333333333";
+      const data = new ethers.Interface([
+        "function buy(uint256 investmentAmount,uint256 outcomeIndex,uint256 minOutcomeTokens)",
+      ]).encodeFunctionData("buy", [1_000_000n, 0n, 900_000n]);
+      const allowedDependencies: EmbeddedEvmSponsorshipDependencies = {
+        ...denyDynamicDependencies,
+        isKnownLimitlessMarket: async (address) =>
+          address.toLowerCase() === market.toLowerCase(),
+      };
+
+      await assert.doesNotReject(() =>
+        assertEmbeddedEvmSponsorshipAllowed({
+          userId: TEST_USER_ID,
+          signer: walletContext.signer,
+          chainId: 8453,
+          transactions: [
+            {
+              id: "limitless-buy",
+              label: "Limitless buy",
+              to: market,
+              data,
+            },
+          ],
+          dependencies: allowedDependencies,
+        }),
+      );
+      await assert.rejects(
+        () =>
+          assertEmbeddedEvmSponsorshipAllowed({
+            userId: TEST_USER_ID,
+            signer: walletContext.signer,
+            chainId: 8453,
+            transactions: [
+              {
+                id: "limitless-buy-unknown-market",
+                label: "Limitless buy",
+                to: "0x4444444444444444444444444444444444444444",
+                data,
+              },
+            ],
+            dependencies: allowedDependencies,
+          }),
+        /not an allowed Hunch operation/,
+      );
+    },
+  },
+  {
+    name: "server-frozen funding and bridge transactions pass without widening protocol allowlists",
+    run: async () => {
+      for (const dependency of [
+        "matchesFundingAction",
+        "matchesBridgeOrder",
+      ] as const) {
+        await assert.doesNotReject(() =>
+          assertEmbeddedEvmSponsorshipAllowed({
+            userId: TEST_USER_ID,
+            signer: walletContext.signer,
+            chainId: 42161,
+            transactions: [
+              {
+                id: `exact-${dependency}`,
+                label: "Exact server transaction",
+                to: "0x5555555555555555555555555555555555555555",
+                data: "0xabcdef12",
+              },
+            ],
+            dependencies: {
+              ...denyDynamicDependencies,
+              [dependency]: async () => true,
+            },
+          }),
+        );
+      }
+    },
+  },
+  {
+    name: "bridge exact-match check binds calldata, value, gas, target, and chain",
+    run: () => {
+      const transaction = {
+        id: "bridge-submit",
+        label: "Bridge transaction",
+        to: "0x6666666666666666666666666666666666666666",
+        data: "0xabcdef12",
+        value: "7",
+        gas: "21000",
+      };
+      const payload = {
+        chainId: 137,
+        to: transaction.to,
+        data: transaction.data,
+        value: "7",
+        gas: "21000",
+      };
+      assert.equal(
+        embeddedEvmSponsorshipTestHooks.exactTransactionMatches(
+          137,
+          transaction,
+          payload,
+        ),
+        true,
+      );
+      assert.equal(
+        embeddedEvmSponsorshipTestHooks.exactTransactionMatches(
+          137,
+          transaction,
+          { ...payload, data: "0xabcdef13" },
+        ),
+        false,
+      );
+    },
+  },
+  {
+    name: "single-flight fingerprint cannot be bypassed by changing client ids or labels",
+    run: () => {
+      const base = {
+        to: "0x7777777777777777777777777777777777777777",
+        data: "0x095ea7b3",
+      };
+      const first = buildEmbeddedEvmTransactionFingerprint({
+        signer: walletContext.signer,
+        chainId: 137,
+        transactions: [{ id: "one", label: "One", ...base }],
+      });
+      const second = buildEmbeddedEvmTransactionFingerprint({
+        signer: walletContext.signer,
+        chainId: 137,
+        transactions: [{ id: "two", label: "Two", ...base }],
+      });
+      const changed = buildEmbeddedEvmTransactionFingerprint({
+        signer: walletContext.signer,
+        chainId: 137,
+        transactions: [
+          { id: "two", label: "Two", ...base, data: "0x095ea7b4" },
+        ],
+      });
+      assert.equal(first, second);
+      assert.notEqual(first, changed);
+    },
+  },
+  {
+    name: "invalid value and excessive gas fail before Privy authorization",
+    run: async () => {
+      await assert.rejects(
+        () =>
+          assertEmbeddedEvmSponsorshipAllowed({
+            userId: TEST_USER_ID,
+            signer: walletContext.signer,
+            chainId: 137,
+            transactions: [
+              {
+                id: "bad-value",
+                label: "Bad value",
+                to: env.polymarketPusdAddress,
+                data: "0x",
+                value: "not-a-number",
+              },
+            ],
+            dependencies: denyDynamicDependencies,
+          }),
+        /value is invalid/,
+      );
+      await assert.rejects(
+        () =>
+          assertEmbeddedEvmSponsorshipAllowed({
+            userId: TEST_USER_ID,
+            signer: walletContext.signer,
+            chainId: 137,
+            transactions: [
+              {
+                id: "too-much-gas",
+                label: "Too much gas",
+                to: env.polymarketPusdAddress,
+                data: "0x",
+                gas: "5000001",
+              },
+            ],
+            dependencies: denyDynamicDependencies,
+          }),
+        /gas limit is too high/,
+      );
     },
   },
   {

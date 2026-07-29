@@ -2,7 +2,12 @@ import crypto from "node:crypto";
 import { isRpcRateLimit } from "@hunch/shared";
 import { ethers } from "ethers";
 
-import { AuthService, type User } from "../auth.js";
+import {
+  AuthService,
+  type User,
+  type VenueCredentials,
+  type VenueCredentialsInfo,
+} from "../auth.js";
 import { pool, type DbQuery } from "../db.js";
 import { env } from "../env.js";
 import { markHotTokens } from "../lib/hot-tokens.js";
@@ -118,10 +123,13 @@ import { buildPolymarketRedemptionPlan } from "./polymarket-redemption-plan.js";
 import {
   fetchErc1155BalancesByOwner,
   fetchEvmCode,
-  fetchPolymarketOrderHashV2,
   fetchPolymarketOrderStatus,
   fetchPolymarketOrderStatusV2,
 } from "./polygon-rpc.js";
+import {
+  buildPolymarketOrderDomain,
+  computePolymarketOrderHashV2,
+} from "./polymarket-order-hash.js";
 import {
   fetchPolymarketOnchainSnapshot,
   POLYGON_NATIVE_USDC_ADDRESS,
@@ -302,12 +310,39 @@ type PolymarketQuoteBody = {
   amount?: number | null;
   amountType?: "usd" | "shares" | null;
   amountUsd?: number | null;
+  includeFundingPlan?: boolean | null;
   limitPrice?: number | null;
   orderType?: PolymarketOrderType | null;
   side: PolymarketSide;
   slippageBps?: number | null;
   tokenId: string;
 };
+
+const POLYMARKET_INTERACTIVE_QUOTE_TIMEOUT_MS = 12_000;
+
+async function withinPolymarketInteractiveQuoteDeadline<T>(
+  promise: Promise<T>,
+): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | null = null;
+  const deadline = new Promise<never>((_, reject) => {
+    timeout = setTimeout(
+      () =>
+        reject(
+          new PolymarketQuoteError(
+            504,
+            "Polymarket quote timed out. Try again.",
+            "quote_timeout",
+          ),
+        ),
+      POLYMARKET_INTERACTIVE_QUOTE_TIMEOUT_MS,
+    );
+  });
+  try {
+    return await Promise.race([promise, deadline]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
 
 type PolymarketMarketInfoQuery = {
   conditionId?: string | null;
@@ -797,7 +832,7 @@ export async function prepareEmbeddedPolymarketEnsureReadyRoute(input: {
     };
   } catch (error) {
     input.log?.error?.(
-      { error, userId: input.user.id, signer: input.signer },
+      { err: error, userId: input.user.id, signer: input.signer },
       "Failed to prepare embedded Polymarket readiness",
     );
     return embeddedPolymarketPreparationFailure(error);
@@ -3291,25 +3326,27 @@ export async function quotePolymarketOrderRoute(input: {
   const amountSharesInput = amountType === "shares" ? body.amount : null;
 
   try {
-    const quote = await quotePolymarketOrder(input.pool, {
-      tokenId,
-      side: body.side,
-      orderType,
-      amountType,
-      amountUsdInput,
-      amountSharesInput,
-      limitPrice: body.limitPrice,
-      slippageBps: body.slippageBps,
-      logWarn: ({ error, tokenId: warningTokenId, conditionId }) =>
-        input.log?.warn?.(
-          { error, tokenId: warningTokenId, conditionId },
-          "Failed to fetch Polymarket CLOB fee curve; using local fee fallback",
-        ),
-    });
+    const quote = await withinPolymarketInteractiveQuoteDeadline(
+      quotePolymarketOrder(input.pool, {
+        tokenId,
+        side: body.side,
+        orderType,
+        amountType,
+        amountUsdInput,
+        amountSharesInput,
+        limitPrice: body.limitPrice,
+        slippageBps: body.slippageBps,
+        logWarn: ({ error, tokenId: warningTokenId, conditionId }) =>
+          input.log?.warn?.(
+            { error, tokenId: warningTokenId, conditionId },
+            "Failed to fetch Polymarket CLOB fee curve; using local fee fallback",
+          ),
+      }),
+    );
 
     let fundingPlan: PolymarketFundingPlan | null = null;
     let fundingPlanError: string | null = null;
-    if (body.side === "BUY") {
+    if (body.side === "BUY" && body.includeFundingPlan !== false) {
       try {
         const signer = toChecksumAddress(input.signer);
         const creds = signer
@@ -3806,9 +3843,7 @@ export async function computePolymarketOrderHashRoute(input: {
     env.polymarketExchangeAddress;
 
   try {
-    const orderHash = await fetchPolymarketOrderHashV2({
-      rpcUrl: env.polygonRpcUrl,
-      timeoutMs: env.polygonRpcTimeoutMs,
+    const orderHash = computePolymarketOrderHashV2({
       exchangeAddress,
       order: normalizedForHash,
     });
@@ -3823,7 +3858,7 @@ export async function computePolymarketOrderHashRoute(input: {
     };
   } catch (error) {
     input.log?.error?.(
-      { error, userId: input.userId, signer },
+      { err: error, userId: input.userId, signer },
       "Failed to compute Polymarket order hash",
     );
     return {
@@ -4103,6 +4138,7 @@ export async function computePolymarketMaxSpendRoute(input: {
 }
 
 export async function fetchPolymarketAccountRoute(input: {
+  credentialsInfo?: VenueCredentials | VenueCredentialsInfo | null;
   log?: PolymarketRouteLogger | null;
   query: PolymarketAccountQuery;
   signer: string;
@@ -4119,11 +4155,14 @@ export async function fetchPolymarketAccountRoute(input: {
     };
   }
 
-  const credsInfo = await AuthService.getVenueCredentialsInfo(
-    input.userId,
-    "polymarket",
-    signer,
-  );
+  const credsInfo =
+    input.credentialsInfo === undefined
+      ? await AuthService.getVenueCredentialsInfo(
+          input.userId,
+          "polymarket",
+          signer,
+        )
+      : input.credentialsInfo;
   const requestedFunder = input.query.funderAddress;
   const funder = requestedFunder ?? credsInfo?.funderAddress ?? signer;
   const funderSource = requestedFunder
@@ -4343,7 +4382,7 @@ export async function fetchPolymarketAccountRoute(input: {
     }
   } catch (error) {
     input.log?.error?.(
-      { error, userId: input.userId, signer, funder },
+      { err: error, userId: input.userId, signer, funder },
       "Failed to fetch Polymarket account snapshot",
     );
     return {
@@ -5953,7 +5992,7 @@ class PolymarketMaxSpendLiveOrderLocksError extends Error {
   }
 }
 
-async function fetchPolymarketMaxSpendLiveOpenOrderLocks(inputs: {
+export async function fetchPolymarketMaxSpendLiveOpenOrderLocks(inputs: {
   creds: PolymarketL2Credentials;
   signer: string;
   wallets: string[];
@@ -6076,12 +6115,28 @@ function maxRaw(a: bigint | null | undefined, b: bigint | null | undefined) {
   return left > right ? left : right;
 }
 
+export type PolymarketMaxSpendOnchainSnapshot = Readonly<{
+  pusdBalance: bigint;
+  usdceBalance: bigint;
+  signerPusdBalance: bigint | null;
+  signerUsdceBalance: bigint | null;
+  allowanceExchange: bigint;
+  allowanceNegRisk: bigint;
+  allowanceNegRiskAdapter: bigint | null;
+  fundingRouterNonce: bigint | null;
+  fundingRouterDepositUsdceAllowance: bigint | null;
+  fundingRouterPusdAllowance: bigint | null;
+  fundingRouterUsdceAllowance: bigint | null;
+}>;
+
 export async function resolvePolymarketMaxSpendFunds(inputs: {
   creds: PolymarketL2Credentials;
   funder: string;
   funderExecutionKind: PolymarketFunderExecutionKind;
   fundingCapRaw?: bigint | null;
+  liveCollateralLocks?: ReadonlyMap<string, bigint>;
   negRisk?: boolean | null;
+  onchainSnapshot?: PolymarketMaxSpendOnchainSnapshot;
   pool: ApiTradingApplicationServiceInput["pool"];
   signer: string;
   userId: string;
@@ -6118,30 +6173,32 @@ export async function resolvePolymarketMaxSpendFunds(inputs: {
     env.polymarketNegRiskAdapterAddress?.trim() || "";
   const [snapshot, localCollateralLocks, liveCollateralLocks] =
     await Promise.all([
-      fetchPolymarketOnchainSnapshot({
-        rpcUrl: env.polygonRpcUrl,
-        timeoutMs: env.polygonRpcTimeoutMs,
-        signer: signerNormalized,
-        funder: funderNormalized,
-        includeSignerUsdc,
-        includeFeeCollectorNonce: false,
-        negRiskAdapterAddress,
-        feeCollectorAddress: null,
-        fundingRouterAddress:
-          includeSignerUsdc && env.polymarketFundingRouterAddress
-            ? env.polymarketFundingRouterAddress
-            : null,
-      }),
+      inputs.onchainSnapshot ??
+        fetchPolymarketOnchainSnapshot({
+          rpcUrl: env.polygonRpcUrl,
+          timeoutMs: env.polygonRpcTimeoutMs,
+          signer: signerNormalized,
+          funder: funderNormalized,
+          includeSignerUsdc,
+          includeFeeCollectorNonce: false,
+          negRiskAdapterAddress,
+          feeCollectorAddress: null,
+          fundingRouterAddress:
+            includeSignerUsdc && env.polymarketFundingRouterAddress
+              ? env.polymarketFundingRouterAddress
+              : null,
+        }),
       fetchOpenOrderCollateralLocks(inputs.pool, {
         userId: inputs.userId,
         polymarketWallets: lockWallets,
         limitlessWallets: [],
       }),
-      fetchPolymarketMaxSpendLiveOpenOrderLocks({
-        signer: signerNormalized,
-        creds: inputs.creds,
-        wallets: lockWallets,
-      }),
+      inputs.liveCollateralLocks ??
+        fetchPolymarketMaxSpendLiveOpenOrderLocks({
+          signer: signerNormalized,
+          creds: inputs.creds,
+          wallets: lockWallets,
+        }),
     ]);
   const funderLockKey = funderNormalized.toLowerCase();
   const signerLockKey = signerNormalized.toLowerCase();
@@ -6568,12 +6625,7 @@ async function signPolymarketOrder(input: {
   signer: string;
   walletId: string;
 }): Promise<string> {
-  const appDomain = {
-    name: "Polymarket CTF Exchange",
-    version: "2",
-    chainId: POLYGON_CHAIN_ID,
-    verifyingContract: input.exchangeAddress,
-  };
+  const appDomain = buildPolymarketOrderDomain(input.exchangeAddress);
   const signingOrder = normalizePolymarketOrderForPrivyPolicy(input.order);
   const walletClient = createServerWalletClient();
 
@@ -6858,9 +6910,7 @@ export async function submitPolymarketClientSignedOrder(input: {
     }
   }
 
-  const orderHash = await fetchPolymarketOrderHashV2({
-    rpcUrl: env.polygonRpcUrl,
-    timeoutMs: env.polygonRpcTimeoutMs,
+  const orderHash = computePolymarketOrderHashV2({
     exchangeAddress,
     order: normalizedForHash,
   });
@@ -8068,9 +8118,7 @@ async function prepareTrade(
       side: action,
       signature,
     });
-  const orderHash = await fetchPolymarketOrderHashV2({
-    rpcUrl: env.polygonRpcUrl,
-    timeoutMs: env.polygonRpcTimeoutMs,
+  const orderHash = computePolymarketOrderHashV2({
     exchangeAddress,
     order: hashOrder,
   });

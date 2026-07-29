@@ -1,13 +1,6 @@
 import { tx, type Pool, type PoolClient } from "@hunch/infra";
-import { Interface } from "ethers";
 
 import { isRecord } from "../../lib/type-guards.js";
-import { fetchEvmMulticall } from "../../services/polygon-rpc.js";
-import {
-  fetchSolanaBalanceLamports,
-  fetchSolanaTokenBalanceByOwnerAndMint,
-} from "../../services/solana-rpc.js";
-import { RELAY_PINNED_ASSETS } from "../../funding-providers/relay/mappings.js";
 import { canonicalJsonHash } from "../persistence/canonical.js";
 import type {
   AssetRef,
@@ -23,7 +16,7 @@ import {
 } from "../persistence/funding-operation-repository.js";
 import { parsePolymarketFundingEvidence } from "../preparation/polymarket-funding-snapshot.js";
 import { sameAsset } from "../planner/money.js";
-import { fundingSidecarRuntimeConfig } from "../runtime/sidecar-runtime-config.js";
+import { observeOwnedWalletAssetBalance } from "./owned-wallet-asset-balance.js";
 
 type JsonRecord = Readonly<Record<string, JsonValue>>;
 
@@ -414,77 +407,6 @@ const polymarketDepositWalletAssetsAdapter: DirectIngressObservationAdapter = {
   },
 };
 
-const ERC20_BALANCE_INTERFACE = new Interface([
-  "function balanceOf(address owner) view returns (uint256)",
-]);
-
-async function observeOwnedWalletAsset(
-  variant: DirectIngressObservationVariant,
-): Promise<string> {
-  if (variant.networkId === "solana:mainnet") {
-    if (
-      variant.asset.assetId === RELAY_PINNED_ASSETS.solanaNative &&
-      variant.asset.decimals === 9
-    ) {
-      return (
-        await fetchSolanaBalanceLamports({
-          rpcUrls: [...fundingSidecarRuntimeConfig.solanaRpcUrls],
-          owner: variant.destinationAddress,
-          timeoutMs: fundingSidecarRuntimeConfig.solanaRpcTimeoutMs,
-        })
-      ).toString();
-    }
-    const balance = await fetchSolanaTokenBalanceByOwnerAndMint({
-      rpcUrls: [...fundingSidecarRuntimeConfig.solanaRpcUrls],
-      owner: variant.destinationAddress,
-      mint: variant.asset.assetId,
-      timeoutMs: fundingSidecarRuntimeConfig.solanaRpcTimeoutMs,
-    });
-    return (balance?.amount ?? 0n).toString();
-  }
-  const rpc =
-    variant.networkId === "evm:137"
-      ? {
-          url: fundingSidecarRuntimeConfig.polygonRpcUrl,
-          timeoutMs: fundingSidecarRuntimeConfig.polygonRpcTimeoutMs,
-          multicallAddress: fundingSidecarRuntimeConfig.polygonMulticallAddress,
-        }
-      : variant.networkId === "evm:8453"
-        ? {
-            url: fundingSidecarRuntimeConfig.baseRpcUrl,
-            timeoutMs: fundingSidecarRuntimeConfig.baseRpcTimeoutMs,
-            multicallAddress: fundingSidecarRuntimeConfig.baseMulticallAddress,
-          }
-        : null;
-  if (!rpc) throw new Error("receive observation network is not supported");
-  const [result] = await fetchEvmMulticall({
-    rpcUrl: rpc.url,
-    timeoutMs: rpc.timeoutMs,
-    multicallAddress: rpc.multicallAddress,
-    calls: [
-      {
-        target: variant.asset.assetId,
-        callData: ERC20_BALANCE_INTERFACE.encodeFunctionData("balanceOf", [
-          variant.destinationAddress,
-        ]),
-        allowFailure: false,
-      },
-    ],
-  });
-  if (!result?.success) {
-    throw new Error("receive ERC-20 balance observation failed");
-  }
-  const decoded = ERC20_BALANCE_INTERFACE.decodeFunctionResult(
-    "balanceOf",
-    result.returnData,
-  );
-  const raw = decoded[0];
-  if (typeof raw !== "bigint") {
-    throw new Error("receive ERC-20 balance observation is invalid");
-  }
-  return raw.toString();
-}
-
 const ownedWalletLiquidBalancesAdapter: DirectIngressObservationAdapter = {
   adapterId: "owned_wallet_liquid_balances_v1",
   async observe(_pool, _target, variants) {
@@ -495,7 +417,11 @@ const ownedWalletLiquidBalancesAdapter: DirectIngressObservationAdapter = {
           if (typeof variant.observation.payload.balanceKey !== "string") {
             throw new Error("receive balance key is missing");
           }
-          const observedRaw = await observeOwnedWalletAsset(variant);
+          const observedRaw = await observeOwnedWalletAssetBalance({
+            networkId: variant.networkId,
+            asset: variant.asset,
+            destinationAddress: variant.destinationAddress,
+          });
           return {
             variantId: variant.variantId,
             observedRaw,

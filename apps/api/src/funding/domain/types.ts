@@ -300,6 +300,7 @@ export type FundingIntent = Readonly<{
   destinationOptionId: string | null;
   withdrawalRecipientId: string | null;
   venueBindingOptionId: string | null;
+  controllerWalletRef?: string | null;
   maxFeeUsd: string | null;
   maxSlippageBps: number | null;
   deadline: string | null;

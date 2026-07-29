@@ -31,6 +31,29 @@ export type RuntimeCredentialEvidence = Readonly<{
   stale: boolean;
 }>;
 
+export function storedCredentialEvidence(
+  input: Readonly<{
+    present: boolean;
+    boundToExactWallet: boolean;
+    observedAt: Date | null;
+    now: Date;
+    maxAgeMs: number;
+  }>,
+): RuntimeCredentialEvidence {
+  const observedTimestamp = input.observedAt?.getTime() ?? Number.NaN;
+  const stale =
+    !Number.isFinite(observedTimestamp) ||
+    observedTimestamp > input.now.getTime() ||
+    input.now.getTime() - observedTimestamp > input.maxAgeMs;
+  return {
+    present: input.present,
+    boundToExactWallet: input.boundToExactWallet,
+    verified: input.present && input.boundToExactWallet && !stale,
+    observedAt: stale ? null : (input.observedAt?.toISOString() ?? null),
+    stale,
+  };
+}
+
 export type RuntimeMarketEvidence = Readonly<{
   resolved: boolean;
   orderable: boolean;

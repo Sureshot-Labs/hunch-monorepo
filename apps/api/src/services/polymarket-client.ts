@@ -13,123 +13,144 @@ export class PolymarketRateLimiter {
   public requestQueue: Array<{
     key: string;
     requestData: PolymarketRequestData;
+    priority: "interactive" | "normal";
     resolve: (value: unknown) => void;
     reject: (error: unknown) => void;
   }> = [];
   public isProcessing = false;
-  private lastRequestTime = 0;
   public requestCount = 0;
   public windowStart = Date.now();
+  private readonly pendingByKey = new Map<string, Promise<unknown>>();
+  private activeRequests = 0;
+  private activeBackgroundRequests = 0;
+  private readonly maxConcurrentRequests = 8;
+  private readonly maxBackgroundRequests = 6;
 
-  // Polymarket rate limits by endpoint type
-  private readonly RATE_LIMITS = {
-    "price-history": { maxRequests: 100, windowMs: 10000 }, // 100 requests per 10 seconds
-    book: { maxRequests: 200, windowMs: 10000 }, // 200 requests per 10 seconds
-    books: { maxRequests: 80, windowMs: 10000 }, // 80 requests per 10 seconds
-    price: { maxRequests: 200, windowMs: 10000 }, // 200 requests per 10 seconds
-    prices: { maxRequests: 80, windowMs: 10000 }, // 80 requests per 10 seconds
-    midpoint: { maxRequests: 200, windowMs: 10000 }, // 200 requests per 10 seconds
-    spreads: { maxRequests: 200, windowMs: 10000 }, // 200 requests per 10 seconds
-  };
-
-  private readonly WINDOW_MS = 10000; // 10 seconds
-  private readonly MIN_REQUEST_INTERVAL = 50; // Minimum 50ms between requests
-
-  async queueRequest<T = unknown>(
+  queueRequest<T = unknown>(
     key: string,
     requestData: PolymarketRequestData,
+    options: { priority?: "interactive" | "normal" } = {},
   ): Promise<T> {
-    return new Promise<T>((resolve, reject) => {
-      const resolveUnknown = (value: unknown) => resolve(value as T);
-      this.requestQueue.push({
-        key,
-        requestData,
-        resolve: resolveUnknown,
-        reject,
-      });
-      void this.processQueue().catch((error) => {
-        // Avoid crashing the process if the queue loop throws unexpectedly.
-        this.isProcessing = false;
-        reject(error);
-      });
-    });
-  }
-
-  private async processQueue() {
-    if (this.isProcessing || this.requestQueue.length === 0) {
-      return;
+    const existing = this.pendingByKey.get(key);
+    if (existing) {
+      if (options.priority === "interactive") {
+        this.promoteQueuedRequest(key);
+      }
+      return existing as Promise<T>;
     }
 
-    this.isProcessing = true;
+    const priority = options.priority ?? "normal";
+    const requestPromise = new Promise<T>((resolve, reject) => {
+      const resolveUnknown = (value: unknown) => resolve(value as T);
+      const request = {
+        key,
+        requestData,
+        priority,
+        resolve: resolveUnknown,
+        reject,
+      };
+      if (priority === "interactive") {
+        this.requestQueue.unshift(request);
+      } else {
+        this.requestQueue.push(request);
+      }
+    });
 
-    while (this.requestQueue.length > 0) {
+    this.pendingByKey.set(key, requestPromise);
+    const clearPending = () => {
+      if (this.pendingByKey.get(key) === requestPromise) {
+        this.pendingByKey.delete(key);
+      }
+    };
+    void requestPromise.then(clearPending, clearPending);
+    this.processQueue();
+    return requestPromise;
+  }
+
+  private promoteQueuedRequest(key: string): void {
+    const index = this.requestQueue.findIndex((request) => request.key === key);
+    if (index <= 0) return;
+    const [request] = this.requestQueue.splice(index, 1);
+    if (!request) return;
+    request.priority = "interactive";
+    this.requestQueue.unshift(request);
+  }
+
+  private processQueue(): void {
+    while (this.activeRequests < this.maxConcurrentRequests) {
+      const interactiveIndex = this.requestQueue.findIndex(
+        (request) => request.priority === "interactive",
+      );
+      const nextIndex =
+        interactiveIndex >= 0
+          ? interactiveIndex
+          : this.activeBackgroundRequests < this.maxBackgroundRequests
+            ? 0
+            : -1;
+      if (nextIndex < 0) break;
+
+      const [request] = this.requestQueue.splice(nextIndex, 1);
+      if (!request) break;
+
       const now = Date.now();
-
-      // Reset window if needed
-      if (now - this.windowStart >= this.WINDOW_MS) {
+      if (now - this.windowStart >= 10_000) {
         this.requestCount = 0;
         this.windowStart = now;
       }
 
-      // Check if we can make a request (use most restrictive limit)
-      const maxRequests = Math.min(
-        ...Object.values(this.RATE_LIMITS).map((limit) => limit.maxRequests),
-      );
-      if (this.requestCount >= maxRequests) {
-        // Wait for window to reset
-        const waitTime = this.WINDOW_MS - (now - this.windowStart);
-        await new Promise((resolve) => setTimeout(resolve, waitTime + 100));
-        continue;
+      this.activeRequests += 1;
+      if (request.priority === "normal") {
+        this.activeBackgroundRequests += 1;
       }
-
-      // Ensure minimum interval between requests
-      const timeSinceLastRequest = now - this.lastRequestTime;
-      if (timeSinceLastRequest < this.MIN_REQUEST_INTERVAL) {
-        await new Promise((resolve) =>
-          setTimeout(resolve, this.MIN_REQUEST_INTERVAL - timeSinceLastRequest),
-        );
-      }
-
-      const request = this.requestQueue.shift();
-      if (!request) break;
-
-      try {
-        let result;
-
-        // Handle different request types
-        if (request.requestData.isPost) {
-          if (!request.requestData.endpoint) {
-            throw new Error(
-              "Polymarket request isPost=true but endpoint is missing",
-            );
-          }
-          result = await this.makePostRequest(
-            request.requestData.endpoint,
-            request.requestData.body,
-          );
-        } else if (request.requestData.endpoint) {
-          result = await this.makeRequest(
-            request.requestData.endpoint,
-            request.requestData.params,
-          );
-        } else {
-          // Legacy price history request
-          const params = new URLSearchParams({
-            market: request.key,
-            interval: "max",
-          });
-          result = await this.makeRequest("/prices-history", params);
-        }
-
-        request.resolve(result);
-        this.requestCount++;
-        this.lastRequestTime = Date.now();
-      } catch (error) {
-        request.reject(error);
-      }
+      this.requestCount += 1;
+      this.isProcessing = true;
+      void this.executeRequest(request);
     }
 
-    this.isProcessing = false;
+    if (this.activeRequests === 0) {
+      this.isProcessing = false;
+    }
+  }
+
+  private async executeRequest(
+    request: (typeof this.requestQueue)[number],
+  ): Promise<void> {
+    try {
+      let result;
+
+      if (request.requestData.isPost) {
+        if (!request.requestData.endpoint) {
+          throw new Error(
+            "Polymarket request isPost=true but endpoint is missing",
+          );
+        }
+        result = await this.makePostRequest(
+          request.requestData.endpoint,
+          request.requestData.body,
+        );
+      } else if (request.requestData.endpoint) {
+        result = await this.makeRequest(
+          request.requestData.endpoint,
+          request.requestData.params,
+        );
+      } else {
+        const params = new URLSearchParams({
+          market: request.key,
+          interval: "max",
+        });
+        result = await this.makeRequest("/prices-history", params);
+      }
+
+      request.resolve(result);
+    } catch (error) {
+      request.reject(error);
+    } finally {
+      this.activeRequests -= 1;
+      if (request.priority === "normal") {
+        this.activeBackgroundRequests -= 1;
+      }
+      this.processQueue();
+    }
   }
 
   private async makeRequest(
@@ -396,10 +417,12 @@ export class PolymarketClient {
     // Store the promise for deduplication (using max data key)
     this.pendingRequests.set(maxDataKey, requestPromise);
 
-    // Clean up when request completes
-    requestPromise.finally(() => {
+    // Use both promise branches instead of a bare finally(), whose returned
+    // rejected promise can become an unhandled rejection in Bun.
+    const clearPending = () => {
       this.pendingRequests.delete(maxDataKey);
-    });
+    };
+    void requestPromise.then(clearPending, clearPending);
 
     // Wait for max data and then process it
     const maxData = await requestPromise;
@@ -420,16 +443,24 @@ export class PolymarketClient {
    */
   async getOrderBook(tokenId: string): Promise<unknown> {
     const params = new URLSearchParams({ token_id: tokenId });
-    return this.rateLimiter.queueRequest(`/book:${tokenId}`, {
-      endpoint: "/book",
-      params,
-    });
+    return this.rateLimiter.queueRequest(
+      `/book:${tokenId}`,
+      {
+        endpoint: "/book",
+        params,
+      },
+      { priority: "interactive" },
+    );
   }
 
   async getClobMarketInfo(conditionId: string): Promise<unknown> {
-    return this.rateLimiter.queueRequest(`/clob-markets:${conditionId}`, {
-      endpoint: `/clob-markets/${conditionId}`,
-    });
+    return this.rateLimiter.queueRequest(
+      `/clob-markets:${conditionId}`,
+      {
+        endpoint: `/clob-markets/${conditionId}`,
+      },
+      { priority: "interactive" },
+    );
   }
 
   /**

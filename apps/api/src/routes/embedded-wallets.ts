@@ -45,6 +45,10 @@ import {
   resolveEmbeddedEthereumWalletContext,
 } from "../services/embedded-ethereum.js";
 import {
+  assertEmbeddedEvmSponsorshipAllowed,
+  buildEmbeddedEvmTransactionFingerprint,
+} from "../services/embedded-evm-sponsorship.js";
+import {
   buildEmbeddedExecutionSingleFlightKey,
   isEmbeddedExecutionInProgressError,
   runEmbeddedExecutionSingleFlight,
@@ -2486,6 +2490,12 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
           user,
           signer,
         });
+        await assertEmbeddedEvmSponsorshipAllowed({
+          userId: user.id,
+          signer: context.signer,
+          chainId: request.body.chainId,
+          transactions: request.body.transactions,
+        });
         const requests = prepareEmbeddedEthereumTransactionRequests({
           context,
           chainId: request.body.chainId,
@@ -2537,13 +2547,24 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
           user,
           signer,
         });
+        await assertEmbeddedEvmSponsorshipAllowed({
+          userId: user.id,
+          signer: context.signer,
+          chainId: request.body.chainId,
+          transactions: request.body.transactions,
+        });
+        const transactionFingerprint = buildEmbeddedEvmTransactionFingerprint({
+          signer: context.signer,
+          chainId: request.body.chainId,
+          transactions: request.body.transactions,
+        });
         const result = await runEmbeddedExecutionSingleFlight({
           key: buildEmbeddedExecutionSingleFlightKey(
             "embedded-wallets",
             "ethereum",
             context.signer,
             request.body.chainId,
-            request.body.executionKey,
+            transactionFingerprint,
           ),
           redis: await getRedis(),
           run: async () => {

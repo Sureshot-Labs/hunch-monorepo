@@ -330,6 +330,9 @@ export class FundingReceiveSessionObserver {
       {
         limit: Math.min(1_000, batchLimit * 8),
         minimumPollIntervalMs: input.minimumPollIntervalMs ?? 10_000,
+        inactivePollIntervalMs: 60_000,
+        closedPollIntervalMs: 300_000,
+        activeWindowMs: 15 * 60_000,
         now,
       },
     );

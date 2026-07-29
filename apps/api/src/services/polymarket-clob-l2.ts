@@ -11,7 +11,14 @@ export type PolymarketL2Credentials = {
   apiPassphrase: string;
 };
 
+export type PolymarketL2Response =
+  | { ok: true; payload: unknown }
+  | { ok: false; status: number; payload: unknown };
+
 const STRIP_QUERY_FROM_SIGNATURE = true;
+const clobClockOffsetSecByBaseUrl = new Map<string, number>();
+const clobTimeSyncByBaseUrl = new Map<string, Promise<number | null>>();
+const clobGetInflight = new Map<string, Promise<PolymarketL2Response>>();
 
 function normalizeBaseUrl(baseUrl: string): string {
   const trimmed = baseUrl.trim();
@@ -121,7 +128,43 @@ async function fetchClobTime(inputs: {
   }
 }
 
-export async function polymarketL2Request(inputs: {
+function clobTimestampSec(baseUrl: string): number {
+  return (
+    Math.floor(Date.now() / 1_000) +
+    (clobClockOffsetSecByBaseUrl.get(baseUrl) ?? 0)
+  );
+}
+
+async function syncClobTime(inputs: {
+  baseUrl: string;
+  timeoutMs: number;
+  telemetry?: WalletIntelRetryTelemetry | null;
+}): Promise<number | null> {
+  const activeSync = clobTimeSyncByBaseUrl.get(inputs.baseUrl);
+  if (activeSync) return activeSync;
+
+  const sync = (async () => {
+    const remoteTime = await fetchClobTime(inputs);
+    if (remoteTime == null) return null;
+
+    clobClockOffsetSecByBaseUrl.set(
+      inputs.baseUrl,
+      remoteTime - Math.floor(Date.now() / 1_000),
+    );
+    return remoteTime;
+  })();
+  clobTimeSyncByBaseUrl.set(inputs.baseUrl, sync);
+
+  try {
+    return await sync;
+  } finally {
+    if (clobTimeSyncByBaseUrl.get(inputs.baseUrl) === sync) {
+      clobTimeSyncByBaseUrl.delete(inputs.baseUrl);
+    }
+  }
+}
+
+async function executePolymarketL2Request(inputs: {
   baseUrl: string;
   timeoutMs: number;
   address: string;
@@ -130,10 +173,7 @@ export async function polymarketL2Request(inputs: {
   requestPath: string;
   body?: unknown;
   telemetry?: WalletIntelRetryTelemetry | null;
-}): Promise<
-  | { ok: true; payload: unknown }
-  | { ok: false; status: number; payload: unknown }
-> {
+}): Promise<PolymarketL2Response> {
   const baseUrl = normalizeBaseUrl(inputs.baseUrl);
   const requestPath = inputs.requestPath.startsWith("/")
     ? inputs.requestPath
@@ -146,44 +186,82 @@ export async function polymarketL2Request(inputs: {
   const bodyString =
     inputs.body === undefined ? undefined : JSON.stringify(inputs.body);
 
-  const remoteTime = await fetchClobTime({
-    baseUrl,
-    timeoutMs: inputs.timeoutMs,
-    telemetry: inputs.telemetry ?? null,
-  });
+  const send = (timestampSec?: number) => {
+    const headers = new Headers({
+      accept: "application/json",
+      "user-agent": "Hunch-API/1.0",
+      ...createPolymarketL2Headers({
+        address: inputs.address,
+        creds: inputs.creds,
+        method: inputs.method,
+        requestPath: requestPathForSignature,
+        body: bodyString,
+        ...(timestampSec != null ? { timestampSec } : {}),
+      }),
+    });
+    if (bodyString !== undefined) {
+      headers.set("content-type", "application/json; charset=utf-8");
+    }
+    return fetchWithWalletIntelRetry({
+      url: `${baseUrl}${requestPath}`,
+      init: {
+        method: inputs.method,
+        headers,
+        body: bodyString,
+      },
+      timeoutMs: inputs.timeoutMs,
+      allowRetry: inputs.method === "GET",
+      telemetry: inputs.telemetry ?? null,
+    });
+  };
 
-  const headers = new Headers({
-    accept: "application/json",
-    "user-agent": "Hunch-API/1.0",
-    ...createPolymarketL2Headers({
-      address: inputs.address,
-      creds: inputs.creds,
-      method: inputs.method,
-      requestPath: requestPathForSignature,
-      body: bodyString,
-      ...(remoteTime != null ? { timestampSec: remoteTime } : {}),
-    }),
-  });
-  if (bodyString !== undefined) {
-    headers.set("content-type", "application/json; charset=utf-8");
+  const requestTimestamp = clobTimestampSec(baseUrl);
+  let res = await send(requestTimestamp);
+  if (res.status === 401) {
+    const remoteTime = await syncClobTime({
+      baseUrl,
+      timeoutMs: inputs.timeoutMs,
+      telemetry: inputs.telemetry ?? null,
+    });
+    if (remoteTime != null && remoteTime !== requestTimestamp) {
+      res = await send(remoteTime);
+    }
   }
-  const res = await fetchWithWalletIntelRetry({
-    url: `${baseUrl}${requestPath}`,
-    init: {
-      method: inputs.method,
-      headers,
-      body: bodyString,
-    },
-    timeoutMs: inputs.timeoutMs,
-    allowRetry: inputs.method === "GET",
-    telemetry: inputs.telemetry ?? null,
-  });
 
   const payload = await readJsonOrText(res);
   if (!res.ok) {
     return { ok: false, status: res.status, payload };
   }
   return { ok: true, payload };
+}
+
+export function polymarketL2Request(inputs: {
+  baseUrl: string;
+  timeoutMs: number;
+  address: string;
+  creds: PolymarketL2Credentials;
+  method: "GET" | "POST" | "DELETE";
+  requestPath: string;
+  body?: unknown;
+  telemetry?: WalletIntelRetryTelemetry | null;
+}): Promise<PolymarketL2Response> {
+  if (inputs.method !== "GET") return executePolymarketL2Request(inputs);
+
+  const key = JSON.stringify([
+    normalizeBaseUrl(inputs.baseUrl),
+    inputs.address.trim().toLowerCase(),
+    inputs.creds.apiKey,
+    inputs.requestPath,
+    inputs.body ?? null,
+  ]);
+  const pending = clobGetInflight.get(key);
+  if (pending) return pending;
+
+  const request = executePolymarketL2Request(inputs).finally(() => {
+    clobGetInflight.delete(key);
+  });
+  clobGetInflight.set(key, request);
+  return request;
 }
 
 export function extractOrderArray(payload: unknown): unknown[] {

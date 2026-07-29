@@ -242,7 +242,10 @@ export class RelayReconciliationDriver {
         ciphertext: request.request_ref_ciphertext,
       });
     }
-    let childrenDiscovered = 0;
+    const depositTargets: Array<{
+      segment: StoredRelaySegment;
+      depositAddress: string;
+    }> = [];
     for (const segment of segmentResult.rows) {
       if (!segment.deposit_address_ciphertext) continue;
       if (
@@ -259,8 +262,38 @@ export class RelayReconciliationDriver {
       const depositAddress = this.depositAddressCodec.decrypt(
         segment.deposit_address_ciphertext,
       );
-      const requests =
-        await this.client.requestsByDepositAddress(depositAddress);
+      depositTargets.push({ segment, depositAddress });
+    }
+    const knownRequests = [...existingByRequestId.entries()].map(
+      ([requestId, request]) => {
+        if (!segmentsById.has(request.segment_id)) {
+          throw new Error(
+            "Relay provider request references another operation",
+          );
+        }
+        return { requestId, request };
+      },
+    );
+
+    const [depositResults, statusResults] = await Promise.all([
+      Promise.all(
+        depositTargets.map(async ({ segment, depositAddress }) => ({
+          segment,
+          depositAddress,
+          requests: await this.client.requestsByDepositAddress(depositAddress),
+        })),
+      ),
+      Promise.all(
+        knownRequests.map(async ({ requestId, request }) => ({
+          requestId,
+          request,
+          status: await this.client.status(requestId),
+        })),
+      ),
+    ]);
+
+    let childrenDiscovered = 0;
+    for (const { segment, depositAddress, requests } of depositResults) {
       const discoveredRequestIds = new Set<string>();
       for (const request of requests) {
         if (discoveredRequestIds.has(request.requestId)) {
@@ -311,12 +344,7 @@ export class RelayReconciliationDriver {
       }
     }
 
-    let requestsPolled = 0;
-    for (const [requestId, request] of existingByRequestId) {
-      if (!segmentsById.has(request.segment_id)) {
-        throw new Error("Relay provider request references another operation");
-      }
-      const status = await this.client.status(requestId);
+    for (const { requestId, request, status } of statusResults) {
       if (status.requestId !== undefined && status.requestId !== requestId) {
         throw new Error("Relay Status v3 request ID does not match lookup");
       }
@@ -332,9 +360,11 @@ export class RelayReconciliationDriver {
         referenceCodec: this.referenceCodec,
         now,
       });
-      requestsPolled += 1;
     }
-    return { requestsPolled, childrenDiscovered };
+    return {
+      requestsPolled: statusResults.length,
+      childrenDiscovered,
+    };
   }
 }
 

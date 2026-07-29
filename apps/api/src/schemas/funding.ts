@@ -56,6 +56,7 @@ const preparationRequestBaseSchema = z
     marketContextId: marketReferenceSchema.nullable(),
     marketClass: z.string().trim().min(1).max(80).nullable(),
     positionActionRef: z.string().uuid().nullable().optional(),
+    controllerWalletRef: z.string().uuid().nullable().optional(),
   })
   .strict();
 

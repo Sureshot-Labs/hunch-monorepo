@@ -17,6 +17,7 @@ import type {
   FundingDiscoveryRequest,
   FundingExecutionPlan,
   FundingTarget,
+  PlacementDecision,
   SourceOption,
   VenueAccountBinding,
   VenueBindingOption,
@@ -512,6 +513,58 @@ await test("trade buffer is requested explicitly and bounded by raw and USD caps
       }),
     /buffer exceeds/i,
   );
+});
+
+await test("trade shortfall refills up to the bounded executable route floor", () => {
+  const policy = mutablePolicy();
+  const placement = decidePlacement({
+    intent: intent("trade_shortfall", "1000000"),
+    target: target(POLYGON_PUSD),
+    targetVenueId: "polymarket",
+    targetRequirement: { asset: POLYGON_PUSD, raw: "1000000" },
+    availableNow: { asset: POLYGON_PUSD, raw: "940000" },
+    minimumExecutableDestination: {
+      asset: POLYGON_PUSD,
+      raw: "1000000",
+    },
+    selectionReason: "current_trade",
+    policy,
+  });
+
+  assert.equal(placement.destinationRequirement.raw, "1000000");
+  assert.equal(placement.boundedBuffer?.raw, "940000");
+
+  const alreadyFunded = decidePlacement({
+    intent: intent("trade_shortfall", "1000000"),
+    target: target(POLYGON_PUSD),
+    targetVenueId: "polymarket",
+    targetRequirement: { asset: POLYGON_PUSD, raw: "1000000" },
+    availableNow: { asset: POLYGON_PUSD, raw: "1000000" },
+    minimumExecutableDestination: {
+      asset: POLYGON_PUSD,
+      raw: "1000000",
+    },
+    selectionReason: "current_trade",
+    policy,
+  });
+  assert.equal(alreadyFunded.destinationRequirement.raw, "0");
+  assert.equal(alreadyFunded.boundedBuffer, null);
+
+  const belowRouteFloor = decidePlacement({
+    intent: intent("trade_shortfall", "500000"),
+    target: target(POLYGON_PUSD),
+    targetVenueId: "polymarket",
+    targetRequirement: { asset: POLYGON_PUSD, raw: "500000" },
+    availableNow: { asset: POLYGON_PUSD, raw: "490000" },
+    minimumExecutableDestination: {
+      asset: POLYGON_PUSD,
+      raw: "1000000",
+    },
+    selectionReason: "current_trade",
+    policy,
+  });
+  assert.equal(belowRouteFloor.destinationRequirement.raw, "500000");
+  assert.equal(belowRouteFloor.boundedBuffer?.raw, "490000");
 });
 
 await test("Placement Policy has no Base parking or rebalance path", () => {
@@ -1431,6 +1484,48 @@ await test("planner requires destination choice and keeps external balances out 
   assert.equal(projection.destinationOptionId, null);
 });
 
+await test("destination and source discovery do not wait for ownership persistence evidence", async () => {
+  const policy = mutablePolicy();
+  policy.creationMode = "on";
+  let ownershipSettled = false;
+  let resolveOwnership!: (value: string) => void;
+  let signalSourceStarted!: () => void;
+  const ownershipRevision = new Promise<string>((resolve) => {
+    resolveOwnership = (value) => {
+      ownershipSettled = true;
+      resolve(value);
+    };
+  });
+  const sourceStarted = new Promise<void>((resolve) => {
+    signalSourceStarted = resolve;
+  });
+  const discovery = new FundingPlanner({
+    listDestinations: async () => {
+      assert.equal(ownershipSettled, false);
+      return [candidate()];
+    },
+    resolveMarketContext: async () => null,
+    listSources: async () => {
+      assert.equal(ownershipSettled, false);
+      signalSourceStarted();
+      return [];
+    },
+    store: new MemoryPlanningStore(),
+    now: () => NOW,
+  }).discover({
+    accountId: USER_ID,
+    request: intent("add_funds", "1000000"),
+    policy,
+    policyRevision: "policy_revision_12345678",
+    ownershipRevision,
+  });
+
+  await sourceStarted;
+  resolveOwnership("ownership_revision_12345678");
+  const projection = await discovery;
+  assert.equal(projection.destinationOptionId, "destination_poly_12345678");
+});
+
 await test("single destination values exact liquidity without inventing consent", async () => {
   const policy = mutablePolicy();
   policy.creationMode = "on";
@@ -1901,6 +1996,121 @@ await test("planner preserves Add Funds exact amount and trade shortfall", async
   );
   assert.equal(trade.shortfallRaw, "3000000");
   assert.equal(trade.sourceOptions[0]?.minimumDestination?.raw, "3000000");
+});
+
+await test("one liquidity discovery resolves market context and destination candidates once", async () => {
+  const policy = mutablePolicy();
+  policy.creationMode = "on";
+  const store = new MemoryPlanningStore();
+  const destination = candidate({
+    option: destinationOption({ preparationPurpose: "buy" }),
+    bindingOption: bindingOption({ preparationPurpose: "buy" }),
+    availableNow: { asset: POLYGON_PUSD, raw: "1000000" },
+  });
+  const request = intent("trade_shortfall", "1000000");
+  let marketResolutionCalls = 0;
+  let destinationDiscoveryCalls = 0;
+
+  const projection = await new FundingPlanner({
+    resolveMarketContext: async ({ marketContextId }) => {
+      marketResolutionCalls += 1;
+      return {
+        marketContextId,
+        venueId: "polymarket",
+        marketId: "market_12345678",
+        side: "YES",
+        executionProfileId: "profile_polymarket",
+        marketPriceRevision: "marketprice_12345678",
+        collateralAsset: POLYGON_PUSD,
+        requestedCollateralRaw: "1000000",
+        compatibleVenueBindingOptionIds: [],
+        expiresAt: "2026-07-24T12:01:00.000Z",
+      };
+    },
+    listDestinations: async () => {
+      destinationDiscoveryCalls += 1;
+      return [destination];
+    },
+    listSources: async () => [],
+    store,
+    now: () => NOW,
+  }).discover({
+    accountId: USER_ID,
+    request,
+    policy,
+    policyRevision: "policy_revision_12345678",
+    ownershipRevision: "ownership_revision_12345678",
+  });
+
+  assert.equal(marketResolutionCalls, 1);
+  assert.equal(destinationDiscoveryCalls, 1);
+  assert.equal(
+    projection.destinationOptionId,
+    destination.option.destinationOptionId,
+  );
+  assert.deepEqual(
+    store.rows.get(projection.liquidityProjectionId)?.plannerSnapshot
+      .marketContext?.compatibleVenueBindingOptionIds,
+    [destination.bindingOption.venueBindingOptionId],
+  );
+});
+
+await test("planner keeps the true tiny shortfall while quoting one executable trade refill", async () => {
+  const policy = mutablePolicy();
+  policy.creationMode = "on";
+  let plannedRequiredRaw: string | null = null;
+  const plannedPlacements: PlacementDecision[] = [];
+  const destination = candidate({
+    option: destinationOption({ preparationPurpose: "buy" }),
+    bindingOption: bindingOption({ preparationPurpose: "buy" }),
+    availableNow: { asset: POLYGON_PUSD, raw: "940000" },
+  });
+  const request = intent("trade_shortfall", "1000000", {
+    destinationOptionId: null,
+  });
+
+  const projection = await new FundingPlanner({
+    listDestinations: async () => [destination],
+    resolveMarketContext: async ({ marketContextId }) => ({
+      marketContextId,
+      venueId: "polymarket",
+      marketId: "market_12345678",
+      side: "yes",
+      executionProfileId: "profile_polymarket",
+      marketPriceRevision: "marketprice_12345678",
+      collateralAsset: POLYGON_PUSD,
+      requestedCollateralRaw: "1000000",
+      compatibleVenueBindingOptionIds: [
+        destination.bindingOption.venueBindingOptionId,
+      ],
+      expiresAt: "2026-07-24T12:01:00.000Z",
+    }),
+    listSources: async ({ placement, requiredAmount }) => {
+      plannedRequiredRaw = requiredAmount.raw;
+      plannedPlacements.push(placement);
+      return [plannedSource(requiredAmount.raw)];
+    },
+    store: new MemoryPlanningStore(),
+    now: () => NOW,
+  }).discover({
+    accountId: USER_ID,
+    request,
+    policy,
+    policyRevision: "policy_revision_12345678",
+    ownershipRevision: "ownership_revision_12345678",
+  });
+
+  assert.equal(projection.shortfallRaw, "60000");
+  assert.equal(projection.shortfallUsd, "0.06");
+  assert.equal(plannedRequiredRaw, "1000000");
+  assert.equal(plannedPlacements[0]?.destinationRequirement.raw, "1000000");
+  assert.equal(plannedPlacements[0]?.boundedBuffer?.raw, "940000");
+  assert.equal(projection.sourceOptions[0]?.minimumDestination?.raw, "1000000");
+  assert.equal(projection.mode, "inline_funding");
+  assert.equal(
+    projection.reasonCodes.includes("insufficient_liquidity"),
+    false,
+  );
 });
 
 await test("withdrawal binds one owner recipient through discovery, quote, and atomic commit", async () => {

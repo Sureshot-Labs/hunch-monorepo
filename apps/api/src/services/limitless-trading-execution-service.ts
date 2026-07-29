@@ -952,6 +952,7 @@ function buildLimitlessAccountCacheKey(inputs: {
   ammSpender: string;
   clobSpender: string;
   credsUpdatedAt: string | null;
+  includeSignerCode: boolean;
   negRiskSpender: string;
   signer: string;
   tokenId: string;
@@ -964,6 +965,7 @@ function buildLimitlessAccountCacheKey(inputs: {
     normalizeAddress(inputs.negRiskSpender),
     normalizeAddress(inputs.adapterSpender),
     normalizeAddress(inputs.ammSpender),
+    inputs.includeSignerCode ? "signer-code" : "binding-owned-eoa",
     inputs.tokenId,
     inputs.credsUpdatedAt ?? "none",
   ].join("|");
@@ -1662,6 +1664,7 @@ export async function syncLimitlessOrderHistoryRoute(input: {
 }
 
 export async function fetchLimitlessAccountRoute(input: {
+  includeSignerCode?: boolean;
   log?: LimitlessRouteLogger | null;
   query: LimitlessAccountQuery;
   signerRaw: string;
@@ -1715,6 +1718,7 @@ export async function fetchLimitlessAccountRoute(input: {
   const adapterSpender = input.query.adapterSpender ?? null;
   const ammSpender = input.query.ammSpender ?? null;
   const tokenId = normalizeLimitlessRawTokenId(input.query.tokenId);
+  const includeSignerCode = input.includeSignerCode !== false;
 
   const cacheEnabled = !refresh && env.limitlessAccountCacheTtlMs > 0;
   const cacheKey = buildLimitlessAccountCacheKey({
@@ -1724,6 +1728,7 @@ export async function fetchLimitlessAccountRoute(input: {
     negRiskSpender: negRiskSpender ?? "none",
     adapterSpender: adapterSpender ?? "none",
     ammSpender: ammSpender ?? "none",
+    includeSignerCode,
     tokenId: tokenId ?? "none",
     credsUpdatedAt: credsUpdatedAtValue,
   });
@@ -1752,69 +1757,24 @@ export async function fetchLimitlessAccountRoute(input: {
   try {
     const conditionalTokensAddress = env.limitlessConditionalTokensAddress;
     const computePromise = (async (): Promise<LimitlessAccountPayload> => {
-      const [
-        code,
-        snapshot,
-        approvedClob,
-        approvedNegRisk,
-        approvedAdapter,
-        approvedAmm,
-        tokenBalanceMap,
-        liveProfile,
-      ] = await Promise.all([
-        fetchEvmCode({
-          rpcUrl: env.baseRpcUrl,
-          timeoutMs: env.baseRpcTimeoutMs,
-          address: signer,
-        }),
+      const [code, snapshot, tokenBalanceMap, liveProfile] = await Promise.all([
+        includeSignerCode
+          ? fetchEvmCode({
+              rpcUrl: env.baseRpcUrl,
+              timeoutMs: env.baseRpcTimeoutMs,
+              address: signer,
+            })
+          : Promise.resolve("0x"),
         fetchLimitlessOnchainSnapshot({
           rpcUrl: env.baseRpcUrl,
           timeoutMs: env.baseRpcTimeoutMs,
           owner: signer,
           clobAddress: clobSpender,
           negRiskAddress: negRiskSpender,
+          adapterAddress: adapterSpender,
           ammAddress: ammSpender,
+          conditionalTokensAddress,
         }),
-        clobSpender
-          ? fetchErc1155IsApprovedForAll({
-              rpcUrl: env.baseRpcUrl,
-              timeoutMs: env.baseRpcTimeoutMs,
-              contractAddress: conditionalTokensAddress,
-              owner: signer,
-              operator: clobSpender,
-              bypassCache: refresh,
-            })
-          : Promise.resolve(null),
-        negRiskSpender
-          ? fetchErc1155IsApprovedForAll({
-              rpcUrl: env.baseRpcUrl,
-              timeoutMs: env.baseRpcTimeoutMs,
-              contractAddress: conditionalTokensAddress,
-              owner: signer,
-              operator: negRiskSpender,
-              bypassCache: refresh,
-            })
-          : Promise.resolve(null),
-        adapterSpender
-          ? fetchErc1155IsApprovedForAll({
-              rpcUrl: env.baseRpcUrl,
-              timeoutMs: env.baseRpcTimeoutMs,
-              contractAddress: conditionalTokensAddress,
-              owner: signer,
-              operator: adapterSpender,
-              bypassCache: refresh,
-            })
-          : Promise.resolve(null),
-        ammSpender
-          ? fetchErc1155IsApprovedForAll({
-              rpcUrl: env.baseRpcUrl,
-              timeoutMs: env.baseRpcTimeoutMs,
-              contractAddress: conditionalTokensAddress,
-              owner: signer,
-              operator: ammSpender,
-              bypassCache: refresh,
-            })
-          : Promise.resolve(null),
         tokenId
           ? fetchErc1155BalancesByOwner({
               rpcUrl: env.baseRpcUrl,
@@ -1898,10 +1858,14 @@ export async function fetchLimitlessAccountRoute(input: {
               }
             : {}),
           isApprovedForAll: {
-            ...(clobSpender ? { clob: approvedClob ?? false } : {}),
-            ...(negRiskSpender ? { negRisk: approvedNegRisk ?? false } : {}),
-            ...(adapterSpender ? { adapter: approvedAdapter ?? false } : {}),
-            ...(ammSpender ? { amm: approvedAmm ?? false } : {}),
+            ...(clobSpender ? { clob: snapshot.approvedClob ?? false } : {}),
+            ...(negRiskSpender
+              ? { negRisk: snapshot.approvedNegRisk ?? false }
+              : {}),
+            ...(adapterSpender
+              ? { adapter: snapshot.approvedAdapter ?? false }
+              : {}),
+            ...(ammSpender ? { amm: snapshot.approvedAmm ?? false } : {}),
           },
         },
         profile: liveProfile ?? null,

@@ -1,18 +1,15 @@
 import { tx, type Pool, type PoolClient } from "@hunch/infra";
 
 import { isRecord } from "../../lib/type-guards.js";
-import type {
-  AssetRef,
-  FundingPurpose,
-  JsonValue,
-  PreparationPurpose,
-} from "../domain/types.js";
+import type { AssetRef, FundingPurpose, JsonValue } from "../domain/types.js";
 import type { FundingOperationState } from "../domain/transitions.js";
 import {
   allocateFundingObservationInTransaction,
   FundingPersistenceError,
 } from "../persistence/funding-operation-repository.js";
+import { canonicalJsonHash } from "../persistence/canonical.js";
 import { sameAsset } from "../planner/money.js";
+import { observeOwnedWalletAssetBalance } from "./owned-wallet-asset-balance.js";
 
 type JsonRecord = Readonly<Record<string, JsonValue>>;
 const OWNED_ROUTE_DESTINATION_OBSERVER_ID =
@@ -76,10 +73,6 @@ function nonNegativeCount(value: unknown): number {
   return typeof value === "number" && Number.isInteger(value) && value >= 0
     ? value
     : 0;
-}
-
-function preparationPurpose(purpose: FundingPurpose): PreparationPurpose {
-  return purpose === "trade_shortfall" ? "buy" : "fund";
 }
 
 function destinationObservationEvidence(
@@ -359,37 +352,35 @@ async function loadTarget(
   };
 }
 
+export async function observeOwnedRouteDestination(
+  target: OwnedRouteDestinationTarget,
+  observeBalance: typeof observeOwnedWalletAssetBalance = observeOwnedWalletAssetBalance,
+): Promise<OwnedRouteDestinationObservation | null> {
+  const observedRaw = await observeBalance({
+    networkId: target.asset.networkId,
+    asset: target.asset,
+    destinationAddress: target.destinationAddress,
+  });
+  const observedAt = new Date().toISOString();
+  return {
+    observedRaw,
+    revision: canonicalJsonHash({
+      schema: "relay_owned_destination_observation_v2",
+      networkId: target.asset.networkId,
+      address: target.destinationAddress,
+      asset: target.asset,
+      raw: observedRaw,
+      observedAt,
+    }),
+    observedAt,
+  };
+}
+
 async function observeDestination(
-  pool: Pool,
+  _pool: Pool,
   target: OwnedRouteDestinationTarget,
 ): Promise<OwnedRouteDestinationObservation | null> {
-  const { WalletPreparationRuntimeService } =
-    await import("../preparation/runtime-service.js");
-  const candidates = await new WalletPreparationRuntimeService(
-    pool,
-  ).resolvedCandidates({
-    accountId: target.userId,
-    purpose: preparationPurpose(target.purpose),
-    marketContextId: target.marketId,
-    marketClass: null,
-    compatibleVenueBindingOptionIds: [target.venueBindingOptionId],
-  });
-  const matches = candidates.filter(
-    (candidate) =>
-      candidate.bindingOption.venueBindingOptionId ===
-        target.venueBindingOptionId &&
-      candidate.target.kind === "owned_location" &&
-      candidate.target.location.locationId === target.destinationLocationId &&
-      sameAsset(candidate.spendability.observedAmount.asset, target.asset),
-  );
-  if (matches.length !== 1) return null;
-  const candidate = matches[0];
-  if (!candidate) return null;
-  return {
-    observedRaw: candidate.spendability.observedAmount.raw,
-    revision: candidate.spendability.revision,
-    observedAt: candidate.spendability.asOf,
-  };
+  return observeOwnedRouteDestination(target);
 }
 
 export function ownedRouteSatisfiedAmount(

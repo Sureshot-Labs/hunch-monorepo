@@ -22,6 +22,7 @@ export type PlacementPolicyInput = Readonly<{
   targetVenueId: VenueId | null;
   targetRequirement: Money;
   availableNow: Money;
+  minimumExecutableDestination?: Money | null;
   requestedBuffer?: Readonly<{
     amount: Money;
     estimatedUsd: string;
@@ -97,6 +98,14 @@ export function decidePlacement(
     );
     assertSameAsset(requested.asset, targetRequirement.asset, "trade target");
     const shortfallRaw = subtractFloor(requested.raw, availableNow.raw);
+    const minimumExecutableDestination = input.minimumExecutableDestination;
+    if (minimumExecutableDestination) {
+      assertSameAsset(
+        minimumExecutableDestination.asset,
+        requested.asset,
+        "minimum executable trade destination",
+      );
+    }
     const maximumBufferRaw = multiplyBpsCeil(
       shortfallRaw,
       policy.placement.maximumBufferBps,
@@ -130,10 +139,27 @@ export function decidePlacement(
         "trade shortfall buffer exceeds the raw or USD policy cap",
       );
     }
+    const explicitlyBufferedRaw =
+      rawAmount(shortfallRaw) + rawAmount(bufferRaw);
+    const minimumRefillRaw =
+      rawAmount(shortfallRaw) === 0n
+        ? 0n
+        : rawAmount(minimumExecutableDestination?.raw ?? "0") >
+            rawAmount(requested.raw)
+          ? rawAmount(requested.raw)
+          : rawAmount(minimumExecutableDestination?.raw ?? "0");
+    const destinationRequirementRaw =
+      explicitlyBufferedRaw > minimumRefillRaw
+        ? explicitlyBufferedRaw
+        : minimumRefillRaw;
     const destinationRequirement = money(
       requested.asset,
-      rawAmount(shortfallRaw) + rawAmount(bufferRaw),
+      destinationRequirementRaw,
     );
+    const boundedBufferRaw =
+      destinationRequirementRaw > rawAmount(shortfallRaw)
+        ? destinationRequirementRaw - rawAmount(shortfallRaw)
+        : 0n;
     return {
       mode: "trade_shortfall_only",
       sourceAmount: intent.confirmedSourceAmount ?? destinationRequirement,
@@ -141,9 +167,9 @@ export function decidePlacement(
       targetVenueId: input.targetVenueId,
       target: input.target,
       boundedBuffer:
-        rawAmount(bufferRaw) === 0n
+        boundedBufferRaw === 0n
           ? null
-          : money(requested.asset, rawAmount(bufferRaw)),
+          : money(requested.asset, boundedBufferRaw),
       reason: "current_trade",
       policyVersion: policy.version,
     };

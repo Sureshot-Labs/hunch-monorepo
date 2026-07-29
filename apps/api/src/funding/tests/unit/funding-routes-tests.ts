@@ -846,6 +846,40 @@ await test("liquidity rejects provider and raw destination authority fields", as
   }
 });
 
+await test("trade shortfall liquidity forwards the selected controller wallet", async () => {
+  const controllerWalletRef = "20000000-0000-4000-8000-000000000002";
+  let observedControllerWalletRef: string | null | undefined;
+  const app = await buildApp({
+    liquidity: async (_userId, request) => {
+      observedControllerWalletRef = request.controllerWalletRef;
+      return liquidity();
+    },
+  });
+  try {
+    const response = await app.inject({
+      method: "POST",
+      url: "/funding/liquidity",
+      payload: {
+        purpose: "trade_shortfall",
+        requestedDestinationAmount: { asset: ASSET, raw: "1000000" },
+        confirmedSourceAmount: null,
+        marketContextId: "polymarket:token-yes",
+        destinationOptionId: "destination_poly_12345678",
+        withdrawalRecipientId: null,
+        venueBindingOptionId: "binding_poly_12345678",
+        controllerWalletRef,
+        maxFeeUsd: null,
+        maxSlippageBps: null,
+        deadline: null,
+      },
+    });
+    assert.equal(response.statusCode, 200);
+    assert.equal(observedControllerWalletRef, controllerWalletRef);
+  } finally {
+    await app.close();
+  }
+});
+
 await test("typed source-selection failures remain fail closed", async () => {
   const app = await buildApp({
     quote: async () => {
@@ -874,11 +908,14 @@ await test("typed source-selection failures remain fail closed", async () => {
 await test("preparation inspection is account-bound and returns sanitized evidence", async () => {
   let observedUserId: string | null = null;
   let observedPositionActionRef: string | null | undefined;
+  let observedControllerWalletRef: string | null | undefined;
   const positionActionRef = "20000000-0000-4000-8000-000000000001";
+  const controllerWalletRef = "20000000-0000-4000-8000-000000000002";
   const app = await buildApp({
     inspectPreparation: async (userId, request) => {
       observedUserId = userId;
       observedPositionActionRef = request.positionActionRef;
+      observedControllerWalletRef = request.controllerWalletRef;
       return preparation();
     },
   });
@@ -892,11 +929,13 @@ await test("preparation inspection is account-bound and returns sanitized eviden
         marketContextId: null,
         marketClass: null,
         positionActionRef,
+        controllerWalletRef,
       },
     });
     assert.equal(response.statusCode, 200);
     assert.equal(observedUserId, USER_ID);
     assert.equal(observedPositionActionRef, positionActionRef);
+    assert.equal(observedControllerWalletRef, controllerWalletRef);
     assert.equal(
       response.json().preparation.inspectionRevision,
       "inspection_poly_runtime_12345678",
@@ -908,10 +947,13 @@ await test("preparation inspection is account-bound and returns sanitized eviden
 
 await test("preparation rejects stale revisions before action construction", async () => {
   let observedPositionActionRef: string | null | undefined;
+  let observedControllerWalletRef: string | null | undefined;
   const positionActionRef = "20000000-0000-4000-8000-000000000001";
+  const controllerWalletRef = "20000000-0000-4000-8000-000000000002";
   const app = await buildApp({
     prepare: async (_userId, request) => {
       observedPositionActionRef = request.positionActionRef;
+      observedControllerWalletRef = request.controllerWalletRef;
       throw new PreparationContractError(
         "evidence_stale",
         "inspection changed",
@@ -928,6 +970,7 @@ await test("preparation rejects stale revisions before action construction", asy
         marketContextId: null,
         marketClass: null,
         positionActionRef,
+        controllerWalletRef,
         operationId: "operation_prepare_12345678",
         expectedInspectionRevision: "inspection_poly_runtime_12345678",
       },
@@ -935,6 +978,7 @@ await test("preparation rejects stale revisions before action construction", asy
     assert.equal(response.statusCode, 409);
     assert.equal(response.json().code, "evidence_stale");
     assert.equal(observedPositionActionRef, positionActionRef);
+    assert.equal(observedControllerWalletRef, controllerWalletRef);
   } finally {
     await app.close();
   }

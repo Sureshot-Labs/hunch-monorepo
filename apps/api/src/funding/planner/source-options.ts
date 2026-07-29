@@ -575,7 +575,8 @@ export class RelayFirstSourcePlanner {
               source,
               destination: input.destination,
               sourceAmount: source.quoteInputAmount,
-              minimumOutput: source.quoteMinimumOutput ?? input.requiredAmount,
+              minimumOutput:
+                source.quoteMinimumOutput ?? input.requiredAmount,
               quoteCorrelationId,
               deadline,
               policyRevision: input.policyRevision,
@@ -677,7 +678,9 @@ export class RelayFirstSourcePlanner {
                 : null,
               placementSnapshot: jsonRecord(input.placement),
               requestedSourceAmount: jsonRecord(plannedQuote.sourceAmount),
-              requestedDestinationAmount: jsonRecord(input.requiredAmount),
+              requestedDestinationAmount: jsonRecord(
+                plannedQuote.candidate.minimumOutput,
+              ),
             },
             segments: plannedQuote.commitPlan.segments.map((segment) => ({
               ...segment,

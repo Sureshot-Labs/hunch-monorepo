@@ -121,16 +121,21 @@ function normalizeHex(value: string | null | undefined): `0x${string}` | null {
 
 function normalizeValueHex(
   value: string | null | undefined,
+  label = "Embedded EVM transaction value",
 ): `0x${string}` | null {
   if (!value) return null;
   const trimmed = value.trim();
   if (!trimmed) return null;
+  if (!/^(?:0x[0-9a-fA-F]+|\d+)$/.test(trimmed)) {
+    throw new Error(`${label} is invalid.`);
+  }
   try {
     const parsed = BigInt(trimmed);
+    if (parsed < 0n) throw new Error(`${label} is invalid.`);
     if (parsed <= 0n) return null;
     return `0x${parsed.toString(16)}` as `0x${string}`;
   } catch {
-    return null;
+    throw new Error(`${label} is invalid.`);
   }
 }
 
@@ -695,6 +700,10 @@ export function buildEmbeddedEthereumSendTransactionRequest(inputs: {
       );
     })();
   const value = normalizeValueHex(inputs.transaction.value);
+  const gasLimit = normalizeValueHex(
+    inputs.transaction.gas,
+    "Embedded EVM gas limit",
+  );
 
   return createPrivyWalletRpcRequest({
     id: inputs.transaction.id,
@@ -710,6 +719,7 @@ export function buildEmbeddedEthereumSendTransactionRequest(inputs: {
           to: to as `0x${string}`,
           data,
           ...(value ? { value } : {}),
+          ...(gasLimit ? { gas_limit: gasLimit } : {}),
         },
       },
     },
@@ -762,7 +772,10 @@ export async function executeServerEmbeddedEthereumTransaction(inputs: {
       );
     })();
   const value = normalizeValueHex(inputs.transaction.value);
-  const gasLimit = normalizeValueHex(inputs.transaction.gas);
+  const gasLimit = normalizeValueHex(
+    inputs.transaction.gas,
+    "Embedded EVM gas limit",
+  );
 
   const result = await inputs.walletClient.walletApi.ethereum.sendTransaction({
     address: signer,

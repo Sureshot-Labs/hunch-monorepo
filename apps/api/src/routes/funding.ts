@@ -149,6 +149,7 @@ export type FundingRouteDependencies = Readonly<{
       marketContextId: string | null;
       marketClass: string | null;
       positionActionRef?: string | null;
+      controllerWalletRef?: string | null;
     }>,
   ): Promise<PreparationResult>;
   prepare(
@@ -159,6 +160,7 @@ export type FundingRouteDependencies = Readonly<{
       marketContextId: string | null;
       marketClass: string | null;
       positionActionRef?: string | null;
+      controllerWalletRef?: string | null;
       operationId: string;
       expectedInspectionRevision: string;
     }>,

@@ -2,7 +2,10 @@ import type { Pool } from "@hunch/infra";
 
 import { buildAccountValueReadModel } from "../../account-value/runtime-service.js";
 import { stableOpaqueId } from "../../account-value/canonical.js";
-import { fetchMarketsByTokenIds } from "../../repos/unified-read.js";
+import {
+  resolveTradeMarketByRef,
+  type ApiTradeMarket,
+} from "../../services/api-trading-market-repo.js";
 import { canonicalJsonHash, lookupHmac } from "../persistence/canonical.js";
 import {
   fetchFundingOperationForUser,
@@ -16,6 +19,7 @@ import type {
   FundingDestinationOption,
   FundingDiscoveryRequest,
   FundingQuoteRequest,
+  IntentLiquidityProjection,
   NormalizedAction,
   PreparationPurpose,
 } from "../domain/types.js";
@@ -25,7 +29,6 @@ import { FundingQuoteService } from "./quote-service.js";
 import { FundingOperationService } from "./operation-service.js";
 import { canonicalMarketUpdatedAt } from "./market-context-revision.js";
 import { FundingPlannerError } from "./money.js";
-import { sameAsset } from "./money.js";
 import { WalletPreparationRuntimeService } from "../preparation/runtime-service.js";
 import { ProductionFundingSourcePlanner } from "./production-source-planner.js";
 import { PolymarketFundingSourceAdapter } from "../preparation/polymarket-funding-source-adapter.js";
@@ -44,11 +47,43 @@ function positiveInt(raw: string | undefined): number | null {
   return Number.isSafeInteger(value) && value > 0 ? value : null;
 }
 
+export class FundingLiquiditySingleflight {
+  private readonly inflight = new Map<
+    string,
+    Promise<IntentLiquidityProjection>
+  >();
+
+  run(
+    userId: string,
+    request: FundingDiscoveryRequest,
+    discover: () => Promise<IntentLiquidityProjection>,
+  ): Promise<IntentLiquidityProjection> {
+    const key = canonicalJsonHash({
+      userId,
+      request: {
+        ...request,
+        controllerWalletRef: request.controllerWalletRef ?? null,
+      },
+    });
+    const pending = this.inflight.get(key);
+    if (pending) return pending;
+
+    const started = Promise.resolve()
+      .then(discover)
+      .finally(() => {
+        this.inflight.delete(key);
+      });
+    this.inflight.set(key, started);
+    return started;
+  }
+}
+
 export class FundingPlanningRuntime {
   private readonly planningStore: PostgresFundingPlanningStore;
   private readonly preparationRuntime: WalletPreparationRuntimeService;
   private readonly actionRuntime: FundingOperationActionRuntime;
   private readonly withdrawalRuntime: WithdrawalDestinationRuntime;
+  private readonly liquiditySingleflight = new FundingLiquiditySingleflight();
 
   constructor(private readonly db: Pool) {
     this.planningStore = new PostgresFundingPlanningStore(db);
@@ -120,6 +155,7 @@ export class FundingPlanningRuntime {
       marketContextId: string | null;
       marketClass: string | null;
       positionActionRef?: string | null;
+      controllerWalletRef?: string | null;
     }>,
   ): Promise<PreparationResult> {
     return this.preparationRuntime.inspectBindingOption({
@@ -130,6 +166,7 @@ export class FundingPlanningRuntime {
       marketClass: request.marketClass,
       positionActionRef: request.positionActionRef ?? null,
       compatibleVenueBindingOptionIds: [request.venueBindingOptionId],
+      controllerWalletRef: request.controllerWalletRef ?? null,
     });
   }
 
@@ -141,6 +178,7 @@ export class FundingPlanningRuntime {
       marketContextId: string | null;
       marketClass: string | null;
       positionActionRef?: string | null;
+      controllerWalletRef?: string | null;
       operationId: string;
       expectedInspectionRevision: string;
     }>,
@@ -158,86 +196,103 @@ export class FundingPlanningRuntime {
       marketClass: request.marketClass,
       positionActionRef: request.positionActionRef ?? null,
       compatibleVenueBindingOptionIds: [request.venueBindingOptionId],
+      controllerWalletRef: request.controllerWalletRef ?? null,
       operationId: request.operationId,
       expectedInspectionRevision: request.expectedInspectionRevision,
     });
   }
 
-  async liquidity(userId: string, request: FundingDiscoveryRequest) {
-    const [resolvedPolicy, account] = await Promise.all([
-      resolveFundingPolicy(this.db),
-      buildAccountValueReadModel({ pool: this.db, userId }),
-    ]);
-    const sourcePlanner = new ProductionFundingSourcePlanner(this.db, account, [
-      new PolymarketFundingSourceAdapter(account),
-      new DirectIngressFundingSourceAdapter(account),
-    ]);
+  liquidity(
+    userId: string,
+    request: FundingDiscoveryRequest,
+  ): Promise<IntentLiquidityProjection> {
+    return this.liquiditySingleflight.run(userId, request, () =>
+      this.discoverLiquidity(userId, request),
+    );
+  }
+
+  private async discoverLiquidity(
+    userId: string,
+    request: FundingDiscoveryRequest,
+  ): Promise<IntentLiquidityProjection> {
+    let resolvedMarketForPreparation: ApiTradeMarket | null = null;
+    const accountPromise = buildAccountValueReadModel({
+      pool: this.db,
+      userId,
+    });
+    // Discovery can resolve the market and inspect its exact destination while
+    // the authoritative owned-source inventory is being collected. Keep the
+    // same account snapshot for source selection and ownership persistence;
+    // only remove the former sequential wait between these independent reads.
+    void accountPromise.catch(() => undefined);
+    const resolvedPolicy = await resolveFundingPolicy(this.db);
+    const sourcePlannerPromise = accountPromise.then(
+      (account) =>
+        new ProductionFundingSourcePlanner(this.db, account, [
+          new PolymarketFundingSourceAdapter(account),
+          new DirectIngressFundingSourceAdapter(account),
+        ]),
+    );
     const planner = new FundingPlanner({
       listDestinations: async ({ accountId, request, marketContext }) =>
-        this.preparationRuntime.resolvedCandidates({
-          accountId,
-          purpose:
-            request.purpose === "trade_shortfall"
-              ? "buy"
-              : request.purpose === "withdrawal"
-                ? "withdraw"
-                : "fund",
-          marketContextId: marketContext?.marketId ?? null,
-          marketClass: null,
-          compatibleVenueBindingOptionIds:
-            marketContext?.compatibleVenueBindingOptionIds ?? null,
-        }),
-      resolveMarketContext: async ({ accountId, marketContextId }) => {
+        this.preparationRuntime.resolvedCandidates(
+          {
+            accountId,
+            purpose:
+              request.purpose === "trade_shortfall"
+                ? "buy"
+                : request.purpose === "withdrawal"
+                  ? "withdraw"
+                  : "fund",
+            marketContextId: marketContext?.marketId ?? null,
+            marketClass: null,
+            compatibleVenueBindingOptionIds:
+              marketContext &&
+              marketContext.compatibleVenueBindingOptionIds.length > 0
+                ? marketContext.compatibleVenueBindingOptionIds
+                : null,
+            controllerWalletRef: request.controllerWalletRef ?? null,
+          },
+          resolvedMarketForPreparation,
+        ),
+      resolveMarketContext: async ({ marketContextId }) => {
         const requestedAmount = request.requestedDestinationAmount;
         if (!requestedAmount) return null;
-        const rows = await fetchMarketsByTokenIds(this.db, {
-          tokenIds: [marketContextId],
-          includeTop: false,
-        });
-        const exact = rows.filter(
-          (row) =>
-            row.token_id === marketContextId &&
-            (row.side === "YES" || row.side === "NO"),
+        const resolved = await resolveTradeMarketByRef(
+          this.db,
+          marketContextId,
         );
-        if (exact.length !== 1) return null;
-        const market = exact[0];
-        if (!market) return null;
-        const candidates = await this.preparationRuntime.resolvedCandidates({
-          accountId,
-          purpose: "buy",
-          marketContextId: market.market_id,
-          marketClass: null,
-          compatibleVenueBindingOptionIds: null,
-        });
-        const compatible = candidates.filter(
-          (candidate) =>
-            candidate.option.selectable &&
-            candidate.option.venueId === market.venue &&
-            sameAsset(candidate.option.requiredAsset, requestedAmount.asset),
-        );
-        if (compatible.length === 0) return null;
+        if (!resolved?.market || !resolved.side) return null;
+        const market = resolved.market;
+        resolvedMarketForPreparation = market;
+        // The opaque binding is still revalidated by the one authoritative
+        // destination discovery below. Do not perform the same live wallet
+        // inspection once here merely to rediscover an ID the client already
+        // selected, and then immediately perform it again for placement.
+        const explicitBindingOptionId = request.venueBindingOptionId;
+        const compatibleVenueBindingOptionIds = explicitBindingOptionId
+          ? [explicitBindingOptionId]
+          : [];
         const now = new Date();
         return {
           marketContextId,
           venueId: market.venue,
-          marketId: market.market_id,
-          side: market.side as "YES" | "NO",
+          marketId: market.id,
+          side: resolved.side,
           executionProfileId: `funding_${market.venue}_buy_v1`,
           marketPriceRevision: stableOpaqueId(
             "market_revision",
             canonicalJsonHash({
-              marketId: market.market_id,
-              side: market.side,
-              status: market.market_status,
-              acceptingOrders: market.pm_accepting_orders,
+              marketId: market.id,
+              side: resolved.side,
+              status: market.status,
+              acceptingOrders: market.accepting_orders,
               updatedAt: canonicalMarketUpdatedAt(market.updated_at),
             }),
           ),
           collateralAsset: requestedAmount.asset,
           requestedCollateralRaw: requestedAmount.raw,
-          compatibleVenueBindingOptionIds: compatible.map(
-            (candidate) => candidate.bindingOption.venueBindingOptionId,
-          ),
+          compatibleVenueBindingOptionIds,
           expiresAt: new Date(
             now.getTime() + resolvedPolicy.policy.ttl.quoteMs,
           ).toISOString(),
@@ -245,9 +300,10 @@ export class FundingPlanningRuntime {
       },
       resolveWithdrawalRecipient: async ({ accountId, recipientId }) =>
         this.withdrawalRuntime.resolve(accountId, recipientId),
-      listSources: (sourceInput) => sourcePlanner.list(sourceInput),
-      listSourceBlockers: (sourceInput) =>
-        sourcePlanner.listBlockingReasonCodes(sourceInput),
+      listSources: async (sourceInput) =>
+        (await sourcePlannerPromise).list(sourceInput),
+      listSourceBlockers: async (sourceInput) =>
+        (await sourcePlannerPromise).listBlockingReasonCodes(sourceInput),
       store: this.planningStore,
     });
     return planner.discover({
@@ -255,7 +311,9 @@ export class FundingPlanningRuntime {
       request,
       policy: resolvedPolicy.policy,
       policyRevision: resolvedPolicy.revision,
-      ownershipRevision: account.ownershipEvidenceRevision,
+      ownershipRevision: accountPromise.then(
+        (account) => account.ownershipEvidenceRevision,
+      ),
     });
   }
 

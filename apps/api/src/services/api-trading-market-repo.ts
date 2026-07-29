@@ -40,6 +40,7 @@ export type ApiTradeMarket = {
   title: string;
   token_no: string | null;
   token_yes: string | null;
+  updated_at: Date | string | null;
   venue: SupportedBotTradingVenue;
   venue_market_id: string;
 };
@@ -70,7 +71,8 @@ const TRADE_MARKET_SELECT_SQL = `SELECT
        m.expiration_time,
        m.best_bid,
        m.best_ask,
-       m.last_price
+       m.last_price,
+       m.updated_at
      FROM unified_markets m
      LEFT JOIN unified_events e ON e.id = m.event_id
      LEFT JOIN polymarket_markets pm
@@ -92,22 +94,85 @@ export async function findTradeMarketById(
   return rows[0] ?? null;
 }
 
+type CanonicalMarketRefMatch = Readonly<{
+  marketId: string;
+  side: "YES" | "NO" | null;
+}>;
+
+async function findCanonicalMarketRefMatch(
+  db: DbQuery,
+  marketRef: string,
+  venue?: SupportedBotTradingVenue,
+): Promise<CanonicalMarketRefMatch | null> {
+  const venueValues = venue ? [marketRef, venue] : [marketRef];
+  const venuePredicate = venue ? " AND venue = $2" : "";
+
+  const byVenueMarketId = await db.query<{ id: string }>(
+    `SELECT id
+       FROM unified_markets
+      WHERE venue_market_id = $1${venuePredicate}
+      ORDER BY updated_at_db DESC NULLS LAST
+      LIMIT 1`,
+    venueValues,
+  );
+  if (byVenueMarketId.rows[0]) {
+    return { marketId: byVenueMarketId.rows[0].id, side: null };
+  }
+
+  const bySlug = await db.query<{ id: string }>(
+    `SELECT id
+       FROM unified_markets
+      WHERE slug = $1${venuePredicate}
+      ORDER BY updated_at_db DESC NULLS LAST
+      LIMIT 1`,
+    venueValues,
+  );
+  if (bySlug.rows[0]) {
+    return { marketId: bySlug.rows[0].id, side: null };
+  }
+
+  const tokenVenuePredicate = venue ? " AND venue = $2" : "";
+  const byToken = await db.query<{
+    market_id: string;
+    outcome_side: string | null;
+  }>(
+    `SELECT market_id, outcome_side
+       FROM unified_market_tokens
+      WHERE token_id = $1${tokenVenuePredicate}
+      LIMIT 1`,
+    venueValues,
+  );
+  const token = byToken.rows[0];
+  if (!token) return null;
+  const side = token.outcome_side?.toUpperCase();
+  return {
+    marketId: token.market_id,
+    side: side === "YES" || side === "NO" ? side : null,
+  };
+}
+
+export type ResolvedTradeMarketRef = Readonly<{
+  market: ApiTradeMarket;
+  side: "YES" | "NO" | null;
+}>;
+
+export async function resolveTradeMarketByRef(
+  db: DbQuery,
+  marketRef: string,
+): Promise<ResolvedTradeMarketRef | null> {
+  const exact = await findTradeMarketById(db, marketRef);
+  if (exact) return { market: exact, side: null };
+  const match = await findCanonicalMarketRefMatch(db, marketRef);
+  if (!match) return null;
+  const market = await findTradeMarketById(db, match.marketId);
+  return market ? { market, side: match.side } : null;
+}
+
 export async function findTradeMarketByRef(
   db: DbQuery,
   marketRef: string,
 ): Promise<ApiTradeMarket | null> {
-  const { rows } = await db.query<ApiTradeMarket>(
-    `${TRADE_MARKET_SELECT_SQL}
-     WHERE m.id = $1
-        OR m.venue_market_id = $1
-        OR m.slug = $1
-     ORDER BY
-       CASE WHEN m.id = $1 THEN 0 WHEN m.venue_market_id = $1 THEN 1 ELSE 2 END,
-       m.updated_at_db DESC NULLS LAST
-     LIMIT 1`,
-    [marketRef],
-  );
-  return rows[0] ?? null;
+  return (await resolveTradeMarketByRef(db, marketRef))?.market ?? null;
 }
 
 export async function findTradeMarketByRefForVenue(
@@ -115,21 +180,10 @@ export async function findTradeMarketByRefForVenue(
   marketRef: string,
   venue: SupportedBotTradingVenue,
 ): Promise<ApiTradeMarket | null> {
-  const { rows } = await db.query<ApiTradeMarket>(
-    `${TRADE_MARKET_SELECT_SQL}
-     WHERE m.venue = $2
-       AND (
-         m.id = $1
-         OR m.venue_market_id = $1
-         OR m.slug = $1
-       )
-     ORDER BY
-       CASE WHEN m.id = $1 THEN 0 WHEN m.venue_market_id = $1 THEN 1 ELSE 2 END,
-       m.updated_at_db DESC NULLS LAST
-     LIMIT 1`,
-    [marketRef, venue],
-  );
-  return rows[0] ?? null;
+  const exact = await findTradeMarketById(db, marketRef);
+  if (exact) return exact.venue === venue ? exact : null;
+  const match = await findCanonicalMarketRefMatch(db, marketRef, venue);
+  return match ? findTradeMarketById(db, match.marketId) : null;
 }
 
 export async function loadUser(pool: Pool, userId: string): Promise<User> {
