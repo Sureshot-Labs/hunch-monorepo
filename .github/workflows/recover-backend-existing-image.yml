@@ -1,0 +1,97 @@
+name: Emergency Recover Backend (Existing Image)
+
+on:
+  workflow_dispatch:
+    inputs:
+      backend_image:
+        description: Existing image already loaded on the production host
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  recover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      SSH_HOST: ${{ secrets.SSH_HOST }}
+      BACKEND_IMAGE: ${{ inputs.backend_image }}
+    steps:
+      - name: Validate recovery input
+        run: |
+          if [[ ! "${BACKEND_IMAGE}" =~ ^hunch-backend:[0-9a-f]{7,40}$ ]]; then
+            echo "backend_image must be an immutable hunch-backend:<git-sha> tag" >&2
+            exit 1
+          fi
+
+      - name: Start ssh-agent
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_KEY }}
+        run: |
+          eval "$(ssh-agent -s)"
+          printf 'SSH_AUTH_SOCK=%s\n' "${SSH_AUTH_SOCK}" >> "${GITHUB_ENV}"
+          printf 'SSH_AGENT_PID=%s\n' "${SSH_AGENT_PID}" >> "${GITHUB_ENV}"
+          printf '%s\n' "${SSH_PRIVATE_KEY}" | ssh-add -
+
+      - name: Configure pinned known_hosts
+        env:
+          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+        run: |
+          if [[ -z "${SSH_HOST}" || -z "${SSH_KNOWN_HOSTS}" ]]; then
+            echo "SSH_HOST and SSH_KNOWN_HOSTS secrets are required" >&2
+            exit 1
+          fi
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "${SSH_KNOWN_HOSTS}" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Preflight image and recover production stack
+        env:
+          REMOTE_HOST: ubuntu@${{ secrets.SSH_HOST }}
+        run: |
+          ssh "${REMOTE_HOST}" \
+            "APP_DIR='/home/ubuntu/hunch-monorepo' ENV_FILE='/opt/hunch/.env' HUNCH_BACKEND_IMAGE='${BACKEND_IMAGE}' bash -s" <<'REMOTE'
+          set -Eeuo pipefail
+
+          docker image inspect "${HUNCH_BACKEND_IMAGE}" >/dev/null
+
+          compose=(docker-compose --project-directory "${APP_DIR}"
+            -f "${APP_DIR}/ops/docker-compose.prod.yml"
+            -f "${APP_DIR}/ops/docker-compose.prebuilt.yml"
+            --env-file "${ENV_FILE}")
+
+          if ! docker network inspect hunch-edge >/dev/null 2>&1; then
+            docker network create hunch-edge
+          fi
+          if ! docker network inspect hunch-internal >/dev/null 2>&1; then
+            docker network create hunch-internal
+          fi
+
+          export HUNCH_BACKEND_IMAGE
+          "${compose[@]}" run --rm --no-deps api \
+            node /app/packages/config/dist/run-with-secrets.js \
+            /app/apps/api/dist/env.js
+
+          "${compose[@]}" up -d postgres redis
+          "${compose[@]}" up -d --no-build
+
+          healthy=0
+          for _ in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:3001/health >/dev/null 2>&1; then
+              healthy=1
+              break
+            fi
+            sleep 2
+          done
+          if [[ "${healthy}" != "1" ]]; then
+            "${compose[@]}" ps >&2 || true
+            docker logs --tail 160 hunch-api >&2 2>&1 || true
+            exit 1
+          fi
+
+          docker restart hunch-nginx >/dev/null 2>&1 || true
+          curl -fsS http://127.0.0.1:3001/health
+          REMOTE
