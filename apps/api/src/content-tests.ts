@@ -507,6 +507,7 @@ test("keeps the content database fallback and deployment preflight fail-safe", (
   assert.match(deployScript, /rollback_on_error/);
   assert.match(deployScript, /Restoring previous backend image/);
   assert.ok(recoveryWorkflow.includes("run -T --rm --no-deps api \\"));
+  assert.ok(recoveryWorkflow.includes("/app/apps/api/dist/env.js </dev/null"));
   assert.ok(
     recoveryWorkflow.includes('"${compose[@]}" up -d --no-build nginx'),
   );
