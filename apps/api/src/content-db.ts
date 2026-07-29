@@ -3,7 +3,7 @@ import { createPgPool, type Pool } from "@hunch/infra";
 import { env } from "./env.js";
 
 export const CONTENT_SCHEMA_MIGRATION =
-  "0006_content_operational_guards.sql" as const;
+  "0007_content_foreign_key_indexes.sql" as const;
 
 function createContentPool(inputs: {
   name: string;

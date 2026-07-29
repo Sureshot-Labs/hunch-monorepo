@@ -2,6 +2,15 @@ name: Deploy Backend (Prebuilt, SCP)
 
 on:
   workflow_dispatch:
+    inputs:
+      production_action:
+        description: Select DEPLOY_PRODUCTION only after main verification passes
+        required: true
+        default: VERIFY_ONLY
+        type: choice
+        options:
+          - VERIFY_ONLY
+          - DEPLOY_PRODUCTION
   push:
     branches:
       - main
@@ -86,8 +95,16 @@ jobs:
         run: node --import tsx apps/api/src/content-performance-tests.ts
 
   deploy:
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.ref == 'refs/heads/main' &&
+      inputs.production_action == 'DEPLOY_PRODUCTION'
     needs: verify-content-backend
     runs-on: ubuntu-24.04-arm
+    environment: production
+    concurrency:
+      group: backend-production-deploy
+      cancel-in-progress: false
     env:
       SSH_HOST: ${{ secrets.SSH_HOST }}
     steps:

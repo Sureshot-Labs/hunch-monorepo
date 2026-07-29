@@ -321,7 +321,7 @@ market snapshot client-side.
 
 | Gate                              | Result       | Evidence                                                                                                 |
 | --------------------------------- | ------------ | -------------------------------------------------------------------------------------------------------- |
-| Migrations on clean PostgreSQL 16 | Pass         | Six migrations apply; CI applies them twice to verify checksums and idempotency                          |
+| Migrations on clean PostgreSQL 16 | Pass         | Seven migrations apply; CI applies them twice to verify checksums and idempotency                        |
 | Public/admin query plans          | Pass         | 100k audit above; reproducible CI and latest local gate use 50k rows                                     |
 | Bounded media-reference SQL       | Pass         | 1 and 500 references both execute 11 SQL commands; usages use set-based `unnest`                         |
 | Optimistic concurrency            | Pass         | Two simultaneous edits produce one success and one revision conflict                                     |
@@ -348,6 +348,17 @@ These are local warm timings, not a latency promise. Their purpose is to prove
 bounded plan shape. CI now seeds 50,000 rows and uses intentionally much looser
 thresholds (75-300 ms), so it catches sequential-scan regressions without
 depending on runner speed.
+
+A follow-up cascade audit found a real gap outside the original read-query
+plans: deleting the 50,000-row synthetic fixture took about 100 seconds because
+PostgreSQL had to repeatedly scan referencing tables for unindexed foreign
+keys. Migration `0007_content_foreign_key_indexes.sql` adds leading indexes for
+article/version ownership, publication jobs, asset usages, and outbox
+references. The same full cleanup then completed in 6.0 seconds locally. CI now
+requires all six support indexes and fails if the intentionally pathological
+50,000-row cascade exceeds 20 seconds. Production retention remains much
+smaller and bounded per transaction; this gate exists to catch regressions
+before operational tables accumulate data.
 
 The clean CI runner builds the complete API workspace dependency closure with
 `pnpm --filter "api^..." run build` before typechecking. This prevents local
@@ -377,6 +388,8 @@ set-differences asset usages; it does not create a version. Checkpoints are
 capped at 100 per article. Processed operational rows are deleted in bounded,
 advisory-locked batches after 180 days, audit events after 730 days, and
 orphaned cancelled scheduled snapshots after their job history expires.
+All referencing content foreign keys have leading support indexes so cascades,
+`SET NULL`, and retention anti-joins do not degrade into repeated full scans.
 
 `relatedArticles` adds no work when absent. When present it adds one indexed,
 bounded query for at most twelve UUIDs and then reuses the existing asset batch;
@@ -420,7 +433,7 @@ silently trusting client metadata is not an acceptable substitute.
 1. Deploy the content database schema and backend APIs.
 2. Verify the empty public API and background worker health.
 3. Deploy the admin block editor and create draft content.
-4. Deploy `/blog`, article rendering, preview, sitemap/feed, and the signed
+4. Deploy `/journal`, article rendering, preview, sitemap/feed, and the signed
    revalidation endpoint.
 5. Configure the revalidation secret and enable publishing.
 

@@ -37,11 +37,7 @@ export const healthRoutes: FastifyPluginAsync = async (app) => {
       revalidationConfigured: Boolean(
         env.contentRevalidateUrl && env.contentRevalidateSecret,
       ),
-      storageConfigured: Boolean(
-        env.contentAssetS3Endpoint &&
-        env.contentAssetS3Bucket &&
-        env.contentAssetPublicBaseUrl,
-      ),
+      storageConfigured: env.contentAssetStorageConfigured,
     };
     try {
       const database = await checkContentDatabaseReady();

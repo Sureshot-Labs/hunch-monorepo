@@ -203,13 +203,7 @@ function assetFromRow(row: AssetRow): ContentAsset {
 }
 
 function storageConfigured(): boolean {
-  return Boolean(
-    env.contentAssetS3Endpoint &&
-    env.contentAssetS3Bucket &&
-    env.contentAssetS3AccessKeyId &&
-    env.contentAssetS3SecretAccessKey &&
-    env.contentAssetPublicBaseUrl,
-  );
+  return env.contentAssetStorageConfigured;
 }
 
 let storageClient: S3Client | null = null;
@@ -222,14 +216,21 @@ function requireStorage(): S3Client {
       503,
     );
   }
+  const staticCredentials = env.contentAssetStaticCredentialsConfigured
+    ? {
+        credentials: {
+          accessKeyId: env.contentAssetS3AccessKeyId,
+          secretAccessKey: env.contentAssetS3SecretAccessKey,
+        },
+      }
+    : {};
   storageClient ??= new S3Client({
-    endpoint: env.contentAssetS3Endpoint,
+    ...(env.contentAssetS3Endpoint
+      ? { endpoint: env.contentAssetS3Endpoint }
+      : {}),
     region: env.contentAssetS3Region,
     forcePathStyle: env.contentAssetS3ForcePathStyle,
-    credentials: {
-      accessKeyId: env.contentAssetS3AccessKeyId,
-      secretAccessKey: env.contentAssetS3SecretAccessKey,
-    },
+    ...staticCredentials,
   });
   return storageClient;
 }
