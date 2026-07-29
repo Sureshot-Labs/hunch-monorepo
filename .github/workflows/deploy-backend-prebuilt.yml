@@ -38,7 +38,7 @@ jobs:
       PRIVY_APP_ID: content-ci
       PRIVY_APP_SECRET: content-ci-secret
       CONTENT_WORKER_ENABLED: "false"
-      CONTENT_PERF_ROWS: "20000"
+      CONTENT_PERF_ROWS: "50000"
     steps:
       - name: Checkout
         uses: actions/checkout@v5

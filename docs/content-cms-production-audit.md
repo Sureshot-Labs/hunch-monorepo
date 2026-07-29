@@ -1,20 +1,24 @@
 # Content CMS production audit
 
-Status: backend release candidate; local production gates pass; admin and landing phases pending  
-Date: 2026-07-29  
+Status: backend/admin/landing implementation complete; production API redeploy and authenticated staging QA required
+
+Date: 2026-07-29
+
 Scope: `hunch-monorepo`, `hunch-admin`, and `hunch-landing`
 
 ## Decision
 
 The first Markdown-based content CRUD implementation was not safe to deploy as
 the production blog CMS. It was replaced before its migration was applied. The
-backend described below is the implemented baseline for the admin and landing
-phases.
+backend described below is the implemented foundation for the admin and landing
+applications.
 
 This verdict is deliberately narrower than “the whole blog is live.” The
-backend is safe to deploy with publishing disabled. Publishing remains
-fail-closed until the landing renderer, signed revalidation endpoint, and the
-chosen object-storage/CDN configuration pass staging certification.
+backend, admin, and all document renderers pass their local production gates,
+but the live API is still serving a revision without content routes. Publishing
+remains fail-closed until that backend is redeployed and the signed
+revalidation and real object-storage/CDN flows pass authenticated staging
+certification.
 
 The production design is:
 
@@ -235,9 +239,8 @@ The Next.js landing owns output and crawlability:
 - cache tags, ISR fallback, signed on-demand revalidation, and no-index draft
   previews.
 
-The existing landing metadata, robots, and root sitemap are a useful start, but
-the current sitemap contains only `/`, and the header logo still uses `href="#"`.
-The logo must use `/` when the landing phase begins.
+The landing now generates article metadata, robots directives, sitemap entries,
+and feeds. Its header and footer logos link to `/`.
 
 ## Admin editor requirements
 
@@ -258,12 +261,67 @@ The admin implementation must provide:
 - a lazy-loaded editor route so editor code does not inflate the entire admin
   bundle.
 
+## Admin implementation checkpoint (2026-07-29)
+
+`hunch-admin` now implements the editor contract against the deployed content
+API:
+
+- a lazy-loaded `/content` catalog and `/content/:articleId` editor;
+- Lexical-backed inline rich text for paragraphs, leads, headings, table cells,
+  captions, quotes, transcripts, and other rich fields;
+- bold, italic, underline, strike, inline code, highlight, super/subscript,
+  safe links, automatic URL conversion, footnote references, and local
+  undo/redo;
+- `dnd-kit` pointer, touch, and keyboard sorting for the versioned top-level
+  block array, with handle-only activation and screen-reader announcements;
+- dedicated form editors for every schema-v1 block type, including nested
+  multi-block columns without destructive truncation;
+- direct checksum-verified object-storage uploads, drag/drop and paste upload,
+  MIME/size preflight, paginated media browsing, and resolved selected assets;
+- independent list-cover, hero, and social-image controls;
+- article, author, category, tags, SEO, robots, Open Graph, Twitter, search, and
+  social-preview controls;
+- debounced serialized autosave, optimistic revision conflicts, unload guards,
+  and bounded IndexedDB recovery (ten most recent local drafts);
+- review, approval, immutable scheduling, publish, unpublish, archive,
+  checkpoint, lazy version inspection, and checkpoint-before-restore flows;
+- role-aware read-only mode for `content:read` without `content:write`;
+- client-side validation for the document limits, embed provider/host pairing,
+  nested layouts, stable IDs, dangling footnotes, heading hierarchy, media
+  accessibility, canonical URL ownership, and common publication requirements.
+
+The implementation follows the interaction architecture documented by
+[Payload rich text](https://payloadcms.com/docs/rich-text/overview),
+[Payload official Lexical features](https://payloadcms.com/docs/rich-text/official-features),
+and [Payload blocks](https://payloadcms.com/docs/fields/blocks), but does not
+embed Payload itself. Payload's packages are coupled to Payload field/server
+configuration, while Hunch already has a strict independent content contract.
+Hunch therefore uses Lexical directly for inline editing and stable
+[`@dnd-kit/sortable`](https://docs.dndkit.com/presets/sortable) for the outer
+schema array; Lexical's top-level draggable plugin is experimental.
+
+The admin release still has one explicit staging gate:
+
+1. authenticated staging browser QA, including pointer and keyboard drag,
+   mobile overflow, upload CORS, autosave, revision conflict, and workflow
+   smoke tests against the deployed API.
+
+The landing renderer, metadata, sitemap/feed, private preview bridge, and
+signed revalidation endpoint are implemented and pass local production gates.
+`VITE_CONTENT_PUBLISHING_ENABLED=true` must still be enabled only together
+with the backend renderer-contract gate after staging smoke tests.
+
+Snapshot market/event mode remains intentionally unselectable for new blocks
+until a backend snapshot resolver exists. Existing snapshot documents remain
+readable and can be switched back to live mode. The editor never fabricates a
+market snapshot client-side.
+
 ## Production acceptance gates
 
 | Gate                              | Result       | Evidence                                                                                                 |
 | --------------------------------- | ------------ | -------------------------------------------------------------------------------------------------------- |
 | Migrations on clean PostgreSQL 16 | Pass         | Six migrations apply; CI applies them twice to verify checksums and idempotency                          |
-| Public/admin query plans          | Pass         | 100k audit above; reproducible CI gate uses 20k rows; latest local run used 50k                          |
+| Public/admin query plans          | Pass         | 100k audit above; reproducible CI and latest local gate use 50k rows                                     |
 | Bounded media-reference SQL       | Pass         | 1 and 500 references both execute 11 SQL commands; usages use set-based `unnest`                         |
 | Optimistic concurrency            | Pass         | Two simultaneous edits produce one success and one revision conflict                                     |
 | Scheduler concurrency             | Pass         | Two workers publish one version once; cancel/publish races complete without deadlock                     |
@@ -272,21 +330,23 @@ The admin implementation must provide:
 | Public/draft separation           | Pass         | Editing and restoring do not change the live immutable version before republish                          |
 | Media quarantine lifecycle        | Pass locally | AWS SDK test covers signed PUT, checksum/HEAD, magic bytes, immutable copy, failure, and deferred delete |
 | Real storage/CDN behavior         | Staging gate | Verify provider checksum headers, CORS, CDN `nosniff`, private staging, and lifecycle policy             |
-| Landing renderer/revalidation     | Later phase  | Publishing cannot be enabled until the renderer contract and signed HTTPS webhook are configured         |
+| Landing renderer/revalidation     | Pass locally | All 43 blocks, SEO, preview, feed/sitemap, and HMAC tests pass; signed staging delivery remains required |
 
 The latest reproducible 50,000-row PostgreSQL 16 run produced:
 
 | Query                    | Execution time | Index path                            |
 | ------------------------ | -------------: | ------------------------------------- |
-| Public first page        |       0.222 ms | publication index + version PK        |
-| Public page at 80% depth |       0.221 ms | keyset publication index + version PK |
-| Public detail            |       0.056 ms | route, article, and version PKs       |
-| Admin first page         |       0.365 ms | draft-order index + PKs               |
-| Rare full-text search    |       0.820 ms | GIN search index                      |
+| Public first page        |       0.207 ms | publication index + version PK        |
+| Public page at 80% depth |       0.186 ms | keyset publication index + version PK |
+| Public detail            |       0.046 ms | route, article, and version PKs       |
+| Related articles (12)    |       0.082 ms | article PK + version ownership index  |
+| Admin first page         |       0.381 ms | draft-order index + PKs               |
+| Rare full-text search    |       0.102 ms | GIN search index                      |
 
 These are local warm timings, not a latency promise. Their purpose is to prove
-bounded plan shape. CI thresholds are intentionally much looser (75-300 ms),
-so they catch sequential-scan regressions without depending on runner speed.
+bounded plan shape. CI now seeds 50,000 rows and uses intentionally much looser
+thresholds (75-300 ms), so it catches sequential-scan regressions without
+depending on runner speed.
 
 ## Load containment and timeout rationale
 
@@ -311,6 +371,11 @@ set-differences asset usages; it does not create a version. Checkpoints are
 capped at 100 per article. Processed operational rows are deleted in bounded,
 advisory-locked batches after 180 days, audit events after 730 days, and
 orphaned cancelled scheduled snapshots after their job history expires.
+
+`relatedArticles` adds no work when absent. When present it adds one indexed,
+bounded query for at most twelve UUIDs and then reuses the existing asset batch;
+there is no N+1 card lookup. The Next data cache and durable revalidation outbox
+keep this path off the database for normal cached traffic.
 
 ## Failure and recovery model
 
@@ -356,3 +421,13 @@ silently trusting client metadata is not an acceptable substitute.
 The backend may be deployed before the two frontends, but content publication
 must remain operationally disabled with `CONTENT_PUBLISHING_ENABLED=false`
 until the landing renderer supports the document schema being published.
+
+### Current deployment handoff
+
+During the 2026-07-29 release check, `https://api.hunch.trade/health` returned
+ready, but both `/health/content` and `/content/articles?limit=1` returned 404.
+That response can only come from an API revision that has not registered the
+content routes. The landing build is deliberately independent of upstream
+availability, but publishing must stay disabled until a backend redeploy makes
+both endpoints return the documented contract and the signed staging webhook
+has been observed end to end.

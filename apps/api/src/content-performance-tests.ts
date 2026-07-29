@@ -202,6 +202,9 @@ try {
     "select slug from content_perf_seed where n = $1",
     [Math.floor(rowCount / 2)],
   );
+  const { rows: relatedRows } = await pool.query<{ article_id: string }>(
+    "select article_id from content_perf_seed where n <= 12 order by n",
+  );
   const cursor = cursorRows[0];
   const plans = [];
 
@@ -266,6 +269,22 @@ try {
   );
   plans.push(
     await explain(
+      "public-related-articles-batch",
+      `
+        select article.id, version.title
+        from content_articles article
+        join content_article_versions version
+          on version.id = article.published_version_id
+        where article.id = any($1::uuid[])
+          and article.published_version_id is not null
+          and article.archived_at is null
+      `,
+      [relatedRows.map((row) => row.article_id)],
+      maxDetailMs,
+    ),
+  );
+  plans.push(
+    await explain(
       "admin-first-page",
       `
         with page as materialized (
@@ -299,7 +318,7 @@ try {
     ),
   );
 
-  for (const plan of plans.slice(0, 4)) {
+  for (const plan of plans.slice(0, -1)) {
     const coreSequentialScan = plan.nodes.find(
       (node) =>
         node.type === "Seq Scan" &&
@@ -317,12 +336,14 @@ try {
     );
   }
   assert.ok(
-    plans[4].nodes.some(
-      (node) =>
-        node.type === "Bitmap Index Scan" &&
-        node.index === "idx_content_article_drafts_search_gin",
-    ),
-    `full-text search did not use the GIN index: ${JSON.stringify(plans[4])}`,
+    plans
+      .at(-1)
+      ?.nodes.some(
+        (node) =>
+          node.type === "Bitmap Index Scan" &&
+          node.index === "idx_content_article_drafts_search_gin",
+      ),
+    `full-text search did not use the GIN index: ${JSON.stringify(plans.at(-1))}`,
   );
 
   console.log(

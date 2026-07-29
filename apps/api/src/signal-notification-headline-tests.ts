@@ -713,6 +713,31 @@ const tests: Array<{ name: string; run: () => void }> = [
         positionChange.text,
         "💰 +$49.4K added. One trader increased their Under 2.5 total goals in Spain vs. Argentina position.",
       );
+
+      const clusterPositionChange = buildSignalNotificationHeadline({
+        currentPrice: 0.75,
+        editorialSubject: "25 bps increase",
+        kind: "research_update",
+        positionDirection: "against",
+        positionLabel: "NO on 25 bps increase",
+        researchDelta: {
+          afterUsd: 7_500_000,
+          beforeUsd: 5_600_000,
+          kind: "position_change",
+          positionChangeUsd: 1_900_000,
+          scope: "selected_side_cluster",
+          walletId: null,
+        },
+        subject: subject({
+          eventTitle: "Fed decision in July?",
+          marketTitle: "25 bps increase",
+          side: "NO",
+        }),
+      });
+      assert.equal(
+        clusterPositionChange.text,
+        "💰 +$1.9M added. Traders are betting against a 25 bps increase.",
+      );
     },
   },
   {

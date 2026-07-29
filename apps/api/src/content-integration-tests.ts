@@ -34,9 +34,11 @@ const suffix = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 const originalSlug = `content-integration-${suffix}`;
 const updatedSlug = `${originalSlug}-updated`;
 let cleanupArticleId: string | null = null;
+let cleanupRelatedArticleId: string | null = null;
 let assetId: string | null = null;
+let relatedAssetId: string | null = null;
 
-const document: ContentDocument = {
+const baseDocument: ContentDocument = {
   schemaVersion: 1,
   blocks: [
     {
@@ -71,6 +73,64 @@ try {
     [`tests/${suffix}/cover.png`, "0".repeat(64)],
   );
   assetId = assetRows[0].id;
+
+  const { rows: relatedAssetRows } = await pool.query<{ id: string }>(
+    `
+      insert into content_assets (
+        status, kind, storage_key, public_url, original_filename, mime_type,
+        byte_size, width, height, checksum_sha256, ready_at
+      ) values (
+        'ready', 'image', $1, 'https://cdn.example.com/related.png',
+        'related.png', 'image/png', 1024, 1200, 630, $2, now()
+      ) returning id
+    `,
+    [`tests/${suffix}/related.png`, "1".repeat(64)],
+  );
+  relatedAssetId = relatedAssetRows[0].id;
+
+  const relatedSlug = `${originalSlug}-related`;
+  const relatedCreated = await createContentArticle(
+    pool,
+    {
+      slug: relatedSlug,
+      title: "Related integration article",
+      excerpt: "Related integration-test excerpt",
+      document: baseDocument,
+      listCover: {
+        assetId: relatedAssetId,
+        alt: "Related integration cover",
+        decorative: false,
+        crop: "16:9",
+        presentation: "cover",
+      },
+      author: { name: "Hunch", url: null, bio: null, avatarAssetId: null },
+      tags: [{ slug: "integration", label: "Integration" }],
+    },
+    null,
+  );
+  cleanupRelatedArticleId = relatedCreated.article.id;
+  await publishContentArticle(pool, {
+    id: relatedCreated.article.id,
+    expectedRevision: 1,
+    actorAdminId: null,
+    requireApproval: false,
+  });
+
+  const document: ContentDocument = {
+    ...baseDocument,
+    blocks: [
+      ...baseDocument.blocks,
+      {
+        id: randomUUID(),
+        type: "relatedArticles",
+        version: 1,
+        data: {
+          title: "Related articles",
+          articleIds: [relatedCreated.article.id],
+        },
+      },
+    ],
+  };
 
   const created = await createContentArticle(
     pool,
@@ -119,6 +179,20 @@ try {
     (await getPublicContentArticle(pool, originalSlug))?.kind,
     "article",
   );
+  const publicWithRelated = await getPublicContentArticle(pool, originalSlug);
+  assert.equal(publicWithRelated?.kind, "article");
+  if (publicWithRelated?.kind === "article") {
+    assert.deepEqual(
+      publicWithRelated.article.relatedArticles.map((article) => article.id),
+      [relatedCreated.article.id],
+    );
+    assert.equal(
+      publicWithRelated.article.assets.some(
+        (asset) => asset.id === relatedAssetId && asset.publicUrl,
+      ),
+      true,
+    );
+  }
 
   const checkpoint = await createContentArticleCheckpoint(pool, {
     id: articleId,
@@ -329,7 +403,16 @@ try {
       cleanupArticleId,
     ]);
   }
+  if (cleanupRelatedArticleId) {
+    await pool.query("delete from content_articles where id = $1", [
+      cleanupRelatedArticleId,
+    ]);
+  }
   if (assetId)
     await pool.query("delete from content_assets where id = $1", [assetId]);
+  if (relatedAssetId)
+    await pool.query("delete from content_assets where id = $1", [
+      relatedAssetId,
+    ]);
   await pool.end();
 }

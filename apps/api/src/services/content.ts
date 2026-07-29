@@ -264,6 +264,7 @@ export type PublicContentArticle = PublicContentArticleSummary & {
   wordCount: number;
   toc: ContentTocItem[];
   assets: ResolvedContentAsset[];
+  relatedArticles: PublicContentArticleSummary[];
 };
 
 export type PreviewContentArticle = {
@@ -290,6 +291,7 @@ export type PreviewContentArticle = {
   publishedAt: string | null;
   updatedAt: string;
   assets: ResolvedContentAsset[];
+  relatedArticles: PublicContentArticleSummary[];
 };
 
 export type ContentArticleMutationResult = {
@@ -2371,9 +2373,19 @@ export async function getPreviewContentArticle(
     );
   }
   const draft = article.draft;
+  const relatedArticles = await loadRelatedPublicArticles(
+    db,
+    draft.document,
+    article.id,
+  );
   const assets = await resolveContentAssets(
     db,
-    draftAssetReferences(draft).map((reference) => reference.assetId),
+    [
+      ...draftAssetReferences(draft).map((reference) => reference.assetId),
+      ...relatedArticles.flatMap((related) =>
+        related.listCover ? [related.listCover.assetId] : [],
+      ),
+    ],
     false,
   );
   return {
@@ -2400,6 +2412,7 @@ export async function getPreviewContentArticle(
     publishedAt: article.published?.publishedAt ?? null,
     updatedAt: draft.updatedAt,
     assets,
+    relatedArticles,
   };
 }
 
@@ -2440,6 +2453,55 @@ function publicSummary(row: PublicSummaryRow): PublicContentArticleSummary {
     publishedAt: requiredIso(row.published_at),
     updatedAt: requiredIso(row.version_created_at),
   };
+}
+
+function relatedArticleIds(document: ContentDocument): string[] {
+  const ids = document.blocks.flatMap((block) =>
+    block.type === "relatedArticles" ? block.data.articleIds : [],
+  );
+  return [...new Set(ids)].slice(0, 12);
+}
+
+async function loadRelatedPublicArticles(
+  db: DbQuery,
+  document: ContentDocument,
+  currentArticleId: string,
+): Promise<PublicContentArticleSummary[]> {
+  const ids = relatedArticleIds(document).filter(
+    (articleId) => articleId !== currentArticleId,
+  );
+  if (ids.length === 0) return [];
+  const { rows } = await db.query<PublicSummaryRow>(
+    `
+      select
+        a.id,
+        v.id as version_id,
+        v.slug,
+        v.title,
+        v.excerpt,
+        v.list_cover,
+        v.author,
+        v.category,
+        v.tags,
+        v.locale,
+        v.featured,
+        v.reading_time_minutes,
+        a.first_published_at,
+        a.published_at,
+        greatest(v.created_at, a.published_at) as version_created_at
+      from content_articles a
+      join content_article_versions v on v.id = a.published_version_id
+      where a.id = any($1::uuid[])
+        and a.published_version_id is not null
+        and a.archived_at is null
+    `,
+    [ids],
+  );
+  const byId = new Map(rows.map((row) => [row.id, publicSummary(row)]));
+  return ids.flatMap((id) => {
+    const article = byId.get(id);
+    return article ? [article] : [];
+  });
 }
 
 export async function listPublicContentArticles(
@@ -2590,15 +2652,25 @@ export async function getPublicContentArticle(
   const socialImage = row.social_image
     ? contentImagePlacementSchema.parse(row.social_image)
     : null;
+  const relatedArticles = await loadRelatedPublicArticles(
+    db,
+    document,
+    summary.id,
+  );
   const assets = await resolveContentAssets(
     db,
-    collectContentAssetReferences({
-      document,
-      listCover: summary.listCover,
-      heroImage,
-      socialImage,
-      author: summary.author,
-    }).map((reference) => reference.assetId),
+    [
+      ...collectContentAssetReferences({
+        document,
+        listCover: summary.listCover,
+        heroImage,
+        socialImage,
+        author: summary.author,
+      }).map((reference) => reference.assetId),
+      ...relatedArticles.flatMap((related) =>
+        related.listCover ? [related.listCover.assetId] : [],
+      ),
+    ],
     true,
   );
   return {
@@ -2614,6 +2686,7 @@ export async function getPublicContentArticle(
       wordCount: row.word_count,
       toc: parseToc(row.toc),
       assets,
+      relatedArticles,
     },
   };
 }
