@@ -130,6 +130,7 @@ import {
   emphasizeSignalBotNarrativeText,
   formatSignalBotPreciseCompactUsd,
   formatSignalNotificationHeadlineRichText,
+  isRepresentativeTraderResearchDelta,
   normalizeSignalBotPublicLanguage,
   splitSignalBotNarrative,
 } from "./signal-bot-editorial-copy.js";
@@ -1547,7 +1548,8 @@ export function buildSignalBotMessage(input: {
     : null;
   const researchTrackRecord =
     messageKind === "research_update" &&
-    note.holderActorMode === "single_holder"
+    note.holderActorMode === "single_holder" &&
+    isRepresentativeTraderResearchDelta(notificationCopy.researchDelta)
       ? scalarSignalEvidenceValue(evidenceRows, "track_record", "usd")
       : null;
   const researchPositionRows = researchPosition

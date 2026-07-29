@@ -28,6 +28,14 @@ type EditorialResearchDelta =
     }
   | { kind: "wallet_count_change" };
 
+export function isRepresentativeTraderResearchDelta(
+  value: EditorialResearchDelta | null,
+): boolean {
+  return (
+    value?.kind !== "position_change" || value.scope === "representative_wallet"
+  );
+}
+
 function formatCents(value: number): string {
   return `${Math.max(0, Math.min(100, Math.round(value * 100)))}¢`;
 }
@@ -107,6 +115,15 @@ function resolvePriceTargetNarrative(
   return { market: subject, subject: capitalize(match[1]) };
 }
 
+function resolveMatchupNarrative(
+  value: string,
+): { favorite: string; opponent: string } | null {
+  const cleaned = cleanPublicMarketText(value)?.trim();
+  const match = cleaned?.match(/^(.+?)\s+over\s+(.+)$/i);
+  if (!match?.[1] || !match[2]) return null;
+  return { favorite: match[1].trim(), opponent: match[2].trim() };
+}
+
 export function formatSignalBotPreciseCompactUsd(
   value: number,
   signed = false,
@@ -148,6 +165,47 @@ export function buildSignalBotStructuredNarrative(input: {
       input.note.holderIdentityDisplayName ?? input.note.holderDisplayName,
     ) ?? "the trader";
   const priceTarget = resolvePriceTargetNarrative(input.marketLabel);
+  const matchup = resolveMatchupNarrative(input.marketLabel);
+
+  if (
+    input.messageKind === "research_update" &&
+    (input.headlineTemplateKey === "research_position_added_v7" ||
+      input.headlineTemplateKey === "research_position_reduced_v7") &&
+    input.researchDelta?.kind === "position_change" &&
+    input.researchDelta.scope === "selected_side_cluster" &&
+    input.side != null &&
+    input.price != null
+  ) {
+    const added = input.researchDelta.positionChangeUsd > 0;
+    const amount = formatSignalBotPreciseCompactUsd(
+      Math.abs(input.researchDelta.positionChangeUsd),
+    );
+    const combined = formatSignalBotPreciseCompactUsd(
+      input.researchDelta.afterUsd,
+    );
+    const probability =
+      input.editorialProbability == null
+        ? null
+        : formatCents(input.editorialProbability);
+    const marketSubject =
+      /^\d+(?:\.\d+)?\s+(?:bps?|basis points?)\s+(?:increase|decrease)\b/i.test(
+        input.marketLabel,
+      )
+        ? `A ${input.marketLabel}`
+        : capitalize(input.marketLabel);
+    return [
+      probability
+        ? `${marketSubject} is priced near ${probability}, leaving ${input.side} around ${formatCents(input.price)}.`
+        : `${input.side} is trading around ${formatCents(input.price)}.`,
+      `Tracked traders ${added ? "added" : "cut"} ${amount} ${
+        added ? "to" : "from"
+      } ${input.side}, ${
+        added
+          ? `bringing their combined position to ${combined}`
+          : `leaving their combined position at ${combined}`
+      }.`,
+    ];
+  }
 
   if (
     input.messageKind === "research_update" &&
@@ -305,6 +363,30 @@ export function buildSignalBotStructuredNarrative(input: {
     return [
       `${input.sideLabel} is already a heavy favorite, but this trader has still built a ${position} position while making ${formatSignalBotPreciseCompactUsd(trackRecordUsd)} over the last ${horizonDays} days.`,
       `At ${formatCents(input.price)}, there is little room left for error, so risking ${position} is a strong statement of conviction.`,
+    ];
+  }
+
+  if (
+    input.messageKind === "initial" &&
+    input.headlineTemplateKey === "initial_actor_stakes_v10" &&
+    matchup &&
+    input.sideLabel &&
+    input.price != null &&
+    input.note.holderPositionUsd != null &&
+    input.note.holderPositionUsd > 0 &&
+    trackRecordUsd != null
+  ) {
+    const position = formatSignalBotPreciseCompactUsd(
+      input.note.holderPositionUsd,
+    );
+    const positionSubject =
+      input.sideLabel.toLocaleLowerCase("en-US") ===
+      matchup.favorite.toLocaleLowerCase("en-US")
+        ? `${matchup.favorite} against ${matchup.opponent}`
+        : input.sideLabel;
+    return [
+      `${input.sideLabel} is priced at ${formatCents(input.price)}, and ${holderName} has built a ${position} position on ${positionSubject}.`,
+      `With ${formatSignalBotPreciseCompactUsd(trackRecordUsd)} in profit over the last ${horizonDays} days, their ${position} position stands out as a meaningful vote of confidence rather than a routine bet.`,
     ];
   }
 
