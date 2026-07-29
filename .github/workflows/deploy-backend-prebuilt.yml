@@ -96,9 +96,9 @@ jobs:
 
   deploy:
     if: >-
-      github.event_name == 'workflow_dispatch' &&
       github.ref == 'refs/heads/main' &&
-      inputs.production_action == 'DEPLOY_PRODUCTION'
+      (github.event_name == 'push' ||
+      inputs.production_action == 'DEPLOY_PRODUCTION')
     needs: verify-content-backend
     runs-on: ubuntu-24.04-arm
     environment: production
