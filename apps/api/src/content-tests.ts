@@ -508,6 +508,23 @@ test("keeps the content database fallback and deployment preflight fail-safe", (
   assert.match(deployScript, /Restoring previous backend image/);
   assert.ok(recoveryWorkflow.includes("run -T --rm --no-deps api \\"));
   assert.ok(recoveryWorkflow.includes("/app/apps/api/dist/env.js </dev/null"));
+  const recoveryServicesAt = recoveryWorkflow.indexOf("application_services=(");
+  const recoveryRemovalAt = recoveryWorkflow.indexOf(
+    'for service in "${application_services[@]}"',
+  );
+  assert.ok(recoveryServicesAt >= 0);
+  assert.ok(recoveryRemovalAt > recoveryServicesAt);
+  const recoveryServicesBlock = recoveryWorkflow.slice(
+    recoveryServicesAt,
+    recoveryRemovalAt,
+  );
+  assert.doesNotMatch(recoveryServicesBlock, /\bpostgres\b/);
+  assert.doesNotMatch(recoveryServicesBlock, /\bredis\b/);
+  assert.ok(
+    recoveryWorkflow.includes(
+      "label=com.docker.compose.project=hunch-monorepo",
+    ),
+  );
   assert.ok(
     recoveryWorkflow.includes('"${compose[@]}" up -d --no-build nginx'),
   );

@@ -75,6 +75,27 @@ jobs:
             node /app/packages/config/dist/run-with-secrets.js \
             /app/apps/api/dist/env.js </dev/null
 
+          application_services=(
+            api
+            indexer-polymarket
+            indexer-limitless
+            indexer-dflow
+            ai-worker
+            finance-worker
+            signal-bot
+            nginx
+          )
+          for service in "${application_services[@]}"; do
+            container_ids="$(
+              docker ps -aq \
+                --filter "label=com.docker.compose.project=hunch-monorepo" \
+                --filter "label=com.docker.compose.service=${service}"
+            )"
+            if [[ -n "${container_ids}" ]]; then
+              docker rm -f ${container_ids}
+            fi
+          done
+
           "${compose[@]}" up -d postgres redis
           "${compose[@]}" up -d --no-build
 
