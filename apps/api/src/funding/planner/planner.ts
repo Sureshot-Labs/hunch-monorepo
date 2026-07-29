@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import {
+  compareUnsignedDecimals,
   multiplyRawByUnitPrice,
   rawForUsdCeil,
 } from "../../account-value/decimal.js";
@@ -38,6 +39,8 @@ import type {
   FundingPlanningStore,
   PlannedSourceOption,
 } from "./planning-types.js";
+
+const MINIMUM_AUTOMATIC_TRADE_REFILL_USD = "0.5";
 
 export type FundingSourcePlanningRequest = Readonly<{
   accountId: string;
@@ -428,10 +431,18 @@ function minimumExecutableDestination(
   const valuation = candidate.collateralValuation;
   if (!valuation) return null;
   try {
+    const configuredMinimumUsd = policy.placement.minimumDestinationUsd;
+    const minimumUsd =
+      compareUnsignedDecimals(
+        configuredMinimumUsd,
+        MINIMUM_AUTOMATIC_TRADE_REFILL_USD,
+      ) >= 0
+        ? configuredMinimumUsd
+        : MINIMUM_AUTOMATIC_TRADE_REFILL_USD;
     return {
       asset: candidate.option.requiredAsset,
       raw: rawForUsdCeil({
-        usd: policy.placement.minimumDestinationUsd,
+        usd: minimumUsd,
         decimals: candidate.option.requiredAsset.decimals,
         unitPriceUsd: valuation.unitPriceUsd,
       }),

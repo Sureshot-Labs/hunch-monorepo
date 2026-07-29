@@ -2058,6 +2058,9 @@ await test("one liquidity discovery resolves market context and destination cand
 await test("planner keeps the true tiny shortfall while quoting one executable trade refill", async () => {
   const policy = mutablePolicy();
   policy.creationMode = "on";
+  // A runtime policy may tune warnings and fee caps, but it must not make
+  // automatic trade refills economically meaningless.
+  policy.placement.minimumDestinationUsd = "0.1";
   let plannedRequiredRaw: string | null = null;
   const plannedPlacements: PlacementDecision[] = [];
   const destination = candidate({
@@ -2102,15 +2105,65 @@ await test("planner keeps the true tiny shortfall while quoting one executable t
 
   assert.equal(projection.shortfallRaw, "60000");
   assert.equal(projection.shortfallUsd, "0.06");
-  assert.equal(plannedRequiredRaw, "1000000");
-  assert.equal(plannedPlacements[0]?.destinationRequirement.raw, "1000000");
-  assert.equal(plannedPlacements[0]?.boundedBuffer?.raw, "940000");
-  assert.equal(projection.sourceOptions[0]?.minimumDestination?.raw, "1000000");
+  assert.equal(plannedRequiredRaw, "500000");
+  assert.equal(plannedPlacements[0]?.destinationRequirement.raw, "500000");
+  assert.equal(plannedPlacements[0]?.boundedBuffer?.raw, "440000");
+  assert.equal(projection.sourceOptions[0]?.minimumDestination?.raw, "500000");
   assert.equal(projection.mode, "inline_funding");
   assert.equal(
     projection.reasonCodes.includes("insufficient_liquidity"),
     false,
   );
+});
+
+await test("a tiny shortfall falls back when no source covers the executable refill", async () => {
+  const policy = mutablePolicy();
+  policy.creationMode = "on";
+  policy.placement.minimumDestinationUsd = "0.1";
+  const destination = candidate({
+    option: destinationOption({ preparationPurpose: "buy" }),
+    bindingOption: bindingOption({ preparationPurpose: "buy" }),
+    availableNow: { asset: POLYGON_PUSD, raw: "940000" },
+  });
+  const request = intent("trade_shortfall", "1000000", {
+    destinationOptionId: null,
+  });
+  let requiredRaw: string | null = null;
+
+  const projection = await new FundingPlanner({
+    listDestinations: async () => [destination],
+    resolveMarketContext: async ({ marketContextId }) => ({
+      marketContextId,
+      venueId: "polymarket",
+      marketId: "market_12345678",
+      side: "yes",
+      executionProfileId: "profile_polymarket",
+      marketPriceRevision: "marketprice_12345678",
+      collateralAsset: POLYGON_PUSD,
+      requestedCollateralRaw: "1000000",
+      compatibleVenueBindingOptionIds: [
+        destination.bindingOption.venueBindingOptionId,
+      ],
+      expiresAt: "2026-07-24T12:01:00.000Z",
+    }),
+    listSources: async ({ requiredAmount }) => {
+      requiredRaw = requiredAmount.raw;
+      return [];
+    },
+    store: new MemoryPlanningStore(),
+    now: () => NOW,
+  }).discover({
+    accountId: USER_ID,
+    request,
+    policy,
+    policyRevision: "policy_revision_12345678",
+    ownershipRevision: "ownership_revision_12345678",
+  });
+
+  assert.equal(requiredRaw, "500000");
+  assert.equal(projection.sourceOptions.length, 0);
+  assert.equal(projection.mode, "unavailable");
+  assert.equal(projection.reasonCodes.includes("insufficient_liquidity"), true);
 });
 
 await test("withdrawal binds one owner recipient through discovery, quote, and atomic commit", async () => {

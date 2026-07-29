@@ -896,6 +896,7 @@ async function refreshLimitlessMarketTop(
     const quote = await fetchLimitlessAmmQuotePair({
       rpcUrl: env.baseRpcUrl,
       timeoutMs: env.baseRpcTimeoutMs,
+      minDelayMs: env.baseRpcMinDelayMs,
       marketAddress: address,
     });
     const ts = new Date();
@@ -1722,6 +1723,7 @@ export async function backfillHotLimitlessAmmPrices(): Promise<{
       const quote = await fetchLimitlessAmmQuotePair({
         rpcUrl: env.baseRpcUrl,
         timeoutMs: env.baseRpcTimeoutMs,
+        minDelayMs: env.baseRpcMinDelayMs,
         marketAddress: address,
       });
 

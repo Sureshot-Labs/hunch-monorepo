@@ -578,7 +578,7 @@ await test("older stored policies receive fail-closed WP5 economics defaults", (
       maximumFeeBps: 2_000,
       warningFeeUsd: "5",
       warningFeeBps: 1_000,
-      minimumDestinationUsd: "1",
+      minimumDestinationUsd: "0.5",
     },
   );
 });

@@ -25,6 +25,20 @@ export class PolymarketRateLimiter {
   private activeBackgroundRequests = 0;
   private readonly maxConcurrentRequests = 8;
   private readonly maxBackgroundRequests = 6;
+  private readonly interactiveRequestTimeoutMs: number;
+  private readonly backgroundRequestTimeoutMs: number;
+
+  constructor(
+    options: {
+      interactiveRequestTimeoutMs?: number;
+      backgroundRequestTimeoutMs?: number;
+    } = {},
+  ) {
+    this.interactiveRequestTimeoutMs =
+      options.interactiveRequestTimeoutMs ?? 4_000;
+    this.backgroundRequestTimeoutMs =
+      options.backgroundRequestTimeoutMs ?? 15_000;
+  }
 
   queueRequest<T = unknown>(
     key: string,
@@ -117,6 +131,10 @@ export class PolymarketRateLimiter {
   ): Promise<void> {
     try {
       let result;
+      const timeoutMs =
+        request.priority === "interactive"
+          ? this.interactiveRequestTimeoutMs
+          : this.backgroundRequestTimeoutMs;
 
       if (request.requestData.isPost) {
         if (!request.requestData.endpoint) {
@@ -127,18 +145,20 @@ export class PolymarketRateLimiter {
         result = await this.makePostRequest(
           request.requestData.endpoint,
           request.requestData.body,
+          timeoutMs,
         );
       } else if (request.requestData.endpoint) {
         result = await this.makeRequest(
           request.requestData.endpoint,
           request.requestData.params,
+          timeoutMs,
         );
       } else {
         const params = new URLSearchParams({
           market: request.key,
           interval: "max",
         });
-        result = await this.makeRequest("/prices-history", params);
+        result = await this.makeRequest("/prices-history", params, timeoutMs);
       }
 
       request.resolve(result);
@@ -156,47 +176,73 @@ export class PolymarketRateLimiter {
   private async makeRequest(
     endpoint: string,
     params: URLSearchParams = new URLSearchParams(),
+    timeoutMs = this.backgroundRequestTimeoutMs,
   ): Promise<unknown> {
     const url = `https://clob.polymarket.com${endpoint}${params.toString() ? "?" + params.toString() : ""}`;
-
-    const response = await fetch(url, {
-      method: "GET",
-      headers: {
-        "User-Agent": "Hunch-API/1.0",
+    return this.fetchJson(
+      url,
+      {
+        method: "GET",
+        headers: {
+          "User-Agent": "Hunch-API/1.0",
+        },
       },
-    });
-
-    if (!response.ok) {
-      throw new Error(
-        `Polymarket API error: ${response.status} ${response.statusText}`,
-      );
-    }
-
-    return response.json();
+      timeoutMs,
+    );
   }
 
   private async makePostRequest(
     endpoint: string,
     body: unknown,
+    timeoutMs = this.backgroundRequestTimeoutMs,
   ): Promise<unknown> {
     const url = `https://clob.polymarket.com${endpoint}`;
-
-    const response = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "User-Agent": "Hunch-API/1.0",
+    return this.fetchJson(
+      url,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "User-Agent": "Hunch-API/1.0",
+        },
+        body: JSON.stringify(body),
       },
-      body: JSON.stringify(body),
-    });
+      timeoutMs,
+    );
+  }
 
-    if (!response.ok) {
-      throw new Error(
-        `Polymarket API error: ${response.status} ${response.statusText}`,
-      );
+  private async fetchJson(
+    url: string,
+    init: RequestInit,
+    timeoutMs: number,
+  ): Promise<unknown> {
+    const controller = new AbortController();
+    let timedOut = false;
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, timeoutMs);
+    try {
+      const response = await fetch(url, {
+        ...init,
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        throw new Error(
+          `Polymarket API error: ${response.status} ${response.statusText}`,
+        );
+      }
+      return response.json();
+    } catch (error) {
+      if (timedOut) {
+        throw new Error(
+          `Polymarket API request timed out after ${timeoutMs}ms`,
+        );
+      }
+      throw error;
+    } finally {
+      clearTimeout(timeout);
     }
-
-    return response.json();
   }
 }
 

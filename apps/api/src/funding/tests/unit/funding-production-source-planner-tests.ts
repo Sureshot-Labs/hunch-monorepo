@@ -252,6 +252,7 @@ function account(
           signingModes: internal
             ? ["web_client", "privy_authorization"]
             : ["web_client"],
+          controllerWalletRef: "8571f3cb-381e-4e55-8f4c-ecc4c7f2abb9",
           serverWalletRef: internal ? "privy_wallet_source_12345678" : null,
           sponsorshipPolicyIds: internal
             ? [PRIVY_USER_AUTHORIZED_EVM_SPONSORSHIP_POLICY_ID]
@@ -368,14 +369,22 @@ assert.equal(unavailableExactReceivedSource.length, 0);
   );
 }
 
-const externalWalletIsNotADefaultSource =
-  deriveProductionRelayEligibleSourceFacts({
-    accountId: ACCOUNT_ID,
-    account: account({ internal: false }),
-    policy: policy(),
-    requiredAmount: { asset: POLYGON_PUSD, raw: "3000000" },
-  });
-assert.equal(externalWalletIsNotADefaultSource.length, 0);
+const connectedExternalWalletSource = deriveProductionRelayEligibleSourceFacts({
+  accountId: ACCOUNT_ID,
+  account: account({ internal: false }),
+  policy: policy(),
+  requiredAmount: { asset: POLYGON_PUSD, raw: "3000000" },
+  purpose: "trade_shortfall",
+});
+assert.equal(connectedExternalWalletSource.length, 1);
+assert.equal(connectedExternalWalletSource[0]?.safeLabel, "Connected wallet");
+assert.equal(connectedExternalWalletSource[0]?.walletExecutionReady, true);
+assert.equal(
+  connectedExternalWalletSource[0]?.source.kind === "owned_location"
+    ? connectedExternalWalletSource[0].source.location.details.walletId
+    : null,
+  "wallet_source_planner_12345678",
+);
 
 {
   const sourceOnly = account();

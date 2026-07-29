@@ -72,8 +72,53 @@ async function testInteractiveBookBypassesQueuedBackgroundWork(): Promise<void> 
   await Promise.all([...blockers, queuedBackground, interactive]);
 }
 
+async function testHungInteractiveRequestIsAbortedAndReleasesCapacity(): Promise<void> {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = (async (_input, init) => {
+    calls += 1;
+    if (calls === 1) {
+      return await new Promise<Response>((_resolve, reject) => {
+        const signal = init?.signal;
+        signal?.addEventListener(
+          "abort",
+          () => reject(new Error("upstream request aborted")),
+          { once: true },
+        );
+      });
+    }
+    return new Response(JSON.stringify({ ok: true }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  }) as typeof fetch;
+
+  try {
+    const limiter = new PolymarketRateLimiter({
+      interactiveRequestTimeoutMs: 10,
+      backgroundRequestTimeoutMs: 50,
+    });
+    const client = new PolymarketClient(limiter);
+
+    await assert.rejects(
+      client.getOrderBook("hung-interactive-token"),
+      /Polymarket API request timed out after 10ms/,
+    );
+    assert.deepEqual(await client.getOrderBook("next-interactive-token"), {
+      ok: true,
+    });
+    assert.equal(calls, 2);
+    assert.equal(limiter.requestQueue.length, 0);
+    assert.equal(limiter.isProcessing, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}
+
 await testIdenticalRequestsUseOneUpstreamCall();
 await testInteractiveBookBypassesQueuedBackgroundWork();
+await testHungInteractiveRequestIsAbortedAndReleasesCapacity();
 
 console.log("ok - identical Polymarket requests share one upstream call");
 console.log("ok - interactive orderbook bypasses queued background work");
+console.log("ok - hung interactive request aborts and releases capacity");

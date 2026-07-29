@@ -451,11 +451,13 @@ function sourceFactsForComponent(input: {
         sourceLocationPatternId: location.locationPatternId,
         safeLabel:
           input.safeLabel ??
-          (nativeSolSource
-            ? "SOL on Solana"
-            : input.component.location.kind === "venue_account"
-              ? "Trading balance"
-              : `${input.component.amount.asset.networkId} wallet`),
+          (input.profile.source === "external"
+            ? "Connected wallet"
+            : nativeSolSource
+              ? "SOL on Solana"
+              : input.component.location.kind === "venue_account"
+                ? "Trading balance"
+                : `${input.component.amount.asset.networkId} wallet`),
         source: {
           kind: "owned_location" as const,
           location: input.executionLocation,
@@ -567,11 +569,7 @@ export function deriveProductionRelayEligibleSourceFacts(input: {
           availability.reasonCodes.includes("cash_availability_unknown"))) ||
       BigInt(availability.availableRaw) <= 0n ||
       !profile ||
-      !executionLocation ||
-      // Linked external wallets are inventory evidence, not default Add Funds
-      // sources. They need a separate explicit advanced signer contract; the
-      // initial flow accepts external money only through direct ingress.
-      profile.source === "external"
+      !executionLocation
     ) {
       continue;
     }

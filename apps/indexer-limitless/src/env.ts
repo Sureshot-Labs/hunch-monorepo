@@ -282,6 +282,11 @@ const baseRpcTimeoutMs = clampInt(
   { min: 1_000, max: 60_000, fallback: 10_000 },
 );
 
+const baseRpcMinDelayMs = clampInt(
+  parseOptionalInt(process.env.LIMITLESS_BASE_RPC_MIN_DELAY_MS),
+  { min: 10, max: 10_000, fallback: 100 },
+);
+
 const hotAmmQuoteCooldownMs = clampInt(
   parseOptionalInt(process.env.LIMITLESS_AMM_QUOTE_COOLDOWN_MS),
   { min: 1_000, max: 10 * 60 * 1000, fallback: 15_000 },
@@ -297,6 +302,7 @@ export const env = {
   redisUrl: req("REDIS_URL"),
   baseRpcUrl: process.env.BASE_RPC_URL?.trim() || "https://mainnet.base.org",
   baseRpcTimeoutMs,
+  baseRpcMinDelayMs,
 
   limitlessEnabledSetting,
   limitlessEnabled: limitlessEnabledSetting ?? true,

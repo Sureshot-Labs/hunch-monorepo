@@ -329,7 +329,7 @@ export const fundingRuntimePolicySchema = z
         maximumFeeBps: z.number().int().min(0).max(10_000).default(2_000),
         warningFeeUsd: usdAmountSchema.default("5"),
         warningFeeBps: z.number().int().min(0).max(10_000).default(1_000),
-        minimumDestinationUsd: usdAmountSchema.default("1"),
+        minimumDestinationUsd: usdAmountSchema.default("0.5"),
       })
       .strict(),
     routeExperience: z
@@ -414,7 +414,7 @@ export const DEFAULT_FUNDING_RUNTIME_POLICY: FundingRuntimePolicy = deepFreeze({
     maximumFeeBps: 2_000,
     warningFeeUsd: "5",
     warningFeeBps: 1_000,
-    minimumDestinationUsd: "1",
+    minimumDestinationUsd: "0.5",
   },
   routeExperience: {
     maximumInlineP95Ms: 45_000,
