@@ -21,7 +21,7 @@ The design and SQL findings behind this implementation are recorded in
 5. Verify `GET /health/content`, `GET /content/articles`, and
    `GET /admin/content/operations`.
 6. Deploy the admin block editor and create drafts.
-7. Deploy the landing renderer, `/blog`, sitemap/feed support, preview bridge,
+7. Deploy the landing renderer, `/journal`, sitemap/feed support, preview bridge,
    and signed revalidation route.
 8. Set `CONTENT_REVALIDATE_URL`, `CONTENT_REVALIDATE_SECRET`,
    `CONTENT_RENDERER_CONTRACT_ID=hunch-content-document-v1`, and
@@ -57,17 +57,19 @@ disabled.
 | `CONTENT_REVALIDATE_URL`                 | empty          | Landing revalidation webhook URL                  |
 | `CONTENT_REVALIDATE_SECRET`              | empty          | 32+ character HMAC secret shared with the landing |
 | `CONTENT_REVALIDATE_TIMEOUT_MS`          | `5000`         | Webhook timeout                                   |
-| `CONTENT_ASSET_S3_ENDPOINT`              | empty          | Checksum-capable S3 endpoint                      |
-| `CONTENT_ASSET_S3_REGION`                | `auto`         | Object-store region                               |
+| `CONTENT_ASSET_S3_ENDPOINT`              | empty          | Optional S3-compatible endpoint; omit for AWS S3  |
+| `CONTENT_ASSET_S3_REGION`                | AWS region     | Object-store region                               |
 | `CONTENT_ASSET_S3_BUCKET`                | empty          | Private upload bucket                             |
-| `CONTENT_ASSET_S3_ACCESS_KEY_ID`         | empty          | Object-store access key                           |
-| `CONTENT_ASSET_S3_SECRET_ACCESS_KEY`     | empty          | Object-store secret                               |
-| `CONTENT_ASSET_S3_FORCE_PATH_STYLE`      | `true`         | S3 path-style compatibility                       |
+| `CONTENT_ASSET_S3_ACCESS_KEY_ID`         | empty          | Optional static access key; prefer EC2 IAM role   |
+| `CONTENT_ASSET_S3_SECRET_ACCESS_KEY`     | empty          | Optional paired static secret                     |
+| `CONTENT_ASSET_S3_FORCE_PATH_STYLE`      | endpoint-based | S3 path-style compatibility                       |
 | `CONTENT_ASSET_PUBLIC_BASE_URL`          | empty          | CDN/public asset origin                           |
 | `CONTENT_ASSET_UPLOAD_TTL_SEC`           | `900`          | Signed PUT lifetime, 60-3600 seconds              |
 
-All five object-store endpoint/bucket/credential/public-origin values must be
-configured together. Revalidation URL and secret must also be configured
+The bucket and public CDN origin are required together. On AWS, omit the custom
+endpoint and static keys so the SDK uses the EC2/ECS IAM role credential chain.
+For another S3-compatible service, set its endpoint and provide the access key
+and secret as a pair. Revalidation URL and secret must also be configured
 together. Production webhook, storage, and CDN URLs must use HTTPS. Secrets
 belong in the existing runtime secret mechanism, not in git.
 

@@ -2,6 +2,7 @@ import { config } from "dotenv";
 import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
 import { resolveAggMarketCredential } from "./lib/agg-market-credentials.js";
+import { resolveContentStorageConfig } from "./lib/content-storage-config.js";
 import { parseUsdcToMicro, usdcMicroToDecimalString } from "./lib/usdc.js";
 import { CONTENT_RENDERER_CONTRACT_ID } from "./schemas/content-blocks.js";
 
@@ -463,26 +464,17 @@ const contentRendererContractId =
   process.env.CONTENT_RENDERER_CONTRACT_ID?.trim() || "";
 const contentWorkerEnabled =
   parseOptionalBool(process.env.CONTENT_WORKER_ENABLED) ?? true;
-const contentAssetS3Endpoint =
-  process.env.CONTENT_ASSET_S3_ENDPOINT?.trim().replace(/\/+$/, "") || "";
-const contentAssetS3Region =
-  process.env.CONTENT_ASSET_S3_REGION?.trim() || "auto";
-const contentAssetS3Bucket = process.env.CONTENT_ASSET_S3_BUCKET?.trim() || "";
-const contentAssetS3AccessKeyId =
-  process.env.CONTENT_ASSET_S3_ACCESS_KEY_ID?.trim() || "";
-const contentAssetS3SecretAccessKey =
-  process.env.CONTENT_ASSET_S3_SECRET_ACCESS_KEY?.trim() || "";
-const contentAssetPublicBaseUrl =
-  process.env.CONTENT_ASSET_PUBLIC_BASE_URL?.trim().replace(/\/+$/, "") || "";
-const contentAssetS3ForcePathStyle =
-  parseOptionalBool(process.env.CONTENT_ASSET_S3_FORCE_PATH_STYLE) ?? true;
-const contentAssetConfigValues = [
-  contentAssetS3Endpoint,
-  contentAssetS3Bucket,
-  contentAssetS3AccessKeyId,
-  contentAssetS3SecretAccessKey,
-  contentAssetPublicBaseUrl,
-];
+const contentStorageConfig = resolveContentStorageConfig(process.env, nodeEnv);
+const contentAssetS3Endpoint = contentStorageConfig.endpoint;
+const contentAssetS3Region = contentStorageConfig.region;
+const contentAssetS3Bucket = contentStorageConfig.bucket;
+const contentAssetS3AccessKeyId = contentStorageConfig.accessKeyId;
+const contentAssetS3SecretAccessKey = contentStorageConfig.secretAccessKey;
+const contentAssetPublicBaseUrl = contentStorageConfig.publicBaseUrl;
+const contentAssetS3ForcePathStyle = contentStorageConfig.forcePathStyle;
+const contentAssetStaticCredentialsConfigured =
+  contentStorageConfig.staticCredentialsConfigured;
+const contentAssetStorageConfigured = contentStorageConfig.storageConfigured;
 if (contentPublishingEnabled) {
   if (contentRendererContractId !== CONTENT_RENDERER_CONTRACT_ID) {
     throw new Error(
@@ -499,7 +491,7 @@ if (contentPublishingEnabled) {
       "[env] content revalidation must be configured when publishing is enabled",
     );
   }
-  if (!contentAssetConfigValues.every(Boolean)) {
+  if (!contentAssetStorageConfigured) {
     throw new Error(
       "[env] content object storage must be configured when publishing is enabled",
     );
@@ -508,29 +500,6 @@ if (contentPublishingEnabled) {
     throw new Error(
       "[env] ADMIN_AUTH_LEGACY_FALLBACK must be false before content publishing is enabled",
     );
-  }
-}
-if (
-  contentAssetConfigValues.some(Boolean) &&
-  !contentAssetConfigValues.every(Boolean)
-) {
-  throw new Error(
-    "[env] CONTENT_ASSET_S3_ENDPOINT, CONTENT_ASSET_S3_BUCKET, " +
-      "CONTENT_ASSET_S3_ACCESS_KEY_ID, CONTENT_ASSET_S3_SECRET_ACCESS_KEY, " +
-      "and CONTENT_ASSET_PUBLIC_BASE_URL must be configured together",
-  );
-}
-for (const [name, value] of [
-  ["CONTENT_ASSET_S3_ENDPOINT", contentAssetS3Endpoint],
-  ["CONTENT_ASSET_PUBLIC_BASE_URL", contentAssetPublicBaseUrl],
-] as const) {
-  if (!value) continue;
-  const parsed = new URL(value);
-  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
-    throw new Error(`[env] ${name} must be an HTTP(S) URL`);
-  }
-  if (nodeEnv.toLowerCase() === "production" && parsed.protocol !== "https:") {
-    throw new Error(`[env] ${name} must use HTTPS in production`);
   }
 }
 const aiMarketMapEnabled =
@@ -1091,6 +1060,8 @@ export const env = {
   contentAssetS3Bucket,
   contentAssetS3AccessKeyId,
   contentAssetS3SecretAccessKey,
+  contentAssetStaticCredentialsConfigured,
+  contentAssetStorageConfigured,
   contentAssetS3ForcePathStyle,
   contentAssetPublicBaseUrl,
   contentAssetUploadTtlSec: optionalIntInRange(

@@ -218,11 +218,7 @@ export async function getContentOperationalStatus(db: DbQuery) {
         env.contentRevalidateUrl && env.contentRevalidateSecret,
       ),
       previewConfigured: Boolean(env.contentPreviewSecret),
-      storageConfigured: Boolean(
-        env.contentAssetS3Endpoint &&
-        env.contentAssetS3Bucket &&
-        env.contentAssetPublicBaseUrl,
-      ),
+      storageConfigured: env.contentAssetStorageConfigured,
     },
     database: {
       ready: true,

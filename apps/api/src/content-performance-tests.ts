@@ -14,11 +14,13 @@ const rowCount = Math.max(
 const maxListMs = Number(process.env.CONTENT_PERF_MAX_LIST_MS ?? 250);
 const maxDetailMs = Number(process.env.CONTENT_PERF_MAX_DETAIL_MS ?? 75);
 const maxSearchMs = Number(process.env.CONTENT_PERF_MAX_SEARCH_MS ?? 300);
+const maxCleanupMs = Number(process.env.CONTENT_PERF_MAX_CLEANUP_MS ?? 20_000);
 const pool = createPgPool({ connectionString, max: 2 });
 const prefix = `perf-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 const rareSearchToken = `perfsearch${Date.now()}${Math.random()
   .toString(36)
   .slice(2, 8)}`;
+let cleanupMs = 0;
 
 type ExplainNode = {
   "Node Type": string;
@@ -68,6 +70,28 @@ async function explain(
 }
 
 try {
+  const requiredForeignKeyIndexes = [
+    "idx_content_articles_published_version_owner",
+    "idx_content_articles_scheduled_version_owner",
+    "idx_content_asset_usages_version_owner",
+    "idx_content_publication_jobs_version_owner",
+    "idx_content_outbox_article",
+    "idx_content_outbox_version_owner",
+  ];
+  const { rows: foreignKeyIndexRows } = await pool.query<{ indexname: string }>(
+    `
+      select indexname
+      from pg_indexes
+      where schemaname = 'public' and indexname = any($1::text[])
+    `,
+    [requiredForeignKeyIndexes],
+  );
+  assert.deepEqual(
+    foreignKeyIndexRows.map((row) => row.indexname).sort(),
+    [...requiredForeignKeyIndexes].sort(),
+    "content foreign-key support indexes are incomplete",
+  );
+
   await pool.query(
     `
       create temporary table content_perf_seed (
@@ -364,9 +388,9 @@ try {
       2,
     ),
   );
-  console.log("[content-performance-tests] passed");
 } finally {
   try {
+    const cleanupStartedAt = performance.now();
     await pool.query(
       `
         delete from content_articles article
@@ -374,7 +398,17 @@ try {
         where article.id = seed.article_id
       `,
     );
+    cleanupMs = performance.now() - cleanupStartedAt;
   } finally {
     await pool.end();
   }
 }
+
+assert.ok(
+  cleanupMs <= maxCleanupMs,
+  `${rowCount}-row cascade cleanup took ${cleanupMs.toFixed(1)}ms (limit ${maxCleanupMs}ms)`,
+);
+console.log(
+  `[content-performance-tests] ${rowCount}-row cleanup ${cleanupMs.toFixed(1)}ms (limit ${maxCleanupMs}ms)`,
+);
+console.log("[content-performance-tests] passed");

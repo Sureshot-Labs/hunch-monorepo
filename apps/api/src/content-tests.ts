@@ -19,6 +19,7 @@ import {
   deriveContentDocument,
   validateContentDocumentForPublication,
 } from "./services/content-document.js";
+import { resolveContentStorageConfig } from "./lib/content-storage-config.js";
 import {
   createContentPreviewTokenForTests,
   verifyContentPreviewTokenForTests,
@@ -443,6 +444,66 @@ test("signs short-lived preview tokens and rejects tampering", () => {
   );
 });
 
+test("supports AWS IAM-role storage without long-lived static keys", () => {
+  const config = resolveContentStorageConfig(
+    {
+      AWS_REGION: "eu-north-1",
+      CONTENT_ASSET_S3_REGION: "auto",
+      CONTENT_ASSET_S3_BUCKET: "hunch-content-production",
+      CONTENT_ASSET_PUBLIC_BASE_URL: "https://content.hunch.trade/",
+    },
+    "production",
+  );
+  assert.equal(config.storageConfigured, true);
+  assert.equal(config.staticCredentialsConfigured, false);
+  assert.equal(config.endpoint, "");
+  assert.equal(config.region, "eu-north-1");
+  assert.equal(config.publicBaseUrl, "https://content.hunch.trade");
+  assert.equal(config.forcePathStyle, false);
+});
+
+test("validates static storage credentials and production URLs", () => {
+  assert.throws(() =>
+    resolveContentStorageConfig(
+      {
+        CONTENT_ASSET_S3_BUCKET: "content",
+        CONTENT_ASSET_PUBLIC_BASE_URL: "https://cdn.example.com",
+        CONTENT_ASSET_S3_ACCESS_KEY_ID: "access-only",
+      },
+      "production",
+    ),
+  );
+  assert.throws(() =>
+    resolveContentStorageConfig(
+      { CONTENT_ASSET_S3_ENDPOINT: "https://s3.example.com" },
+      "production",
+    ),
+  );
+  assert.throws(() =>
+    resolveContentStorageConfig(
+      {
+        CONTENT_ASSET_S3_BUCKET: "content",
+        CONTENT_ASSET_PUBLIC_BASE_URL: "http://cdn.example.com",
+      },
+      "production",
+    ),
+  );
+  const custom = resolveContentStorageConfig(
+    {
+      CONTENT_ASSET_S3_ENDPOINT: "https://s3.example.com/",
+      CONTENT_ASSET_S3_REGION: "auto",
+      CONTENT_ASSET_S3_BUCKET: "content",
+      CONTENT_ASSET_S3_ACCESS_KEY_ID: "access",
+      CONTENT_ASSET_S3_SECRET_ACCESS_KEY: "secret",
+      CONTENT_ASSET_PUBLIC_BASE_URL: "https://cdn.example.com/",
+    },
+    "production",
+  );
+  assert.equal(custom.staticCredentialsConfigured, true);
+  assert.equal(custom.forcePathStyle, true);
+  assert.equal(custom.endpoint, "https://s3.example.com");
+});
+
 test("registers protected content routes and the isolated content migration", () => {
   const routes = readFileSync(
     new URL("./routes/index.ts", import.meta.url),
@@ -459,6 +520,13 @@ test("registers protected content routes and the isolated content migration", ()
     ),
     "utf8",
   );
+  const foreignKeyIndexMigration = readFileSync(
+    new URL(
+      "../../../packages/db/content-migrations/0007_content_foreign_key_indexes.sql",
+      import.meta.url,
+    ),
+    "utf8",
+  );
   assert.match(routes, /app\.register\(contentRoutes\)/);
   assert.match(routes, /app\.register\(adminContentRoutes\)/);
   assert.match(adminRoutes, /requiredAdminPermission: "content:read"/);
@@ -470,6 +538,11 @@ test("registers protected content routes and the isolated content migration", ()
   assert.match(migration, /content_article_versions/);
   assert.match(migration, /content_publication_jobs/);
   assert.match(migration, /content_outbox/);
+  assert.match(foreignKeyIndexMigration, /idx_content_outbox_article/);
+  assert.match(
+    foreignKeyIndexMigration,
+    /idx_content_publication_jobs_version_owner/,
+  );
   assert.equal(CONTENT_RENDERER_CONTRACT_ID, "hunch-content-document-v1");
 });
 
@@ -482,6 +555,13 @@ test("keeps the content database fallback and deployment preflight fail-safe", (
   const recoveryWorkflow = readFileSync(
     new URL(
       "../../../.github/workflows/recover-backend-existing-image.yml",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  const deployWorkflow = readFileSync(
+    new URL(
+      "../../../.github/workflows/deploy-backend-prebuilt.yml",
       import.meta.url,
     ),
     "utf8",
@@ -527,6 +607,18 @@ test("keeps the content database fallback and deployment preflight fail-safe", (
   );
   assert.ok(
     recoveryWorkflow.includes('"${compose[@]}" up -d --no-build nginx'),
+  );
+  assert.match(deployWorkflow, /production_action:/);
+  assert.match(deployWorkflow, /default: VERIFY_ONLY/);
+  assert.match(
+    deployWorkflow,
+    /inputs\.production_action == 'DEPLOY_PRODUCTION'/,
+  );
+  assert.match(deployWorkflow, /github\.ref == 'refs\/heads\/main'/);
+  assert.match(deployWorkflow, /cancel-in-progress: false/);
+  assert.match(
+    envSource,
+    /resolveContentStorageConfig\(process\.env, nodeEnv\)/,
   );
 });
 
