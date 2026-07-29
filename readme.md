@@ -9,7 +9,6 @@ This ingestor feeds that future: it normalizes markets and streams price/TOB dat
 ### For New Developers
 
 If you're new to the project, start with the **[Developer Setup Guide](./DEVELOPER_SETUP.md)** which covers:
-
 - Prerequisites and installation
 - Environment configuration
 - Database setup
@@ -28,7 +27,6 @@ pnpm infra:up
 
 # Run database migrations
 pnpm migrate
-pnpm migrate:content
 
 # Start all services in development mode
 pnpm dev
@@ -46,4 +44,3 @@ git config core.hooksPath .githooks
 
 - **[Developer Setup Guide](./DEVELOPER_SETUP.md)** - Complete setup instructions for new developers
 - **[API Documentation](./API_DOCUMENTATION.md)** - Complete API reference
-- **[Content API](./docs/content-api.md)** - Blog storage, admin workflow, and landing revalidation contract

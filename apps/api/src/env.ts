@@ -2,9 +2,7 @@ import { config } from "dotenv";
 import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
 import { resolveAggMarketCredential } from "./lib/agg-market-credentials.js";
-import { resolveContentStorageConfig } from "./lib/content-storage-config.js";
 import { parseUsdcToMicro, usdcMicroToDecimalString } from "./lib/usdc.js";
-import { CONTENT_RENDERER_CONTRACT_ID } from "./schemas/content-blocks.js";
 
 const envPath = resolve(
   dirname(fileURLToPath(import.meta.url)),
@@ -418,90 +416,6 @@ const adminSessionTtlMs = optionalPositiveInt(
   8 * 60 * 60 * 1000,
 );
 const adminTotpIssuer = process.env.ADMIN_TOTP_ISSUER?.trim() || "Hunch Admin";
-const contentRevalidateUrl = process.env.CONTENT_REVALIDATE_URL?.trim() || "";
-const contentRevalidateSecret =
-  process.env.CONTENT_REVALIDATE_SECRET?.trim() || "";
-const contentPreviewSecret = process.env.CONTENT_PREVIEW_SECRET?.trim() || "";
-if (contentRevalidateSecret && contentRevalidateSecret.length < 32) {
-  throw new Error(
-    "[env] CONTENT_REVALIDATE_SECRET must be at least 32 characters",
-  );
-}
-if (contentPreviewSecret && contentPreviewSecret.length < 32) {
-  throw new Error(
-    "[env] CONTENT_PREVIEW_SECRET must be at least 32 characters",
-  );
-}
-if (Boolean(contentRevalidateUrl) !== Boolean(contentRevalidateSecret)) {
-  throw new Error(
-    "[env] CONTENT_REVALIDATE_URL and CONTENT_REVALIDATE_SECRET must be configured together",
-  );
-}
-if (contentRevalidateUrl) {
-  const parsed = new URL(contentRevalidateUrl);
-  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
-    throw new Error("[env] CONTENT_REVALIDATE_URL must be an HTTP(S) URL");
-  }
-  if (nodeEnv.toLowerCase() === "production" && parsed.protocol !== "https:") {
-    throw new Error(
-      "[env] CONTENT_REVALIDATE_URL must use HTTPS in production",
-    );
-  }
-}
-const explicitContentDatabaseUrl =
-  process.env.CONTENT_DATABASE_URL?.trim() || "";
-const contentDatabaseUrl = explicitContentDatabaseUrl || req("DATABASE_URL");
-if (nodeEnv.toLowerCase() === "production" && !explicitContentDatabaseUrl) {
-  console.warn(
-    "[env] CONTENT_DATABASE_URL is not set; content uses DATABASE_URL through isolated bounded pools",
-  );
-}
-const contentPublishingEnabled =
-  parseOptionalBool(process.env.CONTENT_PUBLISHING_ENABLED) ?? false;
-const contentRequireApproval =
-  parseOptionalBool(process.env.CONTENT_REQUIRE_APPROVAL) ?? true;
-const contentRendererContractId =
-  process.env.CONTENT_RENDERER_CONTRACT_ID?.trim() || "";
-const contentWorkerEnabled =
-  parseOptionalBool(process.env.CONTENT_WORKER_ENABLED) ?? true;
-const contentStorageConfig = resolveContentStorageConfig(process.env, nodeEnv);
-const contentAssetS3Endpoint = contentStorageConfig.endpoint;
-const contentAssetS3Region = contentStorageConfig.region;
-const contentAssetS3Bucket = contentStorageConfig.bucket;
-const contentAssetS3AccessKeyId = contentStorageConfig.accessKeyId;
-const contentAssetS3SecretAccessKey = contentStorageConfig.secretAccessKey;
-const contentAssetPublicBaseUrl = contentStorageConfig.publicBaseUrl;
-const contentAssetS3ForcePathStyle = contentStorageConfig.forcePathStyle;
-const contentAssetStaticCredentialsConfigured =
-  contentStorageConfig.staticCredentialsConfigured;
-const contentAssetStorageConfigured = contentStorageConfig.storageConfigured;
-if (contentPublishingEnabled) {
-  if (contentRendererContractId !== CONTENT_RENDERER_CONTRACT_ID) {
-    throw new Error(
-      `[env] CONTENT_RENDERER_CONTRACT_ID must equal ${CONTENT_RENDERER_CONTRACT_ID} when publishing is enabled`,
-    );
-  }
-  if (!contentWorkerEnabled) {
-    throw new Error(
-      "[env] CONTENT_WORKER_ENABLED must be true when content publishing is enabled",
-    );
-  }
-  if (!contentRevalidateUrl || !contentRevalidateSecret) {
-    throw new Error(
-      "[env] content revalidation must be configured when publishing is enabled",
-    );
-  }
-  if (!contentAssetStorageConfigured) {
-    throw new Error(
-      "[env] content object storage must be configured when publishing is enabled",
-    );
-  }
-  if (nodeEnv.toLowerCase() === "production" && adminAuthLegacyFallback) {
-    throw new Error(
-      "[env] ADMIN_AUTH_LEGACY_FALLBACK must be false before content publishing is enabled",
-    );
-  }
-}
 const aiMarketMapEnabled =
   parseOptionalBool(process.env.AI_MARKET_MAP_ENABLED) ?? false;
 const aiMarketMapTriggerMode = parseEnum(
@@ -971,105 +885,6 @@ export const env = {
   adminEnrollmentTtlMs,
   adminSessionTtlMs,
   adminTotpIssuer,
-  contentRevalidateUrl,
-  contentRevalidateSecret,
-  contentPreviewSecret,
-  contentRevalidateTimeoutMs: optionalPositiveInt(
-    "CONTENT_REVALIDATE_TIMEOUT_MS",
-    5_000,
-  ),
-  contentDatabaseUrl,
-  contentPublishingEnabled,
-  contentRequireApproval,
-  contentRendererContractId,
-  contentDbPublicPoolMax: optionalIntInRange(
-    "CONTENT_DB_PUBLIC_POOL_MAX",
-    2,
-    1,
-    10,
-  ),
-  contentDbAdminPoolMax: optionalIntInRange(
-    "CONTENT_DB_ADMIN_POOL_MAX",
-    2,
-    1,
-    10,
-  ),
-  contentDbWorkerPoolMax: optionalIntInRange(
-    "CONTENT_DB_WORKER_POOL_MAX",
-    1,
-    1,
-    5,
-  ),
-  contentDbPublicStatementTimeoutMs: optionalIntInRange(
-    "CONTENT_DB_PUBLIC_STATEMENT_TIMEOUT_MS",
-    750,
-    100,
-    10_000,
-  ),
-  contentDbAdminStatementTimeoutMs: optionalIntInRange(
-    "CONTENT_DB_ADMIN_STATEMENT_TIMEOUT_MS",
-    2_500,
-    250,
-    15_000,
-  ),
-  contentDbWorkerStatementTimeoutMs: optionalIntInRange(
-    "CONTENT_DB_WORKER_STATEMENT_TIMEOUT_MS",
-    5_000,
-    500,
-    30_000,
-  ),
-  contentDbLockTimeoutMs: optionalIntInRange(
-    "CONTENT_DB_LOCK_TIMEOUT_MS",
-    750,
-    100,
-    5_000,
-  ),
-  contentWorkerEnabled,
-  contentWorkerPollMs: optionalIntInRange(
-    "CONTENT_WORKER_POLL_MS",
-    5_000,
-    1_000,
-    60_000,
-  ),
-  contentWorkerBatchSize: optionalIntInRange(
-    "CONTENT_WORKER_BATCH_SIZE",
-    10,
-    1,
-    100,
-  ),
-  contentWorkerMaxAttempts: optionalIntInRange(
-    "CONTENT_WORKER_MAX_ATTEMPTS",
-    8,
-    1,
-    20,
-  ),
-  contentRetentionDays: optionalIntInRange(
-    "CONTENT_RETENTION_DAYS",
-    180,
-    30,
-    3_650,
-  ),
-  contentAuditRetentionDays: optionalIntInRange(
-    "CONTENT_AUDIT_RETENTION_DAYS",
-    730,
-    90,
-    3_650,
-  ),
-  contentAssetS3Endpoint,
-  contentAssetS3Region,
-  contentAssetS3Bucket,
-  contentAssetS3AccessKeyId,
-  contentAssetS3SecretAccessKey,
-  contentAssetStaticCredentialsConfigured,
-  contentAssetStorageConfigured,
-  contentAssetS3ForcePathStyle,
-  contentAssetPublicBaseUrl,
-  contentAssetUploadTtlSec: optionalIntInRange(
-    "CONTENT_ASSET_UPLOAD_TTL_SEC",
-    900,
-    60,
-    3_600,
-  ),
   marketMapTtlSec: optionalNonNegativeInt("API_MARKET_MAP_TTL_SEC", 10),
   walletIntelTtlSec: optionalNonNegativeInt("API_WALLET_INTEL_TTL_SEC", 30),
   holdersTtlSec: Number(process.env.API_HOLDERS_TTL_SEC ?? "300"),

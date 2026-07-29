@@ -50,7 +50,6 @@ type BundleName =
 export const SECRET_BUNDLE_KEYS: Record<BundleName, readonly string[]> = {
   shared: [
     "DATABASE_URL",
-    "CONTENT_DATABASE_URL",
     "REDIS_URL",
     "CREDENTIALS_ENCRYPTION_KEY",
     "JWT_SECRET",
@@ -72,10 +71,6 @@ export const SECRET_BUNDLE_KEYS: Record<BundleName, readonly string[]> = {
     "ALCHEMY_BASE_NFT_BASE_URL",
   ],
   api: [
-    "CONTENT_REVALIDATE_SECRET",
-    "CONTENT_PREVIEW_SECRET",
-    "CONTENT_ASSET_S3_ACCESS_KEY_ID",
-    "CONTENT_ASSET_S3_SECRET_ACCESS_KEY",
     "PRIVY_APP_ID",
     "PRIVY_APP_SECRET",
     "PRIVY_WALLET_AUTHORIZATION_ID",

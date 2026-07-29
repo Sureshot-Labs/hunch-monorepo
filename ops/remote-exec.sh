@@ -18,7 +18,6 @@ Tools:
   fees:collect     -> /app/apps/api/dist/collect-fees.js via run-with-secrets
   rewards:payout   -> /app/apps/api/dist/rewards-payout.js via run-with-secrets
   migrate          -> /app/packages/db/dist/migrate.js via run-with-secrets
-  migrate:content  -> /app/packages/db/dist/content-migrate.js via run-with-secrets
   run -- <cmd>     -> run an arbitrary command inside hunch-api
   psql "<sql>"     -> run SQL against hunch-postgres using container env
 
@@ -82,9 +81,6 @@ case "${tool}" in
     ;;
   migrate)
     cmd="$(node_with_secrets /app/packages/db/dist/migrate.js "$@")"
-    ;;
-  migrate:content|migrate-content)
-    cmd="$(node_with_secrets /app/packages/db/dist/content-migrate.js "$@")"
     ;;
   run)
     if [[ $# -lt 1 ]]; then

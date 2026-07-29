@@ -699,28 +699,6 @@ function editorialPositionAction(input: {
   } still backing ${input.subject.entity}.`;
 }
 
-function editorialTrackedTraderAction(input: {
-  added: boolean;
-  direction: SignalEditorialPositionDirection;
-  subject: SignalEditorialSubject;
-}): string {
-  const subject =
-    input.subject.kind === "generic" &&
-    /^\d+(?:\.\d+)?\s+(?:bps?|basis points?)\s+(?:increase|decrease)\b/i.test(
-      input.subject.text,
-    )
-      ? `a ${input.subject.text}`
-      : input.subject.text;
-  if (input.added) {
-    return `Traders are betting ${
-      input.direction === "against" ? "against" : "on"
-    } ${subject}.`;
-  }
-  return `Traders are pulling back from bets ${
-    input.direction === "against" ? "against" : "on"
-  } ${subject}.`;
-}
-
 function editorialInitialEmoji(
   subject: SignalEditorialSubject,
   direction: SignalEditorialPositionDirection,
@@ -922,23 +900,24 @@ function buildInitialEditorialAngle(input: {
 
   const actorReference =
     input.actorMode === "single_holder"
-      ? "A trader"
+      ? "This trader"
       : `${numberWord(input.strongWallets)} wallets`;
   const action =
     input.direction === "against"
       ? `betting against ${subject.text}`
       : `backing ${subject.text}`;
-  const singleTrader = input.actorMode === "single_holder";
   return {
-    continuation: singleTrader ? "" : `${actorReference} are ${action}.`,
+    continuation: `${actorReference} ${
+      input.actorMode === "single_holder" ? "is" : "are"
+    } ${action}.`,
     emoji,
-    hook: singleTrader
-      ? `A trader up ${clickbaitPnl(input.actorPnlUsd)} is ${action}.`
-      : `${clickbaitPnlHook(input.actorPnlUsd)} combined${
-          input.actorPnlHorizonDays != null
-            ? ` in ${input.actorPnlHorizonDays} days`
-            : ""
-        }.`,
+    hook: `${clickbaitPnlHook(input.actorPnlUsd)}${
+      input.actorMode === "sharp_cluster" ? " combined" : ""
+    }${
+      input.actorPnlHorizonDays != null
+        ? ` in ${input.actorPnlHorizonDays} days`
+        : ""
+    }.`,
     primaryMetric: formatCompactUsd(input.actorPnlUsd),
     supportingMetric:
       input.holderPositionUsd > 0
@@ -1245,15 +1224,7 @@ export function buildSignalNotificationHeadline(input: {
             ? `One trader ${added ? "increased" : "cut"} their ${
                 positionLabel
               } position.`
-            : editorialSubject
-              ? editorialTrackedTraderAction({
-                  added,
-                  direction: input.positionDirection ?? "backing",
-                  subject: editorialSubject,
-                })
-              : `Traders ${
-                  added ? "added to" : "cut"
-                } their ${positionLabel} positions.`;
+            : `Wallet backing for ${positionLabel} ${added ? "grew" : "fell"}.`;
       } else if (delta?.kind === "wallet_count_change") {
         const added = delta.walletChange > 0;
         const wallets = Math.abs(delta.walletChange);
