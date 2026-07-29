@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 
 APP_DIR="${APP_DIR:-/home/ubuntu/hunch-monorepo}"
 ENV_FILE="${ENV_FILE:-/opt/hunch/.env}"
 ARCHIVE="${ARCHIVE:-}"
 IMAGE_ARCHIVE="${IMAGE_ARCHIVE:-}"
 HUNCH_BACKEND_IMAGE="${HUNCH_BACKEND_IMAGE:-}"
+BACKUP_DIR=""
 
 if [[ -z "${HUNCH_BACKEND_IMAGE}" ]]; then
   echo "HUNCH_BACKEND_IMAGE is required" >&2
@@ -60,6 +61,66 @@ fi
 
 export HUNCH_BACKEND_IMAGE
 
+previous_backend_image="$(
+  docker inspect --format '{{.Config.Image}}' hunch-api 2>/dev/null || true
+)"
+deployment_started=0
+
+print_deploy_diagnostics() {
+  echo "Deployment diagnostics:" >&2
+  "${compose[@]}" ps >&2 || true
+  docker logs --tail 160 hunch-api >&2 2>&1 || true
+}
+
+rollback_on_error() {
+  original_status=$?
+  trap - ERR
+  set +e
+  print_deploy_diagnostics
+
+  if [[ "${deployment_started}" == "1" && -n "${previous_backend_image}" && -n "${BACKUP_DIR}" && -d "${BACKUP_DIR}" ]]; then
+    echo "Restoring previous backend image ${previous_backend_image}" >&2
+    failed_app_dir="${APP_DIR}.failed.$(date +%s)"
+    mv "${APP_DIR}" "${failed_app_dir}"
+    mv "${BACKUP_DIR}" "${APP_DIR}"
+    BACKUP_DIR=""
+    export HUNCH_BACKEND_IMAGE="${previous_backend_image}"
+    rollback_compose=(docker-compose --project-directory "${APP_DIR}" \
+      -f "${APP_DIR}/ops/docker-compose.prod.yml" \
+      -f "${APP_DIR}/ops/docker-compose.prebuilt.yml" \
+      --env-file "${ENV_FILE}")
+    "${rollback_compose[@]}" up -d postgres redis
+    "${rollback_compose[@]}" up -d --no-build
+
+    rollback_healthy=0
+    for _ in $(seq 1 45); do
+      if curl -fsS http://127.0.0.1:3001/health >/dev/null 2>&1; then
+        rollback_healthy=1
+        break
+      fi
+      sleep 2
+    done
+    if [[ "${rollback_healthy}" == "1" ]]; then
+      echo "Rollback restored the previous healthy API." >&2
+    else
+      echo "Rollback did not restore API health; manual intervention is required." >&2
+      docker logs --tail 160 hunch-api >&2 2>&1 || true
+    fi
+  else
+    echo "No previous deployment is available for automatic rollback." >&2
+  fi
+  exit "${original_status}"
+}
+
+trap rollback_on_error ERR
+
+echo "Preflighting new API environment before stopping the current stack"
+"${compose[@]}" run --rm --no-deps api \
+  node /app/packages/config/dist/run-with-secrets.js \
+  node --input-type=module --eval \
+  "await import('/app/apps/api/dist/env.js'); console.log('API environment preflight passed')"
+
+deployment_started=1
 "${compose[@]}" down --remove-orphans || true
 stale_containers=$(docker ps -aq --filter "label=com.docker.compose.project=${project_name}")
 if [[ -n "${stale_containers}" ]]; then
@@ -76,6 +137,21 @@ fi
   /app/packages/db/dist/content-migrate.js
 
 "${compose[@]}" up -d --no-build
+
+api_healthy=0
+for _ in $(seq 1 45); do
+  if curl -fsS http://127.0.0.1:3001/health >/dev/null 2>&1; then
+    api_healthy=1
+    break
+  fi
+  sleep 2
+done
+if [[ "${api_healthy}" != "1" ]]; then
+  echo "New API did not become healthy after deployment." >&2
+  false
+fi
+
+trap - ERR
 
 if [[ -n "${ARCHIVE}" ]]; then
   rm -f "${ARCHIVE}" || true

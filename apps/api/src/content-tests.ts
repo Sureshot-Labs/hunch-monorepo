@@ -473,4 +473,26 @@ test("registers protected content routes and the isolated content migration", ()
   assert.equal(CONTENT_RENDERER_CONTRACT_ID, "hunch-content-document-v1");
 });
 
+test("keeps the content database fallback and deployment preflight fail-safe", () => {
+  const envSource = readFileSync(new URL("./env.ts", import.meta.url), "utf8");
+  const deployScript = readFileSync(
+    new URL("../../../ops/deploy-ec2-prebuilt.sh", import.meta.url),
+    "utf8",
+  );
+  assert.match(
+    envSource,
+    /contentDatabaseUrl = explicitContentDatabaseUrl \|\| req\("DATABASE_URL"\)/,
+  );
+  assert.doesNotMatch(
+    envSource,
+    /CONTENT_DATABASE_URL is required in production/,
+  );
+  const preflightAt = deployScript.indexOf("Preflighting new API environment");
+  const shutdownAt = deployScript.indexOf('"${compose[@]}" down');
+  assert.ok(preflightAt >= 0);
+  assert.ok(shutdownAt > preflightAt);
+  assert.match(deployScript, /rollback_on_error/);
+  assert.match(deployScript, /Restoring previous backend image/);
+});
+
 console.log("[content-tests] passed");

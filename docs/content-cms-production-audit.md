@@ -23,8 +23,9 @@ certification.
 The production design is:
 
 - content APIs and admin authorization remain in `hunch-monorepo`;
-- content uses a separately bounded PostgreSQL pool and supports a dedicated
-  `CONTENT_DATABASE_URL` for hard isolation from the trading database;
+- content uses separately bounded PostgreSQL pools and supports an optional
+  dedicated `CONTENT_DATABASE_URL` for hard isolation from the trading
+  database;
 - the landing remains read-only and reads the public API only on a Next.js
   cache miss;
 - article drafts are mutable, while published and scheduled versions are
@@ -354,9 +355,10 @@ The clean CI runner builds the complete API workspace dependency closure with
 
 ## Load containment and timeout rationale
 
-Content does not share a connection pool with trading traffic. Production
-requires `CONTENT_DATABASE_URL`; each API instance opens at most two public,
-two admin, and one worker connection. Capacity planning is therefore explicit:
+Content does not share a connection pool with trading traffic. If
+`CONTENT_DATABASE_URL` is absent, the pools use `DATABASE_URL`; each API
+instance still opens at most two public, two admin, and one worker connection.
+Capacity planning is therefore explicit:
 `API replica count × 5`, plus one temporary migration connection, must fit the
 content database connection budget.
 
@@ -437,4 +439,10 @@ both endpoints return the documented contract and the signed staging webhook
 has been observed end to end. The first two content-enabled deploy runs failed
 before deployment because their clean runners built only `@hunch/infra`; the
 workflow now builds the complete API workspace dependency closure before its
-lint and typecheck gate.
+lint and typecheck gate. The next run passed every verification and migration
+but exposed an inconsistent runtime guard: the content migrator accepted
+`DATABASE_URL` while API startup required a duplicate `CONTENT_DATABASE_URL`.
+The API now uses the same documented fallback as the migrator. The prebuilt
+deploy also validates the new image's secret-backed environment before stopping
+the live stack, captures failure diagnostics, and restores the previous repo
+and image if the replacement cannot become healthy.

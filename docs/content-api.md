@@ -10,9 +10,10 @@ The design and SQL findings behind this implementation are recorded in
 
 ## Safe deployment order
 
-1. Create a dedicated PostgreSQL database and set `CONTENT_DATABASE_URL`.
-   Production startup rejects a missing dedicated URL. Development can fall
-   back to `DATABASE_URL`.
+1. Optionally create a dedicated PostgreSQL database and set
+   `CONTENT_DATABASE_URL`. Without it, content uses `DATABASE_URL` through its
+   own bounded pools.
+   Production logs this fallback without rejecting startup.
 2. Configure object storage and `CONTENT_PREVIEW_SECRET`.
 3. Keep `CONTENT_PUBLISHING_ENABLED=false`.
 4. Deploy the backend. The deploy scripts run the normal migrations and then
@@ -33,37 +34,37 @@ disabled.
 
 ## Configuration
 
-| Variable                                 | Default      | Purpose                                           |
-| ---------------------------------------- | ------------ | ------------------------------------------------- |
-| `CONTENT_DATABASE_URL`                   | dev fallback | Dedicated content PostgreSQL connection           |
-| `CONTENT_DB_PUBLIC_POOL_MAX`             | `2`          | Public-read connections per API replica           |
-| `CONTENT_DB_ADMIN_POOL_MAX`              | `2`          | Admin/editor connections per API replica          |
-| `CONTENT_DB_WORKER_POOL_MAX`             | `1`          | Scheduler/outbox connections per API replica      |
-| `CONTENT_DB_PUBLIC_STATEMENT_TIMEOUT_MS` | `750`        | Public SQL circuit breaker                        |
-| `CONTENT_DB_ADMIN_STATEMENT_TIMEOUT_MS`  | `2500`       | Admin SQL circuit breaker                         |
-| `CONTENT_DB_WORKER_STATEMENT_TIMEOUT_MS` | `5000`       | Worker SQL circuit breaker                        |
-| `CONTENT_DB_LOCK_TIMEOUT_MS`             | `750`        | Maximum lock wait                                 |
-| `CONTENT_PUBLISHING_ENABLED`             | `false`      | Allows immediate/scheduled publication            |
-| `CONTENT_REQUIRE_APPROVAL`               | `true`       | Requires approval before publication              |
-| `CONTENT_RENDERER_CONTRACT_ID`           | empty        | Exact backend/landing renderer contract gate      |
-| `CONTENT_WORKER_ENABLED`                 | `true`       | Runs the durable scheduler and outbox dispatcher  |
-| `CONTENT_WORKER_POLL_MS`                 | `5000`       | Worker polling interval                           |
-| `CONTENT_WORKER_BATCH_SIZE`              | `10`         | Maximum jobs and outbox events per tick           |
-| `CONTENT_WORKER_MAX_ATTEMPTS`            | `8`          | Retry/dead-letter boundary                        |
-| `CONTENT_RETENTION_DAYS`                 | `180`        | Operational history retention                     |
-| `CONTENT_AUDIT_RETENTION_DAYS`           | `730`        | Audit event retention                             |
-| `CONTENT_PREVIEW_SECRET`                 | empty        | 32+ character HMAC secret for draft previews      |
-| `CONTENT_REVALIDATE_URL`                 | empty        | Landing revalidation webhook URL                  |
-| `CONTENT_REVALIDATE_SECRET`              | empty        | 32+ character HMAC secret shared with the landing |
-| `CONTENT_REVALIDATE_TIMEOUT_MS`          | `5000`       | Webhook timeout                                   |
-| `CONTENT_ASSET_S3_ENDPOINT`              | empty        | Checksum-capable S3 endpoint                      |
-| `CONTENT_ASSET_S3_REGION`                | `auto`       | Object-store region                               |
-| `CONTENT_ASSET_S3_BUCKET`                | empty        | Private upload bucket                             |
-| `CONTENT_ASSET_S3_ACCESS_KEY_ID`         | empty        | Object-store access key                           |
-| `CONTENT_ASSET_S3_SECRET_ACCESS_KEY`     | empty        | Object-store secret                               |
-| `CONTENT_ASSET_S3_FORCE_PATH_STYLE`      | `true`       | S3 path-style compatibility                       |
-| `CONTENT_ASSET_PUBLIC_BASE_URL`          | empty        | CDN/public asset origin                           |
-| `CONTENT_ASSET_UPLOAD_TTL_SEC`           | `900`        | Signed PUT lifetime, 60-3600 seconds              |
+| Variable                                 | Default        | Purpose                                           |
+| ---------------------------------------- | -------------- | ------------------------------------------------- |
+| `CONTENT_DATABASE_URL`                   | `DATABASE_URL` | Optional dedicated content PostgreSQL connection  |
+| `CONTENT_DB_PUBLIC_POOL_MAX`             | `2`            | Public-read connections per API replica           |
+| `CONTENT_DB_ADMIN_POOL_MAX`              | `2`            | Admin/editor connections per API replica          |
+| `CONTENT_DB_WORKER_POOL_MAX`             | `1`            | Scheduler/outbox connections per API replica      |
+| `CONTENT_DB_PUBLIC_STATEMENT_TIMEOUT_MS` | `750`          | Public SQL circuit breaker                        |
+| `CONTENT_DB_ADMIN_STATEMENT_TIMEOUT_MS`  | `2500`         | Admin SQL circuit breaker                         |
+| `CONTENT_DB_WORKER_STATEMENT_TIMEOUT_MS` | `5000`         | Worker SQL circuit breaker                        |
+| `CONTENT_DB_LOCK_TIMEOUT_MS`             | `750`          | Maximum lock wait                                 |
+| `CONTENT_PUBLISHING_ENABLED`             | `false`        | Allows immediate/scheduled publication            |
+| `CONTENT_REQUIRE_APPROVAL`               | `true`         | Requires approval before publication              |
+| `CONTENT_RENDERER_CONTRACT_ID`           | empty          | Exact backend/landing renderer contract gate      |
+| `CONTENT_WORKER_ENABLED`                 | `true`         | Runs the durable scheduler and outbox dispatcher  |
+| `CONTENT_WORKER_POLL_MS`                 | `5000`         | Worker polling interval                           |
+| `CONTENT_WORKER_BATCH_SIZE`              | `10`           | Maximum jobs and outbox events per tick           |
+| `CONTENT_WORKER_MAX_ATTEMPTS`            | `8`            | Retry/dead-letter boundary                        |
+| `CONTENT_RETENTION_DAYS`                 | `180`          | Operational history retention                     |
+| `CONTENT_AUDIT_RETENTION_DAYS`           | `730`          | Audit event retention                             |
+| `CONTENT_PREVIEW_SECRET`                 | empty          | 32+ character HMAC secret for draft previews      |
+| `CONTENT_REVALIDATE_URL`                 | empty          | Landing revalidation webhook URL                  |
+| `CONTENT_REVALIDATE_SECRET`              | empty          | 32+ character HMAC secret shared with the landing |
+| `CONTENT_REVALIDATE_TIMEOUT_MS`          | `5000`         | Webhook timeout                                   |
+| `CONTENT_ASSET_S3_ENDPOINT`              | empty          | Checksum-capable S3 endpoint                      |
+| `CONTENT_ASSET_S3_REGION`                | `auto`         | Object-store region                               |
+| `CONTENT_ASSET_S3_BUCKET`                | empty          | Private upload bucket                             |
+| `CONTENT_ASSET_S3_ACCESS_KEY_ID`         | empty          | Object-store access key                           |
+| `CONTENT_ASSET_S3_SECRET_ACCESS_KEY`     | empty          | Object-store secret                               |
+| `CONTENT_ASSET_S3_FORCE_PATH_STYLE`      | `true`         | S3 path-style compatibility                       |
+| `CONTENT_ASSET_PUBLIC_BASE_URL`          | empty          | CDN/public asset origin                           |
+| `CONTENT_ASSET_UPLOAD_TTL_SEC`           | `900`          | Signed PUT lifetime, 60-3600 seconds              |
 
 All five object-store endpoint/bucket/credential/public-origin values must be
 configured together. Revalidation URL and secret must also be configured

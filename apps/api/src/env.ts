@@ -449,12 +449,12 @@ if (contentRevalidateUrl) {
 }
 const explicitContentDatabaseUrl =
   process.env.CONTENT_DATABASE_URL?.trim() || "";
+const contentDatabaseUrl = explicitContentDatabaseUrl || req("DATABASE_URL");
 if (nodeEnv.toLowerCase() === "production" && !explicitContentDatabaseUrl) {
-  throw new Error(
-    "[env] CONTENT_DATABASE_URL is required in production so content cannot consume the application database pool",
+  console.warn(
+    "[env] CONTENT_DATABASE_URL is not set; content uses DATABASE_URL through isolated bounded pools",
   );
 }
-const contentDatabaseUrl = explicitContentDatabaseUrl || req("DATABASE_URL");
 const contentPublishingEnabled =
   parseOptionalBool(process.env.CONTENT_PUBLISHING_ENABLED) ?? false;
 const contentRequireApproval =
