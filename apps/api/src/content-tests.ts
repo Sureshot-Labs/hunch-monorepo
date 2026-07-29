@@ -491,6 +491,11 @@ test("keeps the content database fallback and deployment preflight fail-safe", (
   const shutdownAt = deployScript.indexOf('"${compose[@]}" down');
   assert.ok(preflightAt >= 0);
   assert.ok(shutdownAt > preflightAt);
+  assert.match(
+    deployScript,
+    /run-with-secrets\.js \\\n+  \/app\/apps\/api\/dist\/env\.js/,
+  );
+  assert.doesNotMatch(deployScript, /node --input-type=module/);
   assert.match(deployScript, /rollback_on_error/);
   assert.match(deployScript, /Restoring previous backend image/);
 });

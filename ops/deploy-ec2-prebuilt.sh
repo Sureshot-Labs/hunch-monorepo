@@ -117,8 +117,8 @@ trap rollback_on_error ERR
 echo "Preflighting new API environment before stopping the current stack"
 "${compose[@]}" run --rm --no-deps api \
   node /app/packages/config/dist/run-with-secrets.js \
-  node --input-type=module --eval \
-  "await import('/app/apps/api/dist/env.js'); console.log('API environment preflight passed')"
+  /app/apps/api/dist/env.js
+echo "API environment preflight passed"
 
 deployment_started=1
 "${compose[@]}" down --remove-orphans || true
