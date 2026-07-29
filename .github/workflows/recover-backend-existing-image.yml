@@ -71,7 +71,7 @@ jobs:
           fi
 
           export HUNCH_BACKEND_IMAGE
-          "${compose[@]}" run --rm --no-deps api \
+          "${compose[@]}" run -T --rm --no-deps api \
             node /app/packages/config/dist/run-with-secrets.js \
             /app/apps/api/dist/env.js
 

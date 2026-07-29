@@ -479,6 +479,13 @@ test("keeps the content database fallback and deployment preflight fail-safe", (
     new URL("../../../ops/deploy-ec2-prebuilt.sh", import.meta.url),
     "utf8",
   );
+  const recoveryWorkflow = readFileSync(
+    new URL(
+      "../../../.github/workflows/recover-backend-existing-image.yml",
+      import.meta.url,
+    ),
+    "utf8",
+  );
   assert.match(
     envSource,
     /contentDatabaseUrl = explicitContentDatabaseUrl \|\| req\("DATABASE_URL"\)/,
@@ -499,6 +506,10 @@ test("keeps the content database fallback and deployment preflight fail-safe", (
   assert.doesNotMatch(deployScript, /node --input-type=module/);
   assert.match(deployScript, /rollback_on_error/);
   assert.match(deployScript, /Restoring previous backend image/);
+  assert.ok(recoveryWorkflow.includes("run -T --rm --no-deps api \\"));
+  assert.ok(
+    recoveryWorkflow.includes('"${compose[@]}" up -d --no-build nginx'),
+  );
 });
 
 console.log("[content-tests] passed");
