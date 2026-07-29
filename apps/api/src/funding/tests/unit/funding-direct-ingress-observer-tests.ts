@@ -162,7 +162,10 @@ const observer = new DirectIngressDestinationObserver({
   },
 });
 const result = await observer.pollOperation({} as Pool, target.operationId);
-assert.deepEqual(result, { destinationsPolled: 1 });
+assert.deepEqual(result, {
+  destinationsPolled: 1,
+  destinationSatisfied: true,
+});
 assert.equal(persisted, 1);
 
 let adapterObserved = 0;
@@ -186,7 +189,7 @@ const adapterDriven = new DirectIngressDestinationObserver({
 });
 assert.deepEqual(
   await adapterDriven.pollOperation({} as Pool, target.operationId),
-  { destinationsPolled: 1 },
+  { destinationsPolled: 1, destinationSatisfied: true },
 );
 assert.equal(adapterObserved, 1);
 
@@ -195,7 +198,7 @@ const unrelated = new DirectIngressDestinationObserver({
 });
 assert.deepEqual(
   await unrelated.pollOperation({} as Pool, target.operationId),
-  { destinationsPolled: 0 },
+  { destinationsPolled: 0, destinationSatisfied: false },
 );
 
 console.log(

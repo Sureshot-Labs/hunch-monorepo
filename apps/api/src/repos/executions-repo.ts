@@ -81,6 +81,7 @@ export type StoreExecutionInput = {
     reservationId: string;
   }> | null;
   fundingTradeAttemptId?: string | null;
+  fundingResolvedAt?: Date;
 };
 
 export async function storeExecutionInTransaction(
@@ -219,6 +220,7 @@ export async function storeExecutionInTransaction(
       tradeAttemptId: inputs.fundingTradeAttemptId,
       consumer: { kind: "execution", executionId: execution.id },
       outcomeReason: "trade_execution_recorded",
+      now: inputs.fundingResolvedAt,
     });
   }
   return execution;

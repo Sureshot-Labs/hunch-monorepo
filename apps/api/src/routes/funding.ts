@@ -343,7 +343,12 @@ function errorStatus(error: unknown): number {
   }
   if (error instanceof FundingPlannerError) {
     if (error.code === "stale_projection") return 410;
-    if (error.code === "invalid_policy") return 503;
+    if (
+      error.code === "invalid_policy" ||
+      error.code === "provider_unavailable"
+    ) {
+      return 503;
+    }
     if (
       error.code === "destination_selection_required" ||
       error.code === "source_not_selected"

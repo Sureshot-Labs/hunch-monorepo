@@ -1414,15 +1414,15 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
                 relayerEnabled,
               });
 
+              const inflight = venueStatusInflight.get(cacheKey);
+              if (inflight) {
+                return await inflight;
+              }
+
               if (!refresh) {
                 const cached = readVenueStatusCache(cacheKey);
                 if (cached) {
                   return cached;
-                }
-
-                const inflight = venueStatusInflight.get(cacheKey);
-                if (inflight) {
-                  return await inflight;
                 }
               }
 
@@ -1809,18 +1809,16 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
                 return response as WalletVenueStatus;
               })();
 
-              if (!refresh) {
-                venueStatusInflight.set(cacheKey, computePromise);
-              }
+              venueStatusInflight.set(cacheKey, computePromise);
 
               try {
                 const computed = await computePromise;
-                if (!refresh) {
-                  writeVenueStatusCache(cacheKey, computed);
-                }
+                writeVenueStatusCache(cacheKey, computed);
                 return computed;
               } finally {
-                venueStatusInflight.delete(cacheKey);
+                if (venueStatusInflight.get(cacheKey) === computePromise) {
+                  venueStatusInflight.delete(cacheKey);
+                }
               }
             } catch (error) {
               app.log.warn(

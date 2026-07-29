@@ -478,6 +478,7 @@ export class RelayFirstSourcePlanner {
     }>,
   ): Promise<readonly PlannedSourceOption[]> {
     const planningStartedAt = this.monotonicNow();
+    let providerUnavailable = false;
     const relayProvider = input.policy.providers.find(
       (provider) => provider.providerId === "relay",
     );
@@ -568,21 +569,36 @@ export class RelayFirstSourcePlanner {
           const remainingPlannerMs =
             this.totalPlannerTimeoutMs -
             (this.monotonicNow() - planningStartedAt);
-          if (remainingPlannerMs <= 0) return null;
-          const plannedQuote = await this.quoteRelayWithinBudget(
-            {
-              route,
-              source,
-              destination: input.destination,
-              sourceAmount: source.quoteInputAmount,
-              minimumOutput:
-                source.quoteMinimumOutput ?? input.requiredAmount,
-              quoteCorrelationId,
-              deadline,
-              policyRevision: input.policyRevision,
-            },
-            Math.min(this.relayQuoteTimeoutMs, remainingPlannerMs),
-          );
+          if (remainingPlannerMs <= 0) {
+            providerUnavailable = true;
+            return null;
+          }
+          let plannedQuote: RelayPlanningQuote | null;
+          try {
+            plannedQuote = await this.quoteRelayWithinBudget(
+              {
+                route,
+                source,
+                destination: input.destination,
+                sourceAmount: source.quoteInputAmount,
+                minimumOutput:
+                  source.quoteMinimumOutput ?? input.requiredAmount,
+                quoteCorrelationId,
+                deadline,
+                policyRevision: input.policyRevision,
+              },
+              Math.min(this.relayQuoteTimeoutMs, remainingPlannerMs),
+            );
+          } catch (error) {
+            if (
+              error instanceof FundingPlannerError &&
+              error.code === "provider_unavailable"
+            ) {
+              providerUnavailable = true;
+              return null;
+            }
+            throw error;
+          }
           if (!plannedQuote) return null;
           assertRelayPlanningQuote({
             quote: plannedQuote,
@@ -719,7 +735,17 @@ export class RelayFirstSourcePlanner {
       maximumFeeUsd: limits.maximumFeeUsd,
       maximumFeeBps: limits.maximumFeeBps,
     });
-    return composite ? [...selected, composite] : selected;
+    const result = composite ? [...selected, composite] : selected;
+    if (
+      !result.some((source) => source.option.selectable) &&
+      providerUnavailable
+    ) {
+      throw new FundingPlannerError(
+        "provider_unavailable",
+        "Relay funding quote is temporarily unavailable",
+      );
+    }
+    return result;
   }
 
   private async quoteRelayWithinBudget(
@@ -731,11 +757,16 @@ export class RelayFirstSourcePlanner {
   ): Promise<RelayPlanningQuote | null> {
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | null = null;
-    const timeout = new Promise<null>((resolve) => {
+    const timeout = new Promise<never>((_resolve, reject) => {
       timer = setTimeout(
         () => {
+          reject(
+            new FundingPlannerError(
+              "provider_unavailable",
+              "Relay funding quote timed out",
+            ),
+          );
           controller.abort();
-          resolve(null);
         },
         Math.max(1, Math.floor(timeoutMs)),
       );

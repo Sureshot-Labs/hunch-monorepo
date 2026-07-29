@@ -188,6 +188,16 @@ function compareClustersBySort(
   return left.id.localeCompare(right.id);
 }
 
+function restoreExplicitClusterOrder<T extends { id: string }>(
+  ordered: Array<{ id: string }>,
+  enriched: T[],
+): T[] {
+  const byId = new Map(enriched.map((cluster) => [cluster.id, cluster]));
+  return ordered
+    .map((cluster) => byId.get(cluster.id))
+    .filter((cluster): cluster is T => cluster != null);
+}
+
 function requestClusterMarketRefresh(
   clusters: Array<{ markets: ClusterMarketSummary[] }>,
   logLabel: string,
@@ -366,7 +376,10 @@ export const clustersRoutes: FastifyPluginAsync = async (app) => {
 
       const limit = query.limit ?? defaults.limit;
       const items = filtered.slice(0, limit);
-      const enrichedItems = await enrichClusterExecutions(pool, items);
+      const executionRankedItems = await enrichClusterExecutions(pool, items);
+      const enrichedItems = sortBy
+        ? restoreExplicitClusterOrder(items, executionRankedItems)
+        : executionRankedItems;
       requestClusterMarketRefresh(enrichedItems, "clusters");
       return {
         generatedAt,
@@ -407,10 +420,13 @@ export const clustersRoutes: FastifyPluginAsync = async (app) => {
               );
             },
           });
-        const enrichedItems = await enrichClusterExecutions(
+        const executionRankedItems = await enrichClusterExecutions(
           pool,
           response.items,
         );
+        const enrichedItems = request.query.sort_by
+          ? restoreExplicitClusterOrder(response.items, executionRankedItems)
+          : executionRankedItems;
         const enrichedResponse = { ...response, items: enrichedItems };
         reply.header("x-agg-clusters-cache", cache.status);
         reply.header("x-agg-clusters-cache-layer", cache.layer);

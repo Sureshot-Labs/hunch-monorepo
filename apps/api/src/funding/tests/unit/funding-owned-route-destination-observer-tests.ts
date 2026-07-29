@@ -26,8 +26,8 @@ const target: OwnedRouteDestinationTarget = {
   requestedRaw: "1000000",
   baselineRaw: "0",
   baselineRevision: "baseline-revision",
-  providerRawStatus: "success",
-  providerDestinationReferenceCount: 1,
+  providerRawStatus: "pending",
+  providerDestinationReferenceCount: 0,
   operationVersion: 4,
   operationState: {
     status: "in_progress",
@@ -85,8 +85,8 @@ const observer = new OwnedRouteDestinationObserver({
   }),
   persist: async (_pool, input) => {
     assert.equal(input.target.segmentId, target.segmentId);
-    assert.equal(input.target.providerRawStatus, "success");
-    assert.equal(input.target.providerDestinationReferenceCount, 1);
+    assert.equal(input.target.providerRawStatus, "pending");
+    assert.equal(input.target.providerDestinationReferenceCount, 0);
     assert.equal(input.observation.observedRaw, "1010102");
     persisted += 1;
     return true;
@@ -95,6 +95,7 @@ const observer = new OwnedRouteDestinationObserver({
 assert.equal(observer.observerId, "relay_owned_destination_observation_v1");
 assert.deepEqual(await observer.pollOperation({} as Pool, target.operationId), {
   destinationsPolled: 1,
+  destinationSatisfied: true,
 });
 assert.equal(persisted, 1);
 
@@ -107,7 +108,7 @@ const waitingForObservation = new OwnedRouteDestinationObserver({
 });
 assert.deepEqual(
   await waitingForObservation.pollOperation({} as Pool, target.operationId),
-  { destinationsPolled: 1 },
+  { destinationsPolled: 1, destinationSatisfied: false },
 );
 
 const unrelated = new OwnedRouteDestinationObserver({
@@ -115,7 +116,7 @@ const unrelated = new OwnedRouteDestinationObserver({
 });
 assert.deepEqual(
   await unrelated.pollOperation({} as Pool, target.operationId),
-  { destinationsPolled: 0 },
+  { destinationsPolled: 0, destinationSatisfied: false },
 );
 
 let inspectedCompetitionQuery = false;
@@ -129,12 +130,13 @@ assert.deepEqual(
         assert.match(sql, /destinationObservation,baselineAsOf/);
         assert.match(sql, /destinationTransactionReferenceCount/);
         assert.match(sql, /to_timestamp/);
+        assert.doesNotMatch(sql, /\n\s+and segment\.raw_status = 'success'/);
         return { rows: [] };
       },
     } as unknown as Pool,
     target.operationId,
   ),
-  { destinationsPolled: 0 },
+  { destinationsPolled: 0, destinationSatisfied: false },
 );
 assert.equal(inspectedCompetitionQuery, true);
 

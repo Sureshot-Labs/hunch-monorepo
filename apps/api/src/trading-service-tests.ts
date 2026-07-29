@@ -1275,12 +1275,23 @@ const tests: TestCase[] = [
         token_yes: "yes-token",
         updated_at: new Date(),
         venue: "polymarket",
-        venue_market_id: "market-1",
+        venue_market_id: "venue-market-1",
       };
       const db = {
         query: async (sql: string, params: unknown[] = []) => {
           queries.push({ params, sql });
-          return { rowCount: 1, rows: [market] };
+          if (/WHERE m\.id = \$1/.test(sql)) {
+            const rows = params[0] === market.id ? [market] : [];
+            return { rowCount: rows.length, rows };
+          }
+          if (/WHERE venue_market_id = \$1/.test(sql)) {
+            return { rowCount: 0, rows: [] };
+          }
+          if (/WHERE slug = \$1/.test(sql)) {
+            const rows = params[0] === market.slug ? [{ id: market.id }] : [];
+            return { rowCount: rows.length, rows };
+          }
+          throw new Error(`Unexpected market lookup query: ${sql}`);
         },
       };
 
@@ -1296,8 +1307,12 @@ const tests: TestCase[] = [
         (await loadMarketForVenue(db as never, market.id, "polymarket")).id,
         market.id,
       );
-      assert.equal(queries.length, 3);
-      for (const query of queries) {
+      assert.equal(queries.length, 6);
+      const projectionQueries = queries.filter((query) =>
+        query.sql.includes("LEFT JOIN polymarket_markets pm"),
+      );
+      assert.equal(projectionQueries.length, 4);
+      for (const query of projectionQueries) {
         assert.match(
           query.sql,
           /LEFT JOIN polymarket_markets pm\s+ON pm\.id = m\.venue_market_id\s+AND m\.venue = 'polymarket'/,
@@ -1314,12 +1329,15 @@ const tests: TestCase[] = [
         assert.doesNotMatch(query.sql, /(^|[^a-z_])m\.accepting_orders/i);
         assert.doesNotMatch(query.sql, /^\s*accepting_orders[,\s]/m);
       }
-      assert.match(
-        queries[1]?.sql ?? "",
-        /CASE\s+WHEN m\.id = \$1 THEN 0\s+WHEN m\.venue_market_id = \$1 THEN 1\s+WHEN m\.slug = \$1 THEN 2/,
-      );
+      assert.match(queries[1]?.sql ?? "", /WHERE m\.id = \$1/);
       assert.deepEqual(queries[1]?.params, [market.slug]);
-      assert.deepEqual(queries[2]?.params, [market.id]);
+      assert.match(queries[2]?.sql ?? "", /WHERE venue_market_id = \$1/);
+      assert.deepEqual(queries[2]?.params, [market.slug]);
+      assert.match(queries[3]?.sql ?? "", /WHERE slug = \$1/);
+      assert.deepEqual(queries[3]?.params, [market.slug]);
+      assert.match(queries[4]?.sql ?? "", /WHERE m\.id = \$1/);
+      assert.deepEqual(queries[4]?.params, [market.id]);
+      assert.deepEqual(queries[5]?.params, [market.id]);
     },
   },
   {

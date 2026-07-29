@@ -113,6 +113,8 @@ export async function runFundingReconciliationJob(
     return {
       destinationsPolled:
         direct.destinationsPolled + ownedRoute.destinationsPolled,
+      destinationSatisfied:
+        direct.destinationSatisfied || ownedRoute.destinationSatisfied,
     };
   };
   if (!relay) {

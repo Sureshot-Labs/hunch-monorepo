@@ -81,6 +81,7 @@ export type FundingPlannerErrorCode =
   | "invalid_policy"
   | "manual_rebalance_forbidden"
   | "market_class_required"
+  | "provider_unavailable"
   | "source_not_selected"
   | "stale_projection";
 

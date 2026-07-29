@@ -262,6 +262,85 @@ async function requestMarketMap(args: {
   return response.json<MarketMapPayload>();
 }
 
+async function insertCanonicalMarketTokens(params: {
+  marketId: string;
+  venue: MarketMapVenue;
+  tokenYes: string;
+  tokenNo: string;
+  yesBid: number;
+  yesAsk: number;
+}): Promise<void> {
+  await pool.query(
+    `
+      insert into unified_tokens (token_id, venue, market_id, side)
+      values
+        ($1, $4, $3, 'YES'),
+        ($2, $4, $3, 'NO')
+    `,
+    [params.tokenYes, params.tokenNo, params.marketId, params.venue],
+  );
+  await pool.query(
+    `
+      insert into unified_market_tokens (
+        token_id,
+        venue,
+        market_id,
+        outcome_side
+      )
+      values
+        ($1, $4, $3, 'YES'),
+        ($2, $4, $3, 'NO')
+    `,
+    [params.tokenYes, params.tokenNo, params.marketId, params.venue],
+  );
+  const noBid = 1 - params.yesAsk;
+  const noAsk = 1 - params.yesBid;
+  await pool.query(
+    `
+      insert into unified_token_top_latest (
+        token_id,
+        venue,
+        ts,
+        best_bid,
+        best_ask,
+        mid,
+        spread,
+        updated_at
+      )
+      values
+        (
+          $1,
+          $3,
+          now(),
+          $4::numeric,
+          $5::numeric,
+          ($4::numeric + $5::numeric) / 2,
+          $5::numeric - $4::numeric,
+          now()
+        ),
+        (
+          $2,
+          $3,
+          now(),
+          $6::numeric,
+          $7::numeric,
+          ($6::numeric + $7::numeric) / 2,
+          $7::numeric - $6::numeric,
+          now()
+        )
+    `,
+    [
+      params.tokenYes,
+      params.tokenNo,
+      params.venue,
+      params.yesBid,
+      params.yesAsk,
+      noBid,
+      noAsk,
+    ],
+  );
+}
+
 async function insertUnifiedMarketForSignal(params: {
   marketId: string;
   venue: MarketMapVenue;
@@ -318,6 +397,14 @@ async function insertUnifiedMarketForSignal(params: {
       makeToken(`slug-${params.marketId}`),
     ],
   );
+  await insertCanonicalMarketTokens({
+    marketId: params.marketId,
+    venue: params.venue,
+    tokenYes,
+    tokenNo,
+    yesBid: 0.45,
+    yesAsk: 0.55,
+  });
   return { tokenYes, tokenNo };
 }
 
@@ -333,6 +420,8 @@ async function insertUnifiedMarketForPreview(params: {
   lastPrice: number;
   volume24h: number;
 }): Promise<void> {
+  const tokenYes = makeToken(`yes-${params.marketId}`);
+  const tokenNo = makeToken(`no-${params.marketId}`);
   await pool.query(
     `
       insert into unified_markets (
@@ -385,11 +474,19 @@ async function insertUnifiedMarketForPreview(params: {
       params.bestAsk,
       params.lastPrice,
       params.volume24h,
-      makeToken(`yes-${params.marketId}`),
-      makeToken(`no-${params.marketId}`),
+      tokenYes,
+      tokenNo,
       makeToken(`slug-${params.marketId}`),
     ],
   );
+  await insertCanonicalMarketTokens({
+    marketId: params.marketId,
+    venue: params.venue,
+    tokenYes,
+    tokenNo,
+    yesBid: params.bestBid,
+    yesAsk: params.bestAsk,
+  });
 }
 
 async function insertUnifiedEventForSignal(params: {
@@ -1191,8 +1288,25 @@ async function main() {
     await pool.query("delete from ai_notes where id = any($1::uuid[])", [
       [signalNoteId, signalNoteIdTwo],
     ]);
+    const testMarketIds = [
+      signalMarketId,
+      staleRepresentativeMarketId,
+      activeFallbackMarketId,
+    ];
+    await pool.query(
+      "delete from unified_market_tokens where market_id = any($1::text[])",
+      [testMarketIds],
+    );
+    await pool.query(
+      "delete from unified_token_top_latest where token_id in (select token_id from unified_tokens where market_id = any($1::text[]))",
+      [testMarketIds],
+    );
+    await pool.query(
+      "delete from unified_tokens where market_id = any($1::text[])",
+      [testMarketIds],
+    );
     await pool.query("delete from unified_markets where id = any($1::text[])", [
-      [signalMarketId, staleRepresentativeMarketId, activeFallbackMarketId],
+      testMarketIds,
     ]);
     await pool.query("delete from unified_events where id = any($1::text[])", [
       [`event-a-${suiteId}`, fallbackEventId],

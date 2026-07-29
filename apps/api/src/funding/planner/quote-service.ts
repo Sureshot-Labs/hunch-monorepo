@@ -65,6 +65,7 @@ function planMoney(
 export function classifyFundingQuoteConsent(
   input: Readonly<{
     purpose: string;
+    planKind?: string;
     ingress: boolean;
     sourceAmounts: readonly Readonly<{ amount: Money }>[];
     expectedDestination: Money;
@@ -72,12 +73,16 @@ export function classifyFundingQuoteConsent(
   }>,
 ): FundingQuoteSummary["consentMode"] {
   if (input.ingress) return "external_action";
+  const stableSource =
+    (input.sourceAmounts.length > 0 &&
+      input.sourceAmounts.every((source) =>
+        isRelayPinnedStableAsset(source.amount.asset),
+      )) ||
+    (input.planKind === "venue_preparation" &&
+      input.sourceAmounts.length === 0);
   const stableTradeRoute =
     input.purpose === "trade_shortfall" &&
-    input.sourceAmounts.length > 0 &&
-    input.sourceAmounts.every((source) =>
-      isRelayPinnedStableAsset(source.amount.asset),
-    ) &&
+    stableSource &&
     isRelayPinnedStableAsset(input.expectedDestination.asset) &&
     isRelayPinnedStableAsset(input.minimumDestination.asset);
   return stableTradeRoute ? "trade_intent" : "explicit_economic_review";
@@ -247,33 +252,44 @@ export class FundingQuoteService {
         );
       }
       frozenTarget = destination.target;
-      frozenBinding = destination.bindingOption;
+      frozenBinding =
+        storedPlan.operation.planKind === "venue_preparation"
+          ? destination.venueBinding
+          : destination.bindingOption;
     }
-    if (
-      !canonicalJsonEqual(
-        storedPlan.operation.sourceSnapshot,
-        selected.option,
-      ) ||
+    const frozenFactMismatches = [
+      !canonicalJsonEqual(storedPlan.operation.sourceSnapshot, selected.option)
+        ? "source"
+        : null,
       !canonicalJsonEqual(
         storedPlan.operation.destinationTargetSnapshot,
         frozenTarget,
-      ) ||
+      )
+        ? "destination"
+        : null,
       !canonicalJsonEqual(
         storedPlan.operation.venueBindingSnapshot,
         frozenBinding,
-      ) ||
+      )
+        ? "binding"
+        : null,
       !canonicalJsonEqual(
         storedPlan.operation.marketContextSnapshot,
         planning.plannerSnapshot.marketContext,
-      ) ||
+      )
+        ? "market_context"
+        : null,
       !canonicalJsonEqual(
         storedPlan.operation.placementSnapshot,
         planning.plannerSnapshot.placement,
       )
-    ) {
+        ? "placement"
+        : null,
+    ].filter((value): value is string => value != null);
+    if (frozenFactMismatches.length > 0) {
       throw new FundingPersistenceError(
         "quote_mismatch",
-        "selected source plan differs from frozen placement or destination facts",
+        `selected source plan differs from frozen facts: ${frozenFactMismatches.join(",")}`,
       );
     }
     const plan = {
@@ -363,6 +379,7 @@ export class FundingQuoteService {
           : plan.operation.experienceMode,
       consentMode: classifyFundingQuoteConsent({
         purpose: planning.request.purpose,
+        planKind: plan.operation.planKind,
         ingress: Boolean(selected.option.ingress),
         sourceAmounts,
         expectedDestination: expected,

@@ -1104,7 +1104,12 @@ export type FundingReconciliationBatchOptions = Readonly<{
   destinationPoll?: (
     operationId: string,
     now: Date,
-  ) => Promise<Readonly<{ destinationsPolled: number }>>;
+  ) => Promise<
+    Readonly<{
+      destinationsPolled: number;
+      destinationSatisfied: boolean;
+    }>
+  >;
 }>;
 
 export type FundingReconciliationBatchResult = Readonly<{
@@ -1142,6 +1147,29 @@ export function fundingReconciliationPollDelayMs(
     : input.idlePollDelayMs;
 }
 
+export async function pollFundingReconciliationEvidence(
+  input: Readonly<{
+    operationId: string;
+    now: Date;
+    providerPoll?: FundingReconciliationBatchOptions["providerPoll"];
+    receiptPoll?: FundingReconciliationBatchOptions["receiptPoll"];
+    postconditionPoll?: FundingReconciliationBatchOptions["postconditionPoll"];
+    destinationPoll?: FundingReconciliationBatchOptions["destinationPoll"];
+  }>,
+): Promise<void> {
+  await input.receiptPoll?.(input.operationId, input.now);
+  const [, destination] = await Promise.all([
+    input.postconditionPoll?.(input.operationId, input.now),
+    input.destinationPoll?.(input.operationId, input.now),
+  ]);
+  // Finalized source receipts plus the exact owned-destination balance delta
+  // are authoritative completion evidence. Provider status is only needed
+  // while that destination evidence is still absent.
+  if (!destination?.destinationSatisfied) {
+    await input.providerPoll?.(input.operationId, input.now);
+  }
+}
+
 async function processLease(
   pool: Pool,
   lease: FundingReconciliationLease,
@@ -1158,10 +1186,14 @@ async function processLease(
   destinationPoll?: FundingReconciliationBatchOptions["destinationPoll"],
 ): Promise<"completed" | "requeued" | "failed" | "dead_lettered"> {
   try {
-    await receiptPoll?.(lease.operationId, options.now);
-    await postconditionPoll?.(lease.operationId, options.now);
-    await providerPoll?.(lease.operationId, options.now);
-    await destinationPoll?.(lease.operationId, options.now);
+    await pollFundingReconciliationEvidence({
+      operationId: lease.operationId,
+      now: options.now,
+      providerPoll,
+      receiptPoll,
+      postconditionPoll,
+      destinationPoll,
+    });
     const reduction = await reduceFundingOperation(pool, {
       operationId: lease.operationId,
       now: options.now,

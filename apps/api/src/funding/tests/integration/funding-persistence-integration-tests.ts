@@ -1712,13 +1712,8 @@ async function testTransactionalPersistenceContracts(): Promise<void> {
       }),
       "trade_submission_reconciling",
     );
-    await client.query(
-      `
-        update balance_reservations
-        set expires_at = now() - interval '1 second'
-        where id = $1
-      `,
-      [reservationBId],
+    const fundingResolvedAfterExpiry = new Date(
+      reservationB.rows[0]!.expires_at.getTime() + 1_000,
     );
     const executionInput = {
       userId: userB,
@@ -1733,6 +1728,7 @@ async function testTransactionalPersistenceContracts(): Promise<void> {
         reservationId: reservationBId,
       },
       fundingTradeAttemptId: tradeClaim.attempt.id,
+      fundingResolvedAt: fundingResolvedAfterExpiry,
     } as const;
     const execution = await storeExecutionInTransaction(client, executionInput);
     assert.equal(execution.funding_operation_id, committedB.operation.id);

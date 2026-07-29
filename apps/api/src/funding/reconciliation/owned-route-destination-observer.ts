@@ -290,16 +290,9 @@ async function loadTarget(
   );
   const row = rows[0];
   if (!row || Number(row.competing_count) > 0) return null;
-  if (
-    row.segment_raw_status !== "success" ||
-    row.segment_support_metadata.relayStatusCategory !== "provider_success"
-  ) {
-    return null;
-  }
   const destinationReferenceCount = nonNegativeCount(
     row.segment_support_metadata.destinationTransactionReferenceCount,
   );
-  if (destinationReferenceCount < 1) return null;
 
   const target = row.destination_target_snapshot;
   const location = isRecord(target.location) ? target.location : null;
@@ -342,7 +335,7 @@ async function loadTarget(
     ),
     baselineRaw: baseline.baselineRaw,
     baselineRevision: baseline.baselineRevision,
-    providerRawStatus: row.segment_raw_status,
+    providerRawStatus: row.segment_raw_status ?? "pending",
     providerDestinationReferenceCount: destinationReferenceCount,
     operationVersion: row.version,
     operationState: {
@@ -466,24 +459,38 @@ export class OwnedRouteDestinationObserver {
     pool: Pool,
     operationId: string,
     now = new Date(),
-  ): Promise<Readonly<{ destinationsPolled: number }>> {
+  ): Promise<
+    Readonly<{
+      destinationsPolled: number;
+      destinationSatisfied: boolean;
+    }>
+  > {
     const target = await (this.dependencies.loadTarget ?? loadTarget)(
       pool,
       operationId,
     );
-    if (!target) return { destinationsPolled: 0 };
+    if (!target) {
+      return { destinationsPolled: 0, destinationSatisfied: false };
+    }
     const observation = await (this.dependencies.observe ?? observeDestination)(
       pool,
       target,
     );
-    if (!observation) return { destinationsPolled: 1 };
+    if (!observation) {
+      return { destinationsPolled: 1, destinationSatisfied: false };
+    }
+    let destinationSatisfied: boolean;
     if (this.dependencies.persist) {
-      await this.dependencies.persist(pool, { target, observation, now });
+      destinationSatisfied = await this.dependencies.persist(pool, {
+        target,
+        observation,
+        now,
+      });
     } else {
-      await tx(pool, (client) =>
+      destinationSatisfied = await tx(pool, (client) =>
         persistSatisfiedAmount(client, { target, observation, now }),
       );
     }
-    return { destinationsPolled: 1 };
+    return { destinationsPolled: 1, destinationSatisfied };
   }
 }

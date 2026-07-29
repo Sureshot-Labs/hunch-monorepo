@@ -105,6 +105,17 @@ await test("quote consent reuses Buy only for pinned stable collateral", () => {
   assert.equal(
     classifyFundingQuoteConsent({
       purpose: "trade_shortfall",
+      planKind: "venue_preparation",
+      ingress: false,
+      sourceAmounts: [],
+      expectedDestination: { asset: polygonPusd, raw: "1000000" },
+      minimumDestination: { asset: polygonPusd, raw: "1000000" },
+    }),
+    "trade_intent",
+  );
+  assert.equal(
+    classifyFundingQuoteConsent({
+      purpose: "trade_shortfall",
       ingress: false,
       sourceAmounts: [{ amount: { asset: sol, raw: "10000000" } }],
       expectedDestination: { asset: baseUsdc, raw: "990000" },
@@ -1151,7 +1162,12 @@ await test("Relay-first source planner asks only one exact Relay route", async (
     },
     { relayQuoteTimeoutMs: 5, totalPlannerTimeoutMs: 10 },
   );
-  assert.deepEqual(await timedOutPlanner.list(plannerInput), []);
+  await assert.rejects(
+    () => timedOutPlanner.list(plannerInput),
+    (error: unknown) =>
+      error instanceof FundingPlannerError &&
+      error.code === "provider_unavailable",
+  );
   assert.equal(aborted, true);
 
   let activeQuotes = 0;
@@ -1592,6 +1608,37 @@ await test("planner exposes missing native gas instead of only reporting no liqu
   assert.equal(projection.sourceOptions.length, 0);
   assert.equal(projection.reasonCodes.includes("insufficient_gas"), true);
   assert.equal(projection.reasonCodes.includes("insufficient_liquidity"), true);
+});
+
+await test("retryable source inventory failure is not reported as insufficient liquidity", async () => {
+  const policy = mutablePolicy();
+  policy.creationMode = "on";
+  const projection = await new FundingPlanner({
+    listDestinations: async () => [candidate()],
+    resolveMarketContext: async () => null,
+    listSources: async () => [],
+    listSourceBlockers: async () => ["rpc_unavailable"],
+    store: new MemoryPlanningStore(),
+    now: () => NOW,
+  }).discover({
+    accountId: USER_ID,
+    request: intent("add_funds", "1000000"),
+    policy,
+    policyRevision: "policy_revision_12345678",
+    ownershipRevision: "ownership_revision_12345678",
+  });
+
+  assert.equal(projection.mode, "unavailable");
+  assert.equal(projection.completeness, "partial");
+  assert.equal(projection.freshness, "stale");
+  assert.deepEqual(projection.errors, [
+    { code: "rpc_unavailable", retryable: true },
+  ]);
+  assert.equal(projection.reasonCodes.includes("rpc_unavailable"), true);
+  assert.equal(
+    projection.reasonCodes.includes("insufficient_liquidity"),
+    false,
+  );
 });
 
 await test("planner evaluates collected evidence at a current clock and permits known-zero direct ingress", async () => {
@@ -2384,7 +2431,7 @@ await test("withdrawal binds one owner recipient through discovery, quote, and a
   assert.equal(currentRecipientChecks, 2);
 });
 
-await test("quote freezes one selected source and rejects changed raw amounts", async () => {
+await test("quote preserves a venue-preparation runtime binding and rejects changed raw amounts", async () => {
   const store = new MemoryPlanningStore();
   const exactDestination = candidate();
   const request = intent("add_funds", "1000000");
@@ -2403,9 +2450,10 @@ await test("quote freezes one selected source and rejects changed raw amounts", 
     ...basePlan,
     operation: {
       ...basePlan.operation,
+      planKind: "venue_preparation",
       sourceSnapshot: option as never,
       destinationTargetSnapshot: exactDestination.target as never,
-      venueBindingSnapshot: exactDestination.bindingOption as never,
+      venueBindingSnapshot: exactDestination.venueBinding as never,
       placementSnapshot: placement as never,
     },
     segments: basePlan.segments.map((segment) => ({

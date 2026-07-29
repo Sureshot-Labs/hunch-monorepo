@@ -47,7 +47,7 @@ import {
   PRIVY_USER_AUTHORIZED_EVM_SPONSORSHIP_POLICY_ID,
   resolveActionSponsorship,
 } from "../execution/sponsorship-policy.js";
-import { sameAsset } from "./money.js";
+import { FundingPlannerError, sameAsset } from "./money.js";
 import {
   RelayFirstSourcePlanner,
   type RelayEligibleSourceFact,
@@ -68,6 +68,19 @@ const POLYMARKET_DEPOSIT_WALLET_HANDOFF_EXECUTOR_ID =
 const ERC20_TRANSFER_INTERFACE = new Interface([
   "function transfer(address recipient,uint256 amount)",
 ]);
+
+export function fundingSourceInventoryBlockingReasonCodes(
+  errors: readonly Readonly<{
+    collectorId: string;
+    retryable: boolean;
+  }>[],
+): readonly FundingReasonCode[] {
+  return errors.some(
+    (error) => error.collectorId === "wallet-inventory" && error.retryable,
+  )
+    ? ["rpc_unavailable"]
+    : [];
+}
 
 function jsonRecord(value: unknown): Readonly<Record<string, JsonValue>> {
   return value as Readonly<Record<string, JsonValue>>;
@@ -770,6 +783,12 @@ export class ProductionFundingSourcePlanner {
   async listBlockingReasonCodes(
     input: FundingSourcePlanningRequest,
   ): Promise<readonly FundingReasonCode[]> {
+    // A failed wallet observation is not proof that the wallet is empty.
+    const blockers = [
+      ...fundingSourceInventoryBlockingReasonCodes(
+        this.account.projection.collectorErrors,
+      ),
+    ];
     const facts = this.relaySourceFacts({
       accountId: input.accountId,
       request: input.request,
@@ -788,10 +807,13 @@ export class ProductionFundingSourcePlanner {
         BigInt(fact.quoteInputAmount.raw) > 0n &&
         BigInt(fact.maximumSourceRaw) >= BigInt(fact.quoteInputAmount.raw),
     );
-    return otherwiseExecutableWithoutGas ||
+    if (
+      otherwiseExecutableWithoutGas ||
       this.confirmedNativeSolanaAmountConsumesReserve(input)
-      ? ["insufficient_gas"]
-      : [];
+    ) {
+      blockers.push("insufficient_gas");
+    }
+    return blockers;
   }
 
   private confirmedNativeSolanaAmountConsumesReserve(
@@ -966,12 +988,13 @@ export class ProductionFundingSourcePlanner {
         maximumSlippageBps: input.source.maximumSlippageBps,
       });
     } catch (error) {
-      if (
-        error instanceof RelayClientError ||
-        error instanceof RelayQuoteEconomicsError
-      ) {
-        return null;
+      if (error instanceof RelayClientError) {
+        throw new FundingPlannerError(
+          "provider_unavailable",
+          `Relay funding quote failed: ${error.code}`,
+        );
       }
+      if (error instanceof RelayQuoteEconomicsError) return null;
       throw error;
     }
     if (input.signal.aborted) return null;

@@ -180,6 +180,10 @@ assert.equal(planned.commitPlan.steps.length, 1);
 assert.equal(planned.commitPlan.steps[0]?.stepKind, "venue_preparation");
 assert.equal(planned.commitPlan.steps[0]?.payerRequirement, "privy_sponsor");
 assert.deepEqual(
+  planned.commitPlan.operation.venueBindingSnapshot,
+  planningInput().destinationFacts?.venueBinding,
+);
+assert.deepEqual(
   planned.commitPlan.reservations.map((entry) => entry.rawAmount),
   ["1000000", "1500000", "1500000"],
 );

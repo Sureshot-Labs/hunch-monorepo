@@ -837,6 +837,8 @@ export class FundingPlanner {
       recommended:
         recommended?.option.sourceOptionId === source.option.sourceOptionId,
     }));
+    const sourceEvidenceUnavailable =
+      sourceBlockers.includes("rpc_unavailable");
     const convertibleRaw = sourceOptions.some(isSelectableOwnedSource)
       ? shortfallRaw
       : "0";
@@ -868,7 +870,9 @@ export class FundingPlanner {
         : []),
       ...valuationReasons,
       ...sourceBlockers,
-      ...(needsFunding && !sourceOptions.some((source) => source.selectable)
+      ...(needsFunding &&
+      !sourceEvidenceUnavailable &&
+      !sourceOptions.some((source) => source.selectable)
         ? (["insufficient_liquidity"] as const)
         : []),
     ];
@@ -899,14 +903,23 @@ export class FundingPlanner {
       expiresAt: expiresAt.toISOString(),
       policyVersion: input.policy.version,
       completeness:
-        destinationFactsUsable && valuationUsable ? "complete" : "partial",
+        destinationFactsUsable && valuationUsable && !sourceEvidenceUnavailable
+          ? "complete"
+          : "partial",
       freshness:
-        selected.freshness === "fresh" && valuationUsable ? "fresh" : "stale",
+        selected.freshness === "fresh" &&
+        valuationUsable &&
+        !sourceEvidenceUnavailable
+          ? "fresh"
+          : "stale",
       errors: [
         ...(!destinationFactsUsable
           ? [{ code: "cash_availability_unknown", retryable: true }]
           : []),
         ...valuationReasons.map((code) => ({ code, retryable: true })),
+        ...(sourceEvidenceUnavailable
+          ? [{ code: "rpc_unavailable" as const, retryable: true }]
+          : []),
       ],
       reasonCodes,
       destinationOptions: publicDestinations,

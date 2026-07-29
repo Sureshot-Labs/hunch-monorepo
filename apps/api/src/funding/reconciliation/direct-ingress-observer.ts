@@ -698,12 +698,19 @@ export class DirectIngressDestinationObserver {
     pool: Pool,
     operationId: string,
     now = new Date(),
-  ): Promise<Readonly<{ destinationsPolled: number }>> {
+  ): Promise<
+    Readonly<{
+      destinationsPolled: number;
+      destinationSatisfied: boolean;
+    }>
+  > {
     const target = await (this.dependencies.loadTarget ?? loadTarget)(
       pool,
       operationId,
     );
-    if (!target) return { destinationsPolled: 0 };
+    if (!target) {
+      return { destinationsPolled: 0, destinationSatisfied: false };
+    }
     const observation = this.dependencies.observe
       ? await this.dependencies.observe(pool, target)
       : await observeDirectIngressDestination(
@@ -711,14 +718,21 @@ export class DirectIngressDestinationObserver {
           target,
           this.dependencies.observationAdapters,
         );
-    if (!observation) return { destinationsPolled: 1 };
+    if (!observation) {
+      return { destinationsPolled: 1, destinationSatisfied: false };
+    }
+    let destinationSatisfied: boolean;
     if (this.dependencies.persist) {
-      await this.dependencies.persist(pool, { target, observation, now });
+      destinationSatisfied = await this.dependencies.persist(pool, {
+        target,
+        observation,
+        now,
+      });
     } else {
-      await tx(pool, (client) =>
+      destinationSatisfied = await tx(pool, (client) =>
         persistSatisfiedAmount(client, { target, observation, now }),
       );
     }
-    return { destinationsPolled: 1 };
+    return { destinationsPolled: 1, destinationSatisfied };
   }
 }

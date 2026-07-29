@@ -161,10 +161,19 @@ try {
     }),
     null,
   );
-  assert.equal(
-    await deleteExpiredFundingPlanningSnapshots(pool, afterExpiry),
-    1,
+  const deletedExpiredSnapshots =
+    await deleteExpiredFundingPlanningSnapshots(pool, afterExpiry);
+  assert.ok(deletedExpiredSnapshots >= 1);
+  const { rowCount: remainingOwnedProjectionCount } = await pool.query(
+    `
+      select 1
+      from funding_liquidity_projections
+      where user_id = $1
+        and id = $2
+    `,
+    [userId, projectionId],
   );
+  assert.equal(remainingOwnedProjectionCount, 0);
   console.log(
     "[funding-planning-integration-tests] ok ownership, expiry, immutability, cleanup",
   );
