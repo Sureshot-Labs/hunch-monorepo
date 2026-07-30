@@ -70,6 +70,7 @@ import type {
   FundingSourcePlanningInput,
 } from "./source-adapter.js";
 import { listAdaptedFundingSources } from "./source-adapter.js";
+import { groupWalletExecutableActions } from "./evm-action-batching.js";
 
 const ROUTE_EXPERIENCE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1_000;
 export const SOLANA_NATIVE_EXECUTION_RESERVE_LAMPORTS = 3_000_000n;
@@ -646,8 +647,11 @@ async function validatedSteps(input: {
   sourceAmount: Money;
   profile: WalletExecutionProfile;
 }) {
-  const output = [];
-  for (const [ordinal, action] of input.actions.entries()) {
+  const validatedByActionId = new Map<
+    string,
+    Awaited<ReturnType<RelayPinnedActionValidator["validate"]>>
+  >();
+  for (const action of input.actions) {
     const validator = new RelayPinnedActionValidator(action);
     const signerWalletId =
       action.kind === "evm_transaction"
@@ -665,11 +669,50 @@ async function validatedSteps(input: {
       policyRevision: input.policyRevision,
       routeId: input.route.routeId,
     });
+    resolveActionSponsorship({
+      action,
+      profile: input.profile,
+    });
+    validatedByActionId.set(action.actionId, validated);
+  }
+
+  const groups = groupWalletExecutableActions({
+    actions: input.actions,
+    profile: input.profile,
+  });
+  return groups.map(({ action, sourceActions }, ordinal) => {
+    const validations = sourceActions.map((sourceAction) => {
+      const validation = validatedByActionId.get(sourceAction.actionId);
+      if (!validation) {
+        throw new Error("validated Relay action is missing from atomic group");
+      }
+      return validation;
+    });
     const sponsorship = resolveActionSponsorship({
       action,
       profile: input.profile,
     });
-    output.push({
+    const validation =
+      validations.length === 1
+        ? validations[0]
+        : {
+            validatorId: "relay_evm_atomic_batch_v1",
+            validationRevision: canonicalJsonHash(
+              validations.map((entry) => entry.validationRevision),
+            ),
+            validatedAt: validations.reduce(
+              (latest, entry) =>
+                entry.validatedAt > latest ? entry.validatedAt : latest,
+              "",
+            ),
+            sourceActionValidations: validations.map((entry) => ({
+              actionId: entry.action.actionId,
+              validatorId: entry.validatorId,
+              validationRevision: entry.validationRevision,
+              validatedAt: entry.validatedAt,
+            })),
+          };
+    return {
       ordinal,
       segmentOrdinal: 0,
       stepKind: "transaction" as const,
@@ -680,14 +723,13 @@ async function validatedSteps(input: {
       dependsOnOrdinal: ordinal === 0 ? null : ordinal - 1,
       normalizedAction: jsonRecord(action),
       actionValidationResult: jsonRecord({
-        ...validated,
+        ...validation,
         signerAddress: input.profile.address,
         sponsorshipPolicyId: sponsorship.policyId,
         signingMode: sponsorship.signingMode,
       }),
-    });
-  }
-  return output;
+    };
+  });
 }
 
 export function buildPolymarketPreRouteHandoffSteps(input: {

@@ -160,6 +160,11 @@ export type WalletExecutionProfile = Readonly<{
   )[];
   serverWalletRef: string | null;
   sponsorshipPolicyIds: readonly string[];
+  /**
+   * Explicit wallet capability. Omitted profiles are treated as unable to
+   * atomically execute multiple EVM calls.
+   */
+  evmAtomicBatchMode?: "privy_wallet_send_calls" | null;
 }>;
 
 export type TradingWalletReadinessClass =
@@ -309,6 +314,7 @@ export type FundingIntent = Readonly<{
 export type ActionSummary = Readonly<{
   kind:
     | "evm_transaction"
+    | "evm_transaction_batch"
     | "svm_transaction"
     | "signature"
     | "external_handoff";
@@ -646,6 +652,21 @@ export type EvmTransactionAction = Readonly<{
   gasLimitRaw: RawAmount | null;
 }>;
 
+export type EvmTransactionBatchCall = Readonly<{
+  actionId: string;
+  to: string;
+  data: string;
+  valueRaw: RawAmount;
+}>;
+
+export type EvmTransactionBatchAction = Readonly<{
+  kind: "evm_transaction_batch";
+  actionId: string;
+  networkId: NetworkId;
+  senderWalletId: WalletId;
+  calls: readonly EvmTransactionBatchCall[];
+}>;
+
 export type SvmAccountMeta = Readonly<{
   address: string;
   signer: boolean;
@@ -693,6 +714,7 @@ export type ExternalHandoffAction = Readonly<{
 
 export type NormalizedAction =
   | EvmTransactionAction
+  | EvmTransactionBatchAction
   | ExternalHandoffAction
   | SvmTransactionAction
   | SignatureAction;

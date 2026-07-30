@@ -5,6 +5,7 @@ import { ethers } from "ethers";
 
 import type {
   EvmTransactionAction,
+  EvmTransactionBatchAction,
   ExternalHandoffAction,
   JsonValue,
   SvmTransactionAction,
@@ -57,6 +58,7 @@ export type EvmExecutionEnvelope = "direct" | "privy_erc4337";
 
 const ENTRY_POINT_V07_ADDRESS = "0x0000000071727de22e5e9d8baf0edac6f37da032";
 const ERC7579_SINGLE_EXECUTION_MODE = `0x${"00".repeat(32)}`;
+const ERC7579_BATCH_EXECUTION_MODE = `0x01${"00".repeat(31)}`;
 const ENTRY_POINT_V07_INTERFACE = new ethers.Interface([
   "function handleOps((address sender,uint256 nonce,bytes initCode,bytes callData,bytes32 accountGasLimits,uint256 preVerificationGas,bytes32 gasFees,bytes paymasterAndData,bytes signature)[] ops,address beneficiary)",
   "event UserOperationEvent(bytes32 indexed userOpHash,address indexed sender,address indexed paymaster,uint256 nonce,bool success,uint256 actualGasCost,uint256 actualUserOpFeePerGas)",
@@ -77,7 +79,7 @@ type SponsoredActionMatch = Readonly<{
 
 function evaluateSponsoredErc4337Action(
   input: Readonly<{
-    action: EvmTransactionAction;
+    action: EvmTransactionAction | EvmTransactionBatchAction;
     expectedSignerAddress: string;
     transaction: EvmReceiptTransaction;
     receipt: EvmReceiptRecord | null;
@@ -148,22 +150,50 @@ function evaluateSponsoredErc4337Action(
     }
     const executionMode = parsedExecute?.args[0] as string | undefined;
     const executionCalldata = parsedExecute?.args[1] as string | undefined;
-    const body = executionCalldata?.slice(2) ?? "";
-    if (
-      parsedExecute?.name !== "execute" ||
-      executionMode?.toLowerCase() !== ERC7579_SINGLE_EXECUTION_MODE ||
-      body.length < 104
-    ) {
+    if (parsedExecute?.name !== "execute" || !executionCalldata) {
       return [];
     }
 
     try {
+      if (executionMode?.toLowerCase() === ERC7579_BATCH_EXECUTION_MODE) {
+        const [decodedCalls] = ethers.AbiCoder.defaultAbiCoder().decode(
+          ["tuple(address target,uint256 value,bytes callData)[]"],
+          executionCalldata,
+        ) as unknown as [
+          readonly Readonly<{
+            target: string;
+            value: bigint;
+            callData: string;
+          }>[],
+        ];
+        return [
+          {
+            operation,
+            calls: decodedCalls.map((call) => ({
+              target: ethers.getAddress(call.target),
+              value: BigInt(call.value),
+              data: call.callData,
+            })),
+          },
+        ];
+      }
+      const body = executionCalldata.slice(2);
+      if (
+        executionMode?.toLowerCase() !== ERC7579_SINGLE_EXECUTION_MODE ||
+        body.length < 104
+      ) {
+        return [];
+      }
       return [
         {
           operation,
-          target: ethers.getAddress(`0x${body.slice(0, 40)}`),
-          value: BigInt(`0x${body.slice(40, 104)}`),
-          data: `0x${body.slice(104)}`,
+          calls: [
+            {
+              target: ethers.getAddress(`0x${body.slice(0, 40)}`),
+              value: BigInt(`0x${body.slice(40, 104)}`),
+              data: `0x${body.slice(104)}`,
+            },
+          ],
         },
       ];
     } catch {
@@ -178,11 +208,22 @@ function evaluateSponsoredErc4337Action(
     };
   }
 
+  const expectedCalls =
+    input.action.kind === "evm_transaction_batch"
+      ? input.action.calls
+      : [input.action];
   const matchingOperations = decodedOperations.filter(
     (candidate) =>
-      candidate.target.toLowerCase() === input.action.to.toLowerCase() &&
-      candidate.value === BigInt(input.action.valueRaw) &&
-      normalizedHex(candidate.data) === normalizedHex(input.action.data),
+      candidate.calls.length === expectedCalls.length &&
+      candidate.calls.every((call, index) => {
+        const expected = expectedCalls[index];
+        return (
+          expected !== undefined &&
+          call.target.toLowerCase() === expected.to.toLowerCase() &&
+          call.value === BigInt(expected.valueRaw) &&
+          normalizedHex(call.data) === normalizedHex(expected.data)
+        );
+      }),
   );
   const [matchingOperation] = matchingOperations;
   if (matchingOperations.length !== 1 || !matchingOperation) {
@@ -268,7 +309,7 @@ function validExpectedSigner(
 
 export function evaluateEvmActionReceipt(
   input: Readonly<{
-    action: EvmTransactionAction;
+    action: EvmTransactionAction | EvmTransactionBatchAction;
     expectedSignerAddress: string;
     transaction: EvmReceiptTransaction | null;
     receipt: EvmReceiptRecord | null;
@@ -314,7 +355,8 @@ export function evaluateEvmActionReceipt(
     input.transaction.chainId === expectedChainId &&
     (sponsoredMatch
       ? sponsoredMatch.actionMatches
-      : input.transaction.from.toLowerCase() ===
+      : input.action.kind === "evm_transaction" &&
+        input.transaction.from.toLowerCase() ===
           input.expectedSignerAddress.toLowerCase() &&
         input.transaction.to?.toLowerCase() === input.action.to.toLowerCase() &&
         normalizedHex(input.transaction.data) ===
@@ -892,6 +934,7 @@ async function inspectEvmTarget(
 ): Promise<FundingStepReceiptEvidence> {
   if (
     target.action.kind !== "evm_transaction" &&
+    target.action.kind !== "evm_transaction_batch" &&
     target.action.kind !== "external_handoff"
   ) {
     throw new Error("EVM receipt inspector received a non-EVM action");
@@ -910,12 +953,15 @@ async function inspectEvmTarget(
   const chainId = Number(target.action.networkId.slice("evm:".length));
   const rpcUrl = Number.isSafeInteger(chainId) ? evmRpcUrl(chainId) : null;
   const expectedSignerAddress =
-    target.action.kind === "evm_transaction"
+    target.action.kind === "evm_transaction" ||
+    target.action.kind === "evm_transaction_batch"
       ? validExpectedSigner(target.actionValidationResult, "evm")
       : null;
   if (
     !rpcUrl ||
-    (target.action.kind === "evm_transaction" && !expectedSignerAddress)
+    ((target.action.kind === "evm_transaction" ||
+      target.action.kind === "evm_transaction_batch") &&
+      !expectedSignerAddress)
   ) {
     throw new Error("committed EVM receipt inspection context is incomplete");
   }
@@ -1185,6 +1231,7 @@ export class FundingStepReceiptReconciliationDriver {
           }
           const inspected =
             target.action.kind === "evm_transaction" ||
+            target.action.kind === "evm_transaction_batch" ||
             target.action.kind === "external_handoff"
               ? await (this.dependencies.inspectEvm
                   ? this.dependencies.inspectEvm(target, reference)

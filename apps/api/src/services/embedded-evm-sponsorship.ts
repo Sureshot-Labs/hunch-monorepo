@@ -565,7 +565,20 @@ async function matchesFundingAction(
       from funding_operation_steps step
       join funding_operations operation on operation.id = step.operation_id
       where operation.user_id = $1
-        and step.normalized_action->>'actionId' = $2
+        and (
+          step.normalized_action->>'actionId' = $2
+          or exists (
+            select 1
+            from jsonb_array_elements(
+              case
+                when jsonb_typeof(step.normalized_action->'calls') = 'array'
+                  then step.normalized_action->'calls'
+                else '[]'::jsonb
+              end
+            ) as child_call
+            where child_call->>'actionId' = $2
+          )
+        )
         and step.payer_requirement = 'privy_sponsor'
         and step.state in ('planned', 'action_required')
       order by step.updated_at desc
@@ -574,33 +587,60 @@ async function matchesFundingAction(
     [input.userId, input.transaction.id],
   );
   for (const row of rows) {
-    const action = row.normalized_action;
-    if (
-      action.kind !== "evm_transaction" ||
-      action.networkId !== `evm:${input.chainId}` ||
-      !addressesEqual(String(action.to ?? ""), input.transaction.to)
-    ) {
-      continue;
-    }
-    try {
-      if (
-        normalizeData(String(action.data ?? "")) !==
-          normalizeData(input.transaction.data) ||
-        quantity(String(action.valueRaw ?? "0"), "Funding action value") !==
-          transactionValue(input.transaction) ||
-        quantity(
-          action.gasLimitRaw == null ? null : String(action.gasLimitRaw),
-          "Funding action gas",
-        ) !== transactionGas(input.transaction)
-      ) {
-        continue;
-      }
+    if (fundingActionMatchesTransaction(row.normalized_action, input)) {
       return true;
-    } catch {
-      continue;
     }
   }
   return false;
+}
+
+function fundingActionMatchesTransaction(
+  action: Record<string, unknown>,
+  input: SponsoredTransaction,
+): boolean {
+  if (action.networkId !== `evm:${input.chainId}`) return false;
+
+  let expectedCall: Record<string, unknown> | null = null;
+  let expectedGas: string | null = null;
+  if (
+    action.kind === "evm_transaction" &&
+    action.actionId === input.transaction.id
+  ) {
+    expectedCall = action;
+    expectedGas =
+      action.gasLimitRaw == null ? null : String(action.gasLimitRaw);
+  } else if (action.kind === "evm_transaction_batch") {
+    const matchingCalls = Array.isArray(action.calls)
+      ? action.calls.filter(
+          (call): call is Record<string, unknown> =>
+            typeof call === "object" &&
+            call !== null &&
+            !Array.isArray(call) &&
+            call.actionId === input.transaction.id,
+        )
+      : [];
+    if (matchingCalls.length !== 1) return false;
+    expectedCall = matchingCalls[0] ?? null;
+  }
+  if (
+    !expectedCall ||
+    !addressesEqual(String(expectedCall.to ?? ""), input.transaction.to)
+  ) {
+    return false;
+  }
+
+  try {
+    return (
+      normalizeData(String(expectedCall.data ?? "")) ===
+        normalizeData(input.transaction.data) &&
+      quantity(String(expectedCall.valueRaw ?? "0"), "Funding action value") ===
+        transactionValue(input.transaction) &&
+      quantity(expectedGas, "Funding action gas") ===
+        transactionGas(input.transaction)
+    );
+  } catch {
+    return false;
+  }
 }
 
 async function isKnownLimitlessMarket(
@@ -693,6 +733,7 @@ function defaultDependencies(
 
 export function buildEmbeddedEvmTransactionFingerprint(input: {
   chainId: number;
+  executionMode?: "sequential" | "atomic";
   signer: string;
   transactions: readonly EmbeddedEthereumTransactionSpec[];
 }): string {
@@ -709,6 +750,7 @@ export function buildEmbeddedEvmTransactionFingerprint(input: {
     .update(
       JSON.stringify({
         chainId: input.chainId,
+        executionMode: input.executionMode ?? "sequential",
         signer: signer.toLowerCase(),
         transactions: canonical,
       }),
@@ -784,4 +826,5 @@ export async function assertEmbeddedEvmSponsorshipAllowed(input: {
 
 export const embeddedEvmSponsorshipTestHooks = {
   exactTransactionMatches,
+  fundingActionMatchesTransaction,
 };

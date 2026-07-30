@@ -2499,6 +2499,7 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
         const requests = prepareEmbeddedEthereumTransactionRequests({
           context,
           chainId: request.body.chainId,
+          executionMode: request.body.executionMode,
           transactions: request.body.transactions,
         });
         reply.header("Content-Type", "application/json; charset=utf-8");
@@ -2556,6 +2557,7 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
         const transactionFingerprint = buildEmbeddedEvmTransactionFingerprint({
           signer: context.signer,
           chainId: request.body.chainId,
+          executionMode: request.body.executionMode,
           transactions: request.body.transactions,
         });
         const result = await runEmbeddedExecutionSingleFlight({
@@ -2571,6 +2573,7 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
             const requests = prepareEmbeddedEthereumTransactionRequests({
               context,
               chainId: request.body.chainId,
+              executionMode: request.body.executionMode,
               transactions: request.body.transactions,
             });
             const transactionHashes =

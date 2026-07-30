@@ -281,10 +281,7 @@ function parsePrivyRpcTransactionHashResponse(
   userOperationHash: string | null;
 } {
   const data =
-    payload &&
-    typeof payload.data === "object" &&
-    payload.data !== null &&
-    "hash" in payload.data
+    payload && typeof payload.data === "object" && payload.data !== null
       ? (payload.data as Record<string, unknown>)
       : null;
   const hash =
@@ -309,6 +306,80 @@ function parsePrivyRpcTransactionHashResponse(
     );
   }
   return { hash, transactionId, userOperationHash };
+}
+
+export function transactionHashFromUserOperationReceipt(
+  payload: unknown,
+): string | null {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return null;
+  }
+  const record = payload as Record<string, unknown>;
+  const receipt =
+    record.receipt &&
+    typeof record.receipt === "object" &&
+    !Array.isArray(record.receipt)
+      ? (record.receipt as Record<string, unknown>)
+      : null;
+  const candidate =
+    (typeof receipt?.transactionHash === "string"
+      ? receipt.transactionHash
+      : null) ??
+    (typeof receipt?.transaction_hash === "string"
+      ? receipt.transaction_hash
+      : null) ??
+    (typeof record.transactionHash === "string"
+      ? record.transactionHash
+      : null);
+  const normalized = candidate?.trim() ?? "";
+  return /^0x[0-9a-fA-F]{64}$/u.test(normalized) ? normalized : null;
+}
+
+async function waitForUserOperationTransactionHash(
+  chainId: number,
+  userOperationHash: string,
+  context: string,
+): Promise<string> {
+  if (!/^0x[0-9a-fA-F]{64}$/u.test(userOperationHash)) {
+    throw new Error(`${context} returned an invalid user operation hash.`);
+  }
+  const provider = evmProviderForChain(chainId);
+  const deadline = Date.now() + 90_000;
+  while (Date.now() < deadline) {
+    try {
+      const receipt = (await provider.send("eth_getUserOperationReceipt", [
+        userOperationHash,
+      ])) as unknown;
+      if (receipt != null) {
+        if (
+          typeof receipt === "object" &&
+          !Array.isArray(receipt) &&
+          (receipt as Record<string, unknown>).success === false
+        ) {
+          throw new Error(`${context} failed during sponsored execution.`);
+        }
+        const transactionHash =
+          transactionHashFromUserOperationReceipt(receipt);
+        if (!transactionHash) {
+          throw new Error(
+            `${context} returned a user operation receipt without a transaction hash.`,
+          );
+        }
+        return transactionHash;
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (
+        message.includes("failed during sponsored execution") ||
+        message.includes("without a transaction hash") ||
+        /method (?:not found|unsupported)/iu.test(message)
+      ) {
+        throw error;
+      }
+    }
+    await sleep(1_000);
+  }
+  throw new Error(`${context} user operation is still pending.`);
 }
 
 function getRequestTransaction(request: EmbeddedPrivyAuthorizationRequest): {
@@ -729,8 +800,64 @@ export function buildEmbeddedEthereumSendTransactionRequest(inputs: {
 export function prepareEmbeddedEthereumTransactionRequests(inputs: {
   context: EmbeddedEthereumWalletContext;
   chainId: number;
+  executionMode?: "sequential" | "atomic";
   transactions: EmbeddedEthereumTransactionSpec[];
 }): EmbeddedPrivyAuthorizationRequest[] {
+  if (inputs.executionMode === "atomic") {
+    if (inputs.transactions.length < 2) {
+      throw new Error("Atomic EVM execution requires at least two calls.");
+    }
+    const sponsor = inputs.transactions[0]?.sponsor !== false;
+    const calls = inputs.transactions.map((transaction) => {
+      if ((transaction.sponsor !== false) !== sponsor) {
+        throw new Error(
+          "Atomic EVM execution requires one sponsorship mode for every call.",
+        );
+      }
+      if (transaction.gas?.trim()) {
+        throw new Error(
+          "Atomic EVM execution does not support per-call gas limits.",
+        );
+      }
+      const to = requireAddress(
+        transaction.to,
+        `${transaction.label} is missing a valid target address.`,
+      );
+      const data =
+        normalizeHex(transaction.data ?? "0x") ??
+        (() => {
+          throw new Error(
+            `${transaction.label} is missing valid transaction calldata.`,
+          );
+        })();
+      const value = normalizeValueHex(transaction.value);
+      return {
+        to: to as `0x${string}`,
+        data,
+        ...(value ? { value } : {}),
+      };
+    });
+    const requestId = `batch-${ethers
+      .keccak256(
+        ethers.toUtf8Bytes(
+          JSON.stringify(inputs.transactions.map((entry) => entry.id)),
+        ),
+      )
+      .slice(2, 34)}`;
+    return [
+      createPrivyWalletRpcRequest({
+        id: requestId,
+        label: "Atomic EVM funding transaction",
+        walletId: inputs.context.walletId,
+        body: {
+          method: "wallet_sendCalls",
+          caip2: `eip155:${inputs.chainId}`,
+          sponsor,
+          params: { calls },
+        },
+      }),
+    ];
+  }
   return inputs.transactions.map((transaction) =>
     buildEmbeddedEthereumSendTransactionRequest({
       context: inputs.context,
@@ -854,8 +981,18 @@ export async function executeEmbeddedEthereumTransactionRequests(inputs: {
     }
 
     if (userOperationHash) {
+      const transactionHash = await waitForUserOperationTransactionHash(
+        inputs.chainId,
+        userOperationHash,
+        request.label,
+      );
+      await waitForEvmTransaction(
+        inputs.chainId,
+        transactionHash,
+        request.label,
+      );
       await waitForTokenPostcondition(postcondition, request.label);
-      transactionHashes.push(userOperationHash);
+      transactionHashes.push(transactionHash);
       continue;
     }
 

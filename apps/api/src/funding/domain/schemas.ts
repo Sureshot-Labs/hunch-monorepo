@@ -246,6 +246,23 @@ export const evmTransactionActionSchema = normalizedActionBaseSchema
   })
   .strict();
 
+const evmTransactionBatchCallSchema = z
+  .object({
+    actionId: opaqueIdSchema,
+    to: z.string().regex(/^0x[0-9a-fA-F]{40}$/),
+    data: z.string().regex(hexDataPattern),
+    valueRaw: rawAmountSchema,
+  })
+  .strict();
+
+export const evmTransactionBatchActionSchema = normalizedActionBaseSchema
+  .extend({
+    kind: z.literal("evm_transaction_batch"),
+    senderWalletId: opaqueIdSchema,
+    calls: z.array(evmTransactionBatchCallSchema).min(2).max(8),
+  })
+  .strict();
+
 export const svmTransactionActionSchema = normalizedActionBaseSchema
   .extend({
     kind: z.literal("svm_transaction"),
@@ -306,6 +323,7 @@ export const externalHandoffActionSchema = normalizedActionBaseSchema
 
 export const normalizedActionSchema = z.discriminatedUnion("kind", [
   evmTransactionActionSchema,
+  evmTransactionBatchActionSchema,
   externalHandoffActionSchema,
   svmTransactionActionSchema,
   signatureActionSchema,

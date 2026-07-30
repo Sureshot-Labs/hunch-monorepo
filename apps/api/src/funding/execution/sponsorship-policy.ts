@@ -29,7 +29,8 @@ export function resolveActionSponsorship(input: {
   profile: WalletExecutionProfile;
 }): ResolvedActionSponsorship {
   const actionWalletId =
-    input.action.kind === "evm_transaction"
+    input.action.kind === "evm_transaction" ||
+    input.action.kind === "evm_transaction_batch"
       ? input.action.senderWalletId
       : input.action.kind === "external_handoff"
         ? input.action.actorWalletId
@@ -43,7 +44,8 @@ export function resolveActionSponsorship(input: {
     );
   }
   if (
-    input.action.kind === "evm_transaction" &&
+    (input.action.kind === "evm_transaction" ||
+      input.action.kind === "evm_transaction_batch") &&
     input.profile.serverWalletRef &&
     input.profile.source !== "external" &&
     input.profile.signingModes.includes("privy_authorization") &&
@@ -51,18 +53,31 @@ export function resolveActionSponsorship(input: {
       PRIVY_USER_AUTHORIZED_EVM_SPONSORSHIP_POLICY_ID,
     )
   ) {
-    const gasLimit = input.action.gasLimitRaw
-      ? unsignedRaw(input.action.gasLimitRaw)
-      : null;
-    const value = unsignedRaw(input.action.valueRaw);
     if (
-      value == null ||
-      (gasLimit != null &&
-        (gasLimit <= 0n || gasLimit > MAX_SPONSORED_EVM_GAS_LIMIT))
+      input.action.kind === "evm_transaction_batch" &&
+      input.profile.evmAtomicBatchMode !== "privy_wallet_send_calls"
     ) {
-      throw new Error(
-        "Privy sponsorship action gas or native value is outside policy",
-      );
+      throw new Error("wallet profile cannot execute an atomic EVM batch");
+    }
+    const calls =
+      input.action.kind === "evm_transaction_batch"
+        ? input.action.calls
+        : [input.action];
+    for (const call of calls) {
+      const gasLimit =
+        input.action.kind === "evm_transaction" && input.action.gasLimitRaw
+          ? unsignedRaw(input.action.gasLimitRaw)
+          : null;
+      const value = unsignedRaw(call.valueRaw);
+      if (
+        value == null ||
+        (gasLimit != null &&
+          (gasLimit <= 0n || gasLimit > MAX_SPONSORED_EVM_GAS_LIMIT))
+      ) {
+        throw new Error(
+          "Privy sponsorship action gas or native value is outside policy",
+        );
+      }
     }
     return {
       payerRequirement: "privy_sponsor",

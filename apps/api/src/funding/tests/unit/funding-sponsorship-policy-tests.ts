@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import { ExistingFactsOwnershipResolver } from "../../../account-value/ownership-resolver.js";
 import type {
   EvmTransactionAction,
+  EvmTransactionBatchAction,
   WalletExecutionProfile,
 } from "../../domain/types.js";
 import {
@@ -21,6 +22,26 @@ const ACTION: EvmTransactionAction = {
   data: "0x",
   valueRaw: "0",
   gasLimitRaw: "21000",
+};
+const BATCH_ACTION: EvmTransactionBatchAction = {
+  kind: "evm_transaction_batch",
+  actionId: "action_batch_sponsorship_12345678",
+  networkId: ACTION.networkId,
+  senderWalletId: ACTION.senderWalletId,
+  calls: [
+    {
+      actionId: ACTION.actionId,
+      to: ACTION.to,
+      data: ACTION.data,
+      valueRaw: ACTION.valueRaw,
+    },
+    {
+      actionId: "action_batch_call_2_12345678",
+      to: "0x0000000000000000000000000000000000000003",
+      data: "0x1234",
+      valueRaw: "0",
+    },
+  ],
 };
 
 function profile(
@@ -45,6 +66,27 @@ assert.deepEqual(
     policyId: PRIVY_USER_AUTHORIZED_EVM_SPONSORSHIP_POLICY_ID,
     signingMode: "privy_authorization",
   },
+);
+assert.deepEqual(
+  resolveActionSponsorship({
+    action: BATCH_ACTION,
+    profile: profile({
+      evmAtomicBatchMode: "privy_wallet_send_calls",
+    }),
+  }),
+  {
+    payerRequirement: "privy_sponsor",
+    policyId: PRIVY_USER_AUTHORIZED_EVM_SPONSORSHIP_POLICY_ID,
+    signingMode: "privy_authorization",
+  },
+);
+assert.throws(
+  () =>
+    resolveActionSponsorship({
+      action: BATCH_ACTION,
+      profile: profile(),
+    }),
+  /cannot execute an atomic EVM batch/,
 );
 
 assert.deepEqual(

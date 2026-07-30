@@ -2,6 +2,7 @@ import type { Pool } from "@hunch/infra";
 
 import { buildAccountValueReadModel } from "../../account-value/runtime-service.js";
 import { getCredentialsEncryptionKey } from "../../lib/credentials-encryption.js";
+import { isReceiptBearingFundingActionKind } from "../domain/action-kinds.js";
 import { normalizedActionSchema } from "../domain/schemas.js";
 import type {
   NormalizedAction,
@@ -29,6 +30,7 @@ import { WithdrawalDestinationRuntime } from "./withdrawal-destination-runtime.j
 
 const EXECUTOR_BY_ACTION_KIND = {
   evm_transaction: "wallet_profile_evm_v1",
+  evm_transaction_batch: "wallet_profile_evm_v1",
   external_handoff: "polymarket_deposit_wallet_relayer_v1",
   svm_transaction: "wallet_profile_svm_v1",
 } as const;
@@ -40,7 +42,12 @@ function positiveInt(value: string | undefined): number | null {
 }
 
 function signerWalletId(action: NormalizedAction): string | null {
-  if (action.kind === "evm_transaction") return action.senderWalletId;
+  if (
+    action.kind === "evm_transaction" ||
+    action.kind === "evm_transaction_batch"
+  ) {
+    return action.senderWalletId;
+  }
   if (action.kind === "svm_transaction" || action.kind === "signature") {
     return action.signerWalletId;
   }
@@ -102,7 +109,11 @@ function assertClientExecutable(
       sponsorshipPolicyId: null,
     };
   }
-  if (action.kind !== "evm_transaction" && action.kind !== "svm_transaction") {
+  if (
+    action.kind !== "evm_transaction" &&
+    action.kind !== "evm_transaction_batch" &&
+    action.kind !== "svm_transaction"
+  ) {
     throw new FundingPersistenceError(
       "quote_mismatch",
       "this endpoint exposes only committed Relay transaction actions",
@@ -123,6 +134,15 @@ function assertClientExecutable(
     throw new FundingPersistenceError(
       "quote_invalidated",
       "committed signer is no longer owned and client-executable",
+    );
+  }
+  if (
+    action.kind === "evm_transaction_batch" &&
+    profile.evmAtomicBatchMode !== "privy_wallet_send_calls"
+  ) {
+    throw new FundingPersistenceError(
+      "quote_invalidated",
+      "committed signer no longer supports atomic EVM batches",
     );
   }
   if (!profile.controllerWalletRef) {
@@ -148,6 +168,12 @@ export type FundingActionReportOutcome =
   | "ambiguous"
   | "failed"
   | "cancelled";
+
+export function isReportableFundingActionKind(
+  kind: NormalizedAction["kind"],
+): boolean {
+  return isReceiptBearingFundingActionKind(kind);
+}
 
 export function assertWithdrawalActionPolicy(
   operation: Pick<FundingOperationRow, "externalRecipientId" | "purpose">,
@@ -306,11 +332,7 @@ export class FundingOperationActionRuntime {
     const action = normalizedActionSchema.parse(
       step.normalizedAction,
     ) as unknown as NormalizedAction;
-    if (
-      action.kind !== "evm_transaction" &&
-      action.kind !== "svm_transaction" &&
-      action.kind !== "external_handoff"
-    ) {
+    if (!isReportableFundingActionKind(action.kind)) {
       throw new FundingPersistenceError(
         "quote_mismatch",
         "this endpoint accepts only committed transaction or relayer reports",

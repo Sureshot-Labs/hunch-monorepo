@@ -11,6 +11,7 @@ import {
   buildPolymarketPreRouteHandoffSteps,
   deriveProductionRelayEligibleSourceFacts,
 } from "../../planner/production-source-planner.js";
+import { groupWalletExecutableActions } from "../../planner/evm-action-batching.js";
 
 const NOW = "2026-07-24T12:00:00.000Z";
 const ACCOUNT_ID = "account_source_planner_12345678";
@@ -34,6 +35,64 @@ const SOLANA_USDC = {
   assetId: RELAY_PINNED_ASSETS.solanaUsdc,
   decimals: 6,
 } as const;
+
+const batchProfile = {
+  walletId: "wallet_batch_12345678",
+  controllerWalletRef: "controller_wallet_12345678",
+  networkId: "evm:137",
+  address: "0x1111111111111111111111111111111111111111",
+  source: "embedded" as const,
+  signingModes: ["web_client", "privy_authorization"] as const,
+  serverWalletRef: "privy_wallet_12345678",
+  sponsorshipPolicyIds: [PRIVY_USER_AUTHORIZED_EVM_SPONSORSHIP_POLICY_ID],
+  evmAtomicBatchMode: "privy_wallet_send_calls" as const,
+};
+const batchCandidates = [
+  {
+    kind: "evm_transaction" as const,
+    actionId: "action_approve_12345678",
+    networkId: "evm:137",
+    senderWalletId: batchProfile.walletId,
+    to: "0x2222222222222222222222222222222222222222",
+    data: "0x01",
+    valueRaw: "0",
+    gasLimitRaw: "65000",
+  },
+  {
+    kind: "evm_transaction" as const,
+    actionId: "action_relay_12345678",
+    networkId: "evm:137",
+    senderWalletId: batchProfile.walletId,
+    to: "0x3333333333333333333333333333333333333333",
+    data: "0x02",
+    valueRaw: "0",
+    gasLimitRaw: "500000",
+  },
+];
+const [atomicGroup] = groupWalletExecutableActions({
+  actions: batchCandidates,
+  profile: batchProfile,
+});
+assert.equal(atomicGroup?.action.kind, "evm_transaction_batch");
+assert.deepEqual(
+  atomicGroup?.action.kind === "evm_transaction_batch"
+    ? atomicGroup.action.calls.map((call) => call.actionId)
+    : [],
+  batchCandidates.map((action) => action.actionId),
+);
+assert.deepEqual(
+  atomicGroup?.sourceActions.map((action) =>
+    action.kind === "evm_transaction" ? action.gasLimitRaw : null,
+  ),
+  batchCandidates.map((action) => action.gasLimitRaw),
+);
+assert.equal(
+  groupWalletExecutableActions({
+    actions: batchCandidates,
+    profile: { ...batchProfile, evmAtomicBatchMode: null },
+  }).length,
+  2,
+);
 
 function policy(
   overrides: Partial<FundingRuntimePolicy> = {},

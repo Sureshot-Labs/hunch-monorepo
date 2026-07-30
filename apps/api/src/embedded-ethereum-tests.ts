@@ -14,6 +14,7 @@ import {
   buildEmbeddedEthereumSendTransactionRequest,
   prepareEmbeddedEthereumTransactionRequests,
   resolvePrivyTransactionHash,
+  transactionHashFromUserOperationReceipt,
   type EmbeddedEthereumWalletContext,
 } from "./services/embedded-ethereum.js";
 
@@ -94,6 +95,28 @@ const tests: TestCase[] = [
     },
   },
   {
+    name: "ERC-4337 receipt resolves the onchain transaction hash",
+    run: () => {
+      const transactionHash = `0x${"ab".repeat(32)}`;
+      assert.equal(
+        transactionHashFromUserOperationReceipt({
+          userOpHash: `0x${"cd".repeat(32)}`,
+          success: true,
+          receipt: { transactionHash },
+        }),
+        transactionHash,
+      );
+      assert.equal(
+        transactionHashFromUserOperationReceipt({
+          success: true,
+          receipt: { transactionHash: "0x1234" },
+        }),
+        null,
+      );
+      assert.equal(transactionHashFromUserOperationReceipt(null), null);
+    },
+  },
+  {
     name: "prepare embedded ethereum transaction requests preserves ids and order",
     run: () => {
       const requests = prepareEmbeddedEthereumTransactionRequests({
@@ -126,6 +149,55 @@ const tests: TestCase[] = [
       };
       assert.equal(secondBody.caip2, "eip155:137");
       assert.equal(secondBody.sponsor, false);
+    },
+  },
+  {
+    name: "atomic embedded ethereum execution prepares one wallet_sendCalls request",
+    run: () => {
+      const requests = prepareEmbeddedEthereumTransactionRequests({
+        context: walletContext,
+        chainId: 137,
+        executionMode: "atomic",
+        transactions: [
+          {
+            id: "approve",
+            label: "Approve",
+            to: "0x1111111111111111111111111111111111111111",
+            data: "0x01",
+          },
+          {
+            id: "relay",
+            label: "Relay",
+            to: "0x2222222222222222222222222222222222222222",
+            data: "0x02",
+            value: "7",
+          },
+        ],
+      });
+
+      assert.equal(requests.length, 1);
+      const body = requests[0]?.input.body as {
+        method: string;
+        caip2: string;
+        sponsor: boolean;
+        params: {
+          calls: Array<{ to: string; data: string; value?: string }>;
+        };
+      };
+      assert.equal(body.method, "wallet_sendCalls");
+      assert.equal(body.caip2, "eip155:137");
+      assert.equal(body.sponsor, true);
+      assert.deepEqual(body.params.calls, [
+        {
+          to: "0x1111111111111111111111111111111111111111",
+          data: "0x01",
+        },
+        {
+          to: "0x2222222222222222222222222222222222222222",
+          data: "0x02",
+          value: "0x7",
+        },
+      ]);
     },
   },
   {
@@ -308,6 +380,84 @@ const tests: TestCase[] = [
           }),
         );
       }
+    },
+  },
+  {
+    name: "server-frozen EVM batch children match only their exact sponsored call",
+    run: () => {
+      const action = {
+        kind: "evm_transaction_batch",
+        actionId: "batch-relay",
+        networkId: "evm:137",
+        senderWalletId: "wallet-1",
+        calls: [
+          {
+            actionId: "relay:quote:approve",
+            to: "0x5555555555555555555555555555555555555555",
+            data: "0xabcdef12",
+            valueRaw: "0",
+          },
+          {
+            actionId: "relay:quote",
+            to: "0x6666666666666666666666666666666666666666",
+            data: "0xabcdef34",
+            valueRaw: "7",
+          },
+        ],
+      };
+      const input = {
+        userId: TEST_USER_ID,
+        signer: walletContext.signer,
+        chainId: 137,
+        transaction: {
+          id: "relay:quote:approve",
+          label: "Relay approval",
+          to: "0x5555555555555555555555555555555555555555",
+          data: "0xabcdef12",
+          value: "0",
+        },
+      };
+
+      assert.equal(
+        embeddedEvmSponsorshipTestHooks.fundingActionMatchesTransaction(
+          action,
+          input,
+        ),
+        true,
+      );
+      assert.equal(
+        embeddedEvmSponsorshipTestHooks.fundingActionMatchesTransaction(
+          action,
+          {
+            ...input,
+            transaction: { ...input.transaction, data: "0xabcdef13" },
+          },
+        ),
+        false,
+      );
+      assert.equal(
+        embeddedEvmSponsorshipTestHooks.fundingActionMatchesTransaction(
+          action,
+          {
+            ...input,
+            transaction: { ...input.transaction, gas: "21000" },
+          },
+        ),
+        false,
+      );
+      assert.equal(
+        embeddedEvmSponsorshipTestHooks.fundingActionMatchesTransaction(
+          action,
+          {
+            ...input,
+            transaction: {
+              ...input.transaction,
+              id: "relay:quote:unknown",
+            },
+          },
+        ),
+        false,
+      );
     },
   },
   {

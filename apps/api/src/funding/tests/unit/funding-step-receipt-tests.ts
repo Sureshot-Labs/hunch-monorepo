@@ -18,6 +18,7 @@ import type {
 } from "../../persistence/funding-step-receipt-repository.js";
 import {
   fundingStepStateForReceipt,
+  listFundingStepReceiptTargets,
   shouldIgnoreFundingStepReceiptUpdate,
 } from "../../persistence/funding-step-receipt-repository.js";
 
@@ -199,6 +200,121 @@ assert.equal(
     executionEnvelope: "privy_erc4337",
   }).status,
   "finalized",
+);
+const batchAction = {
+  kind: "evm_transaction_batch" as const,
+  actionId: "action_batch_12345678",
+  networkId: evmAction.networkId,
+  senderWalletId: evmAction.senderWalletId,
+  calls: [
+    {
+      actionId: "action_approve_12345678",
+      to: "0x2222222222222222222222222222222222222222",
+      data: "0xabcdef",
+      valueRaw: "0",
+    },
+    {
+      actionId: "action_relay_12345678",
+      to: "0x5555555555555555555555555555555555555555",
+      data: "0x1234",
+      valueRaw: "7",
+    },
+  ],
+};
+let receiptTargetQuery = "";
+const [batchReceiptTarget] = await listFundingStepReceiptTargets(
+  {
+    query: async (query: unknown) => {
+      receiptTargetQuery = String(query);
+      return {
+        rows: [
+          {
+            operation_id: "operation_batch_12345678",
+            step_id: "step_batch_12345678",
+            segment_id: null,
+            attempt_id: "attempt_batch_12345678",
+            step_kind: "transaction",
+            payer_requirement: "privy_sponsor",
+            step_state: "succeeded",
+            normalized_action: batchAction,
+            action_validation_result: {},
+            receipt_ref_ciphertext: "ciphertext",
+            receipt_ref_lookup_hmac: "lookup-hmac",
+            lookup_key_version: 1,
+            receipt_operation_id: "operation_batch_12345678",
+            receipt_step_id: "step_batch_12345678",
+            receipt_attempt_id: "attempt_batch_12345678",
+            receipt_network_id: evmAction.networkId,
+            receipt_status: "confirmed",
+            receipt_action_match: true,
+            receipt_ledger_height: "10",
+            receipt_block_hash: `0x${"ab".repeat(32)}`,
+            receipt_canonical: true,
+            receipt_failure_code: null,
+            receipt_evidence: {},
+            receipt_first_seen_at: new Date("2026-07-30T09:39:46.013Z"),
+            receipt_observed_at: new Date("2026-07-30T09:39:46.013Z"),
+            receipt_finalized_at: null,
+            receipt_reorged_at: null,
+          },
+        ],
+      };
+    },
+  } as unknown as Parameters<typeof listFundingStepReceiptTargets>[0],
+  "operation_batch_12345678",
+);
+assert.equal(batchReceiptTarget?.action.kind, "evm_transaction_batch");
+assert.equal(batchReceiptTarget?.stepState, "succeeded");
+assert.equal(batchReceiptTarget?.previousReceipt?.status, "confirmed");
+assert.match(receiptTargetQuery, /or step\.state = 'succeeded'/u);
+const batchExecutionCalldata = ethers.AbiCoder.defaultAbiCoder().encode(
+  ["tuple(address target,uint256 value,bytes callData)[]"],
+  [
+    batchAction.calls.map((call) => ({
+      target: call.to,
+      value: BigInt(call.valueRaw),
+      callData: call.data,
+    })),
+  ],
+);
+const batchUserOperation = {
+  ...sponsoredUserOperation,
+  callData: smartAccount.encodeFunctionData("execute", [
+    `0x01${"00".repeat(31)}`,
+    batchExecutionCalldata,
+  ]),
+};
+const batchSponsoredTransaction = {
+  ...sponsoredTransaction,
+  data: entryPoint.encodeFunctionData("handleOps", [
+    [batchUserOperation],
+    sponsoredTransactionBeneficiary,
+  ]),
+};
+assert.equal(
+  evaluateEvmActionReceipt({
+    action: batchAction,
+    expectedSignerAddress: sponsoredSigner,
+    transaction: batchSponsoredTransaction,
+    receipt: sponsoredReceipt,
+    previous: null,
+    executionEnvelope: "privy_erc4337",
+  }).status,
+  "finalized",
+);
+assert.equal(
+  evaluateEvmActionReceipt({
+    action: {
+      ...batchAction,
+      calls: [...batchAction.calls].reverse(),
+    },
+    expectedSignerAddress: sponsoredSigner,
+    transaction: batchSponsoredTransaction,
+    receipt: sponsoredReceipt,
+    previous: null,
+    executionEnvelope: "privy_erc4337",
+  }).status,
+  "mismatch",
 );
 const bundledSponsoredTransaction = {
   ...sponsoredTransaction,
@@ -612,7 +728,7 @@ await assert.rejects(
   (error: unknown) =>
     error instanceof AggregateError &&
     error.errors.some(
-      nested =>
+      (nested) =>
         nested instanceof Error &&
         nested.message === "simulated provider failure",
     ),

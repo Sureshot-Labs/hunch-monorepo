@@ -56,6 +56,10 @@ function walletProfile(
       internallyManaged && networkId.startsWith("evm:")
         ? [PRIVY_USER_AUTHORIZED_EVM_SPONSORSHIP_POLICY_ID]
         : [],
+    evmAtomicBatchMode:
+      internallyManaged && networkId.startsWith("evm:")
+        ? "privy_wallet_send_calls"
+        : null,
   };
 }
 
@@ -143,6 +147,7 @@ export class ExistingFactsOwnershipResolver implements WalletOwnershipResolver {
         signingModes: profile.signingModes,
         serverWalletRef: profile.serverWalletRef,
         sponsorshipPolicyIds: profile.sponsorshipPolicyIds,
+        evmAtomicBatchMode: profile.evmAtomicBatchMode ?? null,
       })),
       venueBindings: venueBindings.map((binding) => ({
         bindingId: binding.bindingId,
