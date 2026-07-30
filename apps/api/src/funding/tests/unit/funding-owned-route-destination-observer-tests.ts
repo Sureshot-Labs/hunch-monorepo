@@ -206,9 +206,12 @@ assert.deepEqual(
         assert.match(sql, /'recovery_required'/);
         assert.match(
           sql,
-          /competing\.status = 'recovery_required'[\s\S]+relayStatusCategory[\s\S]+awaiting_source/,
+          /competing\.status = 'recovery_required'[\s\S]+segment\.raw_status = 'success'[\s\S]+relayStatusCategory[\s\S]+provider_success/,
         );
-        assert.match(sql, /originTransactionReferenceCount/);
+        assert.match(
+          sql,
+          /competing_segment\.support_metadata[\s\S]+destinationTransactionReferenceCount[\s\S]+::integer = 0/,
+        );
         assert.match(sql, /exists \(\s+select 1[\s\S]+competing_segment/);
         assert.match(
           sql,

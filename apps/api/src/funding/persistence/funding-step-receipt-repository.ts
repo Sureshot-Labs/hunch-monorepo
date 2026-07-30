@@ -1,5 +1,6 @@
 import { tx, type Pool, type PoolClient } from "@hunch/infra";
 
+import { isReceiptBearingFundingActionKind } from "../domain/action-kinds.js";
 import type { JsonValue, NormalizedAction } from "../domain/types.js";
 import { normalizedActionSchema } from "../domain/schemas.js";
 import { FundingPersistenceError } from "./funding-operation-repository.js";
@@ -200,10 +201,11 @@ export async function listFundingStepReceiptTargets(
             'reconcile_required',
             'recovery_required'
           )
-          or (
-            step.state = 'succeeded'
-            and receipt.status = 'finalized'
-          )
+          -- A postcondition may prove a step succeeded before its broadcast
+          -- receipt reaches finality. Keep polling every succeeded step until
+          -- the operation itself terminates so confirmed receipts can advance
+          -- to finalized and finalized receipts remain reorg-monitored.
+          or step.state = 'succeeded'
         )
       order by step.ordinal, attempt.attempt_number
     `,
@@ -213,14 +215,10 @@ export async function listFundingStepReceiptTargets(
     const action = normalizedActionSchema.parse(
       row.normalized_action,
     ) as unknown as NormalizedAction;
-    if (
-      action.kind !== "evm_transaction" &&
-      action.kind !== "svm_transaction" &&
-      action.kind !== "external_handoff"
-    ) {
+    if (!isReceiptBearingFundingActionKind(action.kind)) {
       throw new FundingPersistenceError(
         "quote_mismatch",
-        "broadcast receipt is linked to a non-transaction action",
+        "broadcast receipt is linked to a non-receipt-bearing action",
       );
     }
     const previousReceipt =

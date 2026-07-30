@@ -8,6 +8,7 @@ import {
   fundingDiscoveryRequestSchema,
   fundingQuoteRequestSchema,
   moneySchema,
+  normalizedActionSchema,
   rawAmountSchema,
 } from "../../domain/schemas.js";
 import {
@@ -223,6 +224,51 @@ await test("accepts only unsigned raw-unit strings", () => {
   assert.equal(
     moneySchema.safeParse({ asset: polygonPusd, raw: "1000000" }).success,
     true,
+  );
+});
+
+await test("keeps EVM gas hints on single actions and out of atomic calls", () => {
+  const single = {
+    kind: "evm_transaction",
+    actionId: "action_single_12345678",
+    networkId: "evm:137",
+    senderWalletId: "wallet_single_12345678",
+    to: "0x1111111111111111111111111111111111111111",
+    data: "0x01",
+    valueRaw: "0",
+    gasLimitRaw: "500000",
+  };
+  assert.equal(normalizedActionSchema.safeParse(single).success, true);
+
+  const batch = {
+    kind: "evm_transaction_batch",
+    actionId: "action_batch_12345678",
+    networkId: "evm:137",
+    senderWalletId: "wallet_batch_12345678",
+    calls: [
+      {
+        actionId: "action_approve_12345678",
+        to: "0x2222222222222222222222222222222222222222",
+        data: "0x02",
+        valueRaw: "0",
+      },
+      {
+        actionId: "action_relay_12345678",
+        to: "0x3333333333333333333333333333333333333333",
+        data: "0x03",
+        valueRaw: "0",
+      },
+    ],
+  };
+  assert.equal(normalizedActionSchema.safeParse(batch).success, true);
+  assert.equal(
+    normalizedActionSchema.safeParse({
+      ...batch,
+      calls: batch.calls.map((call, index) =>
+        index === 0 ? { ...call, gasLimitRaw: "65000" } : call,
+      ),
+    }).success,
+    false,
   );
 });
 

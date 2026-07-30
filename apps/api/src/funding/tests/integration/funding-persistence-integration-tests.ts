@@ -747,10 +747,10 @@ async function testUnexposedRecoveryRouteDoesNotBlockDestinationObservation(): P
     await client.query(
       `
         update funding_operation_segments
-        set raw_status = 'waiting',
+        set raw_status = 'submitted',
             support_metadata = support_metadata || jsonb_build_object(
-              'relayStatusCategory', 'awaiting_source',
-              'originTransactionReferenceCount', 0,
+              'relayStatusCategory', 'in_progress',
+              'originTransactionReferenceCount', 1,
               'destinationTransactionReferenceCount', 0
             )
         where operation_id = $1
@@ -769,6 +769,19 @@ async function testUnexposedRecoveryRouteDoesNotBlockDestinationObservation(): P
       `
         update funding_operation_steps
         set state = 'succeeded'
+        where operation_id = $1
+      `,
+      [currentCommit.operation.id],
+    );
+    await client.query(
+      `
+        update funding_operation_segments
+        set raw_status = 'success',
+            support_metadata = support_metadata || jsonb_build_object(
+              'relayStatusCategory', 'provider_success',
+              'originTransactionReferenceCount', 1,
+              'destinationTransactionReferenceCount', 1
+            )
         where operation_id = $1
       `,
       [currentCommit.operation.id],
@@ -795,9 +808,10 @@ async function testUnexposedRecoveryRouteDoesNotBlockDestinationObservation(): P
     await client.query(
       `
         update funding_operation_segments
-        set raw_status = 'pending',
+        set raw_status = 'success',
             support_metadata = support_metadata || jsonb_build_object(
-              'relayStatusCategory', 'in_progress'
+              'relayStatusCategory', 'provider_success',
+              'destinationTransactionReferenceCount', 1
             )
         where operation_id = $1
       `,

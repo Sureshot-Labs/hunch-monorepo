@@ -361,27 +361,28 @@ async function loadTarget(
                       )
                       or (
                         competing.status = 'recovery_required'
-                        -- A recovery operation can only receive a late Relay
-                        -- credit if value entered the provider. An
-                        -- awaiting-source segment with zero origin and
-                        -- destination references proves that it did not;
-                        -- an approval-only wallet broadcast is not delivery
-                        -- exposure and must not block a later operation.
+                        -- A delivered current route cannot be blocked forever
+                        -- by an older recovery route that has no destination
+                        -- transaction. If that older route delivers later,
+                        -- this operation's finalized destination observation
+                        -- prevents the same balance delta from being
+                        -- attributed twice.
                         and not (
-                          competing_segment.support_metadata
-                            ->>'relayStatusCategory' = 'awaiting_source'
+                          segment.raw_status = 'success'
+                          and segment.support_metadata
+                            ->>'relayStatusCategory' = 'provider_success'
                           and coalesce(
-                            competing_segment.support_metadata
-                              ->>'originTransactionReferenceCount',
+                            segment.support_metadata
+                              ->>'destinationTransactionReferenceCount',
                             '0'
                           ) ~ '^[0-9]+$'
                           and (
                             coalesce(
-                              competing_segment.support_metadata
-                                ->>'originTransactionReferenceCount',
+                              segment.support_metadata
+                                ->>'destinationTransactionReferenceCount',
                               '0'
                             )
-                          )::integer = 0
+                          )::integer >= 1
                           and coalesce(
                             competing_segment.support_metadata
                               ->>'destinationTransactionReferenceCount',

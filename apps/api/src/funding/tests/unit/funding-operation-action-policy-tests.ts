@@ -2,7 +2,10 @@
 
 import assert from "node:assert/strict";
 
-import { assertWithdrawalActionPolicy } from "../../execution/operation-action-runtime.js";
+import {
+  assertWithdrawalActionPolicy,
+  isReportableFundingActionKind,
+} from "../../execution/operation-action-runtime.js";
 import { FundingPersistenceError } from "../../persistence/funding-operation-repository.js";
 import { DEFAULT_FUNDING_RUNTIME_POLICY } from "../../policies/funding-policy.js";
 
@@ -57,6 +60,12 @@ assert.throws(
     error instanceof FundingPersistenceError && error.code === "quote_mismatch",
 );
 
+assert.equal(isReportableFundingActionKind("evm_transaction"), true);
+assert.equal(isReportableFundingActionKind("evm_transaction_batch"), true);
+assert.equal(isReportableFundingActionKind("svm_transaction"), true);
+assert.equal(isReportableFundingActionKind("external_handoff"), true);
+assert.equal(isReportableFundingActionKind("signature"), false);
+
 console.log(
-  "[funding-operation-action-policy-tests] independent withdrawal gate and exact recipient binding passed",
+  "[funding-operation-action-policy-tests] withdrawal and reportable action policies passed",
 );

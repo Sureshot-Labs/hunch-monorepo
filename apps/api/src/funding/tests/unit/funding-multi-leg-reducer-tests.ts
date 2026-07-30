@@ -186,6 +186,53 @@ assert.deepEqual(
   ).target,
   { status: "ready", stage: "ready_for_consumer" },
 );
+const mixedCaseAssetId = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB";
+const mixedCasePreparedOperation = {
+  ...exactPreparedOperation,
+  id: "00000000-0000-4000-8000-000000000041",
+  requestedDestinationAmount: {
+    asset: { ...destinationAsset, assetId: mixedCaseAssetId },
+    raw: "4723189",
+  },
+} satisfies FundingOperationRow;
+const mixedCaseRelaySegment = {
+  ...exactRelaySegment,
+  id: "00000000-0000-4000-8000-000000000042",
+  quoted_min_output: {
+    asset: { ...destinationAsset, assetId: mixedCaseAssetId.toLowerCase() },
+    raw: "3749387",
+  },
+};
+const mixedCaseRelayCredit = {
+  ...destinationObservation(mixedCaseRelaySegment.id, "3749387", "41"),
+  operationId: mixedCasePreparedOperation.id,
+  assetId: mixedCaseAssetId.toLowerCase(),
+};
+const mixedCasePreparationReadiness = {
+  ...destinationObservation(null, "973802", "42", "venue_readiness"),
+  operationId: mixedCasePreparedOperation.id,
+  assetId: mixedCaseAssetId,
+};
+assert.notEqual(
+  mixedCaseRelayCredit.assetId,
+  mixedCasePreparationReadiness.assetId,
+);
+assert.deepEqual(
+  deriveTargetState(
+    mixedCasePreparedOperation,
+    [mixedCaseRelayCredit, mixedCasePreparationReadiness],
+    [mixedCaseRelaySegment],
+    [
+      step(
+        "00000000-0000-4000-8000-000000000043",
+        mixedCaseRelaySegment.id,
+        "succeeded",
+      ),
+      step("00000000-0000-4000-8000-000000000044", null, "succeeded"),
+    ],
+  ).target,
+  { status: "ready", stage: "ready_for_consumer" },
+);
 assert.deepEqual(
   deriveTargetState(
     exactPreparedOperation,

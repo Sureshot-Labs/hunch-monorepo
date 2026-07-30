@@ -10,6 +10,7 @@ import {
 } from "../domain/transitions.js";
 import { parseMoneyJson } from "../domain/money-json.js";
 import type { JsonValue } from "../domain/types.js";
+import { normalizeAssetId, sameAsset } from "../planner/money.js";
 import {
   claimFundingReconciliationJobs,
   fetchFundingOperationForWorkerInTransaction,
@@ -456,7 +457,9 @@ function sumObservationAmount(
   const networkIds = new Set(
     selected.map((observation) => observation.networkId),
   );
-  const assetIds = new Set(selected.map((observation) => observation.assetId));
+  const assetIds = new Set(
+    selected.map((observation) => normalizeAssetId(observation.assetId)),
+  );
   if (networkIds.size !== 1 || assetIds.size !== 1) return null;
   const requestedMoney = parseMoneyJson(requested);
   const networkId = selected[0]?.networkId;
@@ -466,7 +469,7 @@ function sumObservationAmount(
     !assetId ||
     !requestedMoney ||
     requestedMoney.asset.networkId !== networkId ||
-    requestedMoney.asset.assetId !== assetId
+    normalizeAssetId(requestedMoney.asset.assetId) !== normalizeAssetId(assetId)
   ) {
     return null;
   }
@@ -488,9 +491,7 @@ function moneyMeetsOrExceeds(
   return Boolean(
     actualMoney &&
     expectedMoney &&
-    actualMoney.asset.networkId === expectedMoney.asset.networkId &&
-    actualMoney.asset.assetId === expectedMoney.asset.assetId &&
-    actualMoney.asset.decimals === expectedMoney.asset.decimals &&
+    sameAsset(actualMoney.asset, expectedMoney.asset) &&
     BigInt(actualMoney.raw) >= BigInt(expectedMoney.raw),
   );
 }

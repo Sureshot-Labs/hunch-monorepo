@@ -1,6 +1,6 @@
 import type { AssetRef, Money } from "../domain/types.js";
 
-function normalizeAssetId(value: string): string {
+export function normalizeAssetId(value: string): string {
   return value.startsWith("0x") ? value.toLowerCase() : value;
 }
 
