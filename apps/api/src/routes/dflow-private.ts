@@ -464,7 +464,6 @@ export const dflowPrivateRoutes: FastifyPluginAsync<
           ok: true,
           venue: "kalshi",
           walletAddress,
-          rpcUrl: env.solanaRpcUrl,
           sol: {
             decimals: SOL_DECIMALS,
             balance: formatUiAmount(solLamports, SOL_DECIMALS),

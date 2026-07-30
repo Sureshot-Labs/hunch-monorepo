@@ -8,6 +8,7 @@ import {
   type FundingStateKey,
   type SegmentStatus,
 } from "../domain/transitions.js";
+import { parseMoneyJson } from "../domain/money-json.js";
 import type { JsonValue } from "../domain/types.js";
 import {
   claimFundingReconciliationJobs,
@@ -181,7 +182,26 @@ function destinationRequiresPreparation(
   operation: FundingOperationRow,
 ): boolean {
   const preparation = operation.destinationTargetSnapshot.preparation;
-  return preparation != null && preparation !== "none";
+  return (
+    (preparation != null && preparation !== "none") ||
+    operation.supportMetadata.containsVenuePreparation === true
+  );
+}
+
+const DESTINATION_CREDIT_KINDS = new Set<FundingObservationRow["kind"]>([
+  "destination_credit",
+]);
+const COMPOSITE_PREPARED_DESTINATION_KINDS = new Set<
+  FundingObservationRow["kind"]
+>(["destination_credit", "venue_readiness"]);
+
+function destinationObservationKinds(
+  operation: FundingOperationRow,
+): ReadonlySet<FundingObservationRow["kind"]> {
+  return operation.planKind === "composite_route" &&
+    destinationRequiresPreparation(operation)
+    ? COMPOSITE_PREPARED_DESTINATION_KINDS
+    : DESTINATION_CREDIT_KINDS;
 }
 
 export function deriveTargetState(
@@ -218,10 +238,10 @@ export function deriveTargetState(
     });
   const actualDestination = sumObservationAmount(
     observations,
-    new Set(["destination_credit"]),
+    destinationObservationKinds(operation),
     operation.requestedDestinationAmount,
   );
-  const requestedDestination = parseMoneySnapshot(
+  const requestedDestination = parseMoneyJson(
     operation.requestedDestinationAmount,
   );
   const destinationRequirementMet =
@@ -401,7 +421,7 @@ export function deriveSegmentTargetStatus(
       new Set(["destination_credit"]),
       quotedMinimumOutput,
     );
-    const minimumOutput = parseMoneySnapshot(quotedMinimumOutput);
+    const minimumOutput = parseMoneyJson(quotedMinimumOutput);
     if (!actualOutput || !minimumOutput) {
       return findSegmentTransitionPath(current, "recovery_required")
         ? "recovery_required"
@@ -423,36 +443,6 @@ export function deriveSegmentTargetStatus(
   return current;
 }
 
-type MoneySnapshot = Readonly<{
-  asset: Readonly<{
-    networkId: string;
-    assetId: string;
-    decimals: number;
-  }>;
-  raw: string;
-}>;
-
-function parseMoneySnapshot(value: JsonRecord | null): MoneySnapshot | null {
-  if (!value || typeof value.raw !== "string") return null;
-  const asset = value.asset;
-  if (!asset || typeof asset !== "object" || Array.isArray(asset)) return null;
-  const assetRecord = asset as Readonly<Record<string, JsonValue>>;
-  const networkId = assetRecord.networkId;
-  const assetId = assetRecord.assetId;
-  const decimals = assetRecord.decimals;
-  if (
-    typeof networkId !== "string" ||
-    typeof assetId !== "string" ||
-    typeof decimals !== "number"
-  ) {
-    return null;
-  }
-  return {
-    asset: { networkId, assetId, decimals },
-    raw: value.raw,
-  };
-}
-
 function sumObservationAmount(
   observations: readonly FundingObservationRow[],
   kinds: ReadonlySet<FundingObservationRow["kind"]>,
@@ -468,7 +458,7 @@ function sumObservationAmount(
   );
   const assetIds = new Set(selected.map((observation) => observation.assetId));
   if (networkIds.size !== 1 || assetIds.size !== 1) return null;
-  const requestedMoney = parseMoneySnapshot(requested);
+  const requestedMoney = parseMoneyJson(requested);
   const networkId = selected[0]?.networkId;
   const assetId = selected[0]?.assetId;
   if (
@@ -493,8 +483,8 @@ function moneyMeetsOrExceeds(
   actual: JsonRecord | null,
   expected: JsonRecord | null,
 ): boolean {
-  const actualMoney = parseMoneySnapshot(actual);
-  const expectedMoney = parseMoneySnapshot(expected);
+  const actualMoney = parseMoneyJson(actual);
+  const expectedMoney = parseMoneyJson(expected);
   return Boolean(
     actualMoney &&
     expectedMoney &&
@@ -677,7 +667,7 @@ async function ensureSettledConsumerReservation(
   now: Date,
 ): Promise<void> {
   if (operation.purpose !== "trade_shortfall") return;
-  const destination = parseMoneySnapshot(
+  const destination = parseMoneyJson(
     operation.actualDestinationAmount ?? operation.requestedDestinationAmount,
   );
   if (!destination || destination.raw === "0") return;
@@ -950,7 +940,7 @@ export async function reduceFundingOperationInTransaction(
   );
   const actualDestinationAmount = sumObservationAmount(
     observations,
-    new Set(["destination_credit"]),
+    destinationObservationKinds(initial),
     initial.requestedDestinationAmount,
   );
   const sourceLegsFinal = segments.every((segment) => {
@@ -1035,7 +1025,7 @@ export async function reduceFundingOperationInTransaction(
       now,
     );
   }
-  if (venueReady && operation.planKind === "venue_preparation") {
+  if (venueReady && destinationRequiresPreparation(operation)) {
     await releaseVenuePreparationReservationsAfterReadiness(
       client,
       operation.id,
@@ -1088,6 +1078,7 @@ export type FundingReconciliationBatchOptions = Readonly<{
   pollDelayMs?: number;
   idlePollDelayMs?: number;
   maxAttempts?: number;
+  terminalTimeoutMs?: number;
   now?: Date;
   providerPoll?: (
     operationId: string,
@@ -1121,6 +1112,165 @@ export type FundingReconciliationBatchResult = Readonly<{
   operationIds: readonly string[];
 }>;
 
+const RECONCILIATION_ACTIVE_STATUSES = new Set<FundingOperationState["status"]>(
+  ["in_progress", "reconcile_required"],
+);
+export const DEFAULT_FUNDING_RECONCILIATION_TERMINAL_TIMEOUT_MS = 90_000;
+export const FUNDING_RECONCILIATION_TIMEOUT_ERROR_CODE =
+  "reconciliation_evidence_timeout";
+
+export type FundingReconciliationDisposition =
+  | "complete"
+  | "requeue"
+  | "recovery_required";
+
+type FundingReconciliationActiveWindow = Readonly<{
+  startedAt: Date;
+  initialAttemptCount: number;
+}>;
+
+export function fundingReconciliationTerminalTimeoutReached(
+  input: Readonly<{
+    reconciliationStartedAt: Date;
+    now: Date;
+    terminalTimeoutMs: number;
+  }>,
+): boolean {
+  return (
+    input.now.getTime() - input.reconciliationStartedAt.getTime() >=
+    input.terminalTimeoutMs
+  );
+}
+
+export function fundingReconciliationDisposition(
+  input: Readonly<{
+    state: FundingOperationState;
+    reductionCompleted: boolean;
+    reconciliationStartedAt: Date | null;
+    now: Date;
+    terminalTimeoutMs: number;
+  }>,
+): FundingReconciliationDisposition {
+  if (input.reductionCompleted || input.state.status === "recovery_required") {
+    return "complete";
+  }
+  if (!RECONCILIATION_ACTIVE_STATUSES.has(input.state.status)) {
+    return "requeue";
+  }
+  return input.reconciliationStartedAt != null &&
+    fundingReconciliationTerminalTimeoutReached({
+      reconciliationStartedAt: input.reconciliationStartedAt,
+      now: input.now,
+      terminalTimeoutMs: input.terminalTimeoutMs,
+    })
+    ? "recovery_required"
+    : "requeue";
+}
+
+function storedFundingReconciliationActiveWindow(
+  supportMetadata: Readonly<Record<string, JsonValue>>,
+  attemptCount: number,
+  now: Date,
+): FundingReconciliationActiveWindow | null {
+  const startedAtValue = supportMetadata.reconciliationActiveSince;
+  const initialAttemptCount =
+    supportMetadata.reconciliationActiveAttemptBaseline;
+  if (
+    typeof startedAtValue !== "string" ||
+    typeof initialAttemptCount !== "number" ||
+    !Number.isInteger(initialAttemptCount) ||
+    initialAttemptCount < 0 ||
+    initialAttemptCount > attemptCount
+  ) {
+    return null;
+  }
+  const startedAt = new Date(startedAtValue);
+  return Number.isFinite(startedAt.getTime()) &&
+    startedAt.getTime() <= now.getTime()
+    ? { startedAt, initialAttemptCount }
+    : null;
+}
+
+async function synchronizeFundingReconciliationActiveWindow(
+  pool: Pool,
+  input: Readonly<{
+    operationId: string;
+    attemptCount: number;
+    now: Date;
+  }>,
+): Promise<FundingReconciliationActiveWindow | null> {
+  return tx(pool, async (client) => {
+    const operation = await fetchFundingOperationForWorkerInTransaction(
+      client,
+      input.operationId,
+    );
+    if (!operation) {
+      return null;
+    }
+    const activeStatus = RECONCILIATION_ACTIVE_STATUSES.has(operation.status);
+    const awaitingActionReport = activeStatus
+      ? Boolean(
+          (
+            await client.query<{ awaiting_report: boolean }>(
+              `
+                select exists (
+                  select 1
+                  from funding_operation_steps step
+                  where step.operation_id = $1
+                    and step.state in ('planned', 'action_required')
+                ) as awaiting_report
+              `,
+              [operation.id],
+            )
+          ).rows[0]?.awaiting_report,
+        )
+      : false;
+    if (!activeStatus || awaitingActionReport) {
+      const hasStoredWindow =
+        operation.supportMetadata.reconciliationActiveSince != null ||
+        operation.supportMetadata.reconciliationActiveAttemptBaseline != null;
+      if (hasStoredWindow) {
+        await transitionFundingOperationInTransaction(client, {
+          operationId: operation.id,
+          scope: { kind: "worker" },
+          expectedVersion: operation.version,
+          expectedState: operationState(operation),
+          nextState: operationState(operation),
+          supportMetadataPatch: {
+            reconciliationActiveSince: null,
+            reconciliationActiveAttemptBaseline: null,
+          },
+          now: input.now,
+        });
+      }
+      return null;
+    }
+    const stored = storedFundingReconciliationActiveWindow(
+      operation.supportMetadata,
+      input.attemptCount,
+      input.now,
+    );
+    if (stored) return stored;
+    const activeWindow = {
+      startedAt: input.now,
+      initialAttemptCount: Math.max(0, input.attemptCount - 1),
+    };
+    await transitionFundingOperationInTransaction(client, {
+      operationId: operation.id,
+      scope: { kind: "worker" },
+      expectedVersion: operation.version,
+      expectedState: operationState(operation),
+      nextState: operationState(operation),
+      supportMetadataPatch: {
+        reconciliationActiveSince: activeWindow.startedAt.toISOString(),
+        reconciliationActiveAttemptBaseline: activeWindow.initialAttemptCount,
+      },
+      now: input.now,
+    });
+    return activeWindow;
+  });
+}
+
 function summarizeError(error: unknown): Readonly<{
   code: string;
   summary: string;
@@ -1150,6 +1300,7 @@ export function fundingReconciliationPollDelayMs(
 export async function pollFundingReconciliationEvidence(
   input: Readonly<{
     operationId: string;
+    state: FundingOperationState;
     now: Date;
     providerPoll?: FundingReconciliationBatchOptions["providerPoll"];
     receiptPoll?: FundingReconciliationBatchOptions["receiptPoll"];
@@ -1158,10 +1309,12 @@ export async function pollFundingReconciliationEvidence(
   }>,
 ): Promise<void> {
   await input.receiptPoll?.(input.operationId, input.now);
+  if (input.state.status === "awaiting_user") return;
   const [, destination] = await Promise.all([
     input.postconditionPoll?.(input.operationId, input.now),
     input.destinationPoll?.(input.operationId, input.now),
   ]);
+  if (!RECONCILIATION_ACTIVE_STATUSES.has(input.state.status)) return;
   // Finalized source receipts plus the exact owned-destination balance delta
   // are authoritative completion evidence. Provider status is only needed
   // while that destination evidence is still absent.
@@ -1170,13 +1323,111 @@ export async function pollFundingReconciliationEvidence(
   }
 }
 
+async function loadFundingOperationState(
+  pool: Pool,
+  operationId: string,
+): Promise<FundingOperationState> {
+  return tx(pool, async (client) => {
+    const operation = await fetchFundingOperationForWorkerInTransaction(
+      client,
+      operationId,
+    );
+    if (!operation) {
+      throw new Error(`funding operation ${operationId} was not found`);
+    }
+    return operationState(operation);
+  });
+}
+
+async function markFundingOperationRecoveryRequired(
+  pool: Pool,
+  input: Readonly<{
+    operationId: string;
+    errorCode: string;
+    now: Date;
+  }>,
+): Promise<boolean> {
+  return tx(pool, async (client) => {
+    let operation = await fetchFundingOperationForWorkerInTransaction(
+      client,
+      input.operationId,
+    );
+    if (!operation || !RECONCILIATION_ACTIVE_STATUSES.has(operation.status)) {
+      return false;
+    }
+    const current = operationState(operation);
+    const target =
+      recoveryTargetFor(current) ??
+      ({
+        status: "recovery_required",
+        stage: current.stage === "committed" ? "source_action" : current.stage,
+      } satisfies FundingOperationState);
+    const path = findTransitionPath(current, target);
+    if (!path) {
+      throw new Error(
+        `no declared funding transition path from ${stateKey(current)} to ${stateKey(target)}`,
+      );
+    }
+    const transitions = path.length > 0 ? path : [target];
+    for (const [index, nextState] of transitions.entries()) {
+      const expectedState = operationState(operation);
+      operation = await transitionFundingOperationInTransaction(client, {
+        operationId: operation.id,
+        scope: { kind: "worker" },
+        expectedVersion: operation.version,
+        expectedState,
+        nextState,
+        errorCode:
+          index === transitions.length - 1 ? input.errorCode : undefined,
+        supportMetadataPatch:
+          index === transitions.length - 1
+            ? {
+                reconciliationRecoveryRequiredAt: input.now.toISOString(),
+                reconciliationRecoveryReason: input.errorCode,
+              }
+            : undefined,
+        now: input.now,
+      });
+    }
+    // The persisted step state machine intentionally does not allow a direct
+    // planned/action_required -> recovery_required jump. Move unsubmitted
+    // work through reconcile_required before applying the terminal recovery
+    // state so this path obeys the same transition contract as live steps.
+    await client.query(
+      `
+        update funding_operation_steps
+        set state = 'reconcile_required',
+            updated_at = $2
+        where operation_id = $1
+          and state in ('planned', 'action_required')
+      `,
+      [operation.id, input.now],
+    );
+    await client.query(
+      `
+        update funding_operation_steps
+        set state = 'recovery_required',
+            updated_at = $2
+        where operation_id = $1
+          and state in ('submitted', 'reconcile_required')
+      `,
+      [operation.id, input.now],
+    );
+    return true;
+  });
+}
+
 async function processLease(
   pool: Pool,
   lease: FundingReconciliationLease,
   options: Required<
     Pick<
       FundingReconciliationBatchOptions,
-      "maxAttempts" | "pollDelayMs" | "idlePollDelayMs" | "retryDelayMs"
+      | "maxAttempts"
+      | "pollDelayMs"
+      | "idlePollDelayMs"
+      | "retryDelayMs"
+      | "terminalTimeoutMs"
     >
   > &
     Readonly<{ now: Date }>,
@@ -1186,8 +1437,13 @@ async function processLease(
   destinationPoll?: FundingReconciliationBatchOptions["destinationPoll"],
 ): Promise<"completed" | "requeued" | "failed" | "dead_lettered"> {
   try {
+    const stateBeforePoll = await loadFundingOperationState(
+      pool,
+      lease.operationId,
+    );
     await pollFundingReconciliationEvidence({
       operationId: lease.operationId,
+      state: stateBeforePoll,
       now: options.now,
       providerPoll,
       receiptPoll,
@@ -1198,7 +1454,23 @@ async function processLease(
       operationId: lease.operationId,
       now: options.now,
     });
-    if (reduction.terminal && !reduction.reorgBlockedByTerminalState) {
+    const reductionCompleted =
+      reduction.terminal && !reduction.reorgBlockedByTerminalState;
+    const activeWindow = reductionCompleted
+      ? null
+      : await synchronizeFundingReconciliationActiveWindow(pool, {
+          operationId: lease.operationId,
+          attemptCount: lease.attemptCount,
+          now: options.now,
+        });
+    const disposition = fundingReconciliationDisposition({
+      state: reduction.finalState,
+      reductionCompleted,
+      reconciliationStartedAt: activeWindow?.startedAt ?? null,
+      now: options.now,
+      terminalTimeoutMs: options.terminalTimeoutMs,
+    });
+    if (disposition === "complete") {
       await finishFundingReconciliationLease(pool, {
         jobId: lease.jobId,
         leaseOwner: lease.leaseOwner,
@@ -1207,6 +1479,28 @@ async function processLease(
         now: options.now,
       });
       return "completed";
+    }
+    if (disposition === "recovery_required") {
+      await markFundingOperationRecoveryRequired(pool, {
+        operationId: lease.operationId,
+        errorCode: FUNDING_RECONCILIATION_TIMEOUT_ERROR_CODE,
+        now: options.now,
+      });
+      await finishFundingReconciliationLease(pool, {
+        jobId: lease.jobId,
+        leaseOwner: lease.leaseOwner,
+        leaseToken: lease.leaseToken,
+        result: {
+          kind: "error",
+          dueAt: options.now,
+          errorCode: FUNDING_RECONCILIATION_TIMEOUT_ERROR_CODE,
+          errorSummary:
+            "funding evidence was not finalized before the reconciliation timeout",
+          deadLetter: true,
+        },
+        now: options.now,
+      });
+      return "dead_lettered";
     }
     await finishFundingReconciliationLease(pool, {
       jobId: lease.jobId,
@@ -1227,7 +1521,42 @@ async function processLease(
     return "requeued";
   } catch (error) {
     const detail = summarizeError(error);
-    const deadLetter = lease.attemptCount >= options.maxAttempts;
+    const activeWindow = await synchronizeFundingReconciliationActiveWindow(
+      pool,
+      {
+        operationId: lease.operationId,
+        attemptCount: lease.attemptCount,
+        now: options.now,
+      },
+    );
+    const terminalTimeoutReached =
+      activeWindow != null &&
+      fundingReconciliationTerminalTimeoutReached({
+        reconciliationStartedAt: activeWindow.startedAt,
+        now: options.now,
+        terminalTimeoutMs: options.terminalTimeoutMs,
+      });
+    const timeoutRecoveryRequired = terminalTimeoutReached
+      ? await markFundingOperationRecoveryRequired(pool, {
+          operationId: lease.operationId,
+          errorCode: FUNDING_RECONCILIATION_TIMEOUT_ERROR_CODE,
+          now: options.now,
+        })
+      : false;
+    const maximumActiveAttemptsReached =
+      activeWindow != null &&
+      lease.attemptCount - activeWindow.initialAttemptCount >=
+        options.maxAttempts;
+    const maximumAttemptsRecoveryRequired =
+      maximumActiveAttemptsReached && !timeoutRecoveryRequired
+        ? await markFundingOperationRecoveryRequired(pool, {
+            operationId: lease.operationId,
+            errorCode: detail.code,
+            now: options.now,
+          })
+        : false;
+    const deadLetter =
+      timeoutRecoveryRequired || maximumAttemptsRecoveryRequired;
     await finishFundingReconciliationLease(pool, {
       jobId: lease.jobId,
       leaseOwner: lease.leaseOwner,
@@ -1235,8 +1564,12 @@ async function processLease(
       result: {
         kind: "error",
         dueAt: new Date(options.now.getTime() + options.retryDelayMs),
-        errorCode: detail.code,
-        errorSummary: detail.summary,
+        errorCode: timeoutRecoveryRequired
+          ? FUNDING_RECONCILIATION_TIMEOUT_ERROR_CODE
+          : detail.code,
+        errorSummary: timeoutRecoveryRequired
+          ? "funding evidence polling failed until the reconciliation timeout"
+          : detail.summary,
         deadLetter,
       },
       now: options.now,
@@ -1271,6 +1604,9 @@ export async function runFundingReconciliationBatch(
         pollDelayMs: options.pollDelayMs ?? 15_000,
         idlePollDelayMs: options.idlePollDelayMs ?? 15_000,
         retryDelayMs: options.retryDelayMs ?? 30_000,
+        terminalTimeoutMs:
+          options.terminalTimeoutMs ??
+          DEFAULT_FUNDING_RECONCILIATION_TERMINAL_TIMEOUT_MS,
         now,
       },
       options.providerPoll,

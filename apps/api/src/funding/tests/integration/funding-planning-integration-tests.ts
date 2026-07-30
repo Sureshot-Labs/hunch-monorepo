@@ -161,8 +161,10 @@ try {
     }),
     null,
   );
-  const deletedExpiredSnapshots =
-    await deleteExpiredFundingPlanningSnapshots(pool, afterExpiry);
+  const deletedExpiredSnapshots = await deleteExpiredFundingPlanningSnapshots(
+    pool,
+    afterExpiry,
+  );
   assert.ok(deletedExpiredSnapshots >= 1);
   const { rowCount: remainingOwnedProjectionCount } = await pool.query(
     `

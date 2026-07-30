@@ -37,14 +37,12 @@ export function storedCredentialEvidence(
     boundToExactWallet: boolean;
     observedAt: Date | null;
     now: Date;
-    maxAgeMs: number;
   }>,
 ): RuntimeCredentialEvidence {
   const observedTimestamp = input.observedAt?.getTime() ?? Number.NaN;
   const stale =
     !Number.isFinite(observedTimestamp) ||
-    observedTimestamp > input.now.getTime() ||
-    input.now.getTime() - observedTimestamp > input.maxAgeMs;
+    observedTimestamp > input.now.getTime();
   return {
     present: input.present,
     boundToExactWallet: input.boundToExactWallet,

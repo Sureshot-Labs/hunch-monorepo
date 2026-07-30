@@ -234,6 +234,7 @@ export const limitlessAccountQuerySchema = z.object({
   negRiskSpender: zEthAddress.optional(),
   adapterSpender: zEthAddress.optional(),
   ammSpender: zEthAddress.optional(),
+  marketSlug: zLimitlessSlug.optional(),
   tokenId: z.string().optional(),
   refresh: zOptionalBool.optional(),
 });

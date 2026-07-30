@@ -765,6 +765,43 @@ async function insertCommitReservations(
   reservations: readonly FundingCommitReservation[],
   segmentIdByOrdinal: ReadonlyMap<number, string>,
 ): Promise<void> {
+  const subtractComponentIds = [
+    ...new Set(
+      reservations
+        .filter((reservation) => reservation.mode === "subtract_available")
+        .map((reservation) => reservation.componentId),
+    ),
+  ].sort();
+  for (const componentId of subtractComponentIds) {
+    await client.query(
+      `
+        select pg_advisory_xact_lock(
+          hashtextextended($1, 0)
+        )
+      `,
+      [["funding-source-reservation", userId, componentId].join(":")],
+    );
+    const conflict = await client.query<{ id: string }>(
+      `
+        select id
+        from balance_reservations
+        where user_id = $1
+          and component_id = $2
+          and mode = 'subtract_available'
+          and state = 'active'
+          and expires_at > now()
+        limit 1
+        for update
+      `,
+      [userId, componentId],
+    );
+    if (conflict.rows[0]) {
+      throw new FundingPersistenceError(
+        "quote_invalidated",
+        "another funding operation already reserves this source balance",
+      );
+    }
+  }
   for (const reservation of reservations) {
     const segmentId =
       reservation.segmentOrdinal == null

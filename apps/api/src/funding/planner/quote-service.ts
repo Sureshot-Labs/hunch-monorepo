@@ -6,11 +6,15 @@ import type {
   FundingQuoteSummary,
   JsonValue,
   Money,
+  SourceOption,
 } from "../domain/types.js";
+import { parseMoneyJson } from "../domain/money-json.js";
 import type { FundingRuntimePolicy } from "../policies/funding-policy.js";
 import {
   FundingPersistenceError,
   createFundingQuote,
+  type FundingCommitPlan,
+  type FundingCommitReservation,
 } from "../persistence/funding-operation-repository.js";
 import {
   canonicalJsonEqual,
@@ -34,38 +38,95 @@ function sameMoney(left: Money | null, right: Money | null): boolean {
   }
 }
 
-function planMoney(
-  value: Readonly<Record<string, JsonValue>> | null,
-): Money | null {
-  if (!value) return null;
-  const asset = value.asset;
-  const raw = value.raw;
-  if (
-    !asset ||
-    typeof asset !== "object" ||
-    Array.isArray(asset) ||
-    typeof raw !== "string"
-  ) {
-    return null;
+function usesVenuePreparation(
+  planKind: string,
+  source: Readonly<{
+    kind: string;
+    sourceLegs?: readonly Readonly<{
+      source: Readonly<{ kind: string }>;
+    }>[];
+  }>,
+): boolean {
+  return (
+    planKind === "venue_preparation" ||
+    source.kind === "venue_preparation" ||
+    source.sourceLegs?.some(
+      (leg) => leg.source.kind === "venue_preparation",
+    ) === true
+  );
+}
+
+type QuoteSourceAmount = FundingQuoteSummary["sourceAmounts"][number];
+
+function reservationAmount(reservation: FundingCommitReservation): Money {
+  return {
+    asset: {
+      networkId: reservation.networkId,
+      assetId: reservation.assetId,
+      decimals: reservation.assetDecimals,
+    },
+    raw: reservation.rawAmount,
+  };
+}
+
+function venuePreparationSourceAmounts(
+  plan: FundingCommitPlan,
+  safeLabel: string,
+  expectedInputCount: number,
+): readonly QuoteSourceAmount[] {
+  const reservations = plan.reservations.filter(
+    (reservation) =>
+      reservation.segmentOrdinal === null &&
+      reservation.mode === "subtract_available",
+  );
+  if (reservations.length === 0 || reservations.length !== expectedInputCount) {
+    throw new FundingPersistenceError(
+      "quote_mismatch",
+      "venue preparation quote lacks its exact frozen source inputs",
+    );
   }
-  const assetRecord = asset as Readonly<Record<string, JsonValue>>;
-  const networkId = assetRecord.networkId;
-  const assetId = assetRecord.assetId;
-  const decimals = assetRecord.decimals;
+  return reservations.map((reservation) => ({
+    safeLabel,
+    amount: reservationAmount(reservation),
+  }));
+}
+
+function fundingQuoteSourceAmounts(
+  input: Readonly<{
+    option: SourceOption;
+    plan: FundingCommitPlan;
+    plannedSource: Money | null;
+  }>,
+): readonly QuoteSourceAmount[] {
   if (
-    typeof networkId !== "string" ||
-    typeof assetId !== "string" ||
-    typeof decimals !== "number"
+    input.option.kind === "venue_preparation" &&
+    input.option.source.kind === "venue_preparation"
   ) {
-    return null;
+    return venuePreparationSourceAmounts(
+      input.plan,
+      input.option.safeLabel,
+      input.option.source.inputCount,
+    );
   }
-  return { asset: { networkId, assetId, decimals }, raw };
+  if (input.option.kind === "composite") {
+    return (input.option.sourceLegs ?? []).flatMap((leg) =>
+      leg.source.kind === "venue_preparation"
+        ? venuePreparationSourceAmounts(
+            input.plan,
+            leg.safeLabel,
+            leg.source.inputCount,
+          )
+        : [{ safeLabel: leg.safeLabel, amount: leg.sourceAmount }],
+    );
+  }
+  return input.plannedSource
+    ? [{ safeLabel: input.option.safeLabel, amount: input.plannedSource }]
+    : [];
 }
 
 export function classifyFundingQuoteConsent(
   input: Readonly<{
     purpose: string;
-    planKind?: string;
     ingress: boolean;
     sourceAmounts: readonly Readonly<{ amount: Money }>[];
     expectedDestination: Money;
@@ -74,12 +135,10 @@ export function classifyFundingQuoteConsent(
 ): FundingQuoteSummary["consentMode"] {
   if (input.ingress) return "external_action";
   const stableSource =
-    (input.sourceAmounts.length > 0 &&
-      input.sourceAmounts.every((source) =>
-        isRelayPinnedStableAsset(source.amount.asset),
-      )) ||
-    (input.planKind === "venue_preparation" &&
-      input.sourceAmounts.length === 0);
+    input.sourceAmounts.length > 0 &&
+    input.sourceAmounts.every((source) =>
+      isRelayPinnedStableAsset(source.amount.asset),
+    );
   const stableTradeRoute =
     input.purpose === "trade_shortfall" &&
     stableSource &&
@@ -190,8 +249,10 @@ export class FundingQuoteService {
         externalRecipientId,
       );
     }
-    const plannedSource = planMoney(storedPlan.operation.requestedSourceAmount);
-    const plannedDestination = planMoney(
+    const plannedSource = parseMoneyJson(
+      storedPlan.operation.requestedSourceAmount,
+    );
+    const plannedDestination = parseMoneyJson(
       storedPlan.operation.requestedDestinationAmount,
     );
     const sourceMatches = sameMoney(
@@ -213,7 +274,10 @@ export class FundingQuoteService {
         "quote request raw amounts differ from the selected source plan",
       );
     }
-    if (storedPlan.segments.length > 1) {
+    if (
+      storedPlan.segments.length > 1 &&
+      storedPlan.operation.planKind !== "composite_route"
+    ) {
       throw new FundingPersistenceError(
         "quote_mismatch",
         "staged or second-segment funding plans are forbidden",
@@ -252,10 +316,12 @@ export class FundingQuoteService {
         );
       }
       frozenTarget = destination.target;
-      frozenBinding =
-        storedPlan.operation.planKind === "venue_preparation"
-          ? destination.venueBinding
-          : destination.bindingOption;
+      frozenBinding = usesVenuePreparation(
+        storedPlan.operation.planKind,
+        selected.option,
+      )
+        ? destination.venueBinding
+        : destination.bindingOption;
     }
     const frozenFactMismatches = [
       !canonicalJsonEqual(storedPlan.operation.sourceSnapshot, selected.option)
@@ -351,20 +417,11 @@ export class FundingQuoteService {
         "stored plan lacks exact destination economics",
       );
     }
-    const sourceAmounts =
-      selected.option.kind === "composite"
-        ? (selected.option.sourceLegs ?? []).map((leg) => ({
-            safeLabel: leg.safeLabel,
-            amount: leg.sourceAmount,
-          }))
-        : plannedSource
-          ? [
-              {
-                safeLabel: selected.option.safeLabel,
-                amount: plannedSource,
-              },
-            ]
-          : [];
+    const sourceAmounts = fundingQuoteSourceAmounts({
+      option: selected.option,
+      plan,
+      plannedSource,
+    });
     return {
       quoteId: stored.id,
       liquidityProjectionId: planning.id,
@@ -379,7 +436,6 @@ export class FundingQuoteService {
           : plan.operation.experienceMode,
       consentMode: classifyFundingQuoteConsent({
         purpose: planning.request.purpose,
-        planKind: plan.operation.planKind,
         ingress: Boolean(selected.option.ingress),
         sourceAmounts,
         expectedDestination: expected,

@@ -19,6 +19,7 @@ import {
 } from "../../services/limitless-auth.js";
 import { isLimitlessPartnerHmacConfigured } from "../../services/limitless-client.js";
 import { fetchLimitlessOnchainSnapshot } from "../../services/limitless-onchain.js";
+import { fetchOpenOrderCollateralLocks } from "../../services/open-order-collateral.js";
 import {
   polymarketL2Request,
   type PolymarketL2Credentials,
@@ -97,7 +98,6 @@ import {
 const PREPARATION_TTL_MS = 45_000;
 const DESTINATION_INSPECTION_REUSE_MS = 30_000;
 const DESTINATION_INSPECTION_TIMEOUT_MS = 20_000;
-const PROFILE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1_000;
 const MAX_APPROVAL = (1n << 255n).toString();
 
 type RuntimeVenue = "limitless" | "polymarket";
@@ -842,10 +842,16 @@ async function reservedRawForLocation(input: {
   return /^(0|[1-9][0-9]*)$/.test(value) ? value : "0";
 }
 
-function availableRaw(observedRaw: string, reservedRaw: string): string {
+function availableRaw(
+  observedRaw: string,
+  lockedRaw: string,
+  reservedRaw: string,
+): string {
   const observed = BigInt(observedRaw);
+  const locked = BigInt(lockedRaw);
   const reserved = BigInt(reservedRaw);
-  return (observed > reserved ? observed - reserved : 0n).toString();
+  const unavailable = locked + reserved;
+  return (observed > unavailable ? observed - unavailable : 0n).toString();
 }
 
 function bindingOption(preparation: PreparationResult): VenueBindingOption {
@@ -876,6 +882,7 @@ function bindingOption(preparation: PreparationResult): VenueBindingOption {
 function frozenDestination(input: {
   preparation: PreparationResult;
   observedRaw: string;
+  lockedRaw: string;
   reservedRaw: string;
   destinationLocationPatternId: string;
   networkLabel: string;
@@ -884,7 +891,11 @@ function frozenDestination(input: {
 }): FrozenPreparationDestination {
   const binding = input.preparation.binding;
   const asset = binding.settlementLocation.asset;
-  const available = availableRaw(input.observedRaw, input.reservedRaw);
+  const available = availableRaw(
+    input.observedRaw,
+    input.lockedRaw,
+    input.reservedRaw,
+  );
   const expiresAt = input.preparation.expiresAt;
   const target: FundingTarget = {
     kind: "owned_location",
@@ -892,13 +903,14 @@ function frozenDestination(input: {
   };
   const spendability = {
     observedAmount: { asset, raw: input.observedRaw },
-    lockedRaw: "0",
+    lockedRaw: input.lockedRaw,
     reservedRaw: input.reservedRaw,
     submittedDebitRaw: "0",
     availableAmount: { asset, raw: available },
     revision: `spendability_${canonicalJsonHash({
       bindingId: binding.bindingId,
       observedRaw: input.observedRaw,
+      lockedRaw: input.lockedRaw,
       reservedRaw: input.reservedRaw,
       expiresAt,
     }).slice(0, 32)}`,
@@ -1413,6 +1425,7 @@ export class WalletPreparationRuntimeService {
       frozen: frozenDestination({
         preparation,
         observedRaw,
+        lockedRaw: "0",
         reservedRaw,
         destinationLocationPatternId: "polymarket-venue-cash-v1",
         networkLabel: "Polygon",
@@ -1458,10 +1471,7 @@ export class WalletPreparationRuntimeService {
       conditionalTokensAddress:
         fundingSidecarRuntimeConfig.limitlessConditionalTokensAddress,
     }).catch(() => null);
-    const [authContext, snapshot] = await Promise.all([
-      authContextPromise,
-      snapshotPromise,
-    ]);
+    const authContext = await authContextPromise;
     const credentialsInfo = authContext?.creds ?? null;
     const profile = credentialsInfo
       ? extractLimitlessPartnerAccountProfile(
@@ -1476,7 +1486,24 @@ export class WalletPreparationRuntimeService {
         sameAddress(profile.account, input.wallet.walletAddress)) &&
       isLimitlessPartnerHmacConfigured(),
     );
+    const venueLockedCollateralPromise = effectiveMarketClass?.startsWith(
+      "clob",
+    )
+      ? fetchOpenOrderCollateralLocks(this.db, {
+          userId: input.accountId,
+          polymarketWallets: [],
+          limitlessWallets: [input.wallet.walletAddress],
+        })
+      : Promise.resolve(null);
+    const [snapshot, venueLockedCollateral] = await Promise.all([
+      snapshotPromise,
+      venueLockedCollateralPromise,
+    ]);
     const cashRaw = snapshot?.usdcBalance.toString() ?? null;
+    const cashLockedRaw =
+      venueLockedCollateral?.limitless
+        .get(normalizeAddress(input.wallet.walletAddress))
+        ?.toString() ?? "0";
     const binding = bindingFor({
       accountId: input.accountId,
       venue: "limitless",
@@ -1512,7 +1539,6 @@ export class WalletPreparationRuntimeService {
       ),
       observedAt: credentialsInfo?.updatedAt ?? null,
       now,
-      maxAgeMs: PROFILE_MAX_AGE_MS,
     });
     const evidence: LimitlessRuntimeEvidence = {
       binding,
@@ -1534,7 +1560,7 @@ export class WalletPreparationRuntimeService {
       withdrawal: null,
       cashObserved: cashRaw != null,
       cashRaw,
-      cashLockedRaw: reservedRaw,
+      cashLockedRaw,
       clobAllowance:
         snapshot != null && snapshot.allowanceClob != null
           ? snapshot.allowanceClob > 0n
@@ -1563,6 +1589,7 @@ export class WalletPreparationRuntimeService {
         profileVerified: credentials.verified,
         profileId: profile?.id == null ? null : String(profile.id),
         cashRaw: cashRaw ?? "unknown",
+        cashLockedRaw,
         reservedRaw,
         marketRef: marketContext.evidence.safeMarketRef,
         marketAdapterRequired: Boolean(marketContext.adapterAddress),
@@ -1590,6 +1617,7 @@ export class WalletPreparationRuntimeService {
       frozen: frozenDestination({
         preparation,
         observedRaw,
+        lockedRaw: cashLockedRaw,
         reservedRaw,
         destinationLocationPatternId: "limitless-venue-cash-v1",
         networkLabel: "Base",
@@ -1885,5 +1913,9 @@ export class WalletPreparationRuntimeService {
     );
   }
 }
+
+export const walletPreparationRuntimeTestHooks = {
+  availableRaw,
+};
 
 export const RUNTIME_PREPARATION_MAX_APPROVAL_RAW = MAX_APPROVAL;

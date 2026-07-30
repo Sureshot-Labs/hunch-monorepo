@@ -323,7 +323,9 @@ export type SourceOptionLeg = Readonly<{
   safeLabel: string;
   source: Extract<
     FundingSourceRef,
-    Readonly<{ kind: "owned_location" | "external_ingress" }>
+    Readonly<{
+      kind: "owned_location" | "external_ingress" | "venue_preparation";
+    }>
   >;
   sourceAmount: Money;
   expectedDestination: Money;

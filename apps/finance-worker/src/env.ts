@@ -127,6 +127,10 @@ export const env = {
     readEnv("HUNCH_FINANCE_FUNDING_RECONCILIATION_MAX_ATTEMPTS"),
     20,
   ),
+  fundingReconciliationTerminalTimeoutSec: parsePositiveInt(
+    readEnv("HUNCH_FINANCE_FUNDING_RECONCILIATION_TERMINAL_TIMEOUT_SEC"),
+    90,
+  ),
   fundingReconciliationPoolSize: parsePositiveInt(
     readEnv("HUNCH_FINANCE_FUNDING_RECONCILIATION_POOL_SIZE"),
     4,

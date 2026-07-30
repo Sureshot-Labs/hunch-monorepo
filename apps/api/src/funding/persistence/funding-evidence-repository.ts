@@ -1,6 +1,7 @@
 import { tx, type Pool, type PoolClient } from "@hunch/infra";
 
 import type { JsonValue } from "../domain/types.js";
+import { canonicalJsonEqual } from "./canonical.js";
 import {
   consumeFundingReservationInTransaction,
   fetchFundingOperationForUser,
@@ -593,23 +594,12 @@ export async function startFundingStepAttemptForUserInTransaction(
 > {
   const { rows } = await client.query<
     FundingOperationStepDbRow & {
-      incomplete_prior_segment_count: string | number;
       operation_status: string;
     }
   >(
     `
         select
           ${operationStepColumns},
-          (
-            select count(*)
-            from funding_operation_segments prior_segment
-            join funding_operation_segments current_segment
-              on current_segment.id = step.segment_id
-             and current_segment.operation_id = step.operation_id
-            where prior_segment.operation_id = step.operation_id
-              and prior_segment.ordinal < current_segment.ordinal
-              and prior_segment.status <> 'succeeded'
-          ) as incomplete_prior_segment_count,
           operation.status as operation_status
         from funding_operation_steps step
         join funding_operations operation on operation.id = step.operation_id
@@ -650,12 +640,6 @@ export async function startFundingStepAttemptForUserInTransaction(
     throw new FundingPersistenceError(
       "invalid_state_transition",
       "funding operation step dependency is not complete",
-    );
-  }
-  if (Number(row.incomplete_prior_segment_count) > 0) {
-    throw new FundingPersistenceError(
-      "invalid_state_transition",
-      "a prior funding source leg has not settled",
     );
   }
   const attempt = await startFundingStepAttemptInTransaction(client, {
@@ -763,6 +747,27 @@ function stepStateForAttemptOutcome(
   return "cancelled";
 }
 
+function finalizedAttemptMatchesReport(
+  attempt: FundingStepAttempt,
+  input: Readonly<{
+    outcome: FundingStepAttemptOutcome;
+    broadcastMayHaveOccurred: boolean;
+    referenceKind: FundingStepAttempt["referenceKind"];
+    receiptRefLookupHmac: string | null;
+    lookupKeyVersion: number | null;
+    actualCosts: JsonRecord;
+  }>,
+): boolean {
+  return (
+    attempt.outcome === input.outcome &&
+    attempt.broadcastMayHaveOccurred === input.broadcastMayHaveOccurred &&
+    attempt.referenceKind === input.referenceKind &&
+    attempt.receiptRefLookupHmac === input.receiptRefLookupHmac &&
+    attempt.lookupKeyVersion === input.lookupKeyVersion &&
+    canonicalJsonEqual(attempt.actualCosts, input.actualCosts)
+  );
+}
+
 export async function finishFundingStepAttemptForUserInTransaction(
   client: PoolClient,
   input: Readonly<{
@@ -807,6 +812,34 @@ export async function finishFundingStepAttemptForUserInTransaction(
       "operation_not_found",
       "funding action attempt was not found for authenticated user",
     );
+  }
+  const priorAttemptResult = await client.query<FundingStepAttemptDbRow>(
+    `
+      select ${attemptColumns}
+      from funding_operation_step_attempts
+      where id = $1
+    `,
+    [input.attemptId],
+  );
+  const priorAttemptRow = priorAttemptResult.rows[0];
+  if (!priorAttemptRow) {
+    throw new FundingPersistenceError(
+      "operation_not_found",
+      "funding action attempt disappeared while recording its report",
+    );
+  }
+  const priorAttempt = mapAttempt(priorAttemptRow);
+  if (priorAttempt.outcome !== "started") {
+    if (!finalizedAttemptMatchesReport(priorAttempt, input)) {
+      throw new FundingPersistenceError(
+        "invalid_state_transition",
+        "funding attempt was already finalized with different evidence",
+      );
+    }
+    return {
+      attempt: priorAttempt,
+      stepState: stepStateForAttemptOutcome(priorAttempt.outcome),
+    };
   }
   if (
     scope.rows[0].step_state !== "planned" &&

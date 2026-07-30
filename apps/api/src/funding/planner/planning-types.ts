@@ -18,6 +18,16 @@ export type PlannedSourceOption = Readonly<{
   compositeEligible?: boolean;
 }>;
 
+/**
+ * Automatic composites may contain provider- or sponsor-executed steps, but
+ * must never silently absorb a step that requires a wallet confirmation.
+ */
+export function commitPlanRunsWithoutUserWalletAction(
+  plan: FundingCommitPlan,
+): boolean {
+  return plan.steps.every((step) => step.payerRequirement !== "user");
+}
+
 export type FundingPlanningSnapshot = Readonly<{
   request: FundingDiscoveryRequest;
   marketContext: MarketContextBinding | null;

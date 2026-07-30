@@ -12,7 +12,10 @@ import type {
 } from "../domain/types.js";
 import type { ProviderQuoteCandidate } from "../domain/contracts.js";
 import type { FundingRuntimePolicy } from "../policies/funding-policy.js";
-import type { PlannedSourceOption } from "./planning-types.js";
+import {
+  commitPlanRunsWithoutUserWalletAction,
+  type PlannedSourceOption,
+} from "./planning-types.js";
 import type { ResolvedRouteDestination } from "./destination-adapters.js";
 import { stableOpaqueId } from "../../account-value/canonical.js";
 import {
@@ -32,7 +35,6 @@ import {
   routeAmountBand,
   type RouteExperienceObservation,
 } from "./route-experience.js";
-import { buildCompositeRelaySourceOption } from "./composite-source-options.js";
 
 export const RELAY_QUOTE_TIMEOUT_MS = 5_000;
 export const TOTAL_FUNDING_PLANNER_TIMEOUT_MS = 7_000;
@@ -729,13 +731,7 @@ export class RelayFirstSourcePlanner {
       policy: input.policy,
     }).sources;
     if (selected.some((source) => source.option.selectable)) return selected;
-    const composite = buildCompositeRelaySourceOption({
-      candidates: selected,
-      requiredDestination: input.requiredAmount,
-      maximumFeeUsd: limits.maximumFeeUsd,
-      maximumFeeBps: limits.maximumFeeBps,
-    });
-    const result = composite ? [...selected, composite] : selected;
+    const result = selected;
     if (
       !result.some((source) => source.option.selectable) &&
       providerUnavailable
@@ -911,12 +907,14 @@ export function selectRelayFirstSourceOptions(
         throw new Error("source option assets differ from route policy");
       }
       let option = candidate.sourceOption;
-      const compositeEligible = option.selectable;
       const expected = option.expectedDestination;
       const minimum = option.minimumDestination;
       if (!expected || !minimum) {
         throw new Error("executable source option lacks exact route economics");
       }
+      const compositeEligible =
+        option.selectable &&
+        commitPlanRunsWithoutUserWalletAction(candidate.commitPlan);
       assertSameAsset(
         expected.asset,
         input.requiredDestination.asset,

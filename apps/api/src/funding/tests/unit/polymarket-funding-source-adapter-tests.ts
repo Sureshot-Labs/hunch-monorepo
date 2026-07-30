@@ -3,6 +3,7 @@
 import assert from "node:assert/strict";
 
 import type { AccountValueReadModel } from "../../../account-value/runtime-service.js";
+import type { FundingPurpose } from "../../domain/types.js";
 import { PRIVY_USER_AUTHORIZED_EVM_SPONSORSHIP_POLICY_ID } from "../../execution/sponsorship-policy.js";
 import { PolymarketFundingSourceAdapter } from "../../preparation/polymarket-funding-source-adapter.js";
 import { polymarketFundingEvidence } from "../../preparation/polymarket-funding-snapshot.js";
@@ -51,12 +52,16 @@ function component(
   } as const;
 }
 
-function account(includeSignerUsdce = true): AccountValueReadModel {
+function account(
+  includeSignerUsdce = true,
+  signerUsdceRaw = "1500000",
+  executionMode: "automatic" | "user_wallet" = "automatic",
+): AccountValueReadModel {
   const components = [
     component("deposit_usdce_12345678", DEPOSIT, USDCE, "1000000"),
     component("signer_pusd_12345678", SIGNER, PUSD, "1500000"),
     ...(includeSignerUsdce
-      ? [component("signer_usdce_12345678", SIGNER, USDCE, "1500000")]
+      ? [component("signer_usdce_12345678", SIGNER, USDCE, signerUsdceRaw)]
       : []),
   ];
   return {
@@ -74,19 +79,29 @@ function account(includeSignerUsdce = true): AccountValueReadModel {
           walletId: "wallet_pm_signer_12345678",
           networkId: "evm:137",
           address: SIGNER,
-          source: "embedded",
-          signingModes: ["web_client", "privy_authorization"],
-          serverWalletRef: "privy_pm_signer_12345678",
-          sponsorshipPolicyIds: [
-            PRIVY_USER_AUTHORIZED_EVM_SPONSORSHIP_POLICY_ID,
-          ],
+          source: executionMode === "automatic" ? "embedded" : "external",
+          signingModes:
+            executionMode === "automatic"
+              ? ["web_client", "privy_authorization"]
+              : ["web_client"],
+          serverWalletRef:
+            executionMode === "automatic" ? "privy_pm_signer_12345678" : null,
+          sponsorshipPolicyIds:
+            executionMode === "automatic"
+              ? [PRIVY_USER_AUTHORIZED_EVM_SPONSORSHIP_POLICY_ID]
+              : [],
         },
       ],
     },
   } as unknown as AccountValueReadModel;
 }
 
-function planningInput(fundingCapRaw = "4000000"): FundingSourcePlanningInput {
+function planningInput(
+  fundingCapRaw = "4000000",
+  requiredRaw = "4000000",
+  signerUsdceRaw = "1500000",
+  purpose: FundingPurpose = "trade_shortfall",
+): FundingSourcePlanningInput {
   const settlementLocation = {
     kind: "venue_account",
     locationId: "location_pm_deposit_12345678",
@@ -106,9 +121,10 @@ function planningInput(fundingCapRaw = "4000000"): FundingSourcePlanningInput {
   return {
     accountId: ACCOUNT_ID,
     request: {
-      purpose: "trade_shortfall",
-      requestedDestinationAmount: { asset: PUSD, raw: "4000000" },
-      confirmedSourceAmount: null,
+      purpose,
+      requestedDestinationAmount: { asset: PUSD, raw: requiredRaw },
+      confirmedSourceAmount:
+        purpose === "convert_asset" ? { asset: USDCE, raw: requiredRaw } : null,
       marketContextId: "market_context_pm_12345678",
       destinationOptionId: "destination_pm_12345678",
       withdrawalRecipientId: null,
@@ -129,6 +145,12 @@ function planningInput(fundingCapRaw = "4000000"): FundingSourcePlanningInput {
       bindingOption: {
         inspectionRevision: "inspection_pm_12345678",
       },
+      collateralValuation: {
+        unitPriceUsd: "1",
+        pricePolicyId: "exact-stable-policy-v1",
+        asOf: "2026-07-24T12:00:00.000Z",
+        expiresAt: EXPIRES_AT,
+      },
       spendability: { expiresAt: EXPIRES_AT },
       sourcePlanningEvidence: polymarketFundingEvidence({
         signerAddress: SIGNER,
@@ -137,13 +159,13 @@ function planningInput(fundingCapRaw = "4000000"): FundingSourcePlanningInput {
         depositLockedRaw: "500000",
         depositUsdceRaw: "1000000",
         signerPusdRaw: "1500000",
-        signerUsdceRaw: "1500000",
+        signerUsdceRaw,
         fundingCapRaw,
         routerAddress: ROUTER,
         routerNonceRaw: "7",
         depositRouterUsdceAllowanceRaw: "1000000",
         routerPusdAllowanceRaw: "1500000",
-        routerUsdceAllowanceRaw: "1500000",
+        routerUsdceAllowanceRaw: signerUsdceRaw,
         clobPusdRaw: "1500000",
         observedAt: "2026-07-24T12:00:00.000Z",
       }),
@@ -159,8 +181,10 @@ function planningInput(fundingCapRaw = "4000000"): FundingSourcePlanningInput {
       recipientAddress: null,
     },
     placement: {} as FundingSourcePlanningInput["placement"],
-    requiredAmount: { asset: PUSD, raw: "4000000" },
-    policy: {} as FundingSourcePlanningInput["policy"],
+    requiredAmount: { asset: PUSD, raw: requiredRaw },
+    policy: {
+      placement: { minimumDestinationUsd: "0.5" },
+    } as FundingSourcePlanningInput["policy"],
     policyRevision: "policy_pm_router_12345678",
     now: new Date("2026-07-24T12:00:00.000Z"),
   } as unknown as FundingSourcePlanningInput;
@@ -202,6 +226,89 @@ assert.deepEqual(await missingExactInput.list(planningInput()), []);
 
 assert.deepEqual(await adapter.list(planningInput("0")), []);
 
+const partialAdapter = new PolymarketFundingSourceAdapter(
+  account(true, "1069075"),
+  {
+    canonicalRouterAddress: ROUTER,
+    usdceAsset: USDCE,
+  },
+);
+const [partial] = await partialAdapter.list(
+  planningInput("5000000", "4227649", "1069075"),
+);
+assert.ok(partial);
+assert.equal(partial.option.selectable, false);
+assert.equal(partial.compositeEligible, true);
+assert.equal(partial.option.expectedDestination?.raw, "3569075");
+assert.equal(partial.option.minimumDestination?.raw, "3569075");
+assert.equal(
+  partial.commitPlan.operation.requestedDestinationAmount?.raw,
+  "3569075",
+);
+assert.deepEqual(
+  partial.commitPlan.reservations.map((entry) => entry.rawAmount),
+  ["1000000", "1500000", "1069075"],
+);
+
+const relayFloorAdapter = new PolymarketFundingSourceAdapter(
+  account(true, "1400000"),
+  {
+    canonicalRouterAddress: ROUTER,
+    usdceAsset: USDCE,
+  },
+);
+for (const purpose of [
+  "add_funds",
+  "trade_shortfall",
+  "manual_rebalance",
+] as const) {
+  const [relayFloorPartial] = await relayFloorAdapter.list(
+    planningInput("5000000", "4000000", "1400000", purpose),
+  );
+  assert.ok(relayFloorPartial);
+  assert.equal(relayFloorPartial.option.expectedDestination?.raw, "3500000");
+  assert.equal(relayFloorPartial.option.minimumDestination?.raw, "3500000");
+  assert.deepEqual(
+    relayFloorPartial.commitPlan.reservations.map((entry) => entry.rawAmount),
+    ["1000000", "1500000", "1000000"],
+  );
+}
+
+const userWalletPartialAdapter = new PolymarketFundingSourceAdapter(
+  account(true, "1069075", "user_wallet"),
+  {
+    canonicalRouterAddress: ROUTER,
+    usdceAsset: USDCE,
+  },
+);
+const [userWalletPartial] = await userWalletPartialAdapter.list(
+  planningInput("5000000", "4227649", "1069075"),
+);
+assert.ok(userWalletPartial);
+assert.equal(userWalletPartial.commitPlan.steps[0]?.payerRequirement, "user");
+assert.equal(userWalletPartial.compositeEligible, false);
+
+for (const purpose of ["convert_asset", "withdrawal"] as const) {
+  assert.deepEqual(
+    await adapter.list(planningInput("4000000", "4000000", "1500000", purpose)),
+    [],
+  );
+}
+for (const purpose of [
+  "add_funds",
+  "trade_shortfall",
+  "manual_rebalance",
+] as const) {
+  assert.equal(
+    (
+      await adapter.list(
+        planningInput("4000000", "4000000", "1500000", purpose),
+      )
+    )[0]?.option.amountMode,
+    "exact_output",
+  );
+}
+
 console.log(
-  "[polymarket-funding-source-adapter-tests] exact multi-input plan, sponsorship, fail-closed cap/allowance handling, and reservations passed",
+  "[polymarket-funding-source-adapter-tests] exact and maximum partial multi-input plans, purpose-compatible exact-output preparation, automatic-only composite eligibility, sponsorship, fail-closed cap/allowance handling, and reservations passed",
 );

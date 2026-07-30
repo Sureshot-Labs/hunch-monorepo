@@ -326,8 +326,7 @@ const sourceOptionLegSchema = z
     sourceLegId: opaqueIdSchema,
     safeLabel: z.string().trim().min(1).max(160),
     source: fundingSourceRefSchema.refine(
-      (source) =>
-        source.kind !== "composite" && source.kind !== "venue_preparation",
+      (source) => source.kind !== "composite",
       "a composite source leg must be independently executable",
     ),
     sourceAmount: moneySchema,

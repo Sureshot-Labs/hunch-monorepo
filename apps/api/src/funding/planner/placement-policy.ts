@@ -16,6 +16,19 @@ import {
   subtractFloor,
 } from "./money.js";
 
+export const MINIMUM_AUTOMATIC_TRADE_REFILL_USD = "0.5";
+
+export function minimumAutomaticTradeRefillUsd(
+  policy: Pick<FundingRuntimePolicy, "placement">,
+): string {
+  return compareUnsignedDecimals(
+    policy.placement.minimumDestinationUsd,
+    MINIMUM_AUTOMATIC_TRADE_REFILL_USD,
+  ) >= 0
+    ? policy.placement.minimumDestinationUsd
+    : MINIMUM_AUTOMATIC_TRADE_REFILL_USD;
+}
+
 export type PlacementPolicyInput = Readonly<{
   intent: FundingIntent;
   target: FundingTarget;

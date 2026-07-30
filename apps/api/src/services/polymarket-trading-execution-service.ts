@@ -4292,7 +4292,6 @@ export async function fetchPolymarketAccountRoute(input: {
         funderSource,
         funderUpdatedAt: credsInfo?.funderUpdatedAt ?? null,
         funderIsContract: isContract,
-        rpcUrl: env.polygonRpcUrl,
         negRiskAdapterAddress: negRiskAdapterAddress || null,
         ctfCollateralAdapterAddress: ctfCollateralAdapterAddress || null,
         negRiskCollateralAdapterAddress:

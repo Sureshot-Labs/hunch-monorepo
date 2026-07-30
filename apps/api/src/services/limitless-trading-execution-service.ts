@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import type { Pool } from "@hunch/infra";
 import { ethers } from "ethers";
 
 import { AuthService } from "../auth.js";
@@ -122,6 +123,10 @@ import {
   normalizeLimitlessMaybeRawAmount,
   normalizeLimitlessRawAmount,
 } from "./limitless-order-normalization.js";
+import {
+  fetchOpenOrderCollateralLocks,
+  normalizeCollateralWalletKey,
+} from "./open-order-collateral.js";
 import type {
   ApplyTradeEffectsInput,
   EnsureReadinessInput,
@@ -223,12 +228,57 @@ type LimitlessAccountQuery = {
   adapterSpender?: string | null;
   ammSpender?: string | null;
   clobSpender?: string | null;
+  marketSlug?: string | null;
   negRiskSpender?: string | null;
   refresh?: boolean | null;
   tokenId?: string | null;
 };
 
-type LimitlessAccountPayload = Record<string, unknown>;
+type LimitlessAllowanceSnapshot = {
+  allowance: string;
+  allowanceRaw: string;
+  spender: string;
+};
+
+type LimitlessAccountPayload = {
+  authMode?: string;
+  chainId: 8453;
+  conditionalTokens: {
+    contractAddress: string;
+    isApprovedForAll: Partial<
+      Record<"adapter" | "amm" | "clob" | "negRisk", boolean>
+    >;
+    tokenBalance?: {
+      balance: string;
+      balanceRaw: string;
+      tokenId: string;
+    };
+  };
+  hasCredentials: boolean;
+  ok: true;
+  profile: Awaited<ReturnType<typeof loadLimitlessProfileForWallet>> | null;
+  signer: string;
+  signerIsContract: boolean;
+  usdc: {
+    allowance: Partial<
+      Record<"amm" | "clob" | "negRisk", LimitlessAllowanceSnapshot>
+    >;
+    balance: string;
+    balanceRaw: string;
+    collateral?: {
+      availableBalance: string;
+      availableBalanceRaw: string;
+      currency: "USDC";
+      lockedBalance: string;
+      lockedBalanceRaw: string;
+      marketSlug: string;
+      orderCount: null;
+    };
+    decimals: 6;
+    tokenAddress: string;
+  };
+  venue: "limitless";
+};
 
 type LimitlessAccountCacheEntry = {
   expiresAt: number;
@@ -953,6 +1003,7 @@ function buildLimitlessAccountCacheKey(inputs: {
   clobSpender: string;
   credsUpdatedAt: string | null;
   includeSignerCode: boolean;
+  marketSlug: string;
   negRiskSpender: string;
   signer: string;
   tokenId: string;
@@ -966,6 +1017,7 @@ function buildLimitlessAccountCacheKey(inputs: {
     normalizeAddress(inputs.adapterSpender),
     normalizeAddress(inputs.ammSpender),
     inputs.includeSignerCode ? "signer-code" : "binding-owned-eoa",
+    inputs.marketSlug,
     inputs.tokenId,
     inputs.credsUpdatedAt ?? "none",
   ].join("|");
@@ -1664,6 +1716,7 @@ export async function syncLimitlessOrderHistoryRoute(input: {
 }
 
 export async function fetchLimitlessAccountRoute(input: {
+  db?: Pick<Pool, "query">;
   includeSignerCode?: boolean;
   log?: LimitlessRouteLogger | null;
   query: LimitlessAccountQuery;
@@ -1718,6 +1771,7 @@ export async function fetchLimitlessAccountRoute(input: {
   const adapterSpender = input.query.adapterSpender ?? null;
   const ammSpender = input.query.ammSpender ?? null;
   const tokenId = normalizeLimitlessRawTokenId(input.query.tokenId);
+  const marketSlug = input.query.marketSlug?.trim() || null;
   const includeSignerCode = input.includeSignerCode !== false;
 
   const cacheEnabled = !refresh && env.limitlessAccountCacheTtlMs > 0;
@@ -1729,6 +1783,7 @@ export async function fetchLimitlessAccountRoute(input: {
     adapterSpender: adapterSpender ?? "none",
     ammSpender: ammSpender ?? "none",
     includeSignerCode,
+    marketSlug: marketSlug ?? "none",
     tokenId: tokenId ?? "none",
     credsUpdatedAt: credsUpdatedAtValue,
   });
@@ -1739,8 +1794,20 @@ export async function fetchLimitlessAccountRoute(input: {
   }
   const inflight = limitlessAccountInflight.get(cacheKey);
   if (inflight) {
-    const payload = await inflight;
-    return { ok: true, payload };
+    try {
+      const payload = await inflight;
+      return { ok: true, payload };
+    } catch (error) {
+      input.log?.error?.(
+        { error, userId: input.userId, signer },
+        "Failed to fetch shared Limitless account snapshot",
+      );
+      return {
+        ok: false,
+        statusCode: 502,
+        payload: { error: "Failed to fetch Limitless account snapshot" },
+      };
+    }
   }
 
   if (hasCredentials && authContext) {
@@ -1757,42 +1824,50 @@ export async function fetchLimitlessAccountRoute(input: {
   try {
     const conditionalTokensAddress = env.limitlessConditionalTokensAddress;
     const computePromise = (async (): Promise<LimitlessAccountPayload> => {
-      const [code, snapshot, tokenBalanceMap, liveProfile] = await Promise.all([
-        includeSignerCode
-          ? fetchEvmCode({
-              rpcUrl: env.baseRpcUrl,
-              timeoutMs: env.baseRpcTimeoutMs,
-              address: signer,
-            })
-          : Promise.resolve("0x"),
-        fetchLimitlessOnchainSnapshot({
-          rpcUrl: env.baseRpcUrl,
-          timeoutMs: env.baseRpcTimeoutMs,
-          owner: signer,
-          clobAddress: clobSpender,
-          negRiskAddress: negRiskSpender,
-          adapterAddress: adapterSpender,
-          ammAddress: ammSpender,
-          conditionalTokensAddress,
-        }),
-        tokenId
-          ? fetchErc1155BalancesByOwner({
-              rpcUrl: env.baseRpcUrl,
-              timeoutMs: env.baseRpcTimeoutMs,
-              contractAddress: conditionalTokensAddress,
-              owner: signer,
-              tokenIds: [tokenId],
-            })
-          : Promise.resolve(null),
-        hasCredentials && authContext
-          ? loadLimitlessProfileForWallet({
-              walletAddress: signer,
-              authContext,
-              additionalData: creds?.additionalData ?? null,
-              baseProfile: verifiedProfileBase,
-            })
-          : Promise.resolve(null),
-      ]);
+      const [code, snapshot, tokenBalanceMap, liveProfile, collateralLocks] =
+        await Promise.all([
+          includeSignerCode
+            ? fetchEvmCode({
+                rpcUrl: env.baseRpcUrl,
+                timeoutMs: env.baseRpcTimeoutMs,
+                address: signer,
+              })
+            : Promise.resolve("0x"),
+          fetchLimitlessOnchainSnapshot({
+            rpcUrl: env.baseRpcUrl,
+            timeoutMs: env.baseRpcTimeoutMs,
+            owner: signer,
+            clobAddress: clobSpender,
+            negRiskAddress: negRiskSpender,
+            adapterAddress: adapterSpender,
+            ammAddress: ammSpender,
+            conditionalTokensAddress,
+          }),
+          tokenId
+            ? fetchErc1155BalancesByOwner({
+                rpcUrl: env.baseRpcUrl,
+                timeoutMs: env.baseRpcTimeoutMs,
+                contractAddress: conditionalTokensAddress,
+                owner: signer,
+                tokenIds: [tokenId],
+              })
+            : Promise.resolve(null),
+          hasCredentials && authContext
+            ? loadLimitlessProfileForWallet({
+                walletAddress: signer,
+                authContext,
+                additionalData: creds?.additionalData ?? null,
+                baseProfile: verifiedProfileBase,
+              })
+            : Promise.resolve(null),
+          marketSlug && input.db
+            ? fetchOpenOrderCollateralLocks(input.db, {
+                userId: input.userId,
+                polymarketWallets: [],
+                limitlessWallets: [signer],
+              })
+            : Promise.resolve(null),
+        ]);
 
       const usdcBalance = snapshot.usdcBalance;
       const allowanceClob = snapshot.allowanceClob;
@@ -1803,6 +1878,18 @@ export async function fetchLimitlessAccountRoute(input: {
           ? (tokenBalanceMap.get(tokenId) ?? 0n)
           : null;
       const isContract = typeof code === "string" && code.length > 2;
+      const lockedCollateralRaw =
+        collateralLocks == null
+          ? null
+          : (collateralLocks.limitless.get(
+              normalizeCollateralWalletKey(signer),
+            ) ?? 0n);
+      const availableCollateralRaw =
+        lockedCollateralRaw == null
+          ? null
+          : usdcBalance > lockedCollateralRaw
+            ? usdcBalance - lockedCollateralRaw
+            : 0n;
 
       return {
         ok: true,
@@ -1810,12 +1897,29 @@ export async function fetchLimitlessAccountRoute(input: {
         chainId: 8453,
         signer,
         signerIsContract: isContract,
-        rpcUrl: env.baseRpcUrl,
         usdc: {
           tokenAddress: env.limitlessUsdcAddress,
           decimals: 6,
           balance: ethers.formatUnits(usdcBalance, 6),
           balanceRaw: usdcBalance.toString(),
+          ...(marketSlug &&
+          lockedCollateralRaw != null &&
+          availableCollateralRaw != null
+            ? {
+                collateral: {
+                  marketSlug,
+                  availableBalance: ethers.formatUnits(
+                    availableCollateralRaw,
+                    6,
+                  ),
+                  availableBalanceRaw: availableCollateralRaw.toString(),
+                  lockedBalance: ethers.formatUnits(lockedCollateralRaw, 6),
+                  lockedBalanceRaw: lockedCollateralRaw.toString(),
+                  orderCount: null,
+                  currency: "USDC",
+                },
+              }
+            : {}),
           allowance: {
             ...(clobSpender
               ? {

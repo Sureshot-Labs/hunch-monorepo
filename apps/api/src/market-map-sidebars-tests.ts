@@ -116,6 +116,15 @@ async function insertUnifiedEvent(params: {
       makeToken(`slug-${params.eventId}`),
     ],
   );
+  if ((params.venue ?? "polymarket") === "polymarket") {
+    await pool.query(
+      `
+        insert into polymarket_events (id, title, raw)
+        values ($1, $2, '{}'::jsonb)
+      `,
+      [params.venueEventId, params.title],
+    );
+  }
 }
 
 async function insertUnifiedMarket(params: {
@@ -126,6 +135,9 @@ async function insertUnifiedMarket(params: {
   title: string;
   volume24h: number;
 }): Promise<void> {
+  const tokenYes = makeToken(`yes-${params.marketId}`);
+  const tokenNo = makeToken(`no-${params.marketId}`);
+  const venue = params.venue ?? "polymarket";
   await pool.query(
     `
       insert into unified_markets (
@@ -168,12 +180,81 @@ async function insertUnifiedMarket(params: {
       params.eventId,
       params.title,
       params.volume24h,
-      makeToken(`yes-${params.marketId}`),
-      makeToken(`no-${params.marketId}`),
+      tokenYes,
+      tokenNo,
       makeToken(`slug-${params.marketId}`),
-      params.venue ?? "polymarket",
+      venue,
     ],
   );
+  await pool.query(
+    `
+      insert into unified_tokens (token_id, venue, market_id, side)
+      values
+        ($1, $4, $3, 'YES'),
+        ($2, $4, $3, 'NO')
+    `,
+    [tokenYes, tokenNo, params.marketId, venue],
+  );
+  await pool.query(
+    `
+      insert into unified_market_tokens (
+        token_id,
+        venue,
+        market_id,
+        outcome_side
+      )
+      values
+        ($1, $4, $3, 'YES'),
+        ($2, $4, $3, 'NO')
+    `,
+    [tokenYes, tokenNo, params.marketId, venue],
+  );
+  await pool.query(
+    `
+      insert into unified_token_top_latest (
+        token_id,
+        venue,
+        ts,
+        best_bid,
+        best_ask,
+        mid,
+        spread,
+        updated_at
+      )
+      values
+        ($1, $3, now(), 0.45, 0.55, 0.5, 0.1, now()),
+        ($2, $3, now(), 0.45, 0.55, 0.5, 0.1, now())
+    `,
+    [tokenYes, tokenNo, venue],
+  );
+  if (venue === "polymarket") {
+    await pool.query(
+      `
+        insert into polymarket_markets (
+          id,
+          event_id,
+          question,
+          accepting_orders,
+          active,
+          closed,
+          archived,
+          raw
+        )
+        select
+          $1,
+          e.venue_event_id,
+          $2,
+          true,
+          true,
+          false,
+          false,
+          '{}'::jsonb
+        from unified_events e
+        where e.id = $3
+      `,
+      [params.venueMarketId, params.title, params.eventId],
+    );
+  }
 }
 
 async function insertEventActivityMetric(params: {
@@ -443,6 +524,16 @@ async function main() {
   const marketIds = seeds.map(
     (seed) => `mm-sidebars-market-${seed.key}-${suiteId}`,
   );
+  const polymarketEventIds = eventIds
+    .filter(
+      (_, index) => (seeds[index]?.venue ?? "polymarket") === "polymarket",
+    )
+    .map((eventId) => `venue-${eventId}`);
+  const polymarketMarketIds = marketIds
+    .filter(
+      (_, index) => (seeds[index]?.venue ?? "polymarket") === "polymarket",
+    )
+    .map((marketId) => `venue-${marketId}`);
   const policy = await insertRuntimePolicy(pool, {
     policyKey: "market_map",
     effectiveAt: new Date(),
@@ -746,6 +837,33 @@ async function main() {
     await pool.query(
       "delete from unified_event_activity_snapshots_1h where event_id = any($1::text[])",
       [eventIds],
+    );
+    await pool.query(
+      `
+        delete from unified_token_top_latest
+        where token_id in (
+          select token_id
+          from unified_market_tokens
+          where market_id = any($1::text[])
+        )
+      `,
+      [marketIds],
+    );
+    await pool.query(
+      "delete from unified_market_tokens where market_id = any($1::text[])",
+      [marketIds],
+    );
+    await pool.query(
+      "delete from unified_tokens where market_id = any($1::text[])",
+      [marketIds],
+    );
+    await pool.query(
+      "delete from polymarket_markets where id = any($1::text[])",
+      [polymarketMarketIds],
+    );
+    await pool.query(
+      "delete from polymarket_events where id = any($1::text[])",
+      [polymarketEventIds],
     );
     await pool.query("delete from unified_markets where id = any($1::text[])", [
       marketIds,

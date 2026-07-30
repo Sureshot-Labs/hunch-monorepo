@@ -16,7 +16,10 @@ import type {
   FundingStepReceiptEvidence,
   FundingStepReceiptTarget,
 } from "../../persistence/funding-step-receipt-repository.js";
-import { shouldIgnoreFundingStepReceiptUpdate } from "../../persistence/funding-step-receipt-repository.js";
+import {
+  fundingStepStateForReceipt,
+  shouldIgnoreFundingStepReceiptUpdate,
+} from "../../persistence/funding-step-receipt-repository.js";
 
 const evmAction = {
   kind: "evm_transaction" as const,
@@ -521,6 +524,101 @@ const correctedFinalizedReceipt: FundingStepReceiptEvidence = {
   failureCode: null,
   evidence: {},
 };
+const secondReference = `0x${"34".repeat(32)}`;
+const secondTarget: FundingStepReceiptTarget = {
+  ...target,
+  stepId: "00000000-0000-4000-8000-000000000005",
+  segmentId: "00000000-0000-4000-8000-000000000006",
+  attemptId: "00000000-0000-4000-8000-000000000007",
+  receiptRefCiphertext: `encrypted:${secondReference}`,
+  receiptRefLookupHmac: `fingerprint:${secondReference}`,
+};
+let concurrentInspections = 0;
+let peakConcurrentInspections = 0;
+let releaseInspections: (() => void) | null = null;
+const inspectionsReleased = new Promise<void>((resolve) => {
+  releaseInspections = resolve;
+});
+const parallelDriver = new FundingStepReceiptReconciliationDriver(
+  {
+    keyVersion: 1,
+    encrypt: (value) => `encrypted:${value}`,
+    decrypt: (value) => value.slice("encrypted:".length),
+    fingerprint: (value) => `fingerprint:${value}`,
+  },
+  {
+    listTargets: async () => [target, secondTarget],
+    inspectEvm: async () => {
+      concurrentInspections += 1;
+      peakConcurrentInspections = Math.max(
+        peakConcurrentInspections,
+        concurrentInspections,
+      );
+      if (concurrentInspections === 2) releaseInspections?.();
+      await inspectionsReleased;
+      concurrentInspections -= 1;
+      return correctedFinalizedReceipt;
+    },
+    applyEvidence: async (_pool, input) => ({
+      operationId: input.operationId,
+      stepId: input.stepId,
+      attemptId: input.attemptId,
+      networkId: input.networkId,
+      ...input.receipt,
+      firstSeenAt: input.now ?? new Date(),
+      observedAt: input.now ?? new Date(),
+      finalizedAt: input.now ?? new Date(),
+      reorgedAt: null,
+    }),
+  },
+);
+await parallelDriver.pollOperation({} as never, target.operationId);
+assert.equal(peakConcurrentInspections, 2);
+
+const mixedAppliedStepIds: string[] = [];
+const mixedDriver = new FundingStepReceiptReconciliationDriver(
+  {
+    keyVersion: 1,
+    encrypt: (value) => `encrypted:${value}`,
+    decrypt: (value) => value.slice("encrypted:".length),
+    fingerprint: (value) => `fingerprint:${value}`,
+  },
+  {
+    listTargets: async () => [target, secondTarget],
+    inspectEvm: async (receiptTarget) => {
+      if (receiptTarget.stepId === secondTarget.stepId) {
+        throw new Error("simulated provider failure");
+      }
+      return correctedFinalizedReceipt;
+    },
+    applyEvidence: async (_pool, input) => {
+      mixedAppliedStepIds.push(input.stepId);
+      return {
+        operationId: input.operationId,
+        stepId: input.stepId,
+        attemptId: input.attemptId,
+        networkId: input.networkId,
+        ...input.receipt,
+        firstSeenAt: input.now ?? new Date(),
+        observedAt: input.now ?? new Date(),
+        finalizedAt: input.now ?? new Date(),
+        reorgedAt: null,
+      };
+    },
+  },
+);
+await assert.rejects(
+  mixedDriver.pollOperation({} as never, target.operationId),
+  (error: unknown) =>
+    error instanceof AggregateError &&
+    error.errors.some(
+      nested =>
+        nested instanceof Error &&
+        nested.message === "simulated provider failure",
+    ),
+);
+assert.deepEqual(mixedAppliedStepIds, [target.stepId]);
+
 assert.equal(
   shouldIgnoreFundingStepReceiptUpdate("mismatch", correctedFinalizedReceipt),
   false,
@@ -542,6 +640,34 @@ assert.equal(
 assert.equal(
   shouldIgnoreFundingStepReceiptUpdate("failed", correctedFinalizedReceipt),
   true,
+);
+assert.equal(
+  fundingStepStateForReceipt("finalized", "succeeded", "venue_preparation"),
+  "succeeded",
+);
+assert.equal(
+  fundingStepStateForReceipt(
+    "finalized",
+    "recovery_required",
+    "venue_preparation",
+  ),
+  "recovery_required",
+);
+assert.equal(
+  fundingStepStateForReceipt("finalized", "submitted", "venue_preparation"),
+  "submitted",
+);
+assert.equal(
+  fundingStepStateForReceipt(
+    "finalized",
+    "reconcile_required",
+    "venue_preparation",
+  ),
+  "submitted",
+);
+assert.equal(
+  fundingStepStateForReceipt("finalized", "submitted", "transaction"),
+  "succeeded",
 );
 
 console.log(

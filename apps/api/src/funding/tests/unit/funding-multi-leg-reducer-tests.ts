@@ -82,7 +82,7 @@ const segments = [
 ];
 const step = (
   id: string,
-  segmentId: string,
+  segmentId: string | null,
   state:
     | "planned"
     | "action_required"
@@ -94,14 +94,15 @@ const step = (
     | "cancelled",
 ) => ({ id, segment_id: segmentId, state });
 const destinationObservation = (
-  segmentId: string,
+  segmentId: string | null,
   rawAmount: string,
   eventIndex: string,
+  kind: FundingObservationRow["kind"] = "destination_credit",
 ): FundingObservationRow => ({
   id: `00000000-0000-4000-8000-${eventIndex.padStart(12, "0")}`,
   operationId: operation.id,
   segmentId,
-  kind: "destination_credit",
+  kind,
   networkId: destinationAsset.networkId,
   assetId: destinationAsset.assetId,
   txHash: `0x${eventIndex.padStart(64, "0")}`,
@@ -146,6 +147,60 @@ assert.deepEqual(
     step("00000000-0000-4000-8000-000000000022", segments[1].id, "succeeded"),
   ]).target,
   { status: "ready", stage: "ready_for_consumer" },
+);
+
+const exactPreparedOperation = {
+  ...operation,
+  id: "00000000-0000-4000-8000-000000000031",
+  requestedDestinationAmount: money("4227649"),
+  supportMetadata: {
+    containsVenuePreparation: true,
+  },
+} satisfies FundingOperationRow;
+const exactRelaySegment = {
+  ...segments[0],
+  id: "00000000-0000-4000-8000-000000000032",
+  quoted_min_output: money("658574"),
+};
+const exactRelayCredit = {
+  ...destinationObservation(exactRelaySegment.id, "658574", "31"),
+  operationId: exactPreparedOperation.id,
+};
+const exactPreparationReadiness = {
+  ...destinationObservation(null, "3569075", "32", "venue_readiness"),
+  operationId: exactPreparedOperation.id,
+};
+assert.deepEqual(
+  deriveTargetState(
+    exactPreparedOperation,
+    [exactRelayCredit, exactPreparationReadiness],
+    [exactRelaySegment],
+    [
+      step(
+        "00000000-0000-4000-8000-000000000033",
+        exactRelaySegment.id,
+        "succeeded",
+      ),
+      step("00000000-0000-4000-8000-000000000034", null, "succeeded"),
+    ],
+  ).target,
+  { status: "ready", stage: "ready_for_consumer" },
+);
+assert.deepEqual(
+  deriveTargetState(
+    exactPreparedOperation,
+    [exactRelayCredit],
+    [exactRelaySegment],
+    [
+      step(
+        "00000000-0000-4000-8000-000000000033",
+        exactRelaySegment.id,
+        "succeeded",
+      ),
+      step("00000000-0000-4000-8000-000000000034", null, "submitted"),
+    ],
+  ).target,
+  { status: "in_progress", stage: "routing" },
 );
 assert.deepEqual(
   deriveTargetState(

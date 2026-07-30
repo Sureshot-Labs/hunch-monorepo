@@ -47,14 +47,24 @@ import {
   PRIVY_USER_AUTHORIZED_EVM_SPONSORSHIP_POLICY_ID,
   resolveActionSponsorship,
 } from "../execution/sponsorship-policy.js";
-import { FundingPlannerError, sameAsset } from "./money.js";
+import {
+  FundingPlannerError,
+  assertSameAsset,
+  rawAmount,
+  sameAsset,
+} from "./money.js";
+import { buildCompositeSourceOption } from "./composite-source-options.js";
 import {
   RelayFirstSourcePlanner,
+  effectiveFundingEconomicsLimits,
   type RelayEligibleSourceFact,
   type RelayPlanningQuote,
 } from "./source-options.js";
 import type { ResolvedRouteDestination } from "./destination-adapters.js";
-import type { PlannedSourceOption } from "./planning-types.js";
+import {
+  commitPlanRunsWithoutUserWalletAction,
+  type PlannedSourceOption,
+} from "./planning-types.js";
 import type {
   FundingSourceAdapter,
   FundingSourcePlanningInput,
@@ -763,6 +773,110 @@ export function buildPolymarketPreRouteHandoffSteps(input: {
   ];
 }
 
+function maximumVenuePreparationContributionRaw(
+  sources: readonly PlannedSourceOption[],
+  requiredAmount: Money,
+): bigint {
+  return sources.reduce((maximum, source) => {
+    const minimum = source.option.minimumDestination;
+    if (
+      !source.compositeEligible ||
+      source.option.source.kind !== "venue_preparation" ||
+      !commitPlanRunsWithoutUserWalletAction(source.commitPlan) ||
+      !minimum
+    ) {
+      return maximum;
+    }
+    assertSameAsset(
+      minimum.asset,
+      requiredAmount.asset,
+      "venue preparation contribution",
+    );
+    const contribution = rawAmount(minimum.raw);
+    return contribution > 0n &&
+      contribution < rawAmount(requiredAmount.raw) &&
+      contribution > maximum
+      ? contribution
+      : maximum;
+  }, 0n);
+}
+
+export function remainingFundingRequirementAfterVenuePreparation(
+  sources: readonly PlannedSourceOption[],
+  requiredAmount: Money,
+): Money | null {
+  const requiredRaw = rawAmount(requiredAmount.raw);
+  const fullyCovered = sources.some((source) => {
+    const minimum = source.option.minimumDestination;
+    if (
+      !source.option.selectable ||
+      source.option.source.kind !== "venue_preparation" ||
+      !minimum ||
+      !commitPlanRunsWithoutUserWalletAction(source.commitPlan)
+    ) {
+      return false;
+    }
+    assertSameAsset(
+      minimum.asset,
+      requiredAmount.asset,
+      "venue preparation coverage",
+    );
+    return rawAmount(minimum.raw) >= requiredRaw;
+  });
+  if (fullyCovered) return null;
+  const contributedRaw = maximumVenuePreparationContributionRaw(
+    sources,
+    requiredAmount,
+  );
+  return contributedRaw >= requiredRaw
+    ? null
+    : {
+        asset: requiredAmount.asset,
+        raw: (requiredRaw - contributedRaw).toString(),
+      };
+}
+
+export function restrictResidualSourcesToCompositeContribution(
+  sources: readonly PlannedSourceOption[],
+  input: Readonly<{
+    plannedRequirement: Money;
+    fullRequirement: Money;
+  }>,
+): readonly PlannedSourceOption[] {
+  assertSameAsset(
+    input.plannedRequirement.asset,
+    input.fullRequirement.asset,
+    "residual funding requirement",
+  );
+  if (
+    rawAmount(input.plannedRequirement.raw) >=
+    rawAmount(input.fullRequirement.raw)
+  ) {
+    return sources;
+  }
+  return sources.map((source) => {
+    if (!source.option.selectable) return source;
+    return {
+      ...source,
+      option: {
+        ...source.option,
+        experienceMode: "unavailable" as const,
+        recommended: false,
+        selectable: false,
+        reasonCodes: [
+          ...new Set<FundingReasonCode>([
+            ...source.option.reasonCodes,
+            "minimum_output_not_met",
+          ]),
+        ],
+      },
+      compositeEligible:
+        source.compositeEligible === true &&
+        commitPlanRunsWithoutUserWalletAction(source.commitPlan),
+    };
+  });
+}
+
 export class ProductionFundingSourcePlanner {
   constructor(
     private readonly db: Pool,
@@ -773,11 +887,37 @@ export class ProductionFundingSourcePlanner {
   async list(
     input: FundingSourcePlanningInput,
   ): Promise<readonly PlannedSourceOption[]> {
-    const [adapted, relay] = await Promise.all([
-      listAdaptedFundingSources(this.sourceAdapters, input),
-      this.relayPlanner().list(input),
-    ]);
-    return [...adapted, ...relay];
+    const adapted = await listAdaptedFundingSources(this.sourceAdapters, input);
+    const relayRequirement = remainingFundingRequirementAfterVenuePreparation(
+      adapted,
+      input.requiredAmount,
+    );
+    const relay = relayRequirement
+      ? restrictResidualSourcesToCompositeContribution(
+          await this.relayPlanner().list({
+            ...input,
+            requiredAmount: relayRequirement,
+          }),
+          {
+            plannedRequirement: relayRequirement,
+            fullRequirement: input.requiredAmount,
+          },
+        )
+      : [];
+    const candidates = [...adapted, ...relay];
+    const limits = effectiveFundingEconomicsLimits(input.policy, {
+      maximumFeeUsd: input.request.maxFeeUsd,
+      maximumSlippageBps: input.request.maxSlippageBps,
+    });
+    const composite = buildCompositeSourceOption({
+      candidates,
+      requiredDestination: input.requiredAmount,
+      destinationUnitPriceUsd:
+        input.destinationFacts?.collateralValuation?.unitPriceUsd ?? null,
+      maximumFeeUsd: limits.maximumFeeUsd,
+      maximumFeeBps: limits.maximumFeeBps,
+    });
+    return composite ? [...candidates, composite] : candidates;
   }
 
   async listBlockingReasonCodes(

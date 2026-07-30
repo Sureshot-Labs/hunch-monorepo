@@ -1,13 +1,17 @@
 import type { AccountValueReadModel } from "../../account-value/runtime-service.js";
 import { stableOpaqueId } from "../../account-value/canonical.js";
-import { multiplyRawByUnitPrice } from "../../account-value/decimal.js";
 import {
-  buildPolymarketFundingPlan,
+  multiplyRawByUnitPrice,
+  rawForUsdCeil,
+} from "../../account-value/decimal.js";
+import {
+  buildMaximumPolymarketFundingPlan,
   PolymarketFundingPlanError,
 } from "../../services/polymarket-funding-router.js";
 import type {
   AssetLocation,
   AssetRef,
+  FundingPurpose,
   JsonValue,
   SourceOption,
   WalletExecutionProfile,
@@ -15,12 +19,16 @@ import type {
 import { resolveActionSponsorship } from "../execution/sponsorship-policy.js";
 import { canonicalJsonHash } from "../persistence/canonical.js";
 import { sameAsset } from "../planner/money.js";
+import { minimumAutomaticTradeRefillUsd } from "../planner/placement-policy.js";
 import type {
   FundingSourceAdapter,
   FundingSourcePlanningInput,
 } from "../planner/source-adapter.js";
 import { fundingSidecarRuntimeConfig } from "../runtime/sidecar-runtime-config.js";
-import type { PlannedSourceOption } from "../planner/planning-types.js";
+import {
+  commitPlanRunsWithoutUserWalletAction,
+  type PlannedSourceOption,
+} from "../planner/planning-types.js";
 import { buildPolymarketFundingFollowupAction } from "./polymarket-funding-followup.js";
 import {
   parsePolymarketFundingEvidence,
@@ -51,6 +59,33 @@ function profileForExactWallet(input: {
         profile.networkId === input.networkId &&
         profile.address.toLowerCase() === input.address.toLowerCase(),
     ) ?? null
+  );
+}
+
+function supportsExactOutputVenuePreparation(purpose: FundingPurpose): boolean {
+  switch (purpose) {
+    case "add_funds":
+    case "trade_shortfall":
+    case "manual_rebalance":
+      return true;
+    case "convert_asset":
+    case "withdrawal":
+      return false;
+  }
+}
+
+function minimumAutomaticRelayDestinationRaw(
+  input: FundingSourcePlanningInput,
+): bigint | null {
+  const unitPriceUsd =
+    input.destinationFacts?.collateralValuation?.unitPriceUsd;
+  if (!unitPriceUsd) return null;
+  return BigInt(
+    rawForUsdCeil({
+      usd: minimumAutomaticTradeRefillUsd(input.policy),
+      decimals: input.requiredAmount.asset.decimals,
+      unitPriceUsd,
+    }),
   );
 }
 
@@ -126,9 +161,10 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
       facts?.sourcePlanningEvidence ?? null,
     );
     if (
-      input.request.purpose === "withdrawal" ||
+      !supportsExactOutputVenuePreparation(input.request.purpose) ||
       facts?.option.venueId !== "polymarket" ||
       facts.target.kind !== "owned_location" ||
+      !facts.collateralValuation ||
       !snapshot ||
       snapshot.routerAddress.toLowerCase() !==
         this.config.canonicalRouterAddress?.toLowerCase() ||
@@ -150,18 +186,13 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
     ) {
       return null;
     }
-    const depositAvailableRaw =
-      BigInt(snapshot.depositPusdRaw) > BigInt(snapshot.depositLockedRaw)
-        ? BigInt(snapshot.depositPusdRaw) - BigInt(snapshot.depositLockedRaw)
-        : 0n;
-    let plan;
-    try {
-      plan = buildPolymarketFundingPlan({
+    const buildPlan = (maximumFundingRaw: bigint) =>
+      buildMaximumPolymarketFundingPlan({
         signer: snapshot.signerAddress,
         depositWallet: snapshot.depositWallet,
         routerAddress: snapshot.routerAddress,
         routerNonce: BigInt(snapshot.routerNonceRaw),
-        requiredRaw: depositAvailableRaw + BigInt(input.requiredAmount.raw),
+        maximumFundingRaw,
         depositPusdRaw: BigInt(snapshot.depositPusdRaw),
         depositLockedRaw: BigInt(snapshot.depositLockedRaw),
         depositUsdceRaw: BigInt(snapshot.depositUsdceRaw),
@@ -175,6 +206,18 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
         routerUsdceAllowanceRaw: BigInt(snapshot.routerUsdceAllowanceRaw),
         fundingCapRaw: BigInt(snapshot.fundingCapRaw),
       });
+    const requiredRaw = BigInt(input.requiredAmount.raw);
+    let plan;
+    try {
+      plan = buildPlan(requiredRaw);
+      if (plan && BigInt(plan.totalAmountRaw) < requiredRaw) {
+        const minimumRelayRaw = minimumAutomaticRelayDestinationRaw(input);
+        if (minimumRelayRaw == null) return null;
+        const maximumPreparationRaw =
+          requiredRaw > minimumRelayRaw ? requiredRaw - minimumRelayRaw : 0n;
+        plan =
+          maximumPreparationRaw > 0n ? buildPlan(maximumPreparationRaw) : null;
+      }
     } catch (error) {
       // A stale/missing balance, cap, or allowance makes this exact source
       // unavailable; it must not abort discovery of independent sources such
@@ -182,13 +225,14 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
       if (error instanceof PolymarketFundingPlanError) return null;
       throw error;
     }
-    if (
-      !plan ||
-      plan.totalAmountRaw !== input.requiredAmount.raw ||
-      plan.routerNonce !== snapshot.routerNonceRaw
-    ) {
+    if (!plan || plan.routerNonce !== snapshot.routerNonceRaw) {
       return null;
     }
+    const plannedDestinationAmount = {
+      asset: input.requiredAmount.asset,
+      raw: plan.totalAmountRaw,
+    };
+    const fullyFunded = plan.totalAmountRaw === input.requiredAmount.raw;
     const usdceAsset = this.config.usdceAsset;
     const exactInputs = [
       {
@@ -258,12 +302,12 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
       source,
       amountMode: "exact_output",
       maximumSourceRaw: plan.totalAmountRaw,
-      expectedDestination: input.requiredAmount,
-      minimumDestination: input.requiredAmount,
+      expectedDestination: plannedDestinationAmount,
+      minimumDestination: plannedDestinationAmount,
       estimatedUsd: multiplyRawByUnitPrice({
-        raw: input.requiredAmount.raw,
+        raw: plannedDestinationAmount.raw,
         decimals: input.requiredAmount.asset.decimals,
-        unitPriceUsd: "1",
+        unitPriceUsd: facts.collateralValuation.unitPriceUsd,
       }),
       fees: [],
       eta: { minSeconds: 5, maxSeconds: 90 },
@@ -281,86 +325,90 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
         },
       ],
       expiresAt: facts.spendability.expiresAt,
-      recommended: true,
-      selectable: true,
-      reasonCodes: [],
+      recommended: fullyFunded,
+      selectable: fullyFunded,
+      reasonCodes: fullyFunded ? [] : ["minimum_output_not_met"],
+    };
+    const commitPlan: PlannedSourceOption["commitPlan"] = {
+      operation: {
+        purpose: input.request.purpose,
+        initialState: {
+          status: "in_progress",
+          stage: "committed",
+        },
+        experienceMode: "prepare_first",
+        planKind: "venue_preparation",
+        sourceSnapshot: jsonRecord(option),
+        destinationTargetSnapshot: jsonRecord(input.destination.target),
+        externalRecipientId: null,
+        venueId: "polymarket",
+        marketId: input.marketContext?.marketId ?? null,
+        marketContextSnapshot: input.marketContext
+          ? jsonRecord(input.marketContext)
+          : null,
+        venueBindingSnapshot: jsonRecord(facts.venueBinding),
+        walletExecutionSnapshot: jsonRecord(profile),
+        placementSnapshot: jsonRecord(input.placement),
+        requestedSourceAmount: null,
+        requestedDestinationAmount: jsonRecord(plannedDestinationAmount),
+        supportMetadata: {
+          preparationKind: "polymarket_funding_router",
+          adapterId: this.adapterId,
+          venueBindingOptionId: facts.bindingOption.venueBindingOptionId,
+          fundingPlan: jsonRecord(plan),
+          before: {
+            routerNonceRaw: snapshot.routerNonceRaw,
+            depositPusdRaw: snapshot.depositPusdRaw,
+            clobPusdRaw: snapshot.clobPusdRaw,
+            observedAt: snapshot.observedAt,
+          },
+        },
+      },
+      segments: [],
+      steps: [
+        {
+          ordinal: 0,
+          segmentOrdinal: null,
+          stepKind: "venue_preparation",
+          state: "action_required",
+          actionFingerprint: canonicalJsonHash(action),
+          executorId: "wallet_profile_evm_v1",
+          payerRequirement: sponsorship.payerRequirement,
+          dependsOnOrdinal: null,
+          normalizedAction: jsonRecord(action),
+          actionValidationResult: {
+            valid: true,
+            signerAddress: profile.address,
+            canonicalRouterAddress: snapshot.routerAddress,
+            expectedNonceRaw: plan.routerNonce,
+            expectedTotalAmountRaw: plan.totalAmountRaw,
+            fundingPlanHash: canonicalJsonHash(plan),
+            sponsorshipPolicyId: sponsorship.policyId,
+            signingMode: sponsorship.signingMode,
+          },
+        },
+      ],
+      reservations: resolvedInputs.map((entry) => {
+        return {
+          segmentOrdinal: null,
+          componentId: entry.resolved.component.componentId,
+          locationId: entry.resolved.component.location.locationId,
+          networkId: entry.asset.networkId,
+          assetId: entry.asset.assetId,
+          assetDecimals: entry.asset.decimals,
+          rawAmount: entry.rawAmount,
+          mode: "subtract_available" as const,
+          expiresAt: facts.spendability.expiresAt,
+        };
+      }),
     };
     return {
       option,
       routeId: null,
       providerId: null,
-      commitPlan: {
-        operation: {
-          purpose: input.request.purpose,
-          initialState: {
-            status: "in_progress",
-            stage: "committed",
-          },
-          experienceMode: "prepare_first",
-          planKind: "venue_preparation",
-          sourceSnapshot: jsonRecord(option),
-          destinationTargetSnapshot: jsonRecord(input.destination.target),
-          externalRecipientId: null,
-          venueId: "polymarket",
-          marketId: input.marketContext?.marketId ?? null,
-          marketContextSnapshot: input.marketContext
-            ? jsonRecord(input.marketContext)
-            : null,
-          venueBindingSnapshot: jsonRecord(facts.venueBinding),
-          walletExecutionSnapshot: jsonRecord(profile),
-          placementSnapshot: jsonRecord(input.placement),
-          requestedSourceAmount: null,
-          requestedDestinationAmount: jsonRecord(input.requiredAmount),
-          supportMetadata: {
-            preparationKind: "polymarket_funding_router",
-            adapterId: this.adapterId,
-            fundingPlan: jsonRecord(plan),
-            before: {
-              routerNonceRaw: snapshot.routerNonceRaw,
-              depositPusdRaw: snapshot.depositPusdRaw,
-              clobPusdRaw: snapshot.clobPusdRaw,
-              observedAt: snapshot.observedAt,
-            },
-          },
-        },
-        segments: [],
-        steps: [
-          {
-            ordinal: 0,
-            segmentOrdinal: null,
-            stepKind: "venue_preparation",
-            state: "action_required",
-            actionFingerprint: canonicalJsonHash(action),
-            executorId: "wallet_profile_evm_v1",
-            payerRequirement: sponsorship.payerRequirement,
-            dependsOnOrdinal: null,
-            normalizedAction: jsonRecord(action),
-            actionValidationResult: {
-              valid: true,
-              signerAddress: profile.address,
-              canonicalRouterAddress: snapshot.routerAddress,
-              expectedNonceRaw: plan.routerNonce,
-              expectedTotalAmountRaw: plan.totalAmountRaw,
-              fundingPlanHash: canonicalJsonHash(plan),
-              sponsorshipPolicyId: sponsorship.policyId,
-              signingMode: sponsorship.signingMode,
-            },
-          },
-        ],
-        reservations: resolvedInputs.map((entry) => {
-          return {
-            segmentOrdinal: null,
-            componentId: entry.resolved.component.componentId,
-            locationId: entry.resolved.component.location.locationId,
-            networkId: entry.asset.networkId,
-            assetId: entry.asset.assetId,
-            assetDecimals: entry.asset.decimals,
-            rawAmount: entry.rawAmount,
-            mode: "subtract_available" as const,
-            expiresAt: facts.spendability.expiresAt,
-          };
-        }),
-      },
+      commitPlan,
+      compositeEligible:
+        !fullyFunded && commitPlanRunsWithoutUserWalletAction(commitPlan),
     };
   }
 }

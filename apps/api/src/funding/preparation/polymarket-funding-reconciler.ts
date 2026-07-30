@@ -37,7 +37,7 @@ async function observePolymarketFundingRuntimeLazy(
 
 export type PolymarketFundingPostconditionTarget = Readonly<{
   operationId: string;
-  planKind: "venue_preparation" | "direct_external_handoff";
+  planKind: "venue_preparation" | "direct_external_handoff" | "composite_route";
   userId: string;
   stepId: string;
   attemptId: string;
@@ -231,7 +231,8 @@ async function loadTarget(
       where operation.id = $1
         and operation.plan_kind in (
           'venue_preparation',
-          'direct_external_handoff'
+          'direct_external_handoff',
+          'composite_route'
         )
         and operation.support_metadata->>'preparationKind'
           = 'polymarket_funding_router'
@@ -295,22 +296,25 @@ async function persistSatisfiedPostcondition(
     now: Date;
   }>,
 ): Promise<void> {
-  await allocateFundingObservationInTransaction(client, {
+  const observationBase = {
     operationId: input.target.operationId,
     segmentId: null,
-    kind: "venue_readiness",
     networkId: input.target.destinationAsset.networkId,
     assetId: input.target.destinationAsset.assetId,
     txHash: input.transactionHash,
-    eventIndex: "venue-readiness",
     fromAddress: input.target.signerAddress,
     toAddress: input.target.plan.depositWallet,
     rawAmount: input.target.plan.totalAmountRaw,
     observedAt: new Date(input.after.observedAt),
     ledgerHeight: input.target.ledgerHeight,
     blockHash: input.target.blockHash,
-    finalityStatus: "finalized",
+    finalityStatus: "finalized" as const,
     finalizedAt: input.target.finalizedAt,
+  };
+  await allocateFundingObservationInTransaction(client, {
+    ...observationBase,
+    kind: "venue_readiness",
+    eventIndex: "venue-readiness",
     metadata: {
       receiptAttemptId: input.target.attemptId,
       expectedDepositPusdRaw: input.expectedDepositPusdRaw,
@@ -323,21 +327,9 @@ async function persistSatisfiedPostcondition(
   });
   if (input.target.planKind === "direct_external_handoff") {
     await allocateFundingObservationInTransaction(client, {
-      operationId: input.target.operationId,
-      segmentId: null,
+      ...observationBase,
       kind: "destination_credit",
-      networkId: input.target.destinationAsset.networkId,
-      assetId: input.target.destinationAsset.assetId,
-      txHash: input.transactionHash,
       eventIndex: "converted-destination-credit",
-      fromAddress: input.target.signerAddress,
-      toAddress: input.target.plan.depositWallet,
-      rawAmount: input.target.plan.totalAmountRaw,
-      observedAt: new Date(input.after.observedAt),
-      ledgerHeight: input.target.ledgerHeight,
-      blockHash: input.target.blockHash,
-      finalityStatus: "finalized",
-      finalizedAt: input.target.finalizedAt,
       metadata: {
         completionKind: "committed_venue_preparation",
         receiptAttemptId: input.target.attemptId,

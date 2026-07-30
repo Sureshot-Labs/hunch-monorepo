@@ -1146,11 +1146,11 @@ async function main() {
     assert.equal(signaledEvent?.topSignal?.targetMarket?.yesBid, 0.45);
     assert.equal(signaledEvent?.topSignal?.targetMarket?.yesAsk, 0.55);
     assert.ok(
-      Math.abs((signaledEvent?.topSignal?.targetMarket?.noBid ?? 0) - 0.55) <
+      Math.abs((signaledEvent?.topSignal?.targetMarket?.noBid ?? 0) - 0.45) <
         1e-9,
     );
     assert.ok(
-      Math.abs((signaledEvent?.topSignal?.targetMarket?.noAsk ?? 0) - 0.45) <
+      Math.abs((signaledEvent?.topSignal?.targetMarket?.noAsk ?? 0) - 0.55) <
         1e-9,
     );
 

@@ -11,6 +11,7 @@ import {
   type RuntimeVenueInspectionInput,
   WalletPreparationRuntimeService,
   type WalletPreparationRuntimeDriver,
+  walletPreparationRuntimeTestHooks,
 } from "../../preparation/runtime-service.js";
 
 const NOW = new Date("2026-07-29T00:00:00.000Z");
@@ -177,4 +178,23 @@ await test("one destination discovery resolves and shares one immutable market c
   assert.ok(contexts.every(Boolean));
   assert.equal(new Set(contexts).size, 1);
   assert.equal(contexts[0]?.market, market);
+});
+
+await test("venue locks and internal reservations are both excluded from destination availability", () => {
+  assert.equal(
+    walletPreparationRuntimeTestHooks.availableRaw(
+      "12500000",
+      "5000000",
+      "500000",
+    ),
+    "7000000",
+  );
+  assert.equal(
+    walletPreparationRuntimeTestHooks.availableRaw(
+      "1000000",
+      "900000",
+      "200000",
+    ),
+    "0",
+  );
 });

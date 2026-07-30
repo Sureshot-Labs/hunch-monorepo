@@ -83,6 +83,21 @@ type FundingDestinationQuery = Readonly<{
   controllerWalletRef?: string | null;
 }>;
 
+const DEFAULT_FUNDING_REQUESTS_PER_MINUTE = 30;
+const ACTIVE_FUNDING_READ_REQUESTS_PER_MINUTE = 180;
+
+const FUNDING_REQUEST_LIMITS_BY_ENDPOINT: Readonly<Record<string, number>> = {
+  operation: ACTIVE_FUNDING_READ_REQUESTS_PER_MINUTE,
+  "receive-session-read": ACTIVE_FUNDING_READ_REQUESTS_PER_MINUTE,
+};
+
+export function fundingRequestsPerMinute(endpoint: string): number {
+  return (
+    FUNDING_REQUEST_LIMITS_BY_ENDPOINT[endpoint] ??
+    DEFAULT_FUNDING_REQUESTS_PER_MINUTE
+  );
+}
+
 export type FundingRouteDependencies = Readonly<{
   authenticate: preHandlerHookHandler;
   rateLimit(userId: string, endpoint: string): Promise<boolean>;
@@ -1137,9 +1152,14 @@ export const fundingRoutes: FastifyPluginAsync = async (app) => {
   registerFundingRoutes(app, {
     authenticate: createAuthMiddleware(),
     rateLimit: (userId, endpoint) =>
-      checkRateLimit(`funding:${endpoint}:${userId}`, 30, 60_000, {
-        onError: "fail_closed",
-      }),
+      checkRateLimit(
+        `funding:${endpoint}:${userId}`,
+        fundingRequestsPerMinute(endpoint),
+        60_000,
+        {
+          onError: "fail_closed",
+        },
+      ),
     capabilities: () => runtime.capabilities(),
     destinations: (userId, query) => runtime.destinations(userId, query),
     registerWithdrawalDestination: (userId, request) =>

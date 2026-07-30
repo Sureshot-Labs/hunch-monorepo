@@ -829,9 +829,66 @@ function evmRpcUrl(chainId: number): string | null {
   return null;
 }
 
+type EvmReceiptInspectionContext = Readonly<{
+  providersByChainId: Map<number, ethers.JsonRpcProvider>;
+  latestBlockNumbersByChainId: Map<number, Promise<number>>;
+  canonicalBlocksByChainAndHeight: Map<string, Promise<ethers.Block | null>>;
+}>;
+
+function createEvmReceiptInspectionContext(): EvmReceiptInspectionContext {
+  return {
+    providersByChainId: new Map(),
+    latestBlockNumbersByChainId: new Map(),
+    canonicalBlocksByChainAndHeight: new Map(),
+  };
+}
+
+function evmProviderForInspection(
+  context: EvmReceiptInspectionContext,
+  chainId: number,
+  rpcUrl: string,
+): ethers.JsonRpcProvider {
+  const existing = context.providersByChainId.get(chainId);
+  if (existing) return existing;
+  const provider = new ethers.JsonRpcProvider(rpcUrl, chainId, {
+    staticNetwork: true,
+    batchMaxCount: 100,
+    batchStallTime: 5,
+  });
+  context.providersByChainId.set(chainId, provider);
+  return provider;
+}
+
+function latestEvmBlockNumber(
+  context: EvmReceiptInspectionContext,
+  chainId: number,
+  provider: ethers.JsonRpcProvider,
+): Promise<number> {
+  const existing = context.latestBlockNumbersByChainId.get(chainId);
+  if (existing) return existing;
+  const pending = provider.getBlockNumber();
+  context.latestBlockNumbersByChainId.set(chainId, pending);
+  return pending;
+}
+
+function canonicalEvmBlock(
+  context: EvmReceiptInspectionContext,
+  chainId: number,
+  blockNumber: number,
+  provider: ethers.JsonRpcProvider,
+): Promise<ethers.Block | null> {
+  const key = `${chainId}:${blockNumber}`;
+  const existing = context.canonicalBlocksByChainAndHeight.get(key);
+  if (existing) return existing;
+  const pending = provider.getBlock(blockNumber);
+  context.canonicalBlocksByChainAndHeight.set(key, pending);
+  return pending;
+}
+
 async function inspectEvmTarget(
   target: FundingStepReceiptTarget,
   reference: string,
+  context = createEvmReceiptInspectionContext(),
 ): Promise<FundingStepReceiptEvidence> {
   if (
     target.action.kind !== "evm_transaction" &&
@@ -862,19 +919,21 @@ async function inspectEvmTarget(
   ) {
     throw new Error("committed EVM receipt inspection context is incomplete");
   }
-  const provider = new ethers.JsonRpcProvider(rpcUrl, chainId, {
-    staticNetwork: true,
-  });
+  const provider = evmProviderForInspection(context, chainId, rpcUrl);
   const [transaction, receipt] = await Promise.all([
     provider.getTransaction(reference),
     provider.getTransactionReceipt(reference),
   ]);
   let receiptRecord: EvmReceiptRecord | null = null;
   if (receipt) {
-    const [confirmations, canonicalBlock] = await Promise.all([
-      receipt.confirmations(),
-      provider.getBlock(receipt.blockNumber),
+    const [latestBlockNumber, canonicalBlock] = await Promise.all([
+      latestEvmBlockNumber(context, chainId, provider),
+      canonicalEvmBlock(context, chainId, receipt.blockNumber, provider),
     ]);
+    const confirmations = Math.max(
+      0,
+      latestBlockNumber - receipt.blockNumber + 1,
+    );
     receiptRecord = {
       succeeded: receipt.status === 1,
       blockNumber: receipt.blockNumber,
@@ -1096,44 +1155,82 @@ export class FundingStepReceiptReconciliationDriver {
     const targets = await (
       this.dependencies.listTargets ?? listFundingStepReceiptTargets
     )(pool, operationId);
-    let receiptsFinalized = 0;
-    for (const target of targets) {
-      if (target.lookupKeyVersion !== this.referenceCodec.keyVersion) {
-        throw new Error(
-          "funding transaction reference key version is unavailable",
-        );
-      }
-      const reference = this.referenceCodec.decrypt(
-        target.receiptRefCiphertext,
-      );
-      if (
-        this.referenceCodec.fingerprint(reference) !==
-        target.receiptRefLookupHmac
-      ) {
-        throw new Error("funding transaction reference integrity check failed");
-      }
-      const inspected =
-        target.action.kind === "evm_transaction" ||
-        target.action.kind === "external_handoff"
-          ? await (this.dependencies.inspectEvm ?? inspectEvmTarget)(
-              target,
-              reference,
-            )
-          : await (this.dependencies.inspectSvm ?? inspectSvmTarget)(
-              target,
-              reference,
+    const inspectionContext = createEvmReceiptInspectionContext();
+    let inspectionResults: ReadonlyArray<
+      PromiseSettledResult<
+        Readonly<{
+          target: FundingStepReceiptTarget;
+          inspected: FundingStepReceiptEvidence;
+        }>
+      >
+    >;
+    try {
+      inspectionResults = await Promise.allSettled(
+        targets.map(async (target) => {
+          if (target.lookupKeyVersion !== this.referenceCodec.keyVersion) {
+            throw new Error(
+              "funding transaction reference key version is unavailable",
             );
-      await (
-        this.dependencies.applyEvidence ?? applyFundingStepReceiptEvidence
-      )(pool, {
-        operationId: target.operationId,
-        stepId: target.stepId,
-        attemptId: target.attemptId,
-        networkId: target.networkId,
-        receipt: inspected,
-        now,
-      });
-      if (inspected.status === "finalized") receiptsFinalized += 1;
+          }
+          const reference = this.referenceCodec.decrypt(
+            target.receiptRefCiphertext,
+          );
+          if (
+            this.referenceCodec.fingerprint(reference) !==
+            target.receiptRefLookupHmac
+          ) {
+            throw new Error(
+              "funding transaction reference integrity check failed",
+            );
+          }
+          const inspected =
+            target.action.kind === "evm_transaction" ||
+            target.action.kind === "external_handoff"
+              ? await (this.dependencies.inspectEvm
+                  ? this.dependencies.inspectEvm(target, reference)
+                  : inspectEvmTarget(target, reference, inspectionContext))
+              : await (this.dependencies.inspectSvm ?? inspectSvmTarget)(
+                  target,
+                  reference,
+                );
+          return { target, inspected };
+        }),
+      );
+    } finally {
+      for (const provider of inspectionContext.providersByChainId.values()) {
+        provider.destroy();
+      }
+    }
+
+    let receiptsFinalized = 0;
+    const failures: unknown[] = [];
+    for (const result of inspectionResults) {
+      if (result.status === "rejected") {
+        failures.push(result.reason);
+        continue;
+      }
+      const { target, inspected } = result.value;
+      try {
+        await (
+          this.dependencies.applyEvidence ?? applyFundingStepReceiptEvidence
+        )(pool, {
+          operationId: target.operationId,
+          stepId: target.stepId,
+          attemptId: target.attemptId,
+          networkId: target.networkId,
+          receipt: inspected,
+          now,
+        });
+        if (inspected.status === "finalized") receiptsFinalized += 1;
+      } catch (error) {
+        failures.push(error);
+      }
+    }
+    if (failures.length > 0) {
+      throw new AggregateError(
+        failures,
+        "one or more funding receipt inspections failed",
+      );
     }
     return { receiptsPolled: targets.length, receiptsFinalized };
   }

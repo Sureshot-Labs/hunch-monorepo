@@ -4,6 +4,7 @@ import type { Pool } from "@hunch/infra";
 
 import {
   observeOwnedRouteDestination,
+  ownedRouteProviderCredits,
   ownedRouteSatisfiedAmount,
   OwnedRouteDestinationObserver,
   type OwnedRouteDestinationTarget,
@@ -11,7 +12,21 @@ import {
 
 const target: OwnedRouteDestinationTarget = {
   operationId: "00000000-0000-4000-8000-000000000001",
-  segmentId: "00000000-0000-4000-8000-000000000002",
+  providerSegments: [
+    {
+      segmentId: "00000000-0000-4000-8000-000000000002",
+      ordinal: 0,
+      asset: {
+        networkId: "evm:8453",
+        assetId: "0x0000000000000000000000000000000000000005",
+        decimals: 6,
+      },
+      expectedRaw: "1010102",
+      minimumRaw: "1000000",
+      providerRawStatus: "pending",
+      providerDestinationReferenceCount: 0,
+    },
+  ],
   userId: "00000000-0000-4000-8000-000000000003",
   purpose: "trade_shortfall",
   marketId: "limitless:258338",
@@ -24,10 +39,9 @@ const target: OwnedRouteDestinationTarget = {
     decimals: 6,
   },
   requestedRaw: "1000000",
+  observationThresholdRaw: "1000000",
   baselineRaw: "0",
   baselineRevision: "baseline-revision",
-  providerRawStatus: "pending",
-  providerDestinationReferenceCount: 0,
   operationVersion: 4,
   operationState: {
     status: "in_progress",
@@ -75,6 +89,49 @@ assert.equal(
   "1000000",
 );
 
+const primaryProviderSegment = target.providerSegments[0];
+assert.ok(primaryProviderSegment);
+assert.deepEqual(ownedRouteProviderCredits(target), [
+  {
+    segmentId: primaryProviderSegment.segmentId,
+    ordinal: 0,
+    rawAmount: "1000000",
+    providerRawStatus: "pending",
+    providerDestinationReferenceCount: 0,
+  },
+]);
+assert.deepEqual(
+  ownedRouteProviderCredits({
+    observationThresholdRaw: "1750000",
+    providerSegments: [
+      primaryProviderSegment,
+      {
+        ...primaryProviderSegment,
+        segmentId: "00000000-0000-4000-8000-000000000004",
+        ordinal: 1,
+        expectedRaw: "800000",
+        minimumRaw: "750000",
+      },
+    ],
+  }),
+  [
+    {
+      segmentId: primaryProviderSegment.segmentId,
+      ordinal: 0,
+      rawAmount: "1000000",
+      providerRawStatus: "pending",
+      providerDestinationReferenceCount: 0,
+    },
+    {
+      segmentId: "00000000-0000-4000-8000-000000000004",
+      ordinal: 1,
+      rawAmount: "750000",
+      providerRawStatus: "pending",
+      providerDestinationReferenceCount: 0,
+    },
+  ],
+);
+
 let persisted = 0;
 const observer = new OwnedRouteDestinationObserver({
   loadTarget: async () => target,
@@ -84,9 +141,18 @@ const observer = new OwnedRouteDestinationObserver({
     observedAt: "2026-07-27T01:58:00.000Z",
   }),
   persist: async (_pool, input) => {
-    assert.equal(input.target.segmentId, target.segmentId);
-    assert.equal(input.target.providerRawStatus, "pending");
-    assert.equal(input.target.providerDestinationReferenceCount, 0);
+    assert.equal(
+      input.target.providerSegments[0]?.segmentId,
+      target.providerSegments[0]?.segmentId,
+    );
+    assert.equal(
+      input.target.providerSegments[0]?.providerRawStatus,
+      "pending",
+    );
+    assert.equal(
+      input.target.providerSegments[0]?.providerDestinationReferenceCount,
+      0,
+    );
     assert.equal(input.observation.observedRaw, "1010102");
     persisted += 1;
     return true;
@@ -128,8 +194,39 @@ assert.deepEqual(
         inspectedCompetitionQuery = true;
         assert.match(sql, /providerUpdatedAt/);
         assert.match(sql, /destinationObservation,baselineAsOf/);
+        assert.match(sql, /destination,spendability,asOf/);
+        assert.match(sql, /coalesce\(/);
+        assert.match(sql, /destination_baseline\.baseline_as_of/);
         assert.match(sql, /destinationTransactionReferenceCount/);
+        assert.doesNotMatch(sql, /competing\.updated_at >=/);
         assert.match(sql, /to_timestamp/);
+        assert.match(sql, /competing_preparation\.kind = 'venue_readiness'/);
+        assert.match(sql, /competing_credit\.kind = 'destination_credit'/);
+        assert.match(sql, /'reconcile_required'/);
+        assert.match(sql, /'recovery_required'/);
+        assert.match(
+          sql,
+          /competing\.status = 'recovery_required'[\s\S]+relayStatusCategory[\s\S]+awaiting_source/,
+        );
+        assert.match(sql, /originTransactionReferenceCount/);
+        assert.match(sql, /exists \(\s+select 1[\s\S]+competing_segment/);
+        assert.match(
+          sql,
+          /then to_timestamp\([\s\S]+providerUpdatedAt[\s\S]+>\s+destination_baseline\.baseline_as_of/,
+        );
+        assert.doesNotMatch(sql, /and not \(\s+case/);
+        const preparationAfterBaseline = sql.indexOf(
+          "competing_preparation.observed_at >",
+        );
+        const preparationAtOrBeforeBaseline = sql.indexOf(
+          "competing_preparation.observed_at <=",
+        );
+        assert.ok(preparationAfterBaseline >= 0);
+        assert.ok(
+          preparationAtOrBeforeBaseline > preparationAfterBaseline,
+          "a post-baseline preparation observation must take precedence over historical readiness",
+        );
+        assert.doesNotMatch(sql, /competing_segment\.ordinal = 0/);
         assert.doesNotMatch(sql, /\n\s+and segment\.raw_status = 'success'/);
         return { rows: [] };
       },

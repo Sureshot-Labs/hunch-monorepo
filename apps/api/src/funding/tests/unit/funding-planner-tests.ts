@@ -70,6 +70,11 @@ const BASE_USDC: AssetRef = {
   assetId: "0x0000000000000000000000000000000000000002",
   decimals: 6,
 };
+const POLYGON_OTHER_TOKEN: AssetRef = {
+  networkId: "evm:137",
+  assetId: "0x0000000000000000000000000000000000000003",
+  decimals: 18,
+};
 
 async function test(name: string, run: () => void | Promise<void>) {
   await run();
@@ -105,13 +110,12 @@ await test("quote consent reuses Buy only for pinned stable collateral", () => {
   assert.equal(
     classifyFundingQuoteConsent({
       purpose: "trade_shortfall",
-      planKind: "venue_preparation",
       ingress: false,
       sourceAmounts: [],
       expectedDestination: { asset: polygonPusd, raw: "1000000" },
       minimumDestination: { asset: polygonPusd, raw: "1000000" },
     }),
-    "trade_intent",
+    "explicit_economic_review",
   );
   assert.equal(
     classifyFundingQuoteConsent({
@@ -416,6 +420,66 @@ function plannedSource(requiredRaw: string): PlannedSourceOption {
     commitPlan: commitPlan(requiredRaw, option),
     routeId: "relay_polygon_pusd",
     providerId: "relay",
+  };
+}
+
+function plannedVenuePreparationSource(
+  requiredRaw: string,
+  payerRequirement: "user" | "privy_sponsor",
+): PlannedSourceOption {
+  const option = sourceOption(requiredRaw, {
+    sourceOptionId: `source_preparation_${payerRequirement}_12345678`,
+    kind: "venue_preparation",
+    safeLabel: "Prepare trading balance",
+    source: {
+      kind: "venue_preparation",
+      venueId: "fixture_venue",
+      venueBindingId: "binding_fixture_12345678",
+      inputCount: 1,
+    },
+    experienceMode: "prepare_first",
+  });
+  const plan = commitPlan(requiredRaw, option);
+  return {
+    option,
+    commitPlan: {
+      ...plan,
+      operation: {
+        ...plan.operation,
+        experienceMode: "prepare_first",
+        planKind: "venue_preparation",
+      },
+      segments: [],
+      steps: [
+        {
+          ordinal: 0,
+          segmentOrdinal: null,
+          stepKind: "venue_preparation",
+          state: "action_required",
+          actionFingerprint: `fingerprint_${payerRequirement}_12345678`,
+          executorId: "wallet_profile_evm_v1",
+          payerRequirement,
+          dependsOnOrdinal: null,
+          normalizedAction: { kind: "evm_transaction" },
+          actionValidationResult: { validatorId: "fixture_preparation_v1" },
+        },
+      ],
+      reservations: [
+        {
+          segmentOrdinal: null,
+          componentId: "component_preparation_12345678",
+          locationId: "location_preparation_12345678",
+          networkId: POLYGON_PUSD.networkId,
+          assetId: POLYGON_PUSD.assetId,
+          assetDecimals: POLYGON_PUSD.decimals,
+          rawAmount: requiredRaw,
+          mode: "subtract_available",
+          expiresAt: option.expiresAt,
+        },
+      ],
+    },
+    routeId: null,
+    providerId: null,
   };
 }
 
@@ -940,6 +1004,23 @@ await test("Relay-first source selection rejects another provider and second seg
   });
   assert.equal(exactInput.sources[0]?.option.selectable, true);
   assert.deepEqual(exactInput.sources[0]?.option.reasonCodes, []);
+
+  const partialExactOutput = selectRelayFirstSourceOptions({
+    candidates: [
+      {
+        routeId: route.routeId,
+        providerId: "relay",
+        routeEnabled: true,
+        sourceOption: sourceOption("600000"),
+        executionPlan,
+        commitPlan: commitPlan("600000"),
+      },
+    ],
+    requiredDestination: { asset: POLYGON_PUSD, raw: "1000000" },
+    policy,
+  });
+  assert.equal(partialExactOutput.sources[0]?.option.selectable, false);
+  assert.equal(partialExactOutput.sources[0]?.compositeEligible, true);
 
   const twoSegments = {
     kind: "wallet_route",
@@ -1608,6 +1689,98 @@ await test("planner exposes missing native gas instead of only reporting no liqu
   assert.equal(projection.sourceOptions.length, 0);
   assert.equal(projection.reasonCodes.includes("insufficient_gas"), true);
   assert.equal(projection.reasonCodes.includes("insufficient_liquidity"), true);
+});
+
+await test("a verified automatic source makes unrelated gas failure non-blocking", async () => {
+  const policy = mutablePolicy();
+  policy.creationMode = "on";
+  const projection = await new FundingPlanner({
+    listDestinations: async () => [candidate()],
+    resolveMarketContext: async () => null,
+    listSources: async ({ requiredAmount }) => [
+      plannedSource(requiredAmount.raw),
+    ],
+    listSourceBlockers: async () => ["insufficient_gas"],
+    store: new MemoryPlanningStore(),
+    now: () => NOW,
+  }).discover({
+    accountId: USER_ID,
+    request: intent("add_funds", "1000000"),
+    policy,
+    policyRevision: "policy_revision_12345678",
+    ownershipRevision: "ownership_revision_12345678",
+  });
+
+  assert.equal(
+    projection.sourceOptions.some((option) => option.selectable),
+    true,
+  );
+  assert.equal(projection.reasonCodes.includes("insufficient_gas"), false);
+  assert.equal(
+    projection.reasonCodes.includes("insufficient_liquidity"),
+    false,
+  );
+});
+
+await test("automatic source is recommended ahead of a user-paid preparation option", async () => {
+  const policy = mutablePolicy();
+  policy.creationMode = "on";
+  const projection = await new FundingPlanner({
+    listDestinations: async () => [candidate()],
+    resolveMarketContext: async () => null,
+    listSources: async ({ requiredAmount }) => [
+      plannedVenuePreparationSource(requiredAmount.raw, "user"),
+      plannedSource(requiredAmount.raw),
+    ],
+    store: new MemoryPlanningStore(),
+    now: () => NOW,
+  }).discover({
+    accountId: USER_ID,
+    request: intent("add_funds", "1000000"),
+    policy,
+    policyRevision: "policy_revision_12345678",
+    ownershipRevision: "ownership_revision_12345678",
+  });
+
+  assert.equal(
+    projection.sourceOptions.find((option) => option.recommended)
+      ?.sourceOptionId,
+    "source_wallet_12345678",
+  );
+  assert.equal(projection.requiredActions.length, 0);
+});
+
+await test("automatic venue preparation is executable while user-paid preparation keeps its gas blocker", async () => {
+  const discover = (payerRequirement: "user" | "privy_sponsor") =>
+    new FundingPlanner({
+      listDestinations: async () => [candidate()],
+      resolveMarketContext: async () => null,
+      listSources: async ({ requiredAmount }) => [
+        plannedVenuePreparationSource(requiredAmount.raw, payerRequirement),
+      ],
+      listSourceBlockers: async () => ["insufficient_gas"],
+      store: new MemoryPlanningStore(),
+      now: () => NOW,
+    }).discover({
+      accountId: USER_ID,
+      request: intent("add_funds", "1000000"),
+      policy: {
+        ...mutablePolicy(),
+        creationMode: "on",
+      },
+      policyRevision: "policy_revision_12345678",
+      ownershipRevision: "ownership_revision_12345678",
+    });
+
+  const automatic = await discover("privy_sponsor");
+  assert.equal(automatic.convertibleRaw, "1000000");
+  assert.equal(automatic.reasonCodes.includes("insufficient_gas"), false);
+  assert.equal(automatic.sourceOptions[0]?.selectable, true);
+
+  const userPaid = await discover("user");
+  assert.equal(userPaid.convertibleRaw, "0");
+  assert.equal(userPaid.reasonCodes.includes("insufficient_gas"), true);
+  assert.equal(userPaid.sourceOptions[0]?.selectable, true);
 });
 
 await test("retryable source inventory failure is not reported as insufficient liquidity", async () => {
@@ -2444,8 +2617,9 @@ await test("quote preserves a venue-preparation runtime binding and rejects chan
     selectionReason: "explicit",
     policy: DEFAULT_FUNDING_RUNTIME_POLICY,
   });
-  const option = sourceOption("1000000");
-  const basePlan = commitPlan("1000000", option);
+  const prepared = plannedVenuePreparationSource("1000000", "privy_sponsor");
+  const option = prepared.option;
+  const basePlan = prepared.commitPlan;
   const exactPlan: FundingCommitPlan = {
     ...basePlan,
     operation: {
@@ -2455,11 +2629,8 @@ await test("quote preserves a venue-preparation runtime binding and rejects chan
       destinationTargetSnapshot: exactDestination.target as never,
       venueBindingSnapshot: exactDestination.venueBinding as never,
       placementSnapshot: placement as never,
+      requestedSourceAmount: null,
     },
-    segments: basePlan.segments.map((segment) => ({
-      ...segment,
-      destinationTargetSnapshot: exactDestination.target as never,
-    })),
   };
   const projection = {
     ...liquidityProjectionFixture(),
@@ -2481,8 +2652,8 @@ await test("quote preserves a venue-preparation runtime binding and rejects chan
         {
           option,
           commitPlan: exactPlan,
-          routeId: "relay_polygon_pusd",
-          providerId: "relay",
+          routeId: null,
+          providerId: null,
         },
       ],
       projection,
@@ -2541,6 +2712,12 @@ await test("quote preserves a venue-preparation runtime binding and rejects chan
   });
   assert.equal(summary.selectedSourceOptionId, option.sourceOptionId);
   assert.equal(summary.minimumDestination.raw, "1000000");
+  assert.deepEqual(summary.sourceAmounts, [
+    {
+      safeLabel: option.safeLabel,
+      amount: { asset: POLYGON_PUSD, raw: "1000000" },
+    },
+  ]);
   assert.equal(
     insertedPlans[0]?.operation.supportMetadata?.ownershipRevision,
     "ownership_revision_12345678",
@@ -2563,6 +2740,260 @@ await test("quote preserves a venue-preparation runtime binding and rejects chan
         ownershipRevision: "ownership_revision_12345678",
       }),
     /raw amounts differ/,
+  );
+});
+
+await test("quote preserves a frozen composite preparation binding without replanning", async () => {
+  const store = new MemoryPlanningStore();
+  const exactDestination = candidate({
+    availableNow: { asset: POLYGON_PUSD, raw: "4108032" },
+  });
+  const request = intent("trade_shortfall", "8335681");
+  const placement = decidePlacement({
+    intent: request,
+    target: exactDestination.target,
+    targetVenueId: "polymarket",
+    targetRequirement: { asset: POLYGON_PUSD, raw: "8335681" },
+    availableNow: exactDestination.availableNow,
+    selectionReason: "current_trade",
+    policy: DEFAULT_FUNDING_RUNTIME_POLICY,
+  });
+  assert.equal(placement.destinationRequirement.raw, "4227649");
+  const relayOption = sourceOption("658574", {
+    sourceOptionId: "source_relay_residual_12345678",
+  });
+  assert.equal(relayOption.source.kind, "owned_location");
+  if (relayOption.source.kind !== "owned_location") {
+    throw new Error("relay fixture must use an owned source location");
+  }
+  const preparationAmount = {
+    asset: POLYGON_PUSD,
+    raw: "3569075",
+  } as const;
+  const relayAmount = {
+    asset: POLYGON_PUSD,
+    raw: "658574",
+  } as const;
+  const compositeOption: SourceOption = {
+    sourceOptionId: "source_composite_preparation_relay_12345678",
+    kind: "composite",
+    safeLabel: "Use 2 balances",
+    source: { kind: "composite", legCount: 2 },
+    sourceLegs: [
+      {
+        sourceLegId: "source_leg_preparation_12345678",
+        safeLabel: "Prepare trading balance",
+        source: {
+          kind: "venue_preparation",
+          venueId: "polymarket",
+          venueBindingId: exactDestination.venueBinding.bindingId,
+          inputCount: 2,
+        },
+        sourceAmount: preparationAmount,
+        expectedDestination: preparationAmount,
+        minimumDestination: preparationAmount,
+        fees: [],
+        eta: { minSeconds: 5, maxSeconds: 90 },
+        requiredActions: [],
+      },
+      {
+        sourceLegId: "source_leg_relay_12345678",
+        safeLabel: relayOption.safeLabel,
+        source: relayOption.source,
+        sourceAmount: relayAmount,
+        expectedDestination: relayAmount,
+        minimumDestination: relayAmount,
+        fees: [],
+        eta: { minSeconds: 5, maxSeconds: 20 },
+        requiredActions: [],
+      },
+    ],
+    amountMode: "exact_output",
+    maximumSourceRaw: null,
+    expectedDestination: { asset: POLYGON_PUSD, raw: "4227649" },
+    minimumDestination: { asset: POLYGON_PUSD, raw: "4227649" },
+    estimatedUsd: "4.227649",
+    fees: [],
+    eta: { minSeconds: 5, maxSeconds: 90 },
+    experienceMode: "prepare_first",
+    requiredActions: [],
+    expiresAt: "2026-07-24T12:01:00.000Z",
+    recommended: true,
+    selectable: true,
+    reasonCodes: [],
+  };
+  const relayPlan = commitPlan("658574", relayOption);
+  const compositePlan: FundingCommitPlan = {
+    ...relayPlan,
+    operation: {
+      ...relayPlan.operation,
+      purpose: "trade_shortfall",
+      experienceMode: "prepare_first",
+      planKind: "composite_route",
+      sourceSnapshot: compositeOption as never,
+      destinationTargetSnapshot: exactDestination.target as never,
+      venueBindingSnapshot: exactDestination.venueBinding as never,
+      placementSnapshot: placement as never,
+      requestedSourceAmount: null,
+      requestedDestinationAmount: {
+        asset: POLYGON_PUSD,
+        raw: "4227649",
+      },
+      supportMetadata: {
+        containsVenuePreparation: true,
+        venuePreparationMinimumDestination: preparationAmount,
+        venueBindingOptionId:
+          exactDestination.bindingOption.venueBindingOptionId,
+      },
+    },
+    segments: relayPlan.segments.map((segment) => ({
+      ...segment,
+      destinationTargetSnapshot: exactDestination.target as never,
+    })),
+    steps: [
+      {
+        ordinal: 0,
+        segmentOrdinal: null,
+        stepKind: "venue_preparation",
+        state: "action_required",
+        actionFingerprint: "d".repeat(64),
+        executorId: "wallet_profile_evm_v1",
+        payerRequirement: "privy_sponsor",
+        dependsOnOrdinal: null,
+        normalizedAction: { kind: "evm_transaction" },
+        actionValidationResult: {
+          valid: true,
+          compositeSourceLegId: "source_leg_preparation_12345678",
+        },
+      },
+    ],
+    reservations: [
+      {
+        segmentOrdinal: null,
+        componentId: "component_preparation_token_12345678",
+        locationId: "location_preparation_token_12345678",
+        networkId: POLYGON_OTHER_TOKEN.networkId,
+        assetId: POLYGON_OTHER_TOKEN.assetId,
+        assetDecimals: POLYGON_OTHER_TOKEN.decimals,
+        rawAmount: "100000000000000000",
+        mode: "subtract_available",
+        expiresAt: compositeOption.expiresAt,
+      },
+      {
+        segmentOrdinal: null,
+        componentId: "component_preparation_pusd_12345678",
+        locationId: "location_preparation_pusd_12345678",
+        networkId: POLYGON_PUSD.networkId,
+        assetId: POLYGON_PUSD.assetId,
+        assetDecimals: POLYGON_PUSD.decimals,
+        rawAmount: "2000000",
+        mode: "subtract_available",
+        expiresAt: compositeOption.expiresAt,
+      },
+    ],
+  };
+  const projection = {
+    ...liquidityProjectionFixture(),
+    liquidityProjectionId: "projection_composite_quote_12345678",
+    requestedCollateralRaw: "8335681",
+    availableNowRaw: "4108032",
+    shortfallRaw: "4227649",
+    convertibleRaw: "4227649",
+    requestedUsd: "8.335681",
+    availableNowUsd: "4.108032",
+    shortfallUsd: "4.227649",
+    convertibleUsd: "4.227649",
+    mode: "prepare_first" as const,
+    sourceOptions: [compositeOption],
+    destinationOptions: [exactDestination.option],
+  };
+  await store.create({
+    userId: USER_ID,
+    request,
+    projection,
+    plannerSnapshot: {
+      request,
+      marketContext: null,
+      destination: exactDestination,
+      withdrawalRecipient: null,
+      placement,
+      sources: [
+        {
+          option: compositeOption,
+          commitPlan: compositePlan,
+          routeId: null,
+          providerId: null,
+        },
+      ],
+      projection,
+      policyRevision: "policy_revision_12345678",
+      ownershipRevision: "ownership_revision_12345678",
+    },
+    policyVersion: 1,
+    policyRevision: "policy_revision_12345678",
+    ownershipRevision: "ownership_revision_12345678",
+    expiresAt: new Date("2026-07-24T12:01:00.000Z"),
+  });
+  const policy = mutablePolicy();
+  policy.creationMode = "on";
+  policy.gates.quoteCreation = true;
+  const insertedPlans: FundingCommitPlan[] = [];
+  const service = new FundingQuoteService({
+    db: {} as never,
+    planningStore: store,
+    now: () => NOW,
+    createQuote: async (_db, input) => {
+      insertedPlans.push(input.planSnapshot);
+      return {
+        id: "quote_composite_12345678",
+        userId: input.userId,
+        discoveryProjectionId: input.discoveryProjectionId,
+        selectedSourceOptionSnapshot: input.selectedSourceOptionSnapshot,
+        marketContextSnapshot: input.marketContextSnapshot,
+        destinationOptionSnapshot: input.destinationOptionSnapshot,
+        venueBindingSnapshot: input.venueBindingSnapshot,
+        planSnapshot: input.planSnapshot,
+        policyVersion: input.policyVersion,
+        policyRevision: input.policyRevision,
+        canonicalRequestHash: "b".repeat(64),
+        planHash: canonicalJsonHash(input.planSnapshot),
+        consentTokenHash: "c".repeat(64),
+        expiresAt: input.expiresAt,
+        consumedAt: null,
+        invalidatedAt: null,
+      };
+    },
+  });
+  const summary = await service.quote({
+    userId: USER_ID,
+    request: {
+      liquidityProjectionId: projection.liquidityProjectionId,
+      selectedSourceOptionId: compositeOption.sourceOptionId,
+      confirmedSourceAmount: null,
+      requestedDestinationAmount: {
+        asset: POLYGON_PUSD,
+        raw: "4227649",
+      },
+    },
+    policy,
+    policyRevision: "policy_revision_12345678",
+    ownershipRevision: "ownership_revision_12345678",
+  });
+
+  assert.equal(summary.selectedSourceOptionId, compositeOption.sourceOptionId);
+  assert.equal(summary.minimumDestination.raw, "4227649");
+  assert.equal(summary.consentMode, "explicit_economic_review");
+  assert.deepEqual(
+    summary.sourceAmounts.map((source) => source.amount),
+    [
+      { asset: POLYGON_OTHER_TOKEN, raw: "100000000000000000" },
+      { asset: POLYGON_PUSD, raw: "2000000" },
+      relayAmount,
+    ],
+  );
+  assert.deepEqual(
+    insertedPlans[0]?.operation.venueBindingSnapshot,
+    exactDestination.venueBinding,
   );
 });
 

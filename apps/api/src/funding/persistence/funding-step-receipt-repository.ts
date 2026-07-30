@@ -307,13 +307,19 @@ export function shouldIgnoreFundingStepReceiptUpdate(
   return receiptRank[incoming.status] < receiptRank[previous];
 }
 
-function stepStateForReceipt(
+export function fundingStepStateForReceipt(
   receipt: FundingStepReceiptStatus,
   current: FundingStepReceiptTarget["stepState"],
   stepKind: FundingStepReceiptTarget["stepKind"],
 ): ReceiptManagedStepState {
   if (receipt === "finalized") {
-    return stepKind === "venue_preparation" ? "submitted" : "succeeded";
+    if (stepKind === "venue_preparation") {
+      // A finalized receipt only advances preparation into postcondition
+      // verification. Once that verifier succeeds (or recovery is required),
+      // later receipt polls must not move the step backwards.
+      return current === "reconcile_required" ? "submitted" : current;
+    }
+    return "succeeded";
   }
   if (receipt === "failed") return "action_required";
   if (receipt === "mismatch") return "recovery_required";
@@ -463,7 +469,7 @@ export async function applyFundingStepReceiptEvidenceInTransaction(
     );
   }
 
-  const nextStepState = stepStateForReceipt(
+  const nextStepState = fundingStepStateForReceipt(
     input.receipt.status,
     scoped.step_state,
     scoped.step_kind,

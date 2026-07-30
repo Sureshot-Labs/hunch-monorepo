@@ -36,15 +36,7 @@ export class PolymarketFundingPlanError extends Error {
   }
 }
 
-function positive(value: bigint | null | undefined): bigint {
-  return value != null && value > 0n ? value : 0n;
-}
-
-function available(balance: bigint, locked: bigint): bigint {
-  return balance > locked ? balance - locked : 0n;
-}
-
-export function buildPolymarketFundingPlan(input: {
+export type PolymarketFundingPlanInput = Readonly<{
   depositWallet: string;
   depositPusdRaw: bigint;
   depositRouterUsdceAllowanceRaw: bigint;
@@ -60,7 +52,19 @@ export function buildPolymarketFundingPlan(input: {
   signerLockedRaw?: bigint | null;
   signerPusdRaw: bigint;
   signerUsdceRaw: bigint;
-}): PolymarketFundingPlan | null {
+}>;
+
+function positive(value: bigint | null | undefined): bigint {
+  return value != null && value > 0n ? value : 0n;
+}
+
+function available(balance: bigint, locked: bigint): bigint {
+  return balance > locked ? balance - locked : 0n;
+}
+
+export function buildPolymarketFundingPlan(
+  input: PolymarketFundingPlanInput,
+): PolymarketFundingPlan | null {
   let signer: string;
   let depositWallet: string;
   let routerAddress: string;
@@ -154,6 +158,61 @@ export function buildPolymarketFundingPlan(input: {
       pUsdAmountRaw,
     ]),
   };
+}
+
+const PARTIAL_CAPACITY_ERRORS = new Set<PolymarketFundingPlanError["code"]>([
+  "allowance_missing",
+  "cap_exceeded",
+  "insufficient_balance",
+]);
+
+/**
+ * Returns the largest exact router plan that is executable under the same
+ * balances, allowances, cap, and priority rules as buildPolymarketFundingPlan.
+ *
+ * Executability is monotonic for this router: once a requested funding amount
+ * exceeds any frozen capacity constraint, larger requests cannot recover.
+ * Searching the exact builder keeps one source of truth for allocation and
+ * calldata instead of maintaining a second, drifting capacity formula.
+ */
+export function buildMaximumPolymarketFundingPlan(
+  input: Omit<PolymarketFundingPlanInput, "requiredRaw"> &
+    Readonly<{ maximumFundingRaw: bigint }>,
+): PolymarketFundingPlan | null {
+  const maximumFundingRaw = positive(input.maximumFundingRaw);
+  if (maximumFundingRaw === 0n) return null;
+  const depositAvailableRaw = available(
+    positive(input.depositPusdRaw),
+    positive(input.depositLockedRaw),
+  );
+  let lower = 1n;
+  let upper = maximumFundingRaw;
+  let best: PolymarketFundingPlan | null = null;
+  while (lower <= upper) {
+    const candidateFundingRaw = lower + (upper - lower) / 2n;
+    try {
+      const plan = buildPolymarketFundingPlan({
+        ...input,
+        requiredRaw: depositAvailableRaw + candidateFundingRaw,
+      });
+      if (!plan || BigInt(plan.totalAmountRaw) !== candidateFundingRaw) {
+        throw new Error(
+          "maximum Polymarket funding search produced inconsistent economics",
+        );
+      }
+      best = plan;
+      lower = candidateFundingRaw + 1n;
+    } catch (error) {
+      if (
+        !(error instanceof PolymarketFundingPlanError) ||
+        !PARTIAL_CAPACITY_ERRORS.has(error.code)
+      ) {
+        throw error;
+      }
+      upper = candidateFundingRaw - 1n;
+    }
+  }
+  return best;
 }
 
 export function decodePolymarketFundingCalldata(calldata: string): {

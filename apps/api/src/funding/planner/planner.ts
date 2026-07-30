@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto";
 
 import {
-  compareUnsignedDecimals,
   multiplyRawByUnitPrice,
   rawForUsdCeil,
 } from "../../account-value/decimal.js";
@@ -34,14 +33,16 @@ import {
   sameAsset,
   subtractFloor,
 } from "./money.js";
-import { decidePlacement } from "./placement-policy.js";
-import type {
-  FundingPlanningSnapshot,
-  FundingPlanningStore,
-  PlannedSourceOption,
+import {
+  decidePlacement,
+  minimumAutomaticTradeRefillUsd,
+} from "./placement-policy.js";
+import {
+  commitPlanRunsWithoutUserWalletAction,
+  type FundingPlanningSnapshot,
+  type FundingPlanningStore,
+  type PlannedSourceOption,
 } from "./planning-types.js";
-
-const MINIMUM_AUTOMATIC_TRADE_REFILL_USD = "0.5";
 
 export type FundingSourcePlanningRequest = Readonly<{
   accountId: string;
@@ -104,21 +105,49 @@ function recommendedSource(
       (left, right) =>
         Number(left.option.source.kind === "external_ingress") -
           Number(right.option.source.kind === "external_ingress") ||
+        Number(isSelectableAutomaticSource(right)) -
+          Number(isSelectableAutomaticSource(left)) ||
         Number(right.option.recommended) - Number(left.option.recommended) ||
         left.option.sourceOptionId.localeCompare(right.option.sourceOptionId),
     )[0] ?? null
   );
 }
 
-function isSelectableOwnedSource(option: SourceOption): boolean {
-  if (!option.selectable) return false;
-  if (option.source.kind === "owned_location") return true;
+function isInternalSource(option: SourceOption): boolean {
+  if (
+    option.source.kind === "owned_location" ||
+    option.source.kind === "venue_preparation"
+  ) {
+    return true;
+  }
   if (option.source.kind !== "composite") return false;
   return (
     option.sourceLegs != null &&
     option.sourceLegs.length > 0 &&
-    option.sourceLegs.every((leg) => leg.source.kind === "owned_location")
+    option.sourceLegs.every(
+      (leg) =>
+        leg.source.kind === "owned_location" ||
+        leg.source.kind === "venue_preparation",
+    )
   );
+}
+
+function isSelectableAutomaticSource(source: PlannedSourceOption): boolean {
+  return (
+    source.option.selectable &&
+    isInternalSource(source.option) &&
+    commitPlanRunsWithoutUserWalletAction(source.commitPlan)
+  );
+}
+
+function applicableSourceBlockingReasons(
+  sources: readonly PlannedSourceOption[],
+  reasons: readonly FundingReasonCode[],
+): readonly FundingReasonCode[] {
+  const executablePlanExists = sources.some(isSelectableAutomaticSource);
+  return executablePlanExists
+    ? reasons.filter((reason) => reason !== "insufficient_gas")
+    : reasons;
 }
 
 function validatePlannedSources(
@@ -161,7 +190,7 @@ function validatePlannedSources(
         planKind === "venue_preparation") &&
         segmentCount !== 0) ||
       (planKind === "composite_route" &&
-        (segmentCount < 2 ||
+        (segmentCount < 1 ||
           source.commitPlan.segments.some(
             (segment) => segment.providerId !== "relay",
           )))
@@ -209,7 +238,6 @@ function validatePlannedSources(
         !legs ||
         legs.length < 2 ||
         legs.length !== source.option.source.legCount ||
-        legs.length !== segmentCount ||
         planKind !== "composite_route"
       ) {
         throw new FundingPlannerError(
@@ -220,7 +248,9 @@ function validatePlannedSources(
       const legIds = new Set<string>();
       let expectedRaw = 0n;
       let minimumRaw = 0n;
-      for (const [ordinal, leg] of legs.entries()) {
+      let providerSegmentOrdinal = 0;
+      let preparationLegCount = 0;
+      for (const leg of legs) {
         if (legIds.has(leg.sourceLegId)) {
           throw new FundingPlannerError(
             "invalid_policy",
@@ -249,29 +279,62 @@ function validatePlannedSources(
             "composite source leg lacks positive exact economics",
           );
         }
-        const segment = source.commitPlan.segments[ordinal];
-        if (
-          !segment ||
-          rawAmount(
-            (segment.quotedInput as Readonly<{ raw?: string }>).raw ?? "0",
-          ) !== rawAmount(leg.sourceAmount.raw) ||
-          rawAmount(
-            (segment.quotedExpectedOutput as Readonly<{ raw?: string }>).raw ??
-              "0",
-          ) !== rawAmount(leg.expectedDestination.raw) ||
-          rawAmount(
-            (segment.quotedMinOutput as Readonly<{ raw?: string }>).raw ?? "0",
-          ) !== rawAmount(leg.minimumDestination.raw)
-        ) {
-          throw new FundingPlannerError(
-            "invalid_policy",
-            "composite public leg economics differ from committed segment",
+        if (leg.source.kind === "venue_preparation") {
+          preparationLegCount += 1;
+          const preparationSteps = source.commitPlan.steps.filter(
+            (step) =>
+              step.stepKind === "venue_preparation" &&
+              step.segmentOrdinal === null &&
+              step.actionValidationResult.compositeSourceLegId ===
+                leg.sourceLegId,
           );
+          const preparationReservations = source.commitPlan.reservations.filter(
+            (reservation) => reservation.segmentOrdinal === null,
+          );
+          if (
+            preparationLegCount > 1 ||
+            preparationSteps.length === 0 ||
+            preparationReservations.length !== leg.source.inputCount ||
+            rawAmount(leg.sourceAmount.raw) !==
+              rawAmount(leg.expectedDestination.raw)
+          ) {
+            throw new FundingPlannerError(
+              "invalid_policy",
+              "composite venue preparation leg differs from its frozen actions and inputs",
+            );
+          }
+        } else {
+          const segment = source.commitPlan.segments[providerSegmentOrdinal];
+          providerSegmentOrdinal += 1;
+          if (
+            leg.source.kind !== "owned_location" ||
+            !segment ||
+            rawAmount(
+              (segment.quotedInput as Readonly<{ raw?: string }>).raw ?? "0",
+            ) !== rawAmount(leg.sourceAmount.raw) ||
+            rawAmount(
+              (
+                segment.quotedExpectedOutput as Readonly<{
+                  raw?: string;
+                }>
+              ).raw ?? "0",
+            ) !== rawAmount(leg.expectedDestination.raw) ||
+            rawAmount(
+              (segment.quotedMinOutput as Readonly<{ raw?: string }>).raw ??
+                "0",
+            ) !== rawAmount(leg.minimumDestination.raw)
+          ) {
+            throw new FundingPlannerError(
+              "invalid_policy",
+              "composite provider leg differs from its committed segment",
+            );
+          }
         }
         expectedRaw += rawAmount(leg.expectedDestination.raw);
         minimumRaw += rawAmount(leg.minimumDestination.raw);
       }
       if (
+        providerSegmentOrdinal !== segmentCount ||
         !source.option.expectedDestination ||
         !source.option.minimumDestination ||
         expectedRaw !== rawAmount(source.option.expectedDestination.raw) ||
@@ -443,18 +506,10 @@ function minimumExecutableDestination(
   const valuation = candidate.collateralValuation;
   if (!valuation) return null;
   try {
-    const configuredMinimumUsd = policy.placement.minimumDestinationUsd;
-    const minimumUsd =
-      compareUnsignedDecimals(
-        configuredMinimumUsd,
-        MINIMUM_AUTOMATIC_TRADE_REFILL_USD,
-      ) >= 0
-        ? configuredMinimumUsd
-        : MINIMUM_AUTOMATIC_TRADE_REFILL_USD;
     return {
       asset: candidate.option.requiredAsset,
       raw: rawForUsdCeil({
-        usd: minimumUsd,
+        usd: minimumAutomaticTradeRefillUsd(policy),
         decimals: candidate.option.requiredAsset.decimals,
         unitPriceUsd: valuation.unitPriceUsd,
       }),
@@ -837,9 +892,13 @@ export class FundingPlanner {
       recommended:
         recommended?.option.sourceOptionId === source.option.sourceOptionId,
     }));
+    const applicableSourceBlockers = applicableSourceBlockingReasons(
+      sources,
+      sourceBlockers,
+    );
     const sourceEvidenceUnavailable =
-      sourceBlockers.includes("rpc_unavailable");
-    const convertibleRaw = sourceOptions.some(isSelectableOwnedSource)
+      applicableSourceBlockers.includes("rpc_unavailable");
+    const convertibleRaw = sources.some(isSelectableAutomaticSource)
       ? shortfallRaw
       : "0";
     const convertibleUsd =
@@ -869,7 +928,7 @@ export class FundingPlanner {
         ? (["cash_availability_unknown"] as const)
         : []),
       ...valuationReasons,
-      ...sourceBlockers,
+      ...applicableSourceBlockers,
       ...(needsFunding &&
       !sourceEvidenceUnavailable &&
       !sourceOptions.some((source) => source.selectable)

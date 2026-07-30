@@ -375,6 +375,10 @@ const tests: TestCase[] = [
           observedOptions.receivePollDelayMs,
           env.fundingReceivePollSec * 1_000,
         );
+        assert.equal(
+          observedOptions.terminalTimeoutMs,
+          env.fundingReconciliationTerminalTimeoutSec * 1_000,
+        );
         assert.match(String(observedOptions.workerId), /:\d+$/);
       } finally {
         resetFundingWorkerModuleLoaderForTests();

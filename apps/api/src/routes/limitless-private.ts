@@ -881,6 +881,7 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
       }
 
       const result = await fetchLimitlessAccountRoute({
+        db: pool,
         query: request.query,
         userId: user.id,
         signerRaw,

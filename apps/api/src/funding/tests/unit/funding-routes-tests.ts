@@ -21,6 +21,7 @@ import { WithdrawalDestinationError } from "../../execution/withdrawal-destinati
 import { FundingPlannerError } from "../../planner/money.js";
 import { PreparationContractError } from "../../preparation/core-adapter.js";
 import {
+  fundingRequestsPerMinute,
   registerFundingRoutes,
   type FundingRouteDependencies,
 } from "../../../routes/funding.js";
@@ -1231,6 +1232,12 @@ await test("financial endpoints fail closed when rate limiting is unavailable", 
   } finally {
     await app.close();
   }
+});
+
+await test("active funding reads have a polling-safe rate limit", () => {
+  assert.equal(fundingRequestsPerMinute("operation"), 180);
+  assert.equal(fundingRequestsPerMinute("receive-session-read"), 180);
+  assert.equal(fundingRequestsPerMinute("quote"), 30);
 });
 
 console.log("[funding-routes-tests] complete");

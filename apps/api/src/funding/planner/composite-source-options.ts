@@ -22,9 +22,32 @@ import type {
   FundingCommitStep,
 } from "../persistence/funding-operation-repository.js";
 import { assertSameAsset, rawAmount } from "./money.js";
-import type { PlannedSourceOption } from "./planning-types.js";
+import {
+  commitPlanRunsWithoutUserWalletAction,
+  type PlannedSourceOption,
+} from "./planning-types.js";
 
-const MAX_COMPOSITE_LEGS = 16;
+/**
+ * The subset search is exhaustive within an explicit operational bound so
+ * selection remains deterministic and minimizes excess output. Discovery
+ * fails closed above the bound instead of silently discarding contributors
+ * and claiming an optimum over an incomplete candidate set.
+ */
+const MAX_COMPOSITE_CANDIDATES = 16;
+
+type CompositeCandidateKind = "provider_segment" | "venue_preparation";
+
+type CompositeCandidate = Readonly<{
+  kind: CompositeCandidateKind;
+  source: PlannedSourceOption;
+  leg: SourceOptionLeg;
+  reservations: readonly FundingCommitReservation[];
+}>;
+
+type RebasedCandidate = Readonly<{
+  candidate: CompositeCandidate;
+  providerSegmentOrdinal: number | null;
+}>;
 
 function jsonRecord(value: unknown): Readonly<Record<string, JsonValue>> {
   return value as Readonly<Record<string, JsonValue>>;
@@ -39,7 +62,7 @@ function money(value: Readonly<Record<string, JsonValue>>): Money {
     typeof asset !== "object" ||
     Array.isArray(asset)
   ) {
-    throw new Error("composite Relay segment lacks exact money");
+    throw new Error("composite candidate lacks exact money");
   }
   const record = asset as Readonly<Record<string, JsonValue>>;
   if (
@@ -47,7 +70,7 @@ function money(value: Readonly<Record<string, JsonValue>>): Money {
     typeof record.assetId !== "string" ||
     typeof record.decimals !== "number"
   ) {
-    throw new Error("composite Relay segment asset is invalid");
+    throw new Error("composite candidate asset is invalid");
   }
   return {
     asset: {
@@ -59,69 +82,157 @@ function money(value: Readonly<Record<string, JsonValue>>): Money {
   };
 }
 
-function sourceReservation(
-  source: PlannedSourceOption,
-): FundingCommitReservation {
-  const reservations = source.commitPlan.reservations.filter(
-    (reservation) => reservation.mode === "subtract_available",
-  );
-  if (reservations.length !== 1) {
-    throw new Error(
-      "each composite Relay leg must reserve exactly one source component",
-    );
+function positiveEconomics(source: PlannedSourceOption): Readonly<{
+  expectedDestination: Money;
+  minimumDestination: Money;
+}> {
+  const expectedDestination = source.option.expectedDestination;
+  const minimumDestination = source.option.minimumDestination;
+  if (
+    !expectedDestination ||
+    !minimumDestination ||
+    rawAmount(expectedDestination.raw) < rawAmount(minimumDestination.raw) ||
+    rawAmount(minimumDestination.raw) === 0n
+  ) {
+    throw new Error("composite candidate lacks positive exact economics");
   }
-  const reservation = reservations[0];
-  if (!reservation) {
-    throw new Error("composite Relay source reservation disappeared");
-  }
-  return reservation;
+  return { expectedDestination, minimumDestination };
 }
 
-function candidateLeg(source: PlannedSourceOption): Readonly<{
-  source: PlannedSourceOption;
-  leg: SourceOptionLeg;
-  reservation: FundingCommitReservation;
-}> {
+function sourceLegId(
+  source: PlannedSourceOption,
+  sourceAmount: Money,
+  expectedDestination: Money,
+  minimumDestination: Money,
+): string {
+  return stableOpaqueId(
+    "source_leg",
+    canonicalJsonHash({
+      sourceOptionId: source.option.sourceOptionId,
+      source: source.option.source,
+      sourceAmount,
+      expectedDestination,
+      minimumDestination,
+    }),
+  );
+}
+
+function venuePreparationCandidate(
+  source: PlannedSourceOption,
+): CompositeCandidate {
+  const economics = positiveEconomics(source);
+  if (
+    source.option.kind !== "venue_preparation" ||
+    source.option.source.kind !== "venue_preparation" ||
+    source.commitPlan.operation.planKind !== "venue_preparation" ||
+    source.commitPlan.segments.length !== 0 ||
+    source.commitPlan.steps.length === 0 ||
+    source.commitPlan.steps.some(
+      (step) =>
+        step.stepKind !== "venue_preparation" || step.segmentOrdinal !== null,
+    ) ||
+    source.commitPlan.reservations.length !== source.option.source.inputCount ||
+    source.commitPlan.reservations.some(
+      (reservation) =>
+        reservation.segmentOrdinal !== null ||
+        reservation.mode !== "subtract_available",
+    )
+  ) {
+    throw new Error(
+      "composite venue preparation candidate has an invalid frozen plan",
+    );
+  }
+  const sourceAmount = economics.expectedDestination;
+  return {
+    kind: "venue_preparation",
+    source,
+    reservations: source.commitPlan.reservations,
+    leg: {
+      sourceLegId: sourceLegId(
+        source,
+        sourceAmount,
+        economics.expectedDestination,
+        economics.minimumDestination,
+      ),
+      safeLabel: source.option.safeLabel,
+      source: source.option.source,
+      sourceAmount,
+      expectedDestination: economics.expectedDestination,
+      minimumDestination: economics.minimumDestination,
+      fees: source.option.fees,
+      eta: source.option.eta,
+      requiredActions: source.option.requiredActions,
+    },
+  };
+}
+
+function reservationLocationMatchesSource(
+  source: Extract<FundingSourceRef, Readonly<{ kind: "owned_location" }>>,
+  reservation: FundingCommitReservation,
+): boolean {
+  const balanceLocationId = source.location.details.balanceLocationId;
+  return (
+    reservation.locationId === source.location.locationId ||
+    (typeof balanceLocationId === "string" &&
+      reservation.locationId === balanceLocationId)
+  );
+}
+
+function providerCandidate(source: PlannedSourceOption): CompositeCandidate {
+  const economics = positiveEconomics(source);
   if (
     source.providerId !== "relay" ||
     source.routeId == null ||
-    source.option.source.kind === "composite" ||
-    source.option.source.kind === "venue_preparation" ||
+    source.option.source.kind !== "owned_location" ||
     source.commitPlan.operation.planKind !== "wallet_route" ||
     source.commitPlan.segments.length !== 1 ||
-    source.commitPlan.steps.length === 0 ||
-    !source.option.expectedDestination ||
-    !source.option.minimumDestination
+    source.commitPlan.steps.length === 0
   ) {
-    throw new Error("composite candidate is not one exact Relay wallet leg");
+    throw new Error(
+      "composite provider candidate is not one exact Relay wallet leg",
+    );
   }
   const segment = source.commitPlan.segments[0];
-  if (!segment) {
+  if (!segment || segment.providerId !== "relay") {
     throw new Error("composite Relay segment disappeared");
+  }
+  const reservations = source.commitPlan.reservations.filter(
+    (reservation) => reservation.mode === "subtract_available",
+  );
+  const reservation = reservations[0];
+  if (
+    reservations.length !== 1 ||
+    !reservation ||
+    !reservationLocationMatchesSource(source.option.source, reservation)
+  ) {
+    throw new Error(
+      "each composite Relay leg must reserve its one owned source component",
+    );
   }
   const sourceAmount = money(segment.quotedInput);
   const expectedDestination = money(segment.quotedExpectedOutput);
   const minimumDestination = money(segment.quotedMinOutput);
-  const sourceRef = source.option.source as Extract<
-    FundingSourceRef,
-    Readonly<{ kind: "owned_location" | "external_ingress" }>
-  >;
+  if (
+    !canonicalJsonEqual(expectedDestination, economics.expectedDestination) ||
+    !canonicalJsonEqual(minimumDestination, economics.minimumDestination)
+  ) {
+    throw new Error(
+      "composite Relay public economics differ from its committed segment",
+    );
+  }
   return {
+    kind: "provider_segment",
     source,
-    reservation: sourceReservation(source),
+    reservations,
     leg: {
-      sourceLegId: stableOpaqueId(
-        "source_leg",
-        canonicalJsonHash({
-          routeId: source.routeId,
-          source: sourceRef,
-          sourceAmount,
-          expectedDestination,
-          minimumDestination,
-        }),
+      sourceLegId: sourceLegId(
+        source,
+        sourceAmount,
+        expectedDestination,
+        minimumDestination,
       ),
       safeLabel: source.option.safeLabel,
-      source: sourceRef,
+      source: source.option.source,
       sourceAmount,
       expectedDestination,
       minimumDestination,
@@ -132,13 +243,20 @@ function candidateLeg(source: PlannedSourceOption): Readonly<{
   };
 }
 
+function candidate(source: PlannedSourceOption): CompositeCandidate {
+  return source.option.source.kind === "venue_preparation"
+    ? venuePreparationCandidate(source)
+    : providerCandidate(source);
+}
+
 function candidateSubsets<T>(values: readonly T[]): readonly (readonly T[])[] {
-  if (values.length > MAX_COMPOSITE_LEGS) {
+  if (values.length > MAX_COMPOSITE_CANDIDATES) {
     throw new Error("too many eligible sources for bounded composite search");
   }
   const subsets: T[][] = [];
-  const limit = 1 << values.length;
-  for (let mask = 0; mask < limit; mask += 1) {
+  const maskLimit = 1 << values.length;
+  for (let mask = 0; mask < maskLimit; mask += 1) {
+    // Composite means at least two independently executable contributors.
     if ((mask & (mask - 1)) === 0) continue;
     const subset: T[] = [];
     for (let index = 0; index < values.length; index += 1) {
@@ -152,6 +270,7 @@ function candidateSubsets<T>(values: readonly T[]): readonly (readonly T[])[] {
 }
 
 function estimatedFeeUsd(source: PlannedSourceOption): string | null {
+  if (source.option.fees.length === 0) return "0";
   const values = source.option.fees.map((fee) => fee.estimatedUsd);
   return values.some((value) => value == null)
     ? null
@@ -159,13 +278,15 @@ function estimatedFeeUsd(source: PlannedSourceOption): string | null {
 }
 
 function selectSubset(
-  candidates: readonly ReturnType<typeof candidateLeg>[],
+  candidates: readonly CompositeCandidate[],
   requiredDestination: Money,
+  destinationUnitPriceUsd: string,
   maximumFeeUsd: string,
   maximumFeeBps: number,
-): readonly ReturnType<typeof candidateLeg>[] | null {
+): readonly CompositeCandidate[] | null {
   const viable = candidateSubsets(candidates)
     .map((legs) => {
+      if (selectedCandidateCompatibilityIssue(legs)) return null;
       let minimumRaw = 0n;
       for (const item of legs) {
         assertSameAsset(
@@ -183,7 +304,7 @@ function selectSubset(
       const minimumUsd = multiplyRawByUnitPrice({
         raw: minimumRaw.toString(),
         decimals: requiredDestination.asset.decimals,
-        unitPriceUsd: "1",
+        unitPriceUsd: destinationUnitPriceUsd,
       });
       if (
         feeUsd == null ||
@@ -199,13 +320,13 @@ function selectSubset(
         legs,
         excessRaw: minimumRaw - rawAmount(requiredDestination.raw),
         feeUsd,
-        key: legs.map((item) => item.leg.sourceLegId).join("|"),
+        key: legs
+          .map((item) => item.leg.sourceLegId)
+          .sort()
+          .join("|"),
       };
     })
-    .filter(
-      (candidate): candidate is NonNullable<typeof candidate> =>
-        candidate != null,
-    )
+    .filter((entry): entry is NonNullable<typeof entry> => entry != null)
     .sort((left, right) => {
       if (left.excessRaw !== right.excessRaw) {
         return left.excessRaw < right.excessRaw ? -1 : 1;
@@ -213,64 +334,105 @@ function selectSubset(
       if (left.legs.length !== right.legs.length) {
         return left.legs.length - right.legs.length;
       }
-      if (left.feeUsd == null || right.feeUsd == null) {
-        if (left.feeUsd !== right.feeUsd) return left.feeUsd == null ? 1 : -1;
-      } else {
-        const feeOrder = compareUnsignedDecimals(left.feeUsd, right.feeUsd);
-        if (feeOrder !== 0) return feeOrder;
-      }
-      return left.key.localeCompare(right.key);
+      const feeOrder = compareUnsignedDecimals(left.feeUsd, right.feeUsd);
+      return feeOrder !== 0 ? feeOrder : left.key.localeCompare(right.key);
     });
   return viable[0]?.legs ?? null;
 }
 
-function aggregateEta(legs: readonly SourceOptionLeg[]): SourceOption["eta"] {
-  let minSeconds = 0;
-  let maxSeconds = 0;
-  for (const leg of legs) {
-    if (!leg.eta) return null;
-    minSeconds += leg.eta.minSeconds;
-    maxSeconds += leg.eta.maxSeconds;
-  }
-  return { minSeconds, maxSeconds };
+function candidateOrder(
+  left: CompositeCandidate,
+  right: CompositeCandidate,
+): number {
+  return (
+    Number(left.kind === "provider_segment") -
+      Number(right.kind === "provider_segment") ||
+    left.source.option.sourceOptionId.localeCompare(
+      right.source.option.sourceOptionId,
+    )
+  );
 }
 
-function renumberSteps(
-  selected: readonly ReturnType<typeof candidateLeg>[],
+function aggregateEta(legs: readonly SourceOptionLeg[]): SourceOption["eta"] {
+  if (legs.some((leg) => leg.eta == null)) return null;
+  const eta = legs.map((leg) => {
+    if (!leg.eta) throw new Error("composite ETA disappeared");
+    return leg.eta;
+  });
+  return {
+    minSeconds: Math.max(...eta.map((entry) => entry.minSeconds)),
+    maxSeconds: Math.max(...eta.map((entry) => entry.maxSeconds)),
+  };
+}
+
+function rebaseCandidates(
+  selected: readonly CompositeCandidate[],
+): readonly RebasedCandidate[] {
+  let providerSegmentOrdinal = 0;
+  return selected.map((entry) => {
+    if (entry.kind === "venue_preparation") {
+      return { candidate: entry, providerSegmentOrdinal: null };
+    }
+    const rebased = { candidate: entry, providerSegmentOrdinal };
+    providerSegmentOrdinal += 1;
+    return rebased;
+  });
+}
+
+function rebaseSteps(
+  selected: readonly RebasedCandidate[],
 ): readonly FundingCommitStep[] {
   const output: FundingCommitStep[] = [];
-  let priorLegLastOrdinal: number | null = null;
-  for (const [segmentOrdinal, item] of selected.entries()) {
-    const legSteps = [...item.source.commitPlan.steps].sort(
+  for (const entry of selected) {
+    const oldToNew = new Map<number, number>();
+    const steps = [...entry.candidate.source.commitPlan.steps].sort(
       (left, right) => left.ordinal - right.ordinal,
     );
-    const oldToNew = new Map<number, number>();
-    for (const step of legSteps) {
-      oldToNew.set(step.ordinal, output.length);
-      const dependsOnOrdinal =
-        step.dependsOnOrdinal == null
-          ? priorLegLastOrdinal
-          : oldToNew.get(step.dependsOnOrdinal);
-      if (step.dependsOnOrdinal != null && dependsOnOrdinal == null) {
-        throw new Error("composite leg contains a forward step dependency");
+    for (const step of steps) {
+      const ordinal = output.length;
+      let dependsOnOrdinal: number | null = null;
+      if (step.dependsOnOrdinal != null) {
+        const mappedDependency = oldToNew.get(step.dependsOnOrdinal);
+        if (mappedDependency == null) {
+          throw new Error(
+            "composite contributor contains a forward step dependency",
+          );
+        }
+        dependsOnOrdinal = mappedDependency;
       }
+      oldToNew.set(step.ordinal, ordinal);
       output.push({
         ...step,
-        ordinal: output.length,
-        segmentOrdinal,
-        dependsOnOrdinal: dependsOnOrdinal ?? null,
+        ordinal,
+        segmentOrdinal:
+          step.segmentOrdinal == null ? null : entry.providerSegmentOrdinal,
+        dependsOnOrdinal,
         actionValidationResult: {
           ...step.actionValidationResult,
-          compositeSegmentOrdinal: segmentOrdinal,
+          compositeSourceLegId: entry.candidate.leg.sourceLegId,
+          compositeSegmentOrdinal: entry.providerSegmentOrdinal,
         },
       });
     }
-    priorLegLastOrdinal = output.at(-1)?.ordinal ?? priorLegLastOrdinal;
   }
   return output;
 }
 
-function sameFrozenOperation(
+function rebaseReservations(
+  selected: readonly RebasedCandidate[],
+): readonly FundingCommitReservation[] {
+  return selected.flatMap((entry) =>
+    entry.candidate.reservations.map((reservation) => ({
+      ...reservation,
+      segmentOrdinal:
+        reservation.segmentOrdinal == null
+          ? null
+          : entry.providerSegmentOrdinal,
+    })),
+  );
+}
+
+function sameFrozenOperationFacts(
   left: PlannedSourceOption,
   right: PlannedSourceOption,
 ): boolean {
@@ -286,96 +448,201 @@ function sameFrozenOperation(
       b.destinationTargetSnapshot,
     ) &&
     canonicalJsonEqual(a.marketContextSnapshot, b.marketContextSnapshot) &&
-    canonicalJsonEqual(a.venueBindingSnapshot, b.venueBindingSnapshot) &&
     canonicalJsonEqual(a.placementSnapshot, b.placementSnapshot)
   );
 }
 
-export function buildCompositeRelaySourceOption(
+function venueBindingOptionId(source: PlannedSourceOption): string | null {
+  const metadata =
+    source.commitPlan.operation.supportMetadata?.venueBindingOptionId;
+  if (typeof metadata === "string" && metadata.trim()) return metadata;
+  const snapshot = source.commitPlan.operation.venueBindingSnapshot;
+  const snapshotId = snapshot?.venueBindingOptionId;
+  return typeof snapshotId === "string" && snapshotId.trim()
+    ? snapshotId
+    : null;
+}
+
+function destinationObservation(
+  source: PlannedSourceOption,
+): JsonValue | null {
+  return (
+    source.commitPlan.operation.supportMetadata?.destinationObservation ?? null
+  );
+}
+
+function sharedProviderDestinationObservation(
+  selected: readonly CompositeCandidate[],
+): JsonValue {
+  const providerCandidates = selected.filter(
+    (entry) => entry.kind === "provider_segment",
+  );
+  const first = providerCandidates[0];
+  const observation = first ? destinationObservation(first.source) : null;
+  if (
+    observation == null ||
+    providerCandidates.some(
+      (entry) =>
+        !canonicalJsonEqual(
+          destinationObservation(entry.source),
+          observation,
+        ),
+    )
+  ) {
+    throw new Error(
+      "composite Relay contributors lack one immutable destination baseline",
+    );
+  }
+  return observation;
+}
+
+function selectedCandidateCompatibilityIssue(
+  selected: readonly CompositeCandidate[],
+): string | null {
+  const first = selected[0];
+  if (
+    !first ||
+    selected.some(
+      (entry) => !sameFrozenOperationFacts(first.source, entry.source),
+    )
+  ) {
+    return "composite contributors differ in destination or frozen intent facts";
+  }
+  const preparations = selected.filter(
+    (entry) => entry.kind === "venue_preparation",
+  );
+  if (preparations.length > 1) {
+    return "one destination cannot contain multiple venue preparation plans";
+  }
+  const bindingOptionIds = new Set(
+    selected
+      .map((entry) => venueBindingOptionId(entry.source))
+      .filter((value): value is string => value != null),
+  );
+  if (bindingOptionIds.size > 1) {
+    return "composite Relay contributors use different destination bindings";
+  }
+  const providerObservations = selected
+    .filter((entry) => entry.kind === "provider_segment")
+    .map((entry) => destinationObservation(entry.source));
+  const firstProviderObservation = providerObservations[0];
+  if (
+    firstProviderObservation == null ||
+    providerObservations.some(
+      (observation) =>
+        !canonicalJsonEqual(observation, firstProviderObservation),
+    )
+  ) {
+    return "composite Relay contributors lack one immutable destination baseline";
+  }
+  const reservationKeys = new Set<string>();
+  for (const entry of selected) {
+    for (const reservation of entry.reservations) {
+      const key = `${reservation.componentId}\u0000${reservation.mode}`;
+      if (reservationKeys.has(key)) {
+        return "composite plan reserves one component twice";
+      }
+      reservationKeys.add(key);
+    }
+  }
+  return null;
+}
+
+function assertCompatibleSelectedCandidates(
+  selected: readonly CompositeCandidate[],
+): void {
+  const issue = selectedCandidateCompatibilityIssue(selected);
+  if (issue) throw new Error(issue);
+}
+
+function aggregateDestination(
+  legs: readonly SourceOptionLeg[],
+  requiredDestination: Money,
+  field: "expectedDestination" | "minimumDestination",
+): Money {
+  return {
+    asset: requiredDestination.asset,
+    raw: legs
+      .reduce((sum, leg) => sum + rawAmount(leg[field].raw), 0n)
+      .toString(),
+  };
+}
+
+export function buildCompositeSourceOption(
   input: Readonly<{
     candidates: readonly PlannedSourceOption[];
     requiredDestination: Money;
+    destinationUnitPriceUsd: string | null;
     maximumFeeUsd: string;
     maximumFeeBps: number;
   }>,
 ): PlannedSourceOption | null {
-  const partial = input.candidates
+  if (input.destinationUnitPriceUsd == null) return null;
+  const eligible = input.candidates
     .filter(
       (source) =>
         source.compositeEligible === true &&
+        commitPlanRunsWithoutUserWalletAction(source.commitPlan) &&
         source.option.minimumDestination != null &&
+        rawAmount(source.option.minimumDestination.raw) > 0n &&
         rawAmount(source.option.minimumDestination.raw) <
           rawAmount(input.requiredDestination.raw),
     )
-    .sort((left, right) =>
-      left.option.sourceOptionId.localeCompare(right.option.sourceOptionId),
-    )
-    .slice(0, MAX_COMPOSITE_LEGS)
-    .map(candidateLeg);
+    .sort((left, right) => {
+      const leftRaw = rawAmount(left.option.minimumDestination?.raw ?? "0");
+      const rightRaw = rawAmount(right.option.minimumDestination?.raw ?? "0");
+      return leftRaw === rightRaw
+        ? left.option.sourceOptionId.localeCompare(right.option.sourceOptionId)
+        : leftRaw > rightRaw
+          ? -1
+          : 1;
+    });
+  if (eligible.length > MAX_COMPOSITE_CANDIDATES) return null;
+  const partial = eligible.map(candidate);
   if (partial.length < 2) return null;
   const selected = selectSubset(
     partial,
     input.requiredDestination,
+    input.destinationUnitPriceUsd,
     input.maximumFeeUsd,
     input.maximumFeeBps,
   );
   if (!selected) return null;
-  const firstEntry = selected[0];
-  if (!firstEntry) return null;
-  const first = firstEntry.source;
-  if (
-    selected.some(
-      (item) =>
-        !sameFrozenOperation(first, item.source) ||
-        item.leg.source.kind !== "owned_location" ||
-        item.leg.source.location.locationId !== item.reservation.locationId,
-    )
-  ) {
-    throw new Error(
-      "composite Relay legs differ in destination or source reservation",
-    );
-  }
-  const componentKeys = new Set<string>();
-  for (const item of selected) {
-    const key = `${item.reservation.componentId}\u0000${item.reservation.mode}`;
-    if (componentKeys.has(key)) {
-      throw new Error("composite Relay plan reserves one component twice");
-    }
-    componentKeys.add(key);
-  }
-
-  const legs = selected.map((item) => item.leg);
-  const expectedRaw = legs.reduce(
-    (sum, leg) => sum + rawAmount(leg.expectedDestination.raw),
-    0n,
+  const ordered = [...selected].sort(candidateOrder);
+  assertCompatibleSelectedCandidates(ordered);
+  const rebased = rebaseCandidates(ordered);
+  const legs = ordered.map((entry) => entry.leg);
+  const expectedDestination = aggregateDestination(
+    legs,
+    input.requiredDestination,
+    "expectedDestination",
   );
-  const minimumRaw = legs.reduce(
-    (sum, leg) => sum + rawAmount(leg.minimumDestination.raw),
-    0n,
+  const minimumDestination = aggregateDestination(
+    legs,
+    input.requiredDestination,
+    "minimumDestination",
   );
-  const expectedDestination = {
-    asset: input.requiredDestination.asset,
-    raw: expectedRaw.toString(),
-  };
-  const minimumDestination = {
-    asset: input.requiredDestination.asset,
-    raw: minimumRaw.toString(),
-  };
   const requiredActions = legs.flatMap((leg) => leg.requiredActions);
   const fees = legs.flatMap((leg) => leg.fees);
-  const estimatedUsdValues = selected.map(
-    (item) => item.source.option.estimatedUsd,
+  const estimatedUsdValues = ordered.map(
+    (entry) => entry.source.option.estimatedUsd,
   );
   const expiresAt = new Date(
     Math.min(
-      ...selected.map((item) => Date.parse(item.source.option.expiresAt)),
+      ...ordered.map((entry) => Date.parse(entry.source.option.expiresAt)),
     ),
   ).toISOString();
-  const experienceMode = selected.some(
-    (item) => item.source.option.experienceMode === "prepare_first",
-  )
+  const containsPreparation = ordered.some(
+    (entry) => entry.kind === "venue_preparation",
+  );
+  const experienceMode = containsPreparation
     ? "prepare_first"
     : "inline_funding";
+  const amountMode = ordered.every(
+    (entry) => entry.source.option.amountMode === "exact_input",
+  )
+    ? "exact_input"
+    : "exact_output";
   const option: SourceOption = {
     sourceOptionId: stableOpaqueId(
       "source",
@@ -389,7 +656,7 @@ export function buildCompositeRelaySourceOption(
     safeLabel: `Use ${legs.length} balances`,
     source: { kind: "composite", legCount: legs.length },
     sourceLegs: legs,
-    amountMode: "exact_input",
+    amountMode,
     maximumSourceRaw: null,
     expectedDestination,
     minimumDestination,
@@ -407,55 +674,71 @@ export function buildCompositeRelaySourceOption(
     selectable: true,
     reasonCodes: [
       ...new Set(
-        selected
-          .flatMap((item) => item.source.option.reasonCodes)
+        ordered
+          .flatMap((entry) => entry.source.option.reasonCodes)
           .filter((code) => code !== "minimum_output_not_met"),
       ),
     ],
   };
-  const walletSnapshots = selected.map(
-    (item) => item.source.commitPlan.operation.walletExecutionSnapshot,
+  const preparation = ordered.find(
+    (entry) => entry.kind === "venue_preparation",
   );
+  const providerDestinationObservation =
+    sharedProviderDestinationObservation(ordered);
+  const operationSource = preparation?.source ?? ordered[0]?.source;
+  if (!operationSource) return null;
+  const bindingOptionId = ordered
+    .map((entry) => venueBindingOptionId(entry.source))
+    .find((value): value is string => value != null);
+  const routeIds = ordered.flatMap((entry) =>
+    entry.source.routeId ? [entry.source.routeId] : [],
+  );
+  const supportMetadata = {
+    ...(operationSource.commitPlan.operation.supportMetadata ?? {}),
+    composite: true,
+    containsVenuePreparation: containsPreparation,
+    destinationObservation: providerDestinationObservation,
+    ...(preparation
+      ? {
+          venuePreparationMinimumDestination: jsonRecord(
+            preparation.leg.minimumDestination,
+          ),
+        }
+      : {}),
+    sourceLegIds: legs.map((leg) => leg.sourceLegId),
+    routeIds,
+    ...(bindingOptionId ? { venueBindingOptionId: bindingOptionId } : {}),
+  };
   const plan = {
     operation: {
-      ...first.commitPlan.operation,
+      ...operationSource.commitPlan.operation,
       initialState: {
         status: "in_progress" as const,
         stage: "committed" as const,
       },
-      experienceMode:
-        experienceMode === "inline_funding"
-          ? ("inline" as const)
-          : ("prepare_first" as const),
+      experienceMode: containsPreparation
+        ? ("prepare_first" as const)
+        : ("inline" as const),
       planKind: "composite_route" as const,
       sourceSnapshot: jsonRecord(option),
-      walletExecutionSnapshot: jsonRecord({ profiles: walletSnapshots }),
+      walletExecutionSnapshot: jsonRecord({
+        profiles: ordered.map(
+          (entry) => entry.source.commitPlan.operation.walletExecutionSnapshot,
+        ),
+      }),
       requestedSourceAmount: null,
       requestedDestinationAmount: jsonRecord(input.requiredDestination),
-      supportMetadata: {
-        ...(first.commitPlan.operation.supportMetadata ?? {}),
-        composite: true,
-        sourceLegIds: legs.map((leg) => leg.sourceLegId),
-        routeIds: selected.map((item) => {
-          if (!item.source.routeId) {
-            throw new Error("composite Relay route ID disappeared");
-          }
-          return item.source.routeId;
-        }),
-      },
+      supportMetadata,
     },
-    segments: selected.flatMap((item) => item.source.commitPlan.segments),
-    steps: renumberSteps(selected),
-    reservations: selected.map((item, segmentOrdinal) => ({
-      ...item.reservation,
-      segmentOrdinal,
-    })),
+    segments: ordered.flatMap((entry) => entry.source.commitPlan.segments),
+    steps: rebaseSteps(rebased),
+    reservations: rebaseReservations(rebased),
   };
   return {
     option,
     commitPlan: plan,
     routeId: null,
-    providerId: "relay",
+    providerId: null,
     compositeEligible: false,
   };
 }

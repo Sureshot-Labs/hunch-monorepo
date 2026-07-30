@@ -2423,12 +2423,83 @@ const tests: TestCase[] = [
         "   * GET /amm/quote",
       );
       assert.match(limitlessAccountBlock, /fetchLimitlessAccountRoute/);
+      assert.match(limitlessAccountBlock, /db: pool/);
       assert.doesNotMatch(limitlessAccountBlock, /fetchEvmCode/);
       assert.doesNotMatch(
         limitlessAccountBlock,
         /fetchLimitlessOnchainSnapshot/,
       );
       assert.doesNotMatch(limitlessAccountBlock, /fetchErc1155BalancesByOwner/);
+
+      const limitlessService = readFileSync(
+        resolve(apiSrcDir, "services/limitless-trading-execution-service.ts"),
+        "utf8",
+      );
+      const limitlessAccountServiceBlock = sourceSlice(
+        limitlessService,
+        "export async function fetchLimitlessAccountRoute",
+        "function isBytes32",
+      );
+      assert.match(
+        limitlessAccountServiceBlock,
+        /fetchOpenOrderCollateralLocks/,
+      );
+      assert.match(
+        limitlessAccountServiceBlock,
+        /collateralLocks == null[\s\S]*limitless\.get\([\s\S]*\) \?\? 0n/,
+        "a successful lock query with no open orders must report zero locked collateral",
+      );
+      assert.doesNotMatch(limitlessAccountServiceBlock, /locked-balance/);
+      const limitlessAccountPayloadType = sourceSlice(
+        limitlessService,
+        "type LimitlessAccountPayload = {",
+        "type LimitlessAccountCacheEntry",
+      );
+      assert.doesNotMatch(
+        limitlessAccountPayloadType,
+        /\brpcUrl\b/,
+        "the authenticated account DTO must never expose server RPC URLs",
+      );
+
+      const polymarketService = readFileSync(
+        resolve(
+          apiSrcDir,
+          "services/polymarket-trading-execution-service.ts",
+        ),
+        "utf8",
+      );
+      const polymarketAccountBlock = sourceSlice(
+        polymarketService,
+        "export async function fetchPolymarketAccountRoute",
+        "export async function syncPolymarketOrdersRoute",
+      );
+      assert.doesNotMatch(
+        polymarketAccountBlock,
+        /funderIsContract:[\s\S]*?\brpcUrl\s*:/,
+        "Polymarket account responses must not expose the server RPC URL",
+      );
+
+      const dflowRoute = readFileSync(
+        resolve(apiSrcDir, "routes/dflow-private.ts"),
+        "utf8",
+      );
+      const kalshiAccountBlock = sourceSlice(
+        dflowRoute,
+        "   * GET /account",
+        "   * GET /order",
+      );
+      assert.doesNotMatch(
+        kalshiAccountBlock,
+        /\brpcUrl:\s*env\.solanaRpcUrl/,
+        "Kalshi account responses must not expose the server RPC URL",
+      );
+
+      const fundingRuntime = readFileSync(
+        resolve(apiSrcDir, "funding/preparation/runtime-service.ts"),
+        "utf8",
+      );
+      assert.match(fundingRuntime, /fetchOpenOrderCollateralLocks/);
+      assert.doesNotMatch(fundingRuntime, /locked-balance/);
 
       const limitlessAmmQuoteBlock = sourceSlice(
         limitlessRoute,

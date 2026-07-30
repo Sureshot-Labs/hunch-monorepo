@@ -82,7 +82,6 @@ await test("stored credentials avoid a live profile lookup while fresh", () => {
       boundToExactWallet: true,
       observedAt: new Date("2026-07-24T11:59:00.000Z"),
       now: NOW,
-      maxAgeMs: 60_000,
     }),
     {
       present: true,
@@ -94,21 +93,20 @@ await test("stored credentials avoid a live profile lookup while fresh", () => {
   );
 });
 
-await test("stored credentials fail closed when stale", () => {
+await test("stored credentials stay valid regardless of record age", () => {
   assert.deepEqual(
     storedCredentialEvidence({
       present: true,
       boundToExactWallet: true,
-      observedAt: new Date("2026-07-24T11:58:59.999Z"),
+      observedAt: new Date("2025-07-24T11:58:59.999Z"),
       now: NOW,
-      maxAgeMs: 60_000,
     }),
     {
       present: true,
       boundToExactWallet: true,
-      verified: false,
-      observedAt: null,
-      stale: true,
+      verified: true,
+      observedAt: "2025-07-24T11:58:59.999Z",
+      stale: false,
     },
   );
 });

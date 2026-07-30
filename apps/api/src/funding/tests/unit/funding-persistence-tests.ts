@@ -13,11 +13,79 @@ import {
   DEFAULT_FUNDING_RUNTIME_POLICY,
   PRODUCTION_FUNDING_REGISTRY,
 } from "../../policies/funding-policy.js";
-import { fundingReconciliationPollDelayMs } from "../../reconciliation/funding-reducer.js";
+import {
+  fundingReconciliationDisposition,
+  fundingReconciliationPollDelayMs,
+  fundingReconciliationTerminalTimeoutReached,
+} from "../../reconciliation/funding-reducer.js";
 
 type Test = Readonly<{ name: string; run: () => void }>;
 
 const tests: readonly Test[] = [
+  {
+    name: "reconciliation stops active operations at a named terminal timeout without timing out user-funded waits",
+    run: () => {
+      const startedAt = new Date("2026-07-29T15:00:00.000Z");
+      const common = {
+        reconciliationStartedAt: startedAt,
+        now: new Date("2026-07-29T15:01:30.000Z"),
+        terminalTimeoutMs: 90_000,
+      };
+      assert.equal(
+        fundingReconciliationDisposition({
+          ...common,
+          state: { status: "in_progress", stage: "source_action" },
+          reductionCompleted: false,
+        }),
+        "recovery_required",
+      );
+      assert.equal(
+        fundingReconciliationDisposition({
+          ...common,
+          state: {
+            status: "awaiting_external_funds",
+            stage: "source_action",
+          },
+          reductionCompleted: false,
+        }),
+        "requeue",
+      );
+      assert.equal(
+        fundingReconciliationDisposition({
+          ...common,
+          state: { status: "in_progress", stage: "source_action" },
+          reductionCompleted: false,
+          reconciliationStartedAt: null,
+        }),
+        "requeue",
+      );
+      assert.equal(
+        fundingReconciliationDisposition({
+          ...common,
+          state: { status: "recovery_required", stage: "source_action" },
+          reductionCompleted: false,
+        }),
+        "complete",
+      );
+      assert.equal(
+        fundingReconciliationDisposition({
+          ...common,
+          state: { status: "in_progress", stage: "source_action" },
+          reductionCompleted: true,
+        }),
+        "complete",
+      );
+      assert.equal(
+        fundingReconciliationTerminalTimeoutReached({
+          reconciliationStartedAt: startedAt,
+          now: new Date("2026-07-29T15:01:29.999Z"),
+          terminalTimeoutMs: 90_000,
+        }),
+        false,
+      );
+      assert.equal(fundingReconciliationTerminalTimeoutReached(common), true);
+    },
+  },
   {
     name: "funding reconciliation polls active operations without hot-looping idle operations",
     run: () => {

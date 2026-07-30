@@ -86,13 +86,28 @@ try {
     gasLimitRaw: "21000",
   } as const;
   const actionFingerprint = hash(JSON.stringify(action));
+  const secondSourceLocation = {
+    ...sourceLocation,
+    locationId: opaque("location"),
+    details: {
+      ...sourceLocation.details,
+      walletId: opaque("wallet"),
+      address: "0x00000000000000000000000000000000000000a2",
+    },
+  } as const;
+  const secondAction = {
+    ...action,
+    actionId: opaque("action"),
+    senderWalletId: secondSourceLocation.details.walletId,
+  } as const;
+  const secondActionFingerprint = hash(JSON.stringify(secondAction));
   const plan: FundingCommitPlan = {
     operation: {
       purpose: "add_funds",
       initialState: { status: "in_progress", stage: "committed" },
       experienceMode: "prepare_first",
-      planKind: "wallet_route",
-      sourceSnapshot: { kind: "owned_location", location: sourceLocation },
+      planKind: "composite_route",
+      sourceSnapshot: { kind: "composite", legCount: 2 },
       destinationTargetSnapshot: {
         kind: "owned_location",
         location: {
@@ -107,8 +122,8 @@ try {
       venueBindingSnapshot: null,
       walletExecutionSnapshot: null,
       placementSnapshot: {},
-      requestedSourceAmount: { asset: ASSET, raw: "1000000" },
-      requestedDestinationAmount: { asset: ASSET, raw: "990000" },
+      requestedSourceAmount: null,
+      requestedDestinationAmount: { asset: ASSET, raw: "1980000" },
       supportMetadata: { test: true },
     },
     segments: [
@@ -137,6 +152,34 @@ try {
         refundLocationSnapshot: sourceLocation,
         quoteExpiresAt: new Date(Date.now() + 60_000).toISOString(),
       },
+      {
+        providerId: "relay",
+        adapterId: "relay_quote_v2",
+        adapterVersion: 1,
+        segmentKind: "same_network_swap",
+        status: "planned",
+        sourceSnapshot: {
+          kind: "owned_location",
+          location: secondSourceLocation,
+        },
+        destinationTargetSnapshot: {
+          kind: "owned_location",
+          location: {
+            ...sourceLocation,
+            locationId: opaque("segment-destination"),
+          },
+        },
+        quotedInput: { asset: ASSET, raw: "1000000" },
+        quotedExpectedOutput: { asset: ASSET, raw: "995000" },
+        quotedMinOutput: { asset: ASSET, raw: "990000" },
+        providerQuoteRefCiphertext: "ciphertext:request-2",
+        providerQuoteRefLookupHmac: hash("request-2"),
+        depositAddressCiphertext: null,
+        depositAddressLookupHmac: null,
+        lookupKeyVersion: 1,
+        refundLocationSnapshot: secondSourceLocation,
+        quoteExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+      },
     ],
     steps: [
       {
@@ -151,8 +194,43 @@ try {
         normalizedAction: action,
         actionValidationResult: { valid: true },
       },
+      {
+        ordinal: 1,
+        segmentOrdinal: 1,
+        stepKind: "transaction",
+        state: "action_required",
+        actionFingerprint: secondActionFingerprint,
+        executorId: "wallet_profile_evm_v1",
+        payerRequirement: "user",
+        dependsOnOrdinal: null,
+        normalizedAction: secondAction,
+        actionValidationResult: { valid: true },
+      },
     ],
-    reservations: [],
+    reservations: [
+      {
+        segmentOrdinal: 0,
+        componentId: opaque("component"),
+        locationId: sourceLocation.locationId,
+        networkId: ASSET.networkId,
+        assetId: ASSET.assetId,
+        assetDecimals: ASSET.decimals,
+        rawAmount: "1000000",
+        mode: "subtract_available",
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      },
+      {
+        segmentOrdinal: 1,
+        componentId: opaque("component"),
+        locationId: secondSourceLocation.locationId,
+        networkId: ASSET.networkId,
+        assetId: ASSET.assetId,
+        assetDecimals: ASSET.decimals,
+        rawAmount: "1000000",
+        mode: "subtract_available",
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      },
+    ],
   };
   const consentToken = opaque("consent");
   const quote = await createFundingQuoteInTransaction(client, {
@@ -178,16 +256,24 @@ try {
     subjectLookupHmac: hash("user"),
     subjectLookupKeyVersion: 1,
   });
-  const stepResult = await client.query<{ id: string }>(
+  const stepResult = await client.query<{
+    id: string;
+    ordinal: number;
+  }>(
     `
-      select id
+      select id, ordinal
       from funding_operation_steps
-      where operation_id = $1 and ordinal = 0
+      where operation_id = $1
+      order by ordinal
     `,
     [committed.operation.id],
   );
-  const stepId = stepResult.rows[0]?.id;
+  const stepId = stepResult.rows.find((row) => row.ordinal === 0)?.id;
+  const independentStepId = stepResult.rows.find(
+    (row) => row.ordinal === 1,
+  )?.id;
   assert.ok(stepId);
+  assert.ok(independentStepId);
 
   await expectFundingError(
     startFundingStepAttemptForUserInTransaction(client, {
@@ -199,6 +285,16 @@ try {
     }),
     "operation_not_found",
   );
+
+  const independentlyStarted =
+    await startFundingStepAttemptForUserInTransaction(client, {
+      userId,
+      operationId: committed.operation.id,
+      stepId: independentStepId,
+      canonicalActionFingerprint: secondActionFingerprint,
+      executorId: "wallet_profile_evm_v1",
+    });
+  assert.equal(independentlyStarted.attempt.attemptNumber, 1);
 
   const started = await startFundingStepAttemptForUserInTransaction(client, {
     userId,
@@ -220,7 +316,7 @@ try {
     "invalid_state_transition",
   );
 
-  const reported = await finishFundingStepAttemptForUserInTransaction(client, {
+  const reportInput = {
     userId,
     operationId: committed.operation.id,
     stepId,
@@ -232,8 +328,25 @@ try {
     receiptRefLookupHmac: hash("transaction"),
     lookupKeyVersion: 1,
     actualCosts: { networkFeeRaw: "21000" },
-  });
+  } as const;
+  const reported = await finishFundingStepAttemptForUserInTransaction(
+    client,
+    reportInput,
+  );
   assert.equal(reported.stepState, "reconcile_required");
+  const replayed = await finishFundingStepAttemptForUserInTransaction(
+    client,
+    reportInput,
+  );
+  assert.equal(replayed.attempt.id, reported.attempt.id);
+  assert.equal(replayed.stepState, "reconcile_required");
+  await expectFundingError(
+    finishFundingStepAttemptForUserInTransaction(client, {
+      ...reportInput,
+      actualCosts: { networkFeeRaw: "21001" },
+    }),
+    "invalid_state_transition",
+  );
   const storedStep = await fetchFundingOperationStepForUser(client, {
     userId,
     operationId: committed.operation.id,
@@ -252,7 +365,7 @@ try {
     "invalid_state_transition",
   );
   console.log(
-    "[funding-operation-action-persistence-integration-tests] owner scope, ambiguous report, and no-rebroadcast passed",
+    "[funding-operation-action-persistence-integration-tests] owner scope, idempotent exact report replay, mismatched replay rejection, ambiguous report, and no-rebroadcast passed",
   );
 } finally {
   await client.query("rollback");

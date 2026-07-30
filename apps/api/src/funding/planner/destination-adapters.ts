@@ -88,9 +88,11 @@ function toOption(
     fact.preparation.inspectionRevision !==
       fact.bindingOption.inspectionRevision;
   const reasonCodes = [
-    ...fact.bindingOption.reasonCodes,
-    ...fact.preparation.reasonCodes,
-    ...(stale ? (["preparation_evidence_stale"] as const) : []),
+    ...new Set([
+      ...fact.bindingOption.reasonCodes,
+      ...fact.preparation.reasonCodes,
+      ...(stale ? (["preparation_evidence_stale"] as const) : []),
+    ]),
   ];
   return {
     destinationOptionId: stableOpaqueId("destination", destinationKey(fact)),
