@@ -9,6 +9,7 @@ import {
 import { stableOpaqueId } from "../../account-value/canonical.js";
 import { createRelayReferenceCodec } from "../../funding-providers/relay/reference-codec.js";
 import {
+  isRelayQuoteRejectedError,
   RelayClient,
   RelayClientError,
 } from "../../funding-providers/relay/client.js";
@@ -20,6 +21,7 @@ import {
 } from "../../funding-providers/relay/mappings.js";
 import {
   RelayQuoteEconomicsError,
+  RelayQuoteValidationError,
   RelayWalletQuoteAdapter,
 } from "../../funding-providers/relay/wallet-adapter.js";
 import { RelayPinnedActionValidator } from "../../funding-providers/relay/action-validator.js";
@@ -37,7 +39,10 @@ import type {
   WalletExecutionProfile,
 } from "../domain/types.js";
 import type { FundingRuntimePolicy } from "../policies/funding-policy.js";
-import type { FundingSourcePlanningRequest } from "./planner.js";
+import type {
+  FundingSourcePlanningRequest,
+  FundingSourcePlanningResult,
+} from "./planner.js";
 import {
   fetchFundingRouteExperience,
   fundingRouteExperienceFingerprint,
@@ -71,6 +76,10 @@ import type {
 } from "./source-adapter.js";
 import { listAdaptedFundingSources } from "./source-adapter.js";
 import { groupWalletExecutableActions } from "./evm-action-batching.js";
+import {
+  canonicalAssetId,
+  sameAccountAddress,
+} from "../domain/asset-identity.js";
 
 const ROUTE_EXPERIENCE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1_000;
 export const SOLANA_NATIVE_EXECUTION_RESERVE_LAMPORTS = 3_000_000n;
@@ -120,7 +129,7 @@ function profileForLocation(
       (profile) =>
         profile.walletId === walletId &&
         profile.networkId === location.asset.networkId &&
-        profile.address.toLowerCase() === address.toLowerCase(),
+        sameAccountAddress(location.asset.networkId, profile.address, address),
     ) ?? null
   );
 }
@@ -134,7 +143,7 @@ function profileForExactAddress(
   const matches = account.ownership.wallets.filter(
     (profile) =>
       profile.networkId === networkId &&
-      profile.address.toLowerCase() === address.toLowerCase(),
+      sameAccountAddress(networkId, profile.address, address),
   );
   return matches.length === 1 ? (matches[0] ?? null) : null;
 }
@@ -149,7 +158,7 @@ function walletExecutionLocation(
     !walletId ||
     !address ||
     walletId !== profile.walletId ||
-    address.toLowerCase() !== profile.address.toLowerCase() ||
+    !sameAccountAddress(profile.networkId, address, profile.address) ||
     location.asset.networkId !== profile.networkId
   ) {
     return null;
@@ -231,9 +240,15 @@ function hasNativeGas(
     return (
       component.location.kind === "wallet" &&
       component.amount.asset.networkId === profile.networkId &&
-      component.amount.asset.assetId.toLowerCase() ===
-        nativeAssetId(component.amount.asset).toLowerCase() &&
-      address?.toLowerCase() === profile.address.toLowerCase() &&
+      canonicalAssetId(component.amount.asset) ===
+        canonicalAssetId({
+          ...component.amount.asset,
+          assetId: nativeAssetId(component.amount.asset),
+        }) &&
+      Boolean(
+        address &&
+        sameAccountAddress(profile.networkId, address, profile.address),
+      ) &&
       available?.freshness === "fresh" &&
       BigInt(available.availableRaw) >=
         (profile.networkId === "solana:mainnet"
@@ -550,11 +565,15 @@ export function deriveProductionRelayEligibleSourceFacts(input: {
       detail(component.location, "venueId") === "polymarket" &&
       detail(component.location, "polymarketFunderKind") === "deposit_wallet" &&
       component.amount.asset.networkId === "evm:137" &&
-      component.amount.asset.assetId.toLowerCase() ===
+      canonicalAssetId(component.amount.asset) ===
         RELAY_PINNED_ASSETS.polygonPusd.toLowerCase() &&
       Boolean(funderAddress) &&
       Boolean(linkedAddress) &&
-      funderAddress?.toLowerCase() !== linkedAddress?.toLowerCase() &&
+      Boolean(
+        funderAddress &&
+        linkedAddress &&
+        !sameAccountAddress("evm:137", funderAddress, linkedAddress),
+      ) &&
       directProfile?.source === "smart" &&
       directProfile.signingModes.length === 0;
     const handoffControllerProfile =
@@ -743,10 +762,16 @@ export function buildPolymarketPreRouteHandoffSteps(input: {
   if (
     handoff.kind !== "polymarket_deposit_wallet_to_controller_v1" ||
     input.sourceAmount.asset.networkId !== "evm:137" ||
-    input.sourceAmount.asset.assetId.toLowerCase() !==
-      handoff.tokenAddress.toLowerCase() ||
-    handoff.controllerAddress.toLowerCase() !==
-      input.profile.address.toLowerCase() ||
+    canonicalAssetId(input.sourceAmount.asset) !==
+      canonicalAssetId({
+        ...input.sourceAmount.asset,
+        assetId: handoff.tokenAddress,
+      }) ||
+    !sameAccountAddress(
+      input.sourceAmount.asset.networkId,
+      handoff.controllerAddress,
+      input.profile.address,
+    ) ||
     BigInt(input.sourceAmount.raw) <= 0n
   ) {
     throw new Error("Polymarket pre-route handoff differs from Relay source");
@@ -929,17 +954,29 @@ export class ProductionFundingSourcePlanner {
   async list(
     input: FundingSourcePlanningInput,
   ): Promise<readonly PlannedSourceOption[]> {
-    const adapted = await listAdaptedFundingSources(this.sourceAdapters, input);
+    return (await this.discover(input)).sources;
+  }
+
+  async discover(
+    input: FundingSourcePlanningInput,
+  ): Promise<FundingSourcePlanningResult> {
+    const [adapted, inventoryReasonCodes] = await Promise.all([
+      listAdaptedFundingSources(this.sourceAdapters, input),
+      this.listBlockingReasonCodes(input),
+    ]);
     const relayRequirement = remainingFundingRequirementAfterVenuePreparation(
       adapted,
       input.requiredAmount,
     );
+    const relayDiscovery = relayRequirement
+      ? await this.relayPlanner().discover({
+          ...input,
+          requiredAmount: relayRequirement,
+        })
+      : { sources: [], reasonCodes: [] };
     const relay = relayRequirement
       ? restrictResidualSourcesToCompositeContribution(
-          await this.relayPlanner().list({
-            ...input,
-            requiredAmount: relayRequirement,
-          }),
+          relayDiscovery.sources,
           {
             plannedRequirement: relayRequirement,
             fullRequirement: input.requiredAmount,
@@ -959,7 +996,15 @@ export class ProductionFundingSourcePlanner {
       maximumFeeUsd: limits.maximumFeeUsd,
       maximumFeeBps: limits.maximumFeeBps,
     });
-    return composite ? [...candidates, composite] : candidates;
+    return {
+      sources: composite ? [...candidates, composite] : candidates,
+      reasonCodes: [
+        ...new Set<FundingReasonCode>([
+          ...inventoryReasonCodes,
+          ...relayDiscovery.reasonCodes,
+        ]),
+      ],
+    };
   }
 
   async listBlockingReasonCodes(
@@ -1171,10 +1216,14 @@ export class ProductionFundingSourcePlanner {
       });
     } catch (error) {
       if (error instanceof RelayClientError) {
+        if (isRelayQuoteRejectedError(error)) return null;
         throw new FundingPlannerError(
           "provider_unavailable",
           `Relay funding quote failed: ${error.code}`,
         );
+      }
+      if (error instanceof RelayQuoteValidationError) {
+        return null;
       }
       if (error instanceof RelayQuoteEconomicsError) return null;
       throw error;

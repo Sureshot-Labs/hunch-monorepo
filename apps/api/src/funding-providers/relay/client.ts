@@ -10,6 +10,7 @@ import {
 const DEFAULT_RELAY_API_BASE_URL = "https://api.relay.link";
 const DEFAULT_TIMEOUT_MS = 10_000;
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
+const RELAY_PROVIDER_ERROR_CODE = /^[A-Z][A-Z0-9_]{0,127}$/u;
 
 type FetchLike = (input: string | URL, init?: RequestInit) => Promise<Response>;
 
@@ -24,9 +25,22 @@ export class RelayClientError extends Error {
       | "timeout",
     readonly retryable: boolean,
     readonly httpStatus: number | null = null,
+    readonly providerErrorCode: string | null = null,
   ) {
     super(message);
   }
+}
+
+// Relay Quote v2 uses HTTP 400 for a non-transient rejection of the exact
+// requested route/amount. It means there is no executable candidate for this
+// request, not that Relay itself is unavailable. The provider error code is
+// retained for diagnostics but is not an application-level routing boundary.
+export function isRelayQuoteRejectedError(error: RelayClientError): boolean {
+  return (
+    error.code === "http_error" &&
+    error.httpStatus === 400 &&
+    !error.retryable
+  );
 }
 
 export type RelayQuoteRequest = Readonly<{
@@ -184,6 +198,7 @@ export class RelayClient {
           "http_error",
           response.status === 429 || response.status >= 500,
           response.status,
+          relayProviderErrorCode(text),
         );
       }
       try {
@@ -209,6 +224,22 @@ export class RelayClient {
     } finally {
       clearTimeout(timeout);
     }
+  }
+}
+
+function relayProviderErrorCode(text: string): string | null {
+  try {
+    const parsed = JSON.parse(text) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return null;
+    }
+    const errorCode = (parsed as Record<string, unknown>).errorCode;
+    return typeof errorCode === "string" &&
+      RELAY_PROVIDER_ERROR_CODE.test(errorCode)
+      ? errorCode
+      : null;
+  } catch {
+    return null;
   }
 }
 

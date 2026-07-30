@@ -54,6 +54,30 @@ export type RelayFirstSelection = Readonly<{
   reasonCodes: readonly FundingReasonCode[];
 }>;
 
+export type RelayFirstSourcePlanningInput = Readonly<{
+  accountId: string;
+  request: FundingDiscoveryRequest;
+  marketContext: MarketContextBinding | null;
+  destination: ResolvedRouteDestination;
+  placement: PlacementDecision;
+  requiredAmount: Money;
+  policy: FundingRuntimePolicy;
+  policyRevision: string;
+  now: Date;
+}>;
+
+type RelaySourcePlanningOutcome =
+  | Readonly<{
+      kind: "candidate";
+      candidate: RelayFirstCandidate;
+    }>
+  | Readonly<{
+      kind:
+        | "deterministic_ineligible"
+        | "definitive_no_candidate"
+        | "transient_unknown";
+    }>;
+
 export type RelayEligibleSourceFact = Readonly<{
   componentId: string;
   reservationLocationId?: string;
@@ -467,24 +491,19 @@ export class RelayFirstSourcePlanner {
   }
 
   async list(
-    input: Readonly<{
-      accountId: string;
-      request: FundingDiscoveryRequest;
-      marketContext: MarketContextBinding | null;
-      destination: ResolvedRouteDestination;
-      placement: PlacementDecision;
-      requiredAmount: Money;
-      policy: FundingRuntimePolicy;
-      policyRevision: string;
-      now: Date;
-    }>,
+    input: RelayFirstSourcePlanningInput,
   ): Promise<readonly PlannedSourceOption[]> {
+    return (await this.discover(input)).sources;
+  }
+
+  async discover(
+    input: RelayFirstSourcePlanningInput,
+  ): Promise<RelayFirstSelection> {
     const planningStartedAt = this.monotonicNow();
-    let providerUnavailable = false;
     const relayProvider = input.policy.providers.find(
       (provider) => provider.providerId === "relay",
     );
-    if (!relayProvider) return [];
+    if (!relayProvider) return { sources: [], reasonCodes: [] };
     const deadline = quoteDeadline(input.request, input.policy, input.now);
     const limits = effectiveFundingEconomicsLimits(input.policy, {
       maximumFeeUsd: input.request.maxFeeUsd,
@@ -502,7 +521,9 @@ export class RelayFirstSourcePlanner {
           sameAsset(route.destinationAsset, input.requiredAmount.asset),
       )
       .sort((left, right) => left.routeId.localeCompare(right.routeId));
-    if (enabledRoutes.length === 0) return [];
+    if (enabledRoutes.length === 0) {
+      return { sources: [], reasonCodes: [] };
+    }
     const sourceFacts = [
       ...(await this.dependencies.listEligibleSources({
         accountId: input.accountId,
@@ -522,7 +543,7 @@ export class RelayFirstSourcePlanner {
     const plannedCandidates = await Promise.all(
       sourceFacts
         .slice(0, MAX_RELAY_SOURCE_QUOTES)
-        .map(async (source): Promise<RelayFirstCandidate | null> => {
+        .map(async (source): Promise<RelaySourcePlanningOutcome> => {
           if (
             source.source.kind !== "owned_location" ||
             source.source.location.accountId !== input.accountId ||
@@ -539,7 +560,7 @@ export class RelayFirstSourcePlanner {
             rawAmount(source.maximumSourceRaw) <
               rawAmount(source.quoteInputAmount.raw)
           ) {
-            return null;
+            return { kind: "deterministic_ineligible" };
           }
           const routes = enabledRoutes.filter(
             (route) =>
@@ -554,7 +575,7 @@ export class RelayFirstSourcePlanner {
             );
           }
           const route = routes[0];
-          if (!route) return null;
+          if (!route) return { kind: "deterministic_ineligible" };
           const quoteCorrelationId = stableOpaqueId(
             "funding_quote",
             [
@@ -572,8 +593,7 @@ export class RelayFirstSourcePlanner {
             this.totalPlannerTimeoutMs -
             (this.monotonicNow() - planningStartedAt);
           if (remainingPlannerMs <= 0) {
-            providerUnavailable = true;
-            return null;
+            return { kind: "transient_unknown" };
           }
           let plannedQuote: RelayPlanningQuote | null;
           try {
@@ -596,12 +616,13 @@ export class RelayFirstSourcePlanner {
               error instanceof FundingPlannerError &&
               error.code === "provider_unavailable"
             ) {
-              providerUnavailable = true;
-              return null;
+              return { kind: "transient_unknown" };
             }
             throw error;
           }
-          if (!plannedQuote) return null;
+          if (!plannedQuote) {
+            return { kind: "definitive_no_candidate" };
+          }
           assertRelayPlanningQuote({
             quote: plannedQuote,
             route,
@@ -713,35 +734,37 @@ export class RelayFirstSourcePlanner {
             })),
           };
           return {
-            routeId: route.routeId,
-            providerId: "relay",
-            routeEnabled: true,
-            sourceOption: option,
-            executionPlan: plannedQuote.executionPlan,
-            commitPlan,
+            kind: "candidate",
+            candidate: {
+              routeId: route.routeId,
+              providerId: "relay",
+              routeEnabled: true,
+              sourceOption: option,
+              executionPlan: plannedQuote.executionPlan,
+              commitPlan,
+            },
           };
         }),
     );
-    const candidates = plannedCandidates.filter(
-      (candidate): candidate is RelayFirstCandidate => candidate !== null,
+    const candidates = plannedCandidates.flatMap((outcome) =>
+      outcome.kind === "candidate" ? [outcome.candidate] : [],
     );
     const selected = selectRelayFirstSourceOptions({
       candidates,
       requiredDestination: input.requiredAmount,
       policy: input.policy,
     }).sources;
-    if (selected.some((source) => source.option.selectable)) return selected;
-    const result = selected;
-    if (
-      !result.some((source) => source.option.selectable) &&
-      providerUnavailable
-    ) {
-      throw new FundingPlannerError(
-        "provider_unavailable",
-        "Relay funding quote is temporarily unavailable",
-      );
+    if (selected.some((source) => source.option.selectable)) {
+      return { sources: selected, reasonCodes: [] };
     }
-    return result;
+    return {
+      sources: selected,
+      reasonCodes: plannedCandidates.some(
+        (outcome) => outcome.kind === "transient_unknown",
+      )
+        ? ["provider_status_unknown"]
+        : [],
+    };
   }
 
   private async quoteRelayWithinBudget(

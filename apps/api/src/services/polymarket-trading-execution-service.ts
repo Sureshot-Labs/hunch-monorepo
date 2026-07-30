@@ -16,6 +16,7 @@ import {
   releaseFundingReservationForDefinitiveTradeFailure,
 } from "../funding/persistence/funding-evidence-repository.js";
 import { canonicalJsonHash } from "../funding/persistence/canonical.js";
+import { buildFundingTradeConsumerIntent } from "../funding/persistence/funding-trade-consumer-intent.js";
 import {
   claimFundingTradeAttempt,
   markFundingTradeAttemptSubmissionStarted,
@@ -6831,28 +6832,6 @@ export async function submitPolymarketClientSignedOrder(input: {
   const marketInfo = orderTokenId
     ? await fetchPolymarketMarketInfo(input.pool, { tokenId: orderTokenId })
     : null;
-  if (fundingReservation) {
-    try {
-      await assertFundingReservationReadyForTrade(input.pool, {
-        userId: input.userId,
-        link: fundingReservation,
-        venue: "polymarket",
-        marketId: marketInfo?.unified_market_id ?? null,
-      });
-    } catch (error) {
-      return {
-        ok: false,
-        statusCode: 409,
-        payload: {
-          error:
-            error instanceof Error
-              ? error.message
-              : "Funding reservation is unavailable",
-        },
-      };
-    }
-  }
-
   const normalizedOrder = normalizeOrderForPayload(order, side);
   const normalizedForHash = normalizeOrderForHash(order, side);
   if (normalizedOrder.expiration == null) {
@@ -6876,6 +6855,50 @@ export async function submitPolymarketClientSignedOrder(input: {
         error: "Order payload is missing required hash fields",
       },
     };
+  }
+  const fundingMarketId = marketInfo?.unified_market_id ?? null;
+  const fundingConsumerIntent =
+    fundingReservation && fundingMarketId
+      ? buildFundingTradeConsumerIntent({
+          venueId: "polymarket",
+          marketId: fundingMarketId,
+          marketContextId: normalizedForHash.tokenId,
+          spend: {
+            asset: {
+              networkId: "evm:137",
+              assetId: env.polymarketUsdcAddress,
+              decimals: POLY_DECIMALS,
+            },
+            raw: normalizedForHash.makerAmount,
+          },
+        })
+      : null;
+  if (fundingReservation) {
+    if (!fundingConsumerIntent) {
+      return {
+        ok: false,
+        statusCode: 409,
+        payload: { error: "Funding reservation market binding is unavailable" },
+      };
+    }
+    try {
+      await assertFundingReservationReadyForTrade(input.pool, {
+        userId: input.userId,
+        link: fundingReservation,
+        intent: fundingConsumerIntent,
+      });
+    } catch (error) {
+      return {
+        ok: false,
+        statusCode: 409,
+        payload: {
+          error:
+            error instanceof Error
+              ? error.message
+              : "Funding reservation is unavailable",
+        },
+      };
+    }
   }
 
   if (side === "SELL") {
@@ -6931,7 +6954,14 @@ export async function submitPolymarketClientSignedOrder(input: {
   let fundingTradeAttemptId: string | null = null;
   let fundingTradeClaimToken: string | null = null;
   if (fundingReservation) {
-    const marketId = marketInfo?.unified_market_id ?? null;
+    if (!fundingConsumerIntent) {
+      return {
+        ok: false,
+        statusCode: 409,
+        payload: { error: "Funding reservation market binding is unavailable" },
+      };
+    }
+    const marketId = fundingMarketId;
     if (!marketId) {
       return {
         ok: false,
@@ -6958,6 +6988,7 @@ export async function submitPolymarketClientSignedOrder(input: {
         executionPath: "polymarket_clob",
         idempotencyKey: `polymarket-clob:${orderHash}`,
         canonicalFingerprint,
+        consumerIntent: fundingConsumerIntent,
         externalReference: orderHash,
       });
       if (!claim.claimed) {

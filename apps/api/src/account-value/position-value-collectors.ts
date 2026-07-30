@@ -36,20 +36,25 @@ function normalizePositionToken(venue: string, tokenId: string): string {
 }
 
 function positionIdentity(position: Position): string {
-  const wallet = position.walletAddress?.startsWith("0x")
-    ? position.walletAddress.toLowerCase()
-    : (position.walletAddress ?? "unknown");
+  const walletAddress = position.walletAddress ?? "unknown";
+  const wallet = /^0x[0-9a-fA-F]{40}$/.test(walletAddress)
+    ? walletAddress.toLowerCase()
+    : walletAddress;
   return [
     position.venue,
     wallet,
-    normalizePositionToken(position.venue, position.tokenId).toLowerCase(),
+    normalizePositionToken(position.venue, position.tokenId),
   ].join(":");
 }
 
 function positionBindingId(position: Position): string {
+  const walletAddress = position.walletAddress ?? "unknown";
+  const canonicalWallet = /^0x[0-9a-fA-F]{40}$/.test(walletAddress)
+    ? walletAddress.toLowerCase()
+    : walletAddress;
   return stableOpaqueId(
     "binding",
-    `${position.userId}:${position.venue}:${position.walletAddress?.toLowerCase() ?? "unknown"}`,
+    `${position.userId}:${position.venue}:${canonicalWallet}`,
   );
 }
 

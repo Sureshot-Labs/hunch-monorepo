@@ -73,6 +73,21 @@ export class RelayQuoteEconomicsError extends Error {
   readonly code = "relay_quote_economics_rejected";
 }
 
+export class RelayQuoteValidationError extends Error {
+  readonly code = "relay_quote_validation_failed";
+
+  constructor(message: string) {
+    super(message);
+    this.name = "RelayQuoteValidationError";
+  }
+}
+
+function relayQuoteValidationError(error: unknown): RelayQuoteValidationError {
+  return new RelayQuoteValidationError(
+    error instanceof Error ? error.message : "Relay quote validation failed",
+  );
+}
+
 function requiredLocationDetail(
   details: Readonly<Record<string, unknown>>,
   key: string,
@@ -302,7 +317,7 @@ export class RelayWalletQuoteAdapter {
         ) {
           throw new RelayQuoteEconomicsError(error.message);
         }
-        throw error;
+        throw relayQuoteValidationError(error);
       }
       requestId = validated.requestId;
       sourceAmountRaw = validated.sourceAmountRaw;
@@ -358,7 +373,7 @@ export class RelayWalletQuoteAdapter {
         ) {
           throw new RelayQuoteEconomicsError(error.message);
         }
-        throw error;
+        throw relayQuoteValidationError(error);
       }
       requestId = validated.requestId;
       sourceAmountRaw = validated.sourceAmountRaw;
@@ -415,7 +430,7 @@ export class RelayWalletQuoteAdapter {
         ) {
           throw new RelayQuoteEconomicsError(error.message);
         }
-        throw error;
+        throw relayQuoteValidationError(error);
       }
       requestId = validated.requestId;
       sourceAmountRaw = validated.sourceAmountRaw;
@@ -451,13 +466,18 @@ export class RelayWalletQuoteAdapter {
         },
       ];
     } else {
-      const validated = validateRelaySolanaRehearsalQuote({
-        amount: BigInt(input.sourceAmount.raw),
-        minimumOutputFloor: BigInt(input.minimumOutput.raw),
-        quote,
-        recipient: recipientAddress,
-        user: userAddress,
-      });
+      let validated;
+      try {
+        validated = validateRelaySolanaRehearsalQuote({
+          amount: BigInt(input.sourceAmount.raw),
+          minimumOutputFloor: BigInt(input.minimumOutput.raw),
+          quote,
+          recipient: recipientAddress,
+          user: userAddress,
+        });
+      } catch (error) {
+        throw relayQuoteValidationError(error);
+      }
       requestId = validated.requestId;
       expectedOutputRaw = validated.expectedOutputRaw;
       minimumOutputRaw = validated.minimumOutputRaw;

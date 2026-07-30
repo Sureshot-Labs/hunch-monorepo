@@ -204,6 +204,16 @@ function intent(
     confirmedSourceAmount: null,
     marketContextId:
       purpose === "trade_shortfall" ? "marketctx_12345678" : null,
+    consumerIntent:
+      purpose === "trade_shortfall"
+        ? {
+            venueId: "polymarket",
+            marketId: "polymarket:market_12345678",
+            marketContextId: "marketctx_12345678",
+            side: "BUY",
+            spend: { asset: POLYGON_PUSD, raw: requestedRaw },
+          }
+        : null,
     destinationOptionId: "destination_poly_12345678",
     withdrawalRecipientId: null,
     venueBindingOptionId: null,
@@ -1243,13 +1253,160 @@ await test("Relay-first source planner asks only one exact Relay route", async (
     },
     { relayQuoteTimeoutMs: 5, totalPlannerTimeoutMs: 10 },
   );
-  await assert.rejects(
-    () => timedOutPlanner.list(plannerInput),
-    (error: unknown) =>
-      error instanceof FundingPlannerError &&
-      error.code === "provider_unavailable",
-  );
+  assert.deepEqual(await timedOutPlanner.discover(plannerInput), {
+    sources: [],
+    reasonCodes: ["provider_status_unknown"],
+  });
   assert.equal(aborted, true);
+
+  let resilientQuoteCalls = 0;
+  const resilientPlanner = new RelayFirstSourcePlanner({
+    listEligibleSources: async () => [
+      {
+        componentId: "component_invalid_quote_12345678",
+        sourceLocationPatternId: "wallet_polygon",
+        safeLabel: "Provider-drifted source",
+        source: exactSource,
+        quoteInputAmount: { asset: POLYGON_PUSD, raw: "1000000" },
+        maximumSourceRaw: "2000000",
+        maximumSlippageBps: 100,
+        estimatedUsd: "1",
+        transferable: true,
+        riskEligible: true,
+        walletExecutionReady: true,
+        nativeGasReady: true,
+        freshness: "fresh",
+      },
+      {
+        componentId: "component_valid_quote_12345678",
+        sourceLocationPatternId: "wallet_polygon",
+        safeLabel: "Valid source",
+        source: exactSource,
+        quoteInputAmount: { asset: POLYGON_PUSD, raw: "1000000" },
+        maximumSourceRaw: "2000000",
+        maximumSlippageBps: 100,
+        estimatedUsd: "1",
+        transferable: true,
+        riskEligible: true,
+        walletExecutionReady: true,
+        nativeGasReady: true,
+        freshness: "fresh",
+      },
+    ],
+    quoteRelay: async ({ source, sourceAmount, minimumOutput }) => {
+      resilientQuoteCalls += 1;
+      if (source.componentId === "component_invalid_quote_12345678") {
+        throw new FundingPlannerError(
+          "provider_unavailable",
+          "Relay funding quote failed validation",
+        );
+      }
+      return {
+        sourceAmount,
+        sourceEstimatedUsd: "1",
+        candidate: {
+          providerId: "relay",
+          adapterVersion: 1,
+          capability: "same_network_swap",
+          amountMode: "exact_input",
+          source: exactSource,
+          destination: exactDestination.target,
+          expectedOutput: minimumOutput,
+          minimumOutput,
+          fees: [],
+          eta: { minSeconds: 5, maxSeconds: 15 },
+          expiresAt: "2026-07-24T12:00:30.000Z",
+          actionKinds: ["evm_transaction"],
+          refundSemantics: "owned_refund",
+          opaqueQuoteRef: "opaque_relay_quote_resilient_12345678",
+        },
+        feeUsd: [],
+        minimumDestinationEstimatedUsd: "1",
+        executionPlan: {
+          kind: "wallet_route",
+          segments: [
+            {
+              segmentId: "segment_relay_resilient_12345678",
+              providerId: "relay",
+              adapterId: "relay_quote_v2",
+              adapterVersion: 1,
+              source: exactSource,
+              destination: exactDestination.target,
+              amountMode: "exact_input",
+            },
+          ],
+        },
+        commitPlan: commitPlan(sourceAmount.raw),
+      };
+    },
+    observeRoute: async () => null,
+  });
+  const resilientSources = await resilientPlanner.list(plannerInput);
+  assert.equal(resilientQuoteCalls, 2);
+  assert.equal(resilientSources.length, 1);
+  assert.equal(resilientSources[0]?.option.safeLabel, "Valid source");
+
+  let mixedFailureQuoteCalls = 0;
+  const mixedFailurePlanner = new RelayFirstSourcePlanner({
+    listEligibleSources: async () => [
+      {
+        componentId: "component_definitive_rejection_12345678",
+        sourceLocationPatternId: "wallet_polygon",
+        safeLabel: "Amount rejected",
+        source: exactSource,
+        quoteInputAmount: { asset: POLYGON_PUSD, raw: "1791747" },
+        quoteMinimumOutput: { asset: POLYGON_PUSD, raw: "1773829" },
+        maximumSourceRaw: "1791747",
+        maximumSlippageBps: 100,
+        estimatedUsd: "1.79",
+        transferable: true,
+        riskEligible: true,
+        walletExecutionReady: true,
+        nativeGasReady: true,
+        freshness: "fresh",
+      },
+      {
+        componentId: "component_parallel_provider_failure_12345678",
+        sourceLocationPatternId: "wallet_polygon",
+        safeLabel: "Provider-failed source",
+        source: exactSource,
+        quoteInputAmount: { asset: POLYGON_PUSD, raw: "500000" },
+        quoteMinimumOutput: { asset: POLYGON_PUSD, raw: "495000" },
+        maximumSourceRaw: "500000",
+        maximumSlippageBps: 100,
+        estimatedUsd: "0.5",
+        transferable: true,
+        riskEligible: true,
+        walletExecutionReady: true,
+        nativeGasReady: true,
+        freshness: "fresh",
+      },
+    ],
+    quoteRelay: async ({ source }) => {
+      mixedFailureQuoteCalls += 1;
+      if (
+        source.componentId === "component_definitive_rejection_12345678"
+      ) {
+        return null;
+      }
+      throw new FundingPlannerError(
+        "provider_unavailable",
+        "parallel source timed out",
+      );
+    },
+    observeRoute: async () => null,
+  });
+  assert.deepEqual(
+    await mixedFailurePlanner.discover({
+      ...plannerInput,
+      requiredAmount: { asset: POLYGON_PUSD, raw: "1998348" },
+    }),
+    {
+      sources: [],
+      reasonCodes: ["provider_status_unknown"],
+    },
+  );
+  assert.equal(mixedFailureQuoteCalls, 2);
 
   let activeQuotes = 0;
   let maximumConcurrentQuotes = 0;
@@ -1814,6 +1971,45 @@ await test("retryable source inventory failure is not reported as insufficient l
   );
 });
 
+await test("transient provider failure remains a partial liquidity projection so manual funding stays available", async () => {
+  const policy = mutablePolicy();
+  policy.creationMode = "on";
+  const projection = await new FundingPlanner({
+    listDestinations: async () => [candidate()],
+    resolveMarketContext: async () => null,
+    listSources: async () => {
+      throw new Error("discoverSources must be the single source boundary");
+    },
+    discoverSources: async () => ({
+      sources: [],
+      reasonCodes: ["provider_status_unknown"],
+    }),
+    store: new MemoryPlanningStore(),
+    now: () => NOW,
+  }).discover({
+    accountId: USER_ID,
+    request: intent("add_funds", "1000000"),
+    policy,
+    policyRevision: "policy_revision_12345678",
+    ownershipRevision: "ownership_revision_12345678",
+  });
+
+  assert.equal(projection.mode, "unavailable");
+  assert.equal(projection.completeness, "partial");
+  assert.equal(projection.freshness, "stale");
+  assert.deepEqual(projection.errors, [
+    { code: "provider_status_unknown", retryable: true },
+  ]);
+  assert.equal(
+    projection.reasonCodes.includes("provider_status_unknown"),
+    true,
+  );
+  assert.equal(
+    projection.reasonCodes.includes("insufficient_liquidity"),
+    false,
+  );
+});
+
 await test("planner evaluates collected evidence at a current clock and permits known-zero direct ingress", async () => {
   const policy = mutablePolicy();
   policy.creationMode = "on";
@@ -2184,12 +2380,15 @@ await test("planner preserves Add Funds exact amount and trade shortfall", async
       resolveMarketContext: async ({ marketContextId }) => ({
         marketContextId,
         venueId: "polymarket",
-        marketId: "market_12345678",
+        marketId: "polymarket:market_12345678",
         side: "yes",
         executionProfileId: "profile_polymarket",
         marketPriceRevision: "marketprice_12345678",
         collateralAsset: POLYGON_PUSD,
-        requestedCollateralRaw: request.requestedDestinationAmount?.raw ?? "0",
+        requestedCollateralRaw:
+          request.consumerIntent?.spend.raw ??
+          request.requestedDestinationAmount?.raw ??
+          "0",
         compatibleVenueBindingOptionIds: [
           exactCandidate.bindingOption.venueBindingOptionId,
         ],
@@ -2217,6 +2416,13 @@ await test("planner preserves Add Funds exact amount and trade shortfall", async
   const trade = await run(
     intent("trade_shortfall", "5000000", {
       destinationOptionId: null,
+      consumerIntent: {
+        venueId: "polymarket",
+        marketId: "polymarket:market_12345678",
+        marketContextId: "marketctx_12345678",
+        side: "BUY",
+        spend: { asset: POLYGON_PUSD, raw: "4900000" },
+      },
     }),
     "2000000",
   );
@@ -2225,6 +2431,76 @@ await test("planner preserves Add Funds exact amount and trade shortfall", async
   assert.equal(trade.convertibleRaw, "3000000");
   assert.equal(trade.convertibleUsd, "3");
   assert.equal(trade.sourceOptions[0]?.minimumDestination?.raw, "3000000");
+  assert.equal(
+    store.rows.get(trade.liquidityProjectionId)?.plannerSnapshot.marketContext
+      ?.requestedCollateralRaw,
+    "4900000",
+  );
+});
+
+await test("an uncovered trade shortfall stays a usable insufficient-liquidity projection", async () => {
+  const policy = mutablePolicy();
+  policy.creationMode = "on";
+  const request = intent("trade_shortfall", "10100401", {
+    destinationOptionId: null,
+    consumerIntent: {
+      venueId: "polymarket",
+      marketId: "polymarket:561251",
+      marketContextId:
+        "50862799703982327636174441241062907649998751737045006653560124656563256528691",
+      side: "BUY",
+      spend: { asset: POLYGON_PUSD, raw: "10000000" },
+    },
+    marketContextId:
+      "50862799703982327636174441241062907649998751737045006653560124656563256528691",
+  });
+  const exactCandidate = candidate({
+    option: destinationOption({ preparationPurpose: "buy" }),
+    bindingOption: bindingOption({ preparationPurpose: "buy" }),
+    availableNow: { asset: POLYGON_PUSD, raw: "8102053" },
+  });
+  let plannedShortfallRaw: string | null = null;
+  const projection = await new FundingPlanner({
+    listDestinations: async () => [exactCandidate],
+    resolveMarketContext: async ({ marketContextId }) => ({
+      marketContextId,
+      venueId: "polymarket",
+      marketId: "polymarket:561251",
+      side: "yes",
+      executionProfileId: "profile_polymarket",
+      marketPriceRevision: "marketprice_561251",
+      collateralAsset: POLYGON_PUSD,
+      requestedCollateralRaw: "10000000",
+      compatibleVenueBindingOptionIds: [
+        exactCandidate.bindingOption.venueBindingOptionId,
+      ],
+      expiresAt: "2026-07-24T12:01:00.000Z",
+    }),
+    listSources: async ({ requiredAmount }) => {
+      plannedShortfallRaw = requiredAmount.raw;
+      return [];
+    },
+    store: new MemoryPlanningStore(),
+    now: () => NOW,
+  }).discover({
+    accountId: USER_ID,
+    request,
+    policy,
+    policyRevision: "policy_revision_12345678",
+    ownershipRevision: "ownership_revision_12345678",
+  });
+
+  assert.equal(plannedShortfallRaw, "1998348");
+  assert.equal(projection.requestedCollateralRaw, "10100401");
+  assert.equal(projection.availableNowRaw, "8102053");
+  assert.equal(projection.shortfallRaw, "1998348");
+  assert.equal(projection.mode, "unavailable");
+  assert.deepEqual(projection.sourceOptions, []);
+  assert.equal(
+    projection.reasonCodes.includes("insufficient_liquidity"),
+    true,
+  );
+  assert.equal(projection.errors.length, 0);
 });
 
 await test("one liquidity discovery resolves market context and destination candidates once", async () => {
@@ -2246,7 +2522,7 @@ await test("one liquidity discovery resolves market context and destination cand
       return {
         marketContextId,
         venueId: "polymarket",
-        marketId: "market_12345678",
+        marketId: "polymarket:market_12345678",
         side: "YES",
         executionProfileId: "profile_polymarket",
         marketPriceRevision: "marketprice_12345678",
@@ -2306,7 +2582,7 @@ await test("planner keeps the true tiny shortfall while quoting one executable t
     resolveMarketContext: async ({ marketContextId }) => ({
       marketContextId,
       venueId: "polymarket",
-      marketId: "market_12345678",
+      marketId: "polymarket:market_12345678",
       side: "yes",
       executionProfileId: "profile_polymarket",
       marketPriceRevision: "marketprice_12345678",
@@ -2364,7 +2640,7 @@ await test("a tiny shortfall falls back when no source covers the executable ref
     resolveMarketContext: async ({ marketContextId }) => ({
       marketContextId,
       venueId: "polymarket",
-      marketId: "market_12345678",
+      marketId: "polymarket:market_12345678",
       side: "yes",
       executionProfileId: "profile_polymarket",
       marketPriceRevision: "marketprice_12345678",

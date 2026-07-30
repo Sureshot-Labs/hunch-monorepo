@@ -61,6 +61,10 @@ import type {
   VenueBindingOption,
   VenueId,
 } from "../domain/types.js";
+import {
+  canonicalAssetId,
+  canonicalAssetKey,
+} from "../domain/asset-identity.js";
 import { canonicalJsonHash } from "../persistence/canonical.js";
 import { fundingSidecarRuntimeConfig } from "../runtime/sidecar-runtime-config.js";
 import type {
@@ -334,7 +338,7 @@ function bindingFor(input: {
       kind: "venue_account",
       locationId: stableOpaqueId(
         "location",
-        `${bindingId}:${asset.networkId}:${asset.assetId.toLowerCase()}`,
+        `${bindingId}:${canonicalAssetKey(asset)}`,
       ),
       accountId: input.accountId,
       asset,
@@ -825,7 +829,7 @@ async function reservedRawForLocation(input: {
       where user_id = $1
         and location_id = $2
         and network_id = $3
-        and lower(asset_id) = lower($4)
+        and asset_id = $4
         and asset_decimals = $5
         and state = 'active'
         and expires_at > now()
@@ -834,7 +838,7 @@ async function reservedRawForLocation(input: {
       input.userId,
       input.locationId,
       input.asset.networkId,
-      input.asset.assetId,
+      canonicalAssetId(input.asset),
       input.asset.decimals,
     ],
   );

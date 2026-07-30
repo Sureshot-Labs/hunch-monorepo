@@ -1,9 +1,6 @@
 import type { AccountValueReadModel } from "../../account-value/runtime-service.js";
 import { multiplyRawByUnitPrice } from "../../account-value/decimal.js";
-import {
-  canonicalAssetKey,
-  stableOpaqueId,
-} from "../../account-value/canonical.js";
+import { stableOpaqueId } from "../../account-value/canonical.js";
 import {
   buildPolymarketFundingPlan,
   PolymarketFundingPlanError,
@@ -20,6 +17,11 @@ import type {
   SourceOption,
   WalletExecutionProfile,
 } from "../domain/types.js";
+import {
+  canonicalAccountAddress,
+  canonicalAssetKey,
+  sameAccountAddress,
+} from "../domain/asset-identity.js";
 import { resolveActionSponsorship } from "../execution/sponsorship-policy.js";
 import { canonicalJsonHash } from "../persistence/canonical.js";
 import type {
@@ -104,7 +106,7 @@ function profileForExactWallet(input: {
       (profile) =>
         profile.walletId === input.walletId &&
         profile.networkId === input.networkId &&
-        profile.address.toLowerCase() === input.address.toLowerCase(),
+        sameAccountAddress(input.networkId, profile.address, input.address),
     ) ?? null
   );
 }
@@ -123,7 +125,10 @@ function exactIngressVariant(
     variantId: stableOpaqueId(
       "ingress_variant",
       canonicalJsonHash({
-        destinationAddress: destinationAddress.toLowerCase(),
+        destinationAddress: canonicalAccountAddress(
+          input.requiredAmount.asset.networkId,
+          destinationAddress,
+        ),
         asset: input.requiredAmount.asset,
         completion: "direct_destination_credit",
       }),
@@ -161,9 +166,17 @@ function buildPolymarketIngressCompletion(input: {
     facts.target.kind !== "owned_location" ||
     !snapshot ||
     !destinationAddress ||
-    destinationAddress.toLowerCase() !== snapshot.depositWallet.toLowerCase() ||
-    snapshot.routerAddress.toLowerCase() !==
-      input.canonicalRouterAddress?.toLowerCase() ||
+    !sameAccountAddress(
+      "evm:137",
+      destinationAddress,
+      snapshot.depositWallet,
+    ) ||
+    !input.canonicalRouterAddress ||
+    !sameAccountAddress(
+      "evm:137",
+      snapshot.routerAddress,
+      input.canonicalRouterAddress,
+    ) ||
     !sameAsset(
       input.planning.requiredAmount.asset,
       facts.option.requiredAsset,
@@ -368,7 +381,7 @@ function buildRoutedReceiveVariants(input: {
   const existing = new Set(
     input.existing.map(
       (variant) =>
-        `${variant.networkId}:${variant.asset.assetId.toLowerCase()}:${variant.destinationAddress.toLowerCase()}`,
+        `${canonicalAssetKey(variant.asset)}:${canonicalAccountAddress(variant.networkId, variant.destinationAddress)}`,
     ),
   );
   const componentVariants = (
@@ -425,7 +438,11 @@ function buildRoutedReceiveVariants(input: {
     ) {
       return [];
     }
-    const key = `${component.amount.asset.networkId}:${component.amount.asset.assetId.toLowerCase()}:${address.toLowerCase()}`;
+    const destinationAddress = canonicalAccountAddress(
+      component.amount.asset.networkId,
+      address,
+    );
+    const key = `${canonicalAssetKey(component.amount.asset)}:${destinationAddress}`;
     if (existing.has(key)) return [];
     existing.add(key);
     return [
@@ -433,7 +450,7 @@ function buildRoutedReceiveVariants(input: {
         variantId: stableOpaqueId(
           "ingress_variant",
           canonicalJsonHash({
-            destinationAddress: address.toLowerCase(),
+            destinationAddress,
             asset: component.amount.asset,
             completion: "child_funding_operation",
             routeId: route.routeId,
@@ -495,7 +512,11 @@ function buildRoutedReceiveVariants(input: {
       if (profiles.length !== 1) return [];
       const profile = profiles[0];
       if (!profile) return [];
-      const key = `${route.sourceAsset.networkId}:${route.sourceAsset.assetId.toLowerCase()}:${profile.address.toLowerCase()}`;
+      const destinationAddress = canonicalAccountAddress(
+        route.sourceAsset.networkId,
+        profile.address,
+      );
+      const key = `${canonicalAssetKey(route.sourceAsset)}:${destinationAddress}`;
       if (existing.has(key)) return [];
       existing.add(key);
       return [
@@ -503,7 +524,7 @@ function buildRoutedReceiveVariants(input: {
           variantId: stableOpaqueId(
             "ingress_variant",
             canonicalJsonHash({
-              destinationAddress: profile.address.toLowerCase(),
+              destinationAddress,
               asset: route.sourceAsset,
               completion: "child_funding_operation",
               routeId: route.routeId,
@@ -517,7 +538,7 @@ function buildRoutedReceiveVariants(input: {
             [
               input.planning.accountId,
               "wallet",
-              profile.address.toLowerCase(),
+              destinationAddress,
               canonicalAssetKey(route.sourceAsset),
             ].join(":"),
           ),
@@ -558,7 +579,7 @@ function instruction(input: {
   );
   const sourceAssets = new Map(
     input.variants.map((variant) => [
-      `${variant.asset.networkId}:${variant.asset.assetId.toLowerCase()}:${variant.asset.decimals}`,
+      canonicalAssetKey(variant.asset),
       variant.asset,
     ]),
   );
@@ -728,7 +749,7 @@ function plannedSource(
           segmentOrdinal: null,
           componentId: stableOpaqueId(
             "direct_ingress",
-            `${destinationLocation.locationId}:${variant.asset.networkId}:${variant.asset.assetId.toLowerCase()}`,
+            `${destinationLocation.locationId}:${canonicalAssetKey(variant.asset)}`,
           ),
           locationId: destinationLocation.locationId,
           networkId: variant.asset.networkId,

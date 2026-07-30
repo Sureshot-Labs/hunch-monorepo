@@ -12,6 +12,7 @@ import type {
   JsonValue,
 } from "../domain/types.js";
 import { resolveFundingDestinationChoice } from "../domain/selections.js";
+import { canonicalAccountAddress } from "../domain/asset-identity.js";
 import { FundingPlannerError } from "../planner/money.js";
 import { FundingPlanningRuntime } from "../planner/runtime-service.js";
 import { buildFundingReceiveTargets } from "../planner/receive-targets.js";
@@ -377,7 +378,10 @@ export class FundingReceiveSessionService {
           variantId: variant.variantId,
           networkId: variant.networkId,
           asset: variant.asset,
-          destinationAddress: variant.destinationAddress.toLowerCase(),
+          destinationAddress: canonicalAccountAddress(
+            variant.networkId,
+            variant.destinationAddress,
+          ),
           destinationLocationId: variant.destinationLocationId,
           observation: variant.observation,
           completion: variant.completion,

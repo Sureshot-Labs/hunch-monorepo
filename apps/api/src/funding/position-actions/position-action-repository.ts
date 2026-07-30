@@ -165,16 +165,19 @@ function sameCreate(
   existing: StoredPositionAction,
   input: PositionActionCreateInput,
 ): boolean {
+  const canonicalAddress = (value: string) =>
+    /^0x[0-9a-fA-F]{40}$/.test(value) ? value.toLowerCase() : value;
   return (
     existing.userId === input.userId &&
     existing.venueId === input.venueId &&
     existing.action === input.action &&
     existing.positionRef === input.positionRef &&
     existing.ownerBindingId === input.ownerBindingId &&
-    existing.ownerAddress.toLowerCase() === input.ownerAddress.toLowerCase() &&
+    canonicalAddress(existing.ownerAddress) ===
+      canonicalAddress(input.ownerAddress) &&
     existing.executionWalletId === input.executionWalletId &&
-    existing.executionAddress.toLowerCase() ===
-      input.executionAddress.toLowerCase() &&
+    canonicalAddress(existing.executionAddress) ===
+      canonicalAddress(input.executionAddress) &&
     existing.executionMode === input.executionMode &&
     existing.inspectionRevision === input.inspectionRevision &&
     existing.actionDigest === input.actionDigest &&

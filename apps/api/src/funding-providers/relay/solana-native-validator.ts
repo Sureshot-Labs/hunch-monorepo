@@ -341,10 +341,51 @@ function assertAtaCreation(input: {
       key.isSigner !== isSigner ||
       key.isWritable !== isWritable
     ) {
+      const received = key
+        ? `${key.pubkey}/${String(key.isSigner)}/${String(key.isWritable)}`
+        : "missing";
       throw new Error(
-        `instructions[${input.index}].keys[${keyIndex}] mismatch`,
+        `instructions[${input.index}].keys[${keyIndex}] mismatch: expected ${pubkey}/${String(isSigner)}/${String(isWritable)}, received ${received}`,
       );
     }
+  });
+}
+
+function assertAtaCreationPair(input: {
+  instructions: readonly [
+    ValidatedSolanaInstruction,
+    ValidatedSolanaInstruction,
+  ];
+  owner: string;
+  creations: readonly [
+    Readonly<{ mint: string; ata: string }>,
+    Readonly<{ mint: string; ata: string }>,
+  ];
+}): void {
+  const firstAta = input.instructions[0].keys[1]?.pubkey;
+  const [first, second] =
+    firstAta === input.creations[0].ata
+      ? input.creations
+      : firstAta === input.creations[1].ata
+        ? [input.creations[1], input.creations[0]]
+        : (() => {
+            throw new Error(
+              `instructions[0].keys[1] is not an authorized ATA: expected ${input.creations[0].ata} or ${input.creations[1].ata}, received ${firstAta ?? "missing"}`,
+            );
+          })();
+  assertAtaCreation({
+    instruction: input.instructions[0],
+    index: 0,
+    mint: first.mint,
+    owner: input.owner,
+    ata: first.ata,
+  });
+  assertAtaCreation({
+    instruction: input.instructions[1],
+    index: 1,
+    mint: second.mint,
+    owner: input.owner,
+    ata: second.ata,
   });
 }
 
@@ -626,8 +667,8 @@ export function validateRelaySolanaNativeQuote(input: {
     new PublicKey(user),
   ).toBase58();
   const [
-    createUsdc,
-    createWrappedSol,
+    createAtaFirst,
+    createAtaSecond,
     transfer,
     syncNative,
     swap,
@@ -636,8 +677,8 @@ export function validateRelaySolanaNativeQuote(input: {
     memo,
   ] = instructions;
   if (
-    !createUsdc ||
-    !createWrappedSol ||
+    !createAtaFirst ||
+    !createAtaSecond ||
     !transfer ||
     !syncNative ||
     !swap ||
@@ -647,19 +688,13 @@ export function validateRelaySolanaNativeQuote(input: {
   ) {
     throw new Error("native SOL route instruction disappeared");
   }
-  assertAtaCreation({
-    instruction: createUsdc,
-    index: 0,
-    mint: SOLANA_USDC,
+  assertAtaCreationPair({
+    instructions: [createAtaFirst, createAtaSecond],
     owner: user,
-    ata: usdcAta,
-  });
-  assertAtaCreation({
-    instruction: createWrappedSol,
-    index: 1,
-    mint: WRAPPED_SOL_MINT,
-    owner: user,
-    ata: wrappedSolAta,
+    creations: [
+      { mint: SOLANA_USDC, ata: usdcAta },
+      { mint: WRAPPED_SOL_MINT, ata: wrappedSolAta },
+    ],
   });
   exact(transfer.programId, SOLANA_SYSTEM_PROGRAM, "transfer program");
   assertSignerSet(transfer, user, "SOL transfer");

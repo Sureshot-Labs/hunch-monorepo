@@ -297,11 +297,21 @@ export type FundingPurpose =
   | "withdrawal"
   | "manual_rebalance";
 
+export type FundingTradeConsumerIntentInput = Readonly<{
+  venueId: VenueId;
+  /** Canonical unified market ID in venue:venue_market_id form. */
+  marketId: string;
+  marketContextId: string;
+  side: "BUY";
+  spend: Money;
+}>;
+
 export type FundingIntent = Readonly<{
   purpose: FundingPurpose;
   requestedDestinationAmount: Money | null;
   confirmedSourceAmount: Money | null;
   marketContextId: string | null;
+  consumerIntent?: FundingTradeConsumerIntentInput | null;
   destinationOptionId: string | null;
   withdrawalRecipientId: string | null;
   venueBindingOptionId: string | null;

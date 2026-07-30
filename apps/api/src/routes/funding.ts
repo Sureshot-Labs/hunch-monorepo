@@ -39,6 +39,10 @@ import {
   type FundingConsumerReservation,
   type FundingOperationStep,
 } from "../funding/persistence/funding-evidence-repository.js";
+import type {
+  FundingPreparationActionReport,
+  FundingPreparationRun,
+} from "../funding/persistence/funding-preparation-run-repository.js";
 import { checkRateLimit } from "../lib/rate-limit.js";
 import {
   fundingApiErrorResponseSchema,
@@ -60,8 +64,12 @@ import {
   fundingQuoteResponseSchema,
   fundingPreparationInspectRequestSchema,
   fundingPreparationInspectResponseSchema,
+  fundingPreparationActionParamsSchema,
+  fundingPreparationActionReportRequestSchema,
   fundingPreparationPrepareRequestSchema,
   fundingPreparationPrepareResponseSchema,
+  fundingPreparationRunParamsSchema,
+  fundingPreparationRunResponseSchema,
   fundingReceiveSessionOpenRequestSchema,
   fundingReceiveReceiptParamsSchema,
   fundingReceiveReceiptReviewQuoteResponseSchema,
@@ -176,15 +184,26 @@ export type FundingRouteDependencies = Readonly<{
       marketClass: string | null;
       positionActionRef?: string | null;
       controllerWalletRef?: string | null;
-      operationId: string;
+      operationId?: string;
       expectedInspectionRevision: string;
     }>,
-  ): Promise<
-    Readonly<{
-      actions: readonly NormalizedAction[];
-      controllerWalletRef: string;
-    }>
-  >;
+  ): Promise<FundingPreparationRun>;
+  preparationRun(
+    userId: string,
+    runId: string,
+  ): Promise<FundingPreparationRun | null>;
+  reportPreparationAction(
+    userId: string,
+    input: Readonly<{
+      runId: string;
+      actionId: string;
+      report: FundingPreparationActionReport;
+    }>,
+  ): Promise<FundingPreparationRun>;
+  reconcilePreparationRun(
+    userId: string,
+    runId: string,
+  ): Promise<FundingPreparationRun | null>;
   liquidity(
     userId: string,
     request: FundingDiscoveryRequest,
@@ -282,10 +301,41 @@ function publicOperation(operation: FundingOperationRow) {
     experienceMode: operation.experienceMode,
     planKind: operation.planKind,
     errorCode: operation.errorCode,
+    recoveryMode: operation.recoveryMode,
     version: operation.version,
     createdAt: operation.createdAt.toISOString(),
     updatedAt: operation.updatedAt.toISOString(),
     completedAt: operation.completedAt?.toISOString() ?? null,
+  };
+}
+
+function publicPreparationRun(run: FundingPreparationRun) {
+  if (!run.controllerWalletRef) {
+    throw new FundingPersistenceError(
+      "invalid_state_transition",
+      "funding preparation run is not materialized",
+    );
+  }
+  return {
+    runId: run.runId,
+    status: run.status,
+    inspectionRevision: run.inspectionRevision,
+    actions: run.actions.map((attempt) => attempt.action),
+    actionAttempts: run.actions.map((attempt) => ({
+      actionId: attempt.actionId,
+      ordinal: attempt.ordinal,
+      actionFingerprint: attempt.actionFingerprint,
+      action: attempt.action,
+      state: attempt.state,
+      broadcastMayHaveOccurred: attempt.broadcastMayHaveOccurred,
+      transactionReference: attempt.transactionReference,
+      reportedAt: attempt.reportedAt?.toISOString() ?? null,
+      resolvedAt: attempt.resolvedAt?.toISOString() ?? null,
+    })),
+    controllerWalletRef: run.controllerWalletRef,
+    expiresAt: run.expiresAt.toISOString(),
+    resolvedAt: run.resolvedAt?.toISOString() ?? null,
+    replayed: run.replayed,
   };
 }
 
@@ -305,6 +355,7 @@ function publicConsumerReservation(
         reservationId: reservation.reservationId,
         rawAmount: reservation.rawAmount,
         asset: reservation.asset,
+        consumerIntent: reservation.consumerIntent,
         expiresAt: reservation.expiresAt.toISOString(),
       }
     : null;
@@ -933,7 +984,136 @@ export function registerFundingRoutes(
           return reply.send(
             fundingPreparationPrepareResponseSchema.parse({
               ok: true,
-              ...prepared,
+              ...publicPreparationRun(prepared),
+            }),
+          );
+        },
+      ),
+  );
+
+  z.get(
+    "/funding/preparation/runs/:runId",
+    {
+      preHandler: dependencies.authenticate,
+      schema: {
+        params: fundingPreparationRunParamsSchema,
+        response: {
+          200: fundingPreparationRunResponseSchema,
+          ...errors,
+        },
+      },
+    },
+    (request, reply) =>
+      handleFundingRequest(
+        request,
+        reply,
+        dependencies,
+        {
+          endpoint: "preparation-run",
+          logMessage: "Funding preparation run read failed",
+          publicError: "Wallet preparation run could not be read",
+        },
+        async (userId) => {
+          const run = await dependencies.preparationRun(
+            userId,
+            request.params.runId,
+          );
+          if (!run) {
+            throw new FundingPersistenceError(
+              "operation_not_found",
+              "funding preparation run was not found",
+            );
+          }
+          return reply.send(
+            fundingPreparationRunResponseSchema.parse({
+              ok: true,
+              ...publicPreparationRun(run),
+            }),
+          );
+        },
+      ),
+  );
+
+  z.post(
+    "/funding/preparation/runs/:runId/actions/:actionId/report",
+    {
+      preHandler: dependencies.authenticate,
+      schema: {
+        params: fundingPreparationActionParamsSchema,
+        body: fundingPreparationActionReportRequestSchema,
+        response: {
+          200: fundingPreparationRunResponseSchema,
+          ...errors,
+        },
+      },
+    },
+    (request, reply) =>
+      handleFundingRequest(
+        request,
+        reply,
+        dependencies,
+        {
+          endpoint: "preparation-action-report",
+          logMessage: "Funding preparation action report failed",
+          publicError: "Wallet preparation action report was not accepted",
+        },
+        async (userId) => {
+          const run = await dependencies.reportPreparationAction(userId, {
+            runId: request.params.runId,
+            actionId: request.params.actionId,
+            report: {
+              outcome: request.body.outcome,
+              transactionReference: request.body.transactionReference,
+              networkFeeRaw: request.body.actualCosts.networkFeeRaw,
+            },
+          });
+          return reply.send(
+            fundingPreparationRunResponseSchema.parse({
+              ok: true,
+              ...publicPreparationRun(run),
+            }),
+          );
+        },
+      ),
+  );
+
+  z.post(
+    "/funding/preparation/runs/:runId/reconcile",
+    {
+      preHandler: dependencies.authenticate,
+      schema: {
+        params: fundingPreparationRunParamsSchema,
+        response: {
+          200: fundingPreparationRunResponseSchema,
+          ...errors,
+        },
+      },
+    },
+    (request, reply) =>
+      handleFundingRequest(
+        request,
+        reply,
+        dependencies,
+        {
+          endpoint: "preparation-reconcile",
+          logMessage: "Funding preparation reconciliation failed",
+          publicError: "Wallet preparation could not be reconciled",
+        },
+        async (userId) => {
+          const run = await dependencies.reconcilePreparationRun(
+            userId,
+            request.params.runId,
+          );
+          if (!run) {
+            throw new FundingPersistenceError(
+              "operation_not_found",
+              "funding preparation run was not found",
+            );
+          }
+          return reply.send(
+            fundingPreparationRunResponseSchema.parse({
+              ok: true,
+              ...publicPreparationRun(run),
             }),
           );
         },
@@ -1169,6 +1349,11 @@ export const fundingRoutes: FastifyPluginAsync = async (app) => {
     inspectPreparation: (userId, request) =>
       runtime.inspectPreparation(userId, request),
     prepare: (userId, request) => runtime.prepare(userId, request),
+    preparationRun: (userId, runId) => runtime.preparationRun(userId, runId),
+    reportPreparationAction: (userId, input) =>
+      runtime.reportPreparationAction(userId, input),
+    reconcilePreparationRun: (userId, runId) =>
+      runtime.reconcilePreparationRun(userId, runId),
     liquidity: (userId, request) => runtime.liquidity(userId, request),
     quote: (userId, request) => runtime.quote(userId, request),
     commit: (userId, request) => runtime.commit(userId, request),

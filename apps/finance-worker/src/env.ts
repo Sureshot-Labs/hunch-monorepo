@@ -119,6 +119,10 @@ export const env = {
     readEnv("HUNCH_FINANCE_FUNDING_RECONCILIATION_IDLE_POLL_SEC"),
     15,
   ),
+  fundingReconciliationRecoveryPollSec: parsePositiveInt(
+    readEnv("HUNCH_FINANCE_FUNDING_RECONCILIATION_RECOVERY_POLL_SEC"),
+    60,
+  ),
   fundingReconciliationRetrySec: parsePositiveInt(
     readEnv("HUNCH_FINANCE_FUNDING_RECONCILIATION_RETRY_SEC"),
     30,

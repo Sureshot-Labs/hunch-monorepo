@@ -1,4 +1,8 @@
 import { z } from "zod";
+import {
+  isCanonicalUnifiedMarketId,
+  isVenueLocalMarketContextId,
+} from "./market-identity.js";
 
 const canonicalIdPattern = /^[a-z0-9][a-z0-9:_-]{1,159}$/;
 const opaqueIdPattern = /^[A-Za-z0-9][A-Za-z0-9:_-]{7,191}$/;
@@ -117,12 +121,41 @@ export const fundingPurposeSchema = z.enum([
   "manual_rebalance",
 ]);
 
+export const fundingTradeConsumerIntentInputSchema = z
+  .object({
+    venueId: canonicalIdSchema,
+    marketId: marketReferenceSchema,
+    marketContextId: marketReferenceSchema,
+    side: z.literal("BUY"),
+    spend: moneySchema,
+  })
+  .strict()
+  .superRefine((intent, context) => {
+    if (!isCanonicalUnifiedMarketId(intent.venueId, intent.marketId)) {
+      context.addIssue({
+        code: "custom",
+        path: ["marketId"],
+        message:
+          "trade consumer marketId must be a canonical unified market ID",
+      });
+    }
+    if (!isVenueLocalMarketContextId(intent.venueId, intent.marketContextId)) {
+      context.addIssue({
+        code: "custom",
+        path: ["marketContextId"],
+        message:
+          "trade consumer marketContextId must be a venue-local outcome identifier",
+      });
+    }
+  });
+
 export const fundingDiscoveryRequestSchema = z
   .object({
     purpose: fundingPurposeSchema,
     requestedDestinationAmount: moneySchema.nullable(),
     confirmedSourceAmount: moneySchema.nullable(),
     marketContextId: marketReferenceSchema.nullable(),
+    consumerIntent: fundingTradeConsumerIntentInputSchema.nullable().optional(),
     destinationOptionId: opaqueIdSchema.nullable(),
     withdrawalRecipientId: opaqueIdSchema.nullable(),
     venueBindingOptionId: opaqueIdSchema.nullable(),
@@ -164,13 +197,25 @@ export const fundingDiscoveryRequestSchema = z
     }
     if (
       request.purpose === "trade_shortfall" &&
-      (!request.marketContextId || !request.requestedDestinationAmount)
+      (!request.marketContextId ||
+        !request.requestedDestinationAmount ||
+        !request.consumerIntent)
     ) {
       context.addIssue({
         code: "custom",
-        path: ["marketContextId"],
+        path: ["consumerIntent"],
         message:
-          "trade shortfall requires market context and exact requested collateral",
+          "trade shortfall requires market context, funding target, and exact consumer intent",
+      });
+    }
+    if (
+      request.purpose !== "trade_shortfall" &&
+      request.consumerIntent != null
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["consumerIntent"],
+        message: "consumer intent is allowed only for a trade shortfall",
       });
     }
     if (

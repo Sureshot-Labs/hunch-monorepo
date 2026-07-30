@@ -57,6 +57,11 @@ export type FundingSourcePlanningRequest = Readonly<{
   now: Date;
 }>;
 
+export type FundingSourcePlanningResult = Readonly<{
+  sources: readonly PlannedSourceOption[];
+  reasonCodes: readonly FundingReasonCode[];
+}>;
+
 export type FundingPlannerDependencies = Readonly<{
   listDestinations(
     input: Readonly<{
@@ -80,12 +85,29 @@ export type FundingPlannerDependencies = Readonly<{
   listSources(
     input: FundingSourcePlanningRequest,
   ): Promise<readonly PlannedSourceOption[]>;
+  discoverSources?(
+    input: FundingSourcePlanningRequest,
+  ): Promise<FundingSourcePlanningResult>;
   listSourceBlockers?(
     input: FundingSourcePlanningRequest,
   ): Promise<readonly FundingReasonCode[]>;
   store: FundingPlanningStore;
   now?: () => Date;
 }>;
+
+async function discoverFundingSources(
+  dependencies: FundingPlannerDependencies,
+  input: FundingSourcePlanningRequest,
+): Promise<FundingSourcePlanningResult> {
+  if (dependencies.discoverSources) {
+    return dependencies.discoverSources(input);
+  }
+  const [sources, reasonCodes] = await Promise.all([
+    dependencies.listSources(input),
+    dependencies.listSourceBlockers?.(input) ?? Promise.resolve([]),
+  ]);
+  return { sources, reasonCodes };
+}
 
 function preparationPurpose(
   purpose: FundingDiscoveryRequest["purpose"],
@@ -146,7 +168,12 @@ function applicableSourceBlockingReasons(
 ): readonly FundingReasonCode[] {
   const executablePlanExists = sources.some(isSelectableAutomaticSource);
   return executablePlanExists
-    ? reasons.filter((reason) => reason !== "insufficient_gas")
+    ? reasons.filter(
+        (reason) =>
+          reason !== "insufficient_gas" &&
+          reason !== "provider_status_unknown" &&
+          reason !== "rpc_unavailable",
+      )
     : reasons;
 }
 
@@ -582,18 +609,31 @@ function validateMarketContext(
   }
   if (
     request.requestedDestinationAmount &&
-    (request.requestedDestinationAmount.asset.networkId !==
-      marketContext.collateralAsset.networkId ||
-      request.requestedDestinationAmount.asset.assetId.toLowerCase() !==
-        marketContext.collateralAsset.assetId.toLowerCase() ||
-      request.requestedDestinationAmount.asset.decimals !==
-        marketContext.collateralAsset.decimals ||
-      request.requestedDestinationAmount.raw !==
-        marketContext.requestedCollateralRaw)
+    !sameAsset(
+      request.requestedDestinationAmount.asset,
+      marketContext.collateralAsset,
+    )
   ) {
     throw new FundingPlannerError(
       "invalid_market_context",
-      "requested collateral differs from the frozen market context",
+      "funding target asset differs from the frozen market context",
+    );
+  }
+  const consumerSpend =
+    request.purpose === "trade_shortfall"
+      ? request.consumerIntent?.spend
+      : request.requestedDestinationAmount;
+  if (
+    !consumerSpend ||
+    !sameAsset(consumerSpend.asset, marketContext.collateralAsset) ||
+    consumerSpend.raw !== marketContext.requestedCollateralRaw ||
+    (request.requestedDestinationAmount &&
+      BigInt(request.requestedDestinationAmount.raw) <
+        BigInt(consumerSpend.raw))
+  ) {
+    throw new FundingPlannerError(
+      "invalid_market_context",
+      "exact consumer spend differs from the frozen market context",
     );
   }
 }
@@ -872,16 +912,15 @@ export class FundingPlanner {
       policyRevision: input.policyRevision,
       now,
     };
-    const [discoveredSources, sourceBlockers] =
+    const sourceDiscovery =
       needsFunding && input.policy.creationMode === "on" && planningFactsUsable
-        ? await Promise.all([
-            this.dependencies.listSources(sourcePlanningRequest),
-            this.dependencies.listSourceBlockers?.(sourcePlanningRequest) ??
-              Promise.resolve([]),
-          ])
-        : [[], []];
+        ? await discoverFundingSources(
+            this.dependencies,
+            sourcePlanningRequest,
+          )
+        : { sources: [], reasonCodes: [] };
     const sources = validatePlannedSources(
-      discoveredSources,
+      sourceDiscovery.sources,
       fundingRequirement,
       now,
       input.request.purpose,
@@ -894,10 +933,16 @@ export class FundingPlanner {
     }));
     const applicableSourceBlockers = applicableSourceBlockingReasons(
       sources,
-      sourceBlockers,
+      sourceDiscovery.reasonCodes,
     );
-    const sourceEvidenceUnavailable =
-      applicableSourceBlockers.includes("rpc_unavailable");
+    const sourceEvidenceReasonCodes = applicableSourceBlockers.filter(
+      (
+        reason,
+      ): reason is "rpc_unavailable" | "provider_status_unknown" =>
+        reason === "rpc_unavailable" ||
+        reason === "provider_status_unknown",
+    );
+    const sourceEvidenceUnavailable = sourceEvidenceReasonCodes.length > 0;
     const convertibleRaw = sources.some(isSelectableAutomaticSource)
       ? shortfallRaw
       : "0";
@@ -976,9 +1021,10 @@ export class FundingPlanner {
           ? [{ code: "cash_availability_unknown", retryable: true }]
           : []),
         ...valuationReasons.map((code) => ({ code, retryable: true })),
-        ...(sourceEvidenceUnavailable
-          ? [{ code: "rpc_unavailable" as const, retryable: true }]
-          : []),
+        ...sourceEvidenceReasonCodes.map((code) => ({
+          code,
+          retryable: true,
+        })),
       ],
       reasonCodes,
       destinationOptions: publicDestinations,
@@ -1096,10 +1142,7 @@ export class FundingPlanner {
       (location) =>
         location.enabled &&
         location.ownership === "external_recipient" &&
-        location.asset.networkId === amount.asset.networkId &&
-        location.asset.assetId.toLowerCase() ===
-          amount.asset.assetId.toLowerCase() &&
-        location.asset.decimals === amount.asset.decimals,
+        sameAsset(location.asset, amount.asset),
     );
     if (recipientLocations.length !== 1) {
       throw new FundingPlannerError(

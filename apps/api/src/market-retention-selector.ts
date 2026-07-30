@@ -157,6 +157,7 @@ function protectedRefsSql(
   options: {
     includeFundingOperations?: boolean;
     includeFundingLiquidityProjections?: boolean;
+    includeFundingPreparationRuns?: boolean;
     includePositionActionOperations?: boolean;
     includeTelegramTradeIntents?: boolean;
   } = {},
@@ -180,6 +181,17 @@ function protectedRefsSql(
     where projection.expires_at > now()
   `
       : "";
+  const fundingPreparationRunsRef = options.includeFundingPreparationRuns
+    ? `
+    union
+    select distinct c.market_id, 'funding_preparation_runs' as reason
+    from ${candidatePoolTable} c
+    join funding_preparation_runs run
+      on run.request_snapshot->>'marketContextId' = c.market_id
+    where run.expires_at > now()
+       or run.status in ('submitted', 'ambiguous')
+  `
+    : "";
   const positionActionOperationsRef = options.includePositionActionOperations
     ? `
     union
@@ -219,6 +231,7 @@ function protectedRefsSql(
     join executions ex on ex.unified_market_id = c.market_id
     ${fundingOperationsRef}
     ${fundingLiquidityProjectionsRef}
+    ${fundingPreparationRunsRef}
     ${positionActionOperationsRef}
     ${telegramTradeIntentsRef}
     union
@@ -350,6 +363,7 @@ function candidateCte(
   options: {
     includeFundingOperations?: boolean;
     includeFundingLiquidityProjections?: boolean;
+    includeFundingPreparationRuns?: boolean;
     includePositionActionOperations?: boolean;
     includeTelegramTradeIntents?: boolean;
   } = {},
@@ -578,23 +592,27 @@ async function relationExists(
 async function protectedRefOptions(client: PoolClient): Promise<{
   includeFundingOperations: boolean;
   includeFundingLiquidityProjections: boolean;
+  includeFundingPreparationRuns: boolean;
   includePositionActionOperations: boolean;
   includeTelegramTradeIntents: boolean;
 }> {
   const [
     includeFundingOperations,
     includeFundingLiquidityProjections,
+    includeFundingPreparationRuns,
     includePositionActionOperations,
     includeTelegramTradeIntents,
   ] = await Promise.all([
     relationExists(client, "public.funding_operations"),
     relationExists(client, "public.funding_liquidity_projections"),
+    relationExists(client, "public.funding_preparation_runs"),
     relationExists(client, "public.position_action_operations"),
     relationExists(client, "public.telegram_trade_intents"),
   ]);
   return {
     includeFundingOperations,
     includeFundingLiquidityProjections,
+    includeFundingPreparationRuns,
     includePositionActionOperations,
     includeTelegramTradeIntents,
   };

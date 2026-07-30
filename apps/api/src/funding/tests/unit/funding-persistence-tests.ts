@@ -135,9 +135,13 @@ const tests: readonly Test[] = [
       );
       assert.match(
         source,
-        /when \$9::boolean then coalesce\(completed_at, \$10::timestamptz\)/i,
+        /when \$10::boolean then coalesce\(completed_at, \$11::timestamptz\)/i,
       );
-      assert.doesNotMatch(source, /when \$9::boolean then \$10::timestamptz/i);
+      assert.doesNotMatch(source, /when \$10::boolean then \$11::timestamptz/i);
+      assert.match(
+        source,
+        /when \$2 = 'recovery_required'[\s\S]+then \$4::text[\s\S]+else null/i,
+      );
     },
   },
   {
@@ -191,7 +195,7 @@ const tests: readonly Test[] = [
       );
       assert.match(
         source,
-        /\$12::timestamptz \+ interval '15 seconds', \$12::timestamptz/i,
+        /\$14::timestamptz \+ interval '15 seconds', \$14::timestamptz/i,
       );
       assert.doesNotMatch(
         source,

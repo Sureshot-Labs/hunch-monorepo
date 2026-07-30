@@ -10,6 +10,7 @@ import {
   releaseFundingReservationForDefinitiveTradeFailure,
 } from "../funding/persistence/funding-evidence-repository.js";
 import { canonicalJsonHash } from "../funding/persistence/canonical.js";
+import { buildFundingTradeConsumerIntent } from "../funding/persistence/funding-trade-consumer-intent.js";
 import {
   claimFundingTradeAttempt,
   markFundingTradeAttemptSubmissionStarted,
@@ -3514,28 +3515,6 @@ export async function submitLimitlessClientSignedOrder(input: {
       },
     };
   }
-  if (fundingReservation) {
-    try {
-      await assertFundingReservationReadyForTrade(input.pool, {
-        userId: input.userId,
-        link: fundingReservation,
-        venue: "limitless",
-        marketId: marketTokens?.marketId ?? null,
-      });
-    } catch (error) {
-      return {
-        ok: false,
-        statusCode: 409,
-        payload: {
-          error:
-            error instanceof Error
-              ? error.message
-              : "Funding reservation is unavailable",
-        },
-      };
-    }
-  }
-
   const tokenId = normalizeLimitlessScopedTokenId(requestedRawTokenId);
   const makerAmount = coercedMakerAmount;
   const takerAmount = coercedTakerAmount;
@@ -3550,6 +3529,55 @@ export async function submitLimitlessClientSignedOrder(input: {
     onBehalfOf: ownerId,
     clientOrderId,
   };
+  const fundingMarketId = marketTokens?.marketId ?? null;
+  const fundingConsumerIntent =
+    fundingReservation &&
+    fundingMarketId &&
+    tokenId &&
+    makerAmount != null &&
+    Number.isSafeInteger(makerAmount) &&
+    makerAmount > 0
+      ? buildFundingTradeConsumerIntent({
+          venueId: "limitless",
+          marketId: fundingMarketId,
+          marketContextId: tokenId,
+          spend: {
+            asset: {
+              networkId: "evm:8453",
+              assetId: env.limitlessUsdcAddress,
+              decimals: 6,
+            },
+            raw: makerAmount.toString(),
+          },
+        })
+      : null;
+  if (fundingReservation) {
+    if (!fundingConsumerIntent) {
+      return {
+        ok: false,
+        statusCode: 409,
+        payload: { error: "Funding reservation market binding is unavailable" },
+      };
+    }
+    try {
+      await assertFundingReservationReadyForTrade(input.pool, {
+        userId: input.userId,
+        link: fundingReservation,
+        intent: fundingConsumerIntent,
+      });
+    } catch (error) {
+      return {
+        ok: false,
+        statusCode: 409,
+        payload: {
+          error:
+            error instanceof Error
+              ? error.message
+              : "Funding reservation is unavailable",
+        },
+      };
+    }
+  }
 
   if (input.body.orderType === "FOK") {
     const amount = normalizeLimitlessRawAmount(makerAmount);
@@ -3596,7 +3624,14 @@ export async function submitLimitlessClientSignedOrder(input: {
   let fundingTradeAttemptId: string | null = null;
   let fundingTradeClaimToken: string | null = null;
   if (fundingReservation) {
-    const marketId = marketTokens?.marketId ?? null;
+    if (!fundingConsumerIntent) {
+      return {
+        ok: false,
+        statusCode: 409,
+        payload: { error: "Funding reservation market binding is unavailable" },
+      };
+    }
+    const marketId = fundingMarketId;
     if (!marketId) {
       return {
         ok: false,
@@ -3622,6 +3657,7 @@ export async function submitLimitlessClientSignedOrder(input: {
         executionPath: "limitless_clob",
         idempotencyKey: `limitless-clob:${canonicalFingerprint}`,
         canonicalFingerprint,
+        consumerIntent: fundingConsumerIntent,
         externalReference: clientOrderId,
       });
       if (!claim.claimed) {
@@ -4139,6 +4175,27 @@ export async function claimLimitlessAmmFundingTrade(input: {
       payload: { error: "Funding reservation market binding is unavailable" },
     };
   }
+  const tokenId = normalizeLimitlessScopedTokenId(input.body.tokenId);
+  if (!tokenId) {
+    return {
+      ok: false as const,
+      statusCode: 409,
+      payload: { error: "Funding reservation token binding is unavailable" },
+    };
+  }
+  const consumerIntent = buildFundingTradeConsumerIntent({
+    venueId: "limitless",
+    marketId,
+    marketContextId: tokenId,
+    spend: {
+      asset: {
+        networkId: "evm:8453",
+        assetId: env.limitlessUsdcAddress,
+        decimals: 6,
+      },
+      raw: input.body.amountUsdRaw,
+    },
+  });
   const canonicalFingerprint = canonicalJsonHash({
     amountUsdRaw: input.body.amountUsdRaw,
     executionPath: "limitless_amm",
@@ -4158,6 +4215,7 @@ export async function claimLimitlessAmmFundingTrade(input: {
       executionPath: "limitless_amm",
       idempotencyKey: input.body.idempotencyKey,
       canonicalFingerprint,
+      consumerIntent,
     });
     if (!claim.claimed) {
       return {
@@ -4306,31 +4364,6 @@ export async function recordLimitlessAmmOrder(input: {
       statusCode: 409,
       payload: { error: "Funding trade attempt claim is required" },
     };
-  }
-  if (input.fundingReservation) {
-    const marketId = await resolveLimitlessFundingMarketId(input.pool, {
-      marketSlug: input.body.marketSlug,
-      tokenId: input.body.tokenId,
-    });
-    try {
-      await assertFundingReservationReadyForTrade(input.pool, {
-        userId: input.userId,
-        link: input.fundingReservation,
-        venue: "limitless",
-        marketId,
-      });
-    } catch (error) {
-      return {
-        ok: false,
-        statusCode: 409,
-        payload: {
-          error:
-            error instanceof Error
-              ? error.message
-              : "Funding reservation is unavailable",
-        },
-      };
-    }
   }
   const size = input.body.size;
   const amountUsd = input.body.amountUsd ?? null;

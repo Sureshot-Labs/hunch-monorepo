@@ -225,7 +225,7 @@ function networkToBalanceChainId(networkId: string): string | null {
 }
 
 function normalizeAddress(value: string): string {
-  return value.startsWith("0x") ? value.toLowerCase() : value;
+  return /^0x[0-9a-fA-F]{40}$/.test(value) ? value.toLowerCase() : value;
 }
 
 function isPositiveRaw(value: string): boolean {

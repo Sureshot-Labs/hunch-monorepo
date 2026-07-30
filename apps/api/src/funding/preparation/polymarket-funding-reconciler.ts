@@ -301,6 +301,7 @@ async function persistSatisfiedPostcondition(
     segmentId: null,
     networkId: input.target.destinationAsset.networkId,
     assetId: input.target.destinationAsset.assetId,
+    assetDecimals: input.target.destinationAsset.decimals,
     txHash: input.transactionHash,
     fromAddress: input.target.signerAddress,
     toAddress: input.target.plan.depositWallet,

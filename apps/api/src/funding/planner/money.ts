@@ -1,16 +1,11 @@
 import type { AssetRef, Money } from "../domain/types.js";
+import { canonicalAssetId, sameAsset } from "../domain/asset-identity.js";
 
-export function normalizeAssetId(value: string): string {
-  return value.startsWith("0x") ? value.toLowerCase() : value;
+export function normalizeAssetId(asset: AssetRef): string {
+  return canonicalAssetId(asset);
 }
 
-export function sameAsset(left: AssetRef, right: AssetRef): boolean {
-  return (
-    left.networkId === right.networkId &&
-    normalizeAssetId(left.assetId) === normalizeAssetId(right.assetId) &&
-    left.decimals === right.decimals
-  );
-}
+export { sameAsset };
 
 export function assertSameAsset(
   left: AssetRef,

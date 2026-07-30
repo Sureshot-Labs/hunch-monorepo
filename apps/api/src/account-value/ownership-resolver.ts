@@ -9,6 +9,10 @@ import type {
   VenueAccountBinding,
   WalletExecutionProfile,
 } from "../funding/domain/types.js";
+import {
+  canonicalAccountAddress,
+  canonicalAssetKey,
+} from "../funding/domain/asset-identity.js";
 import { stableOpaqueId } from "./canonical.js";
 import { PRIVY_USER_AUTHORIZED_EVM_SPONSORSHIP_POLICY_ID } from "../funding/execution/sponsorship-policy.js";
 
@@ -39,7 +43,7 @@ function walletProfile(
   return {
     walletId: stableOpaqueId(
       "wallet",
-      `${fact.walletType}:${networkId}:${fact.address.toLowerCase()}`,
+      `${fact.walletType}:${networkId}:${canonicalAccountAddress(networkId, fact.address)}`,
     ),
     controllerWalletRef: fact.controllerWalletRef ?? null,
     networkId,
@@ -90,7 +94,10 @@ export class ExistingFactsOwnershipResolver implements WalletOwnershipResolver {
     }
     const profileByAddressAndNetwork = new Map(
       profiles.map((profile) => [
-        `${profile.networkId}:${profile.address.toLowerCase()}`,
+        `${profile.networkId}:${canonicalAccountAddress(
+          profile.networkId,
+          profile.address,
+        )}`,
         profile,
       ]),
     );
@@ -98,16 +105,25 @@ export class ExistingFactsOwnershipResolver implements WalletOwnershipResolver {
       (fact): VenueAccountBinding[] => {
         const controller =
           profileByAddressAndNetwork.get(
-            `${fact.settlementAsset.networkId}:${fact.controllerAddress.toLowerCase()}`,
+            `${fact.settlementAsset.networkId}:${canonicalAccountAddress(
+              fact.settlementAsset.networkId,
+              fact.controllerAddress,
+            )}`,
           ) ?? null;
         const execution =
           profileByAddressAndNetwork.get(
-            `${fact.settlementAsset.networkId}:${fact.executionAddress.toLowerCase()}`,
+            `${fact.settlementAsset.networkId}:${canonicalAccountAddress(
+              fact.settlementAsset.networkId,
+              fact.executionAddress,
+            )}`,
           ) ?? null;
         if (!controller || !execution) return [];
         const bindingId = stableOpaqueId(
           "binding",
-          `${accountId}:${fact.venueId}:${fact.accountRef.toLowerCase()}`,
+          `${accountId}:${fact.venueId}:${canonicalAccountAddress(
+            fact.settlementAsset.networkId,
+            fact.accountRef,
+          )}`,
         );
         return [
           {
@@ -120,7 +136,7 @@ export class ExistingFactsOwnershipResolver implements WalletOwnershipResolver {
               kind: "venue_account",
               locationId: stableOpaqueId(
                 "location",
-                `${bindingId}:${fact.settlementAsset.networkId}:${fact.settlementAsset.assetId.toLowerCase()}`,
+                `${bindingId}:${canonicalAssetKey(fact.settlementAsset)}`,
               ),
               accountId,
               asset: fact.settlementAsset,
@@ -142,7 +158,7 @@ export class ExistingFactsOwnershipResolver implements WalletOwnershipResolver {
         walletId: profile.walletId,
         controllerWalletRef: profile.controllerWalletRef ?? null,
         networkId: profile.networkId,
-        address: profile.address.toLowerCase(),
+        address: canonicalAccountAddress(profile.networkId, profile.address),
         source: profile.source,
         signingModes: profile.signingModes,
         serverWalletRef: profile.serverWalletRef,
@@ -152,7 +168,10 @@ export class ExistingFactsOwnershipResolver implements WalletOwnershipResolver {
       venueBindings: venueBindings.map((binding) => ({
         bindingId: binding.bindingId,
         venueId: binding.venueId,
-        accountRef: binding.accountRef.toLowerCase(),
+        accountRef: canonicalAccountAddress(
+          binding.settlementLocation.asset.networkId,
+          binding.accountRef,
+        ),
         controllerWalletId: binding.controllerWalletId,
         executionWalletId: binding.executionWalletId,
         signingMode: binding.signingMode,

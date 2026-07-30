@@ -2,6 +2,11 @@ import { tx, type Pool, type PoolClient } from "@hunch/infra";
 
 import type { FundingPurpose, JsonValue } from "../domain/types.js";
 import {
+  canonicalAccountAddress,
+  canonicalAssetId,
+  sameAccountAddress,
+} from "../domain/asset-identity.js";
+import {
   assertFundingOperationTransition,
   canTransitionSegment,
   isValidFundingOperationState,
@@ -224,12 +229,15 @@ export type FundingOperationRow = Readonly<{
   actualSourceAmount: JsonRecord | null;
   actualDestinationAmount: JsonRecord | null;
   errorCode: string | null;
+  recoveryMode: FundingRecoveryMode | null;
   supportMetadata: JsonRecord;
   version: number;
   createdAt: Date;
   updatedAt: Date;
   completedAt: Date | null;
 }>;
+
+export type FundingRecoveryMode = "automatic_evidence" | "manual_review";
 
 type FundingQuoteDbRow = {
   id: string;
@@ -274,6 +282,7 @@ type FundingOperationDbRow = {
   actual_source_amount: JsonRecord | null;
   actual_destination_amount: JsonRecord | null;
   error_code: string | null;
+  recovery_mode: FundingRecoveryMode | null;
   support_metadata: JsonRecord;
   version: string | number;
   created_at: Date;
@@ -327,6 +336,7 @@ function mapOperation(row: FundingOperationDbRow): FundingOperationRow {
     actualSourceAmount: row.actual_source_amount,
     actualDestinationAmount: row.actual_destination_amount,
     errorCode: row.error_code,
+    recoveryMode: row.recovery_mode,
     supportMetadata: row.support_metadata,
     version: Number(row.version),
     createdAt: row.created_at,
@@ -378,6 +388,7 @@ const operationColumns = `
   actual_source_amount,
   actual_destination_amount,
   error_code,
+  recovery_mode,
   support_metadata,
   version,
   created_at,
@@ -826,7 +837,11 @@ async function insertCommitReservations(
             userId,
             reservation.locationId,
             reservation.networkId,
-            reservation.assetId.toLowerCase(),
+            canonicalAssetId({
+              networkId: reservation.networkId,
+              assetId: reservation.assetId,
+              decimals: reservation.assetDecimals,
+            }),
           ].join(":"),
         ],
       );
@@ -837,7 +852,7 @@ async function insertCommitReservations(
           where user_id = $1
             and location_id = $2
             and network_id = $3
-            and lower(asset_id) = lower($4)
+            and asset_id = $4
             and mode = 'advisory_destination'
             and state = 'active'
             and expires_at > now()
@@ -848,7 +863,11 @@ async function insertCommitReservations(
           userId,
           reservation.locationId,
           reservation.networkId,
-          reservation.assetId,
+          canonicalAssetId({
+            networkId: reservation.networkId,
+            assetId: reservation.assetId,
+            decimals: reservation.assetDecimals,
+          }),
         ],
       );
       if (conflict.rows[0]) {
@@ -882,7 +901,11 @@ async function insertCommitReservations(
         reservation.componentId,
         reservation.locationId,
         reservation.networkId,
-        reservation.assetId,
+        canonicalAssetId({
+          networkId: reservation.networkId,
+          assetId: reservation.assetId,
+          decimals: reservation.assetDecimals,
+        }),
         reservation.assetDecimals,
         reservation.rawAmount,
         reservation.mode,
@@ -1162,6 +1185,7 @@ export type FundingOperationTransitionInput = Readonly<{
   actualSourceAmount?: JsonRecord | null;
   actualDestinationAmount?: JsonRecord | null;
   errorCode?: string | null;
+  recoveryMode?: FundingRecoveryMode;
   supportMetadataPatch?: JsonRecord;
   now?: Date;
 }>;
@@ -1188,6 +1212,15 @@ export async function transitionFundingOperationInTransaction(
   client: Pick<PoolClient, "query">,
   input: FundingOperationTransitionInput,
 ): Promise<FundingOperationRow> {
+  if (
+    input.nextState.status !== "recovery_required" &&
+    input.recoveryMode !== undefined
+  ) {
+    throw new FundingPersistenceError(
+      "invalid_state_transition",
+      "recovery mode may only be assigned to recovery_required",
+    );
+  }
   const userPredicate = input.scope.kind === "user" ? "and user_id = $2" : "";
   const params =
     input.scope.kind === "user"
@@ -1251,6 +1284,7 @@ export async function transitionFundingOperationInTransaction(
     input.actualSourceAmount === undefined &&
     input.actualDestinationAmount === undefined &&
     input.errorCode === undefined &&
+    input.recoveryMode === undefined &&
     input.supportMetadataPatch === undefined;
   if (noStateChange && noDataChange) return current;
 
@@ -1263,31 +1297,39 @@ export async function transitionFundingOperationInTransaction(
       update funding_operations
       set status = $2,
           progress_stage = $3,
-          actual_source_amount = case
-            when $4::jsonb is null then actual_source_amount
-            else $4::jsonb
+          recovery_mode = case
+            when $2 = 'recovery_required'
+              then $4::text
+            else null
           end,
-          actual_destination_amount = case
-            when $5::jsonb is null then actual_destination_amount
+          actual_source_amount = case
+            when $5::jsonb is null then actual_source_amount
             else $5::jsonb
           end,
+          actual_destination_amount = case
+            when $6::jsonb is null then actual_destination_amount
+            else $6::jsonb
+          end,
           error_code = case
-            when $6::boolean then $7::text
+            when $7::boolean then $8::text
             else error_code
           end,
-          support_metadata = support_metadata || $8::jsonb,
+          support_metadata = support_metadata || $9::jsonb,
           completed_at = case
-            when $9::boolean then coalesce(completed_at, $10::timestamptz)
+            when $10::boolean then coalesce(completed_at, $11::timestamptz)
             else null
           end,
           version = version + 1
-      where id = $1 and version = $11
+      where id = $1 and version = $12
       returning ${operationColumns}
     `,
     [
       input.operationId,
       input.nextState.status,
       input.nextState.stage,
+      input.nextState.status === "recovery_required"
+        ? (input.recoveryMode ?? current.recoveryMode ?? "manual_review")
+        : null,
       input.actualSourceAmount ?? null,
       input.actualDestinationAmount ?? null,
       input.errorCode !== undefined,
@@ -1410,6 +1452,7 @@ export type FundingObservationInsert = Readonly<{
     | "venue_readiness";
   networkId: string;
   assetId: string;
+  assetDecimals: number;
   txHash: string;
   eventIndex: string;
   fromAddress: string | null;
@@ -1431,6 +1474,7 @@ export type FundingObservationRow = Readonly<{
   kind: FundingObservationInsert["kind"];
   networkId: string;
   assetId: string;
+  assetDecimals: number;
   txHash: string;
   eventIndex: string;
   fromAddress: string | null;
@@ -1453,6 +1497,7 @@ type FundingObservationDbRow = {
   kind: FundingObservationRow["kind"];
   network_id: string;
   asset_id: string;
+  asset_decimals: number;
   tx_hash: string;
   event_index: string;
   from_address: string | null;
@@ -1475,6 +1520,7 @@ const observationColumns = `
   kind,
   network_id,
   asset_id,
+  asset_decimals,
   tx_hash,
   event_index,
   from_address,
@@ -1498,6 +1544,7 @@ function mapObservation(row: FundingObservationDbRow): FundingObservationRow {
     kind: row.kind,
     networkId: row.network_id,
     assetId: row.asset_id,
+    assetDecimals: row.asset_decimals,
     txHash: row.tx_hash,
     eventIndex: row.event_index,
     fromAddress: row.from_address,
@@ -1529,6 +1576,7 @@ export async function allocateFundingObservationInTransaction(
         kind,
         network_id,
         asset_id,
+        asset_decimals,
         tx_hash,
         event_index,
         from_address,
@@ -1545,9 +1593,11 @@ export async function allocateFundingObservationInTransaction(
       )
       values (
         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
-        $15, $16, $17, $18::jsonb
+        $15, $16, $17, $18, $19::jsonb
       )
-      on conflict (network_id, tx_hash, event_index, asset_id) do nothing
+      on conflict (
+        network_id, tx_hash, event_index, asset_id, asset_decimals
+      ) do nothing
       returning ${observationColumns}
     `,
     [
@@ -1555,11 +1605,18 @@ export async function allocateFundingObservationInTransaction(
       input.segmentId,
       input.kind,
       input.networkId,
-      input.assetId,
+      canonicalAssetId({
+        networkId: input.networkId,
+        assetId: input.assetId,
+        decimals: input.assetDecimals,
+      }),
+      input.assetDecimals,
       input.txHash,
       input.eventIndex,
-      input.fromAddress,
-      input.toAddress,
+      input.fromAddress == null
+        ? null
+        : canonicalAccountAddress(input.networkId, input.fromAddress),
+      canonicalAccountAddress(input.networkId, input.toAddress),
       input.rawAmount,
       input.observedAt,
       input.ledgerHeight,
@@ -1583,9 +1640,20 @@ export async function allocateFundingObservationInTransaction(
         and tx_hash = $2
         and event_index = $3
         and asset_id = $4
+        and asset_decimals = $5
       for update
     `,
-    [input.networkId, input.txHash, input.eventIndex, input.assetId],
+    [
+      input.networkId,
+      input.txHash,
+      input.eventIndex,
+      canonicalAssetId({
+        networkId: input.networkId,
+        assetId: input.assetId,
+        decimals: input.assetDecimals,
+      }),
+      input.assetDecimals,
+    ],
   );
   const existingRow = existingResult.rows[0];
   if (!existingRow) {
@@ -1599,9 +1667,17 @@ export async function allocateFundingObservationInTransaction(
     existing.operationId === input.operationId &&
     existing.segmentId === input.segmentId &&
     existing.kind === input.kind &&
+    existing.assetDecimals === input.assetDecimals &&
     existing.rawAmount === input.rawAmount &&
-    existing.toAddress === input.toAddress &&
-    existing.fromAddress === input.fromAddress;
+    sameAccountAddress(input.networkId, existing.toAddress, input.toAddress) &&
+    (existing.fromAddress === null
+      ? input.fromAddress === null
+      : input.fromAddress !== null &&
+        sameAccountAddress(
+          input.networkId,
+          existing.fromAddress,
+          input.fromAddress,
+        ));
   if (!sameAllocation) {
     throw new FundingPersistenceError(
       "ambiguous_duplicate_observation",

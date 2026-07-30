@@ -8,6 +8,10 @@ import {
   multiplyUnsignedDecimals,
 } from "../../account-value/decimal.js";
 import type { AssetRef, FundingQuoteSummary, Money } from "../domain/types.js";
+import {
+  canonicalAssetId,
+  sameAccountAddress,
+} from "../domain/asset-identity.js";
 import { sameAsset } from "../planner/money.js";
 import type { FundingPlanningRuntime } from "../planner/runtime-service.js";
 import { SOLANA_NATIVE_EXECUTION_RESERVE_LAMPORTS } from "../planner/production-source-planner.js";
@@ -64,11 +68,11 @@ export function receiveReceiptRoutingAmounts(
 }> {
   const venuePreparation =
     input.receiptAsset.networkId === "evm:137" &&
-    input.receiptAsset.assetId.toLowerCase() ===
-      RELAY_PINNED_ASSETS.polygonUsdce &&
+    canonicalAssetId(input.receiptAsset) ===
+      RELAY_PINNED_ASSETS.polygonUsdce.toLowerCase() &&
     input.destinationAsset.networkId === "evm:137" &&
-    input.destinationAsset.assetId.toLowerCase() ===
-      RELAY_PINNED_ASSETS.polygonPusd;
+    canonicalAssetId(input.destinationAsset) ===
+      RELAY_PINNED_ASSETS.polygonPusd.toLowerCase();
   const nativeSol =
     input.receiptAsset.networkId === "solana:mainnet" &&
     input.receiptAsset.assetId === RELAY_PINNED_ASSETS.solanaNative &&
@@ -139,7 +143,11 @@ export async function quoteFundingReceiveReceipt(
     const address = option.source.location.details.address;
     return (
       typeof address === "string" &&
-      address.toLowerCase() === target.receipt.destinationAddress.toLowerCase()
+      sameAccountAddress(
+        target.receipt.asset.networkId,
+        address,
+        target.receipt.destinationAddress,
+      )
     );
   });
   if (sources.length !== 1) return null;

@@ -23,7 +23,10 @@ import {
   SPL_ASSOCIATED_TOKEN_PROGRAM,
   SPL_TOKEN_PROGRAM,
 } from "./solana-rehearsal.js";
-import { RelayWalletQuoteAdapter } from "./wallet-adapter.js";
+import {
+  RelayQuoteValidationError,
+  RelayWalletQuoteAdapter,
+} from "./wallet-adapter.js";
 
 const USER = "78Hpb2CbmvW2Gp2aJGZec8nphXdqtRdfjPwwLfxKgo6t";
 const RECIPIENT = "0x4D4D9799758f3B4E5DacE902c06D2F213B7C584f";
@@ -397,6 +400,42 @@ if (result.actions[0]?.kind !== "svm_transaction") {
 assert.equal(result.actions[0].instructions.length, 8);
 assert.equal(result.actions[0].addressLookupTables.length, 2);
 
+{
+  const reordered = quoteFixture();
+  const instructions = reordered.steps[0]?.items[0]?.data.instructions;
+  const first = instructions?.[0];
+  const second = instructions?.[1];
+  if (!instructions || !first || !second) {
+    throw new Error("ATA creation fixtures missing");
+  }
+  instructions[0] = second;
+  instructions[1] = first;
+  const reorderedClient = new RelayClient({
+    apiKey: "test-relay-key",
+    fetchImpl: async () =>
+      new Response(JSON.stringify(reordered), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+  });
+  const reorderedResult = await new RelayWalletQuoteAdapter(
+    reorderedClient,
+  ).quote({
+    route,
+    source,
+    destination,
+    sourceAmount: { asset: route.source, raw: "20000000" },
+    minimumOutput: { asset: route.destination, raw: "1000000" },
+    userAddress: USER,
+    recipientAddress: RECIPIENT,
+    senderWalletId: "wallet_solana_native_12345678",
+    quoteCorrelationId: "quote_solana_native_reordered_12345678",
+    deadline: new Date(Date.now() + 60_000),
+    maximumSlippageBps: 100,
+  });
+  assert.equal(reorderedResult.actions[0]?.kind, "svm_transaction");
+}
+
 async function assertQuoteRejected(
   mutated: ReturnType<typeof quoteFixture>,
   expected: RegExp,
@@ -425,6 +464,43 @@ async function assertQuoteRejected(
         maximumSlippageBps: 100,
       }),
     expected,
+  );
+}
+
+{
+  const mutated = quoteFixture();
+  const ataCreation = mutated.steps[0]?.items[0]?.data.instructions[0];
+  if (!ataCreation) throw new Error("ATA creation fixture missing");
+  ataCreation.keys[1] = key(RELAY_SWAP, false, true);
+  await assert.rejects(
+    () =>
+      new RelayWalletQuoteAdapter(
+        new RelayClient({
+          apiKey: "test-relay-key",
+          fetchImpl: async () =>
+            new Response(JSON.stringify(mutated), {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            }),
+        }),
+      ).quote({
+        route,
+        source,
+        destination,
+        sourceAmount: { asset: route.source, raw: "20000000" },
+        minimumOutput: { asset: route.destination, raw: "1000000" },
+        userAddress: USER,
+        recipientAddress: RECIPIENT,
+        senderWalletId: "wallet_solana_native_12345678",
+        quoteCorrelationId: "quote_solana_native_bad_ata_12345678",
+        deadline: new Date(Date.now() + 60_000),
+        maximumSlippageBps: 100,
+      }),
+    (error: unknown) =>
+      error instanceof RelayQuoteValidationError &&
+      error.message.includes(
+        "instructions[0].keys[1] is not an authorized ATA",
+      ),
   );
 }
 

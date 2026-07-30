@@ -1,4 +1,9 @@
 import { tx, type Pool, type PoolClient } from "@hunch/infra";
+import {
+  sameFundingTradeConsumerIntent,
+  storedFundingTradeConsumerIntentFromRow,
+  type FundingTradeConsumerIntent,
+} from "./funding-trade-consumer-intent.js";
 
 export type FundingTradeExecutionPath =
   | "polymarket_clob"
@@ -24,6 +29,7 @@ export type FundingTradeAttempt = Readonly<{
   executionPath: FundingTradeExecutionPath;
   idempotencyKey: string;
   canonicalFingerprint: string;
+  consumerIntent: FundingTradeConsumerIntent;
   state: FundingTradeAttemptState;
   broadcastMayHaveOccurred: boolean;
   externalReference: string | null;
@@ -49,6 +55,8 @@ type FundingTradeAttemptRow = Readonly<{
   execution_path: FundingTradeExecutionPath;
   idempotency_key: string;
   canonical_fingerprint: string;
+  consumer_intent: FundingTradeConsumerIntent;
+  consumer_intent_fingerprint: string;
   state: FundingTradeAttemptState;
   broadcast_may_have_occurred: boolean;
   external_reference: string | null;
@@ -73,11 +81,18 @@ type FundingTradeReservationScopeRow = Readonly<{
   purpose: string;
   venue_id: string | null;
   market_id: string | null;
+  raw_amount: string;
+  network_id: string;
+  asset_id: string;
+  asset_decimals: number;
+  market_context_snapshot: unknown;
+  requested_destination_amount: unknown;
 }>;
 
 const ATTEMPT_COLUMNS = `
   id, user_id, operation_id, reservation_id, attempt_number, venue_id,
   market_id, execution_path, idempotency_key, canonical_fingerprint, state,
+  consumer_intent, consumer_intent_fingerprint,
   broadcast_may_have_occurred, external_reference, error_code, consumer_kind,
   consumer_ref, claim_token, claim_lease_until, claimed_at, resolved_at,
   created_at, updated_at
@@ -95,6 +110,7 @@ function mapAttempt(row: FundingTradeAttemptRow): FundingTradeAttempt {
     executionPath: row.execution_path,
     idempotencyKey: row.idempotency_key,
     canonicalFingerprint: row.canonical_fingerprint,
+    consumerIntent: row.consumer_intent,
     state: row.state,
     broadcastMayHaveOccurred: row.broadcast_may_have_occurred,
     externalReference: row.external_reference,
@@ -158,7 +174,13 @@ async function loadReservationForUpdate(
         operation.progress_stage,
         operation.purpose,
         operation.venue_id,
-        operation.market_id
+        operation.market_id,
+        reservation.raw_amount,
+        reservation.network_id,
+        reservation.asset_id,
+        reservation.asset_decimals,
+        operation.market_context_snapshot,
+        operation.requested_destination_amount
       from balance_reservations reservation
       join funding_operations operation
         on operation.id = reservation.operation_id
@@ -186,6 +208,7 @@ function assertReservationScope(
   input: Readonly<{
     venueId: string;
     marketId: string;
+    consumerIntent: FundingTradeConsumerIntent;
     now: Date;
   }>,
 ): void {
@@ -201,6 +224,16 @@ function assertReservationScope(
     throw new FundingTradeAttemptError(
       "reservation_unavailable",
       "funding reservation is not ready for this exact trade",
+    );
+  }
+  const expectedIntent = storedFundingTradeConsumerIntentFromRow(row);
+  if (
+    !expectedIntent ||
+    !sameFundingTradeConsumerIntent(expectedIntent, input.consumerIntent)
+  ) {
+    throw new FundingTradeAttemptError(
+      "reservation_unavailable",
+      "funding reservation does not match this exact normalized trade spend",
     );
   }
 }
@@ -239,6 +272,7 @@ export async function claimFundingTradeAttemptInTransaction(
     executionPath: FundingTradeExecutionPath;
     idempotencyKey: string;
     canonicalFingerprint: string;
+    consumerIntent: FundingTradeConsumerIntent;
     externalReference?: string | null;
     now?: Date;
   }>,
@@ -277,7 +311,11 @@ export async function claimFundingTradeAttemptInTransaction(
       active.marketId === input.marketId &&
       active.executionPath === input.executionPath &&
       active.idempotencyKey === input.idempotencyKey &&
-      active.canonicalFingerprint === input.canonicalFingerprint
+      active.canonicalFingerprint === input.canonicalFingerprint &&
+      sameFundingTradeConsumerIntent(
+        active.consumerIntent,
+        input.consumerIntent,
+      )
     ) {
       if (
         active.state === "claimed" &&
@@ -322,6 +360,7 @@ export async function claimFundingTradeAttemptInTransaction(
   assertReservationScope(scope, {
     venueId: input.venueId,
     marketId: input.marketId,
+    consumerIntent: input.consumerIntent,
     now,
   });
 
@@ -344,7 +383,11 @@ export async function claimFundingTradeAttemptInTransaction(
       replay.venueId === input.venueId &&
       replay.marketId === input.marketId &&
       replay.executionPath === input.executionPath &&
-      replay.canonicalFingerprint === input.canonicalFingerprint
+      replay.canonicalFingerprint === input.canonicalFingerprint &&
+      sameFundingTradeConsumerIntent(
+        replay.consumerIntent,
+        input.consumerIntent,
+      )
     ) {
       return {
         claimed: false,
@@ -372,12 +415,13 @@ export async function claimFundingTradeAttemptInTransaction(
         insert into funding_trade_attempts (
           user_id, operation_id, reservation_id, attempt_number, venue_id,
           market_id, execution_path, idempotency_key, canonical_fingerprint,
+          consumer_intent, consumer_intent_fingerprint,
           external_reference, broadcast_may_have_occurred, claim_lease_until,
           claimed_at
         )
         values (
-          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
-          $12::timestamptz + interval '15 seconds', $12::timestamptz
+          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12, $13,
+          $14::timestamptz + interval '15 seconds', $14::timestamptz
         )
         returning ${ATTEMPT_COLUMNS}
       `,
@@ -391,6 +435,8 @@ export async function claimFundingTradeAttemptInTransaction(
       input.executionPath,
       input.idempotencyKey,
       input.canonicalFingerprint,
+      input.consumerIntent,
+      input.consumerIntent.fingerprint,
       input.externalReference?.trim() || null,
       false,
       now,

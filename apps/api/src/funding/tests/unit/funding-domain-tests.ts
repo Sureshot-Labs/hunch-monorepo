@@ -278,6 +278,13 @@ await test("freezes authenticated discovery, quote, and commit boundaries", () =
     requestedDestinationAmount: { asset: polygonPusd, raw: "5000000" },
     confirmedSourceAmount: null,
     marketContextId: "marketctx_12345678",
+    consumerIntent: {
+      venueId: "polymarket",
+      marketId: "polymarket:market_12345678",
+      marketContextId: "marketctx_12345678",
+      side: "BUY",
+      spend: { asset: polygonPusd, raw: "4900000" },
+    },
     destinationOptionId: "destination_12345678",
     withdrawalRecipientId: null,
     venueBindingOptionId: "bindingopt_12345678",
@@ -293,6 +300,23 @@ await test("freezes authenticated discovery, quote, and commit boundaries", () =
     fundingDiscoveryRequestSchema.safeParse({
       ...tradeDiscovery,
       marketContextId: null,
+    }).success,
+    false,
+  );
+  assert.equal(
+    fundingDiscoveryRequestSchema.safeParse({
+      ...tradeDiscovery,
+      consumerIntent: null,
+    }).success,
+    false,
+  );
+  assert.equal(
+    fundingDiscoveryRequestSchema.safeParse({
+      ...tradeDiscovery,
+      consumerIntent: {
+        ...tradeDiscovery.consumerIntent,
+        marketId: "market_12345678",
+      },
     }).success,
     false,
   );

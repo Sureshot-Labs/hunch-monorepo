@@ -2462,19 +2462,16 @@ const tests: TestCase[] = [
       );
 
       const polymarketService = readFileSync(
-        resolve(
-          apiSrcDir,
-          "services/polymarket-trading-execution-service.ts",
-        ),
+        resolve(apiSrcDir, "services/polymarket-trading-execution-service.ts"),
         "utf8",
       );
-      const polymarketAccountBlock = sourceSlice(
+      const polymarketAccountServiceBlock = sourceSlice(
         polymarketService,
         "export async function fetchPolymarketAccountRoute",
         "export async function syncPolymarketOrdersRoute",
       );
       assert.doesNotMatch(
-        polymarketAccountBlock,
+        polymarketAccountServiceBlock,
         /funderIsContract:[\s\S]*?\brpcUrl\s*:/,
         "Polymarket account responses must not expose the server RPC URL",
       );
@@ -2683,10 +2680,6 @@ const tests: TestCase[] = [
         /requireLimitlessPartnerAuth/,
       );
 
-      const dflowRoute = readFileSync(
-        resolve(apiSrcDir, "routes/dflow-private.ts"),
-        "utf8",
-      );
       assert.match(dflowRoute, /buildKalshiDflowOrderRoute/);
       assert.match(dflowRoute, /quoteKalshiDflowRoute/);
       assert.match(dflowRoute, /buildKalshiDflowSwapRoute/);

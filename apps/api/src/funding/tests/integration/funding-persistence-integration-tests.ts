@@ -59,6 +59,13 @@ import {
   claimFundingTradeAttemptInTransaction,
   markFundingTradeAttemptSubmissionStartedInTransaction,
 } from "../../persistence/funding-trade-attempt-repository.js";
+import { buildFundingTradeConsumerIntent } from "../../persistence/funding-trade-consumer-intent.js";
+import {
+  createOrReplayFundingPreparationRun,
+  fetchFundingPreparationRun,
+  reportFundingPreparationAction,
+  resolveFundingPreparationRun,
+} from "../../persistence/funding-preparation-run-repository.js";
 import { ingestFundingObservationInTransaction } from "../../reconciliation/funding-observation-ingestion.js";
 import {
   FUNDING_RECONCILIATION_TIMEOUT_ERROR_CODE,
@@ -94,6 +101,8 @@ function buildPlan(
     includeReservation?: boolean;
     includeStep?: boolean;
     invalidDependency?: boolean;
+    marketSide?: string;
+    requestedCollateralRaw?: string;
     sourceComponentId?: string;
     sourceLocationId?: string;
   } = {},
@@ -128,7 +137,14 @@ function buildPlan(
       marketId: input.marketId ?? null,
       marketContextSnapshot:
         input.marketId && input.venueId
-          ? { marketId: input.marketId, venueId: input.venueId }
+          ? {
+              marketContextId: opaque("market-context"),
+              marketId: input.marketId,
+              venueId: input.venueId,
+              side: input.marketSide ?? "BUY",
+              collateralAsset: ASSET,
+              requestedCollateralRaw: input.requestedCollateralRaw ?? "990000",
+            }
           : null,
       venueBindingSnapshot: null,
       walletExecutionSnapshot: null,
@@ -318,6 +334,139 @@ async function cleanupCommittedOperation(
   } finally {
     client.release();
   }
+}
+
+async function testConcurrentPreparationRunReplay(): Promise<void> {
+  const userId = await insertUser(pool);
+  let materializations = 0;
+  const request = {
+    venueBindingOptionId: "binding:test:preparation",
+    purpose: "buy" as const,
+    marketContextId: "market:test:preparation",
+    marketClass: null,
+    positionActionRef: null,
+    controllerWalletRef: userId,
+    expectedInspectionRevision: hash("b"),
+  };
+  const create = () =>
+    createOrReplayFundingPreparationRun(pool, {
+      userId,
+      request,
+      expiresAt: new Date(Date.now() + 60_000),
+      materialize: async (runId) => {
+        materializations += 1;
+        return {
+          controllerWalletRef: userId,
+          actions: [
+            {
+              kind: "evm_transaction" as const,
+              actionId: `preparation_action_${runId}`,
+              networkId: "evm:137",
+              senderWalletId: userId,
+              to: "0x0000000000000000000000000000000000000001",
+              data: "0x",
+              valueRaw: "0",
+              gasLimitRaw: null,
+            },
+          ],
+        };
+      },
+    });
+  const [first, second] = await Promise.all([create(), create()]);
+  assert.equal(first.runId, second.runId);
+  assert.equal(materializations, 1);
+  assert.deepEqual([first.replayed, second.replayed].sort(), [false, true]);
+  const action = first.actions[0];
+  assert.ok(action);
+  const report = {
+    outcome: "submitted" as const,
+    transactionReference: `0x${hash("c")}`,
+    networkFeeRaw: null,
+  };
+  const submitted = await reportFundingPreparationAction(pool, {
+    userId,
+    runId: first.runId,
+    actionId: action.actionId,
+    report,
+  });
+  assert.equal(submitted.status, "submitted");
+  const replayedReport = await reportFundingPreparationAction(pool, {
+    userId,
+    runId: first.runId,
+    actionId: action.actionId,
+    report,
+  });
+  assert.equal(replayedReport.replayed, true);
+  await expectFundingError(
+    reportFundingPreparationAction(pool, {
+      userId,
+      runId: first.runId,
+      actionId: action.actionId,
+      report: { ...report, outcome: "ambiguous" },
+    }),
+    "idempotency_conflict",
+  );
+  const resolved = await resolveFundingPreparationRun(pool, {
+    userId,
+    runId: first.runId,
+    succeeded: true,
+  });
+  assert.equal(resolved.status, "succeeded");
+
+  const expiring = await createOrReplayFundingPreparationRun(pool, {
+    userId,
+    request: {
+      ...request,
+      expectedInspectionRevision: hash("d"),
+    },
+    expiresAt: new Date(Date.now() - 1),
+    materialize: async (runId) => ({
+      controllerWalletRef: userId,
+      actions: [
+        {
+          kind: "evm_transaction" as const,
+          actionId: `preparation_action_${runId}`,
+          networkId: "evm:137",
+          senderWalletId: userId,
+          to: "0x0000000000000000000000000000000000000001",
+          data: "0x",
+          valueRaw: "0",
+          gasLimitRaw: null,
+        },
+      ],
+    }),
+  });
+  const expired = await fetchFundingPreparationRun(pool, {
+    userId,
+    runId: expiring.runId,
+  });
+  assert.equal(expired?.status, "expired");
+  const lateSubmitted = await reportFundingPreparationAction(pool, {
+    userId,
+    runId: expiring.runId,
+    actionId: expiring.actions[0]?.actionId ?? "",
+    report: {
+      outcome: "submitted",
+      transactionReference: `0x${hash("e")}`,
+      networkFeeRaw: null,
+    },
+  });
+  assert.equal(lateSubmitted.status, "submitted");
+  const stillSubmitted = await fetchFundingPreparationRun(pool, {
+    userId,
+    runId: expiring.runId,
+  });
+  assert.equal(stillSubmitted?.status, "submitted");
+
+  await pool.query(
+    "delete from funding_preparation_action_attempts where run_id = any($1::uuid[])",
+    [[first.runId, expiring.runId]],
+  );
+  await pool.query(
+    "delete from funding_preparation_runs where id = any($1::uuid[])",
+    [[first.runId, expiring.runId]],
+  );
+  await pool.query("delete from users where id = $1", [userId]);
 }
 
 async function testConcurrentCommitReplay(): Promise<void> {
@@ -556,15 +705,16 @@ async function assertPollingFailureHonorsTerminalTimeout(input: {
         requeued: result.requeued,
       },
       input.markStepSucceeded
-        ? { claimed: 1, deadLettered: 1, failed: 0, requeued: 0 }
+        ? { claimed: 1, deadLettered: 0, failed: 0, requeued: 1 }
         : { claimed: 1, deadLettered: 0, failed: 1, requeued: 0 },
     );
     const operation = await pool.query<{
       error_code: string | null;
+      recovery_mode: string | null;
       status: string;
     }>(
       `
-        select status, error_code
+        select status, error_code, recovery_mode
         from funding_operations
         where id = $1
       `,
@@ -576,8 +726,13 @@ async function assertPollingFailureHonorsTerminalTimeout(input: {
         ? {
             status: "recovery_required",
             error_code: FUNDING_RECONCILIATION_TIMEOUT_ERROR_CODE,
+            recovery_mode: "automatic_evidence",
           }
-        : { status: "in_progress", error_code: null },
+        : {
+            status: "in_progress",
+            error_code: null,
+            recovery_mode: null,
+          },
     );
     const steps = await pool.query<{ state: string }>(
       `
@@ -593,11 +748,12 @@ async function assertPollingFailureHonorsTerminalTimeout(input: {
       [input.expectedStepState],
     );
     const job = await pool.query<{
+      due_at: Date;
       last_error_code: string | null;
       status: string;
     }>(
       `
-        select status, last_error_code
+        select status, last_error_code, due_at
         from funding_reconciliation_jobs
         where operation_id = $1
       `,
@@ -607,12 +763,14 @@ async function assertPollingFailureHonorsTerminalTimeout(input: {
       job.rows[0],
       input.markStepSucceeded
         ? {
-            status: "dead_letter",
-            last_error_code: FUNDING_RECONCILIATION_TIMEOUT_ERROR_CODE,
+            status: "scheduled",
+            last_error_code: null,
+            due_at: new Date(now.getTime() + 60_000),
           }
         : {
             status: "scheduled",
             last_error_code: "funding_reconciliation_failed",
+            due_at: new Date(now.getTime() + 30_000),
           },
     );
   } finally {
@@ -1652,7 +1810,8 @@ async function testTransactionalPersistenceContracts(): Promise<void> {
     const userA = await insertUser(client);
     const userB = await insertUser(client);
     const eventId = opaque("event");
-    const marketId = opaque("market");
+    const venueMarketId = opaque("market");
+    const marketId = `polymarket:${venueMarketId}`;
     await client.query(
       `
         insert into unified_events (
@@ -1680,7 +1839,7 @@ async function testTransactionalPersistenceContracts(): Promise<void> {
         )
         values ($1, 'polymarket', $2, $3, 'WP6 reservation market', 'ACTIVE', 'binary')
       `,
-      [marketId, opaque("venue-market"), eventId],
+      [marketId, venueMarketId, eventId],
     );
     const userBPrivyId = `did:privy:wp3-${crypto.randomUUID()}`;
     await client.query("update users set privy_user_id = $2 where id = $1", [
@@ -1738,6 +1897,8 @@ async function testTransactionalPersistenceContracts(): Promise<void> {
       purpose: "trade_shortfall",
       venueId: "polymarket",
       marketId,
+      marketSide: "NO",
+      requestedCollateralRaw: "1000000",
     });
     const tokenB = opaque("consent");
     const quoteB = await createFundingQuoteInTransaction(
@@ -2138,6 +2299,7 @@ async function testTransactionalPersistenceContracts(): Promise<void> {
           kind: "source_debit",
           networkId: ASSET.networkId,
           assetId: ASSET.assetId,
+          assetDecimals: ASSET.decimals,
           txHash: opaque("source-tx"),
           eventIndex: "0",
           fromAddress: "0xsource",
@@ -2160,6 +2322,7 @@ async function testTransactionalPersistenceContracts(): Promise<void> {
         kind: "source_debit",
         networkId: ASSET.networkId,
         assetId: ASSET.assetId,
+        assetDecimals: ASSET.decimals,
         txHash: sourceObservation.observation.txHash,
         eventIndex: "0",
         fromAddress: "0xsource",
@@ -2216,6 +2379,7 @@ async function testTransactionalPersistenceContracts(): Promise<void> {
         kind: "source_debit",
         networkId: ASSET.networkId,
         assetId: ASSET.assetId,
+        assetDecimals: ASSET.decimals,
         txHash: sourceObservation.observation.txHash,
         eventIndex: "0",
         fromAddress: "0xsource",
@@ -2349,6 +2513,7 @@ async function testTransactionalPersistenceContracts(): Promise<void> {
         kind: "destination_credit",
         networkId: ASSET.networkId,
         assetId: ASSET.assetId,
+        assetDecimals: ASSET.decimals,
         txHash: opaque("destination-tx"),
         eventIndex: "0",
         fromAddress: "0xrouter",
@@ -2494,6 +2659,7 @@ async function testTransactionalPersistenceContracts(): Promise<void> {
         kind: "refund_credit",
         networkId: ASSET.networkId,
         assetId: ASSET.assetId,
+        assetDecimals: ASSET.decimals,
         txHash: opaque("refund-tx"),
         eventIndex: "0",
         fromAddress: "0xrouter",
@@ -2540,6 +2706,7 @@ async function testTransactionalPersistenceContracts(): Promise<void> {
         kind: "destination_credit",
         networkId: ASSET.networkId,
         assetId: ASSET.assetId,
+        assetDecimals: ASSET.decimals,
         txHash: opaque("trade-shortfall-destination"),
         eventIndex: "0",
         fromAddress: "0xrouter",
@@ -2584,6 +2751,17 @@ async function testTransactionalPersistenceContracts(): Promise<void> {
     assert.ok(reservationBRow);
     const reservationBId = reservationBRow.id;
     assert.equal(reservationBRow.raw_amount, "990000");
+    const marketContextId = String(
+      committedB.operation.supportMetadata.test
+        ? planB.operation.marketContextSnapshot?.marketContextId
+        : "",
+    );
+    const consumerIntent = buildFundingTradeConsumerIntent({
+      venueId: "polymarket",
+      marketId,
+      marketContextId,
+      spend: { asset: ASSET, raw: "1000000" },
+    });
     assert.deepEqual(
       await assertFundingReservationReadyForTrade(client as never, {
         userId: userB,
@@ -2591,8 +2769,7 @@ async function testTransactionalPersistenceContracts(): Promise<void> {
           operationId: committedB.operation.id,
           reservationId: reservationBId,
         },
-        venue: "polymarket",
-        marketId,
+        intent: consumerIntent,
       }),
       {
         rawAmount: "990000",
@@ -2606,8 +2783,12 @@ async function testTransactionalPersistenceContracts(): Promise<void> {
           operationId: committedB.operation.id,
           reservationId: reservationBId,
         },
-        venue: "polymarket",
-        marketId: null,
+        intent: buildFundingTradeConsumerIntent({
+          venueId: "polymarket",
+          marketId,
+          marketContextId,
+          spend: { asset: ASSET, raw: "990000" },
+        }),
       }),
       "invalid_state_transition",
     );
@@ -2672,6 +2853,7 @@ async function testTransactionalPersistenceContracts(): Promise<void> {
       executionPath: "polymarket_clob",
       idempotencyKey: `polymarket-clob:${tradeExecutionReference}`,
       canonicalFingerprint: hash("t"),
+      consumerIntent,
       externalReference: tradeExecutionReference,
     } as const;
     const tradeClaim = await claimFundingTradeAttemptInTransaction(
@@ -3065,6 +3247,10 @@ async function testTransactionalPersistenceContracts(): Promise<void> {
   }
 }
 
+await testConcurrentPreparationRunReplay();
+console.log(
+  "[funding-persistence-integration-tests] ok concurrent preparation replay, report idempotency, and reconcile",
+);
 await testConcurrentCommitReplay();
 console.log(
   "[funding-persistence-integration-tests] ok concurrent exact replay",

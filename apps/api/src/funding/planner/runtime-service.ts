@@ -12,6 +12,15 @@ import {
   listFundingOperationsForUser,
 } from "../persistence/funding-operation-repository.js";
 import { listFundingOperationStepsForUser } from "../persistence/funding-evidence-repository.js";
+import {
+  createOrReplayFundingPreparationRun,
+  fetchFundingPreparationRun,
+  reportFundingPreparationAction,
+  resolveFundingPreparationRun,
+  type FundingPreparationActionReport,
+  type FundingPreparationRun,
+  type FundingPreparationRunRequest,
+} from "../persistence/funding-preparation-run-repository.js";
 import { PostgresFundingPlanningStore } from "../persistence/funding-planning-repository.js";
 import { resolveFundingPolicy } from "../policies/funding-policy-service.js";
 import type {
@@ -20,14 +29,16 @@ import type {
   FundingDiscoveryRequest,
   FundingQuoteRequest,
   IntentLiquidityProjection,
-  NormalizedAction,
   PreparationPurpose,
 } from "../domain/types.js";
 import type { PreparationResult } from "../domain/contracts.js";
 import { FundingPlanner } from "./planner.js";
 import { FundingQuoteService } from "./quote-service.js";
 import { FundingOperationService } from "./operation-service.js";
-import { canonicalMarketUpdatedAt } from "./market-context-revision.js";
+import {
+  canonicalMarketUpdatedAt,
+  matchesCanonicalMarketIdentity,
+} from "./market-context-revision.js";
 import { FundingPlannerError } from "./money.js";
 import { WalletPreparationRuntimeService } from "../preparation/runtime-service.js";
 import { ProductionFundingSourcePlanner } from "./production-source-planner.js";
@@ -38,8 +49,10 @@ import {
   type FundingActionReportOutcome,
 } from "../execution/operation-action-runtime.js";
 import { WithdrawalDestinationRuntime } from "../execution/withdrawal-destination-runtime.js";
+import { sameAsset } from "../domain/asset-identity.js";
 
 const SUBJECT_FINGERPRINT_DOMAIN = "hunch:funding:subject:v1:";
+const PREPARATION_RUN_TTL_MS = 15 * 60_000;
 
 function positiveInt(raw: string | undefined): number | null {
   if (!raw || !/^\d+$/.test(raw)) return null;
@@ -170,7 +183,7 @@ export class FundingPlanningRuntime {
     });
   }
 
-  prepare(
+  async prepare(
     userId: string,
     request: Readonly<{
       venueBindingOptionId: string;
@@ -179,26 +192,75 @@ export class FundingPlanningRuntime {
       marketClass: string | null;
       positionActionRef?: string | null;
       controllerWalletRef?: string | null;
-      operationId: string;
+      operationId?: string;
       expectedInspectionRevision: string;
     }>,
-  ): Promise<
-    Readonly<{
-      actions: readonly NormalizedAction[];
-      controllerWalletRef: string;
-    }>
-  > {
-    return this.preparationRuntime.prepareBindingOption({
-      accountId: userId,
+  ): Promise<FundingPreparationRun> {
+    const resolvedMarket = request.marketContextId
+      ? await resolveTradeMarketByRef(this.db, request.marketContextId)
+      : null;
+    const snapshot: FundingPreparationRunRequest = {
       venueBindingOptionId: request.venueBindingOptionId,
       purpose: request.purpose,
-      marketContextId: request.marketContextId,
+      marketContextId: resolvedMarket?.market.id ?? request.marketContextId,
       marketClass: request.marketClass,
       positionActionRef: request.positionActionRef ?? null,
-      compatibleVenueBindingOptionIds: [request.venueBindingOptionId],
       controllerWalletRef: request.controllerWalletRef ?? null,
-      operationId: request.operationId,
       expectedInspectionRevision: request.expectedInspectionRevision,
+    };
+    return createOrReplayFundingPreparationRun(this.db, {
+      userId,
+      request: snapshot,
+      expiresAt: new Date(Date.now() + PREPARATION_RUN_TTL_MS),
+      materialize: (runId) =>
+        this.preparationRuntime.prepareBindingOption({
+          accountId: userId,
+          venueBindingOptionId: snapshot.venueBindingOptionId,
+          purpose: snapshot.purpose,
+          marketContextId: snapshot.marketContextId,
+          marketClass: snapshot.marketClass,
+          positionActionRef: snapshot.positionActionRef,
+          compatibleVenueBindingOptionIds: [snapshot.venueBindingOptionId],
+          controllerWalletRef: snapshot.controllerWalletRef,
+          operationId: runId,
+          expectedInspectionRevision: snapshot.expectedInspectionRevision,
+        }),
+    });
+  }
+
+  preparationRun(userId: string, runId: string) {
+    return fetchFundingPreparationRun(this.db, { userId, runId });
+  }
+
+  reportPreparationAction(
+    userId: string,
+    input: Readonly<{
+      runId: string;
+      actionId: string;
+      report: FundingPreparationActionReport;
+    }>,
+  ) {
+    return reportFundingPreparationAction(this.db, {
+      userId,
+      runId: input.runId,
+      actionId: input.actionId,
+      report: input.report,
+    });
+  }
+
+  async reconcilePreparationRun(
+    userId: string,
+    runId: string,
+  ): Promise<FundingPreparationRun | null> {
+    const run = await fetchFundingPreparationRun(this.db, { userId, runId });
+    if (!run || run.status === "succeeded" || run.status === "expired") {
+      return run;
+    }
+    const preparation = await this.inspectPreparation(userId, run.request);
+    return resolveFundingPreparationRun(this.db, {
+      userId,
+      runId,
+      succeeded: preparation.status === "ready",
     });
   }
 
@@ -257,13 +319,31 @@ export class FundingPlanningRuntime {
         ),
       resolveMarketContext: async ({ marketContextId }) => {
         const requestedAmount = request.requestedDestinationAmount;
-        if (!requestedAmount) return null;
+        const consumerIntent = request.consumerIntent;
+        if (!requestedAmount || !consumerIntent) {
+          throw new FundingPlannerError(
+            "invalid_market_context",
+            "trade funding requires an exact normalized consumer intent",
+          );
+        }
         const resolved = await resolveTradeMarketByRef(
           this.db,
           marketContextId,
         );
         if (!resolved?.market || !resolved.side) return null;
         const market = resolved.market;
+        if (
+          !matchesCanonicalMarketIdentity(consumerIntent, market) ||
+          consumerIntent.marketContextId !== marketContextId ||
+          consumerIntent.side !== "BUY" ||
+          !sameAsset(consumerIntent.spend.asset, requestedAmount.asset) ||
+          BigInt(requestedAmount.raw) < BigInt(consumerIntent.spend.raw)
+        ) {
+          throw new FundingPlannerError(
+            "invalid_market_context",
+            "trade consumer intent differs from the resolved funding market",
+          );
+        }
         resolvedMarketForPreparation = market;
         // The opaque binding is still revalidated by the one authoritative
         // destination discovery below. Do not perform the same live wallet
@@ -290,8 +370,8 @@ export class FundingPlanningRuntime {
               updatedAt: canonicalMarketUpdatedAt(market.updated_at),
             }),
           ),
-          collateralAsset: requestedAmount.asset,
-          requestedCollateralRaw: requestedAmount.raw,
+          collateralAsset: consumerIntent.spend.asset,
+          requestedCollateralRaw: consumerIntent.spend.raw,
           compatibleVenueBindingOptionIds,
           expiresAt: new Date(
             now.getTime() + resolvedPolicy.policy.ttl.quoteMs,
@@ -302,6 +382,8 @@ export class FundingPlanningRuntime {
         this.withdrawalRuntime.resolve(accountId, recipientId),
       listSources: async (sourceInput) =>
         (await sourcePlannerPromise).list(sourceInput),
+      discoverSources: async (sourceInput) =>
+        (await sourcePlannerPromise).discover(sourceInput),
       listSourceBlockers: async (sourceInput) =>
         (await sourcePlannerPromise).listBlockingReasonCodes(sourceInput),
       store: this.planningStore,

@@ -4,11 +4,12 @@ import type {
   ApiVenueTradingExecutor,
   SupportedBotTradingVenue,
 } from "./api-trading-types.js";
-import {
-  assertFundingReservationReadyForTrade,
-  releaseFundingReservationForDefinitiveTradeFailure,
-} from "../funding/persistence/funding-evidence-repository.js";
+import { releaseFundingReservationForDefinitiveTradeFailure } from "../funding/persistence/funding-evidence-repository.js";
 import { canonicalJsonHash } from "../funding/persistence/canonical.js";
+import {
+  buildFundingTradeConsumerIntent,
+  type FundingTradeConsumerIntent,
+} from "../funding/persistence/funding-trade-consumer-intent.js";
 import {
   claimFundingTradeAttempt,
   FundingTradeAttemptError,
@@ -17,6 +18,8 @@ import {
   type FundingTradeExecutionPath,
 } from "../funding/persistence/funding-trade-attempt-repository.js";
 import { isRecord } from "../lib/type-guards.js";
+import { normalizeLimitlessScopedTokenId } from "../lib/limitless-token.js";
+import { env } from "../env.js";
 import { createKalshiTradingExecutionService } from "./kalshi-trading-execution-service.js";
 import { createLimitlessTradingExecutionService } from "./limitless-trading-execution-service.js";
 import { createPolymarketTradingExecutionService } from "./polymarket-trading-execution-service.js";
@@ -24,7 +27,11 @@ import {
   normalizeTradingError,
   TradingServiceError,
 } from "./trading-errors.js";
-import type { TradeIntent, TradingVenue } from "./trading-types.js";
+import type {
+  PreparedTrade,
+  TradeIntent,
+  TradingVenue,
+} from "./trading-types.js";
 import { venueLifecycleAllowsTradingAction } from "./venue-lifecycle.js";
 
 export type {
@@ -99,24 +106,6 @@ export function createApiTradingApplicationService(
         venue: intent.venue,
       });
     }
-    try {
-      await assertFundingReservationReadyForTrade(input.pool, {
-        userId: intent.actor.userId,
-        link: intent.fundingReservation,
-        venue: intent.venue,
-        marketId: intent.target.marketId,
-      });
-    } catch (error) {
-      throw new TradingServiceError({
-        code: "insufficient_readiness",
-        message:
-          error instanceof Error
-            ? error.message
-            : "Funding reservation is unavailable.",
-        statusCode: 409,
-        venue: intent.venue,
-      });
-    }
   };
   const assertReadyIntent = async (intent: TradeIntent): Promise<void> => {
     await assertIntentAllowed(intent);
@@ -145,6 +134,99 @@ export function createApiTradingApplicationService(
     venueOrderId?: string | null;
   }): string | null =>
     input.orderHash ?? input.txSignature ?? input.venueOrderId ?? null;
+
+  const rawInteger = (value: unknown): string | null => {
+    if (typeof value === "bigint" && value > 0n) return value.toString();
+    if (typeof value === "number" && Number.isSafeInteger(value) && value > 0) {
+      return value.toString();
+    }
+    if (typeof value !== "string") return null;
+    const trimmed = value.trim();
+    return /^[1-9][0-9]*$/.test(trimmed) ? trimmed : null;
+  };
+
+  const fundingConsumerIntentForPrepared = (
+    prepared: PreparedTrade,
+  ): FundingTradeConsumerIntent => {
+    const intent = prepared.intent;
+    const payload = isRecord(prepared.venuePayload)
+      ? prepared.venuePayload
+      : null;
+    const marketId = intent.target.marketId;
+    if (!payload || !marketId) {
+      throw new TradingServiceError({
+        code: "invalid_trade_request",
+        message: "Funding reservation trade is missing normalized venue data.",
+        statusCode: 409,
+        venue: intent.venue,
+      });
+    }
+    let marketContextId: string | null = null;
+    let raw: string | null = null;
+    let asset: Readonly<{
+      networkId: string;
+      assetId: string;
+      decimals: number;
+    }> | null = null;
+    if (prepared.venue === "polymarket") {
+      const order = isRecord(payload.orderPayload)
+        ? payload.orderPayload
+        : null;
+      marketContextId =
+        (typeof payload.tokenId === "string" && payload.tokenId) ||
+        intent.target.tokenId ||
+        null;
+      raw = rawInteger(order?.makerAmount);
+      asset = {
+        networkId: "evm:137",
+        assetId: env.polymarketUsdcAddress,
+        decimals: 6,
+      };
+    } else if (prepared.venue === "limitless") {
+      const order = isRecord(payload.orderPayload)
+        ? payload.orderPayload
+        : null;
+      const tokenId =
+        (typeof payload.tokenId === "string" && payload.tokenId) ||
+        intent.target.tokenId ||
+        null;
+      marketContextId = tokenId
+        ? normalizeLimitlessScopedTokenId(tokenId)
+        : null;
+      raw =
+        payload.tradeType === "amm"
+          ? rawInteger(payload.amountUsdRaw)
+          : rawInteger(order?.makerAmount);
+      asset = {
+        networkId: "evm:8453",
+        assetId: env.limitlessUsdcAddress,
+        decimals: 6,
+      };
+    } else if (prepared.venue === "kalshi") {
+      marketContextId = intent.target.tokenId ?? null;
+      raw = rawInteger(payload.amountInRaw);
+      asset = {
+        networkId: "solana:mainnet",
+        assetId: env.solanaUsdcMint,
+        decimals: 6,
+      };
+    }
+    if (!marketContextId || !raw || !asset) {
+      throw new TradingServiceError({
+        code: "invalid_trade_request",
+        message:
+          "Funding reservation trade is missing its exact normalized spend.",
+        statusCode: 409,
+        venue: intent.venue,
+      });
+    }
+    return buildFundingTradeConsumerIntent({
+      venueId: intent.venue,
+      marketId,
+      marketContextId,
+      spend: { asset, raw },
+    });
+  };
 
   return {
     applyTradeEffects: (effectsInput) =>
@@ -209,6 +291,7 @@ export function createApiTradingApplicationService(
                   key: intent.idempotencyKey,
                 })}`,
                 canonicalFingerprint,
+                consumerIntent: fundingConsumerIntentForPrepared(prepared),
                 externalReference,
               }).catch((error: unknown) => {
                 if (!(error instanceof FundingTradeAttemptError)) throw error;

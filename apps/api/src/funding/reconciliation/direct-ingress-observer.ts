@@ -576,6 +576,7 @@ async function persistSatisfiedAmount(
     kind: direct ? "destination_credit" : "source_credit",
     networkId: selected.variant.asset.networkId,
     assetId: selected.variant.asset.assetId,
+    assetDecimals: selected.variant.asset.decimals,
     txHash: `direct-ingress:${input.target.operationId}:${selected.observation.revision}`,
     eventIndex: direct
       ? "minimum-destination-balance-delta"

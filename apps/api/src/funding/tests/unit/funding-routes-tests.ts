@@ -17,6 +17,7 @@ import type {
 import type { PreparationResult } from "../../domain/contracts.js";
 import type { FundingOperationStep } from "../../persistence/funding-evidence-repository.js";
 import type { FundingOperationRow } from "../../persistence/funding-operation-repository.js";
+import { buildFundingTradeConsumerIntent } from "../../persistence/funding-trade-consumer-intent.js";
 import { WithdrawalDestinationError } from "../../execution/withdrawal-destination-runtime.js";
 import { FundingPlannerError } from "../../planner/money.js";
 import { PreparationContractError } from "../../preparation/core-adapter.js";
@@ -34,6 +35,12 @@ const ASSET = {
   assetId: "0x0000000000000000000000000000000000000001",
   decimals: 6,
 };
+const CONSUMER_INTENT = buildFundingTradeConsumerIntent({
+  venueId: "polymarket",
+  marketId: "polymarket:market_id_12345678",
+  marketContextId: "token_id_12345678",
+  spend: { asset: ASSET, raw: "1000000" },
+});
 
 async function test(name: string, run: () => void | Promise<void>) {
   await run();
@@ -152,6 +159,44 @@ function preparedAction(): NormalizedAction {
   return action;
 }
 
+function preparationRun() {
+  const action = preparedAction();
+  return {
+    runId: "30000000-0000-4000-8000-000000000001",
+    userId: USER_ID,
+    requestFingerprint: `preparation_${"f".repeat(64)}`,
+    request: {
+      venueBindingOptionId: "binding_poly_12345678",
+      purpose: "fund" as const,
+      marketContextId: null,
+      marketClass: null,
+      positionActionRef: null,
+      controllerWalletRef: USER_ID,
+      expectedInspectionRevision: "inspection_poly_runtime_12345678",
+    },
+    inspectionRevision: "inspection_poly_runtime_12345678",
+    controllerWalletRef: USER_ID,
+    status: "action_required" as const,
+    expiresAt: new Date(NOW.getTime() + 60_000),
+    resolvedAt: null,
+    actions: [
+      {
+        actionId: action.actionId,
+        ordinal: 0,
+        actionFingerprint: "a".repeat(64),
+        action,
+        state: "action_required" as const,
+        broadcastMayHaveOccurred: false,
+        transactionReference: null,
+        report: null,
+        reportedAt: null,
+        resolvedAt: null,
+      },
+    ],
+    replayed: false,
+  };
+}
+
 function quote(): FundingQuoteSummary {
   return {
     quoteId: "quote_id_12345678",
@@ -206,6 +251,7 @@ function operation(): FundingOperationRow {
     actualSourceAmount: null,
     actualDestinationAmount: null,
     errorCode: null,
+    recoveryMode: null,
     supportMetadata: {},
     version: 1,
     createdAt: NOW,
@@ -356,9 +402,33 @@ async function buildApp(overrides: Partial<FundingRouteDependencies> = {}) {
     }),
     destinations: async () => [destination()],
     inspectPreparation: async () => preparation(),
-    prepare: async () => ({
-      actions: preparedActions(),
-      controllerWalletRef: USER_ID,
+    prepare: async () => preparationRun(),
+    preparationRun: async () => preparationRun(),
+    reportPreparationAction: async () => ({
+      ...preparationRun(),
+      status: "submitted",
+      actions: preparationRun().actions.map((attempt) => ({
+        ...attempt,
+        state: "submitted" as const,
+        broadcastMayHaveOccurred: true,
+        transactionReference: "0xtransaction_reference_12345678",
+        report: {
+          outcome: "submitted" as const,
+          transactionReference: "0xtransaction_reference_12345678",
+          networkFeeRaw: null,
+        },
+        reportedAt: NOW,
+      })),
+    }),
+    reconcilePreparationRun: async () => ({
+      ...preparationRun(),
+      status: "succeeded",
+      resolvedAt: NOW,
+      actions: preparationRun().actions.map((attempt) => ({
+        ...attempt,
+        state: "succeeded" as const,
+        resolvedAt: NOW,
+      })),
     }),
     liquidity: async () => liquidity(),
     quote: async () => quote(),
@@ -865,6 +935,13 @@ await test("trade shortfall liquidity forwards the selected controller wallet", 
         requestedDestinationAmount: { asset: ASSET, raw: "1000000" },
         confirmedSourceAmount: null,
         marketContextId: "polymarket:token-yes",
+        consumerIntent: {
+          venueId: "polymarket",
+          marketId: "polymarket:market-1",
+          marketContextId: "polymarket:token-yes",
+          side: "BUY",
+          spend: { asset: ASSET, raw: "990000" },
+        },
         destinationOptionId: "destination_poly_12345678",
         withdrawalRecipientId: null,
         venueBindingOptionId: "binding_poly_12345678",
@@ -985,6 +1062,99 @@ await test("preparation rejects stale revisions before action construction", asy
   }
 });
 
+await test("preparation creates a durable server run without a client operation id", async () => {
+  let observedOperationId: string | undefined;
+  const app = await buildApp({
+    prepare: async (_userId, request) => {
+      observedOperationId = request.operationId;
+      return preparationRun();
+    },
+  });
+  try {
+    const response = await app.inject({
+      method: "POST",
+      url: "/funding/preparation/prepare",
+      payload: {
+        venueBindingOptionId: "binding_poly_12345678",
+        purpose: "fund",
+        marketContextId: null,
+        marketClass: null,
+        controllerWalletRef: USER_ID,
+        expectedInspectionRevision: "inspection_poly_runtime_12345678",
+      },
+    });
+    assert.equal(response.statusCode, 200);
+    assert.equal(observedOperationId, undefined);
+    assert.equal(response.json().runId, preparationRun().runId);
+    assert.equal(response.json().status, "action_required");
+    assert.equal(response.json().actionAttempts.length, 1);
+  } finally {
+    await app.close();
+  }
+});
+
+await test("preparation run reads, reports, and reconciles are owner-scoped", async () => {
+  let reported:
+    | Readonly<{
+        runId: string;
+        actionId: string;
+        report: Readonly<{
+          outcome: string;
+          transactionReference: string | null;
+          networkFeeRaw: string | null;
+        }>;
+      }>
+    | undefined;
+  const app = await buildApp({
+    reportPreparationAction: async (_userId, input) => {
+      reported = input;
+      return {
+        ...preparationRun(),
+        status: "submitted",
+        actions: preparationRun().actions.map((attempt) => ({
+          ...attempt,
+          state: "submitted" as const,
+          broadcastMayHaveOccurred: true,
+          transactionReference: input.report.transactionReference,
+          report: input.report,
+          reportedAt: NOW,
+        })),
+      };
+    },
+  });
+  try {
+    const read = await app.inject({
+      method: "GET",
+      url: `/funding/preparation/runs/${preparationRun().runId}`,
+    });
+    assert.equal(read.statusCode, 200);
+    assert.equal(read.json().runId, preparationRun().runId);
+
+    const report = await app.inject({
+      method: "POST",
+      url: `/funding/preparation/runs/${preparationRun().runId}/actions/${preparedAction().actionId}/report`,
+      payload: {
+        outcome: "submitted",
+        transactionReference: "0xtransaction_reference_12345678",
+        actualCosts: { networkFeeRaw: null },
+      },
+    });
+    assert.equal(report.statusCode, 200);
+    assert.equal(report.json().status, "submitted");
+    assert.equal(reported?.runId, preparationRun().runId);
+    assert.equal(reported?.actionId, preparedAction().actionId);
+
+    const reconcile = await app.inject({
+      method: "POST",
+      url: `/funding/preparation/runs/${preparationRun().runId}/reconcile`,
+    });
+    assert.equal(reconcile.statusCode, 200);
+    assert.equal(reconcile.json().status, "succeeded");
+  } finally {
+    await app.close();
+  }
+});
+
 await test("operation reads expose safe resumable state, not internal snapshots", async () => {
   let reservationScope:
     | Readonly<{ userId: string; operationId: string }>
@@ -1018,6 +1188,7 @@ await test("operation reads expose safe resumable state, not internal snapshots"
         reservationId: "reservation_id_12345678",
         rawAmount: "1000000",
         asset: ASSET,
+        consumerIntent: CONSUMER_INTENT,
         expiresAt: new Date(NOW.getTime() + 60_000),
       };
     },
@@ -1064,6 +1235,7 @@ await test("operation reads expose safe resumable state, not internal snapshots"
       reservationId: "reservation_id_12345678",
       rawAmount: "1000000",
       asset: ASSET,
+      consumerIntent: CONSUMER_INTENT,
       expiresAt: new Date(NOW.getTime() + 60_000).toISOString(),
     });
   } finally {

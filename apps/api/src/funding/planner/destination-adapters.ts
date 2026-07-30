@@ -16,6 +16,7 @@ import type {
   VenueId,
 } from "../domain/types.js";
 import { FundingPlannerError, assertSameAsset } from "./money.js";
+import { canonicalAssetId } from "../domain/asset-identity.js";
 
 export type FrozenPreparationDestination = Readonly<{
   venueId: VenueId;
@@ -73,7 +74,7 @@ function destinationKey(fact: FrozenPreparationDestination): string {
     fact.bindingOption.topology,
     fact.bindingOption.inspectionRevision,
     fact.requiredAsset.networkId,
-    fact.requiredAsset.assetId.toLowerCase(),
+    canonicalAssetId(fact.requiredAsset),
     fact.requiredAsset.decimals,
   ].join("|");
 }

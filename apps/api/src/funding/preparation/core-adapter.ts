@@ -1,4 +1,5 @@
 import { canonicalJsonHash } from "../persistence/canonical.js";
+import { sameAccountAddress, sameAsset } from "../domain/asset-identity.js";
 import type {
   PreparationCheckEvidence,
   PreparationInspectionInput,
@@ -136,12 +137,6 @@ function assertNoSecretKeys(value: unknown, path = "evidence"): void {
   }
 }
 
-function canonicalAddress(value: unknown): string {
-  if (typeof value !== "string") return "";
-  const trimmed = value.trim();
-  return trimmed.startsWith("0x") ? trimmed.toLowerCase() : trimmed;
-}
-
 function sameBinding(
   expected: VenueAccountBinding,
   actual: VenueAccountBinding,
@@ -151,19 +146,20 @@ function sameBinding(
     expected.venueId === actual.venueId &&
     expected.controllerWalletId === actual.controllerWalletId &&
     expected.executionWalletId === actual.executionWalletId &&
-    canonicalAddress(expected.accountRef) ===
-      canonicalAddress(actual.accountRef) &&
+    sameAccountAddress(
+      expected.settlementLocation.asset.networkId,
+      expected.accountRef,
+      actual.accountRef,
+    ) &&
     expected.signingMode === actual.signingMode &&
     expected.settlementLocation.locationId ===
       actual.settlementLocation.locationId &&
     expected.settlementLocation.accountId ===
       actual.settlementLocation.accountId &&
-    expected.settlementLocation.asset.networkId ===
-      actual.settlementLocation.asset.networkId &&
-    canonicalAddress(expected.settlementLocation.asset.assetId) ===
-      canonicalAddress(actual.settlementLocation.asset.assetId) &&
-    expected.settlementLocation.asset.decimals ===
-      actual.settlementLocation.asset.decimals
+    sameAsset(
+      expected.settlementLocation.asset,
+      actual.settlementLocation.asset,
+    )
   );
 }
 

@@ -15,6 +15,11 @@ import {
   hasUnresolvedFundingTradeAttemptInTransaction,
   recordFundingTradeAttemptOutcomeInTransaction,
 } from "./funding-trade-attempt-repository.js";
+import {
+  sameFundingTradeConsumerIntent,
+  storedFundingTradeConsumerIntentFromRow,
+  type FundingTradeConsumerIntent,
+} from "./funding-trade-consumer-intent.js";
 
 type JsonRecord = Readonly<Record<string, JsonValue>>;
 
@@ -905,6 +910,7 @@ export type FundingConsumerReservation = Readonly<{
     assetId: string;
     decimals: number;
   }>;
+  consumerIntent: FundingTradeConsumerIntent;
   expiresAt: Date;
 }>;
 
@@ -920,6 +926,10 @@ export async function fetchFundingConsumerReservationForUser(
     asset_id: string;
     asset_decimals: number;
     expires_at: Date;
+    venue_id: string | null;
+    market_id: string | null;
+    market_context_snapshot: unknown;
+    requested_destination_amount: unknown;
   }>(
     `
       select
@@ -929,7 +939,11 @@ export async function fetchFundingConsumerReservationForUser(
         reservation.network_id,
         reservation.asset_id,
         reservation.asset_decimals,
-        reservation.expires_at
+        reservation.expires_at,
+        operation.venue_id,
+        operation.market_id,
+        operation.market_context_snapshot,
+        operation.requested_destination_amount
       from balance_reservations reservation
       join funding_operations operation
         on operation.id = reservation.operation_id
@@ -952,6 +966,15 @@ export async function fetchFundingConsumerReservationForUser(
     );
   }
   const row = result.rows[0];
+  const consumerIntent = row
+    ? storedFundingTradeConsumerIntentFromRow(row)
+    : null;
+  if (row && !consumerIntent) {
+    throw new FundingPersistenceError(
+      "invalid_operation_state",
+      "funding reservation is missing its exact trade consumer intent",
+    );
+  }
   return row
     ? {
         operationId: row.operation_id,
@@ -962,6 +985,7 @@ export async function fetchFundingConsumerReservationForUser(
           assetId: row.asset_id,
           decimals: row.asset_decimals,
         },
+        consumerIntent: consumerIntent as FundingTradeConsumerIntent,
         expiresAt: row.expires_at,
       }
     : null;
@@ -980,6 +1004,11 @@ type FundingTradeReservationScopeRow = Readonly<{
   purpose: string;
   venue_id: string | null;
   market_id: string | null;
+  network_id: string;
+  asset_id: string;
+  asset_decimals: number;
+  market_context_snapshot: unknown;
+  requested_destination_amount: unknown;
 }>;
 
 async function loadFundingTradeReservationScope(
@@ -1004,7 +1033,12 @@ async function loadFundingTradeReservationScope(
         operation.progress_stage,
         operation.purpose,
         operation.venue_id,
-        operation.market_id
+        operation.market_id,
+        reservation.network_id,
+        reservation.asset_id,
+        reservation.asset_decimals,
+        operation.market_context_snapshot,
+        operation.requested_destination_amount
       from funding_operations operation
       join balance_reservations reservation
         on reservation.operation_id = operation.id
@@ -1031,8 +1065,7 @@ export async function assertFundingReservationReadyForTrade(
   input: Readonly<{
     userId: string;
     link: FundingTradeReservationLink;
-    venue: string;
-    marketId: string | null;
+    intent: FundingTradeConsumerIntent;
     now?: Date;
   }>,
 ): Promise<Readonly<{ rawAmount: string; expiresAt: Date }>> {
@@ -1048,14 +1081,22 @@ export async function assertFundingReservationReadyForTrade(
     row.purpose !== "trade_shortfall" ||
     row.reservation_state !== "active" ||
     row.expires_at.getTime() <= now.getTime() ||
-    row.venue_id !== input.venue ||
-    row.market_id === null ||
-    input.marketId === null ||
-    row.market_id !== input.marketId
+    row.venue_id !== input.intent.venueId ||
+    row.market_id !== input.intent.marketId
   ) {
     throw new FundingPersistenceError(
       "invalid_state_transition",
       "funding reservation is not ready for this exact trade",
+    );
+  }
+  const expectedIntent = storedFundingTradeConsumerIntentFromRow(row);
+  if (
+    !expectedIntent ||
+    !sameFundingTradeConsumerIntent(expectedIntent, input.intent)
+  ) {
+    throw new FundingPersistenceError(
+      "invalid_state_transition",
+      "funding reservation does not match this exact normalized trade spend",
     );
   }
   return { rawAmount: row.raw_amount, expiresAt: row.expires_at };

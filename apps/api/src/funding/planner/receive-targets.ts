@@ -6,6 +6,7 @@ import type {
   FundingReceiveHandling,
 } from "../domain/types.js";
 import { canonicalJsonHash } from "../persistence/canonical.js";
+import { canonicalAccountAddress } from "../domain/asset-identity.js";
 
 export type ReceiveTargetVariant = Readonly<{
   networkId: string;
@@ -40,7 +41,10 @@ export function buildFundingReceiveTargets(
     }
   >();
   for (const variant of variants) {
-    const key = `${variant.networkId}:${variant.destinationAddress.toLowerCase()}`;
+    const key = `${variant.networkId}:${canonicalAccountAddress(
+      variant.networkId,
+      variant.destinationAddress,
+    )}`;
     const target = grouped.get(key) ?? {
       networkId: variant.networkId,
       destinationAddress: variant.destinationAddress,

@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 
-import { pollFundingReconciliationEvidence } from "../../reconciliation/funding-reducer.js";
+import {
+  fundingReconciliationDisposition,
+  fundingReconciliationErrorIsNonTransient,
+  fundingReconciliationPollDelayMs,
+  pollFundingReconciliationEvidence,
+} from "../../reconciliation/funding-reducer.js";
 
 const calls: string[] = [];
 await pollFundingReconciliationEvidence({
@@ -93,6 +98,87 @@ assert.deepEqual(
   new Set(["postcondition", "destination"]),
 );
 
+const automaticRecoveryCalls: string[] = [];
+await pollFundingReconciliationEvidence({
+  operationId: "00000000-0000-4000-8000-000000000005",
+  state: { status: "recovery_required", stage: "routing" },
+  recoveryMode: "automatic_evidence",
+  now: new Date("2026-07-29T13:24:04.000Z"),
+  receiptPoll: async () => {
+    automaticRecoveryCalls.push("receipt");
+    return { receiptsPolled: 0 };
+  },
+  providerPoll: async () => {
+    automaticRecoveryCalls.push("provider");
+    return { requestsPolled: 0 };
+  },
+});
+assert.deepEqual(automaticRecoveryCalls, ["receipt", "provider"]);
+assert.equal(
+  fundingReconciliationPollDelayMs(
+    { status: "recovery_required", stage: "routing" },
+    {
+      activePollDelayMs: 1_000,
+      idlePollDelayMs: 5_000,
+      recoveryPollDelayMs: 60_000,
+    },
+  ),
+  60_000,
+);
+
+assert.equal(
+  fundingReconciliationErrorIsNonTransient({
+    code: "invalid_state_transition",
+  }),
+  true,
+);
+assert.equal(
+  fundingReconciliationErrorIsNonTransient({
+    code: "provider_unavailable",
+    retryable: true,
+  }),
+  false,
+);
+assert.equal(
+  fundingReconciliationDisposition({
+    state: { status: "recovery_required", stage: "routing" },
+    recoveryMode: "automatic_evidence",
+    reductionCompleted: false,
+    reconciliationStartedAt: new Date("2026-07-29T13:20:00.000Z"),
+    now: new Date("2026-07-29T13:24:04.000Z"),
+    terminalTimeoutMs: 90_000,
+  }),
+  "requeue",
+);
+
+const manualRecoveryCalls: string[] = [];
+await pollFundingReconciliationEvidence({
+  operationId: "00000000-0000-4000-8000-000000000006",
+  state: { status: "recovery_required", stage: "routing" },
+  recoveryMode: "manual_review",
+  now: new Date("2026-07-29T13:24:05.000Z"),
+  receiptPoll: async () => {
+    manualRecoveryCalls.push("receipt");
+    return { receiptsPolled: 0 };
+  },
+  providerPoll: async () => {
+    manualRecoveryCalls.push("provider");
+    return { requestsPolled: 0 };
+  },
+});
+assert.deepEqual(manualRecoveryCalls, []);
+assert.equal(
+  fundingReconciliationDisposition({
+    state: { status: "recovery_required", stage: "routing" },
+    recoveryMode: "manual_review",
+    reductionCompleted: false,
+    reconciliationStartedAt: new Date("2026-07-29T13:20:00.000Z"),
+    now: new Date("2026-07-29T13:24:05.000Z"),
+    terminalTimeoutMs: 90_000,
+  }),
+  "complete",
+);
+
 console.log(
-  "[funding-reconciliation-evidence-tests] owned destination evidence bypasses slow provider status, inactive waits use only relevant observers, and receipt checks remain authoritative",
+  "[funding-reconciliation-evidence-tests] owned destination evidence bypasses slow provider status, automatic recovery requeues at its dedicated interval, and manual recovery has no provider loop",
 );

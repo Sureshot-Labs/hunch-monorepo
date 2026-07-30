@@ -66,7 +66,9 @@ export const fundingPreparationInspectRequestSchema =
 export const fundingPreparationPrepareRequestSchema =
   preparationRequestBaseSchema
     .extend({
-      operationId: opaqueIdSchema,
+      // Accepted for compatibility only. The server-owned run id is the
+      // durable idempotency boundary.
+      operationId: opaqueIdSchema.optional(),
       expectedInspectionRevision: opaqueIdSchema,
     })
     .strict();
@@ -532,13 +534,103 @@ export const fundingPreparationInspectResponseSchema = z
   })
   .strict();
 
+const fundingPreparationActionStateSchema = z.enum([
+  "action_required",
+  "submitted",
+  "ambiguous",
+  "failed",
+  "cancelled",
+  "succeeded",
+]);
+
+const fundingPreparationRunStatusSchema = z.enum([
+  ...fundingPreparationActionStateSchema.options,
+  "expired",
+]);
+
+const fundingPreparationRunResponseFields = {
+  ok: z.literal(true),
+  runId: z.string().uuid(),
+  status: fundingPreparationRunStatusSchema,
+  inspectionRevision: opaqueIdSchema,
+  actions: z.array(normalizedActionSchema).max(64),
+  actionAttempts: z
+    .array(
+      z
+        .object({
+          actionId: opaqueIdSchema,
+          ordinal: z.number().int().min(0).max(63),
+          actionFingerprint: z.string().trim().min(32).max(192),
+          action: normalizedActionSchema,
+          state: fundingPreparationActionStateSchema,
+          broadcastMayHaveOccurred: z.boolean(),
+          transactionReference: z.string().trim().min(8).max(512).nullable(),
+          reportedAt: z.string().datetime().nullable(),
+          resolvedAt: z.string().datetime().nullable(),
+        })
+        .strict(),
+    )
+    .max(64),
+  controllerWalletRef: z.string().uuid(),
+  expiresAt: z.string().datetime(),
+  resolvedAt: z.string().datetime().nullable(),
+  replayed: z.boolean(),
+} as const;
+
 export const fundingPreparationPrepareResponseSchema = z
+  .object(fundingPreparationRunResponseFields)
+  .strict();
+
+export const fundingPreparationRunResponseSchema = z
+  .object(fundingPreparationRunResponseFields)
+  .strict();
+
+export const fundingPreparationRunParamsSchema = z
   .object({
-    ok: z.literal(true),
-    actions: z.array(normalizedActionSchema).max(64),
-    controllerWalletRef: z.string().uuid(),
+    runId: z.string().uuid(),
   })
   .strict();
+
+export const fundingPreparationActionParamsSchema = z
+  .object({
+    runId: z.string().uuid(),
+    actionId: opaqueIdSchema,
+  })
+  .strict();
+
+export const fundingPreparationActionReportRequestSchema = z
+  .object({
+    outcome: z.enum(["submitted", "ambiguous", "failed", "cancelled"]),
+    transactionReference: z.string().trim().min(8).max(512).nullable(),
+    actualCosts: z
+      .object({
+        networkFeeRaw: rawAmountSchema.nullable(),
+      })
+      .strict(),
+  })
+  .strict()
+  .superRefine((report, context) => {
+    if (
+      report.outcome === "submitted" &&
+      report.transactionReference === null
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["transactionReference"],
+        message: "submitted report requires a transaction reference",
+      });
+    }
+    if (
+      (report.outcome === "failed" || report.outcome === "cancelled") &&
+      report.transactionReference !== null
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["transactionReference"],
+        message: "an unbroadcast action cannot have a transaction reference",
+      });
+    }
+  });
 
 export const fundingWithdrawalDestinationRequestSchema = z
   .object({
@@ -746,6 +838,7 @@ export const fundingOperationPublicSchema = z
       "composite_route",
     ]),
     errorCode: z.string().trim().min(1).max(160).nullable(),
+    recoveryMode: z.enum(["automatic_evidence", "manual_review"]).nullable(),
     version: z.number().int().positive(),
     createdAt: z.string().datetime(),
     updatedAt: z.string().datetime(),
@@ -804,6 +897,16 @@ export const fundingOperationResponseSchema = z
         reservationId: opaqueIdSchema,
         rawAmount: rawAmountSchema,
         asset: assetRefSchema,
+        consumerIntent: z
+          .object({
+            venueId: z.string().trim().min(1).max(160),
+            marketId: marketReferenceSchema,
+            marketContextId: marketReferenceSchema,
+            side: z.literal("BUY"),
+            spend: moneySchema,
+            fingerprint: z.string().trim().min(32).max(192),
+          })
+          .strict(),
         expiresAt: z.string().datetime(),
       })
       .strict()

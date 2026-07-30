@@ -6,28 +6,33 @@ import type {
   ObservedAsset,
   ValuedPositionComponent,
 } from "../funding/domain/types.js";
+import {
+  canonicalAccountAddress,
+  canonicalAssetId,
+  canonicalAssetKey,
+} from "../funding/domain/asset-identity.js";
 
 export function normalizeAssetId(asset: AssetRef): string {
-  return asset.assetId.startsWith("0x")
-    ? asset.assetId.toLowerCase()
-    : asset.assetId;
-}
-
-export function canonicalAssetKey(asset: AssetRef): string {
-  return `${asset.networkId}:${normalizeAssetId(asset)}:${asset.decimals}`;
-}
-
-function normalizeAddress(value: unknown): string {
-  if (typeof value !== "string") return "";
-  const trimmed = value.trim();
-  return trimmed.startsWith("0x") ? trimmed.toLowerCase() : trimmed;
+  return canonicalAssetId(asset);
 }
 
 export function canonicalLocationKey(location: AssetLocation): string {
   const address =
-    normalizeAddress(location.details.address) ||
-    normalizeAddress(location.details.accountRef) ||
-    normalizeAddress(location.details.operationId) ||
+    (typeof location.details.address === "string"
+      ? canonicalAccountAddress(
+          location.asset.networkId,
+          location.details.address,
+        )
+      : "") ||
+    (typeof location.details.accountRef === "string"
+      ? canonicalAccountAddress(
+          location.asset.networkId,
+          location.details.accountRef,
+        )
+      : "") ||
+    (typeof location.details.operationId === "string"
+      ? location.details.operationId.trim()
+      : "") ||
     location.locationId;
   const balanceClass =
     typeof location.details.balanceClass === "string"
@@ -41,6 +46,8 @@ export function canonicalLocationKey(location: AssetLocation): string {
     balanceClass,
   ].join("|");
 }
+
+export { canonicalAssetKey };
 
 export function stableOpaqueId(prefix: string, value: string): string {
   const digest = createHash("sha256").update(value).digest("hex");
@@ -121,7 +128,7 @@ export function deduplicatePositionComponents(
     const key = [
       component.venueId,
       component.venueBindingId,
-      component.positionRef.toLowerCase(),
+      component.positionRef,
     ].join("|");
     const entries = byKey.get(key) ?? [];
     entries.push(component);

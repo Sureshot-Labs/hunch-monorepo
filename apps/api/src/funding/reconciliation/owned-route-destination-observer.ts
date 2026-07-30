@@ -677,6 +677,7 @@ async function persistSatisfiedAmount(
       kind: "destination_credit",
       networkId: input.target.asset.networkId,
       assetId: input.target.asset.assetId,
+      assetDecimals: input.target.asset.decimals,
       txHash: `owned-route:${input.target.operationId}:${input.observation.revision}`,
       eventIndex: `minimum-destination-balance-delta:${credit.ordinal}`,
       fromAddress: null,

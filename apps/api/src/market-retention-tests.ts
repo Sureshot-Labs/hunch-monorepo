@@ -509,6 +509,79 @@ await test("unified retention protects markets referenced by funding operations"
   }
 });
 
+await test("unified retention protects markets referenced by preparation runs", async () => {
+  const rawTokenId = numericTokenId();
+  const marketId = `limitless:${crypto.randomUUID()}`;
+  const userId = await createTestUser();
+  let runId: string | null = null;
+
+  try {
+    await insertUnifiedLimitlessMarket({ marketId, rawTokenId });
+    const runResult = await pool.query<{ id: string }>(
+      `
+        insert into funding_preparation_runs (
+          user_id,
+          request_fingerprint,
+          request_snapshot,
+          inspection_revision,
+          status,
+          expires_at
+        )
+        values (
+          $1,
+          $2,
+          jsonb_build_object(
+            'venueBindingOptionId', 'retention-binding',
+            'purpose', 'buy',
+            'marketContextId', $3::text,
+            'marketClass', null,
+            'positionActionRef', null,
+            'controllerWalletRef', null,
+            'expectedInspectionRevision', 'retention-inspection'
+          ),
+          'retention-inspection',
+          'action_required',
+          now() + interval '1 hour'
+        )
+        returning id
+      `,
+      [userId, `preparation_${crypto.randomUUID()}`, marketId],
+    );
+    runId = runResult.rows[0]?.id ?? null;
+    assert.ok(runId);
+
+    const report = await runApiScriptJson("market-retention-selector.ts", [
+      "--venue=limitless",
+      "--cutoff-days=30",
+      "--limit=50000",
+      "--sample=200",
+      "--json",
+    ]);
+    const rows = summaryRows(report, "batchSummary");
+    assert.ok(
+      countFor(rows, {
+        section: "protected_by_reason",
+        label: "funding_preparation_runs",
+      }) >= 1,
+    );
+    const samples = summaryRows(report, "removableSamples");
+    assert.equal(
+      samples.some((row) => row.marketId === marketId),
+      false,
+    );
+  } finally {
+    if (runId) {
+      await pool.query("delete from funding_preparation_runs where id = $1", [
+        runId,
+      ]);
+    }
+    await cleanupUnifiedRetentionTest(userId, marketId, [
+      rawTokenId,
+      `other-${rawTokenId}`,
+    ]);
+  }
+});
+
 await test("unified retention protects live funding projections and reports expired cleanup", async () => {
   const rawTokenId = numericTokenId();
   const marketId = `retention-funding-projection:${crypto.randomUUID()}`;

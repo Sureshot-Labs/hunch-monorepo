@@ -10,6 +10,7 @@ import type {
   FundingReceiveSessionStatus,
   JsonValue,
 } from "../domain/types.js";
+import { canonicalAccountAddress } from "../domain/asset-identity.js";
 
 type JsonRecord = Readonly<Record<string, JsonValue>>;
 type ReceiveTargets = NonNullable<ExternalIngressInstruction["receiveTargets"]>;
@@ -550,9 +551,10 @@ function sameCanonicalReceiveValue(
   left: string,
   right: string,
 ): boolean {
-  return networkId.startsWith("evm:")
-    ? left.toLowerCase() === right.toLowerCase()
-    : left === right;
+  return (
+    canonicalAccountAddress(networkId, left) ===
+    canonicalAccountAddress(networkId, right)
+  );
 }
 
 function canonicalStartCursor(
@@ -826,6 +828,9 @@ export async function claimFundingReceiveCanonicalEventAllocation(
             and (
               case
                 when $2 like 'evm:%'
+                  and variant->'asset'->>'assetId'
+                    ~ '^0x[0-9A-Fa-f]{40}$'
+                  and $3 ~ '^0x[0-9A-Fa-f]{40}$'
                   then lower(variant->'asset'->>'assetId') = lower($3)
                 else variant->'asset'->>'assetId' = $3
               end
@@ -833,6 +838,9 @@ export async function claimFundingReceiveCanonicalEventAllocation(
             and (
               case
                 when $2 like 'evm:%'
+                  and variant->>'destinationAddress'
+                    ~ '^0x[0-9A-Fa-f]{40}$'
+                  and $4 ~ '^0x[0-9A-Fa-f]{40}$'
                   then lower(variant->>'destinationAddress') = lower($4)
                 else variant->>'destinationAddress' = $4
               end

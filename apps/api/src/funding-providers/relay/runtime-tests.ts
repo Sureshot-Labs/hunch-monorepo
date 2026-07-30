@@ -13,12 +13,20 @@ import type {
 } from "../../funding/domain/types.js";
 import { PRODUCTION_FUNDING_REGISTRY } from "../../funding/policies/funding-policy.js";
 import { RelayPinnedActionValidator } from "./action-validator.js";
-import { RelayClient, RelayClientError } from "./client.js";
+import {
+  isRelayQuoteRejectedError,
+  RelayClient,
+  RelayClientError,
+} from "./client.js";
 import {
   assertStrictRelayDepositAddressPolicy,
   StrictRelayDepositAddressAdapter,
 } from "./deposit-address.js";
-import { RELAY_ROUTE_SPECS, relayChainIdForNetwork } from "./mappings.js";
+import {
+  RELAY_PINNED_ASSETS,
+  RELAY_ROUTE_SPECS,
+  relayChainIdForNetwork,
+} from "./mappings.js";
 import {
   createRelayDepositAddressCodec,
   createRelayReferenceCodec,
@@ -998,6 +1006,73 @@ const destination: FundingTarget = {
 }
 
 {
+  const noRouteClient = new RelayClient({
+    apiKey: "relay-no-route-secret",
+    fetchImpl: async () =>
+      response(
+        {
+          message: "No swap routes found",
+          errorCode: "NO_SWAP_ROUTES_FOUND",
+        },
+        400,
+      ),
+  });
+  await assert.rejects(
+    () =>
+      noRouteClient.quote({
+        user,
+        recipient: user,
+        originChainId: 8453,
+        destinationChainId: 137,
+        originCurrency: RELAY_PINNED_ASSETS.baseUsdc,
+        destinationCurrency: POLYGON_PUSD,
+        amount: "1998348",
+        tradeType: "EXPECTED_OUTPUT",
+      }),
+    (error: unknown) => {
+      assert.ok(error instanceof RelayClientError);
+      assert.equal(error.httpStatus, 400);
+      assert.equal(error.retryable, false);
+      assert.equal(error.providerErrorCode, "NO_SWAP_ROUTES_FOUND");
+      assert.equal(isRelayQuoteRejectedError(error), true);
+      assert.doesNotMatch(error.message, /No swap routes found/u);
+      return true;
+    },
+  );
+
+  const rejectedClient = new RelayClient({
+    apiKey: "relay-rejected-secret",
+    fetchImpl: async () =>
+      response(
+        {
+          message: "Invalid quote request",
+          errorCode: "FIXTURE_BAD_REQUEST",
+        },
+        400,
+      ),
+  });
+  await assert.rejects(
+    () =>
+      rejectedClient.quote({
+        user,
+        recipient: user,
+        originChainId: 8453,
+        destinationChainId: 137,
+        originCurrency: RELAY_PINNED_ASSETS.baseUsdc,
+        destinationCurrency: POLYGON_PUSD,
+        amount: "1998348",
+        tradeType: "EXPECTED_OUTPUT",
+      }),
+    (error: unknown) => {
+      assert.ok(error instanceof RelayClientError);
+      assert.equal(error.providerErrorCode, "FIXTURE_BAD_REQUEST");
+      assert.equal(isRelayQuoteRejectedError(error), true);
+      return true;
+    },
+  );
+}
+
+{
   const client = new RelayClient({
     apiKey: "not-leaked-secret",
     fetchImpl: async () => response({ error: "no" }, 503),
@@ -1007,6 +1082,7 @@ const destination: FundingTarget = {
     (error: unknown) => {
       assert.ok(error instanceof RelayClientError);
       assert.equal(error.retryable, true);
+      assert.equal(isRelayQuoteRejectedError(error), false);
       assert.doesNotMatch(error.message, /not-leaked-secret/u);
       return true;
     },

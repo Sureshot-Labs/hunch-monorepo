@@ -5,6 +5,7 @@ import { ethers } from "ethers";
 import { getCredentialsEncryptionKey } from "../../lib/credentials-encryption.js";
 import { fetchEvmCode } from "../../services/polygon-rpc.js";
 import type { AssetRef, ResolvedExternalRecipient } from "../domain/types.js";
+import { sameAsset } from "../domain/asset-identity.js";
 import {
   fetchFundingWithdrawalDestinationForUser,
   registerFundingWithdrawalDestination,
@@ -52,14 +53,6 @@ function positiveInt(raw: string | undefined): number | null {
   if (!raw || !/^\d+$/.test(raw)) return null;
   const value = Number(raw);
   return Number.isSafeInteger(value) && value > 0 ? value : null;
-}
-
-function sameAsset(left: AssetRef, right: AssetRef): boolean {
-  return (
-    left.networkId === right.networkId &&
-    left.assetId.toLowerCase() === right.assetId.toLowerCase() &&
-    left.decimals === right.decimals
-  );
 }
 
 export function assertWithdrawalRecipientPolicy(
