@@ -9,7 +9,9 @@ import {
   findTradeMarketByRef,
   findTradeMarketByRefForVenue,
   resolveTradeMarketByRef,
+  resolveTradeMarketOutcomeIdentity,
   type ApiTradeMarket,
+  venueScopedMarketContextCandidates,
 } from "./services/api-trading-market-repo.js";
 
 async function test(name: string, run: () => Promise<void>): Promise<void> {
@@ -172,4 +174,56 @@ await test("market ref lookup resolves canonical YES and NO token IDs", async ()
       assert.doesNotMatch(whereSql, /select umt\.token_id/i);
     }
   }
+});
+
+await test("exact market identity resolves venue-local tokens against a venue-scoped index", async () => {
+  const market = {
+    id: "limitless:340129",
+    venue: "limitless",
+    venue_market_id: "340129",
+  } as ApiTradeMarket;
+  const queries: { sql: string; values: readonly unknown[] }[] = [];
+  const pool = {
+    query: async (sql: string, values: readonly unknown[]) => {
+      queries.push({ sql, values });
+      if (/WHERE m\.id = \$1/i.test(sql)) {
+        return { rows: [market], rowCount: 1 };
+      }
+      assert.match(sql, /FROM unified_market_tokens/i);
+      return { rows: [{ outcome_side: "NO" }], rowCount: 1 };
+    },
+  } as unknown as Pool;
+  const localToken =
+    "17010889650761664535813980494830909251800363478221179782160919073160517899180";
+
+  const resolved = await resolveTradeMarketOutcomeIdentity(pool, {
+    venue: "limitless",
+    marketId: market.id,
+    marketContextId: localToken,
+  });
+
+  assert.equal(resolved?.market, market);
+  assert.equal(resolved?.side, "NO");
+  assert.deepEqual(queries[1]?.values, [
+    market.id,
+    "limitless",
+    [localToken, `limitless:${localToken}`],
+  ]);
+  assert.match(queries[1]?.sql ?? "", /market_id = \$1/i);
+  assert.match(queries[1]?.sql ?? "", /venue = \$2/i);
+  assert.match(queries[1]?.sql ?? "", /token_id = ANY\(\$3::text\[\]\)/i);
+});
+
+await test("venue-scoped outcome candidates are generic and case-sensitive", async () => {
+  assert.deepEqual(
+    venueScopedMarketContextCandidates("future-venue", "Case:Sensitive/Token"),
+    ["Case:Sensitive/Token", "future-venue:Case:Sensitive/Token"],
+  );
+  assert.deepEqual(
+    venueScopedMarketContextCandidates(
+      "future-venue",
+      "future-venue:Case:Sensitive/Token",
+    ),
+    ["Case:Sensitive/Token", "future-venue:Case:Sensitive/Token"],
+  );
 });

@@ -27,7 +27,6 @@ import type { SupportedBotTradingVenue } from "./api-trading-types.js";
 export const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
 export const ZERO_BYTES32 = `0x${"0".repeat(64)}`;
 export const POLYGON_CHAIN_ID = 137;
-export const SOLANA_CAIP2 = "solana:mainnet";
 export const USDC_SCALE = 1_000_000;
 
 export type PreparedPayloadBase = {

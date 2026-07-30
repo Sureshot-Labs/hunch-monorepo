@@ -3530,27 +3530,42 @@ export async function submitLimitlessClientSignedOrder(input: {
     clientOrderId,
   };
   const fundingMarketId = marketTokens?.marketId ?? null;
-  const fundingConsumerIntent =
+  let fundingConsumerIntent: ReturnType<
+    typeof buildFundingTradeConsumerIntent
+  > | null = null;
+  if (
     fundingReservation &&
     fundingMarketId &&
-    tokenId &&
+    requestedRawTokenId &&
     makerAmount != null &&
     Number.isSafeInteger(makerAmount) &&
     makerAmount > 0
-      ? buildFundingTradeConsumerIntent({
-          venueId: "limitless",
-          marketId: fundingMarketId,
-          marketContextId: tokenId,
-          spend: {
-            asset: {
-              networkId: "evm:8453",
-              assetId: env.limitlessUsdcAddress,
-              decimals: 6,
-            },
-            raw: makerAmount.toString(),
+  ) {
+    try {
+      fundingConsumerIntent = buildFundingTradeConsumerIntent({
+        venueId: "limitless",
+        marketId: fundingMarketId,
+        marketContextId: requestedRawTokenId,
+        spend: {
+          asset: {
+            networkId: "evm:8453",
+            assetId: env.limitlessUsdcAddress,
+            decimals: 6,
           },
-        })
-      : null;
+          raw: makerAmount.toString(),
+        },
+      });
+    } catch {
+      return {
+        ok: false,
+        statusCode: 409,
+        payload: {
+          code: "funding_intent_invalid",
+          error: "Funding reservation market binding is unavailable",
+        },
+      };
+    }
+  }
   if (fundingReservation) {
     if (!fundingConsumerIntent) {
       return {
@@ -4175,27 +4190,42 @@ export async function claimLimitlessAmmFundingTrade(input: {
       payload: { error: "Funding reservation market binding is unavailable" },
     };
   }
-  const tokenId = normalizeLimitlessScopedTokenId(input.body.tokenId);
-  if (!tokenId) {
+  const marketContextId = normalizeLimitlessRawTokenId(input.body.tokenId);
+  const tokenId = marketContextId
+    ? normalizeLimitlessScopedTokenId(marketContextId)
+    : null;
+  if (!marketContextId || !tokenId) {
     return {
       ok: false as const,
       statusCode: 409,
       payload: { error: "Funding reservation token binding is unavailable" },
     };
   }
-  const consumerIntent = buildFundingTradeConsumerIntent({
-    venueId: "limitless",
-    marketId,
-    marketContextId: tokenId,
-    spend: {
-      asset: {
-        networkId: "evm:8453",
-        assetId: env.limitlessUsdcAddress,
-        decimals: 6,
+  let consumerIntent: ReturnType<typeof buildFundingTradeConsumerIntent>;
+  try {
+    consumerIntent = buildFundingTradeConsumerIntent({
+      venueId: "limitless",
+      marketId,
+      marketContextId,
+      spend: {
+        asset: {
+          networkId: "evm:8453",
+          assetId: env.limitlessUsdcAddress,
+          decimals: 6,
+        },
+        raw: input.body.amountUsdRaw,
       },
-      raw: input.body.amountUsdRaw,
-    },
-  });
+    });
+  } catch {
+    return {
+      ok: false as const,
+      statusCode: 409,
+      payload: {
+        code: "funding_intent_invalid",
+        error: "Funding reservation market binding is unavailable",
+      },
+    };
+  }
   const canonicalFingerprint = canonicalJsonHash({
     amountUsdRaw: input.body.amountUsdRaw,
     executionPath: "limitless_amm",

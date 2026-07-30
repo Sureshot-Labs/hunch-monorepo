@@ -4,9 +4,11 @@ import type {
   AssetRef,
   ExternalIngressInstruction,
   FundingReceiveHandling,
+  Money,
 } from "../domain/types.js";
 import { canonicalJsonHash } from "../persistence/canonical.js";
 import { canonicalAccountAddress } from "../domain/asset-identity.js";
+import { senderNativeFeeRequirement } from "../domain/network-fees.js";
 
 export type ReceiveTargetVariant = Readonly<{
   networkId: string;
@@ -37,6 +39,7 @@ export function buildFundingReceiveTargets(
       acceptedAssets: {
         asset: AssetRef;
         handling: FundingReceiveHandling;
+        senderNativeFeeRequirement: Money | null;
       }[];
     }
   >();
@@ -53,6 +56,9 @@ export function buildFundingReceiveTargets(
     target.acceptedAssets.push({
       asset: variant.asset,
       handling: fundingReceiveVariantHandling(variant),
+      senderNativeFeeRequirement: senderNativeFeeRequirement(
+        variant.asset.networkId,
+      ),
     });
     grouped.set(key, target);
   }

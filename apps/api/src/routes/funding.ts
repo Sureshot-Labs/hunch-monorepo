@@ -19,6 +19,7 @@ import type {
   NormalizedAction,
   PreparationPurpose,
 } from "../funding/domain/types.js";
+import { parseMoneyJson } from "../funding/domain/money-json.js";
 import type { PreparationResult } from "../funding/domain/contracts.js";
 import { FundingPlannerError } from "../funding/planner/money.js";
 import { FundingPlanningRuntime } from "../funding/planner/runtime-service.js";
@@ -114,6 +115,7 @@ export type FundingRouteDependencies = Readonly<{
       fundingApiVersion: 1;
       receiveSessionsVersion: 1;
       creationMode: "off" | "on";
+      destinationVenues: readonly string[];
       supportedActionKinds: readonly (
         | "add_funds"
         | "trade_shortfall"
@@ -300,6 +302,13 @@ function publicOperation(operation: FundingOperationRow) {
     progressStage: operation.progressStage,
     experienceMode: operation.experienceMode,
     planKind: operation.planKind,
+    venueId: operation.venueId,
+    requestedSourceAmount: parseMoneyJson(operation.requestedSourceAmount),
+    requestedDestinationAmount: parseMoneyJson(
+      operation.requestedDestinationAmount,
+    ),
+    actualSourceAmount: parseMoneyJson(operation.actualSourceAmount),
+    actualDestinationAmount: parseMoneyJson(operation.actualDestinationAmount),
     errorCode: operation.errorCode,
     recoveryMode: operation.recoveryMode,
     version: operation.version,

@@ -62,6 +62,7 @@ import type {
   VenueId,
 } from "../domain/types.js";
 import {
+  canonicalAccountAddress,
   canonicalAssetId,
   canonicalAssetKey,
 } from "../domain/asset-identity.js";
@@ -161,7 +162,7 @@ function normalizeAddress(value: string | null | undefined): string {
   try {
     return ethers.getAddress(value).toLowerCase();
   } catch {
-    return value.trim().toLowerCase();
+    return value.trim();
   }
 }
 
@@ -298,7 +299,10 @@ function walletAuthority(wallet: UserWallet): RuntimeWalletAuthority {
 function walletId(wallet: UserWallet, networkId: string): string {
   return stableOpaqueId(
     "wallet",
-    `${wallet.walletType}:${networkId}:${wallet.walletAddress.toLowerCase()}`,
+    `${wallet.walletType}:${networkId}:${canonicalAccountAddress(
+      networkId,
+      wallet.walletAddress,
+    )}`,
   );
 }
 
@@ -326,7 +330,10 @@ function bindingFor(input: {
   const executionWalletId = walletId(input.wallet, asset.networkId);
   const bindingId = stableOpaqueId(
     "binding",
-    `${input.accountId}:${input.venue}:${input.accountRef.toLowerCase()}`,
+    `${input.accountId}:${input.venue}:${canonicalAccountAddress(
+      asset.networkId,
+      input.accountRef,
+    )}`,
   );
   return {
     bindingId,
@@ -1475,7 +1482,20 @@ export class WalletPreparationRuntimeService {
       conditionalTokensAddress:
         fundingSidecarRuntimeConfig.limitlessConditionalTokensAddress,
     }).catch(() => null);
-    const authContext = await authContextPromise;
+    const venueLockedCollateralPromise = effectiveMarketClass?.startsWith(
+      "clob",
+    )
+      ? fetchOpenOrderCollateralLocks(this.db, {
+          userId: input.accountId,
+          polymarketWallets: [],
+          limitlessWallets: [input.wallet.walletAddress],
+        })
+      : Promise.resolve(null);
+    const [authContext, snapshot, venueLockedCollateral] = await Promise.all([
+      authContextPromise,
+      snapshotPromise,
+      venueLockedCollateralPromise,
+    ]);
     const credentialsInfo = authContext?.creds ?? null;
     const profile = credentialsInfo
       ? extractLimitlessPartnerAccountProfile(
@@ -1490,19 +1510,6 @@ export class WalletPreparationRuntimeService {
         sameAddress(profile.account, input.wallet.walletAddress)) &&
       isLimitlessPartnerHmacConfigured(),
     );
-    const venueLockedCollateralPromise = effectiveMarketClass?.startsWith(
-      "clob",
-    )
-      ? fetchOpenOrderCollateralLocks(this.db, {
-          userId: input.accountId,
-          polymarketWallets: [],
-          limitlessWallets: [input.wallet.walletAddress],
-        })
-      : Promise.resolve(null);
-    const [snapshot, venueLockedCollateral] = await Promise.all([
-      snapshotPromise,
-      venueLockedCollateralPromise,
-    ]);
     const cashRaw = snapshot?.usdcBalance.toString() ?? null;
     const cashLockedRaw =
       venueLockedCollateral?.limitless
@@ -1720,6 +1727,19 @@ export class WalletPreparationRuntimeService {
         outcome: outcomes[index],
       })),
     );
+    const compatibleBindingOptionIds = new Set(
+      input.compatibleVenueBindingOptionIds ?? [],
+    );
+    if (compatibleBindingOptionIds.size > 0) {
+      const compatibleValues = coverage.values.filter((value) =>
+        compatibleBindingOptionIds.has(
+          value.frozen.bindingOption.venueBindingOptionId,
+        ),
+      );
+      if (compatibleValues.length > 0) {
+        return compatibleValues;
+      }
+    }
     if (coverage.incompleteVenueIds.length > 0) {
       throw new PreparationContractError(
         "preparation_unavailable",

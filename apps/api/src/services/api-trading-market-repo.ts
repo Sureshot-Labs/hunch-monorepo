@@ -156,6 +156,56 @@ export type ResolvedTradeMarketRef = Readonly<{
   side: "YES" | "NO" | null;
 }>;
 
+/**
+ * Funding and execution APIs carry venue-local outcome IDs, while the unified
+ * token index may store either that local ID or its venue-scoped form. Keep
+ * this compatibility at one read boundary and preserve byte-for-byte identity.
+ */
+export function venueScopedMarketContextCandidates(
+  venue: string,
+  marketContextId: string,
+): readonly string[] {
+  const prefix = `${venue}:`;
+  const localId = marketContextId.startsWith(prefix)
+    ? marketContextId.slice(prefix.length)
+    : marketContextId;
+  if (!venue || !localId) return [];
+  return [...new Set([localId, `${prefix}${localId}`])];
+}
+
+export async function resolveTradeMarketOutcomeIdentity(
+  db: DbQuery,
+  input: Readonly<{
+    venue: string;
+    marketId: string;
+    marketContextId: string;
+  }>,
+): Promise<ResolvedTradeMarketRef | null> {
+  const market = await findTradeMarketById(db, input.marketId);
+  if (!market || market.venue !== input.venue) return null;
+
+  const candidates = venueScopedMarketContextCandidates(
+    input.venue,
+    input.marketContextId,
+  );
+  if (candidates.length === 0) return null;
+  const { rows } = await db.query<{ outcome_side: string | null }>(
+    `SELECT outcome_side
+       FROM unified_market_tokens
+      WHERE market_id = $1
+        AND venue = $2
+        AND token_id = ANY($3::text[])`,
+    [market.id, input.venue, candidates],
+  );
+  const sides = new Set(
+    rows
+      .map((row) => row.outcome_side?.toUpperCase())
+      .filter((side): side is "YES" | "NO" => side === "YES" || side === "NO"),
+  );
+  if (sides.size !== 1) return null;
+  return { market, side: [...sides][0] ?? null };
+}
+
 export async function resolveTradeMarketByRef(
   db: DbQuery,
   marketRef: string,

@@ -544,6 +544,7 @@ export type ExternalIngressInstruction = Readonly<{
     acceptedAssets: readonly Readonly<{
       asset: AssetRef;
       handling: FundingReceiveHandling;
+      senderNativeFeeRequirement?: Money | null;
     }>[];
     safeInstructions: readonly string[];
   }>[];
@@ -773,6 +774,9 @@ export const FUNDING_REASON_CODES = [
   "position_action_required",
   "position_owner_mismatch",
   "provider_capability_disabled",
+  "provider_quote_economics_rejected",
+  "provider_quote_invalid",
+  "provider_quote_rejected",
   "provider_status_unknown",
   "preparation_evidence_stale",
   "quote_expired",

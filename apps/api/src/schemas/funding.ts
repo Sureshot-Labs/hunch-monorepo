@@ -4,6 +4,7 @@ import { FUNDING_REASON_CODES } from "../funding/domain/types.js";
 import {
   assetLocationSchema,
   assetRefSchema,
+  canonicalIdSchema,
   fundingCommitRequestSchema,
   fundingDiscoveryRequestSchema,
   fundingQuoteRequestSchema,
@@ -151,6 +152,7 @@ const fundingReceiveTargetSchema = z
               "automatic_conversion",
               "review_required",
             ]),
+            senderNativeFeeRequirement: moneySchema.nullable().optional(),
           })
           .strict(),
       )
@@ -780,6 +782,7 @@ export const fundingCapabilitiesResponseSchema = z
     fundingApiVersion: z.literal(1),
     receiveSessionsVersion: z.literal(1),
     creationMode: z.enum(["off", "on"]),
+    destinationVenues: z.array(canonicalIdSchema).max(64),
     supportedActionKinds: z
       .array(
         z.enum([
@@ -837,6 +840,11 @@ export const fundingOperationPublicSchema = z
       "venue_preparation",
       "composite_route",
     ]),
+    venueId: z.string().trim().min(1).max(160).nullable(),
+    requestedSourceAmount: moneySchema.nullable(),
+    requestedDestinationAmount: moneySchema.nullable(),
+    actualSourceAmount: moneySchema.nullable(),
+    actualDestinationAmount: moneySchema.nullable(),
     errorCode: z.string().trim().min(1).max(160).nullable(),
     recoveryMode: z.enum(["automatic_evidence", "manual_review"]).nullable(),
     version: z.number().int().positive(),

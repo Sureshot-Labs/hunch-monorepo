@@ -401,6 +401,44 @@ assert.equal(result.actions[0].instructions.length, 8);
 assert.equal(result.actions[0].addressLookupTables.length, 2);
 
 {
+  let exactInputRequestBody: Record<string, unknown> = {};
+  const exactInputClient = new RelayClient({
+    apiKey: "test-relay-key",
+    fetchImpl: async (_url, init) => {
+      exactInputRequestBody = JSON.parse(String(init?.body)) as Record<
+        string,
+        unknown
+      >;
+      return new Response(JSON.stringify(quoteFixture()), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    },
+  });
+  const exactInputResult = await new RelayWalletQuoteAdapter(
+    exactInputClient,
+  ).quote({
+    route: { ...route, quoteMode: "exact_input" },
+    source,
+    destination,
+    sourceAmount: { asset: route.source, raw: "14398334" },
+    minimumOutput: { asset: route.destination, raw: "1" },
+    userAddress: USER,
+    recipientAddress: RECIPIENT,
+    senderWalletId: "wallet_solana_native_12345678",
+    quoteCorrelationId: "quote_solana_native_exact_input_12345678",
+    deadline: new Date(Date.now() + 60_000),
+    maximumSlippageBps: 100,
+  });
+  assert.equal(exactInputRequestBody.tradeType, "EXACT_INPUT");
+  assert.equal(exactInputRequestBody.amount, "14398334");
+  assert.equal(exactInputResult.candidate.amountMode, "exact_input");
+  assert.equal(exactInputResult.sourceAmount.raw, "14398334");
+  assert.equal(exactInputResult.candidate.expectedOutput.raw, "1010102");
+  assert.equal(exactInputResult.candidate.minimumOutput.raw, "1000000");
+}
+
+{
   const reordered = quoteFixture();
   const instructions = reordered.steps[0]?.items[0]?.data.instructions;
   const first = instructions?.[0];

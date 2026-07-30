@@ -49,19 +49,22 @@ function stringValue(
   return source[key]?.trim() || fallback;
 }
 
-function listValue(
+function solanaRpcUrlList(
   source: Environment,
   primaryKey: string,
   fallbackKey: string,
   fallback: string,
 ): readonly string[] {
-  const values = (source[primaryKey] ?? "")
+  const explicitValues = (source[primaryKey] ?? "")
     .split(",")
     .map((entry) => entry.trim())
     .filter(Boolean);
-  return values.length > 0
-    ? values
-    : [stringValue(source, fallbackKey, fallback)];
+  if (explicitValues.length > 0) {
+    return [...new Set(explicitValues)];
+  }
+
+  const configuredValue = stringValue(source, fallbackKey, fallback);
+  return [...new Set([configuredValue, fallback])];
 }
 
 function keyValueMap(
@@ -120,7 +123,7 @@ export type FundingSidecarRuntimeConfig = Readonly<{
 export function loadFundingSidecarRuntimeConfig(
   source: Environment = process.env,
 ): FundingSidecarRuntimeConfig {
-  const solanaRpcUrls = listValue(
+  const solanaRpcUrls = solanaRpcUrlList(
     source,
     "SOLANA_RPC_URLS",
     "SOLANA_RPC_URL",

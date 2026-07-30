@@ -728,6 +728,12 @@ export class FundingPlanner {
           marketContextId: input.request.marketContextId,
         })
       : null;
+    if (input.request.marketContextId && !marketContext) {
+      throw new FundingPlannerError(
+        "invalid_market_context",
+        "market context is absent or does not belong to this intent",
+      );
+    }
 
     const allCandidates = await this.dependencies.listDestinations({
       accountId: input.accountId,
@@ -914,10 +920,7 @@ export class FundingPlanner {
     };
     const sourceDiscovery =
       needsFunding && input.policy.creationMode === "on" && planningFactsUsable
-        ? await discoverFundingSources(
-            this.dependencies,
-            sourcePlanningRequest,
-          )
+        ? await discoverFundingSources(this.dependencies, sourcePlanningRequest)
         : { sources: [], reasonCodes: [] };
     const sources = validatePlannedSources(
       sourceDiscovery.sources,
@@ -936,11 +939,8 @@ export class FundingPlanner {
       sourceDiscovery.reasonCodes,
     );
     const sourceEvidenceReasonCodes = applicableSourceBlockers.filter(
-      (
-        reason,
-      ): reason is "rpc_unavailable" | "provider_status_unknown" =>
-        reason === "rpc_unavailable" ||
-        reason === "provider_status_unknown",
+      (reason): reason is "rpc_unavailable" | "provider_status_unknown" =>
+        reason === "rpc_unavailable" || reason === "provider_status_unknown",
     );
     const sourceEvidenceUnavailable = sourceEvidenceReasonCodes.length > 0;
     const convertibleRaw = sources.some(isSelectableAutomaticSource)

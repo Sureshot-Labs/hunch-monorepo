@@ -376,6 +376,7 @@ async function buildApp(overrides: Partial<FundingRouteDependencies> = {}) {
       fundingApiVersion: 1,
       receiveSessionsVersion: 1,
       creationMode: "on",
+      destinationVenues: ["limitless", "polymarket"],
       supportedActionKinds: [
         "add_funds",
         "trade_shortfall",
@@ -507,6 +508,7 @@ await test("funding capabilities publish the rollout contract", async () => {
       fundingApiVersion: 1,
       receiveSessionsVersion: 1,
       creationMode: "on",
+      destinationVenues: ["limitless", "polymarket"],
       supportedActionKinds: [
         "add_funds",
         "trade_shortfall",
@@ -934,11 +936,11 @@ await test("trade shortfall liquidity forwards the selected controller wallet", 
         purpose: "trade_shortfall",
         requestedDestinationAmount: { asset: ASSET, raw: "1000000" },
         confirmedSourceAmount: null,
-        marketContextId: "polymarket:token-yes",
+        marketContextId: "token-yes",
         consumerIntent: {
           venueId: "polymarket",
           marketId: "polymarket:market-1",
-          marketContextId: "polymarket:token-yes",
+          marketContextId: "token-yes",
           side: "BUY",
           spend: { asset: ASSET, raw: "990000" },
         },
@@ -1165,6 +1167,11 @@ await test("operation reads expose safe resumable state, not internal snapshots"
       purpose: "trade_shortfall",
       status: "ready",
       progressStage: "ready_for_consumer",
+      venueId: "polymarket",
+      requestedSourceAmount: { asset: ASSET, raw: "1000000" },
+      requestedDestinationAmount: { asset: ASSET, raw: "990000" },
+      actualSourceAmount: { asset: ASSET, raw: "1000000" },
+      actualDestinationAmount: { asset: ASSET, raw: "995000" },
       sourceSnapshot: {
         ingress: {
           ingressKind: "manual",
@@ -1201,6 +1208,23 @@ await test("operation reads expose safe resumable state, not internal snapshots"
     assert.equal(response.statusCode, 200);
     const body = response.json();
     assert.equal(body.operation.operationId, "operation_id_12345678");
+    assert.equal(body.operation.venueId, "polymarket");
+    assert.deepEqual(body.operation.requestedSourceAmount, {
+      asset: ASSET,
+      raw: "1000000",
+    });
+    assert.deepEqual(body.operation.requestedDestinationAmount, {
+      asset: ASSET,
+      raw: "990000",
+    });
+    assert.deepEqual(body.operation.actualSourceAmount, {
+      asset: ASSET,
+      raw: "1000000",
+    });
+    assert.deepEqual(body.operation.actualDestinationAmount, {
+      asset: ASSET,
+      raw: "995000",
+    });
     assert.equal("destinationTargetSnapshot" in body.operation, false);
     assert.equal("sourceSnapshot" in body.operation, false);
     assert.deepEqual(body.steps, [

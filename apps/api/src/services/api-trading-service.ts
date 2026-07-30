@@ -18,7 +18,7 @@ import {
   type FundingTradeExecutionPath,
 } from "../funding/persistence/funding-trade-attempt-repository.js";
 import { isRecord } from "../lib/type-guards.js";
-import { normalizeLimitlessScopedTokenId } from "../lib/limitless-token.js";
+import { normalizeLimitlessRawTokenId } from "../lib/limitless-token.js";
 import { env } from "../env.js";
 import { createKalshiTradingExecutionService } from "./kalshi-trading-execution-service.js";
 import { createLimitlessTradingExecutionService } from "./limitless-trading-execution-service.js";
@@ -190,9 +190,7 @@ export function createApiTradingApplicationService(
         (typeof payload.tokenId === "string" && payload.tokenId) ||
         intent.target.tokenId ||
         null;
-      marketContextId = tokenId
-        ? normalizeLimitlessScopedTokenId(tokenId)
-        : null;
+      marketContextId = tokenId ? normalizeLimitlessRawTokenId(tokenId) : null;
       raw =
         payload.tradeType === "amm"
           ? rawInteger(payload.amountUsdRaw)

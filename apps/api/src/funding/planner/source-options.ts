@@ -72,10 +72,11 @@ type RelaySourcePlanningOutcome =
       candidate: RelayFirstCandidate;
     }>
   | Readonly<{
-      kind:
-        | "deterministic_ineligible"
-        | "definitive_no_candidate"
-        | "transient_unknown";
+      kind: "deterministic_ineligible" | "transient_unknown";
+    }>
+  | Readonly<{
+      kind: "definitive_no_candidate";
+      reasonCode: RelayPlanningQuoteRejectionReason;
     }>;
 
 export type RelayEligibleSourceFact = Readonly<{
@@ -115,6 +116,29 @@ export type RelayPlanningQuote = Readonly<{
   commitPlan: PlannedSourceOption["commitPlan"];
 }>;
 
+export type RelayPlanningQuoteRejectionReason = Extract<
+  FundingReasonCode,
+  | "provider_quote_economics_rejected"
+  | "provider_quote_invalid"
+  | "provider_quote_rejected"
+>;
+
+export type RelayPlanningQuoteRejection = Readonly<{
+  kind: "rejected";
+  reasonCode: RelayPlanningQuoteRejectionReason;
+}>;
+
+export type RelayPlanningQuoteResult =
+  | RelayPlanningQuote
+  | RelayPlanningQuoteRejection
+  | null;
+
+function isRelayPlanningQuoteRejection(
+  value: RelayPlanningQuote | RelayPlanningQuoteRejection,
+): value is RelayPlanningQuoteRejection {
+  return "kind" in value && value.kind === "rejected";
+}
+
 export type RelayFirstSourcePlannerDependencies = Readonly<{
   listEligibleSources(
     input: Readonly<{
@@ -139,7 +163,7 @@ export type RelayFirstSourcePlannerDependencies = Readonly<{
       signal: AbortSignal;
       timeoutMs: number;
     }>,
-  ): Promise<RelayPlanningQuote | null>;
+  ): Promise<RelayPlanningQuoteResult>;
   observeRoute(
     input: Readonly<{
       route: FundingRuntimePolicy["routes"][number];
@@ -595,7 +619,7 @@ export class RelayFirstSourcePlanner {
           if (remainingPlannerMs <= 0) {
             return { kind: "transient_unknown" };
           }
-          let plannedQuote: RelayPlanningQuote | null;
+          let plannedQuote: RelayPlanningQuoteResult;
           try {
             plannedQuote = await this.quoteRelayWithinBudget(
               {
@@ -621,7 +645,16 @@ export class RelayFirstSourcePlanner {
             throw error;
           }
           if (!plannedQuote) {
-            return { kind: "definitive_no_candidate" };
+            return {
+              kind: "definitive_no_candidate",
+              reasonCode: "provider_quote_rejected",
+            };
+          }
+          if (isRelayPlanningQuoteRejection(plannedQuote)) {
+            return {
+              kind: "definitive_no_candidate",
+              reasonCode: plannedQuote.reasonCode,
+            };
           }
           assertRelayPlanningQuote({
             quote: plannedQuote,
@@ -759,11 +792,20 @@ export class RelayFirstSourcePlanner {
     }
     return {
       sources: selected,
-      reasonCodes: plannedCandidates.some(
-        (outcome) => outcome.kind === "transient_unknown",
-      )
-        ? ["provider_status_unknown"]
-        : [],
+      reasonCodes: [
+        ...new Set<FundingReasonCode>([
+          ...(plannedCandidates.some(
+            (outcome) => outcome.kind === "transient_unknown",
+          )
+            ? (["provider_status_unknown"] as const)
+            : []),
+          ...plannedCandidates.flatMap((outcome) =>
+            outcome.kind === "definitive_no_candidate"
+              ? [outcome.reasonCode]
+              : [],
+          ),
+        ]),
+      ],
     };
   }
 
@@ -773,7 +815,7 @@ export class RelayFirstSourcePlanner {
       "signal" | "timeoutMs"
     >,
     timeoutMs: number,
-  ): Promise<RelayPlanningQuote | null> {
+  ): Promise<RelayPlanningQuoteResult> {
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | null = null;
     const timeout = new Promise<never>((_resolve, reject) => {

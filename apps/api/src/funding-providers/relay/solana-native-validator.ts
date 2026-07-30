@@ -511,7 +511,8 @@ function validateProtocol(input: {
 }
 
 export function validateRelaySolanaNativeQuote(input: {
-  maximumSourceAmountRaw: bigint;
+  amountMode: "exact_input" | "expected_output";
+  authorizedSourceAmountRaw: bigint;
   expectedOutputTargetRaw: bigint;
   minimumOutputFloorRaw: bigint;
   maximumSlippageBps: number;
@@ -522,9 +523,10 @@ export function validateRelaySolanaNativeQuote(input: {
   const user = publicKey(input.user, "user");
   const recipient = evmAddress(input.recipient, "recipient");
   if (
-    input.maximumSourceAmountRaw <= 0n ||
+    input.authorizedSourceAmountRaw <= 0n ||
     input.minimumOutputFloorRaw <= 0n ||
-    input.expectedOutputTargetRaw < input.minimumOutputFloorRaw ||
+    (input.amountMode === "expected_output" &&
+      input.expectedOutputTargetRaw < input.minimumOutputFloorRaw) ||
     !Number.isInteger(input.maximumSlippageBps) ||
     input.maximumSlippageBps < 0 ||
     input.maximumSlippageBps > 500
@@ -556,9 +558,15 @@ export function validateRelaySolanaNativeQuote(input: {
   if (
     sourceAmountRaw <= 0n ||
     BigInt(details.currencyIn.minimumAmount) !== sourceAmountRaw ||
-    sourceAmountRaw > input.maximumSourceAmountRaw
+    (input.amountMode === "exact_input"
+      ? sourceAmountRaw !== input.authorizedSourceAmountRaw
+      : sourceAmountRaw > input.authorizedSourceAmountRaw)
   ) {
-    throw new Error("Relay native SOL input exceeds the authorized source cap");
+    throw new Error(
+      input.amountMode === "exact_input"
+        ? "Relay native SOL input differs from the authorized exact source amount"
+        : "Relay native SOL input exceeds the authorized source cap",
+    );
   }
   exact(details.currencyOut.currency.chainId, 137, "output chain");
   exact(
@@ -570,7 +578,9 @@ export function validateRelaySolanaNativeQuote(input: {
   const expectedOutputRaw = BigInt(details.currencyOut.amount);
   const minimumOutputRaw = BigInt(details.currencyOut.minimumAmount);
   if (
-    expectedOutputRaw !== input.expectedOutputTargetRaw ||
+    expectedOutputRaw <= 0n ||
+    (input.amountMode === "expected_output" &&
+      expectedOutputRaw !== input.expectedOutputTargetRaw) ||
     minimumOutputRaw < input.minimumOutputFloorRaw ||
     minimumOutputRaw > expectedOutputRaw
   ) {

@@ -341,10 +341,7 @@ export class RelayWalletQuoteAdapter {
           gasLimitRaw: action.gasLimit.toString(),
         };
       });
-    } else if (
-      input.route.quoteMode === "expected_output" &&
-      input.route.destination.networkId === "evm:8453"
-    ) {
+    } else if (input.route.destination.networkId === "evm:8453") {
       const sourceCurrency =
         input.route.source.assetId === SOLANA_NATIVE
           ? SOLANA_NATIVE
@@ -357,7 +354,8 @@ export class RelayWalletQuoteAdapter {
       let validated;
       try {
         validated = validateRelaySolanaDirectBaseQuote({
-          maximumSourceAmountRaw: BigInt(input.sourceAmount.raw),
+          amountMode: input.route.quoteMode,
+          authorizedSourceAmountRaw: BigInt(input.sourceAmount.raw),
           expectedOutputTargetRaw: BigInt(expectedOutputTargetRaw),
           minimumOutputFloorRaw: BigInt(input.minimumOutput.raw),
           quote,
@@ -410,11 +408,12 @@ export class RelayWalletQuoteAdapter {
             validated.instruction.addressLookupTableAddresses,
         },
       ];
-    } else if (input.route.quoteMode === "expected_output") {
+    } else if (input.route.source.assetId === SOLANA_NATIVE) {
       let validated;
       try {
         validated = validateRelaySolanaNativeQuote({
-          maximumSourceAmountRaw: BigInt(input.sourceAmount.raw),
+          amountMode: input.route.quoteMode,
+          authorizedSourceAmountRaw: BigInt(input.sourceAmount.raw),
           expectedOutputTargetRaw: BigInt(expectedOutputTargetRaw),
           minimumOutputFloorRaw: BigInt(input.minimumOutput.raw),
           maximumSlippageBps: input.maximumSlippageBps ?? 100,

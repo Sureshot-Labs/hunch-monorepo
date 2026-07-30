@@ -6,6 +6,7 @@ import { ExistingFactsOwnershipResolver } from "../../../account-value/ownership
 import type {
   EvmTransactionAction,
   EvmTransactionBatchAction,
+  SvmTransactionAction,
   WalletExecutionProfile,
 } from "../../domain/types.js";
 import {
@@ -42,6 +43,21 @@ const BATCH_ACTION: EvmTransactionBatchAction = {
       valueRaw: "0",
     },
   ],
+};
+const SVM_ACTION: SvmTransactionAction = {
+  kind: "svm_transaction",
+  actionId: "action_svm_sponsorship_12345678",
+  networkId: "solana:mainnet",
+  signerWalletId: "wallet_svm_sponsorship_12345678",
+  instructions: [
+    {
+      programId: "11111111111111111111111111111111",
+      accounts: [],
+      data: "",
+      dataEncoding: "hex",
+    },
+  ],
+  addressLookupTables: [],
 };
 
 function profile(
@@ -116,6 +132,69 @@ assert.deepEqual(
     signingMode: "web_client",
   },
 );
+assert.deepEqual(
+  resolveActionSponsorship({
+    action: SVM_ACTION,
+    profile: profile({
+      walletId: SVM_ACTION.signerWalletId,
+      networkId: SVM_ACTION.networkId,
+      address: "11111111111111111111111111111111",
+      sponsorshipPolicyIds: [],
+    }),
+  }),
+  {
+    payerRequirement: "user",
+    policyId: null,
+    signingMode: "privy_authorization",
+  },
+);
+assert.deepEqual(
+  resolveActionSponsorship({
+    action: SVM_ACTION,
+    profile: profile({
+      walletId: SVM_ACTION.signerWalletId,
+      networkId: SVM_ACTION.networkId,
+      address: "11111111111111111111111111111111",
+      source: "external",
+      signingModes: ["web_client"],
+      serverWalletRef: null,
+      sponsorshipPolicyIds: [],
+    }),
+  }),
+  {
+    payerRequirement: "user",
+    policyId: null,
+    signingMode: "web_client",
+  },
+);
+for (const incompleteProfile of [
+  profile({
+    walletId: SVM_ACTION.signerWalletId,
+    networkId: SVM_ACTION.networkId,
+    address: "11111111111111111111111111111111",
+    serverWalletRef: null,
+    sponsorshipPolicyIds: [],
+  }),
+  profile({
+    walletId: SVM_ACTION.signerWalletId,
+    networkId: SVM_ACTION.networkId,
+    address: "11111111111111111111111111111111",
+    signingModes: ["web_client"],
+    sponsorshipPolicyIds: [],
+  }),
+]) {
+  assert.deepEqual(
+    resolveActionSponsorship({
+      action: SVM_ACTION,
+      profile: incompleteProfile,
+    }),
+    {
+      payerRequirement: "user",
+      policyId: null,
+      signingMode: "web_client",
+    },
+  );
+}
 
 assert.throws(
   () =>
@@ -183,5 +262,5 @@ assert.ok(
 );
 
 console.log(
-  "[funding-sponsorship-policy-tests] exact internal EVM sponsorship and mutation guards passed",
+  "[funding-sponsorship-policy-tests] exact signing custody, sponsorship, and mutation guards passed",
 );

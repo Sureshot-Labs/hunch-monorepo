@@ -1,6 +1,12 @@
 import { getAssociatedTokenAddressSync } from "@solana/spl-token";
 import { PublicKey } from "@solana/web3.js";
 import assert from "node:assert/strict";
+import type {
+  FundingSourceRef,
+  FundingTarget,
+} from "../../funding/domain/types.js";
+import { RelayClient } from "./client.js";
+import { RELAY_ROUTE_SPECS } from "./mappings.js";
 import {
   BASE_USDC,
   POLYGON_PUSD,
@@ -17,6 +23,7 @@ import {
   validateRelaySolanaDirectBaseQuote,
   validateRelaySolanaRehearsalQuote,
 } from "./solana-rehearsal.js";
+import { RelayWalletQuoteAdapter } from "./wallet-adapter.js";
 
 const user = "9HXGB1nMpw4vhMUCZC5JLfpZt6RXZoaf2HptmormMReH";
 const recipient = "0x2222222222222222222222222222222222222222";
@@ -457,8 +464,9 @@ function directQuote(
 for (const sourceCurrency of [SOLANA_NATIVE, SOLANA_USDC] as const) {
   const native = sourceCurrency === SOLANA_NATIVE;
   const validated = validateRelaySolanaDirectBaseQuote({
+    amountMode: "expected_output",
+    authorizedSourceAmountRaw: native ? 20_000_000n : 1_100_000n,
     expectedOutputTargetRaw: 1_010_102n,
-    maximumSourceAmountRaw: native ? 20_000_000n : 1_100_000n,
     minimumOutputFloorRaw: 1_000_000n,
     quote: directQuote(sourceCurrency),
     recipient,
@@ -484,8 +492,9 @@ for (const sourceCurrency of [SOLANA_NATIVE, SOLANA_USDC] as const) {
   assert.throws(
     () =>
       validateRelaySolanaDirectBaseQuote({
+        amountMode: "expected_output",
+        authorizedSourceAmountRaw: native ? 20_000_000n : 1_100_000n,
         expectedOutputTargetRaw: 1_010_102n,
-        maximumSourceAmountRaw: native ? 20_000_000n : 1_100_000n,
         minimumOutputFloorRaw: 1_000_000n,
         quote: wrongAmount,
         recipient,
@@ -494,6 +503,100 @@ for (const sourceCurrency of [SOLANA_NATIVE, SOLANA_USDC] as const) {
       }),
     /economics binding mismatch/,
   );
+}
+
+{
+  const validated = validateRelaySolanaDirectBaseQuote({
+    amountMode: "exact_input",
+    authorizedSourceAmountRaw: 14_000_000n,
+    // Exact-input discovery uses a one-unit destination floor. The provider's
+    // actual output is validated and frozen from the returned quote instead.
+    expectedOutputTargetRaw: 1n,
+    minimumOutputFloorRaw: 1n,
+    quote: directQuote(SOLANA_NATIVE),
+    recipient,
+    sourceCurrency: SOLANA_NATIVE,
+    user,
+  });
+  assert.equal(validated.sourceAmountRaw, 14_000_000n);
+  assert.equal(validated.expectedOutputRaw, 1_010_102n);
+
+  assert.throws(
+    () =>
+      validateRelaySolanaDirectBaseQuote({
+        amountMode: "exact_input",
+        authorizedSourceAmountRaw: 14_000_001n,
+        expectedOutputTargetRaw: 1n,
+        minimumOutputFloorRaw: 1n,
+        quote: directQuote(SOLANA_NATIVE),
+        recipient,
+        sourceCurrency: SOLANA_NATIVE,
+        user,
+      }),
+    /differs from the authorized exact source amount/u,
+  );
+}
+
+{
+  const configuredRoute = required(
+    RELAY_ROUTE_SPECS["solana-sol-to-base-usdc"],
+    "direct SOL to Base route",
+  );
+  const route = { ...configuredRoute, quoteMode: "exact_input" as const };
+  const source: FundingSourceRef = {
+    kind: "owned_location",
+    location: {
+      kind: "wallet",
+      locationId: "location_direct_solana_source",
+      accountId: "account_direct_solana",
+      asset: route.source,
+      details: { walletId: "wallet_direct_solana", address: user },
+    },
+  };
+  const destination: FundingTarget = {
+    kind: "owned_location",
+    location: {
+      kind: "wallet",
+      locationId: "location_direct_base_destination",
+      accountId: "account_direct_solana",
+      asset: route.destination,
+      details: { walletId: "wallet_direct_base", address: recipient },
+    },
+  };
+  let requestBody: Record<string, unknown> = {};
+  const client = new RelayClient({
+    apiKey: "test-relay-key",
+    fetchImpl: async (_url, init) => {
+      requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return new Response(JSON.stringify(directQuote(SOLANA_NATIVE)), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    },
+  });
+  const normalized = await new RelayWalletQuoteAdapter(client).quote({
+    route,
+    source,
+    destination,
+    sourceAmount: { asset: route.source, raw: "14000000" },
+    minimumOutput: { asset: route.destination, raw: "1" },
+    userAddress: user,
+    recipientAddress: recipient,
+    senderWalletId: "wallet_direct_solana",
+    quoteCorrelationId: "quote_direct_solana_exact_input",
+    deadline: new Date(Date.now() + 60_000),
+    maximumSlippageBps: 100,
+  });
+  assert.equal(requestBody.tradeType, "EXACT_INPUT");
+  assert.equal(requestBody.amount, "14000000");
+  assert.equal(normalized.candidate.amountMode, "exact_input");
+  assert.equal(
+    normalized.routeShape,
+    "relay-solana-native-direct-depository-v1",
+  );
+  assert.equal(normalized.sourceAmount.raw, "14000000");
+  assert.equal(normalized.candidate.expectedOutput.raw, "1010102");
+  assert.equal(normalized.actions[0]?.kind, "svm_transaction");
 }
 
 console.log(

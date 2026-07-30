@@ -109,6 +109,29 @@ function driver(
   };
 }
 
+function venueDriver(input: {
+  inspected: RuntimeVenueInspectionInput[];
+  venueId: "polymarket" | "limitless";
+  inspect: (
+    inspection: RuntimeVenueInspectionInput,
+  ) => Promise<PreparedRuntimeDestination>;
+}): WalletPreparationRuntimeDriver {
+  return {
+    venueId: input.venueId,
+    supportedMarketClasses: ["standard", "neg_risk"],
+    supportsWallet: () => true,
+    inspect: async (inspection) => {
+      input.inspected.push(inspection);
+      return input.inspect(inspection);
+    },
+    ownerCandidates: async ({ wallets: candidates }) => ({
+      candidateWallets: candidates,
+      ownershipHinted: candidates.length > 0,
+    }),
+    matchesAccountRef: () => false,
+  };
+}
+
 function marketDb(queries: string[]): Pool {
   return {
     query: async (sql: string) => {
@@ -178,6 +201,47 @@ await test("one destination discovery resolves and shares one immutable market c
   assert.ok(contexts.every(Boolean));
   assert.equal(new Set(contexts).size, 1);
   assert.equal(contexts[0]?.market, market);
+});
+
+await test("an exact successful binding is not blocked by an unrelated venue inspection failure", async () => {
+  const inspected: RuntimeVenueInspectionInput[] = [];
+  const service = new WalletPreparationRuntimeService(
+    {} as Pool,
+    () => NOW,
+    [
+      venueDriver({
+        inspected,
+        venueId: "polymarket",
+        inspect: async (input) => preparedDestination(input),
+      }),
+      venueDriver({
+        inspected,
+        venueId: "limitless",
+        inspect: async () => {
+          throw new Error("unrelated venue unavailable");
+        },
+      }),
+    ],
+    async () => wallets,
+  );
+
+  const destinations = await service.frozenDestinations({
+    accountId: ACCOUNT_ID,
+    purpose: "fund",
+    marketContextId: null,
+    marketClass: null,
+    positionActionRef: null,
+    compatibleVenueBindingOptionIds: [SELECTED_BINDING_ID],
+    controllerWalletRef: SELECTED_WALLET_ID,
+  });
+
+  assert.deepEqual(
+    destinations.map(
+      (destination) => destination.bindingOption.venueBindingOptionId,
+    ),
+    [SELECTED_BINDING_ID],
+  );
+  assert.equal(inspected.length, 2);
 });
 
 await test("venue locks and internal reservations are both excluded from destination availability", () => {

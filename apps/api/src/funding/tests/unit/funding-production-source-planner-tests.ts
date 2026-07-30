@@ -6,8 +6,8 @@ import type { AccountValueReadModel } from "../../../account-value/runtime-servi
 import { RELAY_PINNED_ASSETS } from "../../../funding-providers/relay/mappings.js";
 import type { FundingRuntimePolicy } from "../../policies/funding-policy.js";
 import { PRIVY_USER_AUTHORIZED_EVM_SPONSORSHIP_POLICY_ID } from "../../execution/sponsorship-policy.js";
+import { SOLANA_NATIVE_EXECUTION_RESERVE_LAMPORTS } from "../../domain/network-fees.js";
 import {
-  SOLANA_NATIVE_EXECUTION_RESERVE_LAMPORTS,
   buildPolymarketPreRouteHandoffSteps,
   deriveProductionRelayEligibleSourceFacts,
 } from "../../planner/production-source-planner.js";
@@ -356,8 +356,8 @@ const exactReceivedSource = deriveProductionRelayEligibleSourceFacts({
 });
 assert.equal(exactReceivedSource.length, 1);
 assert.equal(exactReceivedSource[0]?.quoteInputAmount.raw, "3000000");
-assert.equal(exactReceivedSource[0]?.quoteMinimumOutput?.raw, "2970000");
-assert.equal(exactReceivedSource[0]?.quoteModeOverride, undefined);
+assert.equal(exactReceivedSource[0]?.quoteMinimumOutput?.raw, "1");
+assert.equal(exactReceivedSource[0]?.quoteModeOverride, "exact_input");
 
 const exactInputConversionSource = deriveProductionRelayEligibleSourceFacts({
   accountId: ACCOUNT_ID,
@@ -958,6 +958,108 @@ assert.equal(excludedByPreference.length, 0);
   });
   assert.equal(atReserveFacts.length, 1);
   assert.equal(atReserveFacts[0]?.nativeGasReady, true);
+
+  const splitWalletPolicy = policy({
+    locations: [
+      ...tokenPolicy.locations,
+      {
+        locationPatternId: "wallet_solana_native",
+        locationKind: "wallet",
+        ownership: "owned",
+        observable: true,
+        capabilities: ["observe", "value", "execution_source"],
+        asset: SOLANA_NATIVE,
+        enabled: true,
+      },
+    ],
+    routes: [
+      ...tokenPolicy.routes,
+      {
+        ...tokenPolicy.routes[0],
+        routeId: "solana-sol-to-polygon-pusd",
+        sourceLocationPatternId: "wallet_solana_native",
+        sourceAsset: SOLANA_NATIVE,
+        fixtureIds: ["relay_wallet_solana_native_to_pusd_quote_live"],
+      },
+    ],
+  });
+  const externalWalletId = "wallet_solana_external_12345678";
+  const externalAddress = "5CnexXUpyxp6bBJQWXoLe8v54FRGN5v3aDTtYsU2rgL3H";
+  const externalNativeLocation = {
+    kind: "wallet",
+    locationId: "location_solana_external_native_12345678",
+    accountId: ACCOUNT_ID,
+    asset: SOLANA_NATIVE,
+    details: {
+      walletId: externalWalletId,
+      address: externalAddress,
+    },
+  } as const;
+  const externalNativeComponent = {
+    ...nativeComponent,
+    componentId: "component_solana_external_native_12345678",
+    location: externalNativeLocation,
+    amount: { asset: SOLANA_NATIVE, raw: "205985000" },
+    estimatedUsd: null,
+    valuationEligibility: "unpriced",
+    reasonCodes: ["trusted_price_unavailable"],
+  } as const;
+  const belowReserveOwnership = belowReserveAccount.ownership;
+  assert.ok(belowReserveOwnership);
+  const splitWalletAccount = {
+    ...belowReserveAccount,
+    projection: {
+      ...belowReserveAccount.projection,
+      components: [sourceComponent, nativeComponent, externalNativeComponent],
+    },
+    cashAvailability: {
+      ...belowReserveAccount.cashAvailability,
+      components: [
+        ...belowReserveAccount.cashAvailability.components,
+        {
+          ...belowReserveAccount.cashAvailability.components[0],
+          componentId: externalNativeComponent.componentId,
+          amount: externalNativeComponent.amount,
+          availableRaw: externalNativeComponent.amount.raw,
+          availableEstimatedUsd: null,
+        },
+      ],
+    },
+    runtimePolicy: splitWalletPolicy,
+    ownership: {
+      ...belowReserveOwnership,
+      wallets: [
+        ...belowReserveOwnership.wallets,
+        {
+          walletId: externalWalletId,
+          networkId: "solana:mainnet",
+          address: externalAddress,
+          source: "external",
+          signingModes: ["web_client"],
+          serverWalletRef: null,
+          sponsorshipPolicyIds: [],
+        },
+      ],
+    },
+  } as AccountValueReadModel;
+  const splitWalletFacts = deriveProductionRelayEligibleSourceFacts({
+    accountId: ACCOUNT_ID,
+    account: splitWalletAccount,
+    policy: splitWalletPolicy,
+    requiredAmount: { asset: POLYGON_PUSD, raw: "2770428" },
+  });
+  const splitUsdcFact = splitWalletFacts.find(
+    (fact) => fact.componentId === sourceComponent.componentId,
+  );
+  const splitNativeFact = splitWalletFacts.find(
+    (fact) => fact.componentId === externalNativeComponent.componentId,
+  );
+  assert.equal(splitUsdcFact?.nativeGasReady, false);
+  assert.equal(splitNativeFact?.nativeGasReady, true);
+  assert.equal(
+    splitNativeFact?.maximumSourceRaw,
+    (205_985_000n - SOLANA_NATIVE_EXECUTION_RESERVE_LAMPORTS).toString(),
+  );
 }
 
 const originalRoute = policy().routes[0];

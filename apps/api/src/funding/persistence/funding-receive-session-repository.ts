@@ -1167,6 +1167,7 @@ export async function updateClosedFundingReceiveSessionObservation(
 
 export type FundingReceiveReceiptRoutingTarget = Readonly<{
   receipt: FundingReceiveReceipt;
+  receiptDestinationLocationId: string | null;
   userId: string;
   venueId: string;
   destinationOptionId: string;
@@ -1174,6 +1175,8 @@ export type FundingReceiveReceiptRoutingTarget = Readonly<{
   destinationAsset: AssetRef;
   automationPolicy: FundingReceiveAutomationPolicy;
   childOperationStatus: string | null;
+  childBroadcastMayHaveOccurred: boolean;
+  childHasUnfinishedAttempt: boolean;
   routingAttemptCount: number;
   routingDisposition:
     | "pending"
@@ -1191,12 +1194,15 @@ export type FundingReceiveReceiptReviewTarget =
     }>;
 
 type ReceiveReceiptTargetRow = ReceiveReceiptRow & {
+  receipt_destination_location_id: string | null;
   venue_id: string;
   destination_option_id: string;
   venue_binding_option_id: string;
   destination_asset: AssetRef;
   automation_policy: FundingReceiveAutomationPolicy;
   child_operation_status: string | null;
+  child_broadcast_may_have_occurred: boolean;
+  child_has_unfinished_attempt: boolean;
   routing_attempt_count: number;
   routing_disposition: FundingReceiveReceiptRoutingTarget["routingDisposition"];
 };
@@ -1206,6 +1212,7 @@ function receiveReceiptRoutingTarget(
 ): FundingReceiveReceiptRoutingTarget {
   return {
     receipt: publicReceipt(row),
+    receiptDestinationLocationId: row.receipt_destination_location_id,
     userId: row.user_id,
     venueId: row.venue_id,
     destinationOptionId: row.destination_option_id,
@@ -1213,6 +1220,8 @@ function receiveReceiptRoutingTarget(
     destinationAsset: row.destination_asset,
     automationPolicy: row.automation_policy,
     childOperationStatus: row.child_operation_status,
+    childBroadcastMayHaveOccurred: row.child_broadcast_may_have_occurred,
+    childHasUnfinishedAttempt: row.child_has_unfinished_attempt,
     routingAttemptCount: row.routing_attempt_count,
     routingDisposition: row.routing_disposition,
   };
@@ -1249,20 +1258,49 @@ export async function listFundingReceiveReceiptsForRouting(
         receipt.evidence,
         receipt.created_at,
         receipt.updated_at,
+        (
+          select variant ->> 'destinationLocationId'
+          from jsonb_array_elements(session.observation_variants) variant
+          where variant ->> 'variantId' = receipt.variant_id
+          limit 1
+        ) as receipt_destination_location_id,
         session.venue_id,
         session.destination_option_id,
         session.venue_binding_option_id,
         session.destination_asset,
         session.automation_policy,
-        operation.status as child_operation_status
+        operation.status as child_operation_status,
+        exists (
+          select 1
+          from funding_operation_steps child_step
+          join funding_operation_step_attempts child_attempt
+            on child_attempt.step_id = child_step.id
+          where child_step.operation_id = operation.id
+            and child_attempt.broadcast_may_have_occurred
+        ) as child_broadcast_may_have_occurred,
+        exists (
+          select 1
+          from funding_operation_steps child_step
+          join funding_operation_step_attempts child_attempt
+            on child_attempt.step_id = child_step.id
+          where child_step.operation_id = operation.id
+            and child_attempt.outcome = 'started'
+        ) as child_has_unfinished_attempt
       from funding_receive_receipts receipt
       join funding_receive_sessions session
         on session.id = receipt.receive_session_id
       left join funding_operations operation
         on operation.id = receipt.child_funding_operation_id
-      where receipt.status in ('observed', 'routing')
-        and receipt.handling = 'automatic_conversion'
-        and receipt.routing_next_attempt_at <= $2
+      where (
+          receipt.status = 'observed'
+          and receipt.handling = 'automatic_conversion'
+          and receipt.child_funding_operation_id is null
+          and receipt.routing_next_attempt_at <= $2
+        )
+        or (
+          receipt.status = 'routing'
+          and receipt.child_funding_operation_id is not null
+        )
       order by receipt.created_at asc
       limit $1
     `,
@@ -1382,12 +1420,34 @@ export async function fetchFundingReceiveReceiptForReview(
         receipt.evidence,
         receipt.created_at,
         receipt.updated_at,
+        (
+          select variant ->> 'destinationLocationId'
+          from jsonb_array_elements(session.observation_variants) variant
+          where variant ->> 'variantId' = receipt.variant_id
+          limit 1
+        ) as receipt_destination_location_id,
         session.venue_id,
         session.destination_option_id,
         session.venue_binding_option_id,
         session.destination_asset,
         session.automation_policy,
-        operation.status as child_operation_status
+        operation.status as child_operation_status,
+        exists (
+          select 1
+          from funding_operation_steps child_step
+          join funding_operation_step_attempts child_attempt
+            on child_attempt.step_id = child_step.id
+          where child_step.operation_id = operation.id
+            and child_attempt.broadcast_may_have_occurred
+        ) as child_broadcast_may_have_occurred,
+        exists (
+          select 1
+          from funding_operation_steps child_step
+          join funding_operation_step_attempts child_attempt
+            on child_attempt.step_id = child_step.id
+          where child_step.operation_id = operation.id
+            and child_attempt.outcome = 'started'
+        ) as child_has_unfinished_attempt
       from funding_receive_receipts receipt
       join funding_receive_sessions session
         on session.id = receipt.receive_session_id
@@ -1532,10 +1592,20 @@ export async function settleFundingReceiveReceiptRouting(
     receiptId: string;
     receiveSessionId: string;
     userId: string;
-    status: "ready" | "recovery_required";
+    childOperationId?: string | null;
+    childOperationStatus?: string | null;
+    status: "ready" | "review_required" | "recovery_required";
     now: Date;
   }>,
 ): Promise<boolean> {
+  if (
+    input.status === "review_required" &&
+    (!input.childOperationId || !input.childOperationStatus)
+  ) {
+    throw new Error(
+      "retryable receive routing requires the exact failed child operation",
+    );
+  }
   return tx(db, async (client) => {
     const receipt = await client.query(
       `
@@ -1543,17 +1613,50 @@ export async function settleFundingReceiveReceiptRouting(
         set status = $4,
             routing_disposition = case
               when $4 = 'ready' then 'ready'
+              when $4 = 'review_required' then 'review_required'
               else 'recovery_required'
             end,
             routing_last_error_code = case
               when $4 = 'ready' then null
+              when $4 = 'review_required'
+                then 'child_operation_failed_before_broadcast'
               else coalesce(routing_last_error_code, 'child_operation_failed')
             end,
-            updated_at = $5
+            review_quote_id = case
+              when $4 = 'review_required' then null
+              else review_quote_id
+            end,
+            child_funding_operation_id = case
+              when $4 = 'review_required' then null
+              else child_funding_operation_id
+            end,
+            evidence = case
+              when $4 = 'review_required' then jsonb_set(
+                evidence,
+                '{routingOperationHistory}',
+                (
+                  case
+                    when jsonb_typeof(evidence -> 'routingOperationHistory') = 'array'
+                      then evidence -> 'routingOperationHistory'
+                    else '[]'::jsonb
+                  end
+                ) || jsonb_build_array(
+                  jsonb_build_object(
+                    'operationId', $6::text,
+                    'outcome', $7::text,
+                    'detachedAt', $5::timestamptz
+                  )
+                ),
+                true
+              )
+              else evidence
+            end,
+            updated_at = $5::timestamptz
         where id = $1
           and receive_session_id = $2
           and user_id = $3
           and status = 'routing'
+          and ($6::uuid is null or child_funding_operation_id = $6)
       `,
       [
         input.receiptId,
@@ -1561,6 +1664,8 @@ export async function settleFundingReceiveReceiptRouting(
         input.userId,
         input.status,
         input.now,
+        input.childOperationId ?? null,
+        input.childOperationStatus ?? null,
       ],
     );
     if (receipt.rowCount !== 1) return false;

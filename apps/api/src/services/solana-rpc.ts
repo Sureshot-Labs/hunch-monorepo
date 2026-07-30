@@ -149,10 +149,14 @@ async function solanaRpcRequest<T>(inputs: {
       } catch (error) {
         lastError = error;
         const retryable = isRpcRateLimit(error) || isAbortError(error);
+        if (inputs.rpcUrls.length > 1) {
+          // A transport failure, non-2xx response, malformed payload, or
+          // provider-specific JSON-RPC error does not prove the canonical
+          // request itself is invalid. Try the next independently configured
+          // endpoint before failing the read.
+          continue;
+        }
         if (retryable) {
-          if (inputs.rpcUrls.length > 1) {
-            continue;
-          }
           break;
         }
         throw error;

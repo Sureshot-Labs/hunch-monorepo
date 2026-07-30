@@ -63,7 +63,7 @@ import {
   RelayFirstSourcePlanner,
   effectiveFundingEconomicsLimits,
   type RelayEligibleSourceFact,
-  type RelayPlanningQuote,
+  type RelayPlanningQuoteResult,
 } from "./source-options.js";
 import type { ResolvedRouteDestination } from "./destination-adapters.js";
 import {
@@ -80,9 +80,9 @@ import {
   canonicalAssetId,
   sameAccountAddress,
 } from "../domain/asset-identity.js";
+import { SOLANA_NATIVE_EXECUTION_RESERVE_LAMPORTS } from "../domain/network-fees.js";
 
 const ROUTE_EXPERIENCE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1_000;
-export const SOLANA_NATIVE_EXECUTION_RESERVE_LAMPORTS = 3_000_000n;
 const POLYMARKET_DEPOSIT_WALLET_HANDOFF_EXECUTOR_ID =
   "polymarket_deposit_wallet_relayer_v1";
 const ERC20_TRANSFER_INTERFACE = new Interface([
@@ -424,26 +424,12 @@ function sourceFactsForComponent(input: {
           confirmedSourceRaw > 0n && confirmedSourceRaw <= spendableRaw
             ? confirmedSourceRaw.toString()
             : "0";
-        if (input.purpose === "convert_asset") {
-          // Convert is exact-input UX. Relay owns the executable minimum
-          // derived from its live quote; this pre-quote value only identifies
-          // the positive destination asset and must not turn the entered
-          // source amount into an exact-output request.
-          minimumDestinationRaw = "1";
-        } else {
-          const grossDestinationRaw = rescaleStableRaw(
-            raw,
-            input.requiredAmount.asset.decimals,
-            input.component.amount.asset.decimals,
-          );
-          const boundedMinimum =
-            (BigInt(grossDestinationRaw) *
-              BigInt(10_000 - input.maximumSlippageBps)) /
-            10_000n;
-          minimumDestinationRaw = (
-            boundedMinimum > 0n ? boundedMinimum : 1n
-          ).toString();
-        }
+        // A confirmed source amount is exact-input regardless of which flow
+        // supplied it. This includes user-entered Convert and an observed
+        // receive receipt. Relay freezes the economically safe destination
+        // output; the pre-quote floor only proves that the route cannot return
+        // zero and must never turn received funds into an exact-output spend.
+        minimumDestinationRaw = "1";
       } else if (nativeSolSource) {
         raw = spendableRaw.toString();
         minimumDestinationRaw = input.requiredAmount.raw;
@@ -509,7 +495,7 @@ function sourceFactsForComponent(input: {
           asset: input.requiredAmount.asset,
           raw: minimumDestinationRaw,
         },
-        ...(input.purpose === "convert_asset"
+        ...(confirmedSourceRaw != null
           ? { quoteModeOverride: "exact_input" as const }
           : {}),
         maximumSourceRaw: spendableRaw.toString(),
@@ -975,13 +961,10 @@ export class ProductionFundingSourcePlanner {
         })
       : { sources: [], reasonCodes: [] };
     const relay = relayRequirement
-      ? restrictResidualSourcesToCompositeContribution(
-          relayDiscovery.sources,
-          {
-            plannedRequirement: relayRequirement,
-            fullRequirement: input.requiredAmount,
-          },
-        )
+      ? restrictResidualSourcesToCompositeContribution(relayDiscovery.sources, {
+          plannedRequirement: relayRequirement,
+          fullRequirement: input.requiredAmount,
+        })
       : [];
     const candidates = [...adapted, ...relay];
     const limits = effectiveFundingEconomicsLimits(input.policy, {
@@ -1160,7 +1143,7 @@ export class ProductionFundingSourcePlanner {
     input: Parameters<
       ConstructorParameters<typeof RelayFirstSourcePlanner>[0]["quoteRelay"]
     >[0],
-  ): Promise<RelayPlanningQuote | null> {
+  ): Promise<RelayPlanningQuoteResult> {
     const apiKey = process.env.RELAY_API_KEY?.trim();
     const lookupKey = process.env.FUNDING_REFERENCE_LOOKUP_HMAC_KEY?.trim();
     const keyVersion =
@@ -1216,16 +1199,34 @@ export class ProductionFundingSourcePlanner {
       });
     } catch (error) {
       if (error instanceof RelayClientError) {
-        if (isRelayQuoteRejectedError(error)) return null;
+        if (isRelayQuoteRejectedError(error)) {
+          return {
+            kind: "rejected",
+            reasonCode: "provider_quote_rejected",
+          };
+        }
         throw new FundingPlannerError(
           "provider_unavailable",
           `Relay funding quote failed: ${error.code}`,
         );
       }
       if (error instanceof RelayQuoteValidationError) {
-        return null;
+        console.warn("[funding-relay] quote validation rejected", {
+          routeId: relayRoute.routeId,
+          quoteMode: relayRoute.quoteMode,
+          reason: error.message,
+        });
+        return {
+          kind: "rejected",
+          reasonCode: "provider_quote_invalid",
+        };
       }
-      if (error instanceof RelayQuoteEconomicsError) return null;
+      if (error instanceof RelayQuoteEconomicsError) {
+        return {
+          kind: "rejected",
+          reasonCode: "provider_quote_economics_rejected",
+        };
+      }
       throw error;
     }
     if (input.signal.aborted) return null;

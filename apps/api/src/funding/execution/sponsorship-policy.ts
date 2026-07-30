@@ -43,6 +43,24 @@ export function resolveActionSponsorship(input: {
       "sponsorship profile does not match the exact action signer and network",
     );
   }
+  /*
+   * Signing custody and fee payment are independent capabilities. An embedded
+   * Solana wallet must use Privy's authorization-request flow even though the
+   * wallet, rather than a sponsor, pays the network fee. External Solana
+   * wallets continue through the connected web-client signer.
+   */
+  if (
+    input.action.kind === "svm_transaction" &&
+    input.profile.source !== "external" &&
+    input.profile.serverWalletRef &&
+    input.profile.signingModes.includes("privy_authorization")
+  ) {
+    return {
+      payerRequirement: "user",
+      policyId: null,
+      signingMode: "privy_authorization",
+    };
+  }
   if (
     (input.action.kind === "evm_transaction" ||
       input.action.kind === "evm_transaction_batch") &&

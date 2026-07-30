@@ -12,9 +12,9 @@ import {
   canonicalAssetId,
   sameAccountAddress,
 } from "../domain/asset-identity.js";
+import { SOLANA_NATIVE_EXECUTION_RESERVE_LAMPORTS } from "../domain/network-fees.js";
 import { sameAsset } from "../planner/money.js";
 import type { FundingPlanningRuntime } from "../planner/runtime-service.js";
-import { SOLANA_NATIVE_EXECUTION_RESERVE_LAMPORTS } from "../planner/production-source-planner.js";
 import {
   linkFundingReceiveReceiptOperation,
   listFundingReceiveReceiptsForRouting,
@@ -23,15 +23,108 @@ import {
   type FundingReceiveReceiptRoutingTarget,
 } from "../persistence/funding-receive-session-repository.js";
 
-const TERMINAL_RECOVERY_STATUSES = new Set([
-  "failed",
-  "cancelled",
+const TERMINAL_UNCERTAIN_STATUSES = new Set([
   "refunded",
   "reconcile_required",
   "recovery_required",
 ]);
 const MAX_ROUTING_ATTEMPTS = 5;
 const BASE_ROUTING_RETRY_MS = 30_000;
+const AUTOMATIC_ROUTING_RETRY_MS = 60_000;
+const AUTOMATIC_ROUTING_ERROR_CODES = new Set([
+  "route_unavailable",
+  "routing_destination_unavailable",
+  "routing_evidence_expired",
+  "routing_evidence_stale",
+  "routing_preparation_unavailable",
+  "routing_provider_unavailable",
+  "routing_stale_projection",
+]);
+
+export function fundingReceiveRoutingErrorCode(error: unknown): string {
+  if (
+    error != null &&
+    typeof error === "object" &&
+    "code" in error &&
+    typeof error.code === "string" &&
+    /^[a-z][a-z0-9_]{2,63}$/.test(error.code)
+  ) {
+    if (
+      error.code === "quote_mismatch" &&
+      "message" in error &&
+      typeof error.message === "string"
+    ) {
+      if (
+        error.message ===
+        "quote request raw amounts differ from the selected source plan"
+      ) {
+        return "routing_quote_amount_mismatch";
+      }
+      if (
+        error.message.startsWith("selected source plan differs from frozen")
+      ) {
+        return "routing_quote_frozen_facts_mismatch";
+      }
+      if (error.message === "stored plan lacks exact destination economics") {
+        return "routing_quote_economics_missing";
+      }
+      if (
+        error.message ===
+        "venue preparation quote lacks its exact frozen source inputs"
+      ) {
+        return "routing_quote_source_inputs_missing";
+      }
+    }
+    return `routing_${error.code}`;
+  }
+  return "routing_attempt_failed";
+}
+
+export function fundingReceiveRoutingNeedsRecovery(
+  errorCode: string,
+  nextAttempt: number,
+): boolean {
+  return (
+    nextAttempt >= MAX_ROUTING_ATTEMPTS &&
+    !AUTOMATIC_ROUTING_ERROR_CODES.has(errorCode)
+  );
+}
+
+export type FundingReceiveChildOperationDisposition =
+  | "ready"
+  | "review_retry"
+  | "recovery"
+  | "waiting";
+
+/**
+ * A failed/cancelled child is retryable only when durable attempt evidence
+ * proves that no broadcast was possible and no attempt remains unresolved.
+ * Everything ambiguous fails closed to recovery instead of rebroadcasting.
+ */
+export function fundingReceiveChildOperationDisposition(input: {
+  childOperationStatus: string | null;
+  broadcastMayHaveOccurred: boolean;
+  hasUnfinishedAttempt: boolean;
+}): FundingReceiveChildOperationDisposition {
+  if (input.childOperationStatus === "completed") return "ready";
+  if (
+    (input.childOperationStatus === "failed" ||
+      input.childOperationStatus === "cancelled") &&
+    !input.broadcastMayHaveOccurred &&
+    !input.hasUnfinishedAttempt
+  ) {
+    return "review_retry";
+  }
+  if (
+    input.childOperationStatus === "failed" ||
+    input.childOperationStatus === "cancelled" ||
+    (input.childOperationStatus != null &&
+      TERMINAL_UNCERTAIN_STATUSES.has(input.childOperationStatus))
+  ) {
+    return "recovery";
+  }
+  return "waiting";
+}
 
 export function quoteWithinReceiveAutomationPolicy(
   quote: FundingQuoteSummary,
@@ -136,6 +229,8 @@ export async function quoteFundingReceiveReceipt(
     if (
       option.kind !== "wallet_asset" ||
       option.source.kind !== "owned_location" ||
+      option.source.location.locationId !==
+        target.receiptDestinationLocationId ||
       !sameAsset(option.source.location.asset, target.receipt.asset)
     ) {
       return false;
@@ -160,7 +255,14 @@ export async function quoteFundingReceiveReceipt(
       source.source.kind === "owned_location"
         ? amounts.confirmedSourceAmount
         : null,
-    requestedDestinationAmount: amounts.requestedDestinationAmount,
+    // Discovery needs a non-zero destination floor, but an exact-input quote
+    // is bound only by its frozen source amount. Re-sending that discovery
+    // floor as an exact destination contradicts the provider output frozen in
+    // the selected source plan.
+    requestedDestinationAmount:
+      source.amountMode === "exact_input"
+        ? null
+        : amounts.requestedDestinationAmount,
   });
 }
 
@@ -231,11 +333,11 @@ export class FundingReceiveReceiptRouter {
             counts.retriesScheduled += disposition === "retry" ? 1 : 0;
             counts.recoveriesRequired += disposition === "recovery" ? 1 : 0;
           }
-        } catch {
+        } catch (error) {
           counts.retryableErrors += 1;
           const disposition = await this.deferOrRecoverReceipt(
             target,
-            "routing_attempt_failed",
+            fundingReceiveRoutingErrorCode(error),
             now,
           ).catch(() => "unchanged" as const);
           counts.retriesScheduled += disposition === "retry" ? 1 : 0;
@@ -243,25 +345,47 @@ export class FundingReceiveReceiptRouter {
         }
         continue;
       }
-      if (target.childOperationStatus === "completed") {
+      const childDisposition = fundingReceiveChildOperationDisposition({
+        childOperationStatus: target.childOperationStatus,
+        broadcastMayHaveOccurred: target.childBroadcastMayHaveOccurred,
+        hasUnfinishedAttempt: target.childHasUnfinishedAttempt,
+      });
+      const childOperationId = target.receipt.childFundingOperationId;
+      if (!childOperationId) continue;
+      if (childDisposition === "ready") {
         const settled = await settleFundingReceiveReceiptRouting(this.db, {
           receiptId: target.receipt.receiptId,
           receiveSessionId: target.receipt.receiveSessionId,
           userId: target.userId,
+          childOperationId,
+          childOperationStatus: target.childOperationStatus ?? "completed",
           status: "ready",
           now,
         });
         counts.receiptsReady += settled ? 1 : 0;
         continue;
       }
-      if (
-        target.childOperationStatus &&
-        TERMINAL_RECOVERY_STATUSES.has(target.childOperationStatus)
-      ) {
+      if (childDisposition === "review_retry") {
         const settled = await settleFundingReceiveReceiptRouting(this.db, {
           receiptId: target.receipt.receiptId,
           receiveSessionId: target.receipt.receiveSessionId,
           userId: target.userId,
+          childOperationId,
+          childOperationStatus: target.childOperationStatus ?? "failed",
+          status: "review_required",
+          now,
+        });
+        counts.reviewsRequired += settled ? 1 : 0;
+        continue;
+      }
+      if (childDisposition === "recovery") {
+        const settled = await settleFundingReceiveReceiptRouting(this.db, {
+          receiptId: target.receipt.receiptId,
+          receiveSessionId: target.receipt.receiveSessionId,
+          userId: target.userId,
+          childOperationId,
+          childOperationStatus:
+            target.childOperationStatus ?? "recovery_required",
           status: "recovery_required",
           now,
         });
@@ -314,7 +438,7 @@ export class FundingReceiveReceiptRouter {
     now: Date,
   ): Promise<"retry" | "recovery" | "unchanged"> {
     const nextAttempt = target.routingAttemptCount + 1;
-    if (nextAttempt >= MAX_ROUTING_ATTEMPTS) {
+    if (fundingReceiveRoutingNeedsRecovery(errorCode, nextAttempt)) {
       const updated = await recordFundingReceiveReceiptRoutingDisposition(
         this.db,
         {
@@ -328,10 +452,12 @@ export class FundingReceiveReceiptRouter {
       );
       return updated ? "recovery" : "unchanged";
     }
-    const delayMs = Math.min(
-      15 * 60_000,
-      BASE_ROUTING_RETRY_MS * 2 ** target.routingAttemptCount,
-    );
+    const delayMs = AUTOMATIC_ROUTING_ERROR_CODES.has(errorCode)
+      ? AUTOMATIC_ROUTING_RETRY_MS
+      : Math.min(
+          15 * 60_000,
+          BASE_ROUTING_RETRY_MS * 2 ** target.routingAttemptCount,
+        );
     const updated = await recordFundingReceiveReceiptRoutingDisposition(
       this.db,
       {

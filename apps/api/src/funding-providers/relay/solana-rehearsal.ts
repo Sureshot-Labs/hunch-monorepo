@@ -307,8 +307,9 @@ function validateProtocol(input: {
 }
 
 export function validateRelaySolanaDirectBaseQuote(input: {
+  amountMode: "exact_input" | "expected_output";
+  authorizedSourceAmountRaw: bigint;
   expectedOutputTargetRaw: bigint;
-  maximumSourceAmountRaw: bigint;
   minimumOutputFloorRaw: bigint;
   quote: unknown;
   recipient: string;
@@ -316,7 +317,7 @@ export function validateRelaySolanaDirectBaseQuote(input: {
   user: string;
 }): ValidatedSolanaDirectRelayQuote {
   if (
-    input.maximumSourceAmountRaw <= 0n ||
+    input.authorizedSourceAmountRaw <= 0n ||
     input.expectedOutputTargetRaw <= 0n ||
     input.minimumOutputFloorRaw <= 0n
   ) {
@@ -354,10 +355,16 @@ export function validateRelaySolanaDirectBaseQuote(input: {
   });
   if (
     source.amount <= 0n ||
-    source.amount > input.maximumSourceAmountRaw ||
+    (input.amountMode === "exact_input"
+      ? source.amount !== input.authorizedSourceAmountRaw
+      : source.amount > input.authorizedSourceAmountRaw) ||
     source.minimumAmount !== source.amount
   ) {
-    throw new Error("direct Solana input exceeds the authorized source cap");
+    throw new Error(
+      input.amountMode === "exact_input"
+        ? "direct Solana input differs from the authorized exact source amount"
+        : "direct Solana input exceeds the authorized source cap",
+    );
   }
   const output = currencyAmount(details, "currencyOut", {
     address: BASE_USDC,
@@ -366,7 +373,9 @@ export function validateRelaySolanaDirectBaseQuote(input: {
     vm: "evm",
   });
   if (
-    output.amount !== input.expectedOutputTargetRaw ||
+    output.amount <= 0n ||
+    (input.amountMode === "expected_output" &&
+      output.amount !== input.expectedOutputTargetRaw) ||
     output.minimumAmount < input.minimumOutputFloorRaw ||
     output.minimumAmount > output.amount
   ) {

@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 
 import { env } from "../env.js";
+import { SOLANA_MAINNET_CAIP2 } from "../lib/chain-identifiers.js";
 import {
   computeAcceptingOrders,
   readDflowNativeAcceptingOrders,
@@ -22,7 +23,6 @@ import {
   rawUsd,
   readiness,
   readString,
-  SOLANA_CAIP2,
   tokenForSide,
   tradingError,
   verifyLinkedWallet,
@@ -900,7 +900,7 @@ async function submitPreparedTrade(
     await createServerWalletClient().walletApi.solana.signAndSendTransaction({
       walletId: getPrivyWalletId(prepared.intent),
       transaction: payload.transaction,
-      caip2: SOLANA_CAIP2,
+      caip2: SOLANA_MAINNET_CAIP2,
     });
   if (!result.hash) {
     throw tradingError({

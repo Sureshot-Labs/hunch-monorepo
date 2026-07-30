@@ -4,6 +4,7 @@ import { buildAccountValueReadModel } from "../../account-value/runtime-service.
 import { stableOpaqueId } from "../../account-value/canonical.js";
 import {
   resolveTradeMarketByRef,
+  resolveTradeMarketOutcomeIdentity,
   type ApiTradeMarket,
 } from "../../services/api-trading-market-repo.js";
 import { canonicalJsonHash, lookupHmac } from "../persistence/canonical.js";
@@ -129,6 +130,15 @@ export class FundingPlanningRuntime {
       fundingApiVersion: 1 as const,
       receiveSessionsVersion: 1 as const,
       creationMode: resolvedPolicy.policy.creationMode,
+      destinationVenues: resolvedPolicy.policy.venues
+        .filter(
+          (venue) =>
+            venue.lifecycleEnabled &&
+            venue.destinationReadinessEnabled &&
+            venue.fundingEnabled,
+        )
+        .map((venue) => venue.venueId)
+        .sort((left, right) => left.localeCompare(right)),
       supportedActionKinds: [
         "add_funds",
         "trade_shortfall",
@@ -309,10 +319,12 @@ export class FundingPlanningRuntime {
             marketContextId: marketContext?.marketId ?? null,
             marketClass: null,
             compatibleVenueBindingOptionIds:
-              marketContext &&
-              marketContext.compatibleVenueBindingOptionIds.length > 0
-                ? marketContext.compatibleVenueBindingOptionIds
-                : null,
+              request.venueBindingOptionId != null
+                ? [request.venueBindingOptionId]
+                : marketContext &&
+                    marketContext.compatibleVenueBindingOptionIds.length > 0
+                  ? marketContext.compatibleVenueBindingOptionIds
+                  : null,
             controllerWalletRef: request.controllerWalletRef ?? null,
           },
           resolvedMarketForPreparation,
@@ -326,10 +338,11 @@ export class FundingPlanningRuntime {
             "trade funding requires an exact normalized consumer intent",
           );
         }
-        const resolved = await resolveTradeMarketByRef(
-          this.db,
+        const resolved = await resolveTradeMarketOutcomeIdentity(this.db, {
+          venue: consumerIntent.venueId,
+          marketId: consumerIntent.marketId,
           marketContextId,
-        );
+        });
         if (!resolved?.market || !resolved.side) return null;
         const market = resolved.market;
         if (

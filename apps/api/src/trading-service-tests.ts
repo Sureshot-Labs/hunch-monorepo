@@ -2846,6 +2846,24 @@ const tests: TestCase[] = [
       assert.match(limitlessRestSubmitBlock, /resolveLimitlessRouteAuth/);
       assert.match(
         limitlessRestSubmitBlock,
+        /marketContextId:\s*requestedRawTokenId/,
+      );
+      assert.doesNotMatch(
+        limitlessRestSubmitBlock,
+        /marketContextId:\s*tokenId/,
+      );
+      const limitlessAmmFundingClaimBlock = sourceSlice(
+        limitless,
+        "export async function claimLimitlessAmmFundingTrade(",
+        "export async function startLimitlessAmmFundingTrade(",
+      );
+      assert.match(
+        limitlessAmmFundingClaimBlock,
+        /const marketContextId = normalizeLimitlessRawTokenId\(input\.body\.tokenId\)/,
+      );
+      assert.match(limitlessAmmFundingClaimBlock, /marketContextId,\s*spend:/);
+      assert.match(
+        limitlessRestSubmitBlock,
         /if \(input\.body\.orderType === "FOK"\)/,
       );
       assert.doesNotMatch(

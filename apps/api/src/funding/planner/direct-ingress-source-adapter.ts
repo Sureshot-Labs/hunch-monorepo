@@ -468,8 +468,14 @@ function buildRoutedReceiveVariants(input: {
           raw: component.amount.raw,
         }),
         observation: {
-          adapterId: "owned_destination_spendability_v1",
-          payload: { routeId: route.routeId },
+          // This variant belongs to an owned source wallet. Destination
+          // spendability can only observe the venue destination and therefore
+          // cannot verify a routed cross-network source location.
+          adapterId: "owned_wallet_liquid_balances_v1",
+          payload: {
+            routeId: route.routeId,
+            balanceKey: canonicalAssetKey(component.amount.asset),
+          },
         },
         completion: { kind: "child_funding_operation" as const },
       },

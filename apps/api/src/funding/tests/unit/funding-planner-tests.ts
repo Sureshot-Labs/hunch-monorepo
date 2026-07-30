@@ -1384,9 +1384,7 @@ await test("Relay-first source planner asks only one exact Relay route", async (
     ],
     quoteRelay: async ({ source }) => {
       mixedFailureQuoteCalls += 1;
-      if (
-        source.componentId === "component_definitive_rejection_12345678"
-      ) {
+      if (source.componentId === "component_definitive_rejection_12345678") {
         return null;
       }
       throw new FundingPlannerError(
@@ -1403,10 +1401,53 @@ await test("Relay-first source planner asks only one exact Relay route", async (
     }),
     {
       sources: [],
-      reasonCodes: ["provider_status_unknown"],
+      reasonCodes: ["provider_status_unknown", "provider_quote_rejected"],
     },
   );
   assert.equal(mixedFailureQuoteCalls, 2);
+
+  const rejectionReasonPlanner = new RelayFirstSourcePlanner({
+    listEligibleSources: async () =>
+      [
+        [
+          "component_rejection_economics_12345678",
+          "provider_quote_economics_rejected",
+        ],
+        ["component_rejection_invalid_12345678", "provider_quote_invalid"],
+        ["component_rejection_provider_12345678", "provider_quote_rejected"],
+      ].map(([componentId]) => ({
+        componentId: componentId as string,
+        sourceLocationPatternId: "wallet_polygon",
+        safeLabel: "Rejected exact source",
+        source: exactSource,
+        quoteInputAmount: { asset: POLYGON_PUSD, raw: "1000000" },
+        maximumSourceRaw: "1000000",
+        maximumSlippageBps: 100,
+        estimatedUsd: "1",
+        transferable: true,
+        riskEligible: true,
+        walletExecutionReady: true,
+        nativeGasReady: true,
+        freshness: "fresh" as const,
+      })),
+    quoteRelay: async ({ source }) => {
+      const reasonCode = source.componentId.includes("economics")
+        ? ("provider_quote_economics_rejected" as const)
+        : source.componentId.includes("invalid")
+          ? ("provider_quote_invalid" as const)
+          : ("provider_quote_rejected" as const);
+      return { kind: "rejected", reasonCode };
+    },
+    observeRoute: async () => null,
+  });
+  assert.deepEqual(await rejectionReasonPlanner.discover(plannerInput), {
+    sources: [],
+    reasonCodes: [
+      "provider_quote_economics_rejected",
+      "provider_quote_invalid",
+      "provider_quote_rejected",
+    ],
+  });
 
   let activeQuotes = 0;
   let maximumConcurrentQuotes = 0;
@@ -1778,6 +1819,33 @@ await test("destination and source discovery do not wait for ownership persisten
   resolveOwnership("ownership_revision_12345678");
   const projection = await discovery;
   assert.equal(projection.destinationOptionId, "destination_poly_12345678");
+});
+
+await test("unresolved trade market context fails before destination inspection", async () => {
+  let destinationCalls = 0;
+  await assert.rejects(
+    () =>
+      new FundingPlanner({
+        listDestinations: async () => {
+          destinationCalls += 1;
+          return [candidate()];
+        },
+        resolveMarketContext: async () => null,
+        listSources: async () => [],
+        store: new MemoryPlanningStore(),
+        now: () => NOW,
+      }).discover({
+        accountId: USER_ID,
+        request: intent("trade_shortfall", "1000000"),
+        policy: mutablePolicy(),
+        policyRevision: "policy_revision_12345678",
+        ownershipRevision: "ownership_revision_12345678",
+      }),
+    (error: unknown) =>
+      error instanceof FundingPlannerError &&
+      error.code === "invalid_market_context",
+  );
+  assert.equal(destinationCalls, 0);
 });
 
 await test("single destination values exact liquidity without inventing consent", async () => {
@@ -2496,10 +2564,7 @@ await test("an uncovered trade shortfall stays a usable insufficient-liquidity p
   assert.equal(projection.shortfallRaw, "1998348");
   assert.equal(projection.mode, "unavailable");
   assert.deepEqual(projection.sourceOptions, []);
-  assert.equal(
-    projection.reasonCodes.includes("insufficient_liquidity"),
-    true,
-  );
+  assert.equal(projection.reasonCodes.includes("insufficient_liquidity"), true);
   assert.equal(projection.errors.length, 0);
 });
 

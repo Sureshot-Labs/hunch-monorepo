@@ -9,15 +9,26 @@ import type {
   DirectIngressVariantObservation,
 } from "../../reconciliation/direct-ingress-observer.js";
 import type { FundingQuoteSummary } from "../../domain/types.js";
+import { SOLANA_NATIVE_EXECUTION_RESERVE_LAMPORTS } from "../../domain/network-fees.js";
+import {
+  fundingSidecarRuntimeConfig,
+  loadFundingSidecarRuntimeConfig,
+} from "../../runtime/sidecar-runtime-config.js";
 import { buildFundingReceiveTargets } from "../../planner/receive-targets.js";
 import {
   deriveActiveFundingReceiveSessionStatus,
   selectFundingReceiveCanonicalEventTarget,
 } from "../../persistence/funding-receive-session-repository.js";
 import {
+  fundingReceiveChildOperationDisposition,
+  fundingReceiveRoutingErrorCode,
+  fundingReceiveRoutingNeedsRecovery,
+  quoteFundingReceiveReceipt,
   quoteWithinReceiveAutomationPolicy,
   receiveReceiptRoutingAmounts,
 } from "../../receive/receive-receipt-router.js";
+import type { FundingReceiveReceiptRoutingTarget } from "../../persistence/funding-receive-session-repository.js";
+import { fetchSolanaFinalizedSlot } from "../../../services/solana-rpc.js";
 import { verifyFundingReceiveVariants } from "../../receive/receive-session-service.js";
 import {
   initializeFundingReceiveEventCursors,
@@ -35,13 +46,278 @@ import {
   selectFundingReceiveSessionObservation,
 } from "../../receive/receive-session-observer.js";
 import { RELAY_PINNED_ASSETS } from "../../../funding-providers/relay/mappings.js";
-import { env } from "../../../env.js";
 
 const ASSET = {
   networkId: "evm:137",
   assetId: "0x0000000000000000000000000000000000000001",
   decimals: 6,
 };
+
+assert.deepEqual(
+  loadFundingSidecarRuntimeConfig({
+    SOLANA_RPC_URL: "https://primary-solana-rpc.example",
+  }).solanaRpcUrls,
+  ["https://primary-solana-rpc.example", "https://api.mainnet-beta.solana.com"],
+  "a single configured Solana provider must retain an independent fallback",
+);
+assert.deepEqual(
+  loadFundingSidecarRuntimeConfig({
+    SOLANA_RPC_URLS:
+      "https://primary-solana-rpc.example,https://fallback-solana-rpc.example",
+    SOLANA_RPC_URL: "https://ignored-solana-rpc.example",
+  }).solanaRpcUrls,
+  ["https://primary-solana-rpc.example", "https://fallback-solana-rpc.example"],
+  "an explicit ordered Solana RPC list must remain authoritative",
+);
+
+const originalFetch = globalThis.fetch;
+const rpcCalls: string[] = [];
+globalThis.fetch = (async (input: string | URL | Request) => {
+  const url =
+    typeof input === "string"
+      ? input
+      : input instanceof URL
+        ? input.toString()
+        : input.url;
+  rpcCalls.push(url);
+  if (url === "https://primary-solana-rpc.example") {
+    return new Response("provider unavailable", {
+      status: 503,
+      statusText: "Service Unavailable",
+    });
+  }
+  return Response.json({
+    jsonrpc: "2.0",
+    id: 1,
+    result: 123_456,
+  });
+}) as typeof fetch;
+try {
+  assert.equal(
+    await fetchSolanaFinalizedSlot({
+      rpcUrls: [
+        "https://primary-solana-rpc.example",
+        "https://fallback-solana-rpc.example",
+      ],
+      timeoutMs: 1_000,
+    }),
+    123_456n,
+  );
+  assert.deepEqual(
+    rpcCalls,
+    [
+      "https://primary-solana-rpc.example",
+      "https://fallback-solana-rpc.example",
+    ],
+    "a provider-local failure must fail over before the receive capability is discarded",
+  );
+} finally {
+  globalThis.fetch = originalFetch;
+}
+
+assert.equal(
+  fundingReceiveRoutingErrorCode({ code: "preparation_unavailable" }),
+  "routing_preparation_unavailable",
+);
+assert.equal(
+  fundingReceiveRoutingErrorCode(new Error("provider details stay private")),
+  "routing_attempt_failed",
+);
+assert.equal(
+  fundingReceiveRoutingErrorCode({ code: "INVALID CODE" }),
+  "routing_attempt_failed",
+);
+assert.equal(
+  fundingReceiveRoutingErrorCode({
+    code: "quote_mismatch",
+    message: "quote request raw amounts differ from the selected source plan",
+  }),
+  "routing_quote_amount_mismatch",
+);
+assert.equal(
+  fundingReceiveRoutingErrorCode({
+    code: "quote_mismatch",
+    message: "selected source plan differs from frozen facts: source,binding",
+  }),
+  "routing_quote_frozen_facts_mismatch",
+);
+assert.equal(
+  fundingReceiveRoutingNeedsRecovery("routing_preparation_unavailable", 500),
+  false,
+  "temporary destination inspection failures must keep automatic conversion alive",
+);
+assert.equal(
+  fundingReceiveRoutingNeedsRecovery("route_unavailable", 500),
+  false,
+  "an accepted automatic receive asset must keep checking for a route",
+);
+assert.equal(
+  fundingReceiveRoutingNeedsRecovery("routing_binding_mismatch", 5),
+  true,
+  "a non-transient exact-binding contradiction requires recovery",
+);
+assert.equal(
+  fundingReceiveRoutingNeedsRecovery("routing_attempt_failed", 4),
+  false,
+);
+assert.equal(
+  fundingReceiveRoutingNeedsRecovery("routing_attempt_failed", 5),
+  true,
+);
+assert.equal(
+  fundingReceiveChildOperationDisposition({
+    childOperationStatus: "completed",
+    broadcastMayHaveOccurred: true,
+    hasUnfinishedAttempt: false,
+  }),
+  "ready",
+);
+for (const childOperationStatus of ["failed", "cancelled"]) {
+  assert.equal(
+    fundingReceiveChildOperationDisposition({
+      childOperationStatus,
+      broadcastMayHaveOccurred: false,
+      hasUnfinishedAttempt: false,
+    }),
+    "review_retry",
+  );
+  assert.equal(
+    fundingReceiveChildOperationDisposition({
+      childOperationStatus,
+      broadcastMayHaveOccurred: true,
+      hasUnfinishedAttempt: false,
+    }),
+    "recovery",
+  );
+  assert.equal(
+    fundingReceiveChildOperationDisposition({
+      childOperationStatus,
+      broadcastMayHaveOccurred: false,
+      hasUnfinishedAttempt: true,
+    }),
+    "recovery",
+  );
+}
+for (const childOperationStatus of [
+  "refunded",
+  "reconcile_required",
+  "recovery_required",
+]) {
+  assert.equal(
+    fundingReceiveChildOperationDisposition({
+      childOperationStatus,
+      broadcastMayHaveOccurred: false,
+      hasUnfinishedAttempt: false,
+    }),
+    "recovery",
+  );
+}
+assert.equal(
+  fundingReceiveChildOperationDisposition({
+    childOperationStatus: "in_progress",
+    broadcastMayHaveOccurred: false,
+    hasUnfinishedAttempt: false,
+  }),
+  "waiting",
+);
+
+let routedQuoteRequest:
+  | Readonly<{
+      selectedSourceOptionId: string;
+      confirmedSourceAmount: unknown;
+      requestedDestinationAmount: unknown;
+    }>
+  | undefined;
+const routedReceiptAsset = {
+  networkId: "evm:137",
+  assetId: RELAY_PINNED_ASSETS.polygonPusd,
+  decimals: 6,
+};
+const routedReceiptTarget = {
+  userId: "user_receive_route_12345678",
+  receiptDestinationLocationId: "location_receive_route_exact_receipt_12345678",
+  destinationOptionId: "destination_receive_route_12345678",
+  venueBindingOptionId: "binding_receive_route_12345678",
+  destinationAsset: {
+    networkId: "evm:8453",
+    assetId: RELAY_PINNED_ASSETS.baseUsdc,
+    decimals: 6,
+  },
+  automationPolicy: {
+    stableConversion: "automatic_within_caps",
+    volatileConversion: "review_required",
+    maximumFeeUsd: "1",
+    maximumFeeBps: 500,
+    maximumSlippageBps: 100,
+  },
+  receipt: {
+    rawAmount: "1000000",
+    asset: routedReceiptAsset,
+    destinationAddress: "0x0000000000000000000000000000000000000003",
+  },
+} as unknown as FundingReceiveReceiptRoutingTarget;
+await quoteFundingReceiveReceipt(
+  {
+    async liquidity() {
+      return {
+        liquidityProjectionId: "projection_receive_route_12345678",
+        sourceOptions: [
+          {
+            sourceOptionId: "source_receive_route_same_address_other_location",
+            selectable: true,
+            amountMode: "exact_input",
+            kind: "wallet_asset",
+            source: {
+              kind: "owned_location",
+              location: {
+                locationId: "location_receive_route_other_balance_12345678",
+                asset: routedReceiptAsset,
+                details: {
+                  address: "0x0000000000000000000000000000000000000003",
+                },
+              },
+            },
+          },
+          {
+            sourceOptionId: "source_receive_route_12345678",
+            selectable: true,
+            amountMode: "exact_input",
+            kind: "wallet_asset",
+            source: {
+              kind: "owned_location",
+              location: {
+                locationId: "location_receive_route_exact_receipt_12345678",
+                asset: routedReceiptAsset,
+                details: {
+                  address: "0x0000000000000000000000000000000000000003",
+                },
+              },
+            },
+          },
+        ],
+      } as never;
+    },
+    async quote(_userId, request) {
+      routedQuoteRequest = request;
+      return { quoteId: "quote_receive_route_12345678" } as never;
+    },
+  },
+  routedReceiptTarget,
+);
+assert.deepEqual(routedQuoteRequest?.confirmedSourceAmount, {
+  asset: routedReceiptAsset,
+  raw: "1000000",
+});
+assert.equal(
+  routedQuoteRequest?.selectedSourceOptionId,
+  "source_receive_route_12345678",
+  "receipt routing must bind to the frozen observation variant location, not another balance at the same address",
+);
+assert.equal(
+  routedQuoteRequest?.requestedDestinationAmount,
+  null,
+  "an automatic exact-input receipt route must not turn the discovery floor into an exact-output quote",
+);
 
 function variant(
   variantId: string,
@@ -159,6 +435,14 @@ assert.deepEqual(
 );
 assert.equal(targets[1]?.networkId, "solana:mainnet");
 assert.equal(targets[1]?.acceptedAssets[0]?.handling, "automatic_conversion");
+assert.deepEqual(targets[1]?.acceptedAssets[0]?.senderNativeFeeRequirement, {
+  asset: {
+    networkId: "solana:mainnet",
+    assetId: RELAY_PINNED_ASSETS.solanaNative,
+    decimals: 9,
+  },
+  raw: SOLANA_NATIVE_EXECUTION_RESERVE_LAMPORTS.toString(),
+});
 
 assert.deepEqual(
   receiveReceiptRoutingAmounts({
@@ -554,7 +838,10 @@ const initializedEvmVariants = await initializeFundingReceiveEventCursors(
 );
 assert.deepEqual(
   initializedNetworkUrls.sort(),
-  [env.baseRpcUrl, env.polygonRpcUrl].sort(),
+  [
+    fundingSidecarRuntimeConfig.baseRpcUrl,
+    fundingSidecarRuntimeConfig.polygonRpcUrl,
+  ].sort(),
 );
 assert.deepEqual(
   initializedEvmVariants.map(

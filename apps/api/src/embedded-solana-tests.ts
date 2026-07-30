@@ -18,6 +18,13 @@ import {
 } from "@solana/web3.js";
 
 import {
+  SOLANA_CAIP2_PATTERN,
+  SOLANA_MAINNET_CAIP2,
+  SOLANA_MAINNET_NETWORK_ID,
+  solanaCaip2ForNetworkId,
+} from "./lib/chain-identifiers.js";
+import { embeddedSolanaTransactionSchema } from "./schemas/embedded-wallets.js";
+import {
   buildEmbeddedSolanaSignAndSendRequest,
   getEmbeddedSolanaSponsorshipRequirementLamports,
   prepareEmbeddedSolanaTransactionRequests,
@@ -456,6 +463,45 @@ function prepareSponsoredEmbeddedSolanaTransactionRequests(
 }
 
 const tests: TestCase[] = [
+  {
+    name: "internal Solana network IDs map to canonical CAIP-2 only at the boundary",
+    run: () => {
+      assert.equal(
+        solanaCaip2ForNetworkId(SOLANA_MAINNET_NETWORK_ID),
+        SOLANA_MAINNET_CAIP2,
+      );
+      assert.equal(
+        solanaCaip2ForNetworkId(SOLANA_MAINNET_CAIP2),
+        SOLANA_MAINNET_CAIP2,
+      );
+      assert.equal(solanaCaip2ForNetworkId("solana:unknown"), null);
+      assert.match(SOLANA_MAINNET_CAIP2, SOLANA_CAIP2_PATTERN);
+
+      const transaction = {
+        id: "solana-caip2-contract",
+        label: "Solana CAIP-2 contract",
+        transaction: "AQ==",
+      };
+      assert.equal(
+        embeddedSolanaTransactionSchema.safeParse({
+          ...transaction,
+          caip2: SOLANA_MAINNET_NETWORK_ID,
+        }).success,
+        false,
+      );
+      assert.equal(
+        embeddedSolanaTransactionSchema.safeParse({
+          ...transaction,
+          caip2: SOLANA_MAINNET_CAIP2,
+        }).success,
+        true,
+      );
+      assert.equal(
+        embeddedSolanaTransactionSchema.safeParse(transaction).success,
+        true,
+      );
+    },
+  },
   {
     name: "embedded solana disables sponsorship for native SOL transfer from signer",
     run: () => {

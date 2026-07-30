@@ -489,7 +489,45 @@ const provenSolanaAccount = {
   },
   projection: {
     ...unprovenCrossNetworkAccount.projection,
-    components: [...(unprovenCrossNetworkAccount.projection?.components ?? [])],
+    components: [
+      ...(unprovenCrossNetworkAccount.projection?.components ?? []),
+      {
+        componentId: "component_solana_usdc_receive_12345678",
+        amount: { asset: SOLANA_USDC, raw: "1849838" },
+        location: {
+          kind: "wallet",
+          locationId: "location_solana_usdc_receive_12345678",
+          accountId: "account_direct_ingress_12345678",
+          asset: SOLANA_USDC,
+          details: {
+            address: solanaAddress,
+            walletId: "wallet_solana_receive_12345678",
+          },
+        },
+        observedAt: NOW.toISOString(),
+        observationFreshness: "fresh",
+        observationError: null,
+        category: "cash",
+      },
+      {
+        componentId: "component_solana_native_receive_12345678",
+        amount: { asset: SOLANA_NATIVE, raw: "32392013" },
+        location: {
+          kind: "wallet",
+          locationId: "location_solana_native_receive_12345678",
+          accountId: "account_direct_ingress_12345678",
+          asset: SOLANA_NATIVE,
+          details: {
+            address: solanaAddress,
+            walletId: "wallet_solana_receive_12345678",
+          },
+        },
+        observedAt: NOW.toISOString(),
+        observationFreshness: "fresh",
+        observationError: null,
+        category: "cash",
+      },
+    ],
   },
 } as unknown as AccountValueReadModel;
 const provenSolanaRouteInput = {
@@ -606,12 +644,31 @@ assert.deepEqual(
       ?.receiveSessionVariants as readonly Readonly<{
       networkId: string;
       asset: { assetId: string };
+      observation: {
+        adapterId: string;
+        payload: Readonly<Record<string, unknown>>;
+      };
     }>[]
   )
     .filter((variant) => variant.networkId === "solana:mainnet")
-    .map((variant) => variant.asset.assetId),
-  [SOLANA_USDC.assetId, SOLANA_NATIVE.assetId],
-  "owned receive capability must not depend on an already observed positive or zero-balance inventory component",
+    .map((variant) => ({
+      assetId: variant.asset.assetId,
+      adapterId: variant.observation.adapterId,
+      balanceKey: variant.observation.payload.balanceKey,
+    })),
+  [
+    {
+      assetId: SOLANA_USDC.assetId,
+      adapterId: "owned_wallet_liquid_balances_v1",
+      balanceKey: `solana:mainnet:${SOLANA_USDC.assetId}:6`,
+    },
+    {
+      assetId: SOLANA_NATIVE.assetId,
+      adapterId: "owned_wallet_liquid_balances_v1",
+      balanceKey: `solana:mainnet:${SOLANA_NATIVE.assetId}:9`,
+    },
+  ],
+  "positive routed inventory must be re-read from its owned source wallet instead of destination spendability",
 );
 assert.deepEqual(
   provenSolanaIngress.option.ingress?.receiveTargets
@@ -736,7 +793,13 @@ assert.deepEqual(baseReceive.option.ingress?.receiveTargets, [
       baseReceive.option.ingress?.receiveTargets?.[0]?.receiveTargetId,
     networkId: "evm:8453",
     destinationAddress: baseAddress,
-    acceptedAssets: [{ asset: BASE_USDC, handling: "direct" }],
+    acceptedAssets: [
+      {
+        asset: BASE_USDC,
+        handling: "direct",
+        senderNativeFeeRequirement: null,
+      },
+    ],
     safeInstructions: [
       "Use only this network and one listed asset.",
       "You can send any amount.",

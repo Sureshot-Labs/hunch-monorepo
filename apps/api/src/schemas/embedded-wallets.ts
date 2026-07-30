@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { SOLANA_CAIP2_PATTERN } from "../lib/chain-identifiers.js";
+
 export const embeddedEvmTransactionSchema = z.object({
   id: z.string().trim().min(1).max(80),
   label: z.string().trim().min(1).max(120),
@@ -87,7 +89,7 @@ export const embeddedSolanaTransactionSchema = z.object({
   caip2: z
     .string()
     .trim()
-    .regex(/^solana:[1-9A-HJ-NP-Za-km-z]{32}$/)
+    .regex(SOLANA_CAIP2_PATTERN)
     .optional(),
 });
 

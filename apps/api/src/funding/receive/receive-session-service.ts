@@ -359,6 +359,14 @@ export class FundingReceiveSessionService {
       variants,
     );
     const frozenVariants = verified.variants;
+    if (verified.failures.length > 0) {
+      console.warn("[funding-receive] variants failed exact verification", {
+        userId,
+        venueId: destination.venueId,
+        destinationOptionId: destination.destinationOptionId,
+        failures: verified.failures,
+      });
+    }
     if (frozenVariants.length === 0) {
       const failureSummary = verified.failures
         .map(

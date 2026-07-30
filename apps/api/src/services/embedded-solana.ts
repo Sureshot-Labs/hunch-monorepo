@@ -11,6 +11,7 @@ import bs58 from "bs58";
 
 import type { User } from "../auth.js";
 import { env } from "../env.js";
+import { SOLANA_MAINNET_CAIP2 } from "../lib/chain-identifiers.js";
 import {
   type PrivyWalletApiRequestSignatureInput,
   type PrivyWalletProfile,
@@ -19,7 +20,6 @@ import {
 import { fetchSolanaBalanceLamports } from "./solana-rpc.js";
 
 const PRIVY_WALLET_API_BASE_URL = "https://api.privy.io";
-const SOLANA_MAINNET_CAIP2 = "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp";
 const SPL_TOKEN_PROGRAM_ID = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 const TOKEN_2022_PROGRAM_ID = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
 const TOKEN_SYNC_NATIVE_INSTRUCTION = 17;
