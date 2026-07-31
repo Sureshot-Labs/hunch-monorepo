@@ -185,6 +185,13 @@ export type PrepareTradeInput = {
   }) => Promise<void> | void;
 };
 
+export type TradeShortfallFundingResult = {
+  venue: TradingVenue;
+  funded: boolean;
+  transactionHash: string | null;
+  raw?: unknown;
+};
+
 export type PreparedTrade = {
   preparedId: string;
   venue: TradingVenue;

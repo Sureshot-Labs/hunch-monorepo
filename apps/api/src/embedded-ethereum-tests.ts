@@ -246,6 +246,120 @@ const tests: TestCase[] = [
     },
   },
   {
+    name: "previous frontend ERC-20 withdrawal remains sponsored to an arbitrary non-burn address",
+    run: async () => {
+      const token = "0x1111111111111111111111111111111111111111";
+      const recipient = "0x2222222222222222222222222222222222222222";
+      const data = new ethers.Interface([
+        "function transfer(address recipient,uint256 amount)",
+      ]).encodeFunctionData("transfer", [recipient, 2_000_000n]);
+      const result = await assertEmbeddedEvmSponsorshipAllowed({
+        userId: TEST_USER_ID,
+        signer: walletContext.signer,
+        chainId: 8453,
+        executionMode: "sequential",
+        transactions: [
+          {
+            id: "bridge-transfer",
+            label: "Bridge transfer",
+            to: token,
+            data,
+          },
+        ],
+        dependencies: {
+          ...denyDynamicDependencies,
+          isSupportedBridgeToken: async (chainId, address) =>
+            chainId === 8453 && address.toLowerCase() === token.toLowerCase(),
+        },
+      });
+      assert.equal(result.legacySponsoredWithdrawal, true);
+    },
+  },
+  {
+    name: "previous frontend native withdrawal remains sponsored to an arbitrary non-burn address",
+    run: async () => {
+      const result = await assertEmbeddedEvmSponsorshipAllowed({
+        userId: TEST_USER_ID,
+        signer: walletContext.signer,
+        chainId: 137,
+        executionMode: "sequential",
+        transactions: [
+          {
+            id: "bridge-transfer",
+            label: "Bridge transfer",
+            to: "0x2222222222222222222222222222222222222222",
+            data: "0x",
+            value: "2000000000000000",
+          },
+        ],
+        dependencies: denyDynamicDependencies,
+      });
+      assert.equal(result.legacySponsoredWithdrawal, true);
+    },
+  },
+  {
+    name: "previous frontend withdrawal compatibility rejects batches, arbitrary calls, and burn destinations",
+    run: async () => {
+      const token = "0x1111111111111111111111111111111111111111";
+      const transfer = (recipient: string) =>
+        new ethers.Interface([
+          "function transfer(address recipient,uint256 amount)",
+        ]).encodeFunctionData("transfer", [recipient, 2_000_000n]);
+      const dependencies: EmbeddedEvmSponsorshipDependencies = {
+        ...denyDynamicDependencies,
+        isSupportedBridgeToken: async () => true,
+      };
+      for (const input of [
+        {
+          executionMode: "atomic" as const,
+          transactions: [
+            {
+              id: "bridge-transfer",
+              label: "Bridge transfer",
+              to: token,
+              data: transfer("0x2222222222222222222222222222222222222222"),
+            },
+          ],
+        },
+        {
+          executionMode: "sequential" as const,
+          transactions: [
+            {
+              id: "bridge-transfer",
+              label: "Bridge transfer",
+              to: token,
+              data: "0xabcdef12",
+            },
+          ],
+        },
+        {
+          executionMode: "sequential" as const,
+          transactions: [
+            {
+              id: "bridge-transfer",
+              label: "Bridge transfer",
+              to: token,
+              data: transfer("0x0000000000000000000000000000000000000000"),
+            },
+          ],
+        },
+      ]) {
+        await assert.rejects(
+          () =>
+            assertEmbeddedEvmSponsorshipAllowed({
+              userId: TEST_USER_ID,
+              signer: walletContext.signer,
+              chainId: 8453,
+              executionMode: input.executionMode,
+              transactions: input.transactions,
+              dependencies,
+            }),
+          /not an allowed Hunch operation/,
+        );
+      }
+    },
+  },
+  {
     name: "Polymarket wrap is sponsored only for the canonical contract and an authorized recipient",
     run: async () => {
       const recipient = walletContext.signer;

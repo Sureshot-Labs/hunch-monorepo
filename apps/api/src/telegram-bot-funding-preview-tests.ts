@@ -36,8 +36,18 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           controlledFundsUsd: 5,
           executableFundsUsd: 1.06,
           requiredUsd: 1.06,
+          spendableFundsUsd: 1.06,
         }),
         "ready",
+      );
+      assert.equal(
+        resolveTelegramBuyFundingState({
+          controlledFundsUsd: 5,
+          executableFundsUsd: 1.06,
+          requiredUsd: 1.06,
+          spendableFundsUsd: 0.25,
+        }),
+        "convert",
       );
       assert.equal(
         resolveTelegramBuyFundingState({
@@ -101,6 +111,32 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         fundingBlock.match(/formatTelegramVenueFieldMarkdownV2\(/g)?.length,
         2,
       );
+    },
+  },
+  {
+    name: "delegated funding completes before the fresh confirmation quote",
+    run: () => {
+      const source = readFileSync(
+        new URL("./services/telegram-bot-trading.ts", import.meta.url),
+        "utf8",
+      );
+      const fundingCall = source.indexOf("trading.fundTradeShortfall({");
+      const refreshedReadiness = source.indexOf(
+        "tradeReadiness = await resolveTelegramTradingReadiness({",
+        fundingCall,
+      );
+      const refreshedQuote = source.indexOf(
+        "previewQuote = await trading.quote({ intent: previewIntent });",
+        refreshedReadiness,
+      );
+      const confirmation = source.indexOf(
+        "transitionIntentToConfirming({",
+        refreshedQuote,
+      );
+      assert.ok(fundingCall >= 0);
+      assert.ok(refreshedReadiness > fundingCall);
+      assert.ok(refreshedQuote > refreshedReadiness);
+      assert.ok(confirmation > refreshedQuote);
     },
   },
   {

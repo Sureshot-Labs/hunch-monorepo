@@ -2490,12 +2490,25 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
           user,
           signer,
         });
-        await assertEmbeddedEvmSponsorshipAllowed({
+        const sponsorship = await assertEmbeddedEvmSponsorshipAllowed({
           userId: user.id,
           signer: context.signer,
           chainId: request.body.chainId,
+          executionMode: request.body.executionMode,
           transactions: request.body.transactions,
         });
+        if (sponsorship.legacySponsoredWithdrawal) {
+          app.log.info(
+            {
+              chainId: request.body.chainId,
+              operation: "legacy_sponsored_withdrawal",
+              signer: context.signer,
+              stage: "prepare",
+              userId: user.id,
+            },
+            "Prepared previous-frontend sponsored withdrawal",
+          );
+        }
         const requests = prepareEmbeddedEthereumTransactionRequests({
           context,
           chainId: request.body.chainId,
@@ -2548,12 +2561,25 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
           user,
           signer,
         });
-        await assertEmbeddedEvmSponsorshipAllowed({
+        const sponsorship = await assertEmbeddedEvmSponsorshipAllowed({
           userId: user.id,
           signer: context.signer,
           chainId: request.body.chainId,
+          executionMode: request.body.executionMode,
           transactions: request.body.transactions,
         });
+        if (sponsorship.legacySponsoredWithdrawal) {
+          app.log.info(
+            {
+              chainId: request.body.chainId,
+              operation: "legacy_sponsored_withdrawal",
+              signer: context.signer,
+              stage: "execute",
+              userId: user.id,
+            },
+            "Executing previous-frontend sponsored withdrawal",
+          );
+        }
         const transactionFingerprint = buildEmbeddedEvmTransactionFingerprint({
           signer: context.signer,
           chainId: request.body.chainId,

@@ -1575,10 +1575,15 @@ const tests: TestCase[] = [
         {
           buyApprovalOk: true,
           executableFundsRaw: 12_500_000n,
+          spendableFundsRaw: 2_500_000n,
         },
       );
       assert.equal(funded.executable, true);
       assert.equal(funded.maxExecutableBuyUsd, 12.5);
+      assert.equal(
+        (funded.raw as { spendableFundsRaw: string }).spendableFundsRaw,
+        "2500000",
+      );
 
       const preparedQuote =
         polymarketTradingExecutionTestHooks.inspectPreparedQuote({
@@ -3155,6 +3160,23 @@ const tests: TestCase[] = [
       assert.match(
         prepareBlock,
         /requires a completed FundingOperation, venue-visible pUSD, and a fresh quote/,
+      );
+      const delegatedFundingBlock = sourceSlice(
+        executionSource,
+        "async function fundTradeShortfall(",
+        "async function prepareTrade(",
+      );
+      assert.match(
+        delegatedFundingBlock,
+        /intent\.actor\.kind !== "telegram_bot"/,
+      );
+      assert.match(
+        delegatedFundingBlock,
+        /executeServerEmbeddedEthereumTransaction/,
+      );
+      assert.match(
+        delegatedFundingBlock,
+        /syncPolymarketBalanceAllowanceRoute/,
       );
       assert.ok(preflightIndex > builderValidationIndex);
       const accountBlock = sourceSlice(

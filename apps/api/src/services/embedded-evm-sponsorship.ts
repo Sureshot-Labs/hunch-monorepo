@@ -11,6 +11,10 @@ const POLYGON_CHAIN_ID = 137;
 const BASE_CHAIN_ID = 8453;
 const MAX_SPONSORED_GAS_LIMIT = 5_000_000n;
 const ZERO_BYTES32 = `0x${"00".repeat(32)}`;
+const ZERO_ADDRESS = `0x${"00".repeat(20)}`;
+const DEAD_ADDRESS = `0x${"00".repeat(19)}dead`;
+const LEGACY_WITHDRAWAL_TRANSACTION_ID = "bridge-transfer";
+const LEGACY_WITHDRAWAL_TRANSACTION_LABEL = "Bridge transfer";
 const DIRECT_TRANSFER_CHAIN_IDS = new Set([1, 10, 56, 137, 8453, 42161]);
 
 const erc20Interface = new ethers.Interface([
@@ -135,6 +139,13 @@ function positiveBigInt(value: unknown): bigint | null {
   } catch {
     return null;
   }
+}
+
+function isNonBurnAddress(value: string | null | undefined): boolean {
+  const normalized = normalizedAddress(value)?.toLowerCase();
+  return Boolean(
+    normalized && normalized !== ZERO_ADDRESS && normalized !== DEAD_ADDRESS,
+  );
 }
 
 function addressSet(values: Array<string | null | undefined>): Set<string> {
@@ -412,6 +423,54 @@ async function validateNativeTransfer(input: {
     normalizeData(input.transaction.data) === "0x" &&
     transactionValue(input.transaction) > 0n &&
     (await input.dependencies.isAuthorizedDestination(input.transaction.to))
+  );
+}
+
+/**
+ * Compatibility contract for the previous web bundle's embedded-wallet
+ * withdrawal path. The old client cannot create a FundingOperation yet and
+ * identifies this operation only through one exact, user-authorized transfer
+ * payload. Keep this separate from the general destination allowlist so it
+ * cannot authorize arbitrary contract calls.
+ */
+async function validateLegacySponsoredWithdrawal(input: {
+  chainId: number;
+  dependencies: EmbeddedEvmSponsorshipDependencies;
+  executionMode: "sequential" | "atomic";
+  transactions: readonly EmbeddedEthereumTransactionSpec[];
+}): Promise<boolean> {
+  if (input.executionMode !== "sequential" || input.transactions.length !== 1) {
+    return false;
+  }
+  const transaction = input.transactions[0];
+  if (
+    !transaction ||
+    transaction.id !== LEGACY_WITHDRAWAL_TRANSACTION_ID ||
+    transaction.label !== LEGACY_WITHDRAWAL_TRANSACTION_LABEL ||
+    transaction.sponsor === false ||
+    !DIRECT_TRANSFER_CHAIN_IDS.has(input.chainId)
+  ) {
+    return false;
+  }
+
+  const decoded = parsedTransaction(erc20Interface, transaction);
+  if (decoded?.name === "transfer" && isNonPayable(transaction)) {
+    const token = normalizedAddress(transaction.to);
+    const recipient = normalizedAddress(String(decoded.args[0] ?? ""));
+    const amount = positiveBigInt(decoded.args[1]);
+    return Boolean(
+      token &&
+      recipient &&
+      isNonBurnAddress(recipient) &&
+      amount &&
+      (await input.dependencies.isSupportedBridgeToken(input.chainId, token)),
+    );
+  }
+
+  return (
+    normalizeData(transaction.data) === "0x" &&
+    transactionValue(transaction) > 0n &&
+    isNonBurnAddress(transaction.to)
   );
 }
 
@@ -761,20 +820,28 @@ export function buildEmbeddedEvmTransactionFingerprint(input: {
 export async function assertEmbeddedEvmSponsorshipAllowed(input: {
   chainId: number;
   dependencies?: EmbeddedEvmSponsorshipDependencies;
+  executionMode?: "sequential" | "atomic";
   signer: string;
   transactions: readonly EmbeddedEthereumTransactionSpec[];
   userId: string;
-}): Promise<void> {
+}): Promise<Readonly<{ legacySponsoredWithdrawal: boolean }>> {
   const signer = normalizedAddress(input.signer);
   if (!signer) throw new Error("Embedded EVM signer address is invalid.");
   const dependencies =
     input.dependencies ?? defaultDependencies(input.userId, pool);
+  const legacySponsoredWithdrawal = await validateLegacySponsoredWithdrawal({
+    chainId: input.chainId,
+    dependencies,
+    executionMode: input.executionMode ?? "sequential",
+    transactions: input.transactions,
+  });
 
   for (const transaction of input.transactions) {
     normalizeData(transaction.data);
     transactionValue(transaction);
     transactionGas(transaction);
     if (transaction.sponsor === false) continue;
+    if (legacySponsoredWithdrawal) continue;
 
     const sponsoredTransaction: SponsoredTransaction = {
       chainId: input.chainId,
@@ -822,9 +889,11 @@ export async function assertEmbeddedEvmSponsorshipAllowed(input: {
       );
     }
   }
+  return { legacySponsoredWithdrawal };
 }
 
 export const embeddedEvmSponsorshipTestHooks = {
   exactTransactionMatches,
   fundingActionMatchesTransaction,
+  validateLegacySponsoredWithdrawal,
 };
