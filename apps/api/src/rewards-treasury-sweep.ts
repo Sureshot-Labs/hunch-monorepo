@@ -4,7 +4,7 @@ import {
   getOrCreateAssociatedTokenAccount,
   transferChecked,
 } from "@solana/spl-token";
-import { Connection, Keypair, PublicKey } from "@solana/web3.js";
+import { Keypair, PublicKey } from "@solana/web3.js";
 import bs58 from "bs58";
 import { ethers } from "ethers";
 import { pathToFileURL } from "node:url";
@@ -23,6 +23,10 @@ import {
   reserveTreasurySweepAmountMicro,
 } from "./services/rewards-treasury.js";
 import { runPolymarketBuilderSweep } from "./services/polymarket-builder-sweeps.js";
+import {
+  createEvmRpcProvider,
+  createSolanaRpcConnection,
+} from "./services/rpc-client-factory.js";
 import { waitForSolanaSignatureConfirmation } from "./services/solana-rpc.js";
 import {
   fetchVenueFeeAccrualReserveMicro,
@@ -351,7 +355,7 @@ async function executeEvmSweep(
   preColdBalance: bigint;
   postColdBalance: bigint;
 }> {
-  const provider = new ethers.JsonRpcProvider(config.rpcUrl);
+  const provider = createEvmRpcProvider(config.rpcUrl);
   const wallet = new ethers.Wallet(config.privateKey, provider);
   const token = new ethers.Contract(
     config.usdcAddress,
@@ -411,7 +415,7 @@ async function executeSolanaSweep(
   preColdBalance: bigint;
   postColdBalance: bigint;
 }> {
-  const connection = new Connection(config.rpcUrl, "confirmed");
+  const connection = createSolanaRpcConnection(config.rpcUrl, "confirmed");
   const keypair = loadSolanaKeypair(config.secretKey);
   const mint = new PublicKey(config.usdcMint);
   const coldOwner = new PublicKey(config.coldAddress);

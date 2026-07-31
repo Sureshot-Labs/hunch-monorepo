@@ -1,5 +1,5 @@
 import { getAssociatedTokenAddressSync } from "@solana/spl-token";
-import { Connection, Keypair, PublicKey } from "@solana/web3.js";
+import { Keypair, PublicKey } from "@solana/web3.js";
 import bs58 from "bs58";
 import { ethers } from "ethers";
 import type { DbQuery } from "../db.js";
@@ -10,6 +10,10 @@ import {
   type RewardsChainId,
 } from "../lib/rewards-chain.js";
 import { usdcMicroToDecimalString } from "../lib/usdc.js";
+import {
+  createEvmRpcProvider,
+  createSolanaRpcConnection,
+} from "./rpc-client-factory.js";
 
 type ChainLiabilityRow = {
   chain_id: string | null;
@@ -107,7 +111,7 @@ async function fetchEvmHotBalanceMicro(params: {
   usdcAddress: string;
   privateKey: string;
 }): Promise<bigint> {
-  const provider = new ethers.JsonRpcProvider(params.rpcUrl);
+  const provider = createEvmRpcProvider(params.rpcUrl);
   const wallet = new ethers.Wallet(params.privateKey, provider);
   const token = new ethers.Contract(
     params.usdcAddress,
@@ -123,7 +127,7 @@ async function fetchSolanaHotBalanceMicro(params: {
   usdcMint: string;
   secretKey: string;
 }): Promise<bigint> {
-  const connection = new Connection(params.rpcUrl, "confirmed");
+  const connection = createSolanaRpcConnection(params.rpcUrl, "confirmed");
   const keypair = loadSolanaKeypair(params.secretKey);
   const mint = new PublicKey(params.usdcMint);
   const owner = keypair.publicKey;

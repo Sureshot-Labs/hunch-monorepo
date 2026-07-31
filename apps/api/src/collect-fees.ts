@@ -6,6 +6,7 @@ import { pathToFileURL } from "node:url";
 import { pool } from "./db.js";
 import { env } from "./env.js";
 import { abis } from "./lib/contracts.js";
+import { createEvmRpcProvider } from "./services/rpc-client-factory.js";
 import { resolveFeeEventSnapshotAtWrite } from "./services/rewards-fee-snapshot.js";
 
 type FeeOrderRow = {
@@ -670,7 +671,7 @@ export async function runCollectFees(
     throw new Error("Missing HUNCH_FEE_COLLECTOR_PRIVATE_KEY");
   }
 
-  const provider = new ethers.JsonRpcProvider(env.polygonRpcUrl);
+  const provider = createEvmRpcProvider(env.polygonRpcUrl);
   const wallet = privateKey ? new ethers.Wallet(privateKey, provider) : null;
   const collector = new ethers.Contract(
     feeCollectorAddress,

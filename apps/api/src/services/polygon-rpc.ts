@@ -9,6 +9,14 @@ import { Interface, ethers } from "ethers";
 import { fundingSidecarRuntimeConfig } from "../funding/runtime/sidecar-runtime-config.js";
 import { abis } from "../lib/contracts.js";
 import { isRecord } from "../lib/type-guards.js";
+import {
+  captureRpcDiagnosticSource,
+  recordRpcAttempt,
+  recordRpcDedupHit,
+  recordRpcLogicalCall,
+  rpcDiagnosticOutcomeFromError,
+  type RpcDiagnosticOutcome,
+} from "./rpc-diagnostics.js";
 
 type JsonRpcError = {
   code?: number;
@@ -151,6 +159,7 @@ async function executeEthRpcRequest<T>(inputs: {
   timeoutMs: number;
   method: string;
   params: unknown[];
+  source: string;
 }): Promise<T> {
   let lastError: unknown = null;
   const maxAttempts = Math.max(
@@ -161,6 +170,20 @@ async function executeEthRpcRequest<T>(inputs: {
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), inputs.timeoutMs);
+    const startedAt = performance.now();
+    let attemptRecorded = false;
+    const recordAttempt = (outcome: RpcDiagnosticOutcome) => {
+      if (attemptRecorded) return;
+      attemptRecorded = true;
+      recordRpcAttempt({
+        protocol: "evm",
+        rpcUrl: inputs.rpcUrl,
+        method: inputs.method,
+        source: inputs.source,
+        outcome,
+        durationMs: performance.now() - startedAt,
+      });
+    };
 
     try {
       const response = await fetch(inputs.rpcUrl, {
@@ -192,6 +215,7 @@ async function executeEthRpcRequest<T>(inputs: {
         );
         const retryable =
           attempt < maxAttempts - 1 && isRetryableHttpStatus(response.status);
+        recordAttempt(response.status === 429 ? "http_429" : "http_error");
         if (retryable) {
           await sleep(computeBackoffMs(attempt, retryAfterMs));
           continue;
@@ -201,6 +225,7 @@ async function executeEthRpcRequest<T>(inputs: {
 
       const json = (await response.json()) as unknown;
       if (!isRecord(json)) {
+        recordAttempt("rpc_error");
         throw new Error("Polygon RPC: invalid JSON response");
       }
 
@@ -215,6 +240,7 @@ async function executeEthRpcRequest<T>(inputs: {
         );
         lastError = error;
         const retryable = attempt < maxAttempts - 1 && isRpcRateLimit(error);
+        recordAttempt(isRpcRateLimit(error) ? "rpc_429" : "rpc_error");
         if (retryable) {
           await sleep(computeBackoffMs(attempt, null));
           continue;
@@ -222,9 +248,11 @@ async function executeEthRpcRequest<T>(inputs: {
         throw error;
       }
 
+      recordAttempt("ok");
       return rpc.result;
     } catch (error) {
       lastError = error;
+      recordAttempt(rpcDiagnosticOutcomeFromError(error));
       const retryable =
         attempt < maxAttempts - 1 &&
         (isAbortError(error) || isRpcRateLimit(error));
@@ -247,6 +275,13 @@ async function ethRpcRequest<T>(inputs: {
   method: string;
   params: unknown[];
 }): Promise<T> {
+  const source = captureRpcDiagnosticSource();
+  recordRpcLogicalCall({
+    protocol: "evm",
+    rpcUrl: inputs.rpcUrl,
+    method: inputs.method,
+    source,
+  });
   const key = JSON.stringify([
     inputs.rpcUrl,
     inputs.timeoutMs,
@@ -254,9 +289,17 @@ async function ethRpcRequest<T>(inputs: {
     inputs.params,
   ]);
   const pending = rpcReadInflight.get(key);
-  if (pending) return pending as Promise<T>;
+  if (pending) {
+    recordRpcDedupHit({
+      protocol: "evm",
+      rpcUrl: inputs.rpcUrl,
+      method: inputs.method,
+      source,
+    });
+    return pending as Promise<T>;
+  }
 
-  const request = executeEthRpcRequest<T>(inputs).finally(() => {
+  const request = executeEthRpcRequest<T>({ ...inputs, source }).finally(() => {
     rpcReadInflight.delete(key);
   });
   rpcReadInflight.set(key, request);
@@ -316,6 +359,154 @@ export async function fetchEvmBlockNumber(inputs: {
     });
     return parseRpcQuantity(result, "block number");
   });
+}
+
+export type EvmRpcTransactionByHash = Readonly<{
+  chainId: bigint;
+  from: string;
+  to: string | null;
+  data: string;
+  value: bigint;
+}>;
+
+export type EvmRpcTransactionReceipt = Readonly<{
+  succeeded: boolean;
+  blockNumber: number;
+  blockHash: string;
+  logs: readonly Readonly<{
+    address: string;
+    data: string;
+    topics: readonly string[];
+  }>[];
+}>;
+
+function safeRpcBlockNumber(value: string, field: string): number {
+  const parsed = parseRpcQuantity(value, field);
+  if (parsed > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new Error(`EVM RPC ${field} exceeds the safe integer range`);
+  }
+  return Number(parsed);
+}
+
+export async function fetchEvmTransactionByHash(inputs: {
+  rpcUrl: string;
+  timeoutMs: number;
+  transactionHash: string;
+}): Promise<EvmRpcTransactionByHash | null> {
+  if (!/^0x[0-9a-fA-F]{64}$/u.test(inputs.transactionHash)) {
+    throw new Error("EVM RPC transaction hash is invalid");
+  }
+  const result = await ethRpcRequest<unknown | null>({
+    rpcUrl: inputs.rpcUrl,
+    timeoutMs: inputs.timeoutMs,
+    method: "eth_getTransactionByHash",
+    params: [inputs.transactionHash],
+  });
+  if (result == null) return null;
+  if (!isRecord(result)) {
+    throw new Error("EVM RPC transaction response is invalid");
+  }
+  const chainId = result.chainId;
+  const from = result.from;
+  const to = result.to;
+  const data = result.input;
+  const value = result.value;
+  if (
+    typeof chainId !== "string" ||
+    typeof from !== "string" ||
+    (to !== null && typeof to !== "string") ||
+    typeof data !== "string" ||
+    typeof value !== "string"
+  ) {
+    throw new Error("EVM RPC transaction fields are invalid");
+  }
+  return {
+    chainId: parseRpcQuantity(chainId, "transaction chain id"),
+    from: ethers.getAddress(from),
+    to: to === null ? null : ethers.getAddress(to),
+    data,
+    value: parseRpcQuantity(value, "transaction value"),
+  };
+}
+
+export async function fetchEvmTransactionReceipt(inputs: {
+  rpcUrl: string;
+  timeoutMs: number;
+  transactionHash: string;
+}): Promise<EvmRpcTransactionReceipt | null> {
+  if (!/^0x[0-9a-fA-F]{64}$/u.test(inputs.transactionHash)) {
+    throw new Error("EVM RPC transaction hash is invalid");
+  }
+  const result = await ethRpcRequest<unknown | null>({
+    rpcUrl: inputs.rpcUrl,
+    timeoutMs: inputs.timeoutMs,
+    method: "eth_getTransactionReceipt",
+    params: [inputs.transactionHash],
+  });
+  if (result == null) return null;
+  if (!isRecord(result)) {
+    throw new Error("EVM RPC transaction receipt is invalid");
+  }
+  const status = result.status;
+  const blockNumber = result.blockNumber;
+  const blockHash = result.blockHash;
+  const logs = result.logs;
+  if (
+    typeof status !== "string" ||
+    typeof blockNumber !== "string" ||
+    typeof blockHash !== "string" ||
+    !Array.isArray(logs)
+  ) {
+    throw new Error("EVM RPC transaction receipt fields are invalid");
+  }
+  const parsedLogs = logs.map((log) => {
+    if (!isRecord(log)) {
+      throw new Error("EVM RPC transaction receipt log is invalid");
+    }
+    const address = log.address;
+    const data = log.data;
+    const topics = log.topics;
+    if (
+      typeof address !== "string" ||
+      typeof data !== "string" ||
+      !Array.isArray(topics) ||
+      topics.some((topic) => typeof topic !== "string")
+    ) {
+      throw new Error("EVM RPC transaction receipt log fields are invalid");
+    }
+    return {
+      address: ethers.getAddress(address),
+      data,
+      topics: topics as string[],
+    };
+  });
+  return {
+    succeeded: parseRpcQuantity(status, "transaction status") === 1n,
+    blockNumber: safeRpcBlockNumber(blockNumber, "receipt block number"),
+    blockHash,
+    logs: parsedLogs,
+  };
+}
+
+export async function fetchEvmBlockHash(inputs: {
+  rpcUrl: string;
+  timeoutMs: number;
+  blockNumber: number;
+}): Promise<string | null> {
+  if (!Number.isSafeInteger(inputs.blockNumber) || inputs.blockNumber < 0) {
+    throw new Error("EVM RPC block number is invalid");
+  }
+  const result = await ethRpcRequest<unknown | null>({
+    rpcUrl: inputs.rpcUrl,
+    timeoutMs: inputs.timeoutMs,
+    method: "eth_getBlockByNumber",
+    params: [rpcQuantity(BigInt(inputs.blockNumber)), false],
+  });
+  if (result == null) return null;
+  if (!isRecord(result) || typeof result.hash !== "string") {
+    throw new Error("EVM RPC block response is invalid");
+  }
+  return result.hash;
 }
 
 export async function fetchErc20TransferLogs(inputs: {

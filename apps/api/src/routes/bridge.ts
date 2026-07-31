@@ -8,6 +8,7 @@ import { pool } from "../db.js";
 import { env } from "../env.js";
 import { fetchActiveDebridgeConfig } from "../repos/debridge-config.js";
 import { isRecord } from "../lib/type-guards.js";
+import { fetchEvmTransactionReceipt } from "../services/polygon-rpc.js";
 import { fetchSolanaSignatureStatus } from "../services/solana-rpc.js";
 import { resolveLegacyCreationAdapterVersion } from "../funding/legacy/bridge-adapter-classifier.js";
 import {
@@ -591,12 +592,13 @@ async function fetchEvmReceiptStatus(inputs: {
   const rpcConfig = resolveEvmReceiptRpcConfig(inputs.chainId);
   if (!rpcConfig) return null;
   try {
-    const provider = new ethers.JsonRpcProvider(rpcConfig.rpcUrl);
-    const receipt = await provider.getTransactionReceipt(inputs.txHash);
+    const receipt = await fetchEvmTransactionReceipt({
+      rpcUrl: rpcConfig.rpcUrl,
+      timeoutMs: rpcConfig.timeoutMs,
+      transactionHash: inputs.txHash,
+    });
     if (!receipt) return { status: "submitted" };
-    if (receipt.status === 1) return { status: "fulfilled" };
-    if (receipt.status === 0) return { status: "failed" };
-    return { status: "submitted" };
+    return { status: receipt.succeeded ? "fulfilled" : "failed" };
   } catch {
     return null;
   }

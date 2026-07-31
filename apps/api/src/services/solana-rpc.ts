@@ -2,6 +2,13 @@ import { isAbortError, isRpcRateLimit, sleep } from "@hunch/shared";
 
 import { fundingSidecarRuntimeConfig } from "../funding/runtime/sidecar-runtime-config.js";
 import { isRecord } from "../lib/type-guards.js";
+import {
+  captureRpcDiagnosticSource,
+  recordRpcAttempt,
+  recordRpcLogicalCall,
+  rpcDiagnosticOutcomeFromError,
+  type RpcDiagnosticOutcome,
+} from "./rpc-diagnostics.js";
 
 type JsonRpcError = {
   code?: number;
@@ -90,6 +97,13 @@ async function solanaRpcRequest<T>(inputs: {
   method: string;
   params: unknown[];
 }): Promise<T> {
+  const source = captureRpcDiagnosticSource();
+  recordRpcLogicalCall({
+    protocol: "solana",
+    rpcUrl: inputs.rpcUrls[0] ?? "",
+    method: inputs.method,
+    source,
+  });
   let lastError: unknown = null;
   const maxAttempts = Math.max(
     1,
@@ -100,6 +114,20 @@ async function solanaRpcRequest<T>(inputs: {
     for (const rpcUrl of inputs.rpcUrls) {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), inputs.timeoutMs);
+      const startedAt = performance.now();
+      let attemptRecorded = false;
+      const recordAttempt = (outcome: RpcDiagnosticOutcome) => {
+        if (attemptRecorded) return;
+        attemptRecorded = true;
+        recordRpcAttempt({
+          protocol: "solana",
+          rpcUrl,
+          method: inputs.method,
+          source,
+          outcome,
+          durationMs: performance.now() - startedAt,
+        });
+      };
       try {
         const response = await fetch(rpcUrl, {
           method: "POST",
@@ -118,6 +146,7 @@ async function solanaRpcRequest<T>(inputs: {
             `Solana RPC error: ${response.status} ${response.statusText}`,
           );
           lastError = error;
+          recordAttempt(response.status === 429 ? "http_429" : "http_error");
           if (response.status === 429 && inputs.rpcUrls.length > 1) {
             continue;
           }
@@ -126,6 +155,7 @@ async function solanaRpcRequest<T>(inputs: {
 
         const json = (await response.json()) as unknown;
         if (!isRecord(json)) {
+          recordAttempt("rpc_error");
           throw new Error("Solana RPC: invalid JSON response");
         }
 
@@ -139,15 +169,18 @@ async function solanaRpcRequest<T>(inputs: {
             `Solana RPC ${inputs.method} error: ${message}`,
           );
           lastError = error;
+          recordAttempt(isRpcRateLimit(error) ? "rpc_429" : "rpc_error");
           if (/too many requests/i.test(message) && inputs.rpcUrls.length > 1) {
             continue;
           }
           throw error;
         }
 
+        recordAttempt("ok");
         return rpc.result;
       } catch (error) {
         lastError = error;
+        recordAttempt(rpcDiagnosticOutcomeFromError(error));
         const retryable = isRpcRateLimit(error) || isAbortError(error);
         if (inputs.rpcUrls.length > 1) {
           // A transport failure, non-2xx response, malformed payload, or
@@ -283,6 +316,181 @@ export async function fetchSolanaParsedTransaction(inputs: {
       },
     ],
   });
+}
+
+export type SolanaSignatureReceiptStatus = Readonly<{
+  confirmationStatus: "processed" | "confirmed" | "finalized";
+  failed: boolean;
+}>;
+
+export type SolanaReceiptTransaction = Readonly<{
+  slot: number;
+  failed: boolean;
+  numRequiredSignatures: number;
+  accountKeys: readonly string[];
+  instructions: readonly Readonly<{
+    programIdIndex: number;
+    accountIndexes: readonly number[];
+    data: string;
+  }>[];
+  addressLookupTables: readonly string[];
+}>;
+
+export async function fetchSolanaSignatureReceiptStatus(inputs: {
+  rpcUrls: string[];
+  signature: string;
+  timeoutMs: number;
+}): Promise<SolanaSignatureReceiptStatus | null> {
+  const result = await solanaRpcRequest<{
+    value?: Array<{
+      confirmationStatus?: string | null;
+      err?: unknown;
+    } | null>;
+  }>({
+    rpcUrls: inputs.rpcUrls,
+    timeoutMs: inputs.timeoutMs,
+    method: "getSignatureStatuses",
+    params: [[inputs.signature], { searchTransactionHistory: true }],
+  });
+  const entry = Array.isArray(result.value) ? result.value[0] : null;
+  if (!entry) return null;
+  const confirmationStatus = entry.confirmationStatus ?? "processed";
+  if (
+    confirmationStatus !== "processed" &&
+    confirmationStatus !== "confirmed" &&
+    confirmationStatus !== "finalized"
+  ) {
+    throw new Error("Solana RPC signature confirmation status is invalid");
+  }
+  return { confirmationStatus, failed: entry.err != null };
+}
+
+function parseSolanaReceiptIndex(value: unknown, field: string): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    throw new Error(`Solana RPC ${field} is invalid`);
+  }
+  return value;
+}
+
+export async function fetchSolanaReceiptTransaction(inputs: {
+  rpcUrls: string[];
+  signature: string;
+  timeoutMs: number;
+  commitment: "confirmed" | "finalized";
+}): Promise<SolanaReceiptTransaction | null> {
+  const result = await solanaRpcRequest<unknown | null>({
+    rpcUrls: inputs.rpcUrls,
+    timeoutMs: inputs.timeoutMs,
+    method: "getTransaction",
+    params: [
+      inputs.signature,
+      {
+        encoding: "json",
+        commitment: inputs.commitment,
+        maxSupportedTransactionVersion: 0,
+      },
+    ],
+  });
+  if (result == null) return null;
+  if (!isRecord(result)) {
+    throw new Error("Solana RPC receipt transaction is invalid");
+  }
+  const slot = parseSolanaReceiptIndex(result.slot, "transaction slot");
+  const transaction = result.transaction;
+  const meta = result.meta;
+  if (!isRecord(transaction) || !isRecord(meta)) {
+    throw new Error("Solana RPC receipt transaction fields are invalid");
+  }
+  const message = transaction.message;
+  if (!isRecord(message)) {
+    throw new Error("Solana RPC receipt transaction message is invalid");
+  }
+  const header = message.header;
+  const staticAccountKeys = message.accountKeys;
+  const instructions = message.instructions;
+  if (
+    !isRecord(header) ||
+    !Array.isArray(staticAccountKeys) ||
+    staticAccountKeys.some((key) => typeof key !== "string") ||
+    !Array.isArray(instructions)
+  ) {
+    throw new Error(
+      "Solana RPC receipt transaction message fields are invalid",
+    );
+  }
+  const numRequiredSignatures = parseSolanaReceiptIndex(
+    header.numRequiredSignatures,
+    "required signature count",
+  );
+  const loadedAddresses = isRecord(meta.loadedAddresses)
+    ? meta.loadedAddresses
+    : null;
+  const writable = loadedAddresses?.writable;
+  const readonly = loadedAddresses?.readonly;
+  if (
+    (writable !== undefined &&
+      (!Array.isArray(writable) ||
+        writable.some((key) => typeof key !== "string"))) ||
+    (readonly !== undefined &&
+      (!Array.isArray(readonly) ||
+        readonly.some((key) => typeof key !== "string")))
+  ) {
+    throw new Error("Solana RPC loaded addresses are invalid");
+  }
+  const accountKeys = [
+    ...(staticAccountKeys as string[]),
+    ...((writable as string[] | undefined) ?? []),
+    ...((readonly as string[] | undefined) ?? []),
+  ];
+  const parsedInstructions = instructions.map((instruction) => {
+    if (!isRecord(instruction)) {
+      throw new Error("Solana RPC compiled instruction is invalid");
+    }
+    const programIdIndex = parseSolanaReceiptIndex(
+      instruction.programIdIndex,
+      "instruction program index",
+    );
+    const accounts = instruction.accounts;
+    const data = instruction.data;
+    if (
+      !Array.isArray(accounts) ||
+      typeof data !== "string" ||
+      accounts.some(
+        (account) =>
+          typeof account !== "number" ||
+          !Number.isSafeInteger(account) ||
+          account < 0,
+      )
+    ) {
+      throw new Error("Solana RPC compiled instruction fields are invalid");
+    }
+    return {
+      programIdIndex,
+      accountIndexes: accounts as number[],
+      data,
+    };
+  });
+  const addressTableLookups = message.addressTableLookups;
+  if (
+    addressTableLookups !== undefined &&
+    (!Array.isArray(addressTableLookups) ||
+      addressTableLookups.some(
+        (lookup) => !isRecord(lookup) || typeof lookup.accountKey !== "string",
+      ))
+  ) {
+    throw new Error("Solana RPC address table lookups are invalid");
+  }
+  return {
+    slot,
+    failed: meta.err != null,
+    numRequiredSignatures,
+    accountKeys,
+    instructions: parsedInstructions,
+    addressLookupTables:
+      (addressTableLookups as Array<{ accountKey: string }> | undefined)?.map(
+        (lookup) => lookup.accountKey,
+      ) ?? [],
+  };
 }
 
 export async function fetchSolanaBlockhash(inputs: {

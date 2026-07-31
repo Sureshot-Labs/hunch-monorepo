@@ -2,6 +2,7 @@ import { ethers } from "ethers";
 
 import type { User } from "../auth.js";
 import { env } from "../env.js";
+import { createEvmRpcProvider } from "./rpc-client-factory.js";
 import {
   type PrivyWalletApiClient,
   type PrivyWalletApiRequestSignatureInput,
@@ -229,7 +230,7 @@ function evmProviderForChain(chainId: number): ethers.JsonRpcProvider {
   if (!rpcUrl) {
     throw new Error(`No RPC URL configured for EVM chain ${chainId}.`);
   }
-  return new ethers.JsonRpcProvider(rpcUrl);
+  return createEvmRpcProvider(rpcUrl);
 }
 
 async function executePreparedPrivyAuthorizationRequest(

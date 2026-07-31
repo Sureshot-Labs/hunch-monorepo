@@ -14,6 +14,7 @@ import {
 } from "@solana/spl-token";
 
 import { isRecord } from "../lib/type-guards.js";
+import { createSolanaRpcConnection } from "./rpc-client-factory.js";
 import { fetchSolanaTokenAccountInfo } from "./solana-rpc.js";
 
 type ResolvedSolanaAccount = {
@@ -327,7 +328,7 @@ function createTimedSolanaConnection(
   rpcUrl: string,
   timeoutMs: number,
 ): Connection {
-  return new Connection(rpcUrl, {
+  return createSolanaRpcConnection(rpcUrl, {
     commitment: "confirmed",
     fetch: async (url, init) => {
       const controller = new AbortController();

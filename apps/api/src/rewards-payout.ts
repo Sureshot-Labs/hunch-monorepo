@@ -23,6 +23,10 @@ import {
   waitForSolanaSignatureConfirmation,
 } from "./services/solana-rpc.js";
 import { unlockPolymarketBuilderFeeAccruals } from "./services/polymarket-builder-fees.js";
+import {
+  createEvmRpcProvider,
+  createSolanaRpcConnection,
+} from "./services/rpc-client-factory.js";
 
 type ClaimRow = {
   id: string;
@@ -206,11 +210,11 @@ function isValidClaimAmount(value: string): boolean {
 }
 
 function buildProvider(config: EvmChainConfig): ethers.JsonRpcProvider {
-  return new ethers.JsonRpcProvider(config.rpcUrl);
+  return createEvmRpcProvider(config.rpcUrl);
 }
 
 function buildSolanaConnection(config: SolanaChainConfig): Connection {
-  return new Connection(config.rpcUrl, "confirmed");
+  return createSolanaRpcConnection(config.rpcUrl, "confirmed");
 }
 
 function loadSolanaKeypair(): Keypair {

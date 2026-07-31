@@ -8,7 +8,6 @@ import {
 } from "@solana/spl-token";
 import {
   AddressLookupTableAccount,
-  Connection,
   PublicKey,
   SystemInstruction,
   SystemProgram,
@@ -22,6 +21,7 @@ import { env } from "../env.js";
 import { isRecord } from "../lib/type-guards.js";
 import { fetchActiveDebridgeConfig } from "../repos/debridge-config.js";
 import { getRedis } from "../redis.js";
+import { createSolanaRpcConnection } from "../services/rpc-client-factory.js";
 import {
   embeddedEvmExecuteBodySchema,
   embeddedEvmPrepareBodySchema,
@@ -492,7 +492,7 @@ async function fetchSolanaAddressLookupTableAccounts(
     let lastError: unknown = null;
     for (const rpcUrl of env.solanaRpcUrls) {
       try {
-        const connection = new Connection(rpcUrl, "confirmed");
+        const connection = createSolanaRpcConnection(rpcUrl, "confirmed");
         const response = await connection.getAddressLookupTable(
           lookup.accountKey,
         );

@@ -1,7 +1,14 @@
-import { JsonRpcProvider, ethers } from "ethers";
+import {
+  captureRpcDiagnosticSource,
+  recordRpcAttempt,
+  recordRpcLogicalCall,
+  rpcDiagnosticOutcomeFromError,
+} from "@hunch/infra";
+import { ethers } from "ethers";
 
 import { env } from "../env.js";
 import { isRecord } from "../lib/type-guards.js";
+import { createEvmRpcProvider } from "./rpc-client-factory.js";
 
 export type WalletIdentityNameSource = "polymarket" | "ens";
 
@@ -491,6 +498,15 @@ async function checkEthereumRpc(input: {
   fetchImpl: FetchLike;
   timeoutMs: number;
 }): Promise<EthereumRpcCheckResult> {
+  const source = captureRpcDiagnosticSource();
+  const startedAt = performance.now();
+  let attemptRecorded = false;
+  recordRpcLogicalCall({
+    protocol: "evm",
+    rpcUrl: input.rpcUrl,
+    method: "eth_chainId",
+    source,
+  });
   try {
     const res = await input.fetchImpl(input.rpcUrl, {
       method: "POST",
@@ -503,16 +519,57 @@ async function checkEthereumRpc(input: {
       }),
       signal: AbortSignal.timeout(input.timeoutMs),
     });
-    if (res.status === 403) return { ok: false, reason: "forbidden" };
-    if (!res.ok) return { ok: false, reason: "network_error" };
+    if (!res.ok) {
+      recordRpcAttempt({
+        protocol: "evm",
+        rpcUrl: input.rpcUrl,
+        method: "eth_chainId",
+        source,
+        outcome: res.status === 429 ? "http_429" : "http_error",
+        durationMs: performance.now() - startedAt,
+      });
+      attemptRecorded = true;
+      return {
+        ok: false,
+        reason: res.status === 403 ? "forbidden" : "network_error",
+      };
+    }
     const payload = (await res.json()) as unknown;
     if (!isRecord(payload) || typeof payload.result !== "string") {
+      recordRpcAttempt({
+        protocol: "evm",
+        rpcUrl: input.rpcUrl,
+        method: "eth_chainId",
+        source,
+        outcome: "rpc_error",
+        durationMs: performance.now() - startedAt,
+      });
+      attemptRecorded = true;
       return { ok: false, reason: "network_error" };
     }
+    recordRpcAttempt({
+      protocol: "evm",
+      rpcUrl: input.rpcUrl,
+      method: "eth_chainId",
+      source,
+      outcome: "ok",
+      durationMs: performance.now() - startedAt,
+    });
+    attemptRecorded = true;
     const chainId = Number.parseInt(payload.result, 16);
     if (chainId !== 1) return { ok: false, reason: "wrong_chain" };
     return { ok: true };
-  } catch {
+  } catch (error) {
+    if (!attemptRecorded) {
+      recordRpcAttempt({
+        protocol: "evm",
+        rpcUrl: input.rpcUrl,
+        method: "eth_chainId",
+        source,
+        outcome: rpcDiagnosticOutcomeFromError(error),
+        durationMs: performance.now() - startedAt,
+      });
+    }
     return { ok: false, reason: "network_error" };
   }
 }
@@ -541,7 +598,7 @@ export async function resolveEnsIdentityName(input: {
   try {
     const client =
       input.client ??
-      new JsonRpcProvider(rpcUrl, 1, {
+      createEvmRpcProvider(rpcUrl, 1, {
         staticNetwork: true,
       });
     const name = await Promise.race([

@@ -3,6 +3,7 @@ import type { Pool } from "pg";
 
 import { env } from "../env.js";
 import { usdcMicroToDecimalString } from "../lib/usdc.js";
+import { createEvmRpcProvider } from "./rpc-client-factory.js";
 import {
   buildDepositWalletBatchTypedData,
   POLYMARKET_DEPOSIT_WALLET_FACTORY_ADDRESS,
@@ -111,7 +112,7 @@ export async function runPolymarketBuilderSweep(
     };
   }
 
-  const provider = new ethers.JsonRpcProvider(env.polygonRpcUrl);
+  const provider = createEvmRpcProvider(env.polygonRpcUrl);
   const token = new ethers.Contract(
     configured.tokenAddress,
     ERC20_ABI,

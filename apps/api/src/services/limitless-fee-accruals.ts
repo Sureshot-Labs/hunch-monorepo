@@ -6,6 +6,7 @@ import { withRewardsChainLocks } from "../lib/rewards-locks.js";
 import { usdcMicroToDecimalString } from "../lib/usdc.js";
 import { fetchActiveFeePolicy } from "../repos/fee-policy.js";
 import { isRecord } from "../lib/type-guards.js";
+import { createEvmRpcProvider } from "./rpc-client-factory.js";
 import {
   limitlessRequest,
   extractLimitlessMessage,
@@ -1080,7 +1081,7 @@ export async function backfillLimitlessVenueShareAccruals(
   ): Promise<LimitlessAccrualBuildResult | null> => {
     const txHash = extractTxHashFromLimitlessStatus(status);
     if (!txHash) return null;
-    baseProvider ??= new ethers.JsonRpcProvider(env.baseRpcUrl, undefined, {
+    baseProvider ??= createEvmRpcProvider(env.baseRpcUrl, undefined, {
       staticNetwork: true,
     });
     return buildLimitlessVenueShareAccrualResultFromReceipt({
@@ -1189,7 +1190,7 @@ export async function backfillLimitlessVenueShareAccruals(
     if (!status) {
       const shareBps = clampShareBps(row.fee_share_bps);
       if (isFilledOrderWithKnownTx(row) && shareBps > 0) {
-        baseProvider ??= new ethers.JsonRpcProvider(env.baseRpcUrl, undefined, {
+        baseProvider ??= createEvmRpcProvider(env.baseRpcUrl, undefined, {
           staticNetwork: true,
         });
         const onchainResult =
@@ -1436,7 +1437,7 @@ export async function verifyLimitlessVenueShareAccruals(
     const receiptTxHash =
       normalizeHash(row.tx_hash) ?? normalizeHash(row.order_hash);
     if (receiptTxHash && row.side) {
-      baseProvider ??= new ethers.JsonRpcProvider(env.baseRpcUrl, undefined, {
+      baseProvider ??= createEvmRpcProvider(env.baseRpcUrl, undefined, {
         staticNetwork: true,
       });
       const receiptResult =

@@ -4,6 +4,7 @@ import { ethers } from "ethers";
 
 import { getCredentialsEncryptionKey } from "../../lib/credentials-encryption.js";
 import { fetchEvmCode } from "../../services/polygon-rpc.js";
+import { createSolanaRpcConnection } from "../../services/rpc-client-factory.js";
 import type { AssetRef, ResolvedExternalRecipient } from "../domain/types.js";
 import { sameAsset } from "../domain/asset-identity.js";
 import {
@@ -184,7 +185,7 @@ export async function inspectWithdrawalAddress(
     }
     let account: Awaited<ReturnType<Connection["getAccountInfo"]>>;
     try {
-      account = await new Connection(
+      account = await createSolanaRpcConnection(
         fundingSidecarRuntimeConfig.solanaRpcUrl,
         "confirmed",
       ).getAccountInfo(publicKey, "confirmed");

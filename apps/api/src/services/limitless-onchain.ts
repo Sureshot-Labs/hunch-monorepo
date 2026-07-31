@@ -1,13 +1,7 @@
-import {
-  isAbortError,
-  isRetryableHttpStatus,
-  isRpcRateLimit,
-  parseRetryAfterMs,
-  sleep,
-} from "@hunch/shared";
+import { isRpcRateLimit } from "@hunch/shared";
 import { Interface, ethers } from "ethers";
 import { env } from "../env.js";
-import { fetchEvmMulticall } from "./polygon-rpc.js";
+import { fetchEvmCall, fetchEvmMulticall } from "./polygon-rpc.js";
 
 const erc20Iface = new Interface([
   "function balanceOf(address owner) view returns (uint256)",
@@ -68,111 +62,13 @@ function decodeBoolean(iface: Interface, fn: string, data: string): boolean {
   return value;
 }
 
-function computeRetryDelayMs(
-  attempt: number,
-  retryAfterMs: number | null,
-): number {
-  if (retryAfterMs != null && Number.isFinite(retryAfterMs)) {
-    return Math.min(
-      Math.max(0, retryAfterMs),
-      env.walletIntelRetryMaxBackoffMs,
-    );
-  }
-  const configuredDelay = Math.min(
-    env.walletIntelRetryBaseBackoffMs * 2 ** Math.max(0, attempt),
-    env.walletIntelRetryMaxBackoffMs,
-  );
-  const rateLimitFloor = Math.min(1_000 * 2 ** Math.max(0, attempt), 5_000);
-  return Math.max(configuredDelay, rateLimitFloor);
-}
-
 async function performLimitlessEthCall(inputs: {
   rpcUrl: string;
   timeoutMs: number;
   to: string;
   data: string;
 }): Promise<string> {
-  let lastError: unknown = null;
-  const maxAttempts = Math.max(1, env.walletIntelRetryMaxAttempts);
-
-  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), inputs.timeoutMs);
-
-    try {
-      const response = await fetch(inputs.rpcUrl, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          jsonrpc: "2.0",
-          id: 1,
-          method: "eth_call",
-          params: [{ to: inputs.to, data: inputs.data }, "latest"],
-        }),
-        signal: controller.signal,
-      });
-
-      if (!response.ok) {
-        const error = new Error(
-          `Limitless RPC error: ${response.status} ${response.statusText}`,
-        );
-        lastError = error;
-        if (
-          attempt < maxAttempts - 1 &&
-          isRetryableHttpStatus(response.status)
-        ) {
-          await sleep(
-            computeRetryDelayMs(
-              attempt,
-              parseRetryAfterMs(response.headers.get("retry-after")),
-            ),
-          );
-          continue;
-        }
-        throw error;
-      }
-
-      const json = (await response.json()) as unknown;
-      if (
-        !json ||
-        typeof json !== "object" ||
-        !("result" in json) ||
-        typeof (json as { result?: unknown }).result !== "string"
-      ) {
-        const message =
-          json &&
-          typeof json === "object" &&
-          "error" in json &&
-          typeof (json as { error?: { message?: unknown } }).error?.message ===
-            "string"
-            ? (json as { error: { message: string } }).error.message
-            : "Invalid Limitless RPC response";
-        const error = new Error(message);
-        lastError = error;
-        if (attempt < maxAttempts - 1 && isRpcRateLimit(error)) {
-          await sleep(computeRetryDelayMs(attempt, null));
-          continue;
-        }
-        throw error;
-      }
-
-      return (json as { result: string }).result;
-    } catch (error) {
-      lastError = error;
-      if (
-        attempt < maxAttempts - 1 &&
-        (isAbortError(error) || isRpcRateLimit(error))
-      ) {
-        await sleep(computeRetryDelayMs(attempt, null));
-        continue;
-      }
-      throw error;
-    } finally {
-      clearTimeout(timeout);
-    }
-  }
-
-  throw lastError ?? new Error("Limitless RPC request failed");
+  return fetchEvmCall(inputs);
 }
 
 async function limitlessEthCall(inputs: {

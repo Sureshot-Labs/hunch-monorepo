@@ -10,6 +10,7 @@ import {
 import type { EmbeddedEthereumTransactionSpec } from "./embedded-ethereum.js";
 import type { PolymarketFunderCandidate } from "./polymarket-funder.js";
 import { POLYGON_NATIVE_USDC_ADDRESS } from "./polymarket-onchain.js";
+import { createEvmRpcProvider } from "./rpc-client-factory.js";
 import {
   POLYMARKET_AUTH_MESSAGE,
   POLYMARKET_AUTH_TYPES,
@@ -322,7 +323,7 @@ function signatureToBytes(signature: string): `0x${string}` {
 }
 
 function polygonProvider() {
-  return new ethers.JsonRpcProvider(env.polygonRpcUrl);
+  return createEvmRpcProvider(env.polygonRpcUrl);
 }
 
 function buildPrivyWalletRpcUrl(walletId: string): string {

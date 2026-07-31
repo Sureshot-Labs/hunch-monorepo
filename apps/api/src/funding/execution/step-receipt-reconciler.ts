@@ -1,7 +1,18 @@
-import { Connection, PublicKey } from "@solana/web3.js";
 import type { Pool } from "@hunch/infra";
+import { PublicKey } from "@solana/web3.js";
 import bs58 from "bs58";
 import { ethers } from "ethers";
+
+import {
+  fetchEvmBlockHash,
+  fetchEvmBlockNumber,
+  fetchEvmTransactionByHash,
+  fetchEvmTransactionReceipt,
+} from "../../services/polygon-rpc.js";
+import {
+  fetchSolanaReceiptTransaction,
+  fetchSolanaSignatureReceiptStatus,
+} from "../../services/solana-rpc.js";
 
 import type {
   EvmTransactionAction,
@@ -793,58 +804,53 @@ function evmRpcUrl(chainId: number): string | null {
 }
 
 type EvmReceiptInspectionContext = Readonly<{
-  providersByChainId: Map<number, ethers.JsonRpcProvider>;
-  latestBlockNumbersByChainId: Map<number, Promise<number>>;
-  canonicalBlocksByChainAndHeight: Map<string, Promise<ethers.Block | null>>;
+  latestBlockNumbersByChainId: Map<number, Promise<bigint>>;
+  canonicalBlockHashesByChainAndHeight: Map<string, Promise<string | null>>;
 }>;
 
 function createEvmReceiptInspectionContext(): EvmReceiptInspectionContext {
   return {
-    providersByChainId: new Map(),
     latestBlockNumbersByChainId: new Map(),
-    canonicalBlocksByChainAndHeight: new Map(),
+    canonicalBlockHashesByChainAndHeight: new Map(),
   };
 }
 
-function evmProviderForInspection(
-  context: EvmReceiptInspectionContext,
-  chainId: number,
-  rpcUrl: string,
-): ethers.JsonRpcProvider {
-  const existing = context.providersByChainId.get(chainId);
-  if (existing) return existing;
-  const provider = new ethers.JsonRpcProvider(rpcUrl, chainId, {
-    staticNetwork: true,
-    batchMaxCount: 100,
-    batchStallTime: 5,
-  });
-  context.providersByChainId.set(chainId, provider);
-  return provider;
+function evmReceiptTimeoutMs(chainId: number): number {
+  return chainId === 8453
+    ? fundingSidecarRuntimeConfig.baseRpcTimeoutMs
+    : fundingSidecarRuntimeConfig.polygonRpcTimeoutMs;
 }
 
 function latestEvmBlockNumber(
   context: EvmReceiptInspectionContext,
   chainId: number,
-  provider: ethers.JsonRpcProvider,
-): Promise<number> {
+  rpcUrl: string,
+): Promise<bigint> {
   const existing = context.latestBlockNumbersByChainId.get(chainId);
   if (existing) return existing;
-  const pending = provider.getBlockNumber();
+  const pending = fetchEvmBlockNumber({
+    rpcUrl,
+    timeoutMs: evmReceiptTimeoutMs(chainId),
+  });
   context.latestBlockNumbersByChainId.set(chainId, pending);
   return pending;
 }
 
-function canonicalEvmBlock(
+function canonicalEvmBlockHash(
   context: EvmReceiptInspectionContext,
   chainId: number,
   blockNumber: number,
-  provider: ethers.JsonRpcProvider,
-): Promise<ethers.Block | null> {
+  rpcUrl: string,
+): Promise<string | null> {
   const key = `${chainId}:${blockNumber}`;
-  const existing = context.canonicalBlocksByChainAndHeight.get(key);
+  const existing = context.canonicalBlockHashesByChainAndHeight.get(key);
   if (existing) return existing;
-  const pending = provider.getBlock(blockNumber);
-  context.canonicalBlocksByChainAndHeight.set(key, pending);
+  const pending = fetchEvmBlockHash({
+    rpcUrl,
+    timeoutMs: evmReceiptTimeoutMs(chainId),
+    blockNumber,
+  });
+  context.canonicalBlockHashesByChainAndHeight.set(key, pending);
   return pending;
 }
 
@@ -886,27 +892,40 @@ async function inspectEvmTarget(
   ) {
     throw new Error("committed EVM receipt inspection context is incomplete");
   }
-  const provider = evmProviderForInspection(context, chainId, rpcUrl);
+  const timeoutMs = evmReceiptTimeoutMs(chainId);
   const [transaction, receipt] = await Promise.all([
-    provider.getTransaction(reference),
-    provider.getTransactionReceipt(reference),
+    fetchEvmTransactionByHash({
+      rpcUrl,
+      timeoutMs,
+      transactionHash: reference,
+    }),
+    fetchEvmTransactionReceipt({
+      rpcUrl,
+      timeoutMs,
+      transactionHash: reference,
+    }),
   ]);
   let receiptRecord: EvmReceiptRecord | null = null;
   if (receipt) {
     const [latestBlockNumber, canonicalBlock] = await Promise.all([
-      latestEvmBlockNumber(context, chainId, provider),
-      canonicalEvmBlock(context, chainId, receipt.blockNumber, provider),
+      latestEvmBlockNumber(context, chainId, rpcUrl),
+      canonicalEvmBlockHash(context, chainId, receipt.blockNumber, rpcUrl),
     ]);
-    const confirmations = Math.max(
-      0,
-      latestBlockNumber - receipt.blockNumber + 1,
+    const confirmationsRaw =
+      latestBlockNumber - BigInt(receipt.blockNumber) + 1n;
+    const confirmations = Number(
+      confirmationsRaw > 0n
+        ? confirmationsRaw > BigInt(Number.MAX_SAFE_INTEGER)
+          ? BigInt(Number.MAX_SAFE_INTEGER)
+          : confirmationsRaw
+        : 0n,
     );
     receiptRecord = {
-      succeeded: receipt.status === 1,
+      succeeded: receipt.succeeded,
       blockNumber: receipt.blockNumber,
       blockHash: receipt.blockHash,
       confirmations,
-      canonicalBlockHash: canonicalBlock?.hash ?? null,
+      canonicalBlockHash: canonicalBlock,
       logs: receipt.logs.map((log) => ({
         address: log.address,
         data: log.data,
@@ -989,14 +1008,11 @@ async function inspectSvmTarget(
       "committed Solana receipt inspection context is incomplete",
     );
   }
-  const connection = new Connection(
-    fundingSidecarRuntimeConfig.solanaRpcUrl,
-    "confirmed",
-  );
-  const statusResponse = await connection.getSignatureStatuses([reference], {
-    searchTransactionHistory: true,
+  const status = await fetchSolanaSignatureReceiptStatus({
+    rpcUrls: [...fundingSidecarRuntimeConfig.solanaRpcUrls],
+    signature: reference,
+    timeoutMs: fundingSidecarRuntimeConfig.solanaRpcTimeoutMs,
   });
-  const status = statusResponse.value[0];
   if (!status) {
     return evaluateSvmActionReceipt({
       action: target.action,
@@ -1007,9 +1023,11 @@ async function inspectSvmTarget(
   }
   const commitment =
     status.confirmationStatus === "finalized" ? "finalized" : "confirmed";
-  const transaction = await connection.getTransaction(reference, {
+  const transaction = await fetchSolanaReceiptTransaction({
+    rpcUrls: [...fundingSidecarRuntimeConfig.solanaRpcUrls],
+    signature: reference,
+    timeoutMs: fundingSidecarRuntimeConfig.solanaRpcTimeoutMs,
     commitment,
-    maxSupportedTransactionVersion: 0,
   });
   if (!transaction) {
     return evaluateSvmActionReceipt({
@@ -1019,37 +1037,12 @@ async function inspectSvmTarget(
       previous: target.previousReceipt,
     });
   }
-  const message = transaction.transaction.message as unknown as {
-    header: { numRequiredSignatures: number };
-    staticAccountKeys?: readonly PublicKey[];
-    accountKeys?: readonly PublicKey[];
-    compiledInstructions: readonly Readonly<{
-      programIdIndex: number;
-      accountKeyIndexes?: readonly number[];
-      accounts?: readonly number[];
-      data: unknown;
-    }>[];
-    addressTableLookups?: readonly Readonly<{ accountKey: PublicKey }>[];
-    getAccountKeys?: (input?: {
-      accountKeysFromLookups?: Readonly<{
-        writable: readonly PublicKey[];
-        readonly: readonly PublicKey[];
-      }>;
-    }) => Readonly<{ get(index: number): PublicKey | undefined }>;
-  };
-  const staticKeys = message.staticAccountKeys ?? message.accountKeys ?? [];
-  const loaded = transaction.meta?.loadedAddresses;
-  const resolvedKeys = message.getAccountKeys?.(
-    loaded ? { accountKeysFromLookups: loaded } : undefined,
-  );
-  const keyAt = (index: number): PublicKey | undefined =>
-    resolvedKeys?.get(index) ?? staticKeys[index];
+  const keyAt = (index: number): string | undefined =>
+    transaction.accountKeys[index];
   const instructions: SvmReceiptInstruction[] = [];
-  for (const instruction of message.compiledInstructions) {
-    const programId = keyAt(instruction.programIdIndex)?.toBase58();
-    const accountIndexes =
-      instruction.accountKeyIndexes ?? instruction.accounts ?? [];
-    const accounts = accountIndexes.map((index) => keyAt(index)?.toBase58());
+  for (const instruction of transaction.instructions) {
+    const programId = keyAt(instruction.programIdIndex);
+    const accounts = instruction.accountIndexes.map((index) => keyAt(index));
     const dataHex = instructionDataHex(instruction.data);
     if (
       !programId ||
@@ -1072,9 +1065,10 @@ async function inspectSvmTarget(
       dataHex,
     });
   }
-  const signers = staticKeys
-    .slice(0, message.header.numRequiredSignatures)
-    .map((key) => key.toBase58());
+  const signers = transaction.accountKeys.slice(
+    0,
+    transaction.numRequiredSignatures,
+  );
   return evaluateSvmActionReceipt({
     action: target.action,
     expectedSignerAddress,
@@ -1085,14 +1079,11 @@ async function inspectSvmTarget(
           : status.confirmationStatus === "confirmed"
             ? "confirmed"
             : "processed",
-      failed: status.err != null || transaction.meta?.err != null,
+      failed: status.failed || transaction.failed,
       slot: transaction.slot,
       signers,
       instructions,
-      addressLookupTables:
-        message.addressTableLookups?.map((lookup) =>
-          lookup.accountKey.toBase58(),
-        ) ?? [],
+      addressLookupTables: transaction.addressLookupTables,
     },
     previous: target.previousReceipt,
   });
@@ -1123,52 +1114,45 @@ export class FundingStepReceiptReconciliationDriver {
       this.dependencies.listTargets ?? listFundingStepReceiptTargets
     )(pool, operationId);
     const inspectionContext = createEvmReceiptInspectionContext();
-    let inspectionResults: ReadonlyArray<
+    const inspectionResults: ReadonlyArray<
       PromiseSettledResult<
         Readonly<{
           target: FundingStepReceiptTarget;
           inspected: FundingStepReceiptEvidence;
         }>
       >
-    >;
-    try {
-      inspectionResults = await Promise.allSettled(
-        targets.map(async (target) => {
-          if (target.lookupKeyVersion !== this.referenceCodec.keyVersion) {
-            throw new Error(
-              "funding transaction reference key version is unavailable",
-            );
-          }
-          const reference = this.referenceCodec.decrypt(
-            target.receiptRefCiphertext,
+    > = await Promise.allSettled(
+      targets.map(async (target) => {
+        if (target.lookupKeyVersion !== this.referenceCodec.keyVersion) {
+          throw new Error(
+            "funding transaction reference key version is unavailable",
           );
-          if (
-            this.referenceCodec.fingerprint(reference) !==
-            target.receiptRefLookupHmac
-          ) {
-            throw new Error(
-              "funding transaction reference integrity check failed",
-            );
-          }
-          const inspected =
-            target.action.kind === "evm_transaction" ||
-            target.action.kind === "evm_transaction_batch" ||
-            target.action.kind === "external_handoff"
-              ? await (this.dependencies.inspectEvm
-                  ? this.dependencies.inspectEvm(target, reference)
-                  : inspectEvmTarget(target, reference, inspectionContext))
-              : await (this.dependencies.inspectSvm ?? inspectSvmTarget)(
-                  target,
-                  reference,
-                );
-          return { target, inspected };
-        }),
-      );
-    } finally {
-      for (const provider of inspectionContext.providersByChainId.values()) {
-        provider.destroy();
-      }
-    }
+        }
+        const reference = this.referenceCodec.decrypt(
+          target.receiptRefCiphertext,
+        );
+        if (
+          this.referenceCodec.fingerprint(reference) !==
+          target.receiptRefLookupHmac
+        ) {
+          throw new Error(
+            "funding transaction reference integrity check failed",
+          );
+        }
+        const inspected =
+          target.action.kind === "evm_transaction" ||
+          target.action.kind === "evm_transaction_batch" ||
+          target.action.kind === "external_handoff"
+            ? await (this.dependencies.inspectEvm
+                ? this.dependencies.inspectEvm(target, reference)
+                : inspectEvmTarget(target, reference, inspectionContext))
+            : await (this.dependencies.inspectSvm ?? inspectSvmTarget)(
+                target,
+                reference,
+              );
+        return { target, inspected };
+      }),
+    );
 
     let receiptsFinalized = 0;
     const failures: unknown[] = [];

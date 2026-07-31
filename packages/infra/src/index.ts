@@ -15,6 +15,18 @@ export {
   waitForRedisReady,
 } from "./redis.js";
 export {
+  captureRpcDiagnosticSource,
+  classifyRpcNetwork,
+  decodeRpcDiagnosticField,
+  encodeRpcDiagnosticField,
+  flushRpcDiagnostics,
+  recordRpcAttempt,
+  recordRpcDedupHit,
+  recordRpcLogicalCall,
+  rpcDiagnosticOutcomeFromError,
+  rpcDiagnosticsHourKey,
+} from "./rpc-diagnostics.js";
+export {
   buildTopMarketsText,
   enqueueEmbedItems,
   getEmbedStreamKey,
@@ -106,3 +118,8 @@ export type {
 export type { Pool, PoolClient, PoolConfig } from "pg";
 export type { RedisClientType } from "redis";
 export type { RedisReadyOptions } from "./redis.js";
+export type {
+  RpcDiagnosticDimensions,
+  RpcDiagnosticOutcome,
+  RpcDiagnosticProtocol,
+} from "./rpc-diagnostics.js";

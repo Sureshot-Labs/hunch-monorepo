@@ -4,6 +4,7 @@ import { env } from "../env.js";
 import { usdcMicroToDecimalString } from "../lib/usdc.js";
 import { withRewardsChainLocks } from "../lib/rewards-locks.js";
 import { fetchActiveFeePolicy } from "../repos/fee-policy.js";
+import { createEvmRpcProvider } from "./rpc-client-factory.js";
 import {
   unlockVenueFeeAccruals,
   upsertVenueFeeAccruals,
@@ -665,7 +666,7 @@ export async function verifyPolymarketBuilderFeeAccruals(
     return { checked: 0, verified: 0, failed: 0, skipped: 0 };
   }
 
-  const provider = new ethers.JsonRpcProvider(env.polygonRpcUrl, undefined, {
+  const provider = createEvmRpcProvider(env.polygonRpcUrl, undefined, {
     staticNetwork: true,
   });
   let checked = 0;
