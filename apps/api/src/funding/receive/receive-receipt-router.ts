@@ -90,6 +90,16 @@ export function fundingReceiveRoutingNeedsRecovery(
   );
 }
 
+export function fundingReceiveRoutingNeedsReview(
+  errorCode: string,
+  nextAttempt: number,
+): boolean {
+  return (
+    nextAttempt >= MAX_ROUTING_ATTEMPTS &&
+    AUTOMATIC_ROUTING_ERROR_CODES.has(errorCode)
+  );
+}
+
 export type FundingReceiveChildOperationDisposition =
   | "ready"
   | "review_retry"
@@ -332,6 +342,7 @@ export class FundingReceiveReceiptRouter {
               now,
             );
             counts.retriesScheduled += disposition === "retry" ? 1 : 0;
+            counts.reviewsRequired += disposition === "review" ? 1 : 0;
             counts.recoveriesRequired += disposition === "recovery" ? 1 : 0;
           }
         } catch (error) {
@@ -342,6 +353,7 @@ export class FundingReceiveReceiptRouter {
             now,
           ).catch(() => "unchanged" as const);
           counts.retriesScheduled += disposition === "retry" ? 1 : 0;
+          counts.reviewsRequired += disposition === "review" ? 1 : 0;
           counts.recoveriesRequired += disposition === "recovery" ? 1 : 0;
         }
         continue;
@@ -437,8 +449,22 @@ export class FundingReceiveReceiptRouter {
     target: FundingReceiveReceiptRoutingTarget,
     errorCode: string,
     now: Date,
-  ): Promise<"retry" | "recovery" | "unchanged"> {
+  ): Promise<"retry" | "review" | "recovery" | "unchanged"> {
     const nextAttempt = target.routingAttemptCount + 1;
+    if (fundingReceiveRoutingNeedsReview(errorCode, nextAttempt)) {
+      const updated = await recordFundingReceiveReceiptRoutingDisposition(
+        this.db,
+        {
+          receiptId: target.receipt.receiptId,
+          receiveSessionId: target.receipt.receiveSessionId,
+          userId: target.userId,
+          disposition: "review_required",
+          errorCode,
+          now,
+        },
+      );
+      return updated ? "review" : "unchanged";
+    }
     if (fundingReceiveRoutingNeedsRecovery(errorCode, nextAttempt)) {
       const updated = await recordFundingReceiveReceiptRoutingDisposition(
         this.db,

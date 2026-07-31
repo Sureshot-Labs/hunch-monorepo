@@ -18,6 +18,7 @@ import {
   type FundingStepReceiptTarget,
 } from "../persistence/funding-step-receipt-repository.js";
 import { fundingSidecarRuntimeConfig } from "../runtime/sidecar-runtime-config.js";
+import { polymarketDepositWalletHandoffExpectation } from "./polymarket-deposit-wallet-handoff.js";
 import type { FundingTransactionReferenceCodec } from "./transaction-reference-codec.js";
 
 type JsonRecord = Readonly<Record<string, JsonValue>>;
@@ -66,8 +67,7 @@ const ENTRY_POINT_V07_INTERFACE = new ethers.Interface([
 const ERC7579_EXECUTE_INTERFACE = new ethers.Interface([
   "function execute(bytes32 execMode,bytes executionCalldata)",
 ]);
-const ERC20_TRANSFER_INTERFACE = new ethers.Interface([
-  "function transfer(address recipient,uint256 amount)",
+const ERC20_TRANSFER_EVENT_INTERFACE = new ethers.Interface([
   "event Transfer(address indexed from,address indexed to,uint256 value)",
 ]);
 
@@ -486,85 +486,6 @@ export function evaluateEvmActionReceipt(
   };
 }
 
-type PolymarketDepositWalletHandoffExpectation = Readonly<{
-  tokenAddress: string;
-  funderAddress: string;
-  recipientAddress: string;
-  amountRaw: bigint;
-}>;
-
-function polymarketHandoffExpectation(
-  action: ExternalHandoffAction,
-  validation: JsonRecord,
-): PolymarketDepositWalletHandoffExpectation | null {
-  if (
-    action.networkId !== "evm:137" ||
-    action.handoffKind !== "polymarket_deposit_wallet_transfer" ||
-    typeof action.payload.token !== "string" ||
-    typeof action.payload.funder !== "string" ||
-    typeof action.payload.recipient !== "string" ||
-    typeof action.payload.amountRaw !== "string" ||
-    !Array.isArray(action.payload.calls) ||
-    action.payload.calls.length !== 1
-  ) {
-    return null;
-  }
-  const call = action.payload.calls[0];
-  if (
-    typeof call !== "object" ||
-    call === null ||
-    Array.isArray(call) ||
-    typeof call.target !== "string" ||
-    typeof call.value !== "string" ||
-    typeof call.data !== "string" ||
-    call.value !== "0"
-  ) {
-    return null;
-  }
-  try {
-    const tokenAddress = ethers.getAddress(action.payload.token);
-    const funderAddress = ethers.getAddress(action.payload.funder);
-    const recipientAddress = ethers.getAddress(action.payload.recipient);
-    const validatedTokenAddress = ethers.getAddress(
-      String(validation.tokenAddress),
-    );
-    const validatedFunderAddress = ethers.getAddress(
-      String(validation.funderAddress),
-    );
-    const validatedRecipientAddress = ethers.getAddress(
-      String(validation.recipientAddress),
-    );
-    const amountRaw = BigInt(action.payload.amountRaw);
-    const decoded = ERC20_TRANSFER_INTERFACE.decodeFunctionData(
-      "transfer",
-      call.data,
-    );
-    if (
-      amountRaw <= 0n ||
-      ethers.getAddress(call.target) !== tokenAddress ||
-      ethers.getAddress(String(decoded[0])) !== recipientAddress ||
-      BigInt(decoded[1]) !== amountRaw ||
-      validation.executionEnvelope !==
-        "polymarket_deposit_wallet_to_controller_v1" ||
-      validatedTokenAddress !== tokenAddress ||
-      validatedFunderAddress !== funderAddress ||
-      validatedRecipientAddress !== recipientAddress ||
-      validation.amountRaw !== amountRaw.toString() ||
-      validation.transferData !== call.data
-    ) {
-      return null;
-    }
-    return {
-      tokenAddress,
-      funderAddress,
-      recipientAddress,
-      amountRaw,
-    };
-  } catch {
-    return null;
-  }
-}
-
 export function evaluatePolymarketDepositWalletHandoffReceipt(
   input: Readonly<{
     action: ExternalHandoffAction;
@@ -574,7 +495,7 @@ export function evaluatePolymarketDepositWalletHandoffReceipt(
     previous: FundingStepReceiptObservation | null;
   }>,
 ): FundingStepReceiptEvidence {
-  const expectation = polymarketHandoffExpectation(
+  const expectation = polymarketDepositWalletHandoffExpectation(
     input.action,
     input.actionValidationResult,
   );
@@ -664,7 +585,7 @@ export function evaluatePolymarketDepositWalletHandoffReceipt(
       return [];
     }
     try {
-      const parsed = ERC20_TRANSFER_INTERFACE.parseLog({
+      const parsed = ERC20_TRANSFER_EVENT_INTERFACE.parseLog({
         topics: [...log.topics],
         data: log.data,
       });

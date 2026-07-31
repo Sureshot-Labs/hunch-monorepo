@@ -25,6 +25,7 @@ import {
   resolveActionSponsorship,
   type ResolvedActionSponsorship,
 } from "./sponsorship-policy.js";
+import { normalizePolymarketDepositWalletTransactionReference } from "./polymarket-deposit-wallet-handoff.js";
 import { createFundingTransactionReferenceCodec } from "./transaction-reference-codec.js";
 import { WithdrawalDestinationRuntime } from "./withdrawal-destination-runtime.js";
 
@@ -360,7 +361,13 @@ export class FundingOperationActionRuntime {
       lookupHmacKey: lookupKey,
       keyVersion,
     });
-    const reference = input.transactionReference;
+    const reference = input.transactionReference
+      ? normalizePolymarketDepositWalletTransactionReference(
+          action,
+          step.actionValidationResult,
+          input.transactionReference,
+        )
+      : null;
     const finished = await finishFundingStepAttemptForUser(this.db, {
       userId,
       operationId: input.operationId,

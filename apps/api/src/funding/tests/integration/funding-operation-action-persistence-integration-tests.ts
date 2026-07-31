@@ -5,10 +5,13 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 
+import { ethers } from "ethers";
+
 import { pool } from "../../../db.js";
 import {
   fetchFundingOperationStepForUser,
   finishFundingStepAttemptForUserInTransaction,
+  listReportedPolymarketHandoffsByTransactionReferences,
   startFundingStepAttemptForUserInTransaction,
 } from "../../persistence/funding-evidence-repository.js";
 import {
@@ -75,16 +78,43 @@ try {
       address: "0x00000000000000000000000000000000000000a1",
     },
   } as const;
+  const handoffToken = "0x1111111111111111111111111111111111111111";
+  const handoffFunder = "0x2222222222222222222222222222222222222222";
+  const handoffRecipient = "0x3333333333333333333333333333333333333333";
+  const handoffAmount = "8736244";
+  const handoffTransferData = new ethers.Interface([
+    "function transfer(address recipient,uint256 amount)",
+  ]).encodeFunctionData("transfer", [handoffRecipient, BigInt(handoffAmount)]);
   const action = {
-    kind: "evm_transaction",
+    kind: "external_handoff",
     actionId: opaque("action"),
     networkId: ASSET.networkId,
-    senderWalletId: sourceLocation.details.walletId,
-    to: "0x00000000000000000000000000000000000000b1",
-    data: "0x",
-    valueRaw: "0",
-    gasLimitRaw: "21000",
+    actorWalletId: sourceLocation.details.walletId,
+    handoffKind: "polymarket_deposit_wallet_transfer",
+    payload: {
+      topology: "deposit_wallet",
+      funder: handoffFunder,
+      recipient: handoffRecipient,
+      token: handoffToken,
+      amountRaw: handoffAmount,
+      calls: [
+        {
+          target: handoffToken,
+          value: "0",
+          data: handoffTransferData,
+        },
+      ],
+    },
   } as const;
+  const actionValidationResult = {
+    executionEnvelope: "polymarket_deposit_wallet_to_controller_v1",
+    funderAddress: handoffFunder,
+    recipientAddress: handoffRecipient,
+    tokenAddress: handoffToken,
+    amountRaw: handoffAmount,
+    transferData: handoffTransferData,
+  } as const;
+  const actionExecutorId = "polymarket_deposit_wallet_relayer_v1";
   const actionFingerprint = hash(JSON.stringify(action));
   const secondSourceLocation = {
     ...sourceLocation,
@@ -96,9 +126,14 @@ try {
     },
   } as const;
   const secondAction = {
-    ...action,
+    kind: "evm_transaction",
     actionId: opaque("action"),
+    networkId: ASSET.networkId,
     senderWalletId: secondSourceLocation.details.walletId,
+    to: "0x00000000000000000000000000000000000000b1",
+    data: "0x",
+    valueRaw: "0",
+    gasLimitRaw: "21000",
   } as const;
   const secondActionFingerprint = hash(JSON.stringify(secondAction));
   const plan: FundingCommitPlan = {
@@ -185,14 +220,14 @@ try {
       {
         ordinal: 0,
         segmentOrdinal: 0,
-        stepKind: "transaction",
+        stepKind: "external_handoff",
         state: "action_required",
         actionFingerprint,
-        executorId: "wallet_profile_evm_v1",
-        payerRequirement: "user",
+        executorId: actionExecutorId,
+        payerRequirement: "provider",
         dependsOnOrdinal: null,
         normalizedAction: action,
-        actionValidationResult: { valid: true },
+        actionValidationResult,
       },
       {
         ordinal: 1,
@@ -281,7 +316,7 @@ try {
       operationId: committed.operation.id,
       stepId,
       canonicalActionFingerprint: actionFingerprint,
-      executorId: "wallet_profile_evm_v1",
+      executorId: actionExecutorId,
     }),
     "operation_not_found",
   );
@@ -301,7 +336,7 @@ try {
     operationId: committed.operation.id,
     stepId,
     canonicalActionFingerprint: actionFingerprint,
-    executorId: "wallet_profile_evm_v1",
+    executorId: actionExecutorId,
   });
   assert.equal(started.attempt.attemptNumber, 1);
 
@@ -311,7 +346,7 @@ try {
       operationId: committed.operation.id,
       stepId,
       canonicalActionFingerprint: actionFingerprint,
-      executorId: "wallet_profile_evm_v1",
+      executorId: actionExecutorId,
     }),
     "invalid_state_transition",
   );
@@ -354,13 +389,44 @@ try {
   });
   assert.equal(storedStep?.state, "reconcile_required");
 
+  const matchingHandoffs =
+    await listReportedPolymarketHandoffsByTransactionReferences(client, {
+      userId,
+      lookupKeyVersion: 1,
+      receiptRefLookupHmacs: [reportInput.receiptRefLookupHmac],
+    });
+  assert.equal(matchingHandoffs.length, 1);
+  assert.equal(matchingHandoffs[0]?.attemptId, started.attempt.id);
+  assert.equal(
+    (
+      await listReportedPolymarketHandoffsByTransactionReferences(client, {
+        userId: otherUserId,
+        lookupKeyVersion: 1,
+        receiptRefLookupHmacs: [reportInput.receiptRefLookupHmac],
+      })
+    ).length,
+    0,
+    "transaction lineage must remain scoped to the authenticated user",
+  );
+  assert.equal(
+    (
+      await listReportedPolymarketHandoffsByTransactionReferences(client, {
+        userId,
+        lookupKeyVersion: 2,
+        receiptRefLookupHmacs: [reportInput.receiptRefLookupHmac],
+      })
+    ).length,
+    0,
+    "a lookup key-version mismatch must fail open",
+  );
+
   await expectFundingError(
     startFundingStepAttemptForUserInTransaction(client, {
       userId,
       operationId: committed.operation.id,
       stepId,
       canonicalActionFingerprint: actionFingerprint,
-      executorId: "wallet_profile_evm_v1",
+      executorId: actionExecutorId,
     }),
     "invalid_state_transition",
   );

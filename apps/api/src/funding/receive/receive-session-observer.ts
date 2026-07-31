@@ -1,10 +1,18 @@
-import { tx, type Pool } from "@hunch/infra";
+import { tx, type Pool, type PoolClient } from "@hunch/infra";
 
+import { sameAccountAddress } from "../domain/asset-identity.js";
+import { normalizedActionSchema } from "../domain/schemas.js";
 import type {
   FundingReceiveReceipt,
   FundingReceiveSessionStatus,
   JsonValue,
+  NormalizedAction,
 } from "../domain/types.js";
+import { polymarketDepositWalletHandoffExpectation } from "../execution/polymarket-deposit-wallet-handoff.js";
+import {
+  listReportedPolymarketHandoffsByTransactionReferences,
+  type FundingReportedPolymarketHandoffCandidate,
+} from "../persistence/funding-evidence-repository.js";
 import {
   observeDirectIngressDestination,
   parseDirectIngressObservationVariant,
@@ -30,6 +38,105 @@ import {
 import { fundingReceiveVariantHandling } from "../planner/receive-targets.js";
 
 type JsonRecord = Readonly<Record<string, JsonValue>>;
+
+const EVM_TRANSACTION_HASH_PATTERN = /^0x[0-9a-fA-F]{64}$/;
+
+type FingerprintedFundingReceiveCanonicalEvent = Readonly<{
+  event: FundingReceiveCanonicalEvent;
+  receiptRefLookupHmac: string;
+}>;
+
+function canonicalEventIdentity(event: FundingReceiveCanonicalEvent): string {
+  return [
+    event.variant.networkId,
+    event.transactionHash,
+    event.eventIndex,
+  ].join(":");
+}
+
+function deduplicateCanonicalEvents(
+  events: readonly FundingReceiveCanonicalEvent[],
+): readonly FundingReceiveCanonicalEvent[] {
+  const unique = new Map<string, FundingReceiveCanonicalEvent>();
+  for (const event of events) {
+    const identity = canonicalEventIdentity(event);
+    if (!unique.has(identity)) unique.set(identity, event);
+  }
+  return [...unique.values()];
+}
+
+function handoffMatchesCanonicalEvent(
+  candidate: FundingReportedPolymarketHandoffCandidate,
+  event: FundingReceiveCanonicalEvent,
+): boolean {
+  const action = normalizedActionSchema.safeParse(candidate.normalizedAction);
+  if (!action.success) return false;
+  const expectation = polymarketDepositWalletHandoffExpectation(
+    action.data as unknown as NormalizedAction,
+    candidate.actionValidationResult,
+  );
+  if (!expectation || action.data.networkId !== event.variant.networkId) {
+    return false;
+  }
+  let eventAmount: bigint;
+  try {
+    eventAmount = BigInt(event.rawAmount);
+  } catch {
+    return false;
+  }
+  return (
+    expectation.amountRaw === eventAmount &&
+    sameAccountAddress(
+      event.variant.networkId,
+      expectation.funderAddress,
+      event.sourceAddress,
+    ) &&
+    sameAccountAddress(
+      event.variant.networkId,
+      expectation.recipientAddress,
+      event.destinationAddress,
+    ) &&
+    sameAccountAddress(
+      event.variant.networkId,
+      expectation.tokenAddress,
+      event.variant.asset.assetId,
+    )
+  );
+}
+
+export function internalPolymarketHandoffEventIdentities(
+  events: readonly FingerprintedFundingReceiveCanonicalEvent[],
+  candidates: readonly FundingReportedPolymarketHandoffCandidate[],
+): ReadonlySet<string> {
+  const candidatesByReference = new Map<
+    string,
+    FundingReportedPolymarketHandoffCandidate[]
+  >();
+  for (const candidate of candidates) {
+    const grouped =
+      candidatesByReference.get(candidate.receiptRefLookupHmac) ?? [];
+    grouped.push(candidate);
+    candidatesByReference.set(candidate.receiptRefLookupHmac, grouped);
+  }
+  const internal = new Set<string>();
+  for (const entry of events) {
+    const referenceCandidates =
+      candidatesByReference.get(entry.receiptRefLookupHmac) ?? [];
+    if (referenceCandidates.length !== 1) continue;
+    const candidate = referenceCandidates[0];
+    if (!candidate || !handoffMatchesCanonicalEvent(candidate, entry.event)) {
+      continue;
+    }
+    const matchingEvents = events.filter(
+      (other) =>
+        other.receiptRefLookupHmac === entry.receiptRefLookupHmac &&
+        handoffMatchesCanonicalEvent(candidate, other.event),
+    );
+    if (matchingEvents.length !== 1) continue;
+    internal.add(canonicalEventIdentity(entry.event));
+  }
+  return internal;
+}
 
 function jsonRecord(value: unknown): JsonRecord {
   return value as JsonRecord;
@@ -306,6 +413,17 @@ export function advanceFundingReceiveObservationBaselines(
 }
 
 export class FundingReceiveSessionObserver {
+  constructor(
+    private readonly dependencies: Readonly<{
+      transactionReferenceLookup?: Readonly<{
+        keyVersion: number;
+        fingerprint(value: string): string;
+      }>;
+      scanCanonicalEvents?: typeof scanCanonicalFundingReceiveEvents;
+      listReportedPolymarketHandoffs?: typeof listReportedPolymarketHandoffsByTransactionReferences;
+    }> = {},
+  ) {}
+
   async pollBatch(
     pool: Pool,
     input: Readonly<{
@@ -385,10 +503,9 @@ export class FundingReceiveSessionObserver {
     Readonly<{ receiptsRecorded: number; recoveryRequired: boolean }>
   > {
     const target = observationTarget(snapshot);
-    const canonicalEvents = await scanCanonicalFundingReceiveEvents(
-      target.variants,
-      now,
-    );
+    const canonicalEvents = await (
+      this.dependencies.scanCanonicalEvents ?? scanCanonicalFundingReceiveEvents
+    )(target.variants, now);
     if (canonicalEvents) {
       return this.persistCanonicalEvents(
         pool,
@@ -559,7 +676,16 @@ export class FundingReceiveSessionObserver {
     return tx(pool, async (client) => {
       let receiptsRecorded = 0;
       let recoveryRequired = false;
-      for (const event of events) {
+      const uniqueEvents = deduplicateCanonicalEvents(events);
+      const internalEventIdentities = await this.internalEventIdentities(
+        client,
+        snapshot,
+        uniqueEvents,
+      );
+      for (const event of uniqueEvents) {
+        if (internalEventIdentities.has(canonicalEventIdentity(event))) {
+          continue;
+        }
         const allocation = await claimFundingReceiveCanonicalEventAllocation(
           client,
           {
@@ -688,5 +814,46 @@ export class FundingReceiveSessionObserver {
       }
       return { receiptsRecorded, recoveryRequired };
     });
+  }
+
+  private async internalEventIdentities(
+    client: PoolClient,
+    snapshot: FundingReceiveSessionSnapshot,
+    events: readonly FundingReceiveCanonicalEvent[],
+  ): Promise<ReadonlySet<string>> {
+    const lookup = this.dependencies.transactionReferenceLookup;
+    if (!lookup) return new Set();
+    const fingerprinted: FingerprintedFundingReceiveCanonicalEvent[] = [];
+    for (const event of events) {
+      if (
+        !event.variant.networkId.startsWith("evm:") ||
+        !EVM_TRANSACTION_HASH_PATTERN.test(event.transactionHash)
+      ) {
+        continue;
+      }
+      try {
+        fingerprinted.push({
+          event,
+          receiptRefLookupHmac: lookup.fingerprint(
+            event.transactionHash.toLowerCase(),
+          ),
+        });
+      } catch {
+        // A malformed or unsupported reference remains on the normal receive
+        // path. Persistence failures below are deliberately not swallowed.
+      }
+    }
+    if (fingerprinted.length === 0) return new Set();
+    const candidates = await (
+      this.dependencies.listReportedPolymarketHandoffs ??
+      listReportedPolymarketHandoffsByTransactionReferences
+    )(client, {
+      userId: snapshot.userId,
+      lookupKeyVersion: lookup.keyVersion,
+      receiptRefLookupHmacs: fingerprinted.map(
+        (entry) => entry.receiptRefLookupHmac,
+      ),
+    });
+    return internalPolymarketHandoffEventIdentities(fingerprinted, candidates);
   }
 }

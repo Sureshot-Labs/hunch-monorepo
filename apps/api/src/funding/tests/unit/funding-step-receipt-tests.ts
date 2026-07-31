@@ -12,6 +12,10 @@ import {
   evaluateSvmActionReceipt,
   FundingStepReceiptReconciliationDriver,
 } from "../../execution/step-receipt-reconciler.js";
+import {
+  normalizePolymarketDepositWalletTransactionReference,
+  polymarketDepositWalletHandoffExpectation,
+} from "../../execution/polymarket-deposit-wallet-handoff.js";
 import type {
   FundingStepReceiptEvidence,
   FundingStepReceiptTarget,
@@ -441,6 +445,28 @@ const handoffValidation = {
   amountRaw: handoffAmount.toString(),
   transferData: handoffData,
 };
+const uppercaseHandoffHash = `0x${"AB".repeat(32)}`;
+assert.ok(
+  polymarketDepositWalletHandoffExpectation(handoffAction, handoffValidation),
+);
+assert.equal(
+  normalizePolymarketDepositWalletTransactionReference(
+    handoffAction,
+    handoffValidation,
+    uppercaseHandoffHash,
+  ),
+  uppercaseHandoffHash.toLowerCase(),
+  "a valid Polymarket handoff EVM hash must share the scanner's lowercase form",
+);
+assert.equal(
+  normalizePolymarketDepositWalletTransactionReference(
+    handoffAction,
+    { ...handoffValidation, amountRaw: "1" },
+    uppercaseHandoffHash,
+  ),
+  uppercaseHandoffHash,
+  "an invalid handoff envelope must not change transaction reference semantics",
+);
 const transferEvent = transferInterface.getEvent("Transfer");
 if (!transferEvent) throw new Error("Transfer event ABI is unavailable");
 const exactTransferLog = transferInterface.encodeEventLog(transferEvent, [

@@ -3,6 +3,7 @@
 import assert from "node:assert/strict";
 
 import type { Pool } from "@hunch/infra";
+import { ethers } from "ethers";
 
 import type {
   DirectIngressObservationVariant,
@@ -23,6 +24,7 @@ import {
   fundingReceiveChildOperationDisposition,
   fundingReceiveRoutingErrorCode,
   fundingReceiveRoutingNeedsRecovery,
+  fundingReceiveRoutingNeedsReview,
   quoteFundingReceiveReceipt,
   quoteWithinReceiveAutomationPolicy,
   receiveReceiptRoutingAmounts,
@@ -42,6 +44,7 @@ import {
 import {
   advanceFundingReceiveObservationBaselines,
   fundingReceiveObservationDisposition,
+  internalPolymarketHandoffEventIdentities,
   selectFundingReceiveSessionsForPolling,
   selectFundingReceiveSessionObservation,
 } from "../../receive/receive-session-observer.js";
@@ -52,6 +55,133 @@ const ASSET = {
   assetId: "0x0000000000000000000000000000000000000001",
   decimals: 6,
 };
+
+const internalHandoffToken = "0x1111111111111111111111111111111111111111";
+const internalHandoffFunder = "0x2222222222222222222222222222222222222222";
+const internalHandoffRecipient = "0x3333333333333333333333333333333333333333";
+const internalHandoffAmount = "8736244";
+const internalHandoffHash = `0x${"ab".repeat(32)}`;
+const internalHandoffTransferData = new ethers.Interface([
+  "function transfer(address recipient,uint256 amount)",
+]).encodeFunctionData("transfer", [
+  internalHandoffRecipient,
+  BigInt(internalHandoffAmount),
+]);
+const internalHandoffAction = {
+  kind: "external_handoff" as const,
+  actionId: "action_internal_handoff_12345678",
+  networkId: "evm:137",
+  actorWalletId: "wallet_internal_handoff_12345678",
+  handoffKind: "polymarket_deposit_wallet_transfer",
+  payload: {
+    topology: "deposit_wallet",
+    funder: internalHandoffFunder,
+    recipient: internalHandoffRecipient,
+    token: internalHandoffToken,
+    amountRaw: internalHandoffAmount,
+    calls: [
+      {
+        target: internalHandoffToken,
+        value: "0",
+        data: internalHandoffTransferData,
+      },
+    ],
+  },
+};
+const internalHandoffValidation = {
+  executionEnvelope: "polymarket_deposit_wallet_to_controller_v1",
+  funderAddress: internalHandoffFunder,
+  recipientAddress: internalHandoffRecipient,
+  tokenAddress: internalHandoffToken,
+  amountRaw: internalHandoffAmount,
+  transferData: internalHandoffTransferData,
+};
+const internalHandoffCandidate = {
+  operationId: "operation_internal_handoff_12345678",
+  stepId: "step_internal_handoff_12345678",
+  attemptId: "attempt_internal_handoff_12345678",
+  receiptRefLookupHmac: "lookup_internal_handoff_12345678",
+  normalizedAction: internalHandoffAction,
+  actionValidationResult: internalHandoffValidation,
+};
+const internalHandoffVariant = {
+  variantId: "variant_internal_handoff_12345678",
+  networkId: "evm:137",
+  asset: {
+    networkId: "evm:137",
+    assetId: internalHandoffToken,
+    decimals: 6,
+  },
+  destinationAddress: internalHandoffRecipient,
+  destinationLocationId: "location_internal_handoff_12345678",
+  baselineRaw: "0",
+  baselineRevision: "baseline_internal_handoff_12345678",
+  observation: {
+    adapterId: "owned_wallet_liquid_balances_v1",
+    payload: { eventIdentity: "evm_erc20_transfer_v1" },
+  },
+  completion: { kind: "direct_destination_credit" as const },
+};
+const internalHandoffEvent = (eventIndex: string, rawAmount: string) => ({
+  event: {
+    variant: internalHandoffVariant,
+    transactionHash: internalHandoffHash,
+    eventIndex,
+    blockNumber: "91203919",
+    blockHash: `0x${"cd".repeat(32)}`,
+    sourceAddress: internalHandoffFunder,
+    destinationAddress: internalHandoffRecipient,
+    rawAmount,
+    observedAt: "2026-07-31T15:15:06.000Z",
+  },
+  receiptRefLookupHmac: internalHandoffCandidate.receiptRefLookupHmac,
+});
+
+assert.deepEqual(
+  [
+    ...internalPolymarketHandoffEventIdentities(
+      [internalHandoffEvent("1", internalHandoffAmount)],
+      [internalHandoffCandidate],
+    ),
+  ],
+  [`evm:137:${internalHandoffHash}:1`],
+  "one exact handoff event must be classified as internal",
+);
+assert.deepEqual(
+  [
+    ...internalPolymarketHandoffEventIdentities(
+      [
+        internalHandoffEvent("1", internalHandoffAmount),
+        internalHandoffEvent("2", "1"),
+      ],
+      [internalHandoffCandidate],
+    ),
+  ],
+  [`evm:137:${internalHandoffHash}:1`],
+  "an unrelated Transfer in the same transaction must remain external",
+);
+assert.equal(
+  internalPolymarketHandoffEventIdentities(
+    [
+      internalHandoffEvent("1", internalHandoffAmount),
+      internalHandoffEvent("2", internalHandoffAmount),
+    ],
+    [internalHandoffCandidate],
+  ).size,
+  0,
+  "two identical matching events are ambiguous and must fail open",
+);
+assert.equal(
+  internalPolymarketHandoffEventIdentities(
+    [internalHandoffEvent("1", internalHandoffAmount)],
+    [
+      internalHandoffCandidate,
+      { ...internalHandoffCandidate, attemptId: "attempt_duplicate_12345678" },
+    ],
+  ).size,
+  0,
+  "multiple attempts for one transaction are ambiguous and must fail open",
+);
 
 assert.deepEqual(
   loadFundingSidecarRuntimeConfig({
@@ -149,7 +279,22 @@ assert.equal(
 assert.equal(
   fundingReceiveRoutingNeedsRecovery("route_unavailable", 500),
   false,
-  "an accepted automatic receive asset must keep checking for a route",
+  "a transient routing failure must remain recoverable by explicit review",
+);
+assert.equal(
+  fundingReceiveRoutingNeedsReview("route_unavailable", 4),
+  false,
+  "automatic routing keeps its bounded retry window",
+);
+assert.equal(
+  fundingReceiveRoutingNeedsReview("route_unavailable", 5),
+  true,
+  "automatic routing stops polling and becomes user-resumable at the cap",
+);
+assert.equal(
+  fundingReceiveRoutingNeedsReview("routing_attempt_failed", 5),
+  false,
+  "non-transient contradictions still use recovery instead of review",
 );
 assert.equal(
   fundingReceiveRoutingNeedsRecovery("routing_binding_mismatch", 5),

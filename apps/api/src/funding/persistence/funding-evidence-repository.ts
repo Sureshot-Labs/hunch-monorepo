@@ -161,6 +161,71 @@ export async function listFundingOperationStepsForUser(
   return rows.map(mapOperationStep);
 }
 
+export type FundingReportedPolymarketHandoffCandidate = Readonly<{
+  operationId: string;
+  stepId: string;
+  attemptId: string;
+  receiptRefLookupHmac: string;
+  normalizedAction: JsonRecord;
+  actionValidationResult: JsonRecord;
+}>;
+
+type FundingReportedPolymarketHandoffCandidateDbRow = {
+  operation_id: string;
+  step_id: string;
+  attempt_id: string;
+  receipt_ref_lookup_hmac: string;
+  normalized_action: JsonRecord;
+  action_validation_result: JsonRecord;
+};
+
+export async function listReportedPolymarketHandoffsByTransactionReferences(
+  db: Pick<PoolClient, "query">,
+  input: Readonly<{
+    userId: string;
+    lookupKeyVersion: number;
+    receiptRefLookupHmacs: readonly string[];
+  }>,
+): Promise<readonly FundingReportedPolymarketHandoffCandidate[]> {
+  if (input.receiptRefLookupHmacs.length === 0) return [];
+  const { rows } =
+    await db.query<FundingReportedPolymarketHandoffCandidateDbRow>(
+      `
+        select
+          operation.id as operation_id,
+          step.id as step_id,
+          attempt.id as attempt_id,
+          attempt.receipt_ref_lookup_hmac,
+          step.normalized_action,
+          step.action_validation_result
+        from funding_operation_step_attempts attempt
+        join funding_operation_steps step on step.id = attempt.step_id
+        join funding_operations operation on operation.id = step.operation_id
+        where operation.user_id = $1
+          and attempt.lookup_key_version = $2
+          and attempt.receipt_ref_lookup_hmac = any($3::text[])
+          and attempt.broadcast_may_have_occurred = true
+          and attempt.reference_kind = 'transaction'
+          and step.normalized_action ->> 'kind' = 'external_handoff'
+          and step.normalized_action ->> 'handoffKind'
+            = 'polymarket_deposit_wallet_transfer'
+      `,
+      [
+        input.userId,
+        input.lookupKeyVersion,
+        [...new Set(input.receiptRefLookupHmacs)],
+      ],
+    );
+  return rows.map((row) => ({
+    operationId: row.operation_id,
+    stepId: row.step_id,
+    attemptId: row.attempt_id,
+    receiptRefLookupHmac: row.receipt_ref_lookup_hmac,
+    normalizedAction: row.normalized_action,
+    actionValidationResult: row.action_validation_result,
+  }));
+}
+
 export type FundingWithdrawalDestination = Readonly<{
   id: string;
   userId: string;

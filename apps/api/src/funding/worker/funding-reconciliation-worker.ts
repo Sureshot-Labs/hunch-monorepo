@@ -92,17 +92,42 @@ export async function runFundingReconciliationJob(
       receiveRouting: null,
     };
   }
-  const receiveObservation =
-    await new FundingReceiveSessionObserver().pollBatch(pool, {
+  const relay = options.relay;
+  const codecConfig = relay
+    ? {
+        encryptionKey: decodeCredentialsEncryptionKey(
+          relay.credentialsEncryptionKey,
+        ),
+        lookupHmacKey: relay.referenceLookupHmacKey,
+        keyVersion: relay.referenceKeyVersion,
+      }
+    : null;
+  const transactionCodec = codecConfig
+    ? createFundingTransactionReferenceCodec(codecConfig)
+    : null;
+  const runReceivePipeline = async () => {
+    const receiveObservation = await new FundingReceiveSessionObserver(
+      transactionCodec
+        ? {
+            transactionReferenceLookup: {
+              fingerprint: (value) => transactionCodec.fingerprint(value),
+              keyVersion: transactionCodec.keyVersion,
+            },
+          }
+        : {},
+    ).pollBatch(pool, {
       limit: options.limit ?? 25,
       minimumPollIntervalMs: options.receivePollDelayMs ?? 10_000,
       now: options.now,
     });
-  const receiveRouting = await new FundingReceiveReceiptRouter(pool).runBatch({
-    limit: options.limit ?? 25,
-    now: options.now,
-  });
-  const relay = options.relay;
+    const receiveRouting = await new FundingReceiveReceiptRouter(pool).runBatch(
+      {
+        limit: options.limit ?? 25,
+        now: options.now,
+      },
+    );
+    return { receiveObservation, receiveRouting };
+  };
   const directIngressObserver = new DirectIngressDestinationObserver();
   const ownedRouteObserver = new OwnedRouteDestinationObserver();
   const pollDestination = async (operationId: string, now: Date) => {
@@ -122,16 +147,11 @@ export async function runFundingReconciliationJob(
       ...options,
       destinationPoll: pollDestination,
     });
-    return { ...result, receiveObservation, receiveRouting };
+    return { ...result, ...(await runReceivePipeline()) };
   }
-  const encryptionKey = decodeCredentialsEncryptionKey(
-    relay.credentialsEncryptionKey,
-  );
-  const codecConfig = {
-    encryptionKey,
-    lookupHmacKey: relay.referenceLookupHmacKey,
-    keyVersion: relay.referenceKeyVersion,
-  };
+  if (!codecConfig || !transactionCodec) {
+    throw new Error("funding transaction codec configuration is unavailable");
+  }
   const driver = new RelayReconciliationDriver(
     new RelayClient({
       apiKey: relay.apiKey,
@@ -140,7 +160,6 @@ export async function runFundingReconciliationJob(
     createRelayReferenceCodec(codecConfig),
     createRelayDepositAddressCodec(codecConfig),
   );
-  const transactionCodec = createFundingTransactionReferenceCodec(codecConfig);
   const receiptDriver = new FundingStepReceiptReconciliationDriver(
     transactionCodec,
   );
@@ -161,7 +180,7 @@ export async function runFundingReconciliationJob(
       ),
     destinationPoll: pollDestination,
   });
-  return { ...result, receiveObservation, receiveRouting };
+  return { ...result, ...(await runReceivePipeline()) };
 }
 
 export type {
