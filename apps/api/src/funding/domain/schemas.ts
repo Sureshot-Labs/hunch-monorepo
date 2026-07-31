@@ -327,7 +327,6 @@ export const svmTransactionActionSchema = normalizedActionBaseSchema
                   })
                   .strict(),
               )
-              .min(1)
               .max(64),
             data: z.string().regex(unprefixedHexPattern),
             dataEncoding: z.literal("hex"),

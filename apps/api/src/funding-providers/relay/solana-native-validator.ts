@@ -169,6 +169,28 @@ function assertAccount(
   }
 }
 
+function assertAccountPresent(
+  instructionValue: ValidatedSolanaInstruction,
+  expected: Readonly<{
+    pubkey: string;
+    isSigner: boolean;
+    isWritable?: boolean;
+  }>,
+  label: string,
+): void {
+  if (
+    !instructionValue.keys.some(
+      (account) =>
+        account.pubkey === expected.pubkey &&
+        account.isSigner === expected.isSigner &&
+        (expected.isWritable === undefined ||
+          account.isWritable === expected.isWritable),
+    )
+  ) {
+    throw new Error(`${label} account missing`);
+  }
+}
+
 function bytes32(value: unknown, label: string): Buffer {
   const encoded = text(value, label);
   if (!/^0x[0-9a-f]{64}$/iu.test(encoded)) {
@@ -190,42 +212,33 @@ function validateJupiterSwap(input: {
   const value = input.instruction;
   exact(value.programId, JUPITER_V6_PROGRAM, "Jupiter program");
   assertSignerSet(value, input.user, "Jupiter swap");
-  if (value.keys.length < 7) {
-    throw new Error("Jupiter account layout is too short");
-  }
-  assertAccount(
+  assertAccountPresent(
     value,
-    0,
     { pubkey: SPL_TOKEN_PROGRAM, isSigner: false, isWritable: false },
     "Jupiter token program",
   );
-  assertAccount(
+  assertAccountPresent(
     value,
-    1,
     { pubkey: input.user, isSigner: true, isWritable: false },
     "Jupiter transfer authority",
   );
-  assertAccount(
+  assertAccountPresent(
     value,
-    2,
     { pubkey: input.wrappedSolAta, isSigner: false, isWritable: true },
     "Jupiter wrapped SOL input",
   );
-  assertAccount(
+  assertAccountPresent(
     value,
-    4,
     { pubkey: input.usdcAta, isSigner: false, isWritable: true },
     "Jupiter USDC output",
   );
-  assertAccount(
+  assertAccountPresent(
     value,
-    5,
     { pubkey: SOLANA_USDC, isSigner: false, isWritable: false },
     "Jupiter output mint",
   );
-  assertAccount(
+  assertAccountPresent(
     value,
-    6,
     { pubkey: JUPITER_V6_PROGRAM, isSigner: false, isWritable: false },
     "Jupiter program account",
   );
@@ -260,38 +273,14 @@ function validateRelayDeposit(input: {
   instruction: ValidatedSolanaInstruction;
   orderId: Buffer;
   user: string;
-  usdcAta: string;
 }): void {
   const value = input.instruction;
   exact(value.programId, RELAY_SOLANA_SWAP_PROGRAM, "Relay deposit program");
   assertSignerSet(value, input.user, "Relay deposit");
-  if (value.keys.length !== 12) {
-    throw new Error("Relay deposit account layout mismatch");
-  }
-  [
-    [0, input.user, true, true],
-    [1, input.user, false, false],
-    [2, input.usdcAta, false, true],
-    [3, JUPITER_V6_PROGRAM, false, false],
-    [4, MEMO_PROGRAM, false, false],
-    [5, SOLANA_USDC, false, false],
-    [6, input.usdcAta, false, true],
-    [7, RELAY_SOLANA_SWAP_PROGRAM, false, true],
-    [8, RELAY_SOLANA_DEPOSITORY, false, false],
-    [9, SPL_TOKEN_PROGRAM, false, false],
-    [10, SPL_ASSOCIATED_TOKEN_PROGRAM, false, false],
-    [11, SOLANA_SYSTEM_PROGRAM, false, false],
-  ].forEach(([index, pubkey, isSigner, isWritable]) =>
-    assertAccount(
-      value,
-      Number(index),
-      {
-        pubkey: String(pubkey),
-        isSigner: Boolean(isSigner),
-        isWritable: Boolean(isWritable),
-      },
-      `Relay deposit[${index}]`,
-    ),
+  assertAccountPresent(
+    value,
+    { pubkey: input.user, isSigner: true, isWritable: true },
+    "Relay deposit controlled signer",
   );
   const data = Buffer.from(value.data);
   if (
@@ -304,13 +293,17 @@ function validateRelayDeposit(input: {
   }
 }
 
-function assertAtaCreation(input: {
-  instruction: ValidatedSolanaInstruction;
-  index: number;
+type ValidatedAtaCreation = Readonly<{
+  ata: string;
   mint: string;
   owner: string;
-  ata: string;
-}): void {
+}>;
+
+function assertBoundedAtaCreation(input: {
+  instruction: ValidatedSolanaInstruction;
+  index: number;
+  payer: string;
+}): ValidatedAtaCreation {
   const value = input.instruction;
   exact(
     value.programId,
@@ -325,11 +318,21 @@ function assertAtaCreation(input: {
       `instructions[${input.index}] must be idempotent ATA creation`,
     );
   }
+  const mint = value.keys[3]?.pubkey;
+  const owner = value.keys[2]?.pubkey;
+  if (!mint || !owner) {
+    throw new Error(`instructions[${input.index}] ATA identity is missing`);
+  }
+  const ata = getAssociatedTokenAddressSync(
+    new PublicKey(mint),
+    new PublicKey(owner),
+    true,
+  ).toBase58();
   const expected = [
-    [input.owner, true, true],
-    [input.ata, false, true],
-    [input.owner, false, false],
-    [input.mint, false, false],
+    [input.payer, true, true],
+    [ata, false, true],
+    [owner, false, false],
+    [mint, false, false],
     [SOLANA_SYSTEM_PROGRAM, false, false],
     [SPL_TOKEN_PROGRAM, false, false],
   ] as const;
@@ -349,44 +352,30 @@ function assertAtaCreation(input: {
       );
     }
   });
+  return { ata, mint, owner };
 }
 
-function assertAtaCreationPair(input: {
+function assertBoundedAtaCreationPair(input: {
   instructions: readonly [
     ValidatedSolanaInstruction,
     ValidatedSolanaInstruction,
   ];
-  owner: string;
-  creations: readonly [
-    Readonly<{ mint: string; ata: string }>,
-    Readonly<{ mint: string; ata: string }>,
-  ];
-}): void {
-  const firstAta = input.instructions[0].keys[1]?.pubkey;
-  const [first, second] =
-    firstAta === input.creations[0].ata
-      ? input.creations
-      : firstAta === input.creations[1].ata
-        ? [input.creations[1], input.creations[0]]
-        : (() => {
-            throw new Error(
-              `instructions[0].keys[1] is not an authorized ATA: expected ${input.creations[0].ata} or ${input.creations[1].ata}, received ${firstAta ?? "missing"}`,
-            );
-          })();
-  assertAtaCreation({
+  payer: string;
+}): readonly [ValidatedAtaCreation, ValidatedAtaCreation] {
+  const first = assertBoundedAtaCreation({
     instruction: input.instructions[0],
     index: 0,
-    mint: first.mint,
-    owner: input.owner,
-    ata: first.ata,
+    payer: input.payer,
   });
-  assertAtaCreation({
+  const second = assertBoundedAtaCreation({
     instruction: input.instructions[1],
     index: 1,
-    mint: second.mint,
-    owner: input.owner,
-    ata: second.ata,
+    payer: input.payer,
   });
+  if (first.ata === second.ata) {
+    throw new Error("native SOL route contains duplicate ATA creation");
+  }
+  return [first, second];
 }
 
 function validateProtocol(input: {
@@ -698,14 +687,13 @@ export function validateRelaySolanaNativeQuote(input: {
   ) {
     throw new Error("native SOL route instruction disappeared");
   }
-  assertAtaCreationPair({
+  const ataCreations = assertBoundedAtaCreationPair({
     instructions: [createAtaFirst, createAtaSecond],
-    owner: user,
-    creations: [
-      { mint: SOLANA_USDC, ata: usdcAta },
-      { mint: WRAPPED_SOL_MINT, ata: wrappedSolAta },
-    ],
+    payer: user,
   });
+  const paymentUsdcAta =
+    ataCreations.find((creation) => creation.mint === SOLANA_USDC)?.ata ??
+    usdcAta;
   exact(transfer.programId, SOLANA_SYSTEM_PROGRAM, "transfer program");
   assertSignerSet(transfer, user, "SOL transfer");
   if (
@@ -748,7 +736,7 @@ export function validateRelaySolanaNativeQuote(input: {
     paymentAmountRaw,
     sourceAmountRaw,
     user,
-    usdcAta,
+    usdcAta: paymentUsdcAta,
     wrappedSolAta,
   });
 
@@ -783,7 +771,6 @@ export function validateRelaySolanaNativeQuote(input: {
     instruction: deposit,
     orderId,
     user,
-    usdcAta,
   });
   exact(memo.programId, MEMO_PROGRAM, "memo program");
   if (

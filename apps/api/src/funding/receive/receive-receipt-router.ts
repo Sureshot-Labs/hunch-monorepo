@@ -228,6 +228,7 @@ export async function quoteFundingReceiveReceipt(
     }
     if (
       option.kind !== "wallet_asset" ||
+      option.amountMode !== "exact_input" ||
       option.source.kind !== "owned_location" ||
       option.source.location.locationId !==
         target.receiptDestinationLocationId ||

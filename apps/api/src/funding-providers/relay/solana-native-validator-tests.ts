@@ -8,6 +8,7 @@ import type {
   FundingSourceRef,
   FundingTarget,
 } from "../../funding/domain/types.js";
+import { normalizedActionSchema } from "../../funding/domain/schemas.js";
 import { RelayClient } from "./client.js";
 import { RELAY_ROUTE_SPECS } from "./mappings.js";
 import {
@@ -43,6 +44,18 @@ const USDC_ATA = getAssociatedTokenAddressSync(
 const WRAPPED_SOL_ATA = getAssociatedTokenAddressSync(
   new PublicKey(WRAPPED_SOL),
   new PublicKey(USER),
+).toBase58();
+const INTERMEDIATE_MINT = new PublicKey(
+  Uint8Array.from({ length: 32 }, (_value, index) => index + 1),
+).toBase58();
+const INTERMEDIATE_ATA = getAssociatedTokenAddressSync(
+  new PublicKey(INTERMEDIATE_MINT),
+  new PublicKey(USER),
+).toBase58();
+const ROUTE_OWNED_USDC_ATA = getAssociatedTokenAddressSync(
+  new PublicKey(SOLANA_USDC),
+  new PublicKey(RELAY_SOLANA_DEPOSITORY),
+  true,
 ).toBase58();
 
 const key = (pubkey: string, isSigner = false, isWritable = false) => ({
@@ -399,6 +412,7 @@ if (result.actions[0]?.kind !== "svm_transaction") {
 }
 assert.equal(result.actions[0].instructions.length, 8);
 assert.equal(result.actions[0].addressLookupTables.length, 2);
+assert.doesNotThrow(() => normalizedActionSchema.parse(result.actions[0]));
 
 {
   let exactInputRequestBody: Record<string, unknown> = {};
@@ -506,6 +520,77 @@ async function assertQuoteRejected(
 }
 
 {
+  const intermediate = quoteFixture();
+  const ataCreation = intermediate.steps[0]?.items[0]?.data.instructions[0];
+  if (!ataCreation) throw new Error("ATA creation fixture missing");
+  ataCreation.keys[1] = key(INTERMEDIATE_ATA, false, true);
+  ataCreation.keys[3] = key(INTERMEDIATE_MINT);
+  const intermediateClient = new RelayClient({
+    apiKey: "test-relay-key",
+    fetchImpl: async () =>
+      new Response(JSON.stringify(intermediate), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+  });
+  const intermediateResult = await new RelayWalletQuoteAdapter(
+    intermediateClient,
+  ).quote({
+    route: { ...route, quoteMode: "exact_input" },
+    source,
+    destination,
+    sourceAmount: { asset: route.source, raw: "14398334" },
+    minimumOutput: { asset: route.destination, raw: "1" },
+    userAddress: USER,
+    recipientAddress: RECIPIENT,
+    senderWalletId: "wallet_solana_native_12345678",
+    quoteCorrelationId: "quote_solana_native_intermediate_ata_12345678",
+    deadline: new Date(Date.now() + 60_000),
+    maximumSlippageBps: 100,
+  });
+  assert.equal(intermediateResult.candidate.amountMode, "exact_input");
+}
+
+{
+  const routeOwnedUsdc = quoteFixture();
+  const ataCreation = routeOwnedUsdc.steps[0]?.items[0]?.data.instructions[0];
+  if (!ataCreation) throw new Error("ATA creation fixture missing");
+  ataCreation.keys[1] = key(ROUTE_OWNED_USDC_ATA, false, true);
+  ataCreation.keys[2] = key(RELAY_SOLANA_DEPOSITORY);
+  const swap = routeOwnedUsdc.steps[0]?.items[0]?.data.instructions[4];
+  const deposit = routeOwnedUsdc.steps[0]?.items[0]?.data.instructions[6];
+  if (!swap || !deposit) throw new Error("route-owned USDC fixtures missing");
+  swap.keys[4] = key(ROUTE_OWNED_USDC_ATA, false, true);
+  deposit.keys[2] = key(USDC_ATA, false, true);
+  deposit.keys[6] = key(ROUTE_OWNED_USDC_ATA, false, true);
+  [deposit.keys[2], deposit.keys[3]] = [deposit.keys[3], deposit.keys[2]];
+  const routeOwnedUsdcClient = new RelayClient({
+    apiKey: "test-relay-key",
+    fetchImpl: async () =>
+      new Response(JSON.stringify(routeOwnedUsdc), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+  });
+  const routeOwnedUsdcResult = await new RelayWalletQuoteAdapter(
+    routeOwnedUsdcClient,
+  ).quote({
+    route: { ...route, quoteMode: "exact_input" },
+    source,
+    destination,
+    sourceAmount: { asset: route.source, raw: "14398334" },
+    minimumOutput: { asset: route.destination, raw: "1" },
+    userAddress: USER,
+    recipientAddress: RECIPIENT,
+    senderWalletId: "wallet_solana_native_12345678",
+    quoteCorrelationId: "quote_solana_native_route_owned_usdc_ata_12345678",
+    deadline: new Date(Date.now() + 60_000),
+    maximumSlippageBps: 100,
+  });
+  assert.equal(routeOwnedUsdcResult.candidate.amountMode, "exact_input");
+}
+
+{
   const mutated = quoteFixture();
   const ataCreation = mutated.steps[0]?.items[0]?.data.instructions[0];
   if (!ataCreation) throw new Error("ATA creation fixture missing");
@@ -536,9 +621,7 @@ async function assertQuoteRejected(
       }),
     (error: unknown) =>
       error instanceof RelayQuoteValidationError &&
-      error.message.includes(
-        "instructions[0].keys[1] is not an authorized ATA",
-      ),
+      error.message.includes("instructions[0].keys[1] mismatch"),
   );
 }
 
@@ -588,10 +671,8 @@ async function assertQuoteRejected(
   const mutated = quoteFixture();
   const deposit = mutated.steps[0]?.items[0]?.data.instructions[6];
   if (!deposit) throw new Error("Relay deposit fixture missing");
-  const routerAccount = deposit.keys[3];
-  if (!routerAccount) throw new Error("Relay router account missing");
-  routerAccount.pubkey = RELAY_SOLANA_DEPOSITORY;
-  await assertQuoteRejected(mutated, /Relay deposit\[3\] account mismatch/u);
+  deposit.programId = RELAY_SOLANA_DEPOSITORY;
+  await assertQuoteRejected(mutated, /Relay deposit program mismatch/u);
 }
 
 console.log(

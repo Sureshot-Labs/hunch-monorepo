@@ -319,6 +319,46 @@ assert.equal(
   "an automatic exact-input receipt route must not turn the discovery floor into an exact-output quote",
 );
 
+let expectedOutputReceiptQuoted = false;
+const expectedOutputReceiptResult = await quoteFundingReceiveReceipt(
+  {
+    async liquidity() {
+      return {
+        liquidityProjectionId: "projection_receive_expected_output_12345678",
+        sourceOptions: [
+          {
+            sourceOptionId: "source_receive_expected_output_12345678",
+            selectable: true,
+            amountMode: "exact_output",
+            kind: "wallet_asset",
+            source: {
+              kind: "owned_location",
+              location: {
+                locationId: "location_receive_route_exact_receipt_12345678",
+                asset: routedReceiptAsset,
+                details: {
+                  address: "0x0000000000000000000000000000000000000003",
+                },
+              },
+            },
+          },
+        ],
+      } as never;
+    },
+    async quote() {
+      expectedOutputReceiptQuoted = true;
+      return { quoteId: "quote_receive_expected_output_12345678" } as never;
+    },
+  },
+  routedReceiptTarget,
+);
+assert.equal(expectedOutputReceiptResult, null);
+assert.equal(
+  expectedOutputReceiptQuoted,
+  false,
+  "a received exact source amount must never select an exact-output plan",
+);
+
 function variant(
   variantId: string,
   baselineRaw: string,
