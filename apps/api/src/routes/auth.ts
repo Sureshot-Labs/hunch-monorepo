@@ -62,6 +62,7 @@ import {
   DEFAULT_PRIVY_TERMINAL_AUTH_MESSAGE,
   getPrivyTerminalAuthMessage,
 } from "../lib/privy-auth-errors.js";
+import { reconcilePendingPrivyDeletions } from "../services/privy-deletion-reconciler.js";
 
 const WALLET_TYPES = new Set(["ethereum", "solana"]);
 const ETH_ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
@@ -706,13 +707,15 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
 
       let privyDeleted = false;
       if (privyUserId && deletion.privyDeletionAllowed) {
-        try {
-          await PrivyService.deleteUser(privyUserId);
-          privyDeleted = true;
-        } catch (error) {
+        const reconciliation = await reconcilePendingPrivyDeletions(pool, {
+          limit: 1,
+          userId: user.id,
+        });
+        privyDeleted = reconciliation.completed === 1;
+        if (reconciliation.failed > 0) {
           app.log.error(
-            { error, userId: user.id, privyUserId },
-            "Failed to delete Privy user",
+            { userId: user.id, privyUserId },
+            "Failed to reconcile pending Privy user deletion",
           );
         }
       }
@@ -723,8 +726,7 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
         disposition: deletion.disposition,
         activeMovement: deletion.activeMovement,
         privyDeleted,
-        privyDeletionPending:
-          Boolean(privyUserId) && !deletion.privyDeletionAllowed,
+        privyDeletionPending: Boolean(privyUserId) && !privyDeleted,
       });
     },
   );

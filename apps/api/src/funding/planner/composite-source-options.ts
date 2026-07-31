@@ -463,9 +463,7 @@ function venueBindingOptionId(source: PlannedSourceOption): string | null {
     : null;
 }
 
-function destinationObservation(
-  source: PlannedSourceOption,
-): JsonValue | null {
+function destinationObservation(source: PlannedSourceOption): JsonValue | null {
   return (
     source.commitPlan.operation.supportMetadata?.destinationObservation ?? null
   );
@@ -483,10 +481,7 @@ function sharedProviderDestinationObservation(
     observation == null ||
     providerCandidates.some(
       (entry) =>
-        !canonicalJsonEqual(
-          destinationObservation(entry.source),
-          observation,
-        ),
+        !canonicalJsonEqual(destinationObservation(entry.source), observation),
     )
   ) {
     throw new Error(

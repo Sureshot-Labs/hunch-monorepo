@@ -132,6 +132,31 @@ function createMergeDb(fixture: MergeDbFixture) {
         ] as unknown as T[]);
       }
       if (
+        normalized.includes("as active_preparation") &&
+        normalized.includes("as preparation_run_count")
+      ) {
+        return result<T>([
+          {
+            active_funding_movement: false,
+            active_legacy_bridge: false,
+            active_position_action: false,
+            active_preparation: false,
+            active_receive_session: false,
+            active_telegram_intent: false,
+            deposit_evidence: false,
+            funding_evidence:
+              (fixture.fundingConflicts?.fundingPreparationRuns ?? 0) > 0,
+            legacy_bridge_evidence: false,
+            position_action_evidence: false,
+            preparation_run_count: String(
+              fixture.fundingConflicts?.fundingPreparationRuns ?? 0,
+            ),
+            receive_evidence: false,
+            trading_evidence: false,
+          },
+        ] as unknown as T[]);
+      }
+      if (
         normalized.includes("from user_telegram_accounts") &&
         normalized.includes("where user_id = $1")
       ) {
@@ -232,6 +257,7 @@ const tests: Array<{ name: string; run: () => Promise<void> }> = [
           nonTerminalLegacyBridgeOrders: 5,
           nonTerminalTelegramTradeIntents: 6,
           fundingTradeAttempts: 8,
+          fundingPreparationRuns: 11,
           positionActionEvidence: 9,
           receiveEvidence: 10,
         },
@@ -253,6 +279,7 @@ const tests: Array<{ name: string; run: () => Promise<void> }> = [
             ambiguousFundingAttempts: 2,
             fundingConsentConflicts: 0,
             fundingIdempotencyConflicts: 0,
+            fundingPreparationRuns: 11,
             fundingTradeAttempts: 8,
             liveFundingReservations: 3,
             nonTerminalFundingOperations: 4,

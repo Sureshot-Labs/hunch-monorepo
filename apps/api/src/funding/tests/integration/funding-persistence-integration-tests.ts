@@ -2393,6 +2393,48 @@ async function testTransactionalPersistenceContracts(): Promise<void> {
       }),
       "ambiguous_duplicate_observation",
     );
+    await expectFundingError(
+      allocateFundingObservationInTransaction(client, {
+        operationId: committedA.operation.id,
+        segmentId,
+        kind: "source_debit",
+        networkId: ASSET.networkId,
+        assetId: ASSET.assetId,
+        assetDecimals: 18,
+        txHash: sourceObservation.observation.txHash,
+        eventIndex: "0",
+        fromAddress: "0xsource",
+        toAddress: "0xrouter",
+        rawAmount: "1000000",
+        observedAt: new Date(),
+        ledgerHeight: "100",
+        blockHash: sourceObservation.observation.blockHash,
+        finalityStatus: "finalized",
+        finalizedAt: new Date(),
+      }),
+      "ambiguous_duplicate_observation",
+    );
+    await expectFundingError(
+      allocateFundingObservationInTransaction(client, {
+        operationId: committedA.operation.id,
+        segmentId,
+        kind: "source_debit",
+        networkId: ASSET.networkId,
+        assetId: "erc20:0x0000000000000000000000000000000000000002",
+        assetDecimals: ASSET.decimals,
+        txHash: sourceObservation.observation.txHash,
+        eventIndex: "0",
+        fromAddress: "0xsource",
+        toAddress: "0xrouter",
+        rawAmount: "1000000",
+        observedAt: new Date(),
+        ledgerHeight: "100",
+        blockHash: sourceObservation.observation.blockHash,
+        finalityStatus: "finalized",
+        finalizedAt: new Date(),
+      }),
+      "ambiguous_duplicate_observation",
+    );
 
     const factsBeforeReducer = await loadFundingAccountValueFacts(
       client as never,
@@ -3133,6 +3175,31 @@ async function testTransactionalPersistenceContracts(): Promise<void> {
       [disposableUser],
     );
     assert.equal(disposableUserCount.rows[0]?.count, "0");
+
+    const preparationUser = await insertUser(client);
+    await client.query(
+      `
+        insert into funding_preparation_runs (
+          user_id,
+          request_fingerprint,
+          request_snapshot,
+          inspection_revision,
+          status,
+          expires_at
+        )
+        values ($1, $2, '{}'::jsonb, $3, 'action_required', now() + interval '1 hour')
+      `,
+      [preparationUser, hash("p"), "inspection-revision-test"],
+    );
+    const preparationDeletion = await AuthService.deleteUser(
+      preparationUser,
+      client,
+    );
+    assert.equal(preparationDeletion.disposition, "deactivated");
+    assert.equal(preparationDeletion.activeMovement, false);
+    assert.ok(
+      preparationDeletion.protectedReasons.includes("funding_evidence"),
+    );
 
     const retainedDeletion = await AuthService.deleteUser(userB, client);
     assert.equal(retainedDeletion.disposition, "deactivated");

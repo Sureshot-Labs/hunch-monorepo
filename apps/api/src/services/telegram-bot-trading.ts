@@ -371,6 +371,7 @@ type TelegramReadinessRepairAudit = {
 
 type TelegramSetupTransactionAudit = {
   kind: "approval" | "funding_router" | "redemption_adapter";
+  recordedAt?: string | null;
   referenceId?: string | null;
   transactionId?: string | null;
   txHash: string | null;
@@ -1171,25 +1172,12 @@ function readPolymarketControlledFundsUsd(
   return Number.isFinite(amount) && amount >= 0 ? amount : null;
 }
 
-function readPolymarketSpendableFundsUsd(
-  readiness: TradingReadiness | null | undefined,
-): number | null {
-  if (!isRecord(readiness?.raw)) return null;
-  if (readiness.raw.kind !== "polymarket_funds_v1") return null;
-  const raw = readiness.raw.spendableFundsRaw;
-  if (typeof raw !== "string" || !/^\d+$/.test(raw)) return null;
-  const amount = Number(raw) / 1_000_000;
-  return Number.isFinite(amount) && amount >= 0 ? amount : null;
-}
-
 export function resolveTelegramBuyFundingState(input: {
   controlledFundsUsd: number | null;
   executableFundsUsd: number;
   requiredUsd: number;
-  spendableFundsUsd?: number | null;
 }): "convert" | "deposit" | "ready" {
-  const spendableFundsUsd = input.spendableFundsUsd ?? input.executableFundsUsd;
-  if (input.requiredUsd <= spendableFundsUsd + 0.000_001) {
+  if (input.requiredUsd <= input.executableFundsUsd + 0.000_001) {
     return "ready";
   }
   if (
@@ -1205,7 +1193,6 @@ export function resolveTelegramBuyFundingPreview(input: {
   controlledFundsUsd: number | null;
   executableFundsUsd: number;
   requiredUsd: number;
-  spendableFundsUsd?: number | null;
 }): {
   availableUsd: number;
   shortfallUsd: number;
@@ -5211,7 +5198,7 @@ export async function handleTelegramBotTradingCallback(
     policy,
     authorization?.max_amount_usd ?? null,
   );
-  let tradeReadiness =
+  const tradeReadiness =
     authorization && market
       ? await resolveTelegramTradingReadiness({
           action: action === "SELL" ? "SELL" : "BUY",
@@ -5387,7 +5374,7 @@ export async function handleTelegramBotTradingCallback(
       });
       return true;
     }
-    let previewMaxSpendUsd =
+    const previewMaxSpendUsd =
       action === "BUY" ? (previewQuote.maxSpendUsd ?? amountUsd) : null;
     if (
       isTelegramVenueMinimumBlocking({
@@ -5451,154 +5438,19 @@ export async function handleTelegramBotTradingCallback(
       });
       return true;
     }
-    let previewFundingPreparation: Record<string, unknown> | null = null;
     if (action === "BUY" && previewMaxSpendUsd != null) {
-      let executableFundsUsd = Math.max(
+      const executableFundsUsd = Math.max(
         0,
         tradeReadiness?.maxExecutableBuyUsd ?? 0,
       );
-      let controlledFundsUsd = readPolymarketControlledFundsUsd(tradeReadiness);
-      let spendableFundsUsd = readPolymarketSpendableFundsUsd(tradeReadiness);
-      let fundingPreview = resolveTelegramBuyFundingPreview({
+      const controlledFundsUsd =
+        readPolymarketControlledFundsUsd(tradeReadiness);
+      const fundingPreview = resolveTelegramBuyFundingPreview({
         controlledFundsUsd,
         executableFundsUsd,
         requiredUsd: previewMaxSpendUsd,
-        spendableFundsUsd,
       });
-      let fundingState = fundingPreview.state;
-      if (fundingState === "convert" && intent.venue === "polymarket") {
-        const setupTransactions: TelegramSetupTransactionAudit[] = [];
-        try {
-          const fundingResult = await trading.fundTradeShortfall({
-            intent: previewIntent,
-            quote: previewQuote,
-            onSetupTransactionSubmitted: async (setupTransaction) => {
-              const existingIndex = setupTransactions.findIndex(
-                (entry) =>
-                  (setupTransaction.referenceId &&
-                    entry.referenceId === setupTransaction.referenceId) ||
-                  (setupTransaction.transactionId &&
-                    entry.transactionId === setupTransaction.transactionId) ||
-                  (setupTransaction.txHash &&
-                    entry.txHash === setupTransaction.txHash),
-              );
-              if (existingIndex >= 0) {
-                setupTransactions[existingIndex] = {
-                  ...setupTransactions[existingIndex],
-                  ...setupTransaction,
-                };
-              } else {
-                setupTransactions.push(setupTransaction);
-              }
-              await updateIntentStatus({
-                allowedStatuses: ["draft", "previewed"],
-                db: input.db,
-                intentId: intent.id,
-                quoteSnapshot: buildTelegramTradeQuotePreview(previewQuote),
-                result: {
-                  setupTransactions: [...setupTransactions],
-                  stage: "delegated_funding",
-                },
-                status: "previewed",
-              });
-            },
-          });
-          tradeReadiness = await resolveTelegramTradingReadiness({
-            action: "BUY",
-            authorization,
-            market: marketForCallbackReadiness("BUY", market),
-            trading,
-            venue: intent.venue,
-          });
-          previewQuote = await trading.quote({ intent: previewIntent });
-          previewMaxSpendUsd = previewQuote.maxSpendUsd ?? previewMaxSpendUsd;
-          executableFundsUsd = Math.max(
-            0,
-            tradeReadiness?.maxExecutableBuyUsd ?? 0,
-          );
-          controlledFundsUsd = readPolymarketControlledFundsUsd(tradeReadiness);
-          spendableFundsUsd = readPolymarketSpendableFundsUsd(tradeReadiness);
-          fundingPreview = resolveTelegramBuyFundingPreview({
-            controlledFundsUsd,
-            executableFundsUsd,
-            requiredUsd: previewMaxSpendUsd,
-            spendableFundsUsd,
-          });
-          fundingState = fundingPreview.state;
-          previewFundingPreparation = {
-            funded: fundingResult.funded,
-            setupTransactions,
-            transactionHash: fundingResult.transactionHash,
-          };
-          if (
-            isTelegramVenueMinimumBlocking({
-              action: previewIntent.action,
-              meetsVenueMinimum: previewQuote.meetsVenueMinimum,
-              orderType: previewIntent.orderType,
-              venue: previewIntent.venue,
-            }) ||
-            previewMaxSpendUsd > maxAmountUsd
-          ) {
-            await updateIntentStatus({
-              allowedStatuses: ["draft", "previewed"],
-              db: input.db,
-              errorCode: "quote_changed",
-              errorMessage:
-                "The quote changed after Polymarket funding completed.",
-              intentId: intent.id,
-              quoteSnapshot: buildTelegramTradeQuotePreview(previewQuote),
-              result: {
-                fundingPreparation: previewFundingPreparation,
-                previewQuote,
-                stage: "post_funding_quote",
-              },
-              status: "failed",
-            });
-            await input.sendMessage({
-              chat_id: chatId,
-              parse_mode: "MarkdownV2",
-              text: formatTelegramTradeLifecycleMessageMarkdownV2({
-                heading: "Funds prepared, but the quote changed.",
-                lines: [
-                  "No trade was submitted. Send /market again for a fresh confirmation.",
-                ],
-                marketTitle: intent.market_title,
-                venue: intent.venue,
-              }),
-            });
-            return true;
-          }
-        } catch (error) {
-          const normalized = trading.normalizeError(intent.venue, error);
-          await updateIntentStatus({
-            allowedStatuses: ["draft", "previewed"],
-            db: input.db,
-            errorCode: normalized.code,
-            errorMessage: normalized.message,
-            intentId: intent.id,
-            quoteSnapshot: buildTelegramTradeQuotePreview(previewQuote),
-            result: {
-              error: normalized,
-              setupTransactions,
-              stage: "delegated_funding",
-            },
-            status: "previewed",
-          });
-          await input.sendMessage({
-            chat_id: chatId,
-            parse_mode: "MarkdownV2",
-            text: formatTelegramTradeLifecycleMessageMarkdownV2({
-              heading: "Automatic Polymarket funding is not ready.",
-              lines: [
-                "No trade was submitted. Open Hunch to convert, or check the balance and try again.",
-              ],
-              marketTitle: intent.market_title,
-              venue: intent.venue,
-            }),
-          });
-          return true;
-        }
-      }
+      const fundingState = fundingPreview.state;
       if (fundingState !== "ready") {
         await updateIntentStatus({
           allowedStatuses: ["draft", "previewed"],
@@ -5606,9 +5458,6 @@ export async function handleTelegramBotTradingCallback(
           intentId: intent.id,
           quoteSnapshot: buildTelegramTradeQuotePreview(previewQuote),
           result: {
-            ...(previewFundingPreparation
-              ? { fundingPreparation: previewFundingPreparation }
-              : {}),
             fundingState,
             previewQuote,
             stage: "funding_preview",
@@ -5790,12 +5639,7 @@ export async function handleTelegramBotTradingCallback(
       db: input.db,
       intentId: intent.id,
       quoteSnapshot: buildTelegramTradeQuotePreview(previewQuote),
-      result: {
-        ...(previewFundingPreparation
-          ? { fundingPreparation: previewFundingPreparation }
-          : {}),
-        previewQuote,
-      },
+      result: { previewQuote },
       status: "previewed",
     });
     if (!previewRecorded) {

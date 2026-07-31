@@ -37,9 +37,7 @@ export class RelayClientError extends Error {
 // retained for diagnostics but is not an application-level routing boundary.
 export function isRelayQuoteRejectedError(error: RelayClientError): boolean {
   return (
-    error.code === "http_error" &&
-    error.httpStatus === 400 &&
-    !error.retryable
+    error.code === "http_error" && error.httpStatus === 400 && !error.retryable
   );
 }
 

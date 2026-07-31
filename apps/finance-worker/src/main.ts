@@ -6,6 +6,7 @@ import {
   runFeesReconcileJob,
   runKalshiExecutionReconcileJob,
   runPositionResolutionNotificationJob,
+  runPrivyDeletionReconcileJob,
   runRewardsPayoutJob,
   runTelegramTradeIntentReconcileJob,
   runTreasurySweepJob,
@@ -180,6 +181,21 @@ export function buildJobs(workerEnv: FinanceWorkerEnv = env): ScheduledJob[] {
       retryBackoffSec: workerEnv.retryBackoffSec,
       jitterSec: workerEnv.jitterSec,
       run: () => runPositionResolutionNotificationJob(),
+    },
+    {
+      name: "privy_deletion_reconcile",
+      enabled:
+        workerEnv.privyDeletionReconciliationEnabled &&
+        Boolean(workerEnv.databaseUrl),
+      intervalSec: workerEnv.privyDeletionReconciliationIntervalSec,
+      timeoutSec: workerEnv.jobTimeoutSec,
+      maxRetries: workerEnv.maxRetries,
+      retryBackoffSec: workerEnv.retryBackoffSec,
+      jitterSec: workerEnv.jitterSec,
+      run: () =>
+        runPrivyDeletionReconcileJob({
+          limit: workerEnv.privyDeletionReconciliationBatchSize,
+        }),
     },
     {
       name: "treasury_sweep",

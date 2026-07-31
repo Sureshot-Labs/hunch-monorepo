@@ -5791,7 +5791,6 @@ function evaluatePolymarketFundsReadiness(input: {
   buyApprovalOk: boolean;
   controlledFundsRaw?: bigint;
   executableFundsRaw: bigint;
-  spendableFundsRaw?: bigint;
 }): TradingReadiness {
   const raw = {
     kind: "polymarket_funds_v1",
@@ -5799,9 +5798,6 @@ function evaluatePolymarketFundsReadiness(input: {
       input.controlledFundsRaw ?? input.executableFundsRaw
     ).toString(),
     executableFundsRaw: input.executableFundsRaw.toString(),
-    spendableFundsRaw: (
-      input.spendableFundsRaw ?? input.executableFundsRaw
-    ).toString(),
   };
   if (!input.buyApprovalOk) {
     const code = "polymarket_approvals_missing";
@@ -7626,7 +7622,6 @@ async function getReadiness(
         funds.signerPusdTopUpRaw +
         funds.signerUsdceTopUpRaw,
       executableFundsRaw: funds.executableFundsRaw,
-      spendableFundsRaw: funds.funderPusdAvailableRaw,
     });
   } catch (error) {
     ctx.logger?.warn?.(
@@ -7913,207 +7908,6 @@ async function quote(
   };
 }
 
-/**
- * Completes only the delegated Funding Router step for a Telegram BUY.
- * The caller must obtain a fresh quote and a new explicit confirmation after
- * this returns; this function never prepares or submits the venue order.
- */
-async function fundTradeShortfall(
-  ctx: ApiTradingApplicationServiceInput,
-  input: PrepareTradeInput,
-) {
-  const intent = input.intent;
-  if (intent.actor.kind !== "telegram_bot" || intent.action !== "BUY") {
-    throw tradingError({
-      code: "unsupported_capability",
-      message:
-        "Delegated Polymarket funding is restricted to an authorized Telegram buy.",
-      venue: "polymarket",
-    });
-  }
-  const market = await loadMarketForVenue(
-    ctx.pool,
-    intent.target.marketId,
-    "polymarket",
-  );
-  const signer = toChecksumAddress(intent.walletAddress);
-  if (!signer) {
-    throw tradingError({
-      code: "invalid_trade_request",
-      message: "Polymarket bot funding requires a valid EVM wallet.",
-      venue: "polymarket",
-    });
-  }
-  const creds = await AuthService.getVenueCredentials(
-    intent.actor.userId,
-    "polymarket",
-    signer,
-  );
-  if (!creds?.apiKey || !creds.apiSecret || !creds.apiPassphrase) {
-    throw tradingError({
-      code: "insufficient_readiness",
-      message: "Polymarket CLOB credentials are missing.",
-      venue: "polymarket",
-    });
-  }
-  const l2Creds: PolymarketL2Credentials = {
-    apiKey: creds.apiKey,
-    apiSecret: creds.apiSecret,
-    apiPassphrase: creds.apiPassphrase,
-  };
-  const candidate = (
-    await derivePolymarketFunders({
-      signer,
-      storedFunder: creds.funderAddress ?? null,
-      includeMagicProxy: true,
-      bypassCodeCache: true,
-    })
-  ).recommended;
-  if (!candidate) {
-    throw tradingError({
-      code: "insufficient_readiness",
-      message: "Polymarket DepositWallet is not ready.",
-      venue: "polymarket",
-    });
-  }
-  const rawQuote =
-    extractQuoteRaw<PolymarketBotQuoteRaw>(input.quote) ??
-    ((await quote(ctx, { intent })).raw as PolymarketBotQuoteRaw);
-  const preparedQuote = inspectPolymarketPreparedQuote({
-    candidate,
-    rawQuote,
-  });
-  const policyFundingCapRaw = await resolvePolymarketBotPolicyFundingCapRaw();
-  let executableFunds = await resolvePolymarketMaxSpendFunds({
-    creds: l2Creds,
-    funder: candidate.funder,
-    funderExecutionKind: preparedQuote.funderExecutionKind,
-    fundingCapRaw: policyFundingCapRaw,
-    negRisk: readPolymarketNegRisk({
-      market,
-      quote: preparedQuote.rawQuote,
-    }),
-    pool: ctx.pool,
-    signer,
-    userId: intent.actor.userId,
-  });
-  assertPolymarketPreparedFunds({
-    buyApprovalOk: executableFunds.buyApproval.ok,
-    executableFundsRaw: executableFunds.executableFundsRaw,
-    requiredSpendRaw: preparedQuote.requiredSpendRaw,
-  });
-  const fundingPlan = buildPreparedPolymarketFundingPlan({
-    signer,
-    funder: candidate.funder,
-    funderExecutionKind: preparedQuote.funderExecutionKind,
-    funds: executableFunds,
-    requiredSpendRaw: preparedQuote.requiredSpendRaw,
-  });
-  if (!fundingPlan) {
-    return {
-      venue: "polymarket" as const,
-      funded: false,
-      transactionHash: null,
-      raw: {
-        reason: "already_venue_ready",
-        requiredSpendRaw: preparedQuote.requiredSpendRaw.toString(),
-      },
-    };
-  }
-
-  await assertServerEvmWalletAuthorization({
-    action: "BUY",
-    privyUserId: intent.executionAuthorization?.privyUserId,
-    signer,
-    venue: "polymarket",
-    walletId: getPrivyWalletId(intent),
-  });
-  const fundingReferenceId = `hunch:tgfund:${
-    intent.id?.trim() ||
-    crypto
-      .createHash("sha256")
-      .update(intent.idempotencyKey)
-      .digest("hex")
-      .slice(0, 40)
-  }`.slice(0, 64);
-  let acceptedTransactionId: string | null = null;
-  const transactionHash = await executeServerEmbeddedEthereumTransaction({
-    chainId: POLYGON_CHAIN_ID,
-    signer,
-    walletId: getPrivyWalletId(intent),
-    walletClient: createServerWalletClient(),
-    transaction: {
-      id: "polymarket-funding-router",
-      label: "Polymarket funding router",
-      to: fundingPlan.routerAddress,
-      data: fundingPlan.calldata,
-      value: "0x0",
-      sponsor: true,
-      referenceId: fundingReferenceId,
-    },
-    onAccepted: async (reference) => {
-      acceptedTransactionId = reference.transactionId;
-      await input.onSetupTransactionSubmitted?.({
-        kind: "funding_router",
-        referenceId: reference.referenceId ?? fundingReferenceId,
-        transactionId: reference.transactionId,
-        txHash: reference.txHash,
-      });
-    },
-    onSubmitted: (txHash) =>
-      input.onSetupTransactionSubmitted?.({
-        kind: "funding_router",
-        referenceId: fundingReferenceId,
-        transactionId: acceptedTransactionId,
-        txHash,
-      }),
-  });
-  const balanceSync = await syncPolymarketBalanceAllowanceRoute({
-    body: { assetType: "COLLATERAL", signatureType: 3 },
-    log: ctx.logger,
-    signer,
-    userId: intent.actor.userId,
-  });
-  if (!balanceSync.ok) {
-    throw tradingError({
-      code: "insufficient_readiness",
-      message: "Polymarket balance sync failed after delegated funding.",
-      venue: "polymarket",
-    });
-  }
-  executableFunds = await resolvePolymarketMaxSpendFunds({
-    creds: l2Creds,
-    funder: candidate.funder,
-    funderExecutionKind: preparedQuote.funderExecutionKind,
-    fundingCapRaw: policyFundingCapRaw,
-    negRisk: readPolymarketNegRisk({
-      market,
-      quote: preparedQuote.rawQuote,
-    }),
-    pool: ctx.pool,
-    signer,
-    userId: intent.actor.userId,
-  });
-  assertPolymarketPreparedFunds({
-    buyApprovalOk: executableFunds.buyApproval.ok,
-    executableFundsRaw: executableFunds.funderPusdAvailableRaw,
-    requiredSpendRaw: preparedQuote.requiredSpendRaw,
-  });
-  return {
-    venue: "polymarket" as const,
-    funded: true,
-    transactionHash,
-    raw: {
-      depositWallet: fundingPlan.depositWallet,
-      referenceId: fundingReferenceId,
-      requiredSpendRaw: preparedQuote.requiredSpendRaw.toString(),
-      routerAddress: fundingPlan.routerAddress,
-      routerNonce: fundingPlan.routerNonce,
-      totalAmountRaw: fundingPlan.totalAmountRaw,
-    },
-  };
-}
-
 async function prepareTrade(
   ctx: ApiTradingApplicationServiceInput,
   input: PrepareTradeInput,
@@ -8229,7 +8023,7 @@ async function prepareTrade(
     feePolicySnapshot = preparedQuote.feePolicySnapshot;
     const { funderExecutionKind, requiredSpendRaw } = preparedQuote;
     const policyFundingCapRaw = await resolvePolymarketBotPolicyFundingCapRaw();
-    const executableFunds = await resolvePolymarketMaxSpendFunds({
+    let executableFunds = await resolvePolymarketMaxSpendFunds({
       creds: l2Creds,
       funder: candidate.funder,
       funderExecutionKind,
@@ -8252,11 +8046,95 @@ async function prepareTrade(
       requiredSpendRaw,
     });
     if (fundingPlan) {
-      throw tradingError({
-        code: "insufficient_readiness",
-        message:
-          "Polymarket buy requires a completed FundingOperation, venue-visible pUSD, and a fresh quote.",
+      const useLegacyTelegramFunding =
+        intent.actor.kind === "telegram_bot" && !intent.fundingReservation;
+      if (!useLegacyTelegramFunding) {
+        throw tradingError({
+          code: "insufficient_readiness",
+          message:
+            "Polymarket buy requires a completed FundingOperation, venue-visible pUSD, and a fresh quote.",
+          venue: "polymarket",
+        });
+      }
+      const fundingReferenceId = `hunch:tgfund:${
+        intent.id?.trim() ||
+        crypto
+          .createHash("sha256")
+          .update(intent.idempotencyKey)
+          .digest("hex")
+          .slice(0, 40)
+      }`.slice(0, 64);
+      const recordedAt = new Date().toISOString();
+      let acceptedTransactionId: string | null = null;
+      await assertServerEvmWalletAuthorization({
+        action: "BUY",
+        privyUserId: intent.executionAuthorization?.privyUserId,
+        signer,
         venue: "polymarket",
+        walletId: getPrivyWalletId(intent),
+      });
+      await input.onSetupTransactionSubmitted?.({
+        kind: "funding_router",
+        recordedAt,
+        referenceId: fundingReferenceId,
+        transactionId: null,
+        txHash: null,
+      });
+      await executeServerEmbeddedEthereumTransaction({
+        chainId: POLYGON_CHAIN_ID,
+        signer,
+        walletId: getPrivyWalletId(intent),
+        walletClient: createServerWalletClient(),
+        transaction: {
+          id: "polymarket-funding-router",
+          label: "Polymarket funding router",
+          to: fundingPlan.routerAddress,
+          data: fundingPlan.calldata,
+          value: "0x0",
+          sponsor: true,
+          referenceId: fundingReferenceId,
+        },
+        onAccepted: async (reference) => {
+          acceptedTransactionId = reference.transactionId;
+          await input.onSetupTransactionSubmitted?.({
+            kind: "funding_router",
+            recordedAt,
+            referenceId: reference.referenceId ?? fundingReferenceId,
+            transactionId: reference.transactionId,
+            txHash: reference.txHash,
+          });
+        },
+        onSubmitted: (txHash) =>
+          input.onSetupTransactionSubmitted?.({
+            kind: "funding_router",
+            recordedAt,
+            referenceId: fundingReferenceId,
+            transactionId: acceptedTransactionId,
+            txHash,
+          }),
+      });
+      const balanceSync = await syncPolymarketBalanceAllowanceRoute({
+        body: { assetType: "COLLATERAL", signatureType: 3 },
+        log: ctx.logger,
+        signer,
+        userId: intent.actor.userId,
+      });
+      if (!balanceSync.ok) {
+        throw tradingError({
+          code: "insufficient_readiness",
+          message: "Polymarket balance sync failed after funding.",
+          venue: "polymarket",
+        });
+      }
+      executableFunds = await resolvePolymarketMaxSpendFunds({
+        creds: l2Creds,
+        funder: candidate.funder,
+        funderExecutionKind,
+        fundingCapRaw: policyFundingCapRaw,
+        negRisk: readPolymarketNegRisk({ market, quote: rawQuote }),
+        pool: ctx.pool,
+        signer,
+        userId: intent.actor.userId,
       });
     }
     assertPolymarketPreparedFunds({
@@ -8640,7 +8518,6 @@ export function createPolymarketTradingExecutionService(
     capabilities: () => capabilities,
     ensureReadiness: (input) => ensureReadiness(ctx, input),
     getReadiness: (input) => getReadiness(ctx, input),
-    fundTradeShortfall: (input) => fundTradeShortfall(ctx, input),
     quote: (input) => quote(ctx, input),
     prepareTrade: (input) =>
       prepareTrade(ctx, { intent: input.intent, quote: input.quote ?? null }),

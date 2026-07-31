@@ -37,6 +37,7 @@ import {
   readResolvedPositionProbability,
 } from "./account-value/position-value-collectors.js";
 import { ExistingFactsOwnershipResolver } from "./account-value/ownership-resolver.js";
+import { createAccountValueSnapshotLoader } from "./account-value/snapshot-loader.js";
 import type { PriceAdapter } from "./funding/domain/contracts.js";
 import type {
   AssetLocation,
@@ -773,6 +774,33 @@ await test("account routes require auth and preference response denies authority
   assert.equal(preference.statusCode, 200);
   assert.equal(preference.json().grantsTransactionAuthority, false);
   await app.close();
+});
+
+await test("account value snapshots coalesce and expire per user", async () => {
+  let builds = 0;
+  let now = 1_000;
+  const loader = createAccountValueSnapshotLoader(
+    async (userId) => {
+      builds += 1;
+      await Promise.resolve();
+      return `${userId}:${builds}`;
+    },
+    { now: () => now, ttlMs: 2_000 },
+  );
+  const [first, concurrent] = await Promise.all([
+    loader.load("user-1"),
+    loader.load("user-1"),
+  ]);
+  assert.equal(first, concurrent);
+  assert.equal(builds, 1);
+  assert.equal(await loader.load("user-1"), first);
+  assert.equal(builds, 1);
+  now += 2_001;
+  assert.notEqual(await loader.load("user-1"), first);
+  assert.equal(builds, 2);
+  loader.invalidate("user-1");
+  await loader.load("user-1");
+  assert.equal(builds, 3);
 });
 
 console.log("[account-value-tests] complete");

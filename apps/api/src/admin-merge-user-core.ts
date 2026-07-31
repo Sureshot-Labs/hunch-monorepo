@@ -1,6 +1,7 @@
 import type { Pool, PoolClient } from "pg";
 
 import { pool } from "./db.js";
+import { fetchUserFinancialLifecycleSummary } from "./services/user-financial-lifecycle.js";
 
 export type UserRow = {
   id: string;
@@ -91,6 +92,7 @@ export type FundingMergeConflictSummary = Readonly<{
   ambiguousFundingAttempts: number;
   fundingConsentConflicts: number;
   fundingIdempotencyConflicts: number;
+  fundingPreparationRuns: number;
   fundingTradeAttempts: number;
   liveFundingReservations: number;
   nonTerminalFundingOperations: number;
@@ -257,12 +259,17 @@ async function fetchFundingMergeConflicts(
   );
   const row = rows[0];
   if (!row) throw new Error("Funding merge conflict query returned no row");
+  const lifecycle = await fetchUserFinancialLifecycleSummary(client, [
+    sourceId,
+    targetId,
+  ]);
   return {
     activeFundingLeases: Number(row.active_funding_leases),
     activeFundingRoutes: Number(row.active_funding_routes),
     ambiguousFundingAttempts: Number(row.ambiguous_funding_attempts),
     fundingConsentConflicts: Number(row.funding_consent_conflicts),
     fundingIdempotencyConflicts: Number(row.funding_idempotency_conflicts),
+    fundingPreparationRuns: lifecycle.preparationRunEvidence,
     fundingTradeAttempts: Number(row.funding_trade_attempts),
     liveFundingReservations: Number(row.live_funding_reservations),
     nonTerminalFundingOperations: Number(row.non_terminal_funding_operations),

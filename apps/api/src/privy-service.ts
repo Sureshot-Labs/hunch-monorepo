@@ -421,6 +421,13 @@ export class PrivyUpstreamError extends Error {
   }
 }
 
+export class PrivyUserNotFoundError extends Error {
+  constructor(message = "Privy user does not exist") {
+    super(message);
+    this.name = "PrivyUserNotFoundError";
+  }
+}
+
 export class PrivyTelegramIdentityMismatchError extends Error {
   readonly actualTelegramUserId: string | null;
   readonly expectedTelegramUserId: string;
@@ -1025,7 +1032,21 @@ export class PrivyService {
     try {
       await privyClient.users().delete(privyUserId);
     } catch (error) {
-      throw new Error(
+      const status =
+        error && typeof error === "object"
+          ? typeof (error as { status?: unknown }).status === "number"
+            ? (error as { status: number }).status
+            : typeof (error as { statusCode?: unknown }).statusCode === "number"
+              ? (error as { statusCode: number }).statusCode
+              : typeof (error as { response?: { status?: unknown } }).response
+                    ?.status === "number"
+                ? (error as { response: { status: number } }).response.status
+                : null
+          : null;
+      if (status === 404) {
+        throw new PrivyUserNotFoundError();
+      }
+      throw new PrivyUpstreamError(
         `Failed to delete Privy user: ${error instanceof Error ? error.message : "Unknown error"}`,
       );
     }

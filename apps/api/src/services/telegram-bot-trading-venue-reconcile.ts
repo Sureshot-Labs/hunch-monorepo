@@ -27,6 +27,20 @@ import type {
   TradeIntent,
 } from "./trading-types.js";
 
+const FUNDING_REFERENCE_NOT_FOUND_GRACE_MS = 10 * 60 * 1_000;
+
+export function resolveMissingFundingReferenceState(
+  recordedAt: Date | null,
+  nowMs = Date.now(),
+): "funding_not_found" | "funding_pending" {
+  if (!recordedAt || !Number.isFinite(recordedAt.getTime())) {
+    return "funding_pending";
+  }
+  return nowMs - recordedAt.getTime() >= FUNDING_REFERENCE_NOT_FOUND_GRACE_MS
+    ? "funding_not_found"
+    : "funding_pending";
+}
+
 type VenueReconcileIntentRow = {
   action: "buy" | "sell" | "redeem";
   id: string;
@@ -233,6 +247,7 @@ function limitlessTxHash(row: VenueReconcileIntentRow): string | null {
 }
 
 function fundingRouterReference(row: VenueReconcileIntentRow): {
+  recordedAt: Date | null;
   referenceId: string | null;
   transactionId: string | null;
   txHash: string | null;
@@ -246,12 +261,18 @@ function fundingRouterReference(row: VenueReconcileIntentRow): {
     const txHash = readString(transaction.txHash);
     const transactionId = readString(transaction.transactionId);
     const referenceId = readString(transaction.referenceId);
+    const recordedAtRaw = readString(transaction.recordedAt);
+    const recordedAt = recordedAtRaw ? new Date(recordedAtRaw) : null;
     if (
       /^0x[0-9a-f]{64}$/i.test(txHash ?? "") ||
       transactionId ||
       referenceId
     ) {
       return {
+        recordedAt:
+          recordedAt && Number.isFinite(recordedAt.getTime())
+            ? recordedAt
+            : null,
         referenceId,
         transactionId,
         txHash: /^0x[0-9a-f]{64}$/i.test(txHash ?? "") ? txHash : null,
@@ -357,7 +378,12 @@ async function inspectVenueSubmit(
               })
             : null;
         if (!privyTransaction) {
-          return { state: "funding_pending", submitResult: null };
+          return {
+            state: resolveMissingFundingReferenceState(
+              fundingReference.recordedAt,
+            ),
+            submitResult: null,
+          };
         }
         if (
           privyTransaction.status === "execution_reverted" ||
@@ -551,9 +577,10 @@ async function finalizeDefinitiveRejectedIntent(input: {
 async function finalizeFundingOnlyIntent(input: {
   db: DbQuery;
   intentId: string;
-  state: "funding_confirmed" | "funding_reverted";
+  state: "funding_confirmed" | "funding_not_found" | "funding_reverted";
 }): Promise<void> {
   const confirmed = input.state === "funding_confirmed";
+  const notFound = input.state === "funding_not_found";
   await input.db.query(
     `UPDATE telegram_trade_intents
         SET status = 'failed',
@@ -569,10 +596,16 @@ async function finalizeFundingOnlyIntent(input: {
         AND tx_signature IS NULL`,
     [
       input.intentId,
-      confirmed ? "funding_confirmed_order_not_submitted" : "funding_reverted",
+      confirmed
+        ? "funding_confirmed_order_not_submitted"
+        : notFound
+          ? "funding_not_found"
+          : "funding_reverted",
       confirmed
         ? "Funding confirmed; no CLOB order was submitted. A fresh retry is safe."
-        : "Funding transaction reverted; no CLOB order was submitted.",
+        : notFound
+          ? "Funding reference was not accepted by the provider. A fresh retry is safe."
+          : "Funding transaction reverted; no CLOB order was submitted.",
       JSON.stringify({
         venueReconcile: {
           checkedAt: new Date().toISOString(),
@@ -794,6 +827,7 @@ export async function reconcileTelegramVenueIntents(
       if (!submitResult) {
         if (
           inspection.state === "funding_confirmed" ||
+          inspection.state === "funding_not_found" ||
           inspection.state === "funding_reverted"
         ) {
           item.result = "failed";

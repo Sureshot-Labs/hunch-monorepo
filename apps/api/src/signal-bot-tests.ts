@@ -71,7 +71,10 @@ import {
   resolveTelegramBotTradingWalletSetupIssues,
   telegramBotTradingTestHooks,
 } from "./services/telegram-bot-trading.js";
-import { reconcileTelegramVenueIntents } from "./services/telegram-bot-trading-venue-reconcile.js";
+import {
+  reconcileTelegramVenueIntents,
+  resolveMissingFundingReferenceState,
+} from "./services/telegram-bot-trading-venue-reconcile.js";
 import {
   isTelegramBotTradingReconciliationEnabled,
   reconcileTelegramBotTradingStatus,
@@ -1555,6 +1558,30 @@ function decodeStartAppPayload(startParam: string): string {
 }
 
 const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
+  {
+    name: "Telegram funding reference becomes retryable only after the grace period",
+    run: () => {
+      const now = Date.parse("2026-07-31T12:00:00.000Z");
+      assert.equal(
+        resolveMissingFundingReferenceState(
+          new Date(now - 9 * 60 * 1_000),
+          now,
+        ),
+        "funding_pending",
+      );
+      assert.equal(
+        resolveMissingFundingReferenceState(
+          new Date(now - 10 * 60 * 1_000),
+          now,
+        ),
+        "funding_not_found",
+      );
+      assert.equal(
+        resolveMissingFundingReferenceState(null, now),
+        "funding_pending",
+      );
+    },
+  },
   {
     name: "Telegram trading presentation escapes dynamic text and formats progress",
     run: () => {

@@ -49,6 +49,10 @@ type ApiCacheWarmJobOptions = {
   force?: boolean;
 };
 
+type PrivyDeletionReconcileOptions = {
+  limit?: number;
+};
+
 type FinanceJobsModule = {
   runFeesCollectJob: (
     overrides?: Partial<CollectFeesOptions>,
@@ -63,6 +67,9 @@ type FinanceJobsModule = {
     overrides?: Partial<ReconcileTelegramTradeIntentsOptions>,
   ) => Promise<unknown>;
   runPositionResolutionNotificationJob: () => Promise<unknown>;
+  runPrivyDeletionReconcileJob: (
+    overrides?: Partial<PrivyDeletionReconcileOptions>,
+  ) => Promise<unknown>;
   runRewardsPayoutJob: (
     overrides?: Partial<RewardsPayoutOptions>,
   ) => Promise<unknown>;
@@ -148,6 +155,13 @@ export async function runTelegramTradeIntentReconcileJob(
 export async function runPositionResolutionNotificationJob(): Promise<unknown> {
   const jobs = await getFinanceJobsModule();
   return jobs.runPositionResolutionNotificationJob();
+}
+
+export async function runPrivyDeletionReconcileJob(
+  overrides?: Partial<PrivyDeletionReconcileOptions>,
+): Promise<unknown> {
+  const jobs = await getFinanceJobsModule();
+  return jobs.runPrivyDeletionReconcileJob(overrides);
 }
 
 export async function runRewardsPayoutJob(

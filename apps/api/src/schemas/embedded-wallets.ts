@@ -86,11 +86,7 @@ export const embeddedSolanaTransactionSchema = z.object({
   transaction: z.string().trim().min(1),
   encoding: z.enum(["base64"]).default("base64"),
   sponsor: z.boolean().optional(),
-  caip2: z
-    .string()
-    .trim()
-    .regex(SOLANA_CAIP2_PATTERN)
-    .optional(),
+  caip2: z.string().trim().regex(SOLANA_CAIP2_PATTERN).optional(),
 });
 
 export const embeddedSolanaPrepareBodySchema = z.object({

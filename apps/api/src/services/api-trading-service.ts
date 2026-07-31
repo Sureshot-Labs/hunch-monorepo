@@ -417,19 +417,6 @@ export function createApiTradingApplicationService(
     },
     getReadiness: (readinessInput) =>
       executorFor(readinessInput.venue).getReadiness(readinessInput),
-    fundTradeShortfall: async (fundingInput) => {
-      await assertReadyIntent(fundingInput.intent);
-      const executor = executorFor(fundingInput.intent.venue);
-      if (!executor.fundTradeShortfall) {
-        throw new TradingServiceError({
-          code: "unsupported_capability",
-          message: "This venue does not support delegated trade funding.",
-          statusCode: 400,
-          venue: fundingInput.intent.venue,
-        });
-      }
-      return executor.fundTradeShortfall(fundingInput);
-    },
     listCapabilities: () =>
       Array.from(executors.values(), (executor) => executor.capabilities()),
     normalizeError: (venue, error) =>

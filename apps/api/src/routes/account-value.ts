@@ -22,6 +22,7 @@ import {
   accountValueResponseSchema,
 } from "../schemas/account-value.js";
 import { upsertAssetFundingPreference } from "../account-value/asset-preferences.js";
+import { createAccountValueSnapshotLoader } from "../account-value/snapshot-loader.js";
 
 export type AccountValueRouteDependencies = Readonly<{
   authenticate: preHandlerHookHandler;
@@ -239,14 +240,20 @@ export function registerAccountValueRoutes(
 }
 
 export const accountValueRoutes: FastifyPluginAsync = async (app) => {
+  const snapshots = createAccountValueSnapshotLoader((userId) =>
+    buildAccountValueReadModel({ pool, userId }),
+  );
   registerAccountValueRoutes(app, {
     authenticate: createAuthMiddleware(),
-    build: (userId) => buildAccountValueReadModel({ pool, userId }),
-    setPreference: (userId, component, preference) =>
-      upsertAssetFundingPreference(pool, {
+    build: snapshots.load,
+    setPreference: async (userId, component, preference) => {
+      const stored = await upsertAssetFundingPreference(pool, {
         userId,
         component,
         preference,
-      }),
+      });
+      snapshots.invalidate(userId);
+      return stored;
+    },
   });
 };

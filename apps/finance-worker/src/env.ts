@@ -150,6 +150,19 @@ export const env = {
     readEnv("FUNDING_REFERENCE_LOOKUP_KEY_VERSION"),
   ),
 
+  privyDeletionReconciliationEnabled: parseBool(
+    readEnv("HUNCH_FINANCE_PRIVY_DELETION_RECONCILIATION_ENABLED"),
+    true,
+  ),
+  privyDeletionReconciliationIntervalSec: parsePositiveInt(
+    readEnv("HUNCH_FINANCE_PRIVY_DELETION_RECONCILIATION_INTERVAL_SEC"),
+    60,
+  ),
+  privyDeletionReconciliationBatchSize: parsePositiveInt(
+    readEnv("HUNCH_FINANCE_PRIVY_DELETION_RECONCILIATION_BATCH_SIZE"),
+    10,
+  ),
+
   feesCollectEnabled: parseBool(readEnv("HUNCH_FINANCE_COLLECT_ENABLED"), true),
   feesCollectIntervalSec: parsePositiveInt(
     readEnv("HUNCH_FINANCE_COLLECT_INTERVAL_SEC"),

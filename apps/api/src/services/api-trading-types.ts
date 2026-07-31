@@ -12,7 +12,6 @@ import type {
   PrepareTradeInput,
   SubmitPreparedTradeInput,
   SubmitResult,
-  TradeShortfallFundingResult,
   TradeEffectsResult,
   TradeQuote,
   TradeQuoteInput,
@@ -49,9 +48,6 @@ export type ApiBotTradingExecutor = {
     input: EnsureReadinessInput,
   ) => Promise<EnsureReadinessResult>;
   getReadiness: (input: TradingReadinessInput) => Promise<TradingReadiness>;
-  fundTradeShortfall: (
-    input: PrepareTradeInput,
-  ) => Promise<TradeShortfallFundingResult>;
   listCapabilities: () => VenueTradingCapabilities[];
   normalizeError: (venue: TradingVenue, error: unknown) => TradingError;
   persistTrade: (input: PersistTradeInput) => Promise<PersistedTrade>;
@@ -74,9 +70,6 @@ export type ApiVenueTradingExecutor = {
     input: EnsureReadinessInput,
   ) => Promise<EnsureReadinessResult>;
   getReadiness: (input: TradingReadinessInput) => Promise<TradingReadiness>;
-  fundTradeShortfall?: (
-    input: PrepareTradeInput,
-  ) => Promise<TradeShortfallFundingResult>;
   persistTrade: (input: PersistTradeInput) => Promise<PersistedTrade>;
   prepareTrade: (input: PrepareTradeInput) => Promise<PreparedTrade>;
   quote: (input: TradeQuoteInput) => Promise<TradeQuote>;

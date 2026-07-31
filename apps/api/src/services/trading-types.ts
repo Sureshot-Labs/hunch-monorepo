@@ -179,17 +179,11 @@ export type PrepareTradeInput = {
   now?: Date;
   onSetupTransactionSubmitted?: (input: {
     kind: "approval" | "funding_router" | "redemption_adapter";
+    recordedAt?: string | null;
     referenceId?: string | null;
     transactionId?: string | null;
     txHash: string | null;
   }) => Promise<void> | void;
-};
-
-export type TradeShortfallFundingResult = {
-  venue: TradingVenue;
-  funded: boolean;
-  transactionHash: string | null;
-  raw?: unknown;
 };
 
 export type PreparedTrade = {

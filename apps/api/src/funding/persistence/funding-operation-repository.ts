@@ -1568,6 +1568,11 @@ export async function allocateFundingObservationInTransaction(
   Readonly<{ observation: FundingObservationRow; replayed: boolean }>
 > {
   const canonical = input.finalityStatus !== "reorged";
+  const canonicalInputAssetId = canonicalAssetId({
+    networkId: input.networkId,
+    assetId: input.assetId,
+    decimals: input.assetDecimals,
+  });
   const { rows } = await client.query<FundingObservationDbRow>(
     `
       insert into funding_observations (
@@ -1595,9 +1600,7 @@ export async function allocateFundingObservationInTransaction(
         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
         $15, $16, $17, $18, $19::jsonb
       )
-      on conflict (
-        network_id, tx_hash, event_index, asset_id, asset_decimals
-      ) do nothing
+      on conflict (network_id, tx_hash, event_index) do nothing
       returning ${observationColumns}
     `,
     [
@@ -1605,11 +1608,7 @@ export async function allocateFundingObservationInTransaction(
       input.segmentId,
       input.kind,
       input.networkId,
-      canonicalAssetId({
-        networkId: input.networkId,
-        assetId: input.assetId,
-        decimals: input.assetDecimals,
-      }),
+      canonicalInputAssetId,
       input.assetDecimals,
       input.txHash,
       input.eventIndex,
@@ -1639,21 +1638,9 @@ export async function allocateFundingObservationInTransaction(
       where network_id = $1
         and tx_hash = $2
         and event_index = $3
-        and asset_id = $4
-        and asset_decimals = $5
       for update
     `,
-    [
-      input.networkId,
-      input.txHash,
-      input.eventIndex,
-      canonicalAssetId({
-        networkId: input.networkId,
-        assetId: input.assetId,
-        decimals: input.assetDecimals,
-      }),
-      input.assetDecimals,
-    ],
+    [input.networkId, input.txHash, input.eventIndex],
   );
   const existingRow = existingResult.rows[0];
   if (!existingRow) {
@@ -1667,6 +1654,7 @@ export async function allocateFundingObservationInTransaction(
     existing.operationId === input.operationId &&
     existing.segmentId === input.segmentId &&
     existing.kind === input.kind &&
+    existing.assetId === canonicalInputAssetId &&
     existing.assetDecimals === input.assetDecimals &&
     existing.rawAmount === input.rawAmount &&
     sameAccountAddress(input.networkId, existing.toAddress, input.toAddress) &&

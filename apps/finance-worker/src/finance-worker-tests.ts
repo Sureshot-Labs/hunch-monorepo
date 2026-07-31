@@ -52,6 +52,9 @@ function buildTestEnv(overrides: Partial<typeof env> = {}): typeof env {
     maxRetries: 0,
     payoutPrepareEnabled: false,
     payoutSendEnabled: false,
+    privyDeletionReconciliationBatchSize: 10,
+    privyDeletionReconciliationEnabled: false,
+    privyDeletionReconciliationIntervalSec: 60,
     retryBackoffSec: 1,
     telegramTradeIntentsEnabled: false,
     telegramTradeIntentsExecutingGraceSec: 600,
@@ -232,6 +235,22 @@ const tests: TestCase[] = [
     },
   },
   {
+    name: "Privy deletion reconciliation is a durable user-requested job",
+    run: () => {
+      const job = buildJobs(
+        buildTestEnv({
+          databaseUrl: "postgresql://local/funding-test",
+          executeEnabled: false,
+          privyDeletionReconciliationEnabled: true,
+          privyDeletionReconciliationIntervalSec: 60,
+        }),
+      ).find((candidate) => candidate.name === "privy_deletion_reconcile");
+      assert.ok(job);
+      assert.equal(job.enabled, true);
+      assert.equal(job.intervalSec, 60);
+    },
+  },
+  {
     name: "telegram trade intent reconcile follows explicit execute-enabled env",
     run: () => {
       const disabledExecute = buildJobs(
@@ -297,6 +316,7 @@ const tests: TestCase[] = [
           runFeesReconcileJob: async () => null,
           runKalshiExecutionReconcileJob: async () => null,
           runPositionResolutionNotificationJob: async () => null,
+          runPrivyDeletionReconcileJob: async () => null,
           runRewardsPayoutJob: async () => null,
           runTelegramTradeIntentReconcileJob: async (overrides) => {
             reconcileArgs = overrides;

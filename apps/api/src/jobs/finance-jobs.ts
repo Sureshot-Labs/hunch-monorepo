@@ -34,6 +34,10 @@ import {
   runPositionResolutionNotificationProducer,
   type PositionResolutionProducerSummary,
 } from "../services/position-resolution-producer.js";
+import {
+  reconcilePendingPrivyDeletions,
+  type PrivyDeletionReconciliationSummary,
+} from "../services/privy-deletion-reconciler.js";
 
 export type ReconcileTelegramTradeIntentsOptions = {
   db?: DbQuery;
@@ -210,6 +214,14 @@ export async function runPositionResolutionNotificationJob(): Promise<PositionRe
       .join(" "),
   );
   return summary;
+}
+
+export async function runPrivyDeletionReconcileJob(
+  overrides: Readonly<{ db?: typeof pool; limit?: number }> = {},
+): Promise<PrivyDeletionReconciliationSummary> {
+  return reconcilePendingPrivyDeletions(overrides.db ?? pool, {
+    limit: overrides.limit ?? 10,
+  });
 }
 
 export type {
