@@ -850,6 +850,7 @@ export const fundingOperationPublicSchema = z
     version: z.number().int().positive(),
     createdAt: z.string().datetime(),
     updatedAt: z.string().datetime(),
+    expiresAt: z.string().datetime(),
     completedAt: z.string().datetime().nullable(),
   })
   .strict();

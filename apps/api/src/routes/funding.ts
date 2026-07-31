@@ -314,6 +314,7 @@ function publicOperation(operation: FundingOperationRow) {
     version: operation.version,
     createdAt: operation.createdAt.toISOString(),
     updatedAt: operation.updatedAt.toISOString(),
+    expiresAt: operation.expiresAt.toISOString(),
     completedAt: operation.completedAt?.toISOString() ?? null,
   };
 }

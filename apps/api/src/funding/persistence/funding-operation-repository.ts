@@ -234,10 +234,12 @@ export type FundingOperationRow = Readonly<{
   version: number;
   createdAt: Date;
   updatedAt: Date;
+  expiresAt: Date;
   completedAt: Date | null;
 }>;
 
 export type FundingRecoveryMode = "automatic_evidence" | "manual_review";
+export const FUNDING_OPERATION_ACTION_TTL_MS = 15 * 60_000;
 
 type FundingQuoteDbRow = {
   id: string;
@@ -287,6 +289,7 @@ type FundingOperationDbRow = {
   version: string | number;
   created_at: Date;
   updated_at: Date;
+  expires_at: Date;
   completed_at: Date | null;
 };
 
@@ -341,6 +344,7 @@ function mapOperation(row: FundingOperationDbRow): FundingOperationRow {
     version: Number(row.version),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    expiresAt: row.expires_at,
     completedAt: row.completed_at,
   };
 }
@@ -393,6 +397,7 @@ const operationColumns = `
   version,
   created_at,
   updated_at,
+  expires_at,
   completed_at
 `;
 
@@ -1012,13 +1017,14 @@ export async function commitFundingOperationInTransaction(
         subject_lookup_key_version,
         created_at,
         updated_at,
+        expires_at,
         completed_at
       )
       values (
         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb,
         $14::jsonb, $15, $16, $17, $18::jsonb, $19::jsonb, $20::jsonb,
         $21::jsonb, $22::jsonb, $23::jsonb, $24::jsonb, $25::jsonb,
-        $26::jsonb, $27, $28, $29, $29, $30
+        $26::jsonb, $27, $28, $29, $29, $30, $31
       )
       returning ${operationColumns}
     `,
@@ -1062,6 +1068,7 @@ export async function commitFundingOperationInTransaction(
       input.subjectLookupHmac,
       input.subjectLookupKeyVersion,
       now,
+      new Date(now.getTime() + FUNDING_OPERATION_ACTION_TTL_MS),
       ["completed", "refunded", "failed", "cancelled"].includes(
         operationPlan.initialState.status,
       )

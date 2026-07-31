@@ -49,6 +49,7 @@ const operation = {
   version: 1,
   createdAt: new Date("2026-07-24T10:00:00.000Z"),
   updatedAt: new Date("2026-07-24T10:00:00.000Z"),
+  expiresAt: new Date("2026-07-24T10:15:00.000Z"),
   completedAt: null,
 } satisfies FundingOperationRow;
 const segments = [

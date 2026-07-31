@@ -171,6 +171,20 @@ function operationState(operation: FundingOperationRow): FundingOperationState {
   };
 }
 
+export function fundingSuccessfulRecoveryResolved(
+  input: Readonly<{
+    initialStatus: FundingOperationState["status"];
+    targetStatus: FundingOperationState["status"];
+    reorgBlockedByTerminalState: boolean;
+  }>,
+): boolean {
+  return (
+    input.initialStatus === "recovery_required" &&
+    !input.reorgBlockedByTerminalState &&
+    ["in_progress", "ready", "completed"].includes(input.targetStatus)
+  );
+}
+
 function recoveryTargetFor(
   current: FundingOperationState,
 ): FundingOperationState | null {
@@ -972,18 +986,11 @@ export async function reduceFundingOperationInTransaction(
   );
   const refundObserved = hasFinalObservation(observations, "refund_credit");
   const venueReady = hasFinalObservation(observations, "venue_readiness");
-  const automaticRecoveryResolved =
-    initial.status === "recovery_required" &&
-    initial.recoveryMode === "automatic_evidence" &&
-    !derived.reorgBlockedByTerminalState &&
-    (destinationObserved || venueReady) &&
-    ![
-      "recovery_required",
-      "reconcile_required",
-      "failed",
-      "refunded",
-      "cancelled",
-    ].includes(derived.target.status);
+  const successfulRecoveryResolved = fundingSuccessfulRecoveryResolved({
+    initialStatus: initial.status,
+    targetStatus: derived.target.status,
+    reorgBlockedByTerminalState: derived.reorgBlockedByTerminalState,
+  });
   const sourceLegsFinal = segments.every((segment) => {
     const segmentInput = sumObservationAmount(
       observations.filter(
@@ -1027,7 +1034,7 @@ export async function reduceFundingOperationInTransaction(
           : undefined,
       errorCode: derived.reorgBlockedByTerminalState
         ? "finalized_observation_reorg"
-        : automaticRecoveryResolved &&
+        : successfulRecoveryResolved &&
             currentState.status === "recovery_required" &&
             nextState.status !== "recovery_required"
           ? null
@@ -1233,6 +1240,46 @@ function storedFundingReconciliationActiveWindow(
     : null;
 }
 
+async function awaitingUnbroadcastActionReport(
+  client: Pick<PoolClient, "query">,
+  operationId: string,
+): Promise<boolean> {
+  const result = await client.query<{ awaiting_report: boolean }>(
+    `
+      select
+        exists (
+          select 1
+          from funding_operation_steps step
+          where step.operation_id = $1
+            and step.state in ('planned', 'action_required')
+        )
+        and not exists (
+          select 1
+          from funding_operation_steps step
+          where step.operation_id = $1
+            and step.state in (
+              'submitted',
+              'reconcile_required',
+              'recovery_required'
+            )
+        )
+        and not exists (
+          select 1
+          from funding_operation_steps step
+          join funding_operation_step_attempts attempt
+            on attempt.step_id = step.id
+          left join funding_step_receipt_observations receipt
+            on receipt.attempt_id = attempt.id
+          where step.operation_id = $1
+            and attempt.broadcast_may_have_occurred
+            and receipt.status is distinct from 'failed'
+        ) as awaiting_report
+    `,
+    [operationId],
+  );
+  return Boolean(result.rows[0]?.awaiting_report);
+}
+
 async function synchronizeFundingReconciliationActiveWindow(
   pool: Pool,
   input: Readonly<{
@@ -1250,23 +1297,9 @@ async function synchronizeFundingReconciliationActiveWindow(
       return null;
     }
     const activeStatus = RECONCILIATION_ACTIVE_STATUSES.has(operation.status);
-    const awaitingActionReport = activeStatus
-      ? Boolean(
-          (
-            await client.query<{ awaiting_report: boolean }>(
-              `
-                select exists (
-                  select 1
-                  from funding_operation_steps step
-                  where step.operation_id = $1
-                    and step.state in ('planned', 'action_required')
-                ) as awaiting_report
-              `,
-              [operation.id],
-            )
-          ).rows[0]?.awaiting_report,
-        )
-      : false;
+    const awaitingActionReport =
+      activeStatus &&
+      (await awaitingUnbroadcastActionReport(client, operation.id));
     if (!activeStatus || awaitingActionReport) {
       const hasStoredWindow =
         operation.supportMetadata.reconciliationActiveSince != null ||
@@ -1360,10 +1393,14 @@ export function fundingReconciliationPollDelayMs(
     activePollDelayMs: number;
     idlePollDelayMs: number;
     recoveryPollDelayMs?: number;
+    awaitingUnbroadcastActionReport?: boolean;
   }>,
 ): number {
   if (state.status === "recovery_required") {
     return input.recoveryPollDelayMs ?? 60_000;
+  }
+  if (input.awaitingUnbroadcastActionReport) {
+    return input.idlePollDelayMs;
   }
   return state.status === "in_progress" || state.status === "reconcile_required"
     ? input.activePollDelayMs
@@ -1375,6 +1412,7 @@ export async function pollFundingReconciliationEvidence(
     operationId: string;
     state: FundingOperationState;
     recoveryMode?: FundingRecoveryMode | null;
+    awaitingUnbroadcastActionReport?: boolean;
     now: Date;
     providerPoll?: FundingReconciliationBatchOptions["providerPoll"];
     receiptPoll?: FundingReconciliationBatchOptions["receiptPoll"];
@@ -1382,6 +1420,9 @@ export async function pollFundingReconciliationEvidence(
     destinationPoll?: FundingReconciliationBatchOptions["destinationPoll"];
   }>,
 ): Promise<void> {
+  if (input.awaitingUnbroadcastActionReport) {
+    return;
+  }
   if (
     input.state.status === "recovery_required" &&
     input.recoveryMode !== "automatic_evidence"
@@ -1418,6 +1459,8 @@ async function loadFundingOperationState(
   Readonly<{
     state: FundingOperationState;
     recoveryMode: FundingRecoveryMode | null;
+    awaitingUnbroadcastActionReport: boolean;
+    expiresAt: Date;
   }>
 > {
   return tx(pool, async (client) => {
@@ -1431,7 +1474,91 @@ async function loadFundingOperationState(
     return {
       state: operationState(operation),
       recoveryMode: operation.recoveryMode,
+      awaitingUnbroadcastActionReport: await awaitingUnbroadcastActionReport(
+        client,
+        operation.id,
+      ),
+      expiresAt: operation.expiresAt,
     };
+  });
+}
+
+async function expireUnbroadcastActionWait(
+  pool: Pool,
+  input: Readonly<{ operationId: string; now: Date }>,
+): Promise<boolean> {
+  return tx(pool, async (client) => {
+    let operation = await fetchFundingOperationForWorkerInTransaction(
+      client,
+      input.operationId,
+    );
+    if (
+      !operation ||
+      operation.expiresAt.getTime() > input.now.getTime() ||
+      ["completed", "refunded", "failed", "cancelled"].includes(
+        operation.status,
+      ) ||
+      !(await awaitingUnbroadcastActionReport(client, operation.id))
+    ) {
+      return false;
+    }
+    const unsafe = await client.query<{ unsafe: boolean }>(
+      `
+        select
+          exists (
+            select 1
+            from funding_observations observation
+            where observation.operation_id = $1
+          )
+          or exists (
+            select 1
+            from funding_operation_steps step
+            join funding_operation_step_attempts attempt
+              on attempt.step_id = step.id
+            where step.operation_id = $1
+              and attempt.outcome = 'started'
+          ) as unsafe
+      `,
+      [operation.id],
+    );
+    if (unsafe.rows[0]?.unsafe) {
+      return false;
+    }
+    operation = await transitionFundingOperationInTransaction(client, {
+      operationId: operation.id,
+      scope: { kind: "worker" },
+      expectedVersion: operation.version,
+      expectedState: operationState(operation),
+      nextState: operationState(operation),
+      supportMetadataPatch: {
+        actionWaitExpiredAt: input.now.toISOString(),
+        terminalReason: "unbroadcast_action_expired",
+      },
+      now: input.now,
+    });
+    await client.query(
+      `
+        update funding_operation_steps
+        set state = 'cancelled',
+            updated_at = $2
+        where operation_id = $1
+          and state in ('planned', 'action_required')
+      `,
+      [operation.id, input.now],
+    );
+    const reduction = await reduceFundingOperationInTransaction(client, {
+      operationId: operation.id,
+      now: input.now,
+    });
+    if (
+      reduction.finalState.status !== "cancelled" ||
+      reduction.finalState.stage !== "terminal"
+    ) {
+      throw new Error(
+        `expired unbroadcast funding operation ${operation.id} did not cancel`,
+      );
+    }
+    return true;
   });
 }
 
@@ -1541,10 +1668,29 @@ async function processLease(
       pool,
       lease.operationId,
     );
+    if (
+      operationBeforePoll.awaitingUnbroadcastActionReport &&
+      operationBeforePoll.expiresAt.getTime() <= options.now.getTime() &&
+      (await expireUnbroadcastActionWait(pool, {
+        operationId: lease.operationId,
+        now: options.now,
+      }))
+    ) {
+      await finishFundingReconciliationLease(pool, {
+        jobId: lease.jobId,
+        leaseOwner: lease.leaseOwner,
+        leaseToken: lease.leaseToken,
+        result: { kind: "completed" },
+        now: options.now,
+      });
+      return "completed";
+    }
     await pollFundingReconciliationEvidence({
       operationId: lease.operationId,
       state: operationBeforePoll.state,
       recoveryMode: operationBeforePoll.recoveryMode,
+      awaitingUnbroadcastActionReport:
+        operationBeforePoll.awaitingUnbroadcastActionReport,
       now: options.now,
       providerPoll,
       receiptPoll,
@@ -1613,6 +1759,8 @@ async function processLease(
               activePollDelayMs: options.pollDelayMs,
               idlePollDelayMs: options.idlePollDelayMs,
               recoveryPollDelayMs: options.recoveryPollDelayMs,
+              awaitingUnbroadcastActionReport:
+                operationBeforePoll.awaitingUnbroadcastActionReport,
             }),
         ),
       },

@@ -256,6 +256,7 @@ function operation(): FundingOperationRow {
     version: 1,
     createdAt: NOW,
     updatedAt: NOW,
+    expiresAt: new Date(NOW.getTime() + 15 * 60_000),
     completedAt: null,
   };
 }

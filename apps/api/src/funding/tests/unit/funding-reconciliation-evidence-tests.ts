@@ -4,6 +4,7 @@ import {
   fundingReconciliationDisposition,
   fundingReconciliationErrorIsNonTransient,
   fundingReconciliationPollDelayMs,
+  fundingSuccessfulRecoveryResolved,
   pollFundingReconciliationEvidence,
 } from "../../reconciliation/funding-reducer.js";
 
@@ -54,6 +55,42 @@ await pollFundingReconciliationEvidence({
   },
 });
 assert.equal(providerPolled, 1);
+
+const actionWaitCalls: string[] = [];
+await pollFundingReconciliationEvidence({
+  operationId: "00000000-0000-4000-8000-000000000007",
+  state: { status: "in_progress", stage: "source_action" },
+  awaitingUnbroadcastActionReport: true,
+  now: new Date("2026-07-29T13:24:01.500Z"),
+  receiptPoll: async () => {
+    actionWaitCalls.push("receipt");
+    return { receiptsPolled: 0 };
+  },
+  postconditionPoll: async () => {
+    actionWaitCalls.push("postcondition");
+    return { postconditionsPolled: 0 };
+  },
+  destinationPoll: async () => {
+    actionWaitCalls.push("destination");
+    return { destinationsPolled: 0, destinationSatisfied: false };
+  },
+  providerPoll: async () => {
+    actionWaitCalls.push("provider");
+    return { requestsPolled: 0 };
+  },
+});
+assert.deepEqual(actionWaitCalls, []);
+assert.equal(
+  fundingReconciliationPollDelayMs(
+    { status: "in_progress", stage: "source_action" },
+    {
+      activePollDelayMs: 2_000,
+      idlePollDelayMs: 15_000,
+      awaitingUnbroadcastActionReport: true,
+    },
+  ),
+  15_000,
+);
 
 const awaitingUserCalls: string[] = [];
 await pollFundingReconciliationEvidence({
@@ -179,6 +216,41 @@ assert.equal(
   "complete",
 );
 
+for (const targetStatus of ["in_progress", "ready", "completed"] as const) {
+  assert.equal(
+    fundingSuccessfulRecoveryResolved({
+      initialStatus: "recovery_required",
+      targetStatus,
+      reorgBlockedByTerminalState: false,
+    }),
+    true,
+  );
+}
+for (const targetStatus of [
+  "recovery_required",
+  "reconcile_required",
+  "failed",
+  "refunded",
+  "cancelled",
+] as const) {
+  assert.equal(
+    fundingSuccessfulRecoveryResolved({
+      initialStatus: "recovery_required",
+      targetStatus,
+      reorgBlockedByTerminalState: false,
+    }),
+    false,
+  );
+}
+assert.equal(
+  fundingSuccessfulRecoveryResolved({
+    initialStatus: "recovery_required",
+    targetStatus: "completed",
+    reorgBlockedByTerminalState: true,
+  }),
+  false,
+);
+
 console.log(
-  "[funding-reconciliation-evidence-tests] owned destination evidence bypasses slow provider status, automatic recovery requeues at its dedicated interval, and manual recovery has no provider loop",
+  "[funding-reconciliation-evidence-tests] action waits skip external polling, owned destination evidence bypasses slow provider status, automatic recovery requeues at its dedicated interval, and manual recovery has no provider loop",
 );

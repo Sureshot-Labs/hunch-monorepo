@@ -8,11 +8,15 @@ const MIGRATION_0184 = "0184_funding_operations_core.sql";
 const MIGRATION_0193 = "0193_funding_preparation_runs.sql";
 const MIGRATION_0194 = "0194_funding_recovery_identity_and_trade_intent.sql";
 const MIGRATION_0195 = "0195_funding_observation_physical_identity.sql";
+const MIGRATION_0196 = "0196_funding_operation_expiry.sql";
+const MIGRATION_0197 = "0197_funding_operation_expiry_immutability.sql";
 const FUNDING_MIGRATIONS = [
   MIGRATION_0184,
   MIGRATION_0193,
   MIGRATION_0194,
   MIGRATION_0195,
+  MIGRATION_0196,
+  MIGRATION_0197,
 ] as const;
 
 const LEGACY_CLASSIFIER_SQL = `
@@ -92,6 +96,26 @@ async function columnExists(
       ) as exists
     `,
     [table, column],
+  );
+  return rows[0]?.exists === true;
+}
+
+async function triggerExists(
+  db: DbQuery,
+  table: string,
+  trigger: string,
+): Promise<boolean> {
+  const { rows } = await db.query<{ exists: boolean }>(
+    `
+      select exists (
+        select 1
+        from pg_trigger
+        where tgrelid = $1::regclass
+          and tgname = $2
+          and not tgisinternal
+      ) as exists
+    `,
+    [table, trigger],
   );
   return rows[0]?.exists === true;
 }
@@ -190,6 +214,16 @@ export async function inspectFundingMigrationPreflight(
   const hasObservationDecimals =
     hasObservations &&
     (await columnExists(db, "funding_observations", "asset_decimals"));
+  const hasOperationExpiry =
+    hasFundingOperations &&
+    (await columnExists(db, "funding_operations", "expires_at"));
+  const hasImmutableOperationExpiry =
+    hasFundingOperations &&
+    (await triggerExists(
+      db,
+      "public.funding_operations",
+      "funding_operations_immutable_expiry",
+    ));
   const observationIdentityConstraint = hasObservations
     ? ((
         await db.query<{ definition: string }>(
@@ -229,6 +263,18 @@ export async function inspectFundingMigrationPreflight(
       : null,
     appliedSet.has(MIGRATION_0195) && !hasPhysicalObservationIdentity
       ? "0195 is recorded but physical observation identity is absent"
+      : null,
+    !appliedSet.has(MIGRATION_0196) && hasOperationExpiry
+      ? "funding operation expiry exists before 0196 is recorded"
+      : null,
+    appliedSet.has(MIGRATION_0196) && !hasOperationExpiry
+      ? "0196 is recorded but funding operation expiry is absent"
+      : null,
+    !appliedSet.has(MIGRATION_0197) && hasImmutableOperationExpiry
+      ? "funding operation expiry immutability exists before 0197 is recorded"
+      : null,
+    appliedSet.has(MIGRATION_0197) && !hasImmutableOperationExpiry
+      ? "0197 is recorded but funding operation expiry immutability is absent"
       : null,
   ].filter((value): value is string => value !== null);
 

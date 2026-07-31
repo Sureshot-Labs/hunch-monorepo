@@ -622,10 +622,7 @@ async function testAtomicRollbackAfterPartialInsert(): Promise<void> {
   }
 }
 
-async function assertPollingFailureHonorsTerminalTimeout(input: {
-  markStepSucceeded: boolean;
-  expectedStepState: "planned" | "succeeded";
-}): Promise<void> {
+async function testPollingFailureHonorsTerminalTimeout(): Promise<void> {
   const userId = await insertUser(pool);
   const plan = buildPlan();
   const consentToken = opaque("consent");
@@ -640,26 +637,24 @@ async function assertPollingFailureHonorsTerminalTimeout(input: {
       commitInput(userId, quote.id, consentToken, plan),
     );
     operationId = committed.operation.id;
-    if (input.markStepSucceeded) {
-      await pool.query(
-        `
-          update funding_operation_steps
-          set state = 'submitted'
-          where operation_id = $1
-            and state in ('planned', 'action_required')
-        `,
-        [operationId],
-      );
-      await pool.query(
-        `
-          update funding_operation_steps
-          set state = 'succeeded'
-          where operation_id = $1
-            and state = 'submitted'
-        `,
-        [operationId],
-      );
-    }
+    await pool.query(
+      `
+        update funding_operation_steps
+        set state = 'submitted'
+        where operation_id = $1
+          and state in ('planned', 'action_required')
+      `,
+      [operationId],
+    );
+    await pool.query(
+      `
+        update funding_operation_steps
+        set state = 'succeeded'
+        where operation_id = $1
+          and state = 'submitted'
+      `,
+      [operationId],
+    );
     const now = new Date();
     await pool.query(
       `
@@ -689,11 +684,7 @@ async function assertPollingFailureHonorsTerminalTimeout(input: {
     );
 
     const result = await runFundingReconciliationBatch(pool, {
-      workerId: opaque(
-        input.markStepSucceeded
-          ? "terminal-timeout-succeeded-worker"
-          : "terminal-timeout-pending-worker",
-      ),
+      workerId: opaque("terminal-timeout-succeeded-worker"),
       limit: 1,
       terminalTimeoutMs: 90_000,
       now,
@@ -709,9 +700,7 @@ async function assertPollingFailureHonorsTerminalTimeout(input: {
         failed: result.failed,
         requeued: result.requeued,
       },
-      input.markStepSucceeded
-        ? { claimed: 1, deadLettered: 0, failed: 0, requeued: 1 }
-        : { claimed: 1, deadLettered: 0, failed: 1, requeued: 0 },
+      { claimed: 1, deadLettered: 0, failed: 0, requeued: 1 },
     );
     const operation = await pool.query<{
       error_code: string | null;
@@ -725,20 +714,11 @@ async function assertPollingFailureHonorsTerminalTimeout(input: {
       `,
       [operationId],
     );
-    assert.deepEqual(
-      operation.rows[0],
-      input.markStepSucceeded
-        ? {
-            status: "recovery_required",
-            error_code: FUNDING_RECONCILIATION_TIMEOUT_ERROR_CODE,
-            recovery_mode: "automatic_evidence",
-          }
-        : {
-            status: "in_progress",
-            error_code: null,
-            recovery_mode: null,
-          },
-    );
+    assert.deepEqual(operation.rows[0], {
+      status: "recovery_required",
+      error_code: FUNDING_RECONCILIATION_TIMEOUT_ERROR_CODE,
+      recovery_mode: "automatic_evidence",
+    });
     const steps = await pool.query<{ state: string }>(
       `
         select state
@@ -750,7 +730,7 @@ async function assertPollingFailureHonorsTerminalTimeout(input: {
     );
     assert.deepEqual(
       steps.rows.map((step) => step.state),
-      [input.expectedStepState],
+      ["succeeded"],
     );
     const job = await pool.query<{
       due_at: Date;
@@ -764,34 +744,14 @@ async function assertPollingFailureHonorsTerminalTimeout(input: {
       `,
       [operationId],
     );
-    assert.deepEqual(
-      job.rows[0],
-      input.markStepSucceeded
-        ? {
-            status: "scheduled",
-            last_error_code: null,
-            due_at: new Date(now.getTime() + 60_000),
-          }
-        : {
-            status: "scheduled",
-            last_error_code: "funding_reconciliation_failed",
-            due_at: new Date(now.getTime() + 30_000),
-          },
-    );
+    assert.deepEqual(job.rows[0], {
+      status: "scheduled",
+      last_error_code: null,
+      due_at: new Date(now.getTime() + 60_000),
+    });
   } finally {
     await cleanupCommittedOperation(operationId, quote.id, userId);
   }
-}
-
-async function testPollingFailureHonorsTerminalTimeout(): Promise<void> {
-  await assertPollingFailureHonorsTerminalTimeout({
-    markStepSucceeded: false,
-    expectedStepState: "planned",
-  });
-  await assertPollingFailureHonorsTerminalTimeout({
-    markStepSucceeded: true,
-    expectedStepState: "succeeded",
-  });
 }
 
 async function testOwnedRouteCompetitionQueryParses(): Promise<void> {
@@ -948,6 +908,63 @@ async function testAutomaticRecoveryAcceptsLateDestinationEvidence(): Promise<vo
     });
     assert.equal(balanceReads, 0);
 
+    const manualRecoveryClient = await pool.connect();
+    try {
+      await manualRecoveryClient.query("begin");
+      const segment = await manualRecoveryClient.query<{ id: string }>(
+        `
+          select id
+          from funding_operation_segments
+          where operation_id = $1 and ordinal = 0
+        `,
+        [operationId],
+      );
+      const segmentId = segment.rows[0]?.id;
+      assert.ok(segmentId);
+      const observedAt = new Date("2026-07-31T02:23:35.004Z");
+      await ingestFundingObservationInTransaction(manualRecoveryClient, {
+        discoverySource: "chain_rpc",
+        observation: {
+          operationId,
+          segmentId,
+          kind: "destination_credit",
+          networkId: ASSET.networkId,
+          assetId: ASSET.assetId,
+          assetDecimals: ASSET.decimals,
+          txHash: opaque("manual-recovery-destination"),
+          eventIndex: "0",
+          fromAddress: "0xrouter",
+          toAddress: "0x00000000000000000000000000000000000000d2",
+          rawAmount: "5057251",
+          observedAt,
+          ledgerHeight: "200",
+          blockHash: opaque("manual-recovery-block"),
+          finalityStatus: "finalized",
+          finalizedAt: observedAt,
+        },
+      });
+      const manualRecovery = await reduceFundingOperationInTransaction(
+        manualRecoveryClient,
+        { operationId },
+      );
+      assert.deepEqual(manualRecovery.finalState, {
+        status: "ready",
+        stage: "ready_for_consumer",
+      });
+      const resolvedManual = await fetchFundingOperationForUser(
+        manualRecoveryClient,
+        { userId, operationId },
+      );
+      assert.equal(resolvedManual?.recoveryMode, null);
+      assert.equal(resolvedManual?.errorCode, null);
+      await manualRecoveryClient.query("rollback");
+    } catch (error) {
+      await manualRecoveryClient.query("rollback");
+      throw error;
+    } finally {
+      manualRecoveryClient.release();
+    }
+
     operation = await transitionFundingOperation(pool, {
       operationId,
       scope: { kind: "worker" },
@@ -958,7 +975,7 @@ async function testAutomaticRecoveryAcceptsLateDestinationEvidence(): Promise<vo
       },
       nextState: { status: "in_progress", stage: "source_action" },
     });
-    operation = await transitionFundingOperation(pool, {
+    await transitionFundingOperation(pool, {
       operationId,
       scope: { kind: "worker" },
       expectedVersion: operation.version,
@@ -977,12 +994,20 @@ async function testAutomaticRecoveryAcceptsLateDestinationEvidence(): Promise<vo
     const withoutEvidenceClient = await pool.connect();
     try {
       await withoutEvidenceClient.query("begin");
+      await withoutEvidenceClient.query(
+        `
+          update funding_operation_steps
+          set state = 'recovery_required'
+          where operation_id = $1
+        `,
+        [operationId],
+      );
       const withoutEvidence = await reduceFundingOperationInTransaction(
         withoutEvidenceClient,
         { operationId },
       );
       assert.deepEqual(withoutEvidence.finalState, {
-        status: "in_progress",
+        status: "recovery_required",
         stage: "source_action",
       });
       const preserved = await fetchFundingOperationForUser(
@@ -993,7 +1018,11 @@ async function testAutomaticRecoveryAcceptsLateDestinationEvidence(): Promise<vo
         preserved?.errorCode,
         FUNDING_RECONCILIATION_TIMEOUT_ERROR_CODE,
       );
+      assert.equal(preserved?.recoveryMode, "automatic_evidence");
       await withoutEvidenceClient.query("rollback");
+    } catch (error) {
+      await withoutEvidenceClient.query("rollback");
+      throw error;
     } finally {
       withoutEvidenceClient.release();
     }
@@ -1301,9 +1330,22 @@ async function testUnexposedRecoveryRouteDoesNotBlockDestinationObservation(): P
   }
 }
 
-async function testInactiveWaitResetsReconciliationActiveWindow(): Promise<void> {
+async function testActionWaitUsesIdleReconciliationWithoutExternalPolling(): Promise<void> {
   const userId = await insertUser(pool);
-  const plan = buildPlan();
+  const basePlan = buildPlan();
+  const firstStep = basePlan.steps[0];
+  assert.ok(firstStep);
+  const plan: FundingCommitPlan = {
+    ...basePlan,
+    steps: [
+      firstStep,
+      {
+        ...firstStep,
+        ordinal: 1,
+        actionFingerprint: hash("d"),
+      },
+    ],
+  };
   const consentToken = opaque("consent");
   const quote = await createFundingQuote(
     pool,
@@ -1316,12 +1358,13 @@ async function testInactiveWaitResetsReconciliationActiveWindow(): Promise<void>
       commitInput(userId, quote.id, consentToken, plan),
     );
     operationId = committed.operation.id;
-    const waitingAt = new Date("2026-07-29T15:00:00.000Z");
+    const waitingAt = new Date(
+      committed.operation.createdAt.getTime() + 60_000,
+    );
     await pool.query(
       `
         update funding_operations
-        set status = 'awaiting_user',
-            progress_stage = 'source_action',
+        set progress_stage = 'source_action',
             support_metadata = support_metadata || jsonb_build_object(
               'reconciliationActiveSince',
               '2026-07-29T14:00:00.000Z',
@@ -1355,14 +1398,28 @@ async function testInactiveWaitResetsReconciliationActiveWindow(): Promise<void>
       [operationId, waitingAt],
     );
 
-    let providerPolls = 0;
+    const externalPolls: string[] = [];
     const waitingResult = await runFundingReconciliationBatch(pool, {
       workerId: opaque("inactive-window-worker"),
       limit: 1,
       maxAttempts: 2,
+      pollDelayMs: 2_000,
+      idlePollDelayMs: 15_000,
       now: waitingAt,
+      receiptPoll: async () => {
+        externalPolls.push("receipt");
+        return { receiptsPolled: 0 };
+      },
+      postconditionPoll: async () => {
+        externalPolls.push("postcondition");
+        return { postconditionsPolled: 0 };
+      },
+      destinationPoll: async () => {
+        externalPolls.push("destination");
+        return { destinationsPolled: 0, destinationSatisfied: false };
+      },
       providerPoll: async () => {
-        providerPolls += 1;
+        externalPolls.push("provider");
         return { requestsPolled: 0 };
       },
     });
@@ -1371,67 +1428,104 @@ async function testInactiveWaitResetsReconciliationActiveWindow(): Promise<void>
         claimed: waitingResult.claimed,
         requeued: waitingResult.requeued,
         deadLettered: waitingResult.deadLettered,
-        providerPolls,
+        externalPolls,
       },
-      { claimed: 1, requeued: 1, deadLettered: 0, providerPolls: 0 },
+      { claimed: 1, requeued: 1, deadLettered: 0, externalPolls: [] },
     );
-    const clearedWindow = await pool.query<{
+    const idleWait = await pool.query<{
       active_since: string | null;
       attempt_baseline: string | null;
+      due_at: Date;
     }>(
       `
         select
           support_metadata ->> 'reconciliationActiveSince' as active_since,
           support_metadata ->> 'reconciliationActiveAttemptBaseline'
-            as attempt_baseline
-        from funding_operations
-        where id = $1
+            as attempt_baseline,
+          job.due_at
+        from funding_operations operation
+        join funding_reconciliation_jobs job
+          on job.operation_id = operation.id
+        where operation.id = $1
       `,
       [operationId],
     );
-    assert.deepEqual(clearedWindow.rows[0], {
+    assert.deepEqual(idleWait.rows[0], {
       active_since: null,
       attempt_baseline: null,
+      due_at: new Date(waitingAt.getTime() + 15_000),
     });
 
-    const resumedAt = new Date("2026-07-29T16:00:00.000Z");
-    await pool.query(
+    const firstStepResult = await pool.query<{ id: string }>(
       `
-        update funding_operations
-        set status = 'in_progress',
-            progress_stage = 'source_action',
-            version = version + 1
-        where id = $1
+        select id
+        from funding_operation_steps
+        where operation_id = $1 and ordinal = 0
       `,
       [operationId],
     );
-    await pool.query(
+    const firstStepId = firstStepResult.rows[0]?.id;
+    assert.ok(firstStepId);
+    const reportedAt = committed.operation.expiresAt;
+    const reportClient = await pool.connect();
+    try {
+      await reportClient.query("begin");
+      await reportClient.query(
+        `
+          update funding_operation_steps
+          set state = 'submitted',
+              updated_at = $3
+          where operation_id = $1 and id = $2
+        `,
+        [operationId, firstStepId, reportedAt],
+      );
+      await wakeFundingReconciliationInTransaction(reportClient, {
+        operationId,
+        dueAt: reportedAt,
+      });
+      await reportClient.query("commit");
+    } catch (error) {
+      await reportClient.query("rollback");
+      throw error;
+    } finally {
+      reportClient.release();
+    }
+    const wokenJob = await pool.query<{ due_at: Date; status: string }>(
       `
-        update funding_operation_steps
-        set state = 'submitted'
+        select due_at, status
+        from funding_reconciliation_jobs
         where operation_id = $1
       `,
       [operationId],
     );
-    await pool.query(
-      `
-        update funding_reconciliation_jobs
-        set due_at = $2,
-            status = 'scheduled',
-            lease_owner = null,
-            lease_token = null,
-            lease_until = null
-        where operation_id = $1
-      `,
-      [operationId, resumedAt],
+    assert.equal(wokenJob.rows[0]?.status, "scheduled");
+    assert.ok(
+      Number(wokenJob.rows[0]?.due_at.getTime()) <= reportedAt.getTime(),
+      "action report must leave reconciliation immediately claimable",
     );
 
+    const mixedPolls: string[] = [];
     const resumedResult = await runFundingReconciliationBatch(pool, {
       workerId: opaque("resumed-window-worker"),
       limit: 1,
       maxAttempts: 2,
-      now: resumedAt,
+      pollDelayMs: 2_000,
+      idlePollDelayMs: 15_000,
+      now: reportedAt,
+      receiptPoll: async () => {
+        mixedPolls.push("receipt");
+        return { receiptsPolled: 1 };
+      },
+      postconditionPoll: async () => {
+        mixedPolls.push("postcondition");
+        return { postconditionsPolled: 0 };
+      },
+      destinationPoll: async () => {
+        mixedPolls.push("destination");
+        return { destinationsPolled: 0, destinationSatisfied: false };
+      },
       providerPoll: async () => {
+        mixedPolls.push("provider");
         throw new Error("synthetic provider timeout after resume");
       },
     });
@@ -1440,8 +1534,19 @@ async function testInactiveWaitResetsReconciliationActiveWindow(): Promise<void>
         claimed: resumedResult.claimed,
         failed: resumedResult.failed,
         deadLettered: resumedResult.deadLettered,
+        mixedPolls: new Set(mixedPolls),
       },
-      { claimed: 1, failed: 1, deadLettered: 0 },
+      {
+        claimed: 1,
+        failed: 1,
+        deadLettered: 0,
+        mixedPolls: new Set([
+          "receipt",
+          "postcondition",
+          "destination",
+          "provider",
+        ]),
+      },
     );
     const resumedWindow = await pool.query<{
       active_since: string | null;
@@ -1465,10 +1570,129 @@ async function testInactiveWaitResetsReconciliationActiveWindow(): Promise<void>
       [operationId],
     );
     assert.deepEqual(resumedWindow.rows[0], {
-      active_since: resumedAt.toISOString(),
+      active_since: reportedAt.toISOString(),
       attempt_baseline: "100",
       operation_status: "in_progress",
       job_status: "scheduled",
+    });
+  } finally {
+    await cleanupCommittedOperation(operationId, quote.id, userId);
+  }
+}
+
+async function testExpiredUnbroadcastActionWaitCancelsSafely(): Promise<void> {
+  const userId = await insertUser(pool);
+  const plan = buildPlan();
+  const consentToken = opaque("expiry-consent");
+  const quote = await createFundingQuote(
+    pool,
+    quoteInput(userId, plan, consentToken),
+  );
+  let operationId: string | null = null;
+  try {
+    const committed = await commitFundingOperation(
+      pool,
+      commitInput(userId, quote.id, consentToken, plan),
+    );
+    operationId = committed.operation.id;
+    await pool.query(
+      `
+        update funding_operations
+        set progress_stage = 'source_action',
+            version = version + 1
+        where id = $1
+      `,
+      [operationId],
+    );
+    await pool.query(
+      `
+        update funding_operation_steps
+        set state = 'action_required'
+        where operation_id = $1
+      `,
+      [operationId],
+    );
+    await pool.query(
+      `
+        update funding_reconciliation_jobs
+        set due_at = $2,
+            status = 'scheduled',
+            lease_owner = null,
+            lease_token = null,
+            lease_until = null
+        where operation_id = $1
+      `,
+      [operationId, committed.operation.expiresAt],
+    );
+
+    const externalPolls: string[] = [];
+    const result = await runFundingReconciliationBatch(pool, {
+      workerId: opaque("expired-action-wait-worker"),
+      limit: 1,
+      now: committed.operation.expiresAt,
+      receiptPoll: async () => {
+        externalPolls.push("receipt");
+        return { receiptsPolled: 0 };
+      },
+      postconditionPoll: async () => {
+        externalPolls.push("postcondition");
+        return { postconditionsPolled: 0 };
+      },
+      destinationPoll: async () => {
+        externalPolls.push("destination");
+        return { destinationsPolled: 0, destinationSatisfied: false };
+      },
+      providerPoll: async () => {
+        externalPolls.push("provider");
+        return { requestsPolled: 0 };
+      },
+    });
+    assert.deepEqual(
+      {
+        claimed: result.claimed,
+        completed: result.completed,
+        externalPolls,
+      },
+      { claimed: 1, completed: 1, externalPolls: [] },
+    );
+    const expired = await pool.query<{
+      completed_at: Date | null;
+      expires_at: Date;
+      job_status: string;
+      reservation_state: string;
+      status: string;
+      step_state: string;
+      terminal_reason: string | null;
+    }>(
+      `
+        select
+          operation.status,
+          operation.completed_at,
+          operation.expires_at,
+          operation.support_metadata ->> 'terminalReason'
+            as terminal_reason,
+          step.state as step_state,
+          reservation.state as reservation_state,
+          job.status as job_status
+        from funding_operations operation
+        join funding_operation_steps step
+          on step.operation_id = operation.id
+        join balance_reservations reservation
+          on reservation.operation_id = operation.id
+        join funding_reconciliation_jobs job
+          on job.operation_id = operation.id
+        where operation.id = $1
+      `,
+      [operationId],
+    );
+    assert.deepEqual(expired.rows[0], {
+      status: "cancelled",
+      completed_at: committed.operation.expiresAt,
+      expires_at: committed.operation.expiresAt,
+      terminal_reason: "unbroadcast_action_expired",
+      step_state: "cancelled",
+      reservation_state: "released",
+      job_status: "completed",
     });
   } finally {
     await cleanupCommittedOperation(operationId, quote.id, userId);
@@ -3327,7 +3551,11 @@ async function testTransactionalPersistenceContracts(): Promise<void> {
       leaseSeconds: 5,
       now: leaseNow,
     });
-    assert.equal(workerA.length, 1);
+    assert.equal(
+      workerA.length,
+      1,
+      "funding persistence lease contract requires an exclusive migrated test database with no finance worker",
+    );
     assert.equal(workerA[0]?.operationId, committedB.operation.id);
     const blockedWorker = await claimFundingReconciliationJobsInTransaction(
       client,
@@ -3572,6 +3800,21 @@ async function testTransactionalPersistenceContracts(): Promise<void> {
     );
     await client.query("rollback to savepoint invalid_state");
 
+    await client.query("savepoint immutable_expiry");
+    await assert.rejects(
+      client.query(
+        `
+          update funding_operations
+          set expires_at = expires_at + interval '1 minute',
+              version = version + 1
+          where id = $1
+        `,
+        [committedB.operation.id],
+      ),
+      /funding operation expiry is immutable/i,
+    );
+    await client.query("rollback to savepoint immutable_expiry");
+
     await client.query("savepoint second_segment");
     await assert.rejects(async () => {
       await client.query(
@@ -3661,9 +3904,13 @@ await testUnexposedRecoveryRouteDoesNotBlockDestinationObservation();
 console.log(
   "[funding-persistence-integration-tests] ok unexposed recovery route does not block destination observation",
 );
-await testInactiveWaitResetsReconciliationActiveWindow();
+await testActionWaitUsesIdleReconciliationWithoutExternalPolling();
 console.log(
-  "[funding-persistence-integration-tests] ok inactive wait resets reconciliation active window",
+  "[funding-persistence-integration-tests] ok action wait skips external polling, uses idle cadence, wakes on report, and mixed work remains active",
+);
+await testExpiredUnbroadcastActionWaitCancelsSafely();
+console.log(
+  "[funding-persistence-integration-tests] ok expired unbroadcast action wait cancels and releases reservations without external polling",
 );
 await testConcurrentSourceReservationExclusion();
 console.log(
