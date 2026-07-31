@@ -10,12 +10,89 @@ import {
   type JsonRpcApiProviderOptions,
   type Networkish,
 } from "ethers";
+import { isRpcRateLimit } from "@hunch/shared";
 
 import {
   captureRpcDiagnosticSource,
   recordRpcAttempt,
   rpcDiagnosticOutcomeFromError,
+  type RpcDiagnosticOutcome,
 } from "./rpc-diagnostics.js";
+
+function rpcErrorIsRateLimited(error: unknown): boolean {
+  if (
+    error &&
+    typeof error === "object" &&
+    "code" in error &&
+    error.code === 429
+  ) {
+    return true;
+  }
+  try {
+    return isRpcRateLimit(JSON.stringify(error));
+  } catch {
+    return false;
+  }
+}
+
+function jsonRpcEntryOutcome(entry: unknown): "ok" | "rpc_429" | "rpc_error" {
+  if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+    return "rpc_error";
+  }
+  if ("error" in entry && entry.error != null) {
+    return rpcErrorIsRateLimited(entry.error) ? "rpc_429" : "rpc_error";
+  }
+  return "result" in entry ? "ok" : "rpc_error";
+}
+
+export function rpcDiagnosticOutcomeFromJsonRpcResponse(
+  status: number,
+  payload: unknown,
+): RpcDiagnosticOutcome {
+  if (status === 429) return "http_429";
+  if (status < 200 || status >= 300) return "http_error";
+  const entries = Array.isArray(payload) ? payload : [payload];
+  if (entries.length === 0) return "rpc_error";
+  const outcomes = entries.map(jsonRpcEntryOutcome);
+  if (outcomes.includes("rpc_429")) return "rpc_429";
+  if (outcomes.includes("rpc_error")) return "rpc_error";
+  return "ok";
+}
+
+function evmResponseOutcome(
+  response: Readonly<{
+    statusCode: number;
+    body: null | Uint8Array;
+  }>,
+): RpcDiagnosticOutcome {
+  if (response.statusCode === 429) return "http_429";
+  if (response.statusCode < 200 || response.statusCode >= 300) {
+    return "http_error";
+  }
+  try {
+    return rpcDiagnosticOutcomeFromJsonRpcResponse(
+      response.statusCode,
+      JSON.parse(new TextDecoder().decode(response.body ?? new Uint8Array())),
+    );
+  } catch {
+    return "rpc_error";
+  }
+}
+
+async function solanaResponseOutcome(
+  response: Response,
+): Promise<RpcDiagnosticOutcome> {
+  if (response.status === 429) return "http_429";
+  if (response.status < 200 || response.status >= 300) return "http_error";
+  try {
+    return rpcDiagnosticOutcomeFromJsonRpcResponse(
+      response.status,
+      await response.clone().json(),
+    );
+  } catch {
+    return "rpc_error";
+  }
+}
 
 function rpcMethodLabel(body: unknown): string {
   let text: string | null = null;
@@ -68,12 +145,7 @@ export function createEvmRpcProvider(
         rpcUrl,
         method,
         source,
-        outcome:
-          response.statusCode === 429
-            ? "http_429"
-            : response.statusCode >= 400
-              ? "http_error"
-              : "ok",
+        outcome: evmResponseOutcome(response),
         durationMs: performance.now() - startedAt,
       });
       return response;
@@ -120,12 +192,7 @@ export function createSolanaRpcConnection(
         rpcUrl,
         method,
         source,
-        outcome:
-          response.status === 429
-            ? "http_429"
-            : response.status >= 400
-              ? "http_error"
-              : "ok",
+        outcome: await solanaResponseOutcome(response),
         durationMs: performance.now() - startedAt,
       });
       return response;

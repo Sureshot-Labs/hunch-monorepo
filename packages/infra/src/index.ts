@@ -20,6 +20,7 @@ export {
   decodeRpcDiagnosticField,
   encodeRpcDiagnosticField,
   flushRpcDiagnostics,
+  inferRpcDiagnosticService,
   recordRpcAttempt,
   recordRpcDedupHit,
   recordRpcLogicalCall,

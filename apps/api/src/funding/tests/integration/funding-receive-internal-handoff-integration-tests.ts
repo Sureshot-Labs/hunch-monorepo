@@ -9,7 +9,7 @@ import { ethers } from "ethers";
 
 import { pool } from "../../../db.js";
 import type { JsonObject } from "../../domain/types.js";
-import type { FundingReportedPolymarketHandoffCandidate } from "../../persistence/funding-evidence-repository.js";
+import type { FundingPolymarketHandoffCandidate } from "../../persistence/funding-evidence-repository.js";
 import {
   createOrReuseFundingReceiveSession,
   fetchFundingReceiveSessionForUser,
@@ -35,8 +35,9 @@ const DESTINATION_ASSET = {
 const FUNDER = "0x3333333333333333333333333333333333333333";
 const RECIPIENT = "0x4444444444444444444444444444444444444444";
 const AMOUNT_RAW = "8736244";
-const TRANSACTION_HASH = `0x${"ab".repeat(32)}`;
-const ERROR_TRANSACTION_HASH = `0x${"cd".repeat(32)}`;
+const TRANSACTION_HASH = `0x${crypto.randomBytes(32).toString("hex")}`;
+const ERROR_TRANSACTION_HASH = `0x${crypto.randomBytes(32).toString("hex")}`;
+const AMBIGUOUS_TRANSACTION_HASH = `0x${crypto.randomBytes(32).toString("hex")}`;
 const LOOKUP_HMAC = crypto
   .createHash("sha256")
   .update("internal-handoff-reference")
@@ -148,11 +149,14 @@ function sessionInput(userId: string, label: string) {
   } as const;
 }
 
-const candidate: FundingReportedPolymarketHandoffCandidate = {
+const candidate: FundingPolymarketHandoffCandidate = {
   operationId: opaque("operation"),
   stepId: opaque("step"),
   attemptId: opaque("attempt"),
+  attemptOutcome: "submitted",
+  receiptRefCiphertext: "encrypted_internal_handoff_reference",
   receiptRefLookupHmac: LOOKUP_HMAC,
+  lookupKeyVersion: 1,
   normalizedAction: {
     kind: "external_handoff",
     actionId: opaque("action"),
@@ -224,9 +228,10 @@ try {
   const input = sessionInput(userId, "suppressed");
   const created = await createOrReuseFundingReceiveSession(pool, input);
   const observer = new FundingReceiveSessionObserver({
-    transactionReferenceLookup: {
+    transactionReferenceCodec: {
       keyVersion: 1,
       fingerprint: () => LOOKUP_HMAC,
+      decrypt: () => TRANSACTION_HASH,
     },
     scanCanonicalEvents: async (variants) => {
       const variant = variants.find(
@@ -243,7 +248,7 @@ try {
         cursorAdvanced: true,
       };
     },
-    listReportedPolymarketHandoffs: async (_client, lookup) =>
+    listPotentialPolymarketHandoffs: async (_client, lookup) =>
       lookup.userId === userId ? [candidate] : [],
   });
   const observed = await observer.pollBatch(pool, {
@@ -288,6 +293,92 @@ try {
     receipts: "0",
     canonical_events: "0",
   });
+  await pool.query(
+    `
+      update funding_receive_sessions
+      set expires_at = $2,
+          observe_until = $3
+      where id = $1
+    `,
+    [
+      created.snapshot.session.receiveSessionId,
+      new Date(NOW.getTime() + 11_000),
+      new Date(NOW.getTime() + 12_000),
+    ],
+  );
+
+  const ambiguousUserId = await insertUser("ambiguous");
+  userIds.push(ambiguousUserId);
+  const ambiguousInput = sessionInput(ambiguousUserId, "ambiguous");
+  const ambiguousSession = await createOrReuseFundingReceiveSession(
+    pool,
+    ambiguousInput,
+  );
+  const ambiguousObserver = new FundingReceiveSessionObserver({
+    transactionReferenceCodec: {
+      keyVersion: 1,
+      fingerprint: () => LOOKUP_HMAC,
+      decrypt: () => AMBIGUOUS_TRANSACTION_HASH,
+    },
+    scanCanonicalEvents: async (variants) => {
+      const variant = variants.find(
+        (entry) => entry.variantId === ambiguousInput.variantId,
+      );
+      if (!variant) return null;
+      return {
+        events: [canonicalEvent(variant, AMBIGUOUS_TRANSACTION_HASH)],
+        variants: variants.map((entry) =>
+          entry.variantId === ambiguousInput.variantId
+            ? cursorVariant(entry, "101")
+            : entry,
+        ),
+        cursorAdvanced: true,
+      };
+    },
+    listPotentialPolymarketHandoffs: async () => [
+      candidate,
+      { ...candidate, attemptId: opaque("ambiguous_attempt") },
+    ],
+  });
+  const ambiguousObserved = await ambiguousObserver.pollBatch(pool, {
+    limit: 25,
+    minimumPollIntervalMs: 10_000,
+    now: new Date(NOW.getTime() + 15_000),
+  });
+  assert.equal(ambiguousObserved.retryableErrors, 0);
+  assert.equal(ambiguousObserved.receiptsRecorded, 1);
+  assert.equal(ambiguousObserved.recoveriesRequired, 1);
+  const { rows: ambiguousRows } = await pool.query<{
+    session_status: string;
+    receipt_status: string;
+    child_funding_operation_id: string | null;
+    event_cursor_block: string;
+  }>(
+    `
+      select
+        session.status as session_status,
+        receipt.status as receipt_status,
+        receipt.child_funding_operation_id,
+        variant -> 'observation' -> 'payload' ->> 'eventCursorBlock'
+          as event_cursor_block
+      from funding_receive_sessions session
+      join funding_receive_receipts receipt
+        on receipt.receive_session_id = session.id
+      cross join lateral jsonb_array_elements(session.observation_variants) variant
+      where session.id = $1
+        and variant ->> 'variantId' = $2
+    `,
+    [
+      ambiguousSession.snapshot.session.receiveSessionId,
+      ambiguousInput.variantId,
+    ],
+  );
+  assert.deepEqual(ambiguousRows[0], {
+    session_status: "recovery_required",
+    receipt_status: "recovery_required",
+    child_funding_operation_id: null,
+    event_cursor_block: "101",
+  });
 
   const errorUserId = await insertUser("retry");
   userIds.push(errorUserId);
@@ -297,9 +388,10 @@ try {
     errorInput,
   );
   const failingObserver = new FundingReceiveSessionObserver({
-    transactionReferenceLookup: {
+    transactionReferenceCodec: {
       keyVersion: 1,
       fingerprint: () => LOOKUP_HMAC,
+      decrypt: () => ERROR_TRANSACTION_HASH,
     },
     scanCanonicalEvents: async (variants) => {
       const variant = variants.find(
@@ -316,13 +408,13 @@ try {
         cursorAdvanced: true,
       };
     },
-    listReportedPolymarketHandoffs: async () => {
+    listPotentialPolymarketHandoffs: async () => {
       throw new Error("simulated internal handoff lookup failure");
     },
   });
   const failed = await failingObserver.pollBatch(pool, {
     limit: 25,
-    minimumPollIntervalMs: 0,
+    minimumPollIntervalMs: 10_000,
     now: new Date(NOW.getTime() + 20_000),
   });
   assert.ok(failed.retryableErrors >= 1);
@@ -350,6 +442,10 @@ try {
     await cleanup.query(
       "delete from funding_receive_receipts where user_id = any($1::uuid[])",
       [userIds],
+    );
+    await cleanup.query(
+      "delete from funding_receive_canonical_events where tx_hash = any($1::text[])",
+      [[TRANSACTION_HASH, ERROR_TRANSACTION_HASH, AMBIGUOUS_TRANSACTION_HASH]],
     );
     await cleanup.query(
       "delete from funding_receive_sessions where user_id = any($1::uuid[])",

@@ -8,6 +8,7 @@ import {
 } from "@hunch/infra";
 import { config } from "dotenv";
 import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 
 config({
   path: resolve(import.meta.dirname, "../../../.env"),
@@ -22,7 +23,7 @@ type ReportRow = {
   logical: number;
   attempts: number;
   dedup: number;
-  retries: number;
+  retries: number | null;
   rateLimited: number;
   errors: number;
   averageMs: number;
@@ -36,20 +37,54 @@ function readPositiveIntFlag(name: string, fallback: number): number {
   return Number.isSafeInteger(value) && value > 0 ? value : fallback;
 }
 
-function reportKeys(hours: number, now = new Date()): string[] {
+export function rpcDiagnosticsReportWindow(
+  hours: number,
+  now = new Date(),
+): Readonly<{
+  hours: number;
+  windowKind: "utc_hour_buckets";
+  fromHour: string;
+  throughHour: string;
+  currentBucketPartial: true;
+  keys: readonly string[];
+}> {
   const currentHour = new Date(now);
   currentHour.setUTCMinutes(0, 0, 0);
-  return Array.from({ length: hours }, (_, index) =>
+  const keys = Array.from({ length: hours }, (_, index) =>
     rpcDiagnosticsHourKey(
       new Date(currentHour.getTime() - index * 60 * 60 * 1_000),
     ),
   );
+  const fromHour = new Date(
+    currentHour.getTime() - (hours - 1) * 60 * 60 * 1_000,
+  );
+  return {
+    hours,
+    windowKind: "utc_hour_buckets",
+    fromHour: fromHour.toISOString(),
+    throughHour: currentHour.toISOString(),
+    currentBucketPartial: true,
+    keys,
+  };
+}
+
+export function rpcDiagnosticRetryCount(
+  input: Readonly<{
+    logical: number;
+    attempts: number;
+    dedup: number;
+  }>,
+): number | null {
+  return input.logical > 0
+    ? Math.max(0, input.attempts - (input.logical - input.dedup))
+    : null;
 }
 
 async function main(): Promise<void> {
   const redisUrl = process.env.REDIS_URL?.trim();
   if (!redisUrl) throw new Error("REDIS_URL is required");
   const hours = Math.min(30, readPositiveIntFlag("hours", 24));
+  const window = rpcDiagnosticsReportWindow(hours);
   const asJson = process.argv.slice(2).includes("--json");
   const redis = createRedisClient({ url: redisUrl });
   await ensureRedis(redis);
@@ -58,7 +93,7 @@ async function main(): Promise<void> {
       string,
       Omit<ReportRow, "averageMs" | "retries"> & { durationMs: number }
     >();
-    for (const key of reportKeys(hours)) {
+    for (const key of window.keys) {
       const fields = await redis.hGetAll(key);
       for (const [field, rawValue] of Object.entries(fields)) {
         const dimensions = decodeRpcDiagnosticField(field);
@@ -107,10 +142,7 @@ async function main(): Promise<void> {
         logical: row.logical,
         attempts: row.attempts,
         dedup: row.dedup,
-        retries:
-          row.logical > 0
-            ? Math.max(0, row.attempts - (row.logical - row.dedup))
-            : 0,
+        retries: rpcDiagnosticRetryCount(row),
         rateLimited: row.rateLimited,
         errors: row.errors,
         averageMs:
@@ -123,10 +155,13 @@ async function main(): Promise<void> {
           left.source.localeCompare(right.source),
       );
     if (asJson) {
-      console.log(JSON.stringify({ hours, rows }, null, 2));
+      const { keys: _keys, ...publicWindow } = window;
+      console.log(JSON.stringify({ ...publicWindow, rows }, null, 2));
       return;
     }
-    console.log(`RPC diagnostics — last ${hours}h (${rows.length} sources)`);
+    console.log(
+      `RPC diagnostics — ${hours} UTC hour buckets, current partial bucket included (${rows.length} sources)`,
+    );
     if (rows.length === 0) {
       console.log(
         "No samples found. Restart instrumented processes and wait at least 10 seconds.",
@@ -141,7 +176,7 @@ async function main(): Promise<void> {
         source: row.source,
         logical: row.logical,
         attempts: row.attempts,
-        retries: row.retries,
+        retries: row.retries ?? "n/a",
         dedup: row.dedup,
         "429": row.rateLimited,
         errors: row.errors,
@@ -153,4 +188,9 @@ async function main(): Promise<void> {
   }
 }
 
-await main();
+if (
+  process.argv[1] &&
+  import.meta.url === pathToFileURL(resolve(process.argv[1])).href
+) {
+  await main();
+}

@@ -54,10 +54,27 @@ function diagnosticsEnabled(): boolean {
 }
 
 function diagnosticServiceName(): string | null {
-  const configured = process.env.HUNCH_RPC_DIAGNOSTICS_SERVICE?.trim();
+  return inferRpcDiagnosticService({
+    configured: process.env.HUNCH_RPC_DIAGNOSTICS_SERVICE,
+    argv: process.argv,
+    cwd: process.cwd(),
+  });
+}
+
+export function inferRpcDiagnosticService(
+  input: Readonly<{
+    configured?: string | null;
+    argv: readonly string[];
+    cwd: string;
+  }>,
+): string | null {
+  const configured = input.configured?.trim();
   if (configured) return configured.slice(0, 64);
-  const argv = process.argv.join(" ").toLowerCase();
-  const cwd = process.cwd().replace(/\\/gu, "/").toLowerCase();
+  const normalizedArgv = input.argv.map((entry) =>
+    entry.replace(/\\/gu, "/").toLowerCase(),
+  );
+  const argv = normalizedArgv.join(" ");
+  const cwd = input.cwd.replace(/\\/gu, "/").toLowerCase();
   if (argv.includes("finance-worker") || cwd.endsWith("/apps/finance-worker")) {
     return "finance-worker";
   }
@@ -76,10 +93,13 @@ function diagnosticServiceName(): string | null {
   if (argv.includes("indexer-dflow") || cwd.endsWith("/apps/indexer-dflow")) {
     return "indexer-dflow";
   }
-  if (
-    cwd.endsWith("/apps/api") &&
-    (argv.includes("src/server.") || argv.includes("dist/server."))
-  ) {
+  const apiServerEntrypoint = normalizedArgv.some(
+    (entry) =>
+      /(?:^|\/)apps\/api\/(?:src|dist)\/server\.[^/]+$/u.test(entry) ||
+      (cwd.endsWith("/apps/api") &&
+        /(?:^|\/)(?:src|dist)\/server\.[^/]+$/u.test(entry)),
+  );
+  if (apiServerEntrypoint) {
     return "api";
   }
   return null;

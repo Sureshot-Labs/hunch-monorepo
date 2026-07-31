@@ -11,7 +11,7 @@ import { pool } from "../../../db.js";
 import {
   fetchFundingOperationStepForUser,
   finishFundingStepAttemptForUserInTransaction,
-  listReportedPolymarketHandoffsByTransactionReferences,
+  listPotentialPolymarketHandoffsForCanonicalEvents,
   startFundingStepAttemptForUserInTransaction,
 } from "../../persistence/funding-evidence-repository.js";
 import {
@@ -340,6 +340,25 @@ try {
   });
   assert.equal(started.attempt.attemptNumber, 1);
 
+  const canonicalHandoffEvent = {
+    eventKey: "canonical-handoff-event",
+    networkId: ASSET.networkId,
+    assetId: handoffToken,
+    sourceAddress: handoffFunder,
+    destinationAddress: handoffRecipient,
+    rawAmount: handoffAmount,
+    receiptRefLookupHmac: null,
+  } as const;
+  const startedHandoffs =
+    await listPotentialPolymarketHandoffsForCanonicalEvents(client, {
+      userId,
+      currentLookupKeyVersion: 1,
+      events: [canonicalHandoffEvent],
+    });
+  assert.equal(startedHandoffs.length, 1);
+  assert.equal(startedHandoffs[0]?.attemptId, started.attempt.id);
+  assert.equal(startedHandoffs[0]?.attemptOutcome, "started");
+
   await expectFundingError(
     startFundingStepAttemptForUserInTransaction(client, {
       userId,
@@ -390,19 +409,29 @@ try {
   assert.equal(storedStep?.state, "reconcile_required");
 
   const matchingHandoffs =
-    await listReportedPolymarketHandoffsByTransactionReferences(client, {
+    await listPotentialPolymarketHandoffsForCanonicalEvents(client, {
       userId,
-      lookupKeyVersion: 1,
-      receiptRefLookupHmacs: [reportInput.receiptRefLookupHmac],
+      currentLookupKeyVersion: 1,
+      events: [
+        {
+          ...canonicalHandoffEvent,
+          receiptRefLookupHmac: reportInput.receiptRefLookupHmac,
+        },
+      ],
     });
   assert.equal(matchingHandoffs.length, 1);
   assert.equal(matchingHandoffs[0]?.attemptId, started.attempt.id);
   assert.equal(
     (
-      await listReportedPolymarketHandoffsByTransactionReferences(client, {
+      await listPotentialPolymarketHandoffsForCanonicalEvents(client, {
         userId: otherUserId,
-        lookupKeyVersion: 1,
-        receiptRefLookupHmacs: [reportInput.receiptRefLookupHmac],
+        currentLookupKeyVersion: 1,
+        events: [
+          {
+            ...canonicalHandoffEvent,
+            receiptRefLookupHmac: reportInput.receiptRefLookupHmac,
+          },
+        ],
       })
     ).length,
     0,
@@ -410,14 +439,14 @@ try {
   );
   assert.equal(
     (
-      await listReportedPolymarketHandoffsByTransactionReferences(client, {
+      await listPotentialPolymarketHandoffsForCanonicalEvents(client, {
         userId,
-        lookupKeyVersion: 2,
-        receiptRefLookupHmacs: [reportInput.receiptRefLookupHmac],
+        currentLookupKeyVersion: 2,
+        events: [{ ...canonicalHandoffEvent, rawAmount: "1" }],
       })
     ).length,
-    0,
-    "a lookup key-version mismatch must fail open",
+    1,
+    "a reported old-key reference must remain available for decrypt-and-compare even when the envelope mismatches",
   );
 
   await expectFundingError(

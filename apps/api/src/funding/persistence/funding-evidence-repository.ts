@@ -161,66 +161,142 @@ export async function listFundingOperationStepsForUser(
   return rows.map(mapOperationStep);
 }
 
-export type FundingReportedPolymarketHandoffCandidate = Readonly<{
+export type FundingPolymarketHandoffCandidate = Readonly<{
   operationId: string;
   stepId: string;
   attemptId: string;
-  receiptRefLookupHmac: string;
+  attemptOutcome: "started" | "submitted" | "ambiguous";
+  receiptRefCiphertext: string | null;
+  receiptRefLookupHmac: string | null;
+  lookupKeyVersion: number | null;
   normalizedAction: JsonRecord;
   actionValidationResult: JsonRecord;
 }>;
 
-type FundingReportedPolymarketHandoffCandidateDbRow = {
+type FundingPolymarketHandoffCandidateDbRow = {
   operation_id: string;
   step_id: string;
   attempt_id: string;
-  receipt_ref_lookup_hmac: string;
+  attempt_outcome: FundingPolymarketHandoffCandidate["attemptOutcome"];
+  receipt_ref_ciphertext: string | null;
+  receipt_ref_lookup_hmac: string | null;
+  lookup_key_version: number | null;
   normalized_action: JsonRecord;
   action_validation_result: JsonRecord;
 };
 
-export async function listReportedPolymarketHandoffsByTransactionReferences(
+const MAX_POLYMARKET_HANDOFF_CANDIDATES_PER_LOOKUP = 256;
+
+export class FundingPolymarketHandoffLookupOverflowError extends Error {
+  constructor() {
+    super("polymarket handoff candidate lookup exceeded its safety bound");
+    this.name = "FundingPolymarketHandoffLookupOverflowError";
+  }
+}
+
+export type FundingPolymarketHandoffCanonicalEventLookup = Readonly<{
+  networkId: string;
+  assetId: string;
+  sourceAddress: string;
+  destinationAddress: string;
+  rawAmount: string;
+  receiptRefLookupHmac: string | null;
+}>;
+
+export async function listPotentialPolymarketHandoffsForCanonicalEvents(
   db: Pick<PoolClient, "query">,
   input: Readonly<{
     userId: string;
-    lookupKeyVersion: number;
-    receiptRefLookupHmacs: readonly string[];
+    events: readonly FundingPolymarketHandoffCanonicalEventLookup[];
+    currentLookupKeyVersion: number | null;
   }>,
-): Promise<readonly FundingReportedPolymarketHandoffCandidate[]> {
-  if (input.receiptRefLookupHmacs.length === 0) return [];
-  const { rows } =
-    await db.query<FundingReportedPolymarketHandoffCandidateDbRow>(
-      `
+): Promise<readonly FundingPolymarketHandoffCandidate[]> {
+  if (input.events.length === 0) return [];
+  const receiptRefLookupHmacs = input.events.flatMap((event) =>
+    event.receiptRefLookupHmac ? [event.receiptRefLookupHmac] : [],
+  );
+  const { rows } = await db.query<FundingPolymarketHandoffCandidateDbRow>(
+    `
+        with candidate_event as (
+          select value as event
+          from jsonb_array_elements($2::jsonb)
+        )
         select
           operation.id as operation_id,
           step.id as step_id,
           attempt.id as attempt_id,
+          attempt.outcome as attempt_outcome,
+          attempt.receipt_ref_ciphertext,
           attempt.receipt_ref_lookup_hmac,
+          attempt.lookup_key_version,
           step.normalized_action,
           step.action_validation_result
         from funding_operation_step_attempts attempt
         join funding_operation_steps step on step.id = attempt.step_id
         join funding_operations operation on operation.id = step.operation_id
+        left join lateral (
+          select true as matches_event
+          from candidate_event candidate
+          where step.normalized_action ->> 'networkId'
+                  = candidate.event ->> 'networkId'
+            and lower(step.action_validation_result ->> 'tokenAddress')
+                  = lower(candidate.event ->> 'assetId')
+            and lower(step.action_validation_result ->> 'funderAddress')
+                  = lower(candidate.event ->> 'sourceAddress')
+            and lower(step.action_validation_result ->> 'recipientAddress')
+                  = lower(candidate.event ->> 'destinationAddress')
+            and step.action_validation_result ->> 'amountRaw'
+                  = candidate.event ->> 'rawAmount'
+          limit 1
+        ) semantic_match on true
         where operation.user_id = $1
-          and attempt.lookup_key_version = $2
-          and attempt.receipt_ref_lookup_hmac = any($3::text[])
-          and attempt.broadcast_may_have_occurred = true
-          and attempt.reference_kind = 'transaction'
           and step.normalized_action ->> 'kind' = 'external_handoff'
           and step.normalized_action ->> 'handoffKind'
             = 'polymarket_deposit_wallet_transfer'
+          and (
+            (
+              attempt.outcome = 'started'
+              and operation.status not in (
+                'completed', 'refunded', 'failed', 'cancelled'
+              )
+              and semantic_match.matches_event
+            )
+            or (
+              attempt.outcome in ('submitted', 'ambiguous')
+              and attempt.broadcast_may_have_occurred = true
+              and attempt.reference_kind = 'transaction'
+              and (
+                semantic_match.matches_event
+                or attempt.receipt_ref_lookup_hmac = any($3::text[])
+                or (
+                  $4::integer is not null
+                  and attempt.lookup_key_version is distinct from $4
+                )
+              )
+            )
+          )
+        order by attempt.created_at desc
+        limit $5
       `,
-      [
-        input.userId,
-        input.lookupKeyVersion,
-        [...new Set(input.receiptRefLookupHmacs)],
-      ],
-    );
+    [
+      input.userId,
+      JSON.stringify(input.events),
+      [...new Set(receiptRefLookupHmacs)],
+      input.currentLookupKeyVersion,
+      MAX_POLYMARKET_HANDOFF_CANDIDATES_PER_LOOKUP + 1,
+    ],
+  );
+  if (rows.length > MAX_POLYMARKET_HANDOFF_CANDIDATES_PER_LOOKUP) {
+    throw new FundingPolymarketHandoffLookupOverflowError();
+  }
   return rows.map((row) => ({
     operationId: row.operation_id,
     stepId: row.step_id,
     attemptId: row.attempt_id,
+    attemptOutcome: row.attempt_outcome,
+    receiptRefCiphertext: row.receipt_ref_ciphertext,
     receiptRefLookupHmac: row.receipt_ref_lookup_hmac,
+    lookupKeyVersion: row.lookup_key_version,
     normalizedAction: row.normalized_action,
     actionValidationResult: row.action_validation_result,
   }));

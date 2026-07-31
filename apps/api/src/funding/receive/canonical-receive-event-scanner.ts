@@ -2,11 +2,14 @@ import type { DirectIngressObservationVariant } from "../reconciliation/direct-i
 import { canonicalFundingReceiveObserverId } from "./canonical-receive-capabilities.js";
 import {
   initializeFundingReceiveEventCursors as initializeEvmCursors,
+  scanFundingReceiveCanonicalEventBatch as scanEvmEventBatch,
   scanFundingReceiveCanonicalEvents as scanEvmEvents,
+  type FundingReceiveEventScanBatchEntry,
   type FundingReceiveEventScan,
 } from "./evm-receive-event-scanner.js";
 import {
   initializeSolanaFundingReceiveEventCursors,
+  scanSolanaFundingReceiveCanonicalEventBatch as scanSolanaEventBatch,
   scanSolanaFundingReceiveCanonicalEvents,
 } from "./solana-receive-event-scanner.js";
 
@@ -85,6 +88,71 @@ export async function scanCanonicalFundingReceiveEvents(
     variants: variants.map((variant) => byId.get(variant.variantId) ?? variant),
     cursorAdvanced: active.some((scan) => scan.cursorAdvanced),
   };
+}
+
+export type CanonicalFundingReceiveScanBatchResult = Readonly<{
+  scans: ReadonlyMap<string, FundingReceiveEventScan | null>;
+  failedKeys: ReadonlySet<string>;
+  errors: ReadonlyMap<string, unknown>;
+}>;
+
+export async function scanCanonicalFundingReceiveEventsBatch(
+  entries: readonly FundingReceiveEventScanBatchEntry[],
+  now = new Date(),
+): Promise<CanonicalFundingReceiveScanBatchResult> {
+  const groupsByKey = new Map<string, ReturnType<typeof partitionVariants>>();
+  const failedKeys = new Set<string>();
+  const errors = new Map<string, unknown>();
+  for (const entry of entries) {
+    try {
+      groupsByKey.set(entry.key, partitionVariants(entry.variants));
+    } catch (error) {
+      failedKeys.add(entry.key);
+      errors.set(entry.key, error);
+    }
+  }
+  const evmEntries = entries.flatMap((entry) => {
+    if (failedKeys.has(entry.key)) return [];
+    const variants = groupsByKey.get(entry.key)?.evm ?? [];
+    return variants.length > 0 ? [{ key: entry.key, variants }] : [];
+  });
+  const evmResult = await scanEvmEventBatch(evmEntries, now);
+  for (const key of evmResult.failedKeys) failedKeys.add(key);
+  for (const [key, error] of evmResult.errors) errors.set(key, error);
+  const solanaEntries = entries.flatMap((entry) => {
+    if (failedKeys.has(entry.key)) return [];
+    const variants = groupsByKey.get(entry.key)?.solana ?? [];
+    return variants.length > 0 ? [{ key: entry.key, variants }] : [];
+  });
+  const solanaResult = await scanSolanaEventBatch(solanaEntries, now);
+  for (const key of solanaResult.failedKeys) failedKeys.add(key);
+  for (const [key, error] of solanaResult.errors) errors.set(key, error);
+
+  const scans = new Map<string, FundingReceiveEventScan | null>();
+  for (const entry of entries) {
+    if (failedKeys.has(entry.key)) continue;
+    const active = [
+      evmResult.scans.get(entry.key) ?? null,
+      solanaResult.scans.get(entry.key) ?? null,
+    ].filter((scan): scan is FundingReceiveEventScan => scan != null);
+    if (active.length === 0) {
+      scans.set(entry.key, null);
+      continue;
+    }
+    const variantsById = new Map(
+      active.flatMap((scan) =>
+        scan.variants.map((variant) => [variant.variantId, variant] as const),
+      ),
+    );
+    scans.set(entry.key, {
+      events: active.flatMap((scan) => scan.events),
+      variants: entry.variants.map(
+        (variant) => variantsById.get(variant.variantId) ?? variant,
+      ),
+      cursorAdvanced: active.some((scan) => scan.cursorAdvanced),
+    });
+  }
+  return { scans, failedKeys, errors };
 }
 
 export type {

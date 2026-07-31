@@ -12,6 +12,7 @@ export type { ReconcileKalshiExecutionsOptions } from "./services/kalshi-executi
 
 const DEFAULT_LIMIT = 50;
 const DEFAULT_MIN_AGE_SEC = 15;
+const DEFAULT_MAX_AGE_SEC = 7 * 24 * 60 * 60;
 
 export function parseReconcileKalshiExecutionsArgs(
   args: string[] = process.argv.slice(2),
@@ -25,17 +26,31 @@ export function parseReconcileKalshiExecutionsArgs(
 
   const limitRaw = getValue("--limit");
   const minAgeRaw = getValue("--min-age-sec");
+  const maxAgeRaw = getValue("--max-age-sec");
   const limit = limitRaw ? Number(limitRaw) : DEFAULT_LIMIT;
   const minAgeSec = minAgeRaw ? Number(minAgeRaw) : DEFAULT_MIN_AGE_SEC;
+  const maxAgeSec = maxAgeRaw ? Number(maxAgeRaw) : DEFAULT_MAX_AGE_SEC;
+
+  const normalizedMinAgeSec =
+    Number.isFinite(minAgeSec) && minAgeSec >= 0
+      ? Math.trunc(minAgeSec)
+      : DEFAULT_MIN_AGE_SEC;
+  const normalizedMaxAgeSec =
+    Number.isFinite(maxAgeSec) && maxAgeSec > 0
+      ? Math.trunc(maxAgeSec)
+      : DEFAULT_MAX_AGE_SEC;
+  if (normalizedMaxAgeSec <= normalizedMinAgeSec) {
+    throw new Error(
+      "--max-age-sec (fee-backfill horizon) must be greater than --min-age-sec",
+    );
+  }
 
   return {
     dryRun: args.includes("--dry-run"),
     limit:
       Number.isFinite(limit) && limit > 0 ? Math.trunc(limit) : DEFAULT_LIMIT,
-    minAgeSec:
-      Number.isFinite(minAgeSec) && minAgeSec >= 0
-        ? Math.trunc(minAgeSec)
-        : DEFAULT_MIN_AGE_SEC,
+    minAgeSec: normalizedMinAgeSec,
+    maxAgeSec: normalizedMaxAgeSec,
   };
 }
 

@@ -9,9 +9,11 @@ import type {
   NormalizedAction,
 } from "../domain/types.js";
 import { polymarketDepositWalletHandoffExpectation } from "../execution/polymarket-deposit-wallet-handoff.js";
+import type { FundingTransactionReferenceCodec } from "../execution/transaction-reference-codec.js";
 import {
-  listReportedPolymarketHandoffsByTransactionReferences,
-  type FundingReportedPolymarketHandoffCandidate,
+  FundingPolymarketHandoffLookupOverflowError,
+  listPotentialPolymarketHandoffsForCanonicalEvents,
+  type FundingPolymarketHandoffCandidate,
 } from "../persistence/funding-evidence-repository.js";
 import {
   observeDirectIngressDestination,
@@ -33,7 +35,9 @@ import {
 } from "../persistence/funding-receive-session-repository.js";
 import {
   scanCanonicalFundingReceiveEvents,
+  scanCanonicalFundingReceiveEventsBatch,
   type FundingReceiveCanonicalEvent,
+  type FundingReceiveEventScan,
 } from "./canonical-receive-event-scanner.js";
 import { fundingReceiveVariantHandling } from "../planner/receive-targets.js";
 
@@ -43,7 +47,12 @@ const EVM_TRANSACTION_HASH_PATTERN = /^0x[0-9a-fA-F]{64}$/;
 
 type FingerprintedFundingReceiveCanonicalEvent = Readonly<{
   event: FundingReceiveCanonicalEvent;
-  receiptRefLookupHmac: string;
+  receiptRefLookupHmac: string | null;
+}>;
+
+export type PolymarketHandoffEventClassification = Readonly<{
+  kind: "internal" | "external" | "recovery_required";
+  reason: string | null;
 }>;
 
 function canonicalEventIdentity(event: FundingReceiveCanonicalEvent): string {
@@ -65,27 +74,54 @@ function deduplicateCanonicalEvents(
   return [...unique.values()];
 }
 
-function handoffMatchesCanonicalEvent(
-  candidate: FundingReportedPolymarketHandoffCandidate,
+function handoffSnapshotMatchesCanonicalEvent(
+  candidate: FundingPolymarketHandoffCandidate,
   event: FundingReceiveCanonicalEvent,
 ): boolean {
+  const networkId = candidate.normalizedAction.networkId;
+  const tokenAddress = candidate.actionValidationResult.tokenAddress;
+  const funderAddress = candidate.actionValidationResult.funderAddress;
+  const recipientAddress = candidate.actionValidationResult.recipientAddress;
+  const amountRaw = candidate.actionValidationResult.amountRaw;
+  if (
+    typeof networkId !== "string" ||
+    typeof tokenAddress !== "string" ||
+    typeof funderAddress !== "string" ||
+    typeof recipientAddress !== "string" ||
+    typeof amountRaw !== "string" ||
+    networkId !== event.variant.networkId ||
+    amountRaw !== event.rawAmount
+  ) {
+    return false;
+  }
+  return (
+    sameAccountAddress(networkId, funderAddress, event.sourceAddress) &&
+    sameAccountAddress(networkId, recipientAddress, event.destinationAddress) &&
+    sameAccountAddress(networkId, tokenAddress, event.variant.asset.assetId)
+  );
+}
+
+function handoffCanonicalEventRelation(
+  candidate: FundingPolymarketHandoffCandidate,
+  event: FundingReceiveCanonicalEvent,
+): "match" | "mismatch" | "invalid" {
+  const snapshotMatch = handoffSnapshotMatchesCanonicalEvent(candidate, event);
   const action = normalizedActionSchema.safeParse(candidate.normalizedAction);
-  if (!action.success) return false;
+  if (!action.success) return snapshotMatch ? "invalid" : "mismatch";
   const expectation = polymarketDepositWalletHandoffExpectation(
     action.data as unknown as NormalizedAction,
     candidate.actionValidationResult,
   );
   if (!expectation || action.data.networkId !== event.variant.networkId) {
-    return false;
+    return snapshotMatch ? "invalid" : "mismatch";
   }
   let eventAmount: bigint;
   try {
     eventAmount = BigInt(event.rawAmount);
   } catch {
-    return false;
+    return "invalid";
   }
-  return (
-    expectation.amountRaw === eventAmount &&
+  return expectation.amountRaw === eventAmount &&
     sameAccountAddress(
       event.variant.networkId,
       expectation.funderAddress,
@@ -101,41 +137,134 @@ function handoffMatchesCanonicalEvent(
       expectation.tokenAddress,
       event.variant.asset.assetId,
     )
-  );
+    ? "match"
+    : snapshotMatch
+      ? "invalid"
+      : "mismatch";
 }
 
-export function internalPolymarketHandoffEventIdentities(
-  events: readonly FingerprintedFundingReceiveCanonicalEvent[],
-  candidates: readonly FundingReportedPolymarketHandoffCandidate[],
-): ReadonlySet<string> {
-  const candidatesByReference = new Map<
-    string,
-    FundingReportedPolymarketHandoffCandidate[]
-  >();
-  for (const candidate of candidates) {
-    const grouped =
-      candidatesByReference.get(candidate.receiptRefLookupHmac) ?? [];
-    grouped.push(candidate);
-    candidatesByReference.set(candidate.receiptRefLookupHmac, grouped);
+function candidateReferenceMatch(
+  candidate: FundingPolymarketHandoffCandidate,
+  event: FingerprintedFundingReceiveCanonicalEvent,
+  codec: Pick<FundingTransactionReferenceCodec, "decrypt"> | null,
+): "match" | "mismatch" | "unavailable" {
+  if (
+    candidate.receiptRefLookupHmac &&
+    event.receiptRefLookupHmac &&
+    candidate.receiptRefLookupHmac === event.receiptRefLookupHmac
+  ) {
+    return "match";
   }
-  const internal = new Set<string>();
-  for (const entry of events) {
-    const referenceCandidates =
-      candidatesByReference.get(entry.receiptRefLookupHmac) ?? [];
-    if (referenceCandidates.length !== 1) continue;
-    const candidate = referenceCandidates[0];
-    if (!candidate || !handoffMatchesCanonicalEvent(candidate, entry.event)) {
+  if (!candidate.receiptRefCiphertext || !codec) return "unavailable";
+  try {
+    return codec.decrypt(candidate.receiptRefCiphertext).toLowerCase() ===
+      event.event.transactionHash.toLowerCase()
+      ? "match"
+      : "mismatch";
+  } catch {
+    return "unavailable";
+  }
+}
+
+export function classifyPolymarketHandoffEvents(
+  events: readonly FingerprintedFundingReceiveCanonicalEvent[],
+  candidates: readonly FundingPolymarketHandoffCandidate[],
+  codec: Pick<FundingTransactionReferenceCodec, "decrypt"> | null = null,
+): ReadonlyMap<string, PolymarketHandoffEventClassification> {
+  const classifications = new Map<string, PolymarketHandoffEventClassification>(
+    events.map((entry) => [
+      canonicalEventIdentity(entry.event),
+      { kind: "external", reason: null },
+    ]),
+  );
+  const candidateMatches = new Map<string, Set<string>>();
+  const eventMatches = new Map<string, Set<string>>();
+  const markRecovery = (eventIdentity: string, reason: string) => {
+    classifications.set(eventIdentity, {
+      kind: "recovery_required",
+      reason,
+    });
+  };
+  const markMatch = (candidateId: string, eventIdentity: string) => {
+    const candidateEventIds = candidateMatches.get(candidateId) ?? new Set();
+    candidateEventIds.add(eventIdentity);
+    candidateMatches.set(candidateId, candidateEventIds);
+    const eventCandidateIds = eventMatches.get(eventIdentity) ?? new Set();
+    eventCandidateIds.add(candidateId);
+    eventMatches.set(eventIdentity, eventCandidateIds);
+  };
+
+  for (const candidate of candidates) {
+    if (candidate.attemptOutcome === "started") {
+      for (const event of events) {
+        const eventIdentity = canonicalEventIdentity(event.event);
+        const relation = handoffCanonicalEventRelation(candidate, event.event);
+        if (relation === "match") {
+          markMatch(candidate.attemptId, eventIdentity);
+        } else if (relation === "invalid") {
+          markRecovery(eventIdentity, "handoff_envelope_invalid");
+        }
+      }
       continue;
     }
-    const matchingEvents = events.filter(
-      (other) =>
-        other.receiptRefLookupHmac === entry.receiptRefLookupHmac &&
-        handoffMatchesCanonicalEvent(candidate, other.event),
-    );
-    if (matchingEvents.length !== 1) continue;
-    internal.add(canonicalEventIdentity(entry.event));
+
+    const referencedEvents: (typeof events)[number][] = [];
+    const exactReferencedEvents: (typeof events)[number][] = [];
+    for (const event of events) {
+      const eventIdentity = canonicalEventIdentity(event.event);
+      const relation = handoffCanonicalEventRelation(candidate, event.event);
+      const referenceMatch = candidateReferenceMatch(candidate, event, codec);
+      if (referenceMatch === "match") {
+        referencedEvents.push(event);
+        if (relation === "match") exactReferencedEvents.push(event);
+        if (relation === "invalid") {
+          markRecovery(eventIdentity, "handoff_envelope_invalid");
+        }
+        continue;
+      }
+      if (relation === "match" && referenceMatch === "unavailable") {
+        markRecovery(eventIdentity, "handoff_reference_unavailable");
+      } else if (relation === "invalid" && referenceMatch === "unavailable") {
+        markRecovery(eventIdentity, "handoff_envelope_invalid");
+      }
+    }
+    if (exactReferencedEvents.length > 0) {
+      for (const event of exactReferencedEvents) {
+        markMatch(candidate.attemptId, canonicalEventIdentity(event.event));
+      }
+      continue;
+    }
+    for (const event of referencedEvents) {
+      markRecovery(
+        canonicalEventIdentity(event.event),
+        "handoff_reference_envelope_mismatch",
+      );
+    }
   }
-  return internal;
+
+  for (const event of events) {
+    const eventIdentity = canonicalEventIdentity(event.event);
+    if (classifications.get(eventIdentity)?.kind === "recovery_required") {
+      continue;
+    }
+    const matchingCandidates = eventMatches.get(eventIdentity) ?? new Set();
+    if (matchingCandidates.size === 0) continue;
+    if (matchingCandidates.size !== 1) {
+      markRecovery(eventIdentity, "handoff_candidate_ambiguity");
+      continue;
+    }
+    const candidateId = [...matchingCandidates][0];
+    if (!candidateId) continue;
+    const matchingEvents = candidateMatches.get(candidateId) ?? new Set();
+    if (matchingEvents.size !== 1) {
+      for (const matchingEventIdentity of matchingEvents) {
+        markRecovery(matchingEventIdentity, "handoff_event_ambiguity");
+      }
+      continue;
+    }
+    classifications.set(eventIdentity, { kind: "internal", reason: null });
+  }
+  return classifications;
 }
 
 function jsonRecord(value: unknown): JsonRecord {
@@ -415,12 +544,13 @@ export function advanceFundingReceiveObservationBaselines(
 export class FundingReceiveSessionObserver {
   constructor(
     private readonly dependencies: Readonly<{
-      transactionReferenceLookup?: Readonly<{
-        keyVersion: number;
-        fingerprint(value: string): string;
-      }>;
+      transactionReferenceCodec?: Pick<
+        FundingTransactionReferenceCodec,
+        "decrypt" | "fingerprint" | "keyVersion"
+      >;
       scanCanonicalEvents?: typeof scanCanonicalFundingReceiveEvents;
-      listReportedPolymarketHandoffs?: typeof listReportedPolymarketHandoffsByTransactionReferences;
+      scanCanonicalEventsBatch?: typeof scanCanonicalFundingReceiveEventsBatch;
+      listPotentialPolymarketHandoffs?: typeof listPotentialPolymarketHandoffsForCanonicalEvents;
     }> = {},
   ) {}
 
@@ -475,10 +605,52 @@ export class FundingReceiveSessionObserver {
     const sessions = selectFundingReceiveSessionsForPolling(
       validSessions,
     ).slice(0, batchLimit);
+    let batchScans: Awaited<
+      ReturnType<typeof scanCanonicalFundingReceiveEventsBatch>
+    > | null = null;
+    if (
+      !this.dependencies.scanCanonicalEvents ||
+      this.dependencies.scanCanonicalEventsBatch
+    ) {
+      const scanBatch =
+        this.dependencies.scanCanonicalEventsBatch ??
+        scanCanonicalFundingReceiveEventsBatch;
+      try {
+        batchScans = await scanBatch(
+          sessions.map((session) => ({
+            key: session.session.receiveSessionId,
+            variants: observationTarget(session).variants,
+          })),
+          now,
+        );
+      } catch {
+        // An unexpected batch-level failure is retryable for every selected
+        // session. Normal route failures are isolated in failedKeys below.
+        retryableErrors += sessions.length;
+        return {
+          sessionsPolled: sessions.length,
+          receiptsRecorded: 0,
+          recoveriesRequired,
+          retryableErrors,
+        };
+      }
+    }
     let receiptsRecorded = 0;
     for (const session of sessions) {
+      const sessionKey = session.session.receiveSessionId;
+      if (batchScans?.failedKeys.has(sessionKey)) {
+        retryableErrors += 1;
+        continue;
+      }
       try {
-        const result = await this.pollSession(pool, session, now);
+        const result = await this.pollSession(
+          pool,
+          session,
+          now,
+          batchScans
+            ? { canonicalEvents: batchScans.scans.get(sessionKey) ?? null }
+            : undefined,
+        );
         receiptsRecorded += result.receiptsRecorded;
         recoveriesRequired += result.recoveryRequired ? 1 : 0;
       } catch {
@@ -499,13 +671,19 @@ export class FundingReceiveSessionObserver {
     pool: Pool,
     snapshot: FundingReceiveSessionSnapshot,
     now: Date,
+    precomputed?: Readonly<{
+      canonicalEvents: FundingReceiveEventScan | null;
+    }>,
   ): Promise<
     Readonly<{ receiptsRecorded: number; recoveryRequired: boolean }>
   > {
     const target = observationTarget(snapshot);
-    const canonicalEvents = await (
-      this.dependencies.scanCanonicalEvents ?? scanCanonicalFundingReceiveEvents
-    )(target.variants, now);
+    const canonicalEvents = precomputed
+      ? precomputed.canonicalEvents
+      : await (
+          this.dependencies.scanCanonicalEvents ??
+          scanCanonicalFundingReceiveEvents
+        )(target.variants, now);
     if (canonicalEvents) {
       return this.persistCanonicalEvents(
         pool,
@@ -677,13 +855,16 @@ export class FundingReceiveSessionObserver {
       let receiptsRecorded = 0;
       let recoveryRequired = false;
       const uniqueEvents = deduplicateCanonicalEvents(events);
-      const internalEventIdentities = await this.internalEventIdentities(
+      const handoffClassifications = await this.handoffClassifications(
         client,
         snapshot,
         uniqueEvents,
       );
       for (const event of uniqueEvents) {
-        if (internalEventIdentities.has(canonicalEventIdentity(event))) {
+        const handoffClassification = handoffClassifications.get(
+          canonicalEventIdentity(event),
+        );
+        if (handoffClassification?.kind === "internal") {
           continue;
         }
         const allocation = await claimFundingReceiveCanonicalEventAllocation(
@@ -719,6 +900,8 @@ export class FundingReceiveSessionObserver {
           completion: event.variant.completion,
           handling,
         });
+        const handoffRecoveryRequired =
+          handoffClassification?.kind === "recovery_required";
         const observerId =
           event.variant.observation.payload.eventIdentity ===
           "solana_transfer_v1"
@@ -746,7 +929,9 @@ export class FundingReceiveSessionObserver {
           },
           observedAt: new Date(event.observedAt),
           handling,
-          status: disposition.receiptStatus,
+          status: handoffRecoveryRequired
+            ? "recovery_required"
+            : disposition.receiptStatus,
           evidence: {
             observerId,
             transactionHash: event.transactionHash,
@@ -756,6 +941,12 @@ export class FundingReceiveSessionObserver {
             sourceAddress: event.sourceAddress,
             canonicalEventId: allocation.eventId,
             lateReceipt: disposition.late,
+            ...(handoffRecoveryRequired
+              ? {
+                  handoffClassification: "recovery_required",
+                  handoffReason: handoffClassification.reason,
+                }
+              : {}),
           },
           now,
         });
@@ -779,7 +970,9 @@ export class FundingReceiveSessionObserver {
             "canonical receive event allocation changed during receipt commit",
           );
         }
-        recoveryRequired ||= disposition.sessionStatus === "recovery_required";
+        recoveryRequired ||=
+          handoffRecoveryRequired ||
+          disposition.sessionStatus === "recovery_required";
       }
       const closed =
         snapshot.session.status === "expired" ||
@@ -816,13 +1009,12 @@ export class FundingReceiveSessionObserver {
     });
   }
 
-  private async internalEventIdentities(
+  private async handoffClassifications(
     client: PoolClient,
     snapshot: FundingReceiveSessionSnapshot,
     events: readonly FundingReceiveCanonicalEvent[],
-  ): Promise<ReadonlySet<string>> {
-    const lookup = this.dependencies.transactionReferenceLookup;
-    if (!lookup) return new Set();
+  ): Promise<ReadonlyMap<string, PolymarketHandoffEventClassification>> {
+    const codec = this.dependencies.transactionReferenceCodec ?? null;
     const fingerprinted: FingerprintedFundingReceiveCanonicalEvent[] = [];
     for (const event of events) {
       if (
@@ -831,29 +1023,50 @@ export class FundingReceiveSessionObserver {
       ) {
         continue;
       }
-      try {
-        fingerprinted.push({
-          event,
-          receiptRefLookupHmac: lookup.fingerprint(
+      let receiptRefLookupHmac: string | null = null;
+      if (codec) {
+        try {
+          receiptRefLookupHmac = codec.fingerprint(
             event.transactionHash.toLowerCase(),
-          ),
-        });
-      } catch {
-        // A malformed or unsupported reference remains on the normal receive
-        // path. Persistence failures below are deliberately not swallowed.
+          );
+        } catch {
+          receiptRefLookupHmac = null;
+        }
       }
+      fingerprinted.push({ event, receiptRefLookupHmac });
     }
-    if (fingerprinted.length === 0) return new Set();
-    const candidates = await (
-      this.dependencies.listReportedPolymarketHandoffs ??
-      listReportedPolymarketHandoffsByTransactionReferences
-    )(client, {
-      userId: snapshot.userId,
-      lookupKeyVersion: lookup.keyVersion,
-      receiptRefLookupHmacs: fingerprinted.map(
-        (entry) => entry.receiptRefLookupHmac,
-      ),
-    });
-    return internalPolymarketHandoffEventIdentities(fingerprinted, candidates);
+    if (fingerprinted.length === 0) return new Map();
+    let candidates: readonly FundingPolymarketHandoffCandidate[];
+    try {
+      candidates = await (
+        this.dependencies.listPotentialPolymarketHandoffs ??
+        listPotentialPolymarketHandoffsForCanonicalEvents
+      )(client, {
+        userId: snapshot.userId,
+        currentLookupKeyVersion: codec?.keyVersion ?? null,
+        events: fingerprinted.map((entry) => ({
+          networkId: entry.event.variant.networkId,
+          assetId: entry.event.variant.asset.assetId,
+          sourceAddress: entry.event.sourceAddress,
+          destinationAddress: entry.event.destinationAddress,
+          rawAmount: entry.event.rawAmount,
+          receiptRefLookupHmac: entry.receiptRefLookupHmac,
+        })),
+      });
+    } catch (error) {
+      if (!(error instanceof FundingPolymarketHandoffLookupOverflowError)) {
+        throw error;
+      }
+      return new Map(
+        fingerprinted.map(({ event }) => [
+          canonicalEventIdentity(event),
+          {
+            kind: "recovery_required" as const,
+            reason: "handoff_candidate_lookup_overflow",
+          },
+        ]),
+      );
+    }
+    return classifyPolymarketHandoffEvents(fingerprinted, candidates, codec);
   }
 }

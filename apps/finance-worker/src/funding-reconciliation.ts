@@ -14,11 +14,13 @@ type FundingReconciliationOptions = {
   receivePollDelayMs?: number;
   maxAttempts?: number;
   terminalTimeoutMs?: number;
-  relay?: Readonly<{
-    apiKey: string;
+  referenceProtection?: Readonly<{
     credentialsEncryptionKey: string;
     referenceLookupHmacKey: string;
     referenceKeyVersion: number;
+  }>;
+  relay?: Readonly<{
+    apiKey: string;
     timeoutMs?: number;
   }>;
 };
@@ -65,7 +67,6 @@ export function relayFundingWorkerConfig(
     | "relayRequestTimeoutMs"
     | "credentialsEncryptionKey"
     | "fundingReferenceLookupHmacKey"
-    | "fundingReferenceLookupKeyVersion"
   >,
 ): FundingReconciliationOptions["relay"] {
   if (
@@ -77,12 +78,27 @@ export function relayFundingWorkerConfig(
   }
   return {
     apiKey: input.relayApiKey,
-    credentialsEncryptionKey: input.credentialsEncryptionKey,
-    referenceLookupHmacKey: input.fundingReferenceLookupHmacKey,
-    referenceKeyVersion: input.fundingReferenceLookupKeyVersion,
     ...(input.relayRequestTimeoutMs
       ? { timeoutMs: input.relayRequestTimeoutMs }
       : {}),
+  };
+}
+
+export function fundingReferenceProtectionConfig(
+  input: Pick<
+    typeof env,
+    | "credentialsEncryptionKey"
+    | "fundingReferenceLookupHmacKey"
+    | "fundingReferenceLookupKeyVersion"
+  >,
+): FundingReconciliationOptions["referenceProtection"] {
+  if (!input.credentialsEncryptionKey || !input.fundingReferenceLookupHmacKey) {
+    return undefined;
+  }
+  return {
+    credentialsEncryptionKey: input.credentialsEncryptionKey,
+    referenceLookupHmacKey: input.fundingReferenceLookupHmacKey,
+    referenceKeyVersion: input.fundingReferenceLookupKeyVersion,
   };
 }
 
@@ -138,6 +154,7 @@ export function fundingWorkerId(): string {
 export async function runFundingReconciliationJob(): Promise<FundingReconciliationResult> {
   const module = await getFundingWorkerModule();
   const relay = relayFundingWorkerConfig(env);
+  const referenceProtection = fundingReferenceProtectionConfig(env);
   return module.runFundingReconciliationJob(getFundingPool(), {
     workerId: fundingWorkerId(),
     limit: env.fundingReconciliationBatchSize,
@@ -149,6 +166,7 @@ export async function runFundingReconciliationJob(): Promise<FundingReconciliati
     receivePollDelayMs: env.fundingReceivePollSec * 1_000,
     maxAttempts: env.fundingReconciliationMaxAttempts,
     terminalTimeoutMs: env.fundingReconciliationTerminalTimeoutSec * 1_000,
+    ...(referenceProtection ? { referenceProtection } : {}),
     ...(relay ? { relay } : {}),
   });
 }

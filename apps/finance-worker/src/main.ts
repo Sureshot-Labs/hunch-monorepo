@@ -156,6 +156,7 @@ export function buildJobs(workerEnv: FinanceWorkerEnv = env): ScheduledJob[] {
           dryRun: workerEnv.kalshiExecutionReconcileDryRun || !allowExecute,
           limit: workerEnv.kalshiExecutionReconcileLimit,
           minAgeSec: workerEnv.kalshiExecutionReconcileMinAgeSec,
+          maxAgeSec: workerEnv.kalshiExecutionReconcileMaxAgeSec,
         }),
     },
     {

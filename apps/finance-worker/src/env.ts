@@ -207,6 +207,10 @@ export const env = {
     readEnv("HUNCH_FINANCE_KALSHI_EXECUTIONS_MIN_AGE_SEC"),
     15,
   ),
+  kalshiExecutionReconcileMaxAgeSec: parsePositiveInt(
+    readEnv("HUNCH_FINANCE_KALSHI_EXECUTIONS_MAX_AGE_SEC"),
+    7 * 24 * 60 * 60,
+  ),
 
   telegramTradeIntentsEnabled,
   telegramTradeIntentsExplicitWriteOverride:
@@ -297,3 +301,11 @@ export const env = {
   ),
   jitterSec: parsePositiveInt(process.env.HUNCH_FINANCE_JITTER_SEC, 30),
 };
+
+if (
+  env.kalshiExecutionReconcileMaxAgeSec <= env.kalshiExecutionReconcileMinAgeSec
+) {
+  throw new Error(
+    "HUNCH_FINANCE_KALSHI_EXECUTIONS_MAX_AGE_SEC (fee-backfill horizon) must be greater than HUNCH_FINANCE_KALSHI_EXECUTIONS_MIN_AGE_SEC",
+  );
+}

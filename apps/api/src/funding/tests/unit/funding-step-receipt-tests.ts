@@ -18,6 +18,7 @@ import {
 } from "../../execution/polymarket-deposit-wallet-handoff.js";
 import type {
   FundingStepReceiptEvidence,
+  FundingStepReceiptObservation,
   FundingStepReceiptTarget,
 } from "../../persistence/funding-step-receipt-repository.js";
 import {
@@ -512,6 +513,44 @@ assert.equal(
     previous: null,
   }).status,
   "confirmed",
+);
+const finalizedHandoffObservation: FundingStepReceiptObservation = {
+  operationId: "00000000-0000-4000-8000-000000000101",
+  stepId: "00000000-0000-4000-8000-000000000102",
+  attemptId: "00000000-0000-4000-8000-000000000103",
+  networkId: handoffAction.networkId,
+  status: "finalized",
+  actionMatch: true,
+  ledgerHeight: handoffReceipt.blockNumber.toString(),
+  blockHash: handoffReceipt.blockHash,
+  canonical: true,
+  failureCode: null,
+  evidence: {},
+  firstSeenAt: new Date("2026-07-31T10:00:00.000Z"),
+  observedAt: new Date("2026-07-31T10:00:01.000Z"),
+  finalizedAt: new Date("2026-07-31T10:00:01.000Z"),
+  reorgedAt: null,
+};
+assert.deepEqual(
+  evaluatePolymarketDepositWalletHandoffReceipt({
+    action: handoffAction,
+    actionValidationResult: handoffValidation,
+    transaction: handoffTransaction,
+    receipt: null,
+    previous: finalizedHandoffObservation,
+  }),
+  {
+    status: "reorged",
+    actionMatch: true,
+    ledgerHeight: handoffReceipt.blockNumber.toString(),
+    blockHash: handoffReceipt.blockHash,
+    canonical: false,
+    failureCode: "finalized_receipt_disappeared",
+    evidence: {
+      transactionObserved: true,
+      receiptObserved: false,
+    },
+  },
 );
 const extraTransferLog = transferInterface.encodeEventLog(transferEvent, [
   handoffFunder,

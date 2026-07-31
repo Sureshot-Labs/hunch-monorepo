@@ -17,6 +17,7 @@ import {
   rpcDiagnosticOutcomeFromError,
   type RpcDiagnosticOutcome,
 } from "./rpc-diagnostics.js";
+import { rpcReadCoordinator } from "./rpc-read-coordinator.js";
 
 type JsonRpcError = {
   code?: number;
@@ -72,61 +73,6 @@ const multicallIface = new Interface([
 const CODE_CACHE_TTL_MS = fundingSidecarRuntimeConfig.evmCodeCacheTtlMs;
 const APPROVAL_CACHE_TTL_MS = fundingSidecarRuntimeConfig.evmApprovalCacheTtlMs;
 const BLOCK_NUMBER_CACHE_TTL_MS = 1_000;
-
-type CacheEntry<T> = { value: T; expiresAt: number };
-
-function createTimedCache<T>(ttlMs: number) {
-  const store = new Map<string, CacheEntry<T>>();
-  const inflight = new Map<string, Promise<T>>();
-
-  function get(key: string): T | null {
-    const entry = store.get(key);
-    if (!entry) return null;
-    if (entry.expiresAt <= Date.now()) {
-      store.delete(key);
-      return null;
-    }
-    return entry.value;
-  }
-
-  function set(key: string, value: T) {
-    store.set(key, { value, expiresAt: Date.now() + ttlMs });
-  }
-
-  async function load(
-    key: string,
-    loader: () => Promise<T>,
-    options?: { bypass?: boolean },
-  ): Promise<T> {
-    if (ttlMs <= 0) return loader();
-    if (options?.bypass) {
-      const value = await loader();
-      set(key, value);
-      return value;
-    }
-    const cached = get(key);
-    if (cached != null) return cached;
-    const pending = inflight.get(key);
-    if (pending) return pending;
-    const promise = loader()
-      .then((value) => {
-        set(key, value);
-        return value;
-      })
-      .finally(() => {
-        inflight.delete(key);
-      });
-    inflight.set(key, promise);
-    return promise;
-  }
-
-  return { load };
-}
-
-const codeCache = createTimedCache<string>(CODE_CACHE_TTL_MS);
-const approvalCache = createTimedCache<boolean>(APPROVAL_CACHE_TTL_MS);
-const blockNumberCache = createTimedCache<bigint>(BLOCK_NUMBER_CACHE_TTL_MS);
-const rpcReadInflight = new Map<string, Promise<unknown>>();
 
 function computeBackoffMs(
   attempt: number,
@@ -288,22 +234,17 @@ async function ethRpcRequest<T>(inputs: {
     inputs.method,
     inputs.params,
   ]);
-  const pending = rpcReadInflight.get(key);
-  if (pending) {
-    recordRpcDedupHit({
-      protocol: "evm",
-      rpcUrl: inputs.rpcUrl,
-      method: inputs.method,
-      source,
-    });
-    return pending as Promise<T>;
-  }
-
-  const request = executeEthRpcRequest<T>({ ...inputs, source }).finally(() => {
-    rpcReadInflight.delete(key);
-  });
-  rpcReadInflight.set(key, request);
-  return request;
+  return rpcReadCoordinator.singleFlight(
+    `evm:request:${key}`,
+    () => executeEthRpcRequest<T>({ ...inputs, source }),
+    () =>
+      recordRpcDedupHit({
+        protocol: "evm",
+        rpcUrl: inputs.rpcUrl,
+        method: inputs.method,
+        source,
+      }),
+  );
 }
 
 export type EvmErc20TransferLog = Readonly<{
@@ -349,16 +290,24 @@ function addressTopic(address: string): string {
 export async function fetchEvmBlockNumber(inputs: {
   rpcUrl: string;
   timeoutMs: number;
+  bypassCache?: boolean;
 }): Promise<bigint> {
-  return blockNumberCache.load(inputs.rpcUrl, async () => {
-    const result = await ethRpcRequest<string>({
-      rpcUrl: inputs.rpcUrl,
-      timeoutMs: inputs.timeoutMs,
-      method: "eth_blockNumber",
-      params: [],
-    });
-    return parseRpcQuantity(result, "block number");
-  });
+  return rpcReadCoordinator.memo(
+    `evm:block-number:${inputs.rpcUrl}`,
+    {
+      ttlMs: BLOCK_NUMBER_CACHE_TTL_MS,
+      bypass: inputs.bypassCache,
+    },
+    async () => {
+      const result = await ethRpcRequest<string>({
+        rpcUrl: inputs.rpcUrl,
+        timeoutMs: inputs.timeoutMs,
+        method: "eth_blockNumber",
+        params: [],
+      });
+      return parseRpcQuantity(result, "block number");
+    },
+  );
 }
 
 export type EvmRpcTransactionByHash = Readonly<{
@@ -770,8 +719,9 @@ export async function fetchEvmCode(inputs: {
 }): Promise<string> {
   const address = ethers.getAddress(inputs.address);
   const cacheKey = `${inputs.rpcUrl}:${address}`.toLowerCase();
-  return codeCache.load(
-    cacheKey,
+  return rpcReadCoordinator.memo(
+    `evm:code:${cacheKey}`,
+    { ttlMs: CODE_CACHE_TTL_MS, bypass: inputs.bypassCache },
     () =>
       ethRpcRequest<string>({
         rpcUrl: inputs.rpcUrl,
@@ -779,7 +729,6 @@ export async function fetchEvmCode(inputs: {
         method: "eth_getCode",
         params: [address, "latest"],
       }),
-    { bypass: inputs.bypassCache },
   );
 }
 
@@ -1015,8 +964,12 @@ export async function fetchErc1155IsApprovedForAll(inputs: {
   const operator = ethers.getAddress(inputs.operator);
   const cacheKey =
     `${inputs.rpcUrl}:${contractAddress}:${owner}:${operator}`.toLowerCase();
-  return approvalCache.load(
-    cacheKey,
+  return rpcReadCoordinator.memo(
+    `evm:approval:${cacheKey}`,
+    {
+      ttlMs: APPROVAL_CACHE_TTL_MS,
+      bypass: inputs.bypassCache === true,
+    },
     async () => {
       const data = erc1155Iface.encodeFunctionData("isApprovedForAll", [
         owner,
@@ -1039,7 +992,6 @@ export async function fetchErc1155IsApprovedForAll(inputs: {
       }
       return value;
     },
-    { bypass: inputs.bypassCache === true },
   );
 }
 

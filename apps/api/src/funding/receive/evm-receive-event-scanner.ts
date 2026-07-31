@@ -4,6 +4,10 @@ import {
   parseEvmGetLogsBlockRangeLimit,
   type EvmErc20TransferLog,
 } from "../../services/polygon-rpc.js";
+import {
+  canonicalAccountAddress,
+  canonicalAssetKey,
+} from "../domain/asset-identity.js";
 import type { JsonValue } from "../domain/types.js";
 import type { DirectIngressObservationVariant } from "../reconciliation/direct-ingress-observer.js";
 import { canonicalFundingReceiveObserverId } from "./canonical-receive-capabilities.js";
@@ -21,7 +25,9 @@ type EvmReceiveNetwork = Readonly<{
 }>;
 
 export type FundingReceiveEventRpc = Readonly<{
-  blockNumber: (network: EvmReceiveNetwork) => Promise<bigint>;
+  blockNumber: (
+    network: EvmReceiveNetwork & Readonly<{ bypassCache?: boolean }>,
+  ) => Promise<bigint>;
   transferLogs: (
     input: EvmReceiveNetwork &
       Readonly<{
@@ -100,7 +106,7 @@ export async function initializeFundingReceiveEventCursors(
       }
       let block = byNetwork.get(variant.networkId);
       if (!block) {
-        block = rpc.blockNumber(network);
+        block = rpc.blockNumber({ ...network, bypassCache: true });
         byNetwork.set(variant.networkId, block);
       }
       return withEventCursor(variant, await block);
@@ -124,6 +130,17 @@ export type FundingReceiveEventScan = Readonly<{
   events: readonly FundingReceiveCanonicalEvent[];
   variants: readonly DirectIngressObservationVariant[];
   cursorAdvanced: boolean;
+}>;
+
+export type FundingReceiveEventScanBatchEntry = Readonly<{
+  key: string;
+  variants: readonly DirectIngressObservationVariant[];
+}>;
+
+export type FundingReceiveEventScanBatchResult = Readonly<{
+  scans: ReadonlyMap<string, FundingReceiveEventScan | null>;
+  failedKeys: ReadonlySet<string>;
+  errors: ReadonlyMap<string, unknown>;
 }>;
 
 function canonicalEvent(
@@ -150,88 +167,246 @@ export async function scanFundingReceiveCanonicalEvents(
   rpc: FundingReceiveEventRpc = DEFAULT_EVENT_RPC,
 ): Promise<FundingReceiveEventScan | null> {
   if (variants.length === 0) return null;
-  const networks = new Map<string, Promise<bigint>>();
-  let cursorAdvanced = false;
-  const eventGroups: Array<{
-    events: FundingReceiveCanonicalEvent[];
-    variant: DirectIngressObservationVariant;
-  } | null> = [];
-  // Receive variants share provider capacity. Serial scans avoid turning one
-  // worker pass into an RPC burst when a session accepts several assets.
-  for (const variant of variants) {
-    const network = receiveNetwork(variant.networkId);
-    const cursor = eventCursorBlock(variant);
-    if (!network || cursor == null) {
-      eventGroups.push(null);
+  const result = await scanFundingReceiveCanonicalEventBatch(
+    [{ key: "single", variants }],
+    now,
+    rpc,
+  );
+  if (result.failedKeys.has("single")) {
+    throw (
+      result.errors.get("single") ?? new Error("EVM receive-event scan failed")
+    );
+  }
+  return result.scans.get("single") ?? null;
+}
+
+type EvmBatchItem = Readonly<{
+  entryKey: string;
+  variant: DirectIngressObservationVariant;
+  network: EvmReceiveNetwork;
+  cursor: bigint;
+}>;
+
+type BlockRange = Readonly<{ fromBlock: bigint; toBlock: bigint }>;
+
+function physicalRouteKey(variant: DirectIngressObservationVariant): string {
+  return JSON.stringify([
+    variant.networkId,
+    canonicalAssetKey(variant.asset),
+    canonicalAccountAddress(variant.networkId, variant.destinationAddress),
+  ]);
+}
+
+function mergeBlockRanges(ranges: readonly BlockRange[]): BlockRange[] {
+  const sorted = [...ranges].sort((left, right) =>
+    left.fromBlock < right.fromBlock
+      ? -1
+      : left.fromBlock > right.fromBlock
+        ? 1
+        : 0,
+  );
+  const merged: BlockRange[] = [];
+  for (const range of sorted) {
+    const previous = merged.at(-1);
+    if (!previous || range.fromBlock > previous.toBlock + 1n) {
+      merged.push(range);
       continue;
     }
-    let latest = networks.get(variant.networkId);
-    if (!latest) {
-      latest = rpc.blockNumber(network);
-      networks.set(variant.networkId, latest);
+    if (range.toBlock > previous.toBlock) {
+      merged[merged.length - 1] = {
+        fromBlock: previous.fromBlock,
+        toBlock: range.toBlock,
+      };
     }
-    const latestBlock = await latest;
-    const safeHead =
-      latestBlock >= EXTERNAL_INGRESS_CONFIRMATIONS - 1n
-        ? latestBlock - (EXTERNAL_INGRESS_CONFIRMATIONS - 1n)
-        : 0n;
-    if (safeHead <= cursor) {
-      eventGroups.push({
-        events: [] as FundingReceiveCanonicalEvent[],
-        variant,
-      });
-      continue;
+  }
+  return merged;
+}
+
+async function transferLogsForRange(
+  rpc: FundingReceiveEventRpc,
+  input: EvmReceiveNetwork &
+    Readonly<{
+      contractAddress: string;
+      recipientAddress: string;
+      fromBlock: bigint;
+      toBlock: bigint;
+      maximumRange: bigint;
+    }>,
+): Promise<readonly EvmErc20TransferLog[]> {
+  const logs: EvmErc20TransferLog[] = [];
+  for (
+    let fromBlock = input.fromBlock;
+    fromBlock <= input.toBlock;
+    fromBlock += input.maximumRange
+  ) {
+    const toBlock =
+      fromBlock + input.maximumRange - 1n < input.toBlock
+        ? fromBlock + input.maximumRange - 1n
+        : input.toBlock;
+    logs.push(
+      ...(await rpc.transferLogs({
+        rpcUrl: input.rpcUrl,
+        timeoutMs: input.timeoutMs,
+        contractAddress: input.contractAddress,
+        recipientAddress: input.recipientAddress,
+        fromBlock,
+        toBlock,
+      })),
+    );
+  }
+  return logs;
+}
+
+export async function scanFundingReceiveCanonicalEventBatch(
+  entries: readonly FundingReceiveEventScanBatchEntry[],
+  now = new Date(),
+  rpc: FundingReceiveEventRpc = DEFAULT_EVENT_RPC,
+): Promise<FundingReceiveEventScanBatchResult> {
+  const entryStates = new Map<
+    string,
+    {
+      originalVariants: readonly DirectIngressObservationVariant[];
+      nextVariants: Map<string, DirectIngressObservationVariant>;
+      events: FundingReceiveCanonicalEvent[];
+      cursorAdvanced: boolean;
+      invalid: boolean;
     }
-    const fromBlock = cursor + 1n;
-    let maximumRange =
-      learnedBlockRangeByRpcUrl.get(network.rpcUrl) ?? MAX_BLOCK_RANGE;
-    let toBlock =
-      safeHead < cursor + maximumRange ? safeHead : cursor + maximumRange;
-    let logs: readonly EvmErc20TransferLog[];
+  >();
+  const routeItems = new Map<string, EvmBatchItem[]>();
+  for (const entry of entries) {
+    const state = {
+      originalVariants: entry.variants,
+      nextVariants: new Map<string, DirectIngressObservationVariant>(),
+      events: [] as FundingReceiveCanonicalEvent[],
+      cursorAdvanced: false,
+      invalid: false,
+    };
+    entryStates.set(entry.key, state);
+    for (const variant of entry.variants) {
+      const network = receiveNetwork(variant.networkId);
+      const cursor = eventCursorBlock(variant);
+      if (!network || cursor == null) {
+        state.invalid = true;
+        continue;
+      }
+      const routeKey = physicalRouteKey(variant);
+      const items = routeItems.get(routeKey) ?? [];
+      items.push({ entryKey: entry.key, variant, network, cursor });
+      routeItems.set(routeKey, items);
+    }
+  }
+
+  const headsByNetwork = new Map<string, Promise<bigint>>();
+  const failedKeys = new Set<string>();
+  const errors = new Map<string, unknown>();
+  // Routes remain serial. Deduplication reduces request count without turning
+  // a worker pass into a new provider burst.
+  for (const items of routeItems.values()) {
+    const first = items[0];
+    if (!first) continue;
     try {
-      logs = await rpc.transferLogs({
-        ...network,
-        contractAddress: variant.asset.assetId,
-        recipientAddress: variant.destinationAddress,
-        fromBlock,
-        toBlock,
-      });
+      let head = headsByNetwork.get(first.variant.networkId);
+      if (!head) {
+        head = rpc.blockNumber(first.network);
+        headsByNetwork.set(first.variant.networkId, head);
+      }
+      const latestBlock = await head;
+      const safeHead =
+        latestBlock >= EXTERNAL_INGRESS_CONFIRMATIONS - 1n
+          ? latestBlock - (EXTERNAL_INGRESS_CONFIRMATIONS - 1n)
+          : 0n;
+      let maximumRange =
+        learnedBlockRangeByRpcUrl.get(first.network.rpcUrl) ?? MAX_BLOCK_RANGE;
+      let logs: EvmErc20TransferLog[] | null = null;
+      for (let rangeAttempt = 0; rangeAttempt < 2; rangeAttempt += 1) {
+        const intervals = items.flatMap((item) => {
+          if (safeHead <= item.cursor) return [];
+          return [
+            {
+              fromBlock: item.cursor + 1n,
+              toBlock:
+                safeHead < item.cursor + maximumRange
+                  ? safeHead
+                  : item.cursor + maximumRange,
+            },
+          ];
+        });
+        try {
+          const routeLogs: EvmErc20TransferLog[] = [];
+          for (const range of mergeBlockRanges(intervals)) {
+            routeLogs.push(
+              ...(await transferLogsForRange(rpc, {
+                ...first.network,
+                contractAddress: first.variant.asset.assetId,
+                recipientAddress: first.variant.destinationAddress,
+                maximumRange,
+                ...range,
+              })),
+            );
+          }
+          logs = routeLogs;
+          break;
+        } catch (error) {
+          const providerLimit = parseEvmGetLogsBlockRangeLimit(error);
+          if (
+            providerLimit == null ||
+            providerLimit <= 0n ||
+            providerLimit >= maximumRange ||
+            rangeAttempt > 0
+          ) {
+            throw error;
+          }
+          maximumRange = providerLimit;
+          learnedBlockRangeByRpcUrl.set(first.network.rpcUrl, providerLimit);
+        }
+      }
+      if (!logs) throw new Error("EVM receive-event range scan failed");
+      const observedAt = now.toISOString();
+      for (const item of items) {
+        const state = entryStates.get(item.entryKey);
+        if (!state || safeHead <= item.cursor) continue;
+        const toBlock =
+          safeHead < item.cursor + maximumRange
+            ? safeHead
+            : item.cursor + maximumRange;
+        state.cursorAdvanced = true;
+        state.nextVariants.set(
+          item.variant.variantId,
+          withEventCursor(item.variant, toBlock),
+        );
+        state.events.push(
+          ...logs
+            .filter(
+              (log) =>
+                log.rawAmount > 0n &&
+                log.blockNumber > item.cursor &&
+                log.blockNumber <= toBlock,
+            )
+            .map((log) => canonicalEvent(item.variant, log, observedAt)),
+        );
+      }
     } catch (error) {
-      const providerLimit = parseEvmGetLogsBlockRangeLimit(error);
-      if (providerLimit == null || toBlock <= fromBlock) throw error;
-      maximumRange =
-        providerLimit < MAX_BLOCK_RANGE ? providerLimit : MAX_BLOCK_RANGE;
-      learnedBlockRangeByRpcUrl.set(network.rpcUrl, maximumRange);
-      toBlock =
-        safeHead < cursor + maximumRange ? safeHead : cursor + maximumRange;
-      logs = await rpc.transferLogs({
-        ...network,
-        contractAddress: variant.asset.assetId,
-        recipientAddress: variant.destinationAddress,
-        fromBlock,
-        toBlock,
-      });
+      for (const item of items) {
+        failedKeys.add(item.entryKey);
+        errors.set(item.entryKey, error);
+      }
     }
-    cursorAdvanced = true;
-    eventGroups.push({
-      events: logs
-        .filter((log) => log.rawAmount > 0n)
-        .map((log) => canonicalEvent(variant, log, now.toISOString())),
-      variant: withEventCursor(variant, toBlock),
+  }
+
+  const scans = new Map<string, FundingReceiveEventScan | null>();
+  for (const [entryKey, state] of entryStates) {
+    if (failedKeys.has(entryKey)) continue;
+    if (state.invalid) {
+      scans.set(entryKey, null);
+      continue;
+    }
+    scans.set(entryKey, {
+      events: state.events,
+      variants: state.originalVariants.map(
+        (variant) => state.nextVariants.get(variant.variantId) ?? variant,
+      ),
+      cursorAdvanced: state.cursorAdvanced,
     });
   }
-  if (eventGroups.some((group) => group == null)) return null;
-  const groups = eventGroups.filter(
-    (
-      group,
-    ): group is {
-      events: FundingReceiveCanonicalEvent[];
-      variant: DirectIngressObservationVariant;
-    } => group != null,
-  );
-  return {
-    events: groups.flatMap((group) => group.events),
-    variants: groups.map((group) => group.variant),
-    cursorAdvanced,
-  };
+  return { scans, failedKeys, errors };
 }

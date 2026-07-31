@@ -23,6 +23,7 @@ type ReconcileKalshiExecutionsOptions = {
   dryRun?: boolean;
   limit?: number;
   minAgeSec?: number;
+  maxAgeSec?: number;
 };
 
 type ReconcileTelegramTradeIntentsOptions = {

@@ -5,10 +5,12 @@ import { isRecord } from "../lib/type-guards.js";
 import {
   captureRpcDiagnosticSource,
   recordRpcAttempt,
+  recordRpcDedupHit,
   recordRpcLogicalCall,
   rpcDiagnosticOutcomeFromError,
   type RpcDiagnosticOutcome,
 } from "./rpc-diagnostics.js";
+import { rpcReadCoordinator } from "./rpc-read-coordinator.js";
 
 type JsonRpcError = {
   code?: number;
@@ -91,19 +93,30 @@ function parseTokenAccount(entry: unknown): ParsedTokenAccount | null {
   return { pubkey, mint, owner: ownerValue, amount, decimals };
 }
 
-async function solanaRpcRequest<T>(inputs: {
+const SOLANA_FINALIZED_SLOT_CACHE_TTL_MS = 1_000;
+const SOLANA_SINGLE_FLIGHT_READ_METHODS = new Set([
+  "getAccountInfo",
+  "getBalance",
+  "getBlock",
+  "getLatestBlockhash",
+  "getMultipleAccounts",
+  "getSignatureStatuses",
+  "getSignaturesForAddress",
+  "getSlot",
+  "getTokenAccountBalance",
+  "getTokenAccountsByOwner",
+  "getTokenLargestAccounts",
+  "getTokenSupply",
+  "getTransaction",
+]);
+
+async function executeSolanaRpcRequest<T>(inputs: {
   rpcUrls: string[];
   timeoutMs: number;
   method: string;
   params: unknown[];
+  source: string;
 }): Promise<T> {
-  const source = captureRpcDiagnosticSource();
-  recordRpcLogicalCall({
-    protocol: "solana",
-    rpcUrl: inputs.rpcUrls[0] ?? "",
-    method: inputs.method,
-    source,
-  });
   let lastError: unknown = null;
   const maxAttempts = Math.max(
     1,
@@ -123,7 +136,7 @@ async function solanaRpcRequest<T>(inputs: {
           protocol: "solana",
           rpcUrl,
           method: inputs.method,
-          source,
+          source: inputs.source,
           outcome,
           durationMs: performance.now() - startedAt,
         });
@@ -214,6 +227,48 @@ async function solanaRpcRequest<T>(inputs: {
   throw lastError ?? new Error("Solana RPC request failed");
 }
 
+async function solanaRpcRequest<T>(inputs: {
+  rpcUrls: string[];
+  timeoutMs: number;
+  method: string;
+  params: unknown[];
+}): Promise<T> {
+  const source = captureRpcDiagnosticSource();
+  const rpcUrl = inputs.rpcUrls[0] ?? "";
+  recordRpcLogicalCall({
+    protocol: "solana",
+    rpcUrl,
+    method: inputs.method,
+    source,
+  });
+  if (!SOLANA_SINGLE_FLIGHT_READ_METHODS.has(inputs.method)) {
+    return executeSolanaRpcRequest<T>({
+      rpcUrls: inputs.rpcUrls,
+      timeoutMs: inputs.timeoutMs,
+      method: inputs.method,
+      params: inputs.params,
+      source,
+    });
+  }
+  const key = JSON.stringify([
+    inputs.rpcUrls,
+    inputs.timeoutMs,
+    inputs.method,
+    inputs.params,
+  ]);
+  return rpcReadCoordinator.singleFlight(
+    `solana:request:${key}`,
+    () => executeSolanaRpcRequest<T>({ ...inputs, source }),
+    () =>
+      recordRpcDedupHit({
+        protocol: "solana",
+        rpcUrl,
+        method: inputs.method,
+        source,
+      }),
+  );
+}
+
 export const SOLANA_SPL_TOKEN_PROGRAM_ID =
   "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 export const SOLANA_TOKEN_2022_PROGRAM_ID =
@@ -229,21 +284,31 @@ export type SolanaAddressSignature = Readonly<{
 export async function fetchSolanaFinalizedSlot(inputs: {
   rpcUrls: string[];
   timeoutMs: number;
+  bypassCache?: boolean;
 }): Promise<bigint> {
-  const result = await solanaRpcRequest<number>({
-    rpcUrls: inputs.rpcUrls,
-    timeoutMs: inputs.timeoutMs,
-    method: "getSlot",
-    params: [{ commitment: "finalized" }],
-  });
-  if (
-    typeof result !== "number" ||
-    !Number.isSafeInteger(result) ||
-    result < 0
-  ) {
-    throw new Error("Solana RPC: invalid finalized slot");
-  }
-  return BigInt(result);
+  return rpcReadCoordinator.memo(
+    `solana:finalized-slot:${JSON.stringify(inputs.rpcUrls)}`,
+    {
+      ttlMs: SOLANA_FINALIZED_SLOT_CACHE_TTL_MS,
+      bypass: inputs.bypassCache,
+    },
+    async () => {
+      const result = await solanaRpcRequest<number>({
+        rpcUrls: inputs.rpcUrls,
+        timeoutMs: inputs.timeoutMs,
+        method: "getSlot",
+        params: [{ commitment: "finalized" }],
+      });
+      if (
+        typeof result !== "number" ||
+        !Number.isSafeInteger(result) ||
+        result < 0
+      ) {
+        throw new Error("Solana RPC: invalid finalized slot");
+      }
+      return BigInt(result);
+    },
+  );
 }
 
 export async function fetchSolanaAddressSignatures(inputs: {

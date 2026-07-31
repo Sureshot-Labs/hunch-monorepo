@@ -16,6 +16,8 @@ import type { JsonValue } from "../domain/types.js";
 import type { DirectIngressObservationVariant } from "../reconciliation/direct-ingress-observer.js";
 import type {
   FundingReceiveCanonicalEvent,
+  FundingReceiveEventScanBatchEntry,
+  FundingReceiveEventScanBatchResult,
   FundingReceiveEventScan,
 } from "./evm-receive-event-scanner.js";
 import { fundingSidecarRuntimeConfig } from "../runtime/sidecar-runtime-config.js";
@@ -31,7 +33,9 @@ type SolanaReceiveNetwork = Readonly<{
 }>;
 
 export type SolanaReceiveEventRpc = Readonly<{
-  finalizedSlot: (network: SolanaReceiveNetwork) => Promise<bigint>;
+  finalizedSlot: (
+    network: SolanaReceiveNetwork & Readonly<{ bypassCache?: boolean }>,
+  ) => Promise<bigint>;
   signatures: (
     input: SolanaReceiveNetwork &
       Readonly<{
@@ -71,6 +75,37 @@ const DEFAULT_SOLANA_EVENT_RPC: SolanaReceiveEventRpc = {
       rpcUrls: [...input.rpcUrls],
     }),
 };
+
+export type SolanaFundingReceiveScanContext = Readonly<{
+  transactionsBySignature: Map<string, Promise<unknown | null>>;
+  blockhashesBySlot: Map<string, Promise<string | null>>;
+}>;
+
+export function createSolanaFundingReceiveScanContext(): SolanaFundingReceiveScanContext {
+  return {
+    transactionsBySignature: new Map(),
+    blockhashesBySlot: new Map(),
+  };
+}
+
+async function loadBatchValue<T>(
+  store: Map<string, Promise<T | null>>,
+  key: string,
+  loader: () => Promise<T | null>,
+): Promise<T | null> {
+  const existing = store.get(key);
+  if (existing) return existing;
+  const pending = loader();
+  store.set(key, pending);
+  try {
+    const value = await pending;
+    if (value == null) store.delete(key);
+    return value;
+  } catch (error) {
+    store.delete(key);
+    throw error;
+  }
+}
 
 function solanaNetwork(): SolanaReceiveNetwork {
   return {
@@ -139,7 +174,10 @@ export async function initializeSolanaFundingReceiveEventCursors(
   if (variants.some((variant) => variant.networkId !== "solana:mainnet")) {
     throw new Error("Solana receive scanner received a non-Solana variant");
   }
-  const slot = await rpc.finalizedSlot(solanaNetwork());
+  const slot = await rpc.finalizedSlot({
+    ...solanaNetwork(),
+    bypassCache: true,
+  });
   return variants.map((variant) =>
     withCursor(variant, { slot, signature: null }),
   );
@@ -348,89 +386,216 @@ export async function scanSolanaFundingReceiveCanonicalEvents(
   variants: readonly DirectIngressObservationVariant[],
   now = new Date(),
   rpc: SolanaReceiveEventRpc = DEFAULT_SOLANA_EVENT_RPC,
+  context = createSolanaFundingReceiveScanContext(),
 ): Promise<FundingReceiveEventScan | null> {
   if (variants.length === 0) return null;
-  if (variants.some((variant) => variant.networkId !== "solana:mainnet")) {
-    return null;
+  const result = await scanSolanaFundingReceiveCanonicalEventBatch(
+    [{ key: "single", variants }],
+    now,
+    rpc,
+    context,
+  );
+  if (result.failedKeys.has("single")) {
+    throw (
+      result.errors.get("single") ??
+      new Error("Solana receive-event scan failed")
+    );
   }
-  let cursorAdvanced = false;
-  const groups: Array<{
-    variant: DirectIngressObservationVariant;
-    events: FundingReceiveCanonicalEvent[];
-  }> = [];
-  // A receive session can expose several Solana asset variants. Query them in
-  // sequence so the worker cannot exhaust provider compute units in one burst.
-  for (const variant of variants) {
-    const signatures = await listNewSignatures(variant, rpc);
-    if (signatures.length === 0) {
-      groups.push({ variant, events: [] as FundingReceiveCanonicalEvent[] });
-      continue;
+  return result.scans.get("single") ?? null;
+}
+
+type SolanaBatchItem = Readonly<{
+  entryKey: string;
+  variant: DirectIngressObservationVariant;
+  cursor: bigint;
+}>;
+
+function physicalRouteKey(variant: DirectIngressObservationVariant): string {
+  return JSON.stringify([
+    variant.networkId,
+    variant.asset.assetId,
+    variant.asset.decimals,
+    variant.destinationAddress,
+  ]);
+}
+
+export async function scanSolanaFundingReceiveCanonicalEventBatch(
+  entries: readonly FundingReceiveEventScanBatchEntry[],
+  now = new Date(),
+  rpc: SolanaReceiveEventRpc = DEFAULT_SOLANA_EVENT_RPC,
+  context = createSolanaFundingReceiveScanContext(),
+): Promise<FundingReceiveEventScanBatchResult> {
+  const entryStates = new Map<
+    string,
+    {
+      originalVariants: readonly DirectIngressObservationVariant[];
+      nextVariants: Map<string, DirectIngressObservationVariant>;
+      events: FundingReceiveCanonicalEvent[];
+      cursorAdvanced: boolean;
+      invalid: boolean;
     }
-    const network = solanaNetwork();
-    const blockhashBySlot = new Map<string, Promise<string | null>>();
-    const events: FundingReceiveCanonicalEvent[] = [];
-    for (const signature of [...signatures].reverse()) {
-      if (signature.failed) continue;
-      const transaction = await rpc.transaction({
-        ...network,
-        signature: signature.signature,
-      });
-      if (transaction == null) {
-        throw new Error(
-          `Solana finalized transaction ${signature.signature} is unavailable`,
+  >();
+  const routeItems = new Map<string, SolanaBatchItem[]>();
+  for (const entry of entries) {
+    const state = {
+      originalVariants: entry.variants,
+      nextVariants: new Map<string, DirectIngressObservationVariant>(),
+      events: [] as FundingReceiveCanonicalEvent[],
+      cursorAdvanced: false,
+      invalid: false,
+    };
+    entryStates.set(entry.key, state);
+    for (const variant of entry.variants) {
+      const cursor = cursorSlot(variant);
+      if (variant.networkId !== "solana:mainnet" || cursor == null) {
+        state.invalid = true;
+        continue;
+      }
+      const key = physicalRouteKey(variant);
+      const items = routeItems.get(key) ?? [];
+      items.push({ entryKey: entry.key, variant, cursor });
+      routeItems.set(key, items);
+    }
+  }
+
+  const failedKeys = new Set<string>();
+  const errors = new Map<string, unknown>();
+  const network = solanaNetwork();
+  // Routes remain serial. Within one route, the oldest cursor produces a
+  // superset that is filtered independently for every receive session.
+  for (const items of routeItems.values()) {
+    const activeItems = items.filter((item) => !failedKeys.has(item.entryKey));
+    const ordered = [...activeItems].sort((left, right) =>
+      left.cursor < right.cursor ? -1 : left.cursor > right.cursor ? 1 : 0,
+    );
+    const first = ordered[0];
+    if (!first) continue;
+    try {
+      const signatures = await listNewSignatures(first.variant, rpc);
+      const decoded = new Map<
+        string,
+        Readonly<{
+          signature: SolanaAddressSignature;
+          transfers: readonly ParsedTransfer[];
+          blockhash: string;
+        }>
+      >();
+      for (const signature of [...signatures].reverse()) {
+        if (signature.failed) continue;
+        const interestedItems = activeItems.filter(
+          (item) => signature.slot > item.cursor,
         );
-      }
-      const transfers = parseTransactionTransfers(transaction, { variant });
-      if (transfers == null) {
-        throw new Error(
-          `Solana finalized transaction ${signature.signature} is malformed`,
+        if (interestedItems.length === 0) continue;
+        const failInterestedItems = (error: Error) => {
+          for (const item of interestedItems) {
+            failedKeys.add(item.entryKey);
+            if (!errors.has(item.entryKey)) {
+              errors.set(item.entryKey, error);
+            }
+          }
+        };
+        const transaction = await loadBatchValue(
+          context.transactionsBySignature,
+          signature.signature,
+          () => rpc.transaction({ ...network, signature: signature.signature }),
         );
-      }
-      let blockhash = blockhashBySlot.get(signature.slot.toString());
-      if (!blockhash) {
-        blockhash = rpc.blockhash({ ...network, slot: signature.slot });
-        blockhashBySlot.set(signature.slot.toString(), blockhash);
-      }
-      const resolvedBlockhash = await blockhash;
-      if (!resolvedBlockhash) {
-        throw new Error(
-          `Solana finalized block ${signature.slot.toString()} is unavailable`,
-        );
-      }
-      for (const transfer of transfers) {
-        events.push({
-          variant,
-          transactionHash: signature.signature,
-          eventIndex: transfer.eventIndex,
-          blockNumber: signature.slot.toString(),
-          blockHash: resolvedBlockhash,
-          sourceAddress: transfer.sourceAddress,
-          destinationAddress: variant.destinationAddress,
-          rawAmount: transfer.rawAmount.toString(),
-          observedAt:
-            signature.blockTime == null
-              ? now.toISOString()
-              : new Date(signature.blockTime * 1_000).toISOString(),
+        if (transaction == null) {
+          failInterestedItems(
+            new Error(
+              `Solana finalized transaction ${signature.signature} is unavailable`,
+            ),
+          );
+          continue;
+        }
+        const transfers = parseTransactionTransfers(transaction, {
+          variant: first.variant,
         });
+        if (transfers == null) {
+          failInterestedItems(
+            new Error(
+              `Solana finalized transaction ${signature.signature} is malformed`,
+            ),
+          );
+          continue;
+        }
+        const blockhash = await loadBatchValue(
+          context.blockhashesBySlot,
+          signature.slot.toString(),
+          () => rpc.blockhash({ ...network, slot: signature.slot }),
+        );
+        if (!blockhash) {
+          failInterestedItems(
+            new Error(
+              `Solana finalized block ${signature.slot.toString()} is unavailable`,
+            ),
+          );
+          continue;
+        }
+        decoded.set(signature.signature, { signature, transfers, blockhash });
+      }
+
+      for (const item of activeItems) {
+        if (failedKeys.has(item.entryKey)) continue;
+        const state = entryStates.get(item.entryKey);
+        if (!state) continue;
+        const relevant = signatures.filter(
+          (signature) => signature.slot > item.cursor,
+        );
+        const newest = relevant[0];
+        if (!newest) continue;
+        state.cursorAdvanced = true;
+        state.nextVariants.set(
+          item.variant.variantId,
+          withCursor(item.variant, {
+            slot: newest.slot,
+            signature: newest.signature,
+          }),
+        );
+        for (const signature of [...relevant].reverse()) {
+          const resolved = decoded.get(signature.signature);
+          if (!resolved) continue;
+          for (const transfer of resolved.transfers) {
+            state.events.push({
+              variant: item.variant,
+              transactionHash: resolved.signature.signature,
+              eventIndex: transfer.eventIndex,
+              blockNumber: resolved.signature.slot.toString(),
+              blockHash: resolved.blockhash,
+              sourceAddress: transfer.sourceAddress,
+              destinationAddress: item.variant.destinationAddress,
+              rawAmount: transfer.rawAmount.toString(),
+              observedAt:
+                resolved.signature.blockTime == null
+                  ? now.toISOString()
+                  : new Date(
+                      resolved.signature.blockTime * 1_000,
+                    ).toISOString(),
+            });
+          }
+        }
+      }
+    } catch (error) {
+      for (const item of activeItems) {
+        failedKeys.add(item.entryKey);
+        errors.set(item.entryKey, error);
       }
     }
-    const newest = signatures[0];
-    if (!newest) {
-      groups.push({ variant, events });
+  }
+
+  const scans = new Map<string, FundingReceiveEventScan | null>();
+  for (const [entryKey, state] of entryStates) {
+    if (failedKeys.has(entryKey)) continue;
+    if (state.invalid) {
+      scans.set(entryKey, null);
       continue;
     }
-    cursorAdvanced = true;
-    groups.push({
-      events,
-      variant: withCursor(variant, {
-        slot: newest.slot,
-        signature: newest.signature,
-      }),
+    scans.set(entryKey, {
+      events: state.events,
+      variants: state.originalVariants.map(
+        (variant) => state.nextVariants.get(variant.variantId) ?? variant,
+      ),
+      cursorAdvanced: state.cursorAdvanced,
     });
   }
-  return {
-    events: groups.flatMap((group) => group.events),
-    variants: groups.map((group) => group.variant),
-    cursorAdvanced,
-  };
+  return { scans, failedKeys, errors };
 }

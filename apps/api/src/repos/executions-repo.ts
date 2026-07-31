@@ -247,6 +247,28 @@ export async function storeExecution(
   }
 }
 
+function normalizeKalshiReconciliationMinAge(minAgeInput: number): number {
+  const minAgeSec = Math.trunc(minAgeInput);
+  if (!Number.isSafeInteger(minAgeSec) || minAgeSec < 0) {
+    throw new Error("Kalshi reconciliation minAgeSec must be non-negative");
+  }
+  return minAgeSec;
+}
+
+function normalizeKalshiFeeBackfillAgeWindow(inputs: {
+  minAgeSec: number;
+  maxAgeSec: number;
+}) {
+  const minAgeSec = normalizeKalshiReconciliationMinAge(inputs.minAgeSec);
+  const maxAgeSec = Math.trunc(inputs.maxAgeSec);
+  if (!Number.isSafeInteger(maxAgeSec) || maxAgeSec <= minAgeSec) {
+    throw new Error(
+      "Kalshi fee backfill maxAgeSec must be greater than minAgeSec",
+    );
+  }
+  return { minAgeSec, maxAgeSec };
+}
+
 export async function fetchPendingKalshiExecutions(
   pool: Pool,
   inputs: {
@@ -255,7 +277,7 @@ export async function fetchPendingKalshiExecutions(
   },
 ): Promise<ExecutionRow[]> {
   const limit = Math.max(1, Math.trunc(inputs.limit));
-  const minAgeSec = Math.max(0, Math.trunc(inputs.minAgeSec));
+  const minAgeSec = normalizeKalshiReconciliationMinAge(inputs.minAgeSec);
   const { rows } = await pool.query<ExecutionRow>(
     `
       select
@@ -299,10 +321,11 @@ export async function fetchFulfilledKalshiTradeExecutionsMissingFeeEvent(
   inputs: {
     limit: number;
     minAgeSec: number;
+    maxAgeSec: number;
   },
 ): Promise<ExecutionRow[]> {
   const limit = Math.max(1, Math.trunc(inputs.limit));
-  const minAgeSec = Math.max(0, Math.trunc(inputs.minAgeSec));
+  const { minAgeSec, maxAgeSec } = normalizeKalshiFeeBackfillAgeWindow(inputs);
   const { rows } = await pool.query<ExecutionRow>(
     `
       select
@@ -338,10 +361,11 @@ export async function fetchFulfilledKalshiTradeExecutionsMissingFeeEvent(
         and coalesce(e.raw->>'purpose', 'trade') = 'trade'
         and fe.id is null
         and e.created_at <= now() - ($1::int * interval '1 second')
+        and e.created_at >= now() - ($2::int * interval '1 second')
       order by e.created_at asc
-      limit $2
+      limit $3
     `,
-    [minAgeSec, limit],
+    [minAgeSec, maxAgeSec, limit],
   );
 
   return rows;

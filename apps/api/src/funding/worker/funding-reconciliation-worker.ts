@@ -21,17 +21,21 @@ import { OwnedRouteDestinationObserver } from "../reconciliation/owned-route-des
 import { FundingReceiveSessionObserver } from "../receive/receive-session-observer.js";
 import { FundingReceiveReceiptRouter } from "../receive/receive-receipt-router.js";
 
-export type RelayFundingWorkerConfig = Readonly<{
-  apiKey: string;
+export type FundingReferenceProtectionConfig = Readonly<{
   credentialsEncryptionKey: string;
   referenceLookupHmacKey: string;
   referenceKeyVersion: number;
+}>;
+
+export type RelayFundingWorkerConfig = Readonly<{
+  apiKey: string;
   timeoutMs?: number;
 }>;
 
 export type FundingReconciliationJobOptions =
   FundingReconciliationBatchOptions &
     Readonly<{
+      referenceProtection?: FundingReferenceProtectionConfig;
       relay?: RelayFundingWorkerConfig;
       receivePollDelayMs?: number;
     }>;
@@ -93,13 +97,14 @@ export async function runFundingReconciliationJob(
     };
   }
   const relay = options.relay;
-  const codecConfig = relay
+  const referenceProtection = options.referenceProtection;
+  const codecConfig = referenceProtection
     ? {
         encryptionKey: decodeCredentialsEncryptionKey(
-          relay.credentialsEncryptionKey,
+          referenceProtection.credentialsEncryptionKey,
         ),
-        lookupHmacKey: relay.referenceLookupHmacKey,
-        keyVersion: relay.referenceKeyVersion,
+        lookupHmacKey: referenceProtection.referenceLookupHmacKey,
+        keyVersion: referenceProtection.referenceKeyVersion,
       }
     : null;
   const transactionCodec = codecConfig
@@ -109,10 +114,7 @@ export async function runFundingReconciliationJob(
     const receiveObservation = await new FundingReceiveSessionObserver(
       transactionCodec
         ? {
-            transactionReferenceLookup: {
-              fingerprint: (value) => transactionCodec.fingerprint(value),
-              keyVersion: transactionCodec.keyVersion,
-            },
+            transactionReferenceCodec: transactionCodec,
           }
         : {},
     ).pollBatch(pool, {

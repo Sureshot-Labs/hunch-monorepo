@@ -34,17 +34,20 @@ import { fetchSolanaFinalizedSlot } from "../../../services/solana-rpc.js";
 import { verifyFundingReceiveVariants } from "../../receive/receive-session-service.js";
 import {
   initializeFundingReceiveEventCursors,
+  scanFundingReceiveCanonicalEventBatch,
   scanFundingReceiveCanonicalEvents,
   type FundingReceiveEventRpc,
 } from "../../receive/evm-receive-event-scanner.js";
 import {
+  createSolanaFundingReceiveScanContext,
   initializeSolanaFundingReceiveEventCursors,
+  scanSolanaFundingReceiveCanonicalEventBatch,
   scanSolanaFundingReceiveCanonicalEvents,
 } from "../../receive/solana-receive-event-scanner.js";
 import {
   advanceFundingReceiveObservationBaselines,
+  classifyPolymarketHandoffEvents,
   fundingReceiveObservationDisposition,
-  internalPolymarketHandoffEventIdentities,
   selectFundingReceiveSessionsForPolling,
   selectFundingReceiveSessionObservation,
 } from "../../receive/receive-session-observer.js";
@@ -100,7 +103,10 @@ const internalHandoffCandidate = {
   operationId: "operation_internal_handoff_12345678",
   stepId: "step_internal_handoff_12345678",
   attemptId: "attempt_internal_handoff_12345678",
+  attemptOutcome: "submitted" as const,
+  receiptRefCiphertext: "encrypted_internal_handoff_reference",
   receiptRefLookupHmac: "lookup_internal_handoff_12345678",
+  lookupKeyVersion: 1,
   normalizedAction: internalHandoffAction,
   actionValidationResult: internalHandoffValidation,
 };
@@ -137,50 +143,159 @@ const internalHandoffEvent = (eventIndex: string, rawAmount: string) => ({
   receiptRefLookupHmac: internalHandoffCandidate.receiptRefLookupHmac,
 });
 
-assert.deepEqual(
-  [
-    ...internalPolymarketHandoffEventIdentities(
-      [internalHandoffEvent("1", internalHandoffAmount)],
-      [internalHandoffCandidate],
-    ),
-  ],
-  [`evm:137:${internalHandoffHash}:1`],
+assert.equal(
+  classifyPolymarketHandoffEvents(
+    [internalHandoffEvent("1", internalHandoffAmount)],
+    [internalHandoffCandidate],
+  ).get(`evm:137:${internalHandoffHash}:1`)?.kind,
+  "internal",
   "one exact handoff event must be classified as internal",
 );
-assert.deepEqual(
+const unrelatedHandoffClassifications = classifyPolymarketHandoffEvents(
   [
-    ...internalPolymarketHandoffEventIdentities(
-      [
-        internalHandoffEvent("1", internalHandoffAmount),
-        internalHandoffEvent("2", "1"),
-      ],
-      [internalHandoffCandidate],
-    ),
+    internalHandoffEvent("1", internalHandoffAmount),
+    internalHandoffEvent("2", "1"),
   ],
-  [`evm:137:${internalHandoffHash}:1`],
+  [internalHandoffCandidate],
+);
+assert.equal(
+  unrelatedHandoffClassifications.get(`evm:137:${internalHandoffHash}:1`)?.kind,
+  "internal",
+);
+assert.equal(
+  unrelatedHandoffClassifications.get(`evm:137:${internalHandoffHash}:2`)?.kind,
+  "external",
   "an unrelated Transfer in the same transaction must remain external",
 );
 assert.equal(
-  internalPolymarketHandoffEventIdentities(
+  classifyPolymarketHandoffEvents(
     [
       internalHandoffEvent("1", internalHandoffAmount),
       internalHandoffEvent("2", internalHandoffAmount),
     ],
     [internalHandoffCandidate],
-  ).size,
-  0,
-  "two identical matching events are ambiguous and must fail open",
+  ).get(`evm:137:${internalHandoffHash}:1`)?.kind,
+  "recovery_required",
+  "two identical matching events must fail closed into recovery",
 );
 assert.equal(
-  internalPolymarketHandoffEventIdentities(
+  classifyPolymarketHandoffEvents(
     [internalHandoffEvent("1", internalHandoffAmount)],
     [
       internalHandoffCandidate,
       { ...internalHandoffCandidate, attemptId: "attempt_duplicate_12345678" },
     ],
-  ).size,
-  0,
-  "multiple attempts for one transaction are ambiguous and must fail open",
+  ).get(`evm:137:${internalHandoffHash}:1`)?.kind,
+  "recovery_required",
+  "multiple attempts for one transaction must fail closed into recovery",
+);
+assert.equal(
+  classifyPolymarketHandoffEvents(
+    [internalHandoffEvent("1", internalHandoffAmount)],
+    [
+      {
+        ...internalHandoffCandidate,
+        attemptOutcome: "started",
+        receiptRefCiphertext: null,
+        receiptRefLookupHmac: null,
+        lookupKeyVersion: null,
+      },
+    ],
+  ).get(`evm:137:${internalHandoffHash}:1`)?.kind,
+  "internal",
+  "a durable started attempt must close the broadcast-to-report gap",
+);
+assert.equal(
+  classifyPolymarketHandoffEvents(
+    [internalHandoffEvent("1", internalHandoffAmount)],
+    [
+      {
+        ...internalHandoffCandidate,
+        attemptOutcome: "started",
+        receiptRefCiphertext: null,
+        receiptRefLookupHmac: null,
+        lookupKeyVersion: null,
+        normalizedAction: {
+          ...internalHandoffAction,
+          payload: { ...internalHandoffAction.payload, calls: [] },
+        },
+      },
+    ],
+  ).get(`evm:137:${internalHandoffHash}:1`)?.kind,
+  "recovery_required",
+  "a semantically relevant but invalid started envelope must fail closed",
+);
+assert.equal(
+  classifyPolymarketHandoffEvents(
+    [
+      {
+        ...internalHandoffEvent("1", internalHandoffAmount),
+        receiptRefLookupHmac: "rotated_lookup_hmac",
+      },
+    ],
+    [{ ...internalHandoffCandidate, receiptRefLookupHmac: "old_lookup_hmac" }],
+    { decrypt: () => internalHandoffHash },
+  ).get(`evm:137:${internalHandoffHash}:1`)?.kind,
+  "internal",
+  "a rotated lookup HMAC must fall back to the encrypted reference",
+);
+const mismatchedHandoffRecipient = "0x4444444444444444444444444444444444444444";
+const mismatchedHandoffTransferData = new ethers.Interface([
+  "function transfer(address recipient,uint256 amount)",
+]).encodeFunctionData("transfer", [
+  mismatchedHandoffRecipient,
+  BigInt(internalHandoffAmount),
+]);
+assert.equal(
+  classifyPolymarketHandoffEvents(
+    [
+      {
+        ...internalHandoffEvent("1", internalHandoffAmount),
+        receiptRefLookupHmac: "rotated_lookup_hmac",
+      },
+    ],
+    [
+      {
+        ...internalHandoffCandidate,
+        receiptRefLookupHmac: "old_lookup_hmac",
+        normalizedAction: {
+          ...internalHandoffAction,
+          payload: {
+            ...internalHandoffAction.payload,
+            recipient: mismatchedHandoffRecipient,
+            calls: [
+              {
+                target: internalHandoffToken,
+                value: "0",
+                data: mismatchedHandoffTransferData,
+              },
+            ],
+          },
+        },
+        actionValidationResult: {
+          ...internalHandoffValidation,
+          recipientAddress: mismatchedHandoffRecipient,
+          transferData: mismatchedHandoffTransferData,
+        },
+      },
+    ],
+    { decrypt: () => internalHandoffHash },
+  ).get(`evm:137:${internalHandoffHash}:1`)?.kind,
+  "recovery_required",
+  "a rotated exact reference with a mismatched envelope must fail closed",
+);
+assert.equal(
+  classifyPolymarketHandoffEvents(
+    [
+      {
+        ...internalHandoffEvent("1", internalHandoffAmount),
+        receiptRefLookupHmac: "rotated_lookup_hmac",
+      },
+    ],
+    [{ ...internalHandoffCandidate, receiptRefLookupHmac: "old_lookup_hmac" }],
+  ).get(`evm:137:${internalHandoffHash}:1`)?.kind,
+  "recovery_required",
+  "relevant encrypted evidence without a decoder must not fail open",
 );
 
 assert.deepEqual(
@@ -1008,12 +1123,14 @@ const [eventInitialized] = await initializeFundingReceiveEventCursors(
   eventRpc,
 );
 assert.equal(eventInitialized?.observation.payload.eventCursorBlock, "100");
+let initializedEvmBypassCache: boolean | undefined;
 const initializedNetworkUrls: string[] = [];
 const initializedEvmVariants = await initializeFundingReceiveEventCursors(
   [direct, baseUsdc],
   {
     async blockNumber(network) {
       initializedNetworkUrls.push(network.rpcUrl);
+      initializedEvmBypassCache = network.bypassCache;
       return 101n;
     },
     async transferLogs() {
@@ -1034,14 +1151,17 @@ assert.deepEqual(
   ),
   ["101", "101"],
 );
+assert.equal(initializedEvmBypassCache, true);
 await assert.rejects(
   initializeFundingReceiveEventCursors([solanaUsdc], eventRpc),
   /canonical receive-event scanner is unavailable for solana:mainnet/,
 );
+let initializedSolanaBypassCache: boolean | undefined;
 const initializedSolana = await initializeSolanaFundingReceiveEventCursors(
   [solanaUsdc],
   {
-    async finalizedSlot() {
+    async finalizedSlot(input) {
+      initializedSolanaBypassCache = input.bypassCache;
       return 500n;
     },
     async signatures() {
@@ -1055,6 +1175,7 @@ const initializedSolana = await initializeSolanaFundingReceiveEventCursors(
     },
   },
 );
+assert.equal(initializedSolanaBypassCache, true);
 assert.equal(initializedSolana[0]?.observation.payload.eventCursorSlot, "500");
 assert.equal(
   initializedSolana[0]?.observation.payload.eventIdentity,
@@ -1232,6 +1353,133 @@ assert.equal(
   "102",
 );
 
+const laterCursorVariant = eventInitialized
+  ? {
+      ...eventInitialized,
+      variantId: "ingress_variant_batch_later_12345678",
+      observation: {
+        ...eventInitialized.observation,
+        payload: {
+          ...eventInitialized.observation.payload,
+          eventCursorBlock: "101",
+        },
+      },
+    }
+  : null;
+let batchHeadCalls = 0;
+let batchLogCalls = 0;
+const batchScan = await scanFundingReceiveCanonicalEventBatch(
+  eventInitialized && laterCursorVariant
+    ? [
+        { key: "earlier", variants: [eventInitialized] },
+        { key: "later", variants: [laterCursorVariant] },
+      ]
+    : [],
+  new Date("2026-07-27T12:00:00.500Z"),
+  {
+    async blockNumber() {
+      batchHeadCalls += 1;
+      return 103n;
+    },
+    async transferLogs() {
+      batchLogCalls += 1;
+      return [
+        {
+          transactionHash: `0x${"3".repeat(64)}`,
+          logIndex: 8,
+          blockNumber: 101n,
+          blockHash: `0x${"4".repeat(64)}`,
+          fromAddress: "0x0000000000000000000000000000000000000005",
+          toAddress: direct.destinationAddress,
+          rawAmount: 10n,
+        },
+        {
+          transactionHash: `0x${"5".repeat(64)}`,
+          logIndex: 9,
+          blockNumber: 102n,
+          blockHash: `0x${"6".repeat(64)}`,
+          fromAddress: "0x0000000000000000000000000000000000000006",
+          toAddress: direct.destinationAddress,
+          rawAmount: 11n,
+        },
+      ];
+    },
+  },
+);
+assert.equal(batchHeadCalls, 1);
+assert.equal(batchLogCalls, 1);
+assert.equal(batchScan.failedKeys.size, 0);
+assert.equal(batchScan.scans.get("earlier")?.events.length, 2);
+assert.equal(batchScan.scans.get("later")?.events.length, 1);
+assert.equal(
+  batchScan.scans.get("earlier")?.variants[0]?.observation.payload
+    .eventCursorBlock,
+  "102",
+);
+assert.equal(
+  batchScan.scans.get("later")?.variants[0]?.observation.payload
+    .eventCursorBlock,
+  "102",
+);
+
+const differentAssetVariant = eventInitialized
+  ? {
+      ...eventInitialized,
+      variantId: "ingress_variant_batch_asset_12345678",
+      asset: {
+        ...eventInitialized.asset,
+        assetId: "0x0000000000000000000000000000000000000009",
+      },
+    }
+  : null;
+let differentRouteHeadCalls = 0;
+let differentRouteLogCalls = 0;
+await scanFundingReceiveCanonicalEventBatch(
+  eventInitialized && differentAssetVariant
+    ? [
+        { key: "asset-a", variants: [eventInitialized] },
+        { key: "asset-b", variants: [differentAssetVariant] },
+      ]
+    : [],
+  new Date("2026-07-27T12:00:00.750Z"),
+  {
+    async blockNumber() {
+      differentRouteHeadCalls += 1;
+      return 103n;
+    },
+    async transferLogs() {
+      differentRouteLogCalls += 1;
+      return [];
+    },
+  },
+);
+assert.equal(differentRouteHeadCalls, 1);
+assert.equal(differentRouteLogCalls, 2);
+
+const isolatedFailure = await scanFundingReceiveCanonicalEventBatch(
+  eventInitialized && differentAssetVariant
+    ? [
+        { key: "failed-route", variants: [eventInitialized] },
+        { key: "healthy-route", variants: [differentAssetVariant] },
+      ]
+    : [],
+  new Date("2026-07-27T12:00:00.875Z"),
+  {
+    async blockNumber() {
+      return 103n;
+    },
+    async transferLogs(input) {
+      if (input.contractAddress === eventInitialized?.asset.assetId) {
+        throw new Error("route unavailable");
+      }
+      return [];
+    },
+  },
+);
+assert.equal(isolatedFailure.failedKeys.has("failed-route"), true);
+assert.equal(isolatedFailure.failedKeys.has("healthy-route"), false);
+assert.ok(isolatedFailure.scans.has("healthy-route"));
+
 const adaptiveRangeCalls: Array<
   Readonly<{ fromBlock: bigint; toBlock: bigint }>
 > = [];
@@ -1344,6 +1592,278 @@ assert.equal(
   1,
   "accepted Solana assets must not burst provider compute units",
 );
+
+let sharedSolanaTransactionCalls = 0;
+let sharedSolanaBlockhashCalls = 0;
+const sharedSolanaContext = createSolanaFundingReceiveScanContext();
+const sharedSolanaRpc = {
+  async finalizedSlot() {
+    return 501n;
+  },
+  async signatures() {
+    return [
+      {
+        signature: solanaSignature,
+        slot: 501n,
+        blockTime: 1_785_139_200,
+        failed: false,
+      },
+    ];
+  },
+  async transaction() {
+    sharedSolanaTransactionCalls += 1;
+    return {
+      transaction: {
+        message: { instructions: [] },
+      },
+      meta: { err: null, innerInstructions: [] },
+    };
+  },
+  async blockhash() {
+    sharedSolanaBlockhashCalls += 1;
+    return solanaBlockhash;
+  },
+};
+await scanSolanaFundingReceiveCanonicalEvents(
+  initializedSolana,
+  new Date("2026-07-27T12:00:04.000Z"),
+  sharedSolanaRpc,
+  sharedSolanaContext,
+);
+await scanSolanaFundingReceiveCanonicalEvents(
+  initializedSolana,
+  new Date("2026-07-27T12:00:05.000Z"),
+  sharedSolanaRpc,
+  sharedSolanaContext,
+);
+assert.equal(sharedSolanaTransactionCalls, 1);
+assert.equal(sharedSolanaBlockhashCalls, 1);
+
+let batchedSolanaSignatureCalls = 0;
+const batchedSolanaBase = initializedSolana[0];
+assert.ok(batchedSolanaBase);
+assert.ok(observedSolanaTokenAccount);
+const batchedSolanaResult = await scanSolanaFundingReceiveCanonicalEventBatch(
+  [
+    {
+      key: "older-session",
+      variants: [
+        {
+          ...batchedSolanaBase,
+          variantId: "ingress_variant_solana_older_12345678",
+        },
+      ],
+    },
+    {
+      key: "newer-session",
+      variants: [
+        {
+          ...batchedSolanaBase,
+          variantId: "ingress_variant_solana_newer_12345678",
+          observation: {
+            ...batchedSolanaBase.observation,
+            payload: {
+              ...batchedSolanaBase.observation.payload,
+              eventCursorSlot: "501",
+              eventCursorSignature: "solana_signature_receive_501_12345678",
+            },
+          },
+        },
+      ],
+    },
+  ],
+  new Date("2026-07-27T12:00:05.000Z"),
+  {
+    async finalizedSlot() {
+      return 502n;
+    },
+    async signatures() {
+      batchedSolanaSignatureCalls += 1;
+      return [
+        {
+          signature: "solana_signature_receive_502_12345678",
+          slot: 502n,
+          blockTime: 1_785_139_202,
+          failed: false,
+        },
+        {
+          signature: "solana_signature_receive_501_12345678",
+          slot: 501n,
+          blockTime: 1_785_139_201,
+          failed: false,
+        },
+      ];
+    },
+    async transaction() {
+      return {
+        transaction: {
+          message: {
+            instructions: [
+              {
+                program: "spl-token",
+                parsed: {
+                  type: "transferChecked",
+                  info: {
+                    source: "solana_source_token_account_batch_12345678",
+                    destination: observedSolanaTokenAccount,
+                    mint: solanaUsdc.asset.assetId,
+                    tokenAmount: { amount: "1000000", decimals: 6 },
+                  },
+                },
+              },
+            ],
+          },
+        },
+        meta: { err: null, innerInstructions: [] },
+      };
+    },
+    async blockhash(input) {
+      return `solana_blockhash_${input.slot.toString()}_12345678`;
+    },
+  },
+);
+assert.equal(
+  batchedSolanaSignatureCalls,
+  1,
+  "one physical Solana route must issue one signature scan per worker batch",
+);
+assert.equal(batchedSolanaResult.scans.get("older-session")?.events.length, 2);
+assert.equal(batchedSolanaResult.scans.get("newer-session")?.events.length, 1);
+assert.equal(
+  batchedSolanaResult.scans.get("newer-session")?.variants[0]?.observation
+    .payload.eventCursorSlot,
+  "502",
+);
+
+const isolatedHistoricalFailureResult =
+  await scanSolanaFundingReceiveCanonicalEventBatch(
+    [
+      {
+        key: "older-session-with-gap",
+        variants: [
+          {
+            ...batchedSolanaBase,
+            variantId: "ingress_variant_solana_gap_older_12345678",
+          },
+        ],
+      },
+      {
+        key: "newer-session-after-gap",
+        variants: [
+          {
+            ...batchedSolanaBase,
+            variantId: "ingress_variant_solana_gap_newer_12345678",
+            observation: {
+              ...batchedSolanaBase.observation,
+              payload: {
+                ...batchedSolanaBase.observation.payload,
+                eventCursorSlot: "501",
+                eventCursorSignature:
+                  "solana_signature_receive_gap_501_12345678",
+              },
+            },
+          },
+        ],
+      },
+    ],
+    new Date("2026-07-27T12:00:05.000Z"),
+    {
+      async finalizedSlot() {
+        return 502n;
+      },
+      async signatures() {
+        return [
+          {
+            signature: "solana_signature_receive_gap_502_12345678",
+            slot: 502n,
+            blockTime: 1_785_139_202,
+            failed: false,
+          },
+          {
+            signature: "solana_signature_receive_gap_501_12345678",
+            slot: 501n,
+            blockTime: 1_785_139_201,
+            failed: false,
+          },
+        ];
+      },
+      async transaction(input) {
+        if (input.signature.includes("_501_")) return null;
+        return {
+          transaction: {
+            message: {
+              instructions: [
+                {
+                  program: "spl-token",
+                  parsed: {
+                    type: "transferChecked",
+                    info: {
+                      source: "solana_source_token_account_gap_12345678",
+                      destination: observedSolanaTokenAccount,
+                      mint: solanaUsdc.asset.assetId,
+                      tokenAmount: { amount: "1000000", decimals: 6 },
+                    },
+                  },
+                },
+              ],
+            },
+          },
+          meta: { err: null, innerInstructions: [] },
+        };
+      },
+      async blockhash(input) {
+        return `solana_blockhash_gap_${input.slot.toString()}_12345678`;
+      },
+    },
+  );
+assert.equal(
+  isolatedHistoricalFailureResult.failedKeys.has("older-session-with-gap"),
+  true,
+);
+assert.equal(
+  isolatedHistoricalFailureResult.failedKeys.has("newer-session-after-gap"),
+  false,
+  "an unavailable transaction at an older cursor must not block newer sessions",
+);
+assert.equal(
+  isolatedHistoricalFailureResult.scans.get("newer-session-after-gap")?.events
+    .length,
+  1,
+);
+assert.equal(
+  isolatedHistoricalFailureResult.scans.get("newer-session-after-gap")
+    ?.variants[0]?.observation.payload.eventCursorSlot,
+  "502",
+);
+
+let missingSolanaTransactionCalls = 0;
+const missingSolanaContext = createSolanaFundingReceiveScanContext();
+const missingSolanaRpc = {
+  ...sharedSolanaRpc,
+  async transaction() {
+    missingSolanaTransactionCalls += 1;
+    return null;
+  },
+};
+await assert.rejects(
+  scanSolanaFundingReceiveCanonicalEvents(
+    initializedSolana,
+    new Date("2026-07-27T12:00:06.000Z"),
+    missingSolanaRpc,
+    missingSolanaContext,
+  ),
+  /finalized transaction .* is unavailable/,
+);
+await assert.rejects(
+  scanSolanaFundingReceiveCanonicalEvents(
+    initializedSolana,
+    new Date("2026-07-27T12:00:07.000Z"),
+    missingSolanaRpc,
+    missingSolanaContext,
+  ),
+  /finalized transaction .* is unavailable/,
+);
+assert.equal(missingSolanaTransactionCalls, 2);
 
 const quote = (feeUsd: string | null): FundingQuoteSummary =>
   ({

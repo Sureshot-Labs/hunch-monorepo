@@ -4,21 +4,31 @@ import assert from "node:assert/strict";
 import bs58 from "bs58";
 
 import {
+  fetchEvmBalance,
+  fetchEvmBlockNumber,
   fetchEvmBlockHash,
   fetchEvmTransactionByHash,
   fetchEvmTransactionReceipt,
 } from "./services/polygon-rpc.js";
 import {
+  fetchSolanaBalanceLamports,
+  fetchSolanaFinalizedSlot,
   fetchSolanaReceiptTransaction,
   fetchSolanaSignatureReceiptStatus,
+  sendSolanaRawTransaction,
 } from "./services/solana-rpc.js";
 
 const originalFetch = globalThis.fetch;
+const originalNow = Date.now;
+let rpcNow = originalNow();
+Date.now = () => rpcNow;
 const transactionHash = `0x${"11".repeat(32)}`;
 const evmFrom = "0x1111111111111111111111111111111111111111";
 const evmTo = "0x2222222222222222222222222222222222222222";
 const solanaKeyA = "11111111111111111111111111111111";
 const solanaKeyB = "SysvarRent111111111111111111111111111111111";
+const attemptsByMethod = new Map<string, number>();
+let finalizedSlot = 123;
 
 try {
   globalThis.fetch = async (_input, init) => {
@@ -26,6 +36,10 @@ try {
       id: number;
       method: string;
     };
+    attemptsByMethod.set(
+      request.method,
+      (attemptsByMethod.get(request.method) ?? 0) + 1,
+    );
     let result: unknown;
     if (request.method === "eth_getTransactionByHash") {
       result = {
@@ -50,8 +64,18 @@ try {
       };
     } else if (request.method === "eth_getBlockByNumber") {
       result = { hash: `0x${"44".repeat(32)}` };
+    } else if (request.method === "eth_blockNumber") {
+      result = "0x64";
+    } else if (request.method === "eth_getBalance") {
+      result = "0x5";
     } else if (request.method === "getSignatureStatuses") {
       result = { value: [{ confirmationStatus: null, err: null }] };
+    } else if (request.method === "getSlot") {
+      result = finalizedSlot;
+    } else if (request.method === "getBalance") {
+      result = { value: 5 };
+    } else if (request.method === "sendTransaction") {
+      result = solanaKeyB;
     } else if (request.method === "getTransaction") {
       result = {
         slot: 123,
@@ -140,8 +164,164 @@ try {
     data: bs58.encode(Uint8Array.from([1, 2, 3])),
   });
   assert.deepEqual(solanaTransaction?.addressLookupTables, [solanaKeyB]);
+
+  const evmHeadUrl = "https://rpc.test/evm-head";
+  assert.deepEqual(
+    await Promise.all(
+      Array.from({ length: 20 }, () =>
+        fetchEvmBlockNumber({ rpcUrl: evmHeadUrl, timeoutMs: 1_000 }),
+      ),
+    ),
+    Array(20).fill(100n),
+  );
+  assert.equal(
+    await fetchEvmBlockNumber({ rpcUrl: evmHeadUrl, timeoutMs: 1_000 }),
+    100n,
+  );
+  assert.equal(attemptsByMethod.get("eth_blockNumber"), 1);
+  assert.deepEqual(
+    await Promise.all(
+      Array.from({ length: 20 }, () =>
+        fetchEvmBlockNumber({
+          rpcUrl: evmHeadUrl,
+          timeoutMs: 1_000,
+          bypassCache: true,
+        }),
+      ),
+    ),
+    Array(20).fill(100n),
+  );
+  assert.equal(attemptsByMethod.get("eth_blockNumber"), 2);
+  assert.equal(
+    await fetchEvmBlockNumber({ rpcUrl: evmHeadUrl, timeoutMs: 1_000 }),
+    100n,
+  );
+  assert.equal(attemptsByMethod.get("eth_blockNumber"), 2);
+  rpcNow += 1_001;
+  assert.equal(
+    await fetchEvmBlockNumber({ rpcUrl: evmHeadUrl, timeoutMs: 1_000 }),
+    100n,
+  );
+  assert.equal(attemptsByMethod.get("eth_blockNumber"), 3);
+
+  const evmBalanceUrl = "https://rpc.test/evm-balance";
+  assert.deepEqual(
+    await Promise.all(
+      Array.from({ length: 20 }, () =>
+        fetchEvmBalance({
+          rpcUrl: evmBalanceUrl,
+          timeoutMs: 1_000,
+          address: evmFrom,
+        }),
+      ),
+    ),
+    Array(20).fill(5n),
+  );
+  assert.equal(attemptsByMethod.get("eth_getBalance"), 1);
+  await fetchEvmBalance({
+    rpcUrl: evmBalanceUrl,
+    timeoutMs: 1_000,
+    address: evmFrom,
+  });
+  assert.equal(attemptsByMethod.get("eth_getBalance"), 2);
+
+  const solanaHeadUrls = ["https://rpc.test/solana-head"];
+  assert.deepEqual(
+    await Promise.all(
+      Array.from({ length: 20 }, () =>
+        fetchSolanaFinalizedSlot({
+          rpcUrls: solanaHeadUrls,
+          timeoutMs: 1_000,
+        }),
+      ),
+    ),
+    Array(20).fill(123n),
+  );
+  assert.equal(
+    await fetchSolanaFinalizedSlot({
+      rpcUrls: solanaHeadUrls,
+      timeoutMs: 1_000,
+    }),
+    123n,
+  );
+  assert.equal(attemptsByMethod.get("getSlot"), 1);
+  finalizedSlot = 124;
+  assert.deepEqual(
+    await Promise.all(
+      Array.from({ length: 20 }, () =>
+        fetchSolanaFinalizedSlot({
+          rpcUrls: solanaHeadUrls,
+          timeoutMs: 1_000,
+          bypassCache: true,
+        }),
+      ),
+    ),
+    Array(20).fill(124n),
+    "fresh finalized-slot reads must ignore completed cache entries and remain single-flight",
+  );
+  assert.equal(attemptsByMethod.get("getSlot"), 2);
+  assert.equal(
+    await fetchSolanaFinalizedSlot({
+      rpcUrls: solanaHeadUrls,
+      timeoutMs: 1_000,
+    }),
+    124n,
+    "the fresh boundary must replace the cached finalized slot",
+  );
+  rpcNow += 1_001;
+  assert.equal(
+    await fetchSolanaFinalizedSlot({
+      rpcUrls: solanaHeadUrls,
+      timeoutMs: 1_000,
+    }),
+    124n,
+  );
+  assert.equal(attemptsByMethod.get("getSlot"), 3);
+
+  const solanaBalanceUrls = ["https://rpc.test/solana-balance"];
+  assert.deepEqual(
+    await Promise.all(
+      Array.from({ length: 20 }, () =>
+        fetchSolanaBalanceLamports({
+          rpcUrls: solanaBalanceUrls,
+          timeoutMs: 1_000,
+          owner: solanaKeyA,
+        }),
+      ),
+    ),
+    Array(20).fill(5n),
+  );
+  assert.equal(attemptsByMethod.get("getBalance"), 1);
+  await fetchSolanaBalanceLamports({
+    rpcUrls: solanaBalanceUrls,
+    timeoutMs: 1_000,
+    owner: solanaKeyA,
+  });
+  assert.equal(attemptsByMethod.get("getBalance"), 2);
+
+  assert.deepEqual(
+    await Promise.all([
+      sendSolanaRawTransaction({
+        rpcUrls: ["https://rpc.test/solana-submit"],
+        timeoutMs: 1_000,
+        signedTransaction: "same-signed-transaction",
+      }),
+      sendSolanaRawTransaction({
+        rpcUrls: ["https://rpc.test/solana-submit"],
+        timeoutMs: 1_000,
+        signedTransaction: "same-signed-transaction",
+      }),
+    ]),
+    [solanaKeyB, solanaKeyB],
+  );
+  assert.equal(
+    attemptsByMethod.get("sendTransaction"),
+    2,
+    "transaction submission must never be single-flight deduplicated",
+  );
 } finally {
   globalThis.fetch = originalFetch;
+  Date.now = originalNow;
 }
 
 console.log("rpc gateway tests passed");

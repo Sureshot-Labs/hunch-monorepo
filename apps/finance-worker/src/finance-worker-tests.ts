@@ -14,6 +14,7 @@ import {
   setFinanceJobsModuleLoaderForTests,
 } from "./finance-jobs.js";
 import {
+  fundingReferenceProtectionConfig,
   resetFundingWorkerModuleLoaderForTests,
   relayFundingWorkerConfig,
   runFundingReconciliationJob,
@@ -49,6 +50,7 @@ function buildTestEnv(overrides: Partial<typeof env> = {}): typeof env {
     feesReconcileEnabled: false,
     jitterSec: 0,
     kalshiExecutionReconcileEnabled: false,
+    kalshiExecutionReconcileMaxAgeSec: 7 * 24 * 60 * 60,
     maxRetries: 0,
     payoutPrepareEnabled: false,
     payoutSendEnabled: false,
@@ -124,7 +126,7 @@ const tests: TestCase[] = [
     },
   },
   {
-    name: "Relay worker config requires the complete secret set",
+    name: "Relay requires reference protection while receive lookup remains independent",
     run: () => {
       const complete = {
         relayApiKey: "relay-api-key",
@@ -136,10 +138,28 @@ const tests: TestCase[] = [
       assert.deepEqual(relayFundingWorkerConfig(complete), {
         apiKey: "relay-api-key",
         timeoutMs: 1_500,
+      });
+      assert.deepEqual(fundingReferenceProtectionConfig(complete), {
         credentialsEncryptionKey: "credentials-key",
         referenceLookupHmacKey: "lookup-key",
         referenceKeyVersion: 4,
       });
+      assert.equal(
+        fundingReferenceProtectionConfig({
+          ...complete,
+          fundingReferenceLookupHmacKey: undefined,
+        }),
+        undefined,
+      );
+      assert.equal(
+        relayFundingWorkerConfig({
+          relayApiKey: complete.relayApiKey,
+          relayRequestTimeoutMs: complete.relayRequestTimeoutMs,
+          credentialsEncryptionKey: undefined,
+          fundingReferenceLookupHmacKey: undefined,
+        }),
+        undefined,
+      );
       assert.equal(
         relayFundingWorkerConfig({
           ...complete,

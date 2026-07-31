@@ -26,6 +26,7 @@ export type ReconcileKalshiExecutionsOptions = {
   dryRun: boolean;
   limit: number;
   minAgeSec: number;
+  maxAgeSec: number;
   logger?: Logger;
 };
 
@@ -182,6 +183,7 @@ export async function reconcileKalshiExecutions(
     fetchFulfilledKalshiTradeExecutionsMissingFeeEvent(pool, {
       limit: options.limit,
       minAgeSec: options.minAgeSec,
+      maxAgeSec: options.maxAgeSec,
     }),
   ]);
 

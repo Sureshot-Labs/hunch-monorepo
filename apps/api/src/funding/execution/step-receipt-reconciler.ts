@@ -555,6 +555,20 @@ export function evaluatePolymarketDepositWalletHandoffReceipt(
     };
   }
   if (!input.receipt) {
+    if (input.previous?.status === "finalized") {
+      return {
+        status: "reorged",
+        actionMatch: true,
+        ledgerHeight: input.previous.ledgerHeight,
+        blockHash: input.previous.blockHash,
+        canonical: false,
+        failureCode: "finalized_receipt_disappeared",
+        evidence: evidence({
+          transactionObserved: true,
+          receiptObserved: false,
+        }),
+      };
+    }
     return {
       status: "pending",
       actionMatch: null,
