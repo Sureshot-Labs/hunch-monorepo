@@ -99,6 +99,7 @@ import {
   runEmbeddedExecutionSingleFlight,
 } from "./embedded-execution-singleflight.js";
 import { executeServerEmbeddedEthereumTransaction } from "./embedded-ethereum.js";
+import { toPublicFundingTradeError } from "./funding-trade-public-errors.js";
 import { requestPolymarketCredentials } from "./polymarket-credentials.js";
 import {
   buildEmbeddedPolymarketConnectPayload,
@@ -6892,12 +6893,7 @@ export async function submitPolymarketClientSignedOrder(input: {
       return {
         ok: false,
         statusCode: 409,
-        payload: {
-          error:
-            error instanceof Error
-              ? error.message
-              : "Funding reservation is unavailable",
-        },
+        payload: toPublicFundingTradeError(error),
       };
     }
   }
@@ -7008,12 +7004,7 @@ export async function submitPolymarketClientSignedOrder(input: {
       return {
         ok: false,
         statusCode: 409,
-        payload: {
-          error:
-            error instanceof Error
-              ? error.message
-              : "Funding reservation claim failed",
-        },
+        payload: toPublicFundingTradeError(error),
       };
     }
   }
@@ -7031,12 +7022,7 @@ export async function submitPolymarketClientSignedOrder(input: {
       return {
         ok: false,
         statusCode: 409,
-        payload: {
-          error:
-            error instanceof Error
-              ? error.message
-              : "Funding trade submission could not start",
-        },
+        payload: toPublicFundingTradeError(error),
       };
     }
   }

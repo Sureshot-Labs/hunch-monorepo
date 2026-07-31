@@ -39,6 +39,7 @@ import {
   executeServerEmbeddedEthereumTransaction,
   waitForEmbeddedEthereumTransactionReceipt,
 } from "./embedded-ethereum.js";
+import { toPublicFundingTradeError } from "./funding-trade-public-errors.js";
 import {
   applyOptimisticPositionTradeOnce,
   reconcileExactPositionBalance,
@@ -3584,12 +3585,7 @@ export async function submitLimitlessClientSignedOrder(input: {
       return {
         ok: false,
         statusCode: 409,
-        payload: {
-          error:
-            error instanceof Error
-              ? error.message
-              : "Funding reservation is unavailable",
-        },
+        payload: toPublicFundingTradeError(error),
       };
     }
   }
@@ -3691,12 +3687,7 @@ export async function submitLimitlessClientSignedOrder(input: {
       return {
         ok: false,
         statusCode: 409,
-        payload: {
-          error:
-            error instanceof Error
-              ? error.message
-              : "Funding reservation claim failed",
-        },
+        payload: toPublicFundingTradeError(error),
       };
     }
   }
@@ -3714,12 +3705,7 @@ export async function submitLimitlessClientSignedOrder(input: {
       return {
         ok: false,
         statusCode: 409,
-        payload: {
-          error:
-            error instanceof Error
-              ? error.message
-              : "Funding trade submission could not start",
-        },
+        payload: toPublicFundingTradeError(error),
       };
     }
   }
@@ -4272,12 +4258,7 @@ export async function claimLimitlessAmmFundingTrade(input: {
     return {
       ok: false as const,
       statusCode: 409,
-      payload: {
-        error:
-          error instanceof Error
-            ? error.message
-            : "Funding reservation claim failed",
-      },
+      payload: toPublicFundingTradeError(error),
     };
   }
 }
@@ -4308,10 +4289,7 @@ export async function recordLimitlessAmmFundingTradeOutcome(input: {
     return {
       ok: false as const,
       statusCode: 409,
-      payload: {
-        error:
-          error instanceof Error ? error.message : "Trade outcome was rejected",
-      },
+      payload: toPublicFundingTradeError(error),
     };
   }
 }
@@ -4340,12 +4318,7 @@ export async function startLimitlessAmmFundingTrade(input: {
     return {
       ok: false as const,
       statusCode: 409,
-      payload: {
-        error:
-          error instanceof Error
-            ? error.message
-            : "Trade submission could not start",
-      },
+      payload: toPublicFundingTradeError(error),
     };
   }
 }

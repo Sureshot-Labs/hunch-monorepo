@@ -198,6 +198,8 @@ assert.deepEqual(
         assert.match(sql, /coalesce\(/);
         assert.match(sql, /destination_baseline\.baseline_as_of/);
         assert.match(sql, /destinationTransactionReferenceCount/);
+        assert.match(sql, /competing_attempt\.broadcast_may_have_occurred/);
+        assert.match(sql, /originTransactionReferenceCount/);
         assert.doesNotMatch(sql, /competing\.updated_at >=/);
         assert.match(sql, /to_timestamp/);
         assert.match(sql, /competing_preparation\.kind = 'venue_readiness'/);

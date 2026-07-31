@@ -46,7 +46,10 @@ import {
   validateCanonicalRedemptionBatch,
 } from "./services/polymarket-deposit-wallet-relayer.js";
 import { sumErc20TransfersTo } from "./funding/execution/evm-erc20-receipt.js";
+import { FundingPersistenceError } from "./funding/persistence/funding-operation-repository.js";
+import { FundingTradeAttemptError } from "./funding/persistence/funding-trade-attempt-repository.js";
 import { kalshiTradingExecutionTestHooks } from "./services/kalshi-trading-execution-service.js";
+import { toPublicFundingTradeError } from "./services/funding-trade-public-errors.js";
 import {
   isLimitlessBotClobExecutable,
   limitlessTradingExecutionTestHooks,
@@ -2882,6 +2885,85 @@ const tests: TestCase[] = [
       );
       assert.match(limitlessRestSubmitBlock, /extractLimitlessSubmittedOrder/);
       assert.match(limitlessBotSubmitBlock, /extractLimitlessSubmittedOrder/);
+    },
+  },
+  {
+    name: "funding trade endpoints expose stable domain errors and rethrow unknown failures",
+    run: () => {
+      const internalMessage =
+        'relation "funding_trade_attempts" violates secret_constraint';
+      const reservationError = toPublicFundingTradeError(
+        new FundingPersistenceError(
+          "invalid_state_transition",
+          internalMessage,
+        ),
+      );
+      assert.deepEqual(reservationError, {
+        code: "funding_reservation_not_ready",
+        error: "Funding reservation is not ready for this exact trade.",
+      });
+      assert.doesNotMatch(
+        JSON.stringify(reservationError),
+        /secret_constraint/,
+      );
+
+      const attemptError = toPublicFundingTradeError(
+        new FundingTradeAttemptError("attempt_conflict", internalMessage),
+      );
+      assert.deepEqual(attemptError, {
+        code: "funding_trade_reconciling",
+        error: "This funding trade is already being reconciled.",
+      });
+      assert.doesNotMatch(JSON.stringify(attemptError), /secret_constraint/);
+
+      const unknownError = new Error(internalMessage);
+      assert.throws(
+        () => toPublicFundingTradeError(unknownError),
+        (error) => error === unknownError,
+      );
+
+      const polymarket = readFileSync(
+        resolve(apiSrcDir, "services/polymarket-trading-execution-service.ts"),
+        "utf8",
+      );
+      const limitless = readFileSync(
+        resolve(apiSrcDir, "services/limitless-trading-execution-service.ts"),
+        "utf8",
+      );
+      const polymarketFundingSubmit = sourceSlice(
+        polymarket,
+        "export async function submitPolymarketClientSignedOrder(",
+        "async function getReadiness(",
+      );
+      const limitlessFundingSubmit = sourceSlice(
+        limitless,
+        "export async function submitLimitlessClientSignedOrder(",
+        "export async function quoteLimitlessAmmRoute(",
+      );
+      const limitlessAmmFunding = sourceSlice(
+        limitless,
+        "export async function claimLimitlessAmmFundingTrade(",
+        "export async function recordLimitlessAmmOrder(",
+      );
+
+      assert.equal(
+        (polymarketFundingSubmit.match(/toPublicFundingTradeError\(/g) ?? [])
+          .length,
+        3,
+      );
+      assert.equal(
+        (limitlessFundingSubmit.match(/toPublicFundingTradeError\(/g) ?? [])
+          .length,
+        3,
+      );
+      assert.equal(
+        (limitlessAmmFunding.match(/toPublicFundingTradeError\(/g) ?? [])
+          .length,
+        3,
+      );
+      assert.doesNotMatch(polymarketFundingSubmit, /error\.message/);
+      assert.doesNotMatch(limitlessFundingSubmit, /error\.message/);
+      assert.doesNotMatch(limitlessAmmFunding, /error\.message/);
     },
   },
   {

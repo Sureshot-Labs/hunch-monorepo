@@ -327,6 +327,45 @@ async function loadTarget(
                 from funding_operation_segments competing_segment
                 where competing_segment.operation_id = competing.id
                   and competing_segment.provider_id = 'relay'
+                  and (
+                    exists (
+                      select 1
+                      from funding_operation_steps competing_step
+                      join funding_operation_step_attempts competing_attempt
+                        on competing_attempt.step_id = competing_step.id
+                      where competing_step.operation_id = competing.id
+                        and competing_step.segment_id = competing_segment.id
+                        and competing_attempt.broadcast_may_have_occurred
+                    )
+                    or (
+                      coalesce(
+                        competing_segment.support_metadata
+                          ->>'originTransactionReferenceCount',
+                        '0'
+                      ) ~ '^[0-9]+$'
+                      and (
+                        coalesce(
+                          competing_segment.support_metadata
+                            ->>'originTransactionReferenceCount',
+                          '0'
+                        )
+                      )::integer >= 1
+                    )
+                    or (
+                      coalesce(
+                        competing_segment.support_metadata
+                          ->>'destinationTransactionReferenceCount',
+                        '0'
+                      ) ~ '^[0-9]+$'
+                      and (
+                        coalesce(
+                          competing_segment.support_metadata
+                            ->>'destinationTransactionReferenceCount',
+                          '0'
+                        )
+                      )::integer >= 1
+                    )
+                  )
                   and case
                     when
                       competing_segment.raw_status = 'success'

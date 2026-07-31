@@ -1205,6 +1205,55 @@ async function testUnexposedRecoveryRouteDoesNotBlockDestinationObservation(): P
     const competingCommit = await commit("competing");
     const currentCommit = await commit("current");
 
+    await client.query(
+      `
+        update funding_operation_steps
+        set state = 'submitted'
+        where operation_id = $1
+      `,
+      [currentCommit.operation.id],
+    );
+    await client.query(
+      `
+        update funding_operation_steps
+        set state = 'succeeded'
+        where operation_id = $1
+      `,
+      [currentCommit.operation.id],
+    );
+    await client.query(
+      `
+        update funding_operation_segments
+        set raw_status = 'success',
+            support_metadata = support_metadata || jsonb_build_object(
+              'relayStatusCategory', 'provider_success',
+              'originTransactionReferenceCount', 1,
+              'destinationTransactionReferenceCount', 1
+            )
+        where operation_id = $1
+      `,
+      [currentCommit.operation.id],
+    );
+
+    const observer = new OwnedRouteDestinationObserver({
+      observe: async () => ({
+        observedRaw: "1990000",
+        revision: opaque("observation"),
+        observedAt: "2026-07-29T22:36:30.000Z",
+      }),
+      persist: async () => true,
+    });
+    assert.deepEqual(
+      await observer.pollOperation(
+        client as unknown as Parameters<
+          OwnedRouteDestinationObserver["pollOperation"]
+        >[0],
+        currentCommit.operation.id,
+      ),
+      { destinationsPolled: 1, destinationSatisfied: true },
+      "an unbroadcast action_required route must not block a delivered route",
+    );
+
     let competingOperation = await transitionFundingOperationInTransaction(
       client,
       {
@@ -1255,44 +1304,6 @@ async function testUnexposedRecoveryRouteDoesNotBlockDestinationObservation(): P
       `,
       [competingCommit.operation.id],
     );
-    await client.query(
-      `
-        update funding_operation_steps
-        set state = 'submitted'
-        where operation_id = $1
-      `,
-      [currentCommit.operation.id],
-    );
-    await client.query(
-      `
-        update funding_operation_steps
-        set state = 'succeeded'
-        where operation_id = $1
-      `,
-      [currentCommit.operation.id],
-    );
-    await client.query(
-      `
-        update funding_operation_segments
-        set raw_status = 'success',
-            support_metadata = support_metadata || jsonb_build_object(
-              'relayStatusCategory', 'provider_success',
-              'originTransactionReferenceCount', 1,
-              'destinationTransactionReferenceCount', 1
-            )
-        where operation_id = $1
-      `,
-      [currentCommit.operation.id],
-    );
-
-    const observer = new OwnedRouteDestinationObserver({
-      observe: async () => ({
-        observedRaw: "1990000",
-        revision: opaque("observation"),
-        observedAt: "2026-07-29T22:36:30.000Z",
-      }),
-      persist: async () => true,
-    });
     assert.deepEqual(
       await observer.pollOperation(
         client as unknown as Parameters<
