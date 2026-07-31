@@ -963,6 +963,27 @@ export async function reduceFundingOperationInTransaction(
     destinationObservationKinds(initial),
     initial.requestedDestinationAmount,
   );
+  const sourceObserved =
+    hasFinalObservation(observations, "source_debit") ||
+    hasFinalObservation(observations, "source_credit");
+  const destinationObserved = hasFinalObservation(
+    observations,
+    "destination_credit",
+  );
+  const refundObserved = hasFinalObservation(observations, "refund_credit");
+  const venueReady = hasFinalObservation(observations, "venue_readiness");
+  const automaticRecoveryResolved =
+    initial.status === "recovery_required" &&
+    initial.recoveryMode === "automatic_evidence" &&
+    !derived.reorgBlockedByTerminalState &&
+    (destinationObserved || venueReady) &&
+    ![
+      "recovery_required",
+      "reconcile_required",
+      "failed",
+      "refunded",
+      "cancelled",
+    ].includes(derived.target.status);
   const sourceLegsFinal = segments.every((segment) => {
     const segmentInput = sumObservationAmount(
       observations.filter(
@@ -1006,7 +1027,11 @@ export async function reduceFundingOperationInTransaction(
           : undefined,
       errorCode: derived.reorgBlockedByTerminalState
         ? "finalized_observation_reorg"
-        : undefined,
+        : automaticRecoveryResolved &&
+            currentState.status === "recovery_required" &&
+            nextState.status !== "recovery_required"
+          ? null
+          : undefined,
       supportMetadataPatch: derived.reorgBlockedByTerminalState
         ? {
             reorgBlockedByTerminalState: true,
@@ -1023,15 +1048,6 @@ export async function reduceFundingOperationInTransaction(
     }
   }
 
-  const sourceObserved =
-    hasFinalObservation(observations, "source_debit") ||
-    hasFinalObservation(observations, "source_credit");
-  const destinationObserved = hasFinalObservation(
-    observations,
-    "destination_credit",
-  );
-  const refundObserved = hasFinalObservation(observations, "refund_credit");
-  const venueReady = hasFinalObservation(observations, "venue_readiness");
   if (sourceObserved || destinationObserved || refundObserved) {
     await releaseSourceReservationsAfterEvidence(
       client,

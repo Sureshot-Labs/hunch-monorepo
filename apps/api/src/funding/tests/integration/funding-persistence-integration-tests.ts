@@ -48,6 +48,7 @@ import {
   FundingPersistenceError,
   releaseFundingReservationInTransaction,
   renewFundingReconciliationLease,
+  transitionFundingOperation,
   transitionFundingOperationInTransaction,
   wakeFundingReconciliationInTransaction,
   type FundingCommitInput,
@@ -296,6 +297,10 @@ async function cleanupCommittedOperation(
     if (operationId) {
       await client.query(
         "delete from funding_reconciliation_jobs where operation_id = $1",
+        [operationId],
+      );
+      await client.query(
+        "delete from funding_observations where operation_id = $1",
         [operationId],
       );
       await client.query(
@@ -795,6 +800,312 @@ async function testOwnedRouteCompetitionQueryParses(): Promise<void> {
     destinationsPolled: 0,
     destinationSatisfied: false,
   });
+}
+
+async function testAutomaticRecoveryAcceptsLateDestinationEvidence(): Promise<void> {
+  const userId = await insertUser(pool);
+  const destinationLocationId = opaque("recovery-destination");
+  const destinationComponentId = opaque("recovery-component");
+  const destinationTargetSnapshot = {
+    kind: "owned_location",
+    componentId: destinationComponentId,
+    locationId: destinationLocationId,
+    preparation: "none",
+    networkId: ASSET.networkId,
+    assetId: ASSET.assetId,
+    location: {
+      kind: "venue_account",
+      locationId: destinationLocationId,
+      accountId: userId,
+      asset: ASSET,
+      details: {
+        address: "0x00000000000000000000000000000000000000d2",
+        venueId: "limitless",
+      },
+    },
+  } as const;
+  const basePlan = buildPlan({
+    purpose: "trade_shortfall",
+    venueId: "limitless",
+  });
+  const plan: FundingCommitPlan = {
+    ...basePlan,
+    operation: {
+      ...basePlan.operation,
+      destinationTargetSnapshot,
+      requestedSourceAmount: money("5090982"),
+      requestedDestinationAmount: money("5006577"),
+      venueBindingSnapshot: {
+        venueBindingOptionId: opaque("recovery-binding"),
+      },
+      supportMetadata: {
+        destinationObservation: {
+          observerId: "relay_owned_destination_observation_v1",
+          locationId: destinationLocationId,
+          asset: ASSET,
+          baselineRaw: "4993423",
+          baselineRevision: opaque("recovery-baseline"),
+          baselineAsOf: "2026-07-31T02:23:04.647Z",
+        },
+      },
+    },
+    segments: basePlan.segments.map((segment) => ({
+      ...segment,
+      providerId: "relay",
+      destinationTargetSnapshot,
+      quotedInput: money("5090982"),
+      quotedExpectedOutput: money("5057149"),
+      quotedMinOutput: money("5006577"),
+    })),
+    reservations: basePlan.reservations.map((reservation) => ({
+      ...reservation,
+      rawAmount: "5090982",
+    })),
+  };
+  const consentToken = opaque("recovery-consent");
+  const quote = await createFundingQuote(
+    pool,
+    quoteInput(userId, plan, consentToken),
+  );
+  let operationId: string | null = null;
+  try {
+    const committed = await commitFundingOperation(
+      pool,
+      commitInput(userId, quote.id, consentToken, plan),
+    );
+    operationId = committed.operation.id;
+    let operation = await transitionFundingOperation(pool, {
+      operationId,
+      scope: { kind: "worker" },
+      expectedVersion: committed.operation.version,
+      expectedState: {
+        status: committed.operation.status,
+        stage: committed.operation.progressStage,
+      },
+      nextState: { status: "in_progress", stage: "source_action" },
+    });
+    operation = await transitionFundingOperation(pool, {
+      operationId,
+      scope: { kind: "worker" },
+      expectedVersion: operation.version,
+      expectedState: {
+        status: operation.status,
+        stage: operation.progressStage,
+      },
+      nextState: {
+        status: "recovery_required",
+        stage: "source_action",
+      },
+      errorCode: "manual_fixture",
+      recoveryMode: "manual_review",
+    });
+    await pool.query(
+      `
+        update funding_operation_steps
+        set state = 'submitted'
+        where operation_id = $1
+      `,
+      [operationId],
+    );
+    await pool.query(
+      `
+        update funding_operation_steps
+        set state = 'succeeded'
+        where operation_id = $1
+      `,
+      [operationId],
+    );
+    await pool.query(
+      `
+        update funding_operation_segments
+        set status = 'submitted',
+            submitted_at = now(),
+            raw_status = 'success',
+            support_metadata = support_metadata || jsonb_build_object(
+              'relayStatusCategory', 'provider_success',
+              'originTransactionReferenceCount', 1,
+              'destinationTransactionReferenceCount', 1
+            )
+        where operation_id = $1
+      `,
+      [operationId],
+    );
+
+    let balanceReads = 0;
+    const observer = new OwnedRouteDestinationObserver({
+      observe: async () => {
+        balanceReads += 1;
+        return {
+          observedRaw: "10050674",
+          revision: "recovery-observation",
+          observedAt: "2026-07-31T02:23:35.004Z",
+        };
+      },
+    });
+    assert.deepEqual(await observer.pollOperation(pool, operationId), {
+      destinationsPolled: 0,
+      destinationSatisfied: false,
+    });
+    assert.equal(balanceReads, 0);
+
+    operation = await transitionFundingOperation(pool, {
+      operationId,
+      scope: { kind: "worker" },
+      expectedVersion: operation.version,
+      expectedState: {
+        status: operation.status,
+        stage: operation.progressStage,
+      },
+      nextState: { status: "in_progress", stage: "source_action" },
+    });
+    operation = await transitionFundingOperation(pool, {
+      operationId,
+      scope: { kind: "worker" },
+      expectedVersion: operation.version,
+      expectedState: {
+        status: operation.status,
+        stage: operation.progressStage,
+      },
+      nextState: {
+        status: "recovery_required",
+        stage: "source_action",
+      },
+      errorCode: FUNDING_RECONCILIATION_TIMEOUT_ERROR_CODE,
+      recoveryMode: "automatic_evidence",
+    });
+
+    const withoutEvidenceClient = await pool.connect();
+    try {
+      await withoutEvidenceClient.query("begin");
+      const withoutEvidence = await reduceFundingOperationInTransaction(
+        withoutEvidenceClient,
+        { operationId },
+      );
+      assert.deepEqual(withoutEvidence.finalState, {
+        status: "in_progress",
+        stage: "source_action",
+      });
+      const preserved = await fetchFundingOperationForUser(
+        withoutEvidenceClient,
+        { userId, operationId },
+      );
+      assert.equal(
+        preserved?.errorCode,
+        FUNDING_RECONCILIATION_TIMEOUT_ERROR_CODE,
+      );
+      await withoutEvidenceClient.query("rollback");
+    } finally {
+      withoutEvidenceClient.release();
+    }
+
+    assert.deepEqual(await observer.pollOperation(pool, operationId), {
+      destinationsPolled: 1,
+      destinationSatisfied: true,
+    });
+    assert.equal(balanceReads, 1);
+    const reductionClient = await pool.connect();
+    try {
+      await reductionClient.query("begin");
+      await reduceFundingOperationInTransaction(reductionClient, {
+        operationId,
+      });
+      await reductionClient.query("commit");
+    } catch (error) {
+      await reductionClient.query("rollback");
+      throw error;
+    } finally {
+      reductionClient.release();
+    }
+
+    const recovered = await fetchFundingOperationForUser(pool, {
+      userId,
+      operationId,
+    });
+    assert.equal(recovered?.status, "ready");
+    assert.equal(recovered?.progressStage, "ready_for_consumer");
+    assert.equal(recovered?.recoveryMode, null);
+    assert.equal(recovered?.errorCode, null);
+    const recoveredFacts = await pool.query<{
+      destination_credit_count: string;
+      segment_status: string;
+      settled_reservation_count: string;
+    }>(
+      `
+        select
+          (
+            select count(*)::text
+            from funding_observations observation
+            where observation.operation_id = operation.id
+              and observation.kind = 'destination_credit'
+          ) as destination_credit_count,
+          (
+            select segment.status
+            from funding_operation_segments segment
+            where segment.operation_id = operation.id
+              and segment.ordinal = 0
+          ) as segment_status,
+          (
+            select count(*)::text
+            from balance_reservations reservation
+            where reservation.operation_id = operation.id
+              and reservation.mode = 'settled_for_consumer'
+          ) as settled_reservation_count
+        from funding_operations operation
+        where operation.id = $1
+      `,
+      [operationId],
+    );
+    assert.deepEqual(recoveredFacts.rows[0], {
+      destination_credit_count: "1",
+      segment_status: "succeeded",
+      settled_reservation_count: "1",
+    });
+
+    assert.deepEqual(await observer.pollOperation(pool, operationId), {
+      destinationsPolled: 0,
+      destinationSatisfied: false,
+    });
+    const replayClient = await pool.connect();
+    try {
+      await replayClient.query("begin");
+      await reduceFundingOperationInTransaction(replayClient, { operationId });
+      await replayClient.query("commit");
+    } catch (error) {
+      await replayClient.query("rollback");
+      throw error;
+    } finally {
+      replayClient.release();
+    }
+    const replayFacts = await pool.query<{
+      destination_credit_count: string;
+      settled_reservation_count: string;
+    }>(
+      `
+        select
+          (
+            select count(*)::text
+            from funding_observations observation
+            where observation.operation_id = operation.id
+              and observation.kind = 'destination_credit'
+          ) as destination_credit_count,
+          (
+            select count(*)::text
+            from balance_reservations reservation
+            where reservation.operation_id = operation.id
+              and reservation.mode = 'settled_for_consumer'
+          ) as settled_reservation_count
+        from funding_operations operation
+        where operation.id = $1
+      `,
+      [operationId],
+    );
+    assert.deepEqual(replayFacts.rows[0], {
+      destination_credit_count: "1",
+      settled_reservation_count: "1",
+    });
+  } finally {
+    await cleanupCommittedOperation(operationId, quote.id, userId);
+  }
 }
 
 async function testUnexposedRecoveryRouteDoesNotBlockDestinationObservation(): Promise<void> {
@@ -3341,6 +3652,10 @@ console.log(
 await testOwnedRouteCompetitionQueryParses();
 console.log(
   "[funding-persistence-integration-tests] ok owned-route competition query parses",
+);
+await testAutomaticRecoveryAcceptsLateDestinationEvidence();
+console.log(
+  "[funding-persistence-integration-tests] ok automatic recovery accepts late owned-destination evidence idempotently",
 );
 await testUnexposedRecoveryRouteDoesNotBlockDestinationObservation();
 console.log(

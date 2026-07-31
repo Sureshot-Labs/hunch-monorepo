@@ -477,9 +477,11 @@ async function loadTarget(
           'completed',
           'refunded',
           'failed',
-          'cancelled',
-          'reconcile_required',
-          'recovery_required'
+          'cancelled'
+        )
+        and (
+          operation.status <> 'recovery_required'
+          or operation.recovery_mode = 'automatic_evidence'
         )
         and exists (
           select 1

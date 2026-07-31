@@ -231,6 +231,18 @@ assert.deepEqual(
         );
         assert.doesNotMatch(sql, /competing_segment\.ordinal = 0/);
         assert.doesNotMatch(sql, /\n\s+and segment\.raw_status = 'success'/);
+        assert.match(
+          sql,
+          /operation\.status not in \([^)]*'completed'[^)]*'cancelled'[^)]*\)/,
+        );
+        assert.doesNotMatch(
+          sql,
+          /operation\.status not in \([^)]*'reconcile_required'/,
+        );
+        assert.match(
+          sql,
+          /operation\.status <> 'recovery_required'[\s\S]*operation\.recovery_mode = 'automatic_evidence'/,
+        );
         return { rows: [] };
       },
     } as unknown as Pool,
