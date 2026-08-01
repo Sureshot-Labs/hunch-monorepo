@@ -5,6 +5,7 @@ export type SignalBotCommand =
   | "market"
   | "menu"
   | "settings"
+  | "signal_profile"
   | "signal_venues"
   | "start"
   | "stats"
@@ -72,6 +73,7 @@ export function parseSignalBotCommand(
     case "market":
     case "menu":
     case "settings":
+    case "signal_profile":
     case "signal_venues":
     case "start":
     case "stats":
@@ -86,6 +88,39 @@ export function parseSignalBotCommand(
     default:
       return null;
   }
+}
+
+export type SignalBotContentProfileRequest = {
+  profile: "telegram_signal_v11" | "x_editorial_draft_v1";
+  targetChatId: string | null;
+};
+
+export function parseSignalBotContentProfileRequest(
+  text: string | null | undefined,
+): SignalBotContentProfileRequest | null {
+  if (!text) return null;
+  const [, ...args] = text.trim().split(/\s+/);
+  if (args.length < 1 || args.length > 2) return null;
+  const profile = (() => {
+    switch (args[0]?.trim().toLowerCase()) {
+      case "telegram":
+      case "default":
+      case "telegram_signal_v11":
+        return "telegram_signal_v11" as const;
+      case "twitter":
+      case "x":
+      case "x_draft":
+      case "x_editorial_draft_v1":
+        return "x_editorial_draft_v1" as const;
+      default:
+        return null;
+    }
+  })();
+  if (!profile) return null;
+  const targetChatId =
+    args.length === 2 ? normalizeSignalBotCommandTargetChatId(args[1]) : null;
+  if (args.length === 2 && !targetChatId) return null;
+  return { profile, targetChatId };
 }
 
 export function parseSignalBotStatsPeriod(

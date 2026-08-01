@@ -26,7 +26,10 @@ import {
   resolveStrictClusterNativeOffer,
 } from "./cluster-execution.js";
 import { loadClusterMarketNativeQuotes } from "./cluster-execution-quotes.js";
-import { SIGNAL_BOT_QUOTE_MAX_AGE_MS } from "./signal-bot-delivery-policy.js";
+import {
+  isSignalBotQuoteFresh,
+  SIGNAL_BOT_QUOTE_MAX_AGE_MS,
+} from "./signal-bot-delivery-policy.js";
 import {
   HOLDER_RESEARCH_PUBLICATION_DECISION_V1_METRICS_JSON,
   parseHolderResearchUpdateV1,
@@ -84,6 +87,7 @@ import {
   parseSignalBotCommand,
   parseSignalBotCommandFirstArg,
   parseSignalBotCommandTargetChatId,
+  parseSignalBotContentProfileRequest,
   parseSignalBotDestinationPolicyRequest,
   parseSignalBotFollowthroughPreviewRequest,
   parseSignalBotRichPreviewRequest,
@@ -94,6 +98,16 @@ import {
   type SignalBotStatsPeriod,
   type SignalBotTestSignalSelector,
 } from "./signal-bot-command-parsers.js";
+import {
+  buildXEditorialSourceDigest,
+  parsePersistedXEditorialDraft,
+  X_EDITORIAL_CONTENT_PROFILE,
+  type XEditorialComposerConfig,
+  type XEditorialDraftComposer,
+  type XEditorialDraftSource,
+  type XEditorialDraftV1,
+  type XEditorialMessageKind,
+} from "./x-editorial-draft.js";
 import {
   buildSignalBotBuyStartParam,
   buildSignalBotHolderStartParam,
@@ -213,6 +227,7 @@ export { TelegramBotApiClient } from "./signal-bot-telegram-client.js";
 export { sendSignalBotRichLayoutPreview } from "./signal-bot-rich-preview.js";
 export {
   parseSignalBotCommand,
+  parseSignalBotContentProfileRequest,
   parseSignalBotDestinationPolicyRequest,
   parseSignalBotFollowthroughPreviewRequest,
   parseSignalBotRichPreviewRequest,
@@ -242,7 +257,12 @@ export type SignalBotConfig = {
   telegramMiniAppLinkBase: string | null;
   tradingInternalApiBaseUrl: string | null;
   tradingInternalApiToken: string | null;
+  xEditorial: XEditorialComposerConfig;
 };
+
+export type SignalBotContentProfile =
+  | "telegram_signal_v11"
+  | typeof X_EDITORIAL_CONTENT_PROFILE;
 
 export type SignalBotDisableTradingResult =
   | "already_disabled"
@@ -258,6 +278,7 @@ export type SignalBotChatState = {
   cursorCreatedAt: string;
   cursorId: string;
   destinationPolicy: SignalDestinationPolicy | null;
+  contentProfile: SignalBotContentProfile;
 };
 
 export type SignalBotRedisLike = {
@@ -389,7 +410,7 @@ export type TelegramInlineKeyboard = {
 export type TelegramSendMessageInput = {
   chat_id: string;
   disable_web_page_preview: boolean;
-  parse_mode: "MarkdownV2";
+  parse_mode?: "MarkdownV2";
   reply_parameters?: {
     allow_sending_without_reply?: boolean;
     message_id: number;
@@ -804,6 +825,28 @@ export function parseSignalBotConfig(
         : null),
     tradingInternalApiToken:
       env.HUNCH_SIGNAL_BOT_INTERNAL_API_TOKEN?.trim() || null,
+    xEditorial: {
+      enabled: parseBool(env.HUNCH_SIGNAL_BOT_X_EDITORIAL_ENABLED, false),
+      maxCharacters: Math.min(
+        4_000,
+        parsePositiveInt(
+          env.HUNCH_SIGNAL_BOT_X_EDITORIAL_MAX_CHARACTERS,
+          1_000,
+        ),
+      ),
+      maxOutputTokens: Math.min(
+        2_000,
+        parsePositiveInt(
+          env.HUNCH_SIGNAL_BOT_X_EDITORIAL_MAX_OUTPUT_TOKENS,
+          700,
+        ),
+      ),
+      maxParagraphs: Math.min(
+        8,
+        parsePositiveInt(env.HUNCH_SIGNAL_BOT_X_EDITORIAL_MAX_PARAGRAPHS, 5),
+      ),
+      model: env.HUNCH_SIGNAL_BOT_X_EDITORIAL_MODEL?.trim() || "openai/gpt-5.5",
+    },
   };
   if (
     config.enabled &&
@@ -1978,6 +2021,7 @@ export async function enableSignalBotChat(input: {
     cursorCreatedAt: now.toISOString(),
     cursorId: DEFAULT_CURSOR_ID,
     destinationPolicy: null,
+    contentProfile: "telegram_signal_v11",
   };
   await input.redis.sAdd(CHAT_SET_KEY, chatId);
   await writeChatState(input.redis, state);
@@ -2025,6 +2069,20 @@ export async function updateSignalBotDestinationPolicy(input: {
   await writeChatState(input.redis, {
     ...existing,
     destinationPolicy: input.policy,
+  });
+  return true;
+}
+
+export async function updateSignalBotContentProfile(input: {
+  chatId: string;
+  contentProfile: SignalBotContentProfile;
+  redis: SignalBotRedisLike;
+}): Promise<boolean> {
+  const existing = await getSignalBotChatState(input.redis, input.chatId);
+  if (!existing) return false;
+  await writeChatState(input.redis, {
+    ...existing,
+    contentProfile: input.contentProfile,
   });
   return true;
 }
@@ -2675,6 +2733,7 @@ export function buildSignalBotMenuScreen(input: {
           [
             ["/enable_signals", "enable a channel"],
             ["/disable_signals", "disable a channel"],
+            ["/signal_profile", "select Telegram or Twitter copy"],
             ["/signal_venues", "select trading venues"],
             ["/status", "inspect channel delivery"],
             ["/test_followthrough", "preview a follow-up"],
@@ -3824,6 +3883,37 @@ export async function handleSignalBotCommand(input: {
     await input.sendMessage(buildPlainReply(chatId, "Signals enabled here."));
     return true;
   }
+  if (command === "signal_profile") {
+    const request = parseSignalBotContentProfileRequest(input.message.text);
+    if (!request) {
+      await input.sendMessage(
+        buildPlainReply(
+          chatId,
+          "Usage: /signal_profile <telegram|twitter> [channel_id]",
+        ),
+      );
+      return true;
+    }
+    const destinationChatId = request.targetChatId ?? chatId;
+    const updated = await updateSignalBotContentProfile({
+      chatId: destinationChatId,
+      contentProfile: request.profile,
+      redis: input.redis,
+    });
+    const profileLabel =
+      request.profile === X_EDITORIAL_CONTENT_PROFILE
+        ? "Twitter editorial drafts"
+        : "Telegram signals";
+    await input.sendMessage(
+      buildPlainReply(
+        chatId,
+        updated
+          ? `${profileLabel} enabled for ${destinationChatId}.`
+          : `Signals are not enabled for ${destinationChatId}.`,
+      ),
+    );
+    return true;
+  }
   if (command === "signal_venues") {
     const request = parseSignalBotDestinationPolicyRequest(input.message.text);
     if (!request) {
@@ -3921,6 +4011,18 @@ export async function handleSignalBotCommand(input: {
               ? `Signals are disabled for ${targetChatId}.`
               : "Signals are disabled here.",
           `Destinations: ${destinations.join(", ") || "none"}.`,
+          `Content profile: ${
+            state?.contentProfile === X_EDITORIAL_CONTENT_PROFILE
+              ? "Twitter editorial drafts"
+              : "Telegram signals"
+          }.`,
+          ...(state?.contentProfile === X_EDITORIAL_CONTENT_PROFILE
+            ? [
+                `Editorial composer: ${
+                  input.config.xEditorial.enabled ? "enabled" : "disabled"
+                }.`,
+              ]
+            : []),
         ].join("\n"),
       ),
     );
@@ -5611,6 +5713,453 @@ async function recordSignalBotMessage(input: {
   }
 }
 
+type SignalBotXEditorialDeliveryRow = {
+  id: string;
+  metrics: unknown;
+  telegram_message_id: string | number | null;
+};
+
+type SignalBotXEditorialDeliveryResult =
+  | { status: "already_sent" | "blocked" | "sent" }
+  | { blockedChat: boolean; status: "retry" };
+
+function readXEditorialExternalResearch(modelMeta: Record<string, unknown>): {
+  fact: Record<string, unknown> | null;
+  urls: string[];
+} {
+  const external = asObject(modelMeta.external_research);
+  const status = asTrimmedString(external.status);
+  if (status !== "ok") return { fact: null, urls: [] };
+  const citations = Array.isArray(external.citations)
+    ? external.citations
+        .map((value) => asObject(value))
+        .map((citation) => ({
+          publishedAt: asTrimmedString(citation.publishedAt),
+          title: asTrimmedString(citation.title),
+          url: asTrimmedString(citation.url),
+        }))
+        .filter(
+          (
+            citation,
+          ): citation is {
+            publishedAt: string | null;
+            title: string | null;
+            url: string;
+          } => isSafeHttpUrl(citation.url),
+        )
+        .slice(0, 3)
+    : [];
+  return {
+    fact: {
+      citations: citations.map(({ publishedAt, title, url }) => ({
+        publishedAt,
+        title,
+        url,
+      })),
+      summary: asTrimmedString(external.summary),
+      timing: asTrimmedString(external.timing),
+      verdict: asTrimmedString(external.verdict),
+    },
+    urls: citations.map((citation) => citation.url),
+  };
+}
+
+function isSafeHttpUrl(value: string | null | undefined): value is string {
+  if (!value) return false;
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" || url.protocol === "http:";
+  } catch {
+    return false;
+  }
+}
+
+function buildSignalBotXEditorialSource(input: {
+  appBaseUrl: string;
+  kind: "initial" | "research_update";
+  note: SignalBotNote;
+  recentOpenings: string[];
+  selectedSide: "NO" | "YES";
+}): XEditorialDraftSource {
+  const note = input.note;
+  const identity = note.telegramMarketIdentityV1;
+  const price = note.signalPriceSnapshotV1;
+  const external = readXEditorialExternalResearch(note.modelMeta);
+  const facts: XEditorialDraftSource["facts"] = [];
+  const addFact = (id: string, label: string, value: unknown) => {
+    if (value == null) return;
+    if (typeof value === "string" && value.trim().length === 0) return;
+    facts.push({ id, label, value });
+  };
+  addFact("market", "Canonical market proposition and selected side", {
+    eventTitle: identity?.eventTitle ?? note.eventTitle,
+    marketQuestion: identity?.marketQuestion ?? note.marketTitle,
+    predicate: identity?.predicate ?? null,
+    selectedSide: identity?.selectedSide ?? resolveSignalBotBuySide(note),
+    selectedSideLabel: identity?.selectedSideLabel ?? note.holderSide,
+    subject: identity?.subject ?? note.eventTitle ?? note.marketTitle,
+    venue: identity?.venue ?? note.marketVenue,
+  });
+  addFact("price", "Selected-side signal price", {
+    asOf: price?.asOf ?? null,
+    displayPrice: price?.displayPrice ?? null,
+    displaySide: price?.displaySide ?? null,
+  });
+  addFact("research_copy", "Quality-gated research thesis", {
+    description: note.description,
+    headline: note.title,
+    rationale: note.rationale,
+  });
+  addFact("actor", "Tracked trader or group", {
+    actorMode: note.holderActorMode,
+    clusterOpenPnlUsd: note.holderClusterOpenPnlUsd,
+    clusterPnl30dUsd: note.holderClusterPnl30dUsd,
+    clusterSharpHolders: note.holderClusterSharpHolders,
+    clusterSharpUsd: note.holderClusterSharpUsd,
+    displayName:
+      note.holderIdentityDisplayName ?? note.holderDisplayName ?? null,
+    openPnlUsd: note.holderOpenPnlUsd,
+    positionSide: note.holderSide,
+    positionUsd: note.holderPositionUsd,
+  });
+  addFact("credentials", "Verified actor credentials", [
+    ...note.holderCredentialBullets,
+  ]);
+  if (input.kind === "research_update") {
+    addFact(
+      "research_update",
+      "Producer-owned material change since the prior signal",
+      note.holderResearchUpdateV1,
+    );
+  }
+  addFact("external_context", "Validated external research", external.fact);
+  const marketUrl =
+    note.eventId && note.marketId
+      ? buildSignalBotOpenMarketUrl({
+          appBaseUrl: input.appBaseUrl,
+          eventId: note.eventId,
+          marketId: note.marketId,
+          side: resolveSignalBotBuySide(note),
+        })
+      : null;
+  return {
+    facts,
+    kind: input.kind,
+    marketId: note.marketId ?? identity?.marketId ?? note.id,
+    noteId: note.id,
+    recentOpenings: input.recentOpenings,
+    selectedSide: input.selectedSide,
+    sourceUrls: [marketUrl, ...external.urls].filter(isSafeHttpUrl).slice(0, 3),
+  };
+}
+
+function validateSignalBotXEditorialNote(input: {
+  kind: "initial" | "research_update";
+  note: SignalBotNote;
+  now?: Date;
+}): SignalBotDeliveryPreparationReason | null {
+  const side = resolveSignalBotBuySide(input.note);
+  if (!side) return "non_directional";
+  const identity = input.note.telegramMarketIdentityV1;
+  if (!identity) return "missing_market_identity";
+  if (
+    identity.selectedSide !== side ||
+    identity.marketId !== input.note.marketId ||
+    identity.venue !== input.note.marketVenue
+  ) {
+    return "identity_mismatch";
+  }
+  if (input.kind === "research_update" && !input.note.holderResearchUpdateV1) {
+    return "missing_update_contract";
+  }
+  const price = input.note.signalPriceSnapshotV1;
+  if (!price) return "missing_price_snapshot";
+  if (
+    price.displaySide !== side ||
+    price.marketId !== input.note.marketId ||
+    price.venue !== input.note.marketVenue
+  ) {
+    return "identity_mismatch";
+  }
+  const asOfMs = Date.parse(price.asOf);
+  const nowMs = (input.now ?? new Date()).getTime();
+  if (
+    !Number.isFinite(asOfMs) ||
+    asOfMs > nowMs ||
+    !isSignalBotQuoteFresh(asOfMs, nowMs)
+  ) {
+    return "stale_price_snapshot";
+  }
+  return null;
+}
+
+function buildSignalBotXEditorialFollowthroughSource(input: {
+  appBaseUrl: string;
+  candidate: SignalBotFollowthroughCandidateRow;
+  kind: Extract<
+    SignalBotMessageKind,
+    "followthrough_stats" | "resolved_loss" | "resolved_win"
+  >;
+  recentOpenings: string[];
+  stats: SignalBotFollowthroughStats;
+}): XEditorialDraftSource {
+  const identity = parseTelegramMarketIdentityV1(
+    asObject(input.candidate.metrics).telegramMarketIdentityV1,
+  );
+  const marketUrl = input.candidate.event_id
+    ? buildSignalBotOpenMarketUrl({
+        appBaseUrl: input.appBaseUrl,
+        eventId: input.candidate.event_id,
+        marketId: input.candidate.market_id,
+        side: input.stats.signalSide,
+      })
+    : null;
+  return {
+    facts: [
+      {
+        id: "market",
+        label: "Canonical market proposition and selected side",
+        value: {
+          eventTitle: identity?.eventTitle ?? input.candidate.event_title,
+          marketQuestion:
+            identity?.marketQuestion ?? input.candidate.market_title,
+          predicate: identity?.predicate ?? null,
+          selectedSide: input.stats.signalSide,
+          selectedSideLabel: identity?.selectedSideLabel ?? null,
+          subject:
+            identity?.subject ??
+            input.candidate.event_title ??
+            input.candidate.market_title,
+          venue: identity?.venue ?? input.candidate.venue,
+        },
+      },
+      {
+        id: "original_signal",
+        label: "Original quality-gated signal headline",
+        value: input.candidate.title,
+      },
+      {
+        id: "followthrough",
+        label: "Computed change since the signal",
+        value: input.stats,
+      },
+    ],
+    kind: input.kind,
+    marketId: input.candidate.market_id,
+    noteId: input.candidate.thread_root_note_id,
+    recentOpenings: input.recentOpenings,
+    selectedSide: input.stats.signalSide as "NO" | "YES",
+    sourceUrls: [marketUrl].filter(isSafeHttpUrl),
+  };
+}
+
+async function loadSignalBotXEditorialDelivery(input: {
+  chatId: string;
+  db: DbQuery;
+  messageKind: XEditorialMessageKind;
+  noteId: string;
+}): Promise<SignalBotXEditorialDeliveryRow | null> {
+  try {
+    const result = await input.db.query<SignalBotXEditorialDeliveryRow>(
+      `
+        select id::text, telegram_message_id, metrics
+        from signal_bot_messages
+        where chat_id = $1
+          and note_id = $2::uuid
+          and message_kind = $3
+        limit 1
+      `,
+      [input.chatId, input.noteId, input.messageKind],
+    );
+    return result.rows[0] ?? null;
+  } catch (error) {
+    if (isMissingSignalBotMessagesTable(error)) return null;
+    throw error;
+  }
+}
+
+async function loadRecentSignalBotXEditorialOpenings(input: {
+  chatId: string;
+  db: DbQuery;
+  limit?: number;
+}): Promise<string[]> {
+  try {
+    const result = await input.db.query<{ post_text: string | null }>(
+      `
+        select metrics #>> '{editorialDraftV1,postText}' as post_text
+        from signal_bot_messages
+        where chat_id = $1
+          and metrics->>'contentProfile' = $2
+          and metrics #>> '{editorialDraftV1,status}' = 'ready'
+        order by sent_at desc
+        limit $3
+      `,
+      [
+        input.chatId,
+        X_EDITORIAL_CONTENT_PROFILE,
+        Math.max(1, Math.min(20, input.limit ?? 20)),
+      ],
+    );
+    return result.rows
+      .map((row) => row.post_text?.trim() ?? "")
+      .filter(Boolean);
+  } catch (error) {
+    if (isMissingSignalBotMessagesTable(error)) return [];
+    throw error;
+  }
+}
+
+function buildSignalBotXEditorialKeyboard(
+  sourceUrls: string[] | undefined,
+): TelegramInlineKeyboard | undefined {
+  const urls = [...new Set((sourceUrls ?? []).filter(isSafeHttpUrl))].slice(
+    0,
+    3,
+  );
+  if (urls.length === 0) return undefined;
+  return {
+    inline_keyboard: [
+      urls.map((url, index) => ({
+        text: index === 0 ? "Market" : `Source ${index}`,
+        url,
+      })),
+    ],
+  };
+}
+
+async function deliverSignalBotXEditorialDraft(input: {
+  baselineAt: string;
+  chatId: string;
+  composer?: XEditorialDraftComposer;
+  db: DbQuery;
+  messageKind: XEditorialMessageKind;
+  noteId: string;
+  source: XEditorialDraftSource;
+  telegram: SignalBotTelegramClient;
+  threadRootNoteId: string;
+}): Promise<SignalBotXEditorialDeliveryResult> {
+  const existing = await loadSignalBotXEditorialDelivery({
+    chatId: input.chatId,
+    db: input.db,
+    messageKind: input.messageKind,
+    noteId: input.noteId,
+  });
+  const existingMetrics = asObject(existing?.metrics);
+  if (
+    existing?.telegram_message_id != null &&
+    existingMetrics.status === "sent"
+  ) {
+    return { status: "already_sent" };
+  }
+  const digest = buildXEditorialSourceDigest(input.source);
+  const persistedDraft = parsePersistedXEditorialDraft(
+    existingMetrics.editorialDraftV1,
+  );
+  let draft: XEditorialDraftV1;
+  if (persistedDraft?.sourceDigest === digest) {
+    draft = persistedDraft;
+  } else {
+    if (!input.composer) return { blockedChat: false, status: "retry" };
+    try {
+      draft = await input.composer({ source: input.source });
+    } catch (error) {
+      await recordSignalBotMessage({
+        baselineAt: input.baselineAt,
+        chatId: input.chatId,
+        db: input.db,
+        insertId: existing?.id ?? createSignalDeliveryRef(),
+        messageId: null,
+        messageKind: input.messageKind,
+        metrics: {
+          contentProfile: X_EDITORIAL_CONTENT_PROFILE,
+          error:
+            error instanceof Error
+              ? error.message.slice(0, 500)
+              : String(error),
+          status: "compose_failed",
+        },
+        noteId: input.noteId,
+        replyToMessageId: null,
+        threadRootNoteId: input.threadRootNoteId,
+      });
+      return { blockedChat: false, status: "retry" };
+    }
+  }
+  const baseMetrics = {
+    contentProfile: X_EDITORIAL_CONTENT_PROFILE,
+    editorialDraftV1: draft,
+  };
+  if (draft.status === "blocked" || !draft.postText) {
+    await recordSignalBotMessage({
+      baselineAt: input.baselineAt,
+      chatId: input.chatId,
+      db: input.db,
+      insertId: existing?.id ?? createSignalDeliveryRef(),
+      messageId: null,
+      messageKind: input.messageKind,
+      metrics: { ...baseMetrics, status: "skipped" },
+      noteId: input.noteId,
+      replyToMessageId: null,
+      threadRootNoteId: input.threadRootNoteId,
+    });
+    return { status: "blocked" };
+  }
+  const prepared = await recordSignalBotMessage({
+    baselineAt: input.baselineAt,
+    chatId: input.chatId,
+    db: input.db,
+    insertId: existing?.id ?? createSignalDeliveryRef(),
+    messageId: null,
+    messageKind: input.messageKind,
+    metrics: { ...baseMetrics, status: "prepared" },
+    noteId: input.noteId,
+    replyToMessageId: null,
+    threadRootNoteId: input.threadRootNoteId,
+  });
+  if (!prepared) return { blockedChat: false, status: "retry" };
+  const result = await input.telegram.sendMessage({
+    chat_id: input.chatId,
+    disable_web_page_preview: true,
+    reply_markup: buildSignalBotXEditorialKeyboard(input.source.sourceUrls),
+    text: draft.postText,
+  });
+  if (!result.ok) {
+    await recordSignalBotMessage({
+      baselineAt: input.baselineAt,
+      chatId: input.chatId,
+      db: input.db,
+      insertId: existing?.id ?? createSignalDeliveryRef(),
+      messageId: null,
+      messageKind: input.messageKind,
+      metrics: {
+        ...baseMetrics,
+        error: result.message.slice(0, 500),
+        status: "send_failed",
+      },
+      noteId: input.noteId,
+      replyToMessageId: null,
+      threadRootNoteId: input.threadRootNoteId,
+    });
+    return {
+      blockedChat: result.error === "blocked_or_missing",
+      status: "retry",
+    };
+  }
+  await recordSignalBotMessage({
+    baselineAt: input.baselineAt,
+    chatId: input.chatId,
+    db: input.db,
+    insertId: existing?.id ?? createSignalDeliveryRef(),
+    messageId: result.messageId,
+    messageKind: input.messageKind,
+    metrics: { ...baseMetrics, status: "sent" },
+    noteId: input.noteId,
+    replyToMessageId: null,
+    threadRootNoteId: input.threadRootNoteId,
+  });
+  return { status: "sent" };
+}
+
 async function recordSignalBotSkippedDelivery(input: {
   audit?: Record<string, unknown>;
   baselineAt: string;
@@ -6009,6 +6558,7 @@ export async function publishSignalBotTick(input: {
   redis: SignalBotRedisLike;
   telegram: SignalBotTelegramClient;
   transports?: readonly SignalTransport[];
+  xEditorialComposer?: XEditorialDraftComposer;
 }): Promise<
   {
     blockedChats: number;
@@ -6125,6 +6675,71 @@ export async function publishSignalBotTick(input: {
       const buySide = resolveSignalBotBuySide(note);
       if (!buySide) {
         await skipDelivery("non_directional");
+        continue;
+      }
+      if (state.contentProfile === X_EDITORIAL_CONTENT_PROFILE) {
+        const validationReason = validateSignalBotXEditorialNote({
+          kind: messageKind,
+          note,
+        });
+        if (validationReason) {
+          await skipDelivery(validationReason, {
+            contentProfile: X_EDITORIAL_CONTENT_PROFILE,
+          });
+          continue;
+        }
+        if (!input.config.xEditorial.enabled || !input.xEditorialComposer) {
+          await input.redis.set(
+            signalBotSendCooldownKey(chatId, note.id),
+            "X editorial composer is unavailable",
+            { EX: SEND_FAILURE_COOLDOWN_SEC },
+          );
+          break;
+        }
+        const recentOpenings = await loadRecentSignalBotXEditorialOpenings({
+          chatId,
+          db: input.db,
+        });
+        const editorial = await deliverSignalBotXEditorialDraft({
+          baselineAt: thread.baselineAt,
+          chatId,
+          composer: input.xEditorialComposer,
+          db: input.db,
+          messageKind,
+          noteId: note.id,
+          source: buildSignalBotXEditorialSource({
+            appBaseUrl: input.config.appBaseUrl,
+            kind: messageKind,
+            note,
+            recentOpenings,
+            selectedSide: buySide,
+          }),
+          telegram: input.telegram,
+          threadRootNoteId: thread.threadRootNoteId,
+        });
+        if (editorial.status === "retry") {
+          if (editorial.blockedChat) {
+            blockedChats += 1;
+            await disableSignalBotChat(input.redis, chatId);
+          } else {
+            await input.redis.set(
+              signalBotSendCooldownKey(chatId, note.id),
+              "X editorial delivery failed",
+              { EX: SEND_FAILURE_COOLDOWN_SEC },
+            );
+          }
+          break;
+        }
+        if (editorial.status === "sent") sent += 1;
+        if (editorial.status === "blocked") {
+          countDeliverySkip("unpublishable_copy");
+        }
+        await updateSignalBotChatCursor({
+          chatId,
+          createdAt: note.createdAt,
+          id: note.id,
+          redis: input.redis,
+        });
         continue;
       }
       const routing = await resolveSignalBotDeliveryForPolicy({
@@ -6637,6 +7252,7 @@ async function loadSignalBotFollowthroughCandidates(input: {
                     and sent.message_kind = 'followthrough_stats'
                     and (
                       coalesce(sent.metrics->>'status', 'sent') = 'sent'
+                      or sent.metrics #>> '{editorialDraftV1,status}' = 'blocked'
                       or sent.sent_at > $6::timestamptz
                     )
                 )
@@ -6655,6 +7271,7 @@ async function loadSignalBotFollowthroughCandidates(input: {
                     and sent.message_kind in ('resolved_win', 'resolved_loss')
                     and (
                       coalesce(sent.metrics->>'status', 'sent') = 'sent'
+                      or sent.metrics #>> '{editorialDraftV1,status}' = 'blocked'
                       or sent.sent_at > $6::timestamptz
                     )
                 )
@@ -7864,6 +8481,7 @@ export async function publishSignalBotFollowthroughTick(input: {
   redis: SignalBotRedisLike;
   telegram: SignalBotTelegramClient;
   transports?: readonly SignalTransport[];
+  xEditorialComposer?: XEditorialDraftComposer;
 }): Promise<{
   candidates: number;
   policyEnabled: boolean;
@@ -7945,6 +8563,63 @@ export async function publishSignalBotFollowthroughTick(input: {
       skipped += 1;
       continue;
     }
+    const chatState = await getSignalBotChatState(
+      input.redis,
+      candidate.chat_id,
+    );
+    if (!chatState) {
+      skipped += 1;
+      continue;
+    }
+    if (chatState.contentProfile === X_EDITORIAL_CONTENT_PROFILE) {
+      if (!stats.signalSide) {
+        skipped += 1;
+        continue;
+      }
+      if (!input.config.xEditorial.enabled || !input.xEditorialComposer) {
+        skipped += 1;
+        continue;
+      }
+      const recentOpenings = await loadRecentSignalBotXEditorialOpenings({
+        chatId: candidate.chat_id,
+        db: input.db,
+      });
+      const editorial = await deliverSignalBotXEditorialDraft({
+        baselineAt,
+        chatId: candidate.chat_id,
+        composer: input.xEditorialComposer,
+        db: input.db,
+        messageKind: kind,
+        noteId: candidate.thread_root_note_id,
+        source: buildSignalBotXEditorialFollowthroughSource({
+          appBaseUrl: input.config.appBaseUrl,
+          candidate,
+          kind,
+          recentOpenings,
+          stats,
+        }),
+        telegram: input.telegram,
+        threadRootNoteId: candidate.thread_root_note_id,
+      });
+      if (editorial.status === "retry") {
+        if (editorial.blockedChat) {
+          await disableSignalBotChat(input.redis, candidate.chat_id);
+        }
+        skipped += 1;
+        continue;
+      }
+      if (editorial.status === "blocked") {
+        skipped += 1;
+        continue;
+      }
+      if (editorial.status === "sent") {
+        sent += 1;
+        if (kind === "followthrough_stats") sentStats += 1;
+        else if (kind === "resolved_win") sentResolvedWin += 1;
+        else if (kind === "resolved_loss") sentResolvedLoss += 1;
+      }
+      continue;
+    }
     const reserved = await reserveSignalBotFollowthroughMessage({
       baselineAt,
       chatId: candidate.chat_id,
@@ -7988,10 +8663,6 @@ export async function publishSignalBotFollowthroughTick(input: {
       stats,
       target,
     });
-    const chatState = await getSignalBotChatState(
-      input.redis,
-      candidate.chat_id,
-    );
     const keyboard = buildSignalBotFollowthroughKeyboard({
       allowBuyCta: buyPrice != null,
       appBaseUrl: input.config.appBaseUrl,
@@ -8476,6 +9147,7 @@ export async function configureSignalBotTelegramUi(input: {
     { command: "stats", description: "Show signal performance" },
     { command: "enable_signals", description: "Enable signal delivery" },
     { command: "disable_signals", description: "Disable signal delivery" },
+    { command: "signal_profile", description: "Set channel copy profile" },
     { command: "signal_venues", description: "Set destination venues" },
     { command: "test_rich", description: "Preview Rich Message layouts" },
     { command: "test_signal", description: "Preview latest signal" },
@@ -9855,6 +10527,10 @@ function parseChatState(
     chatId: value.chatId,
     chatTitle: value.chatTitle || null,
     chatType: value.chatType || null,
+    contentProfile:
+      value.contentProfile === X_EDITORIAL_CONTENT_PROFILE
+        ? X_EDITORIAL_CONTENT_PROFILE
+        : "telegram_signal_v11",
     cursorCreatedAt: value.cursorCreatedAt || "1970-01-01T00:00:00.000Z",
     cursorId: value.cursorId || DEFAULT_CURSOR_ID,
     enabledAt: value.enabledAt,
@@ -9878,6 +10554,7 @@ async function writeChatState(
     chatId: state.chatId,
     chatTitle: state.chatTitle ?? "",
     chatType: state.chatType ?? "",
+    contentProfile: state.contentProfile,
     cursorCreatedAt: state.cursorCreatedAt,
     cursorId: state.cursorId,
     enabledAt: state.enabledAt,
@@ -9982,6 +10659,7 @@ function helpText(input: {
     "/enable_signals <channel_id> - enable a channel",
     "/disable_signals - disable this chat",
     "/disable_signals <channel_id> - disable a channel",
+    "/signal_profile <telegram|twitter> [channel_id] - set channel copy format",
     "/signal_venues <csv|all> [channel_id] - set destination venues",
     "/status [channel_id] - show signal status",
     "/stats [24h|7d|30d] [detail] - show signal performance",

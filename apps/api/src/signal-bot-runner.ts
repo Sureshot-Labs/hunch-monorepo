@@ -49,6 +49,7 @@ import { createTelegramBotTradingInternalApiClient } from "./services/telegram-b
 import { withTelegramPrivateNavigation } from "./services/telegram-bot-private-navigation.js";
 import { formatTelegramCalloutMarkdownV2 } from "./services/telegram-bot-trading-presentation.js";
 import { buildHunchMiniAppWebButton } from "./services/telegram-mini-app-buttons.js";
+import { createOpenRouterXEditorialDraftComposer } from "./services/x-editorial-draft.js";
 
 function log(event: string, fields?: Record<string, unknown>): void {
   console.log(
@@ -182,6 +183,12 @@ export async function runSignalBotRunner(): Promise<void> {
   let dbPool: Pool | null = null;
   const telegram = new TelegramBotApiClient(config.token);
   const signalTransports = [createSignalBotTelegramTransport(telegram)];
+  const xEditorialComposer = config.xEditorial.enabled
+    ? createOpenRouterXEditorialDraftComposer({
+        apiKey: requiredEnv("OPENROUTER_API_KEY"),
+        config: config.xEditorial,
+      })
+    : undefined;
   const botUsername = await telegram
     .getMe()
     .then((user) => user.username ?? null)
@@ -207,6 +214,9 @@ export async function runSignalBotRunner(): Promise<void> {
     buyAmountUsd: config.buyAmountUsd,
     maxSignalsPerTick: config.maxSignalsPerTick,
     publishIntervalSec: config.publishIntervalSec,
+    xEditorialEnabled: config.xEditorial.enabled,
+    xEditorialMaxCharacters: config.xEditorial.maxCharacters,
+    xEditorialModel: config.xEditorial.model,
   });
 
   let nextPublishAt = 0;
@@ -630,6 +640,7 @@ export async function runSignalBotRunner(): Promise<void> {
             redis,
             telegram,
             transports: signalTransports,
+            xEditorialComposer,
           });
           log("signal_bot_publish_tick", result);
           const followthrough = await publishSignalBotFollowthroughTick({
@@ -638,6 +649,7 @@ export async function runSignalBotRunner(): Promise<void> {
             redis,
             telegram,
             transports: signalTransports,
+            xEditorialComposer,
           });
           log("signal_bot_followthrough_tick", followthrough);
           nextPublishAt = now + config.publishIntervalSec * 1_000;

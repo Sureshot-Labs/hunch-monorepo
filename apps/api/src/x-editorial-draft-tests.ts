@@ -1,0 +1,587 @@
+import assert from "node:assert/strict";
+
+import {
+  enableSignalBotChat,
+  getSignalBotChatState,
+  handleSignalBotCommand,
+  parseSignalBotConfig,
+  publishSignalBotTick,
+  updateSignalBotContentProfile,
+  type SignalBotRedisLike,
+} from "./services/signal-bot.js";
+import { parseSignalBotContentProfileRequest } from "./services/signal-bot-command-parsers.js";
+import {
+  buildXEditorialDraftSystemPrompt,
+  buildXEditorialSourceDigest,
+  createOpenRouterXEditorialDraftComposer,
+  parsePersistedXEditorialDraft,
+  validateXEditorialModelOutput,
+  type XEditorialDraftSource,
+} from "./services/x-editorial-draft.js";
+import { HOLDER_RESEARCH_PUBLICATION_DECISION_V1 } from "./services/signal-publication-contract.js";
+
+class FakeRedis implements SignalBotRedisLike {
+  readonly hashes = new Map<string, Record<string, string>>();
+  readonly sets = new Map<string, Set<string>>();
+
+  async del(key: string): Promise<number> {
+    return this.hashes.delete(key) ? 1 : 0;
+  }
+
+  async eval(): Promise<number> {
+    return 0;
+  }
+
+  async get(): Promise<string | null> {
+    return null;
+  }
+
+  async hGetAll(key: string): Promise<Record<string, string>> {
+    return { ...(this.hashes.get(key) ?? {}) };
+  }
+
+  async hSet(key: string, value: Record<string, string>): Promise<number> {
+    this.hashes.set(key, { ...(this.hashes.get(key) ?? {}), ...value });
+    return Object.keys(value).length;
+  }
+
+  async sAdd(key: string, member: string): Promise<number> {
+    const values = this.sets.get(key) ?? new Set<string>();
+    const before = values.size;
+    values.add(member);
+    this.sets.set(key, values);
+    return values.size - before;
+  }
+
+  async sMembers(key: string): Promise<string[]> {
+    return [...(this.sets.get(key) ?? [])];
+  }
+
+  async sRem(key: string, member: string): Promise<number> {
+    return this.sets.get(key)?.delete(member) ? 1 : 0;
+  }
+
+  async set(): Promise<string> {
+    return "OK";
+  }
+}
+
+const source: XEditorialDraftSource = {
+  facts: [
+    {
+      id: "market",
+      label: "Canonical market",
+      value: {
+        selectedSide: "YES",
+        selectedSideLabel: "Spain to win",
+        subject: "Spain to win the World Cup",
+      },
+    },
+    {
+      id: "actor",
+      label: "Tracked trader",
+      value: { positionUsd: 56_400, pnl30dUsd: 542_000 },
+    },
+  ],
+  kind: "initial",
+  marketId: "market-1",
+  noteId: "00000000-0000-4000-8000-000000000001",
+  recentOpenings: ["A different opening from yesterday."],
+  selectedSide: "YES",
+};
+
+const config = {
+  enabled: true,
+  maxCharacters: 1_000,
+  maxOutputTokens: 700,
+  maxParagraphs: 5,
+  model: "test/editorial-model",
+};
+
+const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
+  {
+    name: "content profile parser accepts short aliases and optional channel IDs",
+    run: () => {
+      assert.deepEqual(
+        parseSignalBotContentProfileRequest(
+          "/signal_profile twitter 4249870297",
+        ),
+        {
+          profile: "x_editorial_draft_v1",
+          targetChatId: "-1004249870297",
+        },
+      );
+      assert.deepEqual(
+        parseSignalBotContentProfileRequest("/signal_profile x"),
+        {
+          profile: "x_editorial_draft_v1",
+          targetChatId: null,
+        },
+      );
+      assert.deepEqual(
+        parseSignalBotContentProfileRequest("/signal_profile telegram"),
+        { profile: "telegram_signal_v11", targetChatId: null },
+      );
+      assert.equal(
+        parseSignalBotContentProfileRequest("/signal_profile unknown"),
+        null,
+      );
+    },
+  },
+  {
+    name: "old channel state defaults to Telegram and profile round-trips in Redis",
+    run: async () => {
+      const redis = new FakeRedis();
+      const enabled = await enableSignalBotChat({
+        chat: { id: -100123456, title: "Editorial", type: "channel" },
+        enabledBy: 42,
+        now: new Date("2026-08-01T12:00:00.000Z"),
+        redis,
+      });
+      assert.equal(enabled.contentProfile, "telegram_signal_v11");
+      const rawState = redis.hashes.get("tg:signal_bot:v1:chat:-100123456");
+      assert.ok(rawState);
+      rawState.contentProfile = "";
+      assert.equal(
+        (await getSignalBotChatState(redis, "-100123456"))?.contentProfile,
+        "telegram_signal_v11",
+      );
+      assert.equal(
+        await updateSignalBotContentProfile({
+          chatId: "-100123456",
+          contentProfile: "x_editorial_draft_v1",
+          redis,
+        }),
+        true,
+      );
+      assert.equal(
+        (await getSignalBotChatState(redis, "-100123456"))?.contentProfile,
+        "x_editorial_draft_v1",
+      );
+    },
+  },
+  {
+    name: "only an admin can select the editorial profile and status reports it",
+    run: async () => {
+      const redis = new FakeRedis();
+      await enableSignalBotChat({
+        chat: { id: -100123456, title: "Editorial", type: "channel" },
+        enabledBy: 42,
+        redis,
+      });
+      const replies: Array<Record<string, unknown>> = [];
+      const commandInput = (userId: number, text: string) => ({
+        config: parseSignalBotConfig({
+          HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "42",
+          HUNCH_SIGNAL_BOT_TOKEN: "token",
+          HUNCH_SIGNAL_BOT_X_EDITORIAL_ENABLED: "true",
+        }),
+        message: {
+          chat: { id: 42, type: "private" },
+          date: 0,
+          from: { id: userId },
+          message_id: replies.length + 1,
+          text,
+        },
+        redis,
+        sendMessage: async (message: Record<string, unknown>) => {
+          replies.push(message);
+          return { messageId: replies.length, ok: true as const };
+        },
+        sendTestSignal: async () => ({ status: "not_found" as const }),
+      });
+      await handleSignalBotCommand(
+        commandInput(7, "/signal_profile twitter -100123456") as never,
+      );
+      assert.equal(
+        (await getSignalBotChatState(redis, "-100123456"))?.contentProfile,
+        "telegram_signal_v11",
+      );
+      assert.match(String(replies.at(-1)?.text), /Not authorized/);
+
+      await handleSignalBotCommand(
+        commandInput(42, "/signal_profile twitter -100123456") as never,
+      );
+      assert.equal(
+        (await getSignalBotChatState(redis, "-100123456"))?.contentProfile,
+        "x_editorial_draft_v1",
+      );
+      await handleSignalBotCommand(
+        commandInput(42, "/status -100123456") as never,
+      );
+      const statusText = String(replies.at(-1)?.text).replace(/[\\*]/g, "");
+      assert.match(statusText, /Twitter editorial drafts/);
+      assert.match(statusText, /composer: enabled/i);
+    },
+  },
+  {
+    name: "editorial prompt explicitly requests human factual copy",
+    run: () => {
+      const prompt = buildXEditorialDraftSystemPrompt(config);
+      assert.match(prompt, /sharp human analyst/i);
+      assert.match(prompt, /Use only supplied facts/i);
+      assert.match(prompt, /No Markdown/i);
+      assert.match(prompt, /1000 visible characters/i);
+    },
+  },
+  {
+    name: "validator rejects unsafe, promotional, and synthetic-person copy",
+    run: () => {
+      const validated = validateXEditorialModelOutput({
+        config,
+        output: {
+          version: 1,
+          status: "ready",
+          marketId: "market-1",
+          selectedSide: "YES",
+          postText:
+            "I found an insider AI bot. Buy now with our code. #predictionmarkets",
+          storyFamily: "fresh_bet",
+          usedFactIds: ["market", "missing"],
+          safetyFlags: [],
+        },
+        source,
+      });
+      assert.deepEqual(validated.issues.sort(), [
+        "fake_first_person",
+        "hashtag",
+        "promotional_cta",
+        "unknown_fact_id:missing",
+        "unsupported_accusation",
+      ]);
+    },
+  },
+  {
+    name: "OpenRouter composer repairs a rejected first draft once",
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      const requests: unknown[] = [];
+      globalThis.fetch = (async (
+        _url: string | URL | Request,
+        init?: RequestInit,
+      ) => {
+        requests.push(JSON.parse(String(init?.body)) as unknown);
+        const content =
+          requests.length === 1
+            ? {
+                version: 1,
+                status: "ready",
+                marketId: "market-1",
+                selectedSide: "YES",
+                postText: "We found an insider. #alpha",
+                storyFamily: "fresh_bet",
+                usedFactIds: ["market"],
+                safetyFlags: [],
+              }
+            : {
+                version: 1,
+                status: "ready",
+                marketId: "market-1",
+                selectedSide: "YES",
+                postText:
+                  "$56.4K is backing Spain to win the World Cup.\n\nThe position stands out because the tracked trader is up $542K over the supplied period.",
+                storyFamily: "trader_profile",
+                usedFactIds: ["market", "actor"],
+                safetyFlags: [],
+              };
+        return new Response(
+          JSON.stringify({
+            choices: [{ message: { content: JSON.stringify(content) } }],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }) as typeof fetch;
+      try {
+        const compose = createOpenRouterXEditorialDraftComposer({
+          apiKey: "test-key",
+          config,
+        });
+        const draft = await compose({ source });
+        assert.equal(requests.length, 2);
+        assert.equal(draft.status, "ready");
+        assert.equal(draft.storyFamily, "trader_profile");
+        assert.match(draft.postText ?? "", /\$56\.4K/);
+        assert.deepEqual(draft.usedFactIds, ["market", "actor"]);
+        assert.equal(draft.sourceDigest, buildXEditorialSourceDigest(source));
+        assert.deepEqual(
+          parsePersistedXEditorialDraft(JSON.parse(JSON.stringify(draft))),
+          draft,
+        );
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    },
+  },
+  {
+    name: "validator rejects invented numbers and a flipped market contract",
+    run: () => {
+      const validated = validateXEditorialModelOutput({
+        config,
+        output: {
+          version: 1,
+          status: "ready",
+          marketId: "another-market",
+          selectedSide: "NO",
+          postText:
+            "$99K is backing Spain at 73% after a 12-day winning streak.",
+          storyFamily: "trader_profile",
+          usedFactIds: ["market", "actor"],
+          safetyFlags: [],
+        },
+        source,
+      });
+      assert.deepEqual(validated.issues.sort(), [
+        "market_id_mismatch",
+        "selected_side_mismatch",
+        "unsupported_number:$99K",
+        "unsupported_number:12",
+        "unsupported_number:73%",
+      ]);
+    },
+  },
+  {
+    name: "recent opening history does not change the canonical source digest",
+    run: () => {
+      assert.equal(
+        buildXEditorialSourceDigest(source),
+        buildXEditorialSourceDigest({
+          ...source,
+          recentOpenings: ["Completely different comparison set"],
+        }),
+      );
+    },
+  },
+  {
+    name: "publisher sends exact plain editorial copy once and persists it",
+    run: async () => {
+      const redis = new FakeRedis();
+      await enableSignalBotChat({
+        chat: { id: -100987654, title: "X drafts", type: "channel" },
+        enabledBy: 42,
+        now: new Date("2026-07-31T12:00:00.000Z"),
+        redis,
+      });
+      await updateSignalBotContentProfile({
+        chatId: "-100987654",
+        contentProfile: "x_editorial_draft_v1",
+        redis,
+      });
+      const now = new Date();
+      const noteId = "00000000-0000-4000-8000-000000000321";
+      const storedMessages = new Map<
+        string,
+        { id: string; messageId: number | null; metrics: unknown }
+      >();
+      const noteRow = {
+        id: noteId,
+        note_key: "holder_research:v2:test-editorial",
+        title: "One trader is backing Spain",
+        description:
+          "A tracked trader has $56.4K on Spain while the market prices the outcome near 19%.",
+        rationale: "Verified performance makes the minority position notable.",
+        producer_run_id: "run-editorial",
+        direction: "up",
+        confidence: "0.9",
+        model_meta: {},
+        metrics: {
+          publicationDecisionV1: HOLDER_RESEARCH_PUBLICATION_DECISION_V1,
+          telegramMarketIdentityV1: {
+            asOf: now.toISOString(),
+            eventId: "polymarket:event-spain",
+            eventTitle: "2026 World Cup winner",
+            marketGroupItemTitle: "Spain",
+            marketId: "polymarket:market-spain",
+            marketQuestion: "Will Spain win the 2026 World Cup?",
+            predicate: "win the 2026 World Cup",
+            selectedSide: "YES",
+            selectedSideLabel: "Spain",
+            source: "canonical_market",
+            subject: "Spain",
+            venue: "polymarket",
+            version: 1,
+          },
+          signalPriceSnapshotV1: {
+            asOf: now.toISOString(),
+            displayPrice: 0.19,
+            displayPriceSource: "midpoint",
+            displaySide: "YES",
+            marketId: "polymarket:market-spain",
+            NO: { ask: 0.82, bid: 0.8, mark: 0.81 },
+            venue: "polymarket",
+            version: 1,
+            YES: { ask: 0.2, bid: 0.18, mark: 0.19 },
+          },
+        },
+        created_at: now,
+        revision_kind: "initial",
+        meaningful_delta_reasons: [],
+        decision_snapshot: null,
+        previous_decision_snapshot: null,
+        thesis_key: "holder_research:v2:spain:YES",
+        thesis_root_note_id: noteId,
+        primary_target_meta: { side: "YES" },
+        market_id: "polymarket:market-spain",
+        event_id: "polymarket:event-spain",
+        market_venue: "polymarket",
+        market_title: "Will Spain win the 2026 World Cup?",
+        market_slug: "spain-world-cup",
+        market_description: null,
+        market_metadata: {},
+        event_title: "2026 World Cup winner",
+        event_description: null,
+        category: "sports",
+        event_category: "sports",
+        series_key: null,
+        series_title: null,
+        close_time: new Date(now.getTime() + 86_400_000),
+        expiration_time: null,
+        outcomes: '["YES","NO"]',
+        resolution_source: null,
+        market_segment: "sports",
+        best_bid: "0.18",
+        best_ask: "0.20",
+        last_price: "0.19",
+        holder_address: "0x1234567890123456789012345678901234567890",
+        holder_chain: "polygon",
+        holder_wallet_id: "00000000-0000-4000-8000-000000000999",
+        holder_target_meta: {
+          actorMode: "single_holder",
+          credentialBullets: ["Up $542K over the last 30 days"],
+          openPnlUsd: -3_900,
+          positionUsd: 56_400,
+          side: "YES",
+        },
+      };
+      const db = {
+        query: async (sql: string, params: unknown[] = []) => {
+          if (/from runtime_policies/i.test(sql)) return { rows: [] };
+          if (sql.includes("publish_notes_seen")) {
+            return {
+              rows: [{ non_directional: 0, publish_notes_seen: 1, total: 1 }],
+            };
+          }
+          if (sql.includes("from signal_bot_messages prior")) {
+            return { rows: [] };
+          }
+          if (sql.includes("as post_text")) return { rows: [] };
+          if (sql.includes("select id::text, telegram_message_id, metrics")) {
+            const stored = storedMessages.get(String(params[2]));
+            return {
+              rows: stored
+                ? [
+                    {
+                      id: stored.id,
+                      metrics: stored.metrics,
+                      telegram_message_id: stored.messageId,
+                    },
+                  ]
+                : [],
+            };
+          }
+          if (sql.includes("insert into signal_bot_messages")) {
+            storedMessages.set(String(params[4]), {
+              id: String(params[0]),
+              messageId:
+                typeof params[5] === "number" ? (params[5] as number) : null,
+              metrics: JSON.parse(String(params[9])) as unknown,
+            });
+            return { rows: [] };
+          }
+          if (sql.includes("from ai_notes n")) return { rows: [noteRow] };
+          return { rows: [] };
+        },
+      };
+      const telegramMessages: Array<Record<string, unknown>> = [];
+      const telegram = {
+        sendMessage: async (message: Record<string, unknown>) => {
+          telegramMessages.push(message);
+          return { messageId: 777, ok: true as const };
+        },
+      };
+      let composeCalls = 0;
+      const editorialText =
+        "$56.4K is backing Spain to win the World Cup.\n\nThe tracked trader is up $542K over the last 30 days, which makes a 19% minority bet worth following.";
+      const composer = async (_input: { source: XEditorialDraftSource }) => {
+        composeCalls += 1;
+        return {
+          characterCount: Array.from(editorialText).length,
+          generatedAt: now.toISOString(),
+          marketId: "polymarket:market-spain",
+          model: "test/editorial-model",
+          postText: editorialText,
+          promptVersion: "x_editorial_prompt_v1" as const,
+          safetyFlags: [],
+          selectedSide: "YES" as const,
+          sourceDigest: "",
+          status: "ready" as const,
+          storyFamily: "trader_profile" as const,
+          usedFactIds: ["market", "price", "actor", "credentials"],
+          version: 1 as const,
+        };
+      };
+      const configWithEditorial = parseSignalBotConfig({
+        HUNCH_SIGNAL_BOT_TOKEN: "token",
+        HUNCH_SIGNAL_BOT_X_EDITORIAL_ENABLED: "true",
+      });
+      const composedWithDigest = async (
+        input: Parameters<typeof composer>[0],
+      ) => {
+        const draft = await composer(input);
+        return {
+          ...draft,
+          sourceDigest: buildXEditorialSourceDigest(input.source),
+        };
+      };
+      const first = await publishSignalBotTick({
+        config: configWithEditorial,
+        db: db as never,
+        redis,
+        telegram: telegram as never,
+        xEditorialComposer: composedWithDigest,
+      });
+      const second = await publishSignalBotTick({
+        config: configWithEditorial,
+        db: db as never,
+        redis,
+        telegram: telegram as never,
+        xEditorialComposer: composedWithDigest,
+      });
+      assert.equal(first.sent, 1);
+      assert.equal(second.sent, 0);
+      assert.equal(composeCalls, 1);
+      assert.equal(telegramMessages.length, 1);
+      assert.equal(telegramMessages[0]?.text, editorialText);
+      assert.equal("parse_mode" in (telegramMessages[0] ?? {}), false);
+      assert.equal(
+        (
+          storedMessages.get("initial")?.metrics as {
+            contentProfile?: string;
+            status?: string;
+          }
+        ).contentProfile,
+        "x_editorial_draft_v1",
+      );
+      assert.equal(
+        (
+          storedMessages.get("initial")?.metrics as {
+            status?: string;
+          }
+        ).status,
+        "sent",
+      );
+    },
+  },
+];
+
+let passed = 0;
+for (const test of tests) {
+  try {
+    await test.run();
+    passed += 1;
+  } catch (error) {
+    console.error(`[x-editorial-draft-tests] failed: ${test.name}`);
+    throw error;
+  }
+}
+
+console.log(`[x-editorial-draft-tests] passed ${passed}/${tests.length}`);
