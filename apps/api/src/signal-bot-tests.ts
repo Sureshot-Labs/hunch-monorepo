@@ -51,6 +51,7 @@ import {
   signalBotLockKey,
   TelegramBotApiClient,
   resolveSignalBotLatestSnapshotMaxAgeMs,
+  updateSignalBotContentProfile,
   updateSignalBotDestinationPolicy,
   type SignalBotNote,
   type SignalBotRedisLike,
@@ -131,6 +132,10 @@ import {
   type SignalDeliveryView,
 } from "./services/signal-delivery.js";
 import { TELEGRAM_CUSTOM_EMOJI } from "./services/telegram-custom-emoji.js";
+import {
+  buildXEditorialSourceDigest,
+  type XEditorialDraftComposer,
+} from "./services/x-editorial-draft.js";
 
 const TEST_TELEGRAM_MINI_APP_LINK_BASE = "https://t.me/hunch_signal_bot/hunch";
 const TEST_ENABLED_TELEGRAM_TRADING_PREFERENCE = {
@@ -1386,6 +1391,10 @@ function performanceNoteRow(overrides: Record<string, unknown> = {}) {
 class FakeFollowthroughDb {
   candidateRows: unknown[] = [];
   flowRows: unknown[] = [];
+  readonly messageRows = new Map<
+    string,
+    { id: string; messageId: number | null; metrics: unknown }
+  >();
   runtimePayload: unknown = null;
   readonly queries: Array<{ params: unknown[]; sql: string }> = [];
 
@@ -1425,7 +1434,44 @@ class FakeFollowthroughDb {
         rows: this.flowRows as T[],
       };
     }
+    if (sql.includes("as post_text")) {
+      return {
+        command: "SELECT",
+        fields: [],
+        oid: 0,
+        rowCount: 0,
+        rows: [],
+      };
+    }
+    if (sql.includes("select id::text, telegram_message_id, metrics")) {
+      const key = `${String(params[0])}|${String(params[1])}|${String(params[2])}`;
+      const stored = this.messageRows.get(key);
+      const rows = stored
+        ? [
+            {
+              id: stored.id,
+              metrics: stored.metrics,
+              telegram_message_id: stored.messageId,
+            },
+          ]
+        : [];
+      return {
+        command: "SELECT",
+        fields: [],
+        oid: 0,
+        rowCount: rows.length,
+        rows: rows as unknown as T[],
+      };
+    }
     if (sql.includes("insert into signal_bot_messages")) {
+      if (/insert into signal_bot_messages\s*\(\s*id,/i.test(sql)) {
+        const key = `${String(params[1])}|${String(params[2])}|${String(params[4])}`;
+        this.messageRows.set(key, {
+          id: String(params[0]),
+          messageId: typeof params[5] === "number" ? params[5] : null,
+          metrics: JSON.parse(String(params[9])) as unknown,
+        });
+      }
       return {
         command: "INSERT",
         fields: [],
@@ -1527,6 +1573,30 @@ async function enableFollowthroughTestChat(redis: FakeRedis): Promise<void> {
     now: new Date("2026-01-01T00:00:00.000Z"),
     redis,
   });
+}
+
+function createTestXEditorialComposer(input: {
+  calls: { count: number };
+  text: string;
+}): XEditorialDraftComposer {
+  return async ({ source }) => {
+    input.calls.count += 1;
+    return {
+      characterCount: Array.from(input.text).length,
+      generatedAt: "2026-01-02T01:00:00.000Z",
+      marketId: source.marketId,
+      model: "test/editorial-model",
+      postText: input.text,
+      promptVersion: "x_editorial_prompt_v1",
+      safetyFlags: [],
+      selectedSide: source.selectedSide,
+      sourceDigest: buildXEditorialSourceDigest(source),
+      status: "ready",
+      storyFamily: "followthrough",
+      usedFactIds: ["market", "followthrough"],
+      version: 1,
+    };
+  };
 }
 
 function readStartAppParam(url: string | undefined): string {
@@ -1697,6 +1767,24 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         lineCount <= 10_000,
         `signal-bot.ts has ${lineCount} lines; extract responsibilities before it exceeds 10,000`,
       );
+    },
+  },
+  {
+    name: "production signal bot bundle examples include the shared AI bundle",
+    run: () => {
+      const repoRoot = resolve(apiSrcDir, "../../..");
+      const expectedBundles =
+        "aws-sm:/hunch/prod/shared,aws-sm:/hunch/prod/signal-bot,aws-sm:/hunch/prod/ops,aws-sm:/hunch/prod/ai";
+      const envExample = readFileSync(
+        join(repoRoot, "ops", ".env.prod.example"),
+        "utf8",
+      );
+      const compose = readFileSync(
+        join(repoRoot, "ops", "docker-compose.prod.yml"),
+        "utf8",
+      );
+      assert.match(envExample, new RegExp(expectedBundles));
+      assert.match(compose, new RegExp(expectedBundles));
     },
   },
   {
@@ -12965,6 +13053,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(recorded.messageKind, "initial");
       assert.equal(recorded.messageId, 101);
       assert.equal(recorded.replyToMessageId, null);
+      assert.equal(recorded.metrics.contentProfile, "telegram_signal_v11");
       const state = await getSignalBotChatState(redis, "-100");
       assert.equal(state?.cursorCreatedAt, "2026-01-01T00:00:00.000Z");
       assert.equal(state?.cursorId, "00000000-0000-4000-8000-000000000001");
@@ -13467,6 +13556,146 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         query.sql.includes("from wallet_activity_events"),
       );
       assert.equal(flowQuery?.params[3], "polymarket");
+    },
+  },
+  {
+    name: "followthrough renderer stays affined to the initial content profile",
+    run: async () => {
+      const scenarios = [
+        {
+          currentProfile: "x_editorial_draft_v1" as const,
+          expectedComposerCalls: 1,
+          name: "X initial -> X followthrough",
+          rootProfile: "x_editorial_draft_v1" as const,
+        },
+        {
+          currentProfile: "x_editorial_draft_v1" as const,
+          expectedComposerCalls: 0,
+          name: "Telegram initial -> switch to X -> Telegram followthrough",
+          rootProfile: "telegram_signal_v11" as const,
+        },
+        {
+          currentProfile: "telegram_signal_v11" as const,
+          expectedComposerCalls: 1,
+          name: "X initial -> switch to Telegram -> X followthrough",
+          rootProfile: "x_editorial_draft_v1" as const,
+        },
+      ];
+      for (const scenario of scenarios) {
+        const redis = new FakeRedis();
+        await enableFollowthroughTestChat(redis);
+        await updateSignalBotContentProfile({
+          chatId: "-100",
+          contentProfile: scenario.currentProfile,
+          redis,
+        });
+        const db = new FakeFollowthroughDb();
+        db.runtimePayload = {
+          signalBotFollowthroughEnabled: true,
+          signalBotFollowthroughMinJoinedOrAdded: 1,
+          signalBotFollowthroughMinNetFlowUsd: 100_000,
+          signalBotFollowthroughMinPriceMoveCents: 100,
+          signalBotFollowthroughTypes: ["stats"],
+        };
+        db.candidateRows = [
+          followthroughCandidateRow({
+            root_metrics: { contentProfile: scenario.rootProfile },
+          }),
+        ];
+        db.flowRows = [followthroughFlowRow({ baseline_shares: "0" })];
+        const telegram = new FakeTelegram();
+        const calls = { count: 0 };
+        const result = await publishSignalBotFollowthroughTick({
+          config: parseSignalBotConfig({
+            HUNCH_SIGNAL_BOT_TOKEN: "token",
+            HUNCH_SIGNAL_BOT_X_EDITORIAL_ENABLED: "true",
+          }),
+          db,
+          now: new Date("2026-01-02T01:00:00.000Z"),
+          redis,
+          telegram,
+          xEditorialComposer: createTestXEditorialComposer({
+            calls,
+            text: "The tracked position strengthened after the original signal.",
+          }),
+        });
+
+        assert.equal(result.sent, 1, scenario.name);
+        assert.equal(
+          calls.count,
+          scenario.expectedComposerCalls,
+          scenario.name,
+        );
+        assert.equal(telegram.messages.length, 1, scenario.name);
+        assert.equal(
+          telegram.messages[0]?.parse_mode,
+          scenario.rootProfile === "x_editorial_draft_v1"
+            ? undefined
+            : "MarkdownV2",
+          scenario.name,
+        );
+      }
+    },
+  },
+  {
+    name: "X followthrough retry reuses the prepared draft after fifteen minutes",
+    run: async () => {
+      const redis = new FakeRedis();
+      await enableFollowthroughTestChat(redis);
+      await updateSignalBotContentProfile({
+        chatId: "-100",
+        contentProfile: "x_editorial_draft_v1",
+        redis,
+      });
+      const db = new FakeFollowthroughDb();
+      db.runtimePayload = {
+        signalBotFollowthroughEnabled: true,
+        signalBotFollowthroughMinJoinedOrAdded: 1,
+        signalBotFollowthroughMinNetFlowUsd: 100_000,
+        signalBotFollowthroughMinPriceMoveCents: 100,
+        signalBotFollowthroughTypes: ["stats"],
+      };
+      db.candidateRows = [
+        followthroughCandidateRow({
+          root_metrics: { contentProfile: "x_editorial_draft_v1" },
+        }),
+      ];
+      db.flowRows = [followthroughFlowRow({ baseline_shares: "0" })];
+      const telegram = new FakeTelegram();
+      telegram.nextResults.push(
+        { error: "other", message: "temporary failure", ok: false },
+        { messageId: 501, ok: true },
+      );
+      const calls = { count: 0 };
+      const editorialText =
+        "The tracked position strengthened after the original signal.";
+      const tick = (now: string) =>
+        publishSignalBotFollowthroughTick({
+          config: parseSignalBotConfig({
+            HUNCH_SIGNAL_BOT_TOKEN: "token",
+            HUNCH_SIGNAL_BOT_X_EDITORIAL_ENABLED: "true",
+          }),
+          db,
+          now: new Date(now),
+          redis,
+          telegram,
+          xEditorialComposer: createTestXEditorialComposer({
+            calls,
+            text: editorialText,
+          }),
+        });
+
+      const first = await tick("2026-01-02T01:00:00.000Z");
+      const second = await tick("2026-01-02T01:16:00.000Z");
+
+      assert.equal(first.sent, 0);
+      assert.equal(first.skipped, 1);
+      assert.equal(second.sent, 1);
+      assert.equal(calls.count, 1);
+      assert.deepEqual(
+        telegram.messages.map((message) => message.text),
+        [editorialText, editorialText],
+      );
     },
   },
   {

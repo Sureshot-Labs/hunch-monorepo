@@ -252,6 +252,42 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
+    name: "validator permits the US country label but blocks lowercase us",
+    run: () => {
+      const validate = (postText: string) =>
+        validateXEditorialModelOutput({
+          config,
+          output: {
+            version: 1,
+            status: "ready",
+            marketId: "market-1",
+            selectedSide: "YES",
+            postText,
+            storyFamily: "fresh_bet",
+            usedFactIds: ["market"],
+            safetyFlags: [],
+          },
+          source,
+        }).issues;
+      assert.equal(
+        validate(
+          "The US election market is drawing a fresh position.",
+        ).includes("fake_first_person"),
+        false,
+      );
+      assert.ok(
+        validate(
+          "The latest move told us where attention is building.",
+        ).includes("fake_first_person"),
+      );
+      assert.ok(
+        validate("We found a fresh position in the election market.").includes(
+          "fake_first_person",
+        ),
+      );
+    },
+  },
+  {
     name: "OpenRouter composer repairs a rejected first draft once",
     run: async () => {
       const originalFetch = globalThis.fetch;

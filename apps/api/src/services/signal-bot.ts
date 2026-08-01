@@ -9,6 +9,21 @@ import {
 } from "@hunch/shared";
 
 import type { DbQuery } from "../db.js";
+import type {
+  SignalBotDeliveryPreparationReason,
+  SignalBotFollowthroughCandidateRow,
+  SignalBotFollowthroughStats,
+  SignalBotMessageKind,
+  SignalBotNote,
+  SignalBotTelegramClient,
+  TelegramBotCallbackQuery,
+  TelegramBotChat,
+  TelegramBotMessage,
+  TelegramInlineKeyboard,
+  TelegramInlineKeyboardButton,
+  TelegramSendMessageInput,
+  TelegramSendResult,
+} from "./signal-bot-contracts.js";
 import { findTradeMarketById, isOrderable } from "./api-trading-market-repo.js";
 import { resolveAggMarketCredential } from "../lib/agg-market-credentials.js";
 import {
@@ -26,18 +41,13 @@ import {
   resolveStrictClusterNativeOffer,
 } from "./cluster-execution.js";
 import { loadClusterMarketNativeQuotes } from "./cluster-execution-quotes.js";
-import {
-  isSignalBotQuoteFresh,
-  SIGNAL_BOT_QUOTE_MAX_AGE_MS,
-} from "./signal-bot-delivery-policy.js";
+import { SIGNAL_BOT_QUOTE_MAX_AGE_MS } from "./signal-bot-delivery-policy.js";
 import {
   HOLDER_RESEARCH_PUBLICATION_DECISION_V1_METRICS_JSON,
   parseHolderResearchUpdateV1,
   parseSignalPriceSnapshotV1,
   parseTelegramMarketIdentityV1,
   resolveHolderResearchPositionState,
-  type HolderResearchUpdateV1,
-  type SignalPriceSnapshotV1,
   type TelegramMarketIdentityV1,
 } from "./signal-publication-contract.js";
 import {
@@ -99,15 +109,14 @@ import {
   type SignalBotTestSignalSelector,
 } from "./signal-bot-command-parsers.js";
 import {
-  buildXEditorialSourceDigest,
-  parsePersistedXEditorialDraft,
   X_EDITORIAL_CONTENT_PROFILE,
   type XEditorialComposerConfig,
   type XEditorialDraftComposer,
-  type XEditorialDraftSource,
-  type XEditorialDraftV1,
-  type XEditorialMessageKind,
 } from "./x-editorial-draft.js";
+import {
+  publishXEditorialFollowthrough,
+  publishXEditorialNote,
+} from "./signal-bot-x-editorial-delivery.js";
 import {
   buildSignalBotBuyStartParam,
   buildSignalBotHolderStartParam,
@@ -225,6 +234,23 @@ import {
 export { escapeTelegramMarkdownV2 } from "./signal-delivery.js";
 export { TelegramBotApiClient } from "./signal-bot-telegram-client.js";
 export { sendSignalBotRichLayoutPreview } from "./signal-bot-rich-preview.js";
+export type {
+  SignalBotDeliveryPreparationReason,
+  SignalBotFollowthroughCandidateRow,
+  SignalBotFollowthroughStats,
+  SignalBotMessageKind,
+  SignalBotNote,
+  SignalBotTelegramClient,
+  TelegramBotCallbackQuery,
+  TelegramBotChat,
+  TelegramBotMessage,
+  TelegramBotUpdate,
+  TelegramInlineKeyboard,
+  TelegramInlineKeyboardButton,
+  TelegramSendMessageInput,
+  TelegramSendResult,
+  TelegramSendRichMessageInput,
+} from "./signal-bot-contracts.js";
 export {
   parseSignalBotCommand,
   parseSignalBotContentProfileRequest,
@@ -315,45 +341,6 @@ export type SignalBotCheaperAlternativeResolver = (input: {
   note: SignalBotNote;
 }) => Promise<SignalBotCheaperAlternative | null>;
 
-export type TelegramBotChat = {
-  id: number | string;
-  type?: string;
-  title?: string;
-  username?: string;
-  first_name?: string;
-  last_name?: string;
-};
-
-export type TelegramBotMessage = {
-  message_id?: number;
-  chat: TelegramBotChat;
-  from?: {
-    id: number;
-    is_bot?: boolean;
-    first_name?: string;
-    username?: string;
-  };
-  text?: string;
-};
-
-export type TelegramBotCallbackQuery = {
-  id: string;
-  from?: {
-    id?: number;
-    is_bot?: boolean;
-    first_name?: string;
-    username?: string;
-  };
-  message?: TelegramBotMessage;
-  data?: string;
-};
-
-export type TelegramBotUpdate = {
-  update_id: number;
-  callback_query?: TelegramBotCallbackQuery;
-  message?: TelegramBotMessage;
-};
-
 export type TelegramBotUser = {
   id: number;
   is_bot: boolean;
@@ -378,160 +365,6 @@ export type TelegramBotMenuButton =
       web_app: { url: string };
     };
 
-export type TelegramInlineKeyboardButton = (
-  | {
-      copy_text: { text: string };
-      text: string;
-      url?: never;
-      web_app?: never;
-    }
-  | {
-      text: string;
-      url: string;
-      web_app?: never;
-    }
-  | {
-      text: string;
-      url?: never;
-      web_app: { url: string };
-    }
-  | {
-      callback_data: string;
-      text: string;
-      url?: never;
-      web_app?: never;
-    }
-) & { icon_custom_emoji_id?: string };
-
-export type TelegramInlineKeyboard = {
-  inline_keyboard: Array<Array<TelegramInlineKeyboardButton>>;
-};
-
-export type TelegramSendMessageInput = {
-  chat_id: string;
-  disable_web_page_preview: boolean;
-  parse_mode?: "MarkdownV2";
-  reply_parameters?: {
-    allow_sending_without_reply?: boolean;
-    message_id: number;
-  };
-  reply_markup?: TelegramInlineKeyboard;
-  text: string;
-};
-
-export type TelegramSendRichMessageInput = {
-  chat_id: string;
-  reply_parameters?: {
-    allow_sending_without_reply?: boolean;
-    message_id: number;
-  };
-  reply_markup?: TelegramInlineKeyboard;
-  rich_message: TelegramInputRichMessage;
-};
-
-export type TelegramSendResult =
-  | { messageId: number | null; ok: true }
-  | {
-      error: "blocked_or_missing" | "other";
-      message: string;
-      ok: false;
-      retryAfterSec?: number;
-    };
-
-export type SignalBotTelegramClient = {
-  answerCallbackQuery(input: {
-    callbackQueryId: string;
-    showAlert?: boolean;
-    text?: string;
-  }): Promise<unknown>;
-  getUpdates(input: {
-    offset: number | null;
-    timeoutSec: number;
-  }): Promise<TelegramBotUpdate[]>;
-  editMessageText?(input: {
-    chat_id: string;
-    disable_web_page_preview: boolean;
-    message_id: number;
-    parse_mode: "MarkdownV2";
-    reply_markup?: TelegramInlineKeyboard;
-    text: string;
-  }): Promise<TelegramSendResult>;
-  sendPhoto?(input: {
-    caption?: string;
-    chat_id: string;
-    filename: string;
-    parse_mode?: "MarkdownV2";
-    photo: Uint8Array;
-    reply_markup?: TelegramInlineKeyboard;
-  }): Promise<TelegramSendResult>;
-  sendRichMessage?(
-    input: TelegramSendRichMessageInput,
-  ): Promise<TelegramSendResult>;
-  sendMessage(input: TelegramSendMessageInput): Promise<TelegramSendResult>;
-};
-
-export type SignalBotNote = {
-  id: string;
-  noteKey: string;
-  title: string;
-  description: string;
-  rationale: string | null;
-  producerRunId: string;
-  direction: "down" | "mixed" | "up" | null;
-  confidence: number | null;
-  modelMeta: Record<string, unknown>;
-  metrics?: Record<string, unknown>;
-  holderResearchUpdateV1?: HolderResearchUpdateV1 | null;
-  signalPriceSnapshotV1?: SignalPriceSnapshotV1 | null;
-  telegramMarketIdentityV1?: TelegramMarketIdentityV1 | null;
-  createdAt: string;
-  revisionKind: "initial" | "research_update";
-  meaningfulDeltaReasons?: string[];
-  decisionSnapshot?: unknown;
-  previousDecisionSnapshot?: unknown;
-  thesisKey: string;
-  thesisRootNoteId: string;
-  primaryTargetMeta: Record<string, unknown>;
-  marketId: string | null;
-  eventId: string | null;
-  marketVenue: string | null;
-  marketTitle: string | null;
-  marketSlug: string | null;
-  marketDescription: string | null;
-  marketMetadata?: unknown;
-  eventTitle: string | null;
-  eventDescription: string | null;
-  outcomes: string[] | null;
-  resolutionSource: string | null;
-  marketSegment: string | null;
-  closeTime: string | null;
-  expirationTime: string | null;
-  bestBid: number | null;
-  bestAsk: number | null;
-  lastPrice: number | null;
-  holderAddress: string | null;
-  holderChain: string | null;
-  holderWalletId?: string | null;
-  holderDisplayName?: string | null;
-  holderIdentityDisplayName?: string | null;
-  holderOpenPnlUsd: number | null;
-  holderPositionUsd: number | null;
-  holderSide: "NO" | "YES" | null;
-  holderActorMode: "none" | "sharp_cluster" | "single_holder" | null;
-  holderCredentialBullets: string[];
-  holderClusterOpenPnlUsd: number | null;
-  holderClusterPnl30dUsd: number | null;
-  holderClusterSharpHolders: number | null;
-  holderClusterSharpUsd: number | null;
-};
-
-type SignalBotMessageKind =
-  | "followthrough_stats"
-  | "initial"
-  | "research_update"
-  | "resolved_loss"
-  | "resolved_win";
-
 type SignalBotThreadContext = {
   baselineAt: string;
   replyToMessageId: number | null;
@@ -552,40 +385,6 @@ type SignalBotDeliverySendResult =
       ok: false;
       retryAfterSec?: number;
     };
-
-type SignalBotFollowthroughStats = {
-  version: 1;
-  evaluatedAt: string;
-  threadRootNoteId: string;
-  finalProbabilitySource:
-    | "missing"
-    | "resolved_outcome"
-    | "resolved_outcome_pct"
-    | "terminal_price";
-  marketId: string;
-  signalSide: "NO" | "YES" | null;
-  state: "open" | "resolved" | "unknown";
-  outcome: "loss" | "open" | "unknown" | "win";
-  baselineAt: string;
-  asOf: string;
-  entryPrice: number | null;
-  markPrice: number | null;
-  priceMoveCents: number | null;
-  joinedWallets: number;
-  addedWallets: number;
-  joinedOrAddedWallets: number;
-  earlyWalletsCut: number;
-  trimmedWallets: number;
-  exitedWallets: number;
-  stillHoldingWallets: number;
-  missingBaselineSnapshots: number;
-  netSignalSideFlowUsd: number;
-  netOppositeSideFlowUsd: number;
-  estimatedOpenPnlUsd: number | null;
-  estimatedRealizedPnlUsd: number | null;
-  dataQuality: SignalBotFollowthroughDataQuality;
-  dataQualityTags: string[];
-};
 
 type SignalBotNoteRow = {
   id: string;
@@ -662,34 +461,6 @@ type SignalBotEligibilityCountRow = {
   non_directional: string | number | null;
   publish_notes_seen: string | number | null;
   total: string | number | null;
-};
-
-type SignalBotFollowthroughCandidateRow = {
-  chat_id: string;
-  thread_root_note_id: string;
-  reply_to_message_id: string | number | null;
-  baseline_at: Date | string;
-  title: string;
-  direction: "down" | "mixed" | "up" | null;
-  metrics: unknown;
-  root_metrics: unknown;
-  target_meta: unknown;
-  market_id: string;
-  event_id: string | null;
-  market_title: string | null;
-  market_slug: string | null;
-  market_description: string | null;
-  event_title: string | null;
-  event_description: string | null;
-  outcomes: string | null;
-  resolution_source: string | null;
-  venue: string | null;
-  best_bid: string | number | null;
-  best_ask: string | number | null;
-  last_price: string | number | null;
-  resolved_outcome: string | null;
-  resolved_outcome_pct: string | number | null;
-  accepting_orders: boolean | null;
 };
 
 type SignalBotFollowthroughFlowRow = {
@@ -4846,16 +4617,6 @@ async function loadSignalBotPriceGuardBlockers(input: {
   }
 }
 
-export type SignalBotDeliveryPreparationReason =
-  | "identity_mismatch"
-  | "missing_market_identity"
-  | "missing_price_snapshot"
-  | "missing_update_contract"
-  | "non_directional"
-  | "quote_refresh"
-  | "stale_price_snapshot"
-  | "unpublishable_copy";
-
 type SignalBotDeliverySkipReason =
   | SignalBotDeliveryPreparationReason
   | Exclude<SignalDeliveryTargetResolution["reason"], null>
@@ -5713,453 +5474,6 @@ async function recordSignalBotMessage(input: {
   }
 }
 
-type SignalBotXEditorialDeliveryRow = {
-  id: string;
-  metrics: unknown;
-  telegram_message_id: string | number | null;
-};
-
-type SignalBotXEditorialDeliveryResult =
-  | { status: "already_sent" | "blocked" | "sent" }
-  | { blockedChat: boolean; status: "retry" };
-
-function readXEditorialExternalResearch(modelMeta: Record<string, unknown>): {
-  fact: Record<string, unknown> | null;
-  urls: string[];
-} {
-  const external = asObject(modelMeta.external_research);
-  const status = asTrimmedString(external.status);
-  if (status !== "ok") return { fact: null, urls: [] };
-  const citations = Array.isArray(external.citations)
-    ? external.citations
-        .map((value) => asObject(value))
-        .map((citation) => ({
-          publishedAt: asTrimmedString(citation.publishedAt),
-          title: asTrimmedString(citation.title),
-          url: asTrimmedString(citation.url),
-        }))
-        .filter(
-          (
-            citation,
-          ): citation is {
-            publishedAt: string | null;
-            title: string | null;
-            url: string;
-          } => isSafeHttpUrl(citation.url),
-        )
-        .slice(0, 3)
-    : [];
-  return {
-    fact: {
-      citations: citations.map(({ publishedAt, title, url }) => ({
-        publishedAt,
-        title,
-        url,
-      })),
-      summary: asTrimmedString(external.summary),
-      timing: asTrimmedString(external.timing),
-      verdict: asTrimmedString(external.verdict),
-    },
-    urls: citations.map((citation) => citation.url),
-  };
-}
-
-function isSafeHttpUrl(value: string | null | undefined): value is string {
-  if (!value) return false;
-  try {
-    const url = new URL(value);
-    return url.protocol === "https:" || url.protocol === "http:";
-  } catch {
-    return false;
-  }
-}
-
-function buildSignalBotXEditorialSource(input: {
-  appBaseUrl: string;
-  kind: "initial" | "research_update";
-  note: SignalBotNote;
-  recentOpenings: string[];
-  selectedSide: "NO" | "YES";
-}): XEditorialDraftSource {
-  const note = input.note;
-  const identity = note.telegramMarketIdentityV1;
-  const price = note.signalPriceSnapshotV1;
-  const external = readXEditorialExternalResearch(note.modelMeta);
-  const facts: XEditorialDraftSource["facts"] = [];
-  const addFact = (id: string, label: string, value: unknown) => {
-    if (value == null) return;
-    if (typeof value === "string" && value.trim().length === 0) return;
-    facts.push({ id, label, value });
-  };
-  addFact("market", "Canonical market proposition and selected side", {
-    eventTitle: identity?.eventTitle ?? note.eventTitle,
-    marketQuestion: identity?.marketQuestion ?? note.marketTitle,
-    predicate: identity?.predicate ?? null,
-    selectedSide: identity?.selectedSide ?? resolveSignalBotBuySide(note),
-    selectedSideLabel: identity?.selectedSideLabel ?? note.holderSide,
-    subject: identity?.subject ?? note.eventTitle ?? note.marketTitle,
-    venue: identity?.venue ?? note.marketVenue,
-  });
-  addFact("price", "Selected-side signal price", {
-    asOf: price?.asOf ?? null,
-    displayPrice: price?.displayPrice ?? null,
-    displaySide: price?.displaySide ?? null,
-  });
-  addFact("research_copy", "Quality-gated research thesis", {
-    description: note.description,
-    headline: note.title,
-    rationale: note.rationale,
-  });
-  addFact("actor", "Tracked trader or group", {
-    actorMode: note.holderActorMode,
-    clusterOpenPnlUsd: note.holderClusterOpenPnlUsd,
-    clusterPnl30dUsd: note.holderClusterPnl30dUsd,
-    clusterSharpHolders: note.holderClusterSharpHolders,
-    clusterSharpUsd: note.holderClusterSharpUsd,
-    displayName:
-      note.holderIdentityDisplayName ?? note.holderDisplayName ?? null,
-    openPnlUsd: note.holderOpenPnlUsd,
-    positionSide: note.holderSide,
-    positionUsd: note.holderPositionUsd,
-  });
-  addFact("credentials", "Verified actor credentials", [
-    ...note.holderCredentialBullets,
-  ]);
-  if (input.kind === "research_update") {
-    addFact(
-      "research_update",
-      "Producer-owned material change since the prior signal",
-      note.holderResearchUpdateV1,
-    );
-  }
-  addFact("external_context", "Validated external research", external.fact);
-  const marketUrl =
-    note.eventId && note.marketId
-      ? buildSignalBotOpenMarketUrl({
-          appBaseUrl: input.appBaseUrl,
-          eventId: note.eventId,
-          marketId: note.marketId,
-          side: resolveSignalBotBuySide(note),
-        })
-      : null;
-  return {
-    facts,
-    kind: input.kind,
-    marketId: note.marketId ?? identity?.marketId ?? note.id,
-    noteId: note.id,
-    recentOpenings: input.recentOpenings,
-    selectedSide: input.selectedSide,
-    sourceUrls: [marketUrl, ...external.urls].filter(isSafeHttpUrl).slice(0, 3),
-  };
-}
-
-function validateSignalBotXEditorialNote(input: {
-  kind: "initial" | "research_update";
-  note: SignalBotNote;
-  now?: Date;
-}): SignalBotDeliveryPreparationReason | null {
-  const side = resolveSignalBotBuySide(input.note);
-  if (!side) return "non_directional";
-  const identity = input.note.telegramMarketIdentityV1;
-  if (!identity) return "missing_market_identity";
-  if (
-    identity.selectedSide !== side ||
-    identity.marketId !== input.note.marketId ||
-    identity.venue !== input.note.marketVenue
-  ) {
-    return "identity_mismatch";
-  }
-  if (input.kind === "research_update" && !input.note.holderResearchUpdateV1) {
-    return "missing_update_contract";
-  }
-  const price = input.note.signalPriceSnapshotV1;
-  if (!price) return "missing_price_snapshot";
-  if (
-    price.displaySide !== side ||
-    price.marketId !== input.note.marketId ||
-    price.venue !== input.note.marketVenue
-  ) {
-    return "identity_mismatch";
-  }
-  const asOfMs = Date.parse(price.asOf);
-  const nowMs = (input.now ?? new Date()).getTime();
-  if (
-    !Number.isFinite(asOfMs) ||
-    asOfMs > nowMs ||
-    !isSignalBotQuoteFresh(asOfMs, nowMs)
-  ) {
-    return "stale_price_snapshot";
-  }
-  return null;
-}
-
-function buildSignalBotXEditorialFollowthroughSource(input: {
-  appBaseUrl: string;
-  candidate: SignalBotFollowthroughCandidateRow;
-  kind: Extract<
-    SignalBotMessageKind,
-    "followthrough_stats" | "resolved_loss" | "resolved_win"
-  >;
-  recentOpenings: string[];
-  stats: SignalBotFollowthroughStats;
-}): XEditorialDraftSource {
-  const identity = parseTelegramMarketIdentityV1(
-    asObject(input.candidate.metrics).telegramMarketIdentityV1,
-  );
-  const marketUrl = input.candidate.event_id
-    ? buildSignalBotOpenMarketUrl({
-        appBaseUrl: input.appBaseUrl,
-        eventId: input.candidate.event_id,
-        marketId: input.candidate.market_id,
-        side: input.stats.signalSide,
-      })
-    : null;
-  return {
-    facts: [
-      {
-        id: "market",
-        label: "Canonical market proposition and selected side",
-        value: {
-          eventTitle: identity?.eventTitle ?? input.candidate.event_title,
-          marketQuestion:
-            identity?.marketQuestion ?? input.candidate.market_title,
-          predicate: identity?.predicate ?? null,
-          selectedSide: input.stats.signalSide,
-          selectedSideLabel: identity?.selectedSideLabel ?? null,
-          subject:
-            identity?.subject ??
-            input.candidate.event_title ??
-            input.candidate.market_title,
-          venue: identity?.venue ?? input.candidate.venue,
-        },
-      },
-      {
-        id: "original_signal",
-        label: "Original quality-gated signal headline",
-        value: input.candidate.title,
-      },
-      {
-        id: "followthrough",
-        label: "Computed change since the signal",
-        value: input.stats,
-      },
-    ],
-    kind: input.kind,
-    marketId: input.candidate.market_id,
-    noteId: input.candidate.thread_root_note_id,
-    recentOpenings: input.recentOpenings,
-    selectedSide: input.stats.signalSide as "NO" | "YES",
-    sourceUrls: [marketUrl].filter(isSafeHttpUrl),
-  };
-}
-
-async function loadSignalBotXEditorialDelivery(input: {
-  chatId: string;
-  db: DbQuery;
-  messageKind: XEditorialMessageKind;
-  noteId: string;
-}): Promise<SignalBotXEditorialDeliveryRow | null> {
-  try {
-    const result = await input.db.query<SignalBotXEditorialDeliveryRow>(
-      `
-        select id::text, telegram_message_id, metrics
-        from signal_bot_messages
-        where chat_id = $1
-          and note_id = $2::uuid
-          and message_kind = $3
-        limit 1
-      `,
-      [input.chatId, input.noteId, input.messageKind],
-    );
-    return result.rows[0] ?? null;
-  } catch (error) {
-    if (isMissingSignalBotMessagesTable(error)) return null;
-    throw error;
-  }
-}
-
-async function loadRecentSignalBotXEditorialOpenings(input: {
-  chatId: string;
-  db: DbQuery;
-  limit?: number;
-}): Promise<string[]> {
-  try {
-    const result = await input.db.query<{ post_text: string | null }>(
-      `
-        select metrics #>> '{editorialDraftV1,postText}' as post_text
-        from signal_bot_messages
-        where chat_id = $1
-          and metrics->>'contentProfile' = $2
-          and metrics #>> '{editorialDraftV1,status}' = 'ready'
-        order by sent_at desc
-        limit $3
-      `,
-      [
-        input.chatId,
-        X_EDITORIAL_CONTENT_PROFILE,
-        Math.max(1, Math.min(20, input.limit ?? 20)),
-      ],
-    );
-    return result.rows
-      .map((row) => row.post_text?.trim() ?? "")
-      .filter(Boolean);
-  } catch (error) {
-    if (isMissingSignalBotMessagesTable(error)) return [];
-    throw error;
-  }
-}
-
-function buildSignalBotXEditorialKeyboard(
-  sourceUrls: string[] | undefined,
-): TelegramInlineKeyboard | undefined {
-  const urls = [...new Set((sourceUrls ?? []).filter(isSafeHttpUrl))].slice(
-    0,
-    3,
-  );
-  if (urls.length === 0) return undefined;
-  return {
-    inline_keyboard: [
-      urls.map((url, index) => ({
-        text: index === 0 ? "Market" : `Source ${index}`,
-        url,
-      })),
-    ],
-  };
-}
-
-async function deliverSignalBotXEditorialDraft(input: {
-  baselineAt: string;
-  chatId: string;
-  composer?: XEditorialDraftComposer;
-  db: DbQuery;
-  messageKind: XEditorialMessageKind;
-  noteId: string;
-  source: XEditorialDraftSource;
-  telegram: SignalBotTelegramClient;
-  threadRootNoteId: string;
-}): Promise<SignalBotXEditorialDeliveryResult> {
-  const existing = await loadSignalBotXEditorialDelivery({
-    chatId: input.chatId,
-    db: input.db,
-    messageKind: input.messageKind,
-    noteId: input.noteId,
-  });
-  const existingMetrics = asObject(existing?.metrics);
-  if (
-    existing?.telegram_message_id != null &&
-    existingMetrics.status === "sent"
-  ) {
-    return { status: "already_sent" };
-  }
-  const digest = buildXEditorialSourceDigest(input.source);
-  const persistedDraft = parsePersistedXEditorialDraft(
-    existingMetrics.editorialDraftV1,
-  );
-  let draft: XEditorialDraftV1;
-  if (persistedDraft?.sourceDigest === digest) {
-    draft = persistedDraft;
-  } else {
-    if (!input.composer) return { blockedChat: false, status: "retry" };
-    try {
-      draft = await input.composer({ source: input.source });
-    } catch (error) {
-      await recordSignalBotMessage({
-        baselineAt: input.baselineAt,
-        chatId: input.chatId,
-        db: input.db,
-        insertId: existing?.id ?? createSignalDeliveryRef(),
-        messageId: null,
-        messageKind: input.messageKind,
-        metrics: {
-          contentProfile: X_EDITORIAL_CONTENT_PROFILE,
-          error:
-            error instanceof Error
-              ? error.message.slice(0, 500)
-              : String(error),
-          status: "compose_failed",
-        },
-        noteId: input.noteId,
-        replyToMessageId: null,
-        threadRootNoteId: input.threadRootNoteId,
-      });
-      return { blockedChat: false, status: "retry" };
-    }
-  }
-  const baseMetrics = {
-    contentProfile: X_EDITORIAL_CONTENT_PROFILE,
-    editorialDraftV1: draft,
-  };
-  if (draft.status === "blocked" || !draft.postText) {
-    await recordSignalBotMessage({
-      baselineAt: input.baselineAt,
-      chatId: input.chatId,
-      db: input.db,
-      insertId: existing?.id ?? createSignalDeliveryRef(),
-      messageId: null,
-      messageKind: input.messageKind,
-      metrics: { ...baseMetrics, status: "skipped" },
-      noteId: input.noteId,
-      replyToMessageId: null,
-      threadRootNoteId: input.threadRootNoteId,
-    });
-    return { status: "blocked" };
-  }
-  const prepared = await recordSignalBotMessage({
-    baselineAt: input.baselineAt,
-    chatId: input.chatId,
-    db: input.db,
-    insertId: existing?.id ?? createSignalDeliveryRef(),
-    messageId: null,
-    messageKind: input.messageKind,
-    metrics: { ...baseMetrics, status: "prepared" },
-    noteId: input.noteId,
-    replyToMessageId: null,
-    threadRootNoteId: input.threadRootNoteId,
-  });
-  if (!prepared) return { blockedChat: false, status: "retry" };
-  const result = await input.telegram.sendMessage({
-    chat_id: input.chatId,
-    disable_web_page_preview: true,
-    reply_markup: buildSignalBotXEditorialKeyboard(input.source.sourceUrls),
-    text: draft.postText,
-  });
-  if (!result.ok) {
-    await recordSignalBotMessage({
-      baselineAt: input.baselineAt,
-      chatId: input.chatId,
-      db: input.db,
-      insertId: existing?.id ?? createSignalDeliveryRef(),
-      messageId: null,
-      messageKind: input.messageKind,
-      metrics: {
-        ...baseMetrics,
-        error: result.message.slice(0, 500),
-        status: "send_failed",
-      },
-      noteId: input.noteId,
-      replyToMessageId: null,
-      threadRootNoteId: input.threadRootNoteId,
-    });
-    return {
-      blockedChat: result.error === "blocked_or_missing",
-      status: "retry",
-    };
-  }
-  await recordSignalBotMessage({
-    baselineAt: input.baselineAt,
-    chatId: input.chatId,
-    db: input.db,
-    insertId: existing?.id ?? createSignalDeliveryRef(),
-    messageId: result.messageId,
-    messageKind: input.messageKind,
-    metrics: { ...baseMetrics, status: "sent" },
-    noteId: input.noteId,
-    replyToMessageId: null,
-    threadRootNoteId: input.threadRootNoteId,
-  });
-  return { status: "sent" };
-}
-
 async function recordSignalBotSkippedDelivery(input: {
   audit?: Record<string, unknown>;
   baselineAt: string;
@@ -6678,17 +5992,27 @@ export async function publishSignalBotTick(input: {
         continue;
       }
       if (state.contentProfile === X_EDITORIAL_CONTENT_PROFILE) {
-        const validationReason = validateSignalBotXEditorialNote({
+        const editorial = await publishXEditorialNote({
+          appBaseUrl: input.config.appBaseUrl,
+          baselineAt: thread.baselineAt,
+          chatId,
+          composer: input.config.xEditorial.enabled
+            ? input.xEditorialComposer
+            : undefined,
+          db: input.db,
           kind: messageKind,
           note,
+          selectedSide: buySide,
+          telegram: input.telegram,
+          threadRootNoteId: thread.threadRootNoteId,
         });
-        if (validationReason) {
-          await skipDelivery(validationReason, {
+        if (editorial.status === "invalid") {
+          await skipDelivery(editorial.reason, {
             contentProfile: X_EDITORIAL_CONTENT_PROFILE,
           });
           continue;
         }
-        if (!input.config.xEditorial.enabled || !input.xEditorialComposer) {
+        if (editorial.status === "unavailable") {
           await input.redis.set(
             signalBotSendCooldownKey(chatId, note.id),
             "X editorial composer is unavailable",
@@ -6696,27 +6020,6 @@ export async function publishSignalBotTick(input: {
           );
           break;
         }
-        const recentOpenings = await loadRecentSignalBotXEditorialOpenings({
-          chatId,
-          db: input.db,
-        });
-        const editorial = await deliverSignalBotXEditorialDraft({
-          baselineAt: thread.baselineAt,
-          chatId,
-          composer: input.xEditorialComposer,
-          db: input.db,
-          messageKind,
-          noteId: note.id,
-          source: buildSignalBotXEditorialSource({
-            appBaseUrl: input.config.appBaseUrl,
-            kind: messageKind,
-            note,
-            recentOpenings,
-            selectedSide: buySide,
-          }),
-          telegram: input.telegram,
-          threadRootNoteId: thread.threadRootNoteId,
-        });
         if (editorial.status === "retry") {
           if (editorial.blockedChat) {
             blockedChats += 1;
@@ -6881,6 +6184,7 @@ export async function publishSignalBotTick(input: {
             fallbackToMarkdown: result.fallbackToMarkdown,
             fallbackStandalone: result.fallbackStandalone,
             noteKind: messageKind,
+            contentProfile: "telegram_signal_v11",
           },
           noteId: note.id,
           replyToMessageId: result.replyToMessageId,
@@ -8571,35 +7875,23 @@ export async function publishSignalBotFollowthroughTick(input: {
       skipped += 1;
       continue;
     }
-    if (chatState.contentProfile === X_EDITORIAL_CONTENT_PROFILE) {
-      if (!stats.signalSide) {
-        skipped += 1;
-        continue;
-      }
-      if (!input.config.xEditorial.enabled || !input.xEditorialComposer) {
-        skipped += 1;
-        continue;
-      }
-      const recentOpenings = await loadRecentSignalBotXEditorialOpenings({
-        chatId: candidate.chat_id,
-        db: input.db,
-      });
-      const editorial = await deliverSignalBotXEditorialDraft({
+    const rootMetrics = asObject(candidate.root_metrics);
+    const rootContentProfile =
+      rootMetrics.contentProfile === X_EDITORIAL_CONTENT_PROFILE
+        ? X_EDITORIAL_CONTENT_PROFILE
+        : "telegram_signal_v11";
+    if (rootContentProfile === X_EDITORIAL_CONTENT_PROFILE) {
+      const editorial = await publishXEditorialFollowthrough({
+        appBaseUrl: input.config.appBaseUrl,
         baselineAt,
-        chatId: candidate.chat_id,
-        composer: input.xEditorialComposer,
+        candidate,
+        composer: input.config.xEditorial.enabled
+          ? input.xEditorialComposer
+          : undefined,
         db: input.db,
-        messageKind: kind,
-        noteId: candidate.thread_root_note_id,
-        source: buildSignalBotXEditorialFollowthroughSource({
-          appBaseUrl: input.config.appBaseUrl,
-          candidate,
-          kind,
-          recentOpenings,
-          stats,
-        }),
+        kind,
+        stats,
         telegram: input.telegram,
-        threadRootNoteId: candidate.thread_root_note_id,
       });
       if (editorial.status === "retry") {
         if (editorial.blockedChat) {
@@ -8608,7 +7900,11 @@ export async function publishSignalBotFollowthroughTick(input: {
         skipped += 1;
         continue;
       }
-      if (editorial.status === "blocked") {
+      if (
+        editorial.status === "blocked" ||
+        editorial.status === "invalid" ||
+        editorial.status === "unavailable"
+      ) {
         skipped += 1;
         continue;
       }

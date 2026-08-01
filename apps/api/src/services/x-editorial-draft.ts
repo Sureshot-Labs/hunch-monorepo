@@ -159,8 +159,9 @@ const FORBIDDEN_COPY_PATTERNS: Array<{
   {
     code: "fake_first_person",
     pattern:
-      /\b(?:i(?:['’](?:m|ve|d|ll))?|me|my|mine|we(?:['’](?:re|ve|d|ll))?|us|our|ours)\b/i,
+      /\b(?:i(?:['’](?:m|ve|d|ll))?|me|my|mine|we(?:['’](?:re|ve|d|ll))?|our|ours)\b/i,
   },
+  { code: "fake_first_person", pattern: /\bus\b/ },
   {
     code: "promotional_cta",
     pattern:

@@ -1,7 +1,8 @@
 # Backend Design: Human X Drafts in a Private Telegram Channel
 
-Status: V1 implemented locally; production channel setup and live editorial QA remain  
-Scope: holder-research signal copy and Telegram delivery  
+Status: V1 implemented locally; production channel setup and live editorial QA remain
+
+Scope: holder-research signal copy and Telegram delivery
 Decision: no database migration is required for the first production version
 
 ## Product Decision
@@ -434,10 +435,10 @@ environment. It is registered at runtime with `/enable_signals` and
 
 In the current production topology, non-secret settings are read from
 `/opt/hunch/.env`. Runtime secrets for the `signal-bot` container come from
-`HUNCH_SECRET_BUNDLES_SIGNAL_BOT`, whose default is the shared and signal-bot
-AWS Secrets Manager bundles. Therefore `OPENROUTER_API_KEY` must be available in
-one of those bundles; it is not a GitHub Actions channel setting. No channel ID
-is hardcoded or stored as a deployment secret.
+`HUNCH_SECRET_BUNDLES_SIGNAL_BOT`, which loads the shared, signal-bot, ops, and
+AI AWS Secrets Manager bundles. `OPENROUTER_API_KEY` is supplied by
+`/hunch/prod/ai`; it is not a GitHub Actions channel setting. No channel ID is
+hardcoded or stored as a deployment secret.
 
 After deployment, an authorized bot admin configures the destination from a
 private bot chat:
@@ -553,8 +554,9 @@ Useful rollout metrics can be stored/read from existing JSONB and logs:
 ## Rollout
 
 1. Deploy the implemented code with the feature disabled by default.
-2. Confirm `OPENROUTER_API_KEY` is available to the signal-bot secret bundle and
-   enable the non-secret environment feature flag for a closed QA period.
+2. Confirm `OPENROUTER_API_KEY` is loaded from `/hunch/prod/ai` into the
+   signal-bot process and enable the non-secret environment feature flag for a
+   closed QA period.
 3. Create the private Telegram channel, add the bot with post permission, run
    `/enable_signals <channel_id>`, then `/signal_profile twitter <channel_id>`.
    Enabling starts the cursor at the current time and does not backfill.
