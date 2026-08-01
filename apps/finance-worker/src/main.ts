@@ -19,6 +19,23 @@ import { env } from "./env.js";
 import { InMemoryLockManager } from "./locks.js";
 import { IntervalScheduler, type ScheduledJob } from "./scheduler.js";
 
+type ContentWorkerModule = typeof import("./content-worker.js");
+let contentWorkerModulePromise: Promise<ContentWorkerModule> | null = null;
+
+function loadContentWorkerModule(): Promise<ContentWorkerModule> {
+  contentWorkerModulePromise ??= import("./content-worker.js");
+  return contentWorkerModulePromise;
+}
+
+async function runContentWorkerJob(): Promise<unknown> {
+  return (await loadContentWorkerModule()).runContentWorkerJob();
+}
+
+async function closeContentWorkerPool(): Promise<void> {
+  if (!contentWorkerModulePromise) return;
+  await (await contentWorkerModulePromise).closeContentWorkerPool();
+}
+
 function log(event: string, fields?: Record<string, unknown>) {
   console.log(
     JSON.stringify({
@@ -71,6 +88,16 @@ function isFundingReconciliationNoop(result: unknown): boolean {
   );
 }
 
+function isContentWorkerNoop(result: unknown): boolean {
+  return !hasPositiveActivity(result, [
+    "published",
+    "delivered",
+    "expiredUploads",
+    "deletedObjects",
+    "retainedRows",
+  ]);
+}
+
 type FinanceWorkerEnv = typeof env;
 
 export function buildJobs(workerEnv: FinanceWorkerEnv = env): ScheduledJob[] {
@@ -81,6 +108,23 @@ export function buildJobs(workerEnv: FinanceWorkerEnv = env): ScheduledJob[] {
     );
   }
   return [
+    {
+      name: "content",
+      enabled:
+        workerEnv.content.enabled &&
+        workerEnv.content.workerEnabled &&
+        Boolean(workerEnv.databaseUrl),
+      intervalSec: Math.max(
+        1,
+        Math.ceil(workerEnv.content.workerPollMs / 1_000),
+      ),
+      timeoutSec: workerEnv.jobTimeoutSec,
+      maxRetries: 0,
+      retryBackoffSec: workerEnv.retryBackoffSec,
+      jitterSec: 0,
+      run: () => runContentWorkerJob(),
+      isNoopResult: isContentWorkerNoop,
+    },
     {
       name: "funding_reconciliation",
       enabled:
@@ -279,11 +323,17 @@ function main() {
 
   process.on("SIGINT", () => {
     scheduler.shutdown();
-    void closeFundingReconciliationPool().finally(() => process.exit(0));
+    void Promise.all([
+      closeFundingReconciliationPool(),
+      closeContentWorkerPool(),
+    ]).finally(() => process.exit(0));
   });
   process.on("SIGTERM", () => {
     scheduler.shutdown();
-    void closeFundingReconciliationPool().finally(() => process.exit(0));
+    void Promise.all([
+      closeFundingReconciliationPool(),
+      closeContentWorkerPool(),
+    ]).finally(() => process.exit(0));
   });
 
   log("worker_started", {

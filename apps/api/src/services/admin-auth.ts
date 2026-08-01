@@ -32,6 +32,9 @@ export type AdminPermission =
   | "finance:write"
   | "funding:read"
   | "funding:write"
+  | "content:read"
+  | "content:write"
+  | "content:publish"
   | "intel:read"
   | "intel:write"
   | "rewards:read"
@@ -46,6 +49,9 @@ const ALL_ADMIN_PERMISSIONS = [
   "finance:write",
   "funding:read",
   "funding:write",
+  "content:read",
+  "content:write",
+  "content:publish",
   "intel:read",
   "intel:write",
   "rewards:read",
@@ -62,6 +68,7 @@ const ADMIN_ROLE_PERMISSIONS: Record<AdminRole, readonly AdminPermission[]> = {
     "users:read",
     "finance:read",
     "funding:read",
+    "content:read",
     "intel:read",
     "rewards:read",
   ],

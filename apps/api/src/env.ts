@@ -1,6 +1,7 @@
 import { config } from "dotenv";
 import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
+import { resolveContentRuntimeConfig } from "@hunch/config/content";
 import { resolveAggMarketCredential } from "./lib/agg-market-credentials.js";
 import { parseUsdcToMicro, usdcMicroToDecimalString } from "./lib/usdc.js";
 
@@ -17,6 +18,11 @@ function req(name: string) {
   if (!v) throw new Error(`[env] Missing ${name} in ${envPath}`);
   return v;
 }
+
+const contentRuntimeConfig = resolveContentRuntimeConfig(
+  process.env,
+  process.env.NODE_ENV,
+);
 
 function optionalPositiveInt(name: string, fallback: number): number {
   const raw = process.env[name];
@@ -807,6 +813,43 @@ if (
 const aggMarketCredential = resolveAggMarketCredential();
 
 export const env = {
+  content: contentRuntimeConfig,
+  contentEnabled: contentRuntimeConfig.enabled,
+  contentPublishingEnabled: contentRuntimeConfig.publishingEnabled,
+  contentRequireApproval: contentRuntimeConfig.requireApproval,
+  contentRendererContractId: contentRuntimeConfig.rendererContractId,
+  contentWorkerEnabled: contentRuntimeConfig.workerEnabled,
+  contentWorkerPollMs: contentRuntimeConfig.workerPollMs,
+  contentWorkerBatchSize: contentRuntimeConfig.workerBatchSize,
+  contentWorkerMaxAttempts: contentRuntimeConfig.workerMaxAttempts,
+  contentRetentionDays: contentRuntimeConfig.retentionDays,
+  contentAuditRetentionDays: contentRuntimeConfig.auditRetentionDays,
+  contentDatabaseUrl: req("DATABASE_URL"),
+  contentDbPublicPoolMax: contentRuntimeConfig.dbPublicPoolMax,
+  contentDbAdminPoolMax: contentRuntimeConfig.dbAdminPoolMax,
+  contentDbWorkerPoolMax: contentRuntimeConfig.dbWorkerPoolMax,
+  contentDbPublicStatementTimeoutMs:
+    contentRuntimeConfig.dbPublicStatementTimeoutMs,
+  contentDbAdminStatementTimeoutMs:
+    contentRuntimeConfig.dbAdminStatementTimeoutMs,
+  contentDbWorkerStatementTimeoutMs:
+    contentRuntimeConfig.dbWorkerStatementTimeoutMs,
+  contentDbLockTimeoutMs: contentRuntimeConfig.dbLockTimeoutMs,
+  contentRevalidateUrl: contentRuntimeConfig.revalidateUrl,
+  contentRevalidateSecret: contentRuntimeConfig.revalidateSecret,
+  contentRevalidateTimeoutMs: contentRuntimeConfig.revalidateTimeoutMs,
+  contentPreviewSecret: contentRuntimeConfig.previewSecret,
+  contentAssetS3Endpoint: contentRuntimeConfig.assetS3Endpoint,
+  contentAssetS3Region: contentRuntimeConfig.assetS3Region,
+  contentAssetS3Bucket: contentRuntimeConfig.assetS3Bucket,
+  contentAssetS3AccessKeyId: contentRuntimeConfig.assetS3AccessKeyId,
+  contentAssetS3SecretAccessKey: contentRuntimeConfig.assetS3SecretAccessKey,
+  contentAssetS3ForcePathStyle: contentRuntimeConfig.assetS3ForcePathStyle,
+  contentAssetPublicBaseUrl: contentRuntimeConfig.assetPublicBaseUrl,
+  contentAssetUploadTtlSec: contentRuntimeConfig.assetUploadTtlSec,
+  contentAssetStaticCredentialsConfigured:
+    contentRuntimeConfig.assetStaticCredentialsConfigured,
+  contentAssetStorageConfigured: contentRuntimeConfig.assetStorageConfigured,
   host: process.env.HOST || "0.0.0.0",
   port: Number(process.env.PORT ?? "3001"),
   dbUrl: req("DATABASE_URL"),

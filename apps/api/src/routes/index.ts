@@ -41,10 +41,19 @@ import { tradePolicyRoutes } from "./trade-policies.js";
 import { walletsRoutes } from "./wallets.js";
 import { walletIntelRoutes } from "./wallet-intel.js";
 import { watchlistRoutes } from "./watchlist.js";
+import { env } from "../env.js";
 
 export async function registerRoutes(app: FastifyInstance): Promise<void> {
   await app.register(metricsRoutes);
   await app.register(healthRoutes);
+  if (env.contentEnabled) {
+    const [{ contentRoutes }, { adminContentRoutes }] = await Promise.all([
+      import("./content.js"),
+      import("./admin-content.js"),
+    ]);
+    await app.register(contentRoutes);
+    await app.register(adminContentRoutes);
+  }
   await app.register(privyWebhookRoutes);
   await app.register(fundingRelayWebhookRoutes);
   await app.register(fundingRoutes);

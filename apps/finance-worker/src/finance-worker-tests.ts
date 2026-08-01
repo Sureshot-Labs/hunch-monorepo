@@ -229,6 +229,40 @@ const tests: TestCase[] = [
     },
   },
   {
+    name: "content worker is opt-in and owned by the finance worker scheduler",
+    run: () => {
+      const disabled = buildJobs(
+        buildTestEnv({
+          databaseUrl: "postgresql://local/content-test",
+          content: {
+            ...env.content,
+            enabled: true,
+            workerEnabled: false,
+          },
+        }),
+      ).find((candidate) => candidate.name === "content");
+      const enabled = buildJobs(
+        buildTestEnv({
+          databaseUrl: "postgresql://local/content-test",
+          content: {
+            ...env.content,
+            enabled: true,
+            workerEnabled: true,
+            workerPollMs: 5_500,
+          },
+        }),
+      ).find((candidate) => candidate.name === "content");
+
+      assert.equal(disabled?.enabled, false);
+      assert.equal(enabled?.enabled, true);
+      assert.equal(enabled?.intervalSec, 6);
+      assert.equal(enabled?.maxRetries, 0);
+      assert.equal(enabled?.jitterSec, 0);
+      assert.equal(enabled?.isNoopResult?.({ published: 0 }), true);
+      assert.equal(enabled?.isNoopResult?.({ published: 1 }), false);
+    },
+  },
+  {
     name: "position resolution notification producer polls every minute behind runtime policy",
     run: () => {
       const job = buildJobs(buildTestEnv()).find(
