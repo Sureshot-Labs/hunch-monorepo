@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 
 export const X_EDITORIAL_CONTENT_PROFILE = "x_editorial_draft_v1" as const;
-export const X_EDITORIAL_PROMPT_VERSION = "x_editorial_prompt_v1" as const;
+export const X_EDITORIAL_PROMPT_VERSION = "x_editorial_prompt_v2" as const;
 
 export type XEditorialMessageKind =
   | "followthrough_stats"
@@ -25,18 +25,25 @@ export type XEditorialFact = {
   value: unknown;
 };
 
+export type XEditorialFormattingSpan = {
+  style: "bold" | "italic";
+  text: string;
+};
+
 export type XEditorialDraftSource = {
   facts: XEditorialFact[];
   kind: XEditorialMessageKind;
   marketId: string;
+  miniAppUrl?: string;
   noteId: string;
   recentOpenings?: string[];
   selectedSide: "NO" | "YES";
-  sourceUrls?: string[];
+  websiteUrl?: string;
 };
 
 export type XEditorialDraftV1 = {
   characterCount: number;
+  formatting: XEditorialFormattingSpan[];
   generatedAt: string;
   marketId: string;
   model: string;
@@ -70,6 +77,16 @@ const modelOutputSchema = z
     marketId: z.string().trim().min(1).max(500),
     selectedSide: z.enum(["NO", "YES"]),
     postText: z.string().trim().min(1).max(4_096).nullable(),
+    formatting: z
+      .array(
+        z
+          .object({
+            style: z.enum(["bold", "italic"]),
+            text: z.string().trim().min(2).max(180),
+          })
+          .strict(),
+      )
+      .max(3),
     storyFamily: z.enum([
       "case_study",
       "followthrough",
@@ -89,6 +106,13 @@ const modelOutputSchema = z
         path: ["postText"],
       });
     }
+    if (value.status === "ready" && value.formatting.length === 0) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Ready drafts require at least one formatting span.",
+        path: ["formatting"],
+      });
+    }
     if (value.status === "blocked" && value.postText != null) {
       context.addIssue({
         code: z.ZodIssueCode.custom,
@@ -96,11 +120,29 @@ const modelOutputSchema = z
         path: ["postText"],
       });
     }
+    if (value.status === "blocked" && value.formatting.length > 0) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Blocked drafts must not include formatting spans.",
+        path: ["formatting"],
+      });
+    }
   });
 
 const persistedDraftSchema = z
   .object({
     characterCount: z.number().int().min(0).max(4_096),
+    formatting: z
+      .array(
+        z
+          .object({
+            style: z.enum(["bold", "italic"]),
+            text: z.string().min(2).max(180),
+          })
+          .strict(),
+      )
+      .max(3)
+      .default([]),
     generatedAt: z.string().datetime(),
     marketId: z.string().trim().min(1).max(500),
     model: z.string().trim().min(1).max(200),
@@ -244,7 +286,8 @@ export function buildXEditorialDraftSystemPrompt(input: {
     "Do not claim insider access, coordination, private information, causation, certainty, an AI bot, or a cheat code.",
     "Never invent first-person experience or pretend the account placed the trade. Avoid I, we, my, and our.",
     "Do not expose wallet addresses, internal labels, evidence IDs, raw schema names, or analytics jargon.",
-    "No Markdown, headings, tables, hashtags, affiliate language, product CTA, or engagement bait.",
+    "No Markdown markers inside postText, headings, tables, hashtags, affiliate language, product CTA, or engagement bait.",
+    "Select one to three exact, non-overlapping snippets for X Premium formatting. Use bold for the strongest hook, amount, probability, or result; use italic only for a genuinely useful interpretive line. Return those snippets in formatting and keep postText itself plain.",
     "Emoji are optional and should be rare. Do not use an emoji as a fixed template.",
     `Hard limit: ${input.maxCharacters} visible characters and ${input.maxParagraphs} paragraphs.`,
     "Return exactly one JSON object. Use status=blocked and postText=null if the facts do not support a coherent, safe post.",
@@ -266,6 +309,8 @@ function buildUserPrompt(input: {
       marketId: "copy the supplied marketId exactly",
       selectedSide: "copy the supplied selectedSide exactly",
       postText: "ready-to-paste text or null when blocked",
+      formatting:
+        "one to three exact unique postText snippets with style=bold|italic; empty only when blocked",
       storyFamily:
         "fresh_bet | trader_profile | case_study | followthrough | resolution",
       usedFactIds: "IDs of every fact used in visible copy",
@@ -383,6 +428,40 @@ function findUnsupportedNumericClaims(input: {
     .map((claim) => `unsupported_number:${claim.raw}`);
 }
 
+function validateFormattingSpans(input: {
+  formatting: XEditorialFormattingSpan[];
+  postText: string;
+}): string[] {
+  const issues: string[] = [];
+  const ranges: Array<{ end: number; start: number }> = [];
+  const seen = new Set<string>();
+  for (const [index, span] of input.formatting.entries()) {
+    if (span.text.includes("\n")) {
+      issues.push(`formatting_multiline:${index}`);
+      continue;
+    }
+    const key = `${span.style}:${span.text}`;
+    if (seen.has(key)) issues.push(`formatting_duplicate:${index}`);
+    seen.add(key);
+    const start = input.postText.indexOf(span.text);
+    if (start < 0) {
+      issues.push(`formatting_text_missing:${index}`);
+      continue;
+    }
+    if (input.postText.indexOf(span.text, start + span.text.length) >= 0) {
+      issues.push(`formatting_text_ambiguous:${index}`);
+      continue;
+    }
+    const end = start + span.text.length;
+    if (ranges.some((range) => start < range.end && end > range.start)) {
+      issues.push(`formatting_overlap:${index}`);
+      continue;
+    }
+    ranges.push({ end, start });
+  }
+  return issues;
+}
+
 export function validateXEditorialModelOutput(input: {
   config: Pick<XEditorialComposerConfig, "maxCharacters" | "maxParagraphs">;
   output: XEditorialModelOutput;
@@ -415,6 +494,12 @@ export function validateXEditorialModelOutput(input: {
     if (!allowedFactIds.has(factId)) issues.push(`unknown_fact_id:${factId}`);
   }
   issues.push(
+    ...validateFormattingSpans({
+      formatting: input.output.formatting,
+      postText,
+    }),
+  );
+  issues.push(
     ...findUnsupportedNumericClaims({
       factIds: input.output.usedFactIds,
       postText,
@@ -433,6 +518,7 @@ function blockedDraft(input: {
 }): XEditorialDraftV1 {
   return {
     characterCount: 0,
+    formatting: [],
     generatedAt: input.generatedAt,
     marketId: input.source.marketId,
     model: input.model,
@@ -579,6 +665,7 @@ export function createOpenRouterXEditorialDraftComposer(input: {
       }
       return {
         characterCount: visibleCharacterCount(validated.postText),
+        formatting: parsed.data.formatting,
         generatedAt,
         marketId: source.marketId,
         model: input.config.model,

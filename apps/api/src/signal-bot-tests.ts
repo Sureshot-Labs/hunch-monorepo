@@ -1583,11 +1583,12 @@ function createTestXEditorialComposer(input: {
     input.calls.count += 1;
     return {
       characterCount: Array.from(input.text).length,
+      formatting: [{ style: "bold", text: input.text }],
       generatedAt: "2026-01-02T01:00:00.000Z",
       marketId: source.marketId,
       model: "test/editorial-model",
       postText: input.text,
-      promptVersion: "x_editorial_prompt_v1",
+      promptVersion: "x_editorial_prompt_v2",
       safetyFlags: [],
       selectedSide: source.selectedSide,
       sourceDigest: buildXEditorialSourceDigest(source),

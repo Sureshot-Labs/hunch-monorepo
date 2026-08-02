@@ -6004,6 +6004,7 @@ export async function publishSignalBotTick(input: {
           note,
           selectedSide: buySide,
           telegram: input.telegram,
+          telegramMiniAppLinkBase: input.config.telegramMiniAppLinkBase,
           threadRootNoteId: thread.threadRootNoteId,
         });
         if (editorial.status === "invalid") {
@@ -7892,6 +7893,7 @@ export async function publishSignalBotFollowthroughTick(input: {
         kind,
         stats,
         telegram: input.telegram,
+        telegramMiniAppLinkBase: input.config.telegramMiniAppLinkBase,
       });
       if (editorial.status === "retry") {
         if (editorial.blockedChat) {
