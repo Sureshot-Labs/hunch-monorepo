@@ -221,6 +221,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.match(prompt, /sharp human analyst/i);
       assert.match(prompt, /Use only supplied facts/i);
       assert.match(prompt, /No Markdown/i);
+      assert.match(prompt, /X Premium formatting/i);
       assert.match(prompt, /1000 visible characters/i);
     },
   },
@@ -236,6 +237,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           selectedSide: "YES",
           postText:
             "I found an insider AI bot. Buy now with our code. #predictionmarkets",
+          formatting: [{ style: "bold", text: "I found an insider AI bot." }],
           storyFamily: "fresh_bet",
           usedFactIds: ["market", "missing"],
           safetyFlags: [],
@@ -263,6 +265,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
             marketId: "market-1",
             selectedSide: "YES",
             postText,
+            formatting: [{ style: "bold", text: postText }],
             storyFamily: "fresh_bet",
             usedFactIds: ["market"],
             safetyFlags: [],
@@ -305,6 +308,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
                 marketId: "market-1",
                 selectedSide: "YES",
                 postText: "We found an insider. #alpha",
+                formatting: [{ style: "bold", text: "We found an insider." }],
                 storyFamily: "fresh_bet",
                 usedFactIds: ["market"],
                 safetyFlags: [],
@@ -316,6 +320,16 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
                 selectedSide: "YES",
                 postText:
                   "$56.4K is backing Spain to win the World Cup.\n\nThe position stands out because the tracked trader is up $542K over the supplied period.",
+                formatting: [
+                  {
+                    style: "bold",
+                    text: "$56.4K is backing Spain to win the World Cup.",
+                  },
+                  {
+                    style: "italic",
+                    text: "the tracked trader is up $542K",
+                  },
+                ],
                 storyFamily: "trader_profile",
                 usedFactIds: ["market", "actor"],
                 safetyFlags: [],
@@ -360,6 +374,12 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           selectedSide: "NO",
           postText:
             "$99K is backing Spain at 73% after a 12-day winning streak.",
+          formatting: [
+            {
+              style: "bold",
+              text: "$99K is backing Spain at 73%",
+            },
+          ],
           storyFamily: "trader_profile",
           usedFactIds: ["market", "actor"],
           safetyFlags: [],
@@ -372,6 +392,38 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         "unsupported_number:$99K",
         "unsupported_number:12",
         "unsupported_number:73%",
+      ]);
+    },
+  },
+  {
+    name: "validator requires exact non-overlapping X formatting snippets",
+    run: () => {
+      const validated = validateXEditorialModelOutput({
+        config,
+        output: {
+          version: 1,
+          status: "ready",
+          marketId: "market-1",
+          selectedSide: "YES",
+          postText:
+            "$56.4K is backing Spain to win the World Cup while the tracked trader remains up $542K.",
+          formatting: [
+            {
+              style: "bold",
+              text: "$56.4K is backing Spain",
+            },
+            { style: "italic", text: "backing Spain" },
+            { style: "italic", text: "not present in the post" },
+          ],
+          storyFamily: "trader_profile",
+          usedFactIds: ["market", "actor"],
+          safetyFlags: [],
+        },
+        source,
+      });
+      assert.deepEqual(validated.issues.sort(), [
+        "formatting_overlap:1",
+        "formatting_text_missing:2",
       ]);
     },
   },
@@ -541,11 +593,17 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         composeCalls += 1;
         return {
           characterCount: Array.from(editorialText).length,
+          formatting: [
+            {
+              style: "bold" as const,
+              text: "$56.4K is backing Spain to win the World Cup.",
+            },
+          ],
           generatedAt: now.toISOString(),
           marketId: "polymarket:market-spain",
           model: "test/editorial-model",
           postText: editorialText,
-          promptVersion: "x_editorial_prompt_v1" as const,
+          promptVersion: "x_editorial_prompt_v2" as const,
           safetyFlags: [],
           selectedSide: "YES" as const,
           sourceDigest: "",
@@ -557,6 +615,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       };
       const configWithEditorial = parseSignalBotConfig({
         HUNCH_SIGNAL_BOT_TOKEN: "token",
+        HUNCH_SIGNAL_BOT_TELEGRAM_MINI_APP_LINK_BASE:
+          "https://t.me/hunch_signal_bot/hunch",
         HUNCH_SIGNAL_BOT_X_EDITORIAL_ENABLED: "true",
       });
       const composedWithDigest = async (
@@ -586,8 +646,16 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(second.sent, 0);
       assert.equal(composeCalls, 1);
       assert.equal(telegramMessages.length, 1);
-      assert.equal(telegramMessages[0]?.text, editorialText);
-      assert.equal("parse_mode" in (telegramMessages[0] ?? {}), false);
+      const deliveredText = String(telegramMessages[0]?.text);
+      assert.match(deliveredText, /^```\n/);
+      assert.ok(deliveredText.includes(editorialText));
+      assert.match(deliveredText, /Bold in X/);
+      assert.match(deliveredText, /🌐 Website/);
+      assert.match(deliveredText, /utm_campaign=signal_editorial/);
+      assert.match(deliveredText, /📱 Telegram Mini App/);
+      assert.match(deliveredText, /startapp=/);
+      assert.equal(telegramMessages[0]?.parse_mode, "MarkdownV2");
+      assert.equal("reply_markup" in (telegramMessages[0] ?? {}), false);
       assert.equal(
         (
           storedMessages.get("initial")?.metrics as {

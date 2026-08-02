@@ -214,7 +214,7 @@ ai_notes -> common fact/eligibility --|
                                             -> factual/style validation
                                             -> durable draft in existing
                                                signal_bot_messages.metrics
-                                            -> exact plain-text Telegram post
+                                            -> copyable Telegram draft package
                                             -> manager review/copy/edit
                                             -> manual X publication
 ```
@@ -279,6 +279,10 @@ type XEditorialDraftV1 = {
   marketId: string;
   selectedSide: "YES" | "NO";
   postText: string | null;
+  formatting: Array<{
+    style: "bold" | "italic";
+    text: string;
+  }>;
   storyFamily:
     | "fresh_bet"
     | "trader_profile"
@@ -290,13 +294,15 @@ type XEditorialDraftV1 = {
   characterCount: number;
   generatedAt: string;
   model: string;
-  promptVersion: "x_editorial_prompt_v1";
+  promptVersion: "x_editorial_prompt_v2";
   sourceDigest: string;
 };
 ```
 
-`postText` is the only text the manager should copy. The remaining fields are
-for validation, retry safety, diagnostics, and future QA.
+`postText` is the only body text the manager should copy. `formatting` contains
+one to three exact, unique snippets to select and format in the X Premium editor
+after pasting. The snippets remain outside `postText`, because X rich-text
+entities cannot be encoded in a plain Telegram code-block copy operation.
 
 ### Composition rules
 
@@ -316,8 +322,10 @@ The prompt and deterministic validators must enforce all of the following:
   causation without direct evidence;
 - never invent first-person experience such as “I found”, “I bought”, “we
   called”, or “our trader”;
-- no Markdown markers, Telegram section labels, proof tables, Buy/Open buttons,
-  Mini App CTA, affiliate language, hashtags, or generic engagement bait;
+- no Markdown markers inside `postText`, Telegram section labels, proof tables,
+  Buy/Open CTA, affiliate language, hashtags, or generic engagement bait;
+- return one to three exact non-overlapping snippets for intentional bold or
+  italic formatting in X; do not bold the whole post;
 - no internal product vocabulary or raw wallet addresses in visible text;
 - do not repeat the same hook pattern across consecutive drafts;
 - do not imitate one referenced author. Reuse the editorial principles, not a
@@ -341,8 +349,10 @@ The model is not the publication authority. Validate before Telegram send:
    compact currency and probability representations such as `$56.4K` and
    `19%`;
 6. the returned market ID and selected side exactly match the source contract;
-7. initial/update/follow-through semantics match the actual message kind;
-8. recent successful openings are supplied to discourage repetition without
+7. every bold/italic snippet occurs exactly once in `postText`, is single-line,
+   and does not overlap another formatting span;
+8. initial/update/follow-through semantics match the actual message kind;
+9. recent successful openings are supplied to discourage repetition without
    changing the persisted source digest.
 
 If validation fails, one constrained repair call is acceptable. If the repair
@@ -365,7 +375,8 @@ Persisted metrics shape:
   "editorialDraftV1": {
     "version": 1,
     "postText": "...",
-    "promptVersion": "x_editorial_prompt_v1",
+    "formatting": [{ "style": "bold", "text": "..." }],
+    "promptVersion": "x_editorial_prompt_v2",
     "sourceDigest": "..."
   }
 }
@@ -386,21 +397,20 @@ canonical signal note should remain channel-agnostic.
 
 ### Telegram representation for the editorial channel
 
-Send `postText` as one standalone plain-text Telegram channel message:
+Send one standalone MarkdownV2 editorial package:
 
-- omit `parse_mode` and rich-message blocks;
-- do not wrap it in a code block or quote block;
-- do not prepend “Draft”, a status line, a signal title, or instructions;
-- do not append evidence, a disclaimer, a market table, or Hunch CTA to the
-  copyable text;
-- do not use the Buy/Open keyboard from normal signal delivery;
-- keep the message standalone rather than replying it into a Telegram signal
-  thread.
+1. `postText` inside a Telegram preformatted code block, which gives the manager
+   the native one-tap copy affordance without copying operational metadata;
+2. one line per X formatting span, showing the exact snippet rendered as bold
+   or italic so the manager knows what to select in the X Premium editor;
+3. a visible `🌐 Website` deep link to the market on `app.hunch.trade` with X
+   campaign attribution;
+4. a visible `📱 Telegram Mini App` deep link to the same market.
 
-If the manager needs source access, use a small inline URL keyboard such as
-`Market`, `Source 1`, and `Source 2`. Buttons are outside the copied message
-text, so they preserve the ready-to-paste contract without requiring a second
-Telegram message or a new `message_kind` database constraint.
+Do not use an inline keyboard, normal signal card, Buy/Open CTA, reply thread,
+evidence table, or disclaimer. Website and Mini App URLs stay outside the
+copyable code block so the manager can long-press and copy whichever link is
+appropriate for the final post.
 
 ### All message families must be routed explicitly
 
@@ -486,7 +496,8 @@ perform its own presentation-specific preparation.
    - branch both initial/update and follow-through publishers;
    - add editorial reservation/load/update helpers using
      `signal_bot_messages.metrics`;
-   - send editorial drafts as plain text with optional source-link buttons;
+   - send a copyable MarkdownV2 draft package with no inline keyboard;
+   - include visible website and Mini App market deep links below the body;
    - keep current V11 paths byte-for-byte behaviorally unchanged for the
      default profile.
 2. `apps/api/src/services/x-editorial-draft.ts`
@@ -504,8 +515,9 @@ perform its own presentation-specific preparation.
 5. `.env.example` and `ops/.env.prod.example`
    - document non-secret composer settings and the existing provider key.
 6. Tests
-   - cover composer/schema validation, repair, Redis profile compatibility,
-     exact plain-text delivery, persistence, and retry reuse.
+   - cover composer/schema validation, formatting spans, repair, Redis profile
+     compatibility, copy-block delivery, both links, persistence, and retry
+     reuse.
 
 ## Test Coverage and Remaining QA
 
@@ -514,12 +526,13 @@ Implemented deterministic tests cover:
 - old Redis channel hashes parse as `telegram_signal_v11`;
 - both profiles parse and round-trip, unauthorized users cannot switch them,
   and `/status` reports the active profile and composer state;
-- the editorial channel receives only exact plain `postText` and no CTA;
+- the editorial channel receives exact `postText` inside a copyable block, X
+  formatting guidance, both visible links, no inline keyboard, and no trade CTA;
 - invalid or unsafe first output receives one constrained repair;
 - unsafe claims, fake first-person voice, unsupported numeric claims, market
   mismatch, and side mismatch fail validation;
-- a successful draft is persisted, sent without `parse_mode`, and not composed
-  or sent again on the next tick;
+- a successful draft is persisted, sent using only MarkdownV2 presentation, and
+  not composed or sent again on the next tick;
 - `insider`, fake first-person experience, raw addresses, internal labels,
   Markdown, hashtags, and generic promotional CTA are rejected;
 - recent openings do not change the canonical source digest.
@@ -573,8 +586,8 @@ Useful rollout metrics can be stored/read from existing JSONB and logs:
   draft in separate channels;
 - the X draft is composed from structured facts before Telegram presentation,
   not rewritten from the Telegram card;
-- the draft channel message is immediately copyable and contains no operational
-  metadata in its text;
+- the draft body is immediately copyable and contains no formatting guidance,
+  links, or operational metadata inside the copied block;
 - the manager, not Hunch, performs the X publish action;
 - normal channels are unchanged;
 - unsafe or unverifiable copy fails closed;

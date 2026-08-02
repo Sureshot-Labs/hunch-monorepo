@@ -2,13 +2,13 @@ import type { DbQuery } from "../db.js";
 import { isSignalBotQuoteFresh } from "./signal-bot-delivery-policy.js";
 import { createSignalDeliveryRef } from "./signal-delivery-attribution.js";
 import { parseTelegramMarketIdentityV1 } from "./signal-publication-contract.js";
+import { buildSignalBotMiniAppEventUrl } from "./signal-bot-mini-app-links.js";
 import type {
   SignalBotDeliveryPreparationReason,
   SignalBotFollowthroughCandidateRow,
   SignalBotFollowthroughStats,
   SignalBotNote,
   SignalBotTelegramClient,
-  TelegramInlineKeyboard,
 } from "./signal-bot-contracts.js";
 import {
   parsePersistedXEditorialDraft,
@@ -61,6 +61,12 @@ function isSafeHttpUrl(value: string | null | undefined): value is string {
   }
 }
 
+function safeUrlOrUndefined(
+  value: string | null | undefined,
+): string | undefined {
+  return isSafeHttpUrl(value) ? new URL(value).toString() : undefined;
+}
+
 function buildOpenMarketUrl(input: {
   appBaseUrl: string;
   eventId: string;
@@ -73,7 +79,9 @@ function buildOpenMarketUrl(input: {
   );
   if (input.marketId) url.searchParams.set("market", input.marketId);
   if (input.side) url.searchParams.set("side", input.side);
-  url.searchParams.set("utm_source", "telegram_signal_bot");
+  url.searchParams.set("utm_source", "x");
+  url.searchParams.set("utm_medium", "social");
+  url.searchParams.set("utm_campaign", "signal_editorial");
   return url.toString();
 }
 
@@ -124,6 +132,7 @@ function buildInitialSource(input: {
   note: SignalBotNote;
   recentOpenings: string[];
   selectedSide: "NO" | "YES";
+  telegramMiniAppLinkBase: string | null;
 }): XEditorialDraftSource {
   const note = input.note;
   const identity = note.telegramMarketIdentityV1;
@@ -186,14 +195,24 @@ function buildInitialSource(input: {
           side: input.selectedSide,
         })
       : null;
+  const miniAppUrl = buildSignalBotMiniAppEventUrl({
+    eventId: note.eventId,
+    marketId: note.marketId,
+    miniAppLinkBase: input.telegramMiniAppLinkBase,
+    side: input.selectedSide,
+  });
   return {
     facts,
     kind: input.kind,
     marketId: note.marketId ?? identity?.marketId ?? note.id,
+    miniAppUrl:
+      safeUrlOrUndefined(miniAppUrl) ??
+      safeUrlOrUndefined(input.telegramMiniAppLinkBase),
     noteId: note.id,
     recentOpenings: input.recentOpenings,
     selectedSide: input.selectedSide,
-    sourceUrls: [marketUrl, ...external.urls].filter(isSafeHttpUrl).slice(0, 3),
+    websiteUrl:
+      safeUrlOrUndefined(marketUrl) ?? safeUrlOrUndefined(input.appBaseUrl),
   };
 }
 
@@ -245,6 +264,7 @@ function buildFollowthroughSource(input: {
   >;
   recentOpenings: string[];
   stats: SignalBotFollowthroughStats;
+  telegramMiniAppLinkBase: string | null;
 }): XEditorialDraftSource {
   const identity = parseTelegramMarketIdentityV1(
     asObject(input.candidate.metrics).telegramMarketIdentityV1,
@@ -257,6 +277,12 @@ function buildFollowthroughSource(input: {
         side: input.stats.signalSide,
       })
     : null;
+  const miniAppUrl = buildSignalBotMiniAppEventUrl({
+    eventId: input.candidate.event_id,
+    marketId: input.candidate.market_id,
+    miniAppLinkBase: input.telegramMiniAppLinkBase,
+    side: input.stats.signalSide,
+  });
   return {
     facts: [
       {
@@ -289,10 +315,14 @@ function buildFollowthroughSource(input: {
     ],
     kind: input.kind,
     marketId: input.candidate.market_id,
+    miniAppUrl:
+      safeUrlOrUndefined(miniAppUrl) ??
+      safeUrlOrUndefined(input.telegramMiniAppLinkBase),
     noteId: input.candidate.thread_root_note_id,
     recentOpenings: input.recentOpenings,
     selectedSide: input.stats.signalSide as "NO" | "YES",
-    sourceUrls: [marketUrl].filter(isSafeHttpUrl),
+    websiteUrl:
+      safeUrlOrUndefined(marketUrl) ?? safeUrlOrUndefined(input.appBaseUrl),
   };
 }
 
@@ -352,22 +382,47 @@ async function loadRecentOpenings(input: {
   }
 }
 
-function buildKeyboard(
-  sourceUrls: string[] | undefined,
-): TelegramInlineKeyboard | undefined {
-  const urls = [...new Set((sourceUrls ?? []).filter(isSafeHttpUrl))].slice(
-    0,
-    3,
-  );
-  if (urls.length === 0) return undefined;
-  return {
-    inline_keyboard: [
-      urls.map((url, index) => ({
-        text: index === 0 ? "Market" : `Source ${index}`,
-        url,
-      })),
-    ],
-  };
+function escapeMarkdownV2(value: string): string {
+  return value.replace(/([_*[\]()~`>#+\-=|{}.!\\])/g, "\\$1");
+}
+
+function escapeMarkdownV2CodeBlock(value: string): string {
+  return value.replace(/([`\\])/g, "\\$1");
+}
+
+function escapeMarkdownV2LinkTarget(value: string): string {
+  return value.replace(/([)\\])/g, "\\$1");
+}
+
+function buildVisibleLink(
+  label: string,
+  url: string | undefined,
+): string | null {
+  if (!isSafeHttpUrl(url)) return null;
+  return `${label}: [${escapeMarkdownV2(url)}](${escapeMarkdownV2LinkTarget(url)})`;
+}
+
+export function buildXEditorialTelegramDraftMessage(input: {
+  draft: XEditorialDraftV1;
+  miniAppUrl?: string;
+  websiteUrl?: string;
+}): string {
+  const postText = input.draft.postText ?? "";
+  const formatting = input.draft.formatting.flatMap((span) => {
+    const text = escapeMarkdownV2(span.text);
+    return span.style === "bold"
+      ? [`🎨 ${escapeMarkdownV2("Bold in X")}: *${text}*`]
+      : [`🎨 ${escapeMarkdownV2("Italic in X")}: _${text}_`];
+  });
+  const links = [
+    buildVisibleLink("🌐 Website", input.websiteUrl),
+    buildVisibleLink("📱 Telegram Mini App", input.miniAppUrl),
+  ].filter((line): line is string => line != null);
+  return [
+    `\`\`\`\n${escapeMarkdownV2CodeBlock(postText)}\n\`\`\``,
+    ...formatting,
+    ...links,
+  ].join("\n\n");
 }
 
 async function recordMessage(input: {
@@ -502,8 +557,12 @@ async function deliverDraft(input: {
   const result = await input.telegram.sendMessage({
     chat_id: input.chatId,
     disable_web_page_preview: true,
-    reply_markup: buildKeyboard(input.source.sourceUrls),
-    text: draft.postText,
+    parse_mode: "MarkdownV2",
+    text: buildXEditorialTelegramDraftMessage({
+      draft,
+      miniAppUrl: input.source.miniAppUrl,
+      websiteUrl: input.source.websiteUrl,
+    }),
   });
   if (!result.ok) {
     await recordMessage({
@@ -540,6 +599,7 @@ export async function publishXEditorialNote(input: {
   note: SignalBotNote;
   selectedSide: "NO" | "YES";
   telegram: SignalBotTelegramClient;
+  telegramMiniAppLinkBase: string | null;
   threadRootNoteId: string;
 }): Promise<SignalBotXEditorialPublicationResult> {
   const reason = validateInitialSource(input);
@@ -568,6 +628,7 @@ export async function publishXEditorialFollowthrough(input: {
   >;
   stats: SignalBotFollowthroughStats;
   telegram: SignalBotTelegramClient;
+  telegramMiniAppLinkBase: string | null;
 }): Promise<SignalBotXEditorialPublicationResult> {
   if (!input.stats.signalSide) {
     return { reason: "non_directional", status: "invalid" };
