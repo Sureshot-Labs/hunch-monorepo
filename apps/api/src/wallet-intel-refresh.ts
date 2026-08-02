@@ -1,10 +1,11 @@
+import { performance } from "node:perf_hooks";
 import { pathToFileURL } from "node:url";
 import type { PoolClient } from "pg";
 
 import { resolveTerminalTokenPrices } from "@hunch/db";
 import { requestFreshMarketPrices, type PriceRefreshRedis } from "@hunch/infra";
 import { ethers } from "ethers";
-import { chunkArray, isAbortError, isRpcRateLimit } from "@hunch/shared";
+import { chunkArray, isAbortError, isRpcRateLimit, sleep } from "@hunch/shared";
 
 import { pool } from "./db.js";
 import { env } from "./env.js";
@@ -199,6 +200,11 @@ const SYSTEM_TAGS = [
 ] as const;
 const REFRESH_ADVISORY_LOCK_KEY_1 = 4207;
 const REFRESH_ADVISORY_LOCK_KEY_2 = 1;
+// The five-minute selector job is expected to finish quickly and retry when the
+// hourly refresh owns the shared lock. Give the hourly refresh the reciprocal
+// bounded wait without ever queueing behind another full refresh indefinitely.
+const REFRESH_ADVISORY_LOCK_MAX_WAIT_MS = 120_000;
+const REFRESH_ADVISORY_LOCK_RETRY_INTERVAL_MS = 1_000;
 
 export type TokenIndexEntry = {
   marketId: string;
@@ -1226,17 +1232,49 @@ async function hasWalletActivityBaselineSampleCountColumn(
   return result.rows[0]?.exists === true;
 }
 
-async function acquireRefreshAdvisoryLock(client: Queryable): Promise<boolean> {
-  const result = await client.query<{ locked: boolean }>(
-    `
-      select pg_try_advisory_lock($1::int, $2::int) as locked
-    `,
-    [REFRESH_ADVISORY_LOCK_KEY_1, REFRESH_ADVISORY_LOCK_KEY_2],
+type RefreshAdvisoryLockWaitOptions = {
+  maxWaitMs?: number;
+  retryIntervalMs?: number;
+  now?: () => number;
+  wait?: (delayMs: number) => Promise<void>;
+};
+
+export async function acquireRefreshAdvisoryLock(
+  client: Queryable,
+  options: RefreshAdvisoryLockWaitOptions = {},
+): Promise<boolean> {
+  const maxWaitMs = Math.max(
+    0,
+    options.maxWaitMs ?? REFRESH_ADVISORY_LOCK_MAX_WAIT_MS,
   );
-  return result.rows[0]?.locked ?? false;
+  const retryIntervalMs = Math.max(
+    1,
+    options.retryIntervalMs ?? REFRESH_ADVISORY_LOCK_RETRY_INTERVAL_MS,
+  );
+  const now = options.now ?? (() => performance.now());
+  const wait = options.wait ?? sleep;
+  const startedAt = now();
+
+  while (true) {
+    const result = await client.query<{ locked: boolean }>(
+      `
+        select pg_try_advisory_lock($1::int, $2::int) as locked
+      `,
+      [REFRESH_ADVISORY_LOCK_KEY_1, REFRESH_ADVISORY_LOCK_KEY_2],
+    );
+    if (result.rows[0]?.locked === true) return true;
+
+    const remainingMs = maxWaitMs - (now() - startedAt);
+    if (remainingMs <= 0) return false;
+    await wait(Math.min(retryIntervalMs, remainingMs));
+  }
 }
 
-async function releaseRefreshAdvisoryLock(client: Queryable): Promise<void> {
+export async function releaseRefreshAdvisoryLock(
+  client: Queryable,
+  lockAcquired: boolean,
+): Promise<void> {
+  if (!lockAcquired) return;
   await client.query(
     `
       select pg_advisory_unlock($1::int, $2::int)
@@ -7976,12 +8014,13 @@ async function runSnapshot(
 
 async function main() {
   const lockClient = await pool.connect();
+  let lockAcquired = false;
   try {
     const cliArgs = parseWalletIntelRefreshCliArgs();
-    const locked = await acquireRefreshAdvisoryLock(lockClient);
-    if (!locked) {
+    lockAcquired = await acquireRefreshAdvisoryLock(lockClient);
+    if (!lockAcquired) {
       console.warn(
-        "[wallets:intel:refresh] skipped; advisory lock is already held",
+        `[wallets:intel:refresh] skipped; advisory lock remained held after ${REFRESH_ADVISORY_LOCK_MAX_WAIT_MS}ms`,
       );
       return;
     }
@@ -8087,7 +8126,7 @@ async function main() {
     }
   } finally {
     try {
-      await releaseRefreshAdvisoryLock(lockClient);
+      await releaseRefreshAdvisoryLock(lockClient, lockAcquired);
     } finally {
       lockClient.release();
     }

@@ -88,6 +88,7 @@ import {
   fetchMarketHolderDataBatch,
 } from "./services/holders-core.js";
 import {
+  acquireRefreshAdvisoryLock,
   applyWalletIntelRefreshCliArgs,
   applySnapshotDeltas,
   capWalletIntelSelectedTokenUniverse,
@@ -98,6 +99,7 @@ import {
   markAutoTrackedWalletRefreshAttempted,
   markAutoTrackedWalletsRefreshed,
   parseWalletIntelRefreshCliArgs,
+  releaseRefreshAdvisoryLock,
   snapshotFollowedWalletHoldingsEvm,
   upsertRecentTopHolderTrackingSubjects,
   upsertWhaleTrackingSubjects,
@@ -665,6 +667,84 @@ const tests: TestCase[] = [
         () => resolveWalletTagId(missingDb, "whale"),
         /Missing wallet_tags\.slug='whale' record/,
       );
+    },
+  },
+  {
+    name: "hourly wallet refresh waits for a short selector lock holder",
+    run: async () => {
+      let attempts = 0;
+      let nowMs = 0;
+      const waits: number[] = [];
+      const client = {
+        query: async (sql: string, values?: unknown[]) => {
+          attempts += 1;
+          assert.match(sql, /pg_try_advisory_lock/);
+          assert.deepEqual(values, [4207, 1]);
+          return { rows: [{ locked: attempts >= 3 }] };
+        },
+      } as unknown as Parameters<typeof acquireRefreshAdvisoryLock>[0];
+
+      const acquired = await acquireRefreshAdvisoryLock(client, {
+        maxWaitMs: 120_000,
+        retryIntervalMs: 1_000,
+        now: () => nowMs,
+        wait: async (delayMs) => {
+          waits.push(delayMs);
+          nowMs += delayMs;
+        },
+      });
+
+      assert.equal(acquired, true);
+      assert.equal(attempts, 3);
+      assert.deepEqual(waits, [1_000, 1_000]);
+    },
+  },
+  {
+    name: "hourly wallet refresh lock wait is bounded",
+    run: async () => {
+      let attempts = 0;
+      let nowMs = 0;
+      const waits: number[] = [];
+      const client = {
+        query: async () => {
+          attempts += 1;
+          return { rows: [{ locked: false }] };
+        },
+      } as unknown as Parameters<typeof acquireRefreshAdvisoryLock>[0];
+
+      const acquired = await acquireRefreshAdvisoryLock(client, {
+        maxWaitMs: 2_500,
+        retryIntervalMs: 1_000,
+        now: () => nowMs,
+        wait: async (delayMs) => {
+          waits.push(delayMs);
+          nowMs += delayMs;
+        },
+      });
+
+      assert.equal(acquired, false);
+      assert.equal(attempts, 4);
+      assert.deepEqual(waits, [1_000, 1_000, 500]);
+    },
+  },
+  {
+    name: "wallet refresh releases only an advisory lock it acquired",
+    run: async () => {
+      const queries: Array<{ sql: string; values?: unknown[] }> = [];
+      const client = {
+        query: async (sql: string, values?: unknown[]) => {
+          queries.push({ sql, values });
+          return { rows: [] };
+        },
+      } as unknown as Parameters<typeof releaseRefreshAdvisoryLock>[0];
+
+      await releaseRefreshAdvisoryLock(client, false);
+      assert.equal(queries.length, 0);
+
+      await releaseRefreshAdvisoryLock(client, true);
+      assert.equal(queries.length, 1);
+      assert.match(queries[0]?.sql ?? "", /pg_advisory_unlock/);
+      assert.deepEqual(queries[0]?.values, [4207, 1]);
     },
   },
   {
