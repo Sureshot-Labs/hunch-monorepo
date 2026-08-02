@@ -93,6 +93,7 @@ import {
   capWalletIntelSelectedTokenUniverse,
   collectAutoTrackedWalletSnapshotRows,
   dedupeFollowedWalletRowsForSnapshotWork,
+  loadAutoTrackedPreviousOpenPositions,
   loadAutoTrackedWalletRows,
   markAutoTrackedWalletRefreshAttempted,
   markAutoTrackedWalletsRefreshed,
@@ -4371,6 +4372,82 @@ const tests: TestCase[] = [
         limit: 150,
         refreshHours: 6,
         subjectTtlDays: 14,
+      });
+
+      assert.deepEqual(rows, []);
+    },
+  },
+  {
+    name: "auto-tracked previous opens use the compact canonical rollup",
+    run: async () => {
+      const queries: Array<{ sql: string; params: unknown[] }> = [];
+      const client = {
+        query: async (sql: string, params: unknown[] = []) => {
+          queries.push({ sql, params });
+          return {
+            rows: [
+              {
+                wallet_id: "11111111-1111-4111-8111-111111111111",
+                venue: "polymarket",
+                market_id: "polymarket:1",
+                outcome_side: "YES",
+                token_id: "token-1",
+                price: "0.5",
+              },
+            ],
+          };
+        },
+      };
+      const wallets = [
+        {
+          wallet_id: "11111111-1111-4111-8111-111111111111",
+          address: "0x1111111111111111111111111111111111111111",
+          chain: "polygon" as const,
+          venue: "polymarket" as const,
+          sources: ["whale" as const],
+          priority: 1,
+        },
+      ];
+
+      const rows = await loadAutoTrackedPreviousOpenPositions(client as never, {
+        wallets,
+      });
+
+      assert.deepEqual(rows, [
+        {
+          wallet_id: "11111111-1111-4111-8111-111111111111",
+          venue: "polymarket",
+          market_id: "polymarket:1",
+          outcome_side: "YES",
+          token_id: "token-1",
+          price: "0.5",
+        },
+      ]);
+      assert.deepEqual(queries[0]?.params, [
+        ["11111111-1111-4111-8111-111111111111"],
+        ["polymarket"],
+      ]);
+      assert.match(queries[0]?.sql ?? "", /wallet_position_exposure/);
+      assert.match(queries[0]?.sql ?? "", /open_positions_version = 1/);
+      assert.match(queries[0]?.sql ?? "", /jsonb_to_recordset/);
+      assert.match(queries[0]?.sql ?? "", /join unified_tokens/);
+      assert.doesNotMatch(
+        queries[0]?.sql ?? "",
+        /wallet_position_snapshots|metadata->>|snapshot_at/,
+      );
+    },
+  },
+  {
+    name: "auto-tracked previous opens skip database work for an empty selection",
+    run: async () => {
+      const client = {
+        query: async () => {
+          throw new Error("empty selection must not query previous positions");
+        },
+      };
+
+      const rows = await loadAutoTrackedPreviousOpenPositions(client as never, {
+        wallets: [],
       });
 
       assert.deepEqual(rows, []);

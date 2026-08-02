@@ -2473,9 +2473,9 @@ export async function loadAutoTrackedWalletRows(
   }));
 }
 
-async function loadAutoTrackedPreviousOpenPositions(
+export async function loadAutoTrackedPreviousOpenPositions(
   client: Queryable,
-  inputs: { snapshotAt: Date; wallets: AutoTrackedWalletRow[] },
+  inputs: { wallets: AutoTrackedWalletRow[] },
 ): Promise<AutoTrackedPreviousOpenPositionRow[]> {
   if (inputs.wallets.length === 0) return [];
   const { rows } = await client.query<{
@@ -2490,56 +2490,34 @@ async function loadAutoTrackedPreviousOpenPositions(
       with subjects as (
         select distinct *
         from unnest($1::uuid[], $2::text[]) as x(wallet_id, venue)
-      ),
-      latest as (
-        select distinct on (
-          ws.wallet_id,
-          ws.venue,
-          ws.market_id,
-          ws.outcome_side
-        )
-          ws.wallet_id::text as wallet_id,
-          ws.venue,
-          ws.market_id,
-          ws.outcome_side,
-          ws.shares,
-          ws.price::text as price,
-          coalesce(nullif(ws.metadata->>'tokenId', ''), ut.token_id) as token_id
-        from wallet_position_snapshots ws
-        join subjects s
-          on s.wallet_id = ws.wallet_id
-         and s.venue = ws.venue
-        left join unified_tokens ut
-          on ut.market_id = ws.market_id
-         and ut.side = ws.outcome_side
-        where ws.snapshot_at < $3
-          and ws.outcome_side in ('YES', 'NO')
-          and (
-            ws.metadata->>'source' = 'auto_tracked_wallet' or
-            ws.metadata->>'snapshotSource' = 'auto_tracked_wallet'
-          )
-        order by
-          ws.wallet_id,
-          ws.venue,
-          ws.market_id,
-          ws.outcome_side,
-          ws.snapshot_at desc
       )
       select
-        wallet_id,
-        venue,
-        market_id,
-        outcome_side,
-        token_id,
-        price
-      from latest
-      where shares > 0
-        and token_id is not null
+        subject.wallet_id::text as wallet_id,
+        subject.venue,
+        position."marketId" as market_id,
+        position."outcomeSide" as outcome_side,
+        token.token_id,
+        position.price
+      from subjects subject
+      join wallet_position_exposure exposure
+        on exposure.wallet_id = subject.wallet_id
+       and exposure.open_positions_version = 1
+       and jsonb_typeof(exposure.open_positions) = 'array'
+      cross join lateral jsonb_to_recordset(exposure.open_positions) as position(
+        venue text,
+        "marketId" text,
+        "outcomeSide" text,
+        price text
+      )
+      join unified_tokens token
+        on token.market_id = position."marketId"
+       and token.side = position."outcomeSide"
+      where position.venue = subject.venue
+        and position."outcomeSide" in ('YES', 'NO')
     `,
     [
       inputs.wallets.map((row) => row.wallet_id),
       inputs.wallets.map((row) => row.venue),
-      inputs.snapshotAt,
     ],
   );
 
@@ -7852,7 +7830,6 @@ async function runSnapshot(
     const autoTrackedPreviousOpenPositions =
       walletIntelRefreshPolicy.autoTrackedWalletEnabled
         ? await loadAutoTrackedPreviousOpenPositions(client, {
-            snapshotAt,
             wallets: autoTrackedWallets,
           })
         : [];
