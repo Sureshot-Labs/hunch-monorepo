@@ -4,6 +4,11 @@ import { config as dotenv } from "dotenv";
 
 import { z } from "zod";
 
+export {
+  resolveContentRuntimeConfig,
+  type ContentRuntimeConfig,
+} from "./content.js";
+
 /**
  * Walk up parent directories until we find a `.env` file,
  * then load it. Stops at filesystem root.

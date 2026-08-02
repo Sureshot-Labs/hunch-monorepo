@@ -10,6 +10,11 @@
       "types": "./dist/index.d.ts",
       "source": "./src/index.ts",
       "import": "./dist/index.js"
+    },
+    "./content": {
+      "types": "./dist/content.d.ts",
+      "source": "./src/content.ts",
+      "import": "./dist/content.js"
     }
   },
   "scripts": {

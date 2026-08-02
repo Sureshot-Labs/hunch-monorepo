@@ -18,6 +18,7 @@ import { env } from "./env.js";
 import { pool } from "./db.js";
 import { createApiTradingApplicationService } from "./services/api-trading-service.js";
 import { reconcileTelegramVenueIntents } from "./services/telegram-bot-trading-venue-reconcile.js";
+import { closeApiContentPools } from "./content-runtime.js";
 
 function sanitizeErrorEnvelope(
   payload: unknown,
@@ -101,6 +102,7 @@ export async function buildApp() {
       telegramVenueReconcileTimer = null;
     }
     await telegramVenueReconcileRun;
+    await closeApiContentPools();
     await flushPendingMarketRefreshes();
     await closeRedis();
   });

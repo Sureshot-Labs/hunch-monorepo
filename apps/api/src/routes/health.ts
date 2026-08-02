@@ -1,5 +1,8 @@
 import type { FastifyPluginAsync } from "fastify";
 import { checkDatabaseReady } from "../db.js";
+import { checkContentDatabaseReady } from "../content-db.js";
+import { getApiContentPools } from "../content-runtime.js";
+import { env } from "../env.js";
 
 export const healthRoutes: FastifyPluginAsync = async (app) => {
   app.get("/time", async (_request, reply) => {
@@ -22,4 +25,17 @@ export const healthRoutes: FastifyPluginAsync = async (app) => {
       return reply.code(503).send({ ok: false, db: "unavailable" });
     }
   });
+
+  if (env.contentEnabled) {
+    app.get("/health/content", async (_request, reply) => {
+      try {
+        const content = await checkContentDatabaseReady(
+          getApiContentPools().publicPool,
+        );
+        return { ok: true, content: "ready", ...content };
+      } catch {
+        return reply.code(503).send({ ok: false, content: "unavailable" });
+      }
+    });
+  }
 };

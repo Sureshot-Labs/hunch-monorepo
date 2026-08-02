@@ -1,6 +1,7 @@
 import { config } from "dotenv";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { resolveContentRuntimeConfig } from "@hunch/config/content";
 
 const envPath = resolve(
   dirname(fileURLToPath(import.meta.url)),
@@ -85,11 +86,13 @@ const telegramTradeIntentsEnabled = parseBool(
   telegramTradeIntentsEnabledRaw,
   executeEnabled,
 );
+const content = resolveContentRuntimeConfig(process.env, process.env.NODE_ENV);
 
 export const env = {
   enabled,
   executeEnabled,
   databaseUrl,
+  content,
 
   fundingReconciliationEnabled: parseBool(
     readEnv("HUNCH_FINANCE_FUNDING_RECONCILIATION_ENABLED"),

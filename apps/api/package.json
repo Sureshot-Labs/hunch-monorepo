@@ -8,6 +8,10 @@
     "./funding-worker": {
       "source": "./src/funding/worker/funding-reconciliation-worker.ts",
       "import": "./dist/funding/worker/funding-reconciliation-worker.js"
+    },
+    "./content-worker": {
+      "source": "./src/content-worker-entry.ts",
+      "import": "./dist/content-worker-entry.js"
     }
   },
   "scripts": {
@@ -77,6 +81,9 @@
     "test:fast": "tsx src/test-runner.ts --unit account-value-tests admin-funding-routes-tests admin-market-presentations-tests admin-merge-user-tests ai-response-tests cli-args-tests funding-asset-identity-tests funding-domain-tests funding-legacy-tests funding-market-context-revision-tests funding-multi-leg-reducer-tests funding-persistence-tests funding-planner-tests funding-reconciliation-evidence-tests funding-routes-tests funding-trade-consumer-intent-tests funding-relay-webhook-tests relay/fixtures-tests relay/rehearsal-tests relay/runtime-tests relay/solana-rehearsal-tests hot-token-selection-tests limitless-metadata-tests orders-repo-tests polymarket-max-spend-tests kalshi-dflow-transaction-safety-tests kalshi-execution-reconcile-tests rpc-diagnostics-tests rpc-gateway-tests rpc-read-coordinator-tests trading-ready-static-tests trading-service-tests polymarket-embedded-tests limitless-history-tests signal-bot-tests signal-evidence-tests signal-notification-headline-tests signal-post-copy-policy-tests x-editorial-draft-tests",
     "test:integration": "tsx src/test-runner.ts --integration",
     "test:unit": "tsx src/test-runner.ts --unit",
+    "test:content": "tsx src/content-tests.ts",
+    "test:content:integration": "tsx src/content-integration-tests.ts && tsx src/content-batching-tests.ts && tsx src/content-concurrency-tests.ts && tsx src/content-media-integration-tests.ts",
+    "test:content:performance": "tsx src/content-performance-tests.ts",
     "lint": "eslint .",
     "check": "pnpm run lint && pnpm run typecheck",
     "typecheck": "tsc -p tsconfig.json --noEmit",
@@ -94,9 +101,12 @@
     "signal:post-copy:audit": "tsx src/signal-post-copy-audit.ts"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1096.0",
+    "@aws-sdk/s3-request-presigner": "^3.1096.0",
     "@fastify/swagger": "^9.7.0",
     "@fastify/swagger-ui": "^5.2.3",
     "@hunch/contracts": "workspace:*",
+    "@hunch/config": "workspace:*",
     "@hunch/db": "workspace:*",
     "@hunch/infra": "workspace:*",
     "@hunch/shared": "workspace:*",
@@ -109,6 +119,7 @@
     "fastify": "^5.8.5",
     "fastify-type-provider-zod": "6.1.0",
     "geoip-lite": "^2.0.3",
+    "image-size": "^2.0.2",
     "jsonwebtoken": "^9.0.3",
     "ml-pca": "^4.1.1",
     "pg": "^8.22.0",

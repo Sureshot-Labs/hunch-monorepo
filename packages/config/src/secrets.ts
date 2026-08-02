@@ -44,6 +44,7 @@ type BundleName =
   | "ai"
   | "indexer-dflow"
   | "indexer-limitless"
+  | "content"
   | "ops"
   | "signal-bot";
 
@@ -112,6 +113,7 @@ export const SECRET_BUNDLE_KEYS: Record<BundleName, readonly string[]> = {
   ai: ["OPENROUTER_API_KEY", "XAI_API_KEY", "XAI_MANAGEMENT_API_KEY"],
   "indexer-dflow": ["DFLOW_API_KEY"],
   "indexer-limitless": ["LIMITLESS_WS_SESSION"],
+  content: ["CONTENT_PREVIEW_SECRET", "CONTENT_REVALIDATE_SECRET"],
   ops: [
     "AGG_APP_ID",
     "AGG_API_KEY",
@@ -605,6 +607,7 @@ export function buildSecretBundles(
     ai: {},
     "indexer-dflow": {},
     "indexer-limitless": {},
+    content: {},
     ops: {},
     "signal-bot": {},
   };
