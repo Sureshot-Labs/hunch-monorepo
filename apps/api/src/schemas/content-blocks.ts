@@ -140,6 +140,7 @@ export const contentAuthorSchema = z.strictObject({
   url: externalUrlSchema.nullable().default(null),
   bio: z.string().trim().max(1_000).nullable().default(null),
   avatarAssetId: assetIdSchema.nullable().default(null),
+  showByline: z.boolean().default(true),
 });
 
 export const contentCategorySchema = z.strictObject({
