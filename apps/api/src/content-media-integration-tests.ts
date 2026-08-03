@@ -191,6 +191,19 @@ try {
     intent.upload.headers["x-amz-checksum-sha256"],
     checksumBase64(png),
   );
+  const signedUploadUrl = new URL(intent.upload.url);
+  const signedHeaders = new Set(
+    signedUploadUrl.searchParams
+      .get("X-Amz-SignedHeaders")
+      ?.split(";")
+      .filter(Boolean) ?? [],
+  );
+  assert.equal(
+    signedUploadUrl.searchParams.has("x-amz-checksum-sha256"),
+    false,
+  );
+  assert.equal(signedHeaders.has("x-amz-checksum-sha256"), true);
+  assert.equal(signedHeaders.has("content-length"), false);
   assetIds.push(intent.asset.id);
   storageKeys.add(intent.asset.storageKey);
   const rejectedPayload = await fetch(intent.upload.url, {

@@ -128,6 +128,8 @@ const MAX_BYTES_BY_KIND: Record<ContentAsset["kind"], number> = {
   file: 100_000_000,
 };
 
+const CONTENT_CHECKSUM_HEADER = "x-amz-checksum-sha256";
+
 const IMAGE_MIME_BY_DETECTED_TYPE: Record<string, string> = {
   jpg: "image/jpeg",
   png: "image/png",
@@ -293,18 +295,18 @@ export async function createContentAssetUpload(
   const command = new PutObjectCommand({
     Bucket: config.assetS3Bucket,
     Key: key,
-    // Content-Length is advisory for presigned PUTs because SigV4 deliberately
-    // excludes that header. The signed ChecksumSHA256 below is the authoritative
-    // payload binding: S3 rejects any different bytes (and therefore any
-    // different length) before storing the object. Completion also verifies the
-    // observed size and checksum before promotion.
-    ContentLength: body.expectedByteSize,
+    // Bind the payload with the checksum rather than Content-Length. Browsers
+    // own Content-Length and cannot reliably reproduce a caller-signed header.
+    // Completion independently verifies both the stored size and checksum.
     ContentType: body.mimeType,
     ChecksumSHA256: encodedChecksum,
   });
   const expiresAt = new Date(Date.now() + config.assetUploadTtlSec * 1_000);
   const url = await getSignedUrl(client, command, {
     expiresIn: config.assetUploadTtlSec,
+    // The browser sends this header from the upload intent, so it must remain
+    // in X-Amz-SignedHeaders instead of being hoisted into the query string.
+    unhoistableHeaders: new Set([CONTENT_CHECKSUM_HEADER]),
   });
   const { rows } = await pool.query<AssetRow>(
     `
@@ -341,7 +343,7 @@ export async function createContentAssetUpload(
       url,
       headers: {
         "content-type": body.mimeType.toLowerCase(),
-        "x-amz-checksum-sha256": encodedChecksum,
+        [CONTENT_CHECKSUM_HEADER]: encodedChecksum,
       },
       expiresAt: expiresAt.toISOString(),
     },
