@@ -13608,6 +13608,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         const calls = { count: 0 };
         const result = await publishSignalBotFollowthroughTick({
           config: parseSignalBotConfig({
+            HUNCH_SIGNAL_BOT_TELEGRAM_MINI_APP_LINK_BASE:
+              TEST_TELEGRAM_MINI_APP_LINK_BASE,
             HUNCH_SIGNAL_BOT_TOKEN: "token",
             HUNCH_SIGNAL_BOT_X_EDITORIAL_ENABLED: "true",
           }),
@@ -13628,13 +13630,21 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           scenario.name,
         );
         assert.equal(telegram.messages.length, 1, scenario.name);
-        assert.equal(
-          telegram.messages[0]?.parse_mode,
-          scenario.rootProfile === "x_editorial_draft_v1"
-            ? undefined
-            : "MarkdownV2",
-          scenario.name,
-        );
+        const message = telegram.messages[0];
+        assert.equal(message?.parse_mode, "MarkdownV2", scenario.name);
+        if (scenario.rootProfile === "x_editorial_draft_v1") {
+          assert.match(message?.text ?? "", /^```\n/, scenario.name);
+          assert.match(message?.text ?? "", /🎨 Bold in X/, scenario.name);
+          assert.match(message?.text ?? "", /🌐 Website/, scenario.name);
+          assert.match(
+            message?.text ?? "",
+            /📱 Telegram Mini App/,
+            scenario.name,
+          );
+          assert.equal(message?.reply_markup, undefined, scenario.name);
+        } else {
+          assert.doesNotMatch(message?.text ?? "", /^```\n/, scenario.name);
+        }
       }
     },
   },
@@ -13693,10 +13703,14 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(first.skipped, 1);
       assert.equal(second.sent, 1);
       assert.equal(calls.count, 1);
-      assert.deepEqual(
-        telegram.messages.map((message) => message.text),
-        [editorialText, editorialText],
+      assert.equal(telegram.messages.length, 2);
+      assert.equal(telegram.messages[0]?.text, telegram.messages[1]?.text);
+      assert.match(
+        telegram.messages[0]?.text ?? "",
+        /^```\nThe tracked position strengthened after the original signal\.\n```/,
       );
+      assert.equal(telegram.messages[0]?.parse_mode, "MarkdownV2");
+      assert.equal(telegram.messages[1]?.parse_mode, "MarkdownV2");
     },
   },
   {
