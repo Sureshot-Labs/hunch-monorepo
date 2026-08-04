@@ -764,3 +764,6 @@ until the remaining gates in
 corrected contracts for Telegram and exact Privy delegated policy enforcement.
 WP9 owns production-style activation/rollback evidence and the decision to
 remove compatibility components.
+
+The concrete Telegram-native continuation of this work is specified in
+[`../wp8/telegram-native-funding-implementation-plan.md`](../wp8/telegram-native-funding-implementation-plan.md).
