@@ -1,4 +1,9 @@
-import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
+import type {
+  FastifyPluginAsync,
+  FastifyReply,
+  FastifyRequest,
+  preHandlerHookHandler,
+} from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z } from "zod";
 
@@ -57,6 +62,14 @@ import {
   loadTelegramPositions,
 } from "../services/telegram-bot-positions.js";
 import { formatTelegramCalloutMarkdownV2 } from "../services/telegram-bot-trading-presentation.js";
+import { buildTelegramAccountValueMessage } from "../services/telegram-account-value.js";
+import { buildTelegramAccountValueUnavailableMessage } from "../services/telegram-account-value-contract.js";
+import type { AccountValueReadModel } from "../account-value/runtime-service.js";
+import { accountValueReadService } from "../account-value/runtime-read-service.js";
+import {
+  resolveActiveTelegramAccountLink,
+  sameActiveTelegramAccountLink,
+} from "../services/telegram-account-link.js";
 
 const enableBodySchema = z
   .object({
@@ -128,6 +141,13 @@ const internalDepositBodySchema = z
     telegramMiniAppEnabled: z.boolean().optional(),
     telegramUserId: z.union([z.string(), z.number()]),
     venue: z.string().trim().max(32).optional().nullable(),
+  })
+  .strict();
+
+const internalAccountBodySchema = z
+  .object({
+    chatId: z.union([z.string(), z.number()]),
+    telegramUserId: z.union([z.string(), z.number()]),
   })
   .strict();
 
@@ -294,6 +314,9 @@ async function buildKalshiEligibilityForRequest(input: {
 
 export type TelegramBotTradingRouteDependencies = {
   authPreHandler?: ReturnType<typeof createAuthMiddleware>;
+  internalPreHandler?: preHandlerHookHandler;
+  buildAccountValue?: (userId: string) => Promise<AccountValueReadModel>;
+  buildAccountValueMessage?: typeof buildTelegramAccountValueMessage;
   createTrading?: (request: FastifyRequest) => ApiBotTradingExecutor;
   db?: DbQuery;
   reconciliationEnabled?: boolean;
@@ -330,6 +353,10 @@ async function registerTelegramBotTradingRoutes(
     dependencies.buildPositionsMessage ?? buildTelegramPositionsMessage;
   const buildDepositMessage =
     dependencies.buildDepositMessage ?? buildTelegramDepositMessage;
+  const buildAccountValue =
+    dependencies.buildAccountValue ?? accountValueReadService.load;
+  const buildAccountValueMessage =
+    dependencies.buildAccountValueMessage ?? buildTelegramAccountValueMessage;
   const loadPositions = dependencies.loadPositions ?? loadTelegramPositions;
   const searchMarkets = dependencies.searchMarkets ?? searchTelegramMarkets;
   const kalshiGeoFenceConfig: GeoFenceConfig = {
@@ -434,7 +461,7 @@ async function registerTelegramBotTradingRoutes(
     });
   };
 
-  const requireInternal = async (
+  const defaultRequireInternal = async (
     request: { headers: Record<string, unknown> },
     reply: {
       code: (statusCode: number) => unknown;
@@ -445,6 +472,53 @@ async function registerTelegramBotTradingRoutes(
     reply.code(401);
     return reply.send({ error: "Unauthorized" });
   };
+  const requireInternal =
+    dependencies.internalPreHandler ?? defaultRequireInternal;
+
+  api.post(
+    "/internal/telegram-bot/account",
+    {
+      preHandler: requireInternal,
+      schema: { body: internalAccountBodySchema },
+    },
+    async (request, reply) => {
+      const telegramUserId = String(request.body.telegramUserId);
+      const chatId = String(request.body.chatId);
+      if (chatId !== telegramUserId) {
+        return reply.code(403).send({ error: "private_chat_required" });
+      }
+      try {
+        const initialLink = await resolveActiveTelegramAccountLink({
+          db,
+          telegramUserId,
+        });
+        if (!initialLink) {
+          return reply.send(buildTelegramAccountValueUnavailableMessage());
+        }
+        const account = await buildAccountValue(initialLink.userId);
+        const currentLink = await resolveActiveTelegramAccountLink({
+          db,
+          telegramUserId,
+        });
+        if (!sameActiveTelegramAccountLink(initialLink, currentLink)) {
+          return reply.send(buildTelegramAccountValueUnavailableMessage());
+        }
+        return reply.send(buildAccountValueMessage({ account }));
+      } catch (error) {
+        const errorCode =
+          error && typeof error === "object" && "code" in error
+            ? String((error as { code?: unknown }).code ?? "unknown")
+            : error instanceof Error
+              ? error.name
+              : "unknown";
+        request.log.warn(
+          { errorCode },
+          "Telegram Account Value projection failed",
+        );
+        return reply.send(buildTelegramAccountValueUnavailableMessage());
+      }
+    },
+  );
 
   api.post(
     "/internal/telegram-bot/positions",
@@ -1236,5 +1310,6 @@ export function createTelegramBotTradingRoutes(
 export const telegramBotTradingRoutes = createTelegramBotTradingRoutes();
 
 export const telegramBotTradingRouteTestHooks = {
+  internalAccountBodySchema,
   internalMarketCardBodySchema,
 };

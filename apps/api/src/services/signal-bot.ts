@@ -213,6 +213,12 @@ import {
   clearSignalBotMenuInput,
   writeSignalBotMenuInput,
 } from "./telegram-bot-menu-state.js";
+import { handleTelegramAccountValueMenu } from "./telegram-account-value-menu.js";
+import {
+  sendOrEditTelegramBotMenuMessage as sendOrEditSignalBotMenuMessage,
+  type TelegramBotMenuMessage as SignalBotMenuMessage,
+  type TelegramBotMenuTransport as SignalBotMenuTransport,
+} from "./telegram-bot-menu-delivery.js";
 import {
   createTelegramSignalTransport,
   escapeTelegramMarkdownV2,
@@ -1862,6 +1868,7 @@ export type SignalBotMenuScreenName =
   | "account"
   | "admin"
   | "admin_help"
+  | "balance"
   | "help"
   | "home"
   | "market_input"
@@ -1892,11 +1899,6 @@ type SignalBotMenuCallbackRoute =
   | TelegramBotRewardsCallbackRoute
   | SignalBotInteractiveMenuRoute
   | { kind: "trading_status" };
-
-type SignalBotMenuTransport = {
-  editMessageText?: SignalBotTelegramClient["editMessageText"];
-  sendMessage: SignalBotTelegramClient["sendMessage"];
-};
 
 function buildSignalBotMainMiniAppButton(input: {
   appBaseUrl: string;
@@ -2038,6 +2040,7 @@ export function buildSignalBotMenuScreen(input: {
     }
     const rows: TelegramInlineKeyboard["inline_keyboard"] = [
       [callback("trading:market_input", "🔎 Markets")],
+      [callback("balance", "💰 Balance")],
       [callback("positions", "💼 My positions")],
       [callback("trading:status", "👤 My trading")],
       [callback("deposit", "Deposit", telegramCustomEmojiId("usdc"))],
@@ -2581,6 +2584,7 @@ function parseSignalBotMenuCallback(
     case "trading":
     case "help":
     case "performance":
+    case "balance":
     case "positions":
     case "settings":
     case "admin":
@@ -2711,46 +2715,12 @@ async function sendOrEditSignalBotMenuScreen(input: {
   });
 }
 
-async function sendOrEditSignalBotMenuMessage(input: {
-  chatId: string;
-  message: {
-    parse_mode?: "MarkdownV2";
-    reply_markup?: TelegramInlineKeyboard;
-    text: string;
-  };
-  messageId?: number | null;
-  transport: SignalBotMenuTransport;
-}): Promise<TelegramSendResult> {
-  if (input.messageId != null && input.transport.editMessageText) {
-    const edited = await input.transport.editMessageText({
-      chat_id: input.chatId,
-      disable_web_page_preview: true,
-      message_id: input.messageId,
-      parse_mode: input.message.parse_mode ?? "MarkdownV2",
-      reply_markup: input.message.reply_markup,
-      text: input.message.text,
-    });
-    if (edited.ok || /message is not modified/i.test(edited.message)) {
-      return edited;
-    }
-  }
-  return input.transport.sendMessage({
-    chat_id: input.chatId,
-    disable_web_page_preview: true,
-    parse_mode: input.message.parse_mode ?? "MarkdownV2",
-    reply_markup: input.message.reply_markup,
-    text: input.message.text,
-  });
-}
-
-type SignalBotMenuMessage = {
-  marketFound?: boolean;
-  parse_mode?: "MarkdownV2";
-  reply_markup?: TelegramInlineKeyboard;
-  text: string;
-};
-
 type SignalBotMenuLoaders = TelegramBotRewardsMenuDependencies & {
+  loadAccountValue?: (input: {
+    chatId: string;
+    telegramUserId: number;
+  }) => Promise<SignalBotMenuMessage>;
+  onAccountValueError?: (error: unknown) => void;
   loadDeposit?: (input: {
     telegramUserId: number;
     venue: string | null;
@@ -2830,6 +2800,22 @@ export async function handleSignalBotMenuCallback(
     });
     return true;
   }
+  const isAccountBalance =
+    route.kind === "screen" && route.screen === "balance";
+  if (isAccountBalance && String(message.chat.id) !== String(telegramUserId)) {
+    await input.telegram.answerCallbackQuery({
+      callbackQueryId: input.callbackQuery.id,
+      showAlert: true,
+      text: "⚠️ Balance is only available in your own private chat.",
+    });
+    return true;
+  }
+  if (isAccountBalance) {
+    await input.telegram.answerCallbackQuery({
+      callbackQueryId: input.callbackQuery.id,
+      text: "⏳ Working…",
+    });
+  }
   const chatId = String(message.chat.id);
   const messageId = message.message_id ?? null;
   const audience = await resolveTelegramBotMenuAudience({
@@ -2838,15 +2824,17 @@ export async function handleSignalBotMenuCallback(
   });
   const loadMarketCard = input.loadMarketCard;
   if (audience !== "linked") {
-    await input.telegram.answerCallbackQuery({
-      callbackQueryId: input.callbackQuery.id,
-      ...(audience === "unavailable"
-        ? {
-            showAlert: true,
-            text: "⚠️ Account status is temporarily unavailable.",
-          }
-        : {}),
-    });
+    if (!isAccountBalance) {
+      await input.telegram.answerCallbackQuery({
+        callbackQueryId: input.callbackQuery.id,
+        ...(audience === "unavailable"
+          ? {
+              showAlert: true,
+              text: "⚠️ Account status is temporarily unavailable.",
+            }
+          : {}),
+      });
+    }
     await sendOrEditSignalBotMenuScreen({
       audience,
       chatId,
@@ -2879,17 +2867,19 @@ export async function handleSignalBotMenuCallback(
     });
     return true;
   }
-  await input.telegram.answerCallbackQuery({
-    callbackQueryId: input.callbackQuery.id,
-    ...(route.kind === "stats" ||
-    route.kind === "trading_status" ||
-    route.kind === "admin_preview" ||
-    route.kind === "rewards_confirm" ||
-    route.kind === "rewards_view" ||
-    (route.kind === "screen" && route.screen === "positions")
-      ? { text: "⏳ Working…" }
-      : {}),
-  });
+  if (!isAccountBalance) {
+    await input.telegram.answerCallbackQuery({
+      callbackQueryId: input.callbackQuery.id,
+      ...(route.kind === "stats" ||
+      route.kind === "trading_status" ||
+      route.kind === "admin_preview" ||
+      route.kind === "rewards_confirm" ||
+      route.kind === "rewards_view" ||
+      (route.kind === "screen" && route.screen === "positions")
+        ? { text: "⏳ Working…" }
+        : {}),
+    });
+  }
   if (
     route.kind === "rewards_view" ||
     route.kind === "rewards_begin_input" ||
@@ -3013,6 +3003,18 @@ export async function handleSignalBotMenuCallback(
         : "Connect this Telegram account to Hunch first.",
       notificationPreferences: preferences,
       screen: signalBotMenuScreenForNotificationTopic(route.topic),
+      transport: input.telegram,
+    });
+    return true;
+  }
+  if (route.kind === "screen" && route.screen === "balance") {
+    void handleTelegramAccountValueMenu({
+      chatId,
+      loadAccountValue: input.loadAccountValue,
+      messageId,
+      onError: input.onAccountValueError,
+      redis: input.redis,
+      telegramUserId,
       transport: input.telegram,
     });
     return true;
@@ -3284,9 +3286,11 @@ export async function handleSignalBotMenuCallback(
     audience,
     chatId,
     config: input.config,
+    db: input.db,
     isAdmin,
     messageId,
     screen: route.screen,
+    telegramUserId,
     transport: input.telegram,
   });
   return true;
@@ -4231,6 +4235,8 @@ export async function pollSignalBotCommands(
           config: input.config,
           db: input.db,
           redis: input.redis,
+          loadAccountValue: input.loadAccountValue,
+          onAccountValueError: input.onAccountValueError,
           loadMarketCard: input.loadMarketCard,
           loadDeposit: input.loadDeposit,
           loadPositionCard: input.loadPositionCard,

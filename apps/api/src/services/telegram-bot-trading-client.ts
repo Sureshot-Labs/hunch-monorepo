@@ -56,6 +56,10 @@ export type TelegramBotTradingClientCallbackInput = {
 };
 
 export type TelegramBotTradingInternalApiClient = {
+  buildAccountValueMessage: (input: {
+    chatId: string | number;
+    telegramUserId: string | number;
+  }) => Promise<TelegramBotTradingClientMessage>;
   buildMarketMessage: (input: {
     appBaseUrl: string;
     chatId: string | number;
@@ -142,6 +146,7 @@ export const TELEGRAM_BOT_TRADING_CALLBACK_PREFIX = "hbt";
 const DEFAULT_INTERNAL_API_TIMEOUT_MS = 10_000;
 const TELEGRAM_MARKET_SEARCH_TIMEOUT_MS = 12_000;
 const TELEGRAM_TRENDING_MARKETS_TIMEOUT_MS = 2_000;
+const DEFAULT_ACCOUNT_VALUE_TIMEOUT_MS = 30_000;
 const DEFAULT_INTERNAL_API_EXECUTE_TIMEOUT_MS = 120_000;
 
 const EXACT_UUID_RE =
@@ -278,6 +283,7 @@ function createInternalApiPost(input: {
 }
 
 export function createTelegramBotTradingInternalApiClient(input: {
+  accountValueTimeoutMs?: number;
   baseUrl: string;
   executeTimeoutMs?: number;
   token: string;
@@ -288,7 +294,18 @@ export function createTelegramBotTradingInternalApiClient(input: {
     Number.isFinite(input.executeTimeoutMs) && (input.executeTimeoutMs ?? 0) > 0
       ? Math.trunc(input.executeTimeoutMs ?? 0)
       : DEFAULT_INTERNAL_API_EXECUTE_TIMEOUT_MS;
+  const accountValueTimeoutMs =
+    Number.isFinite(input.accountValueTimeoutMs) &&
+    (input.accountValueTimeoutMs ?? 0) > 0
+      ? Math.trunc(input.accountValueTimeoutMs ?? 0)
+      : DEFAULT_ACCOUNT_VALUE_TIMEOUT_MS;
   return {
+    buildAccountValueMessage: (body) =>
+      post<TelegramBotTradingClientMessage>(
+        "/internal/telegram-bot/account",
+        body,
+        { timeoutMs: accountValueTimeoutMs },
+      ),
     buildPositionsMessage: (body) =>
       post<TelegramBotTradingClientMessage>(
         "/internal/telegram-bot/positions",

@@ -7,10 +7,7 @@ import type { ZodTypeProvider } from "fastify-type-provider-zod";
 
 import { createAuthMiddleware } from "../auth.js";
 import { pool } from "../db.js";
-import {
-  buildAccountValueReadModel,
-  type AccountValueReadModel,
-} from "../account-value/runtime-service.js";
+import type { AccountValueReadModel } from "../account-value/runtime-service.js";
 import {
   accountAssetPreferenceBodySchema,
   accountAssetPreferenceParamsSchema,
@@ -22,7 +19,7 @@ import {
   accountValueResponseSchema,
 } from "../schemas/account-value.js";
 import { upsertAssetFundingPreference } from "../account-value/asset-preferences.js";
-import { createAccountValueSnapshotLoader } from "../account-value/snapshot-loader.js";
+import { accountValueReadService } from "../account-value/runtime-read-service.js";
 
 export type AccountValueRouteDependencies = Readonly<{
   authenticate: preHandlerHookHandler;
@@ -240,19 +237,16 @@ export function registerAccountValueRoutes(
 }
 
 export const accountValueRoutes: FastifyPluginAsync = async (app) => {
-  const snapshots = createAccountValueSnapshotLoader((userId) =>
-    buildAccountValueReadModel({ pool, userId }),
-  );
   registerAccountValueRoutes(app, {
     authenticate: createAuthMiddleware(),
-    build: snapshots.load,
+    build: accountValueReadService.load,
     setPreference: async (userId, component, preference) => {
       const stored = await upsertAssetFundingPreference(pool, {
         userId,
         component,
         preference,
       });
-      snapshots.invalidate(userId);
+      accountValueReadService.invalidate(userId);
       return stored;
     },
   });

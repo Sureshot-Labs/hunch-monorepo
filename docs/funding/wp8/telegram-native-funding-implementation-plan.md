@@ -227,7 +227,7 @@ Wallet balances
   Solana wallet    USDC
 
 In transit
-  route, amount, current stage
+  confirmed asset/network, amount, generic in-transit state
 ```
 
 Rules:
@@ -241,8 +241,12 @@ Rules:
   component balance;
 - locked/reserved values are visible when non-zero;
 - `Refresh`, `Add funds`, `Buy`, and `Back` are ordinary callbacks;
-- the same presenter is used for the menu tile, shortfall screen, funding-ready
-  notification, and post-trade receipt.
+- Slice A0 exports reusable Account Value presentation primitives and uses them
+  for the Balance tile. Existing Buy shortfall remains an Intent Liquidity
+  result and is not replaced by Account Value;
+- funding-ready and post-trade surfaces reuse those primitives when their
+  durable A1/B projections exist. Exact route/provider/current-stage labels are
+  owned by that funding-session projection, not inferred from A0 Account Value.
 
 ### 5.2 Add Funds / Receive
 
@@ -853,15 +857,19 @@ are verified again.
 
 ## 12. Runtime controls for local implementation
 
-Every new WP8 control defaults off in source and production fallback policy.
-The existing global finance execute switch retains its configured value but is
-necessary and never sufficient for delegated funding.
+Every new WP8 creation or execution control defaults off in source and
+production fallback policy. The read-only Account Value surface is not an
+execution control: for an exactly linked user in their own private chat it
+remains available regardless of trading, funding-creation, Relay, automation,
+or `desired_enabled` state. It returns `Unavailable` only when the link or
+canonical projection cannot be resolved. The existing global finance execute
+switch retains its configured value but is necessary and never sufficient for
+delegated funding.
 
 ### 12.1 Independent controls and effective predicate
 
 Required independent semantic controls:
 
-- Telegram Account Value surface enabled;
 - Telegram Receive Session creation enabled;
 - per-user Telegram `desired_enabled` master preference;
 - Telegram stable auto-execution enabled;
@@ -877,9 +885,10 @@ Telegram-trading switch never implies value-moving funding capability.
 
 Funding runtime policy still owns routes, assets, venues, quote/commit/action
 gates, caps, observation, reconciliation, and recovery. Signal-bot policy owns
-Telegram product availability, managed authorization targets, confirmation,
-and per-user caps. Privy policies own the outer signing boundary. These control
-planes must remain explicit and must not infer one another.
+Telegram value-moving product availability, managed authorization targets,
+confirmation, and per-user caps. Privy policies own the outer signing boundary.
+These control planes must remain explicit and must not infer one another. None
+of them gates read-only Account Value visibility.
 
 Before a receipt exists, `can_offer_automatic` is the target-presentation and
 consent-creation predicate. It is true only when user `desired_enabled`, stable
@@ -964,7 +973,6 @@ The consent effect of an OFF condition is deterministic:
 
 | OFF plane at target selection                                                                                                 | New consent result                                              |
 | ----------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
-| Account Value surface only                                                                                                    | No effect on funding consent                                    |
 | Receive creation                                                                                                              | No new target selection or consent                              |
 | User preference, stable auto, global/dedicated execute, exact profile, adapter/secrets, emergency pause, or current authority | Exact review-only consent; never silently upgraded on re-enable |
 | Route removed or target/action family no longer capability-backed                                                             | Target hidden; no new consent                                   |
@@ -975,7 +983,6 @@ these rows turns direct settlement into a delegated transaction.
 
 | OFF condition                                                                                           | New bot behavior                                                                                                                                   | Existing receipt with no possible broadcast                                                                                              | Submitted/ambiguous action                                                                                                                                            | When ON/restored                                                                                                                                           |
 | ------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Account Value surface                                                                                   | Hide Balance and return a stable unavailable response; other enabled bot surfaces remain                                                           | Unchanged                                                                                                                                | Reconcile                                                                                                                                                             | Refresh only; no financial action                                                                                                                          |
 | Receive creation                                                                                        | Do not create or reveal a new session/target                                                                                                       | Continue observation, routing assessment, reconciliation, recovery, and progress for existing sessions                                   | Reconcile                                                                                                                                                             | New sessions become available; never reuse an expired target promise                                                                                       |
 | User `desired_enabled`                                                                                  | Balance and direct pUSD Receive remain; no new delegated broadcast or trade submission; render `Automation off`/`Enable`                           | Preserve receipt and exact consent; render waiting-for-enable                                                                            | Reconcile; never resubmit                                                                                                                                             | May resume only under the soft-resume rules in Section 12.3                                                                                                |
 | Telegram stable auto-execution                                                                          | Label a capability-backed routed target `Telegram review required`, persist no automatic consent for a new selection, and keep confirmation in bot | Render `Review conversion`; a fresh exact confirmation may execute only through `can_execute_confirmed`                                  | Reconcile; never resubmit                                                                                                                                             | A receipt with pre-existing still-valid automatic consent may resume only under the soft-resume rules; review-only consent never becomes future automation |
@@ -1221,10 +1228,17 @@ fixture adapters, never public RPC/Relay/Privy/Telegram:
 
 1. Add the pure Account Value presenter and compact Balance message.
 2. Add internal account route/client/callback and strict private-chat gate.
-3. Reuse the presenter in balance, shortfall, ready, and post-trade views.
-4. Cover complete/partial/stale, available/locked/reserved, Limitless, wallet,
-   and in-transit states without a real Telegram bot, including independent
-   Account Value surface and `desired_enabled` OFF behavior.
+3. Export reusable Account Value presentation primitives. Keep the existing Buy
+   shortfall on canonical Intent Liquidity; wire ready/post-trade consumers only
+   when A1/B creates those surfaces.
+4. Cover complete/partial/stale, known/unknown available, locked/reserved,
+   Limitless, wallet,
+   and in-transit states without a real Telegram bot, including Account Value
+   visibility under every execution/creation OFF state and `desired_enabled`
+   OFF behavior.
+5. A0 renders each confirmed in-transit claim without combining distinct
+   operations. Route/provider/current-stage detail begins in A1 from the durable
+   funding-session projection.
 
 Exit: a local callback fixture renders the same accounting truth as web and
 discloses nothing in group chat. This is the first implementation slice because

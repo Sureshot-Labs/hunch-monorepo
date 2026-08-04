@@ -46,6 +46,7 @@ import {
 } from "./services/telegram-bot-onboarding-delivery.js";
 import { resolveTelegramNotificationsPolicy } from "./services/telegram-notification-policy.js";
 import { createTelegramBotTradingInternalApiClient } from "./services/telegram-bot-trading-client.js";
+import { createTelegramAccountValueLoader } from "./services/telegram-account-value-menu.js";
 import { withTelegramPrivateNavigation } from "./services/telegram-bot-private-navigation.js";
 import { formatTelegramCalloutMarkdownV2 } from "./services/telegram-bot-trading-presentation.js";
 import { buildHunchMiniAppWebButton } from "./services/telegram-mini-app-buttons.js";
@@ -63,6 +64,7 @@ function log(event: string, fields?: Record<string, unknown>): void {
 
 function logTradingInternalApiFailure(
   operation:
+    | "account-value"
     | "callback"
     | "deposit"
     | "disable"
@@ -73,9 +75,15 @@ function logTradingInternalApiFailure(
     | "status",
   error: unknown,
 ): void {
+  const errorCode =
+    error && typeof error === "object" && "code" in error
+      ? String((error as { code?: unknown }).code ?? "unknown")
+      : error instanceof Error
+        ? error.name
+        : "unknown";
   log("signal_bot_trading_internal_api_error", {
     operation,
-    error: error instanceof Error ? error.message : String(error),
+    errorCode,
   });
 }
 
@@ -248,6 +256,16 @@ export async function runSignalBotRunner(): Promise<void> {
             token: config.tradingInternalApiToken,
           })
         : null;
+    const loadAccountValue = createTelegramAccountValueLoader({
+      load: ({ chatId, telegramUserId }) =>
+        tradingInternalApi
+          ? tradingInternalApi.buildAccountValueMessage({
+              chatId,
+              telegramUserId,
+            })
+          : Promise.reject(new Error("Account Value API is unavailable")),
+      maxConcurrency: 4,
+    });
     while (!shuttingDown) {
       try {
         if (heartbeatLost) break;
@@ -292,6 +310,9 @@ export async function runSignalBotRunner(): Promise<void> {
               selector,
               telegram,
             }),
+          loadAccountValue,
+          onAccountValueError: (error) =>
+            logTradingInternalApiFailure("account-value", error),
           loadPositions: (telegramUserId) =>
             tradingInternalApi
               ? tradingInternalApi

@@ -1870,6 +1870,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       );
       assert.deepEqual(regularLabels, [
         "🔎 Markets",
+        "💰 Balance",
         "💼 My positions",
         "👤 My trading",
         "Deposit",
@@ -1879,7 +1880,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         "❓ Help",
         "Open Hunch Mini App",
       ]);
-      const rewardsRow = regular.keyboard.inline_keyboard[5];
+      const rewardsRow = regular.keyboard.inline_keyboard[6];
       assert.equal(rewardsRow?.length, 1);
       const rewardsButton = rewardsRow?.[0];
       assert.ok(rewardsButton);
@@ -1889,7 +1890,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         "callback_data" in rewardsButton ? rewardsButton.callback_data : null,
         "hm:v1:rewards",
       );
-      const mainMiniAppRow = regular.keyboard.inline_keyboard[7];
+      const mainMiniAppRow = regular.keyboard.inline_keyboard[8];
       assert.equal(mainMiniAppRow?.length, 1);
       const mainMiniAppButton = mainMiniAppRow?.[0];
       assert.ok(mainMiniAppButton);
@@ -3230,7 +3231,9 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
             HUNCH_SIGNAL_BOT_TOKEN: "token",
           }),
           db: {
-            query: async () => ({ rows: [{ linked: true }] }),
+            query: async () => ({
+              rows: [{ link_id: "link-1", user_id: "user-1" }],
+            }),
           } as never,
           disableTrading: async () => testCase.result,
           message: {
@@ -3449,7 +3452,9 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           HUNCH_SIGNAL_BOT_TOKEN: "token",
         }),
         db: {
-          query: async () => ({ rows: [{ linked: true }] }),
+          query: async () => ({
+            rows: [{ link_id: "link-1", user_id: "user-1" }],
+          }),
         } as never,
         message: {
           chat: { id: 999, first_name: "Kreedle", type: "private" },
@@ -4512,7 +4517,9 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           HUNCH_SIGNAL_BOT_TOKEN: "token",
         }),
         db: {
-          query: async () => ({ rows: [{ linked: true }] }),
+          query: async () => ({
+            rows: [{ link_id: "link-1", user_id: "user-1" }],
+          }),
         } as never,
         handleCallback: async () => {
           tradingCallbackCalls += 1;
@@ -4641,7 +4648,9 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           HUNCH_SIGNAL_BOT_TOKEN: "token",
         }),
         db: {
-          query: async () => ({ rows: [{ linked: true }] }),
+          query: async () => ({
+            rows: [{ link_id: "link-1", user_id: "user-1" }],
+          }),
         } as never,
         handleCallback: async () => confirm,
         redis,
@@ -4752,7 +4761,9 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           HUNCH_SIGNAL_BOT_TOKEN: "token",
         }),
         db: {
-          query: async () => ({ rows: [{ linked: true }] }),
+          query: async () => ({
+            rows: [{ link_id: "link-1", user_id: "user-1" }],
+          }),
         } as never,
         redis,
         sendTestSignal: async () => false,
@@ -9069,7 +9080,9 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         },
         config,
         db: {
-          query: async () => ({ rows: [{ linked: true }] }),
+          query: async () => ({
+            rows: [{ link_id: "link-1", user_id: "user-1" }],
+          }),
         } as never,
         redis,
         sendTestSignal: async () => false,
@@ -9104,8 +9117,10 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       let orderFilled = true;
       const db = {
         query: async (sql: string, params: unknown[] = []) => {
-          if (sql.includes("select exists")) {
-            return { rows: [{ linked: true }] };
+          if (sql.includes("select uta.id::text as link_id")) {
+            return {
+              rows: [{ link_id: "link-1", user_id: "user-1" }],
+            };
           }
           if (sql.includes("update telegram_notification_preferences")) {
             orderFilled = params[1] === true;
@@ -9208,7 +9223,9 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         HUNCH_SIGNAL_BOT_TOKEN: "token",
       });
       const db = {
-        query: async () => ({ rows: [{ linked: true }] }),
+        query: async () => ({
+          rows: [{ link_id: "link-1", user_id: "user-1" }],
+        }),
       } as never;
       const loaded: Array<{
         notice?: string | null;
@@ -9322,7 +9339,9 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           },
           config,
           db: {
-            query: async () => ({ rows: [{ linked: true }] }),
+            query: async () => ({
+              rows: [{ link_id: "link-1", user_id: "user-1" }],
+            }),
           } as never,
           redis,
           sendTestSignal: async () => false,
@@ -9385,7 +9404,9 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         HUNCH_SIGNAL_BOT_TOKEN: "token",
       });
       const db = {
-        query: async () => ({ rows: [{ linked: true }] }),
+        query: async () => ({
+          rows: [{ link_id: "link-1", user_id: "user-1" }],
+        }),
       } as never;
       const callbackQuery: TelegramBotCallbackQuery = {
         data: "hm:v1:trading:market_input",
@@ -9627,7 +9648,9 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       const redis = new FakeRedis();
       const telegram = new FakeTelegram();
       const linkedDb = {
-        query: async () => ({ rows: [{ linked: true }] }),
+        query: async () => ({
+          rows: [{ link_id: "link-1", user_id: "user-1" }],
+        }),
       } as never;
       let marketCalls = 0;
       let publicBrowseOnly: boolean | undefined;
