@@ -1,8 +1,8 @@
 import { pool } from "../db.js";
-import { createAccountValueReadService } from "./read-service.js";
 import { buildAccountValueReadModel } from "./runtime-service.js";
+import { createAccountValueSnapshotLoader } from "./snapshot-loader.js";
 
-export const accountValueReadService = createAccountValueReadService(
+export const accountValueReadService = createAccountValueSnapshotLoader(
   (userId) => buildAccountValueReadModel({ pool, userId }),
-  { maxEntries: 500, retentionMs: 60_000, ttlMs: 2_000 },
+  { maxEntries: 500, ttlMs: 2_000 },
 );

@@ -14,10 +14,7 @@ import {
   resolveEffectiveHeadline,
 } from "./account-value/account-value-projector.js";
 import { projectCashAvailability } from "./account-value/cash-availability-projector.js";
-import {
-  createAccountValueReadService,
-  retainAccountValueDuringRetryablePartial,
-} from "./account-value/read-service.js";
+import { createAccountValueSnapshotLoader } from "./account-value/snapshot-loader.js";
 import { fundingSidecarRuntimeConfig } from "./funding/runtime/sidecar-runtime-config.js";
 import type {
   ValuedAssetComponent,
@@ -33,8 +30,12 @@ import {
   createTelegramAccountValueLoader,
   handleTelegramAccountValueMenu,
 } from "./services/telegram-account-value-menu.js";
-import { createTelegramBotTradingInternalApiClient } from "./services/telegram-bot-trading-client.js";
-import { TelegramBotTradingInternalApiTimeoutError } from "./services/telegram-bot-trading-client.js";
+import {
+  createTelegramBotTradingInternalApiClient,
+  describeTelegramBotTradingInternalApiError,
+  TelegramBotTradingInternalApiError,
+  TelegramBotTradingInternalApiTimeoutError,
+} from "./services/telegram-bot-trading-client.js";
 import {
   buildSignalBotMenuScreen,
   handleSignalBotMenuCallback,
@@ -415,6 +416,42 @@ await test("Telegram Account Value preserves degraded zero balances and position
   assert.doesNotMatch(rendered.text, /Partial data/u);
 });
 
+await test("Telegram Account Value presents fresh unpriced assets as partial but not stale", () => {
+  const source = accountWithoutCollectorErrors();
+  const unpricedSol = component({
+    assetId: "11111111111111111111111111111111",
+    componentId: "fresh-unpriced-sol",
+    decimals: 9,
+    estimatedUsd: null,
+    networkId: "solana:mainnet",
+    raw: "1000000000",
+    valuationEligibility: "unpriced",
+  });
+  const projection = projectAccountValue({
+    accountId: "user-1",
+    asOf: AS_OF,
+    components: [unpricedSol],
+    headlineMode: "liquid_only",
+    positionComponents: [],
+  });
+  const cashAvailability = projectCashAvailability({
+    adjustments: [],
+    asOf: AS_OF,
+    components: [unpricedSol],
+  });
+  const rendered = buildTelegramAccountValueMessage({
+    account: {
+      ...source,
+      cashAvailability,
+      headline: resolveEffectiveHeadline(projection),
+      projection,
+    },
+  });
+  assert.match(rendered.text, /Solana wallet.*1 SOL.*1 available/u);
+  assert.match(rendered.text, /Partial data/u);
+  assert.doesNotMatch(rendered.text, /stale/iu);
+});
+
 await test("Telegram Account Value uses safe unknown-asset grouping", () => {
   const account = buildAccountFixture();
   const unknown = ["unknown-token-a", "unknown-token-b"].map((assetId, index) =>
@@ -549,19 +586,32 @@ function retryablePartialAccount(
   };
 }
 
-await test("shared Account Value read service coalesces builds and retains recent truth only for retryable partials", async () => {
+await test("shared Account Value snapshot loader coalesces builds and returns the next partial snapshot unchanged", async () => {
   const complete = accountWithoutCollectorErrors();
   let builds = 0;
   let now = 1_000;
-  const service = createAccountValueReadService(
+  let builtPartial: AccountValueReadModel | undefined;
+  const service = createAccountValueSnapshotLoader(
     async () => {
       builds += 1;
       await Promise.resolve();
-      return builds === 1
-        ? complete
-        : retryablePartialAccount(complete, builds === 2 ? "1" : "2");
+      if (builds === 1) return complete;
+      const nextAsOf = "2026-08-04T12:35:00.000Z";
+      const partial = retryablePartialAccount(complete, "1");
+      builtPartial = {
+        ...partial,
+        cashAvailability: {
+          ...partial.cashAvailability,
+          asOf: nextAsOf,
+        },
+        projection: {
+          ...partial.projection,
+          asOf: nextAsOf,
+        },
+      };
+      return builtPartial;
     },
-    { now: () => now, retentionMs: 60_000, ttlMs: 2_000 },
+    { now: () => now, ttlMs: 2_000 },
   );
   const [first, concurrent] = await Promise.all([
     service.load("user-1"),
@@ -571,34 +621,14 @@ await test("shared Account Value read service coalesces builds and retains recen
   assert.equal(builds, 1);
 
   now += 2_001;
-  const retained = await service.load("user-1");
+  const partial = await service.load("user-1");
   assert.equal(builds, 2);
-  assert.equal(
-    retained.projection.totalPortfolioEstimatedUsd,
-    complete.projection.totalPortfolioEstimatedUsd,
-  );
-  assert.equal(retained.projection.valuationCompleteness, "partial");
-  assert.equal(retained.projection.valuationFreshness, "stale");
-
-  now += 60_001;
-  const expired = await service.load("user-1");
-  assert.equal(builds, 3);
-  assert.equal(expired.projection.totalPortfolioEstimatedUsd, "2");
-});
-
-await test("retryable Account Value retention helper preserves new health metadata", () => {
-  const previous = accountWithoutCollectorErrors();
-  const next = retryablePartialAccount(previous, "1");
-  const retained = retainAccountValueDuringRetryablePartial(previous, next);
-  assert.equal(
-    retained.cashAvailability.cashAvailableEstimatedUsd,
-    previous.cashAvailability.cashAvailableEstimatedUsd,
-  );
-  assert.deepEqual(
-    retained.cashAvailability.collectorErrors,
-    next.cashAvailability.collectorErrors,
-  );
-  assert.equal(retained.cashAvailability.freshness, "stale");
+  assert.equal(partial, builtPartial);
+  assert.equal(partial.projection.totalPortfolioEstimatedUsd, "1");
+  assert.equal(partial.cashAvailability.cashAvailableEstimatedUsd, "1");
+  assert.equal(partial.headline.estimatedUsd, "1");
+  assert.equal(partial.projection.asOf, "2026-08-04T12:35:00.000Z");
+  assert.equal(partial.cashAvailability.asOf, "2026-08-04T12:35:00.000Z");
 });
 
 await test("main private menu exposes the Balance tile", () => {
@@ -625,6 +655,7 @@ function buildMenuHandlerInput(input: {
 }) {
   const answers: Array<{ showAlert?: boolean; text?: string }> = [];
   const edits: Array<{ chat_id: string; text: string }> = [];
+  const redisValues = new Map<string, string>();
   let dbQueries = 0;
   return {
     answers,
@@ -654,7 +685,12 @@ function buildMenuHandlerInput(input: {
       } as never,
       loadAccountValue: input.loadAccountValue,
       redis: {
-        del: async () => 1,
+        del: async (key: string) => redisValues.delete(key),
+        get: async (key: string) => redisValues.get(key) ?? null,
+        set: async (key: string, value: string) => {
+          redisValues.set(key, value);
+          return "OK";
+        },
       } as never,
       sendTestSignal: async () => false,
       telegram: {
@@ -787,7 +823,7 @@ await test("Signal Bot polling handles the next update while Account Value is pe
             id: "next-help",
             message: {
               chat: { id: 123, type: "private" },
-              message_id: 43,
+              message_id: 42,
             },
           },
           update_id: 2,
@@ -802,10 +838,36 @@ await test("Signal Bot polling handles the next update while Account Value is pe
   assert.match(edits.at(-1) ?? "", /How Hunch works/u);
   resolveLoad({ parse_mode: "MarkdownV2", text: "Late balance" });
   await new Promise((resolve) => setImmediate(resolve));
-  assert.ok(edits.includes("Late balance"));
+  assert.ok(!edits.includes("Late balance"));
 });
 
-await test("Account Value sidecar loader coalesces users and limits global concurrency", async () => {
+await test("only the newest Balance callback for a message may deliver", async () => {
+  let resolveLoad:
+    | ((message: { parse_mode: "MarkdownV2"; text: string }) => void)
+    | undefined;
+  const pending = new Promise<{ parse_mode: "MarkdownV2"; text: string }>(
+    (resolve) => {
+      resolveLoad = resolve;
+    },
+  );
+  const state = buildMenuHandlerInput({
+    chatId: 123,
+    fromId: 123,
+    loadAccountValue: () => pending,
+  });
+  state.handlerInput.callbackQuery.id = "first-balance";
+  assert.equal(await handleSignalBotMenuCallback(state.handlerInput), true);
+  state.handlerInput.callbackQuery.id = "second-balance";
+  assert.equal(await handleSignalBotMenuCallback(state.handlerInput), true);
+  resolveLoad?.({ parse_mode: "MarkdownV2", text: "Newest balance" });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(
+    state.edits.filter((edit) => edit.text === "Newest balance").length,
+    1,
+  );
+});
+
+await test("Account Value sidecar loader coalesces users, fails fast at capacity, and recovers", async () => {
   const started: number[] = [];
   const resolvers = new Map<
     number,
@@ -822,17 +884,78 @@ await test("Account Value sidecar loader coalesces users and limits global concu
   const first = loader({ chatId: "1", telegramUserId: 1 });
   const duplicate = loader({ chatId: "1", telegramUserId: 1 });
   const second = loader({ chatId: "2", telegramUserId: 2 });
-  const queued = loader({ chatId: "3", telegramUserId: 3 });
+  const saturated = loader({ chatId: "3", telegramUserId: 3 });
   await Promise.resolve();
   assert.equal(first, duplicate);
   assert.deepEqual(started, [1, 2]);
+  assert.match((await saturated).text, /Account Value unavailable/u);
   resolvers.get(1)?.({ parse_mode: "MarkdownV2", text: "one" });
   await first;
-  await Promise.resolve();
+  const afterCapacity = loader({ chatId: "3", telegramUserId: 3 });
   assert.deepEqual(started, [1, 2, 3]);
   resolvers.get(2)?.({ parse_mode: "MarkdownV2", text: "two" });
   resolvers.get(3)?.({ parse_mode: "MarkdownV2", text: "three" });
-  await Promise.all([duplicate, second, queued]);
+  await Promise.all([duplicate, second, afterCapacity]);
+});
+
+await test("Account Value delivery rechecks supersession before send fallback", async () => {
+  let checks = 0;
+  let sends = 0;
+  await handleTelegramAccountValueMenu({
+    chatId: "123",
+    loadAccountValue: async () => ({
+      parse_mode: "MarkdownV2",
+      text: "Superseded Account Value",
+    }),
+    messageId: 42,
+    redis: { del: async () => 1 },
+    shouldDeliver: async () => {
+      checks += 1;
+      return checks === 1;
+    },
+    telegramUserId: 123,
+    transport: {
+      editMessageText: async () => ({
+        error: "other",
+        message: "edit failed",
+        ok: false,
+      }),
+      sendMessage: async () => {
+        sends += 1;
+        return { messageId: 43, ok: true };
+      },
+    },
+  });
+  assert.equal(checks, 2);
+  assert.equal(sends, 0);
+});
+
+await test("Account Value delivery fails closed when render-token validation fails", async () => {
+  const edits: string[] = [];
+  const errors: unknown[] = [];
+  await handleTelegramAccountValueMenu({
+    chatId: "123",
+    loadAccountValue: async () => ({
+      parse_mode: "MarkdownV2",
+      text: "Must not render",
+    }),
+    messageId: 42,
+    onError: (error) => errors.push(error),
+    redis: { del: async () => 1 },
+    shouldDeliver: async () => {
+      throw new Error("redis unavailable");
+    },
+    telegramUserId: 123,
+    transport: {
+      editMessageText: async ({ text }) => {
+        edits.push(text);
+        return { messageId: 42, ok: true };
+      },
+      sendMessage: async () => ({ messageId: 43, ok: true }),
+    },
+  });
+  assert.deepEqual(edits, []);
+  assert.equal(errors.length, 1);
 });
 
 await test("Account Value delivery survives Redis menu-state invalidation failure", async () => {
@@ -1096,6 +1219,111 @@ await test("internal client sends Account Value requests to the exact account en
   }
 });
 
+await test("internal client classifies HTTP failures without exposing response bodies", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    for (const statusCode of [401, 403, 500]) {
+      const secret = `secret-response-${statusCode}-test-token`;
+      globalThis.fetch = (async () =>
+        new Response(JSON.stringify({ error: secret }), {
+          headers: { "Content-Type": "application/json" },
+          status: statusCode,
+        })) as typeof fetch;
+      const client = createTelegramBotTradingInternalApiClient({
+        baseUrl: "http://127.0.0.1:3000",
+        token: "test-token",
+      });
+      let captured: unknown;
+      await assert.rejects(
+        client.buildAccountValueMessage({
+          chatId: "123",
+          telegramUserId: 123,
+        }),
+        (error: unknown) => {
+          captured = error;
+          return (
+            error instanceof TelegramBotTradingInternalApiError &&
+            error.code === "http_error" &&
+            error.statusCode === statusCode
+          );
+        },
+      );
+      const fields = describeTelegramBotTradingInternalApiError(captured);
+      assert.equal(fields.errorCode, "http_error");
+      assert.equal(fields.statusCode, statusCode);
+      assert.equal(fields.path, "/internal/telegram-bot/account");
+      assert.doesNotMatch(JSON.stringify(fields), new RegExp(secret, "u"));
+      assert.doesNotMatch(String(captured), /secret-response|test-token/u);
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+await test("internal client distinguishes invalid, empty, and transport responses", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    const cases: Array<{
+      code: "empty_response" | "invalid_response" | "transport_error";
+      fetch: typeof fetch;
+    }> = [
+      {
+        code: "invalid_response",
+        fetch: (async () =>
+          new Response("not-json-secret", { status: 200 })) as typeof fetch,
+      },
+      {
+        code: "empty_response",
+        fetch: (async () =>
+          new Response("null", {
+            headers: { "Content-Type": "application/json" },
+            status: 200,
+          })) as typeof fetch,
+      },
+      {
+        code: "transport_error",
+        fetch: (async () => {
+          throw new Error("network-secret-test-token");
+        }) as typeof fetch,
+      },
+    ];
+    for (const testCase of cases) {
+      globalThis.fetch = testCase.fetch;
+      const client = createTelegramBotTradingInternalApiClient({
+        baseUrl: "http://127.0.0.1:3000",
+        token: "test-token",
+      });
+      let captured: unknown;
+      await assert.rejects(
+        client.buildAccountValueMessage({
+          chatId: "123",
+          telegramUserId: 123,
+        }),
+        (error: unknown) => {
+          captured = error;
+          return (
+            error instanceof TelegramBotTradingInternalApiError &&
+            error.code === testCase.code
+          );
+        },
+      );
+      const fields = describeTelegramBotTradingInternalApiError(captured);
+      assert.deepEqual(fields, {
+        errorCode: testCase.code,
+        path: "/internal/telegram-bot/account",
+        statusCode: undefined,
+        timeoutMs: undefined,
+      });
+      assert.doesNotMatch(
+        String(captured),
+        /not-json-secret|network-secret|test-token/u,
+      );
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 await test("internal client uses a dedicated Account Value timeout", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = ((_url, init) =>
@@ -1117,6 +1345,7 @@ await test("internal client uses a dedicated Account Value timeout", async () =>
       }),
       (error: unknown) =>
         error instanceof TelegramBotTradingInternalApiTimeoutError &&
+        error.code === "timeout" &&
         error.timeoutMs === 5 &&
         error.path === "/internal/telegram-bot/account",
     );

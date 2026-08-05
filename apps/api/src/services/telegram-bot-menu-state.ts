@@ -1,5 +1,7 @@
 const MENU_INPUT_KEY_PREFIX = "tg:signal_bot:v1:menu_input";
 const MENU_INPUT_TTL_SEC = 10 * 60;
+const MENU_RENDER_KEY_PREFIX = "tg:signal_bot:v1:menu_render";
+const MENU_RENDER_TTL_SEC = 10 * 60;
 
 type MenuStateRedis = {
   del(key: string): Promise<unknown>;
@@ -25,6 +27,35 @@ export type SignalBotMenuInputState =
 
 function menuInputKey(chatId: string, telegramUserId: number): string {
   return `${MENU_INPUT_KEY_PREFIX}:${chatId}:${telegramUserId}`;
+}
+
+function menuRenderKey(chatId: string, messageId: number): string {
+  return `${MENU_RENDER_KEY_PREFIX}:${chatId}:${messageId}`;
+}
+
+export async function claimSignalBotMenuRender(input: {
+  chatId: string;
+  messageId: number;
+  redis: Pick<MenuStateRedis, "set">;
+  renderToken: string;
+}): Promise<void> {
+  await input.redis.set(
+    menuRenderKey(input.chatId, input.messageId),
+    input.renderToken,
+    { EX: MENU_RENDER_TTL_SEC },
+  );
+}
+
+export async function isSignalBotMenuRenderCurrent(input: {
+  chatId: string;
+  messageId: number;
+  redis: Pick<MenuStateRedis, "get">;
+  renderToken: string;
+}): Promise<boolean> {
+  return (
+    (await input.redis.get(menuRenderKey(input.chatId, input.messageId))) ===
+    input.renderToken
+  );
 }
 
 export async function clearSignalBotMenuInput(input: {

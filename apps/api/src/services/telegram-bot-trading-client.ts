@@ -198,17 +198,59 @@ function readSuccessfulTelegramResult(value: unknown): {
   };
 }
 
-async function readInternalApiJson<T>(response: Response): Promise<T> {
-  const payload = (await response.json().catch(() => null)) as T | null;
+export type TelegramBotTradingInternalApiErrorCode =
+  | "empty_response"
+  | "http_error"
+  | "invalid_response"
+  | "timeout"
+  | "transport_error";
+
+export class TelegramBotTradingInternalApiError extends Error {
+  readonly code: TelegramBotTradingInternalApiErrorCode;
+  readonly path: string;
+  readonly statusCode?: number;
+
+  constructor(input: {
+    code: TelegramBotTradingInternalApiErrorCode;
+    message?: string;
+    path: string;
+    statusCode?: number;
+  }) {
+    super(
+      input.message ?? `Internal trading API request failed (${input.code}).`,
+    );
+    this.name = "TelegramBotTradingInternalApiError";
+    this.code = input.code;
+    this.path = input.path;
+    this.statusCode = input.statusCode;
+  }
+}
+
+async function readInternalApiJson<T>(
+  response: Response,
+  path: string,
+): Promise<T> {
   if (!response.ok) {
-    const message =
-      payload && typeof payload === "object" && "error" in payload
-        ? String((payload as { error?: unknown }).error)
-        : `Internal trading API failed (${response.status})`;
-    throw new Error(message);
+    throw new TelegramBotTradingInternalApiError({
+      code: "http_error",
+      path,
+      statusCode: response.status,
+    });
+  }
+  let payload: T | null;
+  try {
+    payload = (await response.json()) as T | null;
+  } catch {
+    throw new TelegramBotTradingInternalApiError({
+      code: "invalid_response",
+      path,
+    });
   }
   if (payload == null) {
-    throw new Error("Internal trading API returned an empty response.");
+    throw new TelegramBotTradingInternalApiError({
+      code: "empty_response",
+      path,
+    });
   }
   return payload;
 }
@@ -218,16 +260,40 @@ function normalizeBaseUrl(value: string): string {
   return trimmed.endsWith("/") ? trimmed.slice(0, -1) : trimmed;
 }
 
-export class TelegramBotTradingInternalApiTimeoutError extends Error {
-  readonly path: string;
+export class TelegramBotTradingInternalApiTimeoutError extends TelegramBotTradingInternalApiError {
   readonly timeoutMs: number;
 
   constructor(path: string, timeoutMs: number) {
-    super(`Internal trading API timed out after ${timeoutMs}ms.`);
+    super({
+      code: "timeout",
+      message: `Internal trading API timed out after ${timeoutMs}ms.`,
+      path,
+    });
     this.name = "TelegramBotTradingInternalApiTimeoutError";
-    this.path = path;
     this.timeoutMs = timeoutMs;
   }
+}
+
+export function describeTelegramBotTradingInternalApiError(
+  error: unknown,
+): Readonly<{
+  errorCode: TelegramBotTradingInternalApiErrorCode | "unexpected_error";
+  path?: string;
+  statusCode?: number;
+  timeoutMs?: number;
+}> {
+  if (!(error instanceof TelegramBotTradingInternalApiError)) {
+    return { errorCode: "unexpected_error" };
+  }
+  return {
+    errorCode: error.code,
+    path: error.path,
+    statusCode: error.statusCode,
+    timeoutMs:
+      error instanceof TelegramBotTradingInternalApiTimeoutError
+        ? error.timeoutMs
+        : undefined,
+  };
 }
 
 function isAbortError(error: unknown): boolean {
@@ -270,12 +336,16 @@ function createInternalApiPost(input: {
         body: JSON.stringify(body),
         signal: controller.signal,
       });
-      return readInternalApiJson<T>(response);
+      return readInternalApiJson<T>(response, path);
     } catch (error) {
       if (isAbortError(error)) {
         throw new TelegramBotTradingInternalApiTimeoutError(path, timeoutMs);
       }
-      throw error;
+      if (error instanceof TelegramBotTradingInternalApiError) throw error;
+      throw new TelegramBotTradingInternalApiError({
+        code: "transport_error",
+        path,
+      });
     } finally {
       clearTimeout(timer);
     }

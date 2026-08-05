@@ -210,7 +210,9 @@ import {
   joinTelegramMarkdownV2Lines,
 } from "./telegram-bot-trading-presentation.js";
 import {
+  claimSignalBotMenuRender,
   clearSignalBotMenuInput,
+  isSignalBotMenuRenderCurrent,
   writeSignalBotMenuInput,
 } from "./telegram-bot-menu-state.js";
 import { handleTelegramAccountValueMenu } from "./telegram-account-value-menu.js";
@@ -2810,14 +2812,23 @@ export async function handleSignalBotMenuCallback(
     });
     return true;
   }
+  const chatId = String(message.chat.id);
+  const messageId = message.message_id ?? null;
+  const renderToken = input.callbackQuery.id;
+  if (messageId != null) {
+    await claimSignalBotMenuRender({
+      chatId,
+      messageId,
+      redis: input.redis,
+      renderToken,
+    });
+  }
   if (isAccountBalance) {
     await input.telegram.answerCallbackQuery({
       callbackQueryId: input.callbackQuery.id,
       text: "⏳ Working…",
     });
   }
-  const chatId = String(message.chat.id);
-  const messageId = message.message_id ?? null;
   const audience = await resolveTelegramBotMenuAudience({
     db: input.db,
     telegramUserId,
@@ -3014,6 +3025,16 @@ export async function handleSignalBotMenuCallback(
       messageId,
       onError: input.onAccountValueError,
       redis: input.redis,
+      shouldDeliver:
+        messageId == null
+          ? undefined
+          : () =>
+              isSignalBotMenuRenderCurrent({
+                chatId,
+                messageId,
+                redis: input.redis,
+                renderToken,
+              }),
       telegramUserId,
       transport: input.telegram,
     });

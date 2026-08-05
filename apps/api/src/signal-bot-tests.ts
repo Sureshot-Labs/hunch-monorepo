@@ -9314,7 +9314,10 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       });
       assert.equal(loaded.at(-1)?.view.kind, "overview");
       assert.equal(loaded.at(-1)?.notice, "Referral code changed to ALPHA7.");
-      assert.equal(redis.strings.size, 0);
+      assert.deepEqual(
+        [...redis.strings.keys()],
+        ["tg:signal_bot:v1:menu_render:999:90"],
+      );
     },
   },
   {

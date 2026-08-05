@@ -180,7 +180,9 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           query: async (sql: string, params: unknown[] = []) => {
             assert.match(sql, /from user_telegram_accounts/);
             assert.deepEqual(params, ["99"]);
-            return { rows: [{ linked: true }] };
+            return {
+              rows: [{ link_id: "link-1", user_id: "user-1" }],
+            };
           },
         } as never,
         loadPositions: async () => {

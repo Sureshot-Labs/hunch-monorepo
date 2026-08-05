@@ -16,35 +16,21 @@ export function createTelegramAccountValueLoader(input: {
   maxConcurrency?: number;
 }): TelegramAccountValueLoader {
   const maxConcurrency = Math.max(1, Math.trunc(input.maxConcurrency ?? 4));
-  const waiting: Array<() => void> = [];
   const inFlight = new Map<number, Promise<TelegramBotMenuMessage>>();
   let active = 0;
-
-  const acquire = async () => {
-    if (active < maxConcurrency) {
-      active += 1;
-      return;
-    }
-    await new Promise<void>((resolve) => waiting.push(resolve));
-  };
-  const release = () => {
-    const next = waiting.shift();
-    if (next) {
-      next();
-      return;
-    }
-    active -= 1;
-  };
 
   return (request) => {
     const existing = inFlight.get(request.telegramUserId);
     if (existing) return existing;
+    if (active >= maxConcurrency) {
+      return Promise.resolve(buildTelegramAccountValueUnavailableMessage());
+    }
+    active += 1;
     const pending = (async () => {
-      await acquire();
       try {
         return await input.load(request);
       } finally {
-        release();
+        active -= 1;
       }
     })().finally(() => {
       inFlight.delete(request.telegramUserId);
@@ -60,6 +46,7 @@ export async function handleTelegramAccountValueMenu(input: {
   messageId: number | null;
   onError?: (error: unknown) => void;
   redis: { del(key: string): Promise<unknown> };
+  shouldDeliver?: () => Promise<boolean>;
   telegramUserId: number;
   transport: TelegramBotMenuTransport;
 }): Promise<void> {
@@ -85,6 +72,7 @@ export async function handleTelegramAccountValueMenu(input: {
       chatId: input.chatId,
       message,
       messageId: input.messageId,
+      shouldDeliver: input.shouldDeliver,
       transport: input.transport,
     });
   } catch (error) {

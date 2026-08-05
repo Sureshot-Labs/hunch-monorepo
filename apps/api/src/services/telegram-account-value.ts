@@ -150,10 +150,17 @@ function isPublicComponent(component: AccountComponent): boolean {
   return component.valuationEligibility !== "excluded";
 }
 
-function componentIsDegraded(component: AccountComponent): boolean {
+function componentNeedsVisibility(component: AccountComponent): boolean {
   return (
     component.observationFreshness !== "fresh" ||
     component.valuationEligibility !== "included"
+  );
+}
+
+function componentIsStale(component: AccountComponent): boolean {
+  return (
+    component.observationFreshness !== "fresh" ||
+    component.valuationEligibility === "stale"
   );
 }
 
@@ -192,7 +199,7 @@ function buildWalletGroups(account: AccountValueReadModel): {
     const raw = parseRaw(component.amount.raw);
     if (
       raw === 0n &&
-      !componentIsDegraded(component) &&
+      !componentNeedsVisibility(component) &&
       availabilityIsKnown(available)
     ) {
       continue;
@@ -222,7 +229,7 @@ function buildWalletGroups(account: AccountValueReadModel): {
     } else {
       current.availableUnknownCount += 1;
     }
-    if (componentIsDegraded(component) || available?.freshness === "stale") {
+    if (componentIsStale(component) || !availabilityIsKnown(available)) {
       current.freshness = "stale";
     }
     groups.set(key, current);
@@ -293,7 +300,7 @@ function buildInTransitBalances(
     .map((component) => {
       const network = networkLabel(component.amount.asset.networkId);
       const symbol = assetSymbol(component);
-      const stale = componentIsDegraded(component) ? " · stale" : "";
+      const stale = componentIsStale(component) ? " · stale" : "";
       const label = symbol
         ? `• ${network} ${symbol} — ${formatRaw(
             parseRaw(component.amount.raw),
@@ -320,7 +327,13 @@ function buildStatusLines(account: AccountValueReadModel): string[] {
   const stale =
     account.projection.valuationFreshness === "stale" ||
     account.projection.positionValuationFreshness === "stale" ||
-    account.cashAvailability.freshness === "stale";
+    account.projection.components.some((component) => {
+      if (!isPublicComponent(component)) return false;
+      const availability = account.cashAvailability.components.find(
+        (candidate) => candidate.componentId === component.componentId,
+      );
+      return componentIsStale(component) || !availabilityIsKnown(availability);
+    });
   const collectorErrorCount = new Set([
     ...account.projection.collectorErrors.map(
       (error) => `${error.collectorId}:${error.code}`,

@@ -20,8 +20,17 @@ export async function sendOrEditTelegramBotMenuMessage(input: {
   chatId: string;
   message: TelegramBotMenuMessage;
   messageId?: number | null;
+  shouldDeliver?: () => Promise<boolean>;
   transport: TelegramBotMenuTransport;
 }): Promise<TelegramSendResult> {
+  const superseded = (): TelegramSendResult => ({
+    error: "other",
+    message: "superseded",
+    ok: false,
+  });
+  if (input.shouldDeliver && !(await input.shouldDeliver())) {
+    return superseded();
+  }
   if (input.messageId != null && input.transport.editMessageText) {
     const edited = await input.transport.editMessageText({
       chat_id: input.chatId,
@@ -34,6 +43,9 @@ export async function sendOrEditTelegramBotMenuMessage(input: {
     if (edited.ok || /message is not modified/i.test(edited.message)) {
       return edited;
     }
+  }
+  if (input.shouldDeliver && !(await input.shouldDeliver())) {
+    return superseded();
   }
   return input.transport.sendMessage({
     chat_id: input.chatId,

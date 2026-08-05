@@ -45,7 +45,10 @@ import {
   deliverTelegramBotOnboardingActions,
 } from "./services/telegram-bot-onboarding-delivery.js";
 import { resolveTelegramNotificationsPolicy } from "./services/telegram-notification-policy.js";
-import { createTelegramBotTradingInternalApiClient } from "./services/telegram-bot-trading-client.js";
+import {
+  createTelegramBotTradingInternalApiClient,
+  describeTelegramBotTradingInternalApiError,
+} from "./services/telegram-bot-trading-client.js";
 import { createTelegramAccountValueLoader } from "./services/telegram-account-value-menu.js";
 import { withTelegramPrivateNavigation } from "./services/telegram-bot-private-navigation.js";
 import { formatTelegramCalloutMarkdownV2 } from "./services/telegram-bot-trading-presentation.js";
@@ -75,15 +78,9 @@ function logTradingInternalApiFailure(
     | "status",
   error: unknown,
 ): void {
-  const errorCode =
-    error && typeof error === "object" && "code" in error
-      ? String((error as { code?: unknown }).code ?? "unknown")
-      : error instanceof Error
-        ? error.name
-        : "unknown";
   log("signal_bot_trading_internal_api_error", {
     operation,
-    errorCode,
+    ...describeTelegramBotTradingInternalApiError(error),
   });
 }
 

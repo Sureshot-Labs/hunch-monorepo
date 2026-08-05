@@ -131,9 +131,11 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       const preferenceWrites: unknown[][] = [];
       const db = {
         query: async (sql: string, params: unknown[] = []) => {
-          if (sql.includes("select exists (")) {
+          if (sql.includes("uta.id::text as link_id")) {
             assert.deepEqual(params, ["99"]);
-            return { rows: [{ linked: true }] };
+            return {
+              rows: [{ link_id: "link-1", user_id: "user-1" }],
+            };
           }
           preferenceWrites.push(params);
           return {
