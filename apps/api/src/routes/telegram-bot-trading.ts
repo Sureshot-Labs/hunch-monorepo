@@ -169,7 +169,11 @@ const internalFundingMutationSchema = internalFundingIdentitySchema.extend({
 });
 
 const internalFundingOpenBodySchema = internalFundingMutationSchema
-  .extend({ venue: z.literal("polymarket") })
+  .extend({
+    appBaseUrl: z.string().trim().url(),
+    telegramMiniAppEnabled: z.boolean().optional(),
+    venue: z.literal("polymarket"),
+  })
   .strict();
 
 const internalFundingSessionBodySchema = internalFundingIdentitySchema
@@ -619,6 +623,20 @@ async function registerTelegramBotTradingRoutes(
       try {
         return reply.send(await fundingService.open(request.body));
       } catch (error) {
+        if (
+          error instanceof TelegramFundingError &&
+          error.code === "funding_receive_disabled"
+        ) {
+          return reply.send(
+            await buildDepositMessage({
+              appBaseUrl: request.body.appBaseUrl,
+              pool: db,
+              telegramMiniAppEnabled: request.body.telegramMiniAppEnabled,
+              telegramUserId: request.body.telegramUserId,
+              venue: "polymarket",
+            }),
+          );
+        }
         return sendTelegramFundingError(request, reply, error);
       }
     },

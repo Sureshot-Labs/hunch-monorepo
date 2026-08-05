@@ -3459,6 +3459,49 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
+    name: "internal trading client passes server-owned app context to funding open",
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      let requestBody: Record<string, unknown> | null = null;
+      globalThis.fetch = (async (_input, init) => {
+        requestBody = JSON.parse(String(init?.body ?? "{}")) as Record<
+          string,
+          unknown
+        >;
+        return new Response(JSON.stringify({ text: "Funding" }), {
+          headers: { "Content-Type": "application/json" },
+          status: 200,
+        });
+      }) as typeof fetch;
+      try {
+        const client = createTelegramBotTradingInternalApiClient({
+          baseUrl: "https://api.hunch.trade",
+          token: "token",
+        });
+        await client.openFunding({
+          appBaseUrl: "https://app.hunch.trade",
+          chatId: 999,
+          idempotencyKey: "funding:callback:open",
+          telegramMessageId: 42,
+          telegramMiniAppEnabled: true,
+          telegramUserId: 999,
+          venue: "polymarket",
+        });
+        assert.deepEqual(requestBody, {
+          appBaseUrl: "https://app.hunch.trade",
+          chatId: 999,
+          idempotencyKey: "funding:callback:open",
+          telegramMessageId: 42,
+          telegramMiniAppEnabled: true,
+          telegramUserId: 999,
+          venue: "polymarket",
+        });
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    },
+  },
+  {
     name: "internal trading client preserves Mini App mode for position cards",
     run: async () => {
       const originalFetch = globalThis.fetch;

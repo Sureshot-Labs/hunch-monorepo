@@ -114,8 +114,10 @@ export type TelegramBotTradingInternalApiClient = {
     }
   >;
   openFunding: (input: {
+    appBaseUrl: string;
     chatId: string | number;
     idempotencyKey: string;
+    telegramMiniAppEnabled?: boolean;
     telegramMessageId: number | null;
     telegramUserId: string | number;
     venue: "polymarket";

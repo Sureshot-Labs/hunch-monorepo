@@ -18,6 +18,7 @@ import {
   resolveCanonicalPolymarketDepositAddress,
   type TelegramDepositResolverDependencies,
 } from "./services/telegram-bot-deposit.js";
+import { TelegramFundingError } from "./services/telegram-funding.js";
 import { TELEGRAM_CUSTOM_EMOJI } from "./services/telegram-custom-emoji.js";
 
 const DEPOSIT_PREFIX =
@@ -181,6 +182,147 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
+    name: "disabled Telegram Receive falls back to verified legacy Polymarket deposit",
+    run: async () => {
+      const fallbackCalls: Array<{
+        appBaseUrl: string;
+        telegramMiniAppEnabled?: boolean;
+        telegramUserId: string | number;
+        venue?: string | null;
+      }> = [];
+      const app = Fastify({ logger: false });
+      app.setValidatorCompiler(validatorCompiler);
+      app.setSerializerCompiler(serializerCompiler);
+      await app.register(
+        createTelegramBotTradingRoutes({
+          buildDepositMessage: async (input) => {
+            fallbackCalls.push(input);
+            return {
+              depositAddress: deposit,
+              qrText: deposit,
+              text: `Send only pUSD on Polygon to ${deposit}`,
+              venue: "polymarket",
+            };
+          },
+          db: { query: async () => ({ fields: [], rows: [] }) } as never,
+          fundingService: {
+            cancel: async () => ({ text: "cancel" }),
+            open: async () => {
+              throw new TelegramFundingError("funding_receive_disabled");
+            },
+            selectTarget: async () => ({ text: "select" }),
+            session: async () => ({ text: "session" }),
+          },
+          internalPreHandler: async () => undefined,
+        }),
+      );
+      try {
+        const response = await app.inject({
+          method: "POST",
+          payload: {
+            appBaseUrl: "https://app.hunch.trade",
+            chatId: 20,
+            idempotencyKey: "funding:callback:disabled",
+            telegramMessageId: 42,
+            telegramMiniAppEnabled: true,
+            telegramUserId: 20,
+            venue: "polymarket",
+          },
+          url: "/internal/telegram-bot/funding/open",
+        });
+        assert.equal(response.statusCode, 200);
+        assert.equal(response.json().depositAddress, deposit);
+        assert.equal(response.json().qrText, deposit);
+        assert.match(response.json().text, /pUSD on Polygon/u);
+        assert.doesNotMatch(response.json().text, /USDC\.e/u);
+        assert.equal(fallbackCalls.length, 1);
+        assert.equal(fallbackCalls[0]?.appBaseUrl, "https://app.hunch.trade");
+        assert.equal(fallbackCalls[0]?.telegramMiniAppEnabled, true);
+        assert.equal(fallbackCalls[0]?.telegramUserId, 20);
+        assert.equal(fallbackCalls[0]?.venue, "polymarket");
+      } finally {
+        await app.close();
+      }
+    },
+  },
+  {
+    name: "Telegram Receive success and non-disabled failures never use legacy deposit",
+    run: async () => {
+      let fallbackCalls = 0;
+      let openResult: "success" | "ambiguous" | "private" | "unexpected" =
+        "success";
+      const app = Fastify({ logger: false });
+      app.setValidatorCompiler(validatorCompiler);
+      app.setSerializerCompiler(serializerCompiler);
+      await app.register(
+        createTelegramBotTradingRoutes({
+          buildDepositMessage: async () => {
+            fallbackCalls += 1;
+            return { text: "legacy" };
+          },
+          db: { query: async () => ({ fields: [], rows: [] }) } as never,
+          fundingService: {
+            cancel: async () => ({ text: "cancel" }),
+            open: async () => {
+              if (openResult === "ambiguous") {
+                throw new TelegramFundingError("destination_ambiguous");
+              }
+              if (openResult === "private") {
+                throw new TelegramFundingError("private_chat_required");
+              }
+              if (openResult === "unexpected") {
+                throw new Error("unexpected funding failure");
+              }
+              return { text: "current funding progress" };
+            },
+            selectTarget: async () => ({ text: "select" }),
+            session: async () => ({ text: "session" }),
+          },
+          internalPreHandler: async () => undefined,
+        }),
+      );
+      const request = () =>
+        app.inject({
+          method: "POST",
+          payload: {
+            appBaseUrl: "https://app.hunch.trade",
+            chatId: 20,
+            idempotencyKey: "funding:callback:result",
+            telegramMessageId: 42,
+            telegramUserId: 20,
+            venue: "polymarket",
+          },
+          url: "/internal/telegram-bot/funding/open",
+        });
+      try {
+        const success = await request();
+        assert.equal(success.statusCode, 200);
+        assert.equal(success.json().text, "current funding progress");
+
+        openResult = "ambiguous";
+        const ambiguous = await request();
+        assert.equal(ambiguous.statusCode, 409);
+        assert.equal(ambiguous.json().error, "destination_ambiguous");
+
+        openResult = "private";
+        const privateChat = await request();
+        assert.equal(privateChat.statusCode, 403);
+        assert.equal(privateChat.json().error, "private_chat_required");
+
+        openResult = "unexpected";
+        const unexpected = await request();
+        assert.equal(unexpected.statusCode, 503);
+        assert.equal(
+          unexpected.json().error,
+          "telegram_funding_unexpected_error",
+        );
+        assert.equal(fallbackCalls, 0);
+      } finally {
+        await app.close();
+      }
+    },
+  },
+  {
     name: "Limitless deposit uses only an unambiguous internal EVM wallet",
     run: async () => {
       assert.deepEqual(
@@ -338,6 +480,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.match(message.text, new RegExp(deposit));
       assert.match(message.text, /\*Network:\* Polygon/);
       assert.match(message.text, /\*Assets:\* pUSD/);
+      assert.doesNotMatch(message.text, /USDC\.e/u);
       assert.doesNotMatch(message.text, /pUSD or USDC\\\.e/);
       assert.match(message.text, /📍 \*Deposit address\*/);
       assert.ok(message.text.includes(`\`${deposit}\``));

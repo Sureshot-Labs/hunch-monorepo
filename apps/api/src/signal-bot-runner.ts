@@ -364,8 +364,11 @@ export async function runSignalBotRunner(): Promise<void> {
             const request =
               input.action === "open"
                 ? tradingInternalApi.openFunding({
+                    appBaseUrl: config.appBaseUrl,
                     chatId: input.chatId,
                     idempotencyKey: input.idempotencyKey,
+                    telegramMiniAppEnabled:
+                      config.telegramMiniAppLinkBase != null,
                     telegramMessageId: input.telegramMessageId,
                     telegramUserId: input.telegramUserId,
                     venue: "polymarket",

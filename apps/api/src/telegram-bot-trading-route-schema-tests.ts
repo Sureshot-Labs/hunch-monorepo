@@ -55,6 +55,8 @@ await test("Telegram funding schemas accept only server-owned opaque inputs", ()
   assert.equal(
     telegramBotTradingRouteTestHooks.internalFundingOpenBodySchema.safeParse({
       ...mutation,
+      appBaseUrl: "https://app.hunch.trade",
+      telegramMiniAppEnabled: true,
       venue: "polymarket",
     }).success,
     true,
@@ -89,8 +91,16 @@ await test("Telegram funding schemas accept only server-owned opaque inputs", ()
   assert.equal(
     telegramBotTradingRouteTestHooks.internalFundingOpenBodySchema.safeParse({
       ...mutation,
+      appBaseUrl: "https://app.hunch.trade",
       venue: "polymarket",
       destinationAddress: "0x1111111111111111111111111111111111111111",
+    }).success,
+    false,
+  );
+  assert.equal(
+    telegramBotTradingRouteTestHooks.internalFundingOpenBodySchema.safeParse({
+      ...mutation,
+      venue: "polymarket",
     }).success,
     false,
   );

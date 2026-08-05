@@ -536,6 +536,21 @@ assert.equal(
 
 const defaultPolicy = getDefaultSignalBotPolicy();
 assert.equal(defaultPolicy.fundingReceiveEnabled, false);
+const {
+  fundingReceiveEnabled: _legacyMissingFundingReceiveEnabled,
+  ...productionLegacyPolicyPayload
+} = defaultPolicy;
+assert.equal(_legacyMissingFundingReceiveEnabled, false);
+const productionLegacyPolicy = normalizeSignalBotPolicy({
+  ...productionLegacyPolicyPayload,
+  autoEnableOnTelegramLink: true,
+  tradingEnabled: true,
+  tradingActions: ["buy", "sell"],
+  tradingVenues: ["polymarket"],
+});
+assert.equal(productionLegacyPolicy.tradingEnabled, true);
+assert.equal(productionLegacyPolicy.autoEnableOnTelegramLink, true);
+assert.equal(productionLegacyPolicy.fundingReceiveEnabled, false);
 const receiveOnlyPolicy = normalizeSignalBotPolicy({
   ...defaultPolicy,
   fundingReceiveEnabled: true,
