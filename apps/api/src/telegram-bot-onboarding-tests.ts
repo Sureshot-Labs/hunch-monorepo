@@ -72,11 +72,18 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         blocked: 0,
         claimed: 1,
         failed: 0,
+        quarantined: 0,
         sent: 1,
         skipped: 0,
       });
-      assert.match(queries[0]?.sql ?? "", /for update skip locked/i);
-      assert.deepEqual(queries[1]?.params, [
+      const claim = queries.find(({ sql }) =>
+        sql.includes("for update skip locked"),
+      );
+      const audience = queries.find(({ sql }) =>
+        sql.includes("select account.telegram_user_id"),
+      );
+      assert.ok(claim);
+      assert.deepEqual(audience?.params, [
         "telegram-account-1",
         "user-1",
         "999",
@@ -206,6 +213,76 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         ),
         true,
       );
+    },
+  },
+  {
+    name: "ambiguous welcome delivery is quarantined without automatic retry",
+    run: async () => {
+      const queries: Array<{ params: unknown[]; sql: string }> = [];
+      const result = await deliverTelegramBotOnboardingActions({
+        config,
+        db: {
+          query: async (sql: string, params: unknown[] = []) => {
+            queries.push({ params, sql });
+            if (sql.includes("with candidates as")) {
+              return { rows: [outboxRow] };
+            }
+            if (sql.includes("select account.telegram_user_id")) {
+              return { rows: [{ telegram_user_id: "999" }] };
+            }
+            return { rows: [] };
+          },
+        } as never,
+        telegram: {
+          sendMessage: async () => ({
+            error: "ambiguous",
+            message: "request outcome unknown",
+            ok: false,
+          }),
+        },
+      });
+
+      assert.equal(result.failed, 1);
+      assert.equal(
+        queries.some(
+          ({ params, sql }) =>
+            sql.includes("status = 'delivery_unknown'") &&
+            params[1] === "request outcome unknown",
+        ),
+        true,
+      );
+      assert.equal(
+        queries.some(({ sql }) => sql.includes("set status = $2")),
+        false,
+      );
+    },
+  },
+  {
+    name: "stale welcome sending is quarantined and excluded from claim",
+    run: async () => {
+      const queries: string[] = [];
+      const result = await deliverTelegramBotOnboardingActions({
+        config,
+        db: {
+          query: async (sql: string) => {
+            queries.push(sql);
+            if (sql.includes("stale_sending_delivery_unknown")) {
+              return { rowCount: 1, rows: [] };
+            }
+            if (sql.includes("with candidates as")) return { rows: [] };
+            return { rowCount: 0, rows: [] };
+          },
+        } as never,
+        telegram: {
+          sendMessage: async () => {
+            throw new Error("quarantined welcome must not be sent");
+          },
+        },
+      });
+      assert.equal(result.quarantined, 1);
+      assert.equal(result.claimed, 0);
+      assert.match(queries[0] ?? "", /status = 'sending'/);
+      assert.match(queries[1] ?? "", /status in \('pending', 'retry'\)/);
     },
   },
 ];

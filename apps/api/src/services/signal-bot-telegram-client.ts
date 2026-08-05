@@ -2,7 +2,10 @@ import {
   stripTelegramCustomEmojiButtonIcons,
   stripTelegramCustomEmojiMarkdownV2,
 } from "./telegram-custom-emoji.js";
-import { sendTelegramPhotoRequest } from "./telegram-api-photo.js";
+import {
+  isValidTelegramMessageId,
+  sendTelegramPhotoRequest,
+} from "./telegram-api-photo.js";
 
 import type {
   SignalBotTelegramClient,
@@ -12,10 +15,66 @@ import type {
   TelegramBotUpdate,
   TelegramBotUser,
   TelegramInlineKeyboard,
+  TelegramMutationResult,
   TelegramSendMessageInput,
   TelegramSendResult,
   TelegramSendRichMessageInput,
 } from "./signal-bot.js";
+
+export const TELEGRAM_MUTATION_TIMEOUT_MS = 20_000;
+
+function telegramMutationSignal(): AbortSignal {
+  return AbortSignal.timeout(TELEGRAM_MUTATION_TIMEOUT_MS);
+}
+
+export function classifyTelegramEditFailure(input: {
+  description?: string;
+  messageId: number;
+  responseOk: boolean;
+  retryAfterSec?: number;
+  status: number;
+}): TelegramSendResult {
+  const message = input.description ?? `HTTP ${input.status}`;
+  if (/message is not modified/i.test(message)) {
+    return { messageId: input.messageId, ok: true };
+  }
+  if (
+    input.status === 403 ||
+    /chat not found|bot was blocked|user is deactivated/i.test(message)
+  ) {
+    return { error: "blocked_or_missing", message, ok: false };
+  }
+  if (
+    /message to edit not found|message can(?:not|'t) be edited|message_id_invalid/i.test(
+      message,
+    )
+  ) {
+    return { error: "message_not_editable", message, ok: false };
+  }
+  return {
+    error: input.responseOk || input.status >= 500 ? "ambiguous" : "other",
+    message,
+    ok: false,
+    ...(typeof input.retryAfterSec === "number" && input.retryAfterSec > 0
+      ? { retryAfterSec: Math.trunc(input.retryAfterSec) }
+      : {}),
+  };
+}
+
+function telegramTransportFailure(error: unknown): TelegramSendResult {
+  return {
+    error: "ambiguous",
+    message:
+      error instanceof Error ? error.message : "telegram_transport_error",
+    ok: false,
+  };
+}
+
+function isTelegramReplyTargetMissing(message: string): boolean {
+  return /reply message not found|message to (?:be )?repl(?:y|ied) (?:to )?not found|reply_to_message_id_invalid/i.test(
+    message,
+  );
+}
 
 function telegramPayloadHasCustomEmoji(input: {
   reply_markup?: TelegramInlineKeyboard;
@@ -64,10 +123,12 @@ export class TelegramBotApiClient implements SignalBotTelegramClient {
     method: string,
     body: Record<string, unknown>,
   ): Promise<void> {
+    const signal = telegramMutationSignal();
     const response = await fetch(this.baseUrl + "/" + method, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
+      signal,
     });
     const payload = (await response.json().catch(() => null)) as {
       description?: string;
@@ -171,17 +232,46 @@ export class TelegramBotApiClient implements SignalBotTelegramClient {
     callbackQueryId: string;
     showAlert?: boolean;
     text?: string;
-  }): Promise<unknown> {
-    const response = await fetch(`${this.baseUrl}/answerCallbackQuery`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        callback_query_id: input.callbackQueryId,
-        show_alert: input.showAlert ?? false,
-        text: input.text,
-      }),
-    });
-    return response.json().catch(() => null);
+  }): Promise<TelegramMutationResult> {
+    const signal = telegramMutationSignal();
+    let response: Response;
+    let payload: {
+      description?: string;
+      ok?: boolean;
+      parameters?: { retry_after?: number };
+    } | null;
+    try {
+      response = await fetch(`${this.baseUrl}/answerCallbackQuery`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          callback_query_id: input.callbackQueryId,
+          show_alert: input.showAlert ?? false,
+          text: input.text,
+        }),
+        signal,
+      });
+      payload = (await response.json().catch(() => null)) as typeof payload;
+    } catch (error) {
+      return telegramTransportFailure(error);
+    }
+    if (response.ok && payload?.ok) return { ok: true };
+    const message = payload?.description ?? `HTTP ${response.status}`;
+    if (
+      response.status === 403 ||
+      /chat not found|bot was blocked|user is deactivated/i.test(message)
+    ) {
+      return { error: "blocked_or_missing", message, ok: false };
+    }
+    const retryAfterSec = payload?.parameters?.retry_after;
+    return {
+      error: response.ok || response.status >= 500 ? "ambiguous" : "other",
+      message,
+      ok: false,
+      ...(typeof retryAfterSec === "number" && retryAfterSec > 0
+        ? { retryAfterSec: Math.trunc(retryAfterSec) }
+        : {}),
+    };
   }
 
   async editMessageText(input: {
@@ -192,69 +282,13 @@ export class TelegramBotApiClient implements SignalBotTelegramClient {
     reply_markup?: TelegramInlineKeyboard;
     text: string;
   }): Promise<TelegramSendResult> {
+    const signal = telegramMutationSignal();
     const request = async (body: typeof input) => {
       const response = await fetch(`${this.baseUrl}/editMessageText`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
-      });
-      const payload = (await response.json().catch(() => null)) as {
-        description?: string;
-        ok?: boolean;
-        result?: { message_id?: number };
-      } | null;
-      return { payload, response };
-    };
-    let requestInput = input;
-    let { payload, response } = await request(requestInput);
-    if (
-      isTelegramCustomEmojiRejection(response.status, payload?.description) &&
-      telegramPayloadHasCustomEmoji(requestInput)
-    ) {
-      requestInput = stripTelegramCustomEmojiFromPayload(requestInput);
-      ({ payload, response } = await request(requestInput));
-    }
-    if (response.ok && payload?.ok) {
-      const messageId = payload.result?.message_id;
-      return {
-        messageId: typeof messageId === "number" ? messageId : input.message_id,
-        ok: true,
-      };
-    }
-    return {
-      error: "other",
-      message: payload?.description ?? `HTTP ${response.status}`,
-      ok: false,
-    };
-  }
-
-  async sendPhoto(input: {
-    caption?: string;
-    chat_id: string;
-    filename: string;
-    parse_mode?: "MarkdownV2";
-    photo: Uint8Array;
-    reply_markup?: TelegramInlineKeyboard;
-  }): Promise<TelegramSendResult> {
-    return sendTelegramPhotoRequest({
-      baseUrl: this.baseUrl,
-      caption: input.caption,
-      chatId: input.chat_id,
-      filename: input.filename,
-      parseMode: input.parse_mode,
-      photo: input.photo,
-      replyMarkup: input.reply_markup,
-    });
-  }
-
-  async sendRichMessage(
-    input: TelegramSendRichMessageInput,
-  ): Promise<TelegramSendResult> {
-    const request = async (body: TelegramSendRichMessageInput) => {
-      const response = await fetch(`${this.baseUrl}/sendRichMessage`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
+        signal,
       });
       const payload = (await response.json().catch(() => null)) as {
         description?: string;
@@ -265,7 +299,92 @@ export class TelegramBotApiClient implements SignalBotTelegramClient {
       return { payload, response };
     };
     let requestInput = input;
-    let { payload, response } = await request(requestInput);
+    let payload: Awaited<ReturnType<typeof request>>["payload"];
+    let response: Awaited<ReturnType<typeof request>>["response"];
+    try {
+      ({ payload, response } = await request(requestInput));
+    } catch (error) {
+      return telegramTransportFailure(error);
+    }
+    if (
+      isTelegramCustomEmojiRejection(response.status, payload?.description) &&
+      telegramPayloadHasCustomEmoji(requestInput)
+    ) {
+      requestInput = stripTelegramCustomEmojiFromPayload(requestInput);
+      try {
+        ({ payload, response } = await request(requestInput));
+      } catch (error) {
+        return telegramTransportFailure(error);
+      }
+    }
+    if (response.ok && payload?.ok) {
+      const messageId = payload.result?.message_id;
+      return {
+        messageId: typeof messageId === "number" ? messageId : input.message_id,
+        ok: true,
+      };
+    }
+    return classifyTelegramEditFailure({
+      description: payload?.description,
+      messageId: input.message_id,
+      responseOk: response.ok,
+      retryAfterSec: payload?.parameters?.retry_after,
+      status: response.status,
+    });
+  }
+
+  async sendPhoto(input: {
+    caption?: string;
+    chat_id: string;
+    filename: string;
+    parse_mode?: "MarkdownV2";
+    photo: Uint8Array;
+    reply_markup?: TelegramInlineKeyboard;
+  }): Promise<TelegramSendResult> {
+    const signal = telegramMutationSignal();
+    try {
+      return await sendTelegramPhotoRequest({
+        baseUrl: this.baseUrl,
+        caption: input.caption,
+        chatId: input.chat_id,
+        filename: input.filename,
+        parseMode: input.parse_mode,
+        photo: input.photo,
+        replyMarkup: input.reply_markup,
+        signal,
+      });
+    } catch (error) {
+      return telegramTransportFailure(error);
+    }
+  }
+
+  async sendRichMessage(
+    input: TelegramSendRichMessageInput,
+  ): Promise<TelegramSendResult> {
+    const signal = telegramMutationSignal();
+    const request = async (body: TelegramSendRichMessageInput) => {
+      const response = await fetch(`${this.baseUrl}/sendRichMessage`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        signal,
+      });
+      const payload = (await response.json().catch(() => null)) as {
+        description?: string;
+        ok?: boolean;
+        parameters?: { retry_after?: number };
+        result?: { message_id?: number };
+      } | null;
+      return { payload, response };
+    };
+    let requestInput = input;
+    let payload: Awaited<ReturnType<typeof request>>["payload"];
+    let response: Awaited<ReturnType<typeof request>>["response"];
+    try {
+      ({ payload, response } = await request(requestInput));
+    } catch (error) {
+      return telegramTransportFailure(error);
+    }
     const hasButtonCustomEmoji =
       requestInput.reply_markup?.inline_keyboard.some((row) =>
         row.some((button) => Boolean(button.icon_custom_emoji_id)),
@@ -281,12 +400,23 @@ export class TelegramBotApiClient implements SignalBotTelegramClient {
           requestInput.reply_markup,
         ),
       };
-      ({ payload, response } = await request(requestInput));
+      try {
+        ({ payload, response } = await request(requestInput));
+      } catch (error) {
+        return telegramTransportFailure(error);
+      }
     }
     if (response.ok && payload?.ok) {
       const messageId = payload.result?.message_id;
+      if (!isValidTelegramMessageId(messageId)) {
+        return {
+          error: "ambiguous",
+          message: "invalid telegram success response",
+          ok: false,
+        };
+      }
       return {
-        messageId: typeof messageId === "number" ? messageId : null,
+        messageId,
         ok: true,
       };
     }
@@ -297,9 +427,12 @@ export class TelegramBotApiClient implements SignalBotTelegramClient {
     ) {
       return { error: "blocked_or_missing", message, ok: false };
     }
+    if (input.reply_parameters && isTelegramReplyTargetMissing(message)) {
+      return { error: "reply_target_missing", message, ok: false };
+    }
     const retryAfterSec = payload?.parameters?.retry_after;
     return {
-      error: "other",
+      error: response.ok || response.status >= 500 ? "ambiguous" : "other",
       message,
       ok: false,
       ...(typeof retryAfterSec === "number" ? { retryAfterSec } : {}),
@@ -309,11 +442,13 @@ export class TelegramBotApiClient implements SignalBotTelegramClient {
   async sendMessage(
     input: TelegramSendMessageInput,
   ): Promise<TelegramSendResult> {
+    const signal = telegramMutationSignal();
     const request = async (body: TelegramSendMessageInput) => {
       const response = await fetch(`${this.baseUrl}/sendMessage`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
+        signal,
       });
       const payload = (await response.json().catch(() => null)) as {
         description?: string;
@@ -324,18 +459,35 @@ export class TelegramBotApiClient implements SignalBotTelegramClient {
       return { payload, response };
     };
     let requestInput = input;
-    let { payload, response } = await request(requestInput);
+    let payload: Awaited<ReturnType<typeof request>>["payload"];
+    let response: Awaited<ReturnType<typeof request>>["response"];
+    try {
+      ({ payload, response } = await request(requestInput));
+    } catch (error) {
+      return telegramTransportFailure(error);
+    }
     if (
       isTelegramCustomEmojiRejection(response.status, payload?.description) &&
       telegramPayloadHasCustomEmoji(requestInput)
     ) {
       requestInput = stripTelegramCustomEmojiFromPayload(requestInput);
-      ({ payload, response } = await request(requestInput));
+      try {
+        ({ payload, response } = await request(requestInput));
+      } catch (error) {
+        return telegramTransportFailure(error);
+      }
     }
     if (response.ok && payload?.ok) {
       const messageId = payload.result?.message_id;
+      if (!isValidTelegramMessageId(messageId)) {
+        return {
+          error: "ambiguous",
+          message: "invalid telegram success response",
+          ok: false,
+        };
+      }
       return {
-        messageId: typeof messageId === "number" ? messageId : null,
+        messageId,
         ok: true,
       };
     }
@@ -346,9 +498,12 @@ export class TelegramBotApiClient implements SignalBotTelegramClient {
     ) {
       return { error: "blocked_or_missing", message, ok: false };
     }
+    if (input.reply_parameters && isTelegramReplyTargetMissing(message)) {
+      return { error: "reply_target_missing", message, ok: false };
+    }
     const retryAfterSec = payload?.parameters?.retry_after;
     return {
-      error: "other",
+      error: response.ok || response.status >= 500 ? "ambiguous" : "other",
       message,
       ok: false,
       retryAfterSec:

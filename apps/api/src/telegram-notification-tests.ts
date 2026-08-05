@@ -88,8 +88,10 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     name: "only an explicit start request marks preferences reachable",
     run: async () => {
       const paramsSeen: unknown[][] = [];
+      const sqlSeen: string[] = [];
       const db = {
-        query: async (_sql: string, params: unknown[] = []) => {
+        query: async (sql: string, params: unknown[] = []) => {
+          sqlSeen.push(sql);
           paramsSeen.push(params);
           return {
             rows: [
@@ -119,10 +121,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       });
       assert.equal(passive?.reachable, false);
       assert.equal(started?.reachable, true);
-      assert.deepEqual(paramsSeen, [
-        ["99", false],
-        ["99", true],
-      ]);
+      assert.deepEqual(paramsSeen, [["99", false], ["99", true], ["99"]]);
+      assert.match(sqlSeen[2] ?? "", /rearm_telegram_funding_delivery/);
     },
   },
   {
@@ -136,6 +136,10 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
             return {
               rows: [{ link_id: "link-1", user_id: "user-1" }],
             };
+          }
+          if (sql.includes("rearm_telegram_funding_delivery")) {
+            assert.deepEqual(params, ["99"]);
+            return { rowCount: 0, rows: [] };
           }
           preferenceWrites.push(params);
           return {
@@ -298,7 +302,10 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       });
       assert.equal(result.skipped, 1);
       assert.equal(result.sent, 0);
-      assert.match(queries[0] ?? "", /interval '30 seconds'/);
+      assert.match(
+        queries.find((sql) => sql.includes("with candidates")) ?? "",
+        /interval '30 seconds'/,
+      );
       assert.equal(
         queries.some(
           (sql) =>
@@ -472,6 +479,224 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
+    name: "ambiguous notification delivery is quarantined without retry",
+    run: async () => {
+      const updates: Array<{ params: unknown[]; sql: string }> = [];
+      const result = await deliverTelegramNotificationOutbox({
+        db: {
+          query: async (sql: string, params: unknown[] = []) => {
+            if (sql.includes("with candidates")) {
+              return {
+                rows: [
+                  {
+                    attempt_count: 1,
+                    id: "outbox-ambiguous",
+                    payload: {
+                      body: "2 pUSD received",
+                      title: "Deposit received",
+                      type: "deposit_received",
+                    },
+                    topic: "deposit_received",
+                    user_id: "user-1",
+                  },
+                ],
+              };
+            }
+            if (sql.includes("case outbox.topic")) {
+              return {
+                rows: [
+                  {
+                    enabled: true,
+                    enabled_since_event: true,
+                    reachable: true,
+                    telegram_user_id: "99",
+                  },
+                ],
+              };
+            }
+            updates.push({ params, sql });
+            return { rows: [] };
+          },
+        } as never,
+        miniAppLinkBase: null,
+        telegram: {
+          sendMessage: async () => ({
+            error: "ambiguous",
+            message: "request outcome unknown",
+            ok: false,
+          }),
+        },
+      });
+      assert.equal(result.failed, 1);
+      assert.equal(
+        updates.some(
+          ({ params, sql }) =>
+            sql.includes("status = 'delivery_unknown'") &&
+            params[1] === "request outcome unknown",
+        ),
+        true,
+      );
+      assert.equal(
+        updates.some(({ sql }) => sql.includes("next_attempt_at")),
+        false,
+      );
+    },
+  },
+  {
+    name: "stale notification sending is quarantined before claim",
+    run: async () => {
+      const queries: string[] = [];
+      const result = await deliverTelegramNotificationOutbox({
+        db: {
+          query: async (sql: string) => {
+            queries.push(sql);
+            if (sql.includes("stale_sending_delivery_unknown")) {
+              return { rowCount: 2, rows: [] };
+            }
+            if (sql.includes("with candidates")) return { rows: [] };
+            return { rowCount: 0, rows: [] };
+          },
+        } as never,
+        miniAppLinkBase: null,
+        telegram: {
+          sendMessage: async () => {
+            throw new Error("quarantined rows must not be sent");
+          },
+        },
+      });
+      assert.equal(result.quarantined, 2);
+      assert.equal(result.claimed, 0);
+      assert.match(queries[0] ?? "", /status = 'sending'/);
+      assert.match(queries[1] ?? "", /status in \('pending', 'retry'\)/);
+    },
+  },
+  {
+    name: "late notification success cannot overwrite delivery quarantine",
+    run: async () => {
+      const result = await deliverTelegramNotificationOutbox({
+        db: {
+          query: async (sql: string) => {
+            if (sql.includes("with candidates")) {
+              return {
+                rows: [
+                  {
+                    attempt_count: 1,
+                    id: "outbox-cas-loser",
+                    payload: {
+                      body: "2 pUSD received",
+                      title: "Deposit received",
+                      type: "deposit_received",
+                    },
+                    topic: "deposit_received",
+                    user_id: "user-1",
+                  },
+                ],
+              };
+            }
+            if (sql.includes("case outbox.topic")) {
+              return {
+                rows: [
+                  {
+                    enabled: true,
+                    enabled_since_event: true,
+                    reachable: true,
+                    telegram_user_id: "99",
+                  },
+                ],
+              };
+            }
+            if (sql.includes("set status = 'sent'")) {
+              return { rowCount: 0, rows: [] };
+            }
+            return { rowCount: 0, rows: [] };
+          },
+        } as never,
+        miniAppLinkBase: null,
+        telegram: {
+          sendMessage: async () => ({ messageId: 8, ok: true }),
+        },
+      });
+      assert.equal(result.claimed, 1);
+      assert.equal(result.sent, 0);
+    },
+  },
+  {
+    name: "position reply fallback is persisted once and ambiguous standalone is terminal",
+    run: async () => {
+      const queries: Array<{ params: unknown[]; sql: string }> = [];
+      let sends = 0;
+      const result = await deliverTelegramNotificationOutbox({
+        db: {
+          query: async (sql: string, params: unknown[] = []) => {
+            queries.push({ params, sql });
+            if (sql.includes("with candidates")) {
+              return {
+                rows: [
+                  {
+                    attempt_count: 1,
+                    id: "outbox-position-reply",
+                    payload: { replyToMessageId: 77, text: "Position update" },
+                    topic: "position_signals",
+                    user_id: "user-1",
+                  },
+                ],
+              };
+            }
+            if (sql.includes("case outbox.topic")) {
+              return {
+                rows: [
+                  {
+                    enabled: true,
+                    enabled_since_event: true,
+                    reachable: true,
+                    telegram_user_id: "99",
+                  },
+                ],
+              };
+            }
+            return { rowCount: 1, rows: [] };
+          },
+        } as never,
+        miniAppLinkBase: null,
+        telegram: {
+          sendMessage: async (message) => {
+            sends += 1;
+            if (sends === 1) {
+              assert.deepEqual(message.reply_parameters, { message_id: 77 });
+              return {
+                error: "reply_target_missing",
+                message: "reply message not found",
+                ok: false,
+              };
+            }
+            assert.equal(message.reply_parameters, undefined);
+            return {
+              error: "ambiguous",
+              message: "standalone outcome unknown",
+              ok: false,
+            };
+          },
+        },
+      });
+      assert.equal(sends, 2);
+      assert.equal(result.failed, 1);
+      assert.equal(
+        queries.some(({ sql }) =>
+          sql.includes("jsonb_set(payload, '{replyToMessageId}'"),
+        ),
+        true,
+      );
+      assert.equal(
+        queries.some(
+          ({ params, sql }) =>
+            sql.includes("status = 'delivery_unknown'") &&
+            params[1] === "standalone outcome unknown",
+        ),
+        true,
+      );
+    },
+  },
+  {
     name: "cleanup deletes only terminal outbox rows after retention",
     run: async () => {
       let capturedSql = "";
@@ -486,7 +711,10 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         } as never,
       });
       assert.equal(deleted, 7);
-      assert.match(capturedSql, /status in \('sent', 'skipped', 'dead'\)/);
+      assert.match(
+        capturedSql,
+        /status in \('sent', 'skipped', 'dead', 'delivery_unknown'\)/,
+      );
       assert.doesNotMatch(capturedSql, /status in \('pending'/);
       assert.deepEqual(capturedParams, [90, 1000]);
     },

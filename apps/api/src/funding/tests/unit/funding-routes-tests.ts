@@ -596,6 +596,32 @@ await test("receive session opens without a requested amount", async () => {
   }
 });
 
+await test("receive channel conflicts use HTTP 409", async () => {
+  const app = await buildApp({
+    openReceiveSession: async () => {
+      throw new FundingPlannerError(
+        "receive_channel_conflict",
+        "another channel owns the active receive session",
+      );
+    },
+  });
+  try {
+    const response = await app.inject({
+      method: "POST",
+      url: "/funding/receive-sessions",
+      payload: {
+        destinationOptionId: destination().destinationOptionId,
+        venueBindingOptionId: destination().venueBindingOptionId,
+        selectedReceiveTargetId: null,
+      },
+    });
+    assert.equal(response.statusCode, 409);
+    assert.equal(response.json().code, "receive_channel_conflict");
+  } finally {
+    await app.close();
+  }
+});
+
 await test("receive session reads only through the authenticated owner", async () => {
   let observedUserId: string | null = null;
   const app = await buildApp({

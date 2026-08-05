@@ -32,15 +32,8 @@ async function claimTelegramBotActionOutbox(input: {
         select id
         from telegram_bot_action_outbox
         where action = 'welcome_menu'
-          and (
-            (
-              status in ('pending', 'retry')
-              and next_attempt_at <= now()
-            ) or (
-              status = 'sending'
-              and updated_at <= now() - interval '5 minutes'
-            )
-          )
+          and status in ('pending', 'retry')
+          and next_attempt_at <= now()
         order by next_attempt_at asc, created_at asc
         for update skip locked
         limit $1
@@ -61,6 +54,23 @@ async function claimTelegramBotActionOutbox(input: {
     [input.limit],
   );
   return rows;
+}
+
+async function quarantineStaleTelegramBotWelcomeActions(input: {
+  db: DbQuery;
+}): Promise<number> {
+  const result = await input.db.query(
+    `
+      update telegram_bot_action_outbox
+      set status = 'delivery_unknown',
+          last_error = 'stale_sending_delivery_unknown',
+          updated_at = now()
+      where action = 'welcome_menu'
+        and status = 'sending'
+        and updated_at <= now() - interval '5 minutes'
+    `,
+  );
+  return result.rowCount ?? 0;
 }
 
 async function loadCurrentDestination(input: {
@@ -91,23 +101,24 @@ async function markActionSkipped(input: {
   db: DbQuery;
   id: string;
   reason: string;
-}): Promise<void> {
-  await input.db.query(
+}): Promise<boolean> {
+  const result = await input.db.query(
     `
       update telegram_bot_action_outbox
       set status = 'skipped', last_error = $2, updated_at = now()
-      where id = $1
+      where id = $1 and status = 'sending'
     `,
     [input.id, input.reason],
   );
+  return result.rowCount !== 0;
 }
 
 async function markActionSent(input: {
   db: DbQuery;
   id: string;
   messageId: number | null;
-}): Promise<void> {
-  await input.db.query(
+}): Promise<boolean> {
+  const result = await input.db.query(
     `
       update telegram_bot_action_outbox
       set status = 'sent',
@@ -115,25 +126,27 @@ async function markActionSent(input: {
           last_error = null,
           sent_at = now(),
           updated_at = now()
-      where id = $1
+      where id = $1 and status = 'sending'
     `,
     [input.id, input.messageId],
   );
+  return result.rowCount !== 0;
 }
 
 async function markActionDead(input: {
   db: DbQuery;
   id: string;
   message: string;
-}): Promise<void> {
-  await input.db.query(
+}): Promise<boolean> {
+  const result = await input.db.query(
     `
       update telegram_bot_action_outbox
       set status = 'dead', last_error = $2, updated_at = now()
-      where id = $1
+      where id = $1 and status = 'sending'
     `,
     [input.id, input.message],
   );
+  return result.rowCount !== 0;
 }
 
 async function markActionFailed(input: {
@@ -142,7 +155,7 @@ async function markActionFailed(input: {
   id: string;
   message: string;
   retryAfterSec?: number;
-}): Promise<void> {
+}): Promise<boolean> {
   const dead = input.attemptCount >= MAX_DELIVERY_ATTEMPTS;
   const retryAfterSec = Math.max(
     1,
@@ -151,17 +164,38 @@ async function markActionFailed(input: {
       input.retryAfterSec ?? 5 * 2 ** Math.max(0, input.attemptCount - 1),
     ),
   );
-  await input.db.query(
+  const result = await input.db.query(
     `
       update telegram_bot_action_outbox
       set status = $2,
           last_error = $3,
           next_attempt_at = now() + ($4::int * interval '1 second'),
           updated_at = now()
-      where id = $1
+      where id = $1 and status = 'sending'
     `,
     [input.id, dead ? "dead" : "retry", input.message, retryAfterSec],
   );
+  return result.rowCount !== 0;
+}
+
+async function markActionDeliveryUnknown(input: {
+  db: DbQuery;
+  id: string;
+  message: string;
+}): Promise<boolean> {
+  const result = await input.db.query(
+    `
+      update telegram_bot_action_outbox
+      set status = 'delivery_unknown',
+          last_error = $2,
+          updated_at = now()
+      where id = $1
+        and action = 'welcome_menu'
+        and status = 'sending'
+    `,
+    [input.id, input.message],
+  );
+  return result.rowCount !== 0;
 }
 
 export async function cleanupTelegramBotActionOutbox(input: {
@@ -179,7 +213,7 @@ export async function cleanupTelegramBotActionOutbox(input: {
       with expired as (
         select id
         from telegram_bot_action_outbox
-        where status in ('sent', 'skipped', 'dead')
+        where status in ('sent', 'skipped', 'dead', 'delivery_unknown')
           and updated_at < now() - ($1::int * interval '1 day')
         order by updated_at asc
         limit $2
@@ -205,9 +239,13 @@ export async function deliverTelegramBotOnboardingActions(input: {
   blocked: number;
   claimed: number;
   failed: number;
+  quarantined: number;
   sent: number;
   skipped: number;
 }> {
+  const quarantined = await quarantineStaleTelegramBotWelcomeActions({
+    db: input.db,
+  });
   const claimedRows = await claimTelegramBotActionOutbox({
     db: input.db,
     limit: Math.min(100, Math.max(1, input.limit ?? 25)),
@@ -220,12 +258,14 @@ export async function deliverTelegramBotOnboardingActions(input: {
   for (const row of claimedRows) {
     const destination = await loadCurrentDestination({ db: input.db, row });
     if (!destination) {
-      skipped += 1;
-      await markActionSkipped({
-        db: input.db,
-        id: row.id,
-        reason: "The Telegram account link changed before delivery.",
-      });
+      if (
+        await markActionSkipped({
+          db: input.db,
+          id: row.id,
+          reason: "The Telegram account link changed before delivery.",
+        })
+      )
+        skipped += 1;
       continue;
     }
 
@@ -252,48 +292,67 @@ export async function deliverTelegramBotOnboardingActions(input: {
       });
     } catch (error) {
       result = {
-        error: "other",
+        error: "ambiguous",
         message: error instanceof Error ? error.message : String(error),
         ok: false,
       };
     }
 
     if (result.ok) {
-      sent += 1;
-      await markActionSent({
-        db: input.db,
-        id: row.id,
-        messageId: result.messageId,
-      });
+      if (
+        await markActionSent({
+          db: input.db,
+          id: row.id,
+          messageId: result.messageId,
+        })
+      )
+        sent += 1;
       continue;
     }
     if (result.error === "blocked_or_missing") {
-      blocked += 1;
-      await markTelegramNotificationsUnreachable({
-        db: input.db,
-        userId: row.user_id,
-      });
-      await markActionDead({
+      if (
+        await markActionDead({
+          db: input.db,
+          id: row.id,
+          message: result.message,
+        })
+      ) {
+        blocked += 1;
+        await markTelegramNotificationsUnreachable({
+          db: input.db,
+          userId: row.user_id,
+        });
+      }
+      continue;
+    }
+    if (result.error === "ambiguous") {
+      if (
+        await markActionDeliveryUnknown({
+          db: input.db,
+          id: row.id,
+          message: result.message,
+        })
+      )
+        failed += 1;
+      continue;
+    }
+    if (
+      await markActionFailed({
+        attemptCount: row.attempt_count,
         db: input.db,
         id: row.id,
         message: result.message,
-      });
-      continue;
-    }
-    failed += 1;
-    await markActionFailed({
-      attemptCount: row.attempt_count,
-      db: input.db,
-      id: row.id,
-      message: result.message,
-      retryAfterSec: result.retryAfterSec,
-    });
+        retryAfterSec: result.retryAfterSec,
+      })
+    )
+      failed += 1;
   }
 
   return {
     blocked,
     claimed: claimedRows.length,
     failed,
+    quarantined,
     sent,
     skipped,
   };

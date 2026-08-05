@@ -427,7 +427,8 @@ function errorStatus(error: unknown): number {
     }
     if (
       error.code === "destination_selection_required" ||
-      error.code === "source_not_selected"
+      error.code === "source_not_selected" ||
+      error.code === "receive_channel_conflict"
     ) {
       return 409;
     }

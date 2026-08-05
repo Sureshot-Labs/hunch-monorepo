@@ -49,6 +49,11 @@ type FundingReconciliationResult = {
     retriesScheduled: number;
     retryableErrors: number;
   }> | null;
+  telegramFundingProgress?: Readonly<{
+    candidates: number;
+    created: number;
+    skipped: number;
+  }> | null;
 };
 
 type FundingWorkerModule = {

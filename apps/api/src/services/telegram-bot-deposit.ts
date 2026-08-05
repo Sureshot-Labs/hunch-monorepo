@@ -342,7 +342,7 @@ function depositNetwork(venue: TelegramDepositVenue): "Base" | "Polygon" {
 }
 
 function depositAssetLabel(venue: TelegramDepositVenue): string {
-  return venue === "polymarket" ? "pUSD / USDC.e" : "USDC";
+  return venue === "polymarket" ? "pUSD" : "USDC";
 }
 
 function buildDepositTitleMarkdownV2(venue?: TelegramDepositVenue): string {
@@ -379,8 +379,6 @@ function formatDepositSafetyInstructionMarkdownV2(
   return venue === "polymarket"
     ? `Send only ${formatTelegramBoldMarkdownV2(
         "pUSD",
-      )} or ${formatTelegramBoldMarkdownV2(
-        "USDC.e",
       )} on ${formatTelegramBoldMarkdownV2("Polygon")} to this address\\.`
     : `Send only ${formatTelegramBoldMarkdownV2(
         "USDC",
@@ -400,12 +398,12 @@ export function buildTelegramDepositAddressPresentation(input: {
 } {
   const isPolymarket = input.venue === "polymarket";
   const network = depositNetwork(input.venue);
-  const assetLabel = isPolymarket ? "pUSD or USDC.e" : "USDC";
+  const assetLabel = isPolymarket ? "pUSD" : "USDC";
   const lines = [
     `Network: ${network}`,
-    `${isPolymarket ? "Assets" : "Asset"}: ${assetLabel}`,
+    `Asset: ${assetLabel}`,
     `Address: ${input.address}`,
-    `Send only ${isPolymarket ? "pUSD or USDC.e on Polygon" : "USDC on Base"} to this address.`,
+    `Send only ${isPolymarket ? "pUSD on Polygon" : "USDC on Base"} to this address.`,
   ];
   return {
     buttonRows: [

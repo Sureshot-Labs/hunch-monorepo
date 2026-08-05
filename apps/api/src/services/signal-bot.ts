@@ -128,6 +128,10 @@ import {
 } from "./signal-bot-mini-app-links.js";
 import { parseTelegramBotTradingCallbackData } from "./telegram-bot-trading-client.js";
 import {
+  sendTelegramMessageWithReplyFallback,
+  type TelegramDeliverySendResult,
+} from "./telegram-delivery-safety.js";
+import {
   ensureTelegramNotificationPreferences,
   setTelegramNotificationTopic,
   type TelegramNotificationPreferences,
@@ -172,11 +176,7 @@ import {
   writeSignalBotMarketSearchSession,
   type SignalBotMarketSearchResult,
 } from "./telegram-bot-menu-markets.js";
-import {
-  handleSignalBotInteractiveMenuCallback,
-  parseSignalBotInteractiveMenuRoute,
-  type SignalBotInteractiveMenuRoute,
-} from "./telegram-bot-menu-actions.js";
+import * as TelegramBotMenuActions from "./telegram-bot-menu-actions.js";
 import {
   resolveTelegramBotMenuAudience,
   type TelegramBotMenuAudience,
@@ -212,15 +212,23 @@ import {
 import {
   claimSignalBotMenuRender,
   clearSignalBotMenuInput,
-  isSignalBotMenuRenderCurrent,
+  createSignalBotMenuRenderGuard,
   writeSignalBotMenuInput,
 } from "./telegram-bot-menu-state.js";
 import { handleTelegramAccountValueMenu } from "./telegram-account-value-menu.js";
 import {
+  createTelegramBotCallbackMenuTransport,
   sendOrEditTelegramBotMenuMessage as sendOrEditSignalBotMenuMessage,
   type TelegramBotMenuMessage as SignalBotMenuMessage,
   type TelegramBotMenuTransport as SignalBotMenuTransport,
 } from "./telegram-bot-menu-delivery.js";
+import {
+  beginSignalBotMessageDelivery,
+  finishSignalBotMessageDelivery,
+  quarantineStaleSignalBotMessageDeliveries,
+  recordSignalBotFollowthroughSkipped,
+  reserveSignalBotMessageDelivery,
+} from "./signal-bot-message-delivery-ledger.js";
 import {
   createTelegramSignalTransport,
   escapeTelegramMarkdownV2,
@@ -238,7 +246,6 @@ import {
   type TelegramInputRichMessage,
   type TelegramRichText,
 } from "./telegram-rich-message.js";
-
 export { escapeTelegramMarkdownV2 } from "./signal-delivery.js";
 export { TelegramBotApiClient } from "./signal-bot-telegram-client.js";
 export { sendSignalBotRichLayoutPreview } from "./signal-bot-rich-preview.js";
@@ -255,6 +262,7 @@ export type {
   TelegramBotUpdate,
   TelegramInlineKeyboard,
   TelegramInlineKeyboardButton,
+  TelegramMutationResult,
   TelegramSendMessageInput,
   TelegramSendResult,
   TelegramSendRichMessageInput,
@@ -372,27 +380,12 @@ export type TelegramBotMenuButton =
       type: "web_app";
       web_app: { url: string };
     };
-
 type SignalBotThreadContext = {
   baselineAt: string;
   replyToMessageId: number | null;
   threadRootNoteId: string;
 };
-
-type SignalBotDeliverySendResult =
-  | {
-      fallbackToMarkdown: boolean;
-      fallbackStandalone: boolean;
-      messageId: number | null;
-      ok: true;
-      replyToMessageId: number | null;
-    }
-  | {
-      error: "blocked_or_missing" | "other";
-      message: string;
-      ok: false;
-      retryAfterSec?: number;
-    };
+type SignalBotDeliverySendResult = TelegramDeliverySendResult;
 
 type SignalBotNoteRow = {
   id: string;
@@ -1899,7 +1892,7 @@ type SignalBotMenuCallbackRoute =
     }
   | { kind: "stale" }
   | TelegramBotRewardsCallbackRoute
-  | SignalBotInteractiveMenuRoute
+  | TelegramBotMenuActions.SignalBotInteractiveMenuRoute
   | { kind: "trading_status" };
 
 function buildSignalBotMainMiniAppButton(input: {
@@ -2556,7 +2549,8 @@ function parseSignalBotMenuCallback(
     return { kind: "stale" };
   }
   const route = data.slice(SIGNAL_BOT_MENU_CALLBACK_PREFIX.length);
-  const interactiveRoute = parseSignalBotInteractiveMenuRoute(route);
+  const interactiveRoute =
+    TelegramBotMenuActions.parseSignalBotInteractiveMenuRoute(route);
   if (interactiveRoute) return interactiveRoute;
   const rewardsRoute = parseTelegramBotRewardsCallbackRoute(route);
   if (rewardsRoute) return rewardsRoute;
@@ -2695,25 +2689,15 @@ async function sendOrEditSignalBotMenuScreen(input: {
     notificationPreferences: input.notificationPreferences,
     screen: input.screen,
   });
-  if (input.messageId != null && input.transport.editMessageText) {
-    const edited = await input.transport.editMessageText({
-      chat_id: input.chatId,
-      disable_web_page_preview: true,
-      message_id: input.messageId,
+  return sendOrEditSignalBotMenuMessage({
+    chatId: input.chatId,
+    message: {
       parse_mode: "MarkdownV2",
       reply_markup: screen.keyboard,
       text: screen.text,
-    });
-    if (edited.ok || /message is not modified/i.test(edited.message)) {
-      return edited;
-    }
-  }
-  return input.transport.sendMessage({
-    chat_id: input.chatId,
-    disable_web_page_preview: true,
-    parse_mode: "MarkdownV2",
-    reply_markup: screen.keyboard,
-    text: screen.text,
+    },
+    messageId: input.messageId,
+    transport: input.transport,
   });
 }
 
@@ -2723,16 +2707,8 @@ type SignalBotMenuLoaders = TelegramBotRewardsMenuDependencies & {
     telegramUserId: number;
   }) => Promise<SignalBotMenuMessage>;
   onAccountValueError?: (error: unknown) => void;
-  loadDeposit?: (input: {
-    telegramUserId: number;
-    venue: string | null;
-  }) => Promise<
-    SignalBotMenuMessage & {
-      depositAddress?: string;
-      qrText?: string;
-      venue?: string;
-    }
-  >;
+  loadDeposit?: TelegramBotMenuActions.SignalBotInteractiveMenuLoaders["deposit"];
+  loadFunding?: TelegramBotMenuActions.SignalBotInteractiveMenuLoaders["funding"];
   loadMarketCard?: (input: {
     chatId: string;
     context?: {
@@ -2802,19 +2778,30 @@ export async function handleSignalBotMenuCallback(
     });
     return true;
   }
-  const isAccountBalance =
-    route.kind === "screen" && route.screen === "balance";
-  if (isAccountBalance && String(message.chat.id) !== String(telegramUserId)) {
+  const isBalance = route.kind === "screen" && route.screen === "balance";
+  if (
+    (isBalance || TelegramBotMenuActions.isSignalBotFundingMenuRoute(route)) &&
+    String(message.chat.id) !== String(telegramUserId)
+  ) {
     await input.telegram.answerCallbackQuery({
       callbackQueryId: input.callbackQuery.id,
       showAlert: true,
-      text: "⚠️ Balance is only available in your own private chat.",
+      text: "⚠️ This financial menu is only available in your own private chat.",
     });
     return true;
   }
   const chatId = String(message.chat.id);
   const messageId = message.message_id ?? null;
   const renderToken = input.callbackQuery.id;
+  const shouldDeliver =
+    messageId == null
+      ? undefined
+      : createSignalBotMenuRenderGuard({
+          chatId,
+          messageId,
+          redis: input.redis,
+          renderToken,
+        });
   if (messageId != null) {
     await claimSignalBotMenuRender({
       chatId,
@@ -2823,7 +2810,17 @@ export async function handleSignalBotMenuCallback(
       renderToken,
     });
   }
-  if (isAccountBalance) {
+  const menuTransport =
+    messageId == null
+      ? input.telegram
+      : createTelegramBotCallbackMenuTransport({
+          chatId,
+          messageId,
+          redis: input.redis,
+          renderToken,
+          transport: input.telegram,
+        });
+  if (isBalance) {
     await input.telegram.answerCallbackQuery({
       callbackQueryId: input.callbackQuery.id,
       text: "⏳ Working…",
@@ -2835,7 +2832,7 @@ export async function handleSignalBotMenuCallback(
   });
   const loadMarketCard = input.loadMarketCard;
   if (audience !== "linked") {
-    if (!isAccountBalance) {
+    if (!isBalance) {
       await input.telegram.answerCallbackQuery({
         callbackQueryId: input.callbackQuery.id,
         ...(audience === "unavailable"
@@ -2855,7 +2852,7 @@ export async function handleSignalBotMenuCallback(
       messageId,
       screen: "home",
       telegramUserId,
-      transport: input.telegram,
+      transport: menuTransport,
     });
     return true;
   }
@@ -2874,11 +2871,11 @@ export async function handleSignalBotMenuCallback(
       notice: "The menu was refreshed.",
       screen: "home",
       telegramUserId,
-      transport: input.telegram,
+      transport: menuTransport,
     });
     return true;
   }
-  if (!isAccountBalance) {
+  if (!isBalance) {
     await input.telegram.answerCallbackQuery({
       callbackQueryId: input.callbackQuery.id,
       ...(route.kind === "stats" ||
@@ -2909,7 +2906,7 @@ export async function handleSignalBotMenuCallback(
       redis: input.redis,
       route,
       telegramUserId,
-      transport: input.telegram,
+      transport: menuTransport,
       updateRewardsReferralCode: input.updateRewardsReferralCode,
     });
   }
@@ -2919,12 +2916,18 @@ export async function handleSignalBotMenuCallback(
     route.kind === "market_search_venue" ||
     route.kind === "position" ||
     route.kind === "deposit" ||
-    route.kind === "deposit_menu"
+    route.kind === "deposit_menu" ||
+    route.kind === "select" ||
+    route.kind === "cancel" ||
+    route.kind === "refresh" ||
+    route.kind === "qr"
   ) {
-    return handleSignalBotInteractiveMenuCallback({
+    return TelegramBotMenuActions.handleSignalBotInteractiveMenuCallback({
       callbackPrefix: SIGNAL_BOT_MENU_CALLBACK_PREFIX,
       chatId,
+      idempotencyKey: input.callbackQuery.id,
       loadDeposit: input.loadDeposit,
+      loadFunding: input.loadFunding,
       loadMarketCard: loadMarketCard
         ? (marketInput) =>
             loadMarketCard({
@@ -2940,7 +2943,8 @@ export async function handleSignalBotMenuCallback(
           chatId,
           message: interactiveMessage,
           messageId,
-          transport: input.telegram,
+          shouldDeliver,
+          transport: menuTransport,
         }),
       renderExpiredSearch: () =>
         sendOrEditSignalBotMenuScreen({
@@ -2950,7 +2954,7 @@ export async function handleSignalBotMenuCallback(
           messageId,
           notice: "Search expired. Start a new search.",
           screen: "market_input",
-          transport: input.telegram,
+          transport: menuTransport,
         }),
       route,
       sendPhoto: input.telegram.sendPhoto?.bind(input.telegram),
@@ -2972,7 +2976,7 @@ export async function handleSignalBotMenuCallback(
       notice: "This menu expired, so it was refreshed.",
       screen: "home",
       telegramUserId,
-      transport: input.telegram,
+      transport: menuTransport,
     });
     return true;
   }
@@ -2991,7 +2995,7 @@ export async function handleSignalBotMenuCallback(
       notice: "Market input cancelled.",
       screen: "home",
       telegramUserId,
-      transport: input.telegram,
+      transport: menuTransport,
     });
     return true;
   }
@@ -3014,7 +3018,7 @@ export async function handleSignalBotMenuCallback(
         : "Connect this Telegram account to Hunch first.",
       notificationPreferences: preferences,
       screen: signalBotMenuScreenForNotificationTopic(route.topic),
-      transport: input.telegram,
+      transport: menuTransport,
     });
     return true;
   }
@@ -3025,18 +3029,9 @@ export async function handleSignalBotMenuCallback(
       messageId,
       onError: input.onAccountValueError,
       redis: input.redis,
-      shouldDeliver:
-        messageId == null
-          ? undefined
-          : () =>
-              isSignalBotMenuRenderCurrent({
-                chatId,
-                messageId,
-                redis: input.redis,
-                renderToken,
-              }),
+      shouldDeliver,
       telegramUserId,
-      transport: input.telegram,
+      transport: menuTransport,
     });
     return true;
   }
@@ -3052,7 +3047,7 @@ export async function handleSignalBotMenuCallback(
       isAdmin,
       messageId,
       screen: "positions",
-      transport: input.telegram,
+      transport: menuTransport,
     });
     let positionsMessage: {
       parse_mode?: "MarkdownV2";
@@ -3104,29 +3099,16 @@ export async function handleSignalBotMenuCallback(
         ],
       ],
     };
-    const editResult =
-      messageId != null
-        ? await input.telegram.editMessageText?.({
-            chat_id: chatId,
-            disable_web_page_preview: true,
-            message_id: messageId,
-            parse_mode: positionsMessage.parse_mode ?? "MarkdownV2",
-            reply_markup: keyboard,
-            text: positionsMessage.text,
-          })
-        : null;
-    if (
-      !editResult?.ok &&
-      !/message is not modified/i.test(editResult?.message ?? "")
-    ) {
-      await input.telegram.sendMessage({
-        chat_id: chatId,
-        disable_web_page_preview: true,
+    await sendOrEditSignalBotMenuMessage({
+      chatId,
+      message: {
         parse_mode: positionsMessage.parse_mode ?? "MarkdownV2",
         reply_markup: keyboard,
         text: positionsMessage.text,
-      });
-    }
+      },
+      messageId,
+      transport: menuTransport,
+    });
     return true;
   }
   if (route.kind === "trading_status") {
@@ -3178,7 +3160,7 @@ export async function handleSignalBotMenuCallback(
         },
       },
       messageId,
-      transport: input.telegram,
+      transport: menuTransport,
     });
     return true;
   }
@@ -3202,7 +3184,7 @@ export async function handleSignalBotMenuCallback(
         ? route.period.toUpperCase() + " report was sent below."
         : "Performance is unavailable right now.",
       screen: "performance",
-      transport: input.telegram,
+      transport: menuTransport,
     });
     return true;
   }
@@ -3227,7 +3209,7 @@ export async function handleSignalBotMenuCallback(
         ? "Latest eligible signal preview was sent below."
         : `Signal preview rejected: ${outcome.reason ?? "unknown"}.`,
       screen: "admin",
-      transport: input.telegram,
+      transport: menuTransport,
     });
     return true;
   }
@@ -3250,7 +3232,7 @@ export async function handleSignalBotMenuCallback(
       messageId,
       notificationPreferences: preferences,
       screen: route.screen,
-      transport: input.telegram,
+      transport: menuTransport,
     });
     return true;
   }
@@ -3267,7 +3249,7 @@ export async function handleSignalBotMenuCallback(
         callbackPrefix: SIGNAL_BOT_MENU_CALLBACK_PREFIX,
       }),
       messageId,
-      transport: input.telegram,
+      transport: menuTransport,
     });
     let results: SignalBotMarketSearchResult[];
     try {
@@ -3293,7 +3275,7 @@ export async function handleSignalBotMenuCallback(
         sessionId,
       }),
       messageId,
-      transport: input.telegram,
+      transport: menuTransport,
     });
     return true;
   } else {
@@ -3312,7 +3294,7 @@ export async function handleSignalBotMenuCallback(
     messageId,
     screen: route.screen,
     telegramUserId,
-    transport: input.telegram,
+    transport: menuTransport,
   });
   return true;
 }
@@ -4260,6 +4242,7 @@ export async function pollSignalBotCommands(
           onAccountValueError: input.onAccountValueError,
           loadMarketCard: input.loadMarketCard,
           loadDeposit: input.loadDeposit,
+          loadFunding: input.loadFunding,
           loadPositionCard: input.loadPositionCard,
           loadPositions: input.loadPositions,
           loadRewards: input.loadRewards,
@@ -5438,69 +5421,6 @@ async function loadSignalBotThreadContext(input: {
   }
 }
 
-async function recordSignalBotMessage(input: {
-  baselineAt: string;
-  chatId: string;
-  db: DbQuery;
-  insertId: string;
-  messageId: number | null;
-  messageKind: SignalBotMessageKind;
-  metrics?: unknown;
-  noteId: string;
-  replyToMessageId: number | null;
-  sentAt?: Date;
-  threadRootNoteId: string;
-}): Promise<boolean> {
-  try {
-    await input.db.query(
-      `
-        insert into signal_bot_messages (
-          id,
-          chat_id,
-          note_id,
-          thread_root_note_id,
-          message_kind,
-          telegram_message_id,
-          reply_to_message_id,
-          baseline_at,
-          sent_at,
-          metrics
-        )
-        values ($1::uuid, $2, $3::uuid, $4::uuid, $5, $6, $7, $8::timestamptz, $9::timestamptz, $10::jsonb)
-        on conflict (chat_id, note_id, message_kind)
-        do update set
-          telegram_message_id = excluded.telegram_message_id,
-          reply_to_message_id = excluded.reply_to_message_id,
-          baseline_at = excluded.baseline_at,
-          sent_at = excluded.sent_at,
-          metrics = excluded.metrics
-      `,
-      [
-        input.insertId,
-        input.chatId,
-        input.noteId,
-        input.threadRootNoteId,
-        input.messageKind,
-        input.messageId,
-        input.replyToMessageId,
-        input.baselineAt,
-        (input.sentAt ?? new Date()).toISOString(),
-        JSON.stringify(input.metrics ?? {}),
-      ],
-    );
-    return true;
-  } catch (error) {
-    if (isMissingSignalBotMessagesTable(error)) return false;
-    console.warn("[signal-bot] failed to record message delivery", {
-      chatId: input.chatId,
-      error: error instanceof Error ? error.message : String(error),
-      messageKind: input.messageKind,
-      noteId: input.noteId,
-    });
-    return false;
-  }
-}
-
 async function recordSignalBotSkippedDelivery(input: {
   audit?: Record<string, unknown>;
   baselineAt: string;
@@ -5512,215 +5432,51 @@ async function recordSignalBotSkippedDelivery(input: {
   reason: SignalBotDeliverySkipReason;
   threadRootNoteId: string;
 }): Promise<void> {
-  await recordSignalBotMessage({
+  const now = new Date();
+  const reservation = await reserveSignalBotMessageDelivery({
     baselineAt: input.baselineAt,
+    baseMetrics: {
+      delivery: {
+        policy: input.policy,
+        preparation: input.audit ?? null,
+        reason: input.reason,
+      },
+      reason: input.reason,
+    },
     chatId: input.chatId,
     db: input.db,
-    insertId: createSignalDeliveryRef(),
-    messageId: null,
     messageKind: input.messageKind,
+    noteId: input.noteId,
+    now,
+    replyToMessageId: null,
+    threadRootNoteId: input.threadRootNoteId,
+  });
+  if (reservation.status !== "acquired") return;
+  await finishSignalBotMessageDelivery({
+    attemptId: reservation.attemptId,
+    db: input.db,
+    deliveryRef: reservation.deliveryRef,
+    expectedStatus: "reserved",
     metrics: {
       delivery: {
         policy: input.policy,
         preparation: input.audit ?? null,
         reason: input.reason,
-        status: "skipped",
       },
       reason: input.reason,
-      status: "skipped",
     },
-    noteId: input.noteId,
-    replyToMessageId: null,
-    threadRootNoteId: input.threadRootNoteId,
+    now,
+    status: "skipped",
   });
 }
 
-async function reserveSignalBotFollowthroughMessage(input: {
-  baselineAt: string;
-  chatId: string;
-  db: DbQuery;
-  messageKind: Extract<
-    SignalBotMessageKind,
-    "followthrough_stats" | "resolved_loss" | "resolved_win"
-  >;
-  noteId: string;
-  replyToMessageId: number | null;
-  sentAt: Date;
-  threadRootNoteId: string;
-}): Promise<string | null> {
-  try {
-    const result = await input.db.query<{ id: string }>(
-      `
-        insert into signal_bot_messages (
-          chat_id,
-          note_id,
-          thread_root_note_id,
-          message_kind,
-          telegram_message_id,
-          reply_to_message_id,
-          baseline_at,
-          sent_at,
-          metrics
-        )
-        values ($1, $2::uuid, $3::uuid, $4, null, $5, $6::timestamptz, $7::timestamptz, $8::jsonb)
-        on conflict (chat_id, note_id, message_kind)
-        do update set
-          telegram_message_id = null,
-          reply_to_message_id = excluded.reply_to_message_id,
-          baseline_at = excluded.baseline_at,
-          sent_at = excluded.sent_at,
-          metrics = excluded.metrics
-        where coalesce(signal_bot_messages.metrics->>'status', 'sent') <> 'sent'
-          and signal_bot_messages.sent_at <= $9::timestamptz
-        returning id
-      `,
-      [
-        input.chatId,
-        input.noteId,
-        input.threadRootNoteId,
-        input.messageKind,
-        input.replyToMessageId,
-        input.baselineAt,
-        input.sentAt.toISOString(),
-        JSON.stringify({ status: "pending" }),
-        new Date(
-          input.sentAt.getTime() - FOLLOWTHROUGH_RETRY_COOLDOWN_MS,
-        ).toISOString(),
-      ],
-    );
-    return result.rows[0]?.id ?? null;
-  } catch (error) {
-    if (isMissingSignalBotMessagesTable(error)) return null;
-    console.warn("[signal-bot] failed to reserve followthrough delivery", {
-      chatId: input.chatId,
-      error: error instanceof Error ? error.message : String(error),
-      messageKind: input.messageKind,
-      noteId: input.noteId,
-    });
-    return null;
-  }
-}
-
-async function recordSignalBotFollowthroughSkipped(input: {
-  baselineAt: string;
-  chatId: string;
-  db: DbQuery;
-  metrics: unknown;
-  noteId: string;
-  replyToMessageId: number | null;
-  sentAt: Date;
-  threadRootNoteId: string;
-}): Promise<void> {
-  try {
-    await input.db.query(
-      `
-        insert into signal_bot_messages (
-          chat_id,
-          note_id,
-          thread_root_note_id,
-          message_kind,
-          telegram_message_id,
-          reply_to_message_id,
-          baseline_at,
-          sent_at,
-          metrics
-        )
-        values ($1, $2::uuid, $3::uuid, $4, $5, $6, $7::timestamptz, $8::timestamptz, $9::jsonb)
-        on conflict (chat_id, note_id, message_kind)
-        do update set
-          telegram_message_id = null,
-          reply_to_message_id = excluded.reply_to_message_id,
-          thread_root_note_id = excluded.thread_root_note_id,
-          baseline_at = excluded.baseline_at,
-          sent_at = excluded.sent_at,
-          metrics = excluded.metrics
-        where coalesce(signal_bot_messages.metrics->>'status', 'sent') <> 'sent'
-      `,
-      [
-        input.chatId,
-        input.noteId,
-        input.threadRootNoteId,
-        "followthrough_stats",
-        null,
-        input.replyToMessageId,
-        input.baselineAt,
-        input.sentAt.toISOString(),
-        JSON.stringify(input.metrics),
-      ],
-    );
-  } catch (error) {
-    if (isMissingSignalBotMessagesTable(error)) return;
-    console.warn("[signal-bot] failed to record skipped followthrough", {
-      chatId: input.chatId,
-      error: error instanceof Error ? error.message : String(error),
-      noteId: input.noteId,
-    });
-  }
-}
-
-async function sendSignalBotMessageWithReplyFallback(input: {
+export async function sendSignalBotMessageWithReplyFallback(input: {
   message: TelegramSendMessageInput;
   replyToMessageId: number | null;
   richMessage?: TelegramInputRichMessage;
   telegram: SignalBotTelegramClient;
 }): Promise<SignalBotDeliverySendResult> {
-  const send = async (
-    replyToMessageId: number | null,
-  ): Promise<{
-    fallbackToMarkdown: boolean;
-    result: TelegramSendResult;
-  }> => {
-    const replyParameters =
-      replyToMessageId == null ? undefined : { message_id: replyToMessageId };
-    if (input.richMessage && input.telegram.sendRichMessage) {
-      const richResult = await input.telegram.sendRichMessage({
-        chat_id: input.message.chat_id,
-        reply_markup: input.message.reply_markup,
-        reply_parameters: replyParameters,
-        rich_message: input.richMessage,
-      });
-      if (
-        richResult.ok ||
-        richResult.error === "blocked_or_missing" ||
-        richResult.retryAfterSec != null
-      ) {
-        return { fallbackToMarkdown: false, result: richResult };
-      }
-    }
-    return {
-      fallbackToMarkdown: Boolean(
-        input.richMessage && input.telegram.sendRichMessage,
-      ),
-      result: await input.telegram.sendMessage({
-        ...input.message,
-        reply_parameters: replyParameters,
-      }),
-    };
-  };
-
-  const first = await send(input.replyToMessageId);
-  if (first.result.ok) {
-    return {
-      fallbackToMarkdown: first.fallbackToMarkdown,
-      fallbackStandalone: false,
-      messageId: first.result.messageId,
-      ok: true,
-      replyToMessageId: input.replyToMessageId,
-    };
-  }
-  if (first.result.error === "blocked_or_missing") return first.result;
-  if (input.replyToMessageId == null) return first.result;
-
-  const standalone = await send(null);
-  return standalone.result.ok
-    ? {
-        fallbackToMarkdown: standalone.fallbackToMarkdown,
-        fallbackStandalone: true,
-        messageId: standalone.result.messageId,
-        ok: true,
-        replyToMessageId: null,
-      }
-    : standalone.result;
+  return sendTelegramMessageWithReplyFallback(input);
 }
 
 export function createSignalBotTelegramTransport(
@@ -5799,7 +5555,9 @@ async function sendSignalBotViaTransport(input: {
       error:
         result.errorCode === "blocked_or_missing"
           ? "blocked_or_missing"
-          : "other",
+          : result.errorCode === "ambiguous"
+            ? "ambiguous"
+            : "other",
       message: result.message ?? "Telegram delivery failed",
       ok: false,
       retryAfterSec: result.retryAfterSec,
@@ -5913,6 +5671,7 @@ export async function publishSignalBotTick(input: {
   } & SignalBotCheaperAlternativeDiagnostics &
     SignalBotPriceGuardDiagnostics
 > {
+  await quarantineStaleSignalBotMessageDeliveries({ db: input.db });
   const chatIds = await input.redis.sMembers(CHAT_SET_KEY);
   const telegramTransport =
     input.transports?.find((transport) => transport.kind === "telegram") ??
@@ -6063,6 +5822,10 @@ export async function publishSignalBotTick(input: {
         }
         if (editorial.status === "sent") sent += 1;
         if (editorial.status === "blocked") {
+          if (editorial.blockedChat) {
+            blockedChats += 1;
+            await disableSignalBotChat(input.redis, chatId);
+          }
           countDeliverySkip("unpublishable_copy");
         }
         await updateSignalBotChatCursor({
@@ -6114,7 +5877,44 @@ export async function publishSignalBotTick(input: {
       if (routing.target.marketId !== note.marketId) {
         cheaperAlternatives += 1;
       }
-      const deliveryRef = createSignalDeliveryRef();
+      const reservation = await reserveSignalBotMessageDelivery({
+        baselineAt: thread.baselineAt,
+        baseMetrics: {
+          delivery: {
+            lifecycleRevision: lifecycle.revision,
+            policy: destinationPolicy,
+            view: {
+              target: {
+                marketId: routing.target.marketId,
+                venue: routing.target.venue,
+              },
+            },
+          },
+          noteKind: messageKind,
+          contentProfile: "telegram_signal_v11",
+        },
+        chatId,
+        db: input.db,
+        messageKind,
+        noteId: note.id,
+        replyToMessageId: thread.replyToMessageId,
+        threadRootNoteId: thread.threadRootNoteId,
+      });
+      if (reservation.status === "terminal") {
+        if (reservation.outcome === "blocked") {
+          blockedChats += 1;
+          await disableSignalBotChat(input.redis, chatId);
+        }
+        await updateSignalBotChatCursor({
+          chatId,
+          createdAt: note.createdAt,
+          id: note.id,
+          redis: input.redis,
+        });
+        continue;
+      }
+      if (reservation.status !== "acquired") break;
+      const deliveryRef = reservation.deliveryRef;
       const preparation = await prepareSignalBotDelivery({
         appBaseUrl: input.config.appBaseUrl,
         buyAmountUsd: input.config.buyAmountUsd,
@@ -6144,10 +5944,43 @@ export async function publishSignalBotTick(input: {
         );
         if (deferCount > input.config.priceGuardMaxDefers) {
           priceGuardDiagnostics.priceGuardStaleExpired += 1;
-          await skipDelivery("quote_refresh_expired", preparation.audit);
+          countDeliverySkip("quote_refresh_expired");
+          await finishSignalBotMessageDelivery({
+            attemptId: reservation.attemptId,
+            db: input.db,
+            deliveryRef,
+            expectedStatus: "reserved",
+            metrics: {
+              delivery: {
+                policy: destinationPolicy,
+                preparation: preparation.audit,
+                reason: "quote_refresh_expired",
+              },
+              reason: "quote_refresh_expired",
+            },
+            status: "skipped",
+          });
+          await updateSignalBotChatCursor({
+            chatId,
+            createdAt: note.createdAt,
+            id: note.id,
+            redis: input.redis,
+          });
           continue;
         }
         priceGuardDiagnostics.priceGuardDeferred += 1;
+        await finishSignalBotMessageDelivery({
+          attemptId: reservation.attemptId,
+          db: input.db,
+          deliveryRef,
+          errorCode: "quote_refresh_deferred",
+          expectedStatus: "reserved",
+          metrics: { delivery: { preparation: preparation.audit } },
+          nextAttemptAt: new Date(
+            Date.now() + input.config.priceGuardDeferTtlSec * 1_000,
+          ),
+          status: "retry",
+        });
         break;
       }
       if (preparation.status === "skipped") {
@@ -6158,7 +5991,28 @@ export async function publishSignalBotTick(input: {
             preparation.blockers,
           );
         }
-        await skipDelivery(preparation.reason, preparation.audit);
+        countDeliverySkip(preparation.reason);
+        await finishSignalBotMessageDelivery({
+          attemptId: reservation.attemptId,
+          db: input.db,
+          deliveryRef,
+          expectedStatus: "reserved",
+          metrics: {
+            delivery: {
+              policy: destinationPolicy,
+              preparation: preparation.audit,
+              reason: preparation.reason,
+            },
+            reason: preparation.reason,
+          },
+          status: "skipped",
+        });
+        await updateSignalBotChatCursor({
+          chatId,
+          createdAt: note.createdAt,
+          id: note.id,
+          redis: input.redis,
+        });
         continue;
       }
       if (preparation.blockers.length > 0) {
@@ -6183,19 +6037,23 @@ export async function publishSignalBotTick(input: {
         },
         text,
       };
+      const began = await beginSignalBotMessageDelivery({
+        attemptId: reservation.attemptId,
+        db: input.db,
+        deliveryRef,
+      });
+      if (!began) break;
       const result = await sendSignalBotViaTransport({
         payload: transportPayload,
         transport: telegramTransport,
       });
       if (result.ok) {
-        sent += 1;
-        await recordSignalBotMessage({
-          baselineAt: thread.baselineAt,
-          chatId,
+        const applied = await finishSignalBotMessageDelivery({
+          attemptId: reservation.attemptId,
           db: input.db,
-          insertId: deliveryRef,
+          deliveryRef,
+          expectedStatus: "sending",
           messageId: result.messageId,
-          messageKind,
           metrics: {
             copy: buildSignalBotCopyAudit({
               buySide: preparation.buySide,
@@ -6214,10 +6072,10 @@ export async function publishSignalBotTick(input: {
             noteKind: messageKind,
             contentProfile: "telegram_signal_v11",
           },
-          noteId: note.id,
           replyToMessageId: result.replyToMessageId,
-          threadRootNoteId: thread.threadRootNoteId,
+          status: "sent",
         });
+        if (applied) sent += 1;
         await updateSignalBotChatCursor({
           chatId,
           createdAt: note.createdAt,
@@ -6227,10 +6085,47 @@ export async function publishSignalBotTick(input: {
         continue;
       }
       if (result.error === "blocked_or_missing") {
+        await finishSignalBotMessageDelivery({
+          attemptId: reservation.attemptId,
+          db: input.db,
+          deliveryRef,
+          errorCode: result.error,
+          expectedStatus: "sending",
+          status: "blocked",
+        });
         blockedChats += 1;
         await disableSignalBotChat(input.redis, chatId);
         break;
       }
+      if (result.error === "ambiguous") {
+        await finishSignalBotMessageDelivery({
+          attemptId: reservation.attemptId,
+          db: input.db,
+          deliveryRef,
+          errorCode: result.error,
+          expectedStatus: "sending",
+          status: "delivery_unknown",
+        });
+        await updateSignalBotChatCursor({
+          chatId,
+          createdAt: note.createdAt,
+          id: note.id,
+          redis: input.redis,
+        });
+        continue;
+      }
+      await finishSignalBotMessageDelivery({
+        attemptId: reservation.attemptId,
+        db: input.db,
+        deliveryRef,
+        errorCode: result.error,
+        expectedStatus: "sending",
+        nextAttemptAt: new Date(
+          Date.now() +
+            (result.retryAfterSec ?? SEND_FAILURE_COOLDOWN_SEC) * 1_000,
+        ),
+        status: "retry",
+      });
       await input.redis.set(
         signalBotSendCooldownKey(chatId, note.id),
         result.message,
@@ -6583,7 +6478,9 @@ async function loadSignalBotFollowthroughCandidates(input: {
                     and sent.note_id = root.thread_root_note_id
                     and sent.message_kind = 'followthrough_stats'
                     and (
-                      coalesce(sent.metrics->>'status', 'sent') = 'sent'
+                      coalesce(sent.metrics->>'status', 'sent') in (
+                        'blocked', 'delivery_unknown', 'sent'
+                      )
                       or sent.metrics #>> '{editorialDraftV1,status}' = 'blocked'
                       or sent.sent_at > $6::timestamptz
                     )
@@ -6602,7 +6499,9 @@ async function loadSignalBotFollowthroughCandidates(input: {
                     and sent.note_id = root.thread_root_note_id
                     and sent.message_kind in ('resolved_win', 'resolved_loss')
                     and (
-                      coalesce(sent.metrics->>'status', 'sent') = 'sent'
+                      coalesce(sent.metrics->>'status', 'sent') in (
+                        'blocked', 'delivery_unknown', 'sent'
+                      )
                       or sent.metrics #>> '{editorialDraftV1,status}' = 'blocked'
                       or sent.sent_at > $6::timestamptz
                     )
@@ -7823,6 +7722,10 @@ export async function publishSignalBotFollowthroughTick(input: {
   sentStats: number;
   skipped: number;
 }> {
+  await quarantineStaleSignalBotMessageDeliveries({
+    db: input.db,
+    now: input.now,
+  });
   const policy = await resolveSignalBotFollowthroughPolicy(
     input.db,
     input.config.followthrough,
@@ -7931,9 +7834,13 @@ export async function publishSignalBotFollowthroughTick(input: {
       }
       if (
         editorial.status === "blocked" ||
+        editorial.status === "delivery_unknown" ||
         editorial.status === "invalid" ||
         editorial.status === "unavailable"
       ) {
+        if (editorial.status === "blocked" && editorial.blockedChat) {
+          await disableSignalBotChat(input.redis, candidate.chat_id);
+        }
         skipped += 1;
         continue;
       }
@@ -7945,20 +7852,22 @@ export async function publishSignalBotFollowthroughTick(input: {
       }
       continue;
     }
-    const reserved = await reserveSignalBotFollowthroughMessage({
+    const reservation = await reserveSignalBotMessageDelivery({
       baselineAt,
+      baseMetrics: { ...stats },
       chatId: candidate.chat_id,
       db: input.db,
       messageKind: kind,
       noteId: candidate.thread_root_note_id,
+      now,
       replyToMessageId,
-      sentAt: now,
       threadRootNoteId: candidate.thread_root_note_id,
     });
-    if (!reserved) {
+    if (reservation.status !== "acquired") {
       skipped += 1;
       continue;
     }
+    const reserved = reservation.deliveryRef;
     const text = buildSignalBotFollowthroughMessage({
       candidate,
       deliveryRef: reserved,
@@ -8011,6 +7920,16 @@ export async function publishSignalBotFollowthroughTick(input: {
       target,
       copyPolicy,
     });
+    const began = await beginSignalBotMessageDelivery({
+      attemptId: reservation.attemptId,
+      db: input.db,
+      deliveryRef: reserved,
+      now,
+    });
+    if (!began) {
+      skipped += 1;
+      continue;
+    }
     const result = await sendSignalBotViaTransport({
       payload: {
         ...telegramTransport.render(deliveryView),
@@ -8029,54 +7948,84 @@ export async function publishSignalBotFollowthroughTick(input: {
     });
     if (!result.ok) {
       if (result.error === "blocked_or_missing") {
+        await finishSignalBotMessageDelivery({
+          attemptId: reservation.attemptId,
+          db: input.db,
+          deliveryRef: reserved,
+          errorCode: result.error,
+          expectedStatus: "sending",
+          metrics: {
+            ...stats,
+            copy: copyAudit,
+            delivery: { view: deliveryView },
+          },
+          now,
+          status: "blocked",
+        });
         await disableSignalBotChat(input.redis, candidate.chat_id);
+      } else if (result.error === "ambiguous") {
+        await finishSignalBotMessageDelivery({
+          attemptId: reservation.attemptId,
+          db: input.db,
+          deliveryRef: reserved,
+          errorCode: result.error,
+          expectedStatus: "sending",
+          metrics: {
+            ...stats,
+            copy: copyAudit,
+            delivery: { view: deliveryView },
+          },
+          now,
+          status: "delivery_unknown",
+        });
+      } else {
+        await finishSignalBotMessageDelivery({
+          attemptId: reservation.attemptId,
+          db: input.db,
+          deliveryRef: reserved,
+          errorCode: result.error,
+          expectedStatus: "sending",
+          metrics: {
+            ...stats,
+            copy: copyAudit,
+            delivery: { view: deliveryView },
+          },
+          nextAttemptAt: new Date(
+            now.getTime() +
+              (result.retryAfterSec == null
+                ? FOLLOWTHROUGH_RETRY_COOLDOWN_MS
+                : result.retryAfterSec * 1_000),
+          ),
+          now,
+          status: "retry",
+        });
       }
-      await recordSignalBotMessage({
-        baselineAt,
-        chatId: candidate.chat_id,
-        db: input.db,
-        insertId: createSignalDeliveryRef(),
-        messageId: null,
-        messageKind: kind,
-        metrics: {
-          ...stats,
-          copy: copyAudit,
-          delivery: { view: deliveryView },
-          error: result.error,
-          status: "send_failed",
-        },
-        noteId: candidate.thread_root_note_id,
-        replyToMessageId,
-        threadRootNoteId: candidate.thread_root_note_id,
-        sentAt: now,
-      });
       skipped += 1;
       continue;
     }
-    await recordSignalBotMessage({
-      baselineAt,
-      chatId: candidate.chat_id,
+    const applied = await finishSignalBotMessageDelivery({
+      attemptId: reservation.attemptId,
       db: input.db,
-      insertId: createSignalDeliveryRef(),
+      deliveryRef: reserved,
+      expectedStatus: "sending",
       messageId: result.messageId,
-      messageKind: kind,
       metrics: {
         ...stats,
         copy: copyAudit,
         delivery: { view: deliveryView },
         fallbackToMarkdown: result.fallbackToMarkdown,
         fallbackStandalone: result.fallbackStandalone,
-        status: "sent",
       },
-      noteId: candidate.thread_root_note_id,
+      now,
       replyToMessageId: result.replyToMessageId,
-      threadRootNoteId: candidate.thread_root_note_id,
-      sentAt: now,
+      status: "sent",
     });
-    sent += 1;
-    if (kind === "followthrough_stats") sentStats += 1;
-    else if (kind === "resolved_win") sentResolvedWin += 1;
-    else if (kind === "resolved_loss") sentResolvedLoss += 1;
+    if (applied) {
+      sent += 1;
+      if (kind === "followthrough_stats") sentStats += 1;
+      else if (kind === "resolved_win") sentResolvedWin += 1;
+      else if (kind === "resolved_loss") sentResolvedLoss += 1;
+    }
   }
   return {
     candidates: candidates.length,

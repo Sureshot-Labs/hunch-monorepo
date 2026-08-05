@@ -60,11 +60,20 @@ export type TelegramSendRichMessageInput = {
 export type TelegramSendResult =
   | { messageId: number | null; ok: true }
   | {
-      error: "blocked_or_missing" | "other";
+      error:
+        | "ambiguous"
+        | "blocked_or_missing"
+        | "message_not_editable"
+        | "other"
+        | "reply_target_missing";
       message: string;
       ok: false;
       retryAfterSec?: number;
     };
+
+export type TelegramMutationResult =
+  | { ok: true }
+  | Extract<TelegramSendResult, { ok: false }>;
 
 export type SignalBotTelegramClient = {
   answerCallbackQuery(input: {

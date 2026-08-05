@@ -84,6 +84,10 @@ function isFundingReconciliationNoop(result: unknown): boolean {
       "reviewsRequired",
       "retriesScheduled",
       "retryableErrors",
+    ]) &&
+    !hasPositiveActivity(record.telegramFundingProgress, [
+      "candidates",
+      "created",
     ])
   );
 }

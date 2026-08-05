@@ -77,6 +77,7 @@ export type FundingPlannerErrorCode =
   | "manual_rebalance_forbidden"
   | "market_class_required"
   | "provider_unavailable"
+  | "receive_channel_conflict"
   | "source_not_selected"
   | "stale_projection";
 

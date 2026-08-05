@@ -23,6 +23,12 @@ export type TelegramBotTradingClientMessage = {
   text: string;
 };
 
+export type TelegramFundingClientMessage = TelegramBotTradingClientMessage & {
+  fundingContextId?: string;
+  qrText?: string;
+  venue?: "polymarket";
+};
+
 export type TelegramBotTradingClientCallbackInput = {
   answerCallbackQuery: (input: {
     callbackQueryId: string;
@@ -107,6 +113,34 @@ export type TelegramBotTradingInternalApiClient = {
       venue?: string;
     }
   >;
+  openFunding: (input: {
+    chatId: string | number;
+    idempotencyKey: string;
+    telegramMessageId: number | null;
+    telegramUserId: string | number;
+    venue: "polymarket";
+  }) => Promise<TelegramFundingClientMessage>;
+  getFundingSession: (input: {
+    chatId: string | number;
+    contextId: string;
+    telegramUserId: string | number;
+    view?: "address" | "progress";
+  }) => Promise<TelegramFundingClientMessage>;
+  selectFundingTarget: (input: {
+    chatId: string | number;
+    choiceToken: string;
+    contextId: string;
+    idempotencyKey: string;
+    telegramMessageId: number | null;
+    telegramUserId: string | number;
+  }) => Promise<TelegramFundingClientMessage>;
+  cancelFunding: (input: {
+    chatId: string | number;
+    contextId: string;
+    idempotencyKey: string;
+    telegramMessageId: number | null;
+    telegramUserId: string | number;
+  }) => Promise<TelegramFundingClientMessage>;
   searchMarkets: (input: { query?: string | null }) => Promise<
     Array<{
       eventId: string;
@@ -400,6 +434,27 @@ export function createTelegramBotTradingInternalApiClient(input: {
           venue?: string;
         }
       >("/internal/telegram-bot/deposit", body),
+    openFunding: (body) =>
+      post<TelegramFundingClientMessage>(
+        "/internal/telegram-bot/funding/open",
+        body,
+        { timeoutMs: executeTimeoutMs },
+      ),
+    getFundingSession: (body) =>
+      post<TelegramFundingClientMessage>(
+        "/internal/telegram-bot/funding/session",
+        body,
+      ),
+    selectFundingTarget: (body) =>
+      post<TelegramFundingClientMessage>(
+        "/internal/telegram-bot/funding/select-target",
+        body,
+      ),
+    cancelFunding: (body) =>
+      post<TelegramFundingClientMessage>(
+        "/internal/telegram-bot/funding/cancel",
+        body,
+      ),
     searchMarkets: (body) =>
       post<
         Array<{

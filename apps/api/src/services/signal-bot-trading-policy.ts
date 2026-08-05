@@ -10,6 +10,7 @@ export type SignalBotPolicy = {
   autoEnableOnTelegramLink: boolean;
   autoManagedMaxAmountUsd: number;
   autoManagedVenues: SignalBotTradingVenue[];
+  fundingReceiveEnabled: boolean;
   tradingEnabled: boolean;
   tradingActions: SignalBotTradingAction[];
   tradingVenues: SignalBotTradingVenue[];
@@ -44,6 +45,7 @@ export const signalBotSchema = z
     autoEnableOnTelegramLink: strictBoolean,
     autoManagedMaxAmountUsd: positiveInt.max(100_000),
     autoManagedVenues: z.array(signalBotTradingVenueSchema).max(8),
+    fundingReceiveEnabled: strictBoolean,
     tradingEnabled: strictBoolean,
     tradingActions: z.array(signalBotTradingActionSchema).max(8),
     tradingVenues: z.array(signalBotTradingVenueSchema).max(8),
@@ -87,6 +89,7 @@ export function getDefaultSignalBotPolicy(): SignalBotPolicy {
     autoEnableOnTelegramLink: false,
     autoManagedMaxAmountUsd: 1,
     autoManagedVenues: ["polymarket"],
+    fundingReceiveEnabled: false,
     tradingEnabled: false,
     tradingActions: ["buy"],
     tradingVenues: ["polymarket", "limitless", "kalshi"],
@@ -110,7 +113,10 @@ export function sanitizeSignalBotPolicyOverride(payload: unknown): unknown {
 export function normalizeSignalBotPolicy(
   policy: Omit<
     SignalBotPolicy,
-    "autoEnableOnTelegramLink" | "autoManagedMaxAmountUsd" | "autoManagedVenues"
+    | "autoEnableOnTelegramLink"
+    | "autoManagedMaxAmountUsd"
+    | "autoManagedVenues"
+    | "fundingReceiveEnabled"
   > &
     Partial<
       Pick<
@@ -118,6 +124,7 @@ export function normalizeSignalBotPolicy(
         | "autoEnableOnTelegramLink"
         | "autoManagedMaxAmountUsd"
         | "autoManagedVenues"
+        | "fundingReceiveEnabled"
       >
     >,
 ): SignalBotPolicy {
@@ -163,6 +170,7 @@ export function normalizeSignalBotPolicy(
         ),
       ),
     ),
+    fundingReceiveEnabled: Boolean(policy.fundingReceiveEnabled ?? false),
     tradingEnabled: Boolean(policy.tradingEnabled),
     tradingActions,
     tradingVenues: venues,

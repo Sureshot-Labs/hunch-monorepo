@@ -43,6 +43,7 @@ import {
   readSignalBotUpdateOffset,
   refreshSignalBotLock,
   releaseSignalBotLock,
+  sendSignalBotMessageWithReplyFallback,
   sendSignalBotFollowthroughPreview,
   sendSignalBotRichLayoutPreview,
   resolveSignalBotBuySide,
@@ -755,7 +756,7 @@ class FakeDb {
         oid: 0,
         rowCount: 1,
         rows: (sql.includes("returning id")
-          ? [{ id: "00000000-0000-4000-8000-000000000099" }]
+          ? [{ id: String(params[0]) }]
           : []) as unknown as T[],
       };
     }
@@ -1466,10 +1467,38 @@ class FakeFollowthroughDb {
     if (sql.includes("insert into signal_bot_messages")) {
       if (/insert into signal_bot_messages\s*\(\s*id,/i.test(sql)) {
         const key = `${String(params[1])}|${String(params[2])}|${String(params[4])}`;
+        const existing = this.messageRows.get(key);
+        const nonDeliveryState = params.length === 9;
+        const existingDeliveryState = (
+          existing?.metrics as
+            | { deliveryStateV2?: { version?: unknown } }
+            | undefined
+        )?.deliveryStateV2;
+        const existingStatus = String(
+          (existing?.metrics as { status?: unknown } | undefined)?.status ?? "",
+        );
+        const canUpdate = nonDeliveryState
+          ? existingDeliveryState?.version == null &&
+            ["compose_failed", "skipped"].includes(existingStatus)
+          : existingStatus === "retry";
+        if (existing && !canUpdate) {
+          return {
+            command: "INSERT",
+            fields: [],
+            oid: 0,
+            rowCount: 0,
+            rows: [],
+          };
+        }
         this.messageRows.set(key, {
-          id: String(params[0]),
-          messageId: typeof params[5] === "number" ? params[5] : null,
-          metrics: JSON.parse(String(params[9])) as unknown,
+          id: "00000000-0000-4000-8000-000000000099",
+          messageId:
+            !nonDeliveryState && typeof params[5] === "number"
+              ? params[5]
+              : null,
+          metrics: JSON.parse(
+            String(nonDeliveryState ? params[8] : params[9]),
+          ) as unknown,
         });
       }
       return {
@@ -1480,6 +1509,37 @@ class FakeFollowthroughDb {
         rows: (sql.includes("returning id")
           ? [{ id: "00000000-0000-4000-8000-000000000099" }]
           : []) as unknown as T[],
+      };
+    }
+    if (
+      sql.includes("update signal_bot_messages") &&
+      sql.includes("deliveryStateV2") &&
+      params.length >= 4
+    ) {
+      const stored = [...this.messageRows.values()].find(
+        (row) => row.id === String(params[0]),
+      );
+      if (!stored) {
+        return {
+          command: "UPDATE",
+          fields: [],
+          oid: 0,
+          rowCount: 0,
+          rows: [],
+        };
+      }
+      if (sql.includes("set telegram_message_id = $4")) {
+        stored.messageId = typeof params[3] === "number" ? params[3] : null;
+        stored.metrics = JSON.parse(String(params[4])) as unknown;
+      } else if (typeof params[2] === "string") {
+        stored.metrics = JSON.parse(params[2]) as unknown;
+      }
+      return {
+        command: "UPDATE",
+        fields: [],
+        oid: 0,
+        rowCount: 1,
+        rows: [],
       };
     }
     return {
@@ -1496,6 +1556,19 @@ function readSignalBotMessageInsert(query: { params: unknown[]; sql: string }) {
   const hasExplicitId = /insert into signal_bot_messages\s*\(\s*id,/i.test(
     query.sql,
   );
+  const nonDeliveryState = query.params.length === 9;
+  if (hasExplicitId && nonDeliveryState) {
+    return {
+      id: query.params[0],
+      chatId: query.params[1],
+      noteId: query.params[2],
+      threadRootNoteId: query.params[3],
+      messageKind: query.params[4],
+      messageId: null,
+      replyToMessageId: query.params[5],
+      metrics: JSON.parse(String(query.params[8])) as Record<string, unknown>,
+    };
+  }
   const offset = hasExplicitId ? 1 : 0;
   return {
     id: hasExplicitId ? query.params[0] : null,
@@ -1509,6 +1582,14 @@ function readSignalBotMessageInsert(query: { params: unknown[]; sql: string }) {
       string,
       unknown
     >,
+  };
+}
+
+function readSignalBotMessageFinish(query: { params: unknown[]; sql: string }) {
+  return {
+    messageId: query.params[3] ?? null,
+    metrics: JSON.parse(String(query.params[4])) as Record<string, unknown>,
+    replyToMessageId: query.params[7] ?? null,
   };
 }
 
@@ -2208,6 +2289,21 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
             }),
             { status: 429 },
           ),
+          new Response(
+            JSON.stringify({
+              description: "Too Many Requests",
+              ok: false,
+              parameters: { retry_after: 11 },
+            }),
+            { status: 429 },
+          ),
+          new Response(
+            JSON.stringify({
+              description: "Bad Request: reply message not found",
+              ok: false,
+            }),
+            { status: 400 },
+          ),
         ];
         globalThis.fetch = (async (...args: Parameters<typeof fetch>) => {
           const init = args[1];
@@ -2237,9 +2333,87 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           ok: false,
           retryAfterSec: 9,
         });
+        const editRateLimited = await client.editMessageText({
+          chat_id: "-100",
+          disable_web_page_preview: true,
+          message_id: 456,
+          parse_mode: "MarkdownV2",
+          text: "updated",
+        });
+        assert.deepEqual(editRateLimited, {
+          error: "other",
+          message: "Too Many Requests",
+          ok: false,
+          retryAfterSec: 11,
+        });
+        const missingReply = await client.sendMessage({
+          chat_id: "-100",
+          disable_web_page_preview: true,
+          parse_mode: "MarkdownV2",
+          reply_parameters: { message_id: 77 },
+          text: "hello",
+        });
+        assert.deepEqual(missingReply, {
+          error: "reply_target_missing",
+          message: "Bad Request: reply message not found",
+          ok: false,
+        });
       } finally {
         globalThis.fetch = originalFetch;
       }
+    },
+  },
+  {
+    name: "Telegram client classifies a timed-out send as ambiguous",
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      try {
+        globalThis.fetch = (async () => {
+          throw new DOMException("request timed out", "TimeoutError");
+        }) as typeof fetch;
+        const result = await new TelegramBotApiClient("token").sendMessage({
+          chat_id: "-100",
+          disable_web_page_preview: true,
+          text: "hello",
+        });
+        assert.deepEqual(result, {
+          error: "ambiguous",
+          message: "request timed out",
+          ok: false,
+        });
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    },
+  },
+  {
+    name: "ambiguous reply delivery never falls back to a standalone send",
+    run: async () => {
+      let sends = 0;
+      const result = await sendSignalBotMessageWithReplyFallback({
+        message: {
+          chat_id: "-100",
+          disable_web_page_preview: true,
+          text: "signal",
+        },
+        replyToMessageId: 77,
+        telegram: {
+          sendMessage: async () => {
+            sends += 1;
+            return {
+              error: "ambiguous" as const,
+              message: "request outcome unknown",
+              ok: false as const,
+            };
+          },
+        } as never,
+      });
+      assert.equal(sends, 1);
+      assert.deepEqual(result, {
+        error: "ambiguous",
+        message: "request outcome unknown",
+        ok: false,
+      });
     },
   },
   {
@@ -2637,6 +2811,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         claimed: 1,
         deferred: 0,
         failed: 0,
+        quarantined: 0,
         sent: 1,
         skipped: 0,
       });
@@ -13078,9 +13253,14 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         "00000000-0000-4000-8000-000000000001",
       );
       assert.equal(recorded.messageKind, "initial");
-      assert.equal(recorded.messageId, 101);
+      assert.equal(recorded.messageId, null);
       assert.equal(recorded.replyToMessageId, null);
       assert.equal(recorded.metrics.contentProfile, "telegram_signal_v11");
+      const finish = db.queries.find((query) =>
+        query.sql.includes("set telegram_message_id = $4"),
+      );
+      assert.ok(finish);
+      assert.equal(readSignalBotMessageFinish(finish).messageId, 101);
       const state = await getSignalBotChatState(redis, "-100");
       assert.equal(state?.cursorCreatedAt, "2026-01-01T00:00:00.000Z");
       assert.equal(state?.cursorId, "00000000-0000-4000-8000-000000000001");
@@ -13157,8 +13337,13 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         "00000000-0000-4000-8000-000000000001",
       );
       assert.equal(recorded.messageKind, "research_update");
-      assert.equal(recorded.messageId, 101);
+      assert.equal(recorded.messageId, null);
       assert.equal(recorded.replyToMessageId, 77);
+      const finish = db.queries.find((query) =>
+        query.sql.includes("set telegram_message_id = $4"),
+      );
+      assert.ok(finish);
+      assert.equal(readSignalBotMessageFinish(finish).messageId, 101);
     },
   },
   {
@@ -13259,7 +13444,11 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       ];
       const telegram = new FakeTelegram();
       telegram.nextResults = [
-        { error: "other", message: "reply target missing", ok: false },
+        {
+          error: "reply_target_missing",
+          message: "reply target missing",
+          ok: false,
+        },
         { messageId: 333, ok: true },
       ];
       const result = await publishSignalBotTick({
@@ -13282,9 +13471,16 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         .at(-1);
       assert.ok(delivery);
       const recorded = readSignalBotMessageInsert(delivery);
-      assert.equal(recorded.messageId, 333);
-      assert.equal(recorded.replyToMessageId, null);
-      const metrics = recorded.metrics as {
+      assert.equal(recorded.messageId, null);
+      assert.equal(recorded.replyToMessageId, 77);
+      const finish = db.queries.find((query) =>
+        query.sql.includes("set telegram_message_id = $4"),
+      );
+      assert.ok(finish);
+      const finished = readSignalBotMessageFinish(finish);
+      assert.equal(finished.messageId, 333);
+      assert.equal(finished.replyToMessageId, null);
+      const metrics = finished.metrics as {
         copy?: {
           copyVersion?: string;
           notification?: {
@@ -13364,10 +13560,18 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         query.sql.includes("insert into signal_bot_messages"),
       );
       assert.equal(deliveries.length, 2);
+      const finishes = db.queries.filter((query) =>
+        query.sql.includes("set telegram_message_id = $4"),
+      );
       assert.deepEqual(
-        deliveries.map((delivery) => {
+        deliveries.map((delivery, index) => {
           const recorded = readSignalBotMessageInsert(delivery);
-          return [recorded.chatId, recorded.messageId];
+          const finish = finishes[index];
+          assert.ok(finish);
+          return [
+            recorded.chatId,
+            readSignalBotMessageFinish(finish).messageId,
+          ];
         }),
         [
           ["-100", 101],
@@ -13568,7 +13772,11 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(recorded.noteId, "00000000-0000-4000-8000-000000000101");
       assert.equal(recorded.messageKind, "followthrough_stats");
       assert.equal(recorded.replyToMessageId, 77);
-      const metrics = recorded.metrics;
+      const finish = db.queries.find((query) =>
+        query.sql.includes("set telegram_message_id = $4"),
+      );
+      assert.ok(finish);
+      const metrics = readSignalBotMessageFinish(finish).metrics;
       assert.equal(metrics.joinedOrAddedWallets, 2);
       assert.equal(metrics.netSignalSideFlowUsd, 9500);
       assert.equal(metrics.fallbackStandalone, false);
@@ -13737,6 +13945,123 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       );
       assert.equal(telegram.messages[0]?.parse_mode, "MarkdownV2");
       assert.equal(telegram.messages[1]?.parse_mode, "MarkdownV2");
+    },
+  },
+  {
+    name: "ambiguous X followthrough is terminal and never sent again",
+    run: async () => {
+      const redis = new FakeRedis();
+      await enableFollowthroughTestChat(redis);
+      await updateSignalBotContentProfile({
+        chatId: "-100",
+        contentProfile: "x_editorial_draft_v1",
+        redis,
+      });
+      const db = new FakeFollowthroughDb();
+      db.runtimePayload = {
+        signalBotFollowthroughEnabled: true,
+        signalBotFollowthroughMinJoinedOrAdded: 1,
+        signalBotFollowthroughMinNetFlowUsd: 100_000,
+        signalBotFollowthroughMinPriceMoveCents: 100,
+        signalBotFollowthroughTypes: ["stats"],
+      };
+      db.candidateRows = [
+        followthroughCandidateRow({
+          root_metrics: { contentProfile: "x_editorial_draft_v1" },
+        }),
+      ];
+      db.flowRows = [followthroughFlowRow({ baseline_shares: "0" })];
+      const telegram = new FakeTelegram();
+      telegram.nextResults.push(
+        {
+          error: "ambiguous",
+          message: "request outcome unknown",
+          ok: false,
+        },
+        { messageId: 501, ok: true },
+      );
+      const calls = { count: 0 };
+      const tick = (now: string) =>
+        publishSignalBotFollowthroughTick({
+          config: parseSignalBotConfig({
+            HUNCH_SIGNAL_BOT_TOKEN: "token",
+            HUNCH_SIGNAL_BOT_X_EDITORIAL_ENABLED: "true",
+          }),
+          db,
+          now: new Date(now),
+          redis,
+          telegram,
+          xEditorialComposer: createTestXEditorialComposer({
+            calls,
+            text: "The tracked position strengthened after the signal.",
+          }),
+        });
+
+      const first = await tick("2026-01-02T01:00:00.000Z");
+      const second = await tick("2026-01-02T02:00:00.000Z");
+
+      assert.equal(first.sent, 0);
+      assert.equal(second.sent, 0);
+      assert.equal(calls.count, 1);
+      assert.equal(telegram.messages.length, 1);
+      const stored = [...db.messageRows.values()][0];
+      assert.equal(
+        (stored?.metrics as { status?: unknown } | undefined)?.status,
+        "delivery_unknown",
+      );
+    },
+  },
+  {
+    name: "ambiguous Telegram followthrough is terminal and never sent again",
+    run: async () => {
+      const redis = new FakeRedis();
+      await enableFollowthroughTestChat(redis);
+      const db = new FakeFollowthroughDb();
+      db.runtimePayload = {
+        signalBotFollowthroughEnabled: true,
+        signalBotFollowthroughMinJoinedOrAdded: 1,
+        signalBotFollowthroughMinNetFlowUsd: 100_000,
+        signalBotFollowthroughMinPriceMoveCents: 100,
+        signalBotFollowthroughTypes: ["stats"],
+      };
+      db.candidateRows = [followthroughCandidateRow()];
+      db.flowRows = [followthroughFlowRow({ baseline_shares: "0" })];
+      const telegram = new FakeTelegram();
+      telegram.nextResults.push(
+        {
+          error: "ambiguous",
+          message: "request outcome unknown",
+          ok: false,
+        },
+        { messageId: 501, ok: true },
+      );
+      const config = parseSignalBotConfig({
+        HUNCH_SIGNAL_BOT_TOKEN: "token",
+      });
+
+      const first = await publishSignalBotFollowthroughTick({
+        config,
+        db,
+        now: new Date("2026-01-02T01:00:00.000Z"),
+        redis,
+        telegram,
+      });
+      const second = await publishSignalBotFollowthroughTick({
+        config,
+        db,
+        now: new Date("2026-01-02T02:00:00.000Z"),
+        redis,
+        telegram,
+      });
+
+      assert.equal(first.sent, 0);
+      assert.equal(second.sent, 0);
+      assert.equal(telegram.messages.length, 1);
+      const stored = [...db.messageRows.values()][0];
+      assert.equal(
+        (stored?.metrics as { status?: unknown } | undefined)?.status,
+        "delivery_unknown",
+      );
     },
   },
   {

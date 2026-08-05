@@ -1,4 +1,4 @@
-import type { Pool } from "@hunch/infra";
+import type { Pool, PoolClient } from "@hunch/infra";
 
 import { stableOpaqueId } from "../../account-value/canonical.js";
 import type {
@@ -9,6 +9,7 @@ import type {
   FundingReceiveMethod,
   FundingReceiveReceipt,
   FundingReceiveSession,
+  FundingReceiveSessionChannel,
   JsonValue,
 } from "../domain/types.js";
 import { resolveFundingDestinationChoice } from "../domain/selections.js";
@@ -21,6 +22,8 @@ import { PostgresFundingPlanningStore } from "../persistence/funding-planning-re
 import {
   cancelFundingReceiveSessionForUser,
   createOrReuseFundingReceiveSession,
+  type FundingReceiveSessionPersistenceResult,
+  FundingReceiveSessionChannelConflictError,
   fetchFundingReceiveReceiptForReview,
   fetchFundingReceiveSessionForUser,
   linkFundingReceiveReceiptReviewOperation,
@@ -217,6 +220,16 @@ export type FundingReceiveSessionResponse = Readonly<{
   replayed: boolean;
 }>;
 
+export function resolveFundingReceiveSelectedTargetId(
+  requested: string | null | undefined,
+  recommended: string | null,
+  ownerChannel: FundingReceiveSessionChannel = "web",
+): string | null {
+  return ownerChannel === "telegram" && requested === null
+    ? null
+    : (requested ?? recommended);
+}
+
 export type FundingReceiveReceiptReviewQuoteResponse = Readonly<{
   receipt: FundingReceiveReceipt;
   quote: FundingQuoteSummary;
@@ -235,6 +248,11 @@ export class FundingReceiveSessionService {
     userId: string,
     request: OpenFundingReceiveSessionRequest,
     now = new Date(),
+    ownerChannel: FundingReceiveSessionChannel = "web",
+    finalize?: (
+      client: PoolClient,
+      result: FundingReceiveSessionPersistenceResult,
+    ) => Promise<void>,
   ): Promise<FundingReceiveSessionResponse> {
     const destinations = await this.runtime.destinations(userId, {
       purpose: "fund",
@@ -398,7 +416,7 @@ export class FundingReceiveSessionService {
     });
     const targets = buildFundingReceiveTargets(frozenVariants);
     if (
-      request.selectedReceiveTargetId &&
+      request.selectedReceiveTargetId != null &&
       !targets.some(
         (target) => target.receiveTargetId === request.selectedReceiveTargetId,
       )
@@ -410,8 +428,7 @@ export class FundingReceiveSessionService {
     }
     const plannedRecommendation =
       sourceOption.ingress?.recommendedReceiveTargetId;
-    const selectedReceiveTargetId =
-      request.selectedReceiveTargetId ??
+    const recommendedReceiveTargetId =
       (targets.some(
         (target) => target.receiveTargetId === plannedRecommendation,
       )
@@ -419,6 +436,16 @@ export class FundingReceiveSessionService {
         : null) ??
       targets[0]?.receiveTargetId ??
       null;
+    // `undefined` preserves the existing public/web convenience selection.
+    // An explicit `null` is used by Telegram so a verified address is not
+    // revealed before an exact target+asset consent callback.
+    const selectedReceiveTargetId = resolveFundingReceiveSelectedTargetId(
+      request.selectedReceiveTargetId,
+      recommendedReceiveTargetId,
+      ownerChannel,
+    );
+    const methodRecommendedReceiveTargetId =
+      selectedReceiveTargetId ?? recommendedReceiveTargetId;
     const expiresAt = new Date(now.getTime() + 24 * 60 * 60 * 1_000);
     const observeUntil = new Date(
       expiresAt.getTime() + 7 * 24 * 60 * 60 * 1_000,
@@ -437,11 +464,15 @@ export class FundingReceiveSessionService {
           ? {
               ...optionIngress,
               receiveTargets: targets,
-              recommendedReceiveTargetId: selectedReceiveTargetId,
+              recommendedReceiveTargetId: methodRecommendedReceiveTargetId,
               destinationAddress:
                 targets.find(
                   (target) =>
                     target.receiveTargetId === selectedReceiveTargetId,
+                )?.destinationAddress ??
+                targets.find(
+                  (target) =>
+                    target.receiveTargetId === recommendedReceiveTargetId,
                 )?.destinationAddress ??
                 targets[0]?.destinationAddress ??
                 optionIngress.destinationAddress,
@@ -484,36 +515,53 @@ export class FundingReceiveSessionService {
         "receive session requires one durable manual funding method",
       );
     }
-    const created = await createOrReuseFundingReceiveSession(this.db, {
-      userId,
-      venueId: destination.venueId,
-      destinationOptionId: destination.destinationOptionId,
-      venueBindingOptionId: destination.venueBindingOptionId,
-      destinationAsset: destination.requiredAsset as AssetRef,
-      destinationTargetSnapshot: jsonRecord(
-        selectedPlan.commitPlan.operation.destinationTargetSnapshot,
-      ),
-      venueBindingSnapshot: jsonRecord(
-        selectedPlan.commitPlan.operation.venueBindingSnapshot,
-      ),
-      methods,
-      receiveTargets: targets,
-      observationVariants: frozenVariants.map(jsonRecord),
-      selectedReceiveTargetId,
-      automationPolicy: {
-        stableConversion: "automatic_within_caps",
-        volatileConversion: "review_required",
-        maximumFeeUsd: resolvedPolicy.policy.placement.maximumFeeUsd,
-        maximumFeeBps: resolvedPolicy.policy.placement.maximumFeeBps,
-        maximumSlippageBps: resolvedPolicy.policy.placement.maximumSlippageBps,
-      },
-      policyVersion: planning.policyVersion,
-      policyRevision: planning.policyRevision,
-      ownershipRevision: receiveCapabilityRevision,
-      expiresAt,
-      observeUntil,
-      now,
-    });
+    let created: Awaited<ReturnType<typeof createOrReuseFundingReceiveSession>>;
+    try {
+      created = await createOrReuseFundingReceiveSession(
+        this.db,
+        {
+          userId,
+          ownerChannel,
+          venueId: destination.venueId,
+          destinationOptionId: destination.destinationOptionId,
+          venueBindingOptionId: destination.venueBindingOptionId,
+          destinationAsset: destination.requiredAsset as AssetRef,
+          destinationTargetSnapshot: jsonRecord(
+            selectedPlan.commitPlan.operation.destinationTargetSnapshot,
+          ),
+          venueBindingSnapshot: jsonRecord(
+            selectedPlan.commitPlan.operation.venueBindingSnapshot,
+          ),
+          methods,
+          receiveTargets: targets,
+          observationVariants: frozenVariants.map(jsonRecord),
+          selectedReceiveTargetId,
+          automationPolicy: {
+            stableConversion: "automatic_within_caps",
+            volatileConversion: "review_required",
+            maximumFeeUsd: resolvedPolicy.policy.placement.maximumFeeUsd,
+            maximumFeeBps: resolvedPolicy.policy.placement.maximumFeeBps,
+            maximumSlippageBps:
+              resolvedPolicy.policy.placement.maximumSlippageBps,
+          },
+          policyVersion: planning.policyVersion,
+          policyRevision: planning.policyRevision,
+          ownershipRevision: receiveCapabilityRevision,
+          expiresAt,
+          observeUntil,
+          now,
+        },
+        finalize,
+      );
+    } catch (error) {
+      if (error instanceof FundingReceiveSessionChannelConflictError) {
+        throw new FundingPlannerError(
+          "receive_channel_conflict",
+          error.message,
+        );
+      }
+      throw error;
+    }
     const receipts = await listFundingReceiveReceiptsForUser(this.db, {
       userId,
       receiveSessionId: created.snapshot.session.receiveSessionId,
@@ -528,12 +576,13 @@ export class FundingReceiveSessionService {
   async get(
     userId: string,
     receiveSessionId: string,
+    ownerChannel: FundingReceiveSessionChannel = "web",
   ): Promise<FundingReceiveSessionResponse | null> {
     const found = await fetchFundingReceiveSessionForUser(this.db, {
       userId,
       receiveSessionId,
     });
-    if (!found) return null;
+    if (!found || found.ownerChannel !== ownerChannel) return null;
     const receipts = await listFundingReceiveReceiptsForUser(this.db, {
       userId,
       receiveSessionId,
@@ -647,9 +696,11 @@ export class FundingReceiveSessionService {
     userId: string,
     receiveSessionId: string,
     now = new Date(),
+    ownerChannel: FundingReceiveSessionChannel = "web",
   ): Promise<FundingReceiveSessionResponse | null> {
     const cancelled = await cancelFundingReceiveSessionForUser(this.db, {
       userId,
+      ownerChannel,
       receiveSessionId,
       now,
     });

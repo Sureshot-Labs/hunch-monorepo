@@ -1068,8 +1068,8 @@ await test("Account Value delivery rechecks supersession before send fallback", 
     telegramUserId: 123,
     transport: {
       editMessageText: async () => ({
-        error: "other",
-        message: "edit failed",
+        error: "message_not_editable",
+        message: "message to edit not found",
         ok: false,
       }),
       sendMessage: async () => {

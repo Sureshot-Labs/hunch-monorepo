@@ -70,6 +70,11 @@ import {
   resolveActiveTelegramAccountLink,
   sameActiveTelegramAccountLink,
 } from "../services/telegram-account-link.js";
+import {
+  TelegramFundingError,
+  TelegramFundingService,
+} from "../services/telegram-funding.js";
+import { buildTelegramFundingUnavailableMessage } from "../services/telegram-funding-presentation.js";
 
 const enableBodySchema = z
   .object({
@@ -149,6 +154,40 @@ const internalAccountBodySchema = z
     chatId: z.union([z.string(), z.number()]),
     telegramUserId: z.union([z.string(), z.number()]),
   })
+  .strict();
+
+const internalFundingIdentitySchema = z
+  .object({
+    chatId: z.union([z.string(), z.number()]),
+    telegramUserId: z.union([z.string(), z.number()]),
+  })
+  .strict();
+
+const internalFundingMutationSchema = internalFundingIdentitySchema.extend({
+  idempotencyKey: z.string().trim().min(8).max(192),
+  telegramMessageId: z.number().int().positive().nullable(),
+});
+
+const internalFundingOpenBodySchema = internalFundingMutationSchema
+  .extend({ venue: z.literal("polymarket") })
+  .strict();
+
+const internalFundingSessionBodySchema = internalFundingIdentitySchema
+  .extend({
+    contextId: z.string().uuid(),
+    view: z.enum(["address", "progress"]).optional(),
+  })
+  .strict();
+
+const internalFundingSelectTargetBodySchema = internalFundingMutationSchema
+  .extend({
+    choiceToken: z.string().regex(/^[a-z0-9]{1,8}$/i),
+    contextId: z.string().uuid(),
+  })
+  .strict();
+
+const internalFundingCancelBodySchema = internalFundingMutationSchema
+  .extend({ contextId: z.string().uuid() })
   .strict();
 
 const internalStatusBodySchema = z
@@ -328,6 +367,10 @@ export type TelegramBotTradingRouteDependencies = {
   buildDepositMessage?: typeof buildTelegramDepositMessage;
   buildPositionsMessage?: typeof buildTelegramPositionsMessage;
   loadPositions?: typeof loadTelegramPositions;
+  fundingService?: Pick<
+    TelegramFundingService,
+    "cancel" | "open" | "selectTarget" | "session"
+  >;
   searchMarkets?: typeof searchTelegramMarkets;
 };
 
@@ -359,6 +402,8 @@ async function registerTelegramBotTradingRoutes(
     dependencies.buildAccountValueMessage ?? buildTelegramAccountValueMessage;
   const loadPositions = dependencies.loadPositions ?? loadTelegramPositions;
   const searchMarkets = dependencies.searchMarkets ?? searchTelegramMarkets;
+  const fundingService =
+    dependencies.fundingService ?? new TelegramFundingService(routePool);
   const kalshiGeoFenceConfig: GeoFenceConfig = {
     enabled: env.dflowGeoBlockEnabled,
     blockedCountries: env.dflowGeoBlockCountries,
@@ -520,6 +565,110 @@ async function registerTelegramBotTradingRoutes(
     },
   );
 
+  const sendTelegramFundingError = (
+    request: FastifyRequest,
+    reply: FastifyReply,
+    error: unknown,
+  ) => {
+    const errorCode =
+      error instanceof TelegramFundingError
+        ? error.code
+        : "telegram_funding_unexpected_error";
+    request.log.warn({ errorCode }, "Telegram funding request failed");
+    if (
+      error instanceof TelegramFundingError &&
+      error.code === "private_chat_required"
+    ) {
+      return reply.code(403).send({ error: error.code });
+    }
+    if (
+      error instanceof TelegramFundingError &&
+      (error.code === "funding_context_not_found" ||
+        error.code === "telegram_account_required")
+    ) {
+      return reply.code(404).send({ error: error.code });
+    }
+    if (
+      error instanceof TelegramFundingError &&
+      error.code === "funding_session_expired"
+    ) {
+      return reply.send(
+        buildTelegramFundingUnavailableMessage({ reason: "expired" }),
+      );
+    }
+    if (
+      error instanceof TelegramFundingError &&
+      error.code === "funding_receive_disabled"
+    ) {
+      return reply.send(
+        buildTelegramFundingUnavailableMessage({ reason: "disabled" }),
+      );
+    }
+    return reply
+      .code(error instanceof TelegramFundingError ? 409 : 503)
+      .send({ error: errorCode });
+  };
+
+  api.post(
+    "/internal/telegram-bot/funding/open",
+    {
+      preHandler: requireInternal,
+      schema: { body: internalFundingOpenBodySchema },
+    },
+    async (request, reply) => {
+      try {
+        return reply.send(await fundingService.open(request.body));
+      } catch (error) {
+        return sendTelegramFundingError(request, reply, error);
+      }
+    },
+  );
+
+  api.post(
+    "/internal/telegram-bot/funding/session",
+    {
+      preHandler: requireInternal,
+      schema: { body: internalFundingSessionBodySchema },
+    },
+    async (request, reply) => {
+      try {
+        return reply.send(await fundingService.session(request.body));
+      } catch (error) {
+        return sendTelegramFundingError(request, reply, error);
+      }
+    },
+  );
+
+  api.post(
+    "/internal/telegram-bot/funding/select-target",
+    {
+      preHandler: requireInternal,
+      schema: { body: internalFundingSelectTargetBodySchema },
+    },
+    async (request, reply) => {
+      try {
+        return reply.send(await fundingService.selectTarget(request.body));
+      } catch (error) {
+        return sendTelegramFundingError(request, reply, error);
+      }
+    },
+  );
+
+  api.post(
+    "/internal/telegram-bot/funding/cancel",
+    {
+      preHandler: requireInternal,
+      schema: { body: internalFundingCancelBodySchema },
+    },
+    async (request, reply) => {
+      try {
+        return reply.send(await fundingService.cancel(request.body));
+      } catch (error) {
+        return sendTelegramFundingError(request, reply, error);
+      }
+    },
+  );
+
   api.post(
     "/internal/telegram-bot/positions",
     {
@@ -612,30 +761,40 @@ async function registerTelegramBotTradingRoutes(
     },
     async (request) => {
       const venue = request.body.venue?.trim().toLowerCase() ?? null;
+      if (venue === null) {
+        return buildDepositMessage({
+          appBaseUrl: request.body.appBaseUrl,
+          pool: db,
+          telegramMiniAppEnabled: request.body.telegramMiniAppEnabled,
+          telegramUserId: request.body.telegramUserId,
+          venue: null,
+        });
+      }
+      if (venue !== "limitless") {
+        return buildTelegramFundingUnavailableMessage({ reason: "disabled" });
+      }
       let internalWallets:
         | TelegramBotTradingInternalWalletCandidate[]
         | null
         | undefined;
-      if (venue === "limitless") {
-        const { rows } = await db.query<{ privy_user_id: string }>(
-          `select privy_user_id
+      const { rows } = await db.query<{ privy_user_id: string }>(
+        `select privy_user_id
              from user_telegram_accounts
             where telegram_user_id = $1
             limit 1`,
-          [String(request.body.telegramUserId)],
-        );
-        const privyUserId = rows[0]?.privy_user_id ?? null;
-        if (!privyUserId) {
-          internalWallets = [];
-        } else {
-          try {
-            internalWallets = await resolveInternalWallets({
-              app,
-              privyUserId,
-            });
-          } catch {
-            internalWallets = null;
-          }
+        [String(request.body.telegramUserId)],
+      );
+      const privyUserId = rows[0]?.privy_user_id ?? null;
+      if (!privyUserId) {
+        internalWallets = [];
+      } else {
+        try {
+          internalWallets = await resolveInternalWallets({
+            app,
+            privyUserId,
+          });
+        } catch {
+          internalWallets = null;
         }
       }
       return buildDepositMessage({
@@ -1311,5 +1470,9 @@ export const telegramBotTradingRoutes = createTelegramBotTradingRoutes();
 
 export const telegramBotTradingRouteTestHooks = {
   internalAccountBodySchema,
+  internalFundingCancelBodySchema,
+  internalFundingOpenBodySchema,
+  internalFundingSelectTargetBodySchema,
+  internalFundingSessionBodySchema,
   internalMarketCardBodySchema,
 };

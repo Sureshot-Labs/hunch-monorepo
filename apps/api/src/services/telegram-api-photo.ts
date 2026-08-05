@@ -6,11 +6,15 @@ import {
 export type TelegramPhotoSendResult =
   | { messageId: number | null; ok: true }
   | {
-      error: "blocked_or_missing" | "other";
+      error: "ambiguous" | "blocked_or_missing" | "other";
       message: string;
       ok: false;
       retryAfterSec?: number;
     };
+
+export function isValidTelegramMessageId(value: unknown): value is number {
+  return Number.isSafeInteger(value) && typeof value === "number" && value > 0;
+}
 
 export async function sendTelegramPhotoRequest(input: {
   baseUrl: string;
@@ -20,6 +24,7 @@ export async function sendTelegramPhotoRequest(input: {
   parseMode?: "MarkdownV2";
   photo: Uint8Array;
   replyMarkup?: unknown;
+  signal: AbortSignal;
 }): Promise<TelegramPhotoSendResult> {
   const request = async (requestInput: {
     caption?: string;
@@ -40,6 +45,7 @@ export async function sendTelegramPhotoRequest(input: {
     const response = await fetch(`${input.baseUrl}/sendPhoto`, {
       body: form,
       method: "POST",
+      signal: input.signal,
     });
     const payload = (await response.json().catch(() => null)) as {
       description?: string;
@@ -72,11 +78,16 @@ export async function sendTelegramPhotoRequest(input: {
     }));
   }
   if (response.ok && payload?.ok) {
+    const messageId = payload.result?.message_id;
+    if (!isValidTelegramMessageId(messageId)) {
+      return {
+        error: "ambiguous",
+        message: "invalid telegram success response",
+        ok: false,
+      };
+    }
     return {
-      messageId:
-        typeof payload.result?.message_id === "number"
-          ? payload.result.message_id
-          : null,
+      messageId,
       ok: true,
     };
   }
@@ -88,7 +99,7 @@ export async function sendTelegramPhotoRequest(input: {
     return { error: "blocked_or_missing", message, ok: false };
   }
   return {
-    error: "other",
+    error: response.ok || response.status >= 500 ? "ambiguous" : "other",
     message,
     ok: false,
     retryAfterSec: payload?.parameters?.retry_after,

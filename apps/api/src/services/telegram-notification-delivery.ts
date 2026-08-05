@@ -30,6 +30,7 @@ import {
   markTelegramNotificationsUnreachable,
   type TelegramNotificationTopic,
 } from "./telegram-notification-preferences.js";
+import { sendTelegramMessageWithReplyFallback } from "./telegram-delivery-safety.js";
 
 type TelegramNotificationOutboxRow = {
   attempt_count: number;
@@ -837,18 +838,13 @@ async function claimTelegramNotificationOutbox(input: {
       with candidates as (
         select id
         from telegram_notification_outbox
-        where (
-          status in ('pending', 'retry')
+        where status in ('pending', 'retry')
           and next_attempt_at <= now()
-        ) or (
-          status = 'sending'
-          and updated_at <= now() - interval '5 minutes'
-        )
-        and (
+          and (
           topic <> 'order_filled'
           or payload #>> '{data,source}' is distinct from 'telegram_bot'
           or event_occurred_at <= now() - interval '30 seconds'
-        )
+          )
         order by next_attempt_at asc, created_at asc
         for update skip locked
         limit $1
@@ -869,6 +865,22 @@ async function claimTelegramNotificationOutbox(input: {
     [input.limit],
   );
   return rows;
+}
+
+async function quarantineStaleTelegramNotificationOutbox(input: {
+  db: DbQuery;
+}): Promise<number> {
+  const result = await input.db.query(
+    `
+      update telegram_notification_outbox
+      set status = 'delivery_unknown',
+          last_error = 'stale_sending_delivery_unknown',
+          updated_at = now()
+      where status = 'sending'
+        and updated_at <= now() - interval '5 minutes'
+    `,
+  );
+  return result.rowCount ?? 0;
 }
 
 async function hasTelegramTradeReceipt(input: {
@@ -1020,23 +1032,24 @@ async function markOutboxSkipped(input: {
   db: DbQuery;
   id: string;
   reason: string;
-}): Promise<void> {
-  await input.db.query(
+}): Promise<boolean> {
+  const result = await input.db.query(
     `
       update telegram_notification_outbox
       set status = 'skipped', last_error = $2, updated_at = now()
-      where id = $1
+      where id = $1 and status = 'sending'
     `,
     [input.id, input.reason],
   );
+  return result.rowCount !== 0;
 }
 
 async function markOutboxSent(input: {
   db: DbQuery;
   id: string;
   messageId: number | null;
-}): Promise<void> {
-  await input.db.query(
+}): Promise<boolean> {
+  const result = await input.db.query(
     `
       update telegram_notification_outbox
       set status = 'sent',
@@ -1044,10 +1057,11 @@ async function markOutboxSent(input: {
           last_error = null,
           sent_at = now(),
           updated_at = now()
-      where id = $1
+      where id = $1 and status = 'sending'
     `,
     [input.id, input.messageId],
   );
+  return result.rowCount !== 0;
 }
 
 async function markOutboxFailed(input: {
@@ -1056,7 +1070,7 @@ async function markOutboxFailed(input: {
   id: string;
   message: string;
   retryAfterSec?: number;
-}): Promise<void> {
+}): Promise<boolean> {
   const dead = input.attemptCount >= MAX_DELIVERY_ATTEMPTS;
   const retryAfterSec = Math.max(
     1,
@@ -1065,24 +1079,44 @@ async function markOutboxFailed(input: {
       input.retryAfterSec ?? 5 * 2 ** Math.max(0, input.attemptCount - 1),
     ),
   );
-  await input.db.query(
+  const result = await input.db.query(
     `
       update telegram_notification_outbox
       set status = $2,
           last_error = $3,
           next_attempt_at = now() + ($4::int * interval '1 second'),
           updated_at = now()
-      where id = $1
+      where id = $1 and status = 'sending'
     `,
     [input.id, dead ? "dead" : "retry", input.message, retryAfterSec],
   );
+  return result.rowCount !== 0;
+}
+
+async function markOutboxDeliveryUnknown(input: {
+  db: DbQuery;
+  id: string;
+  message: string;
+}): Promise<boolean> {
+  const result = await input.db.query(
+    `
+      update telegram_notification_outbox
+      set status = 'delivery_unknown',
+          last_error = $2,
+          updated_at = now()
+      where id = $1
+        and status = 'sending'
+    `,
+    [input.id, input.message],
+  );
+  return result.rowCount !== 0;
 }
 
 async function deferOutboxForChatRate(input: {
   db: DbQuery;
   id: string;
-}): Promise<void> {
-  await input.db.query(
+}): Promise<boolean> {
+  const result = await input.db.query(
     `
       update telegram_notification_outbox
       set status = 'retry',
@@ -1090,10 +1124,27 @@ async function deferOutboxForChatRate(input: {
           last_error = 'Deferred to respect the per-chat Telegram rate limit.',
           next_attempt_at = now() + interval '1 second',
           updated_at = now()
-      where id = $1
+      where id = $1 and status = 'sending'
     `,
     [input.id],
   );
+  return result.rowCount !== 0;
+}
+
+async function persistStandaloneNotificationFallback(input: {
+  db: DbQuery;
+  id: string;
+}): Promise<boolean> {
+  const result = await input.db.query(
+    `
+      update telegram_notification_outbox
+      set payload = jsonb_set(payload, '{replyToMessageId}', 'null'::jsonb, true),
+          updated_at = now()
+      where id = $1 and status = 'sending'
+    `,
+    [input.id],
+  );
+  return result.rowCount !== 0;
 }
 
 export async function cleanupTelegramNotificationOutbox(input: {
@@ -1111,7 +1162,7 @@ export async function cleanupTelegramNotificationOutbox(input: {
       with expired as (
         select id
         from telegram_notification_outbox
-        where status in ('sent', 'skipped', 'dead')
+        where status in ('sent', 'skipped', 'dead', 'delivery_unknown')
           and updated_at < now() - ($1::int * interval '1 day')
         order by updated_at asc
         limit $2
@@ -1135,9 +1186,13 @@ export async function deliverTelegramNotificationOutbox(input: {
   claimed: number;
   deferred: number;
   failed: number;
+  quarantined: number;
   sent: number;
   skipped: number;
 }> {
+  const quarantined = await quarantineStaleTelegramNotificationOutbox({
+    db: input.db,
+  });
   const rows = await claimTelegramNotificationOutbox({
     db: input.db,
     limit: Math.min(100, Math.max(1, input.limit ?? 25)),
@@ -1154,12 +1209,14 @@ export async function deliverTelegramNotificationOutbox(input: {
       row.topic === "order_filled" &&
       (await hasTelegramTradeReceipt({ db: input.db, payload: row.payload }))
     ) {
-      skipped += 1;
-      await markOutboxSkipped({
-        db: input.db,
-        id: row.id,
-        reason: "Telegram trade receipt already delivered.",
-      });
+      if (
+        await markOutboxSkipped({
+          db: input.db,
+          id: row.id,
+          reason: "Telegram trade receipt already delivered.",
+        })
+      )
+        skipped += 1;
       continue;
     }
     const destination = await loadTelegramNotificationDestination({
@@ -1172,21 +1229,24 @@ export async function deliverTelegramNotificationOutbox(input: {
       !destination.enabled_since_event ||
       !destination.reachable
     ) {
-      skipped += 1;
-      await markOutboxSkipped({
-        db: input.db,
-        id: row.id,
-        reason:
-          destination?.enabled === true &&
-          destination.enabled_since_event === false
-            ? "Notification predates the latest topic enablement."
-            : "Telegram destination or preference is unavailable.",
-      });
+      if (
+        await markOutboxSkipped({
+          db: input.db,
+          id: row.id,
+          reason:
+            destination?.enabled === true &&
+            destination.enabled_since_event === false
+              ? "Notification predates the latest topic enablement."
+              : "Telegram destination or preference is unavailable.",
+        })
+      )
+        skipped += 1;
       continue;
     }
     if (attemptedChats.has(destination.telegram_user_id)) {
-      deferred += 1;
-      await deferOutboxForChatRate({ db: input.db, id: row.id });
+      if (await deferOutboxForChatRate({ db: input.db, id: row.id })) {
+        deferred += 1;
+      }
       continue;
     }
     attemptedChats.add(destination.telegram_user_id);
@@ -1206,61 +1266,89 @@ export async function deliverTelegramNotificationOutbox(input: {
             payload: row.payload,
           });
     if (!message) {
-      skipped += 1;
-      await markOutboxSkipped({
-        db: input.db,
-        id: row.id,
-        reason: "Notification payload could not be rendered.",
-      });
+      if (
+        await markOutboxSkipped({
+          db: input.db,
+          id: row.id,
+          reason: "Notification payload could not be rendered.",
+        })
+      )
+        skipped += 1;
       continue;
     }
 
-    const result = await input.telegram.sendMessage({
-      chat_id: destination.telegram_user_id,
-      disable_web_page_preview: true,
-      parse_mode: "MarkdownV2",
-      reply_parameters: message.replyToMessageId
-        ? {
-            allow_sending_without_reply: false,
-            message_id: message.replyToMessageId,
-          }
+    const result = await sendTelegramMessageWithReplyFallback({
+      beforeStandaloneFallback: message.replyToMessageId
+        ? () =>
+            persistStandaloneNotificationFallback({
+              db: input.db,
+              id: row.id,
+            })
         : undefined,
-      reply_markup: message.keyboard,
-      text: message.text,
-    });
+      message: {
+        chat_id: destination.telegram_user_id,
+        disable_web_page_preview: true,
+        parse_mode: "MarkdownV2",
+        reply_markup: message.keyboard,
+        text: message.text,
+      },
+      replyToMessageId: message.replyToMessageId ?? null,
+      telegram: input.telegram,
+    }).catch((error: unknown) => ({
+      error: "ambiguous" as const,
+      message: error instanceof Error ? error.message : "send_failed",
+      ok: false as const,
+    }));
     if (result.ok) {
-      sent += 1;
-      await markOutboxSent({
-        db: input.db,
-        id: row.id,
-        messageId: result.messageId,
-      });
+      if (
+        await markOutboxSent({
+          db: input.db,
+          id: row.id,
+          messageId: result.messageId,
+        })
+      )
+        sent += 1;
       continue;
     }
     if (result.error === "blocked_or_missing") {
-      blocked += 1;
-      await markTelegramNotificationsUnreachable({
-        db: input.db,
-        userId: row.user_id,
-      });
-      await input.db.query(
+      const transition = await input.db.query(
         `
           update telegram_notification_outbox
           set status = 'dead', last_error = $2, updated_at = now()
-          where id = $1
+          where id = $1 and status = 'sending'
         `,
         [row.id, result.message],
       );
+      if (transition.rowCount !== 0) {
+        blocked += 1;
+        await markTelegramNotificationsUnreachable({
+          db: input.db,
+          userId: row.user_id,
+        });
+      }
       continue;
     }
-    failed += 1;
-    await markOutboxFailed({
-      attemptCount: row.attempt_count,
-      db: input.db,
-      id: row.id,
-      message: result.message,
-      retryAfterSec: result.retryAfterSec,
-    });
+    if (result.error === "ambiguous") {
+      if (
+        await markOutboxDeliveryUnknown({
+          db: input.db,
+          id: row.id,
+          message: result.message,
+        })
+      )
+        failed += 1;
+      continue;
+    }
+    if (
+      await markOutboxFailed({
+        attemptCount: row.attempt_count,
+        db: input.db,
+        id: row.id,
+        message: result.message,
+        retryAfterSec: result.retryAfterSec,
+      })
+    )
+      failed += 1;
   }
 
   return {
@@ -1268,6 +1356,7 @@ export async function deliverTelegramNotificationOutbox(input: {
     claimed: rows.length,
     deferred,
     failed,
+    quarantined,
     sent,
     skipped,
   };

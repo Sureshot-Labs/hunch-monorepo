@@ -1,4 +1,5 @@
 import type { DbQuery } from "../db.js";
+import { rearmTelegramFundingTerminalDelivery } from "./telegram-funding-delivery.js";
 
 export type TelegramNotificationTopic =
   | "bridge_updates"
@@ -146,6 +147,12 @@ export async function ensureTelegramNotificationPreferences(input: {
     `,
     [String(input.telegramUserId), input.markStarted === true],
   );
+  if (input.markStarted) {
+    await rearmTelegramFundingTerminalDelivery({
+      pool: input.db,
+      telegramUserId: input.telegramUserId,
+    });
+  }
   const row = rows[0];
   return row ? rowToPreferences(row) : null;
 }

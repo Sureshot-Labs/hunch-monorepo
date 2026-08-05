@@ -23,6 +23,10 @@ const db = {
       normalized.includes("from public.schema_migrations") &&
       normalized.includes("filename = any")
     ) {
+      assert.ok(
+        Array.isArray(params[0]) &&
+          params[0].includes("0199_telegram_funding_receive.sql"),
+      );
       return { rows: [] };
     }
     if (

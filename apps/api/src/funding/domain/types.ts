@@ -566,6 +566,8 @@ export type FundingReceiveSessionStatus =
   | "cancelled"
   | "recovery_required";
 
+export type FundingReceiveSessionChannel = "telegram" | "web";
+
 export type FundingReceiveMethod = Readonly<{
   methodId: string;
   kind: "manual" | "privy";

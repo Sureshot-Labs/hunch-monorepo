@@ -6,6 +6,7 @@ type FinancialLifecycleDbRow = {
   active_position_action: boolean;
   active_preparation: boolean;
   active_receive_session: boolean;
+  active_telegram_funding_context: boolean;
   active_telegram_intent: boolean;
   deposit_evidence: boolean;
   funding_evidence: boolean;
@@ -13,6 +14,7 @@ type FinancialLifecycleDbRow = {
   position_action_evidence: boolean;
   preparation_run_count: string;
   receive_evidence: boolean;
+  telegram_funding_evidence: boolean;
   trading_evidence: boolean;
 };
 
@@ -139,6 +141,26 @@ export async function fetchUserFinancialLifecycleSummary(
         ) as active_receive_session,
         exists (
           select 1
+          from telegram_funding_sessions context
+          join funding_receive_sessions session
+            on session.id = context.receive_session_id
+           and session.user_id = context.user_id
+          where context.user_id = any($1::uuid[])
+            and (
+              session.status in (
+                'open',
+                'processing',
+                'review_required',
+                'recovery_required'
+              )
+              or (
+                session.status in ('expired', 'cancelled')
+                and session.observe_until > now()
+              )
+            )
+        ) as active_telegram_funding_context,
+        exists (
+          select 1
           from bridge_orders bridge
           where bridge.user_id = any($1::uuid[])
             and lower(trim(bridge.status)) not in (
@@ -189,6 +211,11 @@ export async function fetchUserFinancialLifecycleSummary(
         ) as receive_evidence,
         exists (
           select 1
+          from telegram_funding_sessions
+          where user_id = any($1::uuid[])
+        ) as telegram_funding_evidence,
+        exists (
+          select 1
           from position_action_operations
           where user_id = any($1::uuid[])
         ) as position_action_evidence,
@@ -218,6 +245,9 @@ export async function fetchUserFinancialLifecycleSummary(
     row.active_preparation ? "active_funding_preparation" : null,
     row.active_position_action ? "active_position_action" : null,
     row.active_receive_session ? "active_receive_session" : null,
+    row.active_telegram_funding_context
+      ? "active_telegram_funding_context"
+      : null,
     row.active_legacy_bridge ? "active_legacy_bridge" : null,
     row.active_telegram_intent ? "active_telegram_intent" : null,
   ].filter((reason): reason is string => reason !== null);
@@ -225,6 +255,7 @@ export async function fetchUserFinancialLifecycleSummary(
     row.funding_evidence ? "funding_evidence" : null,
     row.position_action_evidence ? "position_action_evidence" : null,
     row.receive_evidence ? "receive_evidence" : null,
+    row.telegram_funding_evidence ? "telegram_funding_evidence" : null,
     row.legacy_bridge_evidence ? "legacy_bridge_evidence" : null,
     row.deposit_evidence ? "deposit_evidence" : null,
     row.trading_evidence ? "trading_evidence" : null,

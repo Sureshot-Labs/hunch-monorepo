@@ -164,6 +164,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       );
 
       const edits: string[] = [];
+      const redisValues = new Map<string, string>();
       let loads = 0;
       const handled = await handleSignalBotMenuCallback({
         callbackQuery: {
@@ -204,8 +205,25 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         },
         redis: {
           del: async () => 0,
-          get: async () => null,
-          set: async () => null,
+          eval: async (
+            _script: string,
+            options: { arguments: string[]; keys: string[] },
+          ) => {
+            const key = options.keys[0] ?? "";
+            if (redisValues.get(key) !== options.arguments[0]) return 0;
+            redisValues.delete(key);
+            return 1;
+          },
+          get: async (key: string) => redisValues.get(key) ?? null,
+          set: async (
+            key: string,
+            value: string,
+            options?: { NX?: boolean },
+          ) => {
+            if (options?.NX && redisValues.has(key)) return null;
+            redisValues.set(key, value);
+            return "OK";
+          },
         } as never,
         sendTestSignal: async () => false,
         telegram: {

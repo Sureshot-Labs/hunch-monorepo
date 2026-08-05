@@ -28,6 +28,7 @@ import {
   sendLatestSignalBotTestSignal,
   TelegramBotApiClient,
 } from "./services/signal-bot.js";
+import { drainSignalBotFundingOpenTasks } from "./services/telegram-bot-menu-actions.js";
 import {
   attachTelegramBotReferralCode,
   loadTelegramBotRewardsMessage,
@@ -44,6 +45,11 @@ import {
   cleanupTelegramBotActionOutbox,
   deliverTelegramBotOnboardingActions,
 } from "./services/telegram-bot-onboarding-delivery.js";
+import {
+  cleanupTelegramFundingContexts,
+  createTelegramFundingRenderCoordinator,
+  deliverTelegramFundingActions,
+} from "./services/telegram-funding-delivery.js";
 import { resolveTelegramNotificationsPolicy } from "./services/telegram-notification-policy.js";
 import {
   createTelegramBotTradingInternalApiClient,
@@ -73,6 +79,7 @@ function logTradingInternalApiFailure(
     | "disable"
     | "market-card"
     | "market-search"
+    | "funding"
     | "position-card"
     | "positions"
     | "status",
@@ -350,6 +357,53 @@ export async function runSignalBotRunner(): Promise<void> {
                     throw error;
                   })
               : Promise.reject(new Error("Deposit API is unavailable")),
+          loadFunding: (input) => {
+            if (!tradingInternalApi) {
+              return Promise.reject(new Error("Funding API is unavailable"));
+            }
+            const request =
+              input.action === "open"
+                ? tradingInternalApi.openFunding({
+                    chatId: input.chatId,
+                    idempotencyKey: input.idempotencyKey,
+                    telegramMessageId: input.telegramMessageId,
+                    telegramUserId: input.telegramUserId,
+                    venue: "polymarket",
+                  })
+                : input.action === "select" &&
+                    input.contextId &&
+                    input.choiceToken
+                  ? tradingInternalApi.selectFundingTarget({
+                      chatId: input.chatId,
+                      choiceToken: input.choiceToken,
+                      contextId: input.contextId,
+                      idempotencyKey: input.idempotencyKey,
+                      telegramMessageId: input.telegramMessageId,
+                      telegramUserId: input.telegramUserId,
+                    })
+                  : input.action === "cancel" && input.contextId
+                    ? tradingInternalApi.cancelFunding({
+                        chatId: input.chatId,
+                        contextId: input.contextId,
+                        idempotencyKey: input.idempotencyKey,
+                        telegramMessageId: input.telegramMessageId,
+                        telegramUserId: input.telegramUserId,
+                      })
+                    : input.action === "session" && input.contextId
+                      ? tradingInternalApi.getFundingSession({
+                          chatId: input.chatId,
+                          contextId: input.contextId,
+                          telegramUserId: input.telegramUserId,
+                          view: input.view,
+                        })
+                      : Promise.reject(
+                          new Error("Funding callback is invalid"),
+                        );
+            return request.catch((error: unknown) => {
+              logTradingInternalApiFailure("funding", error);
+              throw error;
+            });
+          },
           loadPositionCard: ({ positionId, telegramUserId }) =>
             tradingInternalApi
               ? tradingInternalApi
@@ -557,7 +611,10 @@ export async function runSignalBotRunner(): Promise<void> {
                 limit: 25,
                 telegram,
               });
-            if (onboardingDelivery.claimed > 0) {
+            if (
+              onboardingDelivery.claimed > 0 ||
+              onboardingDelivery.quarantined > 0
+            ) {
               log("signal_bot_onboarding_delivery", onboardingDelivery);
             }
           } catch (error) {
@@ -565,13 +622,31 @@ export async function runSignalBotRunner(): Promise<void> {
               error: error instanceof Error ? error.message : String(error),
             });
           }
+          try {
+            const fundingDelivery = await deliverTelegramFundingActions({
+              pool: db,
+              limit: 25,
+              renderCoordinator: createTelegramFundingRenderCoordinator(redis),
+              telegram,
+            });
+            if (fundingDelivery.claimed > 0) {
+              log("signal_bot_funding_delivery", fundingDelivery);
+            }
+          } catch (error) {
+            log("signal_bot_funding_delivery_error", {
+              errorCode:
+                error instanceof Error ? error.name : "unexpected_error",
+            });
+          }
           let cleaned = 0;
           let onboardingCleaned = 0;
+          let fundingCleaned = 0;
           if (now >= nextNotificationCleanupAt) {
             try {
-              [cleaned, onboardingCleaned] = await Promise.all([
+              [cleaned, onboardingCleaned, fundingCleaned] = await Promise.all([
                 cleanupTelegramNotificationOutbox({ db }),
                 cleanupTelegramBotActionOutbox({ db }),
+                cleanupTelegramFundingContexts({ pool: db }),
               ]);
               nextNotificationCleanupAt = now + 60 * 60 * 1_000;
             } catch (error) {
@@ -625,6 +700,7 @@ export async function runSignalBotRunner(): Promise<void> {
                   claimed: 0,
                   deferred: 0,
                   failed: 0,
+                  quarantined: 0,
                   sent: 0,
                   skipped: 0,
                 };
@@ -632,12 +708,15 @@ export async function runSignalBotRunner(): Promise<void> {
               activityEnqueued > 0 ||
               positionSignals.enqueued > 0 ||
               delivery.claimed > 0 ||
+              delivery.quarantined > 0 ||
               cleaned > 0 ||
-              onboardingCleaned > 0
+              onboardingCleaned > 0 ||
+              fundingCleaned > 0
             ) {
               log("signal_bot_user_notifications", {
                 activityEnqueued,
                 cleaned,
+                fundingCleaned,
                 onboardingCleaned,
                 positionSignalEnqueued: positionSignals.enqueued,
                 positionSignalNotes: positionSignals.notes,
@@ -684,6 +763,11 @@ export async function runSignalBotRunner(): Promise<void> {
     const drainedConfirmTasks = await drainSignalBotConfirmTasks(10_000);
     if (!drainedConfirmTasks) {
       log("signal_bot_confirm_tasks_drain_timeout");
+    }
+    const drainedFundingOpenTasks =
+      await drainSignalBotFundingOpenTasks(10_000);
+    if (!drainedFundingOpenTasks) {
+      log("signal_bot_funding_open_tasks_drain_timeout");
     }
     await releaseSignalBotLock({ owner, redis }).catch(() => undefined);
     await dbPool?.end().catch(() => undefined);

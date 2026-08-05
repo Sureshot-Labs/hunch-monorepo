@@ -1,0 +1,326 @@
+import assert from "node:assert/strict";
+
+import { TelegramBotApiClient } from "./services/signal-bot-telegram-client.js";
+import { sendOrEditTelegramBotMenuMessage } from "./services/telegram-bot-menu-delivery.js";
+import { sendTelegramMessageWithReplyFallback } from "./services/telegram-delivery-safety.js";
+
+const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
+  {
+    name: "menu fallback is limited to definitive message-not-editable",
+    run: async () => {
+      const failures = [
+        { error: "ambiguous", message: "timeout", ok: false },
+        { error: "blocked_or_missing", message: "blocked", ok: false },
+        {
+          error: "other",
+          message: "rate limited",
+          ok: false,
+          retryAfterSec: 9,
+        },
+      ] as const;
+      for (const failure of failures) {
+        let sends = 0;
+        const result = await sendOrEditTelegramBotMenuMessage({
+          chatId: "99",
+          message: { text: "Menu" },
+          messageId: 7,
+          transport: {
+            editMessageText: async () => failure,
+            sendMessage: async () => {
+              sends += 1;
+              return { messageId: 8, ok: true };
+            },
+          },
+        });
+        assert.deepEqual(result, failure);
+        assert.equal(sends, 0);
+      }
+
+      let sends = 0;
+      const result = await sendOrEditTelegramBotMenuMessage({
+        chatId: "99",
+        message: { text: "Menu" },
+        messageId: 7,
+        transport: {
+          editMessageText: async () => ({
+            error: "message_not_editable",
+            message: "message to edit not found",
+            ok: false,
+          }),
+          sendMessage: async () => {
+            sends += 1;
+            return { messageId: 8, ok: true };
+          },
+        },
+      });
+      assert.deepEqual(result, { messageId: 8, ok: true });
+      assert.equal(sends, 1);
+    },
+  },
+  {
+    name: "menu supersession between edit and fallback prevents standalone send",
+    run: async () => {
+      let checks = 0;
+      let sends = 0;
+      const result = await sendOrEditTelegramBotMenuMessage({
+        chatId: "99",
+        message: { text: "Menu" },
+        messageId: 7,
+        shouldDeliver: async () => {
+          checks += 1;
+          return checks === 1;
+        },
+        transport: {
+          editMessageText: async () => ({
+            error: "message_not_editable",
+            message: "message to edit not found",
+            ok: false,
+          }),
+          sendMessage: async () => {
+            sends += 1;
+            return { messageId: 8, ok: true };
+          },
+        },
+      });
+      assert.equal(sends, 0);
+      assert.deepEqual(result, {
+        error: "other",
+        message: "superseded",
+        ok: false,
+      });
+    },
+  },
+  {
+    name: "reply fallback runs once only after definitive missing target",
+    run: async () => {
+      const messages: Array<{ reply_parameters?: { message_id: number } }> = [];
+      const result = await sendTelegramMessageWithReplyFallback({
+        message: {
+          chat_id: "99",
+          disable_web_page_preview: true,
+          text: "Update",
+        },
+        replyToMessageId: 7,
+        telegram: {
+          sendMessage: async (message) => {
+            messages.push(message);
+            return messages.length === 1
+              ? {
+                  error: "reply_target_missing",
+                  message: "reply message not found",
+                  ok: false,
+                }
+              : { messageId: 8, ok: true };
+          },
+        },
+      });
+      assert.equal(messages.length, 2);
+      assert.deepEqual(messages[0]?.reply_parameters, { message_id: 7 });
+      assert.equal(messages[1]?.reply_parameters, undefined);
+      assert.deepEqual(result, {
+        fallbackToMarkdown: false,
+        fallbackStandalone: true,
+        messageId: 8,
+        ok: true,
+        replyToMessageId: null,
+      });
+    },
+  },
+  {
+    name: "rich, photo, and callback transport failures are bounded ambiguous mutations",
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      const signals: AbortSignal[] = [];
+      try {
+        globalThis.fetch = (async (_url, init) => {
+          assert.ok(init?.signal instanceof AbortSignal);
+          signals.push(init.signal);
+          throw new DOMException("request timed out", "TimeoutError");
+        }) as typeof fetch;
+        const client = new TelegramBotApiClient("token");
+        const rich = await client.sendRichMessage({
+          chat_id: "99",
+          rich_message: { blocks: [] },
+        });
+        const photo = await client.sendPhoto({
+          chat_id: "99",
+          filename: "qr.png",
+          photo: new Uint8Array([1]),
+        });
+        const callback = await client.answerCallbackQuery({
+          callbackQueryId: "callback-1",
+        });
+        for (const result of [rich, photo, callback]) {
+          assert.deepEqual(result, {
+            error: "ambiguous",
+            message: "request timed out",
+            ok: false,
+          });
+        }
+        assert.equal(signals.length, 3);
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    },
+  },
+  {
+    name: "successful new-message responses require a positive safe message id",
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      try {
+        const malformedSuccess = () =>
+          new Response(JSON.stringify({ ok: true, result: {} }), {
+            status: 200,
+          });
+        const responses = [
+          malformedSuccess(),
+          malformedSuccess(),
+          malformedSuccess(),
+        ];
+        globalThis.fetch = (async () =>
+          responses.shift() ?? malformedSuccess()) as typeof fetch;
+        const client = new TelegramBotApiClient("token");
+        const results = [
+          await client.sendRichMessage({
+            chat_id: "99",
+            rich_message: { blocks: [] },
+          }),
+          await client.sendPhoto({
+            chat_id: "99",
+            filename: "qr.png",
+            photo: new Uint8Array([1]),
+          }),
+          await client.sendMessage({
+            chat_id: "99",
+            disable_web_page_preview: true,
+            text: "hello",
+          }),
+        ];
+        for (const result of results) {
+          assert.deepEqual(result, {
+            error: "ambiguous",
+            message: "invalid telegram success response",
+            ok: false,
+          });
+        }
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    },
+  },
+  {
+    name: "invalid successful payloads and server failures stay ambiguous while 429 stays retryable",
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      try {
+        const responses = [
+          new Response("", { status: 200 }),
+          new Response("not-json", { status: 200 }),
+          new Response(JSON.stringify({ ok: false }), { status: 500 }),
+          new Response(
+            JSON.stringify({
+              description: "Too Many Requests",
+              ok: false,
+              parameters: { retry_after: 13 },
+            }),
+            { status: 429 },
+          ),
+        ];
+        globalThis.fetch = (async () =>
+          responses.shift() ??
+          new Response("", { status: 500 })) as typeof fetch;
+        const client = new TelegramBotApiClient("token");
+        const results = [
+          await client.sendRichMessage({
+            chat_id: "99",
+            rich_message: { blocks: [] },
+          }),
+          await client.sendPhoto({
+            chat_id: "99",
+            filename: "qr.png",
+            photo: new Uint8Array([1]),
+          }),
+          await client.answerCallbackQuery({ callbackQueryId: "callback-1" }),
+        ];
+        for (const result of results) {
+          assert.equal(result.ok, false);
+          if (!result.ok) assert.equal(result.error, "ambiguous");
+        }
+        const rateLimited = await client.answerCallbackQuery({
+          callbackQueryId: "callback-2",
+        });
+        assert.deepEqual(rateLimited, {
+          error: "other",
+          message: "Too Many Requests",
+          ok: false,
+          retryAfterSec: 13,
+        });
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    },
+  },
+  {
+    name: "custom-emoji retry shares the original mutation deadline",
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      const signals: AbortSignal[] = [];
+      try {
+        const responses = [
+          new Response(
+            JSON.stringify({
+              description: "Bad Request: custom emoji is invalid",
+              ok: false,
+            }),
+            { status: 400 },
+          ),
+          new Response(
+            JSON.stringify({ ok: true, result: { message_id: 8 } }),
+            { status: 200 },
+          ),
+        ];
+        globalThis.fetch = (async (_url, init) => {
+          assert.ok(init?.signal instanceof AbortSignal);
+          signals.push(init.signal);
+          return responses.shift() ?? new Response("", { status: 500 });
+        }) as typeof fetch;
+        const result = await new TelegramBotApiClient("token").sendMessage({
+          chat_id: "99",
+          disable_web_page_preview: true,
+          reply_markup: {
+            inline_keyboard: [
+              [
+                {
+                  icon_custom_emoji_id: "emoji-1",
+                  text: "Open",
+                  url: "https://hunch.trade",
+                },
+              ],
+            ],
+          },
+          text: "Menu",
+        });
+        assert.deepEqual(result, { messageId: 8, ok: true });
+        assert.equal(signals.length, 2);
+        assert.equal(signals[0], signals[1]);
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    },
+  },
+];
+
+let passed = 0;
+for (const test of tests) {
+  try {
+    await test.run();
+    passed += 1;
+  } catch (error) {
+    console.error(`[telegram-delivery-safety-tests] failed: ${test.name}`);
+    throw error;
+  }
+}
+
+console.log(
+  `[telegram-delivery-safety-tests] passed ${passed}/${tests.length}`,
+);

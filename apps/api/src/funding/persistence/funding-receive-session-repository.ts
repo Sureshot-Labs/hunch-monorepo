@@ -5,6 +5,7 @@ import type {
   ExternalIngressInstruction,
   FundingReceiveReceipt,
   FundingReceiveAutomationPolicy,
+  FundingReceiveSessionChannel,
   FundingReceiveMethod,
   FundingReceiveSession,
   FundingReceiveSessionStatus,
@@ -20,10 +21,20 @@ type ActiveReceiveSessionStatus =
   | "review_required"
   | "recovery_required";
 
+export class FundingReceiveSessionChannelConflictError extends Error {
+  readonly code = "receive_channel_conflict";
+
+  constructor() {
+    super("an active receive session is owned by another channel");
+    this.name = "FundingReceiveSessionChannelConflictError";
+  }
+}
+
 type ReceiveSessionRow = Readonly<{
   id: string;
   user_id: string;
   status: FundingReceiveSessionStatus;
+  owner_channel: FundingReceiveSessionChannel;
   venue_id: string;
   destination_option_id: string;
   venue_binding_option_id: string;
@@ -78,6 +89,7 @@ const sessionColumns = `
   id,
   user_id,
   status,
+  owner_channel,
   venue_id,
   destination_option_id,
   venue_binding_option_id,
@@ -184,6 +196,7 @@ export async function derivePersistedFundingReceiveSessionStatus(
 export type FundingReceiveSessionSnapshot = Readonly<{
   session: FundingReceiveSession;
   userId: string;
+  ownerChannel: FundingReceiveSessionChannel;
   destinationTargetSnapshot: JsonRecord;
   venueBindingSnapshot: JsonRecord;
   observationVariants: readonly JsonRecord[];
@@ -193,10 +206,16 @@ export type FundingReceiveSessionSnapshot = Readonly<{
   observeUntil: Date;
 }>;
 
+export type FundingReceiveSessionPersistenceResult = Readonly<{
+  snapshot: FundingReceiveSessionSnapshot;
+  replayed: boolean;
+}>;
+
 function snapshot(row: ReceiveSessionRow): FundingReceiveSessionSnapshot {
   return {
     session: publicSession(row),
     userId: row.user_id,
+    ownerChannel: row.owner_channel,
     destinationTargetSnapshot: row.destination_target_snapshot,
     venueBindingSnapshot: row.venue_binding_snapshot,
     observationVariants: row.observation_variants,
@@ -211,6 +230,7 @@ export async function createOrReuseFundingReceiveSession(
   db: Pool,
   input: Readonly<{
     userId: string;
+    ownerChannel?: FundingReceiveSessionChannel;
     venueId: string;
     destinationOptionId: string;
     venueBindingOptionId: string;
@@ -229,10 +249,19 @@ export async function createOrReuseFundingReceiveSession(
     observeUntil: Date;
     now: Date;
   }>,
-): Promise<
-  Readonly<{ snapshot: FundingReceiveSessionSnapshot; replayed: boolean }>
-> {
+  finalize?: (
+    client: PoolClient,
+    result: FundingReceiveSessionPersistenceResult,
+  ) => Promise<void>,
+): Promise<FundingReceiveSessionPersistenceResult> {
+  const ownerChannel = input.ownerChannel ?? "web";
   return tx(db, async (client) => {
+    const finalized = async (
+      result: FundingReceiveSessionPersistenceResult,
+    ): Promise<FundingReceiveSessionPersistenceResult> => {
+      await finalize?.(client, result);
+      return result;
+    };
     await client.query(
       "select pg_advisory_xact_lock(hashtextextended($1, 0))",
       [
@@ -259,13 +288,21 @@ export async function createOrReuseFundingReceiveSession(
     const current = existing.rows[0];
     if (
       current &&
+      current.owner_channel !== ownerChannel &&
+      current.expires_at > input.now
+    ) {
+      throw new FundingReceiveSessionChannelConflictError();
+    }
+    if (
+      current &&
+      current.owner_channel === ownerChannel &&
       current.expires_at > input.now &&
       (current.status === "processing" ||
         current.status === "review_required" ||
         (current.policy_revision === input.policyRevision &&
           current.ownership_revision === input.ownershipRevision))
     ) {
-      return { snapshot: snapshot(current), replayed: true };
+      return finalized({ snapshot: snapshot(current), replayed: true });
     }
     if (current) {
       await client.query(
@@ -284,6 +321,7 @@ export async function createOrReuseFundingReceiveSession(
       `
         insert into funding_receive_sessions (
           user_id,
+          owner_channel,
           venue_id,
           destination_option_id,
           venue_binding_option_id,
@@ -304,14 +342,15 @@ export async function createOrReuseFundingReceiveSession(
           observe_until
         )
         values (
-          $1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb,
-          $9::jsonb, $10::jsonb, $10::jsonb, $11, $12::jsonb, $13, $14,
-          $15, $16, $17, $18
+          $1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8::jsonb,
+          $9::jsonb, $10::jsonb, $11::jsonb, $11::jsonb, $12, $13::jsonb, $14, $15,
+          $16, $17, $18, $19
         )
         returning ${sessionColumns}
       `,
       [
         input.userId,
+        ownerChannel,
         input.venueId,
         input.destinationOptionId,
         input.venueBindingOptionId,
@@ -333,7 +372,7 @@ export async function createOrReuseFundingReceiveSession(
     );
     const row = inserted.rows[0];
     if (!row) throw new Error("funding receive session insert returned no row");
-    return { snapshot: snapshot(row), replayed: false };
+    return finalized({ snapshot: snapshot(row), replayed: false });
   });
 }
 
@@ -493,6 +532,7 @@ export async function cancelFundingReceiveSessionForUser(
   db: Pick<Pool, "query">,
   input: Readonly<{
     userId: string;
+    ownerChannel: FundingReceiveSessionChannel;
     receiveSessionId: string;
     now: Date;
   }>,
@@ -506,6 +546,7 @@ export async function cancelFundingReceiveSessionForUser(
           version = version + 1
       where id = $1
         and user_id = $2
+        and owner_channel = $4
         and status = 'open'
         and not exists (
           select 1
@@ -514,7 +555,7 @@ export async function cancelFundingReceiveSessionForUser(
         )
       returning ${sessionColumns}
     `,
-    [input.receiveSessionId, input.userId, input.now],
+    [input.receiveSessionId, input.userId, input.now, input.ownerChannel],
   );
   return rows[0] ? snapshot(rows[0]) : null;
 }
@@ -1289,6 +1330,17 @@ export async function listFundingReceiveReceiptsForRouting(
       from funding_receive_receipts receipt
       join funding_receive_sessions session
         on session.id = receipt.receive_session_id
+      left join telegram_funding_sessions telegram_context
+        on telegram_context.receive_session_id = session.id
+       and telegram_context.user_id = session.user_id
+      left join lateral (
+        select consent.*
+        from telegram_funding_consents consent
+        where consent.telegram_funding_session_id = telegram_context.id
+          and consent.consented_at <= receipt.observed_at
+        order by consent.consented_at desc, consent.revision desc
+        limit 1
+      ) telegram_consent on true
       left join funding_operations operation
         on operation.id = receipt.child_funding_operation_id
       where (
@@ -1296,6 +1348,37 @@ export async function listFundingReceiveReceiptsForRouting(
           and receipt.handling = 'automatic_conversion'
           and receipt.child_funding_operation_id is null
           and receipt.routing_next_attempt_at <= $2
+          and (
+            (
+              session.owner_channel = 'web'
+              and session.selected_receive_target_id is not null
+            )
+            or (
+              session.owner_channel = 'telegram'
+              and telegram_context.id is not null
+              and receipt.observed_at <= telegram_context.expires_at
+              and (
+                telegram_context.cancelled_at is null
+                or receipt.observed_at <= telegram_context.cancelled_at
+              )
+              and telegram_consent.automation_enabled
+              and telegram_consent.max_auto_execute_source_raw is not null
+              and receipt.raw_amount <= telegram_consent.max_auto_execute_source_raw
+              and receipt.network_id = telegram_consent.selected_asset_network_id
+              and receipt.asset_decimals = telegram_consent.selected_asset_decimals
+              and (
+                (
+                  receipt.network_id like 'evm:%'
+                  and lower(receipt.asset_id) = lower(telegram_consent.selected_asset_id)
+                )
+                or (
+                  receipt.network_id not like 'evm:%'
+                  and receipt.asset_id = telegram_consent.selected_asset_id
+                )
+              )
+              and receipt.variant_id = any(telegram_consent.consented_variant_ids)
+            )
+          )
         )
         or (
           receipt.status = 'routing'
@@ -1559,7 +1642,7 @@ export async function linkFundingReceiveReceiptReviewOperation(
 }
 
 export async function linkFundingReceiveReceiptOperation(
-  db: Pick<Pool, "query">,
+  db: Pool,
   input: Readonly<{
     receiptId: string;
     userId: string;
@@ -1567,23 +1650,44 @@ export async function linkFundingReceiveReceiptOperation(
     now: Date;
   }>,
 ): Promise<boolean> {
-  const result = await db.query(
-    `
-      update funding_receive_receipts
-      set status = 'routing',
-          child_funding_operation_id = $3,
-          routing_disposition = 'operation_created',
-          routing_last_attempt_at = $4,
-          routing_last_error_code = null,
-          updated_at = $4
-      where id = $1
-        and user_id = $2
-        and status = 'observed'
-        and child_funding_operation_id is null
-    `,
-    [input.receiptId, input.userId, input.childFundingOperationId, input.now],
-  );
-  return result.rowCount === 1;
+  return tx(db, async (client) => {
+    const result = await client.query<{ receive_session_id: string }>(
+      `
+        update funding_receive_receipts
+        set status = 'routing',
+            child_funding_operation_id = $3,
+            routing_disposition = 'operation_created',
+            routing_last_attempt_at = $4,
+            routing_last_error_code = null,
+            updated_at = $4
+        where id = $1
+          and user_id = $2
+          and status = 'observed'
+          and child_funding_operation_id is null
+        returning receive_session_id
+      `,
+      [input.receiptId, input.userId, input.childFundingOperationId, input.now],
+    );
+    const receiveSessionId = result.rows[0]?.receive_session_id;
+    if (!receiveSessionId) return false;
+    const sessionStatus = await derivePersistedFundingReceiveSessionStatus(
+      client,
+      { receiveSessionId, userId: input.userId },
+    );
+    await client.query(
+      `
+        update funding_receive_sessions
+        set status = $3,
+            version = version + 1,
+            updated_at = $4
+        where id = $1
+          and user_id = $2
+          and status in ('open', 'processing', 'review_required')
+      `,
+      [receiveSessionId, input.userId, sessionStatus, input.now],
+    );
+    return true;
+  });
 }
 
 export async function settleFundingReceiveReceiptRouting(

@@ -128,6 +128,9 @@ function createMergeDb(fixture: MergeDbFixture) {
               conflicts.positionActionEvidence ?? 0,
             ),
             receive_evidence: String(conflicts.receiveEvidence ?? 0),
+            telegram_funding_context_evidence: String(
+              conflicts.telegramFundingContextEvidence ?? 0,
+            ),
           },
         ] as unknown as T[]);
       }
@@ -142,6 +145,7 @@ function createMergeDb(fixture: MergeDbFixture) {
             active_position_action: false,
             active_preparation: false,
             active_receive_session: false,
+            active_telegram_funding_context: false,
             active_telegram_intent: false,
             deposit_evidence: false,
             funding_evidence:
@@ -152,6 +156,7 @@ function createMergeDb(fixture: MergeDbFixture) {
               fixture.fundingConflicts?.fundingPreparationRuns ?? 0,
             ),
             receive_evidence: false,
+            telegram_funding_evidence: false,
             trading_evidence: false,
           },
         ] as unknown as T[]);
@@ -260,6 +265,7 @@ const tests: Array<{ name: string; run: () => Promise<void> }> = [
           fundingPreparationRuns: 11,
           positionActionEvidence: 9,
           receiveEvidence: 10,
+          telegramFundingContextEvidence: 12,
         },
       });
 
@@ -287,6 +293,7 @@ const tests: Array<{ name: string; run: () => Promise<void> }> = [
             nonTerminalTelegramTradeIntents: 6,
             positionActionEvidence: 9,
             receiveEvidence: 10,
+            telegramFundingContextEvidence: 12,
           });
           return true;
         },

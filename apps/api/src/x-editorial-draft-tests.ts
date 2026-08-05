@@ -566,14 +566,52 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
                 : [],
             };
           }
+          if (
+            sql.includes("update signal_bot_messages") &&
+            sql.includes("metrics #>> '{deliveryStateV2,attemptId}'")
+          ) {
+            const entry = [...storedMessages.entries()].find(
+              ([, stored]) => stored.id === String(params[0]),
+            );
+            if (!entry) return { rowCount: 0, rows: [] };
+            const [key, stored] = entry;
+            const metrics = stored.metrics as {
+              deliveryStateV2?: { attemptId?: unknown; status?: unknown };
+            };
+            const finishing = sql.includes("set telegram_message_id = $4");
+            const expectedStatus = finishing ? params[1] : "reserved";
+            const attemptId = finishing ? params[2] : params[1];
+            if (
+              metrics.deliveryStateV2?.status !== expectedStatus ||
+              metrics.deliveryStateV2?.attemptId !== attemptId
+            ) {
+              return { rowCount: 0, rows: [] };
+            }
+            storedMessages.set(key, {
+              id: stored.id,
+              messageId:
+                finishing && typeof params[3] === "number"
+                  ? (params[3] as number)
+                  : stored.messageId,
+              metrics: JSON.parse(
+                String(finishing ? params[4] : params[2]),
+              ) as unknown,
+            });
+            return { rowCount: 1, rows: [] };
+          }
           if (sql.includes("insert into signal_bot_messages")) {
-            storedMessages.set(String(params[4]), {
+            const messageKind = String(params[4]);
+            if (storedMessages.has(messageKind)) {
+              return { rowCount: 0, rows: [] };
+            }
+            const stored = {
               id: String(params[0]),
               messageId:
                 typeof params[5] === "number" ? (params[5] as number) : null,
               metrics: JSON.parse(String(params[9])) as unknown,
-            });
-            return { rows: [] };
+            };
+            storedMessages.set(messageKind, stored);
+            return { rowCount: 1, rows: [{ id: stored.id }] };
           }
           if (sql.includes("from ai_notes n")) return { rows: [noteRow] };
           return { rows: [] };

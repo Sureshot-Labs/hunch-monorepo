@@ -10,6 +10,7 @@ const MIGRATION_0194 = "0194_funding_recovery_identity_and_trade_intent.sql";
 const MIGRATION_0195 = "0195_funding_observation_physical_identity.sql";
 const MIGRATION_0196 = "0196_funding_operation_expiry.sql";
 const MIGRATION_0197 = "0197_funding_operation_expiry_immutability.sql";
+const MIGRATION_0199 = "0199_telegram_funding_receive.sql";
 const FUNDING_MIGRATIONS = [
   MIGRATION_0184,
   MIGRATION_0193,
@@ -17,6 +18,7 @@ const FUNDING_MIGRATIONS = [
   MIGRATION_0195,
   MIGRATION_0196,
   MIGRATION_0197,
+  MIGRATION_0199,
 ] as const;
 
 const LEGACY_CLASSIFIER_SQL = `
@@ -120,6 +122,27 @@ async function triggerExists(
   return rows[0]?.exists === true;
 }
 
+async function indexPredicateIncludes(
+  db: DbQuery,
+  indexName: string,
+  fragments: readonly string[],
+): Promise<boolean> {
+  const { rows } = await db.query<{ predicate: string | null }>(
+    `
+      select pg_get_expr(idx.indpred, idx.indrelid) as predicate
+      from pg_index idx
+      join pg_class relation on relation.oid = idx.indexrelid
+      join pg_namespace namespace on namespace.oid = relation.relnamespace
+      where namespace.nspname = 'public' and relation.relname = $1
+    `,
+    [indexName],
+  );
+  const predicate = rows[0]?.predicate?.replaceAll(/\s+/g, " ").toLowerCase();
+  return Boolean(
+    predicate && fragments.every((fragment) => predicate.includes(fragment)),
+  );
+}
+
 async function optionalCount(db: DbQuery, sql: string): Promise<number | null> {
   try {
     const { rows } = await db.query<{ count: string }>(sql);
@@ -211,6 +234,56 @@ export async function inspectFundingMigrationPreflight(
     db,
     "public.funding_preparation_runs",
   );
+  const hasTelegramFundingSessions = await relationExists(
+    db,
+    "public.telegram_funding_sessions",
+  );
+  const hasTelegramFundingConsents = await relationExists(
+    db,
+    "public.telegram_funding_consents",
+  );
+  const hasTelegramFundingMutations = await relationExists(
+    db,
+    "public.telegram_funding_mutations",
+  );
+  const hasReceiveOwnerChannel =
+    (await relationExists(db, "public.funding_receive_sessions")) &&
+    (await columnExists(db, "funding_receive_sessions", "owner_channel"));
+  const hasTelegramProjectionWatermark =
+    hasTelegramFundingSessions &&
+    (await columnExists(
+      db,
+      "telegram_funding_sessions",
+      "projected_receive_version",
+    ));
+  const hasFundingOutboxPayload =
+    (await relationExists(db, "public.telegram_bot_action_outbox")) &&
+    (await columnExists(db, "telegram_bot_action_outbox", "payload"));
+  const hasFundingOutboxDeliveryAttempt =
+    (await relationExists(db, "public.telegram_bot_action_outbox")) &&
+    (await columnExists(
+      db,
+      "telegram_bot_action_outbox",
+      "delivery_attempt_id",
+    ));
+  const hasSafeWelcomePendingIndex = hasFundingOutboxPayload
+    ? await indexPredicateIncludes(
+        db,
+        "idx_telegram_bot_action_outbox_pending",
+        ["welcome_menu", "pending", "retry"],
+      )
+    : false;
+  const hasNotificationOutbox = await relationExists(
+    db,
+    "public.telegram_notification_outbox",
+  );
+  const hasSafeNotificationPendingIndex = hasNotificationOutbox
+    ? await indexPredicateIncludes(
+        db,
+        "idx_telegram_notification_outbox_pending",
+        ["pending", "retry"],
+      )
+    : false;
   const hasObservationDecimals =
     hasObservations &&
     (await columnExists(db, "funding_observations", "asset_decimals"));
@@ -275,6 +348,27 @@ export async function inspectFundingMigrationPreflight(
       : null,
     appliedSet.has(MIGRATION_0197) && !hasImmutableOperationExpiry
       ? "0197 is recorded but funding operation expiry immutability is absent"
+      : null,
+    !appliedSet.has(MIGRATION_0199) &&
+    (hasTelegramFundingSessions ||
+      hasTelegramFundingConsents ||
+      hasTelegramFundingMutations ||
+      hasReceiveOwnerChannel ||
+      hasFundingOutboxPayload ||
+      hasFundingOutboxDeliveryAttempt)
+      ? "Telegram funding receive objects exist before 0199 is recorded"
+      : null,
+    appliedSet.has(MIGRATION_0199) &&
+    (!hasTelegramFundingSessions ||
+      !hasTelegramFundingConsents ||
+      !hasTelegramFundingMutations ||
+      !hasReceiveOwnerChannel ||
+      !hasTelegramProjectionWatermark ||
+      !hasFundingOutboxPayload ||
+      !hasFundingOutboxDeliveryAttempt ||
+      !hasSafeWelcomePendingIndex ||
+      !hasSafeNotificationPendingIndex)
+      ? "0199 is recorded but Telegram funding receive objects are incomplete"
       : null,
   ].filter((value): value is string => value !== null);
 

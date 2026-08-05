@@ -1,8 +1,13 @@
 import type { DbQuery } from "../db.js";
 import { isSignalBotQuoteFresh } from "./signal-bot-delivery-policy.js";
-import { createSignalDeliveryRef } from "./signal-delivery-attribution.js";
 import { parseTelegramMarketIdentityV1 } from "./signal-publication-contract.js";
 import { buildSignalBotMiniAppEventUrl } from "./signal-bot-mini-app-links.js";
+import {
+  beginSignalBotMessageDelivery,
+  finishSignalBotMessageDelivery,
+  recordSignalBotMessageNonDeliveryState,
+  reserveSignalBotMessageDelivery,
+} from "./signal-bot-message-delivery-ledger.js";
 import type {
   SignalBotDeliveryPreparationReason,
   SignalBotFollowthroughCandidateRow,
@@ -26,7 +31,8 @@ type SignalBotXEditorialDeliveryRow = {
 };
 
 export type SignalBotXEditorialPublicationResult =
-  | { status: "already_sent" | "blocked" | "sent" }
+  | { status: "already_sent" | "delivery_unknown" | "sent" }
+  | { blockedChat: boolean; status: "blocked" }
   | { blockedChat: boolean; status: "retry" }
   | { reason: SignalBotDeliveryPreparationReason; status: "invalid" }
   | { status: "unavailable" };
@@ -425,67 +431,6 @@ export function buildXEditorialTelegramDraftMessage(input: {
   ].join("\n\n");
 }
 
-async function recordMessage(input: {
-  baselineAt: string;
-  chatId: string;
-  db: DbQuery;
-  insertId: string;
-  messageId: number | null;
-  messageKind: XEditorialMessageKind;
-  metrics: unknown;
-  noteId: string;
-  threadRootNoteId: string;
-}): Promise<boolean> {
-  try {
-    await input.db.query(
-      `
-        insert into signal_bot_messages (
-          id,
-          chat_id,
-          note_id,
-          thread_root_note_id,
-          message_kind,
-          telegram_message_id,
-          reply_to_message_id,
-          baseline_at,
-          sent_at,
-          metrics
-        )
-        values ($1::uuid, $2, $3::uuid, $4::uuid, $5, $6, $7, $8::timestamptz, $9::timestamptz, $10::jsonb)
-        on conflict (chat_id, note_id, message_kind)
-        do update set
-          telegram_message_id = excluded.telegram_message_id,
-          reply_to_message_id = excluded.reply_to_message_id,
-          baseline_at = excluded.baseline_at,
-          sent_at = excluded.sent_at,
-          metrics = excluded.metrics
-      `,
-      [
-        input.insertId,
-        input.chatId,
-        input.noteId,
-        input.threadRootNoteId,
-        input.messageKind,
-        input.messageId,
-        null,
-        input.baselineAt,
-        new Date().toISOString(),
-        JSON.stringify(input.metrics),
-      ],
-    );
-    return true;
-  } catch (error) {
-    if (isMissingSignalBotMessagesTable(error)) return false;
-    console.warn("[signal-bot] failed to record X editorial delivery", {
-      chatId: input.chatId,
-      error: error instanceof Error ? error.message : String(error),
-      messageKind: input.messageKind,
-      noteId: input.noteId,
-    });
-    return false;
-  }
-}
-
 async function deliverDraft(input: {
   baselineAt: string;
   chatId: string;
@@ -499,11 +444,18 @@ async function deliverDraft(input: {
 }): Promise<SignalBotXEditorialPublicationResult> {
   const existing = await loadDelivery(input);
   const existingMetrics = asObject(existing?.metrics);
-  if (
-    existing?.telegram_message_id != null &&
-    existingMetrics.status === "sent"
-  ) {
+  if (existing?.telegram_message_id != null) {
     return { status: "already_sent" };
+  }
+  const existingDeliveryState = asObject(existingMetrics.deliveryStateV2);
+  const existingStatus = asTrimmedString(
+    existingDeliveryState.status ?? existingMetrics.status,
+  );
+  if (existingStatus === "delivery_unknown") {
+    return { status: "delivery_unknown" };
+  }
+  if (existingStatus === "blocked" || existingStatus === "skipped") {
+    return { blockedChat: existingStatus === "blocked", status: "blocked" };
   }
   const persistedDraft = parsePersistedXEditorialDraft(
     existingMetrics.editorialDraftV1,
@@ -518,10 +470,11 @@ async function deliverDraft(input: {
     try {
       draft = await input.composer({ source: input.source });
     } catch (error) {
-      await recordMessage({
-        ...input,
-        insertId: existing?.id ?? createSignalDeliveryRef(),
-        messageId: null,
+      await recordSignalBotMessageNonDeliveryState({
+        baselineAt: input.baselineAt,
+        chatId: input.chatId,
+        db: input.db,
+        messageKind: input.messageKind,
         metrics: {
           contentProfile: X_EDITORIAL_CONTENT_PROFILE,
           error:
@@ -530,6 +483,10 @@ async function deliverDraft(input: {
               : String(error),
           status: "compose_failed",
         },
+        noteId: input.noteId,
+        replyToMessageId: null,
+        sentAt: new Date(),
+        threadRootNoteId: input.threadRootNoteId,
       });
       return { blockedChat: false, status: "retry" };
     }
@@ -538,22 +495,46 @@ async function deliverDraft(input: {
     contentProfile: X_EDITORIAL_CONTENT_PROFILE,
     editorialDraftV1: draft,
   };
-  if (draft.status === "blocked" || !draft.postText) {
-    await recordMessage({
-      ...input,
-      insertId: existing?.id ?? createSignalDeliveryRef(),
-      messageId: null,
-      metrics: { ...baseMetrics, status: "skipped" },
-    });
-    return { status: "blocked" };
-  }
-  const prepared = await recordMessage({
-    ...input,
-    insertId: existing?.id ?? createSignalDeliveryRef(),
-    messageId: null,
-    metrics: { ...baseMetrics, status: "prepared" },
+  const reservation = await reserveSignalBotMessageDelivery({
+    baselineAt: input.baselineAt,
+    baseMetrics,
+    chatId: input.chatId,
+    db: input.db,
+    messageKind: input.messageKind,
+    noteId: input.noteId,
+    replyToMessageId: null,
+    threadRootNoteId: input.threadRootNoteId,
   });
-  if (!prepared) return { blockedChat: false, status: "retry" };
+  if (reservation.status === "terminal") {
+    if (reservation.outcome === "sent") return { status: "already_sent" };
+    if (reservation.outcome === "delivery_unknown") {
+      return { status: "delivery_unknown" };
+    }
+    return {
+      blockedChat: reservation.outcome === "blocked",
+      status: "blocked",
+    };
+  }
+  if (reservation.status !== "acquired") {
+    return { blockedChat: false, status: "retry" };
+  }
+  if (draft.status === "blocked" || !draft.postText) {
+    await finishSignalBotMessageDelivery({
+      attemptId: reservation.attemptId,
+      db: input.db,
+      deliveryRef: reservation.deliveryRef,
+      expectedStatus: "reserved",
+      metrics: baseMetrics,
+      status: "skipped",
+    });
+    return { blockedChat: false, status: "blocked" };
+  }
+  const began = await beginSignalBotMessageDelivery({
+    attemptId: reservation.attemptId,
+    db: input.db,
+    deliveryRef: reservation.deliveryRef,
+  });
+  if (!began) return { blockedChat: false, status: "retry" };
   const result = await input.telegram.sendMessage({
     chat_id: input.chatId,
     disable_web_page_preview: true,
@@ -565,26 +546,37 @@ async function deliverDraft(input: {
     }),
   });
   if (!result.ok) {
-    await recordMessage({
-      ...input,
-      insertId: existing?.id ?? createSignalDeliveryRef(),
-      messageId: null,
-      metrics: {
-        ...baseMetrics,
-        error: result.message.slice(0, 500),
-        status: "send_failed",
-      },
+    const status =
+      result.error === "ambiguous"
+        ? "delivery_unknown"
+        : result.error === "blocked_or_missing"
+          ? "blocked"
+          : "retry";
+    await finishSignalBotMessageDelivery({
+      attemptId: reservation.attemptId,
+      db: input.db,
+      deliveryRef: reservation.deliveryRef,
+      errorCode: result.error,
+      expectedStatus: "sending",
+      metrics: baseMetrics,
+      nextAttemptAt:
+        status === "retry"
+          ? new Date(Date.now() + (result.retryAfterSec ?? 60) * 1_000)
+          : null,
+      status,
     });
-    return {
-      blockedChat: result.error === "blocked_or_missing",
-      status: "retry",
-    };
+    if (status === "delivery_unknown") return { status };
+    if (status === "blocked") return { blockedChat: true, status };
+    return { blockedChat: false, status };
   }
-  await recordMessage({
-    ...input,
-    insertId: existing?.id ?? createSignalDeliveryRef(),
+  await finishSignalBotMessageDelivery({
+    attemptId: reservation.attemptId,
+    db: input.db,
+    deliveryRef: reservation.deliveryRef,
+    expectedStatus: "sending",
     messageId: result.messageId,
-    metrics: { ...baseMetrics, status: "sent" },
+    metrics: baseMetrics,
+    status: "sent",
   });
   return { status: "sent" };
 }

@@ -159,6 +159,7 @@ function protectedRefsSql(
     includeFundingLiquidityProjections?: boolean;
     includeFundingPreparationRuns?: boolean;
     includePositionActionOperations?: boolean;
+    includeTelegramFundingSessions?: boolean;
     includeTelegramTradeIntents?: boolean;
   } = {},
 ): string {
@@ -213,6 +214,16 @@ function protectedRefsSql(
        or ti.tx_signature is not null
   `
     : "";
+  const telegramFundingSessionsRef = options.includeTelegramFundingSessions
+    ? `
+    union
+    select distinct c.market_id, 'telegram_funding_sessions' as reason
+    from ${candidatePoolTable} c
+    join telegram_funding_sessions context
+      on context.market_id = c.market_id
+      or (context.event_id is not null and context.event_id = c.event_id)
+  `
+    : "";
   return `
     select distinct ct.market_id, 'orders' as reason
     from ${candidateRefTokensTable} ct
@@ -233,6 +244,7 @@ function protectedRefsSql(
     ${fundingLiquidityProjectionsRef}
     ${fundingPreparationRunsRef}
     ${positionActionOperationsRef}
+    ${telegramFundingSessionsRef}
     ${telegramTradeIntentsRef}
     union
     select distinct c.market_id, 'wallet_position_snapshots' as reason
@@ -365,6 +377,7 @@ function candidateCte(
     includeFundingLiquidityProjections?: boolean;
     includeFundingPreparationRuns?: boolean;
     includePositionActionOperations?: boolean;
+    includeTelegramFundingSessions?: boolean;
     includeTelegramTradeIntents?: boolean;
   } = {},
 ): string {
@@ -594,6 +607,7 @@ async function protectedRefOptions(client: PoolClient): Promise<{
   includeFundingLiquidityProjections: boolean;
   includeFundingPreparationRuns: boolean;
   includePositionActionOperations: boolean;
+  includeTelegramFundingSessions: boolean;
   includeTelegramTradeIntents: boolean;
 }> {
   const [
@@ -601,12 +615,14 @@ async function protectedRefOptions(client: PoolClient): Promise<{
     includeFundingLiquidityProjections,
     includeFundingPreparationRuns,
     includePositionActionOperations,
+    includeTelegramFundingSessions,
     includeTelegramTradeIntents,
   ] = await Promise.all([
     relationExists(client, "public.funding_operations"),
     relationExists(client, "public.funding_liquidity_projections"),
     relationExists(client, "public.funding_preparation_runs"),
     relationExists(client, "public.position_action_operations"),
+    relationExists(client, "public.telegram_funding_sessions"),
     relationExists(client, "public.telegram_trade_intents"),
   ]);
   return {
@@ -614,6 +630,7 @@ async function protectedRefOptions(client: PoolClient): Promise<{
     includeFundingLiquidityProjections,
     includeFundingPreparationRuns,
     includePositionActionOperations,
+    includeTelegramFundingSessions,
     includeTelegramTradeIntents,
   };
 }

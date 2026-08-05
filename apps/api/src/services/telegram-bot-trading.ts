@@ -2020,6 +2020,7 @@ export function buildUnlinkedTelegramBotTradingStatus(input: {
           autoEnableOnTelegramLink: false,
           autoManagedMaxAmountUsd: 1,
           autoManagedVenues: ["polymarket"],
+          fundingReceiveEnabled: false,
           tradingEnabled: false,
           tradingActions: ["buy"],
           tradingVenues: ["polymarket"],

@@ -100,6 +100,7 @@ export type FundingMergeConflictSummary = Readonly<{
   nonTerminalTelegramTradeIntents: number;
   positionActionEvidence: number;
   receiveEvidence: number;
+  telegramFundingContextEvidence: number;
 }>;
 
 export class FundingMergeConflictError extends Error {
@@ -151,6 +152,7 @@ async function fetchFundingMergeConflicts(
     non_terminal_telegram_trade_intents: string;
     position_action_evidence: string;
     receive_evidence: string;
+    telegram_funding_context_evidence: string;
   }>(
     `
       select
@@ -240,6 +242,11 @@ async function fetchFundingMergeConflicts(
         ) as receive_evidence,
         (
           select count(*)::text
+          from telegram_funding_sessions context
+          where context.user_id = any($1::uuid[])
+        ) as telegram_funding_context_evidence,
+        (
+          select count(*)::text
           from funding_operations source
           join funding_operations target
             on target.user_id = $3
@@ -281,6 +288,9 @@ async function fetchFundingMergeConflicts(
     ),
     positionActionEvidence: Number(row.position_action_evidence),
     receiveEvidence: Number(row.receive_evidence),
+    telegramFundingContextEvidence: Number(
+      row.telegram_funding_context_evidence,
+    ),
   };
 }
 

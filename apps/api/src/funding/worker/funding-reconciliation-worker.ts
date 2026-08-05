@@ -20,6 +20,7 @@ import { DirectIngressDestinationObserver } from "../reconciliation/direct-ingre
 import { OwnedRouteDestinationObserver } from "../reconciliation/owned-route-destination-observer.js";
 import { FundingReceiveSessionObserver } from "../receive/receive-session-observer.js";
 import { FundingReceiveReceiptRouter } from "../receive/receive-receipt-router.js";
+import { runTelegramFundingProgressProjectionBatch } from "../../services/telegram-funding-progress-projector.js";
 
 export type FundingReferenceProtectionConfig = Readonly<{
   credentialsEncryptionKey: string;
@@ -49,6 +50,9 @@ export type FundingReconciliationJobResult =
         receiveRouting: Awaited<
           ReturnType<FundingReceiveReceiptRouter["runBatch"]>
         >;
+        telegramFundingProgress: Awaited<
+          ReturnType<typeof runTelegramFundingProgressProjectionBatch>
+        >;
       }>)
   | Readonly<{
       skipped: true;
@@ -61,6 +65,7 @@ export type FundingReconciliationJobResult =
       operationIds: readonly [];
       receiveObservation: null;
       receiveRouting: null;
+      telegramFundingProgress: null;
     }>;
 
 export async function isFundingReconciliationSchemaReady(
@@ -72,6 +77,33 @@ export async function isFundingReconciliationSchemaReady(
         to_regclass('public.funding_operations') is not null
         and to_regclass('public.funding_observations') is not null
         and to_regclass('public.funding_reconciliation_jobs') is not null
+        and to_regclass('public.funding_receive_sessions') is not null
+        and to_regclass('public.telegram_funding_sessions') is not null
+        and to_regclass('public.telegram_funding_consents') is not null
+        and to_regclass('public.telegram_funding_mutations') is not null
+        and to_regclass('public.telegram_bot_action_outbox') is not null
+        and exists (
+          select 1
+          from pg_attribute
+          where attrelid = to_regclass('public.funding_receive_sessions')
+            and attname = 'owner_channel'
+            and not attisdropped
+        )
+        and not exists (
+          select required.column_name
+          from (values
+            ('funding_session_id'),
+            ('state_revision'),
+            ('delivery_attempt_id')
+          ) as required(column_name)
+          where not exists (
+            select 1
+            from pg_attribute attribute
+            where attribute.attrelid = to_regclass('public.telegram_bot_action_outbox')
+              and attribute.attname = required.column_name
+              and not attribute.attisdropped
+          )
+        )
         as ready
     `,
   );
@@ -94,6 +126,7 @@ export async function runFundingReconciliationJob(
       operationIds: [],
       receiveObservation: null,
       receiveRouting: null,
+      telegramFundingProgress: null,
     };
   }
   const relay = options.relay;
@@ -128,7 +161,12 @@ export async function runFundingReconciliationJob(
         now: options.now,
       },
     );
-    return { receiveObservation, receiveRouting };
+    const telegramFundingProgress =
+      await runTelegramFundingProgressProjectionBatch(pool, {
+        limit: options.limit ?? 25,
+        now: options.now,
+      });
+    return { receiveObservation, receiveRouting, telegramFundingProgress };
   };
   const directIngressObserver = new DirectIngressDestinationObserver();
   const ownedRouteObserver = new OwnedRouteDestinationObserver();

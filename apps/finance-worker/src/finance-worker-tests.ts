@@ -214,6 +214,17 @@ const tests: TestCase[] = [
         }),
         false,
       );
+      assert.equal(
+        job.isNoopResult?.({
+          claimed: 0,
+          telegramFundingProgress: {
+            candidates: 1,
+            created: 1,
+            skipped: 0,
+          },
+        }),
+        false,
+      );
     },
   },
   {

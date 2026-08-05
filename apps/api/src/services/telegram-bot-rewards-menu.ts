@@ -14,35 +14,15 @@ import {
   readSignalBotMenuInput,
   writeSignalBotRewardsMenuInput,
 } from "./telegram-bot-menu-state.js";
+import {
+  sendOrEditTelegramBotMenuMessage,
+  type TelegramBotMenuTransport,
+} from "./telegram-bot-menu-delivery.js";
 
 type RewardsMenuRedis = {
   del(key: string): Promise<unknown>;
   get(key: string): Promise<string | null>;
   set(key: string, value: string, options?: { EX?: number }): Promise<unknown>;
-};
-
-type RewardsMenuSendResult = {
-  message?: string;
-  messageId?: number | null;
-  ok: boolean;
-};
-
-type RewardsMenuTransport = {
-  editMessageText?: (input: {
-    chat_id: string;
-    disable_web_page_preview: boolean;
-    message_id: number;
-    parse_mode: "MarkdownV2";
-    reply_markup?: TelegramBotRewardsMessage["reply_markup"];
-    text: string;
-  }) => Promise<RewardsMenuSendResult>;
-  sendMessage: (input: {
-    chat_id: string;
-    disable_web_page_preview: boolean;
-    parse_mode: "MarkdownV2";
-    reply_markup?: TelegramBotRewardsMessage["reply_markup"];
-    text: string;
-  }) => Promise<RewardsMenuSendResult>;
 };
 
 export type TelegramBotRewardsMenuDependencies = {
@@ -68,34 +48,6 @@ export type TelegramBotRewardsMenuDependencies = {
   }) => Promise<TelegramBotReferralCodeChangeResult>;
 };
 
-async function sendOrEditRewardsMessage(input: {
-  chatId: string;
-  message: TelegramBotRewardsMessage;
-  messageId: number | null;
-  transport: RewardsMenuTransport;
-}): Promise<RewardsMenuSendResult> {
-  if (input.messageId != null && input.transport.editMessageText) {
-    const edited = await input.transport.editMessageText({
-      chat_id: input.chatId,
-      disable_web_page_preview: true,
-      message_id: input.messageId,
-      parse_mode: "MarkdownV2",
-      reply_markup: input.message.reply_markup,
-      text: input.message.text,
-    });
-    if (edited.ok || /message is not modified/i.test(edited.message ?? "")) {
-      return edited;
-    }
-  }
-  return input.transport.sendMessage({
-    chat_id: input.chatId,
-    disable_web_page_preview: true,
-    parse_mode: "MarkdownV2",
-    reply_markup: input.message.reply_markup,
-    text: input.message.text,
-  });
-}
-
 async function renderRewardsView(input: {
   appBaseUrl: string;
   callbackPrefix: string;
@@ -105,9 +57,9 @@ async function renderRewardsView(input: {
   miniAppEnabled: boolean;
   notice?: string | null;
   telegramUserId: number;
-  transport: RewardsMenuTransport;
+  transport: TelegramBotMenuTransport;
   view: TelegramBotRewardsView;
-}): Promise<RewardsMenuSendResult> {
+}) {
   let message: TelegramBotRewardsMessage;
   try {
     message = input.loadRewards
@@ -120,7 +72,7 @@ async function renderRewardsView(input: {
   } catch {
     message = buildTelegramBotRewardsUnavailableMessage(input);
   }
-  return sendOrEditRewardsMessage({
+  return sendOrEditTelegramBotMenuMessage({
     chatId: input.chatId,
     message,
     messageId: input.messageId,
@@ -182,7 +134,7 @@ export async function handleTelegramBotRewardsCallback(
     redis: RewardsMenuRedis;
     route: TelegramBotRewardsCallbackRoute;
     telegramUserId: number;
-    transport: RewardsMenuTransport;
+    transport: TelegramBotMenuTransport;
   },
 ): Promise<boolean> {
   const render = (view: TelegramBotRewardsView, notice?: string | null) =>
@@ -201,7 +153,7 @@ export async function handleTelegramBotRewardsCallback(
         menuMessageId: input.messageId,
       },
     });
-    await sendOrEditRewardsMessage({
+    await sendOrEditTelegramBotMenuMessage({
       ...input,
       message: buildTelegramBotReferralCodeInputPrompt({
         action: input.route.action,
@@ -258,7 +210,7 @@ export async function handleTelegramBotRewardsCallback(
         menuMessageId: input.messageId,
       },
     });
-    await sendOrEditRewardsMessage({
+    await sendOrEditTelegramBotMenuMessage({
       ...input,
       message: buildTelegramBotReferralCodeInputPrompt({
         action: "change",
@@ -300,7 +252,7 @@ export async function handleTelegramBotRewardsCallback(
       menuMessageId: input.messageId,
     },
   });
-  await sendOrEditRewardsMessage({
+  await sendOrEditTelegramBotMenuMessage({
     ...input,
     message: buildTelegramBotReferralCodeInputPrompt({
       action: "attach",
@@ -321,7 +273,7 @@ export async function handleTelegramBotRewardsInput(
     redis: RewardsMenuRedis;
     telegramUserId: number;
     text: string;
-    transport: RewardsMenuTransport;
+    transport: TelegramBotMenuTransport;
   },
 ): Promise<boolean> {
   const state = await readSignalBotMenuInput(input);
@@ -338,7 +290,7 @@ export async function handleTelegramBotRewardsInput(
         menuMessageId: state.menuMessageId,
       },
     });
-    await sendOrEditRewardsMessage({
+    await sendOrEditTelegramBotMenuMessage({
       chatId: input.chatId,
       message: buildTelegramBotReferralCodeInputPrompt({
         action,
@@ -370,7 +322,7 @@ export async function handleTelegramBotRewardsInput(
           menuMessageId: state.menuMessageId,
         },
       });
-      await sendOrEditRewardsMessage({
+      await sendOrEditTelegramBotMenuMessage({
         chatId: input.chatId,
         message: buildTelegramBotReferralCodeInputPrompt({
           action,
@@ -395,7 +347,7 @@ export async function handleTelegramBotRewardsInput(
       menuMessageId: state.menuMessageId,
     },
   });
-  await sendOrEditRewardsMessage({
+  await sendOrEditTelegramBotMenuMessage({
     chatId: input.chatId,
     message: buildTelegramBotReferralCodeConfirmation({
       action,

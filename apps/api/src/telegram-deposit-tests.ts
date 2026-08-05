@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 
 import { Interface } from "ethers";
+import Fastify from "fastify";
+import {
+  serializerCompiler,
+  validatorCompiler,
+} from "fastify-type-provider-zod";
 
+import { createTelegramBotTradingRoutes } from "./routes/telegram-bot-trading.js";
 import { handleSignalBotInteractiveMenuCallback } from "./services/telegram-bot-menu-actions.js";
 import { recordTelegramDepositResolutionAnalytics } from "./services/telegram-lifecycle-analytics.js";
 import {
@@ -73,6 +79,91 @@ function dependencies(
 }
 
 const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
+  {
+    name: "main Add funds callback reaches the venue picker route",
+    run: async () => {
+      const loadedVenues: Array<string | null | undefined> = [];
+      let rendered = "";
+      await handleSignalBotInteractiveMenuCallback({
+        callbackPrefix: "hm:v1:",
+        chatId: "20",
+        loadDeposit: async ({ venue }) => {
+          loadedVenues.push(venue);
+          return { text: "Choose a trading venue." };
+        },
+        messageId: 42,
+        redis: { get: async () => null },
+        render: async (message) => {
+          rendered = message.text;
+        },
+        renderExpiredSearch: async () => undefined,
+        route: { kind: "deposit_menu" },
+        telegramUserId: 20,
+      });
+      assert.deepEqual(loadedVenues, [null]);
+      assert.equal(rendered, "Choose a trading venue.");
+
+      const routeCalls: Array<string | null | undefined> = [];
+      const app = Fastify({ logger: false });
+      app.setValidatorCompiler(validatorCompiler);
+      app.setSerializerCompiler(serializerCompiler);
+      await app.register(
+        createTelegramBotTradingRoutes({
+          buildDepositMessage: async ({ venue }) => {
+            routeCalls.push(venue);
+            return { text: venue ? `Deposit ${venue}` : "Choose venues" };
+          },
+          db: {
+            query: async () => ({ fields: [], rows: [] }),
+          } as never,
+          fundingService: {
+            cancel: async () => ({ text: "cancel" }),
+            open: async () => ({ text: "open" }),
+            selectTarget: async () => ({ text: "select" }),
+            session: async () => ({ text: "session" }),
+          },
+          internalPreHandler: async () => undefined,
+          resolveInternalWallets: async () => [],
+        }),
+      );
+      try {
+        const picker = await app.inject({
+          method: "POST",
+          payload: {
+            appBaseUrl: "https://app.hunch.trade",
+            telegramUserId: 20,
+            venue: null,
+          },
+          url: "/internal/telegram-bot/deposit",
+        });
+        assert.equal(picker.statusCode, 200);
+        assert.equal(picker.json().text, "Choose venues");
+        const limitless = await app.inject({
+          method: "POST",
+          payload: {
+            appBaseUrl: "https://app.hunch.trade",
+            telegramUserId: 20,
+            venue: "limitless",
+          },
+          url: "/internal/telegram-bot/deposit",
+        });
+        assert.equal(limitless.json().text, "Deposit limitless");
+        const polymarket = await app.inject({
+          method: "POST",
+          payload: {
+            appBaseUrl: "https://app.hunch.trade",
+            telegramUserId: 20,
+            venue: "polymarket",
+          },
+          url: "/internal/telegram-bot/deposit",
+        });
+        assert.doesNotMatch(polymarket.json().text, /address/iu);
+        assert.deepEqual(routeCalls, [null, "limitless"]);
+      } finally {
+        await app.close();
+      }
+    },
+  },
   {
     name: "Limitless deposit prefers the internal Telegram signer",
     run: async () => {
@@ -246,14 +337,12 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(message.qrText, deposit);
       assert.match(message.text, new RegExp(deposit));
       assert.match(message.text, /\*Network:\* Polygon/);
-      assert.match(message.text, /\*Assets:\* pUSD or USDC\\\.e/);
+      assert.match(message.text, /\*Assets:\* pUSD/);
+      assert.doesNotMatch(message.text, /pUSD or USDC\\\.e/);
       assert.match(message.text, /📍 \*Deposit address\*/);
       assert.ok(message.text.includes(`\`${deposit}\``));
       assert.match(message.text, />⚠️ \*Important\*/);
-      assert.match(
-        message.text,
-        />Send only \*pUSD\* or \*USDC\\\.e\* on \*Polygon\*/,
-      );
+      assert.match(message.text, />Send only \*pUSD\* on \*Polygon\*/);
       assert.doesNotMatch(message.text, /setup|required|not configured/i);
       const buttons = message.reply_markup?.inline_keyboard.flat() ?? [];
       assert.equal(
@@ -524,7 +613,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           renderCalls += 1;
         },
         renderExpiredSearch: async () => undefined,
-        route: { kind: "deposit", showQr: true, venue: "polymarket" },
+        route: { kind: "deposit", showQr: true, venue: "limitless" },
         sendPhoto: async (photo) => {
           photoCalls += 1;
           photoCaption = photo.caption ?? "";
