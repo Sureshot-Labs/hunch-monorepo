@@ -89,6 +89,23 @@ test("normalizes slugs and de-duplicates structured tags", () => {
   ]);
 });
 
+test("defaults author bylines on and preserves an explicit opt-out", () => {
+  const base = {
+    slug: "author-byline-contract",
+    title: "Author byline contract",
+  };
+  const defaulted = contentArticleCreateBodySchema.parse({
+    ...base,
+    author: { name: "Hunch" },
+  });
+  const hidden = contentArticleCreateBodySchema.parse({
+    ...base,
+    author: { name: "Hunch", showByline: false },
+  });
+  assert.equal(defaulted.author?.showByline, true);
+  assert.equal(hidden.author?.showByline, false);
+});
+
 test("rejects unsafe slugs, arbitrary document fields, and unsafe links", () => {
   assert.equal(
     contentArticleCreateBodySchema.safeParse({
@@ -374,7 +391,13 @@ const publishableArticle: ContentArticle = {
       twitterTitle: null,
       twitterDescription: null,
     },
-    author: { name: "Hunch", url: null, bio: null, avatarAssetId: null },
+    author: {
+      name: "Hunch",
+      url: null,
+      bio: null,
+      avatarAssetId: null,
+      showByline: true,
+    },
     category: null,
     tags: [{ slug: "guides", label: "Guides" }],
     locale: "en",
