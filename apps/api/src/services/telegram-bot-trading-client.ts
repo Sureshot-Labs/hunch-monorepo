@@ -231,6 +231,7 @@ async function readInternalApiJson<T>(
   path: string,
 ): Promise<T> {
   if (!response.ok) {
+    await response.body?.cancel().catch(() => undefined);
     throw new TelegramBotTradingInternalApiError({
       code: "http_error",
       path,

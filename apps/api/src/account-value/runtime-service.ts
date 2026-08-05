@@ -16,7 +16,6 @@ import type {
 import { resolveFundingPolicy } from "../funding/policies/funding-policy-service.js";
 import { fundingSidecarRuntimeConfig } from "../funding/runtime/sidecar-runtime-config.js";
 import { fetchOpenOrderCollateralLocks } from "../services/open-order-collateral.js";
-import { POLYGON_NATIVE_USDC_ADDRESS } from "../services/polymarket-onchain.js";
 import {
   loadBalanceWalletLookup,
   resolveWalletBalancesForWalletWithInflight,
@@ -68,9 +67,12 @@ import {
   loadFundingAccountValueFacts,
   type FundingAccountValueFacts,
 } from "./funding-movement-feed.js";
+import {
+  exactStableAccountAssets,
+  resolveKnownAccountAsset,
+} from "./known-asset-catalog.js";
 
 const SOLANA_CHAIN_ID = "7565164";
-const SOLANA_NATIVE_ASSET_ID = "11111111111111111111111111111111";
 const UNPRICED_POLICY_ID = "unpriced";
 
 type AccountAssetCatalogEntry = Readonly<{
@@ -108,68 +110,14 @@ export type AccountValueReadModel = Readonly<{
 }>;
 
 function exactStableCatalog(): AccountAssetCatalogEntry[] {
-  return [
-    {
-      asset: {
-        networkId: "evm:137",
-        assetId: fundingSidecarRuntimeConfig.polymarketUsdcAddress,
-        decimals: 6,
-      },
-      category: "cash",
-      symbol: "pUSD",
-      venueId: "polymarket",
-      pricePolicyId: EXACT_STABLE_PRICE_POLICY_ID,
-      verified: true,
-    },
-    {
-      asset: {
-        networkId: "evm:137",
-        assetId: fundingSidecarRuntimeConfig.polymarketUsdceAddress,
-        decimals: 6,
-      },
-      category: "cash",
-      symbol: "USDC.e",
-      venueId: "polymarket",
-      pricePolicyId: EXACT_STABLE_PRICE_POLICY_ID,
-      verified: true,
-    },
-    {
-      asset: {
-        networkId: "evm:137",
-        assetId: POLYGON_NATIVE_USDC_ADDRESS,
-        decimals: 6,
-      },
-      category: "cash",
-      symbol: "USDC",
-      venueId: "polymarket",
-      pricePolicyId: EXACT_STABLE_PRICE_POLICY_ID,
-      verified: true,
-    },
-    {
-      asset: {
-        networkId: "evm:8453",
-        assetId: fundingSidecarRuntimeConfig.limitlessUsdcAddress,
-        decimals: 6,
-      },
-      category: "cash",
-      symbol: "USDC",
-      venueId: "limitless",
-      pricePolicyId: EXACT_STABLE_PRICE_POLICY_ID,
-      verified: true,
-    },
-    {
-      asset: {
-        networkId: "solana:mainnet",
-        assetId: fundingSidecarRuntimeConfig.solanaUsdcMint,
-        decimals: 6,
-      },
-      category: "cash",
-      symbol: "USDC",
-      venueId: "kalshi",
-      pricePolicyId: EXACT_STABLE_PRICE_POLICY_ID,
-      verified: true,
-    },
-  ];
+  return exactStableAccountAssets().map((entry) => ({
+    asset: entry.asset,
+    category: entry.category,
+    pricePolicyId: EXACT_STABLE_PRICE_POLICY_ID,
+    symbol: entry.symbol,
+    venueId: entry.venueId,
+    verified: true,
+  }));
 }
 
 function mergeCatalogWithPolicy(
@@ -202,17 +150,14 @@ function mergeCatalogWithPolicy(
       catalog.set(key, { ...existing, pricePolicyId });
       continue;
     }
-    const nativeSol =
-      item.asset.networkId === "solana:mainnet" &&
-      item.asset.assetId === SOLANA_NATIVE_ASSET_ID &&
-      item.asset.decimals === 9;
+    const known = resolveKnownAccountAsset(item.asset);
     catalog.set(key, {
       asset: item.asset,
-      category: nativeSol ? "cash" : "token",
-      symbol: nativeSol ? "SOL" : "Token",
-      venueId: null,
+      category: known?.category ?? "token",
+      symbol: known?.symbol ?? "Token",
+      venueId: known?.venueId ?? null,
       pricePolicyId,
-      verified: nativeSol,
+      verified: known != null,
     });
   }
   return [...catalog.values()];

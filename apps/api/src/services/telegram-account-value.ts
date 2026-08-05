@@ -1,6 +1,6 @@
 import { parseUnsignedDecimal } from "../account-value/decimal.js";
 import type { AccountValueReadModel } from "../account-value/runtime-service.js";
-import { fundingSidecarRuntimeConfig } from "../funding/runtime/sidecar-runtime-config.js";
+import { resolveKnownAccountAssetSymbol } from "../account-value/known-asset-catalog.js";
 import {
   buildTelegramAccountValueKeyboard,
   buildTelegramAccountValueUnavailableMessage,
@@ -15,7 +15,6 @@ import {
   joinTelegramMarkdownV2Lines,
 } from "./telegram-bot-trading-presentation.js";
 
-const SOLANA_NATIVE_ASSET_ID = "11111111111111111111111111111111";
 const TELEGRAM_ACCOUNT_VALUE_TEXT_BUDGET = 3_900;
 
 type AccountComponent =
@@ -26,6 +25,7 @@ type GroupedWalletBalance = {
   availableKnownCount: number;
   availableRaw: bigint;
   availableUnknownCount: number;
+  cashComponentCount: number;
   decimals: number;
   freshness: "fresh" | "stale";
   network: string;
@@ -53,39 +53,8 @@ type BoundedSection = Readonly<{
   rows: readonly string[];
 }>;
 
-function normalizedAssetId(value: string): string {
-  return /^0x[0-9a-f]{40}$/i.test(value) ? value.toLowerCase() : value;
-}
-
 function assetSymbol(component: AccountComponent): string | null {
-  const asset = component.amount.asset;
-  const assetId = normalizedAssetId(asset.assetId);
-  if (
-    assetId ===
-    normalizedAssetId(fundingSidecarRuntimeConfig.polymarketPusdAddress)
-  ) {
-    return "pUSD";
-  }
-  if (
-    assetId ===
-    normalizedAssetId(fundingSidecarRuntimeConfig.polymarketUsdceAddress)
-  ) {
-    return "USDC.e";
-  }
-  if (
-    assetId ===
-      normalizedAssetId(fundingSidecarRuntimeConfig.limitlessUsdcAddress) ||
-    assetId === fundingSidecarRuntimeConfig.solanaUsdcMint
-  ) {
-    return "USDC";
-  }
-  if (
-    asset.networkId === "solana:mainnet" &&
-    assetId === SOLANA_NATIVE_ASSET_ID
-  ) {
-    return "SOL";
-  }
-  return null;
+  return resolveKnownAccountAssetSymbol(component.amount.asset);
 }
 
 function networkLabel(networkId: string): string {
@@ -196,11 +165,14 @@ function buildWalletGroups(account: AccountValueReadModel): {
       continue;
     }
     const available = availability.get(component.componentId);
+    const cashAvailabilityApplies = component.category === "cash";
+    const availabilityKnown =
+      !cashAvailabilityApplies || availabilityIsKnown(available);
     const raw = parseRaw(component.amount.raw);
     if (
       raw === 0n &&
       !componentNeedsVisibility(component) &&
-      availabilityIsKnown(available)
+      availabilityKnown
     ) {
       continue;
     }
@@ -217,19 +189,26 @@ function buildWalletGroups(account: AccountValueReadModel): {
       availableKnownCount: 0,
       availableRaw: 0n,
       availableUnknownCount: 0,
+      cashComponentCount: 0,
       decimals,
       freshness: "fresh",
       network,
       symbol,
     };
     current.amountRaw += raw;
-    if (availabilityIsKnown(available)) {
-      current.availableKnownCount += 1;
-      current.availableRaw += parseRaw(available?.availableRaw ?? "0");
-    } else {
-      current.availableUnknownCount += 1;
+    if (cashAvailabilityApplies) {
+      current.cashComponentCount += 1;
+      if (availabilityIsKnown(available)) {
+        current.availableKnownCount += 1;
+        current.availableRaw += parseRaw(available?.availableRaw ?? "0");
+      } else {
+        current.availableUnknownCount += 1;
+      }
     }
-    if (componentIsStale(component) || !availabilityIsKnown(available)) {
+    if (
+      componentIsStale(component) ||
+      (cashAvailabilityApplies && !availabilityIsKnown(available))
+    ) {
       current.freshness = "stale";
     }
     groups.set(key, current);
@@ -324,15 +303,24 @@ function buildStatusLines(account: AccountValueReadModel): string[] {
     account.projection.valuationCompleteness === "partial" ||
     account.projection.positionValuationCompleteness === "partial" ||
     account.cashAvailability.completeness === "partial";
+  const availabilityByComponent = new Map(
+    account.cashAvailability.components.map((component) => [
+      component.componentId,
+      component,
+    ]),
+  );
   const stale =
     account.projection.valuationFreshness === "stale" ||
     account.projection.positionValuationFreshness === "stale" ||
     account.projection.components.some((component) => {
       if (!isPublicComponent(component)) return false;
-      const availability = account.cashAvailability.components.find(
-        (candidate) => candidate.componentId === component.componentId,
+      return (
+        componentIsStale(component) ||
+        (component.category === "cash" &&
+          !availabilityIsKnown(
+            availabilityByComponent.get(component.componentId),
+          ))
       );
-      return componentIsStale(component) || !availabilityIsKnown(availability);
     });
   const collectorErrorCount = new Set([
     ...account.projection.collectorErrors.map(
@@ -509,11 +497,13 @@ export function buildTelegramAccountValueMessage(input: {
 
   const walletRows = walletGroups.known.map((group) => {
     const available =
-      group.availableUnknownCount > 0
-        ? group.availableKnownCount > 0
-          ? ` · ${formatRaw(group.availableRaw, group.decimals)} known available · partial`
-          : " · availability unknown"
-        : ` · ${formatRaw(group.availableRaw, group.decimals)} available`;
+      group.cashComponentCount === 0
+        ? ""
+        : group.availableUnknownCount > 0
+          ? group.availableKnownCount > 0
+            ? ` · ${formatRaw(group.availableRaw, group.decimals)} known available · partial`
+            : " · availability unknown"
+          : ` · ${formatRaw(group.availableRaw, group.decimals)} available`;
     const stale = group.freshness === "stale" ? " · stale" : "";
     return escapeTelegramMarkdownV2(
       `• ${group.network} wallet — ${formatRaw(

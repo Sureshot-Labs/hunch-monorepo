@@ -1,6 +1,9 @@
 import { Interface, ethers } from "ethers";
 import { env } from "../env.js";
+import { POLYGON_NATIVE_USDC_ADDRESS } from "../account-value/known-asset-catalog.js";
 import { fetchEvmMulticall } from "./polygon-rpc.js";
+
+export { POLYGON_NATIVE_USDC_ADDRESS };
 
 const erc20Iface = new Interface([
   "function balanceOf(address owner) view returns (uint256)",
@@ -22,9 +25,6 @@ const fundingRouterIface = new Interface([
 const POLYGON_MULTICALL_ADDRESS =
   env.polygonMulticallAddress?.trim() ||
   "0xca11bde05977b3631167028862be2a173976ca11";
-export const POLYGON_NATIVE_USDC_ADDRESS =
-  "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359";
-
 type Snapshot = {
   pusdBalance: bigint;
   usdcBalance: bigint;

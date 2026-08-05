@@ -14,6 +14,7 @@ import {
   resolveEffectiveHeadline,
 } from "./account-value/account-value-projector.js";
 import { projectCashAvailability } from "./account-value/cash-availability-projector.js";
+import { POLYGON_NATIVE_USDC_ADDRESS } from "./account-value/known-asset-catalog.js";
 import { createAccountValueSnapshotLoader } from "./account-value/snapshot-loader.js";
 import { fundingSidecarRuntimeConfig } from "./funding/runtime/sidecar-runtime-config.js";
 import type {
@@ -378,6 +379,7 @@ await test("Telegram Account Value preserves degraded zero balances and position
   const zeroStale = component({
     assetId: "11111111111111111111111111111111",
     componentId: "zero-stale-sol",
+    decimals: 9,
     estimatedUsd: null,
     freshness: "stale",
     networkId: "solana:mainnet",
@@ -416,28 +418,108 @@ await test("Telegram Account Value preserves degraded zero balances and position
   assert.doesNotMatch(rendered.text, /Partial data/u);
 });
 
-await test("Telegram Account Value presents fresh unpriced assets as partial but not stale", () => {
+await test("Telegram Account Value labels only exact canonical asset identities", () => {
+  const mixedCasePusd = `0x${fundingSidecarRuntimeConfig.polymarketPusdAddress
+    .slice(2)
+    .toUpperCase()}`;
+  const cases = [
+    {
+      assetId: mixedCasePusd,
+      decimals: 6,
+      expected: "pUSD",
+      networkId: "evm:137",
+    },
+    {
+      assetId: fundingSidecarRuntimeConfig.polymarketUsdceAddress,
+      decimals: 6,
+      expected: "USDC.e",
+      networkId: "evm:137",
+    },
+    {
+      assetId: POLYGON_NATIVE_USDC_ADDRESS,
+      decimals: 6,
+      expected: "USDC",
+      networkId: "evm:137",
+    },
+    {
+      assetId: fundingSidecarRuntimeConfig.limitlessUsdcAddress,
+      decimals: 6,
+      expected: "USDC",
+      networkId: "evm:8453",
+    },
+    {
+      assetId: fundingSidecarRuntimeConfig.solanaUsdcMint,
+      decimals: 6,
+      expected: "USDC",
+      networkId: "solana:mainnet",
+    },
+    {
+      assetId: "11111111111111111111111111111111",
+      decimals: 9,
+      expected: "SOL",
+      networkId: "solana:mainnet",
+    },
+  ];
+  for (const [index, testCase] of cases.entries()) {
+    assert.equal(
+      telegramAccountValueTestHooks.assetSymbol(
+        component({
+          assetId: testCase.assetId,
+          componentId: `known-asset-${index}`,
+          decimals: testCase.decimals,
+          networkId: testCase.networkId,
+          raw: "1",
+        }),
+      ),
+      testCase.expected,
+    );
+  }
+  for (const [index, asset] of [
+    {
+      assetId: fundingSidecarRuntimeConfig.polymarketPusdAddress,
+      decimals: 6,
+      networkId: "evm:8453",
+    },
+    {
+      assetId: fundingSidecarRuntimeConfig.polymarketPusdAddress,
+      decimals: 18,
+      networkId: "evm:137",
+    },
+  ].entries()) {
+    assert.equal(
+      telegramAccountValueTestHooks.assetSymbol(
+        component({
+          ...asset,
+          componentId: `spoofed-asset-${index}`,
+          raw: "1",
+        }),
+      ),
+      null,
+    );
+  }
+});
+
+await test("Telegram Account Value presents fresh priced tokens without cash availability semantics", () => {
   const source = accountWithoutCollectorErrors();
-  const unpricedSol = component({
-    assetId: "11111111111111111111111111111111",
-    componentId: "fresh-unpriced-sol",
-    decimals: 9,
-    estimatedUsd: null,
-    networkId: "solana:mainnet",
-    raw: "1000000000",
-    valuationEligibility: "unpriced",
+  const pricedToken = component({
+    assetId: "policy-priced-token",
+    category: "token",
+    componentId: "fresh-priced-token",
+    estimatedUsd: "1",
+    networkId: "evm:8453",
+    raw: "1000000",
   });
   const projection = projectAccountValue({
     accountId: "user-1",
     asOf: AS_OF,
-    components: [unpricedSol],
+    components: [pricedToken],
     headlineMode: "liquid_only",
     positionComponents: [],
   });
   const cashAvailability = projectCashAvailability({
     adjustments: [],
     asOf: AS_OF,
-    components: [unpricedSol],
+    components: [pricedToken],
   });
   const rendered = buildTelegramAccountValueMessage({
     account: {
@@ -447,9 +529,79 @@ await test("Telegram Account Value presents fresh unpriced assets as partial but
       projection,
     },
   });
-  assert.match(rendered.text, /Solana wallet.*1 SOL.*1 available/u);
+  assert.match(rendered.text, /Other assets.*1 balance tracked/u);
+  assert.doesNotMatch(rendered.text, /availability|stale|Partial data/iu);
+});
+
+await test("Telegram Account Value presents fresh unpriced tokens as partial but not stale", () => {
+  const source = accountWithoutCollectorErrors();
+  const unpricedToken = component({
+    assetId: "policy-unpriced-token",
+    category: "token",
+    componentId: "fresh-unpriced-token",
+    estimatedUsd: null,
+    networkId: "evm:8453",
+    raw: "1000000",
+    valuationEligibility: "unpriced",
+  });
+  const projection = projectAccountValue({
+    accountId: "user-1",
+    asOf: AS_OF,
+    components: [unpricedToken],
+    headlineMode: "liquid_only",
+    positionComponents: [],
+  });
+  const cashAvailability = projectCashAvailability({
+    adjustments: [],
+    asOf: AS_OF,
+    components: [unpricedToken],
+  });
+  const rendered = buildTelegramAccountValueMessage({
+    account: {
+      ...source,
+      cashAvailability,
+      headline: resolveEffectiveHeadline(projection),
+      projection,
+    },
+  });
+  assert.match(rendered.text, /Other assets.*1 balance tracked/u);
   assert.match(rendered.text, /Partial data/u);
-  assert.doesNotMatch(rendered.text, /stale/iu);
+  assert.doesNotMatch(rendered.text, /availability|stale/iu);
+});
+
+await test("Telegram Account Value keeps genuinely stale tokens stale without cash availability copy", () => {
+  const source = accountWithoutCollectorErrors();
+  const staleToken = component({
+    assetId: "policy-stale-token",
+    category: "token",
+    componentId: "stale-token",
+    estimatedUsd: null,
+    freshness: "stale",
+    networkId: "evm:8453",
+    raw: "1000000",
+  });
+  const projection = projectAccountValue({
+    accountId: "user-1",
+    asOf: AS_OF,
+    components: [staleToken],
+    headlineMode: "liquid_only",
+    positionComponents: [],
+  });
+  const cashAvailability = projectCashAvailability({
+    adjustments: [],
+    asOf: AS_OF,
+    components: [staleToken],
+  });
+  const rendered = buildTelegramAccountValueMessage({
+    account: {
+      ...source,
+      cashAvailability,
+      headline: resolveEffectiveHeadline(projection),
+      projection,
+    },
+  });
+  assert.match(rendered.text, /stale data/iu);
+  assert.doesNotMatch(rendered.text, /availability unknown/iu);
 });
 
 await test("Telegram Account Value uses safe unknown-asset grouping", () => {
@@ -1224,11 +1376,17 @@ await test("internal client classifies HTTP failures without exposing response b
   try {
     for (const statusCode of [401, 403, 500]) {
       const secret = `secret-response-${statusCode}-test-token`;
+      let bodyCancelled = false;
+      const body = new ReadableStream<Uint8Array>({
+        cancel: () => {
+          bodyCancelled = true;
+        },
+        start: (controller) => {
+          controller.enqueue(new TextEncoder().encode(secret));
+        },
+      });
       globalThis.fetch = (async () =>
-        new Response(JSON.stringify({ error: secret }), {
-          headers: { "Content-Type": "application/json" },
-          status: statusCode,
-        })) as typeof fetch;
+        new Response(body, { status: statusCode })) as typeof fetch;
       const client = createTelegramBotTradingInternalApiClient({
         baseUrl: "http://127.0.0.1:3000",
         token: "test-token",
@@ -1252,9 +1410,55 @@ await test("internal client classifies HTTP failures without exposing response b
       assert.equal(fields.errorCode, "http_error");
       assert.equal(fields.statusCode, statusCode);
       assert.equal(fields.path, "/internal/telegram-bot/account");
+      assert.equal(bodyCancelled, true);
       assert.doesNotMatch(JSON.stringify(fields), new RegExp(secret, "u"));
       assert.doesNotMatch(String(captured), /secret-response|test-token/u);
     }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+await test("internal client keeps HTTP classification when response cancellation fails", async () => {
+  const originalFetch = globalThis.fetch;
+  const cancelSecret = "cancel-secret-test-token";
+  let cancelAttempted = false;
+  globalThis.fetch = (async () =>
+    new Response(
+      new ReadableStream({
+        cancel: () => {
+          cancelAttempted = true;
+          throw new Error(cancelSecret);
+        },
+      }),
+      { status: 500 },
+    )) as typeof fetch;
+  try {
+    const client = createTelegramBotTradingInternalApiClient({
+      baseUrl: "http://127.0.0.1:3000",
+      token: "test-token",
+    });
+    let captured: unknown;
+    await assert.rejects(
+      client.buildAccountValueMessage({
+        chatId: "123",
+        telegramUserId: 123,
+      }),
+      (error: unknown) => {
+        captured = error;
+        return (
+          error instanceof TelegramBotTradingInternalApiError &&
+          error.code === "http_error" &&
+          error.statusCode === 500
+        );
+      },
+    );
+    assert.equal(cancelAttempted, true);
+    assert.doesNotMatch(
+      JSON.stringify(describeTelegramBotTradingInternalApiError(captured)),
+      new RegExp(cancelSecret, "u"),
+    );
+    assert.doesNotMatch(String(captured), /cancel-secret|test-token/u);
   } finally {
     globalThis.fetch = originalFetch;
   }
