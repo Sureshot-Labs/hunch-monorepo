@@ -8,7 +8,10 @@ import {
 } from "fastify-type-provider-zod";
 
 import { createTelegramBotTradingRoutes } from "./routes/telegram-bot-trading.js";
-import { handleSignalBotInteractiveMenuCallback } from "./services/telegram-bot-menu-actions.js";
+import {
+  drainSignalBotFundingOpenTasks,
+  handleSignalBotInteractiveMenuCallback,
+} from "./services/telegram-bot-menu-actions.js";
 import { recordTelegramDepositResolutionAnalytics } from "./services/telegram-lifecycle-analytics.js";
 import {
   buildTelegramDepositAddressPresentation,
@@ -733,6 +736,75 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         />Deposit verification[^\n]+\n\u2800\n⚠️ \*Mini App temporarily unavailable\*/,
       );
       assert.doesNotMatch(message.text, /Finish Trading Wallet setup/);
+    },
+  },
+  {
+    name: "legacy Polymarket QR sends a photo only when funding fallback returns qrText",
+    run: async () => {
+      let legacyRenderCalls = 0;
+      let legacyPhotoCalls = 0;
+      let legacyPhotoCaption = "";
+      let legacyPhotoFilename = "";
+      assert.equal(
+        await handleSignalBotInteractiveMenuCallback({
+          callbackPrefix: "hm:v1:",
+          chatId: "20",
+          idempotencyKey: "funding:legacy-qr",
+          loadFunding: async () => ({
+            qrText: deposit,
+            text: "Legacy Polymarket deposit",
+            venue: "polymarket",
+          }),
+          messageId: 420,
+          redis: { get: async () => null },
+          render: async () => {
+            legacyRenderCalls += 1;
+          },
+          renderExpiredSearch: async () => undefined,
+          route: { kind: "deposit", showQr: true, venue: "polymarket" },
+          sendPhoto: async (photo) => {
+            legacyPhotoCalls += 1;
+            legacyPhotoCaption = photo.caption ?? "";
+            legacyPhotoFilename = photo.filename;
+          },
+          telegramUserId: 20,
+        }),
+        true,
+      );
+      assert.equal(await drainSignalBotFundingOpenTasks(1_000), true);
+      assert.equal(legacyRenderCalls, 0);
+      assert.equal(legacyPhotoCalls, 1);
+      assert.match(legacyPhotoCaption, /Polymarket Deposit QR/u);
+      assert.match(legacyPhotoCaption, /Polygon/u);
+      assert.match(legacyPhotoCaption, /pUSD/u);
+      assert.doesNotMatch(legacyPhotoCaption, /USDC\.e/u);
+      assert.match(legacyPhotoFilename, /polymarket/u);
+
+      let a1RenderCalls = 0;
+      let a1PhotoCalls = 0;
+      assert.equal(
+        await handleSignalBotInteractiveMenuCallback({
+          callbackPrefix: "hm:v1:",
+          chatId: "21",
+          idempotencyKey: "funding:a1-no-qr",
+          loadFunding: async () => ({ text: "Choose pUSD on Polygon" }),
+          messageId: 421,
+          redis: { get: async () => null },
+          render: async () => {
+            a1RenderCalls += 1;
+          },
+          renderExpiredSearch: async () => undefined,
+          route: { kind: "deposit", showQr: true, venue: "polymarket" },
+          sendPhoto: async () => {
+            a1PhotoCalls += 1;
+          },
+          telegramUserId: 21,
+        }),
+        true,
+      );
+      assert.equal(await drainSignalBotFundingOpenTasks(1_000), true);
+      assert.equal(a1RenderCalls, 1);
+      assert.equal(a1PhotoCalls, 0);
     },
   },
   {

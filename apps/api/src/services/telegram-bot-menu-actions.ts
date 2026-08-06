@@ -310,8 +310,7 @@ async function deliverSignalBotInteractiveMenuCallback(
         ? route.venue
         : null;
   const showQr =
-    route.kind === "qr" ||
-    (route.kind === "deposit" && route.showQr && route.venue !== "polymarket");
+    route.kind === "qr" || (route.kind === "deposit" && route.showQr);
   try {
     if (fundingAction) {
       depositMessage = input.loadFunding
