@@ -20,6 +20,43 @@ export type TelegramBotMenuTransport = {
   sendMessage: SignalBotTelegramClient["sendMessage"];
 };
 
+export type TelegramBotMenuDeliveryOutcome =
+  | "success"
+  | "ambiguous"
+  | "rate_limited"
+  | "blocked"
+  | "message_not_editable"
+  | "render_superseded"
+  | "render_unavailable"
+  | "other";
+
+export function classifyTelegramBotMenuDeliveryResult(
+  result: TelegramSendResult,
+): Readonly<{
+  outcome: TelegramBotMenuDeliveryOutcome;
+  retryAfterSec?: number;
+}> {
+  if (result.ok) return { outcome: "success" };
+  if (result.retryAfterSec != null) {
+    return { outcome: "rate_limited", retryAfterSec: result.retryAfterSec };
+  }
+  if (
+    result.message === "superseded" ||
+    result.message === "menu_render_superseded"
+  ) {
+    return { outcome: "render_superseded" };
+  }
+  if (result.message === "menu_render_unavailable") {
+    return { outcome: "render_unavailable" };
+  }
+  if (result.error === "ambiguous") return { outcome: "ambiguous" };
+  if (result.error === "blocked_or_missing") return { outcome: "blocked" };
+  if (result.error === "message_not_editable") {
+    return { outcome: "message_not_editable" };
+  }
+  return { outcome: "other" };
+}
+
 export function isTelegramBotMenuRenderSuppressed(
   result: TelegramSendResult,
 ): boolean {

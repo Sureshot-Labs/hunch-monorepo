@@ -317,6 +317,17 @@ export async function runSignalBotRunner(): Promise<void> {
           loadAccountValue,
           onAccountValueError: (error) =>
             logTradingInternalApiFailure("account-value", error),
+          onFundingMenuDelivery: ({ action, outcome, retryAfterSec }) =>
+            log("signal_bot_funding_menu_delivery", {
+              action,
+              outcome,
+              ...(retryAfterSec == null ? {} : { retryAfterSec }),
+            }),
+          onFundingMenuOperationError: ({ action, errorCode }) =>
+            log("signal_bot_funding_menu_operation_error", {
+              action,
+              errorCode,
+            }),
           loadPositions: (telegramUserId) =>
             tradingInternalApi
               ? tradingInternalApi

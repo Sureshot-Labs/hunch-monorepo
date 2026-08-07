@@ -18,6 +18,8 @@ import {
   appendTelegramFundingConsent,
   cancelTelegramFundingSessionContext,
   createOrReuseTelegramFundingSession,
+  createOrReuseTelegramFundingSessionInTransaction,
+  reuseActiveTelegramFundingSession,
   TelegramFundingPersistenceError,
 } from "../../../services/telegram-funding-sessions.js";
 import { runTelegramFundingProgressProjectionBatch } from "../../../services/telegram-funding-progress-projector.js";
@@ -27,7 +29,10 @@ import {
   rearmTelegramFundingTerminalDelivery,
 } from "../../../services/telegram-funding-delivery.js";
 import { fetchUserFinancialLifecycleSummary } from "../../../services/user-financial-lifecycle.js";
-import { TelegramFundingService } from "../../../services/telegram-funding.js";
+import {
+  TelegramFundingError,
+  TelegramFundingService,
+} from "../../../services/telegram-funding.js";
 
 const now = new Date();
 const suffix = crypto.randomUUID();
@@ -61,6 +66,23 @@ const renderCoordinator = {
 
 function hash(label: string): string {
   return crypto.createHash("sha256").update(`${suffix}:${label}`).digest("hex");
+}
+
+function openFingerprint(
+  input: Readonly<{
+    chatId?: string;
+    telegramMessageId: number | null;
+    venueId?: string;
+  }>,
+): string {
+  return canonicalJsonHash({
+    action: "open",
+    chatId: input.chatId ?? telegramUserId,
+    telegramMessageId: input.telegramMessageId,
+    telegramUserId,
+    userId,
+    venue: input.venueId ?? "polymarket",
+  });
 }
 
 try {
@@ -220,6 +242,31 @@ try {
     sameChannelReplay.snapshot.session.receiveSessionId,
     receiveSessionId,
   );
+  const revisedTelegramReplay = await createOrReuseFundingReceiveSession(pool, {
+    ...canonicalInput,
+    observationVariants: canonicalInput.observationVariants.map((variant) => ({
+      ...variant,
+      baselineRevision: `${variant.baselineRevision}:new-cursor`,
+    })),
+    ownershipRevision: `owner_changed_${suffix}`,
+    policyRevision: `telegram_a1_changed_${suffix}`,
+    now: new Date(now.getTime() + 50),
+  });
+  assert.equal(revisedTelegramReplay.replayed, true);
+  assert.equal(
+    revisedTelegramReplay.snapshot.session.receiveSessionId,
+    receiveSessionId,
+  );
+  assert.equal(
+    revisedTelegramReplay.snapshot.ownershipRevision,
+    canonical.snapshot.ownershipRevision,
+    "Telegram replay must preserve the original capability revision",
+  );
+  assert.deepEqual(
+    revisedTelegramReplay.snapshot.observationVariants,
+    canonical.snapshot.observationVariants,
+    "a newly verified cursor must not replace the frozen Telegram baseline",
+  );
   await assert.rejects(
     createOrReuseFundingReceiveSession(pool, {
       ...canonicalInput,
@@ -305,6 +352,248 @@ try {
     false,
     true,
   ]);
+  const fastReplay = await reuseActiveTelegramFundingSession(pool, {
+    userId,
+    telegramAccountId,
+    telegramUserId,
+    chatId: telegramUserId,
+    telegramMessageId: 202,
+    venueId: "polymarket",
+    idempotencyKey: `telegram-open-fast-replay:${suffix}`,
+    requestFingerprint: openFingerprint({ telegramMessageId: 202 }),
+    now: new Date(now.getTime() + 500),
+  });
+  assert.equal(fastReplay?.id, fundingContextId);
+  assert.equal(fastReplay?.receiveSessionId, receiveSessionId);
+  assert.equal(fastReplay?.telegramMessageId, 202);
+  assert.equal(fastReplay?.expiresAt, firstContext.context.expiresAt);
+  assert.equal(fastReplay?.activeConsentRevision, null);
+  const service = new TelegramFundingService(pool);
+  const disabledPolicyReplay = await service.open(
+    {
+      chatId: telegramUserId,
+      idempotencyKey: `telegram-open-new-callback:${suffix}`,
+      telegramMessageId: 202,
+      telegramUserId,
+      venue: "polymarket",
+    },
+    new Date(now.getTime() + 500),
+  );
+  assert.equal(disabledPolicyReplay.fundingContextId, fundingContextId);
+  assert.match(disabledPolicyReplay.text, /Choose the exact asset/u);
+  const openMutation = await pool.query<{
+    action: string;
+    funding_context_id: string;
+    response_context_id: string | null;
+  }>(
+    `select action,
+            funding_context_id,
+            response_payload->>'fundingContextId' as response_context_id
+     from telegram_funding_mutations
+     where idempotency_key = $1`,
+    [`telegram-open-new-callback:${suffix}`],
+  );
+  assert.deepEqual(openMutation.rows, [
+    {
+      action: "open",
+      funding_context_id: fundingContextId,
+      response_context_id: fundingContextId,
+    },
+  ]);
+  await assert.rejects(
+    service.open(
+      {
+        chatId: telegramUserId,
+        idempotencyKey: `telegram-open-new-callback:${suffix}`,
+        telegramMessageId: 999,
+        telegramUserId,
+        venue: "polymarket",
+      },
+      new Date(now.getTime() + 500),
+    ),
+    (error: unknown) =>
+      error instanceof TelegramFundingError &&
+      error.code === "idempotency_conflict",
+    "reusing an open key with a different request must fail closed",
+  );
+  assert.equal(
+    await reuseActiveTelegramFundingSession(pool, {
+      userId,
+      telegramAccountId,
+      telegramUserId,
+      chatId: telegramUserId,
+      telegramMessageId: 203,
+      venueId: "limitless",
+      idempotencyKey: `telegram-open-other-venue:${suffix}`,
+      requestFingerprint: openFingerprint({
+        telegramMessageId: 203,
+        venueId: "limitless",
+      }),
+      now: new Date(now.getTime() + 500),
+    }),
+    null,
+    "a different venue must not reuse the Polymarket context",
+  );
+  assert.equal(
+    await reuseActiveTelegramFundingSession(pool, {
+      userId,
+      telegramAccountId,
+      telegramUserId,
+      chatId: `${telegramUserId}0`,
+      telegramMessageId: 203,
+      venueId: "polymarket",
+      idempotencyKey: `telegram-open-foreign-chat:${suffix}`,
+      requestFingerprint: openFingerprint({
+        chatId: `${telegramUserId}0`,
+        telegramMessageId: 203,
+      }),
+      now: new Date(now.getTime() + 500),
+    }),
+    null,
+    "a foreign chat must not discover a reusable context",
+  );
+
+  const concurrentDestination = `concurrent-destination-${suffix}`;
+  const concurrentBinding = `concurrent-binding-${suffix}`;
+  const concurrentOpens = await Promise.all(
+    ["a", "b"].map((attempt, index) =>
+      createOrReuseFundingReceiveSession(
+        pool,
+        {
+          ...canonicalInput,
+          venueId: "limitless",
+          destinationOptionId: concurrentDestination,
+          venueBindingOptionId: concurrentBinding,
+          policyRevision: `concurrent-policy-${attempt}-${suffix}`,
+          ownershipRevision: `concurrent-owner-${attempt}-${suffix}`,
+          observationVariants: canonicalInput.observationVariants.map(
+            (variant) => ({
+              ...variant,
+              baselineRevision: `${variant.baselineRevision}:${attempt}`,
+            }),
+          ),
+          now: new Date(now.getTime() + 510 + index),
+        },
+        async (client, persisted) => {
+          await createOrReuseTelegramFundingSessionInTransaction(client, {
+            userId,
+            telegramAccountId,
+            telegramUserId,
+            chatId: telegramUserId,
+            telegramMessageId: 300 + index,
+            receiveSessionId: persisted.snapshot.session.receiveSessionId,
+            idempotencyKey: `telegram-open-concurrent-${attempt}:${suffix}`,
+            expiresAt: new Date(persisted.snapshot.session.expiresAt),
+            now: new Date(now.getTime() + 510 + index),
+          });
+        },
+      ),
+    ),
+  );
+  assert.equal(
+    concurrentOpens[0]?.snapshot.session.receiveSessionId,
+    concurrentOpens[1]?.snapshot.session.receiveSessionId,
+  );
+  assert.deepEqual(concurrentOpens.map((result) => result.replayed).sort(), [
+    false,
+    true,
+  ]);
+  const concurrentContextRows = await pool.query<{
+    id: string;
+    receive_session_id: string;
+  }>(
+    `select id, receive_session_id
+     from telegram_funding_sessions
+     where receive_session_id = $1`,
+    [concurrentOpens[0]?.snapshot.session.receiveSessionId],
+  );
+  assert.equal(
+    concurrentContextRows.rowCount,
+    1,
+    "different callback idempotency keys must still create one context",
+  );
+  const concurrentContext = concurrentContextRows.rows[0];
+  assert.ok(concurrentContext);
+  assert.ok(
+    await cancelTelegramFundingSessionContext(pool, {
+      contextId: concurrentContext.id,
+      userId,
+      telegramAccountId,
+      telegramUserId,
+      chatId: telegramUserId,
+      telegramMessageId: 301,
+      idempotencyKey: `telegram-cancel-concurrent:${suffix}`,
+      requestFingerprint: hash("cancel-concurrent-context"),
+      responsePayload: { text: "cancelled" },
+      now: new Date(now.getTime() + 550),
+    }),
+  );
+
+  const ambiguousCanonical = await createOrReuseFundingReceiveSession(pool, {
+    ...canonicalInput,
+    destinationOptionId: `ambiguous-destination-${suffix}`,
+    venueBindingOptionId: `ambiguous-binding-${suffix}`,
+    ownershipRevision: `ambiguous-owner-${suffix}`,
+    now: new Date(now.getTime() + 600),
+  });
+  const ambiguousContext = await createOrReuseTelegramFundingSession(pool, {
+    userId,
+    telegramAccountId,
+    telegramUserId,
+    chatId: telegramUserId,
+    telegramMessageId: 204,
+    receiveSessionId: ambiguousCanonical.snapshot.session.receiveSessionId,
+    idempotencyKey: `telegram-open-ambiguous:${suffix}`,
+    expiresAt: new Date(ambiguousCanonical.snapshot.session.expiresAt),
+    now: new Date(now.getTime() + 600),
+  });
+  await assert.rejects(
+    reuseActiveTelegramFundingSession(pool, {
+      userId,
+      telegramAccountId,
+      telegramUserId,
+      chatId: telegramUserId,
+      telegramMessageId: 205,
+      venueId: "polymarket",
+      idempotencyKey: `telegram-open-ambiguous-replay:${suffix}`,
+      requestFingerprint: openFingerprint({ telegramMessageId: 205 }),
+      now: new Date(now.getTime() + 700),
+    }),
+    (error: unknown) =>
+      error instanceof TelegramFundingPersistenceError &&
+      error.code === "telegram_funding_active_context_ambiguous",
+    "multiple active contexts for one venue must fail closed",
+  );
+  const ambiguousCancelled = await cancelTelegramFundingSessionContext(pool, {
+    contextId: ambiguousContext.context.id,
+    userId,
+    telegramAccountId,
+    telegramUserId,
+    chatId: telegramUserId,
+    telegramMessageId: 204,
+    idempotencyKey: `telegram-cancel-ambiguous:${suffix}`,
+    requestFingerprint: hash("cancel-ambiguous-context"),
+    responsePayload: { text: "cancelled" },
+    now: new Date(now.getTime() + 800),
+  });
+  assert.ok(ambiguousCancelled);
+  assert.equal(
+    (
+      await reuseActiveTelegramFundingSession(pool, {
+        userId,
+        telegramAccountId,
+        telegramUserId,
+        chatId: telegramUserId,
+        telegramMessageId: 206,
+        venueId: "polymarket",
+        idempotencyKey: `telegram-open-after-ambiguous-cancel:${suffix}`,
+        requestFingerprint: openFingerprint({ telegramMessageId: 206 }),
+        now: new Date(now.getTime() + 900),
+      })
+    )?.id,
+    fundingContextId,
+    "a cancelled context must not remain reusable",
+  );
 
   const selectIdempotencyKey = `telegram-select:${suffix}`;
   const selectRequestFingerprint = canonicalJsonHash({
@@ -348,6 +637,40 @@ try {
   assert.equal(replayedConsent.consent.maximumAutomaticRaw, null);
   assert.deepEqual(replayedConsent.mutationResponse, {
     text: "verified pUSD address",
+  });
+  const selectedReplay = await service.open(
+    {
+      chatId: telegramUserId,
+      idempotencyKey: `telegram-open-after-consent:${suffix}`,
+      telegramMessageId: 208,
+      telegramUserId,
+      venue: "polymarket",
+    },
+    new Date(now.getTime() + 1_500),
+  );
+  assert.equal(selectedReplay.fundingContextId, fundingContextId);
+  assert.match(selectedReplay.text, /Waiting for transfer/u);
+  assert.match(selectedReplay.text, new RegExp(destinationAddress, "u"));
+  const unchangedReplayEvidence = await pool.query<{
+    consents: string;
+    mutations: string;
+    outbox: string;
+    progress_revision: number;
+  }>(
+    `select
+       (select count(*)::text from telegram_funding_consents where telegram_funding_session_id = context.id) as consents,
+       (select count(*)::text from telegram_funding_mutations where funding_context_id = context.id) as mutations,
+       (select count(*)::text from telegram_bot_action_outbox where funding_session_id = context.id) as outbox,
+       context.progress_revision
+     from telegram_funding_sessions context
+     where context.id = $1`,
+    [fundingContextId],
+  );
+  assert.deepEqual(unchangedReplayEvidence.rows[0], {
+    consents: "1",
+    mutations: "5",
+    outbox: "0",
+    progress_revision: 0,
   });
   await assert.rejects(
     appendTelegramFundingConsent(pool, {
@@ -480,6 +803,48 @@ try {
     state: "ready",
     outbox_count: "1",
   });
+  assert.equal(
+    await reuseActiveTelegramFundingSession(pool, {
+      userId,
+      telegramAccountId,
+      telegramUserId,
+      chatId: telegramUserId,
+      telegramMessageId: 207,
+      venueId: "polymarket",
+      idempotencyKey: `telegram-open-terminal-probe:${suffix}`,
+      requestFingerprint: openFingerprint({ telegramMessageId: 207 }),
+      now: new Date(now.getTime() + 3_100),
+    }),
+    null,
+    "a terminal context must not be reopened",
+  );
+  const terminalOpenReplay = await service.open(
+    {
+      chatId: telegramUserId,
+      idempotencyKey: `telegram-open:${suffix}`,
+      telegramMessageId: 209,
+      telegramUserId,
+      venue: "polymarket",
+    },
+    new Date(now.getTime() + 3_100),
+  );
+  assert.match(terminalOpenReplay.text, /pUSD ready/u);
+  const terminalAliasReplay = await service.open(
+    {
+      chatId: telegramUserId,
+      idempotencyKey: `telegram-open-new-callback:${suffix}`,
+      telegramMessageId: 202,
+      telegramUserId,
+      venue: "polymarket",
+    },
+    new Date(now.getTime() + 3_100),
+  );
+  assert.equal(terminalAliasReplay.fundingContextId, fundingContextId);
+  assert.match(
+    terminalAliasReplay.text,
+    /pUSD ready/u,
+    "every accepted open key must replay the original context after terminal",
+  );
   const safeTerminalReplay = await new TelegramFundingService(
     pool,
   ).selectTarget(
@@ -1718,34 +2083,42 @@ try {
   try {
     await cleanup.query("begin");
     await cleanup.query("set local session_replication_role = replica");
-    if (fundingContextId) {
-      await cleanup.query(
-        "delete from telegram_bot_action_outbox where funding_session_id = $1",
-        [fundingContextId],
-      );
-      await cleanup.query(
-        "delete from telegram_funding_mutations where funding_context_id = $1",
-        [fundingContextId],
-      );
-      await cleanup.query(
-        "delete from telegram_funding_consents where telegram_funding_session_id = $1",
-        [fundingContextId],
-      );
-      await cleanup.query(
-        "delete from telegram_funding_sessions where id = $1",
-        [fundingContextId],
-      );
-    }
-    if (receiveSessionId) {
-      await cleanup.query(
-        "delete from funding_receive_receipts where receive_session_id = $1",
-        [receiveSessionId],
-      );
-      await cleanup.query(
-        "delete from funding_receive_sessions where id = $1",
-        [receiveSessionId],
-      );
-    }
+    await cleanup.query(
+      `delete from telegram_bot_action_outbox
+       where funding_session_id in (
+         select id from telegram_funding_sessions where user_id = $1
+       )`,
+      [userId],
+    );
+    await cleanup.query(
+      `delete from telegram_funding_mutations
+       where funding_context_id in (
+         select id from telegram_funding_sessions where user_id = $1
+       )`,
+      [userId],
+    );
+    await cleanup.query(
+      `delete from telegram_funding_consents
+       where telegram_funding_session_id in (
+         select id from telegram_funding_sessions where user_id = $1
+       )`,
+      [userId],
+    );
+    await cleanup.query(
+      "delete from telegram_funding_sessions where user_id = $1",
+      [userId],
+    );
+    await cleanup.query(
+      `delete from funding_receive_receipts
+       where receive_session_id in (
+         select id from funding_receive_sessions where user_id = $1
+       )`,
+      [userId],
+    );
+    await cleanup.query(
+      "delete from funding_receive_sessions where user_id = $1",
+      [userId],
+    );
     await cleanup.query(
       "delete from telegram_bot_action_outbox where user_id = $1",
       [userId],

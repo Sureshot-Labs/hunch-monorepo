@@ -16,6 +16,7 @@ import {
   telegramCustomEmojiMarkdownV2ForNetwork,
   telegramCustomEmojiMarkdownV2ForVenue,
 } from "./telegram-custom-emoji.js";
+import { FUNDING_RECEIVE_SESSION_TTL_HOURS } from "../funding/receive/receive-session-constants.js";
 
 function expiryLabel(value: string): string {
   const date = new Date(value);
@@ -25,6 +26,16 @@ function expiryLabel(value: string): string {
         .replace("T", " ")
         .replace(/\.\d{3}Z$/, " UTC")
     : value;
+}
+
+function receiveWindowFields(expiresAt: string): string[] {
+  return [
+    formatTelegramFieldMarkdownV2(
+      "Receive window",
+      `${FUNDING_RECEIVE_SESSION_TTL_HOURS} hours`,
+    ),
+    formatTelegramFieldMarkdownV2("Expires at", expiryLabel(expiresAt)),
+  ];
 }
 
 function formatRawAmount(raw: string, decimals: number): string {
@@ -102,10 +113,7 @@ export function buildTelegramFundingTargetMessage(input: {
         "pUSD",
       )}`,
       formatTelegramFieldMarkdownV2("Settlement", "Direct"),
-      formatTelegramFieldMarkdownV2(
-        "Session expires",
-        expiryLabel(input.expiresAt),
-      ),
+      ...receiveWindowFields(input.expiresAt),
     ]),
     venue: "polymarket",
   };
@@ -175,10 +183,7 @@ export function buildTelegramFundingAddressMessage(input: {
         title: "Important",
       }),
       "",
-      formatTelegramFieldMarkdownV2(
-        "Session expires",
-        expiryLabel(input.expiresAt),
-      ),
+      ...receiveWindowFields(input.expiresAt),
     ]),
     venue: "polymarket",
   };
@@ -308,10 +313,7 @@ export function buildTelegramFundingProgressMessage(
       "",
       formatTelegramFieldMarkdownV2("Network", projection.networkLabel),
       formatTelegramFieldMarkdownV2("Asset", projection.assetSymbol),
-      formatTelegramFieldMarkdownV2(
-        "Session expires",
-        expiryLabel(projection.expiresAt),
-      ),
+      ...(projection.terminal ? [] : receiveWindowFields(projection.expiresAt)),
     ]),
     venue: "polymarket",
   };

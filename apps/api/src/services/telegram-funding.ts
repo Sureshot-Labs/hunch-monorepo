@@ -33,10 +33,13 @@ import {
   cancelTelegramFundingSessionContext,
   createOrReuseTelegramFundingSessionInTransaction,
   fetchActiveTelegramFundingConsent,
+  fetchTelegramFundingOpenMutationReplay,
   fetchTelegramFundingMutationReplay,
   fetchTelegramFundingSelectionSnapshot,
   fetchTelegramFundingSessionByIdempotency,
   fetchTelegramFundingSessionContext,
+  recordTelegramFundingOpenMutation,
+  reuseActiveTelegramFundingSession,
   TelegramFundingPersistenceError,
   type TelegramFundingConsent,
   type TelegramFundingSessionContext,
@@ -116,6 +119,12 @@ function rethrowTelegramFundingPersistenceError(error: unknown): never {
     error.code === "telegram_funding_session_unavailable"
   ) {
     throw new TelegramFundingError("funding_session_expired");
+  }
+  if (
+    error instanceof TelegramFundingPersistenceError &&
+    error.code === "telegram_funding_active_context_ambiguous"
+  ) {
+    throw new TelegramFundingError("destination_ambiguous");
   }
   throw error;
 }
@@ -206,11 +215,44 @@ export class TelegramFundingService {
   }
 
   async open(
-    input: TelegramFundingMutationInput,
+    input: TelegramFundingMutationInput & { venue: "polymarket" },
     now = new Date(),
   ): Promise<TelegramFundingMessage> {
     const idempotencyKey = assertIdempotencyKey(input.idempotencyKey);
     const { identity, link: initialLink } = await this.currentLink(input);
+    const requestFingerprint = canonicalJsonHash({
+      action: "open",
+      chatId: identity.chatId,
+      telegramMessageId: input.telegramMessageId,
+      telegramUserId: identity.telegramUserId,
+      userId: initialLink.userId,
+      venue: input.venue,
+    });
+    try {
+      const mutationReplay = await fetchTelegramFundingOpenMutationReplay(
+        this.pool,
+        {
+          idempotencyKey,
+          requestFingerprint,
+          userId: initialLink.userId,
+          telegramUserId: identity.telegramUserId,
+          chatId: identity.chatId,
+        },
+      );
+      if (mutationReplay) {
+        return this.session(
+          {
+            contextId: mutationReplay.id,
+            telegramUserId: identity.telegramUserId,
+            chatId: identity.chatId,
+            view: "progress",
+          },
+          now,
+        );
+      }
+    } catch (error) {
+      rethrowTelegramFundingPersistenceError(error);
+    }
     const replay = await fetchTelegramFundingSessionByIdempotency(this.pool, {
       idempotencyKey,
       userId: initialLink.userId,
@@ -218,12 +260,42 @@ export class TelegramFundingService {
       chatId: identity.chatId,
     });
     if (replay) {
-      return this.session({
-        contextId: replay.id,
+      return this.session(
+        {
+          contextId: replay.id,
+          telegramUserId: identity.telegramUserId,
+          chatId: identity.chatId,
+          view: "progress",
+        },
+        now,
+      );
+    }
+    let active: TelegramFundingSessionContext | null;
+    try {
+      active = await reuseActiveTelegramFundingSession(this.pool, {
+        userId: initialLink.userId,
+        telegramAccountId: initialLink.linkId,
         telegramUserId: identity.telegramUserId,
         chatId: identity.chatId,
-        view: "progress",
+        telegramMessageId: input.telegramMessageId,
+        venueId: input.venue,
+        idempotencyKey,
+        requestFingerprint,
+        now,
       });
+    } catch (error) {
+      rethrowTelegramFundingPersistenceError(error);
+    }
+    if (active) {
+      return this.session(
+        {
+          contextId: active.id,
+          telegramUserId: identity.telegramUserId,
+          chatId: identity.chatId,
+          view: "progress",
+        },
+        now,
+      );
     }
     const policy = await resolveSignalBotTradingPolicyStateFromDb(this.pool);
     if (!policy.policy.fundingReceiveEnabled) {
@@ -233,7 +305,7 @@ export class TelegramFundingService {
       await this.runtime.destinations(initialLink.userId, { purpose: "fund" })
     ).filter(
       (destination) =>
-        destination.venueId === "polymarket" && destination.selectable,
+        destination.venueId === input.venue && destination.selectable,
     );
     if (destinations.length !== 1) {
       throw new TelegramFundingError("destination_ambiguous");
@@ -277,6 +349,12 @@ export class TelegramFundingService {
               now,
             },
           );
+          await recordTelegramFundingOpenMutation(client, {
+            contextId: context.context.id,
+            idempotencyKey,
+            requestFingerprint,
+            now,
+          });
         },
       );
     } catch (error) {
@@ -286,7 +364,7 @@ export class TelegramFundingService {
       ) {
         throw new TelegramFundingError("receive_channel_conflict");
       }
-      throw error;
+      rethrowTelegramFundingPersistenceError(error);
     }
     if (!context) {
       throw new TelegramFundingError("funding_context_not_found");

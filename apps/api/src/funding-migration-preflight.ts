@@ -12,6 +12,7 @@ const MIGRATION_0196 = "0196_funding_operation_expiry.sql";
 const MIGRATION_0197 = "0197_funding_operation_expiry_immutability.sql";
 const MIGRATION_0199 = "0199_telegram_funding_receive.sql";
 const MIGRATION_0200 = "0200_runtime_policy_admin_actor.sql";
+const MIGRATION_0201 = "0201_telegram_funding_open_idempotency.sql";
 const FUNDING_MIGRATIONS = [
   MIGRATION_0184,
   MIGRATION_0193,
@@ -21,6 +22,7 @@ const FUNDING_MIGRATIONS = [
   MIGRATION_0197,
   MIGRATION_0199,
   MIGRATION_0200,
+  MIGRATION_0201,
 ] as const;
 
 const LEGACY_CLASSIFIER_SQL = `
@@ -74,6 +76,7 @@ export type FundingMigrationPreflightReport = Readonly<{
     recoveryRequiredOperations: number | null;
     tradeAttempts: number | null;
   }>;
+  telegramOpenMutationConstraints: boolean;
 }>;
 
 async function relationExists(db: DbQuery, relation: string): Promise<boolean> {
@@ -271,6 +274,31 @@ export async function inspectFundingMigrationPreflight(
     db,
     "public.telegram_funding_mutations",
   );
+  const hasTelegramOpenMutationActionConstraint =
+    hasTelegramFundingMutations &&
+    (await constraintDefinitionIncludes(
+      db,
+      "public.telegram_funding_mutations",
+      "telegram_funding_mutations_action_check",
+      ["open", "select_target", "cancel"],
+    ));
+  const hasTelegramOpenMutationShapeConstraint =
+    hasTelegramFundingMutations &&
+    (await constraintDefinitionIncludes(
+      db,
+      "public.telegram_funding_mutations",
+      "telegram_funding_mutations_action_shape_check",
+      [
+        "open",
+        "cancel",
+        "select_target",
+        "consent_revision is null",
+        "consent_revision is not null",
+      ],
+    ));
+  const hasTelegramOpenMutationConstraints =
+    hasTelegramOpenMutationActionConstraint &&
+    hasTelegramOpenMutationShapeConstraint;
   const hasRuntimePolicies = await relationExists(
     db,
     "public.runtime_policies",
@@ -436,6 +464,12 @@ export async function inspectFundingMigrationPreflight(
     appliedSet.has(MIGRATION_0200) && !hasRuntimePolicyAdminActor
       ? "0200 is recorded but runtime policy admin actor objects are incomplete"
       : null,
+    !appliedSet.has(MIGRATION_0201) && hasTelegramOpenMutationConstraints
+      ? "Telegram funding open mutation constraints exist before 0201 is recorded"
+      : null,
+    appliedSet.has(MIGRATION_0201) && !hasTelegramOpenMutationConstraints
+      ? "0201 is recorded but telegram_funding_mutations open constraints are incomplete"
+      : null,
   ].filter((value): value is string => value !== null);
 
   const recoveryRequiredOperations =
@@ -510,6 +544,9 @@ export async function inspectFundingMigrationPreflight(
   };
 
   const blockers = [
+    !appliedSet.has(MIGRATION_0201)
+      ? "0201 Telegram funding open idempotency migration is not recorded"
+      : null,
     !hasBridgeOrders ? "bridge_orders table is absent" : null,
     bridgeUnknown > 0
       ? `${bridgeUnknown} legacy bridge orders have unknown adapter class`
@@ -554,6 +591,7 @@ export async function inspectFundingMigrationPreflight(
       recoveryRequiredOperations,
       tradeAttempts: tradeAttemptsBefore0194,
     },
+    telegramOpenMutationConstraints: hasTelegramOpenMutationConstraints,
   };
 }
 
@@ -566,6 +604,7 @@ function formatHuman(report: FundingMigrationPreflightReport): string {
     `0194 blockers: ${JSON.stringify(report.recoveryIdentity)}`,
     `0195 duplicate physical keys: ${report.observationDuplicatePhysicalKeys ?? "n/a"}`,
     `0195 physical identity: ${report.observationIdentityConstraint ?? "n/a"}`,
+    `0201 Telegram open mutation constraints: ${report.telegramOpenMutationConstraints ? "ready" : "missing"}`,
     `Operational: ${JSON.stringify(report.operational)}`,
     ...(report.blockers.length > 0
       ? ["Blockers:", ...report.blockers.map((blocker) => `- ${blocker}`)]

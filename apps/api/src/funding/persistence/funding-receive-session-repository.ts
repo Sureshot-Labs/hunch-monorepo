@@ -297,7 +297,8 @@ export async function createOrReuseFundingReceiveSession(
       current &&
       current.owner_channel === ownerChannel &&
       current.expires_at > input.now &&
-      (current.status === "processing" ||
+      (ownerChannel === "telegram" ||
+        current.status === "processing" ||
         current.status === "review_required" ||
         (current.policy_revision === input.policyRevision &&
           current.ownership_revision === input.ownershipRevision))

@@ -20,6 +20,7 @@ import {
   parseTelegramFundingCallbackRoute,
   type TelegramFundingCallbackRoute,
 } from "./telegram-funding-contracts.js";
+import type { TelegramSendResult } from "./signal-bot-contracts.js";
 
 export type SignalBotInteractiveMenuRoute =
   | { kind: "deposit"; showQr: boolean; venue: string }
@@ -87,13 +88,27 @@ export function parseSignalBotInteractiveMenuRoute(
 export function isSignalBotFundingMenuRoute(
   route: Readonly<{ kind: string; venue?: string }>,
 ): boolean {
-  return (
-    (route.kind === "deposit" && route.venue === "polymarket") ||
-    route.kind === "select" ||
-    route.kind === "cancel" ||
-    route.kind === "refresh" ||
-    route.kind === "qr"
-  );
+  return signalBotFundingMenuAction(route) != null;
+}
+
+export type SignalBotFundingMenuAction =
+  | "cancel"
+  | "open"
+  | "select"
+  | "session";
+
+export function signalBotFundingMenuAction(
+  route: Readonly<{ kind: string; venue?: string }>,
+): SignalBotFundingMenuAction | null {
+  return route.kind === "select"
+    ? "select"
+    : route.kind === "cancel"
+      ? "cancel"
+      : route.kind === "refresh" || route.kind === "qr"
+        ? "session"
+        : route.kind === "deposit" && route.venue === "polymarket"
+          ? "open"
+          : null;
 }
 
 type MenuButton =
@@ -155,6 +170,11 @@ type SignalBotInteractiveMenuCallbackInput = {
   }) => Promise<MenuMessage>;
   messageId: number | null;
   idempotencyKey?: string;
+  onFundingDeliveryResult?: (
+    action: SignalBotFundingMenuAction,
+    result: TelegramSendResult,
+  ) => void;
+  onFundingOperationError?: (action: SignalBotFundingMenuAction) => void;
   redis: MenuRedis;
   render: (message: MenuMessage) => Promise<unknown>;
   renderExpiredSearch: () => Promise<unknown>;
@@ -166,7 +186,7 @@ type SignalBotInteractiveMenuCallbackInput = {
     parse_mode?: "MarkdownV2";
     photo: Uint8Array;
     reply_markup?: { inline_keyboard: MenuButton[][] };
-  }) => Promise<unknown>;
+  }) => Promise<TelegramSendResult>;
   telegramUserId: number;
 };
 
@@ -293,16 +313,15 @@ async function deliverSignalBotInteractiveMenuCallback(
     return true;
   }
   let depositMessage: MenuMessage & { qrText?: string };
-  const fundingAction =
-    route.kind === "select"
-      ? "select"
-      : route.kind === "cancel"
-        ? "cancel"
-        : route.kind === "refresh" || route.kind === "qr"
-          ? "session"
-          : route.kind === "deposit" && route.venue === "polymarket"
-            ? "open"
-            : null;
+  const fundingAction = signalBotFundingMenuAction(route);
+  const reportFundingDeliveryResult = (result: TelegramSendResult): void => {
+    if (!fundingAction) return;
+    try {
+      input.onFundingDeliveryResult?.(fundingAction, result);
+    } catch {
+      // Observability must never alter the funding callback outcome.
+    }
+  };
   const depositVenue =
     fundingAction != null
       ? "polymarket"
@@ -357,6 +376,13 @@ async function deliverSignalBotInteractiveMenuCallback(
           };
     }
   } catch {
+    if (fundingAction) {
+      try {
+        input.onFundingOperationError?.(fundingAction);
+      } catch {
+        // Observability must never alter the safe unavailable response.
+      }
+    }
     depositMessage = {
       parse_mode: "MarkdownV2",
       text: formatTelegramCalloutMarkdownV2({
@@ -382,14 +408,33 @@ async function deliverSignalBotInteractiveMenuCallback(
       },
     });
   }
-  if (showQr && depositMessage.qrText && input.sendPhoto) {
+  if (showQr && depositMessage.qrText) {
+    if (!input.sendPhoto) {
+      reportFundingDeliveryResult({
+        error: "other",
+        message: "funding_qr_transport_unavailable",
+        ok: false,
+      });
+      return true;
+    }
+    let qr: Uint8Array;
     try {
-      const qr = await generateTelegramDepositQr(depositMessage.qrText);
-      const isLimitless = depositMessage.venue === "limitless";
-      const venue = isLimitless ? "limitless" : "polymarket";
-      const network = isLimitless ? "Base" : "Polygon";
-      const asset = isLimitless ? "USDC" : "pUSD";
-      await input.sendPhoto({
+      qr = await generateTelegramDepositQr(depositMessage.qrText);
+    } catch {
+      reportFundingDeliveryResult({
+        error: "other",
+        message: "funding_qr_generation_failed",
+        ok: false,
+      });
+      return true;
+    }
+    const isLimitless = depositMessage.venue === "limitless";
+    const venue = isLimitless ? "limitless" : "polymarket";
+    const network = isLimitless ? "Base" : "Polygon";
+    const asset = isLimitless ? "USDC" : "pUSD";
+    let photoResult: TelegramSendResult;
+    try {
+      photoResult = await input.sendPhoto({
         caption: [
           `${telegramCustomEmojiMarkdownV2ForVenue(venue)} ${formatTelegramBoldMarkdownV2(
             `${isLimitless ? "Limitless" : "Polymarket"} Deposit QR`,
@@ -435,7 +480,13 @@ async function deliverSignalBotInteractiveMenuCallback(
       });
     } catch {
       // The address remains visible and copyable in the edited menu card.
+      photoResult = {
+        error: "ambiguous",
+        message: "funding_qr_delivery_failed",
+        ok: false,
+      };
     }
+    reportFundingDeliveryResult(photoResult);
   }
   return true;
 }
@@ -508,6 +559,16 @@ function scheduleSignalBotFundingOpen(
 
   const firstLoader = input.loadFunding;
   if (!firstLoader) return Promise.resolve(true);
+  let operationErrorReported = false;
+  const reportOperationError = (action: SignalBotFundingMenuAction): void => {
+    if (operationErrorReported) return;
+    operationErrorReported = true;
+    try {
+      input.onFundingOperationError?.(action);
+    } catch {
+      // Telemetry must never alter menu delivery or task cleanup.
+    }
+  };
   let sharedLoad: ReturnType<
     SignalBotInteractiveMenuLoaders["funding"]
   > | null = null;
@@ -530,6 +591,7 @@ function scheduleSignalBotFundingOpen(
       await deliverSignalBotInteractiveMenuCallback({
         ...currentInput,
         loadFunding: coalescedLoader,
+        onFundingOperationError: reportOperationError,
       });
       deliveredVersion = currentVersion;
     }
@@ -539,7 +601,7 @@ function scheduleSignalBotFundingOpen(
     }
   });
   backgroundFundingOpens.set(key, entry);
-  void entry.task.catch(() => undefined);
+  void entry.task.catch(() => reportOperationError("open"));
   return Promise.resolve(true);
 }
 

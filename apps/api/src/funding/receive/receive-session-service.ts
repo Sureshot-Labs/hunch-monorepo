@@ -41,6 +41,10 @@ import {
 } from "../reconciliation/direct-ingress-observer.js";
 import { initializeCanonicalFundingReceiveEventCursors } from "./canonical-receive-event-scanner.js";
 import { quoteFundingReceiveReceipt } from "./receive-receipt-router.js";
+import {
+  FUNDING_RECEIVE_OBSERVATION_GRACE_MS,
+  FUNDING_RECEIVE_SESSION_TTL_MS,
+} from "./receive-session-constants.js";
 
 type JsonRecord = Readonly<Record<string, JsonValue>>;
 
@@ -446,9 +450,9 @@ export class FundingReceiveSessionService {
     );
     const methodRecommendedReceiveTargetId =
       selectedReceiveTargetId ?? recommendedReceiveTargetId;
-    const expiresAt = new Date(now.getTime() + 24 * 60 * 60 * 1_000);
+    const expiresAt = new Date(now.getTime() + FUNDING_RECEIVE_SESSION_TTL_MS);
     const observeUntil = new Date(
-      expiresAt.getTime() + 7 * 24 * 60 * 60 * 1_000,
+      expiresAt.getTime() + FUNDING_RECEIVE_OBSERVATION_GRACE_MS,
     );
     const methods: FundingReceiveMethod[] = receiveOptions.flatMap((option) => {
       const kind =

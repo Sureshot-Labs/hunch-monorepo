@@ -21,7 +21,7 @@ import {
   settleFundingReceiveReceiptRouting,
 } from "../../persistence/funding-receive-session-repository.js";
 
-const NOW = new Date("2026-07-27T18:00:00.000Z");
+const NOW = new Date();
 const DESTINATION_OPTION_ID = "destination_receive_persistence_12345678";
 const VENUE_BINDING_OPTION_ID = "binding_receive_persistence_12345678";
 const RUN_ID = crypto.randomUUID();
@@ -141,7 +141,10 @@ try {
     restored?.session.receiveSessionId,
     first.snapshot.session.receiveSessionId,
   );
-  assert.equal(restored?.session.observeUntil, "2026-08-04T18:00:00.000Z");
+  assert.equal(
+    restored?.session.observeUntil,
+    new Date(NOW.getTime() + 8 * 86_400_000).toISOString(),
+  );
   assert.deepEqual(
     restored?.session.automationPolicy,
     sessionInput(userId).automationPolicy,

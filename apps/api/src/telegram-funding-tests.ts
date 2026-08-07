@@ -326,6 +326,9 @@ const targetMessage = buildTelegramFundingTargetMessage({
   expiresAt,
 });
 assert.match(targetMessage.text, /pUSD/);
+assert.match(targetMessage.text, /Receive window.*24 hours/u);
+assert.equal(targetMessage.text.includes("2026\\-08\\-06 12:00:00 UTC"), true);
+assert.doesNotMatch(targetMessage.text, /Session expires/u);
 assert.doesNotMatch(targetMessage.text, /pUSD \/ USDC\.e/);
 assert.equal(targetMessage.text.includes(address), false);
 assert.equal(
@@ -344,6 +347,8 @@ assert.equal(addressMessage.qrText, address);
 assert.match(addressMessage.text, new RegExp(address));
 assert.doesNotMatch(addressMessage.text, /pUSD \/ USDC\.e/);
 assert.doesNotMatch(addressMessage.text, /USDC\.e/);
+assert.match(addressMessage.text, /Receive window.*24 hours/u);
+assert.equal(addressMessage.text.includes("2026\\-08\\-06 12:00:00 UTC"), true);
 assert.equal(
   addressMessage.reply_markup?.inline_keyboard[0]?.[0] &&
     "copy_text" in addressMessage.reply_markup.inline_keyboard[0][0]
@@ -412,7 +417,14 @@ const ready = projectTelegramFundingProgress({
 assert.equal(ready?.state, "ready");
 assert.equal(ready?.terminal, true);
 assert.ok(ready);
-assert.match(buildTelegramFundingProgressMessage(ready).text, /pUSD ready/);
+const readyMessage = buildTelegramFundingProgressMessage(ready);
+assert.match(readyMessage.text, /pUSD ready/);
+assert.doesNotMatch(readyMessage.text, /Receive window/u);
+assert.doesNotMatch(readyMessage.text, /Expires at/u);
+assert.ok(waiting);
+const waitingMessage = buildTelegramFundingProgressMessage(waiting);
+assert.match(waitingMessage.text, /Receive window.*24 hours/u);
+assert.equal(waitingMessage.text.includes("2026\\-08\\-06 12:00:00 UTC"), true);
 
 const unexpectedUsdce = projectTelegramFundingProgress({
   consent,
@@ -742,6 +754,7 @@ assert.equal(
     route: { contextId, kind: "qr" },
     sendPhoto: async () => {
       photoCalls += 1;
+      return { messageId: 504, ok: true };
     },
     telegramUserId: 42,
   });

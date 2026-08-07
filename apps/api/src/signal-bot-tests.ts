@@ -103,6 +103,7 @@ import {
   formatTelegramTtl,
 } from "./services/telegram-bot-trading-presentation.js";
 import { normalizeSignalBotPolicy } from "./services/signal-bot-trading-policy.js";
+import { drainSignalBotFundingOpenTasks } from "./services/telegram-bot-menu-actions.js";
 import {
   buildTelegramActivityNotificationMessage,
   deliverTelegramNotificationOutbox,
@@ -9326,6 +9327,195 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         true,
       );
       assert.equal(telegram.messages.length, 0);
+    },
+  },
+  {
+    name: "funding menu reports only a normalized delivery outcome",
+    run: async () => {
+      const redis = new FakeRedis();
+      const telegram = new FakeTelegram();
+      telegram.editMessageText = async () => ({
+        error: "ambiguous",
+        message: "raw Telegram timeout with callback-token-secret",
+        ok: false,
+      });
+      const events: Array<Record<string, unknown>> = [];
+      const handled = await handleSignalBotMenuCallback({
+        callbackQuery: {
+          data: "hm:v1:fund:refresh:123e4567-e89b-42d3-a456-426614174000",
+          from: { id: 999 },
+          id: "funding-delivery-callback-secret",
+          message: {
+            chat: { id: 999, type: "private" },
+            message_id: 50,
+          },
+        },
+        config: parseSignalBotConfig({
+          HUNCH_SIGNAL_BOT_TOKEN: "token",
+        }),
+        db: {
+          query: async () => ({
+            rows: [{ link_id: "link-1", user_id: "user-1" }],
+          }),
+        } as never,
+        loadFunding: async () => ({ text: "Current funding progress" }),
+        onFundingMenuDelivery: (event) => events.push(event),
+        redis,
+        sendTestSignal: async () => false,
+        telegram,
+      });
+      assert.equal(handled, true);
+      assert.deepEqual(events, [{ action: "session", outcome: "ambiguous" }]);
+      assert.equal(telegram.messages.length, 0);
+      const serialized = JSON.stringify(events);
+      assert.doesNotMatch(serialized, /callback-token-secret/u);
+      assert.doesNotMatch(serialized, /raw Telegram timeout/u);
+      assert.doesNotMatch(serialized, /999|50/u);
+    },
+  },
+  {
+    name: "funding operation failure is distinct from successful unavailable-card delivery",
+    run: async () => {
+      const redis = new FakeRedis();
+      const telegram = new FakeTelegram();
+      const deliveryEvents: Array<Record<string, unknown>> = [];
+      const operationEvents: Array<Record<string, unknown>> = [];
+      const handled = await handleSignalBotMenuCallback({
+        callbackQuery: {
+          data: "hm:v1:deposit:polymarket",
+          from: { id: 999 },
+          id: "funding-operation-callback-secret",
+          message: {
+            chat: { id: 999, type: "private" },
+            message_id: 51,
+          },
+        },
+        config: parseSignalBotConfig({
+          HUNCH_SIGNAL_BOT_TOKEN: "token",
+        }),
+        db: {
+          query: async () => ({
+            rows: [{ link_id: "link-1", user_id: "user-1" }],
+          }),
+        } as never,
+        loadFunding: async () => {
+          throw new Error("raw funding planner secret");
+        },
+        onFundingMenuDelivery: (event) => deliveryEvents.push(event),
+        onFundingMenuOperationError: (event) => operationEvents.push(event),
+        redis,
+        sendTestSignal: async () => false,
+        telegram,
+      });
+      assert.equal(handled, true);
+      assert.equal(await drainSignalBotFundingOpenTasks(1_000), true);
+      assert.deepEqual(operationEvents, [
+        { action: "open", errorCode: "unexpected_error" },
+      ]);
+      assert.deepEqual(deliveryEvents, [
+        { action: "open", outcome: "success" },
+      ]);
+      assert.equal(telegram.edits.length, 1);
+      assert.match(telegram.edits[0]?.text ?? "", /Deposit unavailable/u);
+      const serialized = JSON.stringify({ deliveryEvents, operationEvents });
+      assert.doesNotMatch(serialized, /callback-secret|planner secret/u);
+      assert.doesNotMatch(serialized, /999|51/u);
+    },
+  },
+  {
+    name: "funding QR photo delivery reports every normalized transport outcome",
+    run: async () => {
+      const cases: Array<{
+        expected: Record<string, unknown>;
+        result: TelegramSendResult;
+      }> = [
+        {
+          expected: { action: "session", outcome: "success" },
+          result: { messageId: 601, ok: true },
+        },
+        {
+          expected: { action: "session", outcome: "ambiguous" },
+          result: {
+            error: "ambiguous",
+            message: "raw photo timeout secret",
+            ok: false,
+          },
+        },
+        {
+          expected: {
+            action: "session",
+            outcome: "rate_limited",
+            retryAfterSec: 9,
+          },
+          result: {
+            error: "other",
+            message: "raw photo rate-limit secret",
+            ok: false,
+            retryAfterSec: 9,
+          },
+        },
+        {
+          expected: { action: "session", outcome: "blocked" },
+          result: {
+            error: "blocked_or_missing",
+            message: "raw photo blocked secret",
+            ok: false,
+          },
+        },
+        {
+          expected: { action: "session", outcome: "other" },
+          result: {
+            error: "other",
+            message: "raw photo rejection secret",
+            ok: false,
+          },
+        },
+      ];
+      for (const testCase of cases) {
+        const redis = new FakeRedis();
+        let photoCalls = 0;
+        const telegram = Object.assign(new FakeTelegram(), {
+          sendPhoto: async () => {
+            photoCalls += 1;
+            return testCase.result;
+          },
+        });
+        const events: Array<Record<string, unknown>> = [];
+        const handled = await handleSignalBotMenuCallback({
+          callbackQuery: {
+            data: "hm:v1:fund:qr:123e4567-e89b-42d3-a456-426614174000",
+            from: { id: 999 },
+            id: "funding-qr-callback-secret",
+            message: {
+              chat: { id: 999, type: "private" },
+              message_id: 52,
+            },
+          },
+          config: parseSignalBotConfig({
+            HUNCH_SIGNAL_BOT_TOKEN: "token",
+          }),
+          db: {
+            query: async () => ({
+              rows: [{ link_id: "link-1", user_id: "user-1" }],
+            }),
+          } as never,
+          loadFunding: async () => ({
+            qrText: "0x1111111111111111111111111111111111111111",
+            text: "Verified receive address",
+            venue: "polymarket",
+          }),
+          onFundingMenuDelivery: (event) => events.push(event),
+          redis,
+          sendTestSignal: async () => false,
+          telegram,
+        });
+        assert.equal(handled, true);
+        assert.equal(photoCalls, 1);
+        assert.deepEqual(events, [testCase.expected]);
+        const serialized = JSON.stringify(events);
+        assert.doesNotMatch(serialized, /callback-secret|photo .* secret/u);
+        assert.doesNotMatch(serialized, /999|52/u);
+      }
     },
   },
   {

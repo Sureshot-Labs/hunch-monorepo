@@ -766,6 +766,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
             legacyPhotoCalls += 1;
             legacyPhotoCaption = photo.caption ?? "";
             legacyPhotoFilename = photo.filename;
+            return { messageId: 501, ok: true };
           },
           telegramUserId: 20,
         }),
@@ -797,6 +798,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           route: { kind: "deposit", showQr: true, venue: "polymarket" },
           sendPhoto: async () => {
             a1PhotoCalls += 1;
+            return { messageId: 502, ok: true };
           },
           telegramUserId: 21,
         }),
@@ -833,6 +835,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           photoCalls += 1;
           photoCaption = photo.caption ?? "";
           photoFilename = photo.filename;
+          return { messageId: 503, ok: true };
         },
         telegramUserId: 20,
       });

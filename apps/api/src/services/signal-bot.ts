@@ -217,8 +217,10 @@ import {
 } from "./telegram-bot-menu-state.js";
 import { handleTelegramAccountValueMenu } from "./telegram-account-value-menu.js";
 import {
+  classifyTelegramBotMenuDeliveryResult,
   createTelegramBotCallbackMenuTransport,
   sendOrEditTelegramBotMenuMessage as sendOrEditSignalBotMenuMessage,
+  type TelegramBotMenuDeliveryOutcome,
   type TelegramBotMenuMessage as SignalBotMenuMessage,
   type TelegramBotMenuTransport as SignalBotMenuTransport,
 } from "./telegram-bot-menu-delivery.js";
@@ -2728,6 +2730,15 @@ type SignalBotMenuLoaders = TelegramBotRewardsMenuDependencies & {
   }) => Promise<SignalBotMenuMessage>;
   loadPositions?: (telegramUserId: number) => Promise<SignalBotMenuMessage>;
   loadTradeStatus?: (telegramUserId: number) => Promise<SignalBotMenuMessage>;
+  onFundingMenuDelivery?: (input: {
+    action: TelegramBotMenuActions.SignalBotFundingMenuAction;
+    outcome: TelegramBotMenuDeliveryOutcome;
+    retryAfterSec?: number;
+  }) => void;
+  onFundingMenuOperationError?: (input: {
+    action: TelegramBotMenuActions.SignalBotFundingMenuAction;
+    errorCode: "unexpected_error";
+  }) => void;
   searchMarkets?: (input: {
     query?: string | null;
   }) => Promise<SignalBotMarketSearchResult[]>;
@@ -2922,6 +2933,21 @@ export async function handleSignalBotMenuCallback(
     route.kind === "refresh" ||
     route.kind === "qr"
   ) {
+    const fundingAction =
+      TelegramBotMenuActions.signalBotFundingMenuAction(route);
+    const reportFundingDelivery = (
+      action: TelegramBotMenuActions.SignalBotFundingMenuAction,
+      result: TelegramSendResult,
+    ): void => {
+      try {
+        input.onFundingMenuDelivery?.({
+          action,
+          ...classifyTelegramBotMenuDeliveryResult(result),
+        });
+      } catch {
+        // Observability must not change the financial menu outcome.
+      }
+    };
     return TelegramBotMenuActions.handleSignalBotInteractiveMenuCallback({
       callbackPrefix: SIGNAL_BOT_MENU_CALLBACK_PREFIX,
       chatId,
@@ -2937,15 +2963,31 @@ export async function handleSignalBotMenuCallback(
         : undefined,
       loadPositionCard: input.loadPositionCard,
       messageId,
+      onFundingDeliveryResult: reportFundingDelivery,
+      onFundingOperationError: (action) => {
+        try {
+          input.onFundingMenuOperationError?.({
+            action,
+            errorCode: "unexpected_error",
+          });
+        } catch {
+          // Observability must not change the financial menu outcome.
+        }
+      },
       redis: input.redis,
-      render: (interactiveMessage) =>
-        sendOrEditSignalBotMenuMessage({
+      render: async (interactiveMessage) => {
+        const result = await sendOrEditSignalBotMenuMessage({
           chatId,
           message: interactiveMessage,
           messageId,
           shouldDeliver,
           transport: menuTransport,
-        }),
+        });
+        if (fundingAction) {
+          reportFundingDelivery(fundingAction, result);
+        }
+        return result;
+      },
       renderExpiredSearch: () =>
         sendOrEditSignalBotMenuScreen({
           chatId,
@@ -4240,6 +4282,8 @@ export async function pollSignalBotCommands(
           redis: input.redis,
           loadAccountValue: input.loadAccountValue,
           onAccountValueError: input.onAccountValueError,
+          onFundingMenuDelivery: input.onFundingMenuDelivery,
+          onFundingMenuOperationError: input.onFundingMenuOperationError,
           loadMarketCard: input.loadMarketCard,
           loadDeposit: input.loadDeposit,
           loadFunding: input.loadFunding,

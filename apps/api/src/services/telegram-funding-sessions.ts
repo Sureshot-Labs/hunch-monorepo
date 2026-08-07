@@ -55,7 +55,7 @@ type TelegramFundingConsentRow = Readonly<{
   consented_at: Date;
 }>;
 
-type TelegramFundingMutationAction = "cancel" | "select_target";
+type TelegramFundingMutationAction = "cancel" | "open" | "select_target";
 
 type TelegramFundingMutationRow = Readonly<{
   funding_context_id: string;
@@ -216,6 +216,98 @@ async function loadMutationByKey(
     [idempotencyKey],
   );
   return rows[0] ?? null;
+}
+
+function assertSameOpenMutation(
+  row: TelegramFundingMutationRow,
+  input: Readonly<{ contextId: string; requestFingerprint: string }>,
+): void {
+  if (
+    row.action !== "open" ||
+    row.funding_context_id !== input.contextId ||
+    row.request_fingerprint !== input.requestFingerprint ||
+    row.consent_revision !== null ||
+    row.response_payload.fundingContextId !== input.contextId
+  ) {
+    throw new TelegramFundingPersistenceError(
+      "telegram_funding_idempotency_conflict",
+    );
+  }
+}
+
+export async function fetchTelegramFundingOpenMutationReplay(
+  pool: Pick<Pool, "query">,
+  input: Readonly<{
+    idempotencyKey: string;
+    requestFingerprint: string;
+    userId: string;
+    telegramUserId: string;
+    chatId: string;
+  }>,
+): Promise<TelegramFundingSessionContext | null> {
+  const row = await loadMutationByKey(pool, input.idempotencyKey);
+  if (!row) return null;
+  const contextId = row.response_payload.fundingContextId;
+  if (typeof contextId !== "string") {
+    throw new TelegramFundingPersistenceError(
+      "telegram_funding_idempotency_conflict",
+    );
+  }
+  assertSameOpenMutation(row, {
+    contextId,
+    requestFingerprint: input.requestFingerprint,
+  });
+  const context = await fetchTelegramFundingSessionContext(pool, {
+    contextId,
+    userId: input.userId,
+    telegramUserId: input.telegramUserId,
+    chatId: input.chatId,
+  });
+  if (!context) {
+    throw new TelegramFundingPersistenceError(
+      "telegram_funding_idempotency_conflict",
+    );
+  }
+  return context;
+}
+
+export async function recordTelegramFundingOpenMutation(
+  client: Pick<PoolClient, "query">,
+  input: Readonly<{
+    contextId: string;
+    idempotencyKey: string;
+    requestFingerprint: string;
+    now: Date;
+  }>,
+): Promise<void> {
+  await client.query(
+    `
+      insert into telegram_funding_mutations (
+        funding_context_id,
+        action,
+        idempotency_key,
+        request_fingerprint,
+        response_payload,
+        consent_revision,
+        created_at
+      ) values ($1, 'open', $2, $3, $4::jsonb, null, $5)
+      on conflict (idempotency_key) do nothing
+    `,
+    [
+      input.contextId,
+      input.idempotencyKey,
+      input.requestFingerprint,
+      JSON.stringify({ fundingContextId: input.contextId }),
+      input.now,
+    ],
+  );
+  const row = await loadMutationByKey(client, input.idempotencyKey);
+  if (!row) {
+    throw new TelegramFundingPersistenceError(
+      "telegram_funding_session_create_failed",
+    );
+  }
+  assertSameOpenMutation(row, input);
 }
 
 export async function fetchTelegramFundingMutationReplay(
@@ -406,6 +498,80 @@ export async function fetchTelegramFundingSessionByIdempotency(
     [input.idempotencyKey, input.userId, input.telegramUserId, input.chatId],
   );
   return rows[0] ? publicSession(rows[0]) : null;
+}
+
+export async function reuseActiveTelegramFundingSession(
+  pool: Pool,
+  input: Readonly<{
+    userId: string;
+    telegramAccountId: string;
+    telegramUserId: string;
+    chatId: string;
+    telegramMessageId: number | null;
+    venueId: string;
+    idempotencyKey: string;
+    requestFingerprint: string;
+    now: Date;
+  }>,
+): Promise<TelegramFundingSessionContext | null> {
+  return tx(pool, async (client) => {
+    const { rows } = await client.query<TelegramFundingSessionRow>(
+      `
+        select ${qualifiedSessionColumns("context")}
+        from telegram_funding_sessions context
+        join funding_receive_sessions receive
+          on receive.id = context.receive_session_id
+         and receive.user_id = context.user_id
+         and receive.owner_channel = context.receive_owner_channel
+        where context.user_id = $1
+          and context.telegram_user_id = $2
+          and context.chat_id = $3
+          and context.origin = 'generic_add_funds'
+          and context.receive_owner_channel = 'telegram'
+          and context.cancelled_at is null
+          and context.latest_terminal_projection is null
+          and context.expires_at > $4
+          and receive.owner_channel = 'telegram'
+          and receive.venue_id = $5
+          and receive.status in ('open', 'processing', 'review_required')
+          and receive.expires_at > $4
+        order by context.created_at desc, context.id desc
+        for update of context
+        limit 2
+      `,
+      [
+        input.userId,
+        input.telegramUserId,
+        input.chatId,
+        input.now,
+        input.venueId,
+      ],
+    );
+    if (rows.length > 1) {
+      throw new TelegramFundingPersistenceError(
+        "telegram_funding_active_context_ambiguous",
+      );
+    }
+    const active = rows[0];
+    if (!active) return null;
+    const refreshed = await client.query<TelegramFundingSessionRow>(
+      `
+        update telegram_funding_sessions
+        set telegram_account_id = $2,
+            telegram_message_id = coalesce($3, telegram_message_id)
+        where id = $1
+        returning ${sessionColumns}
+      `,
+      [active.id, input.telegramAccountId, input.telegramMessageId],
+    );
+    await recordTelegramFundingOpenMutation(client, {
+      contextId: active.id,
+      idempotencyKey: input.idempotencyKey,
+      requestFingerprint: input.requestFingerprint,
+      now: input.now,
+    });
+    return publicSession(refreshed.rows[0] ?? active);
+  });
 }
 
 export type TelegramFundingSelectionSnapshot = Readonly<{

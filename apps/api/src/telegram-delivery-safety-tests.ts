@@ -1,10 +1,64 @@
 import assert from "node:assert/strict";
 
 import { TelegramBotApiClient } from "./services/signal-bot-telegram-client.js";
-import { sendOrEditTelegramBotMenuMessage } from "./services/telegram-bot-menu-delivery.js";
+import {
+  classifyTelegramBotMenuDeliveryResult,
+  sendOrEditTelegramBotMenuMessage,
+} from "./services/telegram-bot-menu-delivery.js";
 import { sendTelegramMessageWithReplyFallback } from "./services/telegram-delivery-safety.js";
 
 const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
+  {
+    name: "menu delivery telemetry exposes only normalized safe outcomes",
+    run: () => {
+      const cases = [
+        [{ messageId: 8, ok: true }, { outcome: "success" }],
+        [
+          { error: "ambiguous", message: "raw timeout", ok: false },
+          { outcome: "ambiguous" },
+        ],
+        [
+          {
+            error: "other",
+            message: "raw Telegram rate limit body",
+            ok: false,
+            retryAfterSec: 11,
+          },
+          { outcome: "rate_limited", retryAfterSec: 11 },
+        ],
+        [
+          { error: "blocked_or_missing", message: "raw block", ok: false },
+          { outcome: "blocked" },
+        ],
+        [
+          {
+            error: "message_not_editable",
+            message: "raw missing message",
+            ok: false,
+          },
+          { outcome: "message_not_editable" },
+        ],
+        [
+          { error: "other", message: "menu_render_superseded", ok: false },
+          { outcome: "render_superseded" },
+        ],
+        [
+          { error: "other", message: "menu_render_unavailable", ok: false },
+          { outcome: "render_unavailable" },
+        ],
+        [
+          { error: "other", message: "raw backend body", ok: false },
+          { outcome: "other" },
+        ],
+      ] as const;
+      for (const [result, expected] of cases) {
+        const normalized = classifyTelegramBotMenuDeliveryResult(result);
+        assert.deepEqual(normalized, expected);
+        assert.equal("message" in normalized, false);
+        assert.equal("error" in normalized, false);
+      }
+    },
+  },
   {
     name: "menu fallback is limited to definitive message-not-editable",
     run: async () => {
