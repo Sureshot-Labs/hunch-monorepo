@@ -455,6 +455,14 @@ The profile branch must exist in both publishers:
 - `publishSignalBotFollowthroughTick`: `followthrough_stats`, `resolved_win`,
   `resolved_loss`.
 
+X follow-through drafts are standalone and must not require a Telegram message
+ID from the initial X draft. The candidate query may use a terminal/skipped
+`x_editorial_draft_v1` initial delivery row with `telegram_message_id=null` as
+its root. This lets a later material follow-through become a valid editorial
+story even when the original X composition failed or the model explicitly
+blocked it. Nonterminal `compose_failed` roots remain excluded until their own
+initial retry lifecycle finishes.
+
 Preferred implementation is one composer with story-family-specific fact
 packets and prompts for all five kinds. If initial rollout intentionally covers
 only initial/update drafts, the follow-through worker must explicitly exclude
