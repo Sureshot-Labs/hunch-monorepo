@@ -17,7 +17,9 @@ import type {
 } from "./signal-bot-contracts.js";
 import {
   parsePersistedXEditorialDraft,
+  readXEditorialComposerFailure,
   X_EDITORIAL_CONTENT_PROFILE,
+  type XEditorialComposerFailureCode,
   type XEditorialDraftComposer,
   type XEditorialDraftSource,
   type XEditorialDraftV1,
@@ -30,10 +32,29 @@ type SignalBotXEditorialDeliveryRow = {
   telegram_message_id: string | number | null;
 };
 
+export const X_EDITORIAL_MAX_COMPOSE_ATTEMPTS = 3;
+
+type XEditorialComposerOutcome =
+  | XEditorialComposerFailureCode
+  | "model_blocked"
+  | "ready";
+
 export type SignalBotXEditorialPublicationResult =
   | { status: "already_sent" | "delivery_unknown" | "sent" }
-  | { blockedChat: boolean; status: "blocked" }
-  | { blockedChat: boolean; status: "retry" }
+  | {
+      blockedChat: boolean;
+      composerOutcome?: XEditorialComposerOutcome;
+      status: "blocked";
+    }
+  | {
+      blockedChat: boolean;
+      composerOutcome?: XEditorialComposerFailureCode;
+      status: "retry";
+    }
+  | {
+      composerOutcome: XEditorialComposerFailureCode;
+      status: "compose_failed";
+    }
   | { reason: SignalBotDeliveryPreparationReason; status: "invalid" }
   | { status: "unavailable" };
 
@@ -47,6 +68,53 @@ function asTrimmedString(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0
     ? value.trim()
     : null;
+}
+
+function asNonNegativeInteger(value: unknown): number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0
+    ? value
+    : 0;
+}
+
+function asComposerFailureCode(
+  value: unknown,
+): XEditorialComposerFailureCode | null {
+  return value === "missing_content" ||
+    value === "provider_error" ||
+    value === "schema_mismatch"
+    ? value
+    : null;
+}
+
+function buildComposerMetrics(input: {
+  attemptCount: number;
+  existing: Record<string, unknown>;
+  outcome: XEditorialComposerOutcome;
+  terminal: boolean;
+}): Record<string, unknown> {
+  const existingOutcomes = asObject(input.existing.outcomes);
+  const outcomes = {
+    missing_content: asNonNegativeInteger(existingOutcomes.missing_content),
+    model_blocked: asNonNegativeInteger(existingOutcomes.model_blocked),
+    provider_error: asNonNegativeInteger(existingOutcomes.provider_error),
+    schema_mismatch: asNonNegativeInteger(existingOutcomes.schema_mismatch),
+  };
+  if (input.outcome in outcomes && input.outcome !== "ready") {
+    outcomes[input.outcome as keyof typeof outcomes] += 1;
+  }
+  return {
+    attemptCount: input.attemptCount,
+    maxAttempts: X_EDITORIAL_MAX_COMPOSE_ATTEMPTS,
+    outcome: input.outcome,
+    outcomes,
+    retryable:
+      input.outcome !== "ready" &&
+      input.outcome !== "model_blocked" &&
+      !input.terminal,
+    terminal: input.terminal,
+    updatedAt: new Date().toISOString(),
+    version: 1,
+  };
 }
 
 function isMissingSignalBotMessagesTable(error: unknown): boolean {
@@ -451,25 +519,58 @@ async function deliverDraft(input: {
   const existingStatus = asTrimmedString(
     existingDeliveryState.status ?? existingMetrics.status,
   );
+  const existingComposerMetrics = asObject(existingMetrics.editorialComposerV1);
+  const existingComposerFailure = asComposerFailureCode(
+    existingComposerMetrics.outcome,
+  );
   if (existingStatus === "delivery_unknown") {
     return { status: "delivery_unknown" };
   }
   if (existingStatus === "blocked" || existingStatus === "skipped") {
+    if (existingStatus === "skipped" && existingComposerFailure) {
+      return {
+        composerOutcome: existingComposerFailure,
+        status: "compose_failed",
+      };
+    }
     return { blockedChat: existingStatus === "blocked", status: "blocked" };
   }
   const persistedDraft = parsePersistedXEditorialDraft(
     existingMetrics.editorialDraftV1,
   );
   let draft: XEditorialDraftV1;
+  let composerMetrics: Record<string, unknown>;
   if (
     persistedDraft?.marketId === input.source.marketId &&
     persistedDraft.selectedSide === input.source.selectedSide
   ) {
     draft = persistedDraft;
+    composerMetrics =
+      Object.keys(existingComposerMetrics).length > 0
+        ? existingComposerMetrics
+        : buildComposerMetrics({
+            attemptCount: Math.max(
+              1,
+              asNonNegativeInteger(existingComposerMetrics.attemptCount),
+            ),
+            existing: existingComposerMetrics,
+            outcome: draft.status === "blocked" ? "model_blocked" : "ready",
+            terminal: draft.status === "blocked",
+          });
   } else {
+    const attemptCount =
+      asNonNegativeInteger(existingComposerMetrics.attemptCount) + 1;
     try {
       draft = await input.composer({ source: input.source });
     } catch (error) {
+      const failure = readXEditorialComposerFailure(error);
+      const terminal = attemptCount >= X_EDITORIAL_MAX_COMPOSE_ATTEMPTS;
+      composerMetrics = buildComposerMetrics({
+        attemptCount,
+        existing: existingComposerMetrics,
+        outcome: failure.code,
+        terminal,
+      });
       await recordSignalBotMessageNonDeliveryState({
         baselineAt: input.baselineAt,
         chatId: input.chatId,
@@ -477,22 +578,34 @@ async function deliverDraft(input: {
         messageKind: input.messageKind,
         metrics: {
           contentProfile: X_EDITORIAL_CONTENT_PROFILE,
-          error:
-            error instanceof Error
-              ? error.message.slice(0, 500)
-              : String(error),
-          status: "compose_failed",
+          editorialComposerV1: composerMetrics,
+          error: failure.message.slice(0, 500),
+          issues: failure.issues.slice(0, 20),
+          status: terminal ? "skipped" : "compose_failed",
         },
         noteId: input.noteId,
         replyToMessageId: null,
         sentAt: new Date(),
         threadRootNoteId: input.threadRootNoteId,
       });
-      return { blockedChat: false, status: "retry" };
+      return terminal
+        ? { composerOutcome: failure.code, status: "compose_failed" }
+        : {
+            blockedChat: false,
+            composerOutcome: failure.code,
+            status: "retry",
+          };
     }
+    composerMetrics = buildComposerMetrics({
+      attemptCount,
+      existing: existingComposerMetrics,
+      outcome: draft.status === "blocked" ? "model_blocked" : "ready",
+      terminal: draft.status === "blocked",
+    });
   }
   const baseMetrics = {
     contentProfile: X_EDITORIAL_CONTENT_PROFILE,
+    editorialComposerV1: composerMetrics,
     editorialDraftV1: draft,
   };
   const reservation = await reserveSignalBotMessageDelivery({
@@ -527,7 +640,11 @@ async function deliverDraft(input: {
       metrics: baseMetrics,
       status: "skipped",
     });
-    return { blockedChat: false, status: "blocked" };
+    return {
+      blockedChat: false,
+      composerOutcome: "model_blocked",
+      status: "blocked",
+    };
   }
   const began = await beginSignalBotMessageDelivery({
     attemptId: reservation.attemptId,

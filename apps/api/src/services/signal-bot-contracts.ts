@@ -271,6 +271,7 @@ export type SignalBotFollowthroughCandidateRow = {
 };
 
 export type SignalBotDeliveryPreparationReason =
+  | "editorial_compose_failed"
   | "identity_mismatch"
   | "missing_market_identity"
   | "missing_price_snapshot"

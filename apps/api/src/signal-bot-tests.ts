@@ -135,6 +135,7 @@ import {
 import { TELEGRAM_CUSTOM_EMOJI } from "./services/telegram-custom-emoji.js";
 import {
   buildXEditorialSourceDigest,
+  XEditorialComposerError,
   type XEditorialDraftComposer,
 } from "./services/x-editorial-draft.js";
 
@@ -1669,7 +1670,7 @@ function createTestXEditorialComposer(input: {
       marketId: source.marketId,
       model: "test/editorial-model",
       postText: input.text,
-      promptVersion: "x_editorial_prompt_v2",
+      promptVersion: "x_editorial_prompt_v3",
       safetyFlags: [],
       selectedSide: source.selectedSide,
       sourceDigest: buildXEditorialSourceDigest(source),
@@ -13988,6 +13989,160 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       );
       assert.equal(telegram.messages[0]?.parse_mode, "MarkdownV2");
       assert.equal(telegram.messages[1]?.parse_mode, "MarkdownV2");
+    },
+  },
+  {
+    name: "X composer contract failures retry three times then become terminal",
+    run: async () => {
+      const redis = new FakeRedis();
+      await enableFollowthroughTestChat(redis);
+      await updateSignalBotContentProfile({
+        chatId: "-100",
+        contentProfile: "x_editorial_draft_v1",
+        redis,
+      });
+      const db = new FakeFollowthroughDb();
+      db.runtimePayload = {
+        signalBotFollowthroughEnabled: true,
+        signalBotFollowthroughMinJoinedOrAdded: 1,
+        signalBotFollowthroughMinNetFlowUsd: 100_000,
+        signalBotFollowthroughMinPriceMoveCents: 100,
+        signalBotFollowthroughTypes: ["stats"],
+      };
+      db.candidateRows = [
+        followthroughCandidateRow({
+          root_metrics: { contentProfile: "x_editorial_draft_v1" },
+        }),
+      ];
+      db.flowRows = [followthroughFlowRow({ baseline_shares: "0" })];
+      const telegram = new FakeTelegram();
+      const failureCodes = [
+        "schema_mismatch",
+        "missing_content",
+        "schema_mismatch",
+      ] as const;
+      let composeCalls = 0;
+      const composer: XEditorialDraftComposer = async () => {
+        const code = failureCodes[composeCalls] ?? "schema_mismatch";
+        composeCalls += 1;
+        throw new XEditorialComposerError({
+          code,
+          issues: code === "schema_mismatch" ? ["formatting.0.text"] : [],
+          message: code,
+        });
+      };
+      const config = parseSignalBotConfig({
+        HUNCH_SIGNAL_BOT_TOKEN: "token",
+        HUNCH_SIGNAL_BOT_X_EDITORIAL_ENABLED: "true",
+      });
+      const tick = (now: string) =>
+        publishSignalBotFollowthroughTick({
+          config,
+          db,
+          now: new Date(now),
+          redis,
+          telegram,
+          xEditorialComposer: composer,
+        });
+
+      await tick("2026-01-02T01:00:00.000Z");
+      await tick("2026-01-02T01:16:00.000Z");
+      await tick("2026-01-02T01:32:00.000Z");
+      await tick("2026-01-02T02:00:00.000Z");
+
+      assert.equal(composeCalls, 3);
+      assert.equal(telegram.messages.length, 0);
+      const stored = [...db.messageRows.values()][0];
+      const metrics = stored?.metrics as
+        | {
+            editorialComposerV1?: {
+              attemptCount?: unknown;
+              outcome?: unknown;
+              outcomes?: Record<string, unknown>;
+              retryable?: unknown;
+              terminal?: unknown;
+            };
+            status?: unknown;
+          }
+        | undefined;
+      assert.equal(metrics?.status, "skipped");
+      assert.equal(metrics?.editorialComposerV1?.attemptCount, 3);
+      assert.equal(metrics?.editorialComposerV1?.outcome, "schema_mismatch");
+      assert.equal(metrics?.editorialComposerV1?.outcomes?.schema_mismatch, 2);
+      assert.equal(metrics?.editorialComposerV1?.outcomes?.missing_content, 1);
+      assert.equal(metrics?.editorialComposerV1?.retryable, false);
+      assert.equal(metrics?.editorialComposerV1?.terminal, true);
+      assert.ok(
+        db.queries.some((query) =>
+          query.sql.includes("{editorialComposerV1,terminal}"),
+        ),
+      );
+    },
+  },
+  {
+    name: "an explicit X model block is terminal and measured separately",
+    run: async () => {
+      const redis = new FakeRedis();
+      await enableFollowthroughTestChat(redis);
+      const db = new FakeFollowthroughDb();
+      db.runtimePayload = {
+        signalBotFollowthroughEnabled: true,
+        signalBotFollowthroughMinJoinedOrAdded: 1,
+        signalBotFollowthroughMinNetFlowUsd: 100_000,
+        signalBotFollowthroughMinPriceMoveCents: 100,
+        signalBotFollowthroughTypes: ["stats"],
+      };
+      db.candidateRows = [
+        followthroughCandidateRow({
+          root_metrics: { contentProfile: "x_editorial_draft_v1" },
+        }),
+      ];
+      db.flowRows = [followthroughFlowRow({ baseline_shares: "0" })];
+      const telegram = new FakeTelegram();
+      const composer: XEditorialDraftComposer = async ({ source }) => ({
+        characterCount: 0,
+        formatting: [],
+        generatedAt: "2026-01-02T01:00:00.000Z",
+        marketId: source.marketId,
+        model: "test/editorial-model",
+        postText: null,
+        promptVersion: "x_editorial_prompt_v3",
+        safetyFlags: ["model_blocked"],
+        selectedSide: source.selectedSide,
+        sourceDigest: buildXEditorialSourceDigest(source),
+        status: "blocked",
+        storyFamily: "followthrough",
+        usedFactIds: [],
+        version: 1,
+      });
+
+      const result = await publishSignalBotFollowthroughTick({
+        config: parseSignalBotConfig({
+          HUNCH_SIGNAL_BOT_TOKEN: "token",
+          HUNCH_SIGNAL_BOT_X_EDITORIAL_ENABLED: "true",
+        }),
+        db,
+        now: new Date("2026-01-02T01:00:00.000Z"),
+        redis,
+        telegram,
+        xEditorialComposer: composer,
+      });
+
+      assert.equal(result.sent, 0);
+      assert.equal(result.skipped, 1);
+      assert.equal(telegram.messages.length, 0);
+      const metrics = [...db.messageRows.values()][0]?.metrics as
+        | {
+            editorialComposerV1?: {
+              outcome?: unknown;
+              outcomes?: Record<string, unknown>;
+              terminal?: unknown;
+            };
+          }
+        | undefined;
+      assert.equal(metrics?.editorialComposerV1?.outcome, "model_blocked");
+      assert.equal(metrics?.editorialComposerV1?.outcomes?.model_blocked, 1);
+      assert.equal(metrics?.editorialComposerV1?.terminal, true);
     },
   },
   {

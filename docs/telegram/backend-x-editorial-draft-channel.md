@@ -294,7 +294,7 @@ type XEditorialDraftV1 = {
   characterCount: number;
   generatedAt: string;
   model: string;
-  promptVersion: "x_editorial_prompt_v2";
+  promptVersion: "x_editorial_prompt_v3";
   sourceDigest: string;
 };
 ```
@@ -325,7 +325,8 @@ The prompt and deterministic validators must enforce all of the following:
 - no Markdown markers inside `postText`, Telegram section labels, proof tables,
   Buy/Open CTA, affiliate language, hashtags, or generic engagement bait;
 - return one to three exact non-overlapping snippets for intentional bold or
-  italic formatting in X; do not bold the whole post;
+  italic formatting in X; every item is exactly `{ style, text }`, the field is
+  named `text` rather than `snippet`, and the whole post must not be bold;
 - no internal product vocabulary or raw wallet addresses in visible text;
 - do not repeat the same hook pattern across consecutive drafts;
 - do not imitate one referenced author. Reuse the editorial principles, not a
@@ -340,7 +341,9 @@ who placed the trade.
 
 The model is not the publication authority. Validate before Telegram send:
 
-1. strict schema parse;
+1. normalize the one explicitly supported provider alias `snippet -> text`
+   when `text` is absent and `snippet` is a string, then perform a strict schema
+   parse without stripping any other unknown fields;
 2. non-empty, normalized text and configured character limit;
 3. no Markdown, hashtags, CTA, addresses, internal labels, or banned claim
    patterns;
@@ -355,9 +358,14 @@ The model is not the publication authority. Validate before Telegram send:
 9. recent successful openings are supplied to discourage repetition without
    changing the persisted source digest.
 
-If validation fails, one constrained repair call is acceptable. If the repair
-also fails, persist a blocked audit and send nothing. Do not substitute the
-short holder-research summary or normal Telegram renderer.
+If parsing or validation fails, one constrained repair call is made inside the
+composer. A second schema/contract failure is classified as `schema_mismatch`,
+not as editorial `blocked`. A provider response without `message.content` is
+classified as `missing_content`. Both are retryable before Telegram delivery,
+with at most three composer attempts across worker ticks. Only an explicit,
+valid model response with `status=blocked` is a terminal `model_blocked`
+content decision. Do not substitute the short holder-research summary or normal
+Telegram renderer.
 
 ### Generate once and reuse on retry
 
@@ -370,30 +378,57 @@ Persisted metrics shape:
 
 ```json
 {
-  "status": "prepared",
+  "status": "reserved",
   "contentProfile": "x_editorial_draft_v1",
+  "editorialComposerV1": {
+    "version": 1,
+    "attemptCount": 1,
+    "maxAttempts": 3,
+    "outcome": "ready",
+    "outcomes": {
+      "schema_mismatch": 0,
+      "missing_content": 0,
+      "model_blocked": 0,
+      "provider_error": 0
+    },
+    "retryable": false,
+    "terminal": false
+  },
   "editorialDraftV1": {
     "version": 1,
     "postText": "...",
     "formatting": [{ "style": "bold", "text": "..." }],
-    "promptVersion": "x_editorial_prompt_v2",
+    "promptVersion": "x_editorial_prompt_v3",
     "sourceDigest": "..."
   }
 }
 ```
 
+For pre-delivery technical failures the same metrics object records
+`outcome=schema_mismatch` or `outcome=missing_content`, increments the matching
+counter, and remains `status=compose_failed` while retryable. On the third
+failed composer attempt it becomes a terminal technical `skipped` row and the
+cursor may advance. An explicit content block records `outcome=model_blocked`
+and a blocked draft. Follow-through selection excludes terminal composer rows,
+so they do not reappear after the normal follow-through cooldown.
+
 On success, update the same row to `status: sent` and retain the exact draft.
-On Telegram failure, retain it as `send_failed`; the next attempt reuses the
-same text when prompt version and source digest match. The existing unique key
-and the runner's Redis singleton lock protect the normal duplicate-tick path.
-As with the existing Telegram sender, a process crash after Telegram accepts a
-message but before the success audit is committed remains an unavoidable narrow
-at-least-once delivery window.
+On a known Telegram failure, retain it as `retry`; the next attempt reuses the
+same text when the persisted prompt contract, market, and selected side still
+match. `sourceDigest` remains an audit field, but is not a retry gate because
+time-sensitive follow-through facts can be recomputed while retrying the same
+prepared message. An ambiguous Telegram outcome becomes terminal
+`delivery_unknown` rather than risking an automatic duplicate. The existing
+unique key and the runner's Redis singleton lock protect the normal
+duplicate-tick path.
 
 The draft belongs in `signal_bot_messages.metrics`, not in
 `ai_notes.metrics`, for v1: it is destination-profile copy, generated after the
 canonical note exists, and its delivery/retry lifecycle is per channel. The
 canonical signal note should remain channel-agnostic.
+
+This retry accounting is stored in the existing JSONB `metrics` column. It does
+not require a database migration.
 
 ### Telegram representation for the editorial channel
 
@@ -502,8 +537,10 @@ perform its own presentation-specific preparation.
      default profile.
 2. `apps/api/src/services/x-editorial-draft.ts`
    - define strict model output and versioned persisted contract schemas;
-   - implement prompts, OpenRouter/repair calls, numeric and style validation,
-     source digest, and persisted-draft parsing;
+   - implement the explicit `{style,text}` prompt contract, safe
+     `snippet -> text` compatibility normalization, typed composer failures,
+     OpenRouter/repair calls, numeric and style validation, source digest, and
+     persisted-draft parsing;
    - consume story-family-specific fact packets built by the publisher for
      initial, update, follow-through, and resolution.
 3. `apps/api/src/signal-bot-command-parsers.ts`
