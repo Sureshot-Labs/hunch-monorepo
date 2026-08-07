@@ -22,6 +22,7 @@ import { adminHasPermission, type AdminRole } from "./services/admin-auth.js";
 type StoredPolicyRow = {
   created_at: Date;
   created_by: string | null;
+  created_by_admin_id: string | null;
   effective_at: Date;
   id: string;
   payload: unknown;
@@ -46,6 +47,7 @@ function createPolicyDb() {
           effective_at: effectiveAt,
           payload: JSON.parse(String(params[2])) as unknown,
           created_by: params[3] == null ? null : String(params[3]),
+          created_by_admin_id: params[4] == null ? null : String(params[4]),
           created_at: effectiveAt,
         };
         rows.push(row);
@@ -96,8 +98,14 @@ function buildAuthorizer(permission: AdminFundingPermission) {
       return reply.code(403).send({ error: "admin_csrf_invalid" });
     }
     request.adminActor = {
-      kind: "admin_account",
-      id: `admin_${role}`,
+      kind:
+        readHeader(request.headers["x-test-admin-kind"]) === "legacy_user"
+          ? "legacy_user"
+          : "admin_account",
+      id:
+        readHeader(request.headers["x-test-admin-kind"]) === "legacy_user"
+          ? `legacy_${role}`
+          : `admin_${role}`,
       email: `${role}@example.com`,
       role,
     };
@@ -115,10 +123,6 @@ async function buildTestApp(fixture: ReturnType<typeof createPolicyDb>) {
   });
   await app.ready();
   return app;
-}
-
-function mutableDefaultPolicy(): FundingRuntimePolicy {
-  return structuredClone(DEFAULT_FUNDING_RUNTIME_POLICY);
 }
 
 async function test(name: string, fn: () => Promise<void> | void) {
@@ -158,7 +162,11 @@ await test("GET requires auth and gives viewers the fail-closed snapshot", async
 await test("diff requires funding:write and CSRF", async () => {
   const fixture = createPolicyDb();
   const app = await buildTestApp(fixture);
-  const candidate = mutableDefaultPolicy();
+  const candidate = structuredClone(
+    DEFAULT_FUNDING_RUNTIME_POLICY,
+  ) as FundingRuntimePolicy & {
+    placement: { maximumFeeUsd: string };
+  };
 
   const viewer = await app.inject({
     method: "POST",
@@ -261,7 +269,8 @@ await test("previews, exact-confirms, and rejects a stale republish", async () =
   assert.equal(publishedBody.resolved.source, "db");
   assert.equal(publishedBody.resolved.revision, preview.candidateRevision);
   assert.equal(fixture.rows.length, 1);
-  assert.equal(fixture.rows[0]?.created_by, "admin_admin");
+  assert.equal(fixture.rows[0]?.created_by, null);
+  assert.equal(fixture.rows[0]?.created_by_admin_id, "admin_admin");
 
   const stale = await app.inject({
     method: "POST",
@@ -279,6 +288,52 @@ await test("previews, exact-confirms, and rejects a stale republish", async () =
     "current_revision_mismatch",
   );
   assert.equal(fixture.rows.length, 1);
+  await app.close();
+});
+
+await test("preserves legacy user authorship in created_by", async () => {
+  const fixture = createPolicyDb();
+  const app = await buildTestApp(fixture);
+  const candidate = structuredClone(
+    DEFAULT_FUNDING_RUNTIME_POLICY,
+  ) as FundingRuntimePolicy & {
+    placement: { maximumFeeUsd: string };
+  };
+  candidate.placement.maximumFeeUsd = "1";
+  const headers = {
+    "x-csrf-token": "test-csrf",
+    "x-test-admin-kind": "legacy_user",
+    "x-test-admin-role": "admin",
+  };
+  const diffResponse = await app.inject({
+    method: "POST",
+    url: "/admin/funding/policy/diff",
+    headers,
+    payload: { candidate },
+  });
+  const preview = diffResponse.json<{
+    preview: {
+      candidate: FundingRuntimePolicy;
+      candidateRevision: string;
+      confirmation: string;
+      current: { revision: string };
+    };
+  }>().preview;
+  const published = await app.inject({
+    method: "POST",
+    url: "/admin/funding/policy/publish",
+    headers,
+    payload: {
+      candidate: preview.candidate,
+      candidateRevision: preview.candidateRevision,
+      confirmation: preview.confirmation,
+      expectedCurrentRevision: preview.current.revision,
+      requestId: "funding_request_legacy",
+    },
+  });
+  assert.equal(published.statusCode, 200);
+  assert.equal(fixture.rows[0]?.created_by, "legacy_admin");
+  assert.equal(fixture.rows[0]?.created_by_admin_id, null);
   await app.close();
 });
 

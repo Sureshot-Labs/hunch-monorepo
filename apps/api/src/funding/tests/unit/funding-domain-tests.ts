@@ -945,6 +945,7 @@ type StoredPolicyRow = {
   effective_at: Date;
   payload: unknown;
   created_by: string | null;
+  created_by_admin_id: string | null;
   created_at: Date;
 };
 
@@ -967,6 +968,7 @@ function createPolicyDb() {
           effective_at: params[1] as Date,
           payload: JSON.parse(String(params[2])) as unknown,
           created_by: params[3] == null ? null : String(params[3]),
+          created_by_admin_id: params[4] == null ? null : String(params[4]),
           created_at: params[1] as Date,
         };
         rows.push(row);
@@ -1007,7 +1009,8 @@ await test("previews, confirms, and append-publishes immutable policy", async ()
         expectedCurrentRevision: preview.current.revision,
         candidateRevision: preview.candidateRevision,
         confirmation: "wrong confirmation",
-        createdBy: "admin_12345678",
+        createdByUserId: "admin_12345678",
+        createdByAdminId: null,
       }),
     (error: unknown) =>
       error instanceof FundingPolicyPublishError &&
@@ -1020,7 +1023,8 @@ await test("previews, confirms, and append-publishes immutable policy", async ()
     expectedCurrentRevision: preview.current.revision,
     candidateRevision: preview.candidateRevision,
     confirmation: preview.confirmation,
-    createdBy: "admin_12345678",
+    createdByUserId: "admin_12345678",
+    createdByAdminId: null,
     now: new Date("2026-07-23T17:00:00.000Z"),
   });
   assert.equal(published.source, "db");
@@ -1038,7 +1042,8 @@ await test("previews, confirms, and append-publishes immutable policy", async ()
         expectedCurrentRevision: initial.revision,
         candidateRevision: preview.candidateRevision,
         confirmation: preview.confirmation,
-        createdBy: "admin_12345678",
+        createdByUserId: "admin_12345678",
+        createdByAdminId: null,
       }),
     (error: unknown) =>
       error instanceof FundingPolicyPublishError &&
@@ -1054,6 +1059,7 @@ await test("falls back closed when stored policy is invalid", async () => {
     effective_at: new Date("2026-07-23T16:00:00.000Z"),
     payload: { version: 99, creationMode: "on" },
     created_by: "admin_12345678",
+    created_by_admin_id: null,
     created_at: new Date("2026-07-23T16:00:00.000Z"),
   });
   const resolved = await resolveFundingPolicy(fixture.db);
@@ -1103,9 +1109,10 @@ await test("protects funding admin routes with dedicated permissions", () => {
     routesSource,
     /z\.post\(\s*"\/admin\/funding\/policy\/publish"[\s\S]*?dependencies\.authorize\("funding:write"\)/,
   );
+  assert.match(routesSource, /const actor =\s*request\.adminActor \?\?/);
   assert.match(
     routesSource,
-    /const actorId = request\.adminActor\?\.id \?\? request\.user\?\.id;/,
+    /const creatorIds = runtimePolicyCreatorIds\(actor\);/,
   );
   const adminRoutesSource = readFileSync(
     new URL("../../../routes/admin.ts", import.meta.url),

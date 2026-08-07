@@ -645,7 +645,8 @@ async function main() {
   const policy = await insertRuntimePolicy(pool, {
     policyKey: "market_map",
     effectiveAt: new Date(),
-    createdBy: null,
+    createdByUserId: null,
+    createdByAdminId: null,
     payload: {
       enabled: true,
       venuesEnabled: ["polymarket", "kalshi", "limitless"],
@@ -654,7 +655,8 @@ async function main() {
   const venueLifecyclePolicy = await insertRuntimePolicy(pool, {
     policyKey: "venue_lifecycle",
     effectiveAt: new Date(),
-    createdBy: null,
+    createdByUserId: null,
+    createdByAdminId: null,
     payload: {
       version: 1,
       venues: {
@@ -1235,7 +1237,8 @@ async function main() {
     const exitOnlyLifecyclePolicy = await insertRuntimePolicy(pool, {
       policyKey: "venue_lifecycle",
       effectiveAt: new Date(),
-      createdBy: null,
+      createdByUserId: null,
+      createdByAdminId: null,
       payload: {
         version: 1,
         venues: {

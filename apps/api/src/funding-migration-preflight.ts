@@ -11,6 +11,7 @@ const MIGRATION_0195 = "0195_funding_observation_physical_identity.sql";
 const MIGRATION_0196 = "0196_funding_operation_expiry.sql";
 const MIGRATION_0197 = "0197_funding_operation_expiry_immutability.sql";
 const MIGRATION_0199 = "0199_telegram_funding_receive.sql";
+const MIGRATION_0200 = "0200_runtime_policy_admin_actor.sql";
 const FUNDING_MIGRATIONS = [
   MIGRATION_0184,
   MIGRATION_0193,
@@ -19,6 +20,7 @@ const FUNDING_MIGRATIONS = [
   MIGRATION_0196,
   MIGRATION_0197,
   MIGRATION_0199,
+  MIGRATION_0200,
 ] as const;
 
 const LEGACY_CLASSIFIER_SQL = `
@@ -120,6 +122,29 @@ async function triggerExists(
     [table, trigger],
   );
   return rows[0]?.exists === true;
+}
+
+async function constraintDefinitionIncludes(
+  db: DbQuery,
+  table: string,
+  constraint: string,
+  fragments: readonly string[],
+): Promise<boolean> {
+  const { rows } = await db.query<{ definition: string | null }>(
+    `
+      select pg_get_constraintdef(oid) as definition
+      from pg_constraint
+      where conrelid = $1::regclass and conname = $2
+    `,
+    [table, constraint],
+  );
+  const definition = rows[0]?.definition
+    ?.replaceAll('"', "")
+    .replaceAll(/\s+/g, " ")
+    .toLowerCase();
+  return Boolean(
+    definition && fragments.every((fragment) => definition.includes(fragment)),
+  );
 }
 
 async function indexPredicateIncludes(
@@ -246,6 +271,41 @@ export async function inspectFundingMigrationPreflight(
     db,
     "public.telegram_funding_mutations",
   );
+  const hasRuntimePolicies = await relationExists(
+    db,
+    "public.runtime_policies",
+  );
+  const hasRuntimePolicyAdminActorColumn =
+    hasRuntimePolicies &&
+    (await columnExists(db, "runtime_policies", "created_by_admin_id"));
+  const hasRuntimePolicyAdminActorFk =
+    hasRuntimePolicyAdminActorColumn &&
+    (await constraintDefinitionIncludes(
+      db,
+      "public.runtime_policies",
+      "runtime_policies_created_by_admin_id_fkey",
+      ["foreign key (created_by_admin_id)", "references admin_accounts(id)"],
+    ));
+  const hasRuntimePolicySingleCreator =
+    hasRuntimePolicyAdminActorColumn &&
+    (await constraintDefinitionIncludes(
+      db,
+      "public.runtime_policies",
+      "runtime_policies_single_creator",
+      ["num_nonnulls(created_by, created_by_admin_id)", "<= 1"],
+    ));
+  const hasRuntimePolicyAdminActorIndex = hasRuntimePolicyAdminActorColumn
+    ? await indexPredicateIncludes(
+        db,
+        "idx_runtime_policies_created_by_admin_id",
+        ["created_by_admin_id", "is not null"],
+      )
+    : false;
+  const hasRuntimePolicyAdminActor =
+    hasRuntimePolicyAdminActorColumn &&
+    hasRuntimePolicyAdminActorFk &&
+    hasRuntimePolicySingleCreator &&
+    hasRuntimePolicyAdminActorIndex;
   const hasReceiveOwnerChannel =
     (await relationExists(db, "public.funding_receive_sessions")) &&
     (await columnExists(db, "funding_receive_sessions", "owner_channel"));
@@ -369,6 +429,12 @@ export async function inspectFundingMigrationPreflight(
       !hasSafeWelcomePendingIndex ||
       !hasSafeNotificationPendingIndex)
       ? "0199 is recorded but Telegram funding receive objects are incomplete"
+      : null,
+    !appliedSet.has(MIGRATION_0200) && hasRuntimePolicyAdminActorColumn
+      ? "runtime policy admin actor exists before 0200 is recorded"
+      : null,
+    appliedSet.has(MIGRATION_0200) && !hasRuntimePolicyAdminActor
+      ? "0200 is recorded but runtime policy admin actor objects are incomplete"
       : null,
   ].filter((value): value is string => value !== null);
 

@@ -29,7 +29,10 @@ import {
   insertDebridgeConfig,
 } from "../repos/debridge-config.js";
 import { fetchActiveFeePolicy, insertFeePolicy } from "../repos/fee-policy.js";
-import { insertRuntimePolicy } from "../repos/runtime-policies.js";
+import {
+  insertRuntimePolicy,
+  runtimePolicyCreatorIds,
+} from "../repos/runtime-policies.js";
 import {
   buildPublicPointsContributionSql,
   buildQualificationPointsContributionSql,
@@ -6205,13 +6208,20 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
       const effectiveAt = body.effectiveAt
         ? new Date(body.effectiveAt)
         : new Date();
-      const actorId = request.user?.id ?? null;
+      const actor =
+        request.adminActor ??
+        (request.user
+          ? ({ kind: "legacy_user", id: request.user.id } as const)
+          : null);
+      const creatorIds = actor
+        ? runtimePolicyCreatorIds(actor)
+        : { createdByUserId: null, createdByAdminId: null };
       try {
         const row = await insertRuntimePolicy(pool, {
           policyKey: key,
           effectiveAt,
           payload: parsed.data,
-          createdBy: actorId,
+          ...creatorIds,
         });
         if (key === "venue_lifecycle") {
           clearVenueLifecyclePolicyCache(pool);
@@ -6233,7 +6243,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
             key: row.policy_key,
             effectiveAt: row.effective_at,
             createdAt: row.created_at,
-            createdBy: row.created_by,
+            createdBy: row.created_by ?? row.created_by_admin_id,
             payload: row.payload,
           },
           resolved: {

@@ -25,7 +25,8 @@ const db = {
     ) {
       assert.ok(
         Array.isArray(params[0]) &&
-          params[0].includes("0199_telegram_funding_receive.sql"),
+          params[0].includes("0199_telegram_funding_receive.sql") &&
+          params[0].includes("0200_runtime_policy_admin_actor.sql"),
       );
       return { rows: [] };
     }
