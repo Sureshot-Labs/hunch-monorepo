@@ -13927,6 +13927,69 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
+    name: "X followthrough can publish standalone after its initial draft was skipped",
+    run: async () => {
+      const redis = new FakeRedis();
+      await enableFollowthroughTestChat(redis);
+      const db = new FakeFollowthroughDb();
+      db.runtimePayload = {
+        signalBotFollowthroughEnabled: true,
+        signalBotFollowthroughMinJoinedOrAdded: 1,
+        signalBotFollowthroughMinNetFlowUsd: 100_000,
+        signalBotFollowthroughMinPriceMoveCents: 100,
+        signalBotFollowthroughTypes: ["stats"],
+      };
+      db.candidateRows = [
+        followthroughCandidateRow({
+          reply_to_message_id: null,
+          root_metrics: {
+            contentProfile: "x_editorial_draft_v1",
+            editorialComposerV1: {
+              outcome: "schema_mismatch",
+              terminal: true,
+            },
+            status: "skipped",
+          },
+        }),
+      ];
+      db.flowRows = [followthroughFlowRow({ baseline_shares: "0" })];
+      const telegram = new FakeTelegram();
+      const calls = { count: 0 };
+
+      const result = await publishSignalBotFollowthroughTick({
+        config: parseSignalBotConfig({
+          HUNCH_SIGNAL_BOT_TELEGRAM_MINI_APP_LINK_BASE:
+            TEST_TELEGRAM_MINI_APP_LINK_BASE,
+          HUNCH_SIGNAL_BOT_TOKEN: "token",
+          HUNCH_SIGNAL_BOT_X_EDITORIAL_ENABLED: "true",
+        }),
+        db,
+        now: new Date("2026-01-02T01:00:00.000Z"),
+        redis,
+        telegram,
+        xEditorialComposer: createTestXEditorialComposer({
+          calls,
+          text: "Fresh wallet activity created a standalone follow-through story.",
+        }),
+      });
+
+      assert.equal(result.sent, 1);
+      assert.equal(calls.count, 1);
+      assert.equal(telegram.messages.length, 1);
+      assert.equal(telegram.messages[0]?.reply_parameters, undefined);
+      assert.match(telegram.messages[0]?.text ?? "", /^```\n/);
+      const candidateQuery = db.queries.find((query) =>
+        query.sql.includes("from signal_bot_messages root"),
+      );
+      assert.ok(candidateQuery);
+      assert.match(
+        candidateQuery.sql,
+        /root\.telegram_message_id is not null[\s\S]*editorialComposerV1,terminal/,
+      );
+      assert.equal(candidateQuery.params[8], "x_editorial_draft_v1");
+    },
+  },
+  {
     name: "X followthrough retry reuses the prepared draft after fifteen minutes",
     run: async () => {
       const redis = new FakeRedis();

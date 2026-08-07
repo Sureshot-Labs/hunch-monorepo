@@ -6465,7 +6465,18 @@ async function loadSignalBotFollowthroughCandidates(input: {
         join unified_markets m on m.id = pt.target_id
         left join unified_events e on e.id = m.event_id
         where root.message_kind = 'initial'
-          and root.telegram_message_id is not null
+          and (
+            root.telegram_message_id is not null
+            or (
+              root.metrics->>'contentProfile' = $9
+              and (
+                coalesce(root.metrics->>'status', '') = 'skipped'
+                or root.metrics #>> '{deliveryStateV2,status}' = 'skipped'
+                or root.metrics #>> '{editorialDraftV1,status}' = 'blocked'
+                or root.metrics #>> '{editorialComposerV1,terminal}' = 'true'
+              )
+            )
+          )
           and root.chat_id = any($5::text[])
           and (
             (
@@ -6532,6 +6543,7 @@ async function loadSignalBotFollowthroughCandidates(input: {
         ).toISOString(),
         input.mode === "preview",
         input.policy.terminalInitialCutoff,
+        X_EDITORIAL_CONTENT_PROFILE,
       ],
     );
     return rows;
