@@ -5828,6 +5828,9 @@ export async function publishSignalBotTick(input: {
           }
           countDeliverySkip("unpublishable_copy");
         }
+        if (editorial.status === "compose_failed") {
+          countDeliverySkip("editorial_compose_failed");
+        }
         await updateSignalBotChatCursor({
           chatId,
           createdAt: note.createdAt,
@@ -6482,6 +6485,7 @@ async function loadSignalBotFollowthroughCandidates(input: {
                         'blocked', 'delivery_unknown', 'sent'
                       )
                       or sent.metrics #>> '{editorialDraftV1,status}' = 'blocked'
+                      or sent.metrics #>> '{editorialComposerV1,terminal}' = 'true'
                       or sent.sent_at > $6::timestamptz
                     )
                 )
@@ -6503,6 +6507,7 @@ async function loadSignalBotFollowthroughCandidates(input: {
                         'blocked', 'delivery_unknown', 'sent'
                       )
                       or sent.metrics #>> '{editorialDraftV1,status}' = 'blocked'
+                      or sent.metrics #>> '{editorialComposerV1,terminal}' = 'true'
                       or sent.sent_at > $6::timestamptz
                     )
                 )
@@ -7834,6 +7839,7 @@ export async function publishSignalBotFollowthroughTick(input: {
       }
       if (
         editorial.status === "blocked" ||
+        editorial.status === "compose_failed" ||
         editorial.status === "delivery_unknown" ||
         editorial.status === "invalid" ||
         editorial.status === "unavailable"

@@ -16,6 +16,7 @@ import {
   createOpenRouterXEditorialDraftComposer,
   parsePersistedXEditorialDraft,
   validateXEditorialModelOutput,
+  XEditorialComposerError,
   type XEditorialDraftSource,
 } from "./services/x-editorial-draft.js";
 import { HOLDER_RESEARCH_PUBLICATION_DECISION_V1 } from "./services/signal-publication-contract.js";
@@ -222,6 +223,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.match(prompt, /Use only supplied facts/i);
       assert.match(prompt, /No Markdown/i);
       assert.match(prompt, /X Premium formatting/i);
+      assert.match(prompt, /field name is text, never snippet/i);
       assert.match(prompt, /1000 visible characters/i);
     },
   },
@@ -357,6 +359,187 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           parsePersistedXEditorialDraft(JSON.parse(JSON.stringify(draft))),
           draft,
         );
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    },
+  },
+  {
+    name: "OpenRouter composer safely normalizes formatting snippet to text",
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      let requests = 0;
+      globalThis.fetch = (async () => {
+        requests += 1;
+        return new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: JSON.stringify({
+                    version: 1,
+                    status: "ready",
+                    marketId: "market-1",
+                    selectedSide: "YES",
+                    postText: "$56.4K is backing Spain to win the World Cup.",
+                    formatting: [
+                      {
+                        style: "bold",
+                        snippet:
+                          "$56.4K is backing Spain to win the World Cup.",
+                      },
+                    ],
+                    storyFamily: "fresh_bet",
+                    usedFactIds: ["market", "actor"],
+                    safetyFlags: [],
+                  }),
+                },
+              },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }) as typeof fetch;
+      try {
+        const compose = createOpenRouterXEditorialDraftComposer({
+          apiKey: "test-key",
+          config,
+        });
+        const draft = await compose({ source });
+        assert.equal(requests, 1);
+        assert.deepEqual(draft.formatting, [
+          {
+            style: "bold",
+            text: "$56.4K is backing Spain to win the World Cup.",
+          },
+        ]);
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    },
+  },
+  {
+    name: "OpenRouter composer reports persistent output contract mismatches",
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      let requests = 0;
+      globalThis.fetch = (async () => {
+        requests += 1;
+        return new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: JSON.stringify({
+                    version: 1,
+                    status: "ready",
+                    marketId: "market-1",
+                    selectedSide: "YES",
+                    postText: "$56.4K is backing Spain to win the World Cup.",
+                    formatting: [{ style: "bold", snippet: 42 }],
+                    storyFamily: "fresh_bet",
+                    usedFactIds: ["market", "actor"],
+                    safetyFlags: [],
+                  }),
+                },
+              },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }) as typeof fetch;
+      try {
+        const compose = createOpenRouterXEditorialDraftComposer({
+          apiKey: "test-key",
+          config,
+        });
+        await assert.rejects(
+          () => compose({ source }),
+          (error: unknown) => {
+            assert.ok(error instanceof XEditorialComposerError);
+            assert.equal(error.code, "schema_mismatch");
+            assert.ok(
+              error.issues.some((issue) =>
+                issue.startsWith("formatting.0.text:"),
+              ),
+            );
+            return true;
+          },
+        );
+        assert.equal(requests, 2);
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    },
+  },
+  {
+    name: "OpenRouter composer reports missing content after one repair retry",
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      let requests = 0;
+      globalThis.fetch = (async () => {
+        requests += 1;
+        return new Response(
+          JSON.stringify({
+            choices: [{ finish_reason: "error", message: {} }],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }) as typeof fetch;
+      try {
+        const compose = createOpenRouterXEditorialDraftComposer({
+          apiKey: "test-key",
+          config,
+        });
+        await assert.rejects(
+          () => compose({ source }),
+          (error: unknown) => {
+            assert.ok(error instanceof XEditorialComposerError);
+            assert.equal(error.code, "missing_content");
+            return true;
+          },
+        );
+        assert.equal(requests, 2);
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    },
+  },
+  {
+    name: "OpenRouter composer keeps an explicit model block terminal",
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = (async () =>
+        new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: JSON.stringify({
+                    version: 1,
+                    status: "blocked",
+                    marketId: "market-1",
+                    selectedSide: "YES",
+                    postText: null,
+                    formatting: [],
+                    storyFamily: "fresh_bet",
+                    usedFactIds: [],
+                    safetyFlags: [],
+                  }),
+                },
+              },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        )) as typeof fetch;
+      try {
+        const compose = createOpenRouterXEditorialDraftComposer({
+          apiKey: "test-key",
+          config,
+        });
+        const draft = await compose({ source });
+        assert.equal(draft.status, "blocked");
+        assert.deepEqual(draft.safetyFlags, ["model_blocked"]);
       } finally {
         globalThis.fetch = originalFetch;
       }
@@ -641,7 +824,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           marketId: "polymarket:market-spain",
           model: "test/editorial-model",
           postText: editorialText,
-          promptVersion: "x_editorial_prompt_v2" as const,
+          promptVersion: "x_editorial_prompt_v3" as const,
           safetyFlags: [],
           selectedSide: "YES" as const,
           sourceDigest: "",
