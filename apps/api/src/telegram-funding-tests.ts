@@ -918,6 +918,38 @@ const destination = {
 
 {
   const fake = deliveryPool({ destinations: [destination] });
+  class StatefulTelegramClient {
+    readonly baseUrl = "https://api.telegram.test";
+    edits = 0;
+
+    async editMessageText() {
+      assert.equal(
+        this.baseUrl,
+        "https://api.telegram.test",
+        "funding delivery must preserve the Telegram client receiver",
+      );
+      this.edits += 1;
+      return { ok: true as const, messageId: 100 };
+    }
+
+    async sendMessage() {
+      assert.fail("a successful bound edit must not fall back to send");
+      return { ok: true as const, messageId: 101 };
+    }
+  }
+  const telegram = new StatefulTelegramClient();
+  const result = await deliverTelegramFundingActions({
+    pool: fake.pool,
+    renderCoordinator,
+    telegram,
+  });
+  assert.equal(result.sent, 1);
+  assert.equal(result.failed, 0);
+  assert.equal(telegram.edits, 1);
+}
+
+{
+  const fake = deliveryPool({ destinations: [destination] });
   let edits = 0;
   let sends = 0;
   const result = await deliverTelegramFundingActions({

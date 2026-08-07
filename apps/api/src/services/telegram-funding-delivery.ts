@@ -651,7 +651,9 @@ export async function deliverTelegramFundingActions(input: {
     }
     const message = buildTelegramFundingProgressMessage(projection);
     if (row.action === "funding_edit") {
-      const editMessageText = input.telegram.editMessageText;
+      const editMessageText = input.telegram.editMessageText?.bind(
+        input.telegram,
+      );
       if (destination.telegram_message_id == null || !editMessageText) {
         const queued = await enqueueReplacementAfterMissingEdit({
           pool: input.pool,
