@@ -2,6 +2,7 @@ import type { FastifyInstance, preHandlerHookHandler } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 
 import type { DbQuery } from "../db.js";
+import { runtimePolicyCreatorIds } from "../repos/runtime-policies.js";
 import {
   FundingPolicyPublishError,
   previewFundingPolicy,
@@ -67,10 +68,15 @@ export function registerAdminFundingRoutes(
       schema: { body: adminFundingPolicyPublishBodySchema },
     },
     async (request, reply) => {
-      const actorId = request.adminActor?.id ?? request.user?.id;
-      if (!actorId) {
+      const actor =
+        request.adminActor ??
+        (request.user
+          ? ({ kind: "legacy_user", id: request.user.id } as const)
+          : null);
+      if (!actor) {
         return reply.code(401).send({ error: "Admin identity is required" });
       }
+      const creatorIds = runtimePolicyCreatorIds(actor);
       try {
         const resolved = await dependencies.transact((db) =>
           publishFundingPolicy(db, {
@@ -78,7 +84,7 @@ export function registerAdminFundingRoutes(
             expectedCurrentRevision: request.body.expectedCurrentRevision,
             candidateRevision: request.body.candidateRevision,
             confirmation: request.body.confirmation,
-            createdBy: actorId,
+            ...creatorIds,
           }),
         );
         reply.header("Content-Type", "application/json; charset=utf-8");

@@ -537,7 +537,8 @@ async function main() {
   const policy = await insertRuntimePolicy(pool, {
     policyKey: "market_map",
     effectiveAt: new Date(),
-    createdBy: null,
+    createdByUserId: null,
+    createdByAdminId: null,
     payload: {
       enabled: true,
       venuesEnabled: ["polymarket", "kalshi", "limitless"],

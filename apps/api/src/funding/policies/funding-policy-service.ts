@@ -105,7 +105,7 @@ export async function resolveFundingPolicy(
       effectiveAt:
         row.effective_at instanceof Date ? row.effective_at : new Date(0),
       createdAt: row.created_at instanceof Date ? row.created_at : new Date(0),
-      createdBy: row.created_by,
+      createdBy: row.created_by ?? row.created_by_admin_id,
       invalidStoredPolicy: true,
       validationIssues: validated.issues,
     };
@@ -118,7 +118,7 @@ export async function resolveFundingPolicy(
     effectiveAt:
       row.effective_at instanceof Date ? row.effective_at : new Date(0),
     createdAt: row.created_at instanceof Date ? row.created_at : new Date(0),
-    createdBy: row.created_by,
+    createdBy: row.created_by ?? row.created_by_admin_id,
     invalidStoredPolicy: false,
     validationIssues: [],
   };
@@ -167,7 +167,8 @@ export async function publishFundingPolicy(
     expectedCurrentRevision: string;
     candidateRevision: string;
     confirmation: string;
-    createdBy: string | null;
+    createdByUserId: string | null;
+    createdByAdminId: string | null;
     now?: Date;
   }>,
   options: Readonly<{
@@ -221,7 +222,8 @@ export async function publishFundingPolicy(
     policyKey: FUNDING_POLICY_KEY,
     effectiveAt: now,
     payload: validated.policy,
-    createdBy: input.createdBy,
+    createdByUserId: input.createdByUserId,
+    createdByAdminId: input.createdByAdminId,
   });
 
   return {
@@ -231,7 +233,7 @@ export async function publishFundingPolicy(
     effectiveAt:
       row.effective_at instanceof Date ? row.effective_at : new Date(0),
     createdAt: row.created_at instanceof Date ? row.created_at : new Date(0),
-    createdBy: row.created_by,
+    createdBy: row.created_by ?? row.created_by_admin_id,
     invalidStoredPolicy: false,
     validationIssues: [],
   };

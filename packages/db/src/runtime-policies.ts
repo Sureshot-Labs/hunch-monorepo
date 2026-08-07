@@ -4,6 +4,7 @@ export type RuntimePolicyRow = {
   effective_at: Date;
   payload: unknown;
   created_by: string | null;
+  created_by_admin_id: string | null;
   created_at: Date;
 };
 
@@ -33,6 +34,7 @@ export async function fetchActiveRuntimePolicy(
           effective_at,
           payload,
           created_by,
+          created_by_admin_id,
           created_at
         from runtime_policies
         where policy_key = $1
@@ -72,6 +74,7 @@ export async function listActiveRuntimePolicies(
           effective_at,
           payload,
           created_by,
+          created_by_admin_id,
           created_at
         from ranked
         where rn = 1
