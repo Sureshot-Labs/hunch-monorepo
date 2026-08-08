@@ -52,6 +52,12 @@ export type TelegramBotTradingClientCallbackInput = {
       message_id?: number;
     };
   };
+  beginTradeInput?: (input: {
+    action: "buy" | "sell";
+    contextId: string;
+    expiresAt: string;
+    message: TelegramBotTradingClientMessage;
+  }) => Promise<boolean>;
   telegramMiniAppEnabled?: boolean;
   sendMessage: (input: {
     chat_id: string;
@@ -98,6 +104,7 @@ export type TelegramBotTradingInternalApiClient = {
   buildPositionMessage: (input: {
     appBaseUrl: string;
     positionId: string;
+    telegramMessageId: number;
     telegramMiniAppEnabled?: boolean;
     telegramUserId: string | number;
   }) => Promise<TelegramBotTradingClientMessage>;
@@ -158,6 +165,18 @@ export type TelegramBotTradingInternalApiClient = {
   disableTrading: (
     telegramUserId: string | number,
   ) => Promise<"already_disabled" | "disabled" | "unavailable">;
+  completeTradeInput: (input: {
+    appBaseUrl: string;
+    chatId: string;
+    contextId: string;
+    telegramMessageId: number;
+    telegramMiniAppEnabled?: boolean;
+    telegramUserId: number;
+    value: string;
+  }) => Promise<{
+    completed: boolean;
+    message: TelegramBotTradingClientMessage;
+  }>;
   handleCallback: (
     input: TelegramBotTradingClientCallbackInput,
   ) => Promise<boolean>;
@@ -188,10 +207,19 @@ const DEFAULT_INTERNAL_API_EXECUTE_TIMEOUT_MS = 120_000;
 const EXACT_UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-export function parseTelegramBotTradingCallbackData(data: string | undefined): {
-  intentId: string;
-  type: "buy" | "sell" | "redeem" | "retry_buy" | "cancel" | "confirm";
-} | null {
+export type ParsedTelegramBotTradingCallback =
+  | {
+      intentId: string;
+      type: "buy" | "sell" | "redeem" | "retry_buy" | "cancel" | "confirm";
+    }
+  | {
+      inputContextId: string;
+      type: "buy_input" | "sell_input";
+    };
+
+export function parseTelegramBotTradingCallbackData(
+  data: string | undefined,
+): ParsedTelegramBotTradingCallback | null {
   if (!data) return null;
   const parts = data.split(":");
   if (parts.length !== 3) return null;
@@ -202,12 +230,16 @@ export function parseTelegramBotTradingCallbackData(data: string | undefined): {
     type !== "sell" &&
     type !== "redeem" &&
     type !== "retry_buy" &&
+    type !== "buy_input" &&
+    type !== "sell_input" &&
     type !== "confirm" &&
     type !== "cancel"
   )
     return null;
   if (!EXACT_UUID_RE.test(intentId ?? "")) return null;
-  return { type, intentId };
+  return type === "buy_input" || type === "sell_input"
+    ? { inputContextId: intentId, type }
+    : { type, intentId };
 }
 
 function isTelegramBotTradingCallbackData(data: string | undefined): boolean {
@@ -424,6 +456,7 @@ export function createTelegramBotTradingInternalApiClient(input: {
         `/internal/telegram-bot/positions/${body.positionId}/card`,
         {
           appBaseUrl: body.appBaseUrl,
+          telegramMessageId: body.telegramMessageId,
           telegramMiniAppEnabled: body.telegramMiniAppEnabled,
           telegramUserId: body.telegramUserId,
         },
@@ -503,6 +536,22 @@ export function createTelegramBotTradingInternalApiClient(input: {
         result.status ?? (result.disabled ? "disabled" : "already_disabled")
       );
     },
+    completeTradeInput: (body) =>
+      post<{
+        completed: boolean;
+        message: TelegramBotTradingClientMessage;
+      }>(
+        `/internal/telegram-bot/trading/input-contexts/${body.contextId}/complete`,
+        {
+          appBaseUrl: body.appBaseUrl,
+          chatId: body.chatId,
+          telegramMessageId: body.telegramMessageId,
+          telegramMiniAppEnabled: body.telegramMiniAppEnabled,
+          telegramUserId: body.telegramUserId,
+          value: body.value,
+        },
+        { timeoutMs: executeTimeoutMs },
+      ),
     handleCallback: async (callbackInput) => {
       const parsed = parseTelegramBotTradingCallbackData(
         callbackInput.callbackQuery.data,
@@ -520,6 +569,64 @@ export function createTelegramBotTradingInternalApiClient(input: {
         });
         return true;
       }
+      if (parsed.type === "buy_input" || parsed.type === "sell_input") {
+        const chat = callbackInput.callbackQuery.message?.chat;
+        const telegramUserId = callbackInput.callbackQuery.from?.id;
+        const telegramMessageId =
+          callbackInput.callbackQuery.message?.message_id;
+        if (
+          chat?.type !== "private" ||
+          chat.id == null ||
+          telegramUserId == null ||
+          telegramMessageId == null ||
+          String(chat.id) !== String(telegramUserId) ||
+          !callbackInput.beginTradeInput
+        ) {
+          await callbackInput.answerCallbackQuery({
+            callbackQueryId: callbackInput.callbackQuery.id,
+            showAlert: true,
+            text: "⚠️ Open the original private bot chat to enter an amount.",
+          });
+          return true;
+        }
+        const action = parsed.type === "sell_input" ? "sell" : "buy";
+        const begun = await post<{
+          action: "buy" | "sell";
+          contextId: string;
+          expiresAt: string;
+          message: TelegramBotTradingClientMessage;
+        }>(
+          `/internal/telegram-bot/trading/input-contexts/${parsed.inputContextId}/begin`,
+          {
+            action,
+            chatId: String(chat.id),
+            telegramMessageId,
+            telegramUserId,
+          },
+        ).catch(() => null);
+        if (!begun) {
+          await callbackInput.answerCallbackQuery({
+            callbackQueryId: callbackInput.callbackQuery.id,
+            showAlert: true,
+            text: "⚠️ Custom input is unavailable or expired.",
+          });
+          return true;
+        }
+        const started = await callbackInput
+          .beginTradeInput(begun)
+          .catch(() => false);
+        await callbackInput.answerCallbackQuery({
+          callbackQueryId: callbackInput.callbackQuery.id,
+          showAlert: !started,
+          text: started
+            ? action === "buy"
+              ? "Enter the USD amount."
+              : "Enter shares, a percentage, or all."
+            : "⚠️ Custom input is temporarily unavailable.",
+        });
+        return true;
+      }
+      if (!("intentId" in parsed)) return true;
       const path =
         parsed.type === "buy" ||
         parsed.type === "retry_buy" ||

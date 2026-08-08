@@ -31,11 +31,13 @@ import {
   buildTelegramBotTradingMarketMessage,
   buildTelegramBotTradingStatusMessage,
   captureTelegramBotTradingCallback,
+  completeTelegramBotTradeInput,
   cleanupTelegramBotTradingForUnlink,
   disableTelegramBotTradingForUser,
   disableTelegramBotTradingForTelegramUser,
   enableTelegramBotTrading,
   getTelegramBotTradingStatus,
+  isTelegramBotTradeInputContextAuthorityCurrent,
   reconcileStaleTelegramTradeIntents,
   resolveTelegramBotTradingWalletSetupIssues,
   TelegramBotTradingEnableError,
@@ -61,7 +63,12 @@ import {
   buildTelegramPositionsMessage,
   loadTelegramPositions,
 } from "../services/telegram-bot-positions.js";
-import { formatTelegramCalloutMarkdownV2 } from "../services/telegram-bot-trading-presentation.js";
+import {
+  escapeTelegramMarkdownV2,
+  formatTelegramBoldMarkdownV2,
+  formatTelegramCalloutMarkdownV2,
+  joinTelegramMarkdownV2Lines,
+} from "../services/telegram-bot-trading-presentation.js";
 import { buildTelegramAccountValueMessage } from "../services/telegram-account-value.js";
 import { buildTelegramAccountValueUnavailableMessage } from "../services/telegram-account-value-contract.js";
 import type { AccountValueReadModel } from "../account-value/runtime-service.js";
@@ -75,6 +82,12 @@ import {
   TelegramFundingService,
 } from "../services/telegram-funding.js";
 import { buildTelegramFundingUnavailableMessage } from "../services/telegram-funding-presentation.js";
+import {
+  readTelegramBotTradeInputContext,
+  telegramBotTradeInputMessageScopeMatches,
+  type TelegramBotTradeInputContext,
+  writeTelegramBotTradeInputContext,
+} from "../services/telegram-bot-trade-input-context.js";
 
 const enableBodySchema = z
   .object({
@@ -99,6 +112,32 @@ const setupFailBodySchema = z
     errorCode: z.string().trim().min(1).max(128),
   })
   .strict();
+
+function readPrivateTelegramIdentity(input: {
+  chatId: number | string;
+  telegramUserId: number | string;
+}): { chatId: string; telegramUserId: string } | null {
+  const identity = {
+    chatId: String(input.chatId),
+    telegramUserId: String(input.telegramUserId),
+  };
+  return identity.chatId === identity.telegramUserId ? identity : null;
+}
+
+const requirePrivateTelegramChat: preHandlerHookHandler = async (
+  request,
+  reply,
+) => {
+  const identity = readPrivateTelegramIdentity(
+    request.body as {
+      chatId: number | string;
+      telegramUserId: number | string;
+    },
+  );
+  if (!identity) {
+    return reply.code(403).send({ error: "private_chat_required" });
+  }
+};
 
 const internalMarketCardBodySchema = z
   .object({
@@ -135,6 +174,7 @@ const internalPositionCardBodySchema = z
   .object({
     appBaseUrl: z.string().trim().url(),
     positionId: z.string().uuid(),
+    telegramMessageId: z.number().int().positive(),
     telegramMiniAppEnabled: z.boolean().optional(),
     telegramUserId: z.union([z.string(), z.number()]),
   })
@@ -149,16 +189,19 @@ const internalDepositBodySchema = z
   })
   .strict();
 
-const internalAccountBodySchema = z
+const internalFundingIdentitySchema = z
   .object({
     chatId: z.union([z.string(), z.number()]),
     telegramUserId: z.union([z.string(), z.number()]),
   })
   .strict();
 
-const internalFundingIdentitySchema = z
+const internalAccountBodySchema = internalFundingIdentitySchema;
+
+const internalTradeInputMessageIdentitySchema = z
   .object({
     chatId: z.union([z.string(), z.number()]),
+    telegramMessageId: z.number().int().positive(),
     telegramUserId: z.union([z.string(), z.number()]),
   })
   .strict();
@@ -235,6 +278,22 @@ const internalCallbackBodySchema = z
       .passthrough(),
   })
   .strict();
+
+const internalTradeInputParamsSchema = z
+  .object({ id: z.string().uuid() })
+  .strict();
+
+const internalTradeInputBeginBodySchema =
+  internalTradeInputMessageIdentitySchema.extend({
+    action: z.enum(["buy", "sell"]),
+  });
+
+const internalTradeInputCompleteBodySchema =
+  internalTradeInputMessageIdentitySchema.extend({
+    appBaseUrl: z.string().trim().url(),
+    telegramMiniAppEnabled: z.boolean().optional(),
+    value: z.string().min(1).max(80),
+  });
 
 const internalIntentParamsSchema = z
   .object({
@@ -376,6 +435,9 @@ export type TelegramBotTradingRouteDependencies = {
     "cancel" | "open" | "selectTarget" | "session"
   >;
   searchMarkets?: typeof searchTelegramMarkets;
+  writeTradeInputContext?: (
+    context: TelegramBotTradeInputContext,
+  ) => Promise<boolean>;
 };
 
 async function registerTelegramBotTradingRoutes(
@@ -408,6 +470,14 @@ async function registerTelegramBotTradingRoutes(
   const searchMarkets = dependencies.searchMarkets ?? searchTelegramMarkets;
   const fundingService =
     dependencies.fundingService ?? new TelegramFundingService(routePool);
+  const writeTradeInputContext =
+    dependencies.writeTradeInputContext ??
+    (async (context: TelegramBotTradeInputContext) => {
+      const redis = await getRedis().catch(() => null);
+      return redis
+        ? writeTelegramBotTradeInputContext({ context, redis })
+        : false;
+    });
   const kalshiGeoFenceConfig: GeoFenceConfig = {
     enabled: env.dflowGeoBlockEnabled,
     blockedCountries: env.dflowGeoBlockCountries,
@@ -527,15 +597,11 @@ async function registerTelegramBotTradingRoutes(
   api.post(
     "/internal/telegram-bot/account",
     {
-      preHandler: requireInternal,
+      preHandler: [requireInternal, requirePrivateTelegramChat],
       schema: { body: internalAccountBodySchema },
     },
     async (request, reply) => {
       const telegramUserId = String(request.body.telegramUserId);
-      const chatId = String(request.body.chatId);
-      if (chatId !== telegramUserId) {
-        return reply.code(403).send({ error: "private_chat_required" });
-      }
       try {
         const initialLink = await resolveActiveTelegramAccountLink({
           db,
@@ -913,9 +979,11 @@ async function registerTelegramBotTradingRoutes(
         },
         db,
         marketRef: position.marketId,
+        telegramMessageId: request.body.telegramMessageId,
         telegramMiniAppEnabled: request.body.telegramMiniAppEnabled,
         telegramUserId: request.body.telegramUserId,
         trading: createTradingForRequest(request),
+        writeTradeInputContext,
       });
     },
   );
@@ -1009,6 +1077,7 @@ async function registerTelegramBotTradingRoutes(
           telegramMiniAppEnabled: request.body.telegramMiniAppEnabled,
           telegramUserId: request.body.telegramUserId,
           trading: createTradingForRequest(request),
+          writeTradeInputContext,
         });
       }
       const openButton = buildHunchMiniAppWebButton({
@@ -1095,6 +1164,134 @@ async function registerTelegramBotTradingRoutes(
       schema: { body: internalCallbackBodySchema },
     },
     handleInternalPreviewCallback,
+  );
+
+  api.post(
+    "/internal/telegram-bot/trading/input-contexts/:id/begin",
+    {
+      preHandler: [requireInternal, requirePrivateTelegramChat],
+      schema: {
+        body: internalTradeInputBeginBodySchema,
+        params: internalTradeInputParamsSchema,
+      },
+    },
+    async (request, reply) => {
+      const chatId = String(request.body.chatId);
+      const telegramUserId = String(request.body.telegramUserId);
+      const redis = await getRedis().catch(() => null);
+      if (!redis) {
+        return reply.code(503).send({ error: "input_context_unavailable" });
+      }
+      const [context, link, policyState] = await Promise.all([
+        readTelegramBotTradeInputContext({ id: request.params.id, redis }),
+        resolveActiveTelegramAccountLink({ db, telegramUserId }),
+        resolveSignalBotTradingPolicyStateFromDb(db),
+      ]);
+      if (!context) {
+        return reply.code(410).send({ error: "input_context_expired" });
+      }
+      if (
+        !link ||
+        context.telegramUserId !== telegramUserId ||
+        context.chatId !== chatId ||
+        context.action !== request.body.action ||
+        !telegramBotTradeInputMessageScopeMatches(
+          context.messageScope,
+          request.body.telegramMessageId,
+        )
+      ) {
+        return reply.code(403).send({ error: "input_context_mismatch" });
+      }
+      if (
+        !(await isTelegramBotTradeInputContextAuthorityCurrent({
+          context,
+          db,
+          telegramUserId,
+        }))
+      ) {
+        return reply.code(403).send({ error: "input_context_mismatch" });
+      }
+      const policy = policyState.policy;
+      if (
+        !policy.tradingEnabled ||
+        !policy.customTradeInputEnabled ||
+        !policy.tradingActions.includes(context.action) ||
+        !policy.tradingVenues.includes(context.venue)
+      ) {
+        return reply.code(409).send({ error: "custom_trade_input_disabled" });
+      }
+      const instruction =
+        context.action === "buy"
+          ? "Send the USD amount to buy. Examples: 2, 2.50, or $2.50."
+          : "Send exact shares, an explicit percentage, or all. Examples: 1.25, 25%, or all. A bare number always means shares.";
+      return reply.send({
+        action: context.action,
+        contextId: context.id,
+        expiresAt: context.expiresAt,
+        message: {
+          parse_mode: "MarkdownV2" as const,
+          text: joinTelegramMarkdownV2Lines([
+            `✍️ ${formatTelegramBoldMarkdownV2(
+              context.action === "buy" ? "Custom buy" : "Custom sell",
+            )}`,
+            "",
+            escapeTelegramMarkdownV2(instruction),
+            "",
+            escapeTelegramMarkdownV2(
+              "Send /cancel or use another menu action to stop this input.",
+            ),
+          ]),
+        },
+      });
+    },
+  );
+
+  api.post(
+    "/internal/telegram-bot/trading/input-contexts/:id/complete",
+    {
+      preHandler: [requireInternal, requirePrivateTelegramChat],
+      schema: {
+        body: internalTradeInputCompleteBodySchema,
+        params: internalTradeInputParamsSchema,
+      },
+    },
+    async (request, reply) => {
+      const chatId = String(request.body.chatId);
+      const telegramUserId = String(request.body.telegramUserId);
+      const initialLink = await resolveActiveTelegramAccountLink({
+        db,
+        telegramUserId,
+      });
+      if (!initialLink) {
+        return reply.code(403).send({ error: "telegram_account_required" });
+      }
+      const result = await completeTelegramBotTradeInput({
+        appBaseUrl: request.body.appBaseUrl,
+        chatId,
+        contextId: request.params.id,
+        db,
+        isLinkCurrent: async () =>
+          sameActiveTelegramAccountLink(
+            initialLink,
+            await resolveActiveTelegramAccountLink({ db, telegramUserId }),
+          ),
+        loadContext: async () => {
+          const redis = await getRedis().catch(() => null);
+          return redis
+            ? readTelegramBotTradeInputContext({
+                id: request.params.id,
+                redis,
+              })
+            : null;
+        },
+        telegramMessageId: request.body.telegramMessageId,
+        telegramMiniAppEnabled: request.body.telegramMiniAppEnabled,
+        telegramUserId,
+        trading: createTradingForRequest(request),
+        value: request.body.value,
+      });
+      return reply.send(result);
+    },
   );
 
   api.post(
@@ -1493,4 +1690,7 @@ export const telegramBotTradingRouteTestHooks = {
   internalFundingSelectTargetBodySchema,
   internalFundingSessionBodySchema,
   internalMarketCardBodySchema,
+  internalTradeInputBeginBodySchema,
+  internalTradeInputCompleteBodySchema,
+  internalTradeInputParamsSchema,
 };

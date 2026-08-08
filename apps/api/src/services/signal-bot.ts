@@ -190,7 +190,6 @@ import {
 import {
   handleTelegramBotRewardsCallback,
   handleTelegramBotRewardsInput,
-  type TelegramBotRewardsMenuDependencies,
 } from "./telegram-bot-rewards-menu.js";
 import {
   buildHunchMiniAppDeepLinkButton,
@@ -213,6 +212,7 @@ import {
   claimSignalBotMenuRender,
   clearSignalBotMenuInput,
   createSignalBotMenuRenderGuard,
+  type SignalBotMenuStateRedis,
   writeSignalBotMenuInput,
 } from "./telegram-bot-menu-state.js";
 import { handleTelegramAccountValueMenu } from "./telegram-account-value-menu.js";
@@ -220,10 +220,10 @@ import {
   classifyTelegramBotMenuDeliveryResult,
   createTelegramBotCallbackMenuTransport,
   sendOrEditTelegramBotMenuMessage as sendOrEditSignalBotMenuMessage,
-  type TelegramBotMenuDeliveryOutcome,
-  type TelegramBotMenuMessage as SignalBotMenuMessage,
   type TelegramBotMenuTransport as SignalBotMenuTransport,
 } from "./telegram-bot-menu-delivery.js";
+import { handleSignalBotTradeInput } from "./telegram-bot-trade-input.js";
+import type { SignalBotMenuLoaders } from "./signal-bot-menu-loaders.js";
 import {
   beginSignalBotMessageDelivery,
   finishSignalBotMessageDelivery,
@@ -325,23 +325,12 @@ export type SignalBotChatState = {
   contentProfile: SignalBotContentProfile;
 };
 
-export type SignalBotRedisLike = {
-  del(key: string): Promise<unknown>;
-  eval(
-    script: string,
-    options: { arguments: string[]; keys: string[] },
-  ): Promise<unknown>;
-  get(key: string): Promise<string | null>;
+export type SignalBotRedisLike = SignalBotMenuStateRedis & {
   hGetAll(key: string): Promise<Record<string, string>>;
   hSet(key: string, value: Record<string, string>): Promise<unknown>;
   sAdd(key: string, member: string): Promise<unknown>;
   sMembers(key: string): Promise<string[]>;
   sRem(key: string, member: string): Promise<unknown>;
-  set(
-    key: string,
-    value: string,
-    options?: { EX?: number; PX?: number; NX?: boolean },
-  ): Promise<unknown>;
   zCard?(key: string): Promise<number>;
   zRemRangeByRank?(key: string, start: number, stop: number): Promise<number>;
 };
@@ -2703,47 +2692,6 @@ async function sendOrEditSignalBotMenuScreen(input: {
   });
 }
 
-type SignalBotMenuLoaders = TelegramBotRewardsMenuDependencies & {
-  loadAccountValue?: (input: {
-    chatId: string;
-    telegramUserId: number;
-  }) => Promise<SignalBotMenuMessage>;
-  onAccountValueError?: (error: unknown) => void;
-  loadDeposit?: TelegramBotMenuActions.SignalBotInteractiveMenuLoaders["deposit"];
-  loadFunding?: TelegramBotMenuActions.SignalBotInteractiveMenuLoaders["funding"];
-  loadMarketCard?: (input: {
-    chatId: string;
-    context?: {
-      observedNoAsk?: number | null;
-      observedYesAsk?: number | null;
-      origin: "search";
-      returnCallbackData: string;
-    };
-    marketRef: string;
-    publicBrowseOnly?: boolean;
-    telegramMessageId: number | null;
-    telegramUserId: number;
-  }) => Promise<SignalBotMenuMessage>;
-  loadPositionCard?: (input: {
-    positionId: string;
-    telegramUserId: number;
-  }) => Promise<SignalBotMenuMessage>;
-  loadPositions?: (telegramUserId: number) => Promise<SignalBotMenuMessage>;
-  loadTradeStatus?: (telegramUserId: number) => Promise<SignalBotMenuMessage>;
-  onFundingMenuDelivery?: (input: {
-    action: TelegramBotMenuActions.SignalBotFundingMenuAction;
-    outcome: TelegramBotMenuDeliveryOutcome;
-    retryAfterSec?: number;
-  }) => void;
-  onFundingMenuOperationError?: (input: {
-    action: TelegramBotMenuActions.SignalBotFundingMenuAction;
-    errorCode: "unexpected_error";
-  }) => void;
-  searchMarkets?: (input: {
-    query?: string | null;
-  }) => Promise<SignalBotMarketSearchResult[]>;
-};
-
 type SignalBotTestSignalHandlerResult = boolean | SignalBotTestSignalOutcome;
 
 function normalizeSignalBotTestSignalOutcome(
@@ -2803,6 +2751,18 @@ export async function handleSignalBotMenuCallback(
   }
   const chatId = String(message.chat.id);
   const messageId = message.message_id ?? null;
+  const isRewardsRoute =
+    route.kind === "rewards_view" ||
+    route.kind === "rewards_begin_input" ||
+    route.kind === "rewards_cancel_input" ||
+    route.kind === "rewards_confirm";
+  if (!isRewardsRoute) {
+    await clearSignalBotMenuInput({
+      chatId,
+      redis: input.redis,
+      telegramUserId,
+    });
+  }
   const renderToken = input.callbackQuery.id;
   const shouldDeliver =
     messageId == null
@@ -2843,6 +2803,13 @@ export async function handleSignalBotMenuCallback(
   });
   const loadMarketCard = input.loadMarketCard;
   if (audience !== "linked") {
+    if (isRewardsRoute) {
+      await clearSignalBotMenuInput({
+        chatId,
+        redis: input.redis,
+        telegramUserId,
+      });
+    }
     if (!isBalance) {
       await input.telegram.answerCallbackQuery({
         callbackQueryId: input.callbackQuery.id,
@@ -3004,11 +2971,6 @@ export async function handleSignalBotMenuCallback(
     });
   }
   if (route.kind === "stale") {
-    await clearSignalBotMenuInput({
-      chatId,
-      redis: input.redis,
-      telegramUserId,
-    });
     await sendOrEditSignalBotMenuScreen({
       chatId,
       config: input.config,
@@ -3023,11 +2985,6 @@ export async function handleSignalBotMenuCallback(
     return true;
   }
   if (route.kind === "cancel_market_input") {
-    await clearSignalBotMenuInput({
-      chatId,
-      redis: input.redis,
-      telegramUserId,
-    });
     await sendOrEditSignalBotMenuScreen({
       chatId,
       config: input.config,
@@ -3078,11 +3035,6 @@ export async function handleSignalBotMenuCallback(
     return true;
   }
   if (route.kind === "screen" && route.screen === "positions") {
-    await clearSignalBotMenuInput({
-      chatId,
-      redis: input.redis,
-      telegramUserId,
-    });
     await sendOrEditSignalBotMenuScreen({
       chatId,
       config: input.config,
@@ -3154,11 +3106,6 @@ export async function handleSignalBotMenuCallback(
     return true;
   }
   if (route.kind === "trading_status") {
-    await clearSignalBotMenuInput({
-      chatId,
-      redis: input.redis,
-      telegramUserId,
-    });
     let statusMessage: {
       parse_mode?: "MarkdownV2";
       reply_markup?: TelegramInlineKeyboard;
@@ -3262,11 +3209,6 @@ export async function handleSignalBotMenuCallback(
           telegramUserId,
         }).catch(() => null)
       : null;
-    await clearSignalBotMenuInput({
-      chatId,
-      redis: input.redis,
-      telegramUserId,
-    });
     await sendOrEditSignalBotMenuScreen({
       chatId,
       config: input.config,
@@ -3320,12 +3262,6 @@ export async function handleSignalBotMenuCallback(
       transport: menuTransport,
     });
     return true;
-  } else {
-    await clearSignalBotMenuInput({
-      chatId,
-      redis: input.redis,
-      telegramUserId,
-    });
   }
   await sendOrEditSignalBotMenuScreen({
     audience,
@@ -3344,6 +3280,7 @@ export async function handleSignalBotMenuCallback(
 export async function handleSignalBotMenuInput(input: {
   config: SignalBotConfig;
   db?: DbQuery;
+  completeTradeInput?: SignalBotMenuLoaders["completeTradeInput"];
   message: TelegramBotMessage;
   redis: SignalBotRedisLike;
   loadMarketCard?: (input: {
@@ -3393,6 +3330,22 @@ export async function handleSignalBotMenuInput(input: {
       telegramUserId,
       transport: input.telegram,
     });
+    return true;
+  }
+  if (
+    input.completeTradeInput &&
+    input.message.message_id != null &&
+    (await handleSignalBotTradeInput({
+      chatId,
+      complete: input.completeTradeInput,
+      messageId: input.message.message_id,
+      redis: input.redis,
+      telegramUserId,
+      telegramMiniAppEnabled: input.config.telegramMiniAppLinkBase != null,
+      text: input.message.text,
+      transport: input.telegram,
+    }))
+  ) {
     return true;
   }
   if (
@@ -3565,6 +3518,7 @@ export async function handleSignalBotCommand(input: {
     command === "settings" ||
     command === "help";
   const isPersonalTradingCommand =
+    command === "cancel" ||
     command === "market" ||
     command === "trade_status" ||
     command === "disable_trading";
@@ -3577,6 +3531,11 @@ export async function handleSignalBotCommand(input: {
 
   if (!isAdmin && !isPublicMenuCommand && !isPersonalTradingCommand) {
     await input.sendMessage(buildPlainReply(chatId, "Not authorized."));
+    return true;
+  }
+
+  if (command === "cancel") {
+    await input.sendMessage(buildPlainReply(chatId, "Input cancelled."));
     return true;
   }
 
@@ -4004,7 +3963,7 @@ export async function handleSignalBotCommand(input: {
       chatId,
       marketRef,
       publicBrowseOnly: false,
-      telegramMessageId: input.message.message_id ?? null,
+      telegramMessageId: null,
       telegramUserId: input.message.from.id,
     }) ?? Promise.resolve(false));
     if (!sent) {
@@ -4226,6 +4185,7 @@ export async function pollSignalBotCommands(
           if (!didHandle) {
             didHandle = await handleSignalBotMenuInput({
               config: input.config,
+              completeTradeInput: input.completeTradeInput,
               db: input.db,
               message: update.message,
               redis: input.redis,

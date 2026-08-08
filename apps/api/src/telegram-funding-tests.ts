@@ -548,11 +548,14 @@ assert.equal(
 
 const defaultPolicy = getDefaultSignalBotPolicy();
 assert.equal(defaultPolicy.fundingReceiveEnabled, false);
+assert.equal(defaultPolicy.customTradeInputEnabled, false);
 const {
+  customTradeInputEnabled: _legacyMissingCustomTradeInputEnabled,
   fundingReceiveEnabled: _legacyMissingFundingReceiveEnabled,
   ...productionLegacyPolicyPayload
 } = defaultPolicy;
 assert.equal(_legacyMissingFundingReceiveEnabled, false);
+assert.equal(_legacyMissingCustomTradeInputEnabled, false);
 const productionLegacyPolicy = normalizeSignalBotPolicy({
   ...productionLegacyPolicyPayload,
   autoEnableOnTelegramLink: true,
@@ -563,6 +566,7 @@ const productionLegacyPolicy = normalizeSignalBotPolicy({
 assert.equal(productionLegacyPolicy.tradingEnabled, true);
 assert.equal(productionLegacyPolicy.autoEnableOnTelegramLink, true);
 assert.equal(productionLegacyPolicy.fundingReceiveEnabled, false);
+assert.equal(productionLegacyPolicy.customTradeInputEnabled, false);
 const receiveOnlyPolicy = normalizeSignalBotPolicy({
   ...defaultPolicy,
   fundingReceiveEnabled: true,

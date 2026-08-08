@@ -125,3 +125,73 @@ await test("Telegram funding API private-chat identity is fail-closed", () => {
       error.code === "private_chat_required",
   );
 });
+
+await test("Telegram custom trade input schemas accept identity and raw value only", () => {
+  const contextId = "123e4567-e89b-42d3-a456-426614174000";
+  assert.equal(
+    telegramBotTradingRouteTestHooks.internalTradeInputParamsSchema.safeParse({
+      id: contextId,
+    }).success,
+    true,
+  );
+  assert.equal(
+    telegramBotTradingRouteTestHooks.internalTradeInputBeginBodySchema.safeParse(
+      {
+        action: "sell",
+        chatId: "123",
+        telegramMessageId: 42,
+        telegramUserId: 123,
+      },
+    ).success,
+    true,
+  );
+  assert.equal(
+    telegramBotTradingRouteTestHooks.internalTradeInputCompleteBodySchema.safeParse(
+      {
+        appBaseUrl: "https://dev.hunch.trade",
+        chatId: "123",
+        telegramMessageId: 43,
+        telegramMiniAppEnabled: true,
+        telegramUserId: 123,
+        value: "25%",
+      },
+    ).success,
+    true,
+  );
+  for (const appBaseUrl of [undefined, "not-a-url"]) {
+    assert.equal(
+      telegramBotTradingRouteTestHooks.internalTradeInputCompleteBodySchema.safeParse(
+        {
+          ...(appBaseUrl === undefined ? {} : { appBaseUrl }),
+          chatId: "123",
+          telegramMessageId: 43,
+          telegramUserId: 123,
+          value: "25%",
+        },
+      ).success,
+      false,
+    );
+  }
+  for (const forbidden of [
+    { marketId: "market-1" },
+    { side: "YES" },
+    { venue: "polymarket" },
+    { walletAddress: "0x1111111111111111111111111111111111111111" },
+    { amountUsd: 10 },
+    { sharesRaw: "1000000" },
+  ]) {
+    assert.equal(
+      telegramBotTradingRouteTestHooks.internalTradeInputCompleteBodySchema.safeParse(
+        {
+          appBaseUrl: "https://dev.hunch.trade",
+          chatId: "123",
+          telegramMessageId: 43,
+          telegramUserId: 123,
+          value: "1",
+          ...forbidden,
+        },
+      ).success,
+      false,
+    );
+  }
+});

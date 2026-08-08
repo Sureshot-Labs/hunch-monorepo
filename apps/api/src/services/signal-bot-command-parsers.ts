@@ -1,4 +1,5 @@
 export type SignalBotCommand =
+  | "cancel"
   | "disable_signals"
   | "enable_signals"
   | "help"
@@ -67,6 +68,7 @@ export function parseSignalBotCommand(
     return null;
   }
   switch (command.toLowerCase()) {
+    case "cancel":
     case "disable_signals":
     case "enable_signals":
     case "help":

@@ -165,6 +165,7 @@ type SignalBotInteractiveMenuCallbackInput = {
     telegramUserId: number;
   }) => Promise<MenuMessage>;
   loadPositionCard?: (input: {
+    messageId: number;
     positionId: string;
     telegramUserId: number;
   }) => Promise<MenuMessage>;
@@ -286,19 +287,21 @@ async function deliverSignalBotInteractiveMenuCallback(
   if (route.kind === "position") {
     let positionMessage: MenuMessage;
     try {
-      positionMessage = input.loadPositionCard
-        ? await input.loadPositionCard({
-            positionId: route.positionId,
-            telegramUserId: input.telegramUserId,
-          })
-        : {
-            parse_mode: "MarkdownV2",
-            text: formatTelegramCalloutMarkdownV2({
-              bodyMarkdownV2: "Try again from My positions\\.",
-              icon: "⚠️",
-              title: "Position unavailable",
-            }),
-          };
+      positionMessage =
+        input.loadPositionCard && input.messageId != null
+          ? await input.loadPositionCard({
+              messageId: input.messageId,
+              positionId: route.positionId,
+              telegramUserId: input.telegramUserId,
+            })
+          : {
+              parse_mode: "MarkdownV2",
+              text: formatTelegramCalloutMarkdownV2({
+                bodyMarkdownV2: "Try again from My positions\\.",
+                icon: "⚠️",
+                title: "Position unavailable",
+              }),
+            };
     } catch {
       positionMessage = {
         parse_mode: "MarkdownV2",

@@ -277,7 +277,15 @@ export async function handleTelegramBotRewardsInput(
   },
 ): Promise<boolean> {
   const state = await readSignalBotMenuInput(input);
-  if (!state || state.kind === "awaiting_market_query") return false;
+  if (
+    !state ||
+    (state.kind !== "awaiting_rewards_code_attach" &&
+      state.kind !== "awaiting_rewards_code_change" &&
+      state.kind !== "confirming_rewards_code_attach" &&
+      state.kind !== "confirming_rewards_code_change")
+  ) {
+    return false;
+  }
 
   const action = state.kind.includes("change") ? "change" : "attach";
   const code = normalizeTelegramBotReferralCode(input.text);

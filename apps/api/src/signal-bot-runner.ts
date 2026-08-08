@@ -56,6 +56,7 @@ import {
   describeTelegramBotTradingInternalApiError,
 } from "./services/telegram-bot-trading-client.js";
 import { createTelegramAccountValueLoader } from "./services/telegram-account-value-menu.js";
+import { beginSignalBotTradeInput } from "./services/telegram-bot-trade-input.js";
 import { withTelegramPrivateNavigation } from "./services/telegram-bot-private-navigation.js";
 import { formatTelegramCalloutMarkdownV2 } from "./services/telegram-bot-trading-presentation.js";
 import { buildHunchMiniAppWebButton } from "./services/telegram-mini-app-buttons.js";
@@ -82,7 +83,8 @@ function logTradingInternalApiFailure(
     | "funding"
     | "position-card"
     | "positions"
-    | "status",
+    | "status"
+    | "trade-input",
   error: unknown,
 ): void {
   log("signal_bot_trading_internal_api_error", {
@@ -315,6 +317,20 @@ export async function runSignalBotRunner(): Promise<void> {
               telegram,
             }),
           loadAccountValue,
+          completeTradeInput: (input) =>
+            tradingInternalApi
+              ? tradingInternalApi
+                  .completeTradeInput({
+                    ...input,
+                    appBaseUrl: config.appBaseUrl,
+                  })
+                  .catch((error: unknown) => {
+                    logTradingInternalApiFailure("trade-input", error);
+                    throw error;
+                  })
+              : Promise.reject(
+                  new Error("Custom trade input API is unavailable"),
+                ),
           onAccountValueError: (error) =>
             logTradingInternalApiFailure("account-value", error),
           onFundingMenuDelivery: ({ action, outcome, retryAfterSec }) =>
@@ -418,11 +434,12 @@ export async function runSignalBotRunner(): Promise<void> {
               throw error;
             });
           },
-          loadPositionCard: ({ positionId, telegramUserId }) =>
+          loadPositionCard: ({ messageId, positionId, telegramUserId }) =>
             tradingInternalApi
               ? tradingInternalApi
                   .buildPositionMessage({
                     appBaseUrl: config.appBaseUrl,
+                    telegramMessageId: messageId,
                     positionId,
                     telegramMiniAppEnabled:
                       config.telegramMiniAppLinkBase != null,
@@ -577,6 +594,27 @@ export async function runSignalBotRunner(): Promise<void> {
                     answerCallbackQuery: (answer) =>
                       telegram.answerCallbackQuery(answer),
                     appBaseUrl: config.appBaseUrl,
+                    beginTradeInput: (begin) => {
+                      const chatId =
+                        callbackQuery.message?.chat?.id == null
+                          ? null
+                          : String(callbackQuery.message.chat.id);
+                      const telegramUserId = callbackQuery.from?.id;
+                      if (!chatId || !telegramUserId)
+                        return Promise.resolve(false);
+                      return beginSignalBotTradeInput({
+                        action: begin.action,
+                        chatId,
+                        contextId: begin.contextId,
+                        expiresAt: begin.expiresAt,
+                        menuMessageId:
+                          callbackQuery.message?.message_id ?? null,
+                        message: begin.message,
+                        redis,
+                        telegramUserId,
+                        transport: telegram,
+                      });
+                    },
                     callbackQuery,
                     editMessageText: (message) =>
                       telegram.editMessageText({

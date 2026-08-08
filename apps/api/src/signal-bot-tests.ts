@@ -105,6 +105,10 @@ import {
 import { normalizeSignalBotPolicy } from "./services/signal-bot-trading-policy.js";
 import { drainSignalBotFundingOpenTasks } from "./services/telegram-bot-menu-actions.js";
 import {
+  readSignalBotMenuInput,
+  writeSignalBotTradeMenuInput,
+} from "./services/telegram-bot-menu-state.js";
+import {
   buildTelegramActivityNotificationMessage,
   deliverTelegramNotificationOutbox,
   enqueueTelegramActivityNotifications,
@@ -536,6 +540,19 @@ function buildTestPolymarketReadiness(
   };
 }
 
+const TEST_TELEGRAM_ACCOUNT_LINK_ID = "00000000-0000-4000-8000-000000000099";
+const TEST_TELEGRAM_TRADE_AUTHORITY_RESULT = {
+  telegramAuthority: {
+    authorizationId: "authorization-1",
+    privyWalletId: "wallet-1",
+    telegramAccountLinkId: TEST_TELEGRAM_ACCOUNT_LINK_ID,
+    userId: "user-1",
+    version: 1,
+    walletAddress: "0x0000000000000000000000000000000000000001",
+    walletChain: "ethereum",
+  },
+};
+
 type ConfirmIntentUpdate = {
   errorCode: unknown;
   markSubmitStarted: boolean;
@@ -575,6 +592,7 @@ function createPolymarketConfirmDb(updates: ConfirmIntentUpdate[]) {
               telegram_user_id: "999",
               user_id: "user-1",
               authorization_id: "authorization-1",
+              result: TEST_TELEGRAM_TRADE_AUTHORITY_RESULT,
               chat_id: "999",
               telegram_message_id: null,
               action: "buy",
@@ -599,6 +617,7 @@ function createPolymarketConfirmDb(updates: ConfirmIntentUpdate[]) {
           rows: [
             {
               id: "authorization-1",
+              telegram_account_link_id: TEST_TELEGRAM_ACCOUNT_LINK_ID,
               user_id: "user-1",
               telegram_user_id: "999",
               privy_user_id: "privy-1",
@@ -3368,6 +3387,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
   {
     name: "trading command parser accepts private trading commands",
     run: () => {
+      assert.equal(parseSignalBotCommand("/cancel", null), "cancel");
       assert.equal(
         parseSignalBotCommand("/trade_status", null),
         "trade_status",
@@ -3378,6 +3398,46 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       );
       assert.equal(parseSignalBotCommand("/market", null), "market");
       assert.equal(parseSignalBotCommand("/test_trade", null), "test_trade");
+    },
+  },
+  {
+    name: "cancel command clears current menu input before any input parser",
+    run: async () => {
+      const redis = new FakeRedis();
+      const telegram = new FakeTelegram();
+      const state = await writeSignalBotTradeMenuInput({
+        action: "sell",
+        chatId: "999",
+        contextId: "3e5ba516-192c-4b0b-96ff-6683399def41",
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        menuMessageId: 12,
+        redis,
+        telegramUserId: 999,
+      });
+      assert.ok(state);
+      const handled = await handleSignalBotCommand({
+        config: parseSignalBotConfig({
+          HUNCH_SIGNAL_BOT_TOKEN: "token",
+        }),
+        message: {
+          chat: { id: 999, first_name: "Kreedle", type: "private" },
+          from: { id: 999 },
+          text: "/cancel",
+        },
+        redis,
+        sendMessage: (message) => telegram.sendMessage(message),
+        sendTestSignal: async () => false,
+      });
+      assert.equal(handled, true);
+      assert.equal(
+        await readSignalBotMenuInput({
+          chatId: "999",
+          redis,
+          telegramUserId: 999,
+        }),
+        null,
+      );
+      assert.match(telegram.messages[0]?.text ?? "", /Input cancelled/);
     },
   },
   {
@@ -3526,13 +3586,60 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         await client.buildPositionMessage({
           appBaseUrl: "https://app.hunch.trade",
           positionId: "00000000-0000-4000-8000-000000000001",
+          telegramMessageId: 42,
           telegramMiniAppEnabled: true,
           telegramUserId: 999,
         });
         assert.deepEqual(requestBody, {
           appBaseUrl: "https://app.hunch.trade",
+          telegramMessageId: 42,
           telegramMiniAppEnabled: true,
           telegramUserId: 999,
+        });
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    },
+  },
+  {
+    name: "internal trading client preserves Mini App mode for custom completion",
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      let requestBody: Record<string, unknown> | null = null;
+      globalThis.fetch = (async (_input, init) => {
+        requestBody = JSON.parse(String(init?.body ?? "{}")) as Record<
+          string,
+          unknown
+        >;
+        return new Response(
+          JSON.stringify({ completed: true, message: { text: "Confirm" } }),
+          {
+            headers: { "Content-Type": "application/json" },
+            status: 200,
+          },
+        );
+      }) as typeof fetch;
+      try {
+        const client = createTelegramBotTradingInternalApiClient({
+          baseUrl: "https://api.hunch.trade",
+          token: "token",
+        });
+        await client.completeTradeInput({
+          appBaseUrl: "https://dev.hunch.trade",
+          chatId: "999",
+          contextId: "00000000-0000-4000-8000-000000000001",
+          telegramMessageId: 43,
+          telegramMiniAppEnabled: true,
+          telegramUserId: 999,
+          value: "all",
+        });
+        assert.deepEqual(requestBody, {
+          appBaseUrl: "https://dev.hunch.trade",
+          chatId: "999",
+          telegramMessageId: 43,
+          telegramMiniAppEnabled: true,
+          telegramUserId: 999,
+          value: "all",
         });
       } finally {
         globalThis.fetch = originalFetch;
@@ -3695,7 +3802,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         chatId: "999",
         marketRef: "polymarket:market-1",
         publicBrowseOnly: false,
-        telegramMessageId: 12,
+        telegramMessageId: null,
         telegramUserId: 123,
       });
       assert.equal(telegram.messages.length, 0);
@@ -3825,6 +3932,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
               rows: [
                 {
                   id: "authorization-1",
+                  telegram_account_link_id: TEST_TELEGRAM_ACCOUNT_LINK_ID,
                   user_id: "user-1",
                   telegram_user_id: "999",
                   privy_user_id: "privy-1",
@@ -3971,6 +4079,14 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       let telegramTradingEnabled = true;
       let autoManagedMaxAmountUsd = 1;
       let buyAmountPresetsUsd = [10, 25];
+      let customTradeInputEnabled = false;
+      let policyTradingEnabled = true;
+      let tradingActions: Array<"buy" | "sell"> = ["buy"];
+      let tradingVenues = ["polymarket"];
+      const readinessRequests: Array<{
+        action: unknown;
+        target: unknown;
+      }> = [];
       const db = {
         query: async (sql: string) => {
           if (/from runtime_policies/i.test(sql)) {
@@ -3980,9 +4096,10 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
                 {
                   payload: {
                     autoManagedMaxAmountUsd,
-                    tradingEnabled: true,
-                    tradingActions: ["buy"],
-                    tradingVenues: ["polymarket"],
+                    customTradeInputEnabled,
+                    tradingEnabled: policyTradingEnabled,
+                    tradingActions,
+                    tradingVenues,
                     buyAmountPresetsUsd,
                     maxTradeAmountUsd: 50,
                     maxSlippageBps: 500,
@@ -4023,6 +4140,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
               rows: [
                 {
                   id: "authorization-1",
+                  telegram_account_link_id: TEST_TELEGRAM_ACCOUNT_LINK_ID,
                   user_id: "user-1",
                   telegram_user_id: "999",
                   privy_user_id: "privy-1",
@@ -4081,8 +4199,18 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         trading: {
           quote: async ({ intent }: { intent: TradeIntent }) =>
             buildTestTelegramQuote(intent),
-          getReadiness: async () =>
-            readinessMode === "disabled"
+          getReadiness: async (readinessInput: {
+            action: unknown;
+            target: unknown;
+          }) => {
+            readinessRequests.push({
+              action: readinessInput.action,
+              target: readinessInput.target,
+            });
+            if (readinessInput.action === "SELL") {
+              throw new Error("unexpected SELL readiness");
+            }
+            return readinessMode === "disabled"
               ? buildTestPolymarketReadiness({
                   code: "unsupported_capability",
                   message: "Direct bot trading is disabled for this venue.",
@@ -4092,9 +4220,22 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
                   message: "Polymarket setup approvals are missing.",
                   repairKind: "auto",
                   sideEffect: "approval",
-                }),
+                });
+          },
         } as never,
       });
+      assert.equal(
+        readinessRequests.some(
+          (request) => request.action === "BUY" && request.target != null,
+        ),
+        true,
+      );
+      assert.equal(
+        readinessRequests.some(
+          (request) => request.action === "SELL" && request.target == null,
+        ),
+        false,
+      );
       assert.equal(insertCount, 0);
       assert.match(message.text, /Direct bot trading is disabled/);
       const buttons = message.reply_markup?.inline_keyboard.flat() ?? [];
@@ -4106,6 +4247,90 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         buttons.some((button) => "web_app" in button),
         true,
       );
+
+      tradingActions = ["sell"];
+      readinessRequests.length = 0;
+      await buildTelegramBotTradingMarketMessage({
+        appBaseUrl: "https://app.hunch.trade",
+        chatId: "999",
+        db: db as never,
+        marketRef: "market-1",
+        signerInspector: readyTelegramSignerInspector,
+        telegramMiniAppEnabled: true,
+        telegramUserId: 999,
+        trading: {
+          getReadiness: async (readinessInput: {
+            action: unknown;
+            target: unknown;
+          }) => {
+            readinessRequests.push({
+              action: readinessInput.action,
+              target: readinessInput.target,
+            });
+            return buildTestPolymarketReadiness({
+              code: "unsupported_capability",
+              message: "Direct bot trading is disabled for this venue.",
+            });
+          },
+        } as never,
+      });
+      assert.equal(
+        readinessRequests.filter((request) => request.action === "SELL").length,
+        1,
+      );
+
+      policyTradingEnabled = false;
+      readinessRequests.length = 0;
+      await buildTelegramBotTradingMarketMessage({
+        appBaseUrl: "https://app.hunch.trade",
+        chatId: "999",
+        db: db as never,
+        marketRef: "market-1",
+        signerInspector: readyTelegramSignerInspector,
+        telegramMiniAppEnabled: true,
+        telegramUserId: 999,
+        trading: {
+          getReadiness: async (readinessInput: { action: unknown }) => {
+            readinessRequests.push({
+              action: readinessInput.action,
+              target: null,
+            });
+            return buildTestPolymarketReadiness({ executable: true });
+          },
+        } as never,
+      });
+      assert.equal(
+        readinessRequests.some((request) => request.action === "SELL"),
+        false,
+      );
+
+      policyTradingEnabled = true;
+      tradingVenues = [];
+      readinessRequests.length = 0;
+      await buildTelegramBotTradingMarketMessage({
+        appBaseUrl: "https://app.hunch.trade",
+        chatId: "999",
+        db: db as never,
+        marketRef: "market-1",
+        signerInspector: readyTelegramSignerInspector,
+        telegramMiniAppEnabled: true,
+        telegramUserId: 999,
+        trading: {
+          getReadiness: async (readinessInput: { action: unknown }) => {
+            readinessRequests.push({
+              action: readinessInput.action,
+              target: null,
+            });
+            return buildTestPolymarketReadiness({ executable: true });
+          },
+        } as never,
+      });
+      assert.equal(
+        readinessRequests.some((request) => request.action === "SELL"),
+        false,
+      );
+      tradingActions = ["buy"];
+      tradingVenues = ["polymarket"];
 
       telegramTradingEnabled = false;
       marketVenue = "limitless";
@@ -4193,6 +4418,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
 
       autoManagedMaxAmountUsd = 20;
       buyAmountPresetsUsd = [10, 1, 25, 5];
+      customTradeInputEnabled = true;
+      const customContexts: Array<{ action: string; side: string }> = [];
       const multiPresetMessage = await buildTelegramBotTradingMarketMessage({
         appBaseUrl: "https://app.hunch.trade",
         chatId: "999",
@@ -4207,6 +4434,10 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           getReadiness: async () =>
             buildTestPolymarketReadiness({ executable: true }),
         } as never,
+        writeTradeInputContext: async (context) => {
+          customContexts.push({ action: context.action, side: context.side });
+          return true;
+        },
       });
       const multiPresetBuyButtons = (
         multiPresetMessage.reply_markup?.inline_keyboard.flat() ?? []
@@ -4231,9 +4462,33 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         multiPresetBuyRows.map((row) => row.length),
         [3, 3],
       );
+      assert.deepEqual(customContexts, [
+        { action: "buy", side: "YES" },
+        { action: "buy", side: "NO" },
+      ]);
+      const customButtons = (
+        multiPresetMessage.reply_markup?.inline_keyboard.flat() ?? []
+      ).filter(
+        (button) =>
+          "callback_data" in button &&
+          button.callback_data?.startsWith("hbt:buy_input:"),
+      );
+      assert.deepEqual(
+        customButtons.map((button) => button.text),
+        ["Custom · YES", "Custom · NO"],
+      );
+      assert.equal(
+        customButtons.every(
+          (button) =>
+            "callback_data" in button &&
+            Buffer.byteLength(button.callback_data ?? "", "utf8") < 64,
+        ),
+        true,
+      );
       assert.equal(insertCount, 8);
       assert.match(multiPresetMessage.text, /Choose side and amount to spend/);
       assert.doesNotMatch(multiPresetMessage.text, /\$25 ·/);
+      customTradeInputEnabled = false;
 
       const partiallyUnavailableMessage =
         await buildTelegramBotTradingMarketMessage({
@@ -5680,7 +5935,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
                   id: "00000000-0000-4000-8000-000000000001",
                   telegram_user_id: "999",
                   user_id: "user-1",
-                  authorization_id: null,
+                  authorization_id: "authorization-1",
                   chat_id: "999",
                   telegram_message_id: null,
                   action: "buy",
@@ -5692,6 +5947,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
                   status: "draft",
                   quote_snapshot: {},
                   policy_snapshot: {},
+                  result: TEST_TELEGRAM_TRADE_AUTHORITY_RESULT,
                   expires_at: new Date(Date.now() + 60_000),
                   market_title: "Market",
                   market_status: "ACTIVE",
@@ -5705,6 +5961,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
               rows: [
                 {
                   id: "authorization-1",
+                  telegram_account_link_id: TEST_TELEGRAM_ACCOUNT_LINK_ID,
                   user_id: "user-1",
                   telegram_user_id: "999",
                   privy_user_id: "privy-1",
@@ -7103,8 +7360,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
                 {
                   id: "00000000-0000-4000-8000-000000000001",
                   telegram_user_id: "999",
-                  user_id: null,
-                  authorization_id: null,
+                  user_id: "user-1",
+                  authorization_id: "authorization-1",
                   chat_id: "999",
                   telegram_message_id: null,
                   action: "buy",
@@ -7119,6 +7376,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
                   submit_started_at: null,
                   quote_snapshot: {},
                   policy_snapshot: {},
+                  result: TEST_TELEGRAM_TRADE_AUTHORITY_RESULT,
                   expires_at: new Date(Date.now() + 60_000),
                   market_title: "Market",
                   market_status: "ACTIVE",
@@ -7262,8 +7520,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
                 {
                   id: "00000000-0000-4000-8000-000000000001",
                   telegram_user_id: "999",
-                  user_id: null,
-                  authorization_id: null,
+                  user_id: "user-1",
+                  authorization_id: "authorization-1",
                   chat_id: "999",
                   telegram_message_id: null,
                   action: "buy",
@@ -7275,6 +7533,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
                   status: "draft",
                   quote_snapshot: {},
                   policy_snapshot: {},
+                  result: TEST_TELEGRAM_TRADE_AUTHORITY_RESULT,
                   expires_at: new Date(Date.now() + 60_000),
                   market_title: "Market",
                   market_status: "ACTIVE",
@@ -7288,12 +7547,13 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
               rows: [
                 {
                   id: "authorization-1",
+                  telegram_account_link_id: TEST_TELEGRAM_ACCOUNT_LINK_ID,
                   user_id: "user-1",
                   telegram_user_id: "999",
                   privy_user_id: "privy-1",
                   wallet_address: "0x0000000000000000000000000000000000000001",
                   wallet_chain: "ethereum",
-                  privy_wallet_id: null,
+                  privy_wallet_id: "wallet-1",
                   enabled: true,
                   enabled_venues: ["polymarket"],
                   max_amount_usd: "5",
@@ -7381,8 +7641,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
                 {
                   id: "00000000-0000-4000-8000-000000000001",
                   telegram_user_id: "999",
-                  user_id: null,
-                  authorization_id: null,
+                  user_id: "user-1",
+                  authorization_id: "authorization-1",
                   chat_id: "999",
                   telegram_message_id: null,
                   action: "buy",
@@ -7394,6 +7654,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
                   status: "draft",
                   quote_snapshot: {},
                   policy_snapshot: {},
+                  result: TEST_TELEGRAM_TRADE_AUTHORITY_RESULT,
                   expires_at: new Date(Date.now() + 60_000),
                   market_title: "Market",
                   market_status: "ACTIVE",
@@ -7409,6 +7670,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
                   id: "authorization-1",
                   user_id: "user-1",
                   telegram_user_id: "999",
+                  telegram_account_link_id: TEST_TELEGRAM_ACCOUNT_LINK_ID,
                   privy_user_id: "privy-1",
                   wallet_address: "0x0000000000000000000000000000000000000001",
                   wallet_chain: "ethereum",
@@ -7536,6 +7798,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
                   status: "confirming",
                   quote_snapshot: {},
                   policy_snapshot: {},
+                  result: TEST_TELEGRAM_TRADE_AUTHORITY_RESULT,
                   expires_at: new Date(Date.now() + 60_000),
                   market_title: "Market",
                   market_status: "ACTIVE",
@@ -7551,6 +7814,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
                   id: "authorization-1",
                   user_id: "user-1",
                   telegram_user_id: "999",
+                  telegram_account_link_id: TEST_TELEGRAM_ACCOUNT_LINK_ID,
                   privy_user_id: "privy-1",
                   wallet_address: "0x0000000000000000000000000000000000000001",
                   wallet_chain: "ethereum",
@@ -7780,6 +8044,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
                   status: "confirming",
                   quote_snapshot: {},
                   policy_snapshot: {},
+                  result: TEST_TELEGRAM_TRADE_AUTHORITY_RESULT,
                   expires_at: new Date(Date.now() + 60_000),
                   market_title: "Market",
                   market_status: "ACTIVE",
@@ -7795,6 +8060,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
                   id: "authorization-1",
                   user_id: "user-1",
                   telegram_user_id: "999",
+                  telegram_account_link_id: TEST_TELEGRAM_ACCOUNT_LINK_ID,
                   privy_user_id: "privy-1",
                   wallet_address: "0x0000000000000000000000000000000000000001",
                   wallet_chain: "ethereum",
@@ -7963,6 +8229,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
                   status: "confirming",
                   quote_snapshot: {},
                   policy_snapshot: {},
+                  result: TEST_TELEGRAM_TRADE_AUTHORITY_RESULT,
                   expires_at: new Date(Date.now() + 60_000),
                   market_title: "Market",
                   market_status: "ACTIVE",
@@ -7978,6 +8245,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
                   id: "authorization-1",
                   user_id: "user-1",
                   telegram_user_id: "999",
+                  telegram_account_link_id: TEST_TELEGRAM_ACCOUNT_LINK_ID,
                   privy_user_id: "privy-1",
                   wallet_address: "0x0000000000000000000000000000000000000001",
                   wallet_chain: "ethereum",
@@ -8178,6 +8446,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
                   status: "confirming",
                   quote_snapshot: {},
                   policy_snapshot: {},
+                  result: TEST_TELEGRAM_TRADE_AUTHORITY_RESULT,
                   expires_at: new Date(Date.now() + 60_000),
                   market_title: "Market",
                   market_status: "ACTIVE",
@@ -8193,6 +8462,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
                   id: "authorization-1",
                   user_id: "user-1",
                   telegram_user_id: "999",
+                  telegram_account_link_id: TEST_TELEGRAM_ACCOUNT_LINK_ID,
                   privy_user_id: "privy-1",
                   wallet_address: "0x0000000000000000000000000000000000000001",
                   wallet_chain: "ethereum",
@@ -8637,6 +8907,13 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
                   status: "confirming",
                   quote_snapshot: {},
                   policy_snapshot: {},
+                  result: {
+                    telegramAuthority: {
+                      ...TEST_TELEGRAM_TRADE_AUTHORITY_RESULT.telegramAuthority,
+                      walletAddress: "11111111111111111111111111111111",
+                      walletChain: "solana",
+                    },
+                  },
                   expires_at: new Date(Date.now() + 60_000),
                   market_title: "Market",
                   market_status: "ACTIVE",
@@ -8652,6 +8929,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
                   id: "authorization-1",
                   user_id: "user-1",
                   telegram_user_id: "999",
+                  telegram_account_link_id: TEST_TELEGRAM_ACCOUNT_LINK_ID,
                   privy_user_id: "privy-1",
                   wallet_address: "11111111111111111111111111111111",
                   wallet_chain: "solana",
@@ -8833,6 +9111,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
                   status: "confirming",
                   quote_snapshot: {},
                   policy_snapshot: {},
+                  result: TEST_TELEGRAM_TRADE_AUTHORITY_RESULT,
                   expires_at: new Date(Date.now() + 60_000),
                   market_title: "Market",
                   market_status: "ACTIVE",
@@ -8848,6 +9127,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
                   id: "authorization-1",
                   user_id: "user-1",
                   telegram_user_id: "999",
+                  telegram_account_link_id: TEST_TELEGRAM_ACCOUNT_LINK_ID,
                   privy_user_id: "privy-1",
                   wallet_address: "0x0000000000000000000000000000000000000001",
                   wallet_chain: "ethereum",
@@ -9151,6 +9431,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       const intent = telegramBotTradingTestHooks.buildTelegramSellTradeIntent({
         authorization: {
           id: "authorization-1",
+          telegram_account_link_id: "00000000-0000-4000-8000-000000000099",
           user_id: "user-1",
           telegram_user_id: "999",
           privy_user_id: "privy-1",
@@ -9288,6 +9569,17 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           "https://t.me/hunch_bot/hunch",
         HUNCH_SIGNAL_BOT_TOKEN: "token",
       });
+      assert.ok(
+        await writeSignalBotTradeMenuInput({
+          action: "buy",
+          chatId: "999",
+          contextId: "3e5ba516-192c-4b0b-96ff-6683399def41",
+          expiresAt: new Date(Date.now() + 120_000).toISOString(),
+          menuMessageId: 50,
+          redis,
+          telegramUserId: 999,
+        }),
+      );
       const handled = await handleSignalBotMenuCallback({
         callbackQuery: {
           data: "hm:v1:trading",
@@ -9327,6 +9619,14 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         true,
       );
       assert.equal(telegram.messages.length, 0);
+      assert.equal(
+        await readSignalBotMenuInput({
+          chatId: "999",
+          redis,
+          telegramUserId: 999,
+        }),
+        null,
+      );
     },
   },
   {
@@ -16087,7 +16387,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
-    name: "Telegram venue minimum predicate blocks SELL, limit, and non-Polymarket orders",
+    name: "Telegram venue minimum predicate treats Polymarket FOK minimum as informational for BUY and SELL",
     run: () => {
       const predicate =
         telegramBotTradingTestHooks.isTelegramVenueMinimumBlocking;
@@ -16105,6 +16405,15 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           action: "SELL",
           meetsVenueMinimum: false,
           orderType: "FOK",
+          venue: "polymarket",
+        }),
+        false,
+      );
+      assert.equal(
+        predicate({
+          action: "SELL",
+          meetsVenueMinimum: false,
+          orderType: "GTC",
           venue: "polymarket",
         }),
         true,

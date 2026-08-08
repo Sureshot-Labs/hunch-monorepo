@@ -10,6 +10,7 @@ export type SignalBotPolicy = {
   autoEnableOnTelegramLink: boolean;
   autoManagedMaxAmountUsd: number;
   autoManagedVenues: SignalBotTradingVenue[];
+  customTradeInputEnabled: boolean;
   fundingReceiveEnabled: boolean;
   tradingEnabled: boolean;
   tradingActions: SignalBotTradingAction[];
@@ -45,6 +46,7 @@ export const signalBotSchema = z
     autoEnableOnTelegramLink: strictBoolean,
     autoManagedMaxAmountUsd: positiveInt.max(100_000),
     autoManagedVenues: z.array(signalBotTradingVenueSchema).max(8),
+    customTradeInputEnabled: strictBoolean,
     fundingReceiveEnabled: strictBoolean,
     tradingEnabled: strictBoolean,
     tradingActions: z.array(signalBotTradingActionSchema).max(8),
@@ -89,6 +91,7 @@ export function getDefaultSignalBotPolicy(): SignalBotPolicy {
     autoEnableOnTelegramLink: false,
     autoManagedMaxAmountUsd: 1,
     autoManagedVenues: ["polymarket"],
+    customTradeInputEnabled: false,
     fundingReceiveEnabled: false,
     tradingEnabled: false,
     tradingActions: ["buy"],
@@ -116,6 +119,7 @@ export function normalizeSignalBotPolicy(
     | "autoEnableOnTelegramLink"
     | "autoManagedMaxAmountUsd"
     | "autoManagedVenues"
+    | "customTradeInputEnabled"
     | "fundingReceiveEnabled"
   > &
     Partial<
@@ -124,6 +128,7 @@ export function normalizeSignalBotPolicy(
         | "autoEnableOnTelegramLink"
         | "autoManagedMaxAmountUsd"
         | "autoManagedVenues"
+        | "customTradeInputEnabled"
         | "fundingReceiveEnabled"
       >
     >,
@@ -170,6 +175,7 @@ export function normalizeSignalBotPolicy(
         ),
       ),
     ),
+    customTradeInputEnabled: Boolean(policy.customTradeInputEnabled ?? false),
     fundingReceiveEnabled: Boolean(policy.fundingReceiveEnabled ?? false),
     tradingEnabled: Boolean(policy.tradingEnabled),
     tradingActions,
