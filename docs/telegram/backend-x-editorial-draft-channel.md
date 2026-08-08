@@ -361,11 +361,24 @@ The model is not the publication authority. Validate before Telegram send:
 If parsing or validation fails, one constrained repair call is made inside the
 composer. A second schema/contract failure is classified as `schema_mismatch`,
 not as editorial `blocked`. A provider response without `message.content` is
-classified as `missing_content`. Both are retryable before Telegram delivery,
-with at most three composer attempts across worker ticks. Only an explicit,
-valid model response with `status=blocked` is a terminal `model_blocked`
-content decision. Do not substitute the short holder-research summary or normal
-Telegram renderer.
+classified as `missing_content`.
+
+The composer is the preferred writer, but it is not allowed to make the
+editorial channel silently lose an already quality-gated signal. After the
+composer's constrained repair call, `schema_mismatch`, `missing_content`,
+`provider_error`, and a valid `status=blocked` all switch to a deterministic
+editorial fallback. Initial/update fallback copy uses the already accepted
+holder-research headline and narrative; follow-through/resolution fallback copy
+uses only the computed side, price move, wallet activity, flow, holding count,
+and PnL facts. It is still sent through the same code-block presentation and
+normal Telegram delivery ledger. It never falls back to the normal Telegram
+signal card, keyboard, or trading CTA.
+
+X editorial drafts also do not apply the normal ten-minute executable-quote
+freshness gate. They retain the validated signal-time price snapshot as an
+editorial fact because the manager publishes manually; identity and side
+matching remain mandatory. Execution-facing Telegram signals continue to use
+the freshness guard unchanged.
 
 ### Generate once and reuse on retry
 
@@ -384,15 +397,22 @@ Persisted metrics shape:
     "version": 1,
     "attemptCount": 1,
     "maxAttempts": 3,
-    "outcome": "ready",
+    "outcome": "schema_mismatch",
     "outcomes": {
-      "schema_mismatch": 0,
+      "schema_mismatch": 1,
       "missing_content": 0,
       "model_blocked": 0,
       "provider_error": 0
     },
+    "fallbackUsed": true,
     "retryable": false,
     "terminal": false
+  },
+  "editorialFallbackV1": {
+    "version": 1,
+    "used": true,
+    "reason": "schema_mismatch",
+    "issues": ["formatting.0.text: expected string"]
   },
   "editorialDraftV1": {
     "version": 1,
@@ -404,13 +424,27 @@ Persisted metrics shape:
 }
 ```
 
-For pre-delivery technical failures the same metrics object records
-`outcome=schema_mismatch` or `outcome=missing_content`, increments the matching
-counter, and remains `status=compose_failed` while retryable. On the third
-failed composer attempt it becomes a terminal technical `skipped` row and the
-cursor may advance. An explicit content block records `outcome=model_blocked`
-and a blocked draft. Follow-through selection excludes terminal composer rows,
-so they do not reappear after the normal follow-through cooldown.
+For a composer failure the same metrics object records the exact outcome,
+increments its counter, sets `fallbackUsed=true`, and stores
+`editorialFallbackV1` with the bounded error/issues metadata. The generated
+fallback is a ready draft, so the row proceeds to Telegram reservation/send
+instead of becoming a terminal technical skip. A structured warning includes
+`chatId`, `noteId`, `messageKind`, and the failure reason without logging the
+post body.
+
+Legacy X follow-through rows that already became terminal `skipped` because of
+`schema_mismatch`, `missing_content`, `provider_error`, or `model_blocked` are
+recoverable after the normal follow-through cooldown. The X publisher replaces
+only that unsent row with an audited fallback reservation; rows with a Telegram
+message ID, ambiguous delivery, or an ordinary content/policy skip remain
+terminal. This allows rollout of the fix to recover a recently lost X
+follow-through without duplicating a successful post.
+
+The initial/update publisher performs the equivalent narrow recovery lookup for
+one unsent legacy X composer skip per tick. Recovery notes are loaded by exact
+`note_id` after the normal cursor batch and never move the Redis cursor
+backwards. Once delivery succeeds, the same ledger row has `status=sent` and is
+no longer eligible.
 
 On success, update the same row to `status: sent` and retain the exact draft.
 On a known Telegram failure, retain it as `retry`; the next attempt reuses the
@@ -456,12 +490,13 @@ The profile branch must exist in both publishers:
   `resolved_loss`.
 
 X follow-through drafts are standalone and must not require a Telegram message
-ID from the initial X draft. The candidate query may use a terminal/skipped
+ID from the initial X draft. For rows created before fail-open fallback was
+introduced, the candidate query may still use a terminal/skipped
 `x_editorial_draft_v1` initial delivery row with `telegram_message_id=null` as
 its root. This lets a later material follow-through become a valid editorial
-story even when the original X composition failed or the model explicitly
-blocked it. Nonterminal `compose_failed` roots remain excluded until their own
-initial retry lifecycle finishes.
+story even when the historical initial X composition failed. New composer
+failures produce a delivered fallback instead of creating another terminal
+composition row.
 
 Preferred implementation is one composer with story-family-specific fact
 packets and prompts for all five kinds. If initial rollout intentionally covers
@@ -601,6 +636,7 @@ Manual QA before production:
 Useful rollout metrics can be stored/read from existing JSONB and logs:
 
 - drafts attempted, ready, blocked, repaired, sent, and retried;
+- deterministic fallbacks by reason and message kind;
 - block reason and validation rule;
 - model latency, token use, and cost;
 - prompt/policy revision;
@@ -635,7 +671,10 @@ Useful rollout metrics can be stored/read from existing JSONB and logs:
   links, or operational metadata inside the copied block;
 - the manager, not Hunch, performs the X publish action;
 - normal channels are unchanged;
-- unsafe or unverifiable copy fails closed;
+- model copy remains strictly validated; a rejected model draft can only fall
+  back to facts already accepted by the holder-research publication gate;
+- composer/provider failure cannot silently advance the channel cursor without
+  a draft;
 - retries are stable and do not spend a new model call or change the text;
 - no normal follow-through card can leak into the editorial channel;
 - all profile, prompt, fact, validation, and delivery versions are auditable in

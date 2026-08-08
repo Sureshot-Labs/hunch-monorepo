@@ -1501,7 +1501,8 @@ class FakeFollowthroughDb {
         const canUpdate = nonDeliveryState
           ? existingDeliveryState?.version == null &&
             ["compose_failed", "skipped"].includes(existingStatus)
-          : existingStatus === "retry";
+          : existingStatus === "retry" ||
+            (params[11] === true && existingStatus === "skipped");
         if (existing && !canUpdate) {
           return {
             command: "INSERT",
@@ -14545,7 +14546,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
-    name: "X composer contract failures retry three times then become terminal",
+    name: "X composer contract failure sends an audited editorial fallback",
     run: async () => {
       const redis = new FakeRedis();
       await enableFollowthroughTestChat(redis);
@@ -14569,19 +14570,13 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       ];
       db.flowRows = [followthroughFlowRow({ baseline_shares: "0" })];
       const telegram = new FakeTelegram();
-      const failureCodes = [
-        "schema_mismatch",
-        "missing_content",
-        "schema_mismatch",
-      ] as const;
       let composeCalls = 0;
       const composer: XEditorialDraftComposer = async () => {
-        const code = failureCodes[composeCalls] ?? "schema_mismatch";
         composeCalls += 1;
         throw new XEditorialComposerError({
-          code,
-          issues: code === "schema_mismatch" ? ["formatting.0.text"] : [],
-          message: code,
+          code: "schema_mismatch",
+          issues: ["formatting.0.text"],
+          message: "schema_mismatch",
         });
       };
       const config = parseSignalBotConfig({
@@ -14598,33 +14593,41 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           xEditorialComposer: composer,
         });
 
-      await tick("2026-01-02T01:00:00.000Z");
-      await tick("2026-01-02T01:16:00.000Z");
-      await tick("2026-01-02T01:32:00.000Z");
-      await tick("2026-01-02T02:00:00.000Z");
+      const result = await tick("2026-01-02T01:00:00.000Z");
 
-      assert.equal(composeCalls, 3);
-      assert.equal(telegram.messages.length, 0);
+      assert.equal(result.sent, 1);
+      assert.equal(composeCalls, 1);
+      assert.equal(telegram.messages.length, 1);
+      assert.match(telegram.messages[0]?.text ?? "", /^```\n/);
+      assert.match(telegram.messages[0]?.text ?? "", /Tracked wallets/);
       const stored = [...db.messageRows.values()][0];
       const metrics = stored?.metrics as
         | {
             editorialComposerV1?: {
               attemptCount?: unknown;
+              fallbackUsed?: unknown;
               outcome?: unknown;
               outcomes?: Record<string, unknown>;
               retryable?: unknown;
               terminal?: unknown;
             };
+            editorialFallbackV1?: {
+              reason?: unknown;
+              used?: unknown;
+            };
             status?: unknown;
           }
         | undefined;
-      assert.equal(metrics?.status, "skipped");
-      assert.equal(metrics?.editorialComposerV1?.attemptCount, 3);
+      assert.equal(metrics?.status, "sent");
+      assert.equal(metrics?.editorialComposerV1?.attemptCount, 1);
       assert.equal(metrics?.editorialComposerV1?.outcome, "schema_mismatch");
-      assert.equal(metrics?.editorialComposerV1?.outcomes?.schema_mismatch, 2);
-      assert.equal(metrics?.editorialComposerV1?.outcomes?.missing_content, 1);
+      assert.equal(metrics?.editorialComposerV1?.outcomes?.schema_mismatch, 1);
+      assert.equal(metrics?.editorialComposerV1?.outcomes?.missing_content, 0);
+      assert.equal(metrics?.editorialComposerV1?.fallbackUsed, true);
       assert.equal(metrics?.editorialComposerV1?.retryable, false);
-      assert.equal(metrics?.editorialComposerV1?.terminal, true);
+      assert.equal(metrics?.editorialComposerV1?.terminal, false);
+      assert.equal(metrics?.editorialFallbackV1?.reason, "schema_mismatch");
+      assert.equal(metrics?.editorialFallbackV1?.used, true);
       assert.ok(
         db.queries.some((query) =>
           query.sql.includes("{editorialComposerV1,terminal}"),
@@ -14633,7 +14636,106 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
-    name: "an explicit X model block is terminal and measured separately",
+    name: "X followthrough recovers a terminal composer skip from the previous release",
+    run: async () => {
+      const redis = new FakeRedis();
+      await enableFollowthroughTestChat(redis);
+      await updateSignalBotContentProfile({
+        chatId: "-100",
+        contentProfile: "x_editorial_draft_v1",
+        redis,
+      });
+      const db = new FakeFollowthroughDb();
+      db.runtimePayload = {
+        signalBotFollowthroughEnabled: true,
+        signalBotFollowthroughMinJoinedOrAdded: 1,
+        signalBotFollowthroughMinNetFlowUsd: 100_000,
+        signalBotFollowthroughMinPriceMoveCents: 100,
+        signalBotFollowthroughTypes: ["stats"],
+      };
+      db.candidateRows = [
+        followthroughCandidateRow({
+          root_metrics: { contentProfile: "x_editorial_draft_v1" },
+        }),
+      ];
+      db.flowRows = [followthroughFlowRow({ baseline_shares: "0" })];
+      const key =
+        "-100|00000000-0000-4000-8000-000000000101|followthrough_stats";
+      db.messageRows.set(key, {
+        id: "00000000-0000-4000-8000-000000000099",
+        messageId: null,
+        metrics: {
+          contentProfile: "x_editorial_draft_v1",
+          editorialComposerV1: {
+            attemptCount: 3,
+            maxAttempts: 3,
+            outcome: "missing_content",
+            outcomes: {
+              missing_content: 3,
+              model_blocked: 0,
+              provider_error: 0,
+              schema_mismatch: 0,
+            },
+            retryable: false,
+            terminal: true,
+            version: 1,
+          },
+          status: "skipped",
+        },
+      });
+      let composeCalls = 0;
+      const telegram = new FakeTelegram();
+
+      const result = await publishSignalBotFollowthroughTick({
+        config: parseSignalBotConfig({
+          HUNCH_SIGNAL_BOT_TOKEN: "token",
+          HUNCH_SIGNAL_BOT_X_EDITORIAL_ENABLED: "true",
+        }),
+        db,
+        now: new Date("2026-01-02T02:00:00.000Z"),
+        redis,
+        telegram,
+        xEditorialComposer: async () => {
+          composeCalls += 1;
+          throw new Error("the historical terminal row must use fallback");
+        },
+      });
+
+      assert.equal(result.sent, 1);
+      assert.equal(composeCalls, 0);
+      assert.equal(telegram.messages.length, 1);
+      const metrics = db.messageRows.get(key)?.metrics as
+        | {
+            editorialComposerV1?: {
+              fallbackUsed?: unknown;
+              outcome?: unknown;
+              terminal?: unknown;
+            };
+            editorialFallbackV1?: {
+              reason?: unknown;
+              recoveredTerminalSkip?: unknown;
+            };
+            status?: unknown;
+          }
+        | undefined;
+      assert.equal(metrics?.status, "sent");
+      assert.equal(metrics?.editorialComposerV1?.fallbackUsed, true);
+      assert.equal(metrics?.editorialComposerV1?.outcome, "missing_content");
+      assert.equal(metrics?.editorialComposerV1?.terminal, false);
+      assert.equal(metrics?.editorialFallbackV1?.reason, "missing_content");
+      assert.equal(metrics?.editorialFallbackV1?.recoveredTerminalSkip, true);
+      const candidateSql =
+        db.queries.find((query) =>
+          query.sql.includes("from signal_bot_messages root"),
+        )?.sql ?? "";
+      assert.equal(
+        [...candidateSql.matchAll(/editorialComposerV1,terminal/g)].length,
+        1,
+      );
+    },
+  },
+  {
+    name: "an explicit X model block sends an audited editorial fallback",
     run: async () => {
       const redis = new FakeRedis();
       await enableFollowthroughTestChat(redis);
@@ -14681,21 +14783,27 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         xEditorialComposer: composer,
       });
 
-      assert.equal(result.sent, 0);
-      assert.equal(result.skipped, 1);
-      assert.equal(telegram.messages.length, 0);
+      assert.equal(result.sent, 1);
+      assert.equal(result.skipped, 0);
+      assert.equal(telegram.messages.length, 1);
+      assert.match(telegram.messages[0]?.text ?? "", /^```\n/);
       const metrics = [...db.messageRows.values()][0]?.metrics as
         | {
             editorialComposerV1?: {
+              fallbackUsed?: unknown;
               outcome?: unknown;
               outcomes?: Record<string, unknown>;
               terminal?: unknown;
             };
+            editorialFallbackV1?: { reason?: unknown; used?: unknown };
           }
         | undefined;
       assert.equal(metrics?.editorialComposerV1?.outcome, "model_blocked");
       assert.equal(metrics?.editorialComposerV1?.outcomes?.model_blocked, 1);
-      assert.equal(metrics?.editorialComposerV1?.terminal, true);
+      assert.equal(metrics?.editorialComposerV1?.fallbackUsed, true);
+      assert.equal(metrics?.editorialComposerV1?.terminal, false);
+      assert.equal(metrics?.editorialFallbackV1?.reason, "model_blocked");
+      assert.equal(metrics?.editorialFallbackV1?.used, true);
     },
   },
   {

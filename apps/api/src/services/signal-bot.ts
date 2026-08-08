@@ -114,6 +114,7 @@ import {
   type XEditorialDraftComposer,
 } from "./x-editorial-draft.js";
 import {
+  loadXEditorialInitialRecoveryNoteIds,
   publishXEditorialFollowthrough,
   publishXEditorialNote,
 } from "./signal-bot-x-editorial-delivery.js";
@@ -5714,7 +5715,33 @@ export async function publishSignalBotTick(input: {
       afterId: state.cursorId,
       limit: input.config.maxSignalsPerTick,
     });
-    for (const note of notes) {
+    const initialRecoveryNoteIds =
+      state.contentProfile === X_EDITORIAL_CONTENT_PROFILE
+        ? await loadXEditorialInitialRecoveryNoteIds({
+            chatId,
+            db: input.db,
+            limit: 1,
+          })
+        : [];
+    const recoveryNotes = (
+      await Promise.all(
+        initialRecoveryNoteIds.map((noteId) =>
+          loadSignalBotNotes(input.db, {
+            afterCreatedAt: "1970-01-01T00:00:00.000Z",
+            afterId: DEFAULT_CURSOR_ID,
+            limit: 1,
+            noteId,
+          }),
+        ),
+      )
+    ).flat();
+    const recoveryNoteIdSet = new Set(recoveryNotes.map((note) => note.id));
+    const queuedNoteIds = new Set(notes.map((note) => note.id));
+    const queuedNotes = [
+      ...notes,
+      ...recoveryNotes.filter((note) => !queuedNoteIds.has(note.id)),
+    ];
+    for (const note of queuedNotes) {
       const messageKind = note.revisionKind;
       const destinationPolicy: SignalDestinationPolicy =
         state.destinationPolicy ?? {
@@ -5734,6 +5761,15 @@ export async function publishSignalBotTick(input: {
         db: input.db,
         note,
       });
+      const advanceCursor = async () => {
+        if (recoveryNoteIdSet.has(note.id)) return;
+        await updateSignalBotChatCursor({
+          chatId,
+          createdAt: note.createdAt,
+          id: note.id,
+          redis: input.redis,
+        });
+      };
       const skipDelivery = async (
         reason: SignalBotDeliverySkipReason,
         audit?: Record<string, unknown>,
@@ -5750,12 +5786,7 @@ export async function publishSignalBotTick(input: {
           reason,
           threadRootNoteId: thread.threadRootNoteId,
         });
-        await updateSignalBotChatCursor({
-          chatId,
-          createdAt: note.createdAt,
-          id: note.id,
-          redis: input.redis,
-        });
+        await advanceCursor();
       };
       const sourceVenue = normalizeHunchVenue(note.marketVenue);
       if (
@@ -5835,12 +5866,7 @@ export async function publishSignalBotTick(input: {
         if (editorial.status === "compose_failed") {
           countDeliverySkip("editorial_compose_failed");
         }
-        await updateSignalBotChatCursor({
-          chatId,
-          createdAt: note.createdAt,
-          id: note.id,
-          redis: input.redis,
-        });
+        await advanceCursor();
         continue;
       }
       const routing = await resolveSignalBotDeliveryForPolicy({
@@ -5912,12 +5938,7 @@ export async function publishSignalBotTick(input: {
           blockedChats += 1;
           await disableSignalBotChat(input.redis, chatId);
         }
-        await updateSignalBotChatCursor({
-          chatId,
-          createdAt: note.createdAt,
-          id: note.id,
-          redis: input.redis,
-        });
+        await advanceCursor();
         continue;
       }
       if (reservation.status !== "acquired") break;
@@ -5967,12 +5988,7 @@ export async function publishSignalBotTick(input: {
             },
             status: "skipped",
           });
-          await updateSignalBotChatCursor({
-            chatId,
-            createdAt: note.createdAt,
-            id: note.id,
-            redis: input.redis,
-          });
+          await advanceCursor();
           continue;
         }
         priceGuardDiagnostics.priceGuardDeferred += 1;
@@ -6014,12 +6030,7 @@ export async function publishSignalBotTick(input: {
           },
           status: "skipped",
         });
-        await updateSignalBotChatCursor({
-          chatId,
-          createdAt: note.createdAt,
-          id: note.id,
-          redis: input.redis,
-        });
+        await advanceCursor();
         continue;
       }
       if (preparation.blockers.length > 0) {
@@ -6499,8 +6510,6 @@ async function loadSignalBotFollowthroughCandidates(input: {
                       coalesce(sent.metrics->>'status', 'sent') in (
                         'blocked', 'delivery_unknown', 'sent'
                       )
-                      or sent.metrics #>> '{editorialDraftV1,status}' = 'blocked'
-                      or sent.metrics #>> '{editorialComposerV1,terminal}' = 'true'
                       or sent.sent_at > $6::timestamptz
                     )
                 )
@@ -6521,8 +6530,6 @@ async function loadSignalBotFollowthroughCandidates(input: {
                       coalesce(sent.metrics->>'status', 'sent') in (
                         'blocked', 'delivery_unknown', 'sent'
                       )
-                      or sent.metrics #>> '{editorialDraftV1,status}' = 'blocked'
-                      or sent.metrics #>> '{editorialComposerV1,terminal}' = 'true'
                       or sent.sent_at > $6::timestamptz
                     )
                 )

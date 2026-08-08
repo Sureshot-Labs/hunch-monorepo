@@ -10,6 +10,7 @@ import {
   type SignalBotRedisLike,
 } from "./services/signal-bot.js";
 import { parseSignalBotContentProfileRequest } from "./services/signal-bot-command-parsers.js";
+import { loadXEditorialInitialRecoveryNoteIds } from "./services/signal-bot-x-editorial-delivery.js";
 import {
   buildXEditorialDraftSystemPrompt,
   buildXEditorialSourceDigest,
@@ -623,7 +624,40 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
-    name: "publisher sends exact plain editorial copy once and persists it",
+    name: "legacy X initial recovery selects only unsent composer skips",
+    run: async () => {
+      let capturedSql = "";
+      let capturedParams: unknown[] = [];
+      const noteIds = await loadXEditorialInitialRecoveryNoteIds({
+        chatId: "-100987654",
+        db: {
+          query: async (sql: string, params?: unknown[]) => {
+            capturedSql = sql;
+            capturedParams = params ?? [];
+            return {
+              rows: [{ note_id: "00000000-0000-4000-8000-000000000321" }],
+            } as never;
+          },
+        } as never,
+      });
+
+      assert.deepEqual(noteIds, ["00000000-0000-4000-8000-000000000321"]);
+      assert.match(capturedSql, /telegram_message_id is null/);
+      assert.match(
+        capturedSql,
+        /message_kind in \('initial', 'research_update'\)/,
+      );
+      assert.match(capturedSql, /editorialComposerV1,outcome/);
+      assert.match(capturedSql, /editorialDraftV1,status/);
+      assert.deepEqual(capturedParams, [
+        "-100987654",
+        "x_editorial_draft_v1",
+        1,
+      ]);
+    },
+  },
+  {
+    name: "publisher sends an editorial draft even when its signal-time quote is old",
     run: async () => {
       const redis = new FakeRedis();
       await enableSignalBotChat({
@@ -672,7 +706,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
             version: 1,
           },
           signalPriceSnapshotV1: {
-            asOf: now.toISOString(),
+            asOf: "2026-01-01T00:00:00.000Z",
             displayPrice: 0.19,
             displayPriceSource: "midpoint",
             displaySide: "YES",

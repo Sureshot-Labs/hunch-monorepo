@@ -81,6 +81,7 @@ export async function reserveSignalBotMessageDelivery(input: {
   messageKind: SignalBotMessageKind;
   noteId: string;
   now?: Date;
+  recoverTerminalSkip?: boolean;
   replyToMessageId: number | null;
   threadRootNoteId: string;
 }): Promise<SignalBotDeliveryReservation> {
@@ -131,6 +132,10 @@ export async function reserveSignalBotMessageDelivery(input: {
         ) or (
           signal_bot_messages.metrics #>> '{deliveryStateV2,version}' is null
           and signal_bot_messages.metrics->>'status' = 'compose_failed'
+        ) or (
+          $12::boolean
+          and signal_bot_messages.telegram_message_id is null
+          and coalesce(signal_bot_messages.metrics->>'status', '') = 'skipped'
         )
         returning id::text as id
       `,
@@ -146,6 +151,7 @@ export async function reserveSignalBotMessageDelivery(input: {
         now.toISOString(),
         JSON.stringify(state),
         new Date(now.getTime() - STALE_DELIVERY_MS).toISOString(),
+        input.recoverTerminalSkip === true,
       ],
     );
     const acquiredId = acquired.rows[0]?.id;

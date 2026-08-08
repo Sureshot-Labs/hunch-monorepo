@@ -1,11 +1,9 @@
 import type { DbQuery } from "../db.js";
-import { isSignalBotQuoteFresh } from "./signal-bot-delivery-policy.js";
 import { parseTelegramMarketIdentityV1 } from "./signal-publication-contract.js";
 import { buildSignalBotMiniAppEventUrl } from "./signal-bot-mini-app-links.js";
 import {
   beginSignalBotMessageDelivery,
   finishSignalBotMessageDelivery,
-  recordSignalBotMessageNonDeliveryState,
   reserveSignalBotMessageDelivery,
 } from "./signal-bot-message-delivery-ledger.js";
 import type {
@@ -18,6 +16,7 @@ import type {
 import {
   parsePersistedXEditorialDraft,
   readXEditorialComposerFailure,
+  buildXEditorialSourceDigest,
   X_EDITORIAL_CONTENT_PROFILE,
   type XEditorialComposerFailureCode,
   type XEditorialDraftComposer,
@@ -89,6 +88,7 @@ function asComposerFailureCode(
 function buildComposerMetrics(input: {
   attemptCount: number;
   existing: Record<string, unknown>;
+  fallbackUsed?: boolean;
   outcome: XEditorialComposerOutcome;
   terminal: boolean;
 }): Record<string, unknown> {
@@ -104,10 +104,12 @@ function buildComposerMetrics(input: {
   }
   return {
     attemptCount: input.attemptCount,
+    fallbackUsed: input.fallbackUsed ?? false,
     maxAttempts: X_EDITORIAL_MAX_COMPOSE_ATTEMPTS,
     outcome: input.outcome,
     outcomes,
     retryable:
+      !input.fallbackUsed &&
       input.outcome !== "ready" &&
       input.outcome !== "model_blocked" &&
       !input.terminal,
@@ -293,7 +295,6 @@ function buildInitialSource(input: {
 function validateInitialSource(input: {
   kind: "initial" | "research_update";
   note: SignalBotNote;
-  now?: Date;
   selectedSide: "NO" | "YES";
 }): SignalBotDeliveryPreparationReason | null {
   const identity = input.note.telegramMarketIdentityV1;
@@ -316,15 +317,6 @@ function validateInitialSource(input: {
     price.venue !== input.note.marketVenue
   ) {
     return "identity_mismatch";
-  }
-  const asOfMs = Date.parse(price.asOf);
-  const nowMs = (input.now ?? new Date()).getTime();
-  if (
-    !Number.isFinite(asOfMs) ||
-    asOfMs > nowMs ||
-    !isSignalBotQuoteFresh(asOfMs, nowMs)
-  ) {
-    return "stale_price_snapshot";
   }
   return null;
 }
@@ -425,6 +417,43 @@ async function loadDelivery(input: {
   }
 }
 
+export async function loadXEditorialInitialRecoveryNoteIds(input: {
+  chatId: string;
+  db: DbQuery;
+  limit?: number;
+}): Promise<string[]> {
+  try {
+    const { rows } = await input.db.query<{ note_id: string }>(
+      `
+        select note_id::text as note_id
+        from signal_bot_messages
+        where chat_id = $1
+          and telegram_message_id is null
+          and message_kind in ('initial', 'research_update')
+          and metrics->>'contentProfile' = $2
+          and coalesce(metrics->>'status', '') = 'skipped'
+          and (
+            metrics #>> '{editorialComposerV1,outcome}' in (
+              'missing_content', 'provider_error', 'schema_mismatch'
+            )
+            or metrics #>> '{editorialDraftV1,status}' = 'blocked'
+          )
+        order by sent_at desc
+        limit $3
+      `,
+      [
+        input.chatId,
+        X_EDITORIAL_CONTENT_PROFILE,
+        Math.max(1, Math.min(5, input.limit ?? 1)),
+      ],
+    );
+    return rows.map((row) => row.note_id);
+  } catch (error) {
+    if (isMissingSignalBotMessagesTable(error)) return [];
+    throw error;
+  }
+}
+
 async function loadRecentOpenings(input: {
   chatId: string;
   db: DbQuery;
@@ -476,6 +505,150 @@ function buildVisibleLink(
   return `${label}: [${escapeMarkdownV2(url)}](${escapeMarkdownV2LinkTarget(url)})`;
 }
 
+function sentence(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) return "";
+  const capitalized = `${trimmed[0]?.toUpperCase() ?? ""}${trimmed.slice(1)}`;
+  return /[.!?]$/.test(capitalized) ? capitalized : `${capitalized}.`;
+}
+
+function clipVisibleText(value: string, maxCharacters = 950): string {
+  const characters = Array.from(value.trim());
+  if (characters.length <= maxCharacters) return characters.join("");
+  const clipped = characters.slice(0, Math.max(1, maxCharacters - 1)).join("");
+  const boundary = clipped.lastIndexOf(" ");
+  return `${(boundary >= maxCharacters * 0.7 ? clipped.slice(0, boundary) : clipped).trimEnd()}…`;
+}
+
+function finiteNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function nonNegativeInteger(value: unknown): number {
+  const parsed = finiteNumber(value);
+  return parsed == null ? 0 : Math.max(0, Math.trunc(parsed));
+}
+
+function formatUsd(value: number, options?: { signed?: boolean }): string {
+  const absolute = Math.abs(value);
+  const amount =
+    absolute >= 1_000_000
+      ? `$${(absolute / 1_000_000).toFixed(1).replace(/\.0$/, "")}M`
+      : absolute >= 1_000
+        ? `$${(absolute / 1_000).toFixed(1).replace(/\.0$/, "")}K`
+        : `$${Math.round(absolute).toLocaleString("en-US")}`;
+  if (!options?.signed || value === 0) return amount;
+  return value > 0 ? `+${amount}` : `-${amount}`;
+}
+
+function formatCents(value: number): string {
+  return `${Math.round(value * 100)}¢`;
+}
+
+function factValue(source: XEditorialDraftSource, id: string): unknown | null {
+  return source.facts.find((fact) => fact.id === id)?.value ?? null;
+}
+
+function buildFallbackPost(input: {
+  failureCode: XEditorialComposerOutcome;
+  source: XEditorialDraftSource;
+}): XEditorialDraftV1 {
+  const researchCopy = asObject(factValue(input.source, "research_copy"));
+  const headline = asTrimmedString(researchCopy.headline);
+  const description = asTrimmedString(researchCopy.description);
+  const originalSignal = asTrimmedString(
+    factValue(input.source, "original_signal"),
+  );
+  const followthrough = asObject(factValue(input.source, "followthrough"));
+  let opening = sentence(headline ?? originalSignal ?? "Market update");
+  let body = description ? sentence(description) : "";
+  const storyFamily: XEditorialDraftV1["storyFamily"] =
+    input.source.kind === "initial" || input.source.kind === "research_update"
+      ? "fresh_bet"
+      : input.source.kind === "followthrough_stats"
+        ? "followthrough"
+        : "resolution";
+  let usedFactIds = description || headline ? ["research_copy"] : [];
+
+  if (
+    input.source.kind !== "initial" &&
+    input.source.kind !== "research_update"
+  ) {
+    const side = input.source.selectedSide;
+    const entryPrice = finiteNumber(followthrough.entryPrice);
+    const markPrice = finiteNumber(followthrough.markPrice);
+    const outcome = asTrimmedString(followthrough.outcome);
+    const state = asTrimmedString(followthrough.state);
+    const detail: string[] = [];
+    if (state === "resolved" && (outcome === "win" || outcome === "loss")) {
+      detail.push(`The ${side} side resolved as a ${outcome}`);
+    } else if (entryPrice != null && markPrice != null) {
+      detail.push(
+        `${side} moved from ${formatCents(entryPrice)} to ${formatCents(markPrice)} since the signal`,
+      );
+    }
+    const netFlow = finiteNumber(followthrough.netSignalSideFlowUsd);
+    if (netFlow != null && Math.abs(netFlow) >= 1) {
+      detail.push(
+        netFlow > 0
+          ? `Tracked wallets added a net ${formatUsd(netFlow)} on ${side}`
+          : `Tracked wallets cut a net ${formatUsd(Math.abs(netFlow))} from ${side}`,
+      );
+    }
+    const added = nonNegativeInteger(followthrough.addedWallets);
+    const joined = nonNegativeInteger(followthrough.joinedWallets);
+    const trimmed = nonNegativeInteger(followthrough.trimmedWallets);
+    const exited = nonNegativeInteger(followthrough.exitedWallets);
+    const holding = nonNegativeInteger(followthrough.stillHoldingWallets);
+    const activity: string[] = [];
+    if (joined > 0) activity.push(`${joined} joined`);
+    if (added > 0) activity.push(`${added} added`);
+    if (trimmed > 0) activity.push(`${trimmed} trimmed`);
+    if (exited > 0) activity.push(`${exited} exited`);
+    if (activity.length > 0) {
+      detail.push(
+        `${activity.join(", ")}${holding > 0 ? `, and ${holding} ${holding === 1 ? "is" : "are"} still holding` : ""}`,
+      );
+    } else if (holding > 0) {
+      detail.push(`${holding} tracked wallets are still holding`);
+    }
+    const pnl = finiteNumber(
+      state === "resolved"
+        ? followthrough.estimatedRealizedPnlUsd
+        : followthrough.estimatedOpenPnlUsd,
+    );
+    if (pnl != null && Math.abs(pnl) >= 1) {
+      detail.push(
+        `Estimated ${state === "resolved" ? "realized" : "open"} PnL is ${formatUsd(pnl, { signed: true })}`,
+      );
+    }
+    body = sentence(detail.join(". "));
+    usedFactIds = ["original_signal", "followthrough"];
+  }
+
+  const postText = clipVisibleText(
+    [opening, body].filter(Boolean).join("\n\n"),
+  );
+  if (!postText.includes(opening))
+    opening = postText.split("\n")[0] ?? postText;
+  return {
+    characterCount: Array.from(postText).length,
+    formatting: opening.length >= 2 ? [{ style: "bold", text: opening }] : [],
+    generatedAt: new Date().toISOString(),
+    marketId: input.source.marketId,
+    model: "deterministic_editorial_fallback_v1",
+    postText,
+    promptVersion: "x_editorial_prompt_v3",
+    safetyFlags: [`composer_fallback:${input.failureCode}`],
+    selectedSide: input.source.selectedSide,
+    sourceDigest: buildXEditorialSourceDigest(input.source),
+    status: "ready",
+    storyFamily,
+    usedFactIds,
+    version: 1,
+  };
+}
+
 export function buildXEditorialTelegramDraftMessage(input: {
   draft: XEditorialDraftV1;
   miniAppUrl?: string;
@@ -523,11 +696,20 @@ async function deliverDraft(input: {
   const existingComposerFailure = asComposerFailureCode(
     existingComposerMetrics.outcome,
   );
+  const persistedDraft = parsePersistedXEditorialDraft(
+    existingMetrics.editorialDraftV1,
+  );
+  const recoverTerminalSkip =
+    existingStatus === "skipped" &&
+    (existingComposerFailure != null || persistedDraft?.status === "blocked");
   if (existingStatus === "delivery_unknown") {
     return { status: "delivery_unknown" };
   }
-  if (existingStatus === "blocked" || existingStatus === "skipped") {
-    if (existingStatus === "skipped" && existingComposerFailure) {
+  if (
+    existingStatus === "blocked" ||
+    (existingStatus === "skipped" && !recoverTerminalSkip)
+  ) {
+    if (existingStatus === "skipped" && existingComposerFailure != null) {
       return {
         composerOutcome: existingComposerFailure,
         status: "compose_failed",
@@ -535,12 +717,33 @@ async function deliverDraft(input: {
     }
     return { blockedChat: existingStatus === "blocked", status: "blocked" };
   }
-  const persistedDraft = parsePersistedXEditorialDraft(
-    existingMetrics.editorialDraftV1,
-  );
   let draft: XEditorialDraftV1;
-  let composerMetrics: Record<string, unknown>;
-  if (
+  let composerMetrics: Record<string, unknown> = existingComposerMetrics;
+  let fallbackMetrics: Record<string, unknown> | null = null;
+  if (recoverTerminalSkip) {
+    const reason = existingComposerFailure ?? "model_blocked";
+    draft = buildFallbackPost({ failureCode: reason, source: input.source });
+    composerMetrics = {
+      ...existingComposerMetrics,
+      fallbackUsed: true,
+      outcome: reason,
+      retryable: false,
+      terminal: false,
+      updatedAt: new Date().toISOString(),
+    };
+    fallbackMetrics = {
+      reason,
+      recoveredTerminalSkip: true,
+      used: true,
+      version: 1,
+    };
+    console.warn("[signal-bot:x-editorial] composer_fallback_recovery", {
+      chatId: input.chatId,
+      messageKind: input.messageKind,
+      noteId: input.noteId,
+      reason,
+    });
+  } else if (
     persistedDraft?.marketId === input.source.marketId &&
     persistedDraft.selectedSide === input.source.selectedSide
   ) {
@@ -564,49 +767,67 @@ async function deliverDraft(input: {
       draft = await input.composer({ source: input.source });
     } catch (error) {
       const failure = readXEditorialComposerFailure(error);
-      const terminal = attemptCount >= X_EDITORIAL_MAX_COMPOSE_ATTEMPTS;
+      draft = buildFallbackPost({
+        failureCode: failure.code,
+        source: input.source,
+      });
       composerMetrics = buildComposerMetrics({
         attemptCount,
         existing: existingComposerMetrics,
+        fallbackUsed: true,
         outcome: failure.code,
-        terminal,
+        terminal: false,
       });
-      await recordSignalBotMessageNonDeliveryState({
-        baselineAt: input.baselineAt,
+      fallbackMetrics = {
+        error: failure.message.slice(0, 500),
+        issues: failure.issues.slice(0, 20),
+        reason: failure.code,
+        used: true,
+        version: 1,
+      };
+      console.warn("[signal-bot:x-editorial] composer_fallback", {
         chatId: input.chatId,
-        db: input.db,
+        issues: failure.issues.slice(0, 20),
         messageKind: input.messageKind,
-        metrics: {
-          contentProfile: X_EDITORIAL_CONTENT_PROFILE,
-          editorialComposerV1: composerMetrics,
-          error: failure.message.slice(0, 500),
-          issues: failure.issues.slice(0, 20),
-          status: terminal ? "skipped" : "compose_failed",
-        },
         noteId: input.noteId,
-        replyToMessageId: null,
-        sentAt: new Date(),
-        threadRootNoteId: input.threadRootNoteId,
+        reason: failure.code,
       });
-      return terminal
-        ? { composerOutcome: failure.code, status: "compose_failed" }
-        : {
-            blockedChat: false,
-            composerOutcome: failure.code,
-            status: "retry",
-          };
     }
-    composerMetrics = buildComposerMetrics({
-      attemptCount,
-      existing: existingComposerMetrics,
-      outcome: draft.status === "blocked" ? "model_blocked" : "ready",
-      terminal: draft.status === "blocked",
-    });
+    if (!fallbackMetrics) {
+      if (draft.status === "blocked" || !draft.postText) {
+        const blockedDraft = draft;
+        draft = buildFallbackPost({
+          failureCode: "model_blocked",
+          source: input.source,
+        });
+        fallbackMetrics = {
+          reason: "model_blocked",
+          safetyFlags: blockedDraft.safetyFlags,
+          used: true,
+          version: 1,
+        };
+        console.warn("[signal-bot:x-editorial] composer_fallback", {
+          chatId: input.chatId,
+          messageKind: input.messageKind,
+          noteId: input.noteId,
+          reason: "model_blocked",
+          safetyFlags: blockedDraft.safetyFlags,
+        });
+      }
+      composerMetrics = buildComposerMetrics({
+        attemptCount,
+        existing: existingComposerMetrics,
+        fallbackUsed: fallbackMetrics != null,
+        outcome: fallbackMetrics ? "model_blocked" : "ready",
+        terminal: false,
+      });
+    }
   }
   const baseMetrics = {
     contentProfile: X_EDITORIAL_CONTENT_PROFILE,
     editorialComposerV1: composerMetrics,
     editorialDraftV1: draft,
+    ...(fallbackMetrics ? { editorialFallbackV1: fallbackMetrics } : {}),
   };
   const reservation = await reserveSignalBotMessageDelivery({
     baselineAt: input.baselineAt,
@@ -615,6 +836,7 @@ async function deliverDraft(input: {
     db: input.db,
     messageKind: input.messageKind,
     noteId: input.noteId,
+    recoverTerminalSkip,
     replyToMessageId: null,
     threadRootNoteId: input.threadRootNoteId,
   });
