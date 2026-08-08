@@ -89,6 +89,40 @@ await test("Telegram funding schemas accept only server-owned opaque inputs", ()
     true,
   );
   assert.equal(
+    telegramBotTradingRouteTestHooks.internalFundingResumeBuyBodySchema.safeParse(
+      {
+        ...identity,
+        appBaseUrl: "https://app.hunch.trade",
+        continuationToken: "AbCdEfGhIjKlMnOpQrStUv",
+        idempotencyKey: "funding:resume:123",
+        telegramMessageId: 42,
+        telegramMiniAppEnabled: true,
+      },
+    ).success,
+    true,
+  );
+  for (const forbidden of [
+    { marketId: "market-1" },
+    { side: "YES" },
+    { amountUsd: 10 },
+    { destinationOptionId: "destination-1" },
+    { walletAddress: "0x1111111111111111111111111111111111111111" },
+  ]) {
+    assert.equal(
+      telegramBotTradingRouteTestHooks.internalFundingResumeBuyBodySchema.safeParse(
+        {
+          ...identity,
+          appBaseUrl: "https://app.hunch.trade",
+          continuationToken: "AbCdEfGhIjKlMnOpQrStUv",
+          idempotencyKey: "funding:resume:123",
+          telegramMessageId: 42,
+          ...forbidden,
+        },
+      ).success,
+      false,
+    );
+  }
+  assert.equal(
     telegramBotTradingRouteTestHooks.internalFundingOpenBodySchema.safeParse({
       ...mutation,
       appBaseUrl: "https://app.hunch.trade",

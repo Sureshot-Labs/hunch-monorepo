@@ -2,7 +2,10 @@ import crypto from "node:crypto";
 import { ethers } from "ethers";
 
 import { AuthService } from "../auth.js";
+import type { Pool } from "@hunch/infra";
 import type { DbQuery } from "../db.js";
+import { sameAsset } from "../funding/domain/asset-identity.js";
+import { canonicalJsonHash } from "../funding/persistence/canonical.js";
 import { env } from "../env.js";
 import { isRecord } from "../lib/type-guards.js";
 import {
@@ -117,10 +120,23 @@ import {
   createNotificationSafe,
 } from "./notifications.js";
 import { venueLifecycleAllows } from "./venue-lifecycle.js";
-import type {
-  TelegramBotTradeAuthorityBinding,
-  TelegramBotTradeInputContext,
+import {
+  parseTelegramBotTradeAuthorityBinding,
+  telegramBotTradeAuthorityFingerprint,
+  type TelegramBotTradeAuthorityBinding,
+  type TelegramBotTradeInputContext,
 } from "./telegram-bot-trade-input-context.js";
+import {
+  buildTelegramFundingReviewBuyButton,
+  fetchActiveTelegramFundingBuyReturn,
+  fetchTelegramFundingBuyContinuationForUpdate,
+  hasReadyTelegramFundingDestinationReceipt,
+  hashTelegramFundingBuyContinuationToken,
+  issueTelegramFundingBuyContinuation,
+  resolveTelegramFundingBuyContinuationAdapter,
+} from "./telegram-funding-buy-continuation.js";
+import type { TelegramFundingProgressDecorator } from "./telegram-funding.js";
+import { buildTelegramFundingAddressMessage } from "./telegram-funding-presentation.js";
 
 export type TelegramBotTradingVenue = "kalshi" | "limitless" | "polymarket";
 export type TelegramBotTradingAction = "buy" | "sell" | "redeem";
@@ -298,6 +314,21 @@ export type TelegramBotTradingMessage = {
   reply_markup?: TelegramBotTradingReplyMarkup;
   text: string;
 };
+
+export type TelegramFundingBuyReturnOpener = (
+  input: Readonly<{
+    authorizationId: string;
+    chatId: string;
+    eventId: string | null;
+    idempotencyKey: string;
+    marketId: string;
+    requestedSpendUsd: string;
+    side: TelegramBotTradingSide;
+    sourceIntentId: string;
+    telegramMessageId: number | null;
+    telegramUserId: string;
+  }>,
+) => Promise<TelegramBotTradingMessage | null>;
 
 export type TelegramMarketCardContext = {
   focusPositionId?: string;
@@ -657,6 +688,7 @@ export type TelegramBotTradingCallbackInput = {
     info?: (payload: unknown, message?: string) => void;
     warn?: (payload: unknown, message?: string) => void;
   };
+  openFundingBuyReturn?: TelegramFundingBuyReturnOpener;
   sendMessage: (input: {
     chat_id: string;
     parse_mode?: "MarkdownV2";
@@ -1323,11 +1355,28 @@ export const telegramBotTradingTestHooks = {
   resolveTelegramBuyFundingPreview,
   resolveExecutablePolymarketSellSharesRaw,
   resolveTelegramExecutableBuyOption,
+  resolveTelegramCallbackMessageId,
   sameTelegramTradeAuthorityBinding,
+  shouldOpenTelegramFundingBuyReturn,
+  lockTelegramFundingReturnBeforeMarket,
   parseTelegramCustomBuyAmount,
   parseTelegramCustomSellAmount,
   venueStatusFromReadiness,
 };
+
+function shouldOpenTelegramFundingBuyReturn(input: {
+  amountUsd: number | null;
+  buyContinuationEnabled: boolean;
+  fundingState: "convert" | "deposit";
+  hasOpener: boolean;
+}): boolean {
+  return (
+    input.fundingState === "deposit" &&
+    input.buyContinuationEnabled &&
+    input.hasOpener &&
+    input.amountUsd != null
+  );
+}
 
 function decimalToRaw(value: string, decimals: number): bigint | null {
   const match = value.match(/^(\d+)(?:\.(\d+))?$/u);
@@ -2201,6 +2250,7 @@ function marketPriceLine(market: TelegramBotMarketRow): string {
 
 function buildPolicySnapshot(policy: SignalBotPolicy): Record<string, unknown> {
   return {
+    buyContinuationEnabled: policy.buyContinuationEnabled,
     customTradeInputEnabled: policy.customTradeInputEnabled,
     tradingEnabled: policy.tradingEnabled,
     tradingActions: policy.tradingActions,
@@ -2432,6 +2482,7 @@ export function buildUnlinkedTelegramBotTradingStatus(input: {
           autoEnableOnTelegramLink: false,
           autoManagedMaxAmountUsd: 1,
           autoManagedVenues: ["polymarket"],
+          buyContinuationEnabled: false,
           customTradeInputEnabled: false,
           fundingReceiveEnabled: false,
           tradingEnabled: false,
@@ -3747,54 +3798,179 @@ async function lockTelegramIntentMarket(
   ]);
 }
 
+async function lockTelegramFundingReturnContext(
+  db: DbQuery,
+  fundingContextId: string,
+): Promise<boolean> {
+  const context = await db.query<{ receive_session_id: string }>(
+    `select receive_session_id
+       from telegram_funding_sessions
+      where id = $1::uuid
+      limit 1`,
+    [fundingContextId],
+  );
+  const receiveSessionId = context.rows[0]?.receive_session_id;
+  if (!receiveSessionId) return false;
+  const receive = await db.query(
+    `select id
+       from funding_receive_sessions
+      where id = $1::uuid
+      for update`,
+    [receiveSessionId],
+  );
+  if ((receive.rowCount ?? 0) !== 1) return false;
+  const lockedContext = await db.query(
+    `select id
+       from telegram_funding_sessions
+      where id = $1::uuid
+        and receive_session_id = $2::uuid
+      for update`,
+    [fundingContextId, receiveSessionId],
+  );
+  return (lockedContext.rowCount ?? 0) === 1;
+}
+
+async function lockTelegramFundingReturnBeforeMarket(
+  db: DbQuery,
+  input: Readonly<{
+    fundingContextId: string;
+    marketId: string;
+    telegramUserId: string;
+  }>,
+): Promise<boolean> {
+  const fundingLocked = await lockTelegramFundingReturnContext(
+    db,
+    input.fundingContextId,
+  );
+  await lockTelegramIntentMarket(db, input);
+  return fundingLocked;
+}
+
+async function loadCurrentTelegramIntentAuthorityLocked(input: {
+  db: DbQuery;
+  expectedAuthorization: TelegramBotTradingAuthorizationRow;
+  intent: TelegramTradeIntentRow;
+  validateFundingReturn?: boolean;
+}): Promise<TelegramBotTradingAuthorizationRow | null> {
+  const currentAuthorization = await loadEnabledAuthorization(
+    input.db,
+    input.intent.telegram_user_id,
+    input.intent.venue,
+    { lock: true },
+  );
+  if (
+    currentAuthorization?.id !== input.expectedAuthorization.id ||
+    !intentMatchesTelegramTradeAuthority({
+      authorization: currentAuthorization,
+      intent: input.intent,
+    })
+  ) {
+    return null;
+  }
+  if (
+    input.validateFundingReturn &&
+    readTelegramFundingReturnIntentMarker(input.intent) &&
+    !(await isTelegramFundingReturnIntentCurrent(
+      input.db,
+      input.intent,
+      currentAuthorization,
+      { lockGeneration: true },
+    ))
+  ) {
+    return null;
+  }
+  return currentAuthorization;
+}
+
+async function withLockedTelegramIntentAuthority<T>(input: {
+  callback: (
+    db: DbQuery,
+    authorization: TelegramBotTradingAuthorizationRow | null,
+  ) => Promise<T>;
+  db: DbQuery;
+  expectedAuthorization: TelegramBotTradingAuthorizationRow;
+  intent: TelegramTradeIntentRow;
+  validateFundingReturn?: boolean;
+}): Promise<T> {
+  return withOptionalTransaction(input.db, async (client) => {
+    const fundingMarker = readTelegramFundingReturnIntentMarker(input.intent);
+    let fundingLocked = true;
+    if (fundingMarker) {
+      fundingLocked = await lockTelegramFundingReturnBeforeMarket(client, {
+        fundingContextId: fundingMarker.fundingContextId,
+        marketId: input.intent.market_id,
+        telegramUserId: input.intent.telegram_user_id,
+      });
+    } else {
+      await lockTelegramIntentMarket(client, {
+        marketId: input.intent.market_id,
+        telegramUserId: input.intent.telegram_user_id,
+      });
+    }
+    if (!fundingLocked) {
+      return input.callback(client, null);
+    }
+    const authorization = await loadCurrentTelegramIntentAuthorityLocked({
+      db: client,
+      expectedAuthorization: input.expectedAuthorization,
+      intent: input.intent,
+      validateFundingReturn: input.validateFundingReturn,
+    });
+    return input.callback(client, authorization);
+  });
+}
+
 async function transitionIntentToConfirming(input: {
   authorization: TelegramBotTradingAuthorizationRow;
+  beforeConfirmLocked?: (
+    db: DbQuery,
+    currentAuthorization: TelegramBotTradingAuthorizationRow,
+  ) => Promise<boolean>;
   db: DbQuery;
   intent: TelegramTradeIntentRow;
 }): Promise<"authority_changed" | "blocked" | "confirmed" | "overtaken"> {
-  return withOptionalTransaction(input.db, async (client) => {
-    await lockTelegramIntentMarket(client, {
-      marketId: input.intent.market_id,
-      telegramUserId: input.intent.telegram_user_id,
-    });
-    const currentAuthorization = await loadEnabledAuthorization(
-      client,
-      input.intent.telegram_user_id,
-      input.intent.venue,
-      { lock: true },
-    );
-    if (
-      currentAuthorization?.id !== input.authorization.id ||
-      !intentMatchesTelegramTradeAuthority({
-        authorization: currentAuthorization,
-        intent: input.intent,
-      })
-    ) {
-      await updateIntentStatus({
+  return withLockedTelegramIntentAuthority({
+    callback: async (client, currentAuthorization) => {
+      if (!currentAuthorization) {
+        await updateIntentStatus({
+          allowedStatuses: ["draft", "previewed"],
+          db: client,
+          errorCode: "authority_changed",
+          errorMessage: "Telegram trade authority changed before confirmation.",
+          intentId: input.intent.id,
+          status: "failed",
+        });
+        return "authority_changed";
+      }
+      if (
+        input.beforeConfirmLocked &&
+        !(await input.beforeConfirmLocked(client, currentAuthorization))
+      ) {
+        await updateIntentStatus({
+          allowedStatuses: ["draft", "previewed"],
+          db: client,
+          errorCode: "funding_continuation_stale",
+          errorMessage: "Funding continuation changed before confirmation.",
+          intentId: input.intent.id,
+          status: "failed",
+        });
+        return "overtaken";
+      }
+      const unresolved = await loadUnresolvedTelegramTradeIntent(client, {
+        excludeIntentId: input.intent.id,
+        marketId: input.intent.market_id,
+        telegramUserId: input.intent.telegram_user_id,
+      });
+      if (unresolved) return "blocked";
+      const confirming = await updateIntentStatus({
         allowedStatuses: ["draft", "previewed"],
         db: client,
-        errorCode: "authority_changed",
-        errorMessage: "Telegram trade authority changed before confirmation.",
         intentId: input.intent.id,
-        status: "failed",
+        status: "confirming",
       });
-      return "authority_changed";
-    }
-    const unresolved = await loadUnresolvedTelegramTradeIntent(client, {
-      excludeIntentId: input.intent.id,
-      marketId: input.intent.market_id,
-      telegramUserId: input.intent.telegram_user_id,
-    });
-    if (unresolved) return "blocked";
-    const confirming = await updateIntentStatus({
-      allowedStatuses: ["draft", "previewed"],
-      db: client,
-      intentId: input.intent.id,
-      status: "confirming",
-    });
-    if (!confirming) return "overtaken";
-    await client.query(
-      `UPDATE telegram_trade_intents
+      if (!confirming) return "overtaken";
+      await client.query(
+        `UPDATE telegram_trade_intents
           SET status = 'cancelled',
               error_code = coalesce(error_code, 'superseded_by_intent'),
               error_message = coalesce(error_message, 'Another trade intent for this market was selected.'),
@@ -3803,14 +3979,18 @@ async function transitionIntentToConfirming(input: {
           AND market_id = $2
           AND id <> $3::uuid
           AND status = ANY($4::text[])`,
-      [
-        input.intent.telegram_user_id,
-        input.intent.market_id,
-        input.intent.id,
-        ["draft", "previewed"],
-      ],
-    );
-    return "confirmed";
+        [
+          input.intent.telegram_user_id,
+          input.intent.market_id,
+          input.intent.id,
+          ["draft", "previewed"],
+        ],
+      );
+      return "confirmed";
+    },
+    db: input.db,
+    expectedAuthorization: input.authorization,
+    intent: input.intent,
   });
 }
 
@@ -3819,34 +3999,68 @@ async function transitionIntentToExecuting(input: {
   db: DbQuery;
   intent: TelegramTradeIntentRow;
 }): Promise<"authority_changed" | "executing" | "overtaken"> {
-  return withOptionalTransaction(input.db, async (client) => {
-    await lockTelegramIntentMarket(client, {
-      marketId: input.intent.market_id,
-      telegramUserId: input.intent.telegram_user_id,
-    });
-    const currentAuthorization = await loadEnabledAuthorization(
-      client,
-      input.intent.telegram_user_id,
-      input.intent.venue,
-      { lock: true },
-    );
-    if (
-      currentAuthorization?.id !== input.authorization.id ||
-      !intentMatchesTelegramTradeAuthority({
-        authorization: currentAuthorization,
-        intent: input.intent,
-      })
-    ) {
-      return "authority_changed";
-    }
-    return (await updateIntentStatus({
-      allowedStatuses: ["confirming"],
-      db: client,
-      intentId: input.intent.id,
-      status: "executing",
-    }))
-      ? "executing"
-      : "overtaken";
+  return withLockedTelegramIntentAuthority({
+    callback: async (client, currentAuthorization) => {
+      if (!currentAuthorization) {
+        return "authority_changed";
+      }
+      return (await updateIntentStatus({
+        allowedStatuses: ["confirming"],
+        db: client,
+        intentId: input.intent.id,
+        status: "executing",
+      }))
+        ? "executing"
+        : "overtaken";
+    },
+    db: input.db,
+    expectedAuthorization: input.authorization,
+    intent: input.intent,
+    validateFundingReturn: true,
+  });
+}
+
+async function markTelegramIntentSubmitBoundary(input: {
+  allowPreviouslyStarted?: boolean;
+  authorization: TelegramBotTradingAuthorizationRow;
+  db: DbQuery;
+  intent: TelegramTradeIntentRow;
+  result: Record<string, unknown>;
+}): Promise<boolean> {
+  return withLockedTelegramIntentAuthority({
+    callback: async (client, currentAuthorization) => {
+      if (!currentAuthorization) return false;
+      const currentIntent = await loadIntent(client, input.intent.id, {
+        lock: true,
+      });
+      if (
+        !currentIntent ||
+        currentIntent.status !== "executing" ||
+        !intentMatchesTelegramTradeAuthority({
+          authorization: currentAuthorization,
+          intent: currentIntent,
+        }) ||
+        JSON.stringify(readTelegramFundingReturnIntentMarker(currentIntent)) !==
+          JSON.stringify(readTelegramFundingReturnIntentMarker(input.intent))
+      ) {
+        return false;
+      }
+      if (currentIntent.submit_started_at != null) {
+        return input.allowPreviouslyStarted === true;
+      }
+      return updateIntentStatus({
+        allowedStatuses: ["executing"],
+        db: client,
+        intentId: currentIntent.id,
+        markSubmitStarted: true,
+        result: input.result,
+        status: "executing",
+      });
+    },
+    db: input.db,
+    expectedAuthorization: input.authorization,
+    intent: input.intent,
+    validateFundingReturn: true,
   });
 }
 
@@ -4664,6 +4878,7 @@ async function loadIntentBy(
   db: DbQuery,
   selector: "id" | "idempotency_key",
   value: string,
+  options: { lock?: boolean } = {},
 ): Promise<TelegramTradeIntentRow | null> {
   const result = await db.query<TelegramTradeIntentRow>(
     `SELECT
@@ -4697,7 +4912,8 @@ async function loadIntentBy(
      FROM telegram_trade_intents i
      JOIN unified_markets m ON m.id = i.market_id
      WHERE i.${selector} = $1
-     LIMIT 1`,
+     LIMIT 1
+     ${options.lock ? "FOR UPDATE OF i" : ""}`,
     [value],
   );
   return result.rows[0] ?? null;
@@ -4706,8 +4922,9 @@ async function loadIntentBy(
 async function loadIntent(
   db: DbQuery,
   intentId: string,
+  options: { lock?: boolean } = {},
 ): Promise<TelegramTradeIntentRow | null> {
-  return loadIntentBy(db, "id", intentId);
+  return loadIntentBy(db, "id", intentId, options);
 }
 
 async function loadIntentByIdempotencyKey(
@@ -5171,24 +5388,7 @@ function readIntentAuthorityBinding(
       ? intent.result.telegramAuthority
       : null;
   if (!raw || raw.version !== 1) return null;
-  if (
-    typeof raw.authorizationId !== "string" ||
-    typeof raw.privyWalletId !== "string" ||
-    typeof raw.telegramAccountLinkId !== "string" ||
-    typeof raw.userId !== "string" ||
-    typeof raw.walletAddress !== "string" ||
-    (raw.walletChain !== "ethereum" && raw.walletChain !== "solana")
-  ) {
-    return null;
-  }
-  return {
-    authorizationId: raw.authorizationId,
-    privyWalletId: raw.privyWalletId,
-    telegramAccountLinkId: raw.telegramAccountLinkId,
-    userId: raw.userId,
-    walletAddress: raw.walletAddress,
-    walletChain: raw.walletChain,
-  };
+  return parseTelegramBotTradeAuthorityBinding(raw);
 }
 
 function buildIntentAuthorityResult(
@@ -5232,6 +5432,9 @@ async function loadEnabledAuthorization(
        a.limits,
        a.max_amount_usd
      FROM telegram_bot_trading_authorizations a
+     JOIN users app_user
+       ON app_user.id = a.user_id
+      AND coalesce(app_user.is_active, true) = true
      JOIN telegram_bot_trading_preferences p
        ON p.user_id = a.user_id
       AND p.desired_enabled = true
@@ -5251,11 +5454,881 @@ async function loadEnabledAuthorization(
        AND a.wallet_chain = $2
        AND $3 = ANY(a.enabled_venues)
      LIMIT 1
-     ${options.lock ? "FOR UPDATE OF a, p, uta, uw" : ""}`,
+     ${options.lock ? "FOR UPDATE OF a, app_user, p, uta, uw" : ""}`,
     [telegramUserId, walletChain, venue],
   );
   return result.rows[0] ?? null;
 }
+
+export function createTelegramFundingBuyContinuationDecorator(input: {
+  pool: Pool;
+  trading: ApiBotTradingExecutor;
+}): TelegramFundingProgressDecorator {
+  return async (presentation) => {
+    if (presentation.progress.state !== "ready") return presentation.message;
+    const buyReturn = await fetchActiveTelegramFundingBuyReturn(
+      input.pool,
+      presentation.context.id,
+    );
+    if (
+      !buyReturn ||
+      !presentation.consent ||
+      buyReturn.venueId !== "polymarket" ||
+      presentation.session.venueId !== "polymarket" ||
+      buyReturn.destinationOptionId !==
+        presentation.session.destinationOptionId ||
+      buyReturn.venueBindingOptionId !==
+        presentation.session.venueBindingOptionId ||
+      !resolveTelegramFundingBuyContinuationAdapter({
+        destinationAsset: presentation.session.destinationAsset,
+        venueId: presentation.session.venueId,
+      }) ||
+      !presentation.context.telegramAccountId ||
+      buyReturn.telegramAccountIdSnapshot !==
+        presentation.context.telegramAccountId
+    ) {
+      return presentation.message;
+    }
+    if (
+      !(await hasReadyTelegramFundingDestinationReceipt(
+        input.pool,
+        presentation.context.id,
+      ))
+    ) {
+      return presentation.message;
+    }
+    const [policyState, authorization, market] = await Promise.all([
+      resolveSignalBotTradingPolicyStateFromDb(input.pool),
+      loadEnabledAuthorization(
+        input.pool,
+        presentation.context.telegramUserId,
+        "polymarket",
+      ),
+      loadMarketById(input.pool, buyReturn.marketId),
+    ]);
+    const policy = policyState.policy;
+    const authority = authorization
+      ? buildTelegramTradeAuthorityBinding(authorization)
+      : null;
+    if (
+      !policy.buyContinuationEnabled ||
+      !policy.tradingEnabled ||
+      !policy.tradingActions.includes("buy") ||
+      !policy.tradingVenues.includes("polymarket") ||
+      !authorization ||
+      !authority ||
+      telegramBotTradeAuthorityFingerprint(authority) !==
+        buyReturn.sourceAuthorityFingerprint ||
+      authorization.telegram_account_link_id !==
+        presentation.context.telegramAccountId ||
+      !authorization.privy_wallet_id ||
+      !market ||
+      market.venue !== "polymarket" ||
+      !isMarketOrderable(market) ||
+      !isVenueAllowed(
+        "polymarket",
+        policy,
+        filterVenuesForWalletChain(
+          normalizeVenues(authorization.enabled_venues),
+          authorization.wallet_chain,
+        ),
+      )
+    ) {
+      return presentation.message;
+    }
+    const requestedSpendUsd = Number(buyReturn.requestedSpendUsd);
+    if (
+      !Number.isFinite(requestedSpendUsd) ||
+      requestedSpendUsd <= 0 ||
+      requestedSpendUsd >
+        effectiveMaxTradeAmountUsd(policy, authorization.max_amount_usd)
+    ) {
+      return presentation.message;
+    }
+    const readiness = await resolveTelegramTradingReadiness({
+      action: "BUY",
+      authorization,
+      market,
+      trading: input.trading,
+      venue: "polymarket",
+    });
+    if (!canPreviewBuyForReadiness(readiness)) {
+      return presentation.message;
+    }
+    const executableUsd = Math.max(0, readiness.maxExecutableBuyUsd ?? 0);
+    if (executableUsd + 0.000_001 < requestedSpendUsd) {
+      const target = presentation.session.receiveTargets.find(
+        (candidate) =>
+          candidate.receiveTargetId === presentation.consent?.receiveTargetId &&
+          candidate.acceptedAssets.some((accepted) =>
+            sameAsset(
+              accepted.asset,
+              presentation.consent?.asset ?? accepted.asset,
+            ),
+          ),
+      );
+      const receiveStillOpen =
+        presentation.context.cancelledAt == null &&
+        new Date(presentation.context.expiresAt).getTime() >
+          presentation.now.getTime();
+      if (!target || !receiveStillOpen) return presentation.message;
+      const addressMessage = buildTelegramFundingAddressMessage({
+        address: target.destinationAddress,
+        contextId: presentation.context.id,
+        expiresAt: presentation.context.expiresAt,
+      });
+      return {
+        ...addressMessage,
+        text: joinTelegramMarkdownV2Lines([
+          formatTelegramCalloutMarkdownV2({
+            bodyMarkdownV2: escapeMarkdown(
+              `Add at least ${formatUsd(requestedSpendUsd - executableUsd)}, then tap Refresh. The Buy still requires Review and Confirm.`,
+            ),
+            icon: "💰",
+            title: "More funding needed",
+          }),
+          "",
+          addressMessage.text,
+        ]),
+      };
+    }
+    let issued: Awaited<ReturnType<typeof issueTelegramFundingBuyContinuation>>;
+    try {
+      issued = await issueTelegramFundingBuyContinuation({
+        pool: input.pool,
+        contextId: presentation.context.id,
+        returnRevision: buyReturn.revision,
+        progressRevision: presentation.context.progressRevision,
+        receiveVersion: presentation.session.version,
+        telegramAccountId: presentation.context.telegramAccountId,
+        telegramUserId: presentation.context.telegramUserId,
+        chatId: presentation.context.chatId,
+        policyRevision: policyState.policyRevision,
+        validateBeforeIssue: async (client) => {
+          const current =
+            await resolveSignalBotTradingPolicyStateFromDb(client);
+          return (
+            current.policyRevision === policyState.policyRevision &&
+            current.policy.buyContinuationEnabled &&
+            current.policy.tradingEnabled &&
+            current.policy.tradingActions.includes("buy") &&
+            current.policy.tradingVenues.includes("polymarket")
+          );
+        },
+        now: presentation.now,
+      });
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        error.message === "telegram_funding_buy_continuation_stale"
+      ) {
+        return presentation.message;
+      }
+      throw error;
+    }
+    const reviewButton = buildTelegramFundingReviewBuyButton({
+      continuationToken: issued.token,
+    });
+    return {
+      ...presentation.message,
+      reply_markup: {
+        inline_keyboard: [
+          [reviewButton],
+          ...(presentation.message.reply_markup?.inline_keyboard ?? []),
+        ],
+      },
+      text: joinTelegramMarkdownV2Lines([
+        presentation.message.text,
+        "",
+        `🎯 ${formatTelegramFieldMarkdownV2(
+          "Buy",
+          `${market.title} · ${sideLabel(market, buyReturn.side)}`,
+        )}`,
+        formatTelegramUsdcLineMarkdownV2(
+          `Order: ${formatUsd(requestedSpendUsd)}`,
+        ),
+        "",
+        formatTelegramCalloutMarkdownV2({
+          bodyMarkdownV2: escapeMarkdown(
+            "A fresh quote will be built after Review Buy. The order is not submitted until you press Confirm.",
+          ),
+          icon: "ℹ️",
+          title: "Funds are ready",
+        }),
+      ]),
+    };
+  };
+}
+
+export async function resumeTelegramFundingBuyContinuation(input: {
+  appBaseUrl: string;
+  chatId: string;
+  db: DbQuery;
+  idempotencyKey: string;
+  telegramMessageId: number;
+  telegramMiniAppEnabled?: boolean;
+  telegramUserId: string;
+  token: string;
+  trading: ApiBotTradingExecutor;
+}): Promise<TelegramBotTradingMessage> {
+  const unavailable = (body: string, title = "Review unavailable") =>
+    buildTelegramTradeInputNotice({ body, title });
+  if (input.chatId !== input.telegramUserId) {
+    return unavailable("Open the original private bot chat.");
+  }
+  const tokenHash = hashTelegramFundingBuyContinuationToken(input.token);
+  const lookup = await input.db.query<{
+    destination_option_id: string;
+    market_id: string;
+    telegram_funding_session_id: string;
+    user_id: string;
+    venue_binding_option_id: string;
+  }>(
+    `
+      select
+        continuation.telegram_funding_session_id,
+        buy_return.market_id,
+        context.user_id,
+        receive.destination_option_id,
+        receive.venue_binding_option_id
+      from telegram_funding_buy_continuations continuation
+      join telegram_funding_sessions context
+        on context.id = continuation.telegram_funding_session_id
+      join telegram_funding_buy_return_revisions buy_return
+        on buy_return.telegram_funding_session_id = continuation.telegram_funding_session_id
+       and buy_return.revision = continuation.buy_return_revision
+      join funding_receive_sessions receive
+        on receive.id = context.receive_session_id
+       and receive.user_id = context.user_id
+      where continuation.token_hash = $1
+      limit 1
+    `,
+    [tokenHash],
+  );
+  const scoped = lookup.rows[0];
+  if (!scoped)
+    return unavailable("This Review Buy button is invalid or expired.");
+  const requestFingerprint = canonicalJsonHash({
+    action: "resume_buy",
+    chatId: input.chatId,
+    contextId: scoped.telegram_funding_session_id,
+    telegramMessageId: input.telegramMessageId,
+    telegramUserId: input.telegramUserId,
+    tokenHash,
+  });
+
+  let intentId: string;
+  try {
+    intentId = await withOptionalTransaction(input.db, async (client) => {
+      await client.query(
+        "select pg_advisory_xact_lock(hashtextextended($1, 0))",
+        [
+          [
+            "funding-receive-session",
+            scoped.user_id,
+            scoped.destination_option_id,
+            scoped.venue_binding_option_id,
+          ].join(":"),
+        ],
+      );
+      const fundingLocked = await lockTelegramFundingReturnBeforeMarket(
+        client,
+        {
+          fundingContextId: scoped.telegram_funding_session_id,
+          marketId: scoped.market_id,
+          telegramUserId: input.telegramUserId,
+        },
+      );
+      if (!fundingLocked) {
+        throw new Error("telegram_funding_buy_continuation_invalid");
+      }
+      const replay = await client.query<{
+        action: string;
+        request_fingerprint: string;
+        resume_intent_id: string | null;
+      }>(
+        `
+          select action, request_fingerprint, resume_intent_id
+          from telegram_funding_mutations
+          where idempotency_key = $1
+          limit 1
+        `,
+        [input.idempotencyKey],
+      );
+      const replayed = replay.rows[0];
+      if (replayed) {
+        if (
+          replayed.action !== "resume_buy" ||
+          replayed.request_fingerprint !== requestFingerprint ||
+          !replayed.resume_intent_id
+        ) {
+          throw new Error("telegram_funding_idempotency_conflict");
+        }
+        return replayed.resume_intent_id;
+      }
+
+      const continuation = await fetchTelegramFundingBuyContinuationForUpdate(
+        client,
+        input.token,
+      );
+      if (!continuation) {
+        throw new Error("telegram_funding_buy_continuation_invalid");
+      }
+      const current = await client.query<{
+        active_buy_return_revision: number | null;
+        cancelled_at: Date | null;
+        chat_id: string;
+        destination_asset: Record<string, unknown>;
+        destination_option_id: string;
+        expires_at: Date;
+        latest_progress_projection: Record<string, unknown> | null;
+        progress_revision: number;
+        receive_session_id: string;
+        receive_version: string | number;
+        resume_generation: number;
+        resume_intent_id: string | null;
+        telegram_account_id: string | null;
+        telegram_user_id: string;
+        user_id: string;
+        venue_binding_option_id: string;
+        venue_id: string;
+      }>(
+        `
+          select
+            context.active_buy_return_revision,
+            context.cancelled_at,
+            context.chat_id,
+            context.expires_at,
+            context.latest_progress_projection,
+            context.progress_revision,
+            context.receive_session_id,
+            context.resume_generation,
+            context.resume_intent_id,
+            context.telegram_account_id,
+            context.telegram_user_id,
+            context.user_id,
+            receive.destination_asset,
+            receive.destination_option_id,
+            receive.venue_binding_option_id,
+            receive.venue_id,
+            receive.version as receive_version
+          from telegram_funding_sessions context
+          join funding_receive_sessions receive
+            on receive.id = context.receive_session_id
+           and receive.user_id = context.user_id
+           and receive.owner_channel = context.receive_owner_channel
+          where context.id = $1
+          for update of context, receive
+        `,
+        [continuation.fundingContextId],
+      );
+      const context = current.rows[0];
+      const now = new Date();
+      if (
+        !context ||
+        context.user_id !== scoped.user_id ||
+        context.telegram_user_id !== input.telegramUserId ||
+        context.chat_id !== input.chatId ||
+        context.telegram_account_id == null ||
+        context.telegram_account_id !== continuation.telegramAccountId ||
+        context.active_buy_return_revision !== continuation.buyReturnRevision ||
+        context.progress_revision !== continuation.readyProgressRevision ||
+        Number(context.receive_version) !== continuation.readyReceiveVersion ||
+        context.cancelled_at != null ||
+        context.expires_at.getTime() <= now.getTime() ||
+        continuation.expiresAt <= now.toISOString() ||
+        context.venue_id !== "polymarket" ||
+        context.destination_option_id !== scoped.destination_option_id ||
+        context.venue_binding_option_id !== scoped.venue_binding_option_id ||
+        context.latest_progress_projection?.state !== "ready"
+      ) {
+        throw new Error("telegram_funding_buy_continuation_stale");
+      }
+      const destinationAsset = context.destination_asset;
+      if (
+        !isRecord(destinationAsset) ||
+        typeof destinationAsset.networkId !== "string" ||
+        typeof destinationAsset.assetId !== "string" ||
+        typeof destinationAsset.decimals !== "number" ||
+        !resolveTelegramFundingBuyContinuationAdapter({
+          destinationAsset: {
+            assetId: destinationAsset.assetId,
+            decimals: destinationAsset.decimals,
+            networkId: destinationAsset.networkId,
+          },
+          venueId: context.venue_id,
+        })
+      ) {
+        throw new Error("telegram_funding_buy_continuation_unsupported");
+      }
+      const buyReturn = await client.query<BuyReturnRowForResume>(
+        `
+          select
+            telegram_account_id_snapshot,
+            market_id,
+            event_id,
+            side,
+            requested_spend_usd::text,
+            source_authority_fingerprint,
+            venue_id,
+            destination_option_id,
+            venue_binding_option_id
+          from telegram_funding_buy_return_revisions
+          where telegram_funding_session_id = $1
+            and revision = $2
+          limit 1
+        `,
+        [continuation.fundingContextId, continuation.buyReturnRevision],
+      );
+      const returnRevision = buyReturn.rows[0];
+      if (
+        !returnRevision ||
+        returnRevision.telegram_account_id_snapshot !==
+          context.telegram_account_id ||
+        returnRevision.market_id !== scoped.market_id ||
+        returnRevision.venue_id !== "polymarket" ||
+        returnRevision.destination_option_id !==
+          context.destination_option_id ||
+        returnRevision.venue_binding_option_id !==
+          context.venue_binding_option_id
+      ) {
+        throw new Error("telegram_funding_buy_continuation_stale");
+      }
+      if (
+        !(await hasReadyTelegramFundingDestinationReceipt(
+          client,
+          continuation.fundingContextId,
+        ))
+      ) {
+        throw new Error("telegram_funding_buy_destination_not_ready");
+      }
+      const policyState =
+        await resolveSignalBotTradingPolicyStateFromDb(client);
+      const authorization = await loadEnabledAuthorization(
+        client,
+        input.telegramUserId,
+        "polymarket",
+        { lock: true },
+      );
+      const market = await loadMarketById(client, returnRevision.market_id);
+      const policy = policyState.policy;
+      const authority = authorization
+        ? buildTelegramTradeAuthorityBinding(authorization)
+        : null;
+      const amountUsd = Number(returnRevision.requested_spend_usd);
+      if (
+        policyState.policyRevision !== continuation.policyRevision ||
+        !policy.buyContinuationEnabled ||
+        !policy.tradingEnabled ||
+        !policy.tradingActions.includes("buy") ||
+        !policy.tradingVenues.includes("polymarket") ||
+        !authorization ||
+        !authority ||
+        telegramBotTradeAuthorityFingerprint(authority) !==
+          returnRevision.source_authority_fingerprint ||
+        authorization.telegram_account_link_id !==
+          context.telegram_account_id ||
+        authorization.user_id !== context.user_id ||
+        !authorization.privy_wallet_id ||
+        !market ||
+        market.venue !== "polymarket" ||
+        !isMarketOrderable(market) ||
+        !Number.isFinite(amountUsd) ||
+        amountUsd <= 0 ||
+        amountUsd >
+          effectiveMaxTradeAmountUsd(policy, authorization.max_amount_usd)
+      ) {
+        throw new Error("telegram_funding_buy_continuation_disabled");
+      }
+
+      let generation: number | null = null;
+      let existingIntentId: string | null = null;
+      if (context.resume_intent_id) {
+        const existing = await client.query<{
+          execution_id: string | null;
+          generation_policy_revision: string;
+          generation_ready_progress_revision: number;
+          generation_ready_receive_version: string | number;
+          generation_telegram_account_id_snapshot: string;
+          has_setup_transactions: boolean;
+          id: string;
+          order_id: string | null;
+          status: string;
+          submit_started_at: Date | null;
+          tx_signature: string | null;
+          venue_order_id: string | null;
+        }>(
+          `
+            select
+              intent.id,
+              intent.status,
+              intent.submit_started_at,
+              intent.order_id,
+              intent.execution_id,
+              intent.venue_order_id,
+              intent.tx_signature,
+              generation.ready_progress_revision as generation_ready_progress_revision,
+              generation.telegram_account_id_snapshot as generation_telegram_account_id_snapshot,
+              generation_continuation.policy_revision as generation_policy_revision,
+              generation_continuation.ready_receive_version as generation_ready_receive_version,
+              coalesce(intent.result->'setupTransactions', '[]'::jsonb) <> '[]'::jsonb
+                as has_setup_transactions
+            from telegram_trade_intents intent
+            join telegram_funding_buy_resume_generations generation
+              on generation.trade_intent_id = intent.id
+             and generation.telegram_funding_session_id = $2::uuid
+             and generation.generation = $3
+             and generation.buy_return_revision = $4
+            join telegram_funding_buy_continuations generation_continuation
+              on generation_continuation.id = generation.continuation_id
+             and generation_continuation.telegram_funding_session_id = generation.telegram_funding_session_id
+             and generation_continuation.buy_return_revision = generation.buy_return_revision
+             and generation_continuation.ready_progress_revision = generation.ready_progress_revision
+            where intent.id = $1::uuid
+            for update
+          `,
+          [
+            context.resume_intent_id,
+            continuation.fundingContextId,
+            context.resume_generation,
+            continuation.buyReturnRevision,
+          ],
+        );
+        const currentIntent = existing.rows[0];
+        if (!currentIntent) {
+          throw new Error("telegram_funding_buy_resume_invalid");
+        }
+        const sameReadyGeneration =
+          currentIntent.generation_ready_progress_revision ===
+            continuation.readyProgressRevision &&
+          Number(currentIntent.generation_ready_receive_version) ===
+            continuation.readyReceiveVersion &&
+          currentIntent.generation_policy_revision ===
+            continuation.policyRevision &&
+          currentIntent.generation_telegram_account_id_snapshot ===
+            continuation.telegramAccountId;
+        if (
+          sameReadyGeneration &&
+          ["draft", "previewed", "confirming"].includes(currentIntent.status)
+        ) {
+          existingIntentId = currentIntent.id;
+          generation = context.resume_generation;
+        } else {
+          const retryablePreSubmit =
+            [
+              "cancelled",
+              "draft",
+              "expired",
+              "failed",
+              "previewed",
+              "confirming",
+            ].includes(currentIntent.status) &&
+            currentIntent.submit_started_at == null &&
+            currentIntent.order_id == null &&
+            currentIntent.execution_id == null &&
+            currentIntent.venue_order_id == null &&
+            currentIntent.tx_signature == null &&
+            !currentIntent.has_setup_transactions;
+          if (!retryablePreSubmit) {
+            throw new Error("telegram_trade_intent_unresolved");
+          }
+          if (
+            !sameReadyGeneration &&
+            ["draft", "previewed", "confirming"].includes(currentIntent.status)
+          ) {
+            const retired = await client.query(
+              `update telegram_trade_intents
+                  set status = 'failed',
+                      error_code = 'funding_continuation_stale',
+                      error_message = 'A newer funding Review replaced this pending Buy.',
+                      updated_at = now()
+                where id = $1::uuid
+                  and status = any($2::text[])
+                  and submit_started_at is null
+                  and order_id is null
+                  and execution_id is null
+                  and venue_order_id is null
+                  and tx_signature is null
+                  and coalesce(result->'setupTransactions', '[]'::jsonb) = '[]'::jsonb`,
+              [currentIntent.id, ["draft", "previewed", "confirming"]],
+            );
+            if ((retired.rowCount ?? 0) !== 1) {
+              throw new Error("telegram_trade_intent_unresolved");
+            }
+          }
+        }
+      }
+      if (!existingIntentId) {
+        const unresolved = await client.query<{ id: string }>(
+          `
+            select id
+            from telegram_trade_intents
+            where telegram_user_id = $1
+              and market_id = $2
+              and status in ('confirming', 'executing', 'submitted', 'reconcile_required')
+            limit 1
+            for update
+          `,
+          [input.telegramUserId, returnRevision.market_id],
+        );
+        if (unresolved.rows[0]) {
+          throw new Error("telegram_trade_intent_unresolved");
+        }
+        generation = context.resume_generation + 1;
+        existingIntentId = crypto.randomUUID();
+        const intentIdempotencyKey = [
+          "telegram-funding-resume",
+          continuation.fundingContextId,
+          continuation.buyReturnRevision,
+          generation,
+        ].join(":");
+        await client.query(
+          `
+            insert into telegram_trade_intents (
+              id,
+              telegram_user_id,
+              user_id,
+              authorization_id,
+              chat_id,
+              telegram_message_id,
+              action,
+              venue,
+              market_id,
+              event_id,
+              side,
+              amount_usd,
+              status,
+              quote_snapshot,
+              policy_snapshot,
+              result,
+              expires_at,
+              idempotency_key
+            ) values (
+              $1, $2, $3, $4, $5, $6, 'buy', 'polymarket', $7, $8, $9,
+              $10::numeric, 'draft', '{}'::jsonb, $11::jsonb, $12::jsonb,
+              $13, $14
+            )
+          `,
+          [
+            existingIntentId,
+            input.telegramUserId,
+            authorization.user_id,
+            authorization.id,
+            input.chatId,
+            input.telegramMessageId,
+            returnRevision.market_id,
+            returnRevision.event_id,
+            returnRevision.side,
+            returnRevision.requested_spend_usd,
+            JSON.stringify(buildPolicySnapshot(policy)),
+            JSON.stringify({
+              ...buildIntentAuthorityResult(authority),
+              telegramFundingReturn: {
+                continuationId: continuation.id,
+                fundingContextId: continuation.fundingContextId,
+                generation,
+                policyRevision: continuation.policyRevision,
+                returnRevision: continuation.buyReturnRevision,
+                version: 1,
+              },
+            }),
+            new Date(Date.now() + policy.intentTtlSec * 1000),
+            intentIdempotencyKey,
+          ],
+        );
+        await client.query(
+          `
+            insert into telegram_funding_buy_resume_generations (
+              telegram_funding_session_id,
+              generation,
+              parent_generation,
+              buy_return_revision,
+              continuation_id,
+              ready_progress_revision,
+              telegram_account_id_snapshot,
+              trade_intent_id,
+              idempotency_key,
+              request_fingerprint,
+              created_at
+            ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())
+          `,
+          [
+            continuation.fundingContextId,
+            generation,
+            generation === 1 ? null : generation - 1,
+            continuation.buyReturnRevision,
+            continuation.id,
+            continuation.readyProgressRevision,
+            context.telegram_account_id,
+            existingIntentId,
+            intentIdempotencyKey,
+            requestFingerprint,
+          ],
+        );
+        const bound = await client.query(
+          `
+            update telegram_funding_sessions
+            set resume_generation = $2,
+                resume_intent_id = $3,
+                resumed_at = now(),
+                updated_at = now()
+            where id = $1
+              and active_buy_return_revision = $4
+              and resume_generation = $5
+          `,
+          [
+            continuation.fundingContextId,
+            generation,
+            existingIntentId,
+            continuation.buyReturnRevision,
+            generation - 1,
+          ],
+        );
+        if ((bound.rowCount ?? 0) !== 1) {
+          throw new Error("telegram_funding_buy_continuation_stale");
+        }
+      }
+      if (generation == null || !existingIntentId) {
+        throw new Error("telegram_funding_buy_resume_failed");
+      }
+      await client.query(
+        `
+          insert into telegram_funding_mutations (
+            funding_context_id,
+            action,
+            idempotency_key,
+            request_fingerprint,
+            response_payload,
+            consent_revision,
+            buy_return_revision,
+            resume_generation,
+            resume_intent_id,
+            continuation_id,
+            created_at
+          ) values (
+            $1, 'resume_buy', $2, $3, $4::jsonb, null, $5, $6, $7, $8, now()
+          )
+        `,
+        [
+          continuation.fundingContextId,
+          input.idempotencyKey,
+          requestFingerprint,
+          JSON.stringify({ intentId: existingIntentId }),
+          continuation.buyReturnRevision,
+          generation,
+          existingIntentId,
+          continuation.id,
+        ],
+      );
+      return existingIntentId;
+    });
+  } catch {
+    return unavailable(
+      "This Review Buy is no longer current. Refresh funding or open the market again.",
+    );
+  }
+
+  const [intent, policy, authorization] = await Promise.all([
+    loadIntent(input.db, intentId),
+    resolveTelegramBotTradingPolicy(input.db),
+    loadEnabledAuthorization(input.db, input.telegramUserId, "polymarket"),
+  ]);
+  const market = intent
+    ? await loadMarketById(input.db, intent.market_id)
+    : null;
+  if (intent && !["draft", "previewed", "confirming"].includes(intent.status)) {
+    return unavailable(
+      "This Review Buy was already processed. Use /trade_status or open the market again.",
+    );
+  }
+  if (
+    !intent ||
+    !authorization ||
+    !market ||
+    !policy.buyContinuationEnabled ||
+    !intentMatchesTelegramTradeAuthority({ authorization, intent }) ||
+    !(await isTelegramFundingReturnIntentCurrent(
+      input.db,
+      intent,
+      authorization,
+    ))
+  ) {
+    if (intent) {
+      await updateIntentStatus({
+        allowedStatuses: ["draft", "previewed"],
+        db: input.db,
+        errorCode: "funding_continuation_stale",
+        errorMessage: "Funding continuation changed before preview.",
+        intentId: intent.id,
+        status: "failed",
+      });
+    }
+    return unavailable("Trading authority or policy changed before preview.");
+  }
+  const readiness = await resolveTelegramTradingReadiness({
+    action: "BUY",
+    authorization,
+    market,
+    trading: input.trading,
+    venue: "polymarket",
+  });
+  if (!canPreviewBuyForReadiness(readiness)) {
+    await updateIntentStatus({
+      allowedStatuses: ["draft", "previewed"],
+      db: input.db,
+      errorCode: "not_ready",
+      errorMessage: readiness.message ?? "Buy is not ready.",
+      intentId: intent.id,
+      status: "failed",
+    });
+    return unavailable("Current Polymarket funds are not ready for this Buy.");
+  }
+  const messages: TelegramBotTradingMessage[] = [];
+  await previewPolymarketTelegramTradeIntent({
+    appBaseUrl: input.appBaseUrl,
+    authorization,
+    beforeConfirmLocked: (client, currentAuthorization) =>
+      isTelegramFundingReturnIntentCurrent(
+        client,
+        intent,
+        currentAuthorization,
+        { lockGeneration: true },
+      ),
+    chatId: input.chatId,
+    db: input.db,
+    fundingReturnResume: true,
+    intent,
+    market,
+    maxAmountUsd: effectiveMaxTradeAmountUsd(
+      policy,
+      authorization.max_amount_usd,
+    ),
+    policy,
+    readiness,
+    sendMessage: async (message) => {
+      messages.push(message);
+      return undefined;
+    },
+    telegramMiniAppEnabled: input.telegramMiniAppEnabled,
+    trading: input.trading,
+  });
+  return (
+    messages.at(-1) ??
+    unavailable("Trade state changed. Check /trade_status before retrying.")
+  );
+}
+
+type BuyReturnRowForResume = Readonly<{
+  telegram_account_id_snapshot: string;
+  market_id: string;
+  event_id: string | null;
+  side: TelegramBotTradingSide;
+  requested_spend_usd: string;
+  source_authority_fingerprint: string;
+  venue_id: string;
+  destination_option_id: string;
+  venue_binding_option_id: string;
+}>;
 
 export async function isTelegramBotTradeInputContextAuthorityCurrent(input: {
   context: TelegramBotTradeInputContext;
@@ -5310,6 +6383,18 @@ function callbackMessageChat(input: TelegramBotTradingCallbackInput): {
   };
 }
 
+function resolveTelegramCallbackMessageId(
+  storedMessageId: string | null,
+  callbackMessageId: number | null | undefined,
+): number | null {
+  if (callbackMessageId != null && Number.isSafeInteger(callbackMessageId)) {
+    return callbackMessageId;
+  }
+  if (storedMessageId == null) return null;
+  const parsed = Number(storedMessageId);
+  return Number.isSafeInteger(parsed) ? parsed : null;
+}
+
 function isTerminalIntentStatus(status: string): boolean {
   return TERMINAL_INTENT_STATUSES.has(status);
 }
@@ -5320,6 +6405,204 @@ function isCustomTelegramTradeIntent(intent: TelegramTradeIntentRow): boolean {
       ? intent.result.telegramInput
       : null;
   return marker?.version === 1;
+}
+
+type TelegramFundingReturnIntentMarker = Readonly<{
+  continuationId: string;
+  fundingContextId: string;
+  generation: number;
+  policyRevision: string;
+  returnRevision: number;
+}>;
+
+function readTelegramFundingReturnIntentMarker(
+  intent: TelegramTradeIntentRow,
+): TelegramFundingReturnIntentMarker | null {
+  const marker =
+    isRecord(intent.result) && isRecord(intent.result.telegramFundingReturn)
+      ? intent.result.telegramFundingReturn
+      : null;
+  if (
+    marker?.version !== 1 ||
+    typeof marker.continuationId !== "string" ||
+    typeof marker.fundingContextId !== "string" ||
+    typeof marker.generation !== "number" ||
+    !Number.isInteger(marker.generation) ||
+    marker.generation <= 0 ||
+    typeof marker.policyRevision !== "string" ||
+    marker.policyRevision.trim().length === 0 ||
+    typeof marker.returnRevision !== "number" ||
+    !Number.isInteger(marker.returnRevision) ||
+    marker.returnRevision <= 0
+  ) {
+    return null;
+  }
+  return {
+    continuationId: marker.continuationId,
+    fundingContextId: marker.fundingContextId,
+    generation: marker.generation,
+    policyRevision: marker.policyRevision,
+    returnRevision: marker.returnRevision,
+  };
+}
+
+async function isTelegramFundingReturnIntentCurrent(
+  db: DbQuery,
+  intent: TelegramTradeIntentRow,
+  authorization: TelegramBotTradingAuthorizationRow,
+  options: Readonly<{ lockGeneration?: boolean }> = {},
+): Promise<boolean> {
+  const marker = readTelegramFundingReturnIntentMarker(intent);
+  const currentAuthority = buildTelegramTradeAuthorityBinding(authorization);
+  if (
+    !marker ||
+    !currentAuthority ||
+    !intentMatchesTelegramTradeAuthority({ authorization, intent })
+  ) {
+    return false;
+  }
+  const { rows } = await db.query<{
+    current: boolean;
+    continuation_policy_revision: string;
+    destination_asset: Record<string, unknown>;
+    market_id: string;
+    requested_spend_usd: string;
+    side: string;
+    source_authority_fingerprint: string;
+    venue_id: string;
+  }>(
+    `
+      select
+        true as current,
+        continuation.policy_revision as continuation_policy_revision,
+        receive.destination_asset,
+        buy_return.market_id,
+        buy_return.requested_spend_usd::text,
+        buy_return.side,
+        buy_return.source_authority_fingerprint,
+        buy_return.venue_id
+      from telegram_funding_buy_resume_generations generation
+      join telegram_funding_sessions context
+        on context.id = generation.telegram_funding_session_id
+      join telegram_funding_buy_continuations continuation
+        on continuation.id = generation.continuation_id
+       and continuation.telegram_funding_session_id = generation.telegram_funding_session_id
+       and continuation.buy_return_revision = generation.buy_return_revision
+       and continuation.ready_progress_revision = generation.ready_progress_revision
+      join telegram_funding_buy_return_revisions buy_return
+        on buy_return.telegram_funding_session_id = generation.telegram_funding_session_id
+       and buy_return.revision = generation.buy_return_revision
+      join funding_receive_sessions receive
+        on receive.id = context.receive_session_id
+       and receive.user_id = context.user_id
+       and receive.owner_channel = context.receive_owner_channel
+      where generation.telegram_funding_session_id = $1::uuid
+        and generation.generation = $2
+        and generation.buy_return_revision = $3
+        and generation.continuation_id = $4::uuid
+        and generation.trade_intent_id = $5::uuid
+        and context.active_buy_return_revision = generation.buy_return_revision
+        and context.resume_generation = generation.generation
+        and context.resume_intent_id = generation.trade_intent_id
+        and context.cancelled_at is null
+        and context.expires_at > now()
+        and context.telegram_account_id = generation.telegram_account_id_snapshot
+        and context.progress_revision = generation.ready_progress_revision
+        and context.latest_progress_projection->>'state' = 'ready'
+        and receive.version = continuation.ready_receive_version
+        and receive.venue_id = buy_return.venue_id
+        and receive.destination_option_id = buy_return.destination_option_id
+        and receive.venue_binding_option_id = buy_return.venue_binding_option_id
+        and exists (
+          select 1
+          from telegram_funding_mutations mutation
+          where mutation.funding_context_id = generation.telegram_funding_session_id
+            and mutation.resume_generation = generation.generation
+            and mutation.buy_return_revision = generation.buy_return_revision
+            and mutation.resume_intent_id = generation.trade_intent_id
+            and mutation.action = 'resume_buy'
+        )
+      ${options.lockGeneration ? "for update of generation" : ""}
+      limit 1
+    `,
+    [
+      marker.fundingContextId,
+      marker.generation,
+      marker.returnRevision,
+      marker.continuationId,
+      intent.id,
+    ],
+  );
+  const current = rows[0];
+  if (
+    current?.current !== true ||
+    current.continuation_policy_revision !== marker.policyRevision ||
+    !(await hasReadyTelegramFundingDestinationReceipt(
+      db,
+      marker.fundingContextId,
+    )) ||
+    current.market_id !== intent.market_id ||
+    current.side !== intent.side ||
+    current.venue_id !== intent.venue ||
+    telegramBotTradeAuthorityFingerprint(currentAuthority) !==
+      current.source_authority_fingerprint ||
+    Number(current.requested_spend_usd) !== Number(intent.amount_usd) ||
+    !isRecord(current.destination_asset) ||
+    typeof current.destination_asset.networkId !== "string" ||
+    typeof current.destination_asset.assetId !== "string" ||
+    typeof current.destination_asset.decimals !== "number" ||
+    !resolveTelegramFundingBuyContinuationAdapter({
+      destinationAsset: {
+        assetId: current.destination_asset.assetId,
+        decimals: current.destination_asset.decimals,
+        networkId: current.destination_asset.networkId,
+      },
+      venueId: current.venue_id,
+    })
+  ) {
+    return false;
+  }
+  await db.query("select id from unified_markets where id = $1 for share", [
+    intent.market_id,
+  ]);
+  const policyState = await resolveSignalBotTradingPolicyStateFromDb(db);
+  const policy = policyState.policy;
+  const market = await loadMarketById(db, intent.market_id);
+  const automationAllowed = await venueLifecycleAllows(
+    db,
+    intent.venue,
+    "automation",
+  );
+  const increaseExposureAllowed = await venueLifecycleAllows(
+    db,
+    intent.venue,
+    "increaseExposure",
+  );
+  const requestedSpendUsd = Number(intent.amount_usd);
+  return Boolean(
+    policyState.policyRevision === marker.policyRevision &&
+    policy.buyContinuationEnabled &&
+    policy.tradingEnabled &&
+    policy.tradingActions.includes("buy") &&
+    policy.tradingVenues.includes(intent.venue) &&
+    isVenueAllowed(
+      intent.venue,
+      policy,
+      filterVenuesForWalletChain(
+        normalizeVenues(authorization.enabled_venues),
+        authorization.wallet_chain,
+      ),
+    ) &&
+    Number.isFinite(requestedSpendUsd) &&
+    requestedSpendUsd > 0 &&
+    requestedSpendUsd <=
+      effectiveMaxTradeAmountUsd(policy, authorization.max_amount_usd) &&
+    market &&
+    market.venue === intent.venue &&
+    isMarketOrderable(market) &&
+    automationAllowed &&
+    increaseExposureAllowed,
+  );
 }
 
 async function answerIntentAlreadyProcessed(
@@ -5777,11 +7060,17 @@ async function handleTelegramRedeemCallback(input: {
 async function previewPolymarketTelegramTradeIntent(input: {
   appBaseUrl: string;
   authorization: TelegramBotTradingAuthorizationRow;
+  beforeConfirmLocked?: (
+    db: DbQuery,
+    currentAuthorization: TelegramBotTradingAuthorizationRow,
+  ) => Promise<boolean>;
   chatId: string;
   db: DbQuery;
   intent: TelegramTradeIntentRow;
   market: TelegramBotMarketRow;
   maxAmountUsd: number;
+  fundingReturnResume?: boolean;
+  openFundingBuyReturn?: TelegramFundingBuyReturnOpener;
   policy: SignalBotPolicy;
   quoteOverride?: TradeQuote;
   readiness: TradingReadiness | null;
@@ -5789,6 +7078,37 @@ async function previewPolymarketTelegramTradeIntent(input: {
   telegramMiniAppEnabled?: boolean;
   trading: ApiBotTradingExecutor;
 }): Promise<void> {
+  const sendCurrentConfirmation = async (): Promise<boolean> => {
+    let current = await loadIntent(input.db, input.intent.id);
+    let stored = current
+      ? readTelegramTradeQuotePreview(current.quote_snapshot)
+      : null;
+    if (current?.status === "previewed" && stored) {
+      await transitionIntentToConfirming({
+        authorization: input.authorization,
+        beforeConfirmLocked: input.beforeConfirmLocked,
+        db: input.db,
+        intent: current,
+      });
+      current = await loadIntent(input.db, input.intent.id);
+      stored = current
+        ? readTelegramTradeQuotePreview(current.quote_snapshot)
+        : null;
+    }
+    if (current?.status !== "confirming" || !stored) return false;
+    await input.sendMessage({
+      chat_id: input.chatId,
+      ...buildTelegramTradeConfirmationMessage({
+        authorization: input.authorization,
+        intent: current,
+        market: input.market,
+        policy: input.policy,
+        quote: stored,
+        readiness: input.readiness,
+      }),
+    });
+    return true;
+  };
   const { action, amountUsd, sharesRaw } = readTelegramTradeIntentAmount(
     input.intent,
   );
@@ -5859,8 +7179,10 @@ async function previewPolymarketTelegramTradeIntent(input: {
       (await input.trading.quote({ intent: previewIntent }));
   } catch (error) {
     const normalized = input.trading.normalizeError(input.intent.venue, error);
-    await updateIntentStatus({
-      allowedStatuses: ["draft", "previewed"],
+    const failed = await updateIntentStatus({
+      allowedStatuses: input.fundingReturnResume
+        ? ["draft"]
+        : ["draft", "previewed"],
       db: input.db,
       errorCode: normalized.code,
       errorMessage: normalized.message,
@@ -5868,6 +7190,23 @@ async function previewPolymarketTelegramTradeIntent(input: {
       result: { error: normalized, stage: "preview_quote" },
       status: "failed",
     });
+    if (!failed && (await sendCurrentConfirmation())) return;
+    if (!failed) {
+      const current = await loadIntent(input.db, input.intent.id);
+      if (current?.status !== "failed") {
+        await input.sendMessage({
+          chat_id: input.chatId,
+          parse_mode: "MarkdownV2",
+          text: formatTelegramTradeLifecycleMessageMarkdownV2({
+            heading: "A newer trade state is already available.",
+            lines: ["Use the latest confirmation or check /trade_status."],
+            marketTitle: input.intent.market_title,
+            venue: input.intent.venue,
+          }),
+        });
+        return;
+      }
+    }
     await input.sendMessage({
       chat_id: input.chatId,
       parse_mode: "MarkdownV2",
@@ -5934,6 +7273,39 @@ async function previewPolymarketTelegramTradeIntent(input: {
       requiredUsd: maxSpendUsd,
     });
     if (fundingPreview.state !== "ready") {
+      if (input.fundingReturnResume) {
+        await updateIntentStatus({
+          allowedStatuses: ["draft", "previewed"],
+          db: input.db,
+          errorCode: "funding_continuation_shortfall_changed",
+          errorMessage:
+            "Available destination funds no longer cover the fresh quote.",
+          intentId: input.intent.id,
+          quoteSnapshot: buildTelegramTradeQuotePreview(quote),
+          result: {
+            fundingState: fundingPreview.state,
+            previewQuote: quote,
+            stage: "funding_continuation_preview",
+          },
+          status: "failed",
+        });
+        await input.sendMessage({
+          chat_id: input.chatId,
+          parse_mode: "MarkdownV2",
+          text: formatTelegramTradeLifecycleMessageMarkdownV2({
+            heading: "More funding is required.",
+            lines: [
+              `The fresh quote now needs ${formatUsd(maxSpendUsd)}, but only ${formatUsd(
+                fundingPreview.availableUsd,
+              )} is executable.`,
+              "Nothing was submitted. Refresh the existing funding session after adding funds.",
+            ],
+            marketTitle: input.intent.market_title,
+            venue: input.intent.venue,
+          }),
+        });
+        return;
+      }
       await updateIntentStatus({
         allowedStatuses: ["draft", "previewed"],
         db: input.db,
@@ -5946,6 +7318,56 @@ async function previewPolymarketTelegramTradeIntent(input: {
         },
         status: "previewed",
       });
+      if (
+        shouldOpenTelegramFundingBuyReturn({
+          amountUsd,
+          buyContinuationEnabled: input.policy.buyContinuationEnabled,
+          fundingState: fundingPreview.state,
+          hasOpener: input.openFundingBuyReturn != null,
+        }) &&
+        input.openFundingBuyReturn &&
+        amountUsd != null
+      ) {
+        let fundingMessage: TelegramBotTradingMessage | null;
+        try {
+          fundingMessage = await input.openFundingBuyReturn({
+            authorizationId: input.authorization.id,
+            chatId: input.chatId,
+            eventId: input.intent.event_id,
+            idempotencyKey: `funding-return:${input.intent.id}`,
+            marketId: input.intent.market_id,
+            requestedSpendUsd: String(amountUsd),
+            side,
+            sourceIntentId: input.intent.id,
+            telegramMessageId:
+              input.intent.telegram_message_id == null
+                ? null
+                : Number(input.intent.telegram_message_id),
+            telegramUserId: input.intent.telegram_user_id,
+          });
+        } catch {
+          await input.sendMessage({
+            chat_id: input.chatId,
+            parse_mode: "MarkdownV2",
+            text: formatTelegramTradeLifecycleMessageMarkdownV2({
+              heading: "Receive setup is temporarily unavailable.",
+              lines: [
+                "The existing trade was not submitted or replaced. Try again shortly.",
+              ],
+              marketTitle: input.intent.market_title,
+              venue: input.intent.venue,
+            }),
+          });
+          return;
+        }
+        if (fundingMessage) {
+          await input.sendMessage({
+            chat_id: input.chatId,
+            ...fundingMessage,
+          });
+          return;
+        }
+      }
       const depositResolution = await resolveCanonicalPolymarketDeposit({
         db: input.db,
         telegramUserId: input.intent.telegram_user_id,
@@ -6095,7 +7517,9 @@ async function previewPolymarketTelegramTradeIntent(input: {
     }
   }
   const previewRecorded = await updateIntentStatus({
-    allowedStatuses: ["draft", "previewed"],
+    allowedStatuses: input.fundingReturnResume
+      ? ["draft"]
+      : ["draft", "previewed"],
     db: input.db,
     intentId: input.intent.id,
     quoteSnapshot: buildTelegramTradeQuotePreview(quote),
@@ -6103,31 +7527,19 @@ async function previewPolymarketTelegramTradeIntent(input: {
     status: "previewed",
   });
   if (!previewRecorded) {
-    const current = await loadIntent(input.db, input.intent.id);
-    const stored = current
-      ? readTelegramTradeQuotePreview(current.quote_snapshot)
-      : null;
-    if (current?.status === "confirming" && stored) {
-      await input.sendMessage({
-        chat_id: input.chatId,
-        ...buildTelegramTradeConfirmationMessage({
-          authorization: input.authorization,
-          intent: current,
-          market: input.market,
-          policy: input.policy,
-          quote: stored,
-          readiness: input.readiness,
-        }),
-      });
-    }
+    await sendCurrentConfirmation();
     return;
   }
   const confirming = await transitionIntentToConfirming({
     authorization: input.authorization,
+    beforeConfirmLocked: input.beforeConfirmLocked,
     db: input.db,
     intent: input.intent,
   });
   if (confirming !== "confirmed") {
+    if (confirming === "overtaken" && (await sendCurrentConfirmation())) {
+      return;
+    }
     await input.sendMessage({
       chat_id: input.chatId,
       parse_mode: "MarkdownV2",
@@ -6277,6 +7689,7 @@ export async function completeTelegramBotTradeInput(input: {
   db: DbQuery;
   isLinkCurrent: () => Promise<boolean>;
   loadContext: () => Promise<TelegramBotTradeInputContext | null>;
+  openFundingBuyReturn?: TelegramFundingBuyReturnOpener;
   telegramMessageId: number;
   telegramMiniAppEnabled?: boolean;
   telegramUserId: string;
@@ -6806,6 +8219,7 @@ export async function completeTelegramBotTradeInput(input: {
       policy,
       authorization.max_amount_usd,
     ),
+    openFundingBuyReturn: input.openFundingBuyReturn,
     policy,
     quoteOverride,
     readiness,
@@ -6902,6 +8316,10 @@ export async function handleTelegramBotTradingCallback(
     return true;
   }
   const chatId = messageChat.id;
+  const callbackMessageId = resolveTelegramCallbackMessageId(
+    intent.telegram_message_id,
+    input.callbackQuery.message?.message_id,
+  );
   if (input.callbackQuery.message?.message_id != null) {
     await input.db.query(
       `UPDATE telegram_trade_intents
@@ -6915,6 +8333,47 @@ export async function handleTelegramBotTradingCallback(
         input.callbackQuery.id,
       ],
     );
+    intent.telegram_message_id = String(input.callbackQuery.message.message_id);
+  }
+  if (
+    parsed.type === "retry_buy" &&
+    intent.status === "cancelled" &&
+    intent.error_code === "superseded_via_funding" &&
+    intent.action === "buy" &&
+    intent.authorization_id &&
+    intent.side &&
+    intent.amount_usd &&
+    input.openFundingBuyReturn
+  ) {
+    try {
+      const fundingMessage = await input.openFundingBuyReturn({
+        authorizationId: intent.authorization_id,
+        chatId,
+        eventId: intent.event_id,
+        idempotencyKey: `funding-return:${intent.id}`,
+        marketId: intent.market_id,
+        requestedSpendUsd: intent.amount_usd,
+        side: intent.side,
+        sourceIntentId: intent.id,
+        telegramMessageId: callbackMessageId,
+        telegramUserId: intent.telegram_user_id,
+      });
+      if (fundingMessage) {
+        await input.answerCallbackQuery({
+          callbackQueryId: input.callbackQuery.id,
+          text: "✅ Funding session restored.",
+        });
+        await input.sendMessage({ chat_id: chatId, ...fundingMessage });
+        return true;
+      }
+    } catch {
+      await input.answerCallbackQuery({
+        callbackQueryId: input.callbackQuery.id,
+        showAlert: true,
+        text: "⚠️ Funding session is temporarily unavailable. Try the same button again.",
+      });
+      return true;
+    }
   }
   if (isTerminalIntentStatus(intent.status) || intent.status === "executing") {
     await answerIntentAlreadyProcessed(input, intent);
@@ -7073,6 +8532,8 @@ export async function handleTelegramBotTradingCallback(
   if (
     !policy.tradingEnabled ||
     (isCustomTelegramTradeIntent(intent) && !policy.customTradeInputEnabled) ||
+    (readTelegramFundingReturnIntentMarker(intent) != null &&
+      !policy.buyContinuationEnabled) ||
     !policy.tradingActions.includes(intent.action) ||
     !policy.tradingVenues.includes(intent.venue) ||
     !market ||
@@ -7190,6 +8651,7 @@ export async function handleTelegramBotTradingCallback(
         intent,
         market,
         maxAmountUsd,
+        openFundingBuyReturn: input.openFundingBuyReturn,
         policy,
         readiness: tradeReadiness,
         sendMessage: input.sendMessage,
@@ -7712,6 +9174,18 @@ export async function handleTelegramBotTradingCallback(
       } else {
         setupTransactions.push(setupTransaction);
       }
+      const recorded = await updateIntentStatus({
+        allowedStatuses: ["executing"],
+        db: input.db,
+        intentId: intent.id,
+        result: withReadinessRepair({ quote }),
+        status: "executing",
+      });
+      if (!recorded) {
+        throw new Error(
+          "Telegram trade state changed before setup transaction evidence was recorded.",
+        );
+      }
       input.log?.info?.(
         {
           intentId: intent.id,
@@ -7721,16 +9195,39 @@ export async function handleTelegramBotTradingCallback(
         },
         "Telegram trade setup transaction submitted",
       );
-      await updateIntentStatus({
-        allowedStatuses: ["executing"],
+    };
+    const enterIrreversibleSubmitBoundary = async (
+      allowPreviouslyStarted: boolean,
+    ) => {
+      const submitMarked = await markTelegramIntentSubmitBoundary({
+        allowPreviouslyStarted,
+        authorization,
         db: input.db,
-        intentId: intent.id,
+        intent,
         result: withReadinessRepair({ quote }),
-        status: "executing",
       });
+      if (!submitMarked) {
+        throw new Error(
+          "Telegram bot trading authority or intent changed before submit.",
+        );
+      }
+      submitStarted = true;
+      if (broadcastStartedAtMs == null) {
+        broadcastStartedAtMs = Date.now();
+        input.log?.info?.(
+          {
+            confirmToBroadcastMs: broadcastStartedAtMs - confirmStartedAtMs,
+            intentId: intent.id,
+            venue: intent.venue,
+          },
+          "Telegram trade reached irreversible submit boundary",
+        );
+      }
     };
     const prepared = await trading.prepareTrade({
       intent: sharedIntent,
+      onBeforeSetupTransactionBroadcast: () =>
+        enterIrreversibleSubmitBoundary(false),
       quote,
       onSetupTransactionSubmitted: recordSetupTransaction,
     });
@@ -7787,41 +9284,7 @@ export async function handleTelegramBotTradingCallback(
     const executed = await trading.executePreparedTrade({
       prepared,
       onBroadcastSubmitted: recordSubmittedReference,
-      onBeforeBroadcast: async () => {
-        if (
-          !(await isTelegramBotTradingAuthorizationEnabled(
-            input.db,
-            authorization,
-            intent.venue,
-            intent,
-          ))
-        ) {
-          throw new Error(
-            "Telegram bot trading authorization was disabled before submit.",
-          );
-        }
-        const submitMarked = await updateIntentStatus({
-          allowedStatuses: ["executing"],
-          db: input.db,
-          intentId: intent.id,
-          markSubmitStarted: true,
-          result: withReadinessRepair({ quote }),
-          status: "executing",
-        });
-        if (!submitMarked) {
-          throw new Error("Trade intent is no longer active before submit.");
-        }
-        submitStarted = true;
-        broadcastStartedAtMs = Date.now();
-        input.log?.info?.(
-          {
-            confirmToBroadcastMs: broadcastStartedAtMs - confirmStartedAtMs,
-            intentId: intent.id,
-            venue: intent.venue,
-          },
-          "Telegram trade reached irreversible submit boundary",
-        );
-      },
+      onBeforeBroadcast: () => enterIrreversibleSubmitBoundary(true),
       onSetupTransactionSubmitted: recordSetupTransaction,
       onSubmitted: recordSubmittedReference,
     });
@@ -8111,6 +9574,7 @@ export async function captureTelegramBotTradingCallback(input: {
   expectedIntentId?: string | null;
   expectedType?: "buy" | "sell" | "redeem" | "cancel" | "confirm" | null;
   log?: TelegramBotTradingCallbackInput["log"];
+  openFundingBuyReturn?: TelegramFundingBuyReturnOpener;
   signerInspector?: TelegramBotTradingSignerInspector;
   telegramMiniAppEnabled?: boolean;
   trading?: ApiBotTradingExecutor;
@@ -8128,6 +9592,7 @@ export async function captureTelegramBotTradingCallback(input: {
     expectedIntentId: input.expectedIntentId,
     expectedType: input.expectedType,
     log: input.log,
+    openFundingBuyReturn: input.openFundingBuyReturn,
     signerInspector: input.signerInspector,
     sendMessage: async (message) => {
       messages.push(message);

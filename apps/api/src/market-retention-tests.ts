@@ -101,6 +101,7 @@ await test("retention selector reports and cleans ephemeral Telegram trade inten
     "utf8",
   );
   assert.match(source, /telegram_trade_intents_ephemeral_cleanup/);
+  assert.match(source, /setupTransactions/);
   assert.match(
     source,
     /'executing', 'submitted', 'filled', 'reconcile_required'/,
@@ -376,6 +377,122 @@ await test("unified retention protects Limitless token_yes/token_no position var
   }
 });
 
+await test("retention preserves failed Telegram intents with submit evidence", async () => {
+  const rawTokenId = numericTokenId();
+  const marketId = `retention-telegram-setup:${crypto.randomUUID()}`;
+  const userId = await createTestUser();
+  let intentId: string | null = null;
+
+  try {
+    await insertUnifiedLimitlessMarket({ marketId, rawTokenId });
+    const inserted = await pool.query<{ id: string }>(
+      `
+        insert into telegram_trade_intents (
+          telegram_user_id,
+          user_id,
+          action,
+          venue,
+          market_id,
+          side,
+          amount_usd,
+          status,
+          result,
+          expires_at,
+          idempotency_key
+        ) values (
+          $1,
+          $2::uuid,
+          'buy',
+          'limitless',
+          $3,
+          'YES',
+          1,
+          'failed',
+          $4::jsonb,
+          now() - interval '1 day',
+          $5
+        )
+        returning id
+      `,
+      [
+        String(crypto.randomInt(100_000_000, 999_999_999)),
+        userId,
+        marketId,
+        JSON.stringify({
+          setupTransactions: [
+            { kind: "approval", txHash: "0xretained-setup-transaction" },
+          ],
+        }),
+        `retention-telegram-setup:${crypto.randomUUID()}`,
+      ],
+    );
+    intentId = inserted.rows[0]?.id ?? null;
+    assert.ok(intentId);
+
+    const report = await runApiScriptJson("market-retention-selector.ts", [
+      "--venue=limitless",
+      "--cutoff-days=30",
+      "--limit=50000",
+      "--sample=200",
+      "--json",
+    ]);
+    const rows = summaryRows(report, "batchSummary");
+    assert.ok(
+      countFor(rows, {
+        section: "protected_by_reason",
+        label: "telegram_trade_intents_durable",
+      }) >= 1,
+    );
+    assert.equal(
+      summaryRows(report, "removableSamples").some(
+        (row) => row.marketId === marketId,
+      ),
+      false,
+    );
+
+    await pool.query(
+      `update telegram_trade_intents
+       set result = '{}'::jsonb,
+           submit_started_at = now(),
+           updated_at = now()
+       where id = $1::uuid`,
+      [intentId],
+    );
+    const submitStartedReport = await runApiScriptJson(
+      "market-retention-selector.ts",
+      [
+        "--venue=limitless",
+        "--cutoff-days=30",
+        "--limit=50000",
+        "--sample=200",
+        "--json",
+      ],
+    );
+    assert.ok(
+      countFor(summaryRows(submitStartedReport, "batchSummary"), {
+        section: "protected_by_reason",
+        label: "telegram_trade_intents_durable",
+      }) >= 1,
+    );
+    assert.equal(
+      summaryRows(submitStartedReport, "removableSamples").some(
+        (row) => row.marketId === marketId,
+      ),
+      false,
+    );
+  } finally {
+    if (intentId) {
+      await pool.query("delete from telegram_trade_intents where id = $1", [
+        intentId,
+      ]);
+    }
+    await cleanupUnifiedRetentionTest(userId, marketId, [
+      rawTokenId,
+      `other-${rawTokenId}`,
+    ]);
+  }
+});
+
 await test("unified retention protects markets referenced by funding operations", async () => {
   const rawTokenId = numericTokenId();
   const marketId = `retention-funding:${crypto.randomUUID()}`;
@@ -443,6 +560,7 @@ await test("unified retention protects markets referenced by funding operations"
           consent_snapshot,
           original_subject_lookup_hmac,
           subject_lookup_key_version,
+          expires_at,
           completed_at
         )
         values (
@@ -465,6 +583,7 @@ await test("unified retention protects markets referenced by funding operations"
           '{}'::jsonb,
           repeat('e', 64),
           1,
+          now() + interval '1 hour',
           now()
         )
         returning id

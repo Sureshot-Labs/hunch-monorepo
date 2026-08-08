@@ -101,6 +101,7 @@ export type FundingMergeConflictSummary = Readonly<{
   positionActionEvidence: number;
   receiveEvidence: number;
   telegramFundingContextEvidence: number;
+  telegramFundingBuyContinuationEvidence: number;
 }>;
 
 export class FundingMergeConflictError extends Error {
@@ -139,6 +140,15 @@ async function fetchFundingMergeConflicts(
   sourceId: string,
   targetId: string,
 ): Promise<FundingMergeConflictSummary> {
+  const buyContinuationEvidenceSql = `
+        (
+          select count(*)::text
+          from telegram_funding_buy_return_revisions buy_return
+          join telegram_funding_sessions context
+            on context.id = buy_return.telegram_funding_session_id
+          where context.user_id = any($1::uuid[])
+        )
+      `;
   const { rows } = await client.query<{
     active_funding_leases: string;
     active_funding_routes: string;
@@ -153,6 +163,7 @@ async function fetchFundingMergeConflicts(
     position_action_evidence: string;
     receive_evidence: string;
     telegram_funding_context_evidence: string;
+    telegram_funding_buy_continuation_evidence: string;
   }>(
     `
       select
@@ -245,6 +256,8 @@ async function fetchFundingMergeConflicts(
           from telegram_funding_sessions context
           where context.user_id = any($1::uuid[])
         ) as telegram_funding_context_evidence,
+        ${buyContinuationEvidenceSql}
+          as telegram_funding_buy_continuation_evidence,
         (
           select count(*)::text
           from funding_operations source
@@ -290,6 +303,9 @@ async function fetchFundingMergeConflicts(
     receiveEvidence: Number(row.receive_evidence),
     telegramFundingContextEvidence: Number(
       row.telegram_funding_context_evidence,
+    ),
+    telegramFundingBuyContinuationEvidence: Number(
+      row.telegram_funding_buy_continuation_evidence,
     ),
   };
 }

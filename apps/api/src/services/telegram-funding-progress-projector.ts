@@ -1,11 +1,12 @@
+import { fetchActiveRuntimePolicy } from "@hunch/db";
 import { tx, type Pool } from "@hunch/infra";
 
 import {
   fetchFundingReceiveSessionForUser,
   listFundingReceiveReceiptsForUser,
 } from "../funding/persistence/funding-receive-session-repository.js";
-import type { TelegramFundingProgressProjection } from "./telegram-funding-contracts.js";
 import {
+  parseTelegramFundingProgressProjection,
   projectTelegramFundingProgress,
   telegramFundingProgressFingerprint,
 } from "./telegram-funding-progress.js";
@@ -13,6 +14,7 @@ import {
   fetchActiveTelegramFundingConsent,
   fetchTelegramFundingSessionContext,
 } from "./telegram-funding-sessions.js";
+import { DEFAULT_SIGNAL_BOT_POLICY_REVISION } from "./signal-bot-policy-revision.js";
 
 type CandidateRow = Readonly<{
   id: string;
@@ -23,7 +25,11 @@ type CandidateRow = Readonly<{
 
 async function listProjectionCandidates(
   pool: Pick<Pool, "query">,
-  input: Readonly<{ limit: number; now: Date }>,
+  input: Readonly<{
+    limit: number;
+    now: Date;
+    policyRevision: string;
+  }>,
 ): Promise<CandidateRow[]> {
   const { rows } = await pool.query<CandidateRow>(
     `
@@ -38,6 +44,7 @@ async function listProjectionCandidates(
        and receive.user_id = context.user_id
       where (
           context.active_consent_revision is not null
+          or context.active_buy_return_revision is not null
           or context.cancelled_at is not null
           or context.expires_at <= $1
           or exists (
@@ -51,6 +58,12 @@ async function listProjectionCandidates(
           or receive.version > context.projected_receive_version
           or coalesce(context.active_consent_revision, 0)
             <> context.projected_consent_revision
+          or coalesce(context.active_buy_return_revision, 0)
+            <> context.projected_buy_return_revision
+          or (
+            context.active_buy_return_revision is not null
+            and context.projected_buy_policy_revision is distinct from $3
+          )
           or (
             context.active_consent_revision is not null
             and (
@@ -64,7 +77,7 @@ async function listProjectionCandidates(
       order by context.projection_checked_at asc nulls first, context.id asc
       limit $2
     `,
-    [input.now, input.limit],
+    [input.now, input.limit, input.policyRevision],
   );
   return rows;
 }
@@ -73,6 +86,7 @@ async function projectCandidate(
   pool: Pool,
   candidate: CandidateRow,
   now: Date,
+  policyRevision: string,
 ): Promise<"created" | "skipped"> {
   return tx(pool, async (client) => {
     const locked = await client.query<{ id: string }>(
@@ -110,8 +124,11 @@ async function projectCandidate(
       ? telegramFundingProgressFingerprint(projection)
       : null;
     const current = await client.query<{
+      active_buy_return_revision: number | null;
       progress_fingerprint: string | null;
       progress_revision: number;
+      projected_buy_policy_revision: string | null;
+      projected_buy_return_revision: number;
       telegram_account_id: string | null;
       telegram_message_id: string | number | null;
     }>(
@@ -119,6 +136,9 @@ async function projectCandidate(
         select
           progress_fingerprint,
           progress_revision,
+          active_buy_return_revision,
+          projected_buy_policy_revision,
+          projected_buy_return_revision,
           telegram_account_id,
           telegram_message_id
         from telegram_funding_sessions
@@ -128,19 +148,29 @@ async function projectCandidate(
     );
     const row = current.rows[0];
     if (!row) return "skipped";
-    if (!projection || row.progress_fingerprint === fingerprint) {
+    const presentationChanged =
+      row.active_buy_return_revision != null &&
+      (row.projected_buy_return_revision !== row.active_buy_return_revision ||
+        row.projected_buy_policy_revision !== policyRevision);
+    if (
+      !projection ||
+      (row.progress_fingerprint === fingerprint && !presentationChanged)
+    ) {
       await client.query(
         `
           update telegram_funding_sessions
           set projected_receive_version = greatest(projected_receive_version, $2),
               projected_consent_revision = $3,
-              projection_checked_at = $4
+              projected_buy_return_revision = coalesce(active_buy_return_revision, 0),
+              projected_buy_policy_revision = $4,
+              projection_checked_at = $5
           where id = $1
         `,
         [
           context.id,
           receive.session.version,
           context.activeConsentRevision ?? 0,
+          policyRevision,
           now,
         ],
       );
@@ -157,7 +187,9 @@ async function projectCandidate(
             latest_terminal_projection = case when $5 then $4::jsonb else latest_terminal_projection end,
             projected_receive_version = greatest(projected_receive_version, $7),
             projected_consent_revision = $8,
-            projection_checked_at = $9
+            projected_buy_return_revision = coalesce(active_buy_return_revision, 0),
+            projected_buy_policy_revision = $9,
+            projection_checked_at = $10
         where id = $1
           and progress_revision = $6
         returning id
@@ -171,6 +203,7 @@ async function projectCandidate(
         row.progress_revision,
         receive.session.version,
         context.activeConsentRevision ?? 0,
+        policyRevision,
         now,
       ],
     );
@@ -221,47 +254,22 @@ export async function runTelegramFundingProgressProjectionBatch(
   input: Readonly<{ limit?: number; now?: Date }> = {},
 ): Promise<Readonly<{ candidates: number; created: number; skipped: number }>> {
   const now = input.now ?? new Date();
+  const policyRevision =
+    (await fetchActiveRuntimePolicy(pool, "signal_bot"))?.id ??
+    DEFAULT_SIGNAL_BOT_POLICY_REVISION;
   const candidates = await listProjectionCandidates(pool, {
     limit: Math.min(100, Math.max(1, input.limit ?? 25)),
     now,
+    policyRevision,
   });
   let created = 0;
   let skipped = 0;
   for (const candidate of candidates) {
-    const result = await projectCandidate(pool, candidate, now);
+    const result = await projectCandidate(pool, candidate, now, policyRevision);
     if (result === "created") created += 1;
     else skipped += 1;
   }
   return { candidates: candidates.length, created, skipped };
 }
 
-export function parseTelegramFundingProgressProjection(
-  value: unknown,
-): TelegramFundingProgressProjection | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const record = value as Partial<TelegramFundingProgressProjection>;
-  if (
-    record.version !== 1 ||
-    typeof record.fundingContextId !== "string" ||
-    ![
-      "waiting_for_transfer",
-      "funds_received",
-      "ready",
-      "expired",
-      "cancelled",
-      "needs_attention",
-    ].includes(String(record.state)) ||
-    typeof record.terminal !== "boolean" ||
-    (record.assetSymbol !== "pUSD" && record.assetSymbol !== "USDC.e") ||
-    record.networkLabel !== "Polygon" ||
-    record.decimals !== 6 ||
-    (record.rawAmount !== null && typeof record.rawAmount !== "string") ||
-    (record.receiveAddress !== null &&
-      typeof record.receiveAddress !== "string") ||
-    typeof record.expiresAt !== "string" ||
-    (record.observedAt !== null && typeof record.observedAt !== "string")
-  ) {
-    return null;
-  }
-  return record as TelegramFundingProgressProjection;
-}
+export { parseTelegramFundingProgressProjection };

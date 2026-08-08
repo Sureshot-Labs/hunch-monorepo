@@ -561,6 +561,7 @@ type ConfirmIntentUpdate = {
 };
 
 function createPolymarketConfirmDb(updates: ConfirmIntentUpdate[]) {
+  let intentStatus = "confirming";
   return {
     query: async (sql: string, params?: unknown[]) => {
       if (/from runtime_policies/i.test(sql)) {
@@ -601,7 +602,7 @@ function createPolymarketConfirmDb(updates: ConfirmIntentUpdate[]) {
               event_id: "event-1",
               side: "YES",
               amount_usd: "10",
-              status: "confirming",
+              status: intentStatus,
               quote_snapshot: {},
               policy_snapshot: {},
               expires_at: new Date(Date.now() + 60_000),
@@ -659,6 +660,7 @@ function createPolymarketConfirmDb(updates: ConfirmIntentUpdate[]) {
         sql.includes("UPDATE telegram_trade_intents") &&
         sql.includes("SET status = $2")
       ) {
+        intentStatus = String(params?.[1]);
         updates.push({
           status: params?.[1],
           errorCode: params?.[2],
@@ -6034,6 +6036,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           getReadiness: async () => ({
             ready: true,
             executable: true,
+            maxExecutableBuyUsd: 50,
             reasonCode: null,
             message: null,
             setupRequired: false,
@@ -7751,6 +7754,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         venueOrderId: unknown;
       }> = [];
       let quotedSlippageBps: unknown = null;
+      let intentStatus = "confirming";
       const db = {
         query: async (sql: string, params?: unknown[]) => {
           if (
@@ -7796,7 +7800,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
                   event_id: "event-1",
                   side: "YES",
                   amount_usd: "10",
-                  status: "confirming",
+                  status: intentStatus,
                   quote_snapshot: {},
                   policy_snapshot: {},
                   result: TEST_TELEGRAM_TRADE_AUTHORITY_RESULT,
@@ -7855,6 +7859,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
             sql.includes("UPDATE telegram_trade_intents") &&
             sql.includes("SET status = $2")
           ) {
+            intentStatus = String(params?.[1]);
             updateStatuses.push({
               status: params?.[1],
               errorCode: params?.[2],
@@ -8188,6 +8193,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     run: async () => {
       const telegram = new FakeTelegram();
       const updateStatuses: Array<{ errorCode: unknown; status: unknown }> = [];
+      let intentStatus = "confirming";
       const db = {
         query: async (sql: string, params?: unknown[]) => {
           if (/from runtime_policies/i.test(sql)) {
@@ -8227,7 +8233,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
                   event_id: "event-1",
                   side: "YES",
                   amount_usd: "10",
-                  status: "confirming",
+                  status: intentStatus,
                   quote_snapshot: {},
                   policy_snapshot: {},
                   result: TEST_TELEGRAM_TRADE_AUTHORITY_RESULT,
@@ -8286,6 +8292,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
             sql.includes("UPDATE telegram_trade_intents") &&
             sql.includes("SET status = $2")
           ) {
+            intentStatus = String(params?.[1]);
             updateStatuses.push({
               status: params?.[1],
               errorCode: params?.[2],
@@ -9070,6 +9077,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         preparedSnapshot: boolean;
         status: unknown;
       }> = [];
+      let intentStatus = "confirming";
       const db = {
         query: async (sql: string, params?: unknown[]) => {
           if (/from runtime_policies/i.test(sql)) {
@@ -9109,7 +9117,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
                   event_id: "event-1",
                   side: "YES",
                   amount_usd: "10",
-                  status: "confirming",
+                  status: intentStatus,
                   quote_snapshot: {},
                   policy_snapshot: {},
                   result: TEST_TELEGRAM_TRADE_AUTHORITY_RESULT,
@@ -9168,6 +9176,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
             sql.includes("UPDATE telegram_trade_intents") &&
             sql.includes("SET status = $2")
           ) {
+            intentStatus = String(params?.[1]);
             updateAttempts.push({
               status: params?.[1],
               errorCode: params?.[2],

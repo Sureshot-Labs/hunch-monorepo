@@ -177,6 +177,7 @@ export type PrepareTradeInput = {
   intent: TradeIntent;
   quote?: TradeQuote | null;
   now?: Date;
+  onBeforeSetupTransactionBroadcast?: () => Promise<void> | void;
   onSetupTransactionSubmitted?: (input: {
     kind: "approval" | "funding_router" | "redemption_adapter";
     recordedAt?: string | null;

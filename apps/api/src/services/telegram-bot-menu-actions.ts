@@ -94,6 +94,7 @@ export function isSignalBotFundingMenuRoute(
 export type SignalBotFundingMenuAction =
   | "cancel"
   | "open"
+  | "resume_buy"
   | "select"
   | "session";
 
@@ -102,13 +103,15 @@ export function signalBotFundingMenuAction(
 ): SignalBotFundingMenuAction | null {
   return route.kind === "select"
     ? "select"
-    : route.kind === "cancel"
-      ? "cancel"
-      : route.kind === "refresh" || route.kind === "qr"
-        ? "session"
-        : route.kind === "deposit" && route.venue === "polymarket"
-          ? "open"
-          : null;
+    : route.kind === "review_buy"
+      ? "resume_buy"
+      : route.kind === "cancel"
+        ? "cancel"
+        : route.kind === "refresh" || route.kind === "qr"
+          ? "session"
+          : route.kind === "deposit" && route.venue === "polymarket"
+            ? "open"
+            : null;
 }
 
 type MenuButton =
@@ -135,10 +138,11 @@ export type SignalBotInteractiveMenuLoaders = {
     venue: string | null;
   }) => Promise<MenuMessage & { qrText?: string }>;
   funding: (input: {
-    action: "cancel" | "open" | "select" | "session";
+    action: "cancel" | "open" | "resume_buy" | "select" | "session";
     chatId: string;
     choiceToken?: string;
     contextId?: string;
+    continuationToken?: string;
     idempotencyKey: string;
     telegramMessageId: number | null;
     telegramUserId: number;
@@ -344,11 +348,13 @@ async function deliverSignalBotInteractiveMenuCallback(
                   choiceToken: route.choiceToken,
                   contextId: route.contextId,
                 }
-              : route.kind === "cancel" ||
-                  route.kind === "refresh" ||
-                  route.kind === "qr"
-                ? { contextId: route.contextId }
-                : {}),
+              : route.kind === "review_buy"
+                ? { continuationToken: route.continuationToken }
+                : route.kind === "cancel" ||
+                    route.kind === "refresh" ||
+                    route.kind === "qr"
+                  ? { contextId: route.contextId }
+                  : {}),
             idempotencyKey:
               "funding:" + (input.idempotencyKey ?? "legacy-callback"),
             telegramMessageId: input.messageId,

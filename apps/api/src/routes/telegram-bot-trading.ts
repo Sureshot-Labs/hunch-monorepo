@@ -32,6 +32,7 @@ import {
   buildTelegramBotTradingStatusMessage,
   captureTelegramBotTradingCallback,
   completeTelegramBotTradeInput,
+  createTelegramFundingBuyContinuationDecorator,
   cleanupTelegramBotTradingForUnlink,
   disableTelegramBotTradingForUser,
   disableTelegramBotTradingForTelegramUser,
@@ -40,6 +41,7 @@ import {
   isTelegramBotTradeInputContextAuthorityCurrent,
   reconcileStaleTelegramTradeIntents,
   resolveTelegramBotTradingWalletSetupIssues,
+  resumeTelegramFundingBuyContinuation,
   TelegramBotTradingEnableError,
   type TelegramBotTradingInternalWalletCandidate,
   type TelegramBotTradingWalletSetupIssue,
@@ -228,13 +230,23 @@ const internalFundingSessionBodySchema = internalFundingIdentitySchema
 
 const internalFundingSelectTargetBodySchema = internalFundingMutationSchema
   .extend({
-    choiceToken: z.string().regex(/^[a-z0-9]{1,8}$/i),
     contextId: z.string().uuid(),
+    choiceToken: z.string().regex(/^[a-z0-9]{1,8}$/i),
   })
   .strict();
 
 const internalFundingCancelBodySchema = internalFundingMutationSchema
   .extend({ contextId: z.string().uuid() })
+  .strict();
+
+const internalFundingResumeBuyBodySchema = internalFundingIdentitySchema
+  .extend({
+    appBaseUrl: z.string().trim().url(),
+    continuationToken: z.string().regex(/^[A-Za-z0-9_-]{22}$/u),
+    idempotencyKey: z.string().trim().min(8).max(192),
+    telegramMessageId: z.number().int().positive(),
+    telegramMiniAppEnabled: z.boolean().optional(),
+  })
   .strict();
 
 const internalStatusBodySchema = z
@@ -433,7 +445,8 @@ export type TelegramBotTradingRouteDependencies = {
   fundingService?: Pick<
     TelegramFundingService,
     "cancel" | "open" | "selectTarget" | "session"
-  >;
+  > &
+    Partial<Pick<TelegramFundingService, "openBuyReturn">>;
   searchMarkets?: typeof searchTelegramMarkets;
   writeTradeInputContext?: (
     context: TelegramBotTradeInputContext,
@@ -493,6 +506,32 @@ async function registerTelegramBotTradingRoutes(
       logger: app.log,
       pool,
     });
+  };
+  const createFundingDecoratorForRequest = (request: FastifyRequest) =>
+    createTelegramFundingBuyContinuationDecorator({
+      pool: routePool,
+      trading: createTradingForRequest(request),
+    });
+  const openFundingBuyReturn = async (
+    input: Parameters<TelegramFundingService["openBuyReturn"]>[0],
+    decorateProgress?: Parameters<TelegramFundingService["openBuyReturn"]>[2],
+  ) => {
+    if (!fundingService.openBuyReturn) return null;
+    try {
+      return await fundingService.openBuyReturn(
+        input,
+        new Date(),
+        decorateProgress,
+      );
+    } catch (error) {
+      if (
+        error instanceof TelegramFundingError &&
+        (error.code === "funding_receive_disabled" ||
+          error.code === "funding_buy_continuation_disabled")
+      )
+        return null;
+      throw error;
+    }
   };
 
   const activateManagedTrading = async (input: {
@@ -678,6 +717,17 @@ async function registerTelegramBotTradingRoutes(
       .code(error instanceof TelegramFundingError ? 409 : 503)
       .send({ error: errorCode });
   };
+  const sendTelegramFundingMessage = async (
+    request: FastifyRequest,
+    reply: FastifyReply,
+    load: () => Promise<unknown>,
+  ) => {
+    try {
+      return reply.send(await load());
+    } catch (error) {
+      return sendTelegramFundingError(request, reply, error);
+    }
+  };
 
   api.post(
     "/internal/telegram-bot/funding/open",
@@ -686,25 +736,25 @@ async function registerTelegramBotTradingRoutes(
       schema: { body: internalFundingOpenBodySchema },
     },
     async (request, reply) => {
-      try {
-        return reply.send(await fundingService.open(request.body));
-      } catch (error) {
-        if (
-          error instanceof TelegramFundingError &&
-          error.code === "funding_receive_disabled"
-        ) {
-          return reply.send(
-            await buildDepositMessage({
+      return sendTelegramFundingMessage(request, reply, async () => {
+        try {
+          return await fundingService.open(request.body, new Date());
+        } catch (error) {
+          if (
+            error instanceof TelegramFundingError &&
+            error.code === "funding_receive_disabled"
+          ) {
+            return buildDepositMessage({
               appBaseUrl: request.body.appBaseUrl,
               pool: db,
               telegramMiniAppEnabled: request.body.telegramMiniAppEnabled,
               telegramUserId: request.body.telegramUserId,
               venue: "polymarket",
-            }),
-          );
+            });
+          }
+          throw error;
         }
-        return sendTelegramFundingError(request, reply, error);
-      }
+      });
     },
   );
 
@@ -715,11 +765,13 @@ async function registerTelegramBotTradingRoutes(
       schema: { body: internalFundingSessionBodySchema },
     },
     async (request, reply) => {
-      try {
-        return reply.send(await fundingService.session(request.body));
-      } catch (error) {
-        return sendTelegramFundingError(request, reply, error);
-      }
+      return sendTelegramFundingMessage(request, reply, () =>
+        fundingService.session(
+          request.body,
+          new Date(),
+          createFundingDecoratorForRequest(request),
+        ),
+      );
     },
   );
 
@@ -750,6 +802,28 @@ async function registerTelegramBotTradingRoutes(
       } catch (error) {
         return sendTelegramFundingError(request, reply, error);
       }
+    },
+  );
+
+  api.post(
+    "/internal/telegram-bot/funding/resume-buy",
+    {
+      preHandler: [requireInternal, requirePrivateTelegramChat],
+      schema: { body: internalFundingResumeBuyBodySchema },
+    },
+    async (request, reply) => {
+      const message = await resumeTelegramFundingBuyContinuation({
+        appBaseUrl: request.body.appBaseUrl,
+        chatId: String(request.body.chatId),
+        db,
+        idempotencyKey: request.body.idempotencyKey,
+        telegramMessageId: request.body.telegramMessageId,
+        telegramMiniAppEnabled: request.body.telegramMiniAppEnabled,
+        telegramUserId: String(request.body.telegramUserId),
+        token: request.body.continuationToken,
+        trading: createTradingForRequest(request),
+      });
+      return reply.send(message);
     },
   );
 
@@ -1137,6 +1211,11 @@ async function registerTelegramBotTradingRoutes(
       expectedIntentId: request.params?.id ?? null,
       expectedType: expectedType ?? null,
       log: app.log,
+      openFundingBuyReturn: (input) =>
+        openFundingBuyReturn(
+          { ...input, venue: "polymarket" },
+          createFundingDecoratorForRequest(request as FastifyRequest),
+        ),
       signerInspector,
       telegramMiniAppEnabled: request.body.telegramMiniAppEnabled,
       trading: createTradingForRequest(request as FastifyRequest),
@@ -1152,6 +1231,11 @@ async function registerTelegramBotTradingRoutes(
       db,
       expectedType: null,
       log: app.log,
+      openFundingBuyReturn: (input) =>
+        openFundingBuyReturn(
+          { ...input, venue: "polymarket" },
+          createFundingDecoratorForRequest(request as FastifyRequest),
+        ),
       signerInspector,
       telegramMiniAppEnabled: request.body.telegramMiniAppEnabled,
       trading: createTradingForRequest(request as FastifyRequest),
@@ -1284,6 +1368,11 @@ async function registerTelegramBotTradingRoutes(
               })
             : null;
         },
+        openFundingBuyReturn: (input) =>
+          openFundingBuyReturn(
+            { ...input, venue: "polymarket" },
+            createFundingDecoratorForRequest(request as FastifyRequest),
+          ),
         telegramMessageId: request.body.telegramMessageId,
         telegramMiniAppEnabled: request.body.telegramMiniAppEnabled,
         telegramUserId,
@@ -1687,6 +1776,7 @@ export const telegramBotTradingRouteTestHooks = {
   internalAccountBodySchema,
   internalFundingCancelBodySchema,
   internalFundingOpenBodySchema,
+  internalFundingResumeBuyBodySchema,
   internalFundingSelectTargetBodySchema,
   internalFundingSessionBodySchema,
   internalMarketCardBodySchema,

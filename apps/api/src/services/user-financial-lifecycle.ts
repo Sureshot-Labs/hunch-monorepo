@@ -15,6 +15,7 @@ type FinancialLifecycleDbRow = {
   preparation_run_count: string;
   receive_evidence: boolean;
   telegram_funding_evidence: boolean;
+  telegram_funding_buy_continuation_evidence: boolean;
   trading_evidence: boolean;
 };
 
@@ -39,6 +40,15 @@ export async function fetchUserFinancialLifecycleSummary(
       protectedReasons: [],
     };
   }
+  const buyContinuationEvidenceSql = `
+        exists (
+          select 1
+          from telegram_funding_buy_return_revisions buy_return
+          join telegram_funding_sessions context
+            on context.id = buy_return.telegram_funding_session_id
+          where context.user_id = any($1::uuid[])
+        )
+      `;
   const { rows } = await db.query<FinancialLifecycleDbRow>(
     `
       select
@@ -214,6 +224,8 @@ export async function fetchUserFinancialLifecycleSummary(
           from telegram_funding_sessions
           where user_id = any($1::uuid[])
         ) as telegram_funding_evidence,
+        ${buyContinuationEvidenceSql}
+          as telegram_funding_buy_continuation_evidence,
         exists (
           select 1
           from position_action_operations
@@ -256,6 +268,9 @@ export async function fetchUserFinancialLifecycleSummary(
     row.position_action_evidence ? "position_action_evidence" : null,
     row.receive_evidence ? "receive_evidence" : null,
     row.telegram_funding_evidence ? "telegram_funding_evidence" : null,
+    row.telegram_funding_buy_continuation_evidence
+      ? "telegram_funding_buy_continuation_evidence"
+      : null,
     row.legacy_bridge_evidence ? "legacy_bridge_evidence" : null,
     row.deposit_evidence ? "deposit_evidence" : null,
     row.trading_evidence ? "trading_evidence" : null,

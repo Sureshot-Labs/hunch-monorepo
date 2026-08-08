@@ -2897,6 +2897,7 @@ export async function handleSignalBotMenuCallback(
     route.kind === "deposit" ||
     route.kind === "deposit_menu" ||
     route.kind === "select" ||
+    route.kind === "review_buy" ||
     route.kind === "cancel" ||
     route.kind === "refresh" ||
     route.kind === "qr"

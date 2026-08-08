@@ -13,6 +13,7 @@ const MIGRATION_0197 = "0197_funding_operation_expiry_immutability.sql";
 const MIGRATION_0199 = "0199_telegram_funding_receive.sql";
 const MIGRATION_0200 = "0200_runtime_policy_admin_actor.sql";
 const MIGRATION_0201 = "0201_telegram_funding_open_idempotency.sql";
+const MIGRATION_0203 = "0203_telegram_funding_buy_continuation.sql";
 const FUNDING_MIGRATIONS = [
   MIGRATION_0184,
   MIGRATION_0193,
@@ -23,6 +24,7 @@ const FUNDING_MIGRATIONS = [
   MIGRATION_0199,
   MIGRATION_0200,
   MIGRATION_0201,
+  MIGRATION_0203,
 ] as const;
 
 const LEGACY_CLASSIFIER_SQL = `
@@ -76,15 +78,42 @@ export type FundingMigrationPreflightReport = Readonly<{
     recoveryRequiredOperations: number | null;
     tradeAttempts: number | null;
   }>;
+  telegramBuyContinuationObjects: boolean;
   telegramOpenMutationConstraints: boolean;
 }>;
 
-async function relationExists(db: DbQuery, relation: string): Promise<boolean> {
-  const { rows } = await db.query<{ exists: boolean }>(
-    "select to_regclass($1)::text is not null as exists",
-    [relation],
-  );
+function migrationObjectDrift(
+  input: Readonly<{
+    applied: boolean;
+    complete: boolean;
+    incompleteMessage: string;
+    present: boolean;
+    presentBeforeMigrationMessage: string;
+  }>,
+): string[] {
+  const blockers: string[] = [];
+  if (!input.applied && input.present) {
+    blockers.push(input.presentBeforeMigrationMessage);
+  }
+  if (input.applied && !input.complete) {
+    blockers.push(input.incompleteMessage);
+  }
+  return blockers;
+}
+
+async function queryExists(
+  db: DbQuery,
+  sql: string,
+  params: readonly unknown[],
+): Promise<boolean> {
+  const { rows } = await db.query<{ exists: boolean }>(sql, [...params]);
   return rows[0]?.exists === true;
+}
+
+async function relationExists(db: DbQuery, relation: string): Promise<boolean> {
+  return queryExists(db, "select to_regclass($1)::text is not null as exists", [
+    relation,
+  ]);
 }
 
 async function columnExists(
@@ -92,7 +121,8 @@ async function columnExists(
   table: string,
   column: string,
 ): Promise<boolean> {
-  const { rows } = await db.query<{ exists: boolean }>(
+  return queryExists(
+    db,
     `
       select exists (
         select 1
@@ -104,7 +134,17 @@ async function columnExists(
     `,
     [table, column],
   );
-  return rows[0]?.exists === true;
+}
+
+async function columnsExist(
+  db: DbQuery,
+  table: string,
+  columns: readonly string[],
+): Promise<boolean> {
+  for (const column of columns) {
+    if (!(await columnExists(db, table, column))) return false;
+  }
+  return true;
 }
 
 async function triggerExists(
@@ -112,7 +152,8 @@ async function triggerExists(
   table: string,
   trigger: string,
 ): Promise<boolean> {
-  const { rows } = await db.query<{ exists: boolean }>(
+  return queryExists(
+    db,
     `
       select exists (
         select 1
@@ -124,7 +165,19 @@ async function triggerExists(
     `,
     [table, trigger],
   );
-  return rows[0]?.exists === true;
+}
+
+function normalizedDefinitionIncludes(
+  definition: string | null | undefined,
+  fragments: readonly string[],
+): boolean {
+  const normalized = definition
+    ?.replaceAll('"', "")
+    .replaceAll(/\s+/g, " ")
+    .toLowerCase();
+  return Boolean(
+    normalized && fragments.every((fragment) => normalized.includes(fragment)),
+  );
 }
 
 async function constraintDefinitionIncludes(
@@ -141,13 +194,31 @@ async function constraintDefinitionIncludes(
     `,
     [table, constraint],
   );
-  const definition = rows[0]?.definition
-    ?.replaceAll('"', "")
-    .replaceAll(/\s+/g, " ")
-    .toLowerCase();
-  return Boolean(
-    definition && fragments.every((fragment) => definition.includes(fragment)),
-  );
+  return normalizedDefinitionIncludes(rows[0]?.definition, fragments);
+}
+
+async function functionDefinitionIncludes(
+  db: DbQuery,
+  functionName: string,
+  fragments: readonly string[],
+): Promise<boolean> {
+  let rows: Array<{ definition: string | null }>;
+  try {
+    ({ rows } = await db.query<{ definition: string | null }>(
+      `
+        select pg_get_functiondef(procedure.oid) as definition
+        from pg_proc procedure
+        join pg_namespace namespace on namespace.oid = procedure.pronamespace
+        where namespace.nspname = 'public' and procedure.proname = $1
+        order by procedure.oid desc
+        limit 1
+      `,
+      [functionName],
+    ));
+  } catch {
+    return false;
+  }
+  return normalizedDefinitionIncludes(rows[0]?.definition, fragments);
 }
 
 async function indexPredicateIncludes(
@@ -274,6 +345,214 @@ export async function inspectFundingMigrationPreflight(
     db,
     "public.telegram_funding_mutations",
   );
+  const hasTelegramFundingBuyReturns = await relationExists(
+    db,
+    "public.telegram_funding_buy_return_revisions",
+  );
+  const hasTelegramFundingBuyContinuations = await relationExists(
+    db,
+    "public.telegram_funding_buy_continuations",
+  );
+  const hasTelegramFundingBuyGenerations = await relationExists(
+    db,
+    "public.telegram_funding_buy_resume_generations",
+  );
+  const hasTelegramFundingActiveBuyReturn =
+    hasTelegramFundingSessions &&
+    (await columnExists(
+      db,
+      "telegram_funding_sessions",
+      "active_buy_return_revision",
+    ));
+  const hasTelegramFundingBuyProjectionWatermarks =
+    hasTelegramFundingSessions &&
+    (await columnsExist(db, "telegram_funding_sessions", [
+      "projected_buy_return_revision",
+      "projected_buy_policy_revision",
+    ]));
+  const hasTelegramFundingBuyProjectionConstraint =
+    hasTelegramFundingBuyProjectionWatermarks &&
+    (await constraintDefinitionIncludes(
+      db,
+      "public.telegram_funding_sessions",
+      "telegram_funding_sessions_buy_projection_check",
+      [
+        "projected_buy_return_revision",
+        "projected_buy_policy_revision",
+        "active_buy_return_revision",
+      ],
+    ));
+  const hasTelegramFundingBuyReturnEvidence =
+    hasTelegramFundingBuyReturns &&
+    (await columnsExist(db, "telegram_funding_buy_return_revisions", [
+      "telegram_account_id_snapshot",
+      "source_shortfall_intent_id",
+      "source_authority_fingerprint",
+    ]));
+  const hasTelegramFundingBuyContinuationBinding =
+    hasTelegramFundingBuyContinuations &&
+    (await columnsExist(db, "telegram_funding_buy_continuations", [
+      "policy_revision",
+    ]));
+  const hasTelegramFundingBuyGenerationIdentity =
+    hasTelegramFundingBuyGenerations &&
+    (await columnExists(
+      db,
+      "telegram_funding_buy_resume_generations",
+      "telegram_account_id_snapshot",
+    ));
+  const hasTelegramResumeMutationAction =
+    hasTelegramFundingMutations &&
+    (await constraintDefinitionIncludes(
+      db,
+      "public.telegram_funding_mutations",
+      "telegram_funding_mutations_action_check",
+      ["set_buy_return", "resume_buy"],
+    ));
+  const hasTelegramResumeMutationShape =
+    hasTelegramFundingMutations &&
+    (await constraintDefinitionIncludes(
+      db,
+      "public.telegram_funding_mutations",
+      "telegram_funding_mutations_action_shape_check",
+      [
+        "set_buy_return",
+        "resume_buy",
+        "buy_return_revision is not null",
+        "resume_generation is not null",
+        "resume_intent_id is not null",
+        "continuation_id is not null",
+      ],
+    ));
+  const hasTelegramFundingActiveBuyReturnFk =
+    hasTelegramFundingActiveBuyReturn &&
+    (await constraintDefinitionIncludes(
+      db,
+      "public.telegram_funding_sessions",
+      "telegram_funding_sessions_active_buy_return_fk",
+      [
+        "id",
+        "active_buy_return_revision",
+        "telegram_funding_session_id",
+        "revision",
+      ],
+    ));
+  const hasTelegramBuyContinuationReturnBinding =
+    hasTelegramFundingBuyContinuations &&
+    (await constraintDefinitionIncludes(
+      db,
+      "public.telegram_funding_buy_continuations",
+      "telegram_funding_buy_continuations_return_fk",
+      ["telegram_funding_session_id", "buy_return_revision"],
+    ));
+  const hasTelegramBuyGenerationTokenBinding =
+    hasTelegramFundingBuyGenerations &&
+    (await constraintDefinitionIncludes(
+      db,
+      "public.telegram_funding_buy_resume_generations",
+      "telegram_funding_buy_generations_continuation_fk",
+      [
+        "continuation_id",
+        "telegram_funding_session_id",
+        "buy_return_revision",
+        "ready_progress_revision",
+      ],
+    ));
+  const hasTelegramResumeMutationParentBinding =
+    hasTelegramFundingMutations &&
+    hasTelegramFundingBuyGenerations &&
+    (await constraintDefinitionIncludes(
+      db,
+      "public.telegram_funding_mutations",
+      "telegram_funding_mutations_resume_generation_fk",
+      [
+        "funding_context_id",
+        "resume_generation",
+        "buy_return_revision",
+        "resume_intent_id",
+      ],
+    ));
+  const hasTelegramResumeMutationContinuationBinding =
+    hasTelegramFundingMutations &&
+    hasTelegramFundingBuyContinuations &&
+    (await constraintDefinitionIncludes(
+      db,
+      "public.telegram_funding_mutations",
+      "telegram_funding_mutations_resume_continuation_fk",
+      ["continuation_id", "funding_context_id", "buy_return_revision"],
+    ));
+  const hasTelegramBuyEvidenceTriggers =
+    hasTelegramFundingBuyReturns &&
+    hasTelegramFundingBuyContinuations &&
+    hasTelegramFundingBuyGenerations &&
+    (await triggerExists(
+      db,
+      "public.telegram_funding_buy_return_revisions",
+      "telegram_funding_buy_returns_binding_guard",
+    )) &&
+    (await triggerExists(
+      db,
+      "public.telegram_funding_buy_return_revisions",
+      "telegram_funding_buy_returns_evidence_guard",
+    )) &&
+    (await triggerExists(
+      db,
+      "public.telegram_funding_buy_continuations",
+      "telegram_funding_buy_continuations_evidence_guard",
+    )) &&
+    (await triggerExists(
+      db,
+      "public.telegram_funding_buy_resume_generations",
+      "telegram_funding_buy_generations_evidence_guard",
+    ));
+  const hasFundingReceiptVariantMatcher =
+    hasTelegramFundingBuyReturns &&
+    (await functionDefinitionIncludes(
+      db,
+      "funding_receive_receipt_matches_frozen_variant",
+      ["receive_session_id", "user_id", "variant_id", "destination_address"],
+    ));
+  const hasTelegramBuyIndexes =
+    (await relationExists(
+      db,
+      "public.telegram_funding_buy_returns_market_idx",
+    )) &&
+    (await relationExists(
+      db,
+      "public.telegram_funding_buy_continuations_expiry_idx",
+    )) &&
+    (await relationExists(
+      db,
+      "public.telegram_funding_buy_generations_session_desc_idx",
+    ));
+  const hasTelegramBuyRelinkRearm =
+    hasTelegramFundingSessions &&
+    (await functionDefinitionIncludes(db, "rearm_telegram_funding_delivery", [
+      "delivered.state_revision = context.latest_terminal_revision",
+      "delivered.telegram_account_id = target_telegram_account_id",
+      "delivered.status = 'sent'",
+    ]));
+  const hasTelegramBuyContinuationObjects =
+    hasTelegramFundingBuyReturns &&
+    hasTelegramFundingBuyContinuations &&
+    hasTelegramFundingBuyGenerations &&
+    hasTelegramFundingActiveBuyReturn &&
+    hasTelegramFundingBuyProjectionWatermarks &&
+    hasTelegramFundingBuyProjectionConstraint &&
+    hasTelegramFundingBuyReturnEvidence &&
+    hasTelegramFundingBuyContinuationBinding &&
+    hasTelegramFundingBuyGenerationIdentity &&
+    hasTelegramResumeMutationAction &&
+    hasTelegramResumeMutationShape &&
+    hasTelegramFundingActiveBuyReturnFk &&
+    hasTelegramBuyContinuationReturnBinding &&
+    hasTelegramBuyGenerationTokenBinding &&
+    hasTelegramResumeMutationParentBinding &&
+    hasTelegramResumeMutationContinuationBinding &&
+    hasTelegramBuyEvidenceTriggers &&
+    hasFundingReceiptVariantMatcher &&
+    hasTelegramBuyIndexes &&
+    hasTelegramBuyRelinkRearm;
   const hasTelegramOpenMutationActionConstraint =
     hasTelegramFundingMutations &&
     (await constraintDefinitionIncludes(
@@ -403,74 +682,105 @@ export async function inspectFundingMigrationPreflight(
       .replaceAll(/\s+/g, " ")
       .trim()
       .toLowerCase() === "unique (network_id, tx_hash, event_index)";
-  const partialObjects = [
-    !appliedSet.has(MIGRATION_0184) && hasFundingOperations
-      ? "funding_operations exists before 0184 is recorded"
-      : null,
-    appliedSet.has(MIGRATION_0184) && !hasFundingOperations
-      ? "0184 is recorded but funding_operations is absent"
-      : null,
-    !appliedSet.has(MIGRATION_0194) && hasObservationDecimals
-      ? "asset_decimals exists before 0194 is recorded"
-      : null,
-    appliedSet.has(MIGRATION_0194) && !hasObservationDecimals
-      ? "0194 is recorded but asset_decimals is absent"
-      : null,
-    !appliedSet.has(MIGRATION_0193) && hasPreparationRuns
-      ? "funding_preparation_runs exists before 0193 is recorded"
-      : null,
-    !appliedSet.has(MIGRATION_0195) && hasPhysicalObservationIdentity
-      ? "physical observation identity exists before 0195 is recorded"
-      : null,
-    appliedSet.has(MIGRATION_0195) && !hasPhysicalObservationIdentity
-      ? "0195 is recorded but physical observation identity is absent"
-      : null,
-    !appliedSet.has(MIGRATION_0196) && hasOperationExpiry
-      ? "funding operation expiry exists before 0196 is recorded"
-      : null,
-    appliedSet.has(MIGRATION_0196) && !hasOperationExpiry
-      ? "0196 is recorded but funding operation expiry is absent"
-      : null,
-    !appliedSet.has(MIGRATION_0197) && hasImmutableOperationExpiry
-      ? "funding operation expiry immutability exists before 0197 is recorded"
-      : null,
-    appliedSet.has(MIGRATION_0197) && !hasImmutableOperationExpiry
-      ? "0197 is recorded but funding operation expiry immutability is absent"
-      : null,
-    !appliedSet.has(MIGRATION_0199) &&
-    (hasTelegramFundingSessions ||
-      hasTelegramFundingConsents ||
-      hasTelegramFundingMutations ||
-      hasReceiveOwnerChannel ||
-      hasFundingOutboxPayload ||
-      hasFundingOutboxDeliveryAttempt)
-      ? "Telegram funding receive objects exist before 0199 is recorded"
-      : null,
-    appliedSet.has(MIGRATION_0199) &&
-    (!hasTelegramFundingSessions ||
-      !hasTelegramFundingConsents ||
-      !hasTelegramFundingMutations ||
-      !hasReceiveOwnerChannel ||
-      !hasTelegramProjectionWatermark ||
-      !hasFundingOutboxPayload ||
-      !hasFundingOutboxDeliveryAttempt ||
-      !hasSafeWelcomePendingIndex ||
-      !hasSafeNotificationPendingIndex)
-      ? "0199 is recorded but Telegram funding receive objects are incomplete"
-      : null,
-    !appliedSet.has(MIGRATION_0200) && hasRuntimePolicyAdminActorColumn
-      ? "runtime policy admin actor exists before 0200 is recorded"
-      : null,
-    appliedSet.has(MIGRATION_0200) && !hasRuntimePolicyAdminActor
-      ? "0200 is recorded but runtime policy admin actor objects are incomplete"
-      : null,
-    !appliedSet.has(MIGRATION_0201) && hasTelegramOpenMutationConstraints
-      ? "Telegram funding open mutation constraints exist before 0201 is recorded"
-      : null,
-    appliedSet.has(MIGRATION_0201) && !hasTelegramOpenMutationConstraints
-      ? "0201 is recorded but telegram_funding_mutations open constraints are incomplete"
-      : null,
-  ].filter((value): value is string => value !== null);
+  const hasAnyTelegramReceiveObject =
+    hasTelegramFundingSessions ||
+    hasTelegramFundingConsents ||
+    hasTelegramFundingMutations ||
+    hasReceiveOwnerChannel ||
+    hasFundingOutboxPayload ||
+    hasFundingOutboxDeliveryAttempt;
+  const hasCompleteTelegramReceiveObjects =
+    hasTelegramFundingSessions &&
+    hasTelegramFundingConsents &&
+    hasTelegramFundingMutations &&
+    hasReceiveOwnerChannel &&
+    hasTelegramProjectionWatermark &&
+    hasFundingOutboxPayload &&
+    hasFundingOutboxDeliveryAttempt &&
+    hasSafeWelcomePendingIndex &&
+    hasSafeNotificationPendingIndex;
+  const migrationDriftChecks = [
+    [
+      MIGRATION_0184,
+      hasFundingOperations,
+      "0184 is recorded but funding_operations is absent",
+      hasFundingOperations,
+      "funding_operations exists before 0184 is recorded",
+    ],
+    [
+      MIGRATION_0194,
+      hasObservationDecimals,
+      "0194 is recorded but asset_decimals is absent",
+      hasObservationDecimals,
+      "asset_decimals exists before 0194 is recorded",
+    ],
+    [
+      MIGRATION_0193,
+      true,
+      "",
+      hasPreparationRuns,
+      "funding_preparation_runs exists before 0193 is recorded",
+    ],
+    [
+      MIGRATION_0195,
+      hasPhysicalObservationIdentity,
+      "0195 is recorded but physical observation identity is absent",
+      hasPhysicalObservationIdentity,
+      "physical observation identity exists before 0195 is recorded",
+    ],
+    [
+      MIGRATION_0196,
+      hasOperationExpiry,
+      "0196 is recorded but funding operation expiry is absent",
+      hasOperationExpiry,
+      "funding operation expiry exists before 0196 is recorded",
+    ],
+    [
+      MIGRATION_0197,
+      hasImmutableOperationExpiry,
+      "0197 is recorded but funding operation expiry immutability is absent",
+      hasImmutableOperationExpiry,
+      "funding operation expiry immutability exists before 0197 is recorded",
+    ],
+    [
+      MIGRATION_0199,
+      hasCompleteTelegramReceiveObjects,
+      "0199 is recorded but Telegram funding receive objects are incomplete",
+      hasAnyTelegramReceiveObject,
+      "Telegram funding receive objects exist before 0199 is recorded",
+    ],
+    [
+      MIGRATION_0200,
+      hasRuntimePolicyAdminActor,
+      "0200 is recorded but runtime policy admin actor objects are incomplete",
+      hasRuntimePolicyAdminActorColumn,
+      "runtime policy admin actor exists before 0200 is recorded",
+    ],
+    [
+      MIGRATION_0201,
+      hasTelegramOpenMutationConstraints,
+      "0201 is recorded but telegram_funding_mutations open constraints are incomplete",
+      hasTelegramOpenMutationConstraints,
+      "Telegram funding open mutation constraints exist before 0201 is recorded",
+    ],
+    [
+      MIGRATION_0203,
+      hasTelegramBuyContinuationObjects,
+      "0203 is recorded but Telegram funding Buy continuation objects are incomplete",
+      hasTelegramBuyContinuationObjects,
+      "Telegram funding Buy continuation objects exist before 0203 is recorded",
+    ],
+  ] as const;
+  const partialObjects = migrationDriftChecks.flatMap(
+    ([migration, complete, incompleteMessage, present, presentMessage]) =>
+      migrationObjectDrift({
+        applied: appliedSet.has(migration),
+        complete,
+        incompleteMessage,
+        present,
+        presentBeforeMigrationMessage: presentMessage,
+      }),
+  );
 
   const recoveryRequiredOperations =
     hasFundingOperations &&
@@ -547,6 +857,9 @@ export async function inspectFundingMigrationPreflight(
     !appliedSet.has(MIGRATION_0201)
       ? "0201 Telegram funding open idempotency migration is not recorded"
       : null,
+    !appliedSet.has(MIGRATION_0203)
+      ? "0203 Telegram funding Buy continuation migration is not recorded"
+      : null,
     !hasBridgeOrders ? "bridge_orders table is absent" : null,
     bridgeUnknown > 0
       ? `${bridgeUnknown} legacy bridge orders have unknown adapter class`
@@ -591,6 +904,7 @@ export async function inspectFundingMigrationPreflight(
       recoveryRequiredOperations,
       tradeAttempts: tradeAttemptsBefore0194,
     },
+    telegramBuyContinuationObjects: hasTelegramBuyContinuationObjects,
     telegramOpenMutationConstraints: hasTelegramOpenMutationConstraints,
   };
 }
@@ -605,6 +919,7 @@ function formatHuman(report: FundingMigrationPreflightReport): string {
     `0195 duplicate physical keys: ${report.observationDuplicatePhysicalKeys ?? "n/a"}`,
     `0195 physical identity: ${report.observationIdentityConstraint ?? "n/a"}`,
     `0201 Telegram open mutation constraints: ${report.telegramOpenMutationConstraints ? "ready" : "missing"}`,
+    `0203 Telegram Buy continuation objects: ${report.telegramBuyContinuationObjects ? "ready" : "missing"}`,
     `Operational: ${JSON.stringify(report.operational)}`,
     ...(report.blockers.length > 0
       ? ["Blockers:", ...report.blockers.map((blocker) => `- ${blocker}`)]

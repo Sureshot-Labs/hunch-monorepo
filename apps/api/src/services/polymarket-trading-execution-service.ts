@@ -8059,6 +8059,7 @@ async function prepareTrade(
         venue: "polymarket",
         walletId: getPrivyWalletId(intent),
       });
+      await input.onBeforeSetupTransactionBroadcast?.();
       await input.onSetupTransactionSubmitted?.({
         kind: "funding_router",
         recordedAt,
@@ -8505,8 +8506,7 @@ export function createPolymarketTradingExecutionService(
     ensureReadiness: (input) => ensureReadiness(ctx, input),
     getReadiness: (input) => getReadiness(ctx, input),
     quote: (input) => quote(ctx, input),
-    prepareTrade: (input) =>
-      prepareTrade(ctx, { intent: input.intent, quote: input.quote ?? null }),
+    prepareTrade: (input) => prepareTrade(ctx, input),
     submitPreparedTrade: (input) => submitPreparedTrade(ctx, input),
     persistTrade: (input) => persistTrade(ctx, input),
     applyTradeEffects: (input) => applyOrderTradeEffects(ctx, input),

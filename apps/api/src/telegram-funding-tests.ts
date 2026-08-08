@@ -16,6 +16,11 @@ import {
   telegramFundingCallbackData,
 } from "./services/telegram-funding-contracts.js";
 import {
+  buildTelegramFundingReviewBuyButton,
+  resolveTelegramFundingBuyContinuationAdapter,
+  resolveTelegramFundingBuyContinuationCapability,
+} from "./services/telegram-funding-buy-continuation.js";
+import {
   buildTelegramFundingAddressMessage,
   buildTelegramFundingProgressMessage,
   buildTelegramFundingTargetMessage,
@@ -29,10 +34,17 @@ import type {
   TelegramFundingSessionContext,
 } from "./services/telegram-funding-sessions.js";
 import {
+  buildTelegramFundingBuyReturnRequestFingerprint,
+  canAttachTelegramFundingBuyReturn,
   canDiscloseTelegramFundingAddress,
+  canonicalTelegramFundingBuySpend,
   loadTelegramFundingReceiveSession,
   resolveTelegramDirectPusdChoice,
 } from "./services/telegram-funding.js";
+import {
+  createTelegramFundingBuyContinuationDecorator,
+  telegramBotTradingTestHooks,
+} from "./services/telegram-bot-trading.js";
 import {
   createTelegramFundingRenderCoordinator,
   deliverTelegramFundingActions,
@@ -49,11 +61,56 @@ import {
 import {
   getDefaultSignalBotPolicy,
   normalizeSignalBotPolicy,
+  signalBotSchema,
 } from "./services/signal-bot-trading-policy.js";
 
 const contextId = "123e4567-e89b-42d3-a456-426614174000";
 const receiveSessionId = "223e4567-e89b-42d3-a456-426614174000";
 const receiveTargetId = "receive_target_telegram_pusd_12345678";
+
+{
+  const lockOrder: string[] = [];
+  const locked =
+    await telegramBotTradingTestHooks.lockTelegramFundingReturnBeforeMarket(
+      {
+        query: async (statement: string) => {
+          if (statement.includes("select receive_session_id")) {
+            lockOrder.push("context_lookup");
+            return {
+              rowCount: 1,
+              rows: [{ receive_session_id: receiveSessionId }],
+            };
+          }
+          if (statement.includes("from funding_receive_sessions")) {
+            lockOrder.push("receive_lock");
+            return { rowCount: 1, rows: [{ id: receiveSessionId }] };
+          }
+          if (statement.includes("from telegram_funding_sessions")) {
+            lockOrder.push("context_lock");
+            return { rowCount: 1, rows: [{ id: contextId }] };
+          }
+          if (statement.includes("pg_advisory_xact_lock")) {
+            lockOrder.push("market_lock");
+            return { rowCount: 1, rows: [{}] };
+          }
+          assert.fail(`unexpected lock query: ${statement}`);
+        },
+      } as never,
+      {
+        fundingContextId: contextId,
+        marketId: "market-lock-order",
+        telegramUserId: "42",
+      },
+    );
+  assert.equal(locked, true);
+  assert.deepEqual(lockOrder, [
+    "context_lookup",
+    "receive_lock",
+    "context_lock",
+    "market_lock",
+  ]);
+}
+
 const pUsd = {
   networkId: "evm:137",
   assetId: fundingSidecarRuntimeConfig.polymarketPusdAddress,
@@ -81,14 +138,121 @@ assert.equal(
       assert.match(sql, /telegram_funding_sessions/);
       assert.match(sql, /telegram_funding_consents/);
       assert.match(sql, /telegram_funding_mutations/);
+      assert.doesNotMatch(sql, /telegram_funding_buy_return_revisions/);
+      assert.doesNotMatch(sql, /active_buy_return_revision/);
       assert.match(sql, /owner_channel/);
       assert.match(sql, /delivery_attempt_id/);
-      return { rows: [{ ready: false }] };
+      return { rows: [{ ready: true }] };
     },
   } as never),
-  false,
-  "a pre-0199 schema must not start the Telegram funding projector",
+  true,
+  "the A1 worker remains available before additive 0203 while Slice B is off",
 );
+
+assert.equal(canonicalTelegramFundingBuySpend("1.000000"), "1");
+assert.equal(canonicalTelegramFundingBuySpend("1.250000"), "1.25");
+assert.equal(
+  telegramBotTradingTestHooks.shouldOpenTelegramFundingBuyReturn({
+    amountUsd: 5,
+    buyContinuationEnabled: false,
+    fundingState: "deposit",
+    hasOpener: true,
+  }),
+  false,
+  "Slice B OFF keeps the ordinary shortfall flow and never attaches funding",
+);
+assert.equal(
+  telegramBotTradingTestHooks.resolveTelegramCallbackMessageId("100", 200),
+  200,
+  "funding replay fingerprints the card that was actually clicked after a send fallback",
+);
+assert.equal(
+  telegramBotTradingTestHooks.resolveTelegramCallbackMessageId("100", null),
+  100,
+);
+{
+  const base = {
+    destinationOptionId: "destination",
+    identity: { chatId: "42", telegramUserId: "42" },
+    link: { linkId: contextId, userId: receiveSessionId },
+    request: {
+      authorizationId: contextId,
+      chatId: "42",
+      eventId: null,
+      idempotencyKey: "funding-fingerprint-test",
+      marketId: "polymarket:test",
+      requestedSpendUsd: "1",
+      side: "YES" as const,
+      sourceIntentId: receiveSessionId,
+      telegramMessageId: 1,
+      telegramUserId: "42",
+      venue: "polymarket" as const,
+    },
+    venueBindingOptionId: "binding",
+  };
+  assert.equal(
+    buildTelegramFundingBuyReturnRequestFingerprint(base),
+    buildTelegramFundingBuyReturnRequestFingerprint({
+      ...base,
+      request: { ...base.request, requestedSpendUsd: "1.000000" },
+    }),
+    "equivalent numeric inputs share one idempotency fingerprint",
+  );
+}
+
+{
+  const future = new Date(Date.now() + 60_000);
+  const policy: ReturnType<typeof getDefaultSignalBotPolicy> = {
+    ...getDefaultSignalBotPolicy(),
+    buyContinuationEnabled: true,
+    fundingReceiveEnabled: true,
+    tradingActions: ["buy"],
+    tradingEnabled: true,
+    tradingVenues: ["polymarket"],
+  };
+  const market = {
+    accepting_orders: true,
+    close_time: future,
+    event_end_time: future,
+    event_id: "polymarket:event",
+    expiration_time: future,
+    metadata: {},
+    status: "ACTIVE",
+    venue: "polymarket" as const,
+  };
+  const current = {
+    currentPolicyRevision: "policy-1",
+    eventId: market.event_id,
+    initialPolicyRevision: "policy-1",
+    lifecycleAllowed: true,
+    market,
+    policy,
+    venue: "polymarket" as const,
+  };
+  assert.equal(canAttachTelegramFundingBuyReturn(current), true);
+  assert.equal(
+    canAttachTelegramFundingBuyReturn({
+      ...current,
+      currentPolicyRevision: "policy-2",
+    }),
+    false,
+    "a policy change during handoff must not cancel the source Buy or solicit funding",
+  );
+  assert.equal(
+    canAttachTelegramFundingBuyReturn({
+      ...current,
+      policy: { ...policy, tradingEnabled: false },
+    }),
+    false,
+  );
+  assert.equal(
+    canAttachTelegramFundingBuyReturn({
+      ...current,
+      market: { ...market, status: "CLOSED" },
+    }),
+    false,
+  );
+}
 
 {
   const values = new Map<string, string>();
@@ -192,6 +356,13 @@ const context: TelegramFundingSessionContext = {
   telegramMessageId: 100,
   receiveSessionId,
   origin: "generic_add_funds",
+  initialMarketId: null,
+  initialEventId: null,
+  initialSide: null,
+  initialRequestedSpendUsd: null,
+  resumeGeneration: 0,
+  resumeIntentId: null,
+  resumedAt: null,
   activeConsentRevision: 1,
   expiresAt,
   cancelledAt: null,
@@ -315,11 +486,127 @@ for (const kind of ["refresh", "cancel", "qr"] as const) {
     contextId,
   });
 }
+const continuationToken = "AbCdEfGhIjKlMnOpQrStUv";
+const reviewBuyCallback = telegramFundingCallbackData({
+  continuationToken,
+  kind: "review_buy",
+});
+assert.ok(Buffer.byteLength(reviewBuyCallback, "utf8") <= 64);
+assert.deepEqual(
+  parseTelegramFundingCallbackRoute(reviewBuyCallback.slice(6)),
+  {
+    kind: "review_buy",
+    continuationToken,
+  },
+);
+assert.equal(
+  parseTelegramFundingCallbackRoute(`fund:review:${contextId}:1`),
+  null,
+  "the callback carries one opaque token rather than mutable generation data",
+);
+assert.deepEqual(buildTelegramFundingReviewBuyButton({ continuationToken }), {
+  callback_data: reviewBuyCallback,
+  text: "Review Buy",
+});
+assert.deepEqual(
+  resolveTelegramFundingBuyContinuationCapability({
+    activeReturnAttached: true,
+    buyContinuationEnabled: false,
+    progressState: "ready",
+  }),
+  { available: false, reason: "disabled" },
+);
+assert.deepEqual(
+  resolveTelegramFundingBuyContinuationCapability({
+    activeReturnAttached: false,
+    buyContinuationEnabled: true,
+    progressState: "ready",
+  }),
+  { available: false, reason: "no_active_return" },
+);
+assert.deepEqual(
+  resolveTelegramFundingBuyContinuationCapability({
+    activeReturnAttached: true,
+    buyContinuationEnabled: true,
+    progressState: "funds_received",
+  }),
+  { available: false, reason: "not_ready" },
+);
+assert.deepEqual(
+  resolveTelegramFundingBuyContinuationCapability({
+    activeReturnAttached: true,
+    buyContinuationEnabled: true,
+    progressState: "ready",
+  }),
+  { available: true },
+);
+assert.deepEqual(
+  resolveTelegramFundingBuyContinuationAdapter({
+    destinationAsset: pUsd,
+    venueId: "polymarket",
+  }),
+  {
+    id: "polymarket_destination_pusd_v1",
+    tradingVenue: "polymarket",
+  },
+);
+for (const unsupported of [
+  { destinationAsset: pUsd, venueId: "limitless" },
+  { destinationAsset: usdce, venueId: "polymarket" },
+  {
+    destinationAsset: { ...pUsd, networkId: "evm:8453" },
+    venueId: "polymarket",
+  },
+  {
+    destinationAsset: { ...pUsd, decimals: 18 },
+    venueId: "polymarket",
+  },
+  {
+    destinationAsset: {
+      ...pUsd,
+      assetId: "0x1111111111111111111111111111111111111111",
+    },
+    venueId: "polymarket",
+  },
+]) {
+  assert.equal(resolveTelegramFundingBuyContinuationAdapter(unsupported), null);
+}
 assert.deepEqual(
   parseTelegramFundingCallbackRoute(`fund:select:${contextId}:usdce`),
   { kind: "select", contextId, choiceToken: "usdce" },
   "the parser accepts opaque tokens; the API selection service owns the allow-list",
 );
+
+{
+  let requestedAction = "";
+  let requestedToken = "";
+  let rendered = "";
+  const handled = await handleSignalBotInteractiveMenuCallback({
+    callbackPrefix: "hm:v1:",
+    chatId: "42",
+    idempotencyKey: "callback-review-buy-1",
+    loadFunding: async (input) => {
+      requestedAction = input.action;
+      requestedToken = input.continuationToken ?? "";
+      return {
+        parse_mode: "MarkdownV2",
+        text: "Fresh Buy confirmation",
+      };
+    },
+    messageId: 100,
+    redis: { get: async () => null },
+    render: async (message) => {
+      rendered = message.text;
+    },
+    renderExpiredSearch: async () => undefined,
+    route: { continuationToken, kind: "review_buy" },
+    telegramUserId: 42,
+  });
+  assert.equal(handled, true);
+  assert.equal(requestedAction, "resume_buy");
+  assert.equal(requestedToken, continuationToken);
+  assert.equal(rendered, "Fresh Buy confirmation");
+}
 
 const targetMessage = buildTelegramFundingTargetMessage({
   contextId,
@@ -421,6 +708,45 @@ const readyMessage = buildTelegramFundingProgressMessage(ready);
 assert.match(readyMessage.text, /pUSD ready/);
 assert.doesNotMatch(readyMessage.text, /Receive window/u);
 assert.doesNotMatch(readyMessage.text, /Expires at/u);
+assert.deepEqual(
+  await createTelegramFundingBuyContinuationDecorator({
+    pool: {
+      query: async (sql: string) => {
+        assert.match(sql, /telegram_funding_buy_return_revisions/u);
+        return { rows: [] };
+      },
+    } as never,
+    trading: {} as never,
+  })({
+    consent,
+    context: { ...context, progressRevision: 1 },
+    message: readyMessage,
+    now: new Date("2026-08-05T12:03:00.000Z"),
+    progress: ready,
+    session: { ...session, status: "completed" },
+  }),
+  readyMessage,
+  "generic ready delivery remains available without a Buy return",
+);
+await assert.rejects(
+  createTelegramFundingBuyContinuationDecorator({
+    pool: {
+      query: async () => {
+        throw new Error("transient continuation database failure");
+      },
+    } as never,
+    trading: {} as never,
+  })({
+    consent,
+    context: { ...context, progressRevision: 1 },
+    message: readyMessage,
+    now: new Date("2026-08-05T12:03:00.000Z"),
+    progress: ready,
+    session: { ...session, status: "completed" },
+  }),
+  /transient continuation database failure/u,
+  "a transient continuation dependency failure must keep durable delivery retryable",
+);
 assert.ok(waiting);
 const waitingMessage = buildTelegramFundingProgressMessage(waiting);
 assert.match(waitingMessage.text, /Receive window.*24 hours/u);
@@ -547,15 +873,26 @@ assert.equal(
 );
 
 const defaultPolicy = getDefaultSignalBotPolicy();
+assert.equal(defaultPolicy.buyContinuationEnabled, false);
 assert.equal(defaultPolicy.fundingReceiveEnabled, false);
 assert.equal(defaultPolicy.customTradeInputEnabled, false);
 const {
+  buyContinuationEnabled: _legacyMissingBuyContinuationEnabled,
   customTradeInputEnabled: _legacyMissingCustomTradeInputEnabled,
   fundingReceiveEnabled: _legacyMissingFundingReceiveEnabled,
   ...productionLegacyPolicyPayload
 } = defaultPolicy;
 assert.equal(_legacyMissingFundingReceiveEnabled, false);
 assert.equal(_legacyMissingCustomTradeInputEnabled, false);
+assert.equal(_legacyMissingBuyContinuationEnabled, false);
+assert.deepEqual(signalBotSchema.parse({ buyContinuationEnabled: "true" }), {
+  buyContinuationEnabled: true,
+});
+assert.equal(
+  signalBotSchema.safeParse({ buyContinuationEnabled: "enabled" }).success,
+  false,
+  "the admin/runtime schema accepts only strict boolean policy values",
+);
 const productionLegacyPolicy = normalizeSignalBotPolicy({
   ...productionLegacyPolicyPayload,
   autoEnableOnTelegramLink: true,
@@ -565,6 +902,7 @@ const productionLegacyPolicy = normalizeSignalBotPolicy({
 });
 assert.equal(productionLegacyPolicy.tradingEnabled, true);
 assert.equal(productionLegacyPolicy.autoEnableOnTelegramLink, true);
+assert.equal(productionLegacyPolicy.buyContinuationEnabled, false);
 assert.equal(productionLegacyPolicy.fundingReceiveEnabled, false);
 assert.equal(productionLegacyPolicy.customTradeInputEnabled, false);
 const receiveOnlyPolicy = normalizeSignalBotPolicy({
@@ -576,6 +914,11 @@ const receiveOnlyPolicy = normalizeSignalBotPolicy({
 });
 assert.equal(receiveOnlyPolicy.fundingReceiveEnabled, true);
 assert.equal(receiveOnlyPolicy.tradingEnabled, false);
+const continuationOnlyPolicy = normalizeSignalBotPolicy({
+  ...defaultPolicy,
+  buyContinuationEnabled: true,
+});
+assert.equal(continuationOnlyPolicy.buyContinuationEnabled, true);
 assert.equal(
   resolveFundingReceiveSelectedTargetId(undefined, receiveTargetId),
   receiveTargetId,
@@ -776,6 +1119,7 @@ function deliveryPool(input: {
   action?: "funding_edit" | "funding_replacement" | "funding_send";
   deliveryCas?: boolean;
   destinations: Array<{
+    active_buy_return_revision: number | null;
     telegram_account_id: string;
     telegram_user_id: string;
     telegram_message_id: number | null;
@@ -879,6 +1223,7 @@ function deliveryPool(input: {
             ? []
             : [
                 {
+                  current_telegram_account_id: "telegram-account-1",
                   latest_progress_projection: ready,
                   progress_revision: 1,
                   telegram_user_id: "42",
@@ -914,6 +1259,7 @@ function deliveryPool(input: {
 }
 
 const destination = {
+  active_buy_return_revision: 1,
   telegram_account_id: "telegram-account-1",
   telegram_user_id: "42",
   telegram_message_id: 100,
@@ -950,6 +1296,34 @@ const destination = {
   assert.equal(result.sent, 1);
   assert.equal(result.failed, 0);
   assert.equal(telegram.edits, 1);
+}
+
+{
+  const fake = deliveryPool({
+    destinations: [{ ...destination, active_buy_return_revision: null }],
+  });
+  let resolved = 0;
+  let deliveredText = "";
+  const result = await deliverTelegramFundingActions({
+    pool: fake.pool,
+    renderCoordinator,
+    resolveMessage: async () => {
+      resolved += 1;
+      throw new Error("trading API unavailable");
+    },
+    telegram: {
+      editMessageText: async (message) => {
+        deliveredText = message.text;
+        return { ok: true, messageId: 100 };
+      },
+      sendMessage: async () => {
+        assert.fail("generic funding edit must not send a replacement");
+      },
+    },
+  });
+  assert.equal(result.sent, 1);
+  assert.equal(resolved, 0, "generic funding never depends on trading API");
+  assert.equal(deliveredText, buildTelegramFundingProgressMessage(ready).text);
 }
 
 {
@@ -1154,6 +1528,66 @@ const destination = {
         statement.includes("set status = $3"),
     ),
     "the attempt is finalized without re-entering the claimable queue",
+  );
+}
+
+{
+  const fake = deliveryPool({ destinations: [destination] });
+  let resolved = 0;
+  let deliveredText = "";
+  const result = await deliverTelegramFundingActions({
+    pool: fake.pool,
+    renderCoordinator,
+    resolveMessage: async ({ contextId: resolvedContextId }) => {
+      resolved += 1;
+      assert.equal(resolvedContextId, contextId);
+      return {
+        ...buildTelegramFundingProgressMessage(ready),
+        text: "dynamically resolved Review Buy presentation",
+      };
+    },
+    telegram: {
+      editMessageText: async (message) => {
+        deliveredText = message.text;
+        return { ok: true, messageId: 100 };
+      },
+      sendMessage: async () => {
+        assert.fail("a successful dynamic edit must not send a replacement");
+      },
+    },
+  });
+  assert.equal(result.sent, 1);
+  assert.equal(resolved, 1);
+  assert.equal(deliveredText, "dynamically resolved Review Buy presentation");
+}
+
+{
+  const fake = deliveryPool({ destinations: [destination] });
+  let telegramCalls = 0;
+  const result = await deliverTelegramFundingActions({
+    pool: fake.pool,
+    renderCoordinator,
+    resolveMessage: async () => {
+      throw new Error("policy source unavailable");
+    },
+    telegram: {
+      editMessageText: async () => {
+        telegramCalls += 1;
+        return { ok: true, messageId: 100 };
+      },
+      sendMessage: async () => {
+        telegramCalls += 1;
+        return { ok: true, messageId: 101 };
+      },
+    },
+  });
+  assert.equal(result.failed, 1);
+  assert.equal(result.sent, 0);
+  assert.equal(telegramCalls, 0);
+  assert.ok(
+    fake.parameters.some((params) =>
+      params.includes("funding_presentation_unavailable"),
+    ),
   );
 }
 

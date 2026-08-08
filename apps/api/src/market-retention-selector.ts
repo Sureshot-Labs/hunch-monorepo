@@ -159,6 +159,7 @@ function protectedRefsSql(
     includeFundingLiquidityProjections?: boolean;
     includeFundingPreparationRuns?: boolean;
     includePositionActionOperations?: boolean;
+    includeTelegramFundingBuyReturns?: boolean;
     includeTelegramFundingSessions?: boolean;
     includeTelegramTradeIntents?: boolean;
   } = {},
@@ -208,10 +209,12 @@ function protectedRefsSql(
     from ${candidatePoolTable} c
     join telegram_trade_intents ti on ti.market_id = c.market_id
     where ti.status in ('executing', 'submitted', 'filled', 'reconcile_required')
+       or ti.submit_started_at is not null
        or ti.order_id is not null
        or ti.execution_id is not null
        or ti.venue_order_id is not null
        or ti.tx_signature is not null
+       or coalesce(ti.result->'setupTransactions', '[]'::jsonb) <> '[]'::jsonb
   `
     : "";
   const telegramFundingSessionsRef = options.includeTelegramFundingSessions
@@ -222,6 +225,16 @@ function protectedRefsSql(
     join telegram_funding_sessions context
       on context.market_id = c.market_id
       or (context.event_id is not null and context.event_id = c.event_id)
+  `
+    : "";
+  const telegramFundingBuyReturnsRef = options.includeTelegramFundingBuyReturns
+    ? `
+    union
+    select distinct c.market_id, 'telegram_funding_buy_return_revisions' as reason
+    from ${candidatePoolTable} c
+    join telegram_funding_buy_return_revisions buy_return
+      on buy_return.market_id = c.market_id
+      or (buy_return.event_id is not null and buy_return.event_id = c.event_id)
   `
     : "";
   return `
@@ -245,6 +258,7 @@ function protectedRefsSql(
     ${fundingPreparationRunsRef}
     ${positionActionOperationsRef}
     ${telegramFundingSessionsRef}
+    ${telegramFundingBuyReturnsRef}
     ${telegramTradeIntentsRef}
     union
     select distinct c.market_id, 'wallet_position_snapshots' as reason
@@ -309,9 +323,11 @@ function telegramTradeIntentEphemeralPredicate(alias: string): string {
       (status) => `'${status}'`,
     ).join(", ")})
     and ${alias}.order_id is null
+    and ${alias}.submit_started_at is null
     and ${alias}.execution_id is null
     and ${alias}.venue_order_id is null
     and ${alias}.tx_signature is null
+    and coalesce(${alias}.result->'setupTransactions', '[]'::jsonb) = '[]'::jsonb
   `;
 }
 
@@ -608,6 +624,7 @@ async function protectedRefOptions(client: PoolClient): Promise<{
   includeFundingPreparationRuns: boolean;
   includePositionActionOperations: boolean;
   includeTelegramFundingSessions: boolean;
+  includeTelegramFundingBuyReturns: boolean;
   includeTelegramTradeIntents: boolean;
 }> {
   const [
@@ -616,6 +633,7 @@ async function protectedRefOptions(client: PoolClient): Promise<{
     includeFundingPreparationRuns,
     includePositionActionOperations,
     includeTelegramFundingSessions,
+    includeTelegramFundingBuyReturns,
     includeTelegramTradeIntents,
   ] = await Promise.all([
     relationExists(client, "public.funding_operations"),
@@ -623,6 +641,7 @@ async function protectedRefOptions(client: PoolClient): Promise<{
     relationExists(client, "public.funding_preparation_runs"),
     relationExists(client, "public.position_action_operations"),
     relationExists(client, "public.telegram_funding_sessions"),
+    relationExists(client, "public.telegram_funding_buy_return_revisions"),
     relationExists(client, "public.telegram_trade_intents"),
   ]);
   return {
@@ -631,6 +650,7 @@ async function protectedRefOptions(client: PoolClient): Promise<{
     includeFundingPreparationRuns,
     includePositionActionOperations,
     includeTelegramFundingSessions,
+    includeTelegramFundingBuyReturns,
     includeTelegramTradeIntents,
   };
 }

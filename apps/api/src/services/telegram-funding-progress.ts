@@ -158,3 +158,34 @@ export function telegramFundingProgressFingerprint(
 ): string {
   return canonicalJsonHash(projectionValue);
 }
+
+export function parseTelegramFundingProgressProjection(
+  value: unknown,
+): TelegramFundingProgressProjection | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Partial<TelegramFundingProgressProjection>;
+  if (
+    record.version !== 1 ||
+    typeof record.fundingContextId !== "string" ||
+    ![
+      "waiting_for_transfer",
+      "funds_received",
+      "ready",
+      "expired",
+      "cancelled",
+      "needs_attention",
+    ].includes(String(record.state)) ||
+    typeof record.terminal !== "boolean" ||
+    (record.assetSymbol !== "pUSD" && record.assetSymbol !== "USDC.e") ||
+    record.networkLabel !== "Polygon" ||
+    record.decimals !== 6 ||
+    (record.rawAmount !== null && typeof record.rawAmount !== "string") ||
+    (record.receiveAddress !== null &&
+      typeof record.receiveAddress !== "string") ||
+    typeof record.expiresAt !== "string" ||
+    (record.observedAt !== null && typeof record.observedAt !== "string")
+  ) {
+    return null;
+  }
+  return record as TelegramFundingProgressProjection;
+}

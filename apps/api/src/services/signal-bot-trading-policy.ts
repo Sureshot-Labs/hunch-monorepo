@@ -2,6 +2,7 @@ import { z } from "zod";
 
 import type { DbQuery } from "../db.js";
 import { fetchActiveRuntimePolicy } from "../repos/runtime-policies.js";
+import { DEFAULT_SIGNAL_BOT_POLICY_REVISION } from "./signal-bot-policy-revision.js";
 
 export type SignalBotTradingAction = "buy" | "sell" | "redeem";
 export type SignalBotTradingVenue = "polymarket" | "limitless" | "kalshi";
@@ -10,6 +11,7 @@ export type SignalBotPolicy = {
   autoEnableOnTelegramLink: boolean;
   autoManagedMaxAmountUsd: number;
   autoManagedVenues: SignalBotTradingVenue[];
+  buyContinuationEnabled: boolean;
   customTradeInputEnabled: boolean;
   fundingReceiveEnabled: boolean;
   tradingEnabled: boolean;
@@ -46,6 +48,7 @@ export const signalBotSchema = z
     autoEnableOnTelegramLink: strictBoolean,
     autoManagedMaxAmountUsd: positiveInt.max(100_000),
     autoManagedVenues: z.array(signalBotTradingVenueSchema).max(8),
+    buyContinuationEnabled: strictBoolean,
     customTradeInputEnabled: strictBoolean,
     fundingReceiveEnabled: strictBoolean,
     tradingEnabled: strictBoolean,
@@ -91,6 +94,7 @@ export function getDefaultSignalBotPolicy(): SignalBotPolicy {
     autoEnableOnTelegramLink: false,
     autoManagedMaxAmountUsd: 1,
     autoManagedVenues: ["polymarket"],
+    buyContinuationEnabled: false,
     customTradeInputEnabled: false,
     fundingReceiveEnabled: false,
     tradingEnabled: false,
@@ -119,6 +123,7 @@ export function normalizeSignalBotPolicy(
     | "autoEnableOnTelegramLink"
     | "autoManagedMaxAmountUsd"
     | "autoManagedVenues"
+    | "buyContinuationEnabled"
     | "customTradeInputEnabled"
     | "fundingReceiveEnabled"
   > &
@@ -128,6 +133,7 @@ export function normalizeSignalBotPolicy(
         | "autoEnableOnTelegramLink"
         | "autoManagedMaxAmountUsd"
         | "autoManagedVenues"
+        | "buyContinuationEnabled"
         | "customTradeInputEnabled"
         | "fundingReceiveEnabled"
       >
@@ -175,6 +181,7 @@ export function normalizeSignalBotPolicy(
         ),
       ),
     ),
+    buyContinuationEnabled: Boolean(policy.buyContinuationEnabled ?? false),
     customTradeInputEnabled: Boolean(policy.customTradeInputEnabled ?? false),
     fundingReceiveEnabled: Boolean(policy.fundingReceiveEnabled ?? false),
     tradingEnabled: Boolean(policy.tradingEnabled),
@@ -201,7 +208,7 @@ export async function resolveSignalBotTradingPolicyFromDb(
   return normalizeSignalBotPolicy(deepMerge(defaults, parsed.data));
 }
 
-export const DEFAULT_SIGNAL_BOT_POLICY_REVISION = "signal-bot-default-v2";
+export { DEFAULT_SIGNAL_BOT_POLICY_REVISION };
 
 export async function resolveSignalBotTradingPolicyStateFromDb(
   pool: DbQuery,

@@ -3015,9 +3015,22 @@ const tests: TestCase[] = [
         "const quote = await trading.quote({ intent: sharedIntent });",
         "const resolution = resolveSubmitIntentStatus(submitResult);",
       );
+      const previewBlock = sourceSlice(
+        telegramTrading,
+        "async function previewPolymarketTelegramTradeIntent(",
+        "function normalizeTelegramTradeInputSyntax(",
+      );
       assert.match(confirmLifecycleBlock, /trading\.prepareTrade/);
       assert.match(confirmLifecycleBlock, /trading\.executePreparedTrade/);
       assert.match(confirmLifecycleBlock, /onSubmitted/);
+      assert.match(
+        previewBlock,
+        /allowedStatuses: input\.fundingReturnResume[\s\S]*?\["draft"\][\s\S]*?\["draft", "previewed"\]/,
+      );
+      assert.match(
+        confirmLifecycleBlock,
+        /const recorded = await updateIntentStatus\([\s\S]*?if \(!recorded\) \{[\s\S]*?before setup transaction evidence was recorded/,
+      );
       assert.doesNotMatch(
         confirmLifecycleBlock,
         /trading\.submitPreparedTrade/,
@@ -3246,9 +3259,31 @@ const tests: TestCase[] = [
         prepareBlock,
         /onSetupTransactionSubmitted\?\.\(\{[\s\S]*?referenceId: fundingReferenceId,[\s\S]*?transactionId: null,[\s\S]*?txHash: null/,
       );
+      const setupFenceIndex = prepareBlock.indexOf(
+        "onBeforeSetupTransactionBroadcast",
+      );
+      const setupPlaceholderIndex = prepareBlock.indexOf(
+        "onSetupTransactionSubmitted?.({",
+      );
       assert.match(prepareBlock, /executeServerEmbeddedEthereumTransaction/);
       assert.match(prepareBlock, /syncPolymarketBalanceAllowanceRoute/);
       assert.ok(preflightIndex > builderValidationIndex);
+      assert.ok(setupFenceIndex > preflightIndex);
+      assert.ok(setupPlaceholderIndex > setupFenceIndex);
+      assert.ok(fundingIndex > setupPlaceholderIndex);
+      const factoryStart = executionSource.indexOf(
+        "export function createPolymarketTradingExecutionService",
+      );
+      assert.notEqual(factoryStart, -1);
+      const factoryBlock = executionSource.slice(factoryStart);
+      assert.match(
+        factoryBlock,
+        /prepareTrade: \(input\) => prepareTrade\(ctx, input\)/,
+      );
+      assert.doesNotMatch(
+        factoryBlock,
+        /prepareTrade\(ctx, \{ intent: input\.intent/,
+      );
       const accountBlock = sourceSlice(
         executionSource,
         "export async function fetchPolymarketAccountRoute",
@@ -3303,6 +3338,24 @@ const tests: TestCase[] = [
           new RegExp(`logTradingInternalApiFailure\\("${operation}"`),
         );
       }
+    },
+  },
+  {
+    name: "funding reconciliation sidecar import graph stays API-secret free",
+    run: () => {
+      const graph = collectRuntimeImportGraph(
+        "funding/worker/funding-reconciliation-worker.ts",
+      );
+      assert.equal(
+        graph.has(resolve(apiSrcDir, "env.ts")),
+        false,
+        "funding reconciliation runtime imports must not transitively reach env.ts",
+      );
+      assert.equal(
+        graph.has(resolve(apiSrcDir, "services/telegram-bot-trading.ts")),
+        false,
+        "funding projection must not import API trading execution",
+      );
     },
   },
 ];

@@ -1,3 +1,5 @@
+import { canonicalJsonHash } from "../funding/persistence/canonical.js";
+
 const TRADE_INPUT_CONTEXT_KEY_PREFIX = "tg:signal_bot:v2:trade_input_context";
 
 const EXACT_UUID_RE =
@@ -54,21 +56,59 @@ function isNullableString(value: unknown): value is string | null {
   return value == null || typeof value === "string";
 }
 
+export function parseTelegramBotTradeAuthorityBinding(
+  value: unknown,
+): TelegramBotTradeAuthorityBinding | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const binding = value as Partial<TelegramBotTradeAuthorityBinding>;
+  const authorizationId = binding.authorizationId;
+  const telegramAccountLinkId = binding.telegramAccountLinkId;
+  const userId = binding.userId;
+  if (
+    typeof authorizationId !== "string" ||
+    authorizationId.length === 0 ||
+    typeof telegramAccountLinkId !== "string" ||
+    telegramAccountLinkId.length === 0 ||
+    typeof userId !== "string" ||
+    userId.length === 0 ||
+    typeof binding.privyWalletId !== "string" ||
+    binding.privyWalletId.length === 0 ||
+    typeof binding.walletAddress !== "string" ||
+    binding.walletAddress.length === 0 ||
+    (binding.walletChain !== "ethereum" && binding.walletChain !== "solana")
+  ) {
+    return null;
+  }
+  return {
+    authorizationId,
+    privyWalletId: binding.privyWalletId,
+    telegramAccountLinkId,
+    userId,
+    walletAddress:
+      binding.walletChain === "ethereum"
+        ? binding.walletAddress.trim().toLowerCase()
+        : binding.walletAddress.trim(),
+    walletChain: binding.walletChain,
+  };
+}
+
+export function telegramBotTradeAuthorityFingerprint(
+  binding: TelegramBotTradeAuthorityBinding,
+): string {
+  return canonicalJsonHash({
+    ...binding,
+    walletAddress:
+      binding.walletChain === "ethereum"
+        ? binding.walletAddress.trim().toLowerCase()
+        : binding.walletAddress.trim(),
+    version: 1,
+  });
+}
+
 function isAuthorityBinding(
   value: unknown,
 ): value is TelegramBotTradeAuthorityBinding {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const binding = value as Partial<TelegramBotTradeAuthorityBinding>;
-  return Boolean(
-    EXACT_UUID_RE.test(binding.authorizationId ?? "") &&
-    EXACT_UUID_RE.test(binding.telegramAccountLinkId ?? "") &&
-    EXACT_UUID_RE.test(binding.userId ?? "") &&
-    typeof binding.privyWalletId === "string" &&
-    binding.privyWalletId.length > 0 &&
-    typeof binding.walletAddress === "string" &&
-    binding.walletAddress.length > 0 &&
-    (binding.walletChain === "ethereum" || binding.walletChain === "solana"),
-  );
+  return parseTelegramBotTradeAuthorityBinding(value) != null;
 }
 
 function isMessageScope(

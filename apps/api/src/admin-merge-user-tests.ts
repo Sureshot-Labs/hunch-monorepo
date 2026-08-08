@@ -131,6 +131,9 @@ function createMergeDb(fixture: MergeDbFixture) {
             telegram_funding_context_evidence: String(
               conflicts.telegramFundingContextEvidence ?? 0,
             ),
+            telegram_funding_buy_continuation_evidence: String(
+              conflicts.telegramFundingBuyContinuationEvidence ?? 0,
+            ),
           },
         ] as unknown as T[]);
       }
@@ -266,6 +269,7 @@ const tests: Array<{ name: string; run: () => Promise<void> }> = [
           positionActionEvidence: 9,
           receiveEvidence: 10,
           telegramFundingContextEvidence: 12,
+          telegramFundingBuyContinuationEvidence: 13,
         },
       });
 
@@ -294,6 +298,7 @@ const tests: Array<{ name: string; run: () => Promise<void> }> = [
             positionActionEvidence: 9,
             receiveEvidence: 10,
             telegramFundingContextEvidence: 12,
+            telegramFundingBuyContinuationEvidence: 13,
           });
           return true;
         },

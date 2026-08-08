@@ -296,7 +296,7 @@ try {
   assert.ok(
     (conflictingPersisted.rows[0]?.sell_percent == null &&
       conflictingPersisted.rows[0]?.shares_raw === "1000000") ||
-      (conflictingPersisted.rows[0]?.sell_percent === "25" &&
+      (Number(conflictingPersisted.rows[0]?.sell_percent) === 25 &&
         conflictingPersisted.rows[0]?.shares_raw === "250000"),
   );
 

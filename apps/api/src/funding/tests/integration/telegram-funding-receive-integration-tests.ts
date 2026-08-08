@@ -776,9 +776,28 @@ try {
       now: new Date(now.getTime() + 3_000),
     }),
   ]);
+  const concurrentProjectionEvidence = await pool.query<{
+    cancelled: boolean;
+    context_id: string;
+    progress_revision: number;
+    state: string | null;
+  }>(
+    `select id as context_id,
+            cancelled_at is not null as cancelled,
+            progress_revision,
+            latest_progress_projection->>'state' as state
+       from telegram_funding_sessions
+      where user_id = $1::uuid
+      order by id`,
+    [userId],
+  );
   assert.equal(
     concurrentProjection.reduce((total, result) => total + result.created, 0),
     1,
+    JSON.stringify({
+      concurrentProjection,
+      evidence: concurrentProjectionEvidence.rows,
+    }),
   );
   const firstProgress = await pool.query<{
     progress_revision: number;
@@ -908,6 +927,7 @@ try {
   assert.equal(
     concurrentDeliveries.reduce((total, result) => total + result.sent, 0),
     1,
+    JSON.stringify(concurrentDeliveries),
   );
   assert.equal(editCalls, 1);
   const currentMessage = await pool.query<{ telegram_message_id: string }>(
@@ -1996,6 +2016,9 @@ try {
     });
     assert.equal(raceDelivery.sent, 1);
     const raceRecorded = await pool.query<{
+      followup_account_id: string | null;
+      followup_action: string | null;
+      followup_status: string | null;
       last_delivered_revision: number;
       telegram_account_id: string | null;
       telegram_message_id: string | null;
@@ -2007,22 +2030,159 @@ try {
          context.telegram_account_id::text,
          context.telegram_message_id::text,
          outbox.telegram_account_id::text as outbox_account_id,
-         outbox.status as outbox_status
+         outbox.status as outbox_status,
+         followup.telegram_account_id::text as followup_account_id,
+         followup.action as followup_action,
+         followup.status as followup_status
        from telegram_funding_sessions context
        join telegram_bot_action_outbox outbox
          on outbox.funding_session_id = context.id
         and outbox.state_revision = 2
         and outbox.action = 'funding_send'
+       left join telegram_bot_action_outbox followup
+         on followup.funding_session_id = context.id
+        and followup.state_revision = 2
+        and followup.action = 'funding_edit'
        where context.id = $1`,
       [preterminalContextId],
     );
     assert.deepEqual(raceRecorded.rows[0], {
-      last_delivered_revision: 2,
+      followup_account_id: raceRelinkId,
+      followup_action: "funding_edit",
+      followup_status: "pending",
+      last_delivered_revision: 0,
       telegram_account_id: raceRelinkId,
       telegram_message_id: "1200",
-      outbox_account_id: raceRelinkId,
+      outbox_account_id: preterminalRelinkId,
       outbox_status: "sent",
     });
+
+    const replacementStartAccountId = raceRelinkId;
+    assert.ok(replacementStartAccountId);
+    await pool.query(
+      `update telegram_bot_action_outbox
+          set status = 'skipped', last_error = 'test_relink_replacement_conflict'
+        where funding_session_id = $1
+          and state_revision = 2
+          and action = 'funding_edit'`,
+      [preterminalContextId],
+    );
+    await pool.query(
+      `insert into telegram_bot_action_outbox (
+         action, telegram_account_id, user_id, telegram_user_id,
+         funding_session_id, state_revision, payload
+       )
+       select 'funding_replacement', $2::uuid, context.user_id,
+              context.telegram_user_id, context.id, 2,
+              context.latest_progress_projection
+         from telegram_funding_sessions context
+        where context.id = $1`,
+      [preterminalContextId, replacementStartAccountId],
+    );
+    await pool.query(
+      `update telegram_bot_action_outbox
+          set status = 'skipped', last_error = 'test_replacement_race_isolation'
+        where funding_session_id <> $1
+          and funding_session_id = any($2::uuid[])
+          and status in ('pending', 'retry')`,
+      [preterminalContextId, fairnessContextIds],
+    );
+    let finalRelinkId: string | null = null;
+    let finalRelinkError: unknown = null;
+    const replacementRace = await deliverTelegramFundingActions({
+      pool,
+      renderCoordinator,
+      telegram: {
+        editMessageText: async () => {
+          assert.fail("the relink replacement race must use sendMessage");
+        },
+        sendMessage: async () => {
+          try {
+            await pool.query(
+              `delete from user_telegram_accounts where user_id = $1`,
+              [userId],
+            );
+            const finalRelink = await pool.query<{ id: string }>(
+              `insert into user_telegram_accounts (
+                 user_id, privy_user_id, telegram_user_id, username
+               ) values ($1, $2, $3, $4)
+               returning id`,
+              [
+                userId,
+                `did:privy:${suffix}:final-relink`,
+                fairnessTelegramUserId,
+                `telegram-funding-final-relink-${suffix}`,
+              ],
+            );
+            finalRelinkId = finalRelink.rows[0]?.id ?? null;
+            assert.ok(finalRelinkId);
+            return { ok: true, messageId: 1201 };
+          } catch (error) {
+            finalRelinkError = error;
+            return {
+              error: "other" as const,
+              message: "test relink failed",
+              ok: false as const,
+            };
+          }
+        },
+      },
+    });
+    assert.equal(
+      finalRelinkError,
+      null,
+      finalRelinkError instanceof Error ? finalRelinkError.message : undefined,
+    );
+    assert.equal(replacementRace.sent, 1);
+    assert.ok(finalRelinkId);
+    const replacementFollowup = await pool.query<{
+      edit_account_id: string | null;
+      edit_status: string;
+      replacement_status: string;
+    }>(
+      `select
+         edit.telegram_account_id::text as edit_account_id,
+         edit.status as edit_status,
+         replacement.status as replacement_status
+       from telegram_bot_action_outbox edit
+       join telegram_bot_action_outbox replacement
+         on replacement.funding_session_id = edit.funding_session_id
+        and replacement.state_revision = edit.state_revision
+        and replacement.action = 'funding_replacement'
+       where edit.funding_session_id = $1
+         and edit.state_revision = 2
+         and edit.action = 'funding_edit'`,
+      [preterminalContextId],
+    );
+    assert.deepEqual(replacementFollowup.rows[0], {
+      edit_account_id: finalRelinkId,
+      edit_status: "pending",
+      replacement_status: "sent",
+    });
+    await pool.query(
+      `update telegram_bot_action_outbox
+          set status = 'skipped', last_error = 'test_corrective_delivery_isolation'
+        where funding_session_id <> $1
+          and funding_session_id = any($2::uuid[])
+          and status in ('pending', 'retry')`,
+      [preterminalContextId, fairnessContextIds],
+    );
+    let correctiveEdits = 0;
+    const correctiveDelivery = await deliverTelegramFundingActions({
+      pool,
+      renderCoordinator,
+      telegram: {
+        editMessageText: async () => {
+          correctiveEdits += 1;
+          return { ok: true, messageId: 1201 };
+        },
+        sendMessage: async () => {
+          assert.fail("the corrective current-account delivery must edit");
+        },
+      },
+    });
+    assert.equal(correctiveDelivery.sent, 1);
+    assert.equal(correctiveEdits, 1);
   } finally {
     const fairnessCleanup = await pool.connect();
     try {

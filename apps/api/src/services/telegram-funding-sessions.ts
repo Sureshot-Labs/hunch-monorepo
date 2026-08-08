@@ -27,6 +27,13 @@ type TelegramFundingSessionRow = Readonly<{
   telegram_message_id: string | number | null;
   receive_session_id: string;
   origin: "generic_add_funds" | "buy_return_context";
+  market_id: string | null;
+  event_id: string | null;
+  side: "NO" | "YES" | null;
+  requested_spend_usd: string | number | null;
+  resume_generation: number;
+  resume_intent_id: string | null;
+  resumed_at: Date | null;
   active_consent_revision: number | null;
   expires_at: Date;
   cancelled_at: Date | null;
@@ -76,14 +83,21 @@ export type TelegramFundingSessionContext = Readonly<{
   receiveSessionId: string;
   origin: "generic_add_funds" | "buy_return_context";
   activeConsentRevision: number | null;
-  expiresAt: string;
+  initialMarketId: string | null;
+  initialEventId: string | null;
+  initialSide: "NO" | "YES" | null;
+  initialRequestedSpendUsd: string | null;
+  resumeGeneration: number;
+  resumeIntentId: string | null;
+  resumedAt: string | null;
   cancelledAt: string | null;
+  expiresAt: string;
+  createdAt: string;
   progressRevision: number;
   latestProgressProjection: JsonRecord | null;
   latestTerminalRevision: number | null;
   latestTerminalProjection: JsonRecord | null;
   lastDeliveredRevision: number;
-  createdAt: string;
   updatedAt: string;
 }>;
 
@@ -110,6 +124,13 @@ const sessionColumns = `
   telegram_message_id,
   receive_session_id,
   origin,
+  market_id,
+  event_id,
+  side,
+  requested_spend_usd,
+  resume_generation,
+  resume_intent_id,
+  resumed_at,
   active_consent_revision,
   expires_at,
   cancelled_at,
@@ -144,6 +165,14 @@ function publicSession(
       messageId != null && Number.isSafeInteger(messageId) ? messageId : null,
     receiveSessionId: row.receive_session_id,
     origin: row.origin,
+    initialMarketId: row.market_id,
+    initialEventId: row.event_id,
+    initialSide: row.side,
+    initialRequestedSpendUsd:
+      row.requested_spend_usd == null ? null : String(row.requested_spend_usd),
+    resumeGeneration: row.resume_generation,
+    resumeIntentId: row.resume_intent_id,
+    resumedAt: row.resumed_at?.toISOString() ?? null,
     activeConsentRevision: row.active_consent_revision,
     expiresAt: row.expires_at.toISOString(),
     cancelledAt: row.cancelled_at?.toISOString() ?? null,
@@ -375,6 +404,12 @@ type CreateTelegramFundingSessionInput = Readonly<{
   idempotencyKey: string;
   expiresAt: Date;
   now: Date;
+  initialBuyReturn?: Readonly<{
+    eventId: string | null;
+    marketId: string;
+    requestedSpendUsd: string;
+    side: "NO" | "YES";
+  }>;
 }>;
 
 export async function createOrReuseTelegramFundingSessionInTransaction(
@@ -409,11 +444,18 @@ export async function createOrReuseTelegramFundingSessionInTransaction(
         telegram_message_id,
         receive_session_id,
         origin,
+        market_id,
+        event_id,
+        side,
+        requested_spend_usd,
         idempotency_key,
         expires_at,
         created_at,
         updated_at
-      ) values ($1, $2, $3, $4, $5, $6, 'generic_add_funds', $7, $8, $9, $9)
+      ) values (
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::numeric,
+        $12, $13, $14, $14
+      )
       on conflict do nothing
       returning ${sessionColumns}
     `,
@@ -424,6 +466,11 @@ export async function createOrReuseTelegramFundingSessionInTransaction(
       input.chatId,
       input.telegramMessageId,
       input.receiveSessionId,
+      input.initialBuyReturn ? "buy_return_context" : "generic_add_funds",
+      input.initialBuyReturn?.marketId ?? null,
+      input.initialBuyReturn?.eventId ?? null,
+      input.initialBuyReturn?.side ?? null,
+      input.initialBuyReturn?.requestedSpendUsd ?? null,
       input.idempotencyKey,
       input.expiresAt,
       input.now,

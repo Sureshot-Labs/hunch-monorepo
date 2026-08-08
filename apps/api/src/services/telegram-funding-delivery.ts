@@ -7,7 +7,7 @@ import type {
   TelegramSendResult,
 } from "./signal-bot-contracts.js";
 import { buildTelegramFundingProgressMessage } from "./telegram-funding-presentation.js";
-import { parseTelegramFundingProgressProjection } from "./telegram-funding-progress-projector.js";
+import { parseTelegramFundingProgressProjection } from "./telegram-funding-progress.js";
 import {
   claimSignalBotMenuRender,
   isSignalBotMenuRenderCurrent,
@@ -26,6 +26,7 @@ type FundingOutboxRow = Readonly<{
 }>;
 
 type FundingDestinationRow = Readonly<{
+  active_buy_return_revision: number | null;
   telegram_account_id: string;
   telegram_user_id: string;
   telegram_message_id: string | number | null;
@@ -34,6 +35,57 @@ type FundingDestinationRow = Readonly<{
 
 const MAX_DELIVERY_ATTEMPTS = 8;
 const DELIVERY_LEASE_SECONDS = 300;
+
+async function enqueueFundingDeliveryRevision(
+  client: PoolClient,
+  input: Readonly<{
+    action: FundingOutboxRow["action"];
+    fundingSessionId: string;
+    payload: unknown;
+    stateRevision: number;
+    telegramAccountId: string;
+    telegramUserId: string;
+    userId: string;
+  }>,
+): Promise<void> {
+  await client.query(
+    `
+      insert into telegram_bot_action_outbox (
+        action,
+        telegram_account_id,
+        user_id,
+        telegram_user_id,
+        funding_session_id,
+        state_revision,
+        payload
+      ) values ($1, $2, $3, $4, $5, $6, $7::jsonb)
+      on conflict (funding_session_id, state_revision, action)
+        where action in ('funding_send', 'funding_edit', 'funding_replacement')
+      do update
+        set telegram_account_id = excluded.telegram_account_id,
+            user_id = excluded.user_id,
+            telegram_user_id = excluded.telegram_user_id,
+            payload = excluded.payload,
+            status = 'pending',
+            attempt_count = 0,
+            next_attempt_at = now(),
+            last_error = null,
+            delivery_attempt_id = null,
+            delivery_started_at = null,
+            sent_at = null,
+            updated_at = now()
+    `,
+    [
+      input.action,
+      input.telegramAccountId,
+      input.userId,
+      input.telegramUserId,
+      input.fundingSessionId,
+      input.stateRevision,
+      JSON.stringify(input.payload),
+    ],
+  );
+}
 
 export type TelegramFundingRenderCoordinator = Readonly<{
   claim(
@@ -229,6 +281,7 @@ async function loadCurrentDestination(
   const { rows } = await pool.query<FundingDestinationRow>(
     `
       select
+        context.active_buy_return_revision,
         account.id::text as telegram_account_id,
         account.telegram_user_id,
         context.telegram_message_id,
@@ -364,8 +417,6 @@ async function recordDeliverySuccess(input: {
     );
     const current = locked.rows[0];
     if (!current) return false;
-    const outboxTelegramAccountId =
-      current.current_telegram_account_id ?? input.telegramAccountId;
     await client.query(
       `
         update telegram_bot_action_outbox
@@ -381,11 +432,53 @@ async function recordDeliverySuccess(input: {
       `,
       [
         input.row.id,
-        outboxTelegramAccountId,
+        input.telegramAccountId,
         input.messageId,
         input.row.delivery_attempt_id,
       ],
     );
+    if (current.current_telegram_account_id !== input.telegramAccountId) {
+      await client.query(
+        `
+          update telegram_funding_sessions
+          set telegram_message_id = case
+                when $4::uuid is not null then $5
+                else telegram_message_id
+              end,
+              delivery_lease_outbox_id = null,
+              delivery_lease_attempt_id = null,
+              delivery_lease_expires_at = null
+          where id = $1
+            and delivery_lease_outbox_id = $2
+            and delivery_lease_attempt_id = $3
+        `,
+        [
+          input.row.funding_session_id,
+          input.row.id,
+          input.row.delivery_attempt_id,
+          current.current_telegram_account_id,
+          input.messageId,
+        ],
+      );
+      if (
+        current.current_telegram_account_id &&
+        current.latest_progress_projection
+      ) {
+        await enqueueFundingDeliveryRevision(client, {
+          action:
+            input.row.action === "funding_edit"
+              ? "funding_replacement"
+              : "funding_edit",
+          fundingSessionId: input.row.funding_session_id,
+          payload: current.latest_progress_projection,
+          stateRevision: current.progress_revision,
+          telegramAccountId: current.current_telegram_account_id,
+          telegramUserId: current.telegram_user_id,
+          userId: current.user_id,
+        });
+      }
+      return true;
+    }
     const attached = await client.query(
       `
         update telegram_funding_sessions context
@@ -449,28 +542,15 @@ async function recordDeliverySuccess(input: {
         `,
         [input.row.funding_session_id, current.progress_revision],
       );
-      await client.query(
-        `
-          insert into telegram_bot_action_outbox (
-            action,
-            telegram_account_id,
-            user_id,
-            telegram_user_id,
-            funding_session_id,
-            state_revision,
-            payload
-          ) values ('funding_edit', $1, $2, $3, $4, $5, $6::jsonb)
-          on conflict do nothing
-        `,
-        [
-          current.current_telegram_account_id,
-          current.user_id,
-          current.telegram_user_id,
-          input.row.funding_session_id,
-          current.progress_revision,
-          JSON.stringify(current.latest_progress_projection),
-        ],
-      );
+      await enqueueFundingDeliveryRevision(client, {
+        action: "funding_edit",
+        fundingSessionId: input.row.funding_session_id,
+        payload: current.latest_progress_projection,
+        stateRevision: current.progress_revision,
+        telegramAccountId: current.current_telegram_account_id,
+        telegramUserId: current.telegram_user_id,
+        userId: current.user_id,
+      });
     }
     return true;
   });
@@ -572,28 +652,15 @@ async function enqueueReplacementAfterMissingEdit(input: {
         input.row.delivery_attempt_id,
       ],
     );
-    await client.query(
-      `
-        insert into telegram_bot_action_outbox (
-          action,
-          telegram_account_id,
-          user_id,
-          telegram_user_id,
-          funding_session_id,
-          state_revision,
-          payload
-        ) values ('funding_replacement', $1, $2, $3, $4, $5, $6::jsonb)
-        on conflict do nothing
-      `,
-      [
-        input.telegramAccountId,
-        destination.user_id,
-        destination.telegram_user_id,
-        input.row.funding_session_id,
-        destination.progress_revision,
-        JSON.stringify(destination.latest_progress_projection),
-      ],
-    );
+    await enqueueFundingDeliveryRevision(client, {
+      action: "funding_replacement",
+      fundingSessionId: input.row.funding_session_id,
+      payload: destination.latest_progress_projection,
+      stateRevision: destination.progress_revision,
+      telegramAccountId: input.telegramAccountId,
+      telegramUserId: destination.telegram_user_id,
+      userId: destination.user_id,
+    });
     return true;
   });
 }
@@ -605,6 +672,12 @@ function resultMessage(result: TelegramSendResult): string {
 export async function deliverTelegramFundingActions(input: {
   pool: Pool;
   renderCoordinator: TelegramFundingRenderCoordinator;
+  resolveMessage?: (
+    input: Readonly<{
+      contextId: string;
+      telegramUserId: string;
+    }>,
+  ) => Promise<ReturnType<typeof buildTelegramFundingProgressMessage>>;
   telegram: Pick<SignalBotTelegramClient, "editMessageText" | "sendMessage">;
   limit?: number;
 }): Promise<
@@ -649,7 +722,25 @@ export async function deliverTelegramFundingActions(input: {
       skipped += 1;
       continue;
     }
-    const message = buildTelegramFundingProgressMessage(projection);
+    let message: ReturnType<typeof buildTelegramFundingProgressMessage>;
+    try {
+      message =
+        input.resolveMessage && destination.active_buy_return_revision != null
+          ? await input.resolveMessage({
+              contextId: row.funding_session_id,
+              telegramUserId: destination.telegram_user_id,
+            })
+          : buildTelegramFundingProgressMessage(projection);
+    } catch {
+      await finishAttempt({
+        pool: input.pool,
+        row,
+        status: "retry",
+        reason: "funding_presentation_unavailable",
+      });
+      failed += 1;
+      continue;
+    }
     if (row.action === "funding_edit") {
       const editMessageText = input.telegram.editMessageText?.bind(
         input.telegram,
@@ -877,6 +968,24 @@ export async function cleanupTelegramFundingContexts(input: {
   limit?: number;
   retentionDays?: number;
 }): Promise<number> {
+  const buyIntentBlockerSql = `
+          and not exists (
+            select 1
+            from telegram_funding_buy_resume_generations generation
+            join telegram_trade_intents intent
+              on intent.id = generation.trade_intent_id
+            where generation.telegram_funding_session_id = context.id
+              and (
+                intent.status in ('executing', 'submitted', 'reconcile_required')
+                or intent.submit_started_at is not null
+                or intent.order_id is not null
+                or intent.execution_id is not null
+                or intent.venue_order_id is not null
+                or intent.tx_signature is not null
+                or coalesce(intent.result->'setupTransactions', '[]'::jsonb) <> '[]'::jsonb
+              )
+          )
+      `;
   const limit = Math.min(10_000, Math.max(1, input.limit ?? 1_000));
   const retentionDays = Math.min(
     3650,
@@ -886,55 +995,84 @@ export async function cleanupTelegramFundingContexts(input: {
     await client.query(
       "select set_config('hunch.telegram_funding_retention_cleanup', 'on', true)",
     );
-    const result = await client.query(
+    const candidates = await client.query<{ id: string }>(
       `
-        with candidates as (
-          select context.id
-          from telegram_funding_sessions context
-          join funding_receive_sessions receive
-            on receive.id = context.receive_session_id
-           and receive.user_id = context.user_id
-          where context.updated_at < now() - ($1::int * interval '1 day')
-            and receive.status in ('completed', 'expired', 'cancelled')
-            and not exists (
-              select 1
-              from funding_receive_receipts receipt
-              left join funding_operations operation
-                on operation.id = receipt.child_funding_operation_id
-              where receipt.receive_session_id = context.receive_session_id
-                and (
-                  receipt.status <> 'ready'
-                  or (
-                    operation.id is not null
-                    and operation.status not in ('completed', 'refunded', 'cancelled', 'failed')
-                  )
+        select context.id
+        from telegram_funding_sessions context
+        join funding_receive_sessions receive
+          on receive.id = context.receive_session_id
+         and receive.user_id = context.user_id
+        where context.updated_at < now() - ($1::int * interval '1 day')
+          and receive.status in ('completed', 'expired', 'cancelled')
+          and not exists (
+            select 1
+            from funding_receive_receipts receipt
+            left join funding_operations operation
+              on operation.id = receipt.child_funding_operation_id
+            where receipt.receive_session_id = context.receive_session_id
+              and (
+                receipt.status <> 'ready'
+                or (
+                  operation.id is not null
+                  and operation.status not in ('completed', 'refunded', 'cancelled', 'failed')
                 )
-            )
-            and not exists (
-              select 1
-              from telegram_bot_action_outbox outbox
-              where outbox.funding_session_id = context.id
-                and outbox.action in ('funding_send', 'funding_edit', 'funding_replacement')
-                and outbox.status in ('pending', 'retry', 'sending', 'delivery_unknown')
-            )
-          order by context.updated_at asc
-          limit $2
-          for update of context skip locked
-        ), deleted_mutations as (
-          delete from telegram_funding_mutations mutation
-          using candidates
-          where mutation.funding_context_id = candidates.id
-        ), deleted_consents as (
-          delete from telegram_funding_consents consent
-          using candidates
-          where consent.telegram_funding_session_id = candidates.id
-        )
-        delete from telegram_funding_sessions context
-        using candidates
-        where context.id = candidates.id
+              )
+          )
+          and not exists (
+            select 1
+            from telegram_bot_action_outbox outbox
+            where outbox.funding_session_id = context.id
+              and outbox.action in ('funding_send', 'funding_edit', 'funding_replacement')
+              and outbox.status in ('pending', 'retry', 'sending', 'delivery_unknown')
+          )
+          ${buyIntentBlockerSql}
+        order by context.updated_at asc
+        limit $2
+        for update of context skip locked
       `,
       [retentionDays, limit],
     );
-    return result.rowCount ?? 0;
+    const ids = candidates.rows.map((row) => row.id);
+    if (ids.length === 0) return 0;
+    await client.query(
+      `delete from telegram_funding_mutations
+       where funding_context_id = any($1::uuid[])`,
+      [ids],
+    );
+    await client.query(
+      `delete from telegram_funding_buy_resume_generations
+       where telegram_funding_session_id = any($1::uuid[])`,
+      [ids],
+    );
+    await client.query(
+      `delete from telegram_funding_buy_continuations
+       where telegram_funding_session_id = any($1::uuid[])`,
+      [ids],
+    );
+    await client.query(
+      `update telegram_funding_sessions
+       set active_consent_revision = null,
+           active_buy_return_revision = null,
+           projected_buy_return_revision = 0,
+           projected_buy_policy_revision = null
+       where id = any($1::uuid[])`,
+      [ids],
+    );
+    await client.query(
+      `delete from telegram_funding_buy_return_revisions
+       where telegram_funding_session_id = any($1::uuid[])`,
+      [ids],
+    );
+    await client.query(
+      `delete from telegram_funding_consents
+       where telegram_funding_session_id = any($1::uuid[])`,
+      [ids],
+    );
+    const deleted = await client.query(
+      `delete from telegram_funding_sessions
+       where id = any($1::uuid[])`,
+      [ids],
+    );
+    return deleted.rowCount ?? 0;
   });
 }
