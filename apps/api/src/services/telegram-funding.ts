@@ -211,7 +211,7 @@ export type TelegramFundingProgressDecorator = (
     context: TelegramFundingSessionContext;
     message: TelegramFundingMessage;
     now: Date;
-    progress: TelegramFundingProgressProjection;
+    progress: TelegramFundingProgressProjection | null;
     session: FundingReceiveSession;
   }>,
 ) => Promise<TelegramFundingMessage>;
@@ -1036,11 +1036,21 @@ export class TelegramFundingService {
       session: owned.receive.session,
     });
     if (input.view === "address" && owned.consent && addressDisclosureOpen) {
-      return this.addressMessage({
+      const message = this.addressMessage({
         consent: owned.consent,
         context: owned.context,
         session: owned.receive.session,
       });
+      return decorateProgress
+        ? decorateProgress({
+            consent: owned.consent,
+            context: owned.context,
+            message,
+            now,
+            progress,
+            session: owned.receive.session,
+          })
+        : message;
     }
     if (progress) {
       const message = buildTelegramFundingProgressMessage(progress);
@@ -1058,10 +1068,20 @@ export class TelegramFundingService {
     if (!addressDisclosureOpen) {
       return buildTelegramFundingUnavailableMessage({ reason: "expired" });
     }
-    return buildTelegramFundingTargetMessage({
+    const message = buildTelegramFundingTargetMessage({
       contextId: owned.context.id,
       expiresAt: owned.context.expiresAt,
     });
+    return decorateProgress
+      ? decorateProgress({
+          consent: owned.consent,
+          context: owned.context,
+          message,
+          now,
+          progress: null,
+          session: owned.receive.session,
+        })
+      : message;
   }
 
   async selectTarget(
@@ -1070,6 +1090,7 @@ export class TelegramFundingService {
       contextId: string;
     },
     now = new Date(),
+    decorateProgress?: TelegramFundingProgressDecorator,
   ): Promise<TelegramFundingMessage> {
     const idempotencyKey = assertIdempotencyKey(input.idempotencyKey);
     const { identity, link } = await this.currentLink(input);
@@ -1098,6 +1119,7 @@ export class TelegramFundingService {
             view: "address",
           },
           now,
+          decorateProgress,
         );
       }
     } catch (error) {
@@ -1159,7 +1181,7 @@ export class TelegramFundingService {
       expiresAt: snapshot.context.expiresAt,
     });
     try {
-      const selected = await appendTelegramFundingConsent(this.pool, {
+      await appendTelegramFundingConsent(this.pool, {
         contextId: snapshot.context.id,
         userId: link.userId,
         telegramAccountId: link.linkId,
@@ -1178,18 +1200,16 @@ export class TelegramFundingService {
         },
         now,
       });
-      if (selected.mutationResponse) {
-        return this.session(
-          {
-            contextId: input.contextId,
-            telegramUserId: identity.telegramUserId,
-            chatId: identity.chatId,
-            view: "address",
-          },
-          now,
-        );
-      }
-      return response;
+      return this.session(
+        {
+          contextId: input.contextId,
+          telegramUserId: identity.telegramUserId,
+          chatId: identity.chatId,
+          view: "address",
+        },
+        now,
+        decorateProgress,
+      );
     } catch (error) {
       rethrowTelegramFundingPersistenceError(error);
     }

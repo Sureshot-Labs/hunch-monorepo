@@ -1264,6 +1264,36 @@ export function resolveTelegramBuyFundingPreview(input: {
   };
 }
 
+export function resolveTelegramFundingBuyDepositRequirement(input: {
+  executableFundsUsd: number;
+  maximumSpendUsd: number;
+}): Readonly<{
+  availableUsd: number;
+  sendAtLeastPusd: number;
+  state: "deposit" | "ready";
+}> {
+  const preview = resolveTelegramBuyFundingPreview({
+    controlledFundsUsd: null,
+    executableFundsUsd: input.executableFundsUsd,
+    requiredUsd: input.maximumSpendUsd,
+  });
+  if (preview.state === "ready") {
+    return {
+      availableUsd: preview.availableUsd,
+      sendAtLeastPusd: 0,
+      state: "ready",
+    };
+  }
+  return {
+    availableUsd: preview.availableUsd,
+    sendAtLeastPusd: Math.max(
+      0.01,
+      Math.ceil((preview.shortfallUsd - Number.EPSILON) * 100) / 100,
+    ),
+    state: "deposit",
+  };
+}
+
 function hasInsufficientFundsReason(
   readiness: TradingReadiness | null | undefined,
 ): boolean {
@@ -1353,6 +1383,7 @@ export const telegramBotTradingTestHooks = {
   openMarketUrl,
   resolveTelegramBuyFundingState,
   resolveTelegramBuyFundingPreview,
+  resolveTelegramFundingBuyDepositRequirement,
   resolveExecutablePolymarketSellSharesRaw,
   resolveTelegramExecutableBuyOption,
   resolveTelegramCallbackMessageId,
@@ -5465,14 +5496,12 @@ export function createTelegramFundingBuyContinuationDecorator(input: {
   trading: ApiBotTradingExecutor;
 }): TelegramFundingProgressDecorator {
   return async (presentation) => {
-    if (presentation.progress.state !== "ready") return presentation.message;
     const buyReturn = await fetchActiveTelegramFundingBuyReturn(
       input.pool,
       presentation.context.id,
     );
     if (
       !buyReturn ||
-      !presentation.consent ||
       buyReturn.venueId !== "polymarket" ||
       presentation.session.venueId !== "polymarket" ||
       buyReturn.destinationOptionId !==
@@ -5490,10 +5519,9 @@ export function createTelegramFundingBuyContinuationDecorator(input: {
       return presentation.message;
     }
     if (
-      !(await hasReadyTelegramFundingDestinationReceipt(
-        input.pool,
-        presentation.context.id,
-      ))
+      presentation.progress?.state === "cancelled" ||
+      presentation.progress?.state === "expired" ||
+      presentation.progress?.state === "needs_attention"
     ) {
       return presentation.message;
     }
@@ -5536,61 +5564,183 @@ export function createTelegramFundingBuyContinuationDecorator(input: {
     ) {
       return presentation.message;
     }
+    const maxAmountUsd = effectiveMaxTradeAmountUsd(
+      policy,
+      authorization.max_amount_usd,
+    );
     const requestedSpendUsd = Number(buyReturn.requestedSpendUsd);
     if (
       !Number.isFinite(requestedSpendUsd) ||
       requestedSpendUsd <= 0 ||
-      requestedSpendUsd >
-        effectiveMaxTradeAmountUsd(policy, authorization.max_amount_usd)
+      requestedSpendUsd > maxAmountUsd
     ) {
       return presentation.message;
     }
-    const readiness = await resolveTelegramTradingReadiness({
-      action: "BUY",
+    const quoteIntent = buildTelegramTradeIntent({
+      amountUsd: requestedSpendUsd,
       authorization,
+      intentId: crypto.randomUUID(),
       market,
-      trading: input.trading,
-      venue: "polymarket",
+      maxSlippageBps: policy.maxSlippageBps,
+      side: buyReturn.side,
     });
-    if (!canPreviewBuyForReadiness(readiness)) {
-      return presentation.message;
+    let quote: TradeQuote | null = null;
+    let readiness: TradingReadiness | null = null;
+    try {
+      [quote, readiness] = await Promise.all([
+        input.trading.quote({ intent: quoteIntent }),
+        resolveTelegramTradingReadiness({
+          action: "BUY",
+          authorization,
+          market,
+          trading: input.trading,
+          venue: "polymarket",
+        }),
+      ]);
+    } catch {
+      quote = null;
+      readiness = null;
     }
-    const executableUsd = Math.max(0, readiness.maxExecutableBuyUsd ?? 0);
-    if (executableUsd + 0.000_001 < requestedSpendUsd) {
-      const target = presentation.session.receiveTargets.find(
-        (candidate) =>
-          candidate.receiveTargetId === presentation.consent?.receiveTargetId &&
-          candidate.acceptedAssets.some((accepted) =>
-            sameAsset(
-              accepted.asset,
-              presentation.consent?.asset ?? accepted.asset,
-            ),
+    const target = (presentation.session.receiveTargets ?? []).find(
+      (candidate) =>
+        candidate.receiveTargetId === presentation.consent?.receiveTargetId &&
+        candidate.acceptedAssets.some((accepted) =>
+          sameAsset(
+            accepted.asset,
+            presentation.consent?.asset ?? accepted.asset,
           ),
-      );
-      const receiveStillOpen =
-        presentation.context.cancelledAt == null &&
-        new Date(presentation.context.expiresAt).getTime() >
-          presentation.now.getTime();
-      if (!target || !receiveStillOpen) return presentation.message;
-      const addressMessage = buildTelegramFundingAddressMessage({
-        address: target.destinationAddress,
-        contextId: presentation.context.id,
-        expiresAt: presentation.context.expiresAt,
+        ),
+    );
+    const receiveStillOpen =
+      presentation.context.cancelledAt == null &&
+      new Date(presentation.context.expiresAt).getTime() >
+        presentation.now.getTime();
+    const addressMessage =
+      target && receiveStillOpen
+        ? buildTelegramFundingAddressMessage({
+            address: target.destinationAddress,
+            contextId: presentation.context.id,
+            expiresAt: presentation.context.expiresAt,
+          })
+        : null;
+    const quoteLimits = quote
+      ? resolveTelegramTradeQuoteLimits({
+          amountUsd: requestedSpendUsd,
+          intent: quoteIntent,
+          quote,
+        })
+      : null;
+    const quoteExpiresAt = quote?.expiresAt
+      ? new Date(quote.expiresAt).getTime()
+      : Number.NaN;
+    const progressState = presentation.progress?.state ?? null;
+    const fundingSurfaceMessage =
+      progressState === "ready" && addressMessage
+        ? addressMessage
+        : presentation.message;
+    const withFundingCallout = (callout: {
+      bodyMarkdownV2: string | string[];
+      icon: string;
+      title: string;
+    }) => ({
+      ...fundingSurfaceMessage,
+      text: joinTelegramMarkdownV2Lines([
+        formatTelegramCalloutMarkdownV2(callout),
+        "",
+        fundingSurfaceMessage.text,
+      ]),
+    });
+    if (
+      !readiness ||
+      !quoteLimits ||
+      !Number.isFinite(quoteExpiresAt) ||
+      quoteExpiresAt <= presentation.now.getTime() ||
+      quoteLimits.venueMinimumBlocking ||
+      quoteLimits.maxSpendUsd == null ||
+      !Number.isFinite(quoteLimits.maxSpendUsd) ||
+      quoteLimits.maxSpendUsd <= 0 ||
+      quoteLimits.maxSpendUsd + 0.000_001 < requestedSpendUsd ||
+      quoteLimits.maxSpendUsd > maxAmountUsd ||
+      readiness.maxExecutableBuyUsd == null ||
+      !Number.isFinite(readiness.maxExecutableBuyUsd) ||
+      readiness.maxExecutableBuyUsd < 0 ||
+      !canPreviewBuyForReadiness(readiness)
+    ) {
+      return withFundingCallout({
+        bodyMarkdownV2: [
+          formatTelegramUsdcLineMarkdownV2(
+            `Order: ${formatUsd(requestedSpendUsd)}`,
+          ),
+          escapeMarkdown(
+            "The current required deposit could not be calculated safely. Tap Refresh before sending.",
+          ),
+        ],
+        icon: "⚠️",
+        title: "Amount temporarily unavailable",
       });
-      return {
-        ...addressMessage,
-        text: joinTelegramMarkdownV2Lines([
-          formatTelegramCalloutMarkdownV2({
-            bodyMarkdownV2: escapeMarkdown(
-              `Add at least ${formatUsd(requestedSpendUsd - executableUsd)}, then tap Refresh. The Buy still requires Review and Confirm.`,
-            ),
-            icon: "💰",
-            title: "More funding needed",
-          }),
-          "",
-          addressMessage.text,
-        ]),
-      };
+    }
+    const executableUsd = readiness.maxExecutableBuyUsd;
+    const requiredUsd = quoteLimits.maxSpendUsd;
+    const fundingRequirement = resolveTelegramFundingBuyDepositRequirement({
+      executableFundsUsd: executableUsd,
+      maximumSpendUsd: requiredUsd,
+    });
+    if (fundingRequirement.state === "deposit") {
+      return withFundingCallout({
+        bodyMarkdownV2: [
+          formatTelegramUsdcLineMarkdownV2(
+            `Order: ${formatUsd(requestedSpendUsd)}`,
+          ),
+          formatTelegramUsdcLineMarkdownV2(
+            `Maximum spend now: ${formatUsd(requiredUsd)}`,
+          ),
+          formatTelegramUsdcLineMarkdownV2(
+            `Available at Polymarket: ${formatUsd(fundingRequirement.availableUsd)}`,
+          ),
+          formatTelegramUsdcLineMarkdownV2(
+            `Send at least: ${fundingRequirement.sendAtLeastPusd.toLocaleString(
+              "en-US",
+              {
+                maximumFractionDigits: 2,
+                minimumFractionDigits: 2,
+              },
+            )} pUSD`,
+          ),
+          escapeMarkdown(
+            "Then tap Refresh. The Buy still requires Review and Confirm.",
+          ),
+        ],
+        icon: "💰",
+        title: "Funding for this Buy",
+      });
+    }
+    if (progressState !== "ready") {
+      return withFundingCallout({
+        bodyMarkdownV2: [
+          formatTelegramUsdcLineMarkdownV2(
+            `Order: ${formatUsd(requestedSpendUsd)}`,
+          ),
+          formatTelegramUsdcLineMarkdownV2(
+            `Maximum spend now: ${formatUsd(requiredUsd)}`,
+          ),
+          formatTelegramUsdcLineMarkdownV2(
+            `Available at Polymarket: ${formatUsd(fundingRequirement.availableUsd)}`,
+          ),
+          escapeMarkdown(
+            "No additional pUSD is required now. Tap Refresh to continue. The Buy still requires Review and Confirm.",
+          ),
+        ],
+        icon: "💰",
+        title: "Funding for this Buy",
+      });
+    }
+    if (
+      !(await hasReadyTelegramFundingDestinationReceipt(
+        input.pool,
+        presentation.context.id,
+      ))
+    ) {
+      return presentation.message;
     }
     let issued: Awaited<ReturnType<typeof issueTelegramFundingBuyContinuation>>;
     try {
@@ -5646,6 +5796,9 @@ export function createTelegramFundingBuyContinuationDecorator(input: {
         )}`,
         formatTelegramUsdcLineMarkdownV2(
           `Order: ${formatUsd(requestedSpendUsd)}`,
+        ),
+        formatTelegramUsdcLineMarkdownV2(
+          `Maximum spend now: ${formatUsd(requiredUsd)}`,
         ),
         "",
         formatTelegramCalloutMarkdownV2({

@@ -273,6 +273,31 @@ Polygon target address and the receive observer intentionally scans all
 variants. An unexpected asset can be observed and credited, but it cannot
 inherit automation consent from the selected address.
 
+For a Receive Session opened from a Buy shortfall, every address and waiting
+surface must also answer how much to send. The immutable Buy amount is the
+destination requirement; a fresh Buy quote supplies maximum spend and current
+destination readiness supplies the executable balance. Direct Polygon pUSD
+therefore shows the nominal order, current maximum spend, available pUSD, and
+the pUSD shortfall rounded up for display. Generic Add Funds remains
+amount-free.
+
+Future activated source assets use the same destination requirement. The
+selected route supplies an exact source amount for stable/prequoted routes or
+a clearly labelled current estimate plus expiry for a volatile asset. Asset
+selection is the user's consent to automatic conversion; the product does not
+add a second exchange-rate confirmation. Execution still remains bounded by
+the route's fee, slippage, minimum-output, cap, and recovery policy. An
+underfunded transfer keeps waiting for the remainder, while excess destination
+value remains in Account Value. If a safe source quote is unavailable, the bot
+shows an explicit unavailable/Refresh state and never invents an amount.
+The live picker/address/progress card owns this dynamic amount guidance. The QR
+image caption stays address-only because a deposit amount or conversion quote
+can change while the receive address remains valid.
+
+This contract does not activate native SOL. Solana USDC and any future SOL
+route remain hidden until their exact capability, fee-payer, policy, and
+recovery gates are independently enabled.
+
 Consent classification is fixed by the selection transaction. A non-direct
 selection writes `automation_enabled=true` only when
 `can_offer_automatic=true` at the compare-and-set boundary; otherwise it writes

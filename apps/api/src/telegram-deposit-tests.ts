@@ -84,6 +84,50 @@ function dependencies(
 
 const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
   {
+    name: "funding target selection receives the Buy-return decorator immediately",
+    run: async () => {
+      let receivedDecorator: unknown;
+      const app = Fastify({ logger: false });
+      app.setValidatorCompiler(validatorCompiler);
+      app.setSerializerCompiler(serializerCompiler);
+      await app.register(
+        createTelegramBotTradingRoutes({
+          createTrading: () => ({}) as never,
+          db: { query: async () => ({ fields: [], rows: [] }) } as never,
+          fundingService: {
+            cancel: async () => ({ text: "cancel" }),
+            open: async () => ({ text: "open" }),
+            selectTarget: async (_input, _now, decorateProgress) => {
+              receivedDecorator = decorateProgress;
+              return { text: "selected with amount guidance" };
+            },
+            session: async () => ({ text: "session" }),
+          },
+          internalPreHandler: async () => undefined,
+        }),
+      );
+      try {
+        const response = await app.inject({
+          method: "POST",
+          payload: {
+            chatId: 20,
+            choiceToken: "p",
+            contextId: "11111111-1111-4111-8111-111111111111",
+            idempotencyKey: "funding:select:amount",
+            telegramMessageId: 42,
+            telegramUserId: 20,
+          },
+          url: "/internal/telegram-bot/funding/select-target",
+        });
+        assert.equal(response.statusCode, 200);
+        assert.equal(response.json().text, "selected with amount guidance");
+        assert.equal(typeof receivedDecorator, "function");
+      } finally {
+        await app.close();
+      }
+    },
+  },
+  {
     name: "main Add funds callback reaches the venue picker route",
     run: async () => {
       const loadedVenues: Array<string | null | undefined> = [];

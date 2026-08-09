@@ -783,7 +783,13 @@ async function registerTelegramBotTradingRoutes(
     },
     async (request, reply) => {
       try {
-        return reply.send(await fundingService.selectTarget(request.body));
+        return reply.send(
+          await fundingService.selectTarget(
+            request.body,
+            new Date(),
+            createFundingDecoratorForRequest(request),
+          ),
+        );
       } catch (error) {
         return sendTelegramFundingError(request, reply, error);
       }

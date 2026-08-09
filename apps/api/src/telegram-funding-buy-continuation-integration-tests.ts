@@ -729,76 +729,158 @@ try {
     ]);
   }
 
-  const partialFundingMessage =
+  const partialTrading = {
+    ...trading,
+    getReadiness: async () => ({
+      capabilities: {
+        authorizationModes: ["server_delegated"],
+        supportsBuy: true,
+        supportsCancel: false,
+        supportsExecutionSync: false,
+        supportsOrderSync: false,
+        supportsPositionSync: false,
+        supportsSell: false,
+        supportsSetup: false,
+        venue: "polymarket" as const,
+      },
+      executable: false,
+      maxExecutableBuyUsd: 0.1,
+      message: "More funds are required.",
+      ready: false,
+      reasonCode: "insufficient_funds",
+      setupRequired: false,
+    }),
+    quote: async (input: Parameters<ApiBotTradingExecutor["quote"]>[0]) => ({
+      action: "BUY" as const,
+      amount: { type: "usd" as const, value: "0.5" },
+      estimatedNotionalUsd: 0.5,
+      estimatedShares: 1,
+      expiresAt: new Date(Date.now() + 60_000),
+      fees: {},
+      maxSpendUsd: 0.503,
+      meetsVenueMinimum: true,
+      minReceiveShares: 0.95,
+      price: 0.45,
+      target: input.intent.target,
+      venue: "polymarket" as const,
+    }),
+  } as ApiBotTradingExecutor;
+  const decoratePartialFunding = createTelegramFundingBuyContinuationDecorator({
+    pool,
+    trading: partialTrading,
+  });
+  const partialFundingPresentation = {
+    consent: {
+      receiveTargetId: `slice-b-target-${suffix}`,
+      asset: {
+        assetId: fundingSidecarRuntimeConfig.polymarketPusdAddress,
+        decimals: 6,
+        networkId: "evm:137",
+      },
+    } as never,
+    context: created.context,
+    now,
+    session: {
+      destinationAsset: {
+        assetId: fundingSidecarRuntimeConfig.polymarketPusdAddress,
+        decimals: 6,
+        networkId: "evm:137",
+      },
+      destinationOptionId,
+      receiveTargets: [
+        {
+          acceptedAssets: [
+            {
+              asset: {
+                assetId: fundingSidecarRuntimeConfig.polymarketPusdAddress,
+                decimals: 6,
+                networkId: "evm:137",
+              },
+              handling: "direct",
+            },
+          ],
+          destinationAddress,
+          networkId: "evm:137",
+          receiveTargetId: `slice-b-target-${suffix}`,
+          safeInstructions: [],
+        },
+      ],
+      venueBindingOptionId,
+      venueId: "polymarket",
+      version: 7,
+    } as never,
+  };
+  const waitingFundingMessage = await decoratePartialFunding({
+    ...partialFundingPresentation,
+    message: { qrText: destinationAddress, text: "Waiting for transfer" },
+    progress: { state: "waiting_for_transfer" } as never,
+  });
+  assert.match(waitingFundingMessage.text, /Funding for this Buy/u);
+  assert.match(waitingFundingMessage.text, /Maximum spend now/u);
+  assert.match(waitingFundingMessage.text, /Send at least/u);
+  assert.match(waitingFundingMessage.text, /pUSD/u);
+  assert.equal(waitingFundingMessage.qrText, destinationAddress);
+
+  const pickerFundingMessage = await decoratePartialFunding({
+    ...partialFundingPresentation,
+    consent: null,
+    message: { text: "Choose the exact asset" },
+    progress: null,
+  });
+  assert.match(pickerFundingMessage.text, /Funding for this Buy/u);
+  assert.match(pickerFundingMessage.text, /Send at least/u);
+  assert.match(pickerFundingMessage.text, /Choose the exact asset/u);
+  assert.equal(
+    pickerFundingMessage.qrText,
+    undefined,
+    "the picker shows the destination requirement without disclosing an address",
+  );
+
+  const fundsReceivedMessage = await decoratePartialFunding({
+    ...partialFundingPresentation,
+    message: { text: "Funds received and processing" },
+    progress: { state: "funds_received" } as never,
+  });
+  assert.match(fundsReceivedMessage.text, /Funding for this Buy/u);
+  assert.match(fundsReceivedMessage.text, /Send at least/u);
+  assert.match(
+    fundsReceivedMessage.text,
+    /Funds received and processing/u,
+    "amount guidance decorates rather than replaces the current funding state",
+  );
+
+  const expiredQuoteMessage =
     await createTelegramFundingBuyContinuationDecorator({
       pool,
       trading: {
-        ...trading,
-        getReadiness: async () => ({
-          capabilities: {
-            authorizationModes: ["server_delegated"],
-            supportsBuy: true,
-            supportsCancel: false,
-            supportsExecutionSync: false,
-            supportsOrderSync: false,
-            supportsPositionSync: false,
-            supportsSell: false,
-            supportsSetup: false,
-            venue: "polymarket" as const,
-          },
-          executable: false,
-          maxExecutableBuyUsd: 0.1,
-          message: "More funds are required.",
-          ready: false,
-          reasonCode: "insufficient_funds",
-          setupRequired: false,
+        ...partialTrading,
+        quote: async (
+          input: Parameters<ApiBotTradingExecutor["quote"]>[0],
+        ) => ({
+          ...(await partialTrading.quote(input)),
+          expiresAt: new Date(now.getTime() - 1),
         }),
       } as ApiBotTradingExecutor,
     })({
-      consent: {
-        receiveTargetId: `slice-b-target-${suffix}`,
-        asset: {
-          assetId: fundingSidecarRuntimeConfig.polymarketPusdAddress,
-          decimals: 6,
-          networkId: "evm:137",
-        },
-      } as never,
-      context: created.context,
-      message: { text: "pUSD ready" },
-      now,
-      progress: { state: "ready" } as never,
-      session: {
-        destinationAsset: {
-          assetId: fundingSidecarRuntimeConfig.polymarketPusdAddress,
-          decimals: 6,
-          networkId: "evm:137",
-        },
-        destinationOptionId,
-        receiveTargets: [
-          {
-            acceptedAssets: [
-              {
-                asset: {
-                  assetId: fundingSidecarRuntimeConfig.polymarketPusdAddress,
-                  decimals: 6,
-                  networkId: "evm:137",
-                },
-                handling: "direct",
-              },
-            ],
-            destinationAddress,
-            networkId: "evm:137",
-            receiveTargetId: `slice-b-target-${suffix}`,
-            safeInstructions: [],
-          },
-        ],
-        venueBindingOptionId,
-        venueId: "polymarket",
-        version: 7,
-      } as never,
+      ...partialFundingPresentation,
+      message: { text: "Waiting for transfer" },
+      progress: { state: "waiting_for_transfer" } as never,
     });
-  assert.match(partialFundingMessage.text, /More funding needed/u);
-  assert.match(partialFundingMessage.text, /Add at least/u);
+  assert.match(expiredQuoteMessage.text, /Amount temporarily unavailable/u);
+  assert.doesNotMatch(
+    expiredQuoteMessage.text,
+    /Send at least/u,
+    "an expired quote never renders a fabricated deposit amount",
+  );
+
+  const partialFundingMessage = await decoratePartialFunding({
+    ...partialFundingPresentation,
+    message: { text: "pUSD ready" },
+    progress: { state: "ready" } as never,
+  });
+  assert.match(partialFundingMessage.text, /Funding for this Buy/u);
+  assert.match(partialFundingMessage.text, /Maximum spend now/u);
+  assert.match(partialFundingMessage.text, /Send at least/u);
   assert.equal(partialFundingMessage.qrText, destinationAddress);
   assert.equal(
     partialFundingMessage.reply_markup?.inline_keyboard.some((row) =>

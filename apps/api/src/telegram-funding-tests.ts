@@ -151,6 +151,30 @@ assert.equal(
 
 assert.equal(canonicalTelegramFundingBuySpend("1.000000"), "1");
 assert.equal(canonicalTelegramFundingBuySpend("1.250000"), "1.25");
+assert.deepEqual(
+  telegramBotTradingTestHooks.resolveTelegramFundingBuyDepositRequirement({
+    executableFundsUsd: 12.65,
+    maximumSpendUsd: 15.216001,
+  }),
+  {
+    availableUsd: 12.65,
+    sendAtLeastPusd: 2.57,
+    state: "deposit",
+  },
+  "Buy-return deposit guidance uses fresh maximum spend and rounds the pUSD shortfall up",
+);
+assert.deepEqual(
+  telegramBotTradingTestHooks.resolveTelegramFundingBuyDepositRequirement({
+    executableFundsUsd: 15.216001,
+    maximumSpendUsd: 15.216001,
+  }),
+  {
+    availableUsd: 15.216001,
+    sendAtLeastPusd: 0,
+    state: "ready",
+  },
+  "an already funded Buy never renders a zero-value deposit instruction",
+);
 assert.equal(
   telegramBotTradingTestHooks.shouldOpenTelegramFundingBuyReturn({
     amountUsd: 5,
