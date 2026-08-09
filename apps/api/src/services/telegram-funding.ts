@@ -80,6 +80,90 @@ type TelegramFundingInitialBuyReturn = Readonly<{
   side: "NO" | "YES";
 }>;
 
+export type TelegramFundingBuyReturnSourceIntent = Readonly<{
+  action: string;
+  amount_usd: string | number | null;
+  authorization_id: string | null;
+  authorization_max_amount_usd: string | number | null;
+  authorization_privy_wallet_id: string | null;
+  authorization_wallet_address: string;
+  authorization_wallet_chain: "ethereum" | "solana";
+  chat_id: string | null;
+  event_id: string | null;
+  funding_operation_id: string | null;
+  funding_reservation_id: string | null;
+  market_id: string;
+  side: string | null;
+  status: string;
+  submit_started_at: Date | null;
+  telegram_authority: unknown;
+  telegram_user_id: string;
+  user_id: string | null;
+}>;
+
+export async function loadTelegramFundingBuyReturnSourceIntentForUpdate(
+  client: PoolClient,
+  input: Readonly<{
+    sourceIntentId: string;
+    telegramAccountId: string;
+  }>,
+): Promise<TelegramFundingBuyReturnSourceIntent | null> {
+  const source = await client.query<TelegramFundingBuyReturnSourceIntent>(
+    `
+      select
+        intent.action,
+        intent.amount_usd,
+        intent.authorization_id,
+        auth.max_amount_usd as authorization_max_amount_usd,
+        auth.privy_wallet_id as authorization_privy_wallet_id,
+        auth.wallet_address as authorization_wallet_address,
+        auth.wallet_chain as authorization_wallet_chain,
+        intent.chat_id,
+        intent.event_id,
+        intent.funding_operation_id,
+        intent.funding_reservation_id,
+        intent.market_id,
+        intent.side,
+        intent.status,
+        intent.submit_started_at,
+        intent.result -> 'telegramAuthority' as telegram_authority,
+        intent.telegram_user_id,
+        intent.user_id
+      from telegram_trade_intents intent
+      join telegram_bot_trading_authorizations auth
+        on auth.id = intent.authorization_id
+       and auth.user_id = intent.user_id
+       and auth.telegram_user_id = intent.telegram_user_id
+       and auth.enabled = true
+       and 'polymarket' = any(auth.enabled_venues)
+      join users app_user
+        on app_user.id = auth.user_id
+       and coalesce(app_user.is_active, true) = true
+      join telegram_bot_trading_preferences preference
+        on preference.user_id = auth.user_id
+       and preference.desired_enabled = true
+      join user_telegram_accounts telegram_account
+        on telegram_account.id = $2::uuid
+       and telegram_account.user_id = auth.user_id
+       and telegram_account.telegram_user_id = auth.telegram_user_id
+      join user_wallets wallet
+        on wallet.user_id = auth.user_id
+       and wallet.wallet_type = auth.wallet_chain
+       and wallet.is_verified = true
+       and (
+         (auth.wallet_chain = 'ethereum'
+           and lower(wallet.wallet_address) = lower(auth.wallet_address))
+         or (auth.wallet_chain <> 'ethereum'
+           and wallet.wallet_address = auth.wallet_address)
+       )
+      where intent.id = $1::uuid
+      for update of intent, auth, app_user, preference, telegram_account, wallet
+    `,
+    [input.sourceIntentId, input.telegramAccountId],
+  );
+  return source.rows[0] ?? null;
+}
+
 export type TelegramFundingErrorCode =
   | "destination_ambiguous"
   | "funding_context_not_found"
@@ -752,79 +836,11 @@ export class TelegramFundingService {
         ) {
           throw new TelegramFundingError("funding_buy_continuation_disabled");
         }
-        const source = await client.query<{
-          action: string;
-          amount_usd: string | number | null;
-          authorization_id: string | null;
-          authorization_max_amount_usd: string | number | null;
-          authorization_privy_wallet_id: string | null;
-          authorization_wallet_address: string;
-          authorization_wallet_chain: "ethereum" | "solana";
-          chat_id: string | null;
-          event_id: string | null;
-          funding_operation_id: string | null;
-          funding_reservation_id: string | null;
-          market_id: string;
-          side: string | null;
-          status: string;
-          submit_started_at: Date | null;
-          telegram_authority: unknown;
-          telegram_user_id: string;
-          user_id: string | null;
-        }>(
-          `
-              select
-                intent.action,
-                intent.amount_usd,
-                intent.authorization_id,
-                authorization.max_amount_usd as authorization_max_amount_usd,
-                authorization.privy_wallet_id as authorization_privy_wallet_id,
-                authorization.wallet_address as authorization_wallet_address,
-                authorization.wallet_chain as authorization_wallet_chain,
-                intent.chat_id,
-                intent.event_id,
-                intent.funding_operation_id,
-                intent.funding_reservation_id,
-                intent.market_id,
-                intent.side,
-                intent.status,
-                intent.submit_started_at,
-                intent.result -> 'telegramAuthority' as telegram_authority,
-                intent.telegram_user_id,
-                intent.user_id
-              from telegram_trade_intents intent
-              join telegram_bot_trading_authorizations authorization
-                on authorization.id = intent.authorization_id
-               and authorization.user_id = intent.user_id
-               and authorization.telegram_user_id = intent.telegram_user_id
-               and authorization.enabled = true
-               and 'polymarket' = any(authorization.enabled_venues)
-              join users app_user
-                on app_user.id = authorization.user_id
-               and coalesce(app_user.is_active, true) = true
-              join telegram_bot_trading_preferences preference
-                on preference.user_id = authorization.user_id
-               and preference.desired_enabled = true
-              join user_telegram_accounts telegram_account
-                on telegram_account.id = $2::uuid
-               and telegram_account.user_id = authorization.user_id
-               and telegram_account.telegram_user_id = authorization.telegram_user_id
-              join user_wallets wallet
-                on wallet.user_id = authorization.user_id
-               and wallet.wallet_type = authorization.wallet_chain
-               and wallet.is_verified = true
-               and (
-                 (authorization.wallet_chain = 'ethereum'
-                   and lower(wallet.wallet_address) = lower(authorization.wallet_address))
-                 or (authorization.wallet_chain <> 'ethereum'
-                   and wallet.wallet_address = authorization.wallet_address)
-               )
-              where intent.id = $1::uuid
-              for update of intent, authorization, app_user, preference, telegram_account, wallet
-            `,
-          [input.sourceIntentId, initialLink.linkId],
-        );
-        const sourceIntent = source.rows[0];
+        const sourceIntent =
+          await loadTelegramFundingBuyReturnSourceIntentForUpdate(client, {
+            sourceIntentId: input.sourceIntentId,
+            telegramAccountId: initialLink.linkId,
+          });
         const sourceAuthority = parseTelegramBotTradeAuthorityBinding(
           sourceIntent?.telegram_authority,
         );
