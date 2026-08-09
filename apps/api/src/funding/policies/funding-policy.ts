@@ -375,6 +375,20 @@ export type FundingRuntimePolicy = DeepReadonly<
   z.infer<typeof fundingRuntimePolicySchema>
 >;
 
+export const FUNDING_ROUTE_EXPERIENCE = deepFreeze({
+  maximumInlineP95Ms: 45_000,
+  minimumInlineSuccessBps: 9_500,
+  minimumInlineObservationCount: 20,
+});
+
+export const FUNDING_TTL = deepFreeze({
+  collectorMs: 60_000,
+  priceMs: 60_000,
+  quoteMs: 30_000,
+  pollingMs: 15_000,
+  reservationMs: 300_000,
+});
+
 export const DEFAULT_FUNDING_RUNTIME_POLICY: FundingRuntimePolicy = deepFreeze({
   version: 1,
   creationMode: "off",
@@ -416,18 +430,8 @@ export const DEFAULT_FUNDING_RUNTIME_POLICY: FundingRuntimePolicy = deepFreeze({
     warningFeeBps: 1_000,
     minimumDestinationUsd: "0.5",
   },
-  routeExperience: {
-    maximumInlineP95Ms: 45_000,
-    minimumInlineSuccessBps: 9_500,
-    minimumInlineObservationCount: 20,
-  },
-  ttl: {
-    collectorMs: 60_000,
-    priceMs: 60_000,
-    quoteMs: 30_000,
-    pollingMs: 15_000,
-    reservationMs: 300_000,
-  },
+  routeExperience: FUNDING_ROUTE_EXPERIENCE,
+  ttl: FUNDING_TTL,
   assets: [],
   locations: [],
   venues: [],
@@ -534,6 +538,7 @@ function addIssue(
 function validateParsedFundingPolicy(
   policy: FundingRuntimePolicy,
   registry: FundingStaticRegistry,
+  requireRouteFixtures: boolean,
 ): FundingPolicyValidationIssue[] {
   const issues: FundingPolicyValidationIssue[] = [];
   issues.push(
@@ -764,10 +769,11 @@ function validateParsedFundingPolicy(
     }
 
     if (
-      route.fixtureIds.length === 0 ||
-      route.fixtureIds.some(
-        (fixtureId) => !registry.fixtureIds.includes(fixtureId),
-      )
+      requireRouteFixtures &&
+      (route.fixtureIds.length === 0 ||
+        route.fixtureIds.some(
+          (fixtureId) => !registry.fixtureIds.includes(fixtureId),
+        ))
     ) {
       addIssue(
         issues,
@@ -1059,6 +1065,7 @@ function validateParsedFundingPolicy(
 export function validateFundingRuntimePolicy(
   input: unknown,
   registry: FundingStaticRegistry = PRODUCTION_FUNDING_REGISTRY,
+  requireRouteFixtures = true,
 ): FundingPolicyValidationResult {
   const parsed = fundingRuntimePolicySchema.safeParse(input);
   if (!parsed.success) {
@@ -1073,7 +1080,11 @@ export function validateFundingRuntimePolicy(
     };
   }
   const policy = deepFreeze(parsed.data);
-  const issues = validateParsedFundingPolicy(policy, registry);
+  const issues = validateParsedFundingPolicy(
+    policy,
+    registry,
+    requireRouteFixtures,
+  );
   if (issues.length > 0) return { ok: false, policy: null, issues };
   return { ok: true, policy, issues: [] };
 }
@@ -1139,7 +1150,7 @@ function canonicalize(value: unknown): JsonValue {
   throw new Error("policy contains a non-JSON value");
 }
 
-export function fundingPolicyRevision(policy: FundingRuntimePolicy): string {
+export function fundingPolicyRevision(policy: unknown): string {
   const canonical = JSON.stringify(canonicalize(policy));
   return `sha256:${createHash("sha256").update(canonical).digest("hex")}`;
 }
@@ -1182,8 +1193,8 @@ function diffJson(
 }
 
 export function diffFundingPolicies(
-  before: FundingRuntimePolicy,
-  after: FundingRuntimePolicy,
+  before: unknown,
+  after: unknown,
 ): readonly FundingPolicyDiffEntry[] {
   const output: FundingPolicyDiffEntry[] = [];
   diffJson(canonicalize(before), canonicalize(after), "", output);

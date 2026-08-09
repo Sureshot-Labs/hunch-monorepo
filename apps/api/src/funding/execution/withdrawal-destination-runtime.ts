@@ -6,15 +6,18 @@ import { getCredentialsEncryptionKey } from "../../lib/credentials-encryption.js
 import { fetchEvmCode } from "../../services/polygon-rpc.js";
 import { createSolanaRpcConnection } from "../../services/rpc-client-factory.js";
 import type { AssetRef, ResolvedExternalRecipient } from "../domain/types.js";
-import { sameAsset } from "../domain/asset-identity.js";
+import {
+  supportsWithdrawalDestinationAsset,
+  WITHDRAWAL_DESTINATION_CONTRACT_REVISION,
+  WITHDRAWAL_DESTINATION_CONTRACT_VERSION,
+} from "../domain/withdrawal-contract.js";
 import {
   fetchFundingWithdrawalDestinationForUser,
   registerFundingWithdrawalDestination,
   revokeFundingWithdrawalDestinationInTransaction,
 } from "../persistence/funding-evidence-repository.js";
-import { resolveFundingPolicy } from "../policies/funding-policy-service.js";
-import type { FundingRuntimePolicy } from "../policies/funding-policy.js";
 import { fundingSidecarRuntimeConfig } from "../runtime/sidecar-runtime-config.js";
+import { parsePositiveInteger } from "../runtime/positive-integer.js";
 import {
   createWithdrawalDestinationCodec,
   type WithdrawalDestinationCodec,
@@ -28,7 +31,6 @@ export type WithdrawalDestinationErrorCode =
   | "withdrawal_destination_expired"
   | "withdrawal_destination_invalid"
   | "withdrawal_destination_not_found"
-  | "withdrawal_destination_policy_disabled"
   | "withdrawal_destination_unsupported";
 
 export class WithdrawalDestinationError extends Error {
@@ -50,40 +52,11 @@ export type WithdrawalAddressInspection = Readonly<{
   evidenceRevision: string;
 }>;
 
-function positiveInt(raw: string | undefined): number | null {
-  if (!raw || !/^\d+$/.test(raw)) return null;
-  const value = Number(raw);
-  return Number.isSafeInteger(value) && value > 0 ? value : null;
-}
-
-export function assertWithdrawalRecipientPolicy(
-  policy: FundingRuntimePolicy,
-  asset: AssetRef,
-  gate: "withdrawalExecution" | "withdrawalRegistration",
-): void {
-  if (
-    policy.creationMode !== "on" ||
-    !policy.gates[gate] ||
-    policy.gates.emergencyBroadcastPause
-  ) {
-    throw new WithdrawalDestinationError(
-      "withdrawal_destination_policy_disabled",
-      `funding ${gate} is disabled`,
-    );
-  }
-  const assetEnabled = policy.assets.some(
-    (candidate) => candidate.enabled && sameAsset(candidate.asset, asset),
-  );
-  const recipientEnabled = policy.locations.some(
-    (location) =>
-      location.enabled &&
-      location.ownership === "external_recipient" &&
-      sameAsset(location.asset, asset),
-  );
-  if (!assetEnabled || !recipientEnabled) {
+export function assertWithdrawalRecipientContract(asset: AssetRef): void {
+  if (!supportsWithdrawalDestinationAsset(asset)) {
     throw new WithdrawalDestinationError(
       "withdrawal_destination_unsupported",
-      "withdrawal recipient asset or network is not enabled",
+      "withdrawal recipient asset is outside the code-owned contract",
     );
   }
 }
@@ -232,7 +205,6 @@ export class WithdrawalDestinationRuntime {
       inspectAddress?: typeof inspectWithdrawalAddress;
       now?: () => Date;
       registerDestination?: typeof registerFundingWithdrawalDestination;
-      resolvePolicy?: typeof resolveFundingPolicy;
       revokeDestination?: typeof revokeFundingWithdrawalDestinationInTransaction;
     }> = {},
   ) {}
@@ -242,7 +214,8 @@ export class WithdrawalDestinationRuntime {
     const lookupKey =
       process.env.FUNDING_REFERENCE_LOOKUP_HMAC_KEY?.trim() ?? "";
     const keyVersion =
-      positiveInt(process.env.FUNDING_REFERENCE_LOOKUP_KEY_VERSION) ?? 1;
+      parsePositiveInteger(process.env.FUNDING_REFERENCE_LOOKUP_KEY_VERSION) ??
+      1;
     return createWithdrawalDestinationCodec({
       encryptionKey: getCredentialsEncryptionKey(),
       lookupHmacKey: lookupKey,
@@ -255,14 +228,7 @@ export class WithdrawalDestinationRuntime {
     input: Readonly<{ asset: AssetRef; address: string }>,
   ) {
     const now = this.dependencies.now?.() ?? new Date();
-    const resolved = await (
-      this.dependencies.resolvePolicy ?? resolveFundingPolicy
-    )(this.db);
-    assertWithdrawalRecipientPolicy(
-      resolved.policy,
-      input.asset,
-      "withdrawalRegistration",
-    );
+    assertWithdrawalRecipientContract(input.asset);
     const inspected = await (
       this.dependencies.inspectAddress ?? inspectWithdrawalAddress
     )({
@@ -287,10 +253,10 @@ export class WithdrawalDestinationRuntime {
         addressKind: inspected.addressKind,
         blockedContractCheck: "passed",
         evidenceRevision: inspected.evidenceRevision,
-        policyRevision: resolved.revision,
+        policyRevision: WITHDRAWAL_DESTINATION_CONTRACT_REVISION,
         validatedAt: now.toISOString(),
       },
-      policyVersion: resolved.policy.version,
+      policyVersion: WITHDRAWAL_DESTINATION_CONTRACT_VERSION,
       expiresAt,
       now,
     });
@@ -302,7 +268,7 @@ export class WithdrawalDestinationRuntime {
       addressFingerprint: fingerprint,
       validatedAt: now.toISOString(),
       expiresAt: stored.destination.expiresAt.toISOString(),
-      validationPolicyVersion: resolved.policy.version,
+      validationPolicyVersion: WITHDRAWAL_DESTINATION_CONTRACT_VERSION,
       replayed: stored.replayed,
     } as const;
   }
@@ -317,17 +283,14 @@ export class WithdrawalDestinationRuntime {
   ): Promise<ResolvedExternalRecipient> {
     const now = this.dependencies.now?.() ?? new Date();
     const db = options.db ?? this.db;
-    const [resolved, stored] = await Promise.all([
-      (this.dependencies.resolvePolicy ?? resolveFundingPolicy)(db),
-      (
-        this.dependencies.fetchDestination ??
-        fetchFundingWithdrawalDestinationForUser
-      )(db, {
-        userId,
-        destinationId: recipientId,
-        lockForShare: options.lockForShare,
-      }),
-    ]);
+    const stored = await (
+      this.dependencies.fetchDestination ??
+      fetchFundingWithdrawalDestinationForUser
+    )(db, {
+      userId,
+      destinationId: recipientId,
+      lockForShare: options.lockForShare,
+    });
     if (!stored) {
       throw new WithdrawalDestinationError(
         "withdrawal_destination_not_found",
@@ -349,19 +312,15 @@ export class WithdrawalDestinationRuntime {
       assetId: stored.assetId,
       decimals: stored.assetDecimals,
     };
-    assertWithdrawalRecipientPolicy(
-      resolved.policy,
-      asset,
-      "withdrawalExecution",
-    );
+    assertWithdrawalRecipientContract(asset);
     const evidenceRevision = stored.validationEvidence.policyRevision;
     if (
-      stored.policyVersion !== resolved.policy.version ||
-      evidenceRevision !== resolved.revision
+      stored.policyVersion !== WITHDRAWAL_DESTINATION_CONTRACT_VERSION ||
+      evidenceRevision !== WITHDRAWAL_DESTINATION_CONTRACT_REVISION
     ) {
       throw new WithdrawalDestinationError(
         "withdrawal_destination_expired",
-        "withdrawal destination policy changed and must be revalidated",
+        "withdrawal destination contract changed and must be revalidated",
       );
     }
     const codec = this.codec();

@@ -9,7 +9,14 @@ import type {
   SourceOption,
 } from "../domain/types.js";
 import { parseMoneyJson } from "../domain/money-json.js";
-import type { FundingRuntimePolicy } from "../policies/funding-policy.js";
+import {
+  FUNDING_TTL,
+  type FundingRuntimePolicy,
+} from "../policies/funding-policy.js";
+import {
+  isWithdrawalPurpose,
+  withdrawalBindingMatches,
+} from "../domain/withdrawal-binding.js";
 import {
   FundingPersistenceError,
   createFundingQuote,
@@ -170,16 +177,6 @@ export class FundingQuoteService {
       ownershipRevision: string;
     }>,
   ): Promise<FundingQuoteSummary> {
-    if (
-      input.policy.creationMode !== "on" ||
-      !input.policy.gates.quoteCreation
-    ) {
-      throw new FundingPlannerError(
-        "invalid_policy",
-        "funding quote creation is disabled",
-      );
-    }
-    const withdrawalGateEnabled = input.policy.gates.withdrawalExecution;
     const now = this.dependencies.now?.() ?? new Date();
     const planning = await this.dependencies.planningStore.fetchOwnedCurrent({
       userId: input.userId,
@@ -192,9 +189,20 @@ export class FundingQuoteService {
         "funding discovery projection is absent or expired",
       );
     }
+    const withdrawalIntent = isWithdrawalPurpose(planning.request.purpose);
     if (
-      planning.policyVersion !== input.policy.version ||
-      planning.policyRevision !== input.policyRevision ||
+      !withdrawalIntent &&
+      (input.policy.creationMode !== "on" || !input.policy.gates.quoteCreation)
+    ) {
+      throw new FundingPlannerError(
+        "invalid_policy",
+        "funding quote creation is disabled",
+      );
+    }
+    if (
+      (!withdrawalIntent &&
+        (planning.policyVersion !== input.policy.version ||
+          planning.policyRevision !== input.policyRevision)) ||
       planning.ownershipRevision !== input.ownershipRevision
     ) {
       throw new FundingPlannerError(
@@ -222,10 +230,12 @@ export class FundingQuoteService {
       );
     }
     const storedPlan = selected.commitPlan;
-    const withdrawalIntent = planning.request.purpose === "withdrawal";
     const externalRecipientId = storedPlan.operation.externalRecipientId;
     if (
-      withdrawalIntent !== Boolean(externalRecipientId) ||
+      !withdrawalBindingMatches(
+        planning.request.purpose,
+        externalRecipientId,
+      ) ||
       externalRecipientId !== planning.request.withdrawalRecipientId
     ) {
       throw new FundingPersistenceError(
@@ -233,14 +243,10 @@ export class FundingQuoteService {
         "withdrawal source plan differs from the frozen recipient",
       );
     }
-    if (
-      withdrawalIntent &&
-      (!withdrawalGateEnabled ||
-        !this.dependencies.revalidateWithdrawalRecipient)
-    ) {
+    if (withdrawalIntent && !this.dependencies.revalidateWithdrawalRecipient) {
       throw new FundingPlannerError(
-        "invalid_policy",
-        "withdrawal execution is disabled or lacks recipient revalidation",
+        "destination_unavailable",
+        "withdrawal recipient revalidation is unavailable",
       );
     }
     if (withdrawalIntent && externalRecipientId) {
@@ -374,13 +380,16 @@ export class FundingQuoteService {
     const directExternalHandoff =
       plan.operation.planKind === "direct_external_handoff" &&
       selected.option.source.kind === "external_ingress";
+    const quoteTtlMs = withdrawalIntent
+      ? FUNDING_TTL.quoteMs
+      : input.policy.ttl.quoteMs;
     const expiresAt = new Date(
       directExternalHandoff
-        ? now.getTime() + input.policy.ttl.quoteMs
+        ? now.getTime() + quoteTtlMs
         : Math.min(
             planning.expiresAt.getTime(),
             Date.parse(selected.option.expiresAt),
-            now.getTime() + input.policy.ttl.quoteMs,
+            now.getTime() + quoteTtlMs,
           ),
     );
     if (expiresAt.getTime() <= now.getTime()) {

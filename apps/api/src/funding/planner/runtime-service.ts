@@ -24,6 +24,11 @@ import {
 } from "../persistence/funding-preparation-run-repository.js";
 import { PostgresFundingPlanningStore } from "../persistence/funding-planning-repository.js";
 import { resolveFundingPolicy } from "../policies/funding-policy-service.js";
+import { recommendFundingDestinations } from "./destination-adapters.js";
+import {
+  fundingDestinationEnabled,
+  fundingVenueReceiveEnabled,
+} from "../policies/funding-policy-v2.js";
 import type {
   FundingCommitRequest,
   FundingDestinationOption,
@@ -45,6 +50,7 @@ import { WalletPreparationRuntimeService } from "../preparation/runtime-service.
 import { ProductionFundingSourcePlanner } from "./production-source-planner.js";
 import { PolymarketFundingSourceAdapter } from "../preparation/polymarket-funding-source-adapter.js";
 import { DirectIngressFundingSourceAdapter } from "./direct-ingress-source-adapter.js";
+import { parsePositiveInteger } from "../runtime/positive-integer.js";
 import {
   FundingOperationActionRuntime,
   type FundingActionReportOutcome,
@@ -55,11 +61,13 @@ import { sameAsset } from "../domain/asset-identity.js";
 const SUBJECT_FINGERPRINT_DOMAIN = "hunch:funding:subject:v1:";
 const PREPARATION_RUN_TTL_MS = 15 * 60_000;
 
-function positiveInt(raw: string | undefined): number | null {
-  if (!raw || !/^\d+$/.test(raw)) return null;
-  const value = Number(raw);
-  return Number.isSafeInteger(value) && value > 0 ? value : null;
-}
+export type FundingDestinationQuery = Readonly<{
+  purpose: "fund" | "buy" | "sell" | "redeem" | "withdraw";
+  marketContextId?: string | null;
+  marketClass?: string | null;
+  positionActionRef?: string | null;
+  controllerWalletRef?: string | null;
+}>;
 
 export class FundingLiquiditySingleflight {
   private readonly inflight = new Map<
@@ -131,11 +139,8 @@ export class FundingPlanningRuntime {
       receiveSessionsVersion: 1 as const,
       creationMode: resolvedPolicy.policy.creationMode,
       destinationVenues: resolvedPolicy.policy.venues
-        .filter(
-          (venue) =>
-            venue.lifecycleEnabled &&
-            venue.destinationReadinessEnabled &&
-            venue.fundingEnabled,
+        .filter((venue) =>
+          fundingVenueReceiveEnabled(resolvedPolicy.policy, venue.venueId),
         )
         .map((venue) => venue.venueId)
         .sort((left, right) => left.localeCompare(right)),
@@ -151,23 +156,50 @@ export class FundingPlanningRuntime {
 
   async destinations(
     userId: string,
-    query: Readonly<{
-      purpose: "fund" | "buy" | "sell" | "redeem" | "withdraw";
-      marketContextId?: string | null;
-      marketClass?: string | null;
-      positionActionRef?: string | null;
-      controllerWalletRef?: string | null;
-    }>,
+    query: FundingDestinationQuery,
   ): Promise<readonly FundingDestinationOption[]> {
-    return this.preparationRuntime.listDestinationOptions({
-      accountId: userId,
-      purpose: query.purpose,
-      marketContextId: query.marketContextId ?? null,
-      marketClass: query.marketClass ?? null,
-      positionActionRef: query.positionActionRef ?? null,
-      compatibleVenueBindingOptionIds: null,
-      controllerWalletRef: query.controllerWalletRef ?? null,
-    });
+    return (await this.destinationAccess(userId, query)).options;
+  }
+
+  async destinationAccess(
+    userId: string,
+    query: FundingDestinationQuery,
+  ): Promise<
+    Readonly<{
+      options: readonly FundingDestinationOption[];
+      policyDisabledOptions: readonly FundingDestinationOption[];
+    }>
+  > {
+    const [resolvedPolicy, rawOptions] = await Promise.all([
+      resolveFundingPolicy(this.db),
+      this.preparationRuntime.listDestinationOptions({
+        accountId: userId,
+        purpose: query.purpose,
+        marketContextId: query.marketContextId ?? null,
+        marketClass: query.marketClass ?? null,
+        positionActionRef: query.positionActionRef ?? null,
+        compatibleVenueBindingOptionIds: null,
+        controllerWalletRef: query.controllerWalletRef ?? null,
+      }),
+    ]);
+    const options: FundingDestinationOption[] = [];
+    const policyDisabledOptions: FundingDestinationOption[] = [];
+    for (const option of rawOptions) {
+      (fundingDestinationEnabled(resolvedPolicy.policy, option, query.purpose)
+        ? options
+        : policyDisabledOptions
+      ).push(option);
+    }
+    return {
+      options:
+        query.purpose === "fund"
+          ? recommendFundingDestinations(
+              options,
+              resolvedPolicy.policy.genericAddFundsRecommendationOrder,
+            )
+          : options,
+      policyDisabledOptions,
+    };
   }
 
   inspectPreparation(
@@ -439,7 +471,8 @@ export class FundingPlanningRuntime {
     ]);
     const lookupKey = process.env.FUNDING_REFERENCE_LOOKUP_HMAC_KEY?.trim();
     const keyVersion =
-      positiveInt(process.env.FUNDING_REFERENCE_LOOKUP_KEY_VERSION) ?? 1;
+      parsePositiveInteger(process.env.FUNDING_REFERENCE_LOOKUP_KEY_VERSION) ??
+      1;
     if (!lookupKey) {
       throw new FundingPlannerError(
         "invalid_policy",

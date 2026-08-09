@@ -5,6 +5,8 @@ import assert from "node:assert/strict";
 import type { AccountValueReadModel } from "../../../account-value/runtime-service.js";
 import { RELAY_PINNED_ASSETS } from "../../../funding-providers/relay/mappings.js";
 import type { FundingRuntimePolicy } from "../../policies/funding-policy.js";
+import { withWithdrawalPlanningContract } from "../../domain/withdrawal-contract.js";
+import { compileFundingIntentPolicy } from "../../policies/funding-policy-v2.js";
 import { PRIVY_USER_AUTHORIZED_EVM_SPONSORSHIP_POLICY_ID } from "../../execution/sponsorship-policy.js";
 import { SOLANA_NATIVE_EXECUTION_RESERVE_LAMPORTS } from "../../domain/network-fees.js";
 import {
@@ -1118,16 +1120,34 @@ assert.equal(
   }).length,
   0,
 );
-const withdrawalPolicy = policy({
-  locations: policy().locations.map((location) => ({
-    ...location,
-    capabilities: [...location.capabilities, "withdrawal_source"],
-  })),
-});
+const withdrawalPolicy = withWithdrawalPlanningContract(
+  compileFundingIntentPolicy({
+    version: 2,
+    venues: [],
+    receive: { assets: [], privy: false },
+    paused: true,
+  }),
+  POLYGON_PUSD,
+);
+const unpricedWithdrawalAccount = structuredClone(account()) as unknown as {
+  projection: {
+    components: Array<{
+      estimatedUsd: null;
+      valuationEligibility: "excluded";
+    }>;
+  };
+};
+const [unpricedWithdrawalComponent] =
+  unpricedWithdrawalAccount.projection.components;
+if (!unpricedWithdrawalComponent) {
+  throw new Error("unpriced withdrawal component fixture is missing");
+}
+unpricedWithdrawalComponent.estimatedUsd = null;
+unpricedWithdrawalComponent.valuationEligibility = "excluded";
 assert.equal(
   deriveProductionRelayEligibleSourceFacts({
     accountId: ACCOUNT_ID,
-    account: account(),
+    account: unpricedWithdrawalAccount as unknown as AccountValueReadModel,
     policy: withdrawalPolicy,
     requiredAmount: { asset: POLYGON_PUSD, raw: "3000000" },
     purpose: "withdrawal",

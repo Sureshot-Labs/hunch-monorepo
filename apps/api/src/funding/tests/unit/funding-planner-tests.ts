@@ -2,6 +2,8 @@
 
 import assert from "node:assert/strict";
 
+import { RELAY_PINNED_ASSETS } from "../../../funding-providers/relay/mappings.js";
+
 import type {
   FundingCommitPlan,
   StoredFundingQuote,
@@ -23,6 +25,7 @@ import type {
   VenueBindingOption,
 } from "../../domain/types.js";
 import { resolveFundingDestinationChoice } from "../../domain/selections.js";
+import { operationPurposeForExternalRecipient } from "../../domain/withdrawal-binding.js";
 import type {
   FrozenPreparationDestination,
   ResolvedDestinationCandidate,
@@ -55,6 +58,7 @@ import { FundingOperationService } from "../../planner/operation-service.js";
 import { canonicalJsonHash } from "../../persistence/canonical.js";
 import {
   DEFAULT_FUNDING_RUNTIME_POLICY,
+  FUNDING_TTL,
   type FundingRuntimePolicy,
 } from "../../policies/funding-policy.js";
 
@@ -62,7 +66,7 @@ const NOW = new Date("2026-07-24T12:00:00.000Z");
 const USER_ID = "10000000-0000-4000-8000-000000000001";
 const POLYGON_PUSD: AssetRef = {
   networkId: "evm:137",
-  assetId: "0x0000000000000000000000000000000000000001",
+  assetId: RELAY_PINNED_ASSETS.polygonPusd,
   decimals: 6,
 };
 const BASE_USDC: AssetRef = {
@@ -2081,6 +2085,15 @@ await test("transient provider failure remains a partial liquidity projection so
 await test("planner evaluates collected evidence at a current clock and permits known-zero direct ingress", async () => {
   const policy = mutablePolicy();
   policy.creationMode = "on";
+  policy.assets = [
+    {
+      asset: POLYGON_PUSD,
+      enabled: true,
+      observationEnabled: true,
+      valuationEnabled: true,
+      pricePolicyId: "exact-stable-policy-v1",
+    },
+  ];
   policy.locations = [
     {
       locationPatternId: "polymarket-venue-cash-v1",
@@ -2089,6 +2102,15 @@ await test("planner evaluates collected evidence at a current clock and permits 
       ownership: "owned",
       observable: true,
       capabilities: ["observe", "venue_settlement"],
+      enabled: true,
+    },
+    {
+      locationPatternId: "wallet-polygon-pusd-v1",
+      locationKind: "wallet",
+      asset: POLYGON_PUSD,
+      ownership: "owned",
+      observable: true,
+      capabilities: ["observe", "value", "execution_source"],
       enabled: true,
     },
   ];
@@ -2736,7 +2758,7 @@ await test("a tiny shortfall falls back when no source covers the executable ref
   assert.equal(projection.reasonCodes.includes("insufficient_liquidity"), true);
 });
 
-await test("withdrawal binds one owner recipient through discovery, quote, and atomic commit", async () => {
+await test("withdrawal stays independent of funding pause through discovery, quote, and atomic commit", async () => {
   const recipient = {
     recipientId: "recipient_withdrawal_12345678",
     accountId: USER_ID,
@@ -2754,21 +2776,10 @@ await test("withdrawal binds one owner recipient through discovery, quote, and a
     withdrawalRecipientId: recipient.recipientId,
   });
   const policy = mutablePolicy();
-  policy.creationMode = "on";
-  policy.gates.quoteCreation = true;
-  policy.gates.commit = true;
-  policy.gates.withdrawalExecution = true;
-  policy.locations = [
-    {
-      locationPatternId: "polygon_external_recipient_v1",
-      locationKind: "wallet",
-      asset: POLYGON_PUSD,
-      ownership: "external_recipient",
-      observable: false,
-      capabilities: [],
-      enabled: true,
-    },
-  ];
+  policy.ttl.quoteMs = 1;
+  assert.equal(policy.creationMode, "off");
+  assert.equal(policy.gates.quoteCreation, false);
+  assert.equal(policy.gates.commit, false);
   const store = new MemoryPlanningStore();
   let frozenPlan: FundingCommitPlan | null = null;
   const projection = await new FundingPlanner({
@@ -2796,7 +2807,7 @@ await test("withdrawal binds one owner recipient through discovery, quote, and a
         ...base,
         operation: {
           ...base.operation,
-          purpose: "withdrawal",
+          purpose: operationPurposeForExternalRecipient(recipient.recipientId),
           sourceSnapshot: option as never,
           destinationTargetSnapshot: destination.target as never,
           externalRecipientId: recipient.recipientId,
@@ -2832,6 +2843,10 @@ await test("withdrawal binds one owner recipient through discovery, quote, and a
   assert.equal(projection.sourceOptions.length, 1);
   assert.equal(projection.mode, "inline_funding");
   assert.equal(
+    projection.expiresAt,
+    new Date(NOW.getTime() + FUNDING_TTL.quoteMs).toISOString(),
+  );
+  assert.equal(
     store.rows.get(projection.liquidityProjectionId)?.plannerSnapshot
       .withdrawalRecipient?.recipientId,
     recipient.recipientId,
@@ -2842,7 +2857,9 @@ await test("withdrawal binds one owner recipient through discovery, quote, and a
     ).includes(recipient.address),
     false,
   );
-  assert.ok(frozenPlan);
+  const createdPlan = frozenPlan as FundingCommitPlan | null;
+  assert.ok(createdPlan);
+  assert.equal(createdPlan.operation.purpose, "withdrawal");
 
   let currentRecipientChecks = 0;
   let storedQuote: StoredFundingQuote | null = null;
@@ -2925,7 +2942,9 @@ await test("withdrawal binds one owner recipient through discovery, quote, and a
       assert.equal(input.recipientId, recipient.recipientId);
     },
     fetchQuote: async () => committedQuote,
-    resolvePolicy: async () => resolvedPolicy,
+    resolvePolicy: async () => {
+      throw new Error("withdrawal commit must not resolve funding policy");
+    },
     commitOperation: async (_db, input) => {
       await input.verifyCurrentFacts?.({} as never, committedQuote);
       return { operation: {} as never, replayed: false };

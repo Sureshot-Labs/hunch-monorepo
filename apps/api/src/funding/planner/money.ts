@@ -71,6 +71,7 @@ export type FundingPlannerErrorCode =
   | "asset_mismatch"
   | "destination_selection_required"
   | "destination_unavailable"
+  | "funding_policy_disabled"
   | "invalid_amount"
   | "invalid_market_context"
   | "invalid_policy"

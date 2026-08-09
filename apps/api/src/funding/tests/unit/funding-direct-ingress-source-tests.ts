@@ -9,6 +9,7 @@ import { PRIVY_USER_AUTHORIZED_EVM_SPONSORSHIP_POLICY_ID } from "../../execution
 import { DirectIngressFundingSourceAdapter } from "../../planner/direct-ingress-source-adapter.js";
 import type { FundingSourcePlanningInput } from "../../planner/source-adapter.js";
 import type { FundingRuntimePolicy } from "../../policies/funding-policy.js";
+import { compileFundingIntentPolicy } from "../../policies/funding-policy-v2.js";
 import { polymarketFundingEvidence } from "../../preparation/polymarket-funding-snapshot.js";
 
 const NOW = new Date("2026-07-24T12:00:00.000Z");
@@ -23,6 +24,11 @@ const ROUTER = "0x0000000000000000000000000000000000000004";
 const USDCE = {
   networkId: "evm:137",
   assetId: RELAY_PINNED_ASSETS.polygonUsdce,
+  decimals: 6,
+} as const;
+const POLYGON_USDC = {
+  networkId: "evm:137",
+  assetId: RELAY_PINNED_ASSETS.polygonUsdc,
   decimals: 6,
 } as const;
 const BASE_USDC = {
@@ -78,6 +84,26 @@ function policy(privyEnabled: boolean): FundingRuntimePolicy {
     ],
     ttl: { quoteMs: 30_000, reservationMs: 300_000 },
     locations: [
+      {
+        locationPatternId: "wallet_polygon_pusd",
+        locationKind: "wallet",
+        ownership: "owned",
+        observable: true,
+        capabilities: ["observe", "execution_source"],
+        asset: ASSET,
+        enabled: true,
+        policyVersion: 1,
+      },
+      {
+        locationPatternId: "wallet_polygon_usdce",
+        locationKind: "wallet",
+        ownership: "owned",
+        observable: true,
+        capabilities: ["observe", "execution_source"],
+        asset: USDCE,
+        enabled: true,
+        policyVersion: 1,
+      },
       {
         locationPatternId: "polymarket-venue-cash-v1",
         locationKind: "venue_account",
@@ -311,6 +337,59 @@ assert.equal(
   "polymarket_funding_router",
 );
 sourceOptionSchema.parse(multiAsset.option);
+
+const v2Input = input(false, "add_funds", true);
+const [nativePolygonOnly] = await multiAssetAdapter.list({
+  ...v2Input,
+  policy: compileFundingIntentPolicy({
+    version: 2,
+    venues: ["polymarket"],
+    receive: { assets: ["polygon:usdc"], privy: false },
+    paused: false,
+  }),
+});
+assert.ok(nativePolygonOnly);
+assert.deepEqual(
+  nativePolygonOnly.option.ingress?.receiveTargets?.flatMap((target) =>
+    target.acceptedAssets.map((accepted) => accepted.asset),
+  ),
+  [POLYGON_USDC],
+  "compact receive aliases must be an exact allowlist",
+);
+
+assert.deepEqual(
+  await multiAssetAdapter.list({
+    ...v2Input,
+    policy: compileFundingIntentPolicy({
+      version: 2,
+      venues: ["polymarket"],
+      receive: { assets: [], privy: false },
+      paused: false,
+    }),
+  }),
+  [],
+  "a venue alone must not create an unselected receive target",
+);
+
+const privyOnly = await multiAssetAdapter.list({
+  ...v2Input,
+  policy: compileFundingIntentPolicy({
+    version: 2,
+    venues: ["polymarket"],
+    receive: { assets: [], privy: true },
+    paused: false,
+  }),
+});
+assert.deepEqual(
+  privyOnly.map((source) => source.option.kind),
+  ["privy_funding_method"],
+);
+assert.deepEqual(
+  privyOnly[0]?.option.ingress?.receiveTargets?.flatMap((target) =>
+    target.acceptedAssets.map((accepted) => accepted.asset),
+  ),
+  [ASSET],
+);
 
 const baseAddress = "0x0000000000000000000000000000000000000006";
 const unprovenCrossNetworkInput = input(false, "add_funds", true);
@@ -772,6 +851,16 @@ const baseReceiveInput = {
     ],
     locations: [
       ...baseTemplate.policy.locations,
+      {
+        locationPatternId: "wallet_base_usdc",
+        locationKind: "wallet",
+        ownership: "owned",
+        observable: true,
+        capabilities: ["observe", "execution_source"],
+        asset: BASE_USDC,
+        enabled: true,
+        policyVersion: 1,
+      },
       {
         locationPatternId: "limitless-venue-cash-v1",
         locationKind: "venue_account",

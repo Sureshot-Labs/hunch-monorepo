@@ -20,7 +20,8 @@ import {
 } from "../persistence/funding-operation-repository.js";
 import { canonicalJsonHash } from "../persistence/canonical.js";
 import { resolveFundingPolicy } from "../policies/funding-policy-service.js";
-import type { FundingRuntimePolicy } from "../policies/funding-policy.js";
+import { withdrawalBindingMatches } from "../domain/withdrawal-binding.js";
+import { parsePositiveInteger } from "../runtime/positive-integer.js";
 import {
   resolveActionSponsorship,
   type ResolvedActionSponsorship,
@@ -35,12 +36,6 @@ const EXECUTOR_BY_ACTION_KIND = {
   external_handoff: "polymarket_deposit_wallet_relayer_v1",
   svm_transaction: "wallet_profile_svm_v1",
 } as const;
-
-function positiveInt(value: string | undefined): number | null {
-  if (!value || !/^\d+$/.test(value)) return null;
-  const parsed = Number(value);
-  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
-}
 
 function signerWalletId(action: NormalizedAction): string | null {
   if (
@@ -178,19 +173,13 @@ export function isReportableFundingActionKind(
 
 export function assertWithdrawalActionPolicy(
   operation: Pick<FundingOperationRow, "externalRecipientId" | "purpose">,
-  policy: Pick<FundingRuntimePolicy, "gates">,
 ): string | null {
-  const withdrawal = operation.purpose === "withdrawal";
-  if (withdrawal !== Boolean(operation.externalRecipientId)) {
+  if (
+    !withdrawalBindingMatches(operation.purpose, operation.externalRecipientId)
+  ) {
     throw new FundingPersistenceError(
       "quote_mismatch",
       "withdrawal operation and external recipient binding differ",
-    );
-  }
-  if (withdrawal && !policy.gates.withdrawalExecution) {
-    throw new FundingPersistenceError(
-      "quote_invalidated",
-      "withdrawal execution is independently disabled",
     );
   }
   return operation.externalRecipientId;
@@ -226,8 +215,7 @@ export class FundingOperationActionRuntime {
       sponsorshipPolicyId: string | null;
     }>
   > {
-    const [resolvedPolicy, operation, step, account] = await Promise.all([
-      resolveFundingPolicy(this.db),
+    const [operation, step, account] = await Promise.all([
       fetchFundingOperationForUser(this.db, {
         userId,
         operationId: input.operationId,
@@ -245,20 +233,20 @@ export class FundingOperationActionRuntime {
         "funding operation action was not found for authenticated user",
       );
     }
-    const externalRecipientId = assertWithdrawalActionPolicy(
-      operation,
-      resolvedPolicy.policy,
-    );
-    if (
-      resolvedPolicy.policy.creationMode !== "on" ||
-      !resolvedPolicy.policy.gates.startUnsubmittedAction ||
-      resolvedPolicy.policy.gates.emergencyBroadcastPause ||
-      resolvedPolicy.revision !== operation.policyRevision
-    ) {
-      throw new FundingPersistenceError(
-        "quote_invalidated",
-        "funding action start is disabled or its policy changed",
-      );
+    const externalRecipientId = assertWithdrawalActionPolicy(operation);
+    if (!externalRecipientId) {
+      const resolvedPolicy = await resolveFundingPolicy(this.db);
+      if (
+        resolvedPolicy.policy.creationMode !== "on" ||
+        !resolvedPolicy.policy.gates.startUnsubmittedAction ||
+        resolvedPolicy.policy.gates.emergencyBroadcastPause ||
+        resolvedPolicy.revision !== operation.policyRevision
+      ) {
+        throw new FundingPersistenceError(
+          "quote_invalidated",
+          "funding action start is disabled or its policy changed",
+        );
+      }
     }
     if (externalRecipientId) {
       await (
@@ -349,7 +337,8 @@ export class FundingOperationActionRuntime {
     }
     const lookupKey = process.env.FUNDING_REFERENCE_LOOKUP_HMAC_KEY?.trim();
     const keyVersion =
-      positiveInt(process.env.FUNDING_REFERENCE_LOOKUP_KEY_VERSION) ?? 1;
+      parsePositiveInteger(process.env.FUNDING_REFERENCE_LOOKUP_KEY_VERSION) ??
+      1;
     if (!lookupKey) {
       throw new FundingPersistenceError(
         "quote_invalidated",

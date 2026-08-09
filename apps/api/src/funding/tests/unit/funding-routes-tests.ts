@@ -622,6 +622,32 @@ await test("receive channel conflicts use HTTP 409", async () => {
   }
 });
 
+await test("disabled receive destinations use HTTP 409", async () => {
+  const app = await buildApp({
+    openReceiveSession: async () => {
+      throw new FundingPlannerError(
+        "funding_policy_disabled",
+        "receive destination is disabled",
+      );
+    },
+  });
+  try {
+    const response = await app.inject({
+      method: "POST",
+      url: "/funding/receive-sessions",
+      payload: {
+        destinationOptionId: destination().destinationOptionId,
+        venueBindingOptionId: destination().venueBindingOptionId,
+        selectedReceiveTargetId: null,
+      },
+    });
+    assert.equal(response.statusCode, 409);
+    assert.equal(response.json().code, "funding_policy_disabled");
+  } finally {
+    await app.close();
+  }
+});
+
 await test("receive session reads only through the authenticated owner", async () => {
   let observedUserId: string | null = null;
   const app = await buildApp({

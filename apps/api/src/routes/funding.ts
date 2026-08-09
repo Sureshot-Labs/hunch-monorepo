@@ -22,7 +22,10 @@ import type {
 import { parseMoneyJson } from "../funding/domain/money-json.js";
 import type { PreparationResult } from "../funding/domain/contracts.js";
 import { FundingPlannerError } from "../funding/planner/money.js";
-import { FundingPlanningRuntime } from "../funding/planner/runtime-service.js";
+import {
+  FundingPlanningRuntime,
+  type FundingDestinationQuery,
+} from "../funding/planner/runtime-service.js";
 import {
   FundingReceiveSessionService,
   type FundingReceiveSessionResponse,
@@ -83,14 +86,6 @@ import {
   fundingWithdrawalDestinationRevokeResponseSchema,
   externalIngressInstructionSchema,
 } from "../schemas/funding.js";
-
-type FundingDestinationQuery = Readonly<{
-  purpose: "fund" | "buy" | "sell" | "redeem" | "withdraw";
-  marketContextId?: string | null;
-  marketClass?: string | null;
-  positionActionRef?: string | null;
-  controllerWalletRef?: string | null;
-}>;
 
 const DEFAULT_FUNDING_REQUESTS_PER_MINUTE = 30;
 const ACTIVE_FUNDING_READ_REQUESTS_PER_MINUTE = 180;
@@ -401,7 +396,6 @@ function errorStatus(error: unknown): number {
   if (error instanceof WithdrawalDestinationError) {
     if (error.code === "withdrawal_destination_not_found") return 404;
     if (error.code === "withdrawal_destination_expired") return 410;
-    if (error.code === "withdrawal_destination_policy_disabled") return 503;
     if (error.code === "withdrawal_destination_unsupported") return 409;
     return 400;
   }
@@ -419,6 +413,7 @@ function errorStatus(error: unknown): number {
   }
   if (error instanceof FundingPlannerError) {
     if (error.code === "stale_projection") return 410;
+    if (error.code === "funding_policy_disabled") return 409;
     if (
       error.code === "invalid_policy" ||
       error.code === "provider_unavailable"

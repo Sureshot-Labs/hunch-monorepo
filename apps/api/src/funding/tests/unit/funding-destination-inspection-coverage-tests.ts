@@ -2,11 +2,15 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
+import type { Pool } from "@hunch/infra";
+
 import {
   collectDestinationInspectionCoverage,
   isDestinationDriverApplicable,
   supportsDestinationMarketClass,
 } from "../../preparation/destination-inspection-coverage.js";
+import { PreparationContractError } from "../../preparation/core-adapter.js";
+import { WalletPreparationRuntimeService } from "../../preparation/runtime-service.js";
 
 const drivers = [
   {
@@ -218,4 +222,74 @@ await test("an external success cannot conceal a failed internal destination", (
 
   assert.deepEqual(coverage.values, ["external-option"]);
   assert.deepEqual(coverage.incompleteVenueIds, ["limitless"]);
+});
+
+await test("destination listing keeps verified venues when another venue fails", async () => {
+  const service = new WalletPreparationRuntimeService({} as Pool);
+  Object.defineProperty(service, "loadWallets", {
+    value: async () => [
+      {
+        id: "wallet_partial_coverage_12345678",
+        isVerified: true,
+        isInternalWallet: true,
+      },
+    ],
+  });
+  Object.defineProperty(service, "venueDrivers", {
+    value: [
+      {
+        venueId: "polymarket",
+        supportedMarketClasses: [],
+        supportsWallet: () => true,
+      },
+      {
+        venueId: "limitless",
+        supportedMarketClasses: [],
+        supportsWallet: () => true,
+      },
+    ],
+  });
+  Object.defineProperty(service, "inspectDestinationWithReuse", {
+    value: async (input: { driver: { venueId: string } }) => {
+      if (input.driver.venueId === "limitless") {
+        throw new Error("Limitless temporarily unavailable");
+      }
+      return { venueId: input.driver.venueId };
+    },
+  });
+  const preparedDestinations = Reflect.get(
+    service,
+    "preparedDestinations",
+  ).bind(service) as (
+    input: {
+      accountId: string;
+      compatibleVenueBindingOptionIds: null;
+      controllerWalletRef: null;
+      marketClass: null;
+      marketContextId: null;
+      positionActionRef: null;
+      purpose: "fund";
+    },
+    resolvedMarket: null,
+    allowPartialVenueCoverage: boolean,
+  ) => Promise<readonly { venueId: string }[]>;
+  const input = {
+    accountId: "account_partial_coverage_12345678",
+    compatibleVenueBindingOptionIds: null,
+    controllerWalletRef: null,
+    marketClass: null,
+    marketContextId: null,
+    positionActionRef: null,
+    purpose: "fund" as const,
+  };
+
+  assert.deepEqual(await preparedDestinations(input, null, true), [
+    { venueId: "polymarket" },
+  ]);
+  await assert.rejects(
+    () => preparedDestinations(input, null, false),
+    (error: unknown) =>
+      error instanceof PreparationContractError &&
+      error.code === "preparation_unavailable",
+  );
 });

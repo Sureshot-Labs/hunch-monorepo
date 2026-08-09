@@ -68,7 +68,7 @@ import {
   type FundingAccountValueFacts,
 } from "./funding-movement-feed.js";
 import {
-  exactStableAccountAssets,
+  knownAccountAssets,
   resolveKnownAccountAsset,
 } from "./known-asset-catalog.js";
 
@@ -109,15 +109,23 @@ export type AccountValueReadModel = Readonly<{
   assetPreferences: Readonly<Record<string, StoredAssetFundingPreference>>;
 }>;
 
-function exactStableCatalog(): AccountAssetCatalogEntry[] {
-  return exactStableAccountAssets().map((entry) => ({
+function knownAssetCatalog(): AccountAssetCatalogEntry[] {
+  return knownAccountAssets().map((entry) => ({
     asset: entry.asset,
     category: entry.category,
-    pricePolicyId: EXACT_STABLE_PRICE_POLICY_ID,
+    pricePolicyId: entry.exactStable
+      ? EXACT_STABLE_PRICE_POLICY_ID
+      : UNPRICED_POLICY_ID,
     symbol: entry.symbol,
     venueId: entry.venueId,
     verified: true,
   }));
+}
+
+function exactStableCatalog(): AccountAssetCatalogEntry[] {
+  return knownAssetCatalog().filter(
+    (entry) => entry.pricePolicyId === EXACT_STABLE_PRICE_POLICY_ID,
+  );
 }
 
 function mergeCatalogWithPolicy(
@@ -130,16 +138,15 @@ function mergeCatalogWithPolicy(
   }>[],
 ): AccountAssetCatalogEntry[] {
   const catalog = new Map(
-    exactStableCatalog().map((entry) => [
-      canonicalAssetKey(entry.asset),
-      entry,
-    ]),
+    knownAssetCatalog().map((entry) => [canonicalAssetKey(entry.asset), entry]),
   );
   for (const item of policyAssets) {
     const key = canonicalAssetKey(item.asset);
     const existing = catalog.get(key);
     if (!item.enabled || !item.observationEnabled) {
-      if (existing) catalog.delete(key);
+      // Funding support must never conceal already-owned known assets from
+      // the user's balance. Policy entries can add/price assets; receive and
+      // route eligibility is enforced separately by the funding resolver.
       continue;
     }
     const pricePolicyId =

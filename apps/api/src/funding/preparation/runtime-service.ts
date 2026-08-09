@@ -1645,15 +1645,21 @@ export class WalletPreparationRuntimeService {
   async frozenDestinations(
     input: DestinationOptionsInput,
     resolvedMarket: ApiTradeMarket | null = null,
+    allowPartialVenueCoverage = false,
   ): Promise<readonly FrozenPreparationDestination[]> {
-    return (await this.preparedDestinations(input, resolvedMarket)).map(
-      (result) => result.frozen,
-    );
+    return (
+      await this.preparedDestinations(
+        input,
+        resolvedMarket,
+        allowPartialVenueCoverage,
+      )
+    ).map((result) => result.frozen);
   }
 
   private async preparedDestinations(
     input: DestinationOptionsInput,
     resolvedMarket: ApiTradeMarket | null = null,
+    allowPartialVenueCoverage = false,
   ): Promise<readonly PreparedRuntimeDestination[]> {
     const wallets = (await this.loadWallets(input.accountId)).filter(
       (wallet) =>
@@ -1740,7 +1746,7 @@ export class WalletPreparationRuntimeService {
         return compatibleValues;
       }
     }
-    if (coverage.incompleteVenueIds.length > 0) {
+    if (!allowPartialVenueCoverage && coverage.incompleteVenueIds.length > 0) {
       throw new PreparationContractError(
         "preparation_unavailable",
         `venue destination inspection is incomplete: ${coverage.incompleteVenueIds.join(",")}`,
@@ -1875,7 +1881,7 @@ export class WalletPreparationRuntimeService {
   async listDestinationOptions(
     input: DestinationOptionsInput,
   ): Promise<readonly FundingDestinationOption[]> {
-    const facts = await this.frozenDestinations(input);
+    const facts = await this.frozenDestinations(input, null, true);
     const resolver = this.destinationResolver(facts);
     return resolver.listOptions(input);
   }

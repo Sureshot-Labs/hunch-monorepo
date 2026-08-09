@@ -20,6 +20,10 @@ import {
   selectFundingDestination,
   selectVenueBindingForCurrentIntent,
 } from "../domain/selections.js";
+import {
+  withdrawalRecipientLocationPatternId,
+  withWithdrawalPlanningContract,
+} from "../domain/withdrawal-contract.js";
 import type { FundingRuntimePolicy } from "../policies/funding-policy.js";
 import {
   toResolvedRouteDestination,
@@ -1099,15 +1103,6 @@ export class FundingPlanner {
     const amount = input.request.requestedDestinationAmount;
     const recipientId = input.request.withdrawalRecipientId;
     if (
-      input.policy.creationMode !== "on" ||
-      !input.policy.gates.withdrawalExecution
-    ) {
-      throw new FundingPlannerError(
-        "invalid_policy",
-        "withdrawal execution is disabled",
-      );
-    }
-    if (
       !amount ||
       rawAmount(amount.raw) === 0n ||
       !recipientId ||
@@ -1138,25 +1133,19 @@ export class FundingPlanner {
       amount.asset,
       "withdrawal recipient and amount",
     );
-    const recipientLocations = input.policy.locations.filter(
-      (location) =>
-        location.enabled &&
-        location.ownership === "external_recipient" &&
-        sameAsset(location.asset, amount.asset),
+    const recipientLocationPatternId = withdrawalRecipientLocationPatternId(
+      amount.asset,
     );
-    if (recipientLocations.length !== 1) {
+    if (!recipientLocationPatternId) {
       throw new FundingPlannerError(
-        "invalid_policy",
-        "withdrawal asset must map to one exact external-recipient pattern",
+        "destination_unavailable",
+        "withdrawal asset is outside the code-owned destination contract",
       );
     }
-    const recipientLocation = recipientLocations[0];
-    if (!recipientLocation) {
-      throw new FundingPlannerError(
-        "invalid_policy",
-        "withdrawal recipient location disappeared",
-      );
-    }
+    const withdrawalPolicy = withWithdrawalPlanningContract(
+      input.policy,
+      amount.asset,
+    );
     const recipientSnapshot = validatedRecipient(recipient);
     const target = {
       kind: "external_recipient" as const,
@@ -1169,11 +1158,11 @@ export class FundingPlanner {
       targetRequirement: amount,
       availableNow: { asset: amount.asset, raw: "0" },
       selectionReason: "explicit",
-      policy: input.policy,
+      policy: withdrawalPolicy,
     });
     const routeDestination: ResolvedRouteDestination = {
       destinationId: recipient.recipientId,
-      destinationLocationPatternId: recipientLocation.locationPatternId,
+      destinationLocationPatternId: recipientLocationPatternId,
       target,
       requiredAsset: amount.asset,
       spendability: null,
@@ -1191,7 +1180,7 @@ export class FundingPlanner {
         destination: routeDestination,
         placement,
         requiredAmount: amount,
-        policy: input.policy,
+        policy: withdrawalPolicy,
         policyRevision: input.policyRevision,
         now,
       }),
@@ -1207,7 +1196,7 @@ export class FundingPlanner {
     }));
     const expiresAt = new Date(
       Math.min(
-        now.getTime() + input.policy.ttl.quoteMs,
+        now.getTime() + withdrawalPolicy.ttl.quoteMs,
         Date.parse(recipient.expiresAt),
       ),
     );

@@ -9,9 +9,9 @@ import {
 } from "fastify-type-provider-zod";
 
 import {
-  DEFAULT_FUNDING_RUNTIME_POLICY,
-  type FundingRuntimePolicy,
-} from "./funding/policies/funding-policy.js";
+  DEFAULT_FUNDING_INTENT_POLICY,
+  type FundingIntentPolicy,
+} from "./funding/policies/funding-policy-v2.js";
 import {
   registerAdminFundingRoutes,
   type AdminFundingPermission,
@@ -130,6 +130,13 @@ async function test(name: string, fn: () => Promise<void> | void) {
   console.log(`[admin-funding-routes-tests] ok ${name}`);
 }
 
+function baseUsdcCandidate(): FundingIntentPolicy {
+  return {
+    ...DEFAULT_FUNDING_INTENT_POLICY,
+    receive: { assets: ["base:usdc"], privy: false },
+  };
+}
+
 await test("GET requires auth and gives viewers the fail-closed snapshot", async () => {
   const fixture = createPolicyDb();
   const app = await buildTestApp(fixture);
@@ -150,23 +157,23 @@ await test("GET requires auth and gives viewers the fail-closed snapshot", async
     ok: boolean;
     resolved: {
       source: string;
-      policy: { creationMode: string };
+      storedVersion: number;
+      editable: boolean;
+      policy: FundingIntentPolicy;
     };
   }>();
   assert.equal(body.ok, true);
   assert.equal(body.resolved.source, "default");
-  assert.equal(body.resolved.policy.creationMode, "off");
+  assert.equal(body.resolved.storedVersion, 2);
+  assert.equal(body.resolved.editable, true);
+  assert.deepEqual(body.resolved.policy, DEFAULT_FUNDING_INTENT_POLICY);
   await app.close();
 });
 
 await test("diff requires funding:write and CSRF", async () => {
   const fixture = createPolicyDb();
   const app = await buildTestApp(fixture);
-  const candidate = structuredClone(
-    DEFAULT_FUNDING_RUNTIME_POLICY,
-  ) as FundingRuntimePolicy & {
-    placement: { maximumFeeUsd: string };
-  };
+  const candidate = baseUsdcCandidate();
 
   const viewer = await app.inject({
     method: "POST",
@@ -200,12 +207,7 @@ await test("diff requires funding:write and CSRF", async () => {
 await test("previews, exact-confirms, and rejects a stale republish", async () => {
   const fixture = createPolicyDb();
   const app = await buildTestApp(fixture);
-  const candidate = structuredClone(
-    DEFAULT_FUNDING_RUNTIME_POLICY,
-  ) as FundingRuntimePolicy & {
-    placement: { maximumFeeUsd: string };
-  };
-  candidate.placement.maximumFeeUsd = "1";
+  const candidate = baseUsdcCandidate();
   const headers = {
     "x-csrf-token": "test-csrf",
     "x-test-admin-role": "admin",
@@ -220,7 +222,7 @@ await test("previews, exact-confirms, and rejects a stale republish", async () =
   assert.equal(diffResponse.statusCode, 200);
   const preview = diffResponse.json<{
     preview: {
-      candidate: FundingRuntimePolicy;
+      candidate: FundingIntentPolicy;
       candidateRevision: string;
       confirmation: string;
       current: { revision: string };
@@ -231,7 +233,7 @@ await test("previews, exact-confirms, and rejects a stale republish", async () =
   assert.equal(preview.valid, true);
   assert.deepEqual(
     preview.diff.map((entry) => entry.path),
-    ["placement.maximumFeeUsd"],
+    ["receive.assets.base:usdc"],
   );
 
   const publishPayload = {
@@ -249,6 +251,23 @@ await test("previews, exact-confirms, and rejects a stale republish", async () =
   });
   assert.equal(mismatch.statusCode, 400);
   assert.equal(mismatch.json<{ code: string }>().code, "confirmation_mismatch");
+  assert.equal(fixture.rows.length, 0);
+
+  const changedAfterPreview = await app.inject({
+    method: "POST",
+    url: "/admin/funding/policy/publish",
+    headers,
+    payload: {
+      ...publishPayload,
+      candidateRevision: "0".repeat(64),
+      confirmation: preview.confirmation,
+    },
+  });
+  assert.equal(changedAfterPreview.statusCode, 409);
+  assert.equal(
+    changedAfterPreview.json<{ code: string }>().code,
+    "candidate_revision_mismatch",
+  );
   assert.equal(fixture.rows.length, 0);
 
   const published = await app.inject({
@@ -271,6 +290,12 @@ await test("previews, exact-confirms, and rejects a stale republish", async () =
   assert.equal(fixture.rows.length, 1);
   assert.equal(fixture.rows[0]?.created_by, null);
   assert.equal(fixture.rows[0]?.created_by_admin_id, "admin_admin");
+  assert.deepEqual(Object.keys(fixture.rows[0]?.payload as object).sort(), [
+    "paused",
+    "receive",
+    "venues",
+    "version",
+  ]);
 
   const stale = await app.inject({
     method: "POST",
@@ -294,12 +319,7 @@ await test("previews, exact-confirms, and rejects a stale republish", async () =
 await test("preserves legacy user authorship in created_by", async () => {
   const fixture = createPolicyDb();
   const app = await buildTestApp(fixture);
-  const candidate = structuredClone(
-    DEFAULT_FUNDING_RUNTIME_POLICY,
-  ) as FundingRuntimePolicy & {
-    placement: { maximumFeeUsd: string };
-  };
-  candidate.placement.maximumFeeUsd = "1";
+  const candidate = baseUsdcCandidate();
   const headers = {
     "x-csrf-token": "test-csrf",
     "x-test-admin-kind": "legacy_user",
@@ -313,7 +333,7 @@ await test("preserves legacy user authorship in created_by", async () => {
   });
   const preview = diffResponse.json<{
     preview: {
-      candidate: FundingRuntimePolicy;
+      candidate: FundingIntentPolicy;
       candidateRevision: string;
       confirmation: string;
       current: { revision: string };
@@ -334,6 +354,51 @@ await test("preserves legacy user authorship in created_by", async () => {
   assert.equal(published.statusCode, 200);
   assert.equal(fixture.rows[0]?.created_by, "legacy_admin");
   assert.equal(fixture.rows[0]?.created_by_admin_id, null);
+  await app.close();
+});
+
+await test("accepts replacement patches and rejects ambiguous diff input", async () => {
+  const fixture = createPolicyDb();
+  const app = await buildTestApp(fixture);
+  const headers = {
+    "x-csrf-token": "test-csrf",
+    "x-test-admin-role": "admin",
+  };
+
+  const patchResponse = await app.inject({
+    method: "POST",
+    url: "/admin/funding/policy/diff",
+    headers,
+    payload: { patch: { receive: { assets: ["base:usdc"] } } },
+  });
+  assert.equal(patchResponse.statusCode, 200, patchResponse.body);
+  assert.deepEqual(
+    patchResponse.json<{ preview: { candidate: FundingIntentPolicy } }>()
+      .preview.candidate.receive.assets,
+    ["base:usdc"],
+  );
+
+  const ambiguous = await app.inject({
+    method: "POST",
+    url: "/admin/funding/policy/diff",
+    headers,
+    payload: { candidate: baseUsdcCandidate(), patch: {} },
+  });
+  assert.equal(ambiguous.statusCode, 400);
+
+  const nullPatch = await app.inject({
+    method: "POST",
+    url: "/admin/funding/policy/diff",
+    headers,
+    payload: { patch: { receive: null } },
+  });
+  assert.equal(nullPatch.statusCode, 200);
+  const nullPreview = nullPatch.json<{
+    preview: { issues: Array<{ path: string }>; valid: boolean };
+  }>().preview;
+  assert.equal(nullPreview.valid, false);
+  assert.equal(nullPreview.issues[0]?.path, "receive");
+
   await app.close();
 });
 

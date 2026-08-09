@@ -689,9 +689,23 @@ export const adminIntelPolicyBodySchema = z.object({
 
 export const adminFundingPolicyDiffBodySchema = z
   .object({
-    candidate: z.unknown(),
+    candidate: z.unknown().optional(),
+    patch: z.unknown().optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((value, context) => {
+    const hasCandidate = Object.prototype.hasOwnProperty.call(
+      value,
+      "candidate",
+    );
+    const hasPatch = Object.prototype.hasOwnProperty.call(value, "patch");
+    if (hasCandidate === hasPatch) {
+      context.addIssue({
+        code: "custom",
+        message: "provide exactly one funding policy candidate or patch",
+      });
+    }
+  });
 
 export const adminFundingPolicyPublishBodySchema = z
   .object({

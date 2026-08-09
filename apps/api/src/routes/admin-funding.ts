@@ -5,9 +5,10 @@ import type { DbQuery } from "../db.js";
 import { runtimePolicyCreatorIds } from "../repos/runtime-policies.js";
 import {
   FundingPolicyPublishError,
+  publishedFundingPolicyForAdmin,
   previewFundingPolicy,
   publishFundingPolicy,
-  resolveFundingPolicy,
+  resolveFundingPolicyForAdmin,
 } from "../funding/policies/funding-policy-service.js";
 import {
   adminFundingPolicyDiffBodySchema,
@@ -39,7 +40,7 @@ export function registerAdminFundingRoutes(
       preHandler: dependencies.authorize("funding:read"),
     },
     async (_request, reply) => {
-      const resolved = await resolveFundingPolicy(dependencies.db);
+      const resolved = await resolveFundingPolicyForAdmin(dependencies.db);
       reply.header("Content-Type", "application/json; charset=utf-8");
       return reply.send({ ok: true, resolved });
     },
@@ -52,10 +53,7 @@ export function registerAdminFundingRoutes(
       schema: { body: adminFundingPolicyDiffBodySchema },
     },
     async (request, reply) => {
-      const preview = await previewFundingPolicy(
-        dependencies.db,
-        request.body.candidate,
-      );
+      const preview = await previewFundingPolicy(dependencies.db, request.body);
       reply.header("Content-Type", "application/json; charset=utf-8");
       return reply.send({ ok: true, preview });
     },
@@ -91,7 +89,7 @@ export function registerAdminFundingRoutes(
         return reply.send({
           ok: true,
           requestId: request.body.requestId,
-          resolved,
+          resolved: publishedFundingPolicyForAdmin(resolved),
         });
       } catch (error) {
         if (error instanceof FundingPolicyPublishError) {

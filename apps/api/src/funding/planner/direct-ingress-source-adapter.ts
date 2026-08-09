@@ -24,6 +24,7 @@ import {
 } from "../domain/asset-identity.js";
 import { resolveActionSponsorship } from "../execution/sponsorship-policy.js";
 import { canonicalJsonHash } from "../persistence/canonical.js";
+import { fundingReceiveAssetEnabled } from "../policies/funding-policy-v2.js";
 import type {
   FundingCommitPlan,
   FundingCommitReservation,
@@ -820,43 +821,55 @@ export class DirectIngressFundingSourceAdapter implements FundingSourceAdapter {
           usdceAsset: this.config.usdceAsset,
         })
       : null;
-    const variants = completion?.variants ?? [exactIngressVariant(input)];
+    const candidateVariants = completion?.variants ?? [
+      exactIngressVariant(input),
+    ];
+    const directVariants = candidateVariants.filter((variant) =>
+      fundingReceiveAssetEnabled(input.policy, variant.asset),
+    );
+    const completionForSelectedAsset = directVariants.some(
+      (variant) => variant.completion.kind === "committed_venue_preparation",
+    )
+      ? completion
+      : null;
     // Receive targets are limited to networks with an exact canonical event
     // observer. Polygon and Base share the EVM Transfer scanner. Solana SPL
     // and native SOL use exact finalized instruction identity. A Relay quote
     // or aggregate wallet balance is never sufficient receipt identity.
     const receiveSessionVariants = [
-      ...variants,
+      ...directVariants,
       ...(this.account
         ? buildRoutedReceiveVariants({
             account: this.account,
             planning: input,
-            existing: variants,
+            existing: directVariants,
           })
         : []),
     ].filter((variant) =>
       supportsCanonicalFundingReceiveEvents(variant.networkId),
     );
-    if (receiveSessionVariants.length === 0) return [];
-    const manual = sourceOption({
-      planning: input,
-      kind: "manual_receive",
-      ingressKind: "manual",
-      safeLabel: "Deposit crypto",
-      expiresAt,
-      destinationAddress,
-      recommended: true,
-      variants: receiveSessionVariants,
-    });
-    const sources: PlannedSourceOption[] = [
-      plannedSource(
-        input,
-        manual,
-        variants,
-        completion,
-        receiveSessionVariants,
-      ),
-    ];
+    const sources: PlannedSourceOption[] = [];
+    if (receiveSessionVariants.length > 0) {
+      const manual = sourceOption({
+        planning: input,
+        kind: "manual_receive",
+        ingressKind: "manual",
+        safeLabel: "Deposit crypto",
+        expiresAt,
+        destinationAddress,
+        recommended: true,
+        variants: receiveSessionVariants,
+      });
+      sources.push(
+        plannedSource(
+          input,
+          manual,
+          directVariants,
+          completionForSelectedAsset,
+          receiveSessionVariants,
+        ),
+      );
+    }
     const privyEnabled = input.policy.privyFundingMethods.some(
       (method) =>
         method.enabled &&
@@ -865,7 +878,10 @@ export class DirectIngressFundingSourceAdapter implements FundingSourceAdapter {
           input.destination.destinationLocationPatternId &&
         sameAsset(method.asset, input.requiredAmount.asset),
     );
-    if (privyEnabled) {
+    const privyVariants = candidateVariants.filter((variant) =>
+      sameAsset(variant.asset, input.requiredAmount.asset),
+    );
+    if (privyEnabled && privyVariants.length > 0) {
       const privy = sourceOption({
         planning: input,
         kind: "privy_funding_method",
@@ -874,9 +890,9 @@ export class DirectIngressFundingSourceAdapter implements FundingSourceAdapter {
         expiresAt,
         destinationAddress,
         recommended: false,
-        variants,
+        variants: privyVariants,
       });
-      sources.push(plannedSource(input, privy, variants, completion, variants));
+      sources.push(plannedSource(input, privy, privyVariants, null));
     }
     return sources;
   }
