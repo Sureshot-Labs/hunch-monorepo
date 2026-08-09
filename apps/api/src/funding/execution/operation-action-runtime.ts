@@ -237,9 +237,9 @@ export class FundingOperationActionRuntime {
     if (!externalRecipientId) {
       const resolvedPolicy = await resolveFundingPolicy(this.db);
       if (
-        resolvedPolicy.policy.creationMode !== "on" ||
-        !resolvedPolicy.policy.gates.startUnsubmittedAction ||
-        resolvedPolicy.policy.gates.emergencyBroadcastPause ||
+        resolvedPolicy.runtime.creationMode !== "on" ||
+        !resolvedPolicy.runtime.gates.startUnsubmittedAction ||
+        resolvedPolicy.runtime.gates.emergencyBroadcastPause ||
         resolvedPolicy.revision !== operation.policyRevision
       ) {
         throw new FundingPersistenceError(

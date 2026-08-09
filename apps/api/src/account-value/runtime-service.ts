@@ -418,7 +418,7 @@ export async function buildAccountValueReadModel(inputs: {
     AuthService.getUserWallets(inputs.userId),
     loadBalanceWalletLookup(inputs.userId),
   ]);
-  const catalog = mergeCatalogWithPolicy(resolvedPolicy.policy.assets);
+  const catalog = mergeCatalogWithPolicy(resolvedPolicy.runtime.assets);
   const resolutions = [...balanceLookup.values()];
   const credentialFacts = await Promise.all(
     linkedWallets
@@ -561,7 +561,7 @@ export async function buildAccountValueReadModel(inputs: {
       entry.pricePolicyId === STABLE_IMPAIRED_PRICE_POLICY_ID
         ? EXACT_STABLE_PRICE_POLICY_ID
         : entry.pricePolicyId,
-    maximumObservationAgeMs: resolvedPolicy.policy.ttl.collectorMs,
+    maximumObservationAgeMs: resolvedPolicy.runtime.ttl.collectorMs,
     executionEligibility: "unknown",
   }));
   const valuationService = new ValuationService({
@@ -617,7 +617,7 @@ export async function buildAccountValueReadModel(inputs: {
     (wallet) => wallet.walletAddress,
   );
   const positionFreshness = Math.max(
-    resolvedPolicy.policy.ttl.collectorMs,
+    resolvedPolicy.runtime.ttl.collectorMs,
     300_000,
   );
   const positionErrors: CollectorError[] = [];
@@ -754,7 +754,7 @@ export async function buildAccountValueReadModel(inputs: {
   ];
   const projection = projectAccountValue({
     accountId: inputs.userId,
-    headlineMode: resolvedPolicy.policy.headline.mode,
+    headlineMode: resolvedPolicy.runtime.headline.mode,
     components: projectedAssets,
     positionComponents,
     collectorErrors,
@@ -775,12 +775,12 @@ export async function buildAccountValueReadModel(inputs: {
       catalog,
     }),
     policy: {
-      creationMode: resolvedPolicy.policy.creationMode,
+      creationMode: resolvedPolicy.runtime.creationMode,
       revision: resolvedPolicy.revision,
       source: resolvedPolicy.source,
       invalidStoredPolicy: resolvedPolicy.invalidStoredPolicy,
     },
-    runtimePolicy: resolvedPolicy.policy,
+    runtimePolicy: resolvedPolicy.runtime,
     ownershipEvidenceRevision: ownership.evidenceRevision,
     ownership,
     duplicateAssetObservationCount: deduplicated.duplicateCount,

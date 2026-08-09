@@ -100,7 +100,7 @@ function policy(
   overrides: Partial<FundingRuntimePolicy> = {},
 ): FundingRuntimePolicy {
   return {
-    version: 1,
+    contractVersion: 1,
     creationMode: "on",
     gates: {
       quoteCreation: true,
@@ -182,7 +182,6 @@ function policy(
         destinationLocationPatternId: "venue_polymarket_pusd",
         sourceAsset: BASE_USDC,
         destinationAsset: POLYGON_PUSD,
-        fixtureIds: ["relay_wallet_evm_roundtrip_live"],
         actionValidatorId: "relay_evm_action_v1",
         networkExecutorId: "wallet_profile_evm_v1",
         reconcilerId: "relay_status_v3",
@@ -708,7 +707,6 @@ assert.equal(excludedByPreference.length, 0);
         sourceAsset: SOLANA_NATIVE,
         actionValidatorId: "relay_svm_action_v1",
         networkExecutorId: "wallet_profile_svm_v1",
-        fixtureIds: ["relay_wallet_solana_native_to_pusd_quote_live"],
       },
     ],
   });
@@ -793,10 +791,6 @@ assert.equal(excludedByPreference.length, 0);
         routeId: "solana-sol-to-base-usdc",
         destinationLocationPatternId: "venue_limitless_usdc",
         destinationAsset: BASE_USDC,
-        fixtureIds: [
-          "relay_wallet_solana_sol_to_base_usdc_quote_live",
-          "relay_status_lifecycle_v3",
-        ],
       },
     ],
   });
@@ -842,7 +836,6 @@ assert.equal(excludedByPreference.length, 0);
         sourceAsset: SOLANA_USDC,
         actionValidatorId: "relay_svm_action_v1",
         networkExecutorId: "wallet_profile_svm_v1",
-        fixtureIds: ["relay_wallet_solana_usdc_to_pusd_quote_live"],
       },
     ],
   });
@@ -981,7 +974,6 @@ assert.equal(excludedByPreference.length, 0);
         routeId: "solana-sol-to-polygon-pusd",
         sourceLocationPatternId: "wallet_solana_native",
         sourceAsset: SOLANA_NATIVE,
-        fixtureIds: ["relay_wallet_solana_native_to_pusd_quote_live"],
       },
     ],
   });

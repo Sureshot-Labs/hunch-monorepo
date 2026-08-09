@@ -3,7 +3,6 @@ import { z } from "zod";
 import {
   assetRefSchema,
   canonicalIdSchema,
-  opaqueIdSchema,
   usdAmountSchema,
 } from "../domain/schemas.js";
 import {
@@ -35,7 +34,6 @@ export type FundingStaticRegistry = Readonly<{
   reconcilers: readonly RegisteredFundingComponent[];
   refundSemantics: readonly RegisteredFundingComponent[];
   destinationObservers: readonly RegisteredFundingComponent[];
-  fixtureIds: readonly string[];
 }>;
 
 export const PRODUCTION_FUNDING_REGISTRY: FundingStaticRegistry = deepFreeze({
@@ -105,18 +103,6 @@ export const PRODUCTION_FUNDING_REGISTRY: FundingStaticRegistry = deepFreeze({
       runtimeKind: "production",
     },
   ],
-  fixtureIds: [
-    "relay_quote_v2_wallet_docs",
-    "relay_wallet_evm_roundtrip_live",
-    "relay_wallet_solana_roundtrip_live",
-    "relay_wallet_solana_sol_to_base_usdc_quote_live",
-    "relay_wallet_solana_usdc_to_base_usdc_quote_live",
-    "relay_wallet_solana_native_to_pusd_quote_live",
-    "relay_status_lifecycle_v3",
-    "relay_webhook_status_updated",
-    "relay_deposit_address_strict_docs",
-    "relay_deposit_address_mismatch_policy",
-  ],
 });
 
 const locationCapabilitySchema = z.enum(LOCATION_CAPABILITIES);
@@ -137,8 +123,8 @@ const fundingOperationalGatesSchema = z
     refunds: z.boolean(),
     recovery: z.boolean(),
     workerDrain: z.boolean(),
-    withdrawalRegistration: z.boolean().default(false),
-    withdrawalExecution: z.boolean().default(false),
+    withdrawalRegistration: z.boolean(),
+    withdrawalExecution: z.boolean(),
   })
   .strict();
 
@@ -234,7 +220,6 @@ const fundingRoutePolicySchema = z
     destinationLocationPatternId: canonicalIdSchema,
     sourceAsset: assetRefSchema,
     destinationAsset: assetRefSchema,
-    fixtureIds: z.array(canonicalIdSchema).max(64),
     actionValidatorId: canonicalIdSchema,
     networkExecutorId: canonicalIdSchema,
     reconcilerId: canonicalIdSchema,
@@ -295,9 +280,9 @@ const positionActionCapabilitySchema = z
   })
   .strict();
 
-export const fundingRuntimePolicySchema = z
+export const effectiveFundingRuntimeSchema = z
   .object({
-    version: z.literal(1),
+    contractVersion: z.literal(1),
     creationMode: fundingCreationModeSchema,
     gates: fundingOperationalGatesSchema,
     headline: z
@@ -323,13 +308,13 @@ export const fundingRuntimePolicySchema = z
       .object({
         requireExplicitNoTradeDestinationSelection: z.boolean(),
         maximumBufferBps: z.number().int().min(0).max(10_000),
-        maximumBufferUsd: usdAmountSchema.default("0"),
+        maximumBufferUsd: usdAmountSchema,
         maximumSlippageBps: z.number().int().min(0).max(500),
         maximumFeeUsd: usdAmountSchema,
-        maximumFeeBps: z.number().int().min(0).max(10_000).default(2_000),
-        warningFeeUsd: usdAmountSchema.default("5"),
-        warningFeeBps: z.number().int().min(0).max(10_000).default(1_000),
-        minimumDestinationUsd: usdAmountSchema.default("0.5"),
+        maximumFeeBps: z.number().int().min(0).max(10_000),
+        warningFeeUsd: usdAmountSchema,
+        warningFeeBps: z.number().int().min(0).max(10_000),
+        minimumDestinationUsd: usdAmountSchema,
       })
       .strict(),
     routeExperience: z
@@ -338,12 +323,7 @@ export const fundingRuntimePolicySchema = z
         minimumInlineSuccessBps: z.number().int().min(0).max(10_000),
         minimumInlineObservationCount: z.number().int().positive(),
       })
-      .strict()
-      .default({
-        maximumInlineP95Ms: 45_000,
-        minimumInlineSuccessBps: 9_500,
-        minimumInlineObservationCount: 20,
-      }),
+      .strict(),
     ttl: z
       .object({
         collectorMs: z.number().int().positive(),
@@ -372,7 +352,7 @@ type DeepReadonly<T> = T extends readonly (infer Item)[]
     : T;
 
 export type FundingRuntimePolicy = DeepReadonly<
-  z.infer<typeof fundingRuntimePolicySchema>
+  z.infer<typeof effectiveFundingRuntimeSchema>
 >;
 
 export const FUNDING_ROUTE_EXPERIENCE = deepFreeze({
@@ -390,7 +370,7 @@ export const FUNDING_TTL = deepFreeze({
 });
 
 export const DEFAULT_FUNDING_RUNTIME_POLICY: FundingRuntimePolicy = deepFreeze({
-  version: 1,
+  contractVersion: 1,
   creationMode: "off",
   gates: {
     quoteCreation: false,
@@ -458,7 +438,6 @@ export type FundingPolicyValidationIssueCode =
   | "provider_adapter_unregistered"
   | "fixture_adapter_forbidden"
   | "route_dependency_missing"
-  | "route_fixture_missing"
   | "route_location_missing"
   | "route_asset_mismatch"
   | "inline_evidence_missing"
@@ -482,7 +461,7 @@ export type FundingPolicyValidationIssue = Readonly<{
   message: string;
 }>;
 
-export type FundingPolicyValidationResult =
+export type EffectiveFundingRuntimeValidationResult =
   | Readonly<{
       ok: true;
       policy: FundingRuntimePolicy;
@@ -538,7 +517,6 @@ function addIssue(
 function validateParsedFundingPolicy(
   policy: FundingRuntimePolicy,
   registry: FundingStaticRegistry,
-  requireRouteFixtures: boolean,
 ): FundingPolicyValidationIssue[] {
   const issues: FundingPolicyValidationIssue[] = [];
   issues.push(
@@ -766,21 +744,6 @@ function validateParsedFundingPolicy(
           "enabled route dependency must be registered for production",
         );
       }
-    }
-
-    if (
-      requireRouteFixtures &&
-      (route.fixtureIds.length === 0 ||
-        route.fixtureIds.some(
-          (fixtureId) => !registry.fixtureIds.includes(fixtureId),
-        ))
-    ) {
-      addIssue(
-        issues,
-        "route_fixture_missing",
-        `routes.${index}.fixtureIds`,
-        "enabled route requires pinned registered fixtures",
-      );
     }
 
     const sourceLocation = locations.get(route.sourceLocationPatternId);
@@ -1062,12 +1025,11 @@ function validateParsedFundingPolicy(
   return issues;
 }
 
-export function validateFundingRuntimePolicy(
+export function validateEffectiveFundingRuntime(
   input: unknown,
   registry: FundingStaticRegistry = PRODUCTION_FUNDING_REGISTRY,
-  requireRouteFixtures = true,
-): FundingPolicyValidationResult {
-  const parsed = fundingRuntimePolicySchema.safeParse(input);
+): EffectiveFundingRuntimeValidationResult {
+  const parsed = effectiveFundingRuntimeSchema.safeParse(input);
   if (!parsed.success) {
     return {
       ok: false,
@@ -1080,11 +1042,7 @@ export function validateFundingRuntimePolicy(
     };
   }
   const policy = deepFreeze(parsed.data);
-  const issues = validateParsedFundingPolicy(
-    policy,
-    registry,
-    requireRouteFixtures,
-  );
+  const issues = validateParsedFundingPolicy(policy, registry);
   if (issues.length > 0) return { ok: false, policy: null, issues };
   return { ok: true, policy, issues: [] };
 }
@@ -1225,7 +1183,6 @@ export function createFundingStaticRegistry(input: {
   reconcilers?: readonly RegisteredFundingComponent[];
   refundSemantics?: readonly RegisteredFundingComponent[];
   destinationObservers?: readonly RegisteredFundingComponent[];
-  fixtureIds?: readonly string[];
 }): FundingStaticRegistry {
   return deepFreeze({
     locationKinds: input.locationKinds ?? [],
@@ -1235,20 +1192,5 @@ export function createFundingStaticRegistry(input: {
     reconcilers: input.reconcilers ?? [],
     refundSemantics: input.refundSemantics ?? [],
     destinationObservers: input.destinationObservers ?? [],
-    fixtureIds: input.fixtureIds ?? [],
   });
 }
-
-export const fundingPolicyDraftSchema = z.object({
-  candidate: z.unknown(),
-});
-
-export const fundingPolicyPublishSchema = z
-  .object({
-    candidate: z.unknown(),
-    expectedCurrentRevision: z.string().min(8).max(96),
-    candidateRevision: z.string().min(8).max(96),
-    confirmation: z.string().min(16).max(320),
-    requestId: opaqueIdSchema,
-  })
-  .strict();

@@ -14,7 +14,7 @@ import { supportsCanonicalFundingReceiveEvents } from "../receive/canonical-rece
 import {
   DEFAULT_FUNDING_RUNTIME_POLICY,
   deepFreeze,
-  validateFundingRuntimePolicy,
+  validateEffectiveFundingRuntime,
   type FundingPolicyValidationIssue,
   type FundingRuntimePolicy,
 } from "./funding-policy.js";
@@ -409,7 +409,7 @@ export function compileFundingIntentPolicy(
       venueActive(policy, venueId),
     ),
   };
-  const validated = validateFundingRuntimePolicy(runtime, undefined, false);
+  const validated = validateEffectiveFundingRuntime(runtime);
   if (!validated.ok) {
     throw new Error(
       `compact funding policy compiled to an invalid runtime policy: ${validated.issues
@@ -472,50 +472,6 @@ export function applyFundingIntentPatch(
       privy: parsed.data.receive?.privy ?? current.receive.privy,
     },
     paused: parsed.data.paused ?? current.paused,
-  });
-}
-
-export function fundingIntentFromRuntimePolicy(
-  policy: FundingRuntimePolicy,
-): FundingIntentPolicy {
-  const venueOrder = unique([
-    ...policy.genericAddFundsRecommendationOrder,
-    ...policy.venues.map((venue) => venue.venueId),
-  ]).filter((venueId): venueId is FundingVenueId =>
-    FUNDING_VENUE_IDS.includes(venueId as FundingVenueId),
-  );
-  const venues = venueOrder.filter((venueId) => {
-    const venue = policy.venues.find(
-      (candidate) => candidate.venueId === venueId,
-    );
-    return Boolean(
-      venue?.lifecycleEnabled &&
-      venue.destinationReadinessEnabled &&
-      venue.fundingEnabled,
-    );
-  });
-  const assets = FUNDING_RECEIVE_ASSET_IDS.filter((alias) => {
-    const expected = FUNDING_ASSET_CATALOG[alias].asset;
-    return fundingReceiveAssetEnabled(policy, expected);
-  });
-  const paused = Boolean(
-    venues.length > 0 &&
-    (policy.creationMode === "off" ||
-      !policy.gates.quoteCreation ||
-      !policy.gates.commit ||
-      !policy.gates.startUnsubmittedAction ||
-      policy.gates.emergencyBroadcastPause),
-  );
-  return deepFreeze({
-    version: 2,
-    venues,
-    receive: {
-      assets,
-      privy: policy.privyFundingMethods.some(
-        (method) => method.enabled && method.locallyConfigured,
-      ),
-    },
-    paused,
   });
 }
 

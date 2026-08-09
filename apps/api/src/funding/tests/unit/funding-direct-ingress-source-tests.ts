@@ -60,7 +60,7 @@ const BINDING_OPTION = {
 
 function policy(privyEnabled: boolean): FundingRuntimePolicy {
   return {
-    version: 1,
+    contractVersion: 1,
     creationMode: "on",
     automation: {
       automaticRebalance: false,
@@ -448,7 +448,6 @@ const inputWithUnprovenBaseRoute = {
         sourceAsset: BASE_USDC,
         destinationAsset: ASSET,
         destinationLocationPatternId: "polymarket-venue-cash-v1",
-        fixtureIds: ["relay_wallet_evm_roundtrip_live"],
         actionValidatorId: "relay_evm_action_v1",
         networkExecutorId: "wallet_profile_evm_v1",
         reconcilerId: "relay_status_v3",
@@ -649,7 +648,6 @@ const provenSolanaRouteInput = {
         sourceAsset: SOLANA_USDC,
         destinationAsset: ASSET,
         destinationLocationPatternId: "polymarket-venue-cash-v1",
-        fixtureIds: ["relay_solana_usdc_roundtrip_live"],
         actionValidatorId: "relay_solana_action_v1",
         networkExecutorId: "wallet_profile_solana_v1",
         reconcilerId: "relay_status_v3",
@@ -672,7 +670,6 @@ const provenSolanaRouteInput = {
         sourceAsset: SOLANA_NATIVE,
         destinationAsset: ASSET,
         destinationLocationPatternId: "polymarket-venue-cash-v1",
-        fixtureIds: ["relay_wallet_solana_native_to_pusd_quote_live"],
         actionValidatorId: "relay_solana_action_v1",
         networkExecutorId: "wallet_profile_solana_v1",
         reconcilerId: "relay_status_v3",

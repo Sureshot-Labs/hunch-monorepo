@@ -201,7 +201,7 @@ export class FundingQuoteService {
     }
     if (
       (!withdrawalIntent &&
-        (planning.policyVersion !== input.policy.version ||
+        (planning.policyVersion !== input.policy.contractVersion ||
           planning.policyRevision !== input.policyRevision)) ||
       planning.ownershipRevision !== input.ownershipRevision
     ) {
@@ -411,7 +411,7 @@ export class FundingQuoteService {
         destinationOptionSnapshot: plan.operation.destinationTargetSnapshot,
         venueBindingSnapshot: plan.operation.venueBindingSnapshot,
         planSnapshot: plan,
-        policyVersion: input.policy.version,
+        policyVersion: input.policy.contractVersion,
         policyRevision: input.policyRevision,
         canonicalRequest: input.request as unknown as JsonValue,
         consentToken,

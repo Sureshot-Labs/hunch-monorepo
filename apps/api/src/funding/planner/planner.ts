@@ -837,7 +837,7 @@ export class FundingPlanner {
         sourceOptions: [],
         asOf: now.toISOString(),
         expiresAt: expiresAt.toISOString(),
-        policyVersion: input.policy.version,
+        policyVersion: input.policy.contractVersion,
         completeness: "partial",
         freshness: "stale",
         errors: [],
@@ -1009,7 +1009,7 @@ export class FundingPlanner {
       sourceOptions,
       asOf: now.toISOString(),
       expiresAt: expiresAt.toISOString(),
-      policyVersion: input.policy.version,
+      policyVersion: input.policy.contractVersion,
       completeness:
         destinationFactsUsable && valuationUsable && !sourceEvidenceUnavailable
           ? "complete"
@@ -1233,7 +1233,7 @@ export class FundingPlanner {
       sourceOptions,
       asOf: now.toISOString(),
       expiresAt: expiresAt.toISOString(),
-      policyVersion: input.policy.version,
+      policyVersion: input.policy.contractVersion,
       completeness: "partial",
       freshness: "fresh",
       errors: [{ code: "trusted_price_unavailable", retryable: true }],

@@ -137,10 +137,10 @@ export class FundingPlanningRuntime {
     return {
       fundingApiVersion: 1 as const,
       receiveSessionsVersion: 1 as const,
-      creationMode: resolvedPolicy.policy.creationMode,
-      destinationVenues: resolvedPolicy.policy.venues
+      creationMode: resolvedPolicy.runtime.creationMode,
+      destinationVenues: resolvedPolicy.runtime.venues
         .filter((venue) =>
-          fundingVenueReceiveEnabled(resolvedPolicy.policy, venue.venueId),
+          fundingVenueReceiveEnabled(resolvedPolicy.runtime, venue.venueId),
         )
         .map((venue) => venue.venueId)
         .sort((left, right) => left.localeCompare(right)),
@@ -185,7 +185,7 @@ export class FundingPlanningRuntime {
     const options: FundingDestinationOption[] = [];
     const policyDisabledOptions: FundingDestinationOption[] = [];
     for (const option of rawOptions) {
-      (fundingDestinationEnabled(resolvedPolicy.policy, option, query.purpose)
+      (fundingDestinationEnabled(resolvedPolicy.runtime, option, query.purpose)
         ? options
         : policyDisabledOptions
       ).push(option);
@@ -195,7 +195,7 @@ export class FundingPlanningRuntime {
         query.purpose === "fund"
           ? recommendFundingDestinations(
               options,
-              resolvedPolicy.policy.genericAddFundsRecommendationOrder,
+              resolvedPolicy.runtime.genericAddFundsRecommendationOrder,
             )
           : options,
       policyDisabledOptions,
@@ -419,7 +419,7 @@ export class FundingPlanningRuntime {
           requestedCollateralRaw: consumerIntent.spend.raw,
           compatibleVenueBindingOptionIds,
           expiresAt: new Date(
-            now.getTime() + resolvedPolicy.policy.ttl.quoteMs,
+            now.getTime() + resolvedPolicy.runtime.ttl.quoteMs,
           ).toISOString(),
         };
       },
@@ -436,7 +436,7 @@ export class FundingPlanningRuntime {
     return planner.discover({
       accountId: userId,
       request,
-      policy: resolvedPolicy.policy,
+      policy: resolvedPolicy.runtime,
       policyRevision: resolvedPolicy.revision,
       ownershipRevision: accountPromise.then(
         (account) => account.ownershipEvidenceRevision,
@@ -458,7 +458,7 @@ export class FundingPlanningRuntime {
     }).quote({
       userId,
       request,
-      policy: resolvedPolicy.policy,
+      policy: resolvedPolicy.runtime,
       policyRevision: resolvedPolicy.revision,
       ownershipRevision: account.ownershipEvidenceRevision,
     });
@@ -500,7 +500,7 @@ export class FundingPlanningRuntime {
     }).commit({
       userId,
       request,
-      policy: resolvedPolicy.policy,
+      policy: resolvedPolicy.runtime,
       policyRevision: resolvedPolicy.revision,
       ownershipRevision: account.ownershipEvidenceRevision,
     });

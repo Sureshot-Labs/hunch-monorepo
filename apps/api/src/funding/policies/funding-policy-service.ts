@@ -5,34 +5,26 @@ import {
 } from "../../repos/runtime-policies.js";
 import {
   FUNDING_POLICY_KEY,
-  PRODUCTION_FUNDING_REGISTRY,
   diffFundingPolicies,
   fundingPolicyPublishConfirmation,
   fundingPolicyRevision,
-  validateFundingRuntimePolicy,
   type FundingPolicyDiffEntry,
   type FundingPolicyValidationIssue,
   type FundingRuntimePolicy,
-  type FundingStaticRegistry,
 } from "./funding-policy.js";
 import {
   DEFAULT_FUNDING_INTENT_POLICY,
   applyFundingIntentPatch,
   compileFundingIntentPolicy,
   fundingIntentBehaviorSnapshot,
-  fundingIntentFromRuntimePolicy,
   validateFundingIntentPolicy,
   type FundingIntentPolicy,
 } from "./funding-policy-v2.js";
 
-export type FundingStoredPolicy = FundingRuntimePolicy | FundingIntentPolicy;
-
 export type ResolvedFundingPolicy = Readonly<{
   source: "default" | "db";
-  policy: FundingRuntimePolicy;
-  storedPolicy: FundingStoredPolicy;
-  intentPolicy: FundingIntentPolicy;
-  storedVersion: 1 | 2;
+  policy: FundingIntentPolicy;
+  runtime: FundingRuntimePolicy;
   revision: string;
   effectiveAt: Date | null;
   createdAt: Date | null;
@@ -43,8 +35,9 @@ export type ResolvedFundingPolicy = Readonly<{
 
 export type PublicResolvedFundingPolicy = Readonly<{
   source: "default" | "db";
-  storedVersion: 1 | 2;
-  editable: boolean;
+  /** Compatibility envelope for admin builds deployed before V1 removal. */
+  storedVersion: 2;
+  editable: true;
   policy: FundingIntentPolicy;
   revision: string;
   effectiveAt: Date | null;
@@ -57,7 +50,7 @@ export type PublicResolvedFundingPolicy = Readonly<{
 export type RuntimeFundingPolicyResolution = Pick<
   ResolvedFundingPolicy,
   | "source"
-  | "policy"
+  | "runtime"
   | "revision"
   | "effectiveAt"
   | "createdAt"
@@ -68,7 +61,6 @@ export type RuntimeFundingPolicyResolution = Pick<
 
 export type FundingPolicyResolver = (
   db: DbQuery,
-  options?: Readonly<{ asOf?: Date; registry?: FundingStaticRegistry }>,
 ) => Promise<RuntimeFundingPolicyResolution>;
 
 export type FundingPolicyPreviewInput = Readonly<{
@@ -123,9 +115,9 @@ function publicResolvedPolicy(
 ): PublicResolvedFundingPolicy {
   return {
     source: resolved.source,
-    storedVersion: resolved.storedVersion,
-    editable: resolved.storedVersion === 2,
-    policy: resolved.intentPolicy,
+    storedVersion: 2,
+    editable: true,
+    policy: resolved.policy,
     revision: resolved.revision,
     effectiveAt: resolved.effectiveAt,
     createdAt: resolved.createdAt,
@@ -141,16 +133,13 @@ function defaultResolvedPolicy(
     createdAt: Date | null;
     createdBy: string | null;
     invalidStoredPolicy: boolean;
-    storedVersion: 1 | 2;
     validationIssues: readonly FundingPolicyValidationIssue[];
   }>,
 ): ResolvedFundingPolicy {
   return {
     source: "default",
-    policy: compileFundingIntentPolicy(DEFAULT_FUNDING_INTENT_POLICY),
-    storedPolicy: DEFAULT_FUNDING_INTENT_POLICY,
-    intentPolicy: DEFAULT_FUNDING_INTENT_POLICY,
-    storedVersion: input.storedVersion,
+    policy: DEFAULT_FUNDING_INTENT_POLICY,
+    runtime: compileFundingIntentPolicy(DEFAULT_FUNDING_INTENT_POLICY),
     revision: fundingPolicyRevision(DEFAULT_FUNDING_INTENT_POLICY),
     effectiveAt: input.effectiveAt,
     createdAt: input.createdAt,
@@ -160,33 +149,16 @@ function defaultResolvedPolicy(
   };
 }
 
-function storedVersion(input: unknown): 1 | 2 {
-  return Boolean(input && typeof input === "object" && "version" in input) &&
-    (input as { version?: unknown }).version === 1
-    ? 1
-    : 2;
-}
-
 export async function resolveFundingPolicy(
   db: DbQuery,
-  options: Readonly<{
-    asOf?: Date;
-    registry?: FundingStaticRegistry;
-  }> = {},
 ): Promise<ResolvedFundingPolicy> {
-  const registry = options.registry ?? PRODUCTION_FUNDING_REGISTRY;
-  const row = await fetchActiveRuntimePolicy(
-    db,
-    FUNDING_POLICY_KEY,
-    options.asOf,
-  );
+  const row = await fetchActiveRuntimePolicy(db, FUNDING_POLICY_KEY);
   if (!row) {
     return defaultResolvedPolicy({
       effectiveAt: null,
       createdAt: null,
       createdBy: null,
       invalidStoredPolicy: false,
-      storedVersion: 2,
       validationIssues: [],
     });
   }
@@ -197,44 +169,18 @@ export async function resolveFundingPolicy(
     createdAt: row.created_at instanceof Date ? row.created_at : new Date(0),
     createdBy: row.created_by ?? row.created_by_admin_id,
   };
-  if (storedVersion(row.payload) === 2) {
-    const validated = validateFundingIntentPolicy(row.payload);
-    if (!validated.ok) {
-      return defaultResolvedPolicy({
-        ...metadata,
-        invalidStoredPolicy: true,
-        storedVersion: 2,
-        validationIssues: validated.issues,
-      });
-    }
-    return {
-      source: "db",
-      policy: validated.runtimePolicy,
-      storedPolicy: validated.policy,
-      intentPolicy: validated.policy,
-      storedVersion: 2,
-      revision: fundingPolicyRevision(validated.policy),
-      ...metadata,
-      invalidStoredPolicy: false,
-      validationIssues: [],
-    };
-  }
-
-  const validated = validateFundingRuntimePolicy(row.payload, registry);
+  const validated = validateFundingIntentPolicy(row.payload);
   if (!validated.ok) {
     return defaultResolvedPolicy({
       ...metadata,
       invalidStoredPolicy: true,
-      storedVersion: 1,
       validationIssues: validated.issues,
     });
   }
   return {
     source: "db",
     policy: validated.policy,
-    storedPolicy: validated.policy,
-    intentPolicy: fundingIntentFromRuntimePolicy(validated.policy),
-    storedVersion: 1,
+    runtime: validated.runtimePolicy,
     revision: fundingPolicyRevision(validated.policy),
     ...metadata,
     invalidStoredPolicy: false,
@@ -266,11 +212,8 @@ function invalidPreview(
 export async function previewFundingPolicy(
   db: DbQuery,
   input: FundingPolicyPreviewInput,
-  options: Readonly<{
-    registry?: FundingStaticRegistry;
-  }> = {},
 ): Promise<FundingPolicyPreview> {
-  const current = await resolveFundingPolicy(db, options);
+  const current = await resolveFundingPolicy(db);
   const hasCandidate = Object.prototype.hasOwnProperty.call(input, "candidate");
   const hasPatch = Object.prototype.hasOwnProperty.call(input, "patch");
   if (hasCandidate === hasPatch) {
@@ -282,18 +225,8 @@ export async function previewFundingPolicy(
       },
     ]);
   }
-  if (hasPatch && current.storedVersion !== 2) {
-    return invalidPreview(current, [
-      {
-        code: "schema_invalid",
-        path: "patch",
-        message:
-          "legacy V1 policy is read-only; create a complete V2 candidate",
-      },
-    ]);
-  }
   const validated = hasPatch
-    ? applyFundingIntentPatch(current.intentPolicy, input.patch)
+    ? applyFundingIntentPatch(current.policy, input.patch)
     : validateFundingIntentPolicy(input.candidate);
   if (!validated.ok) return invalidPreview(current, validated.issues);
 
@@ -308,14 +241,8 @@ export async function previewFundingPolicy(
       candidateRevision,
     }),
     diff: diffFundingPolicies(
-      {
-        storedVersion: current.storedVersion,
-        ...fundingIntentBehaviorSnapshot(current.intentPolicy),
-      },
-      {
-        storedVersion: 2,
-        ...fundingIntentBehaviorSnapshot(validated.policy),
-      },
+      fundingIntentBehaviorSnapshot(current.policy),
+      fundingIntentBehaviorSnapshot(validated.policy),
     ),
     issues: [],
   };
@@ -332,16 +259,13 @@ export async function publishFundingPolicy(
     createdByAdminId: string | null;
     now?: Date;
   }>,
-  options: Readonly<{
-    registry?: FundingStaticRegistry;
-  }> = {},
 ): Promise<ResolvedFundingPolicy> {
   await db.query<{ locked: unknown }>(
     "select pg_advisory_xact_lock(hashtext($1)) as locked",
     [FUNDING_POLICY_KEY],
   );
 
-  const current = await resolveFundingPolicy(db, options);
+  const current = await resolveFundingPolicy(db);
   if (current.revision !== input.expectedCurrentRevision) {
     throw new FundingPolicyPublishError(
       "current_revision_mismatch",
@@ -388,10 +312,8 @@ export async function publishFundingPolicy(
 
   return {
     source: "db",
-    policy: validated.runtimePolicy,
-    storedPolicy: validated.policy,
-    intentPolicy: validated.policy,
-    storedVersion: 2,
+    policy: validated.policy,
+    runtime: validated.runtimePolicy,
     revision: candidateRevision,
     effectiveAt:
       row.effective_at instanceof Date ? row.effective_at : new Date(0),

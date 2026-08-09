@@ -90,7 +90,7 @@ export class FundingOperationService {
     }
     if (
       !withdrawal &&
-      (quote.policyVersion !== input.policy.version ||
+      (quote.policyVersion !== input.policy.contractVersion ||
         quote.policyRevision !== input.policyRevision)
     ) {
       throw new FundingPersistenceError(
@@ -124,9 +124,10 @@ export class FundingOperationService {
               this.dependencies.resolvePolicy ?? resolveFundingPolicy
             )(client);
             if (
-              currentPolicy.policy.creationMode !== "on" ||
-              !currentPolicy.policy.gates.commit ||
-              currentPolicy.policy.version !== lockedQuote.policyVersion ||
+              currentPolicy.runtime.creationMode !== "on" ||
+              !currentPolicy.runtime.gates.commit ||
+              currentPolicy.runtime.contractVersion !==
+                lockedQuote.policyVersion ||
               currentPolicy.revision !== lockedQuote.policyRevision
             ) {
               throw new FundingPersistenceError(

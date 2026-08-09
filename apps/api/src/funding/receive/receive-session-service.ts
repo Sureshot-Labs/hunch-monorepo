@@ -554,10 +554,10 @@ export class FundingReceiveSessionService {
           automationPolicy: {
             stableConversion: "automatic_within_caps",
             volatileConversion: "review_required",
-            maximumFeeUsd: resolvedPolicy.policy.placement.maximumFeeUsd,
-            maximumFeeBps: resolvedPolicy.policy.placement.maximumFeeBps,
+            maximumFeeUsd: resolvedPolicy.runtime.placement.maximumFeeUsd,
+            maximumFeeBps: resolvedPolicy.runtime.placement.maximumFeeBps,
             maximumSlippageBps:
-              resolvedPolicy.policy.placement.maximumSlippageBps,
+              resolvedPolicy.runtime.placement.maximumSlippageBps,
           },
           policyVersion: planning.policyVersion,
           policyRevision: planning.policyRevision,

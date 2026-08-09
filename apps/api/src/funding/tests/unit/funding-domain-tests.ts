@@ -38,7 +38,7 @@ import {
   diffFundingPolicies,
   fundingPolicyRevision,
   isFundingPolicyGateOpen,
-  validateFundingRuntimePolicy,
+  validateEffectiveFundingRuntime,
   type FundingRuntimePolicy,
   type FundingStaticRegistry,
 } from "../../policies/funding-policy.js";
@@ -49,7 +49,6 @@ import {
   resolveFundingPolicy,
 } from "../../policies/funding-policy-service.js";
 import {
-  DEFAULT_FUNDING_INTENT_POLICY,
   FUNDING_RECEIVE_ASSET_IDS,
   applyFundingIntentPatch,
   compileFundingIntentPolicy,
@@ -126,7 +125,6 @@ function productionTestRegistry(
     destinationObservers: [
       { id: "owned-balance-v1", runtimeKind: "production" },
     ],
-    fixtureIds: ["relay-live-evm-v1"],
   });
 }
 
@@ -212,7 +210,6 @@ function activeRoutePolicy(): MutableFundingPolicy {
       destinationLocationPatternId: "venue-limitless-base-usdc",
       sourceAsset: polygonPusd,
       destinationAsset: baseUsdc,
-      fixtureIds: ["relay-live-evm-v1"],
       actionValidatorId: "normalized-action-v1",
       networkExecutorId: "evm-network-v1",
       reconcilerId: "relay-status-v3",
@@ -230,7 +227,7 @@ function activeRoutePolicy(): MutableFundingPolicy {
 }
 
 function issueCodes(candidate: unknown, registry = productionTestRegistry()) {
-  const result = validateFundingRuntimePolicy(candidate, registry);
+  const result = validateEffectiveFundingRuntime(candidate, registry);
   return result.ok ? [] : result.issues.map(({ code }) => code);
 }
 
@@ -429,7 +426,7 @@ await test("accepts a registered future location without a core branch", () => {
     "in_transit_claim",
     "protocol_subaccount",
   ]);
-  assert.equal(validateFundingRuntimePolicy(policy, registry).ok, true);
+  assert.equal(validateEffectiveFundingRuntime(policy, registry).ok, true);
 });
 
 await test("selects only current-intent opaque Trading Wallet options", () => {
@@ -599,7 +596,7 @@ await test("declares every valid state and rejects regressions", () => {
 });
 
 await test("default policy is immutable and fail-closed for creation only", () => {
-  const validated = validateFundingRuntimePolicy(
+  const validated = validateEffectiveFundingRuntime(
     DEFAULT_FUNDING_RUNTIME_POLICY,
   );
   assert.equal(validated.ok, true);
@@ -635,48 +632,11 @@ await test("default policy is immutable and fail-closed for creation only", () =
   }
 });
 
-await test("older stored policies receive fail-closed WP5 economics defaults", () => {
-  const legacyCandidate = structuredClone(
-    DEFAULT_FUNDING_RUNTIME_POLICY,
-  ) as unknown as Record<string, unknown>;
-  delete legacyCandidate.routeExperience;
-  const placement = legacyCandidate.placement as Record<string, unknown>;
-  delete placement.maximumBufferUsd;
-  delete placement.maximumFeeBps;
-  delete placement.warningFeeUsd;
-  delete placement.warningFeeBps;
-  delete placement.minimumDestinationUsd;
-  const validated = validateFundingRuntimePolicy(legacyCandidate);
-  assert.equal(validated.ok, true);
-  if (!validated.ok) return;
-  assert.deepEqual(validated.policy.routeExperience, {
-    maximumInlineP95Ms: 45_000,
-    minimumInlineSuccessBps: 9_500,
-    minimumInlineObservationCount: 20,
-  });
-  assert.deepEqual(
-    {
-      maximumBufferUsd: validated.policy.placement.maximumBufferUsd,
-      maximumFeeBps: validated.policy.placement.maximumFeeBps,
-      warningFeeUsd: validated.policy.placement.warningFeeUsd,
-      warningFeeBps: validated.policy.placement.warningFeeBps,
-      minimumDestinationUsd: validated.policy.placement.minimumDestinationUsd,
-    },
-    {
-      maximumBufferUsd: "0",
-      maximumFeeBps: 2_000,
-      warningFeeUsd: "5",
-      warningFeeBps: 1_000,
-      minimumDestinationUsd: "0.5",
-    },
-  );
-});
-
 await test("rejects retired rollout modes", () => {
   for (const creationMode of ["shadow", "internal", "cohort"]) {
     const policy = mutableDefaultPolicy() as unknown as Record<string, unknown>;
     policy.creationMode = creationMode;
-    const result = validateFundingRuntimePolicy(policy);
+    const result = validateEffectiveFundingRuntime(policy);
     assert.equal(
       result.ok,
       false,
@@ -693,7 +653,7 @@ await test("rejects retired rollout modes", () => {
 });
 
 await test("accepts a fully registered production route", () => {
-  const result = validateFundingRuntimePolicy(
+  const result = validateEffectiveFundingRuntime(
     activeRoutePolicy(),
     productionTestRegistry(),
   );
@@ -707,7 +667,7 @@ await test("accepts a fully registered production route", () => {
 await test("allows staged continuation only with all execution and evidence gates", () => {
   const enabled = activeRoutePolicy();
   enabled.automation.stagedContinuation = true;
-  const accepted = validateFundingRuntimePolicy(
+  const accepted = validateEffectiveFundingRuntime(
     enabled,
     productionTestRegistry(),
   );
@@ -731,7 +691,7 @@ await test("rejects ambiguous duplicate Relay wallet route mappings", () => {
     ...structuredClone(exactRoute),
     routeId: "polygon-pusd-to-base-usdc-second",
   });
-  const result = validateFundingRuntimePolicy(
+  const result = validateEffectiveFundingRuntime(
     candidate,
     productionTestRegistry(),
   );
@@ -883,11 +843,11 @@ await test("rejects section 21 cross-field failures", () => {
   ]) {
     const policy = mutableDefaultPolicy();
     mutation(policy);
-    assert.equal(validateFundingRuntimePolicy(policy).ok, false);
+    assert.equal(validateEffectiveFundingRuntime(policy).ok, false);
   }
 });
 
-await test("rejects fixture adapters and incomplete active routes", () => {
+await test("rejects fixture adapters and deprecated route fallbacks", () => {
   const candidate = activeRoutePolicy();
   const fixtureRegistry = createFundingStaticRegistry({
     ...productionTestRegistry(),
@@ -905,12 +865,6 @@ await test("rejects fixture adapters and incomplete active routes", () => {
       "fixture_adapter_forbidden",
     ),
   );
-
-  const missingFixture = activeRoutePolicy();
-  const route = missingFixture.routes[0];
-  assert.ok(route);
-  route.fixtureIds = [];
-  assert.ok(issueCodes(missingFixture).includes("route_fixture_missing"));
 
   const deprecatedFallback = activeRoutePolicy();
   const fallbackRoute = deprecatedFallback.routes[0];
@@ -1017,11 +971,8 @@ await test("normalizes compact V2 intent and rejects unknown values", () => {
 
 await test("compiles full V2 intent to the reviewed runtime catalog", () => {
   const policy = compileFundingIntentPolicy(FULL_POLICY);
-  assert.equal(validateFundingRuntimePolicy(policy, undefined, false).ok, true);
-  assert.equal(
-    policy.routes.every((route) => route.fixtureIds.length === 0),
-    true,
-  );
+  assert.equal(validateEffectiveFundingRuntime(policy).ok, true);
+  assert.equal(JSON.stringify(policy.routes).includes("fixtureIds"), false);
   assert.deepEqual(
     {
       assets: policy.assets.length,
@@ -1192,7 +1143,6 @@ await test("previews, confirms, and append-publishes immutable policy", async ()
     now: new Date("2026-07-23T17:00:00.000Z"),
   });
   assert.equal(published.source, "db");
-  assert.equal(published.storedVersion, 2);
   assert.equal(published.revision, preview.candidateRevision);
   assert.equal(fixture.rows.length, 1);
   assert.deepEqual(Object.keys(fixture.rows[0]?.payload as object).sort(), [
@@ -1226,7 +1176,7 @@ await test("previews, confirms, and append-publishes immutable policy", async ()
   );
 });
 
-await test("previews partial V2 patches and keeps legacy V1 read-only", async () => {
+await test("previews V2 patches and rejects removed V1 storage", async () => {
   const compactFixture = createPolicyDb();
   const patchPreview = await previewFundingPolicy(compactFixture.db, {
     patch: { receive: { assets: ["base:usdc"] } },
@@ -1241,24 +1191,21 @@ await test("previews partial V2 patches and keeps legacy V1 read-only", async ()
     id: "policy_v1",
     policy_key: "funding_control_plane",
     effective_at: new Date("2026-07-23T16:00:00.000Z"),
-    payload: DEFAULT_FUNDING_RUNTIME_POLICY,
+    payload: { version: 1, creationMode: "on" },
     created_by: "admin_12345678",
     created_by_admin_id: null,
     created_at: new Date("2026-07-23T16:00:00.000Z"),
   });
   const legacy = await resolveFundingPolicy(legacyFixture.db);
-  assert.equal(legacy.storedVersion, 1);
-  assert.equal(legacy.policy.creationMode, "off");
+  assert.equal(legacy.source, "default");
+  assert.equal(legacy.invalidStoredPolicy, true);
+  assert.equal(legacy.runtime.creationMode, "off");
   const legacyPatch = await previewFundingPolicy(legacyFixture.db, {
     patch: { receive: { privy: true } },
   });
-  assert.equal(legacyPatch.valid, false);
-  const migration = await previewFundingPolicy(legacyFixture.db, {
-    candidate: DEFAULT_FUNDING_INTENT_POLICY,
-  });
-  assert.equal(migration.valid, true);
-  if (!migration.valid) throw new Error("valid V1 to V2 migration expected");
-  assert.ok(migration.diff.some((entry) => entry.path === "storedVersion"));
+  assert.equal(legacyPatch.valid, true);
+  if (!legacyPatch.valid) throw new Error("valid V2 recovery patch expected");
+  assert.equal(legacyPatch.candidate.receive.privy, true);
 });
 
 await test("treats venue recommendation reorder as publishable behavior", async () => {
@@ -1301,11 +1248,11 @@ await test("falls back closed when stored policy is invalid", async () => {
   const resolved = await resolveFundingPolicy(fixture.db);
   assert.equal(resolved.source, "default");
   assert.equal(resolved.invalidStoredPolicy, true);
-  assert.equal(resolved.policy.creationMode, "off");
-  assert.equal(resolved.policy.gates.recovery, true);
-  assert.equal(resolved.policy.gates.reconciliation, true);
-  assert.equal(resolved.policy.gates.refunds, true);
-  assert.equal(resolved.policy.venues.length, 0);
+  assert.equal(resolved.runtime.creationMode, "off");
+  assert.equal(resolved.runtime.gates.recovery, true);
+  assert.equal(resolved.runtime.gates.reconciliation, true);
+  assert.equal(resolved.runtime.gates.refunds, true);
+  assert.equal(resolved.runtime.venues.length, 0);
   assert.ok(resolved.validationIssues.length > 0);
 });
 

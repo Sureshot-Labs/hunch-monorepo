@@ -167,6 +167,7 @@ await test("GET requires auth and gives viewers the fail-closed snapshot", async
   assert.equal(body.resolved.storedVersion, 2);
   assert.equal(body.resolved.editable, true);
   assert.deepEqual(body.resolved.policy, DEFAULT_FUNDING_INTENT_POLICY);
+  assert.equal("runtime" in body.resolved, false);
   await app.close();
 });
 

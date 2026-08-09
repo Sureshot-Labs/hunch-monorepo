@@ -67,7 +67,6 @@ export function relayRuntimeRoute(
     destinationLocationPatternId: locations.destinationLocationPatternId,
     sourceAsset: spec.source,
     destinationAsset: spec.destination,
-    fixtureIds: [],
     actionValidatorId:
       spec.sourceVm === "svm" ? "relay_svm_action_v1" : "relay_evm_action_v1",
     networkExecutorId:

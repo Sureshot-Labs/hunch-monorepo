@@ -5,19 +5,17 @@ import assert from "node:assert/strict";
 import type { Pool } from "@hunch/infra";
 
 import type { FundingDestinationOption } from "../../domain/types.js";
-import type { FundingRuntimePolicy } from "../../policies/funding-policy.js";
 import { FundingPlannerError } from "../../planner/money.js";
 import { FundingPlanningRuntime } from "../../planner/runtime-service.js";
 import {
   compileFundingIntentPolicy,
-  fundingVenueReceiveEnabled,
   type FundingIntentPolicy,
 } from "../../policies/funding-policy-v2.js";
 import { FundingReceiveSessionService } from "../../receive/receive-session-service.js";
 
 const USER_ID = "10000000-0000-4000-8000-000000000001";
 
-function policyDb(policy: FundingIntentPolicy | FundingRuntimePolicy): Pool {
+function policyDb(policy: FundingIntentPolicy): Pool {
   return {
     async query() {
       return {
@@ -225,52 +223,6 @@ await test("does not turn funding policy into trade or withdrawal authorization"
     );
     assert.deepEqual(access.policyDisabledOptions, []);
   }
-});
-
-await test("applies legacy V1 funding gates to destination visibility", () => {
-  const runtime = structuredClone(
-    compileFundingIntentPolicy({
-      version: 2,
-      venues: ["polymarket"],
-      receive: { assets: ["polygon:pusd"], privy: false },
-      paused: false,
-    }),
-  );
-  assert.equal(fundingVenueReceiveEnabled(runtime, "polymarket"), true);
-  (runtime.gates as { quoteCreation: boolean }).quoteCreation = false;
-  assert.equal(fundingVenueReceiveEnabled(runtime, "polymarket"), false);
-});
-
-await test("classifies a V1 gate-disabled destination as a policy conflict", async () => {
-  const enabled = compileFundingIntentPolicy({
-    version: 2,
-    venues: ["polymarket"],
-    receive: { assets: ["polygon:pusd"], privy: false },
-    paused: false,
-  });
-  const legacy = structuredClone(enabled);
-  (legacy.gates as { quoteCreation: boolean }).quoteCreation = false;
-  const blocked = destination(
-    "polymarket",
-    settlementAsset(
-      {
-        version: 2,
-        venues: ["polymarket"],
-        receive: { assets: ["polygon:pusd"], privy: false },
-        paused: false,
-      },
-      "polymarket-venue-cash-v1",
-    ),
-  );
-  const runtime = new FundingPlanningRuntime(policyDb(legacy));
-  setPreparationOptions(runtime, [blocked]);
-
-  const access = await runtime.destinationAccess(USER_ID, { purpose: "fund" });
-  assert.deepEqual(access.options, []);
-  assert.deepEqual(
-    access.policyDisabledOptions.map((option) => option.destinationOptionId),
-    [blocked.destinationOptionId],
-  );
 });
 
 console.log("[funding-policy-v2-runtime-tests] complete");

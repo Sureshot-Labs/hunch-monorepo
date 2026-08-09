@@ -41,7 +41,10 @@ export type PlacementPolicyInput = Readonly<{
     estimatedUsd: string;
   }> | null;
   selectionReason: "explicit" | "single_valid_option" | "current_trade";
-  policy: Pick<FundingRuntimePolicy, "automation" | "placement" | "version">;
+  policy: Pick<
+    FundingRuntimePolicy,
+    "automation" | "contractVersion" | "placement"
+  >;
 }>;
 
 function requiredMoney(value: Money | null, label: string): Money {
@@ -100,7 +103,7 @@ export function decidePlacement(
       target: input.target,
       boundedBuffer: null,
       reason: input.selectionReason,
-      policyVersion: policy.version,
+      policyVersion: policy.contractVersion,
     };
   }
 
@@ -184,7 +187,7 @@ export function decidePlacement(
           ? null
           : money(requested.asset, boundedBufferRaw),
       reason: "current_trade",
-      policyVersion: policy.version,
+      policyVersion: policy.contractVersion,
     };
   }
 
@@ -210,7 +213,7 @@ export function decidePlacement(
       target: input.target,
       boundedBuffer: null,
       reason: input.selectionReason,
-      policyVersion: policy.version,
+      policyVersion: policy.contractVersion,
     };
   }
 
@@ -227,6 +230,6 @@ export function decidePlacement(
     target: input.target,
     boundedBuffer: null,
     reason: "explicit",
-    policyVersion: policy.version,
+    policyVersion: policy.contractVersion,
   };
 }
