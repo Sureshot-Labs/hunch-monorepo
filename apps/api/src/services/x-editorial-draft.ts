@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 
 export const X_EDITORIAL_CONTENT_PROFILE = "x_editorial_draft_v1" as const;
-export const X_EDITORIAL_PROMPT_VERSION = "x_editorial_prompt_v3" as const;
+export const X_EDITORIAL_PROMPT_VERSION = "x_editorial_prompt_v4" as const;
 
 export type XEditorialComposerFailureCode =
   | "missing_content"
@@ -225,8 +225,7 @@ const FORBIDDEN_COPY_PATTERNS: Array<{
   { code: "hashtag", pattern: /(^|\s)#[\p{L}\p{N}_]+/u },
   {
     code: "markdown",
-    pattern:
-      /`|\*\*|__|\[[^\]]+\]\([^)]+\)|(^|\n)\s*(?:>|#{1,6}\s|[-*+]\s|\d+\.\s)/,
+    pattern: /`|\*\*|__|\[[^\]]+\]\([^)]+\)|(^|\n)\s*(?:>|#{1,6}\s)/,
   },
   {
     code: "internal_language",
@@ -241,9 +240,8 @@ const FORBIDDEN_COPY_PATTERNS: Array<{
   {
     code: "fake_first_person",
     pattern:
-      /\b(?:i(?:['’](?:m|ve|d|ll))?|me|my|mine|we(?:['’](?:re|ve|d|ll))?|our|ours)\b/i,
+      /\b(?:(?:i|we)\s+(?:bought|sold|bet|traded|entered|exited|hedged|made|earned|lost|won|called|predicted|spoke|talked|messaged|contacted|know|have\s+(?:an?\s+)?(?:source|insider|contact)|(?:was|were)\s+told)|(?:my|our)\s+(?:bet|trade|position|wallet|profit|loss|source|insider|contact|call|prediction|track record))\b/i,
   },
-  { code: "fake_first_person", pattern: /\bus\b/ },
   {
     code: "promotional_cta",
     pattern:
@@ -333,21 +331,28 @@ export function buildXEditorialDraftSystemPrompt(input: {
   maxParagraphs: number;
 }): string {
   return [
-    "You are the editorial writer for a prediction-market intelligence account on X.",
-    "Write one ready-to-paste English post from the supplied allowlisted facts.",
-    "It must read like a sharp human analyst noticed a real story, not like a signal card, dashboard, press release, or AI summary.",
-    "Choose one primary tension: a fresh meaningful bet, a verified trader profile, a real behavior change, market-versus-trader disagreement, follow-through, or a resolved receipt.",
-    "Open with the strongest concrete action, amount, probability, price move, or result. Then explain who is involved and why it matters.",
-    "Use short natural paragraphs and varied sentence rhythm. Omit facts that do not strengthen the story.",
+    "You write human, high-signal English posts for a prediction-market intelligence account on X.",
+    "Write one ready-to-paste post from the supplied allowlisted facts. It should feel like a sharp trader-story post written after noticing something worth sharing, never a signal card, dashboard, press release, or AI summary.",
+    "Choose the strongest supported story: a fresh meaningful bet, a trader with a credible track record, a repeatable strategy, a contradiction between positions, a market-versus-trader disagreement, follow-through, or a resolved receipt.",
+    "Scale the post to the evidence. With thin facts, write a compact 3-5 line post. With a rich track record or several connected positions, build a fuller case study. Never pad a weak story.",
+    "Use this editorial arc when the facts support it, but do not force every stage:",
+    "HOOK — lead with the most surprising verified amount, result, action, probability, or contradiction. Prefer a direct claim over scene-setting.",
+    "CHARACTER — make the trader, wallet, or group concrete. Use a supplied display name and verified credentials when available.",
+    "RECEIPTS — show the two to five facts that prove the hook. Short standalone lines or → bullets are welcome when they scan better than prose.",
+    "READ — explain the tension or pattern: conviction, concentration, hedging, disagreement, changed behavior, asymmetric payoff, or what the result says about the strategy. Clearly frame interpretation as analysis, not fact.",
+    "FINISH — end with a crisp punchline, contrast, question, or forward-looking tension. Do not end by merely repeating the market title or summarizing the data.",
+    "Use short natural paragraphs, clipped sentences where they add rhythm, and varied sentence length. Prefer specific nouns and active verbs. Omit facts that do not strengthen the story.",
+    "Avoid generic openings such as 'Market update', 'Tracked wallets are moving', 'A signal appeared', or '[probability] is now [probability]' when a concrete trader, amount, or result is available.",
     "Use only supplied facts. Preserve side, proposition, scope, amount, price, count, PnL, timeframe, and result exactly.",
     "A position snapshot proves a position, not when or how it was entered. Do not turn a snapshot into a fresh buy unless a supplied fact explicitly proves the change.",
     "Do not claim insider access, coordination, private information, causation, certainty, an AI bot, or a cheat code.",
-    "Never invent first-person experience or pretend the account placed the trade. Avoid I, we, my, and our.",
+    "A light first-person editorial voice is allowed for a fact-grounded observation or opinion, such as 'I found', 'I am watching', or 'I think'. Never invent a personal trade, profit, prediction record, conversation, private source, or firsthand access.",
     "Do not expose wallet addresses, internal labels, evidence IDs, raw schema names, or analytics jargon.",
-    "No Markdown markers inside postText, headings, tables, hashtags, affiliate language, product CTA, or engagement bait.",
-    "Select one to three exact, non-overlapping snippets for X Premium formatting. Use bold for the strongest hook, amount, probability, or result; use italic only for a genuinely useful interpretive line. Return those snippets in formatting and keep postText itself plain.",
+    "No Markdown markers inside postText, headings, pipe-delimited stat tables, hashtags, affiliate language, product CTA, or generic engagement bait.",
+    "Select one to three exact, non-overlapping snippets for intentional Telegram/X formatting. Usually bold the hook or strongest result; use italic only for a genuinely useful interpretive line. Return those snippets in formatting and keep postText itself plain.",
     'Every formatting item must be exactly {"style":"bold"|"italic","text":"an exact substring of postText"}. The field name is text, never snippet.',
-    "Emoji are optional and should be rare. Do not use an emoji as a fixed template.",
+    "Emoji and → bullets are optional. Use a topical emoji only when it improves scanning or tone; never force a fixed emoji template.",
+    "Vary the hook and ending against recentOpeningsToAvoidRepeating. Reuse the reference collection's editorial principles, never one author's exact wording or persona.",
     `Hard limit: ${input.maxCharacters} visible characters and ${input.maxParagraphs} paragraphs.`,
     "Return exactly one JSON object. Use status=blocked and postText=null if the facts do not support a coherent, safe post.",
   ].join("\n");
@@ -457,7 +462,11 @@ function collectAllowedNumericValues(value: unknown, output: number[]): void {
     return;
   }
   if (value && typeof value === "object") {
-    for (const nested of Object.values(value)) {
+    for (const [key, nested] of Object.entries(value)) {
+      for (const match of key.matchAll(/\d+(?:\.\d+)?/g)) {
+        const fieldScope = Number(match[0]);
+        if (Number.isFinite(fieldScope)) output.push(fieldScope);
+      }
       collectAllowedNumericValues(nested, output);
     }
   }

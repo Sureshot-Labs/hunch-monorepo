@@ -1693,7 +1693,7 @@ function createTestXEditorialComposer(input: {
       marketId: source.marketId,
       model: "test/editorial-model",
       postText: input.text,
-      promptVersion: "x_editorial_prompt_v3",
+      promptVersion: "x_editorial_prompt_v4",
       safetyFlags: [],
       selectedSide: source.selectedSide,
       sourceDigest: buildXEditorialSourceDigest(source),
@@ -14411,8 +14411,12 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         const message = telegram.messages[0];
         assert.equal(message?.parse_mode, "MarkdownV2", scenario.name);
         if (scenario.rootProfile === "x_editorial_draft_v1") {
-          assert.match(message?.text ?? "", /^```\n/, scenario.name);
-          assert.match(message?.text ?? "", /🎨 Bold in X/, scenario.name);
+          assert.match(message?.text ?? "", /^\*/, scenario.name);
+          assert.doesNotMatch(
+            message?.text ?? "",
+            /```|🎨 Bold in X|🎨 Italic in X/,
+            scenario.name,
+          );
           assert.match(message?.text ?? "", /🌐 Website/, scenario.name);
           assert.match(
             message?.text ?? "",
@@ -14477,7 +14481,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(calls.count, 1);
       assert.equal(telegram.messages.length, 1);
       assert.equal(telegram.messages[0]?.reply_parameters, undefined);
-      assert.match(telegram.messages[0]?.text ?? "", /^```\n/);
+      assert.match(telegram.messages[0]?.text ?? "", /^\*/);
+      assert.doesNotMatch(telegram.messages[0]?.text ?? "", /```|🎨/);
       const candidateQuery = db.queries.find((query) =>
         query.sql.includes("from signal_bot_messages root"),
       );
@@ -14548,8 +14553,9 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(telegram.messages[0]?.text, telegram.messages[1]?.text);
       assert.match(
         telegram.messages[0]?.text ?? "",
-        /^```\nThe tracked position strengthened after the original signal\.\n```/,
+        /^\*The tracked position strengthened after the original signal\\\.\*/,
       );
+      assert.doesNotMatch(telegram.messages[0]?.text ?? "", /```|🎨/);
       assert.equal(telegram.messages[0]?.parse_mode, "MarkdownV2");
       assert.equal(telegram.messages[1]?.parse_mode, "MarkdownV2");
     },
@@ -14607,7 +14613,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(result.sent, 1);
       assert.equal(composeCalls, 1);
       assert.equal(telegram.messages.length, 1);
-      assert.match(telegram.messages[0]?.text ?? "", /^```\n/);
+      assert.match(telegram.messages[0]?.text ?? "", /^\*/);
+      assert.doesNotMatch(telegram.messages[0]?.text ?? "", /```|🎨/);
       assert.match(telegram.messages[0]?.text ?? "", /Tracked wallets/);
       const stored = [...db.messageRows.values()][0];
       const metrics = stored?.metrics as
@@ -14770,7 +14777,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         marketId: source.marketId,
         model: "test/editorial-model",
         postText: null,
-        promptVersion: "x_editorial_prompt_v3",
+        promptVersion: "x_editorial_prompt_v4",
         safetyFlags: ["model_blocked"],
         selectedSide: source.selectedSide,
         sourceDigest: buildXEditorialSourceDigest(source),
@@ -14795,7 +14802,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(result.sent, 1);
       assert.equal(result.skipped, 0);
       assert.equal(telegram.messages.length, 1);
-      assert.match(telegram.messages[0]?.text ?? "", /^```\n/);
+      assert.match(telegram.messages[0]?.text ?? "", /^\*/);
+      assert.doesNotMatch(telegram.messages[0]?.text ?? "", /```|🎨/);
       const metrics = [...db.messageRows.values()][0]?.metrics as
         | {
             editorialComposerV1?: {

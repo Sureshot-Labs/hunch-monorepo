@@ -606,8 +606,8 @@ export function parseSignalBotConfig(
         ),
       ),
       maxParagraphs: Math.min(
-        8,
-        parsePositiveInt(env.HUNCH_SIGNAL_BOT_X_EDITORIAL_MAX_PARAGRAPHS, 5),
+        12,
+        parsePositiveInt(env.HUNCH_SIGNAL_BOT_X_EDITORIAL_MAX_PARAGRAPHS, 10),
       ),
       model: env.HUNCH_SIGNAL_BOT_X_EDITORIAL_MODEL?.trim() || "openai/gpt-5.5",
     },
