@@ -76,6 +76,9 @@ const SUPPORTED_POSITION_READ_VENUES: Position["venue"][] = [
   "kalshi",
   "limitless",
 ];
+const SUPPORTED_POSITION_READ_VENUE_SET = new Set<string>(
+  SUPPORTED_POSITION_READ_VENUES,
+);
 
 export type PositionMetricsInput = {
   userId: string;
@@ -458,11 +461,14 @@ function resolveVenueList(inputs: {
   venue?: string;
   venues?: string[];
 }): string[] {
-  return inputs.venues?.length
+  const requested = inputs.venues?.length
     ? Array.from(new Set(inputs.venues))
     : inputs.venue
       ? [inputs.venue]
       : SUPPORTED_POSITION_READ_VENUES;
+  return requested.filter((venue) =>
+    SUPPORTED_POSITION_READ_VENUE_SET.has(venue),
+  );
 }
 
 export async function resolvePositionReadScope(
@@ -470,7 +476,7 @@ export async function resolvePositionReadScope(
   inputs: PositionReadScopeInput,
 ): Promise<ResolvedPositionReadScope> {
   const venueList = resolveVenueList(inputs);
-  const shouldExpandFunders = !venueList || venueList.includes("polymarket");
+  const shouldExpandFunders = venueList.includes("polymarket");
   const walletAddresses = shouldExpandFunders
     ? await expandPolymarketWallets(pool, {
         userId: inputs.userId,
@@ -493,7 +499,7 @@ export async function fetchPositionPnlSummaryForResolvedScope(
     venueList?: string[];
   },
 ): Promise<PositionPnlSummary> {
-  if (inputs.walletAddresses.length === 0) {
+  if (inputs.walletAddresses.length === 0 || inputs.venueList?.length === 0) {
     return {
       openPositionsCount: 0,
       positionsCount: 0,
@@ -608,7 +614,7 @@ export async function fetchPositionsForUserWallet(
     pool,
     inputs,
   );
-  if (walletAddresses.length === 0) return [];
+  if (walletAddresses.length === 0 || venueList?.length === 0) return [];
 
   const params: PgParams = [inputs.userId];
   let whereClause = `where p.user_id = $1
@@ -714,6 +720,7 @@ export async function fetchPositionsForUserWalletByTokenIds(
     pool,
     inputs,
   );
+  if (venueList?.length === 0) return [];
   const tokenIds = normalizeTokenIdsForLookup(inputs.tokenIds, venueList);
   if (tokenIds.length === 0) return [];
   if (walletAddresses.length === 0) return [];

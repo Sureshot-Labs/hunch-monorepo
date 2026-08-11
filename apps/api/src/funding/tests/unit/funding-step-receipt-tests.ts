@@ -96,6 +96,77 @@ assert.equal(
   }).status,
   "finalized",
 );
+
+const destinationToken = "0x7777777777777777777777777777777777777777";
+const destinationWallet = "0x8888888888888888888888888888888888888888";
+const exactCreditInterface = new ethers.Interface([
+  "event Transfer(address indexed from,address indexed to,uint256 value)",
+]);
+const exactCreditEvent = exactCreditInterface.getEvent("Transfer");
+if (!exactCreditEvent) throw new Error("Transfer event ABI is unavailable");
+const exactDestinationCreditLog = exactCreditInterface.encodeEventLog(
+  exactCreditEvent,
+  [ethers.ZeroAddress, destinationWallet, 4_000_000n],
+);
+const exactCreditValidation = {
+  postconditionEvidenceKind: "exact_erc20_destination_credit_v1",
+  expectedDestinationAssetId: destinationToken,
+  expectedDestinationAddress: destinationWallet,
+  expectedDestinationRaw: "4000000",
+};
+const exactCreditReceipt = evaluateEvmActionReceipt({
+  action: evmAction,
+  actionValidationResult: exactCreditValidation,
+  expectedSignerAddress: evmTransaction.from,
+  transaction: evmTransaction,
+  receipt: {
+    ...evmReceipt,
+    logs: [
+      {
+        address: destinationToken,
+        data: exactDestinationCreditLog.data,
+        topics: exactDestinationCreditLog.topics,
+      },
+    ],
+  },
+  previous: null,
+});
+assert.equal(exactCreditReceipt.status, "finalized");
+assert.equal(exactCreditReceipt.actionMatch, true);
+assert.equal(exactCreditReceipt.evidence.attributedDestinationRaw, "4000000");
+
+const excessiveDestinationCreditLog = exactCreditInterface.encodeEventLog(
+  exactCreditEvent,
+  [ethers.ZeroAddress, destinationWallet, 4_000_001n],
+);
+const excessiveCreditReceipt = evaluateEvmActionReceipt({
+  action: evmAction,
+  actionValidationResult: exactCreditValidation,
+  expectedSignerAddress: evmTransaction.from,
+  transaction: evmTransaction,
+  receipt: {
+    ...evmReceipt,
+    logs: [
+      {
+        address: destinationToken,
+        data: excessiveDestinationCreditLog.data,
+        topics: excessiveDestinationCreditLog.topics,
+      },
+    ],
+  },
+  previous: null,
+});
+assert.equal(excessiveCreditReceipt.status, "mismatch");
+assert.equal(excessiveCreditReceipt.actionMatch, false);
+assert.equal(
+  excessiveCreditReceipt.failureCode,
+  "destination_credit_amount_mismatch",
+);
+assert.equal(
+  excessiveCreditReceipt.evidence.attributedDestinationRaw,
+  "4000001",
+);
+
 assert.equal(
   evaluateEvmActionReceipt({
     action: evmAction,
@@ -201,6 +272,29 @@ assert.equal(
     expectedSignerAddress: sponsoredSigner,
     transaction: sponsoredTransaction,
     receipt: sponsoredReceipt,
+    previous: null,
+    executionEnvelope: "privy_erc4337",
+  }).status,
+  "finalized",
+);
+const sponsoredExactCreditReceipt = {
+  ...sponsoredReceipt,
+  logs: [
+    ...sponsoredReceipt.logs,
+    {
+      address: destinationToken,
+      data: exactDestinationCreditLog.data,
+      topics: exactDestinationCreditLog.topics,
+    },
+  ],
+};
+assert.equal(
+  evaluateEvmActionReceipt({
+    action: evmAction,
+    actionValidationResult: exactCreditValidation,
+    expectedSignerAddress: sponsoredSigner,
+    transaction: sponsoredTransaction,
+    receipt: sponsoredExactCreditReceipt,
     previous: null,
     executionEnvelope: "privy_erc4337",
   }).status,
@@ -345,6 +439,21 @@ assert.equal(
     executionEnvelope: "privy_erc4337",
   }).status,
   "finalized",
+);
+const ambiguousBundleCredit = evaluateEvmActionReceipt({
+  action: evmAction,
+  actionValidationResult: exactCreditValidation,
+  expectedSignerAddress: sponsoredSigner,
+  transaction: bundledSponsoredTransaction,
+  receipt: sponsoredExactCreditReceipt,
+  previous: null,
+  executionEnvelope: "privy_erc4337",
+});
+assert.equal(ambiguousBundleCredit.status, "mismatch");
+assert.equal(
+  ambiguousBundleCredit.failureCode,
+  "sponsored_exact_credit_scope_ambiguous",
+  "transaction-wide transfer logs cannot prove exact credit for one UserOp in a bundle",
 );
 const ambiguousSponsoredTransaction = {
   ...sponsoredTransaction,

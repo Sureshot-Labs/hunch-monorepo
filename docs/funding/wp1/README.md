@@ -1,5 +1,10 @@
 # Funding WP1 implementation status
 
+> Historical WP1 snapshot. The active control plane is now compact policy V2.
+> Runtime resolution accepts only V2; the former persisted V1 schema and
+> adapter have been removed. Route fixtures remain rehearsal/test artifacts
+> and are not part of the persisted or effective runtime policy.
+
 Status: **domain, fail-closed control plane, authenticated route tests, and
 operator UI implemented; no product route or policy has been activated.**
 

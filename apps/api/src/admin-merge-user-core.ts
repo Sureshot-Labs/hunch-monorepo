@@ -102,6 +102,7 @@ export type FundingMergeConflictSummary = Readonly<{
   receiveEvidence: number;
   telegramFundingContextEvidence: number;
   telegramFundingBuyContinuationEvidence: number;
+  telegramFundingAuthorizationEvidence: number;
 }>;
 
 export class FundingMergeConflictError extends Error {
@@ -164,6 +165,7 @@ async function fetchFundingMergeConflicts(
     receive_evidence: string;
     telegram_funding_context_evidence: string;
     telegram_funding_buy_continuation_evidence: string;
+    telegram_funding_authorization_evidence: string;
   }>(
     `
       select
@@ -260,6 +262,11 @@ async function fetchFundingMergeConflicts(
           as telegram_funding_buy_continuation_evidence,
         (
           select count(*)::text
+          from telegram_funding_authorizations funding_authorization
+          where funding_authorization.user_id = any($1::uuid[])
+        ) as telegram_funding_authorization_evidence,
+        (
+          select count(*)::text
           from funding_operations source
           join funding_operations target
             on target.user_id = $3
@@ -306,6 +313,9 @@ async function fetchFundingMergeConflicts(
     ),
     telegramFundingBuyContinuationEvidence: Number(
       row.telegram_funding_buy_continuation_evidence,
+    ),
+    telegramFundingAuthorizationEvidence: Number(
+      row.telegram_funding_authorization_evidence,
     ),
   };
 }

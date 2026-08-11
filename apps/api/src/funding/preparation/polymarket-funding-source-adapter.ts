@@ -24,12 +24,17 @@ import type {
   FundingSourceAdapter,
   FundingSourcePlanningInput,
 } from "../planner/source-adapter.js";
+import { POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID } from "../execution/delegated-funding-profile-ids.js";
 import { fundingSidecarRuntimeConfig } from "../runtime/sidecar-runtime-config.js";
 import {
   commitPlanRunsWithoutUserWalletAction,
   type PlannedSourceOption,
 } from "../planner/planning-types.js";
-import { buildPolymarketFundingFollowupAction } from "./polymarket-funding-followup.js";
+import {
+  buildExactPolymarketDepositUsdceWrapPlan,
+  buildPolymarketFundingActionValidation,
+  buildPolymarketFundingFollowupAction,
+} from "./polymarket-funding-followup.js";
 import {
   parsePolymarketFundingEvidence,
   POLYMARKET_FUNDING_SOURCE_ADAPTER_ID,
@@ -207,10 +212,18 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
         fundingCapRaw: BigInt(snapshot.fundingCapRaw),
       });
     const requiredRaw = BigInt(input.requiredAmount.raw);
+    const delegatedWrap =
+      input.request.serverExecutionProfileId ===
+      POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID;
     let plan;
     try {
-      plan = buildPlan(requiredRaw);
-      if (plan && BigInt(plan.totalAmountRaw) < requiredRaw) {
+      plan = delegatedWrap
+        ? buildExactPolymarketDepositUsdceWrapPlan({
+            receiptRaw: input.requiredAmount.raw,
+            snapshot,
+          })
+        : buildPlan(requiredRaw);
+      if (!delegatedWrap && plan && BigInt(plan.totalAmountRaw) < requiredRaw) {
         const minimumRelayRaw = minimumAutomaticRelayDestinationRaw(input);
         if (minimumRelayRaw == null) return null;
         const maximumPreparationRaw =
@@ -316,7 +329,7 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
         {
           kind: "evm_transaction",
           safeLabel: "Fund Polymarket Deposit Wallet",
-          actor: "user",
+          actor: delegatedWrap ? "server" : "user",
           valueMoving: true,
           sponsorship:
             sponsorship.payerRequirement === "privy_sponsor"
@@ -349,7 +362,9 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
         venueBindingSnapshot: jsonRecord(facts.venueBinding),
         walletExecutionSnapshot: jsonRecord(profile),
         placementSnapshot: jsonRecord(input.placement),
-        requestedSourceAmount: null,
+        requestedSourceAmount: delegatedWrap
+          ? jsonRecord({ asset: usdceAsset, raw: plan.totalAmountRaw })
+          : null,
         requestedDestinationAmount: jsonRecord(plannedDestinationAmount),
         supportMetadata: {
           preparationKind: "polymarket_funding_router",
@@ -370,21 +385,24 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
           ordinal: 0,
           segmentOrdinal: null,
           stepKind: "venue_preparation",
-          state: "action_required",
+          state: delegatedWrap ? "planned" : "action_required",
           actionFingerprint: canonicalJsonHash(action),
-          executorId: "wallet_profile_evm_v1",
+          executorId: delegatedWrap
+            ? POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID
+            : "wallet_profile_evm_v1",
           payerRequirement: sponsorship.payerRequirement,
           dependsOnOrdinal: null,
           normalizedAction: jsonRecord(action),
           actionValidationResult: {
-            valid: true,
-            signerAddress: profile.address,
-            canonicalRouterAddress: snapshot.routerAddress,
-            expectedNonceRaw: plan.routerNonce,
-            expectedTotalAmountRaw: plan.totalAmountRaw,
-            fundingPlanHash: canonicalJsonHash(plan),
-            sponsorshipPolicyId: sponsorship.policyId,
-            signingMode: sponsorship.signingMode,
+            ...buildPolymarketFundingActionValidation({
+              destinationAssetId:
+                facts.venueBinding.settlementLocation.asset.assetId,
+              plan,
+              profileAddress: profile.address,
+              routerAddress: snapshot.routerAddress,
+              sponsorship,
+            }),
+            ...(delegatedWrap ? { activation: "after_verified_ingress" } : {}),
           },
         },
       ],

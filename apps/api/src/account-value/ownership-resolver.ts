@@ -13,7 +13,7 @@ import {
   canonicalAccountAddress,
   canonicalAssetKey,
 } from "../funding/domain/asset-identity.js";
-import { stableOpaqueId } from "./canonical.js";
+import { stableOpaqueId, stableWalletOpaqueId } from "./canonical.js";
 import { PRIVY_USER_AUTHORIZED_EVM_SPONSORSHIP_POLICY_ID } from "../funding/execution/sponsorship-policy.js";
 
 export type ExistingWalletOwnershipFact = Readonly<{
@@ -41,10 +41,11 @@ function walletProfile(
   const internallyManaged =
     fact.source !== "external" && Boolean(fact.serverWalletRef);
   return {
-    walletId: stableOpaqueId(
-      "wallet",
-      `${fact.walletType}:${networkId}:${canonicalAccountAddress(networkId, fact.address)}`,
-    ),
+    walletId: stableWalletOpaqueId({
+      walletType: fact.walletType,
+      networkId,
+      address: fact.address,
+    }),
     controllerWalletRef: fact.controllerWalletRef ?? null,
     networkId,
     address: fact.address,

@@ -35,11 +35,14 @@ import type {
 } from "./services/telegram-funding-sessions.js";
 import {
   buildTelegramFundingBuyReturnRequestFingerprint,
+  buildTelegramFundingTargetMessageForSession,
   canAttachTelegramFundingBuyReturn,
   canDiscloseTelegramFundingAddress,
   canonicalTelegramFundingBuySpend,
   loadTelegramFundingReceiveSession,
   resolveTelegramDirectPusdChoice,
+  resolveTelegramFundingTargetChoice,
+  telegramFundingConsentPresentationMode,
 } from "./services/telegram-funding.js";
 import {
   createTelegramFundingBuyContinuationDecorator,
@@ -137,6 +140,7 @@ assert.equal(
     query: async (sql: string) => {
       assert.match(sql, /telegram_funding_sessions/);
       assert.match(sql, /telegram_funding_consents/);
+      assert.match(sql, /telegram_funding_authorizations/);
       assert.match(sql, /telegram_funding_mutations/);
       assert.doesNotMatch(sql, /telegram_funding_buy_return_revisions/);
       assert.doesNotMatch(sql, /active_buy_return_revision/);
@@ -146,7 +150,7 @@ assert.equal(
     },
   } as never),
   true,
-  "the A1 worker remains available before additive 0203 while Slice B is off",
+  "the worker requires the Slice C migration marker while remaining independent from additive Buy-return columns",
 );
 
 assert.equal(canonicalTelegramFundingBuySpend("1.000000"), "1");
@@ -454,7 +458,10 @@ const variant = (
     adapterId: "owned_wallet_liquid_balances_v1",
     payload: { eventIdentity: "evm_erc20_transfer_v1" },
   },
-  completion: { kind: "direct_destination_credit" },
+  completion:
+    asset === usdce
+      ? { kind: "committed_venue_preparation", stepOrdinal: 0 }
+      : { kind: "direct_destination_credit" },
 });
 
 const consent: TelegramFundingConsent = {
@@ -470,6 +477,67 @@ const consent: TelegramFundingConsent = {
   fingerprint: "fingerprint-1",
   consentedAt: "2026-08-05T12:01:00.000Z",
 };
+
+assert.equal(
+  telegramFundingConsentPresentationMode(
+    {
+      ...consent,
+      policySnapshot: { presentationMode: "pusd_direct" },
+    },
+    "pusd_or_usdce_automatic",
+  ),
+  "pusd_direct",
+  "new live authorization must not broaden a frozen direct-only consent",
+);
+assert.equal(
+  telegramFundingConsentPresentationMode(
+    {
+      ...consent,
+      automationEnabled: true,
+      policySnapshot: {
+        presentationMode: "pusd_or_usdce_automatic",
+      },
+    },
+    "pusd_direct",
+  ),
+  "pusd_direct",
+  "live capability may safely narrow a frozen automatic consent",
+);
+assert.equal(
+  telegramFundingConsentPresentationMode(
+    {
+      ...consent,
+      automationEnabled: true,
+      policySnapshot: { presentationMode: "usdce_automatic" },
+    },
+    "pusd_direct",
+  ),
+  null,
+  "disjoint frozen and live capabilities must not disclose an address",
+);
+assert.equal(
+  telegramFundingConsentPresentationMode(
+    {
+      ...consent,
+      automationEnabled: true,
+      policySnapshot: {},
+    },
+    "pusd_or_usdce_automatic",
+  ),
+  null,
+  "missing frozen presentation state must never be invented from live capability",
+);
+assert.equal(
+  telegramFundingConsentPresentationMode(
+    {
+      ...consent,
+      policySnapshot: { presentationMode: "unexpected" },
+    },
+    "pusd_direct",
+  ),
+  null,
+  "malformed frozen presentation state must fail closed",
+);
 
 const receipt = (
   input: Partial<FundingReceiveReceipt> &
@@ -678,11 +746,62 @@ const choice = resolveTelegramDirectPusdChoice({
 assert.deepEqual(choice, {
   address,
   asset: pUsd,
+  automaticUsdce: false,
+  mode: "pusd_direct",
   receiveTargetId,
+  usdceVariants: [],
   variantIds: ["variant-pusd"],
 });
 const firstReceiveTarget = session.receiveTargets[0];
 assert.ok(firstReceiveTarget);
+const automaticUsdceAcceptedAsset = firstReceiveTarget.acceptedAssets.find(
+  (accepted) => accepted.handling === "automatic_conversion",
+);
+assert.ok(automaticUsdceAcceptedAsset);
+const usdceOnlySession = {
+  ...session,
+  receiveTargets: [
+    {
+      ...firstReceiveTarget,
+      acceptedAssets: [automaticUsdceAcceptedAsset],
+    },
+  ],
+};
+assert.equal(
+  resolveTelegramDirectPusdChoice({
+    session: usdceOnlySession,
+    observationVariants: [variant("variant-usdce", usdce)],
+  }),
+  null,
+  "Telegram must not expose automatic USDC.e until a durable server executor exists",
+);
+const usdceOnlyTargetMessage = buildTelegramFundingTargetMessageForSession({
+  contextId,
+  expiresAt,
+  session: usdceOnlySession,
+});
+assert.match(usdceOnlyTargetMessage.text, /Receive unavailable/u);
+assert.doesNotMatch(usdceOnlyTargetMessage.text, /pUSD/u);
+assert.equal(usdceOnlyTargetMessage.reply_markup, undefined);
+const combinedTargetMessage = buildTelegramFundingTargetMessageForSession({
+  contextId,
+  expiresAt,
+  session,
+  automaticUsdceEnabled: true,
+});
+assert.match(combinedTargetMessage.text, /pUSD/u);
+assert.equal(combinedTargetMessage.text.includes("USDC"), true);
+assert.equal(
+  resolveTelegramFundingTargetChoice({
+    automaticUsdceEnabled: true,
+    session,
+    observationVariants: [
+      variant("variant-usdce", usdce),
+      variant("variant-pusd", pUsd),
+    ],
+  })?.mode,
+  "pusd_or_usdce_automatic",
+);
 assert.equal(
   resolveTelegramDirectPusdChoice({
     session: {
@@ -794,12 +913,301 @@ assert.equal(unexpectedUsdce?.assetSymbol, "USDC.e");
 assert.ok(unexpectedUsdce);
 assert.match(
   buildTelegramFundingProgressMessage(unexpectedUsdce).text,
-  /No routing transaction was submitted/,
+  /did not complete.*preserved.*needs review/u,
+);
+assert.doesNotMatch(
+  buildTelegramFundingProgressMessage(unexpectedUsdce).text,
+  /No routing transaction was submitted/u,
 );
 assert.notEqual(
   telegramFundingProgressFingerprint(ready),
   telegramFundingProgressFingerprint(unexpectedUsdce),
 );
+const automaticConsent: TelegramFundingConsent = {
+  ...consent,
+  revision: 2,
+  variantIds: ["variant-pusd", "variant-usdce"],
+  automationEnabled: true,
+  policySnapshot: {
+    version: 2,
+    kind: "polymarket_usdce_full_receipt_wrap",
+    profileId: "polymarket_deposit_usdce_wrap_v1",
+    fullReceipt: true,
+    authorizationId: "funding-authorization-v2",
+    authorizationFingerprint: "authorization-fingerprint-v2",
+    signerId: "wrap-signer-v1",
+    signerFingerprint: "signer-fingerprint-v1",
+    policyId: "wrap-policy-v1",
+    policyFingerprint: "policy-fingerprint-v1",
+    fundingPolicyRevision: "funding-policy-revision-v1",
+    venueId: "polymarket",
+    destinationOptionId: "polymarket-deposit",
+    venueBindingOptionId: "polymarket-deposit-wallet",
+    sourceAsset: usdce,
+    destinationAsset: pUsd,
+    variantCursors: [
+      {
+        variantId: "variant-usdce",
+        networkId: "evm:137",
+        ledgerHeightExclusive: "100",
+      },
+    ],
+  },
+};
+const waitingAfterCapabilityLoss = projectTelegramFundingProgress({
+  automaticConversionAvailable: false,
+  consent: automaticConsent,
+  context,
+  receipts: [],
+  session,
+  now: new Date("2026-08-05T12:03:00.000Z"),
+});
+assert.ok(waitingAfterCapabilityLoss);
+assert.equal(waitingAfterCapabilityLoss.automaticConversionEnabled, undefined);
+assert.match(
+  buildTelegramFundingProgressMessage(waitingAfterCapabilityLoss).text,
+  /Asset.*pUSD/u,
+);
+assert.equal(
+  buildTelegramFundingProgressMessage(waitingAfterCapabilityLoss).text.includes(
+    "USDC",
+  ),
+  false,
+  "historical consent must not advertise conversion after live capability is lost",
+);
+const waitingWithLiveCapability = projectTelegramFundingProgress({
+  automaticConversionAvailable: true,
+  consent: automaticConsent,
+  context,
+  receipts: [],
+  session,
+  now: new Date("2026-08-05T12:03:00.000Z"),
+});
+assert.ok(waitingWithLiveCapability);
+assert.equal(waitingWithLiveCapability?.automaticConversionEnabled, true);
+assert.equal(
+  buildTelegramFundingProgressMessage(waitingWithLiveCapability).text.includes(
+    "USDC",
+  ),
+  true,
+);
+const detectedAfterReady = projectTelegramFundingProgress({
+  consent: automaticConsent,
+  context,
+  receipts: [
+    receipt({
+      receiptId: "receipt-ready-pusd-before-usdce",
+      asset: pUsd,
+      handling: "direct",
+      status: "ready",
+      variantId: "variant-pusd",
+    }),
+    receipt({
+      receiptId: "receipt-detected-usdce",
+      asset: usdce,
+      handling: "automatic_conversion",
+      status: "observed",
+      variantId: "variant-usdce",
+    }),
+  ],
+  session: { ...session, status: "processing" },
+});
+assert.equal(
+  detectedAfterReady?.state,
+  "funds_received",
+  "new USDC.e evidence must not be hidden by an older ready pUSD receipt",
+);
+assert.equal(detectedAfterReady?.assetSymbol, "USDC.e");
+const detectedWhilePaused = projectTelegramFundingProgress({
+  automaticConversionMode: "soft_paused",
+  consent: automaticConsent,
+  context,
+  receipts: [
+    receipt({
+      asset: usdce,
+      handling: "automatic_conversion",
+      status: "observed",
+      variantId: "variant-usdce",
+    }),
+  ],
+  session: { ...session, status: "processing" },
+});
+assert.equal(detectedWhilePaused?.state, "waiting_for_routing");
+assert.equal(detectedWhilePaused?.terminal, false);
+assert.ok(detectedWhilePaused);
+assert.match(
+  buildTelegramFundingProgressMessage(detectedWhilePaused).text,
+  /waiting for automatic routing to resume/u,
+);
+const detectedAfterHardInvalidation = projectTelegramFundingProgress({
+  automaticConversionMode: "hard_invalid",
+  consent: automaticConsent,
+  context,
+  receipts: [
+    receipt({
+      asset: usdce,
+      handling: "automatic_conversion",
+      status: "observed",
+      variantId: "variant-usdce",
+    }),
+  ],
+  session: { ...session, status: "processing" },
+});
+assert.equal(detectedAfterHardInvalidation?.state, "needs_attention");
+assert.equal(detectedAfterHardInvalidation?.terminal, true);
+const convertingUsdce = projectTelegramFundingProgress({
+  consent: automaticConsent,
+  context,
+  receipts: [
+    receipt({
+      asset: usdce,
+      handling: "automatic_conversion",
+      status: "routing",
+      variantId: "variant-usdce",
+    }),
+  ],
+  session: { ...session, status: "processing" },
+});
+assert.equal(convertingUsdce?.state, "converting");
+assert.ok(convertingUsdce);
+assert.match(
+  buildTelegramFundingProgressMessage(convertingUsdce).text,
+  /Converting USDC/u,
+);
+const routingWhilePaused = projectTelegramFundingProgress({
+  automaticConversionMode: "soft_paused",
+  consent: automaticConsent,
+  context,
+  receipts: [
+    receipt({
+      asset: usdce,
+      handling: "automatic_conversion",
+      status: "routing",
+      variantId: "variant-usdce",
+    }),
+  ],
+  session: { ...session, status: "processing" },
+});
+assert.equal(routingWhilePaused?.state, "waiting_for_routing");
+assert.equal(routingWhilePaused?.terminal, false);
+assert.match(
+  buildTelegramFundingProgressMessage(routingWhilePaused).text,
+  /waiting for automatic routing to resume/u,
+);
+const routingAfterHardInvalidation = projectTelegramFundingProgress({
+  automaticConversionMode: "hard_invalid",
+  consent: automaticConsent,
+  context,
+  receipts: [
+    receipt({
+      asset: usdce,
+      handling: "automatic_conversion",
+      status: "routing",
+      variantId: "variant-usdce",
+    }),
+  ],
+  session: { ...session, status: "processing" },
+});
+assert.equal(routingAfterHardInvalidation?.state, "needs_attention");
+assert.equal(routingAfterHardInvalidation?.terminal, true);
+const routingReceiptAfterBoundary = receipt({
+  receiptId: "receipt-routing-after-boundary",
+  asset: usdce,
+  handling: "automatic_conversion",
+  status: "routing",
+  variantId: "variant-usdce",
+});
+for (const automaticConversionMode of [
+  "soft_paused",
+  "hard_invalid",
+] as const) {
+  const routingAfterBoundary = projectTelegramFundingProgress({
+    afterBroadcastBoundaryReceiptIds: [routingReceiptAfterBoundary.receiptId],
+    automaticConversionMode,
+    consent: automaticConsent,
+    context,
+    receipts: [routingReceiptAfterBoundary],
+    session: { ...session, status: "processing" },
+  });
+  assert.equal(
+    routingAfterBoundary?.state,
+    "converting",
+    "current capability must not reclassify a route after its durable broadcast boundary",
+  );
+  assert.equal(routingAfterBoundary?.terminal, false);
+}
+const routingAfterBoundaryWithPriorRecovery = projectTelegramFundingProgress({
+  afterBroadcastBoundaryReceiptIds: [routingReceiptAfterBoundary.receiptId],
+  automaticConversionMode: "hard_invalid",
+  consent: automaticConsent,
+  context,
+  receipts: [
+    receipt({
+      receiptId: "receipt-prior-recovery",
+      asset: pUsd,
+      handling: "direct",
+      status: "recovery_required",
+      variantId: "variant-pusd",
+    }),
+    routingReceiptAfterBoundary,
+  ],
+  session: { ...session, status: "recovery_required" },
+});
+assert.equal(
+  routingAfterBoundaryWithPriorRecovery?.state,
+  "converting",
+  "a durable in-flight route must not be masked by older recovery evidence",
+);
+assert.equal(routingAfterBoundaryWithPriorRecovery?.terminal, false);
+const sequentialUsdce = projectTelegramFundingProgress({
+  consent: automaticConsent,
+  context,
+  receipts: [
+    receipt({
+      receiptId: "receipt-ready-usdce",
+      asset: usdce,
+      handling: "automatic_conversion",
+      status: "ready",
+      variantId: "variant-usdce",
+    }),
+    receipt({
+      receiptId: "receipt-routing-usdce",
+      asset: usdce,
+      handling: "automatic_conversion",
+      status: "routing",
+      variantId: "variant-usdce",
+    }),
+  ],
+  session: { ...session, status: "processing" },
+});
+assert.equal(
+  sequentialUsdce?.state,
+  "converting",
+  "a later receipt keeps progress nonterminal until its own wrap completes",
+);
+const mixedRecovery = projectTelegramFundingProgress({
+  consent: automaticConsent,
+  context,
+  receipts: [
+    receipt({
+      receiptId: "receipt-recovery-pusd",
+      asset: pUsd,
+      handling: "direct",
+      status: "recovery_required",
+      variantId: "variant-pusd",
+    }),
+    receipt({
+      receiptId: "receipt-recovery-usdce",
+      asset: usdce,
+      handling: "automatic_conversion",
+      status: "recovery_required",
+      variantId: "variant-usdce",
+    }),
+  ],
+  session: { ...session, status: "recovery_required" },
+});
+assert.equal(mixedRecovery?.assetSymbol, "Multiple assets");
+assert.equal(mixedRecovery?.rawAmount, null);
 assert.deepEqual(
   classifyTelegramEditFailure({
     description: "Bad Request: message is not modified",
@@ -995,8 +1403,23 @@ assert.equal(
   );
   assert.match(
     routingSql,
-    /consent\.consented_at <= receipt\.observed_at/u,
-    "Telegram authority must be selected as of the immutable receipt time",
+    /consent\.consented_at <= canonical_event\.first_observed_at/u,
+    "Telegram routing must use consent already present at immutable first observation",
+  );
+  assert.match(
+    routingSql,
+    /order by consent\.consented_at desc, consent\.revision desc/u,
+    "Telegram routing must choose the latest exact historical consent",
+  );
+  assert.match(
+    routingSql,
+    /receipt\.ledger_height > .*ledgerheightexclusive/u,
+    "prospective authority must compare the canonical event height to the frozen cursor",
+  );
+  assert.doesNotMatch(
+    routingSql,
+    /consent\.revision = telegram_context\.active_consent_revision/u,
+    "a later active consent must never retroactively authorize an old transfer",
   );
 }
 

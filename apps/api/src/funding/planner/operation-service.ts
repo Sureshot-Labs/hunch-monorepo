@@ -8,7 +8,14 @@ import {
   type FundingOperationRow,
 } from "../persistence/funding-operation-repository.js";
 import type { FundingRuntimePolicy } from "../policies/funding-policy.js";
-import { resolveFundingPolicy } from "../policies/funding-policy-service.js";
+import {
+  isWithdrawalPurpose,
+  withdrawalBindingMatches,
+} from "../domain/withdrawal-binding.js";
+import {
+  resolveFundingPolicy,
+  type FundingPolicyResolver,
+} from "../policies/funding-policy-service.js";
 import { FundingPlannerError } from "./money.js";
 
 export class FundingOperationService {
@@ -24,7 +31,7 @@ export class FundingOperationService {
       ) => Promise<void>;
       fetchQuote?: typeof fetchFundingQuoteForUser;
       commitOperation?: typeof commitFundingOperation;
-      resolvePolicy?: typeof resolveFundingPolicy;
+      resolvePolicy?: FundingPolicyResolver;
       now?: () => Date;
     }>,
   ) {}
@@ -38,12 +45,6 @@ export class FundingOperationService {
       ownershipRevision: string;
     }>,
   ): Promise<Readonly<{ operation: FundingOperationRow; replayed: boolean }>> {
-    if (input.policy.creationMode !== "on" || !input.policy.gates.commit) {
-      throw new FundingPlannerError(
-        "invalid_policy",
-        "funding operation commit is disabled",
-      );
-    }
     const quote = await (
       this.dependencies.fetchQuote ?? fetchFundingQuoteForUser
     )(this.dependencies.db, {
@@ -56,28 +57,41 @@ export class FundingOperationService {
         "funding quote was not found for authenticated user",
       );
     }
-    const withdrawal = quote.planSnapshot.operation.purpose === "withdrawal";
     const externalRecipientId =
       quote.planSnapshot.operation.externalRecipientId;
-    if (withdrawal !== Boolean(externalRecipientId)) {
+    const withdrawal = isWithdrawalPurpose(
+      quote.planSnapshot.operation.purpose,
+    );
+    if (
+      !withdrawal &&
+      (input.policy.creationMode !== "on" || !input.policy.gates.commit)
+    ) {
+      throw new FundingPlannerError(
+        "invalid_policy",
+        "funding operation commit is disabled",
+      );
+    }
+    if (
+      !withdrawalBindingMatches(
+        quote.planSnapshot.operation.purpose,
+        externalRecipientId,
+      )
+    ) {
       throw new FundingPersistenceError(
         "quote_mismatch",
         "withdrawal purpose and external recipient binding differ",
       );
     }
-    if (
-      withdrawal &&
-      (!input.policy.gates.withdrawalExecution ||
-        !this.dependencies.revalidateWithdrawalRecipient)
-    ) {
+    if (withdrawal && !this.dependencies.revalidateWithdrawalRecipient) {
       throw new FundingPlannerError(
-        "invalid_policy",
-        "withdrawal execution is disabled or lacks recipient revalidation",
+        "destination_unavailable",
+        "withdrawal recipient revalidation is unavailable",
       );
     }
     if (
-      quote.policyVersion !== input.policy.version ||
-      quote.policyRevision !== input.policyRevision
+      !withdrawal &&
+      (quote.policyVersion !== input.policy.contractVersion ||
+        quote.policyRevision !== input.policyRevision)
     ) {
       throw new FundingPersistenceError(
         "quote_invalidated",
@@ -105,20 +119,22 @@ export class FundingOperationService {
         subjectLookupKeyVersion: this.dependencies.subjectLookupKeyVersion,
         now: this.dependencies.now?.() ?? new Date(),
         verifyCurrentFacts: async (client, lockedQuote) => {
-          const currentPolicy = await (
-            this.dependencies.resolvePolicy ?? resolveFundingPolicy
-          )(client);
-          if (
-            currentPolicy.policy.creationMode !== "on" ||
-            !currentPolicy.policy.gates.commit ||
-            (withdrawal && !currentPolicy.policy.gates.withdrawalExecution) ||
-            currentPolicy.policy.version !== lockedQuote.policyVersion ||
-            currentPolicy.revision !== lockedQuote.policyRevision
-          ) {
-            throw new FundingPersistenceError(
-              "quote_invalidated",
-              "funding policy changed while committing the quote",
-            );
+          if (!withdrawal) {
+            const currentPolicy = await (
+              this.dependencies.resolvePolicy ?? resolveFundingPolicy
+            )(client);
+            if (
+              currentPolicy.runtime.creationMode !== "on" ||
+              !currentPolicy.runtime.gates.commit ||
+              currentPolicy.runtime.contractVersion !==
+                lockedQuote.policyVersion ||
+              currentPolicy.revision !== lockedQuote.policyRevision
+            ) {
+              throw new FundingPersistenceError(
+                "quote_invalidated",
+                "funding policy changed while committing the quote",
+              );
+            }
           }
           const currentOwnershipRevision =
             await this.dependencies.resolveOwnershipRevision(input.userId);

@@ -2,6 +2,7 @@
 
 import assert from "node:assert/strict";
 
+import { POLYMARKET_FUNDING_ROUTER } from "@hunch/contracts";
 import type { Pool } from "@hunch/infra";
 import { ethers } from "ethers";
 
@@ -9,8 +10,12 @@ import type {
   DirectIngressObservationVariant,
   DirectIngressVariantObservation,
 } from "../../reconciliation/direct-ingress-observer.js";
-import type { FundingQuoteSummary } from "../../domain/types.js";
+import type {
+  FundingDiscoveryRequest,
+  FundingQuoteSummary,
+} from "../../domain/types.js";
 import { SOLANA_NATIVE_EXECUTION_RESERVE_LAMPORTS } from "../../domain/network-fees.js";
+import { POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID } from "../../execution/delegated-funding-profile-ids.js";
 import {
   fundingSidecarRuntimeConfig,
   loadFundingSidecarRuntimeConfig,
@@ -314,6 +319,20 @@ assert.deepEqual(
   ["https://primary-solana-rpc.example", "https://fallback-solana-rpc.example"],
   "an explicit ordered Solana RPC list must remain authoritative",
 );
+assert.equal(
+  loadFundingSidecarRuntimeConfig({
+    POLYMARKET_FUNDING_ROUTER_ADDRESS:
+      "0x0000000000000000000000000000000000000001",
+  }).polymarketFundingRouterAddress,
+  "",
+  "an invalid optional Router address must fail closed without crashing the sidecar",
+);
+assert.equal(
+  loadFundingSidecarRuntimeConfig({
+    POLYMARKET_FUNDING_ROUTER_ADDRESS: POLYMARKET_FUNDING_ROUTER.polygon,
+  }).polymarketFundingRouterAddress,
+  POLYMARKET_FUNDING_ROUTER.polygon,
+);
 
 const originalFetch = globalThis.fetch;
 const rpcCalls: string[] = [];
@@ -387,6 +406,13 @@ assert.equal(
   "routing_quote_frozen_facts_mismatch",
 );
 assert.equal(
+  fundingReceiveRoutingErrorCode({
+    code: "invalid_operation_state",
+    message: "another Polymarket Funding Router operation is unresolved",
+  }),
+  "routing_predecessor_unresolved",
+);
+assert.equal(
   fundingReceiveRoutingNeedsRecovery("routing_preparation_unavailable", 500),
   false,
   "temporary destination inspection failures must keep automatic conversion alive",
@@ -427,6 +453,7 @@ assert.equal(
 assert.equal(
   fundingReceiveChildOperationDisposition({
     childOperationStatus: "completed",
+    delegatedExecution: false,
     broadcastMayHaveOccurred: true,
     hasUnfinishedAttempt: false,
   }),
@@ -436,6 +463,7 @@ for (const childOperationStatus of ["failed", "cancelled"]) {
   assert.equal(
     fundingReceiveChildOperationDisposition({
       childOperationStatus,
+      delegatedExecution: false,
       broadcastMayHaveOccurred: false,
       hasUnfinishedAttempt: false,
     }),
@@ -444,6 +472,7 @@ for (const childOperationStatus of ["failed", "cancelled"]) {
   assert.equal(
     fundingReceiveChildOperationDisposition({
       childOperationStatus,
+      delegatedExecution: false,
       broadcastMayHaveOccurred: true,
       hasUnfinishedAttempt: false,
     }),
@@ -452,20 +481,18 @@ for (const childOperationStatus of ["failed", "cancelled"]) {
   assert.equal(
     fundingReceiveChildOperationDisposition({
       childOperationStatus,
+      delegatedExecution: false,
       broadcastMayHaveOccurred: false,
       hasUnfinishedAttempt: true,
     }),
     "recovery",
   );
 }
-for (const childOperationStatus of [
-  "refunded",
-  "reconcile_required",
-  "recovery_required",
-]) {
+for (const childOperationStatus of ["refunded"]) {
   assert.equal(
     fundingReceiveChildOperationDisposition({
       childOperationStatus,
+      delegatedExecution: false,
       broadcastMayHaveOccurred: false,
       hasUnfinishedAttempt: false,
     }),
@@ -474,12 +501,58 @@ for (const childOperationStatus of [
 }
 assert.equal(
   fundingReceiveChildOperationDisposition({
+    childOperationStatus: "reconcile_required",
+    delegatedExecution: true,
+    broadcastMayHaveOccurred: true,
+    hasUnfinishedAttempt: false,
+  }),
+  "waiting",
+  "receipt routing must wait while reconciliation can still finalize the child",
+);
+assert.equal(
+  fundingReceiveChildOperationDisposition({
+    childOperationStatus: "recovery_required",
+    delegatedExecution: true,
+    broadcastMayHaveOccurred: true,
+    hasUnfinishedAttempt: false,
+    recoveryMode: "automatic_evidence",
+  }),
+  "waiting",
+  "automatic evidence recovery must retain the exact receipt binding",
+);
+for (const recoveryMode of [null, "manual_review"] as const) {
+  assert.equal(
+    fundingReceiveChildOperationDisposition({
+      childOperationStatus: "recovery_required",
+      delegatedExecution: true,
+      broadcastMayHaveOccurred: true,
+      hasUnfinishedAttempt: false,
+      recoveryMode,
+    }),
+    "recovery",
+  );
+}
+assert.equal(
+  fundingReceiveChildOperationDisposition({
     childOperationStatus: "in_progress",
+    delegatedExecution: false,
     broadcastMayHaveOccurred: false,
     hasUnfinishedAttempt: false,
   }),
   "waiting",
 );
+for (const childOperationStatus of ["failed", "cancelled"]) {
+  assert.equal(
+    fundingReceiveChildOperationDisposition({
+      childOperationStatus,
+      delegatedExecution: true,
+      broadcastMayHaveOccurred: false,
+      hasUnfinishedAttempt: false,
+    }),
+    "recovery",
+    "a delegated receipt keeps its exact terminal child instead of opening conversion review",
+  );
+}
 
 let routedQuoteRequest:
   | Readonly<{
@@ -516,6 +589,33 @@ const routedReceiptTarget = {
     destinationAddress: "0x0000000000000000000000000000000000000003",
   },
 } as unknown as FundingReceiveReceiptRoutingTarget;
+let delegatedDiscoveryRequest: FundingDiscoveryRequest | undefined;
+await quoteFundingReceiveReceipt(
+  {
+    async liquidity(_userId, request) {
+      delegatedDiscoveryRequest = request;
+      return {
+        liquidityProjectionId: "projection_receive_delegated_12345678",
+        sourceOptions: [],
+      } as never;
+    },
+    async quote() {
+      throw new Error("delegated no-source probe must not quote");
+    },
+  },
+  routedReceiptTarget,
+  { serverExecutionProfileId: POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID },
+);
+assert.equal(
+  delegatedDiscoveryRequest?.maxFeeUsd,
+  null,
+  "closed-destination wrap must not inherit the generic conversion fee cap",
+);
+assert.equal(
+  delegatedDiscoveryRequest?.maxSlippageBps,
+  null,
+  "closed-destination wrap must not inherit generic slippage economics",
+);
 await quoteFundingReceiveReceipt(
   {
     async liquidity() {

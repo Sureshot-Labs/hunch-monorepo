@@ -74,6 +74,7 @@ const satisfied = verifyPolymarketFundingPostconditions({
   canonicalRouterAddress: ROUTER,
   plan,
   receipt: "success",
+  attributedPusdRaw: "4000000",
   before: {
     routerNonceRaw: "7",
     depositPusdRaw: "1500000",
@@ -90,11 +91,62 @@ const satisfied = verifyPolymarketFundingPostconditions({
 assert.equal(satisfied.status, "satisfied");
 assert.equal(satisfied.expectedDepositPusdRaw, "5500000");
 
+const oversizedDelta = verifyPolymarketFundingPostconditions({
+  binding: binding(),
+  canonicalRouterAddress: ROUTER,
+  plan,
+  receipt: "success",
+  attributedPusdRaw: "4000000",
+  before: {
+    routerNonceRaw: "7",
+    depositPusdRaw: "1500000",
+    clobPusdRaw: "1500000",
+    observedAt: "2026-07-24T12:00:00.000Z",
+  },
+  after: {
+    routerNonceRaw: "8",
+    depositPusdRaw: "5500001",
+    clobPusdRaw: "5500001",
+    observedAt: "2026-07-24T12:00:05.000Z",
+  },
+});
+assert.equal(
+  oversizedDelta.status,
+  "satisfied",
+  "a concurrent positive credit must not obscure an exactly attributed wrap",
+);
+
+const wrongAttributedAmount = verifyPolymarketFundingPostconditions({
+  binding: binding(),
+  canonicalRouterAddress: ROUTER,
+  plan,
+  receipt: "success",
+  attributedPusdRaw: "3999999",
+  before: {
+    routerNonceRaw: "7",
+    depositPusdRaw: "1500000",
+    clobPusdRaw: "1500000",
+    observedAt: "2026-07-24T12:00:00.000Z",
+  },
+  after: {
+    routerNonceRaw: "8",
+    depositPusdRaw: "5500000",
+    clobPusdRaw: "5500000",
+    observedAt: "2026-07-24T12:00:05.000Z",
+  },
+});
+assert.equal(wrongAttributedAmount.status, "unavailable");
+assert.equal(wrongAttributedAmount.checks.exactPusdAttributed, false);
+assert.deepEqual(wrongAttributedAmount.reasonCodes, [
+  "operation_reconcile_required",
+]);
+
 const invisible = verifyPolymarketFundingPostconditions({
   binding: binding(),
   canonicalRouterAddress: ROUTER,
   plan,
   receipt: "success",
+  attributedPusdRaw: "4000000",
   before: {
     routerNonceRaw: "7",
     depositPusdRaw: "1500000",
@@ -116,6 +168,7 @@ const stale = verifyPolymarketFundingPostconditions({
   canonicalRouterAddress: ROUTER,
   plan,
   receipt: "success",
+  attributedPusdRaw: "4000000",
   before: {
     routerNonceRaw: "8",
     depositPusdRaw: "1500000",
@@ -132,6 +185,7 @@ const ambiguous = verifyPolymarketFundingPostconditions({
   canonicalRouterAddress: ROUTER,
   plan,
   receipt: "ambiguous",
+  attributedPusdRaw: null,
   before: {
     routerNonceRaw: "7",
     depositPusdRaw: "1500000",
@@ -157,5 +211,5 @@ await assert.rejects(
 );
 
 console.log(
-  "[polymarket-funding-followup-tests] ok exact action, stale nonce, ambiguous receipt, and CLOB visibility",
+  "[polymarket-funding-followup-tests] ok exact action/credit, concurrent balance floor, stale nonce, ambiguous receipt, and CLOB visibility",
 );

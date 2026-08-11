@@ -962,6 +962,66 @@ export async function commitFundingOperationInTransaction(
     return { operation: existing, replayed: true };
   }
 
+  if (
+    input.plan.operation.supportMetadata?.preparationKind ===
+    "polymarket_funding_router"
+  ) {
+    const metadataBinding =
+      input.plan.operation.supportMetadata.venueBindingOptionId;
+    const snapshotBinding =
+      input.plan.operation.venueBindingSnapshot?.venueBindingOptionId;
+    const venueBindingOptionId =
+      typeof metadataBinding === "string" && metadataBinding.trim()
+        ? metadataBinding.trim()
+        : typeof snapshotBinding === "string" && snapshotBinding.trim()
+          ? snapshotBinding.trim()
+          : null;
+    if (!venueBindingOptionId) {
+      throw new FundingPersistenceError(
+        "quote_mismatch",
+        "Polymarket Funding Router operation lacks an exact venue binding",
+      );
+    }
+    await client.query(
+      `select pg_advisory_xact_lock(hashtextextended($1, 0))`,
+      [`funding-router:${input.userId}:${venueBindingOptionId}`],
+    );
+    const unresolved = await client.query<{ blocked: boolean }>(
+      `
+        select exists (
+          select 1
+          from funding_operations operation
+          where operation.user_id = $1
+            and operation.support_metadata ->> 'preparationKind' =
+                  'polymarket_funding_router'
+            and (
+              coalesce(
+                operation.support_metadata ->> 'venueBindingOptionId',
+                operation.venue_binding_snapshot ->> 'venueBindingOptionId'
+              ) = $2
+              or coalesce(
+                operation.support_metadata ->> 'venueBindingOptionId',
+                operation.venue_binding_snapshot ->> 'venueBindingOptionId'
+              ) is null
+            )
+            and operation.status not in (
+              'completed',
+              'refunded',
+              'failed',
+              'cancelled'
+            )
+        ) as blocked
+      `,
+      [input.userId, venueBindingOptionId],
+    );
+    if (unresolved.rows[0]?.blocked) {
+      throw new FundingPersistenceError(
+        "invalid_operation_state",
+        "another Polymarket Funding Router operation is unresolved",
+      );
+    }
+  }
+
   const quoteResult = await client.query<FundingQuoteDbRow>(
     `
       select ${quoteColumns}

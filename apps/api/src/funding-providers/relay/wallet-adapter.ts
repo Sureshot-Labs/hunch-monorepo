@@ -15,6 +15,7 @@ import {
   normalizeRelayAssetId,
   relayChainIdForNetwork,
   relayCurrencyForAsset,
+  relayRouteCapability,
   type RelayRouteSpec,
 } from "./mappings.js";
 import { normalizeRelayFees, normalizeRelayFeeUsd } from "./fees.js";
@@ -173,17 +174,6 @@ function assertEvmActionGasWithinHardPolicy(
   ) {
     throw new Error("Relay EVM action fee fields are outside hard policy");
   }
-}
-
-function routeCapability(
-  route: RelayRouteSpec,
-): ProviderQuoteCandidate["capability"] {
-  if (route.source.networkId === route.destination.networkId) {
-    return "same_network_swap";
-  }
-  return route.source.assetId === route.destination.assetId
-    ? "cross_network_transfer"
-    : "cross_network_swap";
 }
 
 function quoteExpiry(deadline: Date, now: Date): Date {
@@ -525,7 +515,7 @@ export class RelayWalletQuoteAdapter {
       candidate: {
         providerId: "relay",
         adapterVersion: 1,
-        capability: routeCapability(input.route),
+        capability: relayRouteCapability(input.route),
         amountMode:
           input.route.quoteMode === "expected_output"
             ? "exact_output"

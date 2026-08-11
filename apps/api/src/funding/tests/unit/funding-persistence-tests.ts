@@ -252,7 +252,11 @@ const tests: readonly Test[] = [
       );
       assert.deepEqual(
         PRODUCTION_FUNDING_REGISTRY.networkExecutors.map(({ id }) => id),
-        ["wallet_profile_evm_v1", "wallet_profile_svm_v1"],
+        [
+          "wallet_profile_evm_v1",
+          "wallet_profile_svm_v1",
+          "polymarket_deposit_usdce_wrap_v1",
+        ],
       );
       assert.ok(
         PRODUCTION_FUNDING_REGISTRY.reconcilers.some(

@@ -88,7 +88,7 @@ export async function registerRelayWebhookRoute(
     }
     const gateOpen = dependencies.resolveWebhookGate
       ? await dependencies.resolveWebhookGate()
-      : (await resolveFundingPolicy(dependencies.db)).policy.gates
+      : (await resolveFundingPolicy(dependencies.db)).runtime.gates
           .webhookIngestion;
     if (!gateOpen) {
       reply.code(503);

@@ -6,6 +6,12 @@ import type {
   FundingReceiveAutomationPolicy,
   JsonValue,
 } from "../funding/domain/types.js";
+import { resolveTelegramPolymarketWrapCapability } from "../funding/execution/delegated-funding-capability-resolver.js";
+import { lockTelegramFundingLinkLifecycle } from "../funding/execution/telegram-funding-link-lifecycle-lock.js";
+import {
+  parseTelegramFundingAutomationPolicyV2,
+  telegramFundingAutomationPolicyMatchesAuthorization,
+} from "../funding/execution/telegram-funding-automation-policy.js";
 import type { DirectIngressObservationVariant } from "../funding/reconciliation/direct-ingress-observer.js";
 
 type JsonRecord = Readonly<Record<string, JsonValue>>;
@@ -688,6 +694,8 @@ export async function appendTelegramFundingConsent(
     receiveTargetId: string;
     asset: AssetRef;
     variantIds: readonly string[];
+    automationEnabled?: boolean;
+    maximumAutomaticRaw?: string | null;
     policySnapshot: JsonRecord;
     fingerprint: string;
     mutation?: Readonly<{
@@ -721,22 +729,20 @@ export async function appendTelegramFundingConsent(
           contextId: input.contextId,
           requestFingerprint: input.mutation.requestFingerprint,
         });
-        const [contextResult, consentResult] = await Promise.all([
-          client.query<TelegramFundingSessionRow>(
-            `select ${sessionColumns} from telegram_funding_sessions where id = $1`,
-            [input.contextId],
-          ),
-          client.query<TelegramFundingConsentRow>(
-            `
-              select *
-              from telegram_funding_consents
-              where telegram_funding_session_id = $1
-                and revision = $2
-              limit 1
-            `,
-            [input.contextId, existingMutation.consent_revision],
-          ),
-        ]);
+        const contextResult = await client.query<TelegramFundingSessionRow>(
+          `select ${sessionColumns} from telegram_funding_sessions where id = $1`,
+          [input.contextId],
+        );
+        const consentResult = await client.query<TelegramFundingConsentRow>(
+          `
+            select *
+            from telegram_funding_consents
+            where telegram_funding_session_id = $1
+              and revision = $2
+            limit 1
+          `,
+          [input.contextId, existingMutation.consent_revision],
+        );
         const replayContext = contextResult.rows[0];
         const replayConsent = consentResult.rows[0];
         if (!replayContext || !replayConsent) {
@@ -752,6 +758,7 @@ export async function appendTelegramFundingConsent(
         };
       }
     }
+    await lockTelegramFundingLinkLifecycle(client, input.userId);
     const locked = await client.query<TelegramFundingSessionRow>(
       `
         select ${qualifiedSessionColumns("context")}
@@ -787,9 +794,16 @@ export async function appendTelegramFundingConsent(
         "telegram_funding_session_unavailable",
       );
     }
-    const canonical = await client.query<{ id: string }>(
+    const canonical = await client.query<{
+      destination_option_id: string;
+      id: string;
+      venue_binding_option_id: string;
+    }>(
       `
-        select receive.id
+        select
+          receive.id,
+          receive.destination_option_id,
+          receive.venue_binding_option_id
         from funding_receive_sessions receive
         where receive.id = $1
           and receive.user_id = $2
@@ -809,6 +823,46 @@ export async function appendTelegramFundingConsent(
       throw new TelegramFundingPersistenceError(
         "telegram_funding_session_unavailable",
       );
+    }
+    const canonicalReceive = canonical.rows[0];
+    if (input.automationEnabled) {
+      const automation = parseTelegramFundingAutomationPolicyV2(
+        input.policySnapshot,
+      );
+      if (
+        !automation ||
+        automation.destinationOptionId !==
+          canonicalReceive.destination_option_id ||
+        automation.venueBindingOptionId !==
+          canonicalReceive.venue_binding_option_id
+      ) {
+        throw new TelegramFundingPersistenceError(
+          "telegram_funding_session_unavailable",
+        );
+      }
+      const capability = await resolveTelegramPolymarketWrapCapability(client, {
+        userId: input.userId,
+        telegramAccountId: input.telegramAccountId,
+        telegramUserId: input.telegramUserId,
+        destinationOptionId: canonicalReceive.destination_option_id,
+        venueBindingOptionId: canonicalReceive.venue_binding_option_id,
+        expectedAuthorizationId: automation.authorizationId,
+        expectedAuthorizationFingerprint: automation.authorizationFingerprint,
+        expectedFundingPolicyRevision: automation.fundingPolicyRevision,
+        now: input.now,
+        lock: true,
+      });
+      if (
+        !capability.authorization ||
+        !telegramFundingAutomationPolicyMatchesAuthorization(
+          automation,
+          capability.authorization,
+        )
+      ) {
+        throw new TelegramFundingPersistenceError(
+          "telegram_funding_session_unavailable",
+        );
+      }
     }
     const existing = await client.query<TelegramFundingConsentRow>(
       `
@@ -847,7 +901,9 @@ export async function appendTelegramFundingConsent(
             automation_policy_snapshot,
             consent_fingerprint,
             consented_at
-          ) values ($1, $2, $3, $4, $5, $6, $7::text[], false, null, $8::jsonb, $9, $10)
+          ) values (
+            $1, $2, $3, $4, $5, $6, $7::text[], $8, $9, $10::jsonb, $11, $12
+          )
           returning *
         `,
         [
@@ -858,6 +914,8 @@ export async function appendTelegramFundingConsent(
           input.asset.assetId,
           input.asset.decimals,
           Array.from(new Set(input.variantIds)).sort(),
+          input.automationEnabled === true,
+          input.maximumAutomaticRaw ?? null,
           JSON.stringify(input.policySnapshot),
           input.fingerprint,
           input.now,

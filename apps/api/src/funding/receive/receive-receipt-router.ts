@@ -1,4 +1,4 @@
-import type { Pool } from "@hunch/infra";
+import { tx, type Pool } from "@hunch/infra";
 
 import { RELAY_PINNED_ASSETS } from "../../funding-providers/relay/mappings.js";
 import {
@@ -12,22 +12,32 @@ import {
   canonicalAssetId,
   sameAccountAddress,
 } from "../domain/asset-identity.js";
+import { loadPolymarketWrapExecutionConfiguration } from "../execution/delegated-funding-config.js";
+import {
+  delegatedFundingProfile,
+  POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
+} from "../execution/delegated-funding-profiles.js";
+import type { DelegatedFundingPreBroadcastDecision } from "../execution/delegated-funding-capability.js";
+import { resolveTelegramPolymarketWrapCapability } from "../execution/delegated-funding-capability-resolver.js";
+import {
+  parseTelegramFundingAutomationPolicyV2,
+  telegramFundingAutomationPolicyMatchesAuthorization,
+  telegramFundingReceiptIsProspectivelyAuthorized,
+} from "../execution/telegram-funding-automation-policy.js";
 import { SOLANA_NATIVE_EXECUTION_RESERVE_LAMPORTS } from "../domain/network-fees.js";
 import { sameAsset } from "../planner/money.js";
 import type { FundingPlanningRuntime } from "../planner/runtime-service.js";
 import {
-  linkFundingReceiveReceiptOperation,
+  claimFundingReceiveReceiptOperationLinkInTransaction,
+  deferFundingReceiveReceiptRouting,
+  linkFundingReceiveReceiptOperationInTransaction,
   listFundingReceiveReceiptsForRouting,
   recordFundingReceiveReceiptRoutingDisposition,
   settleFundingReceiveReceiptRouting,
   type FundingReceiveReceiptRoutingTarget,
 } from "../persistence/funding-receive-session-repository.js";
 
-const TERMINAL_UNCERTAIN_STATUSES = new Set([
-  "refunded",
-  "reconcile_required",
-  "recovery_required",
-]);
+const TERMINAL_UNCERTAIN_STATUSES = new Set(["refunded"]);
 const MAX_ROUTING_ATTEMPTS = 5;
 const BASE_ROUTING_RETRY_MS = 30_000;
 const AUTOMATIC_ROUTING_RETRY_MS = 60_000;
@@ -49,6 +59,14 @@ export function fundingReceiveRoutingErrorCode(error: unknown): string {
     typeof error.code === "string" &&
     /^[a-z][a-z0-9_]{2,63}$/.test(error.code)
   ) {
+    if (
+      error.code === "invalid_operation_state" &&
+      "message" in error &&
+      error.message ===
+        "another Polymarket Funding Router operation is unresolved"
+    ) {
+      return "routing_predecessor_unresolved";
+    }
     if (
       error.code === "quote_mismatch" &&
       "message" in error &&
@@ -107,16 +125,34 @@ export type FundingReceiveChildOperationDisposition =
   | "waiting";
 
 /**
- * A failed/cancelled child is retryable only when durable attempt evidence
- * proves that no broadcast was possible and no attempt remains unresolved.
- * Everything ambiguous fails closed to recovery instead of rebroadcasting.
+ * A generic failed/cancelled child is retryable only when durable attempt
+ * evidence proves that no broadcast was possible and no attempt is unresolved.
+ * Delegated children retain their exact receipt/operation binding. Everything
+ * ambiguous fails closed to recovery instead of rebroadcasting.
  */
 export function fundingReceiveChildOperationDisposition(input: {
   childOperationStatus: string | null;
+  delegatedExecution: boolean;
   broadcastMayHaveOccurred: boolean;
   hasUnfinishedAttempt: boolean;
+  recoveryMode?: "automatic_evidence" | "manual_review" | null;
 }): FundingReceiveChildOperationDisposition {
   if (input.childOperationStatus === "completed") return "ready";
+  if (input.childOperationStatus === "reconcile_required") return "waiting";
+  if (
+    input.childOperationStatus === "recovery_required" &&
+    input.recoveryMode === "automatic_evidence"
+  ) {
+    return "waiting";
+  }
+  if (input.childOperationStatus === "recovery_required") return "recovery";
+  if (
+    input.delegatedExecution &&
+    (input.childOperationStatus === "failed" ||
+      input.childOperationStatus === "cancelled")
+  ) {
+    return "recovery";
+  }
   if (
     (input.childOperationStatus === "failed" ||
       input.childOperationStatus === "cancelled") &&
@@ -205,9 +241,100 @@ export function receiveReceiptRoutingAmounts(
   };
 }
 
+export async function telegramUsdceWrapRoutingDecision(
+  db: Pool,
+  target: FundingReceiveReceiptRoutingTarget,
+): Promise<DelegatedFundingPreBroadcastDecision> {
+  const snapshot = parseTelegramFundingAutomationPolicyV2(
+    target.telegramAutomationPolicy,
+  );
+  if (
+    !snapshot ||
+    !target.telegramAccountId ||
+    target.telegramFundingAuthorizationId !== snapshot.authorizationId ||
+    !target.telegramUserId ||
+    snapshot.profileId !== POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID ||
+    snapshot.destinationOptionId !== target.destinationOptionId ||
+    snapshot.venueBindingOptionId !== target.venueBindingOptionId ||
+    !sameAsset(snapshot.sourceAsset, target.receipt.asset) ||
+    !sameAsset(snapshot.destinationAsset, target.destinationAsset) ||
+    !telegramFundingReceiptIsProspectivelyAuthorized({
+      policy: snapshot,
+      variantId: target.receipt.variantId,
+      ledgerHeight: target.receipt.ledgerHeight ?? null,
+    })
+  ) {
+    return {
+      kind: "hard_invalid",
+      reasonCode: "delegated_authority_invalid",
+    };
+  }
+  const configuration = loadPolymarketWrapExecutionConfiguration();
+  const capability = await resolveTelegramPolymarketWrapCapability(db, {
+    userId: target.userId,
+    telegramAccountId: target.telegramAccountId,
+    telegramUserId: target.telegramUserId,
+    destinationOptionId: target.destinationOptionId,
+    venueBindingOptionId: target.venueBindingOptionId,
+    configuration,
+    expectedAuthorizationId: snapshot.authorizationId,
+    expectedAuthorizationFingerprint: snapshot.authorizationFingerprint,
+    expectedFundingPolicyRevision: snapshot.fundingPolicyRevision,
+  });
+  if (
+    capability.authorization &&
+    !telegramFundingAutomationPolicyMatchesAuthorization(
+      snapshot,
+      capability.authorization,
+    )
+  ) {
+    return {
+      kind: "hard_invalid",
+      reasonCode: "delegated_authority_invalid",
+    };
+  }
+  return capability.decision;
+}
+
+export async function telegramUsdceWrapRoutingAuthorized(
+  db: Pool,
+  target: FundingReceiveReceiptRoutingTarget,
+): Promise<boolean> {
+  return (
+    (await telegramUsdceWrapRoutingDecision(db, target)).kind === "allowed"
+  );
+}
+
+export function exactPolymarketUsdceWrapQuote(
+  quote: FundingQuoteSummary,
+  target: FundingReceiveReceiptRoutingTarget,
+): boolean {
+  return (
+    quote.planKind === "venue_preparation" &&
+    quote.destinationOptionId === target.destinationOptionId &&
+    quote.venueBindingOptionId === target.venueBindingOptionId &&
+    quote.sourceAmounts.length === 1 &&
+    quote.sourceAmounts[0]?.amount.raw === target.receipt.rawAmount &&
+    sameAsset(quote.sourceAmounts[0]?.amount.asset, target.receipt.asset) &&
+    quote.expectedDestination.raw === target.receipt.rawAmount &&
+    quote.minimumDestination.raw === target.receipt.rawAmount &&
+    sameAsset(quote.expectedDestination.asset, target.destinationAsset) &&
+    sameAsset(quote.minimumDestination.asset, target.destinationAsset) &&
+    quote.fees.length === 0
+  );
+}
+
+type ExactChildOperationOutcome =
+  | Readonly<{ kind: "created" | "no_route" | "outside_policy" }>
+  | Readonly<{
+      kind: "soft_paused" | "hard_invalid";
+      reasonCode: string;
+    }>;
+
 export async function quoteFundingReceiveReceipt(
   runtime: Pick<FundingPlanningRuntime, "liquidity" | "quote">,
   target: FundingReceiveReceiptRoutingTarget,
+  input: Readonly<{ serverExecutionProfileId?: string }> = {},
 ): Promise<FundingQuoteSummary | null> {
   if (target.receipt.rawAmount === "0") return null;
   const amounts = receiveReceiptRoutingAmounts({
@@ -216,6 +343,8 @@ export async function quoteFundingReceiveReceipt(
     rawAmount: target.receipt.rawAmount,
   });
   if (amounts.confirmedSourceAmount?.raw === "0") return null;
+  const closedDestinationWrap =
+    input.serverExecutionProfileId === POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID;
   const liquidity = await runtime.liquidity(target.userId, {
     purpose: "add_funds",
     marketContextId: null,
@@ -224,8 +353,17 @@ export async function quoteFundingReceiveReceipt(
     destinationOptionId: target.destinationOptionId,
     venueBindingOptionId: target.venueBindingOptionId,
     withdrawalRecipientId: null,
-    maxFeeUsd: target.automationPolicy.maximumFeeUsd,
-    maxSlippageBps: target.automationPolicy.maximumSlippageBps,
+    ...(input.serverExecutionProfileId
+      ? { serverExecutionProfileId: input.serverExecutionProfileId }
+      : {}),
+    // The closed-destination wrap is an exact 1:1 protocol transform, not an
+    // economic route. Its boundary is the full receipt and exact calldata.
+    maxFeeUsd: closedDestinationWrap
+      ? null
+      : target.automationPolicy.maximumFeeUsd,
+    maxSlippageBps: closedDestinationWrap
+      ? null
+      : target.automationPolicy.maximumSlippageBps,
     deadline: null,
   });
   const sources = liquidity.sourceOptions.filter((option) => {
@@ -290,12 +428,15 @@ export type FundingReceiveReceiptRoutingResult = Readonly<{
 export class FundingReceiveReceiptRouter {
   private runtime: Pick<
     FundingPlanningRuntime,
-    "liquidity" | "quote" | "commit"
+    "liquidity" | "quote" | "commitInTransaction"
   > | null;
 
   constructor(
     private readonly db: Pool,
-    runtime?: Pick<FundingPlanningRuntime, "liquidity" | "quote" | "commit">,
+    runtime?: Pick<
+      FundingPlanningRuntime,
+      "liquidity" | "quote" | "commitInTransaction"
+    >,
   ) {
     this.runtime = runtime ?? null;
   }
@@ -320,19 +461,31 @@ export class FundingReceiveReceiptRouter {
       if (target.receipt.status === "observed") {
         try {
           const outcome = await this.createExactChildOperation(target, now);
-          if (outcome === "created") {
+          if (outcome.kind === "created") {
             counts.operationsCreated += 1;
-          } else if (outcome === "outside_policy") {
-            const updated = await recordFundingReceiveReceiptRoutingDisposition(
-              this.db,
-              {
-                receiptId: target.receipt.receiptId,
-                receiveSessionId: target.receipt.receiveSessionId,
-                userId: target.userId,
-                disposition: "review_required",
-                errorCode: "automation_policy_exceeded",
-                now,
-              },
+          } else if (outcome.kind === "soft_paused") {
+            const updated = await deferFundingReceiveReceiptRouting(this.db, {
+              receiptId: target.receipt.receiptId,
+              userId: target.userId,
+              errorCode: outcome.reasonCode,
+              retryAt: new Date(now.getTime() + AUTOMATIC_ROUTING_RETRY_MS),
+              now,
+            });
+            counts.retriesScheduled += updated ? 1 : 0;
+          } else if (outcome.kind === "hard_invalid") {
+            const updated = await this.recordDisposition(
+              target,
+              "recovery_required",
+              outcome.reasonCode,
+              now,
+            );
+            counts.recoveriesRequired += updated ? 1 : 0;
+          } else if (outcome.kind === "outside_policy") {
+            const updated = await this.recordDisposition(
+              target,
+              "review_required",
+              "automation_policy_exceeded",
+              now,
             );
             counts.reviewsRequired += updated ? 1 : 0;
           } else {
@@ -360,49 +513,43 @@ export class FundingReceiveReceiptRouter {
       }
       const childDisposition = fundingReceiveChildOperationDisposition({
         childOperationStatus: target.childOperationStatus,
+        delegatedExecution: Boolean(
+          target.childExecutorId &&
+          delegatedFundingProfile(target.childExecutorId),
+        ),
         broadcastMayHaveOccurred: target.childBroadcastMayHaveOccurred,
         hasUnfinishedAttempt: target.childHasUnfinishedAttempt,
+        recoveryMode: target.childOperationRecoveryMode,
       });
       const childOperationId = target.receipt.childFundingOperationId;
-      if (!childOperationId) continue;
-      if (childDisposition === "ready") {
-        const settled = await settleFundingReceiveReceiptRouting(this.db, {
-          receiptId: target.receipt.receiptId,
-          receiveSessionId: target.receipt.receiveSessionId,
-          userId: target.userId,
-          childOperationId,
-          childOperationStatus: target.childOperationStatus ?? "completed",
-          status: "ready",
-          now,
-        });
-        counts.receiptsReady += settled ? 1 : 0;
-        continue;
-      }
-      if (childDisposition === "review_retry") {
-        const settled = await settleFundingReceiveReceiptRouting(this.db, {
-          receiptId: target.receipt.receiptId,
-          receiveSessionId: target.receipt.receiveSessionId,
-          userId: target.userId,
-          childOperationId,
-          childOperationStatus: target.childOperationStatus ?? "failed",
-          status: "review_required",
-          now,
-        });
-        counts.reviewsRequired += settled ? 1 : 0;
-        continue;
-      }
-      if (childDisposition === "recovery") {
-        const settled = await settleFundingReceiveReceiptRouting(this.db, {
-          receiptId: target.receipt.receiptId,
-          receiveSessionId: target.receipt.receiveSessionId,
-          userId: target.userId,
-          childOperationId,
-          childOperationStatus:
-            target.childOperationStatus ?? "recovery_required",
-          status: "recovery_required",
-          now,
-        });
-        counts.recoveriesRequired += settled ? 1 : 0;
+      if (!childOperationId || childDisposition === "waiting") continue;
+      const status =
+        childDisposition === "ready"
+          ? "ready"
+          : childDisposition === "review_retry"
+            ? "review_required"
+            : "recovery_required";
+      const childOperationStatus =
+        target.childOperationStatus ??
+        (childDisposition === "ready"
+          ? "completed"
+          : childDisposition === "review_retry"
+            ? "failed"
+            : "recovery_required");
+      const settled = await settleFundingReceiveReceiptRouting(this.db, {
+        receiptId: target.receipt.receiptId,
+        receiveSessionId: target.receipt.receiveSessionId,
+        userId: target.userId,
+        childOperationId,
+        childOperationStatus,
+        status,
+        now,
+      });
+      if (settled) {
+        if (childDisposition === "ready") counts.receiptsReady += 1;
+        else if (childDisposition === "review_retry")
+          counts.reviewsRequired += 1;
+        else counts.recoveriesRequired += 1;
       }
     }
     return {
@@ -414,29 +561,88 @@ export class FundingReceiveReceiptRouter {
   private async createExactChildOperation(
     target: FundingReceiveReceiptRoutingTarget,
     now: Date,
-  ): Promise<"created" | "no_route" | "outside_policy"> {
-    const runtime = await this.planningRuntime();
-    const quote = await quoteFundingReceiveReceipt(runtime, target);
-    if (!quote) return "no_route";
-    if (!quoteWithinReceiveAutomationPolicy(quote, target.automationPolicy)) {
-      return "outside_policy";
+  ): Promise<ExactChildOperationOutcome> {
+    const telegramOwned = target.ownerChannel === "telegram";
+    const automation = parseTelegramFundingAutomationPolicyV2(
+      target.telegramAutomationPolicy,
+    );
+    if (telegramOwned) {
+      if (!automation) {
+        return {
+          kind: "hard_invalid",
+          reasonCode: "delegated_authority_invalid",
+        };
+      }
+      const decision = await telegramUsdceWrapRoutingDecision(this.db, target);
+      if (decision.kind !== "allowed") return decision;
     }
-    const committed = await runtime.commit(target.userId, {
-      quoteId: quote.quoteId,
-      consentToken: quote.consentToken,
-      idempotencyKey: `receive-receipt:${target.receipt.receiptId}`,
+    const runtime = await this.planningRuntime();
+    const quote = await quoteFundingReceiveReceipt(
+      runtime,
+      target,
+      telegramOwned
+        ? {
+            serverExecutionProfileId: POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
+          }
+        : {},
+    );
+    if (!quote) return { kind: "no_route" };
+    if (telegramOwned && !exactPolymarketUsdceWrapQuote(quote, target)) {
+      return {
+        kind: "hard_invalid",
+        reasonCode: "delegated_action_invalid",
+      };
+    }
+    if (
+      !telegramOwned &&
+      !quoteWithinReceiveAutomationPolicy(quote, target.automationPolicy)
+    ) {
+      return { kind: "outside_policy" };
+    }
+    return tx(this.db, async (client) => {
+      const claimed =
+        await claimFundingReceiveReceiptOperationLinkInTransaction(client, {
+          receiptId: target.receipt.receiptId,
+          userId: target.userId,
+        });
+      if (!claimed) return { kind: "no_route" } as const;
+      const committed = await runtime.commitInTransaction(
+        client,
+        target.userId,
+        {
+          quoteId: quote.quoteId,
+          consentToken: quote.consentToken,
+          idempotencyKey: `receive-receipt:${target.receipt.receiptId}`,
+        },
+      );
+      const linked = await linkFundingReceiveReceiptOperationInTransaction(
+        client,
+        {
+          receiptId: target.receipt.receiptId,
+          userId: target.userId,
+          childFundingOperationId: committed.operation.id,
+          ...(telegramOwned && automation
+            ? {
+                authorizationId: automation.authorizationId,
+                authorizationFingerprint: automation.authorizationFingerprint,
+                telegramFundingConsentId:
+                  target.telegramFundingConsentId ?? undefined,
+                telegramFundingConsentFingerprint:
+                  target.telegramFundingConsentFingerprint ?? undefined,
+              }
+            : {}),
+          now,
+        },
+      );
+      if (!linked) {
+        throw new Error("claimed funding receipt could not be linked");
+      }
+      return { kind: "created" } as const;
     });
-    const linked = await linkFundingReceiveReceiptOperation(this.db, {
-      receiptId: target.receipt.receiptId,
-      userId: target.userId,
-      childFundingOperationId: committed.operation.id,
-      now,
-    });
-    return linked ? "created" : "no_route";
   }
 
   private async planningRuntime(): Promise<
-    Pick<FundingPlanningRuntime, "liquidity" | "quote" | "commit">
+    Pick<FundingPlanningRuntime, "liquidity" | "quote" | "commitInTransaction">
   > {
     if (this.runtime) return this.runtime;
     const { FundingPlanningRuntime: Runtime } =
@@ -445,37 +651,53 @@ export class FundingReceiveReceiptRouter {
     return this.runtime;
   }
 
+  private recordDisposition(
+    target: FundingReceiveReceiptRoutingTarget,
+    disposition: "review_required" | "recovery_required",
+    errorCode: string,
+    now: Date,
+  ): Promise<boolean> {
+    return recordFundingReceiveReceiptRoutingDisposition(this.db, {
+      receiptId: target.receipt.receiptId,
+      receiveSessionId: target.receipt.receiveSessionId,
+      userId: target.userId,
+      disposition,
+      errorCode,
+      now,
+    });
+  }
+
   private async deferOrRecoverReceipt(
     target: FundingReceiveReceiptRoutingTarget,
     errorCode: string,
     now: Date,
   ): Promise<"retry" | "review" | "recovery" | "unchanged"> {
+    if (errorCode === "routing_predecessor_unresolved") {
+      const updated = await deferFundingReceiveReceiptRouting(this.db, {
+        receiptId: target.receipt.receiptId,
+        userId: target.userId,
+        errorCode,
+        retryAt: new Date(now.getTime() + AUTOMATIC_ROUTING_RETRY_MS),
+        now,
+      });
+      return updated ? "retry" : "unchanged";
+    }
     const nextAttempt = target.routingAttemptCount + 1;
     if (fundingReceiveRoutingNeedsReview(errorCode, nextAttempt)) {
-      const updated = await recordFundingReceiveReceiptRoutingDisposition(
-        this.db,
-        {
-          receiptId: target.receipt.receiptId,
-          receiveSessionId: target.receipt.receiveSessionId,
-          userId: target.userId,
-          disposition: "review_required",
-          errorCode,
-          now,
-        },
+      const updated = await this.recordDisposition(
+        target,
+        "review_required",
+        errorCode,
+        now,
       );
       return updated ? "review" : "unchanged";
     }
     if (fundingReceiveRoutingNeedsRecovery(errorCode, nextAttempt)) {
-      const updated = await recordFundingReceiveReceiptRoutingDisposition(
-        this.db,
-        {
-          receiptId: target.receipt.receiptId,
-          receiveSessionId: target.receipt.receiveSessionId,
-          userId: target.userId,
-          disposition: "recovery_required",
-          errorCode,
-          now,
-        },
+      const updated = await this.recordDisposition(
+        target,
+        "recovery_required",
+        errorCode,
+        now,
       );
       return updated ? "recovery" : "unchanged";
     }

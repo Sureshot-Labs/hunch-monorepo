@@ -1,10 +1,16 @@
 import { getAddress, ZeroAddress } from "ethers";
 import { PublicKey } from "@solana/web3.js";
 
+import { canonicalAssetKey } from "../../funding/domain/asset-identity.js";
 import type { AssetRef, NetworkId } from "../../funding/domain/types.js";
+import {
+  FUNDING_ROUTE_EXPERIENCE,
+  type FundingRuntimePolicy,
+} from "../../funding/policies/funding-policy.js";
 import {
   BASE_USDC,
   POLYGON_PUSD,
+  POLYGON_USDC,
   RELAY_SOLANA_CHAIN_ID,
   SOLANA_NATIVE,
   SOLANA_USDC,
@@ -21,6 +27,7 @@ export type RelayRouteSpec = Readonly<{
     | RelayRehearsalScenarioId
     | "solana-sol-to-base-usdc"
     | "solana-usdc-to-base-usdc"
+    | "polygon-usdc-to-polygon-pusd"
     | "solana-usdc-to-polygon-pusd"
     | "solana-sol-to-polygon-pusd";
   source: AssetRef;
@@ -30,6 +37,53 @@ export type RelayRouteSpec = Readonly<{
   quoteMode: "exact_input" | "expected_output";
   rehearsalScenario: RelayRehearsalScenario | null;
 }>;
+
+export function relayRouteCapability(
+  route: Pick<RelayRouteSpec, "source" | "destination">,
+): "same_network_swap" | "cross_network_transfer" | "cross_network_swap" {
+  if (route.source.networkId === route.destination.networkId) {
+    return "same_network_swap";
+  }
+  return route.source.assetId === route.destination.assetId
+    ? "cross_network_transfer"
+    : "cross_network_swap";
+}
+
+export function relayRuntimeRoute(
+  spec: RelayRouteSpec,
+  locations: Readonly<{
+    sourceLocationPatternId: string;
+    destinationLocationPatternId: string;
+  }>,
+): FundingRuntimePolicy["routes"][number] {
+  return {
+    routeId: spec.routeId,
+    enabled: true,
+    providerId: "relay",
+    capability: relayRouteCapability(spec),
+    adapterId: "relay_quote_v2",
+    adapterVersion: 1,
+    sourceLocationPatternId: locations.sourceLocationPatternId,
+    destinationLocationPatternId: locations.destinationLocationPatternId,
+    sourceAsset: spec.source,
+    destinationAsset: spec.destination,
+    actionValidatorId:
+      spec.sourceVm === "svm" ? "relay_svm_action_v1" : "relay_evm_action_v1",
+    networkExecutorId:
+      spec.sourceVm === "svm"
+        ? "wallet_profile_svm_v1"
+        : "wallet_profile_evm_v1",
+    reconcilerId: "relay_status_v3",
+    refundSemanticsId: "relay_owned_refund_observation_v1",
+    destinationObserverId: "relay_owned_destination_observation_v1",
+    experienceMode: "prepare_first",
+    measuredObservationCount: 0,
+    minimumInlineObservationCount:
+      FUNDING_ROUTE_EXPERIENCE.minimumInlineObservationCount,
+    fallbackKind: null,
+    depositAddress: null,
+  };
+}
 
 const NETWORK_BY_RELAY_CHAIN_ID: Readonly<Record<number, NetworkId>> = {
   137: "evm:137",
@@ -120,6 +174,23 @@ export const RELAY_ROUTE_SPECS: Readonly<Record<string, RelayRouteSpec>> = {
     6,
     "expected_output",
   ),
+  "polygon-usdc-to-polygon-pusd": {
+    routeId: "polygon-usdc-to-polygon-pusd",
+    source: {
+      networkId: "evm:137",
+      assetId: normalizeRelayAssetId("evm:137", POLYGON_USDC),
+      decimals: 6,
+    },
+    destination: {
+      networkId: "evm:137",
+      assetId: normalizeRelayAssetId("evm:137", POLYGON_PUSD),
+      decimals: 6,
+    },
+    sourceVm: "evm",
+    destinationVm: "evm",
+    quoteMode: "expected_output",
+    rehearsalScenario: null,
+  },
   "polygon-pol-to-solana-sol": route("polygon-pol-to-solana-sol", 18, 9),
   "polygon-pusd-to-solana-usdc": route("polygon-pusd-to-solana-usdc", 6, 6),
   "solana-usdc-to-polygon-pusd": {
@@ -202,6 +273,63 @@ export const RELAY_PINNED_ASSETS = {
   solanaNative: SOLANA_NATIVE,
   solanaUsdc: SOLANA_USDC,
 } as const;
+
+function relayWalletLocation(
+  networkId: NetworkId,
+  assetId: string,
+  decimals: number,
+  locationPatternId: string,
+): readonly [string, string] {
+  return [
+    canonicalAssetKey({ networkId, assetId, decimals }),
+    locationPatternId,
+  ];
+}
+
+const RELAY_WALLET_LOCATION_PATTERN_BY_ASSET = new Map<string, string>([
+  relayWalletLocation(
+    "evm:137",
+    RELAY_PINNED_ASSETS.polygonPusd,
+    6,
+    "wallet-polygon-pusd-v1",
+  ),
+  relayWalletLocation(
+    "evm:137",
+    RELAY_PINNED_ASSETS.polygonUsdc,
+    6,
+    "wallet-polygon-usdc-v1",
+  ),
+  relayWalletLocation(
+    "evm:137",
+    RELAY_PINNED_ASSETS.polygonUsdce,
+    6,
+    "wallet-polygon-usdce-v1",
+  ),
+  relayWalletLocation(
+    "evm:8453",
+    RELAY_PINNED_ASSETS.baseUsdc,
+    6,
+    "wallet-base-usdc-v1",
+  ),
+  relayWalletLocation(
+    "solana:mainnet",
+    RELAY_PINNED_ASSETS.solanaUsdc,
+    6,
+    "wallet-solana-usdc-v1",
+  ),
+  relayWalletLocation(
+    "solana:mainnet",
+    RELAY_PINNED_ASSETS.solanaNative,
+    9,
+    "wallet-solana-native-v1",
+  ),
+]);
+
+export function relayWalletLocationPatternId(asset: AssetRef): string | null {
+  return (
+    RELAY_WALLET_LOCATION_PATTERN_BY_ASSET.get(canonicalAssetKey(asset)) ?? null
+  );
+}
 
 /**
  * Economic classification for the currently pinned Relay collateral set.

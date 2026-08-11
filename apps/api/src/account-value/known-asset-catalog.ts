@@ -86,8 +86,8 @@ const KNOWN_ACCOUNT_ASSET_BY_KEY = new Map(
   KNOWN_ACCOUNT_ASSETS.map((entry) => [canonicalAssetKey(entry.asset), entry]),
 );
 
-export function exactStableAccountAssets(): readonly KnownAccountAsset[] {
-  return KNOWN_ACCOUNT_ASSETS.filter((entry) => entry.exactStable);
+export function knownAccountAssets(): readonly KnownAccountAsset[] {
+  return KNOWN_ACCOUNT_ASSETS;
 }
 
 export function resolveKnownAccountAsset(

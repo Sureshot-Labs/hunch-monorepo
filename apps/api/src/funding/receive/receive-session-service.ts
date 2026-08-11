@@ -258,15 +258,26 @@ export class FundingReceiveSessionService {
       result: FundingReceiveSessionPersistenceResult,
     ) => Promise<void>,
   ): Promise<FundingReceiveSessionResponse> {
-    const destinations = await this.runtime.destinations(userId, {
+    const destinationAccess = await this.runtime.destinationAccess(userId, {
       purpose: "fund",
     });
     const destination = resolveFundingDestinationChoice({
-      options: destinations,
+      options: destinationAccess.options,
       destinationOptionId: request.destinationOptionId,
       venueBindingOptionId: request.venueBindingOptionId,
     });
     if (!destination) {
+      const policyDisabled = resolveFundingDestinationChoice({
+        options: destinationAccess.policyDisabledOptions,
+        destinationOptionId: request.destinationOptionId,
+        venueBindingOptionId: request.venueBindingOptionId,
+      });
+      if (policyDisabled) {
+        throw new FundingPlannerError(
+          "funding_policy_disabled",
+          "receive session destination is disabled by funding policy",
+        );
+      }
       throw new FundingPlannerError(
         "destination_unavailable",
         "receive session requires one selectable destination for the stable binding",
@@ -543,10 +554,10 @@ export class FundingReceiveSessionService {
           automationPolicy: {
             stableConversion: "automatic_within_caps",
             volatileConversion: "review_required",
-            maximumFeeUsd: resolvedPolicy.policy.placement.maximumFeeUsd,
-            maximumFeeBps: resolvedPolicy.policy.placement.maximumFeeBps,
+            maximumFeeUsd: resolvedPolicy.runtime.placement.maximumFeeUsd,
+            maximumFeeBps: resolvedPolicy.runtime.placement.maximumFeeBps,
             maximumSlippageBps:
-              resolvedPolicy.policy.placement.maximumSlippageBps,
+              resolvedPolicy.runtime.placement.maximumSlippageBps,
           },
           policyVersion: planning.policyVersion,
           policyRevision: planning.policyRevision,

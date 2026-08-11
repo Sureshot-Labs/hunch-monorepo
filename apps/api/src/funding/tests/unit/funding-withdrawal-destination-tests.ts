@@ -3,61 +3,44 @@
 import assert from "node:assert/strict";
 import type { Pool } from "@hunch/infra";
 
+import { RELAY_PINNED_ASSETS } from "../../../funding-providers/relay/mappings.js";
 import {
   DEFAULT_FUNDING_RUNTIME_POLICY,
-  type FundingRuntimePolicy,
+  FUNDING_ROUTE_EXPERIENCE,
+  FUNDING_TTL,
 } from "../../policies/funding-policy.js";
+import {
+  compileFundingIntentPolicy,
+  FUNDING_RECEIVE_ASSET_IDS,
+  type FundingIntentPolicy,
+} from "../../policies/funding-policy-v2.js";
 import { createWithdrawalDestinationCodec } from "../../execution/withdrawal-destination-codec.js";
 import {
-  assertWithdrawalRecipientPolicy,
+  assertWithdrawalRecipientContract,
   inspectWithdrawalAddress,
   WithdrawalDestinationError,
   WithdrawalDestinationRuntime,
 } from "../../execution/withdrawal-destination-runtime.js";
+import {
+  WITHDRAWAL_DESTINATION_CONTRACT_REVISION,
+  WITHDRAWAL_DESTINATION_CONTRACT_VERSION,
+  withWithdrawalPlanningContract,
+} from "../../domain/withdrawal-contract.js";
 
 const NOW = new Date("2026-07-24T12:00:00.000Z");
 const ASSET = {
   networkId: "evm:137",
-  assetId: "0x00000000000000000000000000000000000000a1",
+  assetId: RELAY_PINNED_ASSETS.polygonPusd,
   decimals: 6,
 } as const;
 const ADDRESS = "0x00000000000000000000000000000000000000A2";
 const FINGERPRINT = "f".repeat(64);
-
-function enabledPolicy(): FundingRuntimePolicy {
-  const policy = structuredClone(
-    DEFAULT_FUNDING_RUNTIME_POLICY,
-  ) as FundingRuntimePolicy;
-  return {
-    ...policy,
-    creationMode: "on",
-    gates: {
-      ...policy.gates,
-      withdrawalExecution: true,
-      withdrawalRegistration: true,
-    },
-    assets: [
-      {
-        asset: ASSET,
-        enabled: true,
-        observationEnabled: true,
-        valuationEnabled: false,
-        pricePolicyId: null,
-      },
-    ],
-    locations: [
-      {
-        locationPatternId: "polygon_external_recipient_v1",
-        locationKind: "wallet",
-        asset: ASSET,
-        ownership: "external_recipient",
-        observable: false,
-        capabilities: [],
-        enabled: true,
-      },
-    ],
-  };
-}
+const FULL_POLICY: FundingIntentPolicy = {
+  version: 2,
+  venues: ["polymarket", "limitless"],
+  receive: { assets: [...FUNDING_RECEIVE_ASSET_IDS], privy: true },
+  paused: false,
+};
 
 const codec = createWithdrawalDestinationCodec({
   encryptionKey: Buffer.alloc(32, 7),
@@ -72,34 +55,89 @@ assert.notEqual(
   codec.fingerprint(ADDRESS.toLowerCase()),
 );
 
+assert.doesNotThrow(() => assertWithdrawalRecipientContract(ASSET));
 assert.throws(
   () =>
-    assertWithdrawalRecipientPolicy(
-      DEFAULT_FUNDING_RUNTIME_POLICY,
-      ASSET,
-      "withdrawalRegistration",
-    ),
-  (error: unknown) =>
-    error instanceof WithdrawalDestinationError &&
-    error.code === "withdrawal_destination_policy_disabled",
-);
-assert.doesNotThrow(() =>
-  assertWithdrawalRecipientPolicy(
-    enabledPolicy(),
-    ASSET,
-    "withdrawalRegistration",
-  ),
-);
-assert.throws(
-  () =>
-    assertWithdrawalRecipientPolicy(
-      enabledPolicy(),
-      { ...ASSET, assetId: "0x00000000000000000000000000000000000000a3" },
-      "withdrawalRegistration",
-    ),
+    assertWithdrawalRecipientContract({
+      ...ASSET,
+      assetId: "0x00000000000000000000000000000000000000a3",
+    }),
   (error: unknown) =>
     error instanceof WithdrawalDestinationError &&
     error.code === "withdrawal_destination_unsupported",
+);
+assert.throws(
+  () =>
+    assertWithdrawalRecipientContract({
+      networkId: "evm:137",
+      assetId: RELAY_PINNED_ASSETS.polygonUsdc,
+      decimals: 6,
+    }),
+  (error: unknown) =>
+    error instanceof WithdrawalDestinationError &&
+    error.code === "withdrawal_destination_unsupported",
+);
+
+const withdrawalPlanningPolicy = withWithdrawalPlanningContract(
+  {
+    ...DEFAULT_FUNDING_RUNTIME_POLICY,
+    placement: {
+      ...DEFAULT_FUNDING_RUNTIME_POLICY.placement,
+      maximumFeeUsd: "0",
+      maximumSlippageBps: 0,
+    },
+    routeExperience: {
+      ...DEFAULT_FUNDING_RUNTIME_POLICY.routeExperience,
+      minimumInlineObservationCount: 999,
+    },
+    ttl: { ...DEFAULT_FUNDING_RUNTIME_POLICY.ttl, quoteMs: 1 },
+  },
+  ASSET,
+);
+assert.equal(withdrawalPlanningPolicy.creationMode, "off");
+assert.equal(withdrawalPlanningPolicy.gates.quoteCreation, false);
+assert.deepEqual(withdrawalPlanningPolicy.assets, []);
+assert.equal(
+  withdrawalPlanningPolicy.locations.some(
+    (location) =>
+      location.locationPatternId === "wallet-base-usdc-v1" &&
+      location.capabilities.includes("withdrawal_source"),
+  ),
+  true,
+);
+assert.deepEqual(
+  withdrawalPlanningPolicy.placement,
+  DEFAULT_FUNDING_RUNTIME_POLICY.placement,
+);
+assert.deepEqual(
+  withdrawalPlanningPolicy.routeExperience,
+  FUNDING_ROUTE_EXPERIENCE,
+);
+assert.deepEqual(withdrawalPlanningPolicy.ttl, FUNDING_TTL);
+assert.equal(
+  withdrawalPlanningPolicy.providers.some(
+    (provider) =>
+      provider.providerId === "relay" &&
+      provider.enabledCapabilities.includes("cross_network_swap"),
+  ),
+  true,
+);
+assert.equal(
+  withdrawalPlanningPolicy.routes.some(
+    (route) =>
+      route.routeId === "base-usdc-to-polygon-pusd" &&
+      route.destinationLocationPatternId === "withdrawal-polygon-pusd-v1",
+  ),
+  true,
+);
+
+const activeWithdrawalPolicy = withWithdrawalPlanningContract(
+  compileFundingIntentPolicy(FULL_POLICY),
+  ASSET,
+);
+assert.equal(
+  new Set(activeWithdrawalPolicy.routes.map((route) => route.routeId)).size,
+  activeWithdrawalPolicy.routes.length,
 );
 
 await assert.rejects(
@@ -121,16 +159,6 @@ await assert.rejects(
     error.code === "withdrawal_destination_invalid",
 );
 
-const resolvedPolicy = {
-  source: "db" as const,
-  policy: enabledPolicy(),
-  revision: "withdrawal_policy_revision_12345678",
-  effectiveAt: NOW,
-  createdAt: NOW,
-  createdBy: "test",
-  invalidStoredPolicy: false,
-  validationIssues: [],
-};
 let persistedUserId: string | null = null;
 let persistedCiphertext: string | null = null;
 const runtimeCodec = {
@@ -147,7 +175,6 @@ const runtime = new WithdrawalDestinationRuntime({} as Pool, {
     addressKind: "evm_eoa",
     evidenceRevision: "code_hash_12345678",
   }),
-  resolvePolicy: async () => resolvedPolicy,
   registerDestination: async (_, input) => {
     persistedUserId = input.userId;
     persistedCiphertext = input.addressCiphertext;
@@ -184,7 +211,6 @@ assert.equal(JSON.stringify(registered).includes(ADDRESS), false);
 const resolved = await new WithdrawalDestinationRuntime({} as Pool, {
   codec: runtimeCodec,
   now: () => NOW,
-  resolvePolicy: async () => resolvedPolicy,
   fetchDestination: async (_, input) => {
     assert.equal(input.userId, "account_withdrawal_12345678");
     return {
@@ -197,10 +223,10 @@ const resolved = await new WithdrawalDestinationRuntime({} as Pool, {
       addressLookupHmac: FINGERPRINT,
       lookupKeyVersion: 1,
       validationEvidence: {
-        policyRevision: resolvedPolicy.revision,
+        policyRevision: WITHDRAWAL_DESTINATION_CONTRACT_REVISION,
         validatedAt: NOW.toISOString(),
       },
-      policyVersion: 1,
+      policyVersion: WITHDRAWAL_DESTINATION_CONTRACT_VERSION,
       expiresAt: new Date(NOW.getTime() + 60_000),
       revokedAt: null,
       revocationReason: null,
@@ -212,5 +238,5 @@ assert.equal(resolved.address, ADDRESS);
 assert.equal(resolved.addressFingerprint, FINGERPRINT);
 
 console.log(
-  "[funding-withdrawal-destination-tests] exact policy gate, encrypted opaque registration, address guards, and owner-scoped resolution passed",
+  "[funding-withdrawal-destination-tests] code-owned asset contract, policy-independent Relay planning, encrypted opaque registration, address guards, and owner-scoped resolution passed",
 );

@@ -345,7 +345,9 @@ Unscoped position reads are limited to supported portfolio venues:
 
 Non-portfolio venue values from other feature branches should not be displayed
 by these portfolio APIs until the backend/frontend explicitly support that
-venue.
+venue. Shared `positions` storage accepts registry-known unreleased venues such
+as `hyperliquid`; this storage compatibility does not add them to the supported
+portfolio read scope.
 
 ## Frontend Integration Notes
 

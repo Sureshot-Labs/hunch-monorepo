@@ -1,5 +1,3 @@
-import crypto from "node:crypto";
-
 import { env } from "../env.js";
 import { isRecord } from "../lib/type-guards.js";
 import {
@@ -25,6 +23,17 @@ import {
 } from "./polymarket-deposit-wallet-relayer.js";
 import type { TradeIntent, TradeSide, TradingVenue } from "./trading-types.js";
 import { tradingError } from "./api-trading-utils.js";
+import {
+  derivePrivyAuthorizationPublicKey,
+  normalizePrivyAuthorizationPublicKey,
+} from "../funding/execution/privy-authorization-key.js";
+import { isExactPolymarketDepositUsdceWrapRule } from "../funding/execution/delegated-funding-profiles.js";
+import {
+  knownPrivyPolicyFingerprint,
+  validateKnownPrivyWalletSigners,
+} from "../funding/execution/known-privy-wallet-signers.js";
+
+export { derivePrivyAuthorizationPublicKey } from "../funding/execution/privy-authorization-key.js";
 
 export type PrivySignerState =
   | "not_configured"
@@ -71,12 +80,12 @@ export type PrivyServerSignerConfiguration = {
   authorizationKey: string;
   exchangeAddresses: [string, string];
   policyId: string;
+  policyFingerprint: string;
   policyMaxBuyUsd: number;
   fundingRouterAddress: string;
   builderCode?: string;
-  sellPolicyId?: string;
-  buySellPolicyId?: string;
-  redeemPolicyId?: string;
+  legacyBuyPolicyId?: string;
+  legacySellPolicyId?: string;
 };
 
 const defaultInspectorDependencies: PrivySignerInspectorDependencies = {
@@ -94,12 +103,6 @@ type PolicyValidationResult = {
   valid: boolean;
 };
 
-const PROFILE_ACTIONS: Record<PrivyBotPolicyProfile, ReadonlySet<TradeSide>> = {
-  buy: new Set(["BUY"]),
-  sell: new Set(["SELL"]),
-  buy_sell: new Set(["BUY", "SELL"]),
-};
-
 export function resolvePrivyBotPolicyProfile(
   requiredActions: readonly (TradeSide | "REDEEM")[],
 ): PrivyBotPolicyProfile | null {
@@ -110,9 +113,7 @@ export function resolvePrivyBotPolicyProfile(
       "REDEEM is not supported by the Privy bot policy resolver.",
     );
   }
-  if (actions.size === 1 && actions.has("BUY")) return "buy";
-  if (actions.size === 1 && actions.has("SELL")) return "sell";
-  if (actions.size === 2 && actions.has("BUY") && actions.has("SELL")) {
+  if ([...actions].every((action) => action === "BUY" || action === "SELL")) {
     return "buy_sell";
   }
   throw new Error("Unsupported Privy bot policy action combination.");
@@ -128,18 +129,9 @@ export function hasConfiguredPrivyBotPolicyForActions(
     return false;
   }
   if (!profile) return false;
-  if (profile === "buy") return Boolean(env.privyPolymarketBotBuyPolicyId);
-  if (profile === "sell") return Boolean(env.privyPolymarketBotSellPolicyId);
-  return Boolean(env.privyPolymarketBotBuySellPolicyId);
-}
-
-function policyProfileCovers(
-  attached: PrivyBotPolicyProfile,
-  required: PrivyBotPolicyProfile,
-): boolean {
-  const attachedActions = PROFILE_ACTIONS[attached];
-  return [...PROFILE_ACTIONS[required]].every((action) =>
-    attachedActions.has(action),
+  return Boolean(
+    env.privyPolymarketBotBuySellPolicyId &&
+    env.privyPolymarketBotBuySellPolicyFingerprint,
   );
 }
 
@@ -677,6 +669,7 @@ export function validatePolymarketBotSellPolicy(input: {
 type PolymarketPolicyRuleKind =
   | "clob_auth"
   | "funding"
+  | "funding_wrap"
   | "direct_buy"
   | "deposit_buy"
   | "deposit_sell"
@@ -684,8 +677,16 @@ type PolymarketPolicyRuleKind =
 
 function classifyPolymarketPolicyAllowRule(
   rule: PrivyPolicyMetadata["rules"][number],
+  fundingRouterAddress: string,
 ): PolymarketPolicyRuleKind {
-  if (rule.method === "eth_sendTransaction") return "funding";
+  if (rule.method === "eth_sendTransaction") {
+    return isExactPolymarketDepositUsdceWrapRule({
+      routerAddress: fundingRouterAddress,
+      rule,
+    })
+      ? "funding_wrap"
+      : "funding";
+  }
   if (rule.method !== "eth_signTypedData_v4") return "unknown";
   const conditions = readPolicyConditions(rule);
   if (hasTypedDataSchema({ conditions, primaryType: "ClobAuth" })) {
@@ -737,6 +738,7 @@ export function validatePolymarketBotPolicyProfile(input: {
     buy_sell: [
       "clob_auth",
       "funding",
+      "funding_wrap",
       "direct_buy",
       "deposit_buy",
       "deposit_sell",
@@ -747,7 +749,10 @@ export function validatePolymarketBotPolicyProfile(input: {
   for (const rule of input.policy.rules.filter(
     (candidate) => candidate.action === "ALLOW",
   )) {
-    const kind = classifyPolymarketPolicyAllowRule(rule);
+    const kind = classifyPolymarketPolicyAllowRule(
+      rule,
+      input.fundingRouterAddress,
+    );
     counts.set(kind, (counts.get(kind) ?? 0) + 1);
   }
   const shapeIssues: string[] = [];
@@ -771,7 +776,9 @@ export function validatePolymarketBotPolicyProfile(input: {
     rules: input.policy.rules.filter(
       (rule) =>
         rule.action !== "ALLOW" ||
-        kinds.has(classifyPolymarketPolicyAllowRule(rule)),
+        kinds.has(
+          classifyPolymarketPolicyAllowRule(rule, input.fundingRouterAddress),
+        ),
     ),
   });
   let validations: PolicyValidationResult[];
@@ -918,7 +925,7 @@ let policyFundingCapCache: {
 } | null = null;
 
 export async function resolvePolymarketBotPolicyFundingCapRaw(): Promise<bigint> {
-  const policyId = env.privyPolymarketBotBuyPolicyId.trim();
+  const policyId = env.privyPolymarketBotBuySellPolicyId.trim();
   const fundingRouterAddress = env.polymarketFundingRouterAddress.trim();
   const policyMaxBuyUsd = env.privyPolymarketBotBuyPolicyMaxUsd;
   const exchangeAddresses = [
@@ -950,7 +957,7 @@ export async function resolvePolymarketBotPolicyFundingCapRaw(): Promise<bigint>
       fundingRouterAddress,
       maxBuyUsd: policyMaxBuyUsd,
       policy,
-      profile: "buy",
+      profile: "buy_sell",
     });
     if (
       policy.id !== policyId ||
@@ -972,39 +979,6 @@ export async function resolvePolymarketBotPolicyFundingCapRaw(): Promise<bigint>
     if (policyFundingCapCache?.value === value) policyFundingCapCache = null;
     throw error;
   }
-}
-
-function normalizePublicKey(publicKey: string): string {
-  const trimmed = publicKey.trim().replace(/^wallet-auth:/, "");
-  if (!trimmed) return "";
-  try {
-    const key = trimmed.includes("BEGIN PUBLIC KEY")
-      ? crypto.createPublicKey(trimmed)
-      : crypto.createPublicKey({
-          format: "der",
-          key: Buffer.from(trimmed, "base64"),
-          type: "spki",
-        });
-    return key.export({ format: "der", type: "spki" }).toString("base64");
-  } catch {
-    return trimmed;
-  }
-}
-
-export function derivePrivyAuthorizationPublicKey(
-  authorizationPrivateKey: string,
-): string {
-  const encoded = authorizationPrivateKey.trim().replace(/^wallet-auth:/, "");
-  if (!encoded) throw new Error("Privy authorization private key is empty.");
-  const privateKey = crypto.createPrivateKey({
-    format: "der",
-    key: Buffer.from(encoded, "base64"),
-    type: "pkcs8",
-  });
-  return crypto
-    .createPublicKey(privateKey)
-    .export({ format: "der", type: "spki" })
-    .toString("base64");
 }
 
 function typedDataTypesMatch(
@@ -1172,18 +1146,19 @@ export async function inspectServerEvmWalletAuthorization(input: {
       env.polymarketExchangeAddress,
       env.polymarketNegRiskExchangeAddress,
     ],
-    policyId: env.privyPolymarketBotBuyPolicyId,
+    policyId: env.privyPolymarketBotBuySellPolicyId,
+    policyFingerprint: env.privyPolymarketBotBuySellPolicyFingerprint,
     policyMaxBuyUsd: env.privyPolymarketBotBuyPolicyMaxUsd,
     fundingRouterAddress: env.polymarketFundingRouterAddress,
     builderCode: env.polymarketBuilderCode,
-    sellPolicyId: env.privyPolymarketBotSellPolicyId,
-    buySellPolicyId: env.privyPolymarketBotBuySellPolicyId,
-    redeemPolicyId: env.privyPolymarketBotRedeemPolicyId,
+    legacyBuyPolicyId: env.privyPolymarketBotBuyPolicyId,
+    legacySellPolicyId: env.privyPolymarketBotSellPolicyId,
   };
   const signerId = configuration.authorizationId.trim();
-  const buyPolicyId = configuration.policyId.trim();
-  const sellPolicyId = configuration.sellPolicyId?.trim() ?? "";
-  const buySellPolicyId = configuration.buySellPolicyId?.trim() ?? "";
+  const combinedPolicyId = configuration.policyId.trim();
+  const combinedPolicyFingerprint = configuration.policyFingerprint.trim();
+  const legacyBuyPolicyId = configuration.legacyBuyPolicyId?.trim() ?? "";
+  const legacySellPolicyId = configuration.legacySellPolicyId?.trim() ?? "";
   const policyMaxBuyUsd = configuration.policyMaxBuyUsd;
   const requiredActions = Array.from(
     new Set(input.requiredActions ?? [input.action ?? "BUY"]),
@@ -1195,9 +1170,9 @@ export async function inspectServerEvmWalletAuthorization(input: {
     requiredProfile = null;
   }
   const configuredPolicies = new Map<PrivyBotPolicyProfile, string>([
-    ["buy", buyPolicyId],
-    ["sell", sellPolicyId],
-    ["buy_sell", buySellPolicyId],
+    ["buy", legacyBuyPolicyId],
+    ["sell", legacySellPolicyId],
+    ["buy_sell", combinedPolicyId],
   ]);
   const targetPolicyId = requiredProfile
     ? (configuredPolicies.get(requiredProfile) ?? "")
@@ -1208,13 +1183,9 @@ export async function inspectServerEvmWalletAuthorization(input: {
   const configuredPolicyIds = configuredPolicyEntries.map(([, id]) => id);
   const hasDuplicatePolicyIds =
     new Set(configuredPolicyIds).size !== configuredPolicyIds.length;
-  const profileRequiresBuy =
-    requiredProfile === "buy" || requiredProfile === "buy_sell";
-  const profileRequiresSell =
-    requiredProfile === "sell" || requiredProfile === "buy_sell";
   const common = {
     policyId: targetPolicyId || null,
-    policyMaxBuyUsd: profileRequiresBuy ? policyMaxBuyUsd : null,
+    policyMaxBuyUsd,
     signerId,
   };
   if (
@@ -1222,11 +1193,11 @@ export async function inspectServerEvmWalletAuthorization(input: {
     !signerId ||
     !configuration.authorizationKey ||
     !targetPolicyId ||
+    !combinedPolicyFingerprint ||
     hasDuplicatePolicyIds ||
-    (profileRequiresBuy &&
-      (policyMaxBuyUsd <= 0 || !configuration.fundingRouterAddress)) ||
-    (profileRequiresSell &&
-      !/^0x[a-fA-F0-9]{64}$/.test(configuration.builderCode?.trim() ?? ""))
+    policyMaxBuyUsd <= 0 ||
+    !configuration.fundingRouterAddress ||
+    !/^0x[a-fA-F0-9]{64}$/.test(configuration.builderCode?.trim() ?? "")
   ) {
     return signerStatus({
       ...common,
@@ -1305,11 +1276,21 @@ export async function inspectServerEvmWalletAuthorization(input: {
   const matchingSigners = wallet.additionalSigners.filter(
     (candidate) => candidate.signerId === signerId,
   );
-  const foreignSigners = wallet.additionalSigners.filter(
+  const otherSigners = wallet.additionalSigners.filter(
     (candidate) => candidate.signerId !== signerId,
   );
+  const signerRegistry = validateKnownPrivyWalletSigners({
+    signers: wallet.additionalSigners,
+    specs: [
+      {
+        purpose: "polymarket_automation",
+        signerId,
+        policyIds: configuredPolicyIds,
+      },
+    ],
+  });
   const canRemoveAllSigners =
-    foreignSigners.length === 0 && matchingSigners.length <= 1;
+    otherSigners.length === 0 && matchingSigners.length <= 1;
   const grant: PrivyServerSignerGrant = {
     policyIds: [targetPolicyId],
     policyProfile: requiredProfile,
@@ -1318,7 +1299,7 @@ export async function inspectServerEvmWalletAuthorization(input: {
     walletAddress,
     walletChain: "ethereum",
   };
-  if (foreignSigners.length > 0 || matchingSigners.length > 1) {
+  if (!signerRegistry.valid || matchingSigners.length > 1) {
     return signerStatus({
       ...common,
       attached: matchingSigners.length > 0,
@@ -1340,9 +1321,7 @@ export async function inspectServerEvmWalletAuthorization(input: {
     ? (configuredProfileByPolicyId.get(attachedPolicyId) ?? null)
     : null;
   grant.replaceExistingSigner = Boolean(
-    matchingSigner &&
-    attachedProfile &&
-    !policyProfileCovers(attachedProfile, requiredProfile),
+    matchingSigner && attachedProfile !== requiredProfile,
   );
   if (!input.authorizationEnabled && matchingSigner) {
     return signerStatus({
@@ -1363,7 +1342,8 @@ export async function inspectServerEvmWalletAuthorization(input: {
     quorum.userIds.length !== 0 ||
     !quorum.authorizationPublicKeys.some(
       (publicKey) =>
-        normalizePublicKey(publicKey) === normalizePublicKey(derivedPublicKey),
+        normalizePrivyAuthorizationPublicKey(publicKey) ===
+        normalizePrivyAuthorizationPublicKey(derivedPublicKey),
     )
   ) {
     return signerStatus({
@@ -1399,22 +1379,6 @@ export async function inspectServerEvmWalletAuthorization(input: {
 
   const policyIdsToValidate = new Set([targetPolicyId]);
   if (attachedPolicyId) policyIdsToValidate.add(attachedPolicyId);
-  const validatesCombined = [...policyIdsToValidate].some(
-    (id) => configuredProfileByPolicyId.get(id) === "buy_sell",
-  );
-  if (validatesCombined) {
-    if (!buyPolicyId) {
-      return signerStatus({
-        ...common,
-        attached: Boolean(matchingSigner),
-        canRemoveAllSigners,
-        grant,
-        message: "Canonical BUY policy is required to validate BUY+SELL.",
-        state: "not_configured",
-      });
-    }
-    policyIdsToValidate.add(buyPolicyId);
-  }
   let policies: PrivyPolicyMetadata[];
   try {
     policies = await Promise.all(
@@ -1429,34 +1393,29 @@ export async function inspectServerEvmWalletAuthorization(input: {
     const policy = policiesById.get(id);
     const profile = configuredProfileByPolicyId.get(id);
     if (!policy || !profile) continue;
-    validationsById.set(
-      id,
-      validatePolymarketBotPolicyProfile({
-        builderCode: configuration.builderCode?.trim() ?? "",
-        exchangeAddresses: configuration.exchangeAddresses,
-        fundingRouterAddress: configuration.fundingRouterAddress,
-        maxBuyUsd: policyMaxBuyUsd,
-        policy,
-        profile,
-      }),
-    );
+    const validation = validatePolymarketBotPolicyProfile({
+      builderCode: configuration.builderCode?.trim() ?? "",
+      exchangeAddresses: configuration.exchangeAddresses,
+      fundingRouterAddress: configuration.fundingRouterAddress,
+      maxBuyUsd: policyMaxBuyUsd,
+      policy,
+      profile,
+    });
+    if (
+      id === combinedPolicyId &&
+      knownPrivyPolicyFingerprint(policy) !== combinedPolicyFingerprint
+    ) {
+      validation.issues.push(
+        "Combined policy fingerprint differs from configuration.",
+      );
+      validation.valid = false;
+    }
+    validationsById.set(id, validation);
   }
-  const canonicalBuyFundingCap =
-    validationsById.get(buyPolicyId)?.fundingMaxRaw;
-  const combinedFundingCapsMatch = [...policyIdsToValidate].every((id) => {
-    if (configuredProfileByPolicyId.get(id) !== "buy_sell") return true;
-    const combinedCap = validationsById.get(id)?.fundingMaxRaw;
-    return (
-      canonicalBuyFundingCap != null &&
-      combinedCap != null &&
-      combinedCap === canonicalBuyFundingCap
-    );
-  });
   if (
     policies.length !== policyIdsToValidate.size ||
     validationsById.size !== policyIdsToValidate.size ||
-    [...validationsById.values()].some((validation) => !validation.valid) ||
-    !combinedFundingCapsMatch
+    [...validationsById.values()].some((validation) => !validation.valid)
   ) {
     return signerStatus({
       ...common,
@@ -1468,9 +1427,7 @@ export async function inspectServerEvmWalletAuthorization(input: {
     });
   }
 
-  const attachedCoversRequired =
-    attachedProfile != null &&
-    policyProfileCovers(attachedProfile, requiredProfile);
+  const attachedCoversRequired = attachedProfile === requiredProfile;
   if (!matchingSigner || !attachedCoversRequired) {
     grant.replaceExistingSigner = Boolean(matchingSigner);
     return signerStatus({
@@ -1514,7 +1471,8 @@ export function hasServerWalletClientConfig(): boolean {
   return Boolean(
     env.privyWalletAuthorizationId &&
     env.privyWalletAuthorizationKey &&
-    env.privyPolymarketBotBuyPolicyId &&
+    env.privyPolymarketBotBuySellPolicyId &&
+    env.privyPolymarketBotBuySellPolicyFingerprint &&
     env.privyPolymarketBotBuyPolicyMaxUsd > 0 &&
     env.polymarketFundingRouterAddress,
   );

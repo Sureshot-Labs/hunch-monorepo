@@ -1299,6 +1299,8 @@ export const env = {
     process.env.PRIVY_POLYMARKET_BOT_SELL_POLICY_ID?.trim() || "",
   privyPolymarketBotBuySellPolicyId:
     process.env.PRIVY_POLYMARKET_BOT_BUY_SELL_POLICY_ID?.trim() || "",
+  privyPolymarketBotBuySellPolicyFingerprint:
+    process.env.PRIVY_POLYMARKET_BOT_BUY_SELL_POLICY_FINGERPRINT?.trim() || "",
   privyPolymarketBotRedeemPolicyId:
     process.env.PRIVY_POLYMARKET_BOT_REDEEM_POLICY_ID?.trim() || "",
   privyPolymarketBotBuyPolicyMaxUsd: optionalNonNegativeNumber(

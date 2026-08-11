@@ -81,6 +81,9 @@ import {
   sameAccountAddress,
 } from "../domain/asset-identity.js";
 import { SOLANA_NATIVE_EXECUTION_RESERVE_LAMPORTS } from "../domain/network-fees.js";
+import { operationPurposeForExternalRecipient } from "../domain/withdrawal-binding.js";
+import { withWithdrawalPlanningContract } from "../domain/withdrawal-contract.js";
+import { parsePositiveInteger } from "../runtime/positive-integer.js";
 
 const ROUTE_EXPERIENCE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1_000;
 const POLYMARKET_DEPOSIT_WALLET_HANDOFF_EXECUTOR_ID =
@@ -104,12 +107,6 @@ export function fundingSourceInventoryBlockingReasonCodes(
 
 function jsonRecord(value: unknown): Readonly<Record<string, JsonValue>> {
   return value as Readonly<Record<string, JsonValue>>;
-}
-
-function positiveInt(value: string | undefined): number | null {
-  if (!value || !/^\d+$/.test(value)) return null;
-  const parsed = Number(value);
-  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
 }
 
 function detail(location: AssetLocation, key: string): string | null {
@@ -591,7 +588,9 @@ export function deriveProductionRelayEligibleSourceFacts(input: {
       component.category === "in_transit" ||
       component.observationFreshness !== "fresh" ||
       component.observationError ||
-      (component.valuationEligibility !== "included" && !nativeSolSource) ||
+      (component.valuationEligibility !== "included" &&
+        !nativeSolSource &&
+        input.purpose !== "withdrawal") ||
       !availability ||
       (availability.freshness !== "fresh" &&
         (!nativeSolSource ||
@@ -1077,7 +1076,9 @@ export class ProductionFundingSourcePlanner {
       observeRoute: async ({ route, amountBand, now }) => {
         const lookupKey = process.env.FUNDING_REFERENCE_LOOKUP_HMAC_KEY?.trim();
         const keyVersion =
-          positiveInt(process.env.FUNDING_REFERENCE_LOOKUP_KEY_VERSION) ?? 1;
+          parsePositiveInteger(
+            process.env.FUNDING_REFERENCE_LOOKUP_KEY_VERSION,
+          ) ?? 1;
         if (!lookupKey) return null;
         return fetchFundingRouteExperience(this.db, {
           routeKeyHmac: fundingRouteExperienceFingerprint(
@@ -1115,19 +1116,23 @@ export class ProductionFundingSourcePlanner {
       now: Date;
     }>,
   ): readonly RelayEligibleSourceFact[] {
+    const basePolicy = this.currentPolicy();
+    const policy =
+      input.request.purpose === "withdrawal"
+        ? withWithdrawalPlanningContract(basePolicy, input.requiredAmount.asset)
+        : basePolicy;
     return deriveProductionRelayEligibleSourceFacts({
       accountId: input.accountId,
       account: this.account,
-      policy: this.currentPolicy(),
+      policy,
       requiredAmount: input.requiredAmount,
       confirmedSourceAmount: input.request.confirmedSourceAmount,
       destinationLocationPatternId:
         input.destination.destinationLocationPatternId,
       purpose: input.request.purpose,
       maximumSlippageBps: Math.min(
-        input.request.maxSlippageBps ??
-          this.currentPolicy().placement.maximumSlippageBps,
-        this.currentPolicy().placement.maximumSlippageBps,
+        input.request.maxSlippageBps ?? policy.placement.maximumSlippageBps,
+        policy.placement.maximumSlippageBps,
       ),
     });
   }
@@ -1147,7 +1152,8 @@ export class ProductionFundingSourcePlanner {
     const apiKey = process.env.RELAY_API_KEY?.trim();
     const lookupKey = process.env.FUNDING_REFERENCE_LOOKUP_HMAC_KEY?.trim();
     const keyVersion =
-      positiveInt(process.env.FUNDING_REFERENCE_LOOKUP_KEY_VERSION) ?? 1;
+      parsePositiveInteger(process.env.FUNDING_REFERENCE_LOOKUP_KEY_VERSION) ??
+      1;
     if (!apiKey || !lookupKey) {
       throw new Error("Relay runtime secrets are unavailable");
     }
@@ -1247,7 +1253,9 @@ export class ProductionFundingSourcePlanner {
     });
     const plan = {
       operation: {
-        purpose: "add_funds" as const,
+        purpose: operationPurposeForExternalRecipient(
+          input.destination.externalRecipientId,
+        ),
         initialState: {
           status: "in_progress" as const,
           stage: "committed" as const,

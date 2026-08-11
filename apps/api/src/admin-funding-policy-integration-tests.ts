@@ -15,7 +15,10 @@ import {
 import type { PoolClient } from "pg";
 
 import { pool } from "./db.js";
-import { DEFAULT_FUNDING_RUNTIME_POLICY } from "./funding/policies/funding-policy.js";
+import {
+  DEFAULT_FUNDING_INTENT_POLICY,
+  type FundingIntentPolicy,
+} from "./funding/policies/funding-policy-v2.js";
 import {
   registerAdminFundingRoutes,
   type AdminFundingRouteDependencies,
@@ -37,6 +40,7 @@ async function publishAs(
     id: string;
     kind: "admin_account" | "legacy_user";
   }>,
+  candidate: FundingIntentPolicy,
 ): Promise<PublishedPolicyRow> {
   assert.ok(app);
   const headers = {
@@ -47,7 +51,7 @@ async function publishAs(
     method: "POST",
     url: "/admin/funding/policy/diff",
     headers,
-    payload: { candidate: DEFAULT_FUNDING_RUNTIME_POLICY },
+    payload: { candidate },
   });
   assert.equal(diffResponse.statusCode, 200, diffResponse.body);
   const preview = diffResponse.json<{
@@ -121,19 +125,31 @@ try {
   } satisfies AdminFundingRouteDependencies);
   await app.ready();
 
-  const adminPolicy = await publishAs({
-    id: adminId,
-    kind: "admin_account",
-  });
+  const adminPolicy = await publishAs(
+    {
+      id: adminId,
+      kind: "admin_account",
+    },
+    {
+      ...DEFAULT_FUNDING_INTENT_POLICY,
+      receive: { assets: ["base:usdc"], privy: false },
+    },
+  );
   assert.equal(adminPolicy.created_by, null);
   assert.equal(adminPolicy.created_by_admin_id, adminId);
 
   await new Promise((resolve) => setTimeout(resolve, 2));
 
-  const legacyPolicy = await publishAs({
-    id: legacyUserId,
-    kind: "legacy_user",
-  });
+  const legacyPolicy = await publishAs(
+    {
+      id: legacyUserId,
+      kind: "legacy_user",
+    },
+    {
+      ...DEFAULT_FUNDING_INTENT_POLICY,
+      receive: { assets: ["base:usdc", "polygon:pusd"], privy: false },
+    },
+  );
   assert.equal(legacyPolicy.created_by, legacyUserId);
   assert.equal(legacyPolicy.created_by_admin_id, null);
 

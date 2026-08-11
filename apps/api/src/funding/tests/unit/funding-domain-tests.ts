@@ -29,12 +29,16 @@ import type {
   FundingCommitRequest,
 } from "../../domain/types.js";
 import {
+  operationPurposeForExternalRecipient,
+  withdrawalBindingMatches,
+} from "../../domain/withdrawal-binding.js";
+import {
   DEFAULT_FUNDING_RUNTIME_POLICY,
   createFundingStaticRegistry,
   diffFundingPolicies,
   fundingPolicyRevision,
   isFundingPolicyGateOpen,
-  validateFundingRuntimePolicy,
+  validateEffectiveFundingRuntime,
   type FundingRuntimePolicy,
   type FundingStaticRegistry,
 } from "../../policies/funding-policy.js";
@@ -44,6 +48,13 @@ import {
   publishFundingPolicy,
   resolveFundingPolicy,
 } from "../../policies/funding-policy-service.js";
+import {
+  FUNDING_RECEIVE_ASSET_IDS,
+  applyFundingIntentPatch,
+  compileFundingIntentPolicy,
+  validateFundingIntentPolicy,
+  type FundingIntentPolicy,
+} from "../../policies/funding-policy-v2.js";
 
 type DeepMutable<T> = T extends readonly (infer Item)[]
   ? DeepMutable<Item>[]
@@ -53,6 +64,13 @@ type DeepMutable<T> = T extends readonly (infer Item)[]
 
 type MutableFundingPolicy = DeepMutable<FundingRuntimePolicy>;
 type PolicyDb = Parameters<typeof resolveFundingPolicy>[0];
+
+const FULL_POLICY: FundingIntentPolicy = {
+  version: 2,
+  venues: ["polymarket", "limitless"],
+  receive: { assets: [...FUNDING_RECEIVE_ASSET_IDS], privy: true },
+  paused: false,
+};
 
 async function test(
   name: string,
@@ -107,7 +125,6 @@ function productionTestRegistry(
     destinationObservers: [
       { id: "owned-balance-v1", runtimeKind: "production" },
     ],
-    fixtureIds: ["relay-live-evm-v1"],
   });
 }
 
@@ -193,7 +210,6 @@ function activeRoutePolicy(): MutableFundingPolicy {
       destinationLocationPatternId: "venue-limitless-base-usdc",
       sourceAsset: polygonPusd,
       destinationAsset: baseUsdc,
-      fixtureIds: ["relay-live-evm-v1"],
       actionValidatorId: "normalized-action-v1",
       networkExecutorId: "evm-network-v1",
       reconcilerId: "relay-status-v3",
@@ -211,7 +227,7 @@ function activeRoutePolicy(): MutableFundingPolicy {
 }
 
 function issueCodes(candidate: unknown, registry = productionTestRegistry()) {
-  const result = validateFundingRuntimePolicy(candidate, registry);
+  const result = validateEffectiveFundingRuntime(candidate, registry);
   return result.ok ? [] : result.issues.map(({ code }) => code);
 }
 
@@ -410,7 +426,7 @@ await test("accepts a registered future location without a core branch", () => {
     "in_transit_claim",
     "protocol_subaccount",
   ]);
-  assert.equal(validateFundingRuntimePolicy(policy, registry).ok, true);
+  assert.equal(validateEffectiveFundingRuntime(policy, registry).ok, true);
 });
 
 await test("selects only current-intent opaque Trading Wallet options", () => {
@@ -580,7 +596,7 @@ await test("declares every valid state and rejects regressions", () => {
 });
 
 await test("default policy is immutable and fail-closed for creation only", () => {
-  const validated = validateFundingRuntimePolicy(
+  const validated = validateEffectiveFundingRuntime(
     DEFAULT_FUNDING_RUNTIME_POLICY,
   );
   assert.equal(validated.ok, true);
@@ -616,48 +632,11 @@ await test("default policy is immutable and fail-closed for creation only", () =
   }
 });
 
-await test("older stored policies receive fail-closed WP5 economics defaults", () => {
-  const legacyCandidate = structuredClone(
-    DEFAULT_FUNDING_RUNTIME_POLICY,
-  ) as unknown as Record<string, unknown>;
-  delete legacyCandidate.routeExperience;
-  const placement = legacyCandidate.placement as Record<string, unknown>;
-  delete placement.maximumBufferUsd;
-  delete placement.maximumFeeBps;
-  delete placement.warningFeeUsd;
-  delete placement.warningFeeBps;
-  delete placement.minimumDestinationUsd;
-  const validated = validateFundingRuntimePolicy(legacyCandidate);
-  assert.equal(validated.ok, true);
-  if (!validated.ok) return;
-  assert.deepEqual(validated.policy.routeExperience, {
-    maximumInlineP95Ms: 45_000,
-    minimumInlineSuccessBps: 9_500,
-    minimumInlineObservationCount: 20,
-  });
-  assert.deepEqual(
-    {
-      maximumBufferUsd: validated.policy.placement.maximumBufferUsd,
-      maximumFeeBps: validated.policy.placement.maximumFeeBps,
-      warningFeeUsd: validated.policy.placement.warningFeeUsd,
-      warningFeeBps: validated.policy.placement.warningFeeBps,
-      minimumDestinationUsd: validated.policy.placement.minimumDestinationUsd,
-    },
-    {
-      maximumBufferUsd: "0",
-      maximumFeeBps: 2_000,
-      warningFeeUsd: "5",
-      warningFeeBps: 1_000,
-      minimumDestinationUsd: "0.5",
-    },
-  );
-});
-
 await test("rejects retired rollout modes", () => {
   for (const creationMode of ["shadow", "internal", "cohort"]) {
     const policy = mutableDefaultPolicy() as unknown as Record<string, unknown>;
     policy.creationMode = creationMode;
-    const result = validateFundingRuntimePolicy(policy);
+    const result = validateEffectiveFundingRuntime(policy);
     assert.equal(
       result.ok,
       false,
@@ -674,7 +653,7 @@ await test("rejects retired rollout modes", () => {
 });
 
 await test("accepts a fully registered production route", () => {
-  const result = validateFundingRuntimePolicy(
+  const result = validateEffectiveFundingRuntime(
     activeRoutePolicy(),
     productionTestRegistry(),
   );
@@ -688,7 +667,7 @@ await test("accepts a fully registered production route", () => {
 await test("allows staged continuation only with all execution and evidence gates", () => {
   const enabled = activeRoutePolicy();
   enabled.automation.stagedContinuation = true;
-  const accepted = validateFundingRuntimePolicy(
+  const accepted = validateEffectiveFundingRuntime(
     enabled,
     productionTestRegistry(),
   );
@@ -712,7 +691,7 @@ await test("rejects ambiguous duplicate Relay wallet route mappings", () => {
     ...structuredClone(exactRoute),
     routeId: "polygon-pusd-to-base-usdc-second",
   });
-  const result = validateFundingRuntimePolicy(
+  const result = validateEffectiveFundingRuntime(
     candidate,
     productionTestRegistry(),
   );
@@ -864,11 +843,11 @@ await test("rejects section 21 cross-field failures", () => {
   ]) {
     const policy = mutableDefaultPolicy();
     mutation(policy);
-    assert.equal(validateFundingRuntimePolicy(policy).ok, false);
+    assert.equal(validateEffectiveFundingRuntime(policy).ok, false);
   }
 });
 
-await test("rejects fixture adapters and incomplete active routes", () => {
+await test("rejects fixture adapters and deprecated route fallbacks", () => {
   const candidate = activeRoutePolicy();
   const fixtureRegistry = createFundingStaticRegistry({
     ...productionTestRegistry(),
@@ -886,12 +865,6 @@ await test("rejects fixture adapters and incomplete active routes", () => {
       "fixture_adapter_forbidden",
     ),
   );
-
-  const missingFixture = activeRoutePolicy();
-  const route = missingFixture.routes[0];
-  assert.ok(route);
-  route.fixtureIds = [];
-  assert.ok(issueCodes(missingFixture).includes("route_fixture_missing"));
 
   const deprecatedFallback = activeRoutePolicy();
   const fallbackRoute = deprecatedFallback.routes[0];
@@ -937,6 +910,141 @@ await test("builds deterministic revisions and structural diffs", () => {
       after: "2.50",
     },
   ]);
+});
+
+await test("derives Relay withdrawal purpose from the frozen recipient binding", () => {
+  assert.equal(operationPurposeForExternalRecipient(null), "add_funds");
+  assert.equal(
+    operationPurposeForExternalRecipient("recipient_withdrawal_12345678"),
+    "withdrawal",
+  );
+  assert.equal(
+    withdrawalBindingMatches("withdrawal", "recipient_withdrawal_12345678"),
+    true,
+  );
+  assert.equal(
+    withdrawalBindingMatches("add_funds", "recipient_withdrawal_12345678"),
+    false,
+  );
+});
+
+await test("normalizes compact V2 intent and rejects unknown values", () => {
+  const normalized = validateFundingIntentPolicy({
+    version: 2,
+    venues: ["polymarket", "polymarket"],
+    receive: {
+      assets: ["polygon:pusd", "polygon:pusd"],
+      privy: true,
+    },
+    paused: false,
+  });
+  assert.equal(normalized.ok, true);
+  if (!normalized.ok) throw new Error("normalized V2 policy expected");
+  assert.deepEqual(normalized.policy, {
+    version: 2,
+    venues: ["polymarket"],
+    receive: { assets: ["polygon:pusd"], privy: true },
+    paused: false,
+  });
+  assert.equal(
+    validateFundingIntentPolicy({
+      ...FULL_POLICY,
+      receive: { assets: ["ethereum:usdc"], privy: false },
+    }).ok,
+    false,
+  );
+  assert.equal(
+    validateFundingIntentPolicy({
+      ...FULL_POLICY,
+      venues: ["kalshi"],
+    }).ok,
+    false,
+  );
+  assert.equal(
+    validateFundingIntentPolicy({
+      ...FULL_POLICY,
+      paused: ["fund"],
+    }).ok,
+    false,
+  );
+});
+
+await test("compiles full V2 intent to the reviewed runtime catalog", () => {
+  const policy = compileFundingIntentPolicy(FULL_POLICY);
+  assert.equal(validateEffectiveFundingRuntime(policy).ok, true);
+  assert.equal(JSON.stringify(policy.routes).includes("fixtureIds"), false);
+  assert.deepEqual(
+    {
+      assets: policy.assets.length,
+      locations: policy.locations.length,
+      venues: policy.venues.length,
+      routes: policy.routes.length,
+      privy: policy.privyFundingMethods.length,
+      preparation: policy.walletPreparation.length,
+      positionActions: policy.positionActions.length,
+      recommendationOrder: policy.genericAddFundsRecommendationOrder,
+    },
+    {
+      assets: 6,
+      locations: 8,
+      venues: 2,
+      routes: 7,
+      privy: 2,
+      preparation: 4,
+      positionActions: 0,
+      recommendationOrder: ["polymarket", "limitless"],
+    },
+  );
+  assert.equal(policy.gates.reconciliation, true);
+  assert.equal(policy.gates.refunds, true);
+  assert.equal(policy.gates.recovery, true);
+  assert.deepEqual(policy.placement, DEFAULT_FUNDING_RUNTIME_POLICY.placement);
+  assert.ok(
+    policy.routes.some((route) => route.routeId === "solana-usdc-to-base-usdc"),
+  );
+  assert.ok(
+    policy.routes.some(
+      (route) => route.routeId === "solana-sol-to-polygon-pusd",
+    ),
+  );
+  assert.ok(
+    policy.routes.some(
+      (route) => route.routeId === "polygon-usdc-to-polygon-pusd",
+    ),
+  );
+});
+
+await test("replaces patch arrays and keeps omitted compact fields", () => {
+  const patched = applyFundingIntentPatch(FULL_POLICY, {
+    venues: ["limitless"],
+    receive: { assets: ["base:usdc"] },
+    paused: true,
+  });
+  assert.equal(patched.ok, true);
+  if (!patched.ok) throw new Error("valid compact patch expected");
+  assert.deepEqual(patched.policy.receive.assets, ["base:usdc"]);
+  assert.deepEqual(patched.policy.venues, ["limitless"]);
+  assert.equal(patched.policy.receive.privy, true);
+  assert.equal(patched.policy.paused, true);
+  assert.equal(patched.runtimePolicy.gates.quoteCreation, false);
+  assert.equal(patched.runtimePolicy.gates.recovery, true);
+});
+
+await test("pauses only new funding without closing recovery", () => {
+  const fundPaused = compileFundingIntentPolicy({
+    ...FULL_POLICY,
+    paused: true,
+  });
+  assert.equal(fundPaused.gates.quoteCreation, false);
+  assert.equal(fundPaused.gates.commit, false);
+  assert.equal(
+    fundPaused.venues.every((venue) => !venue.fundingEnabled),
+    true,
+  );
+
+  assert.equal(fundPaused.gates.recovery, true);
+  assert.equal(fundPaused.gates.reconciliation, true);
+  assert.equal(fundPaused.gates.refunds, true);
 });
 
 type StoredPolicyRow = {
@@ -995,12 +1103,19 @@ await test("previews, confirms, and append-publishes immutable policy", async ()
   const initial = await resolveFundingPolicy(fixture.db);
   assert.equal(initial.source, "default");
 
-  const candidate = mutableDefaultPolicy();
-  candidate.placement.maximumFeeUsd = "1";
-  const preview = await previewFundingPolicy(fixture.db, candidate);
+  const candidate = structuredClone(FULL_POLICY);
+  const preview = await previewFundingPolicy(fixture.db, { candidate });
   assert.equal(preview.valid, true);
   if (!preview.valid) throw new Error("valid preview expected");
-  assert.equal(preview.diff.length, 1);
+  assert.equal(preview.diff.length, 10);
+  assert.ok(
+    preview.diff.some((entry) => entry.path === "venues.enabled.polymarket"),
+  );
+  assert.ok(preview.diff.some((entry) => entry.path === "venues.order"));
+  assert.ok(
+    preview.diff.some((entry) => entry.path === "receive.assets.base:usdc"),
+  );
+  assert.ok(preview.diff.some((entry) => entry.path === "receive.privy"));
 
   await assert.rejects(
     () =>
@@ -1030,6 +1145,16 @@ await test("previews, confirms, and append-publishes immutable policy", async ()
   assert.equal(published.source, "db");
   assert.equal(published.revision, preview.candidateRevision);
   assert.equal(fixture.rows.length, 1);
+  assert.deepEqual(Object.keys(fixture.rows[0]?.payload as object).sort(), [
+    "paused",
+    "receive",
+    "venues",
+    "version",
+  ]);
+  assert.equal(
+    JSON.stringify(fixture.rows[0]?.payload).includes("fixtureIds"),
+    false,
+  );
   assert.equal(
     fixture.calls.some((sql) => sql.includes("pg_advisory_xact_lock")),
     true,
@@ -1051,6 +1176,64 @@ await test("previews, confirms, and append-publishes immutable policy", async ()
   );
 });
 
+await test("previews V2 patches and rejects removed V1 storage", async () => {
+  const compactFixture = createPolicyDb();
+  const patchPreview = await previewFundingPolicy(compactFixture.db, {
+    patch: { receive: { assets: ["base:usdc"] } },
+  });
+  assert.equal(patchPreview.valid, true);
+  if (!patchPreview.valid) throw new Error("valid patch preview expected");
+  assert.deepEqual(patchPreview.candidate.receive.assets, ["base:usdc"]);
+  assert.equal(patchPreview.candidate.receive.privy, false);
+
+  const legacyFixture = createPolicyDb();
+  legacyFixture.rows.push({
+    id: "policy_v1",
+    policy_key: "funding_control_plane",
+    effective_at: new Date("2026-07-23T16:00:00.000Z"),
+    payload: { version: 1, creationMode: "on" },
+    created_by: "admin_12345678",
+    created_by_admin_id: null,
+    created_at: new Date("2026-07-23T16:00:00.000Z"),
+  });
+  const legacy = await resolveFundingPolicy(legacyFixture.db);
+  assert.equal(legacy.source, "default");
+  assert.equal(legacy.invalidStoredPolicy, true);
+  assert.equal(legacy.runtime.creationMode, "off");
+  const legacyPatch = await previewFundingPolicy(legacyFixture.db, {
+    patch: { receive: { privy: true } },
+  });
+  assert.equal(legacyPatch.valid, true);
+  if (!legacyPatch.valid) throw new Error("valid V2 recovery patch expected");
+  assert.equal(legacyPatch.candidate.receive.privy, true);
+});
+
+await test("treats venue recommendation reorder as publishable behavior", async () => {
+  const fixture = createPolicyDb();
+  fixture.rows.push({
+    id: "policy_v2_order",
+    policy_key: "funding_control_plane",
+    effective_at: new Date("2026-07-23T16:00:00.000Z"),
+    payload: FULL_POLICY,
+    created_by: "admin_12345678",
+    created_by_admin_id: null,
+    created_at: new Date("2026-07-23T16:00:00.000Z"),
+  });
+  const preview = await previewFundingPolicy(fixture.db, {
+    candidate: {
+      ...FULL_POLICY,
+      venues: ["limitless", "polymarket"],
+    },
+  });
+  assert.equal(preview.valid, true);
+  if (!preview.valid) throw new Error("valid reorder preview expected");
+  assert.deepEqual(
+    preview.diff.map((entry) => entry.path),
+    ["venues.order"],
+  );
+  assert.notEqual(preview.candidateRevision, preview.current.revision);
+});
+
 await test("falls back closed when stored policy is invalid", async () => {
   const fixture = createPolicyDb();
   fixture.rows.push({
@@ -1065,7 +1248,11 @@ await test("falls back closed when stored policy is invalid", async () => {
   const resolved = await resolveFundingPolicy(fixture.db);
   assert.equal(resolved.source, "default");
   assert.equal(resolved.invalidStoredPolicy, true);
-  assert.equal(resolved.policy.creationMode, "off");
+  assert.equal(resolved.runtime.creationMode, "off");
+  assert.equal(resolved.runtime.gates.recovery, true);
+  assert.equal(resolved.runtime.gates.reconciliation, true);
+  assert.equal(resolved.runtime.gates.refunds, true);
+  assert.equal(resolved.runtime.venues.length, 0);
   assert.ok(resolved.validationIssues.length > 0);
 });
 

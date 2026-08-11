@@ -54,6 +54,22 @@ export function stableOpaqueId(prefix: string, value: string): string {
   return `${prefix}_${digest.slice(0, 32)}`;
 }
 
+export function stableWalletOpaqueId(
+  input: Readonly<{
+    walletType: string;
+    networkId: string;
+    address: string;
+  }>,
+): string {
+  return stableOpaqueId(
+    "wallet",
+    `${input.walletType}:${input.networkId}:${canonicalAccountAddress(
+      input.networkId,
+      input.address,
+    )}`,
+  );
+}
+
 export type DeduplicatedInventory = Readonly<{
   observations: readonly ObservedAsset[];
   duplicateCount: number;

@@ -53,6 +53,7 @@ export type PolymarketFundingPostconditionTarget = Readonly<{
   ledgerHeight: string | null;
   blockHash: string | null;
   finalizedAt: Date;
+  attributedPusdRaw: string;
 }>;
 
 function stringField(
@@ -195,6 +196,7 @@ async function loadTarget(
     ledger_height: string | null;
     block_hash: string | null;
     finalized_at: Date;
+    attributed_pusd_raw: string;
   }>(
     `
       select
@@ -213,7 +215,8 @@ async function loadTarget(
         attempt.lookup_key_version,
         receipt.ledger_height,
         receipt.block_hash,
-        receipt.finalized_at
+        receipt.finalized_at,
+        receipt.evidence ->> 'attributedDestinationRaw' as attributed_pusd_raw
       from funding_operations operation
       join funding_operation_steps step
         on step.operation_id = operation.id
@@ -228,6 +231,8 @@ async function loadTarget(
        and receipt.action_match
        and receipt.canonical
        and receipt.finalized_at is not null
+       and receipt.evidence ->> 'attributedDestinationRaw'
+         = operation.support_metadata->'fundingPlan'->>'totalAmountRaw'
       where operation.id = $1
         and operation.plan_kind in (
           'venue_preparation',
@@ -282,6 +287,7 @@ async function loadTarget(
     ledgerHeight: row.ledger_height,
     blockHash: row.block_hash,
     finalizedAt: row.finalized_at,
+    attributedPusdRaw: row.attributed_pusd_raw,
   };
 }
 
@@ -424,6 +430,7 @@ export class PolymarketFundingPostconditionDriver implements FundingPostconditio
       canonicalRouterAddress: target.plan.routerAddress,
       plan: target.plan,
       receipt: "success",
+      attributedPusdRaw: target.attributedPusdRaw,
     });
     if (
       result.status === "satisfied" &&

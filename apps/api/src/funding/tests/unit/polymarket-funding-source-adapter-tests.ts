@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 
 import type { AccountValueReadModel } from "../../../account-value/runtime-service.js";
 import type { FundingPurpose } from "../../domain/types.js";
+import { POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID } from "../../execution/delegated-funding-profile-ids.js";
 import { PRIVY_USER_AUTHORIZED_EVM_SPONSORSHIP_POLICY_ID } from "../../execution/sponsorship-policy.js";
 import { PolymarketFundingSourceAdapter } from "../../preparation/polymarket-funding-source-adapter.js";
 import { polymarketFundingEvidence } from "../../preparation/polymarket-funding-snapshot.js";
@@ -190,6 +191,17 @@ function planningInput(
   } as unknown as FundingSourcePlanningInput;
 }
 
+function delegatedPlanningInput(): FundingSourcePlanningInput {
+  const input = planningInput("1000000", "1000000", "0", "add_funds");
+  return {
+    ...input,
+    request: {
+      ...input.request,
+      serverExecutionProfileId: POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
+    },
+  };
+}
+
 const adapter = new PolymarketFundingSourceAdapter(account(), {
   canonicalRouterAddress: ROUTER,
   usdceAsset: USDCE,
@@ -216,6 +228,31 @@ assert.ok(
     (entry) =>
       entry.segmentOrdinal === null && entry.mode === "subtract_available",
   ),
+);
+
+const delegatedAdapter = new PolymarketFundingSourceAdapter(
+  account(false, "0"),
+  {
+    canonicalRouterAddress: ROUTER,
+    usdceAsset: USDCE,
+  },
+);
+const [delegated] = await delegatedAdapter.list(delegatedPlanningInput());
+assert.ok(delegated);
+assert.deepEqual(delegated.commitPlan.operation.requestedSourceAmount, {
+  asset: USDCE,
+  raw: "1000000",
+});
+assert.equal(delegated.commitPlan.steps[0]?.state, "planned");
+assert.equal(
+  delegated.commitPlan.steps[0]?.executorId,
+  POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
+);
+assert.equal(delegated.option.requiredActions[0]?.actor, "server");
+assert.deepEqual(
+  delegated.commitPlan.reservations.map((entry) => entry.rawAmount),
+  ["1000000"],
+  "delegated wrap must bind only the exact received USDC.e amount",
 );
 
 const missingExactInput = new PolymarketFundingSourceAdapter(account(false), {

@@ -152,6 +152,22 @@ export const env = {
   fundingReferenceLookupKeyVersion: parseFundingReferenceLookupKeyVersion(
     readEnv("FUNDING_REFERENCE_LOOKUP_KEY_VERSION"),
   ),
+  fundingPolymarketWrapExecute:
+    executeEnabled &&
+    parseBool(readEnv("HUNCH_FUNDING_PM_WRAP_EXECUTE"), false),
+  privyAppId: readEnv("PRIVY_APP_ID"),
+  privyAppSecret: readEnv("PRIVY_APP_SECRET"),
+  privyWalletAuthorizationKey: readEnv("PRIVY_WALLET_AUTHORIZATION_KEY"),
+  privyWalletAuthorizationId: readEnv("PRIVY_WALLET_AUTHORIZATION_ID"),
+  privyWalletAuthorizationFingerprint: readEnv(
+    "PRIVY_WALLET_AUTHORIZATION_FINGERPRINT",
+  ),
+  privyPolymarketBotBuySellPolicyId: readEnv(
+    "PRIVY_POLYMARKET_BOT_BUY_SELL_POLICY_ID",
+  ),
+  privyPolymarketBotBuySellPolicyFingerprint: readEnv(
+    "PRIVY_POLYMARKET_BOT_BUY_SELL_POLICY_FINGERPRINT",
+  ),
 
   privyDeletionReconciliationEnabled: parseBool(
     readEnv("HUNCH_FINANCE_PRIVY_DELETION_RECONCILIATION_ENABLED"),

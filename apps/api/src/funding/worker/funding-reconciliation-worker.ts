@@ -21,6 +21,12 @@ import { OwnedRouteDestinationObserver } from "../reconciliation/owned-route-des
 import { FundingReceiveSessionObserver } from "../receive/receive-session-observer.js";
 import { FundingReceiveReceiptRouter } from "../receive/receive-receipt-router.js";
 import { runTelegramFundingProgressProjectionBatch } from "../../services/telegram-funding-progress-projector.js";
+import {
+  createPolymarketWrapDelegatedFundingProfile,
+  DelegatedFundingExecutor,
+} from "../execution/delegated-funding-executor.js";
+import type { PolymarketWrapExecutionConfiguration } from "../execution/delegated-funding-config.js";
+import { createPrivyDelegatedFundingDriver } from "../execution/privy-delegated-funding-driver.js";
 
 export type FundingReferenceProtectionConfig = Readonly<{
   credentialsEncryptionKey: string;
@@ -39,6 +45,14 @@ export type FundingReconciliationJobOptions =
       referenceProtection?: FundingReferenceProtectionConfig;
       relay?: RelayFundingWorkerConfig;
       receivePollDelayMs?: number;
+      delegatedExecution?: Readonly<{
+        configuration: PolymarketWrapExecutionConfiguration;
+        privy: Readonly<{
+          appId: string;
+          appSecret: string;
+          authorizationPrivateKey: string;
+        }>;
+      }>;
     }>;
 
 export type FundingReconciliationJobResult =
@@ -50,6 +64,9 @@ export type FundingReconciliationJobResult =
         receiveRouting: Awaited<
           ReturnType<FundingReceiveReceiptRouter["runBatch"]>
         >;
+        delegatedFundingExecution: Awaited<
+          ReturnType<DelegatedFundingExecutor["runBatch"]>
+        > | null;
         telegramFundingProgress: Awaited<
           ReturnType<typeof runTelegramFundingProgressProjectionBatch>
         >;
@@ -65,6 +82,7 @@ export type FundingReconciliationJobResult =
       operationIds: readonly [];
       receiveObservation: null;
       receiveRouting: null;
+      delegatedFundingExecution: null;
       telegramFundingProgress: null;
     }>;
 
@@ -80,6 +98,7 @@ export async function isFundingReconciliationSchemaReady(
         and to_regclass('public.funding_receive_sessions') is not null
         and to_regclass('public.telegram_funding_sessions') is not null
         and to_regclass('public.telegram_funding_consents') is not null
+        and to_regclass('public.telegram_funding_authorizations') is not null
         and to_regclass('public.telegram_funding_mutations') is not null
         and to_regclass('public.telegram_bot_action_outbox') is not null
         and exists (
@@ -126,6 +145,7 @@ export async function runFundingReconciliationJob(
       operationIds: [],
       receiveObservation: null,
       receiveRouting: null,
+      delegatedFundingExecution: null,
       telegramFundingProgress: null,
     };
   }
@@ -143,7 +163,25 @@ export async function runFundingReconciliationJob(
   const transactionCodec = codecConfig
     ? createFundingTransactionReferenceCodec(codecConfig)
     : null;
-  const runReceivePipeline = async () => {
+  if (options.delegatedExecution && !transactionCodec) {
+    throw new Error(
+      "delegated funding execution requires transaction reference protection",
+    );
+  }
+  const delegatedDriver = options.delegatedExecution
+    ? createPrivyDelegatedFundingDriver({
+        ...options.delegatedExecution.privy,
+        configuration: options.delegatedExecution.configuration,
+      })
+    : null;
+  const polymarketWrapProfile =
+    options.delegatedExecution && delegatedDriver
+      ? createPolymarketWrapDelegatedFundingProfile({
+          configuration: options.delegatedExecution.configuration,
+          driver: delegatedDriver,
+        })
+      : null;
+  const runReceiveBeforeReconciliation = async () => {
     const receiveObservation = await new FundingReceiveSessionObserver(
       transactionCodec
         ? {
@@ -161,15 +199,41 @@ export async function runFundingReconciliationJob(
         now: options.now,
       },
     );
-    const telegramFundingProgress =
-      await runTelegramFundingProgressProjectionBatch(pool, {
-        limit: options.limit ?? 25,
-        now: options.now,
-      });
-    return { receiveObservation, receiveRouting, telegramFundingProgress };
+    const delegatedFundingExecution =
+      polymarketWrapProfile && transactionCodec
+        ? await new DelegatedFundingExecutor(pool, {
+            profiles: [polymarketWrapProfile],
+            referenceCodec: transactionCodec,
+          }).runBatch({ limit: options.limit ?? 25, now: options.now })
+        : null;
+    return {
+      receiveObservation,
+      receiveRouting,
+      delegatedFundingExecution,
+    };
   };
   const directIngressObserver = new DirectIngressDestinationObserver();
   const ownedRouteObserver = new OwnedRouteDestinationObserver();
+  const receiptDriver = transactionCodec
+    ? new FundingStepReceiptReconciliationDriver(transactionCodec)
+    : null;
+  const polymarketPostconditionDriver = transactionCodec
+    ? new PolymarketFundingPostconditionDriver(transactionCodec)
+    : null;
+  const evidencePollers =
+    receiptDriver && polymarketPostconditionDriver
+      ? {
+          receiptPoll: (operationId: string, now: Date) =>
+            receiptDriver.pollOperation(pool, operationId, now),
+          postconditionPoll: (operationId: string, now: Date) =>
+            pollFundingPostconditions(
+              [polymarketPostconditionDriver],
+              pool,
+              operationId,
+              now,
+            ),
+        }
+      : {};
   const pollDestination = async (operationId: string, now: Date) => {
     const [direct, ownedRoute] = await Promise.all([
       directIngressObserver.pollOperation(pool, operationId, now),
@@ -182,45 +246,40 @@ export async function runFundingReconciliationJob(
         direct.destinationSatisfied || ownedRoute.destinationSatisfied,
     };
   };
+  const receive = await runReceiveBeforeReconciliation();
+  let result: FundingReconciliationBatchResult;
   if (!relay) {
-    const result = await runFundingReconciliationBatch(pool, {
+    result = await runFundingReconciliationBatch(pool, {
       ...options,
+      ...evidencePollers,
       destinationPoll: pollDestination,
     });
-    return { ...result, ...(await runReceivePipeline()) };
+  } else {
+    if (!codecConfig || !transactionCodec) {
+      throw new Error("funding transaction codec configuration is unavailable");
+    }
+    const driver = new RelayReconciliationDriver(
+      new RelayClient({
+        apiKey: relay.apiKey,
+        timeoutMs: relay.timeoutMs,
+      }),
+      createRelayReferenceCodec(codecConfig),
+      createRelayDepositAddressCodec(codecConfig),
+    );
+    result = await runFundingReconciliationBatch(pool, {
+      ...options,
+      ...evidencePollers,
+      providerPoll: (operationId, now) =>
+        driver.pollOperation(pool, operationId, now),
+      destinationPoll: pollDestination,
+    });
   }
-  if (!codecConfig || !transactionCodec) {
-    throw new Error("funding transaction codec configuration is unavailable");
-  }
-  const driver = new RelayReconciliationDriver(
-    new RelayClient({
-      apiKey: relay.apiKey,
-      timeoutMs: relay.timeoutMs,
-    }),
-    createRelayReferenceCodec(codecConfig),
-    createRelayDepositAddressCodec(codecConfig),
-  );
-  const receiptDriver = new FundingStepReceiptReconciliationDriver(
-    transactionCodec,
-  );
-  const polymarketPostconditionDriver =
-    new PolymarketFundingPostconditionDriver(transactionCodec);
-  const result = await runFundingReconciliationBatch(pool, {
-    ...options,
-    providerPoll: (operationId, now) =>
-      driver.pollOperation(pool, operationId, now),
-    receiptPoll: (operationId, now) =>
-      receiptDriver.pollOperation(pool, operationId, now),
-    postconditionPoll: (operationId, now) =>
-      pollFundingPostconditions(
-        [polymarketPostconditionDriver],
-        pool,
-        operationId,
-        now,
-      ),
-    destinationPoll: pollDestination,
-  });
-  return { ...result, ...(await runReceivePipeline()) };
+  const telegramFundingProgress =
+    await runTelegramFundingProgressProjectionBatch(pool, {
+      limit: options.limit ?? 25,
+      now: options.now,
+    });
+  return { ...result, ...receive, telegramFundingProgress };
 }
 
 export type {

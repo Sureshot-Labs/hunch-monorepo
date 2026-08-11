@@ -46,6 +46,7 @@ import {
   validateCanonicalRedemptionBatch,
 } from "./services/polymarket-deposit-wallet-relayer.js";
 import { sumErc20TransfersTo } from "./funding/execution/evm-erc20-receipt.js";
+import { knownPrivyPolicyFingerprint } from "./funding/execution/known-privy-wallet-signers.js";
 import { FundingPersistenceError } from "./funding/persistence/funding-operation-repository.js";
 import { FundingTradeAttemptError } from "./funding/persistence/funding-trade-attempt-repository.js";
 import { kalshiTradingExecutionTestHooks } from "./services/kalshi-trading-execution-service.js";
@@ -82,6 +83,19 @@ const policyExchangeAddresses = [
 const policyFundingRouterAddress = "0x0000000000000000000000000000000000000003";
 const policyFundingMaxRaw = 2_200_000n;
 const policyBuilderCode = `0x${"11".repeat(32)}`;
+const policyFundingAbi = [
+  {
+    type: "function",
+    name: "fund",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "expectedNonce", type: "uint256" },
+      { name: "totalAmount", type: "uint256" },
+      { name: "pUsdAmount", type: "uint256" },
+    ],
+    outputs: [],
+  },
+];
 const policyRedemptionAdapterAddresses = [
   "0x0000000000000000000000000000000000000004",
   "0x0000000000000000000000000000000000000005",
@@ -204,38 +218,14 @@ function buildValidPolymarketBotPolicy(): PrivyPolicyMetadata {
             value: "0x0",
           },
           {
-            abi: [
-              {
-                type: "function",
-                name: "fund",
-                stateMutability: "nonpayable",
-                inputs: [
-                  { name: "expectedNonce", type: "uint256" },
-                  { name: "totalAmount", type: "uint256" },
-                  { name: "pUsdAmount", type: "uint256" },
-                ],
-                outputs: [],
-              },
-            ],
+            abi: policyFundingAbi,
             field: "function_name",
             field_source: "ethereum_calldata",
             operator: "eq",
             value: "fund",
           },
           {
-            abi: [
-              {
-                type: "function",
-                name: "fund",
-                stateMutability: "nonpayable",
-                inputs: [
-                  { name: "expectedNonce", type: "uint256" },
-                  { name: "totalAmount", type: "uint256" },
-                  { name: "pUsdAmount", type: "uint256" },
-                ],
-                outputs: [],
-              },
-            ],
+            abi: policyFundingAbi,
             field: "fund.totalAmount",
             field_source: "ethereum_calldata",
             operator: "lte",
@@ -323,7 +313,50 @@ function buildValidPolymarketBuySellPolicy(): PrivyPolicyMetadata {
   return {
     ...buy,
     id: "buy-sell-policy",
-    rules: [...buy.rules, structuredClone(sell.rules[1] as never)],
+    rules: [
+      ...buy.rules,
+      structuredClone(sell.rules[1] as never),
+      {
+        action: "ALLOW",
+        conditions: [
+          {
+            field: "chain_id",
+            field_source: "ethereum_transaction",
+            operator: "eq",
+            value: "137",
+          },
+          {
+            field: "to",
+            field_source: "ethereum_transaction",
+            operator: "eq",
+            value: policyFundingRouterAddress,
+          },
+          {
+            field: "value",
+            field_source: "ethereum_transaction",
+            operator: "eq",
+            value: "0x0",
+          },
+          {
+            abi: policyFundingAbi,
+            field: "function_name",
+            field_source: "ethereum_calldata",
+            operator: "eq",
+            value: "fund",
+          },
+          {
+            abi: policyFundingAbi,
+            field: "fund.pUsdAmount",
+            field_source: "ethereum_calldata",
+            operator: "eq",
+            value: "0",
+          },
+        ],
+        id: "funding-router-full-receipt-wrap",
+        method: "eth_sendTransaction",
+        name: "Funding router full receipt wrap",
+      },
+    ],
   };
 }
 
@@ -583,10 +616,10 @@ const tests: TestCase[] = [
     },
   },
   {
-    name: "Privy bot policy resolver selects one exact action profile",
+    name: "Privy bot policy resolver always selects the combined automation policy",
     run: () => {
-      assert.equal(resolvePrivyBotPolicyProfile(["BUY"]), "buy");
-      assert.equal(resolvePrivyBotPolicyProfile(["SELL"]), "sell");
+      assert.equal(resolvePrivyBotPolicyProfile(["BUY"]), "buy_sell");
+      assert.equal(resolvePrivyBotPolicyProfile(["SELL"]), "buy_sell");
       assert.equal(resolvePrivyBotPolicyProfile(["SELL", "BUY"]), "buy_sell");
       assert.equal(resolvePrivyBotPolicyProfile([]), null);
       assert.throws(() => resolvePrivyBotPolicyProfile(["REDEEM"]));
@@ -886,12 +919,15 @@ const tests: TestCase[] = [
         authorizationId: "signer-1",
         authorizationKey,
         builderCode: policyBuilderCode,
-        buySellPolicyId: "buy-sell-policy",
         exchangeAddresses: [...policyExchangeAddresses],
-        policyId: "policy-1",
+        legacyBuyPolicyId: "policy-1",
+        legacySellPolicyId: "sell-policy",
+        policyId: "buy-sell-policy",
+        policyFingerprint: knownPrivyPolicyFingerprint(
+          buildValidPolymarketBuySellPolicy(),
+        ),
         policyMaxBuyUsd: 2,
         fundingRouterAddress: policyFundingRouterAddress,
-        sellPolicyId: "sell-policy",
       };
       const walletAddress = "0x0000000000000000000000000000000000000010";
       let additionalSigners: Array<{
@@ -953,8 +989,8 @@ const tests: TestCase[] = [
       const grantRequired = await inspect(true);
       assert.equal(grantRequired.state, "grant_required");
       assert.deepEqual(grantRequired.grant, {
-        policyIds: ["policy-1"],
-        policyProfile: "buy",
+        policyIds: ["buy-sell-policy"],
+        policyProfile: "buy_sell",
         replaceExistingSigner: false,
         signerId: "signer-1",
         walletAddress,
@@ -968,8 +1004,7 @@ const tests: TestCase[] = [
       additionalSigners = [
         { overridePolicyIds: ["policy-1"], signerId: "signer-1" },
       ];
-      assert.equal((await inspect(true)).state, "ready");
-      const combinedReplacement = await inspect(true, ["BUY", "SELL"]);
+      const combinedReplacement = await inspect(true);
       assert.equal(combinedReplacement.state, "grant_required");
       assert.deepEqual(combinedReplacement.grant, {
         policyIds: ["buy-sell-policy"],
@@ -991,7 +1026,7 @@ const tests: TestCase[] = [
       additionalSigners = [
         { overridePolicyIds: ["sell-policy"], signerId: "signer-1" },
       ];
-      assert.equal((await inspect(true, ["SELL"])).state, "ready");
+      assert.equal((await inspect(true, ["SELL"])).state, "grant_required");
       assert.equal((await inspect(true, ["BUY"])).state, "grant_required");
       additionalSigners = [
         { overridePolicyIds: ["policy-1"], signerId: "signer-1" },

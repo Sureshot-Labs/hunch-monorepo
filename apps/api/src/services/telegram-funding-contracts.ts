@@ -5,6 +5,8 @@ export const TELEGRAM_FUNDING_CALLBACK_PREFIX = "hm:v1:fund";
 export type TelegramFundingProgressState =
   | "waiting_for_transfer"
   | "funds_received"
+  | "waiting_for_routing"
+  | "converting"
   | "ready"
   | "expired"
   | "cancelled"
@@ -15,13 +17,16 @@ export type TelegramFundingProgressProjection = Readonly<{
   fundingContextId: string;
   state: TelegramFundingProgressState;
   terminal: boolean;
-  assetSymbol: "pUSD" | "USDC.e";
+  assetSymbol: "pUSD" | "USDC.e" | "Multiple assets";
   networkLabel: "Polygon";
   rawAmount: string | null;
   decimals: 6;
   receiveAddress: string | null;
   expiresAt: string;
   observedAt: string | null;
+  automaticConversionEnabled?: boolean;
+  sourceAssetSymbol?: "USDC.e";
+  sourceRawAmount?: string | null;
 }>;
 
 export type TelegramFundingMessage = TelegramBotTradingClientMessage & {

@@ -77,6 +77,7 @@ const target: PolymarketFundingPostconditionTarget = {
   receiptRefCiphertext: `encrypted:${TX_HASH}`,
   receiptRefLookupHmac: `fingerprint:${TX_HASH}`,
   lookupKeyVersion: 1,
+  attributedPusdRaw: plan.totalAmountRaw,
   ledgerHeight: "123",
   blockHash: `0x${"34".repeat(32)}`,
   finalizedAt: new Date("2026-07-24T12:00:04.000Z"),
@@ -164,5 +165,5 @@ await assert.rejects(
 );
 
 console.log(
-  "[polymarket-funding-reconciler-tests] exact receipt integrity, nonce/balance/CLOB postconditions, persistence handoff, and driver composition passed",
+  "[polymarket-funding-reconciler-tests] exact receipt credit, nonce/balance/CLOB postconditions, persistence handoff, and driver composition passed",
 );

@@ -32,6 +32,7 @@ import {
   canonicalLocationKey,
   deduplicateObservedAssets,
   stableOpaqueId,
+  stableWalletOpaqueId,
 } from "./canonical.js";
 import {
   projectCashAvailability,
@@ -68,7 +69,7 @@ import {
   type FundingAccountValueFacts,
 } from "./funding-movement-feed.js";
 import {
-  exactStableAccountAssets,
+  knownAccountAssets,
   resolveKnownAccountAsset,
 } from "./known-asset-catalog.js";
 
@@ -109,15 +110,23 @@ export type AccountValueReadModel = Readonly<{
   assetPreferences: Readonly<Record<string, StoredAssetFundingPreference>>;
 }>;
 
-function exactStableCatalog(): AccountAssetCatalogEntry[] {
-  return exactStableAccountAssets().map((entry) => ({
+function knownAssetCatalog(): AccountAssetCatalogEntry[] {
+  return knownAccountAssets().map((entry) => ({
     asset: entry.asset,
     category: entry.category,
-    pricePolicyId: EXACT_STABLE_PRICE_POLICY_ID,
+    pricePolicyId: entry.exactStable
+      ? EXACT_STABLE_PRICE_POLICY_ID
+      : UNPRICED_POLICY_ID,
     symbol: entry.symbol,
     venueId: entry.venueId,
     verified: true,
   }));
+}
+
+function exactStableCatalog(): AccountAssetCatalogEntry[] {
+  return knownAssetCatalog().filter(
+    (entry) => entry.pricePolicyId === EXACT_STABLE_PRICE_POLICY_ID,
+  );
 }
 
 function mergeCatalogWithPolicy(
@@ -130,16 +139,15 @@ function mergeCatalogWithPolicy(
   }>[],
 ): AccountAssetCatalogEntry[] {
   const catalog = new Map(
-    exactStableCatalog().map((entry) => [
-      canonicalAssetKey(entry.asset),
-      entry,
-    ]),
+    knownAssetCatalog().map((entry) => [canonicalAssetKey(entry.asset), entry]),
   );
   for (const item of policyAssets) {
     const key = canonicalAssetKey(item.asset);
     const existing = catalog.get(key);
     if (!item.enabled || !item.observationEnabled) {
-      if (existing) catalog.delete(key);
+      // Funding support must never conceal already-owned known assets from
+      // the user's balance. Policy entries can add/price assets; receive and
+      // route eligibility is enforced separately by the funding resolver.
       continue;
     }
     const pricePolicyId =
@@ -210,12 +218,12 @@ function buildObservation(inputs: {
     asset: inputs.entry.asset,
     details: {
       address,
-      walletId: stableOpaqueId(
-        "wallet",
-        `${
-          inputs.resolution.walletType === "solana" ? "solana" : "ethereum"
-        }:${inputs.entry.asset.networkId}:${address}`,
-      ),
+      walletId: stableWalletOpaqueId({
+        walletType:
+          inputs.resolution.walletType === "solana" ? "solana" : "ethereum",
+        networkId: inputs.entry.asset.networkId,
+        address,
+      }),
       linkedAddress: inputs.resolution.linkedWalletAddress,
       balanceClass: inputs.entry.venueId ?? "wallet",
       ...(inputs.entry.venueId ? { venueId: inputs.entry.venueId } : {}),
@@ -411,7 +419,7 @@ export async function buildAccountValueReadModel(inputs: {
     AuthService.getUserWallets(inputs.userId),
     loadBalanceWalletLookup(inputs.userId),
   ]);
-  const catalog = mergeCatalogWithPolicy(resolvedPolicy.policy.assets);
+  const catalog = mergeCatalogWithPolicy(resolvedPolicy.runtime.assets);
   const resolutions = [...balanceLookup.values()];
   const credentialFacts = await Promise.all(
     linkedWallets
@@ -554,7 +562,7 @@ export async function buildAccountValueReadModel(inputs: {
       entry.pricePolicyId === STABLE_IMPAIRED_PRICE_POLICY_ID
         ? EXACT_STABLE_PRICE_POLICY_ID
         : entry.pricePolicyId,
-    maximumObservationAgeMs: resolvedPolicy.policy.ttl.collectorMs,
+    maximumObservationAgeMs: resolvedPolicy.runtime.ttl.collectorMs,
     executionEligibility: "unknown",
   }));
   const valuationService = new ValuationService({
@@ -610,7 +618,7 @@ export async function buildAccountValueReadModel(inputs: {
     (wallet) => wallet.walletAddress,
   );
   const positionFreshness = Math.max(
-    resolvedPolicy.policy.ttl.collectorMs,
+    resolvedPolicy.runtime.ttl.collectorMs,
     300_000,
   );
   const positionErrors: CollectorError[] = [];
@@ -747,7 +755,7 @@ export async function buildAccountValueReadModel(inputs: {
   ];
   const projection = projectAccountValue({
     accountId: inputs.userId,
-    headlineMode: resolvedPolicy.policy.headline.mode,
+    headlineMode: resolvedPolicy.runtime.headline.mode,
     components: projectedAssets,
     positionComponents,
     collectorErrors,
@@ -768,12 +776,12 @@ export async function buildAccountValueReadModel(inputs: {
       catalog,
     }),
     policy: {
-      creationMode: resolvedPolicy.policy.creationMode,
+      creationMode: resolvedPolicy.runtime.creationMode,
       revision: resolvedPolicy.revision,
       source: resolvedPolicy.source,
       invalidStoredPolicy: resolvedPolicy.invalidStoredPolicy,
     },
-    runtimePolicy: resolvedPolicy.policy,
+    runtimePolicy: resolvedPolicy.runtime,
     ownershipEvidenceRevision: ownership.evidenceRevision,
     ownership,
     duplicateAssetObservationCount: deduplicated.duplicateCount,

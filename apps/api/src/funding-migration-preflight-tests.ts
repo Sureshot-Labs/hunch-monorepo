@@ -28,7 +28,8 @@ const db = {
           params[0].includes("0199_telegram_funding_receive.sql") &&
           params[0].includes("0200_runtime_policy_admin_actor.sql") &&
           params[0].includes("0201_telegram_funding_open_idempotency.sql") &&
-          params[0].includes("0203_telegram_funding_buy_continuation.sql"),
+          params[0].includes("0203_telegram_funding_buy_continuation.sql") &&
+          params[0].includes("0204_delegated_funding_execution.sql"),
       );
       return { rows: [] };
     }
@@ -70,6 +71,7 @@ const report = await inspectFundingMigrationPreflight(db as never);
 assert.deepEqual(report.blockers, [
   "0201 Telegram funding open idempotency migration is not recorded",
   "0203 Telegram funding Buy continuation migration is not recorded",
+  "0204 delegated funding execution migration is not recorded",
 ]);
 assert.equal(report.latestMigration, "0182_telegram_bot_action_outbox.sql");
 assert.equal(report.bridgeOrders.total, 256);
@@ -211,6 +213,7 @@ const ready = await inspectFundingMigrationPreflight(
 );
 assert.deepEqual(ready.blockers, [
   "0203 Telegram funding Buy continuation migration is not recorded",
+  "0204 delegated funding execution migration is not recorded",
 ]);
 assert.equal(ready.telegramOpenMutationConstraints, true);
 
@@ -224,6 +227,7 @@ const missingMigration = await inspectFundingMigrationPreflight(
 assert.deepEqual(missingMigration.blockers, [
   "0201 Telegram funding open idempotency migration is not recorded",
   "0203 Telegram funding Buy continuation migration is not recorded",
+  "0204 delegated funding execution migration is not recorded",
 ]);
 
 const recordedWithoutConstraint = await inspectFundingMigrationPreflight(
@@ -235,6 +239,7 @@ const recordedWithoutConstraint = await inspectFundingMigrationPreflight(
 );
 assert.deepEqual(recordedWithoutConstraint.blockers, [
   "0203 Telegram funding Buy continuation migration is not recorded",
+  "0204 delegated funding execution migration is not recorded",
   "0201 is recorded but telegram_funding_mutations open constraints are incomplete",
 ]);
 
@@ -247,6 +252,7 @@ const recordedWithOldShapeConstraint = await inspectFundingMigrationPreflight(
 );
 assert.deepEqual(recordedWithOldShapeConstraint.blockers, [
   "0203 Telegram funding Buy continuation migration is not recorded",
+  "0204 delegated funding execution migration is not recorded",
   "0201 is recorded but telegram_funding_mutations open constraints are incomplete",
 ]);
 
@@ -260,6 +266,7 @@ const constraintWithoutLedger = await inspectFundingMigrationPreflight(
 assert.deepEqual(constraintWithoutLedger.blockers, [
   "0201 Telegram funding open idempotency migration is not recorded",
   "0203 Telegram funding Buy continuation migration is not recorded",
+  "0204 delegated funding execution migration is not recorded",
   "Telegram funding open mutation constraints exist before 0201 is recorded",
 ]);
 
@@ -473,13 +480,16 @@ function buildTelegram0203Db(
 const telegram0203Ready = await inspectFundingMigrationPreflight(
   buildTelegram0203Db({ applied: true, completeObjects: true }) as never,
 );
-assert.deepEqual(telegram0203Ready.blockers, []);
+assert.deepEqual(telegram0203Ready.blockers, [
+  "0204 delegated funding execution migration is not recorded",
+]);
 assert.equal(telegram0203Ready.telegramBuyContinuationObjects, true);
 
 const telegram0203RecordedIncomplete = await inspectFundingMigrationPreflight(
   buildTelegram0203Db({ applied: true, completeObjects: false }) as never,
 );
 assert.deepEqual(telegram0203RecordedIncomplete.blockers, [
+  "0204 delegated funding execution migration is not recorded",
   "0203 is recorded but Telegram funding Buy continuation objects are incomplete",
 ]);
 assert.equal(
@@ -495,6 +505,7 @@ const telegram0203OldRearmFunction = await inspectFundingMigrationPreflight(
   }) as never,
 );
 assert.deepEqual(telegram0203OldRearmFunction.blockers, [
+  "0204 delegated funding execution migration is not recorded",
   "0203 is recorded but Telegram funding Buy continuation objects are incomplete",
 ]);
 assert.equal(
@@ -507,6 +518,7 @@ const telegram0203ObjectsBeforeRecord = await inspectFundingMigrationPreflight(
 );
 assert.deepEqual(telegram0203ObjectsBeforeRecord.blockers, [
   "0203 Telegram funding Buy continuation migration is not recorded",
+  "0204 delegated funding execution migration is not recorded",
   "Telegram funding Buy continuation objects exist before 0203 is recorded",
 ]);
 console.log("[funding-migration-preflight-tests] passed");

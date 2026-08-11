@@ -96,6 +96,10 @@ import type {
   TradingReadiness,
   TradingVenue,
 } from "./services/trading-types.js";
+import {
+  FUNDING_RECEIVE_ASSET_IDS,
+  type FundingIntentPolicy,
+} from "./funding/policies/funding-policy-v2.js";
 import { createTelegramBotTradingInternalApiClient } from "./services/telegram-bot-trading-client.js";
 import {
   buildTelegramTradeProgressMessage,
@@ -144,6 +148,12 @@ import {
   type XEditorialDraftComposer,
 } from "./services/x-editorial-draft.js";
 
+const FULL_FUNDING_POLICY: FundingIntentPolicy = {
+  version: 2,
+  venues: ["polymarket", "limitless"],
+  receive: { assets: [...FUNDING_RECEIVE_ASSET_IDS], privy: true },
+  paused: false,
+};
 const TEST_TELEGRAM_MINI_APP_LINK_BASE = "https://t.me/hunch_signal_bot/hunch";
 const TEST_ENABLED_TELEGRAM_TRADING_PREFERENCE = {
   applied_policy_revision: null,
@@ -4091,23 +4101,26 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         target: unknown;
       }> = [];
       const db = {
-        query: async (sql: string) => {
+        query: async (sql: string, params?: unknown[]) => {
           if (/from runtime_policies/i.test(sql)) {
             return {
               rowCount: 1,
               rows: [
                 {
-                  payload: {
-                    autoManagedMaxAmountUsd,
-                    customTradeInputEnabled,
-                    tradingEnabled: policyTradingEnabled,
-                    tradingActions,
-                    tradingVenues,
-                    buyAmountPresetsUsd,
-                    maxTradeAmountUsd: 50,
-                    maxSlippageBps: 500,
-                    intentTtlSec: 120,
-                  },
+                  payload:
+                    params?.[0] === "funding_control_plane"
+                      ? FULL_FUNDING_POLICY
+                      : {
+                          autoManagedMaxAmountUsd,
+                          customTradeInputEnabled,
+                          tradingEnabled: policyTradingEnabled,
+                          tradingActions,
+                          tradingVenues,
+                          buyAmountPresetsUsd,
+                          maxTradeAmountUsd: 50,
+                          maxSlippageBps: 500,
+                          intentTtlSec: 120,
+                        },
                 },
               ],
             };

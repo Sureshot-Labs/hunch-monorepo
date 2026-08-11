@@ -5,6 +5,8 @@ import assert from "node:assert/strict";
 import type { AccountValueReadModel } from "../../../account-value/runtime-service.js";
 import { RELAY_PINNED_ASSETS } from "../../../funding-providers/relay/mappings.js";
 import type { FundingRuntimePolicy } from "../../policies/funding-policy.js";
+import { withWithdrawalPlanningContract } from "../../domain/withdrawal-contract.js";
+import { compileFundingIntentPolicy } from "../../policies/funding-policy-v2.js";
 import { PRIVY_USER_AUTHORIZED_EVM_SPONSORSHIP_POLICY_ID } from "../../execution/sponsorship-policy.js";
 import { SOLANA_NATIVE_EXECUTION_RESERVE_LAMPORTS } from "../../domain/network-fees.js";
 import {
@@ -98,7 +100,7 @@ function policy(
   overrides: Partial<FundingRuntimePolicy> = {},
 ): FundingRuntimePolicy {
   return {
-    version: 1,
+    contractVersion: 1,
     creationMode: "on",
     gates: {
       quoteCreation: true,
@@ -180,7 +182,6 @@ function policy(
         destinationLocationPatternId: "venue_polymarket_pusd",
         sourceAsset: BASE_USDC,
         destinationAsset: POLYGON_PUSD,
-        fixtureIds: ["relay_wallet_evm_roundtrip_live"],
         actionValidatorId: "relay_evm_action_v1",
         networkExecutorId: "wallet_profile_evm_v1",
         reconcilerId: "relay_status_v3",
@@ -706,7 +707,6 @@ assert.equal(excludedByPreference.length, 0);
         sourceAsset: SOLANA_NATIVE,
         actionValidatorId: "relay_svm_action_v1",
         networkExecutorId: "wallet_profile_svm_v1",
-        fixtureIds: ["relay_wallet_solana_native_to_pusd_quote_live"],
       },
     ],
   });
@@ -791,10 +791,6 @@ assert.equal(excludedByPreference.length, 0);
         routeId: "solana-sol-to-base-usdc",
         destinationLocationPatternId: "venue_limitless_usdc",
         destinationAsset: BASE_USDC,
-        fixtureIds: [
-          "relay_wallet_solana_sol_to_base_usdc_quote_live",
-          "relay_status_lifecycle_v3",
-        ],
       },
     ],
   });
@@ -840,7 +836,6 @@ assert.equal(excludedByPreference.length, 0);
         sourceAsset: SOLANA_USDC,
         actionValidatorId: "relay_svm_action_v1",
         networkExecutorId: "wallet_profile_svm_v1",
-        fixtureIds: ["relay_wallet_solana_usdc_to_pusd_quote_live"],
       },
     ],
   });
@@ -979,7 +974,6 @@ assert.equal(excludedByPreference.length, 0);
         routeId: "solana-sol-to-polygon-pusd",
         sourceLocationPatternId: "wallet_solana_native",
         sourceAsset: SOLANA_NATIVE,
-        fixtureIds: ["relay_wallet_solana_native_to_pusd_quote_live"],
       },
     ],
   });
@@ -1118,16 +1112,34 @@ assert.equal(
   }).length,
   0,
 );
-const withdrawalPolicy = policy({
-  locations: policy().locations.map((location) => ({
-    ...location,
-    capabilities: [...location.capabilities, "withdrawal_source"],
-  })),
-});
+const withdrawalPolicy = withWithdrawalPlanningContract(
+  compileFundingIntentPolicy({
+    version: 2,
+    venues: [],
+    receive: { assets: [], privy: false },
+    paused: true,
+  }),
+  POLYGON_PUSD,
+);
+const unpricedWithdrawalAccount = structuredClone(account()) as unknown as {
+  projection: {
+    components: Array<{
+      estimatedUsd: null;
+      valuationEligibility: "excluded";
+    }>;
+  };
+};
+const [unpricedWithdrawalComponent] =
+  unpricedWithdrawalAccount.projection.components;
+if (!unpricedWithdrawalComponent) {
+  throw new Error("unpriced withdrawal component fixture is missing");
+}
+unpricedWithdrawalComponent.estimatedUsd = null;
+unpricedWithdrawalComponent.valuationEligibility = "excluded";
 assert.equal(
   deriveProductionRelayEligibleSourceFacts({
     accountId: ACCOUNT_ID,
-    account: account(),
+    account: unpricedWithdrawalAccount as unknown as AccountValueReadModel,
     policy: withdrawalPolicy,
     requiredAmount: { asset: POLYGON_PUSD, raw: "3000000" },
     purpose: "withdrawal",

@@ -1,10 +1,7 @@
 import type { AccountValueReadModel } from "../../account-value/runtime-service.js";
 import { multiplyRawByUnitPrice } from "../../account-value/decimal.js";
 import { stableOpaqueId } from "../../account-value/canonical.js";
-import {
-  buildPolymarketFundingPlan,
-  PolymarketFundingPlanError,
-} from "../../services/polymarket-funding-router.js";
+import { PolymarketFundingPlanError } from "../../services/polymarket-funding-router.js";
 import {
   isRelayPinnedStableAsset,
   RELAY_PINNED_ASSETS,
@@ -24,11 +21,16 @@ import {
 } from "../domain/asset-identity.js";
 import { resolveActionSponsorship } from "../execution/sponsorship-policy.js";
 import { canonicalJsonHash } from "../persistence/canonical.js";
+import { fundingReceiveAssetEnabled } from "../policies/funding-policy-v2.js";
 import type {
   FundingCommitPlan,
   FundingCommitReservation,
 } from "../persistence/funding-operation-repository.js";
-import { buildPolymarketFundingFollowupAction } from "../preparation/polymarket-funding-followup.js";
+import {
+  buildExactPolymarketDepositUsdceWrapPlan,
+  buildPolymarketFundingActionValidation,
+  buildPolymarketFundingFollowupAction,
+} from "../preparation/polymarket-funding-followup.js";
 import { parsePolymarketFundingEvidence } from "../preparation/polymarket-funding-snapshot.js";
 import type {
   FundingSourceAdapter,
@@ -39,6 +41,7 @@ import { buildFundingReceiveTargets } from "./receive-targets.js";
 import { sameAsset } from "./money.js";
 import { supportsCanonicalFundingReceiveEvents } from "../receive/canonical-receive-capabilities.js";
 import { fundingSidecarRuntimeConfig } from "../runtime/sidecar-runtime-config.js";
+import { POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID } from "../execution/delegated-funding-profile-ids.js";
 
 function jsonRecord(value: unknown): Readonly<Record<string, JsonValue>> {
   return value as Readonly<Record<string, JsonValue>>;
@@ -205,51 +208,17 @@ function buildPolymarketIngressCompletion(input: {
   ) {
     return null;
   }
-  const depositAvailableRaw =
-    BigInt(snapshot.depositPusdRaw) > BigInt(snapshot.depositLockedRaw)
-      ? BigInt(snapshot.depositPusdRaw) - BigInt(snapshot.depositLockedRaw)
-      : 0n;
   let plan;
   try {
-    plan = buildPolymarketFundingPlan({
-      signer: snapshot.signerAddress,
-      depositWallet: snapshot.depositWallet,
-      routerAddress: snapshot.routerAddress,
-      routerNonce: BigInt(snapshot.routerNonceRaw),
-      requiredRaw:
-        depositAvailableRaw + BigInt(input.planning.requiredAmount.raw),
-      depositPusdRaw: BigInt(snapshot.depositPusdRaw),
-      depositLockedRaw: BigInt(snapshot.depositLockedRaw),
-      // This branch is frozen against the amount this operation is waiting
-      // to receive. Existing USDC.e is intentionally not swept.
-      depositUsdceRaw: BigInt(input.planning.requiredAmount.raw),
-      depositRouterUsdceAllowanceRaw: BigInt(
-        snapshot.depositRouterUsdceAllowanceRaw,
-      ),
-      signerPusdRaw: 0n,
-      signerLockedRaw: 0n,
-      signerUsdceRaw: 0n,
-      routerPusdAllowanceRaw: 0n,
-      routerUsdceAllowanceRaw: 0n,
-      // The external ingress operation is already frozen to the exact amount
-      // the user confirmed. Bound this follow-up to that amount instead of a
-      // delegated bot-buy policy cap; the router allowance is checked
-      // independently above.
-      fundingCapRaw: BigInt(input.planning.requiredAmount.raw),
+    plan = buildExactPolymarketDepositUsdceWrapPlan({
+      receiptRaw: input.planning.requiredAmount.raw,
+      snapshot,
     });
   } catch (error) {
     if (error instanceof PolymarketFundingPlanError) return null;
     throw error;
   }
-  if (
-    !plan ||
-    plan.totalAmountRaw !== input.planning.requiredAmount.raw ||
-    plan.depositUsdceAmountRaw !== input.planning.requiredAmount.raw ||
-    plan.pUsdAmountRaw !== "0" ||
-    plan.signerUsdceAmountRaw !== "0"
-  ) {
-    return null;
-  }
+  if (!plan) return null;
   const quoteCorrelationId = stableOpaqueId(
     "funding_quote",
     canonicalJsonHash({
@@ -320,6 +289,9 @@ function buildPolymarketIngressCompletion(input: {
       },
     },
   ];
+  const delegatedWrap =
+    input.planning.request.serverExecutionProfileId ===
+    POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID;
   return {
     variants,
     step: {
@@ -328,25 +300,27 @@ function buildPolymarketIngressCompletion(input: {
       stepKind: "venue_preparation",
       state: "planned",
       actionFingerprint: canonicalJsonHash(action),
-      executorId: "wallet_profile_evm_v1",
+      executorId: delegatedWrap
+        ? POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID
+        : "wallet_profile_evm_v1",
       payerRequirement: sponsorship.payerRequirement,
       dependsOnOrdinal: null,
       normalizedAction: jsonRecord(action),
       actionValidationResult: {
-        valid: true,
-        signerAddress: profile.address,
-        canonicalRouterAddress: snapshot.routerAddress,
-        expectedNonceRaw: plan.routerNonce,
-        expectedTotalAmountRaw: plan.totalAmountRaw,
-        fundingPlanHash: canonicalJsonHash(plan),
-        sponsorshipPolicyId: sponsorship.policyId,
-        signingMode: sponsorship.signingMode,
+        ...buildPolymarketFundingActionValidation({
+          destinationAssetId: input.planning.requiredAmount.asset.assetId,
+          plan,
+          profileAddress: profile.address,
+          routerAddress: snapshot.routerAddress,
+          sponsorship,
+        }),
         activation: "after_verified_ingress",
       },
     },
     walletExecutionSnapshot: jsonRecord(profile),
     supportMetadata: {
       preparationKind: "polymarket_funding_router",
+      venueBindingOptionId: facts.option.venueBindingOptionId,
       venueBinding: jsonRecord(facts.venueBinding),
       fundingPlan: jsonRecord(plan),
       before: {
@@ -820,43 +794,55 @@ export class DirectIngressFundingSourceAdapter implements FundingSourceAdapter {
           usdceAsset: this.config.usdceAsset,
         })
       : null;
-    const variants = completion?.variants ?? [exactIngressVariant(input)];
+    const candidateVariants = completion?.variants ?? [
+      exactIngressVariant(input),
+    ];
+    const directVariants = candidateVariants.filter((variant) =>
+      fundingReceiveAssetEnabled(input.policy, variant.asset),
+    );
+    const completionForSelectedAsset = directVariants.some(
+      (variant) => variant.completion.kind === "committed_venue_preparation",
+    )
+      ? completion
+      : null;
     // Receive targets are limited to networks with an exact canonical event
     // observer. Polygon and Base share the EVM Transfer scanner. Solana SPL
     // and native SOL use exact finalized instruction identity. A Relay quote
     // or aggregate wallet balance is never sufficient receipt identity.
     const receiveSessionVariants = [
-      ...variants,
+      ...directVariants,
       ...(this.account
         ? buildRoutedReceiveVariants({
             account: this.account,
             planning: input,
-            existing: variants,
+            existing: directVariants,
           })
         : []),
     ].filter((variant) =>
       supportsCanonicalFundingReceiveEvents(variant.networkId),
     );
-    if (receiveSessionVariants.length === 0) return [];
-    const manual = sourceOption({
-      planning: input,
-      kind: "manual_receive",
-      ingressKind: "manual",
-      safeLabel: "Deposit crypto",
-      expiresAt,
-      destinationAddress,
-      recommended: true,
-      variants: receiveSessionVariants,
-    });
-    const sources: PlannedSourceOption[] = [
-      plannedSource(
-        input,
-        manual,
-        variants,
-        completion,
-        receiveSessionVariants,
-      ),
-    ];
+    const sources: PlannedSourceOption[] = [];
+    if (receiveSessionVariants.length > 0) {
+      const manual = sourceOption({
+        planning: input,
+        kind: "manual_receive",
+        ingressKind: "manual",
+        safeLabel: "Deposit crypto",
+        expiresAt,
+        destinationAddress,
+        recommended: true,
+        variants: receiveSessionVariants,
+      });
+      sources.push(
+        plannedSource(
+          input,
+          manual,
+          directVariants,
+          completionForSelectedAsset,
+          receiveSessionVariants,
+        ),
+      );
+    }
     const privyEnabled = input.policy.privyFundingMethods.some(
       (method) =>
         method.enabled &&
@@ -865,7 +851,10 @@ export class DirectIngressFundingSourceAdapter implements FundingSourceAdapter {
           input.destination.destinationLocationPatternId &&
         sameAsset(method.asset, input.requiredAmount.asset),
     );
-    if (privyEnabled) {
+    const privyVariants = candidateVariants.filter((variant) =>
+      sameAsset(variant.asset, input.requiredAmount.asset),
+    );
+    if (privyEnabled && privyVariants.length > 0) {
       const privy = sourceOption({
         planning: input,
         kind: "privy_funding_method",
@@ -874,9 +863,9 @@ export class DirectIngressFundingSourceAdapter implements FundingSourceAdapter {
         expiresAt,
         destinationAddress,
         recommended: false,
-        variants,
+        variants: privyVariants,
       });
-      sources.push(plannedSource(input, privy, variants, completion, variants));
+      sources.push(plannedSource(input, privy, privyVariants, null));
     }
     return sources;
   }

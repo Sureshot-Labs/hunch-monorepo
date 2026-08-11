@@ -1568,6 +1568,9 @@ const tests: TestCase[] = [
       const client = {
         query: async (sql: string, params?: unknown[]) => {
           calls.push({ sql, params });
+          if (/pg_advisory_xact_lock/i.test(sql)) {
+            return { rows: [{}] };
+          }
           if (/FROM users WHERE privy_user_id = \$1/i.test(sql)) {
             return { rows: [] };
           }
@@ -1682,6 +1685,17 @@ const tests: TestCase[] = [
         "123456789",
         "ada",
         "Ada",
+      ]);
+      const lifecycleLockIndex = calls.findIndex((call) =>
+        /pg_advisory_xact_lock/i.test(call.sql),
+      );
+      const telegramInsertIndex = calls.findIndex((call) =>
+        /INSERT INTO user_telegram_accounts/i.test(call.sql),
+      );
+      assert.ok(lifecycleLockIndex >= 0);
+      assert.ok(lifecycleLockIndex < telegramInsertIndex);
+      assert.deepEqual(calls[lifecycleLockIndex]?.params, [
+        "telegram-funding-link-lifecycle:user-telegram",
       ]);
       const tradingPreferenceInsert = calls.find((call) =>
         /INSERT INTO telegram_bot_trading_preferences/i.test(call.sql),
@@ -1830,6 +1844,9 @@ const tests: TestCase[] = [
       const client = {
         query: async (sql: string, params?: unknown[]) => {
           calls.push({ sql, params });
+          if (/pg_advisory_xact_lock/i.test(sql)) {
+            return { rows: [{}] };
+          }
           if (/FROM users WHERE privy_user_id = \$1/i.test(sql)) {
             return { rows: [{ id: "user-existing" }] };
           }
@@ -1885,6 +1902,9 @@ const tests: TestCase[] = [
             return { rows: [] };
           }
           if (/UPDATE telegram_bot_trading_authorizations/i.test(sql)) {
+            return { rows: [] };
+          }
+          if (/UPDATE telegram_funding_authorizations/i.test(sql)) {
             return { rows: [] };
           }
           if (/UPDATE telegram_trade_intents/i.test(sql)) {
@@ -1960,6 +1980,12 @@ const tests: TestCase[] = [
       const preferenceUpdateIndex = calls.findIndex((call) =>
         /UPDATE telegram_notification_preferences/i.test(call.sql),
       );
+      const fundingRevocationIndex = calls.findIndex((call) =>
+        /UPDATE telegram_funding_authorizations/i.test(call.sql),
+      );
+      const lifecycleLockIndex = calls.findIndex((call) =>
+        /pg_advisory_xact_lock/i.test(call.sql),
+      );
       const lifecycleInsertIndex = calls.findIndex((call) =>
         /INSERT INTO analytics_server_events/i.test(call.sql),
       );
@@ -1969,7 +1995,18 @@ const tests: TestCase[] = [
         ),
       );
       assert.ok(preferenceUpdateIndex >= 0);
+      assert.ok(lifecycleLockIndex >= 0);
+      assert.ok(fundingRevocationIndex >= 0);
       assert.ok(lifecycleInsertIndex >= 0);
+      assert.ok(lifecycleLockIndex < fundingRevocationIndex);
+      assert.deepEqual(calls[lifecycleLockIndex]?.params, [
+        "telegram-funding-link-lifecycle:user-existing",
+      ]);
+      assert.ok(fundingRevocationIndex < telegramDeleteIndex);
+      assert.deepEqual(calls[fundingRevocationIndex]?.params, [
+        "user-existing",
+        "telegram-account-1",
+      ]);
       assert.ok(lifecycleInsertIndex < preferenceUpdateIndex);
       assert.ok(preferenceUpdateIndex < telegramDeleteIndex);
       assert.match(

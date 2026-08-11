@@ -3,8 +3,11 @@ import { tx, type Pool } from "@hunch/infra";
 
 import {
   fetchFundingReceiveSessionForUser,
+  listFundingReceiveRoutingReceiptIdsAfterBroadcastBoundary,
   listFundingReceiveReceiptsForUser,
 } from "../funding/persistence/funding-receive-session-repository.js";
+import { resolveTelegramPolymarketWrapCapability } from "../funding/execution/delegated-funding-capability-resolver.js";
+import { parseTelegramFundingAutomationPolicyV2 } from "../funding/execution/telegram-funding-automation-policy.js";
 import {
   parseTelegramFundingProgressProjection,
   projectTelegramFundingProgress,
@@ -22,6 +25,8 @@ type CandidateRow = Readonly<{
   telegram_user_id: string;
   chat_id: string;
 }>;
+
+const CAPABILITY_RECHECK_MS = 60_000;
 
 async function listProjectionCandidates(
   pool: Pick<Pool, "query">,
@@ -73,11 +78,41 @@ async function listProjectionCandidates(
             and coalesce(context.latest_progress_projection->>'terminal', 'false')
               <> 'true'
           )
+          or (
+            coalesce(context.latest_progress_projection->>'state', '')
+              <> 'converting'
+            and exists (
+              select 1
+              from funding_receive_receipts routing_receipt
+              join funding_operation_steps routing_step
+                on routing_step.operation_id =
+                     routing_receipt.child_funding_operation_id
+              join funding_operation_step_attempts routing_attempt
+                on routing_attempt.step_id = routing_step.id
+              where routing_receipt.receive_session_id =
+                      context.receive_session_id
+                and routing_receipt.user_id = context.user_id
+                and routing_receipt.status = 'routing'
+                and routing_receipt.handling = 'automatic_conversion'
+                and routing_attempt.broadcast_may_have_occurred
+            )
+          )
+          or (
+            context.active_consent_revision is not null
+            and coalesce(context.latest_progress_projection->>'terminal', 'false')
+              <> 'true'
+            and context.projection_checked_at <= $4
+          )
         )
       order by context.projection_checked_at asc nulls first, context.id asc
       limit $2
     `,
-    [input.now, input.limit, input.policyRevision],
+    [
+      input.now,
+      input.limit,
+      input.policyRevision,
+      new Date(input.now.getTime() - CAPABILITY_RECHECK_MS),
+    ],
   );
   return rows;
 }
@@ -106,14 +141,46 @@ async function projectCandidate(
       receiveSessionId: context.receiveSessionId,
     });
     if (!receive) return "skipped";
-    const [receipts, consent] = await Promise.all([
-      listFundingReceiveReceiptsForUser(client, {
+    const receipts = await listFundingReceiveReceiptsForUser(client, {
+      userId: context.userId,
+      receiveSessionId: context.receiveSessionId,
+    });
+    const afterBroadcastBoundaryReceiptIds =
+      await listFundingReceiveRoutingReceiptIdsAfterBroadcastBoundary(client, {
         userId: context.userId,
         receiveSessionId: context.receiveSessionId,
-      }),
-      fetchActiveTelegramFundingConsent(client, context.id),
-    ]);
+      });
+    const consent = await fetchActiveTelegramFundingConsent(client, context.id);
+    const automation = parseTelegramFundingAutomationPolicyV2(
+      consent?.policySnapshot,
+    );
+    const capability =
+      automation && context.telegramAccountId
+        ? await resolveTelegramPolymarketWrapCapability(client, {
+            userId: context.userId,
+            telegramAccountId: context.telegramAccountId,
+            telegramUserId: context.telegramUserId,
+            destinationOptionId: receive.session.destinationOptionId,
+            venueBindingOptionId: receive.session.venueBindingOptionId,
+            expectedAuthorizationId: automation.authorizationId,
+            expectedAuthorizationFingerprint:
+              automation.authorizationFingerprint,
+            expectedFundingPolicyRevision: automation.fundingPolicyRevision,
+            now,
+          })
+        : null;
     const projection = projectTelegramFundingProgress({
+      afterBroadcastBoundaryReceiptIds,
+      automaticConversionAvailable: capability?.decision.kind === "allowed",
+      automaticConversionMode: capability
+        ? capability.decision.kind === "allowed"
+          ? "available"
+          : capability.decision.kind === "soft_paused"
+            ? "soft_paused"
+            : "hard_invalid"
+        : automation
+          ? "hard_invalid"
+          : undefined,
       consent,
       context,
       receipts,

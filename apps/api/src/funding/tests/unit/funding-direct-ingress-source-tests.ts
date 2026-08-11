@@ -5,10 +5,12 @@ import assert from "node:assert/strict";
 import type { AccountValueReadModel } from "../../../account-value/runtime-service.js";
 import { RELAY_PINNED_ASSETS } from "../../../funding-providers/relay/mappings.js";
 import { sourceOptionSchema } from "../../../schemas/funding.js";
+import { POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID } from "../../execution/delegated-funding-profile-ids.js";
 import { PRIVY_USER_AUTHORIZED_EVM_SPONSORSHIP_POLICY_ID } from "../../execution/sponsorship-policy.js";
 import { DirectIngressFundingSourceAdapter } from "../../planner/direct-ingress-source-adapter.js";
 import type { FundingSourcePlanningInput } from "../../planner/source-adapter.js";
 import type { FundingRuntimePolicy } from "../../policies/funding-policy.js";
+import { compileFundingIntentPolicy } from "../../policies/funding-policy-v2.js";
 import { polymarketFundingEvidence } from "../../preparation/polymarket-funding-snapshot.js";
 
 const NOW = new Date("2026-07-24T12:00:00.000Z");
@@ -23,6 +25,11 @@ const ROUTER = "0x0000000000000000000000000000000000000004";
 const USDCE = {
   networkId: "evm:137",
   assetId: RELAY_PINNED_ASSETS.polygonUsdce,
+  decimals: 6,
+} as const;
+const POLYGON_USDC = {
+  networkId: "evm:137",
+  assetId: RELAY_PINNED_ASSETS.polygonUsdc,
   decimals: 6,
 } as const;
 const BASE_USDC = {
@@ -54,7 +61,7 @@ const BINDING_OPTION = {
 
 function policy(privyEnabled: boolean): FundingRuntimePolicy {
   return {
-    version: 1,
+    contractVersion: 1,
     creationMode: "on",
     automation: {
       automaticRebalance: false,
@@ -78,6 +85,26 @@ function policy(privyEnabled: boolean): FundingRuntimePolicy {
     ],
     ttl: { quoteMs: 30_000, reservationMs: 300_000 },
     locations: [
+      {
+        locationPatternId: "wallet_polygon_pusd",
+        locationKind: "wallet",
+        ownership: "owned",
+        observable: true,
+        capabilities: ["observe", "execution_source"],
+        asset: ASSET,
+        enabled: true,
+        policyVersion: 1,
+      },
+      {
+        locationPatternId: "wallet_polygon_usdce",
+        locationKind: "wallet",
+        ownership: "owned",
+        observable: true,
+        capabilities: ["observe", "execution_source"],
+        asset: USDCE,
+        enabled: true,
+        policyVersion: 1,
+      },
       {
         locationPatternId: "polymarket-venue-cash-v1",
         locationKind: "venue_account",
@@ -305,12 +332,83 @@ assert.deepEqual(
 );
 assert.equal(multiAsset.commitPlan.steps[0]?.state, "planned");
 assert.equal(multiAsset.commitPlan.steps[0]?.stepKind, "venue_preparation");
+assert.equal(
+  multiAsset.commitPlan.steps[0]?.executorId,
+  "wallet_profile_evm_v1",
+  "the existing web USDC.e flow must keep its user-authorized executor",
+);
 assert.equal(multiAsset.commitPlan.reservations.length, 2);
 assert.equal(
   multiAsset.commitPlan.operation.supportMetadata?.preparationKind,
   "polymarket_funding_router",
 );
 sourceOptionSchema.parse(multiAsset.option);
+
+const [delegatedTelegramIngress] = await multiAssetAdapter.list({
+  ...input(false, "add_funds", true),
+  request: {
+    ...input(false, "add_funds", true).request,
+    serverExecutionProfileId: POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
+  },
+});
+assert.equal(
+  delegatedTelegramIngress?.commitPlan.steps[0]?.executorId,
+  POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
+  "only the trusted internal Telegram receipt path selects delegated wrap",
+);
+
+const v2Input = input(false, "add_funds", true);
+const [nativePolygonOnly] = await multiAssetAdapter.list({
+  ...v2Input,
+  policy: compileFundingIntentPolicy({
+    version: 2,
+    venues: ["polymarket"],
+    receive: { assets: ["polygon:usdc"], privy: false },
+    paused: false,
+  }),
+});
+assert.ok(nativePolygonOnly);
+assert.deepEqual(
+  nativePolygonOnly.option.ingress?.receiveTargets?.flatMap((target) =>
+    target.acceptedAssets.map((accepted) => accepted.asset),
+  ),
+  [POLYGON_USDC],
+  "compact receive aliases must be an exact allowlist",
+);
+
+assert.deepEqual(
+  await multiAssetAdapter.list({
+    ...v2Input,
+    policy: compileFundingIntentPolicy({
+      version: 2,
+      venues: ["polymarket"],
+      receive: { assets: [], privy: false },
+      paused: false,
+    }),
+  }),
+  [],
+  "a venue alone must not create an unselected receive target",
+);
+
+const privyOnly = await multiAssetAdapter.list({
+  ...v2Input,
+  policy: compileFundingIntentPolicy({
+    version: 2,
+    venues: ["polymarket"],
+    receive: { assets: [], privy: true },
+    paused: false,
+  }),
+});
+assert.deepEqual(
+  privyOnly.map((source) => source.option.kind),
+  ["privy_funding_method"],
+);
+assert.deepEqual(
+  privyOnly[0]?.option.ingress?.receiveTargets?.flatMap((target) =>
+    target.acceptedAssets.map((accepted) => accepted.asset),
+  ),
+  [ASSET],
+);
 
 const baseAddress = "0x0000000000000000000000000000000000000006";
 const unprovenCrossNetworkInput = input(false, "add_funds", true);
@@ -369,7 +467,6 @@ const inputWithUnprovenBaseRoute = {
         sourceAsset: BASE_USDC,
         destinationAsset: ASSET,
         destinationLocationPatternId: "polymarket-venue-cash-v1",
-        fixtureIds: ["relay_wallet_evm_roundtrip_live"],
         actionValidatorId: "relay_evm_action_v1",
         networkExecutorId: "wallet_profile_evm_v1",
         reconcilerId: "relay_status_v3",
@@ -570,7 +667,6 @@ const provenSolanaRouteInput = {
         sourceAsset: SOLANA_USDC,
         destinationAsset: ASSET,
         destinationLocationPatternId: "polymarket-venue-cash-v1",
-        fixtureIds: ["relay_solana_usdc_roundtrip_live"],
         actionValidatorId: "relay_solana_action_v1",
         networkExecutorId: "wallet_profile_solana_v1",
         reconcilerId: "relay_status_v3",
@@ -593,7 +689,6 @@ const provenSolanaRouteInput = {
         sourceAsset: SOLANA_NATIVE,
         destinationAsset: ASSET,
         destinationLocationPatternId: "polymarket-venue-cash-v1",
-        fixtureIds: ["relay_wallet_solana_native_to_pusd_quote_live"],
         actionValidatorId: "relay_solana_action_v1",
         networkExecutorId: "wallet_profile_solana_v1",
         reconcilerId: "relay_status_v3",
@@ -772,6 +867,16 @@ const baseReceiveInput = {
     ],
     locations: [
       ...baseTemplate.policy.locations,
+      {
+        locationPatternId: "wallet_base_usdc",
+        locationKind: "wallet",
+        ownership: "owned",
+        observable: true,
+        capabilities: ["observe", "execution_source"],
+        asset: BASE_USDC,
+        enabled: true,
+        policyVersion: 1,
+      },
       {
         locationPatternId: "limitless-venue-cash-v1",
         locationKind: "venue_account",

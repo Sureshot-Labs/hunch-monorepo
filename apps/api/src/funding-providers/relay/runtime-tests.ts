@@ -919,6 +919,7 @@ const destination: FundingTarget = {
     Object.keys(RELAY_ROUTE_SPECS).sort(),
     [
       ...Object.keys(relayRehearsalScenarios),
+      "polygon-usdc-to-polygon-pusd",
       "solana-sol-to-base-usdc",
       "solana-sol-to-polygon-pusd",
       "solana-usdc-to-base-usdc",
@@ -934,6 +935,27 @@ const destination: FundingTarget = {
     "expected_output",
   );
   assert.equal(
+    RELAY_ROUTE_SPECS["polygon-usdc-to-polygon-pusd"]?.quoteMode,
+    "expected_output",
+  );
+  assert.deepEqual(RELAY_ROUTE_SPECS["polygon-usdc-to-polygon-pusd"], {
+    routeId: "polygon-usdc-to-polygon-pusd",
+    source: {
+      networkId: "evm:137",
+      assetId: RELAY_PINNED_ASSETS.polygonUsdc,
+      decimals: 6,
+    },
+    destination: {
+      networkId: "evm:137",
+      assetId: RELAY_PINNED_ASSETS.polygonPusd,
+      decimals: 6,
+    },
+    sourceVm: "evm",
+    destinationVm: "evm",
+    quoteMode: "expected_output",
+    rehearsalScenario: null,
+  });
+  assert.equal(
     RELAY_ROUTE_SPECS["solana-sol-to-base-usdc"]?.quoteMode,
     "expected_output",
   );
@@ -943,7 +965,11 @@ const destination: FundingTarget = {
   );
   assert.deepEqual(
     PRODUCTION_FUNDING_REGISTRY.networkExecutors.map(({ id }) => id).sort(),
-    ["wallet_profile_evm_v1", "wallet_profile_svm_v1"],
+    [
+      "polymarket_deposit_usdce_wrap_v1",
+      "wallet_profile_evm_v1",
+      "wallet_profile_svm_v1",
+    ],
   );
   assert.ok(
     PRODUCTION_FUNDING_REGISTRY.providerAdapters.some(
