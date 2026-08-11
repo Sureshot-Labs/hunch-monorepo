@@ -1021,6 +1021,177 @@ export async function finishFundingStepAttemptForUserInTransaction(
   return { attempt, stepState };
 }
 
+export async function resolveAmbiguousProviderFundingStepAttemptForUserInTransaction(
+  client: PoolClient,
+  input: Readonly<{
+    userId: string;
+    operationId: string;
+    stepId: string;
+    attemptId: string;
+    providerReferenceLookupHmac: string;
+    resolution:
+      | Readonly<{
+          kind: "transaction";
+          receiptRefCiphertext: string;
+          receiptRefLookupHmac: string;
+          lookupKeyVersion: number;
+        }>
+      | Readonly<{
+          kind: "definitive_failure";
+          actualCosts: JsonRecord;
+        }>;
+    now?: Date;
+  }>,
+): Promise<
+  Readonly<{
+    attempt: FundingStepAttempt;
+    stepState: "reconcile_required" | "failed";
+  }>
+> {
+  const scope = await client.query<{
+    step_state: FundingOperationStepState;
+  }>(
+    `
+      select step.state as step_state
+      from funding_operation_step_attempts attempt
+      join funding_operation_steps step on step.id = attempt.step_id
+      join funding_operations operation on operation.id = step.operation_id
+      where operation.user_id = $1
+        and operation.id = $2
+        and step.id = $3
+        and attempt.id = $4
+      for update of operation, step, attempt
+    `,
+    [input.userId, input.operationId, input.stepId, input.attemptId],
+  );
+  const scoped = scope.rows[0];
+  if (!scoped) {
+    throw new FundingPersistenceError(
+      "operation_not_found",
+      "delegated funding attempt was not found for authenticated user",
+    );
+  }
+  const priorResult = await client.query<FundingStepAttemptDbRow>(
+    `select ${attemptColumns} from funding_operation_step_attempts where id = $1`,
+    [input.attemptId],
+  );
+  const priorRow = priorResult.rows[0];
+  if (!priorRow) {
+    throw new FundingPersistenceError(
+      "operation_not_found",
+      "delegated funding attempt disappeared while resolving its provider reference",
+    );
+  }
+  const prior = mapAttempt(priorRow);
+  if (input.resolution.kind === "transaction") {
+    if (
+      prior.outcome === "ambiguous" &&
+      prior.referenceKind === "transaction" &&
+      prior.receiptRefLookupHmac === input.resolution.receiptRefLookupHmac &&
+      prior.lookupKeyVersion === input.resolution.lookupKeyVersion
+    ) {
+      return { attempt: prior, stepState: "reconcile_required" };
+    }
+  } else if (
+    prior.outcome === "failed" &&
+    canonicalJsonEqual(prior.actualCosts, input.resolution.actualCosts)
+  ) {
+    return { attempt: prior, stepState: "failed" };
+  }
+  if (
+    prior.outcome !== "ambiguous" ||
+    prior.referenceKind !== "provider_receipt" ||
+    prior.receiptRefLookupHmac !== input.providerReferenceLookupHmac ||
+    prior.lookupKeyVersion === null ||
+    scoped.step_state !== "reconcile_required"
+  ) {
+    throw new FundingPersistenceError(
+      "invalid_state_transition",
+      "delegated provider reference is no longer awaiting resolution",
+    );
+  }
+  const now = input.now ?? new Date();
+  const resolved =
+    input.resolution.kind === "transaction"
+      ? await client.query<FundingStepAttemptDbRow>(
+          `
+            update funding_operation_step_attempts
+            set reference_kind = 'transaction',
+                receipt_ref_ciphertext = $2,
+                receipt_ref_lookup_hmac = $3,
+                lookup_key_version = $4,
+                updated_at = $5
+            where id = $1
+              and outcome = 'ambiguous'
+              and reference_kind = 'provider_receipt'
+              and receipt_ref_lookup_hmac = $6
+            returning ${attemptColumns}
+          `,
+          [
+            input.attemptId,
+            input.resolution.receiptRefCiphertext,
+            input.resolution.receiptRefLookupHmac,
+            input.resolution.lookupKeyVersion,
+            now,
+            input.providerReferenceLookupHmac,
+          ],
+        )
+      : await client.query<FundingStepAttemptDbRow>(
+          `
+            update funding_operation_step_attempts
+            set outcome = 'failed',
+                broadcast_may_have_occurred = false,
+                reference_kind = null,
+                receipt_ref_ciphertext = null,
+                receipt_ref_lookup_hmac = null,
+                lookup_key_version = null,
+                actual_costs = $2::jsonb,
+                updated_at = $3
+            where id = $1
+              and outcome = 'ambiguous'
+              and reference_kind = 'provider_receipt'
+              and receipt_ref_lookup_hmac = $4
+            returning ${attemptColumns}
+          `,
+          [
+            input.attemptId,
+            input.resolution.actualCosts,
+            now,
+            input.providerReferenceLookupHmac,
+          ],
+        );
+  const resolvedRow = resolved.rows[0];
+  if (!resolvedRow) {
+    throw new FundingPersistenceError(
+      "invalid_state_transition",
+      "delegated provider reference resolution lost its compare-and-set",
+    );
+  }
+  const stepState =
+    input.resolution.kind === "transaction" ? "reconcile_required" : "failed";
+  if (stepState === "failed") {
+    const updated = await client.query(
+      `
+        update funding_operation_steps
+        set state = 'failed', updated_at = $2
+        where id = $1 and state = 'reconcile_required'
+      `,
+      [input.stepId, now],
+    );
+    if (updated.rowCount !== 1) {
+      throw new FundingPersistenceError(
+        "invalid_state_transition",
+        "delegated funding step changed while resolving provider failure",
+      );
+    }
+  }
+  await wakeFundingReconciliationInTransaction(client, {
+    operationId: input.operationId,
+    dueAt: now,
+  });
+  return { attempt: mapAttempt(resolvedRow), stepState };
+}
+
 export async function finishFundingStepAttemptForUser(
   pool: Pool,
   input: Parameters<typeof finishFundingStepAttemptForUserInTransaction>[1],

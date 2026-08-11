@@ -4,7 +4,6 @@ import {
   normalizeUnsignedDecimal,
   parseUnsignedDecimal,
 } from "../account-value/decimal.js";
-import { resolveKnownAccountAssetSymbol } from "../account-value/known-asset-catalog.js";
 import {
   sameAccountAddress,
   sameAsset,
@@ -18,8 +17,19 @@ import type {
 import { FundingPlanningRuntime } from "../funding/planner/runtime-service.js";
 import { FundingPlannerError } from "../funding/planner/money.js";
 import { canonicalJsonHash } from "../funding/persistence/canonical.js";
+import { listFundingReceiveRoutingReceiptIdsAfterBroadcastBoundary } from "../funding/persistence/funding-receive-session-repository.js";
 import type { DirectIngressObservationVariant } from "../funding/reconciliation/direct-ingress-observer.js";
+import { initializeCanonicalFundingReceiveEventCursors } from "../funding/receive/canonical-receive-event-scanner.js";
 import { FundingReceiveSessionService } from "../funding/receive/receive-session-service.js";
+import type { DelegatedFundingPreBroadcastDecision } from "../funding/execution/delegated-funding-capability.js";
+import { resolveTelegramPolymarketWrapCapability } from "../funding/execution/delegated-funding-capability-resolver.js";
+import type { TelegramFundingAuthorization } from "../funding/execution/telegram-funding-authorization.js";
+import {
+  buildTelegramFundingAutomationPolicyV2,
+  parseTelegramFundingAutomationPolicyV2,
+  telegramFundingAutomationPolicyJson,
+} from "../funding/execution/telegram-funding-automation-policy.js";
+import { fundingSidecarRuntimeConfig } from "../funding/runtime/sidecar-runtime-config.js";
 import {
   findTradeMarketById,
   isOrderable,
@@ -45,6 +55,7 @@ import {
   buildTelegramFundingProgressMessage,
   buildTelegramFundingTargetMessage,
   buildTelegramFundingUnavailableMessage,
+  type TelegramFundingReceivePresentationMode,
 } from "./telegram-funding-presentation.js";
 import { projectTelegramFundingProgress } from "./telegram-funding-progress.js";
 import {
@@ -344,46 +355,189 @@ function rethrowTelegramFundingPersistenceError(error: unknown): never {
   throw error;
 }
 
-export function resolveTelegramDirectPusdChoice(input: {
+type TelegramFundingTargetCapability = Readonly<{
+  address: string;
+  automaticUsdce: boolean;
+  primaryAsset: AssetRef;
+  mode: TelegramFundingReceivePresentationMode;
+  pusd: AssetRef | null;
+  receiveTargetId: string;
+  usdce: AssetRef | null;
+}>;
+
+function exactPolygonPusd(asset: AssetRef): boolean {
+  return (
+    asset.networkId === "evm:137" &&
+    asset.assetId.toLowerCase() ===
+      fundingSidecarRuntimeConfig.polymarketPusdAddress.toLowerCase() &&
+    asset.decimals === 6
+  );
+}
+
+function exactPolygonUsdce(asset: AssetRef): boolean {
+  return (
+    asset.networkId === "evm:137" &&
+    asset.assetId.toLowerCase() ===
+      fundingSidecarRuntimeConfig.polymarketUsdceAddress.toLowerCase() &&
+    asset.decimals === 6
+  );
+}
+
+function isTelegramFundingReceivePresentationMode(
+  value: unknown,
+): value is TelegramFundingReceivePresentationMode {
+  return (
+    value === "pusd_direct" ||
+    value === "pusd_or_usdce_automatic" ||
+    value === "usdce_automatic"
+  );
+}
+
+export function telegramFundingConsentPresentationMode(
+  consent: TelegramFundingConsent,
+  liveMode: TelegramFundingReceivePresentationMode | null,
+): TelegramFundingReceivePresentationMode | null {
+  const storedMode = consent.policySnapshot.presentationMode;
+  const frozenMode = isTelegramFundingReceivePresentationMode(storedMode)
+    ? storedMode
+    : null;
+  if (!liveMode || !frozenMode) return null;
+  if (liveMode === frozenMode) return frozenMode;
+  if (liveMode === "pusd_or_usdce_automatic") return frozenMode;
+  if (frozenMode === "pusd_or_usdce_automatic") return liveMode;
+  return null;
+}
+
+export function resolveTelegramPolygonFundingTarget(input: {
+  automaticUsdceEnabled: boolean;
+  session: FundingReceiveSession;
+}): TelegramFundingTargetCapability | null {
+  const matches = input.session.receiveTargets.flatMap((target) => {
+    if (target.networkId !== "evm:137") return [];
+    const pusd = target.acceptedAssets.filter(
+      (accepted) =>
+        accepted.handling === "direct" && exactPolygonPusd(accepted.asset),
+    );
+    const usdce = target.acceptedAssets.filter(
+      (accepted) =>
+        accepted.handling === "automatic_conversion" &&
+        exactPolygonUsdce(accepted.asset),
+    );
+    if (pusd.length > 1 || usdce.length > 1) return [];
+    const recognized = pusd.length + usdce.length;
+    if (recognized !== target.acceptedAssets.length) return [];
+    const direct = pusd[0]?.asset ?? null;
+    const automatic = input.automaticUsdceEnabled
+      ? (usdce[0]?.asset ?? null)
+      : null;
+    if (!direct && !automatic) return [];
+    return [{ target, pusd: direct, usdce: automatic }];
+  });
+  if (matches.length !== 1) return null;
+  const match = matches[0];
+  if (!match) return null;
+  const mode: TelegramFundingReceivePresentationMode =
+    match.pusd && match.usdce
+      ? "pusd_or_usdce_automatic"
+      : match.usdce
+        ? "usdce_automatic"
+        : "pusd_direct";
+  const primaryAsset = match.pusd ?? match.usdce;
+  if (!primaryAsset) return null;
+  return {
+    address: match.target.destinationAddress,
+    automaticUsdce: match.usdce != null,
+    primaryAsset,
+    mode,
+    pusd: match.pusd,
+    receiveTargetId: match.target.receiveTargetId,
+    usdce: match.usdce,
+  };
+}
+
+export function resolveTelegramFundingTargetChoice(input: {
+  automaticUsdceEnabled: boolean;
   session: FundingReceiveSession;
   observationVariants: readonly DirectIngressObservationVariant[];
 }): Readonly<{
   address: string;
   asset: AssetRef;
+  automaticUsdce: boolean;
+  mode: TelegramFundingReceivePresentationMode;
   receiveTargetId: string;
+  usdceVariants: readonly DirectIngressObservationVariant[];
   variantIds: readonly string[];
 }> | null {
-  const matches = input.session.receiveTargets.flatMap((target) =>
-    target.acceptedAssets.flatMap((accepted) =>
-      accepted.handling === "direct" &&
-      resolveKnownAccountAssetSymbol(accepted.asset) === "pUSD"
-        ? [{ target, accepted }]
-        : [],
-    ),
+  const target = resolveTelegramPolygonFundingTarget(input);
+  if (!target) return null;
+  const acceptedAssets = [target.pusd, target.usdce].filter(
+    (asset): asset is AssetRef => asset != null,
   );
-  if (matches.length !== 1) return null;
-  const match = matches[0];
-  if (!match) return null;
-  const variantIds = input.observationVariants
+  const variants = input.observationVariants
     .filter(
       (variant) =>
-        variant.completion.kind === "direct_destination_credit" &&
-        sameAsset(variant.asset, match.accepted.asset) &&
+        acceptedAssets.some((asset) => sameAsset(variant.asset, asset)) &&
         sameAccountAddress(
           variant.networkId,
           variant.destinationAddress,
-          match.target.destinationAddress,
-        ),
+          target.address,
+        ) &&
+        ((target.pusd != null &&
+          sameAsset(variant.asset, target.pusd) &&
+          variant.completion.kind === "direct_destination_credit") ||
+          (target.usdce != null &&
+            sameAsset(variant.asset, target.usdce) &&
+            variant.completion.kind === "committed_venue_preparation")),
     )
-    .map((variant) => variant.variantId)
-    .sort();
+    .sort((left, right) => left.variantId.localeCompare(right.variantId));
+  const variantIds = variants.map((variant) => variant.variantId);
+  const usdceVariants = variants.filter(
+    (variant) => target.usdce && sameAsset(variant.asset, target.usdce),
+  );
   if (variantIds.length === 0) return null;
+  const directPusd = target.pusd;
+  if (
+    directPusd &&
+    !variants.some((variant) => sameAsset(variant.asset, directPusd))
+  ) {
+    return null;
+  }
+  if (target.usdce && usdceVariants.length === 0) return null;
   return {
-    address: match.target.destinationAddress,
-    asset: match.accepted.asset,
-    receiveTargetId: match.target.receiveTargetId,
+    address: target.address,
+    asset: target.primaryAsset,
+    automaticUsdce: target.automaticUsdce,
+    mode: target.mode,
+    receiveTargetId: target.receiveTargetId,
+    usdceVariants,
     variantIds,
   };
+}
+
+/** Compatibility name for pUSD-only callers and tests. */
+export function resolveTelegramDirectPusdChoice(input: {
+  session: FundingReceiveSession;
+  observationVariants: readonly DirectIngressObservationVariant[];
+}) {
+  return resolveTelegramFundingTargetChoice({
+    ...input,
+    automaticUsdceEnabled: false,
+  });
+}
+
+export function buildTelegramFundingTargetMessageForSession(input: {
+  automaticUsdceEnabled?: boolean;
+  contextId: string;
+  expiresAt: string;
+  session: FundingReceiveSession;
+}): TelegramFundingMessage {
+  const target = resolveTelegramPolygonFundingTarget({
+    automaticUsdceEnabled: input.automaticUsdceEnabled === true,
+    session: input.session,
+  });
+  return target
+    ? buildTelegramFundingTargetMessage({ ...input, mode: target.mode })
+    : buildTelegramFundingUnavailableMessage({ reason: "unavailable" });
 }
 
 export function loadTelegramFundingReceiveSession(
@@ -427,6 +581,43 @@ export class TelegramFundingService {
     });
     if (!link) throw new TelegramFundingError("telegram_account_required");
     return { identity, link };
+  }
+
+  private async resolveTargetCapability(
+    input: Readonly<{
+      link: ActiveTelegramAccountLink;
+      session: FundingReceiveSession;
+      telegramUserId: string;
+      expectedFundingPolicyRevision?: string;
+    }>,
+  ): Promise<
+    Readonly<{
+      authorization: TelegramFundingAuthorization | null;
+      decision: DelegatedFundingPreBroadcastDecision;
+      fundingPolicyRevision: string;
+      target: TelegramFundingTargetCapability | null;
+    }>
+  > {
+    const capability = await resolveTelegramPolymarketWrapCapability(
+      this.pool,
+      {
+        userId: input.link.userId,
+        telegramAccountId: input.link.linkId,
+        telegramUserId: input.telegramUserId,
+        destinationOptionId: input.session.destinationOptionId,
+        venueBindingOptionId: input.session.venueBindingOptionId,
+        expectedFundingPolicyRevision: input.expectedFundingPolicyRevision,
+      },
+    );
+    return {
+      authorization: capability.authorization,
+      decision: capability.decision,
+      fundingPolicyRevision: capability.fundingPolicyRevision,
+      target: resolveTelegramPolygonFundingTarget({
+        automaticUsdceEnabled: capability.authorization != null,
+        session: input.session,
+      }),
+    };
   }
 
   private async resolveReceiveDestination(
@@ -639,10 +830,16 @@ export class TelegramFundingService {
         decorateProgress,
       );
     }
-    return buildTelegramFundingTargetMessage({
-      contextId: context.context.id,
-      expiresAt: context.context.expiresAt,
-    });
+    return this.session(
+      {
+        contextId: context.context.id,
+        telegramUserId: identity.telegramUserId,
+        chatId: identity.chatId,
+        view: "progress",
+      },
+      now,
+      decorateProgress,
+    );
   }
 
   async openBuyReturn(
@@ -984,18 +1181,32 @@ export class TelegramFundingService {
     if (!receive) {
       throw new TelegramFundingError("funding_context_not_found");
     }
-    const consent = await fetchActiveTelegramFundingConsent(
-      this.pool,
-      context.id,
-    );
-    return { consent, context, identity, link, receive };
+    const [consent, afterBroadcastBoundaryReceiptIds] = await Promise.all([
+      fetchActiveTelegramFundingConsent(this.pool, context.id),
+      listFundingReceiveRoutingReceiptIdsAfterBroadcastBoundary(this.pool, {
+        userId: link.userId,
+        receiveSessionId: context.receiveSessionId,
+      }),
+    ]);
+    return {
+      afterBroadcastBoundaryReceiptIds,
+      consent,
+      context,
+      identity,
+      link,
+      receive,
+    };
   }
 
   private addressMessage(input: {
     consent: TelegramFundingConsent;
     context: TelegramFundingSessionContext;
+    mode: TelegramFundingReceivePresentationMode | null;
     session: FundingReceiveSession;
   }): TelegramFundingMessage {
+    if (!input.mode) {
+      return buildTelegramFundingUnavailableMessage({ reason: "unavailable" });
+    }
     const target = input.session.receiveTargets.find(
       (candidate) =>
         candidate.receiveTargetId === input.consent.receiveTargetId &&
@@ -1010,6 +1221,7 @@ export class TelegramFundingService {
       address: target.destinationAddress,
       contextId: input.context.id,
       expiresAt: input.context.expiresAt,
+      mode: input.mode,
     });
   }
 
@@ -1022,7 +1234,26 @@ export class TelegramFundingService {
     decorateProgress?: TelegramFundingProgressDecorator,
   ): Promise<TelegramFundingMessage> {
     const owned = await this.loadOwned(input);
+    const automation = parseTelegramFundingAutomationPolicyV2(
+      owned.consent?.policySnapshot,
+    );
+    const capability = await this.resolveTargetCapability({
+      link: owned.link,
+      session: owned.receive.session,
+      telegramUserId: owned.identity.telegramUserId,
+      expectedFundingPolicyRevision: automation?.fundingPolicyRevision,
+    });
     const progress = projectTelegramFundingProgress({
+      afterBroadcastBoundaryReceiptIds: owned.afterBroadcastBoundaryReceiptIds,
+      automaticConversionAvailable:
+        capability.target?.mode === "pusd_or_usdce_automatic" ||
+        capability.target?.mode === "usdce_automatic",
+      automaticConversionMode:
+        capability.decision.kind === "allowed"
+          ? "available"
+          : capability.decision.kind === "soft_paused"
+            ? "soft_paused"
+            : "hard_invalid",
       consent: owned.consent,
       context: owned.context,
       receipts: owned.receive.receipts,
@@ -1039,6 +1270,10 @@ export class TelegramFundingService {
       const message = this.addressMessage({
         consent: owned.consent,
         context: owned.context,
+        mode: telegramFundingConsentPresentationMode(
+          owned.consent,
+          capability.target?.mode ?? null,
+        ),
         session: owned.receive.session,
       });
       return decorateProgress
@@ -1068,9 +1303,11 @@ export class TelegramFundingService {
     if (!addressDisclosureOpen) {
       return buildTelegramFundingUnavailableMessage({ reason: "expired" });
     }
-    const message = buildTelegramFundingTargetMessage({
+    const message = buildTelegramFundingTargetMessageForSession({
       contextId: owned.context.id,
       expiresAt: owned.context.expiresAt,
+      session: owned.receive.session,
+      automaticUsdceEnabled: capability.authorization != null,
     });
     return decorateProgress
       ? decorateProgress({
@@ -1155,30 +1392,72 @@ export class TelegramFundingService {
     if (!receive) {
       throw new TelegramFundingError("funding_context_not_found");
     }
-    const choice = resolveTelegramDirectPusdChoice({
+    const capability = await this.resolveTargetCapability({
+      link,
+      session: receive.session,
+      telegramUserId: identity.telegramUserId,
+    });
+    const choice = resolveTelegramFundingTargetChoice({
+      automaticUsdceEnabled: capability.authorization != null,
       session: receive.session,
       observationVariants: snapshot.observationVariants,
     });
     if (!choice) throw new TelegramFundingError("invalid_funding_choice");
+    let consentVariants = snapshot.observationVariants.filter((variant) =>
+      choice.variantIds.includes(variant.variantId),
+    );
+    let automationPolicy: JsonRecord;
+    if (choice.automaticUsdce) {
+      const primaryUsdceVariant = choice.usdceVariants[0];
+      if (!capability.authorization || !primaryUsdceVariant) {
+        throw new TelegramFundingError("invalid_funding_choice");
+      }
+      const refreshedUsdce =
+        await initializeCanonicalFundingReceiveEventCursors(
+          choice.usdceVariants,
+        );
+      const refreshedById = new Map(
+        refreshedUsdce.map((variant) => [variant.variantId, variant]),
+      );
+      consentVariants = consentVariants.map(
+        (variant) => refreshedById.get(variant.variantId) ?? variant,
+      );
+      automationPolicy = telegramFundingAutomationPolicyJson(
+        buildTelegramFundingAutomationPolicyV2({
+          authorization: capability.authorization,
+          sourceAsset: primaryUsdceVariant.asset,
+          destinationAsset: receive.session.destinationAsset,
+          fundingPolicyRevision: capability.fundingPolicyRevision,
+          variants: refreshedUsdce,
+        }),
+      );
+    } else {
+      automationPolicy = jsonRecord({
+        version: 1,
+        mode: "direct",
+        automationEnabled: false,
+        telegramPolicyRevision: policy.policyRevision,
+        receiveAutomationPolicy: snapshot.automationPolicy,
+      });
+    }
     const policySnapshot = jsonRecord({
-      mode: "direct",
-      automationEnabled: false,
-      telegramPolicyRevision: policy.policyRevision,
-      receiveAutomationPolicy: snapshot.automationPolicy,
+      ...automationPolicy,
+      presentationMode: choice.mode,
     });
     const fingerprint = canonicalJsonHash({
       fundingContextId: snapshot.context.id,
       receiveSessionId: snapshot.context.receiveSessionId,
       receiveTargetId: choice.receiveTargetId,
       asset: choice.asset,
-      variantIds: choice.variantIds,
-      automationEnabled: false,
+      variantIds: consentVariants.map((variant) => variant.variantId).sort(),
+      automationEnabled: choice.automaticUsdce,
       policySnapshot,
     });
     const response = buildTelegramFundingAddressMessage({
       address: choice.address,
       contextId: snapshot.context.id,
       expiresAt: snapshot.context.expiresAt,
+      mode: choice.mode,
     });
     try {
       await appendTelegramFundingConsent(this.pool, {
@@ -1190,7 +1469,9 @@ export class TelegramFundingService {
         telegramMessageId: input.telegramMessageId,
         receiveTargetId: choice.receiveTargetId,
         asset: choice.asset,
-        variantIds: choice.variantIds,
+        variantIds: consentVariants.map((variant) => variant.variantId).sort(),
+        automationEnabled: choice.automaticUsdce,
+        maximumAutomaticRaw: null,
         policySnapshot,
         fingerprint,
         mutation: {

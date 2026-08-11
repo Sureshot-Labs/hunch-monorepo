@@ -10,6 +10,10 @@ import {
   type JsonValue,
   type LocationCapability,
 } from "../domain/types.js";
+import {
+  delegatedFundingProfileRequiresAmountCap,
+  POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
+} from "../execution/delegated-funding-profile-ids.js";
 
 export const FUNDING_POLICY_KEY = "funding_control_plane";
 
@@ -63,6 +67,10 @@ export const PRODUCTION_FUNDING_REGISTRY: FundingStaticRegistry = deepFreeze({
   networkExecutors: [
     { id: "wallet_profile_evm_v1", runtimeKind: "production" },
     { id: "wallet_profile_svm_v1", runtimeKind: "production" },
+    {
+      id: POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
+      runtimeKind: "production",
+    },
   ],
   reconcilers: [
     { id: "relay_status_v3", runtimeKind: "production" },
@@ -676,13 +684,17 @@ function validateParsedFundingPolicy(
     }
     if (
       venue.delegatedExecutionEnabled &&
-      (venue.delegatedPolicyIds.length === 0 || !venue.delegatedDailyCapUsd)
+      (venue.delegatedPolicyIds.length === 0 ||
+        (!venue.delegatedDailyCapUsd &&
+          venue.delegatedPolicyIds.some(
+            delegatedFundingProfileRequiresAmountCap,
+          )))
     ) {
       addIssue(
         issues,
         "delegated_policy_incomplete",
         `venues.${index}.delegatedExecutionEnabled`,
-        "delegated execution requires exact policy IDs and a cap",
+        "delegated execution requires exact policy IDs and a cap unless every profile is a closed-destination transform",
       );
     }
   }

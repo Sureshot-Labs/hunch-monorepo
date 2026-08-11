@@ -12,6 +12,8 @@ import type {
   JsonValue,
 } from "../domain/types.js";
 import { canonicalAccountAddress } from "../domain/asset-identity.js";
+import { allocateFundingObservationInTransaction } from "./funding-operation-repository.js";
+import { POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID } from "../execution/delegated-funding-profile-ids.js";
 
 type JsonRecord = Readonly<Record<string, JsonValue>>;
 type ReceiveTargets = NonNullable<ExternalIngressInstruction["receiveTargets"]>;
@@ -149,6 +151,7 @@ function publicReceipt(row: ReceiveReceiptRow): FundingReceiveReceipt {
     destinationAddress: row.destination_address,
     rawAmount: row.raw_amount,
     observationRevision: row.observation_revision,
+    ledgerHeight: row.ledger_height,
     observedAt: row.observed_at.toISOString(),
     status: row.status,
     handling: row.handling,
@@ -191,6 +194,29 @@ export async function derivePersistedFundingReceiveSessionStatus(
     [input.receiveSessionId, input.userId],
   );
   return deriveActiveFundingReceiveSessionStatus(rows.map((row) => row.status));
+}
+
+async function refreshFundingReceiveSessionStatus(
+  db: Pick<PoolClient, "query">,
+  input: Readonly<{
+    receiveSessionId: string;
+    userId: string;
+    now: Date;
+  }>,
+): Promise<void> {
+  const status = await derivePersistedFundingReceiveSessionStatus(db, input);
+  await db.query(
+    `
+      update funding_receive_sessions
+      set status = $3,
+          version = version + 1,
+          updated_at = $4
+      where id = $1
+        and user_id = $2
+        and status in ('open', 'processing', 'review_required')
+    `,
+    [input.receiveSessionId, input.userId, status, input.now],
+  );
 }
 
 export type FundingReceiveSessionSnapshot = Readonly<{
@@ -527,6 +553,34 @@ export async function listFundingReceiveReceiptsForUser(
     [input.receiveSessionId, input.userId],
   );
   return rows.map(publicReceipt);
+}
+
+export async function listFundingReceiveRoutingReceiptIdsAfterBroadcastBoundary(
+  db: Pick<Pool, "query">,
+  input: Readonly<{ userId: string; receiveSessionId: string }>,
+): Promise<readonly string[]> {
+  const { rows } = await db.query<{ id: string }>(
+    `
+      select receipt.id
+      from funding_receive_receipts receipt
+      where receipt.receive_session_id = $1
+        and receipt.user_id = $2
+        and receipt.status = 'routing'
+        and receipt.handling = 'automatic_conversion'
+        and receipt.child_funding_operation_id is not null
+        and exists (
+          select 1
+          from funding_operation_steps step
+          join funding_operation_step_attempts attempt
+            on attempt.step_id = step.id
+          where step.operation_id = receipt.child_funding_operation_id
+            and attempt.broadcast_may_have_occurred
+        )
+      order by receipt.created_at asc, receipt.id asc
+    `,
+    [input.receiveSessionId, input.userId],
+  );
+  return rows.map((row) => row.id);
 }
 
 export async function cancelFundingReceiveSessionForUser(
@@ -1211,12 +1265,21 @@ export type FundingReceiveReceiptRoutingTarget = Readonly<{
   receipt: FundingReceiveReceipt;
   receiptDestinationLocationId: string | null;
   userId: string;
+  ownerChannel: FundingReceiveSessionChannel;
   venueId: string;
   destinationOptionId: string;
   venueBindingOptionId: string;
   destinationAsset: AssetRef;
   automationPolicy: FundingReceiveAutomationPolicy;
+  telegramAccountId: string | null;
+  telegramAutomationPolicy: JsonRecord | null;
+  telegramFundingAuthorizationId: string | null;
+  telegramFundingConsentFingerprint: string | null;
+  telegramFundingConsentId: string | null;
+  telegramUserId: string | null;
   childOperationStatus: string | null;
+  childOperationRecoveryMode: "automatic_evidence" | "manual_review" | null;
+  childExecutorId: string | null;
   childBroadcastMayHaveOccurred: boolean;
   childHasUnfinishedAttempt: boolean;
   routingAttemptCount: number;
@@ -1242,7 +1305,16 @@ type ReceiveReceiptTargetRow = ReceiveReceiptRow & {
   venue_binding_option_id: string;
   destination_asset: AssetRef;
   automation_policy: FundingReceiveAutomationPolicy;
+  owner_channel: FundingReceiveSessionChannel;
+  telegram_account_id: string | null;
+  telegram_automation_policy: JsonRecord | null;
+  telegram_funding_authorization_id: string | null;
+  telegram_funding_consent_fingerprint: string | null;
+  telegram_funding_consent_id: string | null;
+  telegram_user_id: string | null;
   child_operation_status: string | null;
+  child_operation_recovery_mode: "automatic_evidence" | "manual_review" | null;
+  child_executor_id: string | null;
   child_broadcast_may_have_occurred: boolean;
   child_has_unfinished_attempt: boolean;
   routing_attempt_count: number;
@@ -1256,12 +1328,21 @@ function receiveReceiptRoutingTarget(
     receipt: publicReceipt(row),
     receiptDestinationLocationId: row.receipt_destination_location_id,
     userId: row.user_id,
+    ownerChannel: row.owner_channel,
     venueId: row.venue_id,
     destinationOptionId: row.destination_option_id,
     venueBindingOptionId: row.venue_binding_option_id,
     destinationAsset: row.destination_asset,
     automationPolicy: row.automation_policy,
+    telegramAccountId: row.telegram_account_id,
+    telegramAutomationPolicy: row.telegram_automation_policy,
+    telegramFundingAuthorizationId: row.telegram_funding_authorization_id,
+    telegramFundingConsentFingerprint: row.telegram_funding_consent_fingerprint,
+    telegramFundingConsentId: row.telegram_funding_consent_id,
+    telegramUserId: row.telegram_user_id,
     childOperationStatus: row.child_operation_status,
+    childOperationRecoveryMode: row.child_operation_recovery_mode,
+    childExecutorId: row.child_executor_id,
     childBroadcastMayHaveOccurred: row.child_broadcast_may_have_occurred,
     childHasUnfinishedAttempt: row.child_has_unfinished_attempt,
     routingAttemptCount: row.routing_attempt_count,
@@ -1307,11 +1388,29 @@ export async function listFundingReceiveReceiptsForRouting(
           limit 1
         ) as receipt_destination_location_id,
         session.venue_id,
+        session.owner_channel,
         session.destination_option_id,
         session.venue_binding_option_id,
         session.destination_asset,
         session.automation_policy,
+        telegram_context.telegram_account_id,
+        telegram_context.telegram_user_id,
+        telegram_consent.automation_policy_snapshot as telegram_automation_policy,
+        telegram_consent.automation_policy_snapshot ->> 'authorizationId'
+          as telegram_funding_authorization_id,
+        telegram_consent.id as telegram_funding_consent_id,
+        telegram_consent.consent_fingerprint
+          as telegram_funding_consent_fingerprint,
         operation.status as child_operation_status,
+        operation.recovery_mode as child_operation_recovery_mode,
+        (
+          select child_step.executor_id
+          from funding_operation_steps child_step
+          where child_step.operation_id = operation.id
+            and child_step.executor_id is not null
+          order by child_step.ordinal asc
+          limit 1
+        ) as child_executor_id,
         exists (
           select 1
           from funding_operation_steps child_step
@@ -1334,11 +1433,57 @@ export async function listFundingReceiveReceiptsForRouting(
       left join telegram_funding_sessions telegram_context
         on telegram_context.receive_session_id = session.id
        and telegram_context.user_id = session.user_id
+      left join funding_receive_canonical_events canonical_event
+        on canonical_event.allocated_receipt_id = receipt.id
+       and canonical_event.allocated_receive_session_id = session.id
+       and canonical_event.allocation_status = 'allocated'
       left join lateral (
         select consent.*
         from telegram_funding_consents consent
         where consent.telegram_funding_session_id = telegram_context.id
-          and consent.consented_at <= receipt.observed_at
+          and consent.consented_at <= canonical_event.first_observed_at
+          and consent.automation_enabled
+          and consent.max_auto_execute_source_raw is null
+          and consent.automation_policy_snapshot ->> 'version' = '2'
+          and consent.automation_policy_snapshot ->> 'kind' =
+                'polymarket_usdce_full_receipt_wrap'
+          and consent.automation_policy_snapshot ->> 'fullReceipt' = 'true'
+          and receipt.ledger_height is not null
+          and receipt.network_id =
+                consent.automation_policy_snapshot #>> '{sourceAsset,networkId}'
+          and receipt.asset_decimals::text =
+                consent.automation_policy_snapshot #>> '{sourceAsset,decimals}'
+          and (
+            (
+              receipt.network_id like 'evm:%'
+              and lower(receipt.asset_id) = lower(
+                consent.automation_policy_snapshot #>> '{sourceAsset,assetId}'
+              )
+            )
+            or (
+              receipt.network_id not like 'evm:%'
+              and receipt.asset_id =
+                consent.automation_policy_snapshot #>> '{sourceAsset,assetId}'
+            )
+          )
+          and receipt.variant_id = any(consent.consented_variant_ids)
+          and exists (
+            select 1
+            from jsonb_array_elements(
+              case
+                when jsonb_typeof(
+                  consent.automation_policy_snapshot -> 'variantCursors'
+                ) = 'array'
+                  then consent.automation_policy_snapshot -> 'variantCursors'
+                else '[]'::jsonb
+              end
+            ) cursor
+            where cursor ->> 'variantId' = receipt.variant_id
+              and cursor ->> 'networkId' = receipt.network_id
+              and cursor ->> 'ledgerHeightExclusive' ~ '^(0|[1-9][0-9]*)$'
+              and receipt.ledger_height >
+                    (cursor ->> 'ledgerHeightExclusive')::numeric
+          )
         order by consent.consented_at desc, consent.revision desc
         limit 1
       ) telegram_consent on true
@@ -1362,22 +1507,7 @@ export async function listFundingReceiveReceiptsForRouting(
                 telegram_context.cancelled_at is null
                 or receipt.observed_at <= telegram_context.cancelled_at
               )
-              and telegram_consent.automation_enabled
-              and telegram_consent.max_auto_execute_source_raw is not null
-              and receipt.raw_amount <= telegram_consent.max_auto_execute_source_raw
-              and receipt.network_id = telegram_consent.selected_asset_network_id
-              and receipt.asset_decimals = telegram_consent.selected_asset_decimals
-              and (
-                (
-                  receipt.network_id like 'evm:%'
-                  and lower(receipt.asset_id) = lower(telegram_consent.selected_asset_id)
-                )
-                or (
-                  receipt.network_id not like 'evm:%'
-                  and receipt.asset_id = telegram_consent.selected_asset_id
-                )
-              )
-              and receipt.variant_id = any(telegram_consent.consented_variant_ids)
+              and telegram_consent.id is not null
             )
           )
         )
@@ -1442,28 +1572,53 @@ export async function recordFundingReceiveReceiptRoutingDisposition(
     );
     if (receipt.rowCount !== 1) return false;
     if (nextStatus !== "observed") {
-      const sessionStatus = await derivePersistedFundingReceiveSessionStatus(
-        client,
-        {
-          receiveSessionId: input.receiveSessionId,
-          userId: input.userId,
-        },
-      );
-      await client.query(
-        `
-          update funding_receive_sessions
-          set status = $3,
-              version = version + 1,
-              updated_at = $4
-          where id = $1
-            and user_id = $2
-            and status in ('open', 'processing', 'review_required')
-        `,
-        [input.receiveSessionId, input.userId, sessionStatus, input.now],
-      );
+      await refreshFundingReceiveSessionStatus(client, input);
     }
     return true;
   });
+}
+
+/**
+ * A prior operation on the same venue binding is ordinary serialization, not
+ * a failed routing attempt. Defer without consuming the receipt retry budget.
+ */
+export async function deferFundingReceiveReceiptRouting(
+  db: Pick<Pool, "query">,
+  input: Readonly<{
+    receiptId: string;
+    userId: string;
+    retryAt: Date;
+    errorCode: string;
+    now: Date;
+  }>,
+): Promise<boolean> {
+  const result = await db.query<{ id: string }>(
+    `
+      with deferred as (
+        update funding_receive_receipts
+        set routing_disposition = 'retry_scheduled',
+            routing_next_attempt_at = $3,
+            routing_last_attempt_at = $4,
+            routing_last_error_code = $5,
+            updated_at = $4
+        where id = $1
+          and user_id = $2
+          and status = 'observed'
+          and handling = 'automatic_conversion'
+          and child_funding_operation_id is null
+        returning receive_session_id
+      )
+      update funding_receive_sessions session
+      set version = session.version + 1,
+          updated_at = $4
+      from deferred
+      where session.id = deferred.receive_session_id
+        and session.user_id = $2
+      returning session.id
+    `,
+    [input.receiptId, input.userId, input.retryAt, input.now, input.errorCode],
+  );
+  return result.rowCount === 1;
 }
 
 export async function fetchFundingReceiveReceiptForReview(
@@ -1511,11 +1666,26 @@ export async function fetchFundingReceiveReceiptForReview(
           limit 1
         ) as receipt_destination_location_id,
         session.venue_id,
+        session.owner_channel,
         session.destination_option_id,
         session.venue_binding_option_id,
         session.destination_asset,
         session.automation_policy,
+        null::uuid as telegram_account_id,
+        null::text as telegram_user_id,
+        null::jsonb as telegram_automation_policy,
+        null::uuid as telegram_funding_authorization_id,
+        null::uuid as telegram_funding_consent_id,
+        null::text as telegram_funding_consent_fingerprint,
         operation.status as child_operation_status,
+        (
+          select child_step.executor_id
+          from funding_operation_steps child_step
+          where child_step.operation_id = operation.id
+            and child_step.executor_id is not null
+          order by child_step.ordinal asc
+          limit 1
+        ) as child_executor_id,
         exists (
           select 1
           from funding_operation_steps child_step
@@ -1619,41 +1789,62 @@ export async function linkFundingReceiveReceiptReviewOperation(
       ],
     );
     if (receipt.rowCount !== 1) return false;
-    const sessionStatus = await derivePersistedFundingReceiveSessionStatus(
-      client,
-      {
-        receiveSessionId: input.receiveSessionId,
-        userId: input.userId,
-      },
-    );
-    await client.query(
-      `
-        update funding_receive_sessions
-        set status = $3,
-            version = version + 1,
-            updated_at = $4
-        where id = $1
-          and user_id = $2
-          and status in ('open', 'processing', 'review_required')
-      `,
-      [input.receiveSessionId, input.userId, sessionStatus, input.now],
-    );
+    await refreshFundingReceiveSessionStatus(client, input);
     return true;
   });
 }
 
-export async function linkFundingReceiveReceiptOperation(
-  db: Pool,
-  input: Readonly<{
-    receiptId: string;
-    userId: string;
-    childFundingOperationId: string;
-    now: Date;
-  }>,
+type FundingReceiveReceiptOperationLinkInput = Readonly<{
+  authorizationFingerprint?: string;
+  authorizationId?: string;
+  telegramFundingConsentFingerprint?: string;
+  telegramFundingConsentId?: string;
+  receiptId: string;
+  userId: string;
+  childFundingOperationId: string;
+  now: Date;
+}>;
+
+export async function claimFundingReceiveReceiptOperationLinkInTransaction(
+  client: PoolClient,
+  input: Readonly<{ receiptId: string; userId: string }>,
 ): Promise<boolean> {
-  return tx(db, async (client) => {
-    const result = await client.query<{ receive_session_id: string }>(
-      `
+  const result = await client.query(
+    `
+      select 1
+      from funding_receive_receipts
+      where id = $1
+        and user_id = $2
+        and status = 'observed'
+        and handling = 'automatic_conversion'
+        and child_funding_operation_id is null
+      for update
+    `,
+    [input.receiptId, input.userId],
+  );
+  return result.rowCount === 1;
+}
+
+export async function linkFundingReceiveReceiptOperationInTransaction(
+  client: PoolClient,
+  input: FundingReceiveReceiptOperationLinkInput,
+): Promise<boolean> {
+  const result = await client.query<{
+    asset_decimals: number;
+    asset_id: string;
+    block_hash: string | null;
+    destination_address: string;
+    event_index: string | null;
+    ledger_height: string | null;
+    network_id: string;
+    observed_at: Date;
+    raw_amount: string;
+    receive_session_id: string;
+    source_address: string | null;
+    tx_hash: string | null;
+    variant_id: string;
+  }>(
+    `
         update funding_receive_receipts
         set status = 'routing',
             child_funding_operation_id = $3,
@@ -1665,30 +1856,168 @@ export async function linkFundingReceiveReceiptOperation(
           and user_id = $2
           and status = 'observed'
           and child_funding_operation_id is null
-        returning receive_session_id
+        returning
+          asset_decimals,
+          asset_id,
+          block_hash,
+          destination_address,
+          event_index,
+          ledger_height::text,
+          network_id,
+          observed_at,
+          raw_amount::text,
+          receive_session_id,
+          source_address,
+          tx_hash,
+          variant_id
       `,
-      [input.receiptId, input.userId, input.childFundingOperationId, input.now],
+    [input.receiptId, input.userId, input.childFundingOperationId, input.now],
+  );
+  const receipt = result.rows[0];
+  if (!receipt) return false;
+  const receiveSessionId = receipt.receive_session_id;
+  if (!input.authorizationId || !input.authorizationFingerprint) {
+    await refreshFundingReceiveSessionStatus(client, {
+      receiveSessionId,
+      userId: input.userId,
+      now: input.now,
+    });
+    return true;
+  }
+  if (
+    !input.telegramFundingConsentId ||
+    !input.telegramFundingConsentFingerprint
+  ) {
+    throw new Error("automatic funding operation is missing consent evidence");
+  }
+  const operation = await client.query<{
+    step_id: string;
+  }>(
+    `
+        select step.id as step_id
+        from funding_operations operation
+        join funding_operation_steps step
+          on step.operation_id = operation.id
+         and step.ordinal = 0
+        join funding_receive_receipts linked_receipt
+          on linked_receipt.id = $5
+         and linked_receipt.receive_session_id = $6
+         and linked_receipt.user_id = operation.user_id
+         and linked_receipt.child_funding_operation_id = operation.id
+        join funding_receive_canonical_events canonical_event
+          on canonical_event.allocated_receipt_id = linked_receipt.id
+         and canonical_event.allocated_receive_session_id =
+               linked_receipt.receive_session_id
+         and canonical_event.allocation_status = 'allocated'
+        join telegram_funding_sessions funding_context
+          on funding_context.receive_session_id = linked_receipt.receive_session_id
+         and funding_context.user_id = operation.user_id
+        join telegram_funding_consents funding_consent
+          on funding_consent.id = $7
+         and funding_consent.telegram_funding_session_id = funding_context.id
+         and funding_consent.consent_fingerprint = $8
+         and funding_consent.consented_at <= canonical_event.first_observed_at
+         and operation.policy_revision =
+               funding_consent.automation_policy_snapshot ->> 'fundingPolicyRevision'
+        where operation.id = $1
+          and operation.user_id = $2
+          and operation.support_metadata ->> 'preparationKind' =
+                'polymarket_funding_router'
+          and operation.requested_source_amount ->> 'raw' = $3
+          and step.executor_id = $4
+          and step.state = 'planned'
+        for update of operation, step
+      `,
+    [
+      input.childFundingOperationId,
+      input.userId,
+      receipt.raw_amount,
+      POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
+      input.receiptId,
+      receiveSessionId,
+      input.telegramFundingConsentId,
+      input.telegramFundingConsentFingerprint,
+    ],
+  );
+  const stepId = operation.rows[0]?.step_id;
+  if (!stepId || !receipt.tx_hash || !receipt.event_index) {
+    throw new Error(
+      "automatic funding operation is not bound to exact receipt evidence",
     );
-    const receiveSessionId = result.rows[0]?.receive_session_id;
-    if (!receiveSessionId) return false;
-    const sessionStatus = await derivePersistedFundingReceiveSessionStatus(
-      client,
-      { receiveSessionId, userId: input.userId },
-    );
-    await client.query(
-      `
-        update funding_receive_sessions
-        set status = $3,
-            version = version + 1,
-            updated_at = $4
+  }
+  await client.query(
+    `
+        update funding_operations
+        set support_metadata = support_metadata || jsonb_build_object(
+              'fundingAuthorizationId', $3::text,
+              'fundingAuthorizationFingerprint', $4::text,
+              'fundingReceiveReceiptId', $5::text,
+              'telegramFundingConsentId', $6::text,
+              'telegramFundingConsentFingerprint', $7::text
+            ),
+            updated_at = $8
         where id = $1
           and user_id = $2
-          and status in ('open', 'processing', 'review_required')
       `,
-      [receiveSessionId, input.userId, sessionStatus, input.now],
-    );
-    return true;
+    [
+      input.childFundingOperationId,
+      input.userId,
+      input.authorizationId,
+      input.authorizationFingerprint,
+      input.receiptId,
+      input.telegramFundingConsentId,
+      input.telegramFundingConsentFingerprint,
+      input.now,
+    ],
+  );
+  await allocateFundingObservationInTransaction(client, {
+    operationId: input.childFundingOperationId,
+    segmentId: null,
+    kind: "source_credit",
+    networkId: receipt.network_id,
+    assetId: receipt.asset_id,
+    assetDecimals: receipt.asset_decimals,
+    txHash: receipt.tx_hash,
+    eventIndex: receipt.event_index,
+    fromAddress: receipt.source_address,
+    toAddress: receipt.destination_address,
+    rawAmount: receipt.raw_amount,
+    observedAt: receipt.observed_at,
+    ledgerHeight: receipt.ledger_height,
+    blockHash: receipt.block_hash,
+    finalityStatus: "finalized",
+    finalizedAt: input.now,
+    metadata: {
+      receiveSessionId,
+      receiptId: input.receiptId,
+      variantId: receipt.variant_id,
+    },
   });
+  await client.query(
+    `
+        update funding_operation_steps
+        set state = 'action_required',
+            updated_at = $2
+        where id = $1
+          and state = 'planned'
+      `,
+    [stepId, input.now],
+  );
+  await refreshFundingReceiveSessionStatus(client, {
+    receiveSessionId,
+    userId: input.userId,
+    now: input.now,
+  });
+  return true;
+}
+
+export async function linkFundingReceiveReceiptOperation(
+  db: Pool,
+  input: FundingReceiveReceiptOperationLinkInput,
+): Promise<boolean> {
+  return tx(db, (client) =>
+    linkFundingReceiveReceiptOperationInTransaction(client, input),
+  );
 }
 
 export async function settleFundingReceiveReceiptRouting(
@@ -1774,25 +2103,7 @@ export async function settleFundingReceiveReceiptRouting(
       ],
     );
     if (receipt.rowCount !== 1) return false;
-    const sessionStatus = await derivePersistedFundingReceiveSessionStatus(
-      client,
-      {
-        receiveSessionId: input.receiveSessionId,
-        userId: input.userId,
-      },
-    );
-    await client.query(
-      `
-        update funding_receive_sessions
-        set status = $3,
-            version = version + 1,
-            updated_at = $4
-        where id = $1
-          and user_id = $2
-          and status in ('open', 'processing', 'review_required')
-      `,
-      [input.receiveSessionId, input.userId, sessionStatus, input.now],
-    );
+    await refreshFundingReceiveSessionStatus(client, input);
     return true;
   });
 }

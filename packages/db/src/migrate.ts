@@ -1,4 +1,3 @@
-import { env } from "@hunch/config";
 import { globby } from "globby";
 import { promises as fs } from "fs";
 import path from "path";
@@ -6,7 +5,7 @@ import { fileURLToPath } from "url";
 import crypto from "node:crypto";
 import { Pool, PoolClient } from "pg";
 
-const pool = new Pool({ connectionString: env.DATABASE_URL });
+import { parseMigrationTargetOptions } from "./migration-target.js";
 
 function sha256(s: string): string {
   return crypto.createHash("sha256").update(s).digest("hex");
@@ -105,8 +104,29 @@ const __dirname = path.dirname(__filename);
 // absolute path to your migrations folder
 const migrationsDir = path.join(__dirname, "../migrations");
 (async () => {
+  const target = parseMigrationTargetOptions(process.argv.slice(2));
+  const connectionString =
+    target.databaseUrl ?? (await import("@hunch/config")).env.DATABASE_URL;
+  const pool = new Pool({ connectionString });
   const client = await pool.connect();
   try {
+    const targetResult = await client.query<{ current_database: string }>(
+      "SELECT current_database()",
+    );
+    const currentDatabase = targetResult.rows[0]?.current_database;
+    if (!currentDatabase) {
+      throw new Error("Could not resolve the current PostgreSQL database.");
+    }
+    if (
+      target.expectedDatabase !== null &&
+      currentDatabase !== target.expectedDatabase
+    ) {
+      throw new Error(
+        `Migration target mismatch: expected database ${JSON.stringify(target.expectedDatabase)}, connected to ${JSON.stringify(currentDatabase)}.`,
+      );
+    }
+    console.log(`Migration target verified: ${currentDatabase}`);
+
     await acquireLock(client);
     await ensureMigrationsTable(client);
 

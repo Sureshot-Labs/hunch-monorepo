@@ -380,7 +380,11 @@ try {
     new Date(now.getTime() + 500),
   );
   assert.equal(disabledPolicyReplay.fundingContextId, fundingContextId);
-  assert.match(disabledPolicyReplay.text, /Choose the exact asset/u);
+  assert.match(
+    disabledPolicyReplay.text,
+    /Confirm the supported receive assets/u,
+  );
+  assert.doesNotMatch(disabledPolicyReplay.text, /USDC\.e/u);
   const openMutation = await pool.query<{
     action: string;
     funding_context_id: string;

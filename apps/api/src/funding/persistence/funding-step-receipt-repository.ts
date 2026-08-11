@@ -186,6 +186,7 @@ export async function listFundingStepReceiptTargets(
         on attempt.step_id = step.id
        and attempt.outcome in ('submitted', 'ambiguous')
        and attempt.broadcast_may_have_occurred
+       and attempt.reference_kind <> 'provider_receipt'
        and attempt.receipt_ref_ciphertext is not null
        and attempt.receipt_ref_lookup_hmac is not null
        and attempt.lookup_key_version is not null

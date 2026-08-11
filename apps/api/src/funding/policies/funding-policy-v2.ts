@@ -18,6 +18,7 @@ import {
   type FundingPolicyValidationIssue,
   type FundingRuntimePolicy,
 } from "./funding-policy.js";
+import { POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID } from "../execution/delegated-funding-profile-ids.js";
 
 export const FUNDING_VENUE_IDS = deepFreeze([
   "polymarket",
@@ -356,25 +357,33 @@ export function compileFundingIntentPolicy(
       };
     }),
     locations: [...locations.values()],
-    venues: policy.venues.map((venueId) => ({
-      venueId,
-      lifecycleEnabled: true,
-      destinationReadinessEnabled: venueActive(policy, venueId),
-      balanceEnabled: true,
-      fundingEnabled: venueActive(policy, venueId),
-      tradingEnabled: false,
-      withdrawalEnabled: false,
-      delegatedExecutionEnabled: false,
-      delegatedPolicyIds: [],
-      delegatedDailyCapUsd: null,
-      positionValue: {
-        enabled: false,
-        identityPolicyId: null,
-        freshnessMs: null,
-        valuationMethodId: null,
-        deduplicationPolicyId: null,
-      },
-    })),
+    venues: policy.venues.map((venueId) => {
+      const delegatedWrap =
+        venueId === "polymarket" &&
+        !policy.paused &&
+        policy.receive.assets.includes("polygon:usdce");
+      return {
+        venueId,
+        lifecycleEnabled: true,
+        destinationReadinessEnabled: venueActive(policy, venueId),
+        balanceEnabled: true,
+        fundingEnabled: venueActive(policy, venueId),
+        tradingEnabled: false,
+        withdrawalEnabled: false,
+        delegatedExecutionEnabled: delegatedWrap,
+        delegatedPolicyIds: delegatedWrap
+          ? [POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID]
+          : [],
+        delegatedDailyCapUsd: null,
+        positionValue: {
+          enabled: false,
+          identityPolicyId: null,
+          freshnessMs: null,
+          valuationMethodId: null,
+          deduplicationPolicyId: null,
+        },
+      };
+    }),
     providers: routes.length
       ? [
           {

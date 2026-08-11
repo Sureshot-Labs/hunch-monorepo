@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import type { AccountValueReadModel } from "../../../account-value/runtime-service.js";
 import { RELAY_PINNED_ASSETS } from "../../../funding-providers/relay/mappings.js";
 import { sourceOptionSchema } from "../../../schemas/funding.js";
+import { POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID } from "../../execution/delegated-funding-profile-ids.js";
 import { PRIVY_USER_AUTHORIZED_EVM_SPONSORSHIP_POLICY_ID } from "../../execution/sponsorship-policy.js";
 import { DirectIngressFundingSourceAdapter } from "../../planner/direct-ingress-source-adapter.js";
 import type { FundingSourcePlanningInput } from "../../planner/source-adapter.js";
@@ -331,12 +332,30 @@ assert.deepEqual(
 );
 assert.equal(multiAsset.commitPlan.steps[0]?.state, "planned");
 assert.equal(multiAsset.commitPlan.steps[0]?.stepKind, "venue_preparation");
+assert.equal(
+  multiAsset.commitPlan.steps[0]?.executorId,
+  "wallet_profile_evm_v1",
+  "the existing web USDC.e flow must keep its user-authorized executor",
+);
 assert.equal(multiAsset.commitPlan.reservations.length, 2);
 assert.equal(
   multiAsset.commitPlan.operation.supportMetadata?.preparationKind,
   "polymarket_funding_router",
 );
 sourceOptionSchema.parse(multiAsset.option);
+
+const [delegatedTelegramIngress] = await multiAssetAdapter.list({
+  ...input(false, "add_funds", true),
+  request: {
+    ...input(false, "add_funds", true).request,
+    serverExecutionProfileId: POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
+  },
+});
+assert.equal(
+  delegatedTelegramIngress?.commitPlan.steps[0]?.executorId,
+  POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
+  "only the trusted internal Telegram receipt path selects delegated wrap",
+);
 
 const v2Input = input(false, "add_funds", true);
 const [nativePolygonOnly] = await multiAssetAdapter.list({

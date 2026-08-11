@@ -1,0 +1,122 @@
+import type { ResolvedFundingPolicy } from "../policies/funding-policy-service.js";
+import type { PolymarketWrapExecutionConfiguration } from "./delegated-funding-config.js";
+import { polymarketWrapProfileConfigured } from "./delegated-funding-config.js";
+import { POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID } from "./delegated-funding-profile-ids.js";
+
+export type DelegatedFundingCapabilityDecision =
+  | Readonly<{ kind: "allowed" }>
+  | Readonly<{
+      kind: "soft_paused";
+      reasonCode:
+        | "delegated_execution_paused"
+        | "delegated_profile_unavailable"
+        | "funding_policy_unavailable"
+        | "funding_policy_paused"
+        | "telegram_automation_disabled";
+    }>
+  | Readonly<{
+      kind: "hard_invalid";
+      reasonCode:
+        | "delegated_action_invalid"
+        | "delegated_authority_invalid"
+        | "delegated_route_changed"
+        | "funding_policy_changed"
+        | "funding_runtime_contract_changed";
+    }>
+  | Readonly<{ kind: "reconciliation_only" }>;
+
+export type DelegatedFundingPreBroadcastDecision = Exclude<
+  DelegatedFundingCapabilityDecision,
+  Readonly<{ kind: "reconciliation_only" }>
+>;
+
+const ALLOWED = Object.freeze({ kind: "allowed" as const });
+
+export function fundingPolicyRevisionMayResume(
+  policy: ResolvedFundingPolicy,
+): boolean {
+  return (
+    policy.invalidStoredPolicy ||
+    policy.policy.paused ||
+    policy.runtime.creationMode !== "on" ||
+    !policy.runtime.gates.startUnsubmittedAction ||
+    policy.runtime.gates.emergencyBroadcastPause
+  );
+}
+
+/**
+ * Classify only Hunch-owned control-plane state. Current user authority is a
+ * separate DB decision because its rows must be locked at the broadcast
+ * boundary.
+ */
+export function classifyPolymarketWrapControlPlane(input: {
+  configuration: PolymarketWrapExecutionConfiguration;
+  policy: ResolvedFundingPolicy;
+}): DelegatedFundingPreBroadcastDecision {
+  if (input.policy.invalidStoredPolicy) {
+    return {
+      kind: "soft_paused",
+      reasonCode: "funding_policy_unavailable",
+    };
+  }
+  if (input.policy.policy.paused) {
+    return {
+      kind: "soft_paused",
+      reasonCode: "funding_policy_paused",
+    };
+  }
+  if (
+    !input.policy.policy.venues.includes("polymarket") ||
+    !input.policy.policy.receive.assets.includes("polygon:usdce")
+  ) {
+    return {
+      kind: "hard_invalid",
+      reasonCode: "delegated_route_changed",
+    };
+  }
+  if (!input.configuration.enabled) {
+    return {
+      kind: "soft_paused",
+      reasonCode: "delegated_execution_paused",
+    };
+  }
+  if (!polymarketWrapProfileConfigured(input.configuration)) {
+    return {
+      kind: "soft_paused",
+      reasonCode: "delegated_profile_unavailable",
+    };
+  }
+  if (
+    input.policy.runtime.creationMode !== "on" ||
+    !input.policy.runtime.gates.startUnsubmittedAction ||
+    input.policy.runtime.gates.emergencyBroadcastPause
+  ) {
+    return {
+      kind: "soft_paused",
+      reasonCode: "funding_policy_paused",
+    };
+  }
+  const venue = input.policy.runtime.venues.find(
+    (candidate) => candidate.venueId === "polymarket",
+  );
+  if (
+    !venue?.delegatedExecutionEnabled ||
+    !venue.delegatedPolicyIds.includes(POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID)
+  ) {
+    return {
+      kind: "hard_invalid",
+      reasonCode: "delegated_route_changed",
+    };
+  }
+  return ALLOWED;
+}
+
+export function combineDelegatedFundingDecisions(
+  ...decisions: readonly DelegatedFundingPreBroadcastDecision[]
+): DelegatedFundingPreBroadcastDecision {
+  return (
+    decisions.find((decision) => decision.kind === "hard_invalid") ??
+    decisions.find((decision) => decision.kind === "soft_paused") ??
+    ALLOWED
+  );
+}

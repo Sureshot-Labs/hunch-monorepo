@@ -185,6 +185,19 @@ export function assertWithdrawalActionPolicy(
   return operation.externalRecipientId;
 }
 
+export function fundingActionPolicyIsCurrent(
+  operation: Pick<FundingOperationRow, "policyRevision" | "policyVersion">,
+  resolved: Readonly<{
+    revision: string;
+    runtime: Readonly<{ contractVersion: number }>;
+  }>,
+): boolean {
+  return (
+    resolved.revision === operation.policyRevision &&
+    resolved.runtime.contractVersion === operation.policyVersion
+  );
+}
+
 export class FundingOperationActionRuntime {
   private readonly withdrawalRuntime: WithdrawalDestinationRuntime;
 
@@ -240,7 +253,7 @@ export class FundingOperationActionRuntime {
         resolvedPolicy.runtime.creationMode !== "on" ||
         !resolvedPolicy.runtime.gates.startUnsubmittedAction ||
         resolvedPolicy.runtime.gates.emergencyBroadcastPause ||
-        resolvedPolicy.revision !== operation.policyRevision
+        !fundingActionPolicyIsCurrent(operation, resolvedPolicy)
       ) {
         throw new FundingPersistenceError(
           "quote_invalidated",

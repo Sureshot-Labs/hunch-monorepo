@@ -32,6 +32,7 @@ import {
   canonicalLocationKey,
   deduplicateObservedAssets,
   stableOpaqueId,
+  stableWalletOpaqueId,
 } from "./canonical.js";
 import {
   projectCashAvailability,
@@ -217,12 +218,12 @@ function buildObservation(inputs: {
     asset: inputs.entry.asset,
     details: {
       address,
-      walletId: stableOpaqueId(
-        "wallet",
-        `${
-          inputs.resolution.walletType === "solana" ? "solana" : "ethereum"
-        }:${inputs.entry.asset.networkId}:${address}`,
-      ),
+      walletId: stableWalletOpaqueId({
+        walletType:
+          inputs.resolution.walletType === "solana" ? "solana" : "ethereum",
+        networkId: inputs.entry.asset.networkId,
+        address,
+      }),
       linkedAddress: inputs.resolution.linkedWalletAddress,
       balanceClass: inputs.entry.venueId ?? "wallet",
       ...(inputs.entry.venueId ? { venueId: inputs.entry.venueId } : {}),

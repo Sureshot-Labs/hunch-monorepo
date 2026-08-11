@@ -1,4 +1,4 @@
-import type { Pool } from "@hunch/infra";
+import type { Pool, PoolClient } from "@hunch/infra";
 
 import { buildAccountValueReadModel } from "../../account-value/runtime-service.js";
 import { stableOpaqueId } from "../../account-value/canonical.js";
@@ -9,6 +9,8 @@ import {
 } from "../../services/api-trading-market-repo.js";
 import { canonicalJsonHash, lookupHmac } from "../persistence/canonical.js";
 import {
+  commitFundingOperation,
+  commitFundingOperationInTransaction,
   fetchFundingOperationForUser,
   listFundingOperationsForUser,
 } from "../persistence/funding-operation-repository.js";
@@ -464,7 +466,11 @@ export class FundingPlanningRuntime {
     });
   }
 
-  async commit(userId: string, request: FundingCommitRequest) {
+  private async commitUsing(
+    userId: string,
+    request: FundingCommitRequest,
+    commitOperation?: typeof commitFundingOperation,
+  ) {
     const [resolvedPolicy, account] = await Promise.all([
       resolveFundingPolicy(this.db),
       buildAccountValueReadModel({ pool: this.db, userId }),
@@ -481,6 +487,7 @@ export class FundingPlanningRuntime {
     }
     return new FundingOperationService({
       db: this.db,
+      ...(commitOperation ? { commitOperation } : {}),
       subjectLookupHmac: (subjectUserId) =>
         lookupHmac(`${SUBJECT_FINGERPRINT_DOMAIN}${subjectUserId}`, lookupKey),
       subjectLookupKeyVersion: keyVersion,
@@ -504,6 +511,20 @@ export class FundingPlanningRuntime {
       policyRevision: resolvedPolicy.revision,
       ownershipRevision: account.ownershipEvidenceRevision,
     });
+  }
+
+  commit(userId: string, request: FundingCommitRequest) {
+    return this.commitUsing(userId, request);
+  }
+
+  commitInTransaction(
+    client: PoolClient,
+    userId: string,
+    request: FundingCommitRequest,
+  ) {
+    return this.commitUsing(userId, request, (_db, input) =>
+      commitFundingOperationInTransaction(client, input),
+    );
   }
 
   operation(userId: string, operationId: string) {

@@ -110,6 +110,15 @@ export class FundingPolicyPublishError extends Error {
   }
 }
 
+export async function lockFundingPolicyForTransaction(
+  db: DbQuery,
+): Promise<void> {
+  await db.query<{ locked: unknown }>(
+    "select pg_advisory_xact_lock(hashtext($1)) as locked",
+    [FUNDING_POLICY_KEY],
+  );
+}
+
 function publicResolvedPolicy(
   resolved: ResolvedFundingPolicy,
 ): PublicResolvedFundingPolicy {
@@ -260,10 +269,7 @@ export async function publishFundingPolicy(
     now?: Date;
   }>,
 ): Promise<ResolvedFundingPolicy> {
-  await db.query<{ locked: unknown }>(
-    "select pg_advisory_xact_lock(hashtext($1)) as locked",
-    [FUNDING_POLICY_KEY],
-  );
+  await lockFundingPolicyForTransaction(db);
 
   const current = await resolveFundingPolicy(db);
   if (current.revision !== input.expectedCurrentRevision) {

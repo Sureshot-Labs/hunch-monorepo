@@ -1,0 +1,1110 @@
+import { POLYMARKET_FUNDING_ROUTER } from "@hunch/contracts";
+import { tx, type Pool, type PoolClient } from "@hunch/infra";
+
+import { stableWalletOpaqueId } from "../../account-value/canonical.js";
+import { normalizedActionSchema } from "../domain/schemas.js";
+import type { JsonValue, NormalizedAction } from "../domain/types.js";
+import {
+  finishFundingStepAttemptForUserInTransaction,
+  resolveAmbiguousProviderFundingStepAttemptForUserInTransaction,
+  startFundingStepAttemptInTransaction,
+} from "../persistence/funding-evidence-repository.js";
+import { FundingPersistenceError } from "../persistence/funding-operation-repository.js";
+import { canonicalJsonHash } from "../persistence/canonical.js";
+import {
+  lockFundingPolicyForTransaction,
+  resolveFundingPolicy,
+} from "../policies/funding-policy-service.js";
+import type { FundingTransactionReferenceCodec } from "./transaction-reference-codec.js";
+import type { PolymarketWrapExecutionConfiguration } from "./delegated-funding-config.js";
+import {
+  polymarketWrapExecutorEnvironmentReady,
+  polymarketWrapProfileConfigured,
+} from "./delegated-funding-config.js";
+import {
+  classifyPolymarketWrapControlPlane,
+  combineDelegatedFundingDecisions,
+  fundingPolicyRevisionMayResume,
+  type DelegatedFundingPreBroadcastDecision,
+} from "./delegated-funding-capability.js";
+import {
+  delegatedFundingProfile,
+  POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
+  validatePolymarketDepositUsdceWrapAction,
+} from "./delegated-funding-profiles.js";
+import {
+  telegramFundingAuthorizationFingerprint,
+  telegramFundingAuthorizationFromRow,
+  resolveCurrentTelegramFundingAuthority,
+  type TelegramFundingAuthorizationRow,
+} from "./telegram-funding-authorization.js";
+import { lockTelegramFundingLinkLifecycle } from "./telegram-funding-link-lifecycle-lock.js";
+
+type JsonRecord = Readonly<Record<string, JsonValue>>;
+
+export type DelegatedFundingExecutionClaim = Readonly<{
+  action: NormalizedAction;
+  actionWalletId: string;
+  actionFingerprint: string;
+  authorizationFingerprint: string;
+  authorizationId: string;
+  attemptId: string;
+  broadcastBoundaryCrossed: boolean;
+  destinationOptionId: string;
+  operationId: string;
+  policyFingerprint: string;
+  policyId: string;
+  privyWalletId: string;
+  profileId: string;
+  receiptRaw: string;
+  sponsor: boolean;
+  signerFingerprint: string;
+  signerId: string;
+  stepId: string;
+  telegramAccountId: string | null;
+  telegramUserId: string;
+  userId: string;
+  venueBindingOptionId: string;
+  walletAddress: string;
+}>;
+
+export type DelegatedFundingRecoveryClaim = DelegatedFundingExecutionClaim;
+
+type DelegatedFundingProfileClaim =
+  | Readonly<{
+      kind: "execution";
+      claim: DelegatedFundingExecutionClaim;
+    }>
+  | Readonly<{
+      kind: "rejected";
+      operationId: string;
+    }>;
+
+export type DelegatedFundingExecutionResult =
+  | Readonly<{ kind: "submitted"; transactionReference: string }>
+  | Readonly<{ kind: "pending" }>
+  | Readonly<{ kind: "ambiguous" }>
+  | Readonly<{
+      kind: "proven_nonbroadcast_failure";
+      reasonCode: string;
+    }>;
+
+export type DelegatedFundingNetworkDriver = Readonly<{
+  execute: (
+    claim: DelegatedFundingExecutionClaim,
+  ) => Promise<DelegatedFundingExecutionResult>;
+  recover: (
+    claim: DelegatedFundingRecoveryClaim,
+  ) => Promise<DelegatedFundingExecutionResult>;
+}>;
+
+type ResolvedFundingPolicy = Awaited<ReturnType<typeof resolveFundingPolicy>>;
+
+export type DelegatedFundingRuntimeProfile = Readonly<{
+  profileId: string;
+  controlPlaneDecision: (
+    policy: ResolvedFundingPolicy,
+  ) => DelegatedFundingPreBroadcastDecision;
+  rejectInvalidInTransaction: (
+    client: PoolClient,
+    input: Readonly<{
+      controlDecision: DelegatedFundingPreBroadcastDecision;
+      now: Date;
+    }>,
+  ) => Promise<Readonly<{ operationId: string }> | null>;
+  claimInTransaction: (
+    client: PoolClient,
+    input: Readonly<{
+      now: Date;
+    }>,
+  ) => Promise<DelegatedFundingProfileClaim | null>;
+  recoverInTransaction: (
+    client: PoolClient,
+    input: Readonly<{
+      recoverStartedBefore: Date;
+      now: Date;
+    }>,
+  ) => Promise<DelegatedFundingRecoveryClaim | null>;
+  preBroadcastDecisionInTransaction: (
+    client: PoolClient,
+    input: Readonly<{
+      claim: DelegatedFundingExecutionClaim;
+      now: Date;
+    }>,
+  ) => Promise<DelegatedFundingPreBroadcastDecision>;
+  driver: DelegatedFundingNetworkDriver;
+  validateSubmittedReference: (reference: string) => boolean;
+}>;
+
+type ClaimRow = Omit<TelegramFundingAuthorizationRow, "id"> &
+  Readonly<{
+    action_fingerprint: string;
+    authorization_id: string;
+    authorization_fingerprint: string;
+    executor_id: string;
+    normalized_action: JsonRecord;
+    operation_id: string;
+    policy_revision: string;
+    policy_version: string | number;
+    payer_requirement: string;
+    receipt_raw: string;
+    step_id: string;
+  }>;
+
+function actionWalletId(
+  row: Pick<ClaimRow, "wallet_chain" | "wallet_address">,
+) {
+  return stableWalletOpaqueId({
+    walletType: row.wallet_chain,
+    networkId: "evm:137",
+    address: row.wallet_address,
+  });
+}
+
+function executionClaimFromRow(
+  row: Omit<ClaimRow, "telegram_account_id"> & {
+    telegram_account_id: string | null;
+  },
+  input: Readonly<{
+    action: NormalizedAction;
+    actionWalletId: string;
+    attemptId: string;
+    broadcastBoundaryCrossed: boolean;
+  }>,
+): DelegatedFundingExecutionClaim {
+  return {
+    action: input.action,
+    actionWalletId: input.actionWalletId,
+    actionFingerprint: row.action_fingerprint,
+    authorizationFingerprint: row.authorization_fingerprint,
+    authorizationId: row.authorization_id,
+    attemptId: input.attemptId,
+    broadcastBoundaryCrossed: input.broadcastBoundaryCrossed,
+    destinationOptionId: row.destination_option_id,
+    operationId: row.operation_id,
+    policyFingerprint: row.policy_fingerprint,
+    policyId: row.policy_id,
+    privyWalletId: row.privy_wallet_id,
+    profileId: row.executor_id,
+    receiptRaw: row.receipt_raw,
+    signerFingerprint: row.signer_fingerprint,
+    signerId: row.signer_id,
+    sponsor: row.payer_requirement === "privy_sponsor",
+    stepId: row.step_id,
+    telegramAccountId: row.telegram_account_id,
+    telegramUserId: row.telegram_user_id,
+    userId: row.user_id,
+    venueBindingOptionId: row.venue_binding_option_id,
+    walletAddress: row.wallet_address.toLowerCase(),
+  };
+}
+
+async function tryStartDelegatedFundingAttempt(
+  client: PoolClient,
+  row: Pick<
+    ClaimRow,
+    "action_fingerprint" | "executor_id" | "operation_id" | "step_id"
+  >,
+  now: Date,
+) {
+  try {
+    return await startFundingStepAttemptInTransaction(client, {
+      operationId: row.operation_id,
+      stepId: row.step_id,
+      canonicalActionFingerprint: row.action_fingerprint,
+      executorId: row.executor_id,
+      now,
+    });
+  } catch (error) {
+    // The shared attempt guard is authoritative when concurrent workers read
+    // the same pre-commit snapshot. Losing that race is not a batch failure.
+    if (
+      error instanceof FundingPersistenceError &&
+      error.code === "invalid_state_transition"
+    ) {
+      return null;
+    }
+    throw error;
+  }
+}
+
+async function finishDelegatedFundingNonbroadcastFailure(
+  client: PoolClient,
+  input: Readonly<{
+    userId: string;
+    operationId: string;
+    stepId: string;
+    attemptId: string;
+    reasonCode: string;
+    now: Date;
+  }>,
+): Promise<void> {
+  await finishFundingStepAttemptForUserInTransaction(client, {
+    userId: input.userId,
+    operationId: input.operationId,
+    stepId: input.stepId,
+    attemptId: input.attemptId,
+    outcome: "failed",
+    broadcastMayHaveOccurred: false,
+    referenceKind: null,
+    receiptRefCiphertext: null,
+    receiptRefLookupHmac: null,
+    lookupKeyVersion: null,
+    actualCosts: { reasonCode: input.reasonCode },
+    now: input.now,
+  });
+}
+
+async function rejectInvalidPolymarketWrapInTransaction(
+  client: PoolClient,
+  input: Readonly<{
+    configuration: PolymarketWrapExecutionConfiguration;
+    controlDecision: DelegatedFundingPreBroadcastDecision;
+    now: Date;
+  }>,
+): Promise<Readonly<{ operationId: string }> | null> {
+  const invalid = await client.query<{
+    action_fingerprint: string;
+    executor_id: string;
+    operation_id: string;
+    step_id: string;
+    user_id: string;
+  }>(
+    `
+      select
+        operation.id as operation_id,
+        operation.user_id,
+        step.id as step_id,
+        step.action_fingerprint,
+        step.executor_id
+      from funding_operation_steps step
+      join funding_operations operation on operation.id = step.operation_id
+      where step.executor_id = $1
+        and step.state = 'action_required'
+        and operation.status not in (
+          'completed', 'refunded', 'failed', 'cancelled'
+        )
+        and operation.support_metadata ->> 'preparationKind' =
+              'polymarket_funding_router'
+        and not exists (
+          select 1
+          from funding_operation_step_attempts attempt
+          where attempt.step_id = step.id
+        )
+        and (
+          $2::boolean
+          or not exists (
+            select 1
+            from telegram_funding_authorizations funding_authorization
+            join user_telegram_accounts telegram_account
+              on telegram_account.id = funding_authorization.telegram_account_id
+             and telegram_account.user_id = funding_authorization.user_id
+             and telegram_account.telegram_user_id =
+                   funding_authorization.telegram_user_id
+            join user_wallets wallet
+              on wallet.id = funding_authorization.user_wallet_id
+             and wallet.user_id = funding_authorization.user_id
+             and wallet.is_verified = true
+             and wallet.is_internal_wallet = true
+             and wallet.privy_wallet_id = funding_authorization.privy_wallet_id
+             and lower(wallet.wallet_address) =
+                   lower(funding_authorization.wallet_address)
+            join users app_user
+              on app_user.id = funding_authorization.user_id
+             and coalesce(app_user.is_active, true) = true
+            join funding_receive_receipts receipt
+              on receipt.id::text =
+                   operation.support_metadata ->> 'fundingReceiveReceiptId'
+             and receipt.child_funding_operation_id = operation.id
+             and receipt.user_id = operation.user_id
+            join telegram_funding_sessions funding_context
+              on funding_context.receive_session_id = receipt.receive_session_id
+             and funding_context.user_id = operation.user_id
+            join telegram_funding_consents funding_consent
+              on funding_consent.id::text =
+                   operation.support_metadata ->> 'telegramFundingConsentId'
+             and funding_consent.telegram_funding_session_id = funding_context.id
+             and funding_consent.consent_fingerprint =
+                   operation.support_metadata ->>
+                     'telegramFundingConsentFingerprint'
+            where funding_authorization.id::text =
+                    operation.support_metadata ->> 'fundingAuthorizationId'
+              and funding_authorization.user_id = operation.user_id
+              and funding_authorization.profile_id = $1
+              and funding_authorization.security_class =
+                    'closed_destination_transform'
+              and (
+                not $8::boolean
+                or (
+                  funding_authorization.signer_id = $3
+                  and funding_authorization.signer_fingerprint = $4
+                  and funding_authorization.policy_id = $5
+                  and funding_authorization.policy_fingerprint = $6
+                )
+              )
+              and funding_authorization.venue_id = operation.venue_id
+              and funding_authorization.venue_binding_option_id =
+                    operation.support_metadata ->> 'venueBindingOptionId'
+              and funding_authorization.revoked_at is null
+              and (
+                funding_authorization.expires_at is null
+                or funding_authorization.expires_at > $7
+              )
+          )
+        )
+      order by operation.created_at asc, step.ordinal asc
+      for update of operation, step skip locked
+      limit 1
+    `,
+    [
+      POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
+      input.controlDecision.kind === "hard_invalid",
+      input.configuration.signerId,
+      input.configuration.signerFingerprint,
+      input.configuration.policyId,
+      input.configuration.policyFingerprint,
+      input.now,
+      polymarketWrapProfileConfigured(input.configuration),
+    ],
+  );
+  const row = invalid.rows[0];
+  if (!row) return null;
+  const attempt = await startFundingStepAttemptInTransaction(client, {
+    operationId: row.operation_id,
+    stepId: row.step_id,
+    canonicalActionFingerprint: row.action_fingerprint,
+    executorId: row.executor_id,
+    now: input.now,
+  });
+  await finishDelegatedFundingNonbroadcastFailure(client, {
+    userId: row.user_id,
+    operationId: row.operation_id,
+    stepId: row.step_id,
+    attemptId: attempt.id,
+    reasonCode:
+      input.controlDecision.kind === "hard_invalid"
+        ? input.controlDecision.reasonCode
+        : "delegated_authority_invalid",
+    now: input.now,
+  });
+  return { operationId: row.operation_id };
+}
+
+async function claimPolymarketWrapInTransaction(
+  client: PoolClient,
+  input: Readonly<{
+    now: Date;
+  }>,
+): Promise<DelegatedFundingProfileClaim | null> {
+  const { rows } = await client.query<ClaimRow>(
+    `
+      select
+        operation.id as operation_id,
+        operation.user_id,
+        operation.policy_version,
+        operation.policy_revision,
+        operation.support_metadata ->> 'fundingAuthorizationId' as authorization_id,
+        operation.support_metadata ->> 'fundingAuthorizationFingerprint' as authorization_fingerprint,
+        step.id as step_id,
+        step.action_fingerprint,
+        step.executor_id,
+        step.normalized_action,
+        step.payer_requirement,
+        receipt.raw_amount::text as receipt_raw,
+        funding_authorization.telegram_account_id,
+        funding_authorization.telegram_user_id,
+        funding_authorization.user_wallet_id,
+        funding_authorization.privy_wallet_id,
+        funding_authorization.wallet_address,
+        funding_authorization.wallet_chain,
+        funding_authorization.profile_id,
+        funding_authorization.security_class,
+        funding_authorization.signer_id,
+        funding_authorization.signer_fingerprint,
+        funding_authorization.policy_id,
+        funding_authorization.policy_fingerprint,
+        funding_authorization.venue_id,
+        funding_authorization.destination_option_id,
+        funding_authorization.venue_binding_option_id,
+        funding_authorization.source_network_id,
+        funding_authorization.source_asset_id,
+        funding_authorization.source_asset_decimals,
+        funding_authorization.destination_network_id,
+        funding_authorization.destination_asset_id,
+        funding_authorization.destination_asset_decimals,
+        funding_authorization.granted_at,
+        funding_authorization.expires_at
+      from funding_operation_steps step
+      join funding_operations operation
+        on operation.id = step.operation_id
+      left join funding_operation_steps dependency
+        on dependency.id = step.depends_on_step_id
+       and dependency.operation_id = step.operation_id
+      join funding_receive_receipts receipt
+        on receipt.id::text =
+             operation.support_metadata ->> 'fundingReceiveReceiptId'
+       and receipt.child_funding_operation_id = operation.id
+       and receipt.user_id = operation.user_id
+       and receipt.status = 'routing'
+      join telegram_funding_authorizations funding_authorization
+        on funding_authorization.id::text =
+             operation.support_metadata ->> 'fundingAuthorizationId'
+       and funding_authorization.user_id = operation.user_id
+       and funding_authorization.profile_id = $1
+       and funding_authorization.security_class = 'closed_destination_transform'
+       and funding_authorization.venue_id = operation.venue_id
+       and funding_authorization.venue_binding_option_id =
+             operation.support_metadata ->> 'venueBindingOptionId'
+       and funding_authorization.source_network_id = receipt.network_id
+       and lower(funding_authorization.source_asset_id) = lower(receipt.asset_id)
+       and funding_authorization.source_asset_decimals = receipt.asset_decimals
+      join telegram_funding_sessions funding_context
+        on funding_context.receive_session_id = receipt.receive_session_id
+       and funding_context.user_id = operation.user_id
+      join telegram_funding_consents funding_consent
+        on funding_consent.id::text =
+             operation.support_metadata ->> 'telegramFundingConsentId'
+       and funding_consent.telegram_funding_session_id = funding_context.id
+       and funding_consent.consent_fingerprint =
+             operation.support_metadata ->> 'telegramFundingConsentFingerprint'
+      where step.executor_id = $1
+        and step.state = 'action_required'
+        and (step.depends_on_step_id is null or dependency.state = 'succeeded')
+        and operation.status not in (
+          'completed', 'refunded', 'failed', 'cancelled'
+        )
+        and operation.support_metadata ->> 'preparationKind' =
+              'polymarket_funding_router'
+        and not exists (
+          select 1
+          from funding_operation_step_attempts attempt
+          where attempt.step_id = step.id
+        )
+      order by operation.created_at asc, step.ordinal asc
+      for update of operation, step, receipt, funding_authorization skip locked
+      limit 1
+    `,
+    [POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID],
+  );
+  const row = rows[0];
+  if (!row) return null;
+
+  const rejectClaim = async (
+    reasonCode: "delegated_action_invalid" | "delegated_authority_invalid",
+  ): Promise<DelegatedFundingProfileClaim | null> => {
+    const attempt = await tryStartDelegatedFundingAttempt(
+      client,
+      row,
+      input.now,
+    );
+    if (!attempt) return null;
+    await finishDelegatedFundingNonbroadcastFailure(client, {
+      userId: row.user_id,
+      operationId: row.operation_id,
+      stepId: row.step_id,
+      attemptId: attempt.id,
+      reasonCode,
+      now: input.now,
+    });
+    return { kind: "rejected", operationId: row.operation_id };
+  };
+
+  const parsed = normalizedActionSchema.safeParse(row.normalized_action);
+  const action = parsed.success ? (parsed.data as NormalizedAction) : null;
+  if (!action || canonicalJsonHash(action) !== row.action_fingerprint) {
+    return rejectClaim("delegated_action_invalid");
+  }
+  let currentAuthorizationFingerprint: string;
+  try {
+    currentAuthorizationFingerprint = telegramFundingAuthorizationFingerprint(
+      telegramFundingAuthorizationFromRow({
+        ...row,
+        id: row.authorization_id,
+      }),
+    );
+  } catch {
+    return rejectClaim("delegated_authority_invalid");
+  }
+  if (currentAuthorizationFingerprint !== row.authorization_fingerprint) {
+    return rejectClaim("delegated_authority_invalid");
+  }
+  const expectedActionWalletId = actionWalletId(row);
+  try {
+    validatePolymarketDepositUsdceWrapAction({
+      action,
+      expectedRaw: row.receipt_raw,
+      routerAddress: POLYMARKET_FUNDING_ROUTER.polygon,
+      walletId: expectedActionWalletId,
+    });
+  } catch {
+    return rejectClaim("delegated_action_invalid");
+  }
+  const attempt = await tryStartDelegatedFundingAttempt(client, row, input.now);
+  if (!attempt) return null;
+  return {
+    kind: "execution",
+    claim: executionClaimFromRow(row, {
+      action,
+      actionWalletId: expectedActionWalletId,
+      attemptId: attempt.id,
+      broadcastBoundaryCrossed: false,
+    }),
+  };
+}
+
+async function recoverPolymarketWrapInTransaction(
+  client: PoolClient,
+  input: Readonly<{
+    recoverStartedBefore: Date;
+    now: Date;
+  }>,
+): Promise<DelegatedFundingRecoveryClaim | null> {
+  const { rows } = await client.query<
+    Omit<ClaimRow, "telegram_account_id"> & {
+      attempt_id: string;
+      attempt_outcome: "started" | "ambiguous";
+      telegram_account_id: string | null;
+    }
+  >(
+    `
+      select
+        attempt.id as attempt_id,
+        attempt.outcome as attempt_outcome,
+        operation.id as operation_id,
+        operation.user_id,
+        operation.policy_version,
+        operation.policy_revision,
+        operation.support_metadata ->> 'fundingAuthorizationId' as authorization_id,
+        operation.support_metadata ->> 'fundingAuthorizationFingerprint' as authorization_fingerprint,
+        step.id as step_id,
+        step.action_fingerprint,
+        step.executor_id,
+        step.normalized_action,
+        step.payer_requirement,
+        receipt.raw_amount::text as receipt_raw,
+        funding_authorization.telegram_account_id,
+        funding_authorization.telegram_user_id,
+        funding_authorization.user_wallet_id,
+        funding_authorization.privy_wallet_id,
+        funding_authorization.wallet_address,
+        funding_authorization.wallet_chain,
+        funding_authorization.profile_id,
+        funding_authorization.security_class,
+        funding_authorization.signer_id,
+        funding_authorization.signer_fingerprint,
+        funding_authorization.policy_id,
+        funding_authorization.policy_fingerprint,
+        funding_authorization.venue_id,
+        funding_authorization.destination_option_id,
+        funding_authorization.venue_binding_option_id,
+        funding_authorization.source_network_id,
+        funding_authorization.source_asset_id,
+        funding_authorization.source_asset_decimals,
+        funding_authorization.destination_network_id,
+        funding_authorization.destination_asset_id,
+        funding_authorization.destination_asset_decimals,
+        funding_authorization.granted_at,
+        funding_authorization.expires_at
+      from funding_operation_step_attempts attempt
+      join funding_operation_steps step on step.id = attempt.step_id
+      join funding_operations operation on operation.id = step.operation_id
+      join funding_receive_receipts receipt
+        on receipt.id::text =
+             operation.support_metadata ->> 'fundingReceiveReceiptId'
+       and receipt.child_funding_operation_id = operation.id
+       and receipt.user_id = operation.user_id
+      join telegram_funding_authorizations funding_authorization
+        on funding_authorization.id::text =
+             operation.support_metadata ->> 'fundingAuthorizationId'
+       and funding_authorization.user_id = operation.user_id
+      join telegram_funding_sessions funding_context
+        on funding_context.receive_session_id = receipt.receive_session_id
+       and funding_context.user_id = operation.user_id
+      join telegram_funding_consents funding_consent
+        on funding_consent.id::text =
+             operation.support_metadata ->> 'telegramFundingConsentId'
+       and funding_consent.telegram_funding_session_id = funding_context.id
+       and funding_consent.consent_fingerprint =
+             operation.support_metadata ->> 'telegramFundingConsentFingerprint'
+      where attempt.executor_id = $1
+        and (
+          (
+            attempt.outcome = 'started'
+            and step.state = 'action_required'
+          )
+          or (
+            attempt.outcome = 'ambiguous'
+            and attempt.reference_kind = 'provider_receipt'
+            and step.state = 'reconcile_required'
+          )
+        )
+        and attempt.updated_at <= $2
+        and step.executor_id = $1
+        and operation.status not in (
+          'completed', 'refunded', 'failed', 'cancelled'
+        )
+      order by attempt.updated_at asc, attempt.id asc
+      for update of attempt, step, operation skip locked
+      limit 1
+    `,
+    [POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID, input.recoverStartedBefore],
+  );
+  const row = rows[0];
+  if (!row) return null;
+  const leased = await client.query(
+    `
+      update funding_operation_step_attempts
+      set updated_at = $2
+      where id = $1
+        and outcome in ('started', 'ambiguous')
+        and updated_at <= $3
+    `,
+    [row.attempt_id, input.now, input.recoverStartedBefore],
+  );
+  if (leased.rowCount !== 1) {
+    throw new Error("delegated funding recovery lease was lost");
+  }
+  const parsed = normalizedActionSchema.safeParse(row.normalized_action);
+  const action = parsed.success ? (parsed.data as NormalizedAction) : null;
+  if (!action || canonicalJsonHash(action) !== row.action_fingerprint) {
+    throw new Error("delegated funding recovery action is invalid");
+  }
+  const expectedActionWalletId = actionWalletId(row);
+  validatePolymarketDepositUsdceWrapAction({
+    action,
+    expectedRaw: row.receipt_raw,
+    routerAddress: POLYMARKET_FUNDING_ROUTER.polygon,
+    walletId: expectedActionWalletId,
+  });
+  return executionClaimFromRow(row, {
+    action,
+    actionWalletId: expectedActionWalletId,
+    attemptId: row.attempt_id,
+    broadcastBoundaryCrossed: row.attempt_outcome === "ambiguous",
+  });
+}
+
+export type DelegatedFundingExecutorBatchResult = Readonly<{
+  claimed: number;
+  recovered: number;
+  softPaused: number;
+  submitted: number;
+  ambiguous: number;
+  definitivelyFailed: number;
+  pending: number;
+  operationIds: readonly string[];
+}>;
+
+export function delegatedFundingProfileOrder<T>(
+  profiles: readonly T[],
+  startIndex: number,
+): readonly T[] {
+  if (profiles.length < 2) return profiles;
+  const normalized =
+    ((Math.trunc(startIndex) % profiles.length) + profiles.length) %
+    profiles.length;
+  return [...profiles.slice(normalized), ...profiles.slice(0, normalized)];
+}
+
+async function polymarketWrapPreBroadcastDecisionInTransaction(
+  client: PoolClient,
+  input: Readonly<{
+    claim: DelegatedFundingExecutionClaim;
+    configuration: PolymarketWrapExecutionConfiguration;
+    now: Date;
+  }>,
+): Promise<DelegatedFundingPreBroadcastDecision> {
+  await lockTelegramFundingLinkLifecycle(client, input.claim.userId);
+  await lockFundingPolicyForTransaction(client);
+  const policy = await resolveFundingPolicy(client);
+  const controlDecision = classifyPolymarketWrapControlPlane({
+    configuration: input.configuration,
+    policy,
+  });
+  const environmentDecision: DelegatedFundingPreBroadcastDecision =
+    polymarketWrapExecutorEnvironmentReady()
+      ? { kind: "allowed" }
+      : {
+          kind: "soft_paused",
+          reasonCode: "delegated_profile_unavailable",
+        };
+  const scope = await client.query<{
+    action_fingerprint: string;
+    normalized_action: JsonRecord;
+    policy_revision: string;
+    policy_version: string | number;
+    receipt_raw: string;
+  }>(
+    `
+      select
+        operation.policy_revision,
+        operation.policy_version,
+        step.action_fingerprint,
+        step.normalized_action,
+        receipt.raw_amount::text as receipt_raw
+      from funding_operation_step_attempts attempt
+      join funding_operation_steps step on step.id = attempt.step_id
+      join funding_operations operation on operation.id = step.operation_id
+      join funding_receive_receipts receipt
+        on receipt.id::text =
+             operation.support_metadata ->> 'fundingReceiveReceiptId'
+       and receipt.child_funding_operation_id = operation.id
+       and receipt.user_id = operation.user_id
+       and receipt.status = 'routing'
+      join telegram_funding_sessions funding_context
+        on funding_context.receive_session_id = receipt.receive_session_id
+       and funding_context.user_id = operation.user_id
+      join telegram_funding_consents funding_consent
+        on funding_consent.id::text =
+             operation.support_metadata ->> 'telegramFundingConsentId'
+       and funding_consent.telegram_funding_session_id = funding_context.id
+       and funding_consent.consent_fingerprint =
+             operation.support_metadata ->> 'telegramFundingConsentFingerprint'
+      where operation.id = $1
+        and operation.user_id = $2
+        and operation.support_metadata ->> 'fundingAuthorizationId' = $3
+        and operation.support_metadata ->> 'fundingAuthorizationFingerprint' = $4
+        and step.id = $5
+        and step.executor_id = $6
+        and step.state = 'action_required'
+        and attempt.id = $7
+        and attempt.outcome = 'started'
+        and attempt.canonical_action_fingerprint = step.action_fingerprint
+      for update of operation, step, attempt, receipt
+    `,
+    [
+      input.claim.operationId,
+      input.claim.userId,
+      input.claim.authorizationId,
+      input.claim.authorizationFingerprint,
+      input.claim.stepId,
+      input.claim.profileId,
+      input.claim.attemptId,
+    ],
+  );
+  const row = scope.rows[0];
+  if (!row) {
+    return {
+      kind: "hard_invalid",
+      reasonCode: "delegated_action_invalid",
+    };
+  }
+  if (Number(row.policy_version) !== policy.runtime.contractVersion) {
+    return {
+      kind: "hard_invalid",
+      reasonCode: "funding_runtime_contract_changed",
+    };
+  }
+  if (
+    row.policy_revision !== policy.revision &&
+    !fundingPolicyRevisionMayResume(policy)
+  ) {
+    return {
+      kind: "hard_invalid",
+      reasonCode: "funding_policy_changed",
+    };
+  }
+  const parsed = normalizedActionSchema.safeParse(row.normalized_action);
+  const action = parsed.success ? (parsed.data as NormalizedAction) : null;
+  try {
+    if (
+      !action ||
+      canonicalJsonHash(action) !== row.action_fingerprint ||
+      row.action_fingerprint !== input.claim.actionFingerprint
+    ) {
+      throw new Error("delegated action fingerprint changed");
+    }
+    validatePolymarketDepositUsdceWrapAction({
+      action,
+      expectedRaw: row.receipt_raw,
+      routerAddress: POLYMARKET_FUNDING_ROUTER.polygon,
+      walletId: input.claim.actionWalletId,
+    });
+  } catch {
+    return {
+      kind: "hard_invalid",
+      reasonCode: "delegated_action_invalid",
+    };
+  }
+  const authority = input.claim.telegramAccountId
+    ? await resolveCurrentTelegramFundingAuthority(client, {
+        userId: input.claim.userId,
+        telegramAccountId: input.claim.telegramAccountId,
+        telegramUserId: input.claim.telegramUserId,
+        destinationOptionId: input.claim.destinationOptionId,
+        venueBindingOptionId: input.claim.venueBindingOptionId,
+        configuration: input.configuration,
+        expectedAuthorizationId: input.claim.authorizationId,
+        expectedAuthorizationFingerprint: input.claim.authorizationFingerprint,
+        now: input.now,
+        lock: true,
+      })
+    : ({
+        kind: "hard_invalid",
+        reasonCode: "delegated_authority_invalid",
+      } as const);
+  return combineDelegatedFundingDecisions(
+    controlDecision,
+    environmentDecision,
+    authority.kind === "allowed" ? { kind: "allowed" } : authority,
+  );
+}
+
+export function createPolymarketWrapDelegatedFundingProfile(
+  input: Readonly<{
+    configuration: PolymarketWrapExecutionConfiguration;
+    driver: DelegatedFundingNetworkDriver;
+  }>,
+): DelegatedFundingRuntimeProfile {
+  return {
+    profileId: POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
+    controlPlaneDecision: (policy) =>
+      classifyPolymarketWrapControlPlane({
+        configuration: input.configuration,
+        policy,
+      }),
+    rejectInvalidInTransaction: (client, rejectionInput) =>
+      rejectInvalidPolymarketWrapInTransaction(client, {
+        configuration: input.configuration,
+        ...rejectionInput,
+      }),
+    claimInTransaction: (client, claimInput) =>
+      claimPolymarketWrapInTransaction(client, {
+        ...claimInput,
+      }),
+    recoverInTransaction: (client, recoveryInput) =>
+      recoverPolymarketWrapInTransaction(client, recoveryInput),
+    preBroadcastDecisionInTransaction: (client, boundaryInput) =>
+      polymarketWrapPreBroadcastDecisionInTransaction(client, {
+        configuration: input.configuration,
+        ...boundaryInput,
+      }),
+    driver: input.driver,
+    validateSubmittedReference: (reference) =>
+      /^0x[0-9a-f]{64}$/i.test(reference),
+  };
+}
+
+export class DelegatedFundingExecutor {
+  private nextProfileIndex = 0;
+
+  constructor(
+    private readonly pool: Pool,
+    private readonly input: Readonly<{
+      profiles: readonly DelegatedFundingRuntimeProfile[];
+      referenceCodec: FundingTransactionReferenceCodec;
+      startedAttemptRecoveryMs?: number;
+    }>,
+  ) {
+    const seen = new Set<string>();
+    for (const runtime of input.profiles) {
+      if (!delegatedFundingProfile(runtime.profileId)) {
+        throw new Error(
+          `unknown delegated funding profile ${runtime.profileId}`,
+        );
+      }
+      if (seen.has(runtime.profileId)) {
+        throw new Error(
+          `duplicate delegated funding profile ${runtime.profileId}`,
+        );
+      }
+      seen.add(runtime.profileId);
+    }
+  }
+
+  async runBatch(options: Readonly<{ limit?: number; now?: Date }> = {}) {
+    const result = {
+      claimed: 0,
+      recovered: 0,
+      softPaused: 0,
+      submitted: 0,
+      ambiguous: 0,
+      definitivelyFailed: 0,
+      pending: 0,
+      operationIds: [] as string[],
+    };
+    const limit = Math.max(1, Math.min(options.limit ?? 25, 100));
+    const profiles = delegatedFundingProfileOrder(
+      this.input.profiles,
+      this.nextProfileIndex,
+    );
+    const exhausted = new Set<string>();
+    while (result.claimed < limit && exhausted.size < profiles.length) {
+      for (const runtime of profiles) {
+        if (result.claimed >= limit || exhausted.has(runtime.profileId)) {
+          continue;
+        }
+        const now = options.now ?? new Date();
+        const recoveryMs = Math.max(
+          1,
+          this.input.startedAttemptRecoveryMs ?? 5 * 60_000,
+        );
+        const claimed = await tx(this.pool, async (client) => {
+          const recovery = await runtime.recoverInTransaction(client, {
+            now,
+            recoverStartedBefore: new Date(now.getTime() - recoveryMs),
+          });
+          if (recovery) {
+            return { kind: "recovery" as const, claim: recovery };
+          }
+          await lockFundingPolicyForTransaction(client);
+          const currentPolicy = await resolveFundingPolicy(client);
+          const controlDecision = runtime.controlPlaneDecision(currentPolicy);
+          const rejected = await runtime.rejectInvalidInTransaction(client, {
+            controlDecision,
+            now,
+          });
+          if (rejected) {
+            return { kind: "rejected" as const, ...rejected };
+          }
+          const claim = await runtime.claimInTransaction(client, {
+            now,
+          });
+          return claim;
+        });
+        if (!claimed) {
+          exhausted.add(runtime.profileId);
+          continue;
+        }
+        const claimedProfileIndex = this.input.profiles.indexOf(runtime);
+        this.nextProfileIndex =
+          claimedProfileIndex < 0
+            ? 0
+            : (claimedProfileIndex + 1) % this.input.profiles.length;
+        result.claimed += 1;
+        if (claimed.kind === "rejected") {
+          result.definitivelyFailed += 1;
+          result.operationIds.push(claimed.operationId);
+          continue;
+        }
+        const { claim } = claimed;
+        if (claimed.kind === "recovery") result.recovered += 1;
+        result.operationIds.push(claim.operationId);
+        const providerReferenceLookupHmac =
+          this.input.referenceCodec.fingerprint(claim.attemptId);
+        const boundaryDecision = claim.broadcastBoundaryCrossed
+          ? ({ kind: "reconciliation_only" } as const)
+          : await tx(this.pool, async (client) => {
+              const decision = await runtime.preBroadcastDecisionInTransaction(
+                client,
+                {
+                  claim,
+                  now,
+                },
+              );
+              if (decision.kind === "soft_paused") return decision;
+              if (decision.kind === "hard_invalid") {
+                await finishDelegatedFundingNonbroadcastFailure(client, {
+                  userId: claim.userId,
+                  operationId: claim.operationId,
+                  stepId: claim.stepId,
+                  attemptId: claim.attemptId,
+                  reasonCode: decision.reasonCode,
+                  now,
+                });
+                return decision;
+              }
+              await finishFundingStepAttemptForUserInTransaction(client, {
+                userId: claim.userId,
+                operationId: claim.operationId,
+                stepId: claim.stepId,
+                attemptId: claim.attemptId,
+                outcome: "ambiguous",
+                broadcastMayHaveOccurred: true,
+                referenceKind: "provider_receipt",
+                receiptRefCiphertext: this.input.referenceCodec.encrypt(
+                  claim.attemptId,
+                ),
+                receiptRefLookupHmac: providerReferenceLookupHmac,
+                lookupKeyVersion: this.input.referenceCodec.keyVersion,
+                actualCosts: {
+                  providerReferenceKind: "privy_reference_id",
+                },
+                now,
+              });
+              return decision;
+            });
+        if (boundaryDecision.kind === "soft_paused") {
+          result.softPaused += 1;
+          result.pending += 1;
+          continue;
+        }
+        if (boundaryDecision.kind === "hard_invalid") {
+          result.definitivelyFailed += 1;
+          continue;
+        }
+        const executionClaim = claim.broadcastBoundaryCrossed
+          ? claim
+          : { ...claim, broadcastBoundaryCrossed: true };
+        let execution: DelegatedFundingExecutionResult;
+        try {
+          execution =
+            claimed.kind === "recovery"
+              ? await runtime.driver.recover(executionClaim)
+              : await runtime.driver.execute(executionClaim);
+        } catch {
+          execution = { kind: "ambiguous" };
+        }
+        if (execution.kind === "pending" || execution.kind === "ambiguous") {
+          result.pending += 1;
+          result.ambiguous += 1;
+          continue;
+        }
+        let resolution:
+          | Readonly<{
+              kind: "transaction";
+              receiptRefCiphertext: string;
+              receiptRefLookupHmac: string;
+              lookupKeyVersion: number;
+            }>
+          | Readonly<{
+              kind: "definitive_failure";
+              actualCosts: JsonRecord;
+            }>
+          | null;
+        if (execution.kind === "submitted") {
+          const transactionReference = execution.transactionReference.trim();
+          resolution =
+            transactionReference &&
+            runtime.validateSubmittedReference(transactionReference)
+              ? {
+                  kind: "transaction",
+                  receiptRefCiphertext:
+                    this.input.referenceCodec.encrypt(transactionReference),
+                  receiptRefLookupHmac:
+                    this.input.referenceCodec.fingerprint(transactionReference),
+                  lookupKeyVersion: this.input.referenceCodec.keyVersion,
+                }
+              : null;
+        } else {
+          resolution = {
+            kind: "definitive_failure",
+            actualCosts: { reasonCode: execution.reasonCode },
+          };
+        }
+        if (!resolution) {
+          result.pending += 1;
+          result.ambiguous += 1;
+          continue;
+        }
+        await tx(this.pool, (client) =>
+          resolveAmbiguousProviderFundingStepAttemptForUserInTransaction(
+            client,
+            {
+              userId: claim.userId,
+              operationId: claim.operationId,
+              stepId: claim.stepId,
+              attemptId: claim.attemptId,
+              providerReferenceLookupHmac,
+              resolution,
+              now,
+            },
+          ),
+        );
+        if (execution.kind === "submitted") result.submitted += 1;
+        else result.definitivelyFailed += 1;
+      }
+    }
+    return result satisfies DelegatedFundingExecutorBatchResult;
+  }
+}

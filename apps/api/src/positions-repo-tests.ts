@@ -1141,6 +1141,26 @@ await test("unscoped position reads ignore non-portfolio venues", async () => {
     assert.equal(byToken.length, 1);
     assert.equal(byToken[0]?.tokenId, supportedTokenId);
 
+    const explicitlyUnsupported = await fetchPositionsForUserWallet(pool, {
+      userId,
+      walletAddresses: [walletAddress],
+      venue: "hyperliquid",
+      includeHidden: true,
+      minSize: 0,
+    });
+    assert.deepEqual(explicitlyUnsupported, []);
+
+    const explicitlyUnsupportedByToken =
+      await fetchPositionsForUserWalletByTokenIds(pool, {
+        userId,
+        walletAddresses: [walletAddress],
+        tokenIds: [unsupportedTokenId],
+        venue: "hyperliquid",
+        includeHidden: true,
+        minSize: 0,
+      });
+    assert.deepEqual(explicitlyUnsupportedByToken, []);
+
     const summary = await fetchPositionPnlSummaryForUserWallet(pool, {
       userId,
       walletAddresses: [walletAddress],
@@ -1149,6 +1169,17 @@ await test("unscoped position reads ignore non-portfolio venues", async () => {
     assert.equal(summary.openPositionsCount, 1);
     assertClose(summary.realizedPnlAllTime, 2);
     assertClose(summary.unrealizedPnlCurrent, 3);
+
+    const explicitlyUnsupportedSummary =
+      await fetchPositionPnlSummaryForUserWallet(pool, {
+        userId,
+        walletAddresses: [walletAddress],
+        venue: "hyperliquid",
+      });
+    assert.equal(explicitlyUnsupportedSummary.positionsCount, 0);
+    assert.equal(explicitlyUnsupportedSummary.openPositionsCount, 0);
+    assert.equal(explicitlyUnsupportedSummary.realizedPnlAllTime, 0);
+    assert.equal(explicitlyUnsupportedSummary.unrealizedPnlCurrent, 0);
   } finally {
     await cleanupPositionTest(userId, [supportedTokenId, unsupportedTokenId]);
   }

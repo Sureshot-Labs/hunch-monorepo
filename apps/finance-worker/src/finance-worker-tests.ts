@@ -14,6 +14,7 @@ import {
   setFinanceJobsModuleLoaderForTests,
 } from "./finance-jobs.js";
 import {
+  delegatedFundingWorkerConfig,
   fundingReferenceProtectionConfig,
   resetFundingWorkerModuleLoaderForTests,
   relayFundingWorkerConfig,
@@ -164,6 +165,53 @@ const tests: TestCase[] = [
         relayFundingWorkerConfig({
           ...complete,
           fundingReferenceLookupHmacKey: undefined,
+        }),
+        undefined,
+      );
+    },
+  },
+  {
+    name: "delegated wrap config requires its complete execution substrate",
+    run: () => {
+      const complete = buildTestEnv({
+        fundingPolymarketWrapExecute: true,
+        credentialsEncryptionKey: "credentials-key",
+        fundingReferenceLookupHmacKey: "lookup-key",
+        privyAppId: "app-id",
+        privyAppSecret: "app-secret",
+        privyPolymarketWrapAuthorizationKey: "authorization-key",
+        privyPolymarketWrapSignerId: "signer-id",
+        privyPolymarketWrapSignerFingerprint: "s".repeat(64),
+        privyPolymarketWrapPolicyId: "policy-id",
+        privyPolymarketWrapPolicyFingerprint: "p".repeat(64),
+      });
+      assert.ok(delegatedFundingWorkerConfig(complete));
+      const disabled = delegatedFundingWorkerConfig({
+        ...complete,
+        fundingPolymarketWrapExecute: false,
+      });
+      assert.ok(disabled);
+      assert.equal(disabled.configuration.enabled, false);
+      const profileRollback = delegatedFundingWorkerConfig({
+        ...complete,
+        privyPolymarketWrapSignerId: undefined,
+        privyPolymarketWrapSignerFingerprint: undefined,
+        privyPolymarketWrapPolicyId: undefined,
+        privyPolymarketWrapPolicyFingerprint: undefined,
+      });
+      assert.ok(profileRollback);
+      assert.equal(profileRollback.configuration.signerId, "");
+      assert.equal(
+        delegatedFundingWorkerConfig({
+          ...complete,
+          fundingReferenceLookupHmacKey: undefined,
+        }),
+        undefined,
+      );
+      assert.equal(
+        delegatedFundingWorkerConfig({
+          ...complete,
+          privyPolymarketWrapAuthorizationKey: undefined,
         }),
         undefined,
       );

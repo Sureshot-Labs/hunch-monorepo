@@ -23,6 +23,21 @@ type FundingReconciliationOptions = {
     apiKey: string;
     timeoutMs?: number;
   }>;
+  delegatedExecution?: Readonly<{
+    configuration: Readonly<{
+      enabled: boolean;
+      profileId: "polymarket_deposit_usdce_wrap_v1";
+      signerId: string;
+      signerFingerprint: string;
+      policyId: string;
+      policyFingerprint: string;
+    }>;
+    privy: Readonly<{
+      appId: string;
+      appSecret: string;
+      authorizationPrivateKey: string;
+    }>;
+  }>;
 };
 
 type FundingReconciliationResult = {
@@ -48,6 +63,13 @@ type FundingReconciliationResult = {
     reviewsRequired: number;
     retriesScheduled: number;
     retryableErrors: number;
+  }> | null;
+  delegatedFundingExecution?: Readonly<{
+    claimed: number;
+    submitted: number;
+    ambiguous: number;
+    definitivelyFailed: number;
+    operationIds: readonly string[];
   }> | null;
   telegramFundingProgress?: Readonly<{
     candidates: number;
@@ -107,6 +129,47 @@ export function fundingReferenceProtectionConfig(
   };
 }
 
+export function delegatedFundingWorkerConfig(
+  input: Pick<
+    typeof env,
+    | "fundingPolymarketWrapExecute"
+    | "credentialsEncryptionKey"
+    | "fundingReferenceLookupHmacKey"
+    | "privyAppId"
+    | "privyAppSecret"
+    | "privyPolymarketWrapAuthorizationKey"
+    | "privyPolymarketWrapSignerId"
+    | "privyPolymarketWrapSignerFingerprint"
+    | "privyPolymarketWrapPolicyId"
+    | "privyPolymarketWrapPolicyFingerprint"
+  >,
+): FundingReconciliationOptions["delegatedExecution"] {
+  if (
+    !input.credentialsEncryptionKey ||
+    !input.fundingReferenceLookupHmacKey ||
+    !input.privyAppId ||
+    !input.privyAppSecret ||
+    !input.privyPolymarketWrapAuthorizationKey
+  ) {
+    return undefined;
+  }
+  return {
+    configuration: {
+      enabled: input.fundingPolymarketWrapExecute,
+      profileId: "polymarket_deposit_usdce_wrap_v1",
+      signerId: input.privyPolymarketWrapSignerId ?? "",
+      signerFingerprint: input.privyPolymarketWrapSignerFingerprint ?? "",
+      policyId: input.privyPolymarketWrapPolicyId ?? "",
+      policyFingerprint: input.privyPolymarketWrapPolicyFingerprint ?? "",
+    },
+    privy: {
+      appId: input.privyAppId,
+      appSecret: input.privyAppSecret,
+      authorizationPrivateKey: input.privyPolymarketWrapAuthorizationKey,
+    },
+  };
+}
+
 let fundingModulePromise: Promise<FundingWorkerModule> | null = null;
 let fundingPool: Pool | null = null;
 let fundingModuleLoader: FundingWorkerModuleLoader =
@@ -160,6 +223,7 @@ export async function runFundingReconciliationJob(): Promise<FundingReconciliati
   const module = await getFundingWorkerModule();
   const relay = relayFundingWorkerConfig(env);
   const referenceProtection = fundingReferenceProtectionConfig(env);
+  const delegatedExecution = delegatedFundingWorkerConfig(env);
   return module.runFundingReconciliationJob(getFundingPool(), {
     workerId: fundingWorkerId(),
     limit: env.fundingReconciliationBatchSize,
@@ -173,6 +237,7 @@ export async function runFundingReconciliationJob(): Promise<FundingReconciliati
     terminalTimeoutMs: env.fundingReconciliationTerminalTimeoutSec * 1_000,
     ...(referenceProtection ? { referenceProtection } : {}),
     ...(relay ? { relay } : {}),
+    ...(delegatedExecution ? { delegatedExecution } : {}),
   });
 }
 

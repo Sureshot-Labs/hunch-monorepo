@@ -1,10 +1,7 @@
 import type { AccountValueReadModel } from "../../account-value/runtime-service.js";
 import { multiplyRawByUnitPrice } from "../../account-value/decimal.js";
 import { stableOpaqueId } from "../../account-value/canonical.js";
-import {
-  buildPolymarketFundingPlan,
-  PolymarketFundingPlanError,
-} from "../../services/polymarket-funding-router.js";
+import { PolymarketFundingPlanError } from "../../services/polymarket-funding-router.js";
 import {
   isRelayPinnedStableAsset,
   RELAY_PINNED_ASSETS,
@@ -29,7 +26,11 @@ import type {
   FundingCommitPlan,
   FundingCommitReservation,
 } from "../persistence/funding-operation-repository.js";
-import { buildPolymarketFundingFollowupAction } from "../preparation/polymarket-funding-followup.js";
+import {
+  buildExactPolymarketDepositUsdceWrapPlan,
+  buildPolymarketFundingActionValidation,
+  buildPolymarketFundingFollowupAction,
+} from "../preparation/polymarket-funding-followup.js";
 import { parsePolymarketFundingEvidence } from "../preparation/polymarket-funding-snapshot.js";
 import type {
   FundingSourceAdapter,
@@ -40,6 +41,7 @@ import { buildFundingReceiveTargets } from "./receive-targets.js";
 import { sameAsset } from "./money.js";
 import { supportsCanonicalFundingReceiveEvents } from "../receive/canonical-receive-capabilities.js";
 import { fundingSidecarRuntimeConfig } from "../runtime/sidecar-runtime-config.js";
+import { POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID } from "../execution/delegated-funding-profile-ids.js";
 
 function jsonRecord(value: unknown): Readonly<Record<string, JsonValue>> {
   return value as Readonly<Record<string, JsonValue>>;
@@ -206,51 +208,17 @@ function buildPolymarketIngressCompletion(input: {
   ) {
     return null;
   }
-  const depositAvailableRaw =
-    BigInt(snapshot.depositPusdRaw) > BigInt(snapshot.depositLockedRaw)
-      ? BigInt(snapshot.depositPusdRaw) - BigInt(snapshot.depositLockedRaw)
-      : 0n;
   let plan;
   try {
-    plan = buildPolymarketFundingPlan({
-      signer: snapshot.signerAddress,
-      depositWallet: snapshot.depositWallet,
-      routerAddress: snapshot.routerAddress,
-      routerNonce: BigInt(snapshot.routerNonceRaw),
-      requiredRaw:
-        depositAvailableRaw + BigInt(input.planning.requiredAmount.raw),
-      depositPusdRaw: BigInt(snapshot.depositPusdRaw),
-      depositLockedRaw: BigInt(snapshot.depositLockedRaw),
-      // This branch is frozen against the amount this operation is waiting
-      // to receive. Existing USDC.e is intentionally not swept.
-      depositUsdceRaw: BigInt(input.planning.requiredAmount.raw),
-      depositRouterUsdceAllowanceRaw: BigInt(
-        snapshot.depositRouterUsdceAllowanceRaw,
-      ),
-      signerPusdRaw: 0n,
-      signerLockedRaw: 0n,
-      signerUsdceRaw: 0n,
-      routerPusdAllowanceRaw: 0n,
-      routerUsdceAllowanceRaw: 0n,
-      // The external ingress operation is already frozen to the exact amount
-      // the user confirmed. Bound this follow-up to that amount instead of a
-      // delegated bot-buy policy cap; the router allowance is checked
-      // independently above.
-      fundingCapRaw: BigInt(input.planning.requiredAmount.raw),
+    plan = buildExactPolymarketDepositUsdceWrapPlan({
+      receiptRaw: input.planning.requiredAmount.raw,
+      snapshot,
     });
   } catch (error) {
     if (error instanceof PolymarketFundingPlanError) return null;
     throw error;
   }
-  if (
-    !plan ||
-    plan.totalAmountRaw !== input.planning.requiredAmount.raw ||
-    plan.depositUsdceAmountRaw !== input.planning.requiredAmount.raw ||
-    plan.pUsdAmountRaw !== "0" ||
-    plan.signerUsdceAmountRaw !== "0"
-  ) {
-    return null;
-  }
+  if (!plan) return null;
   const quoteCorrelationId = stableOpaqueId(
     "funding_quote",
     canonicalJsonHash({
@@ -321,6 +289,9 @@ function buildPolymarketIngressCompletion(input: {
       },
     },
   ];
+  const delegatedWrap =
+    input.planning.request.serverExecutionProfileId ===
+    POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID;
   return {
     variants,
     step: {
@@ -329,25 +300,27 @@ function buildPolymarketIngressCompletion(input: {
       stepKind: "venue_preparation",
       state: "planned",
       actionFingerprint: canonicalJsonHash(action),
-      executorId: "wallet_profile_evm_v1",
+      executorId: delegatedWrap
+        ? POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID
+        : "wallet_profile_evm_v1",
       payerRequirement: sponsorship.payerRequirement,
       dependsOnOrdinal: null,
       normalizedAction: jsonRecord(action),
       actionValidationResult: {
-        valid: true,
-        signerAddress: profile.address,
-        canonicalRouterAddress: snapshot.routerAddress,
-        expectedNonceRaw: plan.routerNonce,
-        expectedTotalAmountRaw: plan.totalAmountRaw,
-        fundingPlanHash: canonicalJsonHash(plan),
-        sponsorshipPolicyId: sponsorship.policyId,
-        signingMode: sponsorship.signingMode,
+        ...buildPolymarketFundingActionValidation({
+          destinationAssetId: input.planning.requiredAmount.asset.assetId,
+          plan,
+          profileAddress: profile.address,
+          routerAddress: snapshot.routerAddress,
+          sponsorship,
+        }),
         activation: "after_verified_ingress",
       },
     },
     walletExecutionSnapshot: jsonRecord(profile),
     supportMetadata: {
       preparationKind: "polymarket_funding_router",
+      venueBindingOptionId: facts.option.venueBindingOptionId,
       venueBinding: jsonRecord(facts.venueBinding),
       fundingPlan: jsonRecord(plan),
       before: {

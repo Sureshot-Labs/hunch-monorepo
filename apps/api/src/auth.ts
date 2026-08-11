@@ -35,6 +35,7 @@ import {
   ensureTelegramBotTradingPreferenceForLink,
 } from "./services/telegram-bot-trading-preferences.js";
 import { fetchUserFinancialLifecycleSummary } from "./services/user-financial-lifecycle.js";
+import { lockTelegramFundingLinkLifecycle } from "./funding/execution/telegram-funding-link-lifecycle-lock.js";
 
 // JWT secret - in production, this should be in environment variables
 const JWT_SECRET = env.jwtSecret;
@@ -1048,6 +1049,7 @@ export class AuthService {
       telegramAccount: PrivyTelegramAccount | null;
     },
   ): Promise<void> {
+    await lockTelegramFundingLinkLifecycle(client, params.userId);
     if (params.telegramAccount) {
       await AuthService.upsertTelegramAccountForUserWithClient(client, {
         userId: params.userId,
@@ -1071,6 +1073,15 @@ export class AuthService {
         userId: params.userId,
       });
       await blockTelegramBotTradingLinkGeneration(client, params.userId);
+      await client.query(
+        `UPDATE telegram_funding_authorizations
+            SET revoked_at = now(),
+                updated_at = now()
+          WHERE user_id = $1
+            AND telegram_account_id = $2
+            AND revoked_at IS NULL`,
+        [params.userId, accountId],
+      );
       await client.query(
         `UPDATE telegram_bot_trading_authorizations
             SET enabled = false,
@@ -1208,6 +1219,8 @@ export class AuthService {
         }
       }
 
+      await lockTelegramFundingLinkLifecycle(client, userId);
+
       // Update user data (and persist Privy DID for stable identity).
       await client.query(
         `UPDATE users SET
@@ -1343,6 +1356,7 @@ export class AuthService {
       );
 
       userId = userResult.rows[0].id;
+      await lockTelegramFundingLinkLifecycle(client, userId);
 
       // Create wallet records
       for (const wallet of privyWallets) {

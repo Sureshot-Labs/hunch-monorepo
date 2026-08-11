@@ -316,6 +316,8 @@ export type FundingIntent = Readonly<{
   withdrawalRecipientId: string | null;
   venueBindingOptionId: string | null;
   controllerWalletRef?: string | null;
+  /** Internal only: public request schemas intentionally omit this field. */
+  serverExecutionProfileId?: string | null;
   maxFeeUsd: string | null;
   maxSlippageBps: number | null;
   deadline: string | null;
@@ -610,6 +612,8 @@ export type FundingReceiveReceipt = Readonly<{
   destinationAddress: string;
   rawAmount: RawAmount;
   observationRevision: string;
+  /** Canonical block/slot identity. Timestamps are never consent authority. */
+  ledgerHeight?: string | null;
   observedAt: string;
   status:
     | "observed"

@@ -2,6 +2,32 @@
 
 Status: implementation plan; local-only delivery first; no production activation.
 
+### Slice C profile specialization
+
+The first implemented delegated profile,
+`polymarket_deposit_usdce_wrap_v1`, is a closed-destination transform. The
+rules below supersede generic cap/review language elsewhere in this plan for
+that profile only:
+
+- one prospective Polygon USDC.e receipt becomes one operation, one attempt,
+  and one Router `fund(expectedNonce, totalAmount, 0)` call for the full raw
+  receipt;
+- there is no amount cap, conversion quote, rate, slippage, minimum-output
+  check, conversion confirmation, or action TTL for this exact wrap;
+- temporary Hunch/user availability changes preserve the same unbroadcast
+  `started` attempt for later revalidation; they do not terminalize it or
+  create a replacement attempt;
+- revoked/changed authority, route, action bytes, or runtime contract is hard
+  invalidation and can only fail an attempt proved not to have broadcast;
+- once broadcast may have occurred, only exact idempotent lookup/recovery and
+  reconciliation may advance the attempt; and
+- pUSD readiness leads to a separate fresh `Review Buy` and `Confirm`. Funding
+  readiness never submits a trade automatically.
+
+Finite caps and Telegram conversion review remain requirements for future
+routed-value-movement profiles unless their own closed-destination proof
+explicitly replaces them.
+
 This appendix refines the WP8 Telegram migration described by WP6/WP7. It is
 normative for the first implementation pass. It does not authorize a deploy,
 runtime-policy publication, Privy Dashboard mutation, live Telegram bot run,
@@ -92,12 +118,13 @@ The corrected boundary is:
   machine.
 - A Telegram-launched Receive Session is not blanket consent for every asset
   its shared address can receive. The user selects an exact verified
-  asset/network/target variant. Only that immutable scope may be routed within
-  its frozen amount/fee/slippage caps, provided the user also has a current
-  delegated funding authorization.
-- A quote outside the frozen automation caps does not auto-execute. Telegram
-  renders the exact refreshed economics and asks for an explicit conversion
-  confirmation inside the bot.
+  asset/network/target variant. Only that immutable scope may be routed,
+  provided the user also has a current delegated funding authorization. The
+  Slice C profile binds this scope to the full prospective receipt rather than
+  to an amount cap.
+- Future economically variable routes outside their frozen automation caps do
+  not auto-execute and require exact refreshed Telegram review. Slice C has no
+  conversion economics or conversion confirmation.
 - Web handoff remains fail-closed recovery, not the default architecture.
 
 `automatic_conversion` must not be presented as automatic until the delegated
@@ -273,6 +300,12 @@ Polygon target address and the receive observer intentionally scans all
 variants. An unexpected asset can be observed and credited, but it cannot
 inherit automation consent from the selected address.
 
+For a V2 automatic selection, persistence re-resolves and locks the exact
+funding authorization, Telegram link, wallet, user preference, and Funding
+Policy revision inside the consent transaction. A capability result obtained
+before chain-cursor refresh is presentation/preflight only; it cannot authorize
+the append-only consent if authority changes before commit.
+
 For a Receive Session opened from a Buy shortfall, every address and waiting
 surface must also answer how much to send. The immutable Buy amount is the
 destination requirement; a fresh Buy quote supplies maximum spend and current
@@ -290,6 +323,9 @@ the route's fee, slippage, minimum-output, cap, and recovery policy. An
 underfunded transfer keeps waiting for the remainder, while excess destination
 value remains in Account Value. If a safe source quote is unavailable, the bot
 shows an explicit unavailable/Refresh state and never invents an amount.
+This paragraph applies to future economically variable routes. Slice C always
+uses the exact full observed USDC.e receipt, has no conversion economics, and
+does not wait for a requested remainder.
 The live picker/address/progress card owns this dynamic amount guidance. The QR
 image caption stays address-only because a deposit amount or conversion quote
 can change while the receive address remains valid.
@@ -315,18 +351,19 @@ gate value.
 
 Each target displays exact network, asset, verified address, QR/copy buttons,
 session expiry, sender native-fee requirements, and the correct semantic
-progress stages. A non-direct target also displays the frozen maximum
-fee/slippage caps. A target whose receipt can still be safely observed but whose
-execution predicate is false says the exact mode from Section 12 rather than
-promising routing. A route removed from receive/runtime policy is hidden from
-new target selection; funds already sent remain observable and recoverable.
+progress stages. Economically variable non-direct targets also display their
+frozen maximum fee/slippage caps; Slice C does not display invented economics.
+A target whose receipt can still be safely observed but whose execution
+predicate is false says the exact mode from Section 12 rather than promising
+routing. A route removed from receive/runtime policy is hidden from new target
+selection; funds already sent remain observable and recoverable.
 
-The Telegram presenter must not reuse the current generic `You can send any
-amount` instruction for a non-direct target. It shows the positive automatic
-raw cap in user units and states that a larger receipt will not auto-execute.
-If it is still inside every absolute route/grant cap, it can enter Telegram
-review; above an absolute cap it enters recovery/unsupported handling. Direct
-pUSD remains amount-free because it needs no conversion transaction.
+Economically variable routed targets must not reuse a generic `You can send any
+amount` instruction: they show their positive automatic raw cap and the
+out-of-cap consequence. Slice C is the explicit exception: every positive
+prospective USDC.e receipt is wrapped in full without a conversion review or
+amount cap. Direct pUSD remains amount-free because it needs no conversion
+transaction.
 
 ### 5.3 Funding progress
 
@@ -342,7 +379,7 @@ message when the original was deleted, became stale, or cannot be edited.
 | delegated attempt started/submitted  | Routing funds                                          |
 | chain/provider receipt pending       | Confirming                                             |
 | destination postconditions satisfied | pUSD ready                                             |
-| economics exceed frozen caps         | Review conversion                                      |
+| future route economics exceed caps   | Review conversion                                      |
 | user master preference off           | Automation off; enable in Telegram                     |
 | Hunch execution soft-paused          | Waiting for routing to resume                          |
 | grant/policy missing or revoked      | Setup required                                         |
@@ -352,7 +389,12 @@ message when the original was deleted, became stale, or cannot be edited.
 | recovery required                    | Needs attention; show bot actions or last-resort Hunch |
 
 The message renderer reads public session/operation summaries. It does not
-infer success from a Privy or Relay response.
+infer success from a Privy or Relay response. Once an attempt's durable
+`broadcast_may_have_occurred` boundary is set, current capability flags cannot
+project that routing receipt back to a pre-broadcast wait or terminal state.
+The projector candidate query observes this attempt-only transition directly;
+it wakes once even if the Receive Session version is unchanged, then stops
+selecting the context after the persisted state becomes `converting`.
 
 ### 5.4 Return to Buy
 
@@ -431,7 +473,8 @@ an immutable grant snapshot:
   wallet ID;
 - Privy policy ID plus validated revision/fingerprint;
 - authorization/key identity and last verification timestamp;
-- allowed action kinds, assets, destination venues, and per-operation cap;
+- allowed action kinds, assets, destination venues, and any profile-specific
+  cap (none for the Slice C closed-destination transform);
 - expiry, revoke state, and later a separate atomic cumulative-cap ledger if
   daily limits become a product requirement.
 
@@ -443,9 +486,11 @@ retain the exact grant revision/fingerprint they used. Never copy the existing
 trade-authorization `ON DELETE CASCADE` pattern for this evidence. Fresh
 execution resolution still requires the current linked private account.
 
-The first delegated slice uses per-operation/session caps only. It must not claim
-daily/cumulative protection until an atomic reservation ledger exists; an
-ambiguous broadcast would have to retain that reservation until resolution.
+The first delegated slice deliberately has no amount cap: exact full-receipt
+calldata and the non-redirectable destination are its security boundary. It
+must not claim daily/cumulative protection until an atomic reservation ledger
+exists; a future capped profile would have to retain an ambiguous reservation
+until resolution.
 
 ## 7. Telegram funding channel context
 
@@ -500,17 +545,23 @@ consented_at timestamptz not null
 unique (telegram_funding_session_id, revision)
 ```
 
-For an automatic revision, `max_auto_execute_source_raw` is positive and equals
-the minimum applicable session/runtime, user, grant, provider, and Privy
-per-operation cap expressed in the selected asset's raw units. `NULL` always
-means automation disabled, never unlimited. Direct pUSD selection may therefore
-have an exact revision with automation disabled because it needs no route.
+For a generic capped automatic revision, `max_auto_execute_source_raw` is
+positive and equals the minimum applicable bound. Slice C V2 is the only
+implemented unlimited exception: `automation_enabled=true`, a null cap, and an
+exact `polymarket_usdce_full_receipt_wrap`/`fullReceipt=true` policy snapshot
+mean the entire prospective receipt. For every other automatic policy, null
+means disabled. Direct pUSD selection may have an exact revision with
+automation disabled because it needs no route. The snapshot also freezes its
+presentation mode. Live capability may restrict or hide that presentation, but
+must never expand a direct-only revision into automatic USDC.e consent. Missing
+or malformed frozen presentation state fails closed; it is never reconstructed
+from live capability.
 
 Creating the revision and compare-and-setting `active_consent_revision` is one
 transaction. Changing target, asset, variant scope, or cap appends another
 revision and never rewrites history. During delegated eligibility, select the
 latest exact matching consent whose `consented_at` is no later than the
-receipt's immutable `first_seen_at`, then persist that consent ID/fingerprint in
+canonical event's immutable `first_observed_at`, then persist that consent ID/fingerprint in
 the attempt application-authorization snapshot before broadcast. Later consent
 cannot retroactively make an observed transfer automatic.
 
@@ -543,7 +594,11 @@ An active financial session continues safely after Telegram unlink because the
 historical Telegram identity remains on the row and the account foreign key is
 set null. Observation/reconciliation continue; delivery and every new delegated
 broadcast require a fresh current linked-account lookup plus current funding
-authorization and therefore fail closed.
+authorization and therefore fail closed. The unlink transaction first revokes
+the account-bound active funding grant, then deletes the link. Authorization
+grant and link/relink/unlink take the same per-user advisory transaction lock,
+so no grant can be inserted between the revocation scan and link deletion;
+relinking cannot inherit or be blocked by that stale grant.
 
 ## 8. Delegated Funding Operation executor
 
@@ -566,6 +621,7 @@ executor:
 ```text
 receive receipt router
   -> commits exact child Funding Operation
+  -> atomically proves operation Funding Policy revision equals frozen consent
   -> operation exposes a planned delegated-eligible step
 finance-worker
   -> atomically claims one exact eligible step and creates its attempt
@@ -610,6 +666,16 @@ idempotency/lookup for unknown outcome and safe blockhash-expiry semantics.
 
 The receipt router must not call Privy. It remains deterministic and safe to
 retry.
+
+When the internal Slice C profile is requested, the normal planner emits an
+exact receipt-only venue-preparation plan rather than the ordinary user-wallet
+plan: requested source is the full USDC.e receipt, the single step is `planned`,
+and its executor is `polymarket_deposit_usdce_wrap_v1`. Receipt linkage verifies
+those facts before activating the step. The router locks the still-observed
+receipt before insertion and commits the operation, exact receipt attachment,
+canonical source-credit evidence, and step activation in the same transaction.
+Losing the receipt claim or failing exact-plan validation therefore cannot
+leave an unresolved orphan operation.
 
 ### 8.3 Eligibility
 
@@ -662,10 +728,20 @@ multi-policy signers. Trading and funding grants must coexist and revoke
 independently. If Privy cannot support that topology safely, delegated funding
 stays unavailable; do not collapse the purposes into an omnibus signer/policy.
 
+Runtime verification is symmetric: a funding broadcast must live-check every
+attached registry entry, including an existing trading signer, against its
+exact public key/quorum fingerprint and exact attached policy fingerprint.
+Merely recognizing another signer and policy ID is insufficient.
+
 1. `telegram_pm_funding_router_v1`
    - Polygon only;
    - exact Funding Router contract;
-   - exact `fund()` semantics and bounded total amount;
+   - implemented by Slice C as `polymarket_deposit_usdce_wrap_v1` with exact
+     `fund(expectedNonce, totalAmount, 0)` semantics;
+   - `totalAmount` is the backend-frozen full receipt and is intentionally
+     unrestricted by the key policy because the Router has no caller-selected
+     destination; see
+     [the Slice C runbook](./slice-c-delegated-funding-executor.md);
    - Privy policy bounds the external transaction envelope;
    - application authorization separately binds the exact immutable action,
      Funding Operation/step, canonical receipt allocation, internal signer,
@@ -716,20 +792,23 @@ implemented, Slice C is blocked and this plan must be revised rather than
 silently adding a process. Do not import `apps/api/src/env.ts` or another
 API-wide required-secret graph.
 
-Use a dedicated
-`HUNCH_FINANCE_TELEGRAM_FUNDING_DELEGATED_EXECUTION_ENABLED=false` gate that is
-not inferred from the existing general finance execution flag, plus a separate
-optional secret bundle and adapter factory. Broadcast requires all of
-`HUNCH_FINANCE_EXECUTE=true`, the dedicated delegated-execution flag, the exact
-profile gate, funding runtime policy, and emergency pause being clear. The
-general flag alone never enables delegation, and the dedicated flag never
-bypasses the global kill switch. The delegated adapter import graph must not
-reach API-wide env, `privy-service.ts`, `embedded-ethereum.ts`, or
+Use a separate profile gate for each executor. Slice C uses
+`HUNCH_FUNDING_PM_WRAP_EXECUTE=false` and a separate optional secret bundle.
+Broadcast requires both it and `HUNCH_FINANCE_EXECUTE=true`, plus the exact
+profile, funding runtime policy, grant, and Privy fingerprint checks. The
+general flag alone never enables delegation, and a profile gate never bypasses
+the global kill switch. The delegated adapter import graph must not reach
+API-wide env, `privy-service.ts`, `embedded-ethereum.ts`, or
 `embedded-solana.ts`; extract sidecar-safe pure clients/validators instead.
 
 When delegated funding is disabled or any required secret/profile is absent,
 the worker continues observation/reconciliation, does not claim delegated
 steps, and reports the action as unavailable. It must still boot successfully.
+An execution-flag or current profile-ID rollback does not unmount recovery for
+an already-crossed boundary: it uses the persisted signer/policy identity and
+the same provider idempotency key while the separate recovery credentials
+remain available. Provider failure labels without an exact transaction hash
+are not proof that broadcast was impossible.
 
 For same-cycle progress, order the worker batch as receive observation and
 receipt routing, then delegated claim/execution, then ordinary reconciliation.
@@ -737,6 +816,10 @@ This lets a newly created child step execute in the same scheduled run without
 a busy loop while preserving the existing reconciliation authority. No fixed
 latency promise is made until measured; the design must add no avoidable extra
 worker interval between these phases.
+Receipt routing must keep `reconcile_required` and automatic-evidence
+`recovery_required` children attached and pending; only a manual/non-automatic
+recovery mode is terminal receipt recovery. The worker schema-readiness gate
+must require an atomic migration-0204 marker before entering this pipeline.
 
 ## 9. Review-inside-Telegram flow
 
@@ -929,7 +1012,8 @@ is not a guarantee that a later receipt will pass the fresh broadcast check.
 The target-selection transaction reloads `can_offer_automatic`. Only a true
 result creates `automation_enabled=true` consent. Any false result creates an
 exact review-only consent, even if the false gate is expected to recover soon;
-later ON transitions never mutate it into automatic consent.
+later ON transitions never mutate it or its address presentation into automatic
+consent.
 
 For a non-direct receipt, `can_auto_broadcast` is true only when every condition
 below is true at the immediate pre-submit boundary:
@@ -1006,17 +1090,17 @@ The consent effect of an OFF condition is deterministic:
 Direct pUSD always records exact non-automation selection evidence; none of
 these rows turns direct settlement into a delegated transaction.
 
-| OFF condition                                                                                           | New bot behavior                                                                                                                                   | Existing receipt with no possible broadcast                                                                                              | Submitted/ambiguous action                                                                                                                                            | When ON/restored                                                                                                                                           |
-| ------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Receive creation                                                                                        | Do not create or reveal a new session/target                                                                                                       | Continue observation, routing assessment, reconciliation, recovery, and progress for existing sessions                                   | Reconcile                                                                                                                                                             | New sessions become available; never reuse an expired target promise                                                                                       |
-| User `desired_enabled`                                                                                  | Balance and direct pUSD Receive remain; no new delegated broadcast or trade submission; render `Automation off`/`Enable`                           | Preserve receipt and exact consent; render waiting-for-enable                                                                            | Reconcile; never resubmit                                                                                                                                             | May resume only under the soft-resume rules in Section 12.3                                                                                                |
-| Telegram stable auto-execution                                                                          | Label a capability-backed routed target `Telegram review required`, persist no automatic consent for a new selection, and keep confirmation in bot | Render `Review conversion`; a fresh exact confirmation may execute only through `can_execute_confirmed`                                  | Reconcile; never resubmit                                                                                                                                             | A receipt with pre-existing still-valid automatic consent may resume only under the soft-resume rules; review-only consent never becomes future automation |
-| Global execute, dedicated worker, exact profile, adapter secrets, or emergency pause                    | Do not advertise routed targets as automatic; a new selection is review-only; render `Waiting for routing to resume` for existing eligible funds   | Close any claimed pre-submit attempt as proved non-broadcast cancellation; keep receipt/action; review may be shown but cannot broadcast | Reconcile; never resubmit                                                                                                                                             | Only a pre-pause automatic consent may resume automatically, and only under the soft-resume rules; a selection made while OFF remains review-only          |
-| Current link, purpose grant, signer/quorum, or Privy policy missing/revoked/changed                     | Direct receipt and accounting remain; render `Setup required`; do not broadcast                                                                    | Preserve funds/evidence; require fresh authorization and consent/review                                                                  | Reconcile; never resubmit                                                                                                                                             | Hard invalidation: never auto-resume the old authority                                                                                                     |
-| Route removed, action semantics/policy fingerprint changed, cap shrank below receipt, or action expired | Hide route from new target selection; render `Review a fresh route` or recovery for existing funds                                                 | Preserve receipt; no use of the old action                                                                                               | Reconcile; never resubmit                                                                                                                                             | Hard invalidation: fresh quote/action plus explicit Telegram review/consent                                                                                |
-| Telegram trading/Buy continuation                                                                       | Funding may reach ready; do not create a Buy intent; render enable/unavailable state                                                               | Funding lifecycle continues                                                                                                              | Existing submitted trade reconciles; a confirmation arriving while OFF is rejected and marks its unsubmitted intent cancelled, while untouched drafts expire normally | Never auto-create/submit; user must click a fresh `Review Buy`                                                                                             |
-| Chat blocked/unreachable but link remains                                                               | Financial lifecycle continues without transport retries after dead-letter                                                                          | Retain latest progress/terminal projection                                                                                               | Reconcile                                                                                                                                                             | Explicit `/start` rearms exactly one unseen terminal replacement                                                                                           |
-| Telegram unlink                                                                                         | Apply both delivery-off and hard-authorization behavior; no new broadcasts or intents                                                              | Observation/reconciliation continue against immutable user/funding evidence                                                              | Reconcile                                                                                                                                                             | Relink restores delivery, but value-moving actions require current grant and the hard-resume rules                                                         |
+| OFF condition                                                                                      | New bot behavior                                                                                                         | Existing receipt with no possible broadcast                                                            | Submitted/ambiguous action                                                                                                                                            | When ON/restored                                                                                                                              |
+| -------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| Receive creation                                                                                   | Do not create or reveal a new session/target                                                                             | Continue observation, routing assessment, reconciliation, recovery, and progress for existing sessions | Reconcile                                                                                                                                                             | New sessions become available; never reuse an expired target promise                                                                          |
+| User `desired_enabled`                                                                             | Balance and direct pUSD Receive remain; no new delegated broadcast or trade submission; render `Automation off`/`Enable` | Preserve receipt and exact consent; render waiting-for-enable                                          | Reconcile; never resubmit                                                                                                                                             | May resume only under the soft-resume rules in Section 12.3                                                                                   |
+| Telegram stable auto-execution                                                                     | Future variable routes become review-only; Slice C is unavailable for new automatic consent                              | Future routes may render `Review conversion`; Slice C waits without adding a conversion confirmation   | Reconcile; never resubmit                                                                                                                                             | A pre-pause Slice C consent may resume only under the soft-resume rules; review-only consent never becomes future automation                  |
+| Global execute, dedicated worker, exact profile, adapter secrets, or emergency pause               | Do not advertise routed targets as automatic; render `Waiting for routing to resume` for existing eligible funds         | Preserve the same unbroadcast `started` Slice C attempt and receipt/action; no broadcast while paused  | Reconcile; never resubmit                                                                                                                                             | The exact pre-pause automatic consent/attempt may resume after all facts are revalidated; a selection made while OFF is not silently upgraded |
+| Current link, purpose grant, signer/quorum, or Privy policy missing/revoked/changed                | Direct receipt and accounting remain; render `Setup required`; do not broadcast                                          | Preserve funds/evidence; require fresh authorization and consent/review                                | Reconcile; never resubmit                                                                                                                                             | Hard invalidation: never auto-resume the old authority                                                                                        |
+| Route removed, action semantics/runtime contract changed, or future-profile cap/expiry invalidated | Hide route from new target selection; render `Review a fresh route` or recovery for existing funds                       | Preserve receipt; no use of the old action                                                             | Reconcile; never resubmit                                                                                                                                             | Hard invalidation: future routes require fresh quote/review; Slice C requires a new valid authority/route                                     |
+| Telegram trading/Buy continuation                                                                  | Funding may reach ready; do not create a Buy intent; render enable/unavailable state                                     | Funding lifecycle continues                                                                            | Existing submitted trade reconciles; a confirmation arriving while OFF is rejected and marks its unsubmitted intent cancelled, while untouched drafts expire normally | Never auto-create/submit; user must click a fresh `Review Buy`                                                                                |
+| Chat blocked/unreachable but link remains                                                          | Financial lifecycle continues without transport retries after dead-letter                                                | Retain latest progress/terminal projection                                                             | Reconcile                                                                                                                                                             | Explicit `/start` rearms exactly one unseen terminal replacement                                                                              |
+| Telegram unlink                                                                                    | Apply both delivery-off and hard-authorization behavior; no new broadcasts or intents                                    | Observation/reconciliation continue against immutable user/funding evidence                            | Reconcile                                                                                                                                                             | Relink restores delivery, but value-moving actions require current grant and the hard-resume rules                                            |
 
 For a route disabled before target rendering, hide the routed target. If an
 address was already displayed or is shared with direct pUSD, an unexpected
@@ -1030,19 +1114,25 @@ Classify transitions before doing anything value-moving:
 1. **Soft pause:** only availability changed (`desired_enabled`, stable
    auto-execution, global/dedicated execute, unchanged route/profile gate,
    adapter availability, or emergency pause); signer, grant, policy fingerprint,
-   consent, cap, action bytes, and expiry remain identical. An unbroadcast
-   planned action or a proved pre-submit-cancelled attempt may create one new
-   attempt automatically only if its pre-receipt automatic consent remains
-   valid. All eligibility checks rerun immediately before submission.
+   consent and action bytes remain identical. Slice C preserves and resumes the
+   same unbroadcast `started` attempt; it never creates a replacement attempt.
+   Future profiles may define bounded retry rules. All eligibility checks rerun
+   immediately before submission.
 2. **Hard invalidation:** link/grant revoked, signer/quorum/policy fingerprint
-   changed, consent/target/cap semantics changed, route/action semantics
-   changed, or action/quote expired. The old action never auto-resumes. Telegram
-   obtains fresh authorization where needed, replans, shows fresh economics,
-   and requires new explicit consent/review.
+   changed, consent/target semantics changed, route/action semantics changed,
+   runtime contract changed, or a future profile's cap/expiry invalidated. The
+   old action never auto-resumes. Slice C has no conversion action TTL or fresh
+   economics review; it requires valid current authority/route before any new
+   receipt can produce a new operation.
 3. **Broadcast may have occurred:** `submitted`, `ambiguous`, or any durable
    evidence that submission crossed the provider boundary. No switch transition
    can produce another send. Only lookup, reconciliation, postconditions,
    recovery, or proved failure may advance it.
+   For the Polygon Router wrap, completion additionally requires the exact pUSD
+   amount attributed from ERC-20 `Transfer` logs in the same finalized
+   transaction, an exact one-step Router nonce advance, and the expected
+   destination/CLOB balance floors. Balance floors tolerate concurrent credits;
+   they do not replace exact transaction attribution.
 4. **Trade continuation restored:** readiness never creates a trade intent on
    re-enable. The user must click `Review Buy`, which follows the generation
    rules in Section 5.4 and produces a fresh intent/confirmation.
@@ -1118,12 +1208,13 @@ Buy journey must not depend on opening `Hunch_App`.
 - callback parsing, size limits, malformed/foreign opaque IDs;
 - private-chat enforcement for every financial screen/callback;
 - exact target/asset/variant consent, including the shared pUSD/USDC.e address;
-- null/zero effective cap disables automation; the persisted cap is the minimum
-  applicable source-raw bound and cannot be mutated in place;
-- non-direct target copy never says `any amount`; it renders automatic and
-  absolute-cap consequences without soliciting an expected amount;
-- authorization/cap matrix for EVM/Solana/PM Funding Router, including proof
-  that product preference and ordinary wallet signing modes grant nothing;
+- generic null/zero cap behavior plus the exact Slice C V2 full-receipt/null-cap
+  exception; neither consent form can be mutated in place;
+- non-direct copy renders the real profile contract: cap consequences for
+  capped routes, and full-receipt/no-conversion-economics for Slice C;
+- authorization/profile matrix for EVM/Solana/PM Funding Router, including
+  proof that product preference and ordinary wallet signing modes grant
+  nothing;
 - exact immutable-action fingerprint checks;
 - transition-to-progress-action mapping and dedupe;
 - fresh Buy continuation and insufficient/excess deposit calculations.
@@ -1141,9 +1232,9 @@ Buy journey must not depend on opening `Hunch_App`.
 - accepted, submitted, ambiguous, definitive failure, retry, and revoke paths;
 - all combinations of global execute, dedicated execution, profile, runtime,
   and emergency gates, with broadcast possible only when every gate allows it;
-- stable auto-execution OFF excludes automatic broadcast but still permits one
-  exact reviewed broadcast when `can_execute_confirmed` is true; global/profile/
-  emergency OFF blocks both predicates;
+- stable auto-execution OFF excludes automatic broadcast; future variable
+  routes may support exact reviewed execution, while Slice C never invents a
+  conversion-confirmation path; global/profile/emergency OFF blocks broadcast;
 - known trading and funding purpose signers coexist and revoke independently,
   while unknown/duplicate/multi-policy signers remain unsafe;
 - bot callback capture returns the correct edit/send actions without calling
@@ -1158,11 +1249,28 @@ Buy journey must not depend on opening `Hunch_App`.
 ### 14.3 Database integration tests
 
 - channel context uniqueness/idempotency, append-only consent CAS, and proof
-  that consent created after receipt observation cannot authorize it;
+  that consent created after canonical immutable first observation cannot
+  authorize it even when it becomes the active revision before receipt insert;
 - active session survives API, bot, and worker restart;
 - duplicate canonical EVM/Solana event creates one receipt;
 - multi-worker delegated-step claim creates one attempt;
 - ambiguous broadcast prevents a second attempt;
+- `reconcile_required` and automatic-evidence recovery retain the exact routing
+  receipt until the child completes, then project it ready;
+- policy publication between routing eligibility and quote/commit cannot link
+  an operation whose revision differs from the historical consent snapshot;
+- a paused replacement policy, including one that temporarily omits the route,
+  remains a soft wait and resumes only when the exact consented revision returns;
+- early hard rejection waits behind Funding Policy publication and decides from
+  the revision authoritative after that serialization point;
+- worker schema readiness fails closed before migration 0204;
+- fresh pre-send profile invalidation is definitive, while the same proof in
+  recovery remains pending without an exact provider lookup result;
+- lifecycle lock ordering is identical for consent/grant/unlink and the
+  delegated pre-broadcast boundary;
+- exact ERC-20 credit attribution rejects a multi-UserOp ERC-4337 bundle;
+- nonterminal projection rechecks control-plane capability on its bounded
+  timer even when Receive Session state is unchanged;
 - durable provider request identity exists before the external call and is
   distinct from the later transaction/receipt reference;
 - unlink sets the account foreign key null and blocks new broadcasts while
@@ -1375,14 +1483,16 @@ The local WP8 primitives are complete when:
 
 - Telegram renders the same Account Value accounting truth as web;
 - private-chat and exact target/asset/variant consent boundaries are proved;
-- every automatic route has a positive finite source-raw cap; null means
-  disabled and later consent cannot retroactively authorize an observed receipt;
+- every generic automatic route has a positive finite source-raw cap; the exact
+  Slice C V2 full-receipt snapshot is the sole implemented null-cap exception,
+  and later consent cannot retroactively authorize an observed receipt;
 - fixture capabilities can represent the intended Polymarket receive matrix
   without promising unavailable variants at runtime;
 - direct and routed receipts survive retry/restart without duplication;
 - fake supported stable routes execute through the durable delegated executor
-  only when the exact fresh funding grant/profile/caps allow;
-- out-of-cap routes are reviewable and confirmable inside Telegram;
+  only when their exact fresh funding grant/profile contract allows;
+- future out-of-cap routes are reviewable in Telegram; Slice C has neither a
+  cap nor conversion confirmation;
 - destination pUSD readiness, not provider acceptance, unlocks continuation;
 - continuation always creates a fresh quote/intent and final confirmation;
 - Return-to-Buy generations permit a later explicit retry without callback
@@ -1393,8 +1503,8 @@ The local WP8 primitives are complete when:
 - every OFF combination resolves through the Section 12 precedence to one
   deterministic primary bot mode; observation/reconciliation never depend on
   execution availability;
-- soft resume can create at most one fresh attempt from proved non-broadcast
-  state, while hard invalidation never reuses old authority/action;
+- soft resume preserves at most one existing Slice C attempt in proved
+  non-broadcast state, while hard invalidation never reuses old authority/action;
 - all tests run without a real Telegram bot or public financial service;
 - every new runtime/production control remains off;
 - no legacy reconciliation or recovery path is removed.
@@ -1411,8 +1521,9 @@ Funding Router, Relay EVM, and Relay SVM profile separately requires:
 - provider submission correlation, timeout/crash recovery, and ambiguous
   outcome behavior proved for the real adapter;
 - action-envelope/policy expressiveness proved for the real route;
-- finite caps, historical revoke evidence, global plus dedicated execution
-  gates, emergency pause, audit, and runtime policy configured;
+- profile-appropriate amount safety (the closed-destination full-receipt proof
+  for Slice C; finite caps for routed value movement), historical revoke
+  evidence, execution gates, emergency pause, audit, and runtime policy;
 - a separately authorized production rehearsal and activation decision.
 
 Solana additionally requires the explicit fee-payer strategy and safe blockhash
@@ -1461,8 +1572,9 @@ accepted into the normative plan:
 The final Sol review used a frozen finite-constraint model after strict model
 critique and added these source-backed corrections:
 
-- every automatic consent has a positive effective raw cap; null is disabled,
-  and consent revisions are append-only/non-retroactive;
+- every generic automatic consent has a positive effective raw cap; Slice C V2
+  is the explicit full-receipt/null-cap exception, and all consent revisions
+  remain append-only/non-retroactive;
 - purpose-specific funding signers must coexist with the current trading
   inspector through an exact known registry, never an omnibus policy;
 - worker broadcast requires both the global execute kill switch and the
@@ -1515,15 +1627,15 @@ Three tempting additions were deliberately deferred for KISS:
 
 - manual expected-amount/rate entry in generic Add Funds; the session remains
   amount-free and Buy already supplies its intended spend;
-- cumulative/day limits in the first delegated slice; per-operation/session
-  caps ship first, while a future cumulative limit requires its own atomic cap
-  reservation ledger;
+- amount/day limits in the first closed-destination delegated slice; future
+  routed-value profiles require their own atomic cap reservation ledger;
 - a separate provider-request service/table. WP8 uses the dedicated immutable
   `submission_request_ref_*` attempt fields defined in Section 8.2.
 
 The resulting product rule is simple: after the one-time explicit delegation
-ceremony, supported flows complete in Telegram. A conversion review and Buy
-confirmation are Telegram callbacks. The Telegram Mini App appears only to
-create or repair signing authorization. Ordinary Hunch web is offered only for
-recovery that neither the bot nor that ceremony can safely express; an OFF gate
-or reviewable action never defaults to web.
+ceremony, supported flows complete in Telegram. Slice C converts the full
+USDC.e receipt without a conversion review; when pUSD is ready, `Review Buy`
+and `Confirm` are separate Telegram callbacks. The Telegram Mini App appears
+only to create or repair signing authorization. Ordinary Hunch web is offered
+only for recovery that neither the bot nor that ceremony can safely express;
+an OFF gate or reviewable future action never defaults to web.

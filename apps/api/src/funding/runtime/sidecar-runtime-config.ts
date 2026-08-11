@@ -1,11 +1,16 @@
+import {
+  POLYMARKET_FUNDING_ROUTER,
+  POLYMARKET_PUSD,
+  POLYMARKET_USDCE,
+} from "@hunch/contracts";
+
 type Environment = Readonly<Record<string, string | undefined>>;
 
 const DEFAULT_SOLANA_RPC_URL = "https://api.mainnet-beta.solana.com";
 const DEFAULT_MULTICALL_ADDRESS = "0xca11bde05977b3631167028862be2a173976ca11";
-const POLYMARKET_PUSD_ADDRESS = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB";
-const POLYMARKET_USDCE_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
-const POLYMARKET_FUNDING_ROUTER_ADDRESS =
-  "0x0fEF62E1CD0600C132070855A45443852940EE72";
+const POLYMARKET_PUSD_ADDRESS = POLYMARKET_PUSD.polygon;
+const POLYMARKET_USDCE_ADDRESS = POLYMARKET_USDCE.polygon;
+const POLYMARKET_FUNDING_ROUTER_ADDRESS = POLYMARKET_FUNDING_ROUTER.polygon;
 
 function optionalPositiveInt(
   source: Environment,
@@ -151,17 +156,13 @@ export function loadFundingSidecarRuntimeConfig(
     "POLYMARKET_USDCE_ADDRESS",
     POLYMARKET_USDCE_ADDRESS,
   );
-  const polymarketFundingRouterAddress =
+  const configuredFundingRouterAddress =
     source.POLYMARKET_FUNDING_ROUTER_ADDRESS?.trim() || "";
-  if (
-    polymarketFundingRouterAddress &&
-    polymarketFundingRouterAddress.toLowerCase() !==
-      POLYMARKET_FUNDING_ROUTER_ADDRESS.toLowerCase()
-  ) {
-    throw new Error(
-      `POLYMARKET_FUNDING_ROUTER_ADDRESS must be ${POLYMARKET_FUNDING_ROUTER_ADDRESS}`,
-    );
-  }
+  const polymarketFundingRouterAddress =
+    configuredFundingRouterAddress.toLowerCase() ===
+    POLYMARKET_FUNDING_ROUTER_ADDRESS.toLowerCase()
+      ? configuredFundingRouterAddress
+      : "";
   if (
     polymarketFundingRouterAddress &&
     (polymarketPusdAddress.toLowerCase() !==

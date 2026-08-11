@@ -1,5 +1,3 @@
-import crypto from "node:crypto";
-
 import { env } from "../env.js";
 import { isRecord } from "../lib/type-guards.js";
 import {
@@ -25,6 +23,74 @@ import {
 } from "./polymarket-deposit-wallet-relayer.js";
 import type { TradeIntent, TradeSide, TradingVenue } from "./trading-types.js";
 import { tradingError } from "./api-trading-utils.js";
+import {
+  derivePrivyAuthorizationPublicKey,
+  normalizePrivyAuthorizationPublicKey,
+} from "../funding/execution/privy-authorization-key.js";
+import {
+  polymarketWrapSignerFingerprint,
+  validatePolymarketDepositUsdceWrapPolicy,
+} from "../funding/execution/delegated-funding-profiles.js";
+import { fundingSidecarRuntimeConfig } from "../funding/runtime/sidecar-runtime-config.js";
+import { validateKnownPrivyWalletSigners } from "../funding/execution/known-privy-wallet-signers.js";
+
+export { derivePrivyAuthorizationPublicKey } from "../funding/execution/privy-authorization-key.js";
+
+async function isKnownPolymarketWrapSigner(
+  input: Readonly<{
+    dependencies: PrivySignerInspectorDependencies;
+    signer: PrivyManagedWalletMetadata["additionalSigners"][number];
+  }>,
+): Promise<boolean> {
+  const signerId = env.privyPolymarketWrapAuthorizationId;
+  const policyId = env.privyPolymarketWrapPolicyId;
+  if (
+    !signerId ||
+    !policyId ||
+    !env.privyPolymarketWrapAuthorizationKey ||
+    !env.privyPolymarketWrapSignerFingerprint ||
+    !env.privyPolymarketWrapPolicyFingerprint ||
+    input.signer.signerId !== signerId ||
+    input.signer.overridePolicyIds.length !== 1 ||
+    input.signer.overridePolicyIds[0] !== policyId
+  ) {
+    return false;
+  }
+  try {
+    const [quorum, policy] = await Promise.all([
+      input.dependencies.getKeyQuorumMetadata(signerId),
+      input.dependencies.getPolicyMetadata(policyId),
+    ]);
+    const derived = derivePrivyAuthorizationPublicKey(
+      env.privyPolymarketWrapAuthorizationKey,
+    );
+    if (
+      quorum.id !== signerId ||
+      quorum.authorizationThreshold !== 1 ||
+      quorum.authorizationPublicKeys.length !== 1 ||
+      quorum.nestedKeyQuorumIds.length !== 0 ||
+      quorum.userIds.length !== 0 ||
+      normalizePrivyAuthorizationPublicKey(
+        quorum.authorizationPublicKeys[0] ?? "",
+      ) !== normalizePrivyAuthorizationPublicKey(derived) ||
+      polymarketWrapSignerFingerprint(quorum) !==
+        env.privyPolymarketWrapSignerFingerprint
+    ) {
+      return false;
+    }
+    const validated = validatePolymarketDepositUsdceWrapPolicy({
+      policy,
+      policyId,
+      routerAddress: fundingSidecarRuntimeConfig.polymarketFundingRouterAddress,
+    });
+    return (
+      validated.valid &&
+      validated.fingerprint === env.privyPolymarketWrapPolicyFingerprint
+    );
+  } catch {
+    return false;
+  }
+}
 
 export type PrivySignerState =
   | "not_configured"
@@ -974,39 +1040,6 @@ export async function resolvePolymarketBotPolicyFundingCapRaw(): Promise<bigint>
   }
 }
 
-function normalizePublicKey(publicKey: string): string {
-  const trimmed = publicKey.trim().replace(/^wallet-auth:/, "");
-  if (!trimmed) return "";
-  try {
-    const key = trimmed.includes("BEGIN PUBLIC KEY")
-      ? crypto.createPublicKey(trimmed)
-      : crypto.createPublicKey({
-          format: "der",
-          key: Buffer.from(trimmed, "base64"),
-          type: "spki",
-        });
-    return key.export({ format: "der", type: "spki" }).toString("base64");
-  } catch {
-    return trimmed;
-  }
-}
-
-export function derivePrivyAuthorizationPublicKey(
-  authorizationPrivateKey: string,
-): string {
-  const encoded = authorizationPrivateKey.trim().replace(/^wallet-auth:/, "");
-  if (!encoded) throw new Error("Privy authorization private key is empty.");
-  const privateKey = crypto.createPrivateKey({
-    format: "der",
-    key: Buffer.from(encoded, "base64"),
-    type: "pkcs8",
-  });
-  return crypto
-    .createPublicKey(privateKey)
-    .export({ format: "der", type: "spki" })
-    .toString("base64");
-}
-
 function typedDataTypesMatch(
   actual: Record<string, readonly { name: string; type: string }[]>,
   expected: Record<string, readonly TypedDataField[]>,
@@ -1305,11 +1338,44 @@ export async function inspectServerEvmWalletAuthorization(input: {
   const matchingSigners = wallet.additionalSigners.filter(
     (candidate) => candidate.signerId === signerId,
   );
-  const foreignSigners = wallet.additionalSigners.filter(
+  const otherSigners = wallet.additionalSigners.filter(
     (candidate) => candidate.signerId !== signerId,
   );
+  const signerRegistry = validateKnownPrivyWalletSigners({
+    signers: wallet.additionalSigners,
+    specs: [
+      {
+        purpose: "polymarket_trade",
+        signerId,
+        policyIds: configuredPolicyIds,
+      },
+      ...(env.privyPolymarketWrapAuthorizationId &&
+      env.privyPolymarketWrapPolicyId
+        ? [
+            {
+              purpose: "polymarket_deposit_usdce_wrap" as const,
+              signerId: env.privyPolymarketWrapAuthorizationId,
+              policyIds: [env.privyPolymarketWrapPolicyId],
+            },
+          ]
+        : []),
+    ],
+  });
+  const knownWrapEntries = otherSigners.filter(
+    (candidate) =>
+      candidate.signerId === env.privyPolymarketWrapAuthorizationId,
+  );
+  const knownWrapSigner =
+    knownWrapEntries.length === 1 &&
+    knownWrapEntries[0] &&
+    (await isKnownPolymarketWrapSigner({
+      dependencies,
+      signer: knownWrapEntries[0],
+    }))
+      ? knownWrapEntries[0]
+      : null;
   const canRemoveAllSigners =
-    foreignSigners.length === 0 && matchingSigners.length <= 1;
+    otherSigners.length === 0 && matchingSigners.length <= 1;
   const grant: PrivyServerSignerGrant = {
     policyIds: [targetPolicyId],
     policyProfile: requiredProfile,
@@ -1318,7 +1384,11 @@ export async function inspectServerEvmWalletAuthorization(input: {
     walletAddress,
     walletChain: "ethereum",
   };
-  if (foreignSigners.length > 0 || matchingSigners.length > 1) {
+  if (
+    !signerRegistry.valid ||
+    (knownWrapEntries.length > 0 && !knownWrapSigner) ||
+    matchingSigners.length > 1
+  ) {
     return signerStatus({
       ...common,
       attached: matchingSigners.length > 0,
@@ -1363,7 +1433,8 @@ export async function inspectServerEvmWalletAuthorization(input: {
     quorum.userIds.length !== 0 ||
     !quorum.authorizationPublicKeys.some(
       (publicKey) =>
-        normalizePublicKey(publicKey) === normalizePublicKey(derivedPublicKey),
+        normalizePrivyAuthorizationPublicKey(publicKey) ===
+        normalizePrivyAuthorizationPublicKey(derivedPublicKey),
     )
   ) {
     return signerStatus({

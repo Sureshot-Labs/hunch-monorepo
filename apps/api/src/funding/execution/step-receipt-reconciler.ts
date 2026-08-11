@@ -84,6 +84,7 @@ const ERC20_TRANSFER_EVENT_INTERFACE = new ethers.Interface([
 
 type SponsoredActionMatch = Readonly<{
   actionMatches: boolean;
+  singleOperationBundle?: boolean;
   userOperationSucceeded: boolean | null;
   failureCode: string | null;
 }>;
@@ -286,6 +287,7 @@ function evaluateSponsoredErc4337Action(
   const userOperationSucceeded = matchingEvents[0] ?? false;
   return {
     actionMatches: true,
+    singleOperationBundle: operations.length === 1,
     userOperationSucceeded,
     failureCode: userOperationSucceeded
       ? null
@@ -318,9 +320,84 @@ function validExpectedSigner(
   }
 }
 
+type ExactDestinationCreditResult =
+  | Readonly<{ required: false }>
+  | Readonly<{
+      required: true;
+      valid: boolean;
+      attributedRaw: string | null;
+      expectedRaw: string | null;
+    }>;
+
+function exactErc20DestinationCredit(
+  validation: JsonRecord | undefined,
+  receipt: EvmReceiptRecord,
+): ExactDestinationCreditResult {
+  if (
+    validation?.postconditionEvidenceKind !==
+    "exact_erc20_destination_credit_v1"
+  ) {
+    return { required: false };
+  }
+  const assetId = validation.expectedDestinationAssetId;
+  const destination = validation.expectedDestinationAddress;
+  const expectedRaw = validation.expectedDestinationRaw;
+  if (
+    typeof assetId !== "string" ||
+    typeof destination !== "string" ||
+    typeof expectedRaw !== "string" ||
+    !/^(0|[1-9][0-9]*)$/u.test(expectedRaw)
+  ) {
+    return {
+      required: true,
+      valid: false,
+      attributedRaw: null,
+      expectedRaw: null,
+    };
+  }
+  let tokenAddress: string;
+  let destinationAddress: string;
+  try {
+    tokenAddress = ethers.getAddress(assetId);
+    destinationAddress = ethers.getAddress(destination);
+  } catch {
+    return {
+      required: true,
+      valid: false,
+      attributedRaw: null,
+      expectedRaw,
+    };
+  }
+  let attributed = 0n;
+  for (const log of receipt.logs) {
+    if (log.address.toLowerCase() !== tokenAddress.toLowerCase()) continue;
+    try {
+      const parsed = ERC20_TRANSFER_EVENT_INTERFACE.parseLog({
+        topics: [...log.topics],
+        data: log.data,
+      });
+      if (
+        parsed?.name === "Transfer" &&
+        ethers.getAddress(String(parsed.args.to)) === destinationAddress
+      ) {
+        attributed += BigInt(parsed.args.value);
+      }
+    } catch {
+      // Non-Transfer logs from the same token do not carry destination credit.
+    }
+  }
+  return {
+    required: true,
+    valid: attributed === BigInt(expectedRaw),
+    attributedRaw: attributed.toString(),
+    expectedRaw,
+  };
+}
+
 export function evaluateEvmActionReceipt(
   input: Readonly<{
     action: EvmTransactionAction | EvmTransactionBatchAction;
+    actionValidationResult?: JsonRecord;
     expectedSignerAddress: string;
     transaction: EvmReceiptTransaction | null;
     receipt: EvmReceiptRecord | null;
@@ -478,6 +555,40 @@ export function evaluateEvmActionReceipt(
       }),
     };
   }
+  const exactDestinationCredit = exactErc20DestinationCredit(
+    input.actionValidationResult,
+    input.receipt,
+  );
+  if (
+    exactDestinationCredit.required &&
+    executionEnvelope === "privy_erc4337" &&
+    sponsoredMatch?.singleOperationBundle !== true
+  ) {
+    return {
+      status: "mismatch",
+      actionMatch: false,
+      ledgerHeight: input.receipt.blockNumber.toString(),
+      blockHash: input.receipt.blockHash,
+      canonical: true,
+      failureCode: "sponsored_exact_credit_scope_ambiguous",
+      evidence: evidence({ receiptObserved: true }),
+    };
+  }
+  if (exactDestinationCredit.required && !exactDestinationCredit.valid) {
+    return {
+      status: "mismatch",
+      actionMatch: false,
+      ledgerHeight: input.receipt.blockNumber.toString(),
+      blockHash: input.receipt.blockHash,
+      canonical: true,
+      failureCode: "destination_credit_amount_mismatch",
+      evidence: evidence({
+        attributedDestinationRaw: exactDestinationCredit.attributedRaw,
+        expectedDestinationRaw: exactDestinationCredit.expectedRaw,
+        receiptObserved: true,
+      }),
+    };
+  }
   const confirmationPolicy = evmFundingActionFinalityConfirmations(
     input.transaction.chainId,
   );
@@ -490,6 +601,12 @@ export function evaluateEvmActionReceipt(
     canonical: true,
     failureCode: null,
     evidence: evidence({
+      ...(exactDestinationCredit.required
+        ? {
+            attributedDestinationRaw:
+              exactDestinationCredit.attributedRaw ?? "0",
+          }
+        : {}),
       confirmationPolicy,
       confirmations: input.receipt.confirmations,
       receiptObserved: true,
@@ -970,6 +1087,7 @@ async function inspectEvmTarget(
   }
   return evaluateEvmActionReceipt({
     action: target.action,
+    actionValidationResult: target.actionValidationResult,
     expectedSignerAddress,
     transaction: transactionRecord,
     receipt: receiptRecord,

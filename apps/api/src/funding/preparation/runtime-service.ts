@@ -43,7 +43,10 @@ import {
   polymarketFundingEvidence,
   type PolymarketRouterFundingSnapshot,
 } from "./polymarket-funding-snapshot.js";
-import { stableOpaqueId } from "../../account-value/canonical.js";
+import {
+  stableOpaqueId,
+  stableWalletOpaqueId,
+} from "../../account-value/canonical.js";
 import type {
   DestinationOptionsInput,
   PreparationInspectionInput,
@@ -297,13 +300,11 @@ function walletAuthority(wallet: UserWallet): RuntimeWalletAuthority {
 }
 
 function walletId(wallet: UserWallet, networkId: string): string {
-  return stableOpaqueId(
-    "wallet",
-    `${wallet.walletType}:${networkId}:${canonicalAccountAddress(
-      networkId,
-      wallet.walletAddress,
-    )}`,
-  );
+  return stableWalletOpaqueId({
+    walletType: wallet.walletType,
+    networkId,
+    address: wallet.walletAddress,
+  });
 }
 
 function assetFor(venue: RuntimeVenue): AssetRef {

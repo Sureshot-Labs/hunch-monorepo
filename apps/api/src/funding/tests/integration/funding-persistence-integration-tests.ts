@@ -1838,6 +1838,7 @@ async function readMergeUser(userId: string): Promise<MergeUserRow> {
 async function testDirectIngressWithDeferredPreparationCommit(): Promise<void> {
   const userId = await insertUser(pool);
   const destinationLocationId = opaque("destination-location");
+  const venueBindingOptionId = opaque("venue-binding-option");
   const plan: FundingCommitPlan = {
     operation: {
       purpose: "add_funds",
@@ -1861,6 +1862,7 @@ async function testDirectIngressWithDeferredPreparationCommit(): Promise<void> {
       marketContextSnapshot: null,
       venueBindingSnapshot: {
         venueId: "polymarket",
+        venueBindingOptionId,
       },
       walletExecutionSnapshot: {
         profileId: opaque("wallet-profile"),
@@ -1870,6 +1872,7 @@ async function testDirectIngressWithDeferredPreparationCommit(): Promise<void> {
       requestedDestinationAmount: money("1000000"),
       supportMetadata: {
         preparationKind: "polymarket_funding_router",
+        venueBindingOptionId,
       },
     },
     segments: [],
@@ -1977,6 +1980,7 @@ async function testCompositePreparationAndRelayCommit(): Promise<void> {
     networkId: ASSET.networkId,
     assetId: ASSET.assetId,
   };
+  const venueBindingOptionId = opaque("venue-binding-option");
   const expiresAt = new Date(Date.now() + 60_000).toISOString();
   const plan: FundingCommitPlan = {
     operation: {
@@ -1990,7 +1994,7 @@ async function testCompositePreparationAndRelayCommit(): Promise<void> {
       venueId: "polymarket",
       marketId: null,
       marketContextSnapshot: null,
-      venueBindingSnapshot: { venueId: "polymarket" },
+      venueBindingSnapshot: { venueId: "polymarket", venueBindingOptionId },
       walletExecutionSnapshot: {},
       placementSnapshot: {},
       requestedSourceAmount: null,
@@ -1999,6 +2003,7 @@ async function testCompositePreparationAndRelayCommit(): Promise<void> {
         containsVenuePreparation: true,
         venuePreparationMinimumDestination: money("3569075"),
         preparationKind: "polymarket_funding_router",
+        venueBindingOptionId,
         fundingPlan: {
           totalAmountRaw: "3569075",
         },

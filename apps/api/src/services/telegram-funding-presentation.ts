@@ -65,10 +65,52 @@ export function buildTelegramFundingUnavailableMessage(input?: {
   };
 }
 
+export type TelegramFundingReceivePresentationMode =
+  | "pusd_direct"
+  | "pusd_or_usdce_automatic"
+  | "usdce_automatic";
+
+function receivePresentation(mode: TelegramFundingReceivePresentationMode) {
+  if (mode === "pusd_or_usdce_automatic") {
+    return {
+      asset: "pUSD / USDC.e",
+      button: "pUSD / USDC.e on Polygon",
+      settlement: "Direct / automatic 1:1 conversion",
+      instructions: [
+        "Send pUSD or USDC.e on Polygon.",
+        "pUSD is credited directly.",
+        "USDC.e is automatically converted 1:1 to pUSD.",
+      ],
+    } as const;
+  }
+  if (mode === "usdce_automatic") {
+    return {
+      asset: "USDC.e",
+      button: "USDC.e on Polygon → pUSD",
+      settlement: "Automatic 1:1 conversion",
+      instructions: [
+        "Send USDC.e on Polygon.",
+        "USDC.e is automatically converted 1:1 to pUSD.",
+      ],
+    } as const;
+  }
+  return {
+    asset: "pUSD",
+    button: "pUSD on Polygon — direct",
+    settlement: "Direct",
+    instructions: [
+      "Send only pUSD on Polygon.",
+      "Other assets cannot be routed from this Telegram flow.",
+    ],
+  } as const;
+}
+
 export function buildTelegramFundingTargetMessage(input: {
   contextId: string;
   expiresAt: string;
+  mode?: TelegramFundingReceivePresentationMode;
 }): TelegramFundingMessage {
+  const presentation = receivePresentation(input.mode ?? "pusd_direct");
   return {
     fundingContextId: input.contextId,
     parse_mode: "MarkdownV2",
@@ -81,7 +123,7 @@ export function buildTelegramFundingTargetMessage(input: {
               contextId: input.contextId,
               kind: "select",
             }),
-            text: "pUSD on Polygon — direct",
+            text: presentation.button,
           },
         ],
         [
@@ -101,7 +143,7 @@ export function buildTelegramFundingTargetMessage(input: {
       )}*`,
       "",
       escapeTelegramMarkdownV2(
-        "Choose the exact asset before the verified receive address is shown.",
+        "Confirm the supported receive assets before the verified address is shown.",
       ),
       "",
       `${telegramCustomEmojiMarkdownV2ForNetwork("Polygon")} ${formatTelegramFieldMarkdownV2(
@@ -110,9 +152,11 @@ export function buildTelegramFundingTargetMessage(input: {
       )}`,
       `${telegramCustomEmojiMarkdownV2("usdc")} ${formatTelegramFieldMarkdownV2(
         "Asset",
-        "pUSD",
+        presentation.asset,
       )}`,
-      formatTelegramFieldMarkdownV2("Settlement", "Direct"),
+      formatTelegramFieldMarkdownV2("Settlement", presentation.settlement),
+      "",
+      ...presentation.instructions.map(escapeTelegramMarkdownV2),
       ...receiveWindowFields(input.expiresAt),
     ]),
     venue: "polymarket",
@@ -123,7 +167,9 @@ export function buildTelegramFundingAddressMessage(input: {
   address: string;
   contextId: string;
   expiresAt: string;
+  mode?: TelegramFundingReceivePresentationMode;
 }): TelegramFundingMessage {
+  const presentation = receivePresentation(input.mode ?? "pusd_direct");
   return {
     fundingContextId: input.contextId,
     parse_mode: "MarkdownV2",
@@ -169,7 +215,7 @@ export function buildTelegramFundingAddressMessage(input: {
       )}`,
       `${telegramCustomEmojiMarkdownV2("usdc")} ${formatTelegramFieldMarkdownV2(
         "Asset",
-        "pUSD",
+        presentation.asset,
       )}`,
       "",
       `📍 ${formatTelegramBoldMarkdownV2("Verified receive address")}`,
@@ -177,7 +223,7 @@ export function buildTelegramFundingAddressMessage(input: {
       "",
       formatTelegramCalloutMarkdownV2({
         bodyMarkdownV2: escapeTelegramMarkdownV2(
-          "Send only pUSD on Polygon. Other assets cannot be routed from this Telegram flow. Your sending wallet must cover the Polygon network fee.",
+          `${presentation.instructions.join(" ")} Your sending wallet must cover the Polygon network fee.`,
         ),
         icon: "⚠️",
         title: "Important",
@@ -215,19 +261,44 @@ export function buildTelegramFundingProgressMessage(
     waiting_for_transfer: {
       icon: "⏳",
       title: "Waiting for transfer",
-      body: "Send pUSD on Polygon to the verified receive address.",
+      body: projection.automaticConversionEnabled
+        ? "Send pUSD or USDC.e on Polygon to the verified receive address."
+        : "Send pUSD on Polygon to the verified receive address.",
     },
     funds_received: {
       icon: "📥",
-      title: "Funds received",
+      title:
+        projection.assetSymbol === "USDC.e"
+          ? "USDC.e detected"
+          : "Funds received",
       body: amount ? `${amount} was detected.` : "The transfer was detected.",
+    },
+    waiting_for_routing: {
+      icon: "⏸️",
+      title: "USDC.e received",
+      body: amount
+        ? `${amount} is preserved and waiting for automatic routing to resume.`
+        : "The received USDC.e is preserved and waiting for automatic routing to resume.",
+    },
+    converting: {
+      icon: "🔄",
+      title: "Converting USDC.e to pUSD",
+      body: amount
+        ? `${amount} is being converted to pUSD.`
+        : "The received USDC.e is being converted to pUSD.",
     },
     ready: {
       icon: "✅",
       title: "pUSD ready",
-      body: amount
-        ? `${amount} is now available at Polymarket.`
-        : "The received pUSD is now available at Polymarket.",
+      body:
+        projection.sourceAssetSymbol === "USDC.e" && projection.sourceRawAmount
+          ? `${formatRawAmount(
+              projection.sourceRawAmount,
+              projection.decimals,
+            )} USDC.e was converted to ${amount ?? "pUSD"} and is now available at Polymarket.`
+          : amount
+            ? `${amount} is now available at Polymarket.`
+            : "The received pUSD is now available at Polymarket.",
     },
     expired: {
       icon: "⌛",
@@ -242,10 +313,9 @@ export function buildTelegramFundingProgressMessage(
     needs_attention: {
       icon: "⚠️",
       title: "Funds need attention",
-      body:
-        projection.assetSymbol === "USDC.e"
-          ? `${amount ?? "USDC.e"} was received, but Telegram conversion is not enabled. No routing transaction was submitted.`
-          : "The received funds need review. No new routing transaction was submitted.",
+      body: amount
+        ? `Automatic preparation of ${amount} did not complete. The transfer is preserved and needs review.`
+        : "Automatic preparation did not complete. The received funds are preserved and need review.",
     },
   };
   const copy = stateCopy[projection.state];
@@ -312,7 +382,13 @@ export function buildTelegramFundingProgressMessage(
         : []),
       "",
       formatTelegramFieldMarkdownV2("Network", projection.networkLabel),
-      formatTelegramFieldMarkdownV2("Asset", projection.assetSymbol),
+      formatTelegramFieldMarkdownV2(
+        "Asset",
+        projection.state === "waiting_for_transfer" &&
+          projection.automaticConversionEnabled
+          ? "pUSD / USDC.e"
+          : projection.assetSymbol,
+      ),
       ...(projection.terminal ? [] : receiveWindowFields(projection.expiresAt)),
     ]),
     venue: "polymarket",
