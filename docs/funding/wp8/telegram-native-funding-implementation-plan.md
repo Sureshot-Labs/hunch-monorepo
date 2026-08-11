@@ -715,23 +715,26 @@ executor repeats the fresh authorization check immediately before broadcast.
 
 ### 8.4 Execution profiles
 
-Use separate revocable policy profiles; do not create an omnibus EVM/Solana
+Use one Hunch automation signer and one combined policy per wallet chain family.
+Privy permits only one override policy ID for an additional signer, so the EVM
+policy contains separate strict BUY, SELL, capped trade-funding, and delegated
+execution rules. EVM and Solana remain separate policy objects because their
+rule schemas and `chain_type` differ, but they may reuse the same authorization
+quorum/key.
+
+The finite signer registry therefore binds the existing Hunch automation
+signer to the exact wallet/chain, combined policy ID, quorum fingerprint, and
+complete policy fingerprint. The application keeps trading and funding grants
+as separate revocable authorities; it does not create another Privy signer for
+each purpose. Unknown, duplicate, malformed, multi-policy, or second Hunch
+signers still fail closed. Legacy BUY/SELL policy IDs are recognized only long
+enough for the managed setup to replace an old binding with the combined EVM
 policy.
 
-Before attaching another Privy signer, define a finite Hunch-owned purpose
-signer registry. Each entry binds one purpose to an exact signer ID, key quorum,
-wallet/chain, policy ID, and validated policy fingerprint. The existing trading
-inspector currently treats every additional non-trading signer as foreign;
-Slice C must update it to tolerate only fully verified other-purpose registry
-entries while continuing to reject unknown, duplicate, malformed, or
-multi-policy signers. Trading and funding grants must coexist and revoke
-independently. If Privy cannot support that topology safely, delegated funding
-stays unavailable; do not collapse the purposes into an omnibus signer/policy.
-
-Runtime verification is symmetric: a funding broadcast must live-check every
-attached registry entry, including an existing trading signer, against its
-exact public key/quorum fingerprint and exact attached policy fingerprint.
-Merely recognizing another signer and policy ID is insufficient.
+Runtime verification is symmetric: a funding broadcast live-checks the shared
+signer against its exact public key/quorum fingerprint and attached combined
+policy fingerprint, then verifies the exact route rule. Merely recognizing a
+signer and policy ID is insufficient.
 
 1. `telegram_pm_funding_router_v1`
    - Polygon only;
@@ -793,7 +796,8 @@ silently adding a process. Do not import `apps/api/src/env.ts` or another
 API-wide required-secret graph.
 
 Use a separate profile gate for each executor. Slice C uses
-`HUNCH_FUNDING_PM_WRAP_EXECUTE=false` and a separate optional secret bundle.
+`HUNCH_FUNDING_PM_WRAP_EXECUTE=false` and the existing optional Hunch automation
+signer secret plus the combined EVM policy ID/fingerprint.
 Broadcast requires both it and `HUNCH_FINANCE_EXECUTE=true`, plus the exact
 profile, funding runtime policy, grant, and Privy fingerprint checks. The
 general flag alone never enables delegation, and a profile gate never bypasses
@@ -1163,8 +1167,8 @@ Required backend changes:
 - new `apps/api/src/services/telegram-funding-authorizations.ts`
   - purpose-scoped immutable funding grant and current Privy-policy facts;
 - `apps/api/src/services/api-trading-wallet-signing.ts`
-  - exact purpose-signer registry coexistence validation without tolerating
-    unknown additional signers;
+  - exact shared automation-signer registry validation without tolerating
+    unknown or second Hunch signers;
 - new `apps/api/src/funding/execution/delegated-funding-capability-resolver.ts`
   - fresh, exact capability resolution without globally marking wallets as
     delegated;
@@ -1415,11 +1419,13 @@ Buy` journey. Readiness never submits an order automatically.
 1. Add purpose-scoped `telegram_funding_authorizations` and the fresh
    `DelegatedFundingCapabilityResolver`; preference/wallet ownership alone must
    never yield a delegated actor.
-2. Add the exact purpose-signer/quorum/policy registry and make trading/funding
-   inspection coexist without accepting unknown additional signers.
+2. Reuse the existing automation signer/quorum, attach one combined EVM policy,
+   and keep rejecting unknown additional signers; legacy BUY/SELL bindings are
+   transition-only.
 3. Extract sidecar-safe immutable action, finite effective cap, policy, and
-   attempt validation; define a separate EVM executor ID and a secret/config
-   bundle that is optional at worker boot but mandatory for delegated claiming.
+   attempt validation; define a separate EVM executor ID whose config reuses
+   the shared signer secret and is optional at worker boot but mandatory for
+   delegated claiming.
 4. Implement the single effective automation predicate, OFF-mode projection,
    strict blocker precedence, and soft-vs-hard resume classifier from Section 12.
 5. Add atomic eligible-step claim + attempt, a distinct durable pre-submit EVM
@@ -1516,8 +1522,8 @@ Funding Router, Relay EVM, and Relay SVM profile separately requires:
 
 - an explicit current Privy policy whose real serialized form was verified;
 - exact grant/profile resolution immediately before broadcast;
-- a verified purpose-signer/quorum/policy topology that coexists with trading
-  without an omnibus policy;
+- the verified shared Hunch signer/quorum and exact chain-family combined policy
+  that contains only the expected strict rules;
 - provider submission correlation, timeout/crash recovery, and ambiguous
   outcome behavior proved for the real adapter;
 - action-envelope/policy expressiveness proved for the real route;

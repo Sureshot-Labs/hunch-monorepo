@@ -59,7 +59,7 @@ async function main(): Promise<void> {
   const configuration = loadPolymarketWrapExecutionConfiguration();
   if (!polymarketWrapProfileConfigured(configuration)) {
     throw new Error(
-      "Polymarket wrap signer/policy fingerprints are incomplete",
+      "Polymarket automation signer/policy fingerprints are incomplete",
     );
   }
   const input = {
@@ -76,7 +76,7 @@ async function main(): Promise<void> {
   const driver = new PrivyDelegatedFundingDriver({
     appId: env.privyAppId,
     appSecret: env.privyAppSecret,
-    authorizationPrivateKey: env.privyPolymarketWrapAuthorizationKey,
+    authorizationPrivateKey: env.privyWalletAuthorizationKey,
     configuration,
   });
   const liveProfileValid = await driver.verifyWalletProfile({
@@ -85,7 +85,7 @@ async function main(): Promise<void> {
   });
   if (!liveProfileValid) {
     throw new Error(
-      "The wallet does not have the exact configured wrap signer/quorum/policy",
+      "The wallet does not have the exact configured automation signer/quorum/policy",
     );
   }
   const plan = {

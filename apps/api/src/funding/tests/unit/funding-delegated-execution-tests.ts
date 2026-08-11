@@ -249,6 +249,23 @@ const validatedPolicy = validatePolymarketDepositUsdceWrapPolicy({
   routerAddress: ROUTER,
 });
 assert.equal(validatedPolicy.valid, true, validatedPolicy.issues.join("; "));
+const combinedPolicy = wrapPolicy();
+combinedPolicy.rules.unshift({
+  id: "canonical_trading_rule",
+  name: "Canonical trading rule",
+  action: "ALLOW",
+  method: "eth_signTypedData_v4",
+  conditions: [],
+});
+assert.equal(
+  validatePolymarketDepositUsdceWrapPolicy({
+    policy: combinedPolicy,
+    policyId: combinedPolicy.id,
+    routerAddress: ROUTER,
+  }).valid,
+  true,
+  "the exact wrap rule may coexist with canonical trading rules in one policy",
+);
 
 for (const [label, mutate] of [
   [
@@ -526,36 +543,43 @@ assert.throws(
 
 const knownSignerSpecs = polymarketKnownSignerSpecs(
   {
-    PRIVY_WALLET_AUTHORIZATION_ID: "trade-signer",
-    PRIVY_POLYMARKET_BOT_BUY_POLICY_ID: "buy-policy",
-    PRIVY_POLYMARKET_BOT_SELL_POLICY_ID: "sell-policy",
+    PRIVY_WALLET_AUTHORIZATION_ID: "automation-signer",
+    PRIVY_POLYMARKET_BOT_BUY_SELL_POLICY_ID: "automation-policy",
   },
-  { signerId: "wrap-signer", policyId: "wrap-policy" },
+  { signerId: "automation-signer", policyId: "automation-policy" },
 );
 assert.equal(
   validateKnownPrivyWalletSigners({
     specs: knownSignerSpecs,
     signers: [
-      { signerId: "trade-signer", overridePolicyIds: ["buy-policy"] },
-      { signerId: "wrap-signer", overridePolicyIds: ["wrap-policy"] },
+      {
+        signerId: "automation-signer",
+        overridePolicyIds: ["automation-policy"],
+      },
     ],
-    requiredPurposes: ["polymarket_deposit_usdce_wrap"],
+    requiredPurposes: ["polymarket_automation"],
   }).valid,
   true,
 );
 for (const signers of [
   [{ signerId: "foreign", overridePolicyIds: ["foreign-policy"] }],
   [
-    { signerId: "wrap-signer", overridePolicyIds: ["wrap-policy"] },
-    { signerId: "wrap-signer", overridePolicyIds: ["wrap-policy"] },
+    {
+      signerId: "automation-signer",
+      overridePolicyIds: ["automation-policy"],
+    },
+    {
+      signerId: "automation-signer",
+      overridePolicyIds: ["automation-policy"],
+    },
   ],
-  [{ signerId: "wrap-signer", overridePolicyIds: ["buy-policy"] }],
+  [{ signerId: "automation-signer", overridePolicyIds: ["wrong-policy"] }],
 ]) {
   assert.equal(
     validateKnownPrivyWalletSigners({
       specs: knownSignerSpecs,
       signers,
-      requiredPurposes: ["polymarket_deposit_usdce_wrap"],
+      requiredPurposes: ["polymarket_automation"],
     }).valid,
     false,
   );
@@ -564,96 +588,101 @@ for (const signers of [
 const authorizationPublicKey = derivePrivyAuthorizationPublicKey(
   AUTHORIZATION_PRIVATE_KEY,
 );
-const tradeQuorum = {
+const automationQuorum = {
   authorizationPublicKeys: [authorizationPublicKey],
   authorizationThreshold: 1,
-  id: "trade-signer",
+  id: "automation-signer",
   nestedKeyQuorumIds: [] as string[],
   userIds: [] as string[],
 };
-const tradePolicyFingerprint = knownPrivyPolicyFingerprint({
+const automationPolicyFingerprint = knownPrivyPolicyFingerprint({
   chainType: "ethereum",
-  id: "buy-policy",
+  id: "automation-policy",
   rules: [{ action: "ALLOW", method: "eth_sendTransaction" }],
 });
 const runtimeSignerSpecs = polymarketKnownSignerRuntimeSpecs(
   {
-    PRIVY_WALLET_AUTHORIZATION_ID: "trade-signer",
+    PRIVY_WALLET_AUTHORIZATION_ID: "automation-signer",
     PRIVY_WALLET_AUTHORIZATION_KEY: AUTHORIZATION_PRIVATE_KEY,
     PRIVY_WALLET_AUTHORIZATION_FINGERPRINT:
-      privyKeyQuorumFingerprint(tradeQuorum),
-    PRIVY_POLYMARKET_BOT_BUY_POLICY_ID: "buy-policy",
-    PRIVY_POLYMARKET_BOT_BUY_POLICY_FINGERPRINT: tradePolicyFingerprint,
+      privyKeyQuorumFingerprint(automationQuorum),
+    PRIVY_POLYMARKET_BOT_BUY_SELL_POLICY_ID: "automation-policy",
+    PRIVY_POLYMARKET_BOT_BUY_SELL_POLICY_FINGERPRINT:
+      automationPolicyFingerprint,
   },
   {
     authorizationPublicKey,
-    signerId: "wrap-signer",
-    signerFingerprint: "a".repeat(64),
-    policyId: "wrap-policy",
-    policyFingerprint: "b".repeat(64),
+    signerId: "automation-signer",
+    signerFingerprint: privyKeyQuorumFingerprint(automationQuorum),
+    policyId: "automation-policy",
+    policyFingerprint: automationPolicyFingerprint,
   },
 );
-const tradeRuntimeSpec = runtimeSignerSpecs.find(
-  (spec) => spec.purpose === "polymarket_trade",
+const automationRuntimeSpec = runtimeSignerSpecs.find(
+  (spec) => spec.purpose === "polymarket_automation",
 );
-assert.ok(tradeRuntimeSpec);
+assert.ok(automationRuntimeSpec);
 assert.equal(
   validateKnownPrivySignerRuntime({
-    attachedPolicyId: "buy-policy",
+    attachedPolicyId: "automation-policy",
     policyChainType: "ethereum",
-    policyFingerprint: tradePolicyFingerprint,
-    quorum: tradeQuorum,
-    spec: tradeRuntimeSpec,
+    policyFingerprint: automationPolicyFingerprint,
+    quorum: automationQuorum,
+    spec: automationRuntimeSpec,
   }),
   true,
 );
 assert.equal(
   validateKnownPrivySignerRuntime({
-    attachedPolicyId: "buy-policy",
+    attachedPolicyId: "automation-policy",
     policyChainType: "ethereum",
-    policyFingerprint: tradePolicyFingerprint,
-    quorum: { ...tradeQuorum, authorizationThreshold: 2 },
-    spec: tradeRuntimeSpec,
+    policyFingerprint: automationPolicyFingerprint,
+    quorum: { ...automationQuorum, authorizationThreshold: 2 },
+    spec: automationRuntimeSpec,
   }),
   false,
   "a known co-signer with quorum drift must fail closed",
 );
 assert.equal(
   validateKnownPrivySignerRuntime({
-    attachedPolicyId: "buy-policy",
+    attachedPolicyId: "automation-policy",
     policyChainType: "ethereum",
     policyFingerprint: "f".repeat(64),
-    quorum: tradeQuorum,
-    spec: tradeRuntimeSpec,
+    quorum: automationQuorum,
+    spec: automationRuntimeSpec,
   }),
   false,
   "a known co-signer with policy drift must fail closed",
 );
 const incompleteRuntimeSignerSpecs = polymarketKnownSignerRuntimeSpecs(
   {
-    PRIVY_WALLET_AUTHORIZATION_ID: "trade-signer",
+    PRIVY_WALLET_AUTHORIZATION_ID: "automation-signer",
     PRIVY_WALLET_AUTHORIZATION_KEY: AUTHORIZATION_PRIVATE_KEY,
-    PRIVY_POLYMARKET_BOT_BUY_POLICY_ID: "buy-policy",
+    PRIVY_POLYMARKET_BOT_BUY_SELL_POLICY_ID: "automation-policy",
+    PRIVY_POLYMARKET_BOT_BUY_SELL_POLICY_FINGERPRINT:
+      automationPolicyFingerprint,
   },
   {
     authorizationPublicKey,
-    signerId: "wrap-signer",
-    signerFingerprint: "a".repeat(64),
-    policyId: "wrap-policy",
-    policyFingerprint: "b".repeat(64),
+    signerId: "automation-signer",
+    signerFingerprint: privyKeyQuorumFingerprint(automationQuorum),
+    policyId: "automation-policy",
+    policyFingerprint: automationPolicyFingerprint,
   },
 );
 assert.equal(
   validateKnownPrivyWalletSigners({
     specs: incompleteRuntimeSignerSpecs,
     signers: [
-      { signerId: "trade-signer", overridePolicyIds: ["buy-policy"] },
-      { signerId: "wrap-signer", overridePolicyIds: ["wrap-policy"] },
+      {
+        signerId: "automation-signer",
+        overridePolicyIds: ["automation-policy"],
+      },
     ],
-    requiredPurposes: ["polymarket_deposit_usdce_wrap"],
+    requiredPurposes: ["polymarket_automation"],
   }).valid,
   false,
-  "an attached co-signer without complete runtime fingerprints must be unknown",
+  "an attached signer without complete runtime fingerprints must be unknown",
 );
 
 const configuredProfile = {
@@ -772,7 +801,7 @@ assert.equal(
   polymarketWrapExecutorEnvironmentReady({
     PRIVY_APP_ID: "app",
     PRIVY_APP_SECRET: "secret",
-    PRIVY_POLYMARKET_WRAP_AUTHORIZATION_KEY: AUTHORIZATION_PRIVATE_KEY,
+    PRIVY_WALLET_AUTHORIZATION_KEY: AUTHORIZATION_PRIVATE_KEY,
     CREDENTIALS_ENCRYPTION_KEY: "encryption",
     FUNDING_REFERENCE_LOOKUP_HMAC_KEY: "hmac",
     POLYMARKET_FUNDING_ROUTER_ADDRESS: POLYMARKET_FUNDING_ROUTER.polygon,
@@ -783,7 +812,7 @@ assert.equal(
   polymarketWrapExecutorEnvironmentReady({
     PRIVY_APP_ID: "app",
     PRIVY_APP_SECRET: "secret",
-    PRIVY_POLYMARKET_WRAP_AUTHORIZATION_KEY: AUTHORIZATION_PRIVATE_KEY,
+    PRIVY_WALLET_AUTHORIZATION_KEY: AUTHORIZATION_PRIVATE_KEY,
     CREDENTIALS_ENCRYPTION_KEY: "encryption",
     FUNDING_REFERENCE_LOOKUP_HMAC_KEY: "hmac",
   }),
@@ -794,7 +823,7 @@ assert.equal(
   polymarketWrapExecutorEnvironmentReady({
     PRIVY_APP_ID: "app",
     PRIVY_APP_SECRET: "secret",
-    PRIVY_POLYMARKET_WRAP_AUTHORIZATION_KEY: AUTHORIZATION_PRIVATE_KEY,
+    PRIVY_WALLET_AUTHORIZATION_KEY: AUTHORIZATION_PRIVATE_KEY,
     CREDENTIALS_ENCRYPTION_KEY: "encryption",
     FUNDING_REFERENCE_LOOKUP_HMAC_KEY: "hmac",
     POLYMARKET_FUNDING_ROUTER_ADDRESS:
@@ -807,7 +836,7 @@ assert.equal(
   polymarketWrapExecutorEnvironmentReady({
     PRIVY_APP_ID: "app",
     PRIVY_APP_SECRET: "secret",
-    PRIVY_POLYMARKET_WRAP_AUTHORIZATION_KEY: "malformed",
+    PRIVY_WALLET_AUTHORIZATION_KEY: "malformed",
     CREDENTIALS_ENCRYPTION_KEY: "encryption",
     FUNDING_REFERENCE_LOOKUP_HMAC_KEY: "hmac",
     POLYMARKET_FUNDING_ROUTER_ADDRESS: POLYMARKET_FUNDING_ROUTER.polygon,

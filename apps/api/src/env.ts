@@ -1299,18 +1299,10 @@ export const env = {
     process.env.PRIVY_POLYMARKET_BOT_SELL_POLICY_ID?.trim() || "",
   privyPolymarketBotBuySellPolicyId:
     process.env.PRIVY_POLYMARKET_BOT_BUY_SELL_POLICY_ID?.trim() || "",
+  privyPolymarketBotBuySellPolicyFingerprint:
+    process.env.PRIVY_POLYMARKET_BOT_BUY_SELL_POLICY_FINGERPRINT?.trim() || "",
   privyPolymarketBotRedeemPolicyId:
     process.env.PRIVY_POLYMARKET_BOT_REDEEM_POLICY_ID?.trim() || "",
-  privyPolymarketWrapAuthorizationId:
-    process.env.PRIVY_POLYMARKET_WRAP_SIGNER_ID?.trim() || "",
-  privyPolymarketWrapAuthorizationKey:
-    process.env.PRIVY_POLYMARKET_WRAP_AUTHORIZATION_KEY?.trim() || "",
-  privyPolymarketWrapSignerFingerprint:
-    process.env.PRIVY_POLYMARKET_WRAP_SIGNER_FINGERPRINT?.trim() || "",
-  privyPolymarketWrapPolicyId:
-    process.env.PRIVY_POLYMARKET_WRAP_POLICY_ID?.trim() || "",
-  privyPolymarketWrapPolicyFingerprint:
-    process.env.PRIVY_POLYMARKET_WRAP_POLICY_FINGERPRINT?.trim() || "",
   privyPolymarketBotBuyPolicyMaxUsd: optionalNonNegativeNumber(
     "PRIVY_POLYMARKET_BOT_BUY_POLICY_MAX_USD",
     0,

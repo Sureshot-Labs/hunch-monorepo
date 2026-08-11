@@ -13,7 +13,8 @@ Funding Router call with zero native value and `pUsdAmount = 0`; it does not cap
 `totalAmount`. The Router derives the user's canonical Deposit Wallet from the
 caller, so calldata cannot redirect the resulting pUSD.
 
-The expected Privy policy has exactly one rule:
+The combined EVM policy must contain exactly one wrap rule with this shape;
+the existing strict BUY, SELL, and capped funding rules remain alongside it:
 
 ```json
 {
@@ -85,11 +86,13 @@ The expected Privy policy has exactly one rule:
 }
 ```
 
-The live inspector requires one authorization key, threshold one, no nested
-quorums/users, one exact override policy, the expected wallet/address/chain,
-and exact signer and policy fingerprints. It applies the same complete check to
-every other attached Hunch signer. Unknown, duplicate, broader, partially
-configured, or changed signers fail closed.
+The live inspector reuses the existing Hunch automation authorization key and
+quorum. It requires threshold one, no nested quorums/users, the expected
+wallet/address/chain, and exactly one combined EVM override policy with exact
+signer and policy fingerprints. Unknown, duplicate, broader, partially
+configured, or changed signers fail closed. Privy allows only one override
+policy ID per additional signer, so BUY, SELL, capped trade funding, and this
+exact full-receipt wrap are separate strict rules inside that one policy.
 
 ## Runtime controls
 
@@ -113,30 +116,20 @@ and post-broadcast recovery are still checked against the canonical contract:
 
 ```dotenv
 POLYMARKET_FUNDING_ROUTER_ADDRESS=0x0fEF62E1CD0600C132070855A45443852940EE72
-PRIVY_POLYMARKET_WRAP_AUTHORIZATION_KEY=<base64 DER PKCS#8 P-256 private key>
-PRIVY_POLYMARKET_WRAP_SIGNER_ID=
-PRIVY_POLYMARKET_WRAP_SIGNER_FINGERPRINT=
-PRIVY_POLYMARKET_WRAP_POLICY_ID=
-PRIVY_POLYMARKET_WRAP_POLICY_FINGERPRINT=
-```
-
-If the wallet also carries the existing Polymarket trading signer, the
-finance-worker must receive its complete registry entry as well:
-
-```dotenv
 PRIVY_WALLET_AUTHORIZATION_ID=
-PRIVY_WALLET_AUTHORIZATION_KEY=
+PRIVY_WALLET_AUTHORIZATION_KEY=<base64 DER PKCS#8 P-256 private key>
 PRIVY_WALLET_AUTHORIZATION_FINGERPRINT=
-PRIVY_POLYMARKET_BOT_BUY_POLICY_ID=
-PRIVY_POLYMARKET_BOT_BUY_POLICY_FINGERPRINT=
-PRIVY_POLYMARKET_BOT_SELL_POLICY_ID=
-PRIVY_POLYMARKET_BOT_SELL_POLICY_FINGERPRINT=
 PRIVY_POLYMARKET_BOT_BUY_SELL_POLICY_ID=
 PRIVY_POLYMARKET_BOT_BUY_SELL_POLICY_FINGERPRINT=
 ```
 
-Only the policy currently attached to the trading signer needs to be present,
-but its ID and fingerprint are an inseparable pair. The signer fingerprint is
+Do not configure or attach a standalone wrap policy. If one already exists in
+Privy, leave it unattached; Slice C does not read its ID.
+
+The combined policy ID and fingerprint are an inseparable pair. The legacy
+BUY/SELL policy IDs may remain in the API environment only while existing
+wallet bindings are automatically replaced; new grants always attach the
+combined policy. The signer fingerprint is
 the canonical hash of signer ID, sorted public keys, threshold, nested quorum
 IDs, and user IDs. A policy fingerprint is the canonical hash of its normalized
 `chainType`, ID, and complete rules. Generate these only from a live policy that
@@ -223,8 +216,9 @@ never to the generic economic-conversion review API.
 ## Grant and revoke
 
 The grant command is dry-run by default. Even dry-run verifies the live wallet,
-signer/quorum, policy, key, and fingerprints. It does not attach or create
-Privy resources.
+shared signer/quorum, combined policy, key, and fingerprints. It does not
+attach or create Privy resources; the existing managed Telegram automation
+setup owns the one signer attachment.
 
 ```bash
 pnpm -F api run funding:authorization:grant -- \
@@ -339,17 +333,20 @@ The worker schema gate requires `telegram_funding_authorizations` as the atomic
 migration-0204 marker before any of these phases run.
 
 The common Funding Router commit boundary serializes unresolved operations per
-user and venue binding. Future Relay EVM/SVM and venue profiles reuse the same
-claim/attempt/finalize substrate, but must define separate signers, policies,
-drivers, value/recipient constraints, and activation flags.
+user and venue binding. Future Relay EVM profiles reuse the same Hunch signer
+and combined EVM policy by adding separately validated strict rules. Solana may
+reuse the same authorization quorum but needs its own combined Solana policy
+because Privy policies are chain-family specific. Every profile still defines
+its own driver, value/recipient constraints, and activation flag.
 
 ## Activation order
 
 1. Apply migration `0204` and run the funding migration preflight.
 2. Deploy code with `HUNCH_FUNDING_PM_WRAP_EXECUTE=false`.
 3. Verify a dark worker cycle has zero delegated claims.
-4. Create and verify the separate Privy signer/quorum/policy outside deploy.
-5. Attach it only to the canary wallet and issue one funding grant.
+4. Add and verify the exact wrap rule in the existing combined EVM policy.
+5. Let the existing managed setup replace a canary wallet's legacy BUY/SELL
+   binding with the combined policy, then issue one funding grant.
 6. Preview and publish Funding Policy V2 with the full intended asset array,
    including `polygon:usdce`.
 7. Enable the profile for the canary and perform a separately approved tiny

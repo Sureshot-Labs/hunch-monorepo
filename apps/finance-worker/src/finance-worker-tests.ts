@@ -179,11 +179,11 @@ const tests: TestCase[] = [
         fundingReferenceLookupHmacKey: "lookup-key",
         privyAppId: "app-id",
         privyAppSecret: "app-secret",
-        privyPolymarketWrapAuthorizationKey: "authorization-key",
-        privyPolymarketWrapSignerId: "signer-id",
-        privyPolymarketWrapSignerFingerprint: "s".repeat(64),
-        privyPolymarketWrapPolicyId: "policy-id",
-        privyPolymarketWrapPolicyFingerprint: "p".repeat(64),
+        privyWalletAuthorizationKey: "authorization-key",
+        privyWalletAuthorizationId: "signer-id",
+        privyWalletAuthorizationFingerprint: "s".repeat(64),
+        privyPolymarketBotBuySellPolicyId: "policy-id",
+        privyPolymarketBotBuySellPolicyFingerprint: "p".repeat(64),
       });
       assert.ok(delegatedFundingWorkerConfig(complete));
       const disabled = delegatedFundingWorkerConfig({
@@ -194,10 +194,10 @@ const tests: TestCase[] = [
       assert.equal(disabled.configuration.enabled, false);
       const profileRollback = delegatedFundingWorkerConfig({
         ...complete,
-        privyPolymarketWrapSignerId: undefined,
-        privyPolymarketWrapSignerFingerprint: undefined,
-        privyPolymarketWrapPolicyId: undefined,
-        privyPolymarketWrapPolicyFingerprint: undefined,
+        privyWalletAuthorizationId: undefined,
+        privyWalletAuthorizationFingerprint: undefined,
+        privyPolymarketBotBuySellPolicyId: undefined,
+        privyPolymarketBotBuySellPolicyFingerprint: undefined,
       });
       assert.ok(profileRollback);
       assert.equal(profileRollback.configuration.signerId, "");
@@ -211,7 +211,7 @@ const tests: TestCase[] = [
       assert.equal(
         delegatedFundingWorkerConfig({
           ...complete,
-          privyPolymarketWrapAuthorizationKey: undefined,
+          privyWalletAuthorizationKey: undefined,
         }),
         undefined,
       );

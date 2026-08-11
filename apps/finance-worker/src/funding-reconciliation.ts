@@ -137,11 +137,11 @@ export function delegatedFundingWorkerConfig(
     | "fundingReferenceLookupHmacKey"
     | "privyAppId"
     | "privyAppSecret"
-    | "privyPolymarketWrapAuthorizationKey"
-    | "privyPolymarketWrapSignerId"
-    | "privyPolymarketWrapSignerFingerprint"
-    | "privyPolymarketWrapPolicyId"
-    | "privyPolymarketWrapPolicyFingerprint"
+    | "privyWalletAuthorizationKey"
+    | "privyWalletAuthorizationId"
+    | "privyWalletAuthorizationFingerprint"
+    | "privyPolymarketBotBuySellPolicyId"
+    | "privyPolymarketBotBuySellPolicyFingerprint"
   >,
 ): FundingReconciliationOptions["delegatedExecution"] {
   if (
@@ -149,7 +149,7 @@ export function delegatedFundingWorkerConfig(
     !input.fundingReferenceLookupHmacKey ||
     !input.privyAppId ||
     !input.privyAppSecret ||
-    !input.privyPolymarketWrapAuthorizationKey
+    !input.privyWalletAuthorizationKey
   ) {
     return undefined;
   }
@@ -157,15 +157,15 @@ export function delegatedFundingWorkerConfig(
     configuration: {
       enabled: input.fundingPolymarketWrapExecute,
       profileId: "polymarket_deposit_usdce_wrap_v1",
-      signerId: input.privyPolymarketWrapSignerId ?? "",
-      signerFingerprint: input.privyPolymarketWrapSignerFingerprint ?? "",
-      policyId: input.privyPolymarketWrapPolicyId ?? "",
-      policyFingerprint: input.privyPolymarketWrapPolicyFingerprint ?? "",
+      signerId: input.privyWalletAuthorizationId ?? "",
+      signerFingerprint: input.privyWalletAuthorizationFingerprint ?? "",
+      policyId: input.privyPolymarketBotBuySellPolicyId ?? "",
+      policyFingerprint: input.privyPolymarketBotBuySellPolicyFingerprint ?? "",
     },
     privy: {
       appId: input.privyAppId,
       appSecret: input.privyAppSecret,
-      authorizationPrivateKey: input.privyPolymarketWrapAuthorizationKey,
+      authorizationPrivateKey: input.privyWalletAuthorizationKey,
     },
   };
 }

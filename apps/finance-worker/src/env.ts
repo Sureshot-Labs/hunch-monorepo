@@ -157,16 +157,16 @@ export const env = {
     parseBool(readEnv("HUNCH_FUNDING_PM_WRAP_EXECUTE"), false),
   privyAppId: readEnv("PRIVY_APP_ID"),
   privyAppSecret: readEnv("PRIVY_APP_SECRET"),
-  privyPolymarketWrapAuthorizationKey: readEnv(
-    "PRIVY_POLYMARKET_WRAP_AUTHORIZATION_KEY",
+  privyWalletAuthorizationKey: readEnv("PRIVY_WALLET_AUTHORIZATION_KEY"),
+  privyWalletAuthorizationId: readEnv("PRIVY_WALLET_AUTHORIZATION_ID"),
+  privyWalletAuthorizationFingerprint: readEnv(
+    "PRIVY_WALLET_AUTHORIZATION_FINGERPRINT",
   ),
-  privyPolymarketWrapSignerId: readEnv("PRIVY_POLYMARKET_WRAP_SIGNER_ID"),
-  privyPolymarketWrapSignerFingerprint: readEnv(
-    "PRIVY_POLYMARKET_WRAP_SIGNER_FINGERPRINT",
+  privyPolymarketBotBuySellPolicyId: readEnv(
+    "PRIVY_POLYMARKET_BOT_BUY_SELL_POLICY_ID",
   ),
-  privyPolymarketWrapPolicyId: readEnv("PRIVY_POLYMARKET_WRAP_POLICY_ID"),
-  privyPolymarketWrapPolicyFingerprint: readEnv(
-    "PRIVY_POLYMARKET_WRAP_POLICY_FINGERPRINT",
+  privyPolymarketBotBuySellPolicyFingerprint: readEnv(
+    "PRIVY_POLYMARKET_BOT_BUY_SELL_POLICY_FINGERPRINT",
   ),
 
   privyDeletionReconciliationEnabled: parseBool(

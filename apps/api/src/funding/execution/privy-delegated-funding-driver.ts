@@ -223,7 +223,7 @@ export class PrivyDelegatedFundingDriver implements DelegatedFundingNetworkDrive
         overridePolicyIds: signer.override_policy_ids ?? [],
       })),
       specs: runtimeSpecs,
-      requiredPurposes: ["polymarket_deposit_usdce_wrap"],
+      requiredPurposes: ["polymarket_automation"],
     });
     if (
       wallet.id !== input.walletId ||
@@ -285,22 +285,20 @@ export class PrivyDelegatedFundingDriver implements DelegatedFundingNetworkDrive
             "Privy wallet signer or policy fingerprint changed",
           );
         }
-        if (spec.purpose === "polymarket_deposit_usdce_wrap") {
-          if (normalizedPolicy.chainType !== "ethereum") {
-            throw new PrivyDelegatedFundingProfileInvalidError(
-              "Privy wrap policy is not an Ethereum policy",
-            );
-          }
-          const policyValidation = validatePolymarketDepositUsdceWrapPolicy({
-            policy: { ...normalizedPolicy, chainType: "ethereum" },
-            policyId,
-            routerAddress: POLYMARKET_FUNDING_ROUTER.polygon,
-          });
-          if (!policyValidation.valid) {
-            throw new PrivyDelegatedFundingProfileInvalidError(
-              "Privy wrap policy is unsafe",
-            );
-          }
+        if (normalizedPolicy.chainType !== "ethereum") {
+          throw new PrivyDelegatedFundingProfileInvalidError(
+            "Privy automation policy is not an Ethereum policy",
+          );
+        }
+        const policyValidation = validatePolymarketDepositUsdceWrapPolicy({
+          policy: { ...normalizedPolicy, chainType: "ethereum" },
+          policyId,
+          routerAddress: POLYMARKET_FUNDING_ROUTER.polygon,
+        });
+        if (!policyValidation.valid) {
+          throw new PrivyDelegatedFundingProfileInvalidError(
+            "Privy automation policy is missing the exact wrap rule",
+          );
         }
       }),
     );

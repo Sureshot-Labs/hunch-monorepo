@@ -5,9 +5,7 @@ import {
   normalizePrivyAuthorizationPublicKey,
 } from "./privy-authorization-key.js";
 
-export type KnownPrivySignerPurpose =
-  | "polymarket_trade"
-  | "polymarket_deposit_usdce_wrap";
+export type KnownPrivySignerPurpose = "polymarket_automation";
 
 export type KnownPrivySignerSpec = Readonly<{
   purpose: KnownPrivySignerPurpose;
@@ -134,31 +132,20 @@ export function validateKnownPrivyWalletSigners(
 
 export function polymarketKnownSignerSpecs(
   source: Readonly<Record<string, string | undefined>>,
-  wrap: Readonly<{ signerId: string; policyId: string }>,
+  authority: Readonly<{ signerId: string; policyId: string }>,
 ): readonly KnownPrivySignerSpec[] {
-  const tradeSignerId = source.PRIVY_WALLET_AUTHORIZATION_ID?.trim() ?? "";
-  const tradePolicyIds = [
-    source.PRIVY_POLYMARKET_BOT_BUY_POLICY_ID,
-    source.PRIVY_POLYMARKET_BOT_SELL_POLICY_ID,
-    source.PRIVY_POLYMARKET_BOT_BUY_SELL_POLICY_ID,
-  ]
-    .map((value) => value?.trim() ?? "")
-    .filter(Boolean);
+  const signerId = source.PRIVY_WALLET_AUTHORIZATION_ID?.trim() ?? "";
+  const policyId = source.PRIVY_POLYMARKET_BOT_BUY_SELL_POLICY_ID?.trim() ?? "";
+  if (
+    !signerId ||
+    !policyId ||
+    authority.signerId !== signerId ||
+    authority.policyId !== policyId
+  ) {
+    return [];
+  }
   return [
-    ...(tradeSignerId && tradePolicyIds.length > 0
-      ? [
-          {
-            purpose: "polymarket_trade" as const,
-            signerId: tradeSignerId,
-            policyIds: tradePolicyIds,
-          },
-        ]
-      : []),
-    {
-      purpose: "polymarket_deposit_usdce_wrap" as const,
-      signerId: wrap.signerId,
-      policyIds: [wrap.policyId],
-    },
+    { purpose: "polymarket_automation", signerId, policyIds: [policyId] },
   ];
 }
 
@@ -179,7 +166,7 @@ function derivePublicKeyOrEmpty(privateKey: string): string {
 
 export function polymarketKnownSignerRuntimeSpecs(
   source: Readonly<Record<string, string | undefined>>,
-  wrap: Readonly<{
+  authority: Readonly<{
     authorizationPublicKey: string;
     policyFingerprint: string;
     policyId: string;
@@ -187,75 +174,47 @@ export function polymarketKnownSignerRuntimeSpecs(
     signerId: string;
   }>,
 ): readonly KnownPrivySignerRuntimeSpec[] {
-  const tradePolicyPairs = [
-    [
-      "PRIVY_POLYMARKET_BOT_BUY_POLICY_ID",
-      "PRIVY_POLYMARKET_BOT_BUY_POLICY_FINGERPRINT",
-    ],
-    [
-      "PRIVY_POLYMARKET_BOT_SELL_POLICY_ID",
-      "PRIVY_POLYMARKET_BOT_SELL_POLICY_FINGERPRINT",
-    ],
-    [
-      "PRIVY_POLYMARKET_BOT_BUY_SELL_POLICY_ID",
-      "PRIVY_POLYMARKET_BOT_BUY_SELL_POLICY_FINGERPRINT",
-    ],
-  ] as const;
-  const tradePolicies = tradePolicyPairs
-    .map(([idKey, fingerprintKey]) => ({
-      id: environmentValue(source, idKey),
-      fingerprint: environmentValue(source, fingerprintKey),
-    }))
-    .filter(({ id, fingerprint }) => id && fingerprint);
-  const tradeSignerId = environmentValue(
-    source,
-    "PRIVY_WALLET_AUTHORIZATION_ID",
-  );
-  const tradeSignerFingerprint = environmentValue(
+  const signerId = environmentValue(source, "PRIVY_WALLET_AUTHORIZATION_ID");
+  const signerFingerprint = environmentValue(
     source,
     "PRIVY_WALLET_AUTHORIZATION_FINGERPRINT",
   );
-  const tradePublicKey = derivePublicKeyOrEmpty(
+  const authorizationPublicKey = derivePublicKeyOrEmpty(
     environmentValue(source, "PRIVY_WALLET_AUTHORIZATION_KEY"),
   );
-  const wrapComplete = [
-    wrap.signerId,
-    wrap.signerFingerprint,
-    wrap.authorizationPublicKey,
-    wrap.policyId,
-    wrap.policyFingerprint,
-  ].every(Boolean);
+  const policyId = environmentValue(
+    source,
+    "PRIVY_POLYMARKET_BOT_BUY_SELL_POLICY_ID",
+  );
+  const policyFingerprint = environmentValue(
+    source,
+    "PRIVY_POLYMARKET_BOT_BUY_SELL_POLICY_FINGERPRINT",
+  );
+  if (
+    ![
+      signerId,
+      signerFingerprint,
+      authorizationPublicKey,
+      policyId,
+      policyFingerprint,
+    ].every(Boolean) ||
+    authority.signerId !== signerId ||
+    authority.signerFingerprint !== signerFingerprint ||
+    authority.policyId !== policyId ||
+    authority.policyFingerprint !== policyFingerprint ||
+    normalizePrivyAuthorizationPublicKey(authority.authorizationPublicKey) !==
+      normalizePrivyAuthorizationPublicKey(authorizationPublicKey)
+  ) {
+    return [];
+  }
   return [
-    ...(tradeSignerId &&
-    tradeSignerFingerprint &&
-    tradePublicKey &&
-    tradePolicies.length > 0
-      ? [
-          {
-            purpose: "polymarket_trade" as const,
-            signerId: tradeSignerId,
-            signerFingerprint: tradeSignerFingerprint,
-            authorizationPublicKey: tradePublicKey,
-            policyIds: tradePolicies.map(({ id }) => id),
-            policyFingerprints: Object.fromEntries(
-              tradePolicies.map(({ id, fingerprint }) => [id, fingerprint]),
-            ),
-          },
-        ]
-      : []),
-    ...(wrapComplete
-      ? [
-          {
-            purpose: "polymarket_deposit_usdce_wrap" as const,
-            signerId: wrap.signerId,
-            signerFingerprint: wrap.signerFingerprint,
-            authorizationPublicKey: wrap.authorizationPublicKey,
-            policyIds: [wrap.policyId],
-            policyFingerprints: {
-              [wrap.policyId]: wrap.policyFingerprint,
-            },
-          },
-        ]
-      : []),
+    {
+      purpose: "polymarket_automation",
+      signerId,
+      signerFingerprint,
+      authorizationPublicKey,
+      policyIds: [policyId],
+      policyFingerprints: { [policyId]: policyFingerprint },
+    },
   ];
 }

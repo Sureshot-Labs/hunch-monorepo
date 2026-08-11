@@ -693,8 +693,8 @@ async function createFixture(
       false,
       "routing must reject a grant whose wallet authority is no longer current",
     );
-    const configuredSignerId = process.env.PRIVY_POLYMARKET_WRAP_SIGNER_ID;
-    process.env.PRIVY_POLYMARKET_WRAP_SIGNER_ID = "";
+    const configuredSignerId = process.env.PRIVY_WALLET_AUTHORIZATION_ID;
+    process.env.PRIVY_WALLET_AUTHORIZATION_ID = "";
     try {
       assert.deepEqual(
         await telegramUsdceWrapRoutingDecision(pool, target),
@@ -702,7 +702,7 @@ async function createFixture(
         "hard wallet invalidation must win over incomplete runtime config",
       );
     } finally {
-      process.env.PRIVY_POLYMARKET_WRAP_SIGNER_ID = configuredSignerId;
+      process.env.PRIVY_WALLET_AUTHORIZATION_ID = configuredSignerId;
     }
     await pool.query(
       `update user_wallets set is_verified = true where id = $1`,
@@ -1166,15 +1166,16 @@ try {
   process.env.HUNCH_FUNDING_PM_WRAP_EXECUTE = "true";
   process.env.PRIVY_APP_ID = "test-app";
   process.env.PRIVY_APP_SECRET = "test-secret";
-  process.env.PRIVY_POLYMARKET_WRAP_AUTHORIZATION_KEY = authorizationPrivateKey;
+  process.env.PRIVY_WALLET_AUTHORIZATION_KEY = authorizationPrivateKey;
   process.env.CREDENTIALS_ENCRYPTION_KEY = "test-encryption-key";
   process.env.FUNDING_REFERENCE_LOOKUP_HMAC_KEY = "test-hmac-key";
   process.env.POLYMARKET_FUNDING_ROUTER_ADDRESS = router;
-  process.env.PRIVY_POLYMARKET_WRAP_SIGNER_ID = profileConfiguration.signerId;
-  process.env.PRIVY_POLYMARKET_WRAP_SIGNER_FINGERPRINT =
+  process.env.PRIVY_WALLET_AUTHORIZATION_ID = profileConfiguration.signerId;
+  process.env.PRIVY_WALLET_AUTHORIZATION_FINGERPRINT =
     profileConfiguration.signerFingerprint;
-  process.env.PRIVY_POLYMARKET_WRAP_POLICY_ID = profileConfiguration.policyId;
-  process.env.PRIVY_POLYMARKET_WRAP_POLICY_FINGERPRINT =
+  process.env.PRIVY_POLYMARKET_BOT_BUY_SELL_POLICY_ID =
+    profileConfiguration.policyId;
+  process.env.PRIVY_POLYMARKET_BOT_BUY_SELL_POLICY_FINGERPRINT =
     profileConfiguration.policyFingerprint;
   await publishFundingPolicy(false);
 

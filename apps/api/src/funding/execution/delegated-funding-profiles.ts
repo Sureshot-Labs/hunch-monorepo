@@ -5,7 +5,6 @@ import {
   POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
   type DelegatedFundingSecurityClass,
 } from "./delegated-funding-profile-ids.js";
-import { privyKeyQuorumFingerprint } from "./known-privy-wallet-signers.js";
 
 export {
   POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
@@ -39,18 +38,6 @@ export type DelegatedFundingPrivyPolicy = Readonly<{
   id: string;
   rules: readonly Readonly<Record<string, unknown>>[];
 }>;
-
-export function polymarketWrapSignerFingerprint(
-  input: Readonly<{
-    authorizationPublicKeys: readonly string[];
-    authorizationThreshold: number | null;
-    id: string;
-    nestedKeyQuorumIds: readonly string[];
-    userIds: readonly string[];
-  }>,
-): string {
-  return privyKeyQuorumFingerprint(input);
-}
 
 const FUND_ABI = [
   {
@@ -105,6 +92,69 @@ function exactCondition(
   return matches.length === 1;
 }
 
+export function isExactPolymarketDepositUsdceWrapRule(
+  input: Readonly<{
+    routerAddress: string;
+    rule: Readonly<Record<string, unknown>>;
+  }>,
+): boolean {
+  const expectedRouter = input.routerAddress.trim().toLowerCase();
+  if (!/^0x[0-9a-f]{40}$/u.test(expectedRouter)) return false;
+  if (
+    input.rule.action !== "ALLOW" ||
+    input.rule.method !== "eth_sendTransaction"
+  ) {
+    return false;
+  }
+  const rawConditions = Array.isArray(input.rule.conditions)
+    ? input.rule.conditions
+    : [];
+  const conditions = rawConditions
+    .map(record)
+    .filter((condition): condition is PolicyCondition => condition != null);
+  return (
+    conditions.length === 5 &&
+    conditions.length === rawConditions.length &&
+    exactCondition(conditions, {
+      field: "chain_id",
+      fieldSource: "ethereum_transaction",
+      operator: "eq",
+      value: "137",
+    }) &&
+    exactCondition(conditions, {
+      field: "to",
+      fieldSource: "ethereum_transaction",
+      operator: "eq",
+      value: expectedRouter,
+    }) &&
+    exactCondition(conditions, {
+      field: "value",
+      fieldSource: "ethereum_transaction",
+      operator: "eq",
+      value: "0x0",
+    }) &&
+    exactCondition(conditions, {
+      field: "function_name",
+      fieldSource: "ethereum_calldata",
+      operator: "eq",
+      value: "fund",
+      requireAbi: true,
+    }) &&
+    exactCondition(conditions, {
+      field: "fund.pUsdAmount",
+      fieldSource: "ethereum_calldata",
+      operator: "eq",
+      value: "0",
+      requireAbi: true,
+    }) &&
+    !conditions.some(
+      (condition) =>
+        condition.field === "fund.totalAmount" ||
+        condition.field === "fund.expectedNonce",
+    )
+  );
+}
+
 export function validatePolymarketDepositUsdceWrapPolicy(
   input: Readonly<{
     policy: DelegatedFundingPrivyPolicy;
@@ -123,79 +173,22 @@ export function validatePolymarketDepositUsdceWrapPolicy(
     input.policy.chainType !== "ethereum"
   ) {
     issues.push(
-      "wrap policy identity or chain type differs from configuration",
+      "automation policy identity or chain type differs from configuration",
     );
   }
   if (!/^0x[0-9a-f]{40}$/u.test(expectedRouter)) {
     issues.push("canonical Polygon Funding Router is invalid");
   }
-  if (input.policy.rules.length !== 1) {
-    issues.push("wrap policy must contain exactly one rule");
-  }
-  const rule = record(input.policy.rules[0]);
-  if (
-    !rule ||
-    rule.action !== "ALLOW" ||
-    rule.method !== "eth_sendTransaction"
-  ) {
+  const wrapRules = input.policy.rules.filter((rule) =>
+    isExactPolymarketDepositUsdceWrapRule({
+      routerAddress: expectedRouter,
+      rule,
+    }),
+  );
+  if (wrapRules.length !== 1) {
     issues.push(
-      "wrap policy must contain exactly one eth_sendTransaction ALLOW rule",
+      "combined policy must contain exactly one canonical Router fund(..., pUsdAmount=0) wrap rule",
     );
-  } else {
-    const rawConditions = Array.isArray(rule.conditions) ? rule.conditions : [];
-    const conditions = rawConditions
-      .map(record)
-      .filter((condition): condition is PolicyCondition => condition != null);
-    if (conditions.length !== 5 || conditions.length !== rawConditions.length) {
-      issues.push("wrap policy must contain exactly five canonical conditions");
-    }
-    if (
-      !exactCondition(conditions, {
-        field: "chain_id",
-        fieldSource: "ethereum_transaction",
-        operator: "eq",
-        value: "137",
-      }) ||
-      !exactCondition(conditions, {
-        field: "to",
-        fieldSource: "ethereum_transaction",
-        operator: "eq",
-        value: expectedRouter,
-      }) ||
-      !exactCondition(conditions, {
-        field: "value",
-        fieldSource: "ethereum_transaction",
-        operator: "eq",
-        value: "0x0",
-      }) ||
-      !exactCondition(conditions, {
-        field: "function_name",
-        fieldSource: "ethereum_calldata",
-        operator: "eq",
-        value: "fund",
-        requireAbi: true,
-      }) ||
-      !exactCondition(conditions, {
-        field: "fund.pUsdAmount",
-        fieldSource: "ethereum_calldata",
-        operator: "eq",
-        value: "0",
-        requireAbi: true,
-      })
-    ) {
-      issues.push(
-        "wrap policy does not pin the exact Router fund(..., pUsdAmount=0) call",
-      );
-    }
-    if (
-      conditions.some(
-        (condition) =>
-          condition.field === "fund.totalAmount" ||
-          condition.field === "fund.expectedNonce",
-      )
-    ) {
-      issues.push("wrap policy must not cap totalAmount or freeze a nonce");
-    }
   }
   return {
     valid: issues.length === 0,

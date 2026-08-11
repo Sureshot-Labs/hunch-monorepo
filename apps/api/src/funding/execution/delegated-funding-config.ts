@@ -30,15 +30,12 @@ export function loadPolymarketWrapExecutionConfiguration(
       enabled(source, "HUNCH_FINANCE_EXECUTE") &&
       enabled(source, "HUNCH_FUNDING_PM_WRAP_EXECUTE"),
     profileId: POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
-    signerId: value(source, "PRIVY_POLYMARKET_WRAP_SIGNER_ID"),
-    signerFingerprint: value(
-      source,
-      "PRIVY_POLYMARKET_WRAP_SIGNER_FINGERPRINT",
-    ),
-    policyId: value(source, "PRIVY_POLYMARKET_WRAP_POLICY_ID"),
+    signerId: value(source, "PRIVY_WALLET_AUTHORIZATION_ID"),
+    signerFingerprint: value(source, "PRIVY_WALLET_AUTHORIZATION_FINGERPRINT"),
+    policyId: value(source, "PRIVY_POLYMARKET_BOT_BUY_SELL_POLICY_ID"),
     policyFingerprint: value(
       source,
-      "PRIVY_POLYMARKET_WRAP_POLICY_FINGERPRINT",
+      "PRIVY_POLYMARKET_BOT_BUY_SELL_POLICY_FINGERPRINT",
     ),
   };
 }
@@ -74,7 +71,7 @@ export function polymarketWrapExecutorEnvironmentReady(
     value(source, "POLYMARKET_FUNDING_ROUTER_ADDRESS").toLowerCase() ===
       POLYMARKET_FUNDING_ROUTER.polygon.toLowerCase() &&
     privyAuthorizationPrivateKeyIsValid(
-      value(source, "PRIVY_POLYMARKET_WRAP_AUTHORIZATION_KEY"),
+      value(source, "PRIVY_WALLET_AUTHORIZATION_KEY"),
     )
   );
 }
