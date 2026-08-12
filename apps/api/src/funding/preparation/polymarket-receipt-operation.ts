@@ -7,6 +7,7 @@ import {
   canonicalAssetKey,
   canonicalLocationKey,
   stableOpaqueId,
+  stableWalletOpaqueId,
 } from "../../account-value/canonical.js";
 import {
   POLYMARKET_FUNDING_ROUTER_ABI,
@@ -26,11 +27,13 @@ import type {
 } from "../domain/types.js";
 import {
   canonicalAccountAddress,
+  isEvmAddress,
   sameAccountAddress,
   sameAsset,
 } from "../domain/asset-identity.js";
 import { resolveTelegramPolymarketWrapCapability } from "../execution/delegated-funding-capability-resolver.js";
 import { POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID } from "../execution/delegated-funding-profile-ids.js";
+import type { TelegramFundingAuthorization } from "../execution/telegram-funding-authorization.js";
 import { lockTelegramFundingLinkLifecycle } from "../execution/telegram-funding-link-lifecycle-lock.js";
 import {
   PRIVY_USER_AUTHORIZED_EVM_SPONSORSHIP_POLICY_ID,
@@ -94,55 +97,124 @@ function asset(value: unknown): AssetRef | null {
     : null;
 }
 
-function venueBinding(value: unknown): VenueAccountBinding | null {
-  const candidate = record(value);
-  const settlement = record(candidate?.settlementLocation);
+type ReceiptBindingTarget = Pick<
+  FundingReceiveReceiptRoutingTarget,
+  | "userId"
+  | "venueId"
+  | "destinationOptionId"
+  | "venueBindingOptionId"
+  | "destinationAsset"
+  | "destinationTargetSnapshot"
+  | "venueBindingSnapshot"
+> &
+  Readonly<{
+    receipt: Pick<
+      FundingReceiveReceiptRoutingTarget["receipt"],
+      "asset" | "destinationAddress"
+    >;
+  }>;
+
+export function resolvePolymarketReceiptVenueBinding(
+  target: ReceiptBindingTarget,
+  authorization: Pick<
+    TelegramFundingAuthorization,
+    | "walletAddress"
+    | "walletChain"
+    | "venueId"
+    | "destinationOptionId"
+    | "venueBindingOptionId"
+    | "sourceAsset"
+    | "destinationAsset"
+  >,
+): VenueAccountBinding | null {
+  const destination = record(target.destinationTargetSnapshot);
+  const bindingOption = record(target.venueBindingSnapshot);
+  const settlement = record(destination?.location);
   const settlementAsset = asset(settlement?.asset);
   const details = record(settlement?.details);
-  const signingMode = string(candidate?.signingMode);
+  const accountRef = string(details?.accountRef);
+  const address = string(details?.address);
+  const controllerWalletId = string(details?.controllerWalletId);
+  const locationId = string(settlement?.locationId);
+  const accountId = string(settlement?.accountId);
   if (
-    !candidate ||
+    destination?.kind !== "owned_location" ||
     !settlement ||
     !settlementAsset ||
     !details ||
-    (signingMode !== "web_client" &&
-      signingMode !== "privy_authorization" &&
-      signingMode !== "privy_delegated")
+    settlement.kind !== "venue_account" ||
+    !accountRef ||
+    !address ||
+    !controllerWalletId ||
+    !locationId ||
+    accountId !== target.userId
   ) {
     return null;
   }
-  const bindingId = string(candidate.bindingId);
-  const venueId = string(candidate.venueId);
-  const controllerWalletId = string(candidate.controllerWalletId);
-  const executionWalletId = string(candidate.executionWalletId);
-  const accountRef = string(candidate.accountRef);
-  const kind = string(settlement.kind);
-  const locationId = string(settlement.locationId);
-  const accountId = string(settlement.accountId);
-  return bindingId &&
-    venueId &&
-    controllerWalletId &&
-    executionWalletId &&
-    accountRef &&
-    kind &&
-    locationId &&
-    accountId
-    ? {
-        bindingId,
-        venueId,
-        controllerWalletId,
-        executionWalletId,
+  const bindingId = stableOpaqueId(
+    "binding",
+    `${target.userId}:polymarket:${canonicalAccountAddress(
+      "evm:137",
+      accountRef,
+    )}`,
+  );
+  const expectedControllerWalletId = stableWalletOpaqueId({
+    walletType: authorization.walletChain,
+    networkId: "evm:137",
+    address: authorization.walletAddress,
+  });
+  if (
+    target.venueId !== "polymarket" ||
+    authorization.venueId !== target.venueId ||
+    authorization.destinationOptionId !== target.destinationOptionId ||
+    authorization.venueBindingOptionId !== target.venueBindingOptionId ||
+    bindingOption?.venueBindingOptionId !== target.venueBindingOptionId ||
+    settlementAsset.networkId !== "evm:137" ||
+    target.receipt.asset.networkId !== "evm:137" ||
+    !isEvmAddress(settlementAsset.assetId) ||
+    !isEvmAddress(target.receipt.asset.assetId) ||
+    !isEvmAddress(accountRef) ||
+    !isEvmAddress(address) ||
+    !isEvmAddress(target.receipt.destinationAddress) ||
+    !isEvmAddress(authorization.walletAddress) ||
+    controllerWalletId !== expectedControllerWalletId ||
+    locationId !==
+      stableOpaqueId(
+        "location",
+        `${bindingId}:${canonicalAssetKey(settlementAsset)}`,
+      ) ||
+    !sameAsset(settlementAsset, target.destinationAsset) ||
+    !sameAsset(authorization.destinationAsset, target.destinationAsset) ||
+    !sameAsset(authorization.sourceAsset, target.receipt.asset) ||
+    !sameAccountAddress("evm:137", accountRef, address) ||
+    !sameAccountAddress(
+      "evm:137",
+      accountRef,
+      target.receipt.destinationAddress,
+    )
+  ) {
+    return null;
+  }
+  return {
+    bindingId,
+    venueId: "polymarket",
+    controllerWalletId,
+    executionWalletId: controllerWalletId,
+    accountRef,
+    settlementLocation: {
+      kind: "venue_account",
+      locationId,
+      accountId,
+      asset: settlementAsset,
+      details: {
+        venueId: "polymarket",
         accountRef,
-        settlementLocation: {
-          kind,
-          locationId,
-          accountId,
-          asset: settlementAsset,
-          details: details as JsonRecord,
-        },
-        signingMode,
-      }
-    : null;
+        controllerWalletId,
+        address,
+      },
+    },
+    signingMode: "privy_authorization",
+  };
 }
 
 async function routerNonce(input: {
@@ -314,7 +386,9 @@ function commitPlan(input: {
       venueId: "polymarket",
       marketId: null,
       marketContextSnapshot: null,
-      venueBindingSnapshot: input.target.venueBindingSnapshot,
+      // Receive sessions freeze a selectable option; committed operations need
+      // the full executable binding again for post-broadcast reconciliation.
+      venueBindingSnapshot: input.binding as unknown as JsonRecord,
       walletExecutionSnapshot: input.profile as unknown as JsonRecord,
       placementSnapshot: {},
       requestedSourceAmount: requestedSource as unknown as JsonRecord,
@@ -383,23 +457,10 @@ export function createPolymarketReceiptOperationPreparer(input: {
     const automation = parseTelegramFundingAutomationPolicyV2(
       target.telegramAutomationPolicy,
     );
-    const binding = venueBinding(target.venueBindingSnapshot);
-    const linkedAddress = string(
-      binding?.settlementLocation.details.linkedAddress,
-    );
     if (
       !automation ||
-      !binding ||
       target.ownerChannel !== "telegram" ||
       target.venueId !== "polymarket" ||
-      binding.venueId !== "polymarket" ||
-      !sameAccountAddress(
-        "evm:137",
-        binding.accountRef,
-        target.receipt.destinationAddress,
-      ) ||
-      !sameAsset(binding.settlementLocation.asset, target.destinationAsset) ||
-      !linkedAddress ||
       !target.telegramAccountId ||
       !target.telegramUserId
     ) {
@@ -423,11 +484,12 @@ export function createPolymarketReceiptOperationPreparer(input: {
       !telegramFundingAutomationPolicyMatchesAuthorization(
         automation,
         authorization,
-      ) ||
-      !sameAccountAddress("evm:137", authorization.walletAddress, linkedAddress)
+      )
     ) {
       return null;
     }
+    const binding = resolvePolymarketReceiptVenueBinding(target, authorization);
+    if (!binding) return null;
     const snapshot = await fundingSnapshot({
       signerAddress: authorization.walletAddress,
       depositWallet: target.receipt.destinationAddress,
@@ -509,7 +571,7 @@ export function createPolymarketReceiptOperationPreparer(input: {
             frozenPlan.operation.sourceSnapshot ?? {},
           marketContextSnapshot: null,
           destinationOptionSnapshot: target.destinationTargetSnapshot,
-          venueBindingSnapshot: target.venueBindingSnapshot,
+          venueBindingSnapshot: frozenPlan.operation.venueBindingSnapshot,
           planSnapshot: frozenPlan,
           policyVersion: target.policyVersion,
           policyRevision: automation.fundingPolicyRevision,

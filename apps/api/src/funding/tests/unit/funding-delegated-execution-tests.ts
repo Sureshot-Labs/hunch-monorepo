@@ -6,6 +6,11 @@ import crypto from "node:crypto";
 import { POLYMARKET_FUNDING_ROUTER } from "@hunch/contracts";
 import { Interface } from "ethers";
 
+import {
+  canonicalAssetKey,
+  stableOpaqueId,
+  stableWalletOpaqueId,
+} from "../../../account-value/canonical.js";
 import { RELAY_PINNED_ASSETS } from "../../../funding-providers/relay/mappings.js";
 import type { NormalizedAction } from "../../domain/types.js";
 import {
@@ -50,6 +55,7 @@ import {
   parseTelegramFundingAutomationPolicyV2,
   telegramFundingReceiptIsProspectivelyAuthorized,
 } from "../../execution/telegram-funding-automation-policy.js";
+import { resolvePolymarketReceiptVenueBinding } from "../../preparation/polymarket-receipt-operation.js";
 import type { ResolvedFundingPolicy } from "../../policies/funding-policy-service.js";
 import {
   claimFundingReceiveReceiptOperationLinkInTransaction,
@@ -83,6 +89,89 @@ const FUND_ABI = [
   },
 ] as const;
 const fundInterface = new Interface(FUND_ABI);
+
+{
+  const userId = "11111111-1111-4111-8111-111111111111";
+  const signerAddress = "0x1111111111111111111111111111111111111111";
+  const depositAddress = "0x2222222222222222222222222222222222222222";
+  const sourceAsset = {
+    networkId: "evm:137",
+    assetId: RELAY_PINNED_ASSETS.polygonUsdce,
+    decimals: 6,
+  } as const;
+  const destinationAsset = {
+    networkId: "evm:137",
+    assetId: RELAY_PINNED_ASSETS.polygonPusd,
+    decimals: 6,
+  } as const;
+  const controllerWalletId = stableWalletOpaqueId({
+    walletType: "ethereum",
+    networkId: "evm:137",
+    address: signerAddress,
+  });
+  const venueBindingOptionId = "binding_option_polymarket_receipt_12345678";
+  const bindingId = stableOpaqueId(
+    "binding",
+    `${userId}:polymarket:${depositAddress}`,
+  );
+  const target = (frozenControllerWalletId = controllerWalletId) => ({
+    userId,
+    venueId: "polymarket",
+    destinationOptionId: "destination_polymarket_receipt_12345678",
+    venueBindingOptionId,
+    destinationAsset,
+    destinationTargetSnapshot: {
+      kind: "owned_location",
+      location: {
+        kind: "venue_account",
+        locationId: stableOpaqueId(
+          "location",
+          `${bindingId}:${canonicalAssetKey(destinationAsset)}`,
+        ),
+        accountId: userId,
+        asset: destinationAsset,
+        details: {
+          venueId: "polymarket",
+          accountRef: depositAddress,
+          controllerWalletId: frozenControllerWalletId,
+          address: depositAddress,
+        },
+      },
+    },
+    // Production stores a VenueBindingOption here, not VenueAccountBinding.
+    venueBindingSnapshot: { venueBindingOptionId },
+    receipt: {
+      asset: sourceAsset,
+      destinationAddress: depositAddress,
+    },
+  });
+  const authorization = {
+    walletAddress: signerAddress,
+    walletChain: "ethereum" as const,
+    venueId: "polymarket",
+    destinationOptionId: "destination_polymarket_receipt_12345678",
+    venueBindingOptionId,
+    sourceAsset,
+    destinationAsset,
+  };
+  const binding = resolvePolymarketReceiptVenueBinding(target(), authorization);
+  assert.deepEqual(binding, {
+    bindingId,
+    venueId: "polymarket",
+    controllerWalletId,
+    executionWalletId: controllerWalletId,
+    accountRef: depositAddress,
+    settlementLocation: target().destinationTargetSnapshot.location,
+    signingMode: "privy_authorization",
+  });
+  assert.equal(
+    resolvePolymarketReceiptVenueBinding(
+      target("wallet_wrong_controller_12345678"),
+      authorization,
+    ),
+    null,
+  );
+}
 
 {
   const queries: Array<{ params: readonly unknown[]; sql: string }> = [];
