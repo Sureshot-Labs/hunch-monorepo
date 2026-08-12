@@ -321,6 +321,12 @@ const fundInterface = new Interface(FUND_ABI);
               ],
             };
           }
+          if (/select step\.id/u.test(sql)) {
+            return { rowCount: 1, rows: [{ step_id: "step-link-1" }] };
+          }
+          if (/update funding_operations/u.test(sql)) {
+            throw new Error("stop after funding evidence update");
+          }
           return { rowCount: 0, rows: [] };
         },
       } as never,
@@ -336,12 +342,16 @@ const fundInterface = new Interface(FUND_ABI);
         now: new Date(),
       },
     ),
-    /not bound to exact receipt evidence/u,
+    /stop after funding evidence update/u,
   );
   const exactLinkQuery = queries.find((sql) => /select step\.id/u.test(sql));
   assert.ok(exactLinkQuery);
   assert.doesNotMatch(exactLinkQuery, /polymarket|telegram_funding_consent/u);
   assert.match(exactLinkQuery, /step\.executor_id = \$4/u);
+  const evidenceUpdateQuery = queries.find((sql) =>
+    /update funding_operations/u.test(sql),
+  );
+  assert.match(evidenceUpdateQuery ?? "", /version = version \+ 1/u);
 }
 
 function condition(

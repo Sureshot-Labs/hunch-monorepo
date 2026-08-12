@@ -2068,7 +2068,8 @@ export async function linkFundingReceiveReceiptOperationInTransaction(
               'telegramFundingConsentId', $6::text,
               'telegramFundingConsentFingerprint', $7::text
             ),
-            updated_at = $8
+            updated_at = $8,
+            version = version + 1
         where id = $1
           and user_id = $2
       `,
