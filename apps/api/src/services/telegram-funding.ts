@@ -33,6 +33,7 @@ import type {
   TelegramFundingMessage,
   TelegramFundingProgressProjection,
 } from "./telegram-funding-contracts.js";
+import { rearmTelegramFundingCurrentAddressDelivery } from "./telegram-funding-delivery.js";
 import { appendTelegramFundingBuyReturnInTransaction } from "./telegram-funding-buy-continuation.js";
 import {
   parseTelegramBotTradeAuthorityBinding,
@@ -636,7 +637,7 @@ export class TelegramFundingService {
     }>,
   ): Promise<TelegramFundingMessage> {
     await this.provisionExistingContext(input);
-    return this.session(
+    const message = await this.session(
       {
         contextId: input.context.id,
         telegramUserId: input.identity.telegramUserId,
@@ -646,6 +647,26 @@ export class TelegramFundingService {
       input.now,
       input.decorateProgress,
     );
+    if (message.durableFundingDeliveryRequired) {
+      const currentContext = await fetchTelegramFundingSessionContext(
+        this.pool,
+        {
+          contextId: input.context.id,
+          userId: input.link.userId,
+          telegramUserId: input.identity.telegramUserId,
+          chatId: input.identity.chatId,
+        },
+      );
+      if (!currentContext) return message;
+      await rearmTelegramFundingCurrentAddressDelivery({
+        context: currentContext,
+        pool: this.pool,
+        telegramAccountId: input.link.linkId,
+        telegramUserId: input.identity.telegramUserId,
+        userId: input.link.userId,
+      });
+    }
+    return message;
   }
 
   private async currentLink(input: TelegramFundingIdentityInput) {

@@ -19,6 +19,7 @@ import {
   parseTelegramFundingProgressProjection,
   resolveTelegramFundingRetainedTerminal,
 } from "./telegram-funding-progress.js";
+import type { TelegramFundingSessionContext } from "./telegram-funding-sessions.js";
 import { resolveTelegramFundingAutomaticCapability } from "./telegram-funding-route.js";
 import {
   claimSignalBotMenuRender,
@@ -77,7 +78,7 @@ export function requiresCurrentFundingPolicyForAddressDelivery(input: {
 }
 
 async function enqueueFundingDeliveryRevision(
-  client: PoolClient,
+  client: Pick<PoolClient, "query">,
   input: Readonly<{
     action: Exclude<FundingOutboxRow["action"], "funding_qr">;
     fundingSessionId: string;
@@ -86,8 +87,9 @@ async function enqueueFundingDeliveryRevision(
     telegramAccountId: string | null;
     telegramUserId: string;
     userId: string;
+    requireCurrentAddressProjection?: boolean;
   }>,
-): Promise<void> {
+): Promise<boolean> {
   const projection = parseTelegramFundingProgressProjection(input.payload);
   if (
     projection?.receiveAddress != null &&
@@ -95,7 +97,7 @@ async function enqueueFundingDeliveryRevision(
   ) {
     throw new Error("funding address requires a known edit target");
   }
-  await client.query(
+  const queued = await client.query(
     `
       insert into telegram_bot_action_outbox (
         action,
@@ -105,7 +107,25 @@ async function enqueueFundingDeliveryRevision(
         funding_session_id,
         state_revision,
         payload
-      ) values ($1, $2, $3, $4, $5, $6, $7::jsonb)
+      )
+      select $1, $2, $3, $4, $5, $6, $7::jsonb
+      where not $8::boolean
+         or exists (
+           select 1
+           from telegram_funding_sessions context
+           where context.id = $5
+             and context.user_id = $3
+             and context.telegram_account_id = $2
+             and context.telegram_user_id = $4
+             and context.progress_revision = $6
+             and context.latest_progress_projection = $7::jsonb
+             and context.latest_terminal_projection is null
+             and context.telegram_message_id is not null
+             and (
+               context.address_disclosure_message_id is null
+               or context.address_disclosure_message_id = context.telegram_message_id
+             )
+         )
       on conflict (funding_session_id, state_revision, action)
         where action in ('funding_send', 'funding_edit', 'funding_replacement')
       do update
@@ -121,6 +141,10 @@ async function enqueueFundingDeliveryRevision(
             delivery_started_at = null,
             sent_at = null,
             updated_at = now()
+        where telegram_bot_action_outbox.status not in (
+          'sending',
+          'delivery_unknown'
+        )
     `,
     [
       input.action,
@@ -130,8 +154,56 @@ async function enqueueFundingDeliveryRevision(
       input.fundingSessionId,
       input.stateRevision,
       JSON.stringify(input.payload),
+      input.requireCurrentAddressProjection === true,
     ],
   );
+  return (queued.rowCount ?? 0) === 1;
+}
+
+export async function rearmTelegramFundingCurrentAddressDelivery(input: {
+  context: Pick<
+    TelegramFundingSessionContext,
+    | "addressDisclosureMessageId"
+    | "id"
+    | "latestProgressProjection"
+    | "latestTerminalProjection"
+    | "progressRevision"
+    | "telegramMessageId"
+  >;
+  pool: Pool;
+  telegramAccountId: string;
+  telegramUserId: string;
+  userId: string;
+}): Promise<boolean> {
+  const projection = parseTelegramFundingProgressProjection(
+    input.context.latestProgressProjection,
+  );
+  if (
+    !projection ||
+    projection.fundingContextId !== input.context.id ||
+    projection.terminal ||
+    projection.receiveAddress === null ||
+    input.context.latestTerminalProjection !== null ||
+    input.context.telegramMessageId === null ||
+    (input.context.addressDisclosureMessageId !== null &&
+      input.context.addressDisclosureMessageId !==
+        input.context.telegramMessageId)
+  ) {
+    return false;
+  }
+  // A normal menu may overwrite the exact Telegram message after this
+  // revision was delivered. Rearm only the durable intent: claim fencing and
+  // delivery-time lifecycle checks remain the freshness/security boundary.
+  return enqueueFundingDeliveryRevision(input.pool, {
+    action: "funding_edit",
+    fundingSessionId: input.context.id,
+    payload: projection,
+    stateRevision: input.context.progressRevision,
+    telegramAccountId: input.telegramAccountId,
+    telegramUserId: input.telegramUserId,
+    userId: input.userId,
+    requireCurrentAddressProjection: true,
+  });
 }
 
 export type TelegramFundingRenderCoordinator = Readonly<{
