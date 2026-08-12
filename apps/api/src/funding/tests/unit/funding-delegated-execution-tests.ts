@@ -38,6 +38,7 @@ import {
 } from "../../execution/delegated-funding-profiles.js";
 import {
   createPrivyDelegatedFundingDriver,
+  privyEvmQuantity,
   privyProviderErrorDiagnostic,
   PrivyDelegatedFundingDriver,
   PrivyDelegatedFundingProfileInvalidError,
@@ -1069,6 +1070,13 @@ assert.deepEqual(
   resolvePrivyProfileInspectionFailure(new Error("Privy timeout"), false),
   { kind: "pending" },
   "transport failures do not prove that the durable provider call was absent",
+);
+assert.equal(privyEvmQuantity("0"), "0x0");
+assert.equal(privyEvmQuantity("137"), "0x89");
+assert.throws(
+  () => privyEvmQuantity("0x0"),
+  /must be an unsigned integer/u,
+  "the provider adapter accepts only canonical domain raw amounts",
 );
 assert.deepEqual(
   privyProviderErrorDiagnostic(
