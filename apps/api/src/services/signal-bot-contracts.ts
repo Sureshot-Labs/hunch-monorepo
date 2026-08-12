@@ -280,3 +280,8 @@ export type SignalBotDeliveryPreparationReason =
   | "quote_refresh"
   | "stale_price_snapshot"
   | "unpublishable_copy";
+
+export type SignalBotTestSignalOutcome = {
+  reason: SignalBotDeliveryPreparationReason | "no_eligible_note" | null;
+  sent: boolean;
+};

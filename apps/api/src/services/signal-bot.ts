@@ -15,6 +15,7 @@ import type {
   SignalBotFollowthroughStats,
   SignalBotMessageKind,
   SignalBotNote,
+  SignalBotTestSignalOutcome,
   SignalBotTelegramClient,
   TelegramBotCallbackQuery,
   TelegramBotChat,
@@ -24,6 +25,7 @@ import type {
   TelegramSendMessageInput,
   TelegramSendResult,
 } from "./signal-bot-contracts.js";
+export type { SignalBotTestSignalOutcome } from "./signal-bot-contracts.js";
 import { findTradeMarketById, isOrderable } from "./api-trading-market-repo.js";
 import { resolveAggMarketCredential } from "../lib/agg-market-credentials.js";
 import {
@@ -117,6 +119,8 @@ import {
   loadXEditorialInitialRecoveryNoteIds,
   publishXEditorialFollowthrough,
   publishXEditorialNote,
+  sendXEditorialFollowthroughPreview,
+  sendXEditorialNotePreview,
 } from "./signal-bot-x-editorial-delivery.js";
 import {
   buildSignalBotBuyStartParam,
@@ -6167,11 +6171,6 @@ export async function publishSignalBotTick(input: {
   };
 }
 
-export type SignalBotTestSignalOutcome = {
-  reason: SignalBotDeliveryPreparationReason | "no_eligible_note" | null;
-  sent: boolean;
-};
-
 export async function sendLatestSignalBotTestSignal(input: {
   chatId: string;
   config: SignalBotConfig;
@@ -6179,6 +6178,7 @@ export async function sendLatestSignalBotTestSignal(input: {
   redis?: SignalBotRedisLike;
   selector?: SignalBotTestSignalSelector;
   telegram: SignalBotTelegramClient;
+  xEditorialComposer?: XEditorialDraftComposer;
 }): Promise<SignalBotTestSignalOutcome> {
   const selector = input.selector ?? "latest";
   const noteId = UUID_RE.test(selector) ? selector : null;
@@ -6201,6 +6201,16 @@ export async function sendLatestSignalBotTestSignal(input: {
   });
   const note = notes[0];
   if (!note) return { reason: "no_eligible_note", sent: false };
+  if (chatState?.contentProfile === X_EDITORIAL_CONTENT_PROFILE) {
+    const selectedSide = resolveSignalBotBuySide(note);
+    if (!selectedSide) return { reason: "non_directional", sent: false };
+    return sendXEditorialNotePreview({
+      ...input,
+      kind: note.revisionKind,
+      note,
+      selectedSide,
+    });
+  }
   const copyPolicy = await resolveSignalPostCopyPolicy(input.db);
   const preparation = await prepareSignalBotDelivery({
     allowStaleBuyCtaForTest: true,
@@ -6260,6 +6270,7 @@ export async function sendSignalBotFollowthroughPreview(input: {
   now?: Date;
   redis?: SignalBotRedisLike;
   telegram: SignalBotTelegramClient;
+  xEditorialComposer?: XEditorialDraftComposer;
 }): Promise<boolean> {
   const effectivePolicy = await resolveSignalBotFollowthroughPolicy(
     input.db,
@@ -6295,6 +6306,14 @@ export async function sendSignalBotFollowthroughPreview(input: {
     });
     const kind = resolveSignalBotFollowthroughKind({ policy, stats });
     if (kind !== expectedKind) continue;
+    if (chatState?.contentProfile === X_EDITORIAL_CONTENT_PROFILE) {
+      return sendXEditorialFollowthroughPreview({
+        ...input,
+        candidate,
+        kind,
+        stats,
+      });
+    }
     const text = `${escapeTelegramMarkdownV2(
       "Preview only - not recorded.",
     )}\n\n${buildSignalBotFollowthroughMessage({

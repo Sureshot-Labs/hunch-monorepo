@@ -691,6 +691,130 @@ export function buildXEditorialTelegramDraftMessage(input: {
   return [formattedPost.join(""), ...links].join("\n\n");
 }
 
+async function sendPreviewDraft(input: {
+  chatId: string;
+  composer: XEditorialDraftComposer;
+  source: XEditorialDraftSource;
+  telegram: SignalBotTelegramClient;
+}): Promise<SignalBotXEditorialPublicationResult> {
+  let draft: XEditorialDraftV1;
+  try {
+    draft = await input.composer({ source: input.source });
+  } catch (error) {
+    const failure = readXEditorialComposerFailure(error);
+    draft = buildFallbackPost({
+      failureCode: failure.code,
+      source: input.source,
+    });
+  }
+  if (draft.status === "blocked" || !draft.postText) {
+    draft = buildFallbackPost({
+      failureCode: "model_blocked",
+      source: input.source,
+    });
+  }
+  const result = await input.telegram.sendMessage({
+    chat_id: input.chatId,
+    disable_web_page_preview: true,
+    parse_mode: "MarkdownV2",
+    text: [
+      `🧪 _${escapeMarkdownV2("Preview only — not recorded.")}_`,
+      buildXEditorialTelegramDraftMessage({
+        draft,
+        miniAppUrl: input.source.miniAppUrl,
+        websiteUrl: input.source.websiteUrl,
+      }),
+    ].join("\n\n"),
+  });
+  if (result.ok) return { status: "sent" };
+  if (result.error === "ambiguous") return { status: "delivery_unknown" };
+  if (result.error === "blocked_or_missing") {
+    return { blockedChat: true, status: "blocked" };
+  }
+  return { blockedChat: false, status: "retry" };
+}
+
+export async function sendXEditorialNotePreview(input: {
+  chatId: string;
+  config: {
+    appBaseUrl: string;
+    telegramMiniAppLinkBase: string | null;
+    xEditorial: { enabled: boolean };
+  };
+  db: DbQuery;
+  kind: "initial" | "research_update";
+  note: SignalBotNote;
+  selectedSide: "NO" | "YES";
+  telegram: SignalBotTelegramClient;
+  xEditorialComposer?: XEditorialDraftComposer;
+}): Promise<{
+  reason: SignalBotDeliveryPreparationReason | null;
+  sent: boolean;
+}> {
+  const reason = validateInitialSource(input);
+  if (reason) return { reason, sent: false };
+  const composer = input.config.xEditorial.enabled
+    ? input.xEditorialComposer
+    : undefined;
+  if (!composer) return { reason: "editorial_compose_failed", sent: false };
+  const recentOpenings = await loadRecentOpenings(input);
+  const result = await sendPreviewDraft({
+    chatId: input.chatId,
+    composer,
+    source: buildInitialSource({
+      ...input,
+      appBaseUrl: input.config.appBaseUrl,
+      recentOpenings,
+      telegramMiniAppLinkBase: input.config.telegramMiniAppLinkBase,
+    }),
+    telegram: input.telegram,
+  });
+  return {
+    reason: result.status === "sent" ? null : "editorial_compose_failed",
+    sent: result.status === "sent",
+  };
+}
+
+export async function sendXEditorialFollowthroughPreview(input: {
+  candidate: SignalBotFollowthroughCandidateRow;
+  config: {
+    appBaseUrl: string;
+    telegramMiniAppLinkBase: string | null;
+    xEditorial: { enabled: boolean };
+  };
+  db: DbQuery;
+  kind: Extract<
+    XEditorialMessageKind,
+    "followthrough_stats" | "resolved_loss" | "resolved_win"
+  >;
+  stats: SignalBotFollowthroughStats;
+  telegram: SignalBotTelegramClient;
+  xEditorialComposer?: XEditorialDraftComposer;
+}): Promise<boolean> {
+  if (!input.stats.signalSide) return false;
+  const composer = input.config.xEditorial.enabled
+    ? input.xEditorialComposer
+    : undefined;
+  if (!composer) return false;
+  const chatId = input.candidate.chat_id;
+  const recentOpenings = await loadRecentOpenings({
+    chatId,
+    db: input.db,
+  });
+  const result = await sendPreviewDraft({
+    chatId,
+    composer,
+    source: buildFollowthroughSource({
+      ...input,
+      appBaseUrl: input.config.appBaseUrl,
+      recentOpenings,
+      telegramMiniAppLinkBase: input.config.telegramMiniAppLinkBase,
+    }),
+    telegram: input.telegram,
+  });
+  return result.status === "sent";
+}
+
 async function deliverDraft(input: {
   baselineAt: string;
   chatId: string;
