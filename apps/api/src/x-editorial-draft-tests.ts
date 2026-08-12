@@ -11,6 +11,7 @@ import {
 } from "./services/signal-bot.js";
 import { parseSignalBotContentProfileRequest } from "./services/signal-bot-command-parsers.js";
 import {
+  buildXEditorialFallbackPost,
   buildXEditorialTelegramDraftMessage,
   loadXEditorialInitialRecoveryNoteIds,
 } from "./services/signal-bot-x-editorial-delivery.js";
@@ -20,6 +21,7 @@ import {
   createOpenRouterXEditorialDraftComposer,
   parsePersistedXEditorialDraft,
   validateXEditorialModelOutput,
+  X_EDITORIAL_PROMPT_VERSION,
   XEditorialComposerError,
   type XEditorialDraftSource,
 } from "./services/x-editorial-draft.js";
@@ -232,6 +234,10 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.match(prompt, /No Markdown/i);
       assert.match(prompt, /Telegram\/X formatting/i);
       assert.match(prompt, /field name is text, never snippet/i);
+      assert.match(prompt, /STYLE EXAMPLE — compact conviction/);
+      assert.match(prompt, /One position\. No hedge\./);
+      assert.match(prompt, /Boring market\. Serious consistency\./);
+      assert.match(prompt, /Never reuse their people, markets, numbers/i);
       assert.match(prompt, /1000 visible characters/i);
     },
   },
@@ -260,6 +266,30 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         "unknown_fact_id:missing",
         "unsupported_accusation",
       ]);
+    },
+  },
+  {
+    name: "validator rejects dashboard language from the old fallback voice",
+    run: () => {
+      const postText =
+        "Tracked money is backing Spain. The important part is who is there.";
+      const validated = validateXEditorialModelOutput({
+        config,
+        output: {
+          version: 1,
+          status: "ready",
+          marketId: "market-1",
+          selectedSide: "YES",
+          postText,
+          formatting: [{ style: "bold", text: postText }],
+          storyFamily: "fresh_bet",
+          usedFactIds: ["market"],
+          safetyFlags: [],
+        },
+        source,
+      });
+      assert.ok(validated.issues.includes("internal_language"));
+      assert.ok(validated.issues.includes("dashboard_voice"));
     },
   },
   {
@@ -306,6 +336,90 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
+    name: "editorial fallback builds a trader story instead of replaying research copy",
+    run: () => {
+      const fallbackSource: XEditorialDraftSource = {
+        facts: [
+          {
+            id: "market",
+            label: "Canonical market",
+            value: {
+              eventTitle: "Paris Saint-Germain match",
+              selectedSide: "NO",
+              selectedSideLabel: "Betting against Paris Saint-Germain",
+              subject: "Paris Saint-Germain",
+            },
+          },
+          {
+            id: "price",
+            label: "Selected-side signal price",
+            value: { displayPrice: 0.44, displaySide: "NO" },
+          },
+          {
+            id: "research_copy",
+            label: "Old research copy",
+            value: {
+              description:
+                "The important part is who is there: tracked money is against PSG.",
+              headline:
+                "Two recent winners are betting against Paris Saint-Germain.",
+            },
+          },
+          {
+            id: "actor",
+            label: "Tracked group",
+            value: {
+              clusterOpenPnlUsd: -926,
+              clusterSharpHolders: 2,
+              clusterSharpUsd: 27_000,
+            },
+          },
+          {
+            id: "credentials",
+            label: "Verified credentials",
+            value: ["Both traders are recent winners"],
+          },
+        ],
+        kind: "initial",
+        marketId: "polymarket:psg",
+        noteId: "00000000-0000-4000-8000-000000000777",
+        selectedSide: "NO",
+      };
+
+      const draft = buildXEditorialFallbackPost({
+        failureCode: "schema_mismatch",
+        source: fallbackSource,
+      });
+
+      assert.equal(draft.promptVersion, X_EDITORIAL_PROMPT_VERSION);
+      assert.match(
+        draft.postText ?? "",
+        /^Two traders have \$27K betting against Paris Saint-Germain\./,
+      );
+      assert.match(draft.postText ?? "", /That outcome is priced at 44¢\./);
+      assert.match(draft.postText ?? "", /Both traders are recent winners\./);
+      assert.match(draft.postText ?? "", /The position is down \$926/);
+      assert.match(
+        draft.postText ?? "",
+        /The market is undecided\. They are not\./,
+      );
+      assert.doesNotMatch(
+        draft.postText ?? "",
+        /The important part|tracked money|trades around 44c/i,
+      );
+      assert.deepEqual(draft.formatting, [
+        {
+          style: "bold",
+          text: "Two traders have $27K betting against Paris Saint-Germain.",
+        },
+        {
+          style: "italic",
+          text: "The market is undecided. They are not.",
+        },
+      ]);
+    },
+  },
+  {
     name: "Telegram renderer applies editorial formatting directly without a copy block",
     run: () => {
       const postText =
@@ -321,7 +435,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           marketId: "market-1",
           model: "test/editorial-model",
           postText,
-          promptVersion: "x_editorial_prompt_v4",
+          promptVersion: X_EDITORIAL_PROMPT_VERSION,
           safetyFlags: [],
           selectedSide: "YES",
           sourceDigest: buildXEditorialSourceDigest(source),
@@ -937,7 +1051,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           marketId: "polymarket:market-spain",
           model: "test/editorial-model",
           postText: editorialText,
-          promptVersion: "x_editorial_prompt_v4" as const,
+          promptVersion: X_EDITORIAL_PROMPT_VERSION,
           safetyFlags: [],
           selectedSide: "YES" as const,
           sourceDigest: "",

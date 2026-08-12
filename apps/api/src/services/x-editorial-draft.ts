@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 
 export const X_EDITORIAL_CONTENT_PROFILE = "x_editorial_draft_v1" as const;
-export const X_EDITORIAL_PROMPT_VERSION = "x_editorial_prompt_v4" as const;
+export const X_EDITORIAL_PROMPT_VERSION = "x_editorial_prompt_v5" as const;
 
 export type XEditorialComposerFailureCode =
   | "missing_content"
@@ -230,7 +230,12 @@ const FORBIDDEN_COPY_PATTERNS: Array<{
   {
     code: "internal_language",
     pattern:
-      /\b(?:holder[_ -]?research|sharp[_ -]?cluster|z[- ]?score|signal detected|publication decision|evidence id)\b/i,
+      /\b(?:holder[_ -]?research|sharp[_ -]?cluster|z[- ]?score|signal detected|publication decision|evidence id|tracked money)\b/i,
+  },
+  {
+    code: "dashboard_voice",
+    pattern:
+      /\b(?:the important part is|market update|quality[- ]gated|worth following)\b/i,
   },
   {
     code: "unsupported_accusation",
@@ -353,6 +358,11 @@ export function buildXEditorialDraftSystemPrompt(input: {
     'Every formatting item must be exactly {"style":"bold"|"italic","text":"an exact substring of postText"}. The field name is text, never snippet.',
     "Emoji and → bullets are optional. Use a topical emoji only when it improves scanning or tone; never force a fixed emoji template.",
     "Vary the hook and ending against recentOpeningsToAvoidRepeating. Reuse the reference collection's editorial principles, never one author's exact wording or persona.",
+    "These style-only examples show the target rhythm. Never reuse their people, markets, numbers, or claims unless they are present in the supplied facts:",
+    "STYLE EXAMPLE — compact conviction:\nA new wallet just put $1.6M on Spain to win the World Cup.\n\nOne position. No hedge.\n\nEither serious conviction or a very expensive fan bet.",
+    "STYLE EXAMPLE — apparent contradiction:\nOne trader is fading England tonight — and backing them to win the World Cup.\n\nThose bets describe a narrow path: stumble now, peak later.\n\nThat is not indecision. It is a tournament script.",
+    "STYLE EXAMPLE — repeatable strategy:\nThis weather trader has made $5,287 in 30 days.\n\n1,618 forecasts across four continents. The same small edge, repeated.\n\nBoring market. Serious consistency.",
+    "Do not write phrases such as 'the important part is', 'tracked money', 'worth following', or 'market update'. Do not restate the research headline and description as two report-like paragraphs.",
     `Hard limit: ${input.maxCharacters} visible characters and ${input.maxParagraphs} paragraphs.`,
     "Return exactly one JSON object. Use status=blocked and postText=null if the facts do not support a coherent, safe post.",
   ].join("\n");
