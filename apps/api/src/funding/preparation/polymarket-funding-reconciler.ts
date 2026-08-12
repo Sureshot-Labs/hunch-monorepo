@@ -33,7 +33,7 @@ export type PolymarketFundingPostconditionTarget = Readonly<{
   userId: string;
   stepId: string;
   attemptId: string;
-  stepState: "submitted" | "succeeded";
+  stepState: "submitted" | "succeeded" | "recovery_required";
   binding: VenueAccountBinding;
   plan: PolymarketFundingPlan;
   before: PolymarketFundingObservation;
@@ -239,7 +239,7 @@ async function loadTarget(
           'failed',
           'cancelled'
         )
-        and step.state in ('submitted', 'succeeded')
+        and step.state in ('submitted', 'succeeded', 'recovery_required')
         and not exists (
           select 1
           from funding_observations observation
@@ -345,7 +345,7 @@ async function persistSatisfiedPostcondition(
             updated_at = $3
         where operation_id = $1
           and id = $2
-          and state = 'submitted'
+          and state in ('submitted', 'recovery_required')
       `,
       [input.target.operationId, input.target.stepId, input.now],
     );

@@ -656,7 +656,21 @@ async function testAtomicRollbackAfterPartialInsert(): Promise<void> {
 
 async function testPollingFailureHonorsTerminalTimeout(): Promise<void> {
   const userId = await insertUser(pool);
-  const plan = buildPlan();
+  const basePlan = buildPlan();
+  const firstStep = basePlan.steps[0];
+  assert.ok(firstStep);
+  const plan: FundingCommitPlan = {
+    ...basePlan,
+    steps: [
+      firstStep,
+      {
+        ...firstStep,
+        ordinal: 1,
+        actionFingerprint: hash("d"),
+        dependsOnOrdinal: 0,
+      },
+    ],
+  };
   const consentToken = opaque("consent");
   const quote = await createFundingQuote(
     pool,
@@ -674,16 +688,8 @@ async function testPollingFailureHonorsTerminalTimeout(): Promise<void> {
         update funding_operation_steps
         set state = 'submitted'
         where operation_id = $1
+          and ordinal = 0
           and state in ('planned', 'action_required')
-      `,
-      [operationId],
-    );
-    await pool.query(
-      `
-        update funding_operation_steps
-        set state = 'succeeded'
-        where operation_id = $1
-          and state = 'submitted'
       `,
       [operationId],
     );
@@ -762,7 +768,7 @@ async function testPollingFailureHonorsTerminalTimeout(): Promise<void> {
     );
     assert.deepEqual(
       steps.rows.map((step) => step.state),
-      ["succeeded"],
+      ["recovery_required", "planned"],
     );
     const job = await pool.query<{
       due_at: Date;

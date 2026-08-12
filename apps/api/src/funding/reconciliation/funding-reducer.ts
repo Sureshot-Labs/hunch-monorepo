@@ -1240,11 +1240,19 @@ function storedFundingReconciliationActiveWindow(
     : null;
 }
 
-async function awaitingUnbroadcastActionReport(
+async function fundingReconciliationWaitState(
   client: Pick<PoolClient, "query">,
   operationId: string,
-): Promise<boolean> {
-  const result = await client.query<{ awaiting_report: boolean }>(
+): Promise<
+  Readonly<{
+    awaitingProviderReference: boolean;
+    awaitingUnbroadcastActionReport: boolean;
+  }>
+> {
+  const result = await client.query<{
+    awaiting_provider_reference: boolean;
+    awaiting_report: boolean;
+  }>(
     `
       select
         exists (
@@ -1273,11 +1281,35 @@ async function awaitingUnbroadcastActionReport(
           where step.operation_id = $1
             and attempt.broadcast_may_have_occurred
             and receipt.status is distinct from 'failed'
-        ) as awaiting_report
+        ) as awaiting_report,
+        exists (
+          select 1
+          from funding_operation_steps step
+          join funding_operation_step_attempts attempt
+            on attempt.step_id = step.id
+          where step.operation_id = $1
+            and step.state = 'reconcile_required'
+            and attempt.outcome = 'ambiguous'
+            and attempt.broadcast_may_have_occurred
+            and attempt.reference_kind = 'provider_receipt'
+        ) as awaiting_provider_reference
     `,
     [operationId],
   );
-  return Boolean(result.rows[0]?.awaiting_report);
+  return {
+    awaitingProviderReference: Boolean(
+      result.rows[0]?.awaiting_provider_reference,
+    ),
+    awaitingUnbroadcastActionReport: Boolean(result.rows[0]?.awaiting_report),
+  };
+}
+
+async function awaitingUnbroadcastActionReport(
+  client: Pick<PoolClient, "query">,
+  operationId: string,
+): Promise<boolean> {
+  return (await fundingReconciliationWaitState(client, operationId))
+    .awaitingUnbroadcastActionReport;
 }
 
 async function unbroadcastActionExpiresAt(
@@ -1316,10 +1348,17 @@ async function synchronizeFundingReconciliationActiveWindow(
       return null;
     }
     const activeStatus = RECONCILIATION_ACTIVE_STATUSES.has(operation.status);
-    const awaitingActionReport =
-      activeStatus &&
-      (await awaitingUnbroadcastActionReport(client, operation.id));
-    if (!activeStatus || awaitingActionReport) {
+    const waitState = activeStatus
+      ? await fundingReconciliationWaitState(client, operation.id)
+      : null;
+    // The delegated executor owns recovery of its durable provider reference.
+    // Starting the generic evidence timeout before that reference resolves can
+    // strand the attempt before its recovery lease becomes eligible.
+    if (
+      !activeStatus ||
+      waitState?.awaitingUnbroadcastActionReport ||
+      waitState?.awaitingProviderReference
+    ) {
       const hasStoredWindow =
         operation.supportMetadata.reconciliationActiveSince != null ||
         operation.supportMetadata.reconciliationActiveAttemptBaseline != null;
@@ -1643,20 +1682,8 @@ async function markFundingOperationRecoveryRequired(
         now: input.now,
       });
     }
-    // The persisted step state machine intentionally does not allow a direct
-    // planned/action_required -> recovery_required jump. Move unsubmitted
-    // work through reconcile_required before applying the terminal recovery
-    // state so this path obeys the same transition contract as live steps.
-    await client.query(
-      `
-        update funding_operation_steps
-        set state = 'reconcile_required',
-            updated_at = $2
-        where operation_id = $1
-          and state in ('planned', 'action_required')
-      `,
-      [operation.id, input.now],
-    );
+    // Only work that actually started or already needs reconciliation owns
+    // this timeout. Future dependent steps stay planned for a later resume.
     await client.query(
       `
         update funding_operation_steps

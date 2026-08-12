@@ -7,7 +7,6 @@ import crypto from "node:crypto";
 
 import { POLYMARKET_FUNDING_ROUTER } from "@hunch/contracts";
 import { tx, type PoolClient } from "@hunch/infra";
-import { Interface } from "ethers";
 
 import "../../../integration-test-database-guard.js";
 import { stableWalletOpaqueId } from "../../../account-value/canonical.js";
@@ -45,6 +44,7 @@ import {
   FundingPersistenceError,
   type FundingCommitPlan,
 } from "../../persistence/funding-operation-repository.js";
+import { applyFundingStepReceiptEvidenceInTransaction } from "../../persistence/funding-step-receipt-repository.js";
 import {
   claimFundingReceiveCanonicalEventAllocation,
   claimFundingReceiveReceiptOperationLinkInTransaction,
@@ -63,7 +63,11 @@ import {
 } from "../../policies/funding-policy-service.js";
 import { fundingSidecarRuntimeConfig } from "../../runtime/sidecar-runtime-config.js";
 import { FundingReceiveReceiptRouter } from "../../receive/receive-receipt-router.js";
-import { reduceFundingOperation } from "../../reconciliation/funding-reducer.js";
+import {
+  reduceFundingOperation,
+  runFundingReconciliationBatch,
+} from "../../reconciliation/funding-reducer.js";
+import { PolymarketFundingPostconditionDriver } from "../../preparation/polymarket-funding-reconciler.js";
 import { hasReadyTelegramFundingDestinationReceipt } from "../../../services/telegram-funding-buy-continuation.js";
 import { validatePolymarketFundingOperationLink } from "../../../services/telegram-funding-polymarket-evidence.js";
 import {
@@ -77,6 +81,10 @@ import {
   telegramUsdceWrapRoutingAuthorized,
   telegramUsdceWrapRoutingDecision,
 } from "../../../services/telegram-funding-route.js";
+import {
+  buildPolymarketFundingPlan,
+  type PolymarketFundingPlan,
+} from "../../../services/polymarket-funding-router.js";
 
 const suffix = crypto.randomUUID();
 const now = new Date();
@@ -116,10 +124,6 @@ const referenceCodec: FundingTransactionReferenceCodec = {
   fingerprint: (value) =>
     crypto.createHash("sha256").update(`reference:${value}`).digest("hex"),
 };
-const fundInterface = new Interface([
-  "function fund(uint256 expectedNonce,uint256 totalAmount,uint256 pUsdAmount)",
-]);
-
 type JsonRecord = Readonly<Record<string, JsonValue>>;
 
 type Fixture = Readonly<{
@@ -128,6 +132,7 @@ type Fixture = Readonly<{
   consentFingerprint: string;
   consentId: string;
   operationId: string;
+  fundingPlan: PolymarketFundingPlan;
   privyWalletId: string;
   quoteId: string;
   receiptIds: readonly string[];
@@ -136,6 +141,7 @@ type Fixture = Readonly<{
   telegramAccountId: string;
   userId: string;
   userWalletId: string;
+  signerAddress: string;
   plan: FundingCommitPlan;
 }>;
 
@@ -857,13 +863,48 @@ async function createFixture(
   }
 
   const resolvedPolicy = await resolveFundingPolicy(pool);
+  const fundingPlan = buildPolymarketFundingPlan({
+    signer: walletAddress,
+    depositWallet: destinationAddress,
+    routerAddress: router,
+    routerNonce: 77n,
+    requiredRaw: BigInt(raw),
+    depositPusdRaw: 0n,
+    depositLockedRaw: 0n,
+    depositUsdceRaw: BigInt(raw),
+    depositRouterUsdceAllowanceRaw: BigInt(raw),
+    signerPusdRaw: 0n,
+    signerUsdceRaw: 0n,
+    routerPusdAllowanceRaw: 0n,
+    routerUsdceAllowanceRaw: 0n,
+    fundingCapRaw: BigInt(raw),
+  });
+  assert.ok(fundingPlan);
+  const venueBinding = {
+    bindingId: venueBindingOptionId,
+    venueId: "polymarket",
+    controllerWalletId: actionWalletId,
+    executionWalletId: actionWalletId,
+    accountRef: destinationAddress,
+    settlementLocation: {
+      kind: "venue_account",
+      locationId: opaque("settlement_location"),
+      accountId: userId,
+      asset: pUsd,
+      details: {
+        address: destinationAddress,
+        venueId: "polymarket",
+      },
+    },
+    signingMode: "privy_authorization",
+  } as const;
   const action = {
     kind: "evm_transaction",
     actionId: opaque("wrap_action"),
     networkId: "evm:137",
     senderWalletId: actionWalletId,
     to: router,
-    data: fundInterface.encodeFunctionData("fund", [77n, BigInt(raw), 0n]),
+    data: fundingPlan.calldata,
     valueRaw: "0",
     gasLimitRaw: null,
   } as const;
@@ -881,7 +922,7 @@ async function createFixture(
       venueId: "polymarket",
       marketId: null,
       marketContextSnapshot: null,
-      venueBindingSnapshot: { venueBindingOptionId },
+      venueBindingSnapshot: venueBinding as unknown as JsonRecord,
       walletExecutionSnapshot: {
         walletId: actionWalletId,
         address: walletAddress,
@@ -901,6 +942,13 @@ async function createFixture(
         fundingReceiveReceiptId: insertedReceipt.receipt.receiptId,
         telegramFundingConsentId: consentEvidence.id,
         telegramFundingConsentFingerprint: consentEvidence.fingerprint,
+        fundingPlan: fundingPlan as unknown as JsonRecord,
+        before: {
+          routerNonceRaw: "77",
+          depositPusdRaw: "0",
+          clobPusdRaw: "0",
+          observedAt: now.toISOString(),
+        },
       },
     },
     segments: [],
@@ -915,7 +963,7 @@ async function createFixture(
         payerRequirement: "privy_sponsor",
         dependsOnOrdinal: null,
         normalizedAction: action as unknown as JsonRecord,
-        actionValidationResult: { valid: true },
+        actionValidationResult: { valid: true, signerAddress: walletAddress },
       },
     ],
     reservations: [
@@ -941,7 +989,7 @@ async function createFixture(
     },
     marketContextSnapshot: null,
     destinationOptionSnapshot: { destinationOptionId },
-    venueBindingSnapshot: { venueBindingOptionId },
+    venueBindingSnapshot: plan.operation.venueBindingSnapshot,
     planSnapshot: plan,
     policyVersion: resolvedPolicy.runtime.contractVersion,
     policyRevision: resolvedPolicy.revision,
@@ -970,6 +1018,7 @@ async function createFixture(
     authorizationId: authorization.id,
     consentFingerprint: consentEvidence.fingerprint,
     consentId: consentEvidence.id,
+    fundingPlan,
     operationId: committed.operation.id,
     privyWalletId,
     quoteId: quote.id,
@@ -982,6 +1031,7 @@ async function createFixture(
     telegramAccountId,
     userId,
     userWalletId,
+    signerAddress: walletAddress,
     plan,
   };
   fixtures.push(fixture);
@@ -1028,6 +1078,109 @@ async function assertSecondSourceReservationBlocked(
   } finally {
     await pool.query(`delete from funding_quotes where id = $1`, [quote.id]);
   }
+}
+
+async function finalizeRecoveredFixture(
+  fixture: Fixture,
+  input: Readonly<{ attemptId: string; stepId: string; now: Date }>,
+): Promise<void> {
+  await tx(pool, (client) =>
+    applyFundingStepReceiptEvidenceInTransaction(client, {
+      operationId: fixture.operationId,
+      stepId: input.stepId,
+      attemptId: input.attemptId,
+      networkId: "evm:137",
+      receipt: {
+        status: "finalized",
+        actionMatch: true,
+        ledgerHeight: "102",
+        blockHash: `0x${crypto.randomBytes(32).toString("hex")}`,
+        canonical: true,
+        failureCode: null,
+        evidence: {
+          attributedDestinationRaw: fixture.fundingPlan.totalAmountRaw,
+        },
+      },
+      now: input.now,
+    }),
+  );
+  assert.deepEqual(
+    await new PolymarketFundingPostconditionDriver(referenceCodec, {
+      observe: async ({ signerAddress }) => {
+        assert.equal(signerAddress.toLowerCase(), fixture.signerAddress);
+        return {
+          routerNonceRaw: "78",
+          depositPusdRaw: fixture.fundingPlan.totalAmountRaw,
+          clobPusdRaw: fixture.fundingPlan.totalAmountRaw,
+          observedAt: input.now.toISOString(),
+        };
+      },
+    }).pollOperation(pool, fixture.operationId, input.now),
+    { postconditionsPolled: 1 },
+  );
+  const reduction = await reduceFundingOperation(pool, {
+    operationId: fixture.operationId,
+    now: input.now,
+  });
+  assert.deepEqual(reduction.finalState, {
+    status: "completed",
+    stage: "terminal",
+  });
+  const routing = await new FundingReceiveReceiptRouter(
+    pool,
+    undefined,
+    resolveTelegramFundingReceiptDisposition,
+  ).runBatch({ limit: 100, now: input.now });
+  assert.ok(routing.receiptsReady >= 1);
+  const receipt = await pool.query<{
+    routing_disposition: string;
+    status: string;
+  }>(
+    `select status, routing_disposition
+       from funding_receive_receipts
+      where child_funding_operation_id = $1`,
+    [fixture.operationId],
+  );
+  assert.deepEqual(receipt.rows[0], {
+    status: "ready",
+    routing_disposition: "ready",
+  });
+  assert.equal(
+    await hasReadyTelegramFundingDestinationReceipt(
+      pool,
+      fixture.telegramFundingSessionId,
+    ),
+    true,
+  );
+}
+
+async function strandFixtureForAutomaticEvidence(
+  fixture: Fixture,
+): Promise<void> {
+  await reduceFundingOperation(pool, {
+    operationId: fixture.operationId,
+    now: new Date(now.getTime() + 1),
+  });
+  await tx(pool, async (client) => {
+    await client.query(
+      `update funding_operations
+          set status = 'recovery_required',
+              recovery_mode = 'automatic_evidence',
+              error_code = 'reconciliation_evidence_timeout',
+              version = version + 1
+        where id = $1
+          and status = 'reconcile_required'
+          and progress_stage = 'source_action'`,
+      [fixture.operationId],
+    );
+    await client.query(
+      `update funding_operation_steps
+          set state = 'recovery_required'
+        where operation_id = $1
+          and state = 'reconcile_required'`,
+      [fixture.operationId],
+    );
+  });
 }
 
 async function assertOperationAttachmentFailureRollsBack(
@@ -1198,12 +1351,14 @@ function executor(
     claim: DelegatedFundingExecutionClaim,
   ) => Promise<DelegatedFundingExecutionResult> = execute,
   codec: FundingTransactionReferenceCodec = referenceCodec,
+  startedAttemptRecoveryMs = 60_000,
 ): DelegatedFundingExecutor {
   return executorForConfiguration(
     profileConfiguration,
     execute,
     recover,
     codec,
+    startedAttemptRecoveryMs,
   );
 }
 
@@ -1216,6 +1371,7 @@ function executorForConfiguration(
     claim: DelegatedFundingExecutionClaim,
   ) => Promise<DelegatedFundingExecutionResult> = execute,
   codec: FundingTransactionReferenceCodec = referenceCodec,
+  startedAttemptRecoveryMs = 60_000,
 ): DelegatedFundingExecutor {
   const profile = createPolymarketWrapDelegatedFundingProfile({
     configuration,
@@ -1225,7 +1381,7 @@ function executorForConfiguration(
   return new DelegatedFundingExecutor(pool, {
     profiles: [profile],
     referenceCodec: codec,
-    startedAttemptRecoveryMs: 60_000,
+    startedAttemptRecoveryMs,
   });
 }
 
@@ -1662,6 +1818,8 @@ try {
         transactionReference: `0x${"3".repeat(64)}`,
       };
     },
+    referenceCodec,
+    5 * 60_000,
   );
   assert.equal(
     (await ambiguousExecutor.runBatch({ limit: 1, now })).ambiguous,
@@ -1696,12 +1854,15 @@ try {
     "router must retain the exact receipt while its child awaits reconciliation",
   );
   const pendingAttempts = await pool.query<{
+    attempt_id: string;
     operation_id: string;
     outcome: string;
     reference_kind: string | null;
+    step_id: string;
     updated_at: Date;
   }>(
-    `select step.operation_id, attempt.outcome, attempt.reference_kind,
+    `select attempt.id as attempt_id, step.id as step_id,
+            step.operation_id, attempt.outcome, attempt.reference_kind,
             attempt.updated_at
      from funding_operation_step_attempts attempt
      join funding_operation_steps step on step.id = attempt.step_id
@@ -1721,6 +1882,83 @@ try {
         referenceKind: "provider_receipt",
       },
     ],
+  );
+  const crashRecoveryAttempt = pendingAttempts.rows[0];
+  assert.ok(crashRecoveryAttempt);
+  const providerRecoveryDeadline = new Date(now.getTime() + 2 * 60_000);
+  await reduceFundingOperation(pool, {
+    operationId: crashRecovery.operationId,
+    now: new Date(now.getTime() + 1),
+  });
+  await pool.query(
+    `update funding_operations
+        set support_metadata = support_metadata || jsonb_build_object(
+              'reconciliationActiveSince', $2::text,
+              'reconciliationActiveAttemptBaseline', 0
+            ),
+            version = version + 1
+      where id = $1`,
+    [crashRecovery.operationId, now.toISOString()],
+  );
+  await pool.query(
+    `update funding_reconciliation_jobs
+        set due_at = to_timestamp(0),
+            status = 'scheduled',
+            lease_owner = null,
+            lease_token = null,
+            lease_until = null
+      where operation_id = $1`,
+    [crashRecovery.operationId],
+  );
+  assert.equal(
+    (
+      await ambiguousExecutor.runBatch({
+        limit: 1,
+        now: providerRecoveryDeadline,
+      })
+    ).claimed,
+    0,
+    "provider recovery must not claim before the production five-minute lease",
+  );
+  assert.equal(recoveryCalls, 0);
+  const genericReconciliation = await runFundingReconciliationBatch(pool, {
+    workerId: opaque("provider_reference_timeout_worker"),
+    limit: 1,
+    terminalTimeoutMs: 90_000,
+    now: providerRecoveryDeadline,
+  });
+  assert.deepEqual(genericReconciliation.operationIds, [
+    crashRecovery.operationId,
+  ]);
+  const providerRecoveryState = await pool.query<{
+    active_since: string | null;
+    error_code: string | null;
+    recovery_mode: string | null;
+    status: string;
+  }>(
+    `select status,
+            error_code,
+            recovery_mode,
+            support_metadata ->> 'reconciliationActiveSince' as active_since
+       from funding_operations
+      where id = $1`,
+    [crashRecovery.operationId],
+  );
+  assert.deepEqual(providerRecoveryState.rows[0], {
+    status: "reconcile_required",
+    error_code: null,
+    recovery_mode: null,
+    active_since: null,
+  });
+  await pool.query(
+    `update funding_operations
+        set support_metadata = support_metadata || jsonb_build_object(
+              'reconciliationActiveSince', $2::text,
+              'reconciliationActiveAttemptBaseline', 0
+            ),
+            version = version + 1
+      where id = $1`,
+    [crashRecovery.operationId, now.toISOString()],
   );
   assert.equal(
     await revokeTelegramFundingAuthorization(pool, {
@@ -1742,6 +1980,8 @@ try {
         transactionReference: `0x${"3".repeat(64)}`,
       };
     },
+    referenceCodec,
+    5 * 60_000,
   );
   const recovered = await recoveryOnlyExecutor.runBatch({
     limit: 1,
@@ -1752,6 +1992,57 @@ try {
   assert.equal(recoveryCalls, 1);
   assert.equal(ambiguousCalls, 1, "recovery must not call execute again");
   assert.deepEqual(recovered.operationIds, [crashRecovery.operationId]);
+  const clearedAtProviderResolution = await pool.query<{
+    active_since: string | null;
+  }>(
+    `select support_metadata ->> 'reconciliationActiveSince' as active_since
+       from funding_operations
+      where id = $1`,
+    [crashRecovery.operationId],
+  );
+  assert.equal(clearedAtProviderResolution.rows[0]?.active_since, null);
+  await pool.query(
+    `update funding_reconciliation_jobs
+        set due_at = to_timestamp(0),
+            status = 'scheduled',
+            lease_owner = null,
+            lease_token = null,
+            lease_until = null
+      where operation_id = $1`,
+    [crashRecovery.operationId],
+  );
+  const postRecoveryReconciliationNow = new Date(
+    now.getTime() + 10 * 60_000 + 1,
+  );
+  const postRecoveryReconciliation = await runFundingReconciliationBatch(pool, {
+    workerId: opaque("resolved_provider_reference_worker"),
+    limit: 1,
+    terminalTimeoutMs: 90_000,
+    now: postRecoveryReconciliationNow,
+  });
+  assert.deepEqual(postRecoveryReconciliation.operationIds, [
+    crashRecovery.operationId,
+  ]);
+  const freshReconciliationWindow = await pool.query<{
+    active_since: string | null;
+    error_code: string | null;
+    recovery_mode: string | null;
+    status: string;
+  }>(
+    `select status,
+            error_code,
+            recovery_mode,
+            support_metadata ->> 'reconciliationActiveSince' as active_since
+       from funding_operations
+      where id = $1`,
+    [crashRecovery.operationId],
+  );
+  assert.deepEqual(freshReconciliationWindow.rows[0], {
+    status: "reconcile_required",
+    error_code: null,
+    recovery_mode: null,
+    active_since: postRecoveryReconciliationNow.toISOString(),
+  });
   const recoveredAttempts = await pool.query<{
     count: string;
     outcome: string;
@@ -1768,6 +2059,148 @@ try {
   assert.equal(recoveredAttempts.rows[0]?.count, "1");
   assert.equal(recoveredAttempts.rows[0]?.outcome, "ambiguous");
   assert.equal(recoveredAttempts.rows[0]?.reference_kind, "transaction");
+  await finalizeRecoveredFixture(crashRecovery, {
+    attemptId: crashRecoveryAttempt.attempt_id,
+    stepId: crashRecoveryAttempt.step_id,
+    now: new Date(now.getTime() + 10 * 60_000 + 2),
+  });
+
+  const strandedRecovery = await createFixture("1000000001");
+  let strandedExecuteCalls = 0;
+  let strandedRecoveryCalls = 0;
+  const strandedExecutor = executor(
+    async () => {
+      strandedExecuteCalls += 1;
+      return { kind: "ambiguous" };
+    },
+    async () => {
+      strandedRecoveryCalls += 1;
+      return {
+        kind: "submitted",
+        transactionReference: `0x${"4".repeat(64)}`,
+      };
+    },
+  );
+  assert.equal(
+    (await strandedExecutor.runBatch({ limit: 1, now })).ambiguous,
+    1,
+  );
+  await strandFixtureForAutomaticEvidence(strandedRecovery);
+  const recoveredStranded = await strandedExecutor.runBatch({
+    limit: 1,
+    now: new Date(now.getTime() + 10 * 60_000),
+  });
+  assert.equal(recoveredStranded.recovered, 1);
+  assert.equal(recoveredStranded.submitted, 1);
+  assert.equal(strandedExecuteCalls, 1);
+  assert.equal(strandedRecoveryCalls, 1);
+  assert.deepEqual(recoveredStranded.operationIds, [
+    strandedRecovery.operationId,
+  ]);
+  const strandedAttempt = await pool.query<{
+    attempt_id: string;
+    operation_status: string;
+    reference_kind: string | null;
+    step_id: string;
+    step_state: string;
+  }>(
+    `select attempt.id as attempt_id,
+            step.id as step_id,
+            attempt.reference_kind,
+            step.state as step_state,
+            operation.status as operation_status
+       from funding_operation_step_attempts attempt
+       join funding_operation_steps step on step.id = attempt.step_id
+       join funding_operations operation on operation.id = step.operation_id
+      where operation.id = $1`,
+    [strandedRecovery.operationId],
+  );
+  assert.equal(strandedAttempt.rows[0]?.reference_kind, "transaction");
+  assert.equal(strandedAttempt.rows[0]?.step_state, "recovery_required");
+  assert.equal(strandedAttempt.rows[0]?.operation_status, "recovery_required");
+  assert.ok(strandedAttempt.rows[0]?.attempt_id);
+  assert.ok(strandedAttempt.rows[0]?.step_id);
+  await finalizeRecoveredFixture(strandedRecovery, {
+    attemptId: strandedAttempt.rows[0].attempt_id,
+    stepId: strandedAttempt.rows[0].step_id,
+    now: new Date(now.getTime() + 10 * 60_000 + 1),
+  });
+
+  const strandedFailure = await createFixture("1000000002");
+  let strandedFailureExecuteCalls = 0;
+  let strandedFailureRecoveryCalls = 0;
+  const strandedFailureExecutor = executor(
+    async () => {
+      strandedFailureExecuteCalls += 1;
+      return { kind: "ambiguous" };
+    },
+    async () => {
+      strandedFailureRecoveryCalls += 1;
+      return {
+        kind: "proven_nonbroadcast_failure",
+        reasonCode: "provider_request_not_found",
+      };
+    },
+  );
+  assert.equal(
+    (await strandedFailureExecutor.runBatch({ limit: 1, now })).ambiguous,
+    1,
+  );
+  await strandFixtureForAutomaticEvidence(strandedFailure);
+  const failedStranded = await strandedFailureExecutor.runBatch({
+    limit: 1,
+    now: new Date(now.getTime() + 10 * 60_000),
+  });
+  assert.equal(failedStranded.recovered, 1);
+  assert.equal(failedStranded.definitivelyFailed, 1);
+  assert.equal(strandedFailureExecuteCalls, 1);
+  assert.equal(strandedFailureRecoveryCalls, 1);
+  const failedStrandedState = await pool.query<{
+    attempt_count: string;
+    attempt_outcome: string;
+    error_code: string | null;
+    operation_status: string;
+    recovery_mode: string | null;
+    step_state: string;
+  }>(
+    `select operation.status as operation_status,
+            operation.recovery_mode,
+            operation.error_code,
+            step.state as step_state,
+            count(attempt.id)::text as attempt_count,
+            min(attempt.outcome) as attempt_outcome
+       from funding_operations operation
+       join funding_operation_steps step on step.operation_id = operation.id
+       join funding_operation_step_attempts attempt on attempt.step_id = step.id
+      where operation.id = $1
+      group by operation.status, operation.recovery_mode,
+               operation.error_code, step.state`,
+    [strandedFailure.operationId],
+  );
+  assert.deepEqual(failedStrandedState.rows[0], {
+    operation_status: "recovery_required",
+    recovery_mode: "manual_review",
+    error_code: "delegated_provider_reference_failed",
+    step_state: "failed",
+    attempt_count: "1",
+    attempt_outcome: "failed",
+  });
+  const failedRouting = await new FundingReceiveReceiptRouter(
+    pool,
+    undefined,
+    resolveTelegramFundingReceiptDisposition,
+  ).runBatch({ limit: 100, now: new Date(now.getTime() + 10 * 60_000 + 1) });
+  assert.ok(failedRouting.recoveriesRequired >= 1);
+  assert.equal(
+    (
+      await pool.query<{ status: string }>(
+        `select status from funding_receive_receipts
+          where child_funding_operation_id = $1`,
+        [strandedFailure.operationId],
+      )
+    ).rows[0]?.status,
+    "recovery_required",
+  );
 
   const boundaryCrash = await createFixture("1100000000");
   let boundaryExecuteCalls = 0;
