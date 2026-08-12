@@ -669,6 +669,14 @@ manual editorial QA below.
 
 Manual QA before production:
 
+- use `/test_signal <channel_id> [latest|initial|update|note_uuid]` against an
+  enabled `x_editorial_draft_v1` channel to compose and send the exact X draft
+  presentation without writing a delivery row or advancing the channel cursor;
+- use `/test_followthrough <stats|win|loss> <channel_id>` for the corresponding
+  profile-aware X follow-through preview; unlike the ordinary Telegram preview,
+  the X preview stays standalone and has no reply target or inline keyboard;
+  both X preview commands add only a short `Preview only — not recorded` banner
+  above the otherwise production-identical draft presentation;
 - collect a representative batch across sports, politics, crypto, totals,
   named outcomes, single traders, and clusters;
 - have the manager score factual accuracy, naturalness, edit distance before

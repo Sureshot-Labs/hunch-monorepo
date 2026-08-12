@@ -304,6 +304,7 @@ export async function runSignalBotRunner(): Promise<void> {
               kind,
               redis,
               telegram,
+              xEditorialComposer,
             }),
           sendTestRich: (chatId, kind) =>
             sendSignalBotRichLayoutPreview({ chatId, kind, telegram }),
@@ -315,6 +316,7 @@ export async function runSignalBotRunner(): Promise<void> {
               redis,
               selector,
               telegram,
+              xEditorialComposer,
             }),
           loadAccountValue,
           completeTradeInput: (input) =>
