@@ -3,6 +3,10 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 
+import {
+  APIConnectionTimeoutError,
+  PermissionDeniedError,
+} from "@privy-io/node";
 import { POLYMARKET_FUNDING_ROUTER } from "@hunch/contracts";
 import { Interface } from "ethers";
 
@@ -34,6 +38,7 @@ import {
 } from "../../execution/delegated-funding-profiles.js";
 import {
   createPrivyDelegatedFundingDriver,
+  privyProviderErrorDiagnostic,
   PrivyDelegatedFundingDriver,
   PrivyDelegatedFundingProfileInvalidError,
   resolvePrivyProfileInspectionFailure,
@@ -1064,6 +1069,37 @@ assert.deepEqual(
   resolvePrivyProfileInspectionFailure(new Error("Privy timeout"), false),
   { kind: "pending" },
   "transport failures do not prove that the durable provider call was absent",
+);
+assert.deepEqual(
+  privyProviderErrorDiagnostic(
+    new PermissionDeniedError(
+      403,
+      {
+        code: "policy_violation",
+        error: "must never be logged: raw provider body",
+        message: "must never be logged: transaction body and secret",
+      },
+      undefined,
+      new Headers(),
+    ),
+  ),
+  {
+    errorCode: "policy_violation",
+    errorName: "PermissionDeniedError",
+    httpStatus: 403,
+  },
+  "provider diagnostics expose only the bounded status/code surface",
+);
+assert.deepEqual(
+  privyProviderErrorDiagnostic(
+    new APIConnectionTimeoutError({ message: "must never be logged" }),
+  ),
+  {
+    errorCode: null,
+    errorName: "APIConnectionTimeoutError",
+    httpStatus: null,
+  },
+  "statusless SDK failures remain diagnosable without their message",
 );
 assert.deepEqual(
   resolvePrivyProfileInspectionFailure(

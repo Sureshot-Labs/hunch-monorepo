@@ -45,6 +45,41 @@ export class PrivyDelegatedFundingProfileInvalidError extends Error {
 
 export type PrivyWalletProfileInspection = "valid" | "invalid" | "unavailable";
 
+// Provider bodies may echo request data, so diagnostics must stay allowlisted.
+function errorRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function safeString(value: unknown): string | null {
+  return typeof value === "string" && value.trim()
+    ? value.trim().slice(0, 96)
+    : null;
+}
+
+export function privyProviderErrorDiagnostic(error: unknown): Readonly<{
+  errorCode: string | null;
+  errorName: string;
+  httpStatus: number | null;
+}> {
+  const root = errorRecord(error);
+  const provider = errorRecord(root?.error);
+  const status = root?.status;
+  return {
+    errorCode:
+      safeString(provider?.code) ??
+      safeString(provider?.error_code) ??
+      safeString(root?.code),
+    errorName:
+      error instanceof Error
+        ? (safeString(error.constructor.name) ?? "Error")
+        : "UnknownError",
+    httpStatus:
+      typeof status === "number" && Number.isInteger(status) ? status : null,
+  };
+}
+
 export function resolvePrivyProfileInspectionFailure(
   error: unknown,
   priorSubmissionMayHaveOccurred: boolean,
@@ -428,6 +463,21 @@ export class PrivyDelegatedFundingDriver implements DelegatedFundingNetworkDrive
         authorization_context: {
           authorization_private_keys: [this.input.authorizationPrivateKey],
         },
+      })
+      .catch((error: unknown) => {
+        console.warn(
+          JSON.stringify({
+            event: "delegated_funding_provider_error",
+            provider: "privy",
+            stage: "submission",
+            attemptId: claim.attemptId,
+            operationId: claim.operationId,
+            profileId: claim.profileId,
+            stepId: claim.stepId,
+            ...privyProviderErrorDiagnostic(error),
+          }),
+        );
+        throw error;
       });
     return this.resolveSubmission(result);
   }
