@@ -15614,6 +15614,68 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
+    name: "followthrough preview uses X profile without recording delivery",
+    run: async () => {
+      const redis = new FakeRedis();
+      await enableFollowthroughTestChat(redis);
+      await updateSignalBotContentProfile({
+        chatId: "-100",
+        contentProfile: "x_editorial_draft_v1",
+        redis,
+      });
+      const db = new FakeFollowthroughDb();
+      db.candidateRows = [followthroughCandidateRow()];
+      db.flowRows = [
+        followthroughFlowRow({ baseline_shares: "0", wallet_id: "wallet-1" }),
+        followthroughFlowRow({
+          wallet_id: "wallet-2",
+          baseline_shares: "50",
+          latest_shares: "90",
+          latest_size_usd: "4950",
+          positive_usd: "4500",
+          net_usd: "4500",
+          net_shares: "40",
+        }),
+      ];
+      const telegram = new FakeTelegram();
+      const calls = { count: 0 };
+      const sent = await sendSignalBotFollowthroughPreview({
+        chatId: "-100",
+        config: parseSignalBotConfig({
+          HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
+          HUNCH_SIGNAL_BOT_TELEGRAM_MINI_APP_LINK_BASE:
+            "https://t.me/hunch_bot/hunch",
+          HUNCH_SIGNAL_BOT_TOKEN: "token",
+          HUNCH_SIGNAL_BOT_X_EDITORIAL_ENABLED: "true",
+        }),
+        db,
+        kind: "stats",
+        now: new Date("2026-01-02T01:00:00.000Z"),
+        redis,
+        telegram,
+        xEditorialComposer: createTestXEditorialComposer({
+          calls,
+          text: "The original YES position is getting follow-through.",
+        }),
+      });
+
+      assert.equal(sent, true);
+      assert.equal(calls.count, 1);
+      assert.equal(telegram.messages[0]?.reply_parameters, undefined);
+      assert.equal(telegram.messages[0]?.reply_markup, undefined);
+      assert.match(telegram.messages[0]?.text ?? "", /^🧪 _Preview only/);
+      assert.match(telegram.messages[0]?.text ?? "", /\*The original YES/);
+      assert.match(telegram.messages[0]?.text ?? "", /🌐 Website/);
+      assert.match(telegram.messages[0]?.text ?? "", /📱 Telegram Mini App/);
+      assert.equal(
+        db.queries.filter((query) =>
+          query.sql.includes("insert into signal_bot_messages"),
+        ).length,
+        0,
+      );
+    },
+  },
+  {
     name: "followthrough stats thresholds suppress weak open updates",
     run: async () => {
       const redis = new FakeRedis();
@@ -16330,6 +16392,80 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           .map((button) => button.text),
         ["Buy YES · Poly 41¢"],
       );
+      assert.deepEqual(await getSignalBotChatState(redis, "-100"), before);
+      assert.equal(
+        db.queries.some((query) =>
+          query.sql.includes("insert into signal_bot_messages"),
+        ),
+        false,
+      );
+    },
+  },
+  {
+    name: "test signal uses X profile without touching delivery state or cursor",
+    run: async () => {
+      const redis = new FakeRedis();
+      await enableSignalBotChat({
+        chat: { id: "-100", title: "X drafts", type: "channel" },
+        enabledBy: 123,
+        now: new Date("2026-01-01T00:00:00.000Z"),
+        redis,
+      });
+      await updateSignalBotContentProfile({
+        chatId: "-100",
+        contentProfile: "x_editorial_draft_v1",
+        redis,
+      });
+      const before = await getSignalBotChatState(redis, "-100");
+      const db = new FakeDb();
+      db.rows = [noteRow({ id: "00000000-0000-4000-8000-000000000099" })];
+      const telegram = new FakeTelegram();
+      let composeCalls = 0;
+      const outcome = await sendLatestSignalBotTestSignal({
+        chatId: "-100",
+        config: parseSignalBotConfig({
+          HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
+          HUNCH_SIGNAL_BOT_TELEGRAM_MINI_APP_LINK_BASE:
+            "https://t.me/hunch_bot/hunch",
+          HUNCH_SIGNAL_BOT_TOKEN: "token",
+          HUNCH_SIGNAL_BOT_X_EDITORIAL_ENABLED: "true",
+        }),
+        db,
+        redis,
+        telegram,
+        xEditorialComposer: async ({ source }) => {
+          composeCalls += 1;
+          const postText =
+            "$12.3K is backing YES.\n\nOne trader. One concentrated position.";
+          return {
+            characterCount: Array.from(postText).length,
+            formatting: [{ style: "bold", text: "$12.3K is backing YES." }],
+            generatedAt: "2026-01-02T01:00:00.000Z",
+            marketId: source.marketId,
+            model: "test/editorial-model",
+            postText,
+            promptVersion: "x_editorial_prompt_v4",
+            safetyFlags: [],
+            selectedSide: source.selectedSide,
+            sourceDigest: buildXEditorialSourceDigest(source),
+            status: "ready",
+            storyFamily: "fresh_bet",
+            usedFactIds: ["market", "actor"],
+            version: 1,
+          };
+        },
+      });
+
+      assert.deepEqual(outcome, { reason: null, sent: true });
+      assert.equal(composeCalls, 1);
+      assert.equal(telegram.messages[0]?.reply_markup, undefined);
+      assert.match(
+        telegram.messages[0]?.text ?? "",
+        /\*\$12\\\.3K is backing YES\\\.\*/,
+      );
+      assert.match(telegram.messages[0]?.text ?? "", /^🧪 _Preview only/);
+      assert.match(telegram.messages[0]?.text ?? "", /🌐 Website/);
+      assert.match(telegram.messages[0]?.text ?? "", /📱 Telegram Mini App/);
       assert.deepEqual(await getSignalBotChatState(redis, "-100"), before);
       assert.equal(
         db.queries.some((query) =>

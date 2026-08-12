@@ -1,75 +1,3 @@
--- The v0203 runtime could crash after Telegram accepted an address-bearing
--- edit but before it recorded the immutable target. A session can represent
--- only one funding card, so an unknown or multi-message outstanding disclosure
--- cannot be repaired safely by this upgrade. Abort the transaction before any
--- schema change instead of silently discarding a redaction obligation.
-do $$
-declare
-  unknown_target_sessions bigint;
-  multiple_target_sessions bigint;
-begin
-  with attempted as (
-    select
-      address_attempt.funding_session_id,
-      address_attempt.state_revision,
-      address_attempt.telegram_message_id
-    from telegram_bot_action_outbox address_attempt
-    where address_attempt.action in (
-      'funding_send',
-      'funding_edit',
-      'funding_replacement',
-      'funding_qr'
-    )
-      and jsonb_typeof(address_attempt.payload -> 'receiveAddress') = 'string'
-      and length(trim(address_attempt.payload ->> 'receiveAddress')) > 0
-      and (
-        address_attempt.attempt_count > 0
-        or address_attempt.delivery_attempt_id is not null
-        or address_attempt.delivery_started_at is not null
-        or address_attempt.sent_at is not null
-        or address_attempt.status in ('sending', 'delivery_unknown', 'sent')
-      )
-  ), unresolved as (
-    select attempted.*
-    from attempted
-    where attempted.telegram_message_id is null
-       or not exists (
-         select 1
-         from telegram_bot_action_outbox redaction
-         where redaction.funding_session_id = attempted.funding_session_id
-           and redaction.action = 'funding_edit'
-           and redaction.status = 'sent'
-           and redaction.telegram_message_id = attempted.telegram_message_id
-           and redaction.state_revision > attempted.state_revision
-           and (
-             not (redaction.payload ? 'receiveAddress')
-             or redaction.payload -> 'receiveAddress' = 'null'::jsonb
-           )
-       )
-  ), session_targets as (
-    select
-      funding_session_id,
-      bool_or(telegram_message_id is null) as has_unknown_target,
-      count(distinct telegram_message_id) as known_target_count
-    from unresolved
-    group by funding_session_id
-  )
-  select
-    count(*) filter (where has_unknown_target),
-    count(*) filter (where known_target_count > 1)
-  into unknown_target_sessions, multiple_target_sessions
-  from session_targets;
-
-  if unknown_target_sessions > 0 or multiple_target_sessions > 0 then
-    raise exception
-      '0206 cannot preserve historical Telegram address redaction targets (unknown sessions %, multi-target sessions %)',
-      unknown_target_sessions,
-      multiple_target_sessions
-      using errcode = '23514';
-  end if;
-end;
-$$;
-
 -- Funding authorizations are retained as historical evidence, but a retained
 -- row must not prevent ordinary Privy wallet unlink/replacement. The immutable
 -- wallet id may therefore be cleared by its FK while the snapshotted Privy id
@@ -101,8 +29,18 @@ alter table funding_quotes
 -- steps inherit their old operation/segment deadline; new adapters may store
 -- NULL only when their reviewed action contract has no time-based validity
 -- boundary (the exact Polymarket receipt transform is the first such profile).
+-- Keep every ALTER before the UPDATE: funding_operation_steps has an initially
+-- deferred shape trigger, and queued trigger events make a later ALTER fail.
 alter table funding_operation_steps
   add column action_expires_at timestamptz;
+
+alter table funding_operation_steps
+  add constraint funding_operation_steps_action_expiry_check
+  check (action_expires_at is null or action_expires_at > created_at);
+
+create index funding_operation_steps_action_claim_idx
+  on funding_operation_steps (executor_id, action_expires_at, created_at)
+  where state = 'action_required';
 
 update funding_operation_steps step
 set action_expires_at = case
@@ -125,14 +63,6 @@ set action_expires_at = case
 end
 from funding_operations operation
 where operation.id = step.operation_id;
-
-alter table funding_operation_steps
-  add constraint funding_operation_steps_action_expiry_check
-  check (action_expires_at is null or action_expires_at > created_at);
-
-create index funding_operation_steps_action_claim_idx
-  on funding_operation_steps (executor_id, action_expires_at, created_at)
-  where state = 'action_required';
 
 update funding_quotes quote
 set commit_scope = jsonb_build_object(
@@ -679,8 +609,9 @@ alter table telegram_funding_sessions
     );
 
 -- A Telegram request may have succeeded even when the process died before it
--- could record the response. Treat every started address-bearing delivery as a
--- durable redaction obligation; confirmed delivery remains a separate fact.
+-- could record the response. Preserve an obligation only when its exact card
+-- is known and unambiguous; targetless historical attempts cannot be redacted
+-- safely and must not block an availability-critical migration.
 with attempted as (
   select
     address_attempt.funding_session_id,
@@ -725,7 +656,9 @@ with attempted as (
     max(state_revision) as revision,
     min(telegram_message_id) as telegram_message_id
   from unresolved
+  where telegram_message_id is not null
   group by funding_session_id
+  having count(distinct telegram_message_id) = 1
 )
 update telegram_funding_sessions context
 set address_disclosure_attempt_revision = attempted.revision,
