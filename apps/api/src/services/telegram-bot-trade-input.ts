@@ -1,4 +1,7 @@
-import type { TelegramBotTradingClientMessage } from "./telegram-bot-trading-client.js";
+import type {
+  TelegramBotTradingClientMessage,
+  TelegramFundingClientMessage,
+} from "./telegram-bot-trading-client.js";
 import {
   clearSignalBotMenuInputIfCurrent,
   readSignalBotMenuInput,
@@ -18,7 +21,7 @@ export async function beginSignalBotTradeInput(input: {
   chatId: string;
   contextId: string;
   expiresAt: string;
-  menuMessageId: number | null;
+  menuMessageId: number;
   message: TelegramBotTradingClientMessage;
   redis: TradeInputRedis;
   telegramUserId: number;
@@ -62,9 +65,8 @@ export async function handleSignalBotTradeInput(input: {
     value: string;
   }) => Promise<{
     completed: boolean;
-    message: TelegramBotTradingClientMessage;
+    message: TelegramFundingClientMessage;
   }>;
-  messageId: number;
   redis: TradeInputRedis;
   telegramUserId: number;
   telegramMiniAppEnabled?: boolean;
@@ -79,12 +81,28 @@ export async function handleSignalBotTradeInput(input: {
   ) {
     return false;
   }
+  if (state.menuMessageId == null) {
+    await clearSignalBotMenuInputIfCurrent({
+      chatId: input.chatId,
+      redis: input.redis,
+      stateToken: state.stateToken,
+      telegramUserId: input.telegramUserId,
+    }).catch(() => false);
+    await input.transport.sendMessage({
+      chat_id: input.chatId,
+      disable_web_page_preview: true,
+      text: "Custom input expired. Open the market and try again.",
+    });
+    return true;
+  }
   let result: Awaited<ReturnType<typeof input.complete>>;
   try {
     result = await input.complete({
       chatId: input.chatId,
       contextId: state.contextId,
-      telegramMessageId: input.messageId,
+      // The returned card is edited into this message, so it must also own
+      // any funding context opened while completing the Buy preview.
+      telegramMessageId: state.menuMessageId,
       telegramMiniAppEnabled: input.telegramMiniAppEnabled,
       telegramUserId: input.telegramUserId,
       value: input.text,

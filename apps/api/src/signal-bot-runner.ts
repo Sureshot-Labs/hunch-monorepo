@@ -238,6 +238,8 @@ export async function runSignalBotRunner(): Promise<void> {
   let nextNotificationCleanupAt = 0;
   let lastNotificationPolicySignature: string | null = null;
   let heartbeatLost = false;
+  let fundingDeliveryTimer: ReturnType<typeof setInterval> | null = null;
+  let fundingDeliveryInFlight: Promise<void> | null = null;
   const lockHeartbeat = setInterval(() => {
     void refreshSignalBotLock({ owner, redis })
       .then((stillLocked) => {
@@ -272,6 +274,46 @@ export async function runSignalBotRunner(): Promise<void> {
           : Promise.reject(new Error("Account Value API is unavailable")),
       maxConcurrency: 4,
     });
+    const drainFundingDelivery = (): Promise<void> => {
+      fundingDeliveryInFlight ??= (async () => {
+        try {
+          const fundingDelivery = await deliverTelegramFundingActions({
+            pool: db,
+            limit: 25,
+            renderCoordinator: createTelegramFundingRenderCoordinator(redis),
+            ...(tradingInternalApi
+              ? {
+                  resolveMessage: ({ contextId, projection, telegramUserId }) =>
+                    tradingInternalApi.getFundingSession({
+                      chatId: telegramUserId,
+                      contextId,
+                      deliveryProjection: projection,
+                      telegramUserId,
+                      view: "delivery",
+                    }),
+                }
+              : {}),
+            telegram,
+          });
+          if (fundingDelivery.claimed > 0) {
+            log("signal_bot_funding_delivery", fundingDelivery);
+          }
+        } catch (error) {
+          log("signal_bot_funding_delivery_error", {
+            errorCode: error instanceof Error ? error.name : "unexpected_error",
+          });
+        }
+      })().finally(() => {
+        fundingDeliveryInFlight = null;
+      });
+      return fundingDeliveryInFlight;
+    };
+    // Telegram long polling is independent from durable financial delivery.
+    fundingDeliveryTimer = setInterval(
+      () => void drainFundingDelivery(),
+      1_000,
+    );
+    fundingDeliveryTimer.unref?.();
     while (!shuttingDown) {
       try {
         if (heartbeatLost) break;
@@ -455,6 +497,7 @@ export async function runSignalBotRunner(): Promise<void> {
                             ? tradingInternalApi.getFundingSession({
                                 chatId: input.chatId,
                                 contextId: input.contextId,
+                                telegramMessageId: input.telegramMessageId,
                                 telegramUserId: input.telegramUserId,
                                 view: input.view,
                               })
@@ -632,15 +675,15 @@ export async function runSignalBotRunner(): Promise<void> {
                           ? null
                           : String(callbackQuery.message.chat.id);
                       const telegramUserId = callbackQuery.from?.id;
-                      if (!chatId || !telegramUserId)
+                      const menuMessageId = callbackQuery.message?.message_id;
+                      if (!chatId || !telegramUserId || menuMessageId == null)
                         return Promise.resolve(false);
                       return beginSignalBotTradeInput({
                         action: begin.action,
                         chatId,
                         contextId: begin.contextId,
                         expiresAt: begin.expiresAt,
-                        menuMessageId:
-                          callbackQuery.message?.message_id ?? null,
+                        menuMessageId,
                         message: begin.message,
                         redis,
                         telegramUserId,
@@ -683,6 +726,9 @@ export async function runSignalBotRunner(): Promise<void> {
         });
         if (handledCommands > 0) {
           log("signal_bot_commands", { handled: handledCommands });
+          // Long polling must not add another 5-30 seconds after a financial
+          // callback. The periodic drain below remains crash/retry recovery.
+          await drainFundingDelivery();
         }
 
         const now = Date.now();
@@ -704,38 +750,6 @@ export async function runSignalBotRunner(): Promise<void> {
           } catch (error) {
             log("signal_bot_onboarding_delivery_error", {
               error: error instanceof Error ? error.message : String(error),
-            });
-          }
-          try {
-            const fundingDelivery = await deliverTelegramFundingActions({
-              pool: db,
-              limit: 25,
-              renderCoordinator: createTelegramFundingRenderCoordinator(redis),
-              ...(tradingInternalApi
-                ? {
-                    resolveMessage: ({
-                      contextId,
-                      projection,
-                      telegramUserId,
-                    }) =>
-                      tradingInternalApi.getFundingSession({
-                        chatId: telegramUserId,
-                        contextId,
-                        deliveryProjection: projection,
-                        telegramUserId,
-                        view: "delivery",
-                      }),
-                  }
-                : {}),
-              telegram,
-            });
-            if (fundingDelivery.claimed > 0) {
-              log("signal_bot_funding_delivery", fundingDelivery);
-            }
-          } catch (error) {
-            log("signal_bot_funding_delivery_error", {
-              errorCode:
-                error instanceof Error ? error.name : "unexpected_error",
             });
           }
           let cleaned = 0;
@@ -860,6 +874,10 @@ export async function runSignalBotRunner(): Promise<void> {
     }
   } finally {
     clearInterval(lockHeartbeat);
+    if (fundingDeliveryTimer) clearInterval(fundingDeliveryTimer);
+    // A successful Telegram mutation is not durable until its result is stored.
+    // Keep the pool alive for the one bounded delivery already in progress.
+    await fundingDeliveryInFlight;
     const drainedConfirmTasks = await drainSignalBotConfirmTasks(10_000);
     if (!drainedConfirmTasks) {
       log("signal_bot_confirm_tasks_drain_timeout");

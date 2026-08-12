@@ -116,6 +116,7 @@ type MenuButton =
 
 type MenuMessage = {
   durableFundingDeliveryRequired?: boolean;
+  fundingContextId?: string;
   marketFound?: boolean;
   parse_mode?: "MarkdownV2";
   reply_markup?: { inline_keyboard: MenuButton[][] };

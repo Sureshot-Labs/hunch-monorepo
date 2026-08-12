@@ -2866,7 +2866,8 @@ export async function handleSignalBotMenuCallback(
       route.kind === "admin_preview" ||
       route.kind === "rewards_confirm" ||
       route.kind === "rewards_view" ||
-      (route.kind === "screen" && route.screen === "positions")
+      (route.kind === "screen" && route.screen === "positions") ||
+      TelegramBotMenuActions.isSignalBotFundingMenuRoute(route)
         ? { text: "⏳ Working…" }
         : {}),
     });
@@ -3344,7 +3345,6 @@ export async function handleSignalBotMenuInput(input: {
     (await handleSignalBotTradeInput({
       chatId,
       complete: input.completeTradeInput,
-      messageId: input.message.message_id,
       redis: input.redis,
       telegramUserId,
       telegramMiniAppEnabled: input.config.telegramMiniAppLinkBase != null,

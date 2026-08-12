@@ -309,6 +309,7 @@ export class FundingReceiveSessionService {
       client: PoolClient,
       result: FundingReceiveSessionPersistenceResult,
     ) => Promise<void>,
+    preparePersistence?: (client: PoolClient) => Promise<void>,
   ): Promise<FundingReceiveSessionResponse> {
     const destinationAccess = await this.runtime.destinationAccess(userId, {
       purpose: "fund",
@@ -619,6 +620,7 @@ export class FundingReceiveSessionService {
           now,
         },
         finalize,
+        preparePersistence,
       );
     } catch (error) {
       if (error instanceof FundingReceiveSessionChannelConflictError) {

@@ -86,7 +86,10 @@ import {
 } from "../services/telegram-funding.js";
 import { ensureTelegramFundingAuthorization } from "../funding/execution/telegram-funding-authorization.js";
 import { resolveTelegramFundingManagedWalletIdentity } from "../funding/execution/telegram-funding-managed-wallet.js";
-import { buildTelegramFundingUnavailableMessage } from "../services/telegram-funding-presentation.js";
+import {
+  buildTelegramFundingActiveElsewhereMessage,
+  buildTelegramFundingUnavailableMessage,
+} from "../services/telegram-funding-presentation.js";
 import {
   readTelegramBotTradeInputContext,
   telegramBotTradeInputMessageScopeMatches,
@@ -228,9 +231,19 @@ const internalFundingSessionBodySchema = internalFundingIdentitySchema
   .extend({
     contextId: z.string().uuid(),
     deliveryProjection: z.unknown().optional(),
+    telegramMessageId: z.number().int().positive().nullable().optional(),
     view: z.enum(["address", "delivery", "progress"]).optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((body, context) => {
+    if (body.view !== "delivery" && body.telegramMessageId == null) {
+      context.addIssue({
+        code: "custom",
+        message: "interactive funding sessions require telegramMessageId",
+        path: ["telegramMessageId"],
+      });
+    }
+  });
 
 const internalFundingSelectTargetBodySchema = internalFundingMutationSchema
   .extend({
@@ -735,6 +748,12 @@ async function registerTelegramBotTradingRoutes(
       return reply.send(
         buildTelegramFundingUnavailableMessage({ reason: "disabled" }),
       );
+    }
+    if (
+      error instanceof TelegramFundingError &&
+      error.code === "funding_session_active_elsewhere"
+    ) {
+      return reply.send(buildTelegramFundingActiveElsewhereMessage());
     }
     return reply
       .code(error instanceof TelegramFundingError ? 409 : 503)

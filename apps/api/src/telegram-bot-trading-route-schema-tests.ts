@@ -66,7 +66,29 @@ await test("Telegram funding schemas accept only server-owned opaque inputs", ()
       {
         ...identity,
         contextId: "123e4567-e89b-42d3-a456-426614174000",
+        telegramMessageId: 42,
         view: "progress",
+      },
+    ).success,
+    true,
+  );
+  assert.equal(
+    telegramBotTradingRouteTestHooks.internalFundingSessionBodySchema.safeParse(
+      {
+        ...identity,
+        contextId: "123e4567-e89b-42d3-a456-426614174000",
+        view: "progress",
+      },
+    ).success,
+    false,
+  );
+  assert.equal(
+    telegramBotTradingRouteTestHooks.internalFundingSessionBodySchema.safeParse(
+      {
+        ...identity,
+        contextId: "123e4567-e89b-42d3-a456-426614174000",
+        deliveryProjection: {},
+        view: "delivery",
       },
     ).success,
     true,

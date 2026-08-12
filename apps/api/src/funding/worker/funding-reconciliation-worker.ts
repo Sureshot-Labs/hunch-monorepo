@@ -210,7 +210,8 @@ export async function isFundingReconciliationSchemaReady(
           from (values
             ('telegram_bot_action_outbox_action_check'),
             ('telegram_bot_action_outbox_shape_check'),
-            ('telegram_bot_action_outbox_delivery_attempt_check')
+            ('telegram_bot_action_outbox_delivery_attempt_check'),
+            ('telegram_bot_action_outbox_delivery_unknown_check')
           ) as required(constraint_name)
           where not exists (
             select 1

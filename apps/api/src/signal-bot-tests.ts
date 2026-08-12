@@ -3730,6 +3730,69 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
+    name: "internal trading client never sends an owner-scoped funding fallback",
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = (async () =>
+        new Response(
+          JSON.stringify({
+            answers: [],
+            handled: true,
+            messages: [
+              {
+                chat_id: "999",
+                fundingContextId: "00000000-0000-4000-8000-000000000002",
+                parse_mode: "MarkdownV2",
+                text: "Funding preview",
+              },
+            ],
+          }),
+          {
+            headers: { "Content-Type": "application/json" },
+            status: 200,
+          },
+        )) as typeof fetch;
+      try {
+        for (const editFailure of [
+          {
+            error: "message_not_editable",
+            message: "message to edit not found",
+            ok: false,
+          },
+          { error: "ambiguous", message: "timeout", ok: false },
+        ]) {
+          const client = createTelegramBotTradingInternalApiClient({
+            baseUrl: "https://api.hunch.trade",
+            token: "token",
+          });
+          let sends = 0;
+          const handled = await client.handleCallback({
+            answerCallbackQuery: async () => ({ ok: true }),
+            appBaseUrl: "https://app.hunch.trade",
+            callbackQuery: {
+              data: "hbt:buy:00000000-0000-4000-8000-000000000001",
+              from: { id: 999 },
+              id: "funding-fallback",
+              message: {
+                chat: { id: 999, type: "private" },
+                message_id: 77,
+              },
+            },
+            editMessageText: async () => editFailure,
+            sendMessage: async () => {
+              sends += 1;
+              return { messageId: 78, ok: true };
+            },
+          });
+          assert.equal(handled, true);
+          assert.equal(sends, 0);
+        }
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    },
+  },
+  {
     name: "internal trading API client reports unknown status on confirm timeout",
     run: async () => {
       const originalFetch = globalThis.fetch;
@@ -9580,6 +9643,11 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         /publishSignalBotFollowthroughTick\([\s\S]*?transports:\s*signalTransports/,
       );
       assert.doesNotMatch(runnerSource, /create(?:Discord|X)SignalTransport/);
+      assert.match(
+        runnerSource,
+        /finally\s*\{[\s\S]*?clearInterval\(fundingDeliveryTimer\)[\s\S]*?await fundingDeliveryInFlight;[\s\S]*?await dbPool\?\.end\(\)/,
+        "shutdown must persist an in-flight Telegram delivery before closing Postgres",
+      );
       const retentionSelector = readFileSync(
         new URL("./market-retention-selector.ts", import.meta.url),
         "utf8",

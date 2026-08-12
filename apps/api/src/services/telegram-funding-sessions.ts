@@ -9,6 +9,7 @@ import type {
 import { lockTelegramFundingLinkLifecycle } from "../funding/execution/telegram-funding-link-lifecycle-lock.js";
 import { resolveTelegramFundingManagedWalletIdentity } from "../funding/execution/telegram-funding-managed-wallet.js";
 import { hashOpaqueToken } from "../funding/persistence/canonical.js";
+import { lockFundingReceiveSessionScope } from "../funding/persistence/funding-receive-session-repository.js";
 import type { DirectIngressObservationVariant } from "../funding/reconciliation/direct-ingress-observer.js";
 import { resolveTelegramFundingAutomaticCapability } from "./telegram-funding-route.js";
 
@@ -36,6 +37,7 @@ export async function lockActiveTelegramFundingReviewTarget(
     userId: string;
     telegramAccountId: string;
     telegramUserId: string;
+    telegramMessageId: number | null;
     chatId: string;
     now: Date;
   }>,
@@ -68,6 +70,7 @@ export async function lockActiveTelegramFundingReviewTarget(
         and context.user_id = $2::uuid
         and context.telegram_user_id = $4
         and context.chat_id = $5
+        and context.telegram_message_id is not distinct from $7::bigint
         and context.cancelled_at is null
         and context.expires_at > $6
         and context.latest_terminal_projection is null
@@ -87,6 +90,7 @@ export async function lockActiveTelegramFundingReviewTarget(
       input.telegramUserId,
       input.chatId,
       input.now,
+      input.telegramMessageId,
     ],
   );
   const row = rows[0] ?? null;
@@ -106,6 +110,7 @@ export async function lockActiveTelegramFundingReviewByConsentToken(
     userId: string;
     telegramAccountId: string;
     telegramUserId: string;
+    telegramMessageId: number | null;
     chatId: string;
     consentToken: string;
     now: Date;
@@ -142,6 +147,7 @@ export async function lockActiveTelegramFundingReviewByConsentToken(
         and quote.consent_token_hash = $5
         and context.telegram_user_id = $3
         and context.chat_id = $4
+        and context.telegram_message_id is not distinct from $7::bigint
         and context.cancelled_at is null
         and context.expires_at > $6
         and context.latest_terminal_projection is null
@@ -165,6 +171,7 @@ export async function lockActiveTelegramFundingReviewByConsentToken(
       input.chatId,
       hashOpaqueToken(input.consentToken),
       input.now,
+      input.telegramMessageId,
     ],
   );
   const row = rows.length === 1 ? rows[0] : null;
@@ -767,15 +774,22 @@ export async function createOrReuseTelegramFundingSessionInTransaction(
   let existing = await loadSessionByIdentity(client, input);
   if (existing) {
     assertSameContextIdentity(existing, input);
+    if (
+      input.telegramMessageId != null &&
+      existing.telegram_message_id != null &&
+      input.telegramMessageId !== Number(existing.telegram_message_id)
+    ) {
+      // Message ownership changes only through the lifecycle transaction, which
+      // also terminalizes the old card. This low-level reuse must never rebind it.
+      throw new TelegramFundingPersistenceError(
+        "telegram_funding_session_active_elsewhere",
+      );
+    }
     const refreshed = await client.query<TelegramFundingSessionRow>(
       `
         update telegram_funding_sessions
         set telegram_account_id = $2,
-            telegram_message_id = case
-              when address_disclosure_attempt_revision = 0
-                then coalesce($3, telegram_message_id)
-              else telegram_message_id
-            end
+            telegram_message_id = coalesce(telegram_message_id, $3)
         where id = $1
         returning ${sessionColumns}
       `,
@@ -897,6 +911,258 @@ export async function fetchTelegramFundingSessionByIdempotency(
   return rows[0] ? publicSession(rows[0]) : null;
 }
 
+type ActiveTelegramFundingOpenScope = Readonly<{
+  chatId: string;
+  controllerWalletId?: string;
+  now: Date;
+  telegramUserId: string;
+  userId: string;
+  venueBindingOptionId?: string;
+  venueId: string;
+}>;
+
+async function lockActiveTelegramFundingOpenContext(
+  client: Pick<PoolClient, "query">,
+  input: ActiveTelegramFundingOpenScope,
+): Promise<TelegramFundingSessionRow | null> {
+  const { rows } = await client.query<TelegramFundingSessionRow>(
+    `
+      select ${qualifiedSessionColumns("context")}
+      from telegram_funding_sessions context
+      join funding_receive_sessions receive
+        on receive.id = context.receive_session_id
+       and receive.user_id = context.user_id
+       and receive.owner_channel = context.receive_owner_channel
+      where context.user_id = $1
+        and context.telegram_user_id = $2
+        and context.chat_id = $3
+        and context.receive_owner_channel = 'telegram'
+        and context.cancelled_at is null
+        and context.latest_terminal_projection is null
+        and context.expires_at > $4
+        and receive.owner_channel = 'telegram'
+        and receive.venue_id = $5
+        and (
+          $6::text is null
+          or receive.destination_target_snapshot #>>
+               '{location,details,controllerWalletId}' = $6
+        )
+        and ($7::text is null or receive.venue_binding_option_id = $7)
+        and receive.status in ('open', 'processing', 'review_required')
+        and receive.expires_at > $4
+      order by context.created_at desc, context.id desc
+      for update of context, receive
+      limit 2
+    `,
+    [
+      input.userId,
+      input.telegramUserId,
+      input.chatId,
+      input.now,
+      input.venueId,
+      input.controllerWalletId ?? null,
+      input.venueBindingOptionId ?? null,
+    ],
+  );
+  if (rows.length > 1) {
+    throw new TelegramFundingPersistenceError(
+      "telegram_funding_active_context_ambiguous",
+    );
+  }
+  return rows[0] ?? null;
+}
+
+export async function prepareTelegramFundingSessionOpenInTransaction(
+  client: PoolClient,
+  input: ActiveTelegramFundingOpenScope &
+    Readonly<{
+      destinationOptionId: string;
+      telegramAccountId: string;
+      telegramMessageId: number | null;
+      venueBindingOptionId: string;
+    }>,
+): Promise<TelegramFundingSessionContext | null> {
+  await lockTelegramFundingLinkLifecycle(client, input.userId);
+  await lockFundingReceiveSessionScope(client, input);
+  if (input.controllerWalletId) {
+    const currentManagedWallet =
+      await resolveTelegramFundingManagedWalletIdentity(client, {
+        userId: input.userId,
+        telegramAccountId: input.telegramAccountId,
+        telegramUserId: input.telegramUserId,
+      });
+    if (currentManagedWallet?.controllerWalletId !== input.controllerWalletId) {
+      throw new TelegramFundingPersistenceError(
+        "telegram_funding_session_unavailable",
+      );
+    }
+  }
+  const active = await lockActiveTelegramFundingOpenContext(client, input);
+  if (!active) return null;
+  const sameMessage =
+    input.telegramMessageId == null ||
+    active.telegram_message_id == null ||
+    Number(active.telegram_message_id) === input.telegramMessageId;
+  if (sameMessage) return null;
+  // Telegram message ids are monotone within a chat. A delayed callback from an
+  // older card may observe the current context, but it must never take it back.
+  if (input.telegramMessageId < Number(active.telegram_message_id)) {
+    throw new TelegramFundingPersistenceError(
+      "telegram_funding_session_active_elsewhere",
+    );
+  }
+  if (
+    active.active_consent_revision !== null ||
+    active.address_disclosure_attempt_revision > 0
+  ) {
+    throw new TelegramFundingPersistenceError(
+      "telegram_funding_session_active_elsewhere",
+    );
+  }
+  const closed = await client.query<{ id: string }>(
+    `
+      update funding_receive_sessions receive
+      set status = 'cancelled',
+          closed_at = $2,
+          updated_at = $2,
+          version = version + 1
+      where receive.id = $1
+        and receive.owner_channel = 'telegram'
+        and receive.status = 'open'
+        and not exists (
+          select 1
+          from funding_receive_receipts receipt
+          where receipt.receive_session_id = receive.id
+        )
+      returning receive.id
+    `,
+    [active.receive_session_id, input.now],
+  );
+  if (!closed.rows[0]) {
+    throw new TelegramFundingPersistenceError(
+      "telegram_funding_session_active_elsewhere",
+    );
+  }
+  return publicSession(active);
+}
+
+export async function finalizeSupersededTelegramFundingSessionInTransaction(
+  client: PoolClient,
+  input: Readonly<{
+    context: TelegramFundingSessionContext;
+    fingerprint: string;
+    now: Date;
+    projection: JsonRecord;
+  }>,
+): Promise<void> {
+  const updated = await client.query<{
+    progress_revision: number;
+    telegram_account_id: string | null;
+    telegram_message_id: string | number | null;
+    telegram_user_id: string;
+    user_id: string;
+  }>(
+    `
+      update telegram_funding_sessions
+      set cancelled_at = coalesce(cancelled_at, $2),
+          progress_revision = progress_revision + 1,
+          progress_fingerprint = $3,
+          latest_progress_projection = $4::jsonb,
+          latest_terminal_revision = progress_revision + 1,
+          latest_terminal_projection = $4::jsonb,
+          projection_checked_at = $2,
+          updated_at = $2
+      where id = $1
+        and cancelled_at is null
+        and latest_terminal_projection is null
+      returning
+        progress_revision,
+        telegram_account_id,
+        telegram_message_id,
+        telegram_user_id,
+        user_id
+    `,
+    [
+      input.context.id,
+      input.now,
+      input.fingerprint,
+      JSON.stringify(input.projection),
+    ],
+  );
+  const terminal = updated.rows[0];
+  if (!terminal) {
+    throw new TelegramFundingPersistenceError(
+      "telegram_funding_session_unavailable",
+    );
+  }
+  await client.query(
+    `
+      update telegram_bot_action_outbox
+      set status = 'skipped',
+          last_error = 'funding_session_superseded',
+          updated_at = $2
+      where funding_session_id = $1
+        and action in (
+          'funding_send',
+          'funding_edit',
+          'funding_replacement',
+          'funding_qr'
+        )
+        and status in ('pending', 'retry')
+    `,
+    [input.context.id, input.now],
+  );
+  await client.query(
+    `
+      update telegram_bot_action_outbox
+      set state_revision = $2,
+          payload = $3::jsonb,
+          status = 'pending',
+          attempt_count = 0,
+          next_attempt_at = now(),
+          last_error = null,
+          sent_at = null,
+          delivery_attempt_id = null,
+          delivery_started_at = null,
+          updated_at = now()
+      where funding_session_id = $1
+        and action = 'funding_qr'
+        and telegram_message_id is not null
+        and telegram_message_id is distinct from $4::bigint
+        and status not in ('sending', 'delivery_unknown')
+    `,
+    [
+      input.context.id,
+      terminal.progress_revision,
+      JSON.stringify(input.projection),
+      terminal.telegram_message_id,
+    ],
+  );
+  if (terminal.telegram_message_id == null) return;
+  await client.query(
+    `
+      insert into telegram_bot_action_outbox (
+        action,
+        telegram_account_id,
+        user_id,
+        telegram_user_id,
+        funding_session_id,
+        state_revision,
+        payload
+      ) values ('funding_edit', $1, $2, $3, $4, $5, $6::jsonb)
+      on conflict do nothing
+    `,
+    [
+      terminal.telegram_account_id,
+      terminal.user_id,
+      terminal.telegram_user_id,
+      input.context.id,
+      terminal.progress_revision,
+      JSON.stringify(input.projection),
+    ],
+  );
+}
+
 export async function reuseActiveTelegramFundingSession(
   pool: Pool,
   input: Readonly<{
@@ -928,53 +1194,18 @@ export async function reuseActiveTelegramFundingSession(
         return null;
       }
     }
-    const { rows } = await client.query<TelegramFundingSessionRow>(
-      `
-        select ${qualifiedSessionColumns("context")}
-        from telegram_funding_sessions context
-        join funding_receive_sessions receive
-          on receive.id = context.receive_session_id
-         and receive.user_id = context.user_id
-         and receive.owner_channel = context.receive_owner_channel
-        where context.user_id = $1
-          and context.telegram_user_id = $2
-          and context.chat_id = $3
-          and context.origin = 'generic_add_funds'
-          and context.receive_owner_channel = 'telegram'
-          and context.cancelled_at is null
-          and context.latest_terminal_projection is null
-          and context.expires_at > $4
-          and receive.owner_channel = 'telegram'
-          and receive.venue_id = $5
-          and (
-            $6::text is null
-            or receive.destination_target_snapshot #>>
-                 '{location,details,controllerWalletId}' = $6
-          )
-          and ($7::text is null or receive.venue_binding_option_id = $7)
-          and receive.status in ('open', 'processing', 'review_required')
-          and receive.expires_at > $4
-        order by context.created_at desc, context.id desc
-        for update of context
-        limit 2
-      `,
-      [
-        input.userId,
-        input.telegramUserId,
-        input.chatId,
-        input.now,
-        input.venueId,
-        input.controllerWalletId ?? null,
-        input.venueBindingOptionId ?? null,
-      ],
-    );
-    if (rows.length > 1) {
-      throw new TelegramFundingPersistenceError(
-        "telegram_funding_active_context_ambiguous",
-      );
-    }
-    const active = rows[0];
+    const active = await lockActiveTelegramFundingOpenContext(client, input);
     if (!active) return null;
+    const opensInAnotherMessage =
+      input.telegramMessageId != null &&
+      active.telegram_message_id != null &&
+      Number(active.telegram_message_id) !== input.telegramMessageId;
+    if (opensInAnotherMessage) {
+      // A Telegram message owns its context: reusing another message makes
+      // the new button look inert. The final open transaction owns the
+      // supersede decision so two messages cannot both pass this preflight.
+      return null;
+    }
     const refreshed = await client.query<TelegramFundingSessionRow>(
       `
         update telegram_funding_sessions
@@ -1011,6 +1242,7 @@ export async function fetchTelegramFundingSelectionSnapshot(
   input: Readonly<{
     contextId: string;
     telegramUserId: string;
+    telegramMessageId: number | null;
     chatId: string;
     userId: string;
   }>,
@@ -1039,9 +1271,16 @@ export async function fetchTelegramFundingSelectionSnapshot(
         and context.user_id = $2
         and context.telegram_user_id = $3
         and context.chat_id = $4
+        and context.telegram_message_id is not distinct from $5::bigint
       limit 1
     `,
-    [input.contextId, input.userId, input.telegramUserId, input.chatId],
+    [
+      input.contextId,
+      input.userId,
+      input.telegramUserId,
+      input.chatId,
+      input.telegramMessageId,
+    ],
   );
   const row = rows[0];
   return row
@@ -1140,6 +1379,7 @@ export async function appendTelegramFundingConsent(
           and context.user_id = $2
           and context.telegram_user_id = $3
           and context.chat_id = $4
+          and context.telegram_message_id is not distinct from $7::bigint
           and context.cancelled_at is null
           and context.expires_at > $6
           and context.latest_terminal_projection is null
@@ -1159,6 +1399,7 @@ export async function appendTelegramFundingConsent(
         input.chatId,
         input.telegramAccountId,
         input.now,
+        input.telegramMessageId,
       ],
     );
     const contextRow = locked.rows[0];
@@ -1444,6 +1685,7 @@ export async function cancelTelegramFundingSessionContext(
           and context.user_id = $2
           and context.telegram_user_id = $3
           and context.chat_id = $4
+          and context.telegram_message_id is not distinct from $6::bigint
           and context.receive_owner_channel = 'telegram'
           and exists (
             select 1
@@ -1460,6 +1702,7 @@ export async function cancelTelegramFundingSessionContext(
         input.telegramUserId,
         input.chatId,
         input.telegramAccountId,
+        input.telegramMessageId,
       ],
     );
     const contextRow = locked.rows[0];

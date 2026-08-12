@@ -93,6 +93,10 @@ export type SignalBotTelegramClient = {
     reply_markup?: TelegramInlineKeyboard;
     text: string;
   }): Promise<TelegramSendResult>;
+  deleteMessage?(input: {
+    chat_id: string;
+    message_id: number;
+  }): Promise<TelegramSendResult>;
   sendPhoto?(input: {
     caption?: string;
     chat_id: string;

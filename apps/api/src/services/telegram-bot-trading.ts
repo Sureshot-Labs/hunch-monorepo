@@ -306,6 +306,8 @@ export type TelegramBotTradingReplyMarkup = {
 };
 
 export type TelegramBotTradingMessage = {
+  durableFundingDeliveryRequired?: boolean;
+  fundingContextId?: string;
   marketFound?: boolean;
   parse_mode?: "MarkdownV2";
   reply_markup?: TelegramBotTradingReplyMarkup;
@@ -704,12 +706,7 @@ type CapturedTelegramBotTradingCallbackResult = {
     text?: string;
   }>;
   handled: boolean;
-  messages: Array<{
-    chat_id: string;
-    parse_mode?: "MarkdownV2";
-    reply_markup?: TelegramBotTradingReplyMarkup;
-    text: string;
-  }>;
+  messages: Array<TelegramBotTradingMessage & { chat_id: string }>;
 };
 
 const TERMINAL_INTENT_STATUSES = new Set([
@@ -3908,6 +3905,7 @@ async function lockTelegramIntentMarket(
 async function lockTelegramFundingReturnContext(
   db: DbQuery,
   fundingContextId: string,
+  telegramMessageId?: number,
 ): Promise<boolean> {
   const context = await db.query<{ receive_session_id: string }>(
     `select receive_session_id
@@ -3931,8 +3929,9 @@ async function lockTelegramFundingReturnContext(
        from telegram_funding_sessions
       where id = $1::uuid
         and receive_session_id = $2::uuid
+        and ($3::bigint is null or telegram_message_id = $3::bigint)
       for update`,
-    [fundingContextId, receiveSessionId],
+    [fundingContextId, receiveSessionId, telegramMessageId ?? null],
   );
   return (lockedContext.rowCount ?? 0) === 1;
 }
@@ -3942,12 +3941,14 @@ async function lockTelegramFundingReturnBeforeMarket(
   input: Readonly<{
     fundingContextId: string;
     marketId: string;
+    telegramMessageId?: number;
     telegramUserId: string;
   }>,
 ): Promise<boolean> {
   const fundingLocked = await lockTelegramFundingReturnContext(
     db,
     input.fundingContextId,
+    input.telegramMessageId,
   );
   await lockTelegramIntentMarket(db, input);
   return fundingLocked;
@@ -5944,6 +5945,7 @@ export async function resumeTelegramFundingBuyContinuation(input: {
         {
           fundingContextId: scoped.telegram_funding_session_id,
           marketId: scoped.market_id,
+          telegramMessageId: input.telegramMessageId,
           telegramUserId: input.telegramUserId,
         },
       );

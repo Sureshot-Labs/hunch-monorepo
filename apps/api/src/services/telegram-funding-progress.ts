@@ -439,6 +439,20 @@ export function projectTelegramFundingUnavailable(
   });
 }
 
+export function projectTelegramFundingCancelled(
+  context: TelegramFundingSessionContext,
+  presentation: TelegramFundingRoutePresentation,
+): TelegramFundingProgressProjection {
+  return projection({
+    assetSymbol: presentation.destinationAssetSymbol,
+    context,
+    presentation,
+    receipts: [],
+    state: "cancelled",
+    terminal: true,
+  });
+}
+
 export function telegramFundingProgressFingerprint(
   projectionValue: TelegramFundingProgressProjection,
 ): string {

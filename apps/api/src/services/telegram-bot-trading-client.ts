@@ -135,6 +135,7 @@ export type TelegramBotTradingInternalApiClient = {
     chatId: string | number;
     contextId: string;
     deliveryProjection?: TelegramFundingProgressProjection;
+    telegramMessageId?: number | null;
     telegramUserId: string | number;
     view?: "address" | "delivery" | "progress";
   }) => Promise<TelegramFundingClientMessage>;
@@ -201,7 +202,7 @@ export type TelegramBotTradingInternalApiClient = {
     value: string;
   }) => Promise<{
     completed: boolean;
-    message: TelegramBotTradingClientMessage;
+    message: TelegramFundingClientMessage;
   }>;
   handleCallback: (
     input: TelegramBotTradingClientCallbackInput,
@@ -215,12 +216,7 @@ type CapturedTelegramBotTradingCallbackResult = {
     text?: string;
   }>;
   handled: boolean;
-  messages: Array<{
-    chat_id: string;
-    parse_mode?: "MarkdownV2";
-    reply_markup?: TelegramBotTradingClientReplyMarkup;
-    text: string;
-  }>;
+  messages: Array<TelegramFundingClientMessage & { chat_id: string }>;
 };
 
 export const TELEGRAM_BOT_TRADING_CALLBACK_PREFIX = "hbt";
@@ -582,7 +578,7 @@ export function createTelegramBotTradingInternalApiClient(input: {
     completeTradeInput: (body) =>
       post<{
         completed: boolean;
-        message: TelegramBotTradingClientMessage;
+        message: TelegramFundingClientMessage;
       }>(
         `/internal/telegram-bot/trading/input-contexts/${body.contextId}/complete`,
         {
@@ -824,9 +820,12 @@ export function createTelegramBotTradingInternalApiClient(input: {
             ? (terminalMessage ?? message)
             : message;
         if (
-          previewEdited &&
           !confirmAcknowledged &&
-          index === result.messages.length - 1
+          index === result.messages.length - 1 &&
+          // A funding preview is bound to this callback message in the API.
+          // Never copy its actionable keyboard to a different message ID.
+          (previewEdited ||
+            typeof deliveredMessage.fundingContextId === "string")
         ) {
           continue;
         }

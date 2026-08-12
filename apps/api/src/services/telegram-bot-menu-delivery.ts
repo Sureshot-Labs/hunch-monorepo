@@ -6,9 +6,11 @@ import type {
 import {
   isSignalBotMenuRenderCurrent,
   withSignalBotMenuRenderLock,
+  type SignalBotMenuStateRedis,
 } from "./telegram-bot-menu-state.js";
 
 export type TelegramBotMenuMessage = {
+  fundingContextId?: string;
   marketFound?: boolean;
   parse_mode?: "MarkdownV2";
   reply_markup?: TelegramInlineKeyboard;
@@ -70,18 +72,7 @@ export function isTelegramBotMenuRenderSuppressed(
 export function createTelegramBotCallbackMenuTransport(input: {
   chatId: string;
   messageId: number;
-  redis: {
-    eval(
-      script: string,
-      options: { arguments: string[]; keys: string[] },
-    ): Promise<unknown>;
-    get(key: string): Promise<string | null>;
-    set(
-      key: string,
-      value: string,
-      options?: { NX?: boolean; PX?: number },
-    ): Promise<unknown>;
-  };
+  redis: Pick<SignalBotMenuStateRedis, "eval" | "get" | "set">;
   renderToken: string;
   transport: TelegramBotMenuTransport;
 }): TelegramBotMenuTransport {
@@ -149,7 +140,14 @@ export async function sendOrEditTelegramBotMenuMessage(input: {
       return edited;
     }
     if (isTelegramBotMenuRenderSuppressed(edited)) return edited;
-    if (edited.error !== "message_not_editable") return edited;
+    // Funding callbacks are valid only in the message that owns the context.
+    // Sending the same keyboard as a new message would create a dead card.
+    if (
+      edited.error !== "message_not_editable" ||
+      typeof input.message.fundingContextId === "string"
+    ) {
+      return edited;
+    }
   }
   if (input.shouldDeliver && !(await input.shouldDeliver())) {
     return superseded();

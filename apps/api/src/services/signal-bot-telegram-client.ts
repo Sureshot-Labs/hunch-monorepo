@@ -358,6 +358,50 @@ export class TelegramBotApiClient implements SignalBotTelegramClient {
     }
   }
 
+  async deleteMessage(input: {
+    chat_id: string;
+    message_id: number;
+  }): Promise<TelegramSendResult> {
+    const signal = telegramMutationSignal();
+    try {
+      const response = await fetch(`${this.baseUrl}/deleteMessage`, {
+        body: JSON.stringify(input),
+        headers: { "Content-Type": "application/json" },
+        method: "POST",
+        signal,
+      });
+      const payload = (await response.json().catch(() => null)) as {
+        description?: string;
+        ok?: boolean;
+        parameters?: { retry_after?: number };
+        result?: boolean;
+      } | null;
+      if (response.ok && payload?.ok && payload.result === true) {
+        return { messageId: input.message_id, ok: true };
+      }
+      const message = payload?.description ?? `HTTP ${response.status}`;
+      if (/message to delete not found|message not found/i.test(message)) {
+        return { messageId: input.message_id, ok: true };
+      }
+      if (
+        response.status === 403 ||
+        /chat not found|bot was blocked|user is deactivated/i.test(message)
+      ) {
+        return { error: "blocked_or_missing", message, ok: false };
+      }
+      return {
+        error: response.ok || response.status >= 500 ? "ambiguous" : "other",
+        message,
+        ok: false,
+        ...(payload?.parameters?.retry_after
+          ? { retryAfterSec: payload.parameters.retry_after }
+          : {}),
+      };
+    } catch (error) {
+      return telegramTransportFailure(error);
+    }
+  }
+
   async sendRichMessage(
     input: TelegramSendRichMessageInput,
   ): Promise<TelegramSendResult> {

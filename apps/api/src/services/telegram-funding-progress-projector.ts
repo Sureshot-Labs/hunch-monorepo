@@ -176,13 +176,33 @@ async function projectCandidate(
       (consent
         ? resolveTelegramFundingConsentRoute(consent)?.presentation
         : null);
+    const qrPhoto = await client.query<{ exists: boolean }>(
+      `
+        select exists (
+          select 1
+          from telegram_bot_action_outbox
+          where funding_session_id = $1
+            and action = 'funding_qr'
+            and telegram_message_id is not null
+            and telegram_message_id is distinct from $2::bigint
+            and payload->>'terminal' <> 'true'
+        ) as exists
+      `,
+      [context.id, context.telegramMessageId],
+    );
+    const shouldDeleteQrPhoto =
+      !controllerIsCurrent && qrPhoto.rows[0]?.exists === true;
     const shouldRedactDeliveredAddress =
       !controllerIsCurrent &&
       context.addressDisclosureAttemptRevision >
         context.addressRedactedRevision &&
       redactionPresentation != null &&
       latestProjection?.state !== "unavailable";
-    if (!controllerIsCurrent && !shouldRedactDeliveredAddress) {
+    if (
+      !controllerIsCurrent &&
+      !shouldRedactDeliveredAddress &&
+      !shouldDeleteQrPhoto
+    ) {
       await client.query(
         `
           update telegram_bot_action_outbox
@@ -211,7 +231,8 @@ async function projectCandidate(
       return "skipped";
     }
     let projection =
-      shouldRedactDeliveredAddress && redactionPresentation
+      (shouldRedactDeliveredAddress || shouldDeleteQrPhoto) &&
+      redactionPresentation
         ? projectTelegramFundingUnavailable(context, redactionPresentation)
         : null;
     if (controllerIsCurrent) {
@@ -390,6 +411,34 @@ async function projectCandidate(
       `,
       [context.id, revision],
     );
+    if (projection.terminal) {
+      await client.query(
+        `
+          update telegram_bot_action_outbox
+          set state_revision = $2,
+              payload = $3::jsonb,
+              status = 'pending',
+              attempt_count = 0,
+              next_attempt_at = now(),
+              last_error = null,
+              sent_at = null,
+              delivery_attempt_id = null,
+              delivery_started_at = null,
+              updated_at = now()
+          where funding_session_id = $1
+            and action = 'funding_qr'
+            and telegram_message_id is not null
+            and telegram_message_id is distinct from $4::bigint
+            and status not in ('sending', 'delivery_unknown')
+        `,
+        [
+          context.id,
+          revision,
+          JSON.stringify(projection),
+          context.telegramMessageId,
+        ],
+      );
+    }
     if (projection.receiveAddress !== null && !row.telegram_message_id) {
       return "created";
     }
@@ -419,6 +468,27 @@ async function projectCandidate(
     );
     return "created";
   });
+}
+
+export async function runTelegramFundingProgressProjectionForContext(
+  pool: Pool,
+  input: Readonly<{ contextId: string; now?: Date }>,
+): Promise<"created" | "skipped"> {
+  const now = input.now ?? new Date();
+  const policyRevision =
+    (await fetchActiveRuntimePolicy(pool, "signal_bot"))?.id ??
+    DEFAULT_SIGNAL_BOT_POLICY_REVISION;
+  const candidate = await pool.query<CandidateRow>(
+    `
+      select id, user_id, telegram_user_id, chat_id
+      from telegram_funding_sessions
+      where id = $1
+      limit 1
+    `,
+    [input.contextId],
+  );
+  const row = candidate.rows[0];
+  return row ? projectCandidate(pool, row, now, policyRevision) : "skipped";
 }
 
 export async function runTelegramFundingProgressProjectionBatch(

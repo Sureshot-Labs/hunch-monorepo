@@ -230,6 +230,19 @@ export function buildTelegramFundingDeliveryQueuedMessage(input: {
   };
 }
 
+export function buildTelegramFundingActiveElsewhereMessage(): TelegramFundingMessage {
+  return {
+    parse_mode: "MarkdownV2",
+    text: formatTelegramCalloutMarkdownV2({
+      bodyMarkdownV2: escapeTelegramMarkdownV2(
+        "A transfer is already being monitored in an earlier Deposit screen. Finish that transfer there; it remains safe and active.",
+      ),
+      icon: "ℹ️",
+      title: "Deposit already active",
+    }),
+  };
+}
+
 export function buildTelegramFundingCancelledMessage(): TelegramFundingMessage {
   return {
     parse_mode: "MarkdownV2",
@@ -246,7 +259,7 @@ export function buildTelegramFundingCancelledMessage(): TelegramFundingMessage {
 export function buildTelegramFundingProgressMessage(
   projection: TelegramFundingProgressProjection,
 ): TelegramFundingMessage {
-  return buildTelegramFundingProgressMessageInternal(projection, false);
+  return buildTelegramFundingProgressMessageInternal(projection);
 }
 
 function acceptedAssetsLabel(
@@ -264,56 +277,44 @@ function automaticSourceLabel(
   );
 }
 
-function qrMarkdown(address: string): string {
-  const qr = QRCode.create(address, { errorCorrectionLevel: "M" });
-  const margin = 4;
-  const width = qr.modules.size + margin * 2;
-  const quadrants = [
-    " ",
-    "▘",
-    "▝",
-    "▀",
-    "▖",
-    "▌",
-    "▞",
-    "▛",
-    "▗",
-    "▚",
-    "▐",
-    "▜",
-    "▄",
-    "▙",
-    "▟",
-    "█",
-  ] as const;
-  const lines: string[] = [];
-  const isDark = (row: number, column: number): boolean => {
-    const sourceRow = row - margin;
-    const sourceColumn = column - margin;
-    return Boolean(
-      sourceRow >= 0 &&
-      sourceColumn >= 0 &&
-      sourceRow < qr.modules.size &&
-      sourceColumn < qr.modules.size &&
-      qr.modules.get(sourceRow, sourceColumn),
-    );
-  };
-  // Two-by-two quadrant glyphs keep the code block narrow enough for mobile
-  // Telegram. Braille would be smaller too, but its separated dots are less
-  // scanner-friendly than these contiguous module quarters.
-  for (let row = 0; row < width; row += 2) {
-    let line = "";
-    for (let column = 0; column < width; column += 2) {
-      const mask =
-        (isDark(row, column) ? 1 : 0) |
-        (isDark(row, column + 1) ? 2 : 0) |
-        (isDark(row + 1, column) ? 4 : 0) |
-        (isDark(row + 1, column + 1) ? 8 : 0);
-      line += quadrants[mask];
-    }
-    lines.push(line);
+export async function buildTelegramFundingQrPhoto(
+  projection: TelegramFundingProgressProjection,
+): Promise<
+  Readonly<{
+    caption: string;
+    filename: string;
+    photo: Uint8Array;
+  }>
+> {
+  if (!projection.receiveAddress || projection.terminal) {
+    throw new Error("funding QR requires an active verified address");
   }
-  return `\`\`\`\n${lines.join("\n")}\n\`\`\``;
+  const png = await QRCode.toBuffer(projection.receiveAddress, {
+    errorCorrectionLevel: "M",
+    margin: 4,
+    type: "png",
+    width: 768,
+  });
+  return {
+    caption: joinTelegramMarkdownV2Lines([
+      formatTelegramBoldMarkdownV2(
+        `${projection.presentation.venueLabel} funding QR`,
+      ),
+      "",
+      formatTelegramFieldMarkdownV2(
+        "Network",
+        projection.presentation.networkLabel,
+      ),
+      formatTelegramFieldMarkdownV2("Asset", acceptedAssetsLabel(projection)),
+      escapeTelegramMarkdownV2("Scan to fill the verified receive address."),
+      formatTelegramFieldMarkdownV2(
+        "Expires at",
+        expiryLabel(projection.expiresAt),
+      ),
+    ]),
+    filename: `hunch-funding-${projection.fundingContextId}.png`,
+    photo: new Uint8Array(png),
+  };
 }
 
 function fundingProgressReplyMarkup(
@@ -387,7 +388,6 @@ function fundingProgressReplyMarkup(
 
 function buildTelegramFundingProgressMessageInternal(
   projection: TelegramFundingProgressProjection,
-  showQr: boolean,
 ): TelegramFundingMessage {
   const { presentation } = projection;
   const destinationAsset = presentation.destinationAssetSymbol;
@@ -486,13 +486,6 @@ function buildTelegramFundingProgressMessageInternal(
             "",
             `📍 ${formatTelegramBoldMarkdownV2("Verified receive address")}`,
             formatTelegramCodeMarkdownV2(projection.receiveAddress),
-            ...(showQr
-              ? [
-                  "",
-                  formatTelegramBoldMarkdownV2("Scan QR"),
-                  qrMarkdown(projection.receiveAddress),
-                ]
-              : []),
           ]
         : []),
       "",
@@ -508,13 +501,4 @@ function buildTelegramFundingProgressMessageInternal(
     ]),
     venue: presentation.venueId,
   };
-}
-
-export function buildTelegramFundingQrMessage(
-  projection: TelegramFundingProgressProjection,
-): TelegramFundingMessage {
-  if (!projection.receiveAddress || projection.terminal) {
-    return buildTelegramFundingProgressMessage(projection);
-  }
-  return buildTelegramFundingProgressMessageInternal(projection, true);
 }

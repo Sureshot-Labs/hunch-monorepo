@@ -431,15 +431,16 @@ assert.equal(
 
 let completionCalls = 0;
 let completionMiniAppEnabled: boolean | undefined;
+let completionOwnerMessageId: number | undefined;
 assert.equal(
   await handleSignalBotTradeInput({
     chatId: "42",
     complete: async (input) => {
       completionCalls += 1;
       completionMiniAppEnabled = input.telegramMiniAppEnabled;
+      completionOwnerMessageId = input.telegramMessageId;
       return { completed: true, message: { text: "confirm sell" } };
     },
-    messageId: 99,
     redis,
     telegramUserId: 42,
     telegramMiniAppEnabled: true,
@@ -461,6 +462,7 @@ assert.equal(
 );
 assert.equal(completionCalls, 1);
 assert.equal(completionMiniAppEnabled, true);
+assert.equal(completionOwnerMessageId, 12);
 assert.equal(
   await readSignalBotMenuInput({ chatId: "42", redis, telegramUserId: 42 }),
   null,
@@ -482,7 +484,6 @@ await handleSignalBotTradeInput({
     completed: false,
     message: { text: "invalid amount" },
   }),
-  messageId: 100,
   redis,
   telegramUserId: 42,
   text: "wrong",
@@ -542,7 +543,6 @@ assert.equal(
     complete: async () => {
       throw new Error("completion timeout");
     },
-    messageId: 101,
     redis,
     telegramUserId: 42,
     text: "1.25",

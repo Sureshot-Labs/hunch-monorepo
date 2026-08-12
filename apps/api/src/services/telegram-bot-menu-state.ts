@@ -261,7 +261,7 @@ export async function writeSignalBotTradeMenuInput(input: {
   chatId: string;
   contextId: string;
   expiresAt: string;
-  menuMessageId: number | null;
+  menuMessageId: number;
   redis: Pick<MenuStateRedis, "set">;
   telegramUserId: number;
 }): Promise<{ stateToken: string } | null> {

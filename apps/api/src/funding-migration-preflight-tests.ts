@@ -127,7 +127,8 @@ const db = {
           params[0].includes("0201_telegram_funding_open_idempotency.sql") &&
           params[0].includes("0203_telegram_funding_buy_continuation.sql") &&
           params[0].includes("0204_delegated_funding_execution.sql") &&
-          params[0].includes("0206_telegram_funding_wallet_retention.sql"),
+          params[0].includes("0206_telegram_funding_wallet_retention.sql") &&
+          params[0].includes("0207_telegram_funding_owner_delivery.sql"),
       );
       return { rows: [] };
     }
@@ -171,6 +172,7 @@ assert.deepEqual(report.blockers, [
   "0203 Telegram funding Buy continuation migration is not recorded",
   "0204 delegated funding execution migration is not recorded",
   "0206 delegated funding wallet retention migration is not recorded",
+  "0207 Telegram funding owner delivery migration is not recorded",
 ]);
 assert.equal(report.latestMigration, "0182_telegram_bot_action_outbox.sql");
 assert.equal(report.bridgeOrders.total, 256);
@@ -314,6 +316,7 @@ assert.deepEqual(ready.blockers, [
   "0203 Telegram funding Buy continuation migration is not recorded",
   "0204 delegated funding execution migration is not recorded",
   "0206 delegated funding wallet retention migration is not recorded",
+  "0207 Telegram funding owner delivery migration is not recorded",
 ]);
 assert.equal(ready.telegramOpenMutationConstraints, true);
 
@@ -329,6 +332,7 @@ assert.deepEqual(missingMigration.blockers, [
   "0203 Telegram funding Buy continuation migration is not recorded",
   "0204 delegated funding execution migration is not recorded",
   "0206 delegated funding wallet retention migration is not recorded",
+  "0207 Telegram funding owner delivery migration is not recorded",
 ]);
 
 const recordedWithoutConstraint = await inspectFundingMigrationPreflight(
@@ -342,6 +346,7 @@ assert.deepEqual(recordedWithoutConstraint.blockers, [
   "0203 Telegram funding Buy continuation migration is not recorded",
   "0204 delegated funding execution migration is not recorded",
   "0206 delegated funding wallet retention migration is not recorded",
+  "0207 Telegram funding owner delivery migration is not recorded",
   "0201 is recorded but telegram_funding_mutations open constraints are incomplete",
 ]);
 
@@ -356,6 +361,7 @@ assert.deepEqual(recordedWithOldShapeConstraint.blockers, [
   "0203 Telegram funding Buy continuation migration is not recorded",
   "0204 delegated funding execution migration is not recorded",
   "0206 delegated funding wallet retention migration is not recorded",
+  "0207 Telegram funding owner delivery migration is not recorded",
   "0201 is recorded but telegram_funding_mutations open constraints are incomplete",
 ]);
 
@@ -371,6 +377,7 @@ assert.deepEqual(constraintWithoutLedger.blockers, [
   "0203 Telegram funding Buy continuation migration is not recorded",
   "0204 delegated funding execution migration is not recorded",
   "0206 delegated funding wallet retention migration is not recorded",
+  "0207 Telegram funding owner delivery migration is not recorded",
   "Telegram funding open mutation constraints exist before 0201 is recorded",
 ]);
 
@@ -558,6 +565,12 @@ function buildTelegram0203Db(
                      if delivered.state_revision = context.latest_terminal_revision
                         and delivered.telegram_account_id = target_telegram_account_id
                         and delivered.status = 'sent' then
+                       if address_disclosure_attempt_revision > address_redacted_revision
+                          and redaction.state_revision is not null
+                          and address_disclosure_message_id is not null
+                          and context.telegram_message_id is not null then
+                         insert into outbox values ( 'funding_edit' );
+                       end if;
                        return 0;
                      end if;
                    end $$`
@@ -595,6 +608,7 @@ const telegram0203Ready = await inspectFundingMigrationPreflight(
 assert.deepEqual(telegram0203Ready.blockers, [
   "0204 delegated funding execution migration is not recorded",
   "0206 delegated funding wallet retention migration is not recorded",
+  "0207 Telegram funding owner delivery migration is not recorded",
 ]);
 assert.equal(telegram0203Ready.telegramBuyContinuationObjects, true);
 
@@ -617,6 +631,7 @@ const telegram0203RecordedIncomplete = await inspectFundingMigrationPreflight(
 assert.deepEqual(telegram0203RecordedIncomplete.blockers, [
   "0204 delegated funding execution migration is not recorded",
   "0206 delegated funding wallet retention migration is not recorded",
+  "0207 Telegram funding owner delivery migration is not recorded",
   "0203 is recorded but Telegram funding Buy continuation objects are incomplete",
 ]);
 assert.equal(
@@ -634,6 +649,7 @@ const telegram0203OldRearmFunction = await inspectFundingMigrationPreflight(
 assert.deepEqual(telegram0203OldRearmFunction.blockers, [
   "0204 delegated funding execution migration is not recorded",
   "0206 delegated funding wallet retention migration is not recorded",
+  "0207 Telegram funding owner delivery migration is not recorded",
   "0203 is recorded but Telegram funding Buy continuation objects are incomplete",
 ]);
 assert.equal(
@@ -648,12 +664,15 @@ assert.deepEqual(telegram0203ObjectsBeforeRecord.blockers, [
   "0203 Telegram funding Buy continuation migration is not recorded",
   "0204 delegated funding execution migration is not recorded",
   "0206 delegated funding wallet retention migration is not recorded",
+  "0207 Telegram funding owner delivery migration is not recorded",
   "Telegram funding Buy continuation objects exist before 0203 is recorded",
 ]);
 
 function buildTelegram0206Db(
   input: Readonly<{
     qrIndexReady: boolean;
+    ownerDeliveryReady?: boolean;
+    ownerDeliveryRecorded?: boolean;
     malformedReviewEvidence?: number;
     strictAuthorizationIdentity?: boolean;
     strictIdentifierEquality?: boolean;
@@ -694,6 +713,9 @@ function buildTelegram0206Db(
         normalized.includes("from public.schema_migrations") &&
         normalized.includes("filename = any")
       ) {
+        const ownerDeliveryReady = input.ownerDeliveryReady !== false;
+        const ownerDeliveryRecorded =
+          input.ownerDeliveryRecorded ?? ownerDeliveryReady;
         return {
           rows: [
             { filename: "0199_telegram_funding_receive.sql" },
@@ -701,6 +723,9 @@ function buildTelegram0206Db(
             { filename: "0203_telegram_funding_buy_continuation.sql" },
             { filename: "0204_delegated_funding_execution.sql" },
             { filename: "0206_telegram_funding_wallet_retention.sql" },
+            ...(ownerDeliveryRecorded
+              ? [{ filename: "0207_telegram_funding_owner_delivery.sql" }]
+              : []),
           ],
         };
       }
@@ -709,7 +734,15 @@ function buildTelegram0206Db(
         normalized.includes("order by applied_at")
       ) {
         return {
-          rows: [{ filename: "0206_telegram_funding_wallet_retention.sql" }],
+          rows: [
+            {
+              filename:
+                (input.ownerDeliveryRecorded ??
+                input.ownerDeliveryReady !== false)
+                  ? "0207_telegram_funding_owner_delivery.sql"
+                  : "0206_telegram_funding_wallet_retention.sql",
+            },
+          ],
         };
       }
       if (
@@ -745,6 +778,10 @@ function buildTelegram0206Db(
             "CHECK (action = 'funding_qr' AND funding_session_id IS NOT NULL AND state_revision > 0)",
           telegram_bot_action_outbox_delivery_attempt_check:
             "CHECK (action = 'funding_qr' AND delivery_attempt_id IS NOT NULL AND delivery_started_at IS NOT NULL)",
+          telegram_bot_action_outbox_delivery_unknown_check:
+            input.ownerDeliveryReady === false
+              ? "CHECK (status <> 'delivery_unknown' OR action IN ('welcome_menu', 'funding_send', 'funding_replacement'))"
+              : "CHECK (status <> 'delivery_unknown' OR action IN ('welcome_menu', 'funding_send', 'funding_replacement', 'funding_qr'))",
           telegram_bot_action_outbox_address_egress_check:
             "CHECK (action NOT IN ('funding_send', 'funding_replacement') OR payload -> 'receiveAddress' = 'null')",
           telegram_funding_mutations_action_check:
@@ -831,7 +868,9 @@ function buildTelegram0206Db(
             rows: [
               {
                 definition:
-                  "delivered.state_revision = context.latest_terminal_revision delivered.telegram_account_id = target_telegram_account_id delivered.status = 'sent' address_disclosure_attempt_revision > address_redacted_revision then 'funding_edit' redaction.state_revision address_disclosure_message_id is not null",
+                  input.ownerDeliveryReady === false
+                    ? "delivered.state_revision = context.latest_terminal_revision delivered.telegram_account_id = target_telegram_account_id delivered.status = 'sent' address_disclosure_attempt_revision > address_redacted_revision then 'funding_edit' else 'funding_replacement' recovery.delivery_action redaction.state_revision address_disclosure_message_id is not null"
+                    : "delivered.state_revision = context.latest_terminal_revision delivered.telegram_account_id = target_telegram_account_id delivered.status = 'sent' address_disclosure_attempt_revision > address_redacted_revision insert into telegram_bot_action_outbox 'funding_edit' redaction.state_revision recovery.delivery_revision address_disclosure_message_id is not null context.telegram_message_id is not null",
               },
             ],
           };
@@ -888,8 +927,52 @@ const telegram0206Ready = await inspectFundingMigrationPreflight(
 );
 assert.equal(telegram0206Ready.delegatedFundingExecutionObjects, true);
 assert.equal(telegram0206Ready.delegatedFundingWalletRetentionObjects, true);
+assert.equal(telegram0206Ready.telegramFundingOwnerDeliveryObjects, true);
 assert.deepEqual(telegram0206Ready.blockers, []);
 assert.equal(telegram0206Ready.malformedReceiveReviewEvidence, 0);
+
+const telegram0206Only = await inspectFundingMigrationPreflight(
+  buildTelegram0206Db({
+    qrIndexReady: true,
+    ownerDeliveryReady: false,
+  }) as never,
+);
+assert.equal(telegram0206Only.delegatedFundingWalletRetentionObjects, true);
+assert.equal(telegram0206Only.telegramFundingOwnerDeliveryObjects, false);
+assert.deepEqual(telegram0206Only.blockers, [
+  "0207 Telegram funding owner delivery migration is not recorded",
+]);
+
+const telegram0207ObjectsBeforeRecord = await inspectFundingMigrationPreflight(
+  buildTelegram0206Db({
+    qrIndexReady: true,
+    ownerDeliveryReady: true,
+    ownerDeliveryRecorded: false,
+  }) as never,
+);
+assert.equal(
+  telegram0207ObjectsBeforeRecord.telegramFundingOwnerDeliveryObjects,
+  true,
+);
+assert.deepEqual(telegram0207ObjectsBeforeRecord.blockers, [
+  "0207 Telegram funding owner delivery migration is not recorded",
+  "Telegram funding owner delivery objects exist before 0207 is recorded",
+]);
+
+const telegram0207RecordedIncomplete = await inspectFundingMigrationPreflight(
+  buildTelegram0206Db({
+    qrIndexReady: true,
+    ownerDeliveryReady: false,
+    ownerDeliveryRecorded: true,
+  }) as never,
+);
+assert.equal(
+  telegram0207RecordedIncomplete.telegramFundingOwnerDeliveryObjects,
+  false,
+);
+assert.deepEqual(telegram0207RecordedIncomplete.blockers, [
+  "0207 is recorded but Telegram funding owner delivery objects are incomplete",
+]);
 
 const telegram0206MalformedReviewEvidence =
   await inspectFundingMigrationPreflight(

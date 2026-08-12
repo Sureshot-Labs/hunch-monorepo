@@ -1053,6 +1053,17 @@ try {
     policyRevision,
     now,
   });
+  const staleMessageReview = await resumeTelegramFundingBuyContinuation({
+    ...resumeInput,
+    idempotencyKey: `slice-b-stale-message-${suffix}`,
+    telegramMessageId: 100,
+    token: terminalBlockedCard.token,
+  });
+  assert.match(
+    staleMessageReview.text,
+    /Review unavailable/u,
+    "Review Buy must fail closed outside the context's exact owner message",
+  );
   await pool.query(
     `update telegram_funding_sessions
         set latest_terminal_projection = jsonb_set(
@@ -1905,12 +1916,12 @@ try {
      join telegram_bot_action_outbox outbox
        on outbox.funding_session_id = context.id
       and outbox.state_revision = context.latest_terminal_revision
-      and outbox.action = 'funding_replacement'
+      and outbox.action = 'funding_edit'
      where context.id = $1::uuid`,
     [contextId],
   );
   assert.deepEqual(rearmed.rows[0], {
-    action: "funding_replacement",
+    action: "funding_edit",
     context_account: relinkedTelegramAccountId,
     outbox_account: relinkedTelegramAccountId,
     status: "pending",
@@ -1970,7 +1981,7 @@ try {
     `update telegram_bot_action_outbox
      set status = 'sent', sent_at = now(), updated_at = now()
      where funding_session_id = $1::uuid
-       and action = 'funding_replacement'`,
+       and action = 'funding_edit'`,
     [contextId],
   );
   const rearmAgain = await pool.query<{ rearmed: number }>(

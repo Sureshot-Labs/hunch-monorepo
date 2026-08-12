@@ -112,6 +112,35 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
+    name: "owner-scoped funding cards never fall back to a new message",
+    run: async () => {
+      for (const failure of [
+        {
+          error: "message_not_editable",
+          message: "message to edit not found",
+          ok: false,
+        },
+        { error: "ambiguous", message: "timeout", ok: false },
+      ] as const) {
+        let sends = 0;
+        const result = await sendOrEditTelegramBotMenuMessage({
+          chatId: "99",
+          message: { fundingContextId: "funding-1", text: "Funding" },
+          messageId: 7,
+          transport: {
+            editMessageText: async () => failure,
+            sendMessage: async () => {
+              sends += 1;
+              return { messageId: 8, ok: true };
+            },
+          },
+        });
+        assert.deepEqual(result, failure);
+        assert.equal(sends, 0);
+      }
+    },
+  },
+  {
     name: "menu supersession between edit and fallback prevents standalone send",
     run: async () => {
       let checks = 0;
@@ -204,14 +233,43 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         const callback = await client.answerCallbackQuery({
           callbackQueryId: "callback-1",
         });
-        for (const result of [rich, photo, callback]) {
+        const deleted = await client.deleteMessage({
+          chat_id: "99",
+          message_id: 7,
+        });
+        for (const result of [rich, photo, callback, deleted]) {
           assert.deepEqual(result, {
             error: "ambiguous",
             message: "request timed out",
             ok: false,
           });
         }
-        assert.equal(signals.length, 3);
+        assert.equal(signals.length, 4);
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    },
+  },
+  {
+    name: "deleting an already absent Telegram message is idempotent",
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      try {
+        globalThis.fetch = (async () =>
+          new Response(
+            JSON.stringify({
+              description: "Bad Request: message to delete not found",
+              ok: false,
+            }),
+            { status: 400 },
+          )) as typeof fetch;
+        assert.deepEqual(
+          await new TelegramBotApiClient("token").deleteMessage({
+            chat_id: "99",
+            message_id: 7,
+          }),
+          { messageId: 7, ok: true },
+        );
       } finally {
         globalThis.fetch = originalFetch;
       }

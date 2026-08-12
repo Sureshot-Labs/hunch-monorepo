@@ -445,17 +445,17 @@ try {
     telegramAccountId,
     telegramUserId,
     chatId: telegramUserId,
-    telegramMessageId: 202,
+    telegramMessageId: 101,
     venueId: "polymarket",
     controllerWalletId,
     venueBindingOptionId: canonicalInput.venueBindingOptionId,
     idempotencyKey: `telegram-open-fast-replay:${suffix}`,
-    requestFingerprint: openFingerprint({ telegramMessageId: 202 }),
+    requestFingerprint: openFingerprint({ telegramMessageId: 101 }),
     now: new Date(now.getTime() + 500),
   });
   assert.equal(fastReplay?.id, fundingContextId);
   assert.equal(fastReplay?.receiveSessionId, receiveSessionId);
-  assert.equal(fastReplay?.telegramMessageId, 202);
+  assert.equal(fastReplay?.telegramMessageId, 101);
   assert.equal(fastReplay?.expiresAt, firstContext.context.expiresAt);
   assert.equal(fastReplay?.activeConsentRevision, null);
   await pool.query(
@@ -477,12 +477,12 @@ try {
         telegramAccountId,
         telegramUserId,
         chatId: telegramUserId,
-        telegramMessageId: 202,
+        telegramMessageId: 101,
         venueId: "polymarket",
         controllerWalletId,
         venueBindingOptionId: canonicalInput.venueBindingOptionId,
         idempotencyKey: `telegram-open-soft-paused:${suffix}`,
-        requestFingerprint: openFingerprint({ telegramMessageId: 202 }),
+        requestFingerprint: openFingerprint({ telegramMessageId: 101 }),
         now: new Date(now.getTime() + 500),
       })
     )?.id,
@@ -513,12 +513,12 @@ try {
       telegramAccountId,
       telegramUserId,
       chatId: telegramUserId,
-      telegramMessageId: 202,
+      telegramMessageId: 101,
       venueId: "polymarket",
       controllerWalletId: `different_controller_${suffix}`,
       venueBindingOptionId: canonicalInput.venueBindingOptionId,
       idempotencyKey: `telegram-open-wallet-change:${suffix}`,
-      requestFingerprint: openFingerprint({ telegramMessageId: 202 }),
+      requestFingerprint: openFingerprint({ telegramMessageId: 101 }),
       now: new Date(now.getTime() + 500),
     }),
     null,
@@ -530,12 +530,12 @@ try {
       telegramAccountId,
       telegramUserId,
       chatId: telegramUserId,
-      telegramMessageId: 202,
+      telegramMessageId: 101,
       venueId: "polymarket",
       controllerWalletId,
       venueBindingOptionId: `different_binding_${suffix}`,
       idempotencyKey: `telegram-open-route-change:${suffix}`,
-      requestFingerprint: openFingerprint({ telegramMessageId: 202 }),
+      requestFingerprint: openFingerprint({ telegramMessageId: 101 }),
       now: new Date(now.getTime() + 500),
     }),
     null,
@@ -557,7 +557,7 @@ try {
       {
         chatId: telegramUserId,
         idempotencyKey: `telegram-open-new-callback:${suffix}`,
-        telegramMessageId: 202,
+        telegramMessageId: 101,
         telegramUserId,
         venue: "polymarket",
       },
@@ -570,7 +570,7 @@ try {
     {
       chatId: telegramUserId,
       idempotencyKey: `telegram-open-new-callback:${suffix}`,
-      telegramMessageId: 202,
+      telegramMessageId: 101,
       telegramUserId,
       venue: "polymarket",
     },
@@ -719,7 +719,7 @@ try {
             telegramAccountId,
             telegramUserId,
             chatId: telegramUserId,
-            telegramMessageId: 300 + index,
+            telegramMessageId: 300,
             receiveSessionId: persisted.snapshot.session.receiveSessionId,
             idempotencyKey: `telegram-open-concurrent-${attempt}:${suffix}`,
             expiresAt: new Date(persisted.snapshot.session.expiresAt),
@@ -740,8 +740,9 @@ try {
   const concurrentContextRows = await pool.query<{
     id: string;
     receive_session_id: string;
+    telegram_message_id: string;
   }>(
-    `select id, receive_session_id
+    `select id, receive_session_id, telegram_message_id::text
      from telegram_funding_sessions
      where receive_session_id = $1`,
     [concurrentOpens[0]?.snapshot.session.receiveSessionId],
@@ -752,7 +753,27 @@ try {
     "different callback idempotency keys must still create one context",
   );
   const concurrentContext = concurrentContextRows.rows[0];
+  const concurrentReceiveExpiresAt =
+    concurrentOpens[0]?.snapshot.session.expiresAt;
   assert.ok(concurrentContext);
+  assert.ok(concurrentReceiveExpiresAt);
+  await assert.rejects(
+    createOrReuseTelegramFundingSession(pool, {
+      userId,
+      telegramAccountId,
+      telegramUserId,
+      chatId: telegramUserId,
+      telegramMessageId: 301,
+      receiveSessionId: concurrentContext.receive_session_id,
+      idempotencyKey: `telegram-open-cross-message-bypass:${suffix}`,
+      expiresAt: new Date(concurrentReceiveExpiresAt),
+      now: new Date(now.getTime() + 540),
+    }),
+    (error: unknown) =>
+      error instanceof TelegramFundingPersistenceError &&
+      error.code === "telegram_funding_session_active_elsewhere",
+    "low-level reuse must not bypass lifecycle terminalization by rebinding a message",
+  );
   assert.ok(
     await cancelTelegramFundingSessionContext(pool, {
       contextId: concurrentContext.id,
@@ -760,7 +781,7 @@ try {
       telegramAccountId,
       telegramUserId,
       chatId: telegramUserId,
-      telegramMessageId: 301,
+      telegramMessageId: Number(concurrentContext.telegram_message_id),
       idempotencyKey: `telegram-cancel-concurrent:${suffix}`,
       requestFingerprint: hash("cancel-concurrent-context"),
       responsePayload: { text: "cancelled" },
@@ -823,10 +844,10 @@ try {
         telegramAccountId,
         telegramUserId,
         chatId: telegramUserId,
-        telegramMessageId: 206,
+        telegramMessageId: 101,
         venueId: "polymarket",
         idempotencyKey: `telegram-open-after-ambiguous-cancel:${suffix}`,
-        requestFingerprint: openFingerprint({ telegramMessageId: 206 }),
+        requestFingerprint: openFingerprint({ telegramMessageId: 101 }),
         now: new Date(now.getTime() + 900),
       })
     )?.id,
@@ -1708,7 +1729,7 @@ try {
     {
       chatId: telegramUserId,
       idempotencyKey: `telegram-open-after-consent:${suffix}`,
-      telegramMessageId: 208,
+      telegramMessageId: 101,
       telegramUserId,
       venue: "polymarket",
     },
@@ -1919,7 +1940,7 @@ try {
     {
       chatId: telegramUserId,
       idempotencyKey: `telegram-open-new-callback:${suffix}`,
-      telegramMessageId: 202,
+      telegramMessageId: 101,
       telegramUserId,
       venue: "polymarket",
     },
@@ -2176,23 +2197,23 @@ try {
   const relinkedTelegramAccountId = relink.rows[0]?.id;
   assert.ok(relinkedTelegramAccountId);
   const rearmed = await pool.query<{
-    replacement_count: string;
-    retired_count: string;
+    pending_edits: string;
+    pending_replacements: string;
   }>(
     `select
        count(*) filter (
-         where action = 'funding_replacement' and status = 'pending'
-       )::text as replacement_count,
+         where action = 'funding_edit' and status = 'pending'
+       )::text as pending_edits,
        count(*) filter (
-         where action = 'funding_edit' and status = 'skipped'
-       )::text as retired_count
+         where action = 'funding_replacement' and status = 'pending'
+       )::text as pending_replacements
      from telegram_bot_action_outbox
      where funding_session_id = $1 and state_revision = 2`,
     [fundingContextId],
   );
   assert.deepEqual(rearmed.rows[0], {
-    replacement_count: "1",
-    retired_count: "1",
+    pending_edits: "1",
+    pending_replacements: "0",
   });
   const relinkWithoutManagedTrading = await deliverTelegramFundingActions({
     pool,
@@ -2218,27 +2239,28 @@ try {
             updated_at = now()
       where funding_session_id = $1
         and state_revision = 2
-        and action = 'funding_replacement'
+        and action = 'funding_edit'
         and status = 'skipped'`,
     [fundingContextId],
   );
   await enableManagedTrading(telegramUserId, `did:privy:${suffix}:relinked`);
-  let replacementSends = 0;
-  const replacementDelivery = await deliverTelegramFundingActions({
+  let ownerEdits = 0;
+  const ownerEditDelivery = await deliverTelegramFundingActions({
     pool,
     renderCoordinator,
     telegram: {
-      editMessageText: async () => {
-        assert.fail("a rearmed terminal projection must use replacement send");
+      editMessageText: async (message) => {
+        ownerEdits += 1;
+        assert.equal(message.message_id, 202);
+        return { ok: true, messageId: 202 };
       },
       sendMessage: async () => {
-        replacementSends += 1;
-        return { ok: true, messageId: 202 };
+        assert.fail("relink must never copy-send an owned funding context");
       },
     },
   });
-  assert.equal(replacementDelivery.sent, 1);
-  assert.equal(replacementSends, 1);
+  assert.equal(ownerEditDelivery.sent, 1);
+  assert.equal(ownerEdits, 1);
   await pool.query(`delete from user_telegram_accounts where id = $1`, [
     relinkedTelegramAccountId,
   ]);
@@ -2674,7 +2696,7 @@ try {
     );
     assert.deepEqual(explicitlyRearmed.rows[0], {
       delivery_attempt_id: null,
-      status: "pending",
+      status: "skipped",
     });
     const deterministicRearm = await pool.query<{
       edit_status: string;
@@ -2688,8 +2710,8 @@ try {
       [readyContextId],
     );
     assert.deepEqual(deterministicRearm.rows[0], {
-      edit_status: "skipped",
-      replacement_status: "pending",
+      edit_status: "pending",
+      replacement_status: "skipped",
     });
     const activeAttemptId = crypto.randomUUID();
     await pool.query(
@@ -2750,23 +2772,30 @@ try {
     );
     const staleAttemptRearmed = await pool.query<{
       attempt_id: string | null;
+      edit_status: string;
       lease_id: string | null;
       status: string;
     }>(
       `select
          outbox.delivery_attempt_id::text as attempt_id,
          context.delivery_lease_outbox_id::text as lease_id,
-         outbox.status
+         outbox.status,
+         edit.status as edit_status
        from telegram_bot_action_outbox outbox
        join telegram_funding_sessions context
          on context.id = outbox.funding_session_id
+       join telegram_bot_action_outbox edit
+         on edit.funding_session_id = context.id
+        and edit.state_revision = context.progress_revision
+        and edit.action = 'funding_edit'
        where outbox.id = $1`,
       [staleOutboxId],
     );
     assert.deepEqual(staleAttemptRearmed.rows[0], {
       attempt_id: null,
+      edit_status: "pending",
       lease_id: null,
-      status: "pending",
+      status: "skipped",
     });
     await pool.query(
       `update telegram_bot_action_outbox
@@ -3238,106 +3267,44 @@ try {
           and status in ('pending', 'retry')`,
       [preterminalContextId, fairnessContextIds],
     );
-    let finalRelinkId: string | null = null;
-    let finalRelinkError: unknown = null;
     const replacementRace = await deliverTelegramFundingActions({
       pool,
       renderCoordinator,
       telegram: {
         editMessageText: async () => {
-          assert.fail("the relink replacement race must use sendMessage");
+          assert.fail("historical replacement must not edit");
         },
         sendMessage: async () => {
-          try {
-            await pool.query(
-              `delete from user_telegram_accounts where user_id = $1`,
-              [userId],
-            );
-            const finalRelink = await pool.query<{ id: string }>(
-              `insert into user_telegram_accounts (
-                 user_id, privy_user_id, telegram_user_id, username
-               ) values ($1, $2, $3, $4)
-               returning id`,
-              [
-                userId,
-                `did:privy:${suffix}:final-relink`,
-                fairnessTelegramUserId,
-                `telegram-funding-final-relink-${suffix}`,
-              ],
-            );
-            finalRelinkId = finalRelink.rows[0]?.id ?? null;
-            assert.ok(finalRelinkId);
-            return { ok: true, messageId: 1201 };
-          } catch (error) {
-            finalRelinkError = error;
-            return {
-              error: "other" as const,
-              message: "test relink failed",
-              ok: false as const,
-            };
-          }
+          assert.fail("historical replacement must not copy-send");
         },
       },
     });
-    assert.equal(
-      finalRelinkError,
-      null,
-      finalRelinkError instanceof Error ? finalRelinkError.message : undefined,
-    );
-    assert.equal(replacementRace.sent, 1);
-    assert.ok(finalRelinkId);
-    await enableManagedTrading(
-      fairnessTelegramUserId,
-      `did:privy:${suffix}:final-relink`,
-    );
+    assert.equal(replacementRace.failed, 1);
     const replacementFollowup = await pool.query<{
-      edit_account_id: string | null;
-      edit_status: string;
+      owner_account_id: string | null;
+      owner_message_id: string | null;
+      replacement_error: string | null;
       replacement_status: string;
     }>(
       `select
-         edit.telegram_account_id::text as edit_account_id,
-         edit.status as edit_status,
+         context.telegram_account_id::text as owner_account_id,
+         context.telegram_message_id::text as owner_message_id,
+         replacement.last_error as replacement_error,
          replacement.status as replacement_status
-       from telegram_bot_action_outbox edit
+       from telegram_funding_sessions context
        join telegram_bot_action_outbox replacement
-         on replacement.funding_session_id = edit.funding_session_id
-        and replacement.state_revision = edit.state_revision
+         on replacement.funding_session_id = context.id
+        and replacement.state_revision = 2
         and replacement.action = 'funding_replacement'
-       where edit.funding_session_id = $1
-         and edit.state_revision = 2
-         and edit.action = 'funding_edit'`,
+       where context.id = $1`,
       [preterminalContextId],
     );
     assert.deepEqual(replacementFollowup.rows[0], {
-      edit_account_id: finalRelinkId,
-      edit_status: "pending",
-      replacement_status: "sent",
+      owner_account_id: raceRelinkId,
+      owner_message_id: "1200",
+      replacement_error: "funding_owner_scoped_replacement_disabled",
+      replacement_status: "dead",
     });
-    await pool.query(
-      `update telegram_bot_action_outbox
-          set status = 'skipped', last_error = 'test_corrective_delivery_isolation'
-        where funding_session_id <> $1
-          and funding_session_id = any($2::uuid[])
-          and status in ('pending', 'retry')`,
-      [preterminalContextId, fairnessContextIds],
-    );
-    let correctiveEdits = 0;
-    const correctiveDelivery = await deliverTelegramFundingActions({
-      pool,
-      renderCoordinator,
-      telegram: {
-        editMessageText: async () => {
-          correctiveEdits += 1;
-          return { ok: true, messageId: 1201 };
-        },
-        sendMessage: async () => {
-          assert.fail("the corrective current-account delivery must edit");
-        },
-      },
-    });
-    assert.equal(correctiveDelivery.sent, 1);
-    assert.equal(correctiveEdits, 1);
   } finally {
     const fairnessCleanup = await pool.connect();
     try {

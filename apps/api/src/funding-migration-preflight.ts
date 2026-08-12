@@ -16,6 +16,7 @@ const MIGRATION_0201 = "0201_telegram_funding_open_idempotency.sql";
 const MIGRATION_0203 = "0203_telegram_funding_buy_continuation.sql";
 const MIGRATION_0204 = "0204_delegated_funding_execution.sql";
 const MIGRATION_0206 = "0206_telegram_funding_wallet_retention.sql";
+const MIGRATION_0207 = "0207_telegram_funding_owner_delivery.sql";
 const FUNDING_MIGRATIONS = [
   MIGRATION_0184,
   MIGRATION_0193,
@@ -29,6 +30,7 @@ const FUNDING_MIGRATIONS = [
   MIGRATION_0203,
   MIGRATION_0204,
   MIGRATION_0206,
+  MIGRATION_0207,
 ] as const;
 
 const LEGACY_CLASSIFIER_SQL = `
@@ -87,6 +89,7 @@ export type FundingMigrationPreflightReport = Readonly<{
   telegramBuyContinuationObjects: boolean;
   delegatedFundingExecutionObjects: boolean;
   delegatedFundingWalletRetentionObjects: boolean;
+  telegramFundingOwnerDeliveryObjects: boolean;
   telegramOpenMutationConstraints: boolean;
 }>;
 
@@ -196,14 +199,20 @@ async function triggerExists(
   );
 }
 
+function normalizeDefinition(
+  definition: string | null | undefined,
+): string | null {
+  return (
+    definition?.replaceAll('"', "").replaceAll(/\s+/g, " ").toLowerCase() ??
+    null
+  );
+}
+
 function normalizedDefinitionIncludes(
   definition: string | null | undefined,
   fragments: readonly string[],
 ): boolean {
-  const normalized = definition
-    ?.replaceAll('"', "")
-    .replaceAll(/\s+/g, " ")
-    .toLowerCase();
+  const normalized = normalizeDefinition(definition);
   return Boolean(
     normalized && fragments.every((fragment) => normalized.includes(fragment)),
   );
@@ -226,11 +235,10 @@ async function constraintDefinitionIncludes(
   return normalizedDefinitionIncludes(rows[0]?.definition, fragments);
 }
 
-async function functionDefinitionIncludes(
+async function loadFunctionDefinition(
   db: DbQuery,
   functionName: string,
-  fragments: readonly string[],
-): Promise<boolean> {
+): Promise<string | null> {
   let rows: Array<{ definition: string | null }>;
   try {
     ({ rows } = await db.query<{ definition: string | null }>(
@@ -245,9 +253,20 @@ async function functionDefinitionIncludes(
       [functionName],
     ));
   } catch {
-    return false;
+    return null;
   }
-  return normalizedDefinitionIncludes(rows[0]?.definition, fragments);
+  return rows[0]?.definition ?? null;
+}
+
+async function functionDefinitionIncludes(
+  db: DbQuery,
+  functionName: string,
+  fragments: readonly string[],
+): Promise<boolean> {
+  return normalizedDefinitionIncludes(
+    await loadFunctionDefinition(db, functionName),
+    fragments,
+  );
 }
 
 async function indexPredicateIncludes(
@@ -644,15 +663,54 @@ export async function inspectFundingMigrationPreflight(
       "telegram_bot_action_outbox_funding_qr_unique",
       ["funding_qr"],
     ));
-  const hasTelegramFundingSafeRelinkRearm =
+  const telegramFundingRearmDefinition = await loadFunctionDefinition(
+    db,
+    "rearm_telegram_funding_delivery",
+  );
+  const normalizedTelegramFundingRearmDefinition = normalizeDefinition(
+    telegramFundingRearmDefinition,
+  );
+  const hasTelegramFunding0206RelinkRearm =
     hasTelegramFundingAddressDeliveryProof &&
-    (await functionDefinitionIncludes(db, "rearm_telegram_funding_delivery", [
+    normalizedDefinitionIncludes(telegramFundingRearmDefinition, [
       "address_disclosure_attempt_revision >",
       "address_redacted_revision",
       "then 'funding_edit'",
+      "else 'funding_replacement'",
       "redaction.state_revision",
       "address_disclosure_message_id is not null",
-    ]));
+    ]);
+  const hasTelegramFundingOwnerEditOnlyRearm =
+    hasTelegramFundingAddressDeliveryProof &&
+    normalizedDefinitionIncludes(telegramFundingRearmDefinition, [
+      "address_disclosure_attempt_revision >",
+      "address_redacted_revision",
+      "insert into telegram_bot_action_outbox",
+      "'funding_edit'",
+      "redaction.state_revision",
+      "recovery.delivery_revision",
+      "address_disclosure_message_id is not null",
+      "context.telegram_message_id is not null",
+    ]) &&
+    Boolean(
+      normalizedTelegramFundingRearmDefinition &&
+      !normalizedTelegramFundingRearmDefinition.includes(
+        "recovery.delivery_action",
+      ) &&
+      !normalizedTelegramFundingRearmDefinition.includes(
+        "set telegram_message_id = null",
+      ),
+    );
+  const hasTelegramFundingQrDeliveryUnknown =
+    hasTelegramFundingAddressDeliveryProof &&
+    (await constraintDefinitionIncludes(
+      db,
+      "public.telegram_bot_action_outbox",
+      "telegram_bot_action_outbox_delivery_unknown_check",
+      ["delivery_unknown", "funding_qr"],
+    ));
+  const hasTelegramFundingOwnerDeliveryObjects =
+    hasTelegramFundingOwnerEditOnlyRearm && hasTelegramFundingQrDeliveryUnknown;
   const hasTelegramFundingReviewMutationEvidence =
     hasTelegramFundingMutations &&
     (await columnsExist(db, "telegram_funding_mutations", [
@@ -694,7 +752,8 @@ export async function inspectFundingMigrationPreflight(
     hasDelegatedFundingWalletRetentionBase &&
     hasTelegramFundingAddressDeliveryProof &&
     hasTelegramFundingQrOutboxShape &&
-    hasTelegramFundingSafeRelinkRearm &&
+    (hasTelegramFunding0206RelinkRearm ||
+      hasTelegramFundingOwnerEditOnlyRearm) &&
     hasTelegramFundingReviewMutationEvidence;
   const hasTelegramFundingActiveBuyReturn =
     hasTelegramFundingSessions &&
@@ -886,11 +945,11 @@ export async function inspectFundingMigrationPreflight(
     ));
   const hasTelegramBuyRelinkRearm =
     hasTelegramFundingSessions &&
-    (await functionDefinitionIncludes(db, "rearm_telegram_funding_delivery", [
+    normalizedDefinitionIncludes(telegramFundingRearmDefinition, [
       "delivered.state_revision = context.latest_terminal_revision",
       "delivered.telegram_account_id = target_telegram_account_id",
       "delivered.status = 'sent'",
-    ]));
+    ]);
   const hasTelegramBuyContinuationObjects =
     hasTelegramFundingBuyReturns &&
     hasTelegramFundingBuyContinuations &&
@@ -1143,6 +1202,14 @@ export async function inspectFundingMigrationPreflight(
       hasDelegatedFundingWalletRetentionObjects,
       "Delegated funding wallet retention objects exist before 0206 is recorded",
     ],
+    [
+      MIGRATION_0207,
+      hasTelegramFundingOwnerDeliveryObjects,
+      "0207 is recorded but Telegram funding owner delivery objects are incomplete",
+      hasTelegramFundingOwnerEditOnlyRearm ||
+        hasTelegramFundingQrDeliveryUnknown,
+      "Telegram funding owner delivery objects exist before 0207 is recorded",
+    ],
   ] as const;
   const partialObjects = migrationDriftChecks.flatMap(
     ([migration, complete, incompleteMessage, present, presentMessage]) =>
@@ -1267,6 +1334,9 @@ export async function inspectFundingMigrationPreflight(
     !appliedSet.has(MIGRATION_0206)
       ? "0206 delegated funding wallet retention migration is not recorded"
       : null,
+    !appliedSet.has(MIGRATION_0207)
+      ? "0207 Telegram funding owner delivery migration is not recorded"
+      : null,
     !hasBridgeOrders ? "bridge_orders table is absent" : null,
     bridgeUnknown > 0
       ? `${bridgeUnknown} legacy bridge orders have unknown adapter class`
@@ -1321,6 +1391,7 @@ export async function inspectFundingMigrationPreflight(
     delegatedFundingExecutionObjects: hasDelegatedFundingExecutionObjects,
     delegatedFundingWalletRetentionObjects:
       hasDelegatedFundingWalletRetentionObjects,
+    telegramFundingOwnerDeliveryObjects: hasTelegramFundingOwnerDeliveryObjects,
     telegramOpenMutationConstraints: hasTelegramOpenMutationConstraints,
   };
 }
@@ -1338,6 +1409,7 @@ function formatHuman(report: FundingMigrationPreflightReport): string {
     `0203 Telegram Buy continuation objects: ${report.telegramBuyContinuationObjects ? "ready" : "missing"}`,
     `0204 delegated funding execution objects: ${report.delegatedFundingExecutionObjects ? "ready" : "missing"}`,
     `0206 delegated funding wallet retention objects: ${report.delegatedFundingWalletRetentionObjects ? "ready" : "missing"}`,
+    `0207 Telegram funding owner delivery objects: ${report.telegramFundingOwnerDeliveryObjects ? "ready" : "missing"}`,
     `Malformed receive review evidence: ${report.malformedReceiveReviewEvidence ?? "n/a"}`,
     `Unresolved address disclosures without edit target: ${report.unresolvedAddressDisclosureWithoutEditTarget ?? "n/a"}`,
     `Operational: ${JSON.stringify(report.operational)}`,

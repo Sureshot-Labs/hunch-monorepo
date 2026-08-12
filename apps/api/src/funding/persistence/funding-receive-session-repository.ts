@@ -264,6 +264,24 @@ function snapshot(row: ReceiveSessionRow): FundingReceiveSessionSnapshot {
   };
 }
 
+export async function lockFundingReceiveSessionScope(
+  client: Pick<PoolClient, "query">,
+  input: Readonly<{
+    destinationOptionId: string;
+    userId: string;
+    venueBindingOptionId: string;
+  }>,
+): Promise<void> {
+  await client.query("select pg_advisory_xact_lock(hashtextextended($1, 0))", [
+    [
+      "funding-receive-session",
+      input.userId,
+      input.destinationOptionId,
+      input.venueBindingOptionId,
+    ].join(":"),
+  ]);
+}
+
 export async function createOrReuseFundingReceiveSession(
   db: Pool,
   input: Readonly<{
@@ -291,6 +309,7 @@ export async function createOrReuseFundingReceiveSession(
     client: PoolClient,
     result: FundingReceiveSessionPersistenceResult,
   ) => Promise<void>,
+  preparePersistence?: (client: PoolClient) => Promise<void>,
 ): Promise<FundingReceiveSessionPersistenceResult> {
   const ownerChannel = input.ownerChannel ?? "web";
   return tx(db, async (client) => {
@@ -300,17 +319,8 @@ export async function createOrReuseFundingReceiveSession(
       await finalize?.(client, result);
       return result;
     };
-    await client.query(
-      "select pg_advisory_xact_lock(hashtextextended($1, 0))",
-      [
-        [
-          "funding-receive-session",
-          input.userId,
-          input.destinationOptionId,
-          input.venueBindingOptionId,
-        ].join(":"),
-      ],
-    );
+    await preparePersistence?.(client);
+    await lockFundingReceiveSessionScope(client, input);
     const existing = await client.query<ReceiveSessionRow>(
       `
         select ${sessionColumns}
