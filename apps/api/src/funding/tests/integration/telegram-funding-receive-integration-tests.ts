@@ -25,6 +25,7 @@ import {
   cancelTelegramFundingSessionContext,
   createOrReuseTelegramFundingSession,
   createOrReuseTelegramFundingSessionInTransaction,
+  fetchTelegramFundingSessionContext,
   reuseActiveTelegramFundingSession,
   TelegramFundingPersistenceError,
 } from "../../../services/telegram-funding-sessions.js";
@@ -32,6 +33,7 @@ import { runTelegramFundingProgressProjectionBatch } from "../../../services/tel
 import {
   cleanupTelegramFundingContexts,
   deliverTelegramFundingActions,
+  rearmTelegramFundingCurrentAddressDelivery,
   rearmTelegramFundingTerminalDelivery,
 } from "../../../services/telegram-funding-delivery.js";
 import { fetchUserFinancialLifecycleSummary } from "../../../services/user-financial-lifecycle.js";
@@ -1152,6 +1154,150 @@ try {
     address_delivered_revision: 1,
     last_delivered_revision: 1,
   });
+  const currentAddressContext = await fetchTelegramFundingSessionContext(pool, {
+    contextId: fundingContextId,
+    userId,
+    telegramUserId,
+    chatId: telegramUserId,
+  });
+  assert.ok(currentAddressContext);
+  assert.equal(
+    await rearmTelegramFundingCurrentAddressDelivery({
+      context: {
+        ...currentAddressContext,
+        progressRevision: currentAddressContext.progressRevision + 1,
+      },
+      pool,
+      telegramAccountId,
+      telegramUserId,
+      userId,
+    }),
+    false,
+    "a stale context revision must not rearm an unrelated durable response",
+  );
+  const claimBoundary = await pool.connect();
+  const claimBoundaryAttemptId = crypto.randomUUID();
+  try {
+    await claimBoundary.query("begin");
+    const lockedOutbox = await claimBoundary.query<{ id: string }>(
+      `select id
+         from telegram_bot_action_outbox
+        where funding_session_id = $1
+          and action = 'funding_edit'
+        for update`,
+      [fundingContextId],
+    );
+    const lockedOutboxId = lockedOutbox.rows[0]?.id;
+    assert.ok(lockedOutboxId);
+    const concurrentRearm = service.open(
+      {
+        chatId: telegramUserId,
+        idempotencyKey: `telegram-open-during-claim:${suffix}`,
+        telegramMessageId: 101,
+        telegramUserId,
+        venue: "polymarket",
+      },
+      new Date(now.getTime() + 1_070),
+    );
+    let rearmWaitingOnOutbox = false;
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const waiting = await pool.query<{ waiting: boolean }>(
+        `select exists (
+           select 1
+             from pg_stat_activity
+            where datname = current_database()
+              and pid <> pg_backend_pid()
+              and wait_event_type = 'Lock'
+              and query like '%insert into telegram_bot_action_outbox%'
+         ) as waiting`,
+      );
+      rearmWaitingOnOutbox = waiting.rows[0]?.waiting === true;
+      if (rearmWaitingOnOutbox) break;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(rearmWaitingOnOutbox, true);
+    await claimBoundary.query(
+      `update telegram_bot_action_outbox
+          set status = 'sending',
+              delivery_attempt_id = $2,
+              delivery_started_at = now(),
+              updated_at = now()
+        where id = $1`,
+      [lockedOutboxId, claimBoundaryAttemptId],
+    );
+    await claimBoundary.query("commit");
+    assert.equal((await concurrentRearm).durableFundingDeliveryRequired, true);
+    const preservedAttempt = await pool.query<{
+      delivery_attempt_id: string;
+      status: string;
+    }>(
+      `select delivery_attempt_id::text, status
+         from telegram_bot_action_outbox
+        where id = $1`,
+      [lockedOutboxId],
+    );
+    assert.deepEqual(preservedAttempt.rows[0], {
+      delivery_attempt_id: claimBoundaryAttemptId,
+      status: "sending",
+    });
+    await pool.query(
+      `update telegram_bot_action_outbox
+          set status = 'sent',
+              delivery_attempt_id = null,
+              delivery_started_at = null,
+              updated_at = now()
+        where id = $1`,
+      [lockedOutboxId],
+    );
+  } catch (error) {
+    await claimBoundary.query("rollback").catch(() => undefined);
+    throw error;
+  } finally {
+    claimBoundary.release();
+  }
+  const reopenedAfterMenuOverwrite = await service.open(
+    {
+      chatId: telegramUserId,
+      idempotencyKey: `telegram-open-after-menu-overwrite:${suffix}`,
+      telegramMessageId: 101,
+      telegramUserId,
+      venue: "polymarket",
+    },
+    new Date(now.getTime() + 1_075),
+  );
+  assert.equal(reopenedAfterMenuOverwrite.fundingContextId, fundingContextId);
+  assert.equal(reopenedAfterMenuOverwrite.durableFundingDeliveryRequired, true);
+  const rearmedCurrentCard = await pool.query<{
+    state_revision: number;
+    status: string;
+  }>(
+    `select state_revision, status
+       from telegram_bot_action_outbox
+      where funding_session_id = $1
+        and action = 'funding_edit'`,
+    [fundingContextId],
+  );
+  assert.deepEqual(rearmedCurrentCard.rows, [
+    { state_revision: 1, status: "pending" },
+  ]);
+  let redisplayedAddress = false;
+  const redisplayedDelivery = await deliverTelegramFundingActions({
+    pool,
+    renderCoordinator,
+    telegram: {
+      editMessageText: async (message) => {
+        redisplayedAddress = true;
+        assert.equal(message.message_id, 101);
+        assert.match(message.text, new RegExp(destinationAddress, "u"));
+        return { ok: true, messageId: 101 };
+      },
+      sendMessage: async () => {
+        assert.fail("a reused funding context must retain its edit target");
+      },
+    },
+  });
+  assert.equal(redisplayedDelivery.sent, 1);
+  assert.equal(redisplayedAddress, true);
   // Simulate the crash boundary: Telegram accepted the address edit, but the
   // process lost the acknowledgement before durable success recording.
   await pool.query(
@@ -1589,7 +1735,7 @@ try {
   );
   assert.deepEqual(unchangedReplayEvidence.rows[0], {
     consents: "1",
-    mutations: "6",
+    mutations: "8",
     outbox: "0",
     progress_revision: 0,
   });
