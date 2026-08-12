@@ -54,6 +54,16 @@ assert.match(
 );
 assert.match(
   migration0206,
+  /from unresolved\s+where telegram_message_id is not null\s+group by funding_session_id\s+having count\(distinct telegram_message_id\) = 1/u,
+  "0206 must skip unprovable historical targets instead of blocking deploy",
+);
+assert.doesNotMatch(
+  migration0206,
+  /cannot preserve historical Telegram address redaction targets/u,
+  "0206 must not contain a data-dependent availability hard fail",
+);
+assert.match(
+  migration0206,
   /review_conversion[\s\S]*?review_receipt_id[\s\S]*?review_quote_id/u,
   "0206 must persist exact Telegram conversion-review replay evidence",
 );
@@ -72,10 +82,16 @@ assert.match(
   /funding_operation_steps[\s\S]*?action_expires_at[\s\S]*?polymarket_deposit_usdce_wrap_v1[\s\S]*?then null/u,
   "0206 must separate provider action validity from operation lifetime",
 );
-assert.match(
-  migration0206,
-  /cannot preserve historical Telegram address redaction targets/u,
-  "0206 must abort rather than discard unknown historical redaction targets",
+const actionExpiryConstraintIndex = migration0206.indexOf(
+  "add constraint funding_operation_steps_action_expiry_check",
+);
+const actionExpiryBackfillIndex = migration0206.indexOf(
+  "update funding_operation_steps step",
+);
+assert.ok(
+  actionExpiryConstraintIndex >= 0 &&
+    actionExpiryConstraintIndex < actionExpiryBackfillIndex,
+  "0206 must install step DDL before queuing deferred shape-trigger events",
 );
 assert.match(
   migration0206,
