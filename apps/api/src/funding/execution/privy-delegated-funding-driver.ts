@@ -45,6 +45,13 @@ export class PrivyDelegatedFundingProfileInvalidError extends Error {
 
 export type PrivyWalletProfileInspection = "valid" | "invalid" | "unavailable";
 
+export function privyEvmQuantity(raw: string): string {
+  if (!/^(0|[1-9]\d*)$/u.test(raw)) {
+    throw new Error("Privy EVM quantity source must be an unsigned integer");
+  }
+  return `0x${BigInt(raw).toString(16)}`;
+}
+
 // Provider bodies may echo request data, so diagnostics must stay allowlisted.
 function errorRecord(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -455,9 +462,12 @@ export class PrivyDelegatedFundingDriver implements DelegatedFundingNetworkDrive
         idempotency_key: claim.attemptId,
         params: {
           transaction: {
+            chain_id: 137,
             to: claim.action.to,
             data: claim.action.data,
-            value: claim.action.valueRaw,
+            // Funding actions store raw amounts as decimal strings; Privy requires
+            // string quantities to use the canonical 0x-prefixed EVM form.
+            value: privyEvmQuantity(claim.action.valueRaw),
           },
         },
         authorization_context: {
