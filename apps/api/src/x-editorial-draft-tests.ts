@@ -10,7 +10,10 @@ import {
   type SignalBotRedisLike,
 } from "./services/signal-bot.js";
 import { parseSignalBotContentProfileRequest } from "./services/signal-bot-command-parsers.js";
-import { loadXEditorialInitialRecoveryNoteIds } from "./services/signal-bot-x-editorial-delivery.js";
+import {
+  buildXEditorialTelegramDraftMessage,
+  loadXEditorialInitialRecoveryNoteIds,
+} from "./services/signal-bot-x-editorial-delivery.js";
 import {
   buildXEditorialDraftSystemPrompt,
   buildXEditorialSourceDigest,
@@ -96,7 +99,7 @@ const config = {
   enabled: true,
   maxCharacters: 1_000,
   maxOutputTokens: 700,
-  maxParagraphs: 5,
+  maxParagraphs: 10,
   model: "test/editorial-model",
 };
 
@@ -220,10 +223,14 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     name: "editorial prompt explicitly requests human factual copy",
     run: () => {
       const prompt = buildXEditorialDraftSystemPrompt(config);
-      assert.match(prompt, /sharp human analyst/i);
+      assert.match(prompt, /trader-story post/i);
+      assert.match(prompt, /HOOK —/);
+      assert.match(prompt, /RECEIPTS —/);
+      assert.match(prompt, /punchline/i);
+      assert.match(prompt, /light first-person editorial voice/i);
       assert.match(prompt, /Use only supplied facts/i);
       assert.match(prompt, /No Markdown/i);
-      assert.match(prompt, /X Premium formatting/i);
+      assert.match(prompt, /Telegram\/X formatting/i);
       assert.match(prompt, /field name is text, never snippet/i);
       assert.match(prompt, /1000 visible characters/i);
     },
@@ -248,7 +255,6 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         source,
       });
       assert.deepEqual(validated.issues.sort(), [
-        "fake_first_person",
         "hashtag",
         "promotional_cta",
         "unknown_fact_id:missing",
@@ -257,7 +263,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
-    name: "validator permits the US country label but blocks lowercase us",
+    name: "validator allows editorial first person but rejects fabricated personal activity",
     run: () => {
       const validate = (postText: string) =>
         validateXEditorialModelOutput({
@@ -276,21 +282,94 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           source,
         }).issues;
       assert.equal(
+        validate("I found a concentrated Spain position.").includes(
+          "fake_first_person",
+        ),
+        false,
+      );
+      assert.equal(
         validate(
-          "The US election market is drawing a fresh position.",
+          "The latest move told us where attention is building.",
         ).includes("fake_first_person"),
         false,
       );
       assert.ok(
-        validate(
-          "The latest move told us where attention is building.",
-        ).includes("fake_first_person"),
-      );
-      assert.ok(
-        validate("We found a fresh position in the election market.").includes(
+        validate("We bought a fresh position in the election market.").includes(
           "fake_first_person",
         ),
       );
+      assert.ok(
+        validate("My position is backing Spain to win.").includes(
+          "fake_first_person",
+        ),
+      );
+    },
+  },
+  {
+    name: "Telegram renderer applies editorial formatting directly without a copy block",
+    run: () => {
+      const postText =
+        "$56.4K is backing Spain.\n\nOne position. No hedge.\n\nEither conviction — or chaos?";
+      const message = buildXEditorialTelegramDraftMessage({
+        draft: {
+          characterCount: Array.from(postText).length,
+          formatting: [
+            { style: "bold", text: "$56.4K is backing Spain." },
+            { style: "italic", text: "Either conviction — or chaos?" },
+          ],
+          generatedAt: "2026-01-02T01:00:00.000Z",
+          marketId: "market-1",
+          model: "test/editorial-model",
+          postText,
+          promptVersion: "x_editorial_prompt_v4",
+          safetyFlags: [],
+          selectedSide: "YES",
+          sourceDigest: buildXEditorialSourceDigest(source),
+          status: "ready",
+          storyFamily: "fresh_bet",
+          usedFactIds: ["market", "actor"],
+          version: 1,
+        },
+        miniAppUrl: "https://t.me/hunch_signal_bot/hunch?startapp=market-1",
+        websiteUrl: "https://app.hunch.trade/events/world-cup?market=market-1",
+      });
+      assert.match(message, /^\*\$56\\\.4K is backing Spain\\\.\*/);
+      assert.match(message, /_Either conviction — or chaos\?_\n\n🌐 Website/);
+      assert.doesNotMatch(message, /```|Bold in X|Italic in X|🎨/);
+      assert.match(message, /🌐 Website/);
+      assert.match(message, /📱 Telegram Mini App/);
+    },
+  },
+  {
+    name: "validator accepts influencer-style receipts and a grounded first-person hook",
+    run: () => {
+      const postText =
+        "I found a trader with $56.4K on Spain. ⚽\n\n→ Position: $56.4K\n→ 30-day PnL: $542K\n\nThe bet is interesting. The track record is why it matters.";
+      const validated = validateXEditorialModelOutput({
+        config,
+        output: {
+          version: 1,
+          status: "ready",
+          marketId: "market-1",
+          selectedSide: "YES",
+          postText,
+          formatting: [
+            {
+              style: "bold",
+              text: "I found a trader with $56.4K on Spain. ⚽",
+            },
+            {
+              style: "italic",
+              text: "The track record is why it matters.",
+            },
+          ],
+          storyFamily: "trader_profile",
+          usedFactIds: ["market", "actor"],
+          safetyFlags: [],
+        },
+        source,
+      });
+      assert.deepEqual(validated.issues, []);
     },
   },
   {
@@ -858,7 +937,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           marketId: "polymarket:market-spain",
           model: "test/editorial-model",
           postText: editorialText,
-          promptVersion: "x_editorial_prompt_v3" as const,
+          promptVersion: "x_editorial_prompt_v4" as const,
           safetyFlags: [],
           selectedSide: "YES" as const,
           sourceDigest: "",
@@ -902,9 +981,11 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(composeCalls, 1);
       assert.equal(telegramMessages.length, 1);
       const deliveredText = String(telegramMessages[0]?.text);
-      assert.match(deliveredText, /^```\n/);
-      assert.ok(deliveredText.includes(editorialText));
-      assert.match(deliveredText, /Bold in X/);
+      assert.match(
+        deliveredText,
+        /^\*\$56\\\.4K is backing Spain to win the World Cup\\\.\*/,
+      );
+      assert.doesNotMatch(deliveredText, /```|Bold in X|Italic in X|🎨/);
       assert.match(deliveredText, /🌐 Website/);
       assert.match(deliveredText, /utm_campaign=signal_editorial/);
       assert.match(deliveredText, /📱 Telegram Mini App/);

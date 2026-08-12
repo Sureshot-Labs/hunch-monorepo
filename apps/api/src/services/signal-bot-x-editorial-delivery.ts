@@ -489,10 +489,6 @@ function escapeMarkdownV2(value: string): string {
   return value.replace(/([_*[\]()~`>#+\-=|{}.!\\])/g, "\\$1");
 }
 
-function escapeMarkdownV2CodeBlock(value: string): string {
-  return value.replace(/([`\\])/g, "\\$1");
-}
-
 function escapeMarkdownV2LinkTarget(value: string): string {
   return value.replace(/([)\\])/g, "\\$1");
 }
@@ -638,7 +634,7 @@ function buildFallbackPost(input: {
     marketId: input.source.marketId,
     model: "deterministic_editorial_fallback_v1",
     postText,
-    promptVersion: "x_editorial_prompt_v3",
+    promptVersion: "x_editorial_prompt_v4",
     safetyFlags: [`composer_fallback:${input.failureCode}`],
     selectedSide: input.source.selectedSide,
     sourceDigest: buildXEditorialSourceDigest(input.source),
@@ -655,21 +651,44 @@ export function buildXEditorialTelegramDraftMessage(input: {
   websiteUrl?: string;
 }): string {
   const postText = input.draft.postText ?? "";
-  const formatting = input.draft.formatting.flatMap((span) => {
-    const text = escapeMarkdownV2(span.text);
-    return span.style === "bold"
-      ? [`🎨 ${escapeMarkdownV2("Bold in X")}: *${text}*`]
-      : [`🎨 ${escapeMarkdownV2("Italic in X")}: _${text}_`];
-  });
+  const ranges: Array<{
+    end: number;
+    marker: "*" | "_";
+    start: number;
+  }> = [];
+  for (const span of input.draft.formatting) {
+    const start = postText.indexOf(span.text);
+    const end = start + span.text.length;
+    if (
+      start < 0 ||
+      span.text.includes("\n") ||
+      postText.indexOf(span.text, end) >= 0 ||
+      ranges.some((range) => start < range.end && end > range.start)
+    ) {
+      continue;
+    }
+    ranges.push({
+      end,
+      marker: span.style === "bold" ? "*" : "_",
+      start,
+    });
+  }
+  ranges.sort((left, right) => left.start - right.start);
+  const formattedPost: string[] = [];
+  let cursor = 0;
+  for (const range of ranges) {
+    formattedPost.push(escapeMarkdownV2(postText.slice(cursor, range.start)));
+    formattedPost.push(
+      `${range.marker}${escapeMarkdownV2(postText.slice(range.start, range.end))}${range.marker}`,
+    );
+    cursor = range.end;
+  }
+  formattedPost.push(escapeMarkdownV2(postText.slice(cursor)));
   const links = [
     buildVisibleLink("🌐 Website", input.websiteUrl),
     buildVisibleLink("📱 Telegram Mini App", input.miniAppUrl),
   ].filter((line): line is string => line != null);
-  return [
-    `\`\`\`\n${escapeMarkdownV2CodeBlock(postText)}\n\`\`\``,
-    ...formatting,
-    ...links,
-  ].join("\n\n");
+  return [formattedPost.join(""), ...links].join("\n\n");
 }
 
 async function deliverDraft(input: {

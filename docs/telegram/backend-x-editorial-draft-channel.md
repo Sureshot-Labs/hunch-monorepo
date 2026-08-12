@@ -1,6 +1,6 @@
 # Backend Design: Human X Drafts in a Private Telegram Channel
 
-Status: V1 implemented locally; production channel setup and live editorial QA remain
+Status: V1 implemented; influencer-style prompt v4 and direct Telegram formatting added; live editorial QA remains
 
 Scope: holder-research signal copy and Telegram delivery
 Decision: no database migration is required for the first production version
@@ -23,8 +23,9 @@ Non-negotiable behavior:
 - the bot still sends through Telegram only;
 - there is no X API transport, scheduled X post, or personal DM in this flow;
 - the manager remains the final human reviewer and publisher;
-- copy must sound like a human analyst, but it must not invent a first-person
-  experience, identity, trade, source, or opinion that Hunch cannot support;
+- copy must sound like a human analyst; light first-person observation and
+  judgment are allowed, but it must not invent a personal trade, track record,
+  conversation, private source, or firsthand access;
 - a failed or unavailable X composer must fail closed. It must never fall back
   to the normal Telegram card in the editorial channel.
 
@@ -93,12 +94,48 @@ The screenshots suggest four useful editorial story families:
 These are story choices, not templates whose wording should repeat. The
 composer should select one primary story and omit facts that do not help it.
 
+The later manager reference `Twitter_Influencer_Examples_Text.docx` is the more
+actionable style source: it contains 29 transcribed example posts. One example
+is a duplicate and one is only a fragment, so they must not be weighted as 29
+independent complete templates. Across the usable examples, the dominant
+composition is:
+
+1. **Hook:** the strongest verified number, result, position, or apparent
+   contradiction is stated immediately.
+2. **Character:** a specific trader or wallet becomes the protagonist, often
+   with a credential, account age, prior result, or concentration detail.
+3. **Receipts:** two to five concrete positions or outcomes support the hook,
+   sometimes as compact `→` lines.
+4. **Editorial read:** the author explains conviction, hedging, disagreement,
+   strategy, risk, or the scenario implied by the positions.
+5. **Finish:** a short contrast, punchline, question, or forward-looking tension
+   gives the post a human ending.
+
+Not every post needs all five stages. The examples deliberately scale from a
+four-line observation to a longer case study. Thin facts should produce a
+short post; richer trader history can support more paragraphs. The recurring
+voice tools are clipped sentences, isolated lines, occasional topical emoji or
+ALL CAPS for contrast, and a final sentence with judgment. They are optional
+tools, not a fixed template.
+
+The main negative lesson for the current implementation is equally important:
+the examples are not stat cards. Generic probability leads, label/value rows,
+pipe-delimited tables, and phrases such as “tracked wallets are moving” bury
+the actor and the story. The composer must prefer a concrete trader, amount,
+result, or contradiction whenever the fact packet contains one.
+
 Some reference accounts use claims such as “insider”, “AI bot”, or “cheat code”
 as facts. Hunch must not copy that behavior. Unless independently verified, the
 safe version is an attributed observation or an explicitly marked inference:
 “the timing stands out”, “the position appeared before the move”, or “there is
 no evidence that proves access to non-public information.” The post must never
 upgrade correlation into knowledge, causation, or an accusation.
+
+Several examples also use first-person openings such as an author saying they
+found or are watching a wallet. Prompt v4 permits that limited editorial voice
+because it materially contributes to the target style. Deterministic safety
+checks still reject invented personal bets, PnL, predictions, conversations,
+contacts, and private sources.
 
 The desired target length and whether the target X account supports long posts
 still need to be confirmed before the prompt is frozen. The implementation must
@@ -214,7 +251,7 @@ ai_notes -> common fact/eligibility --|
                                             -> factual/style validation
                                             -> durable draft in existing
                                                signal_bot_messages.metrics
-                                            -> copyable Telegram draft package
+                                            -> directly formatted Telegram draft
                                             -> manager review/copy/edit
                                             -> manual X publication
 ```
@@ -294,22 +331,27 @@ type XEditorialDraftV1 = {
   characterCount: number;
   generatedAt: string;
   model: string;
-  promptVersion: "x_editorial_prompt_v3";
+  promptVersion: "x_editorial_prompt_v4";
   sourceDigest: string;
 };
 ```
 
-`postText` is the only body text the manager should copy. `formatting` contains
-one to three exact, unique snippets to select and format in the X Premium editor
-after pasting. The snippets remain outside `postText`, because X rich-text
-entities cannot be encoded in a plain Telegram code-block copy operation.
+`postText` remains plain canonical body text. `formatting` contains one to three
+exact, unique snippets. The Telegram renderer applies those spans directly as
+MarkdownV2 bold or italic, so the manager can see the intended hierarchy while
+reading and copying the message. The model never emits transport markup.
 
 ### Composition rules
 
 The prompt and deterministic validators must enforce all of the following:
 
 - choose one story and one point of tension;
-- start from the strongest supported human detail, not a fixed template;
+- scale the length to fact richness rather than forcing every post into the
+  same five-paragraph shape;
+- use the hook -> character -> receipts -> editorial read -> finish arc when
+  supported, while omitting stages that would only add filler;
+- start from the strongest supported amount, result, action, or contradiction,
+  not a generic market update or fixed template;
 - use natural English and short paragraphs;
 - preserve the canonical proposition and selected side;
 - keep every amount, price, count, PnL, timeframe, and result consistent with
@@ -320,10 +362,13 @@ The prompt and deterministic validators must enforce all of the following:
 - use verified track record only with its exact scope and horizon;
 - never claim “insider”, coordinated behavior, private knowledge, an AI bot, or
   causation without direct evidence;
-- never invent first-person experience such as “I found”, “I bought”, “we
-  called”, or “our trader”;
+- allow first-person discovery or analysis such as “I found” or “I think” when
+  grounded in supplied facts, but never invent a personal bet, position, PnL,
+  prediction record, conversation, private source, or firsthand access;
 - no Markdown markers inside `postText`, Telegram section labels, proof tables,
   Buy/Open CTA, affiliate language, hashtags, or generic engagement bait;
+- allow compact `→` or plain-text list lines when they make several connected
+  receipts easier to scan; reject dashboard-style pipe tables;
 - return one to three exact non-overlapping snippets for intentional bold or
   italic formatting in X; every item is exactly `{ style, text }`, the field is
   named `text` rather than `snippet`, and the whole post must not be bold;
@@ -345,12 +390,13 @@ The model is not the publication authority. Validate before Telegram send:
    when `text` is absent and `snippet` is a string, then perform a strict schema
    parse without stripping any other unknown fields;
 2. non-empty, normalized text and configured character limit;
-3. no Markdown, hashtags, CTA, addresses, internal labels, or banned claim
-   patterns;
+3. no model-authored Markdown, hashtags, CTA, addresses, internal labels, pipe
+   tables, or banned claim patterns; plain list lines remain allowed;
 4. all `usedFactIds` exist in the supplied packet;
 5. numeric tokens are traceable to facts declared in `usedFactIds`, including
    compact currency and probability representations such as `$56.4K` and
-   `19%`;
+   `19%`; numeric horizons encoded by allowlisted fields such as `pnl30dUsd`
+   also authorize the corresponding human phrase “30-day”;
 6. the returned market ID and selected side exactly match the source contract;
 7. every bold/italic snippet occurs exactly once in `postText`, is single-line,
    and does not overlap another formatting span;
@@ -370,8 +416,8 @@ composer's constrained repair call, `schema_mismatch`, `missing_content`,
 editorial fallback. Initial/update fallback copy uses the already accepted
 holder-research headline and narrative; follow-through/resolution fallback copy
 uses only the computed side, price move, wallet activity, flow, holding count,
-and PnL facts. It is still sent through the same code-block presentation and
-normal Telegram delivery ledger. It never falls back to the normal Telegram
+and PnL facts. It is still sent through the same direct-Markdown presentation
+and normal Telegram delivery ledger. It never falls back to the normal Telegram
 signal card, keyboard, or trading CTA.
 
 X editorial drafts also do not apply the normal ten-minute executable-quote
@@ -418,7 +464,7 @@ Persisted metrics shape:
     "version": 1,
     "postText": "...",
     "formatting": [{ "style": "bold", "text": "..." }],
-    "promptVersion": "x_editorial_prompt_v3",
+    "promptVersion": "x_editorial_prompt_v4",
     "sourceDigest": "..."
   }
 }
@@ -468,18 +514,16 @@ not require a database migration.
 
 Send one standalone MarkdownV2 editorial package:
 
-1. `postText` inside a Telegram preformatted code block, which gives the manager
-   the native one-tap copy affordance without copying operational metadata;
-2. one line per X formatting span, showing the exact snippet rendered as bold
-   or italic so the manager knows what to select in the X Premium editor;
-3. a visible `🌐 Website` deep link to the market on `app.hunch.trade` with X
+1. `postText` as the normal message body, with validated `formatting` spans
+   rendered directly as Telegram MarkdownV2 bold or italic;
+2. a visible `🌐 Website` deep link to the market on `app.hunch.trade` with X
    campaign attribution;
-4. a visible `📱 Telegram Mini App` deep link to the same market.
+3. a visible `📱 Telegram Mini App` deep link to the same market.
 
 Do not use an inline keyboard, normal signal card, Buy/Open CTA, reply thread,
-evidence table, or disclaimer. Website and Mini App URLs stay outside the
-copyable code block so the manager can long-press and copy whichever link is
-appropriate for the final post.
+evidence table, copy block, formatting-instruction lines, or disclaimer. Website
+and Mini App URLs remain separate lines below the post body so the manager can
+long-press either URL when assembling the final post.
 
 ### All message families must be routed explicitly
 
@@ -512,7 +556,7 @@ V1 uses service environment configuration:
 HUNCH_SIGNAL_BOT_X_EDITORIAL_ENABLED=false
 HUNCH_SIGNAL_BOT_X_EDITORIAL_MODEL=openai/gpt-5.5
 HUNCH_SIGNAL_BOT_X_EDITORIAL_MAX_CHARACTERS=1000
-HUNCH_SIGNAL_BOT_X_EDITORIAL_MAX_PARAGRAPHS=5
+HUNCH_SIGNAL_BOT_X_EDITORIAL_MAX_PARAGRAPHS=10
 HUNCH_SIGNAL_BOT_X_EDITORIAL_MAX_OUTPUT_TOKENS=700
 ```
 
@@ -574,7 +618,7 @@ perform its own presentation-specific preparation.
    - branch both initial/update and follow-through publishers;
    - add editorial reservation/load/update helpers using
      `signal_bot_messages.metrics`;
-   - send a copyable MarkdownV2 draft package with no inline keyboard;
+   - send a directly formatted MarkdownV2 draft with no inline keyboard;
    - include visible website and Mini App market deep links below the body;
    - keep current V11 paths byte-for-byte behaviorally unchanged for the
      default profile.
@@ -596,7 +640,7 @@ perform its own presentation-specific preparation.
    - document non-secret composer settings and the existing provider key.
 6. Tests
    - cover composer/schema validation, formatting spans, repair, Redis profile
-     compatibility, copy-block delivery, both links, persistence, and retry
+     compatibility, direct Markdown delivery, both links, persistence, and retry
      reuse.
 
 ## Test Coverage and Remaining QA
@@ -606,15 +650,16 @@ Implemented deterministic tests cover:
 - old Redis channel hashes parse as `telegram_signal_v11`;
 - both profiles parse and round-trip, unauthorized users cannot switch them,
   and `/status` reports the active profile and composer state;
-- the editorial channel receives exact `postText` inside a copyable block, X
-  formatting guidance, both visible links, no inline keyboard, and no trade CTA;
+- the editorial channel receives `postText` with direct Telegram bold/italic,
+  both visible links, no copy block, no formatting-guidance lines, no inline
+  keyboard, and no trade CTA;
 - invalid or unsafe first output receives one constrained repair;
-- unsafe claims, fake first-person voice, unsupported numeric claims, market
-  mismatch, and side mismatch fail validation;
+- unsafe claims, fabricated personal activity/source claims, unsupported
+  numeric claims, market mismatch, and side mismatch fail validation;
 - a successful draft is persisted, sent using only MarkdownV2 presentation, and
   not composed or sent again on the next tick;
-- `insider`, fake first-person experience, raw addresses, internal labels,
-  Markdown, hashtags, and generic promotional CTA are rejected;
+- `insider`, fabricated personal activity/source claims, raw addresses,
+  model-authored Markdown, hashtags, and generic promotional CTA are rejected;
 - recent openings do not change the canonical source digest.
 
 The existing signal-bot suite remains the regression layer for authorization,
@@ -630,7 +675,8 @@ Manual QA before production:
   posting, and whether the hook is worth opening;
 - inspect every safety flag and every model-repair case;
 - compare repeated openings and sentence structures across the batch;
-- confirm exact copy/paste behavior from Telegram into the target X account;
+- confirm exact copy/paste behavior from Telegram into the target X account and
+  that Telegram's visible emphasis is sufficient guidance for the manager;
 - confirm the final length mode and whether one post is always required.
 
 Useful rollout metrics can be stored/read from existing JSONB and logs:
@@ -667,8 +713,9 @@ Useful rollout metrics can be stored/read from existing JSONB and logs:
   draft in separate channels;
 - the X draft is composed from structured facts before Telegram presentation,
   not rewritten from the Telegram card;
-- the draft body is immediately copyable and contains no formatting guidance,
-  links, or operational metadata inside the copied block;
+- the draft body is presented as normal Telegram text with intended emphasis;
+  there is no code block or separate formatting guidance, and both links remain
+  visible below it;
 - the manager, not Hunch, performs the X publish action;
 - normal channels are unchanged;
 - model copy remains strictly validated; a rejected model draft can only fall
