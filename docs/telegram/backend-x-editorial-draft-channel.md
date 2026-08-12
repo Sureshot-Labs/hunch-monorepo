@@ -1,6 +1,6 @@
 # Backend Design: Human X Drafts in a Private Telegram Channel
 
-Status: V1 implemented; influencer-style prompt v4 and direct Telegram formatting added; live editorial QA remains
+Status: V1 implemented; influencer-style prompt v5, fail-visible previews, and direct Telegram formatting added; live editorial QA remains
 
 Scope: holder-research signal copy and Telegram delivery
 Decision: no database migration is required for the first production version
@@ -132,7 +132,7 @@ no evidence that proves access to non-public information.” The post must never
 upgrade correlation into knowledge, causation, or an accusation.
 
 Several examples also use first-person openings such as an author saying they
-found or are watching a wallet. Prompt v4 permits that limited editorial voice
+found or are watching a wallet. Prompt v5 permits that limited editorial voice
 because it materially contributes to the target style. Deterministic safety
 checks still reject invented personal bets, PnL, predictions, conversations,
 contacts, and private sources.
@@ -331,7 +331,7 @@ type XEditorialDraftV1 = {
   characterCount: number;
   generatedAt: string;
   model: string;
-  promptVersion: "x_editorial_prompt_v4";
+  promptVersion: "x_editorial_prompt_v5";
   sourceDigest: string;
 };
 ```
@@ -410,15 +410,17 @@ not as editorial `blocked`. A provider response without `message.content` is
 classified as `missing_content`.
 
 The composer is the preferred writer, but it is not allowed to make the
-editorial channel silently lose an already quality-gated signal. After the
-composer's constrained repair call, `schema_mismatch`, `missing_content`,
-`provider_error`, and a valid `status=blocked` all switch to a deterministic
-editorial fallback. Initial/update fallback copy uses the already accepted
-holder-research headline and narrative; follow-through/resolution fallback copy
-uses only the computed side, price move, wallet activity, flow, holding count,
-and PnL facts. It is still sent through the same direct-Markdown presentation
-and normal Telegram delivery ledger. It never falls back to the normal Telegram
-signal card, keyboard, or trading CTA.
+editorial channel silently lose an already quality-gated production signal.
+After the composer's constrained repair call, `schema_mismatch`,
+`missing_content`, `provider_error`, and a valid `status=blocked` all switch to
+a deterministic editorial fallback. Initial/update fallback copy builds a
+short trader story from the canonical side, position size, signal price,
+verified credentials, and PnL; it does not replay the holder-research headline
+and description. Follow-through/resolution fallback copy uses only the
+computed side, price move, wallet activity, flow, holding count, and PnL facts.
+It is still sent through the same direct-Markdown presentation and normal
+Telegram delivery ledger. It never falls back to the normal Telegram signal
+card, keyboard, or trading CTA.
 
 X editorial drafts also do not apply the normal ten-minute executable-quote
 freshness gate. They retain the validated signal-time price snapshot as an
@@ -464,7 +466,7 @@ Persisted metrics shape:
     "version": 1,
     "postText": "...",
     "formatting": [{ "style": "bold", "text": "..." }],
-    "promptVersion": "x_editorial_prompt_v4",
+    "promptVersion": "x_editorial_prompt_v5",
     "sourceDigest": "..."
   }
 }
@@ -676,7 +678,12 @@ Manual QA before production:
   profile-aware X follow-through preview; unlike the ordinary Telegram preview,
   the X preview stays standalone and has no reply target or inline keyboard;
   both X preview commands add only a short `Preview only — not recorded` banner
-  above the otherwise production-identical draft presentation;
+  above the otherwise production-identical composed draft presentation;
+- preview commands never substitute deterministic fallback copy for a composer
+  failure. They send an explicit `X preview failed` diagnostic with the
+  classified composer outcome (`schema_mismatch`, `missing_content`,
+  `provider_error`, or `model_blocked`) and record no delivery row, so an
+  operator cannot mistake fallback text for model-authored output;
 - collect a representative batch across sports, politics, crypto, totals,
   named outcomes, single traders, and clusters;
 - have the manager score factual accuracy, naturalness, edit distance before
