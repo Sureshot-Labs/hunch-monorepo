@@ -7,6 +7,7 @@ import crypto from "node:crypto";
 
 import { ethers } from "ethers";
 
+import "../../../integration-test-database-guard.js";
 import { pool } from "../../../db.js";
 import type { JsonObject } from "../../domain/types.js";
 import type { FundingPolymarketHandoffCandidate } from "../../persistence/funding-evidence-repository.js";

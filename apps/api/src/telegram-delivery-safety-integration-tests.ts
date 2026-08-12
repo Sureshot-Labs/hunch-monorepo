@@ -5,6 +5,7 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 
+import "./integration-test-database-guard.js";
 import { pool } from "./db.js";
 import {
   beginSignalBotMessageDelivery,
@@ -156,7 +157,8 @@ try {
     },
   });
   assert.equal(welcomeDelivery.quarantined, 1);
-  assert.equal(welcomeDelivery.claimed, 0);
+  assert.equal(welcomeDelivery.claimed, welcomeDelivery.skipped);
+  assert.equal(welcomeDelivery.sent, 0);
   assert.equal(welcomeCalls, 0);
 
   await pool.query(

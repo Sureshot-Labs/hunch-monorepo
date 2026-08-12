@@ -6,8 +6,20 @@ import type {
   SignalBotTelegramClient,
   TelegramSendResult,
 } from "./signal-bot-contracts.js";
-import { buildTelegramFundingProgressMessage } from "./telegram-funding-presentation.js";
-import { parseTelegramFundingProgressProjection } from "./telegram-funding-progress.js";
+import type { TelegramFundingProgressProjection } from "./telegram-funding-contracts.js";
+import { lockTelegramFundingLinkLifecycle } from "../funding/execution/telegram-funding-link-lifecycle-lock.js";
+import { isTelegramFundingReceiveControllerCurrent } from "../funding/execution/telegram-funding-managed-wallet.js";
+import { canonicalJsonEqual } from "../funding/persistence/canonical.js";
+import { lockFundingPolicyForTransaction } from "../funding/policies/funding-policy-sidecar.js";
+import {
+  buildTelegramFundingProgressMessage,
+  buildTelegramFundingQrMessage,
+} from "./telegram-funding-presentation.js";
+import {
+  parseTelegramFundingProgressProjection,
+  resolveTelegramFundingRetainedTerminal,
+} from "./telegram-funding-progress.js";
+import { resolveTelegramFundingAutomaticCapability } from "./telegram-funding-route.js";
 import {
   claimSignalBotMenuRender,
   isSignalBotMenuRenderCurrent,
@@ -17,37 +29,72 @@ import {
 
 type FundingOutboxRow = Readonly<{
   id: string;
-  action: "funding_send" | "funding_edit" | "funding_replacement";
+  action:
+    | "funding_send"
+    | "funding_edit"
+    | "funding_replacement"
+    | "funding_qr";
   funding_session_id: string;
   state_revision: number;
   payload: unknown;
   attempt_count: number;
   delivery_attempt_id: string;
+  user_id: string;
 }>;
 
 type FundingDestinationRow = Readonly<{
   active_buy_return_revision: number | null;
-  telegram_account_id: string;
+  address_disclosure_attempt_revision: number;
+  address_disclosure_message_id: string | number | null;
+  address_delivered_revision: number;
+  address_redacted_revision: number;
+  automation_enabled: boolean | null;
+  cancelled_at: Date | null;
+  destination_option_id: string;
+  expires_at: Date;
+  policy_snapshot: unknown;
+  receive_status: string;
+  receive_session_id: string;
+  telegram_account_id: string | null;
   telegram_user_id: string;
   telegram_message_id: string | number | null;
+  latest_terminal_projection: unknown;
   progress_revision: number;
+  user_id: string;
+  venue_binding_option_id: string;
 }>;
 
 const MAX_DELIVERY_ATTEMPTS = 8;
 const DELIVERY_LEASE_SECONDS = 300;
 
+export function requiresCurrentFundingPolicyForAddressDelivery(input: {
+  action: FundingOutboxRow["action"];
+  addressDeliveredRevision: number;
+}): boolean {
+  return (
+    input.addressDeliveredRevision === 0 || input.action !== "funding_edit"
+  );
+}
+
 async function enqueueFundingDeliveryRevision(
   client: PoolClient,
   input: Readonly<{
-    action: FundingOutboxRow["action"];
+    action: Exclude<FundingOutboxRow["action"], "funding_qr">;
     fundingSessionId: string;
     payload: unknown;
     stateRevision: number;
-    telegramAccountId: string;
+    telegramAccountId: string | null;
     telegramUserId: string;
     userId: string;
   }>,
 ): Promise<void> {
+  const projection = parseTelegramFundingProgressProjection(input.payload);
+  if (
+    projection?.receiveAddress != null &&
+    (input.action === "funding_send" || input.action === "funding_replacement")
+  ) {
+    throw new Error("funding address requires a known edit target");
+  }
   await client.query(
     `
       insert into telegram_bot_action_outbox (
@@ -176,7 +223,12 @@ async function claimFundingOutbox(input: {
         from telegram_funding_sessions context
         where context.id = outbox.funding_session_id
           and outbox.state_revision < context.progress_revision
-          and outbox.action in ('funding_send', 'funding_edit', 'funding_replacement')
+          and outbox.action in (
+            'funding_send',
+            'funding_edit',
+            'funding_replacement',
+            'funding_qr'
+          )
           and outbox.status in ('pending', 'retry')
       `,
     );
@@ -190,16 +242,22 @@ async function claimFundingOutbox(input: {
           outbox.funding_session_id,
           outbox.state_revision,
           outbox.payload,
-          outbox.attempt_count
+          outbox.attempt_count,
+          outbox.user_id
         from telegram_bot_action_outbox outbox
         join telegram_funding_sessions context
           on context.id = outbox.funding_session_id
          and context.progress_revision = outbox.state_revision
-        where outbox.action in ('funding_send', 'funding_edit', 'funding_replacement')
+        where outbox.action in (
+          'funding_send',
+          'funding_edit',
+          'funding_replacement',
+          'funding_qr'
+        )
           and (
             (outbox.status in ('pending', 'retry') and outbox.next_attempt_at <= now())
             or (
-              outbox.action = 'funding_edit'
+              outbox.action in ('funding_edit', 'funding_qr')
               and outbox.status = 'sending'
               and outbox.updated_at <= now() - interval '5 minutes'
             )
@@ -213,6 +271,13 @@ async function claimFundingOutbox(input: {
             from telegram_bot_action_outbox unknown
             where unknown.funding_session_id = context.id
               and unknown.status = 'delivery_unknown'
+              and not (
+                outbox.action = 'funding_edit'
+                and context.address_disclosure_attempt_revision >
+                    context.address_redacted_revision
+                and outbox.payload->>'terminal' = 'true'
+                and jsonb_typeof(outbox.payload->'receiveAddress') = 'null'
+              )
           )
         order by outbox.next_attempt_at asc, outbox.created_at asc
         for update of outbox, context skip locked
@@ -254,7 +319,12 @@ async function claimFundingOutbox(input: {
               delivery_started_at = now(),
               updated_at = now()
           where id = $1
-            and action in ('funding_send', 'funding_edit', 'funding_replacement')
+            and action in (
+              'funding_send',
+              'funding_edit',
+              'funding_replacement',
+              'funding_qr'
+            )
           returning attempt_count
         `,
         [row.id, attemptId],
@@ -277,21 +347,43 @@ async function claimFundingOutbox(input: {
 async function loadCurrentDestination(
   pool: Pick<Pool, "query">,
   row: FundingOutboxRow,
+  projection: TelegramFundingProgressProjection,
 ): Promise<FundingDestinationRow | null> {
+  const addressFreeTerminalEdit = isSafeAddressRedaction(projection);
   const { rows } = await pool.query<FundingDestinationRow>(
     `
       select
         context.active_buy_return_revision,
+        context.address_disclosure_attempt_revision,
+        context.address_disclosure_message_id,
+        context.address_delivered_revision,
+        context.address_redacted_revision,
+        consent.automation_enabled,
+        context.cancelled_at,
+        receive.destination_option_id,
+        context.expires_at,
+        consent.automation_policy_snapshot as policy_snapshot,
+        context.receive_session_id,
+        receive.status as receive_status,
         account.id::text as telegram_account_id,
-        account.telegram_user_id,
+        context.chat_id as telegram_user_id,
         context.telegram_message_id,
-        context.progress_revision
+        context.latest_terminal_projection,
+        context.progress_revision,
+        context.user_id,
+        receive.venue_binding_option_id
       from telegram_funding_sessions context
-      join user_telegram_accounts account
+      join funding_receive_sessions receive
+        on receive.id = context.receive_session_id
+       and receive.user_id = context.user_id
+      left join user_telegram_accounts account
         on account.id = context.telegram_account_id
        and account.user_id = context.user_id
        and account.telegram_user_id = context.telegram_user_id
       join users app_user on app_user.id = context.user_id
+      left join telegram_funding_consents consent
+        on consent.telegram_funding_session_id = context.id
+       and consent.revision = context.active_consent_revision
       where context.id = $1
         and context.progress_revision = $2
         and exists (
@@ -304,7 +396,11 @@ async function loadCurrentDestination(
         and context.delivery_lease_outbox_id = $3
         and context.delivery_lease_attempt_id = $4
         and context.delivery_lease_expires_at > now()
-        and coalesce(app_user.is_active, true) = true
+        and context.user_id = $5
+        and (
+          coalesce(app_user.is_active, true) = true
+          or $6::boolean
+        )
       limit 1
     `,
     [
@@ -312,9 +408,178 @@ async function loadCurrentDestination(
       row.state_revision,
       row.id,
       row.delivery_attempt_id,
+      row.user_id,
+      addressFreeTerminalEdit,
     ],
   );
-  return rows[0] ?? null;
+  const destination = rows[0];
+  if (!destination) return null;
+  // The retained terminal is the exact context watermark, not a boolean hint.
+  // Delivery may emit that canonical payload only; malformed or split evidence
+  // stays fail-closed until the projector repairs it under the context lock.
+  const retainedTerminal = resolveTelegramFundingRetainedTerminal(
+    destination.latest_terminal_projection,
+    row.funding_session_id,
+  );
+  if (
+    retainedTerminal.kind === "invalid" ||
+    (retainedTerminal.kind === "absent" && projection.terminal) ||
+    (retainedTerminal.kind === "valid" &&
+      !canonicalJsonEqual(retainedTerminal.projection, projection))
+  ) {
+    return null;
+  }
+  const safeAddressRedaction =
+    addressFreeTerminalEdit &&
+    destination.address_disclosure_attempt_revision >
+      destination.address_redacted_revision;
+  if (
+    safeAddressRedaction &&
+    destination.address_disclosure_message_id == null
+  ) {
+    return null;
+  }
+  if (
+    projection.receiveAddress !== null &&
+    (destination.cancelled_at !== null ||
+      destination.expires_at.getTime() <= Date.now() ||
+      destination.receive_status !== "open")
+  ) {
+    return null;
+  }
+  if (!destination.telegram_account_id) {
+    return safeAddressRedaction ? destination : null;
+  }
+  const controllerIsCurrent = await isTelegramFundingReceiveControllerCurrent(
+    pool,
+    {
+      receiveSessionId: destination.receive_session_id,
+      telegramAccountId: destination.telegram_account_id,
+      telegramUserId: destination.telegram_user_id,
+      userId: destination.user_id,
+    },
+  );
+  if (!controllerIsCurrent) return safeAddressRedaction ? destination : null;
+  if (projection.receiveAddress === null) return destination;
+  if (destination.automation_enabled === false) return destination;
+  if (destination.automation_enabled !== true) return null;
+  const capability = await resolveTelegramFundingAutomaticCapability(pool, {
+    policySnapshot: destination.policy_snapshot,
+    userId: destination.user_id,
+    telegramAccountId: destination.telegram_account_id,
+    telegramUserId: destination.telegram_user_id,
+    destinationOptionId: destination.destination_option_id,
+    venueBindingOptionId: destination.venue_binding_option_id,
+  });
+  if (!capability || capability.decision.kind === "hard_invalid") return null;
+  if (
+    requiresCurrentFundingPolicyForAddressDelivery({
+      action: row.action,
+      addressDeliveredRevision: destination.address_delivered_revision,
+    }) &&
+    capability.fundingPolicyRevision !==
+      capability.expectedFundingPolicyRevision
+  ) {
+    return null;
+  }
+  return destination;
+}
+
+function isSafeAddressRedaction(
+  projection: TelegramFundingProgressProjection,
+): boolean {
+  return projection.terminal && projection.receiveAddress === null;
+}
+
+// Persist the redaction obligation before Telegram can observe the address.
+// This is intentionally distinct from confirmed delivery: process loss after
+// the edit must retain the obligation without pretending that delivery was
+// acknowledged.
+async function markAddressDisclosureAttempt(input: {
+  client: Pick<PoolClient, "query">;
+  messageId: number;
+  row: FundingOutboxRow;
+}): Promise<boolean> {
+  const marked = await input.client.query(
+    `
+      update telegram_funding_sessions context
+      set address_disclosure_attempt_revision = greatest(
+            address_disclosure_attempt_revision,
+            $4
+          ),
+          address_disclosure_message_id = coalesce(
+            address_disclosure_message_id,
+            $5
+          ),
+          updated_at = now()
+      from telegram_bot_action_outbox outbox,
+           funding_receive_sessions receive
+      where context.id = $1
+        and context.progress_revision = $4
+        and context.delivery_lease_outbox_id = $2
+        and context.delivery_lease_attempt_id = $3
+        and context.delivery_lease_expires_at > now()
+        and context.cancelled_at is null
+        and context.expires_at > now()
+        and context.telegram_message_id = $5
+        and (
+          context.address_disclosure_message_id is null
+          or context.address_disclosure_message_id = $5
+        )
+        and receive.id = context.receive_session_id
+        and receive.user_id = context.user_id
+        and receive.owner_channel = 'telegram'
+        and receive.status = 'open'
+        and receive.expires_at > now()
+        and outbox.id = $2
+        and outbox.funding_session_id = context.id
+        and outbox.state_revision = $4
+        and outbox.status = 'sending'
+        and outbox.delivery_attempt_id = $3
+      returning context.id
+    `,
+    [
+      input.row.funding_session_id,
+      input.row.id,
+      input.row.delivery_attempt_id,
+      input.row.state_revision,
+      input.messageId,
+    ],
+  );
+  return (marked.rowCount ?? 0) === 1;
+}
+
+async function prepareAddressDisclosure(input: {
+  pool: Pool;
+  projection: TelegramFundingProgressProjection;
+  row: FundingOutboxRow;
+}): Promise<Readonly<{
+  destination: FundingDestinationRow;
+  messageId: number;
+}> | null> {
+  return tx(input.pool, async (client) => {
+    await lockTelegramFundingLinkLifecycle(client, input.row.user_id);
+    await lockFundingPolicyForTransaction(client);
+    const destination = await loadCurrentDestination(
+      client,
+      input.row,
+      input.projection,
+    );
+    const messageId = Number(destination?.telegram_message_id);
+    if (
+      !destination ||
+      !Number.isSafeInteger(messageId) ||
+      messageId <= 0 ||
+      !(await markAddressDisclosureAttempt({
+        client,
+        messageId,
+        row: input.row,
+      }))
+    ) {
+      return null;
+    }
+    return { destination, messageId };
+  });
 }
 
 async function finishAttempt(input: {
@@ -322,9 +587,11 @@ async function finishAttempt(input: {
   row: FundingOutboxRow;
   status: "dead" | "delivery_unknown" | "retry" | "skipped";
   reason: string;
+  persistentRetry?: boolean;
   retryAfterSec?: number;
 }): Promise<void> {
-  const dead = input.row.attempt_count >= MAX_DELIVERY_ATTEMPTS;
+  const dead =
+    !input.persistentRetry && input.row.attempt_count >= MAX_DELIVERY_ATTEMPTS;
   const retryAfterSec = Math.max(
     1,
     Math.min(
@@ -376,9 +643,11 @@ async function finishAttempt(input: {
 }
 
 async function recordDeliverySuccess(input: {
+  addressDelivered: boolean;
+  addressRedacted: boolean;
   pool: Pool;
   row: FundingOutboxRow;
-  telegramAccountId: string;
+  telegramAccountId: string | null;
   messageId: number;
 }): Promise<boolean> {
   return tx(input.pool, async (client) => {
@@ -445,6 +714,12 @@ async function recordDeliverySuccess(input: {
                 when $4::uuid is not null then $5
                 else telegram_message_id
               end,
+              address_redacted_revision = case
+                when $6::boolean
+                 and address_disclosure_message_id = $5
+                  then greatest(address_redacted_revision, $7)
+                else address_redacted_revision
+              end,
               delivery_lease_outbox_id = null,
               delivery_lease_attempt_id = null,
               delivery_lease_expires_at = null
@@ -458,6 +733,8 @@ async function recordDeliverySuccess(input: {
           input.row.delivery_attempt_id,
           current.current_telegram_account_id,
           input.messageId,
+          input.addressRedacted,
+          input.row.state_revision,
         ],
       );
       if (
@@ -488,6 +765,18 @@ async function recordDeliverySuccess(input: {
               else telegram_message_id
             end,
             last_delivered_revision = greatest(last_delivered_revision, $4),
+            address_delivered_revision = case
+              when $8::boolean
+               and address_disclosure_message_id = $3
+                then greatest(address_delivered_revision, $4)
+              else address_delivered_revision
+            end,
+            address_redacted_revision = case
+              when $9::boolean
+               and address_disclosure_message_id = $3
+                then greatest(address_redacted_revision, $4)
+              else address_redacted_revision
+            end,
             delivery_lease_outbox_id = null,
             delivery_lease_attempt_id = null,
             delivery_lease_expires_at = null
@@ -503,7 +792,10 @@ async function recordDeliverySuccess(input: {
         input.row.state_revision,
         input.row.id,
         input.row.delivery_attempt_id,
-        input.row.action !== "funding_edit",
+        input.row.action === "funding_send" ||
+          input.row.action === "funding_replacement",
+        input.addressDelivered,
+        input.addressRedacted,
       ],
     );
     if ((attached.rowCount ?? 0) === 0) {
@@ -556,10 +848,12 @@ async function recordDeliverySuccess(input: {
   });
 }
 
+// A replacement is a recovery path only for address-free status cards. An
+// address may leave the durable outbox solely as an edit of its known message.
 async function enqueueReplacementAfterMissingEdit(input: {
   pool: Pool;
   row: FundingOutboxRow;
-  telegramAccountId: string;
+  telegramAccountId: string | null;
 }): Promise<boolean> {
   return tx(input.pool, async (client) => {
     const current = await client.query<{
@@ -598,6 +892,40 @@ async function enqueueReplacementAfterMissingEdit(input: {
           update telegram_bot_action_outbox
           set status = 'skipped',
               last_error = 'funding_delivery_superseded',
+              updated_at = now()
+          where id = $1
+            and delivery_attempt_id = $2
+            and status = 'sending'
+        `,
+        [input.row.id, input.row.delivery_attempt_id],
+      );
+      await client.query(
+        `
+          update telegram_funding_sessions
+          set delivery_lease_outbox_id = null,
+              delivery_lease_attempt_id = null,
+              delivery_lease_expires_at = null
+          where id = $1
+            and delivery_lease_outbox_id = $2
+            and delivery_lease_attempt_id = $3
+        `,
+        [
+          input.row.funding_session_id,
+          input.row.id,
+          input.row.delivery_attempt_id,
+        ],
+      );
+      return false;
+    }
+    const latestProjection = parseTelegramFundingProgressProjection(
+      destination.latest_progress_projection,
+    );
+    if (!latestProjection || latestProjection.receiveAddress !== null) {
+      await client.query(
+        `
+          update telegram_bot_action_outbox
+          set status = 'dead',
+              last_error = 'funding_address_edit_target_unavailable',
               updated_at = now()
           where id = $1
             and delivery_attempt_id = $2
@@ -675,6 +1003,7 @@ export async function deliverTelegramFundingActions(input: {
   resolveMessage?: (
     input: Readonly<{
       contextId: string;
+      projection: TelegramFundingProgressProjection;
       telegramUserId: string;
     }>,
   ) => Promise<ReturnType<typeof buildTelegramFundingProgressMessage>>;
@@ -711,7 +1040,21 @@ export async function deliverTelegramFundingActions(input: {
       failed += 1;
       continue;
     }
-    const destination = await loadCurrentDestination(input.pool, row);
+    const addressFreeTerminalEdit = isSafeAddressRedaction(projection);
+    if (
+      projection.receiveAddress !== null &&
+      (row.action === "funding_send" || row.action === "funding_replacement")
+    ) {
+      await finishAttempt({
+        pool: input.pool,
+        row,
+        status: "dead",
+        reason: "funding_address_requires_known_edit_target",
+      });
+      failed += 1;
+      continue;
+    }
+    let destination = await loadCurrentDestination(input.pool, row, projection);
     if (!destination) {
       await finishAttempt({
         pool: input.pool,
@@ -722,101 +1065,295 @@ export async function deliverTelegramFundingActions(input: {
       skipped += 1;
       continue;
     }
+    const safeAddressRedaction =
+      addressFreeTerminalEdit &&
+      destination.address_disclosure_attempt_revision >
+        destination.address_redacted_revision;
+    const frozenMessage = safeAddressRedaction
+      ? buildTelegramFundingProgressMessage(projection)
+      : row.action === "funding_qr"
+        ? buildTelegramFundingQrMessage(projection)
+        : buildTelegramFundingProgressMessage(projection);
     let message: ReturnType<typeof buildTelegramFundingProgressMessage>;
     try {
-      message =
-        input.resolveMessage && destination.active_buy_return_revision != null
-          ? await input.resolveMessage({
-              contextId: row.funding_session_id,
-              telegramUserId: destination.telegram_user_id,
-            })
-          : buildTelegramFundingProgressMessage(projection);
+      message = safeAddressRedaction
+        ? frozenMessage
+        : row.action === "funding_qr"
+          ? frozenMessage
+          : input.resolveMessage &&
+              destination.active_buy_return_revision != null
+            ? await input.resolveMessage({
+                contextId: row.funding_session_id,
+                projection,
+                telegramUserId: destination.telegram_user_id,
+              })
+            : buildTelegramFundingProgressMessage(projection);
     } catch {
       await finishAttempt({
         pool: input.pool,
         row,
         status: "retry",
         reason: "funding_presentation_unavailable",
+        persistentRetry: safeAddressRedaction,
       });
       failed += 1;
       continue;
     }
-    if (row.action === "funding_edit") {
-      const editMessageText = input.telegram.editMessageText?.bind(
-        input.telegram,
-      );
-      if (destination.telegram_message_id == null || !editMessageText) {
-        const queued = await enqueueReplacementAfterMissingEdit({
-          pool: input.pool,
-          row,
-          telegramAccountId: destination.telegram_account_id,
-        });
-        skipped += 1;
-        if (!queued) failed += 1;
-        continue;
-      }
-      const renderAttempt = {
-        chatId: destination.telegram_user_id,
-        messageId: Number(destination.telegram_message_id),
-        renderToken: `funding:${row.delivery_attempt_id}`,
-      };
-      let guarded: SignalBotMenuRenderLockResult<TelegramSendResult>;
-      try {
-        await input.renderCoordinator.claim(renderAttempt);
-        guarded = await input.renderCoordinator.runExclusive({
-          ...renderAttempt,
-          deliver: () =>
-            editMessageText({
-              chat_id: destination.telegram_user_id,
-              disable_web_page_preview: true,
-              message_id: Number(destination.telegram_message_id),
-              parse_mode: message.parse_mode ?? "MarkdownV2",
-              reply_markup: message.reply_markup,
-              text: message.text,
-            }).catch((error: unknown) => ({
-              error: "ambiguous" as const,
-              message: error instanceof Error ? error.message : "edit_failed",
-              ok: false as const,
-            })),
-        });
-      } catch {
+    if (
+      message.durableFundingDeliveryRequired !==
+        frozenMessage.durableFundingDeliveryRequired ||
+      message.qrText !== frozenMessage.qrText
+    ) {
+      await finishAttempt({
+        pool: input.pool,
+        row,
+        status: "dead",
+        reason: "funding_presentation_changed_address_surface",
+      });
+      failed += 1;
+      continue;
+    }
+    {
+      if (row.action === "funding_edit" || row.action === "funding_qr") {
+        let editMessageId = safeAddressRedaction
+          ? destination.address_disclosure_message_id
+          : destination.telegram_message_id;
+        const editMessageText = input.telegram.editMessageText?.bind(
+          input.telegram,
+        );
+        if (editMessageId == null || !editMessageText) {
+          if (safeAddressRedaction) {
+            await finishAttempt({
+              pool: input.pool,
+              row,
+              status: editMessageText ? "dead" : "retry",
+              reason: "funding_redaction_edit_target_unavailable",
+              persistentRetry: !editMessageText,
+            });
+            failed += 1;
+            continue;
+          }
+          if (row.action === "funding_qr") {
+            await finishAttempt({
+              pool: input.pool,
+              row,
+              status: "skipped",
+              reason: "funding_qr_edit_unavailable",
+            });
+            skipped += 1;
+            continue;
+          }
+          const queued = await enqueueReplacementAfterMissingEdit({
+            pool: input.pool,
+            row,
+            telegramAccountId: destination.telegram_account_id,
+          });
+          skipped += 1;
+          if (!queued) failed += 1;
+          continue;
+        }
+        if (projection.receiveAddress !== null || message.qrText != null) {
+          let prepared: Awaited<ReturnType<typeof prepareAddressDisclosure>>;
+          try {
+            prepared = await prepareAddressDisclosure({
+              pool: input.pool,
+              projection,
+              row,
+            });
+          } catch {
+            await finishAttempt({
+              pool: input.pool,
+              row,
+              status: "retry",
+              reason: "funding_lifecycle_guard_unavailable",
+            });
+            failed += 1;
+            continue;
+          }
+          if (!prepared) {
+            await finishAttempt({
+              pool: input.pool,
+              row,
+              status: "skipped",
+              reason: "funding_disclosure_attempt_superseded",
+            });
+            skipped += 1;
+            continue;
+          }
+          destination = prepared.destination;
+          editMessageId = prepared.messageId;
+        }
+        const editTelegramUserId = destination.telegram_user_id;
+        const renderAttempt = {
+          chatId: editTelegramUserId,
+          messageId: Number(editMessageId),
+          renderToken: `funding:${row.delivery_attempt_id}`,
+        };
+        let guarded: SignalBotMenuRenderLockResult<TelegramSendResult>;
+        try {
+          await input.renderCoordinator.claim(renderAttempt);
+          guarded = await input.renderCoordinator.runExclusive({
+            ...renderAttempt,
+            deliver: () =>
+              editMessageText({
+                chat_id: editTelegramUserId,
+                disable_web_page_preview: true,
+                message_id: Number(editMessageId),
+                parse_mode: message.parse_mode ?? "MarkdownV2",
+                reply_markup: message.reply_markup,
+                text: message.text,
+              }).catch((error: unknown) => ({
+                error: "ambiguous" as const,
+                message: error instanceof Error ? error.message : "edit_failed",
+                ok: false as const,
+              })),
+          });
+        } catch {
+          await finishAttempt({
+            pool: input.pool,
+            row,
+            status: "retry",
+            reason: "funding_render_guard_unavailable",
+            persistentRetry: safeAddressRedaction,
+          });
+          failed += 1;
+          continue;
+        }
+        if (guarded.status === "superseded") {
+          await finishAttempt({
+            pool: input.pool,
+            row,
+            status: safeAddressRedaction ? "retry" : "skipped",
+            reason: "funding_render_superseded",
+            persistentRetry: safeAddressRedaction,
+          });
+          if (safeAddressRedaction) failed += 1;
+          else skipped += 1;
+          continue;
+        }
+        if (guarded.status === "unavailable") {
+          await finishAttempt({
+            pool: input.pool,
+            row,
+            status: "retry",
+            reason: "funding_render_guard_unavailable",
+            persistentRetry: safeAddressRedaction,
+          });
+          failed += 1;
+          continue;
+        }
+        const delivery = guarded.value;
+        if (delivery.ok) {
+          const recorded = await recordDeliverySuccess({
+            addressDelivered:
+              projection.receiveAddress !== null || message.qrText != null,
+            addressRedacted:
+              row.action === "funding_edit" &&
+              projection.receiveAddress === null &&
+              message.qrText == null,
+            pool: input.pool,
+            row,
+            telegramAccountId: destination.telegram_account_id,
+            messageId: delivery.messageId ?? Number(editMessageId),
+          });
+          if (recorded) sent += 1;
+          else {
+            await finishAttempt({
+              pool: input.pool,
+              row,
+              status: safeAddressRedaction ? "retry" : "skipped",
+              reason: "funding_delivery_superseded",
+              persistentRetry: safeAddressRedaction,
+            });
+            if (safeAddressRedaction) failed += 1;
+            else skipped += 1;
+          }
+          continue;
+        }
+        if (delivery.error === "message_not_editable") {
+          if (safeAddressRedaction) {
+            await finishAttempt({
+              pool: input.pool,
+              row,
+              status: "dead",
+              reason: "funding_redaction_message_not_editable",
+            });
+            failed += 1;
+            continue;
+          }
+          if (row.action === "funding_qr") {
+            await finishAttempt({
+              pool: input.pool,
+              row,
+              status: "dead",
+              reason: "funding_qr_message_not_editable",
+            });
+            failed += 1;
+            continue;
+          }
+          const queued = await enqueueReplacementAfterMissingEdit({
+            pool: input.pool,
+            row,
+            telegramAccountId: destination.telegram_account_id,
+          });
+          skipped += 1;
+          if (!queued) failed += 1;
+          continue;
+        }
+        if (delivery.error === "blocked_or_missing") {
+          await finishAttempt({
+            pool: input.pool,
+            row,
+            status: "dead",
+            reason: "funding_chat_unreachable",
+          });
+          blocked += 1;
+          continue;
+        }
         await finishAttempt({
           pool: input.pool,
           row,
           status: "retry",
-          reason: "funding_render_guard_unavailable",
+          reason: resultMessage(delivery),
+          persistentRetry: safeAddressRedaction,
+          retryAfterSec: delivery.retryAfterSec,
         });
         failed += 1;
         continue;
       }
-      if (guarded.status === "superseded") {
-        await finishAttempt({
-          pool: input.pool,
-          row,
-          status: "skipped",
-          reason: "funding_render_superseded",
-        });
-        skipped += 1;
-        continue;
-      }
-      if (guarded.status === "unavailable") {
-        await finishAttempt({
-          pool: input.pool,
-          row,
-          status: "retry",
-          reason: "funding_render_guard_unavailable",
-        });
-        failed += 1;
-        continue;
-      }
-      const delivery = guarded.value;
+
+      const delivery = await input.telegram
+        .sendMessage({
+          chat_id: destination.telegram_user_id,
+          disable_web_page_preview: true,
+          parse_mode: message.parse_mode ?? "MarkdownV2",
+          reply_markup: message.reply_markup,
+          text: message.text,
+        })
+        .catch((error: unknown) => ({
+          error: "ambiguous" as const,
+          message: error instanceof Error ? error.message : "send_failed",
+          ok: false as const,
+        }));
       if (delivery.ok) {
+        if (!delivery.messageId || delivery.messageId <= 0) {
+          await finishAttempt({
+            pool: input.pool,
+            row,
+            status: "delivery_unknown",
+            reason: "funding_send_missing_message_id",
+          });
+          unknown += 1;
+          continue;
+        }
         const recorded = await recordDeliverySuccess({
+          addressDelivered:
+            projection.receiveAddress !== null || message.qrText != null,
+          addressRedacted: false,
           pool: input.pool,
           row,
           telegramAccountId: destination.telegram_account_id,
-          messageId:
-            delivery.messageId ?? Number(destination.telegram_message_id),
+          messageId: delivery.messageId,
         });
         if (recorded) sent += 1;
         else {
@@ -830,16 +1367,6 @@ export async function deliverTelegramFundingActions(input: {
         }
         continue;
       }
-      if (delivery.error === "message_not_editable") {
-        const queued = await enqueueReplacementAfterMissingEdit({
-          pool: input.pool,
-          row,
-          telegramAccountId: destination.telegram_account_id,
-        });
-        skipped += 1;
-        if (!queued) failed += 1;
-        continue;
-      }
       if (delivery.error === "blocked_or_missing") {
         await finishAttempt({
           pool: input.pool,
@@ -850,6 +1377,16 @@ export async function deliverTelegramFundingActions(input: {
         blocked += 1;
         continue;
       }
+      if (delivery.error === "ambiguous") {
+        await finishAttempt({
+          pool: input.pool,
+          row,
+          status: "delivery_unknown",
+          reason: "funding_send_outcome_unknown",
+        });
+        unknown += 1;
+        continue;
+      }
       await finishAttempt({
         pool: input.pool,
         row,
@@ -858,79 +1395,7 @@ export async function deliverTelegramFundingActions(input: {
         retryAfterSec: delivery.retryAfterSec,
       });
       failed += 1;
-      continue;
     }
-
-    const delivery = await input.telegram
-      .sendMessage({
-        chat_id: destination.telegram_user_id,
-        disable_web_page_preview: true,
-        parse_mode: message.parse_mode ?? "MarkdownV2",
-        reply_markup: message.reply_markup,
-        text: message.text,
-      })
-      .catch((error: unknown) => ({
-        error: "ambiguous" as const,
-        message: error instanceof Error ? error.message : "send_failed",
-        ok: false as const,
-      }));
-    if (delivery.ok) {
-      if (!delivery.messageId || delivery.messageId <= 0) {
-        await finishAttempt({
-          pool: input.pool,
-          row,
-          status: "delivery_unknown",
-          reason: "funding_send_missing_message_id",
-        });
-        unknown += 1;
-        continue;
-      }
-      const recorded = await recordDeliverySuccess({
-        pool: input.pool,
-        row,
-        telegramAccountId: destination.telegram_account_id,
-        messageId: delivery.messageId,
-      });
-      if (recorded) sent += 1;
-      else {
-        await finishAttempt({
-          pool: input.pool,
-          row,
-          status: "skipped",
-          reason: "funding_delivery_superseded",
-        });
-        skipped += 1;
-      }
-      continue;
-    }
-    if (delivery.error === "blocked_or_missing") {
-      await finishAttempt({
-        pool: input.pool,
-        row,
-        status: "dead",
-        reason: "funding_chat_unreachable",
-      });
-      blocked += 1;
-      continue;
-    }
-    if (delivery.error === "ambiguous") {
-      await finishAttempt({
-        pool: input.pool,
-        row,
-        status: "delivery_unknown",
-        reason: "funding_send_outcome_unknown",
-      });
-      unknown += 1;
-      continue;
-    }
-    await finishAttempt({
-      pool: input.pool,
-      row,
-      status: "retry",
-      reason: resultMessage(delivery),
-      retryAfterSec: delivery.retryAfterSec,
-    });
-    failed += 1;
   }
   return {
     claimed: claimed.length,
@@ -1022,8 +1487,17 @@ export async function cleanupTelegramFundingContexts(input: {
             select 1
             from telegram_bot_action_outbox outbox
             where outbox.funding_session_id = context.id
-              and outbox.action in ('funding_send', 'funding_edit', 'funding_replacement')
+              and outbox.action in (
+                'funding_send',
+                'funding_edit',
+                'funding_replacement',
+                'funding_qr'
+              )
               and outbox.status in ('pending', 'retry', 'sending', 'delivery_unknown')
+          )
+          and not (
+            context.address_disclosure_attempt_revision >
+                context.address_redacted_revision
           )
           ${buyIntentBlockerSql}
         order by context.updated_at asc

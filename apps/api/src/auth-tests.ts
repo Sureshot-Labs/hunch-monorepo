@@ -1,6 +1,7 @@
 #!/usr/bin/env tsx
 
 import assert from "node:assert/strict";
+import "./integration-test-database-guard.js";
 import type { PoolClient } from "pg";
 import {
   AuthService,
@@ -365,7 +366,7 @@ const tests: TestCase[] = [
         assert.equal(calls.length, 1);
         assert.match(
           calls[0].sql,
-          /lower\(wallet_address\)\s*=\s*lower\(\$2\)/i,
+          /funding_account_identifier_equal\(wallet_type, wallet_address, \$2\)/i,
         );
         assert.deepEqual(calls[0].params, [
           "u-1",
@@ -453,7 +454,7 @@ const tests: TestCase[] = [
         assert.ok(queryCall);
         assert.match(
           queryCall.sql,
-          /lower\(wallet_address\)\s*=\s*lower\(\$3\)/i,
+          /funding_account_identifier_equal\('ethereum', wallet_address, \$3\)/i,
         );
         assert.deepEqual(queryCall.params, [
           "u-1",
@@ -512,7 +513,7 @@ const tests: TestCase[] = [
         assert.ok(queryCall);
         assert.match(
           queryCall.sql,
-          /lower\(wallet_address\)\s*=\s*lower\(\$2\)/i,
+          /funding_account_identifier_equal\('ethereum', wallet_address, \$2\)/i,
         );
         assert.deepEqual(queryCall.params, [
           "u-1",
@@ -1121,7 +1122,10 @@ const tests: TestCase[] = [
       assert.equal(result.userId, "user-wallet-match");
       assert.equal(result.consumeBindGrant, false);
       assert.equal(calls.length, 2);
-      assert.match(calls[1].sql, /lower\(wallet_address\)\s*=\s*lower\(\$2\)/i);
+      assert.match(
+        calls[1].sql,
+        /funding_account_identifier_equal\(\s*wallet_type,\s*wallet_address,\s*\$2\s*\)/i,
+      );
     },
   },
   {
@@ -1882,10 +1886,10 @@ const tests: TestCase[] = [
           if (/UPDATE user_wallets\s+SET wallet_type = \$3/i.test(sql)) {
             return { rows: [] };
           }
-          if (/UPDATE user_wallets SET is_primary = false/i.test(sql)) {
+          if (/UPDATE user_wallets\s+SET is_primary = false/i.test(sql)) {
             return { rows: [] };
           }
-          if (/UPDATE user_wallets SET is_primary = true/i.test(sql)) {
+          if (/UPDATE user_wallets\s+SET is_primary = true/i.test(sql)) {
             return { rows: [] };
           }
           if (
@@ -1997,6 +2001,10 @@ const tests: TestCase[] = [
       assert.ok(preferenceUpdateIndex >= 0);
       assert.ok(lifecycleLockIndex >= 0);
       assert.ok(fundingRevocationIndex >= 0);
+      assert.match(
+        calls[fundingRevocationIndex]?.sql ?? "",
+        /greatest\(granted_at, now\(\)\)/i,
+      );
       assert.ok(lifecycleInsertIndex >= 0);
       assert.ok(lifecycleLockIndex < fundingRevocationIndex);
       assert.deepEqual(calls[lifecycleLockIndex]?.params, [

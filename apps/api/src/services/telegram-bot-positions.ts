@@ -27,6 +27,10 @@ import {
 import { syncPositionsForUserWallet } from "./positions-sync.js";
 import { venueLifecycleAllows } from "./venue-lifecycle.js";
 import { telegramCustomEmojiMarkdownV2 } from "./telegram-custom-emoji.js";
+import {
+  canonicalAccountAddress,
+  sameAccountAddress,
+} from "../funding/domain/asset-identity.js";
 
 type SupportedPositionVenue = "kalshi" | "limitless" | "polymarket";
 
@@ -153,9 +157,10 @@ export async function runTelegramPositionSyncTasks(input: {
           partialFailure = true;
           return;
         }
-        const walletKey = /^0x[0-9a-f]{40}$/i.test(task.walletAddress)
-          ? task.walletAddress.toLowerCase()
-          : task.walletAddress;
+        const walletKey = canonicalAccountAddress(
+          task.venue === "kalshi" ? "solana:mainnet" : "evm:1",
+          task.walletAddress,
+        );
         cooldownKey = `positions:sync:${input.userId}:${walletKey}:${task.venue}`;
         attemptToken = crypto.randomUUID();
         const acquired = await input.redis.set(cooldownKey, attemptToken, {
@@ -410,15 +415,15 @@ export async function loadTelegramPositions(input: {
     `,
     [userId],
   );
-  const limitlessWallets = new Set(
-    credentialRows
-      .filter((row) => row.venue === "limitless")
-      .map((row) => row.wallet_address.toLowerCase()),
+  const limitlessWallets = credentialRows.filter(
+    (row) => row.venue === "limitless",
   );
   const tasks = buildPositionTasks(wallets).filter(
     (task) =>
       task.venue !== "limitless" ||
-      limitlessWallets.has(task.walletAddress.toLowerCase()),
+      limitlessWallets.some((row) =>
+        sameAccountAddress("evm:1", row.wallet_address, task.walletAddress),
+      ),
   );
   let partialFailure = false;
   const shouldSync = input.sync !== false;

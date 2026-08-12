@@ -2898,6 +2898,8 @@ export async function handleSignalBotMenuCallback(
     route.kind === "deposit_menu" ||
     route.kind === "select" ||
     route.kind === "review_buy" ||
+    route.kind === "review_conversion" ||
+    route.kind === "confirm_conversion" ||
     route.kind === "cancel" ||
     route.kind === "refresh" ||
     route.kind === "qr"
@@ -2932,7 +2934,6 @@ export async function handleSignalBotMenuCallback(
         : undefined,
       loadPositionCard: input.loadPositionCard,
       messageId,
-      onFundingDeliveryResult: reportFundingDelivery,
       onFundingOperationError: (action) => {
         try {
           input.onFundingMenuOperationError?.({
@@ -2968,7 +2969,6 @@ export async function handleSignalBotMenuCallback(
           transport: menuTransport,
         }),
       route,
-      sendPhoto: input.telegram.sendPhoto?.bind(input.telegram),
       telegramUserId,
     });
   }

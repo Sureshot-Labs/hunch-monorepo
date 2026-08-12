@@ -1,10 +1,11 @@
-import type { Pool, PoolClient } from "@hunch/infra";
+import { tx, type Pool, type PoolClient } from "@hunch/infra";
 
 import { stableOpaqueId } from "../../account-value/canonical.js";
 import type {
   AssetRef,
   ExternalIngressInstruction,
   FundingCommitRequest,
+  FundingQuoteRequest,
   FundingQuoteSummary,
   FundingReceiveMethod,
   FundingReceiveReceipt,
@@ -15,7 +16,10 @@ import type {
 import { resolveFundingDestinationChoice } from "../domain/selections.js";
 import { canonicalAccountAddress } from "../domain/asset-identity.js";
 import { FundingPlannerError } from "../planner/money.js";
-import { FundingPlanningRuntime } from "../planner/runtime-service.js";
+import {
+  FundingPlanningRuntime,
+  type PreparedFundingRuntimeCommit,
+} from "../planner/runtime-service.js";
 import { buildFundingReceiveTargets } from "../planner/receive-targets.js";
 import { canonicalJsonHash } from "../persistence/canonical.js";
 import { PostgresFundingPlanningStore } from "../persistence/funding-planning-repository.js";
@@ -25,13 +29,21 @@ import {
   type FundingReceiveSessionPersistenceResult,
   FundingReceiveSessionChannelConflictError,
   fetchFundingReceiveReceiptForReview,
+  type FundingReceiveReceiptReviewTarget,
   fetchFundingReceiveSessionForUser,
-  linkFundingReceiveReceiptReviewOperation,
+  linkFundingReceiveReceiptReviewOperationInTransaction,
   listFundingReceiveReceiptsForUser,
   setFundingReceiveReceiptReviewQuote,
 } from "../persistence/funding-receive-session-repository.js";
-import type { FundingOperationRow } from "../persistence/funding-operation-repository.js";
-import { resolveFundingPolicy } from "../policies/funding-policy-service.js";
+import {
+  fetchFundingOperationForUser,
+  type FundingOperationRow,
+  type FundingQuoteCommitScope,
+} from "../persistence/funding-operation-repository.js";
+import {
+  lockFundingPolicyForTransaction,
+  resolveFundingPolicy,
+} from "../policies/funding-policy-service.js";
 import {
   observeDirectIngressDestination,
   parseDirectIngressObservationVariant,
@@ -47,6 +59,14 @@ import {
 } from "./receive-session-constants.js";
 
 type JsonRecord = Readonly<Record<string, JsonValue>>;
+
+function reviewCommitScope(input: {
+  ownerChannel: FundingReceiveSessionChannel;
+  receiveSessionId: string;
+  receiptId: string;
+}): FundingQuoteCommitScope {
+  return { kind: "receive_receipt_review_v1", ...input };
+}
 
 function jsonRecord(value: unknown): JsonRecord {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -238,6 +258,38 @@ export type FundingReceiveReceiptReviewQuoteResponse = Readonly<{
   receipt: FundingReceiveReceipt;
   quote: FundingQuoteSummary;
 }>;
+
+export type PreparedFundingReceiveReceiptReviewQuote = Readonly<{
+  ownerChannel: FundingReceiveSessionChannel;
+  previousQuoteId: string | null;
+  quote: FundingQuoteSummary;
+  receiptId: string;
+  receiveSessionId: string;
+  targetFingerprint: string;
+  userId: string;
+}>;
+
+function reviewTargetFingerprint(
+  target: FundingReceiveReceiptReviewTarget,
+): string {
+  return canonicalJsonHash({
+    automationPolicy: target.automationPolicy,
+    destinationAsset: target.destinationAsset,
+    destinationOptionId: target.destinationOptionId,
+    destinationTargetSnapshot: target.destinationTargetSnapshot,
+    ownerChannel: target.ownerChannel,
+    ownershipRevision: target.ownershipRevision,
+    policyRevision: target.policyRevision,
+    policyVersion: target.policyVersion,
+    receipt: target.receipt,
+    receiptDestinationLocationId: target.receiptDestinationLocationId,
+    receiptVariantSnapshot: target.receiptVariantSnapshot,
+    userId: target.userId,
+    venueBindingOptionId: target.venueBindingOptionId,
+    venueBindingSnapshot: target.venueBindingSnapshot,
+    venueId: target.venueId,
+  });
+}
 
 export class FundingReceiveSessionService {
   private readonly runtime: FundingPlanningRuntime;
@@ -609,10 +661,32 @@ export class FundingReceiveSessionService {
     userId: string,
     receiveSessionId: string,
     receiptId: string,
+    ownerChannel: FundingReceiveSessionChannel,
     now = new Date(),
   ): Promise<FundingReceiveReceiptReviewQuoteResponse> {
+    const prepared = await this.prepareReviewQuote(
+      userId,
+      receiveSessionId,
+      receiptId,
+      ownerChannel,
+      now,
+    );
+    const attachNow = new Date(Math.max(now.getTime(), Date.now()));
+    return tx(this.db, (client) =>
+      this.attachPreparedReviewQuoteInTransaction(client, prepared, attachNow),
+    );
+  }
+
+  async prepareReviewQuote(
+    userId: string,
+    receiveSessionId: string,
+    receiptId: string,
+    ownerChannel: FundingReceiveSessionChannel,
+    now = new Date(),
+  ): Promise<PreparedFundingReceiveReceiptReviewQuote> {
     const target = await fetchFundingReceiveReceiptForReview(this.db, {
       userId,
+      ownerChannel,
       receiveSessionId,
       receiptId,
     });
@@ -622,17 +696,80 @@ export class FundingReceiveSessionService {
         "receive receipt does not require an economic review",
       );
     }
-    const quote = await quoteFundingReceiveReceipt(this.runtime, target);
-    if (!quote || quote.consentMode !== "explicit_economic_review") {
+    if (!target.receipt.reviewQuotePlan) {
+      throw new FundingPlannerError(
+        "destination_unavailable",
+        "receive receipt lacks its adapter-owned review quote plan",
+      );
+    }
+    const quote = await quoteFundingReceiveReceipt(
+      {
+        liquidity: this.runtime.liquidity.bind(this.runtime),
+        quote: (quoteUserId: string, request: FundingQuoteRequest) =>
+          this.runtime.quoteForCommitScope(
+            quoteUserId,
+            request,
+            reviewCommitScope({
+              ownerChannel,
+              receiveSessionId,
+              receiptId,
+            }),
+          ),
+      },
+      target,
+      { quotePlan: target.receipt.reviewQuotePlan },
+    );
+    if (
+      !quote ||
+      quote.consentMode !== "explicit_economic_review" ||
+      new Date(quote.expiresAt).getTime() <= Math.max(now.getTime(), Date.now())
+    ) {
       throw new FundingPlannerError(
         "destination_unavailable",
         "received asset cannot be quoted for safe conversion",
       );
     }
-    const stored = await setFundingReceiveReceiptReviewQuote(this.db, {
+    return {
+      ownerChannel,
+      previousQuoteId: target.reviewQuoteId,
+      quote,
       receiptId,
+      receiveSessionId,
+      targetFingerprint: reviewTargetFingerprint(target),
       userId,
-      quoteId: quote.quoteId,
+    };
+  }
+
+  async attachPreparedReviewQuoteInTransaction(
+    client: PoolClient,
+    prepared: PreparedFundingReceiveReceiptReviewQuote,
+    now = new Date(),
+    expectedPreviousQuoteId = prepared.previousQuoteId,
+  ): Promise<FundingReceiveReceiptReviewQuoteResponse> {
+    const target = await fetchFundingReceiveReceiptForReview(client, {
+      userId: prepared.userId,
+      ownerChannel: prepared.ownerChannel,
+      receiveSessionId: prepared.receiveSessionId,
+      receiptId: prepared.receiptId,
+      lock: true,
+    });
+    if (
+      !target ||
+      target.receipt.status !== "review_required" ||
+      target.reviewQuoteId !== expectedPreviousQuoteId ||
+      reviewTargetFingerprint(target) !== prepared.targetFingerprint ||
+      new Date(prepared.quote.expiresAt).getTime() <= now.getTime()
+    ) {
+      throw new FundingPlannerError(
+        "stale_projection",
+        "receive receipt changed while its review quote was prepared",
+      );
+    }
+    const stored = await setFundingReceiveReceiptReviewQuote(client, {
+      receiptId: prepared.receiptId,
+      userId: prepared.userId,
+      quoteId: prepared.quote.quoteId,
+      previousQuoteId: expectedPreviousQuoteId,
       now,
     });
     if (!stored) {
@@ -641,7 +778,7 @@ export class FundingReceiveSessionService {
         "receive receipt changed before review was created",
       );
     }
-    return { receipt: target.receipt, quote };
+    return { receipt: target.receipt, quote: prepared.quote };
   }
 
   async commitReview(
@@ -649,12 +786,63 @@ export class FundingReceiveSessionService {
     receiveSessionId: string,
     receiptId: string,
     request: FundingCommitRequest,
-    now = new Date(),
+    ownerChannel: FundingReceiveSessionChannel,
   ): Promise<Readonly<{ operation: FundingOperationRow; replayed: boolean }>> {
-    const target = await fetchFundingReceiveReceiptForReview(this.db, {
+    const prepared = await this.prepareReviewCommit(
       userId,
       receiveSessionId,
       receiptId,
+      request,
+      ownerChannel,
+    );
+    return tx(this.db, (client) =>
+      this.commitReviewInTransaction(
+        client,
+        userId,
+        receiveSessionId,
+        receiptId,
+        request,
+        prepared,
+        ownerChannel,
+      ),
+    );
+  }
+
+  prepareReviewCommit(
+    userId: string,
+    receiveSessionId: string,
+    receiptId: string,
+    request: FundingCommitRequest,
+    ownerChannel: FundingReceiveSessionChannel,
+  ): Promise<PreparedFundingRuntimeCommit> {
+    return this.runtime.prepareCommit(userId, request, {
+      commitScope: reviewCommitScope({
+        ownerChannel,
+        receiveSessionId,
+        receiptId,
+      }),
+    });
+  }
+
+  async commitReviewInTransaction(
+    client: PoolClient,
+    userId: string,
+    receiveSessionId: string,
+    receiptId: string,
+    request: FundingCommitRequest,
+    prepared: PreparedFundingRuntimeCommit,
+    ownerChannel: FundingReceiveSessionChannel,
+  ): Promise<Readonly<{ operation: FundingOperationRow; replayed: boolean }>> {
+    // The receipt lock makes quote consumption, operation creation, and
+    // attribution one boundary. Channel-specific callers may take their own
+    // lifecycle/context locks before entering this generic financial boundary.
+    await lockFundingPolicyForTransaction(client);
+    const target = await fetchFundingReceiveReceiptForReview(client, {
+      userId,
+      ownerChannel,
+      receiveSessionId,
+      receiptId,
+      lock: true,
     });
     if (!target || target.reviewQuoteId !== request.quoteId) {
       throw new FundingPlannerError(
@@ -666,10 +854,10 @@ export class FundingReceiveSessionService {
       target.receipt.status === "routing" &&
       target.receipt.childFundingOperationId
     ) {
-      const existing = await this.runtime.operation(
+      const existing = await fetchFundingOperationForUser(client, {
         userId,
-        target.receipt.childFundingOperationId,
-      );
+        operationId: target.receipt.childFundingOperationId,
+      });
       if (existing?.quoteId === request.quoteId) {
         return { operation: existing, replayed: true };
       }
@@ -678,27 +866,22 @@ export class FundingReceiveSessionService {
         "receive receipt is linked to another operation",
       );
     }
-    const committed = await this.runtime.commit(userId, request);
-    const linked = await linkFundingReceiveReceiptReviewOperation(this.db, {
-      receiptId,
-      receiveSessionId,
-      userId,
-      quoteId: request.quoteId,
-      childFundingOperationId: committed.operation.id,
-      now,
-    });
-    if (!linked) {
-      const current = await fetchFundingReceiveReceiptForReview(this.db, {
-        userId,
-        receiveSessionId,
+    const committed = await this.runtime.commitPreparedInTransaction(
+      client,
+      prepared,
+    );
+    const linked = await linkFundingReceiveReceiptReviewOperationInTransaction(
+      client,
+      {
         receiptId,
-      });
-      if (
-        current?.receipt.status === "routing" &&
-        current.receipt.childFundingOperationId === committed.operation.id
-      ) {
-        return { operation: committed.operation, replayed: true };
-      }
+        receiveSessionId,
+        userId,
+        quoteId: request.quoteId,
+        childFundingOperationId: committed.operation.id,
+        now: committed.operation.createdAt,
+      },
+    );
+    if (!linked) {
       throw new FundingPlannerError(
         "stale_projection",
         "receive receipt changed before the reviewed operation was linked",

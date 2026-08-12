@@ -1,7 +1,7 @@
 import { tx, type Pool, type PoolClient } from "@hunch/infra";
 
 import type { JsonValue } from "../domain/types.js";
-import { canonicalJsonEqual } from "./canonical.js";
+import { canonicalJsonEqual, canonicalJsonHash } from "./canonical.js";
 import {
   consumeFundingReservationInTransaction,
   fetchFundingOperationForUser,
@@ -58,6 +58,7 @@ export type FundingOperationStep = Readonly<{
   dependencyState: FundingOperationStepState | null;
   normalizedAction: JsonRecord;
   actionValidationResult: JsonRecord;
+  actionExpiresAt: Date | null;
 }>;
 
 type FundingOperationStepDbRow = {
@@ -74,6 +75,7 @@ type FundingOperationStepDbRow = {
   dependency_state: FundingOperationStepState | null;
   normalized_action: JsonRecord;
   action_validation_result: JsonRecord;
+  action_expires_at: Date | null;
 };
 
 function mapOperationStep(
@@ -93,6 +95,7 @@ function mapOperationStep(
     dependencyState: row.dependency_state,
     normalizedAction: row.normalized_action,
     actionValidationResult: row.action_validation_result,
+    actionExpiresAt: row.action_expires_at,
   };
 }
 
@@ -109,7 +112,8 @@ const operationStepColumns = `
   step.depends_on_step_id,
   dependency.state as dependency_state,
   step.normalized_action,
-  step.action_validation_result
+  step.action_validation_result,
+  step.action_expires_at
 `;
 
 export async function fetchFundingOperationStepForUser(
@@ -239,12 +243,21 @@ export async function listPotentialPolymarketHandoffsForCanonicalEvents(
           from candidate_event candidate
           where step.normalized_action ->> 'networkId'
                   = candidate.event ->> 'networkId'
-            and lower(step.action_validation_result ->> 'tokenAddress')
-                  = lower(candidate.event ->> 'assetId')
-            and lower(step.action_validation_result ->> 'funderAddress')
-                  = lower(candidate.event ->> 'sourceAddress')
-            and lower(step.action_validation_result ->> 'recipientAddress')
-                  = lower(candidate.event ->> 'destinationAddress')
+            and funding_account_identifier_equal(
+                  candidate.event ->> 'networkId',
+                  step.action_validation_result ->> 'tokenAddress',
+                  candidate.event ->> 'assetId'
+                )
+            and funding_account_identifier_equal(
+                  candidate.event ->> 'networkId',
+                  step.action_validation_result ->> 'funderAddress',
+                  candidate.event ->> 'sourceAddress'
+                )
+            and funding_account_identifier_equal(
+                  candidate.event ->> 'networkId',
+                  step.action_validation_result ->> 'recipientAddress',
+                  candidate.event ->> 'destinationAddress'
+                )
             and step.action_validation_result ->> 'amountRaw'
                   = candidate.event ->> 'rawAmount'
           limit 1
@@ -730,6 +743,7 @@ export async function startFundingStepAttemptForUserInTransaction(
     stepId: string;
     canonicalActionFingerprint: string;
     executorId: string;
+    expectedPolicy?: Readonly<{ revision: string; version: number }>;
     now?: Date;
   }>,
 ): Promise<
@@ -740,13 +754,17 @@ export async function startFundingStepAttemptForUserInTransaction(
 > {
   const { rows } = await client.query<
     FundingOperationStepDbRow & {
+      operation_policy_revision: string;
+      operation_policy_version: string | number;
       operation_status: string;
     }
   >(
     `
         select
           ${operationStepColumns},
-          operation.status as operation_status
+          operation.status as operation_status,
+          operation.policy_revision as operation_policy_revision,
+          operation.policy_version as operation_policy_version
         from funding_operation_steps step
         join funding_operations operation on operation.id = step.operation_id
         left join funding_operation_steps dependency
@@ -764,6 +782,38 @@ export async function startFundingStepAttemptForUserInTransaction(
     throw new FundingPersistenceError(
       "operation_not_found",
       "funding operation step was not found for authenticated user",
+    );
+  }
+  const now =
+    input.now ??
+    (await client.query<{ now: Date }>("select clock_timestamp() as now"))
+      .rows[0]?.now;
+  if (!now) throw new Error("funding action start clock is unavailable");
+  if (row.action_expires_at !== null && row.action_expires_at <= now) {
+    throw new FundingPersistenceError(
+      "quote_expired",
+      "funding action provider deadline has expired",
+    );
+  }
+  if (
+    input.expectedPolicy &&
+    (row.operation_policy_revision !== input.expectedPolicy.revision ||
+      Number(row.operation_policy_version) !== input.expectedPolicy.version)
+  ) {
+    throw new FundingPersistenceError(
+      "quote_invalidated",
+      "funding action policy changed before attempt start",
+    );
+  }
+  if (
+    row.action_fingerprint !== input.canonicalActionFingerprint ||
+    row.executor_id !== input.executorId ||
+    canonicalJsonHash(row.normalized_action) !==
+      input.canonicalActionFingerprint
+  ) {
+    throw new FundingPersistenceError(
+      "quote_mismatch",
+      "funding action differs from its committed fingerprint",
     );
   }
   if (
@@ -793,7 +843,7 @@ export async function startFundingStepAttemptForUserInTransaction(
     stepId: input.stepId,
     canonicalActionFingerprint: input.canonicalActionFingerprint,
     executorId: input.executorId,
-    now: input.now,
+    now,
   });
   return { attempt, step: mapOperationStep(row) };
 }

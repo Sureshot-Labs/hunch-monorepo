@@ -4,6 +4,7 @@ import {
   formatTelegramTextWithCommandsMarkdownV2,
 } from "./telegram-bot-trading-presentation.js";
 import { withTelegramPrivateNavigation } from "./telegram-bot-private-navigation.js";
+import type { TelegramFundingProgressProjection } from "./telegram-funding-contracts.js";
 
 export type TelegramBotTradingClientButton = (
   | { text: string; callback_data: string }
@@ -24,9 +25,10 @@ export type TelegramBotTradingClientMessage = {
 };
 
 export type TelegramFundingClientMessage = TelegramBotTradingClientMessage & {
+  durableFundingDeliveryRequired?: boolean;
   fundingContextId?: string;
   qrText?: string;
-  venue?: "polymarket";
+  venue?: string;
 };
 
 export type TelegramBotTradingClientCallbackInput = {
@@ -132,8 +134,9 @@ export type TelegramBotTradingInternalApiClient = {
   getFundingSession: (input: {
     chatId: string | number;
     contextId: string;
+    deliveryProjection?: TelegramFundingProgressProjection;
     telegramUserId: string | number;
-    view?: "address" | "progress";
+    view?: "address" | "delivery" | "progress";
   }) => Promise<TelegramFundingClientMessage>;
   selectFundingTarget: (input: {
     chatId: string | number;
@@ -146,6 +149,20 @@ export type TelegramBotTradingInternalApiClient = {
   cancelFunding: (input: {
     chatId: string | number;
     contextId: string;
+    idempotencyKey: string;
+    telegramMessageId: number | null;
+    telegramUserId: string | number;
+  }) => Promise<TelegramFundingClientMessage>;
+  reviewFundingConversion: (input: {
+    chatId: string | number;
+    idempotencyKey: string;
+    receiptId: string;
+    telegramMessageId: number | null;
+    telegramUserId: string | number;
+  }) => Promise<TelegramFundingClientMessage>;
+  confirmFundingConversion: (input: {
+    chatId: string | number;
+    consentToken: string;
     idempotencyKey: string;
     telegramMessageId: number | null;
     telegramUserId: string | number;
@@ -498,6 +515,17 @@ export function createTelegramBotTradingInternalApiClient(input: {
       post<TelegramFundingClientMessage>(
         "/internal/telegram-bot/funding/cancel",
         body,
+      ),
+    reviewFundingConversion: (body) =>
+      post<TelegramFundingClientMessage>(
+        "/internal/telegram-bot/funding/review-conversion",
+        body,
+      ),
+    confirmFundingConversion: (body) =>
+      post<TelegramFundingClientMessage>(
+        "/internal/telegram-bot/funding/confirm-conversion",
+        body,
+        { timeoutMs: executeTimeoutMs },
       ),
     resumeFundingBuy: (body) =>
       post<TelegramFundingClientMessage>(

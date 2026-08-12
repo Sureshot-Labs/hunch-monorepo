@@ -1,4 +1,6 @@
 import type { TelegramBotTradingClientMessage } from "./telegram-bot-trading-client.js";
+import type { TelegramFundingRoutePresentation } from "./telegram-funding-route.js";
+import type { FundingReceiveReviewContinuation } from "../funding/domain/types.js";
 
 export const TELEGRAM_FUNDING_CALLBACK_PREFIX = "hm:v1:fund";
 
@@ -10,35 +12,47 @@ export type TelegramFundingProgressState =
   | "ready"
   | "expired"
   | "cancelled"
+  | "unavailable"
   | "needs_attention";
 
 export type TelegramFundingProgressProjection = Readonly<{
-  version: 1;
+  version: 2;
   fundingContextId: string;
   state: TelegramFundingProgressState;
   terminal: boolean;
-  assetSymbol: "pUSD" | "USDC.e" | "Multiple assets";
-  networkLabel: "Polygon";
+  presentation: TelegramFundingRoutePresentation;
+  assetSymbol: string;
   rawAmount: string | null;
-  decimals: 6;
   receiveAddress: string | null;
   expiresAt: string;
   observedAt: string | null;
   automaticConversionEnabled?: boolean;
-  sourceAssetSymbol?: "USDC.e";
+  automaticConversionPaused?: boolean;
+  sourceAssetSymbol?: string;
   sourceRawAmount?: string | null;
+  reviewContinuation?: FundingReceiveReviewContinuation;
+  reviewReceiptId?: string;
 }>;
 
 export type TelegramFundingMessage = TelegramBotTradingClientMessage & {
   fundingContextId?: string;
+  qrPresentation?: Readonly<{
+    assetLabel: string;
+    instructions: readonly string[];
+    networkLabel: string;
+  }>;
   qrText?: string;
-  venue?: "polymarket";
+  venue?: string;
+  /** Address-bearing funding output may only be rendered by the durable outbox. */
+  durableFundingDeliveryRequired?: boolean;
 };
 
 export type TelegramFundingCallbackRoute =
   | Readonly<{ contextId: string; kind: "cancel" }>
   | Readonly<{ contextId: string; kind: "qr" }>
   | Readonly<{ contextId: string; kind: "refresh" }>
+  | Readonly<{ receiptId: string; kind: "review_conversion" }>
+  | Readonly<{ consentToken: string; kind: "confirm_conversion" }>
   | Readonly<{ continuationToken: string; kind: "review_buy" }>
   | Readonly<{ choiceToken: string; contextId: string; kind: "select" }>;
 
@@ -58,6 +72,15 @@ export function parseTelegramFundingCallbackRoute(
       continuationToken: reviewBuy[1] ?? "",
     };
   }
+  const confirmConversion = route.match(
+    /^fund:c:(consent_[A-Za-z0-9_-]{43})$/u,
+  );
+  if (confirmConversion) {
+    return {
+      kind: "confirm_conversion",
+      consentToken: confirmConversion[1] ?? "",
+    };
+  }
   const select = route.match(
     new RegExp(`^fund:select:${UUID}:([a-z0-9]{1,8})$`, "i"),
   );
@@ -69,24 +92,30 @@ export function parseTelegramFundingCallbackRoute(
     };
   }
   const action = route.match(
-    new RegExp(`^fund:(refresh|cancel|qr):${UUID}$`, "i"),
+    new RegExp(`^fund:(refresh|cancel|qr|convert):${UUID}$`, "i"),
   );
   if (!action) return null;
-  return {
-    kind: action[1] as "refresh" | "cancel" | "qr",
-    contextId: action[2] ?? "",
-  };
+  return action[1] === "convert"
+    ? { kind: "review_conversion", receiptId: action[2] ?? "" }
+    : {
+        kind: action[1] as "refresh" | "cancel" | "qr",
+        contextId: action[2] ?? "",
+      };
 }
 
 export function telegramFundingCallbackData(
   input: TelegramFundingCallbackRoute,
 ): string {
   const data =
-    input.kind === "review_buy"
-      ? `${TELEGRAM_FUNDING_CALLBACK_PREFIX}:review:${input.continuationToken}`
-      : input.kind === "select"
-        ? `${TELEGRAM_FUNDING_CALLBACK_PREFIX}:select:${input.contextId}:${input.choiceToken}`
-        : `${TELEGRAM_FUNDING_CALLBACK_PREFIX}:${input.kind}:${input.contextId}`;
+    input.kind === "confirm_conversion"
+      ? `${TELEGRAM_FUNDING_CALLBACK_PREFIX}:c:${input.consentToken}`
+      : input.kind === "review_buy"
+        ? `${TELEGRAM_FUNDING_CALLBACK_PREFIX}:review:${input.continuationToken}`
+        : input.kind === "select"
+          ? `${TELEGRAM_FUNDING_CALLBACK_PREFIX}:select:${input.contextId}:${input.choiceToken}`
+          : input.kind === "review_conversion"
+            ? `${TELEGRAM_FUNDING_CALLBACK_PREFIX}:convert:${input.receiptId}`
+            : `${TELEGRAM_FUNDING_CALLBACK_PREFIX}:${input.kind}:${input.contextId}`;
   if (Buffer.byteLength(data, "utf8") > 64) {
     throw new Error("Telegram funding callback exceeds 64 bytes");
   }

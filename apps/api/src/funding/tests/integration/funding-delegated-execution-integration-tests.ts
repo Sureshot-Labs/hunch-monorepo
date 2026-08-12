@@ -9,6 +9,7 @@ import { POLYMARKET_FUNDING_ROUTER } from "@hunch/contracts";
 import { tx, type PoolClient } from "@hunch/infra";
 import { Interface } from "ethers";
 
+import "../../../integration-test-database-guard.js";
 import { stableWalletOpaqueId } from "../../../account-value/canonical.js";
 import { pool } from "../../../db.js";
 import { normalizedActionSchema } from "../../domain/schemas.js";
@@ -26,6 +27,7 @@ import {
   validatePolymarketDepositUsdceWrapAction,
 } from "../../execution/delegated-funding-profiles.js";
 import {
+  ensureTelegramFundingAuthorization,
   grantTelegramFundingAuthorization,
   revokeTelegramFundingAuthorization,
   telegramFundingAuthorizationFingerprint,
@@ -60,18 +62,21 @@ import {
   resolveFundingPolicy,
 } from "../../policies/funding-policy-service.js";
 import { fundingSidecarRuntimeConfig } from "../../runtime/sidecar-runtime-config.js";
-import {
-  FundingReceiveReceiptRouter,
-  telegramUsdceWrapRoutingAuthorized,
-  telegramUsdceWrapRoutingDecision,
-} from "../../receive/receive-receipt-router.js";
+import { FundingReceiveReceiptRouter } from "../../receive/receive-receipt-router.js";
 import { reduceFundingOperation } from "../../reconciliation/funding-reducer.js";
 import { hasReadyTelegramFundingDestinationReceipt } from "../../../services/telegram-funding-buy-continuation.js";
+import { validatePolymarketFundingOperationLink } from "../../../services/telegram-funding-polymarket-evidence.js";
 import {
   appendTelegramFundingConsent,
   TelegramFundingPersistenceError,
 } from "../../../services/telegram-funding-sessions.js";
 import { runTelegramFundingProgressProjectionBatch } from "../../../services/telegram-funding-progress-projector.js";
+import {
+  resolveTelegramFundingReceiptDisposition,
+  telegramPolygonFundingPresentation,
+  telegramUsdceWrapRoutingAuthorized,
+  telegramUsdceWrapRoutingDecision,
+} from "../../../services/telegram-funding-route.js";
 
 const suffix = crypto.randomUUID();
 const now = new Date();
@@ -135,6 +140,7 @@ type Fixture = Readonly<{
 }>;
 
 const fixtures: Fixture[] = [];
+const extraAuthorizationIds: string[] = [];
 const policyIds: string[] = [];
 let policyOffsetMs = -1_000;
 
@@ -216,6 +222,7 @@ async function createFixture(
   const venueBindingOptionId = opaque("binding");
   const receiveTargetId = opaque("receive_target");
   const variantId = opaque("usdce_variant");
+  const pUsdVariantId = opaque("pusd_variant");
   const destinationAddress = `0x${crypto.randomBytes(20).toString("hex")}`;
   const sourceLocationId = opaque("deposit_location");
 
@@ -248,6 +255,21 @@ async function createFixture(
   );
   const userWalletId = wallet.rows[0]?.id;
   assert.ok(userWalletId);
+  await pool.query(
+    `insert into telegram_bot_trading_authorizations (
+       user_id, telegram_user_id, privy_user_id, wallet_address,
+       wallet_chain, privy_wallet_id, enabled, enabled_venues
+     ) values (
+       $1, $2, $3, $4, 'ethereum', $5, true, array['polymarket']::text[]
+     )`,
+    [
+      userId,
+      telegramUserId,
+      `did:privy:${userId}`,
+      walletAddress,
+      privyWalletId,
+    ],
+  );
   const authorizationInput = {
     userId,
     telegramAccountId,
@@ -260,10 +282,30 @@ async function createFixture(
     configuration: profileConfiguration,
     now,
   } as const;
-  const authorization = await grantTelegramFundingAuthorization(
+  const authorization = await ensureTelegramFundingAuthorization(
     pool,
-    authorizationInput,
+    {
+      userId,
+      telegramAccountId,
+      telegramUserId,
+      controllerWalletId: actionWalletId,
+      destinationOptionId,
+      venueBindingOptionId,
+      now,
+    },
+    {
+      configuration: profileConfiguration,
+      environmentReady: true,
+      inspectWalletProfile: async (input) => {
+        assert.deepEqual(input, {
+          walletAddress,
+          walletId: privyWalletId,
+        });
+        return "valid";
+      },
+    },
   );
+  assert.ok(authorization);
   const authorizationReplay = await grantTelegramFundingAuthorization(
     pool,
     authorizationInput,
@@ -290,6 +332,14 @@ async function createFixture(
       stepOrdinal: 0,
     },
   };
+  const pUsdVariant = {
+    ...usdceVariant,
+    variantId: pUsdVariantId,
+    asset: pUsd,
+    completion: {
+      kind: "direct_destination_credit" as const,
+    },
+  };
 
   const canonical = await createOrReuseFundingReceiveSession(pool, {
     userId,
@@ -298,7 +348,21 @@ async function createFixture(
     destinationOptionId,
     venueBindingOptionId,
     destinationAsset: pUsd,
-    destinationTargetSnapshot: { locationId: opaque("destination_location") },
+    destinationTargetSnapshot: {
+      kind: "owned_location",
+      location: {
+        kind: "venue_account",
+        locationId: opaque("destination_location"),
+        accountId: userId,
+        asset: pUsd,
+        details: {
+          venueId: "polymarket",
+          accountRef: destinationAddress,
+          controllerWalletId: actionWalletId,
+          address: destinationAddress,
+        },
+      },
+    },
     venueBindingSnapshot: { venueBindingOptionId },
     methods: [
       {
@@ -315,6 +379,7 @@ async function createFixture(
               networkId: "evm:137",
               destinationAddress,
               acceptedAssets: [
+                { asset: pUsd, handling: "direct" },
                 { asset: usdce, handling: "automatic_conversion" },
               ],
               safeInstructions: ["Send only USDC.e on Polygon."],
@@ -335,11 +400,14 @@ async function createFixture(
         receiveTargetId,
         networkId: "evm:137",
         destinationAddress,
-        acceptedAssets: [{ asset: usdce, handling: "automatic_conversion" }],
+        acceptedAssets: [
+          { asset: pUsd, handling: "direct" },
+          { asset: usdce, handling: "automatic_conversion" },
+        ],
         safeInstructions: [],
       },
     ],
-    observationVariants: [usdceVariant],
+    observationVariants: [pUsdVariant, usdceVariant],
     selectedReceiveTargetId: receiveTargetId,
     automationPolicy: {
       stableConversion: "automatic_within_caps",
@@ -383,15 +451,19 @@ async function createFixture(
       now,
     },
   );
-  const automationPolicy = telegramFundingAutomationPolicyJson(
-    buildTelegramFundingAutomationPolicyV2({
-      authorization,
-      sourceAsset: usdce,
-      destinationAsset: pUsd,
-      fundingPolicyRevision: consentCapability.fundingPolicyRevision,
-      variants: [usdceVariant],
-    }),
-  );
+  const automationPolicy = {
+    ...telegramFundingAutomationPolicyJson(
+      buildTelegramFundingAutomationPolicyV2({
+        authorization,
+        sourceAsset: usdce,
+        destinationAsset: pUsd,
+        fundingPolicyRevision: consentCapability.fundingPolicyRevision,
+        variants: [usdceVariant],
+      }),
+    ),
+    presentationMode: "pusd_or_usdce_automatic",
+    presentation: telegramPolygonFundingPresentation("pusd_or_usdce_automatic"),
+  } as const;
   const consentInput = {
     contextId: telegramFundingSessionId,
     userId,
@@ -399,9 +471,10 @@ async function createFixture(
     telegramUserId,
     chatId: telegramUserId,
     telegramMessageId: null,
+    controllerWalletId: actionWalletId,
     receiveTargetId,
     asset: pUsd,
-    variantIds: [variantId],
+    variantIds: [pUsdVariantId, variantId],
     automationEnabled: true,
     maximumAutomaticRaw: null,
     policySnapshot: automationPolicy,
@@ -570,7 +643,7 @@ async function createFixture(
     if (verifyRoutingAuthority) {
       const laterPolicySnapshot = {
         ...automationPolicy,
-        presentationMode: "pusd_or_usdce_automatic",
+        testConsentRevision: 2,
       } as const;
       const laterConsent = await receiptClient.query<{ id: string }>(
         `insert into telegram_funding_consents (
@@ -593,10 +666,10 @@ async function createFixture(
         [
           telegramFundingSessionId,
           receiveTargetId,
-          usdce.networkId,
-          usdce.assetId,
-          usdce.decimals,
-          [variantId],
+          pUsd.networkId,
+          pUsd.assetId,
+          pUsd.decimals,
+          [pUsdVariantId, variantId],
           JSON.stringify(laterPolicySnapshot),
           canonicalJsonHash(laterPolicySnapshot),
           new Date(now.getTime() + 2),
@@ -663,7 +736,7 @@ async function createFixture(
     );
     assert.equal(
       target.telegramAutomationPolicy?.presentationMode,
-      undefined,
+      "pusd_or_usdce_automatic",
       "a later active consent must not replace authority frozen at immutable first-seen",
     );
     assert.equal(await telegramUsdceWrapRoutingAuthorized(pool, target), true);
@@ -731,11 +804,18 @@ async function createFixture(
       genericPlanningCalls += 1;
       throw new Error("hard-invalid Telegram receipt reached generic planning");
     };
-    const unlinkedRouting = await new FundingReceiveReceiptRouter(pool, {
-      liquidity: unexpectedPlanningCall,
-      quote: unexpectedPlanningCall,
-      commit: unexpectedPlanningCall,
-    } as never).runBatch({ limit: 25, now: new Date(now.getTime() + 2_000) });
+    const unlinkedRouting = await new FundingReceiveReceiptRouter(
+      pool,
+      {
+        liquidity: unexpectedPlanningCall,
+        quote: unexpectedPlanningCall,
+        commit: unexpectedPlanningCall,
+      } as never,
+      resolveTelegramFundingReceiptDisposition,
+    ).runBatch({
+      limit: 25,
+      now: new Date(now.getTime() + 2_000),
+    });
     assert.equal(genericPlanningCalls, 0);
     assert.equal(unlinkedRouting.recoveriesRequired, 1);
     const unlinkedReceipt = await pool.query<{
@@ -908,7 +988,7 @@ async function createFixture(
   return fixture;
 }
 
-async function assertSecondRouterOperationBlocked(
+async function assertSecondSourceReservationBlocked(
   fixture: Fixture,
 ): Promise<void> {
   const consentToken = opaque("second_consent");
@@ -943,7 +1023,7 @@ async function assertSecondRouterOperationBlocked(
       }),
       (error: unknown) =>
         error instanceof FundingPersistenceError &&
-        error.code === "invalid_operation_state",
+        error.code === "quote_invalidated",
     );
   } finally {
     await pool.query(`delete from funding_quotes where id = $1`, [quote.id]);
@@ -994,6 +1074,13 @@ async function assertOperationAttachmentFailureRollsBack(
     expiresAt: new Date(Date.now() + 60_000),
   });
   const receiptId = fixture.receiptIds[1];
+  const linkTarget = (
+    await listFundingReceiveReceiptsForRouting(pool, {
+      limit: 500,
+      now: new Date(),
+    })
+  ).find((target) => target.receipt.receiptId === receiptId);
+  assert.ok(linkTarget);
   const authorizationId =
     fixture.plan.operation.supportMetadata?.fundingAuthorizationId;
   const authorizationFingerprint =
@@ -1051,6 +1138,18 @@ async function assertOperationAttachmentFailureRollsBack(
             .digest("hex"),
           subjectLookupKeyVersion: 1,
         });
+        if (
+          !(await validatePolymarketFundingOperationLink(client, {
+            operationId: committed.operation.id,
+            target: linkTarget,
+            consentId: fixture.consentId,
+            consentFingerprint: fixture.consentFingerprint,
+            authorizationId,
+            authorizationFingerprint,
+          }))
+        ) {
+          throw new Error("automatic funding operation evidence is invalid");
+        }
         await linkFundingReceiveReceiptOperationInTransaction(client, {
           receiptId,
           userId: fixture.userId,
@@ -1059,10 +1158,11 @@ async function assertOperationAttachmentFailureRollsBack(
           authorizationFingerprint,
           telegramFundingConsentId: fixture.consentId,
           telegramFundingConsentFingerprint: fixture.consentFingerprint,
+          serverExecutionProfileId: POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
           now: new Date(),
         });
       }),
-      /automatic funding operation is not bound to exact receipt evidence/u,
+      /automatic funding operation evidence is invalid/u,
       "an exact-link validation failure must roll back the operation commit",
     );
     const operation = await pool.query<{ count: string }>(
@@ -1167,7 +1267,7 @@ try {
   process.env.PRIVY_APP_ID = "test-app";
   process.env.PRIVY_APP_SECRET = "test-secret";
   process.env.PRIVY_WALLET_AUTHORIZATION_KEY = authorizationPrivateKey;
-  process.env.CREDENTIALS_ENCRYPTION_KEY = "test-encryption-key";
+  process.env.CREDENTIALS_ENCRYPTION_KEY = "00".repeat(32);
   process.env.FUNDING_REFERENCE_LOOKUP_HMAC_KEY = "test-hmac-key";
   process.env.POLYMARKET_FUNDING_ROUTER_ADDRESS = router;
   process.env.PRIVY_WALLET_AUTHORIZATION_ID = profileConfiguration.signerId;
@@ -1181,7 +1281,7 @@ try {
 
   const hugeRaw = (2n ** 255n).toString();
   const concurrent = await createFixture(hugeRaw, true);
-  await assertSecondRouterOperationBlocked(concurrent);
+  await assertSecondSourceReservationBlocked(concurrent);
   await assertOperationAttachmentFailureRollsBack(concurrent);
   const persistedAction = await pool.query<{
     action_fingerprint: string;
@@ -1307,6 +1407,7 @@ try {
   assert.equal(submittedAttempts.rows[0]?.outcome, "ambiguous");
   assert.equal(submittedAttempts.rows[0]?.reference_kind, "transaction");
   assert.equal(submittedAttempts.rows[0]?.broadcast_may_have_occurred, true);
+
   assert.deepEqual(
     await listFundingReceiveRoutingReceiptIdsAfterBroadcastBoundary(pool, {
       userId: concurrent.userId,
@@ -1334,13 +1435,19 @@ try {
       new Date(now.getTime() + 1_000),
     ],
   );
-  assert.deepEqual(
+  const boundaryProjectionBatch =
     await runTelegramFundingProgressProjectionBatch(pool, {
       limit: 25,
       now: new Date(now.getTime() + 2_000),
-    }),
-    { candidates: 1, created: 1, skipped: 0 },
+    });
+  assert.equal(
+    boundaryProjectionBatch.created,
+    1,
     "the attempt-only durable boundary must wake progress projection once",
+  );
+  assert.equal(
+    boundaryProjectionBatch.created + boundaryProjectionBatch.skipped,
+    boundaryProjectionBatch.candidates,
   );
   const boundaryProjection = await pool.query<{
     progress_revision: number;
@@ -1356,13 +1463,119 @@ try {
     progress_revision: 2,
     state: "converting",
   });
-  assert.deepEqual(
-    await runTelegramFundingProgressProjectionBatch(pool, {
-      limit: 25,
-      now: new Date(now.getTime() + 3_000),
-    }),
-    { candidates: 0, created: 0, skipped: 0 },
+  const noHotLoopBatch = await runTelegramFundingProgressProjectionBatch(pool, {
+    limit: 25,
+    now: new Date(now.getTime() + 3_000),
+  });
+  assert.equal(
+    noHotLoopBatch.created,
+    0,
     "a converting projection must not remain a hot-loop candidate",
+  );
+
+  const expiredOperationLifetime = await createFixture("1010000");
+  const expireOperationLifetime = await pool.connect();
+  try {
+    await expireOperationLifetime.query("begin");
+    await expireOperationLifetime.query(
+      "set local session_replication_role = replica",
+    );
+    await expireOperationLifetime.query(
+      `update funding_operations
+       set expires_at = created_at + interval '1 millisecond'
+       where id = $1`,
+      [expiredOperationLifetime.operationId],
+    );
+    await expireOperationLifetime.query("commit");
+  } catch (error) {
+    await expireOperationLifetime.query("rollback");
+    throw error;
+  } finally {
+    expireOperationLifetime.release();
+  }
+  let expiredOperationCalls = 0;
+  const expiredOperation = await executor(async () => {
+    expiredOperationCalls += 1;
+    return {
+      kind: "proven_nonbroadcast_failure",
+      reasonCode: "test_provider_failure",
+    };
+  }).runBatch({ limit: 1, now: new Date(now.getTime() + 5_000) });
+  assert.equal(expiredOperation.claimed, 1);
+  assert.equal(expiredOperation.definitivelyFailed, 1);
+  assert.equal(expiredOperationCalls, 1);
+
+  const expiredBeforeClaim = await createFixture("1015000");
+  await pool.query(
+    `update funding_operation_steps
+        set action_expires_at = created_at + interval '1 millisecond'
+      where operation_id = $1`,
+    [expiredBeforeClaim.operationId],
+  );
+  let expiredClaimCalls = 0;
+  const expiredClaim = await executor(async () => {
+    expiredClaimCalls += 1;
+    return { kind: "ambiguous" };
+  }).runBatch({ limit: 1, now: new Date(now.getTime() + 5_500) });
+  assert.equal(expiredClaim.claimed, 0);
+  assert.equal(expiredClaimCalls, 0);
+  assert.equal(
+    (
+      await pool.query<{ count: string }>(
+        `select count(*)::text as count
+         from funding_operation_step_attempts attempt
+         join funding_operation_steps step on step.id = attempt.step_id
+         where step.operation_id = $1`,
+        [expiredBeforeClaim.operationId],
+      )
+    ).rows[0]?.count,
+    "0",
+    "an expired provider action must not acquire an execution attempt",
+  );
+
+  const expiredAtBoundary = await createFixture("1020000");
+  let expiredBoundaryCalls = 0;
+  const expiredBoundary = await executorWithBoundaryMutation(
+    async () => {
+      expiredBoundaryCalls += 1;
+      return { kind: "ambiguous" };
+    },
+    async (client) => {
+      await client.query("set local session_replication_role = replica");
+      await client.query(
+        `update funding_operation_steps
+         set action_expires_at = created_at + interval '1 millisecond'
+         where operation_id = $1`,
+        [expiredAtBoundary.operationId],
+      );
+    },
+  ).runBatch({ limit: 1, now: new Date(now.getTime() + 6_000) });
+  assert.equal(expiredBoundary.definitivelyFailed, 1);
+  assert.equal(expiredBoundaryCalls, 0);
+  assert.deepEqual(
+    (
+      await pool.query<{
+        broadcast_may_have_occurred: boolean;
+        outcome: string;
+        reason_code: string | null;
+      }>(
+        `select attempt.outcome,
+                attempt.broadcast_may_have_occurred,
+                attempt.actual_costs ->> 'reasonCode' as reason_code
+         from funding_operation_step_attempts attempt
+         join funding_operation_steps step on step.id = attempt.step_id
+         where step.operation_id = $1`,
+        [expiredAtBoundary.operationId],
+      )
+    ).rows,
+    [
+      {
+        broadcast_may_have_occurred: false,
+        outcome: "failed",
+        reason_code: "delegated_quote_expired",
+      },
+    ],
+    "deadline expiry after claim must fail before the provider boundary",
   );
 
   const destinationReady = await createFixture("4250000");
@@ -1463,7 +1676,11 @@ try {
     1,
     "an ambiguous attempt must never rebroadcast",
   );
-  await new FundingReceiveReceiptRouter(pool).runBatch({
+  await new FundingReceiveReceiptRouter(
+    pool,
+    undefined,
+    resolveTelegramFundingReceiptDisposition,
+  ).runBatch({
     limit: 100,
     now: new Date(now.getTime() + 1),
   });
@@ -2184,6 +2401,12 @@ try {
      where user_id = $1`,
     [projectorWake.userId],
   );
+  await pool.query(
+    `update telegram_bot_trading_authorizations
+        set enabled = false
+      where user_id = $1`,
+    [projectorWake.userId],
+  );
   await runTelegramFundingProgressProjectionBatch(pool, {
     limit: 500,
     now: new Date(projectionBaseline.getTime() + 30_000),
@@ -2219,6 +2442,290 @@ try {
      set desired_enabled = true
      where user_id = $1`,
     [projectorWake.userId],
+  );
+  await pool.query(
+    `update telegram_bot_trading_authorizations
+        set enabled = true
+      where user_id = $1`,
+    [projectorWake.userId],
+  );
+
+  const transientInspection = await createFixture("6925000");
+  const transientFacts = await pool.query<{
+    destination_option_id: string;
+    telegram_user_id: string;
+    venue_binding_option_id: string;
+  }>(
+    `select telegram_user_id, destination_option_id, venue_binding_option_id
+       from telegram_funding_authorizations
+      where id = $1`,
+    [transientInspection.authorizationId],
+  );
+  const transientIdentity = transientFacts.rows[0];
+  assert.ok(transientIdentity);
+  assert.equal(
+    await ensureTelegramFundingAuthorization(
+      pool,
+      {
+        userId: transientInspection.userId,
+        telegramAccountId: transientInspection.telegramAccountId,
+        telegramUserId: transientIdentity.telegram_user_id,
+        controllerWalletId: transientInspection.actionWalletId,
+        destinationOptionId: transientIdentity.destination_option_id,
+        venueBindingOptionId: transientIdentity.venue_binding_option_id,
+        now: new Date(now.getTime() + 4_700),
+      },
+      {
+        configuration: profileConfiguration,
+        environmentReady: true,
+        inspectWalletProfile: async () => {
+          throw new Error("temporary Privy outage");
+        },
+      },
+    ),
+    null,
+    "a transient profile inspection failure must fail softly",
+  );
+  const transientAuthority = await pool.query<{ revoked_at: Date | null }>(
+    `select revoked_at
+       from telegram_funding_authorizations
+      where id = $1`,
+    [transientInspection.authorizationId],
+  );
+  assert.equal(
+    transientAuthority.rows[0]?.revoked_at,
+    null,
+    "a transient profile inspection failure must preserve pinned authority",
+  );
+
+  const operatorRevocation = await createFixture("6935000");
+  const operatorRevocationFacts = await pool.query<{
+    destination_option_id: string;
+    privy_wallet_id: string;
+    telegram_user_id: string;
+    venue_binding_option_id: string;
+    wallet_address: string;
+  }>(
+    `select telegram_user_id, privy_wallet_id, wallet_address,
+            destination_option_id, venue_binding_option_id
+       from telegram_funding_authorizations
+      where id = $1`,
+    [operatorRevocation.authorizationId],
+  );
+  const operatorIdentity = operatorRevocationFacts.rows[0];
+  assert.ok(operatorIdentity);
+  assert.equal(
+    await revokeTelegramFundingAuthorization(pool, {
+      authorizationId: operatorRevocation.authorizationId,
+      userId: operatorRevocation.userId,
+      now: new Date(now.getTime() + 4_710),
+    }),
+    true,
+  );
+  let operatorRevocationInspectionCalls = 0;
+  assert.equal(
+    await ensureTelegramFundingAuthorization(
+      pool,
+      {
+        userId: operatorRevocation.userId,
+        telegramAccountId: operatorRevocation.telegramAccountId,
+        telegramUserId: operatorIdentity.telegram_user_id,
+        controllerWalletId: operatorRevocation.actionWalletId,
+        destinationOptionId: operatorIdentity.destination_option_id,
+        venueBindingOptionId: operatorIdentity.venue_binding_option_id,
+        now: new Date(now.getTime() + 4_720),
+      },
+      {
+        configuration: profileConfiguration,
+        environmentReady: true,
+        inspectWalletProfile: async () => {
+          operatorRevocationInspectionCalls += 1;
+          return "valid";
+        },
+      },
+    ),
+    null,
+    "automatic provisioning must honor an explicit operator revoke",
+  );
+  assert.equal(operatorRevocationInspectionCalls, 0);
+  const operatorBlocked = await pool.query<{
+    active_count: string;
+    funding_operator_revoked_at: Date | null;
+  }>(
+    `select preference.funding_operator_revoked_at,
+            (count(funding_authorization.id) filter (
+              where funding_authorization.revoked_at is null
+            ))::text as active_count
+       from telegram_bot_trading_preferences preference
+       left join telegram_funding_authorizations funding_authorization
+         on funding_authorization.user_id = preference.user_id
+      where preference.user_id = $1
+      group by preference.funding_operator_revoked_at`,
+    [operatorRevocation.userId],
+  );
+  assert.ok(operatorBlocked.rows[0]?.funding_operator_revoked_at);
+  assert.equal(operatorBlocked.rows[0]?.active_count, "0");
+  const operatorRegrant = await grantTelegramFundingAuthorization(pool, {
+    userId: operatorRevocation.userId,
+    telegramAccountId: operatorRevocation.telegramAccountId,
+    telegramUserId: operatorIdentity.telegram_user_id,
+    userWalletId: operatorRevocation.userWalletId,
+    privyWalletId: operatorIdentity.privy_wallet_id,
+    walletAddress: operatorIdentity.wallet_address,
+    destinationOptionId: operatorIdentity.destination_option_id,
+    venueBindingOptionId: operatorIdentity.venue_binding_option_id,
+    configuration: profileConfiguration,
+    now: new Date(now.getTime() + 4_730),
+    operatorOverride: true,
+  });
+  extraAuthorizationIds.push(operatorRegrant.id);
+  const operatorUnblocked = await pool.query<{
+    funding_operator_revoked_at: Date | null;
+  }>(
+    `select funding_operator_revoked_at
+       from telegram_bot_trading_preferences
+      where user_id = $1`,
+    [operatorRevocation.userId],
+  );
+  assert.equal(
+    operatorUnblocked.rows[0]?.funding_operator_revoked_at,
+    null,
+    "an explicit operator grant must clear the emergency stop",
+  );
+  await pool.query(
+    `update telegram_bot_trading_preferences
+        set funding_operator_revoked_at = $2
+      where user_id = $1`,
+    [operatorRevocation.userId, new Date(now.getTime() + 4_740)],
+  );
+  const blockedWithRetainedGrant =
+    await resolveTelegramPolymarketWrapCapability(pool, {
+      userId: operatorRevocation.userId,
+      telegramAccountId: operatorRevocation.telegramAccountId,
+      telegramUserId: operatorIdentity.telegram_user_id,
+      destinationOptionId: operatorIdentity.destination_option_id,
+      venueBindingOptionId: operatorIdentity.venue_binding_option_id,
+      configuration: profileConfiguration,
+      expectedAuthorizationId: operatorRegrant.id,
+      expectedAuthorizationFingerprint:
+        telegramFundingAuthorizationFingerprint(operatorRegrant),
+      now: new Date(now.getTime() + 4_741),
+    });
+  assert.equal(
+    blockedWithRetainedGrant.decision.kind,
+    "hard_invalid",
+    "an operator tombstone must override even a retained active grant",
+  );
+  const operatorReplay = await grantTelegramFundingAuthorization(pool, {
+    userId: operatorRevocation.userId,
+    telegramAccountId: operatorRevocation.telegramAccountId,
+    telegramUserId: operatorIdentity.telegram_user_id,
+    userWalletId: operatorRevocation.userWalletId,
+    privyWalletId: operatorIdentity.privy_wallet_id,
+    walletAddress: operatorIdentity.wallet_address,
+    destinationOptionId: operatorIdentity.destination_option_id,
+    venueBindingOptionId: operatorIdentity.venue_binding_option_id,
+    configuration: profileConfiguration,
+    now: new Date(now.getTime() + 4_750),
+    operatorOverride: true,
+  });
+  assert.equal(operatorReplay.id, operatorRegrant.id);
+
+  const routeReplacement = await createFixture("6950000");
+  const routeReplacementFacts = await pool.query<{
+    destination_option_id: string;
+    privy_wallet_id: string;
+    telegram_user_id: string;
+    venue_binding_option_id: string;
+    wallet_address: string;
+  }>(
+    `select telegram_user_id, privy_wallet_id, wallet_address,
+            destination_option_id, venue_binding_option_id
+       from telegram_funding_authorizations
+      where id = $1`,
+    [routeReplacement.authorizationId],
+  );
+  const routeReplacementIdentity = routeReplacementFacts.rows[0];
+  assert.ok(routeReplacementIdentity);
+  let releaseStaleVerification:
+    | ((inspection: "valid" | "invalid" | "unavailable") => void)
+    | undefined;
+  let markVerificationStarted: (() => void) | undefined;
+  const verificationStarted = new Promise<void>((resolve) => {
+    markVerificationStarted = resolve;
+  });
+  const staleVerificationResult = new Promise<
+    "valid" | "invalid" | "unavailable"
+  >((resolve) => {
+    releaseStaleVerification = resolve;
+  });
+  const staleEnsure = ensureTelegramFundingAuthorization(
+    pool,
+    {
+      userId: routeReplacement.userId,
+      telegramAccountId: routeReplacement.telegramAccountId,
+      telegramUserId: routeReplacementIdentity.telegram_user_id,
+      controllerWalletId: routeReplacement.actionWalletId,
+      destinationOptionId: routeReplacementIdentity.destination_option_id,
+      venueBindingOptionId: routeReplacementIdentity.venue_binding_option_id,
+      now: new Date(now.getTime() + 4_800),
+    },
+    {
+      configuration: profileConfiguration,
+      environmentReady: true,
+      inspectWalletProfile: async () => {
+        markVerificationStarted?.();
+        return staleVerificationResult;
+      },
+    },
+  );
+  await verificationStarted;
+  const replacement = await grantTelegramFundingAuthorization(pool, {
+    userId: routeReplacement.userId,
+    telegramAccountId: routeReplacement.telegramAccountId,
+    telegramUserId: routeReplacementIdentity.telegram_user_id,
+    userWalletId: routeReplacement.userWalletId,
+    privyWalletId: routeReplacementIdentity.privy_wallet_id,
+    walletAddress: routeReplacementIdentity.wallet_address,
+    destinationOptionId: opaque("replacement_destination"),
+    venueBindingOptionId: opaque("replacement_binding"),
+    configuration: profileConfiguration,
+    now: new Date(now.getTime() + 4_900),
+    replaceExisting: true,
+  });
+  extraAuthorizationIds.push(replacement.id);
+  releaseStaleVerification?.("valid");
+  assert.equal(
+    await staleEnsure,
+    null,
+    "a stale successful profile check must fail closed",
+  );
+  const replacementRows = await pool.query<{
+    id: string;
+    revoked_at: Date | null;
+  }>(
+    `select id, revoked_at
+       from telegram_funding_authorizations
+      where id = any($1::uuid[])
+      order by id`,
+    [[routeReplacement.authorizationId, replacement.id]],
+  );
+  assert.equal(
+    replacementRows.rows.filter((row) => row.revoked_at === null).length,
+    1,
+    "a route change must leave exactly one active profile authority",
+  );
+  assert.equal(
+    replacementRows.rows.find(
+      (row) => row.id === routeReplacement.authorizationId,
+    )?.revoked_at != null,
+    true,
+    "a new route must revoke the prior active authority",
+  );
+  assert.equal(
+    replacementRows.rows.find((row) => row.id === replacement.id)?.revoked_at,
+    null,
+    "a stale successful profile check must not replace a newer authority",
   );
 
   const lifecycleRace = await createFixture("7000000");
@@ -2299,6 +2806,41 @@ try {
     [lifecycleRace.userId],
   );
   assert.equal(activeLifecycleGrants.rows[0]?.count, "0");
+  const retainedWalletEvidenceBefore = await pool.query<{
+    privy_wallet_id: string;
+    wallet_address: string;
+  }>(
+    `select privy_wallet_id, wallet_address
+       from telegram_funding_authorizations
+      where id = $1`,
+    [lifecycleRace.authorizationId],
+  );
+  await pool.query(`delete from user_wallets where id = $1`, [
+    lifecycleRace.userWalletId,
+  ]);
+  const retainedWalletEvidenceAfter = await pool.query<{
+    privy_wallet_id: string;
+    revoked_at: Date | null;
+    user_wallet_id: string | null;
+    wallet_address: string;
+  }>(
+    `select user_wallet_id, privy_wallet_id, wallet_address, revoked_at
+       from telegram_funding_authorizations
+      where id = $1`,
+    [lifecycleRace.authorizationId],
+  );
+  assert.deepEqual(
+    {
+      privy_wallet_id:
+        retainedWalletEvidenceAfter.rows[0]?.privy_wallet_id ?? null,
+      wallet_address:
+        retainedWalletEvidenceAfter.rows[0]?.wallet_address ?? null,
+    },
+    retainedWalletEvidenceBefore.rows[0],
+    "wallet unlink must preserve snapshotted authorization evidence",
+  );
+  assert.equal(retainedWalletEvidenceAfter.rows[0]?.user_wallet_id, null);
+  assert.ok(retainedWalletEvidenceAfter.rows[0]?.revoked_at);
 
   console.log(
     "[funding-delegated-execution-integration-tests] full-receipt concurrency, malformed action, soft pause/desired-state resume, lifecycle locking, pre-broadcast revocation, and ambiguous recovery passed",
@@ -2313,6 +2855,13 @@ try {
     await client.query(
       `set local hunch.telegram_funding_retention_cleanup = 'on'`,
     );
+    if (extraAuthorizationIds.length > 0) {
+      await client.query(
+        `delete from telegram_funding_authorizations
+          where id = any($1::uuid[])`,
+        [extraAuthorizationIds],
+      );
+    }
     for (const fixture of [...fixtures].reverse()) {
       await client.query(
         `delete from funding_operation_step_attempts
@@ -2337,6 +2886,11 @@ try {
       await client.query(
         `delete from funding_receive_receipts where id = any($1::uuid[])`,
         [fixture.receiptIds],
+      );
+      await client.query(
+        `delete from telegram_bot_action_outbox
+         where funding_session_id = $1`,
+        [fixture.telegramFundingSessionId],
       );
       await client.query(
         `delete from funding_operation_steps where operation_id = $1`,

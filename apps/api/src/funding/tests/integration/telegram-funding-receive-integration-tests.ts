@@ -5,9 +5,15 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 
+import "../../../integration-test-database-guard.js";
+import { stableWalletOpaqueId } from "../../../account-value/canonical.js";
+import { AuthService } from "../../../auth.js";
+import { pool } from "../../../db.js";
 import { fundingSidecarRuntimeConfig } from "../../runtime/sidecar-runtime-config.js";
 import { canonicalJsonHash } from "../../persistence/canonical.js";
-import { pool } from "../../../db.js";
+import { resolveTelegramFundingManagedWalletIdentity } from "../../execution/telegram-funding-managed-wallet.js";
+import { lockTelegramFundingLinkLifecycle } from "../../execution/telegram-funding-link-lifecycle-lock.js";
+import { FUNDING_POLICY_KEY } from "../../policies/funding-policy.js";
 import {
   cancelFundingReceiveSessionForUser,
   createOrReuseFundingReceiveSession,
@@ -33,6 +39,7 @@ import {
   TelegramFundingError,
   TelegramFundingService,
 } from "../../../services/telegram-funding.js";
+import { telegramPolygonFundingPresentation } from "../../../services/telegram-funding-route.js";
 
 const now = new Date();
 const suffix = crypto.randomUUID();
@@ -48,12 +55,25 @@ const usdce = {
   assetId: fundingSidecarRuntimeConfig.polymarketUsdceAddress,
   decimals: 6,
 } as const;
+const directPolicySnapshot = {
+  mode: "direct",
+  automationEnabled: false,
+  presentationMode: "pusd_direct",
+  presentation: telegramPolygonFundingPresentation("pusd_direct"),
+} as const;
 const destinationAddress = "0x1111111111111111111111111111111111111111";
+const privyWalletId = `privy-wallet-${suffix}`;
+const controllerWalletId = stableWalletOpaqueId({
+  walletType: "ethereum",
+  networkId: "evm:137",
+  address: destinationAddress,
+});
 const receiveTargetId = `receive_target_telegram_${suffix}`;
 const pUsdVariantId = `telegram_pusd_${suffix}`;
 const usdceVariantId = `telegram_usdce_${suffix}`;
 let receiveSessionId: string | null = null;
 let fundingContextId: string | null = null;
+let signalPolicyId: string | null = null;
 let cleanupFailure: unknown;
 const renderCoordinator = {
   claim: async () => {},
@@ -85,6 +105,36 @@ function openFingerprint(
   });
 }
 
+async function enableManagedTrading(
+  managedTelegramUserId: string,
+  privyUserId: string,
+): Promise<void> {
+  await pool.query(
+    `insert into telegram_bot_trading_authorizations (
+       user_id, telegram_user_id, privy_user_id, wallet_address,
+       wallet_chain, privy_wallet_id, enabled, enabled_venues
+     ) values (
+       $1, $2, $3, $4, 'ethereum', $5, true, array['polymarket']::text[]
+     )
+     on conflict (telegram_user_id, wallet_chain) do update
+       set user_id = excluded.user_id,
+           privy_user_id = excluded.privy_user_id,
+           wallet_address = excluded.wallet_address,
+           privy_wallet_id = excluded.privy_wallet_id,
+           enabled = true,
+           enabled_venues = excluded.enabled_venues,
+           disabled_at = null,
+           updated_at = now()`,
+    [
+      userId,
+      managedTelegramUserId,
+      privyUserId,
+      destinationAddress,
+      privyWalletId,
+    ],
+  );
+}
+
 try {
   await pool.query(
     `insert into users (id, email, is_active, is_verified)
@@ -100,6 +150,21 @@ try {
   );
   const telegramAccountId = account.rows[0]?.id;
   assert.ok(telegramAccountId);
+  await pool.query(
+    `insert into telegram_bot_trading_preferences (
+       user_id, desired_enabled, decision_source
+     ) values ($1, true, 'manual_enable')`,
+    [userId],
+  );
+  await pool.query(
+    `insert into user_wallets (
+       user_id, wallet_address, wallet_type, is_primary, is_verified,
+       privy_wallet_id, wallet_source, is_internal_wallet,
+       privy_profile_updated_at
+     ) values ($1, $2, 'ethereum', true, true, $3, 'embedded', true, $4)`,
+    [userId, destinationAddress, privyWalletId, now],
+  );
+  await enableManagedTrading(telegramUserId, `did:privy:${suffix}`);
 
   const canonicalInput = {
     userId,
@@ -108,7 +173,21 @@ try {
     destinationOptionId: `destination_${suffix}`,
     venueBindingOptionId: `binding_${suffix}`,
     destinationAsset: pUsd,
-    destinationTargetSnapshot: { locationId: `location_${suffix}` },
+    destinationTargetSnapshot: {
+      kind: "owned_location",
+      location: {
+        kind: "venue_account",
+        locationId: `location_${suffix}`,
+        accountId: userId,
+        asset: pUsd,
+        details: {
+          venueId: "polymarket",
+          accountRef: `account_${suffix}`,
+          controllerWalletId,
+          address: destinationAddress,
+        },
+      },
+    },
     venueBindingSnapshot: { bindingId: `binding_${suffix}` },
     methods: [
       {
@@ -352,6 +431,13 @@ try {
     false,
     true,
   ]);
+  const refreshedDestinationOptionId = `destination_after_inspection_${suffix}`;
+  await pool.query(
+    `update funding_receive_sessions
+        set destination_option_id = $2
+      where id = $1`,
+    [receiveSessionId, refreshedDestinationOptionId],
+  );
   const fastReplay = await reuseActiveTelegramFundingSession(pool, {
     userId,
     telegramAccountId,
@@ -359,6 +445,8 @@ try {
     chatId: telegramUserId,
     telegramMessageId: 202,
     venueId: "polymarket",
+    controllerWalletId,
+    venueBindingOptionId: canonicalInput.venueBindingOptionId,
     idempotencyKey: `telegram-open-fast-replay:${suffix}`,
     requestFingerprint: openFingerprint({ telegramMessageId: 202 }),
     now: new Date(now.getTime() + 500),
@@ -368,7 +456,114 @@ try {
   assert.equal(fastReplay?.telegramMessageId, 202);
   assert.equal(fastReplay?.expiresAt, firstContext.context.expiresAt);
   assert.equal(fastReplay?.activeConsentRevision, null);
-  const service = new TelegramFundingService(pool);
+  await pool.query(
+    `update telegram_bot_trading_preferences
+        set desired_enabled = false
+      where user_id = $1`,
+    [userId],
+  );
+  await pool.query(
+    `update telegram_bot_trading_authorizations
+        set enabled = false
+      where user_id = $1`,
+    [userId],
+  );
+  assert.equal(
+    (
+      await reuseActiveTelegramFundingSession(pool, {
+        userId,
+        telegramAccountId,
+        telegramUserId,
+        chatId: telegramUserId,
+        telegramMessageId: 202,
+        venueId: "polymarket",
+        controllerWalletId,
+        venueBindingOptionId: canonicalInput.venueBindingOptionId,
+        idempotencyKey: `telegram-open-soft-paused:${suffix}`,
+        requestFingerprint: openFingerprint({ telegramMessageId: 202 }),
+        now: new Date(now.getTime() + 500),
+      })
+    )?.id,
+    fundingContextId,
+    "soft pause must preserve identity-based 24h context reuse",
+  );
+  await pool.query(
+    `update telegram_bot_trading_preferences
+        set desired_enabled = true
+      where user_id = $1`,
+    [userId],
+  );
+  await pool.query(
+    `update telegram_bot_trading_authorizations
+        set enabled = true
+      where user_id = $1`,
+    [userId],
+  );
+  await pool.query(
+    `update funding_receive_sessions
+        set destination_option_id = $2
+      where id = $1`,
+    [receiveSessionId, canonicalInput.destinationOptionId],
+  );
+  assert.equal(
+    await reuseActiveTelegramFundingSession(pool, {
+      userId,
+      telegramAccountId,
+      telegramUserId,
+      chatId: telegramUserId,
+      telegramMessageId: 202,
+      venueId: "polymarket",
+      controllerWalletId: `different_controller_${suffix}`,
+      venueBindingOptionId: canonicalInput.venueBindingOptionId,
+      idempotencyKey: `telegram-open-wallet-change:${suffix}`,
+      requestFingerprint: openFingerprint({ telegramMessageId: 202 }),
+      now: new Date(now.getTime() + 500),
+    }),
+    null,
+    "an active context for a different managed wallet must not be reused",
+  );
+  assert.equal(
+    await reuseActiveTelegramFundingSession(pool, {
+      userId,
+      telegramAccountId,
+      telegramUserId,
+      chatId: telegramUserId,
+      telegramMessageId: 202,
+      venueId: "polymarket",
+      controllerWalletId,
+      venueBindingOptionId: `different_binding_${suffix}`,
+      idempotencyKey: `telegram-open-route-change:${suffix}`,
+      requestFingerprint: openFingerprint({ telegramMessageId: 202 }),
+      now: new Date(now.getTime() + 500),
+    }),
+    null,
+    "an active context for a different venue binding must not be reused",
+  );
+  const provisionedAuthorizations: unknown[] = [];
+  let provisionAttempts = 0;
+  const service = new TelegramFundingService(pool, {
+    provisionAuthorization: async (input) => {
+      provisionAttempts += 1;
+      provisionedAuthorizations.push(input);
+      if (provisionAttempts === 1) {
+        throw new Error("temporary_funding_authorization_failure");
+      }
+    },
+  });
+  await assert.rejects(
+    service.open(
+      {
+        chatId: telegramUserId,
+        idempotencyKey: `telegram-open-new-callback:${suffix}`,
+        telegramMessageId: 202,
+        telegramUserId,
+        venue: "polymarket",
+      },
+      new Date(now.getTime() + 500),
+    ),
+    /temporary_funding_authorization_failure/u,
+    "a provisioning failure must surface after the durable open mutation",
+  );
   const disabledPolicyReplay = await service.open(
     {
       chatId: telegramUserId,
@@ -380,11 +575,49 @@ try {
     new Date(now.getTime() + 500),
   );
   assert.equal(disabledPolicyReplay.fundingContextId, fundingContextId);
+  assert.deepEqual(provisionedAuthorizations, [
+    {
+      userId,
+      telegramAccountId,
+      telegramUserId,
+      controllerWalletId,
+      destinationOptionId: canonicalInput.destinationOptionId,
+      venueBindingOptionId: canonicalInput.venueBindingOptionId,
+      now: new Date(now.getTime() + 500),
+    },
+    {
+      userId,
+      telegramAccountId,
+      telegramUserId,
+      controllerWalletId,
+      destinationOptionId: canonicalInput.destinationOptionId,
+      venueBindingOptionId: canonicalInput.venueBindingOptionId,
+      now: new Date(now.getTime() + 500),
+    },
+  ]);
   assert.match(
     disabledPolicyReplay.text,
     /Confirm the supported receive assets/u,
   );
   assert.doesNotMatch(disabledPolicyReplay.text, /USDC\.e/u);
+  await assert.rejects(
+    new TelegramFundingService(pool, {
+      resolveManagedWallet: async () => null,
+    }).open(
+      {
+        chatId: telegramUserId,
+        idempotencyKey: `telegram-open-without-managed-wallet:${suffix}`,
+        telegramMessageId: 209,
+        telegramUserId,
+        venue: "polymarket",
+      },
+      new Date(now.getTime() + 600),
+    ),
+    (error: unknown) =>
+      error instanceof TelegramFundingError &&
+      error.code === "destination_ambiguous",
+    "production mode must not fall back to an arbitrary verified wallet",
+  );
   const openMutation = await pool.query<{
     action: string;
     funding_context_id: string;
@@ -616,10 +849,11 @@ try {
     telegramUserId,
     chatId: telegramUserId,
     telegramMessageId: 101,
+    controllerWalletId,
     receiveTargetId,
     asset: pUsd,
     variantIds: [pUsdVariantId],
-    policySnapshot: { mode: "direct", automationEnabled: false } as const,
+    policySnapshot: directPolicySnapshot,
     fingerprint: hash("consent"),
     mutation: {
       idempotencyKey: selectIdempotencyKey,
@@ -628,6 +862,135 @@ try {
     },
     now: new Date(now.getTime() + 1_000),
   };
+  const exactManagedService = new TelegramFundingService(pool, {
+    resolveManagedWallet: (input) =>
+      resolveTelegramFundingManagedWalletIdentity(pool, input),
+  });
+  await pool.query(
+    `update funding_receive_sessions
+        set destination_option_id = $2
+      where id = $1`,
+    [receiveSessionId, `destination_after_balance_change_${suffix}`],
+  );
+  const refreshedInspectionMessage = await exactManagedService.session(
+    {
+      chatId: telegramUserId,
+      contextId: fundingContextId,
+      telegramUserId,
+    },
+    new Date(now.getTime() + 950),
+  );
+  assert.doesNotMatch(
+    refreshedInspectionMessage.text,
+    /Receive unavailable/u,
+    "mutable destination inspection IDs must not invalidate the current managed wallet context",
+  );
+  await pool.query(
+    `update funding_receive_sessions
+        set destination_option_id = $2
+      where id = $1`,
+    [receiveSessionId, canonicalInput.destinationOptionId],
+  );
+
+  const replacementWalletAddress = "0x3333333333333333333333333333333333333333";
+  const replacementPrivyWalletId = `replacement-privy-wallet-${suffix}`;
+  await pool.query(
+    `insert into user_wallets (
+       user_id, wallet_address, wallet_type, is_primary, is_verified,
+       privy_wallet_id, wallet_source, is_internal_wallet,
+       privy_profile_updated_at
+     ) values ($1, $2, 'ethereum', false, true, $3, 'embedded', true, $4)`,
+    [userId, replacementWalletAddress, replacementPrivyWalletId, now],
+  );
+  await pool.query(
+    `update telegram_bot_trading_authorizations
+        set wallet_address = $2,
+            privy_wallet_id = $3,
+            updated_at = $4
+      where user_id = $1
+        and telegram_user_id = $5
+        and wallet_chain = 'ethereum'`,
+    [
+      userId,
+      replacementWalletAddress,
+      replacementPrivyWalletId,
+      new Date(now.getTime() + 975),
+      telegramUserId,
+    ],
+  );
+  const staleControllerMessage = await exactManagedService.session(
+    {
+      chatId: telegramUserId,
+      contextId: fundingContextId,
+      telegramUserId,
+    },
+    new Date(now.getTime() + 980),
+  );
+  assert.match(
+    staleControllerMessage.text,
+    /Receive unavailable/u,
+    "a context for the previous wallet must not reveal its address after a managed wallet switch",
+  );
+  await assert.rejects(
+    appendTelegramFundingConsent(pool, consentInput),
+    (error: unknown) =>
+      error instanceof TelegramFundingPersistenceError &&
+      error.code === "telegram_funding_session_unavailable",
+    "direct consent must recheck the exact managed controller under the lifecycle lock",
+  );
+  await pool.query(
+    `update telegram_bot_trading_authorizations
+        set wallet_address = $2,
+            privy_wallet_id = $3,
+            updated_at = $4
+      where user_id = $1
+        and telegram_user_id = $5
+        and wallet_chain = 'ethereum'`,
+    [
+      userId,
+      destinationAddress,
+      privyWalletId,
+      new Date(now.getTime() + 990),
+      telegramUserId,
+    ],
+  );
+  const staleAutomaticSelectionKey = `telegram-select-stale-automatic:${suffix}`;
+  const signalPolicy = await pool.query<{ id: string }>(
+    `insert into runtime_policies (
+       policy_key, effective_at, payload, created_by
+     ) values ('signal_bot', $1, $2::jsonb, null)
+     returning id`,
+    [
+      new Date(Date.now() - 1_000),
+      JSON.stringify({ fundingReceiveEnabled: true }),
+    ],
+  );
+  signalPolicyId = signalPolicy.rows[0]?.id ?? null;
+  assert.ok(signalPolicyId);
+  await assert.rejects(
+    exactManagedService.selectTarget(
+      {
+        chatId: telegramUserId,
+        choiceToken: "a",
+        contextId: fundingContextId,
+        idempotencyKey: staleAutomaticSelectionKey,
+        telegramMessageId: 101,
+        telegramUserId,
+      },
+      new Date(now.getTime() + 995),
+    ),
+    (error: unknown) =>
+      error instanceof TelegramFundingError &&
+      error.code === "invalid_funding_choice",
+    "a stale automatic choice must not be rewritten as direct pUSD consent",
+  );
+  const staleAutomaticMutation = await pool.query<{ count: string }>(
+    `select count(*)::text as count
+       from telegram_funding_mutations
+      where idempotency_key = $1`,
+    [staleAutomaticSelectionKey],
+  );
+  assert.equal(staleAutomaticMutation.rows[0]?.count, "0");
   const concurrentConsents = await Promise.all([
     appendTelegramFundingConsent(pool, consentInput),
     appendTelegramFundingConsent(pool, consentInput),
@@ -642,6 +1005,559 @@ try {
   assert.deepEqual(replayedConsent.mutationResponse, {
     text: "verified pUSD address",
   });
+  const interactiveWaiting = await exactManagedService.session(
+    {
+      chatId: telegramUserId,
+      contextId: fundingContextId,
+      telegramUserId,
+      view: "progress",
+    },
+    new Date(now.getTime() + 1_025),
+  );
+  assert.equal(interactiveWaiting.durableFundingDeliveryRequired, true);
+  assert.equal(interactiveWaiting.qrText, undefined);
+  assert.doesNotMatch(
+    interactiveWaiting.text,
+    new RegExp(destinationAddress, "iu"),
+    "interactive callbacks must never receive the address-bearing render",
+  );
+  const waitingProjection = await runTelegramFundingProgressProjectionBatch(
+    pool,
+    { limit: 10, now: new Date(now.getTime() + 1_050) },
+  );
+  assert.equal(waitingProjection.created, 1);
+  const frozenDeliveryProjection = await pool.query<{
+    projection: unknown;
+  }>(
+    `select latest_progress_projection as projection
+       from telegram_funding_sessions
+      where id = $1`,
+    [fundingContextId],
+  );
+  const deliveryWaiting = await exactManagedService.session(
+    {
+      chatId: telegramUserId,
+      contextId: fundingContextId,
+      deliveryProjection: frozenDeliveryProjection.rows[0]?.projection,
+      telegramUserId,
+      view: "delivery",
+    },
+    new Date(now.getTime() + 1_030),
+  );
+  assert.match(
+    deliveryWaiting.text,
+    new RegExp(destinationAddress, "iu"),
+    "only the durable delivery view may materialize the address",
+  );
+  for (const unsafeAction of ["funding_send", "funding_replacement"] as const) {
+    await assert.rejects(
+      pool.query(
+        `insert into telegram_bot_action_outbox (
+           action, telegram_account_id, user_id, telegram_user_id,
+           funding_session_id, state_revision, payload
+         )
+         select $2, context.telegram_account_id, context.user_id,
+                context.telegram_user_id, context.id,
+                context.progress_revision, context.latest_progress_projection
+           from telegram_funding_sessions context
+          where context.id = $1`,
+        [fundingContextId, unsafeAction],
+      ),
+      (error: unknown) =>
+        error instanceof Error &&
+        "code" in error &&
+        error.code === "23514" &&
+        error.message.includes(
+          "telegram_bot_action_outbox_address_egress_check",
+        ),
+      `${unsafeAction} must reject an address-bearing projection at the DB boundary`,
+    );
+  }
+  let releaseAddressEdit!: () => void;
+  let reportAddressEditStarted!: () => void;
+  const addressEditStarted = new Promise<void>((resolve) => {
+    reportAddressEditStarted = resolve;
+  });
+  const addressEditReleased = new Promise<void>((resolve) => {
+    releaseAddressEdit = resolve;
+  });
+  const addressDeliveryPromise = deliverTelegramFundingActions({
+    pool,
+    renderCoordinator,
+    telegram: {
+      editMessageText: async (message) => {
+        assert.match(message.text, new RegExp(destinationAddress, "u"));
+        reportAddressEditStarted();
+        await addressEditReleased;
+        return { ok: true, messageId: 101 };
+      },
+      sendMessage: async () => {
+        assert.fail("the selected funding card must be edited");
+      },
+    },
+  });
+  await addressEditStarted;
+  const inFlightDisclosure = await pool.query<{
+    address_disclosure_attempt_revision: number;
+    address_disclosure_message_id: string;
+  }>(
+    `select
+       address_disclosure_attempt_revision,
+       address_disclosure_message_id::text
+       from telegram_funding_sessions
+      where id = $1`,
+    [fundingContextId],
+  );
+  assert.deepEqual(inFlightDisclosure.rows[0], {
+    address_disclosure_attempt_revision: 1,
+    address_disclosure_message_id: "101",
+  });
+  const competingLifecycle = await pool.connect();
+  try {
+    await competingLifecycle.query("begin");
+    await competingLifecycle.query("set local lock_timeout = '75ms'");
+    await lockTelegramFundingLinkLifecycle(competingLifecycle, userId);
+    await competingLifecycle.query("rollback");
+    await competingLifecycle.query("begin");
+    await competingLifecycle.query("set local lock_timeout = '75ms'");
+    await competingLifecycle.query(
+      "select pg_advisory_xact_lock(hashtext($1))",
+      [FUNDING_POLICY_KEY],
+    );
+    await competingLifecycle.query("rollback");
+  } finally {
+    competingLifecycle.release();
+  }
+  releaseAddressEdit();
+  const addressDelivery = await addressDeliveryPromise;
+  assert.equal(addressDelivery.sent, 1);
+  const addressProof = await pool.query<{
+    address_disclosure_attempt_revision: number;
+    address_disclosure_message_id: string;
+    address_delivered_revision: number;
+    last_delivered_revision: number;
+  }>(
+    `select
+       address_disclosure_attempt_revision,
+       address_disclosure_message_id::text,
+       address_delivered_revision,
+       last_delivered_revision
+       from telegram_funding_sessions
+      where id = $1`,
+    [fundingContextId],
+  );
+  assert.deepEqual(addressProof.rows[0], {
+    address_disclosure_attempt_revision: 1,
+    address_disclosure_message_id: "101",
+    address_delivered_revision: 1,
+    last_delivered_revision: 1,
+  });
+  // Simulate the crash boundary: Telegram accepted the address edit, but the
+  // process lost the acknowledgement before durable success recording.
+  await pool.query(
+    `update telegram_funding_sessions
+        set address_delivered_revision = 0,
+            last_delivered_revision = 0
+      where id = $1`,
+    [fundingContextId],
+  );
+  await pool.query(
+    `update telegram_bot_action_outbox
+        set action = 'funding_send',
+            status = 'delivery_unknown',
+            payload = jsonb_set(payload, '{receiveAddress}', 'null'::jsonb),
+            sent_at = null,
+            last_error = 'simulated_address_ack_loss'
+      where funding_session_id = $1
+        and state_revision = 1
+        and status = 'sent'`,
+    [fundingContextId],
+  );
+  await pool.query(
+    `update telegram_bot_trading_authorizations
+        set wallet_address = $2,
+            privy_wallet_id = $3,
+            updated_at = $4
+      where user_id = $1
+        and telegram_user_id = $5
+        and wallet_chain = 'ethereum'`,
+    [
+      userId,
+      replacementWalletAddress,
+      replacementPrivyWalletId,
+      new Date(now.getTime() + 1_100),
+      telegramUserId,
+    ],
+  );
+  const staleControllerProjection =
+    await runTelegramFundingProgressProjectionBatch(pool, {
+      limit: 10,
+      now: new Date(now.getTime() + 61_200),
+    });
+  assert.equal(staleControllerProjection.created, 1);
+  const staleControllerProjectionEvidence = await pool.query<{
+    action: string;
+    outbox_count: string;
+    progress_revision: number;
+    state: string;
+  }>(
+    `select
+       context.progress_revision,
+       context.latest_progress_projection->>'state' as state,
+       (
+         select count(*)::text
+         from telegram_bot_action_outbox outbox
+         where outbox.funding_session_id = context.id
+           and outbox.status in ('pending', 'retry', 'sending')
+       ) as outbox_count,
+       (
+         select outbox.action
+         from telegram_bot_action_outbox outbox
+         where outbox.funding_session_id = context.id
+           and outbox.state_revision = context.progress_revision
+         limit 1
+       ) as action
+     from telegram_funding_sessions context
+     where context.id = $1`,
+    [fundingContextId],
+  );
+  assert.deepEqual(staleControllerProjectionEvidence.rows[0], {
+    action: "funding_edit",
+    outbox_count: "1",
+    progress_revision: 2,
+    state: "unavailable",
+  });
+  let redactionText = "";
+  const redactionDelivery = await deliverTelegramFundingActions({
+    pool,
+    renderCoordinator,
+    telegram: {
+      editMessageText: async (message) => {
+        redactionText = message.text;
+        return { ok: true, messageId: 101 };
+      },
+      sendMessage: async () => {
+        assert.fail("a disclosed address must be redacted in place");
+      },
+    },
+  });
+  assert.equal(redactionDelivery.sent, 1);
+  assert.match(redactionText, /Receive unavailable/u);
+  assert.doesNotMatch(redactionText, new RegExp(destinationAddress, "u"));
+  // A relink/start recovery must retry the known address-free edit. A new
+  // replacement card cannot prove that the old address card was overwritten.
+  await pool.query(
+    `update telegram_funding_sessions
+        set address_redacted_revision = 0
+      where id = $1`,
+    [fundingContextId],
+  );
+  await pool.query(
+    `update telegram_bot_action_outbox
+        set status = 'retry', sent_at = null, updated_at = now()
+      where funding_session_id = $1
+        and action = 'funding_edit'
+        and state_revision = 2`,
+    [fundingContextId],
+  );
+  assert.ok(
+    (await rearmTelegramFundingTerminalDelivery({
+      pool,
+      telegramUserId,
+    })) >= 1,
+  );
+  const redactionRearm = await pool.query<{
+    pending_edits: string;
+    pending_replacements: string;
+  }>(
+    `select
+       count(*) filter (
+         where action = 'funding_edit' and status = 'pending'
+       )::text as pending_edits,
+       count(*) filter (
+         where action = 'funding_replacement' and status = 'pending'
+       )::text as pending_replacements
+     from telegram_bot_action_outbox
+     where funding_session_id = $1`,
+    [fundingContextId],
+  );
+  assert.deepEqual(redactionRearm.rows[0], {
+    pending_edits: "1",
+    pending_replacements: "0",
+  });
+  const rearmedRedactionDelivery = await deliverTelegramFundingActions({
+    pool,
+    renderCoordinator,
+    telegram: {
+      editMessageText: async (message) => {
+        assert.match(message.text, /Receive unavailable/u);
+        assert.doesNotMatch(message.text, new RegExp(destinationAddress, "u"));
+        return { ok: true, messageId: 101 };
+      },
+      sendMessage: async () => {
+        assert.fail("rearmed redaction must edit the disclosed card");
+      },
+    },
+  });
+  assert.equal(rearmedRedactionDelivery.sent, 1);
+  await pool.query(
+    `update telegram_bot_trading_authorizations
+        set wallet_address = $2,
+            privy_wallet_id = $3,
+            updated_at = $4
+      where user_id = $1
+        and telegram_user_id = $5
+        and wallet_chain = 'ethereum'`,
+    [
+      userId,
+      destinationAddress,
+      privyWalletId,
+      new Date(now.getTime() + 1_300),
+      telegramUserId,
+    ],
+  );
+  await pool.query(
+    `update funding_receive_sessions
+        set version = version + 1,
+            updated_at = $2
+      where id = $1`,
+    [receiveSessionId, new Date(now.getTime() + 61_300)],
+  );
+  const restoredControllerProjection =
+    await runTelegramFundingProgressProjectionBatch(pool, {
+      limit: 10,
+      now: new Date(now.getTime() + 61_300),
+    });
+  assert.deepEqual(
+    restoredControllerProjection,
+    { candidates: 1, created: 0, skipped: 1 },
+    "a terminal redacted context must not resume when its controller becomes current again",
+  );
+  const absorbingTerminal = await pool.query<{
+    address_redacted_revision: number;
+    progress_revision: number;
+    receive_address: string | null;
+    state: string;
+  }>(
+    `select
+       address_redacted_revision,
+       progress_revision,
+       latest_progress_projection->>'receiveAddress' as receive_address,
+       latest_progress_projection->>'state' as state
+     from telegram_funding_sessions
+     where id = $1`,
+    [fundingContextId],
+  );
+  assert.deepEqual(absorbingTerminal.rows[0], {
+    address_redacted_revision: 2,
+    progress_revision: 2,
+    receive_address: null,
+    state: "unavailable",
+  });
+  const staleDelivery = await exactManagedService.session(
+    {
+      chatId: telegramUserId,
+      contextId: fundingContextId,
+      deliveryProjection: frozenDeliveryProjection.rows[0]?.projection,
+      telegramUserId,
+      view: "delivery",
+    },
+    new Date(now.getTime() + 61_350),
+  );
+  assert.match(staleDelivery.text, /Receive unavailable/u);
+  assert.doesNotMatch(staleDelivery.text, new RegExp(destinationAddress, "iu"));
+  const staleQr = await exactManagedService.session(
+    {
+      chatId: telegramUserId,
+      contextId: fundingContextId,
+      telegramUserId,
+      view: "address",
+    },
+    new Date(now.getTime() + 61_400),
+  );
+  assert.match(staleQr.text, /Receive unavailable/u);
+  assert.doesNotMatch(staleQr.text, new RegExp(destinationAddress, "iu"));
+  let staleProgressDecorations = 0;
+  const staleProgress = await exactManagedService.session(
+    {
+      chatId: telegramUserId,
+      contextId: fundingContextId,
+      telegramUserId,
+      view: "progress",
+    },
+    new Date(now.getTime() + 61_425),
+    async () => {
+      staleProgressDecorations += 1;
+      return {
+        parse_mode: "MarkdownV2",
+        text: "Review Buy must not revive a terminal context",
+      };
+    },
+  );
+  assert.match(staleProgress.text, /Receive unavailable/u);
+  assert.equal(
+    staleProgressDecorations,
+    0,
+    "interactive progress cannot decorate a retained non-ready terminal state",
+  );
+  const lateReadyClient = await pool.connect();
+  let lateReadyReceiptId = "";
+  try {
+    await lateReadyClient.query("begin");
+    const inserted = await insertFundingReceiveReceipt(lateReadyClient, {
+      receiveSessionId,
+      userId,
+      variantId: pUsdVariantId,
+      asset: pUsd,
+      destinationAddress,
+      rawAmount: "1",
+      observationRevision: `late_ready_${suffix}`,
+      canonicalEvent: {
+        transactionHash: `0x${hash("late-ready-tx")}`,
+        eventIndex: "9",
+        ledgerHeight: "99",
+        blockHash: `0x${hash("late-ready-block")}`,
+        sourceAddress: "0x2222222222222222222222222222222222222222",
+      },
+      observedAt: new Date(now.getTime() + 61_430),
+      status: "ready",
+      handling: "direct",
+      evidence: { canonical: true },
+      now: new Date(now.getTime() + 61_430),
+    });
+    lateReadyReceiptId = inserted.receipt.receiptId;
+    await lateReadyClient.query(
+      `update funding_receive_sessions
+          set status = 'completed',
+              closed_at = $2,
+              version = version + 1,
+              updated_at = $2
+        where id = $1`,
+      [receiveSessionId, new Date(now.getTime() + 61_430)],
+    );
+    await lateReadyClient.query("commit");
+  } catch (error) {
+    await lateReadyClient.query("rollback");
+    throw error;
+  } finally {
+    lateReadyClient.release();
+  }
+  assert.deepEqual(
+    await runTelegramFundingProgressProjectionBatch(pool, {
+      limit: 10,
+      now: new Date(now.getTime() + 61_435),
+    }),
+    { candidates: 1, created: 0, skipped: 1 },
+    "a late ready receipt cannot replace the first retained terminal state",
+  );
+  const terminalAfterLateReady = await pool.query<{ state: string }>(
+    `select latest_terminal_projection->>'state' as state
+       from telegram_funding_sessions
+      where id = $1`,
+    [fundingContextId],
+  );
+  assert.equal(terminalAfterLateReady.rows[0]?.state, "unavailable");
+  const lateReadyCleanupClient = await pool.connect();
+  try {
+    await lateReadyCleanupClient.query("begin");
+    await lateReadyCleanupClient.query(
+      "set local session_replication_role = replica",
+    );
+    await lateReadyCleanupClient.query(
+      `delete from funding_receive_canonical_events
+        where allocated_receipt_id = $1`,
+      [lateReadyReceiptId],
+    );
+    await lateReadyCleanupClient.query(
+      `delete from funding_receive_receipts where id = $1`,
+      [lateReadyReceiptId],
+    );
+    await lateReadyCleanupClient.query(
+      `update funding_receive_sessions
+          set status = 'open', closed_at = null, version = version + 1
+        where id = $1`,
+      [receiveSessionId],
+    );
+    await lateReadyCleanupClient.query("commit");
+  } catch (error) {
+    await lateReadyCleanupClient.query("rollback");
+    throw error;
+  } finally {
+    lateReadyCleanupClient.release();
+  }
+  await pool.query(
+    `update telegram_funding_sessions
+        set latest_progress_projection = $2::jsonb,
+            latest_terminal_projection = $2::jsonb,
+            progress_fingerprint = 'malformed-terminal-regression',
+            projection_checked_at = null
+      where id = $1`,
+    [fundingContextId, JSON.stringify({ version: 1 })],
+  );
+  const malformedTerminalProgress = await exactManagedService.session(
+    {
+      chatId: telegramUserId,
+      contextId: fundingContextId,
+      telegramUserId,
+      view: "progress",
+    },
+    new Date(now.getTime() + 61_440),
+  );
+  assert.match(malformedTerminalProgress.text, /Receive unavailable/u);
+  const repairedMalformedTerminal =
+    await runTelegramFundingProgressProjectionBatch(pool, {
+      limit: 10,
+      now: new Date(now.getTime() + 61_450),
+    });
+  assert.deepEqual(repairedMalformedTerminal, {
+    candidates: 1,
+    created: 1,
+    skipped: 0,
+  });
+  const repairedTerminal = await pool.query<{
+    receive_address: string | null;
+    state: string;
+    version: string;
+  }>(
+    `select
+       latest_progress_projection->>'receiveAddress' as receive_address,
+       latest_progress_projection->>'state' as state,
+       latest_progress_projection->>'version' as version
+     from telegram_funding_sessions
+     where id = $1`,
+    [fundingContextId],
+  );
+  assert.deepEqual(repairedTerminal.rows[0], {
+    receive_address: null,
+    state: "unavailable",
+    version: "2",
+  });
+  await pool.query(
+    `delete from telegram_bot_action_outbox
+      where funding_session_id = $1`,
+    [fundingContextId],
+  );
+  await pool.query(
+    `update telegram_funding_sessions
+        set progress_revision = 0,
+            progress_fingerprint = null,
+            latest_progress_projection = null,
+            latest_terminal_revision = null,
+            latest_terminal_projection = null,
+            address_disclosure_attempt_revision = 0,
+            address_disclosure_message_id = null,
+            address_delivered_revision = 0,
+            address_redacted_revision = 0,
+            last_delivered_revision = 0,
+            projected_receive_version = 0,
+            projected_consent_revision = 0,
+            projection_checked_at = null,
+            delivery_lease_outbox_id = null,
+            delivery_lease_attempt_id = null,
+            delivery_lease_expires_at = null
+      where id = $1`,
+    [fundingContextId],
+  );
   const selectedReplay = await service.open(
     {
       chatId: telegramUserId,
@@ -653,8 +1569,9 @@ try {
     new Date(now.getTime() + 1_500),
   );
   assert.equal(selectedReplay.fundingContextId, fundingContextId);
-  assert.match(selectedReplay.text, /Waiting for transfer/u);
-  assert.match(selectedReplay.text, new RegExp(destinationAddress, "u"));
+  assert.equal(selectedReplay.durableFundingDeliveryRequired, true);
+  assert.match(selectedReplay.text, /Receive update queued/u);
+  assert.doesNotMatch(selectedReplay.text, new RegExp(destinationAddress, "u"));
   const unchangedReplayEvidence = await pool.query<{
     consents: string;
     mutations: string;
@@ -672,7 +1589,7 @@ try {
   );
   assert.deepEqual(unchangedReplayEvidence.rows[0], {
     consents: "1",
-    mutations: "5",
+    mutations: "6",
     outbox: "0",
     progress_revision: 0,
   });
@@ -1011,7 +1928,13 @@ try {
       usdce.decimals,
       [usdceVariantId],
       "10000000",
-      JSON.stringify({ mode: "future_automatic_test" }),
+      JSON.stringify({
+        mode: "future_automatic_test",
+        presentationMode: "pusd_or_usdce_automatic",
+        presentation: telegramPolygonFundingPresentation(
+          "pusd_or_usdce_automatic",
+        ),
+      }),
       hash("late-automatic-consent"),
       new Date(now.getTime() + 6_000),
     ],
@@ -1037,14 +1960,48 @@ try {
     pool,
     { limit: 10, now: new Date(now.getTime() + 5_000) },
   );
-  assert.equal(attentionProjection.created, 1);
+  assert.equal(
+    attentionProjection.created,
+    0,
+    "a later terminal attention state cannot replace the first ready terminal",
+  );
   const latest = await pool.query<{ revision: number; state: string }>(
     `select progress_revision as revision,
             latest_progress_projection->>'state' as state
      from telegram_funding_sessions where id = $1`,
     [fundingContextId],
   );
-  assert.deepEqual(latest.rows[0], { revision: 2, state: "needs_attention" });
+  assert.deepEqual(latest.rows[0], { revision: 1, state: "ready" });
+
+  // Start an isolated terminal-delivery fixture for the unlink/relink checks
+  // below. Production never clears the retained terminal watermark.
+  await pool.query(
+    `update telegram_funding_sessions
+        set latest_terminal_revision = null,
+            latest_terminal_projection = null,
+            projection_checked_at = null
+      where id = $1`,
+    [fundingContextId],
+  );
+  const terminalAttentionProjection =
+    await runTelegramFundingProgressProjectionBatch(pool, {
+      limit: 10,
+      now: new Date(now.getTime() + 5_001),
+    });
+  assert.equal(terminalAttentionProjection.created, 1);
+  const terminalAttention = await pool.query<{
+    revision: number;
+    state: string;
+  }>(
+    `select progress_revision as revision,
+            latest_progress_projection->>'state' as state
+       from telegram_funding_sessions where id = $1`,
+    [fundingContextId],
+  );
+  assert.deepEqual(terminalAttention.rows[0], {
+    revision: 2,
+    state: "needs_attention",
+  });
 
   await pool.query(`delete from user_telegram_accounts where id = $1`, [
     telegramAccountId,
@@ -1091,6 +2048,35 @@ try {
     replacement_count: "1",
     retired_count: "1",
   });
+  const relinkWithoutManagedTrading = await deliverTelegramFundingActions({
+    pool,
+    renderCoordinator,
+    telegram: {
+      editMessageText: async () => {
+        assert.fail("a bare relink must not edit a stale funding card");
+      },
+      sendMessage: async () => {
+        assert.fail("a bare relink must not send a stale funding card");
+      },
+    },
+  });
+  assert.equal(relinkWithoutManagedTrading.skipped, 1);
+  await pool.query(
+    `update telegram_bot_action_outbox
+        set status = 'pending',
+            attempt_count = 0,
+            next_attempt_at = now(),
+            last_error = null,
+            delivery_attempt_id = null,
+            delivery_started_at = null,
+            updated_at = now()
+      where funding_session_id = $1
+        and state_revision = 2
+        and action = 'funding_replacement'
+        and status = 'skipped'`,
+    [fundingContextId],
+  );
+  await enableManagedTrading(telegramUserId, `did:privy:${suffix}:relinked`);
   let replacementSends = 0;
   const replacementDelivery = await deliverTelegramFundingActions({
     pool,
@@ -1181,6 +2167,10 @@ try {
   );
   const fairnessTelegramAccountId = fairnessAccount.rows[0]?.id;
   assert.ok(fairnessTelegramAccountId);
+  await enableManagedTrading(
+    fairnessTelegramUserId,
+    `did:privy:${suffix}:fairness`,
+  );
   const fairnessReceiveIds: string[] = [];
   const fairnessContextIds: string[] = [];
   let fairnessCleanupFailure: unknown;
@@ -1217,10 +2207,11 @@ try {
         telegramUserId: fairnessTelegramUserId,
         chatId: fairnessTelegramUserId,
         telegramMessageId: 500 + index,
+        controllerWalletId,
         receiveTargetId,
         asset: pUsd,
         variantIds: [pUsdVariantId],
-        policySnapshot: { mode: "direct", automationEnabled: false },
+        policySnapshot: directPolicySnapshot,
         fingerprint: hash(`fair-consent-${index}`),
         mutation: {
           idempotencyKey: `fair-select-${index}-${suffix}`,
@@ -1773,10 +2764,11 @@ try {
         telegramUserId: fairnessTelegramUserId,
         chatId: fairnessTelegramUserId,
         telegramMessageId: 500,
+        controllerWalletId,
         receiveTargetId,
         asset: pUsd,
         variantIds: [pUsdVariantId],
-        policySnapshot: { mode: "direct", automationEnabled: false },
+        policySnapshot: directPolicySnapshot,
         fingerprint: hash("fair-cancel-key-reuse-consent"),
         mutation: {
           idempotencyKey: cancelMutation.idempotencyKey,
@@ -1832,21 +2824,22 @@ try {
         limit: 100,
         now: new Date(now.getTime() + 27_200),
       }),
-      { candidates: 1, created: 1, skipped: 0 },
+      { candidates: 1, created: 0, skipped: 1 },
+      "a late ready receipt cannot replace a retained cancellation",
     );
     const lateReadyState = await pool.query<{ state: string }>(
       `select latest_progress_projection->>'state' as state
        from telegram_funding_sessions where id = $1`,
       [cancelContextId],
     );
-    assert.equal(lateReadyState.rows[0]?.state, "ready");
+    assert.equal(lateReadyState.rows[0]?.state, "cancelled");
     assert.deepEqual(
       await runTelegramFundingProgressProjectionBatch(pool, {
         limit: 100,
         now: new Date(now.getTime() + 27_300),
       }),
       { candidates: 0, created: 0, skipped: 0 },
-      "a late ready receipt after cancellation must advance the watermark once",
+      "the retained cancellation still advances the observed receive watermark once",
     );
 
     const cleanupAge = await pool.connect();
@@ -1908,6 +2901,10 @@ try {
     );
     const preterminalRelinkId = preterminalRelink.rows[0]?.id;
     assert.ok(preterminalRelinkId);
+    await enableManagedTrading(
+      fairnessTelegramUserId,
+      `did:privy:${suffix}:fairness-relinked`,
+    );
     const reattached = await pool.query<{ telegram_account_id: string | null }>(
       `select telegram_account_id
        from telegram_funding_sessions
@@ -2019,6 +3016,10 @@ try {
       },
     });
     assert.equal(raceDelivery.sent, 1);
+    await enableManagedTrading(
+      fairnessTelegramUserId,
+      `did:privy:${suffix}:race-relinked`,
+    );
     const raceRecorded = await pool.query<{
       followup_account_id: string | null;
       followup_action: string | null;
@@ -2139,6 +3140,10 @@ try {
     );
     assert.equal(replacementRace.sent, 1);
     assert.ok(finalRelinkId);
+    await enableManagedTrading(
+      fairnessTelegramUserId,
+      `did:privy:${suffix}:final-relink`,
+    );
     const replacementFollowup = await pool.query<{
       edit_account_id: string | null;
       edit_status: string;
@@ -2239,6 +3244,72 @@ try {
   }
   if (fairnessCleanupFailure) throw fairnessCleanupFailure;
 
+  const retainedFundingIdentity = await pool.query<{
+    telegram_account_id: string;
+    user_wallet_id: string;
+  }>(
+    `select account.id as telegram_account_id, wallet.id as user_wallet_id
+       from user_telegram_accounts account
+       join user_wallets wallet
+         on wallet.user_id = account.user_id
+        and wallet.privy_wallet_id = $2
+      where account.user_id = $1
+        and account.telegram_user_id = $3
+      limit 1`,
+    [userId, privyWalletId, fairnessTelegramUserId],
+  );
+  const retainedIdentity = retainedFundingIdentity.rows[0];
+  assert.ok(retainedIdentity);
+  const retainedAuthorization = await pool.query<{ id: string }>(
+    `insert into telegram_funding_authorizations (
+       user_id, telegram_account_id, telegram_user_id, user_wallet_id,
+       privy_wallet_id, wallet_address, wallet_chain, profile_id,
+       security_class, signer_id, signer_fingerprint, policy_id,
+       policy_fingerprint, venue_id, destination_option_id,
+       venue_binding_option_id, source_network_id, source_asset_id,
+       source_asset_decimals, destination_network_id, destination_asset_id,
+       destination_asset_decimals
+     ) values (
+       $1, $2, $3, $4, $5, $6, 'ethereum', 'delete-user-test-profile',
+       'closed_destination_transform', 'delete-user-test-signer', $7,
+       'delete-user-test-policy', $8, 'polymarket', $9, $10,
+       $11, $12, 6, $13, $14, 6
+     ) returning id`,
+    [
+      userId,
+      retainedIdentity.telegram_account_id,
+      fairnessTelegramUserId,
+      retainedIdentity.user_wallet_id,
+      privyWalletId,
+      destinationAddress,
+      hash("delete-user-signer"),
+      hash("delete-user-policy"),
+      canonicalInput.destinationOptionId,
+      canonicalInput.venueBindingOptionId,
+      usdce.networkId,
+      usdce.assetId,
+      pUsd.networkId,
+      pUsd.assetId,
+    ],
+  );
+  const deletion = await AuthService.deleteUser(userId);
+  assert.equal(deletion.disposition, "deactivated");
+  const revokedAuthorization = await pool.query<{
+    granted_at: Date;
+    revoked_at: Date | null;
+  }>(
+    `select granted_at, revoked_at
+       from telegram_funding_authorizations
+      where id = $1`,
+    [retainedAuthorization.rows[0]?.id],
+  );
+  const revokedAuthorizationRow = revokedAuthorization.rows[0];
+  assert.ok(revokedAuthorizationRow?.revoked_at);
+  assert.ok(
+    revokedAuthorizationRow.revoked_at.getTime() >=
+      revokedAuthorizationRow.granted_at.getTime(),
+  );
+
   console.log(
     "[telegram-funding-receive-integration-tests] channel ownership, concurrent mutation replay, fair projection watermarks, exact historical authority, durable delivery, and safe lifecycle cleanup passed",
   );
@@ -2287,6 +3358,26 @@ try {
       "delete from telegram_bot_action_outbox where user_id = $1",
       [userId],
     );
+    await cleanup.query(
+      "delete from telegram_bot_trading_authorizations where user_id = $1",
+      [userId],
+    );
+    await cleanup.query(
+      "delete from telegram_bot_trading_preferences where user_id = $1",
+      [userId],
+    );
+    if (signalPolicyId) {
+      await cleanup.query("delete from runtime_policies where id = $1", [
+        signalPolicyId,
+      ]);
+    }
+    await cleanup.query(
+      "delete from telegram_funding_authorizations where user_id = $1",
+      [userId],
+    );
+    await cleanup.query("delete from user_wallets where user_id = $1", [
+      userId,
+    ]);
     await cleanup.query(
       "delete from user_telegram_accounts where user_id = $1",
       [userId],

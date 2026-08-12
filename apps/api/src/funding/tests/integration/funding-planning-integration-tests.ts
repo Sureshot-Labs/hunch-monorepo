@@ -7,6 +7,7 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 
+import "../../../integration-test-database-guard.js";
 import { pool } from "../../../db.js";
 import type {
   FundingDiscoveryRequest,

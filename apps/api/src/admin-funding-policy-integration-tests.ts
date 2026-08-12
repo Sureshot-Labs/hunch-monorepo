@@ -14,6 +14,7 @@ import {
 } from "fastify-type-provider-zod";
 import type { PoolClient } from "pg";
 
+import "./integration-test-database-guard.js";
 import { pool } from "./db.js";
 import {
   DEFAULT_FUNDING_INTENT_POLICY,

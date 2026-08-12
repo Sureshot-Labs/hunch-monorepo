@@ -1,26 +1,14 @@
-import { generateTelegramDepositQr } from "./telegram-bot-deposit-qr.js";
 import {
   buildSignalBotMarketUnavailableResultScreen,
   buildSignalBotMarketSearchScreen,
   buildSignalBotMarketVenuePickerScreen,
   readSignalBotMarketSearchSession,
 } from "./telegram-bot-menu-markets.js";
-import {
-  formatTelegramBoldMarkdownV2,
-  formatTelegramCalloutMarkdownV2,
-  formatTelegramCodeMarkdownV2,
-  formatTelegramFieldMarkdownV2,
-} from "./telegram-bot-trading-presentation.js";
-import {
-  telegramCustomEmojiMarkdownV2,
-  telegramCustomEmojiMarkdownV2ForNetwork,
-  telegramCustomEmojiMarkdownV2ForVenue,
-} from "./telegram-custom-emoji.js";
+import { formatTelegramCalloutMarkdownV2 } from "./telegram-bot-trading-presentation.js";
 import {
   parseTelegramFundingCallbackRoute,
   type TelegramFundingCallbackRoute,
 } from "./telegram-funding-contracts.js";
-import type { TelegramSendResult } from "./signal-bot-contracts.js";
 
 export type SignalBotInteractiveMenuRoute =
   | { kind: "deposit"; showQr: boolean; venue: string }
@@ -93,7 +81,9 @@ export function isSignalBotFundingMenuRoute(
 
 export type SignalBotFundingMenuAction =
   | "cancel"
+  | "confirm_conversion"
   | "open"
+  | "review_conversion"
   | "resume_buy"
   | "select"
   | "session";
@@ -105,13 +95,17 @@ export function signalBotFundingMenuAction(
     ? "select"
     : route.kind === "review_buy"
       ? "resume_buy"
-      : route.kind === "cancel"
-        ? "cancel"
-        : route.kind === "refresh" || route.kind === "qr"
-          ? "session"
-          : route.kind === "deposit" && route.venue === "polymarket"
-            ? "open"
-            : null;
+      : route.kind === "confirm_conversion"
+        ? "confirm_conversion"
+        : route.kind === "review_conversion"
+          ? "review_conversion"
+          : route.kind === "cancel"
+            ? "cancel"
+            : route.kind === "refresh" || route.kind === "qr"
+              ? "session"
+              : route.kind === "deposit" && route.venue === "polymarket"
+                ? "open"
+                : null;
 }
 
 type MenuButton =
@@ -121,6 +115,7 @@ type MenuButton =
   | { text: string; web_app: { url: string } };
 
 type MenuMessage = {
+  durableFundingDeliveryRequired?: boolean;
   marketFound?: boolean;
   parse_mode?: "MarkdownV2";
   reply_markup?: { inline_keyboard: MenuButton[][] };
@@ -138,12 +133,21 @@ export type SignalBotInteractiveMenuLoaders = {
     venue: string | null;
   }) => Promise<MenuMessage & { qrText?: string }>;
   funding: (input: {
-    action: "cancel" | "open" | "resume_buy" | "select" | "session";
+    action:
+      | "cancel"
+      | "confirm_conversion"
+      | "open"
+      | "review_conversion"
+      | "resume_buy"
+      | "select"
+      | "session";
     chatId: string;
     choiceToken?: string;
+    consentToken?: string;
     contextId?: string;
     continuationToken?: string;
     idempotencyKey: string;
+    receiptId?: string;
     telegramMessageId: number | null;
     telegramUserId: number;
     view?: "address" | "progress";
@@ -175,23 +179,11 @@ type SignalBotInteractiveMenuCallbackInput = {
   }) => Promise<MenuMessage>;
   messageId: number | null;
   idempotencyKey?: string;
-  onFundingDeliveryResult?: (
-    action: SignalBotFundingMenuAction,
-    result: TelegramSendResult,
-  ) => void;
   onFundingOperationError?: (action: SignalBotFundingMenuAction) => void;
   redis: MenuRedis;
   render: (message: MenuMessage) => Promise<unknown>;
   renderExpiredSearch: () => Promise<unknown>;
   route: SignalBotInteractiveMenuRoute;
-  sendPhoto?: (input: {
-    caption?: string;
-    chat_id: string;
-    filename: string;
-    parse_mode?: "MarkdownV2";
-    photo: Uint8Array;
-    reply_markup?: { inline_keyboard: MenuButton[][] };
-  }) => Promise<TelegramSendResult>;
   telegramUserId: number;
 };
 
@@ -319,14 +311,18 @@ async function deliverSignalBotInteractiveMenuCallback(
     await input.render(positionMessage);
     return true;
   }
-  let depositMessage: MenuMessage & { qrText?: string };
+  let depositMessage: MenuMessage & {
+    depositAddress?: string;
+    qrText?: string;
+    receiveAddress?: string;
+  };
   const fundingAction = signalBotFundingMenuAction(route);
-  const reportFundingDeliveryResult = (result: TelegramSendResult): void => {
+  const reportFundingOperationError = (): void => {
     if (!fundingAction) return;
     try {
-      input.onFundingDeliveryResult?.(fundingAction, result);
+      input.onFundingOperationError?.(fundingAction);
     } catch {
-      // Observability must never alter the funding callback outcome.
+      // Observability must never alter the safe unavailable response.
     }
   };
   const depositVenue =
@@ -335,8 +331,17 @@ async function deliverSignalBotInteractiveMenuCallback(
       : route.kind === "deposit"
         ? route.venue
         : null;
-  const showQr =
-    route.kind === "qr" || (route.kind === "deposit" && route.showQr);
+  if (!fundingAction && route.kind === "deposit") {
+    await input.render({
+      parse_mode: "MarkdownV2",
+      text: formatTelegramCalloutMarkdownV2({
+        bodyMarkdownV2: "Open Receive again\\.",
+        icon: "⚠️",
+        title: "Receive unavailable",
+      }),
+    });
+    return true;
+  }
   try {
     if (fundingAction) {
       depositMessage = input.loadFunding
@@ -350,11 +355,15 @@ async function deliverSignalBotInteractiveMenuCallback(
                 }
               : route.kind === "review_buy"
                 ? { continuationToken: route.continuationToken }
-                : route.kind === "cancel" ||
-                    route.kind === "refresh" ||
-                    route.kind === "qr"
-                  ? { contextId: route.contextId }
-                  : {}),
+                : route.kind === "confirm_conversion"
+                  ? { consentToken: route.consentToken }
+                  : route.kind === "review_conversion"
+                    ? { receiptId: route.receiptId }
+                    : route.kind === "cancel" ||
+                        route.kind === "refresh" ||
+                        route.kind === "qr"
+                      ? { contextId: route.contextId }
+                      : {}),
             idempotencyKey:
               "funding:" + (input.idempotencyKey ?? "legacy-callback"),
             telegramMessageId: input.messageId,
@@ -385,13 +394,7 @@ async function deliverSignalBotInteractiveMenuCallback(
           };
     }
   } catch {
-    if (fundingAction) {
-      try {
-        input.onFundingOperationError?.(fundingAction);
-      } catch {
-        // Observability must never alter the safe unavailable response.
-      }
-    }
+    reportFundingOperationError();
     depositMessage = {
       parse_mode: "MarkdownV2",
       text: formatTelegramCalloutMarkdownV2({
@@ -401,102 +404,42 @@ async function deliverSignalBotInteractiveMenuCallback(
       }),
     };
   }
-  if (!showQr || !depositMessage.qrText) {
+  // Financial addresses and QR data have one egress gateway: the durable
+  // funding outbox. Interactive callbacks may request an operation, but must
+  // never race revocation by sending the returned address themselves.
+  if (fundingAction && depositMessage.durableFundingDeliveryRequired) {
+    return true;
+  }
+  if (
+    depositMessage.qrText ||
+    depositMessage.depositAddress ||
+    depositMessage.receiveAddress
+  ) {
+    reportFundingOperationError();
     await input.render({
-      ...depositMessage,
-      reply_markup: {
-        inline_keyboard: [
-          ...(depositMessage.reply_markup?.inline_keyboard ?? []),
-          [
-            {
-              callback_data: input.callbackPrefix + "home",
-              text: "🏠 Home",
-            },
-          ],
-        ],
-      },
+      parse_mode: "MarkdownV2",
+      text: formatTelegramCalloutMarkdownV2({
+        bodyMarkdownV2: "Try again shortly\\.",
+        icon: "⚠️",
+        title: "Receive unavailable",
+      }),
     });
+    return true;
   }
-  if (showQr && depositMessage.qrText) {
-    if (!input.sendPhoto) {
-      reportFundingDeliveryResult({
-        error: "other",
-        message: "funding_qr_transport_unavailable",
-        ok: false,
-      });
-      return true;
-    }
-    let qr: Uint8Array;
-    try {
-      qr = await generateTelegramDepositQr(depositMessage.qrText);
-    } catch {
-      reportFundingDeliveryResult({
-        error: "other",
-        message: "funding_qr_generation_failed",
-        ok: false,
-      });
-      return true;
-    }
-    const isLimitless = depositMessage.venue === "limitless";
-    const venue = isLimitless ? "limitless" : "polymarket";
-    const network = isLimitless ? "Base" : "Polygon";
-    const asset = isLimitless ? "USDC" : "pUSD";
-    let photoResult: TelegramSendResult;
-    try {
-      photoResult = await input.sendPhoto({
-        caption: [
-          `${telegramCustomEmojiMarkdownV2ForVenue(venue)} ${formatTelegramBoldMarkdownV2(
-            `${isLimitless ? "Limitless" : "Polymarket"} Deposit QR`,
-          )}`,
-          "",
-          `📍 ${formatTelegramBoldMarkdownV2("Deposit address")}`,
-          formatTelegramCodeMarkdownV2(depositMessage.qrText),
-          "",
-          `${telegramCustomEmojiMarkdownV2ForNetwork(network)} ${formatTelegramFieldMarkdownV2("Network", network)}`,
-          `${telegramCustomEmojiMarkdownV2("usdc")} ${formatTelegramFieldMarkdownV2(
-            "Asset",
-            asset,
-          )}`,
-          "",
-          formatTelegramCalloutMarkdownV2({
-            bodyMarkdownV2: isLimitless
-              ? `Send only ${formatTelegramBoldMarkdownV2(
-                  "USDC",
-                )} on ${formatTelegramBoldMarkdownV2("Base")} to this address\\.`
-              : `Send only ${formatTelegramBoldMarkdownV2(
-                  "pUSD",
-                )} on ${formatTelegramBoldMarkdownV2(
-                  "Polygon",
-                )} to this address\\.`,
-            icon: "⚠️",
-            title: "Important",
-          }),
-        ].join("\n"),
-        chat_id: input.chatId,
-        filename: `hunch-${isLimitless ? "limitless" : "polymarket"}-deposit.png`,
-        parse_mode: "MarkdownV2",
-        photo: qr,
-        reply_markup: {
-          inline_keyboard: [
-            [
-              {
-                copy_text: { text: depositMessage.qrText },
-                text: "📋 Copy address",
-              },
-            ],
-          ],
-        },
-      });
-    } catch {
-      // The address remains visible and copyable in the edited menu card.
-      photoResult = {
-        error: "ambiguous",
-        message: "funding_qr_delivery_failed",
-        ok: false,
-      };
-    }
-    reportFundingDeliveryResult(photoResult);
-  }
+  await input.render({
+    ...depositMessage,
+    reply_markup: {
+      inline_keyboard: [
+        ...(depositMessage.reply_markup?.inline_keyboard ?? []),
+        [
+          {
+            callback_data: input.callbackPrefix + "home",
+            text: "🏠 Home",
+          },
+        ],
+      ],
+    },
+  });
   return true;
 }
 

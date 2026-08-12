@@ -2,12 +2,34 @@ import { tx, type Pool, type PoolClient } from "@hunch/infra";
 
 import { canonicalJsonHash } from "../persistence/canonical.js";
 import type { AssetRef } from "../domain/types.js";
+import {
+  canonicalAccountAddress,
+  sameAccountAddress,
+} from "../domain/asset-identity.js";
 import { fundingSidecarRuntimeConfig } from "../runtime/sidecar-runtime-config.js";
-import type { PolymarketWrapExecutionConfiguration } from "./delegated-funding-config.js";
-import { polymarketWrapProfileConfigured } from "./delegated-funding-config.js";
+import {
+  loadPolymarketWrapExecutionConfiguration,
+  polymarketWrapExecutionConfigurationReady,
+  polymarketWrapExecutorEnvironmentReady,
+  polymarketWrapProfileConfigured,
+  type PolymarketWrapExecutionConfiguration,
+} from "./delegated-funding-config.js";
 import { POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID } from "./delegated-funding-profile-ids.js";
 import type { DelegatedFundingPreBroadcastDecision } from "./delegated-funding-capability.js";
+import {
+  PrivyDelegatedFundingDriver,
+  type PrivyWalletProfileInspection,
+} from "./privy-delegated-funding-driver.js";
 import { lockTelegramFundingLinkLifecycle } from "./telegram-funding-link-lifecycle-lock.js";
+import { resolveTelegramFundingProvisionWallet } from "./telegram-funding-managed-wallet.js";
+
+export {
+  resolveTelegramFundingProvisionWallet,
+  type TelegramFundingProvisionWallet,
+} from "./telegram-funding-managed-wallet.js";
+
+class TelegramFundingAuthorizationIdentityNotCurrentError extends Error {}
+class TelegramFundingAuthorizationGenerationChangedError extends Error {}
 
 export type TelegramFundingAuthorization = Readonly<{
   id: string;
@@ -71,7 +93,7 @@ export function telegramFundingAuthorizationFromRow(
     telegramUserId: row.telegram_user_id,
     userWalletId: row.user_wallet_id,
     privyWalletId: row.privy_wallet_id,
-    walletAddress: row.wallet_address.toLowerCase(),
+    walletAddress: canonicalAccountAddress("evm:1", row.wallet_address),
     walletChain: row.wallet_chain,
     profileId: row.profile_id,
     securityClass: row.security_class,
@@ -143,6 +165,7 @@ export async function loadActiveTelegramFundingAuthorization(
     expectedAuthorizationId?: string;
     now?: Date;
     lock?: boolean;
+    requireTradingEnabled?: boolean;
   }>,
 ): Promise<TelegramFundingAuthorization | null> {
   const { rows } = await db.query<TelegramFundingAuthorizationRow>(
@@ -162,7 +185,23 @@ export async function loadActiveTelegramFundingAuthorization(
        and wallet.is_verified = true
        and wallet.is_internal_wallet = true
        and wallet.privy_wallet_id = funding_authorization.privy_wallet_id
-       and lower(wallet.wallet_address) = lower(funding_authorization.wallet_address)
+       and funding_account_identifier_equal(
+             funding_authorization.wallet_chain,
+             wallet.wallet_address,
+             funding_authorization.wallet_address
+           )
+      join telegram_bot_trading_authorizations trading_authorization
+        on trading_authorization.user_id = funding_authorization.user_id
+       and trading_authorization.telegram_user_id = funding_authorization.telegram_user_id
+       and trading_authorization.wallet_chain = 'ethereum'
+       and trading_authorization.privy_wallet_id = funding_authorization.privy_wallet_id
+       and funding_account_identifier_equal(
+             trading_authorization.wallet_chain,
+             trading_authorization.wallet_address,
+             funding_authorization.wallet_address
+           )
+       and ($11::boolean = false or trading_authorization.enabled = true)
+       and 'polymarket' = any(trading_authorization.enabled_venues)
       where funding_authorization.user_id = $1
         and funding_authorization.telegram_account_id = $2::uuid
         and funding_authorization.telegram_user_id = $3
@@ -173,18 +212,27 @@ export async function loadActiveTelegramFundingAuthorization(
         and funding_authorization.destination_option_id = $6
         and funding_authorization.venue_binding_option_id = $7
         and funding_authorization.source_network_id = 'evm:137'
-        and lower(funding_authorization.source_asset_id) = lower($8)
+        and funding_account_identifier_equal(
+              funding_authorization.source_network_id,
+              funding_authorization.source_asset_id,
+              $8
+            )
         and funding_authorization.source_asset_decimals = 6
         and funding_authorization.destination_network_id = 'evm:137'
-        and lower(funding_authorization.destination_asset_id) = lower($9)
+        and funding_account_identifier_equal(
+              funding_authorization.destination_network_id,
+              funding_authorization.destination_asset_id,
+              $9
+            )
         and funding_authorization.destination_asset_decimals = 6
         and funding_authorization.revoked_at is null
         and (
           funding_authorization.expires_at is null
-          or funding_authorization.expires_at > $10
+          or funding_authorization.expires_at >
+               greatest($10::timestamptz, clock_timestamp())
         )
       limit 1
-      ${input.lock ? "for update of funding_authorization, app_user, account, wallet" : ""}
+      ${input.lock ? "for update of funding_authorization, app_user, account, wallet, trading_authorization" : ""}
     `,
     [
       input.userId,
@@ -197,6 +245,7 @@ export async function loadActiveTelegramFundingAuthorization(
       fundingSidecarRuntimeConfig.polymarketUsdceAddress,
       fundingSidecarRuntimeConfig.polymarketPusdAddress,
       input.now ?? new Date(),
+      input.requireTradingEnabled ?? true,
     ],
   );
   return rows[0] ? telegramFundingAuthorizationFromRow(rows[0]) : null;
@@ -260,6 +309,25 @@ export async function resolveCurrentTelegramFundingAuthority(
     lock?: boolean;
   }>,
 ): Promise<CurrentTelegramFundingAuthorityDecision> {
+  const preference = await db.query<{
+    desired_enabled: boolean;
+    funding_operator_revoked_at: Date | null;
+  }>(
+    `
+      select desired_enabled, funding_operator_revoked_at
+      from telegram_bot_trading_preferences
+      where user_id = $1
+      ${input.lock ? "for update" : ""}
+    `,
+    [input.userId],
+  );
+  if (preference.rows[0]?.funding_operator_revoked_at) {
+    return {
+      kind: "hard_invalid",
+      reasonCode: "delegated_authority_invalid",
+    };
+  }
+  const automationEnabled = preference.rows[0]?.desired_enabled === true;
   const authorization = await loadActiveTelegramFundingAuthorization(db, {
     userId: input.userId,
     telegramAccountId: input.telegramAccountId,
@@ -269,6 +337,7 @@ export async function resolveCurrentTelegramFundingAuthority(
     expectedAuthorizationId: input.expectedAuthorizationId,
     now: input.now,
     lock: input.lock,
+    requireTradingEnabled: automationEnabled,
   });
   if (
     !authorization ||
@@ -300,16 +369,7 @@ export async function resolveCurrentTelegramFundingAuthority(
       reasonCode: "delegated_authority_invalid",
     };
   }
-  const preference = await db.query<{ desired_enabled: boolean }>(
-    `
-      select desired_enabled
-      from telegram_bot_trading_preferences
-      where user_id = $1
-      ${input.lock ? "for update" : ""}
-    `,
-    [input.userId],
-  );
-  if (preference.rows[0]?.desired_enabled !== true) {
+  if (!automationEnabled) {
     return {
       kind: "soft_paused",
       reasonCode: "telegram_automation_disabled",
@@ -323,17 +383,34 @@ export async function revokeTelegramFundingAuthorization(
   input: Readonly<{ authorizationId: string; userId: string; now?: Date }>,
 ): Promise<boolean> {
   return tx(pool, async (client) => {
+    await lockTelegramFundingLinkLifecycle(client, input.userId);
+    const now = input.now ?? new Date();
     const result = await client.query(
       `
         update telegram_funding_authorizations
-        set revoked_at = $3,
-            updated_at = $3
+        set revoked_at = greatest(granted_at, $3),
+            updated_at = greatest(granted_at, $3)
         where id = $1
           and user_id = $2
           and revoked_at is null
       `,
-      [input.authorizationId, input.userId, input.now ?? new Date()],
+      [input.authorizationId, input.userId, now],
     );
+    if (result.rowCount === 1) {
+      const preference = await client.query(
+        `update telegram_bot_trading_preferences
+            set funding_operator_revoked_at = greatest(
+                  coalesce(funding_operator_revoked_at, '-infinity'::timestamptz),
+                  $2
+                ),
+                updated_at = greatest(updated_at, $2)
+          where user_id = $1`,
+        [input.userId, now],
+      );
+      if (preference.rowCount !== 1) {
+        throw new Error("funding authorization preference was not found");
+      }
+    }
     return result.rowCount === 1;
   });
 }
@@ -352,6 +429,9 @@ export async function grantTelegramFundingAuthorization(
     configuration: PolymarketWrapExecutionConfiguration;
     expiresAt?: Date | null;
     now?: Date;
+    replaceExisting?: boolean;
+    expectedActiveAuthorizationIds?: readonly string[];
+    operatorOverride?: boolean;
   }>,
 ): Promise<TelegramFundingAuthorization> {
   if (!polymarketWrapProfileConfigured(input.configuration)) {
@@ -366,9 +446,26 @@ export async function grantTelegramFundingAuthorization(
     await client.query(
       `select pg_advisory_xact_lock(hashtextextended($1, 0))`,
       [
-        `telegram-funding-authorization:${input.userId}:${POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID}:${input.venueBindingOptionId}`,
+        `telegram-funding-authorization:${input.userId}:${POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID}`,
       ],
     );
+    const preference = await client.query<{
+      funding_operator_revoked_at: Date | null;
+    }>(
+      `select funding_operator_revoked_at
+         from telegram_bot_trading_preferences
+        where user_id = $1
+        for update`,
+      [input.userId],
+    );
+    if (
+      preference.rows[0]?.funding_operator_revoked_at &&
+      !input.operatorOverride
+    ) {
+      throw new TelegramFundingAuthorizationGenerationChangedError(
+        "funding authorization was revoked by an operator",
+      );
+    }
     const exactAuthority = await client.query<{ ready: boolean }>(
       `
         select exists (
@@ -384,7 +481,26 @@ export async function grantTelegramFundingAuthorization(
            and wallet.is_verified = true
            and wallet.is_internal_wallet = true
            and wallet.privy_wallet_id = $5
-           and lower(wallet.wallet_address) = lower($6)
+           and funding_account_identifier_equal(
+                 'ethereum',
+                 wallet.wallet_address,
+                 $6
+               )
+          join telegram_bot_trading_authorizations trading_authorization
+            on trading_authorization.user_id = app_user.id
+           and trading_authorization.telegram_user_id = account.telegram_user_id
+           and trading_authorization.wallet_chain = 'ethereum'
+           and trading_authorization.privy_wallet_id = wallet.privy_wallet_id
+           and funding_account_identifier_equal(
+                 trading_authorization.wallet_chain,
+                 trading_authorization.wallet_address,
+                 wallet.wallet_address
+               )
+           and trading_authorization.enabled = true
+           and 'polymarket' = any(trading_authorization.enabled_venues)
+          join telegram_bot_trading_preferences preference
+            on preference.user_id = app_user.id
+           and preference.desired_enabled = true
           where app_user.id = $1::uuid
             and coalesce(app_user.is_active, true) = true
         ) as ready
@@ -399,7 +515,9 @@ export async function grantTelegramFundingAuthorization(
       ],
     );
     if (!exactAuthority.rows[0]?.ready) {
-      throw new Error("funding authorization identity is not current");
+      throw new TelegramFundingAuthorizationIdentityNotCurrentError(
+        "funding authorization identity is not current",
+      );
     }
     const existing = await client.query<TelegramFundingAuthorizationRow>(
       `
@@ -407,50 +525,87 @@ export async function grantTelegramFundingAuthorization(
         from telegram_funding_authorizations funding_authorization
         where funding_authorization.user_id = $1
           and funding_authorization.profile_id = $2
-          and funding_authorization.venue_binding_option_id = $3
           and funding_authorization.revoked_at is null
+        order by funding_authorization.id
         for update of funding_authorization
       `,
-      [
-        input.userId,
-        POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
-        input.venueBindingOptionId,
-      ],
+      [input.userId, POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID],
     );
-    const existingRow = existing.rows[0];
-    if (existingRow) {
-      const current = telegramFundingAuthorizationFromRow(existingRow);
-      if (
-        current.expiresAt &&
-        new Date(current.expiresAt).getTime() <= now.getTime()
-      ) {
-        await client.query(
-          `
-            update telegram_funding_authorizations
-            set revoked_at = $2,
-                updated_at = $2
-            where id = $1 and revoked_at is null
-          `,
-          [current.id, now],
-        );
-      } else {
-        const exactReplay =
-          current.telegramAccountId === input.telegramAccountId &&
-          current.telegramUserId === input.telegramUserId &&
-          current.userWalletId === input.userWalletId &&
-          current.privyWalletId === input.privyWalletId &&
-          current.walletAddress === input.walletAddress.toLowerCase() &&
-          current.signerId === input.configuration.signerId &&
-          current.signerFingerprint === input.configuration.signerFingerprint &&
-          current.policyId === input.configuration.policyId &&
-          current.policyFingerprint === input.configuration.policyFingerprint &&
-          current.destinationOptionId === input.destinationOptionId &&
-          current.expiresAt === (input.expiresAt?.toISOString() ?? null);
-        if (exactReplay) return current;
-        throw new Error(
-          "a different active funding authorization already exists",
-        );
-      }
+    const current = existing.rows.map(telegramFundingAuthorizationFromRow);
+    const generationMatches =
+      input.expectedActiveAuthorizationIds === undefined ||
+      (input.expectedActiveAuthorizationIds.length === current.length &&
+        input.expectedActiveAuthorizationIds.every(
+          (id, index) => current[index]?.id === id,
+        ));
+    const expiredIds = current
+      .filter(
+        (authorization) =>
+          authorization.expiresAt != null &&
+          new Date(authorization.expiresAt).getTime() <= now.getTime(),
+      )
+      .map((authorization) => authorization.id);
+    const active = current.filter(
+      (authorization) => !expiredIds.includes(authorization.id),
+    );
+    const exactReplay = active.find(
+      (authorization) =>
+        authorization.telegramAccountId === input.telegramAccountId &&
+        authorization.telegramUserId === input.telegramUserId &&
+        authorization.userWalletId === input.userWalletId &&
+        authorization.privyWalletId === input.privyWalletId &&
+        sameAccountAddress(
+          "evm:1",
+          authorization.walletAddress,
+          input.walletAddress,
+        ) &&
+        authorization.signerId === input.configuration.signerId &&
+        authorization.signerFingerprint ===
+          input.configuration.signerFingerprint &&
+        authorization.policyId === input.configuration.policyId &&
+        authorization.policyFingerprint ===
+          input.configuration.policyFingerprint &&
+        authorization.destinationOptionId === input.destinationOptionId &&
+        authorization.venueBindingOptionId === input.venueBindingOptionId &&
+        authorization.expiresAt === (input.expiresAt?.toISOString() ?? null),
+    );
+    if (input.operatorOverride) {
+      await client.query(
+        `update telegram_bot_trading_preferences
+            set funding_operator_revoked_at = null,
+                updated_at = greatest(updated_at, $2)
+          where user_id = $1`,
+        [input.userId, now],
+      );
+    }
+    if (exactReplay && active.length === 1) return exactReplay;
+    if (!generationMatches) {
+      throw new TelegramFundingAuthorizationGenerationChangedError(
+        "funding authorization generation changed during inspection",
+      );
+    }
+    if (expiredIds.length > 0) {
+      await client.query(
+        `update telegram_funding_authorizations
+            set revoked_at = greatest(granted_at, $2),
+                updated_at = greatest(granted_at, $2)
+          where id = any($1::uuid[]) and revoked_at is null`,
+        [expiredIds, now],
+      );
+    }
+    if (active.length > 0 && !input.replaceExisting) {
+      throw new Error(
+        "a different active funding authorization already exists",
+      );
+    }
+    if (active.length > 0) {
+      await client.query(
+        `update telegram_funding_authorizations
+            set revoked_at = greatest(granted_at, $2),
+                updated_at = greatest(granted_at, $2)
+          where id = any($1::uuid[]) and revoked_at is null`,
+        [active.map((authorization) => authorization.id), now],
+      );
     }
     const { rows } = await client.query<TelegramFundingAuthorizationRow>(
       `
@@ -482,7 +637,12 @@ export async function grantTelegramFundingAuthorization(
           created_at,
           updated_at
         ) values (
-          $1, $2, $3, $4, $5, lower($6), 'ethereum', $7,
+          $1, $2, $3, $4, $5,
+          case
+            when $6 ~ '^0x[0-9a-fA-F]{40}$' then lower($6)
+            else $6
+          end,
+          'ethereum', $7,
           'closed_destination_transform', $8, $9, $10, $11,
           'polymarket', $12, $13, 'evm:137', $14, 6,
           'evm:137', $15, 6, $16, $17, $16, $16
@@ -513,4 +673,192 @@ export async function grantTelegramFundingAuthorization(
     if (!row) throw new Error("funding authorization insert returned no row");
     return telegramFundingAuthorizationFromRow(row);
   });
+}
+
+async function revokeTelegramFundingAuthorizationForRoute(
+  pool: Pool,
+  input: Readonly<{
+    authorizationIds: readonly string[];
+    userId: string;
+    venueBindingOptionId: string;
+    now: Date;
+  }>,
+): Promise<void> {
+  if (input.authorizationIds.length === 0) return;
+  await tx(pool, async (client) => {
+    await lockTelegramFundingLinkLifecycle(client, input.userId);
+    await client.query(
+      `update telegram_funding_authorizations
+          set revoked_at = greatest(granted_at, $5),
+              updated_at = greatest(granted_at, $5)
+        where user_id = $1
+          and profile_id = $2
+          and venue_binding_option_id = $3
+          and id = any($4::uuid[])
+          and revoked_at is null`,
+      [
+        input.userId,
+        POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
+        input.venueBindingOptionId,
+        input.authorizationIds,
+        input.now,
+      ],
+    );
+  });
+}
+
+async function loadTelegramFundingAuthorizationGeneration(
+  pool: Pick<Pool, "query">,
+  input: Readonly<{ userId: string; venueBindingOptionId: string }>,
+): Promise<
+  Readonly<{
+    activeIds: readonly string[];
+    operatorRevoked: boolean;
+    routeIds: readonly string[];
+  }>
+> {
+  const { rows } = await pool.query<{
+    id: string;
+    venue_binding_option_id: string;
+  }>(
+    `select id, venue_binding_option_id
+       from telegram_funding_authorizations
+      where user_id = $1
+        and profile_id = $2
+        and revoked_at is null
+      order by id`,
+    [input.userId, POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID],
+  );
+  const preference = await pool.query<{
+    funding_operator_revoked_at: Date | null;
+  }>(
+    `select funding_operator_revoked_at
+       from telegram_bot_trading_preferences
+      where user_id = $1`,
+    [input.userId],
+  );
+  return {
+    activeIds: rows.map((row) => row.id),
+    operatorRevoked: preference.rows[0]?.funding_operator_revoked_at != null,
+    routeIds: rows
+      .filter(
+        (row) => row.venue_binding_option_id === input.venueBindingOptionId,
+      )
+      .map((row) => row.id),
+  };
+}
+
+export type EnsureTelegramFundingAuthorizationDependencies = Readonly<{
+  configuration?: PolymarketWrapExecutionConfiguration;
+  environment?: Readonly<Record<string, string | undefined>>;
+  environmentReady?: boolean;
+  inspectWalletProfile?: (input: {
+    walletAddress: string;
+    walletId: string;
+  }) => Promise<PrivyWalletProfileInspection>;
+}>;
+
+/**
+ * Provision the application-side route authority after ordinary managed
+ * trading setup has already attached the shared signer and combined policy.
+ * Missing capability stays a direct-funding fallback; database failures still
+ * surface instead of pretending provisioning succeeded.
+ */
+export async function ensureTelegramFundingAuthorization(
+  pool: Pool,
+  input: Readonly<{
+    userId: string;
+    telegramAccountId: string;
+    telegramUserId: string;
+    controllerWalletId: string;
+    destinationOptionId: string;
+    venueBindingOptionId: string;
+    now?: Date;
+  }>,
+  dependencies: EnsureTelegramFundingAuthorizationDependencies = {},
+): Promise<TelegramFundingAuthorization | null> {
+  const environment = dependencies.environment ?? process.env;
+  const configuration =
+    dependencies.configuration ??
+    loadPolymarketWrapExecutionConfiguration(environment);
+  if (
+    !polymarketWrapExecutionConfigurationReady(configuration) ||
+    !(
+      dependencies.environmentReady ??
+      polymarketWrapExecutorEnvironmentReady(environment)
+    )
+  ) {
+    return null;
+  }
+  const provisioningState = await tx(pool, async (client) => {
+    await lockTelegramFundingLinkLifecycle(client, input.userId);
+    const generation = await loadTelegramFundingAuthorizationGeneration(
+      client,
+      input,
+    );
+    const candidate = await resolveTelegramFundingProvisionWallet(
+      client,
+      input,
+    );
+    return { candidate, generation };
+  });
+  if (provisioningState.generation.operatorRevoked) return null;
+  const candidate = provisioningState.candidate;
+  if (!candidate) return null;
+  if (candidate.controllerWalletId !== input.controllerWalletId) {
+    await revokeTelegramFundingAuthorizationForRoute(pool, {
+      authorizationIds: provisioningState.generation.routeIds,
+      userId: input.userId,
+      venueBindingOptionId: input.venueBindingOptionId,
+      now: input.now ?? new Date(),
+    });
+    return null;
+  }
+  let inspectWalletProfile = dependencies.inspectWalletProfile;
+  if (!inspectWalletProfile) {
+    const driver = new PrivyDelegatedFundingDriver({
+      appId: environment.PRIVY_APP_ID?.trim() ?? "",
+      appSecret: environment.PRIVY_APP_SECRET?.trim() ?? "",
+      authorizationPrivateKey:
+        environment.PRIVY_WALLET_AUTHORIZATION_KEY?.trim() ?? "",
+      configuration,
+    });
+    inspectWalletProfile = (wallet) => driver.inspectWalletProfile(wallet);
+  }
+  let inspection: PrivyWalletProfileInspection = "unavailable";
+  try {
+    inspection = await inspectWalletProfile({
+      walletId: candidate.privyWalletId,
+      walletAddress: candidate.walletAddress,
+    });
+  } catch {
+    inspection = "unavailable";
+  }
+  if (inspection === "unavailable") return null;
+  if (inspection === "invalid") {
+    await revokeTelegramFundingAuthorizationForRoute(pool, {
+      authorizationIds: provisioningState.generation.routeIds,
+      userId: input.userId,
+      venueBindingOptionId: input.venueBindingOptionId,
+      now: input.now ?? new Date(),
+    });
+    return null;
+  }
+  try {
+    return await grantTelegramFundingAuthorization(pool, {
+      ...input,
+      ...candidate,
+      configuration,
+      expectedActiveAuthorizationIds: provisioningState.generation.activeIds,
+      replaceExisting: true,
+    });
+  } catch (error) {
+    if (
+      error instanceof TelegramFundingAuthorizationIdentityNotCurrentError ||
+      error instanceof TelegramFundingAuthorizationGenerationChangedError
+    ) {
+      return null;
+    }
+    throw error;
+  }
 }

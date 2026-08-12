@@ -3,11 +3,17 @@ import { tx, type Pool, type PoolClient } from "@hunch/infra";
 
 import { stableWalletOpaqueId } from "../../account-value/canonical.js";
 import { normalizedActionSchema } from "../domain/schemas.js";
-import type { JsonValue, NormalizedAction } from "../domain/types.js";
+import type {
+  JsonValue,
+  NormalizedAction,
+  WalletExecutionProfile,
+} from "../domain/types.js";
+import { canonicalAccountAddress } from "../domain/asset-identity.js";
 import {
   finishFundingStepAttemptForUserInTransaction,
   resolveAmbiguousProviderFundingStepAttemptForUserInTransaction,
   startFundingStepAttemptInTransaction,
+  startFundingStepAttemptForUserInTransaction,
 } from "../persistence/funding-evidence-repository.js";
 import { FundingPersistenceError } from "../persistence/funding-operation-repository.js";
 import { canonicalJsonHash } from "../persistence/canonical.js";
@@ -39,6 +45,7 @@ import {
   type TelegramFundingAuthorizationRow,
 } from "./telegram-funding-authorization.js";
 import { lockTelegramFundingLinkLifecycle } from "./telegram-funding-link-lifecycle-lock.js";
+import { lockFundingControllerWallet } from "./funding-controller-wallet-lock.js";
 
 type JsonRecord = Readonly<Record<string, JsonValue>>;
 
@@ -115,6 +122,7 @@ export type DelegatedFundingRuntimeProfile = Readonly<{
   claimInTransaction: (
     client: PoolClient,
     input: Readonly<{
+      policy: ResolvedFundingPolicy;
       now: Date;
     }>,
   ) => Promise<DelegatedFundingProfileClaim | null>;
@@ -161,6 +169,23 @@ function actionWalletId(
   });
 }
 
+function delegatedControllerProfile(
+  row: Pick<ClaimRow, "privy_wallet_id" | "user_wallet_id" | "wallet_address">,
+  walletId: string,
+): WalletExecutionProfile {
+  return {
+    walletId,
+    controllerWalletRef: row.user_wallet_id,
+    networkId: "evm:137",
+    address: canonicalAccountAddress("evm:137", row.wallet_address),
+    source: "embedded",
+    signingModes: ["privy_delegated"],
+    serverWalletRef: row.privy_wallet_id,
+    sponsorshipPolicyIds: [],
+    evmAtomicBatchMode: null,
+  };
+}
+
 function executionClaimFromRow(
   row: Omit<ClaimRow, "telegram_account_id"> & {
     telegram_account_id: string | null;
@@ -195,11 +220,46 @@ function executionClaimFromRow(
     telegramUserId: row.telegram_user_id,
     userId: row.user_id,
     venueBindingOptionId: row.venue_binding_option_id,
-    walletAddress: row.wallet_address.toLowerCase(),
+    walletAddress: canonicalAccountAddress("evm:1", row.wallet_address),
   };
 }
 
 async function tryStartDelegatedFundingAttempt(
+  client: PoolClient,
+  row: Pick<
+    ClaimRow,
+    | "action_fingerprint"
+    | "executor_id"
+    | "operation_id"
+    | "step_id"
+    | "user_id"
+  >,
+) {
+  try {
+    return (
+      await startFundingStepAttemptForUserInTransaction(client, {
+        userId: row.user_id,
+        operationId: row.operation_id,
+        stepId: row.step_id,
+        canonicalActionFingerprint: row.action_fingerprint,
+        executorId: row.executor_id,
+      })
+    ).attempt;
+  } catch (error) {
+    // The shared attempt guard is authoritative when concurrent workers read
+    // the same pre-commit snapshot. Losing that race is not a batch failure.
+    if (
+      error instanceof FundingPersistenceError &&
+      (error.code === "invalid_state_transition" ||
+        error.code === "quote_expired")
+    ) {
+      return null;
+    }
+    throw error;
+  }
+}
+
+async function tryStartDelegatedFundingRejection(
   client: PoolClient,
   row: Pick<
     ClaimRow,
@@ -216,8 +276,6 @@ async function tryStartDelegatedFundingAttempt(
       now,
     });
   } catch (error) {
-    // The shared attempt guard is authoritative when concurrent workers read
-    // the same pre-commit snapshot. Losing that race is not a batch failure.
     if (
       error instanceof FundingPersistenceError &&
       error.code === "invalid_state_transition"
@@ -284,6 +342,10 @@ async function rejectInvalidPolymarketWrapInTransaction(
         and operation.status not in (
           'completed', 'refunded', 'failed', 'cancelled'
         )
+        and (
+          step.action_expires_at is null
+          or step.action_expires_at > clock_timestamp()
+        )
         and operation.support_metadata ->> 'preparationKind' =
               'polymarket_funding_router'
         and not exists (
@@ -307,8 +369,11 @@ async function rejectInvalidPolymarketWrapInTransaction(
              and wallet.is_verified = true
              and wallet.is_internal_wallet = true
              and wallet.privy_wallet_id = funding_authorization.privy_wallet_id
-             and lower(wallet.wallet_address) =
-                   lower(funding_authorization.wallet_address)
+             and funding_account_identifier_equal(
+                   funding_authorization.wallet_chain,
+                   wallet.wallet_address,
+                   funding_authorization.wallet_address
+                 )
             join users app_user
               on app_user.id = funding_authorization.user_id
              and coalesce(app_user.is_active, true) = true
@@ -369,13 +434,12 @@ async function rejectInvalidPolymarketWrapInTransaction(
   );
   const row = invalid.rows[0];
   if (!row) return null;
-  const attempt = await startFundingStepAttemptInTransaction(client, {
-    operationId: row.operation_id,
-    stepId: row.step_id,
-    canonicalActionFingerprint: row.action_fingerprint,
-    executorId: row.executor_id,
-    now: input.now,
-  });
+  const attempt = await tryStartDelegatedFundingRejection(
+    client,
+    row,
+    input.now,
+  );
+  if (!attempt) return null;
   await finishDelegatedFundingNonbroadcastFailure(client, {
     userId: row.user_id,
     operationId: row.operation_id,
@@ -393,6 +457,7 @@ async function rejectInvalidPolymarketWrapInTransaction(
 async function claimPolymarketWrapInTransaction(
   client: PoolClient,
   input: Readonly<{
+    policy: ResolvedFundingPolicy;
     now: Date;
   }>,
 ): Promise<DelegatedFundingProfileClaim | null> {
@@ -456,8 +521,18 @@ async function claimPolymarketWrapInTransaction(
        and funding_authorization.venue_binding_option_id =
              operation.support_metadata ->> 'venueBindingOptionId'
        and funding_authorization.source_network_id = receipt.network_id
-       and lower(funding_authorization.source_asset_id) = lower(receipt.asset_id)
+       and funding_account_identifier_equal(
+             receipt.network_id,
+             funding_authorization.source_asset_id,
+             receipt.asset_id
+           )
        and funding_authorization.source_asset_decimals = receipt.asset_decimals
+       and funding_authorization.user_wallet_id is not null
+       and funding_authorization.revoked_at is null
+       and (
+         funding_authorization.expires_at is null
+         or funding_authorization.expires_at > clock_timestamp()
+       )
       join telegram_funding_sessions funding_context
         on funding_context.receive_session_id = receipt.receive_session_id
        and funding_context.user_id = operation.user_id
@@ -472,6 +547,10 @@ async function claimPolymarketWrapInTransaction(
         and (step.depends_on_step_id is null or dependency.state = 'succeeded')
         and operation.status not in (
           'completed', 'refunded', 'failed', 'cancelled'
+        )
+        and (
+          step.action_expires_at is null
+          or step.action_expires_at > clock_timestamp()
         )
         and operation.support_metadata ->> 'preparationKind' =
               'polymarket_funding_router'
@@ -490,9 +569,12 @@ async function claimPolymarketWrapInTransaction(
   if (!row) return null;
 
   const rejectClaim = async (
-    reasonCode: "delegated_action_invalid" | "delegated_authority_invalid",
+    reasonCode:
+      | "delegated_action_invalid"
+      | "delegated_authority_invalid"
+      | "funding_policy_changed",
   ): Promise<DelegatedFundingProfileClaim | null> => {
-    const attempt = await tryStartDelegatedFundingAttempt(
+    const attempt = await tryStartDelegatedFundingRejection(
       client,
       row,
       input.now,
@@ -539,7 +621,29 @@ async function claimPolymarketWrapInTransaction(
   } catch {
     return rejectClaim("delegated_action_invalid");
   }
-  const attempt = await tryStartDelegatedFundingAttempt(client, row, input.now);
+  if (
+    Number(row.policy_version) !== input.policy.runtime.contractVersion ||
+    (row.policy_revision !== input.policy.revision &&
+      !fundingPolicyRevisionMayResume(input.policy))
+  ) {
+    return rejectClaim("funding_policy_changed");
+  }
+  try {
+    await lockFundingControllerWallet(
+      client,
+      row.user_id,
+      delegatedControllerProfile(row, expectedActionWalletId),
+    );
+  } catch (error) {
+    if (
+      error instanceof FundingPersistenceError &&
+      error.code === "quote_invalidated"
+    ) {
+      return rejectClaim("delegated_authority_invalid");
+    }
+    throw error;
+  }
+  const attempt = await tryStartDelegatedFundingAttempt(client, row);
   if (!attempt) return null;
   return {
     kind: "execution",
@@ -734,11 +838,15 @@ async function polymarketWrapPreBroadcastDecisionInTransaction(
     policy_revision: string;
     policy_version: string | number;
     receipt_raw: string;
+    action_expires_at: Date | null;
+    checked_at: Date;
   }>(
     `
       select
         operation.policy_revision,
         operation.policy_version,
+        step.action_expires_at,
+        clock_timestamp() as checked_at,
         step.action_fingerprint,
         step.normalized_action,
         receipt.raw_amount::text as receipt_raw
@@ -796,6 +904,15 @@ async function polymarketWrapPreBroadcastDecisionInTransaction(
     };
   }
   if (
+    row.action_expires_at !== null &&
+    row.action_expires_at <= row.checked_at
+  ) {
+    return {
+      kind: "hard_invalid",
+      reasonCode: "delegated_quote_expired",
+    };
+  }
+  if (
     row.policy_revision !== policy.revision &&
     !fundingPolicyRevisionMayResume(policy)
   ) {
@@ -836,18 +953,33 @@ async function polymarketWrapPreBroadcastDecisionInTransaction(
         configuration: input.configuration,
         expectedAuthorizationId: input.claim.authorizationId,
         expectedAuthorizationFingerprint: input.claim.authorizationFingerprint,
-        now: input.now,
+        now: row.checked_at,
         lock: true,
       })
     : ({
         kind: "hard_invalid",
         reasonCode: "delegated_authority_invalid",
       } as const);
-  return combineDelegatedFundingDecisions(
+  const decision = combineDelegatedFundingDecisions(
     controlDecision,
     environmentDecision,
     authority.kind === "allowed" ? { kind: "allowed" } : authority,
   );
+  if (decision.kind !== "allowed") return decision;
+  const boundaryClock = await client.query<{ now: Date }>(
+    "select clock_timestamp() as now",
+  );
+  const boundaryNow = boundaryClock.rows[0]?.now;
+  if (
+    !boundaryNow ||
+    (row.action_expires_at !== null && row.action_expires_at <= boundaryNow)
+  ) {
+    return {
+      kind: "hard_invalid",
+      reasonCode: "delegated_quote_expired",
+    };
+  }
+  return decision;
 }
 
 export function createPolymarketWrapDelegatedFundingProfile(
@@ -958,6 +1090,7 @@ export class DelegatedFundingExecutor {
             return { kind: "rejected" as const, ...rejected };
           }
           const claim = await runtime.claimInTransaction(client, {
+            policy: currentPolicy,
             now,
           });
           return claim;

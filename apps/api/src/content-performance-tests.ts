@@ -2,10 +2,7 @@
 
 import assert from "node:assert/strict";
 
-import { createPgPool } from "@hunch/infra";
-
-const connectionString = process.env.CONTENT_TEST_DATABASE_URL?.trim();
-if (!connectionString) throw new Error("CONTENT_TEST_DATABASE_URL is required");
+import { createContentTestPool } from "./content-test-runtime.js";
 
 const rowCount = Math.max(
   10_000,
@@ -15,7 +12,7 @@ const maxListMs = Number(process.env.CONTENT_PERF_MAX_LIST_MS ?? 250);
 const maxDetailMs = Number(process.env.CONTENT_PERF_MAX_DETAIL_MS ?? 75);
 const maxSearchMs = Number(process.env.CONTENT_PERF_MAX_SEARCH_MS ?? 300);
 const maxCleanupMs = Number(process.env.CONTENT_PERF_MAX_CLEANUP_MS ?? 30_000);
-const pool = createPgPool({ connectionString, max: 2 });
+const pool = await createContentTestPool(2);
 const prefix = `perf-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 const rareSearchToken = `perfsearch${Date.now()}${Math.random()
   .toString(36)

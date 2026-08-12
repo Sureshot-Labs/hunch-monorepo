@@ -6,6 +6,7 @@ import {
   createRelayReferenceCodec,
 } from "../../funding-providers/relay/reference-codec.js";
 import { RelayReconciliationDriver } from "../../funding-providers/relay/reconciliation.js";
+import { createRelayReceiveReceiptDispositionResolver } from "../../funding-providers/relay/receive-operation.js";
 import { decodeCredentialsEncryptionKey } from "../../lib/credentials-encryption.js";
 import {
   runFundingReconciliationBatch,
@@ -15,11 +16,16 @@ import {
 import { FundingStepReceiptReconciliationDriver } from "../execution/step-receipt-reconciler.js";
 import { createFundingTransactionReferenceCodec } from "../execution/transaction-reference-codec.js";
 import { PolymarketFundingPostconditionDriver } from "../preparation/polymarket-funding-reconciler.js";
+import { observePolymarketFundingRuntimeSidecar } from "../preparation/polymarket-funding-observer.js";
+import { createPolymarketReceiptOperationPreparer } from "../preparation/polymarket-receipt-operation.js";
 import { pollFundingPostconditions } from "../preparation/postcondition-driver.js";
 import { DirectIngressDestinationObserver } from "../reconciliation/direct-ingress-observer.js";
 import { OwnedRouteDestinationObserver } from "../reconciliation/owned-route-destination-observer.js";
 import { FundingReceiveSessionObserver } from "../receive/receive-session-observer.js";
-import { FundingReceiveReceiptRouter } from "../receive/receive-receipt-router.js";
+import {
+  FundingReceiveReceiptRouter,
+  type FundingReceiveReceiptDispositionResolver,
+} from "../receive/receive-receipt-router.js";
 import { runTelegramFundingProgressProjectionBatch } from "../../services/telegram-funding-progress-projector.js";
 import {
   createPolymarketWrapDelegatedFundingProfile,
@@ -27,6 +33,38 @@ import {
 } from "../execution/delegated-funding-executor.js";
 import type { PolymarketWrapExecutionConfiguration } from "../execution/delegated-funding-config.js";
 import { createPrivyDelegatedFundingDriver } from "../execution/privy-delegated-funding-driver.js";
+import {
+  resolveTelegramFundingReceiptDisposition,
+  TELEGRAM_POLYMARKET_FUNDING_ADAPTER_KEY,
+  type TelegramFundingReceiptOperationPreparer,
+} from "../../services/telegram-funding-route.js";
+
+// Channel composition belongs at the worker edge. The receipt router itself
+// only executes a provider-neutral disposition, so a new Telegram venue is a
+// route-adapter registration rather than another branch in the funding core.
+function receiptDispositionResolver(
+  operationPreparers: ReadonlyMap<
+    string,
+    TelegramFundingReceiptOperationPreparer
+  >,
+  webDisposition: FundingReceiveReceiptDispositionResolver | null,
+): FundingReceiveReceiptDispositionResolver {
+  return (target) => {
+    if (target.ownerChannel === "telegram") {
+      return resolveTelegramFundingReceiptDisposition(
+        target,
+        operationPreparers,
+      );
+    }
+    if (target.receipt.handling === "direct") return { kind: "direct" };
+    return webDisposition
+      ? webDisposition(target)
+      : {
+          kind: "hard_invalid",
+          reasonCode: "receipt_disposition_unavailable",
+        };
+  };
+}
 
 export type FundingReferenceProtectionConfig = Readonly<{
   credentialsEncryptionKey: string;
@@ -123,6 +161,83 @@ export async function isFundingReconciliationSchemaReady(
               and not attribute.attisdropped
           )
         )
+        and exists (
+          select 1
+          from pg_constraint constraint_row
+          where constraint_row.conrelid =
+                  to_regclass('public.telegram_bot_action_outbox')
+            and constraint_row.conname =
+                  'telegram_bot_action_outbox_address_egress_check'
+            and lower(pg_get_constraintdef(constraint_row.oid))
+                  like '%funding_replacement%'
+            and lower(pg_get_constraintdef(constraint_row.oid))
+                  like '%receiveaddress%'
+        )
+        and exists (
+          select 1
+          from pg_attribute
+          where attrelid = to_regclass('public.telegram_funding_sessions')
+            and attname in (
+              'address_disclosure_attempt_revision',
+              'address_disclosure_message_id',
+              'address_delivered_revision',
+              'address_redacted_revision'
+            )
+            and not attisdropped
+          group by attrelid
+          having count(*) = 4
+        )
+        and exists (
+          select 1
+          from pg_constraint constraint_row
+          where constraint_row.conrelid =
+                  to_regclass('public.telegram_funding_sessions')
+            and constraint_row.conname =
+                  'telegram_funding_sessions_address_delivery_check'
+            and lower(pg_get_constraintdef(constraint_row.oid))
+                  like '%address_delivered_revision%'
+            and lower(pg_get_constraintdef(constraint_row.oid))
+                  like '%address_disclosure_attempt_revision%'
+            and lower(pg_get_constraintdef(constraint_row.oid))
+                  like '%address_delivered_revision <= address_disclosure_attempt_revision%'
+            and lower(pg_get_constraintdef(constraint_row.oid))
+                  like '%address_redacted_revision%'
+            and lower(pg_get_constraintdef(constraint_row.oid))
+                  like '%address_disclosure_message_id%'
+        )
+        and not exists (
+          select required.constraint_name
+          from (values
+            ('telegram_bot_action_outbox_action_check'),
+            ('telegram_bot_action_outbox_shape_check'),
+            ('telegram_bot_action_outbox_delivery_attempt_check')
+          ) as required(constraint_name)
+          where not exists (
+            select 1
+            from pg_constraint constraint_row
+            where constraint_row.conrelid =
+                    to_regclass('public.telegram_bot_action_outbox')
+              and constraint_row.conname = required.constraint_name
+              and lower(pg_get_constraintdef(constraint_row.oid))
+                    like '%funding_qr%'
+          )
+        )
+        and exists (
+          select 1
+          from pg_index index_row
+          join pg_class index_relation
+            on index_relation.oid = index_row.indexrelid
+          join pg_namespace namespace
+            on namespace.oid = index_relation.relnamespace
+          where namespace.nspname = 'public'
+            and index_relation.relname =
+                  'telegram_bot_action_outbox_funding_qr_unique'
+            and index_row.indisunique
+            and lower(pg_get_expr(
+                  index_row.indpred,
+                  index_row.indrelid
+                )) like '%funding_qr%'
+        )
         as ready
     `,
   );
@@ -181,6 +296,33 @@ export async function runFundingReconciliationJob(
           driver: delegatedDriver,
         })
       : null;
+  const operationPreparers = new Map<
+    string,
+    TelegramFundingReceiptOperationPreparer
+  >();
+  if (referenceProtection) {
+    operationPreparers.set(
+      TELEGRAM_POLYMARKET_FUNDING_ADAPTER_KEY,
+      createPolymarketReceiptOperationPreparer({
+        subjectLookupHmacKey: referenceProtection.referenceLookupHmacKey,
+        subjectLookupKeyVersion: referenceProtection.referenceKeyVersion,
+      }),
+    );
+  }
+  const relayReceiptDisposition =
+    relay && referenceProtection && codecConfig
+      ? createRelayReceiveReceiptDispositionResolver({
+          client: {
+            apiKey: relay.apiKey,
+            ...(relay.timeoutMs === undefined
+              ? {}
+              : { timeoutMs: relay.timeoutMs }),
+          },
+          referenceCodec: createRelayReferenceCodec(codecConfig),
+          subjectLookupHmacKey: referenceProtection.referenceLookupHmacKey,
+          subjectLookupKeyVersion: referenceProtection.referenceKeyVersion,
+        })
+      : null;
   const runReceiveBeforeReconciliation = async () => {
     const receiveObservation = await new FundingReceiveSessionObserver(
       transactionCodec
@@ -193,12 +335,14 @@ export async function runFundingReconciliationJob(
       minimumPollIntervalMs: options.receivePollDelayMs ?? 10_000,
       now: options.now,
     });
-    const receiveRouting = await new FundingReceiveReceiptRouter(pool).runBatch(
-      {
-        limit: options.limit ?? 25,
-        now: options.now,
-      },
-    );
+    const receiveRouting = await new FundingReceiveReceiptRouter(
+      pool,
+      undefined,
+      receiptDispositionResolver(operationPreparers, relayReceiptDisposition),
+    ).runBatch({
+      limit: options.limit ?? 25,
+      now: options.now,
+    });
     const delegatedFundingExecution =
       polymarketWrapProfile && transactionCodec
         ? await new DelegatedFundingExecutor(pool, {
@@ -217,9 +361,17 @@ export async function runFundingReconciliationJob(
   const receiptDriver = transactionCodec
     ? new FundingStepReceiptReconciliationDriver(transactionCodec)
     : null;
-  const polymarketPostconditionDriver = transactionCodec
-    ? new PolymarketFundingPostconditionDriver(transactionCodec)
-    : null;
+  const polymarketPostconditionDriver =
+    transactionCodec && codecConfig
+      ? new PolymarketFundingPostconditionDriver(transactionCodec, {
+          observe: (input) =>
+            observePolymarketFundingRuntimeSidecar({
+              db: pool,
+              encryptionKey: codecConfig.encryptionKey,
+              ...input,
+            }),
+        })
+      : null;
   const evidencePollers =
     receiptDriver && polymarketPostconditionDriver
       ? {

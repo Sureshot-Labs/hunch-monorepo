@@ -1385,7 +1385,7 @@ export const fundingRoutes: FastifyPluginAsync = async (app) => {
     cancelReceiveSession: (userId, receiveSessionId) =>
       receiveSessions.cancel(userId, receiveSessionId),
     reviewReceiveReceipt: (userId, receiveSessionId, receiptId) =>
-      receiveSessions.reviewQuote(userId, receiveSessionId, receiptId),
+      receiveSessions.reviewQuote(userId, receiveSessionId, receiptId, "web"),
     commitReceiveReceiptReview: (
       userId,
       receiveSessionId,
@@ -1397,6 +1397,7 @@ export const fundingRoutes: FastifyPluginAsync = async (app) => {
         receiveSessionId,
         receiptId,
         request,
+        "web",
       ),
   });
 };

@@ -2,6 +2,7 @@
 
 import assert from "node:assert/strict";
 
+import "./integration-test-database-guard.js";
 import { pool, type DbQuery } from "./db.js";
 import {
   clearVenueLifecyclePolicyCache,

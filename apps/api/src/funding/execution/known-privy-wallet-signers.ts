@@ -218,3 +218,29 @@ export function polymarketKnownSignerRuntimeSpecs(
     },
   ];
 }
+
+export function polymarketPersistedSignerRuntimeSpecs(
+  authority: Readonly<{
+    authorizationPublicKey: string;
+    policyFingerprint: string;
+    policyId: string;
+    signerFingerprint: string;
+    signerId: string;
+  }>,
+): readonly KnownPrivySignerRuntimeSpec[] {
+  if (!Object.values(authority).every((value) => value.trim().length > 0)) {
+    return [];
+  }
+  return [
+    {
+      purpose: "polymarket_automation",
+      signerId: authority.signerId,
+      signerFingerprint: authority.signerFingerprint,
+      authorizationPublicKey: authority.authorizationPublicKey,
+      policyIds: [authority.policyId],
+      policyFingerprints: {
+        [authority.policyId]: authority.policyFingerprint,
+      },
+    },
+  ];
+}

@@ -1,4 +1,4 @@
-import type { Pool } from "@hunch/infra";
+import { tx, type Pool } from "@hunch/infra";
 
 import { buildAccountValueReadModel } from "../../account-value/runtime-service.js";
 import { getCredentialsEncryptionKey } from "../../lib/credentials-encryption.js";
@@ -11,7 +11,7 @@ import type {
 import {
   fetchFundingOperationStepForUser,
   finishFundingStepAttemptForUser,
-  startFundingStepAttemptForUser,
+  startFundingStepAttemptForUserInTransaction,
 } from "../persistence/funding-evidence-repository.js";
 import {
   fetchFundingOperationForUser,
@@ -19,7 +19,10 @@ import {
   type FundingOperationRow,
 } from "../persistence/funding-operation-repository.js";
 import { canonicalJsonHash } from "../persistence/canonical.js";
-import { resolveFundingPolicy } from "../policies/funding-policy-service.js";
+import {
+  lockFundingPolicyForTransaction,
+  resolveFundingPolicy,
+} from "../policies/funding-policy-service.js";
 import { withdrawalBindingMatches } from "../domain/withdrawal-binding.js";
 import { parsePositiveInteger } from "../runtime/positive-integer.js";
 import {
@@ -29,6 +32,7 @@ import {
 import { normalizePolymarketDepositWalletTransactionReference } from "./polymarket-deposit-wallet-handoff.js";
 import { createFundingTransactionReferenceCodec } from "./transaction-reference-codec.js";
 import { WithdrawalDestinationRuntime } from "./withdrawal-destination-runtime.js";
+import { lockFundingControllerWallet } from "./funding-controller-wallet-lock.js";
 
 const EXECUTOR_BY_ACTION_KIND = {
   evm_transaction: "wallet_profile_evm_v1",
@@ -73,6 +77,7 @@ function assertClientExecutable(
   executionMode: "web_client" | "privy_authorization" | "venue_relayer";
   payerRequirement: "user" | "privy_sponsor" | "provider";
   sponsorshipPolicyId: string | null;
+  controllerProfile: WalletExecutionProfile;
 }> {
   if (action.kind === "external_handoff") {
     if (
@@ -100,6 +105,7 @@ function assertClientExecutable(
     }
     return {
       controllerWalletRef: profile.controllerWalletRef,
+      controllerProfile: profile,
       executionMode: "venue_relayer",
       payerRequirement: "provider",
       sponsorshipPolicyId: null,
@@ -147,12 +153,25 @@ function assertClientExecutable(
       "committed signer has no authenticated wallet reference",
     );
   }
+  const controllerProfile = profiles.find(
+    (candidate) =>
+      candidate.controllerWalletRef === profile.controllerWalletRef &&
+      candidate.networkId === action.networkId &&
+      candidate.source !== "smart",
+  );
+  if (!controllerProfile) {
+    throw new FundingPersistenceError(
+      "quote_invalidated",
+      "committed signer controller is no longer an exact owned wallet",
+    );
+  }
   const sponsorship: ResolvedActionSponsorship = resolveActionSponsorship({
     action,
     profile,
   });
   return {
     controllerWalletRef: profile.controllerWalletRef,
+    controllerProfile,
     executionMode: sponsorship.signingMode,
     payerRequirement: sponsorship.payerRequirement,
     sponsorshipPolicyId: sponsorship.policyId,
@@ -247,29 +266,6 @@ export class FundingOperationActionRuntime {
       );
     }
     const externalRecipientId = assertWithdrawalActionPolicy(operation);
-    if (!externalRecipientId) {
-      const resolvedPolicy = await resolveFundingPolicy(this.db);
-      if (
-        resolvedPolicy.runtime.creationMode !== "on" ||
-        !resolvedPolicy.runtime.gates.startUnsubmittedAction ||
-        resolvedPolicy.runtime.gates.emergencyBroadcastPause ||
-        !fundingActionPolicyIsCurrent(operation, resolvedPolicy)
-      ) {
-        throw new FundingPersistenceError(
-          "quote_invalidated",
-          "funding action start is disabled or its policy changed",
-        );
-      }
-    }
-    if (externalRecipientId) {
-      await (
-        this.dependencies.revalidateWithdrawalRecipient ??
-        ((ownerId, recipientId) =>
-          this.withdrawalRuntime
-            .resolve(ownerId, recipientId)
-            .then(() => undefined))
-      )(userId, externalRecipientId);
-    }
     const action = normalizedActionSchema.parse(
       step.normalizedAction,
     ) as unknown as NormalizedAction;
@@ -285,23 +281,71 @@ export class FundingOperationActionRuntime {
       step.executorId,
       account.ownership?.wallets ?? [],
     );
-    const started = await startFundingStepAttemptForUser(this.db, {
-      userId,
-      operationId: input.operationId,
-      stepId: input.stepId,
-      canonicalActionFingerprint: fingerprint,
-      executorId: step.executorId,
+    return tx(this.db, async (client) => {
+      if (externalRecipientId) {
+        // The share lock makes revocation/crypto-shredding serialize with the
+        // durable attempt start; validation outside this transaction can race.
+        await this.withdrawalRuntime.resolve(userId, externalRecipientId, {
+          db: client,
+          lockForShare: true,
+        });
+        await this.dependencies.revalidateWithdrawalRecipient?.(
+          userId,
+          externalRecipientId,
+        );
+      }
+      let expectedPolicy:
+        | Readonly<{ revision: string; version: number }>
+        | undefined;
+      if (!externalRecipientId) {
+        await lockFundingPolicyForTransaction(client);
+        const resolvedPolicy = await resolveFundingPolicy(client);
+        if (
+          resolvedPolicy.runtime.creationMode !== "on" ||
+          !resolvedPolicy.runtime.gates.startUnsubmittedAction ||
+          resolvedPolicy.runtime.gates.emergencyBroadcastPause ||
+          !fundingActionPolicyIsCurrent(operation, resolvedPolicy)
+        ) {
+          throw new FundingPersistenceError(
+            "quote_invalidated",
+            "funding action start is disabled or its policy changed",
+          );
+        }
+        expectedPolicy = {
+          revision: resolvedPolicy.revision,
+          version: resolvedPolicy.runtime.contractVersion,
+        };
+      }
+      const start = () =>
+        startFundingStepAttemptForUserInTransaction(client, {
+          userId,
+          operationId: input.operationId,
+          stepId: input.stepId,
+          canonicalActionFingerprint: fingerprint,
+          executorId: step.executorId,
+          ...(expectedPolicy ? { expectedPolicy } : {}),
+        });
+      // Policy-controlled actions lock operation/step before the wallet. The
+      // delegated worker uses the same order; a failed wallet check rolls the
+      // inserted attempt back with this transaction.
+      const started = externalRecipientId ? null : await start();
+      await lockFundingControllerWallet(
+        client,
+        userId,
+        execution.controllerProfile,
+      );
+      const durableStart = started ?? (await start());
+      return {
+        attemptId: durableStart.attempt.id,
+        action,
+        actionFingerprint: fingerprint,
+        controllerWalletRef: execution.controllerWalletRef,
+        executorId: step.executorId,
+        executionMode: execution.executionMode,
+        payerRequirement: execution.payerRequirement,
+        sponsorshipPolicyId: execution.sponsorshipPolicyId,
+      };
     });
-    return {
-      attemptId: started.attempt.id,
-      action,
-      actionFingerprint: fingerprint,
-      controllerWalletRef: execution.controllerWalletRef,
-      executorId: step.executorId,
-      executionMode: execution.executionMode,
-      payerRequirement: execution.payerRequirement,
-      sponsorshipPolicyId: execution.sponsorshipPolicyId,
-    };
   }
 
   async report(

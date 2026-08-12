@@ -7,6 +7,10 @@ export function isEvmNetworkId(networkId: string): boolean {
   return EVM_NETWORK_PATTERN.test(networkId);
 }
 
+export function isEvmAddress(address: string): boolean {
+  return EVM_ADDRESS_PATTERN.test(address);
+}
+
 export function canonicalAssetId(asset: AssetRef): string {
   return isEvmNetworkId(asset.networkId) &&
     EVM_ADDRESS_PATTERN.test(asset.assetId)
@@ -30,10 +34,9 @@ export function canonicalAccountAddress(
   networkId: string,
   address: string,
 ): string {
-  const trimmed = address.trim();
-  return isEvmNetworkId(networkId) && EVM_ADDRESS_PATTERN.test(trimmed)
-    ? trimmed.toLowerCase()
-    : trimmed;
+  return isEvmNetworkId(networkId) && isEvmAddress(address)
+    ? address.toLowerCase()
+    : address;
 }
 
 export function sameAccountAddress(

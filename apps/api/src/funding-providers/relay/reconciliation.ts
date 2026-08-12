@@ -1,6 +1,7 @@
 import { tx, type Pool, type PoolClient } from "@hunch/infra";
 
 import type { JsonValue } from "../../funding/domain/types.js";
+import { sameAccountAddress } from "../../funding/domain/asset-identity.js";
 import { upsertFundingProviderRequestInTransaction } from "../../funding/persistence/funding-evidence-repository.js";
 import { wakeFundingReconciliationInTransaction } from "../../funding/persistence/funding-operation-repository.js";
 import { RelayClient } from "./client.js";
@@ -18,6 +19,7 @@ type StoredRelaySegment = {
   id: string;
   operation_id: string;
   deposit_address_ciphertext: string | null;
+  source_network_id: string | null;
 };
 
 type StoredRelayRequest = {
@@ -193,7 +195,11 @@ export class RelayReconciliationDriver {
   ): Promise<Readonly<{ requestsPolled: number; childrenDiscovered: number }>> {
     const segmentResult = await pool.query<StoredRelaySegment>(
       `
-        select id, operation_id, deposit_address_ciphertext
+        select
+          id,
+          operation_id,
+          deposit_address_ciphertext,
+          quoted_input #>> '{asset,networkId}' as source_network_id
         from funding_operation_segments
         where operation_id = $1 and provider_id = 'relay'
         order by ordinal
@@ -245,9 +251,14 @@ export class RelayReconciliationDriver {
     const depositTargets: Array<{
       segment: StoredRelaySegment;
       depositAddress: string;
+      sourceNetworkId: string;
     }> = [];
     for (const segment of segmentResult.rows) {
       if (!segment.deposit_address_ciphertext) continue;
+      const sourceNetworkId = segment.source_network_id;
+      if (!sourceNetworkId) {
+        throw new Error("Relay Deposit Address segment has no source network");
+      }
       if (
         ![...existingByRequestId.values()].some(
           (request) =>
@@ -262,7 +273,7 @@ export class RelayReconciliationDriver {
       const depositAddress = this.depositAddressCodec.decrypt(
         segment.deposit_address_ciphertext,
       );
-      depositTargets.push({ segment, depositAddress });
+      depositTargets.push({ segment, depositAddress, sourceNetworkId });
     }
     const knownRequests = [...existingByRequestId.entries()].map(
       ([requestId, request]) => {
@@ -277,11 +288,15 @@ export class RelayReconciliationDriver {
 
     const [depositResults, statusResults] = await Promise.all([
       Promise.all(
-        depositTargets.map(async ({ segment, depositAddress }) => ({
-          segment,
-          depositAddress,
-          requests: await this.client.requestsByDepositAddress(depositAddress),
-        })),
+        depositTargets.map(
+          async ({ segment, depositAddress, sourceNetworkId }) => ({
+            segment,
+            depositAddress,
+            sourceNetworkId,
+            requests:
+              await this.client.requestsByDepositAddress(depositAddress),
+          }),
+        ),
       ),
       Promise.all(
         knownRequests.map(async ({ requestId, request }) => ({
@@ -293,7 +308,12 @@ export class RelayReconciliationDriver {
     ]);
 
     let childrenDiscovered = 0;
-    for (const { segment, depositAddress, requests } of depositResults) {
+    for (const {
+      segment,
+      depositAddress,
+      sourceNetworkId,
+      requests,
+    } of depositResults) {
       const discoveredRequestIds = new Set<string>();
       for (const request of requests) {
         if (discoveredRequestIds.has(request.requestId)) {
@@ -302,8 +322,11 @@ export class RelayReconciliationDriver {
         discoveredRequestIds.add(request.requestId);
         if (
           request.depositAddress &&
-          request.depositAddress.address.toLowerCase() !==
-            depositAddress.toLowerCase()
+          !sameAccountAddress(
+            sourceNetworkId,
+            request.depositAddress.address,
+            depositAddress,
+          )
         ) {
           throw new Error(
             "Relay child request deposit address does not match the operation",

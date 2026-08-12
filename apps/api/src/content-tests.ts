@@ -671,6 +671,18 @@ test("registers gated protected routes and one canonical migration", () => {
 
 test("uses the main database and keeps content work out of the API process", () => {
   const envSource = readFileSync(new URL("./env.ts", import.meta.url), "utf8");
+  const testRuntimeSource = readFileSync(
+    new URL("./content-test-runtime.ts", import.meta.url),
+    "utf8",
+  );
+  const testDatabaseTargetSource = readFileSync(
+    new URL("./test-database-target.ts", import.meta.url),
+    "utf8",
+  );
+  const testRunnerSource = readFileSync(
+    new URL("./test-runner.ts", import.meta.url),
+    "utf8",
+  );
   const runtimeSource = readFileSync(
     new URL("./content-runtime.ts", import.meta.url),
     "utf8",
@@ -682,6 +694,26 @@ test("uses the main database and keeps content work out of the API process", () 
   );
   assert.match(envSource, /contentDatabaseUrl: req\("DATABASE_URL"\)/);
   assert.doesNotMatch(envSource, /CONTENT_DATABASE_URL/);
+  assert.match(testRuntimeSource, /createIntegrationTestPool\(\{ max \}\)/);
+  assert.doesNotMatch(testRuntimeSource, /CONTENT_TEST_DATABASE_URL/);
+  assert.match(testDatabaseTargetSource, /databaseUrl: source\.DATABASE_URL/);
+  assert.match(
+    testDatabaseTargetSource,
+    /expectedDatabase: source\.HUNCH_TEST_EXPECT_DATABASE/,
+  );
+  assert.match(
+    testDatabaseTargetSource,
+    /integration tests require an explicit database URL and expected database/,
+  );
+  assert.match(
+    testRunnerSource,
+    /integration tests require --database-url and --expect-database/,
+  );
+  assert.match(testRunnerSource, /closeAcquiredRuntimeResources\(\)/u);
+  assert.doesNotMatch(
+    testRunnerSource,
+    /finally\s*\{[\s\S]{0,500}?import\("\.\/(?:redis|db)\.js"\)/u,
+  );
   assert.match(runtimeSource, /max: env\.contentDbPublicPoolMax/);
   assert.match(runtimeSource, /max: env\.contentDbAdminPoolMax/);
   assert.doesNotMatch(

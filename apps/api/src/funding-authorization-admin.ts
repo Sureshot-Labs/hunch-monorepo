@@ -109,7 +109,10 @@ async function main(): Promise<void> {
       `--confirm must exactly equal ${JSON.stringify(GRANT_CONFIRMATION)}`,
     );
   }
-  const authorization = await grantTelegramFundingAuthorization(pool, input);
+  const authorization = await grantTelegramFundingAuthorization(pool, {
+    ...input,
+    operatorOverride: true,
+  });
   console.log(
     JSON.stringify(
       {

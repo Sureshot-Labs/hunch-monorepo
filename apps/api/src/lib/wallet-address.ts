@@ -11,6 +11,15 @@ export function normalizeWalletForStorage(value: string): string {
   return isEvmAddress(trimmed) ? trimmed.toLowerCase() : trimmed;
 }
 
+export function canonicalWalletIdentity(
+  walletType: string,
+  value: string,
+): string {
+  return walletType === "ethereum" && EVM_ADDRESS_RE.test(value)
+    ? value.toLowerCase()
+    : value;
+}
+
 export function normalizeOptionalWalletForStorage(
   value: string | null | undefined,
 ): string | null {

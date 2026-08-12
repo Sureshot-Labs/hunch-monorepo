@@ -1,6 +1,7 @@
 #!/usr/bin/env tsx
 
 import assert from "node:assert/strict";
+import "./integration-test-database-guard.js";
 import crypto from "node:crypto";
 
 import { pool } from "./db.js";
@@ -3445,9 +3446,3 @@ await test("hiding a resolved position marks its notification read", async () =>
     await cleanupPositionTest(userId, [tokenId]);
   }
 });
-
-await Promise.race([
-  pool.end(),
-  new Promise<void>((resolve) => setTimeout(resolve, 1000)),
-]);
-process.exit(0);

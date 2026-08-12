@@ -1,6 +1,7 @@
 #!/usr/bin/env tsx
 
 import assert from "node:assert/strict";
+import "./integration-test-database-guard.js";
 import crypto from "node:crypto";
 
 import { AuthService, resetAuthDbFeatureCachesForTests } from "./auth.js";

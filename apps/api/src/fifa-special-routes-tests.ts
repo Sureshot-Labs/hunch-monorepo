@@ -1,6 +1,7 @@
 #!/usr/bin/env tsx
 
 import assert from "node:assert/strict";
+import "./integration-test-database-guard.js";
 import crypto from "node:crypto";
 import { buildApp } from "./app.js";
 import { pool } from "./db.js";
@@ -333,7 +334,7 @@ async function main() {
   env.feedTtlSec = 0;
   const eventIds: string[] = [];
   const marketIds: string[] = [];
-  const suffix = crypto.randomUUID().replace(/-/g, "").slice(0, 8);
+  const suffix = `f${crypto.randomUUID().replace(/-/g, "").slice(0, 7)}`;
   const fixtureProviderId = `test-fixture-${suffix}`;
   const fixtureKey = "match:2026-06-30:united-states:paraguay";
 

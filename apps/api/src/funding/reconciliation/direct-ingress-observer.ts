@@ -2,19 +2,13 @@ import { tx, type Pool, type PoolClient } from "@hunch/infra";
 
 import { isRecord } from "../../lib/type-guards.js";
 import { canonicalJsonHash } from "../persistence/canonical.js";
-import type {
-  AssetRef,
-  FundingPurpose,
-  JsonValue,
-  PreparationPurpose,
-} from "../domain/types.js";
+import type { AssetRef, FundingPurpose, JsonValue } from "../domain/types.js";
 import type { FundingOperationState } from "../domain/transitions.js";
 import {
   allocateFundingObservationInTransaction,
   FundingPersistenceError,
   transitionFundingOperationInTransaction,
 } from "../persistence/funding-operation-repository.js";
-import { parsePolymarketFundingEvidence } from "../preparation/polymarket-funding-snapshot.js";
 import { sameAsset } from "../planner/money.js";
 import { observeOwnedWalletAssetBalance } from "./owned-wallet-asset-balance.js";
 
@@ -171,10 +165,6 @@ export function parseDirectIngressObservationVariant(
   };
 }
 
-function preparationPurpose(purpose: FundingPurpose): PreparationPurpose {
-  return purpose === "trade_shortfall" ? "buy" : "fund";
-}
-
 async function loadTarget(
   db: Pick<Pool, "query">,
   operationId: string,
@@ -298,36 +288,33 @@ async function loadTarget(
   };
 }
 
-async function resolveSinglePreparationCandidate(
-  pool: Pool,
-  target: DirectIngressObservationTarget,
+async function observeFrozenOwnedBalances(
   variants: readonly DirectIngressObservationVariant[],
-) {
-  const { WalletPreparationRuntimeService } =
-    await import("../preparation/runtime-service.js");
-  const candidates = await new WalletPreparationRuntimeService(
-    pool,
-  ).resolvedCandidates({
-    accountId: target.userId,
-    purpose: preparationPurpose(target.purpose),
-    marketContextId: target.marketId,
-    marketClass: null,
-    compatibleVenueBindingOptionIds: [target.venueBindingOptionId],
-  });
-  const matches = candidates.filter(
-    (candidate) =>
-      candidate.bindingOption.venueBindingOptionId ===
-        target.venueBindingOptionId &&
-      candidate.target.kind === "owned_location" &&
-      variants.every(
-        (variant) =>
-          candidate.target.kind === "owned_location" &&
-          candidate.target.location.locationId ===
-            variant.destinationLocationId,
-      ),
+): Promise<readonly DirectIngressVariantObservation[]> {
+  const observedAt = new Date().toISOString();
+  return Promise.all(
+    variants.map(async (variant) => {
+      const observedRaw = await observeOwnedWalletAssetBalance({
+        networkId: variant.networkId,
+        asset: variant.asset,
+        destinationAddress: variant.destinationAddress,
+      });
+      return {
+        variantId: variant.variantId,
+        observedRaw,
+        revision: canonicalJsonHash({
+          schema: "owned_ingress_balance_observation_v1",
+          adapterId: variant.observation.adapterId,
+          networkId: variant.networkId,
+          address: variant.destinationAddress,
+          asset: variant.asset,
+          raw: observedRaw,
+          observedAt,
+        }),
+        observedAt,
+      };
+    }),
   );
-  if (matches.length !== 1) return null;
-  return matches[0] ?? null;
 }
 
 /**
@@ -345,99 +332,34 @@ export interface DirectIngressObservationAdapter {
 
 const ownedDestinationSpendabilityAdapter: DirectIngressObservationAdapter = {
   adapterId: "owned_destination_spendability_v1",
-  async observe(pool, target, variants) {
-    const candidate = await resolveSinglePreparationCandidate(
-      pool,
-      target,
-      variants,
-    );
-    if (!candidate || variants.length !== 1) return null;
-    const variant = variants[0];
-    if (
-      !variant ||
-      !sameAsset(candidate.spendability.observedAmount.asset, variant.asset)
-    ) {
-      return null;
-    }
-    return [
-      {
-        variantId: variant.variantId,
-        observedRaw: candidate.spendability.observedAmount.raw,
-        revision: candidate.spendability.revision,
-        observedAt: candidate.spendability.asOf,
-      },
-    ];
+  async observe(_pool, _target, variants) {
+    return variants.length === 1 ? observeFrozenOwnedBalances(variants) : null;
   },
 };
 
 const polymarketDepositWalletAssetsAdapter: DirectIngressObservationAdapter = {
   adapterId: "polymarket_deposit_wallet_assets_v1",
-  async observe(pool, target, variants) {
-    const candidate = await resolveSinglePreparationCandidate(
-      pool,
-      target,
-      variants,
-    );
-    if (!candidate) return null;
-    const fundingSnapshot = parsePolymarketFundingEvidence(
-      candidate.sourcePlanningEvidence,
-    );
-    if (!fundingSnapshot) return null;
-    const revision = canonicalJsonHash({
-      schema: "polymarket_ingress_observation_v1",
-      snapshot: fundingSnapshot,
-    });
-    const observations = variants.flatMap(
-      (variant): DirectIngressVariantObservation[] => {
-        const field = variant.observation.payload.field;
-        if (field !== "depositPusdRaw" && field !== "depositUsdceRaw") {
-          return [];
-        }
-        return [
-          {
-            variantId: variant.variantId,
-            observedRaw: fundingSnapshot[field],
-            revision,
-            observedAt: fundingSnapshot.observedAt,
-          },
-        ];
-      },
-    );
-    return observations.length === variants.length ? observations : null;
+  async observe(_pool, _target, variants) {
+    return variants.every((variant) => {
+      const field = variant.observation.payload.field;
+      return field === "depositPusdRaw" || field === "depositUsdceRaw";
+    })
+      ? observeFrozenOwnedBalances(variants)
+      : null;
   },
 };
 
 const ownedWalletLiquidBalancesAdapter: DirectIngressObservationAdapter = {
   adapterId: "owned_wallet_liquid_balances_v1",
   async observe(_pool, _target, variants) {
-    const observedAt = new Date().toISOString();
-    return Promise.all(
-      variants.map(
-        async (variant): Promise<DirectIngressVariantObservation> => {
-          if (typeof variant.observation.payload.balanceKey !== "string") {
-            throw new Error("receive balance key is missing");
-          }
-          const observedRaw = await observeOwnedWalletAssetBalance({
-            networkId: variant.networkId,
-            asset: variant.asset,
-            destinationAddress: variant.destinationAddress,
-          });
-          return {
-            variantId: variant.variantId,
-            observedRaw,
-            revision: canonicalJsonHash({
-              schema: "owned_wallet_liquid_balance_observation_v1",
-              networkId: variant.networkId,
-              address: variant.destinationAddress,
-              asset: variant.asset,
-              raw: observedRaw,
-              observedAt,
-            }),
-            observedAt,
-          };
-        },
-      ),
-    );
+    if (
+      variants.some(
+        (variant) => typeof variant.observation.payload.balanceKey !== "string",
+      )
+    ) {
+      throw new Error("receive balance key is missing");
+    }
+    return observeFrozenOwnedBalances(variants);
   },
 };
 

@@ -964,6 +964,7 @@ export async function mergeUsers(
            decision_source,
            decision_version,
            manual_disabled_at,
+           funding_operator_revoked_at,
            applied_policy_revision,
            retry_attempt_count,
            retry_after,
@@ -978,6 +979,7 @@ export async function mergeUsers(
            'admin_merge',
            decision_version + 1,
            manual_disabled_at,
+           funding_operator_revoked_at,
            applied_policy_revision,
            0,
            NULL,
@@ -1003,6 +1005,10 @@ export async function mergeUsers(
                EXCLUDED.manual_disabled_at
              )
            END,
+           funding_operator_revoked_at = greatest(
+             telegram_bot_trading_preferences.funding_operator_revoked_at,
+             EXCLUDED.funding_operator_revoked_at
+           ),
            applied_policy_revision = CASE
              WHEN telegram_bot_trading_preferences.applied_policy_revision
                = EXCLUDED.applied_policy_revision

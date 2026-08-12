@@ -1,6 +1,7 @@
 #!/usr/bin/env tsx
 
 import assert from "node:assert/strict";
+import "./integration-test-database-guard.js";
 import crypto from "node:crypto";
 
 import { AuthService, resetAuthDbFeatureCachesForTests } from "./auth.js";
@@ -240,6 +241,7 @@ async function insertKalshiSolanaPosition(context: TestContext): Promise<void> {
 }
 
 async function main() {
+  process.env.CREDENTIALS_ENCRYPTION_KEY = "00".repeat(32);
   resetAuthDbFeatureCachesForTests();
   const app = await buildApp();
   const persistedContext = await createTestContext();

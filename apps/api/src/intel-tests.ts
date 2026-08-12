@@ -27,6 +27,7 @@ import {
   resolveSpecialistAttributionPolicyHash,
   walletMatchesFilters,
 } from "./services/wallet-attribution.js";
+import { walletIntelRetryConfig } from "./services/wallet-intel-retry.js";
 import {
   computeApproxLegPnlUsd,
   NET_SHARES_EPSILON,
@@ -158,6 +159,12 @@ import {
 type TestCase = {
   name: string;
   run: () => void | Promise<void>;
+};
+
+const testRetryConfig = walletIntelRetryConfig as {
+  baseBackoffMs: number;
+  maxAttempts: number;
+  maxBackoffMs: number;
 };
 
 const testErc1155Iface = new Interface([
@@ -4018,13 +4025,13 @@ const tests: TestCase[] = [
     name: "polygon rpc retries HTTP 429 before succeeding",
     run: async () => {
       const originalFetch = globalThis.fetch;
-      const originalMaxAttempts = env.walletIntelRetryMaxAttempts;
-      const originalBaseBackoff = env.walletIntelRetryBaseBackoffMs;
-      const originalMaxBackoff = env.walletIntelRetryMaxBackoffMs;
+      const originalMaxAttempts = testRetryConfig.maxAttempts;
+      const originalBaseBackoff = testRetryConfig.baseBackoffMs;
+      const originalMaxBackoff = testRetryConfig.maxBackoffMs;
 
-      env.walletIntelRetryMaxAttempts = 2;
-      env.walletIntelRetryBaseBackoffMs = 1;
-      env.walletIntelRetryMaxBackoffMs = 1;
+      testRetryConfig.maxAttempts = 2;
+      testRetryConfig.baseBackoffMs = 1;
+      testRetryConfig.maxBackoffMs = 1;
 
       let calls = 0;
       globalThis.fetch = async () => {
@@ -4056,9 +4063,9 @@ const tests: TestCase[] = [
         assert.equal(calls, 2);
       } finally {
         globalThis.fetch = originalFetch;
-        env.walletIntelRetryMaxAttempts = originalMaxAttempts;
-        env.walletIntelRetryBaseBackoffMs = originalBaseBackoff;
-        env.walletIntelRetryMaxBackoffMs = originalMaxBackoff;
+        testRetryConfig.maxAttempts = originalMaxAttempts;
+        testRetryConfig.baseBackoffMs = originalBaseBackoff;
+        testRetryConfig.maxBackoffMs = originalMaxBackoff;
       }
     },
   },
@@ -4066,13 +4073,13 @@ const tests: TestCase[] = [
     name: "polygon rpc retries rate-limit JSON-RPC errors before succeeding",
     run: async () => {
       const originalFetch = globalThis.fetch;
-      const originalMaxAttempts = env.walletIntelRetryMaxAttempts;
-      const originalBaseBackoff = env.walletIntelRetryBaseBackoffMs;
-      const originalMaxBackoff = env.walletIntelRetryMaxBackoffMs;
+      const originalMaxAttempts = testRetryConfig.maxAttempts;
+      const originalBaseBackoff = testRetryConfig.baseBackoffMs;
+      const originalMaxBackoff = testRetryConfig.maxBackoffMs;
 
-      env.walletIntelRetryMaxAttempts = 2;
-      env.walletIntelRetryBaseBackoffMs = 1;
-      env.walletIntelRetryMaxBackoffMs = 1;
+      testRetryConfig.maxAttempts = 2;
+      testRetryConfig.baseBackoffMs = 1;
+      testRetryConfig.maxBackoffMs = 1;
 
       let calls = 0;
       globalThis.fetch = async () => {
@@ -4110,9 +4117,9 @@ const tests: TestCase[] = [
         assert.equal(calls, 2);
       } finally {
         globalThis.fetch = originalFetch;
-        env.walletIntelRetryMaxAttempts = originalMaxAttempts;
-        env.walletIntelRetryBaseBackoffMs = originalBaseBackoff;
-        env.walletIntelRetryMaxBackoffMs = originalMaxBackoff;
+        testRetryConfig.maxAttempts = originalMaxAttempts;
+        testRetryConfig.baseBackoffMs = originalBaseBackoff;
+        testRetryConfig.maxBackoffMs = originalMaxBackoff;
       }
     },
   },
@@ -6454,13 +6461,13 @@ const tests: TestCase[] = [
     name: "single-rpc solana requests retry 429 responses across attempts",
     run: async () => {
       const originalFetch = globalThis.fetch;
-      const originalMaxAttempts = env.walletIntelRetryMaxAttempts;
-      const originalBaseBackoffMs = env.walletIntelRetryBaseBackoffMs;
-      const originalMaxBackoffMs = env.walletIntelRetryMaxBackoffMs;
+      const originalMaxAttempts = testRetryConfig.maxAttempts;
+      const originalBaseBackoffMs = testRetryConfig.baseBackoffMs;
+      const originalMaxBackoffMs = testRetryConfig.maxBackoffMs;
 
-      env.walletIntelRetryMaxAttempts = 2;
-      env.walletIntelRetryBaseBackoffMs = 0;
-      env.walletIntelRetryMaxBackoffMs = 0;
+      testRetryConfig.maxAttempts = 2;
+      testRetryConfig.baseBackoffMs = 0;
+      testRetryConfig.maxBackoffMs = 0;
 
       let fetchCalls = 0;
       globalThis.fetch = async () => {
@@ -6494,9 +6501,9 @@ const tests: TestCase[] = [
         assert.equal(fetchCalls, 2);
       } finally {
         globalThis.fetch = originalFetch;
-        env.walletIntelRetryMaxAttempts = originalMaxAttempts;
-        env.walletIntelRetryBaseBackoffMs = originalBaseBackoffMs;
-        env.walletIntelRetryMaxBackoffMs = originalMaxBackoffMs;
+        testRetryConfig.maxAttempts = originalMaxAttempts;
+        testRetryConfig.baseBackoffMs = originalBaseBackoffMs;
+        testRetryConfig.maxBackoffMs = originalMaxBackoffMs;
       }
     },
   },

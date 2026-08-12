@@ -5,6 +5,7 @@ import crypto from "node:crypto";
 
 import type { PoolClient } from "pg";
 
+import "./integration-test-database-guard.js";
 import { pool } from "./db.js";
 import {
   loadWhaleRowsByIds,

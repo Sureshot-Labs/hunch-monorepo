@@ -4,6 +4,10 @@ import {
   POLYMARKET_USDCE,
 } from "@hunch/contracts";
 
+// Import boundary: workers and sidecars use this module without loading the
+// API-wide env schema or unrelated required secrets. Keep parsing pure and
+// optional here; API-only policy modules may depend on it, never the reverse.
+
 type Environment = Readonly<Record<string, string | undefined>>;
 
 const DEFAULT_SOLANA_RPC_URL = "https://api.mainnet-beta.solana.com";
@@ -23,27 +27,9 @@ function optionalPositiveInt(
   return Number.isSafeInteger(value) && value > 0 ? value : fallback;
 }
 
-function optionalIntInRange(
-  source: Environment,
-  key: string,
-  fallback: number,
-  minimum: number,
-  maximum: number,
-): number {
-  const raw = source[key]?.trim();
-  if (!raw) return fallback;
-  const value = Number(raw);
-  return Number.isSafeInteger(value) && value >= minimum && value <= maximum
-    ? value
-    : fallback;
-}
-
-function optionalNonNegativeInt(
-  source: Environment,
-  key: string,
-  fallback: number,
-): number {
-  return optionalIntInRange(source, key, fallback, 0, Number.MAX_SAFE_INTEGER);
+function optionalPositiveNumber(source: Environment, key: string): number {
+  const value = Number(source[key]?.trim() ?? "");
+  return Number.isFinite(value) && value > 0 ? value : 0;
 }
 
 function stringValue(
@@ -112,17 +98,14 @@ export type FundingSidecarRuntimeConfig = Readonly<{
   polymarketExchangeAddress: string;
   polymarketNegRiskExchangeAddress: string;
   polymarketFundingRouterAddress: string;
+  polymarketBuilderCode: string;
+  polymarketBotBuyPolicyMaxUsd: number;
   polymarketNegRiskAdapterAddress: string;
   polymarketConditionalTokensAddress: string;
   limitlessUsdcAddress: string;
   limitlessConditionalTokensAddress: string;
   limitlessClobAddress: string;
   limitlessNegRiskAddress: string;
-  evmCodeCacheTtlMs: number;
-  evmApprovalCacheTtlMs: number;
-  walletIntelRetryMaxAttempts: number;
-  walletIntelRetryBaseBackoffMs: number;
-  walletIntelRetryMaxBackoffMs: number;
 }>;
 
 export function loadFundingSidecarRuntimeConfig(
@@ -263,6 +246,11 @@ export function loadFundingSidecarRuntimeConfig(
       "0xe2222d279d744050d28e00520010520000310F59",
     ),
     polymarketFundingRouterAddress,
+    polymarketBuilderCode: stringValue(source, "POLYMARKET_BUILDER_CODE", ""),
+    polymarketBotBuyPolicyMaxUsd: optionalPositiveNumber(
+      source,
+      "PRIVY_POLYMARKET_BOT_BUY_POLICY_MAX_USD",
+    ),
     polymarketNegRiskAdapterAddress: stringValue(
       source,
       "POLYMARKET_NEG_RISK_ADAPTER_ADDRESS",
@@ -292,37 +280,6 @@ export function loadFundingSidecarRuntimeConfig(
       source,
       "LIMITLESS_NEGRISK_ADDRESS",
       "0xe3E00BA3a9888d1DE4834269f62ac008b4BB5C47",
-    ),
-    evmCodeCacheTtlMs: optionalNonNegativeInt(
-      source,
-      "EVM_CODE_CACHE_TTL_MS",
-      10 * 60_000,
-    ),
-    evmApprovalCacheTtlMs: optionalNonNegativeInt(
-      source,
-      "EVM_APPROVAL_CACHE_TTL_MS",
-      2_000,
-    ),
-    walletIntelRetryMaxAttempts: optionalIntInRange(
-      source,
-      "WALLET_INTEL_RETRY_MAX_ATTEMPTS",
-      3,
-      1,
-      6,
-    ),
-    walletIntelRetryBaseBackoffMs: optionalIntInRange(
-      source,
-      "WALLET_INTEL_RETRY_BASE_BACKOFF_MS",
-      250,
-      10,
-      60_000,
-    ),
-    walletIntelRetryMaxBackoffMs: optionalIntInRange(
-      source,
-      "WALLET_INTEL_RETRY_MAX_BACKOFF_MS",
-      2_000,
-      10,
-      120_000,
     ),
   };
 }

@@ -1,7 +1,11 @@
 import { getAddress, ZeroAddress } from "ethers";
 import { PublicKey } from "@solana/web3.js";
 
-import { canonicalAssetKey } from "../../funding/domain/asset-identity.js";
+import {
+  canonicalAssetId,
+  canonicalAssetKey,
+  sameAsset,
+} from "../../funding/domain/asset-identity.js";
 import type { AssetRef, NetworkId } from "../../funding/domain/types.js";
 import {
   FUNDING_ROUTE_EXPERIENCE,
@@ -263,6 +267,28 @@ export const RELAY_ROUTE_SPECS: Readonly<Record<string, RelayRouteSpec>> = {
   },
 };
 
+export function resolveRelayRouteSpec(
+  route: FundingRuntimePolicy["routes"][number],
+): RelayRouteSpec {
+  const exact = RELAY_ROUTE_SPECS[route.routeId];
+  if (
+    exact &&
+    sameAsset(exact.source, route.sourceAsset) &&
+    sameAsset(exact.destination, route.destinationAsset)
+  ) {
+    return exact;
+  }
+  const matches = Object.values(RELAY_ROUTE_SPECS).filter(
+    (spec) =>
+      sameAsset(spec.source, route.sourceAsset) &&
+      sameAsset(spec.destination, route.destinationAsset),
+  );
+  if (matches.length !== 1 || !matches[0]) {
+    throw new Error("enabled Relay route does not map to one pinned route");
+  }
+  return matches[0];
+}
+
 // Exported as contract evidence for fixture and registry tests.
 export const RELAY_PINNED_ASSETS = {
   baseUsdc: BASE_USDC.toLowerCase(),
@@ -339,7 +365,7 @@ export function relayWalletLocationPatternId(asset: AssetRef): string | null {
  */
 export function isRelayPinnedStableAsset(asset: AssetRef): boolean {
   if (asset.decimals !== 6) return false;
-  const normalized = asset.assetId.toLowerCase();
+  const normalized = canonicalAssetId(asset);
   return (
     (asset.networkId === "evm:8453" &&
       normalized === RELAY_PINNED_ASSETS.baseUsdc) ||
@@ -350,6 +376,20 @@ export function isRelayPinnedStableAsset(asset: AssetRef): boolean {
     (asset.networkId === "solana:mainnet" &&
       asset.assetId === RELAY_PINNED_ASSETS.solanaUsdc)
   );
+}
+
+export function relayStableAssetSymbol(
+  asset: AssetRef,
+): "pUSD" | "USDC" | null {
+  if (!isRelayPinnedStableAsset(asset)) return null;
+  return asset.networkId === "evm:137" &&
+    sameAsset(asset, {
+      networkId: "evm:137",
+      assetId: RELAY_PINNED_ASSETS.polygonPusd,
+      decimals: 6,
+    })
+    ? "pUSD"
+    : "USDC";
 }
 
 const RELAY_PINNED_ASSET_IDS_BY_NETWORK: Readonly<

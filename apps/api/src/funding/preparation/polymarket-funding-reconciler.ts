@@ -27,14 +27,6 @@ type PolymarketFundingRuntimeObserver = (
   }>,
 ) => Promise<PolymarketFundingObservation | null>;
 
-async function observePolymarketFundingRuntimeLazy(
-  input: Parameters<PolymarketFundingRuntimeObserver>[0],
-): ReturnType<PolymarketFundingRuntimeObserver> {
-  const { observePolymarketFundingRuntime } =
-    await import("./runtime-service.js");
-  return observePolymarketFundingRuntime(input);
-}
-
 export type PolymarketFundingPostconditionTarget = Readonly<{
   operationId: string;
   planKind: "venue_preparation" | "direct_external_handoff" | "composite_route";
@@ -416,9 +408,10 @@ export class PolymarketFundingPostconditionDriver implements FundingPostconditio
         "Polymarket receipt reference integrity check failed",
       );
     }
-    const after = await (
-      this.dependencies.observe ?? observePolymarketFundingRuntimeLazy
-    )({
+    if (!this.dependencies.observe) {
+      throw new Error("Polymarket funding observer is unavailable");
+    }
+    const after = await this.dependencies.observe({
       userId: target.userId,
       signerAddress: target.signerAddress,
       depositWallet: target.plan.depositWallet,

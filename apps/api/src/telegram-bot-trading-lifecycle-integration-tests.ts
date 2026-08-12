@@ -9,6 +9,7 @@ import {
   validatorCompiler,
 } from "fastify-type-provider-zod";
 
+import "./integration-test-database-guard.js";
 import type { User } from "./auth.js";
 import { pool, type DbQuery } from "./db.js";
 import { createTelegramBotTradingRoutes } from "./routes/telegram-bot-trading.js";
@@ -56,10 +57,14 @@ try {
        wallet_address,
        wallet_type,
        is_primary,
-       is_verified
+       is_verified,
+       is_internal_wallet,
+       privy_wallet_id,
+       wallet_source,
+       privy_profile_updated_at
      )
-     values ($1, $2, 'ethereum', true, true)`,
-    [userId, walletAddress],
+     values ($1, $2, 'ethereum', true, true, true, $3, 'embedded', now())`,
+    [userId, walletAddress, walletId],
   );
   await client.query(
     `insert into telegram_bot_trading_preferences (

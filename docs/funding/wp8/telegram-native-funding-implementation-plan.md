@@ -140,8 +140,8 @@ exposes only a client action and does not broadcast it.
 2. Telegram never accepts a raw destination address, provider, calldata,
    transaction, quote, operation status, or `user_id` from a callback.
 3. Every displayed receive target comes from one current, verified Receive
-   Session. The legacy Telegram address resolver is not extended into a second
-   receive lifecycle.
+   Session. The legacy Telegram address resolver and callback QR/photo renderer
+   are absent; they cannot become a second receive lifecycle.
 4. Every delegated transaction must byte-match the immutable normalized action
    and action fingerprint committed by the funding planner.
 5. A Privy policy is an additional enforcement boundary, not a substitute for
@@ -292,6 +292,65 @@ Session:
   EVM;
 - `USDC on Solana — automatic` only when that offer predicate is true for Relay
   SVM, including its fee-payer and submission-recovery gates.
+- `SOL on Solana — review conversion` only as a future, independently gated
+  route; standalone funding opens `Convert to USDC`, while a Trade includes the
+  same bounded conversion in its one quoted Review/Confirm.
+
+Telegram funding integrates those routes through one registry keyed by the
+frozen `routeKey` and execution `profileId`. A capability-sized adapter owns
+target discovery, exact consent validation, current capability/authority,
+managed-controller validation, automatic-policy construction, chain-cursor
+preparation, and the exact receipt amount/quote plan plus execution binding.
+The session, projector, delivery outbox, and receipt router
+consume only the generic adapter result. Adding Base, Solana, or another venue
+therefore means adding and registering an adapter plus fixtures; it must not add
+network/provider branches to those durable state machines.
+
+The receipt-facing adapter contract returns exactly one provider-neutral
+disposition: `direct`, `automatic_execution`, `review_required`, or
+`hard_invalid`. For execution/review it also returns the exact quote plan; for
+`review_required` it returns a frozen action label and fresh-quote continuation
+descriptor. The generic router only persists and routes those facts. Native
+reserve economics, provider error classification, and venue predecessor
+serialization remain adapter hooks. Core does not import Relay, Solana, or
+venue policy code. This makes the future SOL route a
+registration/configuration task, not another receipt state machine.
+Provider/RPC-derived account and route facts are prepared before receipt or
+Telegram lifecycle locks. Confirm then reacquires the exact context/receipt,
+locks only durable DB facts through one supplied client, checks a fresh DB
+clock against every frozen deadline, and atomically consumes/links the quote.
+The locked callback must never re-enter the global pool or a provider client.
+Likewise, `review_required` is actionable evidence, not a label: continuation
+and quote plan are written together, otherwise the receipt becomes
+`recovery_required`.
+Until such an adapter is registered, the venue is absent from the Receive
+picker and every stale/forged legacy `deposit:<venue>` or
+`deposit_qr:<venue>` callback returns an address-free unavailable card. The
+internal deposit endpoint and legacy builder enforce the same rule, so a hidden
+button is not the security boundary. The legacy builder contains no wallet,
+RPC, address-resolution, or QR transport dependency.
+
+The product distinguishes stable routing from volatile conversion. A supported
+stablecoin may be converted automatically to the underlying stable accepted by
+the selected venue. A non-stable asset is never covered by that implicit
+stable-conversion consent. In a standalone Deposit/Account Value flow, the
+surface shows a separate `Convert to <venue stable>` action, a fresh
+amount/fee/slippage preview, and an explicit user confirmation before commit.
+Wallet/account surfaces should keep `Deposit funds` and `Convert to USDC` (or
+the venue-specific stable) as separate primary choices so a user never has to
+understand internal routes, policies, grants, or signers. In an already-started
+Trade flow, the fresh trade quote includes the volatile conversion, the Review
+surface explicitly says what will be converted and its bounds, and the existing
+trade `Confirm` authorizes the complete route; there is no second conversion
+prompt that could let the quote expire.
+
+Every standalone Convert continuation is receipt-specific. If multiple
+volatile receipts await review, the bot exposes one deterministic oldest
+receipt at a time rather than hiding every CTA or guessing a context-wide
+target. Telegram callback delivery is at-least-once: quote issuance persists
+the exact message and consent token under the callback idempotency key in the
+same lifecycle/receipt transaction. An exact replay returns that response;
+reuse for a different receipt/message is an idempotency conflict.
 
 Selecting a target persists immutable consent to the exact asset, network,
 destination, and internal variant IDs before revealing the address as
@@ -314,25 +373,35 @@ therefore shows the nominal order, current maximum spend, available pUSD, and
 the pUSD shortfall rounded up for display. Generic Add Funds remains
 amount-free.
 
-Future activated source assets use the same destination requirement. The
-selected route supplies an exact source amount for stable/prequoted routes or
-a clearly labelled current estimate plus expiry for a volatile asset. Asset
-selection is the user's consent to automatic conversion; the product does not
-add a second exchange-rate confirmation. Execution still remains bounded by
-the route's fee, slippage, minimum-output, cap, and recovery policy. An
+Future activated source assets use the same destination requirement. A stable
+route supplies an exact source amount and its asset selection is sufficient
+consent for the bounded automatic stable conversion. A volatile route supplies
+a clearly labelled current estimate plus expiry. Standalone funding requires
+the separate `Convert to <venue stable>` review/confirmation described above;
+an already-started Trade uses its one composite quoted Review/Confirm.
+Execution remains bounded by the route's fee, slippage, minimum-output, cap,
+and recovery policy. An
 underfunded transfer keeps waiting for the remainder, while excess destination
 value remains in Account Value. If a safe source quote is unavailable, the bot
 shows an explicit unavailable/Refresh state and never invents an amount.
 This paragraph applies to future economically variable routes. Slice C always
 uses the exact full observed USDC.e receipt, has no conversion economics, and
 does not wait for a requested remainder.
-The live picker/address/progress card owns this dynamic amount guidance. The QR
-image caption stays address-only because a deposit amount or conversion quote
-can change while the receive address remains valid.
+The live picker/address/progress card owns this dynamic amount guidance. QR is
+an edit of that same durable card, not a separately sent photo, so revocation
+has one known Telegram message to redact and no second address-bearing surface.
+Address-bearing payloads are valid only for `funding_edit`/`funding_qr` against
+that retained immutable message ID. Both application validation and a DB check
+forbid an address in `funding_send` or `funding_replacement`. If Telegram says
+the edit target is missing/non-editable, the address attempt stops fail-closed;
+it never falls back to a new untrackable message. Address-free terminal cards
+may still use a tracked replacement send.
 
-This contract does not activate native SOL. Solana USDC and any future SOL
-route remain hidden until their exact capability, fee-payer, policy, and
-recovery gates are independently enabled.
+This contract does not activate native SOL. Solana USDC and a future reviewed
+SOL-to-venue-stable route remain hidden until their exact capability, fee-payer,
+policy, quote, confirmation, and recovery gates are independently enabled. SOL
+must never inherit the automatic-stable consent merely because it reaches the
+same Relay destination.
 
 Consent classification is fixed by the selection transaction. A non-direct
 selection writes `automation_enabled=true` only when
@@ -370,6 +439,26 @@ transaction.
 One logical Telegram progress card reflects backend state. Editing the current
 message is best effort; a durable action outbox sends a replacement or terminal
 message when the original was deleted, became stale, or cannot be edited.
+Address and QR renders have exactly one egress: the durable delivery worker.
+Interactive callbacks may request a projection, but their API response contains
+only an address-free queued acknowledgement. The worker alone requests the
+explicit internal `delivery` view after rechecking the current wallet,
+authorization, frozen Funding Policy revision, and lifecycle locks.
+Immediately before an address/QR edit, the worker persists a pessimistic
+disclosure-attempt watermark while those locks are held. Confirmed Telegram
+address delivery is a second watermark. Confirmed address-free edit of the same
+immutable `address_disclosure_message_id` is a third, explicit redaction
+watermark; an edit of another card is not proof. A crash or
+ambiguous response therefore leaves a durable redaction obligation; a new send
+or replacement cannot clear it, relink re-arms only the known address-free
+edit, and retention cannot delete the context until that edit is confirmed.
+Cancel uses the lifecycle fence and the final pre-egress CAS requires an open,
+unexpired Receive Session. Migration preflight blocks historical attempted
+disclosures that have no known edit target.
+
+The QR is part of that same edit, never a separate photo. Telegram text QR uses
+Unicode 2×2 quadrant glyphs so two modules fit in each axis per character; the
+bounded width is covered by presentation tests.
 
 | Backend evidence                     | Telegram state                                         |
 | ------------------------------------ | ------------------------------------------------------ |
@@ -552,10 +641,14 @@ exact `polymarket_usdce_full_receipt_wrap`/`fullReceipt=true` policy snapshot
 mean the entire prospective receipt. For every other automatic policy, null
 means disabled. Direct pUSD selection may have an exact revision with
 automation disabled because it needs no route. The snapshot also freezes its
-presentation mode. Live capability may restrict or hide that presentation, but
-must never expand a direct-only revision into automatic USDC.e consent. Missing
-or malformed frozen presentation state fails closed; it is never reconstructed
-from live capability.
+presentation mode and exact user-visible route copy (labels, button,
+settlement, and instructions). Live capability may restrict or hide that
+presentation, but must never expand a direct-only revision into automatic
+USDC.e consent or relabel an existing consent. The one-time 0206 migration
+derives v2 presentation only from the mode already frozen in the same consent
+and upgrades its retained current/terminal/outbox projections atomically.
+Runtime parsing rejects v1 and missing/malformed presentation; it never
+reconstructs historical copy from live route constants.
 
 Creating the revision and compare-and-setting `active_consent_revision` is one
 transaction. Changing target, asset, variant scope, or cap appends another
@@ -758,10 +851,13 @@ signer and policy ID is insufficient.
    - exact committed source amount and bounded fee/slippage;
    - no arbitrary token approval, transfer, or contract call.
 3. `telegram_relay_svm_funding_v1`
-   - Solana USDC source initially;
+   - Solana USDC source initially, automatic only as a stable-to-stable route;
+   - future native SOL source is a separately advertised reviewed
+     `Convert to USDC` route with a fresh quote and explicit confirmation;
    - exact wallet, mint, amount, program/account allowlist, blockhash/expiry,
      and committed instruction bytes;
-   - no native SOL route in the automatic-stable slice;
+   - no native SOL route in the automatic-stable slice and no reuse of a USDC
+     consent for SOL;
    - no arbitrary message signing or transaction submission.
 
 The Relay EVM profile has an activation gate: prove that current Relay Base
@@ -842,6 +938,12 @@ callback contains only a compact opaque review/continuation ID. On Confirm,
 the API reloads and validates the current quote/operation/authorization; it
 never trusts callback economics.
 
+While the receipt's exact quote is still live, another Review callback reuses
+that financial quote and response even when Telegram moved the card to a new
+message. The new callback keeps its own delivery fingerprint/idempotency row;
+message identity never replaces a live financial quote or invalidates an
+already-visible confirmation token.
+
 That confirmation authorizes one exact newly committed action. It may approve
 economics outside the earlier session automation cap only when they remain
 inside every current runtime/user/grant/Privy absolute cap. It does not mutate
@@ -884,8 +986,8 @@ Endpoint responsibilities are single-purpose:
 | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `account`                | Build and render current Account Value; never mutate funding/trading state                                                                                                                              |
 | `funding/open`           | Open or restore one amount-free Receive Session for the exact destination binding and return its frozen verified targets; do not select one silently                                                    |
-| `funding/session`        | Read the current channel projection by opaque Telegram funding context ID                                                                                                                               |
-| `funding/select-target`  | Validate one exact target+asset from the frozen session, append/CAS its consent revision, and return its address/copy/QR projection                                                                     |
+| `funding/session`        | Read the current channel projection by opaque Telegram funding context ID; address-bearing rendering is reserved for the durable worker's internal `delivery` view                                      |
+| `funding/select-target`  | Validate one exact target+asset from the frozen session, append/CAS its consent revision, queue its durable address/copy/QR projection, and return no address to the interactive callback               |
 | `funding/cancel`         | Stop this context from accepting new UI actions; preserve late observation/reconciliation/recovery windows and immutable evidence                                                                       |
 | `funding/review`         | Produce fresh non-binding review economics for one observed non-direct receipt/action-required context                                                                                                  |
 | `funding/confirm-review` | Revalidate current authority/economics and commit exactly one reviewed action using its one-time planner consent/confirmation; do not mutate session automation consent and never trust callback fields |
@@ -1120,6 +1222,9 @@ Classify transitions before doing anything value-moving:
    adapter availability, or emergency pause); signer, grant, policy fingerprint,
    consent and action bytes remain identical. Slice C preserves and resumes the
    same unbroadcast `started` attempt; it never creates a replacement attempt.
+   Provider-bounded actions store `action_expires_at` on their step. The exact
+   Polymarket full-receipt wrap stores `NULL`; its 60-second quote gates commit,
+   not execution of the immutable amount/nonce/destination contract.
    Future profiles may define bounded retry rules. All eligibility checks rerun
    immediately before submission.
 2. **Hard invalidation:** link/grant revoked, signer/quorum/policy fingerprint
@@ -1505,6 +1610,12 @@ The local WP8 primitives are complete when:
   replay creating duplicate intents;
 - the latest terminal progress revision can be rearmed once after `/start` or
   relink;
+- the first retained terminal projection is absorbing across projector,
+  delivery, interactive Refresh/QR, standalone Convert, and Buy continuation;
+  malformed terminal evidence repairs only to address-free unavailable;
+- standalone conversion Review issue/confirm shares the Telegram lifecycle
+  and receipt transaction, so stale buttons cannot survive cancel, expiry,
+  controller replacement, or terminalization;
 - disabled/revoked policy fails closed while preserving funds and recovery;
 - every OFF combination resolves through the Section 12 precedence to one
   deterministic primary bot mode; observation/reconciliation never depend on

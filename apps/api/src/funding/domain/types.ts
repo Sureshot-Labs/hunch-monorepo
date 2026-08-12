@@ -585,6 +585,93 @@ export type FundingReceiveAutomationPolicy = Readonly<{
   maximumSlippageBps: number;
 }>;
 
+export type FundingReceiveReviewContinuation = Readonly<{
+  version: 1;
+  kind: "convert";
+  label: string;
+  confirmation: "fresh_quote";
+}>;
+
+export function parseFundingReceiveReviewContinuation(
+  value: unknown,
+): FundingReceiveReviewContinuation | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const candidate = value as Record<string, unknown>;
+  const label =
+    typeof candidate.label === "string" ? candidate.label.trim() : "";
+  return candidate.version === 1 &&
+    candidate.kind === "convert" &&
+    candidate.confirmation === "fresh_quote" &&
+    label.length >= 1 &&
+    label.length <= 64
+    ? { version: 1, kind: "convert", label, confirmation: "fresh_quote" }
+    : null;
+}
+
+export type FundingReceiveQuotePlan = Readonly<{
+  version: 1;
+  confirmedSourceAmount: Money | null;
+  requestedDestinationAmount: Money;
+  venuePreparation: boolean;
+}>;
+
+function parseFundingReceiveMoney(value: unknown): Money | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const candidate = value as Record<string, unknown>;
+  const asset = candidate.asset;
+  if (!asset || typeof asset !== "object" || Array.isArray(asset)) return null;
+  const assetCandidate = asset as Record<string, unknown>;
+  if (
+    typeof assetCandidate.networkId !== "string" ||
+    assetCandidate.networkId.trim().length === 0 ||
+    typeof assetCandidate.assetId !== "string" ||
+    assetCandidate.assetId.trim().length === 0 ||
+    !Number.isInteger(assetCandidate.decimals) ||
+    Number(assetCandidate.decimals) < 0 ||
+    Number(assetCandidate.decimals) > 255 ||
+    typeof candidate.raw !== "string" ||
+    !/^(0|[1-9][0-9]*)$/u.test(candidate.raw)
+  ) {
+    return null;
+  }
+  return {
+    asset: {
+      networkId: assetCandidate.networkId,
+      assetId: assetCandidate.assetId,
+      decimals: Number(assetCandidate.decimals),
+    },
+    raw: candidate.raw,
+  };
+}
+
+export function parseFundingReceiveQuotePlan(
+  value: unknown,
+): FundingReceiveQuotePlan | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const candidate = value as Record<string, unknown>;
+  const confirmed =
+    candidate.confirmedSourceAmount === null
+      ? null
+      : parseFundingReceiveMoney(candidate.confirmedSourceAmount);
+  const requested = parseFundingReceiveMoney(
+    candidate.requestedDestinationAmount,
+  );
+  if (
+    candidate.version !== 1 ||
+    (candidate.confirmedSourceAmount !== null && !confirmed) ||
+    !requested ||
+    typeof candidate.venuePreparation !== "boolean"
+  ) {
+    return null;
+  }
+  return {
+    version: 1,
+    confirmedSourceAmount: confirmed,
+    requestedDestinationAmount: requested,
+    venuePreparation: candidate.venuePreparation,
+  };
+}
+
 export type FundingReceiveSession = Readonly<{
   receiveSessionId: string;
   status: FundingReceiveSessionStatus;
@@ -623,6 +710,8 @@ export type FundingReceiveReceipt = Readonly<{
     | "recovery_required";
   handling: FundingReceiveHandling;
   childFundingOperationId: string | null;
+  reviewContinuation?: FundingReceiveReviewContinuation;
+  reviewQuotePlan?: FundingReceiveQuotePlan;
 }>;
 
 export type FundingReceiveHandling =

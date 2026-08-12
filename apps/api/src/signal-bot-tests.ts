@@ -4661,23 +4661,14 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         appFallbackButtons.some(
           (button) => button.text === "Deposit to Limitless",
         ),
-        true,
+        false,
       );
       assert.deepEqual(
         appFallbackButtons.map((button) => button.text),
-        [
-          "Buy YES · 98¢",
-          "Buy NO · 85¢",
-          "Deposit to Limitless",
-          "Trade in Hunch",
-          "⬅️ Back",
-        ],
+        ["Buy YES · 98¢", "Buy NO · 85¢", "Trade in Hunch", "⬅️ Back"],
       );
       assert.match(appFallbackMessage.text, /\*Trade amount in Hunch:\* \$1/);
-      assert.match(
-        appFallbackMessage.text,
-        /\*Limitless balance:\* \$0 available/,
-      );
+      assert.doesNotMatch(appFallbackMessage.text, /Deposit to Limitless/u);
       assert.equal(
         appFallbackButtons.some((button) => "url" in button),
         false,
@@ -4691,7 +4682,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         "event-1|market-1|N|1",
       );
       assert.equal(
-        decodeStartAppPayload(readWebAppStartParam(appFallbackButtons[3])),
+        decodeStartAppPayload(readWebAppStartParam(appFallbackButtons[2])),
         "event-1|market-1|",
       );
     },
@@ -6379,6 +6370,22 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
               };
             }
             if (
+              /select exists \(/i.test(sql) &&
+              /join user_wallets wallet/i.test(sql)
+            ) {
+              const walletChain = String(params?.[2] ?? "");
+              const walletAddress = String(params?.[4] ?? "");
+              const ready = input.verifiedWallets.some(
+                (wallet) =>
+                  wallet.type === walletChain &&
+                  (wallet.type === "ethereum"
+                    ? wallet.address.toLowerCase() ===
+                      walletAddress.toLowerCase()
+                    : wallet.address === walletAddress),
+              );
+              return { rowCount: 1, rows: [{ ready }] };
+            }
+            if (
               sql.includes("INSERT INTO telegram_bot_trading_authorizations")
             ) {
               stats.upserts += 1;
@@ -6818,6 +6825,36 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
 
       {
         const { db } = makeDb({
+          verifiedWallets: [
+            {
+              address: "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd",
+              type: "ethereum",
+            },
+          ],
+        });
+        const issues = await resolveTelegramBotTradingWalletSetupIssues(
+          db as never,
+          {
+            internalWallets: [
+              {
+                privyWalletId: "malformed-evm-wallet",
+                walletAddress: "0XABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCD",
+                walletChain: "ethereum",
+              },
+            ],
+            requestedVenues: ["polymarket"],
+            userId: "user-1",
+          },
+        );
+        assert.equal(
+          issues[0]?.code,
+          "internal_wallet_missing",
+          "malformed EVM-looking identities remain exact and cannot alias a valid wallet",
+        );
+      }
+
+      {
+        const { db } = makeDb({
           existingAuthorizations: [
             {
               enabled: true,
@@ -7026,6 +7063,19 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
             return { rowCount: 1, rows: [] };
           }
           if (sql.includes("UPDATE telegram_trade_intents")) {
+            return { rowCount: 0, rows: [] };
+          }
+          if (
+            sql.includes("SELECT user_id") &&
+            sql.includes("FROM user_telegram_accounts")
+          ) {
+            return { rowCount: 1, rows: [{ user_id: "user-1" }] };
+          }
+          if (
+            sql.includes("pg_advisory_xact_lock") ||
+            sql.includes("UPDATE telegram_funding_authorizations") ||
+            sql.includes("analytics_server_events")
+          ) {
             return { rowCount: 0, rows: [] };
           }
           assert.match(sql, /FROM user_telegram_accounts uta/);
@@ -7309,6 +7359,12 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
             /FROM telegram_bot_trading_preferences/i.test(sql)
           ) {
             return { rowCount: 1, rows: [{ desired_enabled: true }] };
+          }
+          if (
+            /select exists \(/i.test(sql) &&
+            /join user_wallets wallet/i.test(sql)
+          ) {
+            return { rowCount: 1, rows: [{ ready: true }] };
           }
           if (sql.includes("INSERT INTO telegram_bot_trading_authorizations")) {
             enabled = true;
@@ -9746,99 +9802,62 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
-    name: "funding QR photo delivery reports every normalized transport outcome",
+    name: "funding QR callback rejects legacy address delivery outside the durable outbox",
     run: async () => {
-      const cases: Array<{
-        expected: Record<string, unknown>;
-        result: TelegramSendResult;
-      }> = [
-        {
-          expected: { action: "session", outcome: "success" },
-          result: { messageId: 601, ok: true },
+      const redis = new FakeRedis();
+      let photoCalls = 0;
+      const telegram = Object.assign(new FakeTelegram(), {
+        sendPhoto: async () => {
+          photoCalls += 1;
+          return { messageId: 601, ok: true } satisfies TelegramSendResult;
         },
-        {
-          expected: { action: "session", outcome: "ambiguous" },
-          result: {
-            error: "ambiguous",
-            message: "raw photo timeout secret",
-            ok: false,
-          },
-        },
-        {
-          expected: {
-            action: "session",
-            outcome: "rate_limited",
-            retryAfterSec: 9,
-          },
-          result: {
-            error: "other",
-            message: "raw photo rate-limit secret",
-            ok: false,
-            retryAfterSec: 9,
+      });
+      const events: Array<Record<string, unknown>> = [];
+      const operationEvents: Array<Record<string, unknown>> = [];
+      const handled = await handleSignalBotMenuCallback({
+        callbackQuery: {
+          data: "hm:v1:fund:qr:123e4567-e89b-42d3-a456-426614174000",
+          from: { id: 999 },
+          id: "funding-qr-callback-secret",
+          message: {
+            chat: { id: 999, type: "private" },
+            message_id: 52,
           },
         },
-        {
-          expected: { action: "session", outcome: "blocked" },
-          result: {
-            error: "blocked_or_missing",
-            message: "raw photo blocked secret",
-            ok: false,
-          },
-        },
-        {
-          expected: { action: "session", outcome: "other" },
-          result: {
-            error: "other",
-            message: "raw photo rejection secret",
-            ok: false,
-          },
-        },
-      ];
-      for (const testCase of cases) {
-        const redis = new FakeRedis();
-        let photoCalls = 0;
-        const telegram = Object.assign(new FakeTelegram(), {
-          sendPhoto: async () => {
-            photoCalls += 1;
-            return testCase.result;
-          },
-        });
-        const events: Array<Record<string, unknown>> = [];
-        const handled = await handleSignalBotMenuCallback({
-          callbackQuery: {
-            data: "hm:v1:fund:qr:123e4567-e89b-42d3-a456-426614174000",
-            from: { id: 999 },
-            id: "funding-qr-callback-secret",
-            message: {
-              chat: { id: 999, type: "private" },
-              message_id: 52,
-            },
-          },
-          config: parseSignalBotConfig({
-            HUNCH_SIGNAL_BOT_TOKEN: "token",
+        config: parseSignalBotConfig({
+          HUNCH_SIGNAL_BOT_TOKEN: "token",
+        }),
+        db: {
+          query: async () => ({
+            rows: [{ link_id: "link-1", user_id: "user-1" }],
           }),
-          db: {
-            query: async () => ({
-              rows: [{ link_id: "link-1", user_id: "user-1" }],
-            }),
-          } as never,
-          loadFunding: async () => ({
-            qrText: "0x1111111111111111111111111111111111111111",
-            text: "Verified receive address",
-            venue: "polymarket",
-          }),
-          onFundingMenuDelivery: (event) => events.push(event),
-          redis,
-          sendTestSignal: async () => false,
-          telegram,
-        });
-        assert.equal(handled, true);
-        assert.equal(photoCalls, 1);
-        assert.deepEqual(events, [testCase.expected]);
-        const serialized = JSON.stringify(events);
-        assert.doesNotMatch(serialized, /callback-secret|photo .* secret/u);
-        assert.doesNotMatch(serialized, /999|52/u);
-      }
+        } as never,
+        loadFunding: async () => ({
+          qrText: "0x1111111111111111111111111111111111111111",
+          text: "Verified receive address",
+          venue: "polymarket",
+        }),
+        onFundingMenuDelivery: (event) => events.push(event),
+        onFundingMenuOperationError: (event) => operationEvents.push(event),
+        redis,
+        sendTestSignal: async () => false,
+        telegram,
+      });
+      assert.equal(handled, true);
+      assert.equal(photoCalls, 0);
+      assert.equal(telegram.edits.length, 1);
+      assert.match(telegram.edits[0]?.text ?? "", /Receive unavailable/u);
+      assert.doesNotMatch(
+        telegram.edits[0]?.text ?? "",
+        /0x1111111111111111111111111111111111111111/u,
+      );
+      assert.deepEqual(events, [{ action: "session", outcome: "success" }]);
+      assert.deepEqual(operationEvents, [
+        { action: "session", errorCode: "unexpected_error" },
+      ]);
+      const serialized = JSON.stringify({ events, operationEvents });
+      assert.doesNotMatch(serialized, /callback-secret/u);
+      assert.doesNotMatch(serialized, /999|52/u);
     },
   },
   {
@@ -16845,27 +16864,35 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         "user-1",
       );
       assert.equal(disabled, 1);
-      assert.equal(queries.length, 4);
-      assert.match(queries[0]?.sql ?? "", /telegram_bot_trading_preferences/);
-      assert.deepEqual(queries[2]?.params[1], [
+      assert.equal(queries.length, 5);
+      assert.match(queries[0]?.sql ?? "", /pg_advisory_xact_lock/);
+      assert.match(queries[1]?.sql ?? "", /telegram_bot_trading_preferences/);
+      assert.equal(
+        queries.some((query) =>
+          /telegram_funding_authorizations/i.test(query.sql),
+        ),
+        false,
+        "manual disable must preserve resumable funding authority",
+      );
+      assert.deepEqual(queries[3]?.params[1], [
         "draft",
         "previewed",
         "confirming",
       ]);
-      assert.match(queries[2]?.sql ?? "", /status = 'executing'/);
-      assert.match(queries[2]?.sql ?? "", /submit_started_at IS NULL/);
-      assert.doesNotMatch(queries[2]?.sql ?? "", /status = 'submitted'/);
-      assert.match(queries[2]?.sql ?? "", /authorization_disabled/);
-      assert.match(queries[2]?.sql ?? "", /FROM user_telegram_accounts/);
-      assert.match(queries[3]?.sql ?? "", /analytics_server_events/);
-      assert.deepEqual(queries[3]?.params.slice(0, 4), [
+      assert.match(queries[3]?.sql ?? "", /status = 'executing'/);
+      assert.match(queries[3]?.sql ?? "", /submit_started_at IS NULL/);
+      assert.doesNotMatch(queries[3]?.sql ?? "", /status = 'submitted'/);
+      assert.match(queries[3]?.sql ?? "", /authorization_disabled/);
+      assert.match(queries[3]?.sql ?? "", /FROM user_telegram_accounts/);
+      assert.match(queries[4]?.sql ?? "", /analytics_server_events/);
+      assert.deepEqual(queries[4]?.params.slice(0, 4), [
         "user-1",
         "hf_telegram_trading_lifecycle",
         "telegram_trading_settings",
         "disabled",
       ]);
-      assert.equal(queries[3]?.params[4], "polymarket");
-      assert.equal(JSON.parse(String(queries[3]?.params[6])).chain, "polygon");
+      assert.equal(queries[4]?.params[4], "polymarket");
+      assert.equal(JSON.parse(String(queries[4]?.params[6])).chain, "polygon");
     },
   },
 ];

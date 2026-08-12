@@ -7,7 +7,9 @@ import crypto from "node:crypto";
 
 import { ethers } from "ethers";
 
+import "../../../integration-test-database-guard.js";
 import { pool } from "../../../db.js";
+import { canonicalJsonHash } from "../../persistence/canonical.js";
 import {
   fetchFundingOperationStepForUser,
   finishFundingStepAttemptForUserInTransaction,
@@ -115,7 +117,7 @@ try {
     transferData: handoffTransferData,
   } as const;
   const actionExecutorId = "polymarket_deposit_wallet_relayer_v1";
-  const actionFingerprint = hash(JSON.stringify(action));
+  const actionFingerprint = canonicalJsonHash(action);
   const secondSourceLocation = {
     ...sourceLocation,
     locationId: opaque("location"),
@@ -135,7 +137,7 @@ try {
     valueRaw: "0",
     gasLimitRaw: "21000",
   } as const;
-  const secondActionFingerprint = hash(JSON.stringify(secondAction));
+  const secondActionFingerprint = canonicalJsonHash(secondAction);
   const plan: FundingCommitPlan = {
     operation: {
       purpose: "add_funds",
@@ -321,6 +323,39 @@ try {
     "operation_not_found",
   );
 
+  await expectFundingError(
+    startFundingStepAttemptForUserInTransaction(client, {
+      userId,
+      operationId: committed.operation.id,
+      stepId,
+      canonicalActionFingerprint: actionFingerprint,
+      executorId: actionExecutorId,
+      expectedPolicy: { revision: "replacement-policy", version: 1 },
+    }),
+    "quote_invalidated",
+  );
+  await expectFundingError(
+    startFundingStepAttemptForUserInTransaction(client, {
+      userId,
+      operationId: committed.operation.id,
+      stepId,
+      canonicalActionFingerprint: hash("different-action"),
+      executorId: actionExecutorId,
+    }),
+    "quote_mismatch",
+  );
+  await expectFundingError(
+    startFundingStepAttemptForUserInTransaction(client, {
+      userId,
+      operationId: committed.operation.id,
+      stepId,
+      canonicalActionFingerprint: actionFingerprint,
+      executorId: actionExecutorId,
+      now: new Date(Date.now() + 120_000),
+    }),
+    "quote_expired",
+  );
+
   const independentlyStarted =
     await startFundingStepAttemptForUserInTransaction(client, {
       userId,
@@ -328,6 +363,10 @@ try {
       stepId: independentStepId,
       canonicalActionFingerprint: secondActionFingerprint,
       executorId: "wallet_profile_evm_v1",
+      expectedPolicy: {
+        revision: "policy_revision_wp6_action",
+        version: 1,
+      },
     });
   assert.equal(independentlyStarted.attempt.attemptNumber, 1);
 

@@ -32,7 +32,6 @@ import {
   fundingReceiveRoutingNeedsReview,
   quoteFundingReceiveReceipt,
   quoteWithinReceiveAutomationPolicy,
-  receiveReceiptRoutingAmounts,
 } from "../../receive/receive-receipt-router.js";
 import type { FundingReceiveReceiptRoutingTarget } from "../../persistence/funding-receive-session-repository.js";
 import { fetchSolanaFinalizedSlot } from "../../../services/solana-rpc.js";
@@ -57,6 +56,12 @@ import {
   selectFundingReceiveSessionObservation,
 } from "../../receive/receive-session-observer.js";
 import { RELAY_PINNED_ASSETS } from "../../../funding-providers/relay/mappings.js";
+import { relayReceiveQuotePlan } from "../../../funding-providers/relay/receive-routing.js";
+import { classifyPolymarketFundingRoutingError } from "../../../services/telegram-funding-polymarket-evidence.js";
+import {
+  lockPolymarketFundingOperationPredecessor,
+  PolymarketFundingPredecessorUnresolvedError,
+} from "../../preparation/polymarket-funding-commit-guard.js";
 
 const ASSET = {
   networkId: "evm:137",
@@ -410,8 +415,41 @@ assert.equal(
     code: "invalid_operation_state",
     message: "another Polymarket Funding Router operation is unresolved",
   }),
-  "routing_predecessor_unresolved",
+  "routing_invalid_operation_state",
+  "generic routing must not classify a provider's message text",
 );
+assert.deepEqual(
+  classifyPolymarketFundingRoutingError(
+    new PolymarketFundingPredecessorUnresolvedError(),
+  ),
+  {
+    errorCode: "routing_predecessor_unresolved",
+    retryAfterMs: 60_000,
+    retryMode: "defer_without_budget",
+  },
+);
+{
+  const queries: string[] = [];
+  await assert.rejects(
+    lockPolymarketFundingOperationPredecessor(
+      {
+        query: async (sql: string) => {
+          queries.push(sql);
+          return sql.includes("select exists")
+            ? { rowCount: 1, rows: [{ blocked: true }] }
+            : { rowCount: 1, rows: [{}] };
+        },
+      } as never,
+      {
+        userId: "user-polymarket-predecessor",
+        venueBindingOptionId: "binding-polymarket-predecessor",
+      },
+    ),
+    PolymarketFundingPredecessorUnresolvedError,
+  );
+  assert.match(queries[0] ?? "", /pg_advisory_xact_lock/u);
+  assert.match(queries[1] ?? "", /polymarket_funding_router/u);
+}
 assert.equal(
   fundingReceiveRoutingNeedsRecovery("routing_preparation_unavailable", 500),
   false,
@@ -589,6 +627,12 @@ const routedReceiptTarget = {
     destinationAddress: "0x0000000000000000000000000000000000000003",
   },
 } as unknown as FundingReceiveReceiptRoutingTarget;
+const routedReceiptQuotePlan = relayReceiveQuotePlan({
+  receiptAsset: routedReceiptTarget.receipt.asset,
+  destinationAsset: routedReceiptTarget.destinationAsset,
+  rawAmount: routedReceiptTarget.receipt.rawAmount,
+});
+assert.ok(routedReceiptQuotePlan);
 let delegatedDiscoveryRequest: FundingDiscoveryRequest | undefined;
 await quoteFundingReceiveReceipt(
   {
@@ -604,7 +648,18 @@ await quoteFundingReceiveReceipt(
     },
   },
   routedReceiptTarget,
-  { serverExecutionProfileId: POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID },
+  {
+    serverExecutionProfileId: POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
+    quotePlan: {
+      version: 1,
+      confirmedSourceAmount: null,
+      requestedDestinationAmount: {
+        asset: routedReceiptTarget.destinationAsset,
+        raw: routedReceiptTarget.receipt.rawAmount,
+      },
+      venuePreparation: true,
+    },
+  },
 );
 assert.equal(
   delegatedDiscoveryRequest?.maxFeeUsd,
@@ -663,6 +718,7 @@ await quoteFundingReceiveReceipt(
     },
   },
   routedReceiptTarget,
+  { quotePlan: routedReceiptQuotePlan },
 );
 assert.deepEqual(routedQuoteRequest?.confirmedSourceAmount, {
   asset: routedReceiptAsset,
@@ -711,6 +767,7 @@ const expectedOutputReceiptResult = await quoteFundingReceiveReceipt(
     },
   },
   routedReceiptTarget,
+  { quotePlan: routedReceiptQuotePlan },
 );
 assert.equal(expectedOutputReceiptResult, null);
 assert.equal(
@@ -845,7 +902,7 @@ assert.deepEqual(targets[1]?.acceptedAssets[0]?.senderNativeFeeRequirement, {
 });
 
 assert.deepEqual(
-  receiveReceiptRoutingAmounts({
+  relayReceiveQuotePlan({
     receiptAsset: solanaUsdc.asset,
     destinationAsset: {
       networkId: "evm:137",
@@ -855,6 +912,7 @@ assert.deepEqual(
     rawAmount: "3000000",
   }),
   {
+    version: 1,
     confirmedSourceAmount: {
       asset: solanaUsdc.asset,
       raw: "3000000",
@@ -872,7 +930,7 @@ assert.deepEqual(
 );
 
 assert.deepEqual(
-  receiveReceiptRoutingAmounts({
+  relayReceiveQuotePlan({
     receiptAsset: solanaNative.asset,
     destinationAsset: {
       networkId: "evm:137",
@@ -882,6 +940,7 @@ assert.deepEqual(
     rawAmount: "12500000",
   }),
   {
+    version: 1,
     confirmedSourceAmount: {
       asset: solanaNative.asset,
       raw: "9500000",
@@ -899,7 +958,7 @@ assert.deepEqual(
 );
 
 assert.deepEqual(
-  receiveReceiptRoutingAmounts({
+  relayReceiveQuotePlan({
     receiptAsset: {
       networkId: "evm:137",
       assetId: RELAY_PINNED_ASSETS.polygonUsdce,
@@ -913,16 +972,24 @@ assert.deepEqual(
     rawAmount: "3000000",
   }),
   {
-    confirmedSourceAmount: null,
+    version: 1,
+    confirmedSourceAmount: {
+      asset: {
+        networkId: "evm:137",
+        assetId: RELAY_PINNED_ASSETS.polygonUsdce,
+        decimals: 6,
+      },
+      raw: "3000000",
+    },
     requestedDestinationAmount: {
       asset: {
         networkId: "evm:137",
         assetId: RELAY_PINNED_ASSETS.polygonPusd,
         decimals: 6,
       },
-      raw: "3000000",
+      raw: "1",
     },
-    venuePreparation: true,
+    venuePreparation: false,
   },
 );
 

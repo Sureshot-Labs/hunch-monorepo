@@ -3,19 +3,14 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 
-import { createPgPool } from "@hunch/infra";
-
 import {
   parseTelegramBotTradeAuthorityBinding,
   telegramBotTradeAuthorityFingerprint,
 } from "./services/telegram-bot-trade-input-context.js";
 import { loadTelegramFundingBuyReturnSourceIntentForUpdate } from "./services/telegram-funding.js";
+import { createIntegrationTestPool } from "./test-database-target.js";
 
-const databaseUrl = process.env.DATABASE_URL?.trim();
-if (!databaseUrl) throw new Error("DATABASE_URL is required");
-
-const pool = createPgPool({
-  connectionString: databaseUrl,
+const pool = await createIntegrationTestPool({
   options: "-c jit=off",
   max: 2,
 });

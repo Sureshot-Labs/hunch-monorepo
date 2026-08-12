@@ -2,6 +2,11 @@ import type { PrivyPolicyMetadata } from "../privy-service.js";
 import { isRecord } from "../lib/type-guards.js";
 import { isExactPolymarketDepositUsdceWrapRule } from "../funding/execution/delegated-funding-profiles.js";
 import {
+  canonicalAccountAddress,
+  isEvmAddress,
+  sameAccountAddress,
+} from "../funding/domain/asset-identity.js";
+import {
   POLYMARKET_AUTH_MESSAGE,
   POLYMARKET_AUTH_TYPES,
   POLYMARKET_ORDER_TYPES,
@@ -20,7 +25,6 @@ export type PolicyValidationResult = {
 };
 
 type TypedDataField = { name: string; type: string };
-const EVM_ADDRESS_RE = /^0x[a-f0-9]{40}$/;
 
 function stringValues(value: unknown): string[] {
   if (typeof value === "string") return [value];
@@ -35,11 +39,15 @@ function normalizeScalar(value: string): string {
   return value.trim().toLowerCase();
 }
 
+function canonicalEvmAddress(value: string): string | null {
+  return isEvmAddress(value) ? canonicalAccountAddress("evm:137", value) : null;
+}
+
 function readPolicyConditions(rule: Record<string, unknown>) {
   return Array.isArray(rule.conditions) ? rule.conditions.filter(isRecord) : [];
 }
 
-function conditionValues(input: {
+function matchingConditionValues(input: {
   conditions: Record<string, unknown>[];
   field: string;
   fieldSource: string;
@@ -53,8 +61,51 @@ function conditionValues(input: {
     ) {
       return [];
     }
-    return stringValues(condition.value).map(normalizeScalar);
+    return stringValues(condition.value);
   });
+}
+
+function conditionValues(input: {
+  conditions: Record<string, unknown>[];
+  field: string;
+  fieldSource: string;
+  operators: readonly string[];
+}): string[] {
+  return matchingConditionValues(input).map(normalizeScalar);
+}
+
+function addressConditionValues(input: {
+  conditions: Record<string, unknown>[];
+  field: string;
+  fieldSource: string;
+  operators: readonly string[];
+}): string[] {
+  return matchingConditionValues(input).flatMap((value) => {
+    const canonical = canonicalEvmAddress(value);
+    return canonical ? [canonical] : [];
+  });
+}
+
+function canonicalEvmAddressSet(values: readonly string[]): Set<string> {
+  return new Set(
+    values.flatMap((value) => {
+      const canonical = canonicalEvmAddress(value);
+      return canonical ? [canonical] : [];
+    }),
+  );
+}
+
+function hasExactAddressCondition(input: {
+  conditions: Record<string, unknown>[];
+  field: string;
+  fieldSource: string;
+  value: string;
+}): boolean {
+  const expected = canonicalEvmAddress(input.value);
+  return Boolean(
+    expected &&
+    addressConditionValues({ ...input, operators: ["eq"] }).includes(expected),
+  );
 }
 
 function hasExactCondition(input: {
@@ -156,7 +207,7 @@ function coveredExchangeAddresses(input: {
   conditions: Record<string, unknown>[];
   allowedExchangeAddresses: Set<string>;
 }): Set<string> | null {
-  const values = conditionValues({
+  const values = addressConditionValues({
     conditions: input.conditions,
     field: "verifying_contract",
     fieldSource: "ethereum_typed_data_domain",
@@ -187,36 +238,39 @@ function hasExactFundingAbi(condition: Record<string, unknown>): boolean {
     return false;
   }
   const inputs = item.inputs;
-  return ["expectedNonce", "totalAmount", "pUsdAmount"].every(
-    (name, index) => {
-      const parameter = inputs[index];
-      return (
-        isRecord(parameter) &&
-        parameter.name === name &&
-        parameter.type === "uint256"
-      );
-    },
-  );
+  return ["expectedNonce", "totalAmount", "pUsdAmount"].every((name, index) => {
+    const parameter = inputs[index];
+    return (
+      isRecord(parameter) &&
+      parameter.name === name &&
+      parameter.type === "uint256"
+    );
+  });
 }
 
 function readExactFundingRuleCap(input: {
   conditions: Record<string, unknown>[];
   routerAddress: string;
 }): bigint | null {
-  const transactionConditions = [
-    ["chain_id", String(POLYMARKET_POLYGON_CHAIN_ID)],
-    ["to", input.routerAddress],
-    ["value", "0x0"],
-  ] as const;
   if (
-    !transactionConditions.every(([field, value]) =>
-      hasExactCondition({
-        conditions: input.conditions,
-        field,
-        fieldSource: "ethereum_transaction",
-        value,
-      }),
-    )
+    !hasExactCondition({
+      conditions: input.conditions,
+      field: "chain_id",
+      fieldSource: "ethereum_transaction",
+      value: String(POLYMARKET_POLYGON_CHAIN_ID),
+    }) ||
+    !hasExactAddressCondition({
+      conditions: input.conditions,
+      field: "to",
+      fieldSource: "ethereum_transaction",
+      value: input.routerAddress,
+    }) ||
+    !hasExactCondition({
+      conditions: input.conditions,
+      field: "value",
+      fieldSource: "ethereum_transaction",
+      value: "0x0",
+    })
   ) {
     return null;
   }
@@ -266,12 +320,13 @@ export function validatePolymarketBotPolicy(input: {
   if (!Number.isFinite(input.maxBuyUsd) || input.maxBuyUsd <= 0) {
     issues.push("Policy max buy must be positive.");
   }
-  const normalizedFundingRouter = normalizeScalar(input.fundingRouterAddress);
-  if (!EVM_ADDRESS_RE.test(normalizedFundingRouter)) {
+  const normalizedFundingRouter =
+    canonicalEvmAddress(input.fundingRouterAddress) ?? "";
+  if (!normalizedFundingRouter) {
     issues.push("Funding router address must be configured.");
   }
-  const allowedExchangeAddresses = new Set(
-    input.exchangeAddresses.map(normalizeScalar).filter(Boolean),
+  const allowedExchangeAddresses = canonicalEvmAddressSet(
+    input.exchangeAddresses,
   );
   if (allowedExchangeAddresses.size !== 2) {
     issues.push("Both regular and neg-risk Polymarket exchanges are required.");
@@ -408,7 +463,9 @@ export function validatePolymarketBotPolicy(input: {
       issues.push(`Direct Order rule does not cover ${exchangeAddress}.`);
     }
     if (!depositCoverage.has(exchangeAddress)) {
-      issues.push(`Deposit-wallet Order rule does not cover ${exchangeAddress}.`);
+      issues.push(
+        `Deposit-wallet Order rule does not cover ${exchangeAddress}.`,
+      );
     }
   }
   return {
@@ -424,8 +481,8 @@ export function validatePolymarketBotSellPolicy(input: {
   policy: PrivyPolicyMetadata;
 }): PolicyValidationResult {
   const issues: string[] = [];
-  const allowedExchangeAddresses = new Set(
-    input.exchangeAddresses.map(normalizeScalar).filter(Boolean),
+  const allowedExchangeAddresses = canonicalEvmAddressSet(
+    input.exchangeAddresses,
   );
   const builderCode = normalizeScalar(input.builderCode);
   if (!/^0x[a-f0-9]{64}$/.test(builderCode)) {
@@ -621,6 +678,9 @@ export function validatePolymarketBotPolicyProfile(input: {
   };
   const expected = new Set(expectedKinds[input.profile]);
   const counts = new Map<PolymarketPolicyRuleKind, number>();
+  const nonAllowRules = input.policy.rules.filter(
+    (candidate) => candidate.action !== "ALLOW",
+  );
   for (const rule of input.policy.rules.filter(
     (candidate) => candidate.action === "ALLOW",
   )) {
@@ -631,6 +691,16 @@ export function validatePolymarketBotPolicyProfile(input: {
     counts.set(kind, (counts.get(kind) ?? 0) + 1);
   }
   const shapeIssues: string[] = [];
+  if (nonAllowRules.length > 0) {
+    shapeIssues.push(
+      `Policy profile ${input.profile} must not contain rules outside its exact ALLOW set.`,
+    );
+  }
+  if (input.policy.rules.length !== expected.size) {
+    shapeIssues.push(
+      `Policy profile ${input.profile} must contain exactly ${expected.size} rules.`,
+    );
+  }
   for (const kind of expected) {
     if (counts.get(kind) !== 1) {
       shapeIssues.push(
@@ -680,12 +750,7 @@ export function validatePolymarketBotPolicyProfile(input: {
               fundingRouterAddress: input.fundingRouterAddress,
               maxBuyUsd: input.maxBuyUsd,
               policy: selectRules(
-                new Set([
-                  "clob_auth",
-                  "funding",
-                  "direct_buy",
-                  "deposit_buy",
-                ]),
+                new Set(["clob_auth", "funding", "direct_buy", "deposit_buy"]),
               ),
             }),
             validatePolymarketBotSellPolicy({
@@ -713,16 +778,11 @@ export function validatePolymarketBotRedeemPolicy(input: {
   policy: PrivyPolicyMetadata;
 }): PolicyValidationResult {
   const issues: string[] = [];
-  const allowedAdapters = new Set(
-    input.adapterAddresses.map(normalizeScalar).filter(Boolean),
-  );
+  const allowedAdapters = canonicalEvmAddressSet(input.adapterAddresses);
   if (input.policy.chainType !== "ethereum") {
     issues.push("Policy chain type must be ethereum (EVM). ");
   }
-  if (
-    allowedAdapters.size !== 2 ||
-    [...allowedAdapters].some((adapter) => !EVM_ADDRESS_RE.test(adapter))
-  ) {
+  if (allowedAdapters.size !== 2) {
     issues.push("Canonical redemption adapters must be configured.");
   }
   const allowRules = input.policy.rules.filter(
@@ -755,7 +815,7 @@ export function validatePolymarketBotRedeemPolicy(input: {
       );
       continue;
     }
-    const targets = conditionValues({
+    const targets = addressConditionValues({
       conditions,
       field: "calls.target",
       fieldSource: "ethereum_typed_data_message",
@@ -831,8 +891,8 @@ export function validatePolymarketBotTypedData(input: {
   if (Number(domain.chainId) !== POLYMARKET_POLYGON_CHAIN_ID) {
     issues.push("Typed data must use Polygon chainId 137.");
   }
-  const signer = input.signer.trim().toLowerCase();
-  if (!EVM_ADDRESS_RE.test(signer)) {
+  const signer = canonicalEvmAddress(input.signer);
+  if (!signer) {
     issues.push("Typed data signer is invalid.");
   }
   if (primaryType === "ClobAuth") {
@@ -841,20 +901,24 @@ export function validatePolymarketBotTypedData(input: {
       String(domain.version) !== "1" ||
       !typedDataTypesMatch(types, POLYMARKET_AUTH_TYPES) ||
       message.message !== POLYMARKET_AUTH_MESSAGE ||
-      String(message.address).toLowerCase() !== signer
+      !isEvmAddress(String(message.address)) ||
+      !signer ||
+      !sameAccountAddress("evm:137", String(message.address), signer)
     ) {
       issues.push("Typed data is not canonical Polymarket ClobAuth.");
     }
     return { issues, valid: issues.length === 0 };
   }
 
-  const allowedExchanges = new Set(
-    input.exchangeAddresses.map((address) => address.trim().toLowerCase()),
+  const allowedExchanges = canonicalEvmAddressSet(input.exchangeAddresses);
+  const verifyingContract = canonicalEvmAddress(
+    String(domain.verifyingContract),
   );
   if (
     domain.name !== "Polymarket CTF Exchange" ||
     String(domain.version) !== "2" ||
-    !allowedExchanges.has(String(domain.verifyingContract).toLowerCase())
+    !verifyingContract ||
+    !allowedExchanges.has(verifyingContract)
   ) {
     issues.push("Typed data has an invalid Polymarket order domain.");
   }
@@ -885,11 +949,18 @@ export function validatePolymarketBotTypedData(input: {
   const expectedSignatureType = primaryType === "TypedDataSign" ? 3n : 2n;
   const orderSignerMatches =
     primaryType === "TypedDataSign"
-      ? EVM_ADDRESS_RE.test(String(message.verifyingContract).toLowerCase()) &&
-        String(order.signer).toLowerCase() ===
-          String(message.verifyingContract).toLowerCase()
-      : EVM_ADDRESS_RE.test(String(order.signer).toLowerCase()) &&
-        String(order.signer).toLowerCase() === signer;
+      ? isEvmAddress(String(message.verifyingContract)) &&
+        isEvmAddress(String(order.signer)) &&
+        sameAccountAddress(
+          "evm:137",
+          String(order.signer),
+          String(message.verifyingContract),
+        )
+      : Boolean(
+          signer &&
+          isEvmAddress(String(order.signer)) &&
+          sameAccountAddress("evm:137", String(order.signer), signer),
+        );
   const expectedAction = input.action ?? "BUY";
   const expectedSide = expectedAction === "BUY" ? 0n : 1n;
   if (

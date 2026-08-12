@@ -6,7 +6,6 @@ import {
   sleep,
 } from "@hunch/shared";
 import { Interface, ethers } from "ethers";
-import { fundingSidecarRuntimeConfig } from "../funding/runtime/sidecar-runtime-config.js";
 import { abis } from "../lib/contracts.js";
 import { isRecord } from "../lib/type-guards.js";
 import {
@@ -18,6 +17,10 @@ import {
   type RpcDiagnosticOutcome,
 } from "./rpc-diagnostics.js";
 import { rpcReadCoordinator } from "./rpc-read-coordinator.js";
+import {
+  computeWalletIntelBackoffMs,
+  walletIntelRetryConfig,
+} from "./wallet-intel-retry.js";
 
 type JsonRpcError = {
   code?: number;
@@ -70,35 +73,20 @@ const multicallIface = new Interface([
   "function aggregate3(tuple(address target, bool allowFailure, bytes callData)[] calls) view returns (tuple(bool success, bytes returnData)[] returnData)",
 ]);
 
-const CODE_CACHE_TTL_MS = fundingSidecarRuntimeConfig.evmCodeCacheTtlMs;
-const APPROVAL_CACHE_TTL_MS = fundingSidecarRuntimeConfig.evmApprovalCacheTtlMs;
-const BLOCK_NUMBER_CACHE_TTL_MS = 1_000;
-
-function computeBackoffMs(
-  attempt: number,
-  retryAfterMs: number | null,
-): number {
-  if (
-    retryAfterMs != null &&
-    Number.isFinite(retryAfterMs) &&
-    retryAfterMs >= 0
-  ) {
-    return Math.min(
-      retryAfterMs,
-      Math.max(
-        fundingSidecarRuntimeConfig.walletIntelRetryBaseBackoffMs,
-        fundingSidecarRuntimeConfig.walletIntelRetryMaxBackoffMs,
-      ),
-    );
-  }
-  const exponential =
-    fundingSidecarRuntimeConfig.walletIntelRetryBaseBackoffMs *
-    Math.max(1, 2 ** Math.max(0, attempt));
-  return Math.min(
-    exponential,
-    fundingSidecarRuntimeConfig.walletIntelRetryMaxBackoffMs,
-  );
+function nonNegativeIntegerEnv(key: string, fallback: number): number {
+  const value = Number(process.env[key]?.trim() ?? "");
+  return Number.isSafeInteger(value) && value >= 0 ? value : fallback;
 }
+
+const CODE_CACHE_TTL_MS = nonNegativeIntegerEnv(
+  "EVM_CODE_CACHE_TTL_MS",
+  10 * 60_000,
+);
+const APPROVAL_CACHE_TTL_MS = nonNegativeIntegerEnv(
+  "EVM_APPROVAL_CACHE_TTL_MS",
+  2_000,
+);
+const BLOCK_NUMBER_CACHE_TTL_MS = 1_000;
 
 async function executeEthRpcRequest<T>(inputs: {
   rpcUrl: string;
@@ -108,10 +96,7 @@ async function executeEthRpcRequest<T>(inputs: {
   source: string;
 }): Promise<T> {
   let lastError: unknown = null;
-  const maxAttempts = Math.max(
-    1,
-    fundingSidecarRuntimeConfig.walletIntelRetryMaxAttempts,
-  );
+  const maxAttempts = Math.max(1, walletIntelRetryConfig.maxAttempts);
 
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     const controller = new AbortController();
@@ -163,7 +148,7 @@ async function executeEthRpcRequest<T>(inputs: {
           attempt < maxAttempts - 1 && isRetryableHttpStatus(response.status);
         recordAttempt(response.status === 429 ? "http_429" : "http_error");
         if (retryable) {
-          await sleep(computeBackoffMs(attempt, retryAfterMs));
+          await sleep(computeWalletIntelBackoffMs(attempt, retryAfterMs));
           continue;
         }
         throw error;
@@ -188,7 +173,7 @@ async function executeEthRpcRequest<T>(inputs: {
         const retryable = attempt < maxAttempts - 1 && isRpcRateLimit(error);
         recordAttempt(isRpcRateLimit(error) ? "rpc_429" : "rpc_error");
         if (retryable) {
-          await sleep(computeBackoffMs(attempt, null));
+          await sleep(computeWalletIntelBackoffMs(attempt, null));
           continue;
         }
         throw error;
@@ -203,7 +188,7 @@ async function executeEthRpcRequest<T>(inputs: {
         attempt < maxAttempts - 1 &&
         (isAbortError(error) || isRpcRateLimit(error));
       if (retryable) {
-        await sleep(computeBackoffMs(attempt, null));
+        await sleep(computeWalletIntelBackoffMs(attempt, null));
         continue;
       }
       throw error;

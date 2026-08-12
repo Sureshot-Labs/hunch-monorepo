@@ -71,6 +71,10 @@ export function lookupHmac(value: string, key: string): string {
   return crypto.createHmac("sha256", key).update(value).digest("hex");
 }
 
+export function fundingSubjectLookupHmac(userId: string, key: string): string {
+  return lookupHmac(`hunch:funding:subject:v1:${userId}`, key);
+}
+
 export function canonicalJsonEqual(left: unknown, right: unknown): boolean {
   return canonicalJson(left) === canonicalJson(right);
 }

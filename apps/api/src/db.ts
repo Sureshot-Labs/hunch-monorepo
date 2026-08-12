@@ -2,6 +2,7 @@ import { createPgPool, type Pool } from "@hunch/infra";
 
 export type DbQuery = Pick<Pool, "query">;
 import { env } from "./env.js";
+import { registerRuntimeResourceCleanup } from "./runtime-resource-cleanup.js";
 
 export const pool: Pool = createPgPool({
   connectionString: env.dbUrl,
@@ -12,6 +13,7 @@ export const pool: Pool = createPgPool({
 });
 
 pool.on("error", (e: unknown) => console.error("[pg] error", e));
+registerRuntimeResourceCleanup("api-database", () => pool.end());
 
 const DEFAULT_STARTUP_WAIT_MS = 180_000;
 const DEFAULT_STARTUP_RETRY_MS = 1_000;

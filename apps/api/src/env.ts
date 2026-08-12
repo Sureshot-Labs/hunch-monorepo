@@ -1248,24 +1248,6 @@ export const env = {
     "WALLET_INTEL_SIGNAL_MIN_SCORE",
     0.6,
   ),
-  walletIntelRetryMaxAttempts: optionalIntInRange(
-    "WALLET_INTEL_RETRY_MAX_ATTEMPTS",
-    3,
-    1,
-    6,
-  ),
-  walletIntelRetryBaseBackoffMs: optionalIntInRange(
-    "WALLET_INTEL_RETRY_BASE_BACKOFF_MS",
-    250,
-    10,
-    60_000,
-  ),
-  walletIntelRetryMaxBackoffMs: optionalIntInRange(
-    "WALLET_INTEL_RETRY_MAX_BACKOFF_MS",
-    2_000,
-    10,
-    120_000,
-  ),
   walletIntelSignalWindowHoursDefault: optionalPositiveInt(
     "WALLET_INTEL_SIGNAL_WINDOW_HOURS_DEFAULT",
     24,
@@ -1363,14 +1345,6 @@ export const env = {
   limitlessAccountCacheTtlMs: optionalNonNegativeInt(
     "LIMITLESS_ACCOUNT_CACHE_TTL_MS",
     5_000,
-  ),
-  evmCodeCacheTtlMs: optionalNonNegativeInt(
-    "EVM_CODE_CACHE_TTL_MS",
-    10 * 60_000,
-  ),
-  evmApprovalCacheTtlMs: optionalNonNegativeInt(
-    "EVM_APPROVAL_CACHE_TTL_MS",
-    2_000,
   ),
   solanaRpcUrls,
   solanaRpcUrl: solanaRpcUrls[0],

@@ -173,6 +173,58 @@ grant cannot broaden a frozen direct-only consent into USDC.e automation.
 Missing or malformed frozen presentation state fails closed instead of being
 inferred from live capability.
 
+The Telegram integration selects one capability-sized route adapter by the
+frozen route key/profile ID. That adapter is the sole owner of target discovery,
+managed-controller validation, consent parsing, capability resolution,
+automatic-policy/cursor preparation, and the exact receipt quote plan/execution
+binding. The adapter also validates its provider-specific operation/consent
+evidence inside the generic receipt-link transaction and owns the exact
+destination-readiness proof. Projector, delivery, consent persistence, and
+the receipt router stay provider/network-neutral. This is the extension seam
+for Relay EVM, Relay SVM, and new venue routes; it is deliberately a small
+registry, not a second workflow engine.
+
+At receipt time the adapter returns one generic disposition:
+`direct`, `automatic_execution`, `review_required`, or `hard_invalid`.
+`review_required` carries a frozen, adapter-owned continuation descriptor and
+quote plan; the generic router persists both but does not know Telegram, SOL,
+Relay, or venue copy/economics. Provider-specific native reserves, predecessor
+serialization, and error classification are adapter hooks, not core branches.
+The common commit service dispatches the frozen source adapter's commit guard
+inside the same transaction for REST, Telegram review, and automatic receipt
+commits; receipt routing does not carry a second provider-only lock path.
+Provider/RPC account inspection always completes before that transaction. The
+prepared commit carries its frozen ownership evidence; the locked phase uses
+only the supplied DB client to revalidate and lock durable policy, controller,
+source, binding, receipt, and quote rows. After those checks it obtains a fresh
+database clock and rechecks quote, provider-segment, and reservation deadlines
+immediately before insert/consumption. No global-pool or provider call is
+allowed while a financial or Telegram lifecycle lock is held.
+A transition to `review_required` is valid only when continuation and quote plan
+are stored atomically. Retry exhaustion, a pre-broadcast child failure, or a
+legacy incomplete review that cannot reconstruct both fails closed to
+`recovery_required` rather than exposing a dead review state.
+A standalone surface exchanges that evidence for a fresh quote and an explicit
+confirmation. A Trade surface instead includes the same conversion inside its
+existing composite quote and single confirmation.
+
+Frozen presentation is durable evidence, including exact button, settlement,
+and instruction copy. Migration 0206 upgrades trusted legacy projections from
+their exact consent snapshot, after which runtime rejects v1. Address egress is
+separately constrained: an address/QR can only edit the known funding-card
+message ID; `funding_send` and `funding_replacement` are address-free, and a
+lost edit target never falls back to an untrackable address message.
+
+This profile is the stable-to-stable foundation, not authority to convert any
+asset silently. Future Relay adapters may auto-convert supported stablecoins to
+the stable accepted by the destination venue. A volatile source such as SOL
+must instead be explicitly represented in a fresh quote. Standalone funding
+uses a separately reviewed `Convert to <venue stable>` action; an already
+started Trade shows the conversion in its composite quote and its existing
+Trade Confirm authorizes the whole route without a second prompt. Both may
+reuse the same operation, attempt, recovery, and delivery machinery, but must
+not reuse this slice's stable automation consent.
+
 ## Capability and pause semantics
 
 The router, Telegram target rendering, and executor use one decision model:
@@ -197,8 +249,10 @@ and whichever transition commits first is authoritative.
 A soft pause leaves the one `started` attempt resumable. Restoring availability
 revalidates and resumes that same attempt; it does not create another attempt.
 A pause that lands after route commit but before the first worker claim still
-creates that single `started` attempt, which prevents the ordinary action TTL
-from cancelling the committed receipt work. A policy pause/unavailable snapshot
+creates that single `started` attempt. Generic provider actions persist their
+provider deadline on the operation step; this exact Router action persists a
+null action deadline, while the short quote expires only the pre-commit review.
+Therefore a pause/crash cannot cancel already committed receipt work. A policy pause/unavailable snapshot
 does not let a temporarily removed route or its revision mismatch override the
 soft pause: it may resume only when the exact prior policy returns. A different enabled Funding
 Policy revision hard-invalidates the stale operation even when the runtime
@@ -270,6 +324,15 @@ latest exact V2 consent present at or before the canonical event's immutable
 revision with that historical consent snapshot, freezes the consent ID and
 fingerprint in operation metadata, and every claim/recovery/broadcast-boundary
 query rebinds them to the append-only consent row.
+
+The first retained terminal projection is an absorbing context watermark.
+Controller restoration, a later receipt, policy publication, or a second
+terminal state cannot replace it; the user opens a fresh context instead.
+Runtime uses one strict canonical parser for projector, delivery, QR, Review,
+and Buy boundaries. Unknown fields, noncanonical unsigned amounts/timestamps,
+cross-context data, or inconsistent state/terminal/address combinations fail
+closed; the projector may only repair malformed retained evidence to an
+address-free `unavailable` terminal.
 The worker claims a step with `FOR UPDATE SKIP LOCKED`, commits a `started`
 attempt before Privy, crosses a durable pre-broadcast boundary, and uses the
 attempt UUID as both Privy `reference_id` and idempotency key. A submitted or
@@ -315,6 +378,19 @@ that gate requires the same frozen prospective consent plus its linked exact
 single-step Router operation in `completed`/`succeeded` state with matching
 source amount, pUSD destination amount, authorization, and receipt ID.
 
+A standalone volatile `Convert` callback participates in the same Telegram
+lifecycle transaction as its context. Review issuance and confirmation lock
+the user lifecycle, context, Receive Session, and receipt; revalidate the
+current managed controller, cancellation, expiry, and null retained terminal;
+then quote or atomically commit/link/refresh. An old button therefore cannot
+move value after cancel, expiry, controller replacement, or terminalization.
+The button contains the immutable receipt ID, never only the context ID. When
+several receipts need review, progress selects the oldest `(observed_at, id)`
+and exposes one receipt-bound continuation at a time. Issuance records the
+exact quote response and consent token under the Telegram callback idempotency
+key in the same transaction; redelivery replays that exact response, while key
+reuse for another receipt or message fails closed.
+
 The finance-worker phase order is observation, receipt routing, delegated
 execution, ordinary reconciliation, then Telegram progress projection. This
 lets a single cycle expose the newest safe state without allowing presentation
@@ -329,24 +405,68 @@ settlement supplies the next normal version change. Independently, every
 nonterminal consent receives a bounded capability recheck at most once per 60
 seconds, so Funding Policy, profile, link, or preference changes can update a
 stable waiting/converting card without a Receive Session version bump.
+Address and QR output has one egress: the durable Telegram delivery worker.
+Interactive callbacks receive only an address-free queued acknowledgement;
+the worker's internal `delivery` view materializes the frozen presentation only
+after current wallet, authorization, Funding Policy revision, and lifecycle
+locks pass. QR edits the same known card instead of creating a second photo
+message, so invalidation has one exact message to redact. Its text encoding
+packs each 2×2 module group into one Unicode quadrant glyph, keeping the
+scanner input narrow enough for Telegram mobile without weakening QR error
+correction.
+Before the external Telegram edit, the worker durably advances a separate
+`address_disclosure_attempt_revision`. A successful response advances
+`address_delivered_revision`; process loss or an ambiguous response advances
+only the first watermark. A third, independent
+`address_redacted_revision` advances only after a confirmed address-free edit
+of the immutable `address_disclosure_message_id`. A send, replacement, or edit
+of another message may advance ordinary delivery
+state but can never prove redaction. Projector selection, relink rearm, safe
+redaction, immutable edit target, and retention compare the attempted and
+redacted watermarks. Cancel takes the same lifecycle fence as address egress,
+and the final attempt CAS also requires an open, unexpired Receive Session.
+Legacy explicit deposit callbacks and builders are address-free and fail
+closed. Limitless/Base, Base Relay, and Solana buttons remain hidden until a
+registered durable route adapter owns consent, delivery, redaction, and receipt
+handling end to end.
 The worker schema gate requires `telegram_funding_authorizations` as the atomic
 migration-0204 marker before any of these phases run.
 
 The common Funding Router commit boundary serializes unresolved operations per
-user and venue binding. Future Relay EVM profiles reuse the same Hunch signer
+user and venue binding through that provider-owned commit guard. Future Relay
+EVM profiles reuse the same Hunch signer
 and combined EVM policy by adding separately validated strict rules. Solana may
 reuse the same authorization quorum but needs its own combined Solana policy
 because Privy policies are chain-family specific. Every profile still defines
 its own driver, value/recipient constraints, and activation flag.
 
+Disposable integration databases use the API test runner's explicit target
+contract; shell `DATABASE_URL=...` prefixes are not trusted because API dotenv
+loading is intentionally process-wide:
+
+```bash
+pnpm -F api run test:integration -- <filter> \
+  --database-url postgresql://.../<temporary_database> \
+  --expect-database <temporary_database>
+```
+
+The runner loads the normal secret bundle once, pins the explicit URL, verifies
+`current_database()` before importing a test, and then exposes the same
+`DATABASE_URL` contract used by production code. There is no second database
+environment contract. Omitting either explicit target argument is a hard error
+for every integration/content entrypoint, before fixture modules can run DML.
+
 ## Activation order
 
-1. Apply migration `0204` and run the funding migration preflight.
+1. Apply migrations `0204` through `0206` and run the funding migration
+   preflight.
 2. Deploy code with `HUNCH_FUNDING_PM_WRAP_EXECUTE=false`.
 3. Verify a dark worker cycle has zero delegated claims.
 4. Add and verify the exact wrap rule in the existing combined EVM policy.
 5. Let the existing managed setup replace a canary wallet's legacy BUY/SELL
-   binding with the combined policy, then issue one funding grant.
+   binding with the combined policy. Opening funding then verifies that same
+   managed wallet and Privy profile and automatically provisions the app-side
+   route authorization; no user-visible or routine operator grant exists.
 6. Preview and publish Funding Policy V2 with the full intended asset array,
    including `polygon:usdce`.
 7. Enable the profile for the canary and perform a separately approved tiny

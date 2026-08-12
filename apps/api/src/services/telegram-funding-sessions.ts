@@ -6,13 +6,11 @@ import type {
   FundingReceiveAutomationPolicy,
   JsonValue,
 } from "../funding/domain/types.js";
-import { resolveTelegramPolymarketWrapCapability } from "../funding/execution/delegated-funding-capability-resolver.js";
 import { lockTelegramFundingLinkLifecycle } from "../funding/execution/telegram-funding-link-lifecycle-lock.js";
-import {
-  parseTelegramFundingAutomationPolicyV2,
-  telegramFundingAutomationPolicyMatchesAuthorization,
-} from "../funding/execution/telegram-funding-automation-policy.js";
+import { resolveTelegramFundingManagedWalletIdentity } from "../funding/execution/telegram-funding-managed-wallet.js";
+import { hashOpaqueToken } from "../funding/persistence/canonical.js";
 import type { DirectIngressObservationVariant } from "../funding/reconciliation/direct-ingress-observer.js";
+import { resolveTelegramFundingAutomaticCapability } from "./telegram-funding-route.js";
 
 type JsonRecord = Readonly<Record<string, JsonValue>>;
 type ReceiveTargets = NonNullable<ExternalIngressInstruction["receiveTargets"]>;
@@ -22,6 +20,162 @@ export class TelegramFundingPersistenceError extends Error {
     super(code);
     this.name = "TelegramFundingPersistenceError";
   }
+}
+
+export type TelegramFundingReviewTarget = Readonly<{
+  contextId: string;
+  receiptId: string;
+  receiveSessionId: string;
+  quoteId: string | null;
+}>;
+
+export async function lockActiveTelegramFundingReviewTarget(
+  client: PoolClient,
+  input: Readonly<{
+    receiptId: string;
+    userId: string;
+    telegramAccountId: string;
+    telegramUserId: string;
+    chatId: string;
+    now: Date;
+  }>,
+): Promise<TelegramFundingReviewTarget | null> {
+  const { rows } = await client.query<{
+    context_id: string;
+    quote_id: string | null;
+    receipt_id: string;
+    receive_session_id: string;
+  }>(
+    `
+      select
+        context.id as context_id,
+        receipt.review_quote_id as quote_id,
+        receipt.id as receipt_id,
+        receipt.receive_session_id
+      from telegram_funding_sessions context
+      join funding_receive_sessions receive
+        on receive.id = context.receive_session_id
+       and receive.user_id = context.user_id
+       and receive.owner_channel = 'telegram'
+      join funding_receive_receipts receipt
+        on receipt.receive_session_id = receive.id
+       and receipt.user_id = context.user_id
+      join user_telegram_accounts account
+        on account.id = $3::uuid
+       and account.user_id = context.user_id
+       and account.telegram_user_id = context.telegram_user_id
+      where receipt.id = $1::uuid
+        and context.user_id = $2::uuid
+        and context.telegram_user_id = $4
+        and context.chat_id = $5
+        and context.cancelled_at is null
+        and context.expires_at > $6
+        and context.latest_terminal_projection is null
+        and receive.status in ('open', 'processing', 'review_required')
+        and receive.expires_at > $6
+        and receipt.status = 'review_required'
+        and receipt.handling in ('review_required', 'automatic_conversion')
+        and receipt.child_funding_operation_id is null
+        and receipt.evidence ? 'reviewContinuation'
+      for update of context, receive, receipt
+      limit 1
+    `,
+    [
+      input.receiptId,
+      input.userId,
+      input.telegramAccountId,
+      input.telegramUserId,
+      input.chatId,
+      input.now,
+    ],
+  );
+  const row = rows[0] ?? null;
+  return row
+    ? {
+        contextId: row.context_id,
+        receiptId: row.receipt_id,
+        receiveSessionId: row.receive_session_id,
+        quoteId: row.quote_id,
+      }
+    : null;
+}
+
+export async function lockActiveTelegramFundingReviewByConsentToken(
+  client: PoolClient,
+  input: Readonly<{
+    userId: string;
+    telegramAccountId: string;
+    telegramUserId: string;
+    chatId: string;
+    consentToken: string;
+    now: Date;
+  }>,
+): Promise<TelegramFundingReviewTarget | null> {
+  const { rows } = await client.query<{
+    context_id: string;
+    quote_id: string;
+    receipt_id: string;
+    receive_session_id: string;
+  }>(
+    `
+      select
+        context.id as context_id,
+        quote.id as quote_id,
+        receipt.id as receipt_id,
+        receipt.receive_session_id
+      from funding_quotes quote
+      join funding_receive_receipts receipt
+        on receipt.review_quote_id = quote.id
+       and receipt.user_id = quote.user_id
+      join funding_receive_sessions receive
+        on receive.id = receipt.receive_session_id
+       and receive.user_id = receipt.user_id
+       and receive.owner_channel = 'telegram'
+      join telegram_funding_sessions context
+        on context.receive_session_id = receive.id
+       and context.user_id = receive.user_id
+      join user_telegram_accounts account
+        on account.id = $2::uuid
+       and account.user_id = context.user_id
+       and account.telegram_user_id = context.telegram_user_id
+      where quote.user_id = $1::uuid
+        and quote.consent_token_hash = $5
+        and context.telegram_user_id = $3
+        and context.chat_id = $4
+        and context.cancelled_at is null
+        and context.expires_at > $6
+        and context.latest_terminal_projection is null
+        and receive.status in ('open', 'processing', 'review_required')
+        and receive.expires_at > $6
+        and receipt.status in ('review_required', 'routing')
+        and receipt.handling in ('review_required', 'automatic_conversion')
+        and (
+          (receipt.status = 'review_required' and receipt.child_funding_operation_id is null)
+          or (receipt.status = 'routing' and receipt.child_funding_operation_id is not null)
+        )
+        and receipt.evidence ? 'reviewContinuation'
+      order by context.id, receipt.id
+      for update of context, receive, receipt, quote
+      limit 2
+    `,
+    [
+      input.userId,
+      input.telegramAccountId,
+      input.telegramUserId,
+      input.chatId,
+      hashOpaqueToken(input.consentToken),
+      input.now,
+    ],
+  );
+  const row = rows.length === 1 ? rows[0] : null;
+  return row
+    ? {
+        contextId: row.context_id,
+        receiptId: row.receipt_id,
+        receiveSessionId: row.receive_session_id,
+        quoteId: row.quote_id,
+      }
+    : null;
 }
 
 type TelegramFundingSessionRow = Readonly<{
@@ -48,6 +202,10 @@ type TelegramFundingSessionRow = Readonly<{
   latest_terminal_revision: number | null;
   latest_terminal_projection: JsonRecord | null;
   last_delivered_revision: number;
+  address_disclosure_attempt_revision: number;
+  address_disclosure_message_id: string | number | null;
+  address_delivered_revision: number;
+  address_redacted_revision: number;
   created_at: Date;
   updated_at: Date;
 }>;
@@ -68,7 +226,13 @@ type TelegramFundingConsentRow = Readonly<{
   consented_at: Date;
 }>;
 
-type TelegramFundingMutationAction = "cancel" | "open" | "select_target";
+type TelegramFundingMutationAction =
+  | "cancel"
+  | "open"
+  | "resume_buy"
+  | "review_conversion"
+  | "select_target"
+  | "set_buy_return";
 
 type TelegramFundingMutationRow = Readonly<{
   funding_context_id: string;
@@ -77,6 +241,8 @@ type TelegramFundingMutationRow = Readonly<{
   request_fingerprint: string;
   response_payload: JsonRecord;
   consent_revision: number | null;
+  review_receipt_id: string | null;
+  review_quote_id: string | null;
 }>;
 
 export type TelegramFundingSessionContext = Readonly<{
@@ -104,6 +270,10 @@ export type TelegramFundingSessionContext = Readonly<{
   latestTerminalRevision: number | null;
   latestTerminalProjection: JsonRecord | null;
   lastDeliveredRevision: number;
+  addressDisclosureAttemptRevision: number;
+  addressDisclosureMessageId: number | null;
+  addressDeliveredRevision: number;
+  addressRedactedRevision: number;
   updatedAt: string;
 }>;
 
@@ -145,6 +315,10 @@ const sessionColumns = `
   latest_terminal_revision,
   latest_terminal_projection,
   last_delivered_revision,
+  address_disclosure_attempt_revision,
+  address_disclosure_message_id,
+  address_delivered_revision,
+  address_redacted_revision,
   created_at,
   updated_at
 `;
@@ -161,6 +335,10 @@ function publicSession(
 ): TelegramFundingSessionContext {
   const messageId =
     row.telegram_message_id == null ? null : Number(row.telegram_message_id);
+  const disclosureMessageId =
+    row.address_disclosure_message_id == null
+      ? null
+      : Number(row.address_disclosure_message_id);
   return {
     id: row.id,
     userId: row.user_id,
@@ -187,6 +365,13 @@ function publicSession(
     latestTerminalRevision: row.latest_terminal_revision,
     latestTerminalProjection: row.latest_terminal_projection,
     lastDeliveredRevision: row.last_delivered_revision,
+    addressDisclosureAttemptRevision: row.address_disclosure_attempt_revision,
+    addressDisclosureMessageId:
+      disclosureMessageId != null && Number.isSafeInteger(disclosureMessageId)
+        ? disclosureMessageId
+        : null,
+    addressDeliveredRevision: row.address_delivered_revision,
+    addressRedactedRevision: row.address_redacted_revision,
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
   };
@@ -243,7 +428,9 @@ async function loadMutationByKey(
         idempotency_key,
         request_fingerprint,
         response_payload,
-        consent_revision
+        consent_revision,
+        review_receipt_id,
+        review_quote_id
       from telegram_funding_mutations
       where idempotency_key = $1
       limit 1
@@ -251,6 +438,159 @@ async function loadMutationByKey(
     [idempotencyKey],
   );
   return rows[0] ?? null;
+}
+
+function assertSameReviewMutation(
+  row: TelegramFundingMutationRow,
+  input: Readonly<{
+    contextId: string;
+    quoteId?: string;
+    receiptId: string;
+    requestFingerprint: string;
+  }>,
+): void {
+  if (
+    row.action !== "review_conversion" ||
+    row.funding_context_id !== input.contextId ||
+    row.request_fingerprint !== input.requestFingerprint ||
+    row.consent_revision !== null ||
+    row.review_receipt_id !== input.receiptId ||
+    (input.quoteId != null && row.review_quote_id !== input.quoteId) ||
+    row.review_quote_id == null ||
+    row.response_payload.fundingContextId !== input.contextId ||
+    typeof row.response_payload.text !== "string" ||
+    row.response_payload.parse_mode !== "MarkdownV2"
+  ) {
+    throw new TelegramFundingPersistenceError(
+      "telegram_funding_idempotency_conflict",
+    );
+  }
+}
+
+export async function fetchTelegramFundingReviewMutationReplay(
+  client: PoolClient,
+  input: Readonly<{
+    idempotencyKey: string;
+    receiptId: string;
+    requestFingerprint: string;
+    telegramAccountId: string;
+    telegramUserId: string;
+    chatId: string;
+    userId: string;
+  }>,
+): Promise<JsonRecord | null> {
+  const row = await loadMutationByKey(client, input.idempotencyKey);
+  if (!row) return null;
+  assertSameReviewMutation(row, {
+    contextId: row.funding_context_id,
+    receiptId: input.receiptId,
+    requestFingerprint: input.requestFingerprint,
+  });
+  const context = await fetchTelegramFundingSessionContext(client, {
+    contextId: row.funding_context_id,
+    userId: input.userId,
+    telegramUserId: input.telegramUserId,
+    chatId: input.chatId,
+  });
+  if (!context || context.telegramAccountId !== input.telegramAccountId) {
+    throw new TelegramFundingPersistenceError(
+      "telegram_funding_idempotency_conflict",
+    );
+  }
+  return row.response_payload;
+}
+
+export async function fetchActiveTelegramFundingReviewResponse(
+  client: PoolClient,
+  input: Readonly<{
+    contextId: string;
+    quoteId: string;
+    receiptId: string;
+    userId: string;
+    now: Date;
+  }>,
+): Promise<JsonRecord | null> {
+  const { rows } = await client.query<TelegramFundingMutationRow>(
+    `
+      select
+        mutation.funding_context_id,
+        mutation.action,
+        mutation.idempotency_key,
+        mutation.request_fingerprint,
+        mutation.response_payload,
+        mutation.consent_revision,
+        mutation.review_receipt_id,
+        mutation.review_quote_id
+      from telegram_funding_mutations mutation
+      join funding_quotes quote
+        on quote.id = mutation.review_quote_id
+       and quote.user_id = $4::uuid
+      where mutation.funding_context_id = $1::uuid
+        and mutation.action = 'review_conversion'
+        and mutation.review_receipt_id = $2::uuid
+        and mutation.review_quote_id = $3::uuid
+        and quote.expires_at > $5
+        and quote.consumed_at is null
+        and quote.invalidated_at is null
+      order by mutation.created_at asc, mutation.id asc
+      limit 1
+    `,
+    [input.contextId, input.receiptId, input.quoteId, input.userId, input.now],
+  );
+  const row = rows[0];
+  if (!row) return null;
+  assertSameReviewMutation(row, {
+    ...input,
+    requestFingerprint: row.request_fingerprint,
+  });
+  return row.response_payload;
+}
+
+export async function recordTelegramFundingReviewMutation(
+  client: PoolClient,
+  input: Readonly<{
+    contextId: string;
+    idempotencyKey: string;
+    quoteId: string;
+    receiptId: string;
+    requestFingerprint: string;
+    responsePayload: JsonRecord;
+    now: Date;
+  }>,
+): Promise<JsonRecord> {
+  await client.query(
+    `
+      insert into telegram_funding_mutations (
+        funding_context_id,
+        action,
+        idempotency_key,
+        request_fingerprint,
+        response_payload,
+        consent_revision,
+        review_receipt_id,
+        review_quote_id,
+        created_at
+      ) values ($1, 'review_conversion', $2, $3, $4::jsonb, null, $5, $6, $7)
+      on conflict (idempotency_key) do nothing
+    `,
+    [
+      input.contextId,
+      input.idempotencyKey,
+      input.requestFingerprint,
+      JSON.stringify(input.responsePayload),
+      input.receiptId,
+      input.quoteId,
+      input.now,
+    ],
+  );
+  const row = await loadMutationByKey(client, input.idempotencyKey);
+  if (!row) {
+    throw new TelegramFundingPersistenceError(
+      "telegram_funding_session_create_failed",
+    );
+  }
+  assertSameReviewMutation(row, input);
+  return row.response_payload;
 }
 
 function assertSameOpenMutation(
@@ -431,7 +771,11 @@ export async function createOrReuseTelegramFundingSessionInTransaction(
       `
         update telegram_funding_sessions
         set telegram_account_id = $2,
-            telegram_message_id = coalesce($3, telegram_message_id)
+            telegram_message_id = case
+              when address_disclosure_attempt_revision = 0
+                then coalesce($3, telegram_message_id)
+              else telegram_message_id
+            end
         where id = $1
         returning ${sessionColumns}
       `,
@@ -562,12 +906,28 @@ export async function reuseActiveTelegramFundingSession(
     chatId: string;
     telegramMessageId: number | null;
     venueId: string;
+    controllerWalletId?: string;
+    venueBindingOptionId?: string;
     idempotencyKey: string;
     requestFingerprint: string;
     now: Date;
   }>,
 ): Promise<TelegramFundingSessionContext | null> {
   return tx(pool, async (client) => {
+    await lockTelegramFundingLinkLifecycle(client, input.userId);
+    if (input.controllerWalletId) {
+      const currentManagedWallet =
+        await resolveTelegramFundingManagedWalletIdentity(client, {
+          userId: input.userId,
+          telegramAccountId: input.telegramAccountId,
+          telegramUserId: input.telegramUserId,
+        });
+      if (
+        currentManagedWallet?.controllerWalletId !== input.controllerWalletId
+      ) {
+        return null;
+      }
+    }
     const { rows } = await client.query<TelegramFundingSessionRow>(
       `
         select ${qualifiedSessionColumns("context")}
@@ -586,6 +946,12 @@ export async function reuseActiveTelegramFundingSession(
           and context.expires_at > $4
           and receive.owner_channel = 'telegram'
           and receive.venue_id = $5
+          and (
+            $6::text is null
+            or receive.destination_target_snapshot #>>
+                 '{location,details,controllerWalletId}' = $6
+          )
+          and ($7::text is null or receive.venue_binding_option_id = $7)
           and receive.status in ('open', 'processing', 'review_required')
           and receive.expires_at > $4
         order by context.created_at desc, context.id desc
@@ -598,6 +964,8 @@ export async function reuseActiveTelegramFundingSession(
         input.chatId,
         input.now,
         input.venueId,
+        input.controllerWalletId ?? null,
+        input.venueBindingOptionId ?? null,
       ],
     );
     if (rows.length > 1) {
@@ -611,7 +979,11 @@ export async function reuseActiveTelegramFundingSession(
       `
         update telegram_funding_sessions
         set telegram_account_id = $2,
-            telegram_message_id = coalesce($3, telegram_message_id)
+            telegram_message_id = case
+              when address_disclosure_attempt_revision = 0
+                then coalesce($3, telegram_message_id)
+              else telegram_message_id
+            end
         where id = $1
         returning ${sessionColumns}
       `,
@@ -691,6 +1063,7 @@ export async function appendTelegramFundingConsent(
     telegramUserId: string;
     chatId: string;
     telegramMessageId: number | null;
+    controllerWalletId: string;
     receiveTargetId: string;
     asset: AssetRef;
     variantIds: readonly string[];
@@ -795,6 +1168,7 @@ export async function appendTelegramFundingConsent(
       );
     }
     const canonical = await client.query<{
+      controller_wallet_id: string | null;
       destination_option_id: string;
       id: string;
       venue_binding_option_id: string;
@@ -802,6 +1176,8 @@ export async function appendTelegramFundingConsent(
       `
         select
           receive.id,
+          receive.destination_target_snapshot #>>
+            '{location,details,controllerWalletId}' as controller_wallet_id,
           receive.destination_option_id,
           receive.venue_binding_option_id
         from funding_receive_sessions receive
@@ -825,39 +1201,40 @@ export async function appendTelegramFundingConsent(
       );
     }
     const canonicalReceive = canonical.rows[0];
-    if (input.automationEnabled) {
-      const automation = parseTelegramFundingAutomationPolicyV2(
-        input.policySnapshot,
-      );
-      if (
-        !automation ||
-        automation.destinationOptionId !==
-          canonicalReceive.destination_option_id ||
-        automation.venueBindingOptionId !==
-          canonicalReceive.venue_binding_option_id
-      ) {
-        throw new TelegramFundingPersistenceError(
-          "telegram_funding_session_unavailable",
-        );
-      }
-      const capability = await resolveTelegramPolymarketWrapCapability(client, {
+    const frozenControllerWalletId =
+      canonicalReceive.controller_wallet_id?.trim() ?? "";
+    const currentManagedWallet =
+      await resolveTelegramFundingManagedWalletIdentity(client, {
         userId: input.userId,
         telegramAccountId: input.telegramAccountId,
         telegramUserId: input.telegramUserId,
-        destinationOptionId: canonicalReceive.destination_option_id,
-        venueBindingOptionId: canonicalReceive.venue_binding_option_id,
-        expectedAuthorizationId: automation.authorizationId,
-        expectedAuthorizationFingerprint: automation.authorizationFingerprint,
-        expectedFundingPolicyRevision: automation.fundingPolicyRevision,
-        now: input.now,
-        lock: true,
       });
+    if (
+      !frozenControllerWalletId ||
+      frozenControllerWalletId !== input.controllerWalletId ||
+      currentManagedWallet?.controllerWalletId !== frozenControllerWalletId
+    ) {
+      throw new TelegramFundingPersistenceError(
+        "telegram_funding_session_unavailable",
+      );
+    }
+    if (input.automationEnabled) {
+      const capability = await resolveTelegramFundingAutomaticCapability(
+        client,
+        {
+          policySnapshot: input.policySnapshot,
+          userId: input.userId,
+          telegramAccountId: input.telegramAccountId,
+          telegramUserId: input.telegramUserId,
+          destinationOptionId: canonicalReceive.destination_option_id,
+          venueBindingOptionId: canonicalReceive.venue_binding_option_id,
+          now: input.now,
+          lock: true,
+        },
+      );
       if (
-        !capability.authorization ||
-        !telegramFundingAutomationPolicyMatchesAuthorization(
-          automation,
-          capability.authorization,
-        )
+        !capability?.authorization ||
+        capability.decision.kind !== "allowed"
       ) {
         throw new TelegramFundingPersistenceError(
           "telegram_funding_session_unavailable",
@@ -933,7 +1310,11 @@ export async function appendTelegramFundingConsent(
       `
         update telegram_funding_sessions
         set telegram_account_id = $2,
-            telegram_message_id = coalesce($3, telegram_message_id),
+            telegram_message_id = case
+              when address_disclosure_attempt_revision = 0
+                then coalesce($3, telegram_message_id)
+              else telegram_message_id
+            end,
             active_consent_revision = $4
         where id = $1
         returning ${sessionColumns}
@@ -1047,6 +1428,10 @@ export async function cancelTelegramFundingSessionContext(
           }
         : null;
     }
+    // Cancel participates in the same lifecycle fence as address egress. Once
+    // this transaction commits, an older claimed delivery must observe the
+    // closed context at its final pre-egress CAS instead of revealing it.
+    await lockTelegramFundingLinkLifecycle(client, input.userId);
     const locked = await client.query<TelegramFundingSessionRow>(
       `
         select ${qualifiedSessionColumns("context")}
@@ -1083,7 +1468,11 @@ export async function cancelTelegramFundingSessionContext(
       `
         update telegram_funding_sessions
         set cancelled_at = coalesce(cancelled_at, $2),
-            telegram_message_id = coalesce($3, telegram_message_id)
+            telegram_message_id = case
+              when address_disclosure_attempt_revision = 0
+                then coalesce($3, telegram_message_id)
+              else telegram_message_id
+            end
         where id = $1
         returning ${sessionColumns}
       `,
@@ -1106,6 +1495,22 @@ export async function cancelTelegramFundingSessionContext(
           )
       `,
       [contextRow.receive_session_id, input.now],
+    );
+    await client.query(
+      `
+        update telegram_bot_action_outbox outbox
+        set status = 'skipped',
+            last_error = 'funding_session_cancelled',
+            updated_at = $2
+        where outbox.funding_session_id = $1
+          and outbox.action in ('funding_send', 'funding_edit', 'funding_replacement', 'funding_qr')
+          and outbox.status in ('pending', 'retry')
+          and (
+            jsonb_typeof(outbox.payload->'receiveAddress') = 'string'
+            or outbox.action = 'funding_qr'
+          )
+      `,
+      [input.contextId, input.now],
     );
     await client.query(
       `

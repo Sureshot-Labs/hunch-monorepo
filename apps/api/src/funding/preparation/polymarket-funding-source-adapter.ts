@@ -1,3 +1,5 @@
+import type { PoolClient } from "@hunch/infra";
+
 import type { AccountValueReadModel } from "../../account-value/runtime-service.js";
 import { stableOpaqueId } from "../../account-value/canonical.js";
 import {
@@ -14,15 +16,17 @@ import type {
   FundingPurpose,
   JsonValue,
   SourceOption,
-  WalletExecutionProfile,
 } from "../domain/types.js";
 import { resolveActionSponsorship } from "../execution/sponsorship-policy.js";
 import { canonicalJsonHash } from "../persistence/canonical.js";
+import type { FundingCommitPlan } from "../persistence/funding-operation-repository.js";
+import { sameAccountAddress } from "../domain/asset-identity.js";
 import { sameAsset } from "../planner/money.js";
 import { minimumAutomaticTradeRefillUsd } from "../planner/placement-policy.js";
-import type {
-  FundingSourceAdapter,
-  FundingSourcePlanningInput,
+import {
+  findExactFundingWalletProfile,
+  type FundingSourceAdapter,
+  type FundingSourcePlanningInput,
 } from "../planner/source-adapter.js";
 import { POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID } from "../execution/delegated-funding-profile-ids.js";
 import { fundingSidecarRuntimeConfig } from "../runtime/sidecar-runtime-config.js";
@@ -39,6 +43,7 @@ import {
   parsePolymarketFundingEvidence,
   POLYMARKET_FUNDING_SOURCE_ADAPTER_ID,
 } from "./polymarket-funding-snapshot.js";
+import { lockPolymarketFundingOperationPredecessor } from "./polymarket-funding-commit-guard.js";
 
 type JsonRecord = Readonly<Record<string, JsonValue>>;
 
@@ -49,22 +54,6 @@ function jsonRecord(value: unknown): JsonRecord {
 function detail(location: AssetLocation, key: string): string | null {
   const value = location.details[key];
   return typeof value === "string" && value.trim() ? value.trim() : null;
-}
-
-function profileForExactWallet(input: {
-  account: AccountValueReadModel;
-  walletId: string;
-  networkId: string;
-  address: string;
-}): WalletExecutionProfile | null {
-  return (
-    input.account.ownership?.wallets.find(
-      (profile) =>
-        profile.walletId === input.walletId &&
-        profile.networkId === input.networkId &&
-        profile.address.toLowerCase() === input.address.toLowerCase(),
-    ) ?? null
-  );
 }
 
 function supportsExactOutputVenuePreparation(purpose: FundingPurpose): boolean {
@@ -113,6 +102,35 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
     },
   ) {}
 
+  async verifyCommit(
+    client: PoolClient,
+    input: Readonly<{
+      userId: string;
+      operation: FundingCommitPlan["operation"];
+    }>,
+  ): Promise<void> {
+    if (
+      input.operation.supportMetadata?.preparationKind !==
+      "polymarket_funding_router"
+    ) {
+      return;
+    }
+    const metadataBinding =
+      input.operation.supportMetadata?.venueBindingOptionId;
+    const snapshotBinding =
+      input.operation.venueBindingSnapshot?.venueBindingOptionId;
+    const venueBindingOptionId =
+      typeof metadataBinding === "string" && metadataBinding.trim()
+        ? metadataBinding
+        : typeof snapshotBinding === "string" && snapshotBinding.trim()
+          ? snapshotBinding
+          : "";
+    await lockPolymarketFundingOperationPredecessor(client, {
+      userId: input.userId,
+      venueBindingOptionId,
+    });
+  }
+
   async list(
     input: FundingSourcePlanningInput,
   ): Promise<readonly PlannedSourceOption[]> {
@@ -146,7 +164,8 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
         component.observationError ||
         component.valuationEligibility !== "included" ||
         !sameAsset(component.amount.asset, input.asset) ||
-        address?.toLowerCase() !== input.address.toLowerCase() ||
+        !address ||
+        !sameAccountAddress(input.asset.networkId, address, input.address) ||
         !availability ||
         availability.freshness !== "fresh" ||
         BigInt(availability.availableRaw) < BigInt(input.rawAmount)
@@ -171,14 +190,18 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
       facts.target.kind !== "owned_location" ||
       !facts.collateralValuation ||
       !snapshot ||
-      snapshot.routerAddress.toLowerCase() !==
-        this.config.canonicalRouterAddress?.toLowerCase() ||
+      !this.config.canonicalRouterAddress ||
+      !sameAccountAddress(
+        "evm:137",
+        snapshot.routerAddress,
+        this.config.canonicalRouterAddress,
+      ) ||
       !sameAsset(input.requiredAmount.asset, facts.option.requiredAsset) ||
       BigInt(input.requiredAmount.raw) <= 0n
     ) {
       return null;
     }
-    const profile = profileForExactWallet({
+    const profile = findExactFundingWalletProfile({
       account: this.account,
       walletId: facts.venueBinding.executionWalletId,
       networkId: "evm:137",
@@ -393,6 +416,7 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
           payerRequirement: sponsorship.payerRequirement,
           dependsOnOrdinal: null,
           normalizedAction: jsonRecord(action),
+          ...(delegatedWrap ? { actionExpiresAt: null } : {}),
           actionValidationResult: {
             ...buildPolymarketFundingActionValidation({
               destinationAssetId:

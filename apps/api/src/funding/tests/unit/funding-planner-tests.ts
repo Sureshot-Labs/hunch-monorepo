@@ -4,9 +4,10 @@ import assert from "node:assert/strict";
 
 import { RELAY_PINNED_ASSETS } from "../../../funding-providers/relay/mappings.js";
 
-import type {
-  FundingCommitPlan,
-  StoredFundingQuote,
+import {
+  FundingPersistenceError,
+  type FundingCommitPlan,
+  type StoredFundingQuote,
 } from "../../persistence/funding-operation-repository.js";
 import type {
   FundingPlanningStore,
@@ -85,7 +86,7 @@ async function test(name: string, run: () => void | Promise<void>) {
   console.log(`[funding-planner-tests] ok ${name}`);
 }
 
-await test("quote consent reuses Buy only for pinned stable collateral", () => {
+await test("a Trade quote is the single confirmation for contained conversion", () => {
   const polygonPusd: AssetRef = {
     networkId: "evm:137",
     assetId: "0xc011a7e12a19f7b1f670d46f03b03f3342e82dfb",
@@ -119,7 +120,7 @@ await test("quote consent reuses Buy only for pinned stable collateral", () => {
       expectedDestination: { asset: polygonPusd, raw: "1000000" },
       minimumDestination: { asset: polygonPusd, raw: "1000000" },
     }),
-    "explicit_economic_review",
+    "trade_intent",
   );
   assert.equal(
     classifyFundingQuoteConsent({
@@ -129,7 +130,7 @@ await test("quote consent reuses Buy only for pinned stable collateral", () => {
       expectedDestination: { asset: baseUsdc, raw: "990000" },
       minimumDestination: { asset: baseUsdc, raw: "980000" },
     }),
-    "explicit_economic_review",
+    "trade_intent",
   );
   assert.equal(
     classifyFundingQuoteConsent({
@@ -146,7 +147,7 @@ await test("quote consent reuses Buy only for pinned stable collateral", () => {
       expectedDestination: { asset: baseUsdc, raw: "990000" },
       minimumDestination: { asset: baseUsdc, raw: "980000" },
     }),
-    "explicit_economic_review",
+    "trade_intent",
   );
   assert.equal(
     classifyFundingQuoteConsent({
@@ -2882,6 +2883,7 @@ await test("withdrawal stays independent of funding pause through discovery, quo
         canonicalRequestHash: "a".repeat(64),
         planHash: canonicalJsonHash(input.planSnapshot),
         consentTokenHash: "b".repeat(64),
+        commitScope: input.commitScope ?? null,
         expiresAt: input.expiresAt,
         consumedAt: null,
         invalidatedAt: null,
@@ -2930,7 +2932,6 @@ await test("withdrawal stays independent of funding pause through discovery, quo
     db: {} as never,
     subjectLookupHmac: () => "c".repeat(64),
     subjectLookupKeyVersion: 1,
-    resolveOwnershipRevision: async () => "ownership_revision_12345678",
     revalidateWithdrawalRecipient: async (_db, input) => {
       currentRecipientChecks += 1;
       assert.equal(input.userId, USER_ID);
@@ -3044,6 +3045,7 @@ await test("quote preserves a venue-preparation runtime binding and rejects chan
         canonicalRequestHash: "b".repeat(64),
         planHash: canonicalJsonHash(input.planSnapshot),
         consentTokenHash: "c".repeat(64),
+        commitScope: input.commitScope ?? null,
         expiresAt: input.expiresAt,
         consumedAt: null,
         invalidatedAt: null,
@@ -3313,6 +3315,7 @@ await test("quote preserves a frozen composite preparation binding without repla
         canonicalRequestHash: "b".repeat(64),
         planHash: canonicalJsonHash(input.planSnapshot),
         consentTokenHash: "c".repeat(64),
+        commitScope: input.commitScope ?? null,
         expiresAt: input.expiresAt,
         consumedAt: null,
         invalidatedAt: null,
@@ -3337,7 +3340,7 @@ await test("quote preserves a frozen composite preparation binding without repla
 
   assert.equal(summary.selectedSourceOptionId, compositeOption.sourceOptionId);
   assert.equal(summary.minimumDestination.raw, "4227649");
-  assert.equal(summary.consentMode, "explicit_economic_review");
+  assert.equal(summary.consentMode, "trade_intent");
   assert.deepEqual(
     summary.sourceAmounts.map((source) => source.amount),
     [
@@ -3488,6 +3491,7 @@ await test("direct ingress receives a fresh commit window after review", async (
         canonicalRequestHash: "b".repeat(64),
         planHash: canonicalJsonHash(input.planSnapshot),
         consentTokenHash: "c".repeat(64),
+        commitScope: input.commitScope ?? null,
         expiresAt: input.expiresAt,
         consumedAt: null,
         invalidatedAt: null,
@@ -3514,7 +3518,7 @@ await test("direct ingress receives a fresh commit window after review", async (
   assert.equal(summary.expiresAt, "2026-07-24T12:00:59.000Z");
 });
 
-await test("commit revalidates policy and ownership under the locked quote", async () => {
+await test("commit revalidates policy and durable source facts under the locked quote", async () => {
   const policy = mutablePolicy();
   policy.creationMode = "on";
   policy.gates.commit = true;
@@ -3542,6 +3546,7 @@ await test("commit revalidates policy and ownership under the locked quote", asy
     canonicalRequestHash: "a".repeat(64),
     planHash: canonicalJsonHash(plan),
     consentTokenHash: "b".repeat(64),
+    commitScope: null,
     expiresAt: new Date("2026-07-24T12:01:00.000Z"),
     consumedAt: null,
     invalidatedAt: null,
@@ -3556,16 +3561,36 @@ await test("commit revalidates policy and ownership under the locked quote", asy
     invalidStoredPolicy: false,
     validationIssues: [],
   };
-  const build = (ownershipRevision: string, currentPolicy = resolvedPolicy) =>
+  let sourceCommitChecks = 0;
+  const commitBoundaryEvents: string[] = [];
+  const build = (sourceCurrent: boolean, currentPolicy = resolvedPolicy) =>
     new FundingOperationService({
       db: {} as never,
       subjectLookupHmac: () => "c".repeat(64),
       subjectLookupKeyVersion: 1,
-      resolveOwnershipRevision: async () => ownershipRevision,
       fetchQuote: async () => quote,
-      resolvePolicy: async () => currentPolicy,
+      resolvePolicy: async () => {
+        commitBoundaryEvents.push("policy_resolved");
+        return currentPolicy;
+      },
+      verifySourceCommit: async (_client, input) => {
+        sourceCommitChecks += 1;
+        assert.equal(input.operation, quote.planSnapshot.operation);
+        if (!sourceCurrent) {
+          throw new FundingPersistenceError(
+            "quote_invalidated",
+            "wallet ownership facts changed while committing the quote",
+          );
+        }
+      },
       commitOperation: async (_db, input) => {
-        await input.verifyCurrentFacts?.({} as never, quote);
+        const client = {
+          query: async () => {
+            commitBoundaryEvents.push("policy_locked");
+            return { rows: [] };
+          },
+        };
+        await input.verifyCurrentFacts?.(client as never, quote);
         return { operation: {} as never, replayed: false };
       },
       now: () => NOW,
@@ -3575,16 +3600,22 @@ await test("commit revalidates policy and ownership under the locked quote", asy
     consentToken: "consent_token_12345678",
     idempotencyKey: "idempotency_key_12345678",
   };
-  await build("ownership_revision_12345678").commit({
+  await build(true).commit({
     userId: USER_ID,
     request,
     policy,
     policyRevision: resolvedPolicy.revision,
     ownershipRevision: "ownership_revision_12345678",
   });
+  assert.equal(sourceCommitChecks, 1);
+  assert.ok(
+    commitBoundaryEvents.indexOf("policy_locked") <
+      commitBoundaryEvents.indexOf("policy_resolved"),
+    "generic commit must share the policy publisher advisory lock",
+  );
   await assert.rejects(
     () =>
-      build("ownership_revision_changed").commit({
+      build(false).commit({
         userId: USER_ID,
         request,
         policy,
@@ -3595,7 +3626,7 @@ await test("commit revalidates policy and ownership under the locked quote", asy
   );
   await assert.rejects(
     () =>
-      build("ownership_revision_12345678", {
+      build(true, {
         ...resolvedPolicy,
         revision: "policy_revision_changed",
       }).commit({

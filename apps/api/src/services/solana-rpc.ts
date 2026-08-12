@@ -1,6 +1,5 @@
 import { isAbortError, isRpcRateLimit, sleep } from "@hunch/shared";
 
-import { fundingSidecarRuntimeConfig } from "../funding/runtime/sidecar-runtime-config.js";
 import { isRecord } from "../lib/type-guards.js";
 import {
   captureRpcDiagnosticSource,
@@ -11,6 +10,7 @@ import {
   type RpcDiagnosticOutcome,
 } from "./rpc-diagnostics.js";
 import { rpcReadCoordinator } from "./rpc-read-coordinator.js";
+import { walletIntelRetryConfig } from "./wallet-intel-retry.js";
 
 type JsonRpcError = {
   code?: number;
@@ -118,10 +118,7 @@ async function executeSolanaRpcRequest<T>(inputs: {
   source: string;
 }): Promise<T> {
   let lastError: unknown = null;
-  const maxAttempts = Math.max(
-    1,
-    fundingSidecarRuntimeConfig.walletIntelRetryMaxAttempts,
-  );
+  const maxAttempts = Math.max(1, walletIntelRetryConfig.maxAttempts);
 
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     for (const rpcUrl of inputs.rpcUrls) {
@@ -214,9 +211,8 @@ async function executeSolanaRpcRequest<T>(inputs: {
     const retryable = isRpcRateLimit(lastError) || isAbortError(lastError);
     if (retryable && attempt < maxAttempts - 1) {
       const backoffMs = Math.min(
-        fundingSidecarRuntimeConfig.walletIntelRetryBaseBackoffMs *
-          Math.max(1, 2 ** attempt),
-        fundingSidecarRuntimeConfig.walletIntelRetryMaxBackoffMs,
+        walletIntelRetryConfig.baseBackoffMs * Math.max(1, 2 ** attempt),
+        walletIntelRetryConfig.maxBackoffMs,
       );
       await sleep(backoffMs);
       continue;

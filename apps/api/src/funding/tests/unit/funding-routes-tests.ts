@@ -277,6 +277,7 @@ function operationSteps(): readonly FundingOperationStep[] {
       dependencyState: null,
       normalizedAction: preparedAction(),
       actionValidationResult: {},
+      actionExpiresAt: new Date(NOW.getTime() + 15 * 60_000),
     },
   ];
 }

@@ -261,6 +261,12 @@ An observed asset contributes to `liquidAssetsEstimatedUsd` only when all are tr
 5. a trusted price is fresh and carries an accepted confidence class;
 6. the same economic asset instance is not represented by another component.
 
+Identity equality is deliberately narrow: only two valid `0x` plus 40-hex
+account/asset identifiers in a valid `evm:<positive-chain-id>` scope may differ
+by case. Malformed EVM-looking values, Solana addresses/mints/signatures, and
+future non-EVM identifiers remain exact and case-sensitive. TypeScript and SQL
+evidence joins use the same rule.
+
 Execution eligibility is separate. A priced token may remain in estimated value
 while routes are temporarily unavailable. Its component then says `not currently
 usable`, rather than disappearing from the headline.
@@ -432,47 +438,40 @@ The initial product behavior is now closed:
    normal `Pay with`; their venue setup or signed-source use requires a separate
    explicit advanced flow.
 
-### 2.9.1 Destination-scoped deposit conversion consent
+### 2.9.1 Stable auto-routing and volatile conversion consent
 
 Status: accepted product decision for future multi-asset Receive slices on
-2026-08-07. It does not change the current A1 direct-pUSD implementation.
+2026-08-11. It does not change the current Polygon pUSD/USDC.e Slice C scope.
 
-When a user chooses a destination venue and an activated exact asset/network
-option in `Deposit crypto`, Hunch may offer that option as automatic conversion
-to the destination's dollar-denominated settlement collateral. For example,
-choosing `Polymarket` and `SOL on Solana` means that the canonical SOL receipt
-for that Receive Session is converted automatically to Polymarket collateral.
+The product contract is intentionally different for stable and volatile
+sources:
 
-The product contract is:
+1. Selecting an exact supported stablecoin/network Receive option may authorize
+   bounded automatic conversion to the stable collateral accepted by the venue.
+   The session freezes destination, asset identity, expiry, route class, caps,
+   signer, fee/slippage policy, and recovery contract before showing the address.
+2. Selecting a volatile option such as `SOL on Solana` authorizes only receipt
+   and ownership tracking. It never authorizes selling the asset. The user may
+   still send SOL to the verified owned address without understanding Relay,
+   policies, grants, or signers.
+3. In standalone Deposit or Account Value, an observed volatile balance gets an
+   explicit `Convert to <venue stable>` CTA. Opening it obtains a fresh quote and
+   shows exact/max input, expected and minimum output, fees, price impact,
+   slippage, route expiry, and destination. The user explicitly confirms before
+   commit; until then the asset remains ordinary owned Account Value.
+4. In an already-started Trade, the fresh composite trade quote visibly includes
+   the volatile conversion and all of the same economic bounds. The existing
+   Trade Review/Confirm authorizes the complete conversion-plus-trade route;
+   there is no second conversion prompt that can let the quote expire.
+5. A supported stable route or confirmed volatile route executes only while its
+   exact capability and frozen limits still pass. Otherwise Hunch preserves
+   ownership and enters a typed unavailable/recovery state; it never substitutes
+   an asset, destination, or route.
 
-1. Before revealing the receive address, the UI says plainly that funds sent
-   through this option will be converted automatically into dollar-denominated
-   collateral for the selected venue. It also shows the network and material
-   fee/slippage safeguards that can be stated safely before the amount is known.
-2. Selecting the exact asset/network option and continuing to its receive
-   instructions is the user's session-scoped authorization for that conversion.
-   It binds the server-owned destination, receive target, canonical asset
-   identity, expiry, amount cap, route class, and fee/slippage policy limits.
-3. After the canonical receipt is observed, Hunch quotes, commits, executes,
-   reconciles, and credits the selected destination automatically. It never
-   inserts a second exchange-rate, quote, or minimum-received confirmation.
-   Informational estimates may be shown, but they are not another action gate.
-4. If no exact activated route exists, or fresh execution would exceed any
-   frozen cap or safety invariant, the option is absent or the received funds
-   enter a typed recovery/needs-attention state. Hunch does not substitute a
-   route, broaden consent, or turn rate confirmation into the normal recovery
-   path.
-5. This authorization applies only to receipts for the selected Receive
-   Session. It does not authorize selling an unrelated discovered balance,
-   moving funds to another venue, or placing a trade. A separately confirmed
-   Buy may continue after destination readiness while its own authorization is
-   still valid; an ordinary Add Funds flow ends with funds ready to trade.
-
-The intended happy path is therefore `choose destination` -> `choose what to
-send` -> `send` -> `automatic conversion and routing` -> `ready to trade`.
-Future native-SOL Receive must implement `automatic_conversion`; the existing
-WP7 `review_required` implementation is a rollout-disabled transitional state,
-not the product behavior to activate.
+The standalone volatile happy path is therefore `choose destination` -> `send`
+-> `received as Account Value` -> `Convert to <venue stable>` -> `review and
+confirm fresh quote` -> `ready to trade`. The active-Trade path is `fresh
+composite quote` -> `one Trade Confirm` -> `convert and route` -> `place trade`.
 
 Normative Add Funds decision flow:
 
@@ -703,11 +702,12 @@ Operation:
    may be quoted and committed automatically only within the session's frozen
    route class, maximum fee/slippage, amount cap, signer, and destination
    policy.
-5. An activated volatile Receive option such as native SOL uses the
-   destination-scoped automatic-conversion consent in section 2.9.1. It does
-   not require an amount or a later rate confirmation before showing an owned
-   receive address. A receipt outside that exact selected contract remains
-   Account Value and cannot inherit the session's conversion authority.
+5. An activated volatile Receive option such as native SOL may show an owned
+   receive address without inventing an amount, but selection authorizes receipt
+   tracking only. After observation, standalone funding exposes an explicit
+   quoted `Convert to <venue stable>` action; an active Trade instead includes
+   the conversion in its one fresh composite quote and Trade Confirm. A receipt
+   cannot inherit stable-automation authority from the address it reached.
 6. A late receipt is never lost because a UI session expired. It remains owned
    Account Value and is either associated with a recoverable session or shown
    as received value awaiting destination/conversion review.
@@ -725,8 +725,9 @@ contracts but remain different user journeys:
   `Hunch will prepare this Buy`, no alternate `Buy`, and no source/route choice
   appears before the click. After the click, inline progress immediately shows
   `Move funds` only when required, then `Confirm balance` and `Place order`.
-  A second confirmation appears only for materially changed trade economics or
-  an economically material volatile conversion.
+  A volatile conversion is disclosed and bounded inside the same fresh Trade
+  Review/Confirm. If economics materially change after confirmation, re-quote
+  and re-confirm the whole Trade; never add a separate conversion prompt.
 - **External shortfall**: `Add funds` replaces `Buy Now` only when no eligible
   existing Hunch value can cover the exact shortfall and a user-controlled
   external transfer/payment is required.
@@ -737,11 +738,12 @@ contracts but remain different user journeys:
 - **Deposit crypto**: after venue and method, show a human asset/network picker.
   Default to the recommended proven option, but expose every other activated
   option with direct or automatic-conversion semantics. Before revealing an
-  automatic-conversion address, disclose that received funds are converted to
-  the selected venue's dollar collateral without another rate confirmation.
-  Then show the exact network, asset contract label, address, QR, copy action,
-  warnings, and durable status. Unsupported or review-only routes are absent,
-  not optimistic.
+  stable automatic-conversion address, disclose that received stable funds are
+  converted to the venue's accepted stable without another prompt. A volatile
+  option discloses that receipt is tracked first and standalone conversion
+  requires the later quoted `Convert to <venue stable>` confirmation. Then show
+  the exact network, asset contract label, address, QR, copy action, warnings,
+  and durable status. Unsupported routes are absent, not optimistic.
 - **Convert**: use the canonical large `From`/`To` balance cards, venue and
   asset/network labels, amount plus `Max`, computed receive amount, fee,
   price impact, ETA, expiry, and an optional advanced slippage control. Raw
@@ -1110,6 +1112,14 @@ user-visible `recovery_action_required` state rather than an assumed refund.
 10. Wallet preparation is one purpose-aware venue capability reused by auth,
     funding, trading, redemption, and Telegram; it is not copied into each flow.
 11. Redemption is a position action, not a bridge, withdrawal, or Funding Operation.
+12. A Telegram Receive route adapter owns destination selection,
+    managed-controller validation, consent/capability, observation cursors, and
+    its exact receipt quote/execution plan. Registering Base, Solana, or a new
+    venue does not add branches to session, projector, delivery, or receipt
+    routing cores.
+13. A financial receive address has one durable Telegram egress. Disclosure,
+    confirmed delivery, and confirmed redaction are separate facts; only an
+    address-free edit of the known card proves redaction, never a new message.
 
 ### 6.5 Security
 
@@ -3022,22 +3032,26 @@ Sell/Redeem.
 
 1. User chooses `Polymarket`, then the activated `SOL on Solana` Deposit crypto
    option. An amount is not required for an owned Receive target.
-2. Before showing the address, Hunch says the received SOL will be converted
-   automatically into dollar-denominated Polymarket collateral. Choosing the
-   option authorizes that bounded conversion; there is no later rate-confirmation
-   screen.
+2. Before showing the address, Hunch says the received SOL will remain owned
+   value until the user converts it. Choosing the option authorizes receipt
+   tracking, not sale or conversion.
 3. Backend freezes the exact destination binding, receive target, native-SOL
-   identity, expiry, route class, amount cap, execution profile, and fee/slippage
-   limits before tracking starts and the address is revealed.
-4. The canonical receipt fixes the actual input amount. A child operation obtains
-   a fresh exact-input quote and may commit only if every frozen limit and
-   postcondition still passes.
-5. Execute and reconcile the activated Solana SOL → Polygon pUSD route, then any
+   identity, expiry, and observer cursor before tracking starts and the address
+   is revealed.
+4. The canonical receipt fixes the available input amount and records it in
+   Account Value. Standalone Add Funds shows `Convert to pUSD`; opening it gets
+   a fresh exact-input or exact-output quote with fee, slippage, minimum output,
+   price impact, and expiry.
+5. Only the user's explicit Convert confirmation commits the standalone route.
+   If this funding is already part of a Trade, the same conversion is instead
+   included visibly in the one fresh composite Trade quote and its Trade
+   Confirm, with no second prompt.
+6. Execute and reconcile the activated Solana SOL → Polygon pUSD route, then any
    exact Polymarket readiness step. Provider submission is progress, not success.
-6. Destination observation makes the received value ordinary Polymarket cash
+7. Destination observation makes the received value ordinary Polymarket cash
    ready to trade. A separately authorized active Buy may continue if still
    valid; generic Add Funds does not place an order.
-7. If the route cannot execute safely, preserve ownership and enter typed
+8. If the route cannot execute safely, preserve ownership and enter typed
    recovery/needs-attention. Do not substitute a route or ask the user to approve
    a newly discovered rate.
 
@@ -3051,9 +3065,9 @@ Sell/Redeem.
    quoteable, and inside policy.
 3. Relay `EXPECTED_OUTPUT` derives the bounded source input required for the
    Base USDC shortfall and returns one SVM transaction. Solana USDC may proceed
-   automatically inside equivalent-stable caps; an already-owned native SOL
-   balance that was not selected through Deposit crypto requires explicit
-   economic consent.
+   automatically inside equivalent-stable caps. Native SOL always requires
+   explicit economic consent: a standalone Convert confirmation, or the one
+   composite Trade Review/Confirm when a Trade is already in progress.
 4. The fail-closed validator binds source amount, protocol order ID, controlled
    Solana signer, Base USDC recipient/refund, instruction discriminator, and
    address-lookup-table shape before execution.
@@ -3667,27 +3681,27 @@ across route handlers.
 
 At minimum:
 
-| Source                            | Destination                | Purpose/mode                        | Required evidence                                                    |
-| --------------------------------- | -------------------------- | ----------------------------------- | -------------------------------------------------------------------- |
-| existing PM collateral            | Polymarket                 | instant trade                       | binding, locks, readiness                                            |
-| existing Limitless collateral     | Limitless                  | instant trade                       | binding, locks, readiness                                            |
-| existing Limitless collateral     | Limitless CLOB             | Buy/Sell                            | profile, exchange/adapter, approvals, locks, slippage                |
-| existing Limitless collateral     | Limitless AMM              | Buy/Sell                            | profile, market/spender, approvals, locks, min output                |
-| Solana SOL                        | Polymarket                 | Add Funds desired pUSD output       | Relay expected-output quote, gas/rent, PM follow-up                  |
-| Solana USDC                       | Polymarket                 | Add Funds                           | Relay route/settlement                                               |
-| Ethereum supported USDT/USDC      | Polymarket                 | prepare/inline by evidence          | exact mapping, refund, net output                                    |
-| supported wallet token            | active venue               | conversion                          | consent, price, route, min output                                    |
-| exchange pUSD or Polygon USDC.e   | Polymarket receive target  | direct/chained owned Receive        | exact allowlist, both baselines, locked variant, pUSD/CLOB readiness |
-| controlled wallet stablecoin      | active venue               | strict Relay deposit address, gated | exact amount, owned refund, request correlation                      |
-| Privy configured on-ramp          | exact owned destination    | external handoff                    | method config, KYC/config where required, observation                |
-| existing other-venue cash         | target venue               | shortfall only                      | withdrawal/movement capability                                       |
-| any enabled source                | Limitless slow route       | same Buy, operational prepare-first | measured latency, destination observation, fresh bounded quote       |
-| eligible cash                     | validated user destination | withdrawal                          | destination ID, recovery                                             |
-| external ready binding            | active venue               | explicit Trading Wallet             | signer, setup, readiness                                             |
-| external source-only wallet       | internal Hunch destination | future advanced explicit funding    | separate activation, client signature, observation                   |
-| owned PM position                 | owner PM binding           | redeem                              | owner proof, preparation, action validation                          |
-| owned Limitless position          | owner Limitless binding    | standard redeem                     | resolution, token balance, canonical CTF call, receipt               |
-| owned Limitless neg-risk position | owner Limitless binding    | neg-risk redeem                     | resolution, adapter, approval, receipt                               |
+| Source                            | Destination                | Purpose/mode                          | Required evidence                                                    |
+| --------------------------------- | -------------------------- | ------------------------------------- | -------------------------------------------------------------------- |
+| existing PM collateral            | Polymarket                 | instant trade                         | binding, locks, readiness                                            |
+| existing Limitless collateral     | Limitless                  | instant trade                         | binding, locks, readiness                                            |
+| existing Limitless collateral     | Limitless CLOB             | Buy/Sell                              | profile, exchange/adapter, approvals, locks, slippage                |
+| existing Limitless collateral     | Limitless AMM              | Buy/Sell                              | profile, market/spender, approvals, locks, min output                |
+| Solana SOL                        | Polymarket                 | standalone Convert or composite Trade | explicit/frozen quote consent, gas/rent, PM follow-up                |
+| Solana USDC                       | Polymarket                 | Add Funds                             | Relay route/settlement                                               |
+| Ethereum supported USDT/USDC      | Polymarket                 | prepare/inline by evidence            | exact mapping, refund, net output                                    |
+| supported wallet token            | active venue               | conversion                            | consent, price, route, min output                                    |
+| exchange pUSD or Polygon USDC.e   | Polymarket receive target  | direct/chained owned Receive          | exact allowlist, both baselines, locked variant, pUSD/CLOB readiness |
+| controlled wallet stablecoin      | active venue               | strict Relay deposit address, gated   | exact amount, owned refund, request correlation                      |
+| Privy configured on-ramp          | exact owned destination    | external handoff                      | method config, KYC/config where required, observation                |
+| existing other-venue cash         | target venue               | shortfall only                        | withdrawal/movement capability                                       |
+| any enabled source                | Limitless slow route       | same Buy, operational prepare-first   | measured latency, destination observation, fresh bounded quote       |
+| eligible cash                     | validated user destination | withdrawal                            | destination ID, recovery                                             |
+| external ready binding            | active venue               | explicit Trading Wallet               | signer, setup, readiness                                             |
+| external source-only wallet       | internal Hunch destination | future advanced explicit funding      | separate activation, client signature, observation                   |
+| owned PM position                 | owner PM binding           | redeem                                | owner proof, preparation, action validation                          |
+| owned Limitless position          | owner Limitless binding    | standard redeem                       | resolution, token balance, canonical CTF call, receipt               |
+| owned Limitless neg-risk position | owner Limitless binding    | neg-risk redeem                       | resolution, adapter, approval, receipt                               |
 
 Every proposed active route runs through Relay first. Across/deBridge matrix
 rows exist only for legacy reconciliation or an explicit disabled-by-default
@@ -4372,6 +4386,29 @@ of the claimed Buy. Owned Receive exposes only a verified target allowlist; the
 first Polymarket target accepts pUSD directly or USDC.e through its
 precommitted Funding Router continuation. Strict Relay Deposit Addresses remain
 gated off.
+Telegram preserves the same adapter boundary: future venue buttons and legacy
+explicit callbacks are hidden/fail-closed until the adapter owns the complete
+durable address lifecycle. Address disclosure is recorded pessimistically
+before the external edit, independently from confirmed delivery, so a process
+crash cannot erase the obligation to redact a stale wallet address. The legacy
+Telegram builder has no wallet/RPC resolver and the interactive callback layer
+has no address/QR/photo renderer; all financial egress is physically confined
+to the durable worker.
+
+Receipt routing uses one provider-neutral result union — `direct`,
+`automatic_execution`, `review_required`, or `hard_invalid`. Route adapters own
+provider/network facts and the frozen review continuation; the common router,
+projector, and durable delivery worker do not branch on Telegram, Relay,
+Solana, or a venue. Supported stablecoins can therefore route automatically to
+the venue stable, while a volatile asset produces a fresh reviewed conversion
+standalone or is visibly bounded inside the Trade's one existing confirmation.
+Provider-specific operation-link evidence and final destination-readiness also
+belong to that adapter. The generic receipt router consumes only the adapter's
+boolean exact-evidence verdict and opaque execution profile, so adding Relay or
+another EVM venue does not add provider SQL branches to receipt persistence.
+The first canonical terminal projection is absorbing, and standalone Convert
+callbacks revalidate the same context/controller lifecycle before quote and
+commit; restored live facts never revive an old funding or conversion button.
 
 Privy EVM/Solana wallet creation remains exclusively in the existing
 `AuthProvider`; WP7 callers only consume typed missing-wallet prerequisites and

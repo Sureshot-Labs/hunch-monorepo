@@ -15,6 +15,7 @@ const MIGRATION_0200 = "0200_runtime_policy_admin_actor.sql";
 const MIGRATION_0201 = "0201_telegram_funding_open_idempotency.sql";
 const MIGRATION_0203 = "0203_telegram_funding_buy_continuation.sql";
 const MIGRATION_0204 = "0204_delegated_funding_execution.sql";
+const MIGRATION_0206 = "0206_telegram_funding_wallet_retention.sql";
 const FUNDING_MIGRATIONS = [
   MIGRATION_0184,
   MIGRATION_0193,
@@ -27,6 +28,7 @@ const FUNDING_MIGRATIONS = [
   MIGRATION_0201,
   MIGRATION_0203,
   MIGRATION_0204,
+  MIGRATION_0206,
 ] as const;
 
 const LEGACY_CLASSIFIER_SQL = `
@@ -74,6 +76,8 @@ export type FundingMigrationPreflightReport = Readonly<{
     longTransactions: number | null;
     waitingLocks: number | null;
   }>;
+  malformedReceiveReviewEvidence: number | null;
+  unresolvedAddressDisclosureWithoutEditTarget: number | null;
   partialObjects: readonly string[];
   recoveryIdentity: Readonly<{
     observations: number | null;
@@ -82,6 +86,7 @@ export type FundingMigrationPreflightReport = Readonly<{
   }>;
   telegramBuyContinuationObjects: boolean;
   delegatedFundingExecutionObjects: boolean;
+  delegatedFundingWalletRetentionObjects: boolean;
   telegramOpenMutationConstraints: boolean;
 }>;
 
@@ -148,6 +153,27 @@ async function columnsExist(
     if (!(await columnExists(db, table, column))) return false;
   }
   return true;
+}
+
+async function columnAllowsNull(
+  db: DbQuery,
+  table: string,
+  column: string,
+): Promise<boolean> {
+  return queryExists(
+    db,
+    `
+      select exists (
+        select 1
+        from information_schema.columns
+        where table_schema = 'public'
+          and table_name = $1
+          and column_name = $2
+          and is_nullable = 'YES'
+      ) as exists
+    `,
+    [table, column],
+  );
 }
 
 async function triggerExists(
@@ -242,6 +268,35 @@ async function indexPredicateIncludes(
   const predicate = rows[0]?.predicate?.replaceAll(/\s+/g, " ").toLowerCase();
   return Boolean(
     predicate && fragments.every((fragment) => predicate.includes(fragment)),
+  );
+}
+
+async function uniqueIndexPredicateIncludes(
+  db: DbQuery,
+  indexName: string,
+  fragments: readonly string[],
+): Promise<boolean> {
+  const { rows } = await db.query<{
+    is_unique: boolean;
+    predicate: string | null;
+  }>(
+    `
+      select
+        pg_get_expr(idx.indpred, idx.indrelid) as predicate,
+        idx.indisunique as is_unique
+      from pg_index idx
+      join pg_class relation on relation.oid = idx.indexrelid
+      join pg_namespace namespace on namespace.oid = relation.relnamespace
+      where namespace.nspname = 'public' and relation.relname = $1
+    `,
+    [indexName],
+  );
+  const row = rows[0];
+  const predicate = row?.predicate?.replaceAll(/\s+/g, " ").toLowerCase();
+  return Boolean(
+    row?.is_unique &&
+    predicate &&
+    fragments.every((fragment) => predicate.includes(fragment)),
   );
 }
 
@@ -422,6 +477,225 @@ export async function inspectFundingMigrationPreflight(
     hasDelegatedFundingActiveIndex &&
     hasUnlimitedAutomationConsent &&
     hasDelegatedAttemptProviderResolution;
+  const hasFundingAccountIdentifierEquality = await functionDefinitionIncludes(
+    db,
+    "funding_account_identifier_equal",
+    [
+      "identity_scope = 'ethereum'",
+      "identity_scope ~ '^evm:[1-9][0-9]*$'",
+      "left_identifier ~ '^0x[0-9a-fa-f]{40}$'",
+      "right_identifier ~ '^0x[0-9a-fa-f]{40}$'",
+      "lower(left_identifier) = lower(right_identifier)",
+      "left_identifier = right_identifier",
+    ],
+  );
+  const hasFundingReceiveReviewEvidenceValidator =
+    (await functionDefinitionIncludes(db, "funding_receive_money_is_valid", [
+      "jsonb_typeof(candidate -> 'asset') = 'object'",
+      "between 0 and 255",
+      "candidate ->> 'raw' ~ '^(0|[1-9][0-9]*)$'",
+    ])) &&
+    (await functionDefinitionIncludes(
+      db,
+      "funding_receive_review_evidence_is_valid",
+      [
+        "reviewcontinuation",
+        "reviewquoteplan",
+        "fresh_quote",
+        "funding_receive_money_is_valid",
+      ],
+    ));
+  const hasReceiveReviewQuoteScope =
+    (await columnExists(db, "funding_quotes", "commit_scope")) &&
+    (await constraintDefinitionIncludes(
+      db,
+      "public.funding_quotes",
+      "funding_quotes_commit_scope_check",
+      [
+        "receive_receipt_review_v1",
+        "ownerchannel",
+        "receivesessionid",
+        "receiptid",
+      ],
+    ));
+  const hasFundingOperationActionDeadline =
+    (await columnExists(db, "funding_operation_steps", "action_expires_at")) &&
+    (await constraintDefinitionIncludes(
+      db,
+      "public.funding_operation_steps",
+      "funding_operation_steps_action_expiry_check",
+      ["action_expires_at is null", "action_expires_at > created_at"],
+    )) &&
+    (await indexPredicateIncludes(
+      db,
+      "funding_operation_steps_action_claim_idx",
+      ["state = 'action_required'"],
+    ));
+  const hasDelegatedFundingWalletRetentionBase =
+    hasTelegramFundingAuthorizations &&
+    hasFundingAccountIdentifierEquality &&
+    hasFundingReceiveReviewEvidenceValidator &&
+    hasReceiveReviewQuoteScope &&
+    hasFundingOperationActionDeadline &&
+    (await columnExists(
+      db,
+      "telegram_bot_trading_preferences",
+      "funding_operator_revoked_at",
+    )) &&
+    (await columnAllowsNull(
+      db,
+      "telegram_funding_authorizations",
+      "user_wallet_id",
+    )) &&
+    (await constraintDefinitionIncludes(
+      db,
+      "public.telegram_funding_authorizations",
+      "telegram_funding_authorizations_user_wallet_id_fkey",
+      [
+        "foreign key (user_wallet_id)",
+        "references user_wallets(id)",
+        "on delete set null",
+      ],
+    )) &&
+    (await functionDefinitionIncludes(
+      db,
+      "guard_telegram_funding_authorization_update",
+      [
+        "old.user_wallet_id is not null",
+        "new.user_wallet_id is null",
+        "new.revoked_at := greatest",
+        "new.wallet_chain = 'ethereum'",
+        "new.wallet_address ~",
+        "old.wallet_chain = 'ethereum'",
+        "old.wallet_address ~",
+        "new.source_network_id ~",
+        "new.source_asset_id ~",
+        "new.destination_network_id ~",
+        "new.destination_asset_id ~",
+      ],
+    ));
+  const hasTelegramFundingAddressDeliveryProof =
+    hasTelegramFundingSessions &&
+    (await columnExists(
+      db,
+      "telegram_funding_sessions",
+      "address_disclosure_attempt_revision",
+    )) &&
+    (await columnExists(
+      db,
+      "telegram_funding_sessions",
+      "address_disclosure_message_id",
+    )) &&
+    (await columnExists(
+      db,
+      "telegram_funding_sessions",
+      "address_delivered_revision",
+    )) &&
+    (await columnExists(
+      db,
+      "telegram_funding_sessions",
+      "address_redacted_revision",
+    )) &&
+    (await constraintDefinitionIncludes(
+      db,
+      "public.telegram_funding_sessions",
+      "telegram_funding_sessions_address_delivery_check",
+      [
+        "address_disclosure_attempt_revision >= 0",
+        "address_disclosure_attempt_revision <= progress_revision",
+        "address_delivered_revision >= 0",
+        "address_delivered_revision <= progress_revision",
+        "address_delivered_revision <= address_disclosure_attempt_revision",
+        "address_redacted_revision >= 0",
+        "address_redacted_revision <= progress_revision",
+        "(address_delivered_revision = 0) or (address_disclosure_message_id is not null)",
+        "address_redacted_revision > address_disclosure_attempt_revision",
+      ],
+    ));
+  const hasTelegramFundingQrOutboxShape =
+    hasTelegramFundingAddressDeliveryProof &&
+    (await relationExists(db, "public.telegram_bot_action_outbox")) &&
+    (await constraintDefinitionIncludes(
+      db,
+      "public.telegram_bot_action_outbox",
+      "telegram_bot_action_outbox_action_check",
+      ["funding_qr"],
+    )) &&
+    (await constraintDefinitionIncludes(
+      db,
+      "public.telegram_bot_action_outbox",
+      "telegram_bot_action_outbox_shape_check",
+      ["funding_qr", "funding_session_id is not null", "state_revision > 0"],
+    )) &&
+    (await constraintDefinitionIncludes(
+      db,
+      "public.telegram_bot_action_outbox",
+      "telegram_bot_action_outbox_delivery_attempt_check",
+      ["funding_qr", "delivery_attempt_id is not null"],
+    )) &&
+    (await constraintDefinitionIncludes(
+      db,
+      "public.telegram_bot_action_outbox",
+      "telegram_bot_action_outbox_address_egress_check",
+      ["funding_send", "funding_replacement", "receiveaddress"],
+    )) &&
+    (await uniqueIndexPredicateIncludes(
+      db,
+      "telegram_bot_action_outbox_funding_qr_unique",
+      ["funding_qr"],
+    ));
+  const hasTelegramFundingSafeRelinkRearm =
+    hasTelegramFundingAddressDeliveryProof &&
+    (await functionDefinitionIncludes(db, "rearm_telegram_funding_delivery", [
+      "address_disclosure_attempt_revision >",
+      "address_redacted_revision",
+      "then 'funding_edit'",
+      "redaction.state_revision",
+      "address_disclosure_message_id is not null",
+    ]));
+  const hasTelegramFundingReviewMutationEvidence =
+    hasTelegramFundingMutations &&
+    (await columnsExist(db, "telegram_funding_mutations", [
+      "review_receipt_id",
+      "review_quote_id",
+    ])) &&
+    (await constraintDefinitionIncludes(
+      db,
+      "public.telegram_funding_mutations",
+      "telegram_funding_mutations_action_check",
+      ["review_conversion"],
+    )) &&
+    (await constraintDefinitionIncludes(
+      db,
+      "public.telegram_funding_mutations",
+      "telegram_funding_mutations_action_shape_check",
+      [
+        "review_conversion",
+        "review_receipt_id is not null",
+        "review_quote_id is not null",
+      ],
+    )) &&
+    (await constraintDefinitionIncludes(
+      db,
+      "public.telegram_funding_mutations",
+      "telegram_funding_mutations_review_receipt_fk",
+      [
+        "foreign key (review_receipt_id)",
+        "references funding_receive_receipts(id)",
+      ],
+    )) &&
+    (await constraintDefinitionIncludes(
+      db,
+      "public.telegram_funding_mutations",
+      "telegram_funding_mutations_review_quote_fk",
+      ["foreign key (review_quote_id)", "references funding_quotes(id)"],
+    ));
+  const hasDelegatedFundingWalletRetentionObjects =
+    hasDelegatedFundingWalletRetentionBase &&
+    hasTelegramFundingAddressDeliveryProof &&
+    hasTelegramFundingQrOutboxShape &&
+    hasTelegramFundingSafeRelinkRearm &&
+    hasTelegramFundingReviewMutationEvidence;
   const hasTelegramFundingActiveBuyReturn =
     hasTelegramFundingSessions &&
     (await columnExists(
@@ -572,11 +846,31 @@ export async function inspectFundingMigrationPreflight(
     ));
   const hasFundingReceiptVariantMatcher =
     hasTelegramFundingBuyReturns &&
-    (await functionDefinitionIncludes(
+    ((await functionDefinitionIncludes(
       db,
       "funding_receive_receipt_matches_frozen_variant",
-      ["receive_session_id", "user_id", "variant_id", "destination_address"],
-    ));
+      [
+        "receive_session_id",
+        "user_id",
+        "variant_id",
+        "funding_account_identifier_equal",
+        "candidate.network_id",
+        "candidate.asset_id",
+        "candidate.destination_address",
+      ],
+    )) ||
+      (await functionDefinitionIncludes(
+        db,
+        "funding_receive_receipt_matches_frozen_variant",
+        [
+          "receive_session_id",
+          "user_id",
+          "variant_id",
+          "candidate.network_id ~",
+          "candidate.asset_id ~",
+          "candidate.destination_address ~",
+        ],
+      )));
   const hasTelegramBuyIndexes =
     (await relationExists(
       db,
@@ -842,6 +1136,13 @@ export async function inspectFundingMigrationPreflight(
       hasDelegatedFundingExecutionObjects,
       "Delegated funding execution objects exist before 0204 is recorded",
     ],
+    [
+      MIGRATION_0206,
+      hasDelegatedFundingWalletRetentionObjects,
+      "0206 is recorded but delegated funding wallet retention objects are incomplete",
+      hasDelegatedFundingWalletRetentionObjects,
+      "Delegated funding wallet retention objects exist before 0206 is recorded",
+    ],
   ] as const;
   const partialObjects = migrationDriftChecks.flatMap(
     ([migration, complete, incompleteMessage, present, presentMessage]) =>
@@ -895,6 +1196,34 @@ export async function inspectFundingMigrationPreflight(
         `,
       )
     : null;
+  const unresolvedAddressDisclosureWithoutEditTarget =
+    hasTelegramFundingAddressDeliveryProof
+      ? await optionalCount(
+          db,
+          `
+            select count(*)::text as count
+            from telegram_funding_sessions
+            where address_disclosure_attempt_revision >
+                  address_redacted_revision
+              and address_disclosure_message_id is null
+          `,
+        )
+      : null;
+  const malformedReceiveReviewEvidence =
+    appliedSet.has(MIGRATION_0206) && hasFundingReceiveReviewEvidenceValidator
+      ? await optionalCount(
+          db,
+          `
+            select count(*)::text as count
+            from funding_receive_receipts
+            where status = 'review_required'
+              and child_funding_operation_id is null
+              and evidence ? 'reviewContinuation'
+              and evidence ? 'reviewQuotePlan'
+              and not funding_receive_review_evidence_is_valid(evidence)
+          `,
+        )
+      : null;
 
   const operational = {
     invalidIndexes: await optionalCount(
@@ -935,6 +1264,9 @@ export async function inspectFundingMigrationPreflight(
     !appliedSet.has(MIGRATION_0204)
       ? "0204 delegated funding execution migration is not recorded"
       : null,
+    !appliedSet.has(MIGRATION_0206)
+      ? "0206 delegated funding wallet retention migration is not recorded"
+      : null,
     !hasBridgeOrders ? "bridge_orders table is absent" : null,
     bridgeUnknown > 0
       ? `${bridgeUnknown} legacy bridge orders have unknown adapter class`
@@ -955,6 +1287,10 @@ export async function inspectFundingMigrationPreflight(
     duplicatePhysicalKeys != null && duplicatePhysicalKeys > 0
       ? `${duplicatePhysicalKeys} duplicate physical observation keys block 0195`
       : null,
+    unresolvedAddressDisclosureWithoutEditTarget != null &&
+    unresolvedAddressDisclosureWithoutEditTarget > 0
+      ? `${unresolvedAddressDisclosureWithoutEditTarget} Telegram funding address disclosures lack a redaction edit target`
+      : null,
     operational.invalidIndexes != null && operational.invalidIndexes > 0
       ? `${operational.invalidIndexes} invalid indexes`
       : null,
@@ -973,6 +1309,8 @@ export async function inspectFundingMigrationPreflight(
     observationDuplicatePhysicalKeys: duplicatePhysicalKeys,
     observationIdentityConstraint,
     operational,
+    malformedReceiveReviewEvidence,
+    unresolvedAddressDisclosureWithoutEditTarget,
     partialObjects,
     recoveryIdentity: {
       observations: observationsBefore0194,
@@ -981,6 +1319,8 @@ export async function inspectFundingMigrationPreflight(
     },
     telegramBuyContinuationObjects: hasTelegramBuyContinuationObjects,
     delegatedFundingExecutionObjects: hasDelegatedFundingExecutionObjects,
+    delegatedFundingWalletRetentionObjects:
+      hasDelegatedFundingWalletRetentionObjects,
     telegramOpenMutationConstraints: hasTelegramOpenMutationConstraints,
   };
 }
@@ -997,6 +1337,9 @@ function formatHuman(report: FundingMigrationPreflightReport): string {
     `0201 Telegram open mutation constraints: ${report.telegramOpenMutationConstraints ? "ready" : "missing"}`,
     `0203 Telegram Buy continuation objects: ${report.telegramBuyContinuationObjects ? "ready" : "missing"}`,
     `0204 delegated funding execution objects: ${report.delegatedFundingExecutionObjects ? "ready" : "missing"}`,
+    `0206 delegated funding wallet retention objects: ${report.delegatedFundingWalletRetentionObjects ? "ready" : "missing"}`,
+    `Malformed receive review evidence: ${report.malformedReceiveReviewEvidence ?? "n/a"}`,
+    `Unresolved address disclosures without edit target: ${report.unresolvedAddressDisclosureWithoutEditTarget ?? "n/a"}`,
     `Operational: ${JSON.stringify(report.operational)}`,
     ...(report.blockers.length > 0
       ? ["Blockers:", ...report.blockers.map((blocker) => `- ${blocker}`)]

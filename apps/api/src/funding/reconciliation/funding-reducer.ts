@@ -1280,6 +1280,25 @@ async function awaitingUnbroadcastActionReport(
   return Boolean(result.rows[0]?.awaiting_report);
 }
 
+async function unbroadcastActionExpiresAt(
+  client: Pick<PoolClient, "query">,
+  operationId: string,
+): Promise<Date | null> {
+  const result = await client.query<{ expires_at: Date | null }>(
+    `
+      select case
+        when count(*) = 0 or bool_or(action_expires_at is null) then null
+        else max(action_expires_at)
+      end as expires_at
+      from funding_operation_steps
+      where operation_id = $1
+        and state in ('planned', 'action_required')
+    `,
+    [operationId],
+  );
+  return result.rows[0]?.expires_at ?? null;
+}
+
 async function synchronizeFundingReconciliationActiveWindow(
   pool: Pool,
   input: Readonly<{
@@ -1460,7 +1479,7 @@ async function loadFundingOperationState(
     state: FundingOperationState;
     recoveryMode: FundingRecoveryMode | null;
     awaitingUnbroadcastActionReport: boolean;
-    expiresAt: Date;
+    unbroadcastActionExpiresAt: Date | null;
   }>
 > {
   return tx(pool, async (client) => {
@@ -1478,7 +1497,10 @@ async function loadFundingOperationState(
         client,
         operation.id,
       ),
-      expiresAt: operation.expiresAt,
+      unbroadcastActionExpiresAt: await unbroadcastActionExpiresAt(
+        client,
+        operation.id,
+      ),
     };
   });
 }
@@ -1494,12 +1516,18 @@ async function expireUnbroadcastActionWait(
     );
     if (
       !operation ||
-      operation.expiresAt.getTime() > input.now.getTime() ||
       ["completed", "refunded", "failed", "cancelled"].includes(
         operation.status,
       ) ||
       !(await awaitingUnbroadcastActionReport(client, operation.id))
     ) {
+      return false;
+    }
+    const actionExpiresAt = await unbroadcastActionExpiresAt(
+      client,
+      operation.id,
+    );
+    if (!actionExpiresAt || actionExpiresAt.getTime() > input.now.getTime()) {
       return false;
     }
     const unsafe = await client.query<{ unsafe: boolean }>(
@@ -1670,7 +1698,9 @@ async function processLease(
     );
     if (
       operationBeforePoll.awaitingUnbroadcastActionReport &&
-      operationBeforePoll.expiresAt.getTime() <= options.now.getTime() &&
+      operationBeforePoll.unbroadcastActionExpiresAt !== null &&
+      operationBeforePoll.unbroadcastActionExpiresAt.getTime() <=
+        options.now.getTime() &&
       (await expireUnbroadcastActionWait(pool, {
         operationId: lease.operationId,
         now: options.now,

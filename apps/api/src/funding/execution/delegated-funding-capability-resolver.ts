@@ -2,8 +2,8 @@ import type { Pool } from "@hunch/infra";
 
 import {
   lockFundingPolicyForTransaction,
-  resolveFundingPolicy,
-} from "../policies/funding-policy-service.js";
+  resolveFundingControlPlaneSnapshot,
+} from "../policies/funding-policy-sidecar.js";
 import {
   loadPolymarketWrapExecutionConfiguration,
   polymarketWrapExecutorEnvironmentReady,
@@ -46,7 +46,7 @@ export async function resolveTelegramPolymarketWrapCapability(
   const configuration =
     input.configuration ?? loadPolymarketWrapExecutionConfiguration();
   if (input.lock) await lockFundingPolicyForTransaction(db);
-  const policy = await resolveFundingPolicy(db);
+  const policy = await resolveFundingControlPlaneSnapshot(db);
   const authority = await resolveCurrentTelegramFundingAuthority(db, {
     userId: input.userId,
     telegramAccountId: input.telegramAccountId,

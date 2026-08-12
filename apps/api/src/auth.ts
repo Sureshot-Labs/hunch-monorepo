@@ -795,10 +795,6 @@ export class AuthService {
     const matchedUserIds = new Set<string>();
     const matchedWalletAddresses = new Set<string>();
     for (const wallet of privyWallets) {
-      const match = ETH_ADDRESS_RE.test(wallet.address)
-        ? "lower(wallet_address) = lower($2)"
-        : "wallet_address = $2";
-
       const owner = await client.query<{
         is_active: boolean;
         user_id: string;
@@ -807,7 +803,11 @@ export class AuthService {
            FROM user_wallets
            JOIN users ON users.id = user_wallets.user_id
            WHERE wallet_type = $1
-             AND ${match}
+             AND funding_account_identifier_equal(
+                   wallet_type,
+                   wallet_address,
+                   $2
+                 )
            LIMIT 2`,
         [wallet.walletType, wallet.address],
       );
@@ -1075,8 +1075,8 @@ export class AuthService {
       await blockTelegramBotTradingLinkGeneration(client, params.userId);
       await client.query(
         `UPDATE telegram_funding_authorizations
-            SET revoked_at = now(),
-                updated_at = now()
+            SET revoked_at = greatest(granted_at, now()),
+                updated_at = greatest(granted_at, now())
           WHERE user_id = $1
             AND telegram_account_id = $2
             AND revoked_at IS NULL`,
@@ -1197,9 +1197,7 @@ export class AuthService {
 
       for (const wallet of privyWallets) {
         const match =
-          wallet.walletType === "ethereum"
-            ? "lower(wallet_address) = lower($2)"
-            : "wallet_address = $2";
+          "funding_account_identifier_equal($1, wallet_address, $2)";
         const conflict = await client.query<{ user_id: string }>(
           `SELECT user_id
              FROM user_wallets
@@ -1253,6 +1251,15 @@ export class AuthService {
 
       if (walletIdsToDelete.length > 0) {
         await client.query(
+          `UPDATE telegram_funding_authorizations
+              SET revoked_at = greatest(granted_at, now()),
+                  updated_at = greatest(granted_at, now())
+            WHERE user_id = $1
+              AND user_wallet_id = ANY($2::uuid[])
+              AND revoked_at IS NULL`,
+          [userId, walletIdsToDelete],
+        );
+        await client.query(
           `DELETE FROM user_venue_credentials
              WHERE user_id = $1
                AND wallet_address IN (
@@ -1276,9 +1283,8 @@ export class AuthService {
         const walletSource = profile?.source ?? "unknown";
         const isInternalWallet = profile?.isInternalWallet ?? false;
         const privyWalletId = profile?.walletId?.trim() || null;
-        const match = ETH_ADDRESS_RE.test(wallet.address)
-          ? "lower(wallet_address) = lower($2)"
-          : "wallet_address = $2";
+        const match =
+          "funding_account_identifier_equal($3, wallet_address, $2)";
 
         const existingWallet = await client.query<{
           id: string;
@@ -1286,7 +1292,7 @@ export class AuthService {
           is_verified: boolean;
         }>(
           `SELECT id, wallet_type, is_verified FROM user_wallets WHERE user_id = $1 AND ${match} LIMIT 1`,
-          [userId, wallet.address],
+          [userId, wallet.address, wallet.walletType],
         );
 
         if (existingWallet.rows.length === 0) {
@@ -1339,12 +1345,19 @@ export class AuthService {
         [userId],
       );
 
-      const primaryMatch = ETH_ADDRESS_RE.test(primaryWalletAddress)
-        ? "lower(wallet_address) = lower($2)"
-        : "wallet_address = $2";
+      const primaryWalletType =
+        privyWallets.find((wallet) => wallet.address === primaryWalletAddress)
+          ?.walletType ?? "ethereum";
       await client.query(
-        `UPDATE user_wallets SET is_primary = true WHERE user_id = $1 AND ${primaryMatch}`,
-        [userId, primaryWalletAddress],
+        `UPDATE user_wallets
+            SET is_primary = true
+          WHERE user_id = $1
+            AND funding_account_identifier_equal(
+                  $3,
+                  wallet_address,
+                  $2
+                )`,
+        [userId, primaryWalletAddress, primaryWalletType],
       );
     } else {
       // Create new user
@@ -1456,12 +1469,17 @@ export class AuthService {
       await client.query("BEGIN");
 
       // Check if user exists with this wallet
-      const isEth = ETH_ADDRESS_RE.test(walletAddress);
-      const walletMatch = isEth
-        ? "lower(wallet_address) = lower($1)"
-        : "wallet_address = $1";
       const walletResult = await client.query(
-        `SELECT user_id FROM user_wallets WHERE ${walletMatch}`,
+        `SELECT user_id
+           FROM user_wallets
+          WHERE funding_account_identifier_equal(
+                  case
+                    when wallet_type = 'ethereum' then 'ethereum'
+                    else wallet_type
+                  end,
+                  wallet_address,
+                  $1
+                )`,
         [walletAddress],
       );
 
@@ -1580,6 +1598,7 @@ export class AuthService {
     const ownsTransaction = transactionClient == null;
     try {
       if (ownsTransaction) await client.query("BEGIN");
+      await lockTelegramFundingLinkLifecycle(client, userId);
       const userResult = await client.query<{
         id: string;
         privy_user_id: string | null;
@@ -1669,6 +1688,16 @@ export class AuthService {
       );
       await client.query(
         `
+          update telegram_funding_authorizations
+          set revoked_at = greatest(granted_at, now()),
+              updated_at = greatest(granted_at, now())
+          where user_id = $1
+            and revoked_at is null
+        `,
+        [userId],
+      );
+      await client.query(
+        `
           update telegram_bot_trading_authorizations
           set enabled = false,
               disabled_at = coalesce(disabled_at, now()),
@@ -1751,14 +1780,11 @@ export class AuthService {
     walletAddress: string,
   ): Promise<UserWallet | null> {
     const normalized = walletAddress.trim();
-    const isEth = /^0x[a-fA-F0-9]{40}$/.test(normalized);
-
     const result = await pool.query<UserWalletRow>(
       `SELECT ${USER_WALLET_COLUMNS}
        FROM user_wallets
-       WHERE user_id = $1 AND ${
-         isEth ? "lower(wallet_address) = lower($2)" : "wallet_address = $2"
-       }
+       WHERE user_id = $1
+         AND funding_account_identifier_equal(wallet_type, wallet_address, $2)
        LIMIT 1`,
       [userId, normalized],
     );
@@ -1781,12 +1807,11 @@ export class AuthService {
     try {
       await client.query("BEGIN");
 
-      const isEth = ETH_ADDRESS_RE.test(input.walletAddress);
-      const match = isEth
-        ? "lower(wallet_address) = lower($2)"
-        : "wallet_address = $2";
       const existingWallet = await client.query<{ id: string }>(
-        `SELECT id FROM user_wallets WHERE wallet_type = $1 AND ${match}`,
+        `SELECT id
+           FROM user_wallets
+          WHERE wallet_type = $1
+            AND funding_account_identifier_equal($1, wallet_address, $2)`,
         [input.walletType, input.walletAddress],
       );
 
@@ -1829,13 +1854,12 @@ export class AuthService {
     name: string | null,
   ): Promise<UserWallet> {
     const normalized = walletAddress.trim();
-    const isEth = ETH_ADDRESS_RE.test(normalized);
     const result = await pool.query<UserWalletRow>(
       `UPDATE user_wallets
        SET name = $3,
            updated_at = now()
        WHERE user_id = $1
-         AND ${isEth ? "lower(wallet_address) = lower($2)" : "wallet_address = $2"}
+         AND funding_account_identifier_equal(wallet_type, wallet_address, $2)
        RETURNING ${USER_WALLET_COLUMNS}`,
       [userId, normalized, name],
     );
@@ -1861,15 +1885,11 @@ export class AuthService {
       await client.query("BEGIN");
 
       const normalized = walletAddress.trim();
-      const isEth = ETH_ADDRESS_RE.test(normalized);
-      const match = isEth
-        ? "lower(wallet_address) = lower($2)"
-        : "wallet_address = $2";
-
       const targetResult = await client.query<UserWalletRow>(
         `SELECT ${USER_WALLET_COLUMNS}
          FROM user_wallets
-         WHERE user_id = $1 AND ${match}
+         WHERE user_id = $1
+           AND funding_account_identifier_equal(wallet_type, wallet_address, $2)
          LIMIT 1`,
         [userId, normalized],
       );
@@ -1907,12 +1927,20 @@ export class AuthService {
             where action.user_id = $1
               and action.status not in ('completed', 'failed', 'cancelled')
               and (
-                lower(action.owner_address) = lower($2)
-                or lower(action.execution_address) = lower($2)
+                funding_account_identifier_equal(
+                  $3,
+                  action.owner_address,
+                  $2
+                )
+                or funding_account_identifier_equal(
+                  $3,
+                  action.execution_address,
+                  $2
+                )
               )
           ) as active
         `,
-        [userId, target.wallet_address],
+        [userId, target.wallet_address, target.wallet_type],
       );
       if (activePositionAction.rows[0]?.active) {
         throw new WalletUnlinkNotAllowedError(
@@ -2035,7 +2063,11 @@ export class AuthService {
           from user_venue_credentials
           where user_id = $1
             and venue = $2
-            and lower(wallet_address) = lower($3)
+            and funding_account_identifier_equal(
+                  'ethereum',
+                  wallet_address,
+                  $3
+                )
           order by
             last_used_at desc nulls last,
             updated_at desc,
@@ -2098,7 +2130,11 @@ export class AuthService {
               updated_at = now()
           where user_id = $1
             and venue = $2
-            and lower(wallet_address) = lower($3)
+            and funding_account_identifier_equal(
+                  'ethereum',
+                  wallet_address,
+                  $3
+                )
             and id <> $4
             and is_active = true
         `,
@@ -2737,7 +2773,7 @@ function buildWalletAddressMatch(
 ): { normalizedWallet: string; clause: string } {
   const normalizedWallet = normalizeWalletForStorage(walletAddress);
   const clause = isEvmAddress(normalizedWallet)
-    ? `lower(${columnName}) = lower($${parameterIndex})`
+    ? `funding_account_identifier_equal('ethereum', ${columnName}, $${parameterIndex})`
     : `${columnName} = $${parameterIndex}`;
   return { normalizedWallet, clause };
 }

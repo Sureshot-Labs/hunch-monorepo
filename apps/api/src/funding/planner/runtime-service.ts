@@ -1,18 +1,25 @@
 import type { Pool, PoolClient } from "@hunch/infra";
 
-import { buildAccountValueReadModel } from "../../account-value/runtime-service.js";
+import {
+  buildAccountValueReadModel,
+  type AccountValueReadModel,
+} from "../../account-value/runtime-service.js";
 import { stableOpaqueId } from "../../account-value/canonical.js";
 import {
   resolveTradeMarketByRef,
   resolveTradeMarketOutcomeIdentity,
   type ApiTradeMarket,
 } from "../../services/api-trading-market-repo.js";
-import { canonicalJsonHash, lookupHmac } from "../persistence/canonical.js";
 import {
-  commitFundingOperation,
+  canonicalJsonHash,
+  fundingSubjectLookupHmac,
+} from "../persistence/canonical.js";
+import {
   commitFundingOperationInTransaction,
+  createFundingQuote,
   fetchFundingOperationForUser,
   listFundingOperationsForUser,
+  type FundingQuoteCommitScope,
 } from "../persistence/funding-operation-repository.js";
 import { listFundingOperationStepsForUser } from "../persistence/funding-evidence-repository.js";
 import {
@@ -38,11 +45,15 @@ import type {
   FundingQuoteRequest,
   IntentLiquidityProjection,
   PreparationPurpose,
+  WalletExecutionProfile,
 } from "../domain/types.js";
 import type { PreparationResult } from "../domain/contracts.js";
 import { FundingPlanner } from "./planner.js";
 import { FundingQuoteService } from "./quote-service.js";
-import { FundingOperationService } from "./operation-service.js";
+import {
+  FundingOperationService,
+  type PreparedFundingOperationCommit,
+} from "./operation-service.js";
 import {
   canonicalMarketUpdatedAt,
   matchesCanonicalMarketIdentity,
@@ -59,9 +70,46 @@ import {
 } from "../execution/operation-action-runtime.js";
 import { WithdrawalDestinationRuntime } from "../execution/withdrawal-destination-runtime.js";
 import { sameAsset } from "../domain/asset-identity.js";
+import {
+  verifyAdaptedFundingSourceCommit,
+  type FundingSourceAdapter,
+} from "./source-adapter.js";
+import { lockFundingControllerWallet } from "../execution/funding-controller-wallet-lock.js";
 
-const SUBJECT_FINGERPRINT_DOMAIN = "hunch:funding:subject:v1:";
 const PREPARATION_RUN_TTL_MS = 15 * 60_000;
+
+function productionFundingSourceAdapters(
+  account: AccountValueReadModel,
+): readonly FundingSourceAdapter[] {
+  return [
+    new PolymarketFundingSourceAdapter(account),
+    new DirectIngressFundingSourceAdapter(account),
+  ];
+}
+
+function durableControllerProfiles(
+  account: AccountValueReadModel,
+): readonly WalletExecutionProfile[] {
+  const byController = new Map<string, WalletExecutionProfile>();
+  for (const profile of account.ownership?.wallets ?? []) {
+    if (
+      profile.source === "smart" ||
+      !profile.controllerWalletRef ||
+      byController.has(profile.controllerWalletRef)
+    ) {
+      continue;
+    }
+    byController.set(profile.controllerWalletRef, profile);
+  }
+  return [...byController.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([, profile]) => profile);
+}
+
+export type PreparedFundingRuntimeCommit = Readonly<{
+  operation: PreparedFundingOperationCommit;
+  service: FundingOperationService;
+}>;
 
 export type FundingDestinationQuery = Readonly<{
   purpose: "fund" | "buy" | "sell" | "redeem" | "withdraw";
@@ -334,10 +382,11 @@ export class FundingPlanningRuntime {
     const resolvedPolicy = await resolveFundingPolicy(this.db);
     const sourcePlannerPromise = accountPromise.then(
       (account) =>
-        new ProductionFundingSourcePlanner(this.db, account, [
-          new PolymarketFundingSourceAdapter(account),
-          new DirectIngressFundingSourceAdapter(account),
-        ]),
+        new ProductionFundingSourcePlanner(
+          this.db,
+          account,
+          productionFundingSourceAdapters(account),
+        ),
     );
     const planner = new FundingPlanner({
       listDestinations: async ({ accountId, request, marketContext }) =>
@@ -446,7 +495,12 @@ export class FundingPlanningRuntime {
     });
   }
 
-  async quote(userId: string, request: FundingQuoteRequest) {
+  private async quoteUsing(
+    userId: string,
+    request: FundingQuoteRequest,
+    createQuote?: typeof createFundingQuote,
+    commitScope?: FundingQuoteCommitScope,
+  ) {
     const [resolvedPolicy, account] = await Promise.all([
       resolveFundingPolicy(this.db),
       buildAccountValueReadModel({ pool: this.db, userId }),
@@ -457,20 +511,34 @@ export class FundingPlanningRuntime {
       revalidateWithdrawalRecipient: async (ownerId, recipientId) => {
         await this.withdrawalRuntime.resolve(ownerId, recipientId);
       },
+      ...(createQuote ? { createQuote } : {}),
     }).quote({
       userId,
       request,
       policy: resolvedPolicy.runtime,
       policyRevision: resolvedPolicy.revision,
       ownershipRevision: account.ownershipEvidenceRevision,
+      ...(commitScope ? { commitScope } : {}),
     });
   }
 
-  private async commitUsing(
+  async quote(userId: string, request: FundingQuoteRequest) {
+    return this.quoteUsing(userId, request);
+  }
+
+  async quoteForCommitScope(
+    userId: string,
+    request: FundingQuoteRequest,
+    commitScope: FundingQuoteCommitScope,
+  ) {
+    return this.quoteUsing(userId, request, undefined, commitScope);
+  }
+
+  async prepareCommit(
     userId: string,
     request: FundingCommitRequest,
-    commitOperation?: typeof commitFundingOperation,
-  ) {
+    options: Readonly<{ commitScope?: FundingQuoteCommitScope }> = {},
+  ): Promise<PreparedFundingRuntimeCommit> {
     const [resolvedPolicy, account] = await Promise.all([
       resolveFundingPolicy(this.db),
       buildAccountValueReadModel({ pool: this.db, userId }),
@@ -485,44 +553,47 @@ export class FundingPlanningRuntime {
         "funding subject fingerprint key is not configured",
       );
     }
-    return new FundingOperationService({
+    const sourceAdapters = productionFundingSourceAdapters(account);
+    const controllerProfiles = durableControllerProfiles(account);
+    const service = new FundingOperationService({
       db: this.db,
-      ...(commitOperation ? { commitOperation } : {}),
       subjectLookupHmac: (subjectUserId) =>
-        lookupHmac(`${SUBJECT_FINGERPRINT_DOMAIN}${subjectUserId}`, lookupKey),
+        fundingSubjectLookupHmac(subjectUserId, lookupKey),
       subjectLookupKeyVersion: keyVersion,
-      resolveOwnershipRevision: async (subjectUserId) =>
-        (
-          await buildAccountValueReadModel({
-            pool: this.db,
-            userId: subjectUserId,
-          })
-        ).ownershipEvidenceRevision,
+      verifySourceCommit: async (client, input) => {
+        for (const profile of controllerProfiles) {
+          await lockFundingControllerWallet(client, input.userId, profile);
+        }
+        await verifyAdaptedFundingSourceCommit(sourceAdapters, client, input);
+      },
       revalidateWithdrawalRecipient: async (db, input) => {
         await this.withdrawalRuntime.resolve(input.userId, input.recipientId, {
           db,
           lockForShare: true,
         });
       },
-    }).commit({
+    });
+    const operation = await service.prepare({
       userId,
       request,
       policy: resolvedPolicy.runtime,
       policyRevision: resolvedPolicy.revision,
       ownershipRevision: account.ownershipEvidenceRevision,
+      ...(options.commitScope ? { commitScope: options.commitScope } : {}),
     });
+    return { operation, service };
   }
 
-  commit(userId: string, request: FundingCommitRequest) {
-    return this.commitUsing(userId, request);
+  async commit(userId: string, request: FundingCommitRequest) {
+    const prepared = await this.prepareCommit(userId, request);
+    return prepared.service.commitPrepared(prepared.operation);
   }
 
-  commitInTransaction(
+  commitPreparedInTransaction(
     client: PoolClient,
-    userId: string,
-    request: FundingCommitRequest,
+    prepared: PreparedFundingRuntimeCommit,
   ) {
-    return this.commitUsing(userId, request, (_db, input) =>
+    return prepared.service.commitPrepared(prepared.operation, (_db, input) =>
       commitFundingOperationInTransaction(client, input),
     );
   }

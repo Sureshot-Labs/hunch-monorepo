@@ -1,11 +1,8 @@
 import type { Pool } from "@hunch/infra";
-import { Interface, ZeroAddress } from "ethers";
+import { ZeroAddress } from "ethers";
 
 import type { AccountValueReadModel } from "../../account-value/runtime-service.js";
-import {
-  multiplyRawByUnitPrice,
-  scaleUnsignedDecimalByRawRatio,
-} from "../../account-value/decimal.js";
+import { scaleUnsignedDecimalByRawRatio } from "../../account-value/decimal.js";
 import { stableOpaqueId } from "../../account-value/canonical.js";
 import { createRelayReferenceCodec } from "../../funding-providers/relay/reference-codec.js";
 import {
@@ -16,25 +13,21 @@ import {
 import {
   isRelayPinnedStableAsset,
   RELAY_PINNED_ASSETS,
-  RELAY_ROUTE_SPECS,
-  type RelayRouteSpec,
+  resolveRelayRouteSpec,
 } from "../../funding-providers/relay/mappings.js";
 import {
   RelayQuoteEconomicsError,
   RelayQuoteValidationError,
   RelayWalletQuoteAdapter,
 } from "../../funding-providers/relay/wallet-adapter.js";
-import { RelayPinnedActionValidator } from "../../funding-providers/relay/action-validator.js";
+import { buildRelayPlanningQuote } from "../../funding-providers/relay/operation-plan.js";
+export { buildPolymarketPreRouteHandoffSteps } from "../../funding-providers/relay/operation-plan.js";
 import { getCredentialsEncryptionKey } from "../../lib/credentials-encryption.js";
 import type {
   AssetLocation,
   AssetRef,
-  ExternalHandoffAction,
   FundingDiscoveryRequest,
-  FundingExecutionPlan,
-  JsonValue,
   Money,
-  NormalizedAction,
   FundingReasonCode,
   WalletExecutionProfile,
 } from "../domain/types.js";
@@ -47,11 +40,7 @@ import {
   fetchFundingRouteExperience,
   fundingRouteExperienceFingerprint,
 } from "../persistence/route-experience-repository.js";
-import { canonicalJsonHash } from "../persistence/canonical.js";
-import {
-  PRIVY_USER_AUTHORIZED_EVM_SPONSORSHIP_POLICY_ID,
-  resolveActionSponsorship,
-} from "../execution/sponsorship-policy.js";
+import { PRIVY_USER_AUTHORIZED_EVM_SPONSORSHIP_POLICY_ID } from "../execution/sponsorship-policy.js";
 import {
   FundingPlannerError,
   assertSameAsset,
@@ -75,22 +64,15 @@ import type {
   FundingSourcePlanningInput,
 } from "./source-adapter.js";
 import { listAdaptedFundingSources } from "./source-adapter.js";
-import { groupWalletExecutableActions } from "./evm-action-batching.js";
 import {
   canonicalAssetId,
   sameAccountAddress,
 } from "../domain/asset-identity.js";
 import { SOLANA_NATIVE_EXECUTION_RESERVE_LAMPORTS } from "../domain/network-fees.js";
-import { operationPurposeForExternalRecipient } from "../domain/withdrawal-binding.js";
 import { withWithdrawalPlanningContract } from "../domain/withdrawal-contract.js";
 import { parsePositiveInteger } from "../runtime/positive-integer.js";
 
 const ROUTE_EXPERIENCE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1_000;
-const POLYMARKET_DEPOSIT_WALLET_HANDOFF_EXECUTOR_ID =
-  "polymarket_deposit_wallet_relayer_v1";
-const ERC20_TRANSFER_INTERFACE = new Interface([
-  "function transfer(address recipient,uint256 amount)",
-]);
 
 export function fundingSourceInventoryBlockingReasonCodes(
   errors: readonly Readonly<{
@@ -103,10 +85,6 @@ export function fundingSourceInventoryBlockingReasonCodes(
   )
     ? ["rpc_unavailable"]
     : [];
-}
-
-function jsonRecord(value: unknown): Readonly<Record<string, JsonValue>> {
-  return value as Readonly<Record<string, JsonValue>>;
 }
 
 function detail(location: AssetLocation, key: string): string | null {
@@ -263,16 +241,6 @@ function isSolanaNativeAsset(asset: AssetRef): boolean {
   );
 }
 
-function stableUsdValue(amount: Money): string | null {
-  return isRelayPinnedStableAsset(amount.asset)
-    ? multiplyRawByUnitPrice({
-        raw: amount.raw,
-        decimals: amount.asset.decimals,
-        unitPriceUsd: "1",
-      })
-    : null;
-}
-
 function rescaleStableRaw(
   raw: string,
   sourceDecimals: number,
@@ -293,34 +261,6 @@ function rescaleStableRaw(
   return ((source + divisor - 1n) / divisor).toString();
 }
 
-function routeSpec(
-  route: FundingRuntimePolicy["routes"][number],
-): RelayRouteSpec {
-  const exactById = RELAY_ROUTE_SPECS[route.routeId];
-  if (
-    exactById &&
-    sameAsset(exactById.source, route.sourceAsset) &&
-    sameAsset(exactById.destination, route.destinationAsset)
-  ) {
-    return exactById;
-  }
-  const matches = Object.values(RELAY_ROUTE_SPECS).filter(
-    (spec) =>
-      sameAsset(spec.source, route.sourceAsset) &&
-      sameAsset(spec.destination, route.destinationAsset),
-  );
-  if (matches.length !== 1) {
-    throw new Error(
-      "enabled Relay route does not map to one pinned rehearsal route",
-    );
-  }
-  const match = matches[0];
-  if (!match) {
-    throw new Error("enabled Relay route mapping disappeared");
-  }
-  return match;
-}
-
 function destinationAddress(destination: ResolvedRouteDestination): string {
   const address =
     destination.target.kind === "owned_location"
@@ -328,29 +268,6 @@ function destinationAddress(destination: ResolvedRouteDestination): string {
       : destination.recipientAddress;
   if (!address) throw new Error("funding destination address is unavailable");
   return address;
-}
-
-function executionPlan(input: {
-  quote: Awaited<ReturnType<RelayWalletQuoteAdapter["quote"]>>;
-  route: FundingRuntimePolicy["routes"][number];
-}): FundingExecutionPlan {
-  return {
-    kind: "wallet_route",
-    segments: [
-      {
-        segmentId: `segment_${canonicalJsonHash({
-          requestFingerprint: input.quote.requestFingerprint,
-          routeId: input.route.routeId,
-        }).slice(0, 32)}`,
-        providerId: "relay",
-        adapterId: input.route.adapterId,
-        adapterVersion: input.route.adapterVersion,
-        source: input.quote.candidate.source,
-        destination: input.quote.candidate.destination,
-        amountMode: input.quote.candidate.amountMode,
-      },
-    ],
-  };
 }
 
 function sourceFactsForComponent(input: {
@@ -640,189 +557,6 @@ export function deriveProductionRelayEligibleSourceFacts(input: {
     );
   }
   return facts;
-}
-
-async function validatedSteps(input: {
-  actions: readonly NormalizedAction[];
-  minimumOutput: Money;
-  policyRevision: string;
-  quoteCorrelationId: string;
-  route: FundingRuntimePolicy["routes"][number];
-  sourceAmount: Money;
-  profile: WalletExecutionProfile;
-}) {
-  const validatedByActionId = new Map<
-    string,
-    Awaited<ReturnType<RelayPinnedActionValidator["validate"]>>
-  >();
-  for (const action of input.actions) {
-    const validator = new RelayPinnedActionValidator(action);
-    const signerWalletId =
-      action.kind === "evm_transaction"
-        ? action.senderWalletId
-        : action.kind === "svm_transaction"
-          ? action.signerWalletId
-          : "";
-    const validated = await validator.validate(action, {
-      operationId: input.quoteCorrelationId,
-      expectedState: { status: "in_progress", stage: "committed" },
-      expectedNetworkId: action.networkId,
-      expectedSignerWalletId: signerWalletId,
-      sourceAmount: input.sourceAmount,
-      minimumOutput: input.minimumOutput,
-      policyRevision: input.policyRevision,
-      routeId: input.route.routeId,
-    });
-    resolveActionSponsorship({
-      action,
-      profile: input.profile,
-    });
-    validatedByActionId.set(action.actionId, validated);
-  }
-
-  const groups = groupWalletExecutableActions({
-    actions: input.actions,
-    profile: input.profile,
-  });
-  return groups.map(({ action, sourceActions }, ordinal) => {
-    const validations = sourceActions.map((sourceAction) => {
-      const validation = validatedByActionId.get(sourceAction.actionId);
-      if (!validation) {
-        throw new Error("validated Relay action is missing from atomic group");
-      }
-      return validation;
-    });
-    const sponsorship = resolveActionSponsorship({
-      action,
-      profile: input.profile,
-    });
-    const validation =
-      validations.length === 1
-        ? validations[0]
-        : {
-            validatorId: "relay_evm_atomic_batch_v1",
-            validationRevision: canonicalJsonHash(
-              validations.map((entry) => entry.validationRevision),
-            ),
-            validatedAt: validations.reduce(
-              (latest, entry) =>
-                entry.validatedAt > latest ? entry.validatedAt : latest,
-              "",
-            ),
-            sourceActionValidations: validations.map((entry) => ({
-              actionId: entry.action.actionId,
-              validatorId: entry.validatorId,
-              validationRevision: entry.validationRevision,
-              validatedAt: entry.validatedAt,
-            })),
-          };
-    return {
-      ordinal,
-      segmentOrdinal: 0,
-      stepKind: "transaction" as const,
-      state: "action_required" as const,
-      actionFingerprint: canonicalJsonHash(action),
-      executorId: input.route.networkExecutorId,
-      payerRequirement: sponsorship.payerRequirement,
-      dependsOnOrdinal: ordinal === 0 ? null : ordinal - 1,
-      normalizedAction: jsonRecord(action),
-      actionValidationResult: jsonRecord({
-        ...validation,
-        signerAddress: input.profile.address,
-        sponsorshipPolicyId: sponsorship.policyId,
-        signingMode: sponsorship.signingMode,
-      }),
-    };
-  });
-}
-
-export function buildPolymarketPreRouteHandoffSteps(input: {
-  source: RelayEligibleSourceFact;
-  sourceAmount: Money;
-  profile: WalletExecutionProfile;
-  steps: Awaited<ReturnType<typeof validatedSteps>>;
-}) {
-  const handoff = input.source.preRouteHandoff;
-  if (!handoff) return input.steps;
-  if (
-    handoff.kind !== "polymarket_deposit_wallet_to_controller_v1" ||
-    input.sourceAmount.asset.networkId !== "evm:137" ||
-    canonicalAssetId(input.sourceAmount.asset) !==
-      canonicalAssetId({
-        ...input.sourceAmount.asset,
-        assetId: handoff.tokenAddress,
-      }) ||
-    !sameAccountAddress(
-      input.sourceAmount.asset.networkId,
-      handoff.controllerAddress,
-      input.profile.address,
-    ) ||
-    BigInt(input.sourceAmount.raw) <= 0n
-  ) {
-    throw new Error("Polymarket pre-route handoff differs from Relay source");
-  }
-  const transferData = ERC20_TRANSFER_INTERFACE.encodeFunctionData("transfer", [
-    handoff.controllerAddress,
-    BigInt(input.sourceAmount.raw),
-  ]);
-  const action: ExternalHandoffAction = {
-    kind: "external_handoff",
-    actionId: stableOpaqueId(
-      "funding_action",
-      canonicalJsonHash({
-        kind: handoff.kind,
-        funderAddress: handoff.funderAddress,
-        controllerAddress: handoff.controllerAddress,
-        tokenAddress: handoff.tokenAddress,
-        amountRaw: input.sourceAmount.raw,
-      }),
-    ),
-    networkId: input.sourceAmount.asset.networkId,
-    actorWalletId: input.profile.walletId,
-    handoffKind: "polymarket_deposit_wallet_transfer",
-    payload: {
-      topology: "deposit_wallet",
-      funder: handoff.funderAddress,
-      recipient: handoff.controllerAddress,
-      token: handoff.tokenAddress,
-      amountRaw: input.sourceAmount.raw,
-      calls: [
-        {
-          target: handoff.tokenAddress,
-          value: "0",
-          data: transferData,
-        },
-      ],
-    },
-  };
-  return [
-    {
-      ordinal: 0,
-      segmentOrdinal: 0,
-      stepKind: "external_handoff" as const,
-      state: "action_required" as const,
-      actionFingerprint: canonicalJsonHash(action),
-      executorId: POLYMARKET_DEPOSIT_WALLET_HANDOFF_EXECUTOR_ID,
-      payerRequirement: "provider" as const,
-      dependsOnOrdinal: null,
-      normalizedAction: jsonRecord(action),
-      actionValidationResult: jsonRecord({
-        signerAddress: input.profile.address,
-        executionEnvelope: handoff.kind,
-        funderAddress: handoff.funderAddress,
-        recipientAddress: handoff.controllerAddress,
-        tokenAddress: handoff.tokenAddress,
-        amountRaw: input.sourceAmount.raw,
-        transferData,
-      }),
-    },
-    ...input.steps.map((step) => ({
-      ...step,
-      ordinal: step.ordinal + 1,
-      dependsOnOrdinal:
-        step.dependsOnOrdinal == null ? 0 : step.dependsOnOrdinal + 1,
-    })),
-  ];
 }
 
 function maximumVenuePreparationContributionRaw(
@@ -1176,7 +910,7 @@ export class ProductionFundingSourcePlanner {
         timeoutMs: Math.min(input.timeoutMs, 10_000),
       }),
     );
-    const mappedRelayRoute = routeSpec(input.route);
+    const mappedRelayRoute = resolveRelayRouteSpec(input.route);
     const relayRoute =
       input.source.quoteModeOverride === "exact_input"
         ? { ...mappedRelayRoute, quoteMode: "exact_input" as const }
@@ -1236,124 +970,15 @@ export class ProductionFundingSourcePlanner {
       throw error;
     }
     if (input.signal.aborted) return null;
-    const relaySteps = await validatedSteps({
-      actions: quote.actions,
-      minimumOutput: quote.candidate.minimumOutput,
+    return buildRelayPlanningQuote({
+      codec,
+      destination: input.destination,
       policyRevision: input.policyRevision,
+      profile,
+      quote,
       quoteCorrelationId: input.quoteCorrelationId,
       route: input.route,
-      sourceAmount: quote.sourceAmount,
-      profile,
-    });
-    const steps = buildPolymarketPreRouteHandoffSteps({
       source: input.source,
-      sourceAmount: quote.sourceAmount,
-      profile,
-      steps: relaySteps,
     });
-    const plan = {
-      operation: {
-        purpose: operationPurposeForExternalRecipient(
-          input.destination.externalRecipientId,
-        ),
-        initialState: {
-          status: "in_progress" as const,
-          stage: "committed" as const,
-        },
-        experienceMode: input.route.experienceMode,
-        planKind: "wallet_route" as const,
-        sourceSnapshot: jsonRecord(input.source.source),
-        destinationTargetSnapshot: jsonRecord(input.destination.target),
-        externalRecipientId: input.destination.externalRecipientId,
-        venueId: input.destination.venueId,
-        marketId: null,
-        marketContextSnapshot: null,
-        venueBindingSnapshot: input.destination.venueBindingOption
-          ? jsonRecord(input.destination.venueBindingOption)
-          : null,
-        walletExecutionSnapshot: jsonRecord(profile),
-        placementSnapshot: {},
-        requestedSourceAmount: jsonRecord(quote.sourceAmount),
-        requestedDestinationAmount: jsonRecord(input.minimumOutput),
-        supportMetadata: {
-          routeId: input.route.routeId,
-          requestFingerprint: quote.requestFingerprint,
-          routeShape: quote.routeShape,
-          ...(input.destination.target.kind === "owned_location" &&
-          input.destination.spendability
-            ? {
-                destinationObservation: {
-                  observerId: input.route.destinationObserverId,
-                  locationId: input.destination.target.location.locationId,
-                  asset: jsonRecord(input.destination.target.location.asset),
-                  baselineRaw:
-                    input.destination.spendability.observedAmount.raw,
-                  baselineRevision: input.destination.spendability.revision,
-                  baselineAsOf: input.destination.spendability.asOf,
-                },
-              }
-            : {}),
-          ...(input.source.preRouteHandoff
-            ? {
-                preRouteHandoff: jsonRecord(input.source.preRouteHandoff),
-              }
-            : {}),
-        },
-      },
-      segments: [
-        {
-          providerId: "relay",
-          adapterId: input.route.adapterId,
-          adapterVersion: input.route.adapterVersion,
-          segmentKind: quote.candidate.capability,
-          status: "planned" as const,
-          sourceSnapshot: jsonRecord(input.source.source),
-          destinationTargetSnapshot: jsonRecord(input.destination.target),
-          quotedInput: jsonRecord(quote.sourceAmount),
-          quotedExpectedOutput: jsonRecord(quote.candidate.expectedOutput),
-          quotedMinOutput: jsonRecord(quote.candidate.minimumOutput),
-          providerQuoteRefCiphertext: codec.encrypt(quote.requestId),
-          providerQuoteRefLookupHmac: codec.fingerprint(quote.requestId),
-          depositAddressCiphertext: null,
-          depositAddressLookupHmac: null,
-          lookupKeyVersion: codec.keyVersion,
-          refundLocationSnapshot: jsonRecord(sourceLocation),
-          quoteExpiresAt: quote.candidate.expiresAt,
-          supportMetadata: {
-            requestFingerprint: quote.requestFingerprint,
-            routeShape: quote.routeShape,
-          },
-        },
-      ],
-      steps,
-      reservations: [
-        {
-          segmentOrdinal: 0,
-          componentId: input.source.componentId,
-          locationId:
-            input.source.reservationLocationId ?? sourceLocation.locationId,
-          networkId: quote.sourceAmount.asset.networkId,
-          assetId: quote.sourceAmount.asset.assetId,
-          assetDecimals: quote.sourceAmount.asset.decimals,
-          rawAmount: quote.sourceAmount.raw,
-          mode: "subtract_available" as const,
-          expiresAt: quote.candidate.expiresAt,
-        },
-      ],
-    };
-    return {
-      candidate: quote.candidate,
-      sourceAmount: quote.sourceAmount,
-      sourceEstimatedUsd: quote.sourceEstimatedUsd,
-      feeUsd: quote.feeUsd.map((estimated, index) => {
-        const fee = quote.candidate.fees[index];
-        return estimated ?? (fee ? stableUsdValue(fee.amount) : null);
-      }),
-      minimumDestinationEstimatedUsd: stableUsdValue(
-        quote.candidate.minimumOutput,
-      ),
-      executionPlan: executionPlan({ quote, route: input.route }),
-      commitPlan: plan,
-    };
   }
 }

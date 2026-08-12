@@ -4,8 +4,10 @@ import { tx, type Pool, type PoolClient } from "@hunch/infra";
 
 import { canonicalJsonHash } from "../funding/persistence/canonical.js";
 import { resolveKnownAccountAssetSymbol } from "../account-value/known-asset-catalog.js";
-import { POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID } from "../funding/execution/delegated-funding-profile-ids.js";
 import { telegramFundingCallbackData } from "./telegram-funding-contracts.js";
+import { isTelegramFundingReadyTerminalProjection } from "./telegram-funding-progress.js";
+
+export { hasReadyTelegramFundingDestinationReceipt } from "./telegram-funding-route.js";
 
 type Queryable = Pick<PoolClient, "query">;
 
@@ -410,12 +412,14 @@ export async function issueTelegramFundingBuyContinuation(input: {
   return tx(input.pool, async (client) => {
     const current = await client.query<{
       active_buy_return_revision: number | null;
+      latest_terminal_projection: unknown;
       progress_revision: number;
       receive_version: string | number;
     }>(
       `
         select
           context.active_buy_return_revision,
+          context.latest_terminal_projection,
           context.progress_revision,
           receive.version as receive_version
         from telegram_funding_sessions context
@@ -428,6 +432,9 @@ export async function issueTelegramFundingBuyContinuation(input: {
           and context.chat_id = $4
           and context.cancelled_at is null
           and context.expires_at > $5
+          and context.latest_progress_projection ->> 'state' = 'ready'
+          and context.latest_terminal_projection =
+              context.latest_progress_projection
         for update of context
       `,
       [
@@ -441,6 +448,10 @@ export async function issueTelegramFundingBuyContinuation(input: {
     const row = current.rows[0];
     if (
       !row ||
+      !isTelegramFundingReadyTerminalProjection(
+        row.latest_terminal_projection,
+        input.contextId,
+      ) ||
       row.active_buy_return_revision !== input.returnRevision ||
       row.progress_revision !== input.progressRevision ||
       Number(row.receive_version) !== input.receiveVersion
@@ -520,166 +531,6 @@ export async function fetchTelegramFundingBuyContinuationForUpdate(
   return rows[0] ? publicContinuation(rows[0]) : null;
 }
 
-export async function hasReadyTelegramFundingDestinationReceipt(
-  db: Queryable,
-  contextId: string,
-): Promise<boolean> {
-  const { rows } = await db.query<{ ready: boolean }>(
-    `
-      select exists (
-        select 1
-        from telegram_funding_sessions context
-        join funding_receive_sessions receive
-          on receive.id = context.receive_session_id
-         and receive.user_id = context.user_id
-         and receive.owner_channel = context.receive_owner_channel
-        join telegram_funding_consents consent
-          on consent.telegram_funding_session_id = context.id
-         and consent.revision = context.active_consent_revision
-        join funding_receive_receipts receipt
-          on receipt.receive_session_id = receive.id
-         and receipt.user_id = context.user_id
-         and receipt.variant_id = any(consent.consented_variant_ids)
-        where context.id = $1::uuid
-          and receipt.status = 'ready'
-          and funding_receive_receipt_matches_frozen_variant(receipt)
-          and (
-            (
-              receipt.handling = 'direct'
-              and receipt.network_id = receive.destination_asset->>'networkId'
-              and receipt.asset_decimals =
-                    (receive.destination_asset->>'decimals')::int
-              and lower(receipt.asset_id) =
-                    lower(receive.destination_asset->>'assetId')
-              and receipt.network_id = consent.selected_asset_network_id
-              and receipt.asset_decimals = consent.selected_asset_decimals
-              and lower(receipt.asset_id) = lower(consent.selected_asset_id)
-            )
-            or (
-              receipt.handling = 'automatic_conversion'
-              and consent.automation_enabled
-              and consent.max_auto_execute_source_raw is null
-              and consent.automation_policy_snapshot ->> 'version' = '2'
-              and consent.automation_policy_snapshot ->> 'kind' =
-                    'polymarket_usdce_full_receipt_wrap'
-              and consent.automation_policy_snapshot ->> 'fullReceipt' = 'true'
-              and consent.automation_policy_snapshot ->> 'profileId' = $2
-              and consent.automation_policy_snapshot ->> 'venueId' =
-                    receive.venue_id
-              and consent.automation_policy_snapshot ->> 'destinationOptionId' =
-                    receive.destination_option_id
-              and consent.automation_policy_snapshot ->> 'venueBindingOptionId' =
-                    receive.venue_binding_option_id
-              and receipt.network_id =
-                    consent.automation_policy_snapshot #>> '{sourceAsset,networkId}'
-              and receipt.asset_decimals::text =
-                    consent.automation_policy_snapshot #>> '{sourceAsset,decimals}'
-              and lower(receipt.asset_id) = lower(
-                    consent.automation_policy_snapshot #>> '{sourceAsset,assetId}'
-                  )
-              and receive.destination_asset->>'networkId' =
-                    consent.automation_policy_snapshot #>>
-                      '{destinationAsset,networkId}'
-              and receive.destination_asset->>'decimals' =
-                    consent.automation_policy_snapshot #>>
-                      '{destinationAsset,decimals}'
-              and lower(receive.destination_asset->>'assetId') = lower(
-                    consent.automation_policy_snapshot #>>
-                      '{destinationAsset,assetId}'
-                  )
-              and (
-                (
-                  consent.selected_asset_network_id = receipt.network_id
-                  and consent.selected_asset_decimals = receipt.asset_decimals
-                  and lower(consent.selected_asset_id) = lower(receipt.asset_id)
-                )
-                or (
-                  consent.selected_asset_network_id =
-                        receive.destination_asset->>'networkId'
-                  and consent.selected_asset_decimals =
-                        (receive.destination_asset->>'decimals')::int
-                  and lower(consent.selected_asset_id) =
-                        lower(receive.destination_asset->>'assetId')
-                )
-              )
-              and receipt.ledger_height is not null
-              and exists (
-                select 1
-                from jsonb_array_elements(
-                  case
-                    when jsonb_typeof(
-                      consent.automation_policy_snapshot -> 'variantCursors'
-                    ) = 'array'
-                      then consent.automation_policy_snapshot -> 'variantCursors'
-                    else '[]'::jsonb
-                  end
-                ) cursor
-                where cursor ->> 'variantId' = receipt.variant_id
-                  and cursor ->> 'networkId' = receipt.network_id
-                  and cursor ->> 'ledgerHeightExclusive' ~
-                        '^(0|[1-9][0-9]*)$'
-                  and receipt.ledger_height >
-                        (cursor ->> 'ledgerHeightExclusive')::numeric
-              )
-              and exists (
-                select 1
-                from funding_operations operation
-                join funding_operation_steps step
-                  on step.operation_id = operation.id
-                 and step.ordinal = 0
-                where operation.id = receipt.child_funding_operation_id
-                  and operation.user_id = context.user_id
-                  and operation.status = 'completed'
-                  and operation.progress_stage = 'terminal'
-                  and operation.support_metadata ->> 'preparationKind' =
-                        'polymarket_funding_router'
-                  and operation.support_metadata ->> 'fundingReceiveReceiptId' =
-                        receipt.id::text
-                  and operation.support_metadata ->> 'fundingAuthorizationId' =
-                        consent.automation_policy_snapshot ->> 'authorizationId'
-                  and operation.support_metadata ->>
-                        'fundingAuthorizationFingerprint' =
-                        consent.automation_policy_snapshot ->>
-                          'authorizationFingerprint'
-                  and operation.requested_source_amount ->> 'raw' =
-                        receipt.raw_amount::text
-                  and operation.requested_source_amount #>>
-                        '{asset,networkId}' = receipt.network_id
-                  and operation.requested_source_amount #>>
-                        '{asset,decimals}' = receipt.asset_decimals::text
-                  and lower(
-                        operation.requested_source_amount #>> '{asset,assetId}'
-                      ) = lower(receipt.asset_id)
-                  and operation.requested_destination_amount ->> 'raw' =
-                        receipt.raw_amount::text
-                  and operation.requested_destination_amount #>>
-                        '{asset,networkId}' =
-                        receive.destination_asset->>'networkId'
-                  and operation.requested_destination_amount #>>
-                        '{asset,decimals}' =
-                        receive.destination_asset->>'decimals'
-                  and lower(
-                        operation.requested_destination_amount #>>
-                          '{asset,assetId}'
-                      ) = lower(receive.destination_asset->>'assetId')
-                  and step.executor_id = $2
-                  and step.state = 'succeeded'
-                  and not exists (
-                    select 1
-                    from funding_operation_steps other_step
-                    where other_step.operation_id = operation.id
-                      and other_step.id <> step.id
-                  )
-              )
-            )
-          )
-      ) as ready
-    `,
-    [contextId, POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID],
-  );
-  return rows[0]?.ready === true;
-}
-
 export type TelegramFundingBuyContinuationCapability = Readonly<
   | { available: true }
   | {
@@ -722,6 +573,7 @@ export function resolveTelegramFundingBuyContinuationCapability(input: {
     | "funds_received"
     | "needs_attention"
     | "ready"
+    | "unavailable"
     | "waiting_for_transfer";
 }): TelegramFundingBuyContinuationCapability {
   if (!input.buyContinuationEnabled) {

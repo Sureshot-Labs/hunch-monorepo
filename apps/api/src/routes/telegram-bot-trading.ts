@@ -12,6 +12,7 @@ import { pool, type DbQuery } from "../db.js";
 import { env } from "../env.js";
 import { getRedis } from "../redis.js";
 import { evaluateGeoFence, type GeoFenceConfig } from "../lib/geo-fence.js";
+import { canonicalWalletIdentity } from "../lib/wallet-address.js";
 import { PrivyService, type PrivyWalletProfile } from "../privy-service.js";
 import {
   createApiTradingApplicationService,
@@ -83,6 +84,8 @@ import {
   TelegramFundingError,
   TelegramFundingService,
 } from "../services/telegram-funding.js";
+import { ensureTelegramFundingAuthorization } from "../funding/execution/telegram-funding-authorization.js";
+import { resolveTelegramFundingManagedWalletIdentity } from "../funding/execution/telegram-funding-managed-wallet.js";
 import { buildTelegramFundingUnavailableMessage } from "../services/telegram-funding-presentation.js";
 import {
   readTelegramBotTradeInputContext,
@@ -224,7 +227,8 @@ const internalFundingOpenBodySchema = internalFundingMutationSchema
 const internalFundingSessionBodySchema = internalFundingIdentitySchema
   .extend({
     contextId: z.string().uuid(),
-    view: z.enum(["address", "progress"]).optional(),
+    deliveryProjection: z.unknown().optional(),
+    view: z.enum(["address", "delivery", "progress"]).optional(),
   })
   .strict();
 
@@ -237,6 +241,14 @@ const internalFundingSelectTargetBodySchema = internalFundingMutationSchema
 
 const internalFundingCancelBodySchema = internalFundingMutationSchema
   .extend({ contextId: z.string().uuid() })
+  .strict();
+
+const internalFundingReviewBodySchema = internalFundingMutationSchema
+  .extend({ receiptId: z.string().uuid() })
+  .strict();
+
+const internalFundingConfirmBodySchema = internalFundingMutationSchema
+  .extend({ consentToken: z.string().regex(/^consent_[A-Za-z0-9_-]{43}$/u) })
   .strict();
 
 const internalFundingResumeBuyBodySchema = internalFundingIdentitySchema
@@ -446,7 +458,12 @@ export type TelegramBotTradingRouteDependencies = {
     TelegramFundingService,
     "cancel" | "open" | "selectTarget" | "session"
   > &
-    Partial<Pick<TelegramFundingService, "openBuyReturn">>;
+    Partial<
+      Pick<
+        TelegramFundingService,
+        "confirmConversion" | "openBuyReturn" | "reviewConversion"
+      >
+    >;
   searchMarkets?: typeof searchTelegramMarkets;
   writeTradeInputContext?: (
     context: TelegramBotTradeInputContext,
@@ -482,7 +499,13 @@ async function registerTelegramBotTradingRoutes(
   const loadPositions = dependencies.loadPositions ?? loadTelegramPositions;
   const searchMarkets = dependencies.searchMarkets ?? searchTelegramMarkets;
   const fundingService =
-    dependencies.fundingService ?? new TelegramFundingService(routePool);
+    dependencies.fundingService ??
+    new TelegramFundingService(routePool, {
+      provisionAuthorization: (input) =>
+        ensureTelegramFundingAuthorization(routePool, input),
+      resolveManagedWallet: (input) =>
+        resolveTelegramFundingManagedWalletIdentity(routePool, input),
+    });
   const writeTradeInputContext =
     dependencies.writeTradeInputContext ??
     (async (context: TelegramBotTradeInputContext) => {
@@ -736,25 +759,9 @@ async function registerTelegramBotTradingRoutes(
       schema: { body: internalFundingOpenBodySchema },
     },
     async (request, reply) => {
-      return sendTelegramFundingMessage(request, reply, async () => {
-        try {
-          return await fundingService.open(request.body, new Date());
-        } catch (error) {
-          if (
-            error instanceof TelegramFundingError &&
-            error.code === "funding_receive_disabled"
-          ) {
-            return buildDepositMessage({
-              appBaseUrl: request.body.appBaseUrl,
-              pool: db,
-              telegramMiniAppEnabled: request.body.telegramMiniAppEnabled,
-              telegramUserId: request.body.telegramUserId,
-              venue: "polymarket",
-            });
-          }
-          throw error;
-        }
-      });
+      return sendTelegramFundingMessage(request, reply, () =>
+        fundingService.open(request.body, new Date()),
+      );
     },
   );
 
@@ -808,6 +815,46 @@ async function registerTelegramBotTradingRoutes(
       } catch (error) {
         return sendTelegramFundingError(request, reply, error);
       }
+    },
+  );
+
+  api.post(
+    "/internal/telegram-bot/funding/review-conversion",
+    {
+      preHandler: requireInternal,
+      schema: { body: internalFundingReviewBodySchema },
+    },
+    async (request, reply) => {
+      const reviewConversion =
+        fundingService.reviewConversion?.bind(fundingService);
+      if (!reviewConversion) {
+        return reply.code(503).send({ error: "funding_review_unavailable" });
+      }
+      return sendTelegramFundingMessage(request, reply, () =>
+        reviewConversion(request.body, new Date()),
+      );
+    },
+  );
+
+  api.post(
+    "/internal/telegram-bot/funding/confirm-conversion",
+    {
+      preHandler: requireInternal,
+      schema: { body: internalFundingConfirmBodySchema },
+    },
+    async (request, reply) => {
+      const confirmConversion =
+        fundingService.confirmConversion?.bind(fundingService);
+      if (!confirmConversion) {
+        return reply.code(503).send({ error: "funding_review_unavailable" });
+      }
+      return sendTelegramFundingMessage(request, reply, () =>
+        confirmConversion(
+          request.body,
+          new Date(),
+          createFundingDecoratorForRequest(request),
+        ),
+      );
     },
   );
 
@@ -927,48 +974,14 @@ async function registerTelegramBotTradingRoutes(
       const venue = request.body.venue?.trim().toLowerCase() ?? null;
       if (venue === null) {
         return buildDepositMessage({
-          appBaseUrl: request.body.appBaseUrl,
           pool: db,
-          telegramMiniAppEnabled: request.body.telegramMiniAppEnabled,
-          telegramUserId: request.body.telegramUserId,
           venue: null,
         });
       }
-      if (venue !== "limitless") {
-        return buildTelegramFundingUnavailableMessage({ reason: "disabled" });
-      }
-      let internalWallets:
-        | TelegramBotTradingInternalWalletCandidate[]
-        | null
-        | undefined;
-      const { rows } = await db.query<{ privy_user_id: string }>(
-        `select privy_user_id
-             from user_telegram_accounts
-            where telegram_user_id = $1
-            limit 1`,
-        [String(request.body.telegramUserId)],
-      );
-      const privyUserId = rows[0]?.privy_user_id ?? null;
-      if (!privyUserId) {
-        internalWallets = [];
-      } else {
-        try {
-          internalWallets = await resolveInternalWallets({
-            app,
-            privyUserId,
-          });
-        } catch {
-          internalWallets = null;
-        }
-      }
-      return buildDepositMessage({
-        appBaseUrl: request.body.appBaseUrl,
-        internalWallets,
-        pool: db,
-        telegramMiniAppEnabled: request.body.telegramMiniAppEnabled,
-        telegramUserId: request.body.telegramUserId,
-        venue: request.body.venue,
-      });
+      // Explicit legacy venue callbacks cannot bypass the durable funding
+      // lifecycle. Future Relay venues remain hidden until an adapter owns
+      // their address, consent, delivery, and redaction boundaries.
+      return buildTelegramFundingUnavailableMessage({ reason: "disabled" });
     },
   );
 
@@ -1524,12 +1537,18 @@ async function registerTelegramBotTradingRoutes(
       const knownWallets = new Set(
         signerWallets.map(
           (wallet) =>
-            `${wallet.privyWalletId}:${wallet.walletAddress.toLowerCase()}`,
+            `${wallet.privyWalletId}:${canonicalWalletIdentity(
+              wallet.walletChain,
+              wallet.walletAddress,
+            )}`,
         ),
       );
       for (const wallet of internalWallets) {
         if (wallet.walletChain !== "ethereum") continue;
-        const key = `${wallet.privyWalletId}:${wallet.walletAddress.toLowerCase()}`;
+        const key = `${wallet.privyWalletId}:${canonicalWalletIdentity(
+          wallet.walletChain,
+          wallet.walletAddress,
+        )}`;
         if (knownWallets.has(key)) continue;
         signerWallets.push({
           privyWalletId: wallet.privyWalletId,
@@ -1781,7 +1800,9 @@ export const telegramBotTradingRoutes = createTelegramBotTradingRoutes();
 export const telegramBotTradingRouteTestHooks = {
   internalAccountBodySchema,
   internalFundingCancelBodySchema,
+  internalFundingConfirmBodySchema,
   internalFundingOpenBodySchema,
+  internalFundingReviewBodySchema,
   internalFundingResumeBuyBodySchema,
   internalFundingSelectTargetBodySchema,
   internalFundingSessionBodySchema,

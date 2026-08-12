@@ -1,30 +1,20 @@
-import { tx, type Pool } from "@hunch/infra";
+import { tx, type Pool, type PoolClient } from "@hunch/infra";
 
-import { RELAY_PINNED_ASSETS } from "../../funding-providers/relay/mappings.js";
 import {
   addUnsignedDecimals,
   compareUnsignedDecimals,
   multiplyRawByUnitPrice,
   multiplyUnsignedDecimals,
 } from "../../account-value/decimal.js";
-import type { AssetRef, FundingQuoteSummary, Money } from "../domain/types.js";
-import {
-  canonicalAssetId,
-  sameAccountAddress,
-} from "../domain/asset-identity.js";
-import { loadPolymarketWrapExecutionConfiguration } from "../execution/delegated-funding-config.js";
-import {
-  delegatedFundingProfile,
-  POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
-} from "../execution/delegated-funding-profiles.js";
+import type {
+  FundingQuoteSummary,
+  FundingReceiveQuotePlan,
+  FundingReceiveReviewContinuation,
+} from "../domain/types.js";
+import { sameAccountAddress } from "../domain/asset-identity.js";
+import { delegatedFundingProfile } from "../execution/delegated-funding-profiles.js";
 import type { DelegatedFundingPreBroadcastDecision } from "../execution/delegated-funding-capability.js";
-import { resolveTelegramPolymarketWrapCapability } from "../execution/delegated-funding-capability-resolver.js";
-import {
-  parseTelegramFundingAutomationPolicyV2,
-  telegramFundingAutomationPolicyMatchesAuthorization,
-  telegramFundingReceiptIsProspectivelyAuthorized,
-} from "../execution/telegram-funding-automation-policy.js";
-import { SOLANA_NATIVE_EXECUTION_RESERVE_LAMPORTS } from "../domain/network-fees.js";
+import { lockFundingPolicyForTransaction } from "../policies/funding-policy-service.js";
 import { sameAsset } from "../planner/money.js";
 import type { FundingPlanningRuntime } from "../planner/runtime-service.js";
 import {
@@ -59,14 +49,6 @@ export function fundingReceiveRoutingErrorCode(error: unknown): string {
     typeof error.code === "string" &&
     /^[a-z][a-z0-9_]{2,63}$/.test(error.code)
   ) {
-    if (
-      error.code === "invalid_operation_state" &&
-      "message" in error &&
-      error.message ===
-        "another Polymarket Funding Router operation is unresolved"
-    ) {
-      return "routing_predecessor_unresolved";
-    }
     if (
       error.code === "quote_mismatch" &&
       "message" in error &&
@@ -172,8 +154,8 @@ export function fundingReceiveChildOperationDisposition(input: {
   return "waiting";
 }
 
-export function quoteWithinReceiveAutomationPolicy(
-  quote: FundingQuoteSummary,
+export function receiveAutomationEconomicsWithinPolicy(
+  quote: Pick<FundingQuoteSummary, "fees" | "minimumDestination">,
   policy: FundingReceiveReceiptRoutingTarget["automationPolicy"],
 ): boolean {
   if (quote.fees.some((fee) => fee.estimatedUsd == null)) return false;
@@ -194,134 +176,106 @@ export function quoteWithinReceiveAutomationPolicy(
   );
 }
 
-export function receiveReceiptRoutingAmounts(
-  input: Readonly<{
-    receiptAsset: AssetRef;
-    destinationAsset: AssetRef;
-    rawAmount: string;
-  }>,
-): Readonly<{
-  confirmedSourceAmount: Money | null;
-  requestedDestinationAmount: Money;
-  venuePreparation: boolean;
-}> {
-  const venuePreparation =
-    input.receiptAsset.networkId === "evm:137" &&
-    canonicalAssetId(input.receiptAsset) ===
-      RELAY_PINNED_ASSETS.polygonUsdce.toLowerCase() &&
-    input.destinationAsset.networkId === "evm:137" &&
-    canonicalAssetId(input.destinationAsset) ===
-      RELAY_PINNED_ASSETS.polygonPusd.toLowerCase();
-  const nativeSol =
-    input.receiptAsset.networkId === "solana:mainnet" &&
-    input.receiptAsset.assetId === RELAY_PINNED_ASSETS.solanaNative &&
-    input.receiptAsset.decimals === 9;
-  const nativeSolRaw = nativeSol
-    ? BigInt(input.rawAmount) > SOLANA_NATIVE_EXECUTION_RESERVE_LAMPORTS
-      ? (
-          BigInt(input.rawAmount) - SOLANA_NATIVE_EXECUTION_RESERVE_LAMPORTS
-        ).toString()
-      : "0"
-    : null;
-  return {
-    confirmedSourceAmount: venuePreparation
-      ? null
-      : {
-          asset: input.receiptAsset,
-          raw: nativeSolRaw ?? input.rawAmount,
-        },
-    requestedDestinationAmount: {
-      asset: input.destinationAsset,
-      // Cross-network receipts are exact-input operations. The actual Relay
-      // quote freezes the economically safe output; this single-unit floor
-      // prevents a zero-output route without pretending the transfer is 1:1.
-      raw: venuePreparation ? input.rawAmount : "1",
-    },
-    venuePreparation,
-  };
-}
-
-export async function telegramUsdceWrapRoutingDecision(
-  db: Pool,
-  target: FundingReceiveReceiptRoutingTarget,
-): Promise<DelegatedFundingPreBroadcastDecision> {
-  const snapshot = parseTelegramFundingAutomationPolicyV2(
-    target.telegramAutomationPolicy,
-  );
-  if (
-    !snapshot ||
-    !target.telegramAccountId ||
-    target.telegramFundingAuthorizationId !== snapshot.authorizationId ||
-    !target.telegramUserId ||
-    snapshot.profileId !== POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID ||
-    snapshot.destinationOptionId !== target.destinationOptionId ||
-    snapshot.venueBindingOptionId !== target.venueBindingOptionId ||
-    !sameAsset(snapshot.sourceAsset, target.receipt.asset) ||
-    !sameAsset(snapshot.destinationAsset, target.destinationAsset) ||
-    !telegramFundingReceiptIsProspectivelyAuthorized({
-      policy: snapshot,
-      variantId: target.receipt.variantId,
-      ledgerHeight: target.receipt.ledgerHeight ?? null,
-    })
-  ) {
-    return {
-      kind: "hard_invalid",
-      reasonCode: "delegated_authority_invalid",
-    };
-  }
-  const configuration = loadPolymarketWrapExecutionConfiguration();
-  const capability = await resolveTelegramPolymarketWrapCapability(db, {
-    userId: target.userId,
-    telegramAccountId: target.telegramAccountId,
-    telegramUserId: target.telegramUserId,
-    destinationOptionId: target.destinationOptionId,
-    venueBindingOptionId: target.venueBindingOptionId,
-    configuration,
-    expectedAuthorizationId: snapshot.authorizationId,
-    expectedAuthorizationFingerprint: snapshot.authorizationFingerprint,
-    expectedFundingPolicyRevision: snapshot.fundingPolicyRevision,
-  });
-  if (
-    capability.authorization &&
-    !telegramFundingAutomationPolicyMatchesAuthorization(
-      snapshot,
-      capability.authorization,
-    )
-  ) {
-    return {
-      kind: "hard_invalid",
-      reasonCode: "delegated_authority_invalid",
-    };
-  }
-  return capability.decision;
-}
-
-export async function telegramUsdceWrapRoutingAuthorized(
-  db: Pool,
-  target: FundingReceiveReceiptRoutingTarget,
-): Promise<boolean> {
-  return (
-    (await telegramUsdceWrapRoutingDecision(db, target)).kind === "allowed"
-  );
-}
-
-export function exactPolymarketUsdceWrapQuote(
+export function quoteWithinReceiveAutomationPolicy(
   quote: FundingQuoteSummary,
-  target: FundingReceiveReceiptRoutingTarget,
+  policy: FundingReceiveReceiptRoutingTarget["automationPolicy"],
 ): boolean {
-  return (
-    quote.planKind === "venue_preparation" &&
-    quote.destinationOptionId === target.destinationOptionId &&
-    quote.venueBindingOptionId === target.venueBindingOptionId &&
-    quote.sourceAmounts.length === 1 &&
-    quote.sourceAmounts[0]?.amount.raw === target.receipt.rawAmount &&
-    sameAsset(quote.sourceAmounts[0]?.amount.asset, target.receipt.asset) &&
-    quote.expectedDestination.raw === target.receipt.rawAmount &&
-    quote.minimumDestination.raw === target.receipt.rawAmount &&
-    sameAsset(quote.expectedDestination.asset, target.destinationAsset) &&
-    sameAsset(quote.minimumDestination.asset, target.destinationAsset) &&
-    quote.fees.length === 0
-  );
+  return receiveAutomationEconomicsWithinPolicy(quote, policy);
+}
+
+export type FundingReceiveRoutingErrorDirective = Readonly<{
+  errorCode: string;
+  retryAfterMs: number;
+  retryMode: "defer_without_budget";
+}>;
+
+export type FundingReceiveReceiptAutomaticExecution = Readonly<{
+  adapterKey: string;
+  outsidePolicyReview?: FundingReceiveReviewContinuation;
+  authorizationId?: string;
+  authorizationFingerprint?: string;
+  receiptBinding?: Readonly<{
+    consentId: string;
+    consentFingerprint: string;
+  }>;
+  serverExecutionProfileId?: string;
+  quotePlan: (
+    target: FundingReceiveReceiptRoutingTarget,
+  ) => FundingReceiveQuotePlan;
+  classifyError?: (
+    error: unknown,
+  ) => FundingReceiveRoutingErrorDirective | null;
+  decision: (
+    db: Pool,
+    target: FundingReceiveReceiptRoutingTarget,
+  ) => Promise<DelegatedFundingPreBroadcastDecision>;
+  prepareOperation?: (
+    db: Pool,
+    target: FundingReceiveReceiptRoutingTarget,
+    now: Date,
+  ) => Promise<
+    | Readonly<{
+        verify: (client: PoolClient) => Promise<void>;
+        commit: (client: PoolClient) => Promise<string>;
+      }>
+    | Readonly<{ kind: "outside_policy" }>
+    | null
+  >;
+  quoteMatches?: (
+    quote: FundingQuoteSummary,
+    target: FundingReceiveReceiptRoutingTarget,
+  ) => boolean;
+  validateOperationLink: (
+    client: PoolClient,
+    input: Readonly<{
+      operationId: string;
+      target: FundingReceiveReceiptRoutingTarget;
+    }>,
+  ) => Promise<boolean>;
+}>;
+
+export type FundingReceiveReceiptDisposition =
+  | Readonly<{ kind: "direct" }>
+  | Readonly<{
+      kind: "automatic_execution";
+      execution: FundingReceiveReceiptAutomaticExecution | null;
+      quotePlan: FundingReceiveQuotePlan;
+    }>
+  | Readonly<{
+      kind: "review_required";
+      continuation: FundingReceiveReviewContinuation;
+      quotePlan: FundingReceiveQuotePlan;
+    }>
+  | Readonly<{ kind: "hard_invalid"; reasonCode: string }>;
+
+export type FundingReceiveReceiptDispositionResolver = (
+  target: FundingReceiveReceiptRoutingTarget,
+) => FundingReceiveReceiptDisposition;
+
+type FundingReceiveReviewEvidence = Readonly<{
+  continuation: FundingReceiveReviewContinuation;
+  quotePlan: FundingReceiveQuotePlan;
+}>;
+
+type FundingReceiveReviewFallback = Readonly<{
+  evidence: FundingReceiveReviewEvidence | null;
+  errorCode: string;
+}>;
+
+function reviewEvidence(
+  disposition: FundingReceiveReceiptDisposition,
+): FundingReceiveReviewEvidence | null {
+  if (disposition.kind === "review_required") {
+    return {
+      continuation: disposition.continuation,
+      quotePlan: disposition.quotePlan,
+    };
+  }
+  if (disposition.kind !== "automatic_execution") return null;
+  const continuation = disposition.execution?.outsidePolicyReview;
+  return continuation
+    ? { continuation, quotePlan: disposition.quotePlan }
+    : null;
 }
 
 type ExactChildOperationOutcome =
@@ -334,17 +288,15 @@ type ExactChildOperationOutcome =
 export async function quoteFundingReceiveReceipt(
   runtime: Pick<FundingPlanningRuntime, "liquidity" | "quote">,
   target: FundingReceiveReceiptRoutingTarget,
-  input: Readonly<{ serverExecutionProfileId?: string }> = {},
+  input: Readonly<{
+    quotePlan: FundingReceiveQuotePlan;
+    serverExecutionProfileId?: string;
+  }>,
 ): Promise<FundingQuoteSummary | null> {
   if (target.receipt.rawAmount === "0") return null;
-  const amounts = receiveReceiptRoutingAmounts({
-    receiptAsset: target.receipt.asset,
-    destinationAsset: target.destinationAsset,
-    rawAmount: target.receipt.rawAmount,
-  });
+  const amounts = input.quotePlan;
   if (amounts.confirmedSourceAmount?.raw === "0") return null;
-  const closedDestinationWrap =
-    input.serverExecutionProfileId === POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID;
+  const adapterOwnedPreparation = input.quotePlan.venuePreparation;
   const liquidity = await runtime.liquidity(target.userId, {
     purpose: "add_funds",
     marketContextId: null,
@@ -358,10 +310,10 @@ export async function quoteFundingReceiveReceipt(
       : {}),
     // The closed-destination wrap is an exact 1:1 protocol transform, not an
     // economic route. Its boundary is the full receipt and exact calldata.
-    maxFeeUsd: closedDestinationWrap
+    maxFeeUsd: adapterOwnedPreparation
       ? null
       : target.automationPolicy.maximumFeeUsd,
-    maxSlippageBps: closedDestinationWrap
+    maxSlippageBps: adapterOwnedPreparation
       ? null
       : target.automationPolicy.maximumSlippageBps,
     deadline: null,
@@ -428,17 +380,41 @@ export type FundingReceiveReceiptRoutingResult = Readonly<{
 export class FundingReceiveReceiptRouter {
   private runtime: Pick<
     FundingPlanningRuntime,
-    "liquidity" | "quote" | "commitInTransaction"
+    "liquidity" | "quote" | "prepareCommit" | "commitPreparedInTransaction"
   > | null;
 
   constructor(
     private readonly db: Pool,
     runtime?: Pick<
       FundingPlanningRuntime,
-      "liquidity" | "quote" | "commitInTransaction"
+      "liquidity" | "quote" | "prepareCommit" | "commitPreparedInTransaction"
     >,
+    private readonly resolveDisposition: FundingReceiveReceiptDispositionResolver = () => ({
+      kind: "hard_invalid",
+      reasonCode: "receipt_disposition_unavailable",
+    }),
   ) {
     this.runtime = runtime ?? null;
+  }
+
+  private reviewFallback(
+    target: FundingReceiveReceiptRoutingTarget,
+  ): FundingReceiveReviewFallback {
+    try {
+      const disposition = this.resolveDisposition(target);
+      return {
+        evidence: reviewEvidence(disposition),
+        errorCode:
+          disposition.kind === "hard_invalid"
+            ? disposition.reasonCode
+            : "receipt_disposition_invalid",
+      };
+    } catch (error) {
+      return {
+        evidence: null,
+        errorCode: fundingReceiveRoutingErrorCode(error),
+      };
+    }
   }
 
   async runBatch(
@@ -458,9 +434,81 @@ export class FundingReceiveReceiptRouter {
       retryableErrors: 0,
     };
     for (const target of targets) {
+      if (
+        target.receipt.status === "review_required" &&
+        (!target.receipt.reviewContinuation || !target.receipt.reviewQuotePlan)
+      ) {
+        const fallback = this.reviewFallback(target);
+        const evidence = fallback.evidence;
+        const updated = evidence
+          ? await this.recordDisposition(
+              target,
+              "review_required",
+              "economic_review_required",
+              now,
+              evidence.continuation,
+              evidence.quotePlan,
+            )
+          : await this.recordDisposition(
+              target,
+              "recovery_required",
+              fallback.errorCode,
+              now,
+            );
+        if (updated) {
+          if (evidence) {
+            counts.reviewsRequired += 1;
+          } else {
+            counts.recoveriesRequired += 1;
+          }
+        }
+        continue;
+      }
       if (target.receipt.status === "observed") {
+        let execution: FundingReceiveReceiptAutomaticExecution | null = null;
+        let fallbackReview: FundingReceiveReviewEvidence | null = null;
         try {
-          const outcome = await this.createExactChildOperation(target, now);
+          const disposition = this.resolveDisposition(target);
+          if (disposition.kind === "review_required") {
+            const updated = await this.recordDisposition(
+              target,
+              "review_required",
+              "economic_review_required",
+              now,
+              disposition.continuation,
+              disposition.quotePlan,
+            );
+            counts.reviewsRequired += updated ? 1 : 0;
+            continue;
+          }
+          if (disposition.kind === "hard_invalid") {
+            const updated = await this.recordDisposition(
+              target,
+              "recovery_required",
+              disposition.reasonCode,
+              now,
+            );
+            counts.recoveriesRequired += updated ? 1 : 0;
+            continue;
+          }
+          if (disposition.kind === "direct") {
+            const updated = await this.recordDisposition(
+              target,
+              "recovery_required",
+              "receipt_disposition_invalid",
+              now,
+            );
+            counts.recoveriesRequired += updated ? 1 : 0;
+            continue;
+          }
+          execution = disposition.execution;
+          fallbackReview = reviewEvidence(disposition);
+          const outcome = await this.createExactChildOperation(
+            target,
+            now,
+            disposition.quotePlan,
+            execution,
+          );
           if (outcome.kind === "created") {
             counts.operationsCreated += 1;
           } else if (outcome.kind === "soft_paused") {
@@ -481,18 +529,32 @@ export class FundingReceiveReceiptRouter {
             );
             counts.recoveriesRequired += updated ? 1 : 0;
           } else if (outcome.kind === "outside_policy") {
-            const updated = await this.recordDisposition(
-              target,
-              "review_required",
-              "automation_policy_exceeded",
-              now,
-            );
-            counts.reviewsRequired += updated ? 1 : 0;
+            const continuation = execution?.outsidePolicyReview;
+            const updated = continuation
+              ? await this.recordDisposition(
+                  target,
+                  "review_required",
+                  "automation_policy_exceeded",
+                  now,
+                  continuation,
+                  disposition.quotePlan,
+                )
+              : await this.recordDisposition(
+                  target,
+                  "recovery_required",
+                  "automation_policy_exceeded",
+                  now,
+                );
+            if (updated) {
+              if (continuation) counts.reviewsRequired += 1;
+              else counts.recoveriesRequired += 1;
+            }
           } else {
             const disposition = await this.deferOrRecoverReceipt(
               target,
               "route_unavailable",
               now,
+              fallbackReview,
             );
             counts.retriesScheduled += disposition === "retry" ? 1 : 0;
             counts.reviewsRequired += disposition === "review" ? 1 : 0;
@@ -500,10 +562,21 @@ export class FundingReceiveReceiptRouter {
           }
         } catch (error) {
           counts.retryableErrors += 1;
-          const disposition = await this.deferOrRecoverReceipt(
-            target,
-            fundingReceiveRoutingErrorCode(error),
-            now,
+          const directive = execution?.classifyError?.(error) ?? null;
+          const disposition = await (
+            directive?.retryMode === "defer_without_budget"
+              ? this.deferReceipt(
+                  target,
+                  directive.errorCode,
+                  directive.retryAfterMs,
+                  now,
+                )
+              : this.deferOrRecoverReceipt(
+                  target,
+                  fundingReceiveRoutingErrorCode(error),
+                  now,
+                  fallbackReview,
+                )
           ).catch(() => "unchanged" as const);
           counts.retriesScheduled += disposition === "retry" ? 1 : 0;
           counts.reviewsRequired += disposition === "review" ? 1 : 0;
@@ -523,10 +596,14 @@ export class FundingReceiveReceiptRouter {
       });
       const childOperationId = target.receipt.childFundingOperationId;
       if (!childOperationId || childDisposition === "waiting") continue;
+      const fallbackReview =
+        childDisposition === "review_retry"
+          ? this.reviewFallback(target).evidence
+          : null;
       const status =
         childDisposition === "ready"
           ? "ready"
-          : childDisposition === "review_retry"
+          : childDisposition === "review_retry" && fallbackReview
             ? "review_required"
             : "recovery_required";
       const childOperationStatus =
@@ -543,12 +620,12 @@ export class FundingReceiveReceiptRouter {
         childOperationId,
         childOperationStatus,
         status,
+        ...(fallbackReview ?? {}),
         now,
       });
       if (settled) {
         if (childDisposition === "ready") counts.receiptsReady += 1;
-        else if (childDisposition === "review_retry")
-          counts.reviewsRequired += 1;
+        else if (status === "review_required") counts.reviewsRequired += 1;
         else counts.recoveriesRequired += 1;
       }
     }
@@ -561,77 +638,128 @@ export class FundingReceiveReceiptRouter {
   private async createExactChildOperation(
     target: FundingReceiveReceiptRoutingTarget,
     now: Date,
+    quotePlan: FundingReceiveQuotePlan,
+    execution: FundingReceiveReceiptAutomaticExecution | null,
   ): Promise<ExactChildOperationOutcome> {
-    const telegramOwned = target.ownerChannel === "telegram";
-    const automation = parseTelegramFundingAutomationPolicyV2(
-      target.telegramAutomationPolicy,
-    );
-    if (telegramOwned) {
-      if (!automation) {
-        return {
-          kind: "hard_invalid",
-          reasonCode: "delegated_authority_invalid",
-        };
-      }
-      const decision = await telegramUsdceWrapRoutingDecision(this.db, target);
+    if (execution) {
+      const decision = await execution.decision(this.db, target);
       if (decision.kind !== "allowed") return decision;
     }
+    const prepared = execution?.prepareOperation
+      ? await execution.prepareOperation(this.db, target, now)
+      : null;
+    if (execution?.prepareOperation && !prepared) {
+      return { kind: "no_route" };
+    }
+    if (prepared && "kind" in prepared) {
+      return prepared;
+    }
+    if (prepared && execution) {
+      return tx(this.db, async (client) => {
+        await prepared.verify(client);
+        const claimed =
+          await claimFundingReceiveReceiptOperationLinkInTransaction(client, {
+            receiptId: target.receipt.receiptId,
+            userId: target.userId,
+          });
+        if (!claimed) return { kind: "no_route" } as const;
+        const operationId = await prepared.commit(client);
+        if (
+          !(await execution.validateOperationLink(client, {
+            operationId,
+            target,
+          }))
+        ) {
+          throw new Error("automatic funding operation evidence is invalid");
+        }
+        const linked = await linkFundingReceiveReceiptOperationInTransaction(
+          client,
+          {
+            receiptId: target.receipt.receiptId,
+            userId: target.userId,
+            childFundingOperationId: operationId,
+            authorizationId: execution.authorizationId,
+            authorizationFingerprint: execution.authorizationFingerprint,
+            telegramFundingConsentId: execution.receiptBinding?.consentId,
+            telegramFundingConsentFingerprint:
+              execution.receiptBinding?.consentFingerprint,
+            serverExecutionProfileId: execution.serverExecutionProfileId,
+            now,
+          },
+        );
+        if (!linked) {
+          throw new Error("claimed funding receipt could not be linked");
+        }
+        return { kind: "created" } as const;
+      });
+    }
     const runtime = await this.planningRuntime();
-    const quote = await quoteFundingReceiveReceipt(
-      runtime,
-      target,
-      telegramOwned
-        ? {
-            serverExecutionProfileId: POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
-          }
-        : {},
-    );
+    const quote = await quoteFundingReceiveReceipt(runtime, target, {
+      quotePlan,
+      ...(execution?.serverExecutionProfileId
+        ? { serverExecutionProfileId: execution.serverExecutionProfileId }
+        : {}),
+    });
     if (!quote) return { kind: "no_route" };
-    if (telegramOwned && !exactPolymarketUsdceWrapQuote(quote, target)) {
+    if (execution && !execution.quoteMatches?.(quote, target)) {
       return {
         kind: "hard_invalid",
         reasonCode: "delegated_action_invalid",
       };
     }
     if (
-      !telegramOwned &&
+      !execution &&
       !quoteWithinReceiveAutomationPolicy(quote, target.automationPolicy)
     ) {
       return { kind: "outside_policy" };
     }
+    const commitRequest = {
+      quoteId: quote.quoteId,
+      consentToken: quote.consentToken,
+      idempotencyKey: `receive-receipt:${target.receipt.receiptId}`,
+    };
+    const preparedCommit = await runtime.prepareCommit(
+      target.userId,
+      commitRequest,
+    );
     return tx(this.db, async (client) => {
+      await lockFundingPolicyForTransaction(client);
       const claimed =
         await claimFundingReceiveReceiptOperationLinkInTransaction(client, {
           receiptId: target.receipt.receiptId,
           userId: target.userId,
         });
       if (!claimed) return { kind: "no_route" } as const;
-      const committed = await runtime.commitInTransaction(
+      const committed = await runtime.commitPreparedInTransaction(
         client,
-        target.userId,
-        {
-          quoteId: quote.quoteId,
-          consentToken: quote.consentToken,
-          idempotencyKey: `receive-receipt:${target.receipt.receiptId}`,
-        },
+        preparedCommit,
       );
+      if (
+        execution &&
+        !(await execution.validateOperationLink(client, {
+          operationId: committed.operation.id,
+          target,
+        }))
+      ) {
+        throw new Error("automatic funding operation evidence is invalid");
+      }
       const linked = await linkFundingReceiveReceiptOperationInTransaction(
         client,
         {
           receiptId: target.receipt.receiptId,
           userId: target.userId,
           childFundingOperationId: committed.operation.id,
-          ...(telegramOwned && automation
+          ...(execution
             ? {
-                authorizationId: automation.authorizationId,
-                authorizationFingerprint: automation.authorizationFingerprint,
-                telegramFundingConsentId:
-                  target.telegramFundingConsentId ?? undefined,
+                authorizationId: execution.authorizationId,
+                authorizationFingerprint: execution.authorizationFingerprint,
+                telegramFundingConsentId: execution.receiptBinding?.consentId,
                 telegramFundingConsentFingerprint:
-                  target.telegramFundingConsentFingerprint ?? undefined,
+                  execution.receiptBinding?.consentFingerprint,
+                serverExecutionProfileId: execution.serverExecutionProfileId,
               }
             : {}),
-          now,
+          now: committed.operation.createdAt,
         },
       );
       if (!linked) {
@@ -642,13 +770,13 @@ export class FundingReceiveReceiptRouter {
   }
 
   private async planningRuntime(): Promise<
-    Pick<FundingPlanningRuntime, "liquidity" | "quote" | "commitInTransaction">
+    Pick<
+      FundingPlanningRuntime,
+      "liquidity" | "quote" | "prepareCommit" | "commitPreparedInTransaction"
+    >
   > {
     if (this.runtime) return this.runtime;
-    const { FundingPlanningRuntime: Runtime } =
-      await import("../planner/runtime-service.js");
-    this.runtime = new Runtime(this.db);
-    return this.runtime;
+    throw new Error("funding receive route adapter is unavailable");
   }
 
   private recordDisposition(
@@ -656,6 +784,8 @@ export class FundingReceiveReceiptRouter {
     disposition: "review_required" | "recovery_required",
     errorCode: string,
     now: Date,
+    reviewContinuation?: FundingReceiveReviewContinuation,
+    reviewQuotePlan?: FundingReceiveQuotePlan,
   ): Promise<boolean> {
     return recordFundingReceiveReceiptRoutingDisposition(this.db, {
       receiptId: target.receipt.receiptId,
@@ -663,6 +793,8 @@ export class FundingReceiveReceiptRouter {
       userId: target.userId,
       disposition,
       errorCode,
+      ...(reviewContinuation ? { reviewContinuation } : {}),
+      ...(reviewQuotePlan ? { reviewQuotePlan } : {}),
       now,
     });
   }
@@ -671,26 +803,19 @@ export class FundingReceiveReceiptRouter {
     target: FundingReceiveReceiptRoutingTarget,
     errorCode: string,
     now: Date,
+    fallbackReview: FundingReceiveReviewEvidence | null,
   ): Promise<"retry" | "review" | "recovery" | "unchanged"> {
-    if (errorCode === "routing_predecessor_unresolved") {
-      const updated = await deferFundingReceiveReceiptRouting(this.db, {
-        receiptId: target.receipt.receiptId,
-        userId: target.userId,
-        errorCode,
-        retryAt: new Date(now.getTime() + AUTOMATIC_ROUTING_RETRY_MS),
-        now,
-      });
-      return updated ? "retry" : "unchanged";
-    }
     const nextAttempt = target.routingAttemptCount + 1;
     if (fundingReceiveRoutingNeedsReview(errorCode, nextAttempt)) {
       const updated = await this.recordDisposition(
         target,
-        "review_required",
+        fallbackReview ? "review_required" : "recovery_required",
         errorCode,
         now,
+        fallbackReview?.continuation,
+        fallbackReview?.quotePlan,
       );
-      return updated ? "review" : "unchanged";
+      return updated ? (fallbackReview ? "review" : "recovery") : "unchanged";
     }
     if (fundingReceiveRoutingNeedsRecovery(errorCode, nextAttempt)) {
       const updated = await this.recordDisposition(
@@ -719,6 +844,22 @@ export class FundingReceiveReceiptRouter {
         now,
       },
     );
+    return updated ? "retry" : "unchanged";
+  }
+
+  private async deferReceipt(
+    target: FundingReceiveReceiptRoutingTarget,
+    errorCode: string,
+    retryAfterMs: number,
+    now: Date,
+  ): Promise<"retry" | "unchanged"> {
+    const updated = await deferFundingReceiveReceiptRouting(this.db, {
+      receiptId: target.receipt.receiptId,
+      userId: target.userId,
+      errorCode,
+      retryAt: new Date(now.getTime() + retryAfterMs),
+      now,
+    });
     return updated ? "retry" : "unchanged";
   }
 }

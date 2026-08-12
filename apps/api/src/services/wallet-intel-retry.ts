@@ -5,7 +5,48 @@ import {
   sleep,
 } from "@hunch/shared";
 
-import { env } from "../env.js";
+type Environment = Readonly<Record<string, string | undefined>>;
+
+function intInRange(
+  source: Environment,
+  key: string,
+  fallback: number,
+  minimum: number,
+  maximum: number,
+): number {
+  const value = Number(source[key]?.trim() ?? "");
+  return Number.isSafeInteger(value) && value >= minimum && value <= maximum
+    ? value
+    : fallback;
+}
+
+export function loadWalletIntelRetryConfig(
+  source: Environment = process.env,
+): Readonly<{
+  baseBackoffMs: number;
+  maxAttempts: number;
+  maxBackoffMs: number;
+}> {
+  return {
+    maxAttempts: intInRange(source, "WALLET_INTEL_RETRY_MAX_ATTEMPTS", 3, 1, 6),
+    baseBackoffMs: intInRange(
+      source,
+      "WALLET_INTEL_RETRY_BASE_BACKOFF_MS",
+      250,
+      10,
+      60_000,
+    ),
+    maxBackoffMs: intInRange(
+      source,
+      "WALLET_INTEL_RETRY_MAX_BACKOFF_MS",
+      2_000,
+      10,
+      120_000,
+    ),
+  };
+}
+
+export const walletIntelRetryConfig = loadWalletIntelRetryConfig();
 
 export type WalletIntelRetryTelemetry = {
   source: string;
@@ -39,7 +80,7 @@ export function createWalletIntelRetryTelemetry(
   };
 }
 
-function computeBackoffMs(
+export function computeWalletIntelBackoffMs(
   attempt: number,
   retryAfterMs: number | null,
 ): number {
@@ -51,14 +92,15 @@ function computeBackoffMs(
     return Math.min(
       retryAfterMs,
       Math.max(
-        env.walletIntelRetryBaseBackoffMs,
-        env.walletIntelRetryMaxBackoffMs,
+        walletIntelRetryConfig.baseBackoffMs,
+        walletIntelRetryConfig.maxBackoffMs,
       ),
     );
   }
   const exponential =
-    env.walletIntelRetryBaseBackoffMs * Math.max(1, 2 ** Math.max(0, attempt));
-  return Math.min(exponential, env.walletIntelRetryMaxBackoffMs);
+    walletIntelRetryConfig.baseBackoffMs *
+    Math.max(1, 2 ** Math.max(0, attempt));
+  return Math.min(exponential, walletIntelRetryConfig.maxBackoffMs);
 }
 
 export async function fetchWithWalletIntelRetry(inputs: {
@@ -69,7 +111,7 @@ export async function fetchWithWalletIntelRetry(inputs: {
   telemetry?: WalletIntelRetryTelemetry | null;
 }): Promise<Response> {
   const telemetry = inputs.telemetry ?? null;
-  const maxAttempts = Math.max(1, env.walletIntelRetryMaxAttempts);
+  const maxAttempts = Math.max(1, walletIntelRetryConfig.maxAttempts);
   const allowRetry = inputs.allowRetry ?? true;
 
   if (telemetry) telemetry.attempted += 1;
@@ -100,7 +142,7 @@ export async function fetchWithWalletIntelRetry(inputs: {
       }
       if (retryable) {
         if (telemetry) telemetry.retried += 1;
-        await sleep(computeBackoffMs(attempt, retryAfterMs));
+        await sleep(computeWalletIntelBackoffMs(attempt, retryAfterMs));
         continue;
       }
       if (telemetry) telemetry.failed += 1;
@@ -113,7 +155,7 @@ export async function fetchWithWalletIntelRetry(inputs: {
       }
       if (retryable) {
         if (telemetry) telemetry.retried += 1;
-        await sleep(computeBackoffMs(attempt, null));
+        await sleep(computeWalletIntelBackoffMs(attempt, null));
         continue;
       }
       if (telemetry) {

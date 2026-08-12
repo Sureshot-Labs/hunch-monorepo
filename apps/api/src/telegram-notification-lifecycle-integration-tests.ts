@@ -3,6 +3,7 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 
+import "./integration-test-database-guard.js";
 import { pool } from "./db.js";
 import { enqueueTelegramActivityNotifications } from "./services/telegram-notification-delivery.js";
 import { ensureTelegramNotificationPreferences } from "./services/telegram-notification-preferences.js";

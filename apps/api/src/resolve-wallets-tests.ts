@@ -1,6 +1,7 @@
 #!/usr/bin/env tsx
 
 import assert from "node:assert/strict";
+import "./integration-test-database-guard.js";
 import { AuthService } from "./auth.js";
 import { pool } from "./db.js";
 import { resolveRequestedWalletAddresses } from "./lib/resolve-wallets.js";

@@ -1,6 +1,7 @@
 #!/usr/bin/env tsx
 
 import assert from "node:assert/strict";
+import "./integration-test-database-guard.js";
 import crypto from "node:crypto";
 import { pool } from "./db.js";
 import { normalizeRewardsChainId } from "./lib/rewards-chain.js";
@@ -1530,7 +1531,7 @@ const tests: TestCase[] = [
       assert.equal(typedData.domain.name, "DepositWallet");
       assert.equal(typedData.domain.version, "1");
       assert.equal(typedData.domain.chainId, 137);
-      assert.equal(typedData.message.nonce, 42n);
+      assert.equal(typedData.message.nonce, "42");
       assert.equal(
         typedData.message.calls[0]?.target,
         "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB",

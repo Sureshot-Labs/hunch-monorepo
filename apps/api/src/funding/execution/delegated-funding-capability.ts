@@ -1,4 +1,4 @@
-import type { ResolvedFundingPolicy } from "../policies/funding-policy-service.js";
+import type { FundingControlPlaneSnapshot } from "../policies/funding-policy-sidecar.js";
 import type { PolymarketWrapExecutionConfiguration } from "./delegated-funding-config.js";
 import { polymarketWrapProfileConfigured } from "./delegated-funding-config.js";
 import { POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID } from "./delegated-funding-profile-ids.js";
@@ -19,6 +19,7 @@ export type DelegatedFundingCapabilityDecision =
       reasonCode:
         | "delegated_action_invalid"
         | "delegated_authority_invalid"
+        | "delegated_quote_expired"
         | "delegated_route_changed"
         | "funding_policy_changed"
         | "funding_runtime_contract_changed";
@@ -33,7 +34,7 @@ export type DelegatedFundingPreBroadcastDecision = Exclude<
 const ALLOWED = Object.freeze({ kind: "allowed" as const });
 
 export function fundingPolicyRevisionMayResume(
-  policy: ResolvedFundingPolicy,
+  policy: FundingControlPlaneSnapshot,
 ): boolean {
   return (
     policy.invalidStoredPolicy ||
@@ -51,7 +52,7 @@ export function fundingPolicyRevisionMayResume(
  */
 export function classifyPolymarketWrapControlPlane(input: {
   configuration: PolymarketWrapExecutionConfiguration;
-  policy: ResolvedFundingPolicy;
+  policy: FundingControlPlaneSnapshot;
 }): DelegatedFundingPreBroadcastDecision {
   if (input.policy.invalidStoredPolicy) {
     return {

@@ -1,6 +1,10 @@
 import { tx, type Pool, type PoolClient } from "@hunch/infra";
 
-import type { FundingPurpose, JsonValue } from "../domain/types.js";
+import type {
+  FundingPurpose,
+  FundingReceiveSessionChannel,
+  JsonValue,
+} from "../domain/types.js";
 import {
   canonicalAccountAddress,
   canonicalAssetId,
@@ -50,6 +54,13 @@ export class FundingPersistenceError extends Error {
 
 type JsonRecord = Readonly<Record<string, JsonValue>>;
 
+export type FundingQuoteCommitScope = Readonly<{
+  kind: "receive_receipt_review_v1";
+  ownerChannel: FundingReceiveSessionChannel;
+  receiveSessionId: string;
+  receiptId: string;
+}>;
+
 export type FundingQuoteInsert = Readonly<{
   userId: string;
   discoveryProjectionId: string;
@@ -62,6 +73,7 @@ export type FundingQuoteInsert = Readonly<{
   policyRevision: string;
   canonicalRequest: JsonValue;
   consentToken: string;
+  commitScope?: FundingQuoteCommitScope | null;
   expiresAt: Date;
 }>;
 
@@ -79,6 +91,7 @@ export type StoredFundingQuote = Readonly<{
   canonicalRequestHash: string;
   planHash: string;
   consentTokenHash: string;
+  commitScope: FundingQuoteCommitScope | null;
   expiresAt: Date;
   consumedAt: Date | null;
   invalidatedAt: Date | null;
@@ -139,6 +152,8 @@ export type FundingCommitStep = Readonly<{
   dependsOnOrdinal: number | null;
   normalizedAction: JsonRecord;
   actionValidationResult: JsonRecord;
+  /** `null` is reserved for a reviewed action contract with no time validity. */
+  actionExpiresAt?: string | null;
 }>;
 
 export type FundingCommitReservation = Readonly<{
@@ -240,6 +255,84 @@ export type FundingOperationRow = Readonly<{
 
 export type FundingRecoveryMode = "automatic_evidence" | "manual_review";
 export const FUNDING_OPERATION_ACTION_TTL_MS = 15 * 60_000;
+export const FUNDING_OPERATION_RECONCILIATION_TTL_MS = 7 * 24 * 60 * 60_000;
+
+export function fundingOperationExpiresAt(
+  now: Date,
+  quoteExpiresAt: Date,
+  plan: FundingCommitPlan,
+): Date {
+  const deadlines = [
+    quoteExpiresAt.getTime(),
+    ...plan.segments.map((segment) => Date.parse(segment.quoteExpiresAt)),
+    ...plan.reservations.map((reservation) =>
+      Date.parse(reservation.expiresAt),
+    ),
+    ...plan.steps.flatMap((step) =>
+      typeof step.actionExpiresAt === "string"
+        ? [Date.parse(step.actionExpiresAt)]
+        : [],
+    ),
+  ];
+  if (deadlines.some((deadline) => !Number.isFinite(deadline))) {
+    throw new FundingPersistenceError(
+      "quote_mismatch",
+      "funding plan contains an invalid provider deadline",
+    );
+  }
+  if (deadlines.some((deadline) => deadline <= now.getTime())) {
+    throw new FundingPersistenceError(
+      "quote_expired",
+      "funding provider quote expired before operation commit",
+    );
+  }
+  return new Date(now.getTime() + FUNDING_OPERATION_RECONCILIATION_TTL_MS);
+}
+
+function fundingStepActionExpiresAt(
+  now: Date,
+  plan: FundingCommitPlan,
+  step: FundingCommitStep,
+): Date | null {
+  if (step.actionExpiresAt === null) return null;
+  const deadlines = [now.getTime() + FUNDING_OPERATION_ACTION_TTL_MS];
+  if (typeof step.actionExpiresAt === "string") {
+    deadlines.push(Date.parse(step.actionExpiresAt));
+  }
+  if (step.segmentOrdinal !== null) {
+    const segment = plan.segments[step.segmentOrdinal];
+    if (!segment) {
+      throw new FundingPersistenceError(
+        "quote_mismatch",
+        `step ${step.ordinal} references an unavailable segment ordinal`,
+      );
+    }
+    deadlines.push(Date.parse(segment.quoteExpiresAt));
+  }
+  deadlines.push(
+    ...plan.reservations
+      .filter(
+        (reservation) =>
+          reservation.segmentOrdinal === null ||
+          reservation.segmentOrdinal === step.segmentOrdinal,
+      )
+      .map((reservation) => Date.parse(reservation.expiresAt)),
+  );
+  if (deadlines.some((deadline) => !Number.isFinite(deadline))) {
+    throw new FundingPersistenceError(
+      "quote_mismatch",
+      "funding plan contains an invalid action deadline",
+    );
+  }
+  const expiresAt = new Date(Math.min(...deadlines));
+  if (expiresAt.getTime() <= now.getTime()) {
+    throw new FundingPersistenceError(
+      "quote_expired",
+      "funding action expired before operation commit",
+    );
+  }
+  return expiresAt;
+}
 
 type FundingQuoteDbRow = {
   id: string;
@@ -255,6 +348,7 @@ type FundingQuoteDbRow = {
   canonical_request_hash: string;
   plan_hash: string;
   consent_token_hash: string;
+  commit_scope: FundingQuoteCommitScope | null;
   expires_at: Date;
   consumed_at: Date | null;
   invalidated_at: Date | null;
@@ -308,6 +402,7 @@ function mapQuote(row: FundingQuoteDbRow): StoredFundingQuote {
     canonicalRequestHash: row.canonical_request_hash,
     planHash: row.plan_hash,
     consentTokenHash: row.consent_token_hash,
+    commitScope: row.commit_scope,
     expiresAt: row.expires_at,
     consumedAt: row.consumed_at,
     invalidatedAt: row.invalidated_at,
@@ -363,6 +458,7 @@ const quoteColumns = `
   canonical_request_hash,
   plan_hash,
   consent_token_hash,
+  commit_scope,
   expires_at,
   consumed_at,
   invalidated_at
@@ -423,11 +519,12 @@ export async function createFundingQuoteInTransaction(
         canonical_request_hash,
         plan_hash,
         consent_token_hash,
+        commit_scope,
         expires_at
       )
       values (
         $1, $2, $3::jsonb, $4::jsonb, $5::jsonb, $6::jsonb, $7::jsonb,
-        $8, $9, $10, $11, $12, $13
+        $8, $9, $10, $11, $12, $13::jsonb, $14
       )
       returning ${quoteColumns}
     `,
@@ -444,6 +541,7 @@ export async function createFundingQuoteInTransaction(
       canonicalRequestHash,
       planHash,
       consentTokenHash,
+      input.commitScope ? JSON.stringify(input.commitScope) : null,
       input.expiresAt,
     ],
   );
@@ -673,11 +771,12 @@ async function insertCommitSegments(
 async function insertCommitSteps(
   client: Pick<PoolClient, "query">,
   operationId: string,
-  steps: readonly FundingCommitStep[],
+  plan: FundingCommitPlan,
   segmentIdByOrdinal: ReadonlyMap<number, string>,
+  now: Date,
 ): Promise<void> {
   const stepIdByOrdinal = new Map<number, string>();
-  for (const step of [...steps].sort(
+  for (const step of [...plan.steps].sort(
     (left, right) => left.ordinal - right.ordinal,
   )) {
     const dependsOnStepId =
@@ -713,10 +812,12 @@ async function insertCommitSteps(
           payer_requirement,
           depends_on_step_id,
           normalized_action,
-          action_validation_result
+          action_validation_result,
+          action_expires_at
         )
         values (
-          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11::jsonb
+          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11::jsonb,
+          $12
         )
         returning id
       `,
@@ -732,6 +833,7 @@ async function insertCommitSteps(
         dependsOnStepId,
         step.normalizedAction,
         step.actionValidationResult,
+        fundingStepActionExpiresAt(now, plan, step),
       ],
     );
     const insertedId = rows[0]?.id;
@@ -962,66 +1064,6 @@ export async function commitFundingOperationInTransaction(
     return { operation: existing, replayed: true };
   }
 
-  if (
-    input.plan.operation.supportMetadata?.preparationKind ===
-    "polymarket_funding_router"
-  ) {
-    const metadataBinding =
-      input.plan.operation.supportMetadata.venueBindingOptionId;
-    const snapshotBinding =
-      input.plan.operation.venueBindingSnapshot?.venueBindingOptionId;
-    const venueBindingOptionId =
-      typeof metadataBinding === "string" && metadataBinding.trim()
-        ? metadataBinding.trim()
-        : typeof snapshotBinding === "string" && snapshotBinding.trim()
-          ? snapshotBinding.trim()
-          : null;
-    if (!venueBindingOptionId) {
-      throw new FundingPersistenceError(
-        "quote_mismatch",
-        "Polymarket Funding Router operation lacks an exact venue binding",
-      );
-    }
-    await client.query(
-      `select pg_advisory_xact_lock(hashtextextended($1, 0))`,
-      [`funding-router:${input.userId}:${venueBindingOptionId}`],
-    );
-    const unresolved = await client.query<{ blocked: boolean }>(
-      `
-        select exists (
-          select 1
-          from funding_operations operation
-          where operation.user_id = $1
-            and operation.support_metadata ->> 'preparationKind' =
-                  'polymarket_funding_router'
-            and (
-              coalesce(
-                operation.support_metadata ->> 'venueBindingOptionId',
-                operation.venue_binding_snapshot ->> 'venueBindingOptionId'
-              ) = $2
-              or coalesce(
-                operation.support_metadata ->> 'venueBindingOptionId',
-                operation.venue_binding_snapshot ->> 'venueBindingOptionId'
-              ) is null
-            )
-            and operation.status not in (
-              'completed',
-              'refunded',
-              'failed',
-              'cancelled'
-            )
-        ) as blocked
-      `,
-      [input.userId, venueBindingOptionId],
-    );
-    if (unresolved.rows[0]?.blocked) {
-      throw new FundingPersistenceError(
-        "invalid_operation_state",
-        "another Polymarket Funding Router operation is unresolved",
-      );
-    }
-  }
-
   const quoteResult = await client.query<FundingQuoteDbRow>(
     `
       select ${quoteColumns}
@@ -1039,9 +1081,27 @@ export async function commitFundingOperationInTransaction(
     );
   }
   const quote = mapQuote(quoteRow);
-  const now = input.now ?? new Date();
-  const consentTokenHash = assertQuoteMatchesCommit(quote, input, now);
+  const preflightNow = input.now ?? new Date();
+  assertQuoteMatchesCommit(quote, input, preflightNow);
   await input.verifyCurrentFacts?.(client, quote);
+  const { rows: clockRows } = await client.query<{ now: Date }>(
+    "select clock_timestamp() as now",
+  );
+  const databaseNow = clockRows[0]?.now;
+  if (!databaseNow) throw new Error("funding commit clock is unavailable");
+  // A supplied future clock is useful for deterministic expiry tests and can
+  // only fail earlier. A stale batch/request clock can never move commit time
+  // behind the database after current-facts checks and lock waits.
+  const now =
+    input.now && input.now.getTime() > databaseNow.getTime()
+      ? input.now
+      : databaseNow;
+  const consentTokenHash = assertQuoteMatchesCommit(quote, input, now);
+  const operationExpiresAt = fundingOperationExpiresAt(
+    now,
+    quote.expiresAt,
+    input.plan,
+  );
 
   const operationPlan = input.plan.operation;
   const { rows } = await client.query<FundingOperationDbRow>(
@@ -1128,7 +1188,7 @@ export async function commitFundingOperationInTransaction(
       input.subjectLookupHmac,
       input.subjectLookupKeyVersion,
       now,
-      new Date(now.getTime() + FUNDING_OPERATION_ACTION_TTL_MS),
+      operationExpiresAt,
       ["completed", "refunded", "failed", "cancelled"].includes(
         operationPlan.initialState.status,
       )
@@ -1149,8 +1209,9 @@ export async function commitFundingOperationInTransaction(
   await insertCommitSteps(
     client,
     operation.id,
-    input.plan.steps,
+    input.plan,
     segmentIdByOrdinal,
+    now,
   );
   await insertCommitReservations(
     client,

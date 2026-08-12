@@ -11,7 +11,7 @@ import {
   FUNDING_TTL,
   type FundingRuntimePolicy,
 } from "../policies/funding-policy.js";
-import { sameAsset } from "./asset-identity.js";
+import { canonicalAssetId, sameAsset } from "./asset-identity.js";
 import type { AssetRef } from "./types.js";
 
 export const WITHDRAWAL_DESTINATION_CONTRACT_VERSION = 1;
@@ -43,13 +43,13 @@ export function withdrawalRecipientLocationPatternId(
 ): string | null {
   if (!supportsWithdrawalDestinationAsset(asset)) return null;
   if (asset.networkId === "evm:137") {
-    const id = asset.assetId.toLowerCase();
+    const id = canonicalAssetId(asset);
     if (id === RELAY_PINNED_ASSETS.polygonPusd)
       return "withdrawal-polygon-pusd-v1";
   }
   if (
     asset.networkId === "evm:8453" &&
-    asset.assetId.toLowerCase() === RELAY_PINNED_ASSETS.baseUsdc
+    canonicalAssetId(asset) === RELAY_PINNED_ASSETS.baseUsdc
   ) {
     return "withdrawal-base-usdc-v1";
   }

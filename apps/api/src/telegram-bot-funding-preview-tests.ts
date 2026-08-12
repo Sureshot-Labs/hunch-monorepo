@@ -71,32 +71,25 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
-    name: "convert and shortfall messages reuse the canonical deposit presentation",
+    name: "legacy Buy shortfall never materializes a funding address",
     run: () => {
       const source = readFileSync(
         new URL("./services/telegram-bot-trading.ts", import.meta.url),
         "utf8",
       );
-      const start = source.indexOf("const depositPresentation =");
+      const start = source.indexOf(
+        "const marketUrl = openMarketUrl(input.appBaseUrl, input.market);",
+      );
       const end = source.indexOf("const previewRecorded =", start);
       assert.ok(start >= 0 && end > start);
       const fundingBlock = source.slice(start, end);
-      assert.match(
+      assert.doesNotMatch(fundingBlock, /depositPresentation/u);
+      assert.doesNotMatch(
         fundingBlock,
-        /buildTelegramDepositAddressPresentation\(\{[\s\S]*?venue: "polymarket"/,
+        /receiveAddress|depositAddress|qrText/u,
       );
-      assert.equal(
-        fundingBlock.match(/depositPresentation\?\.buttonRows/g)?.length,
-        2,
-      );
-      assert.match(
-        fundingBlock,
-        /formatTelegramBoldMarkdownV2\("Deposit instead"\)[\s\S]*?\.\.\.depositPresentation\.markdownV2Lines/,
-      );
-      assert.match(
-        fundingBlock,
-        /\.\.\.\(depositPresentation\?\.markdownV2Lines \?\? \[/,
-      );
+      assert.match(fundingBlock, /title: "Add funds"/u);
+      assert.match(fundingBlock, /request a verified receive address/u);
       assert.equal(
         fundingBlock.match(/formatTelegramVenueFieldMarkdownV2\(/g)?.length,
         2,

@@ -7,6 +7,7 @@ import crypto from "node:crypto";
 
 import type { PoolClient } from "pg";
 
+import "../../../integration-test-database-guard.js";
 import {
   FundingMergeConflictError,
   mergeUsers,
@@ -588,6 +589,37 @@ async function testExpiredQuoteCannotCommit(): Promise<void> {
   }
 }
 
+async function testQuoteCannotExpireDuringCurrentFactsCheck(): Promise<void> {
+  const userId = await insertUser(pool);
+  const plan = buildPlan({
+    planKind: "already_available",
+    includeStep: false,
+  });
+  const consentToken = opaque("consent");
+  const { rows } = await pool.query<{ expires_at: Date }>(
+    "select clock_timestamp() + interval '200 milliseconds' as expires_at",
+  );
+  const expiresAt = rows[0]?.expires_at;
+  assert.ok(expiresAt);
+  const quote = await createFundingQuote(pool, {
+    ...quoteInput(userId, plan, consentToken),
+    expiresAt,
+  });
+  try {
+    await expectFundingError(
+      commitFundingOperation(pool, {
+        ...commitInput(userId, quote.id, consentToken, plan),
+        verifyCurrentFacts: async (client) => {
+          await client.query("select pg_sleep(0.3)");
+        },
+      }),
+      "quote_expired",
+    );
+  } finally {
+    await cleanupCommittedOperation(null, quote.id, userId);
+  }
+}
+
 async function testAtomicRollbackAfterPartialInsert(): Promise<void> {
   const userId = await insertUser(pool);
   const plan = buildPlan({
@@ -891,6 +923,7 @@ async function testAutomaticRecoveryAcceptsLateDestinationEvidence(): Promise<vo
       [operationId],
     );
 
+    const observedAt = new Date();
     let balanceReads = 0;
     const observer = new OwnedRouteDestinationObserver({
       observe: async () => {
@@ -898,7 +931,7 @@ async function testAutomaticRecoveryAcceptsLateDestinationEvidence(): Promise<vo
         return {
           observedRaw: "10050674",
           revision: "recovery-observation",
-          observedAt: "2026-07-31T02:23:35.004Z",
+          observedAt: observedAt.toISOString(),
         };
       },
     });
@@ -921,7 +954,6 @@ async function testAutomaticRecoveryAcceptsLateDestinationEvidence(): Promise<vo
       );
       const segmentId = segment.rows[0]?.id;
       assert.ok(segmentId);
-      const observedAt = new Date("2026-07-31T02:23:35.004Z");
       await ingestFundingObservationInTransaction(manualRecoveryClient, {
         discoverySource: "chain_rpc",
         observation: {
@@ -1370,7 +1402,7 @@ async function testActionWaitUsesIdleReconciliationWithoutExternalPolling(): Pro
     );
     operationId = committed.operation.id;
     const waitingAt = new Date(
-      committed.operation.createdAt.getTime() + 60_000,
+      committed.operation.createdAt.getTime() + 10_000,
     );
     await pool.query(
       `
@@ -1477,7 +1509,7 @@ async function testActionWaitUsesIdleReconciliationWithoutExternalPolling(): Pro
     );
     const firstStepId = firstStepResult.rows[0]?.id;
     assert.ok(firstStepId);
-    const reportedAt = committed.operation.expiresAt;
+    const reportedAt = new Date(waitingAt.getTime() + 1_000);
     const reportClient = await pool.connect();
     try {
       await reportClient.query("begin");
@@ -1618,11 +1650,20 @@ async function testExpiredUnbroadcastActionWaitCancelsSafely(): Promise<void> {
     await pool.query(
       `
         update funding_operation_steps
-        set state = 'action_required'
+        set state = 'action_required',
+            action_expires_at = created_at + interval '1 millisecond'
         where operation_id = $1
       `,
       [operationId],
     );
+    const deadline = await pool.query<{ action_expires_at: Date }>(
+      `select action_expires_at
+         from funding_operation_steps
+        where operation_id = $1`,
+      [operationId],
+    );
+    const actionExpiresAt = deadline.rows[0]?.action_expires_at;
+    assert.ok(actionExpiresAt);
     await pool.query(
       `
         update funding_reconciliation_jobs
@@ -1633,14 +1674,14 @@ async function testExpiredUnbroadcastActionWaitCancelsSafely(): Promise<void> {
             lease_until = null
         where operation_id = $1
       `,
-      [operationId, committed.operation.expiresAt],
+      [operationId, actionExpiresAt],
     );
 
     const externalPolls: string[] = [];
     const result = await runFundingReconciliationBatch(pool, {
       workerId: opaque("expired-action-wait-worker"),
       limit: 1,
-      now: committed.operation.expiresAt,
+      now: actionExpiresAt,
       receiptPoll: async () => {
         externalPolls.push("receipt");
         return { receiptsPolled: 0 };
@@ -1698,7 +1739,7 @@ async function testExpiredUnbroadcastActionWaitCancelsSafely(): Promise<void> {
     );
     assert.deepEqual(expired.rows[0], {
       status: "cancelled",
-      completed_at: committed.operation.expiresAt,
+      completed_at: actionExpiresAt,
       expires_at: committed.operation.expiresAt,
       terminal_reason: "unbroadcast_action_expired",
       step_state: "cancelled",
@@ -3899,6 +3940,10 @@ console.log(
 await testExpiredQuoteCannotCommit();
 console.log(
   "[funding-persistence-integration-tests] ok expired quote cannot commit",
+);
+await testQuoteCannotExpireDuringCurrentFactsCheck();
+console.log(
+  "[funding-persistence-integration-tests] ok quote expiry is rechecked after current facts",
 );
 await testAtomicRollbackAfterPartialInsert();
 console.log(

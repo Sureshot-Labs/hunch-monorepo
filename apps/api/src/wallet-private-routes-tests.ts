@@ -1,6 +1,7 @@
 #!/usr/bin/env tsx
 
 import assert from "node:assert/strict";
+import "./integration-test-database-guard.js";
 import crypto from "node:crypto";
 
 import { AuthService } from "./auth.js";
@@ -95,7 +96,12 @@ function assertAddressResolverScoring() {
   assert.ok(compareScore(followedEmpty, olderWithIntel) > 0);
 }
 
-async function loadWhaleTagId(): Promise<string> {
+async function ensureWhaleTagId(): Promise<string> {
+  await pool.query(
+    `insert into wallet_tags (slug, label, tag_type, is_system)
+     values ('whale', 'Whale', 'performance', true)
+     on conflict (slug) do nothing`,
+  );
   const result = await pool.query<{ id: string }>(
     "select id from wallet_tags where slug = 'whale'",
   );
@@ -155,7 +161,7 @@ async function createWhaleFixtureWallet(
   });
 
   if (inputs.volumeUsd != null) {
-    const whaleTagId = await loadWhaleTagId();
+    const whaleTagId = await ensureWhaleTagId();
     await pool.query(
       `
         insert into wallet_tag_map (wallet_id, tag_id, source)

@@ -1,5 +1,9 @@
 import { checkRedisReady, createRedisClient, ensureRedis } from "@hunch/infra";
 import { env } from "./env.js";
+import {
+  registerRuntimeResourceCleanup,
+  unregisterRuntimeResourceCleanup,
+} from "./runtime-resource-cleanup.js";
 import type { RedisClientType as RedisClient } from "redis";
 
 type RedisStatus = "disabled" | "ready" | "loading" | "error";
@@ -40,6 +44,7 @@ export async function getRedisStatus(
       };
     }
     client.on("error", (e: unknown) => console.warn("[redis] err", String(e)));
+    registerRuntimeResourceCleanup("api-redis", closeRedis);
   }
 
   try {
@@ -79,6 +84,7 @@ export async function getRedis(): Promise<RedisClient | null> {
 }
 
 export async function closeRedis(): Promise<void> {
+  unregisterRuntimeResourceCleanup("api-redis");
   if (!client) {
     cacheStatus(env.redisUrl ? "loading" : "disabled");
     return;

@@ -5,6 +5,7 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 
+import "../../../integration-test-database-guard.js";
 import {
   fetchUser,
   FundingMergeConflictError,
@@ -15,9 +16,12 @@ import { pool } from "../../../db.js";
 import {
   createOrReuseFundingReceiveSession,
   expireFundingReceiveSessions,
+  fetchFundingReceiveReceiptForReview,
   fetchFundingReceiveSessionForUser,
   insertFundingReceiveReceipt,
+  listFundingReceiveReceiptsForRouting,
   listFundingReceiveReceiptsForUser,
+  recordFundingReceiveReceiptRoutingDisposition,
   settleFundingReceiveReceiptRouting,
 } from "../../persistence/funding-receive-session-repository.js";
 
@@ -47,13 +51,13 @@ async function insertUser(): Promise<string> {
 function sessionInput(userId: string) {
   const asset = {
     networkId: "evm:137",
-    assetId: "0x0000000000000000000000000000000000000001",
+    assetId: "0xAbCdAbCdAbCdAbCdAbCdAbCdAbCdAbCdAbCdAbCd",
     decimals: 6,
   } as const;
   const receiveTarget = {
     receiveTargetId: "receive_target_persistence_12345678",
     networkId: asset.networkId,
-    destinationAddress: "0x0000000000000000000000000000000000000002",
+    destinationAddress: "0xDeF0DeF0DeF0DeF0DeF0DeF0DeF0DeF0DeF0DeF0",
     acceptedAssets: [{ asset, handling: "direct" as const }],
     safeInstructions: ["Send only the displayed asset."],
   } as const;
@@ -91,7 +95,7 @@ function sessionInput(userId: string) {
         variantId: "ingress_variant_persistence_12345678",
         networkId: asset.networkId,
         asset,
-        destinationAddress: "0x0000000000000000000000000000000000000002",
+        destinationAddress: "0xDeF0DeF0DeF0DeF0DeF0DeF0DeF0DeF0DeF0DeF0",
         destinationLocationId: "location_receive_12345678",
         baselineRaw: "0",
         baselineRevision: "baseline_revision_receive_12345678",
@@ -170,6 +174,63 @@ try {
     replacement.snapshot.session.receiveSessionId,
     first.snapshot.session.receiveSessionId,
   );
+
+  const receiptIdentity = {
+    receive_session_id: replacement.snapshot.session.receiveSessionId,
+    user_id: userId,
+    variant_id: "ingress_variant_persistence_12345678",
+    network_id: "evm:137",
+    asset_id: sessionInput(userId).destinationAsset.assetId.toLowerCase(),
+    asset_decimals: 6,
+    destination_address:
+      sessionInput(userId).receiveTargets[0].destinationAddress.toLowerCase(),
+    handling: "direct",
+  };
+  const matchesFrozenVariant = async (candidate: object): Promise<boolean> => {
+    const { rows } = await pool.query<{ matches: boolean }>(
+      `select funding_receive_receipt_matches_frozen_variant(
+         jsonb_populate_record(null::funding_receive_receipts, $1::jsonb)
+       ) as matches`,
+      [JSON.stringify(candidate)],
+    );
+    return rows[0]?.matches === true;
+  };
+  assert.equal(await matchesFrozenVariant(receiptIdentity), true);
+  assert.equal(
+    await matchesFrozenVariant({
+      ...receiptIdentity,
+      asset_id: receiptIdentity.asset_id.replace(/^0x/u, "0X"),
+    }),
+    false,
+    "malformed EVM-looking asset IDs must not alias a valid frozen asset",
+  );
+  const { rows: identityRows } = await pool.query<{
+    evm_alias: boolean;
+    malformed_exact: boolean;
+    solana_exact: boolean;
+  }>(
+    `
+      select
+        funding_account_identifier_equal(
+          'evm:137',
+          '0xAbCdAbCdAbCdAbCdAbCdAbCdAbCdAbCdAbCdAbCd',
+          '0xabcdabcdabcdabcdabcdabcdabcdabcdabcdabcd'
+        ) as evm_alias,
+        funding_account_identifier_equal(
+          'evm:137',
+          '0XAbCdAbCdAbCdAbCdAbCdAbCdAbCdAbCdAbCdAbCd',
+          '0Xabcdabcdabcdabcdabcdabcdabcdabcdabcdabcd'
+        ) as malformed_exact,
+        funding_account_identifier_equal(
+          'solana:mainnet',
+          'So11111111111111111111111111111111111111112',
+          'so11111111111111111111111111111111111111112'
+        ) as solana_exact
+    `,
+  );
+  assert.equal(identityRows[0]?.evm_alias, true);
+  assert.equal(identityRows[0]?.malformed_exact, false);
+  assert.equal(identityRows[0]?.solana_exact, false);
 
   const { rows } = await pool.query<{ status: string }>(
     `
@@ -274,6 +335,18 @@ try {
     firstRoutedReceipt.release();
   }
 
+  await assert.rejects(
+    settleFundingReceiveReceiptRouting(pool, {
+      receiptId: firstRoutedReceiptId,
+      receiveSessionId: replacement.snapshot.session.receiveSessionId,
+      userId,
+      childOperationId: crypto.randomUUID(),
+      childOperationStatus: "failed",
+      status: "review_required",
+      now: new Date(NOW.getTime() + 1_500),
+    }),
+    /adapter review evidence/i,
+  );
   assert.equal(
     await settleFundingReceiveReceiptRouting(pool, {
       receiptId: firstRoutedReceiptId,
@@ -342,6 +415,7 @@ try {
   assert.equal(multiReceiptRows[0]?.count, "2");
 
   const reviewReceiptClient = await pool.connect();
+  let reviewReceiptId = "";
   try {
     await reviewReceiptClient.query("begin");
     const reviewReceipt = await insertFundingReceiveReceipt(
@@ -371,6 +445,18 @@ try {
     );
     assert.equal(reviewReceipt.receipt.status, "review_required");
     assert.equal(reviewReceipt.receipt.handling, "review_required");
+    await assert.rejects(
+      recordFundingReceiveReceiptRoutingDisposition(pool, {
+        receiptId: reviewReceipt.receipt.receiptId,
+        receiveSessionId: replacement.snapshot.session.receiveSessionId,
+        userId,
+        disposition: "review_required",
+        errorCode: "economic_review_required",
+        now: new Date(NOW.getTime() + 3_500),
+      }),
+      /adapter continuation and quote plan/i,
+    );
+    reviewReceiptId = reviewReceipt.receipt.receiptId;
     await reviewReceiptClient.query("commit");
   } catch (error) {
     await reviewReceiptClient.query("rollback");
@@ -392,6 +478,80 @@ try {
     receiveSessionId: replacement.snapshot.session.receiveSessionId,
   });
   assert.equal(reviewSnapshot?.session.status, "review_required");
+  const routableReviews = await listFundingReceiveReceiptsForRouting(pool, {
+    limit: 100,
+    now: new Date(NOW.getTime() + 5_000),
+  });
+  assert.ok(
+    routableReviews.some(
+      (target) => target.receipt.receiptId === reviewReceiptId,
+    ),
+    "web review receipts without an adapter plan must reach the channel-neutral disposition resolver",
+  );
+  await pool.query(
+    `
+      update funding_receive_receipts
+      set evidence = evidence || jsonb_build_object(
+        'reviewContinuation', jsonb_build_object(
+          'version', 2,
+          'kind', 'convert',
+          'label', 'Convert',
+          'confirmation', 'fresh_quote'
+        ),
+        'reviewQuotePlan', jsonb_build_object(
+          'version', 1,
+          'confirmedSourceAmount', null,
+          'requestedDestinationAmount', jsonb_build_object(
+            'asset', jsonb_build_object(
+              'networkId', 'evm:137',
+              'assetId', 'malformed-plan',
+              'decimals', -1
+            ),
+            'raw', '3000000'
+          ),
+          'venuePreparation', false
+        )
+      )
+      where id = $1
+    `,
+    [reviewReceiptId],
+  );
+  const malformedReviews = await listFundingReceiveReceiptsForRouting(pool, {
+    limit: 100,
+    now: new Date(NOW.getTime() + 5_500),
+  });
+  assert.ok(
+    malformedReviews.some(
+      (target) => target.receipt.receiptId === reviewReceiptId,
+    ),
+    "present but structurally invalid review evidence must remain repairable",
+  );
+  assert.equal(
+    await recordFundingReceiveReceiptRoutingDisposition(pool, {
+      receiptId: reviewReceiptId,
+      receiveSessionId: replacement.snapshot.session.receiveSessionId,
+      userId,
+      disposition: "review_required",
+      errorCode: "economic_review_required",
+      reviewContinuation: {
+        version: 1,
+        kind: "convert",
+        label: "Convert",
+        confirmation: "fresh_quote",
+      },
+      reviewQuotePlan: {
+        version: 1,
+        confirmedSourceAmount: null,
+        requestedDestinationAmount: {
+          asset: sessionInput(userId).destinationAsset,
+          raw: "3000000",
+        },
+        venuePreparation: false,
+      },
+      now: new Date(NOW.getTime() + 6_000),
+    }),
+    true,
+  );
   const reviewReceipts = await listFundingReceiveReceiptsForUser(pool, {
     userId,
     receiveSessionId: replacement.snapshot.session.receiveSessionId,
@@ -400,8 +560,32 @@ try {
     reviewReceipts.some(
       (receipt) =>
         receipt.status === "review_required" &&
-        receipt.handling === "review_required",
+        receipt.handling === "review_required" &&
+        receipt.reviewContinuation?.version === 1 &&
+        receipt.reviewQuotePlan?.version === 1,
     ),
+  );
+  const webReviewTarget = await fetchFundingReceiveReceiptForReview(pool, {
+    userId,
+    ownerChannel: "web",
+    receiveSessionId: replacement.snapshot.session.receiveSessionId,
+    receiptId: reviewReceiptId,
+  });
+  assert.ok(webReviewTarget);
+  assert.equal(
+    webReviewTarget.receiptVariantSnapshot,
+    null,
+    "review targets preserve an explicit null when no frozen variant matches",
+  );
+  assert.equal(
+    await fetchFundingReceiveReceiptForReview(pool, {
+      userId,
+      ownerChannel: "telegram",
+      receiveSessionId: replacement.snapshot.session.receiveSessionId,
+      receiptId: reviewReceiptId,
+    }),
+    null,
+    "a channel must never quote or commit another channel's receipt",
   );
 
   const concurrentStableReceiptClient = await pool.connect();
@@ -473,11 +657,11 @@ try {
     "settling a stable receipt must not hide an unresolved volatile-asset review",
   );
 
-  assert.equal(
-    await expireFundingReceiveSessions(pool, {
+  assert.ok(
+    (await expireFundingReceiveSessions(pool, {
       now: new Date(NOW.getTime() + 86_402_000),
-    }),
-    1,
+    })) >= 1,
+    "the global expiry sweep must include this test's expired session",
   );
   const expiredProcessing = await fetchFundingReceiveSessionForUser(pool, {
     userId,

@@ -1,4 +1,5 @@
 import { canonicalJsonHash } from "../funding/persistence/canonical.js";
+import { canonicalWalletIdentity } from "../lib/wallet-address.js";
 
 const TRADE_INPUT_CONTEXT_KEY_PREFIX = "tg:signal_bot:v2:trade_input_context";
 
@@ -84,10 +85,10 @@ export function parseTelegramBotTradeAuthorityBinding(
     privyWalletId: binding.privyWalletId,
     telegramAccountLinkId,
     userId,
-    walletAddress:
-      binding.walletChain === "ethereum"
-        ? binding.walletAddress.trim().toLowerCase()
-        : binding.walletAddress.trim(),
+    walletAddress: canonicalWalletIdentity(
+      binding.walletChain,
+      binding.walletAddress,
+    ),
     walletChain: binding.walletChain,
   };
 }
@@ -97,10 +98,10 @@ export function telegramBotTradeAuthorityFingerprint(
 ): string {
   return canonicalJsonHash({
     ...binding,
-    walletAddress:
-      binding.walletChain === "ethereum"
-        ? binding.walletAddress.trim().toLowerCase()
-        : binding.walletAddress.trim(),
+    walletAddress: canonicalWalletIdentity(
+      binding.walletChain,
+      binding.walletAddress,
+    ),
     version: 1,
   });
 }

@@ -12,11 +12,15 @@ import {
   type TelegramFundingProgressProjection,
 } from "./telegram-funding-contracts.js";
 import {
-  telegramCustomEmojiMarkdownV2,
+  telegramCustomEmojiMarkdownV2ForAsset,
   telegramCustomEmojiMarkdownV2ForNetwork,
   telegramCustomEmojiMarkdownV2ForVenue,
 } from "./telegram-custom-emoji.js";
 import { FUNDING_RECEIVE_SESSION_TTL_HOURS } from "../funding/receive/receive-session-constants.js";
+import QRCode from "qrcode";
+import { type TelegramFundingRoutePresentation } from "./telegram-funding-route.js";
+import type { FundingQuoteSummary, Money } from "../funding/domain/types.js";
+import { resolveKnownAccountAssetSymbol } from "../account-value/known-asset-catalog.js";
 
 function expiryLabel(value: string): string {
   const date = new Date(value);
@@ -46,6 +50,74 @@ function formatRawAmount(raw: string, decimals: number): string {
   return fraction ? `${whole}.${fraction}` : whole;
 }
 
+function fundingMoneyLabel(money: Money): string {
+  return `${formatRawAmount(money.raw, money.asset.decimals)} ${
+    resolveKnownAccountAssetSymbol(money.asset) ?? money.asset.assetId
+  }`;
+}
+
+export function buildTelegramFundingReviewQuoteMessage(input: {
+  contextId: string;
+  quote: FundingQuoteSummary;
+}): TelegramFundingMessage {
+  const source = input.quote.sourceAmounts
+    .map(({ amount }) => fundingMoneyLabel(amount))
+    .join(" + ");
+  const estimatedFeeUsd = input.quote.fees
+    .map((fee) => fee.estimatedUsd)
+    .filter((value): value is string => value != null)
+    .join(" + ");
+  return {
+    fundingContextId: input.contextId,
+    parse_mode: "MarkdownV2",
+    reply_markup: {
+      inline_keyboard: [
+        [
+          {
+            callback_data: telegramFundingCallbackData({
+              consentToken: input.quote.consentToken,
+              kind: "confirm_conversion",
+            }),
+            text: "Confirm conversion",
+          },
+        ],
+        [
+          {
+            callback_data: telegramFundingCallbackData({
+              contextId: input.contextId,
+              kind: "refresh",
+            }),
+            text: "Back",
+          },
+        ],
+      ],
+    },
+    text: joinTelegramMarkdownV2Lines([
+      formatTelegramCalloutMarkdownV2({
+        bodyMarkdownV2: escapeTelegramMarkdownV2(
+          "Review this fresh quote. Nothing is converted until you confirm.",
+        ),
+        icon: "🔄",
+        title: "Confirm conversion",
+      }),
+      "",
+      formatTelegramFieldMarkdownV2("Convert", source),
+      formatTelegramFieldMarkdownV2(
+        "Minimum received",
+        fundingMoneyLabel(input.quote.minimumDestination),
+      ),
+      formatTelegramFieldMarkdownV2(
+        "Estimated fees",
+        estimatedFeeUsd ? `$${estimatedFeeUsd}` : "Included in quote",
+      ),
+      formatTelegramFieldMarkdownV2(
+        "Quote expires",
+        expiryLabel(input.quote.expiresAt),
+      ),
+    ]),
+  };
+}
+
 export function buildTelegramFundingUnavailableMessage(input?: {
   reason?: "disabled" | "expired" | "unavailable";
 }): TelegramFundingMessage {
@@ -65,52 +137,30 @@ export function buildTelegramFundingUnavailableMessage(input?: {
   };
 }
 
-export type TelegramFundingReceivePresentationMode =
-  | "pusd_direct"
-  | "pusd_or_usdce_automatic"
-  | "usdce_automatic";
-
-function receivePresentation(mode: TelegramFundingReceivePresentationMode) {
-  if (mode === "pusd_or_usdce_automatic") {
-    return {
-      asset: "pUSD / USDC.e",
-      button: "pUSD / USDC.e on Polygon",
-      settlement: "Direct / automatic 1:1 conversion",
-      instructions: [
-        "Send pUSD or USDC.e on Polygon.",
-        "pUSD is credited directly.",
-        "USDC.e is automatically converted 1:1 to pUSD.",
-      ],
-    } as const;
-  }
-  if (mode === "usdce_automatic") {
-    return {
-      asset: "USDC.e",
-      button: "USDC.e on Polygon → pUSD",
-      settlement: "Automatic 1:1 conversion",
-      instructions: [
-        "Send USDC.e on Polygon.",
-        "USDC.e is automatically converted 1:1 to pUSD.",
-      ],
-    } as const;
-  }
-  return {
-    asset: "pUSD",
-    button: "pUSD on Polygon — direct",
-    settlement: "Direct",
-    instructions: [
-      "Send only pUSD on Polygon.",
-      "Other assets cannot be routed from this Telegram flow.",
-    ],
-  } as const;
-}
-
 export function buildTelegramFundingTargetMessage(input: {
+  automaticConversion: boolean;
   contextId: string;
   expiresAt: string;
-  mode?: TelegramFundingReceivePresentationMode;
+  presentation: TelegramFundingRoutePresentation;
 }): TelegramFundingMessage {
-  const presentation = receivePresentation(input.mode ?? "pusd_direct");
+  const acceptedAssets = input.presentation.acceptedAssetSymbols.join(" / ");
+  const button =
+    input.presentation.selectionButtonLabel ??
+    `${acceptedAssets} on ${input.presentation.networkLabel}`;
+  const settlement =
+    input.presentation.settlementLabel ??
+    (input.automaticConversion ? "Automatic conversion" : "Direct");
+  const instructions = input.presentation.instructions ?? [];
+  const venueEmoji = telegramCustomEmojiMarkdownV2ForVenue(
+    input.presentation.venueId,
+  );
+  const networkEmoji = telegramCustomEmojiMarkdownV2ForNetwork(
+    input.presentation.networkLabel,
+  );
+  const assetEmoji = telegramCustomEmojiMarkdownV2ForAsset(
+    input.presentation.automaticSourceAssetSymbol ??
+      input.presentation.destinationAssetSymbol,
+  );
   return {
     fundingContextId: input.contextId,
     parse_mode: "MarkdownV2",
@@ -119,11 +169,11 @@ export function buildTelegramFundingTargetMessage(input: {
         [
           {
             callback_data: telegramFundingCallbackData({
-              choiceToken: "p",
+              choiceToken: input.automaticConversion ? "a" : "d",
               contextId: input.contextId,
               kind: "select",
             }),
-            text: presentation.button,
+            text: button,
           },
         ],
         [
@@ -138,100 +188,45 @@ export function buildTelegramFundingTargetMessage(input: {
       ],
     },
     text: joinTelegramMarkdownV2Lines([
-      `${telegramCustomEmojiMarkdownV2ForVenue("polymarket")} *${escapeTelegramMarkdownV2(
-        "Add funds to Polymarket",
+      `${venueEmoji ? `${venueEmoji} ` : ""}*${escapeTelegramMarkdownV2(
+        `Add funds to ${input.presentation.venueLabel}`,
       )}*`,
       "",
       escapeTelegramMarkdownV2(
         "Confirm the supported receive assets before the verified address is shown.",
       ),
       "",
-      `${telegramCustomEmojiMarkdownV2ForNetwork("Polygon")} ${formatTelegramFieldMarkdownV2(
+      `${networkEmoji ? `${networkEmoji} ` : ""}${formatTelegramFieldMarkdownV2(
         "Network",
-        "Polygon",
+        input.presentation.networkLabel,
       )}`,
-      `${telegramCustomEmojiMarkdownV2("usdc")} ${formatTelegramFieldMarkdownV2(
+      `${assetEmoji ? `${assetEmoji} ` : ""}${formatTelegramFieldMarkdownV2(
         "Asset",
-        presentation.asset,
+        acceptedAssets,
       )}`,
-      formatTelegramFieldMarkdownV2("Settlement", presentation.settlement),
+      formatTelegramFieldMarkdownV2("Settlement", settlement),
       "",
-      ...presentation.instructions.map(escapeTelegramMarkdownV2),
+      ...instructions.map(escapeTelegramMarkdownV2),
       ...receiveWindowFields(input.expiresAt),
     ]),
-    venue: "polymarket",
+    venue: input.presentation.venueId,
   };
 }
 
-export function buildTelegramFundingAddressMessage(input: {
-  address: string;
+export function buildTelegramFundingDeliveryQueuedMessage(input: {
   contextId: string;
-  expiresAt: string;
-  mode?: TelegramFundingReceivePresentationMode;
 }): TelegramFundingMessage {
-  const presentation = receivePresentation(input.mode ?? "pusd_direct");
   return {
+    durableFundingDeliveryRequired: true,
     fundingContextId: input.contextId,
     parse_mode: "MarkdownV2",
-    qrText: input.address,
-    reply_markup: {
-      inline_keyboard: [
-        [{ copy_text: { text: input.address }, text: "📋 Copy address" }],
-        [
-          {
-            callback_data: telegramFundingCallbackData({
-              contextId: input.contextId,
-              kind: "qr",
-            }),
-            text: "🔳 Show QR",
-          },
-        ],
-        [
-          {
-            callback_data: telegramFundingCallbackData({
-              contextId: input.contextId,
-              kind: "refresh",
-            }),
-            text: "🔄 Refresh",
-          },
-          {
-            callback_data: telegramFundingCallbackData({
-              contextId: input.contextId,
-              kind: "cancel",
-            }),
-            text: "Cancel",
-          },
-        ],
-      ],
-    },
-    text: joinTelegramMarkdownV2Lines([
-      `${telegramCustomEmojiMarkdownV2ForVenue("polymarket")} *${escapeTelegramMarkdownV2(
-        "Polymarket Receive",
-      )}*`,
-      "",
-      `${telegramCustomEmojiMarkdownV2ForNetwork("Polygon")} ${formatTelegramFieldMarkdownV2(
-        "Network",
-        "Polygon",
-      )}`,
-      `${telegramCustomEmojiMarkdownV2("usdc")} ${formatTelegramFieldMarkdownV2(
-        "Asset",
-        presentation.asset,
-      )}`,
-      "",
-      `📍 ${formatTelegramBoldMarkdownV2("Verified receive address")}`,
-      formatTelegramCodeMarkdownV2(input.address),
-      "",
-      formatTelegramCalloutMarkdownV2({
-        bodyMarkdownV2: escapeTelegramMarkdownV2(
-          `${presentation.instructions.join(" ")} Your sending wallet must cover the Polygon network fee.`,
-        ),
-        icon: "⚠️",
-        title: "Important",
-      }),
-      "",
-      ...receiveWindowFields(input.expiresAt),
-    ]),
-    venue: "polymarket",
+    text: formatTelegramCalloutMarkdownV2({
+      bodyMarkdownV2: escapeTelegramMarkdownV2(
+        "The verified funding card is being updated.",
+      ),
+      icon: "⏳",
+      title: "Receive update queued",
+    }),
   };
 }
 
@@ -251,8 +246,154 @@ export function buildTelegramFundingCancelledMessage(): TelegramFundingMessage {
 export function buildTelegramFundingProgressMessage(
   projection: TelegramFundingProgressProjection,
 ): TelegramFundingMessage {
+  return buildTelegramFundingProgressMessageInternal(projection, false);
+}
+
+function acceptedAssetsLabel(
+  projection: TelegramFundingProgressProjection,
+): string {
+  return projection.presentation.acceptedAssetSymbols.join(" / ");
+}
+
+function automaticSourceLabel(
+  projection: TelegramFundingProgressProjection,
+): string {
+  return (
+    projection.presentation.automaticSourceAssetSymbol ??
+    projection.presentation.destinationAssetSymbol
+  );
+}
+
+function qrMarkdown(address: string): string {
+  const qr = QRCode.create(address, { errorCorrectionLevel: "M" });
+  const margin = 4;
+  const width = qr.modules.size + margin * 2;
+  const quadrants = [
+    " ",
+    "▘",
+    "▝",
+    "▀",
+    "▖",
+    "▌",
+    "▞",
+    "▛",
+    "▗",
+    "▚",
+    "▐",
+    "▜",
+    "▄",
+    "▙",
+    "▟",
+    "█",
+  ] as const;
+  const lines: string[] = [];
+  const isDark = (row: number, column: number): boolean => {
+    const sourceRow = row - margin;
+    const sourceColumn = column - margin;
+    return Boolean(
+      sourceRow >= 0 &&
+      sourceColumn >= 0 &&
+      sourceRow < qr.modules.size &&
+      sourceColumn < qr.modules.size &&
+      qr.modules.get(sourceRow, sourceColumn),
+    );
+  };
+  // Two-by-two quadrant glyphs keep the code block narrow enough for mobile
+  // Telegram. Braille would be smaller too, but its separated dots are less
+  // scanner-friendly than these contiguous module quarters.
+  for (let row = 0; row < width; row += 2) {
+    let line = "";
+    for (let column = 0; column < width; column += 2) {
+      const mask =
+        (isDark(row, column) ? 1 : 0) |
+        (isDark(row, column + 1) ? 2 : 0) |
+        (isDark(row + 1, column) ? 4 : 0) |
+        (isDark(row + 1, column + 1) ? 8 : 0);
+      line += quadrants[mask];
+    }
+    lines.push(line);
+  }
+  return `\`\`\`\n${lines.join("\n")}\n\`\`\``;
+}
+
+function fundingProgressReplyMarkup(
+  projection: TelegramFundingProgressProjection,
+): TelegramFundingMessage["reply_markup"] {
+  if (projection.terminal) return undefined;
+  if (projection.reviewContinuation && projection.reviewReceiptId) {
+    return {
+      inline_keyboard: [
+        [
+          {
+            callback_data: telegramFundingCallbackData({
+              kind: "review_conversion",
+              receiptId: projection.reviewReceiptId,
+            }),
+            text: projection.reviewContinuation.label,
+          },
+        ],
+        [
+          {
+            callback_data: telegramFundingCallbackData({
+              contextId: projection.fundingContextId,
+              kind: "refresh",
+            }),
+            text: "Not now",
+          },
+        ],
+      ],
+    };
+  }
+  return {
+    inline_keyboard: [
+      ...(projection.receiveAddress
+        ? [
+            [
+              {
+                copy_text: { text: projection.receiveAddress },
+                text: "📋 Copy address",
+              },
+            ],
+            [
+              {
+                callback_data: telegramFundingCallbackData({
+                  contextId: projection.fundingContextId,
+                  kind: "qr",
+                }),
+                text: "🔳 Show QR",
+              },
+            ],
+          ]
+        : []),
+      [
+        {
+          callback_data: telegramFundingCallbackData({
+            contextId: projection.fundingContextId,
+            kind: "refresh",
+          }),
+          text: "🔄 Refresh",
+        },
+        {
+          callback_data: telegramFundingCallbackData({
+            contextId: projection.fundingContextId,
+            kind: "cancel",
+          }),
+          text: "Cancel",
+        },
+      ],
+    ],
+  };
+}
+
+function buildTelegramFundingProgressMessageInternal(
+  projection: TelegramFundingProgressProjection,
+  showQr: boolean,
+): TelegramFundingMessage {
+  const { presentation } = projection;
+  const destinationAsset = presentation.destinationAssetSymbol;
+  const sourceAsset = automaticSourceLabel(projection);
   const amount = projection.rawAmount
-    ? `${formatRawAmount(projection.rawAmount, projection.decimals)} ${projection.assetSymbol}`
+    ? `${formatRawAmount(projection.rawAmount, presentation.decimals)} ${projection.assetSymbol}`
     : null;
   const stateCopy: Record<
     TelegramFundingProgressProjection["state"],
@@ -261,44 +402,43 @@ export function buildTelegramFundingProgressMessage(
     waiting_for_transfer: {
       icon: "⏳",
       title: "Waiting for transfer",
-      body: projection.automaticConversionEnabled
-        ? "Send pUSD or USDC.e on Polygon to the verified receive address."
-        : "Send pUSD on Polygon to the verified receive address.",
+      body: projection.automaticConversionPaused
+        ? `Send ${acceptedAssetsLabel(projection)} on ${presentation.networkLabel} to the verified receive address. Automatic ${sourceAsset} conversion is paused and will resume when funding is available.`
+        : projection.automaticConversionEnabled
+          ? `Send ${acceptedAssetsLabel(projection)} on ${presentation.networkLabel} to the verified receive address.`
+          : `Send ${destinationAsset} on ${presentation.networkLabel} to the verified receive address.`,
     },
     funds_received: {
       icon: "📥",
-      title:
-        projection.assetSymbol === "USDC.e"
-          ? "USDC.e detected"
-          : "Funds received",
+      title: `${projection.assetSymbol} detected`,
       body: amount ? `${amount} was detected.` : "The transfer was detected.",
     },
     waiting_for_routing: {
       icon: "⏸️",
-      title: "USDC.e received",
+      title: `${sourceAsset} received`,
       body: amount
         ? `${amount} is preserved and waiting for automatic routing to resume.`
-        : "The received USDC.e is preserved and waiting for automatic routing to resume.",
+        : `The received ${sourceAsset} is preserved and waiting for automatic routing to resume.`,
     },
     converting: {
       icon: "🔄",
-      title: "Converting USDC.e to pUSD",
+      title: `Converting ${sourceAsset} to ${destinationAsset}`,
       body: amount
-        ? `${amount} is being converted to pUSD.`
-        : "The received USDC.e is being converted to pUSD.",
+        ? `${amount} is being converted to ${destinationAsset}.`
+        : `The received ${sourceAsset} is being converted to ${destinationAsset}.`,
     },
     ready: {
       icon: "✅",
-      title: "pUSD ready",
+      title: `${destinationAsset} ready`,
       body:
-        projection.sourceAssetSymbol === "USDC.e" && projection.sourceRawAmount
+        projection.sourceAssetSymbol && projection.sourceRawAmount
           ? `${formatRawAmount(
               projection.sourceRawAmount,
-              projection.decimals,
-            )} USDC.e was converted to ${amount ?? "pUSD"} and is now available at Polymarket.`
+              presentation.decimals,
+            )} ${projection.sourceAssetSymbol} was converted to ${amount ?? destinationAsset} and is now available at ${presentation.venueLabel}.`
           : amount
-            ? `${amount} is now available at Polymarket.`
-            : "The received pUSD is now available at Polymarket.",
+            ? `${amount} is now available at ${presentation.venueLabel}.`
+            : `The received ${destinationAsset} is now available at ${presentation.venueLabel}.`,
     },
     expired: {
       icon: "⌛",
@@ -310,6 +450,11 @@ export function buildTelegramFundingProgressMessage(
       title: "Receive cancelled",
       body: "This funding screen no longer accepts new actions.",
     },
+    unavailable: {
+      icon: "⚠️",
+      title: "Receive unavailable",
+      body: "This receive address is no longer available. Open Add funds again to get the current verified address.",
+    },
     needs_attention: {
       icon: "⚠️",
       title: "Funds need attention",
@@ -320,52 +465,15 @@ export function buildTelegramFundingProgressMessage(
   };
   const copy = stateCopy[projection.state];
   return {
+    ...(projection.receiveAddress
+      ? { durableFundingDeliveryRequired: true }
+      : {}),
     fundingContextId: projection.fundingContextId,
     parse_mode: "MarkdownV2",
-    reply_markup: projection.terminal
-      ? undefined
-      : {
-          inline_keyboard: [
-            ...(projection.receiveAddress
-              ? [
-                  [
-                    {
-                      copy_text: { text: projection.receiveAddress },
-                      text: "📋 Copy address",
-                    },
-                  ],
-                  [
-                    {
-                      callback_data: telegramFundingCallbackData({
-                        contextId: projection.fundingContextId,
-                        kind: "qr",
-                      }),
-                      text: "🔳 Show QR",
-                    },
-                  ],
-                ]
-              : []),
-            [
-              {
-                callback_data: telegramFundingCallbackData({
-                  contextId: projection.fundingContextId,
-                  kind: "refresh",
-                }),
-                text: "🔄 Refresh",
-              },
-              {
-                callback_data: telegramFundingCallbackData({
-                  contextId: projection.fundingContextId,
-                  kind: "cancel",
-                }),
-                text: "Cancel",
-              },
-            ],
-          ],
-        },
+    reply_markup: fundingProgressReplyMarkup(projection),
     text: joinTelegramMarkdownV2Lines([
-      `${telegramCustomEmojiMarkdownV2ForVenue("polymarket")} *${escapeTelegramMarkdownV2(
-        "Polymarket funding",
+      `${telegramCustomEmojiMarkdownV2ForVenue(presentation.venueId)} *${escapeTelegramMarkdownV2(
+        `${presentation.venueLabel} funding`,
       )}*`,
       "",
       formatTelegramCalloutMarkdownV2({
@@ -378,19 +486,35 @@ export function buildTelegramFundingProgressMessage(
             "",
             `📍 ${formatTelegramBoldMarkdownV2("Verified receive address")}`,
             formatTelegramCodeMarkdownV2(projection.receiveAddress),
+            ...(showQr
+              ? [
+                  "",
+                  formatTelegramBoldMarkdownV2("Scan QR"),
+                  qrMarkdown(projection.receiveAddress),
+                ]
+              : []),
           ]
         : []),
       "",
-      formatTelegramFieldMarkdownV2("Network", projection.networkLabel),
+      formatTelegramFieldMarkdownV2("Network", presentation.networkLabel),
       formatTelegramFieldMarkdownV2(
         "Asset",
         projection.state === "waiting_for_transfer" &&
           projection.automaticConversionEnabled
-          ? "pUSD / USDC.e"
+          ? acceptedAssetsLabel(projection)
           : projection.assetSymbol,
       ),
       ...(projection.terminal ? [] : receiveWindowFields(projection.expiresAt)),
     ]),
-    venue: "polymarket",
+    venue: presentation.venueId,
   };
+}
+
+export function buildTelegramFundingQrMessage(
+  projection: TelegramFundingProgressProjection,
+): TelegramFundingMessage {
+  if (!projection.receiveAddress || projection.terminal) {
+    return buildTelegramFundingProgressMessage(projection);
+  }
+  return buildTelegramFundingProgressMessageInternal(projection, true);
 }

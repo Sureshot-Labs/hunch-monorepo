@@ -38,6 +38,7 @@ import {
 import {
   knownPrivyPolicyFingerprint,
   polymarketKnownSignerRuntimeSpecs,
+  polymarketPersistedSignerRuntimeSpecs,
   polymarketKnownSignerSpecs,
   privyKeyQuorumFingerprint,
   validateKnownPrivySignerRuntime,
@@ -52,7 +53,10 @@ import {
 import type { ResolvedFundingPolicy } from "../../policies/funding-policy-service.js";
 import {
   claimFundingReceiveReceiptOperationLinkInTransaction,
+  fetchFundingReceiveReceiptForReview,
+  listFundingReceiveReceiptsForRouting,
   linkFundingReceiveReceiptOperationInTransaction,
+  linkFundingReceiveReceiptReviewOperationInTransaction,
 } from "../../persistence/funding-receive-session-repository.js";
 import {
   compileFundingIntentPolicy,
@@ -121,6 +125,85 @@ const fundInterface = new Interface(FUND_ABI);
 }
 
 {
+  const queries: Array<{ params: readonly unknown[]; sql: string }> = [];
+  const target = await fetchFundingReceiveReceiptForReview(
+    {
+      query: async (sql: string, params?: readonly unknown[]) => {
+        queries.push({ sql, params: params ?? [] });
+        return { rowCount: 0, rows: [] };
+      },
+    } as never,
+    {
+      receiptId: "receipt-review-lock-1",
+      receiveSessionId: "receive-review-lock-1",
+      userId: "user-review-lock-1",
+      ownerChannel: "telegram",
+      lock: true,
+    },
+  );
+  assert.equal(target, null);
+  assert.match(queries[0]?.sql ?? "", /for update of receipt/u);
+  assert.match(queries[0]?.sql ?? "", /session\.owner_channel = \$4/u);
+  assert.deepEqual(queries[0]?.params, [
+    "receipt-review-lock-1",
+    "receive-review-lock-1",
+    "user-review-lock-1",
+    "telegram",
+  ]);
+}
+
+{
+  let routingSql = "";
+  await listFundingReceiveReceiptsForRouting(
+    {
+      query: async (sql: string) => {
+        routingSql = sql;
+        return { rowCount: 0, rows: [] };
+      },
+    } as never,
+    { limit: 1 },
+  );
+  assert.match(
+    routingSql,
+    /funding_account_identifier_equal\(\s*receipt\.network_id,\s*receipt\.asset_id,[\s\S]*?sourceAsset,assetId/u,
+    "routing must use the shared valid-EVM-only identity predicate",
+  );
+  assert.doesNotMatch(
+    routingSql,
+    /lower\(receipt\.asset_id\)/u,
+    "routing must not case-fold malformed EVM or Solana identifiers",
+  );
+}
+
+{
+  const queries: Array<{ params: readonly unknown[]; sql: string }> = [];
+  const linked = await linkFundingReceiveReceiptReviewOperationInTransaction(
+    {
+      query: async (sql: string, params?: readonly unknown[]) => {
+        queries.push({ sql, params: params ?? [] });
+        return { rowCount: 1, rows: [{ id: "receive-review-link-1" }] };
+      },
+    } as never,
+    {
+      receiptId: "receipt-review-link-1",
+      receiveSessionId: "receive-review-link-1",
+      userId: "user-review-link-1",
+      quoteId: "quote-review-link-1",
+      childFundingOperationId: "operation-review-link-1",
+      now: new Date(),
+    },
+  );
+  assert.equal(linked, true);
+  assert.match(queries[0]?.sql ?? "", /review_quote_id = \$4/u);
+  assert.match(queries[0]?.sql ?? "", /child_funding_operation_id = \$5/u);
+  assert.equal(
+    queries.length,
+    3,
+    "receipt link, status derivation, and session refresh share one client",
+  );
+}
+
+{
   const queries: string[] = [];
   await assert.rejects(
     linkFundingReceiveReceiptOperationInTransaction(
@@ -160,6 +243,7 @@ const fundInterface = new Interface(FUND_ABI);
         authorizationFingerprint: "a".repeat(64),
         telegramFundingConsentId: "consent-link-1",
         telegramFundingConsentFingerprint: "b".repeat(64),
+        serverExecutionProfileId: POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
         now: new Date(),
       },
     ),
@@ -167,11 +251,8 @@ const fundInterface = new Interface(FUND_ABI);
   );
   const exactLinkQuery = queries.find((sql) => /select step\.id/u.test(sql));
   assert.ok(exactLinkQuery);
-  assert.match(
-    exactLinkQuery,
-    /operation\.policy_revision\s*=\s*funding_consent\.automation_policy_snapshot\s*->>\s*'fundingPolicyRevision'/u,
-    "the atomic receipt link must bind the operation to the consent's frozen Funding Policy revision",
-  );
+  assert.doesNotMatch(exactLinkQuery, /polymarket|telegram_funding_consent/u);
+  assert.match(exactLinkQuery, /step\.executor_id = \$4/u);
 }
 
 function condition(
@@ -618,6 +699,43 @@ const runtimeSignerSpecs = polymarketKnownSignerRuntimeSpecs(
     policyFingerprint: automationPolicyFingerprint,
   },
 );
+const persistedRuntimeSignerSpecs = polymarketPersistedSignerRuntimeSpecs({
+  authorizationPublicKey,
+  signerId: "automation-signer",
+  signerFingerprint: privyKeyQuorumFingerprint(automationQuorum),
+  policyId: "automation-policy",
+  policyFingerprint: automationPolicyFingerprint,
+});
+assert.deepEqual(
+  persistedRuntimeSignerSpecs,
+  runtimeSignerSpecs,
+  "recovery rebuilds the exact persisted signer/policy registry without current profile IDs",
+);
+assert.equal(
+  polymarketKnownSignerRuntimeSpecs(
+    {
+      PRIVY_WALLET_AUTHORIZATION_ID: "replacement-signer",
+      PRIVY_WALLET_AUTHORIZATION_KEY: AUTHORIZATION_PRIVATE_KEY,
+      PRIVY_WALLET_AUTHORIZATION_FINGERPRINT: "f".repeat(64),
+      PRIVY_POLYMARKET_BOT_BUY_SELL_POLICY_ID: "replacement-policy",
+      PRIVY_POLYMARKET_BOT_BUY_SELL_POLICY_FINGERPRINT: "e".repeat(64),
+    },
+    {
+      authorizationPublicKey,
+      signerId: "automation-signer",
+      signerFingerprint: privyKeyQuorumFingerprint(automationQuorum),
+      policyId: "automation-policy",
+      policyFingerprint: automationPolicyFingerprint,
+    },
+  ).length,
+  0,
+  "fresh execution must reject a persisted profile after current registry replacement",
+);
+assert.equal(
+  persistedRuntimeSignerSpecs.length,
+  1,
+  "exact recovery remains mounted from persisted identity after registry replacement",
+);
 const automationRuntimeSpec = runtimeSignerSpecs.find(
   (spec) => spec.purpose === "polymarket_automation",
 );
@@ -884,6 +1002,13 @@ assert.deepEqual(
     );
   };
   internals.lookupByReference = async () => null;
+  assert.equal(
+    await driver.inspectWalletProfile({
+      walletAddress: "0x1111111111111111111111111111111111111111",
+      walletId: "privy-wallet-fresh-vs-recovery",
+    }),
+    "invalid",
+  );
   const claim = {
     attemptId: "attempt_fresh_vs_recovery_12345678",
     walletAddress: "0x1111111111111111111111111111111111111111",
@@ -901,6 +1026,17 @@ assert.deepEqual(
     await driver.recover(claim),
     { kind: "pending" },
     "recovery must stay ambiguous when a prior provider call may have occurred",
+  );
+  internals.verifyLiveProfile = async () => {
+    throw new Error("temporary Privy outage");
+  };
+  assert.equal(
+    await driver.inspectWalletProfile({
+      walletAddress: "0x1111111111111111111111111111111111111111",
+      walletId: "privy-wallet-fresh-vs-recovery",
+    }),
+    "unavailable",
+    "transport failures must not be classified as invalid authority",
   );
 }
 assert.equal(

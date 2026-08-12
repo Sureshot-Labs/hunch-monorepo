@@ -1,6 +1,7 @@
 #!/usr/bin/env tsx
 
 import assert from "node:assert/strict";
+import "./integration-test-database-guard.js";
 import { execFile } from "node:child_process";
 import crypto from "node:crypto";
 import { readFileSync } from "node:fs";

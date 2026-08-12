@@ -6,13 +6,19 @@ import {
   listFundingReceiveRoutingReceiptIdsAfterBroadcastBoundary,
   listFundingReceiveReceiptsForUser,
 } from "../funding/persistence/funding-receive-session-repository.js";
-import { resolveTelegramPolymarketWrapCapability } from "../funding/execution/delegated-funding-capability-resolver.js";
-import { parseTelegramFundingAutomationPolicyV2 } from "../funding/execution/telegram-funding-automation-policy.js";
+import { lockTelegramFundingLinkLifecycle } from "../funding/execution/telegram-funding-link-lifecycle-lock.js";
+import { isTelegramFundingReceiveControllerCurrent } from "../funding/execution/telegram-funding-managed-wallet.js";
 import {
   parseTelegramFundingProgressProjection,
   projectTelegramFundingProgress,
+  projectTelegramFundingUnavailable,
+  resolveTelegramFundingRetainedTerminal,
   telegramFundingProgressFingerprint,
 } from "./telegram-funding-progress.js";
+import {
+  resolveTelegramFundingConsentCapability,
+  resolveTelegramFundingConsentRoute,
+} from "./telegram-funding-route.js";
 import {
   fetchActiveTelegramFundingConsent,
   fetchTelegramFundingSessionContext,
@@ -103,6 +109,13 @@ async function listProjectionCandidates(
               <> 'true'
             and context.projection_checked_at <= $4
           )
+          or (
+            context.address_disclosure_attempt_revision >
+                context.address_redacted_revision
+            and coalesce(context.latest_progress_projection->>'state', '')
+              <> 'unavailable'
+            and context.projection_checked_at <= $4
+          )
         )
       order by context.projection_checked_at asc nulls first, context.id asc
       limit $2
@@ -124,6 +137,7 @@ async function projectCandidate(
   policyRevision: string,
 ): Promise<"created" | "skipped"> {
   return tx(pool, async (client) => {
+    await lockTelegramFundingLinkLifecycle(client, candidate.user_id);
     const locked = await client.query<{ id: string }>(
       `select id from telegram_funding_sessions where id = $1 for update`,
       [candidate.id],
@@ -141,52 +155,121 @@ async function projectCandidate(
       receiveSessionId: context.receiveSessionId,
     });
     if (!receive) return "skipped";
-    const receipts = await listFundingReceiveReceiptsForUser(client, {
-      userId: context.userId,
-      receiveSessionId: context.receiveSessionId,
-    });
-    const afterBroadcastBoundaryReceiptIds =
-      await listFundingReceiveRoutingReceiptIdsAfterBroadcastBoundary(client, {
+    const controllerIsCurrent =
+      context.telegramAccountId != null &&
+      (await isTelegramFundingReceiveControllerCurrent(client, {
+        receiveSessionId: context.receiveSessionId,
+        telegramAccountId: context.telegramAccountId,
+        telegramUserId: context.telegramUserId,
+        userId: context.userId,
+      }));
+    const latestProjection = parseTelegramFundingProgressProjection(
+      context.latestProgressProjection,
+    );
+    const retainedTerminal = resolveTelegramFundingRetainedTerminal(
+      context.latestTerminalProjection,
+      context.id,
+    );
+    const consent = await fetchActiveTelegramFundingConsent(client, context.id);
+    const redactionPresentation =
+      latestProjection?.presentation ??
+      (consent
+        ? resolveTelegramFundingConsentRoute(consent)?.presentation
+        : null);
+    const shouldRedactDeliveredAddress =
+      !controllerIsCurrent &&
+      context.addressDisclosureAttemptRevision >
+        context.addressRedactedRevision &&
+      redactionPresentation != null &&
+      latestProjection?.state !== "unavailable";
+    if (!controllerIsCurrent && !shouldRedactDeliveredAddress) {
+      await client.query(
+        `
+          update telegram_bot_action_outbox
+          set status = 'skipped',
+              last_error = 'funding_controller_changed',
+              updated_at = $2
+          where funding_session_id = $1
+            and action in (
+              'funding_send',
+              'funding_edit',
+              'funding_replacement',
+              'funding_qr'
+            )
+            and status in ('pending', 'retry')
+        `,
+        [context.id, now],
+      );
+      await client.query(
+        `
+          update telegram_funding_sessions
+          set projection_checked_at = $2
+          where id = $1
+        `,
+        [context.id, now],
+      );
+      return "skipped";
+    }
+    let projection =
+      shouldRedactDeliveredAddress && redactionPresentation
+        ? projectTelegramFundingUnavailable(context, redactionPresentation)
+        : null;
+    if (controllerIsCurrent) {
+      const receipts = await listFundingReceiveReceiptsForUser(client, {
         userId: context.userId,
         receiveSessionId: context.receiveSessionId,
       });
-    const consent = await fetchActiveTelegramFundingConsent(client, context.id);
-    const automation = parseTelegramFundingAutomationPolicyV2(
-      consent?.policySnapshot,
-    );
-    const capability =
-      automation && context.telegramAccountId
-        ? await resolveTelegramPolymarketWrapCapability(client, {
+      const afterBroadcastBoundaryReceiptIds =
+        await listFundingReceiveRoutingReceiptIdsAfterBroadcastBoundary(
+          client,
+          {
             userId: context.userId,
-            telegramAccountId: context.telegramAccountId,
-            telegramUserId: context.telegramUserId,
-            destinationOptionId: receive.session.destinationOptionId,
-            venueBindingOptionId: receive.session.venueBindingOptionId,
-            expectedAuthorizationId: automation.authorizationId,
-            expectedAuthorizationFingerprint:
-              automation.authorizationFingerprint,
-            expectedFundingPolicyRevision: automation.fundingPolicyRevision,
-            now,
-          })
-        : null;
-    const projection = projectTelegramFundingProgress({
-      afterBroadcastBoundaryReceiptIds,
-      automaticConversionAvailable: capability?.decision.kind === "allowed",
-      automaticConversionMode: capability
-        ? capability.decision.kind === "allowed"
-          ? "available"
-          : capability.decision.kind === "soft_paused"
-            ? "soft_paused"
-            : "hard_invalid"
-        : automation
-          ? "hard_invalid"
-          : undefined,
-      consent,
-      context,
-      receipts,
-      session: receive.session,
-      now,
-    });
+            receiveSessionId: context.receiveSessionId,
+          },
+        );
+      const capability =
+        consent?.automationEnabled && context.telegramAccountId
+          ? await resolveTelegramFundingConsentCapability(client, {
+              consent,
+              userId: context.userId,
+              telegramAccountId: context.telegramAccountId,
+              telegramUserId: context.telegramUserId,
+              destinationOptionId: receive.session.destinationOptionId,
+              venueBindingOptionId: receive.session.venueBindingOptionId,
+              now,
+            })
+          : null;
+      projection = projectTelegramFundingProgress({
+        afterBroadcastBoundaryReceiptIds,
+        automaticConversionAvailable: capability?.decision.kind === "allowed",
+        automaticConversionMode: capability
+          ? capability.decision.kind === "allowed"
+            ? "available"
+            : capability.decision.kind === "soft_paused"
+              ? "soft_paused"
+              : "hard_invalid"
+          : consent?.automationEnabled
+            ? "hard_invalid"
+            : undefined,
+        consent,
+        context,
+        receipts,
+        session: receive.session,
+        now,
+      });
+    }
+    // Terminality is absorbing for one funding context. A restored controller
+    // or policy must open a fresh context instead of reviving an address whose
+    // disclosure has already been durably redacted. Malformed historical
+    // terminal JSON is repaired to the same address-free unavailable surface.
+    if (retainedTerminal.kind !== "absent") {
+      projection =
+        retainedTerminal.kind === "valid"
+          ? retainedTerminal.projection
+          : redactionPresentation
+            ? projectTelegramFundingUnavailable(context, redactionPresentation)
+            : null;
+    }
     const fingerprint = projection
       ? telegramFundingProgressFingerprint(projection)
       : null;
@@ -250,8 +333,16 @@ async function projectCandidate(
         set progress_revision = $2,
             progress_fingerprint = $3,
             latest_progress_projection = $4::jsonb,
-            latest_terminal_revision = case when $5 then $2 else latest_terminal_revision end,
-            latest_terminal_projection = case when $5 then $4::jsonb else latest_terminal_projection end,
+            latest_terminal_revision = case
+              when $11::boolean or (latest_terminal_projection is null and $5)
+                then $2
+              else latest_terminal_revision
+            end,
+            latest_terminal_projection = case
+              when $11::boolean or (latest_terminal_projection is null and $5)
+                then $4::jsonb
+              else latest_terminal_projection
+            end,
             projected_receive_version = greatest(projected_receive_version, $7),
             projected_consent_revision = $8,
             projected_buy_return_revision = coalesce(active_buy_return_revision, 0),
@@ -259,6 +350,11 @@ async function projectCandidate(
             projection_checked_at = $10
         where id = $1
           and progress_revision = $6
+          and (
+            latest_terminal_projection is null
+            or latest_terminal_projection = $4::jsonb
+            or $11::boolean
+          )
         returning id
       `,
       [
@@ -272,6 +368,7 @@ async function projectCandidate(
         context.activeConsentRevision ?? 0,
         policyRevision,
         now,
+        retainedTerminal.kind === "invalid",
       ],
     );
     if (!updated.rows[0]) return "skipped";
@@ -283,11 +380,19 @@ async function projectCandidate(
             updated_at = now()
         where funding_session_id = $1
           and state_revision < $2
-          and action in ('funding_send', 'funding_edit', 'funding_replacement')
+          and action in (
+            'funding_send',
+            'funding_edit',
+            'funding_replacement',
+            'funding_qr'
+          )
           and status in ('pending', 'retry')
       `,
       [context.id, revision],
     );
+    if (projection.receiveAddress !== null && !row.telegram_message_id) {
+      return "created";
+    }
     const action = row.telegram_message_id ? "funding_edit" : "funding_send";
     await client.query(
       `

@@ -20,6 +20,9 @@ import {
   validateFundingIntentPolicy,
   type FundingIntentPolicy,
 } from "./funding-policy-v2.js";
+import { lockFundingPolicyForTransaction } from "./funding-policy-sidecar.js";
+
+export { lockFundingPolicyForTransaction } from "./funding-policy-sidecar.js";
 
 export type ResolvedFundingPolicy = Readonly<{
   source: "default" | "db";
@@ -108,15 +111,6 @@ export class FundingPolicyPublishError extends Error {
     this.code = code;
     this.issues = issues;
   }
-}
-
-export async function lockFundingPolicyForTransaction(
-  db: DbQuery,
-): Promise<void> {
-  await db.query<{ locked: unknown }>(
-    "select pg_advisory_xact_lock(hashtext($1)) as locked",
-    [FUNDING_POLICY_KEY],
-  );
 }
 
 function publicResolvedPolicy(

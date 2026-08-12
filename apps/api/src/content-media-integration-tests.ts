@@ -7,12 +7,12 @@ import {
   type IncomingMessage,
   type ServerResponse,
 } from "node:http";
+import type { Pool } from "@hunch/infra";
 
-import { createPgPool } from "@hunch/infra";
-import { configureContentTestRuntime } from "./content-test-runtime.js";
-
-const connectionString = process.env.CONTENT_TEST_DATABASE_URL?.trim();
-if (!connectionString) throw new Error("CONTENT_TEST_DATABASE_URL is required");
+import {
+  configureContentTestRuntime,
+  createContentTestPool,
+} from "./content-test-runtime.js";
 
 type StoredObject = {
   body: Buffer;
@@ -132,51 +132,64 @@ const server = createServer(async (request, response) => {
   }
 });
 
-await new Promise<void>((resolve, reject) => {
-  server.once("error", reject);
-  server.listen(0, "127.0.0.1", () => resolve());
-});
-const address = server.address();
-assert.ok(address && typeof address === "object");
-
-process.env.CONTENT_ASSET_S3_ENDPOINT = `http://127.0.0.1:${address.port}`;
-process.env.CONTENT_ASSET_S3_REGION = "us-east-1";
-process.env.CONTENT_ASSET_S3_BUCKET = bucket;
-process.env.CONTENT_ASSET_S3_ACCESS_KEY_ID = "test-access";
-process.env.CONTENT_ASSET_S3_SECRET_ACCESS_KEY = "test-secret";
-process.env.CONTENT_ASSET_S3_FORCE_PATH_STYLE = "true";
-process.env.CONTENT_ASSET_PUBLIC_BASE_URL = "https://cdn.example.com";
-configureContentTestRuntime();
-
-const [assetsModule, workerModule, contentModule] = await Promise.all([
-  import("./services/content-assets.js"),
-  import("./services/content-worker.js"),
-  import("./services/content.js"),
-]);
-const {
-  completeContentAssetUpload,
-  createContentAssetUpload,
-  deleteContentAsset,
-} = assetsModule;
-const { dispatchContentStorageDeletions } = workerModule;
-const { ContentError } = contentModule;
-
-const pool = createPgPool({ connectionString, max: 2 });
+let pool: Pool | null = null;
 const assetIds: string[] = [];
 const storageKeys = new Set<string>();
-const logger = {
-  info: () => undefined,
-  warn: () => undefined,
-};
 
 try {
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => resolve());
+  });
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+
+  process.env.CONTENT_ASSET_S3_ENDPOINT = `http://127.0.0.1:${address.port}`;
+  process.env.CONTENT_ASSET_S3_REGION = "us-east-1";
+  process.env.CONTENT_ASSET_S3_BUCKET = bucket;
+  process.env.CONTENT_ASSET_S3_ACCESS_KEY_ID = "test-access";
+  process.env.CONTENT_ASSET_S3_SECRET_ACCESS_KEY = "test-secret";
+  process.env.CONTENT_ASSET_S3_FORCE_PATH_STYLE = "true";
+  process.env.CONTENT_ASSET_PUBLIC_BASE_URL = "https://cdn.example.com";
+  configureContentTestRuntime();
+
+  const [assetsModule, workerModule, contentModule] = await Promise.all([
+    import("./services/content-assets.js"),
+    import("./services/content-worker.js"),
+    import("./services/content.js"),
+  ]);
+  const {
+    completeContentAssetUpload,
+    createContentAssetUpload,
+    deleteContentAsset,
+  } = assetsModule;
+  const { dispatchContentStorageDeletions } = workerModule;
+  const { ContentError } = contentModule;
+
+  const testPool = await createContentTestPool(2);
+  pool = testPool;
+  const logger = {
+    info: () => undefined,
+    warn: () => undefined,
+  };
+
+  async function prioritizeStorageDeletion(storageKey: string): Promise<void> {
+    // The shared integration DB may contain unrelated jobs from earlier files.
+    await testPool.query(
+      `update content_storage_deletion_jobs
+     set available_at = '-infinity'::timestamptz
+     where storage_key = $1`,
+      [storageKey],
+    );
+  }
+
   const png = Buffer.from(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
     "base64",
   );
   const pngChecksum = checksumHex(png);
   const intent = await createContentAssetUpload(
-    pool,
+    testPool,
     {
       kind: "image",
       originalFilename: "pixel.png",
@@ -220,7 +233,7 @@ try {
   });
   assert.equal(uploaded.ok, true);
   const ready = await completeContentAssetUpload(
-    pool,
+    testPool,
     intent.asset.id,
     {
       byteSize: png.length,
@@ -237,12 +250,9 @@ try {
   assert.equal(objects.has(ready.storageKey), true);
   storageKeys.add(ready.storageKey);
 
-  await pool.query(
-    "update content_storage_deletion_jobs set available_at = now() where storage_key = $1",
-    [intent.asset.storageKey],
-  );
+  await prioritizeStorageDeletion(intent.asset.storageKey);
   await dispatchContentStorageDeletions(
-    pool,
+    testPool,
     10,
     "media-test-staging-cleanup",
     logger,
@@ -250,10 +260,11 @@ try {
   assert.equal(objects.has(intent.asset.storageKey), false);
   assert.equal(objects.has(ready.storageKey), true);
 
-  const deleted = await deleteContentAsset(pool, ready.id, null);
+  const deleted = await deleteContentAsset(testPool, ready.id, null);
   assert.equal(deleted.status, "deleted");
+  await prioritizeStorageDeletion(ready.storageKey);
   await dispatchContentStorageDeletions(
-    pool,
+    testPool,
     10,
     "media-test-public-cleanup",
     logger,
@@ -263,7 +274,7 @@ try {
   const fakePdf = Buffer.from("this is not a pdf", "utf8");
   const fakePdfChecksum = checksumHex(fakePdf);
   const invalidIntent = await createContentAssetUpload(
-    pool,
+    testPool,
     {
       kind: "file",
       originalFilename: "unsafe.pdf",
@@ -284,7 +295,7 @@ try {
   await assert.rejects(
     () =>
       completeContentAssetUpload(
-        pool,
+        testPool,
         invalidIntent.asset.id,
         {
           byteSize: fakePdf.length,
@@ -295,17 +306,14 @@ try {
     (error: unknown) =>
       error instanceof ContentError && error.code === "content_asset_not_ready",
   );
-  const { rows: failedRows } = await pool.query<{ status: string }>(
+  const { rows: failedRows } = await testPool.query<{ status: string }>(
     "select status from content_assets where id = $1",
     [invalidIntent.asset.id],
   );
   assert.equal(failedRows[0].status, "failed");
-  await pool.query(
-    "update content_storage_deletion_jobs set available_at = now() where storage_key = $1",
-    [invalidIntent.asset.storageKey],
-  );
+  await prioritizeStorageDeletion(invalidIntent.asset.storageKey);
   await dispatchContentStorageDeletions(
-    pool,
+    testPool,
     10,
     "media-test-failed-cleanup",
     logger,
@@ -314,18 +322,19 @@ try {
 
   console.log("[content-media-integration-tests] passed");
 } finally {
-  if (assetIds.length > 0) {
-    await pool.query(
-      "delete from content_audit_events where asset_id = any($1::uuid[])",
-      [assetIds],
-    );
-    const { rows } = await pool.query<{ storage_key: string }>(
-      "select storage_key from content_assets where id = any($1::uuid[])",
-      [assetIds],
-    );
-    for (const row of rows) storageKeys.add(row.storage_key);
-    await pool.query(
-      `
+  try {
+    if (pool && assetIds.length > 0) {
+      await pool.query(
+        "delete from content_audit_events where asset_id = any($1::uuid[])",
+        [assetIds],
+      );
+      const { rows } = await pool.query<{ storage_key: string }>(
+        "select storage_key from content_assets where id = any($1::uuid[])",
+        [assetIds],
+      );
+      for (const row of rows) storageKeys.add(row.storage_key);
+      await pool.query(
+        `
         delete from content_storage_deletion_jobs job
         where job.storage_key = any($1::text[])
            or exists (
@@ -333,14 +342,22 @@ try {
              where position(source.asset_id in job.storage_key) > 0
            )
       `,
-      [[...storageKeys], assetIds],
-    );
-    await pool.query("delete from content_assets where id = any($1::uuid[])", [
-      assetIds,
-    ]);
+        [[...storageKeys], assetIds],
+      );
+      await pool.query(
+        "delete from content_assets where id = any($1::uuid[])",
+        [assetIds],
+      );
+    }
+  } finally {
+    try {
+      if (pool) await pool.end();
+    } finally {
+      if (server.listening) {
+        await new Promise<void>((resolve, reject) =>
+          server.close((error) => (error ? reject(error) : resolve())),
+        );
+      }
+    }
   }
-  await pool.end();
-  await new Promise<void>((resolve, reject) =>
-    server.close((error) => (error ? reject(error) : resolve())),
-  );
 }

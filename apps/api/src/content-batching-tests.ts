@@ -3,15 +3,13 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 
-import { createPgPool, type Pool, type PoolClient } from "@hunch/infra";
+import type { Pool, PoolClient } from "@hunch/infra";
 
+import { createContentTestPool } from "./content-test-runtime.js";
 import type { ContentDocument } from "./schemas/content-blocks.js";
 import { createContentArticle } from "./services/content.js";
 
-const connectionString = process.env.CONTENT_TEST_DATABASE_URL?.trim();
-if (!connectionString) throw new Error("CONTENT_TEST_DATABASE_URL is required");
-
-const pool = createPgPool({ connectionString, max: 1 });
+const pool = await createContentTestPool(1);
 const suffix = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 const assetIds = Array.from({ length: 500 }, () => randomUUID());
 const articleIds: string[] = [];

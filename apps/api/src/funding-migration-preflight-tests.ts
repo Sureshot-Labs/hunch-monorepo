@@ -1,6 +1,87 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 
 import { inspectFundingMigrationPreflight } from "./funding-migration-preflight.js";
+
+const migration0206 = await readFile(
+  new URL(
+    "../../../packages/db/migrations/0206_telegram_funding_wallet_retention.sql",
+    import.meta.url,
+  ),
+  "utf8",
+);
+assert.match(
+  migration0206,
+  /disable trigger telegram_funding_consents_evidence_guard/u,
+);
+assert.match(
+  migration0206,
+  /enable trigger telegram_funding_consents_evidence_guard/u,
+);
+assert.match(
+  migration0206,
+  /jsonb_set\([\s\S]*?'\{presentation\}'[\s\S]*?true\s*\)/u,
+  "0206 must create the missing frozen presentation key",
+);
+assert.match(
+  migration0206,
+  /latest_progress_projection[\s\S]*?latest_terminal_projection[\s\S]*?outbox\.payload/u,
+  "0206 must atomically upgrade retained current/terminal/outbox projections",
+);
+assert.match(
+  migration0206,
+  /latest_progress_projection\s*=\s*context\.latest_terminal_projection[\s\S]*?migration-0206-terminal-absorbed/u,
+  "0206 must synchronously absorb historical current/terminal split state",
+);
+assert.match(
+  migration0206,
+  /funding_terminal_absorbed[\s\S]*?outbox\.status in \('pending', 'retry'\)[\s\S]*?receiveAddress/u,
+  "0206 must suppress queued address output for an absorbed terminal context",
+);
+assert.match(
+  migration0206,
+  /telegram_bot_action_outbox_address_egress_check[\s\S]*?funding_replacement[\s\S]*?receiveAddress/u,
+);
+assert.match(
+  migration0206,
+  /address_disclosure_attempt_revision[\s\S]*?attempt_count > 0/u,
+  "0206 must backfill pessimistic redaction obligations from started address delivery",
+);
+assert.match(
+  migration0206,
+  /count\(distinct telegram_message_id\)[\s\S]*?address_disclosure_message_id\s*=\s*attempted\.telegram_message_id[\s\S]*?outbox\.telegram_message_id = context\.address_disclosure_message_id/u,
+  "0206 must bind redaction proof to one unambiguous immutable message target",
+);
+assert.match(
+  migration0206,
+  /review_conversion[\s\S]*?review_receipt_id[\s\S]*?review_quote_id/u,
+  "0206 must persist exact Telegram conversion-review replay evidence",
+);
+assert.match(
+  migration0206,
+  /create or replace function funding_account_identifier_equal[\s\S]*?identity_scope ~ '\^evm:\[1-9\]\[0-9\]\*\$'[\s\S]*?left_identifier ~ '\^0x\[0-9a-fA-F\]\{40\}\$'[\s\S]*?right_identifier ~ '\^0x\[0-9a-fA-F\]\{40\}\$'[\s\S]*?else left_identifier = right_identifier[\s\S]*?create or replace function funding_receive_receipt_matches_frozen_variant[\s\S]*?funding_account_identifier_equal/u,
+  "0206 must case-fold only valid EVM asset and account identities",
+);
+assert.match(
+  migration0206,
+  /create or replace function funding_receive_money_is_valid[\s\S]*?create or replace function funding_receive_review_evidence_is_valid[\s\S]*?funding_receive_money_is_valid/u,
+  "0206 must validate persisted receive-review evidence structurally",
+);
+assert.match(
+  migration0206,
+  /funding_operation_steps[\s\S]*?action_expires_at[\s\S]*?polymarket_deposit_usdce_wrap_v1[\s\S]*?then null/u,
+  "0206 must separate provider action validity from operation lifetime",
+);
+assert.match(
+  migration0206,
+  /cannot preserve historical Telegram address redaction targets/u,
+  "0206 must abort rather than discard unknown historical redaction targets",
+);
+assert.match(
+  migration0206,
+  /new\.wallet_chain = 'ethereum'[\s\S]*?new\.wallet_address ~ '\^0x\[0-9a-fA-F\]\{40\}\$'[\s\S]*?new\.source_network_id ~ '\^evm:\[1-9\]\[0-9\]\*\$'[\s\S]*?else new\.source_asset_id[\s\S]*?new\.destination_network_id ~ '\^evm:\[1-9\]\[0-9\]\*\$'[\s\S]*?else new\.destination_asset_id/u,
+  "0206 authorization immutability must preserve case-sensitive identities",
+);
 
 const statements: string[] = [];
 const db = {
@@ -29,7 +110,8 @@ const db = {
           params[0].includes("0200_runtime_policy_admin_actor.sql") &&
           params[0].includes("0201_telegram_funding_open_idempotency.sql") &&
           params[0].includes("0203_telegram_funding_buy_continuation.sql") &&
-          params[0].includes("0204_delegated_funding_execution.sql"),
+          params[0].includes("0204_delegated_funding_execution.sql") &&
+          params[0].includes("0206_telegram_funding_wallet_retention.sql"),
       );
       return { rows: [] };
     }
@@ -72,6 +154,7 @@ assert.deepEqual(report.blockers, [
   "0201 Telegram funding open idempotency migration is not recorded",
   "0203 Telegram funding Buy continuation migration is not recorded",
   "0204 delegated funding execution migration is not recorded",
+  "0206 delegated funding wallet retention migration is not recorded",
 ]);
 assert.equal(report.latestMigration, "0182_telegram_bot_action_outbox.sql");
 assert.equal(report.bridgeOrders.total, 256);
@@ -214,6 +297,7 @@ const ready = await inspectFundingMigrationPreflight(
 assert.deepEqual(ready.blockers, [
   "0203 Telegram funding Buy continuation migration is not recorded",
   "0204 delegated funding execution migration is not recorded",
+  "0206 delegated funding wallet retention migration is not recorded",
 ]);
 assert.equal(ready.telegramOpenMutationConstraints, true);
 
@@ -228,6 +312,7 @@ assert.deepEqual(missingMigration.blockers, [
   "0201 Telegram funding open idempotency migration is not recorded",
   "0203 Telegram funding Buy continuation migration is not recorded",
   "0204 delegated funding execution migration is not recorded",
+  "0206 delegated funding wallet retention migration is not recorded",
 ]);
 
 const recordedWithoutConstraint = await inspectFundingMigrationPreflight(
@@ -240,6 +325,7 @@ const recordedWithoutConstraint = await inspectFundingMigrationPreflight(
 assert.deepEqual(recordedWithoutConstraint.blockers, [
   "0203 Telegram funding Buy continuation migration is not recorded",
   "0204 delegated funding execution migration is not recorded",
+  "0206 delegated funding wallet retention migration is not recorded",
   "0201 is recorded but telegram_funding_mutations open constraints are incomplete",
 ]);
 
@@ -253,6 +339,7 @@ const recordedWithOldShapeConstraint = await inspectFundingMigrationPreflight(
 assert.deepEqual(recordedWithOldShapeConstraint.blockers, [
   "0203 Telegram funding Buy continuation migration is not recorded",
   "0204 delegated funding execution migration is not recorded",
+  "0206 delegated funding wallet retention migration is not recorded",
   "0201 is recorded but telegram_funding_mutations open constraints are incomplete",
 ]);
 
@@ -267,6 +354,7 @@ assert.deepEqual(constraintWithoutLedger.blockers, [
   "0201 Telegram funding open idempotency migration is not recorded",
   "0203 Telegram funding Buy continuation migration is not recorded",
   "0204 delegated funding execution migration is not recorded",
+  "0206 delegated funding wallet retention migration is not recorded",
   "Telegram funding open mutation constraints exist before 0201 is recorded",
 ]);
 
@@ -275,6 +363,7 @@ function buildTelegram0203Db(
     applied: boolean;
     completeObjects: boolean;
     rearmDefinition?: boolean;
+    strictMatcher?: boolean;
   }>,
 ) {
   const relations = new Set([
@@ -436,6 +525,13 @@ function buildTelegram0203Db(
                          and candidate.user_id is not null
                          and candidate.variant_id is not null
                          and candidate.destination_address is not null
+                         ${
+                           input.strictMatcher === false
+                             ? ""
+                             : `and candidate.network_id ~ '^evm:'
+                                and candidate.asset_id ~ '^0x'
+                                and candidate.destination_address ~ '^0x'`
+                         }
                      $$`
                   : input.completeObjects && input.rearmDefinition !== false
                     ? `create function rearm_telegram_funding_delivery(
@@ -482,14 +578,29 @@ const telegram0203Ready = await inspectFundingMigrationPreflight(
 );
 assert.deepEqual(telegram0203Ready.blockers, [
   "0204 delegated funding execution migration is not recorded",
+  "0206 delegated funding wallet retention migration is not recorded",
 ]);
 assert.equal(telegram0203Ready.telegramBuyContinuationObjects, true);
+
+const telegram0203BroadIdentityMatcher = await inspectFundingMigrationPreflight(
+  buildTelegram0203Db({
+    applied: true,
+    completeObjects: true,
+    strictMatcher: false,
+  }) as never,
+);
+assert.equal(
+  telegram0203BroadIdentityMatcher.telegramBuyContinuationObjects,
+  false,
+  "case-folding malformed EVM identities must fail migration preflight",
+);
 
 const telegram0203RecordedIncomplete = await inspectFundingMigrationPreflight(
   buildTelegram0203Db({ applied: true, completeObjects: false }) as never,
 );
 assert.deepEqual(telegram0203RecordedIncomplete.blockers, [
   "0204 delegated funding execution migration is not recorded",
+  "0206 delegated funding wallet retention migration is not recorded",
   "0203 is recorded but Telegram funding Buy continuation objects are incomplete",
 ]);
 assert.equal(
@@ -506,6 +617,7 @@ const telegram0203OldRearmFunction = await inspectFundingMigrationPreflight(
 );
 assert.deepEqual(telegram0203OldRearmFunction.blockers, [
   "0204 delegated funding execution migration is not recorded",
+  "0206 delegated funding wallet retention migration is not recorded",
   "0203 is recorded but Telegram funding Buy continuation objects are incomplete",
 ]);
 assert.equal(
@@ -519,6 +631,312 @@ const telegram0203ObjectsBeforeRecord = await inspectFundingMigrationPreflight(
 assert.deepEqual(telegram0203ObjectsBeforeRecord.blockers, [
   "0203 Telegram funding Buy continuation migration is not recorded",
   "0204 delegated funding execution migration is not recorded",
+  "0206 delegated funding wallet retention migration is not recorded",
   "Telegram funding Buy continuation objects exist before 0203 is recorded",
+]);
+
+function buildTelegram0206Db(
+  input: Readonly<{
+    qrIndexReady: boolean;
+    malformedReviewEvidence?: number;
+    strictAuthorizationIdentity?: boolean;
+    strictIdentifierEquality?: boolean;
+    unresolvedAddressDisclosures?: number;
+  }>,
+) {
+  const base = buildTelegram0203Db({
+    applied: true,
+    completeObjects: true,
+  });
+  const authorizationColumns = new Set([
+    "telegram_funding_authorizations.user_id",
+    "telegram_funding_authorizations.telegram_account_id",
+    "telegram_funding_authorizations.user_wallet_id",
+    "telegram_funding_authorizations.privy_wallet_id",
+    "telegram_funding_authorizations.profile_id",
+    "telegram_funding_authorizations.security_class",
+    "telegram_funding_authorizations.signer_fingerprint",
+    "telegram_funding_authorizations.policy_fingerprint",
+    "telegram_funding_authorizations.venue_binding_option_id",
+    "telegram_funding_authorizations.source_asset_id",
+    "telegram_funding_authorizations.destination_asset_id",
+    "telegram_funding_authorizations.revoked_at",
+    "telegram_bot_trading_preferences.funding_operator_revoked_at",
+    "telegram_funding_sessions.address_disclosure_attempt_revision",
+    "telegram_funding_sessions.address_disclosure_message_id",
+    "telegram_funding_sessions.address_delivered_revision",
+    "telegram_funding_sessions.address_redacted_revision",
+    "telegram_funding_mutations.review_receipt_id",
+    "telegram_funding_mutations.review_quote_id",
+    "funding_quotes.commit_scope",
+    "funding_operation_steps.action_expires_at",
+  ]);
+  return {
+    query: async (sql: string, params: unknown[] = []) => {
+      const normalized = sql.replace(/\s+/g, " ").trim().toLowerCase();
+      if (
+        normalized.includes("from public.schema_migrations") &&
+        normalized.includes("filename = any")
+      ) {
+        return {
+          rows: [
+            { filename: "0199_telegram_funding_receive.sql" },
+            { filename: "0201_telegram_funding_open_idempotency.sql" },
+            { filename: "0203_telegram_funding_buy_continuation.sql" },
+            { filename: "0204_delegated_funding_execution.sql" },
+            { filename: "0206_telegram_funding_wallet_retention.sql" },
+          ],
+        };
+      }
+      if (
+        normalized.includes("from public.schema_migrations") &&
+        normalized.includes("order by applied_at")
+      ) {
+        return {
+          rows: [{ filename: "0206_telegram_funding_wallet_retention.sql" }],
+        };
+      }
+      if (
+        normalized === "select to_regclass($1)::text is not null as exists" &&
+        params[0] === "public.telegram_funding_authorizations"
+      ) {
+        return { rows: [{ exists: true }] };
+      }
+      if (normalized.includes("information_schema.columns")) {
+        const key = `${params[0]}.${params[1]}`;
+        if (authorizationColumns.has(key)) {
+          return { rows: [{ exists: true }] };
+        }
+      }
+      if (
+        normalized.includes("from pg_trigger") &&
+        params[1] === "telegram_funding_authorizations_guard"
+      ) {
+        return { rows: [{ exists: true }] };
+      }
+      if (normalized.includes("from pg_constraint")) {
+        const constraint = String(params[1]);
+        const definitions: Record<string, string> = {
+          telegram_funding_authorizations_user_wallet_id_fkey:
+            "FOREIGN KEY (user_wallet_id) REFERENCES user_wallets(id) ON DELETE SET NULL",
+          telegram_funding_consents_automation_check:
+            "CHECK (automation_enabled AND max_auto_execute_source_raw IS NULL AND max_auto_execute_source_raw > 0 AND kind = 'polymarket_usdce_full_receipt_wrap' AND fullReceipt = true)",
+          telegram_funding_sessions_address_delivery_check:
+            "CHECK (((address_disclosure_attempt_revision >= 0) AND (address_disclosure_attempt_revision <= progress_revision) AND (address_delivered_revision >= 0) AND (address_delivered_revision <= progress_revision) AND (address_delivered_revision <= address_disclosure_attempt_revision) AND (address_redacted_revision >= 0) AND (address_redacted_revision <= progress_revision) AND ((address_delivered_revision = 0) OR (address_disclosure_message_id IS NOT NULL)) AND ((address_redacted_revision = 0) OR ((address_disclosure_message_id IS NOT NULL) AND (address_redacted_revision > address_disclosure_attempt_revision)))))",
+          telegram_bot_action_outbox_action_check:
+            "CHECK (action IN ('welcome_menu', 'funding_send', 'funding_edit', 'funding_replacement', 'funding_qr'))",
+          telegram_bot_action_outbox_shape_check:
+            "CHECK (action = 'funding_qr' AND funding_session_id IS NOT NULL AND state_revision > 0)",
+          telegram_bot_action_outbox_delivery_attempt_check:
+            "CHECK (action = 'funding_qr' AND delivery_attempt_id IS NOT NULL AND delivery_started_at IS NOT NULL)",
+          telegram_bot_action_outbox_address_egress_check:
+            "CHECK (action NOT IN ('funding_send', 'funding_replacement') OR payload -> 'receiveAddress' = 'null')",
+          telegram_funding_mutations_action_check:
+            "CHECK (action IN ('open', 'select_target', 'cancel', 'set_buy_return', 'resume_buy', 'review_conversion'))",
+          telegram_funding_mutations_action_shape_check:
+            "CHECK (action = 'open' AND consent_revision IS NULL OR action = 'cancel' AND consent_revision IS NULL OR action = 'select_target' AND consent_revision IS NOT NULL OR action = 'set_buy_return' AND buy_return_revision IS NOT NULL OR action = 'resume_buy' AND buy_return_revision IS NOT NULL AND resume_generation IS NOT NULL AND resume_intent_id IS NOT NULL AND continuation_id IS NOT NULL OR action = 'review_conversion' AND review_receipt_id IS NOT NULL AND review_quote_id IS NOT NULL)",
+          telegram_funding_mutations_review_receipt_fk:
+            "FOREIGN KEY (review_receipt_id) REFERENCES funding_receive_receipts(id) ON DELETE RESTRICT",
+          telegram_funding_mutations_review_quote_fk:
+            "FOREIGN KEY (review_quote_id) REFERENCES funding_quotes(id) ON DELETE RESTRICT",
+          funding_quotes_commit_scope_check:
+            "CHECK (commit_scope IS NULL OR commit_scope ->> 'kind' = 'receive_receipt_review_v1' AND commit_scope ? 'ownerChannel' AND commit_scope ? 'receiveSessionId' AND commit_scope ? 'receiptId')",
+          funding_operation_steps_action_expiry_check:
+            "CHECK (action_expires_at IS NULL OR action_expires_at > created_at)",
+        };
+        if (constraint in definitions) {
+          return { rows: [{ definition: definitions[constraint] }] };
+        }
+      }
+      if (normalized.includes("from pg_proc procedure")) {
+        const functionName = String(params[0]);
+        if (functionName === "funding_account_identifier_equal") {
+          return {
+            rows: [
+              {
+                definition:
+                  input.strictIdentifierEquality === false
+                    ? "select lower(left_identifier) = lower(right_identifier)"
+                    : `identity_scope = 'ethereum'
+                       identity_scope ~ '^evm:[1-9][0-9]*$'
+                       left_identifier ~ '^0x[0-9a-fA-F]{40}$'
+                       right_identifier ~ '^0x[0-9a-fA-F]{40}$'
+                       lower(left_identifier) = lower(right_identifier)
+                       else left_identifier = right_identifier`,
+              },
+            ],
+          };
+        }
+        if (functionName === "funding_receive_money_is_valid") {
+          return {
+            rows: [
+              {
+                definition:
+                  "jsonb_typeof(candidate -> 'asset') = 'object' between 0 and 255 candidate ->> 'raw' ~ '^(0|[1-9][0-9]*)$'",
+              },
+            ],
+          };
+        }
+        if (functionName === "funding_receive_review_evidence_is_valid") {
+          return {
+            rows: [
+              {
+                definition:
+                  "reviewContinuation reviewQuotePlan fresh_quote funding_receive_money_is_valid",
+              },
+            ],
+          };
+        }
+        if (functionName === "funding_guard_attempt_update") {
+          return {
+            rows: [
+              {
+                definition:
+                  "provider_reference_resolved provider_failure_resolved provider_receipt",
+              },
+            ],
+          };
+        }
+        if (functionName === "guard_telegram_funding_authorization_update") {
+          return {
+            rows: [
+              {
+                definition: `old.user_wallet_id is not null new.user_wallet_id is null new.revoked_at := greatest ${
+                  input.strictAuthorizationIdentity === false
+                    ? ""
+                    : "new.wallet_chain = 'ethereum' new.wallet_address ~ old.wallet_chain = 'ethereum' old.wallet_address ~ new.source_network_id ~ new.source_asset_id ~ new.destination_network_id ~ new.destination_asset_id ~"
+                }`,
+              },
+            ],
+          };
+        }
+        if (functionName === "rearm_telegram_funding_delivery") {
+          return {
+            rows: [
+              {
+                definition:
+                  "delivered.state_revision = context.latest_terminal_revision delivered.telegram_account_id = target_telegram_account_id delivered.status = 'sent' address_disclosure_attempt_revision > address_redacted_revision then 'funding_edit' redaction.state_revision address_disclosure_message_id is not null",
+              },
+            ],
+          };
+        }
+      }
+      if (
+        normalized.includes("from pg_index idx") &&
+        params[0] === "telegram_funding_authorizations_active_profile_idx"
+      ) {
+        return { rows: [{ predicate: "revoked_at is null" }] };
+      }
+      if (
+        normalized.includes("from pg_index idx") &&
+        params[0] === "telegram_bot_action_outbox_funding_qr_unique"
+      ) {
+        return {
+          rows: [
+            {
+              is_unique: input.qrIndexReady,
+              predicate: "action = 'funding_qr'",
+            },
+          ],
+        };
+      }
+      if (
+        normalized.includes("from pg_index idx") &&
+        params[0] === "funding_operation_steps_action_claim_idx"
+      ) {
+        return { rows: [{ predicate: "state = 'action_required'" }] };
+      }
+      if (
+        normalized.includes("from telegram_funding_sessions") &&
+        normalized.includes("address_redacted_revision")
+      ) {
+        return {
+          rows: [{ count: String(input.unresolvedAddressDisclosures ?? 0) }],
+        };
+      }
+      if (
+        normalized.includes("from funding_receive_receipts") &&
+        normalized.includes("funding_receive_review_evidence_is_valid")
+      ) {
+        return {
+          rows: [{ count: String(input.malformedReviewEvidence ?? 0) }],
+        };
+      }
+      return base.query(sql, params);
+    },
+  };
+}
+
+const telegram0206Ready = await inspectFundingMigrationPreflight(
+  buildTelegram0206Db({ qrIndexReady: true }) as never,
+);
+assert.equal(telegram0206Ready.delegatedFundingExecutionObjects, true);
+assert.equal(telegram0206Ready.delegatedFundingWalletRetentionObjects, true);
+assert.deepEqual(telegram0206Ready.blockers, []);
+assert.equal(telegram0206Ready.malformedReceiveReviewEvidence, 0);
+
+const telegram0206MalformedReviewEvidence =
+  await inspectFundingMigrationPreflight(
+    buildTelegram0206Db({
+      qrIndexReady: true,
+      malformedReviewEvidence: 2,
+    }) as never,
+  );
+assert.equal(
+  telegram0206MalformedReviewEvidence.malformedReceiveReviewEvidence,
+  2,
+  "preflight must expose malformed persisted review evidence for repair",
+);
+
+const telegram0206BroadAuthorizationIdentity =
+  await inspectFundingMigrationPreflight(
+    buildTelegram0206Db({
+      qrIndexReady: true,
+      strictAuthorizationIdentity: false,
+    }) as never,
+  );
+assert.equal(
+  telegram0206BroadAuthorizationIdentity.delegatedFundingWalletRetentionObjects,
+  false,
+  "case-folding malformed authorization assets must fail migration preflight",
+);
+
+const telegram0206BroadIdentifierEquality =
+  await inspectFundingMigrationPreflight(
+    buildTelegram0206Db({
+      qrIndexReady: true,
+      strictIdentifierEquality: false,
+    }) as never,
+  );
+assert.equal(
+  telegram0206BroadIdentifierEquality.delegatedFundingWalletRetentionObjects,
+  false,
+  "case-folding malformed or non-EVM identifiers must fail migration preflight",
+);
+
+const telegram0206MissingQrIndex = await inspectFundingMigrationPreflight(
+  buildTelegram0206Db({ qrIndexReady: false }) as never,
+);
+assert.equal(
+  telegram0206MissingQrIndex.delegatedFundingWalletRetentionObjects,
+  false,
+);
+assert.deepEqual(telegram0206MissingQrIndex.blockers, [
+  "0206 is recorded but delegated funding wallet retention objects are incomplete",
+]);
+
+const telegram0206UnredactableDisclosure =
+  await inspectFundingMigrationPreflight(
+    buildTelegram0206Db({
+      qrIndexReady: true,
+      unresolvedAddressDisclosures: 2,
+    }) as never,
+  );
+assert.equal(
+  telegram0206UnredactableDisclosure.unresolvedAddressDisclosureWithoutEditTarget,
+  2,
+);
+assert.deepEqual(telegram0206UnredactableDisclosure.blockers, [
+  "2 Telegram funding address disclosures lack a redaction edit target",
 ]);
 console.log("[funding-migration-preflight-tests] passed");

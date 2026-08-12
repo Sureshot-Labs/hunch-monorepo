@@ -35,6 +35,10 @@ import {
   type KalshiLossCloseTransaction,
 } from "../services/kalshi-loss-close.js";
 import { resolveEmbeddedSolanaWalletContext } from "../services/embedded-solana.js";
+import {
+  canonicalAccountAddress,
+  sameAccountAddress,
+} from "../funding/domain/asset-identity.js";
 
 type AuthenticatedUser = NonNullable<FastifyRequest["user"]>;
 
@@ -105,7 +109,10 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
     walletAddresses: string[],
   ): Promise<string[]> => {
     if (walletAddresses.length === 0) return [];
-    const normalized = walletAddresses.map((address) => address.toLowerCase());
+    const networkId = venue === "kalshi" ? "solana:mainnet" : "evm:1";
+    const normalized = walletAddresses.map((address) =>
+      canonicalAccountAddress(networkId, address),
+    );
     const { rows } = await pool.query<{ wallet_address: string }>(
       `
         select wallet_address
@@ -113,15 +120,22 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
         where user_id = $1
           and venue = $2
           and is_active = true
-          and lower(wallet_address) = any($3::text[])
+          and exists (
+            select 1
+            from unnest($3::text[]) candidate(address)
+            where funding_account_identifier_equal(
+              $4,
+              wallet_address,
+              candidate.address
+            )
+          )
       `,
-      [userId, venue, normalized],
-    );
-    const allowed = new Set(
-      rows.map((row) => row.wallet_address.toLowerCase()),
+      [userId, venue, normalized, networkId],
     );
     return walletAddresses.filter((address) =>
-      allowed.has(address.toLowerCase()),
+      rows.some((row) =>
+        sameAccountAddress(networkId, row.wallet_address, address),
+      ),
     );
   };
 
@@ -853,7 +867,7 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
               tasks
                 .filter(isPolymarketEvmTask)
                 .map((task) => [
-                  task.walletAddress.toLowerCase(),
+                  canonicalAccountAddress("evm:137", task.walletAddress),
                   task.walletAddress,
                 ]),
             ).values(),

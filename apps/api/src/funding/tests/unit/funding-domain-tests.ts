@@ -1277,6 +1277,25 @@ await test("keeps core provider-neutral and simulator out of production registry
   );
   assert.doesNotMatch(productionPolicySource, /local-simulator/);
   assert.doesNotMatch(productionServiceSource, /local-simulator/);
+  const receiptRouterSource = readFileSync(
+    new URL("../../receive/receive-receipt-router.ts", import.meta.url),
+    "utf8",
+  );
+  assert.doesNotMatch(
+    receiptRouterSource,
+    /RELAY_PINNED|SOLANA_NATIVE|Polymarket Funding Router|polymarket_funding_router/u,
+  );
+  const operationRepositorySource = readFileSync(
+    new URL(
+      "../../persistence/funding-operation-repository.ts",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  assert.doesNotMatch(
+    operationRepositorySource,
+    /Polymarket Funding Router|polymarket_funding_router/u,
+  );
 });
 
 await test("protects funding admin routes with dedicated permissions", () => {

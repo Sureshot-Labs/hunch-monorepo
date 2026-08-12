@@ -253,7 +253,7 @@ const context: TelegramBotTradeInputContext = {
     privyWalletId: "wallet-1",
     telegramAccountLinkId: "00000000-0000-4000-8000-000000000003",
     userId: "00000000-0000-4000-8000-000000000004",
-    walletAddress: "0x0000000000000000000000000000000000000001",
+    walletAddress: "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd",
     walletChain: "ethereum",
   },
   chatId: "42",
@@ -280,7 +280,7 @@ const currentAuthority = {
   telegram_account_link_id: context.authority.telegramAccountLinkId,
   telegram_user_id: context.telegramUserId,
   user_id: context.authority.userId,
-  wallet_address: context.authority.walletAddress.toUpperCase(),
+  wallet_address: `0x${context.authority.walletAddress.slice(2).toUpperCase()}`,
   wallet_chain: context.authority.walletChain,
 };
 assert.equal(
@@ -289,6 +289,17 @@ assert.equal(
     currentAuthority as never,
   ),
   true,
+);
+assert.equal(
+  telegramBotTradingTestHooks.sameTelegramTradeAuthorityBinding(
+    context.authority,
+    {
+      ...currentAuthority,
+      wallet_address: context.authority.walletAddress.toUpperCase(),
+    } as never,
+  ),
+  false,
+  "an uppercase 0X prefix is malformed and must not alias a valid EVM address",
 );
 for (const changed of [
   { id: "00000000-0000-4000-8000-000000000009" },

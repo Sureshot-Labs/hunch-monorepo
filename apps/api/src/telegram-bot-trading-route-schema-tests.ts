@@ -89,6 +89,31 @@ await test("Telegram funding schemas accept only server-owned opaque inputs", ()
     true,
   );
   assert.equal(
+    telegramBotTradingRouteTestHooks.internalFundingReviewBodySchema.safeParse({
+      ...mutation,
+      receiptId: "123e4567-e89b-42d3-a456-426614174000",
+    }).success,
+    true,
+  );
+  assert.equal(
+    telegramBotTradingRouteTestHooks.internalFundingConfirmBodySchema.safeParse(
+      {
+        ...mutation,
+        consentToken: `consent_${"a".repeat(43)}`,
+      },
+    ).success,
+    true,
+  );
+  assert.equal(
+    telegramBotTradingRouteTestHooks.internalFundingConfirmBodySchema.safeParse(
+      {
+        ...mutation,
+        consentToken: "consent_too_short",
+      },
+    ).success,
+    false,
+  );
+  assert.equal(
     telegramBotTradingRouteTestHooks.internalFundingResumeBuyBodySchema.safeParse(
       {
         ...identity,

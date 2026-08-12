@@ -17,6 +17,10 @@ import {
 } from "../auth.js";
 import { checkRateLimitForSecurityClientIp } from "../lib/request-ip.js";
 import { normalizeWalletNameInput } from "../lib/wallet-name.js";
+import {
+  canonicalWalletIdentity,
+  normalizeWalletForStorage,
+} from "../lib/wallet-address.js";
 import { pool } from "../db.js";
 import { env } from "../env.js";
 import {
@@ -109,7 +113,7 @@ function buildPrivyWalletProfileLookup(
   const lookup = new Map<string, PrivyWalletProfile>();
   for (const profile of walletProfiles ?? []) {
     const walletType = normalizeWalletType(profile.walletType);
-    const normalizedAddress = normalizeWalletAddressForType(
+    const normalizedAddress = canonicalWalletIdentity(
       walletType,
       profile.address,
     );
@@ -125,7 +129,7 @@ function buildAuthWalletPayloads(
   const walletProfileLookup = buildPrivyWalletProfileLookup(walletProfiles);
   return wallets.map((wallet) => {
     const walletType = normalizeWalletType(wallet.walletType);
-    const normalizedAddress = normalizeWalletAddressForType(
+    const normalizedAddress = canonicalWalletIdentity(
       walletType,
       wallet.walletAddress,
     );
@@ -281,7 +285,7 @@ function normalizeWalletAddressForType(
   address: string,
 ): string {
   const trimmed = address.trim();
-  if (walletType === "ethereum") return trimmed.toLowerCase();
+  if (walletType === "ethereum") return normalizeWalletForStorage(trimmed);
   return trimmed;
 }
 
@@ -1333,15 +1337,11 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
           });
         }
 
-        const match =
-          walletType === "ethereum"
-            ? "lower(wallet_address) = lower($2)"
-            : "wallet_address = $2";
         const conflict = await pool.query<{ user_id: string }>(
           `SELECT user_id
            FROM user_wallets
            WHERE wallet_type = $1
-             AND ${match}
+             AND funding_account_identifier_equal($1, wallet_address, $2)
              AND user_id <> $3
            LIMIT 1`,
           [walletType, walletAddress, user.id],

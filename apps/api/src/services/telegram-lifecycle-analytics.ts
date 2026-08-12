@@ -2,7 +2,6 @@ import type { DbQuery } from "../db.js";
 
 export type TelegramLifecycleAnalyticsEvent =
   | "hf_telegram_account_lifecycle"
-  | "hf_telegram_deposit_resolution"
   | "hf_telegram_trading_lifecycle";
 
 export function resolveTelegramLifecycleChain(
@@ -60,43 +59,4 @@ export async function recordTelegramLifecycleAnalytics(input: {
       JSON.stringify(payload),
     ],
   );
-}
-
-export async function recordTelegramDepositResolutionAnalytics(input: {
-  db: DbQuery;
-  reason: string | null;
-  source: "deposit_menu" | "funding_preview";
-  status: string;
-  telegramUserId: string | number;
-  venue: string;
-}): Promise<void> {
-  const { rows } = await input.db.query<{ user_id: string }>(
-    `select user_id
-       from user_telegram_accounts
-      where telegram_user_id = $1
-      limit 1`,
-    [String(input.telegramUserId)],
-  );
-  const userId = rows[0]?.user_id;
-  if (!userId) return;
-  const day = new Date().toISOString().slice(0, 10);
-  await recordTelegramLifecycleAnalytics({
-    chain: resolveTelegramLifecycleChain(input.venue),
-    db: input.db,
-    dedupeKey: [
-      "telegram-deposit",
-      userId,
-      input.venue,
-      input.source,
-      input.status,
-      input.reason ?? "ready",
-      day,
-    ].join(":"),
-    event: "hf_telegram_deposit_resolution",
-    reason: input.reason,
-    source: input.source,
-    status: input.status,
-    userId,
-    venue: input.venue,
-  });
 }

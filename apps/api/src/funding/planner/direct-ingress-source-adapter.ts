@@ -1,6 +1,9 @@
 import type { AccountValueReadModel } from "../../account-value/runtime-service.js";
 import { multiplyRawByUnitPrice } from "../../account-value/decimal.js";
-import { stableOpaqueId } from "../../account-value/canonical.js";
+import {
+  canonicalLocationKey,
+  stableOpaqueId,
+} from "../../account-value/canonical.js";
 import { PolymarketFundingPlanError } from "../../services/polymarket-funding-router.js";
 import {
   isRelayPinnedStableAsset,
@@ -12,7 +15,6 @@ import type {
   ExternalIngressInstruction,
   JsonValue,
   SourceOption,
-  WalletExecutionProfile,
 } from "../domain/types.js";
 import {
   canonicalAccountAddress,
@@ -32,9 +34,10 @@ import {
   buildPolymarketFundingFollowupAction,
 } from "../preparation/polymarket-funding-followup.js";
 import { parsePolymarketFundingEvidence } from "../preparation/polymarket-funding-snapshot.js";
-import type {
-  FundingSourceAdapter,
-  FundingSourcePlanningInput,
+import {
+  findExactFundingWalletProfile,
+  type FundingSourceAdapter,
+  type FundingSourcePlanningInput,
 } from "./source-adapter.js";
 import type { PlannedSourceOption } from "./planning-types.js";
 import { buildFundingReceiveTargets } from "./receive-targets.js";
@@ -97,22 +100,6 @@ type DirectIngressCompletion = Readonly<{
   walletExecutionSnapshot: Readonly<Record<string, JsonValue>>;
   supportMetadata: Readonly<Record<string, JsonValue>>;
 }>;
-
-function profileForExactWallet(input: {
-  account: AccountValueReadModel;
-  walletId: string;
-  networkId: string;
-  address: string;
-}): WalletExecutionProfile | null {
-  return (
-    input.account.ownership?.wallets.find(
-      (profile) =>
-        profile.walletId === input.walletId &&
-        profile.networkId === input.networkId &&
-        sameAccountAddress(input.networkId, profile.address, input.address),
-    ) ?? null
-  );
-}
 
 function exactIngressVariant(
   input: FundingSourcePlanningInput,
@@ -195,7 +182,7 @@ function buildPolymarketIngressCompletion(input: {
   ) {
     return null;
   }
-  const profile = profileForExactWallet({
+  const profile = findExactFundingWalletProfile({
     account: input.account,
     walletId: facts.venueBinding.executionWalletId,
     networkId: "evm:137",
@@ -254,7 +241,10 @@ function buildPolymarketIngressCompletion(input: {
       variantId: stableOpaqueId(
         "ingress_variant",
         canonicalJsonHash({
-          destinationAddress: snapshot.depositWallet.toLowerCase(),
+          destinationAddress: canonicalAccountAddress(
+            input.planning.requiredAmount.asset.networkId,
+            snapshot.depositWallet,
+          ),
           asset: input.planning.requiredAmount.asset,
           completion: "direct_destination_credit",
         }),
@@ -272,7 +262,10 @@ function buildPolymarketIngressCompletion(input: {
       variantId: stableOpaqueId(
         "ingress_variant",
         canonicalJsonHash({
-          destinationAddress: snapshot.depositWallet.toLowerCase(),
+          destinationAddress: canonicalAccountAddress(
+            input.usdceAsset.networkId,
+            snapshot.depositWallet,
+          ),
           asset: input.usdceAsset,
           completion: "committed_venue_preparation",
         }),
@@ -399,7 +392,7 @@ function buildRoutedReceiveVariants(input: {
     const walletId = locationDetail(component.location, "walletId");
     const address = locationDetail(component.location, "address");
     if (!walletId || !address) return [];
-    const profile = profileForExactWallet({
+    const profile = findExactFundingWalletProfile({
       account: input.account,
       walletId,
       networkId: component.amount.asset.networkId,
@@ -449,6 +442,8 @@ function buildRoutedReceiveVariants(input: {
           payload: {
             routeId: route.routeId,
             balanceKey: canonicalAssetKey(component.amount.asset),
+            sourceComponentId: component.componentId,
+            walletExecutionProfile: profile,
           },
         },
         completion: { kind: "child_funding_operation" as const },
@@ -499,6 +494,24 @@ function buildRoutedReceiveVariants(input: {
       const key = `${canonicalAssetKey(route.sourceAsset)}:${destinationAddress}`;
       if (existing.has(key)) return [];
       existing.add(key);
+      const sourceLocation: AssetLocation = {
+        kind: "wallet",
+        locationId: stableOpaqueId(
+          "location",
+          [
+            input.planning.accountId,
+            "wallet",
+            destinationAddress,
+            canonicalAssetKey(route.sourceAsset),
+          ].join(":"),
+        ),
+        accountId: input.planning.accountId,
+        asset: route.sourceAsset,
+        details: {
+          walletId: profile.walletId,
+          address: profile.address,
+        },
+      };
       return [
         {
           variantId: stableOpaqueId(
@@ -513,15 +526,7 @@ function buildRoutedReceiveVariants(input: {
           networkId: route.sourceAsset.networkId,
           asset: route.sourceAsset,
           destinationAddress: profile.address,
-          destinationLocationId: stableOpaqueId(
-            "location",
-            [
-              input.planning.accountId,
-              "wallet",
-              destinationAddress,
-              canonicalAssetKey(route.sourceAsset),
-            ].join(":"),
-          ),
+          destinationLocationId: sourceLocation.locationId,
           baselineRaw: "0",
           baselineRevision: canonicalJsonHash({
             schema: "owned_receive_capability_baseline_v1",
@@ -534,6 +539,11 @@ function buildRoutedReceiveVariants(input: {
             payload: {
               routeId: route.routeId,
               balanceKey: canonicalAssetKey(route.sourceAsset),
+              sourceComponentId: stableOpaqueId(
+                "asset",
+                canonicalLocationKey(sourceLocation),
+              ),
+              walletExecutionProfile: profile,
             },
           },
           completion: { kind: "child_funding_operation" as const },

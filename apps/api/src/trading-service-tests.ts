@@ -9,12 +9,12 @@ import { fileURLToPath } from "node:url";
 import type { Pool } from "@hunch/infra";
 import { ethers } from "ethers";
 
-import { env } from "./env.js";
 import {
   fetchErc20TransferLogs,
   fetchEvmBlockNumber,
   parseEvmGetLogsBlockRangeLimit,
 } from "./services/polygon-rpc.js";
+import { walletIntelRetryConfig } from "./services/wallet-intel-retry.js";
 import { createApiTradingApplicationService } from "./services/api-trading-service.js";
 import type { PrivyPolicyMetadata } from "./privy-service.js";
 import {
@@ -72,6 +72,12 @@ import type { PreparedTrade, SubmitResult } from "./services/trading-types.js";
 type TestCase = {
   name: string;
   run: () => Promise<void> | void;
+};
+
+const testRetryConfig = walletIntelRetryConfig as {
+  baseBackoffMs: number;
+  maxAttempts: number;
+  maxBackoffMs: number;
 };
 
 const apiSrcDir = dirname(fileURLToPath(import.meta.url));
@@ -422,6 +428,10 @@ function collectRuntimeRelativeImports(source: string): string[] {
   while ((match = importRegex.exec(source))) {
     imports.push(match[1]);
   }
+  const dynamicImportRegex = /\bimport\(\s*["']([^"']+)["']\s*\)/gu;
+  while ((match = dynamicImportRegex.exec(source))) {
+    imports.push(match[1]);
+  }
   return imports;
 }
 
@@ -554,17 +564,17 @@ const tests: TestCase[] = [
     name: "Limitless AMM quote retries HTTP 429 and coalesces identical reads",
     run: async () => {
       const originalFetch = globalThis.fetch;
-      const originalMaxAttempts = env.walletIntelRetryMaxAttempts;
-      const originalBaseBackoff = env.walletIntelRetryBaseBackoffMs;
-      const originalMaxBackoff = env.walletIntelRetryMaxBackoffMs;
+      const originalMaxAttempts = testRetryConfig.maxAttempts;
+      const originalBaseBackoff = testRetryConfig.baseBackoffMs;
+      const originalMaxBackoff = testRetryConfig.maxBackoffMs;
       const iface = new ethers.Interface([
         "function calcBuyAmount(uint256 investmentAmount,uint256 outcomeIndex) view returns (uint256)",
       ]);
       let calls = 0;
 
-      env.walletIntelRetryMaxAttempts = 2;
-      env.walletIntelRetryBaseBackoffMs = 10;
-      env.walletIntelRetryMaxBackoffMs = 10;
+      testRetryConfig.maxAttempts = 2;
+      testRetryConfig.baseBackoffMs = 10;
+      testRetryConfig.maxBackoffMs = 10;
       globalThis.fetch = async () => {
         calls += 1;
         if (calls === 1) {
@@ -609,9 +619,9 @@ const tests: TestCase[] = [
         assert.equal(calls, 2);
       } finally {
         globalThis.fetch = originalFetch;
-        env.walletIntelRetryMaxAttempts = originalMaxAttempts;
-        env.walletIntelRetryBaseBackoffMs = originalBaseBackoff;
-        env.walletIntelRetryMaxBackoffMs = originalMaxBackoff;
+        testRetryConfig.maxAttempts = originalMaxAttempts;
+        testRetryConfig.baseBackoffMs = originalBaseBackoff;
+        testRetryConfig.maxBackoffMs = originalMaxBackoff;
       }
     },
   },
@@ -817,6 +827,26 @@ const tests: TestCase[] = [
         }).valid,
         false,
       );
+      const combinedWithDeny = structuredClone(combined);
+      combinedWithDeny.rules.push({
+        action: "DENY",
+        conditions: [],
+        id: "combined-deny",
+        method: "personal_sign",
+        name: "Unexpected deny",
+      });
+      assert.equal(
+        validatePolymarketBotPolicyProfile({
+          builderCode: policyBuilderCode,
+          exchangeAddresses: policyExchangeAddresses,
+          fundingRouterAddress: policyFundingRouterAddress,
+          maxBuyUsd: 2,
+          policy: combinedWithDeny,
+          profile: "buy_sell",
+        }).valid,
+        false,
+        "the combined profile is an exact policy shape, not a subset check",
+      );
 
       const redeem = buildValidPolymarketRedeemPolicy();
       assert.equal(
@@ -996,6 +1026,20 @@ const tests: TestCase[] = [
         walletAddress,
         walletChain: "ethereum",
       });
+      assert.equal(
+        (
+          await inspectServerEvmWalletAuthorization({
+            authorizationEnabled: true,
+            configuration,
+            dependencies,
+            privyUserId: "user-1",
+            requiredActions: ["BUY"],
+            signer: walletAddress.toUpperCase(),
+            walletId: "wallet-1",
+          })
+        ).state,
+        "unsafe_configuration",
+      );
 
       classifiedWalletId = "another-wallet";
       assert.equal((await inspect(true)).state, "unsafe_configuration");
@@ -1133,6 +1177,28 @@ const tests: TestCase[] = [
           typedData,
         }).valid,
         true,
+      );
+      assert.equal(
+        validatePolymarketBotTypedData({
+          exchangeAddresses: policyExchangeAddresses,
+          maxBuyUsd: 2,
+          signer: signer.toUpperCase(),
+          typedData,
+        }).valid,
+        false,
+      );
+      const malformedDomain = structuredClone(typedData);
+      malformedDomain.domain.verifyingContract = String(
+        malformedDomain.domain.verifyingContract,
+      ).toUpperCase();
+      assert.equal(
+        validatePolymarketBotTypedData({
+          exchangeAddresses: policyExchangeAddresses,
+          maxBuyUsd: 2,
+          signer,
+          typedData: malformedDomain,
+        }).valid,
+        false,
       );
       const depositWallet = "0x0000000000000000000000000000000000000020";
       const wrappedTypedData = {
@@ -3341,6 +3407,26 @@ const tests: TestCase[] = [
         envSource,
         /POLYMARKET_FUNDING_ROUTER_ADDRESS must be the verified immutable router/,
       );
+    },
+  },
+  {
+    name: "Telegram trading presentation never discloses managed funding addresses",
+    run: () => {
+      const source = readFileSync(
+        resolve(apiSrcDir, "services/telegram-bot-trading.ts"),
+        "utf8",
+      );
+      assert.doesNotMatch(
+        source,
+        /formatTelegramCodeMarkdownV2\([\s\S]{0,160}(?:wallet_address|walletAddress|funderAddress)/u,
+      );
+      assert.doesNotMatch(source, /Canonical deposit wallet|Internal wallet/u);
+      assert.match(source, /canonicalWalletIdentity\(walletChain, address\)/u);
+      assert.match(
+        source,
+        /sameAccountAddress\(\s*"evm:137",\s*credentials\.funderAddress,\s*context\.funderAddress/u,
+      );
+      assert.doesNotMatch(source, /funderAddress\?\.toLowerCase\(\)/u);
     },
   },
   {

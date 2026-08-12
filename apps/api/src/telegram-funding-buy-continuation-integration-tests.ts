@@ -3,8 +3,9 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 
-import { createPgPool, tx } from "@hunch/infra";
+import { tx } from "@hunch/infra";
 
+import { stableWalletOpaqueId } from "./account-value/canonical.js";
 import { canonicalJsonHash } from "./funding/persistence/canonical.js";
 import { fundingSidecarRuntimeConfig } from "./funding/runtime/sidecar-runtime-config.js";
 import type { ApiBotTradingExecutor } from "./services/api-trading-service.js";
@@ -26,11 +27,10 @@ import {
   buildTelegramFundingBuyReturnRequestFingerprint,
   TelegramFundingService,
 } from "./services/telegram-funding.js";
+import { telegramPolygonFundingPresentation } from "./services/telegram-funding-route.js";
+import { createIntegrationTestPool } from "./test-database-target.js";
 
-const databaseUrl = process.env.DATABASE_URL?.trim();
-if (!databaseUrl) throw new Error("DATABASE_URL is required");
-const pool = createPgPool({
-  connectionString: databaseUrl,
+const pool = await createIntegrationTestPool({
   options: "-c jit=off",
   max: 24,
 });
@@ -51,6 +51,11 @@ const destinationOptionId = `slice-b-destination-${suffix}`;
 const venueBindingOptionId = `slice-b-binding-${suffix}`;
 const now = new Date();
 const walletAddress = `0x${suffix.replaceAll("-", "").slice(0, 40).padEnd(40, "0")}`;
+const controllerWalletId = stableWalletOpaqueId({
+  walletType: "ethereum",
+  networkId: "evm:137",
+  address: walletAddress,
+});
 const destinationAddress = "0x1111111111111111111111111111111111111111";
 const sourceShortfallIntentId = crypto.randomUUID();
 const readyVariantId = `slice-b-ready-${suffix}`;
@@ -166,7 +171,7 @@ try {
        expires_at, observe_until, observation_start_variants, owner_channel
      ) values (
        $1::uuid, $2::uuid, 'open', 'polymarket', $3, $4, $5::jsonb,
-       '{}'::jsonb, '{}'::jsonb, '[{}]'::jsonb, '[{}]'::jsonb,
+       $12::jsonb, '{}'::jsonb, '[{}]'::jsonb, $13::jsonb,
        $11::jsonb, null, $6::jsonb, 1, $7, $8, 7,
        $9, $10, $11::jsonb, 'telegram'
      )`,
@@ -202,6 +207,51 @@ try {
           destinationAddress,
           networkId: "evm:137",
           variantId: readyVariantId,
+        },
+      ]),
+      JSON.stringify({
+        kind: "owned_location",
+        location: {
+          kind: "venue_account",
+          locationId: `slice-b-location-${suffix}`,
+          accountId: userId,
+          asset: {
+            assetId: fundingSidecarRuntimeConfig.polymarketPusdAddress,
+            decimals: 6,
+            networkId: "evm:137",
+          },
+          details: {
+            venueId: "polymarket",
+            accountRef: destinationAddress,
+            controllerWalletId,
+            address: destinationAddress,
+          },
+        },
+      }),
+      JSON.stringify([
+        {
+          receiveTargetId: `slice-b-target-${suffix}`,
+          networkId: "evm:137",
+          destinationAddress,
+          acceptedAssets: [
+            {
+              asset: {
+                assetId: fundingSidecarRuntimeConfig.polymarketPusdAddress,
+                decimals: 6,
+                networkId: "evm:137",
+              },
+              handling: "direct",
+            },
+            {
+              asset: {
+                assetId: fundingSidecarRuntimeConfig.polymarketUsdceAddress,
+                decimals: 6,
+                networkId: "evm:137",
+              },
+              handling: "automatic_conversion",
+            },
+          ],
+          safeInstructions: ["Send pUSD or USDC.e on Polygon."],
         },
       ]),
     ],
@@ -294,7 +344,7 @@ try {
        consent_fingerprint, consented_at
      ) values (
        $1::uuid, 1, $2, 'evm:137', $3, 6, array[$4]::text[], false,
-       null, '{}'::jsonb, $5, $6
+       null, $7::jsonb, $5, $6
      )`,
     [
       contextId,
@@ -303,6 +353,13 @@ try {
       readyVariantId,
       fingerprint("consent"),
       now,
+      JSON.stringify({
+        version: 1,
+        mode: "direct",
+        automationEnabled: false,
+        presentationMode: "pusd_direct",
+        presentation: telegramPolygonFundingPresentation("pusd_direct"),
+      }),
     ],
   );
   await pool.query(
@@ -321,16 +378,15 @@ try {
       fingerprint("ready"),
       JSON.stringify({
         assetSymbol: "pUSD",
-        decimals: 6,
         expiresAt: new Date(now.getTime() + 86_400_000).toISOString(),
         fundingContextId: contextId,
-        networkLabel: "Polygon",
         observedAt: now.toISOString(),
         rawAmount: "5000000",
-        receiveAddress: "0x1111111111111111111111111111111111111111",
+        receiveAddress: null,
+        presentation: telegramPolygonFundingPresentation("pusd_direct"),
         state: "ready",
         terminal: true,
-        version: 1,
+        version: 2,
       }),
       now,
     ],
@@ -581,6 +637,78 @@ try {
     continuationsBeforePolicyRace.rows,
     "a policy change before issuance cannot leave a Review button capability",
   );
+  await pool.query(
+    `update telegram_funding_sessions
+        set latest_terminal_projection = jsonb_set(
+          latest_progress_projection,
+          '{state}',
+          '"unavailable"'::jsonb
+        )
+      where id = $1::uuid`,
+    [contextId],
+  );
+  await assert.rejects(
+    issueTelegramFundingBuyContinuation({
+      pool,
+      contextId,
+      returnRevision: 3,
+      progressRevision: 1,
+      receiveVersion: 7,
+      telegramAccountId,
+      telegramUserId,
+      chatId: telegramUserId,
+      policyRevision,
+      now,
+    }),
+    /telegram_funding_buy_continuation_stale/u,
+    "a retained non-ready terminal projection blocks Review issuance",
+  );
+  await pool.query(
+    `update telegram_funding_sessions
+        set latest_progress_projection = jsonb_set(
+              latest_progress_projection,
+              '{expiresAt}',
+              '"invalid"'::jsonb
+            ),
+            latest_terminal_projection = jsonb_set(
+              latest_progress_projection,
+              '{expiresAt}',
+              '"invalid"'::jsonb
+            )
+      where id = $1::uuid`,
+    [contextId],
+  );
+  await assert.rejects(
+    issueTelegramFundingBuyContinuation({
+      pool,
+      contextId,
+      returnRevision: 3,
+      progressRevision: 1,
+      receiveVersion: 7,
+      telegramAccountId,
+      telegramUserId,
+      chatId: telegramUserId,
+      policyRevision,
+      now,
+    }),
+    /telegram_funding_buy_continuation_stale/u,
+    "JSONB-equal ready rows still require the strict canonical parser",
+  );
+  await pool.query(
+    `update telegram_funding_sessions
+        set latest_progress_projection = jsonb_set(
+              latest_progress_projection,
+              '{expiresAt}',
+              to_jsonb($2::text)
+            ),
+            latest_terminal_projection = jsonb_set(
+              latest_progress_projection,
+              '{expiresAt}',
+              to_jsonb($2::text)
+            )
+      where id = $1::uuid`,
+    [contextId, new Date(now.getTime() + 86_400_000).toISOString()],
+  );
 
   const issued = await Promise.all(
     Array.from({ length: 20 }, () =>
@@ -780,6 +908,7 @@ try {
     } as never,
     context: created.context,
     now,
+    presentationMode: "pusd_or_usdce_automatic" as const,
     session: {
       destinationAsset: {
         assetId: fundingSidecarRuntimeConfig.polymarketPusdAddress,
@@ -797,6 +926,14 @@ try {
                 networkId: "evm:137",
               },
               handling: "direct",
+            },
+            {
+              asset: {
+                assetId: fundingSidecarRuntimeConfig.polymarketUsdceAddress,
+                decimals: 6,
+                networkId: "evm:137",
+              },
+              handling: "automatic_conversion",
             },
           ],
           destinationAddress,
@@ -881,19 +1018,20 @@ try {
   assert.match(partialFundingMessage.text, /Funding for this Buy/u);
   assert.match(partialFundingMessage.text, /Maximum spend now/u);
   assert.match(partialFundingMessage.text, /Send at least/u);
-  assert.equal(partialFundingMessage.qrText, destinationAddress);
   assert.equal(
-    partialFundingMessage.reply_markup?.inline_keyboard.some((row) =>
-      row.some((button) => button.text.includes("Refresh")),
-    ),
-    true,
-    "a partial ready receipt keeps the receive address and Refresh action",
+    partialFundingMessage.qrText,
+    undefined,
+    "Buy continuation must not reconstruct an address outside durable delivery",
   );
   assert.equal(
-    partialFundingMessage.reply_markup?.inline_keyboard.some((row) =>
-      row.some((button) => button.text.includes("Review Buy")),
-    ),
-    false,
+    partialFundingMessage.qrPresentation,
+    undefined,
+    "an address-free ready projection must remain address-free",
+  );
+  assert.equal(
+    partialFundingMessage.reply_markup,
+    undefined,
+    "the decorator must not synthesize address controls for an address-free card",
   );
   const resumeInput = {
     appBaseUrl: "https://app.hunch.trade",
@@ -903,6 +1041,40 @@ try {
     telegramUserId,
     trading,
   };
+  const terminalBlockedCard = await issueTelegramFundingBuyContinuation({
+    pool,
+    contextId,
+    returnRevision: 3,
+    progressRevision: 1,
+    receiveVersion: 7,
+    telegramAccountId,
+    telegramUserId,
+    chatId: telegramUserId,
+    policyRevision,
+    now,
+  });
+  await pool.query(
+    `update telegram_funding_sessions
+        set latest_terminal_projection = jsonb_set(
+          latest_progress_projection,
+          '{state}',
+          '"unavailable"'::jsonb
+        )
+      where id = $1::uuid`,
+    [contextId],
+  );
+  const terminalBlockedReview = await resumeTelegramFundingBuyContinuation({
+    ...resumeInput,
+    idempotencyKey: `slice-b-terminal-absorbed-${suffix}`,
+    token: terminalBlockedCard.token,
+  });
+  assert.match(terminalBlockedReview.text, /Review unavailable/u);
+  await pool.query(
+    `update telegram_funding_sessions
+        set latest_terminal_projection = latest_progress_projection
+      where id = $1::uuid`,
+    [contextId],
+  );
   const resumed = await Promise.all(
     issued.map((entry, index) =>
       resumeTelegramFundingBuyContinuation({
@@ -1086,7 +1258,7 @@ try {
       row.some((button) => button.text.includes("Confirm")),
     ),
     true,
-    "a fresh Review card must replace, not reuse, a generation bound to an older policy revision",
+    `a fresh Review card must replace, not reuse, a generation bound to an older policy revision: ${JSON.stringify(refreshedReview)}`,
   );
   const refreshedGeneration = await pool.query<{
     old_status: string;
@@ -1144,6 +1316,7 @@ try {
     } as never,
     message: policyRaceBaseMessage,
     now: new Date(),
+    presentationMode: "pusd_direct",
     progress: { state: "ready" } as never,
     session: {
       destinationAsset: {
@@ -1764,6 +1937,7 @@ try {
     } as never,
     message: relinkBaseMessage,
     now: new Date(),
+    presentationMode: null,
     progress: { state: "ready" } as never,
     session: {
       destinationAsset: {

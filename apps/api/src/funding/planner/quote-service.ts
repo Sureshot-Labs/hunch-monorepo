@@ -22,12 +22,12 @@ import {
   createFundingQuote,
   type FundingCommitPlan,
   type FundingCommitReservation,
+  type FundingQuoteCommitScope,
 } from "../persistence/funding-operation-repository.js";
 import {
   canonicalJsonEqual,
   canonicalJsonHash,
 } from "../persistence/canonical.js";
-import { isRelayPinnedStableAsset } from "../../funding-providers/relay/mappings.js";
 import type { FundingPlanningStore } from "./planning-types.js";
 import { FundingPlannerError, assertSameAsset } from "./money.js";
 
@@ -141,17 +141,10 @@ export function classifyFundingQuoteConsent(
   }>,
 ): FundingQuoteSummary["consentMode"] {
   if (input.ingress) return "external_action";
-  const stableSource =
-    input.sourceAmounts.length > 0 &&
-    input.sourceAmounts.every((source) =>
-      isRelayPinnedStableAsset(source.amount.asset),
-    );
-  const stableTradeRoute =
-    input.purpose === "trade_shortfall" &&
-    stableSource &&
-    isRelayPinnedStableAsset(input.expectedDestination.asset) &&
-    isRelayPinnedStableAsset(input.minimumDestination.asset);
-  return stableTradeRoute ? "trade_intent" : "explicit_economic_review";
+  // A fresh trade quote already is the user's economic confirmation. Any
+  // conversion contained in that exact quote must not add a second prompt.
+  if (input.purpose === "trade_shortfall") return "trade_intent";
+  return "explicit_economic_review";
 }
 
 export class FundingQuoteService {
@@ -175,6 +168,7 @@ export class FundingQuoteService {
       policy: FundingRuntimePolicy;
       policyRevision: string;
       ownershipRevision: string;
+      commitScope?: FundingQuoteCommitScope;
     }>,
   ): Promise<FundingQuoteSummary> {
     const now = this.dependencies.now?.() ?? new Date();
@@ -415,6 +409,7 @@ export class FundingQuoteService {
         policyRevision: input.policyRevision,
         canonicalRequest: input.request as unknown as JsonValue,
         consentToken,
+        commitScope: input.commitScope ?? null,
         expiresAt,
       },
     );

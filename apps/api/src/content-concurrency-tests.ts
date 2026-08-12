@@ -3,9 +3,10 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 
-import { createPgPool } from "@hunch/infra";
-
-import { configureContentTestRuntime } from "./content-test-runtime.js";
+import {
+  configureContentTestRuntime,
+  createContentTestPool,
+} from "./content-test-runtime.js";
 import type { ContentDocument } from "./schemas/content-blocks.js";
 import { publishDueContentVersions } from "./services/content-worker.js";
 import {
@@ -16,11 +17,9 @@ import {
   updateContentArticle,
 } from "./services/content.js";
 
-const connectionString = process.env.CONTENT_TEST_DATABASE_URL?.trim();
-if (!connectionString) throw new Error("CONTENT_TEST_DATABASE_URL is required");
 configureContentTestRuntime();
 
-const pool = createPgPool({ connectionString, max: 6 });
+const pool = await createContentTestPool(6);
 const suffix = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 const articleIds: string[] = [];
 let assetId: string | null = null;

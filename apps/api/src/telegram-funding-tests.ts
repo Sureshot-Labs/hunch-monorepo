@@ -2,18 +2,22 @@
 
 import assert from "node:assert/strict";
 
+import { stableWalletOpaqueId } from "./account-value/canonical.js";
 import { listFundingReceiveReceiptsForRouting } from "./funding/persistence/funding-receive-session-repository.js";
 import { fundingSidecarRuntimeConfig } from "./funding/runtime/sidecar-runtime-config.js";
 import { isFundingReconciliationSchemaReady } from "./funding/worker/funding-reconciliation-worker.js";
 import { resolveFundingReceiveSelectedTargetId } from "./funding/receive/receive-session-service.js";
 import type {
+  FundingQuoteSummary,
   FundingReceiveReceipt,
   FundingReceiveSession,
 } from "./funding/domain/types.js";
+import type { FundingReceiveReceiptRoutingTarget } from "./funding/persistence/funding-receive-session-repository.js";
 import type { DirectIngressObservationVariant } from "./funding/reconciliation/direct-ingress-observer.js";
 import {
   parseTelegramFundingCallbackRoute,
   telegramFundingCallbackData,
+  type TelegramFundingProgressProjection,
 } from "./services/telegram-funding-contracts.js";
 import {
   buildTelegramFundingReviewBuyButton,
@@ -21,18 +25,32 @@ import {
   resolveTelegramFundingBuyContinuationCapability,
 } from "./services/telegram-funding-buy-continuation.js";
 import {
-  buildTelegramFundingAddressMessage,
+  buildTelegramFundingDeliveryQueuedMessage,
   buildTelegramFundingProgressMessage,
+  buildTelegramFundingReviewQuoteMessage,
   buildTelegramFundingTargetMessage,
 } from "./services/telegram-funding-presentation.js";
 import {
+  parseTelegramFundingProgressProjection,
   projectTelegramFundingProgress,
+  projectTelegramFundingUnavailable,
   telegramFundingProgressFingerprint,
 } from "./services/telegram-funding-progress.js";
 import type {
   TelegramFundingConsent,
   TelegramFundingSessionContext,
 } from "./services/telegram-funding-sessions.js";
+import {
+  fetchActiveTelegramFundingReviewResponse,
+  lockActiveTelegramFundingReviewByConsentToken,
+  lockActiveTelegramFundingReviewTarget,
+  recordTelegramFundingReviewMutation,
+  TelegramFundingPersistenceError,
+} from "./services/telegram-funding-sessions.js";
+import {
+  resolveTelegramFundingReceiptDisposition,
+  telegramPolygonFundingPresentation,
+} from "./services/telegram-funding-route.js";
 import {
   buildTelegramFundingBuyReturnRequestFingerprint,
   buildTelegramFundingTargetMessageForSession,
@@ -51,6 +69,7 @@ import {
 import {
   createTelegramFundingRenderCoordinator,
   deliverTelegramFundingActions,
+  requiresCurrentFundingPolicyForAddressDelivery,
 } from "./services/telegram-funding-delivery.js";
 import {
   claimSignalBotMenuRender,
@@ -69,7 +88,165 @@ import {
 
 const contextId = "123e4567-e89b-42d3-a456-426614174000";
 const receiveSessionId = "223e4567-e89b-42d3-a456-426614174000";
+const reviewReceiptId = "323e4567-e89b-42d3-a456-426614174001";
 const receiveTargetId = "receive_target_telegram_pusd_12345678";
+
+for (const [label, lock] of [
+  [
+    "issue",
+    (client: never) =>
+      lockActiveTelegramFundingReviewTarget(client, {
+        receiptId: reviewReceiptId,
+        userId: "323e4567-e89b-42d3-a456-426614174000",
+        telegramAccountId: "423e4567-e89b-42d3-a456-426614174000",
+        telegramUserId: "42",
+        chatId: "42",
+        now: new Date("2026-08-05T12:00:00.000Z"),
+      }),
+  ],
+  [
+    "commit",
+    (client: never) =>
+      lockActiveTelegramFundingReviewByConsentToken(client, {
+        userId: "323e4567-e89b-42d3-a456-426614174000",
+        telegramAccountId: "423e4567-e89b-42d3-a456-426614174000",
+        telegramUserId: "42",
+        chatId: "42",
+        consentToken: `consent_${"a".repeat(43)}`,
+        now: new Date("2026-08-05T12:00:00.000Z"),
+      }),
+  ],
+] as const) {
+  let sql = "";
+  const target = await lock({
+    query: async (statement: string) => {
+      sql = statement;
+      return {
+        rowCount: 1,
+        rows: [
+          {
+            context_id: contextId,
+            quote_id:
+              label === "issue"
+                ? "623e4567-e89b-42d3-a456-426614174000"
+                : undefined,
+            receipt_id: "523e4567-e89b-42d3-a456-426614174000",
+            receive_session_id: receiveSessionId,
+            ...(label === "commit"
+              ? { quote_id: "623e4567-e89b-42d3-a456-426614174000" }
+              : {}),
+          },
+        ],
+      };
+    },
+  } as never);
+  assert.ok(target);
+  assert.match(sql, /context\.latest_terminal_projection is null/u);
+  assert.match(sql, /context\.cancelled_at is null/u);
+  assert.match(sql, /context\.expires_at > \$\d/u);
+  assert.match(sql, /for update of context, receive, receipt/u);
+  if (label === "issue") {
+    assert.equal(
+      target.quoteId,
+      "623e4567-e89b-42d3-a456-426614174000",
+      "review issuance must see the receipt's current quote under the same lock",
+    );
+  }
+}
+
+{
+  const quoteId = "623e4567-e89b-42d3-a456-426614174000";
+  const requestFingerprint = "review-request-fingerprint-12345678";
+  const responsePayload = {
+    fundingContextId: contextId,
+    parse_mode: "MarkdownV2",
+    text: "Exact conversion quote",
+  } as const;
+  const mutationRow = {
+    funding_context_id: contextId,
+    action: "review_conversion",
+    idempotency_key: "funding:review:exact-replay",
+    request_fingerprint: requestFingerprint,
+    response_payload: responsePayload,
+    consent_revision: null,
+    review_receipt_id: reviewReceiptId,
+    review_quote_id: quoteId,
+  };
+  let insertCount = 0;
+  const stored = await recordTelegramFundingReviewMutation(
+    {
+      query: async (statement: string) => {
+        if (statement.includes("insert into telegram_funding_mutations")) {
+          insertCount += 1;
+          return { rowCount: 1, rows: [] };
+        }
+        if (statement.includes("from telegram_funding_mutations")) {
+          return { rowCount: 1, rows: [mutationRow] };
+        }
+        assert.fail(`unexpected review mutation query: ${statement}`);
+      },
+    } as never,
+    {
+      contextId,
+      idempotencyKey: mutationRow.idempotency_key,
+      quoteId,
+      receiptId: reviewReceiptId,
+      requestFingerprint,
+      responsePayload,
+      now: new Date("2026-08-05T12:00:00.000Z"),
+    },
+  );
+  assert.equal(insertCount, 1);
+  assert.deepEqual(stored, responsePayload);
+  let activeSql = "";
+  const activeResponse = await fetchActiveTelegramFundingReviewResponse(
+    {
+      query: async (statement: string) => {
+        activeSql = statement;
+        return { rowCount: 1, rows: [mutationRow] };
+      },
+    } as never,
+    {
+      contextId,
+      quoteId,
+      receiptId: reviewReceiptId,
+      userId: "323e4567-e89b-42d3-a456-426614174000",
+      now: new Date("2026-08-05T12:00:00.000Z"),
+    },
+  );
+  assert.deepEqual(activeResponse, responsePayload);
+  assert.match(activeSql, /quote\.expires_at > \$\d/u);
+  assert.match(activeSql, /quote\.consumed_at is null/u);
+  assert.match(activeSql, /quote\.invalidated_at is null/u);
+  assert.doesNotMatch(
+    activeSql,
+    /and mutation\.request_fingerprint\s*=/u,
+    "presentation fingerprints must not replace a still-active financial quote",
+  );
+  await assert.rejects(
+    recordTelegramFundingReviewMutation(
+      {
+        query: async (statement: string) =>
+          statement.includes("insert into telegram_funding_mutations")
+            ? { rowCount: 0, rows: [] }
+            : { rowCount: 1, rows: [mutationRow] },
+      } as never,
+      {
+        contextId,
+        idempotencyKey: mutationRow.idempotency_key,
+        quoteId,
+        receiptId: "723e4567-e89b-42d3-a456-426614174000",
+        requestFingerprint,
+        responsePayload,
+        now: new Date("2026-08-05T12:00:00.000Z"),
+      },
+    ),
+    (error: unknown) =>
+      error instanceof TelegramFundingPersistenceError &&
+      error.code === "telegram_funding_idempotency_conflict",
+    "one callback key must never replay another receipt's quote token",
+  );
+}
 
 {
   const lockOrder: string[] = [];
@@ -135,6 +312,23 @@ const renderCoordinator = {
   }),
 };
 
+function successfulTelegramCounter() {
+  let calls = 0;
+  return {
+    calls: () => calls,
+    client: {
+      editMessageText: async () => {
+        calls += 1;
+        return { ok: true as const, messageId: 100 };
+      },
+      sendMessage: async () => {
+        calls += 1;
+        return { ok: true as const, messageId: 101 };
+      },
+    },
+  };
+}
+
 assert.equal(
   await isFundingReconciliationSchemaReady({
     query: async (sql: string) => {
@@ -146,6 +340,11 @@ assert.equal(
       assert.doesNotMatch(sql, /active_buy_return_revision/);
       assert.match(sql, /owner_channel/);
       assert.match(sql, /delivery_attempt_id/);
+      assert.match(sql, /address_disclosure_attempt_revision/);
+      assert.match(sql, /address_delivered_revision/);
+      assert.match(sql, /telegram_funding_sessions_address_delivery_check/);
+      assert.match(sql, /telegram_bot_action_outbox_funding_qr_unique/);
+      assert.match(sql, /funding_qr/);
       return { rows: [{ ready: true }] };
     },
   } as never),
@@ -399,6 +598,10 @@ const context: TelegramFundingSessionContext = {
   latestTerminalRevision: null,
   latestTerminalProjection: null,
   lastDeliveredRevision: 0,
+  addressDisclosureAttemptRevision: 0,
+  addressDisclosureMessageId: null,
+  addressDeliveredRevision: 0,
+  addressRedactedRevision: 0,
   createdAt: "2026-08-05T12:00:00.000Z",
   updatedAt: "2026-08-05T12:00:00.000Z",
 };
@@ -473,16 +676,49 @@ const consent: TelegramFundingConsent = {
   variantIds: ["variant-pusd"],
   automationEnabled: false,
   maximumAutomaticRaw: null,
-  policySnapshot: {},
+  policySnapshot: {
+    presentationMode: "pusd_direct",
+    presentation: telegramPolygonFundingPresentation("pusd_direct"),
+  },
   fingerprint: "fingerprint-1",
   consentedAt: "2026-08-05T12:01:00.000Z",
 };
+const automaticPolicySnapshot = {
+  version: 2,
+  kind: "polymarket_usdce_full_receipt_wrap",
+  profileId: "polymarket_deposit_usdce_wrap_v1",
+  fullReceipt: true,
+  authorizationId: "funding-authorization-v2",
+  authorizationFingerprint: "authorization-fingerprint-v2",
+  signerId: "wrap-signer-v1",
+  signerFingerprint: "signer-fingerprint-v1",
+  policyId: "wrap-policy-v1",
+  policyFingerprint: "policy-fingerprint-v1",
+  fundingPolicyRevision: "funding-policy-revision-v1",
+  venueId: "polymarket",
+  destinationOptionId: "polymarket-deposit",
+  venueBindingOptionId: "polymarket-deposit-wallet",
+  sourceAsset: usdce,
+  destinationAsset: pUsd,
+  presentationMode: "pusd_or_usdce_automatic",
+  presentation: telegramPolygonFundingPresentation("pusd_or_usdce_automatic"),
+  variantCursors: [
+    {
+      variantId: "variant-usdce",
+      networkId: "evm:137",
+      ledgerHeightExclusive: "100",
+    },
+  ],
+} as const;
 
 assert.equal(
   telegramFundingConsentPresentationMode(
     {
       ...consent,
-      policySnapshot: { presentationMode: "pusd_direct" },
+      policySnapshot: {
+        presentationMode: "pusd_direct",
+        presentation: telegramPolygonFundingPresentation("pusd_direct"),
+      },
     },
     "pusd_or_usdce_automatic",
   ),
@@ -494,26 +730,27 @@ assert.equal(
     {
       ...consent,
       automationEnabled: true,
+      variantIds: ["variant-pusd", "variant-usdce"],
       policySnapshot: {
+        ...automaticPolicySnapshot,
         presentationMode: "pusd_or_usdce_automatic",
       },
     },
     "pusd_direct",
   ),
-  "pusd_direct",
-  "live capability may safely narrow a frozen automatic consent",
+  "pusd_or_usdce_automatic",
+  "a soft pause must preserve the exact frozen automatic presentation",
 );
 assert.equal(
   telegramFundingConsentPresentationMode(
     {
       ...consent,
-      automationEnabled: true,
-      policySnapshot: { presentationMode: "usdce_automatic" },
+      policySnapshot: { presentationMode: "pusd_or_usdce_automatic" },
     },
-    "pusd_direct",
+    "pusd_or_usdce_automatic",
   ),
   null,
-  "disjoint frozen and live capabilities must not disclose an address",
+  "a mislabeled direct-only consent must not advertise automatic conversion",
 );
 assert.equal(
   telegramFundingConsentPresentationMode(
@@ -538,6 +775,42 @@ assert.equal(
   null,
   "malformed frozen presentation state must fail closed",
 );
+assert.equal(
+  telegramFundingConsentPresentationMode(
+    {
+      ...consent,
+      automationEnabled: true,
+      variantIds: ["variant-usdce", "variant-usdce"],
+      policySnapshot: {
+        ...automaticPolicySnapshot,
+        presentationMode: "pusd_or_usdce_automatic",
+      },
+    },
+    "pusd_or_usdce_automatic",
+  ),
+  null,
+  "duplicate automatic variants must not impersonate a combined frozen consent",
+);
+assert.equal(
+  telegramFundingConsentPresentationMode(
+    {
+      ...consent,
+      policySnapshot: {
+        presentationMode: "pusd_direct",
+        presentation: {
+          ...telegramPolygonFundingPresentation("pusd_direct"),
+          venueLabel: "Polymarket Prediction Markets",
+          networkLabel: "Polygon PoS",
+          destinationAssetSymbol: "Polygon USD",
+          acceptedAssetSymbols: ["Polygon USD"],
+        },
+      },
+    },
+    "pusd_direct",
+  ),
+  "pusd_direct",
+  "frozen display-label renames must not invalidate immutable route identity",
+);
 
 const receipt = (
   input: Partial<FundingReceiveReceipt> &
@@ -554,6 +827,10 @@ const receipt = (
   status: input.status,
   handling: input.handling,
   childFundingOperationId: input.childFundingOperationId ?? null,
+  ...(input.reviewContinuation
+    ? { reviewContinuation: input.reviewContinuation }
+    : {}),
+  ...(input.reviewQuotePlan ? { reviewQuotePlan: input.reviewQuotePlan } : {}),
 });
 
 const selectionCallback = telegramFundingCallbackData({
@@ -578,6 +855,24 @@ for (const kind of ["refresh", "cancel", "qr"] as const) {
     contextId,
   });
 }
+const reviewConversionCallback = telegramFundingCallbackData({
+  receiptId: reviewReceiptId,
+  kind: "review_conversion",
+});
+assert.deepEqual(
+  parseTelegramFundingCallbackRoute(reviewConversionCallback.slice(6)),
+  { receiptId: reviewReceiptId, kind: "review_conversion" },
+);
+const consentToken = `consent_${"a".repeat(43)}`;
+const confirmConversionCallback = telegramFundingCallbackData({
+  consentToken,
+  kind: "confirm_conversion",
+});
+assert.equal(Buffer.byteLength(confirmConversionCallback, "utf8"), 64);
+assert.deepEqual(
+  parseTelegramFundingCallbackRoute(confirmConversionCallback.slice(6)),
+  { consentToken, kind: "confirm_conversion" },
+);
 const continuationToken = "AbCdEfGhIjKlMnOpQrStUv";
 const reviewBuyCallback = telegramFundingCallbackData({
   continuationToken,
@@ -700,9 +995,46 @@ assert.deepEqual(
   assert.equal(rendered, "Fresh Buy confirmation");
 }
 
+for (const expected of [
+  {
+    action: "review_conversion",
+    route: { receiptId: reviewReceiptId, kind: "review_conversion" as const },
+    token: reviewReceiptId,
+  },
+  {
+    action: "confirm_conversion",
+    route: { consentToken, kind: "confirm_conversion" as const },
+    token: consentToken,
+  },
+]) {
+  let requestedAction = "";
+  let requestedToken = "";
+  const handled = await handleSignalBotInteractiveMenuCallback({
+    callbackPrefix: "hm:v1:",
+    chatId: "42",
+    loadFunding: async (input) => {
+      requestedAction = input.action;
+      requestedToken =
+        input.contextId ?? input.receiptId ?? input.consentToken ?? "";
+      return { text: "Conversion review" };
+    },
+    messageId: 100,
+    redis: { get: async () => null },
+    render: async () => undefined,
+    renderExpiredSearch: async () => undefined,
+    route: expected.route,
+    telegramUserId: 42,
+  });
+  assert.equal(handled, true);
+  assert.equal(requestedAction, expected.action);
+  assert.equal(requestedToken, expected.token);
+}
+
 const targetMessage = buildTelegramFundingTargetMessage({
+  automaticConversion: false,
   contextId,
   expiresAt,
+  presentation: telegramPolygonFundingPresentation("pusd_direct"),
 });
 assert.match(targetMessage.text, /pUSD/);
 assert.match(targetMessage.text, /Receive window.*24 hours/u);
@@ -717,23 +1049,159 @@ assert.equal(
   false,
 );
 
-const addressMessage = buildTelegramFundingAddressMessage({
-  address,
+const queuedDeliveryMessage = buildTelegramFundingDeliveryQueuedMessage({
   contextId,
-  expiresAt,
 });
-assert.equal(addressMessage.qrText, address);
-assert.match(addressMessage.text, new RegExp(address));
-assert.doesNotMatch(addressMessage.text, /pUSD \/ USDC\.e/);
-assert.doesNotMatch(addressMessage.text, /USDC\.e/);
-assert.match(addressMessage.text, /Receive window.*24 hours/u);
-assert.equal(addressMessage.text.includes("2026\\-08\\-06 12:00:00 UTC"), true);
+assert.equal(queuedDeliveryMessage.durableFundingDeliveryRequired, true);
+assert.equal(queuedDeliveryMessage.fundingContextId, contextId);
+assert.equal(queuedDeliveryMessage.qrText, undefined);
+assert.doesNotMatch(
+  queuedDeliveryMessage.text,
+  new RegExp(address, "u"),
+  "interactive durable acknowledgements must never carry the address",
+);
+
+const reviewContinuation = {
+  version: 1,
+  kind: "convert",
+  confirmation: "fresh_quote",
+  label: "Convert to pUSD",
+} as const;
+const multipleReviewProjection = projectTelegramFundingProgress({
+  consent,
+  context,
+  receipts: [
+    receipt({
+      receiptId: "423e4567-e89b-42d3-a456-426614174001",
+      asset: {
+        networkId: "solana:mainnet",
+        assetId: "So11111111111111111111111111111111111111112",
+        decimals: 9,
+      },
+      handling: "review_required",
+      observedAt: "2026-08-05T12:03:00.000Z",
+      reviewContinuation,
+      status: "review_required",
+    }),
+    receipt({
+      receiptId: reviewReceiptId,
+      asset: {
+        networkId: "solana:mainnet",
+        assetId: "11111111111111111111111111111111",
+        decimals: 9,
+      },
+      handling: "review_required",
+      observedAt: "2026-08-05T12:02:00.000Z",
+      reviewContinuation,
+      status: "review_required",
+    }),
+  ],
+  session: { ...session, status: "review_required" },
+  now: new Date("2026-08-05T12:04:00.000Z"),
+});
 assert.equal(
-  addressMessage.reply_markup?.inline_keyboard[0]?.[0] &&
-    "copy_text" in addressMessage.reply_markup.inline_keyboard[0][0]
-    ? addressMessage.reply_markup.inline_keyboard[0][0].copy_text.text
+  multipleReviewProjection?.reviewReceiptId,
+  reviewReceiptId,
+  "multiple volatile receipts must expose one deterministic receipt-bound continuation",
+);
+const reviewProjection: TelegramFundingProgressProjection = {
+  version: 2,
+  fundingContextId: contextId,
+  state: "needs_attention",
+  terminal: false,
+  presentation: {
+    ...telegramPolygonFundingPresentation("pusd_direct"),
+    reviewAction: reviewContinuation,
+  },
+  assetSymbol: "SOL",
+  rawAmount: "1000000000",
+  receiveAddress: null,
+  expiresAt,
+  observedAt: "2026-08-05T12:02:00.000Z",
+  reviewContinuation,
+  reviewReceiptId,
+};
+const reviewMessage = buildTelegramFundingProgressMessage(reviewProjection);
+const reviewButton = reviewMessage.reply_markup?.inline_keyboard[0]?.[0];
+assert.equal(
+  reviewButton && "callback_data" in reviewButton
+    ? reviewButton.callback_data
     : null,
-  address,
+  reviewConversionCallback,
+);
+assert.equal(
+  parseTelegramFundingProgressProjection(reviewProjection)?.reviewContinuation
+    ?.confirmation,
+  "fresh_quote",
+);
+const reviewDisposition = resolveTelegramFundingReceiptDisposition({
+  destinationAsset: {
+    networkId: "evm:137",
+    assetId: "0x0000000000000000000000000000000000000001",
+    decimals: 6,
+  },
+  receipt: {
+    handling: "review_required",
+    asset: {
+      networkId: "solana:mainnet",
+      assetId: "11111111111111111111111111111111",
+      decimals: 9,
+    },
+    rawAmount: "1000000000",
+  },
+  telegramAutomationPolicy: {
+    presentation: reviewProjection.presentation,
+  },
+} as unknown as FundingReceiveReceiptRoutingTarget);
+assert.equal(reviewDisposition.kind, "review_required");
+assert.deepEqual(
+  reviewDisposition.kind === "review_required"
+    ? reviewDisposition.continuation
+    : null,
+  reviewContinuation,
+);
+assert.equal(
+  reviewDisposition.kind === "review_required"
+    ? reviewDisposition.quotePlan.confirmedSourceAmount?.raw
+    : null,
+  "997000000",
+);
+const reviewQuoteMessage = buildTelegramFundingReviewQuoteMessage({
+  contextId,
+  quote: {
+    quoteId: "quote-review",
+    liquidityProjectionId: "projection-review",
+    selectedSourceOptionId: "source-review",
+    destinationOptionId: "destination-review",
+    venueBindingOptionId: "binding-review",
+    planKind: "wallet_route",
+    experienceMode: "prepare_first",
+    consentMode: "explicit_economic_review",
+    sourceAmounts: [
+      { safeLabel: "SOL", amount: { asset: pUsd, raw: "1000000" } },
+    ],
+    expectedDestination: { asset: pUsd, raw: "990000" },
+    minimumDestination: { asset: pUsd, raw: "980000" },
+    fees: [],
+    eta: null,
+    requiredActions: [],
+    ingress: null,
+    planHash: "plan-review",
+    consentToken: `consent_${"a".repeat(43)}`,
+    expiresAt: "2026-08-05T12:05:00.000Z",
+    policyVersion: 1,
+  } satisfies FundingQuoteSummary,
+});
+assert.match(reviewQuoteMessage.text, /Minimum received/u);
+assert.equal(
+  reviewQuoteMessage.reply_markup?.inline_keyboard[0]?.[0] &&
+    "callback_data" in reviewQuoteMessage.reply_markup.inline_keyboard[0][0]
+    ? reviewQuoteMessage.reply_markup.inline_keyboard[0][0].callback_data
+    : null,
+  telegramFundingCallbackData({
+    consentToken: `consent_${"a".repeat(43)}`,
+    kind: "confirm_conversion",
+  }),
 );
 
 const choice = resolveTelegramDirectPusdChoice({
@@ -746,10 +1214,11 @@ const choice = resolveTelegramDirectPusdChoice({
 assert.deepEqual(choice, {
   address,
   asset: pUsd,
-  automaticUsdce: false,
+  automaticConversion: false,
   mode: "pusd_direct",
+  presentation: telegramPolygonFundingPresentation("pusd_direct"),
   receiveTargetId,
-  usdceVariants: [],
+  automaticVariants: [],
   variantIds: ["variant-pusd"],
 });
 const firstReceiveTarget = session.receiveTargets[0];
@@ -775,6 +1244,15 @@ assert.equal(
   null,
   "Telegram must not expose automatic USDC.e until a durable server executor exists",
 );
+assert.equal(
+  resolveTelegramFundingTargetChoice({
+    automaticConversionEnabled: true,
+    session: usdceOnlySession,
+    observationVariants: [variant("variant-usdce", usdce)],
+  }),
+  null,
+  "Telegram must never expose an automatic-only Polygon choice without direct pUSD",
+);
 const usdceOnlyTargetMessage = buildTelegramFundingTargetMessageForSession({
   contextId,
   expiresAt,
@@ -787,13 +1265,13 @@ const combinedTargetMessage = buildTelegramFundingTargetMessageForSession({
   contextId,
   expiresAt,
   session,
-  automaticUsdceEnabled: true,
+  automaticConversionEnabled: true,
 });
 assert.match(combinedTargetMessage.text, /pUSD/u);
 assert.equal(combinedTargetMessage.text.includes("USDC"), true);
 assert.equal(
   resolveTelegramFundingTargetChoice({
-    automaticUsdceEnabled: true,
+    automaticConversionEnabled: true,
     session,
     observationVariants: [
       variant("variant-usdce", usdce),
@@ -837,6 +1315,15 @@ const waiting = projectTelegramFundingProgress({
 });
 assert.equal(waiting?.state, "waiting_for_transfer");
 assert.equal(waiting?.receiveAddress, address);
+assert.equal(
+  parseTelegramFundingProgressProjection({
+    ...waiting,
+    version: 1,
+    presentation: undefined,
+  }),
+  null,
+  "runtime parsing must never reconstruct a legacy projection from live labels",
+);
 
 const ready = projectTelegramFundingProgress({
   consent,
@@ -847,6 +1334,20 @@ const ready = projectTelegramFundingProgress({
 assert.equal(ready?.state, "ready");
 assert.equal(ready?.terminal, true);
 assert.ok(ready);
+assert.deepEqual(parseTelegramFundingProgressProjection(ready), ready);
+for (const malformed of [
+  { ...ready, unexpected: true },
+  { ...ready, expiresAt: "invalid" },
+  { ...ready, rawAmount: "-1" },
+  { ...ready, terminal: false },
+  { ...ready, receiveAddress: address },
+]) {
+  assert.equal(
+    parseTelegramFundingProgressProjection(malformed),
+    null,
+    "persisted progress must be exact, canonical, and semantically consistent",
+  );
+}
 const readyMessage = buildTelegramFundingProgressMessage(ready);
 assert.match(readyMessage.text, /pUSD ready/);
 assert.doesNotMatch(readyMessage.text, /Receive window/u);
@@ -865,6 +1366,7 @@ assert.deepEqual(
     context: { ...context, progressRevision: 1 },
     message: readyMessage,
     now: new Date("2026-08-05T12:03:00.000Z"),
+    presentationMode: "pusd_direct",
     progress: ready,
     session: { ...session, status: "completed" },
   }),
@@ -884,6 +1386,7 @@ await assert.rejects(
     context: { ...context, progressRevision: 1 },
     message: readyMessage,
     now: new Date("2026-08-05T12:03:00.000Z"),
+    presentationMode: "pusd_direct",
     progress: ready,
     session: { ...session, status: "completed" },
   }),
@@ -894,6 +1397,54 @@ assert.ok(waiting);
 const waitingMessage = buildTelegramFundingProgressMessage(waiting);
 assert.match(waitingMessage.text, /Receive window.*24 hours/u);
 assert.equal(waitingMessage.text.includes("2026\\-08\\-06 12:00:00 UTC"), true);
+const futureSolanaProjection: TelegramFundingProgressProjection = {
+  version: 2,
+  fundingContextId: contextId,
+  state: "waiting_for_transfer",
+  terminal: false,
+  presentation: {
+    version: 1,
+    routeKey: "polymarket_solana_sol_relay_v1",
+    venueId: "polymarket",
+    venueLabel: "Polymarket",
+    networkId: "solana:mainnet",
+    networkLabel: "Solana",
+    destinationAssetSymbol: "pUSD",
+    acceptedAssetSymbols: ["SOL"],
+    automaticSourceAssetSymbol: "SOL",
+    decimals: 9,
+  },
+  assetSymbol: "SOL",
+  rawAmount: null,
+  receiveAddress: "11111111111111111111111111111111",
+  expiresAt,
+  observedAt: null,
+  automaticConversionEnabled: true,
+};
+const futureSolanaMessage = buildTelegramFundingProgressMessage(
+  futureSolanaProjection,
+);
+const futureSolanaTargetMessage = buildTelegramFundingTargetMessage({
+  automaticConversion: true,
+  contextId,
+  expiresAt,
+  presentation: futureSolanaProjection.presentation,
+});
+assert.match(futureSolanaMessage.text, /Network.*Solana/u);
+assert.match(futureSolanaMessage.text, /Asset.*SOL/u);
+assert.doesNotMatch(futureSolanaMessage.text, /Polygon|USDC\.e/u);
+assert.match(futureSolanaTargetMessage.text, /Network.*Solana/u);
+assert.match(futureSolanaTargetMessage.text, /Asset.*SOL/u);
+assert.doesNotMatch(futureSolanaTargetMessage.text, /Polygon|USDC\.e/u);
+const unavailable = projectTelegramFundingUnavailable(
+  context,
+  telegramPolygonFundingPresentation("pusd_direct"),
+);
+const unavailableMessage = buildTelegramFundingProgressMessage(unavailable);
+assert.equal(unavailable.receiveAddress, null);
+assert.equal(unavailable.terminal, true);
+assert.match(unavailableMessage.text, /Receive unavailable/u);
+assert.doesNotMatch(unavailableMessage.text, new RegExp(address, "u"));
 
 const unexpectedUsdce = projectTelegramFundingProgress({
   consent,
@@ -929,29 +1480,7 @@ const automaticConsent: TelegramFundingConsent = {
   variantIds: ["variant-pusd", "variant-usdce"],
   automationEnabled: true,
   policySnapshot: {
-    version: 2,
-    kind: "polymarket_usdce_full_receipt_wrap",
-    profileId: "polymarket_deposit_usdce_wrap_v1",
-    fullReceipt: true,
-    authorizationId: "funding-authorization-v2",
-    authorizationFingerprint: "authorization-fingerprint-v2",
-    signerId: "wrap-signer-v1",
-    signerFingerprint: "signer-fingerprint-v1",
-    policyId: "wrap-policy-v1",
-    policyFingerprint: "policy-fingerprint-v1",
-    fundingPolicyRevision: "funding-policy-revision-v1",
-    venueId: "polymarket",
-    destinationOptionId: "polymarket-deposit",
-    venueBindingOptionId: "polymarket-deposit-wallet",
-    sourceAsset: usdce,
-    destinationAsset: pUsd,
-    variantCursors: [
-      {
-        variantId: "variant-usdce",
-        networkId: "evm:137",
-        ledgerHeightExclusive: "100",
-      },
-    ],
+    ...automaticPolicySnapshot,
   },
 };
 const waitingAfterCapabilityLoss = projectTelegramFundingProgress({
@@ -963,17 +1492,16 @@ const waitingAfterCapabilityLoss = projectTelegramFundingProgress({
   now: new Date("2026-08-05T12:03:00.000Z"),
 });
 assert.ok(waitingAfterCapabilityLoss);
-assert.equal(waitingAfterCapabilityLoss.automaticConversionEnabled, undefined);
+assert.equal(waitingAfterCapabilityLoss.automaticConversionEnabled, true);
+assert.equal(waitingAfterCapabilityLoss.automaticConversionPaused, true);
 assert.match(
   buildTelegramFundingProgressMessage(waitingAfterCapabilityLoss).text,
-  /Asset.*pUSD/u,
+  /Asset.*pUSD.*USDC/u,
 );
-assert.equal(
-  buildTelegramFundingProgressMessage(waitingAfterCapabilityLoss).text.includes(
-    "USDC",
-  ),
-  false,
-  "historical consent must not advertise conversion after live capability is lost",
+assert.match(
+  buildTelegramFundingProgressMessage(waitingAfterCapabilityLoss).text,
+  /conversion is paused.*will resume/u,
+  "a resumable pause must preserve the exact combined consent presentation",
 );
 const waitingWithLiveCapability = projectTelegramFundingProgress({
   automaticConversionAvailable: true,
@@ -985,12 +1513,24 @@ const waitingWithLiveCapability = projectTelegramFundingProgress({
 });
 assert.ok(waitingWithLiveCapability);
 assert.equal(waitingWithLiveCapability?.automaticConversionEnabled, true);
+assert.equal(waitingWithLiveCapability?.automaticConversionPaused, undefined);
 assert.equal(
   buildTelegramFundingProgressMessage(waitingWithLiveCapability).text.includes(
     "USDC",
   ),
   true,
 );
+const waitingAfterHardInvalidation = projectTelegramFundingProgress({
+  automaticConversionMode: "hard_invalid",
+  consent: automaticConsent,
+  context,
+  receipts: [],
+  session,
+  now: new Date("2026-08-05T12:03:00.000Z"),
+});
+assert.equal(waitingAfterHardInvalidation?.state, "needs_attention");
+assert.equal(waitingAfterHardInvalidation?.terminal, true);
+assert.equal(waitingAfterHardInvalidation?.receiveAddress, null);
 const detectedAfterReady = projectTelegramFundingProgress({
   consent: automaticConsent,
   context,
@@ -1470,7 +2010,14 @@ assert.equal(
   assert.equal(replayed, true);
   assert.equal(loads, 1, "same-card funding opens must share one API request");
   assert.equal(renders, 0, "session open must not block the update loop");
-  finishOpen(buildTelegramFundingTargetMessage({ contextId, expiresAt }));
+  finishOpen(
+    buildTelegramFundingTargetMessage({
+      automaticConversion: false,
+      contextId,
+      expiresAt,
+      presentation: telegramPolygonFundingPresentation("pusd_direct"),
+    }),
+  );
   assert.equal(await drainSignalBotFundingOpenTasks(1_000), true);
   assert.equal(
     renders,
@@ -1526,14 +2073,43 @@ assert.equal(
   assert.equal(loads, 4);
   assert.match(busyText, /Receive busy/u);
   assert.equal(await drainSignalBotFundingOpenTasks(1), false);
-  finishOpen(buildTelegramFundingTargetMessage({ contextId, expiresAt }));
+  finishOpen(
+    buildTelegramFundingTargetMessage({
+      automaticConversion: false,
+      contextId,
+      expiresAt,
+      presentation: telegramPolygonFundingPresentation("pusd_direct"),
+    }),
+  );
   assert.equal(await drainSignalBotFundingOpenTasks(1_000), true);
+}
+
+{
+  const addressMessage = buildTelegramFundingDeliveryQueuedMessage({
+    contextId,
+  });
+  let renders = 0;
+  const handled = await handleSignalBotInteractiveMenuCallback({
+    callbackPrefix: "hm:v1:",
+    chatId: "42",
+    idempotencyKey: "callback-durable-qr-1",
+    loadFunding: async () => addressMessage,
+    messageId: 100,
+    redis: { get: async () => null },
+    render: async () => {
+      renders += 1;
+    },
+    renderExpiredSearch: async () => undefined,
+    route: { contextId, kind: "qr" },
+    telegramUserId: 42,
+  });
+  assert.equal(handled, true);
+  assert.equal(renders, 0);
 }
 
 {
   const terminalMessage = buildTelegramFundingProgressMessage(cancelled);
   let renderedText = "";
-  let photoCalls = 0;
   const handled = await handleSignalBotInteractiveMenuCallback({
     callbackPrefix: "hm:v1:",
     chatId: "42",
@@ -1546,14 +2122,9 @@ assert.equal(
     },
     renderExpiredSearch: async () => undefined,
     route: { contextId, kind: "qr" },
-    sendPhoto: async () => {
-      photoCalls += 1;
-      return { messageId: 504, ok: true };
-    },
     telegramUserId: 42,
   });
   assert.equal(handled, true);
-  assert.equal(photoCalls, 0, "a terminal QR callback must not send a photo");
   assert.doesNotMatch(renderedText, new RegExp(address, "u"));
   assert.match(
     renderedText,
@@ -1563,19 +2134,43 @@ assert.equal(
 }
 
 function deliveryPool(input: {
-  action?: "funding_edit" | "funding_replacement" | "funding_send";
+  action?:
+    | "funding_edit"
+    | "funding_replacement"
+    | "funding_send"
+    | "funding_qr";
+  controllerCurrent?: boolean;
+  currentTelegramAccountId?: string | null;
   deliveryCas?: boolean;
+  attemptCount?: number;
+  projection?: TelegramFundingProgressProjection;
   destinations: Array<{
     active_buy_return_revision: number | null;
-    telegram_account_id: string;
+    address_disclosure_attempt_revision: number;
+    address_disclosure_message_id: number | null;
+    address_delivered_revision: number;
+    address_redacted_revision: number;
+    automation_enabled: boolean;
+    cancelled_at: Date | null;
+    destination_option_id: string;
+    expires_at: Date;
+    policy_snapshot: unknown;
+    receive_status: string;
+    receive_session_id: string;
+    telegram_account_id: string | null;
     telegram_user_id: string;
     telegram_message_id: number | null;
+    latest_terminal_projection?: unknown;
     progress_revision: number;
+    user_id: string;
+    venue_binding_option_id: string;
   } | null>;
 }) {
   const statements: string[] = [];
   const parameters: unknown[][] = [];
   const destinations = [...input.destinations];
+  const fallbackProjection = input.projection ?? ready;
+  assert.ok(fallbackProjection);
   const query = async (sql: string, params: unknown[] = []) => {
     const normalized = sql.replace(/\s+/gu, " ").trim().toLowerCase();
     statements.push(normalized);
@@ -1590,6 +2185,38 @@ function deliveryPool(input: {
     if (normalized.startsWith("with unknown as")) {
       return { rows: [], rowCount: 0 };
     }
+    if (normalized.includes("select pg_advisory_xact_lock(")) {
+      return { rows: [{ locked: null }], rowCount: 1 };
+    }
+    if (normalized.includes("select destination_target_snapshot #>>")) {
+      return {
+        rows: [
+          {
+            controller_wallet_id:
+              input.controllerCurrent === false
+                ? "wallet_previous_controller"
+                : deliveryControllerWalletId,
+          },
+        ],
+        rowCount: 1,
+      };
+    }
+    if (
+      normalized.includes(
+        "from telegram_bot_trading_authorizations trading_authorization",
+      )
+    ) {
+      return {
+        rows: [
+          {
+            privy_wallet_id: "privy-wallet-1",
+            user_wallet_id: "user-wallet-1",
+            wallet_address: address,
+          },
+        ],
+        rowCount: 1,
+      };
+    }
     if (
       normalized.startsWith("select") &&
       normalized.includes("from telegram_bot_action_outbox outbox") &&
@@ -1602,8 +2229,9 @@ function deliveryPool(input: {
             action: input.action ?? "funding_edit",
             funding_session_id: contextId,
             state_revision: 1,
-            payload: ready,
-            attempt_count: 0,
+            payload: fallbackProjection,
+            attempt_count: Math.max(0, (input.attemptCount ?? 1) - 1),
+            user_id: "user-1",
           },
         ],
         rowCount: 1,
@@ -1619,7 +2247,10 @@ function deliveryPool(input: {
       normalized.startsWith("update telegram_bot_action_outbox") &&
       normalized.includes("set status = 'sending'")
     ) {
-      return { rows: [{ attempt_count: 1 }], rowCount: 1 };
+      return {
+        rows: [{ attempt_count: input.attemptCount ?? 1 }],
+        rowCount: 1,
+      };
     }
     if (
       normalized.startsWith("select") &&
@@ -1632,13 +2263,35 @@ function deliveryPool(input: {
           ? [
               {
                 ...destination,
-                latest_progress_projection: ready,
+                latest_terminal_projection:
+                  destination.latest_terminal_projection !== undefined
+                    ? destination.latest_terminal_projection
+                    : fallbackProjection.terminal
+                      ? fallbackProjection
+                      : null,
+                latest_progress_projection: fallbackProjection,
                 user_id: "user-1",
               },
             ]
           : [],
         rowCount: destination ? 1 : 0,
       };
+    }
+    if (normalized.startsWith("select desired_enabled")) {
+      return {
+        rows: [{ desired_enabled: true, funding_operator_revoked_at: null }],
+        rowCount: 1,
+      };
+    }
+    if (normalized.includes("from runtime_policies")) {
+      return { rows: [], rowCount: 0 };
+    }
+    if (
+      normalized.includes(
+        "from telegram_funding_authorizations funding_authorization",
+      )
+    ) {
+      return { rows: [], rowCount: 0 };
     }
     if (
       normalized.startsWith("select") &&
@@ -1651,7 +2304,13 @@ function deliveryPool(input: {
           ? [
               {
                 ...destination,
-                latest_progress_projection: ready,
+                latest_terminal_projection:
+                  destination.latest_terminal_projection !== undefined
+                    ? destination.latest_terminal_projection
+                    : fallbackProjection.terminal
+                      ? fallbackProjection
+                      : null,
+                latest_progress_projection: fallbackProjection,
                 user_id: "user-1",
               },
             ]
@@ -1670,8 +2329,11 @@ function deliveryPool(input: {
             ? []
             : [
                 {
-                  current_telegram_account_id: "telegram-account-1",
-                  latest_progress_projection: ready,
+                  current_telegram_account_id:
+                    input.currentTelegramAccountId === undefined
+                      ? "telegram-account-1"
+                      : input.currentTelegramAccountId,
+                  latest_progress_projection: fallbackProjection,
                   progress_revision: 1,
                   telegram_user_id: "42",
                   user_id: "user-1",
@@ -1707,11 +2369,60 @@ function deliveryPool(input: {
 
 const destination = {
   active_buy_return_revision: 1,
+  address_disclosure_attempt_revision: 0,
+  address_disclosure_message_id: null,
+  address_delivered_revision: 0,
+  address_redacted_revision: 0,
+  automation_enabled: false,
+  cancelled_at: null,
+  destination_option_id: "polymarket-deposit",
+  expires_at: new Date("2099-01-01T00:00:00.000Z"),
+  policy_snapshot: {},
+  receive_status: "open",
+  receive_session_id: "receive-session-1",
   telegram_account_id: "telegram-account-1",
   telegram_user_id: "42",
   telegram_message_id: 100,
   progress_revision: 1,
+  user_id: "user-1",
+  venue_binding_option_id: "polymarket-deposit-wallet",
 };
+
+assert.equal(
+  requiresCurrentFundingPolicyForAddressDelivery({
+    action: "funding_edit",
+    addressDeliveredRevision: 0,
+  }),
+  true,
+  "the first address edit must match its frozen Funding Policy revision",
+);
+assert.equal(
+  requiresCurrentFundingPolicyForAddressDelivery({
+    action: "funding_edit",
+    addressDeliveredRevision: 1,
+  }),
+  false,
+  "an already disclosed card may still be edited into a soft-paused state",
+);
+for (const action of [
+  "funding_send",
+  "funding_replacement",
+  "funding_qr",
+] as const) {
+  assert.equal(
+    requiresCurrentFundingPolicyForAddressDelivery({
+      action,
+      addressDeliveredRevision: 1,
+    }),
+    true,
+    `${action} materializes the address again and requires the frozen revision`,
+  );
+}
+const deliveryControllerWalletId = stableWalletOpaqueId({
+  walletType: "ethereum",
+  networkId: "evm:137",
+  address,
+});
 
 {
   const fake = deliveryPool({ destinations: [destination] });
@@ -1743,6 +2454,382 @@ const destination = {
   assert.equal(result.sent, 1);
   assert.equal(result.failed, 0);
   assert.equal(telegram.edits, 1);
+}
+
+{
+  const fake = deliveryPool({
+    destinations: [destination, destination, destination],
+    projection: waiting,
+  });
+  let boundaryCommittedBeforeDelivery = false;
+  let disclosureMarkedBeforeDelivery = false;
+  const result = await deliverTelegramFundingActions({
+    pool: fake.pool,
+    renderCoordinator,
+    telegram: {
+      editMessageText: async () => {
+        const markIndex = fake.statements.findIndex((statement) =>
+          statement.includes("set address_disclosure_attempt_revision"),
+        );
+        boundaryCommittedBeforeDelivery =
+          markIndex >= 0 &&
+          fake.statements.slice(markIndex + 1).includes("commit");
+        disclosureMarkedBeforeDelivery = fake.statements.some((statement) =>
+          statement.includes("set address_disclosure_attempt_revision"),
+        );
+        return { ok: true, messageId: 100 };
+      },
+      sendMessage: async () => {
+        assert.fail("an editable address card must not fall back to send");
+      },
+    },
+  });
+  assert.equal(result.sent, 1);
+  assert.equal(
+    boundaryCommittedBeforeDelivery,
+    true,
+    "the disclosure CAS must commit before Telegram network I/O",
+  );
+  assert.equal(
+    disclosureMarkedBeforeDelivery,
+    true,
+    "the durable redaction obligation must precede Telegram address egress",
+  );
+  const disclosureCasSql = fake.statements.find((statement) =>
+    statement.includes("set address_disclosure_attempt_revision"),
+  );
+  assert.match(disclosureCasSql ?? "", /context\.cancelled_at is null/u);
+  assert.match(disclosureCasSql ?? "", /context\.expires_at > now\(\)/u);
+  assert.match(disclosureCasSql ?? "", /receive\.status = 'open'/u);
+  assert.match(disclosureCasSql ?? "", /receive\.expires_at > now\(\)/u);
+  assert.equal(
+    fake.statements.some((statement) =>
+      statement.includes("select pg_advisory_lock("),
+    ),
+    false,
+    "address delivery must not hold session advisory locks over Telegram I/O",
+  );
+  const addressProofUpdate = fake.statements.findIndex(
+    (statement) =>
+      statement.startsWith("update telegram_funding_sessions context") &&
+      statement.includes("address_delivered_revision"),
+  );
+  assert.ok(addressProofUpdate >= 0);
+  assert.equal(fake.parameters[addressProofUpdate]?.[7], true);
+  const claimSql = fake.statements.find((statement) =>
+    statement.includes("order by outbox.next_attempt_at"),
+  );
+  assert.match(claimSql ?? "", /delivery_unknown/u);
+  assert.match(
+    claimSql ?? "",
+    /address_disclosure_attempt_revision > context\.address_redacted_revision/u,
+  );
+  assert.match(claimSql ?? "", /outbox\.payload->>'terminal' = 'true'/u);
+  assert.match(claimSql ?? "", /receiveaddress/u);
+}
+
+for (const closedDestination of [
+  { ...destination, cancelled_at: new Date("2026-08-05T12:00:01.000Z") },
+  { ...destination, expires_at: new Date("2026-08-05T11:59:59.000Z") },
+  { ...destination, receive_status: "cancelled" },
+]) {
+  const fake = deliveryPool({
+    destinations: [closedDestination],
+    projection: waiting,
+  });
+  let edits = 0;
+  const result = await deliverTelegramFundingActions({
+    pool: fake.pool,
+    renderCoordinator,
+    telegram: {
+      editMessageText: async () => {
+        edits += 1;
+        return { ok: true, messageId: 100 };
+      },
+      sendMessage: async () => {
+        assert.fail("a closed receive context must never disclose an address");
+      },
+    },
+  });
+  assert.equal(edits, 0);
+  assert.equal(result.skipped, 1);
+}
+
+{
+  const fake = deliveryPool({
+    destinations: [destination, destination],
+    projection: waiting,
+  });
+  let markedBeforeAmbiguousEdit = false;
+  const result = await deliverTelegramFundingActions({
+    pool: fake.pool,
+    renderCoordinator,
+    telegram: {
+      editMessageText: async () => {
+        markedBeforeAmbiguousEdit = fake.statements.some((statement) =>
+          statement.includes("set address_disclosure_attempt_revision"),
+        );
+        throw new Error("transport outcome unknown");
+      },
+      sendMessage: async () => {
+        assert.fail("an address edit must not fall back to send");
+      },
+    },
+  });
+  assert.equal(markedBeforeAmbiguousEdit, true);
+  assert.equal(result.failed, 1);
+  assert.equal(
+    fake.statements.some(
+      (statement) =>
+        statement.includes("last_delivered_revision") &&
+        statement.includes("address_delivered_revision"),
+    ),
+    false,
+    "an unacknowledged edit must retain only the disclosure obligation",
+  );
+}
+
+{
+  const fake = deliveryPool({
+    action: "funding_qr",
+    destinations: [destination, destination],
+    projection: waiting,
+  });
+  let qrText = "";
+  const result = await deliverTelegramFundingActions({
+    pool: fake.pool,
+    renderCoordinator,
+    telegram: {
+      editMessageText: async (message) => {
+        qrText = message.text;
+        return { ok: true, messageId: 100 };
+      },
+      sendMessage: async () => {
+        assert.fail(
+          "a funding QR must edit the known card, never send a photo or message",
+        );
+      },
+    },
+  });
+  assert.equal(result.sent, 1);
+  assert.match(qrText, /Scan QR/u);
+  assert.match(qrText, new RegExp(address, "u"));
+  assert.match(qrText, /[▘▝▀▖▌▞▛▗▚▐▜▄▙▟█]/u);
+  const qrLines = qrText.match(/```\n([^`]+)\n```/u)?.[1]?.split("\n") ?? [];
+  assert.equal(qrLines.length > 0 && qrLines.length <= 19, true);
+  assert.equal(
+    qrLines.every((line) => [...line].length === qrLines.length),
+    true,
+    "the compact QR must stay square and within 19 Telegram columns",
+  );
+}
+
+{
+  const fake = deliveryPool({
+    controllerCurrent: false,
+    destinations: [destination],
+  });
+  let edits = 0;
+  const result = await deliverTelegramFundingActions({
+    pool: fake.pool,
+    renderCoordinator,
+    telegram: {
+      editMessageText: async () => {
+        edits += 1;
+        return { ok: true, messageId: 100 };
+      },
+      sendMessage: async () => {
+        assert.fail("a stale managed-wallet projection must not be sent");
+      },
+    },
+  });
+  assert.equal(edits, 0);
+  assert.equal(result.skipped, 1);
+}
+
+{
+  const fake = deliveryPool({
+    controllerCurrent: false,
+    currentTelegramAccountId: null,
+    destinations: [
+      {
+        ...destination,
+        active_buy_return_revision: null,
+        address_disclosure_attempt_revision: 1,
+        address_disclosure_message_id: 100,
+        telegram_account_id: null,
+      },
+    ],
+    projection: unavailable,
+  });
+  let redactionText = "";
+  const result = await deliverTelegramFundingActions({
+    pool: fake.pool,
+    renderCoordinator,
+    telegram: {
+      editMessageText: async (message) => {
+        redactionText = message.text;
+        return { ok: true, messageId: 100 };
+      },
+      sendMessage: async () => {
+        assert.fail("an unlinked address card must be redacted in place");
+      },
+    },
+  });
+  assert.equal(result.sent, 1);
+  assert.match(redactionText, /Receive unavailable/u);
+  assert.doesNotMatch(redactionText, new RegExp(address, "u"));
+}
+
+{
+  const fake = deliveryPool({
+    controllerCurrent: false,
+    currentTelegramAccountId: null,
+    destinations: [
+      {
+        ...destination,
+        address_disclosure_attempt_revision: 1,
+        address_disclosure_message_id: 100,
+        telegram_account_id: null,
+      },
+    ],
+    projection: unavailable,
+  });
+  let resolved = 0;
+  let redactionText = "";
+  const result = await deliverTelegramFundingActions({
+    pool: fake.pool,
+    renderCoordinator,
+    resolveMessage: async () => {
+      resolved += 1;
+      throw new Error("unlinked Buy continuation is unavailable");
+    },
+    telegram: {
+      editMessageText: async (message) => {
+        redactionText = message.text;
+        return { ok: true, messageId: 100 };
+      },
+      sendMessage: async () => {
+        assert.fail("safe redaction must remain an edit of the frozen card");
+      },
+    },
+  });
+  assert.equal(result.sent, 1);
+  assert.equal(
+    resolved,
+    0,
+    "safe redaction must not depend on a live account or Buy decorator",
+  );
+  assert.match(redactionText, /Receive unavailable/u);
+  assert.doesNotMatch(redactionText, new RegExp(address, "u"));
+}
+
+{
+  const fake = deliveryPool({
+    attemptCount: 8,
+    controllerCurrent: false,
+    currentTelegramAccountId: null,
+    destinations: [
+      {
+        ...destination,
+        active_buy_return_revision: null,
+        address_disclosure_attempt_revision: 1,
+        address_disclosure_message_id: 100,
+        telegram_account_id: null,
+      },
+    ],
+    projection: unavailable,
+  });
+  const result = await deliverTelegramFundingActions({
+    pool: fake.pool,
+    renderCoordinator,
+    telegram: {
+      editMessageText: async () => ({
+        error: "ambiguous",
+        message: "transport outcome unknown",
+        ok: false,
+      }),
+      sendMessage: async () => {
+        assert.fail("redaction must remain an edit of the known card");
+      },
+    },
+  });
+  assert.equal(result.failed, 1);
+  const finishIndex = fake.statements.findIndex(
+    (statement) =>
+      statement.startsWith("update telegram_bot_action_outbox") &&
+      statement.includes("set status = $3"),
+  );
+  assert.ok(finishIndex >= 0);
+  assert.equal(
+    fake.parameters[finishIndex]?.[2],
+    "retry",
+    "a transient redaction failure remains retryable beyond the ordinary cap",
+  );
+}
+
+{
+  const fake = deliveryPool({
+    controllerCurrent: false,
+    currentTelegramAccountId: null,
+    destinations: [
+      {
+        ...destination,
+        active_buy_return_revision: null,
+        address_disclosure_attempt_revision: 1,
+        address_disclosure_message_id: 100,
+        telegram_account_id: null,
+      },
+    ],
+    projection: unavailable,
+  });
+  const result = await deliverTelegramFundingActions({
+    pool: fake.pool,
+    renderCoordinator,
+    telegram: {
+      editMessageText: async () => ({
+        error: "message_not_editable",
+        message: "message to edit not found",
+        ok: false,
+      }),
+      sendMessage: async () => {
+        assert.fail("redaction must not send an address-free replacement");
+      },
+    },
+  });
+  assert.equal(result.failed, 1);
+  assert.equal(
+    fake.statements.some((statement) =>
+      statement.startsWith("insert into telegram_bot_action_outbox"),
+    ),
+    false,
+    "a replacement card cannot prove that the old address was redacted",
+  );
+}
+
+{
+  const fake = deliveryPool({
+    destinations: [
+      {
+        ...destination,
+        automation_enabled: true,
+        policy_snapshot: automaticPolicySnapshot,
+      },
+    ],
+    projection: waitingWithLiveCapability,
+  });
+  const telegram = successfulTelegramCounter();
+  const result = await deliverTelegramFundingActions({
+    pool: fake.pool,
+    renderCoordinator,
+    telegram: telegram.client,
+  });
+  assert.equal(result.skipped, 1);
+  assert.equal(
+    telegram.calls(),
+    0,
+    "queued automatic address delivery must recheck its frozen authority",
+  );
 }
 
 {
@@ -1885,6 +2972,52 @@ const destination = {
 }
 
 {
+  const fake = deliveryPool({
+    destinations: [destination, destination, destination],
+    projection: waiting,
+  });
+  const result = await deliverTelegramFundingActions({
+    pool: fake.pool,
+    renderCoordinator,
+    telegram: {
+      editMessageText: async () => ({
+        ok: false,
+        error: "message_not_editable",
+        message: "message to edit not found",
+      }),
+      sendMessage: async () => {
+        assert.fail("an address-bearing edit must never become a new message");
+      },
+    },
+  });
+  assert.equal(result.skipped, 1);
+  assert.equal(result.failed, 1);
+  assert.equal(
+    fake.statements.some((statement) =>
+      statement.startsWith("insert into telegram_bot_action_outbox"),
+    ),
+    false,
+  );
+  assert.ok(
+    fake.statements.some(
+      (statement) =>
+        statement.startsWith("update telegram_bot_action_outbox") &&
+        statement.includes("funding_address_edit_target_unavailable"),
+    ),
+    fake.statements.join("\n"),
+  );
+  assert.equal(
+    fake.statements.some(
+      (statement) =>
+        statement.startsWith("update telegram_funding_sessions") &&
+        statement.includes("set telegram_message_id = null"),
+    ),
+    false,
+    "the immutable known edit target must be retained for redaction/recovery",
+  );
+}
+
+{
   const fake = deliveryPool({ destinations: [destination, null] });
   let sends = 0;
   const result = await deliverTelegramFundingActions({
@@ -1911,6 +3044,27 @@ const destination = {
         statement.includes("status = 'skipped'"),
     ),
   );
+}
+
+{
+  const fake = deliveryPool({
+    action: "funding_send",
+    destinations: [],
+    projection: waiting,
+  });
+  let sends = 0;
+  const result = await deliverTelegramFundingActions({
+    pool: fake.pool,
+    renderCoordinator,
+    telegram: {
+      sendMessage: async () => {
+        sends += 1;
+        return { ok: true, messageId: 101 };
+      },
+    },
+  });
+  assert.equal(result.failed, 1);
+  assert.equal(sends, 0);
 }
 
 {
@@ -1985,9 +3139,14 @@ const destination = {
   const result = await deliverTelegramFundingActions({
     pool: fake.pool,
     renderCoordinator,
-    resolveMessage: async ({ contextId: resolvedContextId }) => {
+    resolveMessage: async ({ contextId: resolvedContextId, projection }) => {
       resolved += 1;
       assert.equal(resolvedContextId, contextId);
+      assert.deepEqual(
+        projection,
+        ready,
+        "Buy decoration receives the frozen outbox projection",
+      );
       return {
         ...buildTelegramFundingProgressMessage(ready),
         text: "dynamically resolved Review Buy presentation",
@@ -2009,28 +3168,68 @@ const destination = {
 }
 
 {
+  const fake = deliveryPool({
+    destinations: [
+      {
+        ...destination,
+        address_disclosure_attempt_revision: 1,
+        address_redacted_revision: 1,
+        latest_terminal_projection: unavailable,
+      },
+    ],
+    projection: unavailable,
+  });
+  const telegram = successfulTelegramCounter();
+  const result = await deliverTelegramFundingActions({
+    pool: fake.pool,
+    renderCoordinator,
+    resolveMessage: async () =>
+      buildTelegramFundingProgressMessage(waitingWithLiveCapability),
+    telegram: telegram.client,
+  });
+  assert.equal(result.failed, 1);
+  assert.equal(telegram.calls(), 0);
+  assert.ok(
+    fake.parameters.some((params) =>
+      params.includes("funding_presentation_changed_address_surface"),
+    ),
+    "Buy decoration cannot replace a terminal card with live address output",
+  );
+}
+
+{
+  const fake = deliveryPool({
+    destinations: [{ ...destination, latest_terminal_projection: unavailable }],
+    projection: waitingWithLiveCapability,
+  });
+  const telegram = successfulTelegramCounter();
+  const result = await deliverTelegramFundingActions({
+    pool: fake.pool,
+    renderCoordinator,
+    telegram: telegram.client,
+  });
+  assert.equal(result.skipped, 1);
+  assert.equal(
+    telegram.calls(),
+    0,
+    "raw terminal evidence blocks a historical address-bearing projection",
+  );
+}
+
+{
   const fake = deliveryPool({ destinations: [destination] });
-  let telegramCalls = 0;
+  const telegram = successfulTelegramCounter();
   const result = await deliverTelegramFundingActions({
     pool: fake.pool,
     renderCoordinator,
     resolveMessage: async () => {
       throw new Error("policy source unavailable");
     },
-    telegram: {
-      editMessageText: async () => {
-        telegramCalls += 1;
-        return { ok: true, messageId: 100 };
-      },
-      sendMessage: async () => {
-        telegramCalls += 1;
-        return { ok: true, messageId: 101 };
-      },
-    },
+    telegram: telegram.client,
   });
   assert.equal(result.failed, 1);
   assert.equal(result.sent, 0);
-  assert.equal(telegramCalls, 0);
+  assert.equal(telegram.calls(), 0);
   assert.ok(
     fake.parameters.some((params) =>
       params.includes("funding_presentation_unavailable"),

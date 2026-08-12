@@ -8,15 +8,17 @@ import type {
   DelegatedFundingRecoveryClaim,
 } from "./delegated-funding-executor.js";
 import type { PolymarketWrapExecutionConfiguration } from "./delegated-funding-config.js";
-import { validatePolymarketDepositUsdceWrapPolicy } from "./delegated-funding-profiles.js";
 import { derivePrivyAuthorizationPublicKey } from "./privy-authorization-key.js";
 import {
   knownPrivyPolicyFingerprint,
   polymarketKnownSignerRuntimeSpecs,
+  polymarketPersistedSignerRuntimeSpecs,
   validateKnownPrivyWalletSigners,
   validateKnownPrivySignerRuntime,
 } from "./known-privy-wallet-signers.js";
 import { fundingSidecarRuntimeConfig } from "../runtime/sidecar-runtime-config.js";
+import { validatePolymarketBotPolicyProfile } from "../../services/polymarket-automation-policy.js";
+import { sameAccountAddress } from "../domain/asset-identity.js";
 
 export type PrivyDelegatedFundingDriverConfig = Readonly<{
   appId: string;
@@ -40,6 +42,8 @@ export class PrivyDelegatedFundingProfileInvalidError extends Error {
     this.name = "PrivyDelegatedFundingProfileInvalidError";
   }
 }
+
+export type PrivyWalletProfileInspection = "valid" | "invalid" | "unavailable";
 
 export function resolvePrivyProfileInspectionFailure(
   error: unknown,
@@ -208,15 +212,20 @@ export class PrivyDelegatedFundingDriver implements DelegatedFundingNetworkDrive
       PolymarketWrapExecutionConfiguration,
       "signerId" | "signerFingerprint" | "policyId" | "policyFingerprint"
     > = this.input.configuration,
+    registry: "current" | "persisted_recovery" = "current",
   ) {
     const wallet = await this.client.wallets().get(input.walletId);
-    const runtimeSpecs = polymarketKnownSignerRuntimeSpecs(process.env, {
+    const persistedAuthority = {
       authorizationPublicKey: this.derivedPublicKey,
       policyFingerprint: authority.policyFingerprint,
       policyId: authority.policyId,
       signerFingerprint: authority.signerFingerprint,
       signerId: authority.signerId,
-    });
+    };
+    const runtimeSpecs =
+      registry === "persisted_recovery"
+        ? polymarketPersistedSignerRuntimeSpecs(persistedAuthority)
+        : polymarketKnownSignerRuntimeSpecs(process.env, persistedAuthority);
     const signerRegistry = validateKnownPrivyWalletSigners({
       signers: wallet.additional_signers.map((signer) => ({
         signerId: signer.signer_id,
@@ -228,7 +237,7 @@ export class PrivyDelegatedFundingDriver implements DelegatedFundingNetworkDrive
     if (
       wallet.id !== input.walletId ||
       wallet.chain_type !== "ethereum" ||
-      wallet.address.toLowerCase() !== input.walletAddress.toLowerCase() ||
+      !sameAccountAddress("evm:1", wallet.address, input.walletAddress) ||
       !signerRegistry.valid
     ) {
       throw new PrivyDelegatedFundingProfileInvalidError(
@@ -290,14 +299,20 @@ export class PrivyDelegatedFundingDriver implements DelegatedFundingNetworkDrive
             "Privy automation policy is not an Ethereum policy",
           );
         }
-        const policyValidation = validatePolymarketDepositUsdceWrapPolicy({
+        const policyValidation = validatePolymarketBotPolicyProfile({
+          builderCode: fundingSidecarRuntimeConfig.polymarketBuilderCode,
+          exchangeAddresses: [
+            fundingSidecarRuntimeConfig.polymarketExchangeAddress,
+            fundingSidecarRuntimeConfig.polymarketNegRiskExchangeAddress,
+          ],
+          fundingRouterAddress: POLYMARKET_FUNDING_ROUTER.polygon,
+          maxBuyUsd: fundingSidecarRuntimeConfig.polymarketBotBuyPolicyMaxUsd,
           policy: { ...normalizedPolicy, chainType: "ethereum" },
-          policyId,
-          routerAddress: POLYMARKET_FUNDING_ROUTER.polygon,
+          profile: "buy_sell",
         });
         if (!policyValidation.valid) {
           throw new PrivyDelegatedFundingProfileInvalidError(
-            "Privy automation policy is missing the exact wrap rule",
+            "Privy automation policy is not the exact combined BUY+SELL+FUNDING profile",
           );
         }
       }),
@@ -343,11 +358,22 @@ export class PrivyDelegatedFundingDriver implements DelegatedFundingNetworkDrive
       walletId: string;
     }>,
   ): Promise<boolean> {
+    return (await this.inspectWalletProfile(input)) === "valid";
+  }
+
+  async inspectWalletProfile(
+    input: Readonly<{
+      walletAddress: string;
+      walletId: string;
+    }>,
+  ): Promise<PrivyWalletProfileInspection> {
     try {
       await this.verifyLiveProfile(input);
-      return true;
-    } catch {
-      return false;
+      return "valid";
+    } catch (error) {
+      return error instanceof PrivyDelegatedFundingProfileInvalidError
+        ? "invalid"
+        : "unavailable";
     }
   }
 
@@ -367,6 +393,7 @@ export class PrivyDelegatedFundingDriver implements DelegatedFundingNetworkDrive
           signerFingerprint: claim.signerFingerprint,
           signerId: claim.signerId,
         },
+        priorSubmissionMayHaveOccurred ? "persisted_recovery" : "current",
       );
     } catch (error) {
       return resolvePrivyProfileInspectionFailure(
