@@ -739,7 +739,14 @@ async function recoverPolymarketWrapInTransaction(
           or (
             attempt.outcome = 'ambiguous'
             and attempt.reference_kind = 'provider_receipt'
-            and step.state = 'reconcile_required'
+            and (
+              step.state = 'reconcile_required'
+              or (
+                step.state = 'recovery_required'
+                and operation.status = 'recovery_required'
+                and operation.recovery_mode = 'automatic_evidence'
+              )
+            )
           )
         )
         and attempt.updated_at <= $2

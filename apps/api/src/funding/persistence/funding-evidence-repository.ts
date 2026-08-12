@@ -8,6 +8,7 @@ import {
   FundingPersistenceError,
   releaseFundingReservationInTransaction,
   transitionFundingOperationInTransaction,
+  type FundingOperationRow,
   wakeFundingReconciliationInTransaction,
 } from "./funding-operation-repository.js";
 import {
@@ -1095,14 +1096,24 @@ export async function resolveAmbiguousProviderFundingStepAttemptForUserInTransac
 ): Promise<
   Readonly<{
     attempt: FundingStepAttempt;
-    stepState: "reconcile_required" | "failed";
+    stepState: FundingOperationStepState;
   }>
 > {
   const scope = await client.query<{
+    operation_progress_stage: FundingOperationRow["progressStage"];
+    operation_recovery_mode: FundingOperationRow["recoveryMode"];
+    operation_status: FundingOperationRow["status"];
+    operation_support_metadata: JsonRecord;
+    operation_version: string | number;
     step_state: FundingOperationStepState;
   }>(
     `
-      select step.state as step_state
+      select step.state as step_state,
+             operation.status as operation_status,
+             operation.progress_stage as operation_progress_stage,
+             operation.recovery_mode as operation_recovery_mode,
+             operation.support_metadata as operation_support_metadata,
+             operation.version as operation_version
       from funding_operation_step_attempts attempt
       join funding_operation_steps step on step.id = attempt.step_id
       join funding_operations operation on operation.id = step.operation_id
@@ -1140,7 +1151,7 @@ export async function resolveAmbiguousProviderFundingStepAttemptForUserInTransac
       prior.receiptRefLookupHmac === input.resolution.receiptRefLookupHmac &&
       prior.lookupKeyVersion === input.resolution.lookupKeyVersion
     ) {
-      return { attempt: prior, stepState: "reconcile_required" };
+      return { attempt: prior, stepState: scoped.step_state };
     }
   } else if (
     prior.outcome === "failed" &&
@@ -1153,7 +1164,7 @@ export async function resolveAmbiguousProviderFundingStepAttemptForUserInTransac
     prior.referenceKind !== "provider_receipt" ||
     prior.receiptRefLookupHmac !== input.providerReferenceLookupHmac ||
     prior.lookupKeyVersion === null ||
-    scoped.step_state !== "reconcile_required"
+    !["reconcile_required", "recovery_required"].includes(scoped.step_state)
   ) {
     throw new FundingPersistenceError(
       "invalid_state_transition",
@@ -1218,13 +1229,13 @@ export async function resolveAmbiguousProviderFundingStepAttemptForUserInTransac
     );
   }
   const stepState =
-    input.resolution.kind === "transaction" ? "reconcile_required" : "failed";
+    input.resolution.kind === "transaction" ? scoped.step_state : "failed";
   if (stepState === "failed") {
     const updated = await client.query(
       `
         update funding_operation_steps
         set state = 'failed', updated_at = $2
-        where id = $1 and state = 'reconcile_required'
+        where id = $1 and state in ('reconcile_required', 'recovery_required')
       `,
       [input.stepId, now],
     );
@@ -1234,6 +1245,45 @@ export async function resolveAmbiguousProviderFundingStepAttemptForUserInTransac
         "delegated funding step changed while resolving provider failure",
       );
     }
+  }
+  const strandedProviderFailure =
+    input.resolution.kind === "definitive_failure" &&
+    scoped.operation_status === "recovery_required" &&
+    scoped.operation_recovery_mode === "automatic_evidence";
+  const hasGenericWindow =
+    scoped.operation_support_metadata.reconciliationActiveSince != null ||
+    scoped.operation_support_metadata.reconciliationActiveAttemptBaseline !=
+      null;
+  if (hasGenericWindow || strandedProviderFailure) {
+    // Provider recovery and generic reconciliation own different clocks. At
+    // their handoff, discard the old window; a proven failure also ends the
+    // automatic loop because no recovery selector can claim a failed step.
+    const state = {
+      status: scoped.operation_status,
+      stage: scoped.operation_progress_stage,
+    } as const;
+    await transitionFundingOperationInTransaction(client, {
+      operationId: input.operationId,
+      scope: { kind: "worker" },
+      expectedVersion: Number(scoped.operation_version),
+      expectedState: state,
+      nextState: state,
+      ...(strandedProviderFailure
+        ? {
+            recoveryMode: "manual_review" as const,
+            errorCode: "delegated_provider_reference_failed",
+          }
+        : {}),
+      ...(hasGenericWindow
+        ? {
+            supportMetadataPatch: {
+              reconciliationActiveSince: null,
+              reconciliationActiveAttemptBaseline: null,
+            },
+          }
+        : {}),
+      now,
+    });
   }
   await wakeFundingReconciliationInTransaction(client, {
     operationId: input.operationId,
