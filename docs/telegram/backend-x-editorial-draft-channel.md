@@ -1,6 +1,6 @@
 # Backend Design: Human X Drafts in a Private Telegram Channel
 
-Status: V1 implemented; influencer-style prompt v4 and direct Telegram formatting added; live editorial QA remains
+Status: V1 implemented; influencer-style prompt v6, fail-visible previews, and link-free Telegram formatting added; live editorial QA remains
 
 Scope: holder-research signal copy and Telegram delivery
 Decision: no database migration is required for the first production version
@@ -132,7 +132,7 @@ no evidence that proves access to non-public information.” The post must never
 upgrade correlation into knowledge, causation, or an accusation.
 
 Several examples also use first-person openings such as an author saying they
-found or are watching a wallet. Prompt v4 permits that limited editorial voice
+found or are watching a wallet. Prompt v6 permits that limited editorial voice
 because it materially contributes to the target style. Deterministic safety
 checks still reject invented personal bets, PnL, predictions, conversations,
 contacts, and private sources.
@@ -331,7 +331,7 @@ type XEditorialDraftV1 = {
   characterCount: number;
   generatedAt: string;
   model: string;
-  promptVersion: "x_editorial_prompt_v4";
+  promptVersion: "x_editorial_prompt_v6";
   sourceDigest: string;
 };
 ```
@@ -365,8 +365,9 @@ The prompt and deterministic validators must enforce all of the following:
 - allow first-person discovery or analysis such as “I found” or “I think” when
   grounded in supplied facts, but never invent a personal bet, position, PnL,
   prediction record, conversation, private source, or firsthand access;
-- no Markdown markers inside `postText`, Telegram section labels, proof tables,
-  Buy/Open CTA, affiliate language, hashtags, or generic engagement bait;
+- no Markdown markers or URLs inside `postText`, Telegram section labels, proof
+  tables, Buy/Open CTA, affiliate language, hashtags, or generic engagement
+  bait;
 - allow compact `→` or plain-text list lines when they make several connected
   receipts easier to scan; reject dashboard-style pipe tables;
 - return one to three exact non-overlapping snippets for intentional bold or
@@ -390,8 +391,8 @@ The model is not the publication authority. Validate before Telegram send:
    when `text` is absent and `snippet` is a string, then perform a strict schema
    parse without stripping any other unknown fields;
 2. non-empty, normalized text and configured character limit;
-3. no model-authored Markdown, hashtags, CTA, addresses, internal labels, pipe
-   tables, or banned claim patterns; plain list lines remain allowed;
+3. no model-authored Markdown, URLs, hashtags, CTA, addresses, internal labels,
+   pipe tables, or banned claim patterns; plain list lines remain allowed;
 4. all `usedFactIds` exist in the supplied packet;
 5. numeric tokens are traceable to facts declared in `usedFactIds`, including
    compact currency and probability representations such as `$56.4K` and
@@ -407,18 +408,23 @@ The model is not the publication authority. Validate before Telegram send:
 If parsing or validation fails, one constrained repair call is made inside the
 composer. A second schema/contract failure is classified as `schema_mismatch`,
 not as editorial `blocked`. A provider response without `message.content` is
-classified as `missing_content`.
+classified as `missing_content`. OpenRouter requests use strict JSON Schema and
+minimal reasoning. If the first response spends its output allowance without
+producing content, the one repair attempt receives a larger bounded token
+budget. Failure diagnostics retain finish reason and bounded token-usage facts.
 
 The composer is the preferred writer, but it is not allowed to make the
-editorial channel silently lose an already quality-gated signal. After the
-composer's constrained repair call, `schema_mismatch`, `missing_content`,
-`provider_error`, and a valid `status=blocked` all switch to a deterministic
-editorial fallback. Initial/update fallback copy uses the already accepted
-holder-research headline and narrative; follow-through/resolution fallback copy
-uses only the computed side, price move, wallet activity, flow, holding count,
-and PnL facts. It is still sent through the same direct-Markdown presentation
-and normal Telegram delivery ledger. It never falls back to the normal Telegram
-signal card, keyboard, or trading CTA.
+editorial channel silently lose an already quality-gated production signal.
+After the composer's constrained repair call, `schema_mismatch`,
+`missing_content`, `provider_error`, and a valid `status=blocked` all switch to
+a deterministic editorial fallback. Initial/update fallback copy builds a
+short trader story from the canonical side, position size, signal price,
+verified credentials, and PnL; it does not replay the holder-research headline
+and description. Follow-through/resolution fallback copy uses only the
+computed side, price move, wallet activity, flow, holding count, and PnL facts.
+It is still sent through the same direct-Markdown presentation and normal
+Telegram delivery ledger. It never falls back to the normal Telegram signal
+card, keyboard, or trading CTA.
 
 X editorial drafts also do not apply the normal ten-minute executable-quote
 freshness gate. They retain the validated signal-time price snapshot as an
@@ -464,7 +470,7 @@ Persisted metrics shape:
     "version": 1,
     "postText": "...",
     "formatting": [{ "style": "bold", "text": "..." }],
-    "promptVersion": "x_editorial_prompt_v4",
+    "promptVersion": "x_editorial_prompt_v6",
     "sourceDigest": "..."
   }
 }
@@ -512,18 +518,14 @@ not require a database migration.
 
 ### Telegram representation for the editorial channel
 
-Send one standalone MarkdownV2 editorial package:
+Send one standalone MarkdownV2 editorial package: `postText` as the complete
+message body, with validated `formatting` spans rendered directly as Telegram
+MarkdownV2 bold or italic.
 
-1. `postText` as the normal message body, with validated `formatting` spans
-   rendered directly as Telegram MarkdownV2 bold or italic;
-2. a visible `🌐 Website` deep link to the market on `app.hunch.trade` with X
-   campaign attribution;
-3. a visible `📱 Telegram Mini App` deep link to the same market.
-
-Do not use an inline keyboard, normal signal card, Buy/Open CTA, reply thread,
-evidence table, copy block, formatting-instruction lines, or disclaimer. Website
-and Mini App URLs remain separate lines below the post body so the manager can
-long-press either URL when assembling the final post.
+Do not append website or Mini App links. Do not use an inline keyboard, normal
+signal card, Buy/Open CTA, reply thread, evidence table, copy block,
+formatting-instruction lines, or disclaimer. The manager copies only the draft
+body into X.
 
 ### All message families must be routed explicitly
 
@@ -619,14 +621,15 @@ perform its own presentation-specific preparation.
    - add editorial reservation/load/update helpers using
      `signal_bot_messages.metrics`;
    - send a directly formatted MarkdownV2 draft with no inline keyboard;
-   - include visible website and Mini App market deep links below the body;
+   - include no website or Mini App links;
    - keep current V11 paths byte-for-byte behaviorally unchanged for the
      default profile.
 2. `apps/api/src/services/x-editorial-draft.ts`
    - define strict model output and versioned persisted contract schemas;
    - implement the explicit `{style,text}` prompt contract, safe
      `snippet -> text` compatibility normalization, typed composer failures,
-     OpenRouter/repair calls, numeric and style validation, source digest, and
+     OpenRouter/repair calls, strict JSON Schema, minimal reasoning budget,
+     empty-content recovery, numeric and style validation, source digest, and
      persisted-draft parsing;
    - consume story-family-specific fact packets built by the publisher for
      initial, update, follow-through, and resolution.
@@ -639,9 +642,9 @@ perform its own presentation-specific preparation.
 5. `.env.example` and `ops/.env.prod.example`
    - document non-secret composer settings and the existing provider key.
 6. Tests
-   - cover composer/schema validation, formatting spans, repair, Redis profile
-     compatibility, direct Markdown delivery, both links, persistence, and retry
-     reuse.
+   - cover composer/schema validation, formatting spans, repair, empty-content
+     recovery, Redis profile compatibility, link-free direct Markdown delivery,
+     persistence, and retry reuse.
 
 ## Test Coverage and Remaining QA
 
@@ -650,8 +653,8 @@ Implemented deterministic tests cover:
 - old Redis channel hashes parse as `telegram_signal_v11`;
 - both profiles parse and round-trip, unauthorized users cannot switch them,
   and `/status` reports the active profile and composer state;
-- the editorial channel receives `postText` with direct Telegram bold/italic,
-  both visible links, no copy block, no formatting-guidance lines, no inline
+- the editorial channel receives only `postText` with direct Telegram
+  bold/italic, no links, no copy block, no formatting-guidance lines, no inline
   keyboard, and no trade CTA;
 - invalid or unsafe first output receives one constrained repair;
 - unsafe claims, fabricated personal activity/source claims, unsupported
@@ -659,7 +662,8 @@ Implemented deterministic tests cover:
 - a successful draft is persisted, sent using only MarkdownV2 presentation, and
   not composed or sent again on the next tick;
 - `insider`, fabricated personal activity/source claims, raw addresses,
-  model-authored Markdown, hashtags, and generic promotional CTA are rejected;
+  model-authored Markdown, URLs, hashtags, and generic promotional CTA are
+  rejected;
 - recent openings do not change the canonical source digest.
 
 The existing signal-bot suite remains the regression layer for authorization,
@@ -676,7 +680,12 @@ Manual QA before production:
   profile-aware X follow-through preview; unlike the ordinary Telegram preview,
   the X preview stays standalone and has no reply target or inline keyboard;
   both X preview commands add only a short `Preview only — not recorded` banner
-  above the otherwise production-identical draft presentation;
+  above the otherwise production-identical composed draft presentation;
+- preview commands never substitute deterministic fallback copy for a composer
+  failure. They send an explicit `X preview failed` diagnostic with the
+  classified composer outcome (`schema_mismatch`, `missing_content`,
+  `provider_error`, or `model_blocked`) and record no delivery row, so an
+  operator cannot mistake fallback text for model-authored output;
 - collect a representative batch across sports, politics, crypto, totals,
   named outcomes, single traders, and clusters;
 - have the manager score factual accuracy, naturalness, edit distance before
@@ -722,8 +731,7 @@ Useful rollout metrics can be stored/read from existing JSONB and logs:
 - the X draft is composed from structured facts before Telegram presentation,
   not rewritten from the Telegram card;
 - the draft body is presented as normal Telegram text with intended emphasis;
-  there is no code block or separate formatting guidance, and both links remain
-  visible below it;
+  there is no code block, separate formatting guidance, or appended link;
 - the manager, not Hunch, performs the X publish action;
 - normal channels are unchanged;
 - model copy remains strictly validated; a rejected model draft can only fall

@@ -1,6 +1,5 @@
 import type { DbQuery } from "../db.js";
 import { parseTelegramMarketIdentityV1 } from "./signal-publication-contract.js";
-import { buildSignalBotMiniAppEventUrl } from "./signal-bot-mini-app-links.js";
 import {
   beginSignalBotMessageDelivery,
   finishSignalBotMessageDelivery,
@@ -18,6 +17,7 @@ import {
   readXEditorialComposerFailure,
   buildXEditorialSourceDigest,
   X_EDITORIAL_CONTENT_PROFILE,
+  X_EDITORIAL_PROMPT_VERSION,
   type XEditorialComposerFailureCode,
   type XEditorialDraftComposer,
   type XEditorialDraftSource,
@@ -137,30 +137,6 @@ function isSafeHttpUrl(value: string | null | undefined): value is string {
   }
 }
 
-function safeUrlOrUndefined(
-  value: string | null | undefined,
-): string | undefined {
-  return isSafeHttpUrl(value) ? new URL(value).toString() : undefined;
-}
-
-function buildOpenMarketUrl(input: {
-  appBaseUrl: string;
-  eventId: string;
-  marketId: string | null;
-  side?: "NO" | "YES" | null;
-}): string {
-  const url = new URL(
-    `/events/${encodeURIComponent(input.eventId)}`,
-    input.appBaseUrl,
-  );
-  if (input.marketId) url.searchParams.set("market", input.marketId);
-  if (input.side) url.searchParams.set("side", input.side);
-  url.searchParams.set("utm_source", "x");
-  url.searchParams.set("utm_medium", "social");
-  url.searchParams.set("utm_campaign", "signal_editorial");
-  return url.toString();
-}
-
 function readExternalResearch(modelMeta: Record<string, unknown>): {
   fact: Record<string, unknown> | null;
   urls: string[];
@@ -262,33 +238,13 @@ function buildInitialSource(input: {
     );
   }
   addFact("external_context", "Validated external research", external.fact);
-  const marketUrl =
-    note.eventId && note.marketId
-      ? buildOpenMarketUrl({
-          appBaseUrl: input.appBaseUrl,
-          eventId: note.eventId,
-          marketId: note.marketId,
-          side: input.selectedSide,
-        })
-      : null;
-  const miniAppUrl = buildSignalBotMiniAppEventUrl({
-    eventId: note.eventId,
-    marketId: note.marketId,
-    miniAppLinkBase: input.telegramMiniAppLinkBase,
-    side: input.selectedSide,
-  });
   return {
     facts,
     kind: input.kind,
     marketId: note.marketId ?? identity?.marketId ?? note.id,
-    miniAppUrl:
-      safeUrlOrUndefined(miniAppUrl) ??
-      safeUrlOrUndefined(input.telegramMiniAppLinkBase),
     noteId: note.id,
     recentOpenings: input.recentOpenings,
     selectedSide: input.selectedSide,
-    websiteUrl:
-      safeUrlOrUndefined(marketUrl) ?? safeUrlOrUndefined(input.appBaseUrl),
   };
 }
 
@@ -335,20 +291,6 @@ function buildFollowthroughSource(input: {
   const identity = parseTelegramMarketIdentityV1(
     asObject(input.candidate.metrics).telegramMarketIdentityV1,
   );
-  const marketUrl = input.candidate.event_id
-    ? buildOpenMarketUrl({
-        appBaseUrl: input.appBaseUrl,
-        eventId: input.candidate.event_id,
-        marketId: input.candidate.market_id,
-        side: input.stats.signalSide,
-      })
-    : null;
-  const miniAppUrl = buildSignalBotMiniAppEventUrl({
-    eventId: input.candidate.event_id,
-    marketId: input.candidate.market_id,
-    miniAppLinkBase: input.telegramMiniAppLinkBase,
-    side: input.stats.signalSide,
-  });
   return {
     facts: [
       {
@@ -381,14 +323,9 @@ function buildFollowthroughSource(input: {
     ],
     kind: input.kind,
     marketId: input.candidate.market_id,
-    miniAppUrl:
-      safeUrlOrUndefined(miniAppUrl) ??
-      safeUrlOrUndefined(input.telegramMiniAppLinkBase),
     noteId: input.candidate.thread_root_note_id,
     recentOpenings: input.recentOpenings,
     selectedSide: input.stats.signalSide as "NO" | "YES",
-    websiteUrl:
-      safeUrlOrUndefined(marketUrl) ?? safeUrlOrUndefined(input.appBaseUrl),
   };
 }
 
@@ -489,18 +426,6 @@ function escapeMarkdownV2(value: string): string {
   return value.replace(/([_*[\]()~`>#+\-=|{}.!\\])/g, "\\$1");
 }
 
-function escapeMarkdownV2LinkTarget(value: string): string {
-  return value.replace(/([)\\])/g, "\\$1");
-}
-
-function buildVisibleLink(
-  label: string,
-  url: string | undefined,
-): string | null {
-  if (!isSafeHttpUrl(url)) return null;
-  return `${label}: [${escapeMarkdownV2(url)}](${escapeMarkdownV2LinkTarget(url)})`;
-}
-
 function sentence(value: string): string {
   const trimmed = value.trim();
   if (!trimmed) return "";
@@ -545,50 +470,179 @@ function factValue(source: XEditorialDraftSource, id: string): unknown | null {
   return source.facts.find((fact) => fact.id === id)?.value ?? null;
 }
 
-function buildFallbackPost(input: {
+function stringList(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value
+        .map((item) => asTrimmedString(item))
+        .filter((item): item is string => item != null)
+    : [];
+}
+
+function countLabel(value: number): string {
+  return (
+    (
+      [
+        "Zero",
+        "One",
+        "Two",
+        "Three",
+        "Four",
+        "Five",
+        "Six",
+        "Seven",
+        "Eight",
+        "Nine",
+        "Ten",
+      ] as const
+    )[value] ?? String(value)
+  );
+}
+
+function lowerFirst(value: string): string {
+  return `${value[0]?.toLowerCase() ?? ""}${value.slice(1)}`;
+}
+
+function fallbackPositionPhrase(input: {
+  market: Record<string, unknown>;
+  selectedSide: "NO" | "YES";
+}): string {
+  const label = asTrimmedString(input.market.selectedSideLabel);
+  if (label && /^(?:betting|backing|fading|taking)\b/i.test(label)) {
+    return lowerFirst(label);
+  }
+  if (label && label !== input.selectedSide) return `on ${label}`;
+  const subject =
+    asTrimmedString(input.market.subject) ??
+    asTrimmedString(input.market.eventTitle) ??
+    asTrimmedString(input.market.marketQuestion);
+  return subject
+    ? `backing ${input.selectedSide} on ${subject}`
+    : `backing ${input.selectedSide}`;
+}
+
+function fallbackMarketSubject(
+  market: Record<string, unknown>,
+  selectedSide: "NO" | "YES",
+): string {
+  const label = asTrimmedString(market.selectedSideLabel);
+  if (label && label !== selectedSide) return label;
+  return (
+    asTrimmedString(market.subject) ??
+    asTrimmedString(market.eventTitle) ??
+    asTrimmedString(market.marketQuestion) ??
+    `${selectedSide} outcome`
+  );
+}
+
+export function buildXEditorialFallbackPost(input: {
   failureCode: XEditorialComposerOutcome;
   source: XEditorialDraftSource;
 }): XEditorialDraftV1 {
-  const researchCopy = asObject(factValue(input.source, "research_copy"));
-  const headline = asTrimmedString(researchCopy.headline);
-  const description = asTrimmedString(researchCopy.description);
+  const market = asObject(factValue(input.source, "market"));
+  const actor = asObject(factValue(input.source, "actor"));
+  const price = asObject(factValue(input.source, "price"));
+  const credentials = stringList(factValue(input.source, "credentials"));
   const originalSignal = asTrimmedString(
     factValue(input.source, "original_signal"),
   );
   const followthrough = asObject(factValue(input.source, "followthrough"));
-  let opening = sentence(headline ?? originalSignal ?? "Market update");
-  let body = description ? sentence(description) : "";
+  let opening = "";
+  let ending = "";
+  const paragraphs: string[] = [];
   const storyFamily: XEditorialDraftV1["storyFamily"] =
     input.source.kind === "initial" || input.source.kind === "research_update"
       ? "fresh_bet"
       : input.source.kind === "followthrough_stats"
         ? "followthrough"
         : "resolution";
-  let usedFactIds = description || headline ? ["research_copy"] : [];
+  const usedFactIds: string[] = ["market"];
 
   if (
-    input.source.kind !== "initial" &&
-    input.source.kind !== "research_update"
+    input.source.kind === "initial" ||
+    input.source.kind === "research_update"
   ) {
+    const holders = nonNegativeInteger(actor.clusterSharpHolders);
+    const displayName = asTrimmedString(actor.displayName);
+    const pluralActor = actor.actorMode === "sharp_cluster" || holders > 1;
+    const positionUsd = finiteNumber(
+      pluralActor ? actor.clusterSharpUsd : actor.positionUsd,
+    );
+    const positionPhrase = fallbackPositionPhrase({
+      market,
+      selectedSide: input.source.selectedSide,
+    });
+    const protagonist = displayName
+      ? displayName
+      : holders > 1
+        ? `${countLabel(holders)} traders`
+        : pluralActor
+          ? "A group of traders"
+          : "One trader";
+    opening = sentence(
+      positionUsd != null && Math.abs(positionUsd) >= 1
+        ? `${protagonist} ${pluralActor ? "have" : "has"} ${formatUsd(positionUsd)} ${positionPhrase}`
+        : `${protagonist} ${pluralActor ? "are" : "is"} ${positionPhrase}`,
+    );
+    paragraphs.push(opening);
+    usedFactIds.push("actor");
+
+    const displayPrice = finiteNumber(price.displayPrice);
+    if (displayPrice != null) {
+      paragraphs.push(
+        `That outcome is priced at ${formatCents(displayPrice)}.`,
+      );
+      usedFactIds.push("price");
+    }
+
+    const credentialLines = credentials.slice(0, 2).map(sentence);
+    if (credentialLines.length > 0) {
+      paragraphs.push(credentialLines.join("\n"));
+      usedFactIds.push("credentials");
+    }
+
+    const openPnl = finiteNumber(
+      pluralActor ? actor.clusterOpenPnlUsd : actor.openPnlUsd,
+    );
+    if (openPnl != null && Math.abs(openPnl) >= 1) {
+      paragraphs.push(
+        `The position is ${openPnl >= 0 ? "up" : "down"} ${formatUsd(Math.abs(openPnl))} so far.`,
+      );
+    }
+
+    ending =
+      displayPrice == null
+        ? "Not a casual position."
+        : displayPrice < 0.35
+          ? "The market is skeptical. The position is not."
+          : displayPrice > 0.65
+            ? "The market already leans that way. The size is the story."
+            : `The market is undecided. ${pluralActor ? "They are" : "The trader is"} not.`;
+    paragraphs.push(ending);
+  } else {
     const side = input.source.selectedSide;
     const entryPrice = finiteNumber(followthrough.entryPrice);
     const markPrice = finiteNumber(followthrough.markPrice);
     const outcome = asTrimmedString(followthrough.outcome);
     const state = asTrimmedString(followthrough.state);
-    const detail: string[] = [];
+    const subject = fallbackMarketSubject(market, side);
     if (state === "resolved" && (outcome === "win" || outcome === "loss")) {
-      detail.push(`The ${side} side resolved as a ${outcome}`);
+      opening = sentence(`${side} on ${subject} resolved as a ${outcome}`);
     } else if (entryPrice != null && markPrice != null) {
-      detail.push(
-        `${side} moved from ${formatCents(entryPrice)} to ${formatCents(markPrice)} since the signal`,
+      opening = sentence(
+        `${subject} moved from ${formatCents(entryPrice)} to ${formatCents(markPrice)}`,
       );
+    } else {
+      opening = sentence(originalSignal ?? `${side} on ${subject} moved`);
     }
+    paragraphs.push(opening);
+    usedFactIds.push("original_signal", "followthrough");
+
     const netFlow = finiteNumber(followthrough.netSignalSideFlowUsd);
     if (netFlow != null && Math.abs(netFlow) >= 1) {
-      detail.push(
+      paragraphs.push(
         netFlow > 0
-          ? `Tracked wallets added a net ${formatUsd(netFlow)} on ${side}`
-          : `Tracked wallets cut a net ${formatUsd(Math.abs(netFlow))} from ${side}`,
+          ? `${formatUsd(netFlow)} more moved onto ${side} after the original signal.`
+          : `${formatUsd(Math.abs(netFlow))} came off ${side} after the original signal.`,
       );
     }
     const added = nonNegativeInteger(followthrough.addedWallets);
@@ -596,17 +650,30 @@ function buildFallbackPost(input: {
     const trimmed = nonNegativeInteger(followthrough.trimmedWallets);
     const exited = nonNegativeInteger(followthrough.exitedWallets);
     const holding = nonNegativeInteger(followthrough.stillHoldingWallets);
-    const activity: string[] = [];
-    if (joined > 0) activity.push(`${joined} joined`);
-    if (added > 0) activity.push(`${added} added`);
-    if (trimmed > 0) activity.push(`${trimmed} trimmed`);
-    if (exited > 0) activity.push(`${exited} exited`);
-    if (activity.length > 0) {
-      detail.push(
-        `${activity.join(", ")}${holding > 0 ? `, and ${holding} ${holding === 1 ? "is" : "are"} still holding` : ""}`,
-      );
-    } else if (holding > 0) {
-      detail.push(`${holding} tracked wallets are still holding`);
+    const addedCount = joined + added;
+    const reducedCount = trimmed + exited;
+    if (addedCount > 0 || reducedCount > 0 || holding > 0) {
+      const activity: string[] = [];
+      if (joined > 0) {
+        activity.push(
+          `${joined} new ${joined === 1 ? "wallet" : "wallets"} joined`,
+        );
+      }
+      if (added > 0) {
+        activity.push(
+          `${added} existing ${added === 1 ? "wallet added" : "wallets added"}`,
+        );
+      }
+      if (trimmed > 0) {
+        activity.push(`${trimmed} trimmed the position`);
+      }
+      if (exited > 0) activity.push(`${exited} exited`);
+      if (holding > 0) {
+        activity.push(
+          `${holding} ${holding === 1 ? "wallet is" : "wallets are"} still in`,
+        );
+      }
+      paragraphs.push(sentence(activity.join(". ")));
     }
     const pnl = finiteNumber(
       state === "resolved"
@@ -614,41 +681,54 @@ function buildFallbackPost(input: {
         : followthrough.estimatedOpenPnlUsd,
     );
     if (pnl != null && Math.abs(pnl) >= 1) {
-      detail.push(
-        `Estimated ${state === "resolved" ? "realized" : "open"} PnL is ${formatUsd(pnl, { signed: true })}`,
+      paragraphs.push(
+        `Estimated ${state === "resolved" ? "realized" : "open"} PnL is ${formatUsd(pnl, { signed: true })}.`,
       );
     }
-    body = sentence(detail.join(". "));
-    usedFactIds = ["original_signal", "followthrough"];
+    ending =
+      reducedCount > 0 && addedCount > 0
+        ? "The price moved one way. The wallets did not."
+        : netFlow != null && netFlow > 0
+          ? "The first position now has company."
+          : netFlow != null && netFlow < 0
+            ? "The market moved. The original crowd is thinning out."
+            : "The next move will show whether the conviction holds.";
+    paragraphs.push(ending);
   }
 
-  const postText = clipVisibleText(
-    [opening, body].filter(Boolean).join("\n\n"),
-  );
+  const postText = clipVisibleText(paragraphs.filter(Boolean).join("\n\n"));
   if (!postText.includes(opening))
     opening = postText.split("\n")[0] ?? postText;
+  const formatting: XEditorialDraftV1["formatting"] =
+    opening.length >= 2 ? [{ style: "bold", text: opening }] : [];
+  if (
+    ending.length >= 2 &&
+    ending !== opening &&
+    postText.includes(ending) &&
+    postText.indexOf(ending) === postText.lastIndexOf(ending)
+  ) {
+    formatting.push({ style: "italic", text: ending });
+  }
   return {
     characterCount: Array.from(postText).length,
-    formatting: opening.length >= 2 ? [{ style: "bold", text: opening }] : [],
+    formatting,
     generatedAt: new Date().toISOString(),
     marketId: input.source.marketId,
     model: "deterministic_editorial_fallback_v1",
     postText,
-    promptVersion: "x_editorial_prompt_v4",
+    promptVersion: X_EDITORIAL_PROMPT_VERSION,
     safetyFlags: [`composer_fallback:${input.failureCode}`],
     selectedSide: input.source.selectedSide,
     sourceDigest: buildXEditorialSourceDigest(input.source),
     status: "ready",
     storyFamily,
-    usedFactIds,
+    usedFactIds: [...new Set(usedFactIds)],
     version: 1,
   };
 }
 
 export function buildXEditorialTelegramDraftMessage(input: {
   draft: XEditorialDraftV1;
-  miniAppUrl?: string;
-  websiteUrl?: string;
 }): string {
   const postText = input.draft.postText ?? "";
   const ranges: Array<{
@@ -684,11 +764,7 @@ export function buildXEditorialTelegramDraftMessage(input: {
     cursor = range.end;
   }
   formattedPost.push(escapeMarkdownV2(postText.slice(cursor)));
-  const links = [
-    buildVisibleLink("🌐 Website", input.websiteUrl),
-    buildVisibleLink("📱 Telegram Mini App", input.miniAppUrl),
-  ].filter((line): line is string => line != null);
-  return [formattedPost.join(""), ...links].join("\n\n");
+  return formattedPost.join("");
 }
 
 async function sendPreviewDraft(input: {
@@ -697,20 +773,61 @@ async function sendPreviewDraft(input: {
   source: XEditorialDraftSource;
   telegram: SignalBotTelegramClient;
 }): Promise<SignalBotXEditorialPublicationResult> {
+  const sendFailure = async (failure: {
+    code: Exclude<XEditorialComposerOutcome, "ready">;
+    issues?: string[];
+  }): Promise<SignalBotXEditorialPublicationResult> => {
+    const issueLines = (failure.issues ?? [])
+      .slice(0, 3)
+      .map((issue) => `Issue: ${issue.slice(0, 240)}`);
+    const result = await input.telegram.sendMessage({
+      chat_id: input.chatId,
+      disable_web_page_preview: true,
+      parse_mode: "MarkdownV2",
+      text: [
+        "🧪 *X preview failed*",
+        escapeMarkdownV2(`Composer: ${failure.code}`),
+        ...issueLines.map(escapeMarkdownV2),
+        escapeMarkdownV2(
+          "No fallback was substituted. Nothing was recorded or published.",
+        ),
+      ].join("\n\n"),
+    });
+    if (result.ok) {
+      return failure.code === "model_blocked"
+        ? {
+            blockedChat: false,
+            composerOutcome: "model_blocked",
+            status: "blocked",
+          }
+        : { composerOutcome: failure.code, status: "compose_failed" };
+    }
+    if (result.error === "ambiguous") return { status: "delivery_unknown" };
+    if (result.error === "blocked_or_missing") {
+      return { blockedChat: true, status: "blocked" };
+    }
+    return {
+      blockedChat: false,
+      composerOutcome:
+        failure.code === "model_blocked" ? undefined : failure.code,
+      status: "retry",
+    };
+  };
+
   let draft: XEditorialDraftV1;
   try {
     draft = await input.composer({ source: input.source });
   } catch (error) {
     const failure = readXEditorialComposerFailure(error);
-    draft = buildFallbackPost({
-      failureCode: failure.code,
-      source: input.source,
+    return sendFailure({
+      code: failure.code,
+      issues: failure.issues,
     });
   }
   if (draft.status === "blocked" || !draft.postText) {
-    draft = buildFallbackPost({
-      failureCode: "model_blocked",
-      source: input.source,
+    return sendFailure({
+      code: "model_blocked",
+      issues: draft.safetyFlags,
     });
   }
   const result = await input.telegram.sendMessage({
@@ -721,8 +838,6 @@ async function sendPreviewDraft(input: {
       `🧪 _${escapeMarkdownV2("Preview only — not recorded.")}_`,
       buildXEditorialTelegramDraftMessage({
         draft,
-        miniAppUrl: input.source.miniAppUrl,
-        websiteUrl: input.source.websiteUrl,
       }),
     ].join("\n\n"),
   });
@@ -865,7 +980,10 @@ async function deliverDraft(input: {
   let fallbackMetrics: Record<string, unknown> | null = null;
   if (recoverTerminalSkip) {
     const reason = existingComposerFailure ?? "model_blocked";
-    draft = buildFallbackPost({ failureCode: reason, source: input.source });
+    draft = buildXEditorialFallbackPost({
+      failureCode: reason,
+      source: input.source,
+    });
     composerMetrics = {
       ...existingComposerMetrics,
       fallbackUsed: true,
@@ -910,7 +1028,7 @@ async function deliverDraft(input: {
       draft = await input.composer({ source: input.source });
     } catch (error) {
       const failure = readXEditorialComposerFailure(error);
-      draft = buildFallbackPost({
+      draft = buildXEditorialFallbackPost({
         failureCode: failure.code,
         source: input.source,
       });
@@ -939,7 +1057,7 @@ async function deliverDraft(input: {
     if (!fallbackMetrics) {
       if (draft.status === "blocked" || !draft.postText) {
         const blockedDraft = draft;
-        draft = buildFallbackPost({
+        draft = buildXEditorialFallbackPost({
           failureCode: "model_blocked",
           source: input.source,
         });
@@ -1023,8 +1141,6 @@ async function deliverDraft(input: {
     parse_mode: "MarkdownV2",
     text: buildXEditorialTelegramDraftMessage({
       draft,
-      miniAppUrl: input.source.miniAppUrl,
-      websiteUrl: input.source.websiteUrl,
     }),
   });
   if (!result.ok) {

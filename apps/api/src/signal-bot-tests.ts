@@ -144,6 +144,7 @@ import {
 import { TELEGRAM_CUSTOM_EMOJI } from "./services/telegram-custom-emoji.js";
 import {
   buildXEditorialSourceDigest,
+  X_EDITORIAL_PROMPT_VERSION,
   XEditorialComposerError,
   type XEditorialDraftComposer,
 } from "./services/x-editorial-draft.js";
@@ -1703,7 +1704,7 @@ function createTestXEditorialComposer(input: {
       marketId: source.marketId,
       model: "test/editorial-model",
       postText: input.text,
-      promptVersion: "x_editorial_prompt_v4",
+      promptVersion: X_EDITORIAL_PROMPT_VERSION,
       safetyFlags: [],
       selectedSide: source.selectedSide,
       sourceDigest: buildXEditorialSourceDigest(source),
@@ -14517,10 +14518,9 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
             /```|🎨 Bold in X|🎨 Italic in X/,
             scenario.name,
           );
-          assert.match(message?.text ?? "", /🌐 Website/, scenario.name);
-          assert.match(
+          assert.doesNotMatch(
             message?.text ?? "",
-            /📱 Telegram Mini App/,
+            /https?:\/\/|Website|Mini App/,
             scenario.name,
           );
           assert.equal(message?.reply_markup, undefined, scenario.name);
@@ -14715,7 +14715,18 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(telegram.messages.length, 1);
       assert.match(telegram.messages[0]?.text ?? "", /^\*/);
       assert.doesNotMatch(telegram.messages[0]?.text ?? "", /```|🎨/);
-      assert.match(telegram.messages[0]?.text ?? "", /Tracked wallets/);
+      assert.match(
+        telegram.messages[0]?.text ?? "",
+        /Test event moved from 40¢ to 55¢/,
+      );
+      assert.match(
+        telegram.messages[0]?.text ?? "",
+        /\$5K more moved onto YES/,
+      );
+      assert.doesNotMatch(
+        telegram.messages[0]?.text ?? "",
+        /Tracked wallets|tracked money|The important part is/i,
+      );
       const stored = [...db.messageRows.values()][0];
       const metrics = stored?.metrics as
         | {
@@ -14877,7 +14888,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         marketId: source.marketId,
         model: "test/editorial-model",
         postText: null,
-        promptVersion: "x_editorial_prompt_v4",
+        promptVersion: X_EDITORIAL_PROMPT_VERSION,
         safetyFlags: ["model_blocked"],
         selectedSide: source.selectedSide,
         sourceDigest: buildXEditorialSourceDigest(source),
@@ -15733,8 +15744,10 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(telegram.messages[0]?.reply_markup, undefined);
       assert.match(telegram.messages[0]?.text ?? "", /^🧪 _Preview only/);
       assert.match(telegram.messages[0]?.text ?? "", /\*The original YES/);
-      assert.match(telegram.messages[0]?.text ?? "", /🌐 Website/);
-      assert.match(telegram.messages[0]?.text ?? "", /📱 Telegram Mini App/);
+      assert.doesNotMatch(
+        telegram.messages[0]?.text ?? "",
+        /https?:\/\/|Website|Mini App/,
+      );
       assert.equal(
         db.queries.filter((query) =>
           query.sql.includes("insert into signal_bot_messages"),
@@ -16512,7 +16525,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
             marketId: source.marketId,
             model: "test/editorial-model",
             postText,
-            promptVersion: "x_editorial_prompt_v4",
+            promptVersion: X_EDITORIAL_PROMPT_VERSION,
             safetyFlags: [],
             selectedSide: source.selectedSide,
             sourceDigest: buildXEditorialSourceDigest(source),
@@ -16532,8 +16545,71 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         /\*\$12\\\.3K is backing YES\\\.\*/,
       );
       assert.match(telegram.messages[0]?.text ?? "", /^🧪 _Preview only/);
-      assert.match(telegram.messages[0]?.text ?? "", /🌐 Website/);
-      assert.match(telegram.messages[0]?.text ?? "", /📱 Telegram Mini App/);
+      assert.doesNotMatch(
+        telegram.messages[0]?.text ?? "",
+        /https?:\/\/|Website|Mini App/,
+      );
+      assert.deepEqual(await getSignalBotChatState(redis, "-100"), before);
+      assert.equal(
+        db.queries.some((query) =>
+          query.sql.includes("insert into signal_bot_messages"),
+        ),
+        false,
+      );
+    },
+  },
+  {
+    name: "X test signal exposes composer failure instead of disguising it as a draft",
+    run: async () => {
+      const redis = new FakeRedis();
+      await enableSignalBotChat({
+        chat: { id: "-100", title: "X drafts", type: "channel" },
+        enabledBy: 123,
+        now: new Date("2026-01-01T00:00:00.000Z"),
+        redis,
+      });
+      await updateSignalBotContentProfile({
+        chatId: "-100",
+        contentProfile: "x_editorial_draft_v1",
+        redis,
+      });
+      const before = await getSignalBotChatState(redis, "-100");
+      const db = new FakeDb();
+      db.rows = [noteRow({ id: "00000000-0000-4000-8000-000000000099" })];
+      const telegram = new FakeTelegram();
+      const outcome = await sendLatestSignalBotTestSignal({
+        chatId: "-100",
+        config: parseSignalBotConfig({
+          HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
+          HUNCH_SIGNAL_BOT_TOKEN: "token",
+          HUNCH_SIGNAL_BOT_X_EDITORIAL_ENABLED: "true",
+        }),
+        db,
+        redis,
+        telegram,
+        xEditorialComposer: async () => {
+          throw new XEditorialComposerError({
+            code: "schema_mismatch",
+            issues: ["formatting.0.text: expected string"],
+            message: "schema_mismatch",
+          });
+        },
+      });
+
+      assert.deepEqual(outcome, {
+        reason: "editorial_compose_failed",
+        sent: false,
+      });
+      assert.equal(telegram.messages.length, 1);
+      const diagnostic = (telegram.messages[0]?.text ?? "").replaceAll(
+        "\\",
+        "",
+      );
+      assert.match(diagnostic, /^🧪 \*X preview failed\*/);
+      assert.match(diagnostic, /Composer: schema_mismatch/);
+      assert.match(diagnostic, /formatting\.0\.text: expected string/);
+      assert.match(diagnostic, /No fallback was substituted/);
+      assert.doesNotMatch(diagnostic, /Sharp YES interest|Website|Mini App/);
       assert.deepEqual(await getSignalBotChatState(redis, "-100"), before);
       assert.equal(
         db.queries.some((query) =>

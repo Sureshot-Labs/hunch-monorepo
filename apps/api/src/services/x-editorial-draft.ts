@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 
 export const X_EDITORIAL_CONTENT_PROFILE = "x_editorial_draft_v1" as const;
-export const X_EDITORIAL_PROMPT_VERSION = "x_editorial_prompt_v4" as const;
+export const X_EDITORIAL_PROMPT_VERSION = "x_editorial_prompt_v6" as const;
 
 export type XEditorialComposerFailureCode =
   | "missing_content"
@@ -74,11 +74,9 @@ export type XEditorialDraftSource = {
   facts: XEditorialFact[];
   kind: XEditorialMessageKind;
   marketId: string;
-  miniAppUrl?: string;
   noteId: string;
   recentOpenings?: string[];
   selectedSide: "NO" | "YES";
-  websiteUrl?: string;
 };
 
 export type XEditorialDraftV1 = {
@@ -208,21 +206,76 @@ type XEditorialModelOutput = z.infer<typeof modelOutputSchema>;
 
 type OpenRouterResponse = {
   choices?: Array<{
+    error?: { code?: string | number; message?: string } | null;
     finish_reason?: string | null;
-    message?: { content?: string | null };
+    native_finish_reason?: string | null;
+    message?: {
+      content?: Array<{ text?: string; type?: string }> | string | null;
+      refusal?: string | null;
+    };
   }>;
+  error?: { code?: string | number; message?: string } | null;
   usage?: {
     completion_tokens?: number;
+    completion_tokens_details?: { reasoning_tokens?: number };
     prompt_tokens?: number;
     total_tokens?: number;
   };
 };
+
+const X_EDITORIAL_JSON_SCHEMA = {
+  additionalProperties: false,
+  properties: {
+    formatting: {
+      items: {
+        additionalProperties: false,
+        properties: {
+          style: { enum: ["bold", "italic"], type: "string" },
+          text: { type: "string" },
+        },
+        required: ["style", "text"],
+        type: "object",
+      },
+      type: "array",
+    },
+    marketId: { type: "string" },
+    postText: { type: ["string", "null"] },
+    safetyFlags: { items: { type: "string" }, type: "array" },
+    selectedSide: { enum: ["NO", "YES"], type: "string" },
+    status: { enum: ["ready", "blocked"], type: "string" },
+    storyFamily: {
+      enum: [
+        "case_study",
+        "followthrough",
+        "fresh_bet",
+        "resolution",
+        "trader_profile",
+      ],
+      type: "string",
+    },
+    usedFactIds: { items: { type: "string" }, type: "array" },
+    version: { enum: [1], type: "integer" },
+  },
+  required: [
+    "version",
+    "status",
+    "marketId",
+    "selectedSide",
+    "postText",
+    "formatting",
+    "storyFamily",
+    "usedFactIds",
+    "safetyFlags",
+  ],
+  type: "object",
+} as const;
 
 const FORBIDDEN_COPY_PATTERNS: Array<{
   code: string;
   pattern: RegExp;
 }> = [
   { code: "hashtag", pattern: /(^|\s)#[\p{L}\p{N}_]+/u },
+  { code: "url", pattern: /\b(?:https?:\/\/|www\.)\S+/i },
   {
     code: "markdown",
     pattern: /`|\*\*|__|\[[^\]]+\]\([^)]+\)|(^|\n)\s*(?:>|#{1,6}\s)/,
@@ -230,7 +283,12 @@ const FORBIDDEN_COPY_PATTERNS: Array<{
   {
     code: "internal_language",
     pattern:
-      /\b(?:holder[_ -]?research|sharp[_ -]?cluster|z[- ]?score|signal detected|publication decision|evidence id)\b/i,
+      /\b(?:holder[_ -]?research|sharp[_ -]?cluster|z[- ]?score|signal detected|publication decision|evidence id|tracked money)\b/i,
+  },
+  {
+    code: "dashboard_voice",
+    pattern:
+      /\b(?:the important part is|market update|quality[- ]gated|worth following)\b/i,
   },
   {
     code: "unsupported_accusation",
@@ -348,11 +406,16 @@ export function buildXEditorialDraftSystemPrompt(input: {
     "Do not claim insider access, coordination, private information, causation, certainty, an AI bot, or a cheat code.",
     "A light first-person editorial voice is allowed for a fact-grounded observation or opinion, such as 'I found', 'I am watching', or 'I think'. Never invent a personal trade, profit, prediction record, conversation, private source, or firsthand access.",
     "Do not expose wallet addresses, internal labels, evidence IDs, raw schema names, or analytics jargon.",
-    "No Markdown markers inside postText, headings, pipe-delimited stat tables, hashtags, affiliate language, product CTA, or generic engagement bait.",
+    "No Markdown markers inside postText, headings, pipe-delimited stat tables, URLs, links, hashtags, affiliate language, product CTA, or generic engagement bait.",
     "Select one to three exact, non-overlapping snippets for intentional Telegram/X formatting. Usually bold the hook or strongest result; use italic only for a genuinely useful interpretive line. Return those snippets in formatting and keep postText itself plain.",
     'Every formatting item must be exactly {"style":"bold"|"italic","text":"an exact substring of postText"}. The field name is text, never snippet.',
     "Emoji and → bullets are optional. Use a topical emoji only when it improves scanning or tone; never force a fixed emoji template.",
     "Vary the hook and ending against recentOpeningsToAvoidRepeating. Reuse the reference collection's editorial principles, never one author's exact wording or persona.",
+    "These style-only examples show the target rhythm. Never reuse their people, markets, numbers, or claims unless they are present in the supplied facts:",
+    "STYLE EXAMPLE — compact conviction:\nA new wallet just put $1.6M on Spain to win the World Cup.\n\nOne position. No hedge.\n\nEither serious conviction or a very expensive fan bet.",
+    "STYLE EXAMPLE — apparent contradiction:\nOne trader is fading England tonight — and backing them to win the World Cup.\n\nThose bets describe a narrow path: stumble now, peak later.\n\nThat is not indecision. It is a tournament script.",
+    "STYLE EXAMPLE — repeatable strategy:\nThis weather trader has made $5,287 in 30 days.\n\n1,618 forecasts across four continents. The same small edge, repeated.\n\nBoring market. Serious consistency.",
+    "Do not write phrases such as 'the important part is', 'tracked money', 'worth following', or 'market update'. Do not restate the research headline and description as two report-like paragraphs.",
     `Hard limit: ${input.maxCharacters} visible characters and ${input.maxParagraphs} paragraphs.`,
     "Return exactly one JSON object. Use status=blocked and postText=null if the facts do not support a coherent, safe post.",
   ].join("\n");
@@ -611,6 +674,7 @@ function blockedDraft(input: {
 async function callOpenRouter(input: {
   apiKey: string;
   config: XEditorialComposerConfig;
+  maxTokens: number;
   systemPrompt: string;
   userPrompt: string;
 }): Promise<{ content: string; finishReason: string | null }> {
@@ -632,9 +696,17 @@ async function callOpenRouter(input: {
             { role: "system", content: input.systemPrompt },
             { role: "user", content: input.userPrompt },
           ],
-          response_format: { type: "json_object" },
-          temperature: 0.45,
-          max_tokens: input.config.maxOutputTokens,
+          max_tokens: input.maxTokens,
+          provider: { require_parameters: true },
+          reasoning: { effort: "minimal", exclude: true },
+          response_format: {
+            type: "json_schema",
+            json_schema: {
+              name: "x_editorial_draft",
+              schema: X_EDITORIAL_JSON_SCHEMA,
+              strict: true,
+            },
+          },
         }),
       },
     );
@@ -647,10 +719,45 @@ async function callOpenRouter(input: {
       );
     }
     const choice = payload.choices?.[0];
-    const content = choice?.message?.content;
+    const rawContent = choice?.message?.content;
+    const content =
+      typeof rawContent === "string"
+        ? rawContent.trim()
+        : Array.isArray(rawContent)
+          ? rawContent
+              .filter(
+                (part) => part.type === "text" || part.type === "output_text",
+              )
+              .map((part) => part.text?.trim() ?? "")
+              .filter(Boolean)
+              .join("\n")
+          : "";
     if (!content) {
+      const providerError = choice?.error ?? payload.error;
+      const issues = [
+        `finish_reason:${choice?.finish_reason ?? "unknown"}`,
+        ...(choice?.native_finish_reason
+          ? [`native_finish_reason:${choice.native_finish_reason}`]
+          : []),
+        ...(typeof payload.usage?.completion_tokens_details
+          ?.reasoning_tokens === "number"
+          ? [
+              `reasoning_tokens:${payload.usage.completion_tokens_details.reasoning_tokens}`,
+            ]
+          : []),
+        ...(typeof payload.usage?.completion_tokens === "number"
+          ? [`completion_tokens:${payload.usage.completion_tokens}`]
+          : []),
+        ...(providerError?.code != null
+          ? [`provider_code:${String(providerError.code)}`]
+          : []),
+        ...(choice?.message?.refusal
+          ? [`refusal:${choice.message.refusal.slice(0, 160)}`]
+          : []),
+      ];
       throw new XEditorialComposerError({
         code: "missing_content",
+        issues,
         message: `OpenRouter editorial response missing content (finish_reason=${choice?.finish_reason ?? "unknown"})`,
       });
     }
@@ -683,6 +790,9 @@ export function createOpenRouterXEditorialDraftComposer(input: {
         const response = await callOpenRouter({
           apiKey,
           config: input.config,
+          maxTokens: repairIssues?.includes("missing_content")
+            ? Math.min(4_000, Math.max(1_400, input.config.maxOutputTokens * 2))
+            : input.config.maxOutputTokens,
           systemPrompt,
           userPrompt: buildUserPrompt({
             previousAttempt,
