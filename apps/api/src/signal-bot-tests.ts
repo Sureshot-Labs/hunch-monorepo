@@ -14450,10 +14450,9 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
             /```|🎨 Bold in X|🎨 Italic in X/,
             scenario.name,
           );
-          assert.match(message?.text ?? "", /🌐 Website/, scenario.name);
-          assert.match(
+          assert.doesNotMatch(
             message?.text ?? "",
-            /📱 Telegram Mini App/,
+            /https?:\/\/|Website|Mini App/,
             scenario.name,
           );
           assert.equal(message?.reply_markup, undefined, scenario.name);
@@ -15677,8 +15676,10 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(telegram.messages[0]?.reply_markup, undefined);
       assert.match(telegram.messages[0]?.text ?? "", /^🧪 _Preview only/);
       assert.match(telegram.messages[0]?.text ?? "", /\*The original YES/);
-      assert.match(telegram.messages[0]?.text ?? "", /🌐 Website/);
-      assert.match(telegram.messages[0]?.text ?? "", /📱 Telegram Mini App/);
+      assert.doesNotMatch(
+        telegram.messages[0]?.text ?? "",
+        /https?:\/\/|Website|Mini App/,
+      );
       assert.equal(
         db.queries.filter((query) =>
           query.sql.includes("insert into signal_bot_messages"),
@@ -16476,8 +16477,10 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         /\*\$12\\\.3K is backing YES\\\.\*/,
       );
       assert.match(telegram.messages[0]?.text ?? "", /^🧪 _Preview only/);
-      assert.match(telegram.messages[0]?.text ?? "", /🌐 Website/);
-      assert.match(telegram.messages[0]?.text ?? "", /📱 Telegram Mini App/);
+      assert.doesNotMatch(
+        telegram.messages[0]?.text ?? "",
+        /https?:\/\/|Website|Mini App/,
+      );
       assert.deepEqual(await getSignalBotChatState(redis, "-100"), before);
       assert.equal(
         db.queries.some((query) =>

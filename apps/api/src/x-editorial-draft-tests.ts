@@ -272,7 +272,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     name: "validator rejects dashboard language from the old fallback voice",
     run: () => {
       const postText =
-        "Tracked money is backing Spain. The important part is who is there.";
+        "Tracked money is backing Spain. The important part is who is there. https://app.hunch.trade";
       const validated = validateXEditorialModelOutput({
         config,
         output: {
@@ -290,6 +290,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       });
       assert.ok(validated.issues.includes("internal_language"));
       assert.ok(validated.issues.includes("dashboard_voice"));
+      assert.ok(validated.issues.includes("url"));
     },
   },
   {
@@ -420,7 +421,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
-    name: "Telegram renderer applies editorial formatting directly without a copy block",
+    name: "Telegram renderer applies editorial formatting without links or a copy block",
     run: () => {
       const postText =
         "$56.4K is backing Spain.\n\nOne position. No hedge.\n\nEither conviction — or chaos?";
@@ -444,14 +445,11 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           usedFactIds: ["market", "actor"],
           version: 1,
         },
-        miniAppUrl: "https://t.me/hunch_signal_bot/hunch?startapp=market-1",
-        websiteUrl: "https://app.hunch.trade/events/world-cup?market=market-1",
       });
       assert.match(message, /^\*\$56\\\.4K is backing Spain\\\.\*/);
-      assert.match(message, /_Either conviction — or chaos\?_\n\n🌐 Website/);
+      assert.match(message, /_Either conviction — or chaos\?_$/);
       assert.doesNotMatch(message, /```|Bold in X|Italic in X|🎨/);
-      assert.match(message, /🌐 Website/);
-      assert.match(message, /📱 Telegram Mini App/);
+      assert.doesNotMatch(message, /https?:\/\/|Website|Mini App/);
     },
   },
   {
@@ -667,6 +665,92 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
+    name: "OpenRouter composer limits reasoning and recovers empty content with more output budget",
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      const requests: Array<Record<string, unknown>> = [];
+      globalThis.fetch = (async (
+        _url: string | URL | Request,
+        init?: RequestInit,
+      ) => {
+        requests.push(
+          JSON.parse(String(init?.body)) as Record<string, unknown>,
+        );
+        if (requests.length === 1) {
+          return new Response(
+            JSON.stringify({
+              choices: [
+                {
+                  finish_reason: "length",
+                  message: { content: null },
+                  native_finish_reason: "max_tokens",
+                },
+              ],
+              usage: {
+                completion_tokens: 700,
+                completion_tokens_details: { reasoning_tokens: 700 },
+              },
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        return new Response(
+          JSON.stringify({
+            choices: [
+              {
+                finish_reason: "stop",
+                message: {
+                  content: JSON.stringify({
+                    version: 1,
+                    status: "ready",
+                    marketId: "market-1",
+                    selectedSide: "YES",
+                    postText:
+                      "$56.4K is backing Spain to win the World Cup.\n\nOne position. No hedge.",
+                    formatting: [
+                      {
+                        style: "bold",
+                        text: "$56.4K is backing Spain to win the World Cup.",
+                      },
+                    ],
+                    storyFamily: "fresh_bet",
+                    usedFactIds: ["market", "actor"],
+                    safetyFlags: [],
+                  }),
+                },
+              },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }) as typeof fetch;
+      try {
+        const compose = createOpenRouterXEditorialDraftComposer({
+          apiKey: "test-key",
+          config,
+        });
+        const draft = await compose({ source });
+        assert.equal(draft.status, "ready");
+        assert.equal(requests.length, 2);
+        assert.deepEqual(requests[0]?.reasoning, {
+          effort: "minimal",
+          exclude: true,
+        });
+        assert.equal(requests[0]?.max_tokens, 700);
+        assert.equal(requests[1]?.max_tokens, 1_400);
+        assert.equal(
+          (requests[0]?.response_format as { type?: unknown }).type,
+          "json_schema",
+        );
+        assert.deepEqual(requests[0]?.provider, {
+          require_parameters: true,
+        });
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    },
+  },
+  {
     name: "OpenRouter composer reports missing content after one repair retry",
     run: async () => {
       const originalFetch = globalThis.fetch;
@@ -690,6 +774,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           (error: unknown) => {
             assert.ok(error instanceof XEditorialComposerError);
             assert.equal(error.code, "missing_content");
+            assert.ok(error.issues.includes("finish_reason:error"));
             return true;
           },
         );
@@ -1100,10 +1185,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         /^\*\$56\\\.4K is backing Spain to win the World Cup\\\.\*/,
       );
       assert.doesNotMatch(deliveredText, /```|Bold in X|Italic in X|🎨/);
-      assert.match(deliveredText, /🌐 Website/);
-      assert.match(deliveredText, /utm_campaign=signal_editorial/);
-      assert.match(deliveredText, /📱 Telegram Mini App/);
-      assert.match(deliveredText, /startapp=/);
+      assert.doesNotMatch(deliveredText, /https?:\/\/|Website|Mini App/);
       assert.equal(telegramMessages[0]?.parse_mode, "MarkdownV2");
       assert.equal("reply_markup" in (telegramMessages[0] ?? {}), false);
       assert.equal(

@@ -1,6 +1,5 @@
 import type { DbQuery } from "../db.js";
 import { parseTelegramMarketIdentityV1 } from "./signal-publication-contract.js";
-import { buildSignalBotMiniAppEventUrl } from "./signal-bot-mini-app-links.js";
 import {
   beginSignalBotMessageDelivery,
   finishSignalBotMessageDelivery,
@@ -138,30 +137,6 @@ function isSafeHttpUrl(value: string | null | undefined): value is string {
   }
 }
 
-function safeUrlOrUndefined(
-  value: string | null | undefined,
-): string | undefined {
-  return isSafeHttpUrl(value) ? new URL(value).toString() : undefined;
-}
-
-function buildOpenMarketUrl(input: {
-  appBaseUrl: string;
-  eventId: string;
-  marketId: string | null;
-  side?: "NO" | "YES" | null;
-}): string {
-  const url = new URL(
-    `/events/${encodeURIComponent(input.eventId)}`,
-    input.appBaseUrl,
-  );
-  if (input.marketId) url.searchParams.set("market", input.marketId);
-  if (input.side) url.searchParams.set("side", input.side);
-  url.searchParams.set("utm_source", "x");
-  url.searchParams.set("utm_medium", "social");
-  url.searchParams.set("utm_campaign", "signal_editorial");
-  return url.toString();
-}
-
 function readExternalResearch(modelMeta: Record<string, unknown>): {
   fact: Record<string, unknown> | null;
   urls: string[];
@@ -263,33 +238,13 @@ function buildInitialSource(input: {
     );
   }
   addFact("external_context", "Validated external research", external.fact);
-  const marketUrl =
-    note.eventId && note.marketId
-      ? buildOpenMarketUrl({
-          appBaseUrl: input.appBaseUrl,
-          eventId: note.eventId,
-          marketId: note.marketId,
-          side: input.selectedSide,
-        })
-      : null;
-  const miniAppUrl = buildSignalBotMiniAppEventUrl({
-    eventId: note.eventId,
-    marketId: note.marketId,
-    miniAppLinkBase: input.telegramMiniAppLinkBase,
-    side: input.selectedSide,
-  });
   return {
     facts,
     kind: input.kind,
     marketId: note.marketId ?? identity?.marketId ?? note.id,
-    miniAppUrl:
-      safeUrlOrUndefined(miniAppUrl) ??
-      safeUrlOrUndefined(input.telegramMiniAppLinkBase),
     noteId: note.id,
     recentOpenings: input.recentOpenings,
     selectedSide: input.selectedSide,
-    websiteUrl:
-      safeUrlOrUndefined(marketUrl) ?? safeUrlOrUndefined(input.appBaseUrl),
   };
 }
 
@@ -336,20 +291,6 @@ function buildFollowthroughSource(input: {
   const identity = parseTelegramMarketIdentityV1(
     asObject(input.candidate.metrics).telegramMarketIdentityV1,
   );
-  const marketUrl = input.candidate.event_id
-    ? buildOpenMarketUrl({
-        appBaseUrl: input.appBaseUrl,
-        eventId: input.candidate.event_id,
-        marketId: input.candidate.market_id,
-        side: input.stats.signalSide,
-      })
-    : null;
-  const miniAppUrl = buildSignalBotMiniAppEventUrl({
-    eventId: input.candidate.event_id,
-    marketId: input.candidate.market_id,
-    miniAppLinkBase: input.telegramMiniAppLinkBase,
-    side: input.stats.signalSide,
-  });
   return {
     facts: [
       {
@@ -382,14 +323,9 @@ function buildFollowthroughSource(input: {
     ],
     kind: input.kind,
     marketId: input.candidate.market_id,
-    miniAppUrl:
-      safeUrlOrUndefined(miniAppUrl) ??
-      safeUrlOrUndefined(input.telegramMiniAppLinkBase),
     noteId: input.candidate.thread_root_note_id,
     recentOpenings: input.recentOpenings,
     selectedSide: input.stats.signalSide as "NO" | "YES",
-    websiteUrl:
-      safeUrlOrUndefined(marketUrl) ?? safeUrlOrUndefined(input.appBaseUrl),
   };
 }
 
@@ -488,18 +424,6 @@ async function loadRecentOpenings(input: {
 
 function escapeMarkdownV2(value: string): string {
   return value.replace(/([_*[\]()~`>#+\-=|{}.!\\])/g, "\\$1");
-}
-
-function escapeMarkdownV2LinkTarget(value: string): string {
-  return value.replace(/([)\\])/g, "\\$1");
-}
-
-function buildVisibleLink(
-  label: string,
-  url: string | undefined,
-): string | null {
-  if (!isSafeHttpUrl(url)) return null;
-  return `${label}: [${escapeMarkdownV2(url)}](${escapeMarkdownV2LinkTarget(url)})`;
 }
 
 function sentence(value: string): string {
@@ -805,8 +729,6 @@ export function buildXEditorialFallbackPost(input: {
 
 export function buildXEditorialTelegramDraftMessage(input: {
   draft: XEditorialDraftV1;
-  miniAppUrl?: string;
-  websiteUrl?: string;
 }): string {
   const postText = input.draft.postText ?? "";
   const ranges: Array<{
@@ -842,11 +764,7 @@ export function buildXEditorialTelegramDraftMessage(input: {
     cursor = range.end;
   }
   formattedPost.push(escapeMarkdownV2(postText.slice(cursor)));
-  const links = [
-    buildVisibleLink("🌐 Website", input.websiteUrl),
-    buildVisibleLink("📱 Telegram Mini App", input.miniAppUrl),
-  ].filter((line): line is string => line != null);
-  return [formattedPost.join(""), ...links].join("\n\n");
+  return formattedPost.join("");
 }
 
 async function sendPreviewDraft(input: {
@@ -920,8 +838,6 @@ async function sendPreviewDraft(input: {
       `🧪 _${escapeMarkdownV2("Preview only — not recorded.")}_`,
       buildXEditorialTelegramDraftMessage({
         draft,
-        miniAppUrl: input.source.miniAppUrl,
-        websiteUrl: input.source.websiteUrl,
       }),
     ].join("\n\n"),
   });
@@ -1225,8 +1141,6 @@ async function deliverDraft(input: {
     parse_mode: "MarkdownV2",
     text: buildXEditorialTelegramDraftMessage({
       draft,
-      miniAppUrl: input.source.miniAppUrl,
-      websiteUrl: input.source.websiteUrl,
     }),
   });
   if (!result.ok) {
