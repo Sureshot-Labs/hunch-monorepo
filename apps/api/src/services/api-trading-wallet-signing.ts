@@ -103,7 +103,6 @@ export type PrivyServerSignerConfiguration = {
   builderCode?: string;
   legacyBuyPolicyId?: string;
   legacySellPolicyId?: string;
-  relayAllowedDepositors?: readonly string[];
   relayMaxSourceRaw?: string;
 };
 
@@ -184,7 +183,6 @@ export async function resolvePolymarketBotPolicyFundingCapRaw(): Promise<bigint>
     const policy = await PrivyService.getPolicyMetadata(policyId);
     const relayConfiguration = loadRelayEvmExecutionConfiguration();
     const validation = validateCombinedPolymarketRelayPolicy({
-      allowedRelayDepositors: relayConfiguration.allowedDepositors,
       builderCode: env.polymarketBuilderCode,
       exchangeAddresses,
       fundingRouterAddress,
@@ -259,7 +257,6 @@ export async function inspectServerEvmWalletAuthorization(input: {
     builderCode: env.polymarketBuilderCode,
     legacyBuyPolicyId: env.privyPolymarketBotBuyPolicyId,
     legacySellPolicyId: env.privyPolymarketBotSellPolicyId,
-    relayAllowedDepositors: relayConfiguration?.allowedDepositors,
     relayMaxSourceRaw: relayConfiguration?.maxSourceRaw,
   };
   const signerId = configuration.authorizationId.trim();
@@ -506,7 +503,6 @@ export async function inspectServerEvmWalletAuthorization(input: {
     const validation =
       id === combinedPolicyId
         ? validateCombinedPolymarketRelayPolicy({
-            allowedRelayDepositors: configuration.relayAllowedDepositors,
             builderCode: configuration.builderCode?.trim() ?? "",
             exchangeAddresses: configuration.exchangeAddresses,
             fundingRouterAddress: configuration.fundingRouterAddress,

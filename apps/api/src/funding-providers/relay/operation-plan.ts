@@ -27,6 +27,7 @@ import type { FundingCommitStep } from "../../funding/persistence/funding-operat
 import { resolveActionSponsorship } from "../../funding/execution/sponsorship-policy.js";
 import { RelayPinnedActionValidator } from "./action-validator.js";
 import { isRelayPinnedStableAsset } from "./mappings.js";
+import { canonicalizeRelayDepositoryV2SelfBoundAction } from "./rehearsal.js";
 import type { createRelayReferenceCodec } from "./reference-codec.js";
 import type { NormalizedRelayWalletQuote } from "./wallet-adapter.js";
 
@@ -250,7 +251,47 @@ export function relayDelegatedCommitSteps(
       "delegated Relay EVM route requires exact approve/deposit steps",
     );
   }
-  return input.steps.map((step, ordinal) => ({
+  const quotedDepositStep = input.steps[1];
+  const quotedDepositAction = quotedDepositStep.normalizedAction;
+  if (
+    quotedDepositAction.kind !== "evm_transaction" ||
+    typeof quotedDepositAction.to !== "string" ||
+    typeof quotedDepositAction.data !== "string" ||
+    quotedDepositAction.valueRaw !== "0" ||
+    quotedDepositAction.senderWalletId !== input.profile.walletId
+  ) {
+    throw new Error("delegated Relay deposit quote is not an exact EVM action");
+  }
+  const canonicalDeposit = canonicalizeRelayDepositoryV2SelfBoundAction({
+    action: {
+      data: quotedDepositAction.data,
+      to: quotedDepositAction.to,
+      value: 0n,
+    },
+    amount: BigInt(input.sourceAmount.raw),
+    token: input.sourceAmount.asset.assetId,
+    user: input.profile.address,
+  });
+  const canonicalDepositAction = jsonRecord({
+    ...quotedDepositAction,
+    data: canonicalDeposit.data,
+  });
+  const committedSteps = [
+    input.steps[0],
+    {
+      ...quotedDepositStep,
+      actionFingerprint: canonicalJsonHash(canonicalDepositAction),
+      normalizedAction: canonicalDepositAction,
+      actionValidationResult: jsonRecord({
+        ...quotedDepositStep.actionValidationResult,
+        quotedActionFingerprint: quotedDepositStep.actionFingerprint,
+        quotedDepositorAddress: input.profile.address,
+        committedDepositorMode: "msg_sender_via_zero",
+        relayOrderId: canonicalDeposit.orderId,
+      }),
+    },
+  ];
+  return committedSteps.map((step, ordinal) => ({
     ...step,
     stepKind: ordinal === 0 ? "approval" : step.stepKind,
     state: "planned",

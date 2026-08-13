@@ -80,8 +80,6 @@ async function main(): Promise<void> {
     authorizationPrivateKey: env.privyWalletAuthorizationKey,
     configuration: {
       ...configuration,
-      relayAllowedDepositors:
-        loadRelayEvmExecutionConfiguration().allowedDepositors,
       relayMaxSourceRaw: loadRelayEvmExecutionConfiguration().maxSourceRaw,
     },
   });

@@ -5,6 +5,7 @@ import { stableWalletOpaqueId } from "../../../account-value/canonical.js";
 import {
   BASE_USDC,
   RELAY_DEPOSITORY_V2,
+  RELAY_SELF_DEPOSITOR,
 } from "../../../funding-providers/relay/rehearsal.js";
 import { relayDelegatedCommitSteps } from "../../../funding-providers/relay/operation-plan.js";
 import {
@@ -30,7 +31,6 @@ import { relayOwnedRefundEventMatches } from "../../reconciliation/relay-owned-r
 import { canTransitionFundingOperation } from "../../domain/transitions.js";
 
 const WALLET = "0x1111111111111111111111111111111111111111";
-const SECOND_WALLET = "0x2222222222222222222222222222222222222222";
 const WALLET_ID = stableWalletOpaqueId({
   walletType: "ethereum",
   networkId: "evm:8453",
@@ -196,7 +196,7 @@ const depositRule = {
       "depositErc20.depositor",
       "ethereum_calldata",
       "eq",
-      WALLET,
+      RELAY_SELF_DEPOSITOR,
       DEPOSIT_ABI,
     ),
     condition(
@@ -215,62 +215,44 @@ const depositRule = {
     ),
   ],
 };
-const secondDepositRule = {
+const foreignDepositRule = {
   ...depositRule,
   conditions: depositRule.conditions.map((entry) =>
     entry.field === "depositErc20.depositor"
-      ? { ...entry, value: SECOND_WALLET }
+      ? { ...entry, value: WALLET }
       : entry,
   ),
 };
 
-assert.deepEqual(
-  validateRelayEvmPolicyRules([approveRule, depositRule], WALLET),
-  {
-    valid: true,
-    maxSourceRaw: BigInt(CAP),
-    issues: [],
-  },
-);
+assert.deepEqual(validateRelayEvmPolicyRules([approveRule, depositRule]), {
+  valid: true,
+  maxSourceRaw: BigInt(CAP),
+  issues: [],
+});
 assert.equal(
-  validateRelayEvmPolicyRules(
-    [
-      approveRule,
-      {
-        ...depositRule,
-        conditions: depositRule.conditions.map((entry) =>
-          entry.field === "depositErc20.amount"
-            ? { ...entry, value: "9999999" }
-            : entry,
-        ),
-      },
-    ],
-    WALLET,
-  ).valid,
+  validateRelayEvmPolicyRules([
+    approveRule,
+    {
+      ...depositRule,
+      conditions: depositRule.conditions.map((entry) =>
+        entry.field === "depositErc20.amount"
+          ? { ...entry, value: "9999999" }
+          : entry,
+      ),
+    },
+  ]).valid,
   false,
   "approve and deposit policy caps cannot drift",
 );
 assert.equal(
-  validateRelayEvmPolicyRules([approveRule, depositRule], BASE_USDC).valid,
+  validateRelayEvmPolicyRules([approveRule, foreignDepositRule]).valid,
   false,
-  "Relay policy depositor must equal the executing wallet",
+  "Relay policy depositor must be the contract self-binding zero address",
 );
 assert.equal(
-  validateRelayEvmPolicyRules(
-    [approveRule, depositRule, secondDepositRule],
-    WALLET,
-  ).valid,
+  validateRelayEvmPolicyRules([approveRule, depositRule, depositRule]).valid,
   false,
-  "an undeclared foreign depositor rule broadens the Relay policy",
-);
-assert.equal(
-  validateRelayEvmPolicyRules(
-    [approveRule, depositRule, secondDepositRule],
-    WALLET,
-    [WALLET, SECOND_WALLET],
-  ).valid,
-  true,
-  "the declared finite pilot-wallet allowlist is accepted exactly",
+  "duplicate self-bound deposit rules broaden the Relay policy",
 );
 
 const approve = new Interface(APPROVE_ABI);
@@ -305,7 +287,7 @@ assert.deepEqual(
       actionId: "relay-deposit",
       to: RELAY_DEPOSITORY_V2,
       data: deposit.encodeFunctionData("depositErc20", [
-        WALLET,
+        RELAY_SELF_DEPOSITOR,
         BASE_USDC,
         RAW,
         orderId,
@@ -362,7 +344,12 @@ const delegatedSteps = relayDelegatedCommitSteps({
       executorId: "web",
       payerRequirement: "privy_sponsor",
       dependsOnOrdinal: null,
-      normalizedAction: { actionId: "relay:fixture:approve", to: BASE_USDC },
+      normalizedAction: {
+        ...actionBase,
+        actionId: "relay:fixture:approve",
+        to: BASE_USDC,
+        data: approve.encodeFunctionData("approve", [RELAY_DEPOSITORY_V2, RAW]),
+      },
       actionValidationResult: {},
     },
     {
@@ -375,8 +362,15 @@ const delegatedSteps = relayDelegatedCommitSteps({
       payerRequirement: "privy_sponsor",
       dependsOnOrdinal: 0,
       normalizedAction: {
+        ...actionBase,
         actionId: "relay:fixture:deposit",
         to: RELAY_DEPOSITORY_V2,
+        data: deposit.encodeFunctionData("depositErc20", [
+          WALLET,
+          BASE_USDC,
+          RAW,
+          orderId,
+        ]),
       },
       actionValidationResult: {},
     },
@@ -409,6 +403,55 @@ assert.deepEqual(
 assert.equal(
   delegatedSteps[1]?.actionValidationResult.postconditionEvidenceKind,
   "exact_erc20_source_debit_v1",
+);
+const committedDepositData = delegatedSteps[1]?.normalizedAction.data;
+assert.equal(typeof committedDepositData, "string");
+const committedDeposit = deposit.decodeFunctionData(
+  "depositErc20",
+  String(committedDepositData),
+);
+assert.equal(
+  String(committedDeposit.depositor).toLowerCase(),
+  RELAY_SELF_DEPOSITOR,
+  "the durable Relay action uses Depository V2 msg.sender self-binding",
+);
+assert.equal(
+  delegatedSteps[1]?.actionValidationResult.quotedDepositorAddress,
+  WALLET,
+);
+assert.equal(
+  delegatedSteps[1]?.actionValidationResult.committedDepositorMode,
+  "msg_sender_via_zero",
+);
+assert.equal(
+  delegatedSteps[1]?.actionValidationResult.quotedActionFingerprint,
+  "deposit-fingerprint",
+);
+assert.notEqual(
+  delegatedSteps[1]?.actionFingerprint,
+  "deposit-fingerprint",
+  "canonical zero-depositor calldata receives its own durable fingerprint",
+);
+assert.throws(
+  () =>
+    validateRelayDelegatedEvmAction({
+      action: {
+        ...actionBase,
+        actionId: "relay-explicit-wallet-deposit",
+        to: RELAY_DEPOSITORY_V2,
+        data: deposit.encodeFunctionData("depositErc20", [
+          WALLET,
+          BASE_USDC,
+          RAW,
+          orderId,
+        ]),
+      },
+      actionValidationResult: { relayStepKind: "deposit" },
+      expectedRaw: RAW,
+      walletAddress: WALLET,
+      walletId: WALLET_ID,
+    }),
+  "runtime must reject the original explicit-wallet quote envelope",
 );
 assert.equal(
   delegatedSteps[0]?.actionValidationResult.requiresSingleOperationBundle,

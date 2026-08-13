@@ -22,10 +22,8 @@ export type CombinedPolymarketRelayPolicyValidation = PolicyValidationResult &
  */
 export function validateCombinedPolymarketRelayPolicy(
   input: Readonly<{
-    allowedRelayDepositors?: readonly string[];
     builderCode: string;
     exchangeAddresses: readonly string[];
-    expectedRelayDepositor?: string;
     fundingRouterAddress: string;
     maxBuyUsd: number;
     policy: PrivyPolicyMetadata;
@@ -57,11 +55,7 @@ export function validateCombinedPolymarketRelayPolicy(
     };
   }
 
-  const relayValidation = validateRelayEvmPolicyRules(
-    input.policy.rules,
-    input.expectedRelayDepositor,
-    input.allowedRelayDepositors,
-  );
+  const relayValidation = validateRelayEvmPolicyRules(input.policy.rules);
   const expectedCap = input.relayMaxSourceRaw?.trim() ?? "";
   const capMatches =
     /^[1-9][0-9]*$/u.test(expectedCap) &&

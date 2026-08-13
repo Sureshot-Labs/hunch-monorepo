@@ -30,7 +30,6 @@ export type PrivyDelegatedFundingDriverConfig = Readonly<{
     "signerId" | "signerFingerprint" | "policyId" | "policyFingerprint"
   > &
     Readonly<{
-      relayAllowedDepositors?: readonly string[];
       relayMaxSourceRaw?: string;
     }>;
 }>;
@@ -382,8 +381,6 @@ export class PrivyDelegatedFundingDriver implements DelegatedFundingNetworkDrive
           );
         }
         const policyValidation = validateCombinedPolymarketRelayPolicy({
-          allowedRelayDepositors:
-            this.input.configuration.relayAllowedDepositors,
           builderCode: fundingSidecarRuntimeConfig.polymarketBuilderCode,
           exchangeAddresses: [
             fundingSidecarRuntimeConfig.polymarketExchangeAddress,
@@ -391,10 +388,6 @@ export class PrivyDelegatedFundingDriver implements DelegatedFundingNetworkDrive
           ],
           fundingRouterAddress: POLYMARKET_FUNDING_ROUTER.polygon,
           maxBuyUsd: fundingSidecarRuntimeConfig.polymarketBotBuyPolicyMaxUsd,
-          expectedRelayDepositor:
-            input.requiredProfileId === TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID
-              ? input.walletAddress
-              : undefined,
           policy: { ...normalizedPolicy, chainType: "ethereum" },
           profile: "buy_sell",
           relayMaxSourceRaw: this.input.configuration.relayMaxSourceRaw,

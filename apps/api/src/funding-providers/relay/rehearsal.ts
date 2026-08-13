@@ -128,6 +128,9 @@ const approvalProxyV3Interface = new Interface([
 const depositoryV2Interface = new Interface([
   "function depositErc20(address depositor,address token,uint256 amount,bytes32 id)",
 ]);
+
+export const RELAY_SELF_DEPOSITOR =
+  "0x0000000000000000000000000000000000000000";
 const cleanupInterface = new Interface([
   "function cleanupErc20sViaCall(address[] tokens,address[] recipients,bytes[] calls,uint256[] values)",
 ]);
@@ -755,6 +758,7 @@ export function validateRelayDepositoryV2Action(
     amount: bigint;
     token: string;
     user: string;
+    depositorMode?: "quoted_wallet" | "self_bound";
   }>,
 ): string {
   const { action } = input;
@@ -767,7 +771,7 @@ export function validateRelayDepositoryV2Action(
   );
   assertAddress(
     address(decoded.depositor, "V2 depositor"),
-    input.user,
+    input.depositorMode === "self_bound" ? RELAY_SELF_DEPOSITOR : input.user,
     "V2 depositor",
   );
   assertAddress(address(decoded.token, "V2 token"), input.token, "V2 token");
@@ -779,6 +783,29 @@ export function validateRelayDepositoryV2Action(
     throw new Error("V2 Relay order id must be non-zero bytes32");
   }
   return orderId.toLowerCase();
+}
+
+export function canonicalizeRelayDepositoryV2SelfBoundAction(
+  input: Readonly<{
+    action: Pick<ValidatedRelayAction, "data" | "to" | "value">;
+    amount: bigint;
+    token: string;
+    user: string;
+  }>,
+): Readonly<{ data: string; orderId: string }> {
+  const orderId = validateRelayDepositoryV2Action({
+    ...input,
+    depositorMode: "quoted_wallet",
+  });
+  return {
+    data: depositoryV2Interface.encodeFunctionData("depositErc20", [
+      RELAY_SELF_DEPOSITOR,
+      input.token,
+      input.amount,
+      orderId,
+    ]),
+    orderId,
+  };
 }
 
 function validateV2Erc20Deposit(

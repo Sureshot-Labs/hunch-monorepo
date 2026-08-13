@@ -847,6 +847,9 @@ signer and policy ID is insufficient.
 2. `telegram_relay_evm_funding_v1`
    - Base source initially;
    - exact allowlisted Relay transaction targets/spenders and chain;
+   - Relay Depository V2 `depositErc20.depositor` is committed as the zero
+     address so the immutable Depository contract binds the emitted depositor
+     to `msg.sender`; no per-wallet Privy rules or depositor allowlist;
    - zero native value unless an explicitly validated action requires it;
    - exact committed source amount and bounded fee/slippage;
    - no arbitrary token approval, transfer, or contract call.
@@ -1549,6 +1552,10 @@ Privy activation claim.
 
 1. Prove that the actual Relay Base target/spender envelope is finite and
    expressible by the intended Privy outer policy; otherwise retain bot review.
+   The quoted action remains strictly bound to the managed wallet, then the
+   committed delegated action canonicalizes only `depositErc20.depositor` to
+   `address(0)`. Relay Depository V2 resolves that value to `msg.sender`, which
+   permits one global exact Privy deposit rule without broadening attribution.
 2. Add the exact Relay EVM delegated profile and enable only capability-backed
    Base USDC targets in local policy.
 3. Prove quote/commit/fake broadcast/reconciliation/destination readiness.

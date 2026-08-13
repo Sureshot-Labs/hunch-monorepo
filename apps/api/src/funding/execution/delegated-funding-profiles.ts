@@ -4,6 +4,7 @@ import { decodePolymarketFundingCalldata } from "../../services/polymarket-fundi
 import {
   BASE_USDC,
   RELAY_DEPOSITORY_V2,
+  RELAY_SELF_DEPOSITOR,
 } from "../../funding-providers/relay/rehearsal.js";
 import {
   POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
@@ -171,7 +172,6 @@ function positiveCapCondition(
 
 export function relayEvmPolicyRuleKind(
   rule: Readonly<Record<string, unknown>>,
-  expectedDepositor?: string,
 ): "approve" | "deposit" | null {
   if (rule.action !== "ALLOW" || rule.method !== "eth_sendTransaction") {
     return null;
@@ -244,8 +244,7 @@ export function relayEvmPolicyRuleKind(
         condition.field_source === "ethereum_calldata" &&
         condition.operator === "eq" &&
         conditionAbiEquals(condition, RELAY_DEPOSIT_ERC20_ABI) &&
-        (expectedDepositor === undefined ||
-          scalar(condition.value) === expectedDepositor.toLowerCase()),
+        scalar(condition.value) === RELAY_SELF_DEPOSITOR,
     ).length === 1 &&
     positiveCapCondition(
       conditions,
@@ -257,8 +256,6 @@ export function relayEvmPolicyRuleKind(
 
 export function validateRelayEvmPolicyRules(
   rules: readonly Readonly<Record<string, unknown>>[],
-  expectedDepositor?: string,
-  allowedDepositors?: readonly string[],
 ): Readonly<{
   valid: boolean;
   maxSourceRaw: bigint | null;
@@ -271,45 +268,10 @@ export function validateRelayEvmPolicyRules(
   const approve = relayRules.filter((entry) => entry.kind === "approve");
   const deposit = relayRules.filter((entry) => entry.kind === "deposit");
   const issues: string[] = [];
-  const normalizedExpectedDepositor = expectedDepositor?.toLowerCase() ?? null;
-  const normalizedAllowedDepositors = (
-    allowedDepositors ?? (expectedDepositor ? [expectedDepositor] : [])
-  ).map((address) => address.toLowerCase());
-  const allowedDepositorSet = new Set(normalizedAllowedDepositors);
-  const depositors = deposit.map((entry) => {
-    const matches = conditionsForRule(entry.rule).filter(
-      (condition) =>
-        condition.field === "depositErc20.depositor" &&
-        condition.field_source === "ethereum_calldata" &&
-        condition.operator === "eq" &&
-        conditionAbiEquals(condition, RELAY_DEPOSIT_ERC20_ABI),
-    );
-    return matches.length === 1 ? scalar(matches[0]?.value) : "";
-  });
-  if (
-    normalizedAllowedDepositors.length === 0 ||
-    normalizedAllowedDepositors.some(
-      (address) => !/^0x[0-9a-f]{40}$/u.test(address),
-    ) ||
-    allowedDepositorSet.size !== normalizedAllowedDepositors.length
-  ) {
-    issues.push("Relay policy requires a unique exact depositor allowlist");
-  }
-  if (
-    normalizedExpectedDepositor &&
-    !allowedDepositorSet.has(normalizedExpectedDepositor)
-  ) {
-    issues.push("Relay policy does not allow the executing-wallet depositor");
-  }
   if (approve.length !== 1)
     issues.push("Relay policy requires one exact approve rule");
-  if (
-    deposit.length !== normalizedAllowedDepositors.length ||
-    depositors.some((address) => !allowedDepositorSet.has(address)) ||
-    new Set(depositors).size !== depositors.length
-  ) {
-    issues.push("Relay policy deposit rules must equal the exact allowlist");
-  }
+  if (deposit.length !== 1)
+    issues.push("Relay policy requires one exact self-bound deposit rule");
   const approveCap = approve[0]
     ? positiveCapCondition(
         conditionsForRule(approve[0].rule),

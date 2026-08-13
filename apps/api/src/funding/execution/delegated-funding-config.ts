@@ -32,7 +32,6 @@ export type RelayEvmExecutionConfiguration = Readonly<{
   signerFingerprint: string;
   policyId: string;
   policyFingerprint: string;
-  allowedDepositors: readonly string[];
   maxSourceRaw: string;
   minimumSequentialTtlMs: number;
 }>;
@@ -41,13 +40,6 @@ export function loadRelayEvmExecutionConfiguration(
   source: Environment = process.env,
 ): RelayEvmExecutionConfiguration {
   const maxSourceRaw = value(source, "HUNCH_FUNDING_RELAY_EVM_MAX_SOURCE_RAW");
-  const allowedDepositors = value(
-    source,
-    "HUNCH_FUNDING_RELAY_EVM_ALLOWED_DEPOSITORS",
-  )
-    .split(",")
-    .map((entry) => entry.trim().toLowerCase())
-    .filter((entry) => entry.length > 0);
   const ttl = Number(value(source, "HUNCH_FUNDING_RELAY_EVM_MIN_TTL_MS"));
   return {
     enabled:
@@ -61,7 +53,6 @@ export function loadRelayEvmExecutionConfiguration(
       source,
       "PRIVY_POLYMARKET_BOT_BUY_SELL_POLICY_FINGERPRINT",
     ),
-    allowedDepositors,
     maxSourceRaw,
     minimumSequentialTtlMs: Number.isSafeInteger(ttl) && ttl > 0 ? ttl : 45_000,
   };
@@ -75,12 +66,6 @@ export function relayEvmProfileConfigured(
     config.signerFingerprint.length >= 32 &&
     config.policyId.length >= 3 &&
     config.policyFingerprint.length >= 32 &&
-    config.allowedDepositors.length > 0 &&
-    config.allowedDepositors.every((address) =>
-      /^0x[0-9a-f]{40}$/u.test(address),
-    ) &&
-    new Set(config.allowedDepositors).size ===
-      config.allowedDepositors.length &&
     /^[1-9][0-9]*$/u.test(config.maxSourceRaw) &&
     config.minimumSequentialTtlMs >= 30_000
   );

@@ -910,7 +910,6 @@ export async function ensureTelegramFundingAuthorization(
         environment.PRIVY_WALLET_AUTHORIZATION_KEY?.trim() ?? "",
       configuration: {
         ...configuration,
-        relayAllowedDepositors: relayConfiguration.allowedDepositors,
         relayMaxSourceRaw: relayConfiguration.maxSourceRaw,
       },
     });
@@ -993,7 +992,6 @@ export async function ensureTelegramRelayEvmFundingAuthorization(
         environment.PRIVY_WALLET_AUTHORIZATION_KEY?.trim() ?? "",
       configuration: {
         ...configuration,
-        relayAllowedDepositors: configuration.allowedDepositors,
         relayMaxSourceRaw: configuration.maxSourceRaw,
       },
     });

@@ -51,6 +51,7 @@ import { validateCombinedPolymarketRelayPolicy } from "./funding/execution/combi
 import {
   BASE_USDC,
   RELAY_DEPOSITORY_V2,
+  RELAY_SELF_DEPOSITOR,
 } from "./funding-providers/relay/rehearsal.js";
 import { FundingPersistenceError } from "./funding/persistence/funding-operation-repository.js";
 import { FundingTradeAttemptError } from "./funding/persistence/funding-trade-attempt-repository.js";
@@ -399,7 +400,7 @@ const relayDepositAbi = [
   },
 ];
 
-function buildCombinedPolicyWithRelay(depositor: string): PrivyPolicyMetadata {
+function buildCombinedPolicyWithRelay(): PrivyPolicyMetadata {
   const condition = (
     field: string,
     fieldSource: string,
@@ -471,7 +472,7 @@ function buildCombinedPolicyWithRelay(depositor: string): PrivyPolicyMetadata {
           "depositErc20.depositor",
           "ethereum_calldata",
           "eq",
-          depositor,
+          RELAY_SELF_DEPOSITOR,
           relayDepositAbi,
         ),
         condition(
@@ -932,13 +933,10 @@ const tests: TestCase[] = [
       });
       assert.equal(combinedValidation.valid, true);
       assert.equal(combinedValidation.fundingMaxRaw, policyFundingMaxRaw);
-      const relayDepositor = "0x0000000000000000000000000000000000000010";
-      const combinedWithRelay = buildCombinedPolicyWithRelay(relayDepositor);
+      const combinedWithRelay = buildCombinedPolicyWithRelay();
       const combinedRelayValidation = validateCombinedPolymarketRelayPolicy({
-        allowedRelayDepositors: [relayDepositor],
         builderCode: policyBuilderCode,
         exchangeAddresses: policyExchangeAddresses,
-        expectedRelayDepositor: relayDepositor,
         fundingRouterAddress: policyFundingRouterAddress,
         maxBuyUsd: 2,
         policy: combinedWithRelay,
@@ -964,7 +962,6 @@ const tests: TestCase[] = [
       ).value = "0x0000000000000000000000000000000000000020";
       assert.equal(
         validateCombinedPolymarketRelayPolicy({
-          allowedRelayDepositors: [relayDepositor],
           builderCode: policyBuilderCode,
           exchangeAddresses: policyExchangeAddresses,
           fundingRouterAddress: policyFundingRouterAddress,
@@ -1235,12 +1232,11 @@ const tests: TestCase[] = [
       assert.equal((await inspect(true, ["BUY", "SELL"])).state, "ready");
       assert.equal((await inspect(true, ["SELL"])).state, "ready");
       assert.equal((await inspect(true, ["BUY"])).state, "ready");
-      const revisedCombinedPolicy = buildCombinedPolicyWithRelay(walletAddress);
+      const revisedCombinedPolicy = buildCombinedPolicyWithRelay();
       policies.set("buy-sell-policy", revisedCombinedPolicy);
       configuration.policyFingerprint = knownPrivyPolicyFingerprint(
         revisedCombinedPolicy,
       );
-      configuration.relayAllowedDepositors = [walletAddress];
       configuration.relayMaxSourceRaw = relayPolicyCapRaw;
       assert.equal(
         (await inspect(true, ["BUY", "SELL"])).state,
@@ -1270,7 +1266,6 @@ const tests: TestCase[] = [
       configuration.policyFingerprint = knownPrivyPolicyFingerprint(
         buildValidPolymarketBuySellPolicy(),
       );
-      configuration.relayAllowedDepositors = undefined;
       configuration.relayMaxSourceRaw = undefined;
       additionalSigners = [
         { overridePolicyIds: ["sell-policy"], signerId: "signer-1" },

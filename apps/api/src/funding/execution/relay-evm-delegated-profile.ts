@@ -67,6 +67,7 @@ export function validateRelayDelegatedEvmAction(
     amount,
     token: BASE_USDC,
     user: input.walletAddress,
+    depositorMode: "self_bound",
   });
   return { kind: "deposit", orderId };
 }

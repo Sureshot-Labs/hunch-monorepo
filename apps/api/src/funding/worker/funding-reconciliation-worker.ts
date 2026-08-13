@@ -341,7 +341,6 @@ export async function runFundingReconciliationJob(
         ...options.delegatedExecution.privy,
         configuration: {
           ...options.delegatedExecution.configuration,
-          relayAllowedDepositors: relayEvmConfiguration.allowedDepositors,
           relayMaxSourceRaw: relayEvmConfiguration.maxSourceRaw,
         },
       })

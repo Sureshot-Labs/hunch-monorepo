@@ -47,6 +47,7 @@ import {
   BASE_USDC,
   POLYGON_PUSD,
   RELAY_DEPOSITORY_V2,
+  RELAY_SELF_DEPOSITOR,
 } from "../../../funding-providers/relay/rehearsal.js";
 import { resolveTelegramPolymarketWrapCapability } from "../../execution/delegated-funding-capability-resolver.js";
 import type { FundingTransactionReferenceCodec } from "../../execution/transaction-reference-codec.js";
@@ -142,7 +143,6 @@ const relayConfiguration: RelayEvmExecutionConfiguration = {
   signerFingerprint: profileConfiguration.signerFingerprint,
   policyId: profileConfiguration.policyId,
   policyFingerprint: profileConfiguration.policyFingerprint,
-  allowedDepositors: ["0x1111111111111111111111111111111111111111"],
   maxSourceRaw: "10000000",
   minimumSequentialTtlMs: 30_000,
 };
@@ -1268,7 +1268,7 @@ async function createRelayFixture(
     actionId: `${opaque("relay")}:deposit`,
     to: RELAY_DEPOSITORY_V2,
     data: depository.encodeFunctionData("depositErc20", [
-      identity.wallet_address,
+      RELAY_SELF_DEPOSITOR,
       BASE_USDC,
       raw,
       `0x${crypto.randomBytes(32).toString("hex")}`,

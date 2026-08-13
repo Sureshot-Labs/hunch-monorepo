@@ -24,6 +24,8 @@ import {
   type RelayRehearsalScenario,
   type RelayRehearsalScenarioId,
   type ValidatedRelayAction,
+  type ValidatedRelayQuote,
+  canonicalizeRelayDepositoryV2SelfBoundAction,
   relayRehearsalScenarios,
   validateRelayRehearsalQuote,
 } from "./funding-providers/relay/rehearsal.js";
@@ -126,6 +128,7 @@ type RunReport = {
       result: "passed" | "deferred-until-approval";
       stepId: string;
     }>;
+    depositorMode?: "msg_sender_via_zero";
   };
   confirmation?: string;
   broadcastAttempted: boolean;
@@ -369,6 +372,28 @@ function txRequest(action: ValidatedRelayAction) {
     maxFeePerGas: action.maxFeePerGas,
     maxPriorityFeePerGas: action.maxPriorityFeePerGas,
   } as const;
+}
+
+function canonicalizeProductionRelayEnvelope(input: {
+  amount: bigint;
+  quote: ValidatedRelayQuote;
+  scenario: RelayRehearsalScenario;
+  user: string;
+}): ValidatedRelayQuote {
+  if (input.scenario.id !== "base-usdc-to-polygon-pusd") return input.quote;
+  return {
+    ...input.quote,
+    actions: input.quote.actions.map((action) => {
+      if (action.stepId !== "deposit") return action;
+      const canonical = canonicalizeRelayDepositoryV2SelfBoundAction({
+        action,
+        amount: input.amount,
+        token: input.scenario.originCurrency,
+        user: input.user,
+      });
+      return { ...action, data: canonical.data };
+    }),
+  };
 }
 
 function validateGas(
@@ -651,11 +676,16 @@ async function main(): Promise<void> {
     throw new Error("native balance cannot cover input plus gas envelope");
   }
 
-  let validated = validateRelayRehearsalQuote({
+  let validated = canonicalizeProductionRelayEnvelope({
     amount: options.amountRaw,
-    minimumOutputFloor: options.minimumOutputRaw,
-    quote: quoteResult.body,
-    recipient,
+    quote: validateRelayRehearsalQuote({
+      amount: options.amountRaw,
+      minimumOutputFloor: options.minimumOutputRaw,
+      quote: quoteResult.body,
+      recipient,
+      scenario: options.scenario,
+      user,
+    }),
     scenario: options.scenario,
     user,
   });
@@ -677,6 +707,9 @@ async function main(): Promise<void> {
     contractCodeHashes: codeHashes,
     gasWorstCaseRaw: gasWorstCase.toString(),
     simulations,
+    ...(options.scenario.id === "base-usdc-to-polygon-pusd"
+      ? { depositorMode: "msg_sender_via_zero" }
+      : {}),
   };
   report.confirmation = confirmation(options);
 
@@ -739,11 +772,16 @@ async function main(): Promise<void> {
       user,
     });
     report.timings.quoteLatenciesMs.push(refreshedQuote.latencyMs);
-    validated = validateRelayRehearsalQuote({
+    validated = canonicalizeProductionRelayEnvelope({
       amount: options.amountRaw,
-      minimumOutputFloor: options.minimumOutputRaw,
-      quote: refreshedQuote.body,
-      recipient,
+      quote: validateRelayRehearsalQuote({
+        amount: options.amountRaw,
+        minimumOutputFloor: options.minimumOutputRaw,
+        quote: refreshedQuote.body,
+        recipient,
+        scenario: options.scenario,
+        user,
+      }),
       scenario: options.scenario,
       user,
     });
