@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 
 export const X_EDITORIAL_CONTENT_PROFILE = "x_editorial_draft_v1" as const;
-export const X_EDITORIAL_PROMPT_VERSION = "x_editorial_prompt_v6" as const;
+export const X_EDITORIAL_PROMPT_VERSION = "x_editorial_prompt_v7" as const;
 
 export type XEditorialComposerFailureCode =
   | "missing_content"
@@ -291,6 +291,21 @@ const FORBIDDEN_COPY_PATTERNS: Array<{
       /\b(?:the important part is|market update|quality[- ]gated|worth following)\b/i,
   },
   {
+    code: "raw_numeric_format",
+    pattern:
+      /(?:\$\d{1,3}(?:,\d{3})+(?:\.\d+)?|(?:\d{1,3}(?:,\d{3})+|\d+)\.\d{3,}|\b0\.\d{2,}\b)/,
+  },
+  {
+    code: "editorial_scaffolding",
+    pattern:
+      /(?:^|\n)(?:the trader has (?:some )?receipts|receipts|the credential stack is the story|my read)\s*:/im,
+  },
+  {
+    code: "analyst_jargon",
+    pattern:
+      /\b(?:credentialed (?:fade|trade)|credibility check|making that lean concrete|worth respecting)\b/i,
+  },
+  {
     code: "unsupported_accusation",
     pattern:
       /\b(?:insider|inside information|non[- ]public information|ai bot|cheat code|guaranteed)\b/i,
@@ -376,12 +391,12 @@ function sourceDigest(source: XEditorialDraftSource): string {
     .digest("hex");
 }
 
-function compactRecentOpenings(values: string[] | undefined): string[] {
+function compactRecentDrafts(values: string[] | undefined): string[] {
   return (values ?? [])
-    .map((value) => cleanText(value).split("\n")[0]?.trim() ?? "")
+    .map(cleanText)
     .filter(Boolean)
-    .slice(0, 20)
-    .map((value) => Array.from(value).slice(0, 180).join(""));
+    .slice(0, 10)
+    .map((value) => Array.from(value).slice(0, 600).join(""));
 }
 
 export function buildXEditorialDraftSystemPrompt(input: {
@@ -396,21 +411,25 @@ export function buildXEditorialDraftSystemPrompt(input: {
     "Use this editorial arc when the facts support it, but do not force every stage:",
     "HOOK — lead with the most surprising verified amount, result, action, probability, or contradiction. Prefer a direct claim over scene-setting.",
     "CHARACTER — make the trader, wallet, or group concrete. Use a supplied display name and verified credentials when available.",
-    "RECEIPTS — show the two to five facts that prove the hook. Short standalone lines or → bullets are welcome when they scan better than prose.",
+    "PROOF — weave in only the one or two facts that best prove the hook. Short standalone lines or → bullets are welcome only when several connected facts genuinely scan better than prose.",
     "READ — explain the tension or pattern: conviction, concentration, hedging, disagreement, changed behavior, asymmetric payoff, or what the result says about the strategy. Clearly frame interpretation as analysis, not fact.",
     "FINISH — end with a crisp punchline, contrast, question, or forward-looking tension. Do not end by merely repeating the market title or summarizing the data.",
-    "Use short natural paragraphs, clipped sentences where they add rhythm, and varied sentence length. Prefer specific nouns and active verbs. Omit facts that do not strengthen the story.",
+    "Use short natural paragraphs, clipped sentences where they add rhythm, and varied sentence length. Prefer specific nouns and active verbs. Omit facts that do not strengthen the story. One current position plus track-record facts is usually a compact three- or four-paragraph post, not a case study.",
     "Avoid generic openings such as 'Market update', 'Tracked wallets are moving', 'A signal appeared', or '[probability] is now [probability]' when a concrete trader, amount, or result is available.",
-    "Use only supplied facts. Preserve side, proposition, scope, amount, price, count, PnL, timeframe, and result exactly.",
+    "Use only supplied facts. Preserve side, proposition, scope, count, timeframe, and result. For amounts, prices, and PnL, use the supplied editorial display strings verbatim; never print raw database decimals or add precision.",
     "A position snapshot proves a position, not when or how it was entered. Do not turn a snapshot into a fresh buy unless a supplied fact explicitly proves the change.",
     "Do not claim insider access, coordination, private information, causation, certainty, an AI bot, or a cheat code.",
     "A light first-person editorial voice is allowed for a fact-grounded observation or opinion, such as 'I found', 'I am watching', or 'I think'. Never invent a personal trade, profit, prediction record, conversation, private source, or firsthand access.",
     "Do not expose wallet addresses, internal labels, evidence IDs, raw schema names, or analytics jargon.",
+    "Never announce your structure with labels such as 'Receipts:', 'The trader has receipts:', 'The credential stack is the story:', or 'My read:'. Make the observation directly.",
+    "Avoid investment-memo phrases such as 'credentialed fade', 'credibility check', 'base case', 'making the lean concrete', or 'worth respecting'. Use ordinary language a real market blogger would use.",
+    "Do not mechanically repeat 'The market already...' or 'This is X, not Y'. Vary the structure, transitions, and ending as well as the opening.",
+    "Never assume an acronym or outcome label is self-explanatory. Pair it with the supplied event or market context.",
     "No Markdown markers inside postText, headings, pipe-delimited stat tables, URLs, links, hashtags, affiliate language, product CTA, or generic engagement bait.",
     "Select one to three exact, non-overlapping snippets for intentional Telegram/X formatting. Usually bold the hook or strongest result; use italic only for a genuinely useful interpretive line. Return those snippets in formatting and keep postText itself plain.",
     'Every formatting item must be exactly {"style":"bold"|"italic","text":"an exact substring of postText"}. The field name is text, never snippet.',
     "Emoji and → bullets are optional. Use a topical emoji only when it improves scanning or tone; never force a fixed emoji template.",
-    "Vary the hook and ending against recentOpeningsToAvoidRepeating. Reuse the reference collection's editorial principles, never one author's exact wording or persona.",
+    "Vary the hook, structure, transitions, and ending against recentDraftsToAvoidImitating. Reuse the reference collection's editorial principles, never one author's exact wording or persona.",
     "These style-only examples show the target rhythm. Never reuse their people, markets, numbers, or claims unless they are present in the supplied facts:",
     "STYLE EXAMPLE — compact conviction:\nA new wallet just put $1.6M on Spain to win the World Cup.\n\nOne position. No hedge.\n\nEither serious conviction or a very expensive fan bet.",
     "STYLE EXAMPLE — apparent contradiction:\nOne trader is fading England tonight — and backing them to win the World Cup.\n\nThose bets describe a narrow path: stumble now, peak later.\n\nThat is not indecision. It is a tournament script.",
@@ -453,7 +472,7 @@ function buildUserPrompt(input: {
     messageKind: input.source.kind,
     selectedSide: input.source.selectedSide,
     facts: input.source.facts,
-    recentOpeningsToAvoidRepeating: compactRecentOpenings(
+    recentDraftsToAvoidImitating: compactRecentDrafts(
       input.source.recentOpenings,
     ),
     ...(input.repairIssues

@@ -227,7 +227,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       const prompt = buildXEditorialDraftSystemPrompt(config);
       assert.match(prompt, /trader-story post/i);
       assert.match(prompt, /HOOK —/);
-      assert.match(prompt, /RECEIPTS —/);
+      assert.match(prompt, /PROOF —/);
       assert.match(prompt, /punchline/i);
       assert.match(prompt, /light first-person editorial voice/i);
       assert.match(prompt, /Use only supplied facts/i);
@@ -238,6 +238,9 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.match(prompt, /One position\. No hedge\./);
       assert.match(prompt, /Boring market\. Serious consistency\./);
       assert.match(prompt, /Never reuse their people, markets, numbers/i);
+      assert.match(prompt, /editorial display strings verbatim/i);
+      assert.match(prompt, /Never announce your structure/i);
+      assert.match(prompt, /recentDraftsToAvoidImitating/i);
       assert.match(prompt, /1000 visible characters/i);
     },
   },
@@ -291,6 +294,114 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.ok(validated.issues.includes("internal_language"));
       assert.ok(validated.issues.includes("dashboard_voice"));
       assert.ok(validated.issues.includes("url"));
+    },
+  },
+  {
+    name: "validator rejects the raw numeric and templated voice seen in live previews",
+    run: () => {
+      const validate = (postText: string) =>
+        validateXEditorialModelOutput({
+          config,
+          output: {
+            version: 1,
+            status: "ready",
+            marketId: "market-1",
+            selectedSide: "YES",
+            postText,
+            formatting: [
+              { style: "bold", text: postText.split("\n")[0] ?? postText },
+            ],
+            storyFamily: "trader_profile",
+            usedFactIds: ["market", "actor"],
+            safetyFlags: [],
+          },
+          source,
+        }).issues;
+
+      const first = validate(
+        "@eCash is still holding $22,612.756146 on NO.\n\nThe trader has receipts:\n→ Up $72.4K over the last 30 days\n\nThis is a credentialed fade.",
+      );
+      assert.ok(first.includes("raw_numeric_format"));
+      assert.ok(first.includes("editorial_scaffolding"));
+      assert.ok(first.includes("analyst_jargon"));
+
+      const second = validate(
+        "The market has NO at 0.645.\n@eCash holds 10167.2113 on NO.\n\nThe credential stack is the story:\n→ Up $72.3K over the last 30 days\n\nMy read: this is a credibility check.",
+      );
+      assert.ok(second.includes("raw_numeric_format"));
+      assert.ok(second.includes("editorial_scaffolding"));
+      assert.ok(second.includes("analyst_jargon"));
+
+      const third = validate(
+        "@881112 is holding $14,386.44 on NO.\n\nThe trader has some receipts:\n→ Up $26.9K over the last 30 days.",
+      );
+      assert.ok(third.includes("raw_numeric_format"));
+      assert.ok(third.includes("editorial_scaffolding"));
+
+      const fourth = validate(
+        "@BBQChickenisthebesttt has $15.7K on NIP at 81¢.\n\nReceipts:\n→ open PnL: $700\n\nThe sharper question is whether this edge is still worth respecting.",
+      );
+      assert.ok(fourth.includes("editorial_scaffolding"));
+      assert.ok(fourth.includes("analyst_jargon"));
+    },
+  },
+  {
+    name: "validator accepts compact human copy using publication-ready values",
+    run: () => {
+      const editorialSource: XEditorialDraftSource = {
+        facts: [
+          {
+            id: "market",
+            label: "Canonical market",
+            value: { subject: "Iranian blockade ending by August 15" },
+          },
+          {
+            id: "actor",
+            label: "Publication-ready actor",
+            value: { displayName: "@eCash", position: "$22.6K" },
+          },
+          {
+            id: "price",
+            label: "Publication-ready price",
+            value: { displayPrice: "92.5¢" },
+          },
+          {
+            id: "credentials",
+            label: "Public track record",
+            value: [
+              "Up $72.4K over the last 30 days",
+              "Beat market prices by 23 points across 10 resolved bets",
+            ],
+          },
+        ],
+        kind: "initial",
+        marketId: "market-1",
+        noteId: "00000000-0000-4000-8000-000000000888",
+        selectedSide: "NO",
+      };
+      const postText =
+        "@eCash has $22.6K betting Iran’s blockade lasts past August 15.\n\nNO already trades at 92.5¢. Hardly a contrarian bet.\n\nBut this wallet is up $72.4K in 30 days and has beaten market prices by 23 points across 10 resolved bets.\n\nConsensus is one thing. Consensus backed by a proven trader is another.";
+      const validated = validateXEditorialModelOutput({
+        config,
+        output: {
+          version: 1,
+          status: "ready",
+          marketId: "market-1",
+          selectedSide: "NO",
+          postText,
+          formatting: [
+            {
+              style: "bold",
+              text: "@eCash has $22.6K betting Iran’s blockade lasts past August 15.",
+            },
+          ],
+          storyFamily: "trader_profile",
+          usedFactIds: ["market", "actor", "price", "credentials"],
+          safetyFlags: [],
+        },
+        source: editorialSource,
+      });
+      assert.deepEqual(validated.issues, []);
     },
   },
   {
@@ -354,7 +465,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           {
             id: "price",
             label: "Selected-side signal price",
-            value: { displayPrice: 0.44, displaySide: "NO" },
+            value: { displayPrice: "44¢", displaySide: "NO" },
           },
           {
             id: "research_copy",
@@ -370,9 +481,9 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
             id: "actor",
             label: "Tracked group",
             value: {
-              clusterOpenPnlUsd: -926,
+              clusterOpenPnl: "-$926",
+              clusterPosition: "$27K",
               clusterSharpHolders: 2,
-              clusterSharpUsd: 27_000,
             },
           },
           {
@@ -1121,9 +1232,26 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       };
       let composeCalls = 0;
       const editorialText =
-        "$56.4K is backing Spain to win the World Cup.\n\nThe tracked trader is up $542K over the last 30 days, which makes a 19% minority bet worth following.";
-      const composer = async (_input: { source: XEditorialDraftSource }) => {
+        "$56.4K is backing Spain to win the World Cup.\n\nSpain trades at 19¢. The wallet is up $542K over the last 30 days.\n\nLong odds. Proven hand.";
+      const composer = async (input: { source: XEditorialDraftSource }) => {
         composeCalls += 1;
+        const actor = input.source.facts.find((fact) => fact.id === "actor");
+        const price = input.source.facts.find((fact) => fact.id === "price");
+        assert.deepEqual(actor?.value, {
+          actorMode: "single_holder",
+          clusterOpenPnl: null,
+          clusterPnl30d: null,
+          clusterSharpHolders: null,
+          clusterPosition: null,
+          displayName: null,
+          openPnl: "-$3.9K",
+          positionSide: "YES",
+          position: "$56.4K",
+        });
+        assert.deepEqual(price?.value, {
+          displayPrice: "19¢",
+          displaySide: "YES",
+        });
         return {
           characterCount: Array.from(editorialText).length,
           formatting: [
