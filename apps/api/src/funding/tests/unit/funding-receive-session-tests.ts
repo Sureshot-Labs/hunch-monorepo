@@ -15,7 +15,10 @@ import type {
   FundingQuoteSummary,
 } from "../../domain/types.js";
 import { SOLANA_NATIVE_EXECUTION_RESERVE_LAMPORTS } from "../../domain/network-fees.js";
-import { POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID } from "../../execution/delegated-funding-profile-ids.js";
+import {
+  POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
+  TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
+} from "../../execution/delegated-funding-profile-ids.js";
 import {
   fundingSidecarRuntimeConfig,
   loadFundingSidecarRuntimeConfig,
@@ -27,6 +30,7 @@ import {
 } from "../../persistence/funding-receive-session-repository.js";
 import {
   fundingReceiveChildOperationDisposition,
+  fundingReceiveExecutionUsesReservationScope,
   fundingReceiveRoutingErrorCode,
   fundingReceiveRoutingNeedsRecovery,
   fundingReceiveRoutingNeedsReview,
@@ -395,6 +399,28 @@ assert.equal(
 assert.equal(
   fundingReceiveRoutingErrorCode({ code: "INVALID CODE" }),
   "routing_attempt_failed",
+);
+assert.equal(
+  fundingReceiveExecutionUsesReservationScope({
+    serverExecutionProfileId: POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
+  }),
+  false,
+  "the existing closed-destination Slice C path must not acquire the Relay reservation lane",
+);
+assert.equal(
+  fundingReceiveExecutionUsesReservationScope({
+    serverExecutionProfileId: TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
+  }),
+  true,
+  "the routed-value Slice D path must retain the reservation-lane fence",
+);
+assert.throws(
+  () =>
+    fundingReceiveExecutionUsesReservationScope({
+      serverExecutionProfileId: "unknown_delegated_profile",
+    }),
+  /delegated funding execution profile is unavailable/,
+  "unknown delegated profiles must fail closed",
 );
 assert.equal(
   fundingReceiveRoutingErrorCode({

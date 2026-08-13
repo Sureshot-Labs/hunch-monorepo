@@ -235,6 +235,20 @@ export type FundingReceiveReceiptAutomaticExecution = Readonly<{
   ) => Promise<boolean>;
 }>;
 
+export function fundingReceiveExecutionUsesReservationScope(
+  execution: Pick<
+    FundingReceiveReceiptAutomaticExecution,
+    "serverExecutionProfileId"
+  >,
+): boolean {
+  if (!execution.serverExecutionProfileId) return false;
+  const profile = delegatedFundingProfile(execution.serverExecutionProfileId);
+  if (!profile) {
+    throw new Error("delegated funding execution profile is unavailable");
+  }
+  return profile.securityClass === "routed_value_movement";
+}
+
 export type FundingReceiveReceiptDisposition =
   | Readonly<{ kind: "direct" }>
   | Readonly<{
@@ -660,6 +674,7 @@ export class FundingReceiveReceiptRouter {
         await lockFundingPolicyForTransaction(client);
         if (
           execution.authorizationId &&
+          fundingReceiveExecutionUsesReservationScope(execution) &&
           !(await lockFundingAuthorizationReservationScope(client, {
             authorizationId: execution.authorizationId,
             userId: target.userId,
@@ -737,6 +752,7 @@ export class FundingReceiveReceiptRouter {
       await lockFundingPolicyForTransaction(client);
       if (
         execution?.authorizationId &&
+        fundingReceiveExecutionUsesReservationScope(execution) &&
         !(await lockFundingAuthorizationReservationScope(client, {
           authorizationId: execution.authorizationId,
           userId: target.userId,
