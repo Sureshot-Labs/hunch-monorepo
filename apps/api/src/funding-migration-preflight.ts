@@ -17,6 +17,7 @@ const MIGRATION_0203 = "0203_telegram_funding_buy_continuation.sql";
 const MIGRATION_0204 = "0204_delegated_funding_execution.sql";
 const MIGRATION_0206 = "0206_telegram_funding_wallet_retention.sql";
 const MIGRATION_0207 = "0207_telegram_funding_owner_delivery.sql";
+const MIGRATION_0208 = "0208_relay_evm_delegated_funding.sql";
 const FUNDING_MIGRATIONS = [
   MIGRATION_0184,
   MIGRATION_0193,
@@ -31,6 +32,7 @@ const FUNDING_MIGRATIONS = [
   MIGRATION_0204,
   MIGRATION_0206,
   MIGRATION_0207,
+  MIGRATION_0208,
 ] as const;
 
 const LEGACY_CLASSIFIER_SQL = `
@@ -90,6 +92,7 @@ export type FundingMigrationPreflightReport = Readonly<{
   delegatedFundingExecutionObjects: boolean;
   delegatedFundingWalletRetentionObjects: boolean;
   telegramFundingOwnerDeliveryObjects: boolean;
+  relayEvmDelegatedFundingObjects: boolean;
   telegramOpenMutationConstraints: boolean;
 }>;
 
@@ -496,6 +499,61 @@ export async function inspectFundingMigrationPreflight(
     hasDelegatedFundingActiveIndex &&
     hasUnlimitedAutomationConsent &&
     hasDelegatedAttemptProviderResolution;
+  const hasRelayEvmAuthorizationCap =
+    hasTelegramFundingAuthorizations &&
+    (await columnExists(
+      db,
+      "telegram_funding_authorizations",
+      "max_source_raw",
+    )) &&
+    (await triggerExists(
+      db,
+      "public.telegram_funding_authorizations",
+      "telegram_funding_authorizations_cap_guard",
+    ));
+  const hasRelayEvmReservations = await relationExists(
+    db,
+    "public.telegram_funding_authorization_reservations",
+  );
+  const hasRelayEvmReservationGuard =
+    hasRelayEvmReservations &&
+    (await triggerExists(
+      db,
+      "public.telegram_funding_authorization_reservations",
+      "telegram_funding_authorization_reservations_guard",
+    ));
+  const hasRelayEvmRefundObservationGuard =
+    hasRelayEvmReservations &&
+    (await functionDefinitionIncludes(db, "funding_guard_observation_update", [
+      "refund_recanonicalization",
+      "kind = 'refund_credit'",
+      "network_id = 'evm:8453'",
+      "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+      "observerid",
+      "relay_owned_refund_observation_v1",
+      "relayrefundcanonicalityhistory",
+      "old.finality_status = 'reorged'",
+      "new.finality_status = 'finalized'",
+    ]));
+  const hasRelayEvmConsentV3 =
+    hasRelayEvmReservations &&
+    hasTelegramFundingConsents &&
+    (await constraintDefinitionIncludes(
+      db,
+      "public.telegram_funding_consents",
+      "telegram_funding_consents_automation_check",
+      [
+        "polymarket_base_usdc_relay",
+        "maxsourceraw",
+        "max_auto_execute_source_raw",
+      ],
+    ));
+  const hasRelayEvmDelegatedFundingObjects =
+    hasRelayEvmAuthorizationCap &&
+    hasRelayEvmReservations &&
+    hasRelayEvmReservationGuard &&
+    hasRelayEvmRefundObservationGuard &&
+    hasRelayEvmConsentV3;
   const hasFundingAccountIdentifierEquality = await functionDefinitionIncludes(
     db,
     "funding_account_identifier_equal",
@@ -1210,6 +1268,13 @@ export async function inspectFundingMigrationPreflight(
         hasTelegramFundingQrDeliveryUnknown,
       "Telegram funding owner delivery objects exist before 0207 is recorded",
     ],
+    [
+      MIGRATION_0208,
+      hasRelayEvmDelegatedFundingObjects,
+      "0208 is recorded but Relay EVM delegated funding objects are incomplete",
+      hasRelayEvmDelegatedFundingObjects,
+      "Relay EVM delegated funding objects exist before 0208 is recorded",
+    ],
   ] as const;
   const partialObjects = migrationDriftChecks.flatMap(
     ([migration, complete, incompleteMessage, present, presentMessage]) =>
@@ -1337,6 +1402,9 @@ export async function inspectFundingMigrationPreflight(
     !appliedSet.has(MIGRATION_0207)
       ? "0207 Telegram funding owner delivery migration is not recorded"
       : null,
+    !appliedSet.has(MIGRATION_0208)
+      ? "0208 Relay EVM delegated funding migration is not recorded"
+      : null,
     !hasBridgeOrders ? "bridge_orders table is absent" : null,
     bridgeUnknown > 0
       ? `${bridgeUnknown} legacy bridge orders have unknown adapter class`
@@ -1392,6 +1460,7 @@ export async function inspectFundingMigrationPreflight(
     delegatedFundingWalletRetentionObjects:
       hasDelegatedFundingWalletRetentionObjects,
     telegramFundingOwnerDeliveryObjects: hasTelegramFundingOwnerDeliveryObjects,
+    relayEvmDelegatedFundingObjects: hasRelayEvmDelegatedFundingObjects,
     telegramOpenMutationConstraints: hasTelegramOpenMutationConstraints,
   };
 }
@@ -1410,6 +1479,7 @@ function formatHuman(report: FundingMigrationPreflightReport): string {
     `0204 delegated funding execution objects: ${report.delegatedFundingExecutionObjects ? "ready" : "missing"}`,
     `0206 delegated funding wallet retention objects: ${report.delegatedFundingWalletRetentionObjects ? "ready" : "missing"}`,
     `0207 Telegram funding owner delivery objects: ${report.telegramFundingOwnerDeliveryObjects ? "ready" : "missing"}`,
+    `0208 Relay EVM delegated funding objects: ${report.relayEvmDelegatedFundingObjects ? "ready" : "missing"}`,
     `Malformed receive review evidence: ${report.malformedReceiveReviewEvidence ?? "n/a"}`,
     `Unresolved address disclosures without edit target: ${report.unresolvedAddressDisclosureWithoutEditTarget ?? "n/a"}`,
     `Operational: ${JSON.stringify(report.operational)}`,

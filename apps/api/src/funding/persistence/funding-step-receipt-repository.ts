@@ -122,6 +122,7 @@ function mapReceipt(row: ReceiptDbRow): FundingStepReceiptObservation {
 export async function listFundingStepReceiptTargets(
   db: Pick<Pool, "query">,
   operationId: string,
+  now = new Date(),
 ): Promise<readonly FundingStepReceiptTarget[]> {
   const { rows } = await db.query<{
     operation_id: string;
@@ -195,7 +196,15 @@ export async function listFundingStepReceiptTargets(
       join funding_operations operation
         on operation.id = step.operation_id
       where step.operation_id = $1
-        and operation.status not in ('completed', 'refunded', 'failed', 'cancelled')
+        and (
+          operation.status not in ('completed', 'refunded', 'failed', 'cancelled')
+          or (
+            step.executor_id = 'telegram_relay_evm_funding_v1'
+            and receipt.status in ('finalized', 'failed')
+            and receipt.canonical
+            and receipt.finalized_at >= $2::timestamptz - interval '15 minutes'
+          )
+        )
         and (
           step.state in (
             'submitted',
@@ -207,10 +216,20 @@ export async function listFundingStepReceiptTargets(
           -- the operation itself terminates so confirmed receipts can advance
           -- to finalized and finalized receipts remain reorg-monitored.
           or step.state = 'succeeded'
+          -- A canonical failed receipt authorizes retry only after a bounded
+          -- reorg watch. Keep polling it regardless of the re-armed step state
+          -- until that fence expires.
+          or (
+            step.executor_id = 'telegram_relay_evm_funding_v1'
+            and receipt.status = 'failed'
+            and receipt.canonical
+            and receipt.evidence ->> 'failureFinalized' = 'true'
+            and receipt.finalized_at >= $2::timestamptz - interval '15 minutes'
+          )
         )
       order by step.ordinal, attempt.attempt_number
     `,
-    [operationId],
+    [operationId, now],
   );
   return rows.map((row) => {
     const action = normalizedActionSchema.parse(
@@ -301,7 +320,8 @@ export function shouldIgnoreFundingStepReceiptUpdate(
   ) {
     return false;
   }
-  if (["failed", "mismatch", "reorged"].includes(previous)) return true;
+  if (previous === "failed") return incoming.status !== "reorged";
+  if (["mismatch", "reorged"].includes(previous)) return true;
   if (previous === "finalized") return incoming.status !== "reorged";
   return receiptRank[incoming.status] < receiptRank[previous];
 }
@@ -385,7 +405,12 @@ export async function applyFundingStepReceiptEvidenceInTransaction(
     return mapReceipt(previous);
   }
 
-  const finalizedAt = input.receipt.status === "finalized" ? now : null;
+  const incomingIsFinal =
+    input.receipt.status === "finalized" ||
+    (input.receipt.status === "failed" &&
+      input.receipt.canonical &&
+      input.receipt.evidence.failureFinalized === true);
+  const finalizedAt = incomingIsFinal ? (previous?.finalized_at ?? now) : null;
   const reorgedAt = input.receipt.status === "reorged" ? now : null;
   const stored = await client.query<ReceiptDbRow>(
     `
@@ -443,10 +468,7 @@ export async function applyFundingStepReceiptEvidenceInTransaction(
   const row = stored.rows[0];
   if (!row) throw new Error("funding step receipt upsert returned no row");
 
-  if (
-    scoped.step_kind === "venue_preparation" &&
-    input.receipt.status === "reorged"
-  ) {
+  if (input.receipt.status === "reorged") {
     await client.query(
       `
         update funding_observations
@@ -459,12 +481,15 @@ export async function applyFundingStepReceiptEvidenceInTransaction(
             ),
             updated_at = $2
         where operation_id = $1
-          and kind = 'venue_readiness'
+          and (
+            (kind = 'venue_readiness' and $4 = 'venue_preparation')
+            or (kind = 'source_debit' and $4 = 'transaction')
+          )
           and metadata->>'receiptAttemptId' = $3
           and canonical
           and finality_status = 'finalized'
       `,
-      [input.operationId, now, input.attemptId],
+      [input.operationId, now, input.attemptId, scoped.step_kind],
     );
   }
 

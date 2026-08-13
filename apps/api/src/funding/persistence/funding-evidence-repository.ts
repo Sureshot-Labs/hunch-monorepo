@@ -1080,6 +1080,7 @@ export async function resolveAmbiguousProviderFundingStepAttemptForUserInTransac
     stepId: string;
     attemptId: string;
     providerReferenceLookupHmac: string;
+    retryableDefinitiveFailure?: boolean;
     resolution:
       | Readonly<{
           kind: "transaction";
@@ -1229,15 +1230,19 @@ export async function resolveAmbiguousProviderFundingStepAttemptForUserInTransac
     );
   }
   const stepState =
-    input.resolution.kind === "transaction" ? scoped.step_state : "failed";
-  if (stepState === "failed") {
+    input.resolution.kind === "transaction"
+      ? scoped.step_state
+      : input.retryableDefinitiveFailure
+        ? "action_required"
+        : "failed";
+  if (input.resolution.kind === "definitive_failure") {
     const updated = await client.query(
       `
         update funding_operation_steps
-        set state = 'failed', updated_at = $2
+        set state = $3, updated_at = $2
         where id = $1 and state in ('reconcile_required', 'recovery_required')
       `,
-      [input.stepId, now],
+      [input.stepId, now, stepState],
     );
     if (updated.rowCount !== 1) {
       throw new FundingPersistenceError(

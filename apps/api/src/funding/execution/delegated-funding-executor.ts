@@ -53,11 +53,14 @@ export type DelegatedFundingExecutionClaim = Readonly<{
   action: NormalizedAction;
   actionWalletId: string;
   actionFingerprint: string;
+  actionValidationResult: JsonRecord;
   authorizationFingerprint: string;
   authorizationId: string;
   attemptId: string;
   broadcastBoundaryCrossed: boolean;
   destinationOptionId: string;
+  fundingPolicyRevision?: string;
+  fundingPolicyVersion?: number;
   operationId: string;
   policyFingerprint: string;
   policyId: string;
@@ -77,7 +80,7 @@ export type DelegatedFundingExecutionClaim = Readonly<{
 
 export type DelegatedFundingRecoveryClaim = DelegatedFundingExecutionClaim;
 
-type DelegatedFundingProfileClaim =
+export type DelegatedFundingProfileClaim =
   | Readonly<{
       kind: "execution";
       claim: DelegatedFundingExecutionClaim;
@@ -106,6 +109,9 @@ export type DelegatedFundingNetworkDriver = Readonly<{
 }>;
 
 type ResolvedFundingPolicy = Awaited<ReturnType<typeof resolveFundingPolicy>>;
+type DelegatedFundingRuntimePreBroadcastDecision =
+  | DelegatedFundingPreBroadcastDecision
+  | Readonly<{ kind: "already_satisfied" }>;
 
 export type DelegatedFundingRuntimeProfile = Readonly<{
   profileId: string;
@@ -124,6 +130,7 @@ export type DelegatedFundingRuntimeProfile = Readonly<{
     input: Readonly<{
       policy: ResolvedFundingPolicy;
       now: Date;
+      observation?: JsonRecord;
     }>,
   ) => Promise<DelegatedFundingProfileClaim | null>;
   recoverInTransaction: (
@@ -138,8 +145,33 @@ export type DelegatedFundingRuntimeProfile = Readonly<{
     input: Readonly<{
       claim: DelegatedFundingExecutionClaim;
       now: Date;
+      observation?: JsonRecord;
     }>,
-  ) => Promise<DelegatedFundingPreBroadcastDecision>;
+  ) => Promise<DelegatedFundingRuntimePreBroadcastDecision>;
+  observePreBroadcast?: (
+    claim: DelegatedFundingExecutionClaim,
+  ) => Promise<JsonRecord>;
+  finalizeAlreadySatisfiedInTransaction?: (
+    client: PoolClient,
+    input: Readonly<{
+      claim: DelegatedFundingExecutionClaim;
+      now: Date;
+      observation?: JsonRecord;
+    }>,
+  ) => Promise<void>;
+  finalizeHardInvalidInTransaction?: (
+    client: PoolClient,
+    input: Readonly<{
+      claim: DelegatedFundingExecutionClaim;
+      now: Date;
+      reasonCode: string;
+      observation?: JsonRecord;
+    }>,
+  ) => Promise<void>;
+  observeBeforeClaim?: (
+    pool: Pool,
+    input: Readonly<{ now: Date }>,
+  ) => Promise<JsonRecord | undefined>;
   driver: DelegatedFundingNetworkDriver;
   validateSubmittedReference: (reference: string) => boolean;
 }>;
@@ -147,6 +179,7 @@ export type DelegatedFundingRuntimeProfile = Readonly<{
 type ClaimRow = Omit<TelegramFundingAuthorizationRow, "id"> &
   Readonly<{
     action_fingerprint: string;
+    action_validation_result: JsonRecord;
     authorization_id: string;
     authorization_fingerprint: string;
     executor_id: string;
@@ -161,10 +194,11 @@ type ClaimRow = Omit<TelegramFundingAuthorizationRow, "id"> &
 
 function actionWalletId(
   row: Pick<ClaimRow, "wallet_chain" | "wallet_address">,
+  networkId = "evm:137",
 ) {
   return stableWalletOpaqueId({
     walletType: row.wallet_chain,
-    networkId: "evm:137",
+    networkId,
     address: row.wallet_address,
   });
 }
@@ -172,12 +206,13 @@ function actionWalletId(
 function delegatedControllerProfile(
   row: Pick<ClaimRow, "privy_wallet_id" | "user_wallet_id" | "wallet_address">,
   walletId: string,
+  networkId = "evm:137",
 ): WalletExecutionProfile {
   return {
     walletId,
     controllerWalletRef: row.user_wallet_id,
-    networkId: "evm:137",
-    address: canonicalAccountAddress("evm:137", row.wallet_address),
+    networkId,
+    address: canonicalAccountAddress(networkId, row.wallet_address),
     source: "embedded",
     signingModes: ["privy_delegated"],
     serverWalletRef: row.privy_wallet_id,
@@ -199,6 +234,7 @@ function executionClaimFromRow(
 ): DelegatedFundingExecutionClaim {
   return {
     action: input.action,
+    actionValidationResult: row.action_validation_result,
     actionWalletId: input.actionWalletId,
     actionFingerprint: row.action_fingerprint,
     authorizationFingerprint: row.authorization_fingerprint,
@@ -334,6 +370,7 @@ async function rejectInvalidPolymarketWrapInTransaction(
         operation.user_id,
         step.id as step_id,
         step.action_fingerprint,
+        step.action_validation_result,
         step.executor_id
       from funding_operation_steps step
       join funding_operations operation on operation.id = step.operation_id
@@ -472,6 +509,7 @@ async function claimPolymarketWrapInTransaction(
         operation.support_metadata ->> 'fundingAuthorizationFingerprint' as authorization_fingerprint,
         step.id as step_id,
         step.action_fingerprint,
+        step.action_validation_result,
         step.executor_id,
         step.normalized_action,
         step.payer_requirement,
@@ -484,6 +522,7 @@ async function claimPolymarketWrapInTransaction(
         funding_authorization.wallet_chain,
         funding_authorization.profile_id,
         funding_authorization.security_class,
+        funding_authorization.max_source_raw::text,
         funding_authorization.signer_id,
         funding_authorization.signer_fingerprint,
         funding_authorization.policy_id,
@@ -682,6 +721,7 @@ async function recoverPolymarketWrapInTransaction(
         operation.support_metadata ->> 'fundingAuthorizationFingerprint' as authorization_fingerprint,
         step.id as step_id,
         step.action_fingerprint,
+        step.action_validation_result,
         step.executor_id,
         step.normalized_action,
         step.payer_requirement,
@@ -694,6 +734,7 @@ async function recoverPolymarketWrapInTransaction(
         funding_authorization.wallet_chain,
         funding_authorization.profile_id,
         funding_authorization.security_class,
+        funding_authorization.max_source_raw::text,
         funding_authorization.signer_id,
         funding_authorization.signer_fingerprint,
         funding_authorization.policy_id,
@@ -800,6 +841,7 @@ export type DelegatedFundingExecutorBatchResult = Readonly<{
   recovered: number;
   softPaused: number;
   submitted: number;
+  alreadySatisfied: number;
   ambiguous: number;
   definitivelyFailed: number;
   pending: number;
@@ -1057,6 +1099,7 @@ export class DelegatedFundingExecutor {
       recovered: 0,
       softPaused: 0,
       submitted: 0,
+      alreadySatisfied: 0,
       ambiguous: 0,
       definitivelyFailed: 0,
       pending: 0,
@@ -1078,30 +1121,50 @@ export class DelegatedFundingExecutor {
           1,
           this.input.startedAttemptRecoveryMs ?? 5 * 60_000,
         );
-        const claimed = await tx(this.pool, async (client) => {
-          const recovery = await runtime.recoverInTransaction(client, {
+        const recovery = await tx(this.pool, (client) =>
+          runtime.recoverInTransaction(client, {
             now,
             recoverStartedBefore: new Date(now.getTime() - recoveryMs),
-          });
-          if (recovery) {
-            return { kind: "recovery" as const, claim: recovery };
+          }),
+        );
+        let claimObservation: JsonRecord | undefined;
+        if (!recovery && runtime.observeBeforeClaim) {
+          try {
+            claimObservation = await runtime.observeBeforeClaim(this.pool, {
+              now,
+            });
+          } catch {
+            // Maintenance observations are fail-closed but must never block
+            // recovery of an already durable provider reference.
+            exhausted.add(runtime.profileId);
+            result.pending += 1;
+            continue;
           }
-          await lockFundingPolicyForTransaction(client);
-          const currentPolicy = await resolveFundingPolicy(client);
-          const controlDecision = runtime.controlPlaneDecision(currentPolicy);
-          const rejected = await runtime.rejectInvalidInTransaction(client, {
-            controlDecision,
-            now,
-          });
-          if (rejected) {
-            return { kind: "rejected" as const, ...rejected };
-          }
-          const claim = await runtime.claimInTransaction(client, {
-            policy: currentPolicy,
-            now,
-          });
-          return claim;
-        });
+        }
+        const claimed = recovery
+          ? { kind: "recovery" as const, claim: recovery }
+          : await tx(this.pool, async (client) => {
+              await lockFundingPolicyForTransaction(client);
+              const currentPolicy = await resolveFundingPolicy(client);
+              const controlDecision =
+                runtime.controlPlaneDecision(currentPolicy);
+              const rejected = await runtime.rejectInvalidInTransaction(
+                client,
+                {
+                  controlDecision,
+                  now,
+                },
+              );
+              if (rejected) {
+                return { kind: "rejected" as const, ...rejected };
+              }
+              const claim = await runtime.claimInTransaction(client, {
+                policy: currentPolicy,
+                now,
+                ...(claimObservation ? { observation: claimObservation } : {}),
+              });
+              return claim;
+            });
         if (!claimed) {
           exhausted.add(runtime.profileId);
           continue;
@@ -1122,6 +1185,18 @@ export class DelegatedFundingExecutor {
         result.operationIds.push(claim.operationId);
         const providerReferenceLookupHmac =
           this.input.referenceCodec.fingerprint(claim.attemptId);
+        let preBroadcastObservation: JsonRecord | undefined;
+        if (!claim.broadcastBoundaryCrossed && runtime.observePreBroadcast) {
+          try {
+            preBroadcastObservation = await runtime.observePreBroadcast(claim);
+          } catch {
+            // The attempt remains durably started and is recoverable. No
+            // broadcast boundary has been crossed, so failing closed here can
+            // never authorize a duplicate submission.
+            result.pending += 1;
+            continue;
+          }
+        }
         const boundaryDecision = claim.broadcastBoundaryCrossed
           ? ({ kind: "reconciliation_only" } as const)
           : await tx(this.pool, async (client) => {
@@ -1130,6 +1205,9 @@ export class DelegatedFundingExecutor {
                 {
                   claim,
                   now,
+                  ...(preBroadcastObservation
+                    ? { observation: preBroadcastObservation }
+                    : {}),
                 },
               );
               if (decision.kind === "soft_paused") return decision;
@@ -1141,6 +1219,31 @@ export class DelegatedFundingExecutor {
                   attemptId: claim.attemptId,
                   reasonCode: decision.reasonCode,
                   now,
+                });
+                if (runtime.finalizeHardInvalidInTransaction) {
+                  await runtime.finalizeHardInvalidInTransaction(client, {
+                    claim,
+                    now,
+                    reasonCode: decision.reasonCode,
+                    ...(preBroadcastObservation
+                      ? { observation: preBroadcastObservation }
+                      : {}),
+                  });
+                }
+                return decision;
+              }
+              if (decision.kind === "already_satisfied") {
+                if (!runtime.finalizeAlreadySatisfiedInTransaction) {
+                  throw new Error(
+                    `profile ${runtime.profileId} cannot finalize an already-satisfied action`,
+                  );
+                }
+                await runtime.finalizeAlreadySatisfiedInTransaction(client, {
+                  claim,
+                  now,
+                  ...(preBroadcastObservation
+                    ? { observation: preBroadcastObservation }
+                    : {}),
                 });
                 return decision;
               }
@@ -1173,13 +1276,17 @@ export class DelegatedFundingExecutor {
           result.definitivelyFailed += 1;
           continue;
         }
+        if (boundaryDecision.kind === "already_satisfied") {
+          result.alreadySatisfied += 1;
+          continue;
+        }
         const executionClaim = claim.broadcastBoundaryCrossed
           ? claim
           : { ...claim, broadcastBoundaryCrossed: true };
         let execution: DelegatedFundingExecutionResult;
         try {
           execution =
-            claimed.kind === "recovery"
+            claimed.kind === "recovery" && claim.broadcastBoundaryCrossed
               ? await runtime.driver.recover(executionClaim)
               : await runtime.driver.execute(executionClaim);
         } catch {
@@ -1236,6 +1343,8 @@ export class DelegatedFundingExecutor {
               stepId: claim.stepId,
               attemptId: claim.attemptId,
               providerReferenceLookupHmac,
+              retryableDefinitiveFailure:
+                claim.actionValidationResult.relayStepKind === "cleanup",
               resolution,
               now,
             },

@@ -84,7 +84,10 @@ import {
   TelegramFundingError,
   TelegramFundingService,
 } from "../services/telegram-funding.js";
-import { ensureTelegramFundingAuthorization } from "../funding/execution/telegram-funding-authorization.js";
+import {
+  ensureTelegramFundingAuthorization,
+  ensureTelegramRelayEvmFundingAuthorization,
+} from "../funding/execution/telegram-funding-authorization.js";
 import { resolveTelegramFundingManagedWalletIdentity } from "../funding/execution/telegram-funding-managed-wallet.js";
 import {
   buildTelegramFundingActiveElsewhereMessage,
@@ -514,8 +517,11 @@ async function registerTelegramBotTradingRoutes(
   const fundingService =
     dependencies.fundingService ??
     new TelegramFundingService(routePool, {
-      provisionAuthorization: (input) =>
-        ensureTelegramFundingAuthorization(routePool, input),
+      provisionAuthorization: async (input) => {
+        const wrap = await ensureTelegramFundingAuthorization(routePool, input);
+        await ensureTelegramRelayEvmFundingAuthorization(routePool, input);
+        return wrap;
+      },
       resolveManagedWallet: (input) =>
         resolveTelegramFundingManagedWalletIdentity(routePool, input),
     });

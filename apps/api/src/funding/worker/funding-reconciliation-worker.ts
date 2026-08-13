@@ -21,6 +21,7 @@ import { createPolymarketReceiptOperationPreparer } from "../preparation/polymar
 import { pollFundingPostconditions } from "../preparation/postcondition-driver.js";
 import { DirectIngressDestinationObserver } from "../reconciliation/direct-ingress-observer.js";
 import { OwnedRouteDestinationObserver } from "../reconciliation/owned-route-destination-observer.js";
+import { RelayOwnedRefundObserver } from "../reconciliation/relay-owned-refund-observer.js";
 import { FundingReceiveSessionObserver } from "../receive/receive-session-observer.js";
 import {
   FundingReceiveReceiptRouter,
@@ -32,7 +33,9 @@ import {
   DelegatedFundingExecutor,
 } from "../execution/delegated-funding-executor.js";
 import type { PolymarketWrapExecutionConfiguration } from "../execution/delegated-funding-config.js";
+import { loadRelayEvmExecutionConfiguration } from "../execution/delegated-funding-config.js";
 import { createPrivyDelegatedFundingDriver } from "../execution/privy-delegated-funding-driver.js";
+import { createRelayEvmDelegatedFundingProfile } from "../execution/relay-evm-delegated-executor-profile.js";
 import {
   resolveTelegramFundingReceiptDisposition,
   TELEGRAM_POLYMARKET_FUNDING_ADAPTER_KEY,
@@ -47,18 +50,55 @@ function receiptDispositionResolver(
     string,
     TelegramFundingReceiptOperationPreparer
   >,
-  webDisposition: FundingReceiveReceiptDispositionResolver | null,
+  relayDisposition: FundingReceiveReceiptDispositionResolver | null,
 ): FundingReceiveReceiptDispositionResolver {
   return (target) => {
     if (target.ownerChannel === "telegram") {
-      return resolveTelegramFundingReceiptDisposition(
+      const telegram = resolveTelegramFundingReceiptDisposition(
         target,
         operationPreparers,
       );
+      if (
+        telegram.kind !== "automatic_execution" ||
+        !telegram.execution ||
+        telegram.execution.prepareOperation ||
+        !relayDisposition
+      )
+        return telegram;
+      const relay = relayDisposition(target);
+      if (
+        relay.kind !== "automatic_execution" ||
+        !relay.execution?.prepareOperation
+      )
+        return telegram;
+      const prepareRelay = relay.execution.prepareOperation;
+      const decision = telegram.execution.decision;
+      return {
+        ...telegram,
+        execution: {
+          ...telegram.execution,
+          prepareOperation: async (db, receiptTarget, now) => {
+            const prepared = await prepareRelay(db, receiptTarget, now);
+            if (!prepared || "kind" in prepared) return prepared;
+            return {
+              ...prepared,
+              verify: async (client) => {
+                const authority = await decision(client, receiptTarget);
+                if (authority.kind !== "allowed") {
+                  throw new Error(
+                    "Relay Telegram authority changed before commit",
+                  );
+                }
+                await prepared.verify(client);
+              },
+            };
+          },
+        },
+      };
     }
     if (target.receipt.handling === "direct") return { kind: "direct" };
-    return webDisposition
-      ? webDisposition(target)
+    return relayDisposition
+      ? relayDisposition(target)
       : {
           kind: "hard_invalid",
           reasonCode: "receipt_disposition_unavailable",
@@ -137,6 +177,9 @@ export async function isFundingReconciliationSchemaReady(
         and to_regclass('public.telegram_funding_sessions') is not null
         and to_regclass('public.telegram_funding_consents') is not null
         and to_regclass('public.telegram_funding_authorizations') is not null
+        and to_regclass(
+              'public.telegram_funding_authorization_reservations'
+            ) is not null
         and to_regclass('public.telegram_funding_mutations') is not null
         and to_regclass('public.telegram_bot_action_outbox') is not null
         and exists (
@@ -144,6 +187,14 @@ export async function isFundingReconciliationSchemaReady(
           from pg_attribute
           where attrelid = to_regclass('public.funding_receive_sessions')
             and attname = 'owner_channel'
+            and not attisdropped
+        )
+        and exists (
+          select 1
+          from pg_attribute
+          where attrelid =
+                  to_regclass('public.telegram_funding_authorizations')
+            and attname = 'max_source_raw'
             and not attisdropped
         )
         and not exists (
@@ -284,16 +335,28 @@ export async function runFundingReconciliationJob(
       "delegated funding execution requires transaction reference protection",
     );
   }
+  const relayEvmConfiguration = loadRelayEvmExecutionConfiguration();
   const delegatedDriver = options.delegatedExecution
     ? createPrivyDelegatedFundingDriver({
         ...options.delegatedExecution.privy,
-        configuration: options.delegatedExecution.configuration,
+        configuration: {
+          ...options.delegatedExecution.configuration,
+          relayAllowedDepositors: relayEvmConfiguration.allowedDepositors,
+          relayMaxSourceRaw: relayEvmConfiguration.maxSourceRaw,
+        },
       })
     : null;
   const polymarketWrapProfile =
     options.delegatedExecution && delegatedDriver
       ? createPolymarketWrapDelegatedFundingProfile({
           configuration: options.delegatedExecution.configuration,
+          driver: delegatedDriver,
+        })
+      : null;
+  const relayEvmProfile =
+    options.delegatedExecution && delegatedDriver
+      ? createRelayEvmDelegatedFundingProfile({
+          configuration: relayEvmConfiguration,
           driver: delegatedDriver,
         })
       : null;
@@ -345,9 +408,12 @@ export async function runFundingReconciliationJob(
       now: options.now,
     });
     const delegatedFundingExecution =
-      polymarketWrapProfile && transactionCodec
+      (polymarketWrapProfile || relayEvmProfile) && transactionCodec
         ? await new DelegatedFundingExecutor(pool, {
-            profiles: [polymarketWrapProfile],
+            profiles: [polymarketWrapProfile, relayEvmProfile].filter(
+              (profile): profile is NonNullable<typeof profile> =>
+                profile != null,
+            ),
             referenceCodec: transactionCodec,
           }).runBatch({ limit: options.limit ?? 25, now: options.now })
         : null;
@@ -359,6 +425,9 @@ export async function runFundingReconciliationJob(
   };
   const directIngressObserver = new DirectIngressDestinationObserver();
   const ownedRouteObserver = new OwnedRouteDestinationObserver();
+  const relayRefundObserver = codecConfig
+    ? new RelayOwnedRefundObserver(createRelayReferenceCodec(codecConfig))
+    : null;
   const receiptDriver = transactionCodec
     ? new FundingStepReceiptReconciliationDriver(transactionCodec)
     : null;
@@ -388,15 +457,21 @@ export async function runFundingReconciliationJob(
         }
       : {};
   const pollDestination = async (operationId: string, now: Date) => {
-    const [direct, ownedRoute] = await Promise.all([
+    const [direct, ownedRoute, refund] = await Promise.all([
       directIngressObserver.pollOperation(pool, operationId, now),
       ownedRouteObserver.pollOperation(pool, operationId, now),
+      relayRefundObserver?.pollOperation(pool, operationId, now) ??
+        Promise.resolve({ refundsPolled: 0, refundSatisfied: false }),
     ]);
     return {
       destinationsPolled:
-        direct.destinationsPolled + ownedRoute.destinationsPolled,
+        direct.destinationsPolled +
+        ownedRoute.destinationsPolled +
+        refund.refundsPolled,
       destinationSatisfied:
-        direct.destinationSatisfied || ownedRoute.destinationSatisfied,
+        direct.destinationSatisfied ||
+        ownedRoute.destinationSatisfied ||
+        refund.refundSatisfied,
     };
   };
   const receive = await runReceiveBeforeReconciliation();

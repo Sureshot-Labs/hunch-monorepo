@@ -17,6 +17,7 @@ import {
 } from "../domain/types.js";
 import { canonicalAccountAddress } from "../domain/asset-identity.js";
 import { allocateFundingObservationInTransaction } from "./funding-operation-repository.js";
+import { lockFundingAuthorizationReservationScope } from "./funding-authorization-reservation-lock.js";
 
 type JsonRecord = Readonly<Record<string, JsonValue>>;
 type ReceiveTargets = NonNullable<ExternalIngressInstruction["receiveTargets"]>;
@@ -1483,7 +1484,6 @@ export async function listFundingReceiveReceiptsForRouting(
         from telegram_funding_consents consent
         where consent.telegram_funding_session_id = telegram_context.id
           and consent.consented_at <= canonical_event.first_observed_at
-          and consent.max_auto_execute_source_raw is null
           and jsonb_typeof(
                 consent.automation_policy_snapshot -> 'presentation'
               ) = 'object'
@@ -1492,8 +1492,19 @@ export async function listFundingReceiveReceiptsForRouting(
             receipt.handling = 'review_required'
             or (
               consent.automation_enabled
-              and consent.automation_policy_snapshot ->> 'version' = '2'
-              and consent.automation_policy_snapshot ->> 'fullReceipt' = 'true'
+              and (
+                (
+                  consent.max_auto_execute_source_raw is null
+                  and consent.automation_policy_snapshot ->> 'version' = '2'
+                  and consent.automation_policy_snapshot ->> 'fullReceipt' = 'true'
+                )
+                or (
+                  consent.max_auto_execute_source_raw > 0
+                  and consent.automation_policy_snapshot ->> 'version' = '3'
+                  and consent.automation_policy_snapshot ->> 'fullReceipt' = 'false'
+                  and receipt.raw_amount <= consent.max_auto_execute_source_raw
+                )
+              )
               and receipt.ledger_height is not null
               and receipt.network_id =
                     consent.automation_policy_snapshot #>> '{sourceAsset,networkId}'
@@ -2023,10 +2034,11 @@ export async function linkFundingReceiveReceiptOperationInTransaction(
     throw new Error("automatic funding operation is missing consent evidence");
   }
   const operation = await client.query<{
+    segment_id: string | null;
     step_id: string;
   }>(
     `
-        select step.id as step_id
+        select step.id as step_id, step.segment_id
         from funding_operations operation
         join funding_operation_steps step
           on step.operation_id = operation.id
@@ -2053,6 +2065,7 @@ export async function linkFundingReceiveReceiptOperationInTransaction(
     ],
   );
   const stepId = operation.rows[0]?.step_id;
+  const segmentId = operation.rows[0]?.segment_id ?? null;
   if (!stepId || !receipt.tx_hash || !receipt.event_index) {
     throw new Error(
       "automatic funding operation is not bound to exact receipt evidence",
@@ -2084,9 +2097,88 @@ export async function linkFundingReceiveReceiptOperationInTransaction(
       input.now,
     ],
   );
+  // Acquire the durable scope fence in its own statement. A waiter then starts
+  // the cap-sum statement with a fresh READ COMMITTED snapshot that includes
+  // the preceding generation's committed reservation.
+  await lockFundingAuthorizationReservationScope(client, {
+    authorizationId: input.authorizationId,
+    userId: input.userId,
+  });
+  const capReservation = await client.query<{
+    authority_exists: boolean;
+    requires_reservation: boolean;
+    reserved: boolean;
+  }>(
+    `with authority as materialized (
+       select id, user_id, wallet_address, profile_id,
+              security_class, max_source_raw
+       from telegram_funding_authorizations
+       where id = $1::uuid
+         and user_id = $2::uuid
+       for update
+     ), inserted as (
+       insert into telegram_funding_authorization_reservations (
+         authorization_id,
+         receive_receipt_id,
+         funding_operation_id,
+         source_raw,
+         status,
+         reserved_at
+       )
+       select authority.id, $3::uuid, $4::uuid, $5::numeric,
+              'reserved', clock_timestamp()
+       from authority
+       where authority.security_class = 'routed_value_movement'
+         and authority.max_source_raw is not null
+         and $5::numeric <= authority.max_source_raw
+         and $5::numeric + coalesce((
+           select sum(reservation.source_raw)
+           from telegram_funding_authorization_reservations reservation
+           join telegram_funding_authorizations prior_authority
+             on prior_authority.id = reservation.authorization_id
+           where prior_authority.user_id = authority.user_id
+             and lower(prior_authority.wallet_address) =
+                   lower(authority.wallet_address)
+             and prior_authority.profile_id = authority.profile_id
+             and prior_authority.security_class = 'routed_value_movement'
+             and reservation.status <> 'released'
+             and reservation.reserved_at >= $6::timestamptz - interval '24 hours'
+         ), 0) <= authority.max_source_raw
+       on conflict (receive_receipt_id) do nothing
+       returning id
+     )
+     select
+       exists(select 1 from authority) as authority_exists,
+       coalesce((select security_class = 'routed_value_movement' from authority), false)
+         as requires_reservation,
+       exists(select 1 from inserted)
+         or exists(
+           select 1
+           from telegram_funding_authorization_reservations
+           where receive_receipt_id = $3::uuid
+             and authorization_id = $1::uuid
+             and funding_operation_id = $4::uuid
+             and source_raw = $5::numeric
+         ) as reserved`,
+    [
+      input.authorizationId,
+      input.userId,
+      input.receiptId,
+      input.childFundingOperationId,
+      receipt.raw_amount,
+      input.now,
+    ],
+  );
+  if (
+    !capReservation.rows[0]?.authority_exists ||
+    (capReservation.rows[0]?.requires_reservation &&
+      !capReservation.rows[0]?.reserved)
+  ) {
+    throw new Error("routed funding authorization cap is unavailable");
+  }
   await allocateFundingObservationInTransaction(client, {
     operationId: input.childFundingOperationId,
-    segmentId: null,
+    segmentId,
     kind: "source_credit",
     networkId: receipt.network_id,
     assetId: receipt.asset_id,

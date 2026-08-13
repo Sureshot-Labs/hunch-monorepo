@@ -135,6 +135,41 @@ assert.equal(exactCreditReceipt.status, "finalized");
 assert.equal(exactCreditReceipt.actionMatch, true);
 assert.equal(exactCreditReceipt.evidence.attributedDestinationRaw, "4000000");
 
+const sourceToken = "0x9999999999999999999999999999999999999999";
+const sourceRecipient = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const exactSourceDebitLog = exactCreditInterface.encodeEventLog(
+  exactCreditEvent,
+  [evmTransaction.from, sourceRecipient, 4_000_000n],
+);
+const exactSourceDebitReceipt = evaluateEvmActionReceipt({
+  action: evmAction,
+  actionValidationResult: {
+    postconditionEvidenceKind: "exact_erc20_source_debit_v1",
+    expectedSourceAssetId: sourceToken,
+    expectedSourceAddress: evmTransaction.from,
+    expectedSourceRecipient: sourceRecipient,
+    expectedSourceRaw: "4000000",
+  },
+  expectedSignerAddress: evmTransaction.from,
+  transaction: evmTransaction,
+  receipt: {
+    ...evmReceipt,
+    logs: [
+      {
+        address: sourceToken,
+        data: exactSourceDebitLog.data,
+        logIndex: 17,
+        topics: exactSourceDebitLog.topics,
+      },
+    ],
+  },
+  previous: null,
+});
+assert.equal(exactSourceDebitReceipt.status, "finalized");
+assert.equal(exactSourceDebitReceipt.actionMatch, true);
+assert.equal(exactSourceDebitReceipt.evidence.attributedSourceRaw, "4000000");
+assert.equal(exactSourceDebitReceipt.evidence.sourceDebitEventIndex, "17");
+
 const excessiveDestinationCreditLog = exactCreditInterface.encodeEventLog(
   exactCreditEvent,
   [ethers.ZeroAddress, destinationWallet, 4_000_001n],
@@ -182,10 +217,57 @@ assert.equal(
     action: evmAction,
     expectedSignerAddress: evmTransaction.from,
     transaction: evmTransaction,
-    receipt: { ...evmReceipt, succeeded: false },
+    receipt: {
+      ...evmReceipt,
+      succeeded: false,
+      confirmations: FAST_EVM_FUNDING_ACTION_FINALITY_CONFIRMATIONS - 1,
+    },
     previous: null,
   }).status,
-  "failed",
+  "confirmed",
+);
+const finalizedFailure = evaluateEvmActionReceipt({
+  action: evmAction,
+  expectedSignerAddress: evmTransaction.from,
+  transaction: evmTransaction,
+  receipt: {
+    ...evmReceipt,
+    succeeded: false,
+    confirmations: FAST_EVM_FUNDING_ACTION_FINALITY_CONFIRMATIONS,
+  },
+  previous: null,
+});
+assert.equal(finalizedFailure.status, "failed");
+assert.equal(finalizedFailure.failureCode, "transaction_reverted");
+assert.equal(finalizedFailure.evidence.failureFinalized, true);
+const finalizedFailureObservation: FundingStepReceiptObservation = {
+  operationId: "00000000-0000-4000-8000-000000000111",
+  stepId: "00000000-0000-4000-8000-000000000112",
+  attemptId: "00000000-0000-4000-8000-000000000113",
+  networkId: evmAction.networkId,
+  status: "failed",
+  actionMatch: true,
+  ledgerHeight: evmReceipt.blockNumber.toString(),
+  blockHash: evmReceipt.blockHash,
+  canonical: true,
+  failureCode: finalizedFailure.failureCode,
+  evidence: finalizedFailure.evidence,
+  firstSeenAt: new Date(0),
+  observedAt: new Date(0),
+  finalizedAt: new Date(0),
+  reorgedAt: null,
+};
+const reorgedFinalizedFailure = evaluateEvmActionReceipt({
+  action: evmAction,
+  expectedSignerAddress: evmTransaction.from,
+  transaction: evmTransaction,
+  receipt: null,
+  previous: finalizedFailureObservation,
+});
+assert.equal(reorgedFinalizedFailure.status, "reorged");
+assert.equal(
+  shouldIgnoreFundingStepReceiptUpdate("failed", reorgedFinalizedFailure),
+  false,
 );
 assert.equal(
   evaluateEvmActionReceipt({
@@ -361,11 +443,16 @@ const [batchReceiptTarget] = await listFundingStepReceiptTargets(
     },
   } as unknown as Parameters<typeof listFundingStepReceiptTargets>[0],
   "operation_batch_12345678",
+  new Date("2026-07-30T09:54:46.013Z"),
 );
 assert.equal(batchReceiptTarget?.action.kind, "evm_transaction_batch");
 assert.equal(batchReceiptTarget?.stepState, "succeeded");
 assert.equal(batchReceiptTarget?.previousReceipt?.status, "confirmed");
 assert.match(receiptTargetQuery, /or step\.state = 'succeeded'/u);
+assert.match(
+  receiptTargetQuery,
+  /receipt\.finalized_at >= \$2::timestamptz - interval '15 minutes'/u,
+);
 const batchExecutionCalldata = ethers.AbiCoder.defaultAbiCoder().encode(
   ["tuple(address target,uint256 value,bytes callData)[]"],
   [
@@ -440,6 +527,21 @@ assert.equal(
   }).status,
   "finalized",
 );
+const exclusiveBundleReceipt = evaluateEvmActionReceipt({
+  action: evmAction,
+  actionValidationResult: { requiresSingleOperationBundle: true },
+  expectedSignerAddress: sponsoredSigner,
+  transaction: bundledSponsoredTransaction,
+  receipt: sponsoredReceipt,
+  previous: null,
+  executionEnvelope: "privy_erc4337",
+});
+assert.equal(exclusiveBundleReceipt.status, "mismatch");
+assert.equal(
+  exclusiveBundleReceipt.failureCode,
+  "sponsored_operation_scope_ambiguous",
+  "approval and cleanup ownership cannot be attributed across multiple UserOperations",
+);
 const ambiguousBundleCredit = evaluateEvmActionReceipt({
   action: evmAction,
   actionValidationResult: exactCreditValidation,
@@ -498,25 +600,81 @@ const failedSponsoredEvent = entryPoint.encodeEventLog(userOperationEvent, [
   0,
   0,
 ]);
+const failedSponsoredReceipt = {
+  ...sponsoredReceipt,
+  logs: [
+    {
+      address: entryPointAddress,
+      data: failedSponsoredEvent.data,
+      topics: failedSponsoredEvent.topics,
+    },
+  ],
+};
+assert.equal(
+  evaluateEvmActionReceipt({
+    action: evmAction,
+    expectedSignerAddress: sponsoredSigner,
+    transaction: sponsoredTransaction,
+    receipt: failedSponsoredReceipt,
+    previous: null,
+    executionEnvelope: "privy_erc4337",
+  }).status,
+  "failed",
+);
 assert.equal(
   evaluateEvmActionReceipt({
     action: evmAction,
     expectedSignerAddress: sponsoredSigner,
     transaction: sponsoredTransaction,
     receipt: {
-      ...sponsoredReceipt,
-      logs: [
-        {
-          address: entryPointAddress,
-          data: failedSponsoredEvent.data,
-          topics: failedSponsoredEvent.topics,
-        },
-      ],
+      ...failedSponsoredReceipt,
+      confirmations: FAST_EVM_FUNDING_ACTION_FINALITY_CONFIRMATIONS - 1,
     },
     previous: null,
     executionEnvelope: "privy_erc4337",
   }).status,
-  "failed",
+  "confirmed",
+);
+assert.equal(
+  evaluateEvmActionReceipt({
+    action: evmAction,
+    expectedSignerAddress: sponsoredSigner,
+    transaction: sponsoredTransaction,
+    receipt: {
+      ...failedSponsoredReceipt,
+      canonicalBlockHash: `0x${"cd".repeat(32)}`,
+    },
+    previous: null,
+    executionEnvelope: "privy_erc4337",
+  }).status,
+  "reorged",
+);
+assert.equal(
+  evaluateEvmActionReceipt({
+    action: evmAction,
+    expectedSignerAddress: sponsoredSigner,
+    transaction: sponsoredTransaction,
+    receipt: failedSponsoredReceipt,
+    previous: {
+      operationId: "operation",
+      stepId: "step",
+      attemptId: "attempt",
+      networkId: "evm:8453",
+      status: "finalized",
+      actionMatch: true,
+      ledgerHeight: "9",
+      blockHash: `0x${"cd".repeat(32)}`,
+      canonical: true,
+      failureCode: null,
+      evidence: {},
+      firstSeenAt: new Date(0),
+      observedAt: new Date(0),
+      finalizedAt: new Date(0),
+      reorgedAt: null,
+    },
+    executionEnvelope: "privy_erc4337",
+  }).status,
+  "reorged",
 );
 
 const transferInterface = new ethers.Interface([

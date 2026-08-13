@@ -84,6 +84,7 @@ export const FUNDING_OPERATION_TRANSITIONS = defineTransitions({
     "in_progress:source_observed",
     "reconcile_required:source_action",
     "recovery_required:source_action",
+    "completed:terminal",
     "cancelled:terminal",
   ],
   "in_progress:source_observed": [

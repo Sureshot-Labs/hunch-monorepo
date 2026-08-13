@@ -115,6 +115,7 @@ function createMergeDb(fixture: MergeDbFixture) {
             live_funding_reservations: String(
               conflicts.liveFundingReservations ?? 0,
             ),
+            live_funding_authorization_reservations: "0",
             non_terminal_funding_operations: String(
               conflicts.nonTerminalFundingOperations ?? 0,
             ),

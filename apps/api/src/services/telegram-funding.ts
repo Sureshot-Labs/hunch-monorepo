@@ -45,7 +45,7 @@ import {
   buildTelegramFundingDeliveryQueuedMessage,
   buildTelegramFundingProgressMessage,
   buildTelegramFundingReviewQuoteMessage,
-  buildTelegramFundingTargetMessage,
+  buildTelegramFundingTargetChoicesMessage,
   buildTelegramFundingUnavailableMessage,
 } from "./telegram-funding-presentation.js";
 import {
@@ -92,7 +92,9 @@ import {
   resolveTelegramFundingCurrentController,
   resolveTelegramFundingDestination,
   resolveTelegramFundingRouteCapability,
+  resolveTelegramFundingRouteCapabilities,
   resolveTelegramFundingTarget,
+  resolveTelegramFundingTargets,
   resolveTelegramFundingTargetChoice,
   type TelegramFundingReceivePresentationMode,
   type TelegramFundingTargetCapability,
@@ -421,20 +423,22 @@ export function telegramFundingConsentPresentationMode(
 
 export function buildTelegramFundingTargetMessageForSession(input: {
   automaticConversionEnabled?: boolean;
+  targets?: readonly TelegramFundingTargetCapability[];
   contextId: string;
   expiresAt: string;
   session: FundingReceiveSession;
 }): TelegramFundingMessage {
-  const target = resolveTelegramFundingTarget({
-    automaticConversionEnabled: input.automaticConversionEnabled === true,
-    session: input.session,
-  });
-  return target
-    ? buildTelegramFundingTargetMessage({
-        automaticConversion: target.automaticSourceAsset !== null,
+  const targets =
+    input.targets ??
+    resolveTelegramFundingTargets({
+      automaticConversionEnabled: input.automaticConversionEnabled === true,
+      session: input.session,
+    });
+  return targets.length > 0
+    ? buildTelegramFundingTargetChoicesMessage({
         contextId: input.contextId,
         expiresAt: input.expiresAt,
-        presentation: target.presentation,
+        targets,
       })
     : buildTelegramFundingUnavailableMessage({ reason: "unavailable" });
 }
@@ -700,6 +704,7 @@ export class TelegramFundingService {
       session: FundingReceiveSession;
       telegramUserId: string;
       expectedFundingPolicyRevision?: string;
+      routeKey?: string;
     }>,
   ): Promise<
     Readonly<{
@@ -715,11 +720,27 @@ export class TelegramFundingService {
       telegramUserId: input.telegramUserId,
       session: input.session,
       expectedFundingPolicyRevision: input.expectedFundingPolicyRevision,
+      routeKey: input.routeKey,
     });
     if (!capability) {
       throw new TelegramFundingError("destination_ambiguous");
     }
     return capability;
+  }
+
+  private async resolveTargetCapabilities(
+    input: Readonly<{
+      link: ActiveTelegramAccountLink;
+      session: FundingReceiveSession;
+      telegramUserId: string;
+    }>,
+  ) {
+    return resolveTelegramFundingRouteCapabilities(this.pool, {
+      userId: input.link.userId,
+      telegramAccountId: input.link.linkId,
+      telegramUserId: input.telegramUserId,
+      session: input.session,
+    });
   }
 
   private async resolveReceiveDestination(
@@ -1790,16 +1811,35 @@ export class TelegramFundingService {
           now,
         })
       : null;
-    const liveCapability = await this.resolveTargetCapability({
+    const consentRoute = owned.consent
+      ? resolveTelegramFundingConsentRoute(owned.consent)
+      : null;
+    const liveCapabilities = await this.resolveTargetCapabilities({
       link: owned.link,
       session: owned.receive.session,
       telegramUserId: owned.identity.telegramUserId,
     });
+    const liveCapability =
+      owned.consent && consentRoute
+        ? await this.resolveTargetCapability({
+            link: owned.link,
+            session: owned.receive.session,
+            telegramUserId: owned.identity.telegramUserId,
+            routeKey: consentRoute.presentation.routeKey,
+          })
+        : liveCapabilities[0];
+    if (!liveCapability) {
+      return buildTelegramFundingUnavailableMessage({ reason: "unavailable" });
+    }
     const frozenTarget = owned.consent
-      ? resolveTelegramFundingTarget({
+      ? (resolveTelegramFundingTargets({
           automaticConversionEnabled: owned.consent.automationEnabled,
           session: owned.receive.session,
-        })
+        }).find(
+          (target) =>
+            target.presentation.routeKey ===
+            consentRoute?.presentation.routeKey,
+        ) ?? null)
       : liveCapability.target;
     const capability = owned.consent?.automationEnabled
       ? {
@@ -1873,7 +1913,15 @@ export class TelegramFundingService {
       contextId: owned.context.id,
       expiresAt: owned.context.expiresAt,
       session: owned.receive.session,
-      automaticConversionEnabled: capability.authorization != null,
+      automaticConversionEnabled: liveCapabilities.some(
+        (candidate) => candidate.authorization != null,
+      ),
+      targets: liveCapabilities.flatMap((candidate) =>
+        candidate.authorization ||
+        candidate.target.automaticSourceAsset === null
+          ? [candidate.target]
+          : [],
+      ),
     });
     return decorateProgress
       ? decorateProgress({
@@ -1931,8 +1979,8 @@ export class TelegramFundingService {
     } catch (error) {
       rethrowTelegramFundingPersistenceError(error);
     }
-    const automaticConversionRequested = input.choiceToken === "a";
-    if (!["a", "d", "p"].includes(input.choiceToken)) {
+    const automaticConversionRequested = ["a", "b"].includes(input.choiceToken);
+    if (!["a", "b", "d", "p"].includes(input.choiceToken)) {
       throw new TelegramFundingError("invalid_funding_choice");
     }
     const policy = await resolveSignalBotTradingPolicyStateFromDb(this.pool);
@@ -1972,10 +2020,17 @@ export class TelegramFundingService {
     if (!controllerWalletId) {
       throw new TelegramFundingError("destination_ambiguous");
     }
+    const selectedRouteKey =
+      input.choiceToken === "b"
+        ? "polymarket_base_usdc_relay_v1"
+        : input.choiceToken === "a"
+          ? "polymarket_polygon_pusd_usdce_v1"
+          : "polymarket_polygon_pusd_direct_v1";
     const capability = await this.resolveTargetCapability({
       link,
       session: receive.session,
       telegramUserId: identity.telegramUserId,
+      routeKey: selectedRouteKey,
     });
     if (
       automaticConversionRequested &&
@@ -1987,6 +2042,7 @@ export class TelegramFundingService {
       automaticConversionEnabled: automaticConversionRequested,
       session: receive.session,
       observationVariants: snapshot.observationVariants,
+      routeKey: selectedRouteKey,
     });
     if (!choice) throw new TelegramFundingError("invalid_funding_choice");
     let consentVariants = snapshot.observationVariants.filter((variant) =>
@@ -2067,7 +2123,10 @@ export class TelegramFundingService {
         asset: choice.asset,
         variantIds: consentVariants.map((variant) => variant.variantId).sort(),
         automationEnabled: choice.automaticConversion,
-        maximumAutomaticRaw: null,
+        maximumAutomaticRaw:
+          choice.automaticConversion && capability.authorization?.maxSourceRaw
+            ? capability.authorization.maxSourceRaw
+            : null,
         policySnapshot,
         fingerprint,
         mutation: {

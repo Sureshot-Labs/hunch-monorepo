@@ -62,6 +62,7 @@ export type EvmReceiptRecord = Readonly<{
   logs: readonly Readonly<{
     address: string;
     data: string;
+    logIndex?: number;
     topics: readonly string[];
   }>[];
 }>;
@@ -394,6 +395,79 @@ function exactErc20DestinationCredit(
   };
 }
 
+function exactErc20SourceDebit(
+  validation: JsonRecord | undefined,
+  receipt: EvmReceiptRecord,
+): ExactDestinationCreditResult & Readonly<{ eventIndex?: string | null }> {
+  if (validation?.postconditionEvidenceKind !== "exact_erc20_source_debit_v1")
+    return { required: false };
+  const assetId = validation.expectedSourceAssetId;
+  const source = validation.expectedSourceAddress;
+  const recipient = validation.expectedSourceRecipient;
+  const expectedRaw = validation.expectedSourceRaw;
+  if (
+    typeof assetId !== "string" ||
+    typeof source !== "string" ||
+    typeof recipient !== "string" ||
+    typeof expectedRaw !== "string" ||
+    !/^[1-9][0-9]*$/u.test(expectedRaw)
+  )
+    return {
+      required: true,
+      valid: false,
+      attributedRaw: null,
+      expectedRaw: null,
+    };
+  let token: string;
+  let from: string;
+  let to: string;
+  try {
+    token = ethers.getAddress(assetId);
+    from = ethers.getAddress(source);
+    to = ethers.getAddress(recipient);
+  } catch {
+    return { required: true, valid: false, attributedRaw: null, expectedRaw };
+  }
+  const matches = receipt.logs.flatMap((log) => {
+    if (log.address.toLowerCase() !== token.toLowerCase()) return [];
+    try {
+      const parsed = ERC20_TRANSFER_EVENT_INTERFACE.parseLog({
+        topics: [...log.topics],
+        data: log.data,
+      });
+      return parsed?.name === "Transfer" &&
+        ethers.getAddress(String(parsed.args.from)) === from &&
+        ethers.getAddress(String(parsed.args.to)) === to &&
+        Number.isSafeInteger(log.logIndex) &&
+        Number(log.logIndex) >= 0
+        ? [{ raw: BigInt(parsed.args.value), index: Number(log.logIndex) }]
+        : [];
+    } catch {
+      return [];
+    }
+  });
+  const attributed = matches.reduce((sum, match) => sum + match.raw, 0n);
+  const onlyMatch = matches.length === 1 ? matches[0] : undefined;
+  return {
+    required: true,
+    valid: matches.length === 1 && attributed === BigInt(expectedRaw),
+    attributedRaw: attributed.toString(),
+    expectedRaw,
+    eventIndex: onlyMatch ? String(onlyMatch.index) : null,
+  };
+}
+
+function isReorgWatchReceipt(
+  receipt: FundingStepReceiptObservation | null,
+): receipt is FundingStepReceiptObservation {
+  return (
+    receipt?.status === "finalized" ||
+    (receipt?.status === "failed" &&
+      receipt.canonical &&
+      receipt.evidence.failureFinalized === true)
+  );
+}
+
 export function evaluateEvmActionReceipt(
   input: Readonly<{
     action: EvmTransactionAction | EvmTransactionBatchAction;
@@ -406,7 +480,7 @@ export function evaluateEvmActionReceipt(
   }>,
 ): FundingStepReceiptEvidence {
   if (!input.transaction) {
-    if (input.previous?.status === "finalized") {
+    if (isReorgWatchReceipt(input.previous)) {
       return {
         status: "reorged",
         actionMatch: true,
@@ -465,22 +539,8 @@ export function evaluateEvmActionReceipt(
       }),
     };
   }
-  if (sponsoredMatch?.userOperationSucceeded === false) {
-    return {
-      status: "failed",
-      actionMatch: true,
-      ledgerHeight: input.receipt?.blockNumber.toString() ?? null,
-      blockHash: input.receipt?.blockHash ?? null,
-      canonical: true,
-      failureCode: sponsoredMatch.failureCode,
-      evidence: evidence({
-        executionEnvelope,
-        receiptObserved: input.receipt != null,
-      }),
-    };
-  }
   if (!input.receipt) {
-    if (input.previous?.status === "finalized") {
+    if (isReorgWatchReceipt(input.previous)) {
       return {
         status: "reorged",
         actionMatch: true,
@@ -523,7 +583,7 @@ export function evaluateEvmActionReceipt(
     };
   }
   if (
-    input.previous?.status === "finalized" &&
+    isReorgWatchReceipt(input.previous) &&
     input.previous.blockHash !== null &&
     input.previous.blockHash.toLowerCase() !==
       input.receipt.blockHash.toLowerCase()
@@ -541,16 +601,45 @@ export function evaluateEvmActionReceipt(
       }),
     };
   }
-  if (!input.receipt.succeeded) {
+  // Canonicality must be established before either an outer transaction
+  // revert or an inner ERC-4337 failure can become retry-authorizing evidence.
+  if (sponsoredMatch?.userOperationSucceeded === false) {
+    const confirmationPolicy = evmFundingActionFinalityConfirmations(
+      input.transaction.chainId,
+    );
+    const failureFinalized = input.receipt.confirmations >= confirmationPolicy;
     return {
-      status: "failed",
+      status: failureFinalized ? "failed" : "confirmed",
+      actionMatch: true,
+      ledgerHeight: input.receipt.blockNumber.toString(),
+      blockHash: input.receipt.blockHash,
+      canonical: true,
+      failureCode: sponsoredMatch.failureCode,
+      evidence: evidence({
+        confirmationPolicy,
+        confirmations: input.receipt.confirmations,
+        executionEnvelope,
+        failureFinalized,
+        receiptObserved: true,
+      }),
+    };
+  }
+  if (!input.receipt.succeeded) {
+    const confirmationPolicy = evmFundingActionFinalityConfirmations(
+      input.transaction.chainId,
+    );
+    const failureFinalized = input.receipt.confirmations >= confirmationPolicy;
+    return {
+      status: failureFinalized ? "failed" : "confirmed",
       actionMatch: true,
       ledgerHeight: input.receipt.blockNumber.toString(),
       blockHash: input.receipt.blockHash,
       canonical: true,
       failureCode: "transaction_reverted",
       evidence: evidence({
+        confirmationPolicy,
         confirmations: input.receipt.confirmations,
+        failureFinalized,
         receiptObserved: true,
       }),
     };
@@ -559,8 +648,16 @@ export function evaluateEvmActionReceipt(
     input.actionValidationResult,
     input.receipt,
   );
+  const exactSourceDebit = exactErc20SourceDebit(
+    input.actionValidationResult,
+    input.receipt,
+  );
+  const requiresSingleOperationBundle =
+    input.actionValidationResult?.requiresSingleOperationBundle === true;
   if (
-    exactDestinationCredit.required &&
+    (requiresSingleOperationBundle ||
+      exactDestinationCredit.required ||
+      exactSourceDebit.required) &&
     executionEnvelope === "privy_erc4337" &&
     sponsoredMatch?.singleOperationBundle !== true
   ) {
@@ -570,8 +667,13 @@ export function evaluateEvmActionReceipt(
       ledgerHeight: input.receipt.blockNumber.toString(),
       blockHash: input.receipt.blockHash,
       canonical: true,
-      failureCode: "sponsored_exact_credit_scope_ambiguous",
-      evidence: evidence({ receiptObserved: true }),
+      failureCode: requiresSingleOperationBundle
+        ? "sponsored_operation_scope_ambiguous"
+        : "sponsored_exact_credit_scope_ambiguous",
+      evidence: evidence({
+        receiptObserved: true,
+        singleOperationBundle: false,
+      }),
     };
   }
   if (exactDestinationCredit.required && !exactDestinationCredit.valid) {
@@ -585,6 +687,21 @@ export function evaluateEvmActionReceipt(
       evidence: evidence({
         attributedDestinationRaw: exactDestinationCredit.attributedRaw,
         expectedDestinationRaw: exactDestinationCredit.expectedRaw,
+        receiptObserved: true,
+      }),
+    };
+  }
+  if (exactSourceDebit.required && !exactSourceDebit.valid) {
+    return {
+      status: "mismatch",
+      actionMatch: false,
+      ledgerHeight: input.receipt.blockNumber.toString(),
+      blockHash: input.receipt.blockHash,
+      canonical: true,
+      failureCode: "source_debit_amount_mismatch",
+      evidence: evidence({
+        attributedSourceRaw: exactSourceDebit.attributedRaw,
+        expectedSourceRaw: exactSourceDebit.expectedRaw,
         receiptObserved: true,
       }),
     };
@@ -607,9 +724,16 @@ export function evaluateEvmActionReceipt(
               exactDestinationCredit.attributedRaw ?? "0",
           }
         : {}),
+      ...(exactSourceDebit.required
+        ? {
+            attributedSourceRaw: exactSourceDebit.attributedRaw ?? "0",
+            sourceDebitEventIndex: exactSourceDebit.eventIndex ?? "",
+          }
+        : {}),
       confirmationPolicy,
       confirmations: input.receipt.confirmations,
       receiptObserved: true,
+      ...(requiresSingleOperationBundle ? { singleOperationBundle: true } : {}),
     }),
   };
 }
@@ -639,7 +763,7 @@ export function evaluatePolymarketDepositWalletHandoffReceipt(
     };
   }
   if (!input.transaction) {
-    if (input.previous?.status === "finalized") {
+    if (isReorgWatchReceipt(input.previous)) {
       return {
         status: "reorged",
         actionMatch: true,
@@ -672,7 +796,7 @@ export function evaluatePolymarketDepositWalletHandoffReceipt(
     };
   }
   if (!input.receipt) {
-    if (input.previous?.status === "finalized") {
+    if (isReorgWatchReceipt(input.previous)) {
       return {
         status: "reorged",
         actionMatch: true,
@@ -767,7 +891,7 @@ export function evaluatePolymarketDepositWalletHandoffReceipt(
     };
   }
   if (
-    input.previous?.status === "finalized" &&
+    isReorgWatchReceipt(input.previous) &&
     input.previous.blockHash !== null &&
     input.previous.blockHash.toLowerCase() !==
       input.receipt.blockHash.toLowerCase()
@@ -825,7 +949,7 @@ export function evaluateSvmActionReceipt(
   }>,
 ): FundingStepReceiptEvidence {
   if (!input.transaction) {
-    if (input.previous?.status === "finalized") {
+    if (isReorgWatchReceipt(input.previous)) {
       return {
         status: "reorged",
         actionMatch: true,
@@ -1060,6 +1184,7 @@ async function inspectEvmTarget(
       logs: receipt.logs.map((log) => ({
         address: log.address,
         data: log.data,
+        logIndex: log.logIndex,
         topics: log.topics,
       })),
     };
@@ -1085,7 +1210,7 @@ async function inspectEvmTarget(
   if (!expectedSignerAddress) {
     throw new Error("committed EVM signer is unavailable");
   }
-  return evaluateEvmActionReceipt({
+  const evaluated = evaluateEvmActionReceipt({
     action: target.action,
     actionValidationResult: target.actionValidationResult,
     expectedSignerAddress,
@@ -1095,6 +1220,13 @@ async function inspectEvmTarget(
     executionEnvelope:
       target.payerRequirement === "privy_sponsor" ? "privy_erc4337" : "direct",
   });
+  return {
+    ...evaluated,
+    evidence: {
+      ...evaluated.evidence,
+      transactionHash: reference.toLowerCase(),
+    },
+  };
 }
 
 function instructionDataHex(data: unknown): string | null {
@@ -1244,7 +1376,7 @@ export class FundingStepReceiptReconciliationDriver {
   ): Promise<Readonly<{ receiptsPolled: number; receiptsFinalized: number }>> {
     const targets = await (
       this.dependencies.listTargets ?? listFundingStepReceiptTargets
-    )(pool, operationId);
+    )(pool, operationId, now);
     const inspectionContext = createEvmReceiptInspectionContext();
     const inspectionResults: ReadonlyArray<
       PromiseSettledResult<

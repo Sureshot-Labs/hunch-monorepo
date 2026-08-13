@@ -1,0 +1,569 @@
+import assert from "node:assert/strict";
+import { Interface } from "ethers";
+
+import { stableWalletOpaqueId } from "../../../account-value/canonical.js";
+import {
+  BASE_USDC,
+  RELAY_DEPOSITORY_V2,
+} from "../../../funding-providers/relay/rehearsal.js";
+import { relayDelegatedCommitSteps } from "../../../funding-providers/relay/operation-plan.js";
+import {
+  TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
+  validateRelayEvmPolicyRules,
+} from "../../execution/delegated-funding-profiles.js";
+import { validateRelayDelegatedEvmAction } from "../../execution/relay-evm-delegated-profile.js";
+import {
+  classifyRelayCleanupAllowance,
+  parseRelayEvmAllowanceObservation,
+} from "../../execution/relay-evm-allowance-state.js";
+import { relayEvmUsdCapMatchesRaw } from "../../execution/delegated-funding-capability-resolver.js";
+import {
+  buildTelegramRelayEvmAutomationPolicyV3,
+  parseTelegramRelayEvmAutomationPolicyV3,
+  telegramRelayEvmReceiptIsAuthorized,
+} from "../../execution/telegram-funding-automation-policy.js";
+import {
+  compileFundingIntentPolicy,
+  validateFundingIntentPolicy,
+} from "../../policies/funding-policy-v2.js";
+import { relayOwnedRefundEventMatches } from "../../reconciliation/relay-owned-refund-observer.js";
+import { canTransitionFundingOperation } from "../../domain/transitions.js";
+
+const WALLET = "0x1111111111111111111111111111111111111111";
+const SECOND_WALLET = "0x2222222222222222222222222222222222222222";
+const WALLET_ID = stableWalletOpaqueId({
+  walletType: "ethereum",
+  networkId: "evm:8453",
+  address: WALLET,
+});
+const RAW = "2000000";
+const CAP = "10000000";
+
+const anchoredAllowance = {
+  raw: RAW,
+  blockNumber: "123",
+  blockHash: `0x${"ab".repeat(32)}`,
+  finality: "latest" as const,
+  revision: "c".repeat(64),
+  ownershipRevision: "e".repeat(64),
+  lastMutationTransactionHash: `0x${"51".repeat(32)}`,
+};
+assert.deepEqual(
+  parseRelayEvmAllowanceObservation(anchoredAllowance),
+  anchoredAllowance,
+);
+assert.equal(
+  classifyRelayCleanupAllowance({
+    currentRaw: RAW,
+    currentRevision: anchoredAllowance.ownershipRevision,
+    ownedRaw: RAW,
+    ownedRevision: anchoredAllowance.ownershipRevision,
+    actionOwnedRaw: RAW,
+    actionOwnedRevision: anchoredAllowance.ownershipRevision,
+  }),
+  "owned_residual",
+);
+assert.equal(
+  classifyRelayCleanupAllowance({
+    currentRaw: "0",
+    currentRevision: "d".repeat(64),
+    ownedRaw: RAW,
+    ownedRevision: anchoredAllowance.revision,
+    actionOwnedRaw: RAW,
+    actionOwnedRevision: anchoredAllowance.revision,
+  }),
+  "already_zero",
+);
+assert.equal(
+  classifyRelayCleanupAllowance({
+    currentRaw: "3000000",
+    currentRevision: anchoredAllowance.revision,
+    ownedRaw: RAW,
+    ownedRevision: anchoredAllowance.revision,
+    actionOwnedRaw: RAW,
+    actionOwnedRevision: anchoredAllowance.revision,
+  }),
+  "foreign_drift",
+);
+assert.equal(
+  classifyRelayCleanupAllowance({
+    currentRaw: RAW,
+    currentRevision: "d".repeat(64),
+    ownedRaw: RAW,
+    ownedRevision: anchoredAllowance.revision,
+    actionOwnedRaw: RAW,
+    actionOwnedRevision: anchoredAllowance.revision,
+  }),
+  "foreign_drift",
+);
+
+assert.equal(relayEvmUsdCapMatchesRaw("10", CAP), true);
+assert.equal(relayEvmUsdCapMatchesRaw("10.000001", CAP), false);
+assert.equal(relayEvmUsdCapMatchesRaw(null, CAP), false);
+
+assert.equal(
+  canTransitionFundingOperation(
+    { status: "in_progress", stage: "source_action" },
+    { status: "completed", stage: "terminal" },
+  ),
+  true,
+  "a finalized non-value maintenance action can terminate its own operation",
+);
+const APPROVE_ABI = [
+  {
+    type: "function",
+    name: "approve",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "spender", type: "address" },
+      { name: "amount", type: "uint256" },
+    ],
+    outputs: [{ name: "", type: "bool" }],
+  },
+] as const;
+const DEPOSIT_ABI = [
+  {
+    type: "function",
+    name: "depositErc20",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "depositor", type: "address" },
+      { name: "token", type: "address" },
+      { name: "amount", type: "uint256" },
+      { name: "id", type: "bytes32" },
+    ],
+    outputs: [],
+  },
+] as const;
+
+function condition(
+  field: string,
+  fieldSource: string,
+  operator: string,
+  value: string,
+  abi?: readonly unknown[],
+) {
+  return {
+    field,
+    field_source: fieldSource,
+    operator,
+    value,
+    ...(abi ? { abi } : {}),
+  };
+}
+
+const common = [
+  condition("chain_id", "ethereum_transaction", "eq", "8453"),
+  condition("value", "ethereum_transaction", "eq", "0x0"),
+];
+const approveRule = {
+  action: "ALLOW",
+  method: "eth_sendTransaction",
+  conditions: [
+    ...common,
+    condition("to", "ethereum_transaction", "eq", BASE_USDC),
+    condition(
+      "function_name",
+      "ethereum_calldata",
+      "eq",
+      "approve",
+      APPROVE_ABI,
+    ),
+    condition(
+      "approve.spender",
+      "ethereum_calldata",
+      "eq",
+      RELAY_DEPOSITORY_V2,
+      APPROVE_ABI,
+    ),
+    condition("approve.amount", "ethereum_calldata", "lte", CAP, APPROVE_ABI),
+  ],
+};
+const depositRule = {
+  action: "ALLOW",
+  method: "eth_sendTransaction",
+  conditions: [
+    ...common,
+    condition("to", "ethereum_transaction", "eq", RELAY_DEPOSITORY_V2),
+    condition(
+      "function_name",
+      "ethereum_calldata",
+      "eq",
+      "depositErc20",
+      DEPOSIT_ABI,
+    ),
+    condition(
+      "depositErc20.depositor",
+      "ethereum_calldata",
+      "eq",
+      WALLET,
+      DEPOSIT_ABI,
+    ),
+    condition(
+      "depositErc20.token",
+      "ethereum_calldata",
+      "eq",
+      BASE_USDC,
+      DEPOSIT_ABI,
+    ),
+    condition(
+      "depositErc20.amount",
+      "ethereum_calldata",
+      "lte",
+      CAP,
+      DEPOSIT_ABI,
+    ),
+  ],
+};
+const secondDepositRule = {
+  ...depositRule,
+  conditions: depositRule.conditions.map((entry) =>
+    entry.field === "depositErc20.depositor"
+      ? { ...entry, value: SECOND_WALLET }
+      : entry,
+  ),
+};
+
+assert.deepEqual(
+  validateRelayEvmPolicyRules([approveRule, depositRule], WALLET),
+  {
+    valid: true,
+    maxSourceRaw: BigInt(CAP),
+    issues: [],
+  },
+);
+assert.equal(
+  validateRelayEvmPolicyRules(
+    [
+      approveRule,
+      {
+        ...depositRule,
+        conditions: depositRule.conditions.map((entry) =>
+          entry.field === "depositErc20.amount"
+            ? { ...entry, value: "9999999" }
+            : entry,
+        ),
+      },
+    ],
+    WALLET,
+  ).valid,
+  false,
+  "approve and deposit policy caps cannot drift",
+);
+assert.equal(
+  validateRelayEvmPolicyRules([approveRule, depositRule], BASE_USDC).valid,
+  false,
+  "Relay policy depositor must equal the executing wallet",
+);
+assert.equal(
+  validateRelayEvmPolicyRules(
+    [approveRule, depositRule, secondDepositRule],
+    WALLET,
+  ).valid,
+  false,
+  "an undeclared foreign depositor rule broadens the Relay policy",
+);
+assert.equal(
+  validateRelayEvmPolicyRules(
+    [approveRule, depositRule, secondDepositRule],
+    WALLET,
+    [WALLET, SECOND_WALLET],
+  ).valid,
+  true,
+  "the declared finite pilot-wallet allowlist is accepted exactly",
+);
+
+const approve = new Interface(APPROVE_ABI);
+const deposit = new Interface(DEPOSIT_ABI);
+const actionBase = {
+  kind: "evm_transaction" as const,
+  networkId: "evm:8453",
+  senderWalletId: WALLET_ID,
+  valueRaw: "0",
+  gasLimitRaw: null,
+};
+assert.equal(
+  validateRelayDelegatedEvmAction({
+    action: {
+      ...actionBase,
+      actionId: "relay-approve",
+      to: BASE_USDC,
+      data: approve.encodeFunctionData("approve", [RELAY_DEPOSITORY_V2, RAW]),
+    },
+    actionValidationResult: { relayStepKind: "approve" },
+    expectedRaw: RAW,
+    walletAddress: WALLET,
+    walletId: WALLET_ID,
+  }).kind,
+  "approve",
+);
+const orderId = `0x${"12".repeat(32)}`;
+assert.deepEqual(
+  validateRelayDelegatedEvmAction({
+    action: {
+      ...actionBase,
+      actionId: "relay-deposit",
+      to: RELAY_DEPOSITORY_V2,
+      data: deposit.encodeFunctionData("depositErc20", [
+        WALLET,
+        BASE_USDC,
+        RAW,
+        orderId,
+      ]),
+    },
+    actionValidationResult: { relayStepKind: "deposit" },
+    expectedRaw: RAW,
+    walletAddress: WALLET,
+    walletId: WALLET_ID,
+  }),
+  { kind: "deposit", orderId },
+);
+assert.equal(
+  validateRelayDelegatedEvmAction({
+    action: {
+      ...actionBase,
+      actionId: "relay-cleanup",
+      to: BASE_USDC,
+      data: approve.encodeFunctionData("approve", [RELAY_DEPOSITORY_V2, 0n]),
+    },
+    actionValidationResult: { relayStepKind: "cleanup" },
+    expectedRaw: RAW,
+    walletAddress: WALLET,
+    walletId: WALLET_ID,
+  }).kind,
+  "cleanup",
+);
+assert.throws(() =>
+  validateRelayDelegatedEvmAction({
+    action: {
+      ...actionBase,
+      actionId: "relay-over-cap-action",
+      to: BASE_USDC,
+      data: approve.encodeFunctionData("approve", [
+        "0x2222222222222222222222222222222222222222",
+        RAW,
+      ]),
+    },
+    actionValidationResult: { relayStepKind: "approve" },
+    expectedRaw: RAW,
+    walletAddress: WALLET,
+    walletId: WALLET_ID,
+  }),
+);
+
+const delegatedSteps = relayDelegatedCommitSteps({
+  steps: [
+    {
+      ordinal: 0,
+      segmentOrdinal: 0,
+      stepKind: "transaction",
+      state: "action_required",
+      actionFingerprint: "approve-fingerprint",
+      executorId: "web",
+      payerRequirement: "privy_sponsor",
+      dependsOnOrdinal: null,
+      normalizedAction: { actionId: "relay:fixture:approve", to: BASE_USDC },
+      actionValidationResult: {},
+    },
+    {
+      ordinal: 1,
+      segmentOrdinal: 0,
+      stepKind: "transaction",
+      state: "action_required",
+      actionFingerprint: "deposit-fingerprint",
+      executorId: "web",
+      payerRequirement: "privy_sponsor",
+      dependsOnOrdinal: 0,
+      normalizedAction: {
+        actionId: "relay:fixture:deposit",
+        to: RELAY_DEPOSITORY_V2,
+      },
+      actionValidationResult: {},
+    },
+  ],
+  sourceAmount: {
+    asset: { networkId: "evm:8453", assetId: BASE_USDC, decimals: 6 },
+    raw: RAW,
+  },
+  profile: {
+    walletId: WALLET_ID,
+    controllerWalletRef: "controller-wallet",
+    networkId: "evm:8453",
+    address: WALLET,
+    source: "embedded",
+    signingModes: ["privy_delegated"],
+    serverWalletRef: "privy-wallet",
+    sponsorshipPolicyIds: [],
+    evmAtomicBatchMode: null,
+  },
+  serverExecutionProfileId: TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
+});
+assert.deepEqual(
+  delegatedSteps.map((step) => [step.state, step.dependsOnOrdinal]),
+  [
+    ["planned", null],
+    ["planned", 0],
+  ],
+  "both steps remain inert until the atomic receipt link activates approve",
+);
+assert.equal(
+  delegatedSteps[1]?.actionValidationResult.postconditionEvidenceKind,
+  "exact_erc20_source_debit_v1",
+);
+assert.equal(
+  delegatedSteps[0]?.actionValidationResult.requiresSingleOperationBundle,
+  true,
+);
+assert.equal(
+  delegatedSteps[1]?.actionValidationResult.requiresSingleOperationBundle,
+  true,
+);
+
+const basePolicy = {
+  version: 2 as const,
+  venues: ["polymarket" as const],
+  receive: { assets: ["base:usdc" as const], privy: false },
+  paused: false,
+};
+const withoutExplicitCap = compileFundingIntentPolicy(basePolicy);
+assert.equal(withoutExplicitCap.venues[0]?.delegatedExecutionEnabled, false);
+const withExplicitCap = compileFundingIntentPolicy({
+  ...basePolicy,
+  receive: {
+    ...basePolicy.receive,
+    delegatedRelayEvmDailyCapUsd: "25",
+  },
+});
+assert.equal(withExplicitCap.venues[0]?.delegatedExecutionEnabled, true);
+assert.deepEqual(withExplicitCap.venues[0]?.delegatedPolicyIds, [
+  TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
+]);
+assert.equal(withExplicitCap.venues[0]?.delegatedDailyCapUsd, "25");
+assert.equal(
+  validateFundingIntentPolicy({
+    ...basePolicy,
+    receive: {
+      ...basePolicy.receive,
+      delegatedRelayEvmDailyCapUsd: "not-money",
+    },
+  }).ok,
+  false,
+);
+
+const automationV3 = buildTelegramRelayEvmAutomationPolicyV3({
+  authorization: {
+    id: "11111111-1111-4111-8111-111111111111",
+    userId: "22222222-2222-4222-8222-222222222222",
+    telegramAccountId: "33333333-3333-4333-8333-333333333333",
+    telegramUserId: "42",
+    userWalletId: "44444444-4444-4444-8444-444444444444",
+    privyWalletId: "privy-wallet",
+    walletAddress: WALLET,
+    walletChain: "ethereum",
+    profileId: TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
+    securityClass: "routed_value_movement",
+    maxSourceRaw: CAP,
+    signerId: "signer",
+    signerFingerprint: "a".repeat(64),
+    policyId: "policy",
+    policyFingerprint: "b".repeat(64),
+    venueId: "polymarket",
+    destinationOptionId: "destination",
+    venueBindingOptionId: "binding",
+    sourceAsset: { networkId: "evm:8453", assetId: BASE_USDC, decimals: 6 },
+    destinationAsset: {
+      networkId: "evm:137",
+      assetId: "0x0000000000000000000000000000000000000001",
+      decimals: 6,
+    },
+    grantedAt: new Date(0).toISOString(),
+    expiresAt: null,
+  },
+  fundingPolicyRevision: "funding-policy-revision",
+  destinationAsset: {
+    networkId: "evm:137",
+    assetId: "0x0000000000000000000000000000000000000001",
+    decimals: 6,
+  },
+  sourceAsset: { networkId: "evm:8453", assetId: BASE_USDC, decimals: 6 },
+  variants: [
+    {
+      variantId: "base-usdc-variant",
+      networkId: "evm:8453",
+      asset: { networkId: "evm:8453", assetId: BASE_USDC, decimals: 6 },
+      destinationAddress: WALLET,
+      destinationLocationId: "base-wallet",
+      baselineRaw: "0",
+      baselineRevision: "baseline",
+      observation: {
+        adapterId: "evm_erc20_transfer_v1",
+        payload: { eventCursorBlock: "100" },
+      },
+      completion: { kind: "child_funding_operation" },
+    },
+  ],
+});
+assert.deepEqual(
+  parseTelegramRelayEvmAutomationPolicyV3(automationV3),
+  automationV3,
+);
+assert.equal(
+  telegramRelayEvmReceiptIsAuthorized({
+    policy: automationV3,
+    variantId: "base-usdc-variant",
+    ledgerHeight: "101",
+    rawAmount: RAW,
+  }),
+  true,
+);
+assert.equal(
+  telegramRelayEvmReceiptIsAuthorized({
+    policy: automationV3,
+    variantId: "base-usdc-variant",
+    ledgerHeight: "101",
+    rawAmount: (BigInt(CAP) + 1n).toString(),
+  }),
+  false,
+  "V3 consent cannot route a receipt beyond its immutable raw cap",
+);
+
+const event = {
+  variant: {} as never,
+  transactionHash: `0x${"34".repeat(32)}`,
+  eventIndex: "2",
+  blockNumber: "101",
+  blockHash: `0x${"56".repeat(32)}`,
+  sourceAddress: "0x2222222222222222222222222222222222222222",
+  destinationAddress: WALLET,
+  rawAmount: RAW,
+  observedAt: new Date(0).toISOString(),
+};
+assert.equal(
+  relayOwnedRefundEventMatches({
+    event,
+    expectedRaw: RAW,
+    sourceBlock: "100",
+    sourceEventIndex: "1",
+    transactionReferenceFingerprints: [`fp:${event.transactionHash}`],
+    walletAddress: WALLET,
+    fingerprint: (reference) => `fp:${reference}`,
+  }),
+  true,
+);
+assert.equal(
+  relayOwnedRefundEventMatches({
+    event,
+    expectedRaw: RAW,
+    sourceBlock: "102",
+    sourceEventIndex: "1",
+    transactionReferenceFingerprints: [`fp:${event.transactionHash}`],
+    walletAddress: WALLET,
+    fingerprint: (reference) => `fp:${reference}`,
+  }),
+  false,
+  "pre-debit transfers cannot be attributed as refunds",
+);
+
+console.log(
+  "[funding-relay-evm-delegated-tests] exact policy, actions, explicit cap, cleanup, and owned refund correlation passed",
+);

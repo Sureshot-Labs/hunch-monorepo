@@ -33,6 +33,7 @@ function statusSupportMetadata(
   status: RelayStatusResponse,
   source: "polling" | "deposit_address_poll" | "webhook",
   providerUpdatedAt = status.updatedAt,
+  referenceFingerprint?: (reference: string) => string,
 ): JsonRecord {
   const decision = classifyRelayStatus(status.status);
   const safeProviderCode = (value: string | null | undefined) => {
@@ -46,6 +47,14 @@ function statusSupportMetadata(
     ...(providerUpdatedAt !== undefined ? { providerUpdatedAt } : {}),
     originTransactionReferenceCount: status.inTxHashes?.length ?? 0,
     destinationTransactionReferenceCount: status.txHashes?.length ?? 0,
+    ...(referenceFingerprint
+      ? {
+          relayTransactionReferenceFingerprints: [
+            ...(status.inTxHashes ?? []),
+            ...(status.txHashes ?? []),
+          ].map(referenceFingerprint),
+        }
+      : {}),
     providerFailurePresent: Boolean(status.failReason),
     providerRefundFailurePresent: Boolean(status.refundFailReason),
     providerFailureCode: safeProviderCode(status.failReason),
@@ -66,7 +75,37 @@ async function updateSegmentStatusInTransaction(
     `
       update funding_operation_segments
       set raw_status = $2,
-          support_metadata = support_metadata || $3::jsonb
+          support_metadata = (support_metadata || $3::jsonb) ||
+            jsonb_build_object(
+              'relayTransactionReferenceFingerprints',
+              (
+                select coalesce(
+                         jsonb_agg(fingerprint order by fingerprint),
+                         '[]'::jsonb
+                       )
+                  from (
+                    select distinct fingerprint
+                      from (
+                        select jsonb_array_elements_text(
+                                 coalesce(
+                                   support_metadata ->
+                                     'relayTransactionReferenceFingerprints',
+                                   '[]'::jsonb
+                                 )
+                               ) as fingerprint
+                        union all
+                        select jsonb_array_elements_text(
+                                 coalesce(
+                                   $3::jsonb ->
+                                     'relayTransactionReferenceFingerprints',
+                                   '[]'::jsonb
+                                 )
+                               ) as fingerprint
+                      ) accumulated
+                     where fingerprint ~ '^[a-f0-9]{64}$'
+                  ) unique_fingerprints
+              )
+            )
       where id = $1 and provider_id = 'relay'
         and (
           support_metadata->>'providerUpdatedAt' is null
@@ -133,7 +172,12 @@ async function persistStatus(
     now: Date;
   }>,
 ): Promise<void> {
-  const metadata = statusSupportMetadata(input.status, input.statusSource);
+  const metadata = statusSupportMetadata(
+    input.status,
+    input.statusSource,
+    input.status.updatedAt,
+    (reference) => input.referenceCodec.fingerprint(reference),
+  );
   await tx(pool, async (client) => {
     const requestHmac = input.referenceCodec.fingerprint(input.requestId);
     const existingResult = await client.query<{
@@ -448,6 +492,7 @@ export async function ingestVerifiedRelayWebhook(
             input.webhook.payload.data,
             "webhook",
             providerUpdatedAt,
+            (reference) => input.referenceCodec.fingerprint(reference),
           )
         : {}),
       lastRelayWebhookFingerprint: input.webhook.deliveryFingerprint,

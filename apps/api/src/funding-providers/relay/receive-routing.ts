@@ -6,6 +6,9 @@ import { sameAsset } from "../../funding/domain/asset-identity.js";
 import { SOLANA_NATIVE_EXECUTION_RESERVE_LAMPORTS } from "../../funding/domain/network-fees.js";
 import { RELAY_PINNED_ASSETS } from "./mappings.js";
 
+export const RELAY_RECEIVE_OPERATION_ADAPTER_KEY =
+  "relay_owned_wallet_receipt_v1";
+
 const RELAY_SOLANA_NATIVE_ASSET = Object.freeze({
   networkId: "solana:mainnet",
   assetId: RELAY_PINNED_ASSETS.solanaNative,

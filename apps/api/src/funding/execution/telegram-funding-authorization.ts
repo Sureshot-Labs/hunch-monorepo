@@ -5,16 +5,23 @@ import type { AssetRef } from "../domain/types.js";
 import {
   canonicalAccountAddress,
   sameAccountAddress,
+  sameAsset,
 } from "../domain/asset-identity.js";
 import { fundingSidecarRuntimeConfig } from "../runtime/sidecar-runtime-config.js";
 import {
   loadPolymarketWrapExecutionConfiguration,
   polymarketWrapExecutionConfigurationReady,
   polymarketWrapExecutorEnvironmentReady,
-  polymarketWrapProfileConfigured,
   type PolymarketWrapExecutionConfiguration,
+  loadRelayEvmExecutionConfiguration,
+  relayEvmExecutionConfigurationReady,
+  type RelayEvmExecutionConfiguration,
 } from "./delegated-funding-config.js";
-import { POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID } from "./delegated-funding-profile-ids.js";
+import {
+  POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
+  TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
+} from "./delegated-funding-profile-ids.js";
+import type { DelegatedFundingSecurityClass } from "./delegated-funding-profile-ids.js";
 import type { DelegatedFundingPreBroadcastDecision } from "./delegated-funding-capability.js";
 import {
   PrivyDelegatedFundingDriver,
@@ -22,6 +29,10 @@ import {
 } from "./privy-delegated-funding-driver.js";
 import { lockTelegramFundingLinkLifecycle } from "./telegram-funding-link-lifecycle-lock.js";
 import { resolveTelegramFundingProvisionWallet } from "./telegram-funding-managed-wallet.js";
+import {
+  BASE_USDC,
+  POLYGON_PUSD,
+} from "../../funding-providers/relay/rehearsal.js";
 
 export {
   resolveTelegramFundingProvisionWallet,
@@ -41,7 +52,8 @@ export type TelegramFundingAuthorization = Readonly<{
   walletAddress: string;
   walletChain: "ethereum";
   profileId: string;
-  securityClass: "closed_destination_transform";
+  securityClass: DelegatedFundingSecurityClass;
+  maxSourceRaw: string | null;
   signerId: string;
   signerFingerprint: string;
   policyId: string;
@@ -65,7 +77,8 @@ export type TelegramFundingAuthorizationRow = Readonly<{
   wallet_address: string;
   wallet_chain: "ethereum";
   profile_id: string;
-  security_class: "closed_destination_transform";
+  security_class: DelegatedFundingSecurityClass;
+  max_source_raw: string | null;
   signer_id: string;
   signer_fingerprint: string;
   policy_id: string;
@@ -97,6 +110,7 @@ export function telegramFundingAuthorizationFromRow(
     walletChain: row.wallet_chain,
     profileId: row.profile_id,
     securityClass: row.security_class,
+    maxSourceRaw: row.max_source_raw,
     signerId: row.signer_id,
     signerFingerprint: row.signer_fingerprint,
     policyId: row.policy_id,
@@ -130,6 +144,7 @@ const authorizationColumnNames = [
   "wallet_chain",
   "profile_id",
   "security_class",
+  "max_source_raw",
   "signer_id",
   "signer_fingerprint",
   "policy_id",
@@ -163,6 +178,10 @@ export async function loadActiveTelegramFundingAuthorization(
     destinationOptionId: string;
     venueBindingOptionId: string;
     expectedAuthorizationId?: string;
+    profileId?: string;
+    securityClass?: DelegatedFundingSecurityClass;
+    sourceAsset?: AssetRef;
+    destinationAsset?: AssetRef;
     now?: Date;
     lock?: boolean;
     requireTradingEnabled?: boolean;
@@ -206,25 +225,25 @@ export async function loadActiveTelegramFundingAuthorization(
         and funding_authorization.telegram_account_id = $2::uuid
         and funding_authorization.telegram_user_id = $3
         and funding_authorization.profile_id = $4
-        and funding_authorization.security_class = 'closed_destination_transform'
+        and funding_authorization.security_class = $12
         and ($5::text is null or funding_authorization.id::text = $5)
         and funding_authorization.venue_id = 'polymarket'
         and funding_authorization.destination_option_id = $6
         and funding_authorization.venue_binding_option_id = $7
-        and funding_authorization.source_network_id = 'evm:137'
+        and funding_authorization.source_network_id = $13
         and funding_account_identifier_equal(
               funding_authorization.source_network_id,
               funding_authorization.source_asset_id,
               $8
             )
-        and funding_authorization.source_asset_decimals = 6
-        and funding_authorization.destination_network_id = 'evm:137'
+        and funding_authorization.source_asset_decimals = $14
+        and funding_authorization.destination_network_id = $15
         and funding_account_identifier_equal(
               funding_authorization.destination_network_id,
               funding_authorization.destination_asset_id,
               $9
             )
-        and funding_authorization.destination_asset_decimals = 6
+        and funding_authorization.destination_asset_decimals = $16
         and funding_authorization.revoked_at is null
         and (
           funding_authorization.expires_at is null
@@ -238,14 +257,21 @@ export async function loadActiveTelegramFundingAuthorization(
       input.userId,
       input.telegramAccountId,
       input.telegramUserId,
-      POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
+      input.profileId ?? POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
       input.expectedAuthorizationId ?? null,
       input.destinationOptionId,
       input.venueBindingOptionId,
-      fundingSidecarRuntimeConfig.polymarketUsdceAddress,
-      fundingSidecarRuntimeConfig.polymarketPusdAddress,
+      input.sourceAsset?.assetId ??
+        fundingSidecarRuntimeConfig.polymarketUsdceAddress,
+      input.destinationAsset?.assetId ??
+        fundingSidecarRuntimeConfig.polymarketPusdAddress,
       input.now ?? new Date(),
       input.requireTradingEnabled ?? true,
+      input.securityClass ?? "closed_destination_transform",
+      input.sourceAsset?.networkId ?? "evm:137",
+      input.sourceAsset?.decimals ?? 6,
+      input.destinationAsset?.networkId ?? "evm:137",
+      input.destinationAsset?.decimals ?? 6,
     ],
   );
   return rows[0] ? telegramFundingAuthorizationFromRow(rows[0]) : null;
@@ -265,6 +291,7 @@ export function telegramFundingAuthorizationFingerprint(
     walletChain: authorization.walletChain,
     profileId: authorization.profileId,
     securityClass: authorization.securityClass,
+    maxSourceRaw: authorization.maxSourceRaw,
     signerId: authorization.signerId,
     signerFingerprint: authorization.signerFingerprint,
     policyId: authorization.policyId,
@@ -302,7 +329,15 @@ export async function resolveCurrentTelegramFundingAuthority(
     telegramUserId: string;
     destinationOptionId: string;
     venueBindingOptionId: string;
-    configuration: PolymarketWrapExecutionConfiguration;
+    configuration: Pick<
+      PolymarketWrapExecutionConfiguration,
+      "signerId" | "signerFingerprint" | "policyId" | "policyFingerprint"
+    >;
+    profileId?: string;
+    securityClass?: DelegatedFundingSecurityClass;
+    sourceAsset?: AssetRef;
+    destinationAsset?: AssetRef;
+    maxSourceRaw?: string | null;
     expectedAuthorizationId?: string;
     expectedAuthorizationFingerprint?: string;
     now?: Date;
@@ -335,6 +370,10 @@ export async function resolveCurrentTelegramFundingAuthority(
     destinationOptionId: input.destinationOptionId,
     venueBindingOptionId: input.venueBindingOptionId,
     expectedAuthorizationId: input.expectedAuthorizationId,
+    profileId: input.profileId,
+    securityClass: input.securityClass,
+    sourceAsset: input.sourceAsset,
+    destinationAsset: input.destinationAsset,
     now: input.now,
     lock: input.lock,
     requireTradingEnabled: automationEnabled,
@@ -352,7 +391,12 @@ export async function resolveCurrentTelegramFundingAuthority(
       reasonCode: "delegated_authority_invalid",
     };
   }
-  if (!polymarketWrapProfileConfigured(input.configuration)) {
+  if (
+    input.configuration.signerId.length < 3 ||
+    input.configuration.signerFingerprint.length < 32 ||
+    input.configuration.policyId.length < 3 ||
+    input.configuration.policyFingerprint.length < 32
+  ) {
     return {
       kind: "soft_paused",
       reasonCode: "delegated_profile_unavailable",
@@ -426,7 +470,15 @@ export async function grantTelegramFundingAuthorization(
     walletAddress: string;
     destinationOptionId: string;
     venueBindingOptionId: string;
-    configuration: PolymarketWrapExecutionConfiguration;
+    configuration: Pick<
+      PolymarketWrapExecutionConfiguration,
+      "signerId" | "signerFingerprint" | "policyId" | "policyFingerprint"
+    >;
+    profileId?: string;
+    securityClass?: DelegatedFundingSecurityClass;
+    sourceAsset?: AssetRef;
+    destinationAsset?: AssetRef;
+    maxSourceRaw?: string | null;
     expiresAt?: Date | null;
     now?: Date;
     replaceExisting?: boolean;
@@ -434,20 +486,42 @@ export async function grantTelegramFundingAuthorization(
     operatorOverride?: boolean;
   }>,
 ): Promise<TelegramFundingAuthorization> {
-  if (!polymarketWrapProfileConfigured(input.configuration)) {
+  if (
+    input.configuration.signerId.length < 3 ||
+    input.configuration.signerFingerprint.length < 32 ||
+    input.configuration.policyId.length < 3 ||
+    input.configuration.policyFingerprint.length < 32
+  ) {
     throw new Error("funding authorization profile is not fully configured");
   }
   if (!/^0x[0-9a-fA-F]{40}$/u.test(input.walletAddress)) {
     throw new Error("funding authorization wallet address is invalid");
+  }
+  const profileId = input.profileId ?? POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID;
+  const securityClass = input.securityClass ?? "closed_destination_transform";
+  const sourceAsset = input.sourceAsset ?? {
+    networkId: "evm:137",
+    assetId: fundingSidecarRuntimeConfig.polymarketUsdceAddress,
+    decimals: 6,
+  };
+  const destinationAsset = input.destinationAsset ?? {
+    networkId: "evm:137",
+    assetId: fundingSidecarRuntimeConfig.polymarketPusdAddress,
+    decimals: 6,
+  };
+  const maxSourceRaw = input.maxSourceRaw ?? null;
+  if (
+    securityClass === "routed_value_movement" &&
+    (maxSourceRaw == null || !/^[1-9][0-9]*$/u.test(maxSourceRaw))
+  ) {
+    throw new Error("routed funding authorization requires a positive cap");
   }
   const now = input.now ?? new Date();
   return tx(pool, async (client) => {
     await lockTelegramFundingLinkLifecycle(client, input.userId);
     await client.query(
       `select pg_advisory_xact_lock(hashtextextended($1, 0))`,
-      [
-        `telegram-funding-authorization:${input.userId}:${POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID}`,
-      ],
+      [`telegram-funding-authorization:${input.userId}:${profileId}`],
     );
     const preference = await client.query<{
       funding_operator_revoked_at: Date | null;
@@ -529,7 +603,7 @@ export async function grantTelegramFundingAuthorization(
         order by funding_authorization.id
         for update of funding_authorization
       `,
-      [input.userId, POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID],
+      [input.userId, profileId],
     );
     const current = existing.rows.map(telegramFundingAuthorizationFromRow);
     const generationMatches =
@@ -567,7 +641,12 @@ export async function grantTelegramFundingAuthorization(
           input.configuration.policyFingerprint &&
         authorization.destinationOptionId === input.destinationOptionId &&
         authorization.venueBindingOptionId === input.venueBindingOptionId &&
-        authorization.expiresAt === (input.expiresAt?.toISOString() ?? null),
+        authorization.expiresAt === (input.expiresAt?.toISOString() ?? null) &&
+        authorization.profileId === profileId &&
+        authorization.securityClass === securityClass &&
+        authorization.maxSourceRaw === maxSourceRaw &&
+        sameAsset(authorization.sourceAsset, sourceAsset) &&
+        sameAsset(authorization.destinationAsset, destinationAsset),
     );
     if (input.operatorOverride) {
       await client.query(
@@ -619,6 +698,7 @@ export async function grantTelegramFundingAuthorization(
           wallet_chain,
           profile_id,
           security_class,
+          max_source_raw,
           signer_id,
           signer_fingerprint,
           policy_id,
@@ -642,10 +722,10 @@ export async function grantTelegramFundingAuthorization(
             when $6 ~ '^0x[0-9a-fA-F]{40}$' then lower($6)
             else $6
           end,
-          'ethereum', $7,
-          'closed_destination_transform', $8, $9, $10, $11,
-          'polymarket', $12, $13, 'evm:137', $14, 6,
-          'evm:137', $15, 6, $16, $17, $16, $16
+          'ethereum', $7, $8, $9,
+          $10, $11, $12, $13,
+          'polymarket', $14, $15, $16, $17, $18,
+          $19, $20, $21, $22, $23, $22, $22
         )
         returning ${authorizationColumns()}
       `,
@@ -656,15 +736,21 @@ export async function grantTelegramFundingAuthorization(
         input.userWalletId,
         input.privyWalletId,
         input.walletAddress,
-        POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
+        profileId,
+        securityClass,
+        maxSourceRaw,
         input.configuration.signerId,
         input.configuration.signerFingerprint,
         input.configuration.policyId,
         input.configuration.policyFingerprint,
         input.destinationOptionId,
         input.venueBindingOptionId,
-        fundingSidecarRuntimeConfig.polymarketUsdceAddress,
-        fundingSidecarRuntimeConfig.polymarketPusdAddress,
+        sourceAsset.networkId,
+        sourceAsset.assetId,
+        sourceAsset.decimals,
+        destinationAsset.networkId,
+        destinationAsset.assetId,
+        destinationAsset.decimals,
         now,
         input.expiresAt ?? null,
       ],
@@ -816,12 +902,17 @@ export async function ensureTelegramFundingAuthorization(
   }
   let inspectWalletProfile = dependencies.inspectWalletProfile;
   if (!inspectWalletProfile) {
+    const relayConfiguration = loadRelayEvmExecutionConfiguration(environment);
     const driver = new PrivyDelegatedFundingDriver({
       appId: environment.PRIVY_APP_ID?.trim() ?? "",
       appSecret: environment.PRIVY_APP_SECRET?.trim() ?? "",
       authorizationPrivateKey:
         environment.PRIVY_WALLET_AUTHORIZATION_KEY?.trim() ?? "",
-      configuration,
+      configuration: {
+        ...configuration,
+        relayAllowedDepositors: relayConfiguration.allowedDepositors,
+        relayMaxSourceRaw: relayConfiguration.maxSourceRaw,
+      },
     });
     inspectWalletProfile = (wallet) => driver.inspectWalletProfile(wallet);
   }
@@ -861,4 +952,76 @@ export async function ensureTelegramFundingAuthorization(
     }
     throw error;
   }
+}
+
+export async function ensureTelegramRelayEvmFundingAuthorization(
+  pool: Pool,
+  input: Readonly<{
+    userId: string;
+    telegramAccountId: string;
+    telegramUserId: string;
+    controllerWalletId: string;
+    destinationOptionId: string;
+    venueBindingOptionId: string;
+    now?: Date;
+  }>,
+  dependencies: Readonly<{
+    configuration?: RelayEvmExecutionConfiguration;
+    environment?: Readonly<Record<string, string | undefined>>;
+    inspectWalletProfile?: (input: {
+      walletAddress: string;
+      walletId: string;
+      profileId: string;
+    }) => Promise<PrivyWalletProfileInspection>;
+  }> = {},
+): Promise<TelegramFundingAuthorization | null> {
+  const environment = dependencies.environment ?? process.env;
+  const configuration =
+    dependencies.configuration ??
+    loadRelayEvmExecutionConfiguration(environment);
+  if (!relayEvmExecutionConfigurationReady(configuration)) return null;
+  const candidate = await resolveTelegramFundingProvisionWallet(pool, input);
+  if (!candidate || candidate.controllerWalletId !== input.controllerWalletId) {
+    return null;
+  }
+  let inspect = dependencies.inspectWalletProfile;
+  if (!inspect) {
+    const driver = new PrivyDelegatedFundingDriver({
+      appId: environment.PRIVY_APP_ID?.trim() ?? "",
+      appSecret: environment.PRIVY_APP_SECRET?.trim() ?? "",
+      authorizationPrivateKey:
+        environment.PRIVY_WALLET_AUTHORIZATION_KEY?.trim() ?? "",
+      configuration: {
+        ...configuration,
+        relayAllowedDepositors: configuration.allowedDepositors,
+        relayMaxSourceRaw: configuration.maxSourceRaw,
+      },
+    });
+    inspect = (wallet) => driver.inspectWalletProfileForProfile(wallet);
+  }
+  const inspection = await inspect({
+    walletId: candidate.privyWalletId,
+    walletAddress: candidate.walletAddress,
+    profileId: TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
+  }).catch(() => "unavailable" as const);
+  if (inspection !== "valid") return null;
+  return grantTelegramFundingAuthorization(pool, {
+    ...input,
+    ...candidate,
+    configuration,
+    profileId: TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
+    securityClass: "routed_value_movement",
+    maxSourceRaw: configuration.maxSourceRaw,
+    sourceAsset: {
+      networkId: "evm:8453",
+      assetId: BASE_USDC,
+      decimals: 6,
+    },
+    destinationAsset: {
+      networkId: "evm:137",
+      assetId: POLYGON_PUSD,
+      decimals: 6,
+    },
+    replaceExisting: true,
+  });
 }

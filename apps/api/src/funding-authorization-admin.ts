@@ -6,6 +6,7 @@ import { pool } from "./db.js";
 import { env } from "./env.js";
 import {
   loadPolymarketWrapExecutionConfiguration,
+  loadRelayEvmExecutionConfiguration,
   polymarketWrapProfileConfigured,
 } from "./funding/execution/delegated-funding-config.js";
 import { PrivyDelegatedFundingDriver } from "./funding/execution/privy-delegated-funding-driver.js";
@@ -77,7 +78,12 @@ async function main(): Promise<void> {
     appId: env.privyAppId,
     appSecret: env.privyAppSecret,
     authorizationPrivateKey: env.privyWalletAuthorizationKey,
-    configuration,
+    configuration: {
+      ...configuration,
+      relayAllowedDepositors:
+        loadRelayEvmExecutionConfiguration().allowedDepositors,
+      relayMaxSourceRaw: loadRelayEvmExecutionConfiguration().maxSourceRaw,
+    },
   });
   const liveProfileValid = await driver.verifyWalletProfile({
     walletId: input.privyWalletId,

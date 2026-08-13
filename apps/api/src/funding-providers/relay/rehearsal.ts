@@ -749,15 +749,15 @@ function validateMayanExecutionPayload(
   }
 }
 
-function validateV2Erc20Deposit(
-  action: ValidatedRelayAction,
-  scenario: RelayRehearsalScenario,
-  amount: bigint,
-  user: string,
-): void {
-  if (scenario.originChainId !== 8453) {
-    throw new Error("Relay Depository V2 is not enabled for this origin chain");
-  }
+export function validateRelayDepositoryV2Action(
+  input: Readonly<{
+    action: Pick<ValidatedRelayAction, "data" | "to" | "value">;
+    amount: bigint;
+    token: string;
+    user: string;
+  }>,
+): string {
+  const { action } = input;
   assertAddress(action.to, RELAY_DEPOSITORY_V2, "V2 ERC20 deposit target");
   if (action.value !== 0n)
     throw new Error("V2 ERC20 deposit value must be zero");
@@ -767,21 +767,35 @@ function validateV2Erc20Deposit(
   );
   assertAddress(
     address(decoded.depositor, "V2 depositor"),
-    user,
+    input.user,
     "V2 depositor",
   );
-  assertAddress(
-    address(decoded.token, "V2 token"),
-    scenario.originCurrency,
-    "V2 token",
-  );
-  if (bigint(decoded.amount, "V2 amount") !== amount) {
+  assertAddress(address(decoded.token, "V2 token"), input.token, "V2 token");
+  if (bigint(decoded.amount, "V2 amount") !== input.amount) {
     throw new Error("V2 Relay amount must equal exact input");
   }
   const orderId = string(decoded.id, "V2 order id");
   if (!/^0x[0-9a-f]{64}$/i.test(orderId) || /^0x0{64}$/i.test(orderId)) {
     throw new Error("V2 Relay order id must be non-zero bytes32");
   }
+  return orderId.toLowerCase();
+}
+
+function validateV2Erc20Deposit(
+  action: ValidatedRelayAction,
+  scenario: RelayRehearsalScenario,
+  amount: bigint,
+  user: string,
+): void {
+  if (scenario.originChainId !== 8453) {
+    throw new Error("Relay Depository V2 is not enabled for this origin chain");
+  }
+  validateRelayDepositoryV2Action({
+    action,
+    amount,
+    token: scenario.originCurrency,
+    user,
+  });
 }
 
 export function validateRelayRehearsalQuote(input: {
