@@ -113,11 +113,72 @@ function exactAbi(condition: PolicyCondition): boolean {
   );
 }
 
+function hasOnlyKeys(
+  value: Record<string, unknown>,
+  allowed: readonly string[],
+): boolean {
+  return Object.keys(value).every((key) => allowed.includes(key));
+}
+
+function normalizedPrivyAbiParameter(value: unknown): unknown | null {
+  const parameter = record(value);
+  if (
+    !parameter ||
+    !hasOnlyKeys(parameter, ["name", "type", "internalType"]) ||
+    typeof parameter.name !== "string" ||
+    typeof parameter.type !== "string" ||
+    (parameter.internalType !== undefined &&
+      parameter.internalType !== parameter.type)
+  ) {
+    return null;
+  }
+  return { name: parameter.name, type: parameter.type };
+}
+
+function normalizedPrivyAbi(value: unknown): readonly unknown[] | null {
+  if (!Array.isArray(value)) return null;
+  const normalized = value.map((entry) => {
+    const item = record(entry);
+    if (
+      !item ||
+      !hasOnlyKeys(item, [
+        "type",
+        "name",
+        "stateMutability",
+        "inputs",
+        "outputs",
+      ]) ||
+      item.type !== "function" ||
+      typeof item.name !== "string" ||
+      typeof item.stateMutability !== "string" ||
+      !Array.isArray(item.inputs) ||
+      !Array.isArray(item.outputs)
+    ) {
+      return null;
+    }
+    const inputs = item.inputs.map(normalizedPrivyAbiParameter);
+    const outputs = item.outputs.map(normalizedPrivyAbiParameter);
+    if (inputs.includes(null) || outputs.includes(null)) return null;
+    return {
+      type: item.type,
+      name: item.name,
+      stateMutability: item.stateMutability,
+      inputs,
+      outputs,
+    };
+  });
+  return normalized.includes(null) ? null : (normalized as readonly unknown[]);
+}
+
 function conditionAbiEquals(
   condition: PolicyCondition,
   abi: readonly unknown[],
 ): boolean {
-  return canonicalJsonHash(condition.abi ?? null) === canonicalJsonHash(abi);
+  const normalized = normalizedPrivyAbi(condition.abi);
+  return (
+    normalized !== null &&
+    canonicalJsonHash(normalized) === canonicalJsonHash(abi)
+  );
 }
 
 function conditionsForRule(
