@@ -229,6 +229,62 @@ assert.deepEqual(validateRelayEvmPolicyRules([approveRule, depositRule]), {
   maxSourceRaw: BigInt(CAP),
   issues: [],
 });
+const privyApproveAbi = APPROVE_ABI.map((abiEntry) => ({
+  ...abiEntry,
+  inputs: abiEntry.inputs.map((parameter) => ({
+    ...parameter,
+    internalType: parameter.type,
+  })),
+  outputs: abiEntry.outputs.map((parameter) => ({
+    ...parameter,
+    internalType: parameter.type,
+  })),
+}));
+const privyDepositAbi = DEPOSIT_ABI.map((abiEntry) => ({
+  ...abiEntry,
+  inputs: abiEntry.inputs.map((parameter) => ({
+    ...parameter,
+    internalType: parameter.type,
+  })),
+  outputs: abiEntry.outputs,
+}));
+const approveRuleFromPrivy = {
+  ...approveRule,
+  conditions: approveRule.conditions.map((entry) =>
+    entry.abi ? { ...entry, abi: privyApproveAbi } : entry,
+  ),
+};
+const depositRuleFromPrivy = {
+  ...depositRule,
+  conditions: depositRule.conditions.map((entry) =>
+    entry.abi ? { ...entry, abi: privyDepositAbi } : entry,
+  ),
+};
+const mismatchedPrivyDepositAbi = privyDepositAbi.map((abiEntry) => ({
+  ...abiEntry,
+  inputs: abiEntry.inputs.map((parameter, index) =>
+    index === 0 ? { ...parameter, internalType: "address payable" } : parameter,
+  ),
+}));
+assert.equal(
+  validateRelayEvmPolicyRules([approveRuleFromPrivy, depositRuleFromPrivy])
+    .valid,
+  true,
+  "Privy read-back internalType metadata must preserve the exact ABI",
+);
+assert.equal(
+  validateRelayEvmPolicyRules([
+    approveRuleFromPrivy,
+    {
+      ...depositRuleFromPrivy,
+      conditions: depositRuleFromPrivy.conditions.map((entry) =>
+        entry.abi ? { ...entry, abi: mismatchedPrivyDepositAbi } : entry,
+      ),
+    },
+  ]).valid,
+  false,
+  "Privy ABI internalType metadata cannot change the declared parameter type",
+);
 assert.equal(
   validateRelayEvmPolicyRules([
     approveRule,
