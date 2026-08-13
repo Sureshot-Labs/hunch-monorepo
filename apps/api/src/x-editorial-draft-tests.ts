@@ -480,6 +480,82 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
+    name: "validator rejects the second live NIP preview as a weak unsafe snapshot",
+    run: () => {
+      const nipSource: XEditorialDraftSource = {
+        facts: [
+          {
+            id: "market",
+            label: "Canonical market",
+            value: {
+              eventTitle: "Weibo Gaming vs Ninjas in Pyjamas",
+              marketQuestion: "Will Weibo Gaming win the BO3?",
+              selectedSideLabel: "NIP to win the BO3",
+            },
+          },
+          {
+            id: "actor",
+            label: "Publication-ready actor",
+            value: {
+              displayName: "@BBQChickenisthebesttt",
+              openPnl: "+$700",
+              position: "$15.7K",
+            },
+          },
+          {
+            id: "price",
+            label: "Publication-ready price",
+            value: { displayPrice: "81¢", displaySide: "NO" },
+          },
+          {
+            id: "credentials",
+            label: "Public track record",
+            value: [
+              "Up $81.8K over the last 30 days",
+              "Beat market prices by 16 points across 26 resolved bets",
+            ],
+          },
+        ],
+        kind: "initial",
+        marketId: "nip-market",
+        noteId: "00000000-0000-4000-8000-000000000891",
+        selectedSide: "NO",
+      };
+      const postText =
+        "$15.7K on NIP at 81¢.\n\n@BBQChickenisthebesttt is holding the NO side for Weibo Gaming vs Ninjas in Pyjamas — meaning NIP to win the BO3.\n\nThe price is already heavy, but the holder is up $81.8K over the last 30 days and has beaten market prices by 16 points across 26 resolved bets.\n\nNot a cheap entry anymore. Still a serious holder.";
+      const validated = validateXEditorialModelOutput({
+        config,
+        output: {
+          version: 1,
+          status: "ready",
+          marketId: "nip-market",
+          selectedSide: "NO",
+          postText,
+          formatting: [
+            { style: "bold", text: "$15.7K on NIP at 81¢." },
+            {
+              style: "bold",
+              text: "up $81.8K over the last 30 days",
+            },
+            {
+              style: "italic",
+              text: "Not a cheap entry anymore. Still a serious holder.",
+            },
+          ],
+          storyFamily: "trader_profile",
+          usedFactIds: ["market", "actor", "price", "credentials"],
+          safetyFlags: [],
+        },
+        source: nipSource,
+      });
+      assert.ok(validated.issues.includes("weak_position_hook"));
+      assert.ok(validated.issues.includes("binary_side_explanation"));
+      assert.ok(validated.issues.includes("analyst_jargon"));
+      assert.ok(validated.issues.includes("unsupported_trade_action"));
+      assert.ok(validated.issues.includes("missing_topical_emoji"));
+    },
+  },
+  {
     name: "validator accepts a clipped NIP profile with one topical emoji",
     run: () => {
       const nipSource: XEditorialDraftSource = {
@@ -542,6 +618,48 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           ],
           storyFamily: "trader_profile",
           usedFactIds: ["market", "actor", "price", "credentials"],
+          safetyFlags: [],
+        },
+        source: nipSource,
+      });
+      assert.deepEqual(validated.issues, []);
+    },
+  },
+  {
+    name: "validator does not force emoji repetition across recent esports drafts",
+    run: () => {
+      const nipSource: XEditorialDraftSource = {
+        facts: [
+          {
+            id: "market",
+            label: "Canonical market",
+            value: { eventTitle: "Weibo Gaming vs Ninjas in Pyjamas" },
+          },
+          {
+            id: "actor",
+            label: "Publication-ready actor",
+            value: { position: "$15.7K" },
+          },
+        ],
+        kind: "initial",
+        marketId: "nip-market",
+        noteId: "00000000-0000-4000-8000-000000000892",
+        recentOpenings: ["🎮 An esports post from the previous batch."],
+        selectedSide: "NO",
+      };
+      const postText =
+        "One trader is still holding $15.7K on Ninjas in Pyjamas against Weibo Gaming.";
+      const validated = validateXEditorialModelOutput({
+        config,
+        output: {
+          version: 1,
+          status: "ready",
+          marketId: "nip-market",
+          selectedSide: "NO",
+          postText,
+          formatting: [{ style: "bold", text: postText }],
+          storyFamily: "trader_profile",
+          usedFactIds: ["market", "actor"],
           safetyFlags: [],
         },
         source: nipSource,

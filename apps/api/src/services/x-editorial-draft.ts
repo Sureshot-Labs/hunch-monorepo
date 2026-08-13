@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 
 export const X_EDITORIAL_CONTENT_PROFILE = "x_editorial_draft_v1" as const;
-export const X_EDITORIAL_PROMPT_VERSION = "x_editorial_prompt_v8" as const;
+export const X_EDITORIAL_PROMPT_VERSION = "x_editorial_prompt_v9" as const;
 
 export type XEditorialComposerFailureCode =
   | "missing_content"
@@ -303,7 +303,17 @@ const FORBIDDEN_COPY_PATTERNS: Array<{
   {
     code: "analyst_jargon",
     pattern:
-      /\b(?:credentialed (?:fade|trade)|credibility check|making that lean concrete|worth respecting|last (?:30|thirty) days (?:are|were) not quiet|keep paying favorite prices)\b/i,
+      /\b(?:credentialed (?:fade|trade)|credibility check|making that lean concrete|worth respecting|last (?:30|thirty) days (?:are|were) not quiet|keep paying favorite prices|the price is already heavy|serious holder)\b/i,
+  },
+  {
+    code: "binary_side_explanation",
+    pattern:
+      /\b(?:holding|holds|on)\s+the\s+(?:yes|no)\s+side\b[^\n.!?]*(?:—|-|,)\s*meaning\b/i,
+  },
+  {
+    code: "weak_position_hook",
+    pattern:
+      /^\$\d+(?:\.\d+)?[KMB]?\s+on\s+[^\n.!?]+\s+at\s+\d+(?:\.\d+)?¢[.!?]?$/im,
   },
   {
     code: "unsupported_accusation",
@@ -324,10 +334,15 @@ const FORBIDDEN_COPY_PATTERNS: Array<{
 ];
 
 const UNSUPPORTED_POSITION_ACTION_PATTERN =
-  /\b(?:bought|buying|buys|added|adding|adds|loaded|loading|loads|dropped|dropping|drops|entered|entering|opened (?:a|the|this) (?:new )?(?:bet|position|trade)|doubled? down|put(?:ting)? \$|(?:keeps?|continues?) (?:buying|adding|loading|paying)|paying (?:favorite|current|market) prices?)\b/i;
+  /\b(?:bought|buying|buys|added|adding|adds|loaded|loading|loads|dropped|dropping|drops|entry|entries|entered|entering|opened (?:a|the|this) (?:new )?(?:bet|position|trade)|doubled? down|put(?:ting)? \$|(?:keeps?|continues?) (?:buying|adding|loading|paying)|paying (?:favorite|current|market) prices?)\b/i;
 
 const UNSUPPORTED_RECENCY_PATTERN =
   /\b(?:just|minutes? ago|hours? ago|today|this morning|tonight)\b/i;
+
+const ESPORTS_CONTEXT_PATTERN = /\b(?:bo[1-7]|esports?|gaming)\b/i;
+
+const TOPICAL_EMOJI_PATTERN =
+  /(?:\p{Extended_Pictographic}|\p{Regional_Indicator}{2})/gu;
 
 function cleanText(value: string): string {
   return value
@@ -417,7 +432,7 @@ function buildEditorialBrief(source: XEditorialDraftSource): {
       actionClaims:
         "Treat this as a current-position snapshot unless an allowlisted fact explicitly proves a new action.",
       listAndEmoji:
-        "Do not list a single position. Use at most one topical emoji; a sports/esports marker is welcome when natural.",
+        "Do not list a single position. Use at most one topical emoji. Sports/esports markers such as a flag, ⚽, or 🎮 belong inside postText and should be used when they improve scanning without repeating recent drafts.",
       preferredLength: "Two to four compact paragraphs; shorter is better.",
       recommendedFormat: "snapshot_profile",
       supportingFactBudget: 3,
@@ -469,23 +484,23 @@ export function buildXEditorialDraftSystemPrompt(input: {
     "LIVE ACTION — a new buy, add, trim, exit, or price move only when a supplied fact explicitly proves that change. Lead with the action and its timing.",
     "CONNECTED BETS — two or more positions that reveal a contradiction or scenario. A short list may make the pattern visible before one plain-language interpretation.",
     "STRATEGY OR RESULT — several repeated trades, a resolved win/loss, or a measurable process. Use a compact fact block only when the repeated numbers are the story.",
-    "HOOK — lead with the most surprising verified amount, result, action, probability, or contradiction. Prefer the achievement or event over an @handle; introduce the handle after the hook unless the identity itself is the story.",
+    "HOOK — lead with the most surprising verified amount, result, action, probability, or contradiction. Prefer the achievement or event over an @handle; introduce the handle after the hook unless the identity itself is the story. A bare fragment such as '$15.7K on NIP at 81¢.' is a stat label, not a hook.",
     "After the hook, include only facts that sharpen it. The post does not need an analysis paragraph, a declared tension, or a punchline. If the strongest facts already land, stop.",
     "Use short natural paragraphs and clipped sentences where they add rhythm. Prefer specific nouns and active verbs. Omit facts that do not strengthen the story. Never pad a weak story into three or four explanatory paragraphs.",
     "Avoid generic openings such as 'Market update', 'Tracked wallets are moving', 'A signal appeared', or '[probability] is now [probability]' when a concrete trader, amount, or result is available.",
     "Use only supplied facts. Preserve side, proposition, scope, count, timeframe, and result. For amounts, prices, and PnL, use the supplied editorial display strings verbatim; never print raw database decimals or add precision.",
-    "A position snapshot proves only that the position is currently held. It does not prove when, where, or how it was entered, or that the trader is still buying. Never turn holding into bought, added, loaded, dropped, entered, doubled down, or keeps paying unless a supplied fact explicitly proves that action.",
+    "A position snapshot proves only that the position is currently held. It does not prove when, where, or how it was entered, or that the trader is still buying. Never turn holding into bought, added, loaded, dropped, entered, doubled down, or keeps paying unless a supplied fact explicitly proves that action. Current price alone never supports 'cheap entry', 'expensive entry', or any other entry-price claim.",
     "Do not claim insider access, coordination, private information, causation, certainty, an AI bot, or a cheat code.",
     "A light first-person editorial voice is allowed for a fact-grounded observation or opinion, such as 'I found', 'I am watching', or 'I think'. Never invent a personal trade, profit, prediction record, conversation, private source, or firsthand access.",
     "Do not expose wallet addresses, internal labels, evidence IDs, raw schema names, or analytics jargon.",
     "Never announce your structure with labels such as 'Receipts:', 'The trader has receipts:', 'The credential stack is the story:', 'My read:', 'The cleaner stat:', or 'The actual tension here:'. Make the observation directly.",
-    "Avoid investment-memo and AI-editor phrases such as 'credentialed fade', 'credibility check', 'base case', 'making the lean concrete', 'worth respecting', 'the last 30 days are not quiet', or 'keep paying favorite prices'. Use ordinary language a real market blogger would use.",
+    "Avoid investment-memo and AI-editor phrases such as 'credentialed fade', 'credibility check', 'base case', 'making the lean concrete', 'worth respecting', 'the last 30 days are not quiet', 'the price is already heavy', 'serious holder', or 'keep paying favorite prices'. Use ordinary language a real market blogger would use.",
     "Do not mechanically repeat 'The market already...' or 'This is X, not Y'. Vary the structure, transitions, and ending as well as the opening.",
-    "Never assume an acronym or outcome label is self-explanatory. Pair it with the supplied event or market context.",
+    "Never assume an acronym or outcome label is self-explanatory. Pair it with the supplied event or market context. Translate binary contract mechanics into the natural outcome; do not write 'holding the NO side — meaning NIP to win' when the supplied label or proposition lets you say directly that the trader is holding NIP to win.",
     "No Markdown markers inside postText, headings, pipe-delimited stat tables, URLs, links, hashtags, affiliate language, product CTA, or generic engagement bait.",
     "Select one to three exact, non-overlapping snippets for intentional Telegram/X formatting. Usually bold the hook or strongest result; use italic only for a genuinely useful interpretive line. Return those snippets in formatting and keep postText itself plain.",
     'Every formatting item must be exactly {"style":"bold"|"italic","text":"an exact substring of postText"}. The field name is text, never snippet.',
-    "Emoji and → bullets are editorial tools, not decoration. Use zero or one topical emoji in a normal post; for sports or esports, prefer one natural context marker such as a flag, ⚽, or 🎮 when it improves scanning. Do not add generic 🚨 or 🔥 unless the facts establish real urgency.",
+    "Emoji and → bullets are editorial tools, not decoration. Use zero or one topical emoji in a normal post. For sports or esports, actively consider one natural context marker such as a flag, ⚽, or 🎮 inside postText; prefer it when recent drafts have not already leaned on emoji. Do not count any Telegram preview label as part of the post. Do not add generic 🚨 or 🔥 unless the facts establish real urgency.",
     "Use → lines only for two to four parallel positions, outcomes, or results whose comparison is the story. Never create a list for one position or turn ordinary credentials into a recurring stats card.",
     "Vary the hook, structure, transitions, and ending against recentDraftsToAvoidImitating. Reuse the reference collection's editorial principles, never one author's exact wording or persona.",
     "These style-only examples show the target rhythm. Never reuse their people, markets, numbers, or claims unless they are present in the supplied facts:",
@@ -677,6 +692,22 @@ function findUnsupportedSemanticClaims(input: {
   source: XEditorialDraftSource;
 }): string[] {
   const issues: string[] = [];
+  const emojiCount = [...input.postText.matchAll(TOPICAL_EMOJI_PATTERN)].length;
+  if (emojiCount > 1) issues.push("too_many_emojis");
+  const marketContext = sourceFactText({
+    factIds: new Set(["market"]),
+    source: input.source,
+  });
+  const recentDraftHasEmoji = (input.source.recentOpenings ?? [])
+    .slice(0, 3)
+    .some((draft) => [...draft.matchAll(TOPICAL_EMOJI_PATTERN)].length > 0);
+  if (
+    ESPORTS_CONTEXT_PATTERN.test(marketContext) &&
+    emojiCount === 0 &&
+    !recentDraftHasEmoji
+  ) {
+    issues.push("missing_topical_emoji");
+  }
   if (
     (input.source.kind === "initial" ||
       input.source.kind === "research_update") &&
