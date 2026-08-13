@@ -820,6 +820,24 @@ export async function inspectFundingMigrationPreflight(
       "telegram_funding_sessions",
       "active_buy_return_revision",
     ));
+  const hasTelegramFundingMinimumAmount =
+    hasTelegramFundingSessions &&
+    (await columnExists(
+      db,
+      "telegram_funding_sessions",
+      "minimum_funding_usd",
+    )) &&
+    (await constraintDefinitionIncludes(
+      db,
+      "public.telegram_funding_sessions",
+      "telegram_funding_sessions_minimum_funding_check",
+      ["minimum_funding_usd", "buy_return_context", "> 0"],
+    )) &&
+    (await functionDefinitionIncludes(
+      db,
+      "guard_telegram_funding_session_identity",
+      ["new.minimum_funding_usd", "old.minimum_funding_usd"],
+    ));
   const hasTelegramFundingBuyProjectionWatermarks =
     hasTelegramFundingSessions &&
     (await columnsExist(db, "telegram_funding_sessions", [
@@ -1013,6 +1031,7 @@ export async function inspectFundingMigrationPreflight(
     hasTelegramFundingBuyContinuations &&
     hasTelegramFundingBuyGenerations &&
     hasTelegramFundingActiveBuyReturn &&
+    hasTelegramFundingMinimumAmount &&
     hasTelegramFundingBuyProjectionWatermarks &&
     hasTelegramFundingBuyProjectionConstraint &&
     hasTelegramFundingBuyReturnEvidence &&

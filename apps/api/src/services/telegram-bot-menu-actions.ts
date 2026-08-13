@@ -4,6 +4,10 @@ import {
   buildSignalBotMarketVenuePickerScreen,
   readSignalBotMarketSearchSession,
 } from "./telegram-bot-menu-markets.js";
+import type {
+  SignalBotTelegramClient,
+  TelegramBotCallbackQuery,
+} from "./signal-bot-contracts.js";
 import { formatTelegramCalloutMarkdownV2 } from "./telegram-bot-trading-presentation.js";
 import {
   parseTelegramFundingCallbackRoute,
@@ -77,6 +81,39 @@ export function isSignalBotFundingMenuRoute(
   route: Readonly<{ kind: string; venue?: string }>,
 ): boolean {
   return signalBotFundingMenuAction(route) != null;
+}
+
+export async function hideSignalBotFundingQr(
+  callbackQuery: TelegramBotCallbackQuery,
+  telegram: SignalBotTelegramClient,
+): Promise<true> {
+  const message = callbackQuery.message;
+  const senderId = callbackQuery.from?.id;
+  const deleteMessage = telegram.deleteMessage?.bind(telegram);
+  if (
+    message?.message_id == null ||
+    senderId == null ||
+    String(message.chat.id) !== String(senderId) ||
+    !deleteMessage
+  ) {
+    await telegram.answerCallbackQuery({
+      callbackQueryId: callbackQuery.id,
+      showAlert: true,
+      text: "⚠️ This QR could not be hidden.",
+    });
+    return true;
+  }
+  const deleted = await deleteMessage({
+    chat_id: String(message.chat.id),
+    message_id: message.message_id,
+  }).catch(() => ({ ok: false as const }));
+  await telegram.answerCallbackQuery({
+    callbackQueryId: callbackQuery.id,
+    ...(!deleted.ok
+      ? { showAlert: true, text: "⚠️ This QR could not be hidden." }
+      : { text: "QR hidden." }),
+  });
+  return true;
 }
 
 export type SignalBotFundingMenuAction =

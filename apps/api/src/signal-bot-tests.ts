@@ -9930,6 +9930,46 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
+    name: "funding QR hide deletes only the callback message",
+    run: async () => {
+      const redis = new FakeRedis();
+      const deleted: Array<{ chat_id: string; message_id: number }> = [];
+      const telegram = Object.assign(new FakeTelegram(), {
+        deleteMessage: async (input: {
+          chat_id: string;
+          message_id: number;
+        }) => {
+          deleted.push(input);
+          return { messageId: input.message_id, ok: true } as const;
+        },
+      });
+      const handled = await handleSignalBotMenuCallback({
+        callbackQuery: {
+          data: "hm:v1:fund:hide:123e4567-e89b-42d3-a456-426614174000",
+          from: { id: 999 },
+          id: "funding-qr-hide",
+          message: {
+            chat: { id: 999, type: "private" },
+            message_id: 53,
+          },
+        },
+        config: parseSignalBotConfig({
+          HUNCH_SIGNAL_BOT_TOKEN: "token",
+        }),
+        redis,
+        sendTestSignal: async () => false,
+        telegram,
+      });
+      assert.equal(handled, true);
+      assert.deepEqual(deleted, [{ chat_id: "999", message_id: 53 }]);
+      assert.deepEqual(telegram.callbackAnswers, [
+        { callbackQueryId: "funding-qr-hide", text: "QR hidden." },
+      ]);
+      assert.equal(telegram.edits.length, 0);
+      assert.equal(telegram.messages.length, 0);
+    },
+  },
+  {
     name: "notification menu callbacks load and persist user toggles",
     run: async () => {
       const redis = new FakeRedis();

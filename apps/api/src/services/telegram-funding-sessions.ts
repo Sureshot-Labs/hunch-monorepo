@@ -202,6 +202,7 @@ type TelegramFundingSessionRow = Readonly<{
   event_id: string | null;
   side: "NO" | "YES" | null;
   requested_spend_usd: string | number | null;
+  minimum_funding_usd: string | number | null;
   resume_generation: number;
   resume_intent_id: string | null;
   resumed_at: Date | null;
@@ -270,6 +271,7 @@ export type TelegramFundingSessionContext = Readonly<{
   initialEventId: string | null;
   initialSide: "NO" | "YES" | null;
   initialRequestedSpendUsd: string | null;
+  initialMinimumFundingUsd?: string | null;
   resumeGeneration: number;
   resumeIntentId: string | null;
   resumedAt: string | null;
@@ -315,6 +317,7 @@ const sessionColumns = `
   event_id,
   side,
   requested_spend_usd,
+  minimum_funding_usd,
   resume_generation,
   resume_intent_id,
   resumed_at,
@@ -365,6 +368,8 @@ function publicSession(
     initialSide: row.side,
     initialRequestedSpendUsd:
       row.requested_spend_usd == null ? null : String(row.requested_spend_usd),
+    initialMinimumFundingUsd:
+      row.minimum_funding_usd == null ? null : String(row.minimum_funding_usd),
     resumeGeneration: row.resume_generation,
     resumeIntentId: row.resume_intent_id,
     resumedAt: row.resumed_at?.toISOString() ?? null,
@@ -764,6 +769,7 @@ type CreateTelegramFundingSessionInput = Readonly<{
   initialBuyReturn?: Readonly<{
     eventId: string | null;
     marketId: string;
+    minimumFundingUsd: string | null;
     requestedSpendUsd: string;
     side: "NO" | "YES";
   }>;
@@ -816,13 +822,14 @@ export async function createOrReuseTelegramFundingSessionInTransaction(
         event_id,
         side,
         requested_spend_usd,
+        minimum_funding_usd,
         idempotency_key,
         expires_at,
         created_at,
         updated_at
       ) values (
         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::numeric,
-        $12, $13, $14, $14
+        $12::numeric, $13, $14, $15, $15
       )
       on conflict do nothing
       returning ${sessionColumns}
@@ -839,6 +846,7 @@ export async function createOrReuseTelegramFundingSessionInTransaction(
       input.initialBuyReturn?.eventId ?? null,
       input.initialBuyReturn?.side ?? null,
       input.initialBuyReturn?.requestedSpendUsd ?? null,
+      input.initialBuyReturn?.minimumFundingUsd ?? null,
       input.idempotencyKey,
       input.expiresAt,
       input.now,

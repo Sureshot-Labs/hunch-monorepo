@@ -321,6 +321,7 @@ export type TelegramFundingBuyReturnOpener = (
     eventId: string | null;
     idempotencyKey: string;
     marketId: string;
+    minimumFundingUsd?: string;
     requestedSpendUsd: string;
     side: TelegramBotTradingSide;
     sourceIntentId: string;
@@ -1257,6 +1258,14 @@ export function resolveTelegramBuyFundingPreview(input: {
   };
 }
 
+export function resolveTelegramMinimumFundingUsd(shortfallUsd: number): string {
+  const cents = Math.max(
+    1,
+    Math.ceil((Math.max(0, shortfallUsd) - Number.EPSILON) * 100),
+  );
+  return (cents / 100).toFixed(2);
+}
+
 export function resolveTelegramFundingBuyDepositRequirement(input: {
   executableFundsUsd: number;
   maximumSpendUsd: number;
@@ -1376,6 +1385,7 @@ export const telegramBotTradingTestHooks = {
   openMarketUrl,
   resolveTelegramBuyFundingState,
   resolveTelegramBuyFundingPreview,
+  resolveTelegramMinimumFundingUsd,
   resolveTelegramFundingBuyDepositRequirement,
   resolveExecutablePolymarketSellSharesRaw,
   resolveTelegramExecutableBuyOption,
@@ -7545,6 +7555,9 @@ async function previewPolymarketTelegramTradeIntent(input: {
             eventId: input.intent.event_id,
             idempotencyKey: `funding-return:${input.intent.id}`,
             marketId: input.intent.market_id,
+            minimumFundingUsd: resolveTelegramMinimumFundingUsd(
+              fundingPreview.shortfallUsd,
+            ),
             requestedSpendUsd: String(amountUsd),
             side,
             sourceIntentId: input.intent.id,

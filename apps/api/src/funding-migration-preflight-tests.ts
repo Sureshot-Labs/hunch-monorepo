@@ -437,6 +437,7 @@ function buildTelegram0203Db(
     ...(input.completeObjects
       ? [
           "telegram_funding_sessions.active_buy_return_revision",
+          "telegram_funding_sessions.minimum_funding_usd",
           "telegram_funding_sessions.projected_buy_return_revision",
           "telegram_funding_sessions.projected_buy_policy_revision",
           "telegram_funding_buy_return_revisions.telegram_account_id_snapshot",
@@ -519,6 +520,8 @@ function buildTelegram0203Db(
             "FOREIGN KEY (id, active_buy_return_revision) REFERENCES telegram_funding_buy_return_revisions(telegram_funding_session_id, revision)",
           telegram_funding_sessions_buy_projection_check:
             "CHECK ((projected_buy_return_revision = 0 AND projected_buy_policy_revision IS NULL) OR (projected_buy_return_revision > 0 AND projected_buy_policy_revision IS NOT NULL AND active_buy_return_revision IS NOT NULL))",
+          telegram_funding_sessions_minimum_funding_check:
+            "CHECK (minimum_funding_usd IS NULL OR (origin = 'buy_return_context' AND minimum_funding_usd > 0))",
           telegram_funding_buy_continuations_return_fk:
             "FOREIGN KEY (telegram_funding_session_id, buy_return_revision) REFERENCES telegram_funding_buy_return_revisions(telegram_funding_session_id, revision)",
           telegram_funding_buy_generations_continuation_fk:
@@ -576,8 +579,18 @@ function buildTelegram0203Db(
                                 and candidate.destination_address ~ '^0x'`
                          }
                      $$`
-                  : input.completeObjects && input.rearmDefinition !== false
-                    ? `create function rearm_telegram_funding_delivery(
+                  : input.completeObjects &&
+                      functionName === "guard_telegram_funding_session_identity"
+                    ? `create function guard_telegram_funding_session_identity()
+                       returns trigger language plpgsql as $$
+                       begin
+                         if new.minimum_funding_usd is distinct from old.minimum_funding_usd then
+                           raise exception 'telegram funding session identity is immutable';
+                         end if;
+                         return new;
+                       end $$`
+                    : input.completeObjects && input.rearmDefinition !== false
+                      ? `create function rearm_telegram_funding_delivery(
                      target_telegram_user_id text,
                      target_telegram_account_id uuid
                    ) returns integer language plpgsql as $$
@@ -594,7 +607,7 @@ function buildTelegram0203Db(
                        return 0;
                      end if;
                    end $$`
-                    : null,
+                      : null,
             },
           ],
         };

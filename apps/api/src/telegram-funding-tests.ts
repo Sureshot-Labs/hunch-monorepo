@@ -18,6 +18,7 @@ import type { DirectIngressObservationVariant } from "./funding/reconciliation/d
 import {
   parseTelegramFundingCallbackRoute,
   telegramFundingCallbackData,
+  type TelegramFundingMessage,
   type TelegramFundingProgressProjection,
 } from "./services/telegram-funding-contracts.js";
 import {
@@ -1223,7 +1224,7 @@ assert.deepEqual(
     choiceToken: "p",
   },
 );
-for (const kind of ["refresh", "cancel", "qr"] as const) {
+for (const kind of ["refresh", "cancel", "qr", "hide_qr"] as const) {
   const callback = telegramFundingCallbackData({ contextId, kind });
   assert.ok(Buffer.byteLength(callback, "utf8") <= 64);
   assert.deepEqual(parseTelegramFundingCallbackRoute(callback.slice(6)), {
@@ -3173,13 +3174,18 @@ for (const closedDestination of [
 }
 
 {
+  const buyWaiting = {
+    ...waiting,
+    minimumFundingUsd: "0.37",
+  } satisfies TelegramFundingProgressProjection;
   const fake = deliveryPool({
     action: "funding_qr",
     destinations: [destination, destination],
-    projection: waiting,
+    projection: buyWaiting,
   });
   let qrPhoto: number[] = [];
   let qrCaption = "";
+  let qrReplyMarkup: TelegramFundingMessage["reply_markup"];
   const result = await deliverTelegramFundingActions({
     pool: fake.pool,
     renderCoordinator,
@@ -3193,6 +3199,7 @@ for (const closedDestination of [
       sendPhoto: async (message) => {
         qrPhoto = Array.from(message.photo);
         qrCaption = message.caption ?? "";
+        qrReplyMarkup = message.reply_markup;
         return { ok: true, messageId: 150 };
       },
     },
@@ -3203,7 +3210,21 @@ for (const closedDestination of [
     [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a],
   );
   assert.match(qrCaption, /Polymarket funding QR/u);
+  assert.match(qrCaption, /Minimum to add:\* \$0\\\.37/u);
   assert.doesNotMatch(qrCaption, new RegExp(address, "u"));
+  assert.deepEqual(qrReplyMarkup, {
+    inline_keyboard: [
+      [
+        {
+          callback_data: telegramFundingCallbackData({
+            contextId,
+            kind: "hide_qr",
+          }),
+          text: "🙈 Hide",
+        },
+      ],
+    ],
+  });
   const contextAttachIndex = fake.statements.findIndex(
     (statement) =>
       statement.startsWith("update telegram_funding_sessions context") &&
@@ -3214,6 +3235,38 @@ for (const closedDestination of [
     false,
     "a QR photo must not advance the funding card delivery watermark",
   );
+}
+
+{
+  const detectedForQrCleanup = {
+    ...waiting,
+    observedAt: "2026-08-05T12:02:00.000Z",
+    rawAmount: "10000",
+    receiveAddress: null,
+    state: "funds_received",
+  } satisfies TelegramFundingProgressProjection;
+  const fake = deliveryPool({
+    action: "funding_qr",
+    destinations: [destination],
+    outboxTelegramMessageId: 153,
+    projection: detectedForQrCleanup,
+  });
+  let deletedMessageId: number | null = null;
+  const result = await deliverTelegramFundingActions({
+    pool: fake.pool,
+    renderCoordinator,
+    telegram: {
+      deleteMessage: async (message) => {
+        deletedMessageId = message.message_id;
+        return { ok: true, messageId: message.message_id };
+      },
+      sendMessage: async () => {
+        assert.fail("a detected receipt must delete the tracked QR");
+      },
+    },
+  });
+  assert.equal(result.sent, 1);
+  assert.equal(deletedMessageId, 153);
 }
 
 {
