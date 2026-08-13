@@ -511,8 +511,13 @@ export function projectTelegramFundingProgress(input: {
   const consentedTarget = input.session.receiveTargets.find(
     (target) =>
       target.receiveTargetId === input.consent?.receiveTargetId &&
-      target.acceptedAssets.some((accepted) =>
-        sameAsset(accepted.asset, input.consent?.asset ?? accepted.asset),
+      target.acceptedAssets.some(
+        (accepted) =>
+          (accepted.handling === "direct" &&
+            sameAsset(accepted.asset, route.destinationAsset)) ||
+          (accepted.handling === "automatic_conversion" &&
+            route.automaticSourceAsset != null &&
+            sameAsset(accepted.asset, route.automaticSourceAsset)),
       ),
   );
   return projection({
