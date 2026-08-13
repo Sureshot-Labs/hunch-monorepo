@@ -20,6 +20,11 @@ import {
   type DelegatedFundingExecutionClaim,
   type DelegatedFundingExecutionResult,
 } from "../../execution/delegated-funding-executor.js";
+import {
+  DELEGATED_PROVIDER_EVIDENCE_RECOVERY_CLAIM_KEY,
+  DELEGATED_PROVIDER_EVIDENCE_RECOVERY_MS,
+  DELEGATED_PROVIDER_RECOVERY_MS,
+} from "../../execution/delegated-funding-recovery-policy.js";
 import type {
   PolymarketWrapExecutionConfiguration,
   RelayEvmExecutionConfiguration,
@@ -160,9 +165,11 @@ type Fixture = Readonly<{
   authorizationId: string;
   consentFingerprint: string;
   consentId: string;
+  destinationAddress: string;
   operationId: string;
   fundingPlan: PolymarketFundingPlan;
   privyWalletId: string;
+  pUsdVariantId: string;
   quoteId: string;
   receiptIds: readonly string[];
   receiveSessionId: string;
@@ -1057,9 +1064,11 @@ async function createFixture(
     authorizationId: authorization.id,
     consentFingerprint: consentEvidence.fingerprint,
     consentId: consentEvidence.id,
+    destinationAddress,
     fundingPlan,
     operationId: committed.operation.id,
     privyWalletId,
+    pUsdVariantId,
     quoteId: quote.id,
     receiptIds: [
       oldReceipt.receipt.receiptId,
@@ -1075,6 +1084,35 @@ async function createFixture(
   };
   fixtures.push(fixture);
   return fixture;
+}
+
+async function insertReadyPusdReceipt(
+  fixture: Fixture,
+  rawAmount: string,
+  observedAt: Date,
+): Promise<string> {
+  const inserted = await insertFundingReceiveReceipt(pool, {
+    receiveSessionId: fixture.receiveSessionId,
+    userId: fixture.userId,
+    variantId: fixture.pUsdVariantId,
+    asset: pUsd,
+    destinationAddress: fixture.destinationAddress,
+    rawAmount,
+    observationRevision: opaque("pusd_ready_observation"),
+    canonicalEvent: {
+      transactionHash: `0x${crypto.randomBytes(32).toString("hex")}`,
+      eventIndex: "0",
+      ledgerHeight: "102",
+      blockHash: `0x${crypto.randomBytes(32).toString("hex")}`,
+      sourceAddress: router,
+    },
+    observedAt,
+    handling: "direct",
+    status: "ready",
+    evidence: { fixture: true, exactConversionOutput: true },
+    now: observedAt,
+  });
+  return inserted.receipt.receiptId;
 }
 
 type RelayFixture = Readonly<{
@@ -2781,6 +2819,20 @@ try {
   assert.deepEqual(genericReconciliation.operationIds, [
     crashRecovery.operationId,
   ]);
+  const providerReferenceJob = await pool.query<{ due_at: Date }>(
+    `select due_at
+       from funding_reconciliation_jobs
+      where operation_id = $1`,
+    [crashRecovery.operationId],
+  );
+  assert.equal(
+    providerReferenceJob.rows[0]?.due_at.toISOString(),
+    new Date(
+      crashRecoveryAttempt.updated_at.getTime() +
+        DELEGATED_PROVIDER_RECOVERY_MS,
+    ).toISOString(),
+    "generic reconciliation must sleep until the provider recovery lease instead of hot-looping",
+  );
   const providerRecoveryState = await pool.query<{
     active_since: string | null;
     error_code: string | null;
@@ -2914,6 +2966,284 @@ try {
     attemptId: crashRecoveryAttempt.attempt_id,
     stepId: crashRecoveryAttempt.step_id,
     now: new Date(now.getTime() + 10 * 60_000 + 2),
+  });
+
+  const evidenceRecovery = await createFixture("10000");
+  let evidenceExecuteCalls = 0;
+  let evidenceRecoveryCalls = 0;
+  let signalEvidenceRecoveryStarted: (() => void) | undefined;
+  const evidenceRecoveryStarted = new Promise<void>((resolve) => {
+    signalEvidenceRecoveryStarted = resolve;
+  });
+  let releaseEvidenceRecovery: (() => void) | undefined;
+  const evidenceRecoveryRelease = new Promise<void>((resolve) => {
+    releaseEvidenceRecovery = resolve;
+  });
+  const evidenceRecoveryExecutor = executor(
+    async () => {
+      evidenceExecuteCalls += 1;
+      return { kind: "ambiguous" };
+    },
+    async () => {
+      evidenceRecoveryCalls += 1;
+      signalEvidenceRecoveryStarted?.();
+      await evidenceRecoveryRelease;
+      return {
+        kind: "submitted",
+        transactionReference: `0x${"9".repeat(64)}`,
+      };
+    },
+    referenceCodec,
+    5 * 60_000,
+  );
+  assert.equal(
+    (await evidenceRecoveryExecutor.runBatch({ limit: 1, now })).ambiguous,
+    1,
+  );
+  const evidenceAttemptBeforeRecovery = await pool.query<{
+    finished_at: Date;
+    updated_at: Date;
+  }>(
+    `select attempt.finished_at, attempt.updated_at
+       from funding_operation_step_attempts attempt
+       join funding_operation_steps step on step.id = attempt.step_id
+      where step.operation_id = $1`,
+    [evidenceRecovery.operationId],
+  );
+  const evidenceAttemptUpdatedAt =
+    evidenceAttemptBeforeRecovery.rows[0]?.updated_at;
+  const evidenceBoundaryAt = evidenceAttemptBeforeRecovery.rows[0]?.finished_at;
+  assert.ok(evidenceAttemptUpdatedAt);
+  assert.ok(evidenceBoundaryAt);
+  const evidenceDestinationReceiptId = await insertReadyPusdReceipt(
+    evidenceRecovery,
+    "10000",
+    new Date(evidenceBoundaryAt.getTime() + 10_000),
+  );
+  const exactDestinationEvidence = await pool.query<{ matches: boolean }>(
+    `select exists (
+       select 1
+       from funding_operation_steps step
+       join funding_operations operation on operation.id = step.operation_id
+       join funding_receive_receipts source_receipt
+         on source_receipt.id::text =
+              operation.support_metadata ->> 'fundingReceiveReceiptId'
+        and source_receipt.child_funding_operation_id = operation.id
+        and source_receipt.user_id = operation.user_id
+       join telegram_funding_authorizations funding_authorization
+         on funding_authorization.id::text =
+              operation.support_metadata ->> 'fundingAuthorizationId'
+        and funding_authorization.user_id = operation.user_id
+       join funding_receive_receipts destination_receipt
+         on destination_receipt.id = $2::uuid
+        and destination_receipt.receive_session_id =
+              source_receipt.receive_session_id
+        and destination_receipt.user_id = source_receipt.user_id
+        and lower(destination_receipt.destination_address) =
+              lower(source_receipt.destination_address)
+        and destination_receipt.status = 'ready'
+        and destination_receipt.handling = 'direct'
+        and destination_receipt.network_id =
+              funding_authorization.destination_network_id
+        and lower(destination_receipt.asset_id) =
+              lower(funding_authorization.destination_asset_id)
+        and destination_receipt.asset_decimals =
+              funding_authorization.destination_asset_decimals
+        and destination_receipt.raw_amount = source_receipt.raw_amount
+        and destination_receipt.observed_at >= $3::timestamptz
+       where step.operation_id = $1::uuid
+     ) as matches`,
+    [
+      evidenceRecovery.operationId,
+      evidenceDestinationReceiptId,
+      evidenceBoundaryAt,
+    ],
+  );
+  assert.equal(
+    exactDestinationEvidence.rows[0]?.matches,
+    true,
+    "the early-recovery fixture must provide exact destination evidence",
+  );
+  assert.equal(
+    (
+      await evidenceRecoveryExecutor.runBatch({
+        limit: 1,
+        now: new Date(
+          evidenceBoundaryAt.getTime() +
+            DELEGATED_PROVIDER_EVIDENCE_RECOVERY_MS -
+            1,
+        ),
+      })
+    ).claimed,
+    0,
+    "exact destination evidence must retain a short anti-hammer lease",
+  );
+  const evidenceRecoveryInFlight = evidenceRecoveryExecutor.runBatch({
+    limit: 1,
+    now: new Date(
+      evidenceBoundaryAt.getTime() +
+        DELEGATED_PROVIDER_EVIDENCE_RECOVERY_MS +
+        1,
+    ),
+  });
+  await evidenceRecoveryStarted;
+  const competingEvidenceRecoveryExecutor = executor(
+    async () => {
+      throw new Error("an in-flight evidence recovery must not execute again");
+    },
+    async () => {
+      throw new Error("an in-flight evidence recovery must not be reclaimed");
+    },
+    referenceCodec,
+    5 * 60_000,
+  );
+  assert.equal(
+    (
+      await competingEvidenceRecoveryExecutor.runBatch({
+        limit: 1,
+        now: new Date(evidenceBoundaryAt.getTime() + 60_000),
+      })
+    ).claimed,
+    0,
+    "evidence eligibility must not shorten the five-minute in-flight recovery lease",
+  );
+  releaseEvidenceRecovery?.();
+  const evidenceRecovered = await evidenceRecoveryInFlight;
+  assert.equal(evidenceRecovered.recovered, 1);
+  assert.equal(evidenceRecovered.submitted, 1);
+  assert.deepEqual(evidenceRecovered.operationIds, [
+    evidenceRecovery.operationId,
+  ]);
+  assert.equal(evidenceExecuteCalls, 1);
+  assert.equal(evidenceRecoveryCalls, 1);
+  const evidenceAttempts = await pool.query<{
+    actual_costs: Record<string, unknown>;
+    attempt_id: string;
+    count: string;
+    reference_kind: string | null;
+    step_id: string;
+  }>(
+    `select min(attempt.id::text) as attempt_id,
+            min(step.id::text) as step_id,
+            count(*)::text as count,
+            min(attempt.reference_kind) as reference_kind,
+            jsonb_object_agg(attempt.id::text, attempt.actual_costs) as actual_costs
+       from funding_operation_step_attempts attempt
+       join funding_operation_steps step on step.id = attempt.step_id
+      where step.operation_id = $1`,
+    [evidenceRecovery.operationId],
+  );
+  const evidenceAttempt = evidenceAttempts.rows[0];
+  assert.ok(evidenceAttempt);
+  assert.deepEqual(
+    {
+      count: evidenceAttempt.count,
+      reference_kind: evidenceAttempt.reference_kind,
+    },
+    {
+      count: "1",
+      reference_kind: "transaction",
+    },
+  );
+  assert.equal(
+    Object.values(evidenceAttempt.actual_costs).some(
+      (costs) =>
+        typeof costs === "object" &&
+        costs !== null &&
+        DELEGATED_PROVIDER_EVIDENCE_RECOVERY_CLAIM_KEY in costs,
+    ),
+    true,
+    "the first early claim must leave a durable marker that restores the normal processing lease",
+  );
+  await finalizeRecoveredFixture(evidenceRecovery, {
+    attemptId: evidenceAttempt.attempt_id,
+    stepId: evidenceAttempt.step_id,
+    now: new Date(
+      evidenceBoundaryAt.getTime() +
+        DELEGATED_PROVIDER_EVIDENCE_RECOVERY_MS +
+        2,
+    ),
+  });
+
+  const preBoundaryEvidence = await createFixture("11000");
+  const preBoundaryExecutionAt = new Date(now.getTime() + 30_000);
+  await insertReadyPusdReceipt(
+    preBoundaryEvidence,
+    "11000",
+    new Date(preBoundaryExecutionAt.getTime() - 1_000),
+  );
+  let preBoundaryRecoveryCalls = 0;
+  const preBoundaryEvidenceExecutor = executor(
+    async () => ({ kind: "ambiguous" }),
+    async () => {
+      preBoundaryRecoveryCalls += 1;
+      return {
+        kind: "submitted",
+        transactionReference: `0x${"8".repeat(64)}`,
+      };
+    },
+    referenceCodec,
+    DELEGATED_PROVIDER_RECOVERY_MS,
+  );
+  assert.equal(
+    (
+      await preBoundaryEvidenceExecutor.runBatch({
+        limit: 1,
+        now: preBoundaryExecutionAt,
+      })
+    ).ambiguous,
+    1,
+  );
+  const preBoundaryAttempt = await pool.query<{
+    attempt_id: string;
+    finished_at: Date;
+    step_id: string;
+    updated_at: Date;
+  }>(
+    `select attempt.id as attempt_id,
+            attempt.finished_at,
+            attempt.updated_at,
+            step.id as step_id
+       from funding_operation_step_attempts attempt
+       join funding_operation_steps step on step.id = attempt.step_id
+      where step.operation_id = $1`,
+    [preBoundaryEvidence.operationId],
+  );
+  const preBoundaryAttemptRow = preBoundaryAttempt.rows[0];
+  assert.ok(preBoundaryAttemptRow);
+  assert.equal(
+    (
+      await preBoundaryEvidenceExecutor.runBatch({
+        limit: 1,
+        now: new Date(
+          preBoundaryAttemptRow.finished_at.getTime() +
+            DELEGATED_PROVIDER_EVIDENCE_RECOVERY_MS +
+            1,
+        ),
+      })
+    ).claimed,
+    0,
+    "destination funds observed before the provider boundary must not accelerate recovery",
+  );
+  const preBoundaryRecovered = await preBoundaryEvidenceExecutor.runBatch({
+    limit: 1,
+    now: new Date(
+      preBoundaryAttemptRow.updated_at.getTime() +
+        DELEGATED_PROVIDER_RECOVERY_MS +
+        1,
+    ),
+  });
+  assert.equal(preBoundaryRecovered.recovered, 1);
+  assert.equal(preBoundaryRecovered.submitted, 1);
+  assert.equal(preBoundaryRecoveryCalls, 1);
+  await finalizeRecoveredFixture(preBoundaryEvidence, {
+    attemptId: preBoundaryAttemptRow.attempt_id,
+    stepId: preBoundaryAttemptRow.step_id,
+    now: new Date(
+      preBoundaryAttemptRow.updated_at.getTime() +
+        DELEGATED_PROVIDER_RECOVERY_MS +
+        2,
+    ),
   });
 
   const strandedRecovery = await createFixture("1000000001");
