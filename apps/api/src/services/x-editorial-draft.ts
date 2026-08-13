@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 
 export const X_EDITORIAL_CONTENT_PROFILE = "x_editorial_draft_v1" as const;
-export const X_EDITORIAL_PROMPT_VERSION = "x_editorial_prompt_v7" as const;
+export const X_EDITORIAL_PROMPT_VERSION = "x_editorial_prompt_v8" as const;
 
 export type XEditorialComposerFailureCode =
   | "missing_content"
@@ -298,12 +298,12 @@ const FORBIDDEN_COPY_PATTERNS: Array<{
   {
     code: "editorial_scaffolding",
     pattern:
-      /(?:^|\n)(?:the trader has (?:some )?receipts|receipts|the credential stack is the story|my read)\s*:/im,
+      /(?:^|\n)(?:the trader has (?:some )?receipts|receipts|the credential stack is the story|my read|the (?:cleaner|stronger) stat|the (?:actual|real) tension(?: here)?)\s*:/im,
   },
   {
     code: "analyst_jargon",
     pattern:
-      /\b(?:credentialed (?:fade|trade)|credibility check|making that lean concrete|worth respecting)\b/i,
+      /\b(?:credentialed (?:fade|trade)|credibility check|making that lean concrete|worth respecting|last (?:30|thirty) days (?:are|were) not quiet|keep paying favorite prices)\b/i,
   },
   {
     code: "unsupported_accusation",
@@ -322,6 +322,12 @@ const FORBIDDEN_COPY_PATTERNS: Array<{
   },
   { code: "raw_evm_address", pattern: /\b0x[0-9a-f]{16,}\b/i },
 ];
+
+const UNSUPPORTED_POSITION_ACTION_PATTERN =
+  /\b(?:bought|buying|buys|added|adding|adds|loaded|loading|loads|dropped|dropping|drops|entered|entering|opened (?:a|the|this) (?:new )?(?:bet|position|trade)|doubled? down|put(?:ting)? \$|(?:keeps?|continues?) (?:buying|adding|loading|paying)|paying (?:favorite|current|market) prices?)\b/i;
+
+const UNSUPPORTED_RECENCY_PATTERN =
+  /\b(?:just|minutes? ago|hours? ago|today|this morning|tonight)\b/i;
 
 function cleanText(value: string): string {
   return value
@@ -399,6 +405,57 @@ function compactRecentDrafts(values: string[] | undefined): string[] {
     .map((value) => Array.from(value).slice(0, 600).join(""));
 }
 
+function buildEditorialBrief(source: XEditorialDraftSource): {
+  actionClaims: string;
+  listAndEmoji: string;
+  preferredLength: string;
+  recommendedFormat: string;
+  supportingFactBudget: number;
+} {
+  if (source.kind === "initial") {
+    return {
+      actionClaims:
+        "Treat this as a current-position snapshot unless an allowlisted fact explicitly proves a new action.",
+      listAndEmoji:
+        "Do not list a single position. Use at most one topical emoji; a sports/esports marker is welcome when natural.",
+      preferredLength: "Two to four compact paragraphs; shorter is better.",
+      recommendedFormat: "snapshot_profile",
+      supportingFactBudget: 3,
+    };
+  }
+  if (source.kind === "research_update") {
+    return {
+      actionClaims:
+        "Describe only the material change explicitly stated in the research_update fact.",
+      listAndEmoji:
+        "Use a list only when the update contains at least two parallel changes. Use at most one topical emoji.",
+      preferredLength: "Two to five compact paragraphs.",
+      recommendedFormat: "material_update",
+      supportingFactBudget: 4,
+    };
+  }
+  if (source.kind === "followthrough_stats") {
+    return {
+      actionClaims:
+        "Separate wallet behavior since the signal from lifetime performance and from current position state.",
+      listAndEmoji:
+        "Use → only when comparing at least two wallet-flow outcomes. Use at most one topical emoji.",
+      preferredLength: "Three to five compact paragraphs.",
+      recommendedFormat: "followthrough",
+      supportingFactBudget: 4,
+    };
+  }
+  return {
+    actionClaims:
+      "Lead with the verified resolution and do not turn an estimated PnL into a guaranteed realized result.",
+    listAndEmoji:
+      "Use → only for two or more parallel result facts. Use at most one topical emoji.",
+    preferredLength: "Two to five compact paragraphs.",
+    recommendedFormat: "resolution",
+    supportingFactBudget: 4,
+  };
+}
+
 export function buildXEditorialDraftSystemPrompt(input: {
   maxCharacters: number;
   maxParagraphs: number;
@@ -406,34 +463,35 @@ export function buildXEditorialDraftSystemPrompt(input: {
   return [
     "You write human, high-signal English posts for a prediction-market intelligence account on X.",
     "Write one ready-to-paste post from the supplied allowlisted facts. It should feel like a sharp trader-story post written after noticing something worth sharing, never a signal card, dashboard, press release, or AI summary.",
-    "Choose the strongest supported story: a fresh meaningful bet, a trader with a credible track record, a repeatable strategy, a contradiction between positions, a market-versus-trader disagreement, follow-through, or a resolved receipt.",
-    "Scale the post to the evidence. With thin facts, write a compact 3-5 line post. With a rich track record or several connected positions, build a fuller case study. Never pad a weak story.",
-    "Use this editorial arc when the facts support it, but do not force every stage:",
-    "HOOK — lead with the most surprising verified amount, result, action, probability, or contradiction. Prefer a direct claim over scene-setting.",
-    "CHARACTER — make the trader, wallet, or group concrete. Use a supplied display name and verified credentials when available.",
-    "PROOF — weave in only the one or two facts that best prove the hook. Short standalone lines or → bullets are welcome only when several connected facts genuinely scan better than prose.",
-    "READ — explain the tension or pattern: conviction, concentration, hedging, disagreement, changed behavior, asymmetric payoff, or what the result says about the strategy. Clearly frame interpretation as analysis, not fact.",
-    "FINISH — end with a crisp punchline, contrast, question, or forward-looking tension. Do not end by merely repeating the market title or summarizing the data.",
-    "Use short natural paragraphs, clipped sentences where they add rhythm, and varied sentence length. Prefer specific nouns and active verbs. Omit facts that do not strengthen the story. One current position plus track-record facts is usually a compact three- or four-paragraph post, not a case study.",
+    "Run a story gate before writing. Find one genuinely notable angle: a fresh supported action, an extreme amount or result, a contradiction, a repeatable strategy, a market-versus-trader disagreement, meaningful follow-through, or a resolved receipt. If there is no defensible angle, return blocked instead of manufacturing hype.",
+    "Choose one format from the evidence; do not combine every format into one template:",
+    "SNAPSHOT PROFILE — one currently held position plus track record. Write two to four compact paragraphs, use at most three supporting facts, usually omit trading volume, and do not force a list.",
+    "LIVE ACTION — a new buy, add, trim, exit, or price move only when a supplied fact explicitly proves that change. Lead with the action and its timing.",
+    "CONNECTED BETS — two or more positions that reveal a contradiction or scenario. A short list may make the pattern visible before one plain-language interpretation.",
+    "STRATEGY OR RESULT — several repeated trades, a resolved win/loss, or a measurable process. Use a compact fact block only when the repeated numbers are the story.",
+    "HOOK — lead with the most surprising verified amount, result, action, probability, or contradiction. Prefer the achievement or event over an @handle; introduce the handle after the hook unless the identity itself is the story.",
+    "After the hook, include only facts that sharpen it. The post does not need an analysis paragraph, a declared tension, or a punchline. If the strongest facts already land, stop.",
+    "Use short natural paragraphs and clipped sentences where they add rhythm. Prefer specific nouns and active verbs. Omit facts that do not strengthen the story. Never pad a weak story into three or four explanatory paragraphs.",
     "Avoid generic openings such as 'Market update', 'Tracked wallets are moving', 'A signal appeared', or '[probability] is now [probability]' when a concrete trader, amount, or result is available.",
     "Use only supplied facts. Preserve side, proposition, scope, count, timeframe, and result. For amounts, prices, and PnL, use the supplied editorial display strings verbatim; never print raw database decimals or add precision.",
-    "A position snapshot proves a position, not when or how it was entered. Do not turn a snapshot into a fresh buy unless a supplied fact explicitly proves the change.",
+    "A position snapshot proves only that the position is currently held. It does not prove when, where, or how it was entered, or that the trader is still buying. Never turn holding into bought, added, loaded, dropped, entered, doubled down, or keeps paying unless a supplied fact explicitly proves that action.",
     "Do not claim insider access, coordination, private information, causation, certainty, an AI bot, or a cheat code.",
     "A light first-person editorial voice is allowed for a fact-grounded observation or opinion, such as 'I found', 'I am watching', or 'I think'. Never invent a personal trade, profit, prediction record, conversation, private source, or firsthand access.",
     "Do not expose wallet addresses, internal labels, evidence IDs, raw schema names, or analytics jargon.",
-    "Never announce your structure with labels such as 'Receipts:', 'The trader has receipts:', 'The credential stack is the story:', or 'My read:'. Make the observation directly.",
-    "Avoid investment-memo phrases such as 'credentialed fade', 'credibility check', 'base case', 'making the lean concrete', or 'worth respecting'. Use ordinary language a real market blogger would use.",
+    "Never announce your structure with labels such as 'Receipts:', 'The trader has receipts:', 'The credential stack is the story:', 'My read:', 'The cleaner stat:', or 'The actual tension here:'. Make the observation directly.",
+    "Avoid investment-memo and AI-editor phrases such as 'credentialed fade', 'credibility check', 'base case', 'making the lean concrete', 'worth respecting', 'the last 30 days are not quiet', or 'keep paying favorite prices'. Use ordinary language a real market blogger would use.",
     "Do not mechanically repeat 'The market already...' or 'This is X, not Y'. Vary the structure, transitions, and ending as well as the opening.",
     "Never assume an acronym or outcome label is self-explanatory. Pair it with the supplied event or market context.",
     "No Markdown markers inside postText, headings, pipe-delimited stat tables, URLs, links, hashtags, affiliate language, product CTA, or generic engagement bait.",
     "Select one to three exact, non-overlapping snippets for intentional Telegram/X formatting. Usually bold the hook or strongest result; use italic only for a genuinely useful interpretive line. Return those snippets in formatting and keep postText itself plain.",
     'Every formatting item must be exactly {"style":"bold"|"italic","text":"an exact substring of postText"}. The field name is text, never snippet.',
-    "Emoji and → bullets are optional. Use a topical emoji only when it improves scanning or tone; never force a fixed emoji template.",
+    "Emoji and → bullets are editorial tools, not decoration. Use zero or one topical emoji in a normal post; for sports or esports, prefer one natural context marker such as a flag, ⚽, or 🎮 when it improves scanning. Do not add generic 🚨 or 🔥 unless the facts establish real urgency.",
+    "Use → lines only for two to four parallel positions, outcomes, or results whose comparison is the story. Never create a list for one position or turn ordinary credentials into a recurring stats card.",
     "Vary the hook, structure, transitions, and ending against recentDraftsToAvoidImitating. Reuse the reference collection's editorial principles, never one author's exact wording or persona.",
     "These style-only examples show the target rhythm. Never reuse their people, markets, numbers, or claims unless they are present in the supplied facts:",
-    "STYLE EXAMPLE — compact conviction:\nA new wallet just put $1.6M on Spain to win the World Cup.\n\nOne position. No hedge.\n\nEither serious conviction or a very expensive fan bet.",
-    "STYLE EXAMPLE — apparent contradiction:\nOne trader is fading England tonight — and backing them to win the World Cup.\n\nThose bets describe a narrow path: stumble now, peak later.\n\nThat is not indecision. It is a tournament script.",
-    "STYLE EXAMPLE — repeatable strategy:\nThis weather trader has made $5,287 in 30 days.\n\n1,618 forecasts across four continents. The same small edge, repeated.\n\nBoring market. Serious consistency.",
+    "STYLE EXAMPLE — compact snapshot:\n$410K profit this month. And one trader is still holding $84K on the favorite.\n\nThe contract is already 82¢. The position is barely green.\n\nStrong record. Thin upside. Still holding.",
+    "STYLE EXAMPLE — connected positions:\nOne trader is fading the favorite in three different ways:\n\n⚽ Match winner — NO\n→ Two-goal margin — NO\n→ Tournament winner — YES\n\nThat is one very narrow script.",
+    "STYLE EXAMPLE — repeatable strategy:\nThis weather trader has made $5,287 in 30 days.\n\n→ 1,618 forecasts\n→ Four continents\n→ The same small edge, repeated\n\nBoring market. Serious consistency.",
     "Do not write phrases such as 'the important part is', 'tracked money', 'worth following', or 'market update'. Do not restate the research headline and description as two report-like paragraphs.",
     `Hard limit: ${input.maxCharacters} visible characters and ${input.maxParagraphs} paragraphs.`,
     "Return exactly one JSON object. Use status=blocked and postText=null if the facts do not support a coherent, safe post.",
@@ -472,6 +530,7 @@ function buildUserPrompt(input: {
     messageKind: input.source.kind,
     selectedSide: input.source.selectedSide,
     facts: input.source.facts,
+    editorialBrief: buildEditorialBrief(input.source),
     recentDraftsToAvoidImitating: compactRecentDrafts(
       input.source.recentOpenings,
     ),
@@ -584,6 +643,62 @@ function findUnsupportedNumericClaims(input: {
     .map((claim) => `unsupported_number:${claim.raw}`);
 }
 
+function collectFactStrings(value: unknown, output: string[]): void {
+  if (typeof value === "string") {
+    const cleaned = cleanText(value);
+    if (cleaned) output.push(cleaned);
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) collectFactStrings(item, output);
+    return;
+  }
+  if (value && typeof value === "object") {
+    for (const nested of Object.values(value)) {
+      collectFactStrings(nested, output);
+    }
+  }
+}
+
+function sourceFactText(input: {
+  factIds?: Set<string>;
+  source: XEditorialDraftSource;
+}): string {
+  const values: string[] = [];
+  for (const fact of input.source.facts) {
+    if (input.factIds && !input.factIds.has(fact.id)) continue;
+    collectFactStrings(fact.value, values);
+  }
+  return values.join("\n");
+}
+
+function findUnsupportedSemanticClaims(input: {
+  postText: string;
+  source: XEditorialDraftSource;
+}): string[] {
+  const issues: string[] = [];
+  if (
+    (input.source.kind === "initial" ||
+      input.source.kind === "research_update") &&
+    UNSUPPORTED_POSITION_ACTION_PATTERN.test(input.postText)
+  ) {
+    const actionEvidence = sourceFactText({
+      factIds: new Set(["research_copy", "research_update"]),
+      source: input.source,
+    });
+    if (!UNSUPPORTED_POSITION_ACTION_PATTERN.test(actionEvidence)) {
+      issues.push("unsupported_trade_action");
+    }
+  }
+  if (UNSUPPORTED_RECENCY_PATTERN.test(input.postText)) {
+    const timingEvidence = sourceFactText({ source: input.source });
+    if (!UNSUPPORTED_RECENCY_PATTERN.test(timingEvidence)) {
+      issues.push("unsupported_recency");
+    }
+  }
+  return issues;
+}
+
 function validateFormattingSpans(input: {
   formatting: XEditorialFormattingSpan[];
   postText: string;
@@ -658,6 +773,12 @@ export function validateXEditorialModelOutput(input: {
   issues.push(
     ...findUnsupportedNumericClaims({
       factIds: input.output.usedFactIds,
+      postText,
+      source: input.source,
+    }),
+  );
+  issues.push(
+    ...findUnsupportedSemanticClaims({
       postText,
       source: input.source,
     }),

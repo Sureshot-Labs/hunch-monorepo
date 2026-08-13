@@ -227,19 +227,25 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       const prompt = buildXEditorialDraftSystemPrompt(config);
       assert.match(prompt, /trader-story post/i);
       assert.match(prompt, /HOOK —/);
-      assert.match(prompt, /PROOF —/);
+      assert.match(prompt, /Run a story gate/i);
+      assert.match(prompt, /SNAPSHOT PROFILE —/);
+      assert.match(prompt, /LIVE ACTION —/);
+      assert.match(prompt, /does not need an analysis paragraph/i);
       assert.match(prompt, /punchline/i);
       assert.match(prompt, /light first-person editorial voice/i);
       assert.match(prompt, /Use only supplied facts/i);
       assert.match(prompt, /No Markdown/i);
       assert.match(prompt, /Telegram\/X formatting/i);
       assert.match(prompt, /field name is text, never snippet/i);
-      assert.match(prompt, /STYLE EXAMPLE — compact conviction/);
-      assert.match(prompt, /One position\. No hedge\./);
+      assert.match(prompt, /STYLE EXAMPLE — compact snapshot/);
+      assert.match(prompt, /Strong record\. Thin upside\. Still holding\./);
       assert.match(prompt, /Boring market\. Serious consistency\./);
       assert.match(prompt, /Never reuse their people, markets, numbers/i);
       assert.match(prompt, /editorial display strings verbatim/i);
       assert.match(prompt, /Never announce your structure/i);
+      assert.match(prompt, /zero or one topical emoji/i);
+      assert.match(prompt, /Never create a list for one position/i);
+      assert.match(prompt, /keeps paying/i);
       assert.match(prompt, /recentDraftsToAvoidImitating/i);
       assert.match(prompt, /1000 visible characters/i);
     },
@@ -402,6 +408,199 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         source: editorialSource,
       });
       assert.deepEqual(validated.issues, []);
+    },
+  },
+  {
+    name: "validator rejects the artificial NIP analysis and unsupported buying claim",
+    run: () => {
+      const nipSource: XEditorialDraftSource = {
+        facts: [
+          {
+            id: "market",
+            label: "Canonical market",
+            value: {
+              eventTitle: "Weibo Gaming vs Ninjas in Pyjamas",
+              selectedSideLabel: "NIP",
+            },
+          },
+          {
+            id: "actor",
+            label: "Publication-ready actor",
+            value: {
+              displayName: "@BBQChickenisthebesttt",
+              openPnl: "+$700",
+              position: "$15.7K",
+            },
+          },
+          {
+            id: "price",
+            label: "Publication-ready price",
+            value: { displayPrice: "81¢" },
+          },
+          {
+            id: "credentials",
+            label: "Public track record",
+            value: [
+              "Up $81.8K over the last 30 days",
+              "Beat market prices by 16 points across 26 resolved bets",
+              "Traded $274.5K over the last 30 days",
+            ],
+          },
+        ],
+        kind: "initial",
+        marketId: "nip-market",
+        noteId: "00000000-0000-4000-8000-000000000889",
+        selectedSide: "YES",
+      };
+      const postText =
+        "@BBQChickenisthebesttt is still sitting on $15.7K of NIP in Weibo Gaming vs Ninjas in Pyjamas.\n\nNIP is 81¢ now. The position is already showing +$700, and the holder’s last 30 days are not quiet: up $81.8K, with $274.5K traded.\n\nThe cleaner stat: they beat market prices by 16 points across 26 resolved bets.\n\nThat is the actual tension here: not whether NIP is favored, but whether this trader is right to keep paying favorite prices.";
+      const validated = validateXEditorialModelOutput({
+        config,
+        output: {
+          version: 1,
+          status: "ready",
+          marketId: "nip-market",
+          selectedSide: "YES",
+          postText,
+          formatting: [
+            {
+              style: "bold",
+              text: "@BBQChickenisthebesttt is still sitting on $15.7K of NIP in Weibo Gaming vs Ninjas in Pyjamas.",
+            },
+          ],
+          storyFamily: "trader_profile",
+          usedFactIds: ["market", "actor", "price", "credentials"],
+          safetyFlags: [],
+        },
+        source: nipSource,
+      });
+      assert.ok(validated.issues.includes("editorial_scaffolding"));
+      assert.ok(validated.issues.includes("analyst_jargon"));
+      assert.ok(validated.issues.includes("unsupported_trade_action"));
+    },
+  },
+  {
+    name: "validator accepts a clipped NIP profile with one topical emoji",
+    run: () => {
+      const nipSource: XEditorialDraftSource = {
+        facts: [
+          {
+            id: "market",
+            label: "Canonical market",
+            value: {
+              eventTitle: "Weibo Gaming vs Ninjas in Pyjamas",
+              selectedSideLabel: "NIP",
+            },
+          },
+          {
+            id: "actor",
+            label: "Publication-ready actor",
+            value: {
+              displayName: "@BBQChickenisthebesttt",
+              openPnl: "+$700",
+              position: "$15.7K",
+            },
+          },
+          {
+            id: "price",
+            label: "Publication-ready price",
+            value: { displayPrice: "81¢" },
+          },
+          {
+            id: "credentials",
+            label: "Public track record",
+            value: [
+              "Up $81.8K over the last 30 days",
+              "Beat market prices by 16 points across 26 resolved bets",
+            ],
+          },
+        ],
+        kind: "initial",
+        marketId: "nip-market",
+        noteId: "00000000-0000-4000-8000-000000000890",
+        selectedSide: "YES",
+      };
+      const postText =
+        "🎮 $81.8K profit in 30 days. And one trader is still holding $15.7K on Ninjas in Pyjamas against Weibo Gaming.\n\nNIP are already 81¢. The position is only +$700.\n\nAcross 26 resolved bets, @BBQChickenisthebesttt has beaten market prices by 16 points.\n\nStrong record. Thin upside. Still holding.";
+      const validated = validateXEditorialModelOutput({
+        config,
+        output: {
+          version: 1,
+          status: "ready",
+          marketId: "nip-market",
+          selectedSide: "YES",
+          postText,
+          formatting: [
+            {
+              style: "bold",
+              text: "🎮 $81.8K profit in 30 days. And one trader is still holding $15.7K on Ninjas in Pyjamas against Weibo Gaming.",
+            },
+            {
+              style: "italic",
+              text: "Strong record. Thin upside. Still holding.",
+            },
+          ],
+          storyFamily: "trader_profile",
+          usedFactIds: ["market", "actor", "price", "credentials"],
+          safetyFlags: [],
+        },
+        source: nipSource,
+      });
+      assert.deepEqual(validated.issues, []);
+    },
+  },
+  {
+    name: "validator requires explicit evidence for trade action and recency",
+    run: () => {
+      const snapshotText =
+        "One trader just bought $56.4K of Spain today. The position is still open.";
+      const unsupported = validateXEditorialModelOutput({
+        config,
+        output: {
+          version: 1,
+          status: "ready",
+          marketId: "market-1",
+          selectedSide: "YES",
+          postText: snapshotText,
+          formatting: [{ style: "bold", text: snapshotText }],
+          storyFamily: "fresh_bet",
+          usedFactIds: ["market", "actor"],
+          safetyFlags: [],
+        },
+        source,
+      });
+      assert.ok(unsupported.issues.includes("unsupported_trade_action"));
+      assert.ok(unsupported.issues.includes("unsupported_recency"));
+
+      const actionSource: XEditorialDraftSource = {
+        ...source,
+        facts: [
+          ...source.facts,
+          {
+            id: "research_update",
+            label: "Material change",
+            value: "The trader added $5K to the position today",
+          },
+        ],
+        kind: "research_update",
+      };
+      const actionText = "The trader added $5K to the position today.";
+      const supported = validateXEditorialModelOutput({
+        config,
+        output: {
+          version: 1,
+          status: "ready",
+          marketId: "market-1",
+          selectedSide: "YES",
+          postText: actionText,
+          formatting: [{ style: "bold", text: actionText }],
+          storyFamily: "fresh_bet",
+          usedFactIds: ["research_update"],
+          safetyFlags: [],
+        },
+        source: actionSource,
+      });
+      assert.deepEqual(supported.issues, []);
     },
   },
   {

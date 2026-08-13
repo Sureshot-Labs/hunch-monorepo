@@ -1,6 +1,6 @@
 # Backend Design: Human X Drafts in a Private Telegram Channel
 
-Status: V1 implemented; influencer-style prompt v7, publication-ready numeric facts, fail-visible previews, and link-free Telegram formatting added; live editorial QA remains
+Status: V1 implemented; story-gated influencer-style prompt v8, publication-ready numeric facts, fail-visible previews, and link-free Telegram formatting added; live editorial QA remains
 
 Scope: holder-research signal copy and Telegram delivery
 Decision: no database migration is required for the first production version
@@ -104,19 +104,21 @@ composition is:
    contradiction is stated immediately.
 2. **Character:** a specific trader or wallet becomes the protagonist, often
    with a credential, account age, prior result, or concentration detail.
-3. **Receipts:** two to five concrete positions or outcomes support the hook,
-   sometimes as compact `→` lines.
-4. **Editorial read:** the author explains conviction, hedging, disagreement,
-   strategy, risk, or the scenario implied by the positions.
-5. **Finish:** a short contrast, punchline, question, or forward-looking tension
-   gives the post a human ending.
+3. **Evidence:** only the facts that materially support the hook are retained.
+   Several parallel positions or results may use compact `→` lines.
+4. **Editorial read:** when the facts actually reveal conviction, hedging,
+   disagreement, strategy, or risk, the author states that implication plainly.
+5. **Finish:** some posts earn a short contrast, punchline, question, or
+   forward-looking tension; others stop as soon as the facts land.
 
 Not every post needs all five stages. The examples deliberately scale from a
 four-line observation to a longer case study. Thin facts should produce a
 short post; richer trader history can support more paragraphs. The recurring
 voice tools are clipped sentences, isolated lines, occasional topical emoji or
-ALL CAPS for contrast, and a final sentence with judgment. They are optional
-tools, not a fixed template.
+ALL CAPS for contrast, and sometimes a final sentence with judgment. They are
+optional tools, not a fixed template. A normal post uses zero or one topical
+emoji. A `→` block is reserved for two to four genuinely parallel positions or
+results; a single position must not be inflated into a list.
 
 The main negative lesson for the current implementation is equally important:
 the examples are not stat cards. Generic probability leads, label/value rows,
@@ -132,7 +134,7 @@ no evidence that proves access to non-public information.” The post must never
 upgrade correlation into knowledge, causation, or an accusation.
 
 Several examples also use first-person openings such as an author saying they
-found or are watching a wallet. Prompt v7 permits that limited editorial voice
+found or are watching a wallet. Prompt v8 permits that limited editorial voice
 because it materially contributes to the target style. Deterministic safety
 checks still reject invented personal bets, PnL, predictions, conversations,
 contacts, and private sources.
@@ -331,7 +333,7 @@ type XEditorialDraftV1 = {
   characterCount: number;
   generatedAt: string;
   model: string;
-  promptVersion: "x_editorial_prompt_v7";
+  promptVersion: "x_editorial_prompt_v8";
   sourceDigest: string;
 };
 ```
@@ -345,11 +347,14 @@ reading and copying the message. The model never emits transport markup.
 
 The prompt and deterministic validators must enforce all of the following:
 
-- choose one story and one point of tension;
+- run a storyworthiness gate and choose one defensible angle; return `blocked`
+  instead of manufacturing hype when no angle is supported;
 - scale the length to fact richness rather than forcing every post into the
   same five-paragraph shape;
-- use the hook -> character -> receipts -> editorial read -> finish arc when
-  supported, while omitting stages that would only add filler;
+- choose one format: compact snapshot profile, proved live action, connected
+  bets, strategy/result, follow-through, or resolution;
+- require a hook, but never require an analysis paragraph, declared tension,
+  or punchline when the strongest facts already land;
 - start from the strongest supported amount, result, action, or contradiction,
   not a generic market update or fixed template;
 - use natural English and short paragraphs;
@@ -357,6 +362,8 @@ The prompt and deterministic validators must enforce all of the following:
 - keep every amount, price, count, PnL, timeframe, and result consistent with
   the fact packet;
 - distinguish a position snapshot from a proved buy, add, exit, or entry time;
+  words such as `bought`, `adding`, `loaded`, `dropped`, `doubled down`, and
+  `paying favorite prices` require explicit action evidence;
 - distinguish market movement since signal from the trader's lifetime PnL;
 - describe public information only through validated verdict/timing/citations;
 - use verified track record only with its exact scope and horizon;
@@ -373,8 +380,11 @@ The prompt and deterministic validators must enforce all of the following:
 - no Markdown markers or URLs inside `postText`, Telegram section labels, proof
   tables, Buy/Open CTA, affiliate language, hashtags, or generic engagement
   bait;
-- allow compact `→` or plain-text list lines when they make several connected
-  receipts easier to scan; reject dashboard-style pipe tables;
+- use zero or one topical emoji in a normal post, preferring a natural sports
+  or esports marker when it improves scanning; never force decorative hype;
+- allow compact `→` or plain-text list lines only when two to four connected
+  positions or results are genuinely easier to compare; reject lists for one
+  position and dashboard-style pipe tables;
 - return one to three exact non-overlapping snippets for intentional bold or
   italic formatting in X; every item is exactly `{ style, text }`, the field is
   named `text` rather than `snippet`, and the whole post must not be bold;
@@ -479,7 +489,7 @@ Persisted metrics shape:
     "version": 1,
     "postText": "...",
     "formatting": [{ "style": "bold", "text": "..." }],
-    "promptVersion": "x_editorial_prompt_v7",
+    "promptVersion": "x_editorial_prompt_v8",
     "sourceDigest": "..."
   }
 }
