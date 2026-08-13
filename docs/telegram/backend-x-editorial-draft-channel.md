@@ -1,6 +1,6 @@
 # Backend Design: Human X Drafts in a Private Telegram Channel
 
-Status: V1 implemented; story-gated influencer-style prompt v8, publication-ready numeric facts, fail-visible previews, and link-free Telegram formatting added; live editorial QA remains
+Status: V1 implemented; story-gated influencer-style prompt v9, publication-ready numeric facts, fail-visible previews, and link-free Telegram formatting added; live editorial QA remains
 
 Scope: holder-research signal copy and Telegram delivery
 Decision: no database migration is required for the first production version
@@ -134,7 +134,7 @@ no evidence that proves access to non-public information.” The post must never
 upgrade correlation into knowledge, causation, or an accusation.
 
 Several examples also use first-person openings such as an author saying they
-found or are watching a wallet. Prompt v8 permits that limited editorial voice
+found or are watching a wallet. Prompt v9 permits that limited editorial voice
 because it materially contributes to the target style. Deterministic safety
 checks still reject invented personal bets, PnL, predictions, conversations,
 contacts, and private sources.
@@ -333,7 +333,7 @@ type XEditorialDraftV1 = {
   characterCount: number;
   generatedAt: string;
   model: string;
-  promptVersion: "x_editorial_prompt_v8";
+  promptVersion: "x_editorial_prompt_v9";
   sourceDigest: string;
 };
 ```
@@ -359,11 +359,14 @@ The prompt and deterministic validators must enforce all of the following:
   not a generic market update or fixed template;
 - use natural English and short paragraphs;
 - preserve the canonical proposition and selected side;
+- translate YES/NO mechanics into the supplied natural outcome instead of
+  writing constructions such as `holding the NO side — meaning ...`;
 - keep every amount, price, count, PnL, timeframe, and result consistent with
   the fact packet;
 - distinguish a position snapshot from a proved buy, add, exit, or entry time;
   words such as `bought`, `adding`, `loaded`, `dropped`, `doubled down`, and
-  `paying favorite prices` require explicit action evidence;
+  `paying favorite prices` require explicit action evidence; current price does
+  not support a `cheap entry` or `expensive entry` claim;
 - distinguish market movement since signal from the trader's lifetime PnL;
 - describe public information only through validated verdict/timing/citations;
 - use verified track record only with its exact scope and horizon;
@@ -380,8 +383,10 @@ The prompt and deterministic validators must enforce all of the following:
 - no Markdown markers or URLs inside `postText`, Telegram section labels, proof
   tables, Buy/Open CTA, affiliate language, hashtags, or generic engagement
   bait;
-- use zero or one topical emoji in a normal post, preferring a natural sports
-  or esports marker when it improves scanning; never force decorative hype;
+- use zero or one topical emoji in a normal post; sports/esports posts actively
+  consider a natural marker inside `postText`, and an esports post without one
+  is repaired when the recent drafts have not already used emoji; never rely on
+  the separate Telegram preview label or force decorative hype;
 - allow compact `→` or plain-text list lines only when two to four connected
   positions or results are genuinely easier to compare; reject lists for one
   position and dashboard-style pipe tables;
@@ -489,7 +494,7 @@ Persisted metrics shape:
     "version": 1,
     "postText": "...",
     "formatting": [{ "style": "bold", "text": "..." }],
-    "promptVersion": "x_editorial_prompt_v8",
+    "promptVersion": "x_editorial_prompt_v9",
     "sourceDigest": "..."
   }
 }
