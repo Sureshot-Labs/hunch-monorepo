@@ -1,6 +1,6 @@
 # Backend Design: Human X Drafts in a Private Telegram Channel
 
-Status: V1 implemented; influencer-style prompt v6, fail-visible previews, and link-free Telegram formatting added; live editorial QA remains
+Status: V1 implemented; influencer-style prompt v7, publication-ready numeric facts, fail-visible previews, and link-free Telegram formatting added; live editorial QA remains
 
 Scope: holder-research signal copy and Telegram delivery
 Decision: no database migration is required for the first production version
@@ -132,7 +132,7 @@ no evidence that proves access to non-public information.” The post must never
 upgrade correlation into knowledge, causation, or an accusation.
 
 Several examples also use first-person openings such as an author saying they
-found or are watching a wallet. Prompt v6 permits that limited editorial voice
+found or are watching a wallet. Prompt v7 permits that limited editorial voice
 because it materially contributes to the target style. Deterministic safety
 checks still reject invented personal bets, PnL, predictions, conversations,
 contacts, and private sources.
@@ -304,8 +304,8 @@ entire database row. Its input families are:
   follow-through candidate plus the computed `SignalBotFollowthroughStats`;
 - policy: language, character limit, supported message kinds, prompt version,
   and style guard settings;
-- recent editorial openings: a small set used only to discourage repetitive
-  hooks and phrasing.
+- recent editorial drafts: a bounded set used only to discourage repetitive
+  hooks, scaffolding, transitions, and endings.
 
 The model returns strict JSON, not free-form transport markup:
 
@@ -331,7 +331,7 @@ type XEditorialDraftV1 = {
   characterCount: number;
   generatedAt: string;
   model: string;
-  promptVersion: "x_editorial_prompt_v6";
+  promptVersion: "x_editorial_prompt_v7";
   sourceDigest: string;
 };
 ```
@@ -360,6 +360,11 @@ The prompt and deterministic validators must enforce all of the following:
 - distinguish market movement since signal from the trader's lifetime PnL;
 - describe public information only through validated verdict/timing/citations;
 - use verified track record only with its exact scope and horizon;
+- expose money, probability, and PnL to the composer as publication-ready
+  strings such as `$22.6K`, `64.5¢`, and `-$926`, never raw database values such
+  as `22612.756146` or `0.645`;
+- use one or two credentials that advance the story rather than mechanically
+  printing the whole credential list;
 - never claim “insider”, coordinated behavior, private knowledge, an AI bot, or
   causation without direct evidence;
 - allow first-person discovery or analysis such as “I found” or “I think” when
@@ -377,6 +382,9 @@ The prompt and deterministic validators must enforce all of the following:
 - do not repeat the same hook pattern across consecutive drafts;
 - do not imitate one referenced author. Reuse the editorial principles, not a
   recognisable person's exact phrasing or persona;
+- do not label sections with `Receipts`, `credential stack`, or `My read`, and
+  avoid investment-memo phrases such as `credentialed fade` and `credibility
+check`;
 - return `blocked` when a coherent post requires a fact that is not supplied.
 
 Human-like copy should come from story selection, rhythm, and judgment, not
@@ -392,7 +400,8 @@ The model is not the publication authority. Validate before Telegram send:
    parse without stripping any other unknown fields;
 2. non-empty, normalized text and configured character limit;
 3. no model-authored Markdown, URLs, hashtags, CTA, addresses, internal labels,
-   pipe tables, or banned claim patterns; plain list lines remain allowed;
+   raw database numeric formatting, templated editorial scaffolding, pipe
+   tables, or banned claim patterns; plain list lines remain allowed;
 4. all `usedFactIds` exist in the supplied packet;
 5. numeric tokens are traceable to facts declared in `usedFactIds`, including
    compact currency and probability representations such as `$56.4K` and
@@ -402,8 +411,8 @@ The model is not the publication authority. Validate before Telegram send:
 7. every bold/italic snippet occurs exactly once in `postText`, is single-line,
    and does not overlap another formatting span;
 8. initial/update/follow-through semantics match the actual message kind;
-9. recent successful openings are supplied to discourage repetition without
-   changing the persisted source digest.
+9. recent successful drafts are supplied to discourage structural repetition
+   without changing the persisted source digest.
 
 If parsing or validation fails, one constrained repair call is made inside the
 composer. A second schema/contract failure is classified as `schema_mismatch`,
@@ -470,7 +479,7 @@ Persisted metrics shape:
     "version": 1,
     "postText": "...",
     "formatting": [{ "style": "bold", "text": "..." }],
-    "promptVersion": "x_editorial_prompt_v6",
+    "promptVersion": "x_editorial_prompt_v7",
     "sourceDigest": "..."
   }
 }
@@ -664,7 +673,7 @@ Implemented deterministic tests cover:
 - `insider`, fabricated personal activity/source claims, raw addresses,
   model-authored Markdown, URLs, hashtags, and generic promotional CTA are
   rejected;
-- recent openings do not change the canonical source digest.
+- recent drafts do not change the canonical source digest.
 
 The existing signal-bot suite remains the regression layer for authorization,
 normal Telegram formatting, cursor behavior, channel disable behavior, update
