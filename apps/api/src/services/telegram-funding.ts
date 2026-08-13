@@ -1500,6 +1500,8 @@ export class TelegramFundingService {
   }): Promise<boolean> {
     return tx(this.pool, async (client) => {
       await lockTelegramFundingLinkLifecycle(client, input.link.userId);
+      // A sent QR may already have been hidden or deleted in Telegram. An
+      // explicit QR callback therefore re-arms the single durable outbox row.
       const queued = await client.query(
         `
           insert into telegram_bot_action_outbox (
@@ -1556,14 +1558,7 @@ export class TelegramFundingService {
           where (
             telegram_bot_action_outbox.status in ('retry', 'dead', 'skipped')
             and telegram_bot_action_outbox.telegram_message_id is null
-          ) or (
-            telegram_bot_action_outbox.status = 'sent'
-            and telegram_bot_action_outbox.telegram_message_id = (
-              select context.telegram_message_id
-              from telegram_funding_sessions context
-              where context.id = excluded.funding_session_id
-            )
-          )
+          ) or telegram_bot_action_outbox.status = 'sent'
           returning id
         `,
         [input.context.id, input.link.userId, input.link.linkId],

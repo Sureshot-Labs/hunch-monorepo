@@ -1,6 +1,7 @@
 #!/usr/bin/env tsx
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 
 import { stableWalletOpaqueId } from "./account-value/canonical.js";
 import { listFundingReceiveReceiptsForRouting } from "./funding/persistence/funding-receive-session-repository.js";
@@ -2678,6 +2679,18 @@ assert.equal(
   });
   assert.equal(handled, true);
   assert.equal(renders, 0);
+}
+
+{
+  const fundingServiceSource = readFileSync(
+    new URL("./services/telegram-funding.ts", import.meta.url),
+    "utf8",
+  );
+  assert.match(
+    fundingServiceSource,
+    /or telegram_bot_action_outbox\.status = 'sent'\s+returning id/u,
+    "an explicit QR callback must re-arm a previously delivered photo after Hide",
+  );
 }
 
 {
