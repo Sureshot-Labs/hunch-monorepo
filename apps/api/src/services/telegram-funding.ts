@@ -4,6 +4,7 @@ import {
   normalizeUnsignedDecimal,
   parseUnsignedDecimal,
 } from "../account-value/decimal.js";
+import { stableWalletOpaqueId } from "../account-value/canonical.js";
 import type {
   FundingDestinationOption,
   FundingReceiveSession,
@@ -134,7 +135,31 @@ export type TelegramFundingManagedWalletResolver = (
     telegramAccountId: string;
     telegramUserId: string;
   }>,
-) => Promise<Readonly<{ controllerWalletId: string }> | null>;
+) => Promise<Readonly<{
+  controllerWalletId: string;
+  walletAddress: string;
+}> | null>;
+
+function telegramFundingControllerWalletId(
+  managedWallet: Readonly<{ walletAddress: string }>,
+  networkId: string,
+): string | null {
+  return networkId === "evm:137" || networkId === "evm:8453"
+    ? stableWalletOpaqueId({
+        walletType: "ethereum",
+        networkId,
+        address: managedWallet.walletAddress,
+      })
+    : null;
+}
+
+function telegramFundingVenueNetworkId(venueId: string): string | null {
+  return venueId === "polymarket"
+    ? "evm:137"
+    : venueId === "limitless"
+      ? "evm:8453"
+      : null;
+}
 
 export type TelegramFundingBuyReturnSourceIntent = Readonly<{
   action: string;
@@ -589,7 +614,10 @@ export class TelegramFundingService {
   private async managedWallet(
     link: ActiveTelegramAccountLink,
     telegramUserId: string,
-  ): Promise<Readonly<{ controllerWalletId: string }> | null> {
+  ): Promise<Readonly<{
+    controllerWalletId: string;
+    walletAddress: string;
+  }> | null> {
     if (!this.resolveManagedWallet) return null;
     return this.resolveManagedWallet({
       userId: link.userId,
@@ -794,8 +822,14 @@ export class TelegramFundingService {
       input.link,
       input.telegramUserId,
     );
+    const currentControllerWalletId = managedWallet
+      ? telegramFundingControllerWalletId(
+          managedWallet,
+          input.session.destinationAsset.networkId,
+        )
+      : null;
     return resolveTelegramFundingCurrentController({
-      currentControllerWalletId: managedWallet?.controllerWalletId ?? null,
+      currentControllerWalletId,
       frozenControllerWalletId,
       session: input.session,
     });
@@ -983,11 +1017,19 @@ export class TelegramFundingService {
     if (this.resolveManagedWallet && !managedWallet) {
       throw new TelegramFundingError("destination_ambiguous");
     }
+    const requestedNetworkId = telegramFundingVenueNetworkId(input.venue);
+    const controllerWalletId =
+      managedWallet && requestedNetworkId
+        ? telegramFundingControllerWalletId(managedWallet, requestedNetworkId)
+        : null;
+    if (this.resolveManagedWallet && !controllerWalletId) {
+      throw new TelegramFundingError("destination_ambiguous");
+    }
     let destination = this.resolveManagedWallet
       ? await this.resolveReceiveDestination(
           initialLink.userId,
           input.venue,
-          managedWallet?.controllerWalletId ?? null,
+          controllerWalletId,
         )
       : null;
     let active: TelegramFundingSessionContext | null;
@@ -999,7 +1041,7 @@ export class TelegramFundingService {
         chatId: identity.chatId,
         telegramMessageId: input.telegramMessageId,
         venueId: input.venue,
-        controllerWalletId: managedWallet?.controllerWalletId,
+        controllerWalletId: controllerWalletId ?? undefined,
         venueBindingOptionId: destination?.venueBindingOptionId,
         idempotencyKey,
         requestFingerprint,
@@ -1020,7 +1062,7 @@ export class TelegramFundingService {
     destination ??= await this.resolveReceiveDestination(
       initialLink.userId,
       input.venue,
-      managedWallet?.controllerWalletId ?? null,
+      controllerWalletId,
     );
     await this.provisionFundingAuthorization({
       destination: { ...destination, venueId: input.venue },
@@ -1032,7 +1074,7 @@ export class TelegramFundingService {
       initialLink,
       identity,
       destination,
-      controllerWalletId: managedWallet?.controllerWalletId ?? null,
+      controllerWalletId,
       telegramMessageId: input.telegramMessageId,
       contextIdempotencyKey: idempotencyKey,
       now,
