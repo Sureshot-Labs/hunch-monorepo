@@ -129,7 +129,7 @@ export type TelegramBotTradingInternalApiClient = {
     telegramMiniAppEnabled?: boolean;
     telegramMessageId: number | null;
     telegramUserId: string | number;
-    venue: "polymarket";
+    venue: "limitless" | "polymarket";
   }) => Promise<TelegramFundingClientMessage>;
   getFundingSession: (input: {
     chatId: string | number;

@@ -59,6 +59,15 @@ function fundingMoneyLabel(money: Money): string {
   }`;
 }
 
+function fundingTargetChoiceToken(input: {
+  automaticConversion: boolean;
+  routeKey: string;
+}): string {
+  if (input.routeKey === "polymarket_base_usdc_relay_v1") return "b";
+  if (input.routeKey === "limitless_base_usdc_direct_v1") return "l";
+  return input.automaticConversion ? "a" : "d";
+}
+
 export function buildTelegramFundingReviewQuoteMessage(input: {
   contextId: string;
   quote: FundingQuoteSummary;
@@ -172,7 +181,10 @@ export function buildTelegramFundingTargetMessage(input: {
         [
           {
             callback_data: telegramFundingCallbackData({
-              choiceToken: input.automaticConversion ? "a" : "d",
+              choiceToken: fundingTargetChoiceToken({
+                automaticConversion: input.automaticConversion,
+                routeKey: input.presentation.routeKey,
+              }),
               contextId: input.contextId,
               kind: "select",
             }),
@@ -244,12 +256,10 @@ export function buildTelegramFundingTargetChoicesMessage(input: {
         ...targets.map((target) => [
           {
             callback_data: telegramFundingCallbackData({
-              choiceToken:
-                target.presentation.routeKey === "polymarket_base_usdc_relay_v1"
-                  ? "b"
-                  : target.automaticSourceAsset
-                    ? "a"
-                    : "d",
+              choiceToken: fundingTargetChoiceToken({
+                automaticConversion: target.automaticSourceAsset !== null,
+                routeKey: target.presentation.routeKey,
+              }),
               contextId: input.contextId,
               kind: "select",
             }),
@@ -385,7 +395,15 @@ export async function buildTelegramFundingQrPhoto(
 function fundingProgressReplyMarkup(
   projection: TelegramFundingProgressProjection,
 ): TelegramFundingMessage["reply_markup"] {
-  if (projection.terminal) return undefined;
+  const homeRow = [
+    {
+      callback_data: "hm:v1:home",
+      text: "🏠 Home",
+    },
+  ];
+  if (projection.terminal) {
+    return { inline_keyboard: [homeRow] };
+  }
   if (projection.reviewContinuation && projection.reviewReceiptId) {
     return {
       inline_keyboard: [
@@ -407,6 +425,7 @@ function fundingProgressReplyMarkup(
             text: "Not now",
           },
         ],
+        homeRow,
       ],
     };
   }
@@ -447,8 +466,90 @@ function fundingProgressReplyMarkup(
           text: "Cancel",
         },
       ],
+      homeRow,
     ],
   };
+}
+
+function fundingReceiptBreakdownLines(
+  projection: TelegramFundingProgressProjection,
+): string[] {
+  const breakdown = projection.receiptBreakdown;
+  if (!breakdown) return [];
+  const sourceAmount = (raw: string) =>
+    `${formatRawAmount(raw, breakdown.sourceDecimals)} ${breakdown.sourceAssetSymbol}`;
+  const destinationAmount = (raw: string) =>
+    `${formatRawAmount(raw, breakdown.destinationDecimals)} ${breakdown.destinationAssetSymbol}`;
+  const aggregateLines = [
+    formatTelegramFieldMarkdownV2(
+      "Total received",
+      sourceAmount(breakdown.totalSourceRaw),
+    ),
+    ...(breakdown.readyDestinationRaw !== "0"
+      ? [
+          formatTelegramFieldMarkdownV2(
+            "Ready",
+            destinationAmount(breakdown.readyDestinationRaw),
+          ),
+        ]
+      : []),
+    ...(breakdown.convertingSourceRaw !== "0"
+      ? [
+          formatTelegramFieldMarkdownV2(
+            "Converting",
+            sourceAmount(breakdown.convertingSourceRaw),
+          ),
+        ]
+      : []),
+    ...(breakdown.queuedSourceRaw !== "0"
+      ? [
+          formatTelegramFieldMarkdownV2(
+            "Queued",
+            sourceAmount(breakdown.queuedSourceRaw),
+          ),
+        ]
+      : []),
+    ...(breakdown.attentionSourceRaw !== "0"
+      ? [
+          formatTelegramFieldMarkdownV2(
+            "Needs attention",
+            sourceAmount(breakdown.attentionSourceRaw),
+          ),
+        ]
+      : []),
+    formatTelegramFieldMarkdownV2(
+      "Transfers",
+      String(breakdown.sourceReceiptCount),
+    ),
+  ];
+  const stateLabels: Record<
+    (typeof breakdown.transfers)[number]["state"],
+    string
+  > = {
+    queued: "Queued",
+    converting: "Converting",
+    ready: "Ready",
+    needs_attention: "Needs attention",
+  };
+  const transferLines = breakdown.transfers.map((transfer, index) =>
+    formatTelegramFieldMarkdownV2(
+      `Transfer ${index + 1}`,
+      `${sourceAmount(transfer.rawAmount)} — ${stateLabels[transfer.state]}`,
+    ),
+  );
+  return [
+    "",
+    formatTelegramBoldMarkdownV2("Transfer summary"),
+    ...aggregateLines,
+    ...transferLines,
+    ...(breakdown.hiddenTransferCount > 0
+      ? [
+          escapeTelegramMarkdownV2(
+            `+ ${breakdown.hiddenTransferCount} more transfers`,
+          ),
+        ]
+      : []),
+  ];
 }
 
 function buildTelegramFundingProgressMessageInternal(
@@ -495,15 +596,9 @@ function buildTelegramFundingProgressMessageInternal(
     ready: {
       icon: "✅",
       title: `${destinationAsset} ready`,
-      body:
-        projection.sourceAssetSymbol && projection.sourceRawAmount
-          ? `${formatRawAmount(
-              projection.sourceRawAmount,
-              presentation.decimals,
-            )} ${projection.sourceAssetSymbol} was converted to ${amount ?? destinationAsset} and is now available at ${presentation.venueLabel}.`
-          : amount
-            ? `${amount} is now available at ${presentation.venueLabel}.`
-            : `The received ${destinationAsset} is now available at ${presentation.venueLabel}.`,
+      body: amount
+        ? `${amount} is now available at ${presentation.venueLabel}.`
+        : `The received ${destinationAsset} is now available at ${presentation.venueLabel}.`,
     },
     expired: {
       icon: "⌛",
@@ -546,6 +641,7 @@ function buildTelegramFundingProgressMessageInternal(
         icon: copy.icon,
         title: copy.title,
       }),
+      ...fundingReceiptBreakdownLines(projection),
       ...(projection.receiveAddress
         ? [
             "",

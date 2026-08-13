@@ -217,6 +217,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     name: "Telegram Receive success and non-disabled failures never use legacy deposit",
     run: async () => {
       let fallbackCalls = 0;
+      let openedVenue = "";
       let openResult: "success" | "ambiguous" | "private" | "unexpected" =
         "success";
       const app = Fastify({ logger: false });
@@ -231,7 +232,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           db: { query: async () => ({ fields: [], rows: [] }) } as never,
           fundingService: {
             cancel: async () => ({ text: "cancel" }),
-            open: async () => {
+            open: async (input) => {
+              openedVenue = input.venue;
               if (openResult === "ambiguous") {
                 throw new TelegramFundingError("destination_ambiguous");
               }
@@ -266,6 +268,22 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         const success = await request();
         assert.equal(success.statusCode, 200);
         assert.equal(success.json().text, "current funding progress");
+        assert.equal(openedVenue, "polymarket");
+
+        const limitlessSuccess = await app.inject({
+          method: "POST",
+          payload: {
+            appBaseUrl: "https://app.hunch.trade",
+            chatId: 20,
+            idempotencyKey: "funding:callback:limitless",
+            telegramMessageId: 42,
+            telegramUserId: 20,
+            venue: "limitless",
+          },
+          url: "/internal/telegram-bot/funding/open",
+        });
+        assert.equal(limitlessSuccess.statusCode, 200);
+        assert.equal(openedVenue, "limitless");
 
         openResult = "ambiguous";
         const ambiguous = await request();
@@ -291,16 +309,16 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
-    name: "Deposit menu hides future venues and explicit legacy routes fail closed",
+    name: "Deposit menu exposes direct Polymarket and Limitless receive venues",
     run: async () => {
       const menu = await buildTelegramDepositMessage({
         dependencies: { allowedVenues: ["polymarket", "limitless"] },
         pool: authorizationDb(null),
       });
       assert.match(menu.text, /Polymarket[\s\S]*Polygon/);
-      assert.doesNotMatch(menu.text, /Limitless|Base/);
+      assert.match(menu.text, /Limitless[\s\S]*Base/);
       assert.match(menu.text, new RegExp(TELEGRAM_CUSTOM_EMOJI.usdc.id));
-      assert.doesNotMatch(JSON.stringify(menu.reply_markup), /limitless/);
+      assert.match(JSON.stringify(menu.reply_markup), /deposit:limitless/);
       const venueButtons = menu.reply_markup?.inline_keyboard.flat() ?? [];
       assert.equal(
         venueButtons.find((button) => button.text === "Polymarket")
@@ -396,21 +414,19 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
-    name: "future venue QR callback fails closed before legacy loading",
+    name: "Limitless callback opens the durable funding flow",
     run: async () => {
       let renderCalls = 0;
-      let loadCalls = 0;
+      let fundingCalls = 0;
+      let requestedVenue = "";
       let renderedText = "";
       await handleSignalBotInteractiveMenuCallback({
         callbackPrefix: "hm:v1:",
         chatId: "20",
-        loadDeposit: async () => {
-          loadCalls += 1;
-          return {
-            qrText: deposit,
-            text: "Generic deposit",
-            venue: "limitless",
-          };
+        loadFunding: async (input) => {
+          fundingCalls += 1;
+          requestedVenue = input.venue ?? "";
+          return { text: "Choose USDC on Base" };
         },
         messageId: 42,
         redis: { get: async () => null },
@@ -422,10 +438,11 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         route: { kind: "deposit", showQr: true, venue: "limitless" },
         telegramUserId: 20,
       });
-      assert.equal(loadCalls, 0);
+      assert.equal(await drainSignalBotFundingOpenTasks(1_000), true);
+      assert.equal(fundingCalls, 1);
+      assert.equal(requestedVenue, "limitless");
       assert.equal(renderCalls, 1);
-      assert.match(renderedText, /Receive unavailable/);
-      assert.doesNotMatch(renderedText, new RegExp(deposit, "i"));
+      assert.match(renderedText, /Choose USDC on Base/);
     },
   },
 ];

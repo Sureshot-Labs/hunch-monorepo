@@ -226,7 +226,7 @@ const internalFundingOpenBodySchema = internalFundingMutationSchema
   .extend({
     appBaseUrl: z.string().trim().url(),
     telegramMiniAppEnabled: z.boolean().optional(),
-    venue: z.literal("polymarket"),
+    venue: z.enum(["limitless", "polymarket"]),
   })
   .strict();
 
