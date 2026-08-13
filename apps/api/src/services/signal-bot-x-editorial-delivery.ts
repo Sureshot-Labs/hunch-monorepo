@@ -205,9 +205,9 @@ function buildInitialSource(input: {
     subject: identity?.subject ?? note.eventTitle ?? note.marketTitle,
     venue: identity?.venue ?? note.marketVenue,
   });
-  addFact("price", "Selected-side signal price", {
-    asOf: price?.asOf ?? null,
-    displayPrice: price?.displayPrice ?? null,
+  addFact("price", "Publication-ready selected-side price", {
+    displayPrice:
+      price?.displayPrice == null ? null : formatCents(price.displayPrice),
     displaySide: price?.displaySide ?? null,
   });
   addFact("research_copy", "Quality-gated research thesis", {
@@ -215,19 +215,32 @@ function buildInitialSource(input: {
     headline: note.title,
     rationale: note.rationale,
   });
-  addFact("actor", "Tracked trader or group", {
+  addFact("actor", "Publication-ready trader or group facts", {
     actorMode: note.holderActorMode,
-    clusterOpenPnlUsd: note.holderClusterOpenPnlUsd,
-    clusterPnl30dUsd: note.holderClusterPnl30dUsd,
+    clusterOpenPnl:
+      note.holderClusterOpenPnlUsd == null
+        ? null
+        : formatUsd(note.holderClusterOpenPnlUsd, { signed: true }),
+    clusterPnl30d:
+      note.holderClusterPnl30dUsd == null
+        ? null
+        : formatUsd(note.holderClusterPnl30dUsd, { signed: true }),
     clusterSharpHolders: note.holderClusterSharpHolders,
-    clusterSharpUsd: note.holderClusterSharpUsd,
+    clusterPosition:
+      note.holderClusterSharpUsd == null
+        ? null
+        : formatUsd(note.holderClusterSharpUsd),
     displayName:
       note.holderIdentityDisplayName ?? note.holderDisplayName ?? null,
-    openPnlUsd: note.holderOpenPnlUsd,
+    openPnl:
+      note.holderOpenPnlUsd == null
+        ? null
+        : formatUsd(note.holderOpenPnlUsd, { signed: true }),
     positionSide: note.holderSide,
-    positionUsd: note.holderPositionUsd,
+    position:
+      note.holderPositionUsd == null ? null : formatUsd(note.holderPositionUsd),
   });
-  addFact("credentials", "Verified actor credentials", [
+  addFact("credentials", "Use only the strongest public track-record facts", [
     ...note.holderCredentialBullets,
   ]);
   if (input.kind === "research_update") {
@@ -463,7 +476,18 @@ function formatUsd(value: number, options?: { signed?: boolean }): string {
 }
 
 function formatCents(value: number): string {
-  return `${Math.round(value * 100)}¢`;
+  const cents = Math.round(value * 1_000) / 10;
+  return `${cents.toFixed(1).replace(/\.0$/, "")}¢`;
+}
+
+function parseEditorialPrice(value: unknown): number | null {
+  const number = finiteNumber(value);
+  if (number != null) return number;
+  const text = asTrimmedString(value);
+  const cents = text?.match(/^([0-9]+(?:\.[0-9]+)?)¢$/)?.[1];
+  if (!cents) return null;
+  const parsed = Number(cents) / 100;
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 function factValue(source: XEditorialDraftSource, id: string): unknown | null {
@@ -564,9 +588,14 @@ export function buildXEditorialFallbackPost(input: {
     const holders = nonNegativeInteger(actor.clusterSharpHolders);
     const displayName = asTrimmedString(actor.displayName);
     const pluralActor = actor.actorMode === "sharp_cluster" || holders > 1;
-    const positionUsd = finiteNumber(
-      pluralActor ? actor.clusterSharpUsd : actor.positionUsd,
-    );
+    const positionText =
+      asTrimmedString(pluralActor ? actor.clusterPosition : actor.position) ??
+      (() => {
+        const legacy = finiteNumber(
+          pluralActor ? actor.clusterSharpUsd : actor.positionUsd,
+        );
+        return legacy == null ? null : formatUsd(legacy);
+      })();
     const positionPhrase = fallbackPositionPhrase({
       market,
       selectedSide: input.source.selectedSide,
@@ -579,17 +608,17 @@ export function buildXEditorialFallbackPost(input: {
           ? "A group of traders"
           : "One trader";
     opening = sentence(
-      positionUsd != null && Math.abs(positionUsd) >= 1
-        ? `${protagonist} ${pluralActor ? "have" : "has"} ${formatUsd(positionUsd)} ${positionPhrase}`
+      positionText
+        ? `${protagonist} ${pluralActor ? "have" : "has"} ${positionText} ${positionPhrase}`
         : `${protagonist} ${pluralActor ? "are" : "is"} ${positionPhrase}`,
     );
     paragraphs.push(opening);
     usedFactIds.push("actor");
 
-    const displayPrice = finiteNumber(price.displayPrice);
+    const displayPrice = parseEditorialPrice(price.displayPrice);
     if (displayPrice != null) {
       paragraphs.push(
-        `That outcome is priced at ${formatCents(displayPrice)}.`,
+        `That outcome is priced at ${asTrimmedString(price.displayPrice) ?? formatCents(displayPrice)}.`,
       );
       usedFactIds.push("price");
     }
@@ -600,12 +629,20 @@ export function buildXEditorialFallbackPost(input: {
       usedFactIds.push("credentials");
     }
 
-    const openPnl = finiteNumber(
+    const openPnlText = asTrimmedString(
+      pluralActor ? actor.clusterOpenPnl : actor.openPnl,
+    );
+    const legacyOpenPnl = finiteNumber(
       pluralActor ? actor.clusterOpenPnlUsd : actor.openPnlUsd,
     );
-    if (openPnl != null && Math.abs(openPnl) >= 1) {
+    if (
+      openPnlText ||
+      (legacyOpenPnl != null && Math.abs(legacyOpenPnl) >= 1)
+    ) {
+      const signedPnl =
+        openPnlText ?? formatUsd(legacyOpenPnl ?? 0, { signed: true });
       paragraphs.push(
-        `The position is ${openPnl >= 0 ? "up" : "down"} ${formatUsd(Math.abs(openPnl))} so far.`,
+        `The position is ${signedPnl.startsWith("-") ? "down" : "up"} ${signedPnl.replace(/^[+-]/, "")} so far.`,
       );
     }
 

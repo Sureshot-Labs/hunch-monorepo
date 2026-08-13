@@ -1,6 +1,6 @@
 # Backend Design: Human X Drafts in a Private Telegram Channel
 
-Status: V1 implemented; influencer-style prompt v6, fail-visible previews, and link-free Telegram formatting added; live editorial QA remains
+Status: V1 implemented; story-gated influencer-style prompt v9, publication-ready numeric facts, fail-visible previews, and link-free Telegram formatting added; live editorial QA remains
 
 Scope: holder-research signal copy and Telegram delivery
 Decision: no database migration is required for the first production version
@@ -104,19 +104,21 @@ composition is:
    contradiction is stated immediately.
 2. **Character:** a specific trader or wallet becomes the protagonist, often
    with a credential, account age, prior result, or concentration detail.
-3. **Receipts:** two to five concrete positions or outcomes support the hook,
-   sometimes as compact `→` lines.
-4. **Editorial read:** the author explains conviction, hedging, disagreement,
-   strategy, risk, or the scenario implied by the positions.
-5. **Finish:** a short contrast, punchline, question, or forward-looking tension
-   gives the post a human ending.
+3. **Evidence:** only the facts that materially support the hook are retained.
+   Several parallel positions or results may use compact `→` lines.
+4. **Editorial read:** when the facts actually reveal conviction, hedging,
+   disagreement, strategy, or risk, the author states that implication plainly.
+5. **Finish:** some posts earn a short contrast, punchline, question, or
+   forward-looking tension; others stop as soon as the facts land.
 
 Not every post needs all five stages. The examples deliberately scale from a
 four-line observation to a longer case study. Thin facts should produce a
 short post; richer trader history can support more paragraphs. The recurring
 voice tools are clipped sentences, isolated lines, occasional topical emoji or
-ALL CAPS for contrast, and a final sentence with judgment. They are optional
-tools, not a fixed template.
+ALL CAPS for contrast, and sometimes a final sentence with judgment. They are
+optional tools, not a fixed template. A normal post uses zero or one topical
+emoji. A `→` block is reserved for two to four genuinely parallel positions or
+results; a single position must not be inflated into a list.
 
 The main negative lesson for the current implementation is equally important:
 the examples are not stat cards. Generic probability leads, label/value rows,
@@ -132,7 +134,7 @@ no evidence that proves access to non-public information.” The post must never
 upgrade correlation into knowledge, causation, or an accusation.
 
 Several examples also use first-person openings such as an author saying they
-found or are watching a wallet. Prompt v6 permits that limited editorial voice
+found or are watching a wallet. Prompt v9 permits that limited editorial voice
 because it materially contributes to the target style. Deterministic safety
 checks still reject invented personal bets, PnL, predictions, conversations,
 contacts, and private sources.
@@ -304,8 +306,8 @@ entire database row. Its input families are:
   follow-through candidate plus the computed `SignalBotFollowthroughStats`;
 - policy: language, character limit, supported message kinds, prompt version,
   and style guard settings;
-- recent editorial openings: a small set used only to discourage repetitive
-  hooks and phrasing.
+- recent editorial drafts: a bounded set used only to discourage repetitive
+  hooks, scaffolding, transitions, and endings.
 
 The model returns strict JSON, not free-form transport markup:
 
@@ -331,7 +333,7 @@ type XEditorialDraftV1 = {
   characterCount: number;
   generatedAt: string;
   model: string;
-  promptVersion: "x_editorial_prompt_v6";
+  promptVersion: "x_editorial_prompt_v9";
   sourceDigest: string;
 };
 ```
@@ -345,21 +347,34 @@ reading and copying the message. The model never emits transport markup.
 
 The prompt and deterministic validators must enforce all of the following:
 
-- choose one story and one point of tension;
+- run a storyworthiness gate and choose one defensible angle; return `blocked`
+  instead of manufacturing hype when no angle is supported;
 - scale the length to fact richness rather than forcing every post into the
   same five-paragraph shape;
-- use the hook -> character -> receipts -> editorial read -> finish arc when
-  supported, while omitting stages that would only add filler;
+- choose one format: compact snapshot profile, proved live action, connected
+  bets, strategy/result, follow-through, or resolution;
+- require a hook, but never require an analysis paragraph, declared tension,
+  or punchline when the strongest facts already land;
 - start from the strongest supported amount, result, action, or contradiction,
   not a generic market update or fixed template;
 - use natural English and short paragraphs;
 - preserve the canonical proposition and selected side;
+- translate YES/NO mechanics into the supplied natural outcome instead of
+  writing constructions such as `holding the NO side — meaning ...`;
 - keep every amount, price, count, PnL, timeframe, and result consistent with
   the fact packet;
 - distinguish a position snapshot from a proved buy, add, exit, or entry time;
+  words such as `bought`, `adding`, `loaded`, `dropped`, `doubled down`, and
+  `paying favorite prices` require explicit action evidence; current price does
+  not support a `cheap entry` or `expensive entry` claim;
 - distinguish market movement since signal from the trader's lifetime PnL;
 - describe public information only through validated verdict/timing/citations;
 - use verified track record only with its exact scope and horizon;
+- expose money, probability, and PnL to the composer as publication-ready
+  strings such as `$22.6K`, `64.5¢`, and `-$926`, never raw database values such
+  as `22612.756146` or `0.645`;
+- use one or two credentials that advance the story rather than mechanically
+  printing the whole credential list;
 - never claim “insider”, coordinated behavior, private knowledge, an AI bot, or
   causation without direct evidence;
 - allow first-person discovery or analysis such as “I found” or “I think” when
@@ -368,8 +383,13 @@ The prompt and deterministic validators must enforce all of the following:
 - no Markdown markers or URLs inside `postText`, Telegram section labels, proof
   tables, Buy/Open CTA, affiliate language, hashtags, or generic engagement
   bait;
-- allow compact `→` or plain-text list lines when they make several connected
-  receipts easier to scan; reject dashboard-style pipe tables;
+- use zero or one topical emoji in a normal post; sports/esports posts actively
+  consider a natural marker inside `postText`, and an esports post without one
+  is repaired when the recent drafts have not already used emoji; never rely on
+  the separate Telegram preview label or force decorative hype;
+- allow compact `→` or plain-text list lines only when two to four connected
+  positions or results are genuinely easier to compare; reject lists for one
+  position and dashboard-style pipe tables;
 - return one to three exact non-overlapping snippets for intentional bold or
   italic formatting in X; every item is exactly `{ style, text }`, the field is
   named `text` rather than `snippet`, and the whole post must not be bold;
@@ -377,6 +397,9 @@ The prompt and deterministic validators must enforce all of the following:
 - do not repeat the same hook pattern across consecutive drafts;
 - do not imitate one referenced author. Reuse the editorial principles, not a
   recognisable person's exact phrasing or persona;
+- do not label sections with `Receipts`, `credential stack`, or `My read`, and
+  avoid investment-memo phrases such as `credentialed fade` and `credibility
+check`;
 - return `blocked` when a coherent post requires a fact that is not supplied.
 
 Human-like copy should come from story selection, rhythm, and judgment, not
@@ -392,7 +415,8 @@ The model is not the publication authority. Validate before Telegram send:
    parse without stripping any other unknown fields;
 2. non-empty, normalized text and configured character limit;
 3. no model-authored Markdown, URLs, hashtags, CTA, addresses, internal labels,
-   pipe tables, or banned claim patterns; plain list lines remain allowed;
+   raw database numeric formatting, templated editorial scaffolding, pipe
+   tables, or banned claim patterns; plain list lines remain allowed;
 4. all `usedFactIds` exist in the supplied packet;
 5. numeric tokens are traceable to facts declared in `usedFactIds`, including
    compact currency and probability representations such as `$56.4K` and
@@ -402,8 +426,8 @@ The model is not the publication authority. Validate before Telegram send:
 7. every bold/italic snippet occurs exactly once in `postText`, is single-line,
    and does not overlap another formatting span;
 8. initial/update/follow-through semantics match the actual message kind;
-9. recent successful openings are supplied to discourage repetition without
-   changing the persisted source digest.
+9. recent successful drafts are supplied to discourage structural repetition
+   without changing the persisted source digest.
 
 If parsing or validation fails, one constrained repair call is made inside the
 composer. A second schema/contract failure is classified as `schema_mismatch`,
@@ -470,7 +494,7 @@ Persisted metrics shape:
     "version": 1,
     "postText": "...",
     "formatting": [{ "style": "bold", "text": "..." }],
-    "promptVersion": "x_editorial_prompt_v6",
+    "promptVersion": "x_editorial_prompt_v9",
     "sourceDigest": "..."
   }
 }
@@ -664,7 +688,7 @@ Implemented deterministic tests cover:
 - `insider`, fabricated personal activity/source claims, raw addresses,
   model-authored Markdown, URLs, hashtags, and generic promotional CTA are
   rejected;
-- recent openings do not change the canonical source digest.
+- recent drafts do not change the canonical source digest.
 
 The existing signal-bot suite remains the regression layer for authorization,
 normal Telegram formatting, cursor behavior, channel disable behavior, update
