@@ -69,17 +69,18 @@ async function resolveDepositVenues(input: {
   dependencies?: TelegramDepositResolverDependencies;
 }): Promise<TelegramDepositVenue[]> {
   if (input.dependencies?.allowedVenues) {
-    return input.dependencies.allowedVenues.includes("polymarket")
-      ? ["polymarket"]
-      : [];
+    return (["polymarket", "limitless"] as const).filter((venue) =>
+      input.dependencies?.allowedVenues?.includes(venue),
+    );
   }
   const resolved = await filterVenuesForLifecycleCapability(
     input.db,
-    ["polymarket"],
+    ["polymarket", "limitless"],
     "increaseExposure",
   );
   return resolved.venues.filter(
-    (venue): venue is TelegramDepositVenue => venue === "polymarket",
+    (venue): venue is TelegramDepositVenue =>
+      venue === "polymarket" || venue === "limitless",
   );
 }
 

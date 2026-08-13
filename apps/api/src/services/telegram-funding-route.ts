@@ -59,7 +59,8 @@ import type { TelegramFundingConsent } from "./telegram-funding-sessions.js";
 export type TelegramFundingReceivePresentationMode =
   | "pusd_direct"
   | "pusd_or_usdce_automatic"
-  | "base_usdc_relay_automatic";
+  | "base_usdc_relay_automatic"
+  | "limitless_base_usdc_direct";
 
 export type TelegramFundingRoutePresentation = Readonly<{
   version: 1;
@@ -219,6 +220,24 @@ const POLYMARKET_BASE_USDC_PRESENTATION = {
   decimals: 6,
 } as const satisfies TelegramFundingRoutePresentation;
 
+const LIMITLESS_BASE_USDC_DIRECT_PRESENTATION = {
+  version: 1,
+  routeKey: "limitless_base_usdc_direct_v1",
+  venueId: "limitless",
+  venueLabel: "Limitless",
+  networkId: "evm:8453",
+  networkLabel: "Base",
+  destinationAssetSymbol: "USDC",
+  acceptedAssetSymbols: ["USDC"],
+  selectionButtonLabel: "USDC on Base — direct",
+  settlementLabel: "Direct",
+  instructions: [
+    "Send only native USDC on Base.",
+    "Funds arrive directly in your managed Limitless trading wallet.",
+  ],
+  decimals: 6,
+} as const satisfies TelegramFundingRoutePresentation;
+
 export const TELEGRAM_POLYMARKET_FUNDING_ADAPTER_KEY =
   "polymarket_polygon_funding_v1";
 
@@ -252,6 +271,18 @@ function exactBaseUsdc(asset: AssetRef): boolean {
     assetId: BASE_USDC,
     decimals: 6,
   });
+}
+
+function exactLimitlessBaseUsdc(asset: AssetRef): boolean {
+  const configured = fundingSidecarRuntimeConfig.limitlessUsdcAddress;
+  return (
+    isEvmAddress(configured) &&
+    sameAsset(asset, {
+      networkId: "evm:8453",
+      assetId: configured,
+      decimals: 6,
+    })
+  );
 }
 
 function exactPolygonPusdRelay(asset: AssetRef): boolean {
@@ -375,6 +406,9 @@ export function parseTelegramFundingRoutePresentation(
 export function telegramPolygonFundingPresentation(
   mode: TelegramFundingReceivePresentationMode,
 ): TelegramFundingRoutePresentation {
+  if (mode === "limitless_base_usdc_direct") {
+    return LIMITLESS_BASE_USDC_DIRECT_PRESENTATION;
+  }
   if (mode === "base_usdc_relay_automatic") {
     return POLYMARKET_BASE_USDC_PRESENTATION;
   }
@@ -648,6 +682,14 @@ async function resolvePolymarketBaseRouteCapability(
   db: Pick<Pool, "query">,
   input: TelegramFundingRouteCapabilityInput,
 ): Promise<TelegramFundingRouteCapability | null> {
+  if (
+    !resolvePolymarketBaseFundingTarget({
+      automaticConversionEnabled: true,
+      session: input.session,
+    })
+  ) {
+    return null;
+  }
   const capability = await resolveTelegramRelayEvmCapability(db, {
     userId: input.userId,
     telegramAccountId: input.telegramAccountId,
@@ -858,6 +900,111 @@ async function hasReadyRelayFundingDestinationReceipt(
   return rows[0]?.ready === true;
 }
 
+function resolveLimitlessFundingConsentRoute(
+  consent: TelegramFundingConsent,
+): TelegramFundingRoute | null {
+  const presentation = parseTelegramFundingRoutePresentation(
+    consent.policySnapshot.presentation,
+  );
+  return consent.policySnapshot.presentationMode ===
+    "limitless_base_usdc_direct" &&
+    !consent.automationEnabled &&
+    exactLimitlessBaseUsdc(consent.asset) &&
+    presentation?.routeKey ===
+      LIMITLESS_BASE_USDC_DIRECT_PRESENTATION.routeKey &&
+    presentation.venueId === LIMITLESS_BASE_USDC_DIRECT_PRESENTATION.venueId &&
+    presentation.networkId === LIMITLESS_BASE_USDC_DIRECT_PRESENTATION.networkId
+    ? {
+        destinationAsset: consent.asset,
+        automaticSourceAsset: null,
+        mode: "limitless_base_usdc_direct",
+        presentation,
+      }
+    : null;
+}
+
+function resolveLimitlessFundingTarget(input: {
+  session: FundingReceiveSession;
+}): TelegramFundingTargetCapability | null {
+  const matches = input.session.receiveTargets.flatMap((target) => {
+    if (target.networkId !== "evm:8453") return [];
+    const accepted = target.acceptedAssets.filter(
+      (candidate) =>
+        candidate.handling === "direct" &&
+        exactLimitlessBaseUsdc(candidate.asset),
+    );
+    return accepted.length === 1 && target.acceptedAssets.length === 1
+      ? [{ asset: accepted[0]?.asset, target }]
+      : [];
+  });
+  const match = matches.length === 1 ? matches[0] : null;
+  if (
+    !match?.asset ||
+    !exactLimitlessBaseUsdc(input.session.destinationAsset)
+  ) {
+    return null;
+  }
+  return {
+    address: match.target.destinationAddress,
+    destinationAsset: match.asset,
+    automaticSourceAsset: null,
+    mode: "limitless_base_usdc_direct",
+    presentation: LIMITLESS_BASE_USDC_DIRECT_PRESENTATION,
+    receiveTargetId: match.target.receiveTargetId,
+  };
+}
+
+function resolveLimitlessFundingTargetChoice(input: {
+  session: FundingReceiveSession;
+  observationVariants: readonly DirectIngressObservationVariant[];
+}): TelegramFundingTargetChoice | null {
+  const target = resolveLimitlessFundingTarget(input);
+  if (!target) return null;
+  const variants = input.observationVariants.filter(
+    (variant) =>
+      sameAsset(variant.asset, target.destinationAsset) &&
+      sameAccountAddress(
+        variant.networkId,
+        variant.destinationAddress,
+        target.address,
+      ) &&
+      variant.completion.kind === "direct_destination_credit",
+  );
+  if (variants.length !== 1 || !variants[0]) return null;
+  return {
+    address: target.address,
+    asset: target.destinationAsset,
+    automaticConversion: false,
+    mode: target.mode,
+    presentation: target.presentation,
+    receiveTargetId: target.receiveTargetId,
+    automaticVariants: [],
+    variantIds: [variants[0].variantId],
+  };
+}
+
+async function hasReadyLimitlessFundingDestinationReceipt(
+  db: Pick<Pool, "query">,
+  contextId: string,
+): Promise<boolean> {
+  const { rows } = await db.query<{ ready: boolean }>(
+    `select exists (
+       select 1
+       from telegram_funding_sessions funding_context
+       join funding_receive_receipts funding_receipt
+         on funding_receipt.receive_session_id = funding_context.receive_session_id
+        and funding_receipt.user_id = funding_context.user_id
+       where funding_context.id = $1::uuid
+         and funding_receipt.status = 'ready'
+         and funding_receipt.handling = 'direct'
+         and funding_receipt.network_id = 'evm:8453'
+         and lower(funding_receipt.asset_id) = lower($2)
+     ) as ready`,
+    [contextId, fundingSidecarRuntimeConfig.limitlessUsdcAddress],
+  );
+  return rows[0]?.ready === true;
+}
+
 type TelegramFundingRouteAdapter = Readonly<{
   adapterKey: string;
   profileId: string;
@@ -1009,6 +1156,56 @@ const POLYMARKET_BASE_RELAY_FUNDING_ADAPTER = Object.freeze({
   },
 }) satisfies TelegramFundingRouteAdapter;
 
+const LIMITLESS_BASE_DIRECT_FUNDING_ADAPTER = Object.freeze({
+  adapterKey: "limitless_base_usdc_direct_v1",
+  profileId: "limitless_base_usdc_direct_v1",
+  venueId: "limitless",
+  routeKeys: new Set<string>([
+    LIMITLESS_BASE_USDC_DIRECT_PRESENTATION.routeKey,
+  ]),
+  resolveConsentRoute: resolveLimitlessFundingConsentRoute,
+  resolveDestination: ({ controllerWalletId, destinations }) => {
+    const matches = destinations.filter(
+      (destination) =>
+        destination.venueId === "limitless" &&
+        destination.selectable &&
+        exactLimitlessBaseUsdc(destination.requiredAsset) &&
+        (controllerWalletId === null ||
+          destination.controllerWalletId === controllerWalletId),
+    );
+    return matches.length === 1 ? (matches[0] ?? null) : null;
+  },
+  resolveCurrentController: ({
+    currentControllerWalletId,
+    frozenControllerWalletId,
+  }) =>
+    currentControllerWalletId === frozenControllerWalletId
+      ? frozenControllerWalletId
+      : null,
+  resolveTarget: resolveLimitlessFundingTarget,
+  resolveTargetChoice: resolveLimitlessFundingTargetChoice,
+  resolveCapability: async (_db, input) => {
+    const target = resolveLimitlessFundingTarget(input);
+    return target
+      ? {
+          authorization: null,
+          decision: { kind: "allowed" },
+          fundingPolicyRevision: "limitless_direct_receive_v1",
+          target,
+        }
+      : null;
+  },
+  resolveAutomaticCapability: async () => null,
+  buildAutomaticPolicy: () => null,
+  prepareAutomaticVariants: async (variants) => variants,
+  hasReadyDestinationReceipt: hasReadyLimitlessFundingDestinationReceipt,
+  reviewQuotePlan: () => null,
+  resolveReceiptDisposition: (target) =>
+    target.receipt.handling === "direct"
+      ? { kind: "direct" }
+      : { kind: "hard_invalid", reasonCode: "unsupported_asset" },
+}) satisfies TelegramFundingRouteAdapter;
+
 // This registry is intentionally data-small. A route adapter owns all
 // provider/venue-specific facts; the surrounding session, projection,
 // delivery, and receipt state machines select it by immutable route/profile
@@ -1016,6 +1213,7 @@ const POLYMARKET_BASE_RELAY_FUNDING_ADAPTER = Object.freeze({
 const TELEGRAM_FUNDING_ROUTE_ADAPTERS = Object.freeze([
   POLYMARKET_POLYGON_FUNDING_ADAPTER,
   POLYMARKET_BASE_RELAY_FUNDING_ADAPTER,
+  LIMITLESS_BASE_DIRECT_FUNDING_ADAPTER,
 ]);
 
 function adapterForRouteKey(
@@ -1136,6 +1334,14 @@ async function resolvePolymarketRouteCapability(
   db: Pick<Pool, "query">,
   input: TelegramFundingRouteCapabilityInput,
 ): Promise<TelegramFundingRouteCapability | null> {
+  if (
+    !resolvePolymarketPolygonFundingTarget({
+      automaticConversionEnabled: false,
+      session: input.session,
+    })
+  ) {
+    return null;
+  }
   const capability = await resolveTelegramPolymarketWrapCapability(db, {
     userId: input.userId,
     telegramAccountId: input.telegramAccountId,

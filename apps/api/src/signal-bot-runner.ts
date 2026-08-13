@@ -442,7 +442,8 @@ export async function runSignalBotRunner(): Promise<void> {
                       config.telegramMiniAppLinkBase != null,
                     telegramMessageId: input.telegramMessageId,
                     telegramUserId: input.telegramUserId,
-                    venue: "polymarket",
+                    venue:
+                      input.venue === "limitless" ? "limitless" : "polymarket",
                   })
                 : input.action === "select" &&
                     input.contextId &&

@@ -564,13 +564,17 @@ export class TelegramFundingService {
     input: Readonly<{
       destination: Pick<
         FundingDestinationOption,
-        "controllerWalletId" | "destinationOptionId" | "venueBindingOptionId"
+        | "controllerWalletId"
+        | "destinationOptionId"
+        | "venueBindingOptionId"
+        | "venueId"
       >;
       identity: Readonly<{ telegramUserId: string }>;
       link: ActiveTelegramAccountLink;
       now: Date;
     }>,
   ): Promise<void> {
+    if (input.destination.venueId !== "polymarket") return;
     await this.provisionAuthorization?.({
       userId: input.link.userId,
       telegramAccountId: input.link.linkId,
@@ -639,6 +643,7 @@ export class TelegramFundingService {
         controllerWalletId,
         destinationOptionId: receive.session.destinationOptionId,
         venueBindingOptionId: receive.session.venueBindingOptionId,
+        venueId: receive.session.venueId,
       },
       identity: input.identity,
       link: input.link,
@@ -1018,7 +1023,7 @@ export class TelegramFundingService {
       managedWallet?.controllerWalletId ?? null,
     );
     await this.provisionFundingAuthorization({
-      destination,
+      destination: { ...destination, venueId: input.venue },
       identity,
       link: initialLink,
       now,
@@ -1180,7 +1185,7 @@ export class TelegramFundingService {
       managedWallet?.controllerWalletId ?? null,
     );
     await this.provisionFundingAuthorization({
-      destination,
+      destination: { ...destination, venueId: input.venue },
       identity,
       link: initialLink,
       now,
@@ -1980,7 +1985,7 @@ export class TelegramFundingService {
       rethrowTelegramFundingPersistenceError(error);
     }
     const automaticConversionRequested = ["a", "b"].includes(input.choiceToken);
-    if (!["a", "b", "d", "p"].includes(input.choiceToken)) {
+    if (!["a", "b", "d", "l", "p"].includes(input.choiceToken)) {
       throw new TelegramFundingError("invalid_funding_choice");
     }
     const policy = await resolveSignalBotTradingPolicyStateFromDb(this.pool);
@@ -2023,9 +2028,11 @@ export class TelegramFundingService {
     const selectedRouteKey =
       input.choiceToken === "b"
         ? "polymarket_base_usdc_relay_v1"
-        : input.choiceToken === "a"
-          ? "polymarket_polygon_pusd_usdce_v1"
-          : "polymarket_polygon_pusd_direct_v1";
+        : input.choiceToken === "l"
+          ? "limitless_base_usdc_direct_v1"
+          : input.choiceToken === "a"
+            ? "polymarket_polygon_pusd_usdce_v1"
+            : "polymarket_polygon_pusd_direct_v1";
     const capability = await this.resolveTargetCapability({
       link,
       session: receive.session,

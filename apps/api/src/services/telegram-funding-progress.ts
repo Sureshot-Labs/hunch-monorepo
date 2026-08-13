@@ -13,7 +13,11 @@ import {
   canonicalJsonEqual,
   canonicalJsonHash,
 } from "../funding/persistence/canonical.js";
-import type { TelegramFundingProgressProjection } from "./telegram-funding-contracts.js";
+import type {
+  TelegramFundingProgressProjection,
+  TelegramFundingReceiptBreakdown,
+  TelegramFundingSourceReceiptState,
+} from "./telegram-funding-contracts.js";
 import type {
   TelegramFundingConsent,
   TelegramFundingSessionContext,
@@ -42,6 +46,78 @@ function sumRaw(receipts: readonly FundingReceiveReceipt[]): string | null {
     .toString();
 }
 
+function sumRawOrZero(receipts: readonly FundingReceiveReceipt[]): string {
+  return sumRaw(receipts) ?? "0";
+}
+
+function sourceReceiptState(
+  receipt: FundingReceiveReceipt,
+  automaticConversionConsented: boolean,
+): TelegramFundingSourceReceiptState {
+  switch (receipt.status) {
+    case "observed":
+      return receipt.handling === "automatic_conversion" &&
+        automaticConversionConsented
+        ? "queued"
+        : "needs_attention";
+    case "routing":
+      return "converting";
+    case "ready":
+      return "ready";
+    case "review_required":
+    case "recovery_required":
+      return "needs_attention";
+  }
+}
+
+function buildReceiptBreakdown(input: {
+  automaticConversionConsented: boolean;
+  destinationReceipts: readonly FundingReceiveReceipt[];
+  presentation: TelegramFundingRoutePresentation;
+  route: TelegramFundingRoute;
+  sourceReceipts: readonly FundingReceiveReceipt[];
+}): TelegramFundingReceiptBreakdown | undefined {
+  if (!input.route.automaticSourceAsset || input.sourceReceipts.length === 0) {
+    return undefined;
+  }
+  const byState = (state: TelegramFundingSourceReceiptState) =>
+    input.sourceReceipts.filter(
+      (receipt) =>
+        sourceReceiptState(receipt, input.automaticConversionConsented) ===
+        state,
+    );
+  const ordered = [...input.sourceReceipts].sort(
+    (left, right) =>
+      left.observedAt.localeCompare(right.observedAt) ||
+      left.receiptId.localeCompare(right.receiptId),
+  );
+  const transfers = ordered.slice(0, 5).map((receipt) => ({
+    rawAmount: receipt.rawAmount,
+    state: sourceReceiptState(receipt, input.automaticConversionConsented),
+  }));
+  const readyDestination = input.destinationReceipts.filter(
+    (receipt) => receipt.status === "ready",
+  );
+  return {
+    sourceAssetSymbol:
+      input.presentation.automaticSourceAssetSymbol ??
+      input.presentation.destinationAssetSymbol,
+    sourceDecimals: input.route.automaticSourceAsset.decimals,
+    totalSourceRaw: sumRawOrZero(input.sourceReceipts),
+    queuedSourceRaw: sumRawOrZero(byState("queued")),
+    convertingSourceRaw: sumRawOrZero(byState("converting")),
+    readySourceRaw: sumRawOrZero(byState("ready")),
+    attentionSourceRaw: sumRawOrZero(byState("needs_attention")),
+    sourceReceiptCount: input.sourceReceipts.length,
+    destinationAssetSymbol: input.presentation.destinationAssetSymbol,
+    destinationDecimals: input.route.destinationAsset.decimals,
+    readyDestinationRaw: sumRawOrZero(readyDestination),
+    destinationReceiptCount: readyDestination.length,
+    transfers,
+    hiddenTransferCount: input.sourceReceipts.length - transfers.length,
+  };
+}
+
 function projection(input: {
   assetSymbol: string;
   context: TelegramFundingSessionContext;
@@ -54,6 +130,7 @@ function projection(input: {
   automaticConversionPaused?: boolean;
   sourceAssetSymbol?: string;
   sourceRawAmount?: string | null;
+  receiptBreakdown?: TelegramFundingReceiptBreakdown;
   reviewContinuation?: FundingReceiveReceipt["reviewContinuation"];
   reviewReceiptId?: string;
 }): TelegramFundingProgressProjection {
@@ -79,6 +156,9 @@ function projection(input: {
           sourceAssetSymbol: input.sourceAssetSymbol,
           sourceRawAmount: input.sourceRawAmount ?? sumRaw(input.receipts),
         }
+      : {}),
+    ...(input.receiptBreakdown
+      ? { receiptBreakdown: input.receiptBreakdown }
       : {}),
     ...(input.reviewContinuation
       ? { reviewContinuation: input.reviewContinuation }
@@ -184,6 +264,13 @@ export function projectTelegramFundingProgress(input: {
       : input.automaticConversionAvailable === false
         ? "soft_paused"
         : undefined);
+  const receiptBreakdown = buildReceiptBreakdown({
+    automaticConversionConsented,
+    destinationReceipts,
+    presentation,
+    route,
+    sourceReceipts,
+  });
   const convertingSource = sourceReceipts.filter(
     (receipt) => receipt.status === "routing",
   );
@@ -209,6 +296,7 @@ export function projectTelegramFundingProgress(input: {
       receipts: unsupportedReceipts,
       state: "needs_attention",
       terminal: true,
+      receiptBreakdown,
     });
   }
   const reviewReceipt = [...reviewReceipts].sort(
@@ -249,6 +337,7 @@ export function projectTelegramFundingProgress(input: {
       receipts: attentionSource,
       state: "needs_attention",
       terminal: true,
+      receiptBreakdown,
     });
   }
   if (
@@ -279,6 +368,7 @@ export function projectTelegramFundingProgress(input: {
         recoveryReceipts.length > 0 ? homogeneousRecovery : destinationReceipts,
       state: "needs_attention",
       terminal: true,
+      receiptBreakdown,
     });
   }
   if (convertingSource.length > 0) {
@@ -300,6 +390,7 @@ export function projectTelegramFundingProgress(input: {
           : "converting",
       terminal: hardInvalid,
       automaticConversionEnabled: !hardInvalid && !softPaused,
+      receiptBreakdown,
     });
   }
   const detectedSource = sourceReceipts.filter(
@@ -319,6 +410,7 @@ export function projectTelegramFundingProgress(input: {
         receipts: detectedSource,
         state: "needs_attention",
         terminal: true,
+        receiptBreakdown,
       });
     }
     return projection({
@@ -334,31 +426,32 @@ export function projectTelegramFundingProgress(input: {
           : "funds_received",
       terminal: false,
       automaticConversionEnabled: automaticConversionMode !== "soft_paused",
+      receiptBreakdown,
     });
   }
-  const ready = input.receipts.filter((receipt) => receipt.status === "ready");
-  if (ready.length > 0) {
-    const allSource =
-      route.automaticSourceAsset != null &&
-      ready.every((receipt) =>
-        sameAsset(
-          receipt.asset,
-          route.automaticSourceAsset as NonNullable<
-            typeof route.automaticSourceAsset
-          >,
-        ),
-      );
+  const readyDestination = destinationReceipts.filter(
+    (receipt) => receipt.status === "ready",
+  );
+  const allSourceReady =
+    sourceReceipts.length > 0 &&
+    sourceReceipts.every((receipt) => receipt.status === "ready");
+  if (readyDestination.length > 0 || allSourceReady) {
     return projection({
       assetSymbol: presentation.destinationAssetSymbol,
       context: input.context,
       presentation,
-      receipts: ready,
+      // Destination evidence is authoritative when present. The source-only
+      // fallback preserves the established full-receipt conversion contract,
+      // where `ready` means the exact conversion postcondition was proven.
+      receipts: readyDestination.length > 0 ? readyDestination : sourceReceipts,
       state: "ready",
       terminal: true,
-      automaticConversionEnabled: allSource || automaticConversionConsented,
-      ...(allSource && presentation.automaticSourceAssetSymbol
+      automaticConversionEnabled: automaticConversionConsented,
+      receiptBreakdown,
+      ...(sourceReceipts.length > 0 && presentation.automaticSourceAssetSymbol
         ? {
             sourceAssetSymbol: presentation.automaticSourceAssetSymbol,
+            sourceRawAmount: sumRaw(sourceReceipts),
           }
         : {}),
     });
@@ -394,6 +487,7 @@ export function projectTelegramFundingProgress(input: {
       receipts: destinationReceipts,
       state: "funds_received",
       terminal: false,
+      receiptBreakdown,
     });
   }
   if (
@@ -407,6 +501,7 @@ export function projectTelegramFundingProgress(input: {
       receipts: [],
       state: "needs_attention",
       terminal: true,
+      receiptBreakdown,
     });
   }
   const consentedTarget = input.session.receiveTargets.find(
@@ -488,6 +583,120 @@ export function parseTelegramFundingProgressProjection(
   };
   const canonicalRaw = (raw: unknown): raw is string =>
     typeof raw === "string" && /^(0|[1-9][0-9]*)$/u.test(raw);
+  const breakdownValue = record.receiptBreakdown;
+  let receiptBreakdown: TelegramFundingReceiptBreakdown | null = null;
+  if (breakdownValue !== undefined) {
+    if (
+      !breakdownValue ||
+      typeof breakdownValue !== "object" ||
+      Array.isArray(breakdownValue)
+    ) {
+      return null;
+    }
+    const breakdownRecord = breakdownValue as Record<string, unknown>;
+    const sourceAsset =
+      typeof breakdownRecord.sourceAssetSymbol === "string"
+        ? breakdownRecord.sourceAssetSymbol.trim()
+        : "";
+    const destinationAsset =
+      typeof breakdownRecord.destinationAssetSymbol === "string"
+        ? breakdownRecord.destinationAssetSymbol.trim()
+        : "";
+    const sourceDecimals = breakdownRecord.sourceDecimals;
+    const destinationDecimals = breakdownRecord.destinationDecimals;
+    const sourceReceiptCount = breakdownRecord.sourceReceiptCount;
+    const destinationReceiptCount = breakdownRecord.destinationReceiptCount;
+    const hiddenTransferCount = breakdownRecord.hiddenTransferCount;
+    const transfersValue = breakdownRecord.transfers;
+    const rawFields = [
+      breakdownRecord.totalSourceRaw,
+      breakdownRecord.queuedSourceRaw,
+      breakdownRecord.convertingSourceRaw,
+      breakdownRecord.readySourceRaw,
+      breakdownRecord.attentionSourceRaw,
+      breakdownRecord.readyDestinationRaw,
+    ];
+    if (
+      sourceAsset.length === 0 ||
+      sourceAsset.length > 64 ||
+      sourceAsset !== presentation?.automaticSourceAssetSymbol ||
+      destinationAsset.length === 0 ||
+      destinationAsset.length > 64 ||
+      destinationAsset !== presentation?.destinationAssetSymbol ||
+      !Number.isInteger(sourceDecimals) ||
+      Number(sourceDecimals) < 0 ||
+      Number(sourceDecimals) > 36 ||
+      !Number.isInteger(destinationDecimals) ||
+      Number(destinationDecimals) < 0 ||
+      Number(destinationDecimals) > 36 ||
+      !Number.isSafeInteger(sourceReceiptCount) ||
+      Number(sourceReceiptCount) < 1 ||
+      !Number.isSafeInteger(destinationReceiptCount) ||
+      Number(destinationReceiptCount) < 0 ||
+      !Number.isSafeInteger(hiddenTransferCount) ||
+      Number(hiddenTransferCount) < 0 ||
+      !rawFields.every(canonicalRaw) ||
+      !Array.isArray(transfersValue) ||
+      transfersValue.length > 5 ||
+      Number(sourceReceiptCount) !==
+        transfersValue.length + Number(hiddenTransferCount)
+    ) {
+      return null;
+    }
+    const transfers = transfersValue.map((transfer) => {
+      if (
+        !transfer ||
+        typeof transfer !== "object" ||
+        Array.isArray(transfer)
+      ) {
+        return null;
+      }
+      const transferRecord = transfer as Record<string, unknown>;
+      return canonicalRaw(transferRecord.rawAmount) &&
+        ["queued", "converting", "ready", "needs_attention"].includes(
+          String(transferRecord.state),
+        )
+        ? {
+            rawAmount: transferRecord.rawAmount,
+            state: transferRecord.state as TelegramFundingSourceReceiptState,
+          }
+        : null;
+    });
+    if (transfers.some((transfer) => transfer === null)) return null;
+    const [
+      totalSourceRaw,
+      queuedSourceRaw,
+      convertingSourceRaw,
+      readySourceRaw,
+      attentionSourceRaw,
+      readyDestinationRaw,
+    ] = rawFields as [string, string, string, string, string, string];
+    if (
+      BigInt(totalSourceRaw) !==
+      BigInt(queuedSourceRaw) +
+        BigInt(convertingSourceRaw) +
+        BigInt(readySourceRaw) +
+        BigInt(attentionSourceRaw)
+    ) {
+      return null;
+    }
+    receiptBreakdown = {
+      sourceAssetSymbol: sourceAsset,
+      sourceDecimals: Number(sourceDecimals),
+      totalSourceRaw,
+      queuedSourceRaw,
+      convertingSourceRaw,
+      readySourceRaw,
+      attentionSourceRaw,
+      sourceReceiptCount: Number(sourceReceiptCount),
+      destinationAssetSymbol: destinationAsset,
+      destinationDecimals: Number(destinationDecimals),
+      readyDestinationRaw,
+      destinationReceiptCount: Number(destinationReceiptCount),
+      transfers: transfers as TelegramFundingReceiptBreakdown["transfers"],
+      hiddenTransferCount: Number(hiddenTransferCount),
+    };
+  }
   if (
     record.version !== 2 ||
     typeof record.fundingContextId !== "string" ||
@@ -613,6 +822,7 @@ export function parseTelegramFundingProgressProjection(
           sourceRawAmount: record.sourceRawAmount as string,
         }
       : {}),
+    ...(receiptBreakdown ? { receiptBreakdown } : {}),
     ...(review ? { reviewContinuation: review } : {}),
     ...(review && typeof reviewReceiptId === "string"
       ? { reviewReceiptId }

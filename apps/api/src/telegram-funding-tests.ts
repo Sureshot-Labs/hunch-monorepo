@@ -551,6 +551,11 @@ const usdce = {
   assetId: fundingSidecarRuntimeConfig.polymarketUsdceAddress,
   decimals: 6,
 } as const;
+const baseUsdc = {
+  networkId: "evm:8453",
+  assetId: fundingSidecarRuntimeConfig.limitlessUsdcAddress,
+  decimals: 6,
+} as const;
 const address = "0x1111111111111111111111111111111111111111";
 const expiresAt = "2026-08-06T12:00:00.000Z";
 const renderCoordinator = {
@@ -897,6 +902,29 @@ const session: FundingReceiveSession = {
   closedAt: null,
 };
 
+const limitlessSession: FundingReceiveSession = {
+  ...session,
+  venueId: "limitless",
+  destinationOptionId: "destination-limitless-1",
+  venueBindingOptionId: "venue-binding-limitless-1",
+  destinationAsset: baseUsdc,
+  receiveTargets: [
+    {
+      receiveTargetId: "receive-target-limitless-base-usdc",
+      networkId: "evm:8453",
+      destinationAddress: address,
+      acceptedAssets: [
+        {
+          asset: baseUsdc,
+          handling: "direct",
+          senderNativeFeeRequirement: null,
+        },
+      ],
+      safeInstructions: [],
+    },
+  ],
+};
+
 const variant = (
   variantId: string,
   asset: typeof pUsd | typeof usdce,
@@ -917,6 +945,61 @@ const variant = (
       ? { kind: "committed_venue_preparation", stepOrdinal: 0 }
       : { kind: "direct_destination_credit" },
 });
+
+const limitlessVariant: DirectIngressObservationVariant = {
+  variantId: "variant-limitless-base-usdc",
+  networkId: "evm:8453",
+  asset: baseUsdc,
+  destinationAddress: address,
+  destinationLocationId: "location-limitless-1",
+  baselineRaw: "0",
+  baselineRevision: "baseline-limitless-1",
+  observation: {
+    adapterId: "owned_wallet_liquid_balances_v1",
+    payload: { eventIdentity: "evm_erc20_transfer_v1" },
+  },
+  completion: { kind: "direct_destination_credit" },
+};
+
+const limitlessChoice = resolveTelegramFundingTargetChoice({
+  automaticConversionEnabled: false,
+  session: limitlessSession,
+  observationVariants: [limitlessVariant],
+  routeKey: "limitless_base_usdc_direct_v1",
+});
+assert.equal(limitlessChoice?.mode, "limitless_base_usdc_direct");
+assert.equal(limitlessChoice?.automaticConversion, false);
+assert.deepEqual(limitlessChoice?.variantIds, [limitlessVariant.variantId]);
+const limitlessTargetMessage = buildTelegramFundingTargetMessageForSession({
+  contextId,
+  expiresAt,
+  session: limitlessSession,
+  targets: limitlessChoice
+    ? [
+        {
+          address: limitlessChoice.address,
+          destinationAsset: limitlessChoice.asset,
+          automaticSourceAsset: null,
+          mode: limitlessChoice.mode,
+          presentation: limitlessChoice.presentation,
+          receiveTargetId: limitlessChoice.receiveTargetId,
+        },
+      ]
+    : [],
+});
+assert.match(limitlessTargetMessage.text, /Limitless/u);
+assert.match(limitlessTargetMessage.text, /Base/u);
+assert.match(limitlessTargetMessage.text, /USDC/u);
+assert.equal(
+  limitlessTargetMessage.reply_markup?.inline_keyboard
+    .flat()
+    .some(
+      (button) =>
+        "callback_data" in button &&
+        button.callback_data === `hm:v1:fund:select:${contextId}:l`,
+    ),
+  true,
+);
 
 const consent: TelegramFundingConsent = {
   id: "consent-1",
@@ -1603,6 +1686,16 @@ const readyMessage = buildTelegramFundingProgressMessage(ready);
 assert.match(readyMessage.text, /pUSD ready/);
 assert.doesNotMatch(readyMessage.text, /Receive window/u);
 assert.doesNotMatch(readyMessage.text, /Expires at/u);
+assert.equal(
+  readyMessage.reply_markup?.inline_keyboard
+    .flat()
+    .some(
+      (button) =>
+        "callback_data" in button && button.callback_data === "hm:v1:home",
+    ),
+  true,
+  "terminal funding cards must retain a direct way back to Home",
+);
 assert.deepEqual(
   await createTelegramFundingBuyContinuationDecorator({
     pool: {
@@ -1648,6 +1741,16 @@ assert.ok(waiting);
 const waitingMessage = buildTelegramFundingProgressMessage(waiting);
 assert.match(waitingMessage.text, /Receive window.*24 hours/u);
 assert.equal(waitingMessage.text.includes("2026\\-08\\-06 12:00:00 UTC"), true);
+assert.equal(
+  waitingMessage.reply_markup?.inline_keyboard
+    .flat()
+    .some(
+      (button) =>
+        "callback_data" in button && button.callback_data === "hm:v1:home",
+    ),
+  true,
+  "the durable initial funding card must expose Home before Refresh",
+);
 const futureSolanaProjection: TelegramFundingProgressProjection = {
   version: 2,
   fundingContextId: contextId,
@@ -1976,6 +2079,153 @@ assert.equal(
   "converting",
   "a later receipt keeps progress nonterminal until its own wrap completes",
 );
+const sourceReceiptInputs = [
+  {
+    receiptId: "receipt-source-001",
+    rawAmount: "10000",
+    observedAt: "2026-08-05T12:02:00.000Z",
+  },
+  {
+    receiptId: "receipt-source-002",
+    rawAmount: "40000",
+    observedAt: "2026-08-05T12:03:00.000Z",
+  },
+  {
+    receiptId: "receipt-source-003",
+    rawAmount: "50000",
+    observedAt: "2026-08-05T12:04:00.000Z",
+  },
+] as const;
+const partialMultiReceipt = projectTelegramFundingProgress({
+  consent: automaticConsent,
+  context,
+  receipts: [
+    receipt({
+      ...sourceReceiptInputs[0],
+      asset: usdce,
+      handling: "automatic_conversion",
+      status: "ready",
+      variantId: "variant-usdce",
+    }),
+    receipt({
+      ...sourceReceiptInputs[1],
+      asset: usdce,
+      handling: "automatic_conversion",
+      status: "routing",
+      variantId: "variant-usdce",
+    }),
+    receipt({
+      ...sourceReceiptInputs[2],
+      asset: usdce,
+      handling: "automatic_conversion",
+      status: "observed",
+      variantId: "variant-usdce",
+    }),
+    receipt({
+      receiptId: "receipt-destination-001",
+      asset: pUsd,
+      handling: "direct",
+      rawAmount: "10000",
+      status: "ready",
+      variantId: "variant-pusd",
+    }),
+  ],
+  session: { ...session, status: "processing" },
+});
+assert.equal(partialMultiReceipt?.state, "converting");
+assert.deepEqual(partialMultiReceipt?.receiptBreakdown, {
+  sourceAssetSymbol: "USDC.e",
+  sourceDecimals: 6,
+  totalSourceRaw: "100000",
+  queuedSourceRaw: "50000",
+  convertingSourceRaw: "40000",
+  readySourceRaw: "10000",
+  attentionSourceRaw: "0",
+  sourceReceiptCount: 3,
+  destinationAssetSymbol: "pUSD",
+  destinationDecimals: 6,
+  readyDestinationRaw: "10000",
+  destinationReceiptCount: 1,
+  transfers: [
+    { rawAmount: "10000", state: "ready" },
+    { rawAmount: "40000", state: "converting" },
+    { rawAmount: "50000", state: "queued" },
+  ],
+  hiddenTransferCount: 0,
+});
+assert.ok(partialMultiReceipt);
+const partialMultiReceiptMessage =
+  buildTelegramFundingProgressMessage(partialMultiReceipt);
+assert.match(
+  partialMultiReceiptMessage.text,
+  /Total received.*0\\\.1 USDC\\\.e/u,
+);
+assert.match(partialMultiReceiptMessage.text, /Ready.*0\\\.01 pUSD/u);
+assert.match(partialMultiReceiptMessage.text, /Converting.*0\\\.04 USDC\\\.e/u);
+assert.match(partialMultiReceiptMessage.text, /Queued.*0\\\.05 USDC\\\.e/u);
+assert.match(partialMultiReceiptMessage.text, /Transfers.*3/u);
+
+const completedMultiReceipt = projectTelegramFundingProgress({
+  consent: automaticConsent,
+  context,
+  receipts: [
+    ...sourceReceiptInputs.map((source) =>
+      receipt({
+        ...source,
+        asset: usdce,
+        handling: "automatic_conversion",
+        status: "ready",
+        variantId: "variant-usdce",
+      }),
+    ),
+    ...sourceReceiptInputs.map((destination, index) =>
+      receipt({
+        ...destination,
+        receiptId: `receipt-destination-00${index + 1}`,
+        asset: pUsd,
+        handling: "direct",
+        status: "ready",
+        variantId: "variant-pusd",
+      }),
+    ),
+  ],
+  session: { ...session, status: "completed" },
+});
+assert.ok(completedMultiReceipt);
+assert.equal(completedMultiReceipt.state, "ready");
+assert.equal(
+  completedMultiReceipt.rawAmount,
+  "100000",
+  "ready totals must never add source USDC.e and destination pUSD together",
+);
+assert.equal(completedMultiReceipt.sourceRawAmount, "100000");
+assert.equal(
+  completedMultiReceipt.receiptBreakdown?.readyDestinationRaw,
+  "100000",
+);
+assert.deepEqual(
+  parseTelegramFundingProgressProjection(completedMultiReceipt),
+  completedMultiReceipt,
+);
+assert.equal(
+  parseTelegramFundingProgressProjection({
+    ...completedMultiReceipt,
+    receiptBreakdown: {
+      ...completedMultiReceipt.receiptBreakdown,
+      totalSourceRaw: "100001",
+    },
+  }),
+  null,
+  "persisted receipt buckets must exactly reconcile to the source total",
+);
+const completedMultiReceiptMessage = buildTelegramFundingProgressMessage(
+  completedMultiReceipt,
+);
+assert.match(
+  completedMultiReceiptMessage.text,
+  /0\\\.1 pUSD is now available/u,
+);
+assert.doesNotMatch(completedMultiReceiptMessage.text, /0\\\.2 pUSD/u);
 const mixedRecovery = projectTelegramFundingProgress({
   consent: automaticConsent,
   context,

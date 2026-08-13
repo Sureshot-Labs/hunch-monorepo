@@ -103,7 +103,8 @@ export function signalBotFundingMenuAction(
             ? "cancel"
             : route.kind === "refresh" || route.kind === "qr"
               ? "session"
-              : route.kind === "deposit" && route.venue === "polymarket"
+              : route.kind === "deposit" &&
+                  (route.venue === "polymarket" || route.venue === "limitless")
                 ? "open"
                 : null;
 }
@@ -151,6 +152,7 @@ export type SignalBotInteractiveMenuLoaders = {
     receiptId?: string;
     telegramMessageId: number | null;
     telegramUserId: number;
+    venue?: "limitless" | "polymarket";
     view?: "address" | "progress";
   }) => Promise<MenuMessage & { qrText?: string }>;
 };
@@ -327,10 +329,10 @@ async function deliverSignalBotInteractiveMenuCallback(
     }
   };
   const depositVenue =
-    fundingAction != null
-      ? "polymarket"
-      : route.kind === "deposit"
-        ? route.venue
+    route.kind === "deposit"
+      ? route.venue
+      : fundingAction != null
+        ? "polymarket"
         : null;
   if (!fundingAction && route.kind === "deposit") {
     await input.render({
@@ -369,6 +371,10 @@ async function deliverSignalBotInteractiveMenuCallback(
               "funding:" + (input.idempotencyKey ?? "legacy-callback"),
             telegramMessageId: input.messageId,
             telegramUserId: input.telegramUserId,
+            ...(fundingAction === "open" &&
+            (depositVenue === "polymarket" || depositVenue === "limitless")
+              ? { venue: depositVenue }
+              : {}),
             ...(route.kind === "qr" ? { view: "address" as const } : {}),
           })
         : {

@@ -15,6 +15,32 @@ export type TelegramFundingProgressState =
   | "unavailable"
   | "needs_attention";
 
+export type TelegramFundingSourceReceiptState =
+  | "queued"
+  | "converting"
+  | "ready"
+  | "needs_attention";
+
+export type TelegramFundingReceiptBreakdown = Readonly<{
+  sourceAssetSymbol: string;
+  sourceDecimals: number;
+  totalSourceRaw: string;
+  queuedSourceRaw: string;
+  convertingSourceRaw: string;
+  readySourceRaw: string;
+  attentionSourceRaw: string;
+  sourceReceiptCount: number;
+  destinationAssetSymbol: string;
+  destinationDecimals: number;
+  readyDestinationRaw: string;
+  destinationReceiptCount: number;
+  transfers: readonly Readonly<{
+    rawAmount: string;
+    state: TelegramFundingSourceReceiptState;
+  }>[];
+  hiddenTransferCount: number;
+}>;
+
 export type TelegramFundingProgressProjection = Readonly<{
   version: 2;
   fundingContextId: string;
@@ -30,6 +56,7 @@ export type TelegramFundingProgressProjection = Readonly<{
   automaticConversionPaused?: boolean;
   sourceAssetSymbol?: string;
   sourceRawAmount?: string | null;
+  receiptBreakdown?: TelegramFundingReceiptBreakdown;
   reviewContinuation?: FundingReceiveReviewContinuation;
   reviewReceiptId?: string;
 }>;
