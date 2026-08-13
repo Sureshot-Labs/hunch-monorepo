@@ -1005,6 +1005,54 @@ const limitlessVariant: DirectIngressObservationVariant = {
   completion: { kind: "direct_destination_credit" },
 };
 
+const relayBaseReceiveTargetId = "receive-target-polymarket-base-usdc";
+const relayBaseSession: FundingReceiveSession = {
+  ...session,
+  receiveTargets: [
+    ...session.receiveTargets,
+    {
+      receiveTargetId: relayBaseReceiveTargetId,
+      networkId: "evm:8453",
+      destinationAddress: address,
+      acceptedAssets: [
+        {
+          asset: baseUsdc,
+          handling: "automatic_conversion",
+          senderNativeFeeRequirement: null,
+        },
+      ],
+      safeInstructions: [],
+    },
+  ],
+};
+const relayBaseVariant: DirectIngressObservationVariant = {
+  variantId: "variant-polymarket-base-usdc",
+  networkId: "evm:8453",
+  asset: baseUsdc,
+  destinationAddress: address,
+  destinationLocationId: "location-polymarket-base-usdc",
+  baselineRaw: "0",
+  baselineRevision: "baseline-polymarket-base-usdc",
+  observation: {
+    adapterId: "owned_wallet_liquid_balances_v1",
+    payload: { eventCursorBlock: "100" },
+  },
+  completion: { kind: "child_funding_operation" },
+};
+const relayBaseChoice = resolveTelegramFundingTargetChoice({
+  automaticConversionEnabled: true,
+  session: relayBaseSession,
+  observationVariants: [relayBaseVariant],
+  routeKey: "polymarket_base_usdc_relay_v1",
+});
+assert.equal(relayBaseChoice?.mode, "base_usdc_relay_automatic");
+assert.equal(relayBaseChoice?.receiveTargetId, relayBaseReceiveTargetId);
+assert.deepEqual(
+  relayBaseChoice?.asset,
+  pUsd,
+  "Relay consent binds the destination asset while its receive target accepts Base USDC",
+);
+
 const limitlessChoice = resolveTelegramFundingTargetChoice({
   automaticConversionEnabled: false,
   session: limitlessSession,
@@ -1088,6 +1136,75 @@ const automaticPolicySnapshot = {
     },
   ],
 } as const;
+
+assert.ok(relayBaseChoice);
+const relayBaseConsent: TelegramFundingConsent = {
+  ...consent,
+  id: "consent-relay-base",
+  receiveTargetId: relayBaseReceiveTargetId,
+  variantIds: [relayBaseVariant.variantId],
+  automationEnabled: true,
+  maximumAutomaticRaw: "25000000",
+  policySnapshot: {
+    version: 3,
+    kind: "polymarket_base_usdc_relay",
+    profileId: "telegram_relay_evm_funding_v1",
+    fullReceipt: false,
+    maxSourceRaw: "25000000",
+    authorizationId: "relay-authorization",
+    authorizationFingerprint: "relay-authorization-fingerprint",
+    signerId: "relay-signer",
+    signerFingerprint: "relay-signer-fingerprint",
+    policyId: "relay-policy",
+    policyFingerprint: "relay-policy-fingerprint",
+    fundingPolicyRevision: "relay-funding-policy-revision",
+    venueId: "polymarket",
+    destinationOptionId: session.destinationOptionId,
+    venueBindingOptionId: session.venueBindingOptionId,
+    sourceAsset: baseUsdc,
+    destinationAsset: pUsd,
+    variantCursors: [
+      {
+        variantId: relayBaseVariant.variantId,
+        networkId: "evm:8453",
+        ledgerHeightExclusive: "100",
+      },
+    ],
+    presentationMode: relayBaseChoice.mode,
+    presentation: relayBaseChoice.presentation,
+  },
+  fingerprint: "fingerprint-relay-base",
+};
+
+const relayBaseWaiting = projectTelegramFundingProgress({
+  automaticConversionAvailable: true,
+  consent: relayBaseConsent,
+  context,
+  receipts: [],
+  session: relayBaseSession,
+  now: new Date("2026-08-05T12:03:00.000Z"),
+});
+assert.equal(relayBaseWaiting?.state, "waiting_for_transfer");
+assert.equal(relayBaseWaiting?.receiveAddress, address);
+assert.ok(relayBaseWaiting);
+const relayBaseWaitingMessage =
+  buildTelegramFundingProgressMessage(relayBaseWaiting);
+assert.match(relayBaseWaitingMessage.text, /Verified receive address/u);
+assert.match(relayBaseWaitingMessage.text, new RegExp(address, "u"));
+assert.equal(
+  relayBaseWaitingMessage.reply_markup?.inline_keyboard.flat().some(
+    (button) => "copy_text" in button && button.copy_text.text === address,
+  ),
+  true,
+);
+assert.equal(
+  relayBaseWaitingMessage.reply_markup?.inline_keyboard.flat().some(
+    (button) =>
+      "callback_data" in button &&
+      button.callback_data === `hm:v1:fund:qr:${contextId}`,
+  ),
+  true,
+);
 
 assert.equal(
   telegramFundingConsentPresentationMode(
