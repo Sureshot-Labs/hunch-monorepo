@@ -46,6 +46,11 @@ import {
 } from "./telegram-funding-authorization.js";
 import { lockTelegramFundingLinkLifecycle } from "./telegram-funding-link-lifecycle-lock.js";
 import { lockFundingControllerWallet } from "./funding-controller-wallet-lock.js";
+import {
+  DELEGATED_PROVIDER_EVIDENCE_RECOVERY_CLAIM_KEY,
+  DELEGATED_PROVIDER_EVIDENCE_RECOVERY_MS,
+  DELEGATED_PROVIDER_RECOVERY_MS,
+} from "./delegated-funding-recovery-policy.js";
 
 type JsonRecord = Readonly<Record<string, JsonValue>>;
 
@@ -706,6 +711,7 @@ async function recoverPolymarketWrapInTransaction(
     Omit<ClaimRow, "telegram_account_id"> & {
       attempt_id: string;
       attempt_outcome: "started" | "ambiguous";
+      evidence_recovery: boolean;
       telegram_account_id: string | null;
     }
   >(
@@ -713,6 +719,31 @@ async function recoverPolymarketWrapInTransaction(
       select
         attempt.id as attempt_id,
         attempt.outcome as attempt_outcome,
+        (
+          attempt.outcome = 'ambiguous'
+          and attempt.reference_kind = 'provider_receipt'
+          and not (attempt.actual_costs ? $4::text)
+          and exists (
+            select 1
+            from funding_receive_receipts destination_receipt
+            where destination_receipt.receive_session_id =
+                    receipt.receive_session_id
+              and destination_receipt.user_id = receipt.user_id
+              and destination_receipt.id <> receipt.id
+              and lower(destination_receipt.destination_address) =
+                    lower(receipt.destination_address)
+              and destination_receipt.status = 'ready'
+              and destination_receipt.handling = 'direct'
+              and destination_receipt.network_id =
+                    funding_authorization.destination_network_id
+              and lower(destination_receipt.asset_id) =
+                    lower(funding_authorization.destination_asset_id)
+              and destination_receipt.asset_decimals =
+                    funding_authorization.destination_asset_decimals
+              and destination_receipt.raw_amount = receipt.raw_amount
+              and destination_receipt.observed_at >= attempt.finished_at
+          )
+        ) as evidence_recovery,
         operation.id as operation_id,
         operation.user_id,
         operation.policy_version,
@@ -790,7 +821,35 @@ async function recoverPolymarketWrapInTransaction(
             )
           )
         )
-        and attempt.updated_at <= $2
+        and (
+          attempt.updated_at <= $2
+          or (
+            attempt.finished_at <= $3
+            and attempt.outcome = 'ambiguous'
+            and attempt.reference_kind = 'provider_receipt'
+            and not (attempt.actual_costs ? $4::text)
+            and exists (
+              select 1
+              from funding_receive_receipts destination_receipt
+              where destination_receipt.receive_session_id =
+                      receipt.receive_session_id
+                and destination_receipt.user_id = receipt.user_id
+                and destination_receipt.id <> receipt.id
+                and lower(destination_receipt.destination_address) =
+                      lower(receipt.destination_address)
+                and destination_receipt.status = 'ready'
+                and destination_receipt.handling = 'direct'
+                and destination_receipt.network_id =
+                      funding_authorization.destination_network_id
+                and lower(destination_receipt.asset_id) =
+                      lower(funding_authorization.destination_asset_id)
+                and destination_receipt.asset_decimals =
+                      funding_authorization.destination_asset_decimals
+                and destination_receipt.raw_amount = receipt.raw_amount
+                and destination_receipt.observed_at >= attempt.finished_at
+            )
+          )
+        )
         and step.executor_id = $1
         and operation.status not in (
           'completed', 'refunded', 'failed', 'cancelled'
@@ -799,20 +858,47 @@ async function recoverPolymarketWrapInTransaction(
       for update of attempt, step, operation skip locked
       limit 1
     `,
-    [POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID, input.recoverStartedBefore],
+    [
+      POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
+      input.recoverStartedBefore,
+      new Date(input.now.getTime() - DELEGATED_PROVIDER_EVIDENCE_RECOVERY_MS),
+      DELEGATED_PROVIDER_EVIDENCE_RECOVERY_CLAIM_KEY,
+    ],
   );
   const row = rows[0];
   if (!row) return null;
-  const leased = await client.query(
-    `
-      update funding_operation_step_attempts
-      set updated_at = $2
-      where id = $1
-        and outcome in ('started', 'ambiguous')
-        and updated_at <= $3
-    `,
-    [row.attempt_id, input.now, input.recoverStartedBefore],
-  );
+  const leased = row.evidence_recovery
+    ? await client.query(
+        `
+          update funding_operation_step_attempts
+          set updated_at = $2,
+              actual_costs = actual_costs ||
+                jsonb_build_object($4::text, $2::timestamptz)
+          where id = $1
+            and outcome = 'ambiguous'
+            and reference_kind = 'provider_receipt'
+            and finished_at <= $3
+            and not (actual_costs ? $4::text)
+        `,
+        [
+          row.attempt_id,
+          input.now,
+          new Date(
+            input.now.getTime() - DELEGATED_PROVIDER_EVIDENCE_RECOVERY_MS,
+          ),
+          DELEGATED_PROVIDER_EVIDENCE_RECOVERY_CLAIM_KEY,
+        ],
+      )
+    : await client.query(
+        `
+          update funding_operation_step_attempts
+          set updated_at = $2
+          where id = $1
+            and outcome in ('started', 'ambiguous')
+            and updated_at <= $3
+        `,
+        [row.attempt_id, input.now, input.recoverStartedBefore],
+      );
   if (leased.rowCount !== 1) {
     throw new Error("delegated funding recovery lease was lost");
   }
@@ -1119,7 +1205,7 @@ export class DelegatedFundingExecutor {
         const now = options.now ?? new Date();
         const recoveryMs = Math.max(
           1,
-          this.input.startedAttemptRecoveryMs ?? 5 * 60_000,
+          this.input.startedAttemptRecoveryMs ?? DELEGATED_PROVIDER_RECOVERY_MS,
         );
         const recovery = await tx(this.pool, (client) =>
           runtime.recoverInTransaction(client, {

@@ -561,6 +561,9 @@ function buildTelegramFundingProgressMessageInternal(
   const amount = projection.rawAmount
     ? `${formatRawAmount(projection.rawAmount, presentation.decimals)} ${projection.assetSymbol}`
     : null;
+  const conversionOutputDetected =
+    projection.state === "converting" &&
+    (projection.receiptBreakdown?.destinationReceiptCount ?? 0) > 0;
   const stateCopy: Record<
     TelegramFundingProgressProjection["state"],
     { icon: string; title: string; body: string }
@@ -588,10 +591,14 @@ function buildTelegramFundingProgressMessageInternal(
     },
     converting: {
       icon: "🔄",
-      title: `Converting ${sourceAsset} to ${destinationAsset}`,
-      body: amount
-        ? `${amount} is being converted to ${destinationAsset}.`
-        : `The received ${sourceAsset} is being converted to ${destinationAsset}.`,
+      title: conversionOutputDetected
+        ? `Finalizing ${destinationAsset} funding`
+        : `Converting ${sourceAsset} to ${destinationAsset}`,
+      body: conversionOutputDetected
+        ? `${destinationAsset} was detected. Backend confirmation is still in progress.`
+        : amount
+          ? `${amount} is being converted to ${destinationAsset}.`
+          : `The received ${sourceAsset} is being converted to ${destinationAsset}.`,
     },
     ready: {
       icon: "✅",

@@ -2010,6 +2010,35 @@ assert.match(
   buildTelegramFundingProgressMessage(convertingUsdce).text,
   /Converting USDC/u,
 );
+const finalizingUsdce = projectTelegramFundingProgress({
+  consent: automaticConsent,
+  context,
+  receipts: [
+    receipt({
+      asset: usdce,
+      handling: "automatic_conversion",
+      rawAmount: "10000",
+      status: "routing",
+      variantId: "variant-usdce",
+    }),
+    receipt({
+      asset: pUsd,
+      handling: "direct",
+      rawAmount: "10000",
+      status: "ready",
+      variantId: "variant-pusd",
+    }),
+  ],
+  session: { ...session, status: "processing" },
+});
+assert.equal(finalizingUsdce?.state, "converting");
+assert.ok(finalizingUsdce);
+const finalizingUsdceMessage =
+  buildTelegramFundingProgressMessage(finalizingUsdce).text;
+assert.match(finalizingUsdceMessage, /Finalizing pUSD funding/u);
+assert.match(finalizingUsdceMessage, /pUSD was detected/u);
+assert.match(finalizingUsdceMessage, /Converting.*0\\\.01 USDC\\\.e/u);
+assert.doesNotMatch(finalizingUsdceMessage, /original transfer/u);
 const routingWhilePaused = projectTelegramFundingProgress({
   automaticConversionMode: "soft_paused",
   consent: automaticConsent,
