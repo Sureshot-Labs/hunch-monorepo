@@ -218,8 +218,12 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     run: async () => {
       let fallbackCalls = 0;
       let openedVenue = "";
-      let openResult: "success" | "ambiguous" | "private" | "unexpected" =
-        "success";
+      let openResult:
+        | "success"
+        | "ambiguous"
+        | "private"
+        | "unavailable"
+        | "unexpected" = "success";
       const app = Fastify({ logger: false });
       app.setValidatorCompiler(validatorCompiler);
       app.setSerializerCompiler(serializerCompiler);
@@ -239,6 +243,9 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
               }
               if (openResult === "private") {
                 throw new TelegramFundingError("private_chat_required");
+              }
+              if (openResult === "unavailable") {
+                throw new TelegramFundingError("funding_session_unavailable");
               }
               if (openResult === "unexpected") {
                 throw new Error("unexpected funding failure");
@@ -294,6 +301,12 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         const privateChat = await request();
         assert.equal(privateChat.statusCode, 403);
         assert.equal(privateChat.json().error, "private_chat_required");
+
+        openResult = "unavailable";
+        const unavailable = await request();
+        assert.equal(unavailable.statusCode, 200);
+        assert.match(unavailable.json().text, /Receive unavailable/u);
+        assert.doesNotMatch(unavailable.json().text, /expired/u);
 
         openResult = "unexpected";
         const unexpected = await request();

@@ -749,6 +749,14 @@ async function registerTelegramBotTradingRoutes(
     }
     if (
       error instanceof TelegramFundingError &&
+      error.code === "funding_session_unavailable"
+    ) {
+      return reply.send(
+        buildTelegramFundingUnavailableMessage({ reason: "unavailable" }),
+      );
+    }
+    if (
+      error instanceof TelegramFundingError &&
       error.code === "funding_receive_disabled"
     ) {
       return reply.send(

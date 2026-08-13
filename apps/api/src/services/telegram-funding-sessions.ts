@@ -7,7 +7,11 @@ import type {
   JsonValue,
 } from "../funding/domain/types.js";
 import { lockTelegramFundingLinkLifecycle } from "../funding/execution/telegram-funding-link-lifecycle-lock.js";
-import { resolveTelegramFundingManagedWalletIdentity } from "../funding/execution/telegram-funding-managed-wallet.js";
+import {
+  resolveTelegramFundingManagedWalletIdentity,
+  telegramFundingManagedWalletControllerId,
+  telegramFundingVenueNetworkId,
+} from "../funding/execution/telegram-funding-managed-wallet.js";
 import { hashOpaqueToken } from "../funding/persistence/canonical.js";
 import { lockFundingReceiveSessionScope } from "../funding/persistence/funding-receive-session-repository.js";
 import type { DirectIngressObservationVariant } from "../funding/reconciliation/direct-ingress-observer.js";
@@ -991,7 +995,15 @@ export async function prepareTelegramFundingSessionOpenInTransaction(
         telegramAccountId: input.telegramAccountId,
         telegramUserId: input.telegramUserId,
       });
-    if (currentManagedWallet?.controllerWalletId !== input.controllerWalletId) {
+    const networkId = telegramFundingVenueNetworkId(input.venueId);
+    if (
+      !currentManagedWallet ||
+      !networkId ||
+      telegramFundingManagedWalletControllerId(
+        currentManagedWallet,
+        networkId,
+      ) !== input.controllerWalletId
+    ) {
       throw new TelegramFundingPersistenceError(
         "telegram_funding_session_unavailable",
       );
@@ -1188,8 +1200,14 @@ export async function reuseActiveTelegramFundingSession(
           telegramAccountId: input.telegramAccountId,
           telegramUserId: input.telegramUserId,
         });
+      const networkId = telegramFundingVenueNetworkId(input.venueId);
       if (
-        currentManagedWallet?.controllerWalletId !== input.controllerWalletId
+        !currentManagedWallet ||
+        !networkId ||
+        telegramFundingManagedWalletControllerId(
+          currentManagedWallet,
+          networkId,
+        ) !== input.controllerWalletId
       ) {
         return null;
       }
@@ -1410,6 +1428,7 @@ export async function appendTelegramFundingConsent(
     }
     const canonical = await client.query<{
       controller_wallet_id: string | null;
+      destination_network_id: string | null;
       destination_option_id: string;
       id: string;
       venue_binding_option_id: string;
@@ -1419,6 +1438,7 @@ export async function appendTelegramFundingConsent(
           receive.id,
           receive.destination_target_snapshot #>>
             '{location,details,controllerWalletId}' as controller_wallet_id,
+          receive.destination_asset ->> 'networkId' as destination_network_id,
           receive.destination_option_id,
           receive.venue_binding_option_id
         from funding_receive_sessions receive
@@ -1444,6 +1464,8 @@ export async function appendTelegramFundingConsent(
     const canonicalReceive = canonical.rows[0];
     const frozenControllerWalletId =
       canonicalReceive.controller_wallet_id?.trim() ?? "";
+    const destinationNetworkId =
+      canonicalReceive.destination_network_id?.trim() ?? "";
     const currentManagedWallet =
       await resolveTelegramFundingManagedWalletIdentity(client, {
         userId: input.userId,
@@ -1453,7 +1475,11 @@ export async function appendTelegramFundingConsent(
     if (
       !frozenControllerWalletId ||
       frozenControllerWalletId !== input.controllerWalletId ||
-      currentManagedWallet?.controllerWalletId !== frozenControllerWalletId
+      !currentManagedWallet ||
+      telegramFundingManagedWalletControllerId(
+        currentManagedWallet,
+        destinationNetworkId,
+      ) !== frozenControllerWalletId
     ) {
       throw new TelegramFundingPersistenceError(
         "telegram_funding_session_unavailable",
