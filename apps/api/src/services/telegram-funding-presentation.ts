@@ -138,7 +138,7 @@ export function buildTelegramFundingUnavailableMessage(input?: {
       ? "Telegram Receive is not enabled right now. Existing transfers continue to be monitored."
       : input?.reason === "expired"
         ? "This funding session expired. Open Add funds again for a newly verified address."
-        : "A verified Polymarket receive target is temporarily unavailable. Try again later.";
+        : "A verified receive target is temporarily unavailable. Try again later.";
   return {
     parse_mode: "MarkdownV2",
     text: formatTelegramCalloutMarkdownV2({

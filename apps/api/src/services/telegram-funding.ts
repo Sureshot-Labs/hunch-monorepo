@@ -4,7 +4,6 @@ import {
   normalizeUnsignedDecimal,
   parseUnsignedDecimal,
 } from "../account-value/decimal.js";
-import { stableWalletOpaqueId } from "../account-value/canonical.js";
 import type {
   FundingDestinationOption,
   FundingReceiveSession,
@@ -18,7 +17,11 @@ import { lockFundingPolicyForTransaction } from "../funding/policies/funding-pol
 import { FundingReceiveSessionService } from "../funding/receive/receive-session-service.js";
 import type { DelegatedFundingPreBroadcastDecision } from "../funding/execution/delegated-funding-capability.js";
 import { lockTelegramFundingLinkLifecycle } from "../funding/execution/telegram-funding-link-lifecycle-lock.js";
-import { isTelegramFundingReceiveControllerCurrent } from "../funding/execution/telegram-funding-managed-wallet.js";
+import {
+  isTelegramFundingReceiveControllerCurrent,
+  telegramFundingManagedWalletControllerId,
+  telegramFundingVenueNetworkId,
+} from "../funding/execution/telegram-funding-managed-wallet.js";
 import type { TelegramFundingAuthorization } from "../funding/execution/telegram-funding-authorization.js";
 import {
   findTradeMarketById,
@@ -140,27 +143,6 @@ export type TelegramFundingManagedWalletResolver = (
   walletAddress: string;
 }> | null>;
 
-function telegramFundingControllerWalletId(
-  managedWallet: Readonly<{ walletAddress: string }>,
-  networkId: string,
-): string | null {
-  return networkId === "evm:137" || networkId === "evm:8453"
-    ? stableWalletOpaqueId({
-        walletType: "ethereum",
-        networkId,
-        address: managedWallet.walletAddress,
-      })
-    : null;
-}
-
-function telegramFundingVenueNetworkId(venueId: string): string | null {
-  return venueId === "polymarket"
-    ? "evm:137"
-    : venueId === "limitless"
-      ? "evm:8453"
-      : null;
-}
-
 export type TelegramFundingBuyReturnSourceIntent = Readonly<{
   action: string;
   amount_usd: string | number | null;
@@ -256,6 +238,7 @@ export type TelegramFundingErrorCode =
   | "funding_receive_disabled"
   | "funding_session_active_elsewhere"
   | "funding_session_expired"
+  | "funding_session_unavailable"
   | "receive_channel_conflict"
   | "invalid_funding_choice"
   | "idempotency_conflict"
@@ -421,7 +404,7 @@ function rethrowTelegramFundingPersistenceError(error: unknown): never {
     error instanceof TelegramFundingPersistenceError &&
     error.code === "telegram_funding_session_unavailable"
   ) {
-    throw new TelegramFundingError("funding_session_expired");
+    throw new TelegramFundingError("funding_session_unavailable");
   }
   if (
     error instanceof TelegramFundingPersistenceError &&
@@ -823,7 +806,7 @@ export class TelegramFundingService {
       input.telegramUserId,
     );
     const currentControllerWalletId = managedWallet
-      ? telegramFundingControllerWalletId(
+      ? telegramFundingManagedWalletControllerId(
           managedWallet,
           input.session.destinationAsset.networkId,
         )
@@ -1020,7 +1003,10 @@ export class TelegramFundingService {
     const requestedNetworkId = telegramFundingVenueNetworkId(input.venue);
     const controllerWalletId =
       managedWallet && requestedNetworkId
-        ? telegramFundingControllerWalletId(managedWallet, requestedNetworkId)
+        ? telegramFundingManagedWalletControllerId(
+            managedWallet,
+            requestedNetworkId,
+          )
         : null;
     if (this.resolveManagedWallet && !controllerWalletId) {
       throw new TelegramFundingError("destination_ambiguous");

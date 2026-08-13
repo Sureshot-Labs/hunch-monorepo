@@ -9,6 +9,28 @@ export type TelegramFundingProvisionWallet = Readonly<{
   walletAddress: string;
 }>;
 
+export function telegramFundingManagedWalletControllerId(
+  wallet: Pick<TelegramFundingProvisionWallet, "walletAddress">,
+  networkId: string,
+): string | null {
+  if (networkId !== "evm:137" && networkId !== "evm:8453") return null;
+  return stableWalletOpaqueId({
+    walletType: "ethereum",
+    networkId,
+    address: wallet.walletAddress,
+  });
+}
+
+export function telegramFundingVenueNetworkId(
+  venueId: string,
+): "evm:137" | "evm:8453" | null {
+  return venueId === "polymarket"
+    ? "evm:137"
+    : venueId === "limitless"
+      ? "evm:8453"
+      : null;
+}
+
 async function resolveTelegramFundingManagedWallet(
   pool: Pick<Pool, "query">,
   input: Readonly<{
@@ -149,10 +171,9 @@ export async function isTelegramFundingReceiveControllerCurrent(
   const currentManagedWallet =
     await resolveTelegramFundingManagedWalletIdentity(pool, input);
   return currentManagedWallet
-    ? stableWalletOpaqueId({
-        walletType: "ethereum",
-        networkId: destinationNetworkId,
-        address: currentManagedWallet.walletAddress,
-      }) === frozenControllerWalletId
+    ? telegramFundingManagedWalletControllerId(
+        currentManagedWallet,
+        destinationNetworkId,
+      ) === frozenControllerWalletId
     : false;
 }

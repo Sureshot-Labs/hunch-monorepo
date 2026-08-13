@@ -26,6 +26,7 @@ import {
   createOrReuseTelegramFundingSession,
   createOrReuseTelegramFundingSessionInTransaction,
   fetchTelegramFundingSessionContext,
+  prepareTelegramFundingSessionOpenInTransaction,
   reuseActiveTelegramFundingSession,
   TelegramFundingPersistenceError,
 } from "../../../services/telegram-funding-sessions.js";
@@ -57,6 +58,11 @@ const usdce = {
   assetId: fundingSidecarRuntimeConfig.polymarketUsdceAddress,
   decimals: 6,
 } as const;
+const baseUsdc = {
+  networkId: "evm:8453",
+  assetId: fundingSidecarRuntimeConfig.limitlessUsdcAddress,
+  decimals: 6,
+} as const;
 const directPolicySnapshot = {
   mode: "direct",
   automationEnabled: false,
@@ -68,6 +74,11 @@ const privyWalletId = `privy-wallet-${suffix}`;
 const controllerWalletId = stableWalletOpaqueId({
   walletType: "ethereum",
   networkId: "evm:137",
+  address: destinationAddress,
+});
+const limitlessControllerWalletId = stableWalletOpaqueId({
+  walletType: "ethereum",
+  networkId: "evm:8453",
   address: destinationAddress,
 });
 const receiveTargetId = `receive_target_telegram_${suffix}`;
@@ -308,6 +319,216 @@ try {
     "0",
     "a Telegram context failure must roll back its canonical session",
   );
+
+  const limitlessReceiveTargetId = `limitless_receive_target_${suffix}`;
+  const limitlessVariantId = `limitless_base_usdc_${suffix}`;
+  const limitlessDestinationOptionId = `limitless_destination_${suffix}`;
+  const limitlessVenueBindingOptionId = `limitless_binding_${suffix}`;
+  const limitlessOpenedAt = new Date(now.getTime() + 10);
+  let limitlessContextId: string | null = null;
+  const limitlessCanonical = await createOrReuseFundingReceiveSession(
+    pool,
+    {
+      ...canonicalInput,
+      venueId: "limitless",
+      destinationOptionId: limitlessDestinationOptionId,
+      venueBindingOptionId: limitlessVenueBindingOptionId,
+      destinationAsset: baseUsdc,
+      destinationTargetSnapshot: {
+        kind: "owned_location",
+        location: {
+          kind: "venue_account",
+          locationId: `limitless_location_${suffix}`,
+          accountId: userId,
+          asset: baseUsdc,
+          details: {
+            venueId: "limitless",
+            accountRef: `limitless_account_${suffix}`,
+            controllerWalletId: limitlessControllerWalletId,
+            address: destinationAddress,
+          },
+        },
+      },
+      venueBindingSnapshot: { bindingId: limitlessVenueBindingOptionId },
+      methods: [
+        {
+          methodId: `limitless_method_${suffix}`,
+          kind: "manual",
+          safeLabel: "Send Base USDC",
+          ingress: {
+            ingressKind: "manual",
+            sourceNetworkId: null,
+            sourceAsset: null,
+            receiveTargets: [
+              {
+                receiveTargetId: limitlessReceiveTargetId,
+                networkId: "evm:8453",
+                destinationAddress,
+                acceptedAssets: [{ asset: baseUsdc, handling: "direct" }],
+                safeInstructions: ["Send only Base USDC."],
+              },
+            ],
+            recommendedReceiveTargetId: limitlessReceiveTargetId,
+            destinationOptionId: limitlessDestinationOptionId,
+            destinationAddress,
+            requestedAmount: null,
+            amountSemantics: "minimum",
+            expiresAt: new Date(
+              limitlessOpenedAt.getTime() + 86_400_000,
+            ).toISOString(),
+            safeInstructions: ["Send only Base USDC."],
+          },
+        },
+      ],
+      receiveTargets: [
+        {
+          receiveTargetId: limitlessReceiveTargetId,
+          networkId: "evm:8453",
+          destinationAddress,
+          acceptedAssets: [{ asset: baseUsdc, handling: "direct" }],
+          safeInstructions: ["Send only Base USDC."],
+        },
+      ],
+      observationVariants: [
+        {
+          variantId: limitlessVariantId,
+          networkId: "evm:8453",
+          asset: baseUsdc,
+          destinationAddress,
+          destinationLocationId: `limitless_location_${suffix}`,
+          baselineRaw: "0",
+          baselineRevision: `limitless_baseline_${suffix}`,
+          observation: {
+            adapterId: "owned_wallet_liquid_balances_v1",
+            payload: { eventIdentity: "evm_erc20_transfer_v1" },
+          },
+          completion: { kind: "direct_destination_credit" },
+        },
+      ],
+      policyRevision: `limitless_direct_${suffix}`,
+      ownershipRevision: `limitless_owner_${suffix}`,
+      now: limitlessOpenedAt,
+    },
+    async (client, persisted) => {
+      const opened = await createOrReuseTelegramFundingSessionInTransaction(
+        client,
+        {
+          userId,
+          telegramAccountId,
+          telegramUserId,
+          chatId: telegramUserId,
+          telegramMessageId: 77,
+          receiveSessionId: persisted.snapshot.session.receiveSessionId,
+          idempotencyKey: `limitless_open_${suffix}`,
+          expiresAt: new Date(persisted.snapshot.session.expiresAt),
+          now: limitlessOpenedAt,
+        },
+      );
+      limitlessContextId = opened.context.id;
+    },
+    async (client) => {
+      assert.equal(
+        await prepareTelegramFundingSessionOpenInTransaction(client, {
+          userId,
+          telegramAccountId,
+          telegramUserId,
+          chatId: telegramUserId,
+          telegramMessageId: 77,
+          venueId: "limitless",
+          controllerWalletId: limitlessControllerWalletId,
+          destinationOptionId: limitlessDestinationOptionId,
+          venueBindingOptionId: limitlessVenueBindingOptionId,
+          now: limitlessOpenedAt,
+        }),
+        null,
+        "a fresh Base Limitless context must pass the managed-wallet boundary",
+      );
+    },
+  );
+  assert.ok(limitlessContextId);
+  assert.equal(
+    (
+      await reuseActiveTelegramFundingSession(pool, {
+        userId,
+        telegramAccountId,
+        telegramUserId,
+        chatId: telegramUserId,
+        telegramMessageId: 77,
+        venueId: "limitless",
+        controllerWalletId: limitlessControllerWalletId,
+        venueBindingOptionId: limitlessVenueBindingOptionId,
+        idempotencyKey: `limitless_reuse_${suffix}`,
+        requestFingerprint: openFingerprint({
+          telegramMessageId: 77,
+          venueId: "limitless",
+        }),
+        now: new Date(limitlessOpenedAt.getTime() + 1),
+      })
+    )?.id,
+    limitlessContextId,
+    "the Base-specific controller must remain reusable",
+  );
+  const limitlessConsent = await appendTelegramFundingConsent(pool, {
+    contextId: limitlessContextId,
+    userId,
+    telegramAccountId,
+    telegramUserId,
+    chatId: telegramUserId,
+    telegramMessageId: 77,
+    controllerWalletId: limitlessControllerWalletId,
+    receiveTargetId: limitlessReceiveTargetId,
+    asset: baseUsdc,
+    variantIds: [limitlessVariantId],
+    automationEnabled: false,
+    policySnapshot: { mode: "limitless_base_usdc_direct" },
+    fingerprint: hash("limitless-consent"),
+    now: new Date(limitlessOpenedAt.getTime() + 2),
+  });
+  assert.equal(limitlessConsent.consent.asset.networkId, "evm:8453");
+  assert.equal(
+    limitlessCanonical.snapshot.session.destinationAsset.assetId,
+    baseUsdc.assetId,
+  );
+  await cancelTelegramFundingSessionContext(pool, {
+    contextId: limitlessContextId,
+    userId,
+    telegramAccountId,
+    telegramUserId,
+    chatId: telegramUserId,
+    telegramMessageId: 77,
+    idempotencyKey: `limitless_cancel_${suffix}`,
+    requestFingerprint: hash("limitless-cancel"),
+    responsePayload: { text: "cancelled" },
+    now: new Date(limitlessOpenedAt.getTime() + 3),
+  });
+  const limitlessCleanup = await pool.connect();
+  try {
+    await limitlessCleanup.query("begin");
+    await limitlessCleanup.query("set local session_replication_role = replica");
+    await limitlessCleanup.query(
+      "delete from telegram_funding_mutations where funding_context_id = $1",
+      [limitlessContextId],
+    );
+    await limitlessCleanup.query(
+      "delete from telegram_funding_consents where telegram_funding_session_id = $1",
+      [limitlessContextId],
+    );
+    await limitlessCleanup.query(
+      "delete from telegram_funding_sessions where id = $1",
+      [limitlessContextId],
+    );
+    await limitlessCleanup.query(
+      "delete from funding_receive_sessions where id = $1",
+      [limitlessCanonical.snapshot.session.receiveSessionId],
+    );
+    await limitlessCleanup.query("commit");
+  } catch (error) {
+    await limitlessCleanup.query("rollback");
+    throw error;
+  } finally {
+    limitlessCleanup.release();
+  }
+
   const canonical = await createOrReuseFundingReceiveSession(
     pool,
     canonicalInput,
