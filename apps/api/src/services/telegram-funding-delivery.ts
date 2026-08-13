@@ -6,7 +6,10 @@ import type {
   SignalBotTelegramClient,
   TelegramSendResult,
 } from "./signal-bot-contracts.js";
-import type { TelegramFundingProgressProjection } from "./telegram-funding-contracts.js";
+import {
+  shouldDeleteTelegramFundingQr,
+  type TelegramFundingProgressProjection,
+} from "./telegram-funding-contracts.js";
 import { lockTelegramFundingLinkLifecycle } from "../funding/execution/telegram-funding-link-lifecycle-lock.js";
 import { isTelegramFundingReceiveControllerCurrent } from "../funding/execution/telegram-funding-managed-wallet.js";
 import { canonicalJsonEqual } from "../funding/persistence/canonical.js";
@@ -253,7 +256,14 @@ async function recoverStaleSendAttempts(client: PoolClient): Promise<void> {
             outbox.action in ('funding_send', 'funding_replacement')
             or (
               outbox.action = 'funding_qr'
-              and outbox.payload->>'terminal' <> 'true'
+              and not (
+                outbox.telegram_message_id is not null
+                and jsonb_typeof(outbox.payload->'receiveAddress') = 'null'
+                and (
+                  outbox.payload->>'terminal' = 'true'
+                  or jsonb_typeof(outbox.payload->'observedAt') = 'string'
+                )
+              )
             )
           )
           and outbox.status = 'sending'
@@ -347,8 +357,11 @@ async function claimFundingOutbox(input: {
                 or (
                   outbox.action = 'funding_qr'
                   and outbox.telegram_message_id is not null
-                  and outbox.payload->>'terminal' = 'true'
                   and jsonb_typeof(outbox.payload->'receiveAddress') = 'null'
+                  and (
+                    outbox.payload->>'terminal' = 'true'
+                    or jsonb_typeof(outbox.payload->'observedAt') = 'string'
+                  )
                 )
               )
           )
@@ -423,7 +436,8 @@ async function loadCurrentDestination(
   projection: TelegramFundingProgressProjection,
 ): Promise<FundingDestinationRow | null> {
   const addressFreeTerminalEdit = isSafeAddressRedaction(projection);
-  const deletesQrPhoto = row.action === "funding_qr" && addressFreeTerminalEdit;
+  const deletesQrPhoto =
+    row.action === "funding_qr" && shouldDeleteTelegramFundingQr(projection);
   const { rows } = await pool.query<FundingDestinationRow>(
     `
       select
@@ -794,7 +808,8 @@ async function recordDeliverySuccess(input: {
     );
     const deleteJustSentQr =
       input.row.action === "funding_qr" &&
-      currentProjection?.terminal === true &&
+      currentProjection != null &&
+      shouldDeleteTelegramFundingQr(currentProjection) &&
       current.progress_revision > input.row.state_revision;
     await client.query(
       `
@@ -1079,7 +1094,7 @@ export async function deliverTelegramFundingActions(input: {
       continue;
     }
     if (row.action === "funding_qr") {
-      if (projection.terminal) {
+      if (shouldDeleteTelegramFundingQr(projection)) {
         const messageId = Number(row.telegram_message_id);
         const deleteMessage = input.telegram.deleteMessage?.bind(
           input.telegram,
@@ -1178,6 +1193,7 @@ export async function deliverTelegramFundingActions(input: {
         filename: qr.filename,
         parse_mode: "MarkdownV2",
         photo: qr.photo,
+        reply_markup: qr.reply_markup,
       }).catch((error: unknown) => ({
         error: "ambiguous" as const,
         message:

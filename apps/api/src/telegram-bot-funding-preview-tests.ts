@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import {
   resolveTelegramBuyFundingPreview,
   resolveTelegramBuyFundingState,
+  resolveTelegramMinimumFundingUsd,
   telegramBotTradingTestHooks,
 } from "./services/telegram-bot-trading.js";
 import {
@@ -68,6 +69,14 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(preview.availableUsd, 0.75);
       assert.ok(Math.abs(preview.shortfallUsd - 0.31) < 1e-9);
       assert.equal(preview.state, "deposit");
+    },
+  },
+  {
+    name: "funding minimum rounds up to cents and never displays zero",
+    run: () => {
+      assert.equal(resolveTelegramMinimumFundingUsd(0.31), "0.31");
+      assert.equal(resolveTelegramMinimumFundingUsd(0.310_001), "0.32");
+      assert.equal(resolveTelegramMinimumFundingUsd(0.001), "0.01");
     },
   },
   {

@@ -116,6 +116,7 @@ type TelegramFundingOpenContext = Awaited<
 type TelegramFundingInitialBuyReturn = Readonly<{
   eventId: string | null;
   marketId: string;
+  minimumFundingUsd: string | null;
   requestedSpendUsd: string;
   side: "NO" | "YES";
 }>;
@@ -269,6 +270,7 @@ export type TelegramFundingBuyReturnOpenInput = TelegramFundingMutationInput &
     authorizationId: string;
     eventId: string | null;
     marketId: string;
+    minimumFundingUsd?: string;
     requestedSpendUsd: string;
     side: "NO" | "YES";
     sourceIntentId: string;
@@ -1110,6 +1112,9 @@ export class TelegramFundingService {
     const requestedSpendUsd = canonicalTelegramFundingBuySpend(
       input.requestedSpendUsd,
     );
+    const minimumFundingUsd = input.minimumFundingUsd
+      ? canonicalTelegramFundingBuySpend(input.minimumFundingUsd)
+      : null;
     const replay = await this.pool.query<{
       action: string;
       buy_return_revision: number | null;
@@ -1253,6 +1258,7 @@ export class TelegramFundingService {
       initialBuyReturn: {
         eventId: input.eventId,
         marketId: input.marketId,
+        minimumFundingUsd,
         requestedSpendUsd,
         side: input.side,
       },

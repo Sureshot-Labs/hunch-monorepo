@@ -53,6 +53,12 @@ function formatRawAmount(raw: string, decimals: number): string {
   return fraction ? `${whole}.${fraction}` : whole;
 }
 
+function minimumFundingUsdLabel(value: string): string {
+  const [whole = "0", rawFraction = ""] = value.split(".", 2);
+  const fraction = rawFraction.replace(/0+$/u, "");
+  return `$${fraction ? `${whole}.${fraction}` : whole}`;
+}
+
 function fundingMoneyLabel(money: Money): string {
   return `${formatRawAmount(money.raw, money.asset.decimals)} ${
     resolveKnownAccountAssetSymbol(money.asset) ?? money.asset.assetId
@@ -359,6 +365,7 @@ export async function buildTelegramFundingQrPhoto(
     caption: string;
     filename: string;
     photo: Uint8Array;
+    reply_markup: NonNullable<TelegramFundingMessage["reply_markup"]>;
   }>
 > {
   if (!projection.receiveAddress || projection.terminal) {
@@ -381,6 +388,14 @@ export async function buildTelegramFundingQrPhoto(
         projection.presentation.networkLabel,
       ),
       formatTelegramFieldMarkdownV2("Asset", acceptedAssetsLabel(projection)),
+      ...(projection.minimumFundingUsd
+        ? [
+            formatTelegramFieldMarkdownV2(
+              "Minimum to add",
+              minimumFundingUsdLabel(projection.minimumFundingUsd),
+            ),
+          ]
+        : []),
       escapeTelegramMarkdownV2("Scan to fill the verified receive address."),
       formatTelegramFieldMarkdownV2(
         "Expires at",
@@ -389,6 +404,19 @@ export async function buildTelegramFundingQrPhoto(
     ]),
     filename: `hunch-funding-${projection.fundingContextId}.png`,
     photo: new Uint8Array(png),
+    reply_markup: {
+      inline_keyboard: [
+        [
+          {
+            callback_data: telegramFundingCallbackData({
+              contextId: projection.fundingContextId,
+              kind: "hide_qr",
+            }),
+            text: "🙈 Hide",
+          },
+        ],
+      ],
+    },
   };
 }
 

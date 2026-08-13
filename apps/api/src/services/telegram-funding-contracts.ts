@@ -57,6 +57,7 @@ export type TelegramFundingProgressProjection = Readonly<{
   sourceAssetSymbol?: string;
   sourceRawAmount?: string | null;
   receiptBreakdown?: TelegramFundingReceiptBreakdown;
+  minimumFundingUsd?: string;
   reviewContinuation?: FundingReceiveReviewContinuation;
   reviewReceiptId?: string;
 }>;
@@ -76,6 +77,7 @@ export type TelegramFundingMessage = TelegramBotTradingClientMessage & {
 
 export type TelegramFundingCallbackRoute =
   | Readonly<{ contextId: string; kind: "cancel" }>
+  | Readonly<{ contextId: string; kind: "hide_qr" }>
   | Readonly<{ contextId: string; kind: "qr" }>
   | Readonly<{ contextId: string; kind: "refresh" }>
   | Readonly<{ receiptId: string; kind: "review_conversion" }>
@@ -119,15 +121,17 @@ export function parseTelegramFundingCallbackRoute(
     };
   }
   const action = route.match(
-    new RegExp(`^fund:(refresh|cancel|qr|convert):${UUID}$`, "i"),
+    new RegExp(`^fund:(refresh|cancel|qr|hide|convert):${UUID}$`, "i"),
   );
   if (!action) return null;
   return action[1] === "convert"
     ? { kind: "review_conversion", receiptId: action[2] ?? "" }
-    : {
-        kind: action[1] as "refresh" | "cancel" | "qr",
-        contextId: action[2] ?? "",
-      };
+    : action[1] === "hide"
+      ? { kind: "hide_qr", contextId: action[2] ?? "" }
+      : {
+          kind: action[1] as "refresh" | "cancel" | "qr",
+          contextId: action[2] ?? "",
+        };
 }
 
 export function telegramFundingCallbackData(
@@ -142,9 +146,20 @@ export function telegramFundingCallbackData(
           ? `${TELEGRAM_FUNDING_CALLBACK_PREFIX}:select:${input.contextId}:${input.choiceToken}`
           : input.kind === "review_conversion"
             ? `${TELEGRAM_FUNDING_CALLBACK_PREFIX}:convert:${input.receiptId}`
-            : `${TELEGRAM_FUNDING_CALLBACK_PREFIX}:${input.kind}:${input.contextId}`;
+            : `${TELEGRAM_FUNDING_CALLBACK_PREFIX}:${
+                input.kind === "hide_qr" ? "hide" : input.kind
+              }:${input.contextId}`;
   if (Buffer.byteLength(data, "utf8") > 64) {
     throw new Error("Telegram funding callback exceeds 64 bytes");
   }
   return data;
+}
+
+export function shouldDeleteTelegramFundingQr(
+  projection: TelegramFundingProgressProjection,
+): boolean {
+  return (
+    projection.receiveAddress === null &&
+    (projection.terminal || projection.observedAt !== null)
+  );
 }

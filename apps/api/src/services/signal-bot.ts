@@ -308,16 +308,13 @@ export type SignalBotConfig = {
   tradingInternalApiToken: string | null;
   xEditorial: XEditorialComposerConfig;
 };
-
 export type SignalBotContentProfile =
   | "telegram_signal_v11"
   | typeof X_EDITORIAL_CONTENT_PROFILE;
-
 export type SignalBotDisableTradingResult =
   | "already_disabled"
   | "disabled"
   | "unavailable";
-
 export type SignalBotChatState = {
   chatId: string;
   chatTitle: string | null;
@@ -2756,6 +2753,11 @@ export async function handleSignalBotMenuCallback(
   }
   const chatId = String(message.chat.id);
   const messageId = message.message_id ?? null;
+  if (route.kind === "hide_qr")
+    return TelegramBotMenuActions.hideSignalBotFundingQr(
+      input.callbackQuery,
+      input.telegram,
+    );
   const isRewardsRoute =
     route.kind === "rewards_view" ||
     route.kind === "rewards_begin_input" ||

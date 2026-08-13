@@ -24,6 +24,7 @@ import {
   fetchTelegramFundingSessionContext,
 } from "./telegram-funding-sessions.js";
 import { DEFAULT_SIGNAL_BOT_POLICY_REVISION } from "./signal-bot-policy-revision.js";
+import { shouldDeleteTelegramFundingQr } from "./telegram-funding-contracts.js";
 
 type CandidateRow = Readonly<{
   id: string;
@@ -411,7 +412,7 @@ async function projectCandidate(
       `,
       [context.id, revision],
     );
-    if (projection.terminal) {
+    if (shouldDeleteTelegramFundingQr(projection)) {
       await client.query(
         `
           update telegram_bot_action_outbox

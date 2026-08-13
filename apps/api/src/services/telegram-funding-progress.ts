@@ -145,6 +145,10 @@ function projection(input: {
     receiveAddress: input.receiveAddress ?? null,
     expiresAt: input.context.expiresAt,
     observedAt: latestObservedAt(input.receipts),
+    ...(input.context.origin === "buy_return_context" &&
+    input.context.initialMinimumFundingUsd
+      ? { minimumFundingUsd: input.context.initialMinimumFundingUsd }
+      : {}),
     ...(input.automaticConversionEnabled
       ? { automaticConversionEnabled: true }
       : {}),
@@ -583,6 +587,16 @@ export function parseTelegramFundingProgressProjection(
   };
   const canonicalRaw = (raw: unknown): raw is string =>
     typeof raw === "string" && /^(0|[1-9][0-9]*)$/u.test(raw);
+  const minimumFundingUsd = record.minimumFundingUsd;
+  const hasMinimumFundingUsd = minimumFundingUsd !== undefined;
+  if (
+    hasMinimumFundingUsd &&
+    (typeof minimumFundingUsd !== "string" ||
+      !/^(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$/u.test(minimumFundingUsd) ||
+      !/[1-9]/u.test(minimumFundingUsd))
+  ) {
+    return null;
+  }
   const breakdownValue = record.receiptBreakdown;
   let receiptBreakdown: TelegramFundingReceiptBreakdown | null = null;
   if (breakdownValue !== undefined) {
@@ -810,6 +824,9 @@ export function parseTelegramFundingProgressProjection(
     receiveAddress: record.receiveAddress as string | null,
     expiresAt: record.expiresAt,
     observedAt: record.observedAt as string | null,
+    ...(hasMinimumFundingUsd
+      ? { minimumFundingUsd: minimumFundingUsd as string }
+      : {}),
     ...(record.automaticConversionEnabled === true
       ? { automaticConversionEnabled: true }
       : {}),
