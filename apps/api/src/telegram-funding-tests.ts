@@ -6,6 +6,7 @@ import { stableWalletOpaqueId } from "./account-value/canonical.js";
 import { listFundingReceiveReceiptsForRouting } from "./funding/persistence/funding-receive-session-repository.js";
 import { fundingSidecarRuntimeConfig } from "./funding/runtime/sidecar-runtime-config.js";
 import { isFundingReconciliationSchemaReady } from "./funding/worker/funding-reconciliation-worker.js";
+import { isTelegramFundingReceiveControllerCurrent } from "./funding/execution/telegram-funding-managed-wallet.js";
 import { resolveFundingReceiveSelectedTargetId } from "./funding/receive/receive-session-service.js";
 import type {
   FundingQuoteSummary,
@@ -566,6 +567,47 @@ const renderCoordinator = {
     value: await input.deliver(),
   }),
 };
+
+for (const networkId of ["evm:137", "evm:8453"] as const) {
+  const expectedControllerWalletId = stableWalletOpaqueId({
+    walletType: "ethereum",
+    networkId,
+    address,
+  });
+  assert.equal(
+    await isTelegramFundingReceiveControllerCurrent(
+      {
+        query: async (sql: string) =>
+          sql.includes("from funding_receive_sessions")
+            ? {
+                rows: [
+                  {
+                    controller_wallet_id: expectedControllerWalletId,
+                    destination_network_id: networkId,
+                  },
+                ],
+              }
+            : {
+                rows: [
+                  {
+                    privy_wallet_id: "privy-wallet-network-test",
+                    user_wallet_id: "user-wallet-network-test",
+                    wallet_address: address,
+                  },
+                ],
+              },
+      } as never,
+      {
+        receiveSessionId,
+        telegramAccountId: "723e4567-e89b-42d3-a456-426614174000",
+        telegramUserId: "42",
+        userId: "823e4567-e89b-42d3-a456-426614174000",
+      },
+    ),
+    true,
+    `the same managed EVM wallet must derive its exact ${networkId} controller identity`,
+  );
+}
 
 function successfulTelegramCounter() {
   let calls = 0;
@@ -2700,6 +2742,7 @@ function deliveryPool(input: {
               input.controllerCurrent === false
                 ? "wallet_previous_controller"
                 : deliveryControllerWalletId,
+            destination_network_id: "evm:137",
           },
         ],
         rowCount: 1,

@@ -52,7 +52,13 @@ async function resolveTelegramFundingManagedWallet(
       where trading_authorization.user_id = $1::uuid
         and trading_authorization.telegram_user_id = $3
         and trading_authorization.wallet_chain = 'ethereum'
-        and 'polymarket' = any(trading_authorization.enabled_venues)
+        and (
+          ($4::boolean and 'polymarket' = any(trading_authorization.enabled_venues))
+          or (
+            not $4::boolean
+            and trading_authorization.enabled_venues && array['polymarket', 'limitless']::text[]
+          )
+        )
         and (
           not $4::boolean
           or (
@@ -116,10 +122,14 @@ export async function isTelegramFundingReceiveControllerCurrent(
     userId: string;
   }>,
 ): Promise<boolean> {
-  const { rows } = await pool.query<{ controller_wallet_id: string | null }>(
+  const { rows } = await pool.query<{
+    controller_wallet_id: string | null;
+    destination_network_id: string | null;
+  }>(
     `
       select destination_target_snapshot #>>
-               '{location,details,controllerWalletId}' as controller_wallet_id
+               '{location,details,controllerWalletId}' as controller_wallet_id,
+             destination_asset ->> 'networkId' as destination_network_id
       from funding_receive_sessions
       where id = $1
         and user_id = $2
@@ -129,8 +139,20 @@ export async function isTelegramFundingReceiveControllerCurrent(
     [input.receiveSessionId, input.userId],
   );
   const frozenControllerWalletId = rows[0]?.controller_wallet_id?.trim();
-  if (!frozenControllerWalletId) return false;
+  const destinationNetworkId = rows[0]?.destination_network_id?.trim();
+  if (
+    !frozenControllerWalletId ||
+    (destinationNetworkId !== "evm:137" && destinationNetworkId !== "evm:8453")
+  ) {
+    return false;
+  }
   const currentManagedWallet =
     await resolveTelegramFundingManagedWalletIdentity(pool, input);
-  return currentManagedWallet?.controllerWalletId === frozenControllerWalletId;
+  return currentManagedWallet
+    ? stableWalletOpaqueId({
+        walletType: "ethereum",
+        networkId: destinationNetworkId,
+        address: currentManagedWallet.walletAddress,
+      }) === frozenControllerWalletId
+    : false;
 }
