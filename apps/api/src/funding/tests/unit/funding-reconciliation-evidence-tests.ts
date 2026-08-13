@@ -56,6 +56,90 @@ await pollFundingReconciliationEvidence({
 });
 assert.equal(providerPolled, 1);
 
+const terminalRefundCalls: string[] = [];
+await pollFundingReconciliationEvidence({
+  operationId: "00000000-0000-4000-8000-000000000008",
+  state: { status: "refunded", stage: "terminal" },
+  terminalRelayReceiptWatch: true,
+  now: new Date("2026-07-29T13:24:01.250Z"),
+  providerPoll: async () => {
+    terminalRefundCalls.push("provider");
+    return { requestsPolled: 1 };
+  },
+  destinationPoll: async () => {
+    terminalRefundCalls.push("destination");
+    return { destinationsPolled: 1, destinationSatisfied: true };
+  },
+});
+assert.deepEqual(terminalRefundCalls, ["provider", "destination"]);
+
+const terminalRefundProviderFailureCalls: string[] = [];
+await pollFundingReconciliationEvidence({
+  operationId: "00000000-0000-4000-8000-000000000009",
+  state: { status: "refunded", stage: "terminal" },
+  terminalRelayReceiptWatch: true,
+  now: new Date("2026-07-29T13:24:01.375Z"),
+  providerPoll: async () => {
+    terminalRefundProviderFailureCalls.push("provider");
+    throw new Error("relay status is temporarily unavailable");
+  },
+  destinationPoll: async () => {
+    terminalRefundProviderFailureCalls.push("destination");
+    return { destinationsPolled: 1, destinationSatisfied: true };
+  },
+});
+assert.deepEqual(terminalRefundProviderFailureCalls, [
+  "provider",
+  "destination",
+]);
+
+const terminalRefundReceiptFailureCalls: string[] = [];
+const terminalReceiptFailure = await pollFundingReconciliationEvidence({
+  operationId: "00000000-0000-4000-8000-000000000010",
+  state: { status: "refunded", stage: "terminal" },
+  terminalRelayReceiptWatch: true,
+  now: new Date("2026-07-29T13:24:01.437Z"),
+  receiptPoll: async () => {
+    terminalRefundReceiptFailureCalls.push("receipt");
+    throw new Error("receipt RPC is temporarily unavailable");
+  },
+  providerPoll: async () => {
+    terminalRefundReceiptFailureCalls.push("provider");
+    return { requestsPolled: 1 };
+  },
+  destinationPoll: async () => {
+    terminalRefundReceiptFailureCalls.push("destination");
+    return { destinationsPolled: 1, destinationSatisfied: true };
+  },
+});
+assert.deepEqual(terminalRefundReceiptFailureCalls, [
+  "receipt",
+  "provider",
+  "destination",
+]);
+assert.equal(terminalReceiptFailure.terminalReceiptPollFailed, true);
+
+for (const terminalStatus of ["completed", "failed", "cancelled"] as const) {
+  const terminalReceiptFailureResult = await pollFundingReconciliationEvidence({
+    operationId: "00000000-0000-4000-8000-000000000011",
+    state: { status: terminalStatus, stage: "terminal" },
+    terminalRelayReceiptWatch: true,
+    now: new Date("2026-07-29T13:24:01.500Z"),
+    receiptPoll: async () => {
+      throw new Error(`${terminalStatus} receipt RPC is unavailable`);
+    },
+    destinationPoll: async () => ({
+      destinationsPolled: 1,
+      destinationSatisfied: true,
+    }),
+  });
+  assert.equal(
+    terminalReceiptFailureResult.terminalReceiptPollFailed,
+    true,
+    `${terminalStatus} Relay receipt verification must use bounded handling`,
+  );
+}
+
 const actionWaitCalls: string[] = [];
 await pollFundingReconciliationEvidence({
   operationId: "00000000-0000-4000-8000-000000000007",
@@ -252,5 +336,5 @@ assert.equal(
 );
 
 console.log(
-  "[funding-reconciliation-evidence-tests] action waits skip external polling, owned destination evidence bypasses slow provider status, automatic recovery requeues at its dedicated interval, and manual recovery has no provider loop",
+  "[funding-reconciliation-evidence-tests] action waits skip external polling, terminal refunds keep receipt and provider refreshes best-effort so their failures cannot block replacement scans, owned destination evidence bypasses slow provider status, automatic recovery requeues at its dedicated interval, and manual recovery has no provider loop",
 );

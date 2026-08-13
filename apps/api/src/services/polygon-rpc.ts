@@ -310,6 +310,7 @@ export type EvmRpcTransactionReceipt = Readonly<{
   logs: readonly Readonly<{
     address: string;
     data: string;
+    logIndex?: number;
     topics: readonly string[];
   }>[];
 }>;
@@ -399,10 +400,12 @@ export async function fetchEvmTransactionReceipt(inputs: {
     }
     const address = log.address;
     const data = log.data;
+    const logIndex = log.logIndex;
     const topics = log.topics;
     if (
       typeof address !== "string" ||
       typeof data !== "string" ||
+      typeof logIndex !== "string" ||
       !Array.isArray(topics) ||
       topics.some((topic) => typeof topic !== "string")
     ) {
@@ -411,6 +414,7 @@ export async function fetchEvmTransactionReceipt(inputs: {
     return {
       address: ethers.getAddress(address),
       data,
+      logIndex: safeRpcBlockNumber(logIndex, "receipt log index"),
       topics: topics as string[],
     };
   });

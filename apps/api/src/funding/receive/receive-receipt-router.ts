@@ -17,6 +17,7 @@ import type { DelegatedFundingPreBroadcastDecision } from "../execution/delegate
 import { lockFundingPolicyForTransaction } from "../policies/funding-policy-service.js";
 import { sameAsset } from "../planner/money.js";
 import type { FundingPlanningRuntime } from "../planner/runtime-service.js";
+import { lockFundingAuthorizationReservationScope } from "../persistence/funding-authorization-reservation-lock.js";
 import {
   claimFundingReceiveReceiptOperationLinkInTransaction,
   deferFundingReceiveReceiptRouting,
@@ -206,7 +207,7 @@ export type FundingReceiveReceiptAutomaticExecution = Readonly<{
     error: unknown,
   ) => FundingReceiveRoutingErrorDirective | null;
   decision: (
-    db: Pool,
+    db: Pick<Pool, "query">,
     target: FundingReceiveReceiptRoutingTarget,
   ) => Promise<DelegatedFundingPreBroadcastDecision>;
   prepareOperation?: (
@@ -656,6 +657,16 @@ export class FundingReceiveReceiptRouter {
     }
     if (prepared && execution) {
       return tx(this.db, async (client) => {
+        await lockFundingPolicyForTransaction(client);
+        if (
+          execution.authorizationId &&
+          !(await lockFundingAuthorizationReservationScope(client, {
+            authorizationId: execution.authorizationId,
+            userId: target.userId,
+          }))
+        ) {
+          throw new Error("automatic funding authorization is unavailable");
+        }
         await prepared.verify(client);
         const claimed =
           await claimFundingReceiveReceiptOperationLinkInTransaction(client, {
@@ -724,6 +735,15 @@ export class FundingReceiveReceiptRouter {
     );
     return tx(this.db, async (client) => {
       await lockFundingPolicyForTransaction(client);
+      if (
+        execution?.authorizationId &&
+        !(await lockFundingAuthorizationReservationScope(client, {
+          authorizationId: execution.authorizationId,
+          userId: target.userId,
+        }))
+      ) {
+        throw new Error("automatic funding authorization is unavailable");
+      }
       const claimed =
         await claimFundingReceiveReceiptOperationLinkInTransaction(client, {
           receiptId: target.receipt.receiptId,

@@ -158,6 +158,7 @@ async function fetchFundingMergeConflicts(
     funding_idempotency_conflicts: string;
     funding_trade_attempts: string;
     live_funding_reservations: string;
+    live_funding_authorization_reservations: string;
     non_terminal_funding_operations: string;
     non_terminal_legacy_bridge_orders: string;
     non_terminal_telegram_trade_intents: string;
@@ -183,6 +184,14 @@ async function fetchFundingMergeConflicts(
           where reservation.user_id = any($1::uuid[])
             and reservation.state = 'active'
         ) as live_funding_reservations,
+        (
+          select count(*)::text
+          from telegram_funding_authorization_reservations reservation
+          join telegram_funding_authorizations funding_authorization
+            on funding_authorization.id = reservation.authorization_id
+          where funding_authorization.user_id = any($1::uuid[])
+            and reservation.status in ('reserved', 'cleanup_required')
+        ) as live_funding_authorization_reservations,
         (
           select count(*)::text
           from funding_operation_step_attempts attempt
@@ -298,7 +307,9 @@ async function fetchFundingMergeConflicts(
     fundingIdempotencyConflicts: Number(row.funding_idempotency_conflicts),
     fundingPreparationRuns: lifecycle.preparationRunEvidence,
     fundingTradeAttempts: Number(row.funding_trade_attempts),
-    liveFundingReservations: Number(row.live_funding_reservations),
+    liveFundingReservations:
+      Number(row.live_funding_reservations) +
+      Number(row.live_funding_authorization_reservations),
     nonTerminalFundingOperations: Number(row.non_terminal_funding_operations),
     nonTerminalLegacyBridgeOrders: Number(
       row.non_terminal_legacy_bridge_orders,

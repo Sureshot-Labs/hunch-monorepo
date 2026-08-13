@@ -180,6 +180,7 @@ try {
   assert.ok(segmentId);
 
   let statusStarted = false;
+  let includeTransactionHashes = true;
   const client = new RelayClient({
     apiKey: "relay-integration-api-key",
     fetchImpl: async (input) => {
@@ -217,8 +218,12 @@ try {
         JSON.stringify({
           requestId: requested,
           status: requested === initialRequestId ? "success" : "refund",
-          inTxHashes: ["origin-reference-not-persisted"],
-          txHashes: ["destination-reference-not-persisted"],
+          ...(includeTransactionHashes
+            ? {
+                inTxHashes: ["origin-reference-not-persisted"],
+                txHashes: ["destination-reference-not-persisted"],
+              }
+            : {}),
           updatedAt: Date.parse("2026-07-23T10:00:02.000Z"),
         }),
         { status: 200 },
@@ -238,6 +243,24 @@ try {
   const secondPoll = await driver.pollOperation(pool, operationId);
   assert.equal(secondPoll.childrenDiscovered, 0);
   assert.equal(secondPoll.requestsPolled, 2);
+  includeTransactionHashes = false;
+  const sparsePoll = await driver.pollOperation(pool, operationId);
+  assert.equal(sparsePoll.requestsPolled, 2);
+  const segmentAfterSparseStatus = await pool.query<{
+    fingerprints: unknown;
+  }>(
+    `select support_metadata -> 'relayTransactionReferenceFingerprints'
+              as fingerprints
+       from funding_operation_segments
+      where id = $1::uuid`,
+    [segmentId],
+  );
+  assert.deepEqual(segmentAfterSparseStatus.rows[0]?.fingerprints, [
+    ...[
+      referenceCodec.fingerprint("destination-reference-not-persisted"),
+      referenceCodec.fingerprint("origin-reference-not-persisted"),
+    ].sort(),
+  ]);
 
   const requests = await pool.query<{
     request_kind: string;
@@ -267,7 +290,7 @@ try {
     );
     assert.equal(
       request.support_metadata.destinationTransactionReferenceCount,
-      1,
+      0,
     );
   }
 

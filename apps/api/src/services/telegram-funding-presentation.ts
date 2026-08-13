@@ -18,7 +18,10 @@ import {
 } from "./telegram-custom-emoji.js";
 import { FUNDING_RECEIVE_SESSION_TTL_HOURS } from "../funding/receive/receive-session-constants.js";
 import QRCode from "qrcode";
-import { type TelegramFundingRoutePresentation } from "./telegram-funding-route.js";
+import {
+  type TelegramFundingRoutePresentation,
+  type TelegramFundingTargetCapability,
+} from "./telegram-funding-route.js";
 import type { FundingQuoteSummary, Money } from "../funding/domain/types.js";
 import { resolveKnownAccountAssetSymbol } from "../account-value/known-asset-catalog.js";
 
@@ -210,6 +213,68 @@ export function buildTelegramFundingTargetMessage(input: {
       ...receiveWindowFields(input.expiresAt),
     ]),
     venue: input.presentation.venueId,
+  };
+}
+
+export function buildTelegramFundingTargetChoicesMessage(input: {
+  contextId: string;
+  expiresAt: string;
+  targets: readonly TelegramFundingTargetCapability[];
+}): TelegramFundingMessage {
+  const targets = input.targets.filter(
+    (target, index, values) =>
+      values.findIndex(
+        (candidate) =>
+          candidate.presentation.routeKey === target.presentation.routeKey,
+      ) === index,
+  );
+  if (targets.length === 1 && targets[0]) {
+    return buildTelegramFundingTargetMessage({
+      automaticConversion: targets[0].automaticSourceAsset !== null,
+      contextId: input.contextId,
+      expiresAt: input.expiresAt,
+      presentation: targets[0].presentation,
+    });
+  }
+  return {
+    fundingContextId: input.contextId,
+    parse_mode: "MarkdownV2",
+    reply_markup: {
+      inline_keyboard: [
+        ...targets.map((target) => [
+          {
+            callback_data: telegramFundingCallbackData({
+              choiceToken:
+                target.presentation.routeKey === "polymarket_base_usdc_relay_v1"
+                  ? "b"
+                  : target.automaticSourceAsset
+                    ? "a"
+                    : "d",
+              contextId: input.contextId,
+              kind: "select",
+            }),
+            text:
+              target.presentation.selectionButtonLabel ??
+              `${target.presentation.acceptedAssetSymbols.join(" / ")} on ${target.presentation.networkLabel}`,
+          },
+        ]),
+        [
+          {
+            callback_data: telegramFundingCallbackData({
+              contextId: input.contextId,
+              kind: "cancel",
+            }),
+            text: "Cancel",
+          },
+        ],
+      ],
+    },
+    text: joinTelegramMarkdownV2Lines([
+      "*Add funds to Polymarket*",
+      "",
+      escapeTelegramMarkdownV2("Choose the network and asset to receive."),
+      ...receiveWindowFields(input.expiresAt),
+    ]),
   };
 }
 

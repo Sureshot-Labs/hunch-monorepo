@@ -1,6 +1,9 @@
 import { POLYMARKET_FUNDING_ROUTER } from "@hunch/contracts";
 
-import { POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID } from "./delegated-funding-profile-ids.js";
+import {
+  POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
+  TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
+} from "./delegated-funding-profile-ids.js";
 import { privyAuthorizationPrivateKeyIsValid } from "./privy-authorization-key.js";
 
 type Environment = Readonly<Record<string, string | undefined>>;
@@ -21,6 +24,58 @@ export type PolymarketWrapExecutionConfiguration = Readonly<{
   policyId: string;
   policyFingerprint: string;
 }>;
+
+export type RelayEvmExecutionConfiguration = Readonly<{
+  enabled: boolean;
+  profileId: typeof TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID;
+  signerId: string;
+  signerFingerprint: string;
+  policyId: string;
+  policyFingerprint: string;
+  maxSourceRaw: string;
+  minimumSequentialTtlMs: number;
+}>;
+
+export function loadRelayEvmExecutionConfiguration(
+  source: Environment = process.env,
+): RelayEvmExecutionConfiguration {
+  const maxSourceRaw = value(source, "HUNCH_FUNDING_RELAY_EVM_MAX_SOURCE_RAW");
+  const ttl = Number(value(source, "HUNCH_FUNDING_RELAY_EVM_MIN_TTL_MS"));
+  return {
+    enabled:
+      enabled(source, "HUNCH_FINANCE_EXECUTE") &&
+      enabled(source, "HUNCH_FUNDING_RELAY_EVM_EXECUTE"),
+    profileId: TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
+    signerId: value(source, "PRIVY_WALLET_AUTHORIZATION_ID"),
+    signerFingerprint: value(source, "PRIVY_WALLET_AUTHORIZATION_FINGERPRINT"),
+    policyId: value(source, "PRIVY_POLYMARKET_BOT_BUY_SELL_POLICY_ID"),
+    policyFingerprint: value(
+      source,
+      "PRIVY_POLYMARKET_BOT_BUY_SELL_POLICY_FINGERPRINT",
+    ),
+    maxSourceRaw,
+    minimumSequentialTtlMs: Number.isSafeInteger(ttl) && ttl > 0 ? ttl : 45_000,
+  };
+}
+
+export function relayEvmProfileConfigured(
+  config: RelayEvmExecutionConfiguration,
+): boolean {
+  return (
+    config.signerId.length >= 3 &&
+    config.signerFingerprint.length >= 32 &&
+    config.policyId.length >= 3 &&
+    config.policyFingerprint.length >= 32 &&
+    /^[1-9][0-9]*$/u.test(config.maxSourceRaw) &&
+    config.minimumSequentialTtlMs >= 30_000
+  );
+}
+
+export function relayEvmExecutionConfigurationReady(
+  config: RelayEvmExecutionConfiguration,
+): boolean {
+  return config.enabled && relayEvmProfileConfigured(config);
+}
 
 export function loadPolymarketWrapExecutionConfiguration(
   source: Environment = process.env,

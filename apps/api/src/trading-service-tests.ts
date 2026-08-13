@@ -47,6 +47,12 @@ import {
 } from "./services/polymarket-deposit-wallet-relayer.js";
 import { sumErc20TransfersTo } from "./funding/execution/evm-erc20-receipt.js";
 import { knownPrivyPolicyFingerprint } from "./funding/execution/known-privy-wallet-signers.js";
+import { validateCombinedPolymarketRelayPolicy } from "./funding/execution/combined-privy-policy.js";
+import {
+  BASE_USDC,
+  RELAY_DEPOSITORY_V2,
+  RELAY_SELF_DEPOSITOR,
+} from "./funding-providers/relay/rehearsal.js";
 import { FundingPersistenceError } from "./funding/persistence/funding-operation-repository.js";
 import { FundingTradeAttemptError } from "./funding/persistence/funding-trade-attempt-repository.js";
 import { kalshiTradingExecutionTestHooks } from "./services/kalshi-trading-execution-service.js";
@@ -364,6 +370,125 @@ function buildValidPolymarketBuySellPolicy(): PrivyPolicyMetadata {
       },
     ],
   };
+}
+
+const relayPolicyCapRaw = "2000000";
+const relayApproveAbi = [
+  {
+    type: "function",
+    name: "approve",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "spender", type: "address" },
+      { name: "amount", type: "uint256" },
+    ],
+    outputs: [{ name: "", type: "bool" }],
+  },
+];
+const relayDepositAbi = [
+  {
+    type: "function",
+    name: "depositErc20",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "depositor", type: "address" },
+      { name: "token", type: "address" },
+      { name: "amount", type: "uint256" },
+      { name: "id", type: "bytes32" },
+    ],
+    outputs: [],
+  },
+];
+
+function buildCombinedPolicyWithRelay(): PrivyPolicyMetadata {
+  const condition = (
+    field: string,
+    fieldSource: string,
+    operator: string,
+    value: string,
+    abi?: readonly unknown[],
+  ) => ({
+    ...(abi ? { abi } : {}),
+    field,
+    field_source: fieldSource,
+    operator,
+    value,
+  });
+  const policy = buildValidPolymarketBuySellPolicy();
+  policy.rules.push(
+    {
+      action: "ALLOW",
+      conditions: [
+        condition("chain_id", "ethereum_transaction", "eq", "8453"),
+        condition("value", "ethereum_transaction", "eq", "0x0"),
+        condition("to", "ethereum_transaction", "eq", BASE_USDC),
+        condition(
+          "function_name",
+          "ethereum_calldata",
+          "eq",
+          "approve",
+          relayApproveAbi,
+        ),
+        condition(
+          "approve.spender",
+          "ethereum_calldata",
+          "eq",
+          RELAY_DEPOSITORY_V2,
+          relayApproveAbi,
+        ),
+        condition(
+          "approve.amount",
+          "ethereum_calldata",
+          "lte",
+          relayPolicyCapRaw,
+          relayApproveAbi,
+        ),
+      ],
+      id: "relay-approve",
+      method: "eth_sendTransaction",
+      name: "Relay approve",
+    },
+    {
+      action: "ALLOW",
+      conditions: [
+        condition("chain_id", "ethereum_transaction", "eq", "8453"),
+        condition("value", "ethereum_transaction", "eq", "0x0"),
+        condition("to", "ethereum_transaction", "eq", RELAY_DEPOSITORY_V2),
+        condition(
+          "function_name",
+          "ethereum_calldata",
+          "eq",
+          "depositErc20",
+          relayDepositAbi,
+        ),
+        condition(
+          "depositErc20.token",
+          "ethereum_calldata",
+          "eq",
+          BASE_USDC,
+          relayDepositAbi,
+        ),
+        condition(
+          "depositErc20.depositor",
+          "ethereum_calldata",
+          "eq",
+          RELAY_SELF_DEPOSITOR,
+          relayDepositAbi,
+        ),
+        condition(
+          "depositErc20.amount",
+          "ethereum_calldata",
+          "lte",
+          relayPolicyCapRaw,
+          relayDepositAbi,
+        ),
+      ],
+      id: "relay-deposit",
+      method: "eth_sendTransaction",
+      name: "Relay deposit",
+    },
+  );
+  return policy;
 }
 
 function buildValidPolymarketRedeemPolicy(): PrivyPolicyMetadata {
@@ -808,6 +933,46 @@ const tests: TestCase[] = [
       });
       assert.equal(combinedValidation.valid, true);
       assert.equal(combinedValidation.fundingMaxRaw, policyFundingMaxRaw);
+      const combinedWithRelay = buildCombinedPolicyWithRelay();
+      const combinedRelayValidation = validateCombinedPolymarketRelayPolicy({
+        builderCode: policyBuilderCode,
+        exchangeAddresses: policyExchangeAddresses,
+        fundingRouterAddress: policyFundingRouterAddress,
+        maxBuyUsd: 2,
+        policy: combinedWithRelay,
+        profile: "buy_sell",
+        relayMaxSourceRaw: relayPolicyCapRaw,
+      });
+      assert.equal(combinedRelayValidation.valid, true);
+      assert.equal(
+        combinedRelayValidation.fundingMaxRaw,
+        policyFundingMaxRaw,
+        "Relay partitioning preserves the Slice C funding cap",
+      );
+      const foreignRelayRule = structuredClone(combinedWithRelay);
+      const foreignDepositorConditions =
+        foreignRelayRule.rules.at(-1)?.conditions;
+      assert.ok(Array.isArray(foreignDepositorConditions));
+      (
+        foreignDepositorConditions.find(
+          (entry) =>
+            (entry as Record<string, unknown>).field ===
+            "depositErc20.depositor",
+        ) as Record<string, unknown>
+      ).value = "0x0000000000000000000000000000000000000020";
+      assert.equal(
+        validateCombinedPolymarketRelayPolicy({
+          builderCode: policyBuilderCode,
+          exchangeAddresses: policyExchangeAddresses,
+          fundingRouterAddress: policyFundingRouterAddress,
+          maxBuyUsd: 2,
+          policy: foreignRelayRule,
+          profile: "buy_sell",
+          relayMaxSourceRaw: relayPolicyCapRaw,
+        }).valid,
+        false,
+        "an exact but foreign Relay depositor cannot be hidden from policy closure",
+      );
       const combinedWithWildcard = structuredClone(combined);
       combinedWithWildcard.rules.push({
         action: "ALLOW",
@@ -1067,6 +1232,41 @@ const tests: TestCase[] = [
       assert.equal((await inspect(true, ["BUY", "SELL"])).state, "ready");
       assert.equal((await inspect(true, ["SELL"])).state, "ready");
       assert.equal((await inspect(true, ["BUY"])).state, "ready");
+      const revisedCombinedPolicy = buildCombinedPolicyWithRelay();
+      policies.set("buy-sell-policy", revisedCombinedPolicy);
+      configuration.policyFingerprint = knownPrivyPolicyFingerprint(
+        revisedCombinedPolicy,
+      );
+      configuration.relayMaxSourceRaw = relayPolicyCapRaw;
+      assert.equal(
+        (await inspect(true, ["BUY", "SELL"])).state,
+        "ready",
+        "the same attached combined policy remains trading-ready after exact Relay rules are added",
+      );
+      const broadenedCombinedPolicy = structuredClone(revisedCombinedPolicy);
+      const broadenedConditions =
+        broadenedCombinedPolicy.rules.at(-1)?.conditions;
+      assert.ok(Array.isArray(broadenedConditions));
+      (
+        broadenedConditions.find(
+          (entry) =>
+            (entry as Record<string, unknown>).field === "depositErc20.amount",
+        ) as Record<string, unknown>
+      ).value = "2000001";
+      policies.set("buy-sell-policy", broadenedCombinedPolicy);
+      configuration.policyFingerprint = knownPrivyPolicyFingerprint(
+        broadenedCombinedPolicy,
+      );
+      assert.equal(
+        (await inspect(true, ["BUY", "SELL"])).state,
+        "policy_invalid",
+        "a Relay cap mismatch keeps the shared policy fail-closed",
+      );
+      policies.set("buy-sell-policy", buildValidPolymarketBuySellPolicy());
+      configuration.policyFingerprint = knownPrivyPolicyFingerprint(
+        buildValidPolymarketBuySellPolicy(),
+      );
+      configuration.relayMaxSourceRaw = undefined;
       additionalSigners = [
         { overridePolicyIds: ["sell-policy"], signerId: "signer-1" },
       ];

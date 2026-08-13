@@ -17,14 +17,21 @@ import {
   validateKnownPrivySignerRuntime,
 } from "./known-privy-wallet-signers.js";
 import { fundingSidecarRuntimeConfig } from "../runtime/sidecar-runtime-config.js";
-import { validatePolymarketBotPolicyProfile } from "../../services/polymarket-automation-policy.js";
 import { sameAccountAddress } from "../domain/asset-identity.js";
+import { TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID } from "./delegated-funding-profile-ids.js";
+import { validateCombinedPolymarketRelayPolicy } from "./combined-privy-policy.js";
 
 export type PrivyDelegatedFundingDriverConfig = Readonly<{
   appId: string;
   appSecret: string;
   authorizationPrivateKey: string;
-  configuration: PolymarketWrapExecutionConfiguration;
+  configuration: Pick<
+    PolymarketWrapExecutionConfiguration,
+    "signerId" | "signerFingerprint" | "policyId" | "policyFingerprint"
+  > &
+    Readonly<{
+      relayMaxSourceRaw?: string;
+    }>;
 }>;
 
 export type PrivyDelegatedFundingSubmission = Readonly<{
@@ -154,11 +161,40 @@ function userOperationTransactionHash(payload: unknown): string | null {
   );
 }
 
+function evmRpcForNetwork(networkId: string): Readonly<{
+  url: string;
+  timeoutMs: number;
+}> | null {
+  if (networkId === "evm:137") {
+    return {
+      url: fundingSidecarRuntimeConfig.polygonRpcUrl,
+      timeoutMs: fundingSidecarRuntimeConfig.polygonRpcTimeoutMs,
+    };
+  }
+  if (networkId === "evm:8453") {
+    return {
+      url: fundingSidecarRuntimeConfig.baseRpcUrl,
+      timeoutMs: fundingSidecarRuntimeConfig.baseRpcTimeoutMs,
+    };
+  }
+  return null;
+}
+
+function evmChainId(networkId: string): number | null {
+  const match = /^evm:([1-9][0-9]*)$/u.exec(networkId);
+  if (!match) return null;
+  const value = Number(match[1]);
+  return Number.isSafeInteger(value) && value > 0 ? value : null;
+}
+
 async function resolveUserOperationHash(
   userOperationHash: string,
+  networkId = "evm:137",
 ): Promise<string | null> {
   if (!EVM_TRANSACTION_HASH.test(userOperationHash)) return null;
-  const response = await fetch(fundingSidecarRuntimeConfig.polygonRpcUrl, {
+  const rpc = evmRpcForNetwork(networkId);
+  if (!rpc) return null;
+  const response = await fetch(rpc.url, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
@@ -167,9 +203,7 @@ async function resolveUserOperationHash(
       method: "eth_getUserOperationReceipt",
       params: [userOperationHash],
     }),
-    signal: AbortSignal.timeout(
-      fundingSidecarRuntimeConfig.polygonRpcTimeoutMs,
-    ),
+    signal: AbortSignal.timeout(rpc.timeoutMs),
   });
   if (!response.ok) return null;
   return userOperationTransactionHash(await response.json().catch(() => null));
@@ -186,8 +220,10 @@ export async function resolvePrivyDelegatedFundingSubmission(
     >;
     userOperationTransactionHash: (
       userOperationHash: string,
+      networkId: string,
     ) => Promise<string | null>;
   }>,
+  networkId = "evm:137",
 ): Promise<DelegatedFundingExecutionResult> {
   const directHash = transactionHash(result.hash ?? result.transaction_hash);
   if (directHash) {
@@ -208,8 +244,10 @@ export async function resolvePrivyDelegatedFundingSubmission(
   const userOperationHash = result.user_operation_hash?.trim();
   if (userOperationHash) {
     try {
-      const resolvedHash =
-        await dependencies.userOperationTransactionHash(userOperationHash);
+      const resolvedHash = await dependencies.userOperationTransactionHash(
+        userOperationHash,
+        networkId,
+      );
       if (resolvedHash) {
         return { kind: "submitted", transactionReference: resolvedHash };
       }
@@ -249,6 +287,7 @@ export class PrivyDelegatedFundingDriver implements DelegatedFundingNetworkDrive
     input: Readonly<{
       walletAddress: string;
       walletId: string;
+      requiredProfileId?: string;
     }>,
     authority: Pick<
       PolymarketWrapExecutionConfiguration,
@@ -341,7 +380,7 @@ export class PrivyDelegatedFundingDriver implements DelegatedFundingNetworkDrive
             "Privy automation policy is not an Ethereum policy",
           );
         }
-        const policyValidation = validatePolymarketBotPolicyProfile({
+        const policyValidation = validateCombinedPolymarketRelayPolicy({
           builderCode: fundingSidecarRuntimeConfig.polymarketBuilderCode,
           exchangeAddresses: [
             fundingSidecarRuntimeConfig.polymarketExchangeAddress,
@@ -351,10 +390,19 @@ export class PrivyDelegatedFundingDriver implements DelegatedFundingNetworkDrive
           maxBuyUsd: fundingSidecarRuntimeConfig.polymarketBotBuyPolicyMaxUsd,
           policy: { ...normalizedPolicy, chainType: "ethereum" },
           profile: "buy_sell",
+          relayMaxSourceRaw: this.input.configuration.relayMaxSourceRaw,
         });
         if (!policyValidation.valid) {
           throw new PrivyDelegatedFundingProfileInvalidError(
             "Privy automation policy is not the exact combined BUY+SELL+FUNDING profile",
+          );
+        }
+        if (
+          input.requiredProfileId === TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID &&
+          (!policyValidation.relayRulesPresent || !policyValidation.valid)
+        ) {
+          throw new PrivyDelegatedFundingProfileInvalidError(
+            "Privy automation policy lacks the exact Relay EVM rules",
           );
         }
       }),
@@ -363,12 +411,17 @@ export class PrivyDelegatedFundingDriver implements DelegatedFundingNetworkDrive
 
   private async resolveSubmission(
     result: PrivyDelegatedFundingSubmission,
+    networkId: string,
   ): Promise<DelegatedFundingExecutionResult> {
-    return resolvePrivyDelegatedFundingSubmission(result, {
-      transactionById: (transactionId) =>
-        this.client.transactions().get(transactionId),
-      userOperationTransactionHash: resolveUserOperationHash,
-    });
+    return resolvePrivyDelegatedFundingSubmission(
+      result,
+      {
+        transactionById: (transactionId) =>
+          this.client.transactions().get(transactionId),
+        userOperationTransactionHash: resolveUserOperationHash,
+      },
+      networkId,
+    );
   }
 
   private async lookupByReference(
@@ -419,6 +472,27 @@ export class PrivyDelegatedFundingDriver implements DelegatedFundingNetworkDrive
     }
   }
 
+  async inspectWalletProfileForProfile(
+    input: Readonly<{
+      walletAddress: string;
+      walletId: string;
+      profileId: string;
+    }>,
+  ): Promise<PrivyWalletProfileInspection> {
+    try {
+      await this.verifyLiveProfile({
+        walletAddress: input.walletAddress,
+        walletId: input.walletId,
+        requiredProfileId: input.profileId,
+      });
+      return "valid";
+    } catch (error) {
+      return error instanceof PrivyDelegatedFundingProfileInvalidError
+        ? "invalid"
+        : "unavailable";
+    }
+  }
+
   private async submit(
     claim: DelegatedFundingExecutionClaim,
     priorSubmissionMayHaveOccurred: boolean,
@@ -428,6 +502,7 @@ export class PrivyDelegatedFundingDriver implements DelegatedFundingNetworkDrive
         {
           walletAddress: claim.walletAddress,
           walletId: claim.privyWalletId,
+          requiredProfileId: claim.profileId,
         },
         {
           policyFingerprint: claim.policyFingerprint,
@@ -451,18 +526,27 @@ export class PrivyDelegatedFundingDriver implements DelegatedFundingNetworkDrive
             reasonCode: "delegated_action_invalid",
           };
     }
+    const chainId = evmChainId(claim.action.networkId);
+    if (!chainId || !evmRpcForNetwork(claim.action.networkId)) {
+      return priorSubmissionMayHaveOccurred
+        ? { kind: "pending" }
+        : {
+            kind: "proven_nonbroadcast_failure",
+            reasonCode: "delegated_action_invalid",
+          };
+    }
     const result = await this.client
       .wallets()
       .ethereum()
       .sendTransaction(claim.privyWalletId, {
         address: claim.walletAddress,
-        caip2: "eip155:137",
+        caip2: `eip155:${chainId}`,
         sponsor: claim.sponsor,
         reference_id: claim.attemptId,
         idempotency_key: claim.attemptId,
         params: {
           transaction: {
-            chain_id: 137,
+            chain_id: chainId,
             to: claim.action.to,
             data: claim.action.data,
             // Funding actions store raw amounts as decimal strings; Privy requires
@@ -489,7 +573,7 @@ export class PrivyDelegatedFundingDriver implements DelegatedFundingNetworkDrive
         );
         throw error;
       });
-    return this.resolveSubmission(result);
+    return this.resolveSubmission(result, claim.action.networkId);
   }
 
   async execute(
@@ -506,7 +590,7 @@ export class PrivyDelegatedFundingDriver implements DelegatedFundingNetworkDrive
     // outbox recovery path for a crash between the committed attempt and the
     // external call. It cannot create a second logical submission.
     return transaction
-      ? this.resolveSubmission(transaction)
+      ? this.resolveSubmission(transaction, claim.action.networkId)
       : this.submit(claim, true);
   }
 }

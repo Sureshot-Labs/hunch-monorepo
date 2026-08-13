@@ -2230,13 +2230,22 @@ async function testCompositePreparationAndRelayCommit(): Promise<void> {
         failureCode: null,
         evidence: {},
       } as const;
-      await applyFundingStepReceiptEvidenceInTransaction(replayClient, {
-        operationId,
-        stepId: preparationStepId,
-        attemptId: preparationAttempt.id,
-        networkId: ASSET.networkId,
-        receipt: finalizedPreparationReceipt,
-      });
+      const firstFinalizedAt = new Date("2026-08-13T10:00:00.000Z");
+      const firstFinalized = await applyFundingStepReceiptEvidenceInTransaction(
+        replayClient,
+        {
+          operationId,
+          stepId: preparationStepId,
+          attemptId: preparationAttempt.id,
+          networkId: ASSET.networkId,
+          receipt: finalizedPreparationReceipt,
+          now: firstFinalizedAt,
+        },
+      );
+      assert.equal(
+        firstFinalized.finalizedAt?.getTime(),
+        firstFinalizedAt.getTime(),
+      );
       await replayClient.query(
         `
           update funding_operation_steps
@@ -2248,13 +2257,25 @@ async function testCompositePreparationAndRelayCommit(): Promise<void> {
         [operationId, preparationStepId],
       );
 
-      await applyFundingStepReceiptEvidenceInTransaction(replayClient, {
-        operationId,
-        stepId: preparationStepId,
-        attemptId: preparationAttempt.id,
-        networkId: ASSET.networkId,
-        receipt: finalizedPreparationReceipt,
-      });
+      const repeatedFinalizedAt = new Date("2026-08-13T10:01:00.000Z");
+      const repeatedFinalized =
+        await applyFundingStepReceiptEvidenceInTransaction(replayClient, {
+          operationId,
+          stepId: preparationStepId,
+          attemptId: preparationAttempt.id,
+          networkId: ASSET.networkId,
+          receipt: finalizedPreparationReceipt,
+          now: repeatedFinalizedAt,
+        });
+      assert.equal(
+        repeatedFinalized.finalizedAt?.getTime(),
+        firstFinalizedAt.getTime(),
+        "repeated finalized polling must preserve the bounded-watch origin",
+      );
+      assert.equal(
+        repeatedFinalized.observedAt.getTime(),
+        repeatedFinalizedAt.getTime(),
+      );
       const replayedPreparationStep = await replayClient.query<{
         state: string;
       }>(

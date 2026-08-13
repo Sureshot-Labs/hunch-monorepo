@@ -58,6 +58,7 @@ try {
           {
             address: evmTo,
             data: "0x",
+            logIndex: "0x7",
             topics: [`0x${"33".repeat(32)}`],
           },
         ],

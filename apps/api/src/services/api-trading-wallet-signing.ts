@@ -37,6 +37,8 @@ import {
   type PolicyValidationResult,
   type PrivyBotPolicyProfile,
 } from "./polymarket-automation-policy.js";
+import { validateCombinedPolymarketRelayPolicy } from "../funding/execution/combined-privy-policy.js";
+import { loadRelayEvmExecutionConfiguration } from "../funding/execution/delegated-funding-config.js";
 
 export {
   validatePolymarketBotPolicy,
@@ -101,6 +103,7 @@ export type PrivyServerSignerConfiguration = {
   builderCode?: string;
   legacyBuyPolicyId?: string;
   legacySellPolicyId?: string;
+  relayMaxSourceRaw?: string;
 };
 
 const defaultInspectorDependencies: PrivySignerInspectorDependencies = {
@@ -178,13 +181,15 @@ export async function resolvePolymarketBotPolicyFundingCapRaw(): Promise<bigint>
 
   const value = (async () => {
     const policy = await PrivyService.getPolicyMetadata(policyId);
-    const validation = validatePolymarketBotPolicyProfile({
+    const relayConfiguration = loadRelayEvmExecutionConfiguration();
+    const validation = validateCombinedPolymarketRelayPolicy({
       builderCode: env.polymarketBuilderCode,
       exchangeAddresses,
       fundingRouterAddress,
       maxBuyUsd: policyMaxBuyUsd,
       policy,
       profile: "buy_sell",
+      relayMaxSourceRaw: relayConfiguration.maxSourceRaw,
     });
     if (
       policy.id !== policyId ||
@@ -235,6 +240,9 @@ export async function inspectServerEvmWalletAuthorization(input: {
   signer: string;
   walletId: string;
 }): Promise<PrivyServerSignerStatus> {
+  const relayConfiguration = input.configuration
+    ? null
+    : loadRelayEvmExecutionConfiguration();
   const configuration = input.configuration ?? {
     authorizationId: env.privyWalletAuthorizationId,
     authorizationKey: env.privyWalletAuthorizationKey,
@@ -249,6 +257,7 @@ export async function inspectServerEvmWalletAuthorization(input: {
     builderCode: env.polymarketBuilderCode,
     legacyBuyPolicyId: env.privyPolymarketBotBuyPolicyId,
     legacySellPolicyId: env.privyPolymarketBotSellPolicyId,
+    relayMaxSourceRaw: relayConfiguration?.maxSourceRaw,
   };
   const signerId = configuration.authorizationId.trim();
   const combinedPolicyId = configuration.policyId.trim();
@@ -491,14 +500,25 @@ export async function inspectServerEvmWalletAuthorization(input: {
     const policy = policiesById.get(id);
     const profile = configuredProfileByPolicyId.get(id);
     if (!policy || !profile) continue;
-    const validation = validatePolymarketBotPolicyProfile({
-      builderCode: configuration.builderCode?.trim() ?? "",
-      exchangeAddresses: configuration.exchangeAddresses,
-      fundingRouterAddress: configuration.fundingRouterAddress,
-      maxBuyUsd: policyMaxBuyUsd,
-      policy,
-      profile,
-    });
+    const validation =
+      id === combinedPolicyId
+        ? validateCombinedPolymarketRelayPolicy({
+            builderCode: configuration.builderCode?.trim() ?? "",
+            exchangeAddresses: configuration.exchangeAddresses,
+            fundingRouterAddress: configuration.fundingRouterAddress,
+            maxBuyUsd: policyMaxBuyUsd,
+            policy,
+            profile,
+            relayMaxSourceRaw: configuration.relayMaxSourceRaw,
+          })
+        : validatePolymarketBotPolicyProfile({
+            builderCode: configuration.builderCode?.trim() ?? "",
+            exchangeAddresses: configuration.exchangeAddresses,
+            fundingRouterAddress: configuration.fundingRouterAddress,
+            maxBuyUsd: policyMaxBuyUsd,
+            policy,
+            profile,
+          });
     if (
       id === combinedPolicyId &&
       knownPrivyPolicyFingerprint(policy) !== combinedPolicyFingerprint

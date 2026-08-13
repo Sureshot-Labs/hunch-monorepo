@@ -70,6 +70,14 @@ export async function fetchUserFinancialLifecycleSummary(
           )
           or exists (
             select 1
+            from telegram_funding_authorization_reservations reservation
+            join telegram_funding_authorizations funding_authorization
+              on funding_authorization.id = reservation.authorization_id
+            where funding_authorization.user_id = any($1::uuid[])
+              and reservation.status in ('reserved', 'cleanup_required')
+          )
+          or exists (
+            select 1
             from funding_operation_step_attempts attempt
             join funding_operation_steps step on step.id = attempt.step_id
             join funding_operations operation

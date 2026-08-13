@@ -270,6 +270,11 @@ export function deriveTargetState(
     (observation) =>
       isCanonicalFinal(observation) && observation.kind !== "venue_readiness",
   );
+  const delegatedRelayReady =
+    operation.supportMetadata.routeId !== "base-usdc-to-polygon-pusd" ||
+    (steps.length === 2 &&
+      steps.every((step) => step.state === "succeeded") &&
+      hasFinalObservation(observations, "source_debit"));
   const recoveryTarget = (): FundingOperationState => {
     const exact = recoveryTargetFor(current);
     if (exact) return exact;
@@ -278,10 +283,15 @@ export function deriveTargetState(
       stage: current.stage === "committed" ? "source_action" : current.stage,
     };
   };
+  const canonicalFinalRefundPresent = observations.some(
+    (observation) =>
+      observation.kind === "refund_credit" && isCanonicalFinal(observation),
+  );
   if (
     observations.some(
       (observation) =>
-        observation.finalityStatus === "reorged" || !observation.canonical,
+        (observation.finalityStatus === "reorged" || !observation.canonical) &&
+        !(observation.kind === "refund_credit" && canonicalFinalRefundPresent),
     )
   ) {
     const recovery = recoveryTarget();
@@ -355,7 +365,11 @@ export function deriveTargetState(
     observations,
     "destination_credit",
   );
-  if (venueReady && (!composite || destinationRequirementMet)) {
+  if (
+    venueReady &&
+    delegatedRelayReady &&
+    (!composite || destinationRequirementMet)
+  ) {
     return {
       reorgBlockedByTerminalState: false,
       target:
@@ -366,6 +380,7 @@ export function deriveTargetState(
   }
   if (
     destinationObserved &&
+    delegatedRelayReady &&
     (!composite || (allSegmentsSucceeded && destinationRequirementMet))
   ) {
     if (destinationRequiresPreparation(operation)) {
@@ -1091,6 +1106,24 @@ export async function reduceFundingOperationInTransaction(
       now,
     );
   }
+  if (operation.status === "completed" || operation.status === "refunded") {
+    await client.query(
+      `update telegram_funding_authorization_reservations
+          set status = case when $2 = 'refunded' then 'refunded' else 'settled' end,
+              resolved_at = $3,
+              resolution_evidence = resolution_evidence || jsonb_build_object(
+                'operationStatus', $2::text,
+                'operationId', $1::text
+              ),
+              updated_at = $3
+        where funding_operation_id = $1::uuid
+          and (
+            status = 'reserved'
+            or ($2 = 'refunded' and status = 'cleaned')
+          )`,
+      [operation.id, operation.status, now],
+    );
+  }
 
   return {
     operationId: operation.id,
@@ -1163,6 +1196,10 @@ const RECONCILIATION_ACTIVE_STATUSES = new Set<FundingOperationState["status"]>(
 export const DEFAULT_FUNDING_RECONCILIATION_TERMINAL_TIMEOUT_MS = 90_000;
 export const FUNDING_RECONCILIATION_TIMEOUT_ERROR_CODE =
   "reconciliation_evidence_timeout";
+export const TERMINAL_REFUND_REORG_UNRESOLVED_ERROR_CODE =
+  "terminal_refund_reorg_unresolved";
+export const TERMINAL_RELAY_EVIDENCE_REORG_UNRESOLVED_ERROR_CODE =
+  "terminal_relay_evidence_reorg_unresolved";
 
 export type FundingReconciliationDisposition =
   | "complete"
@@ -1470,6 +1507,7 @@ export async function pollFundingReconciliationEvidence(
     operationId: string;
     state: FundingOperationState;
     recoveryMode?: FundingRecoveryMode | null;
+    terminalRelayReceiptWatch?: boolean;
     awaitingUnbroadcastActionReport?: boolean;
     now: Date;
     providerPoll?: FundingReconciliationBatchOptions["providerPoll"];
@@ -1477,18 +1515,50 @@ export async function pollFundingReconciliationEvidence(
     postconditionPoll?: FundingReconciliationBatchOptions["postconditionPoll"];
     destinationPoll?: FundingReconciliationBatchOptions["destinationPoll"];
   }>,
-): Promise<void> {
-  if (input.awaitingUnbroadcastActionReport) {
-    return;
-  }
+): Promise<Readonly<{ terminalReceiptPollFailed: boolean }>> {
+  const terminalRelayReceiptWatch =
+    input.terminalRelayReceiptWatch === true &&
+    ["completed", "refunded", "failed", "cancelled"].includes(
+      input.state.status,
+    );
+  const terminalRelayRefundWatch =
+    terminalRelayReceiptWatch && input.state.status === "refunded";
+  if (input.awaitingUnbroadcastActionReport && !terminalRelayReceiptWatch)
+    return { terminalReceiptPollFailed: false };
   if (
     input.state.status === "recovery_required" &&
     input.recoveryMode !== "automatic_evidence"
   ) {
-    return;
+    return { terminalReceiptPollFailed: false };
   }
-  await input.receiptPoll?.(input.operationId, input.now);
-  if (input.state.status === "awaiting_user") return;
+  let terminalReceiptPollFailed = false;
+  if (terminalRelayReceiptWatch) {
+    try {
+      await input.receiptPoll?.(input.operationId, input.now);
+    } catch {
+      terminalReceiptPollFailed = true;
+      // A receipt RPC/integrity failure must not consume the bounded local
+      // canonical refund watch. Continue to the authoritative chain scan.
+    }
+  } else {
+    await input.receiptPoll?.(input.operationId, input.now);
+  }
+  if (input.state.status === "awaiting_user") {
+    return { terminalReceiptPollFailed };
+  }
+  // A terminal refund remains under a bounded canonical watch. Refresh Relay
+  // first so a replacement refund transaction hash revealed after a reorg is
+  // available to the exact owned-transfer scanner in this same poll wave.
+  // Provider availability must not gate the local canonical scan: otherwise a
+  // Relay outage could consume the whole watch without observing a chain reorg.
+  // This refresh is therefore best-effort for terminal evidence only.
+  if (terminalRelayRefundWatch) {
+    try {
+      await input.providerPoll?.(input.operationId, input.now);
+    } catch {
+      // Continue to the authoritative local refund scan and bounded reduction.
+    }
+  }
   const [, destination] = await Promise.all([
     input.postconditionPoll?.(input.operationId, input.now),
     input.destinationPoll?.(input.operationId, input.now),
@@ -1500,14 +1570,15 @@ export async function pollFundingReconciliationEvidence(
       input.recoveryMode === "automatic_evidence"
     )
   ) {
-    return;
+    return { terminalReceiptPollFailed };
   }
   // Finalized source receipts plus the exact owned-destination balance delta
   // are authoritative completion evidence. Provider status is only needed
   // while that destination evidence is still absent.
-  if (!destination?.destinationSatisfied) {
+  if (!terminalRelayRefundWatch && !destination?.destinationSatisfied) {
     await input.providerPoll?.(input.operationId, input.now);
   }
+  return { terminalReceiptPollFailed };
 }
 
 async function loadFundingOperationState(
@@ -1517,6 +1588,7 @@ async function loadFundingOperationState(
   Readonly<{
     state: FundingOperationState;
     recoveryMode: FundingRecoveryMode | null;
+    terminalRelayReceiptWatch: boolean;
     awaitingUnbroadcastActionReport: boolean;
     unbroadcastActionExpiresAt: Date | null;
   }>
@@ -1532,6 +1604,10 @@ async function loadFundingOperationState(
     return {
       state: operationState(operation),
       recoveryMode: operation.recoveryMode,
+      terminalRelayReceiptWatch:
+        ["completed", "refunded", "failed", "cancelled"].includes(
+          operation.status,
+        ) && operation.supportMetadata.routeId === "base-usdc-to-polygon-pusd",
       awaitingUnbroadcastActionReport: await awaitingUnbroadcastActionReport(
         client,
         operation.id,
@@ -1742,10 +1818,11 @@ async function processLease(
       });
       return "completed";
     }
-    await pollFundingReconciliationEvidence({
+    const pollEvidence = await pollFundingReconciliationEvidence({
       operationId: lease.operationId,
       state: operationBeforePoll.state,
       recoveryMode: operationBeforePoll.recoveryMode,
+      terminalRelayReceiptWatch: operationBeforePoll.terminalRelayReceiptWatch,
       awaitingUnbroadcastActionReport:
         operationBeforePoll.awaitingUnbroadcastActionReport,
       now: options.now,
@@ -1754,12 +1831,170 @@ async function processLease(
       postconditionPoll,
       destinationPoll,
     });
+    const terminalRelayEvidenceReorgIncident =
+      operationBeforePoll.terminalRelayReceiptWatch
+        ? await pool.query<{ incident: boolean }>(
+            `select exists (
+               select 1
+                 from funding_step_receipt_observations receipt
+                 join funding_operation_steps step on step.id = receipt.step_id
+                where receipt.operation_id = $1::uuid
+                  and step.executor_id = 'telegram_relay_evm_funding_v1'
+                  and receipt.status = 'reorged'
+                  and receipt.reorged_at <=
+                        $2::timestamptz - interval '15 minutes'
+             ) as incident`,
+            [lease.operationId, options.now],
+          )
+        : null;
+    if (terminalRelayEvidenceReorgIncident?.rows[0]?.incident === true) {
+      await finishFundingReconciliationLease(pool, {
+        jobId: lease.jobId,
+        leaseOwner: lease.leaseOwner,
+        leaseToken: lease.leaseToken,
+        result: {
+          kind: "error",
+          dueAt: options.now,
+          errorCode: TERMINAL_RELAY_EVIDENCE_REORG_UNRESOLVED_ERROR_CODE,
+          errorSummary:
+            "terminal Relay receipt reorg remained unresolved after its canonical watch window",
+          deadLetter: true,
+        },
+        now: options.now,
+      });
+      return "dead_lettered";
+    }
+    if (pollEvidence.terminalReceiptPollFailed) {
+      const terminalReceiptVerificationWindow = await pool.query<{
+        expired: boolean;
+      }>(
+        `select exists (
+                 select 1
+                   from funding_operation_steps step
+                   join funding_step_receipt_observations receipt
+                     on receipt.step_id = step.id
+                  where step.operation_id = $1::uuid
+                    and step.executor_id = 'telegram_relay_evm_funding_v1'
+                    and receipt.status in ('finalized', 'failed')
+                    and receipt.canonical
+                    and receipt.finalized_at <=
+                          $2::timestamptz - interval '15 minutes'
+               )
+               and not exists (
+                 select 1
+                   from funding_operation_steps step
+                   join funding_step_receipt_observations receipt
+                     on receipt.step_id = step.id
+                  where step.operation_id = $1::uuid
+                    and step.executor_id = 'telegram_relay_evm_funding_v1'
+                    and receipt.status in ('finalized', 'failed')
+                    and receipt.canonical
+                    and receipt.finalized_at >
+                          $2::timestamptz - interval '15 minutes'
+               ) as expired`,
+        [lease.operationId, options.now],
+      );
+      const deadLetter =
+        terminalReceiptVerificationWindow.rows[0]?.expired === true;
+      await finishFundingReconciliationLease(pool, {
+        jobId: lease.jobId,
+        leaseOwner: lease.leaseOwner,
+        leaseToken: lease.leaseToken,
+        result: {
+          kind: "error",
+          dueAt: new Date(options.now.getTime() + options.retryDelayMs),
+          errorCode: "terminal_relay_receipt_verification_unavailable",
+          errorSummary:
+            "terminal Relay receipt canonicality verification was unavailable",
+          deadLetter,
+        },
+        now: options.now,
+      });
+      return deadLetter ? "dead_lettered" : "requeued";
+    }
     const reduction = await reduceFundingOperation(pool, {
       operationId: lease.operationId,
       now: options.now,
     });
+    const relayReceiptReorgWatch = reduction.terminal
+      ? await pool.query<{ watching: boolean }>(
+          `select exists (
+             select 1
+               from funding_operation_steps step
+               join funding_step_receipt_observations receipt
+                 on receipt.step_id = step.id
+              where step.operation_id = $1::uuid
+                and step.executor_id = 'telegram_relay_evm_funding_v1'
+                and receipt.status in ('finalized', 'failed')
+                and receipt.finalized_at > $2::timestamptz - interval '15 minutes'
+             union all
+             select 1
+               from funding_observations refund
+              where refund.operation_id = $1::uuid
+                and refund.kind = 'refund_credit'
+                and (
+                  (
+                    refund.finality_status = 'finalized'
+                    and refund.canonical
+                    and refund.finalized_at >
+                          $2::timestamptz - interval '15 minutes'
+                  )
+                  or (
+                    refund.finality_status = 'reorged'
+                    and not refund.canonical
+                    and refund.reorged_at >
+                          $2::timestamptz - interval '15 minutes'
+                  )
+                )
+           ) as watching`,
+          [lease.operationId, options.now],
+        )
+      : null;
     const reductionCompleted =
-      reduction.terminal && !reduction.reorgBlockedByTerminalState;
+      reduction.terminal &&
+      !reduction.reorgBlockedByTerminalState &&
+      relayReceiptReorgWatch?.rows[0]?.watching !== true;
+    const terminalRefundReorgIncident =
+      reduction.terminal && reduction.reorgBlockedByTerminalState
+        ? await pool.query<{ incident: boolean }>(
+            `select (
+               (
+                 select max(reorged_refund.reorged_at)
+                   from funding_observations reorged_refund
+                  where reorged_refund.operation_id = $1::uuid
+                    and reorged_refund.kind = 'refund_credit'
+                    and reorged_refund.finality_status = 'reorged'
+                    and not reorged_refund.canonical
+               ) <= $2::timestamptz - interval '15 minutes'
+               and not exists (
+                 select 1
+                   from funding_observations canonical_refund
+                  where canonical_refund.operation_id = $1::uuid
+                    and canonical_refund.kind = 'refund_credit'
+                    and canonical_refund.finality_status = 'finalized'
+                    and canonical_refund.canonical
+               )
+             ) as incident`,
+            [lease.operationId, options.now],
+          )
+        : null;
+    if (terminalRefundReorgIncident?.rows[0]?.incident === true) {
+      await finishFundingReconciliationLease(pool, {
+        jobId: lease.jobId,
+        leaseOwner: lease.leaseOwner,
+        leaseToken: lease.leaseToken,
+        result: {
+          kind: "error",
+          dueAt: options.now,
+          errorCode: TERMINAL_REFUND_REORG_UNRESOLVED_ERROR_CODE,
+          errorSummary:
+            "terminal Relay refund reorg remained unresolved after its canonical recovery window",
+          deadLetter: true,
+        },
+        now: options.now,
+      });
+      return "dead_lettered";
+    }
     const activeWindow = reductionCompleted
       ? null
       : await synchronizeFundingReconciliationActiveWindow(pool, {

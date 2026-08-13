@@ -23,9 +23,11 @@ import type {
 } from "../../funding/planner/source-options.js";
 import type { FundingRuntimePolicy } from "../../funding/policies/funding-policy.js";
 import { canonicalJsonHash } from "../../funding/persistence/canonical.js";
+import type { FundingCommitStep } from "../../funding/persistence/funding-operation-repository.js";
 import { resolveActionSponsorship } from "../../funding/execution/sponsorship-policy.js";
 import { RelayPinnedActionValidator } from "./action-validator.js";
 import { isRelayPinnedStableAsset } from "./mappings.js";
+import { canonicalizeRelayDepositoryV2SelfBoundAction } from "./rehearsal.js";
 import type { createRelayReferenceCodec } from "./reference-codec.js";
 import type { NormalizedRelayWalletQuote } from "./wallet-adapter.js";
 
@@ -230,6 +232,91 @@ export function buildPolymarketPreRouteHandoffSteps(input: {
   ];
 }
 
+export function relayDelegatedCommitSteps(
+  input: Readonly<{
+    steps: readonly FundingCommitStep[];
+    sourceAmount: Money;
+    profile: WalletExecutionProfile;
+    serverExecutionProfileId: string;
+  }>,
+): readonly FundingCommitStep[] {
+  if (
+    input.steps.length !== 2 ||
+    typeof input.steps[0]?.normalizedAction.actionId !== "string" ||
+    !input.steps[0].normalizedAction.actionId.endsWith(":approve") ||
+    typeof input.steps[1]?.normalizedAction.actionId !== "string" ||
+    !input.steps[1].normalizedAction.actionId.endsWith(":deposit")
+  ) {
+    throw new Error(
+      "delegated Relay EVM route requires exact approve/deposit steps",
+    );
+  }
+  const quotedDepositStep = input.steps[1];
+  const quotedDepositAction = quotedDepositStep.normalizedAction;
+  if (
+    quotedDepositAction.kind !== "evm_transaction" ||
+    typeof quotedDepositAction.to !== "string" ||
+    typeof quotedDepositAction.data !== "string" ||
+    quotedDepositAction.valueRaw !== "0" ||
+    quotedDepositAction.senderWalletId !== input.profile.walletId
+  ) {
+    throw new Error("delegated Relay deposit quote is not an exact EVM action");
+  }
+  const canonicalDeposit = canonicalizeRelayDepositoryV2SelfBoundAction({
+    action: {
+      data: quotedDepositAction.data,
+      to: quotedDepositAction.to,
+      value: 0n,
+    },
+    amount: BigInt(input.sourceAmount.raw),
+    token: input.sourceAmount.asset.assetId,
+    user: input.profile.address,
+  });
+  const canonicalDepositAction = jsonRecord({
+    ...quotedDepositAction,
+    data: canonicalDeposit.data,
+  });
+  const committedSteps = [
+    input.steps[0],
+    {
+      ...quotedDepositStep,
+      actionFingerprint: canonicalJsonHash(canonicalDepositAction),
+      normalizedAction: canonicalDepositAction,
+      actionValidationResult: jsonRecord({
+        ...quotedDepositStep.actionValidationResult,
+        quotedActionFingerprint: quotedDepositStep.actionFingerprint,
+        quotedDepositorAddress: input.profile.address,
+        committedDepositorMode: "msg_sender_via_zero",
+        relayOrderId: canonicalDeposit.orderId,
+      }),
+    },
+  ];
+  return committedSteps.map((step, ordinal) => ({
+    ...step,
+    stepKind: ordinal === 0 ? "approval" : step.stepKind,
+    state: "planned",
+    executorId: input.serverExecutionProfileId,
+    actionValidationResult: jsonRecord({
+      ...step.actionValidationResult,
+      delegatedProfileId: input.serverExecutionProfileId,
+      relayStepKind: ordinal === 0 ? "approve" : "deposit",
+      requiresSingleOperationBundle: true,
+      ...(ordinal === 1
+        ? {
+            postconditionEvidenceKind: "exact_erc20_source_debit_v1",
+            expectedSourceAssetId: input.sourceAmount.asset.assetId,
+            expectedSourceAddress: input.profile.address,
+            expectedSourceRecipient:
+              typeof step.normalizedAction.to === "string"
+                ? step.normalizedAction.to
+                : "",
+            expectedSourceRaw: input.sourceAmount.raw,
+          }
+        : {}),
+    }),
+  }));
+}
+
 function executionPlan(input: {
   quote: NormalizedRelayWalletQuote;
   route: FundingRuntimePolicy["routes"][number];
@@ -262,6 +349,7 @@ export async function buildRelayPlanningQuote(
     quote: NormalizedRelayWalletQuote;
     quoteCorrelationId: string;
     route: FundingRuntimePolicy["routes"][number];
+    serverExecutionProfileId?: string;
     source: RelayEligibleSourceFact;
     supportMetadata?: Readonly<Record<string, JsonValue>>;
   }>,
@@ -279,12 +367,20 @@ export async function buildRelayPlanningQuote(
     sourceAmount: input.quote.sourceAmount,
     profile: input.profile,
   });
-  const steps = buildPolymarketPreRouteHandoffSteps({
+  const clientSteps = buildPolymarketPreRouteHandoffSteps({
     source: input.source,
     sourceAmount: input.quote.sourceAmount,
     profile: input.profile,
     steps: relaySteps,
   });
+  const steps = input.serverExecutionProfileId
+    ? relayDelegatedCommitSteps({
+        steps: clientSteps,
+        sourceAmount: input.quote.sourceAmount,
+        profile: input.profile,
+        serverExecutionProfileId: input.serverExecutionProfileId,
+      })
+    : clientSteps;
   const plan = {
     operation: {
       purpose: operationPurposeForExternalRecipient(

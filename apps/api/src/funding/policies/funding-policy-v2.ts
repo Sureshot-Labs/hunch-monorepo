@@ -11,6 +11,7 @@ import {
 import { sameAsset } from "../domain/asset-identity.js";
 import type { AssetRef, FundingDestinationOption } from "../domain/types.js";
 import { supportsCanonicalFundingReceiveEvents } from "../receive/canonical-receive-capabilities.js";
+import { usdAmountSchema } from "../domain/schemas.js";
 import {
   DEFAULT_FUNDING_RUNTIME_POLICY,
   deepFreeze,
@@ -18,7 +19,10 @@ import {
   type FundingPolicyValidationIssue,
   type FundingRuntimePolicy,
 } from "./funding-policy.js";
-import { POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID } from "../execution/delegated-funding-profile-ids.js";
+import {
+  POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
+  TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
+} from "../execution/delegated-funding-profile-ids.js";
 
 export const FUNDING_VENUE_IDS = deepFreeze([
   "polymarket",
@@ -58,6 +62,7 @@ const rawFundingIntentPolicySchema = z
     receive: z
       .object({
         assets: z.array(receiveAssetIdSchema).max(32),
+        delegatedRelayEvmDailyCapUsd: usdAmountSchema.optional(),
         privy: z.boolean(),
       })
       .strict(),
@@ -72,6 +77,12 @@ export const fundingIntentPolicySchema = rawFundingIntentPolicySchema.transform(
       venues: unique(input.venues),
       receive: {
         assets: unique(input.receive.assets),
+        ...(input.receive.delegatedRelayEvmDailyCapUsd
+          ? {
+              delegatedRelayEvmDailyCapUsd:
+                input.receive.delegatedRelayEvmDailyCapUsd,
+            }
+          : {}),
         privy: input.receive.privy,
       },
       paused: input.paused,
@@ -89,6 +100,7 @@ export const fundingIntentPatchSchema = z
     receive: z
       .object({
         assets: z.array(receiveAssetIdSchema).max(32).optional(),
+        delegatedRelayEvmDailyCapUsd: usdAmountSchema.nullable().optional(),
         privy: z.boolean().optional(),
       })
       .strict()
@@ -362,6 +374,11 @@ export function compileFundingIntentPolicy(
         venueId === "polymarket" &&
         !policy.paused &&
         policy.receive.assets.includes("polygon:usdce");
+      const delegatedRelayEvm =
+        venueId === "polymarket" &&
+        !policy.paused &&
+        policy.receive.assets.includes("base:usdc") &&
+        policy.receive.delegatedRelayEvmDailyCapUsd !== undefined;
       return {
         venueId,
         lifecycleEnabled: true,
@@ -370,11 +387,14 @@ export function compileFundingIntentPolicy(
         fundingEnabled: venueActive(policy, venueId),
         tradingEnabled: false,
         withdrawalEnabled: false,
-        delegatedExecutionEnabled: delegatedWrap,
-        delegatedPolicyIds: delegatedWrap
-          ? [POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID]
-          : [],
-        delegatedDailyCapUsd: null,
+        delegatedExecutionEnabled: delegatedWrap || delegatedRelayEvm,
+        delegatedPolicyIds: [
+          ...(delegatedWrap ? [POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID] : []),
+          ...(delegatedRelayEvm ? [TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID] : []),
+        ],
+        delegatedDailyCapUsd: delegatedRelayEvm
+          ? (policy.receive.delegatedRelayEvmDailyCapUsd ?? null)
+          : null,
         positionValue: {
           enabled: false,
           identityPolicyId: null,
@@ -478,6 +498,13 @@ export function applyFundingIntentPatch(
     venues: parsed.data.venues ?? current.venues,
     receive: {
       assets: parsed.data.receive?.assets ?? current.receive.assets,
+      ...(parsed.data.receive?.delegatedRelayEvmDailyCapUsd === null
+        ? {}
+        : {
+            delegatedRelayEvmDailyCapUsd:
+              parsed.data.receive?.delegatedRelayEvmDailyCapUsd ??
+              current.receive.delegatedRelayEvmDailyCapUsd,
+          }),
       privy: parsed.data.receive?.privy ?? current.receive.privy,
     },
     paused: parsed.data.paused ?? current.paused,
@@ -503,6 +530,8 @@ export function fundingIntentBehaviorSnapshot(policy: FundingIntentPolicy) {
         ]),
       ),
       privy: policy.receive.privy,
+      delegatedRelayEvmDailyCapUsd:
+        policy.receive.delegatedRelayEvmDailyCapUsd ?? null,
     },
     paused: policy.paused,
   };

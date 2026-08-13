@@ -49,14 +49,19 @@ import {
 } from "./mappings.js";
 import { buildRelayPlanningQuote } from "./operation-plan.js";
 import { type RelayReferenceCodec } from "./reference-codec.js";
-import { relayReceiveQuotePlan } from "./receive-routing.js";
+import {
+  RELAY_RECEIVE_OPERATION_ADAPTER_KEY,
+  relayReceiveQuotePlan,
+} from "./receive-routing.js";
 import { RelayWalletQuoteAdapter } from "./wallet-adapter.js";
+import { loadRelayEvmExecutionConfiguration } from "../../funding/execution/delegated-funding-config.js";
+import { TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID } from "../../funding/execution/delegated-funding-profile-ids.js";
+import { readBaseRelayAllowance } from "../../funding/execution/relay-evm-delegated-executor-profile.js";
 
 type JsonRecord = Readonly<Record<string, JsonValue>>;
 type RuntimeRoute = FundingRuntimePolicy["routes"][number];
 
-export const RELAY_RECEIVE_OPERATION_ADAPTER_KEY =
-  "relay_owned_wallet_receipt_v1";
+export { RELAY_RECEIVE_OPERATION_ADAPTER_KEY } from "./receive-routing.js";
 
 function relayReviewContinuation(
   destinationAsset: AssetRef,
@@ -237,7 +242,7 @@ function frozenRelayReceipt(
   target: FundingReceiveReceiptRoutingTarget,
 ): FrozenRelayReceipt | null {
   if (
-    target.ownerChannel !== "web" ||
+    !["web", "telegram"].includes(target.ownerChannel) ||
     !target.receiptVariantSnapshot ||
     !target.receiptDestinationLocationId
   ) {
@@ -440,6 +445,7 @@ async function validateOperationLink(
     expectedSource: AssetRef;
     expectedSourceRaw: string;
     routeId: string;
+    delegatedProfileId?: string;
   }>,
 ): Promise<boolean> {
   const { rows } = await client.query<{ valid: boolean }>(
@@ -478,11 +484,20 @@ async function validateOperationLink(
             where other_segment.operation_id = operation.id
               and other_segment.id <> segment.id
           )
-          and exists (
+          and (
+            ($11::text is null and exists (
             select 1
             from funding_operation_steps step
             where step.operation_id = operation.id
               and step.state = 'action_required'
+            ))
+            or ($11::text is not null and (
+              select count(*)
+              from funding_operation_steps step
+              where step.operation_id = operation.id
+                and step.executor_id = $11
+                and step.state = 'planned'
+            ) = 2)
           )
       ) as valid
     `,
@@ -497,6 +512,7 @@ async function validateOperationLink(
       input.expectedSource.networkId,
       input.expectedSource.decimals,
       input.expectedSource.assetId,
+      input.delegatedProfileId ?? null,
     ],
   );
   return rows[0]?.valid === true;
@@ -578,6 +594,17 @@ export function createRelayReceiveReceiptDispositionResolver(
           return null;
         }
         const sourceAmount = confirmedSourceAmount;
+        const delegatedRelay =
+          receiptTarget.ownerChannel === "telegram" &&
+          receiptTarget.telegramAutomationPolicy?.profileId ===
+            TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID;
+        const baselineAllowance = delegatedRelay
+          ? await readBaseRelayAllowance({
+              owner: frozen.profile.address,
+              blockNumber: null,
+            })
+          : null;
+        if (baselineAllowance && baselineAllowance.raw !== "0") return null;
         const quoteCorrelationId = stableOpaqueId(
           "funding_quote",
           receiptTarget.receipt.receiptId,
@@ -607,6 +634,13 @@ export function createRelayReceiveReceiptDispositionResolver(
           quote,
           quoteCorrelationId,
           route,
+          ...(receiptTarget.ownerChannel === "telegram" &&
+          receiptTarget.telegramAutomationPolicy?.profileId ===
+            TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID
+            ? {
+                serverExecutionProfileId: TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
+              }
+            : {}),
           source: {
             ...frozen.source,
             sourceLocationPatternId: route.sourceLocationPatternId,
@@ -618,12 +652,30 @@ export function createRelayReceiveReceiptDispositionResolver(
             fundingReceiveObservationRevision:
               receiptTarget.receipt.observationRevision,
             fundingReceiveVariantId: receiptTarget.receipt.variantId,
+            ...(baselineAllowance
+              ? {
+                  relayApprovalBaselineAllowanceRaw: baselineAllowance.raw,
+                  relayApprovalBaselineAllowanceBlock:
+                    baselineAllowance.blockNumber,
+                  relayApprovalBaselineAllowanceBlockHash:
+                    baselineAllowance.blockHash,
+                  relayApprovalBaselineAllowanceRevision:
+                    baselineAllowance.revision,
+                }
+              : {}),
           },
         });
         const fees = planned.candidate.fees.map((fee, index) => ({
           ...fee,
           estimatedUsd: planned.feeUsd[index] ?? null,
         }));
+        if (
+          receiptTarget.ownerChannel === "telegram" &&
+          new Date(planned.candidate.expiresAt).getTime() - now.getTime() <
+            loadRelayEvmExecutionConfiguration().minimumSequentialTtlMs
+        ) {
+          return null;
+        }
         if (
           !receiveAutomationEconomicsWithinPolicy(
             {
@@ -708,6 +760,9 @@ export function createRelayReceiveReceiptDispositionResolver(
             quotePlan.confirmedSourceAmount?.asset ?? target.receipt.asset,
           expectedSourceRaw: quotePlan.confirmedSourceAmount?.raw ?? "0",
           routeId: frozen.routeId,
+          ...(target.ownerChannel === "telegram"
+            ? { delegatedProfileId: TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID }
+            : {}),
         }),
     };
     return { kind: "automatic_execution", execution, quotePlan };

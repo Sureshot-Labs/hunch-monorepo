@@ -128,6 +128,9 @@ const approvalProxyV3Interface = new Interface([
 const depositoryV2Interface = new Interface([
   "function depositErc20(address depositor,address token,uint256 amount,bytes32 id)",
 ]);
+
+export const RELAY_SELF_DEPOSITOR =
+  "0x0000000000000000000000000000000000000000";
 const cleanupInterface = new Interface([
   "function cleanupErc20sViaCall(address[] tokens,address[] recipients,bytes[] calls,uint256[] values)",
 ]);
@@ -749,15 +752,16 @@ function validateMayanExecutionPayload(
   }
 }
 
-function validateV2Erc20Deposit(
-  action: ValidatedRelayAction,
-  scenario: RelayRehearsalScenario,
-  amount: bigint,
-  user: string,
-): void {
-  if (scenario.originChainId !== 8453) {
-    throw new Error("Relay Depository V2 is not enabled for this origin chain");
-  }
+export function validateRelayDepositoryV2Action(
+  input: Readonly<{
+    action: Pick<ValidatedRelayAction, "data" | "to" | "value">;
+    amount: bigint;
+    token: string;
+    user: string;
+    depositorMode?: "quoted_wallet" | "self_bound";
+  }>,
+): string {
+  const { action } = input;
   assertAddress(action.to, RELAY_DEPOSITORY_V2, "V2 ERC20 deposit target");
   if (action.value !== 0n)
     throw new Error("V2 ERC20 deposit value must be zero");
@@ -767,21 +771,58 @@ function validateV2Erc20Deposit(
   );
   assertAddress(
     address(decoded.depositor, "V2 depositor"),
-    user,
+    input.depositorMode === "self_bound" ? RELAY_SELF_DEPOSITOR : input.user,
     "V2 depositor",
   );
-  assertAddress(
-    address(decoded.token, "V2 token"),
-    scenario.originCurrency,
-    "V2 token",
-  );
-  if (bigint(decoded.amount, "V2 amount") !== amount) {
+  assertAddress(address(decoded.token, "V2 token"), input.token, "V2 token");
+  if (bigint(decoded.amount, "V2 amount") !== input.amount) {
     throw new Error("V2 Relay amount must equal exact input");
   }
   const orderId = string(decoded.id, "V2 order id");
   if (!/^0x[0-9a-f]{64}$/i.test(orderId) || /^0x0{64}$/i.test(orderId)) {
     throw new Error("V2 Relay order id must be non-zero bytes32");
   }
+  return orderId.toLowerCase();
+}
+
+export function canonicalizeRelayDepositoryV2SelfBoundAction(
+  input: Readonly<{
+    action: Pick<ValidatedRelayAction, "data" | "to" | "value">;
+    amount: bigint;
+    token: string;
+    user: string;
+  }>,
+): Readonly<{ data: string; orderId: string }> {
+  const orderId = validateRelayDepositoryV2Action({
+    ...input,
+    depositorMode: "quoted_wallet",
+  });
+  return {
+    data: depositoryV2Interface.encodeFunctionData("depositErc20", [
+      RELAY_SELF_DEPOSITOR,
+      input.token,
+      input.amount,
+      orderId,
+    ]),
+    orderId,
+  };
+}
+
+function validateV2Erc20Deposit(
+  action: ValidatedRelayAction,
+  scenario: RelayRehearsalScenario,
+  amount: bigint,
+  user: string,
+): void {
+  if (scenario.originChainId !== 8453) {
+    throw new Error("Relay Depository V2 is not enabled for this origin chain");
+  }
+  validateRelayDepositoryV2Action({
+    action,
+    amount,
+    token: scenario.originCurrency,
+    user,
+  });
 }
 
 export function validateRelayRehearsalQuote(input: {
