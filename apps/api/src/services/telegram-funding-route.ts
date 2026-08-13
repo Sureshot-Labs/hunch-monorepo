@@ -18,7 +18,11 @@ import {
 import type { DelegatedFundingPreBroadcastDecision } from "../funding/execution/delegated-funding-capability.js";
 import { resolveTelegramPolymarketWrapCapability } from "../funding/execution/delegated-funding-capability-resolver.js";
 import { resolveTelegramRelayEvmCapability } from "../funding/execution/delegated-funding-capability-resolver.js";
-import { loadPolymarketWrapExecutionConfiguration } from "../funding/execution/delegated-funding-config.js";
+import {
+  loadPolymarketWrapExecutionConfiguration,
+  loadRelayEvmExecutionConfiguration,
+  type RelayEvmExecutionConfiguration,
+} from "../funding/execution/delegated-funding-config.js";
 import { POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID } from "../funding/execution/delegated-funding-profile-ids.js";
 import { TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID } from "../funding/execution/delegated-funding-profile-ids.js";
 import type { TelegramFundingAuthorization } from "../funding/execution/telegram-funding-authorization.js";
@@ -172,6 +176,20 @@ export function classifyTelegramRelayFrozenCapability(
       : { kind: "hard_invalid", reasonCode: "delegated_authority_invalid" },
     expectedFundingPolicyRevision: policy.fundingPolicyRevision,
     fundingPolicyRevision: capability.fundingPolicyRevision,
+  };
+}
+
+export function relayEvmFrozenConsentConfiguration(
+  runtime: RelayEvmExecutionConfiguration,
+  policy: TelegramRelayEvmAutomationPolicyV3,
+): RelayEvmExecutionConfiguration {
+  return {
+    ...runtime,
+    // A delivery-only sidecar intentionally has no signing secret bundle.
+    // The signer id is non-secret and frozen inside the exact consent. The
+    // resolver still re-loads the current DB authorization and verifies its
+    // complete fingerprint plus every other current runtime policy field.
+    signerId: runtime.signerId || policy.signerId,
   };
 }
 
@@ -759,6 +777,7 @@ async function resolvePolymarketBaseAutomaticCapability(
     policy.venueBindingOptionId !== input.venueBindingOptionId
   )
     return null;
+  const runtimeConfiguration = loadRelayEvmExecutionConfiguration();
   const capability = await resolveTelegramRelayEvmCapability(db, {
     userId: input.userId,
     telegramAccountId: input.telegramAccountId,
@@ -768,6 +787,10 @@ async function resolvePolymarketBaseAutomaticCapability(
     expectedAuthorizationId: policy.authorizationId,
     expectedAuthorizationFingerprint: policy.authorizationFingerprint,
     expectedFundingPolicyRevision: policy.fundingPolicyRevision,
+    configuration: relayEvmFrozenConsentConfiguration(
+      runtimeConfiguration,
+      policy,
+    ),
     now: input.now,
     lock: input.lock,
   });

@@ -56,6 +56,7 @@ import {
 } from "./services/telegram-funding-sessions.js";
 import {
   classifyTelegramRelayFrozenCapability,
+  relayEvmFrozenConsentConfiguration,
   resolveTelegramFundingReceiptDisposition,
   telegramPolygonFundingPresentation,
 } from "./services/telegram-funding-route.js";
@@ -1182,6 +1183,28 @@ const relayBasePolicy = parseTelegramRelayEvmAutomationPolicyV3(
   relayBaseConsent.policySnapshot,
 );
 assert.ok(relayBasePolicy);
+const deliverySidecarConfiguration = relayEvmFrozenConsentConfiguration(
+  {
+    enabled: true,
+    profileId: "telegram_relay_evm_funding_v1",
+    signerId: "",
+    signerFingerprint: "s".repeat(64),
+    policyId: "combined-policy",
+    policyFingerprint: "p".repeat(64),
+    maxSourceRaw: "25000000",
+    minimumSequentialTtlMs: 45_000,
+  },
+  relayBasePolicy,
+);
+assert.equal(deliverySidecarConfiguration.signerId, relayBasePolicy.signerId);
+assert.equal(
+  relayEvmFrozenConsentConfiguration(
+    { ...deliverySidecarConfiguration, signerId: "current-runtime-signer" },
+    relayBasePolicy,
+  ).signerId,
+  "current-runtime-signer",
+  "a configured runtime signer must never be replaced by frozen consent data",
+);
 assert.equal(
   classifyTelegramRelayFrozenCapability(relayBasePolicy, {
     authorization: null,
