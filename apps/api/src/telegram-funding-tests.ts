@@ -8,6 +8,7 @@ import { listFundingReceiveReceiptsForRouting } from "./funding/persistence/fund
 import { fundingSidecarRuntimeConfig } from "./funding/runtime/sidecar-runtime-config.js";
 import { isFundingReconciliationSchemaReady } from "./funding/worker/funding-reconciliation-worker.js";
 import { isTelegramFundingReceiveControllerCurrent } from "./funding/execution/telegram-funding-managed-wallet.js";
+import { parseTelegramRelayEvmAutomationPolicyV3 } from "./funding/execution/telegram-funding-automation-policy.js";
 import { resolveFundingReceiveSelectedTargetId } from "./funding/receive/receive-session-service.js";
 import type {
   FundingQuoteSummary,
@@ -54,6 +55,7 @@ import {
   TelegramFundingPersistenceError,
 } from "./services/telegram-funding-sessions.js";
 import {
+  classifyTelegramRelayFrozenCapability,
   resolveTelegramFundingReceiptDisposition,
   telegramPolygonFundingPresentation,
 } from "./services/telegram-funding-route.js";
@@ -1175,6 +1177,35 @@ const relayBaseConsent: TelegramFundingConsent = {
   },
   fingerprint: "fingerprint-relay-base",
 };
+
+const relayBasePolicy = parseTelegramRelayEvmAutomationPolicyV3(
+  relayBaseConsent.policySnapshot,
+);
+assert.ok(relayBasePolicy);
+assert.equal(
+  classifyTelegramRelayFrozenCapability(relayBasePolicy, {
+    authorization: null,
+    decision: {
+      kind: "soft_paused",
+      reasonCode: "delegated_profile_unavailable",
+    },
+    fundingPolicyRevision: "relay-funding-policy-revision",
+  }).decision.kind,
+  "soft_paused",
+  "a delivery sidecar missing execution-only profile material must not hard-invalidate an exact frozen Relay consent",
+);
+assert.equal(
+  classifyTelegramRelayFrozenCapability(relayBasePolicy, {
+    authorization: null,
+    decision: {
+      kind: "hard_invalid",
+      reasonCode: "delegated_authority_invalid",
+    },
+    fundingPolicyRevision: "relay-funding-policy-revision",
+  }).decision.kind,
+  "hard_invalid",
+  "a real authority invalidation must remain fail closed",
+);
 
 const relayBaseWaiting = projectTelegramFundingProgress({
   automaticConversionAvailable: true,

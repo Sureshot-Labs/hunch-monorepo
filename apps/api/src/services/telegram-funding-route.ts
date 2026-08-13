@@ -32,6 +32,7 @@ import {
   telegramFundingReceiptIsProspectivelyAuthorized,
   telegramRelayEvmPolicyMatchesAuthorization,
   telegramRelayEvmReceiptIsAuthorized,
+  type TelegramRelayEvmAutomationPolicyV3,
 } from "../funding/execution/telegram-funding-automation-policy.js";
 import type { FundingReceiveReceiptRoutingTarget } from "../funding/persistence/funding-receive-session-repository.js";
 import type {
@@ -142,6 +143,37 @@ type TelegramFundingAutomaticCapability = Readonly<{
   expectedFundingPolicyRevision: string;
   fundingPolicyRevision: string;
 }>;
+
+export function classifyTelegramRelayFrozenCapability(
+  policy: TelegramRelayEvmAutomationPolicyV3,
+  capability: Readonly<{
+    authorization: TelegramFundingAuthorization | null;
+    decision: DelegatedFundingPreBroadcastDecision;
+    fundingPolicyRevision: string;
+  }>,
+): TelegramFundingAutomaticCapability {
+  if (capability.decision.kind !== "allowed") {
+    return {
+      authorization: null,
+      decision: capability.decision,
+      expectedFundingPolicyRevision: policy.fundingPolicyRevision,
+      fundingPolicyRevision: capability.fundingPolicyRevision,
+    };
+  }
+  const authorization =
+    capability.authorization &&
+    telegramRelayEvmPolicyMatchesAuthorization(policy, capability.authorization)
+      ? capability.authorization
+      : null;
+  return {
+    authorization,
+    decision: authorization
+      ? capability.decision
+      : { kind: "hard_invalid", reasonCode: "delegated_authority_invalid" },
+    expectedFundingPolicyRevision: policy.fundingPolicyRevision,
+    fundingPolicyRevision: capability.fundingPolicyRevision,
+  };
+}
 
 type TelegramFundingAutomaticPolicyInput = Readonly<{
   authorization: TelegramFundingAuthorization;
@@ -739,19 +771,7 @@ async function resolvePolymarketBaseAutomaticCapability(
     now: input.now,
     lock: input.lock,
   });
-  const authorization =
-    capability.authorization &&
-    telegramRelayEvmPolicyMatchesAuthorization(policy, capability.authorization)
-      ? capability.authorization
-      : null;
-  return {
-    authorization,
-    decision: authorization
-      ? capability.decision
-      : { kind: "hard_invalid", reasonCode: "delegated_authority_invalid" },
-    expectedFundingPolicyRevision: policy.fundingPolicyRevision,
-    fundingPolicyRevision: capability.fundingPolicyRevision,
-  };
+  return classifyTelegramRelayFrozenCapability(policy, capability);
 }
 
 function buildPolymarketBaseAutomaticPolicy(
@@ -801,10 +821,7 @@ async function relayReceiptRoutingDecision(
     expectedAuthorizationFingerprint: policy.authorizationFingerprint,
     expectedFundingPolicyRevision: policy.fundingPolicyRevision,
   });
-  return capability.authorization &&
-    telegramRelayEvmPolicyMatchesAuthorization(policy, capability.authorization)
-    ? capability.decision
-    : { kind: "hard_invalid", reasonCode: "delegated_authority_invalid" };
+  return classifyTelegramRelayFrozenCapability(policy, capability).decision;
 }
 
 async function validateRelayFundingOperationLink(
