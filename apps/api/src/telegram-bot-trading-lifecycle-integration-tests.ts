@@ -15,13 +15,28 @@ import { pool, type DbQuery } from "./db.js";
 import { createTelegramBotTradingRoutes } from "./routes/telegram-bot-trading.js";
 import type { PrivyServerSignerStatus } from "./services/api-trading-wallet-signing.js";
 import type { ApiBotTradingExecutor } from "./services/api-trading-service.js";
+import { captureTelegramBotTradingCallback } from "./services/telegram-bot-trading.js";
 
 const client = await pool.connect();
 
 try {
   await client.query("begin");
+  let queryQueue = Promise.resolve();
   const db: DbQuery = {
-    query: client.query.bind(client) as DbQuery["query"],
+    query: ((...args: unknown[]) => {
+      const result = queryQueue.then(() =>
+        (
+          client.query as unknown as (
+            ...queryArgs: unknown[]
+          ) => Promise<unknown>
+        )(...args),
+      );
+      queryQueue = result.then(
+        () => undefined,
+        () => undefined,
+      );
+      return result;
+    }) as DbQuery["query"],
   };
 
   const suffix = crypto.randomUUID();
@@ -226,6 +241,23 @@ try {
         setupRequired: false,
       };
     },
+    quote: async (input: {
+      intent: { amount: { type: "usd"; value: string }; target: unknown };
+    }) => ({
+      action: "BUY" as const,
+      amount: input.intent.amount,
+      currentPrice: 0.5,
+      estimatedNotionalUsd: Number(input.intent.amount.value),
+      estimatedShares: Number(input.intent.amount.value) * 2,
+      expiresAt: new Date(Date.now() + 60_000),
+      fees: {},
+      maxSpendUsd: Number(input.intent.amount.value),
+      meetsVenueMinimum: true,
+      minReceiveShares: Number(input.intent.amount.value) * 1.9,
+      price: 0.52,
+      target: input.intent.target,
+      venue: "polymarket" as const,
+    }),
   } as unknown as ApiBotTradingExecutor;
 
   const app = Fastify({ logger: false });
@@ -326,6 +358,104 @@ try {
     )
   ).rows[0];
   assert.ok(authorization?.id);
+
+  const insertMarketExitIntent = async (label: string) => {
+    const result = await client.query<{ id: string }>(
+      `insert into telegram_trade_intents (
+         telegram_user_id, user_id, authorization_id, chat_id,
+         telegram_message_id, action, venue, market_id, side, amount_usd,
+         status, expires_at, idempotency_key
+       ) values (
+         $1, $2, $3, $1, '700', 'buy', 'polymarket', $4, 'YES', 1,
+         'confirming', now() + interval '2 minutes', $5
+       )
+       returning id`,
+      [
+        telegramUserId,
+        userId,
+        authorization.id,
+        marketId,
+        `${label}-${suffix}`,
+      ],
+    );
+    const id = result.rows[0]?.id;
+    assert.ok(id);
+    return id;
+  };
+  const invokeMarketExit = async (
+    intentId: string,
+    type: "cancel" | "change_amount",
+  ) =>
+    captureTelegramBotTradingCallback({
+      appBaseUrl: "https://app.hunch.trade",
+      callbackQuery: {
+        data: `hbt:${type}:${intentId}`,
+        from: { id: telegramUserId as never },
+        id: `${type}-${suffix}`,
+        message: {
+          chat: { id: telegramUserId, type: "private" },
+          message_id: 700,
+        },
+      },
+      db,
+      expectedIntentId: intentId,
+      expectedType: type,
+      signerInspector,
+      trading,
+    });
+
+  const changeAmountIntentId = await insertMarketExitIntent("change-amount");
+  const changedAmount = await invokeMarketExit(
+    changeAmountIntentId,
+    "change_amount",
+  );
+  assert.equal(changedAmount.handled, true);
+  const changedAmountButtons =
+    changedAmount.messages.at(-1)?.reply_markup?.inline_keyboard.flat() ?? [];
+  assert.equal(
+    changedAmountButtons.some((button) => button.text.includes("$1 · YES")),
+    true,
+    JSON.stringify(changedAmount.messages.at(-1)),
+  );
+  assert.equal(
+    changedAmountButtons.some((button) => button.text.includes("$1 · NO")),
+    false,
+    "Change amount keeps the selected side while rebuilding fresh amount choices",
+  );
+  assert.deepEqual(
+    (
+      await client.query<{ error_code: string | null; status: string }>(
+        `select status, error_code
+           from telegram_trade_intents
+          where id = $1::uuid`,
+        [changeAmountIntentId],
+      )
+    ).rows[0],
+    { error_code: "amount_change_requested", status: "cancelled" },
+  );
+
+  await client.query(
+    `update telegram_trade_intents
+        set status = 'cancelled', updated_at = now()
+      where user_id = $1::uuid and status = 'draft'`,
+    [userId],
+  );
+  const cancelIntentId = await insertMarketExitIntent("cancel-to-market");
+  const cancelledToMarket = await invokeMarketExit(cancelIntentId, "cancel");
+  assert.equal(cancelledToMarket.handled, true);
+  const cancelButtons =
+    cancelledToMarket.messages.at(-1)?.reply_markup?.inline_keyboard.flat() ??
+    [];
+  assert.equal(
+    cancelButtons.some((button) => button.text.includes("$1 · YES")),
+    true,
+  );
+  assert.equal(
+    cancelButtons.some((button) => button.text.includes("$1 · NO")),
+    true,
+    "Cancel returns to the complete market action card instead of ending navigation",
+  );
+
   const actionRows = await client.query<{ action: string }>(
     `insert into telegram_trade_intents (
        telegram_user_id, user_id, authorization_id, action, venue, market_id,
@@ -461,7 +591,7 @@ try {
 
   await app.close();
   console.log(
-    "[telegram-bot-trading-lifecycle-integration-tests] passed 27/27",
+    "[telegram-bot-trading-lifecycle-integration-tests] passed lifecycle and market-exit regressions",
   );
 } finally {
   await client.query("rollback");

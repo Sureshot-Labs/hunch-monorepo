@@ -599,3 +599,15 @@ export function buildTelegramFundingReviewBuyButton(input: {
     text: "Review Buy",
   };
 }
+
+export function buildTelegramFundingChangeBuyAmountButton(input: {
+  continuationToken: string;
+}): Readonly<{ callback_data: string; text: string }> {
+  return {
+    callback_data: telegramFundingCallbackData({
+      continuationToken: input.continuationToken,
+      kind: "change_buy_amount",
+    }),
+    text: "Change amount",
+  };
+}

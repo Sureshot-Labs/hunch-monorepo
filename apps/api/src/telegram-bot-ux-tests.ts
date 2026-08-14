@@ -30,6 +30,18 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
+    name: "change amount callback remains valid and bounded",
+    run: () => {
+      const intentId = "00000000-0000-4000-8000-000000000001";
+      const data = `hbt:change_amount:${intentId}`;
+      assert.ok(data.length <= 64);
+      assert.deepEqual(parseTelegramBotTradingCallbackData(data), {
+        intentId,
+        type: "change_amount",
+      });
+    },
+  },
+  {
     name: "market search sessions are scoped to chat and Telegram user",
     run: async () => {
       const values = new Map<string, string>();

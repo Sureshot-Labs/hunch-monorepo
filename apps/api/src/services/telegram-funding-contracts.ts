@@ -83,6 +83,7 @@ export type TelegramFundingCallbackRoute =
   | Readonly<{ receiptId: string; kind: "review_conversion" }>
   | Readonly<{ consentToken: string; kind: "confirm_conversion" }>
   | Readonly<{ continuationToken: string; kind: "review_buy" }>
+  | Readonly<{ continuationToken: string; kind: "change_buy_amount" }>
   | Readonly<{ choiceToken: string; contextId: string; kind: "select" }>;
 
 const UUID =
@@ -92,6 +93,15 @@ const CONTINUATION_TOKEN = "([A-Za-z0-9_-]{22})";
 export function parseTelegramFundingCallbackRoute(
   route: string,
 ): TelegramFundingCallbackRoute | null {
+  const changeBuyAmount = route.match(
+    new RegExp(`^fund:amount:${CONTINUATION_TOKEN}$`),
+  );
+  if (changeBuyAmount) {
+    return {
+      kind: "change_buy_amount",
+      continuationToken: changeBuyAmount[1] ?? "",
+    };
+  }
   const reviewBuy = route.match(
     new RegExp(`^fund:review:${CONTINUATION_TOKEN}$`),
   );
@@ -140,15 +150,17 @@ export function telegramFundingCallbackData(
   const data =
     input.kind === "confirm_conversion"
       ? `${TELEGRAM_FUNDING_CALLBACK_PREFIX}:c:${input.consentToken}`
-      : input.kind === "review_buy"
-        ? `${TELEGRAM_FUNDING_CALLBACK_PREFIX}:review:${input.continuationToken}`
-        : input.kind === "select"
-          ? `${TELEGRAM_FUNDING_CALLBACK_PREFIX}:select:${input.contextId}:${input.choiceToken}`
-          : input.kind === "review_conversion"
-            ? `${TELEGRAM_FUNDING_CALLBACK_PREFIX}:convert:${input.receiptId}`
-            : `${TELEGRAM_FUNDING_CALLBACK_PREFIX}:${
-                input.kind === "hide_qr" ? "hide" : input.kind
-              }:${input.contextId}`;
+      : input.kind === "change_buy_amount"
+        ? `${TELEGRAM_FUNDING_CALLBACK_PREFIX}:amount:${input.continuationToken}`
+        : input.kind === "review_buy"
+          ? `${TELEGRAM_FUNDING_CALLBACK_PREFIX}:review:${input.continuationToken}`
+          : input.kind === "select"
+            ? `${TELEGRAM_FUNDING_CALLBACK_PREFIX}:select:${input.contextId}:${input.choiceToken}`
+            : input.kind === "review_conversion"
+              ? `${TELEGRAM_FUNDING_CALLBACK_PREFIX}:convert:${input.receiptId}`
+              : `${TELEGRAM_FUNDING_CALLBACK_PREFIX}:${
+                  input.kind === "hide_qr" ? "hide" : input.kind
+                }:${input.contextId}`;
   if (Buffer.byteLength(data, "utf8") > 64) {
     throw new Error("Telegram funding callback exceeds 64 bytes");
   }

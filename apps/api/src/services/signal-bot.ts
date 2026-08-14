@@ -2903,13 +2903,7 @@ export async function handleSignalBotMenuCallback(
     route.kind === "position" ||
     route.kind === "deposit" ||
     route.kind === "deposit_menu" ||
-    route.kind === "select" ||
-    route.kind === "review_buy" ||
-    route.kind === "review_conversion" ||
-    route.kind === "confirm_conversion" ||
-    route.kind === "cancel" ||
-    route.kind === "refresh" ||
-    route.kind === "qr"
+    TelegramBotMenuActions.isSignalBotFundingMenuRoute(route)
   ) {
     const fundingAction =
       TelegramBotMenuActions.signalBotFundingMenuAction(route);
