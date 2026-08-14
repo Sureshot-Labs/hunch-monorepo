@@ -727,6 +727,10 @@ test("registers gated protected routes and the content schema migrations", () =>
     new URL("./content-db.ts", import.meta.url),
     "utf8",
   );
+  const prebuiltDeploy = readFileSync(
+    new URL("../../../ops/deploy-ec2-prebuilt.sh", import.meta.url),
+    "utf8",
+  );
   const expectedPublicPaths = [
     "/content/articles",
     "/content/articles-index",
@@ -833,9 +837,40 @@ test("registers gated protected routes and the content schema migrations", () =>
     editorialGraphMigration,
     /idx_content_article_versions_query_cluster/,
   );
+  assert.match(
+    editorialGraphMigration,
+    /disable trigger content_article_versions_immutable/,
+  );
+  assert.match(
+    editorialGraphMigration,
+    /enable trigger content_article_versions_immutable/,
+  );
+  assert.ok(
+    editorialGraphMigration.indexOf(
+      "disable trigger content_article_versions_immutable",
+    ) < editorialGraphMigration.indexOf("update content_article_versions"),
+  );
+  assert.ok(
+    editorialGraphMigration.indexOf("update content_article_versions") <
+      editorialGraphMigration.indexOf(
+        "enable trigger content_article_versions_immutable",
+      ),
+  );
   assert.match(contentDb, /0213_content_editorial_graph\.sql/);
   assert.match(contentDb, /select count\(\*\) = 20/);
   assert.match(contentDb, /content_outbox_version_id_fkey/);
+  assert.ok(
+    prebuiltDeploy.indexOf('"${compose[@]}" run --rm api') <
+      prebuiltDeploy.indexOf('"${compose[@]}" down --remove-orphans'),
+  );
+  const migrationFailureGuard = prebuiltDeploy.match(
+    /if ! "\$\{compose\[@\]\}" run --rm api[\s\S]*?Migration failed; existing application containers were left running\.[\s\S]*?exit 1[\s\S]*?fi/,
+  );
+  assert.ok(migrationFailureGuard);
+  assert.ok(
+    prebuiltDeploy.indexOf(migrationFailureGuard[0]) <
+      prebuiltDeploy.indexOf('"${compose[@]}" down --remove-orphans'),
+  );
   assert.equal(CONTENT_RENDERER_CONTRACT_ID, "hunch-content-document-v1");
 });
 
