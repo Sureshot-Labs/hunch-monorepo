@@ -335,7 +335,7 @@ type XEditorialDraftV1 = {
   characterCount: number;
   generatedAt: string;
   model: string;
-  promptVersion: "x_editorial_prompt_v13";
+  promptVersion: "x_editorial_prompt_v14";
   sourceDigest: string;
 };
 ```
@@ -374,8 +374,9 @@ The prompt and deterministic validators must enforce all of the following:
   such as `not just a large position` as `unsupported_recency`;
 - distinguish market movement since signal from the trader's lifetime PnL;
 - in follow-through copy whose source contains an `@handle`, require that exact
-  handle in the first paragraph; this keeps the trader as the protagonist
-  regardless of how the model phrases a market-price hook;
+  handle in the first paragraph and require a bold span from that paragraph to
+  include the handle; this keeps both the copy and its visual emphasis
+  trader-led regardless of how the model phrases a market-price hook;
 - state the natural proposition once and reject mechanical re-explanations such
   as `on NO — the side betting ...`; use `the position`, `the price`, or the
   trader's name after the bet is clear;
@@ -410,21 +411,23 @@ The prompt and deterministic validators must enforce all of the following:
 - do not imitate one referenced author. Reuse the editorial principles, not a
   recognisable person's exact phrasing or persona;
 - do not label sections with `Receipts`, `credential stack`, or `My read`, and
-  avoid investment-memo phrases such as `credentialed fade` and `credibility
-check`;
+  avoid investment-memo phrases such as `credentialed fade` and
+  `credibility check`;
 - never copy a truncated source title such as `by...?`; rebuild the proposition
   from the canonical market identity and name the selected side in price moves;
-- reject grammar such as `has beat` or `This is the same trader up ...`,
-  abstract hooks such as `NO on ... has moved`, mechanical shorthand such as
-  `holding ... on NO/no ...`, repeated `still there` endings, and meta phrases
-  such as `The better reason to notice it` or `The record is the reason to
-care`;
-- reject generated analyst filler such as `Small red on the position`, `the
-named holder with the recent record`, `The move is no longer subtle`, `Price
-followed the thesis`, and `the holder stayed with it`;
-- describe mixed wallet behavior as mixed; do not write `The price moved one
-way. The wallets did not.` when joined, added, trimmed, or exited counts show
-  that wallets did move;
+- reject grammar such as `has beat`, `This is the same trader up ...`, or
+  `holding $11.1K that ...`;
+- reject abstract hooks such as `NO on ... has moved`, mechanical shorthand
+  such as `holding ... on NO/no ...`, repeated `still there` endings, and meta
+  phrases such as `The better reason to notice it` or
+  `The record is the reason to care`;
+- reject generated analyst filler such as `Small red on the position`,
+  `the named holder with the recent record`, `The move is no longer subtle`,
+  `Price followed the thesis`, `the holder stayed with it`, and
+  `follow-through in price more than PnL`;
+- describe mixed wallet behavior as mixed; do not write
+  `The price moved one way. The wallets did not.` when joined, added, trimmed,
+  or exited counts indicate actual wallet movement;
 - return `blocked` when a coherent post requires a fact that is not supplied.
 
 Human-like copy should come from story selection, rhythm, and judgment, not
@@ -522,7 +525,7 @@ Persisted metrics shape:
     "version": 1,
     "postText": "...",
     "formatting": [{ "style": "bold", "text": "..." }],
-    "promptVersion": "x_editorial_prompt_v13",
+    "promptVersion": "x_editorial_prompt_v14",
     "sourceDigest": "..."
   }
 }
