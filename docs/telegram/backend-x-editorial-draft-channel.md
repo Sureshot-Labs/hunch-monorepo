@@ -335,7 +335,7 @@ type XEditorialDraftV1 = {
   characterCount: number;
   generatedAt: string;
   model: string;
-  promptVersion: "x_editorial_prompt_v11";
+  promptVersion: "x_editorial_prompt_v12";
   sourceDigest: string;
 };
 ```
@@ -373,6 +373,12 @@ The prompt and deterministic validators must enforce all of the following:
   or `just moved` as recency assertions; do not misclassify non-temporal English
   such as `not just a large position` as `unsupported_recency`;
 - distinguish market movement since signal from the trader's lifetime PnL;
+- in follow-through copy with a named trader, position, and track record, keep
+  the trader as the protagonist instead of burying them behind an abstract
+  `YES/NO has moved from ...` opening;
+- state the natural proposition once and reject mechanical re-explanations such
+  as `on NO — the side betting ...`; use `the position`, `the price`, or the
+  trader's name after the bet is clear;
 - describe public information only through validated verdict/timing/citations;
 - use verified track record only with its exact scope and horizon;
 - expose money, probability, and PnL to the composer as publication-ready
@@ -411,6 +417,8 @@ check`;
 - reject grammar such as `has beat`, abstract hooks such as `NO on ... has
 moved`, repeated `still there` endings, and meta phrases such as `The better
 reason to notice it` or `The record is the reason to care`;
+- reject generated analyst filler such as `Small red on the position`, `the
+named holder with the recent record`, and `The move is no longer subtle`;
 - describe mixed wallet behavior as mixed; do not write `The price moved one
 way. The wallets did not.` when joined, added, trimmed, or exited counts show
   that wallets did move;
@@ -511,7 +519,7 @@ Persisted metrics shape:
     "version": 1,
     "postText": "...",
     "formatting": [{ "style": "bold", "text": "..." }],
-    "promptVersion": "x_editorial_prompt_v11",
+    "promptVersion": "x_editorial_prompt_v12",
     "sourceDigest": "..."
   }
 }
