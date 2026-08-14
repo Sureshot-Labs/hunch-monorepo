@@ -4840,6 +4840,44 @@ try {
         and state = 'planned'`,
     [recoveredApprovalMaintenance.depositStepId, new Date(now.getTime() + 2)],
   );
+  let prematureClaimOperationId: string | null = null;
+  await assert.rejects(
+    tx(pool, async (client) => {
+      const claimPolicy = await resolveFundingPolicy(client);
+      const claim = await createRelayEvmDelegatedFundingProfile({
+        configuration: relayConfiguration,
+        allowanceReader: async () => recoveredApprovalObservation,
+        driver: {
+          execute: async () => {
+            throw new Error("premature deposit executed");
+          },
+          recover: async () => ({ kind: "pending" as const }),
+        },
+      }).claimInTransaction(client, {
+        policy: claimPolicy,
+        now: new Date(now.getTime() + 2),
+      });
+      prematureClaimOperationId = claim
+        ? claim.kind === "execution"
+          ? claim.claim.operationId
+          : claim.operationId
+        : null;
+      throw new Error("rollback dependency-evidence claim probe");
+    }),
+    /rollback dependency-evidence claim probe/,
+  );
+  assert.notEqual(
+    prematureClaimOperationId,
+    recoveredApprovalMaintenance.operationId,
+    "deposit must not be claimed before exact allowance ownership evidence exists",
+  );
+  const prematureDepositAttempts = await pool.query<{ count: string }>(
+    `select count(*)::text as count
+       from funding_operation_step_attempts
+      where step_id = $1::uuid`,
+    [recoveredApprovalMaintenance.depositStepId],
+  );
+  assert.equal(prematureDepositAttempts.rows[0]?.count, "0");
   const recoveredApprovalMaintenanceResult =
     await recoveredApprovalExecutor.runBatch({
       limit: 1,

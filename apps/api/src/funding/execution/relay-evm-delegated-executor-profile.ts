@@ -2365,7 +2365,33 @@ async function claimRelay(
        where step.executor_id = $1
          and ${RELAY_ALLOWANCE_LANE_HEAD_PREDICATE}
          and step.state = 'action_required'
-         and (step.depends_on_step_id is null or dependency.state = 'succeeded')
+         and (
+           step.depends_on_step_id is null
+           or (
+             dependency.state = 'succeeded'
+             and exists (
+               select 1
+               from funding_step_receipt_observations dependency_receipt
+               join funding_operation_step_attempts dependency_attempt
+                 on dependency_attempt.id = dependency_receipt.attempt_id
+                and dependency_attempt.step_id = dependency.id
+               where dependency_receipt.step_id = dependency.id
+                 and dependency_receipt.status = 'finalized'
+                 and dependency_receipt.action_match
+                 and dependency_receipt.canonical
+                 and dependency_receipt.evidence ->> 'allowanceExact' = 'true'
+                 and dependency_receipt.evidence ->>
+                       'singleOperationBundle' = 'true'
+                 and dependency_receipt.evidence ->> 'allowanceRaw' =
+                       receipt.raw_amount::text
+                 and dependency_receipt.evidence ->> 'allowanceBlock' =
+                       dependency_receipt.ledger_height
+                 and lower(
+                       dependency_receipt.evidence ->> 'allowanceBlockHash'
+                     ) = lower(dependency_receipt.block_hash)
+             )
+           )
+         )
          and operation.status not in ('completed', 'refunded', 'failed', 'cancelled')
          and (step.action_expires_at is null or step.action_expires_at > clock_timestamp())
          and (
