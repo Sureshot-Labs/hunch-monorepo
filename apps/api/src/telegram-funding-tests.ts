@@ -1246,17 +1246,21 @@ const relayBaseWaitingMessage =
 assert.match(relayBaseWaitingMessage.text, /Verified receive address/u);
 assert.match(relayBaseWaitingMessage.text, new RegExp(address, "u"));
 assert.equal(
-  relayBaseWaitingMessage.reply_markup?.inline_keyboard.flat().some(
-    (button) => "copy_text" in button && button.copy_text.text === address,
-  ),
+  relayBaseWaitingMessage.reply_markup?.inline_keyboard
+    .flat()
+    .some(
+      (button) => "copy_text" in button && button.copy_text.text === address,
+    ),
   true,
 );
 assert.equal(
-  relayBaseWaitingMessage.reply_markup?.inline_keyboard.flat().some(
-    (button) =>
-      "callback_data" in button &&
-      button.callback_data === `hm:v1:fund:qr:${contextId}`,
-  ),
+  relayBaseWaitingMessage.reply_markup?.inline_keyboard
+    .flat()
+    .some(
+      (button) =>
+        "callback_data" in button &&
+        button.callback_data === `hm:v1:fund:qr:${contextId}`,
+    ),
   true,
 );
 
@@ -1882,6 +1886,52 @@ const ready = projectTelegramFundingProgress({
 });
 assert.equal(ready?.state, "ready");
 assert.equal(ready?.terminal, true);
+const buyContext: TelegramFundingSessionContext = {
+  ...context,
+  origin: "buy_return_context",
+  initialMarketId: "market-buy-return",
+  initialSide: "YES",
+  initialRequestedSpendUsd: "18",
+  initialMinimumFundingUsd: "3",
+};
+const partialBuyReady = projectTelegramFundingProgress({
+  consent,
+  context: buyContext,
+  receipts: [
+    receipt({
+      asset: pUsd,
+      handling: "direct",
+      rawAmount: "2500000",
+      status: "ready",
+    }),
+  ],
+  session: { ...session, status: "processing" },
+});
+assert.equal(partialBuyReady?.state, "funds_received");
+assert.equal(partialBuyReady?.terminal, false);
+const sufficientBuyReady = projectTelegramFundingProgress({
+  consent,
+  context: buyContext,
+  receipts: [
+    receipt({
+      asset: pUsd,
+      handling: "direct",
+      rawAmount: "2500000",
+      status: "ready",
+    }),
+    receipt({
+      asset: pUsd,
+      handling: "direct",
+      rawAmount: "500000",
+      receiptId: "receipt-buy-top-up",
+      status: "ready",
+    }),
+  ],
+  session: { ...session, status: "processing" },
+});
+assert.equal(sufficientBuyReady?.state, "ready");
+assert.equal(sufficientBuyReady?.terminal, true);
+assert.equal(sufficientBuyReady?.rawAmount, "3000000");
 assert.ok(ready);
 assert.deepEqual(parseTelegramFundingProgressProjection(ready), ready);
 for (const malformed of [

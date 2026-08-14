@@ -5716,22 +5716,23 @@ export function createTelegramFundingBuyContinuationDecorator(input: {
         fundingSurfaceMessage.text,
       ]),
     });
-    if (
-      !readiness ||
-      !quoteLimits ||
-      !Number.isFinite(quoteExpiresAt) ||
-      quoteExpiresAt <= presentation.now.getTime() ||
-      quoteLimits.venueMinimumBlocking ||
-      quoteLimits.maxSpendUsd == null ||
-      !Number.isFinite(quoteLimits.maxSpendUsd) ||
-      quoteLimits.maxSpendUsd <= 0 ||
-      quoteLimits.maxSpendUsd + 0.000_001 < requestedSpendUsd ||
-      quoteLimits.maxSpendUsd > maxAmountUsd ||
-      readiness.maxExecutableBuyUsd == null ||
-      !Number.isFinite(readiness.maxExecutableBuyUsd) ||
-      readiness.maxExecutableBuyUsd < 0 ||
-      !canPreviewBuyForReadiness(readiness)
-    ) {
+    const liveQuoteUsable = Boolean(
+      !readiness || !quoteLimits
+        ? false
+        : Number.isFinite(quoteExpiresAt) &&
+            quoteExpiresAt > presentation.now.getTime() &&
+            !quoteLimits.venueMinimumBlocking &&
+            quoteLimits.maxSpendUsd != null &&
+            Number.isFinite(quoteLimits.maxSpendUsd) &&
+            quoteLimits.maxSpendUsd > 0 &&
+            quoteLimits.maxSpendUsd + 0.000_001 >= requestedSpendUsd &&
+            quoteLimits.maxSpendUsd <= maxAmountUsd &&
+            readiness.maxExecutableBuyUsd != null &&
+            Number.isFinite(readiness.maxExecutableBuyUsd) &&
+            readiness.maxExecutableBuyUsd >= 0 &&
+            canPreviewBuyForReadiness(readiness),
+    );
+    if (!liveQuoteUsable && progressState !== "ready") {
       return withFundingCallout({
         bodyMarkdownV2: [
           formatTelegramUsdcLineMarkdownV2(
@@ -5745,20 +5746,26 @@ export function createTelegramFundingBuyContinuationDecorator(input: {
         title: "Amount temporarily unavailable",
       });
     }
-    const executableUsd = readiness.maxExecutableBuyUsd;
-    const requiredUsd = quoteLimits.maxSpendUsd;
-    const fundingRequirement = resolveTelegramFundingBuyDepositRequirement({
-      executableFundsUsd: executableUsd,
-      maximumSpendUsd: requiredUsd,
-    });
-    if (fundingRequirement.state === "deposit") {
+    const requiredUsd = liveQuoteUsable
+      ? (quoteLimits?.maxSpendUsd ?? null)
+      : null;
+    const fundingRequirement =
+      liveQuoteUsable &&
+      readiness?.maxExecutableBuyUsd != null &&
+      requiredUsd != null
+        ? resolveTelegramFundingBuyDepositRequirement({
+            executableFundsUsd: readiness.maxExecutableBuyUsd,
+            maximumSpendUsd: requiredUsd,
+          })
+        : null;
+    if (fundingRequirement?.state === "deposit" && progressState !== "ready") {
       return withFundingCallout({
         bodyMarkdownV2: [
           formatTelegramUsdcLineMarkdownV2(
             `Order: ${formatUsd(requestedSpendUsd)}`,
           ),
           formatTelegramUsdcLineMarkdownV2(
-            `Maximum spend now: ${formatUsd(requiredUsd)}`,
+            `Maximum spend now: ${formatUsd(requiredUsd ?? requestedSpendUsd)}`,
           ),
           formatTelegramUsdcLineMarkdownV2(
             `Available at Polymarket: ${formatUsd(fundingRequirement.availableUsd)}`,
@@ -5780,15 +5787,19 @@ export function createTelegramFundingBuyContinuationDecorator(input: {
         title: "Funding for this Buy",
       });
     }
-    if (progressState !== "ready") {
+    if (progressState !== "ready" && fundingRequirement?.state === "ready") {
       return withFundingCallout({
         bodyMarkdownV2: [
           formatTelegramUsdcLineMarkdownV2(
             `Order: ${formatUsd(requestedSpendUsd)}`,
           ),
-          formatTelegramUsdcLineMarkdownV2(
-            `Maximum spend now: ${formatUsd(requiredUsd)}`,
-          ),
+          ...(requiredUsd == null
+            ? []
+            : [
+                formatTelegramUsdcLineMarkdownV2(
+                  `Maximum spend now: ${formatUsd(requiredUsd)}`,
+                ),
+              ]),
           formatTelegramUsdcLineMarkdownV2(
             `Available at Polymarket: ${formatUsd(fundingRequirement.availableUsd)}`,
           ),
@@ -5863,16 +5874,25 @@ export function createTelegramFundingBuyContinuationDecorator(input: {
         formatTelegramUsdcLineMarkdownV2(
           `Order: ${formatUsd(requestedSpendUsd)}`,
         ),
-        formatTelegramUsdcLineMarkdownV2(
-          `Maximum spend now: ${formatUsd(requiredUsd)}`,
-        ),
+        ...(requiredUsd == null
+          ? []
+          : [
+              formatTelegramUsdcLineMarkdownV2(
+                `Maximum spend now: ${formatUsd(requiredUsd)}`,
+              ),
+            ]),
         "",
         formatTelegramCalloutMarkdownV2({
           bodyMarkdownV2: escapeMarkdown(
-            "A fresh quote will be built after Review Buy. The order is not submitted until you press Confirm.",
+            fundingRequirement?.state === "ready"
+              ? "A fresh quote will be built after Review Buy. The order is not submitted until you press Confirm."
+              : "The deposit is confirmed. Polymarket balance may still be syncing; Review Buy safely rechecks it and never submits before Confirm.",
           ),
           icon: "ℹ️",
-          title: "Funds are ready",
+          title:
+            fundingRequirement?.state === "ready"
+              ? "Funds are ready"
+              : "Funds received",
         }),
       ]),
     };
@@ -6510,7 +6530,10 @@ export async function resumeTelegramFundingBuyContinuation(input: {
       intentId: intent.id,
       status: "failed",
     });
-    return unavailable("Current Polymarket funds are not ready for this Buy.");
+    return unavailable(
+      "The deposit is confirmed, but the Polymarket trading balance is still syncing. Tap Review Buy again shortly.",
+      "Funds are syncing",
+    );
   }
   const messages: TelegramBotTradingMessage[] = [];
   await previewPolymarketTelegramTradeIntent({

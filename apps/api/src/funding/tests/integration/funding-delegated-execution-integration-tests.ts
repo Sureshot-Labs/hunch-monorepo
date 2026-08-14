@@ -32,6 +32,7 @@ import type {
 import {
   createRelayEvmDelegatedFundingProfile,
   RELAY_CLEANUP_CANONICAL_WATCH_MS,
+  type RelayEvmAllowanceReader,
 } from "../../execution/relay-evm-delegated-executor-profile.js";
 import { lockTelegramFundingLinkLifecycle } from "../../execution/telegram-funding-link-lifecycle-lock.js";
 import {
@@ -1670,13 +1671,15 @@ function relayAllowanceEvidence(
 function relayExecutor(
   observations: Array<ReturnType<typeof relayAllowanceEvidence>>,
   onExecute: (claim: DelegatedFundingExecutionClaim) => void,
+  onAllowanceRead?: (input: Parameters<RelayEvmAllowanceReader>[0]) => void,
 ) {
   let last = observations.at(-1) ?? relayAllowanceEvidence("0", "1");
   return new DelegatedFundingExecutor(pool, {
     profiles: [
       createRelayEvmDelegatedFundingProfile({
         configuration: relayConfiguration,
-        allowanceReader: async () => {
+        allowanceReader: async (input) => {
+          onAllowanceRead?.(input);
           last = observations.shift() ?? last;
           return last;
         },
@@ -4820,11 +4823,14 @@ try {
   const recoveredApprovalMaintenance = await createRelayFixture();
   const recoveredApprovalObservation = relayAllowanceEvidence("2000000", "102");
   let recoveredApprovalBroadcasts = 0;
+  const recoveredApprovalReads: Array<Parameters<RelayEvmAllowanceReader>[0]> =
+    [];
   const recoveredApprovalExecutor = relayExecutor(
     [relayAllowanceEvidence("0", "101"), recoveredApprovalObservation],
     () => {
       recoveredApprovalBroadcasts += 1;
     },
+    (input) => recoveredApprovalReads.push(input),
   );
   assert.equal(
     (await recoveredApprovalExecutor.runBatch({ limit: 20, now })).submitted,
@@ -4888,6 +4894,11 @@ try {
     });
   assert.equal(recoveredApprovalMaintenanceResult.submitted, 1);
   assert.equal(recoveredApprovalBroadcasts, 2);
+  assert.equal(
+    recoveredApprovalReads.at(-1)?.mutationBaselineBlock,
+    "200",
+    "deposit ownership must scan from its exact finalized approval receipt block",
+  );
   const recoveredApprovalEvidence = await pool.query<{
     allowance_exact: boolean;
     allowance_raw: string | null;

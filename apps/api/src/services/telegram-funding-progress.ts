@@ -1,4 +1,5 @@
 import { resolveKnownAccountAssetSymbol } from "../account-value/known-asset-catalog.js";
+import { rawForUsdCeil } from "../account-value/decimal.js";
 import { sameAsset } from "../funding/domain/asset-identity.js";
 import {
   parseFundingReceiveReviewContinuation,
@@ -440,6 +441,38 @@ export function projectTelegramFundingProgress(input: {
     sourceReceipts.length > 0 &&
     sourceReceipts.every((receipt) => receipt.status === "ready");
   if (readyDestination.length > 0 || allSourceReady) {
+    const readyReceipts =
+      readyDestination.length > 0 ? readyDestination : sourceReceipts;
+    const minimumFundingRaw =
+      input.context.origin === "buy_return_context" &&
+      input.context.initialMinimumFundingUsd
+        ? rawForUsdCeil({
+            usd: input.context.initialMinimumFundingUsd,
+            decimals: route.destinationAsset.decimals,
+            unitPriceUsd: "1",
+          })
+        : null;
+    if (
+      minimumFundingRaw !== null &&
+      BigInt(sumRawOrZero(readyReceipts)) < BigInt(minimumFundingRaw)
+    ) {
+      return projection({
+        assetSymbol: presentation.destinationAssetSymbol,
+        context: input.context,
+        presentation,
+        receipts: readyReceipts,
+        state: "funds_received",
+        terminal: false,
+        automaticConversionEnabled: automaticConversionConsented,
+        receiptBreakdown,
+        ...(sourceReceipts.length > 0 && presentation.automaticSourceAssetSymbol
+          ? {
+              sourceAssetSymbol: presentation.automaticSourceAssetSymbol,
+              sourceRawAmount: sumRaw(sourceReceipts),
+            }
+          : {}),
+      });
+    }
     return projection({
       assetSymbol: presentation.destinationAssetSymbol,
       context: input.context,
@@ -447,7 +480,7 @@ export function projectTelegramFundingProgress(input: {
       // Destination evidence is authoritative when present. The source-only
       // fallback preserves the established full-receipt conversion contract,
       // where `ready` means the exact conversion postcondition was proven.
-      receipts: readyDestination.length > 0 ? readyDestination : sourceReceipts,
+      receipts: readyReceipts,
       state: "ready",
       terminal: true,
       automaticConversionEnabled: automaticConversionConsented,

@@ -16,6 +16,13 @@ export type DelegatedFundingCapabilityDecision =
     }>
   | Readonly<{
       kind: "hard_invalid";
+      diagnosticCode?:
+        | "allowance_amount_mismatch"
+        | "allowance_baseline_missing"
+        | "allowance_observation_missing"
+        | "allowance_owner_tx_mismatch"
+        | "approval_dependency_missing"
+        | "reservation_lane_missing";
       reasonCode:
         | "delegated_action_invalid"
         | "delegated_authority_invalid"

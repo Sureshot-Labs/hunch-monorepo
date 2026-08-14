@@ -91,6 +91,7 @@ type RelayClaimRow = TelegramFundingAuthorizationRow &
   Readonly<{
     action_fingerprint: string;
     action_validation_result: JsonRecord;
+    allowance_mutation_baseline_block: string | null;
     authorization_fingerprint: string;
     authorization_id: string;
     executor_id: string;
@@ -788,6 +789,7 @@ function claimFromRow(
 ): DelegatedFundingExecutionClaim {
   return {
     action: input.action,
+    allowanceMutationBaselineBlock: row.allowance_mutation_baseline_block,
     actionValidationResult: row.action_validation_result,
     actionWalletId: walletId(row),
     actionFingerprint: row.action_fingerprint,
@@ -2196,6 +2198,7 @@ async function claimRelayCleanup(
             cleanup_step.id as step_id,
             cleanup_step.action_fingerprint,
             cleanup_step.action_validation_result,
+            null::text as allowance_mutation_baseline_block,
             cleanup_step.executor_id,
             cleanup_step.normalized_action,
             cleanup_step.payer_requirement,
@@ -2335,6 +2338,35 @@ async function claimRelay(
             step.id as step_id,
             step.action_fingerprint,
             step.action_validation_result,
+            case
+              when step.action_validation_result ->> 'relayStepKind' =
+                     'deposit'
+              then (
+                select dependency_receipt.ledger_height::text
+                from funding_step_receipt_observations dependency_receipt
+                join funding_operation_step_attempts dependency_attempt
+                  on dependency_attempt.id = dependency_receipt.attempt_id
+                 and dependency_attempt.step_id = dependency.id
+                where dependency_receipt.step_id = dependency.id
+                  and dependency_receipt.status = 'finalized'
+                  and dependency_receipt.action_match
+                  and dependency_receipt.canonical
+                  and dependency_receipt.evidence ->> 'allowanceExact' = 'true'
+                  and dependency_receipt.evidence ->>
+                        'singleOperationBundle' = 'true'
+                  and dependency_receipt.evidence ->> 'allowanceRaw' =
+                        receipt.raw_amount::text
+                  and dependency_receipt.evidence ->> 'allowanceBlock' =
+                        dependency_receipt.ledger_height
+                  and lower(
+                        dependency_receipt.evidence ->> 'allowanceBlockHash'
+                      ) = lower(dependency_receipt.block_hash)
+                order by dependency_receipt.observed_at desc,
+                         dependency_receipt.id desc
+                limit 1
+              )
+              else null
+            end as allowance_mutation_baseline_block,
             step.executor_id,
             step.normalized_action,
             step.payer_requirement,
@@ -2485,6 +2517,35 @@ async function recoverRelay(
             step.id as step_id,
             step.action_fingerprint,
             step.action_validation_result,
+            case
+              when step.action_validation_result ->> 'relayStepKind' =
+                     'deposit'
+              then (
+                select dependency_receipt.ledger_height::text
+                from funding_step_receipt_observations dependency_receipt
+                join funding_operation_step_attempts dependency_attempt
+                  on dependency_attempt.id = dependency_receipt.attempt_id
+                 and dependency_attempt.step_id = dependency.id
+                where dependency_receipt.step_id = dependency.id
+                  and dependency_receipt.status = 'finalized'
+                  and dependency_receipt.action_match
+                  and dependency_receipt.canonical
+                  and dependency_receipt.evidence ->> 'allowanceExact' = 'true'
+                  and dependency_receipt.evidence ->>
+                        'singleOperationBundle' = 'true'
+                  and dependency_receipt.evidence ->> 'allowanceRaw' =
+                        receipt.raw_amount::text
+                  and dependency_receipt.evidence ->> 'allowanceBlock' =
+                        dependency_receipt.ledger_height
+                  and lower(
+                        dependency_receipt.evidence ->> 'allowanceBlockHash'
+                      ) = lower(dependency_receipt.block_hash)
+                order by dependency_receipt.observed_at desc,
+                         dependency_receipt.id desc
+                limit 1
+              )
+              else null
+            end as allowance_mutation_baseline_block,
             step.executor_id,
             step.normalized_action,
             step.payer_requirement,
@@ -2493,6 +2554,9 @@ async function recoverRelay(
        from funding_operation_step_attempts attempt
        join funding_operation_steps step on step.id = attempt.step_id
        join funding_operations operation on operation.id = step.operation_id
+       left join funding_operation_steps dependency
+         on dependency.id = step.depends_on_step_id
+        and dependency.operation_id = operation.id
        join funding_receive_receipts receipt on receipt.child_funding_operation_id = operation.id
        join telegram_funding_authorizations funding_authorization
          on funding_authorization.id::text = operation.support_metadata ->> 'fundingAuthorizationId'
@@ -2539,6 +2603,7 @@ async function recoverRelay(
               cleanup_step.id as step_id,
               cleanup_step.action_fingerprint,
               cleanup_step.action_validation_result,
+              null::text as allowance_mutation_baseline_block,
               cleanup_step.executor_id,
               cleanup_step.normalized_action,
               cleanup_step.payer_requirement,
@@ -2795,6 +2860,7 @@ async function preBroadcastRelay(
     return {
       kind: "hard_invalid" as const,
       reasonCode: "delegated_action_invalid" as const,
+      diagnosticCode: "approval_dependency_missing" as const,
     };
   }
   const scope = await client.query<{
@@ -2853,6 +2919,7 @@ async function preBroadcastRelay(
     return {
       kind: "hard_invalid" as const,
       reasonCode: "delegated_action_invalid" as const,
+      diagnosticCode: "reservation_lane_missing" as const,
     };
   const residual = row.action_expires_at
     ? row.action_expires_at.getTime() - row.checked_at.getTime()
@@ -2868,6 +2935,18 @@ async function preBroadcastRelay(
     return {
       kind: "hard_invalid" as const,
       reasonCode: "delegated_action_invalid" as const,
+      diagnosticCode: "allowance_observation_missing" as const,
+    };
+  }
+  if (
+    validated.kind === "deposit" &&
+    (!input.claim.allowanceMutationBaselineBlock ||
+      !/^(0|[1-9][0-9]*)$/u.test(input.claim.allowanceMutationBaselineBlock))
+  ) {
+    return {
+      kind: "hard_invalid" as const,
+      reasonCode: "delegated_action_invalid" as const,
+      diagnosticCode: "allowance_baseline_missing" as const,
     };
   }
   const observedAllowance = BigInt(observed.raw);
@@ -2914,15 +2993,28 @@ async function preBroadcastRelay(
   }
   const expected =
     validated.kind === "approve" ? 0n : BigInt(input.claim.receiptRaw);
+  if (validated.kind !== "cleanup" && observedAllowance !== expected) {
+    return {
+      kind: "hard_invalid" as const,
+      reasonCode: "delegated_action_invalid" as const,
+      diagnosticCode: "allowance_amount_mismatch" as const,
+    };
+  }
   if (
-    (validated.kind !== "cleanup" && observedAllowance !== expected) ||
     cleanupState === "foreign_drift" ||
-    (validated.kind === "deposit" &&
-      (!row.allowance_exact || !depositAllowanceOwned))
+    (validated.kind === "deposit" && !depositAllowanceOwned)
   ) {
     return {
       kind: "hard_invalid" as const,
       reasonCode: "delegated_action_invalid" as const,
+      diagnosticCode: "allowance_owner_tx_mismatch" as const,
+    };
+  }
+  if (validated.kind === "deposit" && !row.allowance_exact) {
+    return {
+      kind: "hard_invalid" as const,
+      reasonCode: "delegated_action_invalid" as const,
+      diagnosticCode: "approval_dependency_missing" as const,
     };
   }
   return { kind: "allowed" as const };
@@ -3738,10 +3830,11 @@ export function createRelayEvmDelegatedFundingProfile(
             ? "finalized"
             : "latest",
         mutationBaselineBlock:
-          typeof claim.actionValidationResult.allowanceMutationBaselineBlock ===
-          "string"
+          claim.allowanceMutationBaselineBlock ??
+          (typeof claim.actionValidationResult
+            .allowanceMutationBaselineBlock === "string"
             ? claim.actionValidationResult.allowanceMutationBaselineBlock
-            : null,
+            : null),
       }),
     preBroadcastDecisionInTransaction: (client, boundaryInput) =>
       preBroadcastRelay(client, { ...boundaryInput, configuration }),

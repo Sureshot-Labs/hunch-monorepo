@@ -906,7 +906,7 @@ try {
         networkId: "evm:137",
       },
     } as never,
-    context: created.context,
+    context: { ...created.context, progressRevision: 1 },
     now,
     presentationMode: "pusd_or_usdce_automatic" as const,
     session: {
@@ -1015,9 +1015,10 @@ try {
     message: { text: "pUSD ready" },
     progress: { state: "ready" } as never,
   });
-  assert.match(partialFundingMessage.text, /Funding for this Buy/u);
-  assert.match(partialFundingMessage.text, /Maximum spend now/u);
-  assert.match(partialFundingMessage.text, /Send at least/u);
+  assert.match(partialFundingMessage.text, /pUSD ready/u);
+  assert.match(partialFundingMessage.text, /Funds received/u);
+  assert.match(partialFundingMessage.text, /balance may still be syncing/u);
+  assert.doesNotMatch(partialFundingMessage.text, /Send at least/u);
   assert.equal(
     partialFundingMessage.qrText,
     undefined,
@@ -1029,9 +1030,11 @@ try {
     "an address-free ready projection must remain address-free",
   );
   assert.equal(
-    partialFundingMessage.reply_markup,
-    undefined,
-    "the decorator must not synthesize address controls for an address-free card",
+    partialFundingMessage.reply_markup?.inline_keyboard
+      .flat()
+      .some((button) => button.text.includes("Review Buy")),
+    true,
+    "durable ready evidence must expose Review Buy while live venue readiness catches up",
   );
   const resumeInput = {
     appBaseUrl: "https://app.hunch.trade",

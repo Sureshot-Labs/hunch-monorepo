@@ -57,6 +57,7 @@ type JsonRecord = Readonly<Record<string, JsonValue>>;
 
 export type DelegatedFundingExecutionClaim = Readonly<{
   action: NormalizedAction;
+  allowanceMutationBaselineBlock?: string | null;
   actionWalletId: string;
   actionFingerprint: string;
   actionValidationResult: JsonRecord;
@@ -337,6 +338,7 @@ async function finishDelegatedFundingNonbroadcastFailure(
     stepId: string;
     attemptId: string;
     reasonCode: string;
+    diagnosticCode?: string;
     now: Date;
   }>,
 ): Promise<void> {
@@ -351,7 +353,10 @@ async function finishDelegatedFundingNonbroadcastFailure(
     receiptRefCiphertext: null,
     receiptRefLookupHmac: null,
     lookupKeyVersion: null,
-    actualCosts: { reasonCode: input.reasonCode },
+    actualCosts: {
+      reasonCode: input.reasonCode,
+      ...(input.diagnosticCode ? { diagnosticCode: input.diagnosticCode } : {}),
+    },
     now: input.now,
   });
 }
@@ -1325,6 +1330,9 @@ export class DelegatedFundingExecutor {
                   stepId: claim.stepId,
                   attemptId: claim.attemptId,
                   reasonCode: decision.reasonCode,
+                  ...(decision.diagnosticCode
+                    ? { diagnosticCode: decision.diagnosticCode }
+                    : {}),
                   now,
                 });
                 if (runtime.finalizeHardInvalidInTransaction) {

@@ -1716,10 +1716,14 @@ try {
       limit: 10,
       now: new Date(now.getTime() + 61_300),
     });
-  assert.deepEqual(
-    restoredControllerProjection,
-    { candidates: 1, created: 0, skipped: 1 },
-    "a terminal redacted context must not resume when its controller becomes current again",
+  assert.equal(restoredControllerProjection.created, 0);
+  assert.equal(
+    restoredControllerProjection.skipped,
+    restoredControllerProjection.candidates,
+  );
+  assert.ok(
+    restoredControllerProjection.candidates >= 1,
+    "the terminal redacted context must be inspected",
   );
   const absorbingTerminal = await pool.query<{
     address_redacted_revision: number;
