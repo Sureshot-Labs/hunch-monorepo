@@ -991,6 +991,9 @@ export class TelegramFundingService {
               controllerWalletId: input.controllerWalletId ?? undefined,
               destinationOptionId: input.destination.destinationOptionId,
               now: input.now,
+              ...(input.reuseActiveContextForBuyReturn
+                ? { supersedeInactiveContextForBuyReturn: true }
+                : {}),
               telegramAccountId: input.initialLink.linkId,
               telegramMessageId: input.telegramMessageId,
               telegramUserId: input.identity.telegramUserId,

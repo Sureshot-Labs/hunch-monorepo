@@ -445,9 +445,14 @@ export async function runFundingReconciliationJob(
     };
   };
   const directIngressObserver = new DirectIngressDestinationObserver();
-  const ownedRouteObserver = new OwnedRouteDestinationObserver();
-  const relayRefundObserver = codecConfig
-    ? new RelayOwnedRefundObserver(createRelayReferenceCodec(codecConfig))
+  const relayReferenceCodec = codecConfig
+    ? createRelayReferenceCodec(codecConfig)
+    : null;
+  const ownedRouteObserver = new OwnedRouteDestinationObserver(
+    relayReferenceCodec ? { referenceCodec: relayReferenceCodec } : {},
+  );
+  const relayRefundObserver = relayReferenceCodec
+    ? new RelayOwnedRefundObserver(relayReferenceCodec)
     : null;
   const receiptDriver = transactionCodec
     ? new FundingStepReceiptReconciliationDriver(transactionCodec)

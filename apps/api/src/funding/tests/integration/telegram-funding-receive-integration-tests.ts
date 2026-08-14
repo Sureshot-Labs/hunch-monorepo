@@ -1270,11 +1270,10 @@ try {
         venueId: "polymarket",
       },
     );
-    assert.equal(attached?.id, fundingContextId);
     assert.equal(
-      attached?.telegramMessageId,
-      101,
-      "a Buy shortfall may attach to a consented context without rebinding its Telegram card",
+      attached,
+      null,
+      "a consented address without an observed transfer is not active funding for a new Buy",
     );
   } finally {
     await buyAttachmentClient.query("rollback").catch(() => undefined);

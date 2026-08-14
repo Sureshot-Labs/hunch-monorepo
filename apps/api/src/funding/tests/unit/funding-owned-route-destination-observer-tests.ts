@@ -4,6 +4,7 @@ import type { Pool } from "@hunch/infra";
 
 import {
   observeOwnedRouteDestination,
+  ownedRouteExactDestinationCredits,
   ownedRouteProviderCredits,
   ownedRouteSatisfiedAmount,
   OwnedRouteDestinationObserver,
@@ -130,6 +131,57 @@ assert.deepEqual(
       providerDestinationReferenceCount: 0,
     },
   ],
+);
+
+const destinationTransactionHash = `0x${"ab".repeat(32)}`;
+const exactReceiptTarget: OwnedRouteDestinationTarget = {
+  ...target,
+  providerSegments: [
+    {
+      ...primaryProviderSegment,
+      providerRawStatus: "success",
+      providerStatusCategory: "provider_success",
+      providerDestinationReferenceCount: 1,
+      transactionReferenceFingerprints: [`fp:${destinationTransactionHash}`],
+    },
+  ],
+  destinationReceipts: [
+    {
+      receiptId: "00000000-0000-4000-8000-000000000010",
+      receiveSessionId: "00000000-0000-4000-8000-000000000011",
+      networkId: target.asset.networkId,
+      assetId: target.asset.assetId,
+      assetDecimals: target.asset.decimals,
+      destinationAddress: target.destinationAddress,
+      rawAmount: "1010102",
+      txHash: destinationTransactionHash,
+      eventIndex: "7",
+      ledgerHeight: "123",
+      blockHash: `0x${"cd".repeat(32)}`,
+      observedAt: "2026-08-14T17:20:15.873Z",
+    },
+  ],
+};
+assert.deepEqual(
+  ownedRouteExactDestinationCredits(exactReceiptTarget, {
+    fingerprint: (reference) => `fp:${reference}`,
+  })?.map((credit) => ({
+    segmentId: credit.segmentId,
+    receiptId: credit.receipt.receiptId,
+  })),
+  [
+    {
+      segmentId: primaryProviderSegment.segmentId,
+      receiptId: "00000000-0000-4000-8000-000000000010",
+    },
+  ],
+);
+assert.equal(
+  ownedRouteExactDestinationCredits(exactReceiptTarget, {
+    fingerprint: () => "unrelated",
+  }),
+  null,
+  "an unrelated ready receipt cannot satisfy Relay destination evidence",
 );
 
 let persisted = 0;
@@ -282,66 +334,73 @@ const receiveBaselineObserver = new OwnedRouteDestinationObserver({
 assert.deepEqual(
   await receiveBaselineObserver.pollOperation(
     {
-      query: async () => ({
-        rows: [
-          {
-            operation_id: target.operationId,
-            user_id: target.userId,
-            purpose: target.purpose,
-            market_id: target.marketId,
-            status: "recovery_required",
-            progress_stage: "source_observed",
-            version: 10,
-            venue_binding_snapshot: {
-              venueBindingOptionId: target.venueBindingOptionId,
-            },
-            destination_target_snapshot: {
-              kind: "owned_location",
-              location: {
-                kind: "venue_account",
+      query: async (sql: string) => {
+        if (sql.includes("from funding_receive_receipts source_receipt")) {
+          return { rows: [] };
+        }
+        return {
+          rows: [
+            {
+              operation_id: target.operationId,
+              user_id: target.userId,
+              purpose: target.purpose,
+              market_id: target.marketId,
+              status: "recovery_required",
+              progress_stage: "source_observed",
+              version: 10,
+              venue_binding_snapshot: {
+                venueBindingOptionId: target.venueBindingOptionId,
+              },
+              destination_target_snapshot: {
+                kind: "owned_location",
+                location: {
+                  kind: "venue_account",
+                  locationId: target.destinationLocationId,
+                  accountId: target.userId,
+                  asset: target.asset,
+                  details: { address: target.destinationAddress },
+                },
+              },
+              operation_support_metadata: {
+                fundingReceiveReceiptId: "00000000-0000-4000-8000-000000000012",
+              },
+              planner_snapshot: null,
+              receive_destination_observation: {
                 locationId: target.destinationLocationId,
-                accountId: target.userId,
                 asset: target.asset,
-                details: { address: target.destinationAddress },
+                baselineRaw: "500000",
+                baselineRevision: "immutable-receive-baseline",
+                baselineAsOf: "2026-08-14T17:19:15.000Z",
               },
-            },
-            operation_support_metadata: {},
-            planner_snapshot: null,
-            receive_destination_observation: {
-              locationId: target.destinationLocationId,
-              asset: target.asset,
-              baselineRaw: "500000",
-              baselineRevision: "immutable-receive-baseline",
-              baselineAsOf: "2026-08-14T17:19:15.000Z",
-            },
-            quoted_min_output: {
-              asset: target.asset,
-              raw: "1000000",
-            },
-            requested_destination_amount: {
-              asset: target.asset,
-              raw: "1000000",
-            },
-            provider_segments: [
-              {
-                segmentId: target.providerSegments[0]?.segmentId,
-                ordinal: 0,
-                expectedOutput: {
-                  asset: target.asset,
-                  raw: "1000000",
-                },
-                minimumOutput: {
-                  asset: target.asset,
-                  raw: "1000000",
-                },
-                rawStatus: "success",
-                destinationTransactionReferenceCount: 0,
+              quoted_min_output: {
+                asset: target.asset,
+                raw: "1000000",
               },
-            ],
-            competing_count: "0",
-          },
-        ],
-      }),
+              requested_destination_amount: {
+                asset: target.asset,
+                raw: "1000000",
+              },
+              provider_segments: [
+                {
+                  segmentId: target.providerSegments[0]?.segmentId,
+                  ordinal: 0,
+                  expectedOutput: {
+                    asset: target.asset,
+                    raw: "1000000",
+                  },
+                  minimumOutput: {
+                    asset: target.asset,
+                    raw: "1000000",
+                  },
+                  rawStatus: "success",
+                  destinationTransactionReferenceCount: 0,
+                },
+              ],
+              competing_count: "0",
+            },
+          ],
+        };
+      },
     } as unknown as Pool,
     target.operationId,
   ),

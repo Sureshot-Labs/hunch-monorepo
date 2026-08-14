@@ -1105,6 +1105,7 @@ async function insertReadyPusdReceipt(
   fixture: Fixture,
   rawAmount: string,
   observedAt: Date,
+  transactionHash = `0x${crypto.randomBytes(32).toString("hex")}`,
 ): Promise<string> {
   const inserted = await insertFundingReceiveReceipt(pool, {
     receiveSessionId: fixture.receiveSessionId,
@@ -1115,7 +1116,7 @@ async function insertReadyPusdReceipt(
     rawAmount,
     observationRevision: opaque("pusd_ready_observation"),
     canonicalEvent: {
-      transactionHash: `0x${crypto.randomBytes(32).toString("hex")}`,
+      transactionHash,
       eventIndex: "0",
       ledgerHeight: "102",
       blockHash: `0x${crypto.randomBytes(32).toString("hex")}`,
@@ -4554,6 +4555,14 @@ try {
       immutableBaselineAt.getTime(),
     ],
   );
+  const ingressCreditReduction = await reduceFundingOperation(pool, {
+    operationId: immutableBaselineRelay.operationId,
+    now: immutableBaselineAt,
+  });
+  assert.deepEqual(ingressCreditReduction.finalState, {
+    status: "in_progress",
+    stage: "source_observed",
+  });
   await tx(pool, (client) =>
     allocateFundingObservationInTransaction(client, {
       operationId: immutableBaselineRelay.operationId,
@@ -4615,6 +4624,19 @@ try {
     status: "completed",
     stage: "terminal",
   });
+  const immutableBaselineActualInput = await pool.query<{
+    actual_input: { raw?: string } | null;
+  }>(
+    `select actual_input
+       from funding_operation_segments
+      where id = $1::uuid`,
+    [immutableBaselineSegmentId],
+  );
+  assert.equal(
+    immutableBaselineActualInput.rows[0]?.actual_input?.raw,
+    "2000000",
+    "the later route debit must replace, not add to, its ingress credit",
+  );
   assert.equal(
     await settleFundingReceiveReceiptRouting(pool, {
       receiptId: immutableBaselineRelay.receiptId,
@@ -4635,6 +4657,136 @@ try {
     true,
     "terminal Relay destination evidence must unlock Buy continuation without rearm",
   );
+
+  const exactReceiptRelay = await createRelayFixture();
+  const exactReceiptAt = new Date(immutableBaselineAt.getTime() + 10_000);
+  const exactDestinationTransactionHash = `0x${crypto
+    .randomBytes(32)
+    .toString("hex")}`;
+  const exactReceiptSegment = await pool.query<{ id: string }>(
+    `select id
+       from funding_operation_segments
+      where operation_id = $1::uuid
+        and ordinal = 0`,
+    [exactReceiptRelay.operationId],
+  );
+  const exactReceiptSegmentId = exactReceiptSegment.rows[0]?.id;
+  assert.ok(exactReceiptSegmentId);
+  await pool.query(
+    `update funding_operation_steps
+        set state = 'submitted'
+      where operation_id = $1::uuid`,
+    [exactReceiptRelay.operationId],
+  );
+  await pool.query(
+    `update funding_operation_steps
+        set state = 'succeeded'
+      where operation_id = $1::uuid`,
+    [exactReceiptRelay.operationId],
+  );
+  await pool.query(
+    `update funding_operation_segments
+        set status = 'submitted',
+            submitted_at = $2,
+            raw_status = 'success',
+            support_metadata = support_metadata || jsonb_build_object(
+              'relayStatusCategory', 'provider_success',
+              'originTransactionReferenceCount', 1,
+              'destinationTransactionReferenceCount', 1,
+              'providerUpdatedAt', $3::bigint,
+              'relayTransactionReferenceFingerprints', $4::jsonb
+            )
+      where id = $1::uuid`,
+    [
+      exactReceiptSegmentId,
+      exactReceiptAt,
+      exactReceiptAt.getTime(),
+      JSON.stringify([
+        referenceCodec.fingerprint(exactDestinationTransactionHash),
+      ]),
+    ],
+  );
+  await reduceFundingOperation(pool, {
+    operationId: exactReceiptRelay.operationId,
+    now: exactReceiptAt,
+  });
+  await tx(pool, (client) =>
+    allocateFundingObservationInTransaction(client, {
+      operationId: exactReceiptRelay.operationId,
+      segmentId: exactReceiptSegmentId,
+      kind: "source_debit",
+      networkId: "evm:8453",
+      assetId: BASE_USDC,
+      assetDecimals: 6,
+      txHash: `0x${crypto.randomBytes(32).toString("hex")}`,
+      eventIndex: "0",
+      fromAddress: exactReceiptRelay.walletAddress,
+      toAddress: RELAY_DEPOSITORY_V2,
+      rawAmount: "2000000",
+      observedAt: exactReceiptAt,
+      ledgerHeight: "251",
+      blockHash: `0x${crypto.randomBytes(32).toString("hex")}`,
+      finalityStatus: "finalized",
+      finalizedAt: exactReceiptAt,
+      metadata: { relayDeposit: true },
+    }),
+  );
+  const exactDestinationReceiptId = await insertReadyPusdReceipt(
+    exactReceiptRelay.base,
+    "2000000",
+    new Date(exactReceiptAt.getTime() + 1_000),
+    exactDestinationTransactionHash,
+  );
+  const exactReceiptObserver = new OwnedRouteDestinationObserver({
+    referenceCodec,
+    observe: async () => {
+      throw new Error(
+        "an exact Relay destination receipt must not depend on current balance",
+      );
+    },
+  });
+  assert.deepEqual(
+    await exactReceiptObserver.pollOperation(
+      pool,
+      exactReceiptRelay.operationId,
+      new Date(exactReceiptAt.getTime() + 2_000),
+    ),
+    { destinationsPolled: 1, destinationSatisfied: true },
+  );
+  const exactReceiptObservation = await pool.query<{
+    raw_amount: string;
+    tx_hash: string;
+    metadata: { receiveReceiptId?: string };
+  }>(
+    `select raw_amount::text as raw_amount, tx_hash, metadata
+       from funding_observations
+      where operation_id = $1::uuid
+        and kind = 'destination_credit'`,
+    [exactReceiptRelay.operationId],
+  );
+  assert.deepEqual(exactReceiptObservation.rows, [
+    {
+      raw_amount: "2000000",
+      tx_hash: exactDestinationTransactionHash,
+      metadata: {
+        observerId: "relay_owned_destination_observation_v1",
+        receiveReceiptId: exactDestinationReceiptId,
+        receiveSessionId: exactReceiptRelay.base.receiveSessionId,
+        relayTransactionReferenceMatched: true,
+        relayTransactionReferenceFingerprint: referenceCodec.fingerprint(
+          exactDestinationTransactionHash,
+        ),
+      },
+    },
+  ]);
+  const exactReceiptReduction = await reduceFundingOperation(pool, {
+    operationId: exactReceiptRelay.operationId,
+    now: new Date(exactReceiptAt.getTime() + 2_001),
+  });
+  assert.deepEqual(exactReceiptReduction.finalState, {
+    status: "completed",
+    stage: "terminal",
+  });
 
   const relayPolicyRace = await createRelayFixture();
   let relayPolicyRaceBroadcasts = 0;

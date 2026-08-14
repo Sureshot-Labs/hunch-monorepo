@@ -984,12 +984,41 @@ async function lockActiveTelegramFundingOpenContext(
   return rows[0] ?? null;
 }
 
+async function activeTelegramFundingHasLiveRouting(
+  client: Pick<PoolClient, "query">,
+  receiveSessionId: string,
+): Promise<boolean> {
+  const { rows } = await client.query<{ live_routing: boolean }>(
+    `select exists (
+       select 1
+         from funding_receive_receipts receive_receipt
+         left join funding_operations operation_row
+           on operation_row.id = receive_receipt.child_funding_operation_id
+        where receive_receipt.receive_session_id = $1::uuid
+          and receive_receipt.status in ('observed', 'routing')
+          and (
+            receive_receipt.child_funding_operation_id is null
+            or operation_row.status in (
+              'awaiting_user',
+              'awaiting_external_funds',
+              'in_progress',
+              'reconcile_required',
+              'recovery_required'
+            )
+          )
+     ) as live_routing`,
+    [receiveSessionId],
+  );
+  return rows[0]?.live_routing === true;
+}
+
 export async function prepareTelegramFundingSessionOpenInTransaction(
   client: PoolClient,
   input: ActiveTelegramFundingOpenScope &
     Readonly<{
       destinationOptionId: string;
       reuseActiveContextForBuyReturn?: boolean;
+      supersedeInactiveContextForBuyReturn?: boolean;
       telegramAccountId: string;
       telegramMessageId: number | null;
       venueBindingOptionId: string;
@@ -1020,15 +1049,49 @@ export async function prepareTelegramFundingSessionOpenInTransaction(
   }
   const active = await lockActiveTelegramFundingOpenContext(client, input);
   if (!active) return null;
-  if (input.reuseActiveContextForBuyReturn) {
+  if (
+    input.reuseActiveContextForBuyReturn ||
+    input.supersedeInactiveContextForBuyReturn
+  ) {
     if (active.telegram_account_id !== input.telegramAccountId) {
       throw new TelegramFundingPersistenceError(
         "telegram_funding_session_unavailable",
       );
     }
-    // A Buy shortfall may attach an append-only return revision to the exact
-    // active receive context. The existing Telegram message remains the sole
-    // owner of its address and callbacks; no message id is rebound here.
+    const hasLiveRouting = await activeTelegramFundingHasLiveRouting(
+      client,
+      active.receive_session_id,
+    );
+    if (input.reuseActiveContextForBuyReturn) {
+      // A Buy shortfall may attach only while deposited funds are actually
+      // being routed. An open address, a completed receipt, or a stale recovery
+      // shell is not an active financial workflow.
+      return hasLiveRouting ? publicSession(active) : null;
+    }
+    if (hasLiveRouting) {
+      throw new TelegramFundingPersistenceError(
+        "telegram_funding_session_active_elsewhere",
+      );
+    }
+    const retired = await client.query<{ id: string }>(
+      `update funding_receive_sessions receive_session
+          set status = 'expired',
+              closed_at = $2,
+              updated_at = $2,
+              version = version + 1
+        where receive_session.id = $1::uuid
+          and receive_session.owner_channel = 'telegram'
+          and receive_session.status in (
+            'open', 'processing', 'review_required'
+          )
+        returning receive_session.id`,
+      [active.receive_session_id, input.now],
+    );
+    if (!retired.rows[0]) {
+      throw new TelegramFundingPersistenceError(
+        "telegram_funding_session_active_elsewhere",
+      );
+    }
     return publicSession(active);
   }
   const sameMessage =
