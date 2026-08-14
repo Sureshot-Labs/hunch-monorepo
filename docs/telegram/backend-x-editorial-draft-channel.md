@@ -335,7 +335,7 @@ type XEditorialDraftV1 = {
   characterCount: number;
   generatedAt: string;
   model: string;
-  promptVersion: "x_editorial_prompt_v10";
+  promptVersion: "x_editorial_prompt_v11";
   sourceDigest: string;
 };
 ```
@@ -369,6 +369,9 @@ The prompt and deterministic validators must enforce all of the following:
   words such as `bought`, `adding`, `loaded`, `dropped`, `doubled down`, and
   `paying favorite prices` require explicit action evidence; current price does
   not support a `cheap entry` or `expensive entry` claim;
+- treat only actual timing claims such as `today`, `hours ago`, `just bought`,
+  or `just moved` as recency assertions; do not misclassify non-temporal English
+  such as `not just a large position` as `unsupported_recency`;
 - distinguish market movement since signal from the trader's lifetime PnL;
 - describe public information only through validated verdict/timing/citations;
 - use verified track record only with its exact scope and horizon;
@@ -508,7 +511,7 @@ Persisted metrics shape:
     "version": 1,
     "postText": "...",
     "formatting": [{ "style": "bold", "text": "..." }],
-    "promptVersion": "x_editorial_prompt_v10",
+    "promptVersion": "x_editorial_prompt_v11",
     "sourceDigest": "..."
   }
 }
