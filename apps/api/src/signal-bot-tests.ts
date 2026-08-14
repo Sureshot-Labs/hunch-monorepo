@@ -4555,7 +4555,20 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       );
       assert.deepEqual(
         customButtons.map((button) => button.text),
-        ["Custom · YES", "Custom · NO"],
+        ["Custom buy · YES", "Custom buy · NO"],
+      );
+      assert.equal(
+        multiPresetMessage.reply_markup?.inline_keyboard.some(
+          (row) =>
+            row.length === 2 &&
+            row.every(
+              (button) =>
+                "callback_data" in button &&
+                button.callback_data?.startsWith("hbt:buy_input:"),
+            ),
+        ),
+        true,
+        "custom buy choices must share one compact row",
       );
       assert.equal(
         customButtons.every(

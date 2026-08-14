@@ -49,6 +49,7 @@ import {
 } from "./telegram-bot-trade-input-context.js";
 import {
   buildTelegramFundingCancelledMessage,
+  buildTelegramFundingBuyReturnAttachedMessage,
   buildTelegramFundingDeliveryQueuedMessage,
   buildTelegramFundingProgressMessage,
   buildTelegramFundingReviewQuoteMessage,
@@ -115,7 +116,14 @@ export {
 type JsonRecord = Readonly<Record<string, JsonValue>>;
 type TelegramFundingOpenContext = Awaited<
   ReturnType<typeof createOrReuseTelegramFundingSessionInTransaction>
->;
+> &
+  Readonly<{
+    reusedActiveMessage?: boolean;
+    reusedReceiveBinding?: Readonly<{
+      destinationOptionId: string;
+      venueBindingOptionId: string;
+    }>;
+  }>;
 type TelegramFundingInitialBuyReturn = Readonly<{
   eventId: string | null;
   marketId: string;
@@ -839,13 +847,74 @@ export class TelegramFundingService {
       initialBuyReturn?: TelegramFundingInitialBuyReturn;
       initialLink: ActiveTelegramAccountLink;
       now: Date;
+      reuseActiveContextForBuyReturn?: boolean;
       telegramMessageId: number | null;
       venueId: string;
     }>,
   ): Promise<TelegramFundingOpenContext> {
     let result: TelegramFundingOpenContext | undefined;
     let supersededContext: TelegramFundingSessionContext | null = null;
+    const reuseActiveContext = async (): Promise<
+      TelegramFundingOpenContext | undefined
+    > => {
+      if (!input.reuseActiveContextForBuyReturn) return undefined;
+      return tx(this.pool, async (client) => {
+        const active = await prepareTelegramFundingSessionOpenInTransaction(
+          client,
+          {
+            chatId: input.identity.chatId,
+            controllerWalletId: input.controllerWalletId ?? undefined,
+            destinationOptionId: input.destination.destinationOptionId,
+            now: input.now,
+            reuseActiveContextForBuyReturn: true,
+            telegramAccountId: input.initialLink.linkId,
+            telegramMessageId: input.telegramMessageId,
+            telegramUserId: input.identity.telegramUserId,
+            userId: input.initialLink.userId,
+            venueBindingOptionId: input.destination.venueBindingOptionId,
+            venueId: input.venueId,
+          },
+        );
+        if (!active) return undefined;
+        const frozenReceive = await client.query<{
+          destination_option_id: string;
+          venue_binding_option_id: string;
+        }>(
+          `
+            select
+              receive_session.destination_option_id,
+              receive_session.venue_binding_option_id
+            from funding_receive_sessions receive_session
+            where receive_session.id = $1::uuid
+              and receive_session.user_id = $2::uuid
+              and receive_session.owner_channel = 'telegram'
+              and receive_session.venue_id = $3
+            for update of receive_session
+          `,
+          [active.receiveSessionId, input.initialLink.userId, input.venueId],
+        );
+        const frozenBinding = frozenReceive.rows[0];
+        if (!frozenBinding) {
+          throw new TelegramFundingPersistenceError(
+            "telegram_funding_session_unavailable",
+          );
+        }
+        const opened: TelegramFundingOpenContext = {
+          context: active,
+          replayed: false,
+          reusedActiveMessage: true,
+          reusedReceiveBinding: {
+            destinationOptionId: frozenBinding.destination_option_id,
+            venueBindingOptionId: frozenBinding.venue_binding_option_id,
+          },
+        };
+        await input.afterContext?.(client, opened);
+        return opened;
+      });
+    };
     try {
+      const active = await reuseActiveContext();
+      if (active) return active;
       await this.receive.open(
         input.initialLink.userId,
         {
@@ -932,6 +1001,14 @@ export class TelegramFundingService {
         },
       );
     } catch (error) {
+      if (
+        input.reuseActiveContextForBuyReturn &&
+        error instanceof TelegramFundingPersistenceError &&
+        error.code === "telegram_funding_session_active_elsewhere"
+      ) {
+        const raced = await reuseActiveContext();
+        if (raced) return raced;
+      }
       if (
         error instanceof FundingPlannerError &&
         error.code === "receive_channel_conflict"
@@ -1126,6 +1203,7 @@ export class TelegramFundingService {
       funding_context_id: string;
       request_fingerprint: string;
       telegram_account_id: string | null;
+      telegram_message_id: string | number | null;
       telegram_user_id: string;
       user_id: string;
       venue_binding_option_id: string;
@@ -1139,6 +1217,7 @@ export class TelegramFundingService {
           mutation.request_fingerprint,
           context.user_id,
           context.telegram_account_id,
+          context.telegram_message_id,
           context.telegram_user_id,
           context.chat_id,
           buy_return.venue_id,
@@ -1190,6 +1269,13 @@ export class TelegramFundingService {
       );
       if (!replayContext) {
         throw new TelegramFundingError("funding_context_not_found");
+      }
+      if (
+        replayed.telegram_message_id != null &&
+        Number(replayed.telegram_message_id) !== input.telegramMessageId
+      ) {
+        await this.projectBuyReturnAttachmentBestEffort(replayContext.id, now);
+        return buildTelegramFundingBuyReturnAttachedMessage();
       }
       return this.presentExistingContext({
         context: replayContext,
@@ -1244,13 +1330,6 @@ export class TelegramFundingService {
       requestedSpendUsd,
       sourceShortfallIntentId: input.sourceIntentId,
     } as const;
-    const requestFingerprint = buildTelegramFundingBuyReturnRequestFingerprint({
-      destinationOptionId: destination.destinationOptionId,
-      identity,
-      link: initialLink,
-      request: input,
-      venueBindingOptionId: destination.venueBindingOptionId,
-    });
     const context = await this.openReceiveContext({
       initialLink,
       identity,
@@ -1266,8 +1345,21 @@ export class TelegramFundingService {
         side: input.side,
       },
       now,
+      reuseActiveContextForBuyReturn: true,
       venueId: input.venue,
       afterContext: async (client, context) => {
+        const effectiveReceiveBinding = {
+          venueId: input.venue,
+          ...(context.reusedReceiveBinding ?? receiveBinding),
+        } as const;
+        const requestFingerprint =
+          buildTelegramFundingBuyReturnRequestFingerprint({
+            destinationOptionId: effectiveReceiveBinding.destinationOptionId,
+            identity,
+            link: initialLink,
+            request: input,
+            venueBindingOptionId: effectiveReceiveBinding.venueBindingOptionId,
+          });
         const mutation = await client.query<{
           action: string;
           funding_context_id: string;
@@ -1408,7 +1500,7 @@ export class TelegramFundingService {
           {
             contextId: context.context.id,
             ...telegramBinding,
-            ...receiveBinding,
+            ...effectiveReceiveBinding,
             ...returnRequest,
             sourceAuthorityFingerprint:
               telegramBotTradeAuthorityFingerprint(sourceAuthority),
@@ -1440,6 +1532,10 @@ export class TelegramFundingService {
         }
       },
     });
+    if (context.reusedActiveMessage) {
+      await this.projectBuyReturnAttachmentBestEffort(context.context.id, now);
+      return buildTelegramFundingBuyReturnAttachedMessage();
+    }
     return this.session(
       {
         contextId: context.context.id,
@@ -2264,5 +2360,19 @@ export class TelegramFundingService {
       contextId,
       now,
     });
+  }
+
+  private async projectBuyReturnAttachmentBestEffort(
+    contextId: string,
+    now: Date,
+  ): Promise<void> {
+    try {
+      await this.projectMutationContext(contextId, now);
+    } catch (error) {
+      console.warn("[telegram-funding] Buy return projection deferred", {
+        contextId,
+        errorName: error instanceof Error ? error.name : "unknown_error",
+      });
+    }
   }
 }

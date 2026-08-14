@@ -1251,6 +1251,35 @@ try {
   assert.deepEqual(replayedConsent.mutationResponse, {
     text: "verified pUSD address",
   });
+  const buyAttachmentClient = await pool.connect();
+  try {
+    await buyAttachmentClient.query("begin");
+    const attached = await prepareTelegramFundingSessionOpenInTransaction(
+      buyAttachmentClient,
+      {
+        chatId: telegramUserId,
+        controllerWalletId,
+        destinationOptionId: canonicalInput.destinationOptionId,
+        now: new Date(now.getTime() + 1_020),
+        reuseActiveContextForBuyReturn: true,
+        telegramAccountId,
+        telegramMessageId: 999,
+        telegramUserId,
+        userId,
+        venueBindingOptionId: canonicalInput.venueBindingOptionId,
+        venueId: "polymarket",
+      },
+    );
+    assert.equal(attached?.id, fundingContextId);
+    assert.equal(
+      attached?.telegramMessageId,
+      101,
+      "a Buy shortfall may attach to a consented context without rebinding its Telegram card",
+    );
+  } finally {
+    await buyAttachmentClient.query("rollback").catch(() => undefined);
+    buyAttachmentClient.release();
+  }
   const interactiveWaiting = await exactManagedService.session(
     {
       chatId: telegramUserId,

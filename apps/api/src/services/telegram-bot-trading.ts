@@ -4759,9 +4759,10 @@ export async function buildTelegramBotTradingMarketMessage(input: {
       text:
         input.context?.origin === "position"
           ? `${action === "buy" ? "Buy" : "Sell"} · Custom amount`
-          : `Custom · ${sideLabel(market, side)}`,
+          : `${action === "buy" ? "Custom buy" : "Custom sell"} · ${sideLabel(market, side)}`,
     };
   };
+  const customBuyRow: TelegramBotTradingButton[] = [];
   for (const side of ["YES", "NO"] as const) {
     const row: TelegramBotTradingButton[] = [];
     for (const option of buyOptions.filter(
@@ -4786,9 +4787,11 @@ export async function buildTelegramBotTradingMarketMessage(input: {
     if (row.length > 0) keyboard.push(row);
     if (canBuildCustomBuy && (!focusedSide || side === focusedSide)) {
       const customButton = await createCustomInputButton("buy", side);
-      if (customButton) keyboard.push([customButton]);
+      if (customButton) customBuyRow.push(customButton);
     }
   }
+  if (customBuyRow.length > 0) keyboard.push(customBuyRow);
+  const customSellRow: TelegramBotTradingButton[] = [];
   for (const side of ["YES", "NO"] as const) {
     for (const option of sellOptions.filter(
       (candidate) => candidate.side === side,
@@ -4819,9 +4822,10 @@ export async function buildTelegramBotTradingMarketMessage(input: {
     }
     if (canBuildCustomSell && customSellSides.includes(side)) {
       const customButton = await createCustomInputButton("sell", side);
-      if (customButton) keyboard.push([customButton]);
+      if (customButton) customSellRow.push(customButton);
     }
   }
+  if (customSellRow.length > 0) keyboard.push(customSellRow);
   if (redeemPlan) {
     const intentId = await insertRedeemIntent({
       authority: authorityBinding as TelegramBotTradeAuthorityBinding,
@@ -7309,6 +7313,7 @@ async function previewPolymarketTelegramTradeIntent(input: {
   chatId: string;
   db: DbQuery;
   intent: TelegramTradeIntentRow;
+  log?: TelegramBotTradingCallbackInput["log"];
   market: TelegramBotMarketRow;
   maxAmountUsd: number;
   fundingReturnResume?: boolean;
@@ -7590,7 +7595,24 @@ async function previewPolymarketTelegramTradeIntent(input: {
                 : Number(input.intent.telegram_message_id),
             telegramUserId: input.intent.telegram_user_id,
           });
-        } catch {
+        } catch (error) {
+          const errorCode =
+            error instanceof Error &&
+            "code" in error &&
+            typeof error.code === "string"
+              ? error.code
+              : error instanceof Error
+                ? error.name
+                : "unknown_error";
+          input.log?.warn?.(
+            {
+              errorCode,
+              event: "telegram_funding_buy_return_open_failed",
+              intentId: input.intent.id,
+              marketId: input.intent.market_id,
+            },
+            "Telegram funding Buy return could not be opened",
+          );
           await input.sendMessage({
             chat_id: input.chatId,
             parse_mode: "MarkdownV2",
@@ -8861,6 +8883,7 @@ export async function handleTelegramBotTradingCallback(
         intent,
         market,
         maxAmountUsd,
+        log: input.log,
         openFundingBuyReturn: input.openFundingBuyReturn,
         policy,
         readiness: tradeReadiness,
