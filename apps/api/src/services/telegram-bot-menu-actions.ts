@@ -470,17 +470,29 @@ async function deliverSignalBotInteractiveMenuCallback(
     });
     return true;
   }
+  const fundingRows = depositMessage.reply_markup?.inline_keyboard ?? [];
+  const homeCallback = input.callbackPrefix + "home";
+  const hasHome = fundingRows.some((row) =>
+    row.some(
+      (button) =>
+        "callback_data" in button && button.callback_data === homeCallback,
+    ),
+  );
   await input.render({
     ...depositMessage,
     reply_markup: {
       inline_keyboard: [
-        ...(depositMessage.reply_markup?.inline_keyboard ?? []),
-        [
-          {
-            callback_data: input.callbackPrefix + "home",
-            text: "🏠 Home",
-          },
-        ],
+        ...fundingRows,
+        ...(!hasHome
+          ? [
+              [
+                {
+                  callback_data: homeCallback,
+                  text: "🏠 Home",
+                },
+              ],
+            ]
+          : []),
       ],
     },
   });

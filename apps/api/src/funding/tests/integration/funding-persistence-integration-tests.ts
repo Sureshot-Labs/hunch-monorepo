@@ -2228,7 +2228,7 @@ async function testCompositePreparationAndRelayCommit(): Promise<void> {
         blockHash: hash("3"),
         canonical: true,
         failureCode: null,
-        evidence: {},
+        evidence: { confirmations: 2 },
       } as const;
       const firstFinalizedAt = new Date("2026-08-13T10:00:00.000Z");
       const firstFinalized = await applyFundingStepReceiptEvidenceInTransaction(
@@ -2256,6 +2256,19 @@ async function testCompositePreparationAndRelayCommit(): Promise<void> {
         `,
         [operationId, preparationStepId],
       );
+      await replayClient.query(
+        `
+          update funding_step_receipt_observations
+          set evidence = evidence || jsonb_build_object(
+            'allowanceExact', true,
+            'allowanceRaw', '1000000',
+            'allowanceBlock', ledger_height,
+            'allowanceBlockHash', block_hash
+          )
+          where attempt_id = $1
+        `,
+        [preparationAttempt.id],
+      );
 
       const repeatedFinalizedAt = new Date("2026-08-13T10:01:00.000Z");
       const repeatedFinalized =
@@ -2276,6 +2289,15 @@ async function testCompositePreparationAndRelayCommit(): Promise<void> {
         repeatedFinalized.observedAt.getTime(),
         repeatedFinalizedAt.getTime(),
       );
+      assert.equal(repeatedFinalized.evidence.confirmations, 2);
+      assert.equal(
+        repeatedFinalized.evidence.allowanceExact,
+        true,
+        "repeated polling of the same receipt must preserve derived evidence",
+      );
+      assert.equal(repeatedFinalized.evidence.allowanceRaw, "1000000");
+      assert.equal(repeatedFinalized.evidence.allowanceBlock, "100");
+      assert.equal(repeatedFinalized.evidence.allowanceBlockHash, hash("3"));
       const replayedPreparationStep = await replayClient.query<{
         state: string;
       }>(

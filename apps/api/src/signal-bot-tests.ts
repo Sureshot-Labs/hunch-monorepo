@@ -9782,11 +9782,14 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     run: async () => {
       const redis = new FakeRedis();
       const telegram = new FakeTelegram();
-      telegram.editMessageText = async () => ({
-        error: "ambiguous",
-        message: "raw Telegram timeout with callback-token-secret",
-        ok: false,
-      });
+      telegram.editMessageText = async (input) => {
+        telegram.edits.push(input);
+        return {
+          error: "ambiguous",
+          message: "raw Telegram timeout with callback-token-secret",
+          ok: false,
+        };
+      };
       const events: Array<Record<string, unknown>> = [];
       const handled = await handleSignalBotMenuCallback({
         callbackQuery: {
@@ -9806,7 +9809,19 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
             rows: [{ link_id: "link-1", user_id: "user-1" }],
           }),
         } as never,
-        loadFunding: async () => ({ text: "Current funding progress" }),
+        loadFunding: async () => ({
+          reply_markup: {
+            inline_keyboard: [
+              [
+                {
+                  callback_data: "hm:v1:home",
+                  text: "🏠 Home",
+                },
+              ],
+            ],
+          },
+          text: "Current funding progress",
+        }),
         onFundingMenuDelivery: (event) => events.push(event),
         redis,
         sendTestSignal: async () => false,
@@ -9815,6 +9830,17 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(handled, true);
       assert.deepEqual(events, [{ action: "session", outcome: "ambiguous" }]);
       assert.equal(telegram.messages.length, 0);
+      assert.equal(
+        telegram.edits[0]?.reply_markup?.inline_keyboard
+          .flat()
+          .filter(
+            (button) =>
+              "callback_data" in button &&
+              button.callback_data === "hm:v1:home",
+          ).length,
+        1,
+        "funding refresh must not append a duplicate Home button",
+      );
       const serialized = JSON.stringify(events);
       assert.doesNotMatch(serialized, /callback-token-secret/u);
       assert.doesNotMatch(serialized, /raw Telegram timeout/u);
