@@ -2313,8 +2313,27 @@ export async function linkFundingReceiveReceiptOperationInTransaction(
           and observation.asset_decimals = $8
           and observation.tx_hash = $9
           and observation.event_index = $10
-          and observation.from_address is not distinct from $11
-          and observation.to_address = $12
+          and (
+            (
+              observation.network_id like 'evm:%'
+              and lower(observation.from_address) is not distinct from
+                    lower($11)
+            )
+            or (
+              observation.network_id not like 'evm:%'
+              and observation.from_address is not distinct from $11
+            )
+          )
+          and (
+            (
+              observation.network_id like 'evm:%'
+              and lower(observation.to_address) = lower($12)
+            )
+            or (
+              observation.network_id not like 'evm:%'
+              and observation.to_address = $12
+            )
+          )
           and observation.raw_amount = $13
           and observation.observed_at = $14::timestamptz
           and observation.ledger_height is not distinct from $15
