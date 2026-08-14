@@ -579,17 +579,26 @@ export class FundingReceiveReceiptRouter {
         } catch (error) {
           counts.retryableErrors += 1;
           const directive = execution?.classifyError?.(error) ?? null;
+          const errorCode =
+            directive?.errorCode ?? fundingReceiveRoutingErrorCode(error);
+          console.warn("[funding-receive] receipt routing attempt failed", {
+            receiptId: target.receipt.receiptId,
+            routeAdapter: execution?.adapterKey ?? null,
+            errorCode,
+            errorName: error instanceof Error ? error.name : null,
+            errorMessage: error instanceof Error ? error.message : null,
+          });
           const disposition = await (
             directive?.retryMode === "defer_without_budget"
               ? this.deferReceipt(
                   target,
-                  directive.errorCode,
+                  errorCode,
                   directive.retryAfterMs,
                   now,
                 )
               : this.deferOrRecoverReceipt(
                   target,
-                  fundingReceiveRoutingErrorCode(error),
+                  errorCode,
                   now,
                   fallbackReview,
                 )

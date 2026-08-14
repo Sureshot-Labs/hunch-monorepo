@@ -7,12 +7,16 @@ import type { FundingReceiveReceiptRoutingTarget } from "../../funding/persisten
 import { fundingPolicyRevision } from "../../funding/policies/funding-policy.js";
 import type { FundingIntentPolicy } from "../../funding/policies/funding-policy-v2.js";
 import { isRelayPinnedStableAsset, RELAY_PINNED_ASSETS } from "./mappings.js";
-import { createRelayReceiveReceiptDispositionResolver } from "./receive-operation.js";
+import {
+  createRelayReceiveReceiptDispositionResolver,
+  relayReceiveQuoteCorrelationId,
+} from "./receive-operation.js";
 import { createRelayReferenceCodec } from "./reference-codec.js";
 
 const USER_ID = "00000000-0000-4000-8000-000000000001";
 const USER_WALLET_ID = "00000000-0000-4000-8000-000000000002";
 const ADDRESS = "0x00000000000000000000000000000000000000a1";
+const RECEIPT_ID = "00000000-0000-4000-8000-000000000003";
 const SOURCE = {
   networkId: "evm:137",
   assetId: RELAY_PINNED_ASSETS.polygonUsdc,
@@ -39,7 +43,7 @@ function target(): FundingReceiveReceiptRoutingTarget {
   const sourceLocationId = "location_source_12345678";
   return {
     receipt: {
-      receiptId: "00000000-0000-4000-8000-000000000003",
+      receiptId: RECEIPT_ID,
       receiveSessionId: "00000000-0000-4000-8000-000000000004",
       variantId: "ingress_variant_12345678",
       asset: SOURCE,
@@ -160,6 +164,14 @@ assert.deepEqual(accepted.execution.outsidePolicyReview, {
   label: "Convert to pUSD",
   confirmation: "fresh_quote",
 });
+assert.notEqual(
+  relayReceiveQuoteCorrelationId(RECEIPT_ID, `receive-receipt:${RECEIPT_ID}`),
+  relayReceiveQuoteCorrelationId(
+    RECEIPT_ID,
+    `receive-receipt:${RECEIPT_ID}:retry:1`,
+  ),
+  "each durable receipt-operation generation must use a fresh Relay correlation",
+);
 
 const reviewTarget = target();
 const review = resolve({

@@ -67,6 +67,19 @@ type RuntimeRoute = FundingRuntimePolicy["routes"][number];
 
 export { RELAY_RECEIVE_OPERATION_ADAPTER_KEY } from "./receive-routing.js";
 
+export function relayReceiveQuoteCorrelationId(
+  receiptId: string,
+  operationIdempotencyKey: string,
+): string {
+  const baseIdempotencyKey = `receive-receipt:${receiptId}`;
+  return stableOpaqueId(
+    "funding_quote",
+    operationIdempotencyKey === baseIdempotencyKey
+      ? receiptId
+      : operationIdempotencyKey,
+  );
+}
+
 function relayReviewContinuation(
   destinationAsset: AssetRef,
 ): FundingReceiveReviewContinuation | null {
@@ -617,9 +630,18 @@ export function createRelayReceiveReceiptDispositionResolver(
             })
           : null;
         if (baselineAllowance && baselineAllowance.raw !== "0") return null;
-        const quoteCorrelationId = stableOpaqueId(
-          "funding_quote",
+        // A detached terminal child starts a new durable operation generation.
+        // Relay's operationId must advance with it: reusing the receipt-only
+        // correlation can replay the provider's expired quote/order from the
+        // failed generation even though our DB idempotency key is `retry:N`.
+        const operationIdempotencyKey =
+          await fundingReceiveReceiptOperationIdempotencyKey(db, {
+            receiptId: receiptTarget.receipt.receiptId,
+            userId: receiptTarget.userId,
+          });
+        const quoteCorrelationId = relayReceiveQuoteCorrelationId(
           receiptTarget.receipt.receiptId,
+          operationIdempotencyKey,
         );
         const quote = await adapter.quote({
           route: exactInputRoute(route),
@@ -726,6 +748,9 @@ export function createRelayReceiveReceiptDispositionResolver(
                 receiptId: receiptTarget.receipt.receiptId,
                 userId: receiptTarget.userId,
               });
+            if (idempotencyKey !== operationIdempotencyKey) {
+              throw new Error("Relay receipt operation generation changed");
+            }
             const quoteRow = await createFundingQuoteInTransaction(client, {
               userId: receiptTarget.userId,
               discoveryProjectionId: stableOpaqueId(
