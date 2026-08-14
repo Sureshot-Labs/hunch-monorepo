@@ -13,6 +13,7 @@ import {
   contentAssetCreateBodySchema,
   contentArticleCreateBodySchema,
   contentArticleUpdateBodySchema,
+  contentEditorialGraphSchema,
   publicContentArticlesQuerySchema,
 } from "./schemas/content.js";
 import {
@@ -87,6 +88,56 @@ test("normalizes slugs and de-duplicates structured tags", () => {
     { slug: "guides", label: "Guides" },
     { slug: "trading", label: "Trading" },
   ]);
+});
+
+test("normalizes the editorial graph and enforces source provenance", () => {
+  const checkedAt = "2026-08-14T12:00:00.000Z";
+  const parsed = contentEditorialGraphSchema.parse({
+    primaryIntent: "trade",
+    queryCluster: "trade-polymarket",
+    topics: [
+      { id: "Prediction-Markets", label: "Prediction markets" },
+      { id: "prediction-markets", label: "Duplicate" },
+    ],
+    venues: [{ id: "polymarket", label: "Polymarket" }],
+    sources: [
+      {
+        checkedAt,
+        publishedAt: null,
+        publisher: "Polymarket",
+        sourceType: "official",
+        title: "Trading documentation",
+        url: "https://docs.polymarket.com/",
+      },
+      {
+        checkedAt,
+        publishedAt: null,
+        publisher: "Duplicate",
+        sourceType: "official",
+        title: "Duplicate URL",
+        url: "https://docs.polymarket.com/",
+      },
+    ],
+  });
+  assert.deepEqual(parsed.topics, [
+    { id: "prediction-markets", label: "Prediction markets" },
+  ]);
+  assert.equal(parsed.sources.length, 1);
+  assert.equal(
+    contentEditorialGraphSchema.safeParse({
+      sources: [
+        {
+          checkedAt,
+          publishedAt: null,
+          publisher: "Unsafe",
+          sourceType: "reporting",
+          title: "Plain HTTP",
+          url: "http://example.com/article",
+        },
+      ],
+    }).success,
+    false,
+  );
 });
 
 test("defaults and validates immutable editorial content kinds", () => {
@@ -389,6 +440,16 @@ const publishableArticle: ContentArticle = {
     revision: 1,
     schemaVersion: 1,
     contentKind: "guide",
+    editorialGraph: {
+      primaryIntent: "learn",
+      queryCluster: "prediction-markets-guide",
+      parentHubId: null,
+      topics: [{ id: "prediction-markets", label: "Prediction markets" }],
+      venues: [],
+      markets: [],
+      entities: [],
+      sources: [],
+    },
     slug: "prediction-markets-guide",
     title: "Prediction Markets Guide",
     excerpt: "A practical guide.",
@@ -475,6 +536,35 @@ test("validates publication completeness without touching the database", () => {
       error.issues.includes(
         "news articles require a citation or references block",
       ),
+  );
+  assert.doesNotThrow(() =>
+    validateArticlePublishability({
+      ...publishableArticle,
+      draft: {
+        ...publishableArticle.draft,
+        contentKind: "news",
+        editorialGraph: {
+          ...publishableArticle.draft.editorialGraph,
+          primaryIntent: "news",
+          sources: [
+            {
+              checkedAt: "2026-08-14T12:00:00.000Z",
+              publishedAt: null,
+              publisher: "CFTC",
+              sourceType: "official",
+              title: "Event contracts",
+              url: "https://www.cftc.gov/",
+            },
+          ],
+        },
+        socialImage: publishableArticle.draft.listCover,
+        author: {
+          ...publishableArticle.draft.author,
+          url: "https://hunch.trade/about",
+          bio: "Hunch editorial team",
+        },
+      },
+    }),
   );
 });
 
@@ -626,8 +716,19 @@ test("registers gated protected routes and the content schema migrations", () =>
     ),
     "utf8",
   );
+  const editorialGraphMigration = readFileSync(
+    new URL(
+      "../../../packages/db/migrations/0213_content_editorial_graph.sql",
+      import.meta.url,
+    ),
+    "utf8",
+  );
   const contentDb = readFileSync(
     new URL("./content-db.ts", import.meta.url),
+    "utf8",
+  );
+  const prebuiltDeploy = readFileSync(
+    new URL("../../../ops/deploy-ec2-prebuilt.sh", import.meta.url),
     "utf8",
   );
   const expectedPublicPaths = [
@@ -719,9 +820,57 @@ test("registers gated protected routes and the content schema migrations", () =>
     editorialMigration,
     /content_article_versions_content_kind_check/,
   );
-  assert.match(contentDb, /0212_content_editorial_seo_foundation\.sql/);
-  assert.match(contentDb, /select count\(\*\) = 18/);
+  assert.match(editorialGraphMigration, /editorial_graph jsonb not null/);
+  assert.match(
+    editorialGraphMigration,
+    /content_article_drafts_editorial_graph_check/,
+  );
+  assert.match(
+    editorialGraphMigration,
+    /content_article_versions_editorial_graph_check/,
+  );
+  assert.match(
+    editorialGraphMigration,
+    /idx_content_article_drafts_editorial_graph/,
+  );
+  assert.match(
+    editorialGraphMigration,
+    /idx_content_article_versions_query_cluster/,
+  );
+  assert.match(
+    editorialGraphMigration,
+    /disable trigger content_article_versions_immutable/,
+  );
+  assert.match(
+    editorialGraphMigration,
+    /enable trigger content_article_versions_immutable/,
+  );
+  assert.ok(
+    editorialGraphMigration.indexOf(
+      "disable trigger content_article_versions_immutable",
+    ) < editorialGraphMigration.indexOf("update content_article_versions"),
+  );
+  assert.ok(
+    editorialGraphMigration.indexOf("update content_article_versions") <
+      editorialGraphMigration.indexOf(
+        "enable trigger content_article_versions_immutable",
+      ),
+  );
+  assert.match(contentDb, /0213_content_editorial_graph\.sql/);
+  assert.match(contentDb, /select count\(\*\) = 20/);
   assert.match(contentDb, /content_outbox_version_id_fkey/);
+  assert.ok(
+    prebuiltDeploy.indexOf('"${compose[@]}" run --rm api') <
+      prebuiltDeploy.indexOf('"${compose[@]}" down --remove-orphans'),
+  );
+  const migrationFailureGuard = prebuiltDeploy.match(
+    /if ! "\$\{compose\[@\]\}" run --rm api[\s\S]*?Migration failed; existing application containers were left running\.[\s\S]*?exit 1[\s\S]*?fi/,
+  );
+  assert.ok(migrationFailureGuard);
+  assert.ok(
+    prebuiltDeploy.indexOf(migrationFailureGuard[0]) <
+      prebuiltDeploy.indexOf('"${compose[@]}" down --remove-orphans'),
+  );
   assert.equal(CONTENT_RENDERER_CONTRACT_ID, "hunch-content-document-v1");
 });
 
