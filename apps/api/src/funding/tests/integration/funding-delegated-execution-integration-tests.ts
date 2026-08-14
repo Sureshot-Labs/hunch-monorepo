@@ -4782,6 +4782,72 @@ try {
     "a reorg committed before the deposit boundary must prevent the deposit send",
   );
 
+  const recoveredApprovalMaintenance = await createRelayFixture();
+  const recoveredApprovalObservation = relayAllowanceEvidence("2000000", "102");
+  let recoveredApprovalBroadcasts = 0;
+  const recoveredApprovalExecutor = relayExecutor(
+    [relayAllowanceEvidence("0", "101"), recoveredApprovalObservation],
+    () => {
+      recoveredApprovalBroadcasts += 1;
+    },
+  );
+  assert.equal(
+    (await recoveredApprovalExecutor.runBatch({ limit: 20, now })).submitted,
+    1,
+  );
+  await recordRelayApprovalSuccess(
+    recoveredApprovalMaintenance,
+    new Date(now.getTime() + 1),
+    recoveredApprovalObservation.blockHash,
+  );
+  await pool.query(
+    `update funding_operation_steps
+        set state = 'action_required',
+            updated_at = $2
+      where id = $1::uuid
+        and state = 'planned'`,
+    [recoveredApprovalMaintenance.depositStepId, new Date(now.getTime() + 2)],
+  );
+  const recoveredApprovalMaintenanceResult =
+    await recoveredApprovalExecutor.runBatch({
+      limit: 1,
+      now: new Date(now.getTime() + 3),
+    });
+  assert.equal(recoveredApprovalMaintenanceResult.submitted, 1);
+  assert.equal(recoveredApprovalBroadcasts, 2);
+  const recoveredApprovalEvidence = await pool.query<{
+    allowance_exact: boolean;
+    allowance_raw: string | null;
+  }>(
+    `select coalesce(evidence ->> 'allowanceExact' = 'true', false)
+              as allowance_exact,
+            evidence ->> 'allowanceRaw' as allowance_raw
+       from funding_step_receipt_observations
+      where step_id = $1::uuid
+        and status = 'finalized'
+        and canonical
+      order by observed_at desc
+      limit 1`,
+    [recoveredApprovalMaintenance.approvalStepId],
+  );
+  assert.deepEqual(recoveredApprovalEvidence.rows[0], {
+    allowance_exact: true,
+    allowance_raw: "2000000",
+  });
+  await pool.query(
+    `update telegram_funding_authorization_reservations
+        set status = 'settled',
+            resolved_at = $2,
+            resolution_evidence = resolution_evidence ||
+              jsonb_build_object(
+                'testResolution', 'recovered_approval_maintenance_complete'
+              ),
+            updated_at = $2
+      where funding_operation_id = $1::uuid
+        and status = 'reserved'`,
+    [recoveredApprovalMaintenance.operationId, new Date(now.getTime() + 4)],
+  );
+
   const hashAnchoredRelay = await createRelayFixture();
   const hashAnchoredBroadcasts = { value: 0 };
   const approvalBlockHash = `0x${"61".repeat(32)}`;

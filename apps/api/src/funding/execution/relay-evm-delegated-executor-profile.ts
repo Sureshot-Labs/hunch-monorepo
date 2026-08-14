@@ -1234,7 +1234,12 @@ async function reconcileRelayPostconditions(
          and approval_receipt.id = $2::uuid
          and operation.id = $3::uuid
          and approval_step.state = 'succeeded'
-         and deposit_step.state = 'planned'
+         and deposit_step.state in ('planned', 'action_required')
+         and not exists (
+           select 1
+           from funding_operation_step_attempts deposit_attempt
+           where deposit_attempt.step_id = deposit_step.id
+         )
          and approval_receipt.evidence ->> 'allowanceExact' is distinct from 'true'
        order by approval_receipt.observed_at
        for update of approval_step, deposit_step, approval_receipt, operation, reservation
