@@ -66,6 +66,7 @@ export type RelayWalletQuoteInput = Readonly<{
   senderWalletId: string;
   quoteCorrelationId: string;
   deadline: Date;
+  maximumQuoteTtlMs?: number;
   maximumSlippageBps?: number;
   now?: Date;
 }>;
@@ -176,8 +177,19 @@ function assertEvmActionGasWithinHardPolicy(
   }
 }
 
-function quoteExpiry(deadline: Date, now: Date): Date {
-  const adapterLimit = new Date(now.getTime() + 60_000);
+function quoteExpiry(
+  deadline: Date,
+  now: Date,
+  maximumQuoteTtlMs = 60_000,
+): Date {
+  if (
+    !Number.isSafeInteger(maximumQuoteTtlMs) ||
+    maximumQuoteTtlMs <= 0 ||
+    maximumQuoteTtlMs > 15 * 60_000
+  ) {
+    throw new Error("Relay quote TTL is outside hard policy");
+  }
+  const adapterLimit = new Date(now.getTime() + maximumQuoteTtlMs);
   return deadline < adapterLimit ? deadline : adapterLimit;
 }
 
@@ -508,7 +520,11 @@ export class RelayWalletQuoteAdapter {
       quoteCorrelationId,
       requestId,
     });
-    const expiresAt = quoteExpiry(input.deadline, completedAt);
+    const expiresAt = quoteExpiry(
+      input.deadline,
+      completedAt,
+      input.maximumQuoteTtlMs,
+    );
     const estimate = Math.max(0, Math.ceil(quote.details.timeEstimate ?? 0));
     const fees = normalizeRelayFees(quote);
     return {
