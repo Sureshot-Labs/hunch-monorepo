@@ -232,6 +232,10 @@ export async function createRelayAllowanceCleanupOperationInTransaction(
     valueRaw: "0",
     gasLimitRaw: null,
   };
+  const walletExecutionSnapshot = {
+    walletId: action.senderWalletId,
+    address: candidate.walletAddress,
+  };
   const expiresAt = new Date(input.now.getTime() + 10 * 60_000);
   const plan: FundingCommitPlan = {
     operation: {
@@ -246,7 +250,7 @@ export async function createRelayAllowanceCleanupOperationInTransaction(
       marketId: null,
       marketContextSnapshot: null,
       venueBindingSnapshot: candidate.venueBindingSnapshot,
-      walletExecutionSnapshot: null,
+      walletExecutionSnapshot,
       placementSnapshot: {},
       requestedSourceAmount: null,
       requestedDestinationAmount: null,
@@ -275,6 +279,7 @@ export async function createRelayAllowanceCleanupOperationInTransaction(
         actionValidationResult: {
           delegatedProfileId: TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
           relayStepKind: "cleanup",
+          signerAddress: candidate.walletAddress,
           requiresSingleOperationBundle: true,
           parentOperationId: candidate.parentOperationId,
           cleanupContext: candidate.cleanupContext,
