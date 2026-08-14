@@ -989,6 +989,7 @@ export async function prepareTelegramFundingSessionOpenInTransaction(
   input: ActiveTelegramFundingOpenScope &
     Readonly<{
       destinationOptionId: string;
+      reuseActiveContextForBuyReturn?: boolean;
       telegramAccountId: string;
       telegramMessageId: number | null;
       venueBindingOptionId: string;
@@ -1019,6 +1020,17 @@ export async function prepareTelegramFundingSessionOpenInTransaction(
   }
   const active = await lockActiveTelegramFundingOpenContext(client, input);
   if (!active) return null;
+  if (input.reuseActiveContextForBuyReturn) {
+    if (active.telegram_account_id !== input.telegramAccountId) {
+      throw new TelegramFundingPersistenceError(
+        "telegram_funding_session_unavailable",
+      );
+    }
+    // A Buy shortfall may attach an append-only return revision to the exact
+    // active receive context. The existing Telegram message remains the sole
+    // owner of its address and callbacks; no message id is rebound here.
+    return publicSession(active);
+  }
   const sameMessage =
     input.telegramMessageId == null ||
     active.telegram_message_id == null ||

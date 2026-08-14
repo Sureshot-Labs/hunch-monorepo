@@ -324,6 +324,19 @@ export function buildTelegramFundingActiveElsewhereMessage(): TelegramFundingMes
   };
 }
 
+export function buildTelegramFundingBuyReturnAttachedMessage(): TelegramFundingMessage {
+  return {
+    parse_mode: "MarkdownV2",
+    text: formatTelegramCalloutMarkdownV2({
+      bodyMarkdownV2: escapeTelegramMarkdownV2(
+        "This Buy was linked to the earlier Polymarket funding card. Continue there after funding is ready. No trade was submitted.",
+      ),
+      icon: "ℹ️",
+      title: "Buy linked to active funding",
+    }),
+  };
+}
+
 export function buildTelegramFundingCancelledMessage(): TelegramFundingMessage {
   return {
     parse_mode: "MarkdownV2",

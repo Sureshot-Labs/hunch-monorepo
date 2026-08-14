@@ -29,6 +29,7 @@ import {
   resolveTelegramFundingBuyContinuationCapability,
 } from "./services/telegram-funding-buy-continuation.js";
 import {
+  buildTelegramFundingBuyReturnAttachedMessage,
   buildTelegramFundingDeliveryQueuedMessage,
   buildTelegramFundingProgressMessage,
   buildTelegramFundingReviewQuoteMessage,
@@ -269,6 +270,50 @@ const supersedeInput = {
   assert.equal(
     fake.statements.some((sql) => sql.startsWith("update funding_receive")),
     false,
+  );
+}
+
+{
+  const fake = supersedeSessionPool(false, 1);
+  const client = await fake.pool.connect();
+  const reused = await prepareTelegramFundingSessionOpenInTransaction(
+    client as never,
+    {
+      ...supersedeInput,
+      destinationOptionId: "polymarket-deposit",
+      reuseActiveContextForBuyReturn: true,
+      telegramMessageId: 101,
+      venueBindingOptionId: "polymarket-wallet",
+    },
+  );
+  assert.equal(reused?.id, contextId);
+  assert.equal(
+    reused?.telegramMessageId,
+    100,
+    "Buy attachment must preserve the earlier funding card as message owner",
+  );
+  assert.equal(
+    fake.statements.some((sql) => sql.startsWith("update funding_receive")),
+    false,
+    "Buy attachment must not cancel or replace the active receive session",
+  );
+}
+
+{
+  const fake = supersedeSessionPool(false, 1);
+  const client = await fake.pool.connect();
+  await assert.rejects(
+    prepareTelegramFundingSessionOpenInTransaction(client as never, {
+      ...supersedeInput,
+      destinationOptionId: "polymarket-deposit",
+      reuseActiveContextForBuyReturn: true,
+      telegramAccountId: "523e4567-e89b-42d3-a456-426614174000",
+      venueBindingOptionId: "polymarket-wallet",
+    }),
+    (error: unknown) =>
+      error instanceof TelegramFundingPersistenceError &&
+      error.code === "telegram_funding_session_unavailable",
+    "Buy attachment must not cross a Telegram account relink",
   );
 }
 
@@ -1607,6 +1652,15 @@ const queuedDeliveryMessage = buildTelegramFundingDeliveryQueuedMessage({
 });
 assert.equal(queuedDeliveryMessage.durableFundingDeliveryRequired, true);
 assert.equal(queuedDeliveryMessage.fundingContextId, contextId);
+const attachedBuyMessage = buildTelegramFundingBuyReturnAttachedMessage();
+assert.equal(attachedBuyMessage.fundingContextId, undefined);
+assert.match(attachedBuyMessage.text, /Buy linked to active funding/u);
+assert.match(attachedBuyMessage.text, /No trade was submitted/u);
+assert.equal(
+  attachedBuyMessage.reply_markup,
+  undefined,
+  "the new Buy message must not duplicate callbacks owned by the earlier funding card",
+);
 assert.equal(queuedDeliveryMessage.qrText, undefined);
 assert.doesNotMatch(
   queuedDeliveryMessage.text,
