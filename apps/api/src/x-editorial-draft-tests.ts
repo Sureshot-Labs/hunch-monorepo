@@ -243,8 +243,12 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.match(prompt, /Never reuse their people, markets, numbers/i);
       assert.match(prompt, /editorial display strings verbatim/i);
       assert.match(prompt, /Never announce your structure/i);
-      assert.match(prompt, /zero or one topical emoji/i);
+      assert.match(prompt, /Use no emoji by default/i);
+      assert.match(prompt, /sports\/esports do not require one/i);
       assert.match(prompt, /Never create a list for one position/i);
+      assert.match(prompt, /at least three of joined, added, trimmed, exited/i);
+      assert.match(prompt, /has beaten market prices by 14 points/i);
+      assert.match(prompt, /ending in 'by\.\.\.\?'/i);
       assert.match(prompt, /keeps paying/i);
       assert.match(prompt, /recentDraftsToAvoidImitating/i);
       assert.match(prompt, /1000 visible characters/i);
@@ -552,7 +556,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.ok(validated.issues.includes("binary_side_explanation"));
       assert.ok(validated.issues.includes("analyst_jargon"));
       assert.ok(validated.issues.includes("unsupported_trade_action"));
-      assert.ok(validated.issues.includes("missing_topical_emoji"));
+      assert.equal(validated.issues.includes("missing_topical_emoji"), false);
     },
   },
   {
@@ -626,7 +630,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
-    name: "validator does not force emoji repetition across recent esports drafts",
+    name: "validator does not force emoji into esports drafts",
     run: () => {
       const nipSource: XEditorialDraftSource = {
         facts: [
@@ -665,6 +669,261 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         source: nipSource,
       });
       assert.deepEqual(validated.issues, []);
+    },
+  },
+  {
+    name: "validator rejects the live Hormuz profile grammar and editorial scaffolding",
+    run: () => {
+      const hormuzSource: XEditorialDraftSource = {
+        facts: [
+          {
+            id: "market",
+            label: "Canonical market",
+            value: {
+              marketQuestion:
+                "Will Iran charge fees for passage through the Strait of Hormuz by August 31?",
+              selectedSideLabel: "No fees by August 31",
+            },
+          },
+          {
+            id: "actor",
+            label: "Publication-ready actor",
+            value: { displayName: "@groth", position: "$6.6K" },
+          },
+          {
+            id: "price",
+            label: "Publication-ready price",
+            value: { displayPrice: "90.5¢" },
+          },
+          {
+            id: "credentials",
+            label: "Public track record",
+            value: [
+              "Up $3.8K over the last 30 days",
+              "Beat market prices by 14 points across 20 resolved bets",
+            ],
+          },
+        ],
+        kind: "initial",
+        marketId: "hormuz-fees",
+        noteId: "00000000-0000-4000-8000-000000000893",
+        selectedSide: "NO",
+      };
+      const postText =
+        "@groth is still holding $6.6K against Iran charging Hormuz fees by August 31.\n\nNO is 90.5¢ now, so this is not a long-shot fade. The market is already heavily on no fees by the deadline.\n\nThe better reason to notice it: @groth is up $3.8K over the last 30 days and has beat market prices by 14 points across 20 resolved bets.";
+      const validated = validateXEditorialModelOutput({
+        config,
+        output: {
+          version: 1,
+          status: "ready",
+          marketId: "hormuz-fees",
+          selectedSide: "NO",
+          postText,
+          formatting: [
+            {
+              style: "bold",
+              text: "@groth is still holding $6.6K against Iran charging Hormuz fees by August 31.",
+            },
+          ],
+          storyFamily: "trader_profile",
+          usedFactIds: ["market", "actor", "price", "credentials"],
+          safetyFlags: [],
+        },
+        source: hormuzSource,
+      });
+      assert.ok(validated.issues.includes("grammar_error"));
+      assert.ok(validated.issues.includes("editorial_scaffolding"));
+    },
+  },
+  {
+    name: "validator rejects raw followthrough titles and prose wallet inventories",
+    run: () => {
+      const followthroughSource: XEditorialDraftSource = {
+        facts: [
+          {
+            id: "market",
+            label: "Canonical market",
+            value: {
+              marketQuestion:
+                "Will the US announce an end to the Iranian blockade by August 31?",
+              selectedSideLabel: "No announcement by August 31",
+            },
+          },
+          {
+            id: "followthrough",
+            label: "Computed change since the signal",
+            value: {
+              addedWallets: 7,
+              entryPrice: "93¢",
+              estimatedOpenPnl: "+$3K",
+              exitedWallets: 2,
+              joinedWallets: 1,
+              markPrice: "96.9¢",
+              netSignalSideFlow: "+$49.5K",
+              stillHoldingWallets: 15,
+              trimmedWallets: 6,
+            },
+          },
+        ],
+        kind: "followthrough_stats",
+        marketId: "iran-blockade-followthrough",
+        noteId: "00000000-0000-4000-8000-000000000894",
+        selectedSide: "NO",
+      };
+      const postText =
+        "US announces end of Iranian blockade by...? moved from 93¢ to 96.9¢.\n\n$49.5K more moved onto NO after the original signal.\n\n1 new wallet joined. 7 existing wallets added. 6 trimmed the position. 2 exited. 15 wallets are still in.\n\nEstimated open PnL is +$3K.\n\nThe price moved one way. The wallets did not.";
+      const validated = validateXEditorialModelOutput({
+        config,
+        output: {
+          version: 1,
+          status: "ready",
+          marketId: "iran-blockade-followthrough",
+          selectedSide: "NO",
+          postText,
+          formatting: [
+            {
+              style: "bold",
+              text: "US announces end of Iranian blockade by...? moved from 93¢ to 96.9¢.",
+            },
+          ],
+          storyFamily: "followthrough",
+          usedFactIds: ["market", "followthrough"],
+          safetyFlags: [],
+        },
+        source: followthroughSource,
+      });
+      assert.ok(validated.issues.includes("raw_market_title"));
+      assert.ok(validated.issues.includes("wallet_activity_needs_list"));
+      assert.ok(validated.issues.includes("misleading_wallet_summary"));
+    },
+  },
+  {
+    name: "validator accepts mixed followthrough wallet activity as arrow lines",
+    run: () => {
+      const followthroughSource: XEditorialDraftSource = {
+        facts: [
+          {
+            id: "market",
+            label: "Canonical market",
+            value: {
+              marketQuestion:
+                "Will the US announce an end to the Iranian blockade by August 31?",
+              selectedSideLabel: "No announcement by August 31",
+            },
+          },
+          {
+            id: "followthrough",
+            label: "Computed change since the signal",
+            value: {
+              addedWallets: 7,
+              entryPrice: "93¢",
+              estimatedOpenPnl: "+$3K",
+              exitedWallets: 2,
+              joinedWallets: 1,
+              markPrice: "96.9¢",
+              netSignalSideFlow: "+$49.5K",
+              stillHoldingWallets: 15,
+              trimmedWallets: 6,
+            },
+          },
+        ],
+        kind: "followthrough_stats",
+        marketId: "iran-blockade-followthrough",
+        noteId: "00000000-0000-4000-8000-000000000895",
+        selectedSide: "NO",
+      };
+      const postText =
+        "NO climbed from 93¢ to 96.9¢ after the original signal. Another $49.5K followed it.\n\n→ 1 wallet joined\n→ 7 added\n→ 6 trimmed\n→ 2 exited\n→ 15 still hold\n\nEstimated open PnL is +$3K.\n\nPrice climbed. Wallet conviction split.";
+      const validated = validateXEditorialModelOutput({
+        config,
+        output: {
+          version: 1,
+          status: "ready",
+          marketId: "iran-blockade-followthrough",
+          selectedSide: "NO",
+          postText,
+          formatting: [
+            {
+              style: "bold",
+              text: "NO climbed from 93¢ to 96.9¢ after the original signal.",
+            },
+            {
+              style: "italic",
+              text: "Price climbed. Wallet conviction split.",
+            },
+          ],
+          storyFamily: "followthrough",
+          usedFactIds: ["market", "followthrough"],
+          safetyFlags: [],
+        },
+        source: followthroughSource,
+      });
+      assert.deepEqual(validated.issues, []);
+    },
+  },
+  {
+    name: "validator rejects abstract side hooks and repeated endings",
+    run: () => {
+      const cashSource: XEditorialDraftSource = {
+        facts: [
+          {
+            id: "market",
+            label: "Canonical market",
+            value: {
+              marketQuestion:
+                "Will the US announce an end to the Iranian blockade by August 31?",
+              selectedSideLabel: "No announcement by August 31",
+            },
+          },
+          {
+            id: "actor",
+            label: "Publication-ready actor",
+            value: { displayName: "@eCash", position: "$11.1K" },
+          },
+          {
+            id: "price",
+            label: "Publication-ready price move",
+            value: { displayMove: "7 points", displayPrice: "71.5¢" },
+          },
+          {
+            id: "credentials",
+            label: "Public track record",
+            value: [
+              "Up $73.7K over the last 30 days",
+              "Beat market prices by 27 points across 13 resolved bets",
+            ],
+          },
+        ],
+        kind: "initial",
+        marketId: "iran-blockade-ecash",
+        noteId: "00000000-0000-4000-8000-000000000896",
+        selectedSide: "NO",
+      };
+      const postText =
+        "NO on an August 31 blockade-end announcement has moved 7 points to 71.5¢.\n\n@eCash is still there with $11.1K on the same side — betting the US does not announce an end to the Iranian blockade by that deadline.\n\nThe record is the reason to care: up $73.7K over the last 30 days, with a 27-point edge versus market prices across 13 resolved bets.\n\nPrice moved with the thesis. The holder is still there.";
+      const validated = validateXEditorialModelOutput({
+        config,
+        output: {
+          version: 1,
+          status: "ready",
+          marketId: "iran-blockade-ecash",
+          selectedSide: "NO",
+          postText,
+          formatting: [
+            {
+              style: "bold",
+              text: "NO on an August 31 blockade-end announcement has moved 7 points to 71.5¢.",
+            },
+          ],
+          storyFamily: "trader_profile",
+          usedFactIds: ["market", "actor", "price", "credentials"],
+          safetyFlags: [],
+        },
+        source: cashSource,
+      });
+      assert.ok(validated.issues.includes("side_label_hook"));
+      assert.ok(validated.issues.includes("editorial_scaffolding"));
+      assert.ok(validated.issues.includes("repeated_phrase:still_there"));
     },
   },
   {
