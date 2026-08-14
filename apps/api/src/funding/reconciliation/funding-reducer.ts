@@ -530,6 +530,21 @@ function sumObservationAmount(
   };
 }
 
+// A routed ingress credit and the later source debit describe two lifecycle
+// points of the same funds. Once a debit exists it is the authoritative amount
+// that entered the route; adding the earlier wallet credit would count the
+// transfer twice and can conflict with the amount already frozen by an earlier
+// reducer pass.
+function effectiveSourceAmount(
+  observations: readonly FundingObservationRow[],
+  requested: JsonRecord | null,
+): JsonRecord | null {
+  return (
+    sumObservationAmount(observations, new Set(["source_debit"]), requested) ??
+    sumObservationAmount(observations, new Set(["source_credit"]), requested)
+  );
+}
+
 function moneyMeetsOrExceeds(
   actual: JsonRecord | null,
   expected: JsonRecord | null,
@@ -868,9 +883,8 @@ async function reduceFundingSegmentsInTransaction(
     const observations = input.observations.filter(
       (observation) => observation.segmentId === segment.id,
     );
-    const actualInput = sumObservationAmount(
+    const actualInput = effectiveSourceAmount(
       observations,
-      new Set(["source_debit", "source_credit"]),
       segment.quoted_input,
     );
     const actualOutput = sumObservationAmount(
@@ -983,9 +997,8 @@ export async function reduceFundingOperationInTransaction(
     );
   }
 
-  const actualSourceAmount = sumObservationAmount(
+  const actualSourceAmount = effectiveSourceAmount(
     observations,
-    new Set(["source_debit", "source_credit"]),
     initial.requestedSourceAmount,
   );
   const actualDestinationAmount = sumObservationAmount(
@@ -1008,11 +1021,10 @@ export async function reduceFundingOperationInTransaction(
     reorgBlockedByTerminalState: derived.reorgBlockedByTerminalState,
   });
   const sourceLegsFinal = segments.every((segment) => {
-    const segmentInput = sumObservationAmount(
+    const segmentInput = effectiveSourceAmount(
       observations.filter(
         (observation) => observation.segmentId === segment.id,
       ),
-      new Set(["source_debit", "source_credit"]),
       segment.quoted_input,
     );
     return moneyMeetsOrExceeds(segmentInput, segment.quoted_input);

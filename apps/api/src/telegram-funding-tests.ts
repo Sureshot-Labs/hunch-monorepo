@@ -104,6 +104,7 @@ const receiveTargetId = "receive_target_telegram_pusd_12345678";
 function supersedeSessionPool(
   receiveCanClose: boolean,
   activeConsentRevision: number | null = null,
+  liveRouting = false,
 ) {
   const statements: string[] = [];
   const client = {
@@ -152,7 +153,13 @@ function supersedeSessionPool(
           ],
         };
       }
-      if (normalized.startsWith("update funding_receive_sessions receive")) {
+      if (
+        normalized.startsWith("select exists (") &&
+        normalized.includes("from funding_receive_receipts receive_receipt")
+      ) {
+        return { rows: [{ live_routing: liveRouting }] };
+      }
+      if (normalized.startsWith("update funding_receive_sessions")) {
         return { rows: receiveCanClose ? [{ id: receiveSessionId }] : [] };
       }
       return { rows: [], rowCount: 0 };
@@ -274,7 +281,7 @@ const supersedeInput = {
 }
 
 {
-  const fake = supersedeSessionPool(false, 1);
+  const fake = supersedeSessionPool(false, 1, true);
   const client = await fake.pool.connect();
   const reused = await prepareTelegramFundingSessionOpenInTransaction(
     client as never,
@@ -296,6 +303,49 @@ const supersedeInput = {
     fake.statements.some((sql) => sql.startsWith("update funding_receive")),
     false,
     "Buy attachment must not cancel or replace the active receive session",
+  );
+}
+
+{
+  const fake = supersedeSessionPool(true, 1, false);
+  const client = await fake.pool.connect();
+  const reused = await prepareTelegramFundingSessionOpenInTransaction(
+    client as never,
+    {
+      ...supersedeInput,
+      destinationOptionId: "polymarket-deposit",
+      reuseActiveContextForBuyReturn: true,
+      telegramMessageId: 101,
+      venueBindingOptionId: "polymarket-wallet",
+    },
+  );
+  assert.equal(
+    reused,
+    null,
+    "an address or consent without deposited funds must not absorb a new Buy",
+  );
+}
+
+{
+  const fake = supersedeSessionPool(true, 1, false);
+  const client = await fake.pool.connect();
+  const superseded = await prepareTelegramFundingSessionOpenInTransaction(
+    client as never,
+    {
+      ...supersedeInput,
+      destinationOptionId: "polymarket-deposit",
+      supersedeInactiveContextForBuyReturn: true,
+      telegramMessageId: 101,
+      venueBindingOptionId: "polymarket-wallet",
+    },
+  );
+  assert.equal(superseded?.id, contextId);
+  assert.equal(
+    fake.statements.some((sql) =>
+      sql.startsWith("update funding_receive_sessions"),
+    ),
+    true,
+    "an inactive receive shell is retired before a fresh Buy context opens",
   );
 }
 

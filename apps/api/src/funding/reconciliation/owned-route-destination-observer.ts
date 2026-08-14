@@ -1,6 +1,7 @@
 import { tx, type Pool, type PoolClient } from "@hunch/infra";
 
 import { isRecord } from "../../lib/type-guards.js";
+import type { RelayReferenceCodec } from "../../funding-providers/relay/reference-codec.js";
 import type {
   AssetRef,
   FundingPurpose,
@@ -8,6 +9,7 @@ import type {
   Money,
 } from "../domain/types.js";
 import type { FundingOperationState } from "../domain/transitions.js";
+import { sameAccountAddress } from "../domain/asset-identity.js";
 import {
   allocateFundingObservationInTransaction,
   FundingPersistenceError,
@@ -29,7 +31,23 @@ export type OwnedRouteDestinationTarget = Readonly<{
     expectedRaw: string;
     minimumRaw: string;
     providerRawStatus: string;
+    providerStatusCategory?: string;
     providerDestinationReferenceCount: number;
+    transactionReferenceFingerprints?: readonly string[];
+  }>[];
+  destinationReceipts?: readonly Readonly<{
+    receiptId: string;
+    receiveSessionId: string;
+    networkId: string;
+    assetId: string;
+    assetDecimals: number;
+    destinationAddress: string;
+    rawAmount: string;
+    txHash: string;
+    eventIndex: string;
+    ledgerHeight: string;
+    blockHash: string;
+    observedAt: string;
   }>[];
   userId: string;
   purpose: FundingPurpose;
@@ -85,6 +103,12 @@ function nonNegativeCount(value: unknown): number {
   return typeof value === "number" && Number.isInteger(value) && value >= 0
     ? value
     : 0;
+}
+
+function stringArray(value: unknown): readonly string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === "string")
+    ? value
+    : [];
 }
 
 function preparationContribution(
@@ -171,8 +195,15 @@ function parseProviderSegments(
       minimumRaw,
       providerRawStatus:
         typeof entry.rawStatus === "string" ? entry.rawStatus : "pending",
+      providerStatusCategory:
+        typeof entry.relayStatusCategory === "string"
+          ? entry.relayStatusCategory
+          : "pending",
       providerDestinationReferenceCount: nonNegativeCount(
         entry.destinationTransactionReferenceCount,
+      ),
+      transactionReferenceFingerprints: stringArray(
+        entry.transactionReferenceFingerprints,
       ),
     };
   });
@@ -323,9 +354,14 @@ async function loadTarget(
               'expectedOutput', provider_segment.quoted_expected_output,
               'minimumOutput', provider_segment.quoted_min_output,
               'rawStatus', provider_segment.raw_status,
+              'relayStatusCategory',
+                provider_segment.support_metadata ->> 'relayStatusCategory',
               'destinationTransactionReferenceCount',
                 provider_segment.support_metadata
-                  ->'destinationTransactionReferenceCount'
+                  ->'destinationTransactionReferenceCount',
+              'transactionReferenceFingerprints',
+                provider_segment.support_metadata
+                  ->'relayTransactionReferenceFingerprints'
             )
             order by provider_segment.ordinal
           )
@@ -669,6 +705,89 @@ async function loadTarget(
       "owned route destination baseline differs from the committed target",
     );
   }
+  const sourceReceiptValue =
+    row.operation_support_metadata.fundingReceiveReceiptId;
+  const sourceReceiptId =
+    typeof sourceReceiptValue === "string" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(
+      sourceReceiptValue,
+    )
+      ? sourceReceiptValue
+      : null;
+  const destinationAddress = requiredString(
+    details?.address,
+    "destinationAddress",
+  );
+  type DestinationReceiptRow = {
+    receipt_id: string;
+    receive_session_id: string;
+    network_id: string;
+    asset_id: string;
+    asset_decimals: number;
+    destination_address: string;
+    raw_amount: string;
+    tx_hash: string;
+    event_index: string;
+    ledger_height: string;
+    block_hash: string;
+    observed_at: Date;
+  };
+  const destinationReceiptRows = sourceReceiptId
+    ? (
+        await db.query<DestinationReceiptRow>(
+          `select destination_receipt.id::text as receipt_id,
+            destination_receipt.receive_session_id::text as receive_session_id,
+            destination_receipt.network_id,
+            destination_receipt.asset_id,
+            destination_receipt.asset_decimals,
+            destination_receipt.destination_address,
+            destination_receipt.raw_amount::text as raw_amount,
+            destination_receipt.tx_hash,
+            destination_receipt.event_index,
+            destination_receipt.ledger_height::text as ledger_height,
+            destination_receipt.block_hash,
+            destination_receipt.observed_at
+       from funding_receive_receipts source_receipt
+       join funding_receive_receipts destination_receipt
+         on destination_receipt.receive_session_id =
+              source_receipt.receive_session_id
+        and destination_receipt.id <> source_receipt.id
+      where source_receipt.id = $1::uuid
+        and source_receipt.child_funding_operation_id = $2::uuid
+        and source_receipt.user_id = $3::uuid
+        and destination_receipt.user_id = source_receipt.user_id
+        and destination_receipt.status = 'ready'
+        and destination_receipt.handling = 'direct'
+        and destination_receipt.network_id = $4
+        and funding_account_identifier_equal(
+              destination_receipt.network_id,
+              destination_receipt.asset_id,
+              $5
+            )
+        and destination_receipt.asset_decimals = $6
+        and funding_account_identifier_equal(
+              destination_receipt.network_id,
+              destination_receipt.destination_address,
+              $7
+            )
+        and destination_receipt.tx_hash is not null
+        and destination_receipt.event_index is not null
+        and destination_receipt.ledger_height is not null
+        and destination_receipt.block_hash is not null
+      order by destination_receipt.observed_at,
+               destination_receipt.id`,
+          [
+            sourceReceiptId,
+            row.operation_id,
+            row.user_id,
+            minimumAsset.networkId,
+            minimumAsset.assetId,
+            minimumAsset.decimals,
+            destinationAddress,
+          ],
+        )
+      ).rows
+    : [];
   return {
     operationId: row.operation_id,
     providerSegments,
@@ -680,8 +799,22 @@ async function loadTarget(
         row.venue_binding_snapshot.venueBindingOptionId,
       "venueBindingOptionId",
     ),
+    destinationReceipts: destinationReceiptRows.map((receipt) => ({
+      receiptId: receipt.receipt_id,
+      receiveSessionId: receipt.receive_session_id,
+      networkId: receipt.network_id,
+      assetId: receipt.asset_id,
+      assetDecimals: receipt.asset_decimals,
+      destinationAddress: receipt.destination_address,
+      rawAmount: receipt.raw_amount,
+      txHash: receipt.tx_hash,
+      eventIndex: receipt.event_index,
+      ledgerHeight: receipt.ledger_height,
+      blockHash: receipt.block_hash,
+      observedAt: receipt.observed_at.toISOString(),
+    })),
     destinationLocationId: baseline.locationId,
-    destinationAddress: requiredString(details?.address, "destinationAddress"),
+    destinationAddress,
     asset: minimumAsset,
     requestedRaw,
     observationThresholdRaw,
@@ -771,6 +904,163 @@ export function ownedRouteProviderCredits(
   return credits;
 }
 
+type OwnedRouteExactDestinationCredit = Readonly<{
+  segmentId: string;
+  receipt: NonNullable<
+    OwnedRouteDestinationTarget["destinationReceipts"]
+  >[number];
+  transactionReferenceFingerprint: string;
+}>;
+
+export function ownedRouteExactDestinationCredits(
+  target: OwnedRouteDestinationTarget,
+  referenceCodec: Pick<RelayReferenceCodec, "fingerprint">,
+): readonly OwnedRouteExactDestinationCredit[] | null {
+  const credits: OwnedRouteExactDestinationCredit[] = [];
+  for (const receipt of target.destinationReceipts ?? []) {
+    if (
+      !sameAsset(
+        {
+          networkId: receipt.networkId,
+          assetId: receipt.assetId,
+          decimals: receipt.assetDecimals,
+        },
+        target.asset,
+      ) ||
+      !sameAccountAddress(
+        target.asset.networkId,
+        receipt.destinationAddress,
+        target.destinationAddress,
+      )
+    ) {
+      continue;
+    }
+    let fingerprint: string;
+    try {
+      fingerprint = referenceCodec.fingerprint(receipt.txHash);
+    } catch {
+      continue;
+    }
+    const matchingSegments = target.providerSegments.filter(
+      (providerSegment) =>
+        providerSegment.providerRawStatus === "success" &&
+        providerSegment.providerStatusCategory === "provider_success" &&
+        providerSegment.providerDestinationReferenceCount > 0 &&
+        (providerSegment.transactionReferenceFingerprints ?? []).includes(
+          fingerprint,
+        ),
+    );
+    if (matchingSegments.length !== 1) continue;
+    const providerSegment = matchingSegments[0];
+    if (!providerSegment) continue;
+    credits.push({
+      segmentId: providerSegment.segmentId,
+      receipt,
+      transactionReferenceFingerprint: fingerprint,
+    });
+  }
+  if (
+    target.providerSegments.some((providerSegment) => {
+      if (
+        providerSegment.providerRawStatus !== "success" ||
+        providerSegment.providerStatusCategory !== "provider_success" ||
+        providerSegment.providerDestinationReferenceCount < 1
+      ) {
+        return true;
+      }
+      const creditedRaw = credits
+        .filter((credit) => credit.segmentId === providerSegment.segmentId)
+        .reduce(
+          (total, credit) => total + BigInt(credit.receipt.rawAmount),
+          0n,
+        );
+      return creditedRaw < BigInt(providerSegment.minimumRaw);
+    })
+  ) {
+    return null;
+  }
+  return credits.length > 0 ? credits : null;
+}
+
+async function persistExactDestinationCredits(
+  client: Pick<PoolClient, "query">,
+  input: Readonly<{
+    target: OwnedRouteDestinationTarget;
+    credits: readonly OwnedRouteExactDestinationCredit[];
+    now: Date;
+  }>,
+): Promise<boolean> {
+  for (const credit of input.credits) {
+    const lockedReceipt = await client.query<{ id: string }>(
+      `select destination_receipt.id::text as id
+         from funding_receive_receipts destination_receipt
+        where destination_receipt.id = $1::uuid
+          and destination_receipt.receive_session_id = $2::uuid
+          and destination_receipt.status = 'ready'
+          and destination_receipt.handling = 'direct'
+          and destination_receipt.network_id = $3
+          and funding_account_identifier_equal(
+                destination_receipt.network_id,
+                destination_receipt.asset_id,
+                $4
+              )
+          and destination_receipt.asset_decimals = $5
+          and funding_account_identifier_equal(
+                destination_receipt.network_id,
+                destination_receipt.destination_address,
+                $6
+              )
+          and destination_receipt.raw_amount = $7::numeric
+          and destination_receipt.tx_hash = $8
+          and destination_receipt.event_index = $9
+          and destination_receipt.ledger_height = $10::numeric
+          and destination_receipt.block_hash = $11
+        for update of destination_receipt`,
+      [
+        credit.receipt.receiptId,
+        credit.receipt.receiveSessionId,
+        input.target.asset.networkId,
+        input.target.asset.assetId,
+        input.target.asset.decimals,
+        input.target.destinationAddress,
+        credit.receipt.rawAmount,
+        credit.receipt.txHash,
+        credit.receipt.eventIndex,
+        credit.receipt.ledgerHeight,
+        credit.receipt.blockHash,
+      ],
+    );
+    if (lockedReceipt.rowCount !== 1) return false;
+    await allocateFundingObservationInTransaction(client, {
+      operationId: input.target.operationId,
+      segmentId: credit.segmentId,
+      kind: "destination_credit",
+      networkId: input.target.asset.networkId,
+      assetId: input.target.asset.assetId,
+      assetDecimals: input.target.asset.decimals,
+      txHash: credit.receipt.txHash,
+      eventIndex: credit.receipt.eventIndex,
+      fromAddress: null,
+      toAddress: input.target.destinationAddress,
+      rawAmount: credit.receipt.rawAmount,
+      observedAt: new Date(credit.receipt.observedAt),
+      ledgerHeight: credit.receipt.ledgerHeight,
+      blockHash: credit.receipt.blockHash,
+      finalityStatus: "finalized",
+      finalizedAt: input.now,
+      metadata: {
+        observerId: OWNED_ROUTE_DESTINATION_OBSERVER_ID,
+        receiveReceiptId: credit.receipt.receiptId,
+        receiveSessionId: credit.receipt.receiveSessionId,
+        relayTransactionReferenceMatched: true,
+        relayTransactionReferenceFingerprint:
+          credit.transactionReferenceFingerprint,
+      },
+    });
+  }
+  return true;
+}
+
 async function persistSatisfiedAmount(
   client: Pick<PoolClient, "query">,
   input: Readonly<{
@@ -840,6 +1130,7 @@ export class OwnedRouteDestinationObserver {
           now: Date;
         }>,
       ) => Promise<boolean>;
+      referenceCodec?: Pick<RelayReferenceCodec, "fingerprint">;
     }> = {},
   ) {}
 
@@ -859,6 +1150,22 @@ export class OwnedRouteDestinationObserver {
     );
     if (!target) {
       return { destinationsPolled: 0, destinationSatisfied: false };
+    }
+    const exactCredits = this.dependencies.referenceCodec
+      ? ownedRouteExactDestinationCredits(
+          target,
+          this.dependencies.referenceCodec,
+        )
+      : null;
+    if (exactCredits) {
+      const destinationSatisfied = await tx(pool, (client) =>
+        persistExactDestinationCredits(client, {
+          target,
+          credits: exactCredits,
+          now,
+        }),
+      );
+      return { destinationsPolled: 1, destinationSatisfied };
     }
     const observation = await (this.dependencies.observe ?? observeDestination)(
       pool,
