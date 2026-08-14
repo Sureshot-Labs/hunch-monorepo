@@ -6082,7 +6082,7 @@ export async function resumeTelegramFundingBuyContinuation(input: {
         context.telegram_account_id !== continuation.telegramAccountId ||
         context.active_buy_return_revision !== continuation.buyReturnRevision ||
         context.progress_revision !== continuation.readyProgressRevision ||
-        Number(context.receive_version) !== continuation.readyReceiveVersion ||
+        Number(context.receive_version) < continuation.readyReceiveVersion ||
         context.cancelled_at != null ||
         context.expires_at.getTime() <= now.getTime() ||
         continuation.expiresAt <= now.toISOString() ||
@@ -6475,7 +6475,15 @@ export async function resumeTelegramFundingBuyContinuation(input: {
       );
       return existingIntentId;
     });
-  } catch {
+  } catch (error) {
+    const errorCode =
+      error instanceof Error && error.message.startsWith("telegram_")
+        ? error.message
+        : "unexpected_error";
+    console.warn("[telegram-funding] Review Buy rejected", {
+      errorCode,
+      fundingContextId: scoped.telegram_funding_session_id,
+    });
     return unavailable(
       "This Review Buy is no longer current. Refresh funding or open the market again.",
     );
@@ -6765,7 +6773,7 @@ async function isTelegramFundingReturnIntentCurrent(
         and context.telegram_account_id = generation.telegram_account_id_snapshot
         and context.progress_revision = generation.ready_progress_revision
         and context.latest_progress_projection->>'state' = 'ready'
-        and receive.version = continuation.ready_receive_version
+        and receive.version >= continuation.ready_receive_version
         and receive.venue_id = buy_return.venue_id
         and receive.destination_option_id = buy_return.destination_option_id
         and receive.venue_binding_option_id = buy_return.venue_binding_option_id

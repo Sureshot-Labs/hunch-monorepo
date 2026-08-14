@@ -1267,7 +1267,12 @@ export async function updateFundingReceiveSessionObservation(
       set observation_variants = $3::jsonb,
           status = $4,
           last_observed_at = $5,
-          version = version + 1,
+          version = version + case
+            when observation_variants is distinct from $3::jsonb
+              or status is distinct from $4
+              then 1
+            else 0
+          end,
           updated_at = $6
       where id = $1
         and version = $2
@@ -1303,7 +1308,12 @@ export async function updateClosedFundingReceiveSessionObservation(
           status = case when $5 then 'recovery_required' else status end,
           closed_at = case when $5 then null else closed_at end,
           last_observed_at = $4,
-          version = version + 1,
+          version = version + case
+            when observation_variants is distinct from $3::jsonb
+              or $5::boolean
+              then 1
+            else 0
+          end,
           updated_at = $6
       where id = $1
         and version = $2

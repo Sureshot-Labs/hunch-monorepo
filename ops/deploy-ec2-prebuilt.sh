@@ -48,7 +48,16 @@ compose=(docker-compose --project-directory "${APP_DIR}" \
   -f "${APP_DIR}/ops/docker-compose.prebuilt.yml" \
   --env-file "${ENV_FILE}")
 
-project_name="hunch-monorepo"
+application_services=(
+  api
+  indexer-polymarket
+  indexer-limitless
+  indexer-dflow
+  ai-worker
+  finance-worker
+  signal-bot
+  nginx
+)
 
 # Ensure external network for edge proxy exists (required by nginx).
 if ! docker network inspect hunch-edge >/dev/null 2>&1; then
@@ -71,15 +80,12 @@ if ! "${compose[@]}" run --rm api \
   exit 1
 fi
 
-# Replace application containers only after the database is ready for the new
-# image. The brief restart cannot now be caused by a rejected migration.
-"${compose[@]}" down --remove-orphans || true
-stale_containers=$(docker ps -aq --filter "label=com.docker.compose.project=${project_name}")
-if [[ -n "${stale_containers}" ]]; then
-  docker rm -f ${stale_containers}
-fi
-
-"${compose[@]}" up -d --no-build
+# Replace only application containers after the database is ready. Postgres and
+# Redis stay up, so a backend deploy cannot trigger a long Redis dataset reload.
+"${compose[@]}" stop "${application_services[@]}" || true
+"${compose[@]}" rm -f "${application_services[@]}" || true
+"${compose[@]}" up -d --no-build --no-deps --remove-orphans \
+  "${application_services[@]}"
 
 if [[ -n "${ARCHIVE}" ]]; then
   rm -f "${ARCHIVE}" || true
