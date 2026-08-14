@@ -689,7 +689,9 @@ async function observeRelayPostcondition(
           and cleanup_step.executor_id = $1
           and cleanup_step.action_validation_result ->> 'relayStepKind' =
                 'cleanup'
-          and cleanup_step.state = 'submitted'
+          and cleanup_step.state in (
+                'submitted', 'reconcile_required', 'recovery_required'
+              )
          join funding_step_receipt_observations cleanup_receipt
            on cleanup_receipt.step_id = cleanup_step.id
           and cleanup_receipt.status = 'finalized'
@@ -1877,7 +1879,9 @@ async function reconcileRelayPostconditions(
          on cleanup_step.operation_id = cleanup_operation.id
         and cleanup_step.executor_id = $1
         and cleanup_step.action_validation_result ->> 'relayStepKind' = 'cleanup'
-        and cleanup_step.state = 'submitted'
+        and cleanup_step.state in (
+              'submitted', 'reconcile_required', 'recovery_required'
+            )
        join funding_step_receipt_observations cleanup_receipt
          on cleanup_receipt.step_id = cleanup_step.id
         and cleanup_receipt.status = 'finalized'
@@ -2013,7 +2017,10 @@ async function reconcileRelayPostconditions(
       const cleanupStep = await client.query(
         `update funding_operation_steps
             set state = 'succeeded', updated_at = $2
-          where id = $1::uuid and state = 'submitted'
+          where id = $1::uuid
+            and state in (
+                  'submitted', 'reconcile_required', 'recovery_required'
+                )
           returning id`,
         [cleanupRow.cleanup_step_id, now],
       );

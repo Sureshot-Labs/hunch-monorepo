@@ -5409,6 +5409,14 @@ try {
     cleanupWalletSnapshot.rows[0]?.wallet_address,
     unchangedOwnedRelay.walletAddress,
   );
+  const timedOutCleanupStep = await pool.query(
+    `update funding_operation_steps
+        set state = 'recovery_required', updated_at = $2
+      where id = $1::uuid
+        and state in ('submitted', 'reconcile_required')`,
+    [cleanup.cleanup_step_id, new Date(now.getTime() + 19 * 60_000)],
+  );
+  assert.equal(timedOutCleanupStep.rowCount, 1);
   const cleanupFinalizedAt = new Date(now.getTime() + 20 * 60_000);
   const cleanupZero = relayAllowanceEvidence(
     "0",
@@ -5473,7 +5481,7 @@ try {
   );
   assert.deepEqual(beforeMaturityState.rows[0], {
     allowance_zero: false,
-    cleanup_state: "submitted",
+    cleanup_state: "recovery_required",
     cleanup_status: "in_progress",
     parent_status: "in_progress",
     reservation_status: "cleanup_required",
