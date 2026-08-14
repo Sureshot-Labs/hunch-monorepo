@@ -604,6 +604,7 @@ try {
     revisions: "3",
   });
 
+  let readyReceiveVersion = 7;
   const continuationsBeforePolicyRace = await pool.query<{ count: string }>(
     `select count(*)::text as count
      from telegram_funding_buy_continuations
@@ -616,7 +617,7 @@ try {
       contextId: created.context.id,
       returnRevision: 3,
       progressRevision: 1,
-      receiveVersion: 7,
+      receiveVersion: readyReceiveVersion,
       telegramAccountId,
       telegramUserId,
       chatId: telegramUserId,
@@ -653,7 +654,7 @@ try {
       contextId,
       returnRevision: 3,
       progressRevision: 1,
-      receiveVersion: 7,
+      receiveVersion: readyReceiveVersion,
       telegramAccountId,
       telegramUserId,
       chatId: telegramUserId,
@@ -684,7 +685,7 @@ try {
       contextId,
       returnRevision: 3,
       progressRevision: 1,
-      receiveVersion: 7,
+      receiveVersion: readyReceiveVersion,
       telegramAccountId,
       telegramUserId,
       chatId: telegramUserId,
@@ -717,7 +718,7 @@ try {
         contextId: created.context.id,
         returnRevision: 3,
         progressRevision: 1,
-        receiveVersion: 7,
+        receiveVersion: readyReceiveVersion,
         telegramAccountId,
         telegramUserId,
         chatId: telegramUserId,
@@ -813,7 +814,7 @@ try {
     contextId,
     returnRevision: 3,
     progressRevision: 1,
-    receiveVersion: 7,
+    receiveVersion: readyReceiveVersion,
     telegramAccountId,
     telegramUserId,
     chatId: telegramUserId,
@@ -1049,7 +1050,7 @@ try {
     contextId,
     returnRevision: 3,
     progressRevision: 1,
-    receiveVersion: 7,
+    receiveVersion: readyReceiveVersion,
     telegramAccountId,
     telegramUserId,
     chatId: telegramUserId,
@@ -1089,6 +1090,19 @@ try {
       where id = $1::uuid`,
     [contextId],
   );
+  await pool.query(
+    `update funding_receive_sessions
+        set last_observed_at = now(),
+            version = version + 1,
+            updated_at = now()
+      where id = (
+        select receive_session_id
+        from telegram_funding_sessions
+        where id = $1::uuid
+      )`,
+    [contextId],
+  );
+  readyReceiveVersion += 1;
   const resumed = await Promise.all(
     issued.map((entry, index) =>
       resumeTelegramFundingBuyContinuation({
@@ -1104,7 +1118,7 @@ try {
         !/retry_buy|Deposit to continue/u.test(JSON.stringify(message)),
     ),
     true,
-    "resumed Buy never re-enters the legacy deposit/retry surface",
+    "polling-only receive version advances must not stale Review Buy or re-enter the legacy deposit/retry surface",
   );
   assert.equal(
     resumed.every((message) =>
@@ -1255,7 +1269,7 @@ try {
     contextId,
     returnRevision: 3,
     progressRevision: 1,
-    receiveVersion: 7,
+    receiveVersion: readyReceiveVersion,
     telegramAccountId,
     telegramUserId,
     chatId: telegramUserId,
@@ -1502,7 +1516,7 @@ try {
     contextId,
     returnRevision: 3,
     progressRevision: 1,
-    receiveVersion: 7,
+    receiveVersion: readyReceiveVersion,
     telegramAccountId,
     telegramUserId,
     chatId: telegramUserId,
@@ -1527,7 +1541,7 @@ try {
     contextId,
     returnRevision: 3,
     progressRevision: 1,
-    receiveVersion: 7,
+    receiveVersion: readyReceiveVersion,
     telegramAccountId,
     telegramUserId,
     chatId: telegramUserId,
@@ -1553,7 +1567,7 @@ try {
     contextId,
     returnRevision: 3,
     progressRevision: 1,
-    receiveVersion: 7,
+    receiveVersion: readyReceiveVersion,
     telegramAccountId,
     telegramUserId,
     chatId: telegramUserId,
@@ -1628,7 +1642,7 @@ try {
     contextId,
     returnRevision: 4,
     progressRevision: 1,
-    receiveVersion: 7,
+    receiveVersion: readyReceiveVersion,
     telegramAccountId,
     telegramUserId,
     chatId: telegramUserId,
@@ -1758,7 +1772,7 @@ try {
     contextId,
     returnRevision: 4,
     progressRevision: 1,
-    receiveVersion: 7,
+    receiveVersion: readyReceiveVersion,
     telegramAccountId,
     telegramUserId,
     chatId: telegramUserId,
@@ -1819,7 +1833,7 @@ try {
     contextId,
     returnRevision: 4,
     progressRevision: 1,
-    receiveVersion: 7,
+    receiveVersion: readyReceiveVersion,
     telegramAccountId,
     telegramUserId,
     chatId: telegramUserId,

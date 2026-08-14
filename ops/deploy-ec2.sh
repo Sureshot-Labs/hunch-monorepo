@@ -31,7 +31,16 @@ compose=(docker-compose --project-directory "${APP_DIR}" \
   -f "${APP_DIR}/ops/docker-compose.prod.yml" \
   --env-file "${ENV_FILE}")
 
-project_name="hunch-monorepo"
+application_services=(
+  api
+  indexer-polymarket
+  indexer-limitless
+  indexer-dflow
+  ai-worker
+  finance-worker
+  signal-bot
+  nginx
+)
 
 # Ensure external network for edge proxy exists (required by nginx).
 if ! docker network inspect hunch-edge >/dev/null 2>&1; then
@@ -41,20 +50,25 @@ if ! docker network inspect hunch-internal >/dev/null 2>&1; then
   docker network create hunch-internal
 fi
 
-"${compose[@]}" down --remove-orphans || true
-stale_containers=$(docker ps -aq --filter "label=com.docker.compose.project=${project_name}")
-if [[ -n "${stale_containers}" ]]; then
-  docker rm -f ${stale_containers}
-fi
+# Build the new application image while the current stack and infra remain up.
+"${compose[@]}" up -d postgres redis
 "${compose[@]}" build
 
-# Bring up infra only so we can migrate without exposing app containers yet.
-"${compose[@]}" up -d postgres redis
-"${compose[@]}" run --rm api \
+# Migrate before touching live application containers. A rejected migration
+# leaves the current application image online.
+if ! "${compose[@]}" run --rm api \
   node /app/packages/config/dist/run-with-secrets.js \
-  /app/packages/db/dist/migrate.js
+  /app/packages/db/dist/migrate.js; then
+  echo "Migration failed; existing application containers were left running." >&2
+  exit 1
+fi
 
-"${compose[@]}" up -d
+# Replace only application containers. Postgres and Redis retain their process
+# state and do not reload their datasets during an ordinary backend deploy.
+"${compose[@]}" stop "${application_services[@]}" || true
+"${compose[@]}" rm -f "${application_services[@]}" || true
+"${compose[@]}" up -d --no-build --no-deps --remove-orphans \
+  "${application_services[@]}"
 if [[ -n "${ARCHIVE}" ]]; then
   rm -f "${ARCHIVE}" || true
 fi

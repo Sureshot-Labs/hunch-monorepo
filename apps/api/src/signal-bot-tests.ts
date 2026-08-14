@@ -3838,6 +3838,45 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
+    name: "internal trading API client makes preview timeout visible without claiming submission",
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = (async (_input, init) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => {
+            reject(new DOMException("Aborted", "AbortError"));
+          });
+        })) as typeof fetch;
+      try {
+        const client = createTelegramBotTradingInternalApiClient({
+          baseUrl: "https://api.hunch.trade",
+          timeoutMs: 1,
+          token: "token",
+        });
+        const messages: Array<{ text: string }> = [];
+        const handled = await client.handleCallback({
+          answerCallbackQuery: async () => undefined,
+          appBaseUrl: "https://app.hunch.trade",
+          callbackQuery: {
+            data: "hbt:buy:00000000-0000-4000-8000-000000000001",
+            from: { id: 999 },
+            id: "callback-preview-timeout",
+            message: { chat: { id: 999 } },
+          },
+          sendMessage: async (input) => {
+            messages.push(input);
+          },
+        });
+        assert.equal(handled, true);
+        assert.match(messages[0]?.text ?? "", /Still preparing/u);
+        assert.match(messages[0]?.text ?? "", /latest card/u);
+        assert.match(messages[0]?.text ?? "", /No trade was submitted/u);
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    },
+  },
+  {
     name: "private market command delegates to trading card hook",
     run: async () => {
       const redis = new FakeRedis();

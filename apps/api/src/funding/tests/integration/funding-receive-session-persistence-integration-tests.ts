@@ -23,6 +23,7 @@ import {
   listFundingReceiveReceiptsForUser,
   recordFundingReceiveReceiptRoutingDisposition,
   settleFundingReceiveReceiptRouting,
+  updateFundingReceiveSessionObservation,
 } from "../../persistence/funding-receive-session-repository.js";
 
 const NOW = new Date();
@@ -161,6 +162,48 @@ try {
       ingress: sessionInput(userId).methods[0]?.ingress,
     },
   ]);
+
+  const { rows: observationBeforeRows } = await pool.query<{
+    last_observed_at: Date | null;
+    version: number;
+  }>(
+    `select last_observed_at, version
+       from funding_receive_sessions
+      where id = $1::uuid`,
+    [first.snapshot.session.receiveSessionId],
+  );
+  const observationBefore = observationBeforeRows[0];
+  assert.ok(observationBefore);
+  const noOpObservationAt = new Date(NOW.getTime() + 500);
+  assert.equal(
+    await updateFundingReceiveSessionObservation(pool, {
+      receiveSessionId: first.snapshot.session.receiveSessionId,
+      expectedVersion: observationBefore.version,
+      observationVariants: sessionInput(userId).observationVariants,
+      status: "open",
+      lastObservedAt: noOpObservationAt,
+      now: noOpObservationAt,
+    }),
+    true,
+  );
+  const { rows: observationAfterRows } = await pool.query<{
+    last_observed_at: Date | null;
+    version: number;
+  }>(
+    `select last_observed_at, version
+       from funding_receive_sessions
+      where id = $1::uuid`,
+    [first.snapshot.session.receiveSessionId],
+  );
+  assert.equal(
+    observationAfterRows[0]?.version,
+    observationBefore.version,
+    "an identical observation heartbeat must not invalidate semantic receive-version fences",
+  );
+  assert.equal(
+    observationAfterRows[0]?.last_observed_at?.toISOString(),
+    noOpObservationAt.toISOString(),
+  );
 
   const replacement = await createOrReuseFundingReceiveSession(pool, {
     ...sessionInput(userId),
