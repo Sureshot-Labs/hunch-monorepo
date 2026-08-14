@@ -20,6 +20,7 @@ import {
 import {
   contentArticleCreateBodySchema,
   contentArticleUpdateBodySchema,
+  type ContentArticleKind,
   type ContentArticleCreateBody,
   type ContentArticleStatus,
   type ContentArticleUpdateBody,
@@ -62,6 +63,7 @@ type DraftRow = {
   article_id: string;
   revision: number;
   schema_version: number;
+  content_kind: ContentArticleKind;
   slug: string;
   title: string;
   excerpt: string;
@@ -98,6 +100,7 @@ type VersionRow = {
   source_draft_revision: number;
   kind: ContentVersionKind;
   schema_version: number;
+  content_kind: ContentArticleKind;
   slug: string;
   title: string;
   excerpt: string;
@@ -155,6 +158,7 @@ export type ContentVersionKind = "checkpoint" | "published" | "scheduled";
 export type ContentArticleDraft = {
   revision: number;
   schemaVersion: number;
+  contentKind: ContentArticleKind;
   slug: string;
   title: string;
   excerpt: string;
@@ -225,6 +229,7 @@ export type ContentArticleVersion = ContentArticleVersionSummary & {
 
 export type PublicContentArticleSummary = {
   id: string;
+  contentKind: ContentArticleKind;
   slug: string;
   title: string;
   excerpt: string;
@@ -275,6 +280,7 @@ export type PreviewContentArticle = {
   id: string;
   revision: number;
   schemaVersion: number;
+  contentKind: ContentArticleKind;
   slug: string;
   title: string;
   excerpt: string;
@@ -305,6 +311,7 @@ export type ContentArticleMutationResult = {
 };
 
 type NormalizedDraft = {
+  contentKind: ContentArticleKind;
   slug: string;
   title: string;
   excerpt: string;
@@ -348,6 +355,7 @@ const DRAFT_COLUMNS = `
   d.article_id,
   d.revision,
   d.schema_version,
+  d.content_kind,
   d.slug,
   d.title,
   d.excerpt,
@@ -376,6 +384,7 @@ const DRAFT_SUMMARY_COLUMNS = `
   d.article_id,
   d.revision,
   d.schema_version,
+  d.content_kind,
   d.slug,
   d.title,
   d.excerpt,
@@ -407,6 +416,7 @@ const VERSION_COLUMNS = `
   v.source_draft_revision,
   v.kind,
   v.schema_version,
+  v.content_kind,
   v.slug,
   v.title,
   v.excerpt,
@@ -457,6 +467,7 @@ function snapshotFromRow(
 ): ContentArticleVersion["snapshot"] {
   return {
     schemaVersion: row.schema_version,
+    contentKind: row.content_kind,
     slug: row.slug,
     title: row.title,
     excerpt: row.excerpt,
@@ -554,6 +565,7 @@ function articleSummary(article: ContentArticle): AdminContentArticleSummary {
 function normalizeCreate(body: ContentArticleCreateBody): NormalizedDraft {
   const parsed = contentArticleCreateBodySchema.parse(body);
   return {
+    contentKind: parsed.contentKind ?? "guide",
     slug: parsed.slug,
     title: parsed.title,
     excerpt: parsed.excerpt ?? "",
@@ -576,6 +588,7 @@ function mergeDraft(
 ): NormalizedDraft {
   const parsed = contentArticleUpdateBodySchema.parse(update);
   return {
+    contentKind: parsed.contentKind ?? existing.contentKind,
     slug: parsed.slug ?? existing.slug,
     title: parsed.title ?? existing.title,
     excerpt: parsed.excerpt ?? existing.excerpt,
@@ -1065,6 +1078,33 @@ function publishabilityIssues(draft: ContentArticleDraft): string[] {
   if (!draft.title.trim()) issues.push("title is required");
   if (!draft.excerpt.trim()) issues.push("excerpt is required");
   if (!draft.listCover) issues.push("list cover is required");
+  if (
+    draft.contentKind === "news" &&
+    draft.seo.robots.index &&
+    !draft.author.showByline
+  )
+    issues.push("indexable articles must show an author byline");
+  if (
+    draft.contentKind === "news" &&
+    draft.seo.robots.index &&
+    !draft.author.url
+  )
+    issues.push("indexable articles require an author profile URL");
+  if (
+    draft.contentKind === "news" &&
+    draft.seo.robots.index &&
+    !draft.author.bio?.trim()
+  )
+    issues.push("indexable articles require an author bio");
+  if (draft.contentKind === "news" && !draft.socialImage)
+    issues.push("news articles require a dedicated social image");
+  if (
+    draft.contentKind === "news" &&
+    !draft.document.blocks.some(
+      (block) => block.type === "citation" || block.type === "references",
+    )
+  )
+    issues.push("news articles require a citation or references block");
   issues.push(
     ...validateContentDocumentForPublication({
       document: draft.document,
@@ -1098,20 +1138,21 @@ async function insertDraft(
   await db.query(
     `
       insert into content_article_drafts (
-        article_id, schema_version, slug, title, excerpt, document,
+        article_id, schema_version, content_kind, slug, title, excerpt, document,
         list_cover, hero_image, social_image, seo, author, category, tags,
         tag_slugs, locale, featured, plain_text, word_count,
         reading_time_minutes, toc, content_hash, updated_by_admin_id
       ) values (
-        $1, $2, $3, $4, $5, $6::jsonb,
-        $7::jsonb, $8::jsonb, $9::jsonb, $10::jsonb, $11::jsonb,
-        $12::jsonb, $13::jsonb, $14, $15, $16, $17, $18, $19,
-        $20::jsonb, $21, $22
+        $1, $2, $3, $4, $5, $6, $7::jsonb,
+        $8::jsonb, $9::jsonb, $10::jsonb, $11::jsonb, $12::jsonb,
+        $13::jsonb, $14::jsonb, $15, $16, $17, $18, $19, $20,
+        $21::jsonb, $22, $23
       )
     `,
     [
       articleId,
       draft.document.schemaVersion,
+      draft.contentKind,
       draft.slug,
       draft.title,
       draft.excerpt,
@@ -1207,31 +1248,33 @@ export async function updateContentArticle(
           set
             revision = revision + 1,
             schema_version = $1,
-            slug = $2,
-            title = $3,
-            excerpt = $4,
-            document = $5::jsonb,
-            list_cover = $6::jsonb,
-            hero_image = $7::jsonb,
-            social_image = $8::jsonb,
-            seo = $9::jsonb,
-            author = $10::jsonb,
-            category = $11::jsonb,
-            tags = $12::jsonb,
-            tag_slugs = $13,
-            locale = $14,
-            featured = $15,
-            plain_text = $16,
-            word_count = $17,
-            reading_time_minutes = $18,
-            toc = $19::jsonb,
-            content_hash = $20,
-            updated_by_admin_id = $21
-          where article_id = $22 and revision = $23
+            content_kind = $2,
+            slug = $3,
+            title = $4,
+            excerpt = $5,
+            document = $6::jsonb,
+            list_cover = $7::jsonb,
+            hero_image = $8::jsonb,
+            social_image = $9::jsonb,
+            seo = $10::jsonb,
+            author = $11::jsonb,
+            category = $12::jsonb,
+            tags = $13::jsonb,
+            tag_slugs = $14,
+            locale = $15,
+            featured = $16,
+            plain_text = $17,
+            word_count = $18,
+            reading_time_minutes = $19,
+            toc = $20::jsonb,
+            content_hash = $21,
+            updated_by_admin_id = $22
+          where article_id = $23 and revision = $24
           returning revision
         `,
         [
           next.document.schemaVersion,
+          next.contentKind,
           next.slug,
           next.title,
           next.excerpt,
@@ -1422,14 +1465,14 @@ async function insertVersion(
     `
       insert into content_article_versions (
         article_id, version_number, source_draft_revision, kind,
-        schema_version, slug, title, excerpt, document, list_cover,
+        schema_version, content_kind, slug, title, excerpt, document, list_cover,
         hero_image, social_image, seo, author, category, tags, tag_slugs,
         locale, featured, plain_text, word_count, reading_time_minutes,
         toc, content_hash, created_by_admin_id
       ) values (
-        $1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb,
-        $11::jsonb, $12::jsonb, $13::jsonb, $14::jsonb, $15::jsonb,
-        $16::jsonb, $17, $18, $19, $20, $21, $22, $23::jsonb, $24, $25
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11::jsonb,
+        $12::jsonb, $13::jsonb, $14::jsonb, $15::jsonb, $16::jsonb,
+        $17::jsonb, $18, $19, $20, $21, $22, $23, $24::jsonb, $25, $26
       )
       returning
         id, article_id, version_number, source_draft_revision, kind,
@@ -1442,6 +1485,7 @@ async function insertVersion(
       draft.revision,
       kind,
       draft.schemaVersion,
+      draft.contentKind,
       draft.slug,
       draft.title,
       draft.excerpt,
@@ -2158,31 +2202,33 @@ export async function restoreContentArticleVersion(
         set
           revision = revision + 1,
           schema_version = $2,
-          slug = $3,
-          title = $4,
-          excerpt = $5,
-          document = $6::jsonb,
-          list_cover = $7::jsonb,
-          hero_image = $8::jsonb,
-          social_image = $9::jsonb,
-          seo = $10::jsonb,
-          author = $11::jsonb,
-          category = $12::jsonb,
-          tags = $13::jsonb,
-          tag_slugs = $14,
-          locale = $15,
-          featured = $16,
-          plain_text = $17,
-          word_count = $18,
-          reading_time_minutes = $19,
-          toc = $20::jsonb,
-          content_hash = $21,
-          updated_by_admin_id = $22
-        where article_id = $1 and revision = $23
+          content_kind = $3,
+          slug = $4,
+          title = $5,
+          excerpt = $6,
+          document = $7::jsonb,
+          list_cover = $8::jsonb,
+          hero_image = $9::jsonb,
+          social_image = $10::jsonb,
+          seo = $11::jsonb,
+          author = $12::jsonb,
+          category = $13::jsonb,
+          tags = $14::jsonb,
+          tag_slugs = $15,
+          locale = $16,
+          featured = $17,
+          plain_text = $18,
+          word_count = $19,
+          reading_time_minutes = $20,
+          toc = $21::jsonb,
+          content_hash = $22,
+          updated_by_admin_id = $23
+        where article_id = $1 and revision = $24
       `,
       [
         inputs.id,
         snapshot.schemaVersion,
+        snapshot.contentKind,
         snapshot.slug,
         snapshot.title,
         snapshot.excerpt,
@@ -2288,6 +2334,7 @@ export async function getPreviewContentArticle(
     id: article.id,
     revision: draft.revision,
     schemaVersion: draft.schemaVersion,
+    contentKind: draft.contentKind,
     slug: draft.slug,
     title: draft.title,
     excerpt: draft.excerpt,
@@ -2315,6 +2362,7 @@ export async function getPreviewContentArticle(
 type PublicSummaryRow = {
   id: string;
   version_id: string;
+  content_kind: ContentArticleKind;
   slug: string;
   title: string;
   excerpt: string;
@@ -2333,6 +2381,7 @@ type PublicSummaryRow = {
 function publicSummary(row: PublicSummaryRow): PublicContentArticleSummary {
   return {
     id: row.id,
+    contentKind: row.content_kind,
     slug: row.slug,
     title: row.title,
     excerpt: row.excerpt,
@@ -2372,6 +2421,7 @@ async function loadRelatedPublicArticles(
       select
         a.id,
         v.id as version_id,
+        v.content_kind,
         v.slug,
         v.title,
         v.excerpt,
@@ -2402,7 +2452,12 @@ async function loadRelatedPublicArticles(
 
 export async function listPublicContentArticles(
   db: DbQuery,
-  inputs: { limit: number; cursor?: string; tag?: string },
+  inputs: {
+    limit: number;
+    cursor?: string;
+    tag?: string;
+    kind?: ContentArticleKind;
+  },
 ): Promise<{
   items: PublicContentArticleSummary[];
   nextCursor: string | null;
@@ -2413,6 +2468,10 @@ export async function listPublicContentArticles(
   if (inputs.tag) {
     values.push([inputs.tag]);
     where.push(`a.published_tag_slugs @> $${values.length}::text[]`);
+  }
+  if (inputs.kind) {
+    values.push(inputs.kind);
+    where.push(`pv.content_kind = $${values.length}`);
   }
   const cursor = inputs.cursor
     ? decodeContentCursor(inputs.cursor, "public")
@@ -2429,6 +2488,7 @@ export async function listPublicContentArticles(
       with page as materialized (
         select a.id, a.published_version_id, a.first_published_at, a.published_at
         from content_articles a
+        join content_article_versions pv on pv.id = a.published_version_id
         where ${where.join(" and ")}
         order by a.published_at desc, a.id desc
         limit $${values.length}
@@ -2436,6 +2496,7 @@ export async function listPublicContentArticles(
       select
         page.id,
         v.id as version_id,
+        v.content_kind,
         v.slug,
         v.title,
         v.excerpt,
@@ -2503,6 +2564,7 @@ export async function getPublicContentArticle(
       select
         a.id,
         v.id as version_id,
+        v.content_kind,
         v.slug,
         v.title,
         v.excerpt,
@@ -2595,6 +2657,8 @@ export async function listPublicContentArticleIndex(
     id: string;
     slug: string;
     title: string;
+    contentKind: ContentArticleKind;
+    locale: string;
     publishedAt: string;
     updatedAt: string;
     listCover: ContentImagePlacement | null;
@@ -2609,6 +2673,8 @@ export async function listPublicContentArticleIndex(
     id: string;
     slug: string;
     title: string;
+    content_kind: ContentArticleKind;
+    locale: string;
     list_cover: unknown;
     list_cover_url: string | null;
     published_at: Date | string;
@@ -2631,6 +2697,8 @@ export async function listPublicContentArticleIndex(
         page.id,
         v.slug,
         v.title,
+        v.content_kind,
+        v.locale,
         v.list_cover,
         asset.public_url as list_cover_url,
         page.published_at,
@@ -2650,6 +2718,8 @@ export async function listPublicContentArticleIndex(
     id: row.id,
     slug: row.slug,
     title: row.title,
+    contentKind: row.content_kind,
+    locale: row.locale,
     publishedAt: requiredIso(row.published_at),
     updatedAt: requiredIso(row.version_created_at),
     listCover: row.list_cover
