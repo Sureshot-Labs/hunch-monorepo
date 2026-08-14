@@ -89,6 +89,32 @@ test("normalizes slugs and de-duplicates structured tags", () => {
   ]);
 });
 
+test("defaults and validates immutable editorial content kinds", () => {
+  assert.equal(
+    contentArticleCreateBodySchema.parse({
+      slug: "prediction-markets-guide",
+      title: "Prediction Markets Guide",
+    }).contentKind,
+    undefined,
+  );
+  assert.equal(
+    contentArticleCreateBodySchema.safeParse({
+      slug: "prediction-markets-news",
+      title: "Prediction Markets News",
+      contentKind: "news",
+    }).success,
+    true,
+  );
+  assert.equal(
+    contentArticleCreateBodySchema.safeParse({
+      slug: "prediction-markets-spam",
+      title: "Prediction Markets Spam",
+      contentKind: "seo-farm",
+    }).success,
+    false,
+  );
+});
+
 test("defaults author bylines on and preserves an explicit opt-out", () => {
   const base = {
     slug: "author-byline-contract",
@@ -362,6 +388,7 @@ const publishableArticle: ContentArticle = {
   draft: {
     revision: 1,
     schemaVersion: 1,
+    contentKind: "guide",
     slug: "prediction-markets-guide",
     title: "Prediction Markets Guide",
     excerpt: "A practical guide.",
@@ -433,6 +460,21 @@ test("validates publication completeness without touching the database", () => {
       error instanceof ContentError &&
       error.code === "content_article_not_publishable" &&
       error.issues?.length === 2,
+  );
+  assert.throws(
+    () =>
+      validateArticlePublishability({
+        ...publishableArticle,
+        draft: { ...publishableArticle.draft, contentKind: "news" },
+      }),
+    (error) =>
+      error instanceof ContentError &&
+      error.issues?.includes(
+        "news articles require a dedicated social image",
+      ) &&
+      error.issues.includes(
+        "news articles require a citation or references block",
+      ),
   );
 });
 
@@ -557,7 +599,7 @@ test("requires a complete fail-closed publishing configuration", () => {
   );
 });
 
-test("registers gated protected routes and one canonical migration", () => {
+test("registers gated protected routes and the content schema migrations", () => {
   const routes = readFileSync(
     new URL("./routes/index.ts", import.meta.url),
     "utf8",
@@ -573,6 +615,13 @@ test("registers gated protected routes and one canonical migration", () => {
   const migration = readFileSync(
     new URL(
       "../../../packages/db/migrations/0198_content_cms_adoption.sql",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  const editorialMigration = readFileSync(
+    new URL(
+      "../../../packages/db/migrations/0212_content_editorial_seo_foundation.sql",
       import.meta.url,
     ),
     "utf8",
@@ -664,7 +713,14 @@ test("registers gated protected routes and one canonical migration", () => {
   );
   assert.match(migration, /required_constraint_count <> 16/);
   assert.match(migration, /content_outbox_version_id_fkey/);
-  assert.match(contentDb, /select count\(\*\) = 16/);
+  assert.match(editorialMigration, /content_kind/);
+  assert.match(editorialMigration, /content_article_drafts_content_kind_check/);
+  assert.match(
+    editorialMigration,
+    /content_article_versions_content_kind_check/,
+  );
+  assert.match(contentDb, /0212_content_editorial_seo_foundation\.sql/);
+  assert.match(contentDb, /select count\(\*\) = 18/);
   assert.match(contentDb, /content_outbox_version_id_fkey/);
   assert.equal(CONTENT_RENDERER_CONTRACT_ID, "hunch-content-document-v1");
 });

@@ -24,6 +24,14 @@ export const contentEditorialStatusSchema = z.enum([
   "approved",
 ]);
 
+export const contentArticleKindSchema = z.enum([
+  "guide",
+  "news",
+  "analysis",
+  "research",
+  "update",
+]);
+
 export const contentArticleSlugSchema = z
   .string()
   .trim()
@@ -45,6 +53,7 @@ const contentTagsSchema = z
   });
 
 const editableFields = {
+  contentKind: contentArticleKindSchema,
   slug: contentArticleSlugSchema,
   title: z.string().trim().min(1).max(160),
   excerpt: z.string().trim().max(500),
@@ -69,6 +78,7 @@ export const contentArticleCreateBodySchema = z
   .object({
     slug: editableFields.slug,
     title: editableFields.title,
+    contentKind: editableFields.contentKind.optional(),
     excerpt: editableFields.excerpt.optional(),
     document: editableFields.document.optional(),
     listCover: editableFields.listCover.optional(),
@@ -86,6 +96,7 @@ export const contentArticleCreateBodySchema = z
 export const contentArticleUpdateBodySchema = z
   .object({
     expectedRevision: z.number().int().positive(),
+    contentKind: editableFields.contentKind.optional(),
     slug: editableFields.slug.optional(),
     title: editableFields.title.optional(),
     excerpt: editableFields.excerpt.optional(),
@@ -145,6 +156,7 @@ const contentCursorSchema = z.string().trim().min(1).max(1_024).optional();
 
 export const publicContentArticlesQuerySchema = z.object({
   cursor: contentCursorSchema,
+  kind: contentArticleKindSchema.optional(),
   limit: z.coerce.number().int().min(1).max(50).default(12),
   tag: contentArticleSlugSchema.max(48).optional(),
 });
@@ -258,6 +270,7 @@ export type ContentArticleUpdateBody = z.infer<
   typeof contentArticleUpdateBodySchema
 >;
 export type ContentArticleStatus = z.infer<typeof contentArticleStatusSchema>;
+export type ContentArticleKind = z.infer<typeof contentArticleKindSchema>;
 export type ContentEditorialStatus = z.infer<
   typeof contentEditorialStatusSchema
 >;
