@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import crypto from "node:crypto";
 
 import { POLYMARKET_FUNDING_ROUTER } from "@hunch/contracts";
-import { Interface } from "ethers";
+import { getAddress, Interface } from "ethers";
 import { tx, type PoolClient } from "@hunch/infra";
 
 import "../../../integration-test-database-guard.js";
@@ -1139,6 +1139,7 @@ async function createRelayFixture(
   raw = "2000000",
   options: Readonly<{
     base?: Fixture;
+    checksumReceiptAddresses?: boolean;
     expectCapReservation?: boolean;
   }> = {},
 ): Promise<RelayFixture> {
@@ -1268,12 +1269,15 @@ async function createRelayFixture(
       where id = $1`,
     [base.telegramFundingSessionId, consentRevision],
   );
+  const receiptSourceAddress = `0x${crypto.randomBytes(20).toString("hex")}`;
   const receipt = await insertFundingReceiveReceipt(pool, {
     receiveSessionId: base.receiveSessionId,
     userId: base.userId,
     variantId: relayVariantId,
     asset: { networkId: "evm:8453", assetId: BASE_USDC, decimals: 6 },
-    destinationAddress: identity.wallet_address,
+    destinationAddress: options.checksumReceiptAddresses
+      ? getAddress(identity.wallet_address)
+      : identity.wallet_address,
     rawAmount: raw,
     observationRevision: opaque("relay_receipt_observation"),
     canonicalEvent: {
@@ -1281,7 +1285,9 @@ async function createRelayFixture(
       eventIndex: "0",
       ledgerHeight: "101",
       blockHash: `0x${crypto.randomBytes(32).toString("hex")}`,
-      sourceAddress: `0x${crypto.randomBytes(20).toString("hex")}`,
+      sourceAddress: options.checksumReceiptAddresses
+        ? getAddress(receiptSourceAddress)
+        : receiptSourceAddress,
     },
     observedAt: now,
     handling: "automatic_conversion",
@@ -5364,7 +5370,9 @@ try {
     reservation_status: "released",
   });
 
-  const unchangedOwnedRelay = await createRelayFixture();
+  const unchangedOwnedRelay = await createRelayFixture("2000000", {
+    checksumReceiptAddresses: true,
+  });
   const unchangedOwnedBroadcasts = { value: 0 };
   await exhaustRelayDeposit(
     unchangedOwnedRelay,
@@ -5677,6 +5685,38 @@ try {
       assert.notEqual(
         retryOperation.operation.id,
         unchangedOwnedRelay.operationId,
+      );
+      const checksumReallocation = await client.query<{
+        observation_from: string;
+        observation_to: string;
+        receipt_from: string;
+        receipt_to: string;
+      }>(
+        `select observation.from_address as observation_from,
+                observation.to_address as observation_to,
+                receipt.source_address as receipt_from,
+                receipt.destination_address as receipt_to
+           from funding_observations observation
+           join funding_receive_receipts receipt
+             on receipt.id = $1::uuid
+          where observation.operation_id = $2::uuid
+            and observation.kind = 'source_credit'`,
+        [unchangedOwnedRelay.receiptId, unchangedOwnedRelay.operationId],
+      );
+      const checksumEvidence = checksumReallocation.rows[0];
+      assert.ok(checksumEvidence);
+      assert.equal(
+        checksumEvidence.observation_from.toLowerCase(),
+        checksumEvidence.receipt_from.toLowerCase(),
+      );
+      assert.equal(
+        checksumEvidence.observation_to.toLowerCase(),
+        checksumEvidence.receipt_to.toLowerCase(),
+      );
+      assert.ok(
+        checksumEvidence.observation_from !== checksumEvidence.receipt_from ||
+          checksumEvidence.observation_to !== checksumEvidence.receipt_to,
+        "fixture must exercise checksum receipt against normalized observation",
       );
       assert.equal(
         await linkFundingReceiveReceiptOperationInTransaction(client, {
