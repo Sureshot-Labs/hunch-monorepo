@@ -116,9 +116,11 @@ four-line observation to a longer case study. Thin facts should produce a
 short post; richer trader history can support more paragraphs. The recurring
 voice tools are clipped sentences, isolated lines, occasional topical emoji or
 ALL CAPS for contrast, and sometimes a final sentence with judgment. They are
-optional tools, not a fixed template. A normal post uses zero or one topical
-emoji. A `→` block is reserved for two to four genuinely parallel positions or
-results; a single position must not be inflated into a list.
+optional tools, not a fixed template. The transcribed examples do not establish
+an emoji-per-category system: the default is no emoji, with at most one topical
+marker when it genuinely helps. A `→` block is reserved for two to five
+genuinely parallel positions, results, or changes; a single position must not
+be inflated into a list.
 
 The main negative lesson for the current implementation is equally important:
 the examples are not stat cards. Generic probability leads, label/value rows,
@@ -333,7 +335,7 @@ type XEditorialDraftV1 = {
   characterCount: number;
   generatedAt: string;
   model: string;
-  promptVersion: "x_editorial_prompt_v9";
+  promptVersion: "x_editorial_prompt_v12";
   sourceDigest: string;
 };
 ```
@@ -367,7 +369,16 @@ The prompt and deterministic validators must enforce all of the following:
   words such as `bought`, `adding`, `loaded`, `dropped`, `doubled down`, and
   `paying favorite prices` require explicit action evidence; current price does
   not support a `cheap entry` or `expensive entry` claim;
+- treat only actual timing claims such as `today`, `hours ago`, `just bought`,
+  or `just moved` as recency assertions; do not misclassify non-temporal English
+  such as `not just a large position` as `unsupported_recency`;
 - distinguish market movement since signal from the trader's lifetime PnL;
+- in follow-through copy with a named trader, position, and track record, keep
+  the trader as the protagonist instead of burying them behind an abstract
+  `YES/NO has moved from ...` opening;
+- state the natural proposition once and reject mechanical re-explanations such
+  as `on NO — the side betting ...`; use `the position`, `the price`, or the
+  trader's name after the bet is clear;
 - describe public information only through validated verdict/timing/citations;
 - use verified track record only with its exact scope and horizon;
 - expose money, probability, and PnL to the composer as publication-ready
@@ -383,13 +394,14 @@ The prompt and deterministic validators must enforce all of the following:
 - no Markdown markers or URLs inside `postText`, Telegram section labels, proof
   tables, Buy/Open CTA, affiliate language, hashtags, or generic engagement
   bait;
-- use zero or one topical emoji in a normal post; sports/esports posts actively
-  consider a natural marker inside `postText`, and an esports post without one
-  is repaired when the recent drafts have not already used emoji; never rely on
-  the separate Telegram preview label or force decorative hype;
-- allow compact `→` or plain-text list lines only when two to four connected
-  positions or results are genuinely easier to compare; reject lists for one
-  position and dashboard-style pipe tables;
+- use no emoji by default and at most one topical emoji when it materially
+  improves the post; sports/esports may use a flag, `⚽`, or `🎮`, but no category
+  requires an emoji, and politics/geopolitics normally use none;
+- allow compact `→` lines only when two to five connected positions, results,
+  or changes are genuinely easier to compare; reject lists for one position and
+  dashboard-style pipe tables; when a follow-through mentions at least three
+  non-zero wallet categories among joined, added, trimmed, exited, and still
+  holding, require one `→` line per category;
 - return one to three exact non-overlapping snippets for intentional bold or
   italic formatting in X; every item is exactly `{ style, text }`, the field is
   named `text` rather than `snippet`, and the whole post must not be bold;
@@ -400,6 +412,16 @@ The prompt and deterministic validators must enforce all of the following:
 - do not label sections with `Receipts`, `credential stack`, or `My read`, and
   avoid investment-memo phrases such as `credentialed fade` and `credibility
 check`;
+- never copy a truncated source title such as `by...?`; rebuild the proposition
+  from the canonical market identity and name the selected side in price moves;
+- reject grammar such as `has beat`, abstract hooks such as `NO on ... has
+moved`, repeated `still there` endings, and meta phrases such as `The better
+reason to notice it` or `The record is the reason to care`;
+- reject generated analyst filler such as `Small red on the position`, `the
+named holder with the recent record`, and `The move is no longer subtle`;
+- describe mixed wallet behavior as mixed; do not write `The price moved one
+way. The wallets did not.` when joined, added, trimmed, or exited counts show
+  that wallets did move;
 - return `blocked` when a coherent post requires a fact that is not supplied.
 
 Human-like copy should come from story selection, rhythm, and judgment, not
@@ -427,7 +449,10 @@ The model is not the publication authority. Validate before Telegram send:
    and does not overlap another formatting span;
 8. initial/update/follow-through semantics match the actual message kind;
 9. recent successful drafts are supplied to discourage structural repetition
-   without changing the persisted source digest.
+   without changing the persisted source digest;
+10. live-copy regressions reject malformed placeholder market titles, the
+    `has beat` grammar failure, repeated editorial scaffolding, and prose dumps
+    of three or more wallet-activity categories without `→` lines.
 
 If parsing or validation fails, one constrained repair call is made inside the
 composer. A second schema/contract failure is classified as `schema_mismatch`,
@@ -494,7 +519,7 @@ Persisted metrics shape:
     "version": 1,
     "postText": "...",
     "formatting": [{ "style": "bold", "text": "..." }],
-    "promptVersion": "x_editorial_prompt_v9",
+    "promptVersion": "x_editorial_prompt_v12",
     "sourceDigest": "..."
   }
 }
