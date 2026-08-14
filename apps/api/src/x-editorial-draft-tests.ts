@@ -1005,6 +1005,41 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.ok(bad.issues.includes("binary_side_explanation"));
       assert.ok(bad.issues.includes("analyst_jargon"));
 
+      const latestLivePostText =
+        "NO moved 7 points to 71.5¢ on whether the US announces an end to the Iranian blockade by August 31.\n\n@eCash is still holding $11.1K on no announcement by the deadline. The position is down $78.\n\nThis is the same trader up $73.7K over the last 30 days, and has beaten market prices by 27 points across 13 resolved bets.\n\nPrice followed the thesis; the holder stayed with it.";
+      const latestLive = validateXEditorialModelOutput({
+        config,
+        output: {
+          version: 1,
+          status: "ready",
+          marketId: "iran-blockade-ecash-followthrough",
+          selectedSide: "NO",
+          postText: latestLivePostText,
+          formatting: [
+            {
+              style: "bold",
+              text: "NO moved 7 points to 71.5¢",
+            },
+            {
+              style: "bold",
+              text: "@eCash is still holding $11.1K",
+            },
+            {
+              style: "italic",
+              text: "Price followed the thesis; the holder stayed with it.",
+            },
+          ],
+          storyFamily: "followthrough",
+          usedFactIds: ["market", "original_signal", "followthrough"],
+          safetyFlags: [],
+        },
+        source: followthroughSource,
+      });
+      assert.ok(latestLive.issues.includes("actor_buried_in_followthrough"));
+      assert.ok(latestLive.issues.includes("binary_side_shorthand"));
+      assert.ok(latestLive.issues.includes("grammar_error"));
+      assert.ok(latestLive.issues.includes("analyst_jargon"));
+
       const goodPostText =
         "@eCash is still holding $11.1K against an August 31 end to the Iranian blockade.\n\nNO moved from 64.5¢ to 71.5¢ after the original signal. The position is down $78.\n\nOver the last 30 days, @eCash is up $73.7K and has beaten market prices by 27 points across 13 resolved bets.";
       const good = validateXEditorialModelOutput({
