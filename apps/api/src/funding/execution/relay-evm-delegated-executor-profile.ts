@@ -477,7 +477,12 @@ async function observeRelayPostcondition(
         where approval_step.executor_id = $1
           and ${RELAY_ALLOWANCE_LANE_HEAD_PREDICATE}
           and approval_step.state = 'succeeded'
-          and deposit_step.state = 'planned'
+          and deposit_step.state in ('planned', 'action_required')
+          and not exists (
+            select 1
+            from funding_operation_step_attempts deposit_attempt
+            where deposit_attempt.step_id = deposit_step.id
+          )
           and approval_receipt.evidence ->> 'allowanceExact'
                 is distinct from 'true'
           and approval_receipt.evidence ->> 'allowanceAnchorRejected'

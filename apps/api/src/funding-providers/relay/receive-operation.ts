@@ -57,6 +57,7 @@ import { RelayWalletQuoteAdapter } from "./wallet-adapter.js";
 import { loadRelayEvmExecutionConfiguration } from "../../funding/execution/delegated-funding-config.js";
 import { TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID } from "../../funding/execution/delegated-funding-profile-ids.js";
 import { readBaseRelayAllowance } from "../../funding/execution/relay-evm-delegated-executor-profile.js";
+import { DELEGATED_PROVIDER_RECOVERY_MS } from "../../funding/execution/delegated-funding-recovery-policy.js";
 
 type JsonRecord = Readonly<Record<string, JsonValue>>;
 type RuntimeRoute = FundingRuntimePolicy["routes"][number];
@@ -598,6 +599,16 @@ export function createRelayReceiveReceiptDispositionResolver(
           receiptTarget.ownerChannel === "telegram" &&
           receiptTarget.telegramAutomationPolicy?.profileId ===
             TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID;
+        const relayExecutionConfiguration = delegatedRelay
+          ? loadRelayEvmExecutionConfiguration()
+          : null;
+        const minimumSequentialTtlMs =
+          relayExecutionConfiguration?.minimumSequentialTtlMs ?? 0;
+        const sequentialQuoteTtlMs = relayExecutionConfiguration
+          ? DELEGATED_PROVIDER_RECOVERY_MS +
+            minimumSequentialTtlMs +
+            30_000
+          : 60_000;
         const baselineAllowance = delegatedRelay
           ? await readBaseRelayAllowance({
               owner: frozen.profile.address,
@@ -619,7 +630,8 @@ export function createRelayReceiveReceiptDispositionResolver(
           recipientAddress: destinationAddress(frozen.destination),
           senderWalletId: frozen.profile.walletId,
           quoteCorrelationId,
-          deadline: new Date(now.getTime() + 60_000),
+          deadline: new Date(now.getTime() + sequentialQuoteTtlMs),
+          maximumQuoteTtlMs: sequentialQuoteTtlMs,
           maximumSlippageBps: receiptTarget.automationPolicy.maximumSlippageBps,
           now,
         });
@@ -672,7 +684,7 @@ export function createRelayReceiveReceiptDispositionResolver(
         if (
           receiptTarget.ownerChannel === "telegram" &&
           new Date(planned.candidate.expiresAt).getTime() - now.getTime() <
-            loadRelayEvmExecutionConfiguration().minimumSequentialTtlMs
+            minimumSequentialTtlMs
         ) {
           return null;
         }

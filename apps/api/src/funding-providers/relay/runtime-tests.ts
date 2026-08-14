@@ -384,6 +384,41 @@ const destination: FundingTarget = {
 }
 
 {
+  const clock = new Date("2030-01-01T00:00:00.000Z");
+  const client = new RelayClient({
+    apiKey: "relay-test-secret",
+    fetchImpl: async () => response(nativeWalletQuote()),
+  });
+  const normalized = await new RelayWalletQuoteAdapter(
+    client,
+    () => clock,
+  ).quote({
+    route,
+    source,
+    destination,
+    sourceAmount: {
+      asset: route.source,
+      raw: "1000000000000000000",
+    },
+    minimumOutput: {
+      asset: route.destination,
+      raw: "27000000000000",
+    },
+    userAddress: user,
+    recipientAddress: user,
+    senderWalletId: "wallet-1",
+    quoteCorrelationId: "quote-correlation-sequential-delegated",
+    deadline: new Date(clock.getTime() + 10 * 60_000),
+    maximumQuoteTtlMs: 6 * 60_000,
+  });
+  assert.equal(
+    normalized.candidate.expiresAt,
+    new Date(clock.getTime() + 6 * 60_000).toISOString(),
+    "a sequential delegated route can retain its envelope through provider recovery",
+  );
+}
+
+{
   const startedAt = new Date("2030-01-01T00:00:00.000Z");
   const deadline = new Date(startedAt.getTime() + 1_000);
   let clock = startedAt;
