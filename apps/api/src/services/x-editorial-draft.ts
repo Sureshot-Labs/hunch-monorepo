@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 
 export const X_EDITORIAL_CONTENT_PROFILE = "x_editorial_draft_v1" as const;
-export const X_EDITORIAL_PROMPT_VERSION = "x_editorial_prompt_v9" as const;
+export const X_EDITORIAL_PROMPT_VERSION = "x_editorial_prompt_v10" as const;
 
 export type XEditorialComposerFailureCode =
   | "missing_content"
@@ -298,12 +298,25 @@ const FORBIDDEN_COPY_PATTERNS: Array<{
   {
     code: "editorial_scaffolding",
     pattern:
-      /(?:^|\n)(?:the trader has (?:some )?receipts|receipts|the credential stack is the story|my read|the (?:cleaner|stronger) stat|the (?:actual|real) tension(?: here)?)\s*:/im,
+      /(?:^|\n)(?:the trader has (?:some )?receipts|receipts|the credential stack is the story|my read|the (?:cleaner|stronger) stat|the (?:actual|real) tension(?: here)?|the (?:better|main|real) reason to (?:notice|care)(?: about)? it|the record is the reason to care)\s*:/im,
   },
   {
     code: "analyst_jargon",
     pattern:
       /\b(?:credentialed (?:fade|trade)|credibility check|making that lean concrete|worth respecting|last (?:30|thirty) days (?:are|were) not quiet|keep paying favorite prices|the price is already heavy|serious holder)\b/i,
+  },
+  { code: "grammar_error", pattern: /\bhas beat\b/i },
+  {
+    code: "raw_market_title",
+    pattern: /\bby\s*\.{2,}\?/i,
+  },
+  {
+    code: "side_label_hook",
+    pattern: /^(?:yes|no)\s+on\b[^\n.!?]*\bhas moved\b/im,
+  },
+  {
+    code: "misleading_wallet_summary",
+    pattern: /\bthe price moved one way\.\s*the wallets did not\b/i,
   },
   {
     code: "binary_side_explanation",
@@ -339,10 +352,18 @@ const UNSUPPORTED_POSITION_ACTION_PATTERN =
 const UNSUPPORTED_RECENCY_PATTERN =
   /\b(?:just|minutes? ago|hours? ago|today|this morning|tonight)\b/i;
 
-const ESPORTS_CONTEXT_PATTERN = /\b(?:bo[1-7]|esports?|gaming)\b/i;
-
 const TOPICAL_EMOJI_PATTERN =
   /(?:\p{Extended_Pictographic}|\p{Regional_Indicator}{2})/gu;
+
+const FOLLOWTHROUGH_ACTIVITY_PATTERNS = [
+  /\bjoined\b/i,
+  /\badded\b/i,
+  /\b(?:wallets?\s+)?trimmed\b/i,
+  /\b(?:wallets?\s+)?exited\b/i,
+  /\b(?:wallets?\s+)?(?:are\s+)?still\s+(?:holding|in)\b/i,
+] as const;
+
+const ARROW_LIST_LINE_PATTERN = /(?:^|\n)\s*→\s+\S/m;
 
 function cleanText(value: string): string {
   return value
@@ -432,7 +453,7 @@ function buildEditorialBrief(source: XEditorialDraftSource): {
       actionClaims:
         "Treat this as a current-position snapshot unless an allowlisted fact explicitly proves a new action.",
       listAndEmoji:
-        "Do not list a single position. Use at most one topical emoji. Sports/esports markers such as a flag, ⚽, or 🎮 belong inside postText and should be used when they improve scanning without repeating recent drafts.",
+        "Do not list a single position. Use no emoji by default. One genuinely useful topical emoji is allowed, including for sports/esports, but it is never required.",
       preferredLength: "Two to four compact paragraphs; shorter is better.",
       recommendedFormat: "snapshot_profile",
       supportingFactBudget: 3,
@@ -443,7 +464,7 @@ function buildEditorialBrief(source: XEditorialDraftSource): {
       actionClaims:
         "Describe only the material change explicitly stated in the research_update fact.",
       listAndEmoji:
-        "Use a list only when the update contains at least two parallel changes. Use at most one topical emoji.",
+        "Use a → list only when the update contains two to five parallel changes. Use no emoji by default; one topical emoji is allowed when it materially improves the post.",
       preferredLength: "Two to five compact paragraphs.",
       recommendedFormat: "material_update",
       supportingFactBudget: 4,
@@ -452,9 +473,9 @@ function buildEditorialBrief(source: XEditorialDraftSource): {
   if (source.kind === "followthrough_stats") {
     return {
       actionClaims:
-        "Separate wallet behavior since the signal from lifetime performance and from current position state.",
+        "Name the selected side in every price move. Separate wallet behavior since the signal from lifetime performance and from current position state. If wallet behavior is mixed, say that precisely rather than implying that wallets did not move.",
       listAndEmoji:
-        "Use → only when comparing at least two wallet-flow outcomes. Use at most one topical emoji.",
+        "When three or more nonzero wallet-activity categories are mentioned, put them on separate → lines. With two categories, use either a compact sentence or → lines. Use no emoji by default; one topical emoji is allowed when it materially improves the post.",
       preferredLength: "Three to five compact paragraphs.",
       recommendedFormat: "followthrough",
       supportingFactBudget: 4,
@@ -464,7 +485,7 @@ function buildEditorialBrief(source: XEditorialDraftSource): {
     actionClaims:
       "Lead with the verified resolution and do not turn an estimated PnL into a guaranteed realized result.",
     listAndEmoji:
-      "Use → only for two or more parallel result facts. Use at most one topical emoji.",
+      "Use → only for two to five parallel result facts. Use no emoji by default; one topical emoji is allowed when it materially improves the post.",
     preferredLength: "Two to five compact paragraphs.",
     recommendedFormat: "resolution",
     supportingFactBudget: 4,
@@ -489,24 +510,28 @@ export function buildXEditorialDraftSystemPrompt(input: {
     "Use short natural paragraphs and clipped sentences where they add rhythm. Prefer specific nouns and active verbs. Omit facts that do not strengthen the story. Never pad a weak story into three or four explanatory paragraphs.",
     "Avoid generic openings such as 'Market update', 'Tracked wallets are moving', 'A signal appeared', or '[probability] is now [probability]' when a concrete trader, amount, or result is available.",
     "Use only supplied facts. Preserve side, proposition, scope, count, timeframe, and result. For amounts, prices, and PnL, use the supplied editorial display strings verbatim; never print raw database decimals or add precision.",
+    "Never copy a truncated or placeholder market title such as one ending in 'by...?'. Reconstruct a natural proposition from the canonical market question, predicate, subject, selected side, and deadline. For a price move, name the side that moved instead of opening with an abstract construction such as 'NO on [market] has moved'.",
+    "Write clean idiomatic English. A supplied credential such as 'Beat market prices by 14 points' becomes 'has beaten market prices by 14 points', never 'has beat'.",
     "A position snapshot proves only that the position is currently held. It does not prove when, where, or how it was entered, or that the trader is still buying. Never turn holding into bought, added, loaded, dropped, entered, doubled down, or keeps paying unless a supplied fact explicitly proves that action. Current price alone never supports 'cheap entry', 'expensive entry', or any other entry-price claim.",
     "Do not claim insider access, coordination, private information, causation, certainty, an AI bot, or a cheat code.",
     "A light first-person editorial voice is allowed for a fact-grounded observation or opinion, such as 'I found', 'I am watching', or 'I think'. Never invent a personal trade, profit, prediction record, conversation, private source, or firsthand access.",
     "Do not expose wallet addresses, internal labels, evidence IDs, raw schema names, or analytics jargon.",
-    "Never announce your structure with labels such as 'Receipts:', 'The trader has receipts:', 'The credential stack is the story:', 'My read:', 'The cleaner stat:', or 'The actual tension here:'. Make the observation directly.",
+    "Never announce your structure with labels such as 'Receipts:', 'The trader has receipts:', 'The credential stack is the story:', 'My read:', 'The cleaner stat:', 'The actual tension here:', 'The better reason to notice it:', or 'The record is the reason to care:'. Make the observation directly.",
     "Avoid investment-memo and AI-editor phrases such as 'credentialed fade', 'credibility check', 'base case', 'making the lean concrete', 'worth respecting', 'the last 30 days are not quiet', 'the price is already heavy', 'serious holder', or 'keep paying favorite prices'. Use ordinary language a real market blogger would use.",
     "Do not mechanically repeat 'The market already...' or 'This is X, not Y'. Vary the structure, transitions, and ending as well as the opening.",
+    "Do not repeat the same observation in the same post. In particular, do not say that a trader is 'still there' twice or end by paraphrasing the preceding sentence.",
     "Never assume an acronym or outcome label is self-explanatory. Pair it with the supplied event or market context. Translate binary contract mechanics into the natural outcome; do not write 'holding the NO side — meaning NIP to win' when the supplied label or proposition lets you say directly that the trader is holding NIP to win.",
     "No Markdown markers inside postText, headings, pipe-delimited stat tables, URLs, links, hashtags, affiliate language, product CTA, or generic engagement bait.",
     "Select one to three exact, non-overlapping snippets for intentional Telegram/X formatting. Usually bold the hook or strongest result; use italic only for a genuinely useful interpretive line. Return those snippets in formatting and keep postText itself plain.",
     'Every formatting item must be exactly {"style":"bold"|"italic","text":"an exact substring of postText"}. The field name is text, never snippet.',
-    "Emoji and → bullets are editorial tools, not decoration. Use zero or one topical emoji in a normal post. For sports or esports, actively consider one natural context marker such as a flag, ⚽, or 🎮 inside postText; prefer it when recent drafts have not already leaned on emoji. Do not count any Telegram preview label as part of the post. Do not add generic 🚨 or 🔥 unless the facts establish real urgency.",
-    "Use → lines only for two to four parallel positions, outcomes, or results whose comparison is the story. Never create a list for one position or turn ordinary credentials into a recurring stats card.",
+    "Emoji and → bullets are editorial tools, not decoration. Use no emoji by default. At most one topical emoji may be used when it materially improves scanning; sports/esports do not require one, and politics/geopolitics usually need none. Do not count any Telegram preview label as part of the post. Do not add generic 🚨 or 🔥 unless the facts establish real urgency.",
+    "Use → lines only for two to five parallel positions, outcomes, results, or wallet-flow changes whose comparison is the story. Never create a list for one position or turn ordinary credentials into a recurring stats card. In a follow-through post that mentions at least three of joined, added, trimmed, exited, and still holding, use one → line per category instead of consecutive prose sentences.",
     "Vary the hook, structure, transitions, and ending against recentDraftsToAvoidImitating. Reuse the reference collection's editorial principles, never one author's exact wording or persona.",
     "These style-only examples show the target rhythm. Never reuse their people, markets, numbers, or claims unless they are present in the supplied facts:",
     "STYLE EXAMPLE — compact snapshot:\n$410K profit this month. And one trader is still holding $84K on the favorite.\n\nThe contract is already 82¢. The position is barely green.\n\nStrong record. Thin upside. Still holding.",
-    "STYLE EXAMPLE — connected positions:\nOne trader is fading the favorite in three different ways:\n\n⚽ Match winner — NO\n→ Two-goal margin — NO\n→ Tournament winner — YES\n\nThat is one very narrow script.",
+    "STYLE EXAMPLE — connected positions:\nOne trader is fading the favorite in three different ways:\n\n→ Match winner — NO\n→ Two-goal margin — NO\n→ Tournament winner — YES\n\nThat is one very narrow script.",
     "STYLE EXAMPLE — repeatable strategy:\nThis weather trader has made $5,287 in 30 days.\n\n→ 1,618 forecasts\n→ Four continents\n→ The same small edge, repeated\n\nBoring market. Serious consistency.",
+    "STYLE EXAMPLE — mixed follow-through:\nNO moved from 93¢ to 96.9¢ after the original signal. Another $49.5K followed it.\n\n→ 1 wallet joined\n→ 7 added\n→ 6 trimmed\n→ 2 exited\n→ 15 still hold\n\nPrice climbed. Wallet conviction split.",
     "Do not write phrases such as 'the important part is', 'tracked money', 'worth following', or 'market update'. Do not restate the research headline and description as two report-like paragraphs.",
     `Hard limit: ${input.maxCharacters} visible characters and ${input.maxParagraphs} paragraphs.`,
     "Return exactly one JSON object. Use status=blocked and postText=null if the facts do not support a coherent, safe post.",
@@ -694,19 +719,19 @@ function findUnsupportedSemanticClaims(input: {
   const issues: string[] = [];
   const emojiCount = [...input.postText.matchAll(TOPICAL_EMOJI_PATTERN)].length;
   if (emojiCount > 1) issues.push("too_many_emojis");
-  const marketContext = sourceFactText({
-    factIds: new Set(["market"]),
-    source: input.source,
-  });
-  const recentDraftHasEmoji = (input.source.recentOpenings ?? [])
-    .slice(0, 3)
-    .some((draft) => [...draft.matchAll(TOPICAL_EMOJI_PATTERN)].length > 0);
-  if (
-    ESPORTS_CONTEXT_PATTERN.test(marketContext) &&
-    emojiCount === 0 &&
-    !recentDraftHasEmoji
-  ) {
-    issues.push("missing_topical_emoji");
+  if (input.source.kind === "followthrough_stats") {
+    const activityCategoryCount = FOLLOWTHROUGH_ACTIVITY_PATTERNS.filter(
+      (pattern) => pattern.test(input.postText),
+    ).length;
+    if (
+      activityCategoryCount >= 3 &&
+      !ARROW_LIST_LINE_PATTERN.test(input.postText)
+    ) {
+      issues.push("wallet_activity_needs_list");
+    }
+  }
+  if ([...input.postText.matchAll(/\bstill there\b/gi)].length >= 2) {
+    issues.push("repeated_phrase:still_there");
   }
   if (
     (input.source.kind === "initial" ||
