@@ -60,17 +60,24 @@ fi
 
 export HUNCH_BACKEND_IMAGE
 
+# Start or retain infra and migrate before touching the live application
+# containers. If migration fails, the currently deployed API and workers stay
+# online on their existing image.
+"${compose[@]}" up -d postgres redis
+if ! "${compose[@]}" run --rm api \
+  node /app/packages/config/dist/run-with-secrets.js \
+  /app/packages/db/dist/migrate.js; then
+  echo "Migration failed; existing application containers were left running." >&2
+  exit 1
+fi
+
+# Replace application containers only after the database is ready for the new
+# image. The brief restart cannot now be caused by a rejected migration.
 "${compose[@]}" down --remove-orphans || true
 stale_containers=$(docker ps -aq --filter "label=com.docker.compose.project=${project_name}")
 if [[ -n "${stale_containers}" ]]; then
   docker rm -f ${stale_containers}
 fi
-
-# Bring up infra only so we can migrate without exposing app containers yet.
-"${compose[@]}" up -d postgres redis
-"${compose[@]}" run --rm api \
-  node /app/packages/config/dist/run-with-secrets.js \
-  /app/packages/db/dist/migrate.js
 
 "${compose[@]}" up -d --no-build
 

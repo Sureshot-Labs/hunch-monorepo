@@ -29,6 +29,12 @@ set editorial_graph = jsonb_set(
   true
 );
 
+-- Versions are immutable at runtime. The migration owns this one bounded
+-- backfill and disables only that guard, inside the same transaction. Any
+-- failure rolls the trigger state and data changes back together.
+alter table content_article_versions
+  disable trigger content_article_versions_immutable;
+
 update content_article_versions
 set editorial_graph = jsonb_set(
   editorial_graph,
@@ -36,6 +42,9 @@ set editorial_graph = jsonb_set(
   to_jsonb(slug),
   true
 );
+
+alter table content_article_versions
+  enable trigger content_article_versions_immutable;
 
 create index idx_content_article_drafts_editorial_graph
   on content_article_drafts using gin (editorial_graph jsonb_path_ops);
