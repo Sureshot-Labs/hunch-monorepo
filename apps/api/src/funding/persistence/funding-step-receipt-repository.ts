@@ -461,20 +461,11 @@ export async function applyFundingStepReceiptEvidenceInTransaction(
           block_hash = excluded.block_hash,
           canonical = excluded.canonical,
           failure_code = excluded.failure_code,
-          evidence = case
-            when funding_step_receipt_observations.status = excluded.status
-             and funding_step_receipt_observations.action_match
-                   is not distinct from excluded.action_match
-             and funding_step_receipt_observations.ledger_height
-                   is not distinct from excluded.ledger_height
-             and funding_step_receipt_observations.block_hash
-                   is not distinct from excluded.block_hash
-             and funding_step_receipt_observations.canonical = excluded.canonical
-             and funding_step_receipt_observations.failure_code
-                   is not distinct from excluded.failure_code
-            then funding_step_receipt_observations.evidence || excluded.evidence
-            else excluded.evidence
-          end,
+          -- Provider polling and profile-specific postcondition verification
+          -- are independent writers. A later receipt observation may advance
+          -- finality or refresh provider metadata, but it must never erase
+          -- causal evidence already attached by the profile verifier.
+          evidence = funding_step_receipt_observations.evidence || excluded.evidence,
           observed_at = excluded.observed_at,
           finalized_at = excluded.finalized_at,
           reorged_at = excluded.reorged_at

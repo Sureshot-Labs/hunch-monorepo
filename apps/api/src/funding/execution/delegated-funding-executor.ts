@@ -47,6 +47,7 @@ import {
 import { lockTelegramFundingLinkLifecycle } from "./telegram-funding-link-lifecycle-lock.js";
 import { lockFundingControllerWallet } from "./funding-controller-wallet-lock.js";
 import {
+  DELEGATED_NONBROADCAST_RECOVERY_MS,
   DELEGATED_PROVIDER_EVIDENCE_RECOVERY_CLAIM_KEY,
   DELEGATED_PROVIDER_EVIDENCE_RECOVERY_MS,
   DELEGATED_PROVIDER_RECOVERY_MS,
@@ -142,6 +143,7 @@ export type DelegatedFundingRuntimeProfile = Readonly<{
     client: PoolClient,
     input: Readonly<{
       recoverStartedBefore: Date;
+      recoverUnbroadcastStartedBefore: Date;
       now: Date;
     }>,
   ) => Promise<DelegatedFundingRecoveryClaim | null>;
@@ -704,6 +706,7 @@ async function recoverPolymarketWrapInTransaction(
   client: PoolClient,
   input: Readonly<{
     recoverStartedBefore: Date;
+    recoverUnbroadcastStartedBefore: Date;
     now: Date;
   }>,
 ): Promise<DelegatedFundingRecoveryClaim | null> {
@@ -822,7 +825,10 @@ async function recoverPolymarketWrapInTransaction(
           )
         )
         and (
-          attempt.updated_at <= $2
+          attempt.updated_at <= case
+            when attempt.outcome = 'started' then $5::timestamptz
+            else $2::timestamptz
+          end
           or (
             attempt.finished_at <= $3
             and attempt.outcome = 'ambiguous'
@@ -863,6 +869,7 @@ async function recoverPolymarketWrapInTransaction(
       input.recoverStartedBefore,
       new Date(input.now.getTime() - DELEGATED_PROVIDER_EVIDENCE_RECOVERY_MS),
       DELEGATED_PROVIDER_EVIDENCE_RECOVERY_CLAIM_KEY,
+      input.recoverUnbroadcastStartedBefore,
     ],
   );
   const row = rows[0];
@@ -897,7 +904,13 @@ async function recoverPolymarketWrapInTransaction(
             and outcome in ('started', 'ambiguous')
             and updated_at <= $3
         `,
-        [row.attempt_id, input.now, input.recoverStartedBefore],
+        [
+          row.attempt_id,
+          input.now,
+          row.attempt_outcome === "started"
+            ? input.recoverUnbroadcastStartedBefore
+            : input.recoverStartedBefore,
+        ],
       );
   if (leased.rowCount !== 1) {
     throw new Error("delegated funding recovery lease was lost");
@@ -1207,10 +1220,18 @@ export class DelegatedFundingExecutor {
           1,
           this.input.startedAttemptRecoveryMs ?? DELEGATED_PROVIDER_RECOVERY_MS,
         );
+        const nonbroadcastRecoveryMs = Math.max(
+          1,
+          this.input.startedAttemptRecoveryMs ??
+            DELEGATED_NONBROADCAST_RECOVERY_MS,
+        );
         const recovery = await tx(this.pool, (client) =>
           runtime.recoverInTransaction(client, {
             now,
             recoverStartedBefore: new Date(now.getTime() - recoveryMs),
+            recoverUnbroadcastStartedBefore: new Date(
+              now.getTime() - nonbroadcastRecoveryMs,
+            ),
           }),
         );
         let claimObservation: JsonRecord | undefined;
