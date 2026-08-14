@@ -37,6 +37,19 @@ const ERC20_TRANSFER_INTERFACE = new Interface([
   "function transfer(address recipient,uint256 amount)",
 ]);
 
+export function groupRelayExecutableActions(input: {
+  actions: readonly NormalizedAction[];
+  preserveActionBoundaries: boolean;
+  profile: WalletExecutionProfile;
+}) {
+  return input.preserveActionBoundaries
+    ? input.actions.map((action) => ({ action, sourceActions: [action] }))
+    : groupWalletExecutableActions({
+        actions: input.actions,
+        profile: input.profile,
+      });
+}
+
 function jsonRecord(value: unknown): Readonly<Record<string, JsonValue>> {
   return value as Readonly<Record<string, JsonValue>>;
 }
@@ -55,6 +68,7 @@ async function validatedSteps(input: {
   actions: readonly NormalizedAction[];
   minimumOutput: Money;
   policyRevision: string;
+  preserveActionBoundaries: boolean;
   quoteCorrelationId: string;
   route: FundingRuntimePolicy["routes"][number];
   sourceAmount: Money;
@@ -88,10 +102,8 @@ async function validatedSteps(input: {
     validatedByActionId.set(action.actionId, validation);
   }
 
-  return groupWalletExecutableActions({
-    actions: input.actions,
-    profile: input.profile,
-  }).map(({ action, sourceActions }, ordinal) => {
+  const executableActions = groupRelayExecutableActions(input);
+  return executableActions.map(({ action, sourceActions }, ordinal) => {
     const validations = sourceActions.map((sourceAction) => {
       const validation = validatedByActionId.get(sourceAction.actionId);
       if (!validation) {
@@ -362,6 +374,7 @@ export async function buildRelayPlanningQuote(
     actions: input.quote.actions,
     minimumOutput: input.quote.candidate.minimumOutput,
     policyRevision: input.policyRevision,
+    preserveActionBoundaries: Boolean(input.serverExecutionProfileId),
     quoteCorrelationId: input.quoteCorrelationId,
     route: input.route,
     sourceAmount: input.quote.sourceAmount,

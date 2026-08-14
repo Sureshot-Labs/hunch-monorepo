@@ -7,7 +7,10 @@ import {
   RELAY_DEPOSITORY_V2,
   RELAY_SELF_DEPOSITOR,
 } from "../../../funding-providers/relay/rehearsal.js";
-import { relayDelegatedCommitSteps } from "../../../funding-providers/relay/operation-plan.js";
+import {
+  groupRelayExecutableActions,
+  relayDelegatedCommitSteps,
+} from "../../../funding-providers/relay/operation-plan.js";
 import {
   TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
   validateRelayEvmPolicyRules,
@@ -389,6 +392,55 @@ assert.throws(() =>
   }),
 );
 
+const atomicWalletProfile = {
+  walletId: WALLET_ID,
+  controllerWalletRef: "controller-wallet",
+  networkId: "evm:8453",
+  address: WALLET,
+  source: "embedded" as const,
+  signingModes: ["privy_delegated" as const],
+  serverWalletRef: "privy-wallet",
+  sponsorshipPolicyIds: [],
+  evmAtomicBatchMode: "privy_wallet_send_calls" as const,
+};
+const quotedRelayActions = [
+  {
+    ...actionBase,
+    actionId: "relay:fixture:approve",
+    to: BASE_USDC,
+    data: approve.encodeFunctionData("approve", [RELAY_DEPOSITORY_V2, RAW]),
+  },
+  {
+    ...actionBase,
+    actionId: "relay:fixture:deposit",
+    to: RELAY_DEPOSITORY_V2,
+    data: deposit.encodeFunctionData("depositErc20", [
+      WALLET,
+      BASE_USDC,
+      RAW,
+      orderId,
+    ]),
+  },
+];
+assert.equal(
+  groupRelayExecutableActions({
+    actions: quotedRelayActions,
+    preserveActionBoundaries: false,
+    profile: atomicWalletProfile,
+  }).length,
+  1,
+  "ordinary client execution may atomically batch the Relay calls",
+);
+assert.deepEqual(
+  groupRelayExecutableActions({
+    actions: quotedRelayActions,
+    preserveActionBoundaries: true,
+    profile: atomicWalletProfile,
+  }).map(({ action }) => action.actionId),
+  ["relay:fixture:approve", "relay:fixture:deposit"],
+  "delegated Relay execution preserves the durable approve/deposit boundary",
+);
+
 const delegatedSteps = relayDelegatedCommitSteps({
   steps: [
     {
@@ -435,17 +487,7 @@ const delegatedSteps = relayDelegatedCommitSteps({
     asset: { networkId: "evm:8453", assetId: BASE_USDC, decimals: 6 },
     raw: RAW,
   },
-  profile: {
-    walletId: WALLET_ID,
-    controllerWalletRef: "controller-wallet",
-    networkId: "evm:8453",
-    address: WALLET,
-    source: "embedded",
-    signingModes: ["privy_delegated"],
-    serverWalletRef: "privy-wallet",
-    sponsorshipPolicyIds: [],
-    evmAtomicBatchMode: null,
-  },
+  profile: atomicWalletProfile,
   serverExecutionProfileId: TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
 });
 assert.deepEqual(
