@@ -62,6 +62,7 @@ import {
 } from "../../funding-providers/relay/rehearsal.js";
 
 type JsonRecord = Readonly<Record<string, JsonValue>>;
+export const RELAY_CLEANUP_CANONICAL_WATCH_MS = 60_000;
 type Policy = Awaited<
   ReturnType<
     typeof import("../policies/funding-policy-service.js").resolveFundingPolicy
@@ -699,7 +700,8 @@ async function observeRelayPostcondition(
           and cleanup_receipt.action_match and cleanup_receipt.canonical
           and cleanup_receipt.evidence ->> 'singleOperationBundle' = 'true'
           and cleanup_receipt.finalized_at <=
-                $2::timestamptz - interval '15 minutes'
+                $2::timestamptz -
+                  $3::bigint * interval '1 millisecond'
          join telegram_funding_authorizations funding_authorization
            on funding_authorization.id = reservation.authorization_id
         where reservation.status = 'cleanup_required'
@@ -721,7 +723,11 @@ async function observeRelayPostcondition(
        from candidates
       order by priority, observed_at
       limit 1`,
-    [TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID, now],
+    [
+      TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
+      now,
+      RELAY_CLEANUP_CANONICAL_WATCH_MS,
+    ],
   );
   const candidate = rows[0];
   if (!candidate) return undefined;
@@ -1890,7 +1896,8 @@ async function reconcileRelayPostconditions(
         and cleanup_receipt.canonical
         and cleanup_receipt.evidence ->> 'singleOperationBundle' = 'true'
         and cleanup_receipt.finalized_at <=
-              $4::timestamptz - interval '15 minutes'
+              $4::timestamptz -
+                $5::bigint * interval '1 millisecond'
        join funding_operations parent
          on parent.id = reservation.funding_operation_id
        left join funding_operation_segments segment
@@ -1944,6 +1951,7 @@ async function reconcileRelayPostconditions(
       maintenance?.kind === "cleanup" ? maintenance.candidateId : null,
       maintenance?.kind === "cleanup" ? maintenance.operationId : null,
       now,
+      RELAY_CLEANUP_CANONICAL_WATCH_MS,
     ],
   );
   const cleanupRow = cleanup.rows[0];
@@ -1956,7 +1964,7 @@ async function reconcileRelayPostconditions(
     if (
       observed.raw === "0" &&
       cleanupRow.cleanup_receipt_finalized_at.getTime() <=
-        now.getTime() - 15 * 60_000
+        now.getTime() - RELAY_CLEANUP_CANONICAL_WATCH_MS
     ) {
       if (cleanupRow.cleanup_context === "post_deposit") {
         if (
@@ -2454,7 +2462,11 @@ async function claimRelay(
 
 async function recoverRelay(
   client: PoolClient,
-  input: Readonly<{ recoverStartedBefore: Date; now: Date }>,
+  input: Readonly<{
+    recoverStartedBefore: Date;
+    recoverUnbroadcastStartedBefore: Date;
+    now: Date;
+  }>,
 ): Promise<DelegatedFundingRecoveryClaim | null> {
   const { rows } = await client.query<
     RelayClaimRow & {
@@ -2497,12 +2509,19 @@ async function recoverRelay(
              and step.state in ('reconcile_required', 'recovery_required')
            )
          )
-         and attempt.updated_at <= $2
+         and attempt.updated_at <= case
+               when attempt.outcome = 'started' then $3::timestamptz
+               else $2::timestamptz
+             end
          and operation.status not in ('completed', 'refunded', 'failed', 'cancelled')
        order by attempt.updated_at, attempt.id
        for update of attempt, step, operation, reservation skip locked
        limit 1`,
-    [TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID, input.recoverStartedBefore],
+    [
+      TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
+      input.recoverStartedBefore,
+      input.recoverUnbroadcastStartedBefore,
+    ],
   );
   const row = rows[0];
   if (!row) {
@@ -2558,7 +2577,10 @@ async function recoverRelay(
                    )
              )
            )
-           and attempt.updated_at <= $2
+           and attempt.updated_at <= case
+                 when attempt.outcome = 'started' then $3::timestamptz
+                 else $2::timestamptz
+               end
            and cleanup_operation.status not in (
                  'completed', 'refunded', 'failed', 'cancelled'
                )
@@ -2566,7 +2588,11 @@ async function recoverRelay(
          for update of attempt, cleanup_step, cleanup_operation,
                        reservation skip locked
          limit 1`,
-      [TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID, input.recoverStartedBefore],
+      [
+        TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
+        input.recoverStartedBefore,
+        input.recoverUnbroadcastStartedBefore,
+      ],
     );
     const cleanupRow = cleanup.rows[0];
     if (!cleanupRow) return null;
@@ -2578,13 +2604,17 @@ async function recoverRelay(
     ) {
       return null;
     }
+    const cleanupRecoveryCutoff =
+      cleanupRow.attempt_outcome === "started"
+        ? input.recoverUnbroadcastStartedBefore
+        : input.recoverStartedBefore;
     const leasedCleanup = await client.query(
       `update funding_operation_step_attempts
           set updated_at = $2
         where id = $1
           and outcome in ('started', 'ambiguous')
           and updated_at <= $3`,
-      [cleanupRow.attempt_id, input.now, input.recoverStartedBefore],
+      [cleanupRow.attempt_id, input.now, cleanupRecoveryCutoff],
     );
     if (leasedCleanup.rowCount !== 1) return null;
     const parsedCleanup = normalizedActionSchema.safeParse(
@@ -2615,11 +2645,15 @@ async function recoverRelay(
   ) {
     return null;
   }
+  const recoveryCutoff =
+    row.attempt_outcome === "started"
+      ? input.recoverUnbroadcastStartedBefore
+      : input.recoverStartedBefore;
   const leased = await client.query(
     `update funding_operation_step_attempts
         set updated_at = $2
       where id = $1 and outcome in ('started', 'ambiguous') and updated_at <= $3`,
-    [row.attempt_id, input.now, input.recoverStartedBefore],
+    [row.attempt_id, input.now, recoveryCutoff],
   );
   if (leased.rowCount !== 1) return null;
   const parsed = normalizedActionSchema.safeParse(row.normalized_action);

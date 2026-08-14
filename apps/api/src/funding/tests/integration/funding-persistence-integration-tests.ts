@@ -2277,7 +2277,11 @@ async function testCompositePreparationAndRelayCommit(): Promise<void> {
           stepId: preparationStepId,
           attemptId: preparationAttempt.id,
           networkId: ASSET.networkId,
-          receipt: finalizedPreparationReceipt,
+          receipt: {
+            ...finalizedPreparationReceipt,
+            blockHash: hash("4"),
+            evidence: { confirmations: 3 },
+          },
           now: repeatedFinalizedAt,
         });
       assert.equal(
@@ -2289,7 +2293,7 @@ async function testCompositePreparationAndRelayCommit(): Promise<void> {
         repeatedFinalized.observedAt.getTime(),
         repeatedFinalizedAt.getTime(),
       );
-      assert.equal(repeatedFinalized.evidence.confirmations, 2);
+      assert.equal(repeatedFinalized.evidence.confirmations, 3);
       assert.equal(
         repeatedFinalized.evidence.allowanceExact,
         true,
@@ -2298,6 +2302,11 @@ async function testCompositePreparationAndRelayCommit(): Promise<void> {
       assert.equal(repeatedFinalized.evidence.allowanceRaw, "1000000");
       assert.equal(repeatedFinalized.evidence.allowanceBlock, "100");
       assert.equal(repeatedFinalized.evidence.allowanceBlockHash, hash("3"));
+      assert.equal(
+        repeatedFinalized.blockHash,
+        hash("4"),
+        "provider receipt identity refreshes must not erase profile evidence",
+      );
       const replayedPreparationStep = await replayClient.query<{
         state: string;
       }>(

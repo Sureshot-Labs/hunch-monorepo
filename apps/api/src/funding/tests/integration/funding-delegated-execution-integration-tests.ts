@@ -29,7 +29,10 @@ import type {
   PolymarketWrapExecutionConfiguration,
   RelayEvmExecutionConfiguration,
 } from "../../execution/delegated-funding-config.js";
-import { createRelayEvmDelegatedFundingProfile } from "../../execution/relay-evm-delegated-executor-profile.js";
+import {
+  createRelayEvmDelegatedFundingProfile,
+  RELAY_CLEANUP_CANONICAL_WATCH_MS,
+} from "../../execution/relay-evm-delegated-executor-profile.js";
 import { lockTelegramFundingLinkLifecycle } from "../../execution/telegram-funding-link-lifecycle-lock.js";
 import {
   POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
@@ -5518,7 +5521,9 @@ try {
     throw new Error("cleanup canonical watch rebroadcast unexpectedly");
   }).runBatch({
     limit: 20,
-    now: new Date(cleanupFinalizedAt.getTime() + 15 * 60_000 - 1),
+    now: new Date(
+      cleanupFinalizedAt.getTime() + RELAY_CLEANUP_CANONICAL_WATCH_MS - 1,
+    ),
   });
   assert.equal(beforeCleanupMaturity.claimed, 0);
   const beforeMaturityState = await pool.query<{
@@ -5579,7 +5584,9 @@ try {
           expectedVersion: version,
           expectedState: { status: "in_progress", stage },
           nextState: { status: "in_progress", stage: "source_action" },
-          now: new Date(cleanupFinalizedAt.getTime() + 15 * 60_000 - 3),
+          now: new Date(
+            cleanupFinalizedAt.getTime() + RELAY_CLEANUP_CANONICAL_WATCH_MS - 3,
+          ),
         },
       );
       version = sourceAction.version;
@@ -5594,7 +5601,9 @@ try {
           expectedVersion: version,
           expectedState: { status: "in_progress", stage },
           nextState: { status: "in_progress", stage: "source_observed" },
-          now: new Date(cleanupFinalizedAt.getTime() + 15 * 60_000 - 2),
+          now: new Date(
+            cleanupFinalizedAt.getTime() + RELAY_CLEANUP_CANONICAL_WATCH_MS - 2,
+          ),
         },
       );
       version = sourceObserved.version;
@@ -5606,14 +5615,18 @@ try {
       expectedState: { status: "in_progress", stage: "source_observed" },
       nextState: { status: "recovery_required", stage: "source_observed" },
       errorCode: "reconciliation_evidence_timeout",
-      now: new Date(cleanupFinalizedAt.getTime() + 15 * 60_000 - 1),
+      now: new Date(
+        cleanupFinalizedAt.getTime() + RELAY_CLEANUP_CANONICAL_WATCH_MS - 1,
+      ),
     });
   });
   const atCleanupMaturity = await relayExecutor([cleanupZero], () => {
     throw new Error("mature cleanup rebroadcast unexpectedly");
   }).runBatch({
     limit: 20,
-    now: new Date(cleanupFinalizedAt.getTime() + 15 * 60_000),
+    now: new Date(
+      cleanupFinalizedAt.getTime() + RELAY_CLEANUP_CANONICAL_WATCH_MS,
+    ),
   });
   assert.equal(atCleanupMaturity.claimed, 0);
   const matureState = await pool.query<{
@@ -5644,7 +5657,9 @@ try {
   });
   await assert.rejects(
     tx(pool, async (client) => {
-      const retryNow = new Date(cleanupFinalizedAt.getTime() + 15 * 60_000 + 1);
+      const retryNow = new Date(
+        cleanupFinalizedAt.getTime() + RELAY_CLEANUP_CANONICAL_WATCH_MS + 1,
+      );
       const detached = await client.query(
         `update funding_receive_receipts
             set status = 'observed',
@@ -5889,7 +5904,9 @@ try {
     },
   ).runBatch({
     limit: 20,
-    now: new Date(foreignCleanupFinalizedAt.getTime() + 15 * 60_000),
+    now: new Date(
+      foreignCleanupFinalizedAt.getTime() + RELAY_CLEANUP_CANONICAL_WATCH_MS,
+    ),
   });
   assert.equal(foreignCleanupMaturity.claimed, 0);
   const foreignCleanupState = await pool.query<{
