@@ -24,6 +24,8 @@ import {
   type ContentArticleCreateBody,
   type ContentArticleStatus,
   type ContentArticleUpdateBody,
+  contentEditorialGraphSchema,
+  type ContentEditorialGraph,
   type ContentEditorialStatus,
 } from "../schemas/content.js";
 import {
@@ -64,6 +66,7 @@ type DraftRow = {
   revision: number;
   schema_version: number;
   content_kind: ContentArticleKind;
+  editorial_graph: unknown;
   slug: string;
   title: string;
   excerpt: string;
@@ -101,6 +104,7 @@ type VersionRow = {
   kind: ContentVersionKind;
   schema_version: number;
   content_kind: ContentArticleKind;
+  editorial_graph: unknown;
   slug: string;
   title: string;
   excerpt: string;
@@ -159,6 +163,7 @@ export type ContentArticleDraft = {
   revision: number;
   schemaVersion: number;
   contentKind: ContentArticleKind;
+  editorialGraph: ContentEditorialGraph;
   slug: string;
   title: string;
   excerpt: string;
@@ -266,6 +271,7 @@ export type ResolvedContentAsset = {
 export type PublicContentArticle = PublicContentArticleSummary & {
   versionId: string;
   schemaVersion: number;
+  editorialGraph: ContentEditorialGraph;
   document: ContentDocument;
   heroImage: ContentImagePlacement | null;
   socialImage: ContentImagePlacement | null;
@@ -281,6 +287,7 @@ export type PreviewContentArticle = {
   revision: number;
   schemaVersion: number;
   contentKind: ContentArticleKind;
+  editorialGraph: ContentEditorialGraph;
   slug: string;
   title: string;
   excerpt: string;
@@ -312,6 +319,7 @@ export type ContentArticleMutationResult = {
 
 type NormalizedDraft = {
   contentKind: ContentArticleKind;
+  editorialGraph: ContentEditorialGraph;
   slug: string;
   title: string;
   excerpt: string;
@@ -331,6 +339,20 @@ const EMPTY_DOCUMENT: ContentDocument = {
   schemaVersion: CONTENT_DOCUMENT_SCHEMA_VERSION,
   blocks: [],
 };
+
+function primaryIntentForKind(contentKind: ContentArticleKind) {
+  return contentKind === "news" ? ("news" as const) : ("learn" as const);
+}
+
+function defaultEditorialGraph(
+  slug: string,
+  contentKind: ContentArticleKind,
+): ContentEditorialGraph {
+  return contentEditorialGraphSchema.parse({
+    primaryIntent: primaryIntentForKind(contentKind),
+    queryCluster: slug,
+  });
+}
 
 const ARTICLE_STATE_COLUMNS = `
   a.id,
@@ -356,6 +378,7 @@ const DRAFT_COLUMNS = `
   d.revision,
   d.schema_version,
   d.content_kind,
+  d.editorial_graph,
   d.slug,
   d.title,
   d.excerpt,
@@ -385,6 +408,7 @@ const DRAFT_SUMMARY_COLUMNS = `
   d.revision,
   d.schema_version,
   d.content_kind,
+  d.editorial_graph,
   d.slug,
   d.title,
   d.excerpt,
@@ -417,6 +441,7 @@ const VERSION_COLUMNS = `
   v.kind,
   v.schema_version,
   v.content_kind,
+  v.editorial_graph,
   v.slug,
   v.title,
   v.excerpt,
@@ -468,6 +493,7 @@ function snapshotFromRow(
   return {
     schemaVersion: row.schema_version,
     contentKind: row.content_kind,
+    editorialGraph: contentEditorialGraphSchema.parse(row.editorial_graph),
     slug: row.slug,
     title: row.title,
     excerpt: row.excerpt,
@@ -564,8 +590,11 @@ function articleSummary(article: ContentArticle): AdminContentArticleSummary {
 
 function normalizeCreate(body: ContentArticleCreateBody): NormalizedDraft {
   const parsed = contentArticleCreateBodySchema.parse(body);
+  const contentKind = parsed.contentKind ?? "guide";
   return {
-    contentKind: parsed.contentKind ?? "guide",
+    contentKind,
+    editorialGraph:
+      parsed.editorialGraph ?? defaultEditorialGraph(parsed.slug, contentKind),
     slug: parsed.slug,
     title: parsed.title,
     excerpt: parsed.excerpt ?? "",
@@ -587,9 +616,25 @@ function mergeDraft(
   update: ContentArticleUpdateBody,
 ): NormalizedDraft {
   const parsed = contentArticleUpdateBodySchema.parse(update);
+  const contentKind = parsed.contentKind ?? existing.contentKind;
+  const slug = parsed.slug ?? existing.slug;
+  const editorialGraph = parsed.editorialGraph
+    ? parsed.editorialGraph
+    : {
+        ...existing.editorialGraph,
+        primaryIntent:
+          parsed.contentKind && parsed.contentKind !== existing.contentKind
+            ? primaryIntentForKind(contentKind)
+            : existing.editorialGraph.primaryIntent,
+        queryCluster:
+          parsed.slug && existing.editorialGraph.queryCluster === existing.slug
+            ? slug
+            : existing.editorialGraph.queryCluster,
+      };
   return {
-    contentKind: parsed.contentKind ?? existing.contentKind,
-    slug: parsed.slug ?? existing.slug,
+    contentKind,
+    editorialGraph,
+    slug,
     title: parsed.title ?? existing.title,
     excerpt: parsed.excerpt ?? existing.excerpt,
     document: parsed.document ?? existing.document,
@@ -1063,6 +1108,74 @@ async function validateRelatedArticlesForPublication(
   }
 }
 
+async function validateEditorialGraphForPublication(
+  db: DbQuery,
+  articleId: string,
+  draft: ContentArticleDraft,
+): Promise<void> {
+  const editorialGraph =
+    draft.editorialGraph ??
+    defaultEditorialGraph(draft.slug, draft.contentKind);
+  const { parentHubId, primaryIntent, queryCluster } = editorialGraph;
+  if (parentHubId === articleId) {
+    throw new ContentError(
+      "content_article_not_publishable",
+      "An article cannot be its own parent hub",
+      422,
+    );
+  }
+  if (parentHubId) {
+    const { rows } = await db.query<{ id: string }>(
+      `
+        select id
+        from content_articles
+        where id = $1
+          and published_version_id is not null
+          and archived_at is null
+        limit 1
+      `,
+      [parentHubId],
+    );
+    if (!rows[0]) {
+      throw new ContentError(
+        "content_article_not_publishable",
+        "The parent hub must exist and be published",
+        422,
+      );
+    }
+  }
+  if (!draft.seo.robots.index || !queryCluster) return;
+  await db.query("select pg_advisory_xact_lock(hashtextextended($1, 0))", [
+    `content-editorial-owner:${primaryIntent}:${queryCluster}`,
+  ]);
+  const { rows } = await db.query<{ slug: string }>(
+    `
+      select version.slug
+      from content_articles article
+      join content_article_versions version
+        on version.id in (
+          article.published_version_id,
+          article.scheduled_version_id
+        )
+      where article.id <> $1
+        and article.archived_at is null
+        and version.editorial_graph->>'primaryIntent' = $2
+        and version.editorial_graph->>'queryCluster' = $3
+        and coalesce(version.seo->'robots'->>'index', 'true')::boolean
+      limit 1
+    `,
+    [articleId, primaryIntent, queryCluster],
+  );
+  if (rows[0]) {
+    throw new ContentError(
+      "content_article_not_publishable",
+      "Another indexable article already owns this search intent and query cluster",
+      422,
+      [`/journal/${rows[0].slug}`],
+    );
+  }
+}
+
 function draftAssetReferences(draft: ContentArticleDraft | NormalizedDraft) {
   return collectContentAssetReferences({
     document: draft.document,
@@ -1075,9 +1188,16 @@ function draftAssetReferences(draft: ContentArticleDraft | NormalizedDraft) {
 
 function publishabilityIssues(draft: ContentArticleDraft): string[] {
   const issues: string[] = [];
+  const editorialGraph =
+    draft.editorialGraph ??
+    defaultEditorialGraph(draft.slug, draft.contentKind);
   if (!draft.title.trim()) issues.push("title is required");
   if (!draft.excerpt.trim()) issues.push("excerpt is required");
   if (!draft.listCover) issues.push("list cover is required");
+  if (draft.seo.robots.index && !editorialGraph.queryCluster)
+    issues.push("indexable articles require a query cluster");
+  if (draft.contentKind === "news" && editorialGraph.primaryIntent !== "news")
+    issues.push("news articles require the news primary intent");
   if (
     draft.contentKind === "news" &&
     draft.seo.robots.index &&
@@ -1100,6 +1220,7 @@ function publishabilityIssues(draft: ContentArticleDraft): string[] {
     issues.push("news articles require a dedicated social image");
   if (
     draft.contentKind === "news" &&
+    editorialGraph.sources.length === 0 &&
     !draft.document.blocks.some(
       (block) => block.type === "citation" || block.type === "references",
     )
@@ -1138,21 +1259,22 @@ async function insertDraft(
   await db.query(
     `
       insert into content_article_drafts (
-        article_id, schema_version, content_kind, slug, title, excerpt, document,
-        list_cover, hero_image, social_image, seo, author, category, tags,
-        tag_slugs, locale, featured, plain_text, word_count,
+        article_id, schema_version, content_kind, editorial_graph, slug, title,
+        excerpt, document, list_cover, hero_image, social_image, seo, author,
+        category, tags, tag_slugs, locale, featured, plain_text, word_count,
         reading_time_minutes, toc, content_hash, updated_by_admin_id
       ) values (
-        $1, $2, $3, $4, $5, $6, $7::jsonb,
-        $8::jsonb, $9::jsonb, $10::jsonb, $11::jsonb, $12::jsonb,
-        $13::jsonb, $14::jsonb, $15, $16, $17, $18, $19, $20,
-        $21::jsonb, $22, $23
+        $1, $2, $3, $4::jsonb, $5, $6, $7, $8::jsonb,
+        $9::jsonb, $10::jsonb, $11::jsonb, $12::jsonb, $13::jsonb,
+        $14::jsonb, $15::jsonb, $16, $17, $18, $19, $20, $21,
+        $22::jsonb, $23, $24
       )
     `,
     [
       articleId,
       draft.document.schemaVersion,
       draft.contentKind,
+      json(draft.editorialGraph),
       draft.slug,
       draft.title,
       draft.excerpt,
@@ -1249,32 +1371,34 @@ export async function updateContentArticle(
             revision = revision + 1,
             schema_version = $1,
             content_kind = $2,
-            slug = $3,
-            title = $4,
-            excerpt = $5,
-            document = $6::jsonb,
-            list_cover = $7::jsonb,
-            hero_image = $8::jsonb,
-            social_image = $9::jsonb,
-            seo = $10::jsonb,
-            author = $11::jsonb,
-            category = $12::jsonb,
-            tags = $13::jsonb,
-            tag_slugs = $14,
-            locale = $15,
-            featured = $16,
-            plain_text = $17,
-            word_count = $18,
-            reading_time_minutes = $19,
-            toc = $20::jsonb,
-            content_hash = $21,
-            updated_by_admin_id = $22
-          where article_id = $23 and revision = $24
+            editorial_graph = $3::jsonb,
+            slug = $4,
+            title = $5,
+            excerpt = $6,
+            document = $7::jsonb,
+            list_cover = $8::jsonb,
+            hero_image = $9::jsonb,
+            social_image = $10::jsonb,
+            seo = $11::jsonb,
+            author = $12::jsonb,
+            category = $13::jsonb,
+            tags = $14::jsonb,
+            tag_slugs = $15,
+            locale = $16,
+            featured = $17,
+            plain_text = $18,
+            word_count = $19,
+            reading_time_minutes = $20,
+            toc = $21::jsonb,
+            content_hash = $22,
+            updated_by_admin_id = $23
+          where article_id = $24 and revision = $25
           returning revision
         `,
         [
           next.document.schemaVersion,
           next.contentKind,
+          json(next.editorialGraph),
           next.slug,
           next.title,
           next.excerpt,
@@ -1465,14 +1589,15 @@ async function insertVersion(
     `
       insert into content_article_versions (
         article_id, version_number, source_draft_revision, kind,
-        schema_version, content_kind, slug, title, excerpt, document, list_cover,
-        hero_image, social_image, seo, author, category, tags, tag_slugs,
-        locale, featured, plain_text, word_count, reading_time_minutes,
-        toc, content_hash, created_by_admin_id
+        schema_version, content_kind, editorial_graph, slug, title, excerpt,
+        document, list_cover, hero_image, social_image, seo, author, category,
+        tags, tag_slugs, locale, featured, plain_text, word_count,
+        reading_time_minutes, toc, content_hash, created_by_admin_id
       ) values (
-        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11::jsonb,
+        $1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11::jsonb,
         $12::jsonb, $13::jsonb, $14::jsonb, $15::jsonb, $16::jsonb,
-        $17::jsonb, $18, $19, $20, $21, $22, $23, $24::jsonb, $25, $26
+        $17::jsonb, $18::jsonb, $19, $20, $21, $22, $23, $24,
+        $25::jsonb, $26, $27
       )
       returning
         id, article_id, version_number, source_draft_revision, kind,
@@ -1486,6 +1611,7 @@ async function insertVersion(
       kind,
       draft.schemaVersion,
       draft.contentKind,
+      json(draft.editorialGraph),
       draft.slug,
       draft.title,
       draft.excerpt,
@@ -1683,6 +1809,7 @@ export async function publishContentArticle(
       inputs.id,
       existing.draft.document,
     );
+    await validateEditorialGraphForPublication(db, inputs.id, existing.draft);
     const requestedAt = inputs.publishAt ?? new Date();
     const scheduled = requestedAt.getTime() > Date.now() + 5_000;
     if (
@@ -2004,6 +2131,7 @@ export async function transitionContentArticleReview(
         inputs.id,
         article.draft.document,
       );
+      await validateEditorialGraphForPublication(db, inputs.id, article.draft);
     }
     await db.query(
       `
@@ -2203,32 +2331,34 @@ export async function restoreContentArticleVersion(
           revision = revision + 1,
           schema_version = $2,
           content_kind = $3,
-          slug = $4,
-          title = $5,
-          excerpt = $6,
-          document = $7::jsonb,
-          list_cover = $8::jsonb,
-          hero_image = $9::jsonb,
-          social_image = $10::jsonb,
-          seo = $11::jsonb,
-          author = $12::jsonb,
-          category = $13::jsonb,
-          tags = $14::jsonb,
-          tag_slugs = $15,
-          locale = $16,
-          featured = $17,
-          plain_text = $18,
-          word_count = $19,
-          reading_time_minutes = $20,
-          toc = $21::jsonb,
-          content_hash = $22,
-          updated_by_admin_id = $23
-        where article_id = $1 and revision = $24
+          editorial_graph = $4::jsonb,
+          slug = $5,
+          title = $6,
+          excerpt = $7,
+          document = $8::jsonb,
+          list_cover = $9::jsonb,
+          hero_image = $10::jsonb,
+          social_image = $11::jsonb,
+          seo = $12::jsonb,
+          author = $13::jsonb,
+          category = $14::jsonb,
+          tags = $15::jsonb,
+          tag_slugs = $16,
+          locale = $17,
+          featured = $18,
+          plain_text = $19,
+          word_count = $20,
+          reading_time_minutes = $21,
+          toc = $22::jsonb,
+          content_hash = $23,
+          updated_by_admin_id = $24
+        where article_id = $1 and revision = $25
       `,
       [
         inputs.id,
         snapshot.schemaVersion,
         snapshot.contentKind,
+        json(snapshot.editorialGraph),
         snapshot.slug,
         snapshot.title,
         snapshot.excerpt,
@@ -2335,6 +2465,7 @@ export async function getPreviewContentArticle(
     revision: draft.revision,
     schemaVersion: draft.schemaVersion,
     contentKind: draft.contentKind,
+    editorialGraph: draft.editorialGraph,
     slug: draft.slug,
     title: draft.title,
     excerpt: draft.excerpt,
@@ -2543,6 +2674,7 @@ type PublicDetailRow = PublicSummaryRow & {
   route_kind: "current" | "redirect";
   current_slug: string;
   schema_version: number;
+  editorial_graph: unknown;
   document: unknown;
   hero_image: unknown;
   social_image: unknown;
@@ -2581,6 +2713,7 @@ export async function getPublicContentArticle(
         r.kind as route_kind,
         a.published_slug as current_slug,
         v.schema_version,
+        case when r.kind = 'current' then v.editorial_graph end as editorial_graph,
         case when r.kind = 'current' then v.document end as document,
         case when r.kind = 'current' then v.hero_image end as hero_image,
         case when r.kind = 'current' then v.social_image end as social_image,
@@ -2637,6 +2770,7 @@ export async function getPublicContentArticle(
       ...summary,
       versionId: row.version_id,
       schemaVersion: row.schema_version,
+      editorialGraph: contentEditorialGraphSchema.parse(row.editorial_graph),
       document,
       heroImage,
       socialImage,

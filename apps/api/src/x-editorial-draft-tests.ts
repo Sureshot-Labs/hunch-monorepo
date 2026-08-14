@@ -1040,6 +1040,36 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.ok(latestLive.issues.includes("grammar_error"));
       assert.ok(latestLive.issues.includes("analyst_jargon"));
 
+      const latestDeployedPostText =
+        "@eCash is still holding $11.1K that the US will not announce an end to the Iranian blockade by August 31.\n\nNO has moved from 64.5¢ to 71.5¢ since the prior signal. The position is down $78, so this is follow-through in price more than PnL.\n\n@eCash is up $73.7K over the last 30 days and has beaten market prices by 27 points across 13 resolved bets.";
+      const latestDeployed = validateXEditorialModelOutput({
+        config,
+        output: {
+          version: 1,
+          status: "ready",
+          marketId: "iran-blockade-ecash-followthrough",
+          selectedSide: "NO",
+          postText: latestDeployedPostText,
+          formatting: [
+            {
+              style: "bold",
+              text: "NO has moved from 64.5¢ to 71.5¢",
+            },
+            {
+              style: "bold",
+              text: "up $73.7K over the last 30 days",
+            },
+          ],
+          storyFamily: "followthrough",
+          usedFactIds: ["market", "original_signal", "followthrough"],
+          safetyFlags: [],
+        },
+        source: followthroughSource,
+      });
+      assert.ok(latestDeployed.issues.includes("grammar_error"));
+      assert.ok(latestDeployed.issues.includes("analyst_jargon"));
+      assert.ok(latestDeployed.issues.includes("named_actor_hook_not_bold"));
+
       const goodPostText =
         "@eCash is still holding $11.1K against an August 31 end to the Iranian blockade.\n\nNO moved from 64.5¢ to 71.5¢ after the original signal. The position is down $78.\n\nOver the last 30 days, @eCash is up $73.7K and has beaten market prices by 27 points across 13 resolved bets.";
       const good = validateXEditorialModelOutput({

@@ -1,7 +1,7 @@
 import { createPgPool, type Pool } from "@hunch/infra";
 
 export const CONTENT_SCHEMA_MIGRATION =
-  "0212_content_editorial_seo_foundation.sql" as const;
+  "0213_content_editorial_graph.sql" as const;
 
 export type ContentPoolOptions = {
   connectionString: string;
@@ -57,7 +57,7 @@ export async function checkContentDatabaseReady(
             and relation.relname = any ($2::text[])
         ) as schema_objects_ready,
         (
-          select count(*) = 18
+          select count(*) = 20
           from pg_constraint constraint_record
           join pg_namespace namespace
             on namespace.oid = constraint_record.connamespace
@@ -98,6 +98,8 @@ export async function checkContentDatabaseReady(
         "content_audit_metadata_size_check",
         "content_article_drafts_content_kind_check",
         "content_article_versions_content_kind_check",
+        "content_article_drafts_editorial_graph_check",
+        "content_article_versions_editorial_graph_check",
       ],
     ],
   );

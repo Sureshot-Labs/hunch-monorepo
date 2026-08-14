@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 
 export const X_EDITORIAL_CONTENT_PROFILE = "x_editorial_draft_v1" as const;
-export const X_EDITORIAL_PROMPT_VERSION = "x_editorial_prompt_v13" as const;
+export const X_EDITORIAL_PROMPT_VERSION = "x_editorial_prompt_v14" as const;
 
 export type XEditorialComposerFailureCode =
   | "missing_content"
@@ -303,11 +303,12 @@ const FORBIDDEN_COPY_PATTERNS: Array<{
   {
     code: "analyst_jargon",
     pattern:
-      /\b(?:credentialed (?:fade|trade)|credibility check|making that lean concrete|worth respecting|last (?:30|thirty) days (?:are|were) not quiet|keep paying favorite prices|the price is already heavy|serious holder|small red on the position|named holder|recent record|the move is no longer subtle|price followed the thesis|(?:the )?holder stayed with it)\b/i,
+      /\b(?:credentialed (?:fade|trade)|credibility check|making that lean concrete|worth respecting|last (?:30|thirty) days (?:are|were) not quiet|keep paying favorite prices|the price is already heavy|serious holder|small red on the position|named holder|recent record|the move is no longer subtle|price followed the thesis|(?:the )?holder stayed with it|follow[- ]through in price (?:more|rather) than (?:pnl|profit))\b/i,
   },
   {
     code: "grammar_error",
-    pattern: /\b(?:has beat|this is the same trader up)\b/i,
+    pattern:
+      /\b(?:has beat|this is the same trader up|(?:holding|holds)\s+\$[\d.,]+[KMB]?\s+that)\b/i,
   },
   {
     code: "raw_market_title",
@@ -482,7 +483,7 @@ function buildEditorialBrief(source: XEditorialDraftSource): {
   if (source.kind === "followthrough_stats") {
     return {
       actionClaims:
-        "Name the selected side in every price move. When the source supplies an @handle, the first paragraph must contain that exact handle and keep the trader as the protagonist instead of opening with an abstract YES/NO price sentence. Separate wallet behavior since the signal from lifetime performance and from current position state. If wallet behavior is mixed, say that precisely rather than implying that wallets did not move.",
+        "Name the selected side in every price move. When the source supplies an @handle, the first paragraph and one bold span from that paragraph must contain the exact handle, keeping the trader as both the editorial and visual protagonist instead of opening with an abstract YES/NO price sentence. Separate wallet behavior since the signal from lifetime performance and from current position state. If wallet behavior is mixed, say that precisely rather than implying that wallets did not move.",
       listAndEmoji:
         "When three or more nonzero wallet-activity categories are mentioned, put them on separate → lines. With two categories, use either a compact sentence or → lines. Use no emoji by default; one topical emoji is allowed when it materially improves the post.",
       preferredLength: "Three to five compact paragraphs.",
@@ -530,9 +531,9 @@ export function buildXEditorialDraftSystemPrompt(input: {
     "Avoid investment-memo and AI-editor phrases such as 'credentialed fade', 'credibility check', 'base case', 'making the lean concrete', 'worth respecting', 'the last 30 days are not quiet', 'the price is already heavy', 'serious holder', or 'keep paying favorite prices'. Use ordinary language a real market blogger would use.",
     "Do not mechanically repeat 'The market already...' or 'This is X, not Y'. Vary the structure, transitions, and ending as well as the opening.",
     "Do not repeat the same observation in the same post. In particular, do not say that a trader is 'still there' twice or end by paraphrasing the preceding sentence.",
-    "In follow-through copy with a named trader, current position, and track record, keep that trader as the protagonist. If the supplied facts contain an @handle, the first paragraph must contain that exact @handle. Do not bury the trader in the second paragraph behind any market-price hook, regardless of how that hook is phrased.",
+    "In follow-through copy with a named trader, current position, and track record, keep that trader as the protagonist. If the supplied facts contain an @handle, the first paragraph must contain that exact @handle, and one bold formatting span from that first paragraph must include the handle. Do not bury the trader or the visual emphasis behind any market-price hook, regardless of how that hook is phrased.",
     "State the natural proposition once. Do not write 'on NO — the side betting...', 'holding $11.1K on no announcement', or any other mechanical YES/NO shorthand. State the trader's bet in natural English, then refer to the position, the price, or the trader directly.",
-    "Use plain, grammatical market language. Write '@handle is up $73.7K', not 'This is the same trader up $73.7K'. Write 'the position is down $78', not 'small red on the position'. Never describe someone as 'the named holder with the recent record', and do not manufacture generic drama such as 'the move is no longer subtle', 'Price followed the thesis', or 'the holder stayed with it'.",
+    "Use plain, grammatical market language. Write '@handle is betting $11.1K that ...' or '@handle is holding $11.1K against ...', never '@handle is holding $11.1K that ...'. Write '@handle is up $73.7K', not 'This is the same trader up $73.7K'. Write 'the position is down $78', not 'small red on the position' or 'follow-through in price more than PnL'. Never describe someone as 'the named holder with the recent record', and do not manufacture generic drama such as 'the move is no longer subtle', 'Price followed the thesis', or 'the holder stayed with it'.",
     "Never assume an acronym or outcome label is self-explanatory. Pair it with the supplied event or market context. Translate binary contract mechanics into the natural outcome; do not write 'holding the NO side — meaning NIP to win' when the supplied label or proposition lets you say directly that the trader is holding NIP to win.",
     "No Markdown markers inside postText, headings, pipe-delimited stat tables, URLs, links, hashtags, affiliate language, product CTA, or generic engagement bait.",
     "Select one to three exact, non-overlapping snippets for intentional Telegram/X formatting. Usually bold the hook or strongest result; use italic only for a genuinely useful interpretive line. Return those snippets in formatting and keep postText itself plain.",
@@ -727,6 +728,7 @@ function sourceFactText(input: {
 }
 
 function findUnsupportedSemanticClaims(input: {
+  formatting: XEditorialFormattingSpan[];
   postText: string;
   source: XEditorialDraftSource;
 }): string[] {
@@ -750,8 +752,8 @@ function findUnsupportedSemanticClaims(input: {
         ),
       ].map((match) => match[0].toLowerCase()),
     );
-    const firstParagraph =
-      input.postText.split(/\n\s*\n/, 1)[0]?.toLowerCase() ?? "";
+    const firstParagraphText = input.postText.split(/\n\s*\n/, 1)[0] ?? "";
+    const firstParagraph = firstParagraphText.toLowerCase();
     const firstParagraphActors = new Set(
       [...firstParagraph.matchAll(NAMED_ACTOR_PATTERN)].map(
         (match) => match[0],
@@ -762,6 +764,17 @@ function findUnsupportedSemanticClaims(input: {
       ![...sourceActors].some((actor) => firstParagraphActors.has(actor))
     ) {
       issues.push("actor_buried_in_followthrough");
+    }
+    const hasBoldActorHook = input.formatting.some(
+      (span) =>
+        span.style === "bold" &&
+        firstParagraphText.includes(span.text) &&
+        [...span.text.toLowerCase().matchAll(NAMED_ACTOR_PATTERN)].some(
+          (match) => sourceActors.has(match[0]),
+        ),
+    );
+    if (sourceActors.size > 0 && !hasBoldActorHook) {
+      issues.push("named_actor_hook_not_bold");
     }
   }
   if ([...input.postText.matchAll(/\bstill there\b/gi)].length >= 2) {
@@ -869,6 +882,7 @@ export function validateXEditorialModelOutput(input: {
   );
   issues.push(
     ...findUnsupportedSemanticClaims({
+      formatting: input.output.formatting,
       postText,
       source: input.source,
     }),

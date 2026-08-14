@@ -32,6 +32,91 @@ export const contentArticleKindSchema = z.enum([
   "update",
 ]);
 
+export const contentPrimaryIntentSchema = z.enum([
+  "learn",
+  "compare",
+  "navigate",
+  "trade",
+  "news",
+]);
+
+export const contentEditorialReferenceSchema = z
+  .object({
+    id: z
+      .string()
+      .trim()
+      .toLowerCase()
+      .min(1)
+      .max(160)
+      .regex(/^[a-z0-9][a-z0-9._:-]*$/),
+    label: z.string().trim().min(1).max(200),
+  })
+  .strict();
+
+const contentQueryClusterSchema = z
+  .string()
+  .trim()
+  .toLowerCase()
+  .min(1)
+  .max(160)
+  .regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/);
+
+export const contentSourceSchema = z
+  .object({
+    checkedAt: z.string().datetime(),
+    publishedAt: z.string().datetime().nullable(),
+    publisher: z.string().trim().min(1).max(200),
+    sourceType: z.enum([
+      "primary",
+      "official",
+      "research",
+      "reporting",
+      "data",
+    ]),
+    title: z.string().trim().min(1).max(300),
+    url: z
+      .string()
+      .trim()
+      .url()
+      .max(2_048)
+      .refine((value) => new URL(value).protocol === "https:", {
+        message: "Content sources must use HTTPS",
+      }),
+  })
+  .strict();
+
+function uniqueBy<T>(values: T[], key: (value: T) => string): T[] {
+  const seen = new Set<string>();
+  return values.filter((value) => {
+    const candidate = key(value);
+    if (seen.has(candidate)) return false;
+    seen.add(candidate);
+    return true;
+  });
+}
+
+const contentEditorialReferencesSchema = z
+  .array(contentEditorialReferenceSchema)
+  .max(30)
+  .transform((references) => uniqueBy(references, ({ id }) => id));
+
+export const contentEditorialGraphSchema = z
+  .object({
+    entities: contentEditorialReferencesSchema.default([]),
+    markets: contentEditorialReferencesSchema.default([]),
+    parentHubId: z.string().uuid().nullable().default(null),
+    primaryIntent: contentPrimaryIntentSchema.default("learn"),
+    queryCluster: contentQueryClusterSchema.nullable().default(null),
+    sources: z
+      .array(contentSourceSchema)
+      .max(30)
+      .transform((sources) => uniqueBy(sources, ({ url }) => url))
+      .default([]),
+    topics: contentEditorialReferencesSchema.default([]),
+    venues: contentEditorialReferencesSchema.default([]),
+  })
+  .strict();
+
 export const contentArticleSlugSchema = z
   .string()
   .trim()
@@ -54,6 +139,7 @@ const contentTagsSchema = z
 
 const editableFields = {
   contentKind: contentArticleKindSchema,
+  editorialGraph: contentEditorialGraphSchema,
   slug: contentArticleSlugSchema,
   title: z.string().trim().min(1).max(160),
   excerpt: z.string().trim().max(500),
@@ -79,6 +165,7 @@ export const contentArticleCreateBodySchema = z
     slug: editableFields.slug,
     title: editableFields.title,
     contentKind: editableFields.contentKind.optional(),
+    editorialGraph: editableFields.editorialGraph.optional(),
     excerpt: editableFields.excerpt.optional(),
     document: editableFields.document.optional(),
     listCover: editableFields.listCover.optional(),
@@ -97,6 +184,7 @@ export const contentArticleUpdateBodySchema = z
   .object({
     expectedRevision: z.number().int().positive(),
     contentKind: editableFields.contentKind.optional(),
+    editorialGraph: editableFields.editorialGraph.optional(),
     slug: editableFields.slug.optional(),
     title: editableFields.title.optional(),
     excerpt: editableFields.excerpt.optional(),
@@ -271,6 +359,12 @@ export type ContentArticleUpdateBody = z.infer<
 >;
 export type ContentArticleStatus = z.infer<typeof contentArticleStatusSchema>;
 export type ContentArticleKind = z.infer<typeof contentArticleKindSchema>;
+export type ContentEditorialGraph = z.infer<typeof contentEditorialGraphSchema>;
+export type ContentEditorialReference = z.infer<
+  typeof contentEditorialReferenceSchema
+>;
+export type ContentPrimaryIntent = z.infer<typeof contentPrimaryIntentSchema>;
+export type ContentSource = z.infer<typeof contentSourceSchema>;
 export type ContentEditorialStatus = z.infer<
   typeof contentEditorialStatusSchema
 >;
