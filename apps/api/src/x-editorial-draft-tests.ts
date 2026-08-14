@@ -249,6 +249,10 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.match(prompt, /at least three of joined, added, trimmed, exited/i);
       assert.match(prompt, /has beaten market prices by 14 points/i);
       assert.match(prompt, /ending in 'by\.\.\.\?'/i);
+      assert.match(
+        prompt,
+        /Non-temporal idioms such as 'not just' are allowed/i,
+      );
       assert.match(prompt, /keeps paying/i);
       assert.match(prompt, /recentDraftsToAvoidImitating/i);
       assert.match(prompt, /1000 visible characters/i);
@@ -948,6 +952,32 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       });
       assert.ok(unsupported.issues.includes("unsupported_trade_action"));
       assert.ok(unsupported.issues.includes("unsupported_recency"));
+
+      const nonTemporalJust = validateXEditorialModelOutput({
+        config,
+        output: {
+          version: 1,
+          status: "ready",
+          marketId: "market-1",
+          selectedSide: "YES",
+          postText:
+            "This is not just a large position. The trader is still holding $56.4K on Spain.",
+          formatting: [
+            {
+              style: "bold",
+              text: "This is not just a large position.",
+            },
+          ],
+          storyFamily: "trader_profile",
+          usedFactIds: ["market", "actor"],
+          safetyFlags: [],
+        },
+        source,
+      });
+      assert.equal(
+        nonTemporalJust.issues.includes("unsupported_recency"),
+        false,
+      );
 
       const actionSource: XEditorialDraftSource = {
         ...source,

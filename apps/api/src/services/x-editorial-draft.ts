@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 
 export const X_EDITORIAL_CONTENT_PROFILE = "x_editorial_draft_v1" as const;
-export const X_EDITORIAL_PROMPT_VERSION = "x_editorial_prompt_v10" as const;
+export const X_EDITORIAL_PROMPT_VERSION = "x_editorial_prompt_v11" as const;
 
 export type XEditorialComposerFailureCode =
   | "missing_content"
@@ -350,7 +350,7 @@ const UNSUPPORTED_POSITION_ACTION_PATTERN =
   /\b(?:bought|buying|buys|added|adding|adds|loaded|loading|loads|dropped|dropping|drops|entry|entries|entered|entering|opened (?:a|the|this) (?:new )?(?:bet|position|trade)|doubled? down|put(?:ting)? \$|(?:keeps?|continues?) (?:buying|adding|loading|paying)|paying (?:favorite|current|market) prices?)\b/i;
 
 const UNSUPPORTED_RECENCY_PATTERN =
-  /\b(?:just|minutes? ago|hours? ago|today|this morning|tonight)\b/i;
+  /\b(?:(?:just|recently|newly)\s+(?:added|bet|bought|built|changed|dropped|earned|entered|exited|joined|loaded|lost|made|moved|opened|placed|put|shifted|sold|took|trimmed|wagered|won)|just\s+now|minutes?\s+ago|hours?\s+ago|today|this\s+morning|tonight)\b/i;
 
 const TOPICAL_EMOJI_PATTERN =
   /(?:\p{Extended_Pictographic}|\p{Regional_Indicator}{2})/gu;
@@ -513,6 +513,7 @@ export function buildXEditorialDraftSystemPrompt(input: {
     "Never copy a truncated or placeholder market title such as one ending in 'by...?'. Reconstruct a natural proposition from the canonical market question, predicate, subject, selected side, and deadline. For a price move, name the side that moved instead of opening with an abstract construction such as 'NO on [market] has moved'.",
     "Write clean idiomatic English. A supplied credential such as 'Beat market prices by 14 points' becomes 'has beaten market prices by 14 points', never 'has beat'.",
     "A position snapshot proves only that the position is currently held. It does not prove when, where, or how it was entered, or that the trader is still buying. Never turn holding into bought, added, loaded, dropped, entered, doubled down, or keeps paying unless a supplied fact explicitly proves that action. Current price alone never supports 'cheap entry', 'expensive entry', or any other entry-price claim.",
+    "Timing words are factual claims. Do not write 'today', 'tonight', 'just bought', 'just moved', 'minutes ago', or similar recency unless a supplied fact explicitly supports that timing. Non-temporal idioms such as 'not just' are allowed, but prefer direct wording when possible.",
     "Do not claim insider access, coordination, private information, causation, certainty, an AI bot, or a cheat code.",
     "A light first-person editorial voice is allowed for a fact-grounded observation or opinion, such as 'I found', 'I am watching', or 'I think'. Never invent a personal trade, profit, prediction record, conversation, private source, or firsthand access.",
     "Do not expose wallet addresses, internal labels, evidence IDs, raw schema names, or analytics jargon.",
