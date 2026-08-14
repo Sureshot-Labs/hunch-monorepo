@@ -161,7 +161,10 @@ export async function loadFundingAccountValueFacts(
             sum(raw_amount::numeric)::text as raw_amount,
             max(coalesce(finalized_at, observed_at)) as observed_at
           from funding_observations
-          where kind in ('source_debit', 'source_credit')
+          -- A source credit only proves that funds reached a wallet controlled
+          -- by the user. They remain wallet cash until a finalized debit
+          -- proves that the provider transfer actually left that wallet.
+          where kind = 'source_debit'
             and canonical
             and finality_status = 'finalized'
           group by operation_id, segment_id

@@ -16,6 +16,7 @@ import {
 } from "./services/telegram-funding-buy-continuation.js";
 import {
   captureTelegramBotTradingCallback,
+  changeTelegramFundingBuyContinuationAmount,
   createTelegramFundingBuyContinuationDecorator,
   resumeTelegramFundingBuyContinuation,
   telegramBotTradingTestHooks,
@@ -894,6 +895,50 @@ try {
       venue: "polymarket" as const,
     }),
   } as ApiBotTradingExecutor;
+  const fundingAmountSelection =
+    await changeTelegramFundingBuyContinuationAmount({
+      appBaseUrl: "https://app.hunch.trade",
+      chatId: telegramUserId,
+      db: pool,
+      telegramMessageId: 101,
+      telegramUserId,
+      token: issued[0]?.token ?? "",
+      signerInspector: async () => ({ state: "ready" }) as never,
+      trading: {
+        ...partialTrading,
+        getReadiness: trading.getReadiness,
+        quote: async (input: Parameters<ApiBotTradingExecutor["quote"]>[0]) => {
+          const amountUsd = Number(input.intent.amount.value);
+          return {
+            action: "BUY" as const,
+            amount: input.intent.amount,
+            currentPrice: 0.45,
+            estimatedNotionalUsd: amountUsd,
+            estimatedShares: amountUsd / 0.45,
+            expiresAt: new Date(Date.now() + 60_000),
+            fees: {},
+            maxSpendUsd: amountUsd,
+            meetsVenueMinimum: true,
+            minReceiveShares: amountUsd / 0.5,
+            price: 0.5,
+            target: input.intent.target,
+            venue: "polymarket" as const,
+          };
+        },
+      } as ApiBotTradingExecutor,
+    });
+  const fundingAmountButtons =
+    fundingAmountSelection.reply_markup?.inline_keyboard.flat() ?? [];
+  assert.equal(
+    fundingAmountButtons.some((button) => button.text.includes("· YES")),
+    true,
+    `a terminal funding card can rebuild fresh amount choices for its original side: ${JSON.stringify(fundingAmountSelection)}`,
+  );
+  assert.equal(
+    fundingAmountButtons.some((button) => button.text.includes("· NO")),
+    false,
+    "funding amount selection preserves the side chosen before funding",
+  );
   const decoratePartialFunding = createTelegramFundingBuyContinuationDecorator({
     pool,
     trading: partialTrading,
@@ -1037,6 +1082,13 @@ try {
     true,
     "durable ready evidence must expose Review Buy while live venue readiness catches up",
   );
+  assert.equal(
+    partialFundingMessage.reply_markup?.inline_keyboard
+      .flat()
+      .some((button) => button.text.includes("Change amount")),
+    true,
+    "the terminal funding card must allow amount changes without discarding ready funds",
+  );
   const resumeInput = {
     appBaseUrl: "https://app.hunch.trade",
     chatId: telegramUserId,
@@ -1130,6 +1182,15 @@ try {
     `explicit Review must reach the ordinary confirmation surface: ${JSON.stringify(
       resumed.map((message) => message.text),
     )}`,
+  );
+  assert.equal(
+    resumed.every((message) =>
+      message.reply_markup?.inline_keyboard.some((row) =>
+        row.some((button) => button.text.includes("Change amount")),
+      ),
+    ),
+    true,
+    "ordinary Buy confirmation keeps a direct path back to amount selection",
   );
   assert.ok(
     resumeQuoteCalls >= 2,

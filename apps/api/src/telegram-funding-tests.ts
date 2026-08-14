@@ -24,6 +24,7 @@ import {
   type TelegramFundingProgressProjection,
 } from "./services/telegram-funding-contracts.js";
 import {
+  buildTelegramFundingChangeBuyAmountButton,
   buildTelegramFundingReviewBuyButton,
   resolveTelegramFundingBuyContinuationAdapter,
   resolveTelegramFundingBuyContinuationCapability,
@@ -1543,6 +1544,25 @@ assert.deepEqual(buildTelegramFundingReviewBuyButton({ continuationToken }), {
   callback_data: reviewBuyCallback,
   text: "Review Buy",
 });
+const changeBuyAmountCallback = telegramFundingCallbackData({
+  continuationToken,
+  kind: "change_buy_amount",
+});
+assert.ok(Buffer.byteLength(changeBuyAmountCallback, "utf8") <= 64);
+assert.deepEqual(
+  parseTelegramFundingCallbackRoute(changeBuyAmountCallback.slice(6)),
+  {
+    kind: "change_buy_amount",
+    continuationToken,
+  },
+);
+assert.deepEqual(
+  buildTelegramFundingChangeBuyAmountButton({ continuationToken }),
+  {
+    callback_data: changeBuyAmountCallback,
+    text: "Change amount",
+  },
+);
 assert.deepEqual(
   resolveTelegramFundingBuyContinuationCapability({
     activeReturnAttached: true,

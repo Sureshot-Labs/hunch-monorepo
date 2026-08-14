@@ -124,6 +124,7 @@ import {
   type TelegramBotTradeInputContext,
 } from "./telegram-bot-trade-input-context.js";
 import {
+  buildTelegramFundingChangeBuyAmountButton,
   buildTelegramFundingReviewBuyButton,
   fetchActiveTelegramFundingBuyReturn,
   fetchTelegramFundingBuyContinuationForUpdate,
@@ -682,7 +683,14 @@ export type TelegramBotTradingCallbackInput = {
   };
   db: DbQuery;
   expectedIntentId?: string | null;
-  expectedType?: "buy" | "sell" | "redeem" | "cancel" | "confirm" | null;
+  expectedType?:
+    | "buy"
+    | "sell"
+    | "redeem"
+    | "cancel"
+    | "change_amount"
+    | "confirm"
+    | null;
   log?: {
     debug?: (payload: unknown, message?: string) => void;
     info?: (payload: unknown, message?: string) => void;
@@ -698,6 +706,9 @@ export type TelegramBotTradingCallbackInput = {
   signerInspector?: TelegramBotTradingSignerInspector;
   telegramMiniAppEnabled?: boolean;
   trading?: ApiBotTradingExecutor;
+  writeTradeInputContext?: (
+    input: TelegramBotTradeInputContext,
+  ) => Promise<boolean>;
 };
 
 type CapturedTelegramBotTradingCallbackResult = {
@@ -755,6 +766,9 @@ function normalizeTelegramUserId(value: string | number): string {
 function normalizeMarketRef(input: string): string | null {
   const trimmed = input.trim();
   if (!trimmed) return null;
+  if (SAFE_VENUES.some((venue) => trimmed.startsWith(`${venue}:`))) {
+    return trimmed;
+  }
   try {
     const url = new URL(trimmed);
     const marketParam = url.searchParams.get("market")?.trim();
@@ -2171,6 +2185,16 @@ function buildTelegramTradeConfirmationMessage(input: {
             text: "❌ Cancel",
           },
         ],
+        ...(action === "BUY"
+          ? [
+              [
+                {
+                  callback_data: `${TELEGRAM_BOT_TRADING_CALLBACK_PREFIX}:change_amount:${input.intent.id}`,
+                  text: "Change amount",
+                },
+              ],
+            ]
+          : []),
       ],
     },
     text: joinTelegramMarkdownV2Lines(
@@ -5860,11 +5884,15 @@ export function createTelegramFundingBuyContinuationDecorator(input: {
     const reviewButton = buildTelegramFundingReviewBuyButton({
       continuationToken: issued.token,
     });
+    const changeAmountButton = buildTelegramFundingChangeBuyAmountButton({
+      continuationToken: issued.token,
+    });
     return {
       ...presentation.message,
       reply_markup: {
         inline_keyboard: [
           [reviewButton],
+          [changeAmountButton],
           ...(presentation.message.reply_markup?.inline_keyboard ?? []),
         ],
       },
@@ -5901,6 +5929,105 @@ export function createTelegramFundingBuyContinuationDecorator(input: {
       ]),
     };
   };
+}
+
+export async function changeTelegramFundingBuyContinuationAmount(input: {
+  appBaseUrl: string;
+  chatId: string;
+  db: DbQuery;
+  telegramMessageId: number;
+  telegramMiniAppEnabled?: boolean;
+  telegramUserId: string;
+  token: string;
+  signerInspector?: TelegramBotTradingSignerInspector;
+  trading: ApiBotTradingExecutor;
+  writeTradeInputContext?: (
+    input: TelegramBotTradeInputContext,
+  ) => Promise<boolean>;
+}): Promise<TelegramBotTradingMessage> {
+  const unavailable = () =>
+    buildTelegramTradeInputNotice({
+      body: "Open the market again to choose a new amount.",
+      title: "Amount selection unavailable",
+    });
+  if (input.chatId !== input.telegramUserId) return unavailable();
+  const { rows } = await input.db.query<{
+    funding_context_id: string;
+    latest_terminal_projection: unknown;
+    market_id: string;
+    side: TelegramBotTradingSide;
+  }>(
+    `
+      select
+        context.id as funding_context_id,
+        context.latest_terminal_projection,
+        buy_return.market_id,
+        buy_return.side
+      from telegram_funding_buy_continuations continuation
+      join telegram_funding_sessions context
+        on context.id = continuation.telegram_funding_session_id
+       and context.active_buy_return_revision = continuation.buy_return_revision
+       and context.progress_revision = continuation.ready_progress_revision
+       and context.telegram_account_id = continuation.telegram_account_id
+      join telegram_funding_buy_return_revisions buy_return
+        on buy_return.telegram_funding_session_id = continuation.telegram_funding_session_id
+       and buy_return.revision = continuation.buy_return_revision
+       and buy_return.venue_id = 'polymarket'
+      join funding_receive_sessions receive
+        on receive.id = context.receive_session_id
+       and receive.user_id = context.user_id
+       and receive.owner_channel = context.receive_owner_channel
+       and receive.version >= continuation.ready_receive_version
+      where continuation.token_hash = $1
+        and continuation.telegram_user_id = $2
+        and continuation.chat_id = $3
+        and context.telegram_user_id = $2
+        and context.chat_id = $3
+        and context.telegram_message_id = $4::bigint
+        and continuation.expires_at > now()
+        and context.cancelled_at is null
+        and context.expires_at > now()
+        and context.latest_progress_projection->>'state' = 'ready'
+        and context.latest_terminal_projection = context.latest_progress_projection
+      limit 1
+    `,
+    [
+      hashTelegramFundingBuyContinuationToken(input.token),
+      input.telegramUserId,
+      input.chatId,
+      input.telegramMessageId,
+    ],
+  );
+  const current = rows[0];
+  if (
+    !current ||
+    !isTelegramFundingReadyTerminalProjection(
+      current.latest_terminal_projection,
+      current.funding_context_id,
+    ) ||
+    !(await hasReadyTelegramFundingDestinationReceipt(
+      input.db,
+      current.funding_context_id,
+    ))
+  ) {
+    return unavailable();
+  }
+  return buildTelegramBotTradingMarketMessage({
+    appBaseUrl: input.appBaseUrl,
+    chatId: input.chatId,
+    context: {
+      focusSide: current.side,
+      origin: "direct",
+    },
+    db: input.db,
+    marketRef: current.market_id,
+    signerInspector: input.signerInspector,
+    telegramMessageId: input.telegramMessageId,
+    telegramMiniAppEnabled: input.telegramMiniAppEnabled,
+    telegramUserId: input.telegramUserId,
+    trading: input.trading,
+    writeTradeInputContext: input.writeTradeInputContext,
+  });
 }
 
 export async function resumeTelegramFundingBuyContinuation(input: {
@@ -8532,6 +8659,7 @@ export async function handleTelegramBotTradingCallback(
   if (
     ((parsed.type === "buy" || parsed.type === "retry_buy") &&
       intent.action !== "buy") ||
+    (parsed.type === "change_amount" && intent.action !== "buy") ||
     (parsed.type === "sell" && intent.action !== "sell")
   ) {
     await input.answerCallbackQuery({
@@ -8615,7 +8743,16 @@ export async function handleTelegramBotTradingCallback(
       return true;
     }
   }
-  if (isTerminalIntentStatus(intent.status) || intent.status === "executing") {
+  const exitsToMarket =
+    parsed.type === "cancel" || parsed.type === "change_amount";
+  const canReplayMarketExit =
+    exitsToMarket &&
+    intent.status === "cancelled" &&
+    intent.submit_started_at == null;
+  if (
+    (isTerminalIntentStatus(intent.status) || intent.status === "executing") &&
+    !canReplayMarketExit
+  ) {
     await answerIntentAlreadyProcessed(input, intent);
     return true;
   }
@@ -8640,28 +8777,62 @@ export async function handleTelegramBotTradingCallback(
     return true;
   }
 
-  if (parsed.type === "cancel") {
-    const cancelled = await updateIntentStatus({
-      allowedStatuses: PENDING_INTENT_STATUSES,
-      db: input.db,
-      intentId: intent.id,
-      status: "cancelled",
-    });
+  if (exitsToMarket) {
+    const cancelled =
+      canReplayMarketExit ||
+      (await updateIntentStatus({
+        allowedStatuses: PENDING_INTENT_STATUSES,
+        db: input.db,
+        errorCode:
+          parsed.type === "change_amount"
+            ? "amount_change_requested"
+            : "cancelled_by_user",
+        errorMessage:
+          parsed.type === "change_amount"
+            ? "The user returned to choose a different amount."
+            : "The user returned to the market card.",
+        intentId: intent.id,
+        status: "cancelled",
+      }));
     if (!cancelled) {
       await answerIntentAlreadyProcessed(input, intent);
       return true;
     }
     await input.answerCallbackQuery({
       callbackQueryId: input.callbackQuery.id,
-      text: "✅ Cancelled.",
+      text:
+        parsed.type === "change_amount"
+          ? "Choose a new amount."
+          : "Trade cancelled. Choose another option.",
     });
+    const marketMessage = await buildTelegramBotTradingMarketMessage({
+      appBaseUrl: input.appBaseUrl,
+      chatId,
+      context: {
+        ...(parsed.type === "change_amount" && intent.side
+          ? { focusSide: intent.side }
+          : {}),
+        origin: "direct",
+      },
+      db: input.db,
+      marketRef: intent.market_id,
+      signerInspector: input.signerInspector,
+      telegramMessageId: callbackMessageId,
+      telegramMiniAppEnabled: input.telegramMiniAppEnabled,
+      telegramUserId: intent.telegram_user_id,
+      trading: input.trading,
+      writeTradeInputContext: input.writeTradeInputContext,
+    }).catch(() => null);
     await input.sendMessage({
       chat_id: chatId,
-      parse_mode: "MarkdownV2",
-      text: formatTelegramTradeLifecycleMessageMarkdownV2({
-        heading: "Trade cancelled.",
-        marketTitle: intent.market_title,
-        venue: intent.venue,
+      ...(marketMessage ?? {
+        parse_mode: "MarkdownV2" as const,
+        text: formatTelegramTradeLifecycleMessageMarkdownV2({
+          heading: "Trade cancelled.",
+          lines: ["Open the market again to choose another amount."],
+          marketTitle: intent.market_title,
+          venue: intent.venue,
+        }),
       }),
     });
     return true;
@@ -9813,12 +9984,22 @@ export async function captureTelegramBotTradingCallback(input: {
   callbackQuery: TelegramBotTradingCallbackInput["callbackQuery"];
   db: DbQuery;
   expectedIntentId?: string | null;
-  expectedType?: "buy" | "sell" | "redeem" | "cancel" | "confirm" | null;
+  expectedType?:
+    | "buy"
+    | "sell"
+    | "redeem"
+    | "cancel"
+    | "change_amount"
+    | "confirm"
+    | null;
   log?: TelegramBotTradingCallbackInput["log"];
   openFundingBuyReturn?: TelegramFundingBuyReturnOpener;
   signerInspector?: TelegramBotTradingSignerInspector;
   telegramMiniAppEnabled?: boolean;
   trading?: ApiBotTradingExecutor;
+  writeTradeInputContext?: (
+    input: TelegramBotTradeInputContext,
+  ) => Promise<boolean>;
 }): Promise<CapturedTelegramBotTradingCallbackResult> {
   const answers: CapturedTelegramBotTradingCallbackResult["answers"] = [];
   const messages: CapturedTelegramBotTradingCallbackResult["messages"] = [];
@@ -9841,6 +10022,7 @@ export async function captureTelegramBotTradingCallback(input: {
     },
     telegramMiniAppEnabled: input.telegramMiniAppEnabled,
     trading: input.trading,
+    writeTradeInputContext: input.writeTradeInputContext,
   });
   return { answers, handled, messages };
 }

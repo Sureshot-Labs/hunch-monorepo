@@ -178,6 +178,14 @@ export type TelegramBotTradingInternalApiClient = {
     telegramMiniAppEnabled?: boolean;
     telegramUserId: string | number;
   }) => Promise<TelegramFundingClientMessage>;
+  changeFundingBuyAmount: (input: {
+    appBaseUrl: string;
+    chatId: string | number;
+    continuationToken: string;
+    telegramMessageId: number;
+    telegramMiniAppEnabled?: boolean;
+    telegramUserId: string | number;
+  }) => Promise<TelegramFundingClientMessage>;
   searchMarkets: (input: { query?: string | null }) => Promise<
     Array<{
       eventId: string;
@@ -233,7 +241,14 @@ const EXACT_UUID_RE =
 export type ParsedTelegramBotTradingCallback =
   | {
       intentId: string;
-      type: "buy" | "sell" | "redeem" | "retry_buy" | "cancel" | "confirm";
+      type:
+        | "buy"
+        | "sell"
+        | "redeem"
+        | "retry_buy"
+        | "cancel"
+        | "change_amount"
+        | "confirm";
     }
   | {
       inputContextId: string;
@@ -256,6 +271,7 @@ export function parseTelegramBotTradingCallbackData(
     type !== "buy_input" &&
     type !== "sell_input" &&
     type !== "confirm" &&
+    type !== "change_amount" &&
     type !== "cancel"
   )
     return null;
@@ -530,6 +546,11 @@ export function createTelegramBotTradingInternalApiClient(input: {
         body,
         { timeoutMs: executeTimeoutMs },
       ),
+    changeFundingBuyAmount: (body) =>
+      post<TelegramFundingClientMessage>(
+        "/internal/telegram-bot/funding/change-buy-amount",
+        body,
+      ),
     searchMarkets: (body) =>
       post<
         Array<{
@@ -675,7 +696,9 @@ export function createTelegramBotTradingInternalApiClient(input: {
           ? "/internal/telegram-bot/trading/preview-intent"
           : parsed.type === "cancel"
             ? `/internal/telegram-bot/trading/intents/${parsed.intentId}/cancel`
-            : `/internal/telegram-bot/trading/intents/${parsed.intentId}/execute`;
+            : parsed.type === "change_amount"
+              ? `/internal/telegram-bot/trading/intents/${parsed.intentId}/change-amount`
+              : `/internal/telegram-bot/trading/intents/${parsed.intentId}/execute`;
       const confirmAcknowledged = parsed.type === "confirm";
       if (confirmAcknowledged) {
         await callbackInput.answerCallbackQuery({
@@ -719,10 +742,9 @@ export function createTelegramBotTradingInternalApiClient(input: {
               ...withTelegramPrivateNavigation({
                 parse_mode: "MarkdownV2",
                 text: formatTelegramCalloutMarkdownV2({
-                  bodyMarkdownV2:
-                    formatTelegramTextWithCommandsMarkdownV2(
-                      "The request may already be updating the trade or funding card. Wait a moment and use the latest card before retrying. No trade was submitted.",
-                    ),
+                  bodyMarkdownV2: formatTelegramTextWithCommandsMarkdownV2(
+                    "The request may already be updating the trade or funding card. Wait a moment and use the latest card before retrying. No trade was submitted.",
+                  ),
                   icon: "⏳",
                   title: "Still preparing",
                 }),

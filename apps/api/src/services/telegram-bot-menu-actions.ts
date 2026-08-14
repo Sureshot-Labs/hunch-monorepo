@@ -14,9 +14,13 @@ import {
   type TelegramFundingCallbackRoute,
 } from "./telegram-funding-contracts.js";
 
-export type SignalBotInteractiveMenuRoute =
+export type SignalBotFundingMenuRoute =
   | { kind: "deposit"; showQr: boolean; venue: string }
   | { kind: "deposit_menu" }
+  | TelegramFundingCallbackRoute;
+
+export type SignalBotInteractiveMenuRoute =
+  | SignalBotFundingMenuRoute
   | { index: number; kind: "market_search_result"; sessionId: string }
   | { kind: "market_search_back"; sessionId: string }
   | {
@@ -25,8 +29,7 @@ export type SignalBotInteractiveMenuRoute =
       resultIndex: number;
       sessionId: string;
     }
-  | { kind: "position"; positionId: string }
-  | TelegramFundingCallbackRoute;
+  | { kind: "position"; positionId: string };
 
 export function parseSignalBotInteractiveMenuRoute(
   route: string,
@@ -79,7 +82,7 @@ export function parseSignalBotInteractiveMenuRoute(
 
 export function isSignalBotFundingMenuRoute(
   route: Readonly<{ kind: string; venue?: string }>,
-): boolean {
+): route is SignalBotFundingMenuRoute {
   return signalBotFundingMenuAction(route) != null;
 }
 
@@ -118,6 +121,7 @@ export async function hideSignalBotFundingQr(
 
 export type SignalBotFundingMenuAction =
   | "cancel"
+  | "change_buy_amount"
   | "confirm_conversion"
   | "open"
   | "review_conversion"
@@ -130,20 +134,23 @@ export function signalBotFundingMenuAction(
 ): SignalBotFundingMenuAction | null {
   return route.kind === "select"
     ? "select"
-    : route.kind === "review_buy"
-      ? "resume_buy"
-      : route.kind === "confirm_conversion"
-        ? "confirm_conversion"
-        : route.kind === "review_conversion"
-          ? "review_conversion"
-          : route.kind === "cancel"
-            ? "cancel"
-            : route.kind === "refresh" || route.kind === "qr"
-              ? "session"
-              : route.kind === "deposit" &&
-                  (route.venue === "polymarket" || route.venue === "limitless")
-                ? "open"
-                : null;
+    : route.kind === "change_buy_amount"
+      ? "change_buy_amount"
+      : route.kind === "review_buy"
+        ? "resume_buy"
+        : route.kind === "confirm_conversion"
+          ? "confirm_conversion"
+          : route.kind === "review_conversion"
+            ? "review_conversion"
+            : route.kind === "cancel"
+              ? "cancel"
+              : route.kind === "refresh" || route.kind === "qr"
+                ? "session"
+                : route.kind === "deposit" &&
+                    (route.venue === "polymarket" ||
+                      route.venue === "limitless")
+                  ? "open"
+                  : null;
 }
 
 type MenuButton =
@@ -174,6 +181,7 @@ export type SignalBotInteractiveMenuLoaders = {
   funding: (input: {
     action:
       | "cancel"
+      | "change_buy_amount"
       | "confirm_conversion"
       | "open"
       | "review_conversion"
@@ -396,15 +404,17 @@ async function deliverSignalBotInteractiveMenuCallback(
                 }
               : route.kind === "review_buy"
                 ? { continuationToken: route.continuationToken }
-                : route.kind === "confirm_conversion"
-                  ? { consentToken: route.consentToken }
-                  : route.kind === "review_conversion"
-                    ? { receiptId: route.receiptId }
-                    : route.kind === "cancel" ||
-                        route.kind === "refresh" ||
-                        route.kind === "qr"
-                      ? { contextId: route.contextId }
-                      : {}),
+                : route.kind === "change_buy_amount"
+                  ? { continuationToken: route.continuationToken }
+                  : route.kind === "confirm_conversion"
+                    ? { consentToken: route.consentToken }
+                    : route.kind === "review_conversion"
+                      ? { receiptId: route.receiptId }
+                      : route.kind === "cancel" ||
+                          route.kind === "refresh" ||
+                          route.kind === "qr"
+                        ? { contextId: route.contextId }
+                        : {}),
             idempotencyKey:
               "funding:" + (input.idempotencyKey ?? "legacy-callback"),
             telegramMessageId: input.messageId,

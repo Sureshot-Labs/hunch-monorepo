@@ -3086,6 +3086,59 @@ async function testTransactionalPersistenceContracts(): Promise<void> {
       "ambiguous_duplicate_observation",
     );
 
+    await ingestFundingObservationInTransaction(client, {
+      discoverySource: "chain_rpc",
+      observation: {
+        operationId: committedA.operation.id,
+        segmentId,
+        kind: "source_credit",
+        networkId: ASSET.networkId,
+        assetId: ASSET.assetId,
+        assetDecimals: ASSET.decimals,
+        txHash: opaque("source-credit-before-debit"),
+        eventIndex: "0",
+        fromAddress: "0xsender",
+        toAddress: "0xsource",
+        rawAmount: "1000000",
+        observedAt: new Date(),
+        ledgerHeight: "99",
+        blockHash: opaque("source-credit-block"),
+        finalityStatus: "finalized",
+        finalizedAt: new Date(),
+      },
+    });
+    const refundSourceSegmentResult = await client.query<{ id: string }>(
+      `
+        select id
+        from funding_operation_segments
+        where operation_id = $1
+      `,
+      [refundOperation.operation.id],
+    );
+    const refundSourceSegmentId = refundSourceSegmentResult.rows[0]?.id;
+    assert.ok(refundSourceSegmentId);
+    await ingestFundingObservationInTransaction(client, {
+      discoverySource: "chain_rpc",
+      observation: {
+        operationId: refundOperation.operation.id,
+        segmentId: refundSourceSegmentId,
+        kind: "source_credit",
+        networkId: ASSET.networkId,
+        assetId: ASSET.assetId,
+        assetDecimals: ASSET.decimals,
+        txHash: opaque("source-credit-only"),
+        eventIndex: "0",
+        fromAddress: "0xsender",
+        toAddress: "0xsource",
+        rawAmount: "1000000",
+        observedAt: new Date(),
+        ledgerHeight: "98",
+        blockHash: opaque("source-credit-only-block"),
+        finalityStatus: "finalized",
+        finalizedAt: new Date(),
+      },
+    });
+
     const factsBeforeReducer = await loadFundingAccountValueFacts(
       client as never,
       userA,
@@ -3096,6 +3149,11 @@ async function testTransactionalPersistenceContracts(): Promise<void> {
     assert.equal(availability?.reservedRaw, "0");
     assert.equal(availability?.submittedDebitRaw, "1000000");
     assert.equal(factsBeforeReducer.inTransit.length, 1);
+    assert.equal(
+      factsBeforeReducer.inTransit[0]?.operationId,
+      committedA.operation.id,
+    );
+    assert.equal(factsBeforeReducer.inTransit[0]?.amount.raw, "1000000");
 
     const staleComponent: ValuedAssetComponent = {
       componentId: String(planA.operation.sourceSnapshot?.componentId),

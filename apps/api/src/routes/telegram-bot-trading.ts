@@ -32,6 +32,7 @@ import {
   buildTelegramBotTradingMarketMessage,
   buildTelegramBotTradingStatusMessage,
   captureTelegramBotTradingCallback,
+  changeTelegramFundingBuyContinuationAmount,
   completeTelegramBotTradeInput,
   createTelegramFundingBuyContinuationDecorator,
   cleanupTelegramBotTradingForUnlink,
@@ -273,6 +274,15 @@ const internalFundingResumeBuyBodySchema = internalFundingIdentitySchema
     appBaseUrl: z.string().trim().url(),
     continuationToken: z.string().regex(/^[A-Za-z0-9_-]{22}$/u),
     idempotencyKey: z.string().trim().min(8).max(192),
+    telegramMessageId: z.number().int().positive(),
+    telegramMiniAppEnabled: z.boolean().optional(),
+  })
+  .strict();
+
+const internalFundingChangeBuyAmountBodySchema = internalFundingIdentitySchema
+  .extend({
+    appBaseUrl: z.string().trim().url(),
+    continuationToken: z.string().regex(/^[A-Za-z0-9_-]{22}$/u),
     telegramMessageId: z.number().int().positive(),
     telegramMiniAppEnabled: z.boolean().optional(),
   })
@@ -915,6 +925,29 @@ async function registerTelegramBotTradingRoutes(
   );
 
   api.post(
+    "/internal/telegram-bot/funding/change-buy-amount",
+    {
+      preHandler: [requireInternal, requirePrivateTelegramChat],
+      schema: { body: internalFundingChangeBuyAmountBodySchema },
+    },
+    async (request, reply) => {
+      const message = await changeTelegramFundingBuyContinuationAmount({
+        appBaseUrl: request.body.appBaseUrl,
+        chatId: String(request.body.chatId),
+        db,
+        telegramMessageId: request.body.telegramMessageId,
+        telegramMiniAppEnabled: request.body.telegramMiniAppEnabled,
+        telegramUserId: String(request.body.telegramUserId),
+        token: request.body.continuationToken,
+        signerInspector,
+        trading: createTradingForRequest(request),
+        writeTradeInputContext,
+      });
+      return reply.send(message);
+    },
+  );
+
+  api.post(
     "/internal/telegram-bot/positions",
     {
       preHandler: requireInternal,
@@ -1231,7 +1264,13 @@ async function registerTelegramBotTradingRoutes(
       body: z.infer<typeof internalCallbackBodySchema>;
       params?: z.infer<typeof internalIntentParamsSchema>;
     },
-    expectedType?: "buy" | "sell" | "redeem" | "cancel" | "confirm",
+    expectedType?:
+      | "buy"
+      | "sell"
+      | "redeem"
+      | "cancel"
+      | "change_amount"
+      | "confirm",
   ) => {
     if (expectedType === "confirm" && !reconciliationEnabled) {
       const chatId = request.body.callbackQuery.message?.chat?.id;
@@ -1272,6 +1311,7 @@ async function registerTelegramBotTradingRoutes(
       signerInspector,
       telegramMiniAppEnabled: request.body.telegramMiniAppEnabled,
       trading: createTradingForRequest(request as FastifyRequest),
+      writeTradeInputContext,
     });
   };
 
@@ -1292,6 +1332,7 @@ async function registerTelegramBotTradingRoutes(
       signerInspector,
       telegramMiniAppEnabled: request.body.telegramMiniAppEnabled,
       trading: createTradingForRequest(request as FastifyRequest),
+      writeTradeInputContext,
     });
 
   api.post(
@@ -1494,6 +1535,18 @@ async function registerTelegramBotTradingRoutes(
       },
     },
     (request) => handleInternalCallback(request, "cancel"),
+  );
+
+  api.post(
+    "/internal/telegram-bot/trading/intents/:id/change-amount",
+    {
+      preHandler: requireInternal,
+      schema: {
+        body: internalCallbackBodySchema,
+        params: internalIntentParamsSchema,
+      },
+    },
+    (request) => handleInternalCallback(request, "change_amount"),
   );
 
   api.get(
