@@ -60,6 +60,7 @@ import {
   commitFundingOperation,
   commitFundingOperationInTransaction,
   createFundingQuote,
+  createFundingQuoteInTransaction,
   FundingPersistenceError,
   allocateFundingObservationInTransaction,
   transitionFundingOperationInTransaction,
@@ -76,6 +77,7 @@ import {
   createOrReuseFundingReceiveSession,
   deferFundingReceiveReceiptRouting,
   finalizeFundingReceiveCanonicalEventAllocation,
+  fundingReceiveReceiptOperationIdempotencyKey,
   insertFundingReceiveReceipt,
   listFundingReceiveRoutingReceiptIdsAfterBroadcastBoundary,
   listFundingReceiveReceiptsForRouting,
@@ -1127,6 +1129,7 @@ type RelayFixture = Readonly<{
   depositStepId: string;
   operationId: string;
   approvalStepId: string;
+  plan: FundingCommitPlan;
   receiptId: string;
   walletAddress: string;
   walletId: string;
@@ -1526,6 +1529,7 @@ async function createRelayFixture(
     approvalStepId,
     depositStepId,
     operationId: committed.operation.id,
+    plan,
     receiptId,
     walletAddress: identity.wallet_address,
     walletId,
@@ -2329,6 +2333,25 @@ try {
 
   const hugeRaw = (2n ** 255n).toString();
   const concurrent = await createFixture(hugeRaw, true);
+  const concurrentReceiptId = concurrent.receiptIds[1];
+  assert.ok(concurrentReceiptId);
+  const unusedReceiptId = crypto.randomUUID();
+  assert.equal(
+    await fundingReceiveReceiptOperationIdempotencyKey(pool, {
+      receiptId: unusedReceiptId,
+      userId: concurrent.userId,
+    }),
+    `receive-receipt:${unusedReceiptId}`,
+    "an unseen receipt starts at the legacy generation-zero key",
+  );
+  assert.equal(
+    await fundingReceiveReceiptOperationIdempotencyKey(pool, {
+      receiptId: concurrentReceiptId,
+      userId: concurrent.userId,
+    }),
+    `receive-receipt:${concurrentReceiptId}:retry:1`,
+    "a persisted child advances the exact receipt to retry generation one",
+  );
   await assertSecondSourceReservationBlocked(concurrent);
   await assertOperationAttachmentFailureRollsBack(concurrent);
   const persistedAction = await pool.query<{
@@ -5573,6 +5596,144 @@ try {
     parent_status: "failed",
     reservation_status: "cleaned",
   });
+  await assert.rejects(
+    tx(pool, async (client) => {
+      const retryNow = new Date(cleanupFinalizedAt.getTime() + 15 * 60_000 + 1);
+      const detached = await client.query(
+        `update funding_receive_receipts
+            set status = 'observed',
+                child_funding_operation_id = null,
+                routing_disposition = 'pending',
+                routing_last_error_code = null,
+                routing_next_attempt_at = $3,
+                evidence = jsonb_set(
+                  evidence,
+                  '{routingOperationHistory}',
+                  jsonb_build_array(jsonb_build_object(
+                    'operationId', $2::text,
+                    'outcome', 'failed',
+                    'detachedAt', $3::timestamptz
+                  )),
+                  true
+                ),
+                updated_at = $3
+          where id = $1::uuid
+            and child_funding_operation_id = $2::uuid
+            and status in ('routing', 'recovery_required')`,
+        [
+          unchangedOwnedRelay.receiptId,
+          unchangedOwnedRelay.operationId,
+          retryNow,
+        ],
+      );
+      assert.equal(detached.rowCount, 1);
+      const retryPolicy = await resolveFundingPolicy(client);
+      const retryConsentToken = opaque("relay_retry_consent");
+      const retrySourceSnapshot =
+        unchangedOwnedRelay.plan.operation.sourceSnapshot;
+      assert.ok(retrySourceSnapshot);
+      const retryQuote = await createFundingQuoteInTransaction(client, {
+        userId: unchangedOwnedRelay.base.userId,
+        discoveryProjectionId: opaque("relay_retry_projection"),
+        selectedSourceOptionSnapshot: retrySourceSnapshot,
+        marketContextSnapshot: null,
+        destinationOptionSnapshot:
+          unchangedOwnedRelay.plan.operation.destinationTargetSnapshot,
+        venueBindingSnapshot:
+          unchangedOwnedRelay.plan.operation.venueBindingSnapshot,
+        planSnapshot: unchangedOwnedRelay.plan,
+        policyVersion: retryPolicy.runtime.contractVersion,
+        policyRevision: retryPolicy.revision,
+        canonicalRequest: {
+          receiptId: unchangedOwnedRelay.receiptId,
+          relay: true,
+          retry: 1,
+        },
+        consentToken: retryConsentToken,
+        expiresAt: new Date(retryNow.getTime() + 4 * 60_000),
+      });
+      const retryIdempotencyKey =
+        await fundingReceiveReceiptOperationIdempotencyKey(client, {
+          receiptId: unchangedOwnedRelay.receiptId,
+          userId: unchangedOwnedRelay.base.userId,
+        });
+      assert.equal(
+        retryIdempotencyKey,
+        `receive-receipt:${unchangedOwnedRelay.receiptId}:retry:1`,
+      );
+      const retryOperation = await commitFundingOperationInTransaction(client, {
+        userId: unchangedOwnedRelay.base.userId,
+        quoteId: retryQuote.id,
+        consentToken: retryConsentToken,
+        idempotencyKey: retryIdempotencyKey,
+        plan: unchangedOwnedRelay.plan,
+        subjectLookupHmac: crypto
+          .createHash("sha256")
+          .update(`${unchangedOwnedRelay.base.userId}:relay-retry`)
+          .digest("hex"),
+        subjectLookupKeyVersion: 1,
+        now: retryNow,
+      });
+      assert.notEqual(
+        retryOperation.operation.id,
+        unchangedOwnedRelay.operationId,
+      );
+      assert.equal(
+        await linkFundingReceiveReceiptOperationInTransaction(client, {
+          receiptId: unchangedOwnedRelay.receiptId,
+          userId: unchangedOwnedRelay.base.userId,
+          childFundingOperationId: retryOperation.operation.id,
+          authorizationId: unchangedOwnedRelay.authorizationId,
+          authorizationFingerprint:
+            unchangedOwnedRelay.authorizationFingerprint,
+          telegramFundingConsentId: unchangedOwnedRelay.consentId,
+          telegramFundingConsentFingerprint:
+            unchangedOwnedRelay.consentFingerprint,
+          serverExecutionProfileId: TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
+          now: retryNow,
+        }),
+        true,
+      );
+      const retryReservations = await client.query<{
+        funding_operation_id: string;
+        status: string;
+      }>(
+        `select funding_operation_id, status
+           from telegram_funding_authorization_reservations
+          where receive_receipt_id = $1::uuid
+          order by reserved_at, id`,
+        [unchangedOwnedRelay.receiptId],
+      );
+      assert.deepEqual(retryReservations.rows, [
+        {
+          funding_operation_id: unchangedOwnedRelay.operationId,
+          status: "cleaned",
+        },
+        {
+          funding_operation_id: retryOperation.operation.id,
+          status: "reserved",
+        },
+      ]);
+      const reallocatedSourceCredit = await client.query<{
+        history_length: number;
+        operation_id: string;
+      }>(
+        `select operation_id,
+                jsonb_array_length(
+                  metadata -> 'receiveReceiptAllocationHistory'
+                ) as history_length
+           from funding_observations
+          where metadata ->> 'receiptId' = $1`,
+        [unchangedOwnedRelay.receiptId],
+      );
+      assert.deepEqual(reallocatedSourceCredit.rows[0], {
+        history_length: 1,
+        operation_id: retryOperation.operation.id,
+      });
+      throw new Error("rollback validated Relay receipt rearm generation");
+    }),
+    /rollback validated Relay receipt rearm generation/,
+  );
 
   const foreignCleanupRelay = await createRelayFixture();
   const foreignCleanupBroadcasts = { value: 0 };
