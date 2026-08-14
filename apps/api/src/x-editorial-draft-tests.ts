@@ -253,6 +253,9 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         prompt,
         /Non-temporal idioms such as 'not just' are allowed/i,
       );
+      assert.match(prompt, /keep that trader as the protagonist/i);
+      assert.match(prompt, /on NO — the side betting/i);
+      assert.match(prompt, /small red on the position/i);
       assert.match(prompt, /keeps paying/i);
       assert.match(prompt, /recentDraftsToAvoidImitating/i);
       assert.match(prompt, /1000 visible characters/i);
@@ -928,6 +931,107 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.ok(validated.issues.includes("side_label_hook"));
       assert.ok(validated.issues.includes("editorial_scaffolding"));
       assert.ok(validated.issues.includes("repeated_phrase:still_there"));
+    },
+  },
+  {
+    name: "validator rejects the live eCash followthrough and accepts trader-led copy",
+    run: () => {
+      const followthroughSource: XEditorialDraftSource = {
+        facts: [
+          {
+            id: "market",
+            label: "Canonical market",
+            value: {
+              marketQuestion:
+                "Will the US announce an end to the Iranian blockade by August 31?",
+              selectedSideLabel: "No announcement by August 31",
+            },
+          },
+          {
+            id: "original_signal",
+            label: "Original quality-gated signal",
+            value: {
+              credentials: [
+                "Up $73.7K over the last 30 days",
+                "Beat market prices by 27 points across 13 resolved bets",
+              ],
+              displayName: "@eCash",
+              position: "$11.1K",
+            },
+          },
+          {
+            id: "followthrough",
+            label: "Computed change since the signal",
+            value: {
+              entryPrice: "64.5¢",
+              estimatedOpenPnl: "-$78",
+              markPrice: "71.5¢",
+              priceMove: "7 points",
+            },
+          },
+        ],
+        kind: "followthrough_stats",
+        marketId: "iran-blockade-ecash-followthrough",
+        noteId: "00000000-0000-4000-8000-000000000897",
+        selectedSide: "NO",
+      };
+      const badPostText =
+        "NO has moved from 64.5¢ to 71.5¢ on whether the US announces an end to the Iranian blockade by August 31.\n\n@eCash is still holding $11.1K on NO — the side betting there is no announcement by that deadline. Small red on the position: -$78.\n\nThe same trader is up $73.7K over the last 30 days and has beaten market prices by 27 points across 13 resolved bets.\n\nThe move is no longer subtle. The named holder with the recent record is on the side that says the deadline passes without it.";
+      const bad = validateXEditorialModelOutput({
+        config,
+        output: {
+          version: 1,
+          status: "ready",
+          marketId: "iran-blockade-ecash-followthrough",
+          selectedSide: "NO",
+          postText: badPostText,
+          formatting: [
+            {
+              style: "bold",
+              text: "NO has moved from 64.5¢ to 71.5¢",
+            },
+            {
+              style: "bold",
+              text: "@eCash is still holding $11.1K",
+            },
+          ],
+          storyFamily: "followthrough",
+          usedFactIds: ["market", "original_signal", "followthrough"],
+          safetyFlags: [],
+        },
+        source: followthroughSource,
+      });
+      assert.ok(bad.issues.includes("actor_buried_in_followthrough"));
+      assert.ok(bad.issues.includes("binary_side_explanation"));
+      assert.ok(bad.issues.includes("analyst_jargon"));
+
+      const goodPostText =
+        "@eCash is still holding $11.1K against an August 31 end to the Iranian blockade.\n\nNO moved from 64.5¢ to 71.5¢ after the original signal. The position is down $78.\n\nOver the last 30 days, @eCash is up $73.7K and has beaten market prices by 27 points across 13 resolved bets.";
+      const good = validateXEditorialModelOutput({
+        config,
+        output: {
+          version: 1,
+          status: "ready",
+          marketId: "iran-blockade-ecash-followthrough",
+          selectedSide: "NO",
+          postText: goodPostText,
+          formatting: [
+            {
+              style: "bold",
+              text: "@eCash is still holding $11.1K against an August 31 end to the Iranian blockade.",
+            },
+            {
+              style: "bold",
+              text: "NO moved from 64.5¢ to 71.5¢",
+            },
+          ],
+          storyFamily: "followthrough",
+          usedFactIds: ["market", "original_signal", "followthrough"],
+          safetyFlags: [],
+        },
+        source: followthroughSource,
+      });
+      assert.deepEqual(good.issues, []);
     },
   },
   {
