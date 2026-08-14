@@ -163,7 +163,26 @@ export async function listFundingStepReceiptTargets(
         step.payer_requirement,
         step.state as step_state,
         step.normalized_action,
-        step.action_validation_result,
+        case
+          when step.executor_id = 'telegram_relay_evm_funding_v1'
+           and step.action_validation_result ->> 'relayStepKind' = 'cleanup'
+           and step.action_validation_result ->> 'signerAddress' is null
+          then step.action_validation_result || jsonb_build_object(
+            'signerAddress',
+            (
+              select min(funding_authorization.wallet_address)
+                from telegram_funding_authorization_reservations reservation
+                join telegram_funding_authorizations funding_authorization
+                  on funding_authorization.id = reservation.authorization_id
+                 and funding_authorization.user_id = operation.user_id
+                 and funding_authorization.profile_id =
+                       'telegram_relay_evm_funding_v1'
+               where reservation.cleanup_operation_id = operation.id
+               having count(*) = 1
+            )
+          )
+          else step.action_validation_result
+        end as action_validation_result,
         attempt.receipt_ref_ciphertext,
         attempt.receipt_ref_lookup_hmac,
         attempt.lookup_key_version,

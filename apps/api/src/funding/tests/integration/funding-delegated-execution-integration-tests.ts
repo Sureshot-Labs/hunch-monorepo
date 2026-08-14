@@ -66,7 +66,10 @@ import {
   wakeFundingReconciliationInTransaction,
   type FundingCommitPlan,
 } from "../../persistence/funding-operation-repository.js";
-import { applyFundingStepReceiptEvidenceInTransaction } from "../../persistence/funding-step-receipt-repository.js";
+import {
+  applyFundingStepReceiptEvidenceInTransaction,
+  listFundingStepReceiptTargets,
+} from "../../persistence/funding-step-receipt-repository.js";
 import {
   claimFundingReceiveCanonicalEventAllocation,
   claimFundingReceiveReceiptOperationLinkInTransaction,
@@ -5383,6 +5386,29 @@ try {
   );
   const cleanup = cleanupScope.rows[0];
   assert.ok(cleanup);
+  const cleanupReceiptTargets = await listFundingStepReceiptTargets(
+    pool,
+    cleanup.cleanup_operation_id,
+    new Date(now.getTime() + 15 * 60_000 + 6),
+  );
+  assert.equal(cleanupReceiptTargets.length, 1);
+  assert.equal(
+    cleanupReceiptTargets[0]?.actionValidationResult.signerAddress,
+    unchangedOwnedRelay.walletAddress,
+    "Relay cleanup receipts require the committed managed-wallet signer",
+  );
+  const cleanupWalletSnapshot = await pool.query<{
+    wallet_address: string | null;
+  }>(
+    `select wallet_execution_snapshot ->> 'address' as wallet_address
+       from funding_operations
+      where id = $1::uuid`,
+    [cleanup.cleanup_operation_id],
+  );
+  assert.equal(
+    cleanupWalletSnapshot.rows[0]?.wallet_address,
+    unchangedOwnedRelay.walletAddress,
+  );
   const cleanupFinalizedAt = new Date(now.getTime() + 20 * 60_000);
   const cleanupZero = relayAllowanceEvidence(
     "0",
