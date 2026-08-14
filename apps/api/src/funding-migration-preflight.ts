@@ -19,6 +19,7 @@ const MIGRATION_0206 = "0206_telegram_funding_wallet_retention.sql";
 const MIGRATION_0207 = "0207_telegram_funding_owner_delivery.sql";
 const MIGRATION_0208 = "0208_relay_evm_delegated_funding.sql";
 const MIGRATION_0211 = "0211_funding_receive_receipt_rearm.sql";
+const MIGRATION_0214 = "0214_funding_receive_observation_wake.sql";
 const FUNDING_MIGRATIONS = [
   MIGRATION_0184,
   MIGRATION_0193,
@@ -35,6 +36,7 @@ const FUNDING_MIGRATIONS = [
   MIGRATION_0207,
   MIGRATION_0208,
   MIGRATION_0211,
+  MIGRATION_0214,
 ] as const;
 
 const LEGACY_CLASSIFIER_SQL = `
@@ -867,12 +869,22 @@ export async function inspectFundingMigrationPreflight(
       "telegram_funding_sessions",
       "minimum_funding_usd",
     )) &&
-    (await constraintDefinitionIncludes(
+    ((await constraintDefinitionIncludes(
       db,
       "public.telegram_funding_sessions",
       "telegram_funding_sessions_minimum_funding_check",
-      ["minimum_funding_usd", "buy_return_context", "> 0"],
-    )) &&
+      ["minimum_funding_usd", "buy_return_context", "minimum_funding_usd > 0"],
+    )) ||
+      (await constraintDefinitionIncludes(
+        db,
+        "public.telegram_funding_sessions",
+        "telegram_funding_sessions_minimum_funding_check",
+        [
+          "minimum_funding_usd",
+          "buy_return_context",
+          "minimum_funding_usd > (0)::numeric",
+        ],
+      ))) &&
     (await functionDefinitionIncludes(
       db,
       "guard_telegram_funding_session_identity",
@@ -1151,6 +1163,13 @@ export async function inspectFundingMigrationPreflight(
   const hasReceiveOwnerChannel =
     (await relationExists(db, "public.funding_receive_sessions")) &&
     (await columnExists(db, "funding_receive_sessions", "owner_channel"));
+  const hasReceiveObservationWake =
+    (await relationExists(db, "public.funding_receive_sessions")) &&
+    (await columnExists(
+      db,
+      "funding_receive_sessions",
+      "observation_requested_at",
+    ));
   const hasTelegramProjectionWatermark =
     hasTelegramFundingSessions &&
     (await columnExists(
@@ -1341,6 +1360,13 @@ export async function inspectFundingMigrationPreflight(
       hasRelayReceiptRearmIndex,
       "Funding receipt rearm objects exist before 0211 is recorded",
     ],
+    [
+      MIGRATION_0214,
+      hasReceiveObservationWake,
+      "0214 is recorded but the funding receive observation wake column is absent",
+      hasReceiveObservationWake,
+      "Funding receive observation wake column exists before 0214 is recorded",
+    ],
   ] as const;
   const partialObjects = migrationDriftChecks.flatMap(
     ([migration, complete, incompleteMessage, present, presentMessage]) =>
@@ -1473,6 +1499,9 @@ export async function inspectFundingMigrationPreflight(
       : null,
     !appliedSet.has(MIGRATION_0211)
       ? "0211 funding receipt rearm migration is not recorded"
+      : null,
+    !appliedSet.has(MIGRATION_0214)
+      ? "0214 funding receive observation wake migration is not recorded"
       : null,
     !hasBridgeOrders ? "bridge_orders table is absent" : null,
     bridgeUnknown > 0

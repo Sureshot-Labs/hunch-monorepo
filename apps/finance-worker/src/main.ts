@@ -85,6 +85,13 @@ function isFundingReconciliationNoop(result: unknown): boolean {
       "retriesScheduled",
       "retryableErrors",
     ]) &&
+    !hasPositiveActivity(record.delegatedFundingExecution, [
+      "providerReferencesResolved",
+      "claimed",
+      "submitted",
+      "ambiguous",
+      "definitivelyFailed",
+    ]) &&
     !hasPositiveActivity(record.telegramFundingProgress, [
       "candidates",
       "created",

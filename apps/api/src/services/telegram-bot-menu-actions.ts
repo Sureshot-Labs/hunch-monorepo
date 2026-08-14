@@ -187,6 +187,7 @@ export type SignalBotInteractiveMenuLoaders = {
     continuationToken?: string;
     idempotencyKey: string;
     receiptId?: string;
+    requestObservation?: boolean;
     telegramMessageId: number | null;
     telegramUserId: number;
     venue?: "limitless" | "polymarket";
@@ -413,6 +414,7 @@ async function deliverSignalBotInteractiveMenuCallback(
               ? { venue: depositVenue }
               : {}),
             ...(route.kind === "qr" ? { view: "address" as const } : {}),
+            ...(route.kind === "refresh" ? { requestObservation: true } : {}),
           })
         : {
             parse_mode: "MarkdownV2" as const,

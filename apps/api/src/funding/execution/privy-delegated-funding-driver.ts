@@ -5,6 +5,8 @@ import type {
   DelegatedFundingExecutionClaim,
   DelegatedFundingExecutionResult,
   DelegatedFundingNetworkDriver,
+  DelegatedFundingProviderLookupClaim,
+  DelegatedFundingProviderLookupResult,
   DelegatedFundingRecoveryClaim,
 } from "./delegated-funding-executor.js";
 import type { PolymarketWrapExecutionConfiguration } from "./delegated-funding-config.js";
@@ -580,6 +582,18 @@ export class PrivyDelegatedFundingDriver implements DelegatedFundingNetworkDrive
     claim: DelegatedFundingExecutionClaim,
   ): Promise<DelegatedFundingExecutionResult> {
     return this.submit(claim, false);
+  }
+
+  async lookupProviderReference(
+    claim: DelegatedFundingProviderLookupClaim,
+  ): Promise<DelegatedFundingProviderLookupResult> {
+    const transaction = await this.lookupByReference(claim.attemptId);
+    if (!transaction) return { kind: "pending" };
+    const resolved = await this.resolveSubmission(
+      transaction,
+      claim.action.networkId,
+    );
+    return resolved.kind === "submitted" ? resolved : { kind: "pending" };
   }
 
   async recover(

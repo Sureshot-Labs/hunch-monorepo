@@ -59,6 +59,7 @@ type ReceiveSessionRow = Readonly<{
   version: string | number;
   opened_at: Date;
   last_observed_at: Date | null;
+  observation_requested_at: Date | null;
   expires_at: Date;
   observe_until: Date;
   closed_at: Date | null;
@@ -114,6 +115,7 @@ const sessionColumns = `
   version,
   opened_at,
   last_observed_at,
+  observation_requested_at,
   expires_at,
   observe_until,
   closed_at,
@@ -388,13 +390,14 @@ export async function createOrReuseFundingReceiveSession(
           policy_revision,
           ownership_revision,
           opened_at,
+          observation_requested_at,
           expires_at,
           observe_until
         )
         values (
           $1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8::jsonb,
           $9::jsonb, $10::jsonb, $11::jsonb, $11::jsonb, $12, $13::jsonb, $14, $15,
-          $16, $17, $18, $19
+          $16, $17, $17, $18, $19
         )
         returning ${sessionColumns}
       `,
@@ -441,6 +444,32 @@ export async function fetchFundingReceiveSessionForUser(
     [input.receiveSessionId, input.userId],
   );
   return rows[0] ? snapshot(rows[0]) : null;
+}
+
+export async function requestFundingReceiveSessionObservation(
+  db: Pick<Pool, "query">,
+  input: Readonly<{
+    now: Date;
+    receiveSessionId: string;
+    userId: string;
+  }>,
+): Promise<boolean> {
+  const result = await db.query(
+    `
+      update funding_receive_sessions receive_session
+      set observation_requested_at = greatest(
+            coalesce(receive_session.observation_requested_at, $3),
+            $3
+          ),
+          updated_at = greatest(receive_session.updated_at, $3)
+      where receive_session.id = $1
+        and receive_session.user_id = $2
+        and receive_session.status in ('open', 'processing', 'review_required')
+        and receive_session.expires_at > $3
+    `,
+    [input.receiveSessionId, input.userId, input.now],
+  );
+  return result.rowCount === 1;
 }
 
 export async function expireFundingReceiveSessions(
@@ -504,16 +533,35 @@ export async function claimObservableFundingReceiveSessions(
               and observe_until > $1
             )
           )
-          and coalesce(last_observed_at, opened_at)
-            <= $1 - (
-              case
-                when status in ('expired', 'cancelled') then $5::bigint
-                when opened_at <= $1 - ($6::bigint * interval '1 millisecond')
-                  then $4::bigint
-                else $3::bigint
-              end * interval '1 millisecond'
+          and (
+            (
+              status in ('open', 'processing', 'review_required')
+              and observation_requested_at is not null
+              and (
+                last_observed_at is null
+                or last_observed_at < observation_requested_at
+              )
             )
-        order by coalesce(last_observed_at, opened_at) asc
+            or coalesce(last_observed_at, opened_at)
+              <= $1 - (
+                case
+                  when status in ('expired', 'cancelled') then $5::bigint
+                  when coalesce(observation_requested_at, opened_at)
+                         <= $1 - ($6::bigint * interval '1 millisecond')
+                    then $4::bigint
+                  else $3::bigint
+                end * interval '1 millisecond'
+              )
+          )
+        order by (
+                   status in ('open', 'processing', 'review_required')
+                   and observation_requested_at is not null
+                   and (
+                     last_observed_at is null
+                     or last_observed_at < observation_requested_at
+                   )
+                 ) desc,
+                 coalesce(last_observed_at, opened_at) asc
         for update skip locked
         limit $2
       ),

@@ -498,6 +498,7 @@ export async function runSignalBotRunner(): Promise<void> {
                             ? tradingInternalApi.getFundingSession({
                                 chatId: input.chatId,
                                 contextId: input.contextId,
+                                requestObservation: input.requestObservation,
                                 telegramMessageId: input.telegramMessageId,
                                 telegramUserId: input.telegramUserId,
                                 view: input.view,

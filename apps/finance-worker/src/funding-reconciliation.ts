@@ -65,6 +65,8 @@ type FundingReconciliationResult = {
     retryableErrors: number;
   }> | null;
   delegatedFundingExecution?: Readonly<{
+    providerLookups: number;
+    providerReferencesResolved: number;
     claimed: number;
     submitted: number;
     ambiguous: number;

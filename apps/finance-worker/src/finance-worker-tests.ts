@@ -265,6 +265,22 @@ const tests: TestCase[] = [
       assert.equal(
         job.isNoopResult?.({
           claimed: 0,
+          delegatedFundingExecution: {
+            providerLookups: 1,
+            providerReferencesResolved: 1,
+            claimed: 0,
+            submitted: 0,
+            ambiguous: 0,
+            definitivelyFailed: 0,
+            operationIds: [],
+          },
+        }),
+        false,
+        "a provider-reference resolution is observable worker activity",
+      );
+      assert.equal(
+        job.isNoopResult?.({
+          claimed: 0,
           telegramFundingProgress: {
             candidates: 1,
             created: 1,

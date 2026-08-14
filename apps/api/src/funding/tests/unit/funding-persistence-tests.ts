@@ -174,9 +174,86 @@ const tests: readonly Test[] = [
       );
       assert.match(
         claim,
-        /opened_at <= \$1 - \(\$6::bigint \* interval '1 millisecond'\)[\s\S]*then \$4::bigint/i,
+        /coalesce\(observation_requested_at, opened_at\)[\s\S]*\$6::bigint[\s\S]*then \$4::bigint/i,
+      );
+      assert.match(claim, /last_observed_at < observation_requested_at/i);
+      assert.match(
+        claim,
+        /order by \([\s\S]*last_observed_at < observation_requested_at[\s\S]*\) desc/i,
       );
       assert.match(claim, /set last_observed_at = \$1/i);
+      assert.match(
+        source,
+        /export async function requestFundingReceiveSessionObservation[\s\S]*observation_requested_at = greatest/i,
+      );
+    },
+  },
+  {
+    name: "funding worker projects routed receipts before delegated execution and aggregates the final projection",
+    run: () => {
+      const source = readFileSync(
+        new URL(
+          "../../worker/funding-reconciliation-worker.ts",
+          import.meta.url,
+        ),
+        "utf8",
+      );
+      const routing = source.indexOf("const receiveRouting =");
+      const earlyProjection = source.indexOf(
+        "const earlyTelegramFundingProgress =",
+      );
+      const delegatedExecution = source.indexOf(
+        "const delegatedFundingExecution =",
+      );
+      const finalProjection = source.indexOf(
+        "const finalTelegramFundingProgress =",
+      );
+      assert.ok(
+        routing >= 0 &&
+          earlyProjection > routing &&
+          delegatedExecution > earlyProjection &&
+          finalProjection > delegatedExecution,
+        "queued progress must be projected after routing but before provider execution",
+      );
+      assert.match(
+        source,
+        /earlyTelegramFundingProgress\.created \+[\s\S]*finalTelegramFundingProgress\.created/,
+      );
+      assert.match(
+        source.slice(earlyProjection, delegatedExecution),
+        /\.catch\(\(\) => \(\{ candidates: 0, created: 0, skipped: 0 \}\)\)/,
+        "an early presentation failure must not block provider execution",
+      );
+    },
+  },
+  {
+    name: "Relay recovery keeps unbroadcast retry and provider replay leases distinct",
+    run: () => {
+      const source = readFileSync(
+        new URL(
+          "../../execution/relay-evm-delegated-executor-profile.ts",
+          import.meta.url,
+        ),
+        "utf8",
+      );
+      const recovery = source.slice(
+        source.indexOf("async function recoverRelay"),
+      );
+      assert.ok(recovery.length > 0);
+      assert.equal(
+        recovery.match(
+          /when attempt\.outcome = 'started' then \$2::timestamptz\s+else \$3::timestamptz/giu,
+        )?.length,
+        2,
+        "main and cleanup recovery SQL must use the short lease only for started attempts",
+      );
+      assert.equal(
+        recovery.match(
+          /attempt_outcome === "started"\s+\? input\.recoverUnbroadcastRetryBefore\s+: input\.recoverProviderReplayBefore/gu,
+        )?.length,
+        2,
+        "both recovery lease CAS updates must preserve the same threshold split",
+      );
     },
   },
   {

@@ -1136,14 +1136,40 @@ assert.deepEqual(
     configuration: configuredProfile,
   });
   const internals = driver as unknown as {
-    lookupByReference: () => Promise<null>;
+    lookupByReference: () => Promise<{
+      reference_id: string;
+      transaction_hash: string;
+    } | null>;
     verifyLiveProfile: () => Promise<void>;
   };
+  let profileChecks = 0;
   internals.verifyLiveProfile = async () => {
+    profileChecks += 1;
     throw new PrivyDelegatedFundingProfileInvalidError(
       "profile changed before provider submission",
     );
   };
+  internals.lookupByReference = async () => ({
+    reference_id: "attempt_fresh_vs_recovery_12345678",
+    transaction_hash: HASH_A,
+  });
+  assert.deepEqual(
+    await driver.lookupProviderReference({
+      action: { networkId: "evm:8453" } as never,
+      attemptId: "attempt_fresh_vs_recovery_12345678",
+      operationId: "operation-lookup",
+      profileId: "profile-lookup",
+      stepId: "step-lookup",
+      userId: "user-lookup",
+    }),
+    { kind: "submitted", transactionReference: HASH_A },
+    "read-only provider lookup resolves the exact reference",
+  );
+  assert.equal(
+    profileChecks,
+    0,
+    "read-only provider lookup bypasses the submission profile check",
+  );
   internals.lookupByReference = async () => null;
   assert.equal(
     await driver.inspectWalletProfile({
@@ -1205,6 +1231,7 @@ assert.equal(
     driver: {
       execute: async () => ({ kind: "ambiguous" }),
       recover: async () => ({ kind: "ambiguous" }),
+      lookupProviderReference: async () => ({ kind: "pending" }),
     },
   }).profileId,
   POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
@@ -1216,6 +1243,7 @@ assert.equal(
     driver: {
       execute: async () => ({ kind: "ambiguous" }),
       recover: async () => ({ kind: "ambiguous" }),
+      lookupProviderReference: async () => ({ kind: "pending" }),
     },
   })?.profileId,
   POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,

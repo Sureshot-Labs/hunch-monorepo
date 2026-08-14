@@ -181,6 +181,7 @@ function parseProviderSegments(
 function destinationObservationEvidence(
   supportMetadata: JsonRecord,
   plannerSnapshot: JsonRecord | null,
+  receiveDestinationObservation: JsonRecord | null,
 ): Readonly<{
   locationId: string;
   asset: AssetRef;
@@ -234,7 +235,25 @@ function destinationObservationEvidence(
     spendability && isRecord(spendability.observedAmount)
       ? spendability.observedAmount
       : null;
-  if (!location || !spendability || !observed) {
+  if (location && spendability && observed) {
+    return {
+      locationId: requiredString(
+        location.locationId,
+        "planner destination locationId",
+      ),
+      asset: parseAsset(observed.asset),
+      baselineRaw: requiredString(
+        observed.raw,
+        "planner destination baselineRaw",
+      ),
+      baselineRevision: requiredString(
+        spendability.revision,
+        "planner destination baselineRevision",
+      ),
+    };
+  }
+
+  if (!receiveDestinationObservation) {
     throw new FundingPersistenceError(
       "quote_mismatch",
       "owned route destination lacks a committed or immutable baseline",
@@ -242,17 +261,17 @@ function destinationObservationEvidence(
   }
   return {
     locationId: requiredString(
-      location.locationId,
-      "planner destination locationId",
+      receiveDestinationObservation.locationId,
+      "receive destination locationId",
     ),
-    asset: parseAsset(observed.asset),
+    asset: parseAsset(receiveDestinationObservation.asset),
     baselineRaw: requiredString(
-      observed.raw,
-      "planner destination baselineRaw",
+      receiveDestinationObservation.baselineRaw,
+      "receive destination baselineRaw",
     ),
     baselineRevision: requiredString(
-      spendability.revision,
-      "planner destination baselineRevision",
+      receiveDestinationObservation.baselineRevision,
+      "receive destination baselineRevision",
     ),
   };
 }
@@ -273,6 +292,7 @@ async function loadTarget(
     destination_target_snapshot: JsonRecord;
     operation_support_metadata: JsonRecord;
     planner_snapshot: JsonRecord | null;
+    receive_destination_observation: JsonRecord | null;
     quoted_min_output: JsonRecord;
     requested_destination_amount: JsonRecord | null;
     provider_segments: unknown;
@@ -291,6 +311,8 @@ async function loadTarget(
         operation.destination_target_snapshot,
         operation.support_metadata as operation_support_metadata,
         projection.planner_snapshot,
+        receive_destination_baseline.destination_observation
+          as receive_destination_observation,
         segment.quoted_min_output,
         operation.requested_destination_amount,
         (
@@ -496,6 +518,59 @@ async function loadTarget(
       left join funding_liquidity_projections projection
         on projection.id = quote.discovery_projection_id
        and projection.user_id = operation.user_id
+      left join lateral (
+        select jsonb_build_object(
+          'locationId', immutable_variant.variant ->> 'destinationLocationId',
+          'asset', immutable_variant.variant -> 'asset',
+          'baselineRaw', immutable_variant.variant ->> 'baselineRaw',
+          'baselineRevision',
+            immutable_variant.variant ->> 'baselineRevision',
+          'baselineAsOf', immutable_variant.session_opened_at
+        ) as destination_observation,
+        immutable_variant.session_opened_at as baseline_as_of
+        from (
+          select
+            receive_session.opened_at as session_opened_at,
+            variant,
+            count(*) over () as candidate_count
+          from funding_receive_receipts receive_receipt
+          join funding_receive_sessions receive_session
+            on receive_session.id = receive_receipt.receive_session_id
+           and receive_session.user_id = operation.user_id
+          cross join lateral jsonb_array_elements(
+            receive_session.observation_start_variants
+          ) variant
+          where receive_receipt.id::text =
+                  operation.support_metadata ->> 'fundingReceiveReceiptId'
+            and receive_receipt.child_funding_operation_id = operation.id
+            and receive_receipt.user_id = operation.user_id
+            and variant ->> 'destinationLocationId' =
+                  operation.destination_target_snapshot #>>
+                    '{location,locationId}'
+            and variant #>> '{completion,kind}' =
+                  'direct_destination_credit'
+            and variant #>> '{asset,networkId}' =
+                  operation.destination_target_snapshot #>>
+                    '{location,asset,networkId}'
+            and variant #>> '{asset,decimals}' =
+                  operation.destination_target_snapshot #>>
+                    '{location,asset,decimals}'
+            and funding_account_identifier_equal(
+                  variant #>> '{asset,networkId}',
+                  variant #>> '{asset,assetId}',
+                  operation.destination_target_snapshot #>>
+                    '{location,asset,assetId}'
+                )
+            and funding_account_identifier_equal(
+                  variant #>> '{asset,networkId}',
+                  variant ->> 'destinationAddress',
+                  operation.destination_target_snapshot #>>
+                    '{location,details,address}'
+                )
+        ) immutable_variant
+        where immutable_variant.candidate_count = 1
+        limit 1
+      ) receive_destination_baseline on true
       cross join lateral (
         select coalesce(
           nullif(
@@ -507,7 +582,8 @@ async function loadTarget(
             projection.planner_snapshot #>>
               '{destination,spendability,asOf}',
             ''
-          )::timestamptz
+          )::timestamptz,
+          receive_destination_baseline.baseline_as_of
         ) as baseline_as_of
       ) destination_baseline
       where operation.id = $1
@@ -572,6 +648,7 @@ async function loadTarget(
   const baseline = destinationObservationEvidence(
     row.operation_support_metadata,
     row.planner_snapshot,
+    row.receive_destination_observation,
   );
   const locationAsset = parseAsset(location?.asset);
   if (

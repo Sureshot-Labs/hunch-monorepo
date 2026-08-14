@@ -234,6 +234,7 @@ const internalFundingSessionBodySchema = internalFundingIdentitySchema
   .extend({
     contextId: z.string().uuid(),
     deliveryProjection: z.unknown().optional(),
+    requestObservation: z.boolean().optional(),
     telegramMessageId: z.number().int().positive().nullable().optional(),
     view: z.enum(["address", "delivery", "progress"]).optional(),
   })

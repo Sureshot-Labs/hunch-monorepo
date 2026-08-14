@@ -192,6 +192,13 @@ export async function isFundingReconciliationSchemaReady(
         and exists (
           select 1
           from pg_attribute
+          where attrelid = to_regclass('public.funding_receive_sessions')
+            and attname = 'observation_requested_at'
+            and not attisdropped
+        )
+        and exists (
+          select 1
+          from pg_attribute
           where attrelid =
                   to_regclass('public.telegram_funding_authorizations')
             and attname = 'max_source_raw'
@@ -406,6 +413,20 @@ export async function runFundingReconciliationJob(
       limit: options.limit ?? 25,
       now: options.now,
     });
+    const receiveChanged =
+      receiveObservation.receiptsRecorded > 0 ||
+      receiveObservation.recoveriesRequired > 0 ||
+      receiveRouting.operationsCreated > 0 ||
+      receiveRouting.receiptsReady > 0 ||
+      receiveRouting.recoveriesRequired > 0 ||
+      receiveRouting.reviewsRequired > 0 ||
+      receiveRouting.retriesScheduled > 0;
+    const earlyTelegramFundingProgress = receiveChanged
+      ? await runTelegramFundingProgressProjectionBatch(pool, {
+          limit: options.limit ?? 25,
+          now: options.now,
+        }).catch(() => ({ candidates: 0, created: 0, skipped: 0 }))
+      : { candidates: 0, created: 0, skipped: 0 };
     const delegatedFundingExecution =
       (polymarketWrapProfile || relayEvmProfile) && transactionCodec
         ? await new DelegatedFundingExecutor(pool, {
@@ -420,6 +441,7 @@ export async function runFundingReconciliationJob(
       receiveObservation,
       receiveRouting,
       delegatedFundingExecution,
+      earlyTelegramFundingProgress,
     };
   };
   const directIngressObserver = new DirectIngressDestinationObserver();
@@ -501,12 +523,27 @@ export async function runFundingReconciliationJob(
       destinationPoll: pollDestination,
     });
   }
-  const telegramFundingProgress =
+  const finalTelegramFundingProgress =
     await runTelegramFundingProgressProjectionBatch(pool, {
       limit: options.limit ?? 25,
       now: options.now,
     });
-  return { ...result, ...receive, telegramFundingProgress };
+  const telegramFundingProgress = {
+    candidates:
+      receive.earlyTelegramFundingProgress.candidates +
+      finalTelegramFundingProgress.candidates,
+    created:
+      receive.earlyTelegramFundingProgress.created +
+      finalTelegramFundingProgress.created,
+    skipped:
+      receive.earlyTelegramFundingProgress.skipped +
+      finalTelegramFundingProgress.skipped,
+  };
+  const {
+    earlyTelegramFundingProgress: _earlyTelegramFundingProgress,
+    ...receiveResult
+  } = receive;
+  return { ...result, ...receiveResult, telegramFundingProgress };
 }
 
 export type {

@@ -195,6 +195,14 @@ assert.deepEqual(
         assert.match(sql, /providerUpdatedAt/);
         assert.match(sql, /destinationObservation,baselineAsOf/);
         assert.match(sql, /destination,spendability,asOf/);
+        assert.match(sql, /observation_start_variants/);
+        assert.match(sql, /receive_session\.opened_at/);
+        assert.match(sql, /direct_destination_credit/);
+        assert.match(
+          sql,
+          /receive_receipt\.child_funding_operation_id = operation\.id/,
+        );
+        assert.match(sql, /receive_destination_baseline\.baseline_as_of/);
         assert.match(sql, /coalesce\(/);
         assert.match(sql, /destination_baseline\.baseline_as_of/);
         assert.match(sql, /destinationTransactionReferenceCount/);
@@ -253,6 +261,92 @@ assert.deepEqual(
   { destinationsPolled: 0, destinationSatisfied: false },
 );
 assert.equal(inspectedCompetitionQuery, true);
+
+const receiveBaselineObserver = new OwnedRouteDestinationObserver({
+  observe: async (_pool, loaded) => {
+    assert.equal(loaded.baselineRaw, "500000");
+    assert.equal(loaded.baselineRevision, "immutable-receive-baseline");
+    assert.equal(loaded.destinationLocationId, "limitless-usdc-location");
+    return {
+      observedRaw: "1500000",
+      revision: "destination-after-relay",
+      observedAt: "2026-08-14T17:20:15.873Z",
+    };
+  },
+  persist: async (_pool, input) => {
+    assert.equal(input.target.baselineRaw, "500000");
+    assert.equal(input.target.baselineRevision, "immutable-receive-baseline");
+    return true;
+  },
+});
+assert.deepEqual(
+  await receiveBaselineObserver.pollOperation(
+    {
+      query: async () => ({
+        rows: [
+          {
+            operation_id: target.operationId,
+            user_id: target.userId,
+            purpose: target.purpose,
+            market_id: target.marketId,
+            status: "recovery_required",
+            progress_stage: "source_observed",
+            version: 10,
+            venue_binding_snapshot: {
+              venueBindingOptionId: target.venueBindingOptionId,
+            },
+            destination_target_snapshot: {
+              kind: "owned_location",
+              location: {
+                kind: "venue_account",
+                locationId: target.destinationLocationId,
+                accountId: target.userId,
+                asset: target.asset,
+                details: { address: target.destinationAddress },
+              },
+            },
+            operation_support_metadata: {},
+            planner_snapshot: null,
+            receive_destination_observation: {
+              locationId: target.destinationLocationId,
+              asset: target.asset,
+              baselineRaw: "500000",
+              baselineRevision: "immutable-receive-baseline",
+              baselineAsOf: "2026-08-14T17:19:15.000Z",
+            },
+            quoted_min_output: {
+              asset: target.asset,
+              raw: "1000000",
+            },
+            requested_destination_amount: {
+              asset: target.asset,
+              raw: "1000000",
+            },
+            provider_segments: [
+              {
+                segmentId: target.providerSegments[0]?.segmentId,
+                ordinal: 0,
+                expectedOutput: {
+                  asset: target.asset,
+                  raw: "1000000",
+                },
+                minimumOutput: {
+                  asset: target.asset,
+                  raw: "1000000",
+                },
+                rawStatus: "success",
+                destinationTransactionReferenceCount: 0,
+              },
+            ],
+            competing_count: "0",
+          },
+        ],
+      }),
+    } as unknown as Pool,
+    target.operationId,
+  ),
+  { destinationsPolled: 1, destinationSatisfied: true },
+);
 
 console.log(
   "[funding-owned-route-destination-observer-tests] exact balance delta, baseline-aware competition, and scoped polling passed",

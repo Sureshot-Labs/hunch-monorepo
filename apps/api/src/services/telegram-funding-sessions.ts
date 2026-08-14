@@ -1388,6 +1388,33 @@ export async function appendTelegramFundingConsent(
             "telegram_funding_mutation_replay_invalid",
           );
         }
+        await client.query(
+          `
+            with request_clock as (
+              select clock_timestamp() as requested_at
+            )
+            update funding_receive_sessions receive_session
+            set observation_requested_at = greatest(
+                  coalesce(
+                    receive_session.observation_requested_at,
+                    request_clock.requested_at
+                  ),
+                  request_clock.requested_at
+                ),
+                updated_at = greatest(
+                  receive_session.updated_at,
+                  request_clock.requested_at
+                )
+            from request_clock
+            where receive_session.id = $1
+              and receive_session.user_id = $2
+              and receive_session.status in (
+                    'open', 'processing', 'review_required'
+                  )
+              and receive_session.expires_at > request_clock.requested_at
+          `,
+          [replayContext.receive_session_id, input.userId],
+        );
         return {
           consent: publicConsent(replayConsent),
           context: publicSession(replayContext),
@@ -1630,6 +1657,33 @@ export async function appendTelegramFundingConsent(
         ],
       );
     }
+    await client.query(
+      `
+        with request_clock as (
+          select clock_timestamp() as requested_at
+        )
+        update funding_receive_sessions receive_session
+        set observation_requested_at = greatest(
+              coalesce(
+                receive_session.observation_requested_at,
+                request_clock.requested_at
+              ),
+              request_clock.requested_at
+            ),
+            updated_at = greatest(
+              receive_session.updated_at,
+              request_clock.requested_at
+            )
+        from request_clock
+        where receive_session.id = $1
+          and receive_session.user_id = $2
+          and receive_session.status in (
+                'open', 'processing', 'review_required'
+              )
+          and receive_session.expires_at > request_clock.requested_at
+      `,
+      [contextRow.receive_session_id, input.userId],
+    );
     return {
       consent: publicConsent(consent),
       context: publicSession(nextContext),
