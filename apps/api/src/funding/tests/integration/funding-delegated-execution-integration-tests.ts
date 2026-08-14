@@ -5740,13 +5740,17 @@ try {
         unchangedOwnedRelay.operationId,
       );
       const checksumReallocation = await client.query<{
+        observation_asset: string;
         observation_from: string;
         observation_to: string;
+        receipt_asset: string;
         receipt_from: string;
         receipt_to: string;
       }>(
-        `select observation.from_address as observation_from,
+        `select observation.asset_id as observation_asset,
+                observation.from_address as observation_from,
                 observation.to_address as observation_to,
+                receipt.asset_id as receipt_asset,
                 receipt.source_address as receipt_from,
                 receipt.destination_address as receipt_to
            from funding_observations observation
@@ -5759,6 +5763,10 @@ try {
       const checksumEvidence = checksumReallocation.rows[0];
       assert.ok(checksumEvidence);
       assert.equal(
+        checksumEvidence.observation_asset.toLowerCase(),
+        checksumEvidence.receipt_asset.toLowerCase(),
+      );
+      assert.equal(
         checksumEvidence.observation_from.toLowerCase(),
         checksumEvidence.receipt_from.toLowerCase(),
       );
@@ -5767,9 +5775,10 @@ try {
         checksumEvidence.receipt_to.toLowerCase(),
       );
       assert.ok(
-        checksumEvidence.observation_from !== checksumEvidence.receipt_from ||
+        checksumEvidence.observation_asset !== checksumEvidence.receipt_asset ||
+          checksumEvidence.observation_from !== checksumEvidence.receipt_from ||
           checksumEvidence.observation_to !== checksumEvidence.receipt_to,
-        "fixture must exercise checksum receipt against normalized observation",
+        "fixture must exercise checksum receipt against normalized EVM evidence",
       );
       assert.equal(
         await linkFundingReceiveReceiptOperationInTransaction(client, {

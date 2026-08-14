@@ -2309,7 +2309,16 @@ export async function linkFundingReceiveReceiptOperationInTransaction(
           and observation.operation_id = $5::uuid
           and observation.kind = 'source_credit'
           and observation.network_id = $6
-          and observation.asset_id = $7
+          and (
+            (
+              observation.network_id like 'evm:%'
+              and lower(observation.asset_id) = lower($7)
+            )
+            or (
+              observation.network_id not like 'evm:%'
+              and observation.asset_id = $7
+            )
+          )
           and observation.asset_decimals = $8
           and observation.tx_hash = $9
           and observation.event_index = $10
