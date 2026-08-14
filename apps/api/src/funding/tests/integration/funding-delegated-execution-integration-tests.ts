@@ -5486,6 +5486,60 @@ try {
     parent_status: "in_progress",
     reservation_status: "cleanup_required",
   });
+  const preMaturityParent = await pool.query<{
+    progress_stage: "committed" | "source_action" | "source_observed";
+    status: "in_progress";
+    version: string | number;
+  }>(
+    `select status, progress_stage, version
+       from funding_operations
+      where id = $1::uuid`,
+    [unchangedOwnedRelay.operationId],
+  );
+  const preMaturityParentRow = preMaturityParent.rows[0];
+  assert.ok(preMaturityParentRow);
+  await tx(pool, async (client) => {
+    let version = Number(preMaturityParentRow.version);
+    let stage = preMaturityParentRow.progress_stage;
+    if (stage === "committed") {
+      const sourceAction = await transitionFundingOperationInTransaction(
+        client,
+        {
+          operationId: unchangedOwnedRelay.operationId,
+          scope: { kind: "worker" },
+          expectedVersion: version,
+          expectedState: { status: "in_progress", stage },
+          nextState: { status: "in_progress", stage: "source_action" },
+          now: new Date(cleanupFinalizedAt.getTime() + 15 * 60_000 - 3),
+        },
+      );
+      version = sourceAction.version;
+      stage = "source_action";
+    }
+    if (stage === "source_action") {
+      const sourceObserved = await transitionFundingOperationInTransaction(
+        client,
+        {
+          operationId: unchangedOwnedRelay.operationId,
+          scope: { kind: "worker" },
+          expectedVersion: version,
+          expectedState: { status: "in_progress", stage },
+          nextState: { status: "in_progress", stage: "source_observed" },
+          now: new Date(cleanupFinalizedAt.getTime() + 15 * 60_000 - 2),
+        },
+      );
+      version = sourceObserved.version;
+    }
+    await transitionFundingOperationInTransaction(client, {
+      operationId: unchangedOwnedRelay.operationId,
+      scope: { kind: "worker" },
+      expectedVersion: version,
+      expectedState: { status: "in_progress", stage: "source_observed" },
+      nextState: { status: "recovery_required", stage: "source_observed" },
+      errorCode: "reconciliation_evidence_timeout",
+      now: new Date(cleanupFinalizedAt.getTime() + 15 * 60_000 - 1),
+    });
+  });
   const atCleanupMaturity = await relayExecutor([cleanupZero], () => {
     throw new Error("mature cleanup rebroadcast unexpectedly");
   }).runBatch({

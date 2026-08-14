@@ -2164,6 +2164,7 @@ async function reconcileRelayPostconditions(
       });
     }
   }
+  await terminalizeCompletedRelayCleanupParent(client, now);
 }
 
 async function claimRelayCleanup(
@@ -2976,7 +2977,7 @@ async function terminalizeRelayParentAfterCleanup(
   if (input.cleanupContext === "post_deposit") return;
   const { rows } = await client.query<{
     approval_step_id: string;
-    operation_stage: "committed" | "source_action";
+    operation_stage: "committed" | "source_action" | "source_observed";
     operation_status:
       | "in_progress"
       | "reconcile_required"
@@ -2997,7 +2998,9 @@ async function terminalizeRelayParentAfterCleanup(
         and operation.status in (
               'in_progress', 'reconcile_required', 'recovery_required'
             )
-        and operation.progress_stage in ('committed', 'source_action')
+        and operation.progress_stage in (
+              'committed', 'source_action', 'source_observed'
+            )
       for update of operation, approval_step`,
     [input.parentOperationId, TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID],
   );
@@ -3034,7 +3037,7 @@ async function terminalizeRelayParentAfterCleanup(
       scope: { kind: "worker" },
       expectedVersion: version,
       expectedState: { status, stage },
-      nextState: { status: "reconcile_required", stage: "source_action" },
+      nextState: { status: "reconcile_required", stage },
       errorCode: "relay_allowance_cleanup_completed",
       now: input.now,
     });
@@ -3046,7 +3049,7 @@ async function terminalizeRelayParentAfterCleanup(
       scope: { kind: "worker" },
       expectedVersion: version,
       expectedState: { status, stage },
-      nextState: { status: "reconcile_required", stage: "source_action" },
+      nextState: { status: "reconcile_required", stage },
       errorCode: "relay_allowance_cleanup_completed",
       now: input.now,
     });
@@ -3058,7 +3061,7 @@ async function terminalizeRelayParentAfterCleanup(
       operationId: input.parentOperationId,
       scope: { kind: "worker" },
       expectedVersion: version,
-      expectedState: { status, stage: "source_action" },
+      expectedState: { status, stage },
       nextState: { status: "failed", stage: "terminal" },
       errorCode:
         input.cleanupContext === "approval_exhausted"
@@ -3068,6 +3071,62 @@ async function terminalizeRelayParentAfterCleanup(
       now: input.now,
     });
   }
+}
+
+async function terminalizeCompletedRelayCleanupParent(
+  client: PoolClient,
+  now: Date,
+): Promise<void> {
+  const { rows } = await client.query<{
+    cleanup_context: Exclude<RelayCleanupContext, "post_deposit">;
+    cleanup_operation_id: string;
+    parent_operation_id: string;
+    resolution_evidence: JsonRecord;
+  }>(
+    `select cleanup.id as cleanup_operation_id,
+            parent.id as parent_operation_id,
+            cleanup_step.action_validation_result ->> 'cleanupContext'
+              as cleanup_context,
+            reservation.resolution_evidence
+       from telegram_funding_authorization_reservations reservation
+       join funding_operations cleanup
+         on cleanup.id = reservation.cleanup_operation_id
+        and cleanup.status = 'completed'
+        and cleanup.progress_stage = 'terminal'
+       join funding_operation_steps cleanup_step
+         on cleanup_step.operation_id = cleanup.id
+        and cleanup_step.executor_id = $1
+        and cleanup_step.action_validation_result ->> 'relayStepKind' =
+              'cleanup'
+        and cleanup_step.action_validation_result ->> 'cleanupContext' in (
+              'approval_exhausted', 'pre_deposit_failure'
+            )
+       join funding_operations parent
+         on parent.id = reservation.funding_operation_id
+        and parent.status in (
+              'in_progress', 'reconcile_required', 'recovery_required'
+            )
+        and parent.progress_stage in (
+              'committed', 'source_action', 'source_observed'
+            )
+      where reservation.status = 'cleaned'
+        and reservation.resolved_at is not null
+      order by reservation.resolved_at, reservation.id
+      limit 1`,
+    [TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID],
+  );
+  const row = rows[0];
+  if (!row) return;
+  await terminalizeRelayParentAfterCleanup(client, {
+    cleanupContext: row.cleanup_context,
+    parentOperationId: row.parent_operation_id,
+    now,
+    evidence: {
+      ...row.resolution_evidence,
+      cleanupOperationId: row.cleanup_operation_id,
+      cleanupParentRepairCompletedAt: now.toISOString(),
+    },
+  });
 }
 
 async function finalizeRelayAlreadySatisfiedInTransaction(
