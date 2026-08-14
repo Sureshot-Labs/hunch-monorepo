@@ -12,7 +12,10 @@ import type {
 import { FundingPlanningRuntime } from "../funding/planner/runtime-service.js";
 import { FundingPlannerError } from "../funding/planner/money.js";
 import { canonicalJsonHash } from "../funding/persistence/canonical.js";
-import { listFundingReceiveRoutingReceiptIdsAfterBroadcastBoundary } from "../funding/persistence/funding-receive-session-repository.js";
+import {
+  listFundingReceiveRoutingReceiptIdsAfterBroadcastBoundary,
+  requestFundingReceiveSessionObservation,
+} from "../funding/persistence/funding-receive-session-repository.js";
 import { lockFundingPolicyForTransaction } from "../funding/policies/funding-policy-service.js";
 import { FundingReceiveSessionService } from "../funding/receive/receive-session-service.js";
 import type { DelegatedFundingPreBroadcastDecision } from "../funding/execution/delegated-funding-capability.js";
@@ -1760,12 +1763,20 @@ export class TelegramFundingService {
     input: TelegramFundingIdentityInput & {
       contextId: string;
       deliveryProjection?: unknown;
+      requestObservation?: boolean;
       view?: "address" | "delivery" | "progress";
     },
     now = new Date(),
     decorateProgress?: TelegramFundingProgressDecorator,
   ): Promise<TelegramFundingMessage> {
     const owned = await this.loadOwned(input);
+    if (input.requestObservation === true) {
+      await requestFundingReceiveSessionObservation(this.pool, {
+        now,
+        receiveSessionId: owned.context.receiveSessionId,
+        userId: owned.link.userId,
+      });
+    }
     const frozenPresentationMode = owned.consent
       ? (resolveTelegramFundingConsentRoute(owned.consent)?.mode ?? null)
       : null;
@@ -1997,6 +2008,12 @@ export class TelegramFundingService {
         requestFingerprint,
       });
       if (replay) {
+        const replayOwned = await this.loadOwned(input);
+        await requestFundingReceiveSessionObservation(this.pool, {
+          now,
+          receiveSessionId: replayOwned.context.receiveSessionId,
+          userId: replayOwned.link.userId,
+        });
         await this.projectMutationContext(input.contextId, now);
         return this.session(
           {

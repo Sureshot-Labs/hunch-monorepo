@@ -2495,8 +2495,8 @@ async function claimRelay(
 async function recoverRelay(
   client: PoolClient,
   input: Readonly<{
-    recoverStartedBefore: Date;
-    recoverUnbroadcastStartedBefore: Date;
+    recoverProviderReplayBefore: Date;
+    recoverUnbroadcastRetryBefore: Date;
     now: Date;
   }>,
 ): Promise<DelegatedFundingRecoveryClaim | null> {
@@ -2573,14 +2573,18 @@ async function recoverRelay(
              and step.state in ('reconcile_required', 'recovery_required')
            )
          )
-         and attempt.updated_at <= $2::timestamptz
+         and attempt.updated_at <= case
+               when attempt.outcome = 'started' then $2::timestamptz
+               else $3::timestamptz
+             end
          and operation.status not in ('completed', 'refunded', 'failed', 'cancelled')
        order by attempt.updated_at, attempt.id
        for update of attempt, step, operation, reservation skip locked
        limit 1`,
     [
       TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
-      input.recoverUnbroadcastStartedBefore,
+      input.recoverUnbroadcastRetryBefore,
+      input.recoverProviderReplayBefore,
     ],
   );
   const row = rows[0];
@@ -2638,7 +2642,10 @@ async function recoverRelay(
                    )
              )
            )
-           and attempt.updated_at <= $2::timestamptz
+           and attempt.updated_at <= case
+                 when attempt.outcome = 'started' then $2::timestamptz
+                 else $3::timestamptz
+               end
            and cleanup_operation.status not in (
                  'completed', 'refunded', 'failed', 'cancelled'
                )
@@ -2648,7 +2655,8 @@ async function recoverRelay(
          limit 1`,
       [
         TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
-        input.recoverUnbroadcastStartedBefore,
+        input.recoverUnbroadcastRetryBefore,
+        input.recoverProviderReplayBefore,
       ],
     );
     const cleanupRow = cleanup.rows[0];
@@ -2667,7 +2675,13 @@ async function recoverRelay(
         where id = $1
           and outcome in ('started', 'ambiguous')
           and updated_at <= $3`,
-      [cleanupRow.attempt_id, input.now, input.recoverUnbroadcastStartedBefore],
+      [
+        cleanupRow.attempt_id,
+        input.now,
+        cleanupRow.attempt_outcome === "started"
+          ? input.recoverUnbroadcastRetryBefore
+          : input.recoverProviderReplayBefore,
+      ],
     );
     if (leasedCleanup.rowCount !== 1) return null;
     const parsedCleanup = normalizedActionSchema.safeParse(
@@ -2702,7 +2716,13 @@ async function recoverRelay(
     `update funding_operation_step_attempts
         set updated_at = $2
       where id = $1 and outcome in ('started', 'ambiguous') and updated_at <= $3`,
-    [row.attempt_id, input.now, input.recoverUnbroadcastStartedBefore],
+    [
+      row.attempt_id,
+      input.now,
+      row.attempt_outcome === "started"
+        ? input.recoverUnbroadcastRetryBefore
+        : input.recoverProviderReplayBefore,
+    ],
   );
   if (leased.rowCount !== 1) return null;
   const parsed = normalizedActionSchema.safeParse(row.normalized_action);

@@ -47,10 +47,9 @@ import {
 import { lockTelegramFundingLinkLifecycle } from "./telegram-funding-link-lifecycle-lock.js";
 import { lockFundingControllerWallet } from "./funding-controller-wallet-lock.js";
 import {
-  DELEGATED_NONBROADCAST_RECOVERY_MS,
-  DELEGATED_PROVIDER_EVIDENCE_RECOVERY_CLAIM_KEY,
-  DELEGATED_PROVIDER_EVIDENCE_RECOVERY_MS,
-  DELEGATED_PROVIDER_RECOVERY_MS,
+  DELEGATED_PROVIDER_LOOKUP_DELAY_MS,
+  DELEGATED_PROVIDER_REPLAY_MS,
+  DELEGATED_UNBROADCAST_RETRY_MS,
 } from "./delegated-funding-recovery-policy.js";
 
 type JsonRecord = Readonly<Record<string, JsonValue>>;
@@ -87,6 +86,19 @@ export type DelegatedFundingExecutionClaim = Readonly<{
 
 export type DelegatedFundingRecoveryClaim = DelegatedFundingExecutionClaim;
 
+export type DelegatedFundingProviderLookupClaim = Readonly<{
+  action: NormalizedAction;
+  attemptId: string;
+  operationId: string;
+  profileId: string;
+  stepId: string;
+  userId: string;
+}>;
+
+export type DelegatedFundingProviderLookupResult =
+  | Readonly<{ kind: "submitted"; transactionReference: string }>
+  | Readonly<{ kind: "pending" }>;
+
 export type DelegatedFundingProfileClaim =
   | Readonly<{
       kind: "execution";
@@ -113,6 +125,9 @@ export type DelegatedFundingNetworkDriver = Readonly<{
   recover: (
     claim: DelegatedFundingRecoveryClaim,
   ) => Promise<DelegatedFundingExecutionResult>;
+  lookupProviderReference: (
+    claim: DelegatedFundingProviderLookupClaim,
+  ) => Promise<DelegatedFundingProviderLookupResult>;
 }>;
 
 type ResolvedFundingPolicy = Awaited<ReturnType<typeof resolveFundingPolicy>>;
@@ -143,8 +158,8 @@ export type DelegatedFundingRuntimeProfile = Readonly<{
   recoverInTransaction: (
     client: PoolClient,
     input: Readonly<{
-      recoverStartedBefore: Date;
-      recoverUnbroadcastStartedBefore: Date;
+      recoverProviderReplayBefore: Date;
+      recoverUnbroadcastRetryBefore: Date;
       now: Date;
     }>,
   ) => Promise<DelegatedFundingRecoveryClaim | null>;
@@ -710,8 +725,8 @@ async function claimPolymarketWrapInTransaction(
 async function recoverPolymarketWrapInTransaction(
   client: PoolClient,
   input: Readonly<{
-    recoverStartedBefore: Date;
-    recoverUnbroadcastStartedBefore: Date;
+    recoverProviderReplayBefore: Date;
+    recoverUnbroadcastRetryBefore: Date;
     now: Date;
   }>,
 ): Promise<DelegatedFundingRecoveryClaim | null> {
@@ -719,7 +734,6 @@ async function recoverPolymarketWrapInTransaction(
     Omit<ClaimRow, "telegram_account_id"> & {
       attempt_id: string;
       attempt_outcome: "started" | "ambiguous";
-      evidence_recovery: boolean;
       telegram_account_id: string | null;
     }
   >(
@@ -727,31 +741,6 @@ async function recoverPolymarketWrapInTransaction(
       select
         attempt.id as attempt_id,
         attempt.outcome as attempt_outcome,
-        (
-          attempt.outcome = 'ambiguous'
-          and attempt.reference_kind = 'provider_receipt'
-          and not (attempt.actual_costs ? $4::text)
-          and exists (
-            select 1
-            from funding_receive_receipts destination_receipt
-            where destination_receipt.receive_session_id =
-                    receipt.receive_session_id
-              and destination_receipt.user_id = receipt.user_id
-              and destination_receipt.id <> receipt.id
-              and lower(destination_receipt.destination_address) =
-                    lower(receipt.destination_address)
-              and destination_receipt.status = 'ready'
-              and destination_receipt.handling = 'direct'
-              and destination_receipt.network_id =
-                    funding_authorization.destination_network_id
-              and lower(destination_receipt.asset_id) =
-                    lower(funding_authorization.destination_asset_id)
-              and destination_receipt.asset_decimals =
-                    funding_authorization.destination_asset_decimals
-              and destination_receipt.raw_amount = receipt.raw_amount
-              and destination_receipt.observed_at >= attempt.finished_at
-          )
-        ) as evidence_recovery,
         operation.id as operation_id,
         operation.user_id,
         operation.policy_version,
@@ -829,38 +818,10 @@ async function recoverPolymarketWrapInTransaction(
             )
           )
         )
-        and (
-          attempt.updated_at <= case
-            when attempt.outcome = 'started' then $5::timestamptz
-            else $2::timestamptz
-          end
-          or (
-            attempt.finished_at <= $3
-            and attempt.outcome = 'ambiguous'
-            and attempt.reference_kind = 'provider_receipt'
-            and not (attempt.actual_costs ? $4::text)
-            and exists (
-              select 1
-              from funding_receive_receipts destination_receipt
-              where destination_receipt.receive_session_id =
-                      receipt.receive_session_id
-                and destination_receipt.user_id = receipt.user_id
-                and destination_receipt.id <> receipt.id
-                and lower(destination_receipt.destination_address) =
-                      lower(receipt.destination_address)
-                and destination_receipt.status = 'ready'
-                and destination_receipt.handling = 'direct'
-                and destination_receipt.network_id =
-                      funding_authorization.destination_network_id
-                and lower(destination_receipt.asset_id) =
-                      lower(funding_authorization.destination_asset_id)
-                and destination_receipt.asset_decimals =
-                      funding_authorization.destination_asset_decimals
-                and destination_receipt.raw_amount = receipt.raw_amount
-                and destination_receipt.observed_at >= attempt.finished_at
-            )
-          )
-        )
+        and attempt.updated_at <= case
+              when attempt.outcome = 'started' then $2::timestamptz
+              else $3::timestamptz
+            end
         and step.executor_id = $1
         and operation.status not in (
           'completed', 'refunded', 'failed', 'cancelled'
@@ -871,52 +832,28 @@ async function recoverPolymarketWrapInTransaction(
     `,
     [
       POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
-      input.recoverStartedBefore,
-      new Date(input.now.getTime() - DELEGATED_PROVIDER_EVIDENCE_RECOVERY_MS),
-      DELEGATED_PROVIDER_EVIDENCE_RECOVERY_CLAIM_KEY,
-      input.recoverUnbroadcastStartedBefore,
+      input.recoverUnbroadcastRetryBefore,
+      input.recoverProviderReplayBefore,
     ],
   );
   const row = rows[0];
   if (!row) return null;
-  const leased = row.evidence_recovery
-    ? await client.query(
-        `
-          update funding_operation_step_attempts
-          set updated_at = $2,
-              actual_costs = actual_costs ||
-                jsonb_build_object($4::text, $2::timestamptz)
-          where id = $1
-            and outcome = 'ambiguous'
-            and reference_kind = 'provider_receipt'
-            and finished_at <= $3
-            and not (actual_costs ? $4::text)
-        `,
-        [
-          row.attempt_id,
-          input.now,
-          new Date(
-            input.now.getTime() - DELEGATED_PROVIDER_EVIDENCE_RECOVERY_MS,
-          ),
-          DELEGATED_PROVIDER_EVIDENCE_RECOVERY_CLAIM_KEY,
-        ],
-      )
-    : await client.query(
-        `
-          update funding_operation_step_attempts
-          set updated_at = $2
-          where id = $1
-            and outcome in ('started', 'ambiguous')
-            and updated_at <= $3
-        `,
-        [
-          row.attempt_id,
-          input.now,
-          row.attempt_outcome === "started"
-            ? input.recoverUnbroadcastStartedBefore
-            : input.recoverStartedBefore,
-        ],
-      );
+  const leased = await client.query(
+    `
+      update funding_operation_step_attempts
+      set updated_at = $2
+      where id = $1
+        and outcome in ('started', 'ambiguous')
+        and updated_at <= $3
+    `,
+    [
+      row.attempt_id,
+      input.now,
+      row.attempt_outcome === "started"
+        ? input.recoverUnbroadcastRetryBefore
+        : input.recoverProviderReplayBefore,
+    ],
+  );
   if (leased.rowCount !== 1) {
     throw new Error("delegated funding recovery lease was lost");
   }
@@ -941,6 +878,8 @@ async function recoverPolymarketWrapInTransaction(
 }
 
 export type DelegatedFundingExecutorBatchResult = Readonly<{
+  providerLookups: number;
+  providerReferencesResolved: number;
   claimed: number;
   recovered: number;
   softPaused: number;
@@ -951,6 +890,67 @@ export type DelegatedFundingExecutorBatchResult = Readonly<{
   pending: number;
   operationIds: readonly string[];
 }>;
+
+type DelegatedFundingProviderLookupRow = Readonly<{
+  action_fingerprint: string;
+  attempt_id: string;
+  normalized_action: JsonRecord;
+  operation_id: string;
+  profile_id: string;
+  provider_reference_lookup_hmac: string;
+  step_id: string;
+  user_id: string;
+}>;
+
+async function listDelegatedFundingProviderLookupClaims(
+  pool: Pick<Pool, "query">,
+  input: Readonly<{
+    limit: number;
+    lookupDueBefore: Date;
+    profileIds: readonly string[];
+  }>,
+): Promise<readonly DelegatedFundingProviderLookupRow[]> {
+  if (input.profileIds.length === 0) return [];
+  const { rows } = await pool.query<DelegatedFundingProviderLookupRow>(
+    `
+      select
+        attempt_row.id as attempt_id,
+        attempt_row.receipt_ref_lookup_hmac
+          as provider_reference_lookup_hmac,
+        step_row.id as step_id,
+        step_row.operation_id,
+        step_row.executor_id as profile_id,
+        step_row.action_fingerprint,
+        step_row.normalized_action,
+        operation_row.user_id
+      from funding_operation_step_attempts attempt_row
+      join funding_operation_steps step_row
+        on step_row.id = attempt_row.step_id
+       and step_row.executor_id = attempt_row.executor_id
+      join funding_operations operation_row
+        on operation_row.id = step_row.operation_id
+      where step_row.executor_id = any($1::text[])
+        and attempt_row.outcome = 'ambiguous'
+        and attempt_row.broadcast_may_have_occurred
+        and attempt_row.reference_kind = 'provider_receipt'
+        and attempt_row.receipt_ref_ciphertext is not null
+        and attempt_row.receipt_ref_lookup_hmac is not null
+        and attempt_row.lookup_key_version is not null
+        and attempt_row.finished_at is not null
+        and attempt_row.finished_at <= $2
+        and attempt_row.canonical_action_fingerprint =
+              step_row.action_fingerprint
+        and step_row.state in ('reconcile_required', 'recovery_required')
+        and operation_row.status not in (
+              'completed', 'refunded', 'failed', 'cancelled'
+            )
+      order by attempt_row.finished_at, attempt_row.id
+      limit $3
+    `,
+    [input.profileIds, input.lookupDueBefore, input.limit],
+  );
+  return rows;
+}
 
 export function delegatedFundingProfileOrder<T>(
   profiles: readonly T[],
@@ -1178,7 +1178,9 @@ export class DelegatedFundingExecutor {
     private readonly input: Readonly<{
       profiles: readonly DelegatedFundingRuntimeProfile[];
       referenceCodec: FundingTransactionReferenceCodec;
-      startedAttemptRecoveryMs?: number;
+      providerLookupDelayMs?: number;
+      providerReplayMs?: number;
+      unbroadcastRetryMs?: number;
     }>,
   ) {
     const seen = new Set<string>();
@@ -1197,8 +1199,126 @@ export class DelegatedFundingExecutor {
     }
   }
 
+  private async lookupProviderReferences(
+    input: Readonly<{
+      limit: number;
+      now: Date;
+      profiles: readonly DelegatedFundingRuntimeProfile[];
+    }>,
+  ): Promise<
+    Readonly<{
+      operationIds: readonly string[];
+      providerLookups: number;
+      providerReferencesResolved: number;
+    }>
+  > {
+    const profileById = new Map(
+      input.profiles.map((profile) => [profile.profileId, profile]),
+    );
+    const lookupDelayMs = Math.max(
+      1,
+      this.input.providerLookupDelayMs ?? DELEGATED_PROVIDER_LOOKUP_DELAY_MS,
+    );
+    const rows = await listDelegatedFundingProviderLookupClaims(this.pool, {
+      limit: input.limit,
+      lookupDueBefore: new Date(input.now.getTime() - lookupDelayMs),
+      profileIds: [...profileById.keys()],
+    });
+    let providerLookups = 0;
+    let providerReferencesResolved = 0;
+    const operationIds: string[] = [];
+    await Promise.all(
+      rows.map(async (row) => {
+        const runtime = profileById.get(row.profile_id);
+        const parsed = normalizedActionSchema.safeParse(row.normalized_action);
+        if (
+          !runtime ||
+          !parsed.success ||
+          canonicalJsonHash(parsed.data) !== row.action_fingerprint
+        ) {
+          return;
+        }
+        const providerReferenceLookupHmac =
+          this.input.referenceCodec.fingerprint(row.attempt_id);
+        if (
+          providerReferenceLookupHmac !== row.provider_reference_lookup_hmac
+        ) {
+          return;
+        }
+        providerLookups += 1;
+        let lookup: DelegatedFundingProviderLookupResult;
+        try {
+          lookup = await runtime.driver.lookupProviderReference({
+            action: parsed.data as NormalizedAction,
+            attemptId: row.attempt_id,
+            operationId: row.operation_id,
+            profileId: row.profile_id,
+            stepId: row.step_id,
+            userId: row.user_id,
+          });
+        } catch {
+          return;
+        }
+        if (lookup.kind !== "submitted") return;
+        const transactionReference = lookup.transactionReference.trim();
+        if (!runtime.validateSubmittedReference(transactionReference)) return;
+        try {
+          await tx(this.pool, (client) =>
+            resolveAmbiguousProviderFundingStepAttemptForUserInTransaction(
+              client,
+              {
+                userId: row.user_id,
+                operationId: row.operation_id,
+                stepId: row.step_id,
+                attemptId: row.attempt_id,
+                providerReferenceLookupHmac,
+                resolution: {
+                  kind: "transaction",
+                  receiptRefCiphertext:
+                    this.input.referenceCodec.encrypt(transactionReference),
+                  receiptRefLookupHmac:
+                    this.input.referenceCodec.fingerprint(transactionReference),
+                  lookupKeyVersion: this.input.referenceCodec.keyVersion,
+                },
+                now: input.now,
+              },
+            ),
+          );
+        } catch (error) {
+          if (
+            error instanceof FundingPersistenceError &&
+            error.code === "invalid_state_transition"
+          ) {
+            return;
+          }
+          throw error;
+        }
+        providerReferencesResolved += 1;
+        operationIds.push(row.operation_id);
+      }),
+    );
+    return {
+      operationIds,
+      providerLookups,
+      providerReferencesResolved,
+    };
+  }
+
   async runBatch(options: Readonly<{ limit?: number; now?: Date }> = {}) {
+    const limit = Math.max(1, Math.min(options.limit ?? 25, 100));
+    const profiles = delegatedFundingProfileOrder(
+      this.input.profiles,
+      this.nextProfileIndex,
+    );
+    const batchNow = options.now ?? new Date();
+    const providerLookup = await this.lookupProviderReferences({
+      limit,
+      now: batchNow,
+      profiles,
+    });
     const result = {
+      providerLookups: providerLookup.providerLookups,
+      providerReferencesResolved: providerLookup.providerReferencesResolved,
       claimed: 0,
       recovered: 0,
       softPaused: 0,
@@ -1207,13 +1327,8 @@ export class DelegatedFundingExecutor {
       ambiguous: 0,
       definitivelyFailed: 0,
       pending: 0,
-      operationIds: [] as string[],
+      operationIds: [...providerLookup.operationIds],
     };
-    const limit = Math.max(1, Math.min(options.limit ?? 25, 100));
-    const profiles = delegatedFundingProfileOrder(
-      this.input.profiles,
-      this.nextProfileIndex,
-    );
     const exhausted = new Set<string>();
     while (result.claimed < limit && exhausted.size < profiles.length) {
       for (const runtime of profiles) {
@@ -1221,21 +1336,22 @@ export class DelegatedFundingExecutor {
           continue;
         }
         const now = options.now ?? new Date();
-        const recoveryMs = Math.max(
+        const providerReplayMs = Math.max(
           1,
-          this.input.startedAttemptRecoveryMs ?? DELEGATED_PROVIDER_RECOVERY_MS,
+          this.input.providerReplayMs ?? DELEGATED_PROVIDER_REPLAY_MS,
         );
-        const nonbroadcastRecoveryMs = Math.max(
+        const unbroadcastRetryMs = Math.max(
           1,
-          this.input.startedAttemptRecoveryMs ??
-            DELEGATED_NONBROADCAST_RECOVERY_MS,
+          this.input.unbroadcastRetryMs ?? DELEGATED_UNBROADCAST_RETRY_MS,
         );
         const recovery = await tx(this.pool, (client) =>
           runtime.recoverInTransaction(client, {
             now,
-            recoverStartedBefore: new Date(now.getTime() - recoveryMs),
-            recoverUnbroadcastStartedBefore: new Date(
-              now.getTime() - nonbroadcastRecoveryMs,
+            recoverProviderReplayBefore: new Date(
+              now.getTime() - providerReplayMs,
+            ),
+            recoverUnbroadcastRetryBefore: new Date(
+              now.getTime() - unbroadcastRetryMs,
             ),
           }),
         );

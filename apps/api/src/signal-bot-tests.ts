@@ -9791,6 +9791,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         };
       };
       const events: Array<Record<string, unknown>> = [];
+      let observationRequested = false;
       const handled = await handleSignalBotMenuCallback({
         callbackQuery: {
           data: "hm:v1:fund:refresh:123e4567-e89b-42d3-a456-426614174000",
@@ -9809,19 +9810,22 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
             rows: [{ link_id: "link-1", user_id: "user-1" }],
           }),
         } as never,
-        loadFunding: async () => ({
-          reply_markup: {
-            inline_keyboard: [
-              [
-                {
-                  callback_data: "hm:v1:home",
-                  text: "🏠 Home",
-                },
+        loadFunding: async (input) => {
+          observationRequested = input.requestObservation === true;
+          return {
+            reply_markup: {
+              inline_keyboard: [
+                [
+                  {
+                    callback_data: "hm:v1:home",
+                    text: "🏠 Home",
+                  },
+                ],
               ],
-            ],
-          },
-          text: "Current funding progress",
-        }),
+            },
+            text: "Current funding progress",
+          };
+        },
         onFundingMenuDelivery: (event) => events.push(event),
         redis,
         sendTestSignal: async () => false,
@@ -9829,6 +9833,11 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       });
       assert.equal(handled, true);
       assert.deepEqual(events, [{ action: "session", outcome: "ambiguous" }]);
+      assert.equal(
+        observationRequested,
+        true,
+        "an explicit Refresh requests a receive-session observation",
+      );
       assert.equal(telegram.messages.length, 0);
       assert.equal(
         telegram.edits[0]?.reply_markup?.inline_keyboard
@@ -9909,6 +9918,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       });
       const events: Array<Record<string, unknown>> = [];
       const operationEvents: Array<Record<string, unknown>> = [];
+      let observationRequested = false;
       const handled = await handleSignalBotMenuCallback({
         callbackQuery: {
           data: "hm:v1:fund:qr:123e4567-e89b-42d3-a456-426614174000",
@@ -9927,11 +9937,14 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
             rows: [{ link_id: "link-1", user_id: "user-1" }],
           }),
         } as never,
-        loadFunding: async () => ({
-          qrText: "0x1111111111111111111111111111111111111111",
-          text: "Verified receive address",
-          venue: "polymarket",
-        }),
+        loadFunding: async (input) => {
+          observationRequested = input.requestObservation === true;
+          return {
+            qrText: "0x1111111111111111111111111111111111111111",
+            text: "Verified receive address",
+            venue: "polymarket",
+          };
+        },
         onFundingMenuDelivery: (event) => events.push(event),
         onFundingMenuOperationError: (event) => operationEvents.push(event),
         redis,
@@ -9939,6 +9952,11 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         telegram,
       });
       assert.equal(handled, true);
+      assert.equal(
+        observationRequested,
+        false,
+        "opening the QR/address view must not heat the receive observer",
+      );
       assert.equal(photoCalls, 0);
       assert.equal(telegram.edits.length, 1);
       assert.match(telegram.edits[0]?.text ?? "", /Receive unavailable/u);

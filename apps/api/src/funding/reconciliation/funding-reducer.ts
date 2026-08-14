@@ -11,11 +11,7 @@ import {
 import { parseMoneyJson } from "../domain/money-json.js";
 import type { JsonValue } from "../domain/types.js";
 import { canonicalAssetId, sameAsset } from "../domain/asset-identity.js";
-import {
-  DELEGATED_PROVIDER_EVIDENCE_RECOVERY_CLAIM_KEY,
-  DELEGATED_PROVIDER_EVIDENCE_RECOVERY_MS,
-  DELEGATED_PROVIDER_RECOVERY_MS,
-} from "../execution/delegated-funding-recovery-policy.js";
+import { DELEGATED_PROVIDER_REPLAY_MS } from "../execution/delegated-funding-recovery-policy.js";
 import {
   claimFundingReconciliationJobs,
   fetchFundingOperationForWorkerInTransaction,
@@ -1340,53 +1336,7 @@ async function fundingReconciliationWaitState(
         (
           select min(
             attempt.updated_at +
-            case
-              when step.executor_id =
-                     'polymarket_deposit_usdce_wrap_v1'
-               and attempt.finished_at is not null
-               and not (attempt.actual_costs ? $4::text)
-               and exists (
-                 select 1
-                 from funding_operations operation
-                 join funding_receive_receipts source_receipt
-                   on source_receipt.id::text =
-                        operation.support_metadata ->>
-                          'fundingReceiveReceiptId'
-                  and source_receipt.child_funding_operation_id = operation.id
-                  and source_receipt.user_id = operation.user_id
-                 join telegram_funding_authorizations funding_authorization
-                   on funding_authorization.id::text =
-                        operation.support_metadata ->> 'fundingAuthorizationId'
-                  and funding_authorization.user_id = operation.user_id
-                 where operation.id = step.operation_id
-                   and exists (
-                     select 1
-                     from funding_receive_receipts destination_receipt
-                     where destination_receipt.receive_session_id =
-                             source_receipt.receive_session_id
-                       and destination_receipt.user_id = source_receipt.user_id
-                       and destination_receipt.id <> source_receipt.id
-                       and lower(destination_receipt.destination_address) =
-                             lower(source_receipt.destination_address)
-                       and destination_receipt.status = 'ready'
-                       and destination_receipt.handling = 'direct'
-                       and destination_receipt.network_id =
-                             funding_authorization.destination_network_id
-                       and lower(destination_receipt.asset_id) = lower(
-                             funding_authorization.destination_asset_id
-                           )
-                       and destination_receipt.asset_decimals =
-                             funding_authorization.destination_asset_decimals
-                       and destination_receipt.raw_amount =
-                             source_receipt.raw_amount
-                       and destination_receipt.observed_at >=
-                             attempt.finished_at
-                   )
-               )
-              then attempt.finished_at - attempt.updated_at +
-                   $2::double precision * interval '1 millisecond'
-              else $3::double precision * interval '1 millisecond'
-            end
+            $2::double precision * interval '1 millisecond'
           )
           from funding_operation_steps step
           join funding_operation_step_attempts attempt
@@ -1398,12 +1348,7 @@ async function fundingReconciliationWaitState(
             and attempt.reference_kind = 'provider_receipt'
         ) as provider_reference_recovery_at
     `,
-    [
-      operationId,
-      DELEGATED_PROVIDER_EVIDENCE_RECOVERY_MS,
-      DELEGATED_PROVIDER_RECOVERY_MS,
-      DELEGATED_PROVIDER_EVIDENCE_RECOVERY_CLAIM_KEY,
-    ],
+    [operationId, DELEGATED_PROVIDER_REPLAY_MS],
   );
   return {
     awaitingProviderReference: Boolean(

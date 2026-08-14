@@ -143,7 +143,8 @@ const db = {
           params[0].includes("0206_telegram_funding_wallet_retention.sql") &&
           params[0].includes("0207_telegram_funding_owner_delivery.sql") &&
           params[0].includes("0208_relay_evm_delegated_funding.sql") &&
-          params[0].includes("0211_funding_receive_receipt_rearm.sql"),
+          params[0].includes("0211_funding_receive_receipt_rearm.sql") &&
+          params[0].includes("0214_funding_receive_observation_wake.sql"),
       );
       return { rows: [] };
     }
@@ -190,6 +191,7 @@ assert.deepEqual(report.blockers, [
   "0207 Telegram funding owner delivery migration is not recorded",
   "0208 Relay EVM delegated funding migration is not recorded",
   "0211 funding receipt rearm migration is not recorded",
+  "0214 funding receive observation wake migration is not recorded",
 ]);
 assert.equal(report.latestMigration, "0182_telegram_bot_action_outbox.sql");
 assert.equal(report.bridgeOrders.total, 256);
@@ -336,6 +338,7 @@ assert.deepEqual(ready.blockers, [
   "0207 Telegram funding owner delivery migration is not recorded",
   "0208 Relay EVM delegated funding migration is not recorded",
   "0211 funding receipt rearm migration is not recorded",
+  "0214 funding receive observation wake migration is not recorded",
 ]);
 assert.equal(ready.telegramOpenMutationConstraints, true);
 
@@ -354,6 +357,7 @@ assert.deepEqual(missingMigration.blockers, [
   "0207 Telegram funding owner delivery migration is not recorded",
   "0208 Relay EVM delegated funding migration is not recorded",
   "0211 funding receipt rearm migration is not recorded",
+  "0214 funding receive observation wake migration is not recorded",
 ]);
 
 const recordedWithoutConstraint = await inspectFundingMigrationPreflight(
@@ -370,6 +374,7 @@ assert.deepEqual(recordedWithoutConstraint.blockers, [
   "0207 Telegram funding owner delivery migration is not recorded",
   "0208 Relay EVM delegated funding migration is not recorded",
   "0211 funding receipt rearm migration is not recorded",
+  "0214 funding receive observation wake migration is not recorded",
   "0201 is recorded but telegram_funding_mutations open constraints are incomplete",
 ]);
 
@@ -387,6 +392,7 @@ assert.deepEqual(recordedWithOldShapeConstraint.blockers, [
   "0207 Telegram funding owner delivery migration is not recorded",
   "0208 Relay EVM delegated funding migration is not recorded",
   "0211 funding receipt rearm migration is not recorded",
+  "0214 funding receive observation wake migration is not recorded",
   "0201 is recorded but telegram_funding_mutations open constraints are incomplete",
 ]);
 
@@ -405,6 +411,7 @@ assert.deepEqual(constraintWithoutLedger.blockers, [
   "0207 Telegram funding owner delivery migration is not recorded",
   "0208 Relay EVM delegated funding migration is not recorded",
   "0211 funding receipt rearm migration is not recorded",
+  "0214 funding receive observation wake migration is not recorded",
   "Telegram funding open mutation constraints exist before 0201 is recorded",
 ]);
 
@@ -412,6 +419,7 @@ function buildTelegram0203Db(
   input: Readonly<{
     applied: boolean;
     completeObjects: boolean;
+    postgresNumericConstraint?: boolean;
     rearmDefinition?: boolean;
     strictMatcher?: boolean;
   }>,
@@ -528,7 +536,9 @@ function buildTelegram0203Db(
           telegram_funding_sessions_buy_projection_check:
             "CHECK ((projected_buy_return_revision = 0 AND projected_buy_policy_revision IS NULL) OR (projected_buy_return_revision > 0 AND projected_buy_policy_revision IS NOT NULL AND active_buy_return_revision IS NOT NULL))",
           telegram_funding_sessions_minimum_funding_check:
-            "CHECK (minimum_funding_usd IS NULL OR (origin = 'buy_return_context' AND minimum_funding_usd > 0))",
+            input.postgresNumericConstraint === true
+              ? "CHECK ((minimum_funding_usd IS NULL) OR ((origin = 'buy_return_context'::text) AND (minimum_funding_usd > (0)::numeric)))"
+              : "CHECK (minimum_funding_usd IS NULL OR (origin = 'buy_return_context' AND minimum_funding_usd > 0))",
           telegram_funding_buy_continuations_return_fk:
             "FOREIGN KEY (telegram_funding_session_id, buy_return_revision) REFERENCES telegram_funding_buy_return_revisions(telegram_funding_session_id, revision)",
           telegram_funding_buy_generations_continuation_fk:
@@ -651,8 +661,23 @@ assert.deepEqual(telegram0203Ready.blockers, [
   "0207 Telegram funding owner delivery migration is not recorded",
   "0208 Relay EVM delegated funding migration is not recorded",
   "0211 funding receipt rearm migration is not recorded",
+  "0214 funding receive observation wake migration is not recorded",
 ]);
 assert.equal(telegram0203Ready.telegramBuyContinuationObjects, true);
+
+const telegram0203PostgresNumericConstraint =
+  await inspectFundingMigrationPreflight(
+    buildTelegram0203Db({
+      applied: true,
+      completeObjects: true,
+      postgresNumericConstraint: true,
+    }) as never,
+  );
+assert.equal(
+  telegram0203PostgresNumericConstraint.telegramBuyContinuationObjects,
+  true,
+  "PostgreSQL numeric casts in pg_get_constraintdef must not produce a false blocker",
+);
 
 const telegram0203BroadIdentityMatcher = await inspectFundingMigrationPreflight(
   buildTelegram0203Db({
@@ -676,6 +701,7 @@ assert.deepEqual(telegram0203RecordedIncomplete.blockers, [
   "0207 Telegram funding owner delivery migration is not recorded",
   "0208 Relay EVM delegated funding migration is not recorded",
   "0211 funding receipt rearm migration is not recorded",
+  "0214 funding receive observation wake migration is not recorded",
   "0203 is recorded but Telegram funding Buy continuation objects are incomplete",
 ]);
 assert.equal(
@@ -696,6 +722,7 @@ assert.deepEqual(telegram0203OldRearmFunction.blockers, [
   "0207 Telegram funding owner delivery migration is not recorded",
   "0208 Relay EVM delegated funding migration is not recorded",
   "0211 funding receipt rearm migration is not recorded",
+  "0214 funding receive observation wake migration is not recorded",
   "0203 is recorded but Telegram funding Buy continuation objects are incomplete",
 ]);
 assert.equal(
@@ -713,6 +740,7 @@ assert.deepEqual(telegram0203ObjectsBeforeRecord.blockers, [
   "0207 Telegram funding owner delivery migration is not recorded",
   "0208 Relay EVM delegated funding migration is not recorded",
   "0211 funding receipt rearm migration is not recorded",
+  "0214 funding receive observation wake migration is not recorded",
   "Telegram funding Buy continuation objects exist before 0203 is recorded",
 ]);
 
@@ -979,6 +1007,7 @@ assert.equal(telegram0206Ready.telegramFundingOwnerDeliveryObjects, true);
 assert.deepEqual(telegram0206Ready.blockers, [
   "0208 Relay EVM delegated funding migration is not recorded",
   "0211 funding receipt rearm migration is not recorded",
+  "0214 funding receive observation wake migration is not recorded",
 ]);
 assert.equal(telegram0206Ready.malformedReceiveReviewEvidence, 0);
 
@@ -994,6 +1023,7 @@ assert.deepEqual(telegram0206Only.blockers, [
   "0207 Telegram funding owner delivery migration is not recorded",
   "0208 Relay EVM delegated funding migration is not recorded",
   "0211 funding receipt rearm migration is not recorded",
+  "0214 funding receive observation wake migration is not recorded",
 ]);
 
 const telegram0207ObjectsBeforeRecord = await inspectFundingMigrationPreflight(
@@ -1011,6 +1041,7 @@ assert.deepEqual(telegram0207ObjectsBeforeRecord.blockers, [
   "0207 Telegram funding owner delivery migration is not recorded",
   "0208 Relay EVM delegated funding migration is not recorded",
   "0211 funding receipt rearm migration is not recorded",
+  "0214 funding receive observation wake migration is not recorded",
   "Telegram funding owner delivery objects exist before 0207 is recorded",
 ]);
 
@@ -1028,6 +1059,7 @@ assert.equal(
 assert.deepEqual(telegram0207RecordedIncomplete.blockers, [
   "0208 Relay EVM delegated funding migration is not recorded",
   "0211 funding receipt rearm migration is not recorded",
+  "0214 funding receive observation wake migration is not recorded",
   "0207 is recorded but Telegram funding owner delivery objects are incomplete",
 ]);
 
@@ -1080,6 +1112,7 @@ assert.equal(
 assert.deepEqual(telegram0206MissingQrIndex.blockers, [
   "0208 Relay EVM delegated funding migration is not recorded",
   "0211 funding receipt rearm migration is not recorded",
+  "0214 funding receive observation wake migration is not recorded",
   "0206 is recorded but delegated funding wallet retention objects are incomplete",
 ]);
 
@@ -1097,6 +1130,7 @@ assert.equal(
 assert.deepEqual(telegram0206UnredactableDisclosure.blockers, [
   "0208 Relay EVM delegated funding migration is not recorded",
   "0211 funding receipt rearm migration is not recorded",
+  "0214 funding receive observation wake migration is not recorded",
   "2 Telegram funding address disclosures lack a redaction edit target",
 ]);
 console.log("[funding-migration-preflight-tests] passed");

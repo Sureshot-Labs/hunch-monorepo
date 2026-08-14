@@ -504,7 +504,9 @@ try {
   const limitlessCleanup = await pool.connect();
   try {
     await limitlessCleanup.query("begin");
-    await limitlessCleanup.query("set local session_replication_role = replica");
+    await limitlessCleanup.query(
+      "set local session_replication_role = replica",
+    );
     await limitlessCleanup.query(
       "delete from telegram_funding_mutations where funding_context_id = $1",
       [limitlessContextId],

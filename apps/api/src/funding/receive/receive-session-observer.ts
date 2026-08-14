@@ -309,6 +309,13 @@ export async function isFundingReceiveSessionSchemaReady(
             and table_name = 'funding_receive_sessions'
             and column_name = 'observation_start_variants'
         )
+        and exists (
+          select 1
+          from information_schema.columns
+          where table_schema = 'public'
+            and table_name = 'funding_receive_sessions'
+            and column_name = 'observation_requested_at'
+        )
         as ready
     `,
   );

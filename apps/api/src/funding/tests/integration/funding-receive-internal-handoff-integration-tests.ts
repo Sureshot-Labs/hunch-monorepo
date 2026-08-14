@@ -12,8 +12,10 @@ import { pool } from "../../../db.js";
 import type { JsonObject } from "../../domain/types.js";
 import type { FundingPolymarketHandoffCandidate } from "../../persistence/funding-evidence-repository.js";
 import {
+  claimObservableFundingReceiveSessions,
   createOrReuseFundingReceiveSession,
   fetchFundingReceiveSessionForUser,
+  requestFundingReceiveSessionObservation,
 } from "../../persistence/funding-receive-session-repository.js";
 import {
   parseDirectIngressObservationVariant,
@@ -430,6 +432,158 @@ try {
     failedVariant.observation.payload.eventCursorBlock,
     "100",
     "a DB classification failure must roll back the cursor update",
+  );
+
+  const wakeUserId = await insertUser("interactive-wake");
+  userIds.push(wakeUserId);
+  const wakeInput = sessionInput(wakeUserId, "interactive-wake");
+  const wakeSession = await createOrReuseFundingReceiveSession(pool, wakeInput);
+  const createdWake = await pool.query<{
+    observation_requested_at: Date | null;
+    opened_at: Date;
+  }>(
+    `select opened_at, observation_requested_at
+       from funding_receive_sessions
+      where id = $1`,
+    [wakeSession.snapshot.session.receiveSessionId],
+  );
+  assert.equal(
+    createdWake.rows[0]?.observation_requested_at?.toISOString(),
+    createdWake.rows[0]?.opened_at.toISOString(),
+    "a new receive session requests its first observation at opened_at",
+  );
+  const wakeNow = new Date(NOW.getTime() + 2 * 60 * 60_000);
+  await pool.query(
+    `update funding_receive_sessions
+        set observation_requested_at = null,
+            last_observed_at = $2,
+            updated_at = $2
+      where id = $1`,
+    [
+      wakeSession.snapshot.session.receiveSessionId,
+      new Date(wakeNow.getTime() - 30_000),
+    ],
+  );
+  const coldBeforeWake = await claimObservableFundingReceiveSessions(pool, {
+    limit: 100,
+    minimumPollIntervalMs: 10_000,
+    inactivePollIntervalMs: 60_000,
+    activeWindowMs: 15 * 60_000,
+    now: wakeNow,
+  });
+  assert.equal(
+    coldBeforeWake.some(
+      (entry) =>
+        entry.session.receiveSessionId ===
+        wakeSession.snapshot.session.receiveSessionId,
+    ),
+    false,
+    "an old session stays on the inactive cadence before interaction",
+  );
+  assert.equal(
+    await requestFundingReceiveSessionObservation(pool, {
+      now: wakeNow,
+      receiveSessionId: wakeSession.snapshot.session.receiveSessionId,
+      userId: wakeUserId,
+    }),
+    true,
+  );
+  const claimedAfterWake = await claimObservableFundingReceiveSessions(pool, {
+    limit: 1,
+    minimumPollIntervalMs: 10_000,
+    inactivePollIntervalMs: 60_000,
+    activeWindowMs: 15 * 60_000,
+    now: wakeNow,
+  });
+  assert.equal(
+    claimedAfterWake.some(
+      (entry) =>
+        entry.session.receiveSessionId ===
+        wakeSession.snapshot.session.receiveSessionId,
+    ),
+    true,
+    "an interactive request is immediately eligible and prioritized within the batch limit",
+  );
+  assert.equal(
+    await requestFundingReceiveSessionObservation(pool, {
+      now: new Date(wakeNow.getTime() - 1_000),
+      receiveSessionId: wakeSession.snapshot.session.receiveSessionId,
+      userId: wakeUserId,
+    }),
+    true,
+  );
+  const monotonicWake = await pool.query<{
+    observation_requested_at: Date | null;
+  }>(
+    `select observation_requested_at
+       from funding_receive_sessions
+      where id = $1`,
+    [wakeSession.snapshot.session.receiveSessionId],
+  );
+  assert.equal(
+    monotonicWake.rows[0]?.observation_requested_at?.toISOString(),
+    wakeNow.toISOString(),
+    "an older replay cannot move the observation request backward",
+  );
+  const claimedWhileHot = await claimObservableFundingReceiveSessions(pool, {
+    limit: 100,
+    minimumPollIntervalMs: 10_000,
+    inactivePollIntervalMs: 60_000,
+    activeWindowMs: 15 * 60_000,
+    now: new Date(wakeNow.getTime() + 10_000),
+  });
+  assert.equal(
+    claimedWhileHot.some(
+      (entry) =>
+        entry.session.receiveSessionId ===
+        wakeSession.snapshot.session.receiveSessionId,
+    ),
+    true,
+    "an interactively woken session stays on the hot cadence",
+  );
+  const coldAgainAt = new Date(wakeNow.getTime() + 15 * 60_000 + 1);
+  await pool.query(
+    `update funding_receive_sessions
+        set last_observed_at = $2,
+            updated_at = $2
+      where id = $1`,
+    [
+      wakeSession.snapshot.session.receiveSessionId,
+      new Date(coldAgainAt.getTime() - 30_000),
+    ],
+  );
+  const coldAgain = await claimObservableFundingReceiveSessions(pool, {
+    limit: 100,
+    minimumPollIntervalMs: 10_000,
+    inactivePollIntervalMs: 60_000,
+    activeWindowMs: 15 * 60_000,
+    now: coldAgainAt,
+  });
+  assert.equal(
+    coldAgain.some(
+      (entry) =>
+        entry.session.receiveSessionId ===
+        wakeSession.snapshot.session.receiveSessionId,
+    ),
+    false,
+    "the session returns to the inactive cadence after the hot window",
+  );
+  await pool.query(
+    `update funding_receive_sessions
+        set status = 'cancelled',
+            closed_at = $2,
+            updated_at = $2
+      where id = $1`,
+    [wakeSession.snapshot.session.receiveSessionId, coldAgainAt],
+  );
+  assert.equal(
+    await requestFundingReceiveSessionObservation(pool, {
+      now: new Date(coldAgainAt.getTime() + 1),
+      receiveSessionId: wakeSession.snapshot.session.receiveSessionId,
+      userId: wakeUserId,
+    }),
+    false,
+    "explicit observation requests never reopen a cancelled session",
   );
 
   console.log(

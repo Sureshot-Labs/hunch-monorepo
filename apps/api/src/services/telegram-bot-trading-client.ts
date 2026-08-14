@@ -135,6 +135,7 @@ export type TelegramBotTradingInternalApiClient = {
     chatId: string | number;
     contextId: string;
     deliveryProjection?: TelegramFundingProgressProjection;
+    requestObservation?: boolean;
     telegramMessageId?: number | null;
     telegramUserId: string | number;
     view?: "address" | "delivery" | "progress";
