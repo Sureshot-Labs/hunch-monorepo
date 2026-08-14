@@ -2509,17 +2509,13 @@ async function recoverRelay(
              and step.state in ('reconcile_required', 'recovery_required')
            )
          )
-         and attempt.updated_at <= case
-               when attempt.outcome = 'started' then $3::timestamptz
-               else $2::timestamptz
-             end
+         and attempt.updated_at <= $2::timestamptz
          and operation.status not in ('completed', 'refunded', 'failed', 'cancelled')
        order by attempt.updated_at, attempt.id
        for update of attempt, step, operation, reservation skip locked
        limit 1`,
     [
       TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
-      input.recoverStartedBefore,
       input.recoverUnbroadcastStartedBefore,
     ],
   );
@@ -2577,10 +2573,7 @@ async function recoverRelay(
                    )
              )
            )
-           and attempt.updated_at <= case
-                 when attempt.outcome = 'started' then $3::timestamptz
-                 else $2::timestamptz
-               end
+           and attempt.updated_at <= $2::timestamptz
            and cleanup_operation.status not in (
                  'completed', 'refunded', 'failed', 'cancelled'
                )
@@ -2590,7 +2583,6 @@ async function recoverRelay(
          limit 1`,
       [
         TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
-        input.recoverStartedBefore,
         input.recoverUnbroadcastStartedBefore,
       ],
     );
@@ -2604,17 +2596,13 @@ async function recoverRelay(
     ) {
       return null;
     }
-    const cleanupRecoveryCutoff =
-      cleanupRow.attempt_outcome === "started"
-        ? input.recoverUnbroadcastStartedBefore
-        : input.recoverStartedBefore;
     const leasedCleanup = await client.query(
       `update funding_operation_step_attempts
           set updated_at = $2
         where id = $1
           and outcome in ('started', 'ambiguous')
           and updated_at <= $3`,
-      [cleanupRow.attempt_id, input.now, cleanupRecoveryCutoff],
+      [cleanupRow.attempt_id, input.now, input.recoverUnbroadcastStartedBefore],
     );
     if (leasedCleanup.rowCount !== 1) return null;
     const parsedCleanup = normalizedActionSchema.safeParse(
@@ -2645,15 +2633,11 @@ async function recoverRelay(
   ) {
     return null;
   }
-  const recoveryCutoff =
-    row.attempt_outcome === "started"
-      ? input.recoverUnbroadcastStartedBefore
-      : input.recoverStartedBefore;
   const leased = await client.query(
     `update funding_operation_step_attempts
         set updated_at = $2
       where id = $1 and outcome in ('started', 'ambiguous') and updated_at <= $3`,
-    [row.attempt_id, input.now, recoveryCutoff],
+    [row.attempt_id, input.now, input.recoverUnbroadcastStartedBefore],
   );
   if (leased.rowCount !== 1) return null;
   const parsed = normalizedActionSchema.safeParse(row.normalized_action);
