@@ -21,6 +21,7 @@ import { lockFundingAuthorizationReservationScope } from "../persistence/funding
 import {
   claimFundingReceiveReceiptOperationLinkInTransaction,
   deferFundingReceiveReceiptRouting,
+  fundingReceiveReceiptOperationIdempotencyKey,
   linkFundingReceiveReceiptOperationInTransaction,
   listFundingReceiveReceiptsForRouting,
   recordFundingReceiveReceiptRoutingDisposition,
@@ -739,10 +740,17 @@ export class FundingReceiveReceiptRouter {
     ) {
       return { kind: "outside_policy" };
     }
+    const idempotencyKey = await fundingReceiveReceiptOperationIdempotencyKey(
+      this.db,
+      {
+        receiptId: target.receipt.receiptId,
+        userId: target.userId,
+      },
+    );
     const commitRequest = {
       quoteId: quote.quoteId,
       consentToken: quote.consentToken,
-      idempotencyKey: `receive-receipt:${target.receipt.receiptId}`,
+      idempotencyKey,
     };
     const preparedCommit = await runtime.prepareCommit(
       target.userId,
@@ -766,6 +774,14 @@ export class FundingReceiveReceiptRouter {
           userId: target.userId,
         });
       if (!claimed) return { kind: "no_route" } as const;
+      const lockedIdempotencyKey =
+        await fundingReceiveReceiptOperationIdempotencyKey(client, {
+          receiptId: target.receipt.receiptId,
+          userId: target.userId,
+        });
+      if (lockedIdempotencyKey !== idempotencyKey) {
+        throw new Error("funding receipt operation generation changed");
+      }
       const committed = await runtime.commitPreparedInTransaction(
         client,
         preparedCommit,

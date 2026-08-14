@@ -26,6 +26,7 @@ import {
 import { buildFundingReceiveTargets } from "../../planner/receive-targets.js";
 import {
   deriveActiveFundingReceiveSessionStatus,
+  fundingReceiveReceiptOperationIdempotencyKey,
   selectFundingReceiveCanonicalEventTarget,
 } from "../../persistence/funding-receive-session-repository.js";
 import {
@@ -2180,6 +2181,50 @@ assert.deepEqual(
     failure.stage,
   ]),
   [[unavailableVariant.variantId, "cursor"]],
+);
+
+const receiptOperationGenerations = ["0", "1", "7"];
+const receiptOperationKeyDb = {
+  async query(sql: string, params: readonly unknown[]) {
+    assert.match(sql, /from funding_operations operation_row/);
+    assert.equal(params[0], "user_receive_retry_12345678");
+    assert.equal(params[1], "receipt_receive_retry_12345678");
+    assert.equal(params[2], "receive-receipt:receipt_receive_retry_12345678");
+    const nextGeneration = receiptOperationGenerations.shift();
+    assert.ok(nextGeneration);
+    return {
+      rows: [{ next_generation: nextGeneration }],
+      rowCount: 1,
+    };
+  },
+} as unknown as Pick<Pool, "query">;
+const receiptOperationKeyInput = {
+  receiptId: "receipt_receive_retry_12345678",
+  userId: "user_receive_retry_12345678",
+};
+assert.equal(
+  await fundingReceiveReceiptOperationIdempotencyKey(
+    receiptOperationKeyDb,
+    receiptOperationKeyInput,
+  ),
+  "receive-receipt:receipt_receive_retry_12345678",
+  "the first child keeps the established idempotency key",
+);
+assert.equal(
+  await fundingReceiveReceiptOperationIdempotencyKey(
+    receiptOperationKeyDb,
+    receiptOperationKeyInput,
+  ),
+  "receive-receipt:receipt_receive_retry_12345678:retry:1",
+  "the first explicit rearm cannot replay the terminal child",
+);
+assert.equal(
+  await fundingReceiveReceiptOperationIdempotencyKey(
+    receiptOperationKeyDb,
+    receiptOperationKeyInput,
+  ),
+  "receive-receipt:receipt_receive_retry_12345678:retry:7",
+  "a later generation remains monotonic even when older rows were retained",
 );
 
 console.log(

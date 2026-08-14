@@ -15,6 +15,7 @@ import {
 } from "../persistence/funding-authorization-reservation-lock.js";
 import {
   allocateFundingObservationInTransaction,
+  releaseFundingReservationInTransaction,
   transitionFundingOperationInTransaction,
 } from "../persistence/funding-operation-repository.js";
 import {
@@ -2165,6 +2166,7 @@ async function reconcileRelayPostconditions(
     }
   }
   await terminalizeCompletedRelayCleanupParent(client, now);
+  await releaseCompletedRelayCleanupParentBalanceReservations(client, now);
 }
 
 async function claimRelayCleanup(
@@ -3070,6 +3072,35 @@ async function terminalizeRelayParentAfterCleanup(
       supportMetadataPatch: input.evidence,
       now: input.now,
     });
+    await releaseRelayParentBalanceReservations(
+      client,
+      input.parentOperationId,
+      input.now,
+    );
+  }
+}
+
+async function releaseRelayParentBalanceReservations(
+  client: PoolClient,
+  parentOperationId: string,
+  now: Date,
+): Promise<void> {
+  const { rows } = await client.query<{ id: string }>(
+    `select balance_reservation.id
+       from balance_reservations balance_reservation
+      where balance_reservation.operation_id = $1::uuid
+        and balance_reservation.state = 'active'
+        and balance_reservation.mode <> 'settled_for_consumer'
+      order by balance_reservation.created_at, balance_reservation.id
+      for update`,
+    [parentOperationId],
+  );
+  for (const row of rows) {
+    await releaseFundingReservationInTransaction(client, {
+      reservationId: row.id,
+      outcomeReason: "operation_failed",
+      now,
+    });
   }
 }
 
@@ -3127,6 +3158,43 @@ async function terminalizeCompletedRelayCleanupParent(
       cleanupParentRepairCompletedAt: now.toISOString(),
     },
   });
+}
+
+async function releaseCompletedRelayCleanupParentBalanceReservations(
+  client: PoolClient,
+  now: Date,
+): Promise<void> {
+  const { rows } = await client.query<{ parent_operation_id: string }>(
+    `select distinct parent.id as parent_operation_id
+       from telegram_funding_authorization_reservations reservation
+       join funding_operations cleanup
+         on cleanup.id = reservation.cleanup_operation_id
+        and cleanup.status = 'completed'
+        and cleanup.progress_stage = 'terminal'
+       join funding_operation_steps cleanup_step
+         on cleanup_step.operation_id = cleanup.id
+        and cleanup_step.executor_id = $1
+        and cleanup_step.action_validation_result ->> 'relayStepKind' =
+              'cleanup'
+        and cleanup_step.action_validation_result ->> 'cleanupContext' in (
+              'approval_exhausted', 'pre_deposit_failure'
+            )
+       join funding_operations parent
+         on parent.id = reservation.funding_operation_id
+        and parent.status = 'failed'
+        and parent.progress_stage = 'terminal'
+       join balance_reservations balance_reservation
+         on balance_reservation.operation_id = parent.id
+        and balance_reservation.state = 'active'
+        and balance_reservation.mode <> 'settled_for_consumer'
+      where reservation.status = 'cleaned'
+      order by parent.id
+      limit 1`,
+    [TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID],
+  );
+  const parentOperationId = rows[0]?.parent_operation_id;
+  if (!parentOperationId) return;
+  await releaseRelayParentBalanceReservations(client, parentOperationId, now);
 }
 
 async function finalizeRelayAlreadySatisfiedInTransaction(

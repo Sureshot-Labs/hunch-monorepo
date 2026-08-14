@@ -18,6 +18,7 @@ const MIGRATION_0204 = "0204_delegated_funding_execution.sql";
 const MIGRATION_0206 = "0206_telegram_funding_wallet_retention.sql";
 const MIGRATION_0207 = "0207_telegram_funding_owner_delivery.sql";
 const MIGRATION_0208 = "0208_relay_evm_delegated_funding.sql";
+const MIGRATION_0211 = "0211_funding_receive_receipt_rearm.sql";
 const FUNDING_MIGRATIONS = [
   MIGRATION_0184,
   MIGRATION_0193,
@@ -33,6 +34,7 @@ const FUNDING_MIGRATIONS = [
   MIGRATION_0206,
   MIGRATION_0207,
   MIGRATION_0208,
+  MIGRATION_0211,
 ] as const;
 
 const LEGACY_CLASSIFIER_SQL = `
@@ -554,6 +556,44 @@ export async function inspectFundingMigrationPreflight(
     hasRelayEvmReservationGuard &&
     hasRelayEvmRefundObservationGuard &&
     hasRelayEvmConsentV3;
+  const hasRelayReceiptRearmIndex =
+    hasRelayEvmReservations &&
+    (await relationExists(
+      db,
+      "public.telegram_funding_authorization_reservations_receipt_idx",
+    ));
+  const hasRelayReceiptSingleGenerationConstraint =
+    hasRelayEvmReservations &&
+    (await queryExists(
+      db,
+      `select exists (
+         select 1
+         from pg_constraint constraint_row
+         where constraint_row.conrelid = $1::regclass
+           and constraint_row.conname = $2
+       ) as exists`,
+      [
+        "public.telegram_funding_authorization_reservations",
+        "telegram_funding_authorization_reservations_receipt_unique",
+      ],
+    ));
+  const hasRelayReceiptReallocationGuard =
+    hasRelayEvmReservations &&
+    (await functionDefinitionIncludes(db, "funding_guard_observation_update", [
+      "receipt_reallocation",
+      "receivereceiptallocationhistory",
+      "previousoperationid",
+      "nextoperationid",
+      "prior_operation.status in ('failed', 'cancelled')",
+      "prior_reservation.status = 'released'",
+      "prior_reservation.status = 'cleaned'",
+      "'approval_exhausted', 'pre_deposit_failure'",
+      "prior_attempt.broadcast_may_have_occurred",
+    ]));
+  const hasRelayReceiptRearmObjects =
+    hasRelayReceiptRearmIndex &&
+    !hasRelayReceiptSingleGenerationConstraint &&
+    hasRelayReceiptReallocationGuard;
   const hasFundingAccountIdentifierEquality = await functionDefinitionIncludes(
     db,
     "funding_account_identifier_equal",
@@ -1294,6 +1334,13 @@ export async function inspectFundingMigrationPreflight(
       hasRelayEvmDelegatedFundingObjects,
       "Relay EVM delegated funding objects exist before 0208 is recorded",
     ],
+    [
+      MIGRATION_0211,
+      hasRelayReceiptRearmObjects,
+      "0211 is recorded but funding receipt rearm objects are incomplete",
+      hasRelayReceiptRearmIndex,
+      "Funding receipt rearm objects exist before 0211 is recorded",
+    ],
   ] as const;
   const partialObjects = migrationDriftChecks.flatMap(
     ([migration, complete, incompleteMessage, present, presentMessage]) =>
@@ -1423,6 +1470,9 @@ export async function inspectFundingMigrationPreflight(
       : null,
     !appliedSet.has(MIGRATION_0208)
       ? "0208 Relay EVM delegated funding migration is not recorded"
+      : null,
+    !appliedSet.has(MIGRATION_0211)
+      ? "0211 funding receipt rearm migration is not recorded"
       : null,
     !hasBridgeOrders ? "bridge_orders table is absent" : null,
     bridgeUnknown > 0

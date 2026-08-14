@@ -22,7 +22,10 @@ import {
   commitFundingOperationInTransaction,
   createFundingQuoteInTransaction,
 } from "../../funding/persistence/funding-operation-repository.js";
-import type { FundingReceiveReceiptRoutingTarget } from "../../funding/persistence/funding-receive-session-repository.js";
+import {
+  fundingReceiveReceiptOperationIdempotencyKey,
+  type FundingReceiveReceiptRoutingTarget,
+} from "../../funding/persistence/funding-receive-session-repository.js";
 import {
   lockFundingPolicyForTransaction,
   resolveFundingControlPlaneSnapshot,
@@ -605,9 +608,7 @@ export function createRelayReceiveReceiptDispositionResolver(
         const minimumSequentialTtlMs =
           relayExecutionConfiguration?.minimumSequentialTtlMs ?? 0;
         const sequentialQuoteTtlMs = relayExecutionConfiguration
-          ? DELEGATED_PROVIDER_RECOVERY_MS +
-            minimumSequentialTtlMs +
-            30_000
+          ? DELEGATED_PROVIDER_RECOVERY_MS + minimumSequentialTtlMs + 30_000
           : 60_000;
         const baselineAllowance = delegatedRelay
           ? await readBaseRelayAllowance({
@@ -720,6 +721,11 @@ export function createRelayReceiveReceiptDispositionResolver(
             }
           },
           commit: async (client: PoolClient) => {
+            const idempotencyKey =
+              await fundingReceiveReceiptOperationIdempotencyKey(client, {
+                receiptId: receiptTarget.receipt.receiptId,
+                userId: receiptTarget.userId,
+              });
             const quoteRow = await createFundingQuoteInTransaction(client, {
               userId: receiptTarget.userId,
               discoveryProjectionId: stableOpaqueId(
@@ -751,7 +757,7 @@ export function createRelayReceiveReceiptDispositionResolver(
                 userId: receiptTarget.userId,
                 quoteId: quoteRow.id,
                 consentToken,
-                idempotencyKey: `receive-receipt:${receiptTarget.receipt.receiptId}`,
+                idempotencyKey,
                 plan: planned.commitPlan,
                 subjectLookupHmac: fundingSubjectLookupHmac(
                   receiptTarget.userId,

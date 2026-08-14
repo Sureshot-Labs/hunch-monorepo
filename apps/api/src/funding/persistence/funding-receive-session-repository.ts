@@ -1967,6 +1967,62 @@ export async function claimFundingReceiveReceiptOperationLinkInTransaction(
   return result.rowCount === 1;
 }
 
+/**
+ * Returns a stable key for the next child operation generation of one receipt.
+ * The initial operation retains the legacy key. A terminal child that was
+ * explicitly detached can then be retried without replaying that child, while
+ * every commit inside the same generation remains idempotent.
+ *
+ * Callers that commit an operation must compute (or recheck) this while holding
+ * the receipt row lock acquired by claimFundingReceiveReceiptOperationLinkInTransaction.
+ */
+export async function fundingReceiveReceiptOperationIdempotencyKey(
+  db: Pick<Pool, "query"> | Pick<PoolClient, "query">,
+  input: Readonly<{ receiptId: string; userId: string }>,
+): Promise<string> {
+  const baseKey = `receive-receipt:${input.receiptId}`;
+  const { rows } = await db.query<{ next_generation: string }>(
+    `select (
+              coalesce(
+                max(
+                  case
+                    when operation_row.idempotency_key = $3 then 0::numeric
+                    when split_part(
+                           operation_row.idempotency_key,
+                           ':retry:',
+                           2
+                         ) ~ '^[1-9][0-9]*$'
+                      then split_part(
+                             operation_row.idempotency_key,
+                             ':retry:',
+                             2
+                           )::numeric
+                    when operation_row.support_metadata ->>
+                           'fundingReceiveReceiptId' = $2
+                      then 0::numeric
+                    else null
+                  end
+                ),
+                -1::numeric
+              ) + 1::numeric
+            )::text as next_generation
+       from funding_operations operation_row
+      where operation_row.user_id = $1
+        and (
+          operation_row.support_metadata ->> 'fundingReceiveReceiptId' = $2
+          or operation_row.idempotency_key = $3
+          or operation_row.idempotency_key like $3 || ':retry:%'
+        )`,
+    [input.userId, input.receiptId, baseKey],
+  );
+  const generationRaw = rows[0]?.next_generation;
+  if (!generationRaw || !/^(0|[1-9][0-9]*)$/.test(generationRaw)) {
+    throw new Error("funding receive receipt operation generation is invalid");
+  }
+  const generation = BigInt(generationRaw);
+  return generation === 0n ? baseKey : `${baseKey}:retry:${generationRaw}`;
+}
+
 export async function linkFundingReceiveReceiptOperationInTransaction(
   client: PoolClient,
   input: FundingReceiveReceiptOperationLinkInput,
@@ -2132,19 +2188,26 @@ export async function linkFundingReceiveReceiptOperationInTransaction(
          and authority.max_source_raw is not null
          and $5::numeric <= authority.max_source_raw
          and $5::numeric + coalesce((
-           select sum(reservation.source_raw)
-           from telegram_funding_authorization_reservations reservation
-           join telegram_funding_authorizations prior_authority
-             on prior_authority.id = reservation.authorization_id
-           where prior_authority.user_id = authority.user_id
-             and lower(prior_authority.wallet_address) =
-                   lower(authority.wallet_address)
-             and prior_authority.profile_id = authority.profile_id
-             and prior_authority.security_class = 'routed_value_movement'
-             and reservation.status <> 'released'
-             and reservation.reserved_at >= $6::timestamptz - interval '24 hours'
+           select sum(receipt_charge.source_raw)
+           from (
+             select reservation.receive_receipt_id,
+                    max(reservation.source_raw) as source_raw
+             from telegram_funding_authorization_reservations reservation
+             join telegram_funding_authorizations prior_authority
+               on prior_authority.id = reservation.authorization_id
+             where prior_authority.user_id = authority.user_id
+               and lower(prior_authority.wallet_address) =
+                     lower(authority.wallet_address)
+               and prior_authority.profile_id = authority.profile_id
+               and prior_authority.security_class = 'routed_value_movement'
+               and reservation.status <> 'released'
+               and reservation.receive_receipt_id <> $3::uuid
+               and reservation.reserved_at >=
+                     $6::timestamptz - interval '24 hours'
+             group by reservation.receive_receipt_id
+           ) receipt_charge
          ), 0) <= authority.max_source_raw
-       on conflict (receive_receipt_id) do nothing
+       on conflict (funding_operation_id) do nothing
        returning id
      )
      select
@@ -2176,29 +2239,115 @@ export async function linkFundingReceiveReceiptOperationInTransaction(
   ) {
     throw new Error("routed funding authorization cap is unavailable");
   }
-  await allocateFundingObservationInTransaction(client, {
-    operationId: input.childFundingOperationId,
-    segmentId,
-    kind: "source_credit",
-    networkId: receipt.network_id,
-    assetId: receipt.asset_id,
-    assetDecimals: receipt.asset_decimals,
-    txHash: receipt.tx_hash,
-    eventIndex: receipt.event_index,
-    fromAddress: receipt.source_address,
-    toAddress: receipt.destination_address,
-    rawAmount: receipt.raw_amount,
-    observedAt: receipt.observed_at,
-    ledgerHeight: receipt.ledger_height,
-    blockHash: receipt.block_hash,
-    finalityStatus: "finalized",
-    finalizedAt: input.now,
-    metadata: {
-      receiveSessionId,
-      receiptId: input.receiptId,
-      variantId: receipt.variant_id,
-    },
-  });
+  const priorSourceCredit = await client.query<{
+    id: string;
+    operation_id: string;
+    segment_id: string | null;
+  }>(
+    `select observation.id, observation.operation_id, observation.segment_id
+       from funding_observations observation
+      where observation.network_id = $1
+        and observation.tx_hash = $2
+        and observation.event_index = $3
+      for update`,
+    [receipt.network_id, receipt.tx_hash, receipt.event_index],
+  );
+  const existingSourceCredit = priorSourceCredit.rows[0];
+  if (!existingSourceCredit) {
+    await allocateFundingObservationInTransaction(client, {
+      operationId: input.childFundingOperationId,
+      segmentId,
+      kind: "source_credit",
+      networkId: receipt.network_id,
+      assetId: receipt.asset_id,
+      assetDecimals: receipt.asset_decimals,
+      txHash: receipt.tx_hash,
+      eventIndex: receipt.event_index,
+      fromAddress: receipt.source_address,
+      toAddress: receipt.destination_address,
+      rawAmount: receipt.raw_amount,
+      observedAt: receipt.observed_at,
+      ledgerHeight: receipt.ledger_height,
+      blockHash: receipt.block_hash,
+      finalityStatus: "finalized",
+      finalizedAt: input.now,
+      metadata: {
+        receiveSessionId,
+        receiptId: input.receiptId,
+        variantId: receipt.variant_id,
+      },
+    });
+  } else if (
+    existingSourceCredit.operation_id !== input.childFundingOperationId
+  ) {
+    const reallocated = await client.query(
+      `update funding_observations observation
+          set operation_id = $2::uuid,
+              segment_id = $3::uuid,
+              metadata = jsonb_set(
+                observation.metadata,
+                '{receiveReceiptAllocationHistory}',
+                (
+                  case
+                    when jsonb_typeof(
+                           observation.metadata ->
+                           'receiveReceiptAllocationHistory'
+                         ) = 'array'
+                      then observation.metadata ->
+                           'receiveReceiptAllocationHistory'
+                    else '[]'::jsonb
+                  end
+                ) || jsonb_build_array(jsonb_build_object(
+                  'previousOperationId', observation.operation_id::text,
+                  'previousSegmentId', observation.segment_id::text,
+                  'nextOperationId', $2::text,
+                  'reallocatedAt', $4::timestamptz
+                )),
+                true
+              )
+        where observation.id = $1::uuid
+          and observation.operation_id = $5::uuid
+          and observation.kind = 'source_credit'
+          and observation.network_id = $6
+          and observation.asset_id = $7
+          and observation.asset_decimals = $8
+          and observation.tx_hash = $9
+          and observation.event_index = $10
+          and observation.from_address is not distinct from $11
+          and observation.to_address = $12
+          and observation.raw_amount = $13
+          and observation.observed_at = $14::timestamptz
+          and observation.ledger_height is not distinct from $15
+          and observation.block_hash is not distinct from $16
+          and observation.finality_status = 'finalized'
+          and observation.canonical
+          and observation.metadata ->> 'receiveSessionId' = $17::text
+          and observation.metadata ->> 'receiptId' = $18::text`,
+      [
+        existingSourceCredit.id,
+        input.childFundingOperationId,
+        segmentId,
+        input.now,
+        existingSourceCredit.operation_id,
+        receipt.network_id,
+        receipt.asset_id,
+        receipt.asset_decimals,
+        receipt.tx_hash,
+        receipt.event_index,
+        receipt.source_address,
+        receipt.destination_address,
+        receipt.raw_amount,
+        receipt.observed_at,
+        receipt.ledger_height,
+        receipt.block_hash,
+        receiveSessionId,
+        input.receiptId,
+      ],
+    );
+    if (reallocated.rowCount !== 1) {
+      throw new Error("funding receive source credit cannot be reallocated");
+    }
+  }
   await client.query(
     `
         update funding_operation_steps

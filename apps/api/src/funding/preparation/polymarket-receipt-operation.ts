@@ -53,7 +53,10 @@ import {
   FUNDING_OPERATION_RECONCILIATION_TTL_MS,
   type FundingCommitPlan,
 } from "../persistence/funding-operation-repository.js";
-import type { FundingReceiveReceiptRoutingTarget } from "../persistence/funding-receive-session-repository.js";
+import {
+  fundingReceiveReceiptOperationIdempotencyKey,
+  type FundingReceiveReceiptRoutingTarget,
+} from "../persistence/funding-receive-session-repository.js";
 import type { FundingReceiveReceiptAutomaticExecution } from "../receive/receive-receipt-router.js";
 import { fundingSidecarRuntimeConfig } from "../runtime/sidecar-runtime-config.js";
 import { lockPolymarketFundingOperationPredecessor } from "./polymarket-funding-commit-guard.js";
@@ -561,6 +564,11 @@ export function createPolymarketReceiptOperationPreparer(input: {
         });
       },
       commit: async (client: PoolClient) => {
+        const idempotencyKey =
+          await fundingReceiveReceiptOperationIdempotencyKey(client, {
+            receiptId: target.receipt.receiptId,
+            userId: target.userId,
+          });
         const quote = await createFundingQuoteInTransaction(client, {
           userId: target.userId,
           discoveryProjectionId: stableOpaqueId(
@@ -590,7 +598,7 @@ export function createPolymarketReceiptOperationPreparer(input: {
           userId: target.userId,
           quoteId: quote.id,
           consentToken,
-          idempotencyKey: `receive-receipt:${target.receipt.receiptId}`,
+          idempotencyKey,
           plan: frozenPlan,
           subjectLookupHmac: fundingSubjectLookupHmac(
             target.userId,
