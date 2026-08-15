@@ -224,6 +224,111 @@ const tests: TestCase[] = [
     },
   },
   {
+    name: "Deposit Wallet Puller setup accepts only the exact current signed batch",
+    run: async () => {
+      const puller = "0x3333333333333333333333333333333333333333";
+      const depositWallet = "0x4444444444444444444444444444444444444444";
+      const pUsd = "0x5555555555555555555555555555555555555555";
+      const now = new Date("2026-08-15T12:00:00.000Z");
+      const nonce = 7n;
+      const setupSigner = new ethers.Wallet(`0x${"12".repeat(32)}`);
+      const tokenInterface = new ethers.Interface([
+        "function approve(address spender,uint256 amount)",
+      ]);
+      const walletInterface = new ethers.Interface([
+        "function execute((address wallet,uint256 nonce,uint256 deadline,(address target,uint256 value,bytes data)[] calls) batch,bytes signature)",
+      ]);
+      const exactCall = {
+        target: pUsd,
+        value: 0n,
+        data: tokenInterface.encodeFunctionData("approve", [
+          puller,
+          ethers.MaxUint256,
+        ]),
+      };
+      const transaction = async (
+        calls: readonly (typeof exactCall)[],
+        batchNonce = nonce,
+      ) => {
+        const batch = {
+          wallet: depositWallet,
+          nonce: batchNonce,
+          deadline: BigInt(Math.floor(now.getTime() / 1_000) + 600),
+          calls,
+        };
+        const signature = await setupSigner.signTypedData(
+          {
+            name: "DepositWallet",
+            version: "1",
+            chainId: 137,
+            verifyingContract: depositWallet,
+          },
+          {
+            Call: [
+              { name: "target", type: "address" },
+              { name: "value", type: "uint256" },
+              { name: "data", type: "bytes" },
+            ],
+            Batch: [
+              { name: "wallet", type: "address" },
+              { name: "nonce", type: "uint256" },
+              { name: "deadline", type: "uint256" },
+              { name: "calls", type: "Call[]" },
+            ],
+          },
+          batch,
+        );
+        return {
+          id: "puller-setup",
+          label: "Puller setup",
+          to: depositWallet,
+          value: "0",
+          data: walletInterface.encodeFunctionData("execute", [
+            batch,
+            signature,
+          ]),
+        };
+      };
+      const dependencies: EmbeddedEvmSponsorshipDependencies = {
+        ...denyDynamicDependencies,
+        inspectDepositWallet: async () => ({
+          canonical: true,
+          deployed: true,
+          nonce,
+          owner: setupSigner.address,
+        }),
+      };
+      const validate = (candidate: Awaited<ReturnType<typeof transaction>>) =>
+        embeddedEvmSponsorshipTestHooks.validateDepositWalletPullerSetup({
+          chainId: 137,
+          dependencies,
+          now,
+          pUsdAddress: pUsd,
+          pullerAddress: puller,
+          signer: setupSigner.address,
+          transaction: candidate,
+        });
+      assert.equal(await validate(await transaction([exactCall])), true);
+      assert.equal(
+        await validate(await transaction([exactCall], nonce + 1n)),
+        false,
+      );
+      assert.equal(
+        await validate(await transaction([exactCall, exactCall])),
+        false,
+        "additional inner calls are rejected",
+      );
+      const wrongSpender = {
+        ...exactCall,
+        data: tokenInterface.encodeFunctionData("approve", [
+          "0x6666666666666666666666666666666666666666",
+          ethers.MaxUint256,
+        ]),
+      };
+      assert.equal(await validate(await transaction([wrongSpender])), false);
+    },
+  },
+  {
     name: "explicitly self-paid transactions keep the backwards-compatible generic path",
     run: async () => {
       await assert.doesNotReject(() =>

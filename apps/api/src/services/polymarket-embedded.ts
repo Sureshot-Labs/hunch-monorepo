@@ -201,7 +201,7 @@ export type EmbeddedPolymarketTypedData = {
   message: Record<string, unknown>;
 };
 
-export type DepositWalletBatchPurpose = "withdraw" | "redeem";
+export type DepositWalletBatchPurpose = "withdraw" | "redeem" | "puller_setup";
 
 export type EmbeddedPolymarketWalletContext = {
   signer: string;
@@ -882,6 +882,28 @@ function validateDepositWalletBatchCall(
     );
   }
 
+  if (purpose === "puller_setup") {
+    const puller = normalizeAddress(env.polymarketDepositWalletPullerAddress);
+    const pusdToken = normalizeAddress(env.polymarketPusdAddress);
+    const spender = normalizeAddress(String(decoded.args[0] ?? ""));
+    let amount = -1n;
+    try {
+      amount = BigInt(String(decoded.args[1] ?? "-1"));
+    } catch {
+      amount = -1n;
+    }
+    if (
+      decoded.name !== "approve" ||
+      !puller ||
+      !addressesEqual(target, pusdToken) ||
+      !addressesEqual(spender, puller) ||
+      (amount !== ethers.MaxUint256 && amount !== 0n)
+    ) {
+      throw new Error("Unsupported Deposit Wallet Puller setup approval.");
+    }
+    return;
+  }
+
   if (purpose === "withdraw") {
     const allowedTransferTokens = allowedDepositWalletTransferTokens();
     if (decoded.name === "transfer") {
@@ -1101,9 +1123,20 @@ function validateDepositWalletBatchTypedData(
   if (!/^\d+$/.test(nonce) || !/^\d+$/.test(deadline)) {
     throw new Error("Deposit wallet batch requires numeric nonce/deadline.");
   }
+  if (purpose === "puller_setup") {
+    const nowSeconds = BigInt(Math.floor(Date.now() / 1_000));
+    const deadlineSeconds = BigInt(deadline);
+    if (deadlineSeconds <= nowSeconds || deadlineSeconds > nowSeconds + 600n) {
+      throw new Error("Deposit Wallet Puller setup deadline is invalid.");
+    }
+  }
 
   const calls = Array.isArray(message.calls) ? message.calls : [];
-  if (calls.length < 1 || calls.length > 24) {
+  if (
+    calls.length < 1 ||
+    calls.length > 24 ||
+    (purpose === "puller_setup" && calls.length !== 1)
+  ) {
     throw new Error("Deposit wallet batch call count is invalid.");
   }
   for (const call of calls) {

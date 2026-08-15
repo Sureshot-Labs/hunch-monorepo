@@ -62,6 +62,10 @@ import {
 } from "../../services/polygon-rpc.js";
 import { RELAY_DEPOSITORY_V2 } from "../../funding-providers/relay/rehearsal.js";
 import { RELAY_ROUTE_SPECS } from "../../funding-providers/relay/mappings.js";
+import {
+  parsePolymarketDepositWalletPullerObservation,
+  readPolymarketDepositWalletPullerState,
+} from "./polymarket-deposit-wallet-puller-state.js";
 
 type JsonRecord = Readonly<Record<string, JsonValue>>;
 export const RELAY_CLEANUP_CANONICAL_WATCH_MS = 60_000;
@@ -1173,7 +1177,7 @@ async function reconcileRelayPostconditions(
         and step.executor_id = $1
         and step.state = 'failed'
         and step.action_validation_result ->> 'relayStepKind' in (
-              'approve', 'deposit'
+              'source_pull', 'approve', 'deposit'
             )
         and (step.action_expires_at is null or step.action_expires_at > $2)
         and operation.status not in (
@@ -2518,16 +2522,35 @@ async function claimRelay(
                  and dependency_receipt.status = 'finalized'
                  and dependency_receipt.action_match
                  and dependency_receipt.canonical
-                 and dependency_receipt.evidence ->> 'allowanceExact' = 'true'
                  and dependency_receipt.evidence ->>
                        'singleOperationBundle' = 'true'
-                 and dependency_receipt.evidence ->> 'allowanceRaw' =
-                       reservation.source_raw::text
-                 and dependency_receipt.evidence ->> 'allowanceBlock' =
-                       dependency_receipt.ledger_height
-                 and lower(
-                       dependency_receipt.evidence ->> 'allowanceBlockHash'
-                     ) = lower(dependency_receipt.block_hash)
+                 and (
+                   (
+                     step.action_validation_result ->> 'relayStepKind' =
+                       'deposit'
+                     and dependency.action_validation_result ->>
+                           'relayStepKind' = 'approve'
+                     and dependency_receipt.evidence ->>
+                           'allowanceExact' = 'true'
+                     and dependency_receipt.evidence ->> 'allowanceRaw' =
+                           reservation.source_raw::text
+                     and dependency_receipt.evidence ->> 'allowanceBlock' =
+                           dependency_receipt.ledger_height
+                     and lower(
+                           dependency_receipt.evidence ->> 'allowanceBlockHash'
+                         ) = lower(dependency_receipt.block_hash)
+                   )
+                   or (
+                     step.action_validation_result ->> 'relayStepKind' =
+                       'approve'
+                     and dependency.action_validation_result ->>
+                           'relayStepKind' = 'source_pull'
+                     and dependency_receipt.evidence ->>
+                           'attributedSourceRaw' = reservation.source_raw::text
+                     and dependency_receipt.evidence ->>
+                           'sourceDebitEventIndex' is not null
+                   )
+                 )
              )
            )
          )
@@ -3041,6 +3064,54 @@ async function preBroadcastRelay(
       diagnosticCode: "approval_dependency_missing" as const,
     };
   }
+  if (
+    validated.kind === "approve" &&
+    input.claim.actionValidationResult.sourcePullRequired === true
+  ) {
+    const dependency = await client.query<{ dependency_kind: string | null }>(
+      `select dependency.action_validation_result ->> 'relayStepKind'
+                as dependency_kind
+         from funding_operation_step_attempts attempt
+         join funding_operation_steps step on step.id = attempt.step_id
+         join funding_operation_steps dependency
+           on dependency.id = step.depends_on_step_id
+          and dependency.operation_id = step.operation_id
+          and dependency.state = 'succeeded'
+          and dependency.action_validation_result ->>
+                'relayStepKind' = 'source_pull'
+         join funding_step_receipt_observations dependency_receipt
+           on dependency_receipt.step_id = dependency.id
+          and dependency_receipt.status = 'finalized'
+          and dependency_receipt.action_match
+          and dependency_receipt.canonical
+          and dependency_receipt.evidence ->>
+                'singleOperationBundle' = 'true'
+          and dependency_receipt.evidence ->> 'attributedSourceRaw' = $4
+          and dependency_receipt.evidence ->> 'sourceDebitEventIndex'
+                is not null
+         join funding_operation_step_attempts dependency_attempt
+           on dependency_attempt.id = dependency_receipt.attempt_id
+          and dependency_attempt.step_id = dependency.id
+        where step.operation_id = $1::uuid
+          and step.id = $2::uuid
+          and attempt.id = $3::uuid
+          and attempt.outcome = 'started'
+        for update of dependency, dependency_attempt, dependency_receipt`,
+      [
+        input.claim.operationId,
+        input.claim.stepId,
+        input.claim.attemptId,
+        input.claim.receiptRaw,
+      ],
+    );
+    if (dependency.rowCount !== 1) {
+      return {
+        kind: "hard_invalid" as const,
+        reasonCode: "delegated_action_invalid" as const,
+        diagnosticCode: "source_pull_dependency_missing" as const,
+      };
+    }
+  }
   const scope = await client.query<{
     action_expires_at: Date | null;
     allowance_exact: boolean;
@@ -3142,6 +3213,35 @@ async function preBroadcastRelay(
       kind: "hard_invalid" as const,
       reasonCode: "delegated_quote_expired" as const,
     };
+  }
+  if (validated.kind === "source_pull") {
+    const observedPull = parsePolymarketDepositWalletPullerObservation(
+      input.observation,
+    );
+    const expectedDepositWallet =
+      input.claim.actionValidationResult.expectedSourceAddress;
+    const expectedNonce = input.claim.actionValidationResult.pullNonce;
+    if (
+      !observedPull ||
+      typeof expectedDepositWallet !== "string" ||
+      typeof expectedNonce !== "string" ||
+      canonicalAccountAddress("evm:137", observedPull.controller) !==
+        canonicalAccountAddress("evm:137", input.claim.walletAddress) ||
+      canonicalAccountAddress("evm:137", observedPull.owner) !==
+        canonicalAccountAddress("evm:137", input.claim.walletAddress) ||
+      canonicalAccountAddress("evm:137", observedPull.depositWallet) !==
+        canonicalAccountAddress("evm:137", expectedDepositWallet) ||
+      observedPull.nonce !== expectedNonce ||
+      BigInt(observedPull.allowanceRaw) !== ethers.MaxUint256 ||
+      BigInt(observedPull.depositBalanceRaw) < BigInt(input.claim.receiptRaw)
+    ) {
+      return {
+        kind: "hard_invalid" as const,
+        reasonCode: "delegated_action_invalid" as const,
+        diagnosticCode: "puller_state_mismatch" as const,
+      };
+    }
+    return { kind: "allowed" as const };
   }
   const observed = parseRelayEvmAllowanceObservation(input.observation);
   if (!observed) {
@@ -3841,6 +3941,103 @@ async function finalizeRelayHardInvalidInTransaction(
     walletId: input.claim.actionWalletId,
     profile: input.profile,
   });
+  if (validated.kind === "source_pull") {
+    const scope = await client.query<{
+      operation_stage: "committed" | "source_action";
+      operation_status:
+        | "in_progress"
+        | "reconcile_required"
+        | "recovery_required";
+      operation_version: string | number;
+      reservation_id: string;
+    }>(
+      `select operation_row.status as operation_status,
+              operation_row.progress_stage as operation_stage,
+              operation_row.version as operation_version,
+              reservation_row.id as reservation_id
+         from funding_operations operation_row
+         join telegram_funding_authorization_reservations reservation_row
+           on reservation_row.funding_operation_id = operation_row.id
+          and reservation_row.status = 'reserved'
+        where operation_row.id = $1::uuid
+          and operation_row.status in (
+                'in_progress', 'reconcile_required', 'recovery_required'
+              )
+          and operation_row.progress_stage in ('committed', 'source_action')
+        for update of operation_row, reservation_row`,
+      [input.claim.operationId],
+    );
+    const row = scope.rows[0];
+    if (!row) return;
+    await client.query(
+      `update funding_operation_steps
+          set state = 'failed', updated_at = $2
+        where operation_id = $1::uuid
+          and state in ('planned', 'action_required')`,
+      [input.claim.operationId, input.now],
+    );
+    const released = await client.query(
+      `update telegram_funding_authorization_reservations
+          set status = 'released',
+              resolved_at = $2,
+              resolution_evidence = resolution_evidence || jsonb_build_object(
+                'operationId', $3::text,
+                'reason', 'source_pull_not_broadcast'
+              ),
+              updated_at = $2
+        where id = $1::uuid and status = 'reserved'`,
+      [row.reservation_id, input.now, input.claim.operationId],
+    );
+    if (released.rowCount !== 1) {
+      throw new Error("Relay source-pull lane release was not applied");
+    }
+    let version = Number(row.operation_version);
+    let status = row.operation_status;
+    let stage = row.operation_stage;
+    if (stage === "committed") {
+      const activated = await transitionFundingOperationInTransaction(client, {
+        operationId: input.claim.operationId,
+        scope: { kind: "worker" },
+        expectedVersion: version,
+        expectedState: { status, stage },
+        nextState: { status: "in_progress", stage: "source_action" },
+        now: input.now,
+      });
+      version = activated.version;
+      status = "in_progress";
+      stage = "source_action";
+    }
+    if (status !== "reconcile_required") {
+      const reconciling = await transitionFundingOperationInTransaction(
+        client,
+        {
+          operationId: input.claim.operationId,
+          scope: { kind: "worker" },
+          expectedVersion: version,
+          expectedState: { status, stage },
+          nextState: { status: "reconcile_required", stage: "source_action" },
+          errorCode: "relay_source_pull_invalid",
+          now: input.now,
+        },
+      );
+      version = reconciling.version;
+    }
+    await transitionFundingOperationInTransaction(client, {
+      operationId: input.claim.operationId,
+      scope: { kind: "worker" },
+      expectedVersion: version,
+      expectedState: { status: "reconcile_required", stage: "source_action" },
+      nextState: { status: "failed", stage: "terminal" },
+      errorCode: "relay_source_pull_invalid",
+      now: input.now,
+    });
+    await releaseRelayParentBalanceReservations(
+      client,
+      input.claim.operationId,
+      input.now,
+    );
+    return;
+  }
   const observed = parseRelayEvmAllowanceObservation(input.observation);
   if (!observed) return;
   if (validated.kind === "deposit") {
@@ -4053,20 +4250,24 @@ export function createRelayEvmDelegatedFundingProfile(
     observeBeforeClaim: (pool, input) =>
       observeRelayPostcondition(pool, allowance, input.now, profile),
     observePreBroadcast: (claim) =>
-      allowance({
-        owner: claim.walletAddress,
-        blockNumber: null,
-        finality:
-          claim.actionValidationResult.relayStepKind === "cleanup"
-            ? "finalized"
-            : "latest",
-        mutationBaselineBlock:
-          claim.allowanceMutationBaselineBlock ??
-          (typeof claim.actionValidationResult
-            .allowanceMutationBaselineBlock === "string"
-            ? claim.actionValidationResult.allowanceMutationBaselineBlock
-            : null),
-      }),
+      claim.actionValidationResult.relayStepKind === "source_pull"
+        ? readPolymarketDepositWalletPullerState({
+            controller: claim.walletAddress,
+          })
+        : allowance({
+            owner: claim.walletAddress,
+            blockNumber: null,
+            finality:
+              claim.actionValidationResult.relayStepKind === "cleanup"
+                ? "finalized"
+                : "latest",
+            mutationBaselineBlock:
+              claim.allowanceMutationBaselineBlock ??
+              (typeof claim.actionValidationResult
+                .allowanceMutationBaselineBlock === "string"
+                ? claim.actionValidationResult.allowanceMutationBaselineBlock
+                : null),
+          }),
     preBroadcastDecisionInTransaction: (client, boundaryInput) =>
       preBroadcastRelay(client, { ...boundaryInput, configuration, profile }),
     finalizeAlreadySatisfiedInTransaction: (client, finalizeInput) =>

@@ -291,6 +291,7 @@ export class PrivyDelegatedFundingDriver implements DelegatedFundingNetworkDrive
       walletAddress: string;
       walletId: string;
       requiredProfileId?: string;
+      requireFundingPuller?: boolean;
     }>,
     authority: Pick<
       PolymarketWrapExecutionConfiguration,
@@ -390,6 +391,8 @@ export class PrivyDelegatedFundingDriver implements DelegatedFundingNetworkDrive
             fundingSidecarRuntimeConfig.polymarketNegRiskExchangeAddress,
           ],
           fundingRouterAddress: POLYMARKET_FUNDING_ROUTER.polygon,
+          fundingPullerAddress:
+            fundingSidecarRuntimeConfig.polymarketDepositWalletPullerAddress,
           maxBuyUsd: fundingSidecarRuntimeConfig.polymarketBotBuyPolicyMaxUsd,
           policy: { ...normalizedPolicy, chainType: "ethereum" },
           profile: "buy_sell",
@@ -398,6 +401,17 @@ export class PrivyDelegatedFundingDriver implements DelegatedFundingNetworkDrive
         if (!policyValidation.valid) {
           throw new PrivyDelegatedFundingProfileInvalidError(
             "Privy automation policy is not the exact combined BUY+SELL+FUNDING profile",
+          );
+        }
+        if (
+          input.requireFundingPuller &&
+          (!fundingSidecarRuntimeConfig.polymarketDepositWalletPullerAddress ||
+            !policyValidation.fundingPullRulesPresent ||
+            policyValidation.fundingPullMaxSourceRaw !==
+              BigInt(this.input.configuration.relayMaxSourceRaw ?? "0"))
+        ) {
+          throw new PrivyDelegatedFundingProfileInvalidError(
+            "Privy automation policy lacks the exact Deposit Wallet Puller rule",
           );
         }
         const relayProfile = relayEvmFundingProfileSpec(
@@ -495,6 +509,15 @@ export class PrivyDelegatedFundingDriver implements DelegatedFundingNetworkDrive
         walletAddress: input.walletAddress,
         walletId: input.walletId,
         requiredProfileId: input.profileId,
+        requireFundingPuller: Boolean(
+          fundingSidecarRuntimeConfig.polymarketDepositWalletPullerAddress &&
+          relayEvmFundingProfileSpec(input.profileId)?.sourceAsset.networkId ===
+            "evm:137" &&
+          relayEvmFundingProfileSpec(
+            input.profileId,
+          )?.sourceAsset.assetId.toLowerCase() ===
+            fundingSidecarRuntimeConfig.polymarketPusdAddress.toLowerCase(),
+        ),
       });
       return "valid";
     } catch (error) {
@@ -514,6 +537,8 @@ export class PrivyDelegatedFundingDriver implements DelegatedFundingNetworkDrive
           walletAddress: claim.walletAddress,
           walletId: claim.privyWalletId,
           requiredProfileId: claim.profileId,
+          requireFundingPuller:
+            claim.actionValidationResult.relayStepKind === "source_pull",
         },
         {
           policyFingerprint: claim.policyFingerprint,
