@@ -4824,11 +4824,13 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         false,
       );
       assert.equal(
-        appFallbackButtons.slice(0, 6).every(
-          (button) =>
-            "callback_data" in button &&
-            button.callback_data?.startsWith("hbt:buy:"),
-        ),
+        appFallbackButtons
+          .slice(0, 6)
+          .every(
+            (button) =>
+              "callback_data" in button &&
+              button.callback_data?.startsWith("hbt:buy:"),
+          ),
         true,
         "Limitless presets must enter the bot shortfall flow instead of opening the Mini App",
       );
@@ -5533,42 +5535,45 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         backfilledExecutionRefs: 0,
         backfilledOrderRefs: 0,
         expiredPending: 2,
+        failedInactiveFunding: 0,
         failedPreSubmitExecuting: 1,
         submittedReconcileRequired: 3,
         unknownSubmitReconcileRequired: 2,
       });
-      assert.match(statements[0] ?? "", /expires_at <=/);
-      assert.match(statements[1] ?? "", /FROM orders o/);
-      assert.match(statements[1] ?? "", /telegramIntentId/);
-      assert.match(
-        statements[1] ?? "",
-        /order_payload->'history'->>'telegramIntentId'/,
-      );
-      assert.match(
-        statements[1] ?? "",
-        /prepared_snapshot->'reconcileKeys'->>'clientOrderId'/,
-      );
-      assert.match(
-        statements[1] ?? "",
-        /order_payload->'submitted'->'payload'->'reconcileKeys'->>'clientOrderId'/,
-      );
-      assert.match(statements[2] ?? "", /FROM executions e/);
+      assert.match(statements[0] ?? "", /funding_no_longer_active/);
+      assert.match(statements[0] ?? "", /funding_operation\.status <> ALL/);
+      assert.match(statements[1] ?? "", /expires_at <=/);
+      assert.match(statements[2] ?? "", /FROM orders o/);
       assert.match(statements[2] ?? "", /telegramIntentId/);
       assert.match(
         statements[2] ?? "",
-        /e\.raw->'history'->'reconcileKeys'->>'intentId'/,
+        /order_payload->'history'->>'telegramIntentId'/,
       );
       assert.match(
         statements[2] ?? "",
+        /prepared_snapshot->'reconcileKeys'->>'clientOrderId'/,
+      );
+      assert.match(
+        statements[2] ?? "",
+        /order_payload->'submitted'->'payload'->'reconcileKeys'->>'clientOrderId'/,
+      );
+      assert.match(statements[3] ?? "", /FROM executions e/);
+      assert.match(statements[3] ?? "", /telegramIntentId/);
+      assert.match(
+        statements[3] ?? "",
+        /e\.raw->'history'->'reconcileKeys'->>'intentId'/,
+      );
+      assert.match(
+        statements[3] ?? "",
         /prepared_snapshot->'reconcileKeys'->>'txSignature'/,
       );
-      assert.match(statements[3] ?? "", /venue_order_id IS NULL/);
-      assert.match(statements[3] ?? "", /submit_started_at IS NULL/);
-      assert.match(statements[4] ?? "", /status = 'reconcile_required'/);
-      assert.match(statements[4] ?? "", /submit_started_at IS NOT NULL/);
-      assert.match(statements[5] ?? "", /venue_order_id IS NOT NULL/);
-      assert.match(statements[5] ?? "", /status = 'submitted'/);
-      assert.match(statements[5] ?? "", /error_code = 'reconcile_required'/);
+      assert.match(statements[4] ?? "", /venue_order_id IS NULL/);
+      assert.match(statements[4] ?? "", /submit_started_at IS NULL/);
+      assert.match(statements[5] ?? "", /status = 'reconcile_required'/);
+      assert.match(statements[5] ?? "", /submit_started_at IS NOT NULL/);
+      assert.match(statements[6] ?? "", /venue_order_id IS NOT NULL/);
+      assert.match(statements[6] ?? "", /status = 'submitted'/);
+      assert.match(statements[6] ?? "", /error_code = 'reconcile_required'/);
     },
   },
   {

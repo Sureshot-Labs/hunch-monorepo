@@ -15,7 +15,12 @@ import { pool, type DbQuery } from "./db.js";
 import { createTelegramBotTradingRoutes } from "./routes/telegram-bot-trading.js";
 import type { PrivyServerSignerStatus } from "./services/api-trading-wallet-signing.js";
 import type { ApiBotTradingExecutor } from "./services/api-trading-service.js";
-import { captureTelegramBotTradingCallback } from "./services/telegram-bot-trading.js";
+import {
+  buildTelegramBotTradingMarketMessage,
+  buildTelegramBotTradingStatusMessage,
+  captureTelegramBotTradingCallback,
+  reconcileStaleTelegramTradeIntents,
+} from "./services/telegram-bot-trading.js";
 
 const client = await pool.connect();
 
@@ -454,6 +459,102 @@ try {
     cancelButtons.some((button) => button.text.includes("$1 · NO")),
     true,
     "Cancel returns to the complete market action card instead of ending navigation",
+  );
+
+  const terminalFundingQuote = await client.query<{ id: string }>(
+    `insert into funding_quotes (
+       user_id, discovery_projection_id, selected_source_option_snapshot,
+       destination_option_snapshot, plan_snapshot, policy_version,
+       policy_revision, canonical_request_hash, plan_hash, consent_token_hash,
+       expires_at, consumed_at
+     ) values (
+       $1, 'telegram-terminal-funding', '{}'::jsonb, '{}'::jsonb, '{}'::jsonb,
+       1, 'telegram-terminal-funding', repeat('a', 64), repeat('b', 64),
+       repeat('c', 64), now() + interval '1 hour', now()
+     ) returning id`,
+    [userId],
+  );
+  const terminalFundingOperation = await client.query<{ id: string }>(
+    `insert into funding_operations (
+       user_id, quote_id, purpose, status, progress_stage, experience_mode,
+       plan_kind, idempotency_key, commit_request_hash, plan_hash,
+       policy_version, policy_revision, destination_target_snapshot, market_id,
+       placement_snapshot, quote_snapshot, consent_snapshot,
+       original_subject_lookup_hmac, subject_lookup_key_version, expires_at,
+       completed_at
+     ) values (
+       $1, $2, 'trade_shortfall', 'cancelled', 'terminal', 'instant',
+       'already_available', $3, repeat('d', 64), repeat('b', 64), 1,
+       'telegram-terminal-funding', '{}'::jsonb, $4, '{}'::jsonb, '{}'::jsonb,
+       '{}'::jsonb, repeat('e', 64), 1, now() + interval '1 hour', now()
+     ) returning id`,
+    [
+      userId,
+      terminalFundingQuote.rows[0]?.id,
+      `terminal-funding:${suffix}`,
+      marketId,
+    ],
+  );
+  const staleFundingIntent = await client.query<{ id: string }>(
+    `insert into telegram_trade_intents (
+       telegram_user_id, user_id, authorization_id, action, venue, market_id,
+       event_id, side, amount_usd, status, expires_at, idempotency_key,
+       funding_operation_id
+     ) values (
+       $1, $2, $3, 'buy', 'polymarket', $4, $5, 'YES', 1, 'funding',
+       now() + interval '2 minutes', $6, $7
+     ) returning id`,
+    [
+      telegramUserId,
+      userId,
+      authorization.id,
+      marketId,
+      eventId,
+      `stale-terminal-funding:${suffix}`,
+      terminalFundingOperation.rows[0]?.id,
+    ],
+  );
+  const marketAfterTerminalFunding = await buildTelegramBotTradingMarketMessage(
+    {
+      appBaseUrl: "https://app.hunch.trade",
+      chatId: telegramUserId,
+      db,
+      marketRef: marketId,
+      signerInspector,
+      telegramMiniAppEnabled: true,
+      telegramUserId,
+      trading,
+    },
+  );
+  assert.doesNotMatch(
+    marketAfterTerminalFunding.text,
+    /Trade still resolving/u,
+    "A terminal funding operation must not block a fresh market action",
+  );
+  const statusAfterTerminalFunding = await buildTelegramBotTradingStatusMessage(
+    db,
+    telegramUserId,
+    trading,
+    { reconcileLocal: false },
+  );
+  assert.doesNotMatch(
+    statusAfterTerminalFunding.text,
+    /Resolving trades/u,
+    "A terminal funding operation must disappear from Telegram trading status",
+  );
+  const reconciledTerminalFunding = await reconcileStaleTelegramTradeIntents(
+    db,
+    { telegramUserId },
+  );
+  assert.equal(reconciledTerminalFunding.failedInactiveFunding, 1);
+  assert.equal(
+    (
+      await client.query<{ status: string }>(
+        `select status from telegram_trade_intents where id = $1::uuid`,
+        [staleFundingIntent.rows[0]?.id],
+      )
+    ).rows[0]?.status,
+    "failed",
   );
 
   const actionRows = await client.query<{ action: string }>(
