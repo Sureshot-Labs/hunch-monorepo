@@ -70,10 +70,21 @@ export function buildSignalBotBuyStartParam(input: {
   if (!isSignalBotRouteId(eventId) || !isSignalBotRouteId(marketId)) {
     return null;
   }
-  const amount =
-    input.amountUsd != null && input.amountUsd > 0 && input.amountUsd <= 999_999
-      ? String(Math.trunc(input.amountUsd))
-      : "";
+  const amount = (() => {
+    if (
+      input.amountUsd == null ||
+      !Number.isFinite(input.amountUsd) ||
+      input.amountUsd <= 0 ||
+      input.amountUsd > 999_999
+    ) {
+      return "";
+    }
+    const rounded = Math.round((input.amountUsd + Number.EPSILON) * 100) / 100;
+    return rounded
+      .toFixed(2)
+      .replace(/\.00$/u, "")
+      .replace(/(\.\d)0$/u, "$1");
+  })();
   const side = input.side === "YES" ? "Y" : "N";
   const eventParts = splitSignalBotRouteId(eventId);
   const marketParts = splitSignalBotRouteId(marketId);

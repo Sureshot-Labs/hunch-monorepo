@@ -8,9 +8,7 @@ type FundingAuthorizationReservationScope = Readonly<{
 const FUNDING_AUTHORIZATION_RESERVATION_SCOPE_KEY = `
   funding_authorization.wallet_chain || ':' ||
   lower(funding_authorization.wallet_address) || ':' ||
-  funding_authorization.profile_id || ':' ||
-  funding_authorization.source_network_id || ':' ||
-  lower(funding_authorization.source_asset_id)
+  funding_authorization.security_class
 `;
 
 export async function lockFundingAuthorizationReservationScope(

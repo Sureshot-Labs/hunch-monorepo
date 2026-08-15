@@ -43,6 +43,7 @@ import {
   ensureTelegramFundingAuthorization,
   ensureTelegramRelayEvmFundingAuthorization,
   grantTelegramFundingAuthorization,
+  loadActiveTelegramFundingAuthorization,
   revokeTelegramFundingAuthorization,
   telegramFundingAuthorizationFingerprint,
 } from "../../execution/telegram-funding-authorization.js";
@@ -51,7 +52,10 @@ import {
   buildTelegramRelayEvmAutomationPolicyV3,
   telegramFundingAutomationPolicyJson,
 } from "../../execution/telegram-funding-automation-policy.js";
-import { TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID } from "../../execution/delegated-funding-profile-ids.js";
+import {
+  TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
+  TELEGRAM_RELAY_POLYGON_PUSD_PROFILE_ID,
+} from "../../execution/delegated-funding-profile-ids.js";
 import {
   BASE_USDC,
   POLYGON_PUSD,
@@ -2397,6 +2401,61 @@ try {
 
   const hugeRaw = (2n ** 255n).toString();
   const concurrent = await createFixture(hugeRaw, true);
+  const limitlessIdentity = await pool.query<{ telegram_user_id: string }>(
+    `select telegram_user_id
+       from user_telegram_accounts
+      where id = $1::uuid`,
+    [concurrent.telegramAccountId],
+  );
+  const limitlessTelegramUserId = limitlessIdentity.rows[0]?.telegram_user_id;
+  assert.ok(limitlessTelegramUserId);
+  const limitlessDestinationOptionId = opaque("limitless_destination");
+  const limitlessBindingOptionId = opaque("limitless_binding");
+  const limitlessFundingAuthorization = await grantTelegramFundingAuthorization(
+    pool,
+    {
+      userId: concurrent.userId,
+      telegramAccountId: concurrent.telegramAccountId,
+      telegramUserId: limitlessTelegramUserId,
+      userWalletId: concurrent.userWalletId,
+      privyWalletId: concurrent.privyWalletId,
+      walletAddress: concurrent.signerAddress,
+      destinationOptionId: limitlessDestinationOptionId,
+      venueBindingOptionId: limitlessBindingOptionId,
+      configuration: profileConfiguration,
+      profileId: TELEGRAM_RELAY_POLYGON_PUSD_PROFILE_ID,
+      securityClass: "routed_value_movement",
+      sourceAsset: pUsd,
+      destinationAsset: {
+        networkId: "evm:8453",
+        assetId: BASE_USDC,
+        decimals: 6,
+      },
+      venueId: "limitless",
+      maxSourceRaw: "20000000",
+      now: new Date(now.getTime() + 1),
+    },
+  );
+  extraAuthorizationIds.push(limitlessFundingAuthorization.id);
+  assert.ok(
+    await loadActiveTelegramFundingAuthorization(pool, {
+      userId: concurrent.userId,
+      telegramAccountId: concurrent.telegramAccountId,
+      telegramUserId: limitlessTelegramUserId,
+      destinationOptionId: limitlessDestinationOptionId,
+      venueBindingOptionId: limitlessBindingOptionId,
+      profileId: TELEGRAM_RELAY_POLYGON_PUSD_PROFILE_ID,
+      securityClass: "routed_value_movement",
+      sourceAsset: pUsd,
+      destinationAsset: {
+        networkId: "evm:8453",
+        assetId: BASE_USDC,
+        decimals: 6,
+      },
+      venueId: "limitless",
+    }),
+    "Limitless Relay funding must not require Limitless in the bot-order signer venue allowlist",
+  );
   const concurrentReceiptId = concurrent.receiptIds[1];
   assert.ok(concurrentReceiptId);
   const unusedReceiptId = crypto.randomUUID();

@@ -120,6 +120,7 @@ export async function hideSignalBotFundingQr(
 }
 
 export type SignalBotFundingMenuAction =
+  | "back_to_market"
   | "cancel"
   | "change_buy_amount"
   | "confirm_conversion"
@@ -142,15 +143,17 @@ export function signalBotFundingMenuAction(
           ? "confirm_conversion"
           : route.kind === "review_conversion"
             ? "review_conversion"
-            : route.kind === "cancel"
-              ? "cancel"
-              : route.kind === "refresh" || route.kind === "qr"
-                ? "session"
-                : route.kind === "deposit" &&
-                    (route.venue === "polymarket" ||
-                      route.venue === "limitless")
-                  ? "open"
-                  : null;
+            : route.kind === "back_to_market"
+              ? "back_to_market"
+              : route.kind === "cancel"
+                ? "cancel"
+                : route.kind === "refresh" || route.kind === "qr"
+                  ? "session"
+                  : route.kind === "deposit" &&
+                      (route.venue === "polymarket" ||
+                        route.venue === "limitless")
+                    ? "open"
+                    : null;
 }
 
 type MenuButton =
@@ -180,6 +183,7 @@ export type SignalBotInteractiveMenuLoaders = {
   }) => Promise<MenuMessage & { qrText?: string }>;
   funding: (input: {
     action:
+      | "back_to_market"
       | "cancel"
       | "change_buy_amount"
       | "confirm_conversion"
@@ -410,7 +414,8 @@ async function deliverSignalBotInteractiveMenuCallback(
                     ? { consentToken: route.consentToken }
                     : route.kind === "review_conversion"
                       ? { receiptId: route.receiptId }
-                      : route.kind === "cancel" ||
+                      : route.kind === "back_to_market" ||
+                          route.kind === "cancel" ||
                           route.kind === "refresh" ||
                           route.kind === "qr"
                         ? { contextId: route.contextId }

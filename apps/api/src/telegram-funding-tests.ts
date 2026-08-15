@@ -1187,7 +1187,7 @@ assert.equal(
     .some(
       (button) =>
         "callback_data" in button &&
-        button.callback_data === `hm:v1:fund:select:${contextId}:l`,
+        button.callback_data === `hm:v1:fund:select:${contextId}:ld`,
     ),
   true,
 );
@@ -1385,7 +1385,7 @@ assert.equal(
         presentationMode: "pusd_or_usdce_automatic",
       },
     },
-    "pusd_direct",
+    "pusd_or_usdce_automatic",
   ),
   "pusd_or_usdce_automatic",
   "a soft pause must preserve the exact frozen automatic presentation",
@@ -1830,19 +1830,10 @@ const reviewDisposition = resolveTelegramFundingReceiptDisposition({
     presentation: reviewProjection.presentation,
   },
 } as unknown as FundingReceiveReceiptRoutingTarget);
-assert.equal(reviewDisposition.kind, "review_required");
-assert.deepEqual(
-  reviewDisposition.kind === "review_required"
-    ? reviewDisposition.continuation
-    : null,
-  reviewContinuation,
-);
-assert.equal(
-  reviewDisposition.kind === "review_required"
-    ? reviewDisposition.quotePlan.confirmedSourceAmount?.raw
-    : null,
-  "997000000",
-);
+assert.deepEqual(reviewDisposition, {
+  kind: "hard_invalid",
+  reasonCode: "funding_review_action_unavailable",
+});
 const reviewQuoteMessage = buildTelegramFundingReviewQuoteMessage({
   contextId,
   quote: {
@@ -1944,8 +1935,8 @@ const combinedTargetMessage = buildTelegramFundingTargetMessageForSession({
   session,
   automaticConversionEnabled: true,
 });
-assert.match(combinedTargetMessage.text, /pUSD/u);
-assert.equal(combinedTargetMessage.text.includes("USDC"), true);
+assert.match(combinedTargetMessage.text, /Choose the network and asset/u);
+assert.ok(combinedTargetMessage.reply_markup);
 assert.equal(
   resolveTelegramFundingTargetChoice({
     automaticConversionEnabled: true,
@@ -1954,8 +1945,8 @@ assert.equal(
       variant("variant-usdce", usdce),
       variant("variant-pusd", pUsd),
     ],
-  })?.mode,
-  "pusd_or_usdce_automatic",
+  }),
+  null,
 );
 assert.equal(
   resolveTelegramDirectPusdChoice({

@@ -12,6 +12,7 @@ import { parseMoneyJson } from "../domain/money-json.js";
 import type { JsonValue } from "../domain/types.js";
 import { canonicalAssetId, sameAsset } from "../domain/asset-identity.js";
 import { DELEGATED_PROVIDER_REPLAY_MS } from "../execution/delegated-funding-recovery-policy.js";
+import { RELAY_EVM_FUNDING_PROFILE_SPECS } from "../execution/relay-evm-profile-specs.js";
 import {
   claimFundingReconciliationJobs,
   fetchFundingOperationForWorkerInTransaction,
@@ -28,6 +29,11 @@ import {
 } from "../persistence/funding-operation-repository.js";
 
 type JsonRecord = Readonly<Record<string, JsonValue>>;
+const DELEGATED_RELAY_EVM_ROUTE_IDS = new Set(
+  Object.values(RELAY_EVM_FUNDING_PROFILE_SPECS).flatMap(
+    (profile) => profile.routeIds,
+  ),
+);
 
 export type FundingReductionResult = Readonly<{
   operationId: string;
@@ -272,7 +278,9 @@ export function deriveTargetState(
       isCanonicalFinal(observation) && observation.kind !== "venue_readiness",
   );
   const delegatedRelayReady =
-    operation.supportMetadata.routeId !== "base-usdc-to-polygon-pusd" ||
+    !DELEGATED_RELAY_EVM_ROUTE_IDS.has(
+      String(operation.supportMetadata.routeId ?? ""),
+    ) ||
     (steps.length === 2 &&
       steps.every((step) => step.state === "succeeded") &&
       hasFinalObservation(observations, "source_debit"));
@@ -1644,7 +1652,10 @@ async function loadFundingOperationState(
       terminalRelayReceiptWatch:
         ["completed", "refunded", "failed", "cancelled"].includes(
           operation.status,
-        ) && operation.supportMetadata.routeId === "base-usdc-to-polygon-pusd",
+        ) &&
+        DELEGATED_RELAY_EVM_ROUTE_IDS.has(
+          String(operation.supportMetadata.routeId ?? ""),
+        ),
       awaitingProviderReference: waitState.awaitingProviderReference,
       awaitingUnbroadcastActionReport:
         waitState.awaitingUnbroadcastActionReport,

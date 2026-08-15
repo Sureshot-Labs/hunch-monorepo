@@ -42,7 +42,10 @@ import type {
 } from "./telegram-funding-contracts.js";
 import { rearmTelegramFundingCurrentAddressDelivery } from "./telegram-funding-delivery.js";
 import { runTelegramFundingProgressProjectionForContext } from "./telegram-funding-progress-projector.js";
-import { appendTelegramFundingBuyReturnInTransaction } from "./telegram-funding-buy-continuation.js";
+import {
+  appendTelegramFundingBuyReturnInTransaction,
+  type TelegramFundingBuyContinuationMode,
+} from "./telegram-funding-buy-continuation.js";
 import {
   parseTelegramBotTradeAuthorityBinding,
   telegramBotTradeAuthorityFingerprint,
@@ -140,6 +143,7 @@ export type TelegramFundingAuthorizationProvisioner = (
     controllerWalletId: string;
     destinationOptionId: string;
     venueBindingOptionId: string;
+    venueId: "limitless" | "polymarket";
     now: Date;
   }>,
 ) => Promise<unknown>;
@@ -164,6 +168,7 @@ export type TelegramFundingBuyReturnSourceIntent = Readonly<{
   authorization_wallet_address: string;
   authorization_wallet_chain: "ethereum" | "solana";
   chat_id: string | null;
+  delivery_mode: TelegramFundingBuyContinuationMode;
   event_id: string | null;
   funding_operation_id: string | null;
   funding_reservation_id: string | null;
@@ -174,6 +179,7 @@ export type TelegramFundingBuyReturnSourceIntent = Readonly<{
   telegram_authority: unknown;
   telegram_user_id: string;
   user_id: string | null;
+  venue: "limitless" | "polymarket";
 }>;
 
 export async function loadTelegramFundingBuyReturnSourceIntentForUpdate(
@@ -194,6 +200,7 @@ export async function loadTelegramFundingBuyReturnSourceIntentForUpdate(
         auth.wallet_address as authorization_wallet_address,
         auth.wallet_chain as authorization_wallet_chain,
         intent.chat_id,
+        intent.delivery_mode,
         intent.event_id,
         intent.funding_operation_id,
         intent.funding_reservation_id,
@@ -203,14 +210,20 @@ export async function loadTelegramFundingBuyReturnSourceIntentForUpdate(
         intent.submit_started_at,
         intent.result -> 'telegramAuthority' as telegram_authority,
         intent.telegram_user_id,
-        intent.user_id
+        intent.user_id,
+        intent.venue
       from telegram_trade_intents intent
       join telegram_bot_trading_authorizations auth
         on auth.id = intent.authorization_id
        and auth.user_id = intent.user_id
        and auth.telegram_user_id = intent.telegram_user_id
        and auth.enabled = true
-       and 'polymarket' = any(auth.enabled_venues)
+       and (
+         (intent.delivery_mode = 'bot_submit'
+           and intent.venue = any(auth.enabled_venues))
+         or (intent.delivery_mode = 'app_handoff'
+           and auth.wallet_chain = 'ethereum')
+       )
       join users app_user
         on app_user.id = auth.user_id
        and coalesce(app_user.is_active, true) = true
@@ -279,14 +292,20 @@ type TelegramFundingMutationInput = TelegramFundingIdentityInput &
 export type TelegramFundingBuyReturnOpenInput = TelegramFundingMutationInput &
   Readonly<{
     authorizationId: string;
+    continuationMode?: TelegramFundingBuyContinuationMode;
     eventId: string | null;
     marketId: string;
     minimumFundingUsd?: string;
     requestedSpendUsd: string;
     side: "NO" | "YES";
     sourceIntentId: string;
-    venue: "polymarket";
+    venue: "limitless" | "polymarket";
   }>;
+
+export type TelegramFundingMarketReturn = Readonly<{
+  marketId: string;
+  side: "NO" | "YES";
+}>;
 
 export type TelegramFundingProgressDecorator = (
   input: Readonly<{
@@ -340,6 +359,7 @@ export function buildTelegramFundingBuyReturnRequestFingerprint(input: {
   return canonicalJsonHash([
     "set_buy_return:v1",
     input.request.authorizationId,
+    input.request.continuationMode ?? "bot_submit",
     input.link.userId,
     input.link.linkId,
     input.identity.telegramUserId,
@@ -390,7 +410,7 @@ export function canAttachTelegramFundingBuyReturn(input: {
     | "tradingEnabled"
     | "tradingVenues"
   >;
-  venue: "polymarket";
+  venue: "limitless" | "polymarket";
 }): boolean {
   return (
     input.currentPolicyRevision === input.initialPolicyRevision &&
@@ -595,7 +615,12 @@ export class TelegramFundingService {
       now: Date;
     }>,
   ): Promise<void> {
-    if (input.destination.venueId !== "polymarket") return;
+    if (
+      input.destination.venueId !== "limitless" &&
+      input.destination.venueId !== "polymarket"
+    ) {
+      return;
+    }
     await this.provisionAuthorization?.({
       userId: input.link.userId,
       telegramAccountId: input.link.linkId,
@@ -603,6 +628,7 @@ export class TelegramFundingService {
       controllerWalletId: input.destination.controllerWalletId,
       destinationOptionId: input.destination.destinationOptionId,
       venueBindingOptionId: input.destination.venueBindingOptionId,
+      venueId: input.destination.venueId,
       now: input.now,
     });
   }
@@ -1240,7 +1266,7 @@ export class TelegramFundingService {
     const replayed = replay.rows[0];
     if (replayed) {
       const replayFingerprint =
-        replayed.venue_id === "polymarket"
+        replayed.venue_id === "polymarket" || replayed.venue_id === "limitless"
           ? buildTelegramFundingBuyReturnRequestFingerprint({
               destinationOptionId: replayed.destination_option_id,
               identity,
@@ -1462,6 +1488,9 @@ export class TelegramFundingService {
           sourceIntent.authorization_id !== input.authorizationId ||
           sourceIntent.telegram_user_id !== identity.telegramUserId ||
           sourceIntent.chat_id !== identity.chatId ||
+          sourceIntent.delivery_mode !==
+            (input.continuationMode ?? "bot_submit") ||
+          sourceIntent.venue !== input.venue ||
           sourceIntent.market_id !== input.marketId ||
           sourceIntent.event_id !== input.eventId ||
           sourceIntent.side !== input.side ||
@@ -1507,6 +1536,7 @@ export class TelegramFundingService {
             ...returnRequest,
             sourceAuthorityFingerprint:
               telegramBotTradeAuthorityFingerprint(sourceAuthority),
+            continuationMode: input.continuationMode ?? "bot_submit",
             idempotencyKey,
             requestFingerprint,
             responsePayload: { fundingContextId: context.context.id },
@@ -2129,8 +2159,25 @@ export class TelegramFundingService {
     } catch (error) {
       rethrowTelegramFundingPersistenceError(error);
     }
-    const automaticConversionRequested = ["a", "b"].includes(input.choiceToken);
-    if (!["a", "b", "d", "l", "p"].includes(input.choiceToken)) {
+    const routeKeyByChoiceToken: Readonly<Record<string, string>> = {
+      a: "polymarket_polygon_pusd_usdce_v1",
+      b: "polymarket_base_usdc_relay_v1",
+      d: "polymarket_polygon_pusd_direct_v1",
+      l: "limitless_base_usdc_direct_v1",
+      p: "polymarket_polygon_pusd_direct_v1",
+      ld: "limitless_base_usdc_direct_v1",
+      le: "limitless_polygon_usdce_relay_v1",
+      ln: "limitless_polygon_usdc_relay_v1",
+      lp: "limitless_polygon_pusd_relay_v1",
+      pb: "polymarket_base_usdc_relay_v1",
+      pd: "polymarket_polygon_pusd_direct_v1",
+      pn: "polymarket_polygon_usdc_relay_v1",
+      pw: "polymarket_polygon_usdce_wrap_v1",
+    };
+    const selectedRouteKey = routeKeyByChoiceToken[input.choiceToken] ?? null;
+    const automaticConversionRequested =
+      selectedRouteKey != null && !selectedRouteKey.endsWith("_direct_v1");
+    if (!selectedRouteKey) {
       throw new TelegramFundingError("invalid_funding_choice");
     }
     const policy = await resolveSignalBotTradingPolicyStateFromDb(this.pool);
@@ -2170,14 +2217,6 @@ export class TelegramFundingService {
     if (!controllerWalletId) {
       throw new TelegramFundingError("destination_ambiguous");
     }
-    const selectedRouteKey =
-      input.choiceToken === "b"
-        ? "polymarket_base_usdc_relay_v1"
-        : input.choiceToken === "l"
-          ? "limitless_base_usdc_direct_v1"
-          : input.choiceToken === "a"
-            ? "polymarket_polygon_pusd_usdce_v1"
-            : "polymarket_polygon_pusd_direct_v1";
     const capability = await this.resolveTargetCapability({
       link,
       session: receive.session,
@@ -2353,6 +2392,40 @@ export class TelegramFundingService {
     } catch (error) {
       rethrowTelegramFundingPersistenceError(error);
     }
+  }
+
+  async loadMarketReturn(
+    input: TelegramFundingIdentityInput & { contextId: string },
+  ): Promise<TelegramFundingMarketReturn | null> {
+    const { identity, link } = await this.currentLink(input);
+    const { rows } = await this.pool.query<{
+      market_id: string;
+      side: "NO" | "YES";
+    }>(
+      `
+        select buy_return.market_id, buy_return.side
+        from telegram_funding_sessions context
+        join telegram_funding_buy_return_revisions buy_return
+          on buy_return.telegram_funding_session_id = context.id
+         and buy_return.revision = context.active_buy_return_revision
+        where context.id = $1
+          and context.user_id = $2
+          and context.telegram_account_id = $3::uuid
+          and context.telegram_user_id = $4
+          and context.chat_id = $5
+          and context.origin = 'buy_return_context'
+        limit 1
+      `,
+      [
+        input.contextId,
+        link.userId,
+        link.linkId,
+        identity.telegramUserId,
+        identity.chatId,
+      ],
+    );
+    const row = rows[0];
+    return row ? { marketId: row.market_id, side: row.side } : null;
   }
 
   private async projectMutationContext(

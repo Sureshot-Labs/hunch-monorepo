@@ -3,18 +3,27 @@ import { canonicalJsonHash } from "../persistence/canonical.js";
 import { decodePolymarketFundingCalldata } from "../../services/polymarket-funding-router.js";
 import {
   BASE_USDC,
+  POLYGON_PUSD,
+  POLYGON_USDC,
+  POLYGON_USDCE_LEGACY,
   RELAY_DEPOSITORY_V2,
   RELAY_SELF_DEPOSITOR,
 } from "../../funding-providers/relay/rehearsal.js";
 import {
   POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
   TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
+  TELEGRAM_RELAY_POLYGON_PUSD_PROFILE_ID,
+  TELEGRAM_RELAY_POLYGON_USDC_PROFILE_ID,
+  TELEGRAM_RELAY_POLYGON_USDCE_PROFILE_ID,
   type DelegatedFundingSecurityClass,
 } from "./delegated-funding-profile-ids.js";
 
 export {
   POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
   TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
+  TELEGRAM_RELAY_POLYGON_PUSD_PROFILE_ID,
+  TELEGRAM_RELAY_POLYGON_USDC_PROFILE_ID,
+  TELEGRAM_RELAY_POLYGON_USDCE_PROFILE_ID,
   type DelegatedFundingSecurityClass,
 } from "./delegated-funding-profile-ids.js";
 
@@ -42,6 +51,27 @@ export const DELEGATED_FUNDING_EXECUTION_PROFILES: Readonly<
     networkId: "evm:8453",
     venueId: "polymarket",
     executorId: TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
+  }),
+  [TELEGRAM_RELAY_POLYGON_PUSD_PROFILE_ID]: Object.freeze({
+    profileId: TELEGRAM_RELAY_POLYGON_PUSD_PROFILE_ID,
+    securityClass: "routed_value_movement",
+    networkId: "evm:137",
+    venueId: "limitless",
+    executorId: TELEGRAM_RELAY_POLYGON_PUSD_PROFILE_ID,
+  }),
+  [TELEGRAM_RELAY_POLYGON_USDC_PROFILE_ID]: Object.freeze({
+    profileId: TELEGRAM_RELAY_POLYGON_USDC_PROFILE_ID,
+    securityClass: "routed_value_movement",
+    networkId: "evm:137",
+    venueId: "polymarket",
+    executorId: TELEGRAM_RELAY_POLYGON_USDC_PROFILE_ID,
+  }),
+  [TELEGRAM_RELAY_POLYGON_USDCE_PROFILE_ID]: Object.freeze({
+    profileId: TELEGRAM_RELAY_POLYGON_USDCE_PROFILE_ID,
+    securityClass: "routed_value_movement",
+    networkId: "evm:137",
+    venueId: "limitless",
+    executorId: TELEGRAM_RELAY_POLYGON_USDCE_PROFILE_ID,
   }),
 });
 
@@ -231,88 +261,140 @@ function positiveCapCondition(
   return BigInt(value);
 }
 
-export function relayEvmPolicyRuleKind(
+type RelayPolicyAsset = Readonly<{
+  chainId: string;
+  token: string;
+}>;
+
+const RELAY_POLICY_ASSETS: readonly RelayPolicyAsset[] = Object.freeze([
+  { chainId: "8453", token: BASE_USDC },
+  { chainId: "137", token: POLYGON_PUSD },
+  { chainId: "137", token: POLYGON_USDC },
+  { chainId: "137", token: POLYGON_USDCE_LEGACY },
+]);
+
+function relayEvmPolicyRuleIdentity(
   rule: Readonly<Record<string, unknown>>,
-): "approve" | "deposit" | null {
+): Readonly<{ asset: RelayPolicyAsset; kind: "approve" | "deposit" }> | null {
   if (rule.action !== "ALLOW" || rule.method !== "eth_sendTransaction") {
     return null;
   }
   const conditions = conditionsForRule(rule);
-  const common =
-    exactPolicyCondition(conditions, {
-      field: "chain_id",
-      fieldSource: "ethereum_transaction",
-      operator: "eq",
-      value: "8453",
-    }) &&
-    exactPolicyCondition(conditions, {
-      field: "value",
-      fieldSource: "ethereum_transaction",
-      operator: "eq",
-      value: "0x0",
-    });
-  if (!common) return null;
-  const approve =
-    conditions.length === 6 &&
-    exactPolicyCondition(conditions, {
-      field: "to",
-      fieldSource: "ethereum_transaction",
-      operator: "eq",
-      value: BASE_USDC,
-    }) &&
-    exactPolicyCondition(conditions, {
-      field: "function_name",
-      fieldSource: "ethereum_calldata",
-      operator: "eq",
-      value: "approve",
-      abi: RELAY_APPROVE_ABI,
-    }) &&
-    exactPolicyCondition(conditions, {
-      field: "approve.spender",
-      fieldSource: "ethereum_calldata",
-      operator: "eq",
-      value: RELAY_DEPOSITORY_V2,
-      abi: RELAY_APPROVE_ABI,
-    }) &&
-    positiveCapCondition(conditions, "approve.amount", RELAY_APPROVE_ABI) !=
-      null;
-  if (approve) return "approve";
-  const deposit =
-    conditions.length === 7 &&
-    exactPolicyCondition(conditions, {
-      field: "to",
-      fieldSource: "ethereum_transaction",
-      operator: "eq",
-      value: RELAY_DEPOSITORY_V2,
-    }) &&
-    exactPolicyCondition(conditions, {
-      field: "function_name",
-      fieldSource: "ethereum_calldata",
-      operator: "eq",
-      value: "depositErc20",
-      abi: RELAY_DEPOSIT_ERC20_ABI,
-    }) &&
-    exactPolicyCondition(conditions, {
-      field: "depositErc20.token",
-      fieldSource: "ethereum_calldata",
-      operator: "eq",
-      value: BASE_USDC,
-      abi: RELAY_DEPOSIT_ERC20_ABI,
-    }) &&
-    conditions.filter(
-      (condition) =>
-        condition.field === "depositErc20.depositor" &&
-        condition.field_source === "ethereum_calldata" &&
-        condition.operator === "eq" &&
-        conditionAbiEquals(condition, RELAY_DEPOSIT_ERC20_ABI) &&
-        scalar(condition.value) === RELAY_SELF_DEPOSITOR,
-    ).length === 1 &&
+  for (const asset of RELAY_POLICY_ASSETS) {
+    const common =
+      exactPolicyCondition(conditions, {
+        field: "chain_id",
+        fieldSource: "ethereum_transaction",
+        operator: "eq",
+        value: asset.chainId,
+      }) &&
+      exactPolicyCondition(conditions, {
+        field: "value",
+        fieldSource: "ethereum_transaction",
+        operator: "eq",
+        value: "0x0",
+      });
+    if (!common) continue;
+    const approve =
+      conditions.length === 6 &&
+      exactPolicyCondition(conditions, {
+        field: "to",
+        fieldSource: "ethereum_transaction",
+        operator: "eq",
+        value: asset.token,
+      }) &&
+      exactPolicyCondition(conditions, {
+        field: "function_name",
+        fieldSource: "ethereum_calldata",
+        operator: "eq",
+        value: "approve",
+        abi: RELAY_APPROVE_ABI,
+      }) &&
+      exactPolicyCondition(conditions, {
+        field: "approve.spender",
+        fieldSource: "ethereum_calldata",
+        operator: "eq",
+        value: RELAY_DEPOSITORY_V2,
+        abi: RELAY_APPROVE_ABI,
+      }) &&
+      positiveCapCondition(conditions, "approve.amount", RELAY_APPROVE_ABI) !=
+        null;
+    if (approve) return { asset, kind: "approve" };
+    const deposit =
+      conditions.length === 7 &&
+      exactPolicyCondition(conditions, {
+        field: "to",
+        fieldSource: "ethereum_transaction",
+        operator: "eq",
+        value: RELAY_DEPOSITORY_V2,
+      }) &&
+      exactPolicyCondition(conditions, {
+        field: "function_name",
+        fieldSource: "ethereum_calldata",
+        operator: "eq",
+        value: "depositErc20",
+        abi: RELAY_DEPOSIT_ERC20_ABI,
+      }) &&
+      exactPolicyCondition(conditions, {
+        field: "depositErc20.token",
+        fieldSource: "ethereum_calldata",
+        operator: "eq",
+        value: asset.token,
+        abi: RELAY_DEPOSIT_ERC20_ABI,
+      }) &&
+      conditions.filter(
+        (condition) =>
+          condition.field === "depositErc20.depositor" &&
+          condition.field_source === "ethereum_calldata" &&
+          condition.operator === "eq" &&
+          conditionAbiEquals(condition, RELAY_DEPOSIT_ERC20_ABI) &&
+          scalar(condition.value) === RELAY_SELF_DEPOSITOR,
+      ).length === 1 &&
+      positiveCapCondition(
+        conditions,
+        "depositErc20.amount",
+        RELAY_DEPOSIT_ERC20_ABI,
+      ) != null;
+    if (deposit) return { asset, kind: "deposit" };
+  }
+  return null;
+}
+
+export function relayEvmPolicyRuleKind(
+  rule: Readonly<Record<string, unknown>>,
+): "approve" | "deposit" | null {
+  return relayEvmPolicyRuleIdentity(rule)?.kind ?? null;
+}
+
+export function relayEvmPolicyHasExactAssetPair(
+  rules: readonly Readonly<Record<string, unknown>>[],
+  input: Readonly<{ chainId: string; token: string; maxSourceRaw: string }>,
+): boolean {
+  if (!/^[1-9][0-9]*$/u.test(input.maxSourceRaw)) return false;
+  const matches = rules.flatMap((rule) => {
+    const identity = relayEvmPolicyRuleIdentity(rule);
+    return identity &&
+      identity.asset.chainId === input.chainId &&
+      scalar(identity.asset.token) === scalar(input.token)
+      ? [{ ...identity, rule }]
+      : [];
+  });
+  const approve = matches.filter((entry) => entry.kind === "approve");
+  const deposit = matches.filter((entry) => entry.kind === "deposit");
+  if (approve.length !== 1 || deposit.length !== 1) return false;
+  const expected = BigInt(input.maxSourceRaw);
+  return (
     positiveCapCondition(
-      conditions,
+      conditionsForRule(approve[0]?.rule ?? {}),
+      "approve.amount",
+      RELAY_APPROVE_ABI,
+    ) === expected &&
+    positiveCapCondition(
+      conditionsForRule(deposit[0]?.rule ?? {}),
       "depositErc20.amount",
       RELAY_DEPOSIT_ERC20_ABI,
-    ) != null;
-  return deposit ? "deposit" : null;
+    ) === expected
+  );
 }
 
 export function validateRelayEvmPolicyRules(
@@ -323,42 +405,60 @@ export function validateRelayEvmPolicyRules(
   issues: readonly string[];
 }> {
   const relayRules = rules.flatMap((rule) => {
-    const kind = relayEvmPolicyRuleKind(rule);
-    return kind ? [{ kind, rule }] : [];
+    const identity = relayEvmPolicyRuleIdentity(rule);
+    return identity ? [{ ...identity, rule }] : [];
   });
-  const approve = relayRules.filter((entry) => entry.kind === "approve");
-  const deposit = relayRules.filter((entry) => entry.kind === "deposit");
   const issues: string[] = [];
-  if (approve.length !== 1)
-    issues.push("Relay policy requires one exact approve rule");
-  if (deposit.length !== 1)
-    issues.push("Relay policy requires one exact self-bound deposit rule");
-  const approveCap = approve[0]
-    ? positiveCapCondition(
-        conditionsForRule(approve[0].rule),
-        "approve.amount",
-        RELAY_APPROVE_ABI,
-      )
-    : null;
-  const depositCaps = deposit.map((entry) =>
-    positiveCapCondition(
-      conditionsForRule(entry.rule),
-      "depositErc20.amount",
-      RELAY_DEPOSIT_ERC20_ABI,
-    ),
-  );
-  if (
-    approveCap == null ||
-    depositCaps.length === 0 ||
-    depositCaps.some(
-      (depositCap) => depositCap == null || depositCap !== approveCap,
-    )
-  ) {
-    issues.push("Relay approve and deposit caps must be equal and positive");
+  const caps: bigint[] = [];
+  for (const asset of RELAY_POLICY_ASSETS) {
+    const matchesAsset = relayRules.filter(
+      (entry) =>
+        entry.asset.chainId === asset.chainId &&
+        scalar(entry.asset.token) === scalar(asset.token),
+    );
+    const approve = matchesAsset.filter((entry) => entry.kind === "approve");
+    const deposit = matchesAsset.filter((entry) => entry.kind === "deposit");
+    const requiredBasePair = asset.chainId === "8453";
+    if (!requiredBasePair && matchesAsset.length === 0) continue;
+    if (approve.length !== 1) {
+      issues.push(
+        `Relay policy requires one exact approve rule for ${asset.chainId}:${asset.token.toLowerCase()}`,
+      );
+    }
+    if (deposit.length !== 1) {
+      issues.push(
+        `Relay policy requires one exact self-bound deposit rule for ${asset.chainId}:${asset.token.toLowerCase()}`,
+      );
+    }
+    const approveCap = approve[0]
+      ? positiveCapCondition(
+          conditionsForRule(approve[0].rule),
+          "approve.amount",
+          RELAY_APPROVE_ABI,
+        )
+      : null;
+    const depositCap = deposit[0]
+      ? positiveCapCondition(
+          conditionsForRule(deposit[0].rule),
+          "depositErc20.amount",
+          RELAY_DEPOSIT_ERC20_ABI,
+        )
+      : null;
+    if (approveCap == null || depositCap == null || approveCap !== depositCap) {
+      issues.push(
+        `Relay approve and deposit caps must match for ${asset.chainId}:${asset.token.toLowerCase()}`,
+      );
+    } else {
+      caps.push(approveCap);
+    }
+  }
+  const maxSourceRaw = caps[0] ?? null;
+  if (maxSourceRaw == null || caps.some((cap) => cap !== maxSourceRaw)) {
+    issues.push("All Relay EVM rules must share one positive cap");
   }
   return {
     valid: issues.length === 0,
-    maxSourceRaw: issues.length === 0 ? approveCap : null,
+    maxSourceRaw: issues.length === 0 ? maxSourceRaw : null,
     issues,
   };
 }

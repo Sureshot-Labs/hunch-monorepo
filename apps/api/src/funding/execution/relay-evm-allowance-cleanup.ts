@@ -5,10 +5,7 @@ import {
   stableOpaqueId,
   stableWalletOpaqueId,
 } from "../../account-value/canonical.js";
-import {
-  BASE_USDC,
-  RELAY_DEPOSITORY_V2,
-} from "../../funding-providers/relay/rehearsal.js";
+import { RELAY_DEPOSITORY_V2 } from "../../funding-providers/relay/rehearsal.js";
 import type { JsonValue } from "../domain/types.js";
 import {
   commitFundingOperationInTransaction,
@@ -16,7 +13,7 @@ import {
   type FundingCommitPlan,
 } from "../persistence/funding-operation-repository.js";
 import { canonicalJsonHash } from "../persistence/canonical.js";
-import { TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID } from "./delegated-funding-profile-ids.js";
+import type { RelayEvmFundingProfileSpec } from "./relay-evm-profile-specs.js";
 
 type JsonRecord = Readonly<Record<string, JsonValue>>;
 
@@ -44,6 +41,7 @@ type CleanupCandidate = Readonly<{
 async function loadCleanupCandidate(
   client: PoolClient,
   parentOperationId: string,
+  profileId: string,
 ): Promise<CleanupCandidate | null> {
   const { rows } = await client.query<{
     authorization_id: string;
@@ -169,7 +167,7 @@ async function loadCleanupCandidate(
          )
        for update of operation, deposit_step, funding_authorization, reservation
        limit 1`,
-    [parentOperationId, TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID],
+    [parentOperationId, profileId],
   );
   const row = rows[0];
   if (!row) return null;
@@ -204,6 +202,7 @@ export async function createRelayAllowanceCleanupOperationInTransaction(
     allowanceObservedBlock: string;
     allowanceMutationBaselineBlock: string;
     now: Date;
+    profile: RelayEvmFundingProfileSpec;
   }>,
 ): Promise<string | null> {
   if (
@@ -213,7 +212,11 @@ export async function createRelayAllowanceCleanupOperationInTransaction(
     !/^(0|[1-9][0-9]*)$/u.test(input.allowanceMutationBaselineBlock)
   )
     return null;
-  const candidate = await loadCleanupCandidate(client, input.parentOperationId);
+  const candidate = await loadCleanupCandidate(
+    client,
+    input.parentOperationId,
+    input.profile.profileId,
+  );
   if (!candidate) return null;
   const action = {
     kind: "evm_transaction" as const,
@@ -221,13 +224,13 @@ export async function createRelayAllowanceCleanupOperationInTransaction(
       "relay_cleanup_action",
       `${candidate.parentOperationId}:${candidate.depositStepId}:${input.allowanceRevision}`,
     ),
-    networkId: "evm:8453",
+    networkId: input.profile.sourceAsset.networkId,
     senderWalletId: stableWalletOpaqueId({
       walletType: "ethereum",
-      networkId: "evm:8453",
+      networkId: input.profile.sourceAsset.networkId,
       address: candidate.walletAddress,
     }),
-    to: BASE_USDC,
+    to: input.profile.sourceAsset.assetId,
     data: ERC20.encodeFunctionData("approve", [RELAY_DEPOSITORY_V2, 0n]),
     valueRaw: "0",
     gasLimitRaw: null,
@@ -272,12 +275,12 @@ export async function createRelayAllowanceCleanupOperationInTransaction(
         stepKind: "venue_preparation",
         state: "action_required",
         actionFingerprint: canonicalJsonHash(action),
-        executorId: TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
+        executorId: input.profile.profileId,
         payerRequirement: "privy_sponsor",
         dependsOnOrdinal: null,
         normalizedAction: action,
         actionValidationResult: {
-          delegatedProfileId: TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
+          delegatedProfileId: input.profile.profileId,
           relayStepKind: "cleanup",
           signerAddress: candidate.walletAddress,
           requiresSingleOperationBundle: true,

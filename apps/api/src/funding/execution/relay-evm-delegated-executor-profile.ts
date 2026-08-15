@@ -38,6 +38,10 @@ import {
 } from "./delegated-funding-config.js";
 import { TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID } from "./delegated-funding-profile-ids.js";
 import {
+  RELAY_EVM_FUNDING_PROFILE_SPECS,
+  type RelayEvmFundingProfileSpec,
+} from "./relay-evm-profile-specs.js";
+import {
   telegramFundingAuthorizationFingerprint,
   telegramFundingAuthorizationFromRow,
   type TelegramFundingAuthorizationRow,
@@ -56,10 +60,8 @@ import {
   fetchEvmBlockHash,
   fetchEvmBlockNumber,
 } from "../../services/polygon-rpc.js";
-import {
-  BASE_USDC,
-  RELAY_DEPOSITORY_V2,
-} from "../../funding-providers/relay/rehearsal.js";
+import { RELAY_DEPOSITORY_V2 } from "../../funding-providers/relay/rehearsal.js";
+import { RELAY_ROUTE_SPECS } from "../../funding-providers/relay/mappings.js";
 
 type JsonRecord = Readonly<Record<string, JsonValue>>;
 export const RELAY_CLEANUP_CANONICAL_WATCH_MS = 60_000;
@@ -72,17 +74,18 @@ type Policy = Awaited<
 function relayControlPlaneAllowed(
   configuration: RelayEvmExecutionConfiguration,
   policy: Policy,
+  profile: RelayEvmFundingProfileSpec,
 ): boolean {
   return (
     configuration.enabled &&
     relayEvmProfileConfigured(configuration) &&
     policy.runtime.venues.some(
       (venue) =>
-        venue.venueId === "polymarket" &&
+        profile.venueIds.includes(
+          venue.venueId as "limitless" | "polymarket",
+        ) &&
         venue.delegatedExecutionEnabled &&
-        venue.delegatedPolicyIds.includes(
-          TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
-        ),
+        venue.delegatedPolicyIds.includes(profile.profileId),
     )
   );
 }
@@ -142,7 +145,8 @@ const RELAY_ALLOWANCE_LANE_HEAD_PREDICATE = `not exists (
            (reservation.reserved_at, reservation.id)
 )`;
 
-export async function readBaseRelayAllowance(
+export async function readRelayEvmAllowance(
+  profile: RelayEvmFundingProfileSpec,
   input: Readonly<{
     owner: string;
     blockNumber: string | null;
@@ -150,10 +154,18 @@ export async function readBaseRelayAllowance(
     mutationBaselineBlock?: string | null;
   }>,
 ): Promise<RelayEvmAllowanceObservation> {
+  const polygon = profile.sourceAsset.networkId === "evm:137";
+  const rpcUrl = polygon
+    ? fundingSidecarRuntimeConfig.polygonRpcUrl
+    : fundingSidecarRuntimeConfig.baseRpcUrl;
+  const timeoutMs = polygon
+    ? fundingSidecarRuntimeConfig.polygonRpcTimeoutMs
+    : fundingSidecarRuntimeConfig.baseRpcTimeoutMs;
+  const chainLabel = polygon ? "Polygon" : "Base";
   let finalizedBlockHash: string | null = null;
   const finalizedBlock =
     input.blockNumber == null && input.finality === "finalized"
-      ? await fetch(fundingSidecarRuntimeConfig.baseRpcUrl, {
+      ? await fetch(rpcUrl, {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
@@ -162,14 +174,15 @@ export async function readBaseRelayAllowance(
             method: "eth_getBlockByNumber",
             params: ["finalized", false],
           }),
-          signal: AbortSignal.timeout(
-            fundingSidecarRuntimeConfig.baseRpcTimeoutMs,
-          ),
+          signal: AbortSignal.timeout(timeoutMs),
         }).then(async (response) => {
-          if (!response.ok) throw new Error("Base finalized block RPC failed");
+          if (!response.ok)
+            throw new Error(`${chainLabel} finalized block RPC failed`);
           const payload = (await response.json()) as { result?: unknown };
           if (!payload.result || typeof payload.result !== "object") {
-            throw new Error("Base finalized block RPC returned no result");
+            throw new Error(
+              `${chainLabel} finalized block RPC returned no result`,
+            );
           }
           const block = payload.result as Record<string, unknown>;
           if (
@@ -178,7 +191,9 @@ export async function readBaseRelayAllowance(
             typeof block.hash !== "string" ||
             !/^0x[0-9a-f]{64}$/iu.test(block.hash)
           ) {
-            throw new Error("Base finalized block RPC returned invalid data");
+            throw new Error(
+              `${chainLabel} finalized block RPC returned invalid data`,
+            );
           }
           finalizedBlockHash = block.hash.toLowerCase();
           return BigInt(block.number);
@@ -189,24 +204,27 @@ export async function readBaseRelayAllowance(
       ? BigInt(input.blockNumber)
       : (finalizedBlock ??
         (await fetchEvmBlockNumber({
-          rpcUrl: fundingSidecarRuntimeConfig.baseRpcUrl,
-          timeoutMs: fundingSidecarRuntimeConfig.baseRpcTimeoutMs,
+          rpcUrl,
+          timeoutMs,
           bypassCache: true,
         })));
   if (anchoredBlock < 0n || anchoredBlock > BigInt(Number.MAX_SAFE_INTEGER)) {
-    throw new Error("Base allowance block is outside the supported range");
+    throw new Error(
+      `${chainLabel} allowance block is outside the supported range`,
+    );
   }
   const blockHash = await fetchEvmBlockHash({
-    rpcUrl: fundingSidecarRuntimeConfig.baseRpcUrl,
-    timeoutMs: fundingSidecarRuntimeConfig.baseRpcTimeoutMs,
+    rpcUrl,
+    timeoutMs,
     blockNumber: Number(anchoredBlock),
   });
-  if (!blockHash) throw new Error("Base allowance block is unavailable");
+  if (!blockHash)
+    throw new Error(`${chainLabel} allowance block is unavailable`);
   if (finalizedBlockHash && finalizedBlockHash !== blockHash.toLowerCase()) {
-    throw new Error("Base finalized allowance block hash changed");
+    throw new Error(`${chainLabel} finalized allowance block hash changed`);
   }
   const tag = `0x${anchoredBlock.toString(16)}`;
-  const response = await fetch(fundingSidecarRuntimeConfig.baseRpcUrl, {
+  const response = await fetch(rpcUrl, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
@@ -215,7 +233,7 @@ export async function readBaseRelayAllowance(
       method: "eth_call",
       params: [
         {
-          to: BASE_USDC,
+          to: profile.sourceAsset.assetId,
           data: ALLOWANCE.encodeFunctionData("allowance", [
             input.owner,
             RELAY_DEPOSITORY_V2,
@@ -224,39 +242,43 @@ export async function readBaseRelayAllowance(
         tag,
       ],
     }),
-    signal: AbortSignal.timeout(fundingSidecarRuntimeConfig.baseRpcTimeoutMs),
+    signal: AbortSignal.timeout(timeoutMs),
   });
-  if (!response.ok) throw new Error("Base allowance RPC failed");
+  if (!response.ok) throw new Error(`${chainLabel} allowance RPC failed`);
   const payload = (await response.json()) as { result?: unknown };
   if (typeof payload.result !== "string") {
-    throw new Error("Base allowance RPC returned no result");
+    throw new Error(`${chainLabel} allowance RPC returned no result`);
   }
   const raw = BigInt(
     ALLOWANCE.decodeFunctionResult("allowance", payload.result)[0],
   ).toString();
   const verifiedBlockHash = await fetchEvmBlockHash({
-    rpcUrl: fundingSidecarRuntimeConfig.baseRpcUrl,
-    timeoutMs: fundingSidecarRuntimeConfig.baseRpcTimeoutMs,
+    rpcUrl,
+    timeoutMs,
     blockNumber: Number(anchoredBlock),
   });
   if (
     !verifiedBlockHash ||
     verifiedBlockHash.toLowerCase() !== blockHash.toLowerCase()
   ) {
-    throw new Error("Base allowance block changed during anchored read");
+    throw new Error(
+      `${chainLabel} allowance block changed during anchored read`,
+    );
   }
   const blockNumber = anchoredBlock.toString();
   let ownershipRevision: string | null = null;
   let lastMutationTransactionHash: string | null = null;
   if (input.mutationBaselineBlock != null) {
     if (!/^(0|[1-9][0-9]*)$/u.test(input.mutationBaselineBlock)) {
-      throw new Error("Base allowance mutation baseline is invalid");
+      throw new Error(`${chainLabel} allowance mutation baseline is invalid`);
     }
     const baseline = BigInt(input.mutationBaselineBlock);
     if (baseline > anchoredBlock) {
-      throw new Error("Base allowance mutation baseline is after observation");
+      throw new Error(
+        `${chainLabel} allowance mutation baseline is after observation`,
+      );
     }
-    const logResponse = await fetch(fundingSidecarRuntimeConfig.baseRpcUrl, {
+    const logResponse = await fetch(rpcUrl, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
@@ -265,13 +287,16 @@ export async function readBaseRelayAllowance(
         method: "eth_getLogs",
         params: [
           {
-            address: BASE_USDC,
+            address: profile.sourceAsset.assetId,
             fromBlock: `0x${baseline.toString(16)}`,
             toBlock: tag,
             topics: [
               ethers.id("Approval(address,address,uint256)"),
               ethers.zeroPadValue(
-                canonicalAccountAddress("evm:8453", input.owner),
+                canonicalAccountAddress(
+                  profile.sourceAsset.networkId,
+                  input.owner,
+                ),
                 32,
               ),
               ethers.zeroPadValue(RELAY_DEPOSITORY_V2, 32),
@@ -279,17 +304,20 @@ export async function readBaseRelayAllowance(
           },
         ],
       }),
-      signal: AbortSignal.timeout(fundingSidecarRuntimeConfig.baseRpcTimeoutMs),
+      signal: AbortSignal.timeout(timeoutMs),
     });
-    if (!logResponse.ok) throw new Error("Base allowance log RPC failed");
+    if (!logResponse.ok)
+      throw new Error(`${chainLabel} allowance log RPC failed`);
     const logPayload = (await logResponse.json()) as { result?: unknown };
     if (!Array.isArray(logPayload.result)) {
-      throw new Error("Base allowance log RPC returned no result");
+      throw new Error(`${chainLabel} allowance log RPC returned no result`);
     }
     const mutations = logPayload.result
       .map((entry) => {
         if (!entry || typeof entry !== "object") {
-          throw new Error("Base allowance log RPC returned invalid evidence");
+          throw new Error(
+            `${chainLabel} allowance log RPC returned invalid evidence`,
+          );
         }
         const log = entry as Record<string, unknown>;
         if (
@@ -301,7 +329,7 @@ export async function readBaseRelayAllowance(
           typeof log.data !== "string"
         ) {
           throw new Error(
-            "Base allowance log RPC returned incomplete evidence",
+            `${chainLabel} allowance log RPC returned incomplete evidence`,
           );
         }
         return {
@@ -323,23 +351,28 @@ export async function readBaseRelayAllowance(
         return logOrder === 0n ? 0 : logOrder < 0n ? -1 : 1;
       });
     const postLogBlockHash = await fetchEvmBlockHash({
-      rpcUrl: fundingSidecarRuntimeConfig.baseRpcUrl,
-      timeoutMs: fundingSidecarRuntimeConfig.baseRpcTimeoutMs,
+      rpcUrl,
+      timeoutMs,
       blockNumber: Number(anchoredBlock),
     });
     if (
       !postLogBlockHash ||
       postLogBlockHash.toLowerCase() !== blockHash.toLowerCase()
     ) {
-      throw new Error("Base allowance block changed during mutation scan");
+      throw new Error(
+        `${chainLabel} allowance block changed during mutation scan`,
+      );
     }
     ownershipRevision = canonicalJsonHash({
       baselineBlock: baseline.toString(),
       mutations,
-      owner: canonicalAccountAddress("evm:8453", input.owner),
+      owner: canonicalAccountAddress(
+        profile.sourceAsset.networkId,
+        input.owner,
+      ),
       raw,
       spender: RELAY_DEPOSITORY_V2,
-      token: BASE_USDC,
+      token: profile.sourceAsset.assetId,
     });
     lastMutationTransactionHash = mutations.at(-1)?.transactionHash ?? null;
   }
@@ -351,14 +384,26 @@ export async function readBaseRelayAllowance(
     revision: canonicalJsonHash({
       blockHash: blockHash.toLowerCase(),
       blockNumber,
-      owner: canonicalAccountAddress("evm:8453", input.owner),
+      owner: canonicalAccountAddress(
+        profile.sourceAsset.networkId,
+        input.owner,
+      ),
       raw,
       spender: RELAY_DEPOSITORY_V2,
-      token: BASE_USDC,
+      token: profile.sourceAsset.assetId,
     }),
     ownershipRevision,
     lastMutationTransactionHash,
   };
+}
+
+export async function readBaseRelayAllowance(
+  input: Parameters<RelayEvmAllowanceReader>[0],
+): Promise<RelayEvmAllowanceObservation> {
+  const profile =
+    RELAY_EVM_FUNDING_PROFILE_SPECS[TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID];
+  if (!profile) throw new Error("Base Relay profile is unavailable");
+  return readRelayEvmAllowance(profile, input);
 }
 
 type RelayMaintenanceKind =
@@ -435,6 +480,7 @@ async function observeRelayPostcondition(
   pool: Pool,
   allowance: RelayEvmAllowanceReader,
   now: Date,
+  profile: RelayEvmFundingProfileSpec,
 ): Promise<JsonRecord | undefined> {
   const { rows } = await pool.query<{
     block_number: string | null;
@@ -724,11 +770,7 @@ async function observeRelayPostcondition(
        from candidates
       order by priority, observed_at
       limit 1`,
-    [
-      TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
-      now,
-      RELAY_CLEANUP_CANONICAL_WATCH_MS,
-    ],
+    [profile.profileId, now, RELAY_CLEANUP_CANONICAL_WATCH_MS],
   );
   const candidate = rows[0];
   if (!candidate) return undefined;
@@ -754,10 +796,13 @@ async function observeRelayPostcondition(
   };
 }
 
-function walletId(row: Pick<RelayClaimRow, "wallet_chain" | "wallet_address">) {
+function walletId(
+  row: Pick<RelayClaimRow, "wallet_chain" | "wallet_address">,
+  profile: RelayEvmFundingProfileSpec,
+) {
   return stableWalletOpaqueId({
     walletType: row.wallet_chain,
-    networkId: "evm:8453",
+    networkId: profile.sourceAsset.networkId,
     address: row.wallet_address,
   });
 }
@@ -765,12 +810,16 @@ function walletId(row: Pick<RelayClaimRow, "wallet_chain" | "wallet_address">) {
 function walletProfile(
   row: RelayClaimRow,
   actionWalletId: string,
+  profile: RelayEvmFundingProfileSpec,
 ): WalletExecutionProfile {
   return {
     walletId: actionWalletId,
     controllerWalletRef: row.user_wallet_id,
-    networkId: "evm:8453",
-    address: canonicalAccountAddress("evm:8453", row.wallet_address),
+    networkId: profile.sourceAsset.networkId,
+    address: canonicalAccountAddress(
+      profile.sourceAsset.networkId,
+      row.wallet_address,
+    ),
     source: "embedded",
     signingModes: ["privy_delegated"],
     serverWalletRef: row.privy_wallet_id,
@@ -786,12 +835,13 @@ function claimFromRow(
     attemptId: string;
     broadcastBoundaryCrossed: boolean;
   }>,
+  profile: RelayEvmFundingProfileSpec,
 ): DelegatedFundingExecutionClaim {
   return {
     action: input.action,
     allowanceMutationBaselineBlock: row.allowance_mutation_baseline_block,
     actionValidationResult: row.action_validation_result,
-    actionWalletId: walletId(row),
+    actionWalletId: walletId(row, profile),
     actionFingerprint: row.action_fingerprint,
     authorizationFingerprint: row.authorization_fingerprint,
     authorizationId: row.authorization_id,
@@ -804,7 +854,7 @@ function claimFromRow(
     policyFingerprint: row.policy_fingerprint,
     policyId: row.policy_id,
     privyWalletId: row.privy_wallet_id,
-    profileId: TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
+    profileId: profile.profileId,
     receiptRaw: row.receipt_raw,
     signerFingerprint: row.signer_fingerprint,
     signerId: row.signer_id,
@@ -813,8 +863,12 @@ function claimFromRow(
     telegramAccountId: row.telegram_account_id,
     telegramUserId: row.telegram_user_id,
     userId: row.user_id,
+    venueId: row.venue_id,
     venueBindingOptionId: row.venue_binding_option_id,
-    walletAddress: canonicalAccountAddress("evm:1", row.wallet_address),
+    walletAddress: canonicalAccountAddress(
+      profile.sourceAsset.networkId,
+      row.wallet_address,
+    ),
   };
 }
 
@@ -1015,6 +1069,7 @@ async function validateAndStartRelayClaim(
   row: RelayClaimRow,
   input: Readonly<{
     now: Date;
+    profile: RelayEvmFundingProfileSpec;
     authorizationAllowed: (
       authorization: ReturnType<typeof telegramFundingAuthorizationFromRow>,
     ) => boolean;
@@ -1028,7 +1083,7 @@ async function validateAndStartRelayClaim(
   } catch {
     return rejectRelayClaimRow(client, row, input.now);
   }
-  const actionWalletId = walletId(row);
+  const actionWalletId = walletId(row, input.profile);
   if (
     !action ||
     canonicalJsonHash(action) !== row.action_fingerprint ||
@@ -1045,6 +1100,7 @@ async function validateAndStartRelayClaim(
       expectedRaw: row.receipt_raw,
       walletAddress: row.wallet_address,
       walletId: actionWalletId,
+      profile: input.profile,
     });
   } catch {
     return rejectRelayClaimRow(client, row, input.now);
@@ -1052,7 +1108,7 @@ async function validateAndStartRelayClaim(
   await lockFundingControllerWallet(
     client,
     row.user_id,
-    walletProfile(row, actionWalletId),
+    walletProfile(row, actionWalletId, input.profile),
   );
   const attempt = await startFundingStepAttemptForUserInTransaction(client, {
     userId: row.user_id,
@@ -1064,11 +1120,15 @@ async function validateAndStartRelayClaim(
   });
   return {
     kind: "execution",
-    claim: claimFromRow(row, {
-      action,
-      attemptId: attempt.attempt.id,
-      broadcastBoundaryCrossed: false,
-    }),
+    claim: claimFromRow(
+      row,
+      {
+        action,
+        attemptId: attempt.attempt.id,
+        broadcastBoundaryCrossed: false,
+      },
+      input.profile,
+    ),
   };
 }
 
@@ -1077,6 +1137,7 @@ async function reconcileRelayPostconditions(
   observation: JsonRecord | undefined,
   now: Date,
   allowRetry: boolean,
+  profile: RelayEvmFundingProfileSpec,
 ): Promise<void> {
   const maintenance = relayMaintenanceObservation(observation);
   if (maintenance) {
@@ -1165,7 +1226,7 @@ async function reconcileRelayPostconditions(
               )
             )
         )`,
-      [TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID, now],
+      [profile.profileId, now],
     );
   if (allowRetry)
     await client.query(
@@ -1206,7 +1267,7 @@ async function reconcileRelayPostconditions(
                and latest_receipt.reorged_at <=
                      $2::timestamptz - interval '15 minutes'
           )`,
-      [TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID, now],
+      [profile.profileId, now],
     );
   const approval = await client.query<{
     approval_receipt_id: string;
@@ -1256,7 +1317,7 @@ async function reconcileRelayPostconditions(
        for update of approval_step, deposit_step, approval_receipt, operation, reservation
        limit 1`,
     [
-      TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
+      profile.profileId,
       maintenance?.kind === "approval" ? maintenance.candidateId : null,
       maintenance?.kind === "approval" ? maintenance.operationId : null,
     ],
@@ -1415,7 +1476,7 @@ async function reconcileRelayPostconditions(
        for update of reservation, operation, approval_step skip locked
        limit 1`,
     [
-      TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
+      profile.profileId,
       maintenance?.kind === "releasable" ? maintenance.candidateId : null,
       maintenance?.kind === "releasable" ? maintenance.operationId : null,
     ],
@@ -1625,7 +1686,7 @@ async function reconcileRelayPostconditions(
        for update of operation, deposit_step, reservation skip locked
        limit 1`,
     [
-      TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
+      profile.profileId,
       maintenance?.kind === "stranded" ? maintenance.operationId : null,
     ],
   );
@@ -1637,6 +1698,7 @@ async function reconcileRelayPostconditions(
       relayAllowanceMutationIsOwned(maintenance)
     ) {
       await createRelayAllowanceCleanupOperationInTransaction(client, {
+        profile,
         parentOperationId: strandedAllowanceRow.operation_id,
         allowanceRaw: observed.raw,
         allowanceRevision: observed.ownershipRevision ?? "",
@@ -1720,7 +1782,7 @@ async function reconcileRelayPostconditions(
        for update of deposit_step, deposit_receipt, operation
        limit 1`,
     [
-      TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
+      profile.profileId,
       maintenance?.kind === "deposit" ? maintenance.candidateId : null,
       maintenance?.kind === "deposit" ? maintenance.operationId : null,
     ],
@@ -1752,6 +1814,7 @@ async function reconcileRelayPostconditions(
     const observed = maintenance.allowance;
     if (observed.raw !== "0" && relayAllowanceMutationIsOwned(maintenance)) {
       await createRelayAllowanceCleanupOperationInTransaction(client, {
+        profile,
         parentOperationId: depositRow.operation_id,
         allowanceRaw: observed.raw,
         allowanceRevision: observed.ownershipRevision ?? "",
@@ -1782,9 +1845,9 @@ async function reconcileRelayPostconditions(
       operationId: depositRow.operation_id,
       segmentId: depositRow.segment_id,
       kind: "source_debit",
-      networkId: "evm:8453",
-      assetId: BASE_USDC,
-      assetDecimals: 6,
+      networkId: profile.sourceAsset.networkId,
+      assetId: profile.sourceAsset.assetId,
+      assetDecimals: profile.sourceAsset.decimals,
       txHash: depositRow.tx_hash,
       eventIndex: depositRow.event_index,
       fromAddress: depositRow.wallet_address,
@@ -1796,7 +1859,7 @@ async function reconcileRelayPostconditions(
       finalityStatus: "finalized",
       finalizedAt: now,
       metadata: {
-        relayDelegatedProfile: TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
+        relayDelegatedProfile: profile.profileId,
         receiptAttemptId: depositRow.deposit_attempt_id,
       },
     });
@@ -1949,7 +2012,7 @@ async function reconcileRelayPostconditions(
                      cleanup_receipt, parent
        limit 1`,
     [
-      TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
+      profile.profileId,
       maintenance?.kind === "cleanup" ? maintenance.candidateId : null,
       maintenance?.kind === "cleanup" ? maintenance.operationId : null,
       now,
@@ -1982,6 +2045,7 @@ async function reconcileRelayPostconditions(
           throw new Error("Relay post-deposit cleanup evidence is incomplete");
         }
         await allocateRelayPostDepositSourceDebitInTransaction(client, {
+          profile,
           evidence: {
             parentOperationId: cleanupRow.parent_operation_id,
             segmentId: cleanupRow.segment_id,
@@ -2093,6 +2157,7 @@ async function reconcileRelayPostconditions(
         cleanupContext: cleanupRow.cleanup_context,
         parentOperationId: cleanupRow.parent_operation_id,
         now,
+        profile,
         evidence: {
           allowanceZeroBlock: cleanupRow.cleanup_block,
           allowanceZeroBlockHash: observed.blockHash,
@@ -2175,8 +2240,12 @@ async function reconcileRelayPostconditions(
       });
     }
   }
-  await terminalizeCompletedRelayCleanupParent(client, now);
-  await releaseCompletedRelayCleanupParentBalanceReservations(client, now);
+  await terminalizeCompletedRelayCleanupParent(client, now, profile);
+  await releaseCompletedRelayCleanupParentBalanceReservations(
+    client,
+    now,
+    profile,
+  );
 }
 
 async function claimRelayCleanup(
@@ -2185,6 +2254,7 @@ async function claimRelayCleanup(
     configuration: RelayEvmExecutionConfiguration;
     policy: Policy;
     now: Date;
+    profile: RelayEvmFundingProfileSpec;
   }>,
 ): Promise<DelegatedFundingProfileClaim | null> {
   const { rows } = await client.query<RelayClaimRow>(
@@ -2283,7 +2353,7 @@ async function claimRelayCleanup(
        for update of cleanup_operation, cleanup_step, reservation,
                      funding_authorization skip locked
        limit 1`,
-    [TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID, input.now],
+    [input.profile.profileId, input.now],
   );
   const row = rows[0];
   if (!row) return null;
@@ -2297,6 +2367,7 @@ async function claimRelayCleanup(
   }
   return validateAndStartRelayClaim(client, row, {
     now: input.now,
+    profile: input.profile,
     authorizationAllowed: (authorization) =>
       authorization.signerId === input.configuration.signerId &&
       authorization.signerFingerprint ===
@@ -2313,17 +2384,20 @@ async function claimRelay(
     now: Date;
     configuration: RelayEvmExecutionConfiguration;
     observation?: JsonRecord;
+    profile: RelayEvmFundingProfileSpec;
   }>,
 ): Promise<DelegatedFundingProfileClaim | null> {
   const controlPlaneAllowed = relayControlPlaneAllowed(
     input.configuration,
     input.policy,
+    input.profile,
   );
   await reconcileRelayPostconditions(
     client,
     input.observation,
     input.now,
     controlPlaneAllowed,
+    input.profile,
   );
   if (!controlPlaneAllowed) {
     return claimRelayCleanup(client, input);
@@ -2471,7 +2545,7 @@ async function claimRelay(
        order by operation.created_at, step.ordinal
        for update of operation, step, receipt, funding_authorization, reservation skip locked
        limit 1`,
-    [TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID, input.now],
+    [input.profile.profileId, input.now],
   );
   const row = rows[0];
   if (!row) return claimRelayCleanup(client, input);
@@ -2485,6 +2559,7 @@ async function claimRelay(
   }
   return validateAndStartRelayClaim(client, row, {
     now: input.now,
+    profile: input.profile,
     authorizationAllowed: (authorization) =>
       authorization.maxSourceRaw === input.configuration.maxSourceRaw &&
       Number(row.policy_version) === input.policy.runtime.contractVersion &&
@@ -2498,6 +2573,7 @@ async function recoverRelay(
     recoverProviderReplayBefore: Date;
     recoverUnbroadcastRetryBefore: Date;
     now: Date;
+    profile: RelayEvmFundingProfileSpec;
   }>,
 ): Promise<DelegatedFundingRecoveryClaim | null> {
   const { rows } = await client.query<
@@ -2582,7 +2658,7 @@ async function recoverRelay(
        for update of attempt, step, operation, reservation skip locked
        limit 1`,
     [
-      TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
+      input.profile.profileId,
       input.recoverUnbroadcastRetryBefore,
       input.recoverProviderReplayBefore,
     ],
@@ -2654,7 +2730,7 @@ async function recoverRelay(
                        reservation skip locked
          limit 1`,
       [
-        TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
+        input.profile.profileId,
         input.recoverUnbroadcastRetryBefore,
         input.recoverProviderReplayBefore,
       ],
@@ -2696,13 +2772,18 @@ async function recoverRelay(
       actionValidationResult: cleanupRow.action_validation_result,
       expectedRaw: cleanupRow.receipt_raw,
       walletAddress: cleanupRow.wallet_address,
-      walletId: walletId(cleanupRow),
+      walletId: walletId(cleanupRow, input.profile),
+      profile: input.profile,
     });
-    return claimFromRow(cleanupRow, {
-      action: cleanupAction,
-      attemptId: cleanupRow.attempt_id,
-      broadcastBoundaryCrossed: cleanupRow.attempt_outcome === "ambiguous",
-    });
+    return claimFromRow(
+      cleanupRow,
+      {
+        action: cleanupAction,
+        attemptId: cleanupRow.attempt_id,
+        broadcastBoundaryCrossed: cleanupRow.attempt_outcome === "ambiguous",
+      },
+      input.profile,
+    );
   }
   if (
     !(await tryLockFundingAuthorizationReservationScope(client, {
@@ -2733,13 +2814,18 @@ async function recoverRelay(
     actionValidationResult: row.action_validation_result,
     expectedRaw: row.receipt_raw,
     walletAddress: row.wallet_address,
-    walletId: walletId(row),
+    walletId: walletId(row, input.profile),
+    profile: input.profile,
   });
-  return claimFromRow(row, {
-    action,
-    attemptId: row.attempt_id,
-    broadcastBoundaryCrossed: row.attempt_outcome === "ambiguous",
-  });
+  return claimFromRow(
+    row,
+    {
+      action,
+      attemptId: row.attempt_id,
+      broadcastBoundaryCrossed: row.attempt_outcome === "ambiguous",
+    },
+    input.profile,
+  );
 }
 
 async function preBroadcastRelay(
@@ -2749,6 +2835,7 @@ async function preBroadcastRelay(
     now: Date;
     configuration: RelayEvmExecutionConfiguration;
     observation?: JsonRecord;
+    profile: RelayEvmFundingProfileSpec;
   }>,
 ) {
   await lockFundingPolicyForTransaction(client);
@@ -2758,6 +2845,7 @@ async function preBroadcastRelay(
     expectedRaw: input.claim.receiptRaw,
     walletAddress: input.claim.walletAddress,
     walletId: input.claim.actionWalletId,
+    profile: input.profile,
   });
   if (
     !input.claim.fundingPolicyRevision ||
@@ -2780,10 +2868,18 @@ async function preBroadcastRelay(
       reasonCode: "delegated_authority_invalid" as const,
     };
   }
+  const claimRoute = input.profile.routeIds
+    .map((routeId) => RELAY_ROUTE_SPECS[routeId])
+    .find(
+      (route) =>
+        route != null &&
+        route.destination.networkId ===
+          (input.claim.venueId === "limitless" ? "evm:8453" : "evm:137"),
+    );
   const capability =
     validated.kind === "cleanup"
       ? null
-      : input.claim.telegramAccountId
+      : input.claim.telegramAccountId && claimRoute
         ? await resolveTelegramRelayEvmCapability(client, {
             userId: input.claim.userId,
             telegramAccountId: input.claim.telegramAccountId,
@@ -2791,6 +2887,11 @@ async function preBroadcastRelay(
             destinationOptionId: input.claim.destinationOptionId,
             venueBindingOptionId: input.claim.venueBindingOptionId,
             configuration: input.configuration,
+            profileId: input.profile.profileId,
+            routeId: claimRoute.routeId,
+            sourceAsset: input.profile.sourceAsset,
+            destinationAsset: claimRoute.destination,
+            venueId: input.claim.venueId,
             expectedAuthorizationId: input.claim.authorizationId,
             expectedAuthorizationFingerprint:
               input.claim.authorizationFingerprint,
@@ -2869,7 +2970,7 @@ async function preBroadcastRelay(
         input.claim.fundingPolicyVersion,
         input.claim.fundingPolicyRevision,
         input.claim.receiptRaw,
-        TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
+        input.profile.profileId,
       ],
     );
     dependencyApprovalLocked = dependency.rowCount === 1;
@@ -3067,15 +3168,16 @@ async function allocateRelayPostDepositSourceDebitInTransaction(
     cleanupOperationId: string;
     cleanupReceiptId?: string;
     now: Date;
+    profile: RelayEvmFundingProfileSpec;
   }>,
 ): Promise<void> {
   await allocateFundingObservationInTransaction(client, {
     operationId: input.evidence.parentOperationId,
     segmentId: input.evidence.segmentId,
     kind: "source_debit",
-    networkId: "evm:8453",
-    assetId: BASE_USDC,
-    assetDecimals: 6,
+    networkId: input.profile.sourceAsset.networkId,
+    assetId: input.profile.sourceAsset.assetId,
+    assetDecimals: input.profile.sourceAsset.decimals,
     txHash: input.evidence.depositTransactionHash,
     eventIndex: input.evidence.depositEventIndex,
     fromAddress: input.evidence.walletAddress,
@@ -3091,7 +3193,7 @@ async function allocateRelayPostDepositSourceDebitInTransaction(
         ? { allowanceCleanupReceiptId: input.cleanupReceiptId }
         : { allowanceCleanupAlreadyZero: true }),
       allowanceCleanupOperationId: input.cleanupOperationId,
-      relayDelegatedProfile: TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
+      relayDelegatedProfile: input.profile.profileId,
       receiptAttemptId: input.evidence.depositAttemptId,
     },
   });
@@ -3130,6 +3232,7 @@ async function terminalizeRelayParentAfterCleanup(
     parentOperationId: string;
     now: Date;
     evidence: JsonRecord;
+    profile: RelayEvmFundingProfileSpec;
   }>,
 ): Promise<void> {
   if (input.cleanupContext === "post_deposit") return;
@@ -3160,7 +3263,7 @@ async function terminalizeRelayParentAfterCleanup(
               'committed', 'source_action', 'source_observed'
             )
       for update of operation, approval_step`,
-    [input.parentOperationId, TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID],
+    [input.parentOperationId, input.profile.profileId],
   );
   const row = rows[0];
   if (!row) return;
@@ -3263,6 +3366,7 @@ async function releaseRelayParentBalanceReservations(
 async function terminalizeCompletedRelayCleanupParent(
   client: PoolClient,
   now: Date,
+  profile: RelayEvmFundingProfileSpec,
 ): Promise<void> {
   const { rows } = await client.query<{
     cleanup_context: Exclude<RelayCleanupContext, "post_deposit">;
@@ -3300,7 +3404,7 @@ async function terminalizeCompletedRelayCleanupParent(
         and reservation.resolved_at is not null
       order by reservation.resolved_at, reservation.id
       limit 1`,
-    [TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID],
+    [profile.profileId],
   );
   const row = rows[0];
   if (!row) return;
@@ -3308,6 +3412,7 @@ async function terminalizeCompletedRelayCleanupParent(
     cleanupContext: row.cleanup_context,
     parentOperationId: row.parent_operation_id,
     now,
+    profile,
     evidence: {
       ...row.resolution_evidence,
       cleanupOperationId: row.cleanup_operation_id,
@@ -3319,6 +3424,7 @@ async function terminalizeCompletedRelayCleanupParent(
 async function releaseCompletedRelayCleanupParentBalanceReservations(
   client: PoolClient,
   now: Date,
+  profile: RelayEvmFundingProfileSpec,
 ): Promise<void> {
   const { rows } = await client.query<{ parent_operation_id: string }>(
     `select distinct parent.id as parent_operation_id
@@ -3346,7 +3452,7 @@ async function releaseCompletedRelayCleanupParentBalanceReservations(
       where reservation.status = 'cleaned'
       order by parent.id
       limit 1`,
-    [TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID],
+    [profile.profileId],
   );
   const parentOperationId = rows[0]?.parent_operation_id;
   if (!parentOperationId) return;
@@ -3359,6 +3465,7 @@ async function finalizeRelayAlreadySatisfiedInTransaction(
     claim: DelegatedFundingExecutionClaim;
     now: Date;
     observation?: JsonRecord;
+    profile: RelayEvmFundingProfileSpec;
   }>,
 ): Promise<void> {
   const observed = parseRelayEvmAllowanceObservation(input.observation);
@@ -3368,6 +3475,7 @@ async function finalizeRelayAlreadySatisfiedInTransaction(
     expectedRaw: input.claim.receiptRaw,
     walletAddress: input.claim.walletAddress,
     walletId: input.claim.actionWalletId,
+    profile: input.profile,
   });
   if (
     validated.kind !== "cleanup" ||
@@ -3500,7 +3608,7 @@ async function finalizeRelayAlreadySatisfiedInTransaction(
         order by deposit_receipt.observed_at desc
         for update of parent, deposit_step, deposit_receipt
         limit 1`,
-      [row.parent_operation_id, TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID],
+      [row.parent_operation_id, input.profile.profileId],
     );
     const evidence = postDeposit.rows[0];
     if (!evidence) {
@@ -3549,6 +3657,7 @@ async function finalizeRelayAlreadySatisfiedInTransaction(
       allowance: observed,
       cleanupOperationId: input.claim.operationId,
       now: input.now,
+      profile: input.profile,
     });
   }
   await client.query(
@@ -3610,6 +3719,7 @@ async function finalizeRelayAlreadySatisfiedInTransaction(
     cleanupContext: row.cleanup_context,
     parentOperationId: row.parent_operation_id,
     now: input.now,
+    profile: input.profile,
     evidence: {
       allowanceAlreadyZero: true,
       allowanceZeroBlock: observed.blockNumber,
@@ -3627,6 +3737,7 @@ async function finalizeRelayHardInvalidInTransaction(
     now: Date;
     reasonCode: string;
     observation?: JsonRecord;
+    profile: RelayEvmFundingProfileSpec;
   }>,
 ): Promise<void> {
   const validated = validateRelayDelegatedEvmAction({
@@ -3635,6 +3746,7 @@ async function finalizeRelayHardInvalidInTransaction(
     expectedRaw: input.claim.receiptRaw,
     walletAddress: input.claim.walletAddress,
     walletId: input.claim.actionWalletId,
+    profile: input.profile,
   });
   const observed = parseRelayEvmAllowanceObservation(input.observation);
   if (!observed) return;
@@ -3827,20 +3939,28 @@ export function createRelayEvmDelegatedFundingProfile(
     configuration?: RelayEvmExecutionConfiguration;
     driver: DelegatedFundingNetworkDriver;
     allowanceReader?: RelayEvmAllowanceReader;
+    profile?: RelayEvmFundingProfileSpec;
   }>,
 ): DelegatedFundingRuntimeProfile {
   const configuration =
     input.configuration ?? loadRelayEvmExecutionConfiguration();
-  const allowance = input.allowanceReader ?? readBaseRelayAllowance;
+  const profile =
+    input.profile ??
+    RELAY_EVM_FUNDING_PROFILE_SPECS[TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID];
+  if (!profile) throw new Error("Relay EVM funding profile is unavailable");
+  const allowance =
+    input.allowanceReader ??
+    ((readInput) => readRelayEvmAllowance(profile, readInput));
   return {
-    profileId: TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
+    profileId: profile.profileId,
     controlPlaneDecision: () => ({ kind: "allowed" }),
     rejectInvalidInTransaction: async () => null,
     claimInTransaction: (client, claimInput) =>
-      claimRelay(client, { ...claimInput, configuration }),
-    recoverInTransaction: recoverRelay,
+      claimRelay(client, { ...claimInput, configuration, profile }),
+    recoverInTransaction: (client, recoverInput) =>
+      recoverRelay(client, { ...recoverInput, profile }),
     observeBeforeClaim: (pool, input) =>
-      observeRelayPostcondition(pool, allowance, input.now),
+      observeRelayPostcondition(pool, allowance, input.now, profile),
     observePreBroadcast: (claim) =>
       allowance({
         owner: claim.walletAddress,
@@ -3857,10 +3977,17 @@ export function createRelayEvmDelegatedFundingProfile(
             : null),
       }),
     preBroadcastDecisionInTransaction: (client, boundaryInput) =>
-      preBroadcastRelay(client, { ...boundaryInput, configuration }),
-    finalizeAlreadySatisfiedInTransaction:
-      finalizeRelayAlreadySatisfiedInTransaction,
-    finalizeHardInvalidInTransaction: finalizeRelayHardInvalidInTransaction,
+      preBroadcastRelay(client, { ...boundaryInput, configuration, profile }),
+    finalizeAlreadySatisfiedInTransaction: (client, finalizeInput) =>
+      finalizeRelayAlreadySatisfiedInTransaction(client, {
+        ...finalizeInput,
+        profile,
+      }),
+    finalizeHardInvalidInTransaction: (client, finalizeInput) =>
+      finalizeRelayHardInvalidInTransaction(client, {
+        ...finalizeInput,
+        profile,
+      }),
     driver: input.driver,
     validateSubmittedReference: (reference) =>
       /^0x[0-9a-f]{64}$/iu.test(reference),

@@ -20,6 +20,7 @@ const MIGRATION_0207 = "0207_telegram_funding_owner_delivery.sql";
 const MIGRATION_0208 = "0208_relay_evm_delegated_funding.sql";
 const MIGRATION_0211 = "0211_funding_receive_receipt_rearm.sql";
 const MIGRATION_0214 = "0214_funding_receive_observation_wake.sql";
+const MIGRATION_0215 = "0215_telegram_buy_delivery_modes.sql";
 const FUNDING_MIGRATIONS = [
   MIGRATION_0184,
   MIGRATION_0193,
@@ -37,6 +38,7 @@ const FUNDING_MIGRATIONS = [
   MIGRATION_0208,
   MIGRATION_0211,
   MIGRATION_0214,
+  MIGRATION_0215,
 ] as const;
 
 const LEGACY_CLASSIFIER_SQL = `
@@ -1170,6 +1172,42 @@ export async function inspectFundingMigrationPreflight(
       "funding_receive_sessions",
       "observation_requested_at",
     ));
+  const hasTelegramBuyDeliveryModes =
+    (await columnExists(db, "telegram_trade_intents", "delivery_mode")) &&
+    (await columnExists(
+      db,
+      "telegram_funding_buy_return_revisions",
+      "continuation_mode",
+    )) &&
+    (await constraintDefinitionIncludes(
+      db,
+      "public.telegram_trade_intents",
+      "telegram_trade_intents_delivery_mode_check",
+      ["bot_submit", "app_handoff"],
+    )) &&
+    (await constraintDefinitionIncludes(
+      db,
+      "public.telegram_trade_intents",
+      "telegram_trade_intents_delivery_authority_check",
+      [
+        "delivery_mode = 'bot_submit'",
+        "limitless",
+        "submit_started_at is null",
+      ],
+    )) &&
+    (await constraintDefinitionIncludes(
+      db,
+      "public.telegram_funding_buy_return_revisions",
+      "telegram_funding_buy_return_continuation_mode_check",
+      ["bot_submit", "app_handoff"],
+    )) &&
+    (await functionDefinitionIncludes(db, "funding_guard_observation_update", [
+      "network_id = 'evm:137'",
+      "0xc011a7e12a19f7b1f670d46f03b03f3342e82dfb",
+      "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359",
+      "0x2791bca1f2de4661ed88a30c99a7a9449aa84174",
+      "receipt_reallocation",
+    ]));
   const hasTelegramProjectionWatermark =
     hasTelegramFundingSessions &&
     (await columnExists(
@@ -1367,6 +1405,13 @@ export async function inspectFundingMigrationPreflight(
       hasReceiveObservationWake,
       "Funding receive observation wake column exists before 0214 is recorded",
     ],
+    [
+      MIGRATION_0215,
+      hasTelegramBuyDeliveryModes,
+      "0215 is recorded but Telegram Buy delivery-mode objects are incomplete",
+      hasTelegramBuyDeliveryModes,
+      "Telegram Buy delivery-mode objects exist before 0215 is recorded",
+    ],
   ] as const;
   const partialObjects = migrationDriftChecks.flatMap(
     ([migration, complete, incompleteMessage, present, presentMessage]) =>
@@ -1502,6 +1547,9 @@ export async function inspectFundingMigrationPreflight(
       : null,
     !appliedSet.has(MIGRATION_0214)
       ? "0214 funding receive observation wake migration is not recorded"
+      : null,
+    !appliedSet.has(MIGRATION_0215)
+      ? "0215 Telegram Buy delivery-mode migration is not recorded"
       : null,
     !hasBridgeOrders ? "bridge_orders table is absent" : null,
     bridgeUnknown > 0

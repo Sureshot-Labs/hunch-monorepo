@@ -1,6 +1,5 @@
 import { tx, type Pool, type PoolClient } from "@hunch/infra";
 
-import { BASE_USDC } from "../../funding-providers/relay/rehearsal.js";
 import type { RelayReferenceCodec } from "../../funding-providers/relay/reference-codec.js";
 import { sameAccountAddress } from "../domain/asset-identity.js";
 import { allocateFundingObservationInTransaction } from "../persistence/funding-operation-repository.js";
@@ -10,7 +9,7 @@ import {
   type FundingReceiveEventRpc,
 } from "../receive/evm-receive-event-scanner.js";
 import type { DirectIngressObservationVariant } from "./direct-ingress-observer.js";
-import { TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID } from "../execution/delegated-funding-profile-ids.js";
+import { relayEvmFundingProfileSpec } from "../execution/relay-evm-profile-specs.js";
 
 // Terminal refund evidence is watched for 15 minutes. Re-scan a bounded Base
 // reorg horizon behind the old refund block so a replacement re-mined at a
@@ -36,6 +35,10 @@ type RefundTarget = Readonly<{
   refundReorgedAt: Date | null;
   refundTransactionHash: string | null;
   transactionReferenceFingerprints: readonly string[];
+  networkId: string;
+  assetId: string;
+  assetDecimals: number;
+  profileId: string;
 }>;
 
 function stringArray(value: unknown): readonly string[] {
@@ -67,6 +70,10 @@ async function loadRefundTarget(
     source_block: string;
     source_event_index: string;
     wallet_address: string;
+    network_id: string;
+    asset_id: string;
+    asset_decimals: number;
+    profile_id: string;
   }>(
     `select operation.id as operation_id,
             segment.id as segment_id,
@@ -87,6 +94,10 @@ async function loadRefundTarget(
             segment.support_metadata -> 'relayTransactionReferenceFingerprints'
               as reference_fingerprints,
             funding_authorization.wallet_address
+            ,source_debit.network_id
+            ,source_debit.asset_id
+            ,source_debit.asset_decimals
+            ,funding_authorization.profile_id
        from funding_operations operation
        join funding_operation_segments segment
          on segment.operation_id = operation.id
@@ -98,14 +109,11 @@ async function loadRefundTarget(
          on source_debit.operation_id = operation.id
         and source_debit.segment_id = segment.id
         and source_debit.kind = 'source_debit'
-        and source_debit.network_id = 'evm:8453'
-        and lower(source_debit.asset_id) = lower($2)
         and source_debit.canonical
         and source_debit.finality_status = 'finalized'
        join telegram_funding_authorizations funding_authorization
          on funding_authorization.id::text =
               operation.support_metadata ->> 'fundingAuthorizationId'
-        and funding_authorization.profile_id = $3
        join telegram_funding_authorization_reservations reservation
          on reservation.funding_operation_id = operation.id
         and reservation.status in (
@@ -143,13 +151,13 @@ async function loadRefundTarget(
                  refund.finality_status = 'finalized'
                  and refund.canonical
                  and refund.finalized_at >=
-                       $4::timestamptz - interval '15 minutes'
+                       $2::timestamptz - interval '15 minutes'
                )
                or (
                  refund.finality_status = 'reorged'
                  and not refund.canonical
                  and refund.reorged_at >=
-                       $4::timestamptz - interval '15 minutes'
+                       $2::timestamptz - interval '15 minutes'
                )
              )
            )
@@ -169,10 +177,19 @@ async function loadRefundTarget(
            )
          )
        limit 1`,
-    [operationId, BASE_USDC, TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID, now],
+    [operationId, now],
   );
   const row = rows[0];
   if (!row || !/^[0-9]+$/u.test(row.source_block)) return null;
+  const profile = relayEvmFundingProfileSpec(row.profile_id);
+  if (
+    !profile ||
+    profile.sourceAsset.networkId !== row.network_id ||
+    profile.sourceAsset.assetId.toLowerCase() !== row.asset_id.toLowerCase() ||
+    profile.sourceAsset.decimals !== row.asset_decimals
+  ) {
+    return null;
+  }
   const fingerprints = stringArray(row.reference_fingerprints);
   if (fingerprints.length === 0 && !row.refund_transaction_hash) return null;
   const initialCursor =
@@ -209,14 +226,22 @@ async function loadRefundTarget(
     refundReorgedAt: row.refund_reorged_at,
     refundTransactionHash: row.refund_transaction_hash,
     transactionReferenceFingerprints: fingerprints,
+    networkId: row.network_id,
+    assetId: row.asset_id,
+    assetDecimals: row.asset_decimals,
+    profileId: row.profile_id,
   };
 }
 
 function refundVariant(target: RefundTarget): DirectIngressObservationVariant {
   return {
     variantId: `relay-refund:${target.operationId}`,
-    networkId: "evm:8453",
-    asset: { networkId: "evm:8453", assetId: BASE_USDC, decimals: 6 },
+    networkId: target.networkId,
+    asset: {
+      networkId: target.networkId,
+      assetId: target.assetId,
+      decimals: target.assetDecimals,
+    },
     destinationAddress: target.walletAddress,
     destinationLocationId: `relay-refund:${target.walletAddress.toLowerCase()}`,
     baselineRaw: "0",
@@ -250,13 +275,14 @@ export function relayOwnedRefundEventMatches(
     sourceEventIndex: string;
     transactionReferenceFingerprints: readonly string[];
     walletAddress: string;
+    networkId?: string;
     fingerprint: (reference: string) => string;
   }>,
 ): boolean {
   return (
     input.event.rawAmount === input.expectedRaw &&
     sameAccountAddress(
-      "evm:8453",
+      input.networkId ?? "evm:8453",
       input.event.destinationAddress,
       input.walletAddress,
     ) &&
@@ -326,7 +352,7 @@ async function persistScan(
         where id = $1::uuid
           and operation_id = $2::uuid
           and kind = 'refund_credit'
-          and network_id = 'evm:8453'
+          and network_id = $9
           and lower(asset_id) = lower($8)
           and metadata ->> 'observerId' =
                 'relay_owned_refund_observation_v1'
@@ -346,7 +372,8 @@ async function persistScan(
         input.target.refundEventIndex,
         input.target.refundTransactionHash,
         input.target.refundReorgedAt,
-        BASE_USDC,
+        input.target.assetId,
+        input.target.networkId,
       ],
     );
     if (observation.rowCount !== 1) return false;
@@ -394,9 +421,9 @@ async function persistScan(
       operationId: input.target.operationId,
       segmentId: input.target.segmentId,
       kind: "refund_credit",
-      networkId: "evm:8453",
-      assetId: BASE_USDC,
-      assetDecimals: 6,
+      networkId: input.target.networkId,
+      assetId: input.target.assetId,
+      assetDecimals: input.target.assetDecimals,
       txHash: event.transactionHash,
       eventIndex: event.eventIndex,
       fromAddress: event.sourceAddress,
@@ -521,9 +548,9 @@ async function persistScan(
     operationId: input.target.operationId,
     segmentId: input.target.segmentId,
     kind: "refund_credit",
-    networkId: "evm:8453",
-    assetId: BASE_USDC,
-    assetDecimals: 6,
+    networkId: input.target.networkId,
+    assetId: input.target.assetId,
+    assetDecimals: input.target.assetDecimals,
     txHash: event.transactionHash,
     eventIndex: event.eventIndex,
     fromAddress: event.sourceAddress,
@@ -590,6 +617,7 @@ export class RelayOwnedRefundObserver {
         transactionReferenceFingerprints:
           scanTarget.transactionReferenceFingerprints,
         walletAddress: scanTarget.walletAddress,
+        networkId: scanTarget.networkId,
         fingerprint: (reference) => this.referenceCodec.fingerprint(reference),
       }),
     );

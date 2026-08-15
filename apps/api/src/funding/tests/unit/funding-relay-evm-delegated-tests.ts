@@ -4,6 +4,9 @@ import { Interface } from "ethers";
 import { stableWalletOpaqueId } from "../../../account-value/canonical.js";
 import {
   BASE_USDC,
+  POLYGON_PUSD,
+  POLYGON_USDC,
+  POLYGON_USDCE_LEGACY,
   RELAY_DEPOSITORY_V2,
   RELAY_SELF_DEPOSITOR,
 } from "../../../funding-providers/relay/rehearsal.js";
@@ -16,6 +19,10 @@ import {
   validateRelayEvmPolicyRules,
 } from "../../execution/delegated-funding-profiles.js";
 import { validateRelayDelegatedEvmAction } from "../../execution/relay-evm-delegated-profile.js";
+import {
+  RELAY_EVM_FUNDING_PROFILE_SPECS,
+  type RelayEvmFundingProfileSpec,
+} from "../../execution/relay-evm-profile-specs.js";
 import {
   classifyRelayCleanupAllowance,
   parseRelayEvmAllowanceObservation,
@@ -232,6 +239,57 @@ assert.deepEqual(validateRelayEvmPolicyRules([approveRule, depositRule]), {
   maxSourceRaw: BigInt(CAP),
   issues: [],
 });
+function relayPolicyPair(chainId: string, token: string) {
+  const rewrite = (entry: (typeof approveRule.conditions)[number]) =>
+    entry.field === "chain_id"
+      ? { ...entry, value: chainId }
+      : entry.field === "to" && entry.field_source === "ethereum_transaction"
+        ? { ...entry, value: token }
+        : entry;
+  return [
+    { ...approveRule, conditions: approveRule.conditions.map(rewrite) },
+    {
+      ...depositRule,
+      conditions: depositRule.conditions.map((entry) =>
+        entry.field === "chain_id"
+          ? { ...entry, value: chainId }
+          : entry.field === "depositErc20.token"
+            ? { ...entry, value: token }
+            : entry,
+      ),
+    },
+  ] as const;
+}
+const polygonRelayRules = [
+  POLYGON_PUSD,
+  POLYGON_USDC,
+  POLYGON_USDCE_LEGACY,
+].flatMap((token) => relayPolicyPair("137", token));
+assert.deepEqual(
+  validateRelayEvmPolicyRules([approveRule, depositRule, ...polygonRelayRules]),
+  { valid: true, maxSourceRaw: BigInt(CAP), issues: [] },
+  "one combined policy accepts exactly one equal-cap pair for every supported EVM source asset",
+);
+assert.equal(
+  validateRelayEvmPolicyRules([
+    approveRule,
+    depositRule,
+    ...polygonRelayRules.map((rule, index) =>
+      index === 1
+        ? {
+            ...rule,
+            conditions: rule.conditions.map((entry) =>
+              entry.field === "depositErc20.amount"
+                ? { ...entry, value: String(BigInt(CAP) - 1n) }
+                : entry,
+            ),
+          }
+        : rule,
+    ),
+  ]).valid,
+  false,
+  "all Base and Polygon Relay pairs must share the same global cap",
+);
 const privyApproveAbi = APPROVE_ABI.map((abiEntry) => ({
   ...abiEntry,
   inputs: abiEntry.inputs.map((parameter) => ({
@@ -391,6 +449,38 @@ assert.throws(() =>
     walletId: WALLET_ID,
   }),
 );
+for (const profile of Object.values(RELAY_EVM_FUNDING_PROFILE_SPECS).filter(
+  (candidate) => candidate.sourceAsset.networkId === "evm:137",
+)) {
+  const polygonAction = {
+    ...actionBase,
+    networkId: "evm:137",
+    actionId: `relay-polygon-approve:${profile.profileId}`,
+    to: profile.sourceAsset.assetId,
+    data: approve.encodeFunctionData("approve", [RELAY_DEPOSITORY_V2, RAW]),
+  };
+  assert.equal(
+    validateRelayDelegatedEvmAction({
+      action: polygonAction,
+      actionValidationResult: { relayStepKind: "approve" },
+      expectedRaw: RAW,
+      profile,
+      walletAddress: WALLET,
+      walletId: WALLET_ID,
+    }).kind,
+    "approve",
+  );
+  assert.throws(() =>
+    validateRelayDelegatedEvmAction({
+      action: { ...polygonAction, networkId: "evm:8453" },
+      actionValidationResult: { relayStepKind: "approve" },
+      expectedRaw: RAW,
+      profile: profile as RelayEvmFundingProfileSpec,
+      walletAddress: WALLET,
+      walletId: WALLET_ID,
+    }),
+  );
+}
 
 const atomicWalletProfile = {
   walletId: WALLET_ID,

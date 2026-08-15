@@ -3318,7 +3318,7 @@ const tests: TestCase[] = [
       );
       const previewBlock = sourceSlice(
         telegramTrading,
-        "async function previewPolymarketTelegramTradeIntent(",
+        "async function previewTelegramTradeIntent(",
         "function normalizeTelegramTradeInputSyntax(",
       );
       assert.match(confirmLifecycleBlock, /trading\.prepareTrade/);

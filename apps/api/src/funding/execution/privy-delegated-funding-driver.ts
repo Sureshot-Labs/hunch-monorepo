@@ -20,8 +20,9 @@ import {
 } from "./known-privy-wallet-signers.js";
 import { fundingSidecarRuntimeConfig } from "../runtime/sidecar-runtime-config.js";
 import { sameAccountAddress } from "../domain/asset-identity.js";
-import { TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID } from "./delegated-funding-profile-ids.js";
 import { validateCombinedPolymarketRelayPolicy } from "./combined-privy-policy.js";
+import { relayEvmPolicyHasExactAssetPair } from "./delegated-funding-profiles.js";
+import { relayEvmFundingProfileSpec } from "./relay-evm-profile-specs.js";
 
 export type PrivyDelegatedFundingDriverConfig = Readonly<{
   appId: string;
@@ -399,9 +400,17 @@ export class PrivyDelegatedFundingDriver implements DelegatedFundingNetworkDrive
             "Privy automation policy is not the exact combined BUY+SELL+FUNDING profile",
           );
         }
+        const relayProfile = relayEvmFundingProfileSpec(
+          input.requiredProfileId ?? "",
+        );
         if (
-          input.requiredProfileId === TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID &&
-          (!policyValidation.relayRulesPresent || !policyValidation.valid)
+          relayProfile &&
+          (!policyValidation.relayRulesPresent ||
+            !relayEvmPolicyHasExactAssetPair(normalizedPolicy.rules, {
+              chainId: relayProfile.sourceAsset.networkId.slice(4),
+              token: relayProfile.sourceAsset.assetId,
+              maxSourceRaw: this.input.configuration.relayMaxSourceRaw ?? "",
+            }))
         ) {
           throw new PrivyDelegatedFundingProfileInvalidError(
             "Privy automation policy lacks the exact Relay EVM rules",

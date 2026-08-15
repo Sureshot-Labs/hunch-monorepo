@@ -58,8 +58,8 @@ import {
 } from "./receive-routing.js";
 import { RelayWalletQuoteAdapter } from "./wallet-adapter.js";
 import { loadRelayEvmExecutionConfiguration } from "../../funding/execution/delegated-funding-config.js";
-import { TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID } from "../../funding/execution/delegated-funding-profile-ids.js";
-import { readBaseRelayAllowance } from "../../funding/execution/relay-evm-delegated-executor-profile.js";
+import { readRelayEvmAllowance } from "../../funding/execution/relay-evm-delegated-executor-profile.js";
+import { relayEvmFundingProfileSpec } from "../../funding/execution/relay-evm-profile-specs.js";
 import { DELEGATED_PROVIDER_REPLAY_MS } from "../../funding/execution/delegated-funding-recovery-policy.js";
 
 type JsonRecord = Readonly<Record<string, JsonValue>>;
@@ -611,10 +611,15 @@ export function createRelayReceiveReceiptDispositionResolver(
           return null;
         }
         const sourceAmount = confirmedSourceAmount;
-        const delegatedRelay =
-          receiptTarget.ownerChannel === "telegram" &&
-          receiptTarget.telegramAutomationPolicy?.profileId ===
-            TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID;
+        const delegatedProfileId =
+          typeof receiptTarget.telegramAutomationPolicy?.profileId === "string"
+            ? receiptTarget.telegramAutomationPolicy.profileId
+            : "";
+        const delegatedProfile =
+          receiptTarget.ownerChannel === "telegram"
+            ? relayEvmFundingProfileSpec(delegatedProfileId)
+            : null;
+        const delegatedRelay = delegatedProfile != null;
         const relayExecutionConfiguration = delegatedRelay
           ? loadRelayEvmExecutionConfiguration()
           : null;
@@ -624,7 +629,7 @@ export function createRelayReceiveReceiptDispositionResolver(
           ? DELEGATED_PROVIDER_REPLAY_MS + minimumSequentialTtlMs + 30_000
           : 60_000;
         const baselineAllowance = delegatedRelay
-          ? await readBaseRelayAllowance({
+          ? await readRelayEvmAllowance(delegatedProfile, {
               owner: frozen.profile.address,
               blockNumber: null,
             })
@@ -669,11 +674,9 @@ export function createRelayReceiveReceiptDispositionResolver(
           quote,
           quoteCorrelationId,
           route,
-          ...(receiptTarget.ownerChannel === "telegram" &&
-          receiptTarget.telegramAutomationPolicy?.profileId ===
-            TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID
+          ...(delegatedProfile
             ? {
-                serverExecutionProfileId: TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
+                serverExecutionProfileId: delegatedProfile.profileId,
               }
             : {}),
           source: {
@@ -797,16 +800,23 @@ export function createRelayReceiveReceiptDispositionResolver(
         };
       },
       validateOperationLink: (client, operation) =>
-        validateOperationLink(client, {
-          ...operation,
-          expectedSource:
-            quotePlan.confirmedSourceAmount?.asset ?? target.receipt.asset,
-          expectedSourceRaw: quotePlan.confirmedSourceAmount?.raw ?? "0",
-          routeId: frozen.routeId,
-          ...(target.ownerChannel === "telegram"
-            ? { delegatedProfileId: TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID }
-            : {}),
-        }),
+        (() => {
+          const delegatedProfileId =
+            typeof target.telegramAutomationPolicy?.profileId === "string"
+              ? target.telegramAutomationPolicy.profileId
+              : "";
+          return validateOperationLink(client, {
+            ...operation,
+            expectedSource:
+              quotePlan.confirmedSourceAmount?.asset ?? target.receipt.asset,
+            expectedSourceRaw: quotePlan.confirmedSourceAmount?.raw ?? "0",
+            routeId: frozen.routeId,
+            ...(target.ownerChannel === "telegram" &&
+            relayEvmFundingProfileSpec(delegatedProfileId)
+              ? { delegatedProfileId }
+              : {}),
+          });
+        })(),
     };
     return { kind: "automatic_execution", execution, quotePlan };
   };

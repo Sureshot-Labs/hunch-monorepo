@@ -2224,7 +2224,7 @@ export async function linkFundingReceiveReceiptOperationInTransaction(
     reserved: boolean;
   }>(
     `with authority as materialized (
-       select id, user_id, wallet_address, profile_id,
+       select id, user_id, wallet_chain, wallet_address,
               security_class, max_source_raw
        from telegram_funding_authorizations
        where id = $1::uuid
@@ -2256,7 +2256,7 @@ export async function linkFundingReceiveReceiptOperationInTransaction(
              where prior_authority.user_id = authority.user_id
                and lower(prior_authority.wallet_address) =
                      lower(authority.wallet_address)
-               and prior_authority.profile_id = authority.profile_id
+               and prior_authority.wallet_chain = authority.wallet_chain
                and prior_authority.security_class = 'routed_value_movement'
                and reservation.status <> 'released'
                and reservation.receive_receipt_id <> $3::uuid
