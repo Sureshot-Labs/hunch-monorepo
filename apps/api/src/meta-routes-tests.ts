@@ -543,6 +543,8 @@ async function assertDirectMarketSqlShape(): Promise<void> {
     change24hSql[0],
     /from unified_token_change_24h cached[\s\S]*join unified_market_tokens mapping/,
   );
+  assert.match(change24hSql[0], /mapping\.outcome_side = 'YES'/);
+  assert.doesNotMatch(change24hSql[0], /select distinct mapping\.market_id/);
   assert.match(
     change24hSql[0],
     /from unified_markets m\s+join change24h_history_market_candidates candidate_filter on candidate_filter\.market_id = m\.id/s,
@@ -688,6 +690,8 @@ async function assertEventFeedSqlShape(): Promise<void> {
       sql,
       /from unified_token_change_24h cached[\s\S]*join unified_market_tokens mapping/,
     );
+    assert.match(sql, /mapping\.outcome_side = 'YES'/);
+    assert.doesNotMatch(sql, /select distinct mapping\.market_id/);
     assert.match(
       sql,
       /from unified_markets m\s+join change24h_history_market_candidates candidate_filter on candidate_filter\.market_id = m\.id/s,
