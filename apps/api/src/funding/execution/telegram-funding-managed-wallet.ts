@@ -37,6 +37,7 @@ async function resolveTelegramFundingManagedWallet(
     userId: string;
     telegramAccountId: string;
     telegramUserId: string;
+    controllerNetworkId?: "evm:137" | "evm:8453";
   }>,
   requireExecutionReady: boolean,
 ): Promise<TelegramFundingProvisionWallet | null> {
@@ -102,7 +103,7 @@ async function resolveTelegramFundingManagedWallet(
   return {
     controllerWalletId: stableWalletOpaqueId({
       walletType: "ethereum",
-      networkId: "evm:137",
+      networkId: input.controllerNetworkId ?? "evm:137",
       address: row.wallet_address,
     }),
     privyWalletId: row.privy_wallet_id,
@@ -117,6 +118,7 @@ export function resolveTelegramFundingManagedWalletIdentity(
     userId: string;
     telegramAccountId: string;
     telegramUserId: string;
+    controllerNetworkId?: "evm:137" | "evm:8453";
   }>,
 ): Promise<TelegramFundingProvisionWallet | null> {
   // Wallet identity survives a user/control-plane pause. Ownership checks must
@@ -130,6 +132,7 @@ export function resolveTelegramFundingProvisionWallet(
     userId: string;
     telegramAccountId: string;
     telegramUserId: string;
+    controllerNetworkId?: "evm:137" | "evm:8453";
   }>,
 ): Promise<TelegramFundingProvisionWallet | null> {
   return resolveTelegramFundingManagedWallet(pool, input, true);

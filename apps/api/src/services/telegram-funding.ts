@@ -1353,10 +1353,21 @@ export class TelegramFundingService {
     if (this.resolveManagedWallet && !managedWallet) {
       throw new TelegramFundingError("destination_ambiguous");
     }
+    const destinationNetworkId = telegramFundingVenueNetworkId(input.venue);
+    const controllerWalletId =
+      managedWallet && destinationNetworkId
+        ? telegramFundingManagedWalletControllerId(
+            managedWallet,
+            destinationNetworkId,
+          )
+        : null;
+    if (this.resolveManagedWallet && !controllerWalletId) {
+      throw new TelegramFundingError("destination_ambiguous");
+    }
     const destination = await this.resolveReceiveDestination(
       initialLink.userId,
       input.venue,
-      managedWallet?.controllerWalletId ?? null,
+      controllerWalletId,
     );
     await this.provisionFundingAuthorization({
       destination: { ...destination, venueId: input.venue },
@@ -1386,7 +1397,7 @@ export class TelegramFundingService {
       initialLink,
       identity,
       destination,
-      controllerWalletId: managedWallet?.controllerWalletId ?? null,
+      controllerWalletId,
       telegramMessageId: input.telegramMessageId,
       contextIdempotencyKey: `buy-return:${input.sourceIntentId}`,
       initialBuyReturn: {
