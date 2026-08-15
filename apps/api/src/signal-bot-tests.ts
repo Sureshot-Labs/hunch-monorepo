@@ -4764,8 +4764,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
             buildTestTelegramQuote(intent),
           getReadiness: async () => ({
             ...buildTestPolymarketReadiness({
-              code: "limitless_no_executable_funds",
-              message: "No Limitless USDC funds are available.",
+              code: "telegram_trading_disabled",
+              message: "Direct Limitless trading is not enabled.",
             }),
             maxExecutableBuyUsd: 0,
           }),
@@ -4792,6 +4792,19 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.doesNotMatch(appFallbackMessage.text, /Deposit to Limitless/u);
       assert.equal(
         appFallbackButtons.some((button) => "url" in button),
+        false,
+      );
+      assert.equal(
+        appFallbackButtons.slice(0, 2).every(
+          (button) =>
+            "callback_data" in button &&
+            button.callback_data?.startsWith("hbt:buy:"),
+        ),
+        true,
+        "Limitless presets must enter the bot shortfall flow instead of opening the Mini App",
+      );
+      assert.equal(
+        appFallbackButtons.slice(0, 2).some((button) => "web_app" in button),
         false,
       );
       const yesButton = appFallbackButtons[0];

@@ -1267,6 +1267,16 @@ function canPreviewBuyForReadiness(
   );
 }
 
+function canPreviewBuyForDelivery(input: {
+  deliveryMode: StoredTelegramBuyDeliveryMode;
+  readiness: TradingReadiness | null | undefined;
+}): boolean {
+  return (
+    input.deliveryMode === "app_handoff" ||
+    canPreviewBuyForReadiness(input.readiness)
+  );
+}
+
 function readPolymarketControlledFundsUsd(
   readiness: TradingReadiness | null | undefined,
 ): number | null {
@@ -4741,7 +4751,9 @@ export async function buildTelegramBotTradingMarketMessage(input: {
     buyAuthorization?.enabled === true &&
     Boolean(buyAuthorization.privy_wallet_id) &&
     Boolean(buyAuthorityBinding) &&
-    canPreviewBuyForReadiness(buyReadiness) &&
+    (canPreviewBuyForReadiness(buyReadiness) ||
+      (market.venue === "limitless" &&
+        input.telegramMiniAppEnabled === true)) &&
     Boolean(input.trading);
   const buyDeliveryMode = resolveTelegramBuyDeliveryMode({
     commonBuySurfaceReady,
@@ -8975,7 +8987,7 @@ export async function completeTelegramBotTradeInput(input: {
   });
   if (
     targetAction === "buy"
-      ? !canPreviewBuyForReadiness(readiness)
+      ? !canPreviewBuyForDelivery({ deliveryMode, readiness })
       : !canOfferTradeForReadiness(readiness)
   ) {
     return {
@@ -9697,7 +9709,10 @@ export async function handleTelegramBotTradingCallback(
     (intent.delivery_mode === "app_handoff" &&
       (intent.action !== "buy" || intent.venue !== "limitless")) ||
     (action === "BUY"
-      ? !canPreviewBuyForReadiness(tradeReadiness)
+      ? !canPreviewBuyForDelivery({
+          deliveryMode: intent.delivery_mode,
+          readiness: tradeReadiness,
+        })
       : !canOfferTradeForReadiness(tradeReadiness)) ||
     (action === "BUY" && (!amountUsd || amountUsd > maxAmountUsd)) ||
     (action === "SELL" &&
