@@ -1648,11 +1648,18 @@ async function registerTelegramBotTradingRoutes(
         return reply.code(403).send({ error: "input_context_mismatch" });
       }
       const policy = policyState.policy;
+      const venueAllowsCustomInput =
+        policy.tradingVenues.includes(context.venue) ||
+        (context.action === "buy" &&
+          context.deliveryMode === "app_handoff" &&
+          context.venue === "limitless" &&
+          policy.fundingReceiveEnabled &&
+          policy.buyContinuationEnabled);
       if (
         !policy.tradingEnabled ||
         !policy.customTradeInputEnabled ||
         !policy.tradingActions.includes(context.action) ||
-        !policy.tradingVenues.includes(context.venue)
+        !venueAllowsCustomInput
       ) {
         return reply.code(409).send({ error: "custom_trade_input_disabled" });
       }

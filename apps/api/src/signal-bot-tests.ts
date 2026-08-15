@@ -4743,8 +4743,15 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
 
       marketOrderable = true;
       marketVenue = "limitless";
+      autoManagedMaxAmountUsd = 20;
+      buyAmountPresetsUsd = [1, 5, 15];
+      customTradeInputEnabled = true;
       buyContinuationEnabled = true;
       fundingReceiveEnabled = true;
+      const limitlessCustomContexts: Array<{
+        deliveryMode: string;
+        side: string;
+      }> = [];
       const appFallbackMessage = await buildTelegramBotTradingMarketMessage({
         appBaseUrl: "https://app.hunch.trade",
         chatId: "999",
@@ -4770,6 +4777,13 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
             maxExecutableBuyUsd: 0,
           }),
         } as never,
+        writeTradeInputContext: async (context) => {
+          limitlessCustomContexts.push({
+            deliveryMode: context.deliveryMode ?? "bot_submit",
+            side: context.side,
+          });
+          return true;
+        },
       });
       assert.doesNotMatch(
         appFallbackMessage.text,
@@ -4786,8 +4800,23 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       );
       assert.deepEqual(
         appFallbackButtons.map((button) => button.text),
-        ["$1 · YES", "$1 · NO", "Open market", "⬅️ Back"],
+        [
+          "$1 · YES",
+          "$5 · YES",
+          "$15 · YES",
+          "$1 · NO",
+          "$5 · NO",
+          "$15 · NO",
+          "Custom buy · YES",
+          "Custom buy · NO",
+          "Open market",
+          "⬅️ Back",
+        ],
       );
+      assert.deepEqual(limitlessCustomContexts, [
+        { deliveryMode: "app_handoff", side: "YES" },
+        { deliveryMode: "app_handoff", side: "NO" },
+      ]);
       assert.doesNotMatch(appFallbackMessage.text, /Trade amount in Hunch/u);
       assert.doesNotMatch(appFallbackMessage.text, /Deposit to Limitless/u);
       assert.equal(
@@ -4795,7 +4824,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         false,
       );
       assert.equal(
-        appFallbackButtons.slice(0, 2).every(
+        appFallbackButtons.slice(0, 6).every(
           (button) =>
             "callback_data" in button &&
             button.callback_data?.startsWith("hbt:buy:"),
@@ -4804,7 +4833,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         "Limitless presets must enter the bot shortfall flow instead of opening the Mini App",
       );
       assert.equal(
-        appFallbackButtons.slice(0, 2).some((button) => "web_app" in button),
+        appFallbackButtons.slice(0, 8).some((button) => "web_app" in button),
         false,
       );
       const yesButton = appFallbackButtons[0];
@@ -4812,7 +4841,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.ok(yesButton && "callback_data" in yesButton);
       assert.ok(noButton && "callback_data" in noButton);
       assert.equal(
-        decodeStartAppPayload(readWebAppStartParam(appFallbackButtons[2])),
+        decodeStartAppPayload(readWebAppStartParam(appFallbackButtons[8])),
         "event-1|market-1|",
       );
     },
