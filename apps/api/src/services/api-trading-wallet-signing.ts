@@ -100,6 +100,7 @@ export type PrivyServerSignerConfiguration = {
   policyFingerprint: string;
   policyMaxBuyUsd: number;
   fundingRouterAddress: string;
+  fundingPullerAddress?: string;
   builderCode?: string;
   legacyBuyPolicyId?: string;
   legacySellPolicyId?: string;
@@ -168,6 +169,7 @@ export async function resolvePolymarketBotPolicyFundingCapRaw(): Promise<bigint>
   const key = [
     policyId,
     fundingRouterAddress.toLowerCase(),
+    env.polymarketDepositWalletPullerAddress.toLowerCase(),
     String(policyMaxBuyUsd),
     ...exchangeAddresses.map((address) => address.toLowerCase()),
   ].join("|");
@@ -186,6 +188,7 @@ export async function resolvePolymarketBotPolicyFundingCapRaw(): Promise<bigint>
       builderCode: env.polymarketBuilderCode,
       exchangeAddresses,
       fundingRouterAddress,
+      fundingPullerAddress: env.polymarketDepositWalletPullerAddress,
       maxBuyUsd: policyMaxBuyUsd,
       policy,
       profile: "buy_sell",
@@ -254,6 +257,7 @@ export async function inspectServerEvmWalletAuthorization(input: {
     policyFingerprint: env.privyPolymarketBotBuySellPolicyFingerprint,
     policyMaxBuyUsd: env.privyPolymarketBotBuyPolicyMaxUsd,
     fundingRouterAddress: env.polymarketFundingRouterAddress,
+    fundingPullerAddress: env.polymarketDepositWalletPullerAddress,
     builderCode: env.polymarketBuilderCode,
     legacyBuyPolicyId: env.privyPolymarketBotBuyPolicyId,
     legacySellPolicyId: env.privyPolymarketBotSellPolicyId,
@@ -506,6 +510,7 @@ export async function inspectServerEvmWalletAuthorization(input: {
             builderCode: configuration.builderCode?.trim() ?? "",
             exchangeAddresses: configuration.exchangeAddresses,
             fundingRouterAddress: configuration.fundingRouterAddress,
+            fundingPullerAddress: configuration.fundingPullerAddress,
             maxBuyUsd: policyMaxBuyUsd,
             policy,
             profile,

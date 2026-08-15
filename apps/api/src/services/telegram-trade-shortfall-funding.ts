@@ -53,6 +53,7 @@ export type TelegramTradeShortfallProposal = Readonly<{
 export type TelegramTradeShortfallInspection =
   | Readonly<{ kind: "destination_ready" }>
   | Readonly<{ kind: "external_deposit_required" }>
+  | Readonly<{ kind: "managed_setup_required" }>
   | Readonly<{
       kind: "temporarily_unavailable";
       reasonCodes: readonly string[];
@@ -159,7 +160,8 @@ export function resolveTelegramTradeShortfallExecutionProfile(
   if (
     option.requiredActions.some(
       (action) => action.kind === "external_handoff",
-    )
+    ) &&
+    !fundingSidecarRuntimeConfig.polymarketDepositWalletPullerAddress
   ) {
     return null;
   }
@@ -346,8 +348,7 @@ export class TelegramTradeShortfallFundingService {
       userId: input.userId,
       telegramAccountId: input.telegramAccountId,
       telegramUserId: input.telegramUserId,
-      controllerNetworkId:
-        input.venue === "limitless" ? "evm:8453" : "evm:137",
+      controllerNetworkId: input.venue === "limitless" ? "evm:8453" : "evm:137",
     });
     if (!controller) {
       return {
@@ -380,10 +381,20 @@ export class TelegramTradeShortfallFundingService {
         reasonCodes: ["internal_route_delegated_authority_unavailable"],
       };
     }
-    const delegated = await this.runtime.liquidity(
-      input.userId,
-      tradeShortfallRequest(input, profileId),
-    );
+    let delegated;
+    try {
+      delegated = await this.runtime.liquidity(
+        input.userId,
+        tradeShortfallRequest(input, profileId),
+      );
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        error.message.includes("Open Hunch once to finish wallet setup")
+      )
+        return { kind: "managed_setup_required" };
+      throw error;
+    }
     if (delegated.completeness !== "complete" || delegated.errors.length > 0) {
       return {
         kind: "temporarily_unavailable",

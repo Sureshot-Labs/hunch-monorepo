@@ -98,11 +98,16 @@ export type RelayEligibleSourceFact = Readonly<{
   suggestionPreferred?: boolean;
   freshness: "fresh" | "stale";
   preRouteHandoff?: Readonly<{
-    kind: "polymarket_deposit_wallet_to_controller_v1";
+    kind:
+      | "polymarket_deposit_wallet_to_controller_v1"
+      | "polymarket_deposit_wallet_puller_v1";
     sourceLocation: AssetLocation;
     funderAddress: string;
     controllerAddress: string;
     tokenAddress: string;
+    pullerAddress?: string;
+    pullNonce?: string;
+    pullerAllowanceRaw?: string;
   }>;
 }>;
 
@@ -147,6 +152,7 @@ export type RelayFirstSourcePlannerDependencies = Readonly<{
       destination: ResolvedRouteDestination;
       requiredAmount: Money;
       policyRevision: string;
+      serverExecutionProfileId?: string;
       now: Date;
     }>,
   ): Promise<readonly RelayEligibleSourceFact[]>;
@@ -160,6 +166,7 @@ export type RelayFirstSourcePlannerDependencies = Readonly<{
       quoteCorrelationId: string;
       deadline: Date;
       policyRevision: string;
+      serverExecutionProfileId?: string;
       signal: AbortSignal;
       timeoutMs: number;
     }>,
@@ -632,6 +639,12 @@ export class RelayFirstSourcePlanner {
                 quoteCorrelationId,
                 deadline,
                 policyRevision: input.policyRevision,
+                ...(input.request.serverExecutionProfileId
+                  ? {
+                      serverExecutionProfileId:
+                        input.request.serverExecutionProfileId,
+                    }
+                  : {}),
               },
               Math.min(this.relayQuoteTimeoutMs, remainingPlannerMs),
             );

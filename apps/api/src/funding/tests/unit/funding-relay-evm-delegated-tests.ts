@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { Interface } from "ethers";
+import { Interface, MaxUint256 } from "ethers";
 
 import { stableWalletOpaqueId } from "../../../account-value/canonical.js";
 import {
@@ -16,6 +16,7 @@ import {
 } from "../../../funding-providers/relay/operation-plan.js";
 import {
   TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
+  TELEGRAM_RELAY_POLYGON_PUSD_PROFILE_ID,
   validateRelayEvmPolicyRules,
 } from "../../execution/delegated-funding-profiles.js";
 import { validateRelayDelegatedEvmAction } from "../../execution/relay-evm-delegated-profile.js";
@@ -587,6 +588,125 @@ assert.deepEqual(
     ["planned", 0],
   ],
   "both steps remain inert until the atomic receipt link activates approve",
+);
+
+const depositWallet = "0x7777777777777777777777777777777777777777";
+const puller = "0x8888888888888888888888888888888888888888";
+const polygonActionBase = { ...actionBase, networkId: "evm:137" };
+const delegatedApproveStep = delegatedSteps[0];
+const delegatedDepositStep = delegatedSteps[1];
+assert.ok(delegatedApproveStep && delegatedDepositStep);
+const reverseDelegatedSteps = relayDelegatedCommitSteps({
+  steps: [
+    {
+      ...delegatedApproveStep,
+      ordinal: 0,
+      normalizedAction: {
+        ...polygonActionBase,
+        actionId: "relay:reverse:approve",
+        to: POLYGON_PUSD,
+        data: approve.encodeFunctionData("approve", [RELAY_DEPOSITORY_V2, RAW]),
+      },
+    },
+    {
+      ...delegatedDepositStep,
+      ordinal: 1,
+      normalizedAction: {
+        ...polygonActionBase,
+        actionId: "relay:reverse:deposit",
+        to: RELAY_DEPOSITORY_V2,
+        data: deposit.encodeFunctionData("depositErc20", [
+          WALLET,
+          POLYGON_PUSD,
+          RAW,
+          orderId,
+        ]),
+      },
+    },
+  ],
+  source: {
+    componentId: "component:deposit-wallet-pusd",
+    sourceLocationPatternId: "venue_polymarket_polygon_pusd",
+    safeLabel: "Polymarket balance",
+    source: {
+      kind: "owned_location",
+      location: {
+        kind: "venue_account",
+        locationId: "location:deposit-wallet",
+        accountId: "account:test",
+        asset: {
+          networkId: "evm:137",
+          assetId: POLYGON_PUSD,
+          decimals: 6,
+        },
+        details: {
+          venueId: "polymarket",
+          accountRef: "polymarket:test",
+          controllerWalletId: WALLET_ID,
+          address: depositWallet,
+        },
+      },
+    },
+    quoteInputAmount: {
+      asset: { networkId: "evm:137", assetId: POLYGON_PUSD, decimals: 6 },
+      raw: RAW,
+    },
+    maximumSourceRaw: RAW,
+    maximumSlippageBps: 100,
+    estimatedUsd: "2",
+    transferable: true,
+    riskEligible: true,
+    walletExecutionReady: true,
+    nativeGasReady: true,
+    freshness: "fresh",
+    preRouteHandoff: {
+      kind: "polymarket_deposit_wallet_puller_v1",
+      sourceLocation: {
+        kind: "venue_account",
+        locationId: "location:deposit-wallet",
+        accountId: "account:test",
+        asset: {
+          networkId: "evm:137",
+          assetId: POLYGON_PUSD,
+          decimals: 6,
+        },
+        details: {
+          venueId: "polymarket",
+          accountRef: "polymarket:test",
+          controllerWalletId: WALLET_ID,
+          address: depositWallet,
+        },
+      },
+      funderAddress: depositWallet,
+      controllerAddress: WALLET,
+      tokenAddress: POLYGON_PUSD,
+      pullerAddress: puller,
+      pullNonce: "4",
+      pullerAllowanceRaw: MaxUint256.toString(),
+    },
+  },
+  sourceAmount: {
+    asset: { networkId: "evm:137", assetId: POLYGON_PUSD, decimals: 6 },
+    raw: RAW,
+  },
+  profile: atomicWalletProfile,
+  serverExecutionProfileId: TELEGRAM_RELAY_POLYGON_PUSD_PROFILE_ID,
+});
+assert.deepEqual(
+  reverseDelegatedSteps.map((step) => [
+    step.actionValidationResult.relayStepKind,
+    step.dependsOnOrdinal,
+  ]),
+  [
+    ["source_pull", null],
+    ["approve", 0],
+    ["deposit", 1],
+  ],
+  "reverse route durably serializes pull before Relay approval and deposit",
+);
+assert.equal(
+  reverseDelegatedSteps[1]?.actionValidationResult.sourcePullRequired,
+  true,
 );
 assert.equal(
   delegatedSteps[1]?.actionValidationResult.postconditionEvidenceKind,

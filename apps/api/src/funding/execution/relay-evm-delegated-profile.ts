@@ -11,14 +11,22 @@ import {
   type RelayEvmFundingProfileSpec,
 } from "./relay-evm-profile-specs.js";
 import { TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID } from "./delegated-funding-profile-ids.js";
+import { fundingSidecarRuntimeConfig } from "../runtime/sidecar-runtime-config.js";
 
 type JsonRecord = Readonly<Record<string, JsonValue>>;
 
 const ERC20 = new ethers.Interface([
   "function approve(address spender,uint256 amount)",
 ]);
+const PULLER = new ethers.Interface([
+  "function pullPusd(uint256 expectedNonce,uint256 amount)",
+]);
 
-export type RelayEvmDelegatedStepKind = "approve" | "deposit" | "cleanup";
+export type RelayEvmDelegatedStepKind =
+  | "source_pull"
+  | "approve"
+  | "deposit"
+  | "cleanup";
 
 function positiveRaw(value: string): bigint | null {
   return /^[1-9][0-9]*$/u.test(value) ? BigInt(value) : null;
@@ -46,9 +54,42 @@ export function validateRelayDelegatedEvmAction(
     input.action.senderWalletId !== input.walletId ||
     input.action.valueRaw !== "0" ||
     amount == null ||
-    !["approve", "deposit", "cleanup"].includes(String(kind))
+    !["source_pull", "approve", "deposit", "cleanup"].includes(String(kind))
   ) {
     throw new Error("Relay delegated action differs from its exact profile");
+  }
+  if (kind === "source_pull") {
+    const puller =
+      fundingSidecarRuntimeConfig.polymarketDepositWalletPullerAddress;
+    const expectedNonce = input.actionValidationResult.pullNonce;
+    const expectedSourceRaw = input.actionValidationResult.expectedSourceRaw;
+    if (
+      profile.sourceAsset.networkId !== "evm:137" ||
+      !sameAccountAddress(
+        profile.sourceAsset.networkId,
+        profile.sourceAsset.assetId,
+        fundingSidecarRuntimeConfig.polymarketPusdAddress,
+      ) ||
+      !puller ||
+      !sameAccountAddress(
+        profile.sourceAsset.networkId,
+        input.action.to,
+        puller,
+      ) ||
+      typeof expectedNonce !== "string" ||
+      !/^(0|[1-9][0-9]*)$/u.test(expectedNonce) ||
+      expectedSourceRaw !== input.expectedRaw
+    )
+      throw new Error(
+        "Relay source pull differs from its exact Puller profile",
+      );
+    const decoded = PULLER.decodeFunctionData("pullPusd", input.action.data);
+    if (
+      BigInt(decoded.expectedNonce) !== BigInt(expectedNonce) ||
+      BigInt(decoded.amount) !== amount
+    )
+      throw new Error("Relay source pull nonce or amount differs");
+    return { kind: "source_pull", orderId: null };
   }
   if (kind === "approve" || kind === "cleanup") {
     if (

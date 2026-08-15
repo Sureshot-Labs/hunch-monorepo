@@ -21,6 +21,7 @@ import {
   RelayWalletQuoteAdapter,
 } from "../../funding-providers/relay/wallet-adapter.js";
 import { buildRelayPlanningQuote } from "../../funding-providers/relay/operation-plan.js";
+import { fundingSidecarRuntimeConfig } from "../runtime/sidecar-runtime-config.js";
 export { buildPolymarketPreRouteHandoffSteps } from "../../funding-providers/relay/operation-plan.js";
 import { getCredentialsEncryptionKey } from "../../lib/credentials-encryption.js";
 import type {
@@ -484,6 +485,8 @@ export function deriveProductionRelayEligibleSourceFacts(input: {
             linkedAddress,
           )
         : null;
+    const configuredPuller =
+      fundingSidecarRuntimeConfig.polymarketDepositWalletPullerAddress;
     const usesPolymarketHandoff =
       Boolean(handoffControllerProfile) &&
       handoffControllerProfile?.source !== "external" &&
@@ -499,6 +502,12 @@ export function deriveProductionRelayEligibleSourceFacts(input: {
         : profile
           ? walletExecutionLocation(component.location, profile)
           : null;
+    if (usesPolymarketHandoff && !configuredPuller) {
+      // The legacy client/Polymarket-relayer handoff is not a background
+      // authority. Reverse routing is intentionally absent until the immutable
+      // Puller is configured and its exact shared-policy rule is verified.
+      continue;
+    }
     const nativeSolSource = isSolanaNativeAsset(component.amount.asset);
     if (
       component.location.accountId !== input.accountId ||
@@ -533,11 +542,12 @@ export function deriveProductionRelayEligibleSourceFacts(input: {
           ? {
               safeLabel: "Polymarket balance",
               preRouteHandoff: {
-                kind: "polymarket_deposit_wallet_to_controller_v1" as const,
+                kind: "polymarket_deposit_wallet_puller_v1" as const,
                 sourceLocation: component.location,
                 funderAddress,
                 controllerAddress: profile.address,
                 tokenAddress: component.amount.asset.assetId,
+                pullerAddress: configuredPuller,
               },
             }
           : {}),
@@ -978,6 +988,9 @@ export class ProductionFundingSourcePlanner {
       quote,
       quoteCorrelationId: input.quoteCorrelationId,
       route: input.route,
+      ...(input.serverExecutionProfileId
+        ? { serverExecutionProfileId: input.serverExecutionProfileId }
+        : {}),
       source: input.source,
     });
   }
