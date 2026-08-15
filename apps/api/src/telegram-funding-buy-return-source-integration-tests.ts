@@ -144,6 +144,56 @@ try {
     telegramBotTradeAuthorityFingerprint(authority),
   );
 
+  const appHandoffIntentId = crypto.randomUUID();
+  await client.query(
+    `insert into telegram_trade_intents (
+       id, telegram_user_id, user_id, authorization_id, chat_id,
+       telegram_message_id, action, venue, market_id, event_id, side,
+       amount_usd, status, result, expires_at, idempotency_key, delivery_mode
+     ) values (
+       $1::uuid, $2, $3::uuid, $4::uuid, $2, 102,
+       'buy', 'limitless', $5, $6, 'YES', 5, 'previewed', $7::jsonb,
+       now() + interval '2 minutes', $8, 'app_handoff'
+     )`,
+    [
+      appHandoffIntentId,
+      telegramUserId,
+      userId,
+      authorizationId,
+      marketId,
+      eventId,
+      JSON.stringify({
+        fundingProposal: { kind: "internal_stable_route", version: 1 },
+        fundingState: "internal_route",
+        telegramAuthority: authority,
+      }),
+      `app-handoff-funding-${suffix}`,
+    ],
+  );
+  await client.query(
+    `update telegram_trade_intents
+        set status = 'confirming'
+      where id = $1::uuid`,
+    [appHandoffIntentId],
+  );
+  await client.query("savepoint app_handoff_execution_rejected");
+  await assert.rejects(
+    client.query(
+      `update telegram_trade_intents
+          set status = 'executing'
+        where id = $1::uuid`,
+      [appHandoffIntentId],
+    ),
+    (error: unknown) =>
+      error instanceof Error &&
+      "code" in error &&
+      error.code === "23514" &&
+      "constraint" in error &&
+      error.constraint === "telegram_trade_intents_delivery_authority_check",
+    "app handoff may confirm funding consent but must never enter trade execution",
+  );
+  await client.query("rollback to savepoint app_handoff_execution_rejected");
+
   await client.query("rollback");
   console.log(
     "[telegram-funding-buy-return-source-integration-tests] production source-intent authority lock query passed",

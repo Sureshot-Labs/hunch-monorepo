@@ -22,6 +22,8 @@ const MIGRATION_0211 = "0211_funding_receive_receipt_rearm.sql";
 const MIGRATION_0214 = "0214_funding_receive_observation_wake.sql";
 const MIGRATION_0215 = "0215_telegram_buy_delivery_modes.sql";
 const MIGRATION_0216 = "0216_telegram_trade_shortfall_funding.sql";
+const MIGRATION_0217 =
+  "0217_telegram_app_handoff_funding_confirmation.sql";
 const FUNDING_MIGRATIONS = [
   MIGRATION_0184,
   MIGRATION_0193,
@@ -41,6 +43,7 @@ const FUNDING_MIGRATIONS = [
   MIGRATION_0214,
   MIGRATION_0215,
   MIGRATION_0216,
+  MIGRATION_0217,
 ] as const;
 
 const LEGACY_CLASSIFIER_SQL = `
@@ -1244,6 +1247,17 @@ export async function inspectFundingMigrationPreflight(
       "guard_telegram_funding_authorization_reservation_update",
       ["new.source_trade_intent_id", "old.source_trade_intent_id"],
     ));
+  const hasTelegramAppHandoffFundingConfirmation =
+    await constraintDefinitionIncludes(
+      db,
+      "public.telegram_trade_intents",
+      "telegram_trade_intents_delivery_authority_check",
+      [
+        "fundingstate",
+        "fundingproposal",
+        "funding_operation_id is not null",
+      ],
+    );
   const hasTelegramProjectionWatermark =
     hasTelegramFundingSessions &&
     (await columnExists(
@@ -1455,6 +1469,13 @@ export async function inspectFundingMigrationPreflight(
       hasTelegramTradeShortfallFundingObjects,
       "Telegram trade-shortfall funding objects exist before 0216 is recorded",
     ],
+    [
+      MIGRATION_0217,
+      hasTelegramAppHandoffFundingConfirmation,
+      "0217 is recorded but app-handoff funding confirmation is not safely enabled",
+      hasTelegramAppHandoffFundingConfirmation,
+      "app-handoff funding confirmation exists before 0217 is recorded",
+    ],
   ] as const;
   const partialObjects = migrationDriftChecks.flatMap(
     ([migration, complete, incompleteMessage, present, presentMessage]) =>
@@ -1596,6 +1617,9 @@ export async function inspectFundingMigrationPreflight(
       : null,
     !appliedSet.has(MIGRATION_0216)
       ? "0216 Telegram trade-shortfall funding migration is not recorded"
+      : null,
+    !appliedSet.has(MIGRATION_0217)
+      ? "0217 Telegram app-handoff funding confirmation migration is not recorded"
       : null,
     !hasBridgeOrders ? "bridge_orders table is absent" : null,
     bridgeUnknown > 0
