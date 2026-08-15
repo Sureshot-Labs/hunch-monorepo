@@ -17,10 +17,7 @@ import {
   relayEvmExecutionConfigurationReady,
   type RelayEvmExecutionConfiguration,
 } from "./delegated-funding-config.js";
-import {
-  POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
-  TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
-} from "./delegated-funding-profile-ids.js";
+import { POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID } from "./delegated-funding-profile-ids.js";
 import type { DelegatedFundingSecurityClass } from "./delegated-funding-profile-ids.js";
 import type { DelegatedFundingPreBroadcastDecision } from "./delegated-funding-capability.js";
 import {
@@ -29,10 +26,8 @@ import {
 } from "./privy-delegated-funding-driver.js";
 import { lockTelegramFundingLinkLifecycle } from "./telegram-funding-link-lifecycle-lock.js";
 import { resolveTelegramFundingProvisionWallet } from "./telegram-funding-managed-wallet.js";
-import {
-  BASE_USDC,
-  POLYGON_PUSD,
-} from "../../funding-providers/relay/rehearsal.js";
+import { RELAY_ROUTE_SPECS } from "../../funding-providers/relay/mappings.js";
+import { RELAY_EVM_FUNDING_PROFILE_SPECS } from "./relay-evm-profile-specs.js";
 
 export {
   resolveTelegramFundingProvisionWallet,
@@ -177,6 +172,7 @@ export async function loadActiveTelegramFundingAuthorization(
     telegramUserId: string;
     destinationOptionId: string;
     venueBindingOptionId: string;
+    venueId?: "limitless" | "polymarket";
     expectedAuthorizationId?: string;
     profileId?: string;
     securityClass?: DelegatedFundingSecurityClass;
@@ -220,14 +216,17 @@ export async function loadActiveTelegramFundingAuthorization(
              funding_authorization.wallet_address
            )
        and ($11::boolean = false or trading_authorization.enabled = true)
-       and 'polymarket' = any(trading_authorization.enabled_venues)
+       and (
+         $17 = 'limitless'
+         or $17 = any(trading_authorization.enabled_venues)
+       )
       where funding_authorization.user_id = $1
         and funding_authorization.telegram_account_id = $2::uuid
         and funding_authorization.telegram_user_id = $3
         and funding_authorization.profile_id = $4
         and funding_authorization.security_class = $12
         and ($5::text is null or funding_authorization.id::text = $5)
-        and funding_authorization.venue_id = 'polymarket'
+        and funding_authorization.venue_id = $17
         and funding_authorization.destination_option_id = $6
         and funding_authorization.venue_binding_option_id = $7
         and funding_authorization.source_network_id = $13
@@ -272,6 +271,7 @@ export async function loadActiveTelegramFundingAuthorization(
       input.sourceAsset?.decimals ?? 6,
       input.destinationAsset?.networkId ?? "evm:137",
       input.destinationAsset?.decimals ?? 6,
+      input.venueId ?? "polymarket",
     ],
   );
   return rows[0] ? telegramFundingAuthorizationFromRow(rows[0]) : null;
@@ -337,6 +337,7 @@ export async function resolveCurrentTelegramFundingAuthority(
     securityClass?: DelegatedFundingSecurityClass;
     sourceAsset?: AssetRef;
     destinationAsset?: AssetRef;
+    venueId?: "limitless" | "polymarket";
     maxSourceRaw?: string | null;
     expectedAuthorizationId?: string;
     expectedAuthorizationFingerprint?: string;
@@ -374,6 +375,7 @@ export async function resolveCurrentTelegramFundingAuthority(
     securityClass: input.securityClass,
     sourceAsset: input.sourceAsset,
     destinationAsset: input.destinationAsset,
+    venueId: input.venueId,
     now: input.now,
     lock: input.lock,
     requireTradingEnabled: automationEnabled,
@@ -478,6 +480,7 @@ export async function grantTelegramFundingAuthorization(
     securityClass?: DelegatedFundingSecurityClass;
     sourceAsset?: AssetRef;
     destinationAsset?: AssetRef;
+    venueId?: "limitless" | "polymarket";
     maxSourceRaw?: string | null;
     expiresAt?: Date | null;
     now?: Date;
@@ -510,6 +513,7 @@ export async function grantTelegramFundingAuthorization(
     decimals: 6,
   };
   const maxSourceRaw = input.maxSourceRaw ?? null;
+  const venueId = input.venueId ?? "polymarket";
   if (
     securityClass === "routed_value_movement" &&
     (maxSourceRaw == null || !/^[1-9][0-9]*$/u.test(maxSourceRaw))
@@ -521,7 +525,9 @@ export async function grantTelegramFundingAuthorization(
     await lockTelegramFundingLinkLifecycle(client, input.userId);
     await client.query(
       `select pg_advisory_xact_lock(hashtextextended($1, 0))`,
-      [`telegram-funding-authorization:${input.userId}:${profileId}`],
+      [
+        `telegram-funding-authorization:${input.userId}:${profileId}:${venueId}`,
+      ],
     );
     const preference = await client.query<{
       funding_operator_revoked_at: Date | null;
@@ -571,7 +577,10 @@ export async function grantTelegramFundingAuthorization(
                  wallet.wallet_address
                )
            and trading_authorization.enabled = true
-           and 'polymarket' = any(trading_authorization.enabled_venues)
+           and (
+             $7 = 'limitless'
+             or $7 = any(trading_authorization.enabled_venues)
+           )
           join telegram_bot_trading_preferences preference
             on preference.user_id = app_user.id
            and preference.desired_enabled = true
@@ -586,6 +595,7 @@ export async function grantTelegramFundingAuthorization(
         input.userWalletId,
         input.privyWalletId,
         input.walletAddress,
+        venueId,
       ],
     );
     if (!exactAuthority.rows[0]?.ready) {
@@ -599,11 +609,12 @@ export async function grantTelegramFundingAuthorization(
         from telegram_funding_authorizations funding_authorization
         where funding_authorization.user_id = $1
           and funding_authorization.profile_id = $2
+          and funding_authorization.venue_id = $3
           and funding_authorization.revoked_at is null
         order by funding_authorization.id
         for update of funding_authorization
       `,
-      [input.userId, profileId],
+      [input.userId, profileId, venueId],
     );
     const current = existing.rows.map(telegramFundingAuthorizationFromRow);
     const generationMatches =
@@ -643,6 +654,7 @@ export async function grantTelegramFundingAuthorization(
         authorization.venueBindingOptionId === input.venueBindingOptionId &&
         authorization.expiresAt === (input.expiresAt?.toISOString() ?? null) &&
         authorization.profileId === profileId &&
+        authorization.venueId === venueId &&
         authorization.securityClass === securityClass &&
         authorization.maxSourceRaw === maxSourceRaw &&
         sameAsset(authorization.sourceAsset, sourceAsset) &&
@@ -724,7 +736,7 @@ export async function grantTelegramFundingAuthorization(
           end,
           'ethereum', $7, $8, $9,
           $10, $11, $12, $13,
-          'polymarket', $14, $15, $16, $17, $18,
+          $24, $14, $15, $16, $17, $18,
           $19, $20, $21, $22, $23, $22, $22
         )
         returning ${authorizationColumns()}
@@ -753,6 +765,7 @@ export async function grantTelegramFundingAuthorization(
         destinationAsset.decimals,
         now,
         input.expiresAt ?? null,
+        venueId,
       ],
     );
     const row = rows[0];
@@ -859,6 +872,7 @@ export async function ensureTelegramFundingAuthorization(
     controllerWalletId: string;
     destinationOptionId: string;
     venueBindingOptionId: string;
+    venueId?: "limitless" | "polymarket";
     now?: Date;
   }>,
   dependencies: EnsureTelegramFundingAuthorizationDependencies = {},
@@ -962,6 +976,7 @@ export async function ensureTelegramRelayEvmFundingAuthorization(
     controllerWalletId: string;
     destinationOptionId: string;
     venueBindingOptionId: string;
+    venueId?: "limitless" | "polymarket";
     now?: Date;
   }>,
   dependencies: Readonly<{
@@ -997,29 +1012,39 @@ export async function ensureTelegramRelayEvmFundingAuthorization(
     });
     inspect = (wallet) => driver.inspectWalletProfileForProfile(wallet);
   }
-  const inspection = await inspect({
-    walletId: candidate.privyWalletId,
-    walletAddress: candidate.walletAddress,
-    profileId: TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
-  }).catch(() => "unavailable" as const);
-  if (inspection !== "valid") return null;
-  return grantTelegramFundingAuthorization(pool, {
-    ...input,
-    ...candidate,
-    configuration,
-    profileId: TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
-    securityClass: "routed_value_movement",
-    maxSourceRaw: configuration.maxSourceRaw,
-    sourceAsset: {
-      networkId: "evm:8453",
-      assetId: BASE_USDC,
-      decimals: 6,
-    },
-    destinationAsset: {
-      networkId: "evm:137",
-      assetId: POLYGON_PUSD,
-      decimals: 6,
-    },
-    replaceExisting: true,
-  });
+  const venueId = input.venueId ?? "polymarket";
+  const profiles = Object.values(RELAY_EVM_FUNDING_PROFILE_SPECS).filter(
+    (profile) => profile.venueIds.includes(venueId),
+  );
+  const granted: TelegramFundingAuthorization[] = [];
+  for (const profile of profiles) {
+    const inspection = await inspect({
+      walletId: candidate.privyWalletId,
+      walletAddress: candidate.walletAddress,
+      profileId: profile.profileId,
+    }).catch(() => "unavailable" as const);
+    if (inspection !== "valid") continue;
+    const route = profile.routeIds
+      .map((routeId) => RELAY_ROUTE_SPECS[routeId])
+      .find(
+        (candidateRoute) =>
+          candidateRoute?.destination.networkId ===
+          (venueId === "limitless" ? "evm:8453" : "evm:137"),
+      );
+    if (!route) continue;
+    granted.push(
+      await grantTelegramFundingAuthorization(pool, {
+        ...input,
+        ...candidate,
+        configuration,
+        profileId: profile.profileId,
+        securityClass: "routed_value_movement",
+        maxSourceRaw: configuration.maxSourceRaw,
+        sourceAsset: profile.sourceAsset,
+        destinationAsset: route.destination,
+        replaceExisting: true,
+      }),
+    );
+  }
+  return granted[0] ?? null;
 }

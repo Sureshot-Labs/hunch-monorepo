@@ -13,8 +13,11 @@ type Queryable = Pick<PoolClient, "query">;
 
 export const TELEGRAM_FUNDING_BUY_CONTINUATION_TTL_MS = 2 * 60 * 1000;
 
+export type TelegramFundingBuyContinuationMode = "app_handoff" | "bot_submit";
+
 export type TelegramFundingBuyReturnRevision = Readonly<{
   revision: number;
+  continuationMode: TelegramFundingBuyContinuationMode;
   fundingContextId: string;
   requestFingerprint: string;
   venueBindingOptionId: string;
@@ -56,6 +59,7 @@ type BuyReturnRow = Readonly<{
   requested_spend_usd: string;
   source_shortfall_intent_id: string | null;
   source_authority_fingerprint: string;
+  continuation_mode: TelegramFundingBuyContinuationMode;
   venue_id: string;
   destination_option_id: string;
   venue_binding_option_id: string;
@@ -89,6 +93,7 @@ const buyReturnColumns = `
   requested_spend_usd::text,
   source_shortfall_intent_id,
   source_authority_fingerprint,
+  continuation_mode,
   venue_id,
   destination_option_id,
   venue_binding_option_id,
@@ -126,6 +131,7 @@ function publicBuyReturn(row: BuyReturnRow): TelegramFundingBuyReturnRevision {
     eventId: row.event_id,
     sourceShortfallIntentId: row.source_shortfall_intent_id,
     sourceAuthorityFingerprint: row.source_authority_fingerprint,
+    continuationMode: row.continuation_mode,
   };
   return {
     revision: row.revision,
@@ -239,6 +245,7 @@ export async function appendTelegramFundingBuyReturnInTransaction(
     requestedSpendUsd: string;
     sourceShortfallIntentId: string;
     sourceAuthorityFingerprint: string;
+    continuationMode?: TelegramFundingBuyContinuationMode;
     venueId: string;
     destinationOptionId: string;
     venueBindingOptionId: string;
@@ -321,13 +328,14 @@ export async function appendTelegramFundingBuyReturnInTransaction(
         requested_spend_usd,
         source_shortfall_intent_id,
         source_authority_fingerprint,
+        continuation_mode,
         venue_id,
         destination_option_id,
         venue_binding_option_id,
         request_fingerprint,
         created_at
       ) values (
-        $1, $2, $3, $4, $5, $6, $7, $8::numeric, $9, $10, $11, $12, $13, $14, $15
+        $1, $2, $3, $4, $5, $6, $7, $8::numeric, $9, $10, $11, $12, $13, $14, $15, $16
       )
       returning ${buyReturnColumns}
     `,
@@ -342,6 +350,7 @@ export async function appendTelegramFundingBuyReturnInTransaction(
       input.requestedSpendUsd,
       input.sourceShortfallIntentId,
       input.sourceAuthorityFingerprint,
+      input.continuationMode ?? "bot_submit",
       input.venueId,
       input.destinationOptionId,
       input.venueBindingOptionId,
@@ -540,8 +549,8 @@ export type TelegramFundingBuyContinuationCapability = Readonly<
 >;
 
 export type TelegramFundingBuyContinuationAdapter = Readonly<{
-  id: "polymarket_destination_pusd_v1";
-  tradingVenue: "polymarket";
+  id: "limitless_destination_base_usdc_v1" | "polymarket_destination_pusd_v1";
+  tradingVenue: "limitless" | "polymarket";
 }>;
 
 export function resolveTelegramFundingBuyContinuationAdapter(input: {
@@ -552,16 +561,24 @@ export function resolveTelegramFundingBuyContinuationAdapter(input: {
   }>;
   venueId: string;
 }): TelegramFundingBuyContinuationAdapter | null {
-  if (
-    input.venueId !== "polymarket" ||
-    resolveKnownAccountAssetSymbol(input.destinationAsset) !== "pUSD"
-  ) {
-    return null;
+  const symbol = resolveKnownAccountAssetSymbol(input.destinationAsset);
+  if (input.venueId === "polymarket" && symbol === "pUSD") {
+    return {
+      id: "polymarket_destination_pusd_v1",
+      tradingVenue: "polymarket",
+    };
   }
-  return {
-    id: "polymarket_destination_pusd_v1",
-    tradingVenue: "polymarket",
-  };
+  if (
+    input.venueId === "limitless" &&
+    input.destinationAsset.networkId === "evm:8453" &&
+    symbol === "USDC"
+  ) {
+    return {
+      id: "limitless_destination_base_usdc_v1",
+      tradingVenue: "limitless",
+    };
+  }
+  return null;
 }
 
 export function resolveTelegramFundingBuyContinuationCapability(input: {

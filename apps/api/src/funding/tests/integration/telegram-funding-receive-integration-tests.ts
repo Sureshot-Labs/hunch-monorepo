@@ -808,6 +808,7 @@ try {
       controllerWalletId,
       destinationOptionId: canonicalInput.destinationOptionId,
       venueBindingOptionId: canonicalInput.venueBindingOptionId,
+      venueId: "polymarket",
       now: new Date(now.getTime() + 500),
     },
     {
@@ -817,6 +818,7 @@ try {
       controllerWalletId,
       destinationOptionId: canonicalInput.destinationOptionId,
       venueBindingOptionId: canonicalInput.venueBindingOptionId,
+      venueId: "polymarket",
       now: new Date(now.getTime() + 500),
     },
   ]);

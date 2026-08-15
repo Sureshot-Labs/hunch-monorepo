@@ -1880,9 +1880,43 @@ export async function cancelTelegramFundingSessionContext(
               else telegram_message_id
             end
         where id = $1
+          and not exists (
+            select 1
+            from funding_receive_receipts receipt
+            where receipt.receive_session_id = $4::uuid
+          )
         returning ${sessionColumns}
       `,
-      [input.contextId, input.now, input.telegramMessageId],
+      [
+        input.contextId,
+        input.now,
+        input.telegramMessageId,
+        contextRow.receive_session_id,
+      ],
+    );
+    if (!updated.rows[0]) {
+      throw new Error("telegram_funding_money_boundary_crossed");
+    }
+    await client.query(
+      `
+        update telegram_trade_intents trade_intent
+        set status = 'cancelled',
+            updated_at = $2
+        from telegram_funding_sessions context
+        join telegram_funding_buy_return_revisions buy_return
+          on buy_return.telegram_funding_session_id = context.id
+         and buy_return.revision = context.active_buy_return_revision
+        where context.id = $1
+          and trade_intent.id = buy_return.source_shortfall_intent_id
+          and trade_intent.status in ('draft', 'previewed')
+          and trade_intent.confirmed_at is null
+          and trade_intent.submitted_at is null
+          and trade_intent.order_id is null
+          and trade_intent.execution_id is null
+          and trade_intent.venue_order_id is null
+          and trade_intent.tx_signature is null
+      `,
+      [input.contextId, input.now],
     );
     await client.query(
       `
@@ -1938,9 +1972,9 @@ export async function cancelTelegramFundingSessionContext(
         input.now,
       ],
     );
-    const nextContext = updated.rows[0];
-    return nextContext
-      ? { context: publicSession(nextContext), mutationResponse: null }
-      : null;
+    return {
+      context: publicSession(updated.rows[0]),
+      mutationResponse: null,
+    };
   });
 }

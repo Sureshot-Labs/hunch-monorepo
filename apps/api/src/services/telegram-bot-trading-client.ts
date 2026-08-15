@@ -149,10 +149,20 @@ export type TelegramBotTradingInternalApiClient = {
     telegramUserId: string | number;
   }) => Promise<TelegramFundingClientMessage>;
   cancelFunding: (input: {
+    appBaseUrl: string;
     chatId: string | number;
     contextId: string;
     idempotencyKey: string;
     telegramMessageId: number | null;
+    telegramMiniAppEnabled?: boolean;
+    telegramUserId: string | number;
+  }) => Promise<TelegramFundingClientMessage>;
+  returnFundingToMarket: (input: {
+    appBaseUrl: string;
+    chatId: string | number;
+    contextId: string;
+    telegramMessageId: number | null;
+    telegramMiniAppEnabled?: boolean;
     telegramUserId: string | number;
   }) => Promise<TelegramFundingClientMessage>;
   reviewFundingConversion: (input: {
@@ -527,6 +537,11 @@ export function createTelegramBotTradingInternalApiClient(input: {
     cancelFunding: (body) =>
       post<TelegramFundingClientMessage>(
         "/internal/telegram-bot/funding/cancel",
+        body,
+      ),
+    returnFundingToMarket: (body) =>
+      post<TelegramFundingClientMessage>(
+        "/internal/telegram-bot/funding/back-to-market",
         body,
       ),
     reviewFundingConversion: (body) =>

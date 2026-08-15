@@ -954,7 +954,9 @@ const destination: FundingTarget = {
     Object.keys(RELAY_ROUTE_SPECS).sort(),
     [
       ...Object.keys(relayRehearsalScenarios),
+      "polygon-usdc-to-base-usdc",
       "polygon-usdc-to-polygon-pusd",
+      "polygon-usdce-to-base-usdc",
       "solana-sol-to-base-usdc",
       "solana-sol-to-polygon-pusd",
       "solana-usdc-to-base-usdc",

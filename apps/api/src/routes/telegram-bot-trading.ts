@@ -258,7 +258,20 @@ const internalFundingSelectTargetBodySchema = internalFundingMutationSchema
   .strict();
 
 const internalFundingCancelBodySchema = internalFundingMutationSchema
-  .extend({ contextId: z.string().uuid() })
+  .extend({
+    appBaseUrl: z.string().trim().url(),
+    contextId: z.string().uuid(),
+    telegramMiniAppEnabled: z.boolean().optional(),
+  })
+  .strict();
+
+const internalFundingBackToMarketBodySchema = internalFundingIdentitySchema
+  .extend({
+    appBaseUrl: z.string().trim().url(),
+    contextId: z.string().uuid(),
+    telegramMessageId: z.number().int().positive().nullable(),
+    telegramMiniAppEnabled: z.boolean().optional(),
+  })
   .strict();
 
 const internalFundingReviewBodySchema = internalFundingMutationSchema
@@ -488,7 +501,10 @@ export type TelegramBotTradingRouteDependencies = {
     Partial<
       Pick<
         TelegramFundingService,
-        "confirmConversion" | "openBuyReturn" | "reviewConversion"
+        | "confirmConversion"
+        | "loadMarketReturn"
+        | "openBuyReturn"
+        | "reviewConversion"
       >
     >;
   searchMarkets?: typeof searchTelegramMarkets;
@@ -529,7 +545,10 @@ async function registerTelegramBotTradingRoutes(
     dependencies.fundingService ??
     new TelegramFundingService(routePool, {
       provisionAuthorization: async (input) => {
-        const wrap = await ensureTelegramFundingAuthorization(routePool, input);
+        const wrap =
+          input.venueId === "polymarket"
+            ? await ensureTelegramFundingAuthorization(routePool, input)
+            : null;
         await ensureTelegramRelayEvmFundingAuthorization(routePool, input);
         return wrap;
       },
@@ -560,8 +579,12 @@ async function registerTelegramBotTradingRoutes(
       pool,
     });
   };
-  const createFundingDecoratorForRequest = (request: FastifyRequest) =>
+  const createFundingDecoratorForRequest = (
+    request: FastifyRequest,
+    appBaseUrl?: string,
+  ) =>
     createTelegramFundingBuyContinuationDecorator({
+      appBaseUrl,
       pool: routePool,
       trading: createTradingForRequest(request),
     });
@@ -854,8 +877,94 @@ async function registerTelegramBotTradingRoutes(
       schema: { body: internalFundingCancelBodySchema },
     },
     async (request, reply) => {
+      const marketReturn = fundingService.loadMarketReturn
+        ? await fundingService.loadMarketReturn(request.body).catch(() => null)
+        : null;
       try {
-        return reply.send(await fundingService.cancel(request.body));
+        const cancelled = await fundingService.cancel(request.body);
+        if (!marketReturn) return reply.send(cancelled);
+        return reply.send(
+          await buildTelegramBotTradingMarketMessage({
+            appBaseUrl: request.body.appBaseUrl,
+            chatId: String(request.body.chatId),
+            context: {
+              focusSide: marketReturn.side,
+              origin: "direct",
+              returnCallbackData: "hm:v1:home",
+            },
+            db,
+            marketRef: marketReturn.marketId,
+            telegramMessageId: request.body.telegramMessageId,
+            telegramMiniAppEnabled: request.body.telegramMiniAppEnabled,
+            telegramUserId: request.body.telegramUserId,
+            trading: createTradingForRequest(request),
+            writeTradeInputContext,
+          }),
+        );
+      } catch (error) {
+        if (
+          marketReturn &&
+          error instanceof Error &&
+          error.message === "telegram_funding_money_boundary_crossed"
+        ) {
+          return reply.send(
+            await buildTelegramBotTradingMarketMessage({
+              appBaseUrl: request.body.appBaseUrl,
+              chatId: String(request.body.chatId),
+              context: {
+                focusSide: marketReturn.side,
+                origin: "direct",
+                returnCallbackData: "hm:v1:home",
+              },
+              db,
+              marketRef: marketReturn.marketId,
+              telegramMessageId: request.body.telegramMessageId,
+              telegramMiniAppEnabled: request.body.telegramMiniAppEnabled,
+              telegramUserId: request.body.telegramUserId,
+              trading: createTradingForRequest(request),
+              writeTradeInputContext,
+            }),
+          );
+        }
+        return sendTelegramFundingError(request, reply, error);
+      }
+    },
+  );
+
+  api.post(
+    "/internal/telegram-bot/funding/back-to-market",
+    {
+      preHandler: requireInternal,
+      schema: { body: internalFundingBackToMarketBodySchema },
+    },
+    async (request, reply) => {
+      try {
+        const marketReturn = fundingService.loadMarketReturn
+          ? await fundingService.loadMarketReturn(request.body)
+          : null;
+        if (!marketReturn) {
+          return reply.send(
+            buildTelegramFundingUnavailableMessage({ reason: "unavailable" }),
+          );
+        }
+        return reply.send(
+          await buildTelegramBotTradingMarketMessage({
+            appBaseUrl: request.body.appBaseUrl,
+            chatId: String(request.body.chatId),
+            context: {
+              focusSide: marketReturn.side,
+              origin: "direct",
+              returnCallbackData: "hm:v1:home",
+            },
+            db,
+            marketRef: marketReturn.marketId,
+            telegramMessageId: request.body.telegramMessageId,
+            telegramMiniAppEnabled: request.body.telegramMiniAppEnabled,
+            telegramUserId: request.body.telegramUserId,
+            trading: createTradingForRequest(request),
+            writeTradeInputContext,
+          }),
+        );
       } catch (error) {
         return sendTelegramFundingError(request, reply, error);
       }
@@ -1305,8 +1414,11 @@ async function registerTelegramBotTradingRoutes(
       log: app.log,
       openFundingBuyReturn: (input) =>
         openFundingBuyReturn(
-          { ...input, venue: "polymarket" },
-          createFundingDecoratorForRequest(request as FastifyRequest),
+          input,
+          createFundingDecoratorForRequest(
+            request as FastifyRequest,
+            request.body.appBaseUrl,
+          ),
         ),
       signerInspector,
       telegramMiniAppEnabled: request.body.telegramMiniAppEnabled,
@@ -1326,8 +1438,11 @@ async function registerTelegramBotTradingRoutes(
       log: app.log,
       openFundingBuyReturn: (input) =>
         openFundingBuyReturn(
-          { ...input, venue: "polymarket" },
-          createFundingDecoratorForRequest(request as FastifyRequest),
+          input,
+          createFundingDecoratorForRequest(
+            request as FastifyRequest,
+            request.body.appBaseUrl,
+          ),
         ),
       signerInspector,
       telegramMiniAppEnabled: request.body.telegramMiniAppEnabled,
@@ -1464,8 +1579,11 @@ async function registerTelegramBotTradingRoutes(
         },
         openFundingBuyReturn: (input) =>
           openFundingBuyReturn(
-            { ...input, venue: "polymarket" },
-            createFundingDecoratorForRequest(request as FastifyRequest),
+            input,
+            createFundingDecoratorForRequest(
+              request as FastifyRequest,
+              request.body.appBaseUrl,
+            ),
           ),
         telegramMessageId: request.body.telegramMessageId,
         telegramMiniAppEnabled: request.body.telegramMiniAppEnabled,
@@ -1886,6 +2004,7 @@ export const telegramBotTradingRoutes = createTelegramBotTradingRoutes();
 
 export const telegramBotTradingRouteTestHooks = {
   internalAccountBodySchema,
+  internalFundingBackToMarketBodySchema,
   internalFundingCancelBodySchema,
   internalFundingConfirmBodySchema,
   internalFundingOpenBodySchema,

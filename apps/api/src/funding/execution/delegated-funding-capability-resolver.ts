@@ -125,12 +125,38 @@ export async function resolveTelegramRelayEvmCapability(
     expectedAuthorizationId?: string;
     expectedAuthorizationFingerprint?: string;
     expectedFundingPolicyRevision?: string;
+    profileId?: string;
+    routeId?: string;
+    sourceAsset?: Readonly<{
+      networkId: string;
+      assetId: string;
+      decimals: number;
+    }>;
+    destinationAsset?: Readonly<{
+      networkId: string;
+      assetId: string;
+      decimals: number;
+    }>;
+    venueId?: string;
     now?: Date;
     lock?: boolean;
   }>,
 ): Promise<ResolvedTelegramRelayEvmCapability> {
   const configuration =
     input.configuration ?? loadRelayEvmExecutionConfiguration();
+  const profileId = input.profileId ?? TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID;
+  const routeId = input.routeId ?? "base-usdc-to-polygon-pusd";
+  const venueId = input.venueId ?? "polymarket";
+  const sourceAsset = input.sourceAsset ?? {
+    networkId: "evm:8453",
+    assetId: BASE_USDC,
+    decimals: 6,
+  };
+  const destinationAsset = input.destinationAsset ?? {
+    networkId: "evm:137",
+    assetId: POLYGON_PUSD,
+    decimals: 6,
+  };
   if (input.lock) await lockFundingPolicyForTransaction(db);
   const policy = await resolveFundingControlPlaneSnapshot(db);
   const controlDecision: DelegatedFundingPreBroadcastDecision =
@@ -146,15 +172,20 @@ export async function resolveTelegramRelayEvmCapability(
               (route) =>
                 route.enabled &&
                 route.providerId === "relay" &&
-                route.routeId === "base-usdc-to-polygon-pusd",
+                route.routeId === routeId &&
+                route.sourceAsset.networkId === sourceAsset.networkId &&
+                route.sourceAsset.assetId.toLowerCase() ===
+                  sourceAsset.assetId.toLowerCase() &&
+                route.destinationAsset.networkId ===
+                  destinationAsset.networkId &&
+                route.destinationAsset.assetId.toLowerCase() ===
+                  destinationAsset.assetId.toLowerCase(),
             ).length !== 1 ||
             !policy.runtime.venues.some(
               (venue) =>
-                venue.venueId === "polymarket" &&
+                venue.venueId === venueId &&
                 venue.delegatedExecutionEnabled &&
-                venue.delegatedPolicyIds.includes(
-                  TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
-                ),
+                venue.delegatedPolicyIds.includes(profileId),
             )
           ? { kind: "hard_invalid", reasonCode: "delegated_route_changed" }
           : { kind: "allowed" };
@@ -165,14 +196,11 @@ export async function resolveTelegramRelayEvmCapability(
     destinationOptionId: input.destinationOptionId,
     venueBindingOptionId: input.venueBindingOptionId,
     configuration,
-    profileId: TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
+    profileId,
     securityClass: "routed_value_movement",
-    sourceAsset: { networkId: "evm:8453", assetId: BASE_USDC, decimals: 6 },
-    destinationAsset: {
-      networkId: "evm:137",
-      assetId: POLYGON_PUSD,
-      decimals: 6,
-    },
+    sourceAsset,
+    destinationAsset,
+    venueId: venueId as "limitless" | "polymarket",
     expectedAuthorizationId: input.expectedAuthorizationId,
     expectedAuthorizationFingerprint: input.expectedAuthorizationFingerprint,
     now: input.now,
@@ -188,10 +216,7 @@ export async function resolveTelegramRelayEvmCapability(
     authority.kind === "allowed" &&
     authority.authorization.maxSourceRaw === configuration.maxSourceRaw &&
     policy.runtime.venues.some((venue) => {
-      if (
-        venue.venueId !== "polymarket" ||
-        venue.delegatedDailyCapUsd == null
-      ) {
+      if (venue.venueId !== venueId || venue.delegatedDailyCapUsd == null) {
         return false;
       }
       return relayEvmUsdCapMatchesRaw(

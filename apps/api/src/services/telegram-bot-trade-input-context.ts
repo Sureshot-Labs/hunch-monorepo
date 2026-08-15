@@ -17,6 +17,7 @@ export type TelegramBotTradeInputContext = Readonly<{
   chatId: string;
   controlledPositionId: string | null;
   createdAt: string;
+  deliveryMode?: "app_handoff" | "bot_submit";
   eventId: string | null;
   expiresAt: string;
   funderAddress: string | null;
@@ -25,7 +26,7 @@ export type TelegramBotTradeInputContext = Readonly<{
   messageScope: TelegramBotTradeInputMessageScope;
   side: "NO" | "YES";
   telegramUserId: string;
-  venue: "polymarket";
+  venue: "limitless" | "polymarket";
   version: 2;
 }>;
 
@@ -136,7 +137,11 @@ export function isTelegramBotTradeInputContext(
     context.version === 2 &&
     EXACT_UUID_RE.test(context.id ?? "") &&
     (context.action === "buy" || context.action === "sell") &&
-    context.venue === "polymarket" &&
+    (context.venue === "polymarket" || context.venue === "limitless") &&
+    (context.deliveryMode == null ||
+      context.deliveryMode === "bot_submit" ||
+      context.deliveryMode === "app_handoff") &&
+    (context.action !== "sell" || context.venue === "polymarket") &&
     (context.side === "YES" || context.side === "NO") &&
     typeof context.marketId === "string" &&
     context.marketId.length > 0 &&

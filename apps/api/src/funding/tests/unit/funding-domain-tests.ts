@@ -55,6 +55,7 @@ import {
   validateFundingIntentPolicy,
   type FundingIntentPolicy,
 } from "../../policies/funding-policy-v2.js";
+import { RELAY_EVM_FUNDING_PROFILE_SPECS } from "../../execution/relay-evm-profile-specs.js";
 
 type DeepMutable<T> = T extends readonly (infer Item)[]
   ? DeepMutable<Item>[]
@@ -988,7 +989,7 @@ await test("compiles full V2 intent to the reviewed runtime catalog", () => {
       assets: 6,
       locations: 8,
       venues: 2,
-      routes: 7,
+      routes: 9,
       privy: 2,
       preparation: 4,
       positionActions: 0,
@@ -1012,6 +1013,28 @@ await test("compiles full V2 intent to the reviewed runtime catalog", () => {
       (route) => route.routeId === "polygon-usdc-to-polygon-pusd",
     ),
   );
+  const delegated = compileFundingIntentPolicy({
+    ...FULL_POLICY,
+    receive: {
+      ...FULL_POLICY.receive,
+      delegatedRelayEvmDailyCapUsd: "20",
+    },
+  });
+  for (const venue of delegated.venues) {
+    const expected = Object.values(RELAY_EVM_FUNDING_PROFILE_SPECS)
+      .filter((profile) =>
+        profile.venueIds.some((candidate) => candidate === venue.venueId),
+      )
+      .map((profile) => profile.profileId)
+      .sort();
+    assert.deepEqual(
+      venue.delegatedPolicyIds
+        .filter((profileId) => profileId.startsWith("telegram_relay_"))
+        .sort(),
+      expected,
+    );
+    assert.equal(venue.delegatedDailyCapUsd, "20");
+  }
 });
 
 await test("replaces patch arrays and keeps omitted compact fields", () => {

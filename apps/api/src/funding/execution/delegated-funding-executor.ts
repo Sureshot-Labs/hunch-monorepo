@@ -80,6 +80,7 @@ export type DelegatedFundingExecutionClaim = Readonly<{
   telegramAccountId: string | null;
   telegramUserId: string;
   userId: string;
+  venueId?: string;
   venueBindingOptionId: string;
   walletAddress: string;
 }>;

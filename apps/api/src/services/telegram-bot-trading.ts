@@ -140,6 +140,32 @@ export type TelegramBotTradingVenue = "kalshi" | "limitless" | "polymarket";
 export type TelegramBotTradingAction = "buy" | "sell" | "redeem";
 export type TelegramBotTradingSide = "NO" | "YES";
 export type TelegramBotTradingWalletChain = "ethereum" | "solana";
+export type TelegramBuyDeliveryMode =
+  | "app_handoff"
+  | "bot_submit"
+  | "direct_deposit_only";
+
+export function resolveTelegramBuyDeliveryMode(
+  input: Readonly<{
+    commonBuySurfaceReady: boolean;
+    telegramMiniAppEnabled: boolean;
+    venue: TelegramBotTradingVenue;
+    venueAllowedForBotSubmit: boolean;
+  }>,
+): TelegramBuyDeliveryMode {
+  if (!input.commonBuySurfaceReady) return "direct_deposit_only";
+  if (input.venue === "polymarket" && input.venueAllowedForBotSubmit) {
+    return "bot_submit";
+  }
+  if (input.venue === "limitless" && input.telegramMiniAppEnabled) {
+    return "app_handoff";
+  }
+  return "direct_deposit_only";
+}
+type StoredTelegramBuyDeliveryMode = Exclude<
+  TelegramBuyDeliveryMode,
+  "direct_deposit_only"
+>;
 
 const EXISTING_TRADE_RESOLVING_MESSAGE =
   "Existing trade is still resolving. The bot is checking the venue automatically; no action is needed. Check /trade_status before retrying.";
@@ -319,6 +345,7 @@ export type TelegramFundingBuyReturnOpener = (
   input: Readonly<{
     authorizationId: string;
     chatId: string;
+    continuationMode: StoredTelegramBuyDeliveryMode;
     eventId: string | null;
     idempotencyKey: string;
     marketId: string;
@@ -328,6 +355,7 @@ export type TelegramFundingBuyReturnOpener = (
     sourceIntentId: string;
     telegramMessageId: number | null;
     telegramUserId: string;
+    venue: "limitless" | "polymarket";
   }>,
 ) => Promise<TelegramBotTradingMessage | null>;
 
@@ -440,6 +468,7 @@ type TelegramTradeIntentRow = {
   user_id: string | null;
   authorization_id: string | null;
   chat_id: string | null;
+  delivery_mode: StoredTelegramBuyDeliveryMode;
   telegram_message_id: string | null;
   action: TelegramBotTradingAction;
   venue: TelegramBotTradingVenue;
@@ -728,6 +757,7 @@ const TERMINAL_INTENT_STATUSES = new Set([
   "filled",
   "reconcile_required",
   "submitted",
+  "external_handoff",
 ]);
 const PENDING_INTENT_STATUSES = ["draft", "previewed", "confirming"];
 const SAFE_VENUES: TelegramBotTradingVenue[] = [
@@ -2284,6 +2314,107 @@ function buildTelegramTradeConfirmationMessage(input: {
   };
 }
 
+function buildTelegramTradeAppHandoffMessage(input: {
+  appBaseUrl: string;
+  intent: TelegramTradeIntentRow;
+  market: TelegramBotMarketRow;
+  policy: SignalBotPolicy;
+  quote: TradeQuote | TelegramTradeQuotePreview;
+  telegramMiniAppEnabled?: boolean;
+}): TelegramBotTradingMessage {
+  const { amountUsd } = readTelegramTradeIntentAmount(input.intent);
+  const side = input.intent.side ?? "YES";
+  const startParam = input.market.event_id
+    ? buildSignalBotBuyStartParam({
+        amountUsd,
+        eventId: input.market.event_id,
+        marketId: input.market.id,
+        side,
+      })
+    : null;
+  const buyButton = buildHunchMiniAppWebButton({
+    appBaseUrl: input.appBaseUrl,
+    enabled: input.telegramMiniAppEnabled === true,
+    path: openMarketUrl(input.appBaseUrl, input.market),
+    startParam,
+    text: "Buy in Hunch",
+  });
+  const quoteExpiresAt =
+    input.quote.expiresAt instanceof Date
+      ? input.quote.expiresAt
+      : typeof input.quote.expiresAt === "string"
+        ? new Date(input.quote.expiresAt)
+        : null;
+  return {
+    parse_mode: "MarkdownV2",
+    reply_markup: {
+      inline_keyboard: [
+        ...(buyButton ? [[buyButton]] : []),
+        [
+          {
+            callback_data: `${TELEGRAM_BOT_TRADING_CALLBACK_PREFIX}:change_amount:${input.intent.id}`,
+            text: "Change amount",
+          },
+          {
+            callback_data: `${TELEGRAM_BOT_TRADING_CALLBACK_PREFIX}:cancel:${input.intent.id}`,
+            text: "❌ Cancel",
+          },
+        ],
+      ],
+    },
+    text: joinTelegramMarkdownV2Lines(
+      [
+        `🟢 ${formatTelegramBoldMarkdownV2("Review buy")}`,
+        "",
+        formatTelegramVenueFieldMarkdownV2(input.intent.venue),
+        `🎯 ${formatTelegramFieldMarkdownV2("Market", input.intent.market_title)}`,
+        `↔️ ${formatTelegramFieldMarkdownV2("Side", side)}`,
+        "",
+        `📊 ${formatTelegramFieldMarkdownV2(
+          "Current ask",
+          formatTelegramQuotePrice(input.quote.currentPrice ?? null),
+        )}`,
+        `📈 ${formatTelegramFieldMarkdownV2(
+          "Maximum execution price",
+          formatTelegramQuotePrice(input.quote.price),
+        )}`,
+        formatTelegramUsdcLineMarkdownV2(
+          `Nominal order: ${formatUsd(amountUsd ?? 0)}`,
+        ),
+        input.quote.minReceiveShares == null
+          ? null
+          : `📦 ${formatTelegramFieldMarkdownV2(
+              "Minimum estimated shares",
+              input.quote.minReceiveShares.toFixed(2),
+            )}`,
+        formatTelegramUsdcLineMarkdownV2(
+          `Maximum total spend: ${formatUsd(
+            input.quote.maxSpendUsd ?? amountUsd ?? 0,
+          )}`,
+        ),
+        `🎚️ ${formatTelegramFieldMarkdownV2(
+          "Price tolerance",
+          `${input.policy.maxSlippageBps / 100}%`,
+        )}`,
+        formatQuoteTtl(quoteExpiresAt)
+          ? `⏱️ ${formatTelegramFieldMarkdownV2(
+              "Quote validity",
+              `About ${formatQuoteTtl(quoteExpiresAt)}`,
+            )}`
+          : null,
+        "",
+        formatTelegramCalloutMarkdownV2({
+          bodyMarkdownV2: escapeMarkdown(
+            "The bot will not submit this order. Hunch opens with this market, side, and amount selected; review the fresh app quote and press Buy there.",
+          ),
+          icon: "ℹ️",
+          title: "Finish in Hunch",
+        }),
+      ].filter((line): line is string => line != null),
+    ),
+  };
+}
+
 function sideLabel(market: TelegramBotMarketRow, side: TelegramBotTradingSide) {
   return outcomeLabelOrSide(market.outcomes, side);
 }
@@ -3582,6 +3713,7 @@ async function insertBuyIntent(input: {
   authority: TelegramBotTradeAuthorityBinding;
   chatId: string;
   db: DbQuery;
+  deliveryMode: StoredTelegramBuyDeliveryMode;
   market: TelegramBotMarketRow;
   policy: SignalBotPolicy;
   side: TelegramBotTradingSide;
@@ -3598,6 +3730,7 @@ async function insertBuyIntent(input: {
        authorization_id,
        chat_id,
        telegram_message_id,
+       delivery_mode,
        action,
        venue,
        market_id,
@@ -3611,8 +3744,8 @@ async function insertBuyIntent(input: {
        expires_at,
        idempotency_key
      )
-     VALUES ($1, $2, $3, $4, $5, $6, 'buy', $7, $8, $9, $10, $11,
-       'draft', $12::jsonb, $13::jsonb, $14::jsonb, $15, $16)`,
+     VALUES ($1, $2, $3, $4, $5, $6, $7, 'buy', $8, $9, $10, $11, $12,
+       'draft', $13::jsonb, $14::jsonb, $15::jsonb, $16, $17)`,
     [
       id,
       input.telegramUserId,
@@ -3620,6 +3753,7 @@ async function insertBuyIntent(input: {
       input.authority.authorizationId,
       input.chatId,
       input.telegramMessageId ?? null,
+      input.deliveryMode,
       input.market.venue,
       input.market.id,
       input.market.event_id,
@@ -4071,6 +4205,7 @@ async function transitionIntentToConfirming(input: {
   db: DbQuery;
   intent: TelegramTradeIntentRow;
 }): Promise<"authority_changed" | "blocked" | "confirmed" | "overtaken"> {
+  if (input.intent.delivery_mode !== "bot_submit") return "overtaken";
   return withLockedTelegramIntentAuthority({
     callback: async (client, currentAuthorization) => {
       if (!currentAuthorization) {
@@ -4141,6 +4276,7 @@ async function transitionIntentToExecuting(input: {
   db: DbQuery;
   intent: TelegramTradeIntentRow;
 }): Promise<"authority_changed" | "executing" | "overtaken"> {
+  if (input.intent.delivery_mode !== "bot_submit") return "overtaken";
   return withLockedTelegramIntentAuthority({
     callback: async (client, currentAuthorization) => {
       if (!currentAuthorization) {
@@ -4169,6 +4305,7 @@ async function markTelegramIntentSubmitBoundary(input: {
   intent: TelegramTradeIntentRow;
   result: Record<string, unknown>;
 }): Promise<boolean> {
+  if (input.intent.delivery_mode !== "bot_submit") return false;
   return withLockedTelegramIntentAuthority({
     callback: async (client, currentAuthorization) => {
       if (!currentAuthorization) return false;
@@ -4177,6 +4314,7 @@ async function markTelegramIntentSubmitBoundary(input: {
       });
       if (
         !currentIntent ||
+        currentIntent.delivery_mode !== "bot_submit" ||
         currentIntent.status !== "executing" ||
         !intentMatchesTelegramTradeAuthority({
           authorization: currentAuthorization,
@@ -4360,8 +4498,16 @@ export async function buildTelegramBotTradingMarketMessage(input: {
     telegramUserId,
     market.venue,
   );
+  const handoffAuthorization =
+    market.venue === "limitless"
+      ? await loadEnabledEvmAuthorization(input.db, telegramUserId)
+      : null;
+  const buyAuthorization = handoffAuthorization ?? authorization;
   const authorityBinding = authorization
     ? buildTelegramTradeAuthorityBinding(authorization)
+    : null;
+  const buyAuthorityBinding = buyAuthorization
+    ? buildTelegramTradeAuthorityBinding(buyAuthorization)
     : null;
   const marketOrderable = isMarketOrderable(market);
   const policyVenueAllowed = policy.tradingVenues.includes(market.venue);
@@ -4380,7 +4526,7 @@ export async function buildTelegramBotTradingMarketMessage(input: {
     ]);
   const maxAmountUsd = effectiveMaxTradeAmountUsd(
     policy,
-    authorization?.max_amount_usd ?? status.maxAmountUsd,
+    buyAuthorization?.max_amount_usd ?? status.maxAmountUsd,
   );
   const focusedSide = input.context?.focusSide ?? null;
   const focusedPositionControlled = await (async () => {
@@ -4424,7 +4570,7 @@ export async function buildTelegramBotTradingMarketMessage(input: {
   const [buyReadiness, sellReadiness] = await Promise.all([
     resolveTelegramTradingReadiness({
       action: "BUY",
-      authorization,
+      authorization: buyAuthorization,
       market,
       status,
       trading: input.trading,
@@ -4446,7 +4592,7 @@ export async function buildTelegramBotTradingMarketMessage(input: {
     maxAmountUsd,
   );
   const minimumPresetAmountUsd = nominalPresetAmountsUsd[0] ?? null;
-  const canBuildBuyAuthority =
+  const commonBuySurfaceReady =
     !input.isAdminTest &&
     !input.publicBrowseOnly &&
     !unresolvedIntent &&
@@ -4455,20 +4601,26 @@ export async function buildTelegramBotTradingMarketMessage(input: {
     policy.tradingEnabled &&
     policy.tradingActions.includes("buy") &&
     policyVenueAllowed &&
-    authorizationVenueAllowed &&
     marketOrderable &&
-    authorization?.enabled === true &&
-    Boolean(authorization.privy_wallet_id) &&
-    Boolean(authorityBinding) &&
+    buyAuthorization?.enabled === true &&
+    Boolean(buyAuthorization.privy_wallet_id) &&
+    Boolean(buyAuthorityBinding) &&
     canPreviewBuyForReadiness(buyReadiness) &&
     Boolean(input.trading);
+  const buyDeliveryMode = resolveTelegramBuyDeliveryMode({
+    commonBuySurfaceReady,
+    telegramMiniAppEnabled: input.telegramMiniAppEnabled === true,
+    venue: market.venue,
+    venueAllowedForBotSubmit: authorizationVenueAllowed,
+  });
+  const canBuildBuyAuthority = buyDeliveryMode !== "direct_deposit_only";
   const canBuildBuyOptions =
     canBuildBuyAuthority && nominalPresetAmountsUsd.length > 0;
   const canBuildCustomBuy =
     canBuildBuyAuthority && policy.customTradeInputEnabled;
   const buyOptions =
     canBuildBuyOptions &&
-    authorization &&
+    buyAuthorization &&
     input.trading &&
     nominalPresetAmountsUsd.length > 0
       ? (
@@ -4478,7 +4630,7 @@ export async function buildTelegramBotTradingMarketMessage(input: {
                 .filter((side) => !focusedSide || side === focusedSide)
                 .map((side) =>
                   resolveTelegramExecutableBuyOption({
-                    authorization,
+                    authorization: buyAuthorization,
                     market,
                     maxAmountUsd,
                     maxSlippageBps: policy.maxSlippageBps,
@@ -4665,6 +4817,11 @@ export async function buildTelegramBotTradingMarketMessage(input: {
       "",
       `Direct bot trading is not enabled for ${formatTelegramVenueLabel(market.venue)}. ${hunchFallbackCopy}`,
     );
+  } else if (buyDeliveryMode === "app_handoff") {
+    lines.push(
+      "",
+      "Build the quote and fund the shortfall here. The final Buy opens in Hunch with this market, side, and amount selected.",
+    );
   } else if (!authorizationVenueAllowed) {
     lines.push(
       "",
@@ -4735,8 +4892,11 @@ export async function buildTelegramBotTradingMarketMessage(input: {
   ): Promise<TelegramBotTradingButton | null> => {
     if (
       !input.writeTradeInputContext ||
-      market.venue !== "polymarket" ||
-      !authorityBinding
+      (action === "sell" && market.venue !== "polymarket") ||
+      (action === "buy" &&
+        market.venue !== "polymarket" &&
+        market.venue !== "limitless") ||
+      !(action === "buy" ? buyAuthorityBinding : authorityBinding)
     ) {
       return null;
     }
@@ -4748,7 +4908,10 @@ export async function buildTelegramBotTradingMarketMessage(input: {
     const written = await input
       .writeTradeInputContext({
         action,
-        authority: authorityBinding,
+        authority:
+          action === "buy"
+            ? (buyAuthorityBinding as TelegramBotTradeAuthorityBinding)
+            : (authorityBinding as TelegramBotTradeAuthorityBinding),
         chatId: String(input.chatId),
         controlledPositionId: input.context?.focusPositionId ?? null,
         createdAt: createdAt.toISOString(),
@@ -4756,7 +4919,9 @@ export async function buildTelegramBotTradingMarketMessage(input: {
         expiresAt: expiresAt.toISOString(),
         funderAddress:
           input.context?.focusPositionWalletAddress ??
-          authorization?.wallet_address ??
+          (action === "buy"
+            ? buyAuthorization?.wallet_address
+            : authorization?.wallet_address) ??
           null,
         id,
         marketId: market.id,
@@ -4769,7 +4934,11 @@ export async function buildTelegramBotTradingMarketMessage(input: {
               },
         side,
         telegramUserId,
-        venue: "polymarket",
+        deliveryMode:
+          action === "buy"
+            ? (buyDeliveryMode as StoredTelegramBuyDeliveryMode)
+            : "bot_submit",
+        venue: market.venue === "limitless" ? "limitless" : "polymarket",
         version: 2,
       })
       .catch(() => false);
@@ -4794,9 +4963,10 @@ export async function buildTelegramBotTradingMarketMessage(input: {
     )) {
       const intentId = await insertBuyIntent({
         amountUsd: option.amountUsd,
-        authority: authorityBinding as TelegramBotTradeAuthorityBinding,
+        authority: buyAuthorityBinding as TelegramBotTradeAuthorityBinding,
         chatId: String(input.chatId),
         db: input.db,
+        deliveryMode: buyDeliveryMode as StoredTelegramBuyDeliveryMode,
         market,
         policy,
         side: option.side,
@@ -5036,6 +5206,7 @@ async function loadIntentBy(
        i.user_id,
        i.authorization_id,
        i.chat_id,
+       i.delivery_mode,
        i.telegram_message_id::text AS telegram_message_id,
        i.action,
        i.venue,
@@ -5065,7 +5236,14 @@ async function loadIntentBy(
      ${options.lock ? "FOR UPDATE OF i" : ""}`,
     [value],
   );
-  return result.rows[0] ?? null;
+  const row = result.rows[0];
+  return row
+    ? {
+        ...row,
+        delivery_mode:
+          row.delivery_mode === "app_handoff" ? "app_handoff" : "bot_submit",
+      }
+    : null;
 }
 
 async function loadIntent(
@@ -5609,7 +5787,61 @@ async function loadEnabledAuthorization(
   return result.rows[0] ?? null;
 }
 
+async function loadEnabledEvmAuthorization(
+  db: DbQuery,
+  telegramUserId: string,
+  options: { lock?: boolean } = {},
+): Promise<TelegramBotTradingAuthorizationRow | null> {
+  const result = await db.query<TelegramBotTradingAuthorizationRow>(
+    `SELECT
+       funding_auth.id,
+       telegram_account.id::text AS telegram_account_link_id,
+       funding_auth.user_id,
+       funding_auth.telegram_user_id,
+       funding_auth.privy_user_id,
+       funding_auth.wallet_address,
+       funding_auth.wallet_chain,
+       funding_auth.privy_wallet_id,
+       funding_auth.enabled,
+       funding_auth.enabled_venues,
+       funding_auth.limits,
+       funding_auth.max_amount_usd
+     FROM telegram_bot_trading_authorizations funding_auth
+     JOIN users app_user
+       ON app_user.id = funding_auth.user_id
+      AND coalesce(app_user.is_active, true) = true
+     JOIN telegram_bot_trading_preferences trading_preference
+       ON trading_preference.user_id = funding_auth.user_id
+      AND trading_preference.desired_enabled = true
+     JOIN user_telegram_accounts telegram_account
+       ON telegram_account.telegram_user_id = funding_auth.telegram_user_id
+      AND telegram_account.user_id = funding_auth.user_id
+     JOIN user_wallets verified_wallet
+       ON verified_wallet.user_id = funding_auth.user_id
+      AND verified_wallet.wallet_type = funding_auth.wallet_chain
+      AND verified_wallet.is_verified = true
+      AND funding_account_identifier_equal(
+            funding_auth.wallet_chain,
+            verified_wallet.wallet_address,
+            funding_auth.wallet_address
+          )
+     WHERE funding_auth.telegram_user_id = $1
+       AND funding_auth.enabled = true
+       AND funding_auth.wallet_chain = 'ethereum'
+     ORDER BY funding_auth.updated_at DESC, funding_auth.id
+     LIMIT 1
+     ${
+       options.lock
+         ? "FOR UPDATE OF funding_auth, app_user, trading_preference, telegram_account, verified_wallet"
+         : ""
+     }`,
+    [telegramUserId],
+  );
+  return result.rows[0] ?? null;
+}
+
 export function createTelegramFundingBuyContinuationDecorator(input: {
+  appBaseUrl?: string;
   pool: Pool;
   trading: ApiBotTradingExecutor;
 }): TelegramFundingProgressDecorator {
@@ -5618,18 +5850,26 @@ export function createTelegramFundingBuyContinuationDecorator(input: {
       input.pool,
       presentation.context.id,
     );
+    const continuationVenue =
+      buyReturn?.venueId === "polymarket" || buyReturn?.venueId === "limitless"
+        ? buyReturn.venueId
+        : null;
+    const continuationAdapter = buyReturn
+      ? resolveTelegramFundingBuyContinuationAdapter({
+          destinationAsset: presentation.session.destinationAsset,
+          venueId: presentation.session.venueId,
+        })
+      : null;
     if (
       !buyReturn ||
-      buyReturn.venueId !== "polymarket" ||
-      presentation.session.venueId !== "polymarket" ||
+      !continuationVenue ||
+      presentation.session.venueId !== continuationVenue ||
       buyReturn.destinationOptionId !==
         presentation.session.destinationOptionId ||
       buyReturn.venueBindingOptionId !==
         presentation.session.venueBindingOptionId ||
-      !resolveTelegramFundingBuyContinuationAdapter({
-        destinationAsset: presentation.session.destinationAsset,
-        venueId: presentation.session.venueId,
-      }) ||
+      !continuationAdapter ||
+      continuationAdapter.tradingVenue !== continuationVenue ||
       !presentation.context.telegramAccountId ||
       buyReturn.telegramAccountIdSnapshot !==
         presentation.context.telegramAccountId
@@ -5646,11 +5886,16 @@ export function createTelegramFundingBuyContinuationDecorator(input: {
     }
     const [policyState, authorization, market] = await Promise.all([
       resolveSignalBotTradingPolicyStateFromDb(input.pool),
-      loadEnabledAuthorization(
-        input.pool,
-        presentation.context.telegramUserId,
-        "polymarket",
-      ),
+      buyReturn.continuationMode === "app_handoff"
+        ? loadEnabledEvmAuthorization(
+            input.pool,
+            presentation.context.telegramUserId,
+          )
+        : loadEnabledAuthorization(
+            input.pool,
+            presentation.context.telegramUserId,
+            continuationVenue,
+          ),
       loadMarketById(input.pool, buyReturn.marketId),
     ]);
     const policy = policyState.policy;
@@ -5661,7 +5906,7 @@ export function createTelegramFundingBuyContinuationDecorator(input: {
       !policy.buyContinuationEnabled ||
       !policy.tradingEnabled ||
       !policy.tradingActions.includes("buy") ||
-      !policy.tradingVenues.includes("polymarket") ||
+      !policy.tradingVenues.includes(continuationVenue) ||
       !authorization ||
       !authority ||
       telegramBotTradeAuthorityFingerprint(authority) !==
@@ -5670,16 +5915,19 @@ export function createTelegramFundingBuyContinuationDecorator(input: {
         presentation.context.telegramAccountId ||
       !authorization.privy_wallet_id ||
       !market ||
-      market.venue !== "polymarket" ||
+      market.venue !== continuationVenue ||
       !isMarketOrderable(market) ||
-      !isVenueAllowed(
-        "polymarket",
-        policy,
-        filterVenuesForWalletChain(
-          normalizeVenues(authorization.enabled_venues),
-          authorization.wallet_chain,
-        ),
-      )
+      (buyReturn.continuationMode === "bot_submit" &&
+        !isVenueAllowed(
+          continuationVenue,
+          policy,
+          filterVenuesForWalletChain(
+            normalizeVenues(authorization.enabled_venues),
+            authorization.wallet_chain,
+          ),
+        )) ||
+      (buyReturn.continuationMode === "app_handoff" &&
+        continuationVenue !== "limitless")
     ) {
       return presentation.message;
     }
@@ -5713,7 +5961,7 @@ export function createTelegramFundingBuyContinuationDecorator(input: {
           authorization,
           market,
           trading: input.trading,
-          venue: "polymarket",
+          venue: continuationVenue,
         }),
       ]);
     } catch {
@@ -5731,6 +5979,9 @@ export function createTelegramFundingBuyContinuationDecorator(input: {
       ? new Date(quote.expiresAt).getTime()
       : Number.NaN;
     const progressState = presentation.progress?.state ?? null;
+    const destinationSymbol =
+      continuationVenue === "polymarket" ? "pUSD" : "USDC";
+    const continuationVenueLabel = formatTelegramVenueLabel(continuationVenue);
     const fundingSurfaceMessage = presentation.message;
     const withFundingCallout = (callout: {
       bodyMarkdownV2: string | string[];
@@ -5796,7 +6047,7 @@ export function createTelegramFundingBuyContinuationDecorator(input: {
             `Maximum spend now: ${formatUsd(requiredUsd ?? requestedSpendUsd)}`,
           ),
           formatTelegramUsdcLineMarkdownV2(
-            `Available at Polymarket: ${formatUsd(fundingRequirement.availableUsd)}`,
+            `Available at ${continuationVenueLabel}: ${formatUsd(fundingRequirement.availableUsd)}`,
           ),
           formatTelegramUsdcLineMarkdownV2(
             `Send at least: ${fundingRequirement.sendAtLeastPusd.toLocaleString(
@@ -5805,10 +6056,12 @@ export function createTelegramFundingBuyContinuationDecorator(input: {
                 maximumFractionDigits: 2,
                 minimumFractionDigits: 2,
               },
-            )} pUSD`,
+            )} ${destinationSymbol}`,
           ),
           escapeMarkdown(
-            "Then tap Refresh. The Buy still requires Review and Confirm.",
+            buyReturn.continuationMode === "bot_submit"
+              ? "Then tap Refresh. The Buy still requires Review and Confirm."
+              : "Then tap Refresh. The final Buy opens in Hunch for review.",
           ),
         ],
         icon: "💰",
@@ -5829,10 +6082,12 @@ export function createTelegramFundingBuyContinuationDecorator(input: {
                 ),
               ]),
           formatTelegramUsdcLineMarkdownV2(
-            `Available at Polymarket: ${formatUsd(fundingRequirement.availableUsd)}`,
+            `Available at ${continuationVenueLabel}: ${formatUsd(fundingRequirement.availableUsd)}`,
           ),
           escapeMarkdown(
-            "No additional pUSD is required now. Tap Refresh to continue. The Buy still requires Review and Confirm.",
+            buyReturn.continuationMode === "bot_submit"
+              ? `No additional ${destinationSymbol} is required now. Tap Refresh to continue. The Buy still requires Review and Confirm.`
+              : `No additional ${destinationSymbol} is required now. Tap Refresh to continue in Hunch.`,
           ),
         ],
         icon: "💰",
@@ -5846,6 +6101,137 @@ export function createTelegramFundingBuyContinuationDecorator(input: {
       ))
     ) {
       return presentation.message;
+    }
+    if (buyReturn.continuationMode === "app_handoff") {
+      if (
+        !quote ||
+        !readiness ||
+        !liveQuoteUsable ||
+        fundingRequirement?.state !== "ready"
+      ) {
+        return withFundingCallout({
+          bodyMarkdownV2: escapeMarkdown(
+            `Funding is ready, but the ${continuationVenueLabel} balance or quote is still syncing. Tap Refresh shortly.`,
+          ),
+          icon: "⏳",
+          title: "Preparing app review",
+        });
+      }
+      const handoffIdempotencyKey = [
+        "telegram-funding-handoff",
+        presentation.context.id,
+        buyReturn.revision,
+        presentation.context.progressRevision,
+      ].join(":");
+      const handoffIntentId = crypto.randomUUID();
+      await input.pool.query(
+        `insert into telegram_trade_intents (
+           id,
+           telegram_user_id,
+           user_id,
+           authorization_id,
+           chat_id,
+           telegram_message_id,
+           delivery_mode,
+           action,
+           venue,
+           market_id,
+           event_id,
+           side,
+           amount_usd,
+           status,
+           quote_snapshot,
+           policy_snapshot,
+           result,
+           expires_at,
+           idempotency_key
+         ) values (
+           $1, $2, $3, $4, $5, $6, 'app_handoff', 'buy', $7, $8, $9, $10,
+           $11::numeric, 'draft', '{}'::jsonb, $12::jsonb, $13::jsonb, $14, $15
+         )
+         on conflict (idempotency_key) do nothing`,
+        [
+          handoffIntentId,
+          presentation.context.telegramUserId,
+          authorization.user_id,
+          authorization.id,
+          presentation.context.chatId,
+          presentation.context.telegramMessageId,
+          continuationVenue,
+          buyReturn.marketId,
+          buyReturn.eventId,
+          buyReturn.side,
+          buyReturn.requestedSpendUsd,
+          JSON.stringify(buildPolicySnapshot(policy)),
+          JSON.stringify({
+            ...buildIntentAuthorityResult(authority),
+            telegramFundingHandoff: {
+              fundingContextId: presentation.context.id,
+              policyRevision: policyState.policyRevision,
+              returnRevision: buyReturn.revision,
+              version: 1,
+            },
+          }),
+          new Date(presentation.now.getTime() + policy.intentTtlSec * 1_000),
+          handoffIdempotencyKey,
+        ],
+      );
+      const handoffIntent = await loadIntentByIdempotencyKey(
+        input.pool,
+        handoffIdempotencyKey,
+      );
+      if (!handoffIntent) return presentation.message;
+      let handoffMessage: TelegramBotTradingMessage | null = null;
+      if (handoffIntent.status === "external_handoff") {
+        const storedQuote = readTelegramTradeQuotePreview(
+          handoffIntent.quote_snapshot,
+        );
+        if (storedQuote) {
+          handoffMessage = buildTelegramTradeAppHandoffMessage({
+            appBaseUrl: normalizeBaseUrl(
+              input.appBaseUrl ?? "https://app.hunch.trade",
+            ),
+            intent: handoffIntent,
+            market,
+            policy,
+            quote: storedQuote,
+            telegramMiniAppEnabled: true,
+          });
+        }
+      } else if (["draft", "previewed"].includes(handoffIntent.status)) {
+        const messages: TelegramBotTradingMessage[] = [];
+        await previewTelegramTradeIntent({
+          appBaseUrl: normalizeBaseUrl(
+            input.appBaseUrl ?? "https://app.hunch.trade",
+          ),
+          authorization,
+          chatId: presentation.context.chatId,
+          db: input.pool,
+          fundingReturnResume: true,
+          intent: handoffIntent,
+          market,
+          maxAmountUsd,
+          policy,
+          quoteOverride: quote,
+          readiness,
+          sendMessage: async (message) => {
+            messages.push(message);
+            return undefined;
+          },
+          telegramMiniAppEnabled: true,
+          trading: input.trading,
+        });
+        handoffMessage = messages.at(-1) ?? null;
+      }
+      if (!handoffMessage) return presentation.message;
+      return {
+        ...handoffMessage,
+        text: joinTelegramMarkdownV2Lines([
+          presentation.message.text,
+          "",
+          handoffMessage.text,
+        ]),
+      };
     }
     let issued: Awaited<ReturnType<typeof issueTelegramFundingBuyContinuation>>;
     try {
@@ -5867,7 +6253,7 @@ export function createTelegramFundingBuyContinuationDecorator(input: {
             current.policy.buyContinuationEnabled &&
             current.policy.tradingEnabled &&
             current.policy.tradingActions.includes("buy") &&
-            current.policy.tradingVenues.includes("polymarket")
+            current.policy.tradingVenues.includes(continuationVenue)
           );
         },
         now: presentation.now,
@@ -6675,7 +7061,7 @@ export async function resumeTelegramFundingBuyContinuation(input: {
     );
   }
   const messages: TelegramBotTradingMessage[] = [];
-  await previewPolymarketTelegramTradeIntent({
+  await previewTelegramTradeIntent({
     appBaseUrl: input.appBaseUrl,
     authorization,
     beforeConfirmLocked: (client, currentAuthorization) =>
@@ -6726,11 +7112,14 @@ export async function isTelegramBotTradeInputContextAuthorityCurrent(input: {
   db: DbQuery;
   telegramUserId: string;
 }): Promise<boolean> {
-  const authorization = await loadEnabledAuthorization(
-    input.db,
-    input.telegramUserId,
-    input.context.venue,
-  );
+  const authorization =
+    input.context.deliveryMode === "app_handoff"
+      ? await loadEnabledEvmAuthorization(input.db, input.telegramUserId)
+      : await loadEnabledAuthorization(
+          input.db,
+          input.telegramUserId,
+          input.context.venue,
+        );
   return sameTelegramTradeAuthorityBinding(
     input.context.authority,
     authorization,
@@ -7438,7 +7827,7 @@ async function handleTelegramRedeemCallback(input: {
   return true;
 }
 
-async function previewPolymarketTelegramTradeIntent(input: {
+async function previewTelegramTradeIntent(input: {
   appBaseUrl: string;
   authorization: TelegramBotTradingAuthorizationRow;
   beforeConfirmLocked?: (
@@ -7715,6 +8104,7 @@ async function previewPolymarketTelegramTradeIntent(input: {
           fundingMessage = await input.openFundingBuyReturn({
             authorizationId: input.authorization.id,
             chatId: input.chatId,
+            continuationMode: input.intent.delivery_mode,
             eventId: input.intent.event_id,
             idempotencyKey: `funding-return:${input.intent.id}`,
             marketId: input.intent.market_id,
@@ -7729,6 +8119,8 @@ async function previewPolymarketTelegramTradeIntent(input: {
                 ? null
                 : Number(input.intent.telegram_message_id),
             telegramUserId: input.intent.telegram_user_id,
+            venue:
+              input.intent.venue === "limitless" ? "limitless" : "polymarket",
           });
         } catch (error) {
           const errorCode =
@@ -7780,11 +8172,20 @@ async function previewPolymarketTelegramTradeIntent(input: {
       if (fundingPreview.state === "convert") {
         const convertUrl = new URL(marketUrl);
         convertUrl.searchParams.set("deposit", "convert");
-        const convertButton = buildTelegramTradingMiniAppButton({
+        const convertStartParam = input.market.event_id
+          ? buildSignalBotBuyStartParam({
+              amountUsd,
+              eventId: input.market.event_id,
+              marketId: input.market.id,
+              side,
+            })
+          : null;
+        const convertButton = buildHunchMiniAppWebButton({
           appBaseUrl: input.appBaseUrl,
+          enabled: input.telegramMiniAppEnabled === true,
           path: convertUrl.toString(),
-          telegramMiniAppEnabled: input.telegramMiniAppEnabled,
-          text: "Convert",
+          startParam: convertStartParam,
+          text: "Convert & continue",
         });
         await input.sendMessage({
           chat_id: input.chatId,
@@ -7891,6 +8292,42 @@ async function previewPolymarketTelegramTradeIntent(input: {
   });
   if (!previewRecorded) {
     await sendCurrentConfirmation();
+    return;
+  }
+  if (input.intent.delivery_mode === "app_handoff") {
+    const handedOff = await updateIntentStatus({
+      allowedStatuses: ["previewed"],
+      db: input.db,
+      errorCode: "external_handoff_required",
+      errorMessage: "The user must finish this Buy in Hunch.",
+      intentId: input.intent.id,
+      quoteSnapshot: buildTelegramTradeQuotePreview(quote),
+      result: {
+        appHandoff: {
+          amountUsd,
+          marketId: input.intent.market_id,
+          side,
+          venue: input.intent.venue,
+          version: 1,
+        },
+        previewQuote: quote,
+      },
+      status: "external_handoff",
+    });
+    if (!handedOff) return;
+    const current = await loadIntent(input.db, input.intent.id);
+    if (!current) return;
+    await input.sendMessage({
+      chat_id: input.chatId,
+      ...buildTelegramTradeAppHandoffMessage({
+        appBaseUrl: input.appBaseUrl,
+        intent: current,
+        market: input.market,
+        policy: input.policy,
+        quote,
+        telegramMiniAppEnabled: input.telegramMiniAppEnabled,
+      }),
+    });
     return;
   }
   const confirming = await transitionIntentToConfirming({
@@ -8165,21 +8602,30 @@ export async function completeTelegramBotTradeInput(input: {
     resolveTelegramBotTradingPolicy(input.db),
     loadMarketById(input.db, intent?.market_id ?? context?.marketId ?? ""),
   ]);
-  const authorization = await loadEnabledAuthorization(
-    input.db,
-    input.telegramUserId,
-    intent?.venue ?? context?.venue ?? "polymarket",
-  );
+  const targetVenue = intent?.venue ?? context?.venue ?? "polymarket";
+  const deliveryMode =
+    intent?.delivery_mode ??
+    context?.deliveryMode ??
+    (targetVenue === "limitless" ? "app_handoff" : "bot_submit");
+  const authorization =
+    deliveryMode === "app_handoff"
+      ? await loadEnabledEvmAuthorization(input.db, input.telegramUserId)
+      : await loadEnabledAuthorization(
+          input.db,
+          input.telegramUserId,
+          targetVenue,
+        );
   const marketId = intent?.market_id ?? context?.marketId ?? "";
   const side = intent?.side ?? context?.side ?? null;
   const actionAllowed =
     policy.tradingEnabled &&
     policy.customTradeInputEnabled &&
     policy.tradingActions.includes(targetAction) &&
-    policy.tradingVenues.includes("polymarket");
+    policy.tradingVenues.includes(targetVenue) &&
+    (deliveryMode !== "app_handoff" || targetAction === "buy");
   const lifecycleAllowed = await venueLifecycleAllows(
     input.db,
-    "polymarket",
+    targetVenue,
     targetAction === "buy" ? "increaseExposure" : "reduceExposure",
   );
   if (
@@ -8187,7 +8633,7 @@ export async function completeTelegramBotTradeInput(input: {
     !lifecycleAllowed ||
     !market ||
     market.id !== marketId ||
-    market.venue !== "polymarket" ||
+    market.venue !== targetVenue ||
     !isMarketOrderable(market) ||
     !side ||
     !authorization ||
@@ -8225,7 +8671,11 @@ export async function completeTelegramBotTradeInput(input: {
       }),
     };
   }
-  if (context?.controlledPositionId && context.funderAddress) {
+  if (
+    targetVenue === "polymarket" &&
+    context?.controlledPositionId &&
+    context.funderAddress
+  ) {
     const credentials = await AuthService.getVenueCredentialsInfo(
       authorization.user_id,
       "polymarket",
@@ -8256,7 +8706,7 @@ export async function completeTelegramBotTradeInput(input: {
         ? marketForCallbackReadiness("SELL", market)
         : market,
     trading: input.trading,
-    venue: "polymarket",
+    venue: targetVenue,
   });
   if (
     targetAction === "buy"
@@ -8480,11 +8930,14 @@ export async function completeTelegramBotTradeInput(input: {
         : { executableSharesRaw: sharesRaw.toString() }),
       version: 1,
     };
-    const currentAuthorization = await loadEnabledAuthorization(
-      input.db,
-      input.telegramUserId,
-      creationContext.venue,
-    );
+    const currentAuthorization =
+      deliveryMode === "app_handoff"
+        ? await loadEnabledEvmAuthorization(input.db, input.telegramUserId)
+        : await loadEnabledAuthorization(
+            input.db,
+            input.telegramUserId,
+            creationContext.venue,
+          );
     if (
       !(await input.isLinkCurrent()) ||
       !sameTelegramTradeAuthorityBinding(
@@ -8503,12 +8956,12 @@ export async function completeTelegramBotTradeInput(input: {
     await input.db.query(
       `INSERT INTO telegram_trade_intents (
          id, telegram_user_id, user_id, authorization_id, chat_id,
-         telegram_message_id, action, venue, market_id, event_id, side,
+         telegram_message_id, delivery_mode, action, venue, market_id, event_id, side,
          amount_usd, sell_percent, shares_raw, status, quote_snapshot,
          policy_snapshot, result, expires_at, idempotency_key
        ) VALUES (
-         $1, $2, $3, $4, $5, $6, $7, 'polymarket', $8, $9, $10,
-         $11, $12, $13, 'draft', $14::jsonb, $15::jsonb, $16::jsonb, $17, $18
+         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+         $12, $13, $14, 'draft', $15::jsonb, $16::jsonb, $17::jsonb, $18, $19
        )
        ON CONFLICT (idempotency_key) DO NOTHING`,
       [
@@ -8518,7 +8971,9 @@ export async function completeTelegramBotTradeInput(input: {
         creationContext.authority.authorizationId,
         input.chatId,
         input.telegramMessageId,
+        deliveryMode,
         targetAction,
+        targetVenue,
         market.id,
         market.event_id,
         side,
@@ -8575,7 +9030,7 @@ export async function completeTelegramBotTradeInput(input: {
     };
   }
   const messages: TelegramBotTradingMessage[] = [];
-  await previewPolymarketTelegramTradeIntent({
+  await previewTelegramTradeIntent({
     appBaseUrl: input.appBaseUrl,
     authorization,
     chatId: input.chatId,
@@ -8717,6 +9172,7 @@ export async function handleTelegramBotTradingCallback(
       const fundingMessage = await input.openFundingBuyReturn({
         authorizationId: intent.authorization_id,
         chatId,
+        continuationMode: intent.delivery_mode,
         eventId: intent.event_id,
         idempotencyKey: `funding-return:${intent.id}`,
         marketId: intent.market_id,
@@ -8725,6 +9181,7 @@ export async function handleTelegramBotTradingCallback(
         sourceIntentId: intent.id,
         telegramMessageId: callbackMessageId,
         telegramUserId: intent.telegram_user_id,
+        venue: intent.venue === "limitless" ? "limitless" : "polymarket",
       });
       if (fundingMessage) {
         await input.answerCallbackQuery({
@@ -8749,9 +9206,15 @@ export async function handleTelegramBotTradingCallback(
     exitsToMarket &&
     intent.status === "cancelled" &&
     intent.submit_started_at == null;
+  const canExitExternalHandoff =
+    exitsToMarket &&
+    intent.status === "external_handoff" &&
+    intent.delivery_mode === "app_handoff" &&
+    intent.submit_started_at == null;
   if (
     (isTerminalIntentStatus(intent.status) || intent.status === "executing") &&
-    !canReplayMarketExit
+    !canReplayMarketExit &&
+    !canExitExternalHandoff
   ) {
     await answerIntentAlreadyProcessed(input, intent);
     return true;
@@ -8781,7 +9244,10 @@ export async function handleTelegramBotTradingCallback(
     const cancelled =
       canReplayMarketExit ||
       (await updateIntentStatus({
-        allowedStatuses: PENDING_INTENT_STATUSES,
+        allowedStatuses: [
+          ...PENDING_INTENT_STATUSES,
+          ...(canExitExternalHandoff ? ["external_handoff"] : []),
+        ],
         db: input.db,
         errorCode:
           parsed.type === "change_amount"
@@ -8840,7 +9306,13 @@ export async function handleTelegramBotTradingCallback(
 
   const [policy, authorization, market] = await Promise.all([
     resolveTelegramBotTradingPolicy(input.db),
-    loadEnabledAuthorization(input.db, intent.telegram_user_id, intent.venue),
+    intent.delivery_mode === "app_handoff"
+      ? loadEnabledEvmAuthorization(input.db, intent.telegram_user_id)
+      : loadEnabledAuthorization(
+          input.db,
+          intent.telegram_user_id,
+          intent.venue,
+        ),
     loadMarketById(input.db, intent.market_id),
   ]);
   const amountUsd = parseNumber(intent.amount_usd);
@@ -8951,7 +9423,10 @@ export async function handleTelegramBotTradingCallback(
     !isMarketOrderable(market) ||
     !authorization ||
     !authorization.privy_wallet_id ||
-    !isVenueAllowed(intent.venue, policy, authorizationVenues) ||
+    (intent.delivery_mode === "bot_submit" &&
+      !isVenueAllowed(intent.venue, policy, authorizationVenues)) ||
+    (intent.delivery_mode === "app_handoff" &&
+      (intent.action !== "buy" || intent.venue !== "limitless")) ||
     (action === "BUY"
       ? !canPreviewBuyForReadiness(tradeReadiness)
       : !canOfferTradeForReadiness(tradeReadiness)) ||
@@ -9053,8 +9528,11 @@ export async function handleTelegramBotTradingCallback(
       callbackQueryId: input.callbackQuery.id,
       text: "⏳ Building a fresh quote…",
     });
-    if (intent.venue === "polymarket") {
-      await previewPolymarketTelegramTradeIntent({
+    if (
+      intent.venue === "polymarket" ||
+      intent.delivery_mode === "app_handoff"
+    ) {
+      await previewTelegramTradeIntent({
         appBaseUrl: input.appBaseUrl,
         authorization,
         chatId,

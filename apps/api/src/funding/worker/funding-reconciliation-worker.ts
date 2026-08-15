@@ -36,6 +36,7 @@ import type { PolymarketWrapExecutionConfiguration } from "../execution/delegate
 import { loadRelayEvmExecutionConfiguration } from "../execution/delegated-funding-config.js";
 import { createPrivyDelegatedFundingDriver } from "../execution/privy-delegated-funding-driver.js";
 import { createRelayEvmDelegatedFundingProfile } from "../execution/relay-evm-delegated-executor-profile.js";
+import { RELAY_EVM_FUNDING_PROFILE_SPECS } from "../execution/relay-evm-profile-specs.js";
 import {
   resolveTelegramFundingReceiptDisposition,
   TELEGRAM_POLYMARKET_FUNDING_ADAPTER_KEY,
@@ -359,13 +360,16 @@ export async function runFundingReconciliationJob(
           driver: delegatedDriver,
         })
       : null;
-  const relayEvmProfile =
+  const relayEvmProfiles =
     options.delegatedExecution && delegatedDriver
-      ? createRelayEvmDelegatedFundingProfile({
-          configuration: relayEvmConfiguration,
-          driver: delegatedDriver,
-        })
-      : null;
+      ? Object.values(RELAY_EVM_FUNDING_PROFILE_SPECS).map((profile) =>
+          createRelayEvmDelegatedFundingProfile({
+            configuration: relayEvmConfiguration,
+            driver: delegatedDriver,
+            profile,
+          }),
+        )
+      : [];
   const operationPreparers = new Map<
     string,
     TelegramFundingReceiptOperationPreparer
@@ -428,9 +432,9 @@ export async function runFundingReconciliationJob(
         }).catch(() => ({ candidates: 0, created: 0, skipped: 0 }))
       : { candidates: 0, created: 0, skipped: 0 };
     const delegatedFundingExecution =
-      (polymarketWrapProfile || relayEvmProfile) && transactionCodec
+      (polymarketWrapProfile || relayEvmProfiles.length > 0) && transactionCodec
         ? await new DelegatedFundingExecutor(pool, {
-            profiles: [polymarketWrapProfile, relayEvmProfile].filter(
+            profiles: [polymarketWrapProfile, ...relayEvmProfiles].filter(
               (profile): profile is NonNullable<typeof profile> =>
                 profile != null,
             ),

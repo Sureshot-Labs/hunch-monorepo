@@ -150,6 +150,9 @@ function projection(input: {
     input.context.initialMinimumFundingUsd
       ? { minimumFundingUsd: input.context.initialMinimumFundingUsd }
       : {}),
+    ...(input.context.origin === "buy_return_context"
+      ? { returnToMarketAvailable: true }
+      : {}),
     ...(input.automaticConversionEnabled
       ? { automaticConversionEnabled: true }
       : {}),

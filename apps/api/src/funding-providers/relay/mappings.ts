@@ -31,6 +31,8 @@ export type RelayRouteSpec = Readonly<{
     | RelayRehearsalScenarioId
     | "solana-sol-to-base-usdc"
     | "solana-usdc-to-base-usdc"
+    | "polygon-usdc-to-base-usdc"
+    | "polygon-usdce-to-base-usdc"
     | "polygon-usdc-to-polygon-pusd"
     | "solana-usdc-to-polygon-pusd"
     | "solana-sol-to-polygon-pusd";
@@ -188,6 +190,40 @@ export const RELAY_ROUTE_SPECS: Readonly<Record<string, RelayRouteSpec>> = {
     destination: {
       networkId: "evm:137",
       assetId: normalizeRelayAssetId("evm:137", POLYGON_PUSD),
+      decimals: 6,
+    },
+    sourceVm: "evm",
+    destinationVm: "evm",
+    quoteMode: "expected_output",
+    rehearsalScenario: null,
+  },
+  "polygon-usdc-to-base-usdc": {
+    routeId: "polygon-usdc-to-base-usdc",
+    source: {
+      networkId: "evm:137",
+      assetId: normalizeRelayAssetId("evm:137", POLYGON_USDC),
+      decimals: 6,
+    },
+    destination: {
+      networkId: "evm:8453",
+      assetId: normalizeRelayAssetId("evm:8453", BASE_USDC),
+      decimals: 6,
+    },
+    sourceVm: "evm",
+    destinationVm: "evm",
+    quoteMode: "expected_output",
+    rehearsalScenario: null,
+  },
+  "polygon-usdce-to-base-usdc": {
+    routeId: "polygon-usdce-to-base-usdc",
+    source: {
+      networkId: "evm:137",
+      assetId: normalizeRelayAssetId("evm:137", POLYGON_USDCE),
+      decimals: 6,
+    },
+    destination: {
+      networkId: "evm:8453",
+      assetId: normalizeRelayAssetId("evm:8453", BASE_USDC),
       decimals: 6,
     },
     sourceVm: "evm",

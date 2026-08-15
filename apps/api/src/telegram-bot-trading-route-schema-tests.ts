@@ -106,8 +106,22 @@ await test("Telegram funding schemas accept only server-owned opaque inputs", ()
   assert.equal(
     telegramBotTradingRouteTestHooks.internalFundingCancelBodySchema.safeParse({
       ...mutation,
+      appBaseUrl: "https://app.hunch.trade",
       contextId: "123e4567-e89b-42d3-a456-426614174000",
+      telegramMiniAppEnabled: true,
     }).success,
+    true,
+  );
+  assert.equal(
+    telegramBotTradingRouteTestHooks.internalFundingBackToMarketBodySchema.safeParse(
+      {
+        ...identity,
+        appBaseUrl: "https://app.hunch.trade",
+        contextId: "123e4567-e89b-42d3-a456-426614174000",
+        telegramMessageId: 42,
+        telegramMiniAppEnabled: true,
+      },
+    ).success,
     true,
   );
   assert.equal(

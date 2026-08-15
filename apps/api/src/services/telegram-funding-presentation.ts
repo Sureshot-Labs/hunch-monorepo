@@ -69,9 +69,21 @@ function fundingTargetChoiceToken(input: {
   automaticConversion: boolean;
   routeKey: string;
 }): string {
-  if (input.routeKey === "polymarket_base_usdc_relay_v1") return "b";
-  if (input.routeKey === "limitless_base_usdc_direct_v1") return "l";
-  return input.automaticConversion ? "a" : "d";
+  const tokenByRouteKey: Readonly<Record<string, string>> = {
+    limitless_base_usdc_direct_v1: "ld",
+    limitless_polygon_pusd_relay_v1: "lp",
+    limitless_polygon_usdc_relay_v1: "ln",
+    limitless_polygon_usdce_relay_v1: "le",
+    polymarket_base_usdc_relay_v1: "pb",
+    polymarket_polygon_pusd_direct_v1: "pd",
+    polymarket_polygon_usdc_relay_v1: "pn",
+    polymarket_polygon_usdce_wrap_v1: "pw",
+    // Existing frozen sessions keep their original route identity.
+    polymarket_polygon_pusd_usdce_v1: "a",
+  };
+  return (
+    tokenByRouteKey[input.routeKey] ?? (input.automaticConversion ? "a" : "d")
+  );
 }
 
 export function buildTelegramFundingReviewQuoteMessage(input: {
@@ -254,26 +266,31 @@ export function buildTelegramFundingTargetChoicesMessage(input: {
       presentation: targets[0].presentation,
     });
   }
+  const targetRows: Array<Array<{ callback_data: string; text: string }>> = [];
+  for (let index = 0; index < targets.length; index += 2) {
+    targetRows.push(
+      targets.slice(index, index + 2).map((target) => ({
+        callback_data: telegramFundingCallbackData({
+          choiceToken: fundingTargetChoiceToken({
+            automaticConversion: target.automaticSourceAsset !== null,
+            routeKey: target.presentation.routeKey,
+          }),
+          contextId: input.contextId,
+          kind: "select",
+        }),
+        text:
+          target.presentation.selectionButtonLabel ??
+          `${target.presentation.acceptedAssetSymbols.join(" / ")} on ${target.presentation.networkLabel}`,
+      })),
+    );
+  }
+  const venueLabel = targets[0]?.presentation.venueLabel ?? "venue";
   return {
     fundingContextId: input.contextId,
     parse_mode: "MarkdownV2",
     reply_markup: {
       inline_keyboard: [
-        ...targets.map((target) => [
-          {
-            callback_data: telegramFundingCallbackData({
-              choiceToken: fundingTargetChoiceToken({
-                automaticConversion: target.automaticSourceAsset !== null,
-                routeKey: target.presentation.routeKey,
-              }),
-              contextId: input.contextId,
-              kind: "select",
-            }),
-            text:
-              target.presentation.selectionButtonLabel ??
-              `${target.presentation.acceptedAssetSymbols.join(" / ")} on ${target.presentation.networkLabel}`,
-          },
-        ]),
+        ...targetRows,
         [
           {
             callback_data: telegramFundingCallbackData({
@@ -286,7 +303,7 @@ export function buildTelegramFundingTargetChoicesMessage(input: {
       ],
     },
     text: joinTelegramMarkdownV2Lines([
-      "*Add funds to Polymarket*",
+      `*Add funds to ${escapeTelegramMarkdownV2(venueLabel)}*`,
       "",
       escapeTelegramMarkdownV2("Choose the network and asset to receive."),
       ...receiveWindowFields(input.expiresAt),
@@ -443,7 +460,24 @@ function fundingProgressReplyMarkup(
     },
   ];
   if (projection.terminal) {
-    return { inline_keyboard: [homeRow] };
+    return {
+      inline_keyboard: [
+        ...(projection.returnToMarketAvailable
+          ? [
+              [
+                {
+                  callback_data: telegramFundingCallbackData({
+                    contextId: projection.fundingContextId,
+                    kind: "back_to_market",
+                  }),
+                  text: "⬅️ Back to market",
+                },
+              ],
+            ]
+          : []),
+        homeRow,
+      ],
+    };
   }
   if (projection.reviewContinuation && projection.reviewReceiptId) {
     return {
@@ -470,6 +504,25 @@ function fundingProgressReplyMarkup(
       ],
     };
   }
+  const moneyReceived =
+    projection.rawAmount != null ||
+    (projection.receiptBreakdown?.sourceReceiptCount ?? 0) > 0;
+  const navigationButton =
+    projection.returnToMarketAvailable && moneyReceived
+      ? {
+          callback_data: telegramFundingCallbackData({
+            contextId: projection.fundingContextId,
+            kind: "back_to_market",
+          }),
+          text: "⬅️ Back to market",
+        }
+      : {
+          callback_data: telegramFundingCallbackData({
+            contextId: projection.fundingContextId,
+            kind: "cancel",
+          }),
+          text: "Cancel",
+        };
   return {
     inline_keyboard: [
       ...(projection.receiveAddress
@@ -499,13 +552,7 @@ function fundingProgressReplyMarkup(
           }),
           text: "🔄 Refresh",
         },
-        {
-          callback_data: telegramFundingCallbackData({
-            contextId: projection.fundingContextId,
-            kind: "cancel",
-          }),
-          text: "Cancel",
-        },
+        navigationButton,
       ],
       homeRow,
     ],

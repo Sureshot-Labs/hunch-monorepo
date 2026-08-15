@@ -60,6 +60,7 @@ export type TelegramFundingProgressProjection = Readonly<{
   minimumFundingUsd?: string;
   reviewContinuation?: FundingReceiveReviewContinuation;
   reviewReceiptId?: string;
+  returnToMarketAvailable?: boolean;
 }>;
 
 export type TelegramFundingMessage = TelegramBotTradingClientMessage & {
@@ -77,6 +78,7 @@ export type TelegramFundingMessage = TelegramBotTradingClientMessage & {
 
 export type TelegramFundingCallbackRoute =
   | Readonly<{ contextId: string; kind: "cancel" }>
+  | Readonly<{ contextId: string; kind: "back_to_market" }>
   | Readonly<{ contextId: string; kind: "hide_qr" }>
   | Readonly<{ contextId: string; kind: "qr" }>
   | Readonly<{ contextId: string; kind: "refresh" }>
@@ -131,17 +133,19 @@ export function parseTelegramFundingCallbackRoute(
     };
   }
   const action = route.match(
-    new RegExp(`^fund:(refresh|cancel|qr|hide|convert):${UUID}$`, "i"),
+    new RegExp(`^fund:(refresh|cancel|market|qr|hide|convert):${UUID}$`, "i"),
   );
   if (!action) return null;
   return action[1] === "convert"
     ? { kind: "review_conversion", receiptId: action[2] ?? "" }
-    : action[1] === "hide"
-      ? { kind: "hide_qr", contextId: action[2] ?? "" }
-      : {
-          kind: action[1] as "refresh" | "cancel" | "qr",
-          contextId: action[2] ?? "",
-        };
+    : action[1] === "market"
+      ? { kind: "back_to_market", contextId: action[2] ?? "" }
+      : action[1] === "hide"
+        ? { kind: "hide_qr", contextId: action[2] ?? "" }
+        : {
+            kind: action[1] as "refresh" | "cancel" | "qr",
+            contextId: action[2] ?? "",
+          };
 }
 
 export function telegramFundingCallbackData(
@@ -159,7 +163,11 @@ export function telegramFundingCallbackData(
             : input.kind === "review_conversion"
               ? `${TELEGRAM_FUNDING_CALLBACK_PREFIX}:convert:${input.receiptId}`
               : `${TELEGRAM_FUNDING_CALLBACK_PREFIX}:${
-                  input.kind === "hide_qr" ? "hide" : input.kind
+                  input.kind === "hide_qr"
+                    ? "hide"
+                    : input.kind === "back_to_market"
+                      ? "market"
+                      : input.kind
                 }:${input.contextId}`;
   if (Buffer.byteLength(data, "utf8") > 64) {
     throw new Error("Telegram funding callback exceeds 64 bytes");
