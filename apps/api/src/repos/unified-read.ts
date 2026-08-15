@@ -514,11 +514,15 @@ function buildChange24hHistoryMarketCandidatesCte(args: {
   assertSafeSqlIdentifier(args.cteName, "change24h history CTE");
   return `
     ${args.cteName} as materialized (
-      select distinct mapping.market_id
+      -- unified_token_change_24h is refreshed only for canonical YES tokens
+      -- and unified_market_tokens.token_id is unique. Consequently
+      -- each source row maps to at most one market: avoiding the redundant
+      -- DISTINCT keeps the change24h fast path a small, index-backed join.
+      select mapping.market_id
       from unified_token_change_24h cached
       join unified_market_tokens mapping
         on mapping.token_id = cached.token_id
-       and mapping.outcome_side in ('YES', 'NO')
+       and mapping.outcome_side = 'YES'
       where cached.avg_mid_24h is not null
     )
   `;

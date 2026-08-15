@@ -12,8 +12,10 @@ import {
 } from "../../../funding-providers/relay/rehearsal.js";
 import {
   groupRelayExecutableActions,
+  buildPolymarketPreRouteHandoffSteps,
   relayDelegatedCommitSteps,
 } from "../../../funding-providers/relay/operation-plan.js";
+import type { RelayEligibleSourceFact } from "../../planner/source-options.js";
 import {
   TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
   TELEGRAM_RELAY_POLYGON_PUSD_PROFILE_ID,
@@ -596,6 +598,82 @@ const polygonActionBase = { ...actionBase, networkId: "evm:137" };
 const delegatedApproveStep = delegatedSteps[0];
 const delegatedDepositStep = delegatedSteps[1];
 assert.ok(delegatedApproveStep && delegatedDepositStep);
+const reverseHandoffSource = {
+  componentId: "component:deposit-wallet-pusd",
+  sourceLocationPatternId: "venue_polymarket_polygon_pusd",
+  safeLabel: "Polymarket balance",
+  source: {
+    kind: "owned_location",
+    location: {
+      kind: "venue_account",
+      locationId: "location:deposit-wallet",
+      accountId: "account:test",
+      asset: {
+        networkId: "evm:137",
+        assetId: POLYGON_PUSD,
+        decimals: 6,
+      },
+      details: {
+        venueId: "polymarket",
+        accountRef: "polymarket:test",
+        controllerWalletId: WALLET_ID,
+        address: depositWallet,
+      },
+    },
+  },
+  quoteInputAmount: {
+    asset: { networkId: "evm:137", assetId: POLYGON_PUSD, decimals: 6 },
+    raw: RAW,
+  },
+  maximumSourceRaw: RAW,
+  maximumSlippageBps: 100,
+  estimatedUsd: "2",
+  transferable: true,
+  riskEligible: true,
+  walletExecutionReady: true,
+  nativeGasReady: true,
+  freshness: "fresh",
+  preRouteHandoff: {
+    kind: "polymarket_deposit_wallet_puller_v1",
+    sourceLocation: {
+      kind: "venue_account",
+      locationId: "location:deposit-wallet",
+      accountId: "account:test",
+      asset: {
+        networkId: "evm:137",
+        assetId: POLYGON_PUSD,
+        decimals: 6,
+      },
+      details: {
+        venueId: "polymarket",
+        accountRef: "polymarket:test",
+        controllerWalletId: WALLET_ID,
+        address: depositWallet,
+      },
+    },
+    funderAddress: depositWallet,
+    controllerAddress: WALLET,
+    tokenAddress: POLYGON_PUSD,
+    pullerAddress: puller,
+    pullNonce: "4",
+    pullerAllowanceRaw: MaxUint256.toString(),
+  },
+} satisfies RelayEligibleSourceFact;
+
+assert.deepEqual(
+  buildPolymarketPreRouteHandoffSteps({
+    source: reverseHandoffSource,
+    sourceAmount: {
+      asset: { networkId: "evm:137", assetId: POLYGON_PUSD, decimals: 6 },
+      raw: RAW,
+    },
+    profile: atomicWalletProfile,
+    steps: [],
+  }),
+  [],
+  "Puller handoff remains a discovery-only marker until the delegated profile is bound",
+);
+
 const reverseDelegatedSteps = relayDelegatedCommitSteps({
   steps: [
     {
@@ -624,67 +702,7 @@ const reverseDelegatedSteps = relayDelegatedCommitSteps({
       },
     },
   ],
-  source: {
-    componentId: "component:deposit-wallet-pusd",
-    sourceLocationPatternId: "venue_polymarket_polygon_pusd",
-    safeLabel: "Polymarket balance",
-    source: {
-      kind: "owned_location",
-      location: {
-        kind: "venue_account",
-        locationId: "location:deposit-wallet",
-        accountId: "account:test",
-        asset: {
-          networkId: "evm:137",
-          assetId: POLYGON_PUSD,
-          decimals: 6,
-        },
-        details: {
-          venueId: "polymarket",
-          accountRef: "polymarket:test",
-          controllerWalletId: WALLET_ID,
-          address: depositWallet,
-        },
-      },
-    },
-    quoteInputAmount: {
-      asset: { networkId: "evm:137", assetId: POLYGON_PUSD, decimals: 6 },
-      raw: RAW,
-    },
-    maximumSourceRaw: RAW,
-    maximumSlippageBps: 100,
-    estimatedUsd: "2",
-    transferable: true,
-    riskEligible: true,
-    walletExecutionReady: true,
-    nativeGasReady: true,
-    freshness: "fresh",
-    preRouteHandoff: {
-      kind: "polymarket_deposit_wallet_puller_v1",
-      sourceLocation: {
-        kind: "venue_account",
-        locationId: "location:deposit-wallet",
-        accountId: "account:test",
-        asset: {
-          networkId: "evm:137",
-          assetId: POLYGON_PUSD,
-          decimals: 6,
-        },
-        details: {
-          venueId: "polymarket",
-          accountRef: "polymarket:test",
-          controllerWalletId: WALLET_ID,
-          address: depositWallet,
-        },
-      },
-      funderAddress: depositWallet,
-      controllerAddress: WALLET,
-      tokenAddress: POLYGON_PUSD,
-      pullerAddress: puller,
-      pullNonce: "4",
-      pullerAllowanceRaw: MaxUint256.toString(),
-    },
-  },
+  source: reverseHandoffSource,
   sourceAmount: {
     asset: { networkId: "evm:137", assetId: POLYGON_PUSD, decimals: 6 },
     raw: RAW,

@@ -448,9 +448,16 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
         ? categories.join(",")
         : normalizedCategory;
 
-      // Calculate cache TTL (default 30 seconds, can be overridden via env var)
+      // `change24h` is a discovery ranking, not a live execution price. Its
+      // canonical-book calculation is materially heavier than the other feed
+      // sorts, so keep a bounded shared result long enough to avoid making
+      // every pagination request rebuild the same ranking.
       const cacheEnabled = env.feedTtlSec > 0;
-      const cacheTtl = cacheEnabled ? env.feedTtlSec : 0;
+      const cacheTtl = cacheEnabled
+        ? sort === "change24h"
+          ? Math.max(env.feedTtlSec, 120)
+          : env.feedTtlSec
+        : 0;
 
       // Create cache key with all parameters normalized
       const venueKey = venues?.length ? venues.join(",") : "";

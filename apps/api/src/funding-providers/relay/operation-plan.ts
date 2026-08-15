@@ -239,6 +239,14 @@ export function buildPolymarketPreRouteHandoffSteps(input: {
 }) {
   const handoff = input.source.preRouteHandoff;
   if (!handoff) return input.steps;
+  if (handoff.kind === "polymarket_deposit_wallet_puller_v1") {
+    // Discovery deliberately runs before the Telegram service has selected and
+    // provisioned the exact delegated profile. The Puller path has no client
+    // handoff: it is materialized only by relayDelegatedCommitSteps after that
+    // profile is bound, which adds the durable source_pull step. Never try to
+    // reinterpret it as the legacy Deposit Wallet -> controller transfer.
+    return input.steps;
+  }
   if (
     handoff.kind !== "polymarket_deposit_wallet_to_controller_v1" ||
     input.sourceAmount.asset.networkId !== "evm:137" ||
