@@ -792,6 +792,12 @@ export function parseTelegramFundingProgressProjection(
     return null;
   }
   if (
+    record.returnToMarketAvailable !== undefined &&
+    typeof record.returnToMarketAvailable !== "boolean"
+  ) {
+    return null;
+  }
+  if (
     record.sourceAssetSymbol !== undefined &&
     (typeof record.sourceAssetSymbol !== "string" ||
       record.sourceAssetSymbol.trim().length === 0 ||
@@ -873,6 +879,9 @@ export function parseTelegramFundingProgressProjection(
       : {}),
     ...(record.automaticConversionPaused === true
       ? { automaticConversionPaused: true }
+      : {}),
+    ...(record.returnToMarketAvailable === true
+      ? { returnToMarketAvailable: true }
       : {}),
     ...(hasSourceSymbol
       ? {

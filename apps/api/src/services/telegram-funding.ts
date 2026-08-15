@@ -51,6 +51,7 @@ import {
   telegramBotTradeAuthorityFingerprint,
 } from "./telegram-bot-trade-input-context.js";
 import {
+  buildTelegramFundingActiveElsewhereMessage,
   buildTelegramFundingCancelledMessage,
   buildTelegramFundingBuyReturnAttachedMessage,
   buildTelegramFundingDeliveryQueuedMessage,
@@ -708,8 +709,22 @@ export class TelegramFundingService {
       identity: Readonly<{ chatId: string; telegramUserId: string }>;
       link: ActiveTelegramAccountLink;
       now: Date;
+      telegramMessageId?: number | null;
+      venue?: string;
     }>,
   ): Promise<TelegramFundingMessage> {
+    if (
+      input.telegramMessageId != null &&
+      input.context.telegramMessageId != null &&
+      input.telegramMessageId !== input.context.telegramMessageId
+    ) {
+      return buildTelegramFundingActiveElsewhereMessage({
+        projection: parseTelegramFundingProgressProjection(
+          input.context.latestProgressProjection,
+        ),
+        venue: input.venue,
+      });
+    }
     await this.provisionExistingContext(input);
     const message = await this.session(
       {
@@ -1085,6 +1100,8 @@ export class TelegramFundingService {
           identity,
           link: initialLink,
           now,
+          telegramMessageId: input.telegramMessageId,
+          venue: input.venue,
         });
       }
     } catch (error) {
@@ -1103,6 +1120,8 @@ export class TelegramFundingService {
         identity,
         link: initialLink,
         now,
+        telegramMessageId: input.telegramMessageId,
+        venue: input.venue,
       });
     }
     const managedWallet = this.resolveManagedWallet
@@ -1138,6 +1157,7 @@ export class TelegramFundingService {
         chatId: identity.chatId,
         telegramMessageId: input.telegramMessageId,
         venueId: input.venue,
+        presentAcrossMessages: true,
         controllerWalletId: controllerWalletId ?? undefined,
         venueBindingOptionId: destination?.venueBindingOptionId,
         idempotencyKey,
@@ -1154,6 +1174,8 @@ export class TelegramFundingService {
         identity,
         link: initialLink,
         now,
+        telegramMessageId: input.telegramMessageId,
+        venue: input.venue,
       });
     }
     destination ??= await this.resolveReceiveDestination(

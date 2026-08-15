@@ -458,6 +458,22 @@ async function deliverSignalBotInteractiveMenuCallback(
     reportFundingOperationError();
     depositMessage = {
       parse_mode: "MarkdownV2",
+      reply_markup: {
+        inline_keyboard: [
+          [
+            {
+              callback_data: input.callbackPrefix + "deposit",
+              text: "Open Deposit",
+            },
+          ],
+          [
+            {
+              callback_data: input.callbackPrefix + "home",
+              text: "🏠 Home",
+            },
+          ],
+        ],
+      },
       text: formatTelegramCalloutMarkdownV2({
         bodyMarkdownV2: "Try again shortly\\.",
         icon: "⚠️",

@@ -307,10 +307,10 @@ const POLYMARKET_POLYGON_USDC_RELAY_PRESENTATION = {
   destinationAssetSymbol: "pUSD",
   acceptedAssetSymbols: ["USDC"],
   automaticSourceAssetSymbol: "USDC",
-  selectionButtonLabel: "USDC · Polygon",
+  selectionButtonLabel: "USDC (native) · Polygon",
   settlementLabel: "Automatic Relay to pUSD",
   instructions: [
-    "Send only native USDC on Polygon.",
+    "Send only native USDC (not USDC.e) on Polygon.",
     "It is automatically routed to Polygon pUSD.",
   ],
   decimals: 6,

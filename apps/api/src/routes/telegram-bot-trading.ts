@@ -759,7 +759,19 @@ async function registerTelegramBotTradingRoutes(
       error instanceof TelegramFundingError
         ? error.code
         : "telegram_funding_unexpected_error";
-    request.log.warn({ errorCode }, "Telegram funding request failed");
+    request.log.warn(
+      {
+        errorCode,
+        errorMessage:
+          error instanceof Error
+            ? error.message
+                .replace(/https?:\/\/\S+/gu, "[redacted-url]")
+                .slice(0, 240)
+            : undefined,
+        errorName: error instanceof Error ? error.name : undefined,
+      },
+      "Telegram funding request failed",
+    );
     if (
       error instanceof TelegramFundingError &&
       error.code === "private_chat_required"

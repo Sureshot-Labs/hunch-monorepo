@@ -328,16 +328,53 @@ export function buildTelegramFundingDeliveryQueuedMessage(input: {
   };
 }
 
-export function buildTelegramFundingActiveElsewhereMessage(): TelegramFundingMessage {
+export function buildTelegramFundingActiveElsewhereMessage(
+  input: Readonly<{
+    projection?: TelegramFundingProgressProjection | null;
+    venue?: string;
+  }> = {},
+): TelegramFundingMessage {
+  const summary = input.projection
+    ? buildTelegramFundingProgressMessageInternal({
+        ...input.projection,
+        receiveAddress: null,
+      })
+    : null;
   return {
     parse_mode: "MarkdownV2",
-    text: formatTelegramCalloutMarkdownV2({
-      bodyMarkdownV2: escapeTelegramMarkdownV2(
-        "A transfer is already being monitored in an earlier Deposit screen. Finish that transfer there; it remains safe and active.",
-      ),
-      icon: "ℹ️",
-      title: "Deposit already active",
-    }),
+    reply_markup: {
+      inline_keyboard: [
+        [
+          {
+            callback_data:
+              input.venue === "limitless" || input.venue === "polymarket"
+                ? `hm:v1:deposit:${input.venue}`
+                : "hm:v1:deposit",
+            text: summary ? "🔄 Refresh active Deposit" : "Open Deposit",
+          },
+        ],
+        [{ callback_data: "hm:v1:home", text: "🏠 Home" }],
+      ],
+    },
+    text: summary
+      ? joinTelegramMarkdownV2Lines([
+          formatTelegramCalloutMarkdownV2({
+            bodyMarkdownV2: escapeTelegramMarkdownV2(
+              "The original card remains the verified address owner. Its current status is mirrored below without repeating the address.",
+            ),
+            icon: "ℹ️",
+            title: "Active Deposit",
+          }),
+          "",
+          summary.text,
+        ])
+      : formatTelegramCalloutMarkdownV2({
+          bodyMarkdownV2: escapeTelegramMarkdownV2(
+            "A transfer is already being monitored. Tap Open Deposit to check it, or return Home.",
+          ),
+          icon: "ℹ️",
+          title: "Deposit already active",
+        }),
   };
 }
 

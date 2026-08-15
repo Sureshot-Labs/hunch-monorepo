@@ -9952,6 +9952,10 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       ]);
       assert.equal(telegram.edits.length, 1);
       assert.match(telegram.edits[0]?.text ?? "", /Deposit unavailable/u);
+      assert.deepEqual(telegram.edits[0]?.reply_markup?.inline_keyboard, [
+        [{ callback_data: "hm:v1:deposit", text: "Open Deposit" }],
+        [{ callback_data: "hm:v1:home", text: "🏠 Home" }],
+      ]);
       const serialized = JSON.stringify({ deliveryEvents, operationEvents });
       assert.doesNotMatch(serialized, /callback-secret|planner secret/u);
       assert.doesNotMatch(serialized, /999|51/u);
