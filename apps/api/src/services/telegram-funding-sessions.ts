@@ -1269,6 +1269,7 @@ export async function reuseActiveTelegramFundingSession(
     venueId: string;
     controllerWalletId?: string;
     venueBindingOptionId?: string;
+    presentAcrossMessages?: boolean;
     idempotencyKey: string;
     requestFingerprint: string;
     now: Date;
@@ -1305,7 +1306,14 @@ export async function reuseActiveTelegramFundingSession(
       // A Telegram message owns its context: reusing another message makes
       // the new button look inert. The final open transaction owns the
       // supersede decision so two messages cannot both pass this preflight.
-      return null;
+      if (!input.presentAcrossMessages) return null;
+      await recordTelegramFundingOpenMutation(client, {
+        contextId: active.id,
+        idempotencyKey: input.idempotencyKey,
+        requestFingerprint: input.requestFingerprint,
+        now: input.now,
+      });
+      return publicSession(active);
     }
     const refreshed = await client.query<TelegramFundingSessionRow>(
       `

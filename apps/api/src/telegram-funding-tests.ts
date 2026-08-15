@@ -30,6 +30,7 @@ import {
   resolveTelegramFundingBuyContinuationCapability,
 } from "./services/telegram-funding-buy-continuation.js";
 import {
+  buildTelegramFundingActiveElsewhereMessage,
   buildTelegramFundingBuyReturnAttachedMessage,
   buildTelegramFundingDeliveryQueuedMessage,
   buildTelegramFundingProgressMessage,
@@ -102,14 +103,23 @@ const receiveSessionId = "223e4567-e89b-42d3-a456-426614174000";
 const reviewReceiptId = "323e4567-e89b-42d3-a456-426614174001";
 const receiveTargetId = "receive_target_telegram_pusd_12345678";
 
+{
+  const activeElsewhere = buildTelegramFundingActiveElsewhereMessage();
+  assert.deepEqual(activeElsewhere.reply_markup?.inline_keyboard, [
+    [{ callback_data: "hm:v1:deposit", text: "Open Deposit" }],
+    [{ callback_data: "hm:v1:home", text: "🏠 Home" }],
+  ]);
+}
+
 function supersedeSessionPool(
   receiveCanClose: boolean,
   activeConsentRevision: number | null = null,
   liveRouting = false,
 ) {
   const statements: string[] = [];
+  let openMutation: Record<string, unknown> | null = null;
   const client = {
-    query: async (sql: string) => {
+    query: async (sql: string, parameters?: readonly unknown[]) => {
       const normalized = sql.replace(/\s+/gu, " ").trim().toLowerCase();
       statements.push(normalized);
       if (
@@ -162,6 +172,25 @@ function supersedeSessionPool(
       }
       if (normalized.startsWith("update funding_receive_sessions")) {
         return { rows: receiveCanClose ? [{ id: receiveSessionId }] : [] };
+      }
+      if (normalized.startsWith("insert into telegram_funding_mutations")) {
+        openMutation = {
+          action: "open",
+          consent_revision: null,
+          funding_context_id: String(parameters?.[0]),
+          idempotency_key: String(parameters?.[1]),
+          request_fingerprint: String(parameters?.[2]),
+          response_payload: { fundingContextId: String(parameters?.[0]) },
+          review_quote_id: null,
+          review_receipt_id: null,
+        };
+        return { rows: [], rowCount: 1 };
+      }
+      if (
+        normalized.includes("from telegram_funding_mutations") &&
+        normalized.includes("where idempotency_key = $1")
+      ) {
+        return { rows: openMutation ? [openMutation] : [] };
       }
       return { rows: [], rowCount: 0 };
     },
@@ -278,6 +307,25 @@ const supersedeInput = {
   assert.equal(
     fake.statements.some((sql) => sql.startsWith("update funding_receive")),
     false,
+  );
+}
+
+{
+  const fake = supersedeSessionPool(false, 1, true);
+  const presented = await reuseActiveTelegramFundingSession(
+    fake.pool as never,
+    {
+      ...supersedeInput,
+      presentAcrossMessages: true,
+    },
+  );
+  assert.equal(presented?.telegramMessageId, 100);
+  assert.equal(
+    fake.statements.some((sql) =>
+      sql.startsWith("update telegram_funding_sessions"),
+    ),
+    false,
+    "a status mirror must not move the address-owning Telegram message",
   );
 }
 
@@ -2030,6 +2078,11 @@ const partialBuyReady = projectTelegramFundingProgress({
 });
 assert.equal(partialBuyReady?.state, "funds_received");
 assert.equal(partialBuyReady?.terminal, false);
+assert.equal(partialBuyReady?.returnToMarketAvailable, true);
+assert.deepEqual(
+  parseTelegramFundingProgressProjection(partialBuyReady),
+  partialBuyReady,
+);
 const sufficientBuyReady = projectTelegramFundingProgress({
   consent,
   context: buyContext,
@@ -2164,6 +2217,18 @@ const futureSolanaProjection: TelegramFundingProgressProjection = {
 const futureSolanaMessage = buildTelegramFundingProgressMessage(
   futureSolanaProjection,
 );
+const activeMirror = buildTelegramFundingActiveElsewhereMessage({
+  projection: futureSolanaProjection,
+  venue: "polymarket",
+});
+assert.match(activeMirror.text, /Active Deposit/u);
+assert.doesNotMatch(activeMirror.text, /11111111111111111111111111111111/u);
+assert.deepEqual(activeMirror.reply_markup?.inline_keyboard[0], [
+  {
+    callback_data: "hm:v1:deposit:polymarket",
+    text: "🔄 Refresh active Deposit",
+  },
+]);
 const futureSolanaTargetMessage = buildTelegramFundingTargetMessage({
   automaticConversion: true,
   contextId,
