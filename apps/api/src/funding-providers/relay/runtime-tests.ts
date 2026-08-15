@@ -955,7 +955,6 @@ const destination: FundingTarget = {
     [
       ...Object.keys(relayRehearsalScenarios),
       "polygon-usdc-to-base-usdc",
-      "polygon-usdc-to-polygon-pusd",
       "polygon-usdce-to-base-usdc",
       "solana-sol-to-base-usdc",
       "solana-sol-to-polygon-pusd",
@@ -990,7 +989,7 @@ const destination: FundingTarget = {
     sourceVm: "evm",
     destinationVm: "evm",
     quoteMode: "expected_output",
-    rehearsalScenario: null,
+    rehearsalScenario: relayRehearsalScenarios["polygon-usdc-to-polygon-pusd"],
   });
   assert.equal(
     RELAY_ROUTE_SPECS["solana-sol-to-base-usdc"]?.quoteMode,

@@ -249,7 +249,7 @@ const POLYMARKET_POLYGON_PUSD_USDCE_PRESENTATION = {
   destinationAssetSymbol: "pUSD",
   acceptedAssetSymbols: ["pUSD", "USDC.e"],
   automaticSourceAssetSymbol: "USDC.e",
-  selectionButtonLabel: "pUSD / USDC.e on Polygon",
+  selectionButtonLabel: "pUSD / USDC.e · Polygon",
   settlementLabel: "Direct / automatic 1:1 conversion",
   instructions: [
     "Send pUSD or USDC.e on Polygon.",
@@ -1701,7 +1701,7 @@ function resolvePolymarketPusdDestination(input: {
 
 const POLYMARKET_POLYGON_FUNDING_ADAPTER = Object.freeze({
   adapterKey: TELEGRAM_POLYMARKET_FUNDING_ADAPTER_KEY,
-  listedByDefault: false,
+  listedByDefault: true,
   profileId: POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
   venueId: "polymarket",
   routeKeys: new Set<string>([
@@ -1747,7 +1747,7 @@ const POLYMARKET_POLYGON_FUNDING_ADAPTER = Object.freeze({
 
 const POLYMARKET_POLYGON_DIRECT_FUNDING_ADAPTER = Object.freeze({
   adapterKey: "polymarket_polygon_pusd_direct_v1",
-  listedByDefault: true,
+  listedByDefault: false,
   profileId: "polymarket_polygon_pusd_direct_v1",
   venueId: "polymarket",
   routeKeys: new Set<string>([
@@ -1773,7 +1773,7 @@ const POLYMARKET_POLYGON_DIRECT_FUNDING_ADAPTER = Object.freeze({
 
 const POLYMARKET_POLYGON_WRAP_FUNDING_ADAPTER = Object.freeze({
   adapterKey: TELEGRAM_POLYMARKET_FUNDING_ADAPTER_KEY,
-  listedByDefault: true,
+  listedByDefault: false,
   profileId: POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
   venueId: "polymarket",
   routeKeys: new Set<string>([

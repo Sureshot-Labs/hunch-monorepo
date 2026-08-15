@@ -345,15 +345,17 @@ function erc20Quote() {
   return quote;
 }
 
-function v2Erc20Quote() {
+function v2Erc20Quote(
+  scenario = relayRehearsalScenarios["base-usdc-to-polygon-pusd"],
+) {
   const amount = 500_000n;
   const quote = {
     details: details({
-      originChainId: 8453,
-      originAddress: BASE_USDC,
+      originChainId: scenario.originChainId,
+      originAddress: scenario.originCurrency,
       originAmount: amount.toString(),
-      destinationChainId: 137,
-      destinationAddress: POLYGON_PUSD,
+      destinationChainId: scenario.destinationChainId,
+      destinationAddress: scenario.destinationCurrency,
       destinationAmount: "490000",
       destinationMinimumAmount: "450000",
     }),
@@ -362,8 +364,8 @@ function v2Erc20Quote() {
     steps: [
       step({
         id: "approve",
-        chainId: 8453,
-        to: BASE_USDC,
+        chainId: scenario.originChainId,
+        to: scenario.originCurrency,
         value: "0",
         data: erc20.encodeFunctionData("approve", [
           RELAY_DEPOSITORY_V2,
@@ -372,12 +374,12 @@ function v2Erc20Quote() {
       }),
       step({
         id: "deposit",
-        chainId: 8453,
+        chainId: scenario.originChainId,
         to: RELAY_DEPOSITORY_V2,
         value: "0",
         data: depositoryV2.encodeFunctionData("depositErc20", [
           user,
-          BASE_USDC,
+          scenario.originCurrency,
           amount,
           `0x${"11".repeat(32)}`,
         ]),
@@ -404,6 +406,22 @@ function v2Erc20Quote() {
   assert.equal(validated.routeShape, "relay-router-v3-native");
   assert.equal(validated.actions.length, 1);
   assert.equal(validated.minimumOutputRaw, 28_000_000_000_000n);
+}
+
+{
+  const scenario = relayRehearsalScenarios["polygon-usdc-to-polygon-pusd"];
+  const validated = validateRelayRehearsalQuote({
+    amount: 500_000n,
+    minimumOutputFloor: 400_000n,
+    quote: v2Erc20Quote(scenario),
+    scenario,
+    user,
+  });
+  assert.equal(validated.routeShape, "relay-depository-v2-erc20");
+  assert.deepEqual(
+    validated.actions.map((action) => action.stepId),
+    ["approve", "deposit"],
+  );
 }
 
 for (const [name, quote] of [

@@ -1935,19 +1935,25 @@ const combinedTargetMessage = buildTelegramFundingTargetMessageForSession({
   session,
   automaticConversionEnabled: true,
 });
-assert.match(combinedTargetMessage.text, /Choose the network and asset/u);
-assert.ok(combinedTargetMessage.reply_markup);
-assert.equal(
-  resolveTelegramFundingTargetChoice({
-    automaticConversionEnabled: true,
-    session,
-    observationVariants: [
-      variant("variant-usdce", usdce),
-      variant("variant-pusd", pUsd),
-    ],
-  }),
-  null,
+assert.ok(combinedTargetMessage.text.includes("pUSD / USDC\\.e"));
+assert.doesNotMatch(
+  combinedTargetMessage.text,
+  /Choose the network and asset/u,
 );
+assert.ok(combinedTargetMessage.reply_markup);
+const combinedChoice = resolveTelegramFundingTargetChoice({
+  automaticConversionEnabled: true,
+  session,
+  observationVariants: [
+    variant("variant-usdce", usdce),
+    variant("variant-pusd", pUsd),
+  ],
+});
+assert.ok(combinedChoice);
+assert.equal(combinedChoice.address, address);
+assert.equal(combinedChoice.mode, "pusd_or_usdce_automatic");
+assert.equal(combinedChoice.automaticConversion, true);
+assert.deepEqual(combinedChoice.variantIds, ["variant-pusd", "variant-usdce"]);
 assert.equal(
   resolveTelegramDirectPusdChoice({
     session: {

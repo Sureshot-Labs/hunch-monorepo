@@ -212,6 +212,7 @@ function assertHardBudgets(options: CliOptions): void {
     "polygon-pol-to-base-eth": 10_000_000_000_000_000_000n,
     "polygon-pusd-to-base-usdc": 3_000_000n,
     "base-usdc-to-polygon-pusd": 1_000_000n,
+    "polygon-usdc-to-polygon-pusd": 1_000_000n,
     "polygon-pol-to-solana-sol": 3_000_000_000_000_000_000n,
     "polygon-pusd-to-solana-usdc": 1_000_000n,
   };
