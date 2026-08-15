@@ -994,7 +994,12 @@ export async function ensureTelegramRelayEvmFundingAuthorization(
     dependencies.configuration ??
     loadRelayEvmExecutionConfiguration(environment);
   if (!relayEvmExecutionConfigurationReady(configuration)) return null;
-  const candidate = await resolveTelegramFundingProvisionWallet(pool, input);
+  const venueId = input.venueId ?? "polymarket";
+  const candidate = await resolveTelegramFundingProvisionWallet(pool, {
+    ...input,
+    controllerNetworkId:
+      venueId === "limitless" ? "evm:8453" : "evm:137",
+  });
   if (!candidate || candidate.controllerWalletId !== input.controllerWalletId) {
     return null;
   }
@@ -1012,7 +1017,6 @@ export async function ensureTelegramRelayEvmFundingAuthorization(
     });
     inspect = (wallet) => driver.inspectWalletProfileForProfile(wallet);
   }
-  const venueId = input.venueId ?? "polymarket";
   const profiles = Object.values(RELAY_EVM_FUNDING_PROFILE_SPECS).filter(
     (profile) => profile.venueIds.includes(venueId),
   );

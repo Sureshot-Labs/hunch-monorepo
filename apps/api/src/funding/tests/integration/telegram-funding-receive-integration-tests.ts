@@ -1114,6 +1114,30 @@ try {
     resolveManagedWallet: (input) =>
       resolveTelegramFundingManagedWalletIdentity(pool, input),
   });
+  const [polygonManagedWallet, baseManagedWallet] = await Promise.all([
+    resolveTelegramFundingManagedWalletIdentity(pool, {
+      userId,
+      telegramAccountId,
+      telegramUserId,
+      controllerNetworkId: "evm:137",
+    }),
+    resolveTelegramFundingManagedWalletIdentity(pool, {
+      userId,
+      telegramAccountId,
+      telegramUserId,
+      controllerNetworkId: "evm:8453",
+    }),
+  ]);
+  assert.equal(
+    polygonManagedWallet?.controllerWalletId,
+    controllerWalletId,
+    "the same EVM wallet must retain its Polygon-scoped controller identity",
+  );
+  assert.equal(
+    baseManagedWallet?.controllerWalletId,
+    limitlessControllerWalletId,
+    "the same EVM wallet must use a distinct Base-scoped controller identity",
+  );
   await pool.query(
     `update funding_receive_sessions
         set destination_option_id = $2

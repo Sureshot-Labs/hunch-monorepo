@@ -18,6 +18,7 @@ import {
   loadActiveTelegramFundingAuthorization,
   telegramFundingAuthorizationFingerprint,
 } from "../funding/execution/telegram-funding-authorization.js";
+import { resolveTelegramFundingProvisionWallet } from "../funding/execution/telegram-funding-managed-wallet.js";
 import { POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID } from "../funding/execution/delegated-funding-profile-ids.js";
 import { RELAY_EVM_FUNDING_PROFILE_SPECS } from "../funding/execution/relay-evm-profile-specs.js";
 import { fundingSidecarRuntimeConfig } from "../funding/runtime/sidecar-runtime-config.js";
@@ -323,28 +324,14 @@ export class TelegramTradeShortfallFundingService {
         reasonCodes: ["internal_route_destination_binding_unavailable"],
       };
     }
-    const controller = await this.pool.query<{ controller_wallet_id: string }>(
-      `select wallet.id::text as controller_wallet_id
-         from telegram_bot_trading_authorizations trading_authorization
-         join user_wallets wallet
-           on wallet.user_id = trading_authorization.user_id
-          and wallet.privy_wallet_id = trading_authorization.privy_wallet_id
-          and wallet.is_verified = true
-          and wallet.is_internal_wallet = true
-          and funding_account_identifier_equal(
-                trading_authorization.wallet_chain,
-                wallet.wallet_address,
-                trading_authorization.wallet_address
-              )
-        where trading_authorization.id = $1::uuid
-          and trading_authorization.user_id = $2::uuid
-          and trading_authorization.telegram_user_id = $3
-          and trading_authorization.enabled = true
-        order by wallet.id
-        limit 2`,
-      [input.authorizationId, input.userId, input.telegramUserId],
-    );
-    if (controller.rows.length !== 1 || !controller.rows[0]) {
+    const controller = await resolveTelegramFundingProvisionWallet(this.pool, {
+      userId: input.userId,
+      telegramAccountId: input.telegramAccountId,
+      telegramUserId: input.telegramUserId,
+      controllerNetworkId:
+        input.venue === "limitless" ? "evm:8453" : "evm:137",
+    });
+    if (!controller) {
       return {
         kind: "temporarily_unavailable",
         reasonCodes: ["internal_route_controller_wallet_unavailable"],
@@ -354,7 +341,7 @@ export class TelegramTradeShortfallFundingService {
       userId: input.userId,
       telegramAccountId: input.telegramAccountId,
       telegramUserId: input.telegramUserId,
-      controllerWalletId: controller.rows[0].controller_wallet_id,
+      controllerWalletId: controller.controllerWalletId,
       destinationOptionId: initial.destinationOptionId,
       venueBindingOptionId: initial.venueBindingOptionId,
       venueId: input.venue,
