@@ -4763,7 +4763,9 @@ export async function buildTelegramBotTradingMarketMessage(input: {
   });
   const canBuildBuyAuthority = buyDeliveryMode !== "direct_deposit_only";
   const canBuildBuyOptions =
-    canBuildBuyAuthority && nominalPresetAmountsUsd.length > 0;
+    canBuildBuyAuthority &&
+    buyDeliveryMode === "bot_submit" &&
+    nominalPresetAmountsUsd.length > 0;
   const canBuildCustomBuy =
     canBuildBuyAuthority && policy.customTradeInputEnabled;
   const buyOptions =
@@ -4793,6 +4795,16 @@ export async function buildTelegramBotTradingMarketMessage(input: {
           (option): option is TelegramExecutableBuyOption => option != null,
         )
       : [];
+  const buyButtonOptions: ReadonlyArray<
+    Pick<TelegramExecutableBuyOption, "amountUsd" | "side">
+  > =
+    buyDeliveryMode === "app_handoff"
+      ? nominalPresetAmountsUsd.flatMap((amountUsd) =>
+          (["YES", "NO"] as const)
+            .filter((side) => !focusedSide || side === focusedSide)
+            .map((side) => ({ amountUsd, side })),
+        )
+      : buyOptions;
   const canBuildSellOptions =
     canAttemptSell && canOfferTradeForReadiness(sellReadiness);
   const sellResolutions =
@@ -4845,7 +4857,7 @@ export async function buildTelegramBotTradingMarketMessage(input: {
   const observedYesAsk = observedAsk(input.context?.observedYesAsk);
   const observedNoAsk = observedAsk(input.context?.observedNoAsk);
   const hasBotAction =
-    buyOptions.length > 0 ||
+    buyButtonOptions.length > 0 ||
     sellOptions.length > 0 ||
     canBuildCustomBuy ||
     canBuildCustomSell ||
@@ -4926,7 +4938,7 @@ export async function buildTelegramBotTradingMarketMessage(input: {
     .join(" · ");
   if (buyPriceSummary) lines.push(`Buy: ${buyPriceSummary}`);
   if (sellPriceSummary) lines.push(`Sell: ${sellPriceSummary}`);
-  if (buyOptions.length > 0) {
+  if (buyButtonOptions.length > 0) {
     lines.push("Choose side and amount to spend:");
   }
   if (input.isAdminTest) {
@@ -5021,7 +5033,7 @@ export async function buildTelegramBotTradingMarketMessage(input: {
     );
   }
   if (
-    buyOptions.length > 0 ||
+    buyButtonOptions.length > 0 ||
     sellOptions.length > 0 ||
     canBuildCustomBuy ||
     canBuildCustomSell ||
@@ -5106,7 +5118,7 @@ export async function buildTelegramBotTradingMarketMessage(input: {
   const customBuyRow: TelegramBotTradingButton[] = [];
   for (const side of ["YES", "NO"] as const) {
     const row: TelegramBotTradingButton[] = [];
-    for (const option of buyOptions.filter(
+    for (const option of buyButtonOptions.filter(
       (candidate) => candidate.side === side,
     )) {
       const intentId = await insertBuyIntent({
