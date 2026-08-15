@@ -115,6 +115,40 @@ assert.equal(
   "Polymarket pUSD to Limitless remains the reverse Relay profile",
 );
 
+const depositWalletHandoff = {
+  ...option(
+    {
+      kind: "owned_location" as const,
+      location: {
+        kind: "wallet" as const,
+        locationId: "location_polygon_controller_fixture_12345678",
+        accountId: "account_fixture_12345678",
+        asset: polygonPusd,
+        details: {},
+      },
+    },
+    baseUsdc,
+  ),
+  requiredActions: [
+    {
+      kind: "external_handoff" as const,
+      safeLabel: "Move Polymarket Deposit Wallet funds",
+      actor: "user" as const,
+      valueMoving: true,
+      sponsorship: "none" as const,
+    },
+  ],
+};
+assert.equal(
+  resolveTelegramTradeShortfallExecutionProfile(
+    depositWalletHandoff,
+    "limitless",
+    baseUsdc,
+  ),
+  null,
+  "Deposit Wallet handoff must not be advertised as unattended Relay execution",
+);
+
 console.log(
   "[telegram-trade-shortfall-funding-tests] Slice C and bidirectional Relay profile selection passed",
 );

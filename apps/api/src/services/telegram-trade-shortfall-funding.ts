@@ -152,6 +152,17 @@ export function resolveTelegramTradeShortfallExecutionProfile(
   venue: Venue,
   destination: AssetRef,
 ): string | null {
+  // A Polymarket Deposit Wallet handoff is a separate, user-authorized
+  // relayer action. Do not present a route containing that action as an
+  // unattended Telegram/server route until it has its own exact authority
+  // and executor profile.
+  if (
+    option.requiredActions.some(
+      (action) => action.kind === "external_handoff",
+    )
+  ) {
+    return null;
+  }
   if (
     option.source.kind === "venue_preparation" &&
     option.source.venueId === "polymarket" &&
@@ -313,6 +324,13 @@ export class TelegramTradeShortfallFundingService {
       destinationAsset(input.venue),
     );
     if (!profileId) {
+      if (
+        selected.requiredActions.some(
+          (action) => action.kind === "external_handoff",
+        )
+      ) {
+        return { kind: "external_deposit_required" };
+      }
       return {
         kind: "temporarily_unavailable",
         reasonCodes: ["internal_route_requires_unsupported_execution_profile"],

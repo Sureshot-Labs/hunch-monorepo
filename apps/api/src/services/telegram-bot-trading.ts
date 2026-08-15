@@ -4124,20 +4124,34 @@ async function listResolvingTelegramTradeIntents(
   Array<{
     action: TelegramBotTradingAction;
     ageMinutes: number;
+    fundingOperationStatus: string | null;
+    fundingProgressStage: string | null;
+    intentId: string;
     marketTitle: string;
+    status: string;
   }>
 > {
   const result = await db.query<{
     action: TelegramBotTradingAction;
     age_minutes: string;
+    funding_operation_status: string | null;
+    funding_progress_stage: string | null;
+    intent_id: string;
     market_title: string;
+    status: string;
   }>(
     `SELECT
        tti.action,
        greatest(0, floor(extract(epoch FROM (now() - tti.created_at)) / 60))::text AS age_minutes,
-       coalesce(m.title, tti.market_id) AS market_title
+       funding_operation.status AS funding_operation_status,
+       funding_operation.progress_stage AS funding_progress_stage,
+       tti.id::text AS intent_id,
+       coalesce(m.title, tti.market_id) AS market_title,
+       tti.status
      FROM telegram_trade_intents tti
      LEFT JOIN unified_markets m ON m.id = tti.market_id
+     LEFT JOIN funding_operations funding_operation
+       ON funding_operation.id = tti.funding_operation_id
      WHERE tti.telegram_user_id = $1
        AND (
          (tti.status = 'confirming' AND tti.expires_at > now())
@@ -4153,8 +4167,42 @@ async function listResolvingTelegramTradeIntents(
   return result.rows.map((row) => ({
     action: row.action,
     ageMinutes: Math.max(0, Number(row.age_minutes) || 0),
+    fundingOperationStatus: row.funding_operation_status,
+    fundingProgressStage: row.funding_progress_stage,
+    intentId: row.intent_id,
     marketTitle: row.market_title,
+    status: row.status,
   }));
+}
+
+function telegramFundingProgressLabel(
+  stage: string | null,
+  operationStatus?: string | null,
+): string {
+  if (
+    operationStatus === "cancelled" ||
+    operationStatus === "failed" ||
+    operationStatus === "refunded"
+  ) {
+    return "Stopped — open to retry";
+  }
+  switch (stage) {
+    case "committed":
+      return "Queued";
+    case "source_action":
+    case "source_observed":
+      return "Moving source funds";
+    case "routing":
+    case "intermediate_observed":
+      return "Routing";
+    case "destination_observed":
+    case "venue_preparation":
+      return "Finalizing";
+    case "ready_for_consumer":
+      return "Ready";
+    default:
+      return "Checking";
+  }
 }
 
 async function withOptionalTransaction<T>(
@@ -4558,6 +4606,13 @@ export async function buildTelegramBotTradingStatusMessage(
     `🧰 ${formatTelegramFieldMarkdownV2("Actions", actions || "None enabled")}`,
   ];
   if (unresolvedIntentCount > 0) {
+    const terminalFundingIntent = resolvingIntents.some(
+      (intent) =>
+        intent.status === "funding" &&
+        ["cancelled", "failed", "refunded"].includes(
+          intent.fundingOperationStatus ?? "",
+        ),
+    );
     lines.push(
       "",
       `⏳ ${formatTelegramFieldMarkdownV2(
@@ -4567,13 +4622,18 @@ export async function buildTelegramBotTradingStatusMessage(
       ...resolvingIntents.map(
         (intent) =>
           `• ${escapeMarkdown(
-            `${intent.action.toUpperCase()} · ${intent.marketTitle} · ${intent.ageMinutes}m`,
+            `${intent.action.toUpperCase()} · ${intent.marketTitle} · ${telegramFundingProgressLabel(intent.fundingProgressStage, intent.fundingOperationStatus)} · ${intent.ageMinutes}m`,
           )}`,
       ),
       "",
-      `🤖 ${formatTelegramFieldMarkdownV2("User action required", "No")}`,
+      `🤖 ${formatTelegramFieldMarkdownV2(
+        "User action required",
+        terminalFundingIntent ? "Yes" : "No",
+      )}`,
       formatTelegramItalicMarkdownV2(
-        "The bot is checking these trades automatically.",
+        terminalFundingIntent
+          ? "Open the stopped funding item below to return to the market safely."
+          : "The bot is checking these trades automatically.",
       ),
     );
   }
@@ -4591,6 +4651,25 @@ export async function buildTelegramBotTradingStatusMessage(
   }
   return {
     parse_mode: "MarkdownV2",
+    ...(resolvingIntents.some(
+      (intent) => intent.action === "buy" && intent.status === "funding",
+    )
+      ? {
+          reply_markup: {
+            inline_keyboard: resolvingIntents
+              .filter(
+                (intent) =>
+                  intent.action === "buy" && intent.status === "funding",
+              )
+              .map((intent) => [
+                {
+                  callback_data: `${TELEGRAM_BOT_TRADING_CALLBACK_PREFIX}:retry_buy:${intent.intentId}`,
+                  text: `↩️ Open funding · ${intent.marketTitle.slice(0, 24)}`,
+                },
+              ]),
+          },
+        }
+      : {}),
     text: joinTelegramMarkdownV2Lines(lines),
   };
 }
@@ -9813,14 +9892,69 @@ export async function handleTelegramBotTradingCallback(
       funding.progress_stage !== "ready_for_consumer" ||
       !funding.reservation_id
     ) {
+      const terminalFunding =
+        funding?.operation_status === "cancelled" ||
+        funding?.operation_status === "failed" ||
+        funding?.operation_status === "refunded";
+      if (terminalFunding) {
+        await updateIntentStatus({
+          allowedStatuses: ["funding"],
+          db: input.db,
+          errorCode: `funding_${funding.operation_status}`,
+          errorMessage:
+            "Funding ended before the Buy could continue. No trade was submitted.",
+          intentId: intent.id,
+          status: "failed",
+        });
+      }
       await input.answerCallbackQuery({
         callbackQueryId: input.callbackQuery.id,
         showAlert: true,
         text:
-          funding?.operation_status === "failed" ||
-          funding?.operation_status === "recovery_required"
+          terminalFunding || funding?.operation_status === "recovery_required"
             ? "⚠️ Funding needs review. No Buy was submitted."
             : "⏳ Funding is still being prepared.",
+      });
+      const retryButton = {
+        callback_data: `${TELEGRAM_BOT_TRADING_CALLBACK_PREFIX}:retry_buy:${intent.id}`,
+        text: "🔄 Refresh funding status",
+      };
+      const openMarketButton = market
+        ? buildTelegramTradingMiniAppButton({
+            appBaseUrl: input.appBaseUrl,
+            path: openMarketUrl(input.appBaseUrl, market),
+            telegramMiniAppEnabled: input.telegramMiniAppEnabled,
+            text: "Open market",
+          })
+        : null;
+      const progressRows = terminalFunding
+        ? telegramTradingButtonRows(openMarketButton)
+        : [[retryButton]];
+      await input.sendMessage({
+        chat_id: chatId,
+        parse_mode: "MarkdownV2",
+        ...(progressRows.length > 0
+          ? { reply_markup: { inline_keyboard: progressRows } }
+          : {}),
+        text: formatTelegramTradeLifecycleMessageMarkdownV2({
+          heading: terminalFunding
+            ? "Funding route stopped safely."
+            : "Preparing funds for this Buy.",
+          lines: terminalFunding
+            ? [
+                "No trade was submitted and this route will not be retried automatically. Open the market to build a fresh quote.",
+              ]
+            : [
+                `Order: ${formatUsd(Number(intent.amount_usd ?? 0))}`,
+                `Status: ${telegramFundingProgressLabel(
+                  funding?.progress_stage ?? null,
+                  funding?.operation_status ?? null,
+                )}`,
+                "The Buy has not been submitted yet.",
+              ],
+          marketTitle: intent.market_title,
+          venue: intent.venue,
+        }),
       });
       return true;
     }
@@ -10170,7 +10304,7 @@ export async function handleTelegramBotTradingCallback(
       return true;
     }
     try {
-      const committed = await input.commitTradeShortfall({
+      await input.commitTradeShortfall({
         ...fundingIdentity,
         proposal: tradeFundingProposal,
       });
@@ -10192,11 +10326,17 @@ export async function handleTelegramBotTradingCallback(
           ],
         },
         text: formatTelegramTradeLifecycleMessageMarkdownV2({
-          heading: "Preparing existing Hunch funds.",
+          heading: "Preparing funds for this Buy.",
           lines: [
-            `Operation ${committed.operationId} is moving the confirmed shortfall to ${intent.venue}.`,
+            `Order: ${formatUsd(Number(intent.amount_usd ?? 0))}`,
+            "Source: existing Hunch balance.",
+            ...(tradeFundingProposal.eta
+              ? [
+                  `Expected time: about ${tradeFundingProposal.eta.minSeconds}–${tradeFundingProposal.eta.maxSeconds} seconds.`,
+                ]
+              : []),
             intent.delivery_mode === "app_handoff"
-              ? "When ready, the final Buy will open in Hunch."
+              ? "When ready, the final Buy will open in Hunch. No trade has been submitted yet."
               : "When ready, the Buy will be re-quoted within your confirmed limits.",
           ],
           marketTitle: intent.market_title,
