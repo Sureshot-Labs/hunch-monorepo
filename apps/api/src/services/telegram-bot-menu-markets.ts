@@ -20,6 +20,8 @@ import {
 
 const SEARCH_KEY_PREFIX = "tg:signal_bot:v1:market_search";
 const SEARCH_TTL_SEC = 10 * 60;
+export const SIGNAL_BOT_MARKET_SEARCH_PAGE_SIZE = 5;
+const SEARCH_SESSION_RESULT_LIMIT = 25;
 
 type SearchRedis = {
   get(key: string): Promise<string | null>;
@@ -76,7 +78,7 @@ export async function writeSignalBotMarketSearchSession(input: {
   const session: SignalBotMarketSearchSession = {
     chatId: input.chatId,
     query: input.query,
-    results: input.results.slice(0, 5),
+    results: input.results.slice(0, SEARCH_SESSION_RESULT_LIMIT),
     telegramUserId: input.telegramUserId,
   };
   await input.redis.set(searchKey(sessionId), JSON.stringify(session), {
@@ -105,7 +107,10 @@ export async function readSignalBotMarketSearchSession(input: {
     return {
       chatId: parsed.chatId,
       query: typeof parsed.query === "string" ? parsed.query : null,
-      results: parsed.results.slice(0, 5) as SignalBotMarketSearchResult[],
+      results: parsed.results.slice(
+        0,
+        SEARCH_SESSION_RESULT_LIMIT,
+      ) as SignalBotMarketSearchResult[],
       telegramUserId: parsed.telegramUserId,
     };
   } catch {
@@ -134,10 +139,24 @@ function venueOptions(
 
 export function buildSignalBotMarketSearchScreen(input: {
   callbackPrefix: string;
+  page?: number;
   query: string | null;
   results: SignalBotMarketSearchResult[];
   sessionId: string;
 }): SignalBotMarketSearchMessage {
+  const pageCount = Math.max(
+    1,
+    Math.ceil(input.results.length / SIGNAL_BOT_MARKET_SEARCH_PAGE_SIZE),
+  );
+  const page = Math.min(
+    pageCount - 1,
+    Math.max(0, Math.trunc(input.page ?? 0)),
+  );
+  const pageStart = page * SIGNAL_BOT_MARKET_SEARCH_PAGE_SIZE;
+  const pageResults = input.results.slice(
+    pageStart,
+    pageStart + SIGNAL_BOT_MARKET_SEARCH_PAGE_SIZE,
+  );
   const title = input.query
     ? `Results for “${compactTelegramText(input.query, 120)}”`
     : "Trending markets";
@@ -152,8 +171,8 @@ export function buildSignalBotMarketSearchScreen(input: {
       ),
     );
   } else {
-    for (const result of input.results.slice(0, 5)) {
-      const index = visibleResults.length;
+    for (const result of pageResults) {
+      const index = pageStart + visibleResults.length;
       const identity = buildTelegramMarketIdentity({
         eventTitle: result.eventTitle,
         marketTitle: result.marketTitle,
@@ -204,10 +223,10 @@ export function buildSignalBotMarketSearchScreen(input: {
       visibleResults.push(result);
       lines.push(block);
     }
-    if (visibleResults.length < input.results.length) {
+    if (visibleResults.length < pageResults.length) {
       lines.push(
         escapeTelegramMarkdownV2(
-          `+ ${input.results.length - visibleResults.length} more`,
+          `+ ${pageResults.length - visibleResults.length} more on this page`,
         ),
         "",
       );
@@ -216,27 +235,50 @@ export function buildSignalBotMarketSearchScreen(input: {
   return {
     reply_markup: {
       inline_keyboard: [
-        ...visibleResults.map((result, index) => [
-          {
-            callback_data: `${input.callbackPrefix}search:${input.sessionId}:${index}`,
-            ...(venueOptions(result).length === 1
-              ? {
-                  icon_custom_emoji_id: formatTelegramVenueButtonIcon(
-                    result.venue,
-                  ),
-                }
-              : {}),
-            text: compactTelegramText(
-              `${venueOptions(result).length > 1 ? "🌐 " : ""}${index + 1}. ${
-                buildTelegramMarketIdentity({
-                  eventTitle: result.eventTitle,
-                  marketTitle: result.marketTitle,
-                }).buttonLabel
-              }${venueOptions(result).length > 1 ? ` · ${venueOptions(result).length} venues` : ""}`,
-              TELEGRAM_INLINE_BUTTON_GRAPHEME_LIMIT,
-            ),
-          },
-        ]),
+        ...visibleResults.map((result, localIndex) => {
+          const index = pageStart + localIndex;
+          return [
+            {
+              callback_data: `${input.callbackPrefix}search:${input.sessionId}:${index}`,
+              ...(venueOptions(result).length === 1
+                ? {
+                    icon_custom_emoji_id: formatTelegramVenueButtonIcon(
+                      result.venue,
+                    ),
+                  }
+                : {}),
+              text: compactTelegramText(
+                `${venueOptions(result).length > 1 ? "🌐 " : ""}${index + 1}. ${
+                  buildTelegramMarketIdentity({
+                    eventTitle: result.eventTitle,
+                    marketTitle: result.marketTitle,
+                  }).buttonLabel
+                }${venueOptions(result).length > 1 ? ` · ${venueOptions(result).length} venues` : ""}`,
+                TELEGRAM_INLINE_BUTTON_GRAPHEME_LIMIT,
+              ),
+            },
+          ];
+        }),
+        ...(input.results.length > SIGNAL_BOT_MARKET_SEARCH_PAGE_SIZE
+          ? [
+              [
+                {
+                  callback_data: `${input.callbackPrefix}search_page:${input.sessionId}:${Math.max(0, page - 1)}`,
+                  text:
+                    page === 0
+                      ? `· Page ${page + 1}/${pageCount}`
+                      : "⬅️ Previous",
+                },
+                {
+                  callback_data: `${input.callbackPrefix}search_page:${input.sessionId}:${Math.min(pageCount - 1, page + 1)}`,
+                  text:
+                    page === pageCount - 1
+                      ? `Page ${page + 1}/${pageCount} ·`
+                      : "Next ➡️",
+                },
+              ],
+            ]
+          : []),
         [
           {
             callback_data: `${input.callbackPrefix}trading:market_input`,
@@ -259,6 +301,9 @@ export function buildSignalBotMarketVenuePickerScreen(input: {
   resultIndex: number;
   sessionId: string;
 }): SignalBotMarketSearchMessage {
+  const returnPage = Math.floor(
+    input.resultIndex / SIGNAL_BOT_MARKET_SEARCH_PAGE_SIZE,
+  );
   const identity = buildTelegramMarketIdentity({
     eventTitle: input.result.eventTitle,
     marketTitle: input.result.marketTitle,
@@ -279,7 +324,7 @@ export function buildSignalBotMarketVenuePickerScreen(input: {
         ]),
         [
           {
-            callback_data: `${input.callbackPrefix}search_back:${input.sessionId}`,
+            callback_data: `${input.callbackPrefix}search_back:${input.sessionId}:${returnPage}`,
             text: "⬅️ Back to results",
           },
           {

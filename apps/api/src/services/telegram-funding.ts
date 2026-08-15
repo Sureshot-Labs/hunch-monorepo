@@ -419,7 +419,8 @@ export function canAttachTelegramFundingBuyReturn(input: {
     input.policy.buyContinuationEnabled &&
     input.policy.tradingEnabled &&
     input.policy.tradingActions.includes("buy") &&
-    input.policy.tradingVenues.includes(input.venue) &&
+    (input.policy.tradingVenues.includes(input.venue) ||
+      input.venue === "limitless") &&
     input.market?.venue === input.venue &&
     (input.eventId == null || input.market.event_id === input.eventId) &&
     isOrderable(input.market) &&

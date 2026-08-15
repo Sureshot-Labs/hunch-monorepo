@@ -25,8 +25,7 @@ export type TelegramMarketSearchVenueOption = Omit<
   "venueOptions"
 >;
 
-const TELEGRAM_SEARCH_DISPLAY_LIMIT = 5;
-const TELEGRAM_SEARCH_BASE_RESULT_LIMIT = 10;
+const TELEGRAM_SEARCH_SESSION_RESULT_LIMIT = 25;
 const TELEGRAM_SEARCH_AGG_SEED_LIMIT = 5;
 const TELEGRAM_SEARCH_DOMINANT_VENUE_RATIO = 0.6;
 
@@ -234,7 +233,7 @@ async function enrichTelegramMarketSearchResults(input: {
   venues: string[];
 }): Promise<TelegramMarketSearchResult[]> {
   if (!input.resolveCrossVenueAlternatives || input.results.length === 0) {
-    return input.results.slice(0, TELEGRAM_SEARCH_DISPLAY_LIMIT);
+    return input.results.slice(0, TELEGRAM_SEARCH_SESSION_RESULT_LIMIT);
   }
   const resolveCrossVenueAlternatives = input.resolveCrossVenueAlternatives;
   const seeds = input.results.slice(0, TELEGRAM_SEARCH_AGG_SEED_LIMIT);
@@ -261,7 +260,7 @@ async function enrichTelegramMarketSearchResults(input: {
   return groupTelegramMarketSearchResults({
     alternativesByMarketId,
     results: input.results,
-  }).slice(0, TELEGRAM_SEARCH_DISPLAY_LIMIT);
+  }).slice(0, TELEGRAM_SEARCH_SESSION_RESULT_LIMIT);
 }
 
 export async function searchTelegramMarkets(input: {
@@ -281,9 +280,7 @@ export async function searchTelegramMarkets(input: {
   );
   if (lifecycle.venues.length === 0) return [];
   const baseInputs = {
-    limit: query
-      ? TELEGRAM_SEARCH_BASE_RESULT_LIMIT
-      : TELEGRAM_SEARCH_DISPLAY_LIMIT,
+    limit: TELEGRAM_SEARCH_SESSION_RESULT_LIMIT,
     offset: 0,
     minVol: 0,
     minLiquidity: 0,
@@ -302,7 +299,7 @@ export async function searchTelegramMarkets(input: {
   if (!query) {
     const rows = await fetchFeedMarketsDirect(input.pool, baseInputs);
     return rows
-      .slice(0, TELEGRAM_SEARCH_DISPLAY_LIMIT)
+      .slice(0, TELEGRAM_SEARCH_SESSION_RESULT_LIMIT)
       .map(mapTelegramMarketSearchResult);
   }
   const fetchRankedResults = async (
@@ -336,7 +333,7 @@ export async function searchTelegramMarkets(input: {
 
   const primary = await fetchRankedResults(
     lifecycle.venues,
-    TELEGRAM_SEARCH_BASE_RESULT_LIMIT,
+    TELEGRAM_SEARCH_SESSION_RESULT_LIMIT,
   );
   const secondaryVenues = resolveTelegramSearchSecondaryVenues({
     results: primary,
@@ -344,12 +341,15 @@ export async function searchTelegramMarkets(input: {
   });
   const secondary =
     secondaryVenues.length > 0
-      ? await fetchRankedResults(secondaryVenues, TELEGRAM_SEARCH_DISPLAY_LIMIT)
+      ? await fetchRankedResults(
+          secondaryVenues,
+          TELEGRAM_SEARCH_SESSION_RESULT_LIMIT,
+        )
       : [];
   const diversified =
     secondary.length > 0
       ? diversifyTelegramMarketSearchResults({
-          limit: TELEGRAM_SEARCH_BASE_RESULT_LIMIT,
+          limit: TELEGRAM_SEARCH_SESSION_RESULT_LIMIT,
           primary,
           secondary,
         })

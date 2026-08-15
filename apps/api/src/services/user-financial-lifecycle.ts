@@ -193,7 +193,7 @@ export async function fetchUserFinancialLifecycleSummary(
           from telegram_trade_intents intent
           where intent.user_id = any($1::uuid[])
             and intent.status in (
-              'executing', 'submitted', 'reconcile_required'
+              'funding', 'executing', 'submitted', 'reconcile_required'
             )
         ) as active_telegram_intent,
         exists (

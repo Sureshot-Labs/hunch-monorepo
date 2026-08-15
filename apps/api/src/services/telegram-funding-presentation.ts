@@ -266,24 +266,21 @@ export function buildTelegramFundingTargetChoicesMessage(input: {
       presentation: targets[0].presentation,
     });
   }
-  const targetRows: Array<Array<{ callback_data: string; text: string }>> = [];
-  for (let index = 0; index < targets.length; index += 2) {
-    targetRows.push(
-      targets.slice(index, index + 2).map((target) => ({
-        callback_data: telegramFundingCallbackData({
-          choiceToken: fundingTargetChoiceToken({
-            automaticConversion: target.automaticSourceAsset !== null,
-            routeKey: target.presentation.routeKey,
-          }),
-          contextId: input.contextId,
-          kind: "select",
+  const targetRows = targets.map((target) => [
+    {
+      callback_data: telegramFundingCallbackData({
+        choiceToken: fundingTargetChoiceToken({
+          automaticConversion: target.automaticSourceAsset !== null,
+          routeKey: target.presentation.routeKey,
         }),
-        text:
-          target.presentation.selectionButtonLabel ??
-          `${target.presentation.acceptedAssetSymbols.join(" / ")} on ${target.presentation.networkLabel}`,
-      })),
-    );
-  }
+        contextId: input.contextId,
+        kind: "select",
+      }),
+      text:
+        target.presentation.selectionButtonLabel ??
+        `${target.presentation.acceptedAssetSymbols.join(" / ")} on ${target.presentation.networkLabel}`,
+    },
+  ]);
   const venueLabel = targets[0]?.presentation.venueLabel ?? "venue";
   return {
     fundingContextId: input.contextId,

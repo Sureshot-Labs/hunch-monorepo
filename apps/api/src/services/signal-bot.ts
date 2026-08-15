@@ -2899,6 +2899,7 @@ export async function handleSignalBotMenuCallback(
   if (
     route.kind === "market_search_result" ||
     route.kind === "market_search_back" ||
+    route.kind === "market_search_page" ||
     route.kind === "market_search_venue" ||
     route.kind === "position" ||
     route.kind === "deposit" ||

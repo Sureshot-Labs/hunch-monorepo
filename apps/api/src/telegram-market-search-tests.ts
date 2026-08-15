@@ -541,6 +541,95 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
+    name: "search and trending sessions paginate with bounded callbacks",
+    run: async () => {
+      const redis = redisStore();
+      const results = Array.from({ length: 12 }, (_, index) => ({
+        ...sampleResult,
+        marketId: crypto.randomUUID(),
+        marketTitle: `Market ${index + 1}`,
+      }));
+      const sessionId = await writeSignalBotMarketSearchSession({
+        chatId: "10",
+        query: null,
+        redis,
+        results,
+        telegramUserId: 20,
+      });
+      const first = buildSignalBotMarketSearchScreen({
+        callbackPrefix: "hm:v1:",
+        query: null,
+        results,
+        sessionId,
+      });
+      assert.match(first.text, /Trending markets/u);
+      assert.doesNotMatch(first.text, /6\. /u);
+      assert.match(JSON.stringify(first.reply_markup), /Next/u);
+      assert.match(
+        JSON.stringify(first.reply_markup),
+        new RegExp(`search_page:${sessionId}:1`, "u"),
+      );
+
+      const nextRoute = parseSignalBotInteractiveMenuRoute(
+        `search_page:${sessionId}:1`,
+      );
+      assert.deepEqual(nextRoute, {
+        kind: "market_search_page",
+        page: 1,
+        sessionId,
+      });
+      assert.deepEqual(
+        parseSignalBotInteractiveMenuRoute(`search_venue:${sessionId}:12:1`),
+        {
+          index: 1,
+          kind: "market_search_venue",
+          resultIndex: 12,
+          sessionId,
+        },
+        "cross-venue results on later pages keep a routable callback",
+      );
+      let rendered = "";
+      let expired = 0;
+      assert.ok(nextRoute);
+      await handleSignalBotInteractiveMenuCallback({
+        callbackPrefix: "hm:v1:",
+        chatId: "10",
+        messageId: 42,
+        redis,
+        render: async (message) => {
+          rendered = JSON.stringify(message);
+        },
+        renderExpiredSearch: async () => {
+          expired += 1;
+        },
+        route: nextRoute,
+        telegramUserId: 20,
+      });
+      assert.match(rendered, /"text":"6\. Market 6/u);
+      assert.match(rendered, /Previous/u);
+      assert.match(rendered, /Next/u);
+      assert.equal(expired, 0);
+
+      const invalidRoute = parseSignalBotInteractiveMenuRoute(
+        `search_page:${sessionId}:9`,
+      );
+      assert.ok(invalidRoute);
+      await handleSignalBotInteractiveMenuCallback({
+        callbackPrefix: "hm:v1:",
+        chatId: "10",
+        messageId: 42,
+        redis,
+        render: async () => undefined,
+        renderExpiredSearch: async () => {
+          expired += 1;
+        },
+        route: invalidRoute,
+        telegramUserId: 20,
+      });
+      assert.equal(expired, 1);
+    },
+  },
+  {
     name: "long Unicode search results stay inside Telegram budgets",
     run: () => {
       const message = buildSignalBotMarketSearchScreen({

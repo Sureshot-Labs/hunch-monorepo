@@ -442,21 +442,6 @@ async function rejectInvalidPolymarketWrapInTransaction(
             join users app_user
               on app_user.id = funding_authorization.user_id
              and coalesce(app_user.is_active, true) = true
-            join funding_receive_receipts receipt
-              on receipt.id::text =
-                   operation.support_metadata ->> 'fundingReceiveReceiptId'
-             and receipt.child_funding_operation_id = operation.id
-             and receipt.user_id = operation.user_id
-            join telegram_funding_sessions funding_context
-              on funding_context.receive_session_id = receipt.receive_session_id
-             and funding_context.user_id = operation.user_id
-            join telegram_funding_consents funding_consent
-              on funding_consent.id::text =
-                   operation.support_metadata ->> 'telegramFundingConsentId'
-             and funding_consent.telegram_funding_session_id = funding_context.id
-             and funding_consent.consent_fingerprint =
-                   operation.support_metadata ->>
-                     'telegramFundingConsentFingerprint'
             where funding_authorization.id::text =
                     operation.support_metadata ->> 'fundingAuthorizationId'
               and funding_authorization.user_id = operation.user_id
@@ -479,6 +464,46 @@ async function rejectInvalidPolymarketWrapInTransaction(
               and (
                 funding_authorization.expires_at is null
                 or funding_authorization.expires_at > $7
+              )
+              and (
+                exists (
+                  select 1
+                    from funding_receive_receipts receipt_row
+                    join telegram_funding_sessions funding_context
+                      on funding_context.receive_session_id =
+                           receipt_row.receive_session_id
+                     and funding_context.user_id = operation.user_id
+                    join telegram_funding_consents funding_consent
+                      on funding_consent.id::text =
+                           operation.support_metadata ->>
+                             'telegramFundingConsentId'
+                     and funding_consent.telegram_funding_session_id =
+                           funding_context.id
+                     and funding_consent.consent_fingerprint =
+                           operation.support_metadata ->>
+                             'telegramFundingConsentFingerprint'
+                   where receipt_row.id::text =
+                           operation.support_metadata ->>
+                             'fundingReceiveReceiptId'
+                     and receipt_row.child_funding_operation_id = operation.id
+                     and receipt_row.user_id = operation.user_id
+                     and receipt_row.status = 'routing'
+                     and operation.requested_source_amount ->> 'raw' =
+                           receipt_row.raw_amount::text
+                )
+                or exists (
+                  select 1
+                    from telegram_trade_intents trade_intent
+                   where trade_intent.id::text =
+                           operation.support_metadata ->>
+                             'telegramTradeIntentId'
+                     and trade_intent.user_id = operation.user_id
+                     and trade_intent.funding_operation_id = operation.id
+                     and trade_intent.status = 'funding'
+                     and trade_intent.submit_started_at is null
+                     and operation.support_metadata ->>
+                           'delegatedOriginKind' = 'trade_shortfall_intent'
+                )
               )
           )
         )
@@ -541,7 +566,7 @@ async function claimPolymarketWrapInTransaction(
         step.executor_id,
         step.normalized_action,
         step.payer_requirement,
-        receipt.raw_amount::text as receipt_raw,
+        operation.requested_source_amount ->> 'raw' as receipt_raw,
         funding_authorization.telegram_account_id,
         funding_authorization.telegram_user_id,
         funding_authorization.user_wallet_id,
@@ -572,12 +597,6 @@ async function claimPolymarketWrapInTransaction(
       left join funding_operation_steps dependency
         on dependency.id = step.depends_on_step_id
        and dependency.operation_id = step.operation_id
-      join funding_receive_receipts receipt
-        on receipt.id::text =
-             operation.support_metadata ->> 'fundingReceiveReceiptId'
-       and receipt.child_funding_operation_id = operation.id
-       and receipt.user_id = operation.user_id
-       and receipt.status = 'routing'
       join telegram_funding_authorizations funding_authorization
         on funding_authorization.id::text =
              operation.support_metadata ->> 'fundingAuthorizationId'
@@ -587,28 +606,21 @@ async function claimPolymarketWrapInTransaction(
        and funding_authorization.venue_id = operation.venue_id
        and funding_authorization.venue_binding_option_id =
              operation.support_metadata ->> 'venueBindingOptionId'
-       and funding_authorization.source_network_id = receipt.network_id
+       and funding_authorization.source_network_id =
+             operation.requested_source_amount -> 'asset' ->> 'networkId'
        and funding_account_identifier_equal(
-             receipt.network_id,
+             operation.requested_source_amount -> 'asset' ->> 'networkId',
              funding_authorization.source_asset_id,
-             receipt.asset_id
+             operation.requested_source_amount -> 'asset' ->> 'assetId'
            )
-       and funding_authorization.source_asset_decimals = receipt.asset_decimals
+       and funding_authorization.source_asset_decimals =
+             (operation.requested_source_amount -> 'asset' ->> 'decimals')::int
        and funding_authorization.user_wallet_id is not null
        and funding_authorization.revoked_at is null
        and (
          funding_authorization.expires_at is null
          or funding_authorization.expires_at > clock_timestamp()
        )
-      join telegram_funding_sessions funding_context
-        on funding_context.receive_session_id = receipt.receive_session_id
-       and funding_context.user_id = operation.user_id
-      join telegram_funding_consents funding_consent
-        on funding_consent.id::text =
-             operation.support_metadata ->> 'telegramFundingConsentId'
-       and funding_consent.telegram_funding_session_id = funding_context.id
-       and funding_consent.consent_fingerprint =
-             operation.support_metadata ->> 'telegramFundingConsentFingerprint'
       where step.executor_id = $1
         and step.state = 'action_required'
         and (step.depends_on_step_id is null or dependency.state = 'succeeded')
@@ -621,13 +633,51 @@ async function claimPolymarketWrapInTransaction(
         )
         and operation.support_metadata ->> 'preparationKind' =
               'polymarket_funding_router'
+        and operation.requested_source_amount ->> 'raw' ~ '^[1-9][0-9]*$'
+        and (
+          exists (
+            select 1
+              from funding_receive_receipts receipt_row
+              join telegram_funding_sessions funding_context
+                on funding_context.receive_session_id =
+                     receipt_row.receive_session_id
+               and funding_context.user_id = operation.user_id
+              join telegram_funding_consents funding_consent
+                on funding_consent.id::text =
+                     operation.support_metadata ->> 'telegramFundingConsentId'
+               and funding_consent.telegram_funding_session_id =
+                     funding_context.id
+               and funding_consent.consent_fingerprint =
+                     operation.support_metadata ->>
+                       'telegramFundingConsentFingerprint'
+             where receipt_row.id::text =
+                     operation.support_metadata ->> 'fundingReceiveReceiptId'
+               and receipt_row.child_funding_operation_id = operation.id
+               and receipt_row.user_id = operation.user_id
+               and receipt_row.status = 'routing'
+               and operation.requested_source_amount ->> 'raw' =
+                     receipt_row.raw_amount::text
+          )
+          or exists (
+            select 1
+              from telegram_trade_intents trade_intent
+             where trade_intent.id::text =
+                     operation.support_metadata ->> 'telegramTradeIntentId'
+               and trade_intent.user_id = operation.user_id
+               and trade_intent.funding_operation_id = operation.id
+               and trade_intent.status = 'funding'
+               and trade_intent.submit_started_at is null
+               and operation.support_metadata ->> 'delegatedOriginKind' =
+                     'trade_shortfall_intent'
+          )
+        )
         and not exists (
           select 1
           from funding_operation_step_attempts attempt
           where attempt.step_id = step.id
         )
       order by operation.created_at asc, step.ordinal asc
-      for update of operation, step, receipt, funding_authorization skip locked
+      for update of operation, step, funding_authorization skip locked
       limit 1
     `,
     [POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID],
@@ -754,7 +804,7 @@ async function recoverPolymarketWrapInTransaction(
         step.executor_id,
         step.normalized_action,
         step.payer_requirement,
-        receipt.raw_amount::text as receipt_raw,
+        operation.requested_source_amount ->> 'raw' as receipt_raw,
         funding_authorization.telegram_account_id,
         funding_authorization.telegram_user_id,
         funding_authorization.user_wallet_id,
@@ -782,24 +832,10 @@ async function recoverPolymarketWrapInTransaction(
       from funding_operation_step_attempts attempt
       join funding_operation_steps step on step.id = attempt.step_id
       join funding_operations operation on operation.id = step.operation_id
-      join funding_receive_receipts receipt
-        on receipt.id::text =
-             operation.support_metadata ->> 'fundingReceiveReceiptId'
-       and receipt.child_funding_operation_id = operation.id
-       and receipt.user_id = operation.user_id
       join telegram_funding_authorizations funding_authorization
         on funding_authorization.id::text =
              operation.support_metadata ->> 'fundingAuthorizationId'
        and funding_authorization.user_id = operation.user_id
-      join telegram_funding_sessions funding_context
-        on funding_context.receive_session_id = receipt.receive_session_id
-       and funding_context.user_id = operation.user_id
-      join telegram_funding_consents funding_consent
-        on funding_consent.id::text =
-             operation.support_metadata ->> 'telegramFundingConsentId'
-       and funding_consent.telegram_funding_session_id = funding_context.id
-       and funding_consent.consent_fingerprint =
-             operation.support_metadata ->> 'telegramFundingConsentFingerprint'
       where attempt.executor_id = $1
         and (
           (
@@ -824,6 +860,45 @@ async function recoverPolymarketWrapInTransaction(
               else $3::timestamptz
             end
         and step.executor_id = $1
+        and operation.requested_source_amount ->> 'raw' ~ '^[1-9][0-9]*$'
+        and (
+          attempt.outcome = 'ambiguous'
+          or exists (
+            select 1
+              from funding_receive_receipts receipt_row
+              join telegram_funding_sessions funding_context
+                on funding_context.receive_session_id =
+                     receipt_row.receive_session_id
+               and funding_context.user_id = operation.user_id
+              join telegram_funding_consents funding_consent
+                on funding_consent.id::text =
+                     operation.support_metadata ->> 'telegramFundingConsentId'
+               and funding_consent.telegram_funding_session_id =
+                     funding_context.id
+               and funding_consent.consent_fingerprint =
+                     operation.support_metadata ->>
+                       'telegramFundingConsentFingerprint'
+             where receipt_row.id::text =
+                     operation.support_metadata ->> 'fundingReceiveReceiptId'
+               and receipt_row.child_funding_operation_id = operation.id
+               and receipt_row.user_id = operation.user_id
+               and receipt_row.status = 'routing'
+               and operation.requested_source_amount ->> 'raw' =
+                     receipt_row.raw_amount::text
+          )
+          or exists (
+            select 1
+              from telegram_trade_intents trade_intent
+             where trade_intent.id::text =
+                     operation.support_metadata ->> 'telegramTradeIntentId'
+               and trade_intent.user_id = operation.user_id
+               and trade_intent.funding_operation_id = operation.id
+               and trade_intent.status = 'funding'
+               and trade_intent.submit_started_at is null
+               and operation.support_metadata ->> 'delegatedOriginKind' =
+                     'trade_shortfall_intent'
+          )
+        )
         and operation.status not in (
           'completed', 'refunded', 'failed', 'cancelled'
         )
@@ -1003,25 +1078,10 @@ async function polymarketWrapPreBroadcastDecisionInTransaction(
         clock_timestamp() as checked_at,
         step.action_fingerprint,
         step.normalized_action,
-        receipt.raw_amount::text as receipt_raw
+        operation.requested_source_amount ->> 'raw' as receipt_raw
       from funding_operation_step_attempts attempt
       join funding_operation_steps step on step.id = attempt.step_id
       join funding_operations operation on operation.id = step.operation_id
-      join funding_receive_receipts receipt
-        on receipt.id::text =
-             operation.support_metadata ->> 'fundingReceiveReceiptId'
-       and receipt.child_funding_operation_id = operation.id
-       and receipt.user_id = operation.user_id
-       and receipt.status = 'routing'
-      join telegram_funding_sessions funding_context
-        on funding_context.receive_session_id = receipt.receive_session_id
-       and funding_context.user_id = operation.user_id
-      join telegram_funding_consents funding_consent
-        on funding_consent.id::text =
-             operation.support_metadata ->> 'telegramFundingConsentId'
-       and funding_consent.telegram_funding_session_id = funding_context.id
-       and funding_consent.consent_fingerprint =
-             operation.support_metadata ->> 'telegramFundingConsentFingerprint'
       where operation.id = $1
         and operation.user_id = $2
         and operation.support_metadata ->> 'fundingAuthorizationId' = $3
@@ -1032,7 +1092,45 @@ async function polymarketWrapPreBroadcastDecisionInTransaction(
         and attempt.id = $7
         and attempt.outcome = 'started'
         and attempt.canonical_action_fingerprint = step.action_fingerprint
-      for update of operation, step, attempt, receipt
+        and operation.requested_source_amount ->> 'raw' ~ '^[1-9][0-9]*$'
+        and (
+          exists (
+            select 1
+              from funding_receive_receipts receipt_row
+              join telegram_funding_sessions funding_context
+                on funding_context.receive_session_id =
+                     receipt_row.receive_session_id
+               and funding_context.user_id = operation.user_id
+              join telegram_funding_consents funding_consent
+                on funding_consent.id::text =
+                     operation.support_metadata ->> 'telegramFundingConsentId'
+               and funding_consent.telegram_funding_session_id =
+                     funding_context.id
+               and funding_consent.consent_fingerprint =
+                     operation.support_metadata ->>
+                       'telegramFundingConsentFingerprint'
+             where receipt_row.id::text =
+                     operation.support_metadata ->> 'fundingReceiveReceiptId'
+               and receipt_row.child_funding_operation_id = operation.id
+               and receipt_row.user_id = operation.user_id
+               and receipt_row.status = 'routing'
+               and operation.requested_source_amount ->> 'raw' =
+                     receipt_row.raw_amount::text
+          )
+          or exists (
+            select 1
+              from telegram_trade_intents trade_intent
+             where trade_intent.id::text =
+                     operation.support_metadata ->> 'telegramTradeIntentId'
+               and trade_intent.user_id = operation.user_id
+               and trade_intent.funding_operation_id = operation.id
+               and trade_intent.status = 'funding'
+               and trade_intent.submit_started_at is null
+               and operation.support_metadata ->> 'delegatedOriginKind' =
+                     'trade_shortfall_intent'
+          )
+        )
+      for update of operation, step, attempt
     `,
     [
       input.claim.operationId,

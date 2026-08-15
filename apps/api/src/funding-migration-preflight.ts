@@ -21,6 +21,7 @@ const MIGRATION_0208 = "0208_relay_evm_delegated_funding.sql";
 const MIGRATION_0211 = "0211_funding_receive_receipt_rearm.sql";
 const MIGRATION_0214 = "0214_funding_receive_observation_wake.sql";
 const MIGRATION_0215 = "0215_telegram_buy_delivery_modes.sql";
+const MIGRATION_0216 = "0216_telegram_trade_shortfall_funding.sql";
 const FUNDING_MIGRATIONS = [
   MIGRATION_0184,
   MIGRATION_0193,
@@ -39,6 +40,7 @@ const FUNDING_MIGRATIONS = [
   MIGRATION_0211,
   MIGRATION_0214,
   MIGRATION_0215,
+  MIGRATION_0216,
 ] as const;
 
 const LEGACY_CLASSIFIER_SQL = `
@@ -100,6 +102,7 @@ export type FundingMigrationPreflightReport = Readonly<{
   telegramFundingOwnerDeliveryObjects: boolean;
   relayEvmDelegatedFundingObjects: boolean;
   telegramOpenMutationConstraints: boolean;
+  telegramTradeShortfallFundingObjects: boolean;
 }>;
 
 function migrationObjectDrift(
@@ -1208,6 +1211,39 @@ export async function inspectFundingMigrationPreflight(
       "0x2791bca1f2de4661ed88a30c99a7a9449aa84174",
       "receipt_reallocation",
     ]));
+  const hasTelegramTradeShortfallFundingObjects =
+    (await columnAllowsNull(
+      db,
+      "telegram_funding_authorization_reservations",
+      "receive_receipt_id",
+    )) &&
+    (await columnExists(
+      db,
+      "telegram_funding_authorization_reservations",
+      "source_trade_intent_id",
+    )) &&
+    (await constraintDefinitionIncludes(
+      db,
+      "public.telegram_funding_authorization_reservations",
+      "telegram_funding_authorization_reservations_origin_check",
+      ["num_nonnulls(receive_receipt_id, source_trade_intent_id) = 1"],
+    )) &&
+    (await indexPredicateIncludes(
+      db,
+      "telegram_funding_authorization_reservations_trade_intent_unique",
+      ["source_trade_intent_id", "is not null"],
+    )) &&
+    (await constraintDefinitionIncludes(
+      db,
+      "public.telegram_trade_intents",
+      "telegram_trade_intents_status_check",
+      ["funding"],
+    )) &&
+    (await functionDefinitionIncludes(
+      db,
+      "guard_telegram_funding_authorization_reservation_update",
+      ["new.source_trade_intent_id", "old.source_trade_intent_id"],
+    ));
   const hasTelegramProjectionWatermark =
     hasTelegramFundingSessions &&
     (await columnExists(
@@ -1412,6 +1448,13 @@ export async function inspectFundingMigrationPreflight(
       hasTelegramBuyDeliveryModes,
       "Telegram Buy delivery-mode objects exist before 0215 is recorded",
     ],
+    [
+      MIGRATION_0216,
+      hasTelegramTradeShortfallFundingObjects,
+      "0216 is recorded but Telegram trade-shortfall funding objects are incomplete",
+      hasTelegramTradeShortfallFundingObjects,
+      "Telegram trade-shortfall funding objects exist before 0216 is recorded",
+    ],
   ] as const;
   const partialObjects = migrationDriftChecks.flatMap(
     ([migration, complete, incompleteMessage, present, presentMessage]) =>
@@ -1551,6 +1594,9 @@ export async function inspectFundingMigrationPreflight(
     !appliedSet.has(MIGRATION_0215)
       ? "0215 Telegram Buy delivery-mode migration is not recorded"
       : null,
+    !appliedSet.has(MIGRATION_0216)
+      ? "0216 Telegram trade-shortfall funding migration is not recorded"
+      : null,
     !hasBridgeOrders ? "bridge_orders table is absent" : null,
     bridgeUnknown > 0
       ? `${bridgeUnknown} legacy bridge orders have unknown adapter class`
@@ -1608,6 +1654,8 @@ export async function inspectFundingMigrationPreflight(
     telegramFundingOwnerDeliveryObjects: hasTelegramFundingOwnerDeliveryObjects,
     relayEvmDelegatedFundingObjects: hasRelayEvmDelegatedFundingObjects,
     telegramOpenMutationConstraints: hasTelegramOpenMutationConstraints,
+    telegramTradeShortfallFundingObjects:
+      hasTelegramTradeShortfallFundingObjects,
   };
 }
 
