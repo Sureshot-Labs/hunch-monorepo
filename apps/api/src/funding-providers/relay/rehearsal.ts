@@ -27,6 +27,7 @@ export const EVM_NATIVE_ASSET_SENTINEL =
 export type RelayRehearsalScenarioId =
   | "polygon-pol-to-base-eth"
   | "polygon-pusd-to-base-usdc"
+  | "polygon-usdc-to-polygon-pusd"
   | "base-usdc-to-polygon-pusd"
   | "polygon-pol-to-solana-sol"
   | "polygon-pusd-to-solana-usdc";
@@ -82,6 +83,19 @@ export const relayRehearsalScenarios: Record<
     originVm: "evm",
     destinationVm: "evm",
     originCurrency: BASE_USDC,
+    destinationCurrency: POLYGON_PUSD,
+    sourceAsset: "USDC",
+    destinationAsset: "pUSD",
+    originDecimals: 6,
+    destinationDecimals: 6,
+  },
+  "polygon-usdc-to-polygon-pusd": {
+    id: "polygon-usdc-to-polygon-pusd",
+    originChainId: 137,
+    destinationChainId: 137,
+    originVm: "evm",
+    destinationVm: "evm",
+    originCurrency: POLYGON_USDC,
     destinationCurrency: POLYGON_PUSD,
     sourceAsset: "USDC",
     destinationAsset: "pUSD",
@@ -814,7 +828,7 @@ function validateV2Erc20Deposit(
   amount: bigint,
   user: string,
 ): void {
-  if (scenario.originChainId !== 8453) {
+  if (scenario.originChainId !== 8453 && scenario.originChainId !== 137) {
     throw new Error("Relay Depository V2 is not enabled for this origin chain");
   }
   validateRelayDepositoryV2Action({
