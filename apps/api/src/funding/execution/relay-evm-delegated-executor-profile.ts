@@ -698,8 +698,6 @@ async function observeRelayPostcondition(
           and deposit_receipt.evidence ->> 'singleOperationBundle' = 'true'
          join funding_operations operation
            on operation.id = deposit_step.operation_id
-         join funding_receive_receipts receipt
-           on receipt.child_funding_operation_id = operation.id
          join telegram_funding_authorizations funding_authorization
            on funding_authorization.id::text =
                 operation.support_metadata ->> 'fundingAuthorizationId'
@@ -710,7 +708,7 @@ async function observeRelayPostcondition(
           and ${RELAY_ALLOWANCE_LANE_HEAD_PREDICATE}
           and deposit_step.state = 'succeeded'
           and deposit_receipt.evidence ->> 'attributedSourceRaw' =
-                receipt.raw_amount::text
+                reservation.source_raw::text
           and deposit_receipt.block_hash is not null
           and deposit_receipt.evidence ->> 'sourceDebitEventIndex' is not null
           and deposit_receipt.evidence ->> 'transactionHash' is not null
@@ -1281,7 +1279,7 @@ async function reconcileRelayPostconditions(
             approval_receipt.ledger_height as approval_block,
             deposit_step.id as deposit_step_id,
             operation.id as operation_id,
-            receipt.raw_amount::text as expected_raw,
+            reservation.source_raw::text as expected_raw,
             funding_authorization.wallet_address
        from funding_operation_steps approval_step
        join funding_operation_steps deposit_step
@@ -1294,9 +1292,6 @@ async function reconcileRelayPostconditions(
         and approval_receipt.canonical
         and approval_receipt.evidence ->> 'singleOperationBundle' = 'true'
        join funding_operations operation on operation.id = approval_step.operation_id
-       join funding_receive_receipts receipt
-         on receipt.child_funding_operation_id = operation.id
-        and receipt.id::text = operation.support_metadata ->> 'fundingReceiveReceiptId'
        join telegram_funding_authorizations funding_authorization
          on funding_authorization.id::text = operation.support_metadata ->> 'fundingAuthorizationId'
        join telegram_funding_authorization_reservations reservation
@@ -1752,7 +1747,7 @@ async function reconcileRelayPostconditions(
             deposit_receipt.evidence ->> 'sourceDebitEventIndex' as event_index,
             operation.id as operation_id,
             segment.id as segment_id,
-            receipt.raw_amount::text as expected_raw,
+            reservation.source_raw::text as expected_raw,
             deposit_receipt.evidence ->> 'transactionHash' as tx_hash,
             funding_authorization.wallet_address
        from funding_operation_steps deposit_step
@@ -1765,15 +1760,16 @@ async function reconcileRelayPostconditions(
        join funding_operations operation on operation.id = deposit_step.operation_id
        join funding_operation_segments segment
          on segment.operation_id = operation.id and segment.ordinal = 0
-       join funding_receive_receipts receipt
-         on receipt.child_funding_operation_id = operation.id
+       join telegram_funding_authorization_reservations reservation
+         on reservation.funding_operation_id = operation.id
+        and reservation.status = 'reserved'
        join telegram_funding_authorizations funding_authorization
          on funding_authorization.id::text = operation.support_metadata ->> 'fundingAuthorizationId'
        where deposit_step.executor_id = $1
          and deposit_receipt.id = $2::uuid
          and operation.id = $3::uuid
          and deposit_step.state = 'succeeded'
-         and deposit_receipt.evidence ->> 'attributedSourceRaw' = receipt.raw_amount::text
+         and deposit_receipt.evidence ->> 'attributedSourceRaw' = reservation.source_raw::text
          and deposit_receipt.block_hash is not null
          and deposit_receipt.evidence ->> 'sourceDebitEventIndex' is not null
          and deposit_receipt.evidence ->> 'transactionHash' is not null
@@ -1940,7 +1936,7 @@ async function reconcileRelayPostconditions(
               as deposit_event_index,
             deposit_receipt.evidence ->> 'transactionHash'
               as deposit_transaction_hash,
-            receive_receipt.raw_amount::text as expected_raw,
+            reservation.source_raw::text as expected_raw,
             reservation.id as reservation_id,
             segment.id as segment_id,
             funding_authorization.wallet_address
@@ -1967,8 +1963,6 @@ async function reconcileRelayPostconditions(
          on parent.id = reservation.funding_operation_id
        left join funding_operation_segments segment
          on segment.operation_id = parent.id and segment.ordinal = 0
-       left join funding_receive_receipts receive_receipt
-         on receive_receipt.child_funding_operation_id = parent.id
        join funding_operation_steps deposit_step
          on deposit_step.operation_id = parent.id
         and deposit_step.executor_id = $1
@@ -2000,7 +1994,6 @@ async function reconcileRelayPostconditions(
              'post_deposit'
            or (
              segment.id is not null
-             and receive_receipt.id is not null
              and deposit_receipt.block_hash is not null
              and deposit_receipt.evidence ->> 'sourceDebitEventIndex' is not null
              and deposit_receipt.evidence ->> 'transactionHash' is not null
@@ -2272,7 +2265,7 @@ async function claimRelayCleanup(
             cleanup_step.executor_id,
             cleanup_step.normalized_action,
             cleanup_step.payer_requirement,
-            receipt.raw_amount::text as receipt_raw,
+            reservation.source_raw::text as receipt_raw,
             ${AUTHORIZATION_COLUMNS}
        from telegram_funding_authorization_reservations reservation
        join funding_operations parent
@@ -2281,8 +2274,6 @@ async function claimRelayCleanup(
          on cleanup_operation.id = reservation.cleanup_operation_id
        join funding_operation_steps cleanup_step
          on cleanup_step.operation_id = cleanup_operation.id
-       join funding_receive_receipts receipt
-         on receipt.child_funding_operation_id = parent.id
        join telegram_funding_authorizations funding_authorization
          on funding_authorization.id = reservation.authorization_id
        where reservation.status = 'cleanup_required'
@@ -2429,7 +2420,7 @@ async function claimRelay(
                   and dependency_receipt.evidence ->>
                         'singleOperationBundle' = 'true'
                   and dependency_receipt.evidence ->> 'allowanceRaw' =
-                        receipt.raw_amount::text
+                        reservation.source_raw::text
                   and dependency_receipt.evidence ->> 'allowanceBlock' =
                         dependency_receipt.ledger_height
                   and lower(
@@ -2444,40 +2435,74 @@ async function claimRelay(
             step.executor_id,
             step.normalized_action,
             step.payer_requirement,
-            receipt.raw_amount::text as receipt_raw,
+            reservation.source_raw::text as receipt_raw,
             ${AUTHORIZATION_COLUMNS}
        from funding_operation_steps step
        join funding_operations operation on operation.id = step.operation_id
        left join funding_operation_steps dependency on dependency.id = step.depends_on_step_id
-       join funding_receive_receipts receipt
-         on receipt.child_funding_operation_id = operation.id
-        and receipt.id::text = operation.support_metadata ->> 'fundingReceiveReceiptId'
-        and receipt.status = 'routing'
        join telegram_funding_authorizations funding_authorization
          on funding_authorization.id::text = operation.support_metadata ->> 'fundingAuthorizationId'
         and funding_authorization.user_id = operation.user_id
         and funding_authorization.profile_id = $1
         and funding_authorization.security_class = 'routed_value_movement'
-        and funding_authorization.max_source_raw >= receipt.raw_amount
         and funding_authorization.revoked_at is null
         and (funding_authorization.expires_at is null or funding_authorization.expires_at > clock_timestamp())
        join telegram_funding_authorization_reservations reservation
          on reservation.authorization_id = funding_authorization.id
-        and reservation.receive_receipt_id = receipt.id
         and reservation.funding_operation_id = operation.id
-        and reservation.source_raw = receipt.raw_amount
+        and reservation.source_raw <= funding_authorization.max_source_raw
         and reservation.status = 'reserved'
-       join telegram_funding_sessions context
-         on context.receive_session_id = receipt.receive_session_id
-        and context.user_id = operation.user_id
-       join telegram_funding_consents consent
-         on consent.id::text = operation.support_metadata ->> 'telegramFundingConsentId'
-        and consent.telegram_funding_session_id = context.id
-        and consent.consent_fingerprint = operation.support_metadata ->> 'telegramFundingConsentFingerprint'
-        and consent.automation_policy_snapshot ->> 'version' = '3'
-        and consent.automation_policy_snapshot ->> 'authorizationId' = funding_authorization.id::text
        where step.executor_id = $1
          and ${RELAY_ALLOWANCE_LANE_HEAD_PREDICATE}
+         and (
+           (
+             reservation.receive_receipt_id is not null
+             and exists (
+               select 1
+                 from funding_receive_receipts receive_receipt
+                 join telegram_funding_sessions funding_context
+                   on funding_context.receive_session_id =
+                        receive_receipt.receive_session_id
+                  and funding_context.user_id = operation.user_id
+                 join telegram_funding_consents funding_consent
+                   on funding_consent.id::text =
+                        operation.support_metadata ->>
+                          'telegramFundingConsentId'
+                  and funding_consent.telegram_funding_session_id =
+                        funding_context.id
+                  and funding_consent.consent_fingerprint =
+                        operation.support_metadata ->>
+                          'telegramFundingConsentFingerprint'
+                  and funding_consent.automation_policy_snapshot ->>
+                        'version' = '3'
+                  and funding_consent.automation_policy_snapshot ->>
+                        'authorizationId' = funding_authorization.id::text
+                where receive_receipt.id = reservation.receive_receipt_id
+                  and receive_receipt.child_funding_operation_id = operation.id
+                  and receive_receipt.id::text =
+                        operation.support_metadata ->>
+                          'fundingReceiveReceiptId'
+                  and receive_receipt.status = 'routing'
+                  and receive_receipt.raw_amount = reservation.source_raw
+             )
+           )
+           or (
+             reservation.source_trade_intent_id is not null
+             and exists (
+               select 1
+                 from telegram_trade_intents trade_intent_row
+                where trade_intent_row.id =
+                      reservation.source_trade_intent_id
+                  and trade_intent_row.user_id = operation.user_id
+                  and trade_intent_row.status = 'funding'
+                  and trade_intent_row.funding_operation_id = operation.id
+                  and trade_intent_row.submit_started_at is null
+                  and trade_intent_row.id::text =
+                        operation.support_metadata ->>
+                          'telegramTradeIntentId'
+             )
+           )
+         )
          and step.state = 'action_required'
          and (
            step.depends_on_step_id is null
@@ -2497,7 +2522,7 @@ async function claimRelay(
                  and dependency_receipt.evidence ->>
                        'singleOperationBundle' = 'true'
                  and dependency_receipt.evidence ->> 'allowanceRaw' =
-                       receipt.raw_amount::text
+                       reservation.source_raw::text
                  and dependency_receipt.evidence ->> 'allowanceBlock' =
                        dependency_receipt.ledger_height
                  and lower(
@@ -2543,7 +2568,7 @@ async function claimRelay(
            )
          )
        order by operation.created_at, step.ordinal
-       for update of operation, step, receipt, funding_authorization, reservation skip locked
+       for update of operation, step, funding_authorization, reservation skip locked
        limit 1`,
     [input.profile.profileId, input.now],
   );
@@ -2610,7 +2635,7 @@ async function recoverRelay(
                   and dependency_receipt.evidence ->>
                         'singleOperationBundle' = 'true'
                   and dependency_receipt.evidence ->> 'allowanceRaw' =
-                        receipt.raw_amount::text
+                        reservation.source_raw::text
                   and dependency_receipt.evidence ->> 'allowanceBlock' =
                         dependency_receipt.ledger_height
                   and lower(
@@ -2625,7 +2650,7 @@ async function recoverRelay(
             step.executor_id,
             step.normalized_action,
             step.payer_requirement,
-            receipt.raw_amount::text as receipt_raw,
+            reservation.source_raw::text as receipt_raw,
             ${AUTHORIZATION_COLUMNS}
        from funding_operation_step_attempts attempt
        join funding_operation_steps step on step.id = attempt.step_id
@@ -2633,7 +2658,6 @@ async function recoverRelay(
        left join funding_operation_steps dependency
          on dependency.id = step.depends_on_step_id
         and dependency.operation_id = operation.id
-       join funding_receive_receipts receipt on receipt.child_funding_operation_id = operation.id
        join telegram_funding_authorizations funding_authorization
          on funding_authorization.id::text = operation.support_metadata ->> 'fundingAuthorizationId'
        join telegram_funding_authorization_reservations reservation
@@ -2641,6 +2665,41 @@ async function recoverRelay(
         and reservation.status in ('reserved', 'cleanup_required')
        where attempt.executor_id = $1
          and ${RELAY_ALLOWANCE_LANE_HEAD_PREDICATE}
+         and (
+           attempt.outcome = 'ambiguous'
+           or (
+             (
+               reservation.receive_receipt_id is not null
+               and exists (
+                 select 1
+                   from funding_receive_receipts receive_receipt
+                  where receive_receipt.id = reservation.receive_receipt_id
+                    and receive_receipt.child_funding_operation_id = operation.id
+                    and receive_receipt.id::text =
+                          operation.support_metadata ->>
+                            'fundingReceiveReceiptId'
+                    and receive_receipt.status = 'routing'
+                    and receive_receipt.raw_amount = reservation.source_raw
+               )
+             )
+             or (
+               reservation.source_trade_intent_id is not null
+               and exists (
+                 select 1
+                   from telegram_trade_intents trade_intent_row
+                  where trade_intent_row.id =
+                        reservation.source_trade_intent_id
+                    and trade_intent_row.user_id = operation.user_id
+                    and trade_intent_row.status = 'funding'
+                    and trade_intent_row.funding_operation_id = operation.id
+                    and trade_intent_row.submit_started_at is null
+                    and trade_intent_row.id::text =
+                          operation.support_metadata ->>
+                            'telegramTradeIntentId'
+               )
+             )
+           )
+         )
          and (
            (attempt.outcome = 'started' and step.state = 'action_required')
            or (
@@ -2687,7 +2746,7 @@ async function recoverRelay(
               cleanup_step.executor_id,
               cleanup_step.normalized_action,
               cleanup_step.payer_requirement,
-              receipt.raw_amount::text as receipt_raw,
+              reservation.source_raw::text as receipt_raw,
               ${AUTHORIZATION_COLUMNS}
          from funding_operation_step_attempts attempt
          join funding_operation_steps cleanup_step
@@ -2699,8 +2758,6 @@ async function recoverRelay(
           and reservation.status = 'cleanup_required'
          join funding_operations parent
            on parent.id = reservation.funding_operation_id
-         join funding_receive_receipts receipt
-           on receipt.child_funding_operation_id = parent.id
          join telegram_funding_authorizations funding_authorization
            on funding_authorization.id = reservation.authorization_id
          where cleanup_step.executor_id = $1
@@ -3022,6 +3079,41 @@ async function preBroadcastRelay(
          and attempt.id = $3::uuid
          and attempt.outcome = 'started'
          and step.state = 'action_required'
+         and (
+           $5::boolean = true
+           or (
+             (
+               reservation.receive_receipt_id is not null
+               and exists (
+                 select 1
+                   from funding_receive_receipts receive_receipt
+                  where receive_receipt.id = reservation.receive_receipt_id
+                    and receive_receipt.child_funding_operation_id = operation.id
+                    and receive_receipt.id::text =
+                          operation.support_metadata ->>
+                            'fundingReceiveReceiptId'
+                    and receive_receipt.status = 'routing'
+                    and receive_receipt.raw_amount = reservation.source_raw
+               )
+             )
+             or (
+               reservation.source_trade_intent_id is not null
+               and exists (
+                 select 1
+                   from telegram_trade_intents trade_intent_row
+                  where trade_intent_row.id =
+                        reservation.source_trade_intent_id
+                    and trade_intent_row.user_id = operation.user_id
+                    and trade_intent_row.status = 'funding'
+                    and trade_intent_row.funding_operation_id = operation.id
+                    and trade_intent_row.submit_started_at is null
+                    and trade_intent_row.id::text =
+                          operation.support_metadata ->>
+                            'telegramTradeIntentId'
+               )
+             )
+           )
+         )
          and ${RELAY_ALLOWANCE_LANE_HEAD_PREDICATE}
        for update of operation, step, attempt, reservation`,
     [
@@ -3574,13 +3666,14 @@ async function finalizeRelayAlreadySatisfiedInTransaction(
               deposit_receipt.observed_at as deposit_observed_at,
               deposit_receipt.ledger_height as deposit_block,
               deposit_receipt.block_hash as deposit_block_hash,
-              receive_receipt.raw_amount::text as expected_raw,
+              reservation.source_raw::text as expected_raw,
               funding_authorization.wallet_address
          from funding_operations parent
+         join telegram_funding_authorization_reservations reservation
+           on reservation.id = $3::uuid
+          and reservation.funding_operation_id = parent.id
          join funding_operation_segments segment
            on segment.operation_id = parent.id and segment.ordinal = 0
-         join funding_receive_receipts receive_receipt
-           on receive_receipt.child_funding_operation_id = parent.id
          join funding_operation_steps deposit_step
            on deposit_step.operation_id = parent.id
           and deposit_step.executor_id = $2
@@ -3594,7 +3687,7 @@ async function finalizeRelayAlreadySatisfiedInTransaction(
           and deposit_receipt.canonical
           and deposit_receipt.evidence ->> 'singleOperationBundle' = 'true'
           and deposit_receipt.evidence ->> 'attributedSourceRaw' =
-                receive_receipt.raw_amount::text
+                reservation.source_raw::text
           and deposit_receipt.block_hash is not null
           and deposit_receipt.evidence ->> 'sourceDebitEventIndex' is not null
           and deposit_receipt.evidence ->> 'transactionHash' is not null
@@ -3608,7 +3701,7 @@ async function finalizeRelayAlreadySatisfiedInTransaction(
         order by deposit_receipt.observed_at desc
         for update of parent, deposit_step, deposit_receipt
         limit 1`,
-      [row.parent_operation_id, input.profile.profileId],
+      [row.parent_operation_id, input.profile.profileId, row.reservation_id],
     );
     const evidence = postDeposit.rows[0];
     if (!evidence) {
@@ -3768,7 +3861,7 @@ async function finalizeRelayHardInvalidInTransaction(
               operation.status as operation_status,
               operation.progress_stage as operation_stage,
               operation.version as operation_version,
-              receipt.raw_amount::text as receipt_raw
+              reservation.source_raw::text as receipt_raw
          from funding_operation_steps deposit_step
          join funding_operations operation
            on operation.id = deposit_step.operation_id
@@ -3782,8 +3875,6 @@ async function finalizeRelayHardInvalidInTransaction(
           and approval_receipt.canonical
           and approval_receipt.evidence ->> 'allowanceExact' = 'true'
           and approval_receipt.evidence ->> 'singleOperationBundle' = 'true'
-         join funding_receive_receipts receipt
-           on receipt.child_funding_operation_id = operation.id
          join telegram_funding_authorization_reservations reservation
            on reservation.funding_operation_id = operation.id
           and reservation.status = 'reserved'

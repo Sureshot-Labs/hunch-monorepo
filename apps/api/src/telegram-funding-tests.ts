@@ -913,6 +913,20 @@ assert.equal(
   assert.equal(
     canAttachTelegramFundingBuyReturn({
       ...current,
+      eventId: "limitless:event",
+      market: {
+        ...market,
+        event_id: "limitless:event",
+        venue: "limitless",
+      },
+      venue: "limitless",
+    }),
+    true,
+    "Limitless app handoff may attach funding without enabling bot submission for that venue",
+  );
+  assert.equal(
+    canAttachTelegramFundingBuyReturn({
+      ...current,
       currentPolicyRevision: "policy-2",
     }),
     false,

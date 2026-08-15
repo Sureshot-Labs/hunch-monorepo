@@ -129,6 +129,7 @@ try {
     [
       JSON.stringify({
         buyContinuationEnabled: true,
+        fundingReceiveEnabled: true,
         tradingEnabled: true,
         tradingActions: ["buy"],
         tradingVenues: ["polymarket"],
@@ -1313,6 +1314,7 @@ try {
     [
       JSON.stringify({
         buyContinuationEnabled: true,
+        fundingReceiveEnabled: true,
         tradingEnabled: true,
         tradingActions: ["buy"],
         tradingVenues: ["polymarket"],
@@ -1453,6 +1455,7 @@ try {
         [
           JSON.stringify({
             buyContinuationEnabled: true,
+            fundingReceiveEnabled: true,
             tradingEnabled: true,
             tradingActions: ["buy"],
             tradingVenues: ["polymarket"],
@@ -1560,6 +1563,7 @@ try {
     [
       JSON.stringify({
         buyContinuationEnabled: true,
+        fundingReceiveEnabled: true,
         tradingEnabled: true,
         tradingActions: ["buy"],
         tradingVenues: ["polymarket"],
@@ -1669,6 +1673,7 @@ try {
     [
       JSON.stringify({
         buyContinuationEnabled: true,
+        fundingReceiveEnabled: true,
         tradingEnabled: true,
         tradingActions: ["buy"],
         tradingVenues: ["polymarket"],

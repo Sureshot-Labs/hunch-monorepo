@@ -203,6 +203,9 @@ const policyIds: string[] = [];
 const relayArtifactOperationIds: string[] = [];
 const relayArtifactQuoteIds: string[] = [];
 const relayArtifactReceiptIds: string[] = [];
+const tradeOriginIntentIds: string[] = [];
+const tradeOriginMarketIds: string[] = [];
+const tradeOriginEventIds: string[] = [];
 let policyOffsetMs = -1_000;
 
 function opaque(prefix: string): string {
@@ -2398,6 +2401,149 @@ try {
   process.env.PRIVY_POLYMARKET_BOT_BUY_SELL_POLICY_FINGERPRINT =
     profileConfiguration.policyFingerprint;
   await publishFundingPolicy(false);
+
+  const tradeOriginWrap = await createFixture("750000");
+  const tradeAuthorization = await pool.query<{ id: string }>(
+    `select id
+       from telegram_bot_trading_authorizations
+      where user_id = $1::uuid
+        and telegram_user_id = (
+          select telegram_user_id
+            from user_telegram_accounts
+           where id = $2::uuid
+        )
+        and enabled = true
+      limit 1`,
+    [tradeOriginWrap.userId, tradeOriginWrap.telegramAccountId],
+  );
+  assert.ok(tradeAuthorization.rows[0]?.id);
+  const tradeOriginEventId = crypto.randomUUID();
+  const tradeOriginMarketId = crypto.randomUUID();
+  tradeOriginEventIds.push(tradeOriginEventId);
+  tradeOriginMarketIds.push(tradeOriginMarketId);
+  await pool.query(
+    `insert into unified_events (
+       id, venue, venue_event_id, title, status, end_date
+     ) values (
+       $1::uuid, 'polymarket', $2, 'Trade origin funding event', 'ACTIVE',
+       clock_timestamp() + interval '1 day'
+     )`,
+    [tradeOriginEventId, `trade-origin-event-${suffix}`],
+  );
+  await pool.query(
+    `insert into unified_markets (
+       id, venue, venue_market_id, event_id, title, status, market_type,
+       close_time, expiration_time, outcomes, clob_token_ids, metadata
+     ) values (
+       $1::uuid, 'polymarket', $2, $3::uuid, 'Trade origin funding market',
+       'ACTIVE', 'binary', clock_timestamp() + interval '1 day',
+       clock_timestamp() + interval '1 day', '["Yes","No"]',
+       '["trade-origin-yes","trade-origin-no"]', '{}'::jsonb
+     )`,
+    [tradeOriginMarketId, `trade-origin-market-${suffix}`, tradeOriginEventId],
+  );
+  const tradeOriginIntentId = crypto.randomUUID();
+  tradeOriginIntentIds.push(tradeOriginIntentId);
+  await pool.query(
+    `insert into telegram_trade_intents (
+       id, telegram_user_id, user_id, authorization_id, chat_id,
+       telegram_message_id, action, venue, market_id, side, amount_usd,
+       status, expires_at, idempotency_key, funding_operation_id
+     )
+     select $1::uuid, telegram_account.telegram_user_id, $2::uuid, $3::uuid,
+            telegram_account.telegram_user_id, '750', 'buy', 'polymarket',
+            $4, 'YES', 0.75, 'funding', clock_timestamp() + interval '30 minutes',
+            $5, $6::uuid
+       from user_telegram_accounts telegram_account
+      where telegram_account.id = $7::uuid`,
+    [
+      tradeOriginIntentId,
+      tradeOriginWrap.userId,
+      tradeAuthorization.rows[0]?.id,
+      tradeOriginMarketId,
+      `trade-origin-wrap-${suffix}`,
+      tradeOriginWrap.operationId,
+      tradeOriginWrap.telegramAccountId,
+    ],
+  );
+  await tx(pool, async (client) => {
+    // The generic fixture is committed as a receive-origin operation. Convert
+    // only this test row into the exact shape that the production shortfall
+    // commit creates; bypassing the immutable-plan trigger here is fixture
+    // construction, not an application transition.
+    await client.query("set local session_replication_role = replica");
+    await client.query(
+      `update funding_operations
+          set purpose = 'trade_shortfall',
+              support_metadata =
+                (support_metadata - 'fundingReceiveReceiptId'
+                                  - 'telegramFundingConsentId'
+                                  - 'telegramFundingConsentFingerprint') ||
+                jsonb_build_object(
+                  'telegramTradeIntentId', $2::text,
+                  'delegatedOriginKind', 'trade_shortfall_intent'
+                )
+        where id = $1::uuid`,
+      [tradeOriginWrap.operationId, tradeOriginIntentId],
+    );
+  });
+  let tradeOriginWrapSends = 0;
+  const tradeOriginWrapResult = await executor(async (claim) => {
+    tradeOriginWrapSends += 1;
+    assert.equal(claim.operationId, tradeOriginWrap.operationId);
+    assert.equal(claim.receiptRaw, "750000");
+    return {
+      kind: "submitted",
+      transactionReference: `0x${"75".repeat(32)}`,
+    };
+  }).runBatch({ limit: 1, now });
+  const tradeOriginAttempt = await pool.query<{ actual_costs: JsonRecord }>(
+    `select attempt.actual_costs
+       from funding_operation_step_attempts attempt
+       join funding_operation_steps step on step.id = attempt.step_id
+      where step.operation_id = $1::uuid
+      order by attempt.started_at desc
+      limit 1`,
+    [tradeOriginWrap.operationId],
+  );
+  assert.equal(
+    tradeOriginWrapResult.submitted,
+    1,
+    JSON.stringify({
+      batch: tradeOriginWrapResult,
+      attempt: tradeOriginAttempt.rows[0]?.actual_costs,
+    }),
+  );
+  assert.equal(tradeOriginWrapSends, 1);
+  const tradeOriginRelayReservation = await pool.query<{ count: string }>(
+    `select count(*)::text as count
+       from telegram_funding_authorization_reservations
+      where source_trade_intent_id = $1::uuid`,
+    [tradeOriginIntentId],
+  );
+  assert.equal(
+    tradeOriginRelayReservation.rows[0]?.count,
+    "0",
+    "Slice C trade shortfall must not create a Relay cap/lane reservation",
+  );
+  const isolatedTradeProjection = await runTelegramFundingProgressProjectionBatch(
+    pool,
+    { limit: 1, now: new Date(now.getTime() + 1) },
+  );
+  assert.equal(isolatedTradeProjection.created, 1);
+  await pool.query(
+    `delete from telegram_bot_action_outbox where funding_session_id = $1::uuid`,
+    [tradeOriginWrap.telegramFundingSessionId],
+  );
+  await pool.query(
+    `update telegram_funding_sessions
+        set projection_checked_at = $2
+      where id = $1::uuid`,
+    [
+      tradeOriginWrap.telegramFundingSessionId,
+      new Date(now.getTime() + 86_400_000),
+    ],
+  );
 
   const hugeRaw = (2n ** 255n).toString();
   const concurrent = await createFixture(hugeRaw, true);
@@ -7344,6 +7490,12 @@ try {
     await client.query(
       `set local hunch.telegram_funding_retention_cleanup = 'on'`,
     );
+    if (tradeOriginIntentIds.length > 0) {
+      await client.query(
+        `delete from telegram_trade_intents where id = any($1::uuid[])`,
+        [tradeOriginIntentIds],
+      );
+    }
     if (relayArtifactOperationIds.length > 0) {
       const relayOperations = await client.query<{ id: string }>(
         `select id from funding_operations
@@ -7488,6 +7640,18 @@ try {
       await client.query(`delete from runtime_policies where id = $1`, [
         policyId,
       ]);
+    }
+    if (tradeOriginMarketIds.length > 0) {
+      await client.query(
+        `delete from unified_markets where id = any($1::text[])`,
+        [tradeOriginMarketIds],
+      );
+    }
+    if (tradeOriginEventIds.length > 0) {
+      await client.query(
+        `delete from unified_events where id = any($1::text[])`,
+        [tradeOriginEventIds],
+      );
     }
     await client.query("commit");
   } catch (error) {

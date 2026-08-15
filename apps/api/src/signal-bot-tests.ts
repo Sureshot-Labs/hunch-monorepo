@@ -4195,7 +4195,9 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       let telegramTradingEnabled = true;
       let autoManagedMaxAmountUsd = 1;
       let buyAmountPresetsUsd = [10, 25];
+      let buyContinuationEnabled = false;
       let customTradeInputEnabled = false;
+      let fundingReceiveEnabled = false;
       let policyTradingEnabled = true;
       let tradingActions: Array<"buy" | "sell"> = ["buy"];
       let tradingVenues = ["polymarket"];
@@ -4215,7 +4217,9 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
                       ? FULL_FUNDING_POLICY
                       : {
                           autoManagedMaxAmountUsd,
+                          buyContinuationEnabled,
                           customTradeInputEnabled,
+                          fundingReceiveEnabled,
                           tradingEnabled: policyTradingEnabled,
                           tradingActions,
                           tradingVenues,
@@ -4739,6 +4743,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
 
       marketOrderable = true;
       marketVenue = "limitless";
+      buyContinuationEnabled = true;
+      fundingReceiveEnabled = true;
       const appFallbackMessage = await buildTelegramBotTradingMarketMessage({
         appBaseUrl: "https://app.hunch.trade",
         chatId: "999",
@@ -4754,6 +4760,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         telegramMiniAppEnabled: true,
         telegramUserId: 999,
         trading: {
+          quote: async ({ intent }: { intent: TradeIntent }) =>
+            buildTestTelegramQuote(intent),
           getReadiness: async () => ({
             ...buildTestPolymarketReadiness({
               code: "limitless_no_executable_funds",
@@ -4767,10 +4775,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         appFallbackMessage.text,
         /venue is disabled by runtime policy/i,
       );
-      assert.match(
-        appFallbackMessage.text,
-        /Direct bot trading is not enabled for Limitless/i,
-      );
+      assert.match(appFallbackMessage.text, /final Buy opens in Hunch/i);
       const appFallbackButtons =
         appFallbackMessage.reply_markup?.inline_keyboard.flat() ?? [];
       assert.equal(
@@ -4781,22 +4786,18 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       );
       assert.deepEqual(
         appFallbackButtons.map((button) => button.text),
-        ["Buy YES · 98¢", "Buy NO · 85¢", "Trade in Hunch", "⬅️ Back"],
+        ["$1 · YES", "$1 · NO", "Open market", "⬅️ Back"],
       );
-      assert.match(appFallbackMessage.text, /\*Trade amount in Hunch:\* \$1/);
+      assert.doesNotMatch(appFallbackMessage.text, /Trade amount in Hunch/u);
       assert.doesNotMatch(appFallbackMessage.text, /Deposit to Limitless/u);
       assert.equal(
         appFallbackButtons.some((button) => "url" in button),
         false,
       );
-      assert.equal(
-        decodeStartAppPayload(readWebAppStartParam(appFallbackButtons[0])),
-        "event-1|market-1|Y|1",
-      );
-      assert.equal(
-        decodeStartAppPayload(readWebAppStartParam(appFallbackButtons[1])),
-        "event-1|market-1|N|1",
-      );
+      const yesButton = appFallbackButtons[0];
+      const noButton = appFallbackButtons[1];
+      assert.ok(yesButton && "callback_data" in yesButton);
+      assert.ok(noButton && "callback_data" in noButton);
       assert.equal(
         decodeStartAppPayload(readWebAppStartParam(appFallbackButtons[2])),
         "event-1|market-1|",

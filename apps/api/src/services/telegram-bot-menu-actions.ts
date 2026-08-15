@@ -3,6 +3,7 @@ import {
   buildSignalBotMarketSearchScreen,
   buildSignalBotMarketVenuePickerScreen,
   readSignalBotMarketSearchSession,
+  SIGNAL_BOT_MARKET_SEARCH_PAGE_SIZE,
 } from "./telegram-bot-menu-markets.js";
 import type {
   SignalBotTelegramClient,
@@ -31,7 +32,8 @@ export type SignalBotFundingMenuRoute =
 export type SignalBotInteractiveMenuRoute =
   | SignalBotFundingMenuRoute
   | { index: number; kind: "market_search_result"; sessionId: string }
-  | { kind: "market_search_back"; sessionId: string }
+  | { kind: "market_search_back"; page: number; sessionId: string }
+  | { kind: "market_search_page"; page: number; sessionId: string }
   | {
       index: number;
       kind: "market_search_venue";
@@ -45,7 +47,7 @@ export function parseSignalBotInteractiveMenuRoute(
 ): SignalBotInteractiveMenuRoute | null {
   const funding = parseTelegramFundingCallbackRoute(route);
   if (funding) return funding;
-  const searchMatch = route.match(/^search:([a-f0-9]{12}):(\d)$/i);
+  const searchMatch = route.match(/^search:([a-f0-9]{12}):(\d{1,2})$/i);
   if (searchMatch) {
     return {
       index: Number(searchMatch[2]),
@@ -53,15 +55,28 @@ export function parseSignalBotInteractiveMenuRoute(
       sessionId: searchMatch[1] ?? "",
     };
   }
-  const searchBackMatch = route.match(/^search_back:([a-f0-9]{12})$/i);
+  const searchBackMatch = route.match(
+    /^search_back:([a-f0-9]{12})(?::(\d{1,2}))?$/i,
+  );
   if (searchBackMatch) {
     return {
       kind: "market_search_back",
+      page: Number(searchBackMatch[2] ?? 0),
       sessionId: searchBackMatch[1] ?? "",
     };
   }
+  const searchPageMatch = route.match(
+    /^search_page:([a-f0-9]{12}):(\d{1,2})$/i,
+  );
+  if (searchPageMatch) {
+    return {
+      kind: "market_search_page",
+      page: Number(searchPageMatch[2]),
+      sessionId: searchPageMatch[1] ?? "",
+    };
+  }
   const searchVenueMatch = route.match(
-    /^search_venue:([a-f0-9]{12}):(\d):(\d)$/i,
+    /^search_venue:([a-f0-9]{12}):(\d{1,2}):(\d)$/i,
   );
   if (searchVenueMatch) {
     return {
@@ -292,6 +307,7 @@ async function deliverSignalBotInteractiveMenuCallback(
   if (
     route.kind === "market_search_result" ||
     route.kind === "market_search_back" ||
+    route.kind === "market_search_page" ||
     route.kind === "market_search_venue"
   ) {
     const session = await readSignalBotMarketSearchSession({
@@ -304,10 +320,26 @@ async function deliverSignalBotInteractiveMenuCallback(
       await input.renderExpiredSearch();
       return true;
     }
-    if (route.kind === "market_search_back") {
+    if (
+      route.kind === "market_search_back" ||
+      route.kind === "market_search_page"
+    ) {
+      const pageCount = Math.max(
+        1,
+        Math.ceil(session.results.length / SIGNAL_BOT_MARKET_SEARCH_PAGE_SIZE),
+      );
+      if (
+        !Number.isInteger(route.page) ||
+        route.page < 0 ||
+        route.page >= pageCount
+      ) {
+        await input.renderExpiredSearch();
+        return true;
+      }
       await input.render(
         buildSignalBotMarketSearchScreen({
           callbackPrefix: input.callbackPrefix,
+          page: route.page,
           query: session.query,
           results: session.results,
           sessionId: route.sessionId,
@@ -353,7 +385,9 @@ async function deliverSignalBotInteractiveMenuCallback(
           returnCallbackData:
             options.length > 1
               ? `${input.callbackPrefix}search:${route.sessionId}:${resultIndex}`
-              : `${input.callbackPrefix}search_back:${route.sessionId}`,
+              : `${input.callbackPrefix}search_back:${route.sessionId}:${Math.floor(
+                  resultIndex / SIGNAL_BOT_MARKET_SEARCH_PAGE_SIZE,
+                )}`,
         },
         marketRef: selectedVenue.marketId,
         telegramMessageId: input.messageId,

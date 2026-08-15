@@ -62,6 +62,7 @@ import {
   searchTelegramMarkets,
 } from "../services/telegram-market-search.js";
 import { buildTelegramDepositMessage } from "../services/telegram-bot-deposit.js";
+import { TelegramTradeShortfallFundingService } from "../services/telegram-trade-shortfall-funding.js";
 import { buildHunchMiniAppWebButton } from "../services/telegram-mini-app-buttons.js";
 import {
   buildTelegramPositionsMessage,
@@ -566,12 +567,18 @@ async function registerTelegramBotTradingRoutes(
           input.venueId === "polymarket"
             ? await ensureTelegramFundingAuthorization(routePool, input)
             : null;
-        await ensureTelegramRelayEvmFundingAuthorization(routePool, input);
-        return wrap;
+        const relay = await ensureTelegramRelayEvmFundingAuthorization(
+          routePool,
+          input,
+        );
+        return wrap ?? relay;
       },
       resolveManagedWallet: (input) =>
         resolveTelegramFundingManagedWalletIdentity(routePool, input),
     });
+  const tradeShortfallFundingService = new TelegramTradeShortfallFundingService(
+    routePool,
+  );
   const writeTradeInputContext =
     dependencies.writeTradeInputContext ??
     (async (context: TelegramBotTradeInputContext) => {
@@ -1548,6 +1555,10 @@ async function registerTelegramBotTradingRoutes(
             request.body.appBaseUrl,
           ),
         ),
+      inspectTradeShortfall: (input) =>
+        tradeShortfallFundingService.inspect(input),
+      commitTradeShortfall: (input) =>
+        tradeShortfallFundingService.commit(input),
       signerInspector,
       telegramMiniAppEnabled: request.body.telegramMiniAppEnabled,
       trading: createTradingForRequest(request as FastifyRequest),
@@ -1572,6 +1583,10 @@ async function registerTelegramBotTradingRoutes(
             request.body.appBaseUrl,
           ),
         ),
+      inspectTradeShortfall: (input) =>
+        tradeShortfallFundingService.inspect(input),
+      commitTradeShortfall: (input) =>
+        tradeShortfallFundingService.commit(input),
       signerInspector,
       telegramMiniAppEnabled: request.body.telegramMiniAppEnabled,
       trading: createTradingForRequest(request as FastifyRequest),
@@ -1713,6 +1728,8 @@ async function registerTelegramBotTradingRoutes(
               request.body.appBaseUrl,
             ),
           ),
+        inspectTradeShortfall: (input) =>
+          tradeShortfallFundingService.inspect(input),
         telegramMessageId: request.body.telegramMessageId,
         telegramMiniAppEnabled: request.body.telegramMiniAppEnabled,
         telegramUserId,

@@ -78,7 +78,7 @@ async function loadRefundTarget(
     `select operation.id as operation_id,
             segment.id as segment_id,
             reservation.id as reservation_id,
-            receipt.raw_amount::text as expected_raw,
+            reservation.source_raw::text as expected_raw,
             source_debit.ledger_height as source_block,
             source_debit.event_index as source_event_index,
             reservation.refund_cursor_block::text as cursor_block,
@@ -103,8 +103,6 @@ async function loadRefundTarget(
          on segment.operation_id = operation.id
         and segment.ordinal = 0
         and segment.provider_id = 'relay'
-       join funding_receive_receipts receipt
-         on receipt.child_funding_operation_id = operation.id
        join funding_observations source_debit
          on source_debit.operation_id = operation.id
         and source_debit.segment_id = segment.id

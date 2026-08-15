@@ -208,8 +208,12 @@ function protectedRefsSql(
     select distinct c.market_id, 'telegram_trade_intents_durable' as reason
     from ${candidatePoolTable} c
     join telegram_trade_intents ti on ti.market_id = c.market_id
-    where ti.status in ('executing', 'submitted', 'filled', 'reconcile_required')
+    where ti.status in (
+            'funding', 'executing', 'submitted', 'filled', 'reconcile_required'
+          )
        or ti.submit_started_at is not null
+       or ti.funding_operation_id is not null
+       or ti.funding_reservation_id is not null
        or ti.order_id is not null
        or ti.execution_id is not null
        or ti.venue_order_id is not null
@@ -323,6 +327,8 @@ function telegramTradeIntentEphemeralPredicate(alias: string): string {
       (status) => `'${status}'`,
     ).join(", ")})
     and ${alias}.order_id is null
+    and ${alias}.funding_operation_id is null
+    and ${alias}.funding_reservation_id is null
     and ${alias}.submit_started_at is null
     and ${alias}.execution_id is null
     and ${alias}.venue_order_id is null
