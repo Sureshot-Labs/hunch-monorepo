@@ -433,10 +433,11 @@ export async function runSignalBotRunner(): Promise<void> {
               return Promise.reject(new Error("Funding API is unavailable"));
             }
             const request =
-              input.action === "open"
-                ? tradingInternalApi.openFunding({
+              input.action === "open_route" && input.fundingRoute
+                ? tradingInternalApi.openFundingRoute({
                     appBaseUrl: config.appBaseUrl,
                     chatId: input.chatId,
+                    fundingRoute: input.fundingRoute,
                     idempotencyKey: input.idempotencyKey,
                     telegramMiniAppEnabled:
                       config.telegramMiniAppLinkBase != null,
@@ -445,94 +446,124 @@ export async function runSignalBotRunner(): Promise<void> {
                     venue:
                       input.venue === "limitless" ? "limitless" : "polymarket",
                   })
-                : input.action === "select" &&
-                    input.contextId &&
-                    input.choiceToken
-                  ? tradingInternalApi.selectFundingTarget({
+                : input.action === "open"
+                  ? tradingInternalApi.openFunding({
+                      appBaseUrl: config.appBaseUrl,
                       chatId: input.chatId,
-                      choiceToken: input.choiceToken,
-                      contextId: input.contextId,
                       idempotencyKey: input.idempotencyKey,
+                      telegramMiniAppEnabled:
+                        config.telegramMiniAppLinkBase != null,
                       telegramMessageId: input.telegramMessageId,
                       telegramUserId: input.telegramUserId,
+                      venue:
+                        input.venue === "limitless"
+                          ? "limitless"
+                          : "polymarket",
                     })
-                  : input.action === "resume_buy" &&
-                      input.continuationToken &&
-                      input.telegramMessageId
-                    ? tradingInternalApi.resumeFundingBuy({
-                        appBaseUrl: config.appBaseUrl,
+                  : input.action === "select" &&
+                      input.contextId &&
+                      input.choiceToken
+                    ? tradingInternalApi.selectFundingTarget({
                         chatId: input.chatId,
-                        continuationToken: input.continuationToken,
+                        choiceToken: input.choiceToken,
+                        contextId: input.contextId,
                         idempotencyKey: input.idempotencyKey,
                         telegramMessageId: input.telegramMessageId,
-                        telegramMiniAppEnabled:
-                          config.telegramMiniAppLinkBase != null,
                         telegramUserId: input.telegramUserId,
                       })
-                    : input.action === "change_buy_amount" &&
+                    : input.action === "resume_buy" &&
                         input.continuationToken &&
                         input.telegramMessageId
-                      ? tradingInternalApi.changeFundingBuyAmount({
+                      ? tradingInternalApi.resumeFundingBuy({
                           appBaseUrl: config.appBaseUrl,
                           chatId: input.chatId,
                           continuationToken: input.continuationToken,
+                          idempotencyKey: input.idempotencyKey,
                           telegramMessageId: input.telegramMessageId,
                           telegramMiniAppEnabled:
                             config.telegramMiniAppLinkBase != null,
                           telegramUserId: input.telegramUserId,
                         })
-                      : input.action === "confirm_conversion" &&
-                          input.consentToken
-                        ? tradingInternalApi.confirmFundingConversion({
+                      : input.action === "change_buy_amount" &&
+                          input.continuationToken &&
+                          input.telegramMessageId
+                        ? tradingInternalApi.changeFundingBuyAmount({
+                            appBaseUrl: config.appBaseUrl,
                             chatId: input.chatId,
-                            consentToken: input.consentToken,
-                            idempotencyKey: input.idempotencyKey,
+                            continuationToken: input.continuationToken,
                             telegramMessageId: input.telegramMessageId,
+                            telegramMiniAppEnabled:
+                              config.telegramMiniAppLinkBase != null,
                             telegramUserId: input.telegramUserId,
                           })
-                        : input.action === "review_conversion" &&
-                            input.receiptId
-                          ? tradingInternalApi.reviewFundingConversion({
+                        : input.action === "confirm_conversion" &&
+                            input.consentToken
+                          ? tradingInternalApi.confirmFundingConversion({
                               chatId: input.chatId,
+                              consentToken: input.consentToken,
                               idempotencyKey: input.idempotencyKey,
-                              receiptId: input.receiptId,
                               telegramMessageId: input.telegramMessageId,
                               telegramUserId: input.telegramUserId,
                             })
-                          : input.action === "back_to_market" && input.contextId
-                            ? tradingInternalApi.returnFundingToMarket({
-                                appBaseUrl: config.appBaseUrl,
+                          : input.action === "review_conversion" &&
+                              input.receiptId
+                            ? tradingInternalApi.reviewFundingConversion({
                                 chatId: input.chatId,
-                                contextId: input.contextId,
+                                idempotencyKey: input.idempotencyKey,
+                                receiptId: input.receiptId,
                                 telegramMessageId: input.telegramMessageId,
-                                telegramMiniAppEnabled:
-                                  config.telegramMiniAppLinkBase != null,
                                 telegramUserId: input.telegramUserId,
                               })
-                            : input.action === "cancel" && input.contextId
-                              ? tradingInternalApi.cancelFunding({
+                            : input.action === "back_to_market" &&
+                                input.contextId
+                              ? tradingInternalApi.returnFundingToMarket({
                                   appBaseUrl: config.appBaseUrl,
                                   chatId: input.chatId,
                                   contextId: input.contextId,
-                                  idempotencyKey: input.idempotencyKey,
                                   telegramMessageId: input.telegramMessageId,
                                   telegramMiniAppEnabled:
                                     config.telegramMiniAppLinkBase != null,
                                   telegramUserId: input.telegramUserId,
                                 })
-                              : input.action === "session" && input.contextId
-                                ? tradingInternalApi.getFundingSession({
+                              : input.action === "cancel_active"
+                                ? tradingInternalApi.cancelActiveFunding({
+                                    appBaseUrl: config.appBaseUrl,
                                     chatId: input.chatId,
-                                    contextId: input.contextId,
-                                    requestObservation:
-                                      input.requestObservation,
+                                    idempotencyKey: input.idempotencyKey,
                                     telegramMessageId: input.telegramMessageId,
+                                    telegramMiniAppEnabled:
+                                      config.telegramMiniAppLinkBase != null,
                                     telegramUserId: input.telegramUserId,
-                                    view: input.view,
                                   })
-                                : Promise.reject(
-                                    new Error("Funding callback is invalid"),
-                                  );
+                                : input.action === "cancel" && input.contextId
+                                  ? tradingInternalApi.cancelFunding({
+                                      appBaseUrl: config.appBaseUrl,
+                                      chatId: input.chatId,
+                                      contextId: input.contextId,
+                                      idempotencyKey: input.idempotencyKey,
+                                      telegramMessageId:
+                                        input.telegramMessageId,
+                                      telegramMiniAppEnabled:
+                                        config.telegramMiniAppLinkBase != null,
+                                      telegramUserId: input.telegramUserId,
+                                    })
+                                  : input.action === "session" &&
+                                      input.contextId
+                                    ? tradingInternalApi.getFundingSession({
+                                        chatId: input.chatId,
+                                        contextId: input.contextId,
+                                        requestObservation:
+                                          input.requestObservation,
+                                        telegramMessageId:
+                                          input.telegramMessageId,
+                                        telegramUserId: input.telegramUserId,
+                                        view: input.view,
+                                      })
+                                    : Promise.reject(
+                                        new Error(
+                                          "Funding callback is invalid",
+                                        ),
+                                      );
             return request.catch((error: unknown) => {
               logTradingInternalApiFailure("funding", error);
               throw error;

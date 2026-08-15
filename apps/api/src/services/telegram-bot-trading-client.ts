@@ -131,6 +131,19 @@ export type TelegramBotTradingInternalApiClient = {
     telegramUserId: string | number;
     venue: "limitless" | "polymarket";
   }) => Promise<TelegramFundingClientMessage>;
+  openFundingRoute: (input: {
+    appBaseUrl: string;
+    chatId: string | number;
+    fundingRoute:
+      | "limitless_base_usdc_direct_v1"
+      | "polymarket_polygon_pusd_direct_v1"
+      | "polymarket_polygon_usdce_wrap_v1";
+    idempotencyKey: string;
+    telegramMiniAppEnabled?: boolean;
+    telegramMessageId: number | null;
+    telegramUserId: string | number;
+    venue: "limitless" | "polymarket";
+  }) => Promise<TelegramFundingClientMessage>;
   getFundingSession: (input: {
     chatId: string | number;
     contextId: string;
@@ -152,6 +165,14 @@ export type TelegramBotTradingInternalApiClient = {
     appBaseUrl: string;
     chatId: string | number;
     contextId: string;
+    idempotencyKey: string;
+    telegramMessageId: number | null;
+    telegramMiniAppEnabled?: boolean;
+    telegramUserId: string | number;
+  }) => Promise<TelegramFundingClientMessage>;
+  cancelActiveFunding: (input: {
+    appBaseUrl: string;
+    chatId: string | number;
     idempotencyKey: string;
     telegramMessageId: number | null;
     telegramMiniAppEnabled?: boolean;
@@ -524,6 +545,12 @@ export function createTelegramBotTradingInternalApiClient(input: {
         body,
         { timeoutMs: executeTimeoutMs },
       ),
+    openFundingRoute: (body) =>
+      post<TelegramFundingClientMessage>(
+        "/internal/telegram-bot/funding/open-route",
+        body,
+        { timeoutMs: executeTimeoutMs },
+      ),
     getFundingSession: (body) =>
       post<TelegramFundingClientMessage>(
         "/internal/telegram-bot/funding/session",
@@ -537,6 +564,11 @@ export function createTelegramBotTradingInternalApiClient(input: {
     cancelFunding: (body) =>
       post<TelegramFundingClientMessage>(
         "/internal/telegram-bot/funding/cancel",
+        body,
+      ),
+    cancelActiveFunding: (body) =>
+      post<TelegramFundingClientMessage>(
+        "/internal/telegram-bot/funding/cancel-active",
         body,
       ),
     returnFundingToMarket: (body) =>

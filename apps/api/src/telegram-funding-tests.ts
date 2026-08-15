@@ -107,6 +107,12 @@ const receiveTargetId = "receive_target_telegram_pusd_12345678";
   const activeElsewhere = buildTelegramFundingActiveElsewhereMessage();
   assert.deepEqual(activeElsewhere.reply_markup?.inline_keyboard, [
     [{ callback_data: "hm:v1:deposit", text: "Open Deposit" }],
+    [
+      {
+        callback_data: "hm:v1:deposit_cancel_active",
+        text: "Cancel active Deposit",
+      },
+    ],
     [{ callback_data: "hm:v1:home", text: "🏠 Home" }],
   ]);
 }
@@ -1199,6 +1205,20 @@ assert.deepEqual(
   pUsd,
   "Relay consent binds the destination asset while its receive target accepts Base USDC",
 );
+
+const directPusdChoice = resolveTelegramFundingTargetChoice({
+  automaticConversionEnabled: true,
+  session,
+  observationVariants: [
+    variant("variant-usdce", usdce),
+    variant("variant-pusd", pUsd),
+  ],
+  routeKey: "polymarket_polygon_pusd_direct_v1",
+});
+assert.equal(directPusdChoice?.mode, "pusd_direct");
+assert.equal(directPusdChoice?.automaticConversion, false);
+assert.deepEqual(directPusdChoice?.asset, pUsd);
+assert.deepEqual(directPusdChoice?.variantIds, ["variant-pusd"]);
 
 const limitlessChoice = resolveTelegramFundingTargetChoice({
   automaticConversionEnabled: false,
