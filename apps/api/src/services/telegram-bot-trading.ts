@@ -6171,7 +6171,10 @@ export function createTelegramFundingBuyContinuationDecorator(input: {
             readiness.maxExecutableBuyUsd != null &&
             Number.isFinite(readiness.maxExecutableBuyUsd) &&
             readiness.maxExecutableBuyUsd >= 0 &&
-            canPreviewBuyForReadiness(readiness),
+            canPreviewBuyForDelivery({
+              deliveryMode: buyReturn.continuationMode,
+              readiness,
+            }),
     );
     if (!liveQuoteUsable && progressState !== "ready") {
       return withFundingCallout({
