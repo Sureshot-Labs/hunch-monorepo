@@ -10,6 +10,7 @@ import { createTelegramBotTradingRoutes } from "./routes/telegram-bot-trading.js
 import {
   drainSignalBotFundingOpenTasks,
   handleSignalBotInteractiveMenuCallback,
+  parseSignalBotInteractiveMenuRoute,
 } from "./services/telegram-bot-menu-actions.js";
 import { buildTelegramDepositMessage } from "./services/telegram-bot-deposit.js";
 import { TelegramFundingError } from "./services/telegram-funding.js";
@@ -25,6 +26,27 @@ function authorizationDb(walletAddress: string | null) {
 
 const owner = "0x1111111111111111111111111111111111111111";
 const deposit = "0x3333333333333333333333333333333333333333";
+
+assert.deepEqual(parseSignalBotInteractiveMenuRoute("deposit_route:pw"), {
+  kind: "deposit_route",
+  route: "polymarket_polygon_usdce_wrap_v1",
+  venue: "polymarket",
+});
+assert.deepEqual(parseSignalBotInteractiveMenuRoute("deposit_route:pd"), {
+  kind: "deposit_route",
+  route: "polymarket_polygon_pusd_direct_v1",
+  venue: "polymarket",
+});
+assert.deepEqual(parseSignalBotInteractiveMenuRoute("deposit_route:ld"), {
+  kind: "deposit_route",
+  route: "limitless_base_usdc_direct_v1",
+  venue: "limitless",
+});
+assert.equal(parseSignalBotInteractiveMenuRoute("deposit_route:pn"), null);
+assert.equal(parseSignalBotInteractiveMenuRoute("deposit_route:pb"), null);
+assert.deepEqual(parseSignalBotInteractiveMenuRoute("deposit_cancel_active"), {
+  kind: "deposit_cancel_active",
+});
 
 const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
   {
@@ -96,6 +118,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(rendered, "Choose a trading venue.");
 
       const routeCalls: Array<string | null | undefined> = [];
+      const directSelections: Array<Record<string, unknown>> = [];
+      const activeCancellations: Array<Record<string, unknown>> = [];
       const app = Fastify({ logger: false });
       app.setValidatorCompiler(validatorCompiler);
       app.setSerializerCompiler(serializerCompiler);
@@ -106,12 +130,31 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
             return { text: venue ? `Deposit ${venue}` : "Choose venues" };
           },
           db: {
-            query: async () => ({ fields: [], rows: [] }),
+            query: async (sql: string) => ({
+              fields: [],
+              rows: sql.includes("funding_context.id as context_id")
+                ? [
+                    {
+                      context_id: "223e4567-e89b-42d3-a456-426614174000",
+                      telegram_message_id: "741",
+                    },
+                  ]
+                : [],
+            }),
           } as never,
           fundingService: {
-            cancel: async () => ({ text: "cancel" }),
-            open: async () => ({ text: "open" }),
-            selectTarget: async () => ({ text: "select" }),
+            cancel: async (input) => {
+              activeCancellations.push(input);
+              return { text: "cancel" };
+            },
+            open: async () => ({
+              fundingContextId: "123e4567-e89b-42d3-a456-426614174000",
+              text: "open",
+            }),
+            selectTarget: async (input) => {
+              directSelections.push(input);
+              return { text: "direct selected" };
+            },
             session: async () => ({ text: "session" }),
           },
           internalPreHandler: async () => undefined,
@@ -151,6 +194,44 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           url: "/internal/telegram-bot/deposit",
         });
         assert.doesNotMatch(polymarket.json().text, /address/iu);
+        const direct = await app.inject({
+          method: "POST",
+          payload: {
+            appBaseUrl: "https://app.hunch.trade",
+            chatId: 20,
+            fundingRoute: "polymarket_polygon_usdce_wrap_v1",
+            idempotencyKey: "funding:direct:test",
+            telegramMessageId: 42,
+            telegramUserId: 20,
+            venue: "polymarket",
+          },
+          url: "/internal/telegram-bot/funding/open-route",
+        });
+        assert.equal(direct.statusCode, 200);
+        assert.equal(direct.json().text, "direct selected");
+        assert.equal(directSelections[0]?.choiceToken, "pw");
+        assert.equal(
+          directSelections[0]?.contextId,
+          "123e4567-e89b-42d3-a456-426614174000",
+        );
+        const cancelActive = await app.inject({
+          method: "POST",
+          payload: {
+            appBaseUrl: "https://app.hunch.trade",
+            chatId: 20,
+            idempotencyKey: "funding:cancel-active:test",
+            telegramMessageId: 42,
+            telegramUserId: 20,
+          },
+          url: "/internal/telegram-bot/funding/cancel-active",
+        });
+        assert.equal(cancelActive.statusCode, 200);
+        assert.equal(cancelActive.json().text, "cancel");
+        assert.equal(
+          activeCancellations[0]?.contextId,
+          "223e4567-e89b-42d3-a456-426614174000",
+        );
+        assert.equal(activeCancellations[0]?.telegramMessageId, 741);
         assert.deepEqual(routeCalls, [null]);
       } finally {
         await app.close();
@@ -332,6 +413,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.match(menu.text, /Limitless[\s\S]*Base/);
       assert.match(menu.text, new RegExp(TELEGRAM_CUSTOM_EMOJI.usdc.id));
       assert.match(JSON.stringify(menu.reply_markup), /deposit:limitless/);
+      assert.match(JSON.stringify(menu.reply_markup), /deposit:any/);
       const venueButtons = menu.reply_markup?.inline_keyboard.flat() ?? [];
       assert.equal(
         venueButtons.find((button) => button.text === "Polymarket")
@@ -339,6 +421,39 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         TELEGRAM_CUSTOM_EMOJI.polymarket.id,
       );
       assert.doesNotMatch(menu.text, /Kalshi/);
+
+      const menuWithActive = await buildTelegramDepositMessage({
+        dependencies: { allowedVenues: ["polymarket", "limitless"] },
+        pool: {
+          query: async (sql: string) => ({
+            rows: sql.includes("telegram_funding_sessions")
+              ? [{ venue_id: "polymarket" }]
+              : [],
+          }),
+        } as never,
+        telegramUserId: 20,
+      });
+      assert.match(
+        JSON.stringify(menuWithActive.reply_markup),
+        /Active Deposit/u,
+      );
+
+      const justDeposit = await buildTelegramDepositMessage({
+        pool: authorizationDb(null),
+        venue: "any",
+      });
+      assert.match(justDeposit.text, /Any \/ Just Deposit/u);
+      assert.match(justDeposit.text, /automatically prepare/u);
+      assert.match(JSON.stringify(justDeposit.reply_markup), /pUSD · Polygon/u);
+      assert.match(
+        JSON.stringify(justDeposit.reply_markup),
+        /USDC\.e · Polygon/u,
+      );
+      assert.match(JSON.stringify(justDeposit.reply_markup), /USDC · Base/u);
+      assert.doesNotMatch(
+        JSON.stringify(justDeposit.reply_markup),
+        /deposit_route:(?:pn|pb)/u,
+      );
 
       const limitless = await buildTelegramDepositMessage({
         pool: authorizationDb(owner),

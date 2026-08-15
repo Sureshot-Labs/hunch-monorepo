@@ -353,6 +353,12 @@ export function buildTelegramFundingActiveElsewhereMessage(
             text: summary ? "🔄 Refresh active Deposit" : "Open Deposit",
           },
         ],
+        [
+          {
+            callback_data: "hm:v1:deposit_cancel_active",
+            text: "Cancel active Deposit",
+          },
+        ],
         [{ callback_data: "hm:v1:home", text: "🏠 Home" }],
       ],
     },

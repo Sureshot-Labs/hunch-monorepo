@@ -16,6 +16,15 @@ import {
 
 export type SignalBotFundingMenuRoute =
   | { kind: "deposit"; showQr: boolean; venue: string }
+  | {
+      kind: "deposit_route";
+      route:
+        | "limitless_base_usdc_direct_v1"
+        | "polymarket_polygon_pusd_direct_v1"
+        | "polymarket_polygon_usdce_wrap_v1";
+      venue: "limitless" | "polymarket";
+    }
+  | { kind: "deposit_cancel_active" }
   | { kind: "deposit_menu" }
   | TelegramFundingCallbackRoute;
 
@@ -71,7 +80,31 @@ export function parseSignalBotInteractiveMenuRoute(
   if (route === "deposit") {
     return { kind: "deposit_menu" };
   }
+  if (route === "deposit_cancel_active") {
+    return { kind: "deposit_cancel_active" };
+  }
   const depositMatch = route.match(/^(deposit|deposit_qr):([a-z0-9_-]+)$/i);
+  const depositRouteMatch = route.match(/^deposit_route:(pd|pw|ld)$/i);
+  if (depositRouteMatch) {
+    const token = depositRouteMatch[1]?.toLowerCase();
+    const routeByToken = {
+      ld: "limitless_base_usdc_direct_v1",
+      pd: "polymarket_polygon_pusd_direct_v1",
+      pw: "polymarket_polygon_usdce_wrap_v1",
+    } as const;
+    const fundingRoute = token
+      ? routeByToken[token as keyof typeof routeByToken]
+      : null;
+    if (!fundingRoute) return null;
+    const venue = fundingRoute.startsWith("limitless_")
+      ? "limitless"
+      : "polymarket";
+    return {
+      kind: "deposit_route",
+      route: fundingRoute,
+      venue,
+    };
+  }
   if (!depositMatch) return null;
   return {
     kind: "deposit",
@@ -122,9 +155,11 @@ export async function hideSignalBotFundingQr(
 export type SignalBotFundingMenuAction =
   | "back_to_market"
   | "cancel"
+  | "cancel_active"
   | "change_buy_amount"
   | "confirm_conversion"
   | "open"
+  | "open_route"
   | "review_conversion"
   | "resume_buy"
   | "select"
@@ -145,15 +180,19 @@ export function signalBotFundingMenuAction(
             ? "review_conversion"
             : route.kind === "back_to_market"
               ? "back_to_market"
-              : route.kind === "cancel"
-                ? "cancel"
-                : route.kind === "refresh" || route.kind === "qr"
-                  ? "session"
-                  : route.kind === "deposit" &&
-                      (route.venue === "polymarket" ||
-                        route.venue === "limitless")
-                    ? "open"
-                    : null;
+              : route.kind === "deposit_cancel_active"
+                ? "cancel_active"
+                : route.kind === "cancel"
+                  ? "cancel"
+                  : route.kind === "refresh" || route.kind === "qr"
+                    ? "session"
+                    : route.kind === "deposit_route"
+                      ? "open_route"
+                      : route.kind === "deposit" &&
+                          (route.venue === "polymarket" ||
+                            route.venue === "limitless")
+                        ? "open"
+                        : null;
 }
 
 type MenuButton =
@@ -185,9 +224,11 @@ export type SignalBotInteractiveMenuLoaders = {
     action:
       | "back_to_market"
       | "cancel"
+      | "cancel_active"
       | "change_buy_amount"
       | "confirm_conversion"
       | "open"
+      | "open_route"
       | "review_conversion"
       | "resume_buy"
       | "select"
@@ -197,6 +238,10 @@ export type SignalBotInteractiveMenuLoaders = {
     consentToken?: string;
     contextId?: string;
     continuationToken?: string;
+    fundingRoute?:
+      | "limitless_base_usdc_direct_v1"
+      | "polymarket_polygon_pusd_direct_v1"
+      | "polymarket_polygon_usdce_wrap_v1";
     idempotencyKey: string;
     receiptId?: string;
     requestObservation?: boolean;
@@ -379,12 +424,12 @@ async function deliverSignalBotInteractiveMenuCallback(
     }
   };
   const depositVenue =
-    route.kind === "deposit"
+    route.kind === "deposit" || route.kind === "deposit_route"
       ? route.venue
       : fundingAction != null
         ? "polymarket"
         : null;
-  if (!fundingAction && route.kind === "deposit") {
+  if (!fundingAction && route.kind === "deposit" && route.venue !== "any") {
     await input.render({
       parse_mode: "MarkdownV2",
       text: formatTelegramCalloutMarkdownV2({
@@ -406,25 +451,27 @@ async function deliverSignalBotInteractiveMenuCallback(
                   choiceToken: route.choiceToken,
                   contextId: route.contextId,
                 }
-              : route.kind === "review_buy"
-                ? { continuationToken: route.continuationToken }
-                : route.kind === "change_buy_amount"
+              : route.kind === "deposit_route"
+                ? { fundingRoute: route.route }
+                : route.kind === "review_buy"
                   ? { continuationToken: route.continuationToken }
-                  : route.kind === "confirm_conversion"
-                    ? { consentToken: route.consentToken }
-                    : route.kind === "review_conversion"
-                      ? { receiptId: route.receiptId }
-                      : route.kind === "back_to_market" ||
-                          route.kind === "cancel" ||
-                          route.kind === "refresh" ||
-                          route.kind === "qr"
-                        ? { contextId: route.contextId }
-                        : {}),
+                  : route.kind === "change_buy_amount"
+                    ? { continuationToken: route.continuationToken }
+                    : route.kind === "confirm_conversion"
+                      ? { consentToken: route.consentToken }
+                      : route.kind === "review_conversion"
+                        ? { receiptId: route.receiptId }
+                        : route.kind === "back_to_market" ||
+                            route.kind === "cancel" ||
+                            route.kind === "refresh" ||
+                            route.kind === "qr"
+                          ? { contextId: route.contextId }
+                          : {}),
             idempotencyKey:
               "funding:" + (input.idempotencyKey ?? "legacy-callback"),
             telegramMessageId: input.messageId,
             telegramUserId: input.telegramUserId,
-            ...(fundingAction === "open" &&
+            ...((fundingAction === "open" || fundingAction === "open_route") &&
             (depositVenue === "polymarket" || depositVenue === "limitless")
               ? { venue: depositVenue }
               : {}),

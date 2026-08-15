@@ -231,6 +231,16 @@ const internalFundingOpenBodySchema = internalFundingMutationSchema
   })
   .strict();
 
+const internalFundingOpenRouteBodySchema = internalFundingOpenBodySchema
+  .extend({
+    fundingRoute: z.enum([
+      "limitless_base_usdc_direct_v1",
+      "polymarket_polygon_pusd_direct_v1",
+      "polymarket_polygon_usdce_wrap_v1",
+    ]),
+  })
+  .strict();
+
 const internalFundingSessionBodySchema = internalFundingIdentitySchema
   .extend({
     contextId: z.string().uuid(),
@@ -261,6 +271,13 @@ const internalFundingCancelBodySchema = internalFundingMutationSchema
   .extend({
     appBaseUrl: z.string().trim().url(),
     contextId: z.string().uuid(),
+    telegramMiniAppEnabled: z.boolean().optional(),
+  })
+  .strict();
+
+const internalFundingCancelActiveBodySchema = internalFundingMutationSchema
+  .extend({
+    appBaseUrl: z.string().trim().url(),
     telegramMiniAppEnabled: z.boolean().optional(),
   })
   .strict();
@@ -845,6 +862,42 @@ async function registerTelegramBotTradingRoutes(
   );
 
   api.post(
+    "/internal/telegram-bot/funding/open-route",
+    {
+      preHandler: requireInternal,
+      schema: { body: internalFundingOpenRouteBodySchema },
+    },
+    async (request, reply) => {
+      const expectedVenue = request.body.fundingRoute.startsWith("limitless_")
+        ? "limitless"
+        : "polymarket";
+      if (request.body.venue !== expectedVenue) {
+        return reply.code(409).send({ error: "invalid_funding_choice" });
+      }
+      try {
+        const opened = await fundingService.open(request.body);
+        if (!opened.fundingContextId) {
+          return reply.code(409).send({ error: "funding_context_not_found" });
+        }
+        return await fundingService.selectTarget({
+          chatId: request.body.chatId,
+          choiceToken: {
+            limitless_base_usdc_direct_v1: "ld",
+            polymarket_polygon_pusd_direct_v1: "pd",
+            polymarket_polygon_usdce_wrap_v1: "pw",
+          }[request.body.fundingRoute],
+          contextId: opened.fundingContextId,
+          idempotencyKey: `${request.body.idempotencyKey.slice(0, 177)}:route`,
+          telegramMessageId: request.body.telegramMessageId,
+          telegramUserId: request.body.telegramUserId,
+        });
+      } catch (error) {
+        return sendTelegramFundingError(request, reply, error);
+      }
+    },
+  );
+
+  api.post(
     "/internal/telegram-bot/funding/session",
     {
       preHandler: requireInternal,
@@ -875,6 +928,68 @@ async function registerTelegramBotTradingRoutes(
             new Date(),
             createFundingDecoratorForRequest(request),
           ),
+        );
+      } catch (error) {
+        return sendTelegramFundingError(request, reply, error);
+      }
+    },
+  );
+
+  api.post(
+    "/internal/telegram-bot/funding/cancel-active",
+    {
+      preHandler: requireInternal,
+      schema: { body: internalFundingCancelActiveBodySchema },
+    },
+    async (request, reply) => {
+      const active = await db.query<{
+        context_id: string;
+        telegram_message_id: string | number | null;
+      }>(
+        `
+          select
+            funding_context.id as context_id,
+            funding_context.telegram_message_id
+          from user_telegram_accounts telegram_account
+          join telegram_funding_sessions funding_context
+            on funding_context.user_id = telegram_account.user_id
+           and funding_context.telegram_account_id = telegram_account.id
+           and funding_context.telegram_user_id = telegram_account.telegram_user_id
+          join funding_receive_sessions receive_session
+            on receive_session.id = funding_context.receive_session_id
+           and receive_session.user_id = funding_context.user_id
+           and receive_session.owner_channel = 'telegram'
+          where telegram_account.telegram_user_id = $1
+            and funding_context.chat_id = $2
+            and funding_context.cancelled_at is null
+            and funding_context.latest_terminal_projection is null
+            and funding_context.expires_at > now()
+            and receive_session.status in (
+              'open',
+              'processing',
+              'review_required'
+            )
+            and receive_session.expires_at > now()
+          order by funding_context.created_at desc, funding_context.id desc
+          limit 1
+        `,
+        [String(request.body.telegramUserId), String(request.body.chatId)],
+      );
+      const activeContext = active.rows[0];
+      if (!activeContext) {
+        return reply.code(409).send({ error: "funding_context_not_found" });
+      }
+      const originalMessageId = Number(activeContext.telegram_message_id);
+      try {
+        return reply.send(
+          await fundingService.cancel({
+            ...request.body,
+            contextId: activeContext.context_id,
+            telegramMessageId:
+              Number.isSafeInteger(originalMessageId) && originalMessageId > 0
+                ? originalMessageId
+                : null,
+          }),
         );
       } catch (error) {
         return sendTelegramFundingError(request, reply, error);
@@ -1160,10 +1275,11 @@ async function registerTelegramBotTradingRoutes(
     },
     async (request) => {
       const venue = request.body.venue?.trim().toLowerCase() ?? null;
-      if (venue === null) {
+      if (venue === null || venue === "any") {
         return buildDepositMessage({
           pool: db,
-          venue: null,
+          telegramUserId: request.body.telegramUserId,
+          venue,
         });
       }
       // Explicit legacy venue callbacks cannot bypass the durable funding
