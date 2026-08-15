@@ -773,6 +773,17 @@ const TERMINAL_INTENT_STATUSES = new Set([
   "external_handoff",
 ]);
 const PENDING_INTENT_STATUSES = ["draft", "previewed", "confirming"];
+const RESOLVING_NON_FUNDING_INTENT_STATUSES = [
+  "executing",
+  "reconcile_required",
+  "submitted",
+];
+const TERMINAL_FUNDING_OPERATION_STATUSES = [
+  "completed",
+  "refunded",
+  "failed",
+  "cancelled",
+];
 const SAFE_VENUES: TelegramBotTradingVenue[] = [
   "polymarket",
   "limitless",
@@ -4082,6 +4093,17 @@ async function loadUnresolvedTelegramTradeIntent(
 	        AND (
 	          (status = 'confirming' AND expires_at > now())
 	          OR status = ANY($5::text[])
+	          OR (
+	            status = 'funding'
+	            AND funding_operation_id IS NOT NULL
+	            AND EXISTS (
+	              SELECT 1
+	                FROM funding_operations funding_operation
+	               WHERE funding_operation.id = tti.funding_operation_id
+	                 AND funding_operation.user_id = tti.user_id
+	                 AND funding_operation.status <> ALL($6::text[])
+	            )
+	          )
 	        )
       ORDER BY updated_at DESC
       LIMIT 1`,
@@ -4090,7 +4112,8 @@ async function loadUnresolvedTelegramTradeIntent(
       input.marketId,
       input.side ?? null,
       input.excludeIntentId ?? null,
-      ["funding", "executing", "reconcile_required", "submitted"],
+      RESOLVING_NON_FUNDING_INTENT_STATUSES,
+      TERMINAL_FUNDING_OPERATION_STATUSES,
     ],
   );
   return result.rows[0] ?? null;
@@ -4107,10 +4130,22 @@ async function countUnresolvedTelegramTradeIntents(
 	        AND (
 	          (status = 'confirming' AND expires_at > now())
 	          OR status = ANY($2::text[])
+	          OR (
+	            status = 'funding'
+	            AND funding_operation_id IS NOT NULL
+	            AND EXISTS (
+	              SELECT 1
+	                FROM funding_operations funding_operation
+	               WHERE funding_operation.id = tti.funding_operation_id
+	                 AND funding_operation.user_id = tti.user_id
+	                 AND funding_operation.status <> ALL($3::text[])
+	            )
+	          )
 	        )`,
     [
       telegramUserId,
-      ["funding", "executing", "reconcile_required", "submitted"],
+      RESOLVING_NON_FUNDING_INTENT_STATUSES,
+      TERMINAL_FUNDING_OPERATION_STATUSES,
     ],
   );
   const parsed = Number(result.rows[0]?.count ?? 0);
@@ -4156,12 +4191,18 @@ async function listResolvingTelegramTradeIntents(
        AND (
          (tti.status = 'confirming' AND tti.expires_at > now())
          OR tti.status = ANY($2::text[])
+         OR (
+           tti.status = 'funding'
+           AND funding_operation.id IS NOT NULL
+           AND funding_operation.status <> ALL($3::text[])
+         )
        )
      ORDER BY tti.created_at DESC
      LIMIT 5`,
     [
       telegramUserId,
-      ["funding", "executing", "reconcile_required", "submitted"],
+      RESOLVING_NON_FUNDING_INTENT_STATUSES,
+      TERMINAL_FUNDING_OPERATION_STATUSES,
     ],
   );
   return result.rows.map((row) => ({
@@ -5623,6 +5664,7 @@ export async function reconcileStaleTelegramTradeIntents(
   backfilledExecutionRefs: number;
   backfilledOrderRefs: number;
   expiredPending: number;
+  failedInactiveFunding: number;
   failedPreSubmitExecuting: number;
   submittedReconcileRequired: number;
   unknownSubmitReconcileRequired: number;
@@ -5635,6 +5677,28 @@ export async function reconcileStaleTelegramTradeIntents(
     input.telegramUserId == null
       ? null
       : normalizeTelegramUserId(input.telegramUserId);
+  const failedInactiveFunding = await db.query(
+    `UPDATE telegram_trade_intents funding_intent
+        SET status = 'failed',
+            error_code = coalesce(error_code, 'funding_no_longer_active'),
+            error_message = coalesce(
+              error_message,
+              'Funding stopped before the Buy could continue. No trade was submitted.'
+            ),
+            updated_at = now()
+      WHERE funding_intent.status = 'funding'
+        AND funding_intent.submit_started_at IS NULL
+        AND ($1::text IS NULL OR funding_intent.telegram_user_id = $1)
+        AND NOT EXISTS (
+          SELECT 1
+            FROM funding_operations funding_operation
+           WHERE funding_operation.id = funding_intent.funding_operation_id
+             AND funding_operation.user_id = funding_intent.user_id
+             AND funding_operation.status <> ALL($2::text[])
+        )
+      RETURNING funding_intent.id`,
+    [telegramUserId, TERMINAL_FUNDING_OPERATION_STATUSES],
+  );
   const expiredPending = await db.query(
     `UPDATE telegram_trade_intents
         SET status = 'expired',
@@ -5834,6 +5898,7 @@ export async function reconcileStaleTelegramTradeIntents(
     backfilledExecutionRefs: backfilledExecutionRefs.rowCount ?? 0,
     backfilledOrderRefs: backfilledOrderRefs.rowCount ?? 0,
     expiredPending: expiredPending.rowCount ?? 0,
+    failedInactiveFunding: failedInactiveFunding.rowCount ?? 0,
     failedPreSubmitExecuting: failedPreSubmitExecuting.rowCount ?? 0,
     submittedReconcileRequired: submittedReconcileRequired.rowCount ?? 0,
     unknownSubmitReconcileRequired:
@@ -9571,6 +9636,47 @@ export async function handleTelegramBotTradingCallback(
       });
       return true;
     }
+  }
+  if (
+    parsed.type === "retry_buy" &&
+    intent.action === "buy" &&
+    intent.funding_operation_id != null &&
+    intent.submit_started_at == null &&
+    ["cancelled", "expired", "failed"].includes(intent.status)
+  ) {
+    await input.answerCallbackQuery({
+      callbackQueryId: input.callbackQuery.id,
+      text: "Opening a fresh market card…",
+    });
+    const marketMessage = await buildTelegramBotTradingMarketMessage({
+      appBaseUrl: input.appBaseUrl,
+      chatId,
+      context: {
+        ...(intent.side ? { focusSide: intent.side } : {}),
+        origin: "direct",
+      },
+      db: input.db,
+      marketRef: intent.market_id,
+      signerInspector: input.signerInspector,
+      telegramMessageId: callbackMessageId,
+      telegramMiniAppEnabled: input.telegramMiniAppEnabled,
+      telegramUserId: intent.telegram_user_id,
+      trading: input.trading,
+      writeTradeInputContext: input.writeTradeInputContext,
+    }).catch(() => null);
+    await input.sendMessage({
+      chat_id: chatId,
+      ...(marketMessage ?? {
+        parse_mode: "MarkdownV2" as const,
+        text: formatTelegramTradeLifecycleMessageMarkdownV2({
+          heading: "Funding stopped safely.",
+          lines: ["Open the market again to build a fresh Buy."],
+          marketTitle: intent.market_title,
+          venue: intent.venue,
+        }),
+      }),
+    });
+    return true;
   }
   const exitsToMarket =
     parsed.type === "cancel" || parsed.type === "change_amount";
