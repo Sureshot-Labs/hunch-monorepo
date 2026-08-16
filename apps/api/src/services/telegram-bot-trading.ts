@@ -9411,7 +9411,7 @@ export async function completeTelegramBotTradeInput(input: {
          policy_snapshot, result, expires_at, idempotency_key
        ) VALUES (
          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
-         $12, $13, $14, 'draft', $15::jsonb, $16::jsonb, $17::jsonb, $18, $19
+         $12, $13, $14, $15, 'draft', $16::jsonb, $17::jsonb, $18::jsonb, $19, $20
        )
        ON CONFLICT (idempotency_key) DO NOTHING`,
       [
