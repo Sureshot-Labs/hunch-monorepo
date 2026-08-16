@@ -8449,6 +8449,20 @@ async function previewTelegramTradeIntent(input: {
             marketTitle: input.intent.market_title,
             venue: input.intent.venue,
           }),
+          reply_markup: {
+            inline_keyboard: [
+              [
+                {
+                  callback_data: `${TELEGRAM_BOT_TRADING_CALLBACK_PREFIX}:retry_buy:${input.intent.id}`,
+                  text: "🔄 Retry balance check",
+                },
+                {
+                  callback_data: `hm:v1:deposit:${input.intent.venue}`,
+                  text: "Deposit",
+                },
+              ],
+            ],
+          },
         });
         return;
       }

@@ -227,6 +227,51 @@ function recommendedOption(
   );
 }
 
+function requiresExternalHandoff(option: SourceOption): boolean {
+  return option.requiredActions.some(
+    (action) => action.kind === "external_handoff",
+  );
+}
+
+/**
+ * Planner recommendations are allowed to change after delegated authority is
+ * provisioned. They must not replace a server-executable source with a
+ * Deposit-Wallet handoff merely because that handoff has a larger balance.
+ */
+export function selectTelegramTradeShortfallAutomatedOption(input: {
+  options: readonly SourceOption[];
+  venue: Venue;
+  destination: AssetRef;
+  requiredProfileId?: string;
+}): Readonly<{ option: SourceOption; profileId: string }> | null {
+  const candidates = input.options.flatMap((option) => {
+    if (
+      !option.selectable ||
+      option.experienceMode === "unavailable" ||
+      requiresExternalHandoff(option)
+    ) {
+      return [];
+    }
+    const profileId = resolveTelegramTradeShortfallExecutionProfile(
+      option,
+      input.venue,
+      input.destination,
+    );
+    if (
+      !profileId ||
+      (input.requiredProfileId && profileId !== input.requiredProfileId)
+    ) {
+      return [];
+    }
+    return [{ option, profileId }];
+  });
+  return (
+    candidates.find((candidate) => candidate.option.recommended) ??
+    candidates[0] ??
+    null
+  );
+}
+
 function proposalFromOption(
   projection: Readonly<{
     liquidityProjectionId: string;
@@ -314,19 +359,14 @@ export class TelegramTradeShortfallFundingService {
         ],
       };
     }
-    const selected = recommendedOption(initial.sourceOptions);
-    if (!selected) return { kind: "external_deposit_required" };
-    const profileId = resolveTelegramTradeShortfallExecutionProfile(
-      selected,
-      input.venue,
-      destinationAsset(input.venue),
-    );
-    if (!profileId) {
-      if (
-        selected.requiredActions.some(
-          (action) => action.kind === "external_handoff",
-        )
-      ) {
+    const automated = selectTelegramTradeShortfallAutomatedOption({
+      options: initial.sourceOptions,
+      venue: input.venue,
+      destination: destinationAsset(input.venue),
+    });
+    if (!automated) {
+      const selected = recommendedOption(initial.sourceOptions);
+      if (selected && requiresExternalHandoff(selected)) {
         return { kind: "external_deposit_required" };
       }
       return {
@@ -334,6 +374,7 @@ export class TelegramTradeShortfallFundingService {
         reasonCodes: ["internal_route_requires_unsupported_execution_profile"],
       };
     }
+    const profileId = automated.profileId;
     if (!initial.destinationOptionId || !initial.venueBindingOptionId) {
       return {
         kind: "temporarily_unavailable",
@@ -377,28 +418,29 @@ export class TelegramTradeShortfallFundingService {
         reasonCodes: ["internal_route_delegated_authority_unavailable"],
       };
     }
-    const delegated = await this.runtime.liquidity(
+    const delegatedPlan = await this.runtime.liquidity(
       input.userId,
       tradeShortfallRequest(input, profileId),
     );
-    if (delegated.completeness !== "complete" || delegated.errors.length > 0) {
+    if (
+      delegatedPlan.completeness !== "complete" ||
+      delegatedPlan.errors.length > 0
+    ) {
       return {
         kind: "temporarily_unavailable",
         reasonCodes: [
-          ...delegated.reasonCodes,
-          ...delegated.errors.map((error) => error.code),
+          ...delegatedPlan.reasonCodes,
+          ...delegatedPlan.errors.map((error) => error.code),
         ],
       };
     }
-    const delegatedOption = recommendedOption(delegated.sourceOptions);
-    if (
-      !delegatedOption ||
-      resolveTelegramTradeShortfallExecutionProfile(
-        delegatedOption,
-        input.venue,
-        destinationAsset(input.venue),
-      ) !== profileId
-    ) {
+    const delegatedAutomated = selectTelegramTradeShortfallAutomatedOption({
+      options: delegatedPlan.sourceOptions,
+      venue: input.venue,
+      destination: destinationAsset(input.venue),
+      requiredProfileId: profileId,
+    });
+    if (!delegatedAutomated) {
       return {
         kind: "temporarily_unavailable",
         reasonCodes: ["internal_route_changed_during_delegated_planning"],
@@ -406,7 +448,11 @@ export class TelegramTradeShortfallFundingService {
     }
     return {
       kind: "internal_route",
-      proposal: proposalFromOption(delegated, delegatedOption, profileId),
+      proposal: proposalFromOption(
+        delegatedPlan,
+        delegatedAutomated.option,
+        profileId,
+      ),
     };
   }
 
