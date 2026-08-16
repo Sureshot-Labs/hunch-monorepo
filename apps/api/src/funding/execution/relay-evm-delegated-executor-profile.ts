@@ -2368,6 +2368,159 @@ async function claimRelayCleanup(
   });
 }
 
+/**
+ * An unstarted Relay action has not created allowance or crossed a provider
+ * boundary. Once its signed action expires, it must be terminalized without an
+ * allowance RPC read: an RPC outage must never leave a dead route holding the
+ * wallet lane (and therefore a Telegram Buy) indefinitely.
+ */
+async function expireRelayActionBeforeBroadcast(
+  client: PoolClient,
+  input: Readonly<{
+    now: Date;
+    profile: RelayEvmFundingProfileSpec;
+  }>,
+): Promise<DelegatedFundingProfileClaim | null> {
+  const { rows } = await client.query<{
+    approval_step_id: string;
+    authorization_id: string;
+    operation_id: string;
+    operation_stage: "committed" | "source_action" | "source_observed";
+    operation_status:
+      | "in_progress"
+      | "reconcile_required"
+      | "recovery_required";
+    operation_version: string | number;
+    reservation_id: string;
+    user_id: string;
+  }>(
+    `select operation.id as operation_id,
+            operation.user_id,
+            operation.status as operation_status,
+            operation.progress_stage as operation_stage,
+            operation.version as operation_version,
+            approval_step.id as approval_step_id,
+            reservation.id as reservation_id,
+            funding_authorization.id::text as authorization_id
+       from telegram_funding_authorization_reservations reservation
+       join telegram_funding_authorizations funding_authorization
+         on funding_authorization.id = reservation.authorization_id
+       join funding_operations operation
+         on operation.id = reservation.funding_operation_id
+       join funding_operation_steps approval_step
+         on approval_step.operation_id = operation.id
+        and approval_step.executor_id = $1
+        and approval_step.action_validation_result ->> 'relayStepKind' =
+              'approve'
+       where reservation.status = 'reserved'
+         and ${RELAY_ALLOWANCE_LANE_HEAD_PREDICATE}
+         and operation.status in (
+               'in_progress', 'reconcile_required', 'recovery_required'
+             )
+         and operation.progress_stage in (
+               'committed', 'source_action', 'source_observed'
+             )
+         and (
+           operation.progress_stage <> 'committed'
+           or operation.status = 'in_progress'
+         )
+         and approval_step.state = 'action_required'
+         and approval_step.action_expires_at is not null
+         and approval_step.action_expires_at <= $2::timestamptz
+         and not exists (
+           select 1
+             from funding_operation_step_attempts attempt
+            where attempt.step_id = approval_step.id
+         )
+       order by operation.created_at, approval_step.ordinal
+       for update of reservation, funding_authorization, operation,
+                     approval_step skip locked
+       limit 1`,
+    [input.profile.profileId, input.now],
+  );
+  const row = rows[0];
+  if (!row) return null;
+  if (
+    !(await tryLockFundingAuthorizationReservationScope(client, {
+      authorizationId: row.authorization_id,
+      userId: row.user_id,
+    }))
+  ) {
+    return null;
+  }
+
+  const stepUpdate = await client.query(
+    `update funding_operation_steps
+        set state = 'failed', updated_at = $2
+      where id = $1::uuid and state = 'action_required'`,
+    [row.approval_step_id, input.now],
+  );
+  if (stepUpdate.rowCount !== 1) return null;
+  const reservationUpdate = await client.query(
+    `update telegram_funding_authorization_reservations
+        set status = 'released',
+            resolved_at = $2,
+            resolution_evidence = resolution_evidence ||
+              jsonb_build_object(
+                'operationId', $3::text,
+                'reason', 'relay_action_expired_before_broadcast'
+              ),
+            updated_at = $2
+      where id = $1::uuid and status = 'reserved'`,
+    [row.reservation_id, input.now, row.operation_id],
+  );
+  if (reservationUpdate.rowCount !== 1) {
+    throw new Error("expired Relay reservation release was lost");
+  }
+
+  let version = Number(row.operation_version);
+  let status = row.operation_status;
+  let stage = row.operation_stage;
+  if (stage === "committed") {
+    const activated = await transitionFundingOperationInTransaction(client, {
+      operationId: row.operation_id,
+      scope: { kind: "worker" },
+      expectedVersion: version,
+      expectedState: { status, stage },
+      nextState: { status: "in_progress", stage: "source_action" },
+      now: input.now,
+    });
+    version = activated.version;
+    status = "in_progress";
+    stage = "source_action";
+  }
+  if (status !== "reconcile_required") {
+    const reconciling = await transitionFundingOperationInTransaction(client, {
+      operationId: row.operation_id,
+      scope: { kind: "worker" },
+      expectedVersion: version,
+      expectedState: { status, stage },
+      nextState: { status: "reconcile_required", stage },
+      errorCode: "relay_action_expired_before_broadcast",
+      now: input.now,
+    });
+    version = reconciling.version;
+    status = "reconcile_required";
+  }
+  await transitionFundingOperationInTransaction(client, {
+    operationId: row.operation_id,
+    scope: { kind: "worker" },
+    expectedVersion: version,
+    expectedState: { status, stage },
+    nextState: { status: "failed", stage: "terminal" },
+    errorCode: "relay_action_expired_before_broadcast",
+    supportMetadataPatch: {
+      relayPreclaimDiagnostic: "action_expired_without_attempt",
+      relayPreclaimDiagnosedAt: input.now.toISOString(),
+    },
+    now: input.now,
+  });
+  return {
+    kind: "expired_without_broadcast",
+    operationId: row.operation_id,
+  };
+}
+
 async function claimRelay(
   client: PoolClient,
   input: Readonly<{
@@ -2390,6 +2543,11 @@ async function claimRelay(
     controlPlaneAllowed,
     input.profile,
   );
+  const expired = await expireRelayActionBeforeBroadcast(client, {
+    now: input.now,
+    profile: input.profile,
+  });
+  if (expired) return expired;
   if (!controlPlaneAllowed) {
     return claimRelayCleanup(client, input);
   }
