@@ -999,6 +999,32 @@ async function registerTelegramBotTradingRoutes(
           }),
         );
       } catch (error) {
+        if (
+          error instanceof Error &&
+          error.message === "telegram_funding_money_boundary_crossed"
+        ) {
+          // A received transfer must keep its observation and routing path. Do
+          // not turn that correct financial boundary into a generic error: the
+          // caller needs the active card, not a retry prompt.
+          return sendTelegramFundingMessage(request, reply, () =>
+            fundingService.session(
+              {
+                chatId: request.body.chatId,
+                contextId: activeContext.context_id,
+                requestObservation: true,
+                telegramMessageId:
+                  Number.isSafeInteger(originalMessageId) &&
+                  originalMessageId > 0
+                    ? originalMessageId
+                    : undefined,
+                telegramUserId: request.body.telegramUserId,
+                view: "progress",
+              },
+              new Date(),
+              createFundingDecoratorForRequest(request),
+            ),
+          );
+        }
         return sendTelegramFundingError(request, reply, error);
       }
     },
