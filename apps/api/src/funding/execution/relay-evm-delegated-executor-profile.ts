@@ -2369,6 +2369,82 @@ async function claimRelayCleanup(
 }
 
 /**
+ * A cancelled terminal route that never created an attempt has no allowance,
+ * provider reference, or external side effect to reconcile. Its rolling-cap
+ * reservation must not remain the head of the lane and strand later routes.
+ */
+async function releaseTerminalRelayReservationWithoutAttempt(
+  client: PoolClient,
+  input: Readonly<{
+    now: Date;
+    profile: RelayEvmFundingProfileSpec;
+  }>,
+): Promise<void> {
+  const { rows } = await client.query<{
+    authorization_id: string;
+    operation_id: string;
+    reservation_id: string;
+    user_id: string;
+  }>(
+    `select reservation.id as reservation_id,
+            reservation.funding_operation_id as operation_id,
+            funding_authorization.id::text as authorization_id,
+            operation.user_id
+       from telegram_funding_authorization_reservations reservation
+       join telegram_funding_authorizations funding_authorization
+         on funding_authorization.id = reservation.authorization_id
+       join funding_operations operation
+         on operation.id = reservation.funding_operation_id
+       join funding_operation_steps approval_step
+         on approval_step.operation_id = operation.id
+        and approval_step.executor_id = $1
+        and approval_step.action_validation_result ->> 'relayStepKind' =
+              'approve'
+       where reservation.status = 'reserved'
+         and operation.status in ('cancelled', 'failed')
+         and operation.progress_stage = 'terminal'
+         and not exists (
+           select 1
+             from funding_operation_step_attempts attempt
+             join funding_operation_steps operation_step
+               on operation_step.id = attempt.step_id
+            where operation_step.operation_id = operation.id
+         )
+       order by reservation.reserved_at, reservation.id
+       for update of reservation, funding_authorization, operation
+                     skip locked
+       limit 1`,
+    [input.profile.profileId],
+  );
+  const row = rows[0];
+  if (!row) return;
+  if (
+    !(await tryLockFundingAuthorizationReservationScope(client, {
+      authorizationId: row.authorization_id,
+      userId: row.user_id,
+    }))
+  ) {
+    return;
+  }
+  const released = await client.query(
+    `update telegram_funding_authorization_reservations
+        set status = 'released',
+            resolved_at = $2,
+            resolution_evidence = resolution_evidence ||
+              jsonb_build_object(
+                'operationId', $3::text,
+                'reason', 'terminal_without_broadcast'
+              ),
+            updated_at = $2
+      where id = $1::uuid and status = 'reserved'`,
+    [row.reservation_id, input.now, row.operation_id],
+  );
+  if (released.rowCount !== 1) {
+    throw new Error("terminal Relay reservation release was lost");
+  }
+}
+
+/**
  * An unstarted Relay action has not created allowance or crossed a provider
  * boundary. Once its signed action expires, it must be terminalized without an
  * allowance RPC read: an RPC outage must never leave a dead route holding the
@@ -2531,6 +2607,10 @@ async function claimRelay(
     profile: RelayEvmFundingProfileSpec;
   }>,
 ): Promise<DelegatedFundingProfileClaim | null> {
+  await releaseTerminalRelayReservationWithoutAttempt(client, {
+    now: input.now,
+    profile: input.profile,
+  });
   const controlPlaneAllowed = relayControlPlaneAllowed(
     input.configuration,
     input.policy,

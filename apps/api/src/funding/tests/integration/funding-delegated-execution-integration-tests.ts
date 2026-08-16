@@ -5684,6 +5684,73 @@ try {
     reservation_status: "released",
   });
 
+  const terminalLaneHolder = await createRelayFixture();
+  const holderMutation = await pool.connect();
+  try {
+    await holderMutation.query("begin");
+    await holderMutation.query("set local session_replication_role = replica");
+    await holderMutation.query(
+      `update funding_operations
+          set status = 'cancelled', progress_stage = 'terminal'
+        where id = $1`,
+      [terminalLaneHolder.operationId],
+    );
+    await holderMutation.query(
+      `update funding_operation_steps set state = 'cancelled'
+        where operation_id = $1`,
+      [terminalLaneHolder.operationId],
+    );
+    await holderMutation.query("commit");
+  } catch (error) {
+    await holderMutation.query("rollback");
+    throw error;
+  } finally {
+    holderMutation.release();
+  }
+  const expiredLaneFollower = await createRelayFixture("2000000", {
+    base: terminalLaneHolder.base,
+  });
+  await pool.query(
+    `update funding_operation_steps
+        set action_expires_at = created_at + interval '1 millisecond'
+      where id = $1 and state = 'action_required'`,
+    [expiredLaneFollower.approvalStepId],
+  );
+  const terminalHolderCleanup = await relayExecutor(
+    [relayAllowanceEvidence("0", "24")],
+    () => {
+      throw new Error("terminal lane holder must not broadcast");
+    },
+    () => {
+      throw new Error("allowance RPC unavailable");
+    },
+  ).runBatch({ limit: 1, now: new Date(now.getTime() + 15 * 60_000 + 7) });
+  assert.equal(terminalHolderCleanup.expiredWithoutBroadcast, 1);
+  const terminalHolderState = await pool.query<{
+    holder_reservation_status: string;
+    holder_reason: string | null;
+    follower_operation_status: string;
+    follower_reservation_status: string;
+  }>(
+    `select holder_reservation.status as holder_reservation_status,
+            holder_reservation.resolution_evidence ->> 'reason' as holder_reason,
+            follower_operation.status as follower_operation_status,
+            follower_reservation.status as follower_reservation_status
+       from telegram_funding_authorization_reservations holder_reservation
+       join telegram_funding_authorization_reservations follower_reservation
+         on follower_reservation.funding_operation_id = $2::uuid
+       join funding_operations follower_operation
+         on follower_operation.id = follower_reservation.funding_operation_id
+      where holder_reservation.funding_operation_id = $1::uuid`,
+    [terminalLaneHolder.operationId, expiredLaneFollower.operationId],
+  );
+  assert.deepEqual(terminalHolderState.rows[0], {
+    follower_operation_status: "failed",
+    follower_reservation_status: "released",
+    holder_reason: "terminal_without_broadcast",
+    holder_reservation_status: "released",
+  });
+
   const alreadyZeroRelay = await createRelayFixture();
   const alreadyZeroBroadcasts = { value: 0 };
   await exhaustRelayDeposit(alreadyZeroRelay, alreadyZeroBroadcasts, "31");
