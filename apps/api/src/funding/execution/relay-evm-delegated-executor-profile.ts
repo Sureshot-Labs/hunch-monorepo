@@ -2373,12 +2373,9 @@ async function claimRelayCleanup(
  * provider reference, or external side effect to reconcile. Its rolling-cap
  * reservation must not remain the head of the lane and strand later routes.
  */
-async function releaseTerminalRelayReservationWithoutAttempt(
+async function releaseTerminalFundingReservationWithoutAttempt(
   client: PoolClient,
-  input: Readonly<{
-    now: Date;
-    profile: RelayEvmFundingProfileSpec;
-  }>,
+  input: Readonly<{ now: Date }>,
 ): Promise<void> {
   const { rows } = await client.query<{
     authorization_id: string;
@@ -2395,11 +2392,6 @@ async function releaseTerminalRelayReservationWithoutAttempt(
          on funding_authorization.id = reservation.authorization_id
        join funding_operations operation
          on operation.id = reservation.funding_operation_id
-       join funding_operation_steps approval_step
-         on approval_step.operation_id = operation.id
-        and approval_step.executor_id = $1
-        and approval_step.action_validation_result ->> 'relayStepKind' =
-              'approve'
        where reservation.status = 'reserved'
          and operation.status in ('cancelled', 'failed')
          and operation.progress_stage = 'terminal'
@@ -2414,7 +2406,6 @@ async function releaseTerminalRelayReservationWithoutAttempt(
        for update of reservation, funding_authorization, operation
                      skip locked
        limit 1`,
-    [input.profile.profileId],
   );
   const row = rows[0];
   if (!row) return;
@@ -2440,7 +2431,7 @@ async function releaseTerminalRelayReservationWithoutAttempt(
     [row.reservation_id, input.now, row.operation_id],
   );
   if (released.rowCount !== 1) {
-    throw new Error("terminal Relay reservation release was lost");
+    throw new Error("terminal funding reservation release was lost");
   }
 }
 
@@ -2607,15 +2598,23 @@ async function claimRelay(
     profile: RelayEvmFundingProfileSpec;
   }>,
 ): Promise<DelegatedFundingProfileClaim | null> {
-  await releaseTerminalRelayReservationWithoutAttempt(client, {
+  await releaseTerminalFundingReservationWithoutAttempt(client, {
     now: input.now,
-    profile: input.profile,
   });
   const controlPlaneAllowed = relayControlPlaneAllowed(
     input.configuration,
     input.policy,
     input.profile,
   );
+  // An action that expired before it acquired an attempt has no external
+  // effect to reconcile. Resolve it before allowance maintenance: maintenance
+  // may otherwise treat the stale action as a live lane candidate and take a
+  // transition intended for a submitted route.
+  const expired = await expireRelayActionBeforeBroadcast(client, {
+    now: input.now,
+    profile: input.profile,
+  });
+  if (expired) return expired;
   await reconcileRelayPostconditions(
     client,
     input.observation,
@@ -2623,11 +2622,6 @@ async function claimRelay(
     controlPlaneAllowed,
     input.profile,
   );
-  const expired = await expireRelayActionBeforeBroadcast(client, {
-    now: input.now,
-    profile: input.profile,
-  });
-  if (expired) return expired;
   if (!controlPlaneAllowed) {
     return claimRelayCleanup(client, input);
   }

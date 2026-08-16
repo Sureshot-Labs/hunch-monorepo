@@ -438,6 +438,26 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         /Active Deposit/u,
       );
 
+      const menuWithReceivedActive = await buildTelegramDepositMessage({
+        dependencies: { allowedVenues: ["polymarket", "limitless"] },
+        pool: {
+          query: async (sql: string) => ({
+            rows: sql.includes("telegram_funding_sessions")
+              ? [{ has_received: true, venue_id: "polymarket" }]
+              : [],
+          }),
+        } as never,
+        telegramUserId: 20,
+      });
+      assert.match(
+        JSON.stringify(menuWithReceivedActive.reply_markup),
+        /Active Deposit/u,
+      );
+      assert.doesNotMatch(
+        JSON.stringify(menuWithReceivedActive.reply_markup),
+        /deposit_cancel_active/u,
+      );
+
       const justDeposit = await buildTelegramDepositMessage({
         pool: authorizationDb(null),
         venue: "any",

@@ -25,6 +25,7 @@ export type TelegramDepositResolverDependencies = {
 };
 
 type ActiveTelegramDeposit = Readonly<{
+  canCancel: boolean;
   venue: TelegramDepositVenue;
 }>;
 
@@ -93,9 +94,18 @@ async function resolveActiveTelegramDeposit(input: {
   telegramUserId?: string | number;
 }): Promise<ActiveTelegramDeposit | null> {
   if (input.telegramUserId == null) return null;
-  const result = await input.db.query<{ venue_id: string }>(
+  const result = await input.db.query<{
+    has_received: boolean;
+    venue_id: string;
+  }>(
     `
-      select receive_session.venue_id
+      select
+        receive_session.venue_id,
+        exists (
+          select 1
+          from funding_receive_receipts receive_receipt
+          where receive_receipt.receive_session_id = receive_session.id
+        ) as has_received
       from user_telegram_accounts telegram_account
       join telegram_funding_sessions funding_context
         on funding_context.user_id = telegram_account.user_id
@@ -117,8 +127,11 @@ async function resolveActiveTelegramDeposit(input: {
     `,
     [String(input.telegramUserId)],
   );
-  const venue = result.rows[0]?.venue_id;
-  return venue === "polymarket" || venue === "limitless" ? { venue } : null;
+  const activeDeposit = result.rows[0];
+  const venue = activeDeposit?.venue_id;
+  return venue === "polymarket" || venue === "limitless"
+    ? { canCancel: activeDeposit.has_received !== true, venue }
+    : null;
 }
 
 function buildDepositVenueMenu(
@@ -131,16 +144,23 @@ function buildDepositVenueMenu(
       inline_keyboard: [
         ...(activeDeposit
           ? [
-              [
-                {
-                  callback_data: `hm:v1:deposit:${activeDeposit.venue}`,
-                  text: "🔄 Active Deposit",
-                },
-                {
-                  callback_data: "hm:v1:deposit_cancel_active",
-                  text: "Cancel active",
-                },
-              ],
+              activeDeposit.canCancel
+                ? [
+                    {
+                      callback_data: `hm:v1:deposit:${activeDeposit.venue}`,
+                      text: "🔄 Active Deposit",
+                    },
+                    {
+                      callback_data: "hm:v1:deposit_cancel_active",
+                      text: "Cancel active",
+                    },
+                  ]
+                : [
+                    {
+                      callback_data: `hm:v1:deposit:${activeDeposit.venue}`,
+                      text: "🔄 Active Deposit",
+                    },
+                  ],
             ]
           : []),
         [

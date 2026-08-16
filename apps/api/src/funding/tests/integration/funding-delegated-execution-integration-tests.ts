@@ -5700,6 +5700,15 @@ try {
         where operation_id = $1`,
       [terminalLaneHolder.operationId],
     );
+    // This holder models a cancelled legacy/profile-migrated operation. Its
+    // no-attempt reservation shares the durable funding lane and must not
+    // strand a later Relay route merely because the executors differ.
+    await holderMutation.query(
+      `update funding_operation_steps
+          set executor_id = 'polymarket_deposit_wallet_relayer_v1'
+        where operation_id = $1`,
+      [terminalLaneHolder.operationId],
+    );
     await holderMutation.query("commit");
   } catch (error) {
     await holderMutation.query("rollback");
