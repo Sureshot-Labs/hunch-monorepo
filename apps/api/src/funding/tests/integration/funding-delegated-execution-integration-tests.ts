@@ -2526,10 +2526,11 @@ try {
     "0",
     "Slice C trade shortfall must not create a Relay cap/lane reservation",
   );
-  const isolatedTradeProjection = await runTelegramFundingProgressProjectionBatch(
-    pool,
-    { limit: 1, now: new Date(now.getTime() + 1) },
-  );
+  const isolatedTradeProjection =
+    await runTelegramFundingProgressProjectionBatch(pool, {
+      limit: 1,
+      now: new Date(now.getTime() + 1),
+    });
   assert.equal(isolatedTradeProjection.created, 1);
   await pool.query(
     `delete from telegram_bot_action_outbox where funding_session_id = $1::uuid`,
@@ -5637,6 +5638,48 @@ try {
   assert.deepEqual(expiredState.rows[0], {
     approval_state: "failed",
     deposit_state: "planned",
+    operation_status: "failed",
+    reservation_status: "released",
+  });
+
+  const expiredDuringAllowanceOutage = await createRelayFixture();
+  await pool.query(
+    `update funding_operation_steps
+        set action_expires_at = created_at + interval '1 millisecond'
+      where id = $1 and state = 'action_required'`,
+    [expiredDuringAllowanceOutage.approvalStepId],
+  );
+  let expiredOutageBroadcasts = 0;
+  const expiredOutageResult = await relayExecutor(
+    [relayAllowanceEvidence("0", "23")],
+    () => {
+      expiredOutageBroadcasts += 1;
+    },
+    () => {
+      throw new Error("allowance RPC unavailable");
+    },
+  ).runBatch({ limit: 1, now: new Date(now.getTime() + 15 * 60_000 + 6) });
+  assert.equal(expiredOutageResult.expiredWithoutBroadcast, 1);
+  assert.equal(expiredOutageBroadcasts, 0);
+  const expiredOutageState = await pool.query<{
+    error_code: string | null;
+    operation_status: string;
+    reservation_status: string;
+    diagnostic: string | null;
+  }>(
+    `select operation.status as operation_status,
+            operation.error_code,
+            operation.support_metadata ->> 'relayPreclaimDiagnostic' as diagnostic,
+            reservation.status as reservation_status
+       from funding_operations operation
+       join telegram_funding_authorization_reservations reservation
+         on reservation.funding_operation_id = operation.id
+      where operation.id = $1`,
+    [expiredDuringAllowanceOutage.operationId],
+  );
+  assert.deepEqual(expiredOutageState.rows[0], {
+    diagnostic: "action_expired_without_attempt",
+    error_code: "relay_action_expired_before_broadcast",
     operation_status: "failed",
     reservation_status: "released",
   });

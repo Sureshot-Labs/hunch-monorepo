@@ -108,6 +108,14 @@ export type DelegatedFundingProfileClaim =
   | Readonly<{
       kind: "rejected";
       operationId: string;
+    }>
+  | Readonly<{
+      /**
+       * A step expired before an attempt existed. This is deliberately not an
+       * execution claim: no provider call or wallet authority was acquired.
+       */
+      kind: "expired_without_broadcast";
+      operationId: string;
     }>;
 
 export type DelegatedFundingExecutionResult =
@@ -963,6 +971,7 @@ export type DelegatedFundingExecutorBatchResult = Readonly<{
   alreadySatisfied: number;
   ambiguous: number;
   definitivelyFailed: number;
+  expiredWithoutBroadcast: number;
   pending: number;
   operationIds: readonly string[];
 }>;
@@ -1425,13 +1434,20 @@ export class DelegatedFundingExecutor {
       alreadySatisfied: 0,
       ambiguous: 0,
       definitivelyFailed: 0,
+      expiredWithoutBroadcast: 0,
       pending: 0,
       operationIds: [...providerLookup.operationIds],
     };
     const exhausted = new Set<string>();
-    while (result.claimed < limit && exhausted.size < profiles.length) {
+    while (
+      result.claimed + result.expiredWithoutBroadcast < limit &&
+      exhausted.size < profiles.length
+    ) {
       for (const runtime of profiles) {
-        if (result.claimed >= limit || exhausted.has(runtime.profileId)) {
+        if (
+          result.claimed + result.expiredWithoutBroadcast >= limit ||
+          exhausted.has(runtime.profileId)
+        ) {
           continue;
         }
         const now = options.now ?? new Date();
@@ -1461,11 +1477,12 @@ export class DelegatedFundingExecutor {
               now,
             });
           } catch {
-            // Maintenance observations are fail-closed but must never block
-            // recovery of an already durable provider reference.
-            exhausted.add(runtime.profileId);
+            // A maintenance observation is never authority to broadcast. The
+            // later pre-broadcast fence will require fresh evidence before
+            // sending anything. Continue with no observation so a purely
+            // local terminal transition (for example an expired, unstarted
+            // action) is not held hostage by an RPC outage.
             result.pending += 1;
-            continue;
           }
         }
         const claimed = recovery
@@ -1501,6 +1518,11 @@ export class DelegatedFundingExecutor {
           claimedProfileIndex < 0
             ? 0
             : (claimedProfileIndex + 1) % this.input.profiles.length;
+        if (claimed.kind === "expired_without_broadcast") {
+          result.expiredWithoutBroadcast += 1;
+          result.operationIds.push(claimed.operationId);
+          continue;
+        }
         result.claimed += 1;
         if (claimed.kind === "rejected") {
           result.definitivelyFailed += 1;
