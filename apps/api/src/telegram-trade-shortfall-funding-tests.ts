@@ -12,7 +12,10 @@ import {
   BASE_USDC,
   POLYGON_PUSD,
 } from "./funding-providers/relay/rehearsal.js";
-import { resolveTelegramTradeShortfallExecutionProfile } from "./services/telegram-trade-shortfall-funding.js";
+import {
+  resolveTelegramTradeShortfallExecutionProfile,
+  selectTelegramTradeShortfallAutomatedOption,
+} from "./services/telegram-trade-shortfall-funding.js";
 
 const polygonPusd: AssetRef = {
   networkId: "evm:137",
@@ -147,6 +150,39 @@ assert.equal(
   ),
   null,
   "Deposit Wallet handoff must not be advertised as unattended Relay execution",
+);
+
+const managedControllerRoute = {
+  ...option(
+    {
+      kind: "owned_location" as const,
+      location: {
+        kind: "venue_account" as const,
+        locationId: "location_polygon_controller_automatic_12345678",
+        accountId: "account_fixture_12345678",
+        asset: polygonPusd,
+        details: { venueId: "polymarket" },
+      },
+    },
+    baseUsdc,
+  ),
+  sourceOptionId: "source_controller_automatic_12345678",
+  recommended: false,
+};
+const preferredDepositWalletHandoff = {
+  ...depositWalletHandoff,
+  sourceOptionId: "source_deposit_wallet_handoff_12345678",
+  recommended: true,
+};
+assert.equal(
+  selectTelegramTradeShortfallAutomatedOption({
+    options: [preferredDepositWalletHandoff, managedControllerRoute],
+    venue: "limitless",
+    destination: baseUsdc,
+    requiredProfileId: TELEGRAM_RELAY_POLYGON_PUSD_PROFILE_ID,
+  })?.option.sourceOptionId,
+  managedControllerRoute.sourceOptionId,
+  "delegated replanning must retain an automatable managed-wallet route when a Deposit Wallet handoff becomes recommended",
 );
 
 console.log(
