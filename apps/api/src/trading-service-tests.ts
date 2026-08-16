@@ -1927,6 +1927,21 @@ const tests: TestCase[] = [
     name: "Limitless and Kalshi readiness decisions expose repair and funding states",
     run: () => {
       assert.equal(isLimitlessBotClobExecutable(), false);
+      const clobHandoffBalance =
+        limitlessTradingExecutionTestHooks.clobBotTradingDisabledReadiness({
+          maxExecutableBuyUsd: 12.5,
+        });
+      assert.equal(
+        clobHandoffBalance.reasonCode,
+        "limitless_clob_slippage_guard_unavailable",
+        "the direct-bot CLOB guard remains in force",
+      );
+      assert.equal(clobHandoffBalance.executable, false);
+      assert.equal(
+        clobHandoffBalance.maxExecutableBuyUsd,
+        12.5,
+        "Telegram app handoff can safely calculate a funding shortfall from observed Base USDC without enabling direct CLOB execution",
+      );
       const connect =
         limitlessTradingExecutionTestHooks.buildConnectionReadiness({
           autoRepairable: true,
