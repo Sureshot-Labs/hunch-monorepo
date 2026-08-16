@@ -4,12 +4,38 @@ import { sameAsset } from "../domain/asset-identity.js";
 import type { TelegramFundingAuthorization } from "./telegram-funding-authorization.js";
 import { telegramFundingAuthorizationFingerprint } from "./telegram-funding-authorization.js";
 import { POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID } from "./delegated-funding-profile-ids.js";
-import { TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID } from "./delegated-funding-profile-ids.js";
+import { TELEGRAM_RELAY_EVM_FUNDING_PROFILE_IDS } from "./delegated-funding-profile-ids.js";
 
 type JsonRecord = Readonly<Record<string, JsonValue>>;
 
 export const TELEGRAM_FUNDING_AUTOMATION_POLICY_VERSION = 2;
 export const TELEGRAM_RELAY_EVM_AUTOMATION_POLICY_VERSION = 3;
+
+type TelegramRelayEvmFundingProfileId =
+  (typeof TELEGRAM_RELAY_EVM_FUNDING_PROFILE_IDS)[number];
+type TelegramRelayIngressNetworkId = "evm:137" | "evm:8453";
+type TelegramRelayVenueId = "limitless" | "polymarket";
+
+function isTelegramRelayEvmFundingProfileId(
+  value: unknown,
+): value is TelegramRelayEvmFundingProfileId {
+  return (
+    typeof value === "string" &&
+    TELEGRAM_RELAY_EVM_FUNDING_PROFILE_IDS.includes(
+      value as TelegramRelayEvmFundingProfileId,
+    )
+  );
+}
+
+function isTelegramRelayIngressNetworkId(
+  value: unknown,
+): value is TelegramRelayIngressNetworkId {
+  return value === "evm:137" || value === "evm:8453";
+}
+
+function isTelegramRelayVenueId(value: unknown): value is TelegramRelayVenueId {
+  return value === "limitless" || value === "polymarket";
+}
 
 export type TelegramFundingVariantCursor = Readonly<{
   variantId: string;
@@ -256,7 +282,7 @@ export function telegramFundingAutomationPolicyJson(
 export type TelegramRelayEvmAutomationPolicyV3 = Readonly<{
   version: 3;
   kind: "polymarket_base_usdc_relay";
-  profileId: typeof TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID;
+  profileId: TelegramRelayEvmFundingProfileId;
   fullReceipt: false;
   maxSourceRaw: string;
   authorizationId: string;
@@ -266,14 +292,14 @@ export type TelegramRelayEvmAutomationPolicyV3 = Readonly<{
   policyId: string;
   policyFingerprint: string;
   fundingPolicyRevision: string;
-  venueId: "polymarket";
+  venueId: TelegramRelayVenueId;
   destinationOptionId: string;
   venueBindingOptionId: string;
   sourceAsset: AssetRef;
   destinationAsset: AssetRef;
   variantCursors: readonly Readonly<{
     variantId: string;
-    networkId: "evm:8453";
+    networkId: TelegramRelayIngressNetworkId;
     ledgerHeightExclusive: string;
   }>[];
 }>;
@@ -287,39 +313,44 @@ export function buildTelegramRelayEvmAutomationPolicyV3(
     variants: readonly DirectIngressObservationVariant[];
   }>,
 ): TelegramRelayEvmAutomationPolicyV3 {
+  const sourceNetworkId = input.sourceAsset.networkId;
   if (
-    input.authorization.profileId !== TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID ||
+    !isTelegramRelayEvmFundingProfileId(input.authorization.profileId) ||
     input.authorization.securityClass !== "routed_value_movement" ||
     input.authorization.maxSourceRaw == null ||
-    !/^[1-9][0-9]*$/u.test(input.authorization.maxSourceRaw)
+    !/^[1-9][0-9]*$/u.test(input.authorization.maxSourceRaw) ||
+    !isTelegramRelayIngressNetworkId(sourceNetworkId) ||
+    !isTelegramRelayVenueId(input.authorization.venueId) ||
+    !sameAsset(input.sourceAsset, input.authorization.sourceAsset) ||
+    !sameAsset(input.destinationAsset, input.authorization.destinationAsset)
   ) {
     throw new Error("Relay EVM automation requires bounded routed authority");
   }
   const variantCursors = input.variants
     .filter(
       (variant) =>
-        variant.networkId === "evm:8453" &&
+        variant.networkId === sourceNetworkId &&
         sameAsset(variant.asset, input.sourceAsset),
     )
     .map((variant) => {
       const ledgerHeightExclusive = cursor(variant);
       if (!ledgerHeightExclusive) {
-        throw new Error("Relay EVM consent requires a current Base cursor");
+        throw new Error("Relay EVM consent requires a current source cursor");
       }
       return {
         variantId: variant.variantId,
-        networkId: "evm:8453" as const,
+        networkId: sourceNetworkId,
         ledgerHeightExclusive,
       };
     })
     .sort((left, right) => left.variantId.localeCompare(right.variantId));
   if (variantCursors.length === 0) {
-    throw new Error("Relay EVM consent requires an exact Base USDC variant");
+    throw new Error("Relay EVM consent requires an exact source variant");
   }
   return {
     version: 3,
     kind: "polymarket_base_usdc_relay",
-    profileId: TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
+    profileId: input.authorization.profileId,
     fullReceipt: false,
     maxSourceRaw: input.authorization.maxSourceRaw,
     authorizationId: input.authorization.id,
@@ -331,7 +362,7 @@ export function buildTelegramRelayEvmAutomationPolicyV3(
     policyId: input.authorization.policyId,
     policyFingerprint: input.authorization.policyFingerprint,
     fundingPolicyRevision: input.fundingPolicyRevision,
-    venueId: "polymarket",
+    venueId: input.authorization.venueId,
     destinationOptionId: input.authorization.destinationOptionId,
     venueBindingOptionId: input.authorization.venueBindingOptionId,
     sourceAsset: input.sourceAsset,
@@ -348,9 +379,9 @@ export function parseTelegramRelayEvmAutomationPolicyV3(
     !candidate ||
     candidate.version !== 3 ||
     candidate.kind !== "polymarket_base_usdc_relay" ||
-    candidate.profileId !== TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID ||
+    !isTelegramRelayEvmFundingProfileId(candidate.profileId) ||
     candidate.fullReceipt !== false ||
-    candidate.venueId !== "polymarket" ||
+    !isTelegramRelayVenueId(candidate.venueId) ||
     typeof candidate.maxSourceRaw !== "string" ||
     !/^[1-9][0-9]*$/u.test(candidate.maxSourceRaw)
   )
@@ -380,15 +411,16 @@ export function parseTelegramRelayEvmAutomationPolicyV3(
     return null;
   const variantCursors = candidate.variantCursors.flatMap((entry) => {
     const item = record(entry);
+    const networkId = item?.networkId;
     return item &&
       typeof item.variantId === "string" &&
-      item.networkId === "evm:8453" &&
+      isTelegramRelayIngressNetworkId(networkId) &&
       typeof item.ledgerHeightExclusive === "string" &&
       /^(0|[1-9][0-9]*)$/u.test(item.ledgerHeightExclusive)
       ? [
           {
             variantId: item.variantId,
-            networkId: "evm:8453" as const,
+            networkId: networkId as TelegramRelayIngressNetworkId,
             ledgerHeightExclusive: item.ledgerHeightExclusive,
           },
         ]
@@ -402,7 +434,7 @@ export function parseTelegramRelayEvmAutomationPolicyV3(
   return {
     version: 3,
     kind: "polymarket_base_usdc_relay",
-    profileId: TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
+    profileId: candidate.profileId,
     fullReceipt: false,
     maxSourceRaw: candidate.maxSourceRaw,
     authorizationId: String(candidate.authorizationId),
@@ -412,7 +444,7 @@ export function parseTelegramRelayEvmAutomationPolicyV3(
     policyId: String(candidate.policyId),
     policyFingerprint: String(candidate.policyFingerprint),
     fundingPolicyRevision: String(candidate.fundingPolicyRevision),
-    venueId: "polymarket",
+    venueId: candidate.venueId,
     destinationOptionId: String(candidate.destinationOptionId),
     venueBindingOptionId: String(candidate.venueBindingOptionId),
     sourceAsset,
@@ -430,6 +462,14 @@ export function telegramRelayEvmPolicyMatchesAuthorization(
     policy.authorizationFingerprint ===
       telegramFundingAuthorizationFingerprint(authorization) &&
     policy.maxSourceRaw === authorization.maxSourceRaw &&
+    policy.profileId === authorization.profileId &&
+    policy.venueId === authorization.venueId &&
+    policy.destinationOptionId === authorization.destinationOptionId &&
+    policy.venueBindingOptionId === authorization.venueBindingOptionId &&
+    policy.signerId === authorization.signerId &&
+    policy.signerFingerprint === authorization.signerFingerprint &&
+    policy.policyId === authorization.policyId &&
+    policy.policyFingerprint === authorization.policyFingerprint &&
     sameAsset(policy.sourceAsset, authorization.sourceAsset) &&
     sameAsset(policy.destinationAsset, authorization.destinationAsset)
   );

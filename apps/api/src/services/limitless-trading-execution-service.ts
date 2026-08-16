@@ -4769,6 +4769,44 @@ function evaluateLimitlessBalanceReadiness(usdcBalance: bigint) {
   });
 }
 
+function limitlessClobBotTradingDisabledReadiness(input: {
+  maxExecutableBuyUsd?: number;
+} = {}): TradingReadiness {
+  return readiness("limitless", capabilities, {
+    ok: false,
+    code: "limitless_clob_slippage_guard_unavailable",
+    message:
+      "Limitless CLOB bot trading is disabled until slippage can be enforced by the submitted order.",
+    ...(input.maxExecutableBuyUsd == null
+      ? {}
+      : { maxExecutableBuyUsd: input.maxExecutableBuyUsd }),
+  });
+}
+
+async function observeLimitlessWalletUsdcBalance(input: {
+  ctx: ApiTradingApplicationServiceInput;
+  walletAddress: string;
+}): Promise<number | null> {
+  try {
+    const snapshot = await fetchLimitlessOnchainSnapshot({
+      rpcUrl: env.baseRpcUrl,
+      timeoutMs: env.baseRpcTimeoutMs,
+      owner: input.walletAddress,
+    });
+    const balanceUsd = Number(snapshot.usdcBalance) / USDC_SCALE;
+    return Number.isFinite(balanceUsd) && balanceUsd >= 0 ? balanceUsd : null;
+  } catch (error) {
+    input.ctx.logger?.warn?.(
+      {
+        error,
+        walletAddress: input.walletAddress,
+      },
+      "Limitless app-handoff balance observation failed",
+    );
+    return null;
+  }
+}
+
 async function getReadiness(
   ctx: ApiTradingApplicationServiceInput,
   input: TradingReadinessInput,
@@ -4855,11 +4893,12 @@ async function getReadiness(
       input.actor.kind === "telegram_bot" &&
       !isLimitlessBotClobExecutable()
     ) {
-      return readiness("limitless", capabilities, {
-        ok: false,
-        code: "limitless_clob_slippage_guard_unavailable",
-        message:
-          "Limitless CLOB bot trading is disabled until slippage can be enforced by the submitted order.",
+      const maxExecutableBuyUsd = await observeLimitlessWalletUsdcBalance({
+        ctx,
+        walletAddress: input.walletAddress,
+      });
+      return limitlessClobBotTradingDisabledReadiness({
+        ...(maxExecutableBuyUsd == null ? {} : { maxExecutableBuyUsd }),
       });
     }
   }
@@ -5583,6 +5622,7 @@ async function submitLimitlessAmmPreparedTrade(
 
 export const limitlessTradingExecutionTestHooks = {
   buildConnectionReadiness: buildLimitlessConnectionReadiness,
+  clobBotTradingDisabledReadiness: limitlessClobBotTradingDisabledReadiness,
   evaluateBalanceReadiness: evaluateLimitlessBalanceReadiness,
   submitAmmPreparedTrade: submitLimitlessAmmPreparedTrade,
 };
