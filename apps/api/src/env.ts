@@ -788,16 +788,6 @@ const polymarketCollateralOnrampAddress =
   POLYMARKET_COLLATERAL_ONRAMP_ADDRESS;
 const polymarketFundingRouterAddress =
   process.env.POLYMARKET_FUNDING_ROUTER_ADDRESS?.trim() || "";
-const polymarketDepositWalletPullerAddress =
-  process.env.POLYMARKET_DEPOSIT_WALLET_PULLER_ADDRESS?.trim() || "";
-if (
-  polymarketDepositWalletPullerAddress &&
-  !/^0x[0-9a-fA-F]{40}$/u.test(polymarketDepositWalletPullerAddress)
-) {
-  throw new Error(
-    "[env] POLYMARKET_DEPOSIT_WALLET_PULLER_ADDRESS must be an EVM address",
-  );
-}
 if (
   polymarketFundingRouterAddress &&
   polymarketFundingRouterAddress.toLowerCase() !==
@@ -1447,7 +1437,6 @@ export const env = {
     POLYMARKET_NEG_RISK_EXCHANGE_V2_ADDRESS,
   polymarketCollateralOnrampAddress,
   polymarketFundingRouterAddress,
-  polymarketDepositWalletPullerAddress,
   polymarketCollateralOfframpAddress:
     process.env.POLYMARKET_COLLATERAL_OFFRAMP_ADDRESS?.trim() ||
     POLYMARKET_COLLATERAL_OFFRAMP_ADDRESS,

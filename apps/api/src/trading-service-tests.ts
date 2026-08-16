@@ -399,20 +399,6 @@ const relayDepositAbi = [
     outputs: [],
   },
 ];
-const policyFundingPullerAddress = "0x0000000000000000000000000000000000000010";
-const fundingPullAbi = [
-  {
-    type: "function",
-    name: "pullPusd",
-    stateMutability: "nonpayable",
-    inputs: [
-      { name: "expectedNonce", type: "uint256" },
-      { name: "amount", type: "uint256" },
-    ],
-    outputs: [],
-  },
-];
-
 function buildCombinedPolicyWithRelay(): PrivyPolicyMetadata {
   const condition = (
     field: string,
@@ -502,49 +488,6 @@ function buildCombinedPolicyWithRelay(): PrivyPolicyMetadata {
     },
   );
   return policy;
-}
-
-function addFundingPullerRule(policy: PrivyPolicyMetadata) {
-  policy.rules.push({
-    action: "ALLOW",
-    conditions: [
-      {
-        field: "chain_id",
-        field_source: "ethereum_transaction",
-        operator: "eq",
-        value: "137",
-      },
-      {
-        field: "value",
-        field_source: "ethereum_transaction",
-        operator: "eq",
-        value: "0x0",
-      },
-      {
-        field: "to",
-        field_source: "ethereum_transaction",
-        operator: "eq",
-        value: policyFundingPullerAddress,
-      },
-      {
-        abi: fundingPullAbi,
-        field: "function_name",
-        field_source: "ethereum_calldata",
-        operator: "eq",
-        value: "pullPusd",
-      },
-      {
-        abi: fundingPullAbi,
-        field: "pullPusd.amount",
-        field_source: "ethereum_calldata",
-        operator: "lte",
-        value: relayPolicyCapRaw,
-      },
-    ],
-    id: "deposit-wallet-puller",
-    method: "eth_sendTransaction",
-    name: "Deposit Wallet pUSD pull",
-  });
 }
 
 function buildValidPolymarketRedeemPolicy(): PrivyPolicyMetadata {
@@ -1004,65 +947,6 @@ const tests: TestCase[] = [
         combinedRelayValidation.fundingMaxRaw,
         policyFundingMaxRaw,
         "Relay partitioning preserves the Slice C funding cap",
-      );
-      const combinedWithPuller = structuredClone(combinedWithRelay);
-      addFundingPullerRule(combinedWithPuller);
-      const combinedPullerValidation = validateCombinedPolymarketRelayPolicy({
-        builderCode: policyBuilderCode,
-        exchangeAddresses: policyExchangeAddresses,
-        fundingRouterAddress: policyFundingRouterAddress,
-        fundingPullerAddress: policyFundingPullerAddress,
-        maxBuyUsd: 2,
-        policy: combinedWithPuller,
-        profile: "buy_sell",
-        relayMaxSourceRaw: relayPolicyCapRaw,
-      });
-      assert.equal(combinedPullerValidation.valid, true);
-      assert.equal(combinedPullerValidation.fundingPullRulesPresent, true);
-      assert.equal(
-        combinedPullerValidation.fundingPullMaxSourceRaw,
-        BigInt(relayPolicyCapRaw),
-      );
-      const duplicatePuller = structuredClone(combinedWithPuller);
-      const pullerRule = duplicatePuller.rules.at(-1);
-      assert.ok(pullerRule);
-      duplicatePuller.rules.push(structuredClone(pullerRule));
-      assert.equal(
-        validateCombinedPolymarketRelayPolicy({
-          builderCode: policyBuilderCode,
-          exchangeAddresses: policyExchangeAddresses,
-          fundingRouterAddress: policyFundingRouterAddress,
-          fundingPullerAddress: policyFundingPullerAddress,
-          maxBuyUsd: 2,
-          policy: duplicatePuller,
-          profile: "buy_sell",
-          relayMaxSourceRaw: relayPolicyCapRaw,
-        }).valid,
-        false,
-        "duplicate Puller authority is rejected",
-      );
-      const broaderPuller = structuredClone(combinedWithPuller);
-      const broaderPullerConditions = broaderPuller.rules.at(-1)?.conditions;
-      assert.ok(Array.isArray(broaderPullerConditions));
-      (
-        broaderPullerConditions.find(
-          (entry) =>
-            (entry as Record<string, unknown>).field === "pullPusd.amount",
-        ) as Record<string, unknown>
-      ).value = String(BigInt(relayPolicyCapRaw) + 1n);
-      assert.equal(
-        validateCombinedPolymarketRelayPolicy({
-          builderCode: policyBuilderCode,
-          exchangeAddresses: policyExchangeAddresses,
-          fundingRouterAddress: policyFundingRouterAddress,
-          fundingPullerAddress: policyFundingPullerAddress,
-          maxBuyUsd: 2,
-          policy: broaderPuller,
-          profile: "buy_sell",
-          relayMaxSourceRaw: relayPolicyCapRaw,
-        }).valid,
-        false,
-        "Puller cap must equal the Relay cap",
       );
       const foreignRelayRule = structuredClone(combinedWithRelay);
       const foreignDepositorConditions =

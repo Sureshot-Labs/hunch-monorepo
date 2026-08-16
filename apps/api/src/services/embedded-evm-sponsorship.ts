@@ -6,7 +6,6 @@ import { AuthService } from "../auth.js";
 import { pool } from "../db.js";
 import { env } from "../env.js";
 import type { EmbeddedEthereumTransactionSpec } from "./embedded-ethereum.js";
-import { fetchEvmCall, fetchEvmCode } from "./polygon-rpc.js";
 
 const POLYGON_CHAIN_ID = 137;
 const BASE_CHAIN_ID = 8453;
@@ -32,24 +31,6 @@ const collateralInterface = new ethers.Interface([
 const polymarketFundingRouterInterface = new ethers.Interface([
   "function fund(uint256 expectedNonce,uint256 totalAmount,uint256 pUsdAmount)",
 ]);
-const depositWalletInterface = new ethers.Interface([
-  "function owner() view returns (address)",
-  "function nonce() view returns (uint256)",
-  "function execute((address wallet,uint256 nonce,uint256 deadline,(address target,uint256 value,bytes data)[] calls) batch,bytes signature)",
-]);
-const depositWalletBatchTypes = {
-  Call: [
-    { name: "target", type: "address" },
-    { name: "value", type: "uint256" },
-    { name: "data", type: "bytes" },
-  ],
-  Batch: [
-    { name: "wallet", type: "address" },
-    { name: "nonce", type: "uint256" },
-    { name: "deadline", type: "uint256" },
-    { name: "calls", type: "Call[]" },
-  ],
-};
 const conditionalTokensInterface = new ethers.Interface([
   "function redeemPositions(address collateralToken,bytes32 parentCollectionId,bytes32 conditionId,uint256[] indexSets)",
 ]);
@@ -79,15 +60,6 @@ export type EmbeddedEvmSponsorshipDependencies = Readonly<{
   ) => Promise<boolean>;
   matchesBridgeOrder: (transaction: SponsoredTransaction) => Promise<boolean>;
   matchesFundingAction: (transaction: SponsoredTransaction) => Promise<boolean>;
-  inspectDepositWallet?: (
-    address: string,
-    owner: string,
-  ) => Promise<Readonly<{
-    canonical: boolean;
-    deployed: boolean;
-    nonce: bigint;
-    owner: string;
-  }> | null>;
 }>;
 
 function normalizedAddress(value: string | null | undefined): string | null {
@@ -381,114 +353,6 @@ async function validatePolymarketProtocolCall(input: {
   }
 
   return false;
-}
-
-async function validateDepositWalletPullerSetup(input: {
-  chainId: number;
-  dependencies: EmbeddedEvmSponsorshipDependencies;
-  now?: Date;
-  pUsdAddress?: string;
-  pullerAddress?: string;
-  signer: string;
-  transaction: EmbeddedEthereumTransactionSpec;
-}): Promise<boolean> {
-  const pullerAddress =
-    input.pullerAddress ?? env.polymarketDepositWalletPullerAddress;
-  const pUsdAddress = input.pUsdAddress ?? env.polymarketPusdAddress;
-  if (
-    input.chainId !== POLYGON_CHAIN_ID ||
-    !pullerAddress ||
-    !isNonPayable(input.transaction)
-  )
-    return false;
-  const outerTarget = normalizedAddress(input.transaction.to);
-  const decoded = parsedTransaction(depositWalletInterface, input.transaction);
-  if (!outerTarget || decoded?.name !== "execute") return false;
-
-  const batch = decoded.args[0] as unknown as {
-    wallet?: string;
-    nonce?: bigint;
-    deadline?: bigint;
-    calls?: readonly { target?: string; value?: bigint; data?: string }[];
-    0?: string;
-    1?: bigint;
-    2?: bigint;
-    3?: readonly { target?: string; value?: bigint; data?: string }[];
-  };
-  const wallet = normalizedAddress(batch.wallet ?? batch[0]);
-  const nonce = batch.nonce ?? batch[1];
-  const deadline = batch.deadline ?? batch[2];
-  const calls = batch.calls ?? batch[3] ?? [];
-  const signature = String(decoded.args[1] ?? "");
-  if (
-    !wallet ||
-    !addressesEqual(wallet, outerTarget) ||
-    typeof nonce !== "bigint" ||
-    typeof deadline !== "bigint" ||
-    calls.length !== 1 ||
-    !/^0x[0-9a-fA-F]{130}$/u.test(signature)
-  )
-    return false;
-
-  const nowSeconds = BigInt(
-    Math.floor((input.now?.getTime() ?? Date.now()) / 1_000),
-  );
-  if (deadline <= nowSeconds || deadline > nowSeconds + 600n) return false;
-  try {
-    const recovered = ethers.verifyTypedData(
-      {
-        name: "DepositWallet",
-        version: "1",
-        chainId: POLYGON_CHAIN_ID,
-        verifyingContract: wallet,
-      },
-      depositWalletBatchTypes,
-      {
-        wallet,
-        nonce,
-        deadline,
-        calls: calls.map((entry) => ({
-          target: entry.target,
-          value: entry.value ?? 0n,
-          data: entry.data,
-        })),
-      },
-      signature,
-    );
-    if (!addressesEqual(recovered, input.signer)) return false;
-  } catch {
-    return false;
-  }
-  const call = calls[0];
-  if (!call || BigInt(call.value ?? 0n) !== 0n) return false;
-  const callTarget = normalizedAddress(call.target);
-  const approval = parsedTransaction(erc20Interface, {
-    id: "puller-setup-inner",
-    label: "Puller setup inner approval",
-    to: callTarget ?? ZERO_ADDRESS,
-    data: String(call.data ?? "0x"),
-    value: "0",
-  });
-  if (
-    !addressesEqual(callTarget, pUsdAddress) ||
-    approval?.name !== "approve" ||
-    !addressesEqual(String(approval.args[0] ?? ""), pullerAddress)
-  )
-    return false;
-  const approvalAmount = BigInt(String(approval.args[1] ?? "-1"));
-  if (approvalAmount !== ethers.MaxUint256 && approvalAmount !== 0n)
-    return false;
-
-  const state = await input.dependencies.inspectDepositWallet?.(
-    wallet,
-    input.signer,
-  );
-  return Boolean(
-    state?.canonical &&
-    state.deployed &&
-    addressesEqual(state.owner, input.signer) &&
-    state.nonce === nonce,
-  );
 }
 
 async function validateLimitlessProtocolCall(input: {
@@ -923,67 +787,6 @@ function defaultDependencies(
     matchesBridgeOrder: (transaction) => matchesBridgeOrder(db, transaction),
     matchesFundingAction: (transaction) =>
       matchesFundingAction(db, transaction),
-    inspectDepositWallet: async (address, expectedOwner) => {
-      const code = await fetchEvmCode({
-        rpcUrl: env.polygonRpcUrl,
-        timeoutMs: env.polygonRpcTimeoutMs,
-        address,
-        bypassCache: true,
-      });
-      if (code === "0x") return null;
-      const [ownerResult, nonceResult, derivedResult] = await Promise.all([
-        fetchEvmCall({
-          rpcUrl: env.polygonRpcUrl,
-          timeoutMs: env.polygonRpcTimeoutMs,
-          to: address,
-          data: depositWalletInterface.encodeFunctionData("owner"),
-        }),
-        fetchEvmCall({
-          rpcUrl: env.polygonRpcUrl,
-          timeoutMs: env.polygonRpcTimeoutMs,
-          to: address,
-          data: depositWalletInterface.encodeFunctionData("nonce"),
-        }),
-        fetchEvmCall({
-          rpcUrl: env.polygonRpcUrl,
-          timeoutMs: env.polygonRpcTimeoutMs,
-          to: env.polymarketDepositWalletPullerAddress,
-          data: new ethers.Interface([
-            "function depositWalletOf(address owner) view returns (address)",
-          ]).encodeFunctionData("depositWalletOf", [
-            normalizedAddress(expectedOwner) ?? ZERO_ADDRESS,
-          ]),
-        }),
-      ]);
-      const ownerDecoded = depositWalletInterface.decodeFunctionResult(
-        "owner",
-        ownerResult,
-      );
-      const nonceDecoded = depositWalletInterface.decodeFunctionResult(
-        "nonce",
-        nonceResult,
-      );
-      const owner = normalizedAddress(String(ownerDecoded[0] ?? ""));
-      const nonce = nonceDecoded[0];
-      const pullerView = new ethers.Interface([
-        "function depositWalletOf(address owner) view returns (address)",
-      ]);
-      const derived = normalizedAddress(
-        String(
-          pullerView.decodeFunctionResult(
-            "depositWalletOf",
-            derivedResult,
-          )[0] ?? "",
-        ),
-      );
-      if (!owner || typeof nonce !== "bigint") return null;
-      return {
-        canonical: addressesEqual(derived, address),
-        deployed: true,
-        owner,
-        nonce,
-      };
-    },
   };
 }
 
@@ -1054,12 +857,6 @@ export async function assertEmbeddedEvmSponsorshipAllowed(input: {
     }
 
     const allowed =
-      (await validateDepositWalletPullerSetup({
-        chainId: input.chainId,
-        dependencies,
-        signer,
-        transaction,
-      })) ||
       (await validateErc20Call({
         chainId: input.chainId,
         dependencies,
@@ -1099,5 +896,4 @@ export const embeddedEvmSponsorshipTestHooks = {
   exactTransactionMatches,
   fundingActionMatchesTransaction,
   validateLegacySponsoredWithdrawal,
-  validateDepositWalletPullerSetup,
 };

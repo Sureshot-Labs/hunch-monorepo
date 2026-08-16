@@ -125,19 +125,6 @@ const FUND_ABI = [
   },
 ] as const;
 
-export const PULL_PUSD_ABI = [
-  {
-    type: "function",
-    name: "pullPusd",
-    stateMutability: "nonpayable",
-    inputs: [
-      { name: "expectedNonce", type: "uint256" },
-      { name: "amount", type: "uint256" },
-    ],
-    outputs: [],
-  },
-] as const;
-
 function record(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -377,53 +364,6 @@ export function relayEvmPolicyRuleKind(
   rule: Readonly<Record<string, unknown>>,
 ): "approve" | "deposit" | null {
   return relayEvmPolicyRuleIdentity(rule)?.kind ?? null;
-}
-
-export function polymarketDepositWalletPullPolicyCap(
-  rule: Readonly<Record<string, unknown>>,
-  pullerAddress: string,
-): bigint | null {
-  const expectedPuller = scalar(pullerAddress);
-  if (
-    !/^0x[0-9a-f]{40}$/u.test(expectedPuller) ||
-    rule.action !== "ALLOW" ||
-    rule.method !== "eth_sendTransaction"
-  )
-    return null;
-  const rawConditions = Array.isArray(rule.conditions) ? rule.conditions : [];
-  const conditions = conditionsForRule(rule);
-  if (conditions.length !== 5 || conditions.length !== rawConditions.length) {
-    return null;
-  }
-  const exact =
-    exactPolicyCondition(conditions, {
-      field: "chain_id",
-      fieldSource: "ethereum_transaction",
-      operator: "eq",
-      value: "137",
-    }) &&
-    exactPolicyCondition(conditions, {
-      field: "to",
-      fieldSource: "ethereum_transaction",
-      operator: "eq",
-      value: expectedPuller,
-    }) &&
-    exactPolicyCondition(conditions, {
-      field: "value",
-      fieldSource: "ethereum_transaction",
-      operator: "eq",
-      value: "0x0",
-    }) &&
-    exactPolicyCondition(conditions, {
-      field: "function_name",
-      fieldSource: "ethereum_calldata",
-      operator: "eq",
-      value: "pullPusd",
-      abi: PULL_PUSD_ABI,
-    });
-  return exact
-    ? positiveCapCondition(conditions, "pullPusd.amount", PULL_PUSD_ABI)
-    : null;
 }
 
 export function relayEvmPolicyHasExactAssetPair(

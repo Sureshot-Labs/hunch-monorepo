@@ -593,7 +593,6 @@ assert.deepEqual(
 );
 
 const depositWallet = "0x7777777777777777777777777777777777777777";
-const puller = "0x8888888888888888888888888888888888888888";
 const polygonActionBase = { ...actionBase, networkId: "evm:137" };
 const delegatedApproveStep = delegatedSteps[0];
 const delegatedDepositStep = delegatedSteps[1];
@@ -634,7 +633,7 @@ const reverseHandoffSource = {
   nativeGasReady: true,
   freshness: "fresh",
   preRouteHandoff: {
-    kind: "polymarket_deposit_wallet_puller_v1",
+    kind: "polymarket_deposit_wallet_to_controller_v1",
     sourceLocation: {
       kind: "venue_account",
       locationId: "location:deposit-wallet",
@@ -654,25 +653,20 @@ const reverseHandoffSource = {
     funderAddress: depositWallet,
     controllerAddress: WALLET,
     tokenAddress: POLYGON_PUSD,
-    pullerAddress: puller,
-    pullNonce: "4",
-    pullerAllowanceRaw: MaxUint256.toString(),
   },
 } satisfies RelayEligibleSourceFact;
 
-assert.deepEqual(
-  buildPolymarketPreRouteHandoffSteps({
-    source: reverseHandoffSource,
-    sourceAmount: {
-      asset: { networkId: "evm:137", assetId: POLYGON_PUSD, decimals: 6 },
-      raw: RAW,
-    },
-    profile: atomicWalletProfile,
-    steps: [],
-  }),
-  [],
-  "Puller handoff remains a discovery-only marker until the delegated profile is bound",
-);
+const reverseHandoffSteps = buildPolymarketPreRouteHandoffSteps({
+  source: reverseHandoffSource,
+  sourceAmount: {
+    asset: { networkId: "evm:137", assetId: POLYGON_PUSD, decimals: 6 },
+    raw: RAW,
+  },
+  profile: atomicWalletProfile,
+  steps: [],
+});
+assert.equal(reverseHandoffSteps.length, 1);
+assert.equal(reverseHandoffSteps[0]?.stepKind, "external_handoff");
 
 const reverseDelegatedSteps = relayDelegatedCommitSteps({
   steps: [
@@ -702,7 +696,6 @@ const reverseDelegatedSteps = relayDelegatedCommitSteps({
       },
     },
   ],
-  source: reverseHandoffSource,
   sourceAmount: {
     asset: { networkId: "evm:137", assetId: POLYGON_PUSD, decimals: 6 },
     raw: RAW,
@@ -716,15 +709,10 @@ assert.deepEqual(
     step.dependsOnOrdinal,
   ]),
   [
-    ["source_pull", null],
-    ["approve", 0],
-    ["deposit", 1],
+    ["approve", null],
+    ["deposit", 0],
   ],
-  "reverse route durably serializes pull before Relay approval and deposit",
-);
-assert.equal(
-  reverseDelegatedSteps[1]?.actionValidationResult.sourcePullRequired,
-  true,
+  "Relay approval and deposit remain exact after the user-authorized handoff",
 );
 assert.equal(
   delegatedSteps[1]?.actionValidationResult.postconditionEvidenceKind,

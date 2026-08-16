@@ -1,4 +1,4 @@
-import { Interface, MaxUint256 } from "ethers";
+import { Interface } from "ethers";
 
 import { stableOpaqueId } from "../../account-value/canonical.js";
 import { multiplyRawByUnitPrice } from "../../account-value/decimal.js";
@@ -25,8 +25,6 @@ import type { FundingRuntimePolicy } from "../../funding/policies/funding-policy
 import { canonicalJsonHash } from "../../funding/persistence/canonical.js";
 import type { FundingCommitStep } from "../../funding/persistence/funding-operation-repository.js";
 import { resolveActionSponsorship } from "../../funding/execution/sponsorship-policy.js";
-import { fundingSidecarRuntimeConfig } from "../../funding/runtime/sidecar-runtime-config.js";
-import { fetchEvmCall } from "../../services/polygon-rpc.js";
 import { RelayPinnedActionValidator } from "./action-validator.js";
 import { isRelayPinnedStableAsset } from "./mappings.js";
 import { canonicalizeRelayDepositoryV2SelfBoundAction } from "./rehearsal.js";
@@ -38,80 +36,6 @@ const POLYMARKET_DEPOSIT_WALLET_HANDOFF_EXECUTOR_ID =
 const ERC20_TRANSFER_INTERFACE = new Interface([
   "function transfer(address recipient,uint256 amount)",
 ]);
-const PULLER_INTERFACE = new Interface([
-  "function pullNonce(address owner) view returns (uint256)",
-  "function pullPusd(uint256 expectedNonce,uint256 amount)",
-]);
-const ERC20_ALLOWANCE_INTERFACE = new Interface([
-  "function allowance(address owner,address spender) view returns (uint256)",
-]);
-const DEPOSIT_WALLET_INTERFACE = new Interface([
-  "function owner() view returns (address)",
-]);
-
-async function hydratePolymarketPullerHandoff(
-  source: RelayEligibleSourceFact,
-): Promise<RelayEligibleSourceFact> {
-  const handoff = source.preRouteHandoff;
-  if (!handoff || handoff.kind !== "polymarket_deposit_wallet_puller_v1") {
-    return source;
-  }
-  const puller = handoff.pullerAddress?.trim() || "";
-  if (!/^0x[0-9a-fA-F]{40}$/u.test(puller)) {
-    throw new Error("Polymarket Deposit Wallet Puller is unavailable");
-  }
-  const [nonceRaw, allowanceRaw, ownerRaw] = await Promise.all([
-    fetchEvmCall({
-      rpcUrl: fundingSidecarRuntimeConfig.polygonRpcUrl,
-      timeoutMs: fundingSidecarRuntimeConfig.polygonRpcTimeoutMs,
-      to: puller,
-      data: PULLER_INTERFACE.encodeFunctionData("pullNonce", [
-        handoff.controllerAddress,
-      ]),
-    }),
-    fetchEvmCall({
-      rpcUrl: fundingSidecarRuntimeConfig.polygonRpcUrl,
-      timeoutMs: fundingSidecarRuntimeConfig.polygonRpcTimeoutMs,
-      to: handoff.tokenAddress,
-      data: ERC20_ALLOWANCE_INTERFACE.encodeFunctionData("allowance", [
-        handoff.funderAddress,
-        puller,
-      ]),
-    }),
-    fetchEvmCall({
-      rpcUrl: fundingSidecarRuntimeConfig.polygonRpcUrl,
-      timeoutMs: fundingSidecarRuntimeConfig.polygonRpcTimeoutMs,
-      to: handoff.funderAddress,
-      data: DEPOSIT_WALLET_INTERFACE.encodeFunctionData("owner"),
-    }),
-  ]);
-  const nonce = PULLER_INTERFACE.decodeFunctionResult("pullNonce", nonceRaw)[0];
-  const allowance = ERC20_ALLOWANCE_INTERFACE.decodeFunctionResult(
-    "allowance",
-    allowanceRaw,
-  )[0];
-  const owner = DEPOSIT_WALLET_INTERFACE.decodeFunctionResult(
-    "owner",
-    ownerRaw,
-  )[0];
-  if (
-    typeof nonce !== "bigint" ||
-    typeof allowance !== "bigint" ||
-    typeof owner !== "string" ||
-    !sameAccountAddress("evm:137", owner, handoff.controllerAddress) ||
-    allowance !== MaxUint256
-  ) {
-    throw new Error("Open Hunch once to finish wallet setup");
-  }
-  return {
-    ...source,
-    preRouteHandoff: {
-      ...handoff,
-      pullNonce: nonce.toString(),
-      pullerAllowanceRaw: allowance.toString(),
-    },
-  };
-}
 
 export function groupRelayExecutableActions(input: {
   actions: readonly NormalizedAction[];
@@ -239,14 +163,6 @@ export function buildPolymarketPreRouteHandoffSteps(input: {
 }) {
   const handoff = input.source.preRouteHandoff;
   if (!handoff) return input.steps;
-  if (handoff.kind === "polymarket_deposit_wallet_puller_v1") {
-    // Discovery deliberately runs before the Telegram service has selected and
-    // provisioned the exact delegated profile. The Puller path has no client
-    // handoff: it is materialized only by relayDelegatedCommitSteps after that
-    // profile is bound, which adds the durable source_pull step. Never try to
-    // reinterpret it as the legacy Deposit Wallet -> controller transfer.
-    return input.steps;
-  }
   if (
     handoff.kind !== "polymarket_deposit_wallet_to_controller_v1" ||
     input.sourceAmount.asset.networkId !== "evm:137" ||
@@ -332,7 +248,6 @@ export function relayDelegatedCommitSteps(
   input: Readonly<{
     steps: readonly FundingCommitStep[];
     sourceAmount: Money;
-    source?: RelayEligibleSourceFact;
     profile: WalletExecutionProfile;
     serverExecutionProfileId: string;
   }>,
@@ -373,58 +288,7 @@ export function relayDelegatedCommitSteps(
     ...quotedDepositAction,
     data: canonicalDeposit.data,
   });
-  const handoff = input.source?.preRouteHandoff;
-  const sourcePullStep =
-    handoff?.kind === "polymarket_deposit_wallet_puller_v1"
-      ? (() => {
-          if (
-            !handoff.pullerAddress ||
-            !handoff.pullNonce ||
-            !handoff.pullerAllowanceRaw ||
-            BigInt(handoff.pullerAllowanceRaw) !== MaxUint256
-          )
-            throw new Error("Deposit Wallet Puller setup is not confirmed");
-          const action = jsonRecord({
-            kind: "evm_transaction",
-            actionId: `${quotedDepositAction.actionId}:source_pull`,
-            networkId: "evm:137",
-            senderWalletId: input.profile.walletId,
-            to: handoff.pullerAddress,
-            valueRaw: "0",
-            data: PULLER_INTERFACE.encodeFunctionData("pullPusd", [
-              BigInt(handoff.pullNonce),
-              BigInt(input.sourceAmount.raw),
-            ]),
-          });
-          return {
-            ordinal: 0,
-            segmentOrdinal: quotedDepositStep.segmentOrdinal,
-            stepKind: "transaction" as const,
-            state: "planned" as const,
-            actionFingerprint: canonicalJsonHash(action),
-            executorId: input.serverExecutionProfileId,
-            payerRequirement: quotedDepositStep.payerRequirement,
-            dependsOnOrdinal: null,
-            normalizedAction: action,
-            actionValidationResult: jsonRecord({
-              delegatedProfileId: input.serverExecutionProfileId,
-              relayStepKind: "source_pull",
-              signerAddress: input.profile.address,
-              pullerAddress: handoff.pullerAddress,
-              pullNonce: handoff.pullNonce,
-              pullerAllowanceRaw: handoff.pullerAllowanceRaw,
-              expectedSourceAssetId: handoff.tokenAddress,
-              expectedSourceAddress: handoff.funderAddress,
-              expectedSourceRecipient: handoff.controllerAddress,
-              expectedSourceRaw: input.sourceAmount.raw,
-              postconditionEvidenceKind: "exact_erc20_source_debit_v1",
-              requiresSingleOperationBundle: true,
-            }),
-          };
-        })()
-      : null;
   const committedSteps = [
-    ...(sourcePullStep ? [sourcePullStep] : []),
     input.steps[0],
     {
       ...quotedDepositStep,
@@ -439,46 +303,30 @@ export function relayDelegatedCommitSteps(
       }),
     },
   ];
-  return committedSteps.map((step, ordinal) => {
-    const relayStepKind = sourcePullStep
-      ? ordinal === 0
-        ? "source_pull"
-        : ordinal === 1
-          ? "approve"
-          : "deposit"
-      : ordinal === 0
-        ? "approve"
-        : "deposit";
-    return {
-      ...step,
-      ordinal,
-      dependsOnOrdinal: ordinal === 0 ? null : ordinal - 1,
-      stepKind: relayStepKind === "approve" ? "approval" : step.stepKind,
-      state: "planned",
-      executorId: input.serverExecutionProfileId,
-      actionValidationResult: jsonRecord({
-        ...step.actionValidationResult,
-        delegatedProfileId: input.serverExecutionProfileId,
-        relayStepKind,
-        ...(sourcePullStep && relayStepKind === "approve"
-          ? { sourcePullRequired: true }
-          : {}),
-        requiresSingleOperationBundle: true,
-        ...(relayStepKind === "deposit"
-          ? {
-              postconditionEvidenceKind: "exact_erc20_source_debit_v1",
-              expectedSourceAssetId: input.sourceAmount.asset.assetId,
-              expectedSourceAddress: input.profile.address,
-              expectedSourceRecipient:
-                typeof step.normalizedAction.to === "string"
-                  ? step.normalizedAction.to
-                  : "",
-              expectedSourceRaw: input.sourceAmount.raw,
-            }
-          : {}),
-      }),
-    };
-  });
+  return committedSteps.map((step, ordinal) => ({
+    ...step,
+    stepKind: ordinal === 0 ? "approval" : step.stepKind,
+    state: "planned",
+    executorId: input.serverExecutionProfileId,
+    actionValidationResult: jsonRecord({
+      ...step.actionValidationResult,
+      delegatedProfileId: input.serverExecutionProfileId,
+      relayStepKind: ordinal === 0 ? "approve" : "deposit",
+      requiresSingleOperationBundle: true,
+      ...(ordinal === 1
+        ? {
+            postconditionEvidenceKind: "exact_erc20_source_debit_v1",
+            expectedSourceAssetId: input.sourceAmount.asset.assetId,
+            expectedSourceAddress: input.profile.address,
+            expectedSourceRecipient:
+              typeof step.normalizedAction.to === "string"
+                ? step.normalizedAction.to
+                : "",
+            expectedSourceRaw: input.sourceAmount.raw,
+          }
+        : {}),
+    }),
+  }));
 }
 
 function executionPlan(input: {
@@ -522,36 +370,37 @@ export async function buildRelayPlanningQuote(
     throw new Error("Relay operation requires an owned source location");
   }
   const sourceLocation = input.source.source.location;
+  // A Deposit Wallet handoff is an explicit user-authorized transfer. Keep the
+  // following Relay calls in the same client execution plan; server authority
+  // starts only after the funds are in the controller wallet on a later plan.
+  const useServerExecution = Boolean(
+    input.serverExecutionProfileId && !input.source.preRouteHandoff,
+  );
   const relaySteps = await validatedSteps({
     actions: input.quote.actions,
     minimumOutput: input.quote.candidate.minimumOutput,
     policyRevision: input.policyRevision,
-    preserveActionBoundaries: Boolean(input.serverExecutionProfileId),
+    preserveActionBoundaries: useServerExecution,
     quoteCorrelationId: input.quoteCorrelationId,
     route: input.route,
     sourceAmount: input.quote.sourceAmount,
     profile: input.profile,
   });
-  const committedSource = input.serverExecutionProfileId
-    ? await hydratePolymarketPullerHandoff(input.source)
-    : input.source;
-  const clientSteps = input.serverExecutionProfileId
-    ? relaySteps
-    : buildPolymarketPreRouteHandoffSteps({
-        source: committedSource,
-        sourceAmount: input.quote.sourceAmount,
-        profile: input.profile,
-        steps: relaySteps,
-      });
-  const steps = input.serverExecutionProfileId
-    ? relayDelegatedCommitSteps({
-        steps: clientSteps,
-        source: committedSource,
-        sourceAmount: input.quote.sourceAmount,
-        profile: input.profile,
-        serverExecutionProfileId: input.serverExecutionProfileId,
-      })
-    : clientSteps;
+  const clientSteps = buildPolymarketPreRouteHandoffSteps({
+    source: input.source,
+    sourceAmount: input.quote.sourceAmount,
+    profile: input.profile,
+    steps: relaySteps,
+  });
+  const steps =
+    useServerExecution && input.serverExecutionProfileId
+      ? relayDelegatedCommitSteps({
+          steps: clientSteps,
+          sourceAmount: input.quote.sourceAmount,
+          profile: input.profile,
+          serverExecutionProfileId: input.serverExecutionProfileId,
+        })
+      : clientSteps;
   const plan = {
     operation: {
       purpose: operationPurposeForExternalRecipient(
@@ -563,7 +412,7 @@ export async function buildRelayPlanningQuote(
       },
       experienceMode: input.route.experienceMode,
       planKind: "wallet_route" as const,
-      sourceSnapshot: jsonRecord(committedSource.source),
+      sourceSnapshot: jsonRecord(input.source.source),
       destinationTargetSnapshot: jsonRecord(input.destination.target),
       externalRecipientId: input.destination.externalRecipientId,
       venueId: input.destination.venueId,
@@ -596,8 +445,8 @@ export async function buildRelayPlanningQuote(
               },
             }
           : {}),
-        ...(committedSource.preRouteHandoff
-          ? { preRouteHandoff: jsonRecord(committedSource.preRouteHandoff) }
+        ...(input.source.preRouteHandoff
+          ? { preRouteHandoff: jsonRecord(input.source.preRouteHandoff) }
           : {}),
       },
     },
@@ -608,7 +457,7 @@ export async function buildRelayPlanningQuote(
         adapterVersion: input.route.adapterVersion,
         segmentKind: input.quote.candidate.capability,
         status: "planned" as const,
-        sourceSnapshot: jsonRecord(committedSource.source),
+        sourceSnapshot: jsonRecord(input.source.source),
         destinationTargetSnapshot: jsonRecord(input.destination.target),
         quotedInput: jsonRecord(input.quote.sourceAmount),
         quotedExpectedOutput: jsonRecord(input.quote.candidate.expectedOutput),

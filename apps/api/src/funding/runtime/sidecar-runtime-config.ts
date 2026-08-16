@@ -98,7 +98,6 @@ export type FundingSidecarRuntimeConfig = Readonly<{
   polymarketExchangeAddress: string;
   polymarketNegRiskExchangeAddress: string;
   polymarketFundingRouterAddress: string;
-  polymarketDepositWalletPullerAddress: string;
   polymarketBuilderCode: string;
   polymarketBotBuyPolicyMaxUsd: number;
   polymarketNegRiskAdapterAddress: string;
@@ -147,16 +146,6 @@ export function loadFundingSidecarRuntimeConfig(
     POLYMARKET_FUNDING_ROUTER_ADDRESS.toLowerCase()
       ? configuredFundingRouterAddress
       : "";
-  const polymarketDepositWalletPullerAddress =
-    source.POLYMARKET_DEPOSIT_WALLET_PULLER_ADDRESS?.trim() || "";
-  if (
-    polymarketDepositWalletPullerAddress &&
-    !/^0x[0-9a-fA-F]{40}$/u.test(polymarketDepositWalletPullerAddress)
-  ) {
-    throw new Error(
-      "POLYMARKET_DEPOSIT_WALLET_PULLER_ADDRESS must be an EVM address",
-    );
-  }
   if (
     polymarketFundingRouterAddress &&
     (polymarketPusdAddress.toLowerCase() !==
@@ -257,7 +246,6 @@ export function loadFundingSidecarRuntimeConfig(
       "0xe2222d279d744050d28e00520010520000310F59",
     ),
     polymarketFundingRouterAddress,
-    polymarketDepositWalletPullerAddress,
     polymarketBuilderCode: stringValue(source, "POLYMARKET_BUILDER_CODE", ""),
     polymarketBotBuyPolicyMaxUsd: optionalPositiveNumber(
       source,

@@ -126,79 +126,10 @@ import { buildPolymarketRedemptionPlan } from "./polymarket-redemption-plan.js";
 import {
   fetchErc1155BalancesByOwner,
   fetchEvmCode,
-  fetchEvmCall,
   fetchPolymarketOrderStatus,
   fetchPolymarketOrderStatusV2,
 } from "./polygon-rpc.js";
 
-const depositWalletPullerView = new ethers.Interface([
-  "function depositWalletOf(address owner) view returns (address)",
-]);
-const depositWalletSetupView = new ethers.Interface([
-  "function owner() view returns (address)",
-  "function nonce() view returns (uint256)",
-]);
-
-async function assertCurrentDepositWalletPullerSetupBatch(input: {
-  context: { signer: string };
-  purpose?: DepositWalletBatchPurpose | null;
-  typedData: EmbeddedPolymarketTypedData;
-}): Promise<void> {
-  if (input.purpose !== "puller_setup") return;
-  const puller = env.polymarketDepositWalletPullerAddress;
-  let wallet: string;
-  let signer: string;
-  try {
-    wallet = ethers.getAddress(String(input.typedData.message.wallet ?? ""));
-    signer = ethers.getAddress(input.context.signer);
-  } catch {
-    throw new Error("Deposit Wallet Puller setup address is invalid.");
-  }
-  const nonce = BigInt(String(input.typedData.message.nonce ?? "-1"));
-  if (!puller) throw new Error("Deposit Wallet Puller is disabled.");
-  const [derivedRaw, ownerRaw, nonceRaw] = await Promise.all([
-    fetchEvmCall({
-      rpcUrl: env.polygonRpcUrl,
-      timeoutMs: env.polygonRpcTimeoutMs,
-      to: puller,
-      data: depositWalletPullerView.encodeFunctionData("depositWalletOf", [
-        input.context.signer,
-      ]),
-    }),
-    fetchEvmCall({
-      rpcUrl: env.polygonRpcUrl,
-      timeoutMs: env.polygonRpcTimeoutMs,
-      to: wallet,
-      data: depositWalletSetupView.encodeFunctionData("owner"),
-    }),
-    fetchEvmCall({
-      rpcUrl: env.polygonRpcUrl,
-      timeoutMs: env.polygonRpcTimeoutMs,
-      to: wallet,
-      data: depositWalletSetupView.encodeFunctionData("nonce"),
-    }),
-  ]);
-  const derived = String(
-    depositWalletPullerView.decodeFunctionResult(
-      "depositWalletOf",
-      derivedRaw,
-    )[0],
-  );
-  const owner = String(
-    depositWalletSetupView.decodeFunctionResult("owner", ownerRaw)[0],
-  );
-  const currentNonce = depositWalletSetupView.decodeFunctionResult(
-    "nonce",
-    nonceRaw,
-  )[0];
-  if (
-    ethers.getAddress(derived) !== wallet ||
-    ethers.getAddress(owner) !== signer ||
-    typeof currentNonce !== "bigint" ||
-    currentNonce !== nonce
-  )
-    throw new Error("Deposit Wallet Puller setup state changed.");
-}
 import {
   buildPolymarketOrderDomain,
   computePolymarketOrderHashV2,
@@ -3784,11 +3715,6 @@ export async function prepareEmbeddedPolymarketTypedDataSignatureRoute(input: {
       user: input.user,
       signer: input.signer,
     });
-    await assertCurrentDepositWalletPullerSetupBatch({
-      context,
-      purpose: input.body.depositWalletBatchPurpose,
-      typedData: input.body.typedData,
-    });
     const authorizationRequest = buildEmbeddedPolymarketTypedDataRequest({
       context,
       typedData: input.body.typedData,
@@ -3823,11 +3749,6 @@ export async function executeEmbeddedPolymarketTypedDataSignatureRoute(input: {
     const context = await resolveEmbeddedPolymarketWalletContext({
       user: input.user,
       signer: input.signer,
-    });
-    await assertCurrentDepositWalletPullerSetupBatch({
-      context,
-      purpose: input.body.depositWalletBatchPurpose,
-      typedData: input.body.typedData,
     });
     const authorizationRequest = buildEmbeddedPolymarketTypedDataRequest({
       context,
@@ -4313,8 +4234,6 @@ export async function fetchPolymarketAccountRoute(input: {
           negRiskCollateralAdapterAddress,
           feeCollectorAddress: null,
           fundingRouterAddress: env.polymarketFundingRouterAddress || null,
-          fundingPullerAddress:
-            env.polymarketDepositWalletPullerAddress || null,
         }),
       ]);
 
@@ -4429,16 +4348,6 @@ export async function fetchPolymarketAccountRoute(input: {
                 snapshot.fundingRouterUsdceAllowance?.toString() ?? null,
               depositUsdceAllowanceRaw:
                 snapshot.fundingRouterDepositUsdceAllowance?.toString() ?? null,
-            }
-          : null,
-        fundingPuller: env.polymarketDepositWalletPullerAddress
-          ? {
-              address: env.polymarketDepositWalletPullerAddress,
-              pullNonce: snapshot.fundingPullerNonce?.toString() ?? null,
-              depositWalletNonce:
-                snapshot.fundingPullerDepositWalletNonce?.toString() ?? null,
-              depositPusdAllowanceRaw:
-                snapshot.fundingPullerDepositPusdAllowance?.toString() ?? null,
             }
           : null,
         conditionalTokens: {
