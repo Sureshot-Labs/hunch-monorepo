@@ -7,6 +7,7 @@ import {
   createNotificationSafe,
 } from "./notifications.js";
 import { canonicalizeBridgeOrderStatus } from "./bridge-status.js";
+import { RELAY_SOLVER } from "../funding-providers/relay/rehearsal.js";
 
 type Logger = {
   info?: (...args: unknown[]) => void;
@@ -17,6 +18,7 @@ type DepositEventStatus =
   | "recorded"
   | "notified"
   | "ignored_bridge"
+  | "ignored_funding"
   | "ignored_venue"
   | "ignored_internal"
   | "unresolved";
@@ -57,6 +59,10 @@ type InternalDepositMatch = {
   walletAddress: string | null;
   walletType: string | null;
   reason: string;
+};
+
+type RelayFundingOutputMatch = {
+  operationId: string;
 };
 
 type PolymarketFunderMovementMatch = {
@@ -240,6 +246,15 @@ function resolveDepositAssetAddress(
   return raw || null;
 }
 
+function resolveFundingNetworkId(caip2: string): string | null {
+  const normalized = caip2.trim().toLowerCase();
+  if (normalized.startsWith("eip155:")) {
+    const chainId = normalized.slice("eip155:".length).trim();
+    return /^[1-9][0-9]*$/u.test(chainId) ? `evm:${chainId}` : null;
+  }
+  return normalized.startsWith("solana:") ? "solana:mainnet" : null;
+}
+
 function buildAddressSet(
   values: Array<string | null | undefined>,
 ): Set<string> {
@@ -387,6 +402,64 @@ async function findInternalDepositMovement(
   }
 
   return null;
+}
+
+/**
+ * Keep normal funding ingress visible. Only suppress an output that is proven
+ * to be from a recent Relay operation owned by this user and addressed to its
+ * exact destination. The sender predicate makes a same-asset user deposit
+ * fail open instead of being hidden.
+ */
+async function findRelayFundingOutput(
+  db: DbQuery,
+  input: {
+    event: PrivyFundsDepositedWebhook;
+    recipient: string | null;
+    userId: string | null | undefined;
+  },
+): Promise<RelayFundingOutputMatch | null> {
+  if (!input.userId || !input.recipient) return null;
+  const networkId = resolveFundingNetworkId(input.event.caip2);
+  const assetId = normalizeEvmAddress(resolveDepositAssetAddress(input.event));
+  const sender = normalizeEvmAddress(input.event.sender);
+  const recipient = normalizeEvmAddress(input.recipient);
+  if (
+    !networkId?.startsWith("evm:") ||
+    !assetId ||
+    !sender ||
+    !recipient ||
+    sender !== RELAY_SOLVER.toLowerCase()
+  ) {
+    return null;
+  }
+
+  const { rows } = await db.query<RelayFundingOutputMatch>(
+    `
+      select operation_row.id as "operationId"
+      from funding_operations operation_row
+      join funding_operation_segments segment_row
+        on segment_row.operation_id = operation_row.id
+       and segment_row.ordinal = 0
+       and segment_row.provider_id = 'relay'
+      join funding_receive_receipts source_receipt
+        on source_receipt.child_funding_operation_id = operation_row.id
+       and source_receipt.user_id = operation_row.user_id
+      where operation_row.user_id = $1::uuid
+        and operation_row.created_at > now() - interval '30 minutes'
+        and operation_row.status not in ('failed', 'cancelled')
+        and lower(
+          operation_row.destination_target_snapshot #>> '{location,details,address}'
+        ) = $2::text
+        and operation_row.destination_target_snapshot #>>
+          '{location,asset,networkId}' = $3::text
+        and lower(operation_row.destination_target_snapshot #>>
+          '{location,asset,assetId}') = $4::text
+      order by operation_row.created_at desc
+      limit 2
+    `,
+    [input.userId, recipient, networkId, assetId],
+  );
+  return rows.length === 1 ? (rows[0] ?? null) : null;
 }
 
 async function findBridgeOrderByTxHash(
@@ -909,16 +982,26 @@ export async function handlePrivyDepositWebhook(
           recipient,
         })
       : null;
+  const relayFundingOutput =
+    !bridgeOrder && !knownAcrossBridgeDeposit && !venueCashDeposit && wallet
+      ? await findRelayFundingOutput(db, {
+          event,
+          recipient,
+          userId: wallet.user_id,
+        })
+      : null;
   const status: DepositEventStatus =
     bridgeOrder || knownAcrossBridgeDeposit
       ? "ignored_bridge"
       : venueCashDeposit
         ? "ignored_venue"
-        : internalMovement
-          ? "ignored_internal"
-          : wallet
-            ? "recorded"
-            : "unresolved";
+        : relayFundingOutput
+          ? "ignored_funding"
+          : internalMovement
+            ? "ignored_internal"
+            : wallet
+              ? "recorded"
+              : "unresolved";
 
   const insertedRow = await insertDepositEvent(db, {
     status,
@@ -1032,6 +1115,30 @@ export async function handlePrivyDepositWebhook(
       "Privy deposit webhook ignored because it matched venue cash movement",
     );
     return { ok: true, duplicate, ignored: true, status: "ignored_venue" };
+  }
+
+  if (relayFundingOutput) {
+    if (row.status !== "ignored_funding") {
+      await updateDepositEventStatus(db, {
+        eventId: row.id,
+        status: "ignored_funding",
+        userId: wallet?.user_id ?? null,
+        walletAddress: wallet?.wallet_address ?? recipient,
+        walletType: wallet?.wallet_type ?? walletType,
+      });
+    }
+    logger?.info?.(
+      {
+        depositEventId: row.id,
+        fundingOperationId: relayFundingOutput.operationId,
+        sender: event.sender ?? null,
+        recipient,
+        asset: event.asset,
+        txHash: event.transaction_hash ?? null,
+      },
+      "Privy deposit webhook suppressed because it matched a Relay funding output",
+    );
+    return { ok: true, duplicate, ignored: true, status: "ignored_funding" };
   }
 
   if (internalMovement) {
