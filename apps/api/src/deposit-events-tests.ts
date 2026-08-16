@@ -54,6 +54,7 @@ type MockDbOptions = {
   existingDepositStatus?: string;
   existingDepositUserId?: string | null;
   existingNotificationId?: string | null;
+  relayFundingOperationId?: string | null;
 };
 
 type MockDb = DbQuery & {
@@ -183,6 +184,15 @@ function createMockDb(options: MockDbOptions): MockDb {
             direction,
           } as unknown as T,
         ],
+      };
+    }
+
+    if (/from funding_operations operation_row/i.test(sql)) {
+      const relayFundingOperationId = options.relayFundingOperationId;
+      return {
+        rows: relayFundingOperationId
+          ? ([{ operationId: relayFundingOperationId }] as unknown as T[])
+          : [],
       };
     }
 
@@ -412,6 +422,38 @@ const tests: TestCase[] = [
         assert.deepEqual(
           db.depositUpdates.map((update) => update.status),
           ["notified"],
+        );
+      });
+    },
+  },
+  {
+    name: "Relay funding output is retained without a duplicate deposit notification",
+    run: async () => {
+      await withRedisDisabled(async () => {
+        const db = createMockDb({
+          wallet: {
+            userId: "user-1",
+            walletAddress: basePayload.recipient,
+            walletType: "ethereum",
+          },
+          relayFundingOperationId: "relay-operation-1",
+        });
+
+        const result = await handlePrivyDepositWebhook(db, {
+          ...basePayload,
+          sender: "0xf70da97812CB96acDF810712Aa562db8dfA3dbEF",
+        });
+
+        assert.deepEqual(result, {
+          ok: true,
+          duplicate: false,
+          ignored: true,
+          status: "ignored_funding",
+        });
+        assert.deepEqual(db.notificationInserts, []);
+        assert.deepEqual(
+          db.depositUpdates.map((update) => update.status),
+          [],
         );
       });
     },
