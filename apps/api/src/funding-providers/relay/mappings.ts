@@ -203,23 +203,12 @@ export const RELAY_ROUTE_SPECS: Readonly<Record<string, RelayRouteSpec>> = {
     quoteMode: "expected_output",
     rehearsalScenario: null,
   },
-  "polygon-usdce-to-base-usdc": {
-    routeId: "polygon-usdce-to-base-usdc",
-    source: {
-      networkId: "evm:137",
-      assetId: normalizeRelayAssetId("evm:137", POLYGON_USDCE),
-      decimals: 6,
-    },
-    destination: {
-      networkId: "evm:8453",
-      assetId: normalizeRelayAssetId("evm:8453", BASE_USDC),
-      decimals: 6,
-    },
-    sourceVm: "evm",
-    destinationVm: "evm",
-    quoteMode: "expected_output",
-    rehearsalScenario: null,
-  },
+  "polygon-usdce-to-base-usdc": route(
+    "polygon-usdce-to-base-usdc",
+    6,
+    6,
+    "expected_output",
+  ),
   "polygon-pol-to-solana-sol": route("polygon-pol-to-solana-sol", 18, 9),
   "polygon-pusd-to-solana-usdc": route("polygon-pusd-to-solana-usdc", 6, 6),
   "solana-usdc-to-polygon-pusd": {

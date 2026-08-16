@@ -27,6 +27,7 @@ export const EVM_NATIVE_ASSET_SENTINEL =
 export type RelayRehearsalScenarioId =
   | "polygon-pol-to-base-eth"
   | "polygon-pusd-to-base-usdc"
+  | "polygon-usdce-to-base-usdc"
   | "polygon-usdc-to-polygon-pusd"
   | "base-usdc-to-polygon-pusd"
   | "polygon-pol-to-solana-sol"
@@ -40,7 +41,7 @@ export type RelayRehearsalScenario = {
   destinationVm: "evm" | "svm";
   originCurrency: string;
   destinationCurrency: string;
-  sourceAsset: "POL" | "pUSD" | "USDC";
+  sourceAsset: "POL" | "pUSD" | "USDC" | "USDC.e";
   destinationAsset: "ETH" | "SOL" | "USDC" | "pUSD";
   originDecimals: 6 | 18;
   destinationDecimals: 6 | 9 | 18;
@@ -72,6 +73,19 @@ export const relayRehearsalScenarios: Record<
     originCurrency: POLYGON_PUSD,
     destinationCurrency: BASE_USDC,
     sourceAsset: "pUSD",
+    destinationAsset: "USDC",
+    originDecimals: 6,
+    destinationDecimals: 6,
+  },
+  "polygon-usdce-to-base-usdc": {
+    id: "polygon-usdce-to-base-usdc",
+    originChainId: 137,
+    destinationChainId: 8453,
+    originVm: "evm",
+    destinationVm: "evm",
+    originCurrency: POLYGON_USDCE_LEGACY,
+    destinationCurrency: BASE_USDC,
+    sourceAsset: "USDC.e",
     destinationAsset: "USDC",
     originDecimals: 6,
     destinationDecimals: 6,
