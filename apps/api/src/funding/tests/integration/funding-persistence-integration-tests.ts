@@ -1757,6 +1757,66 @@ async function testExpiredUnbroadcastActionWaitCancelsSafely(): Promise<void> {
   }
 }
 
+async function testDepositWalletHandoffKeepsItsOwnActionTtl(): Promise<void> {
+  const userId = await insertUser(pool);
+  const basePlan = buildPlan();
+  const quoteExpiresAt = new Date(Date.now() + 30_000).toISOString();
+  const plan: FundingCommitPlan = {
+    ...basePlan,
+    segments: basePlan.segments.map((segment) => ({
+      ...segment,
+      quoteExpiresAt,
+    })),
+    reservations: basePlan.reservations.map((reservation) => ({
+      ...reservation,
+      expiresAt: quoteExpiresAt,
+    })),
+    steps: basePlan.steps.map((step) => ({
+      ...step,
+      segmentOrdinal: null,
+      stepKind: "external_handoff" as const,
+    })),
+  };
+  const consentToken = opaque("handoff-action-ttl-consent");
+  const quote = await createFundingQuote(
+    pool,
+    quoteInput(userId, plan, consentToken),
+  );
+  let operationId: string | null = null;
+  try {
+    const committed = await commitFundingOperation(
+      pool,
+      commitInput(userId, quote.id, consentToken, plan),
+    );
+    operationId = committed.operation.id;
+    const persisted = await pool.query<{
+      action_expires_at: Date;
+      created_at: Date;
+    }>(
+      `
+        select action_expires_at, created_at
+        from funding_operation_steps
+        where operation_id = $1
+      `,
+      [operationId],
+    );
+    const step = persisted.rows[0];
+    assert.ok(step?.action_expires_at);
+    assert.ok(step?.created_at);
+    assert.ok(
+      step.action_expires_at.getTime() - step.created_at.getTime() >=
+        14 * 60_000,
+      "an exact Deposit Wallet handoff must not inherit a 30-second Relay quote expiry",
+    );
+    assert.ok(
+      step.action_expires_at.getTime() > Date.parse(quoteExpiresAt),
+      "the handoff remains actionable after its downstream Relay quote expires",
+    );
+  } finally {
+    await cleanupCommittedOperation(operationId, quote.id, userId);
+  }
+}
+
 async function testConcurrentSourceReservationExclusion(): Promise<void> {
   const userId = await insertUser(pool);
   const sourceComponentId = opaque("shared-component");
@@ -4088,6 +4148,10 @@ console.log(
 await testExpiredUnbroadcastActionWaitCancelsSafely();
 console.log(
   "[funding-persistence-integration-tests] ok expired unbroadcast action wait cancels and releases reservations without external polling",
+);
+await testDepositWalletHandoffKeepsItsOwnActionTtl();
+console.log(
+  "[funding-persistence-integration-tests] ok Deposit Wallet handoff keeps its own action TTL",
 );
 await testConcurrentSourceReservationExclusion();
 console.log(

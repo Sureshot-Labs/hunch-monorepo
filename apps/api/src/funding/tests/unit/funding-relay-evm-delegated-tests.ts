@@ -667,6 +667,11 @@ const reverseHandoffSteps = buildPolymarketPreRouteHandoffSteps({
 });
 assert.equal(reverseHandoffSteps.length, 1);
 assert.equal(reverseHandoffSteps[0]?.stepKind, "external_handoff");
+assert.equal(
+  reverseHandoffSteps[0]?.segmentOrdinal,
+  null,
+  "the exact Deposit Wallet handoff must not inherit the short Relay quote deadline",
+);
 
 const reverseDelegatedSteps = relayDelegatedCommitSteps({
   steps: [
@@ -882,6 +887,76 @@ assert.equal(
   }),
   false,
   "V3 consent cannot route a receipt beyond its immutable raw cap",
+);
+
+const polygonPusdAutomationV3 = buildTelegramRelayEvmAutomationPolicyV3({
+  authorization: {
+    id: "55555555-5555-4555-8555-555555555555",
+    userId: "22222222-2222-4222-8222-222222222222",
+    telegramAccountId: "33333333-3333-4333-8333-333333333333",
+    telegramUserId: "42",
+    userWalletId: "44444444-4444-4444-8444-444444444444",
+    privyWalletId: "privy-wallet",
+    walletAddress: WALLET,
+    walletChain: "ethereum",
+    profileId: TELEGRAM_RELAY_POLYGON_PUSD_PROFILE_ID,
+    securityClass: "routed_value_movement",
+    maxSourceRaw: CAP,
+    signerId: "signer",
+    signerFingerprint: "a".repeat(64),
+    policyId: "policy",
+    policyFingerprint: "b".repeat(64),
+    venueId: "limitless",
+    destinationOptionId: "limitless-destination",
+    venueBindingOptionId: "limitless-binding",
+    sourceAsset: { networkId: "evm:137", assetId: POLYGON_PUSD, decimals: 6 },
+    destinationAsset: {
+      networkId: "evm:8453",
+      assetId: BASE_USDC,
+      decimals: 6,
+    },
+    grantedAt: new Date(0).toISOString(),
+    expiresAt: null,
+  },
+  fundingPolicyRevision: "funding-policy-revision",
+  destinationAsset: { networkId: "evm:8453", assetId: BASE_USDC, decimals: 6 },
+  sourceAsset: { networkId: "evm:137", assetId: POLYGON_PUSD, decimals: 6 },
+  variants: [
+    {
+      variantId: "polygon-pusd-variant",
+      networkId: "evm:137",
+      asset: { networkId: "evm:137", assetId: POLYGON_PUSD, decimals: 6 },
+      destinationAddress: WALLET,
+      destinationLocationId: "polygon-wallet",
+      baselineRaw: "0",
+      baselineRevision: "baseline",
+      observation: {
+        adapterId: "evm_erc20_transfer_v1",
+        payload: { eventCursorBlock: "100" },
+      },
+      completion: { kind: "child_funding_operation" },
+    },
+  ],
+});
+assert.equal(
+  polygonPusdAutomationV3.profileId,
+  TELEGRAM_RELAY_POLYGON_PUSD_PROFILE_ID,
+);
+assert.equal(polygonPusdAutomationV3.venueId, "limitless");
+assert.equal(polygonPusdAutomationV3.variantCursors[0]?.networkId, "evm:137");
+assert.deepEqual(
+  parseTelegramRelayEvmAutomationPolicyV3(polygonPusdAutomationV3),
+  polygonPusdAutomationV3,
+  "Polygon relay consent must retain its exact profile, venue, and source cursor",
+);
+assert.equal(
+  telegramRelayEvmReceiptIsAuthorized({
+    policy: polygonPusdAutomationV3,
+    variantId: "polygon-pusd-variant",
+    ledgerHeight: "101",
+    rawAmount: RAW,
+  }),
+  true,
 );
 
 const event = {

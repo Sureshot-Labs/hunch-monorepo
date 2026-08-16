@@ -217,7 +217,11 @@ export function buildPolymarketPreRouteHandoffSteps(input: {
   return [
     {
       ordinal: 0,
-      segmentOrdinal: 0,
+      // This is an exact user-authorized transfer from the Polymarket Deposit
+      // Wallet, not a Relay quote action. In particular, do not bind the time
+      // available to open Hunch and approve it to the short-lived downstream
+      // Relay quote. The subsequent Relay steps retain their own quote fence.
+      segmentOrdinal: null,
       stepKind: "external_handoff" as const,
       state: "action_required" as const,
       actionFingerprint: canonicalJsonHash(action),
