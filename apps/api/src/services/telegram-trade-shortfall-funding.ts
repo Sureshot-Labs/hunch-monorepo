@@ -53,7 +53,6 @@ export type TelegramTradeShortfallProposal = Readonly<{
 export type TelegramTradeShortfallInspection =
   | Readonly<{ kind: "destination_ready" }>
   | Readonly<{ kind: "external_deposit_required" }>
-  | Readonly<{ kind: "managed_setup_required" }>
   | Readonly<{
       kind: "temporarily_unavailable";
       reasonCodes: readonly string[];
@@ -158,10 +157,7 @@ export function resolveTelegramTradeShortfallExecutionProfile(
   // unattended Telegram/server route until it has its own exact authority
   // and executor profile.
   if (
-    option.requiredActions.some(
-      (action) => action.kind === "external_handoff",
-    ) &&
-    !fundingSidecarRuntimeConfig.polymarketDepositWalletPullerAddress
+    option.requiredActions.some((action) => action.kind === "external_handoff")
   ) {
     return null;
   }
@@ -381,20 +377,10 @@ export class TelegramTradeShortfallFundingService {
         reasonCodes: ["internal_route_delegated_authority_unavailable"],
       };
     }
-    let delegated;
-    try {
-      delegated = await this.runtime.liquidity(
-        input.userId,
-        tradeShortfallRequest(input, profileId),
-      );
-    } catch (error) {
-      if (
-        error instanceof Error &&
-        error.message.includes("Open Hunch once to finish wallet setup")
-      )
-        return { kind: "managed_setup_required" };
-      throw error;
-    }
+    const delegated = await this.runtime.liquidity(
+      input.userId,
+      tradeShortfallRequest(input, profileId),
+    );
     if (delegated.completeness !== "complete" || delegated.errors.length > 0) {
       return {
         kind: "temporarily_unavailable",

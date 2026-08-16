@@ -21,12 +21,6 @@ const feeCollectorIface = new Interface([
 const fundingRouterIface = new Interface([
   "function fundingNonce(address owner) view returns (uint256)",
 ]);
-const fundingPullerIface = new Interface([
-  "function pullNonce(address owner) view returns (uint256)",
-]);
-const depositWalletIface = new Interface([
-  "function nonce() view returns (uint256)",
-]);
 
 const POLYGON_MULTICALL_ADDRESS =
   env.polygonMulticallAddress?.trim() ||
@@ -57,9 +51,6 @@ type Snapshot = {
   fundingRouterDepositUsdceAllowance: bigint | null;
   fundingRouterPusdAllowance: bigint | null;
   fundingRouterUsdceAllowance: bigint | null;
-  fundingPullerNonce: bigint | null;
-  fundingPullerDepositWalletNonce: bigint | null;
-  fundingPullerDepositPusdAllowance: bigint | null;
 };
 
 type MulticallEntry<T> = {
@@ -100,7 +91,6 @@ export async function fetchPolymarketOnchainSnapshot(inputs: {
   negRiskCollateralAdapterAddress?: string | null;
   feeCollectorAddress?: string | null;
   fundingRouterAddress?: string | null;
-  fundingPullerAddress?: string | null;
   extraConditionalOperatorAddresses?: string[];
 }): Promise<Snapshot> {
   const signer = ethers.getAddress(inputs.signer);
@@ -112,7 +102,6 @@ export async function fetchPolymarketOnchainSnapshot(inputs: {
     inputs.negRiskCollateralAdapterAddress?.trim() || "";
   const feeCollectorAddress = inputs.feeCollectorAddress?.trim() || "";
   const fundingRouterAddress = inputs.fundingRouterAddress?.trim() || "";
-  const fundingPullerAddress = inputs.fundingPullerAddress?.trim() || "";
 
   const entries: Array<MulticallEntry<unknown>> = [];
 
@@ -299,32 +288,6 @@ export async function fetchPolymarketOnchainSnapshot(inputs: {
     );
   }
 
-  if (fundingPullerAddress) {
-    entries.push(
-      {
-        target: fundingPullerAddress,
-        callData: fundingPullerIface.encodeFunctionData("pullNonce", [signer]),
-        decode: (data) => decodeBigInt(fundingPullerIface, "pullNonce", data),
-        fallback: 0n,
-      },
-      {
-        target: funder,
-        callData: depositWalletIface.encodeFunctionData("nonce"),
-        decode: (data) => decodeBigInt(depositWalletIface, "nonce", data),
-        fallback: 0n,
-      },
-      {
-        target: env.polymarketPusdAddress,
-        callData: erc20Iface.encodeFunctionData("allowance", [
-          funder,
-          fundingPullerAddress,
-        ]),
-        decode: (data) => decodeBigInt(erc20Iface, "allowance", data),
-        fallback: 0n,
-      },
-    );
-  }
-
   const results = await fetchEvmMulticall({
     rpcUrl: inputs.rpcUrl,
     timeoutMs: inputs.timeoutMs,
@@ -396,15 +359,6 @@ export async function fetchPolymarketOnchainSnapshot(inputs: {
   const fundingRouterDepositUsdceAllowance = fundingRouterAddress
     ? (decoded[cursor++] as bigint)
     : null;
-  const fundingPullerNonce = fundingPullerAddress
-    ? (decoded[cursor++] as bigint)
-    : null;
-  const fundingPullerDepositWalletNonce = fundingPullerAddress
-    ? (decoded[cursor++] as bigint)
-    : null;
-  const fundingPullerDepositPusdAllowance = fundingPullerAddress
-    ? (decoded[cursor++] as bigint)
-    : null;
 
   return {
     pusdBalance,
@@ -452,8 +406,5 @@ export async function fetchPolymarketOnchainSnapshot(inputs: {
     fundingRouterDepositUsdceAllowance,
     fundingRouterPusdAllowance,
     fundingRouterUsdceAllowance,
-    fundingPullerNonce,
-    fundingPullerDepositWalletNonce,
-    fundingPullerDepositPusdAllowance,
   };
 }

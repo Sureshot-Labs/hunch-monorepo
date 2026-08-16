@@ -8452,33 +8452,6 @@ async function previewTelegramTradeIntent(input: {
         });
         return;
       }
-      if (internalFunding?.kind === "managed_setup_required") {
-        await updateIntentStatus({
-          allowedStatuses: ["draft", "previewed"],
-          db: input.db,
-          intentId: input.intent.id,
-          quoteSnapshot: buildTelegramTradeQuotePreview(quote),
-          result: {
-            fundingState: "managed_setup_required",
-            previewQuote: quote,
-            stage: "funding_preview",
-          },
-          status: "previewed",
-        });
-        await input.sendMessage({
-          chat_id: input.chatId,
-          parse_mode: "MarkdownV2",
-          text: formatTelegramTradeLifecycleMessageMarkdownV2({
-            heading: "Open Hunch once to finish wallet setup.",
-            lines: [
-              "This one-time permission lets Hunch move your own pUSD between venues. Nothing was submitted.",
-            ],
-            marketTitle: input.intent.market_title,
-            venue: input.intent.venue,
-          }),
-        });
-        return;
-      }
       if (internalFunding?.kind === "internal_route") {
         const previewRecorded = await updateIntentStatus({
           allowedStatuses: ["draft", "previewed"],

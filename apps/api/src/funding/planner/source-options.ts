@@ -98,16 +98,11 @@ export type RelayEligibleSourceFact = Readonly<{
   suggestionPreferred?: boolean;
   freshness: "fresh" | "stale";
   preRouteHandoff?: Readonly<{
-    kind:
-      | "polymarket_deposit_wallet_to_controller_v1"
-      | "polymarket_deposit_wallet_puller_v1";
+    kind: "polymarket_deposit_wallet_to_controller_v1";
     sourceLocation: AssetLocation;
     funderAddress: string;
     controllerAddress: string;
     tokenAddress: string;
-    pullerAddress?: string;
-    pullNonce?: string;
-    pullerAllowanceRaw?: string;
   }>;
 }>;
 

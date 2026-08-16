@@ -8,11 +8,6 @@ type AbiExport = {
 
 const exportsList: AbiExport[] = [
   {
-    artifact:
-      "PolymarketDepositWalletPuller.sol/PolymarketDepositWalletPuller.json",
-    outFile: "PolymarketDepositWalletPuller.json",
-  },
-  {
     artifact: "PolymarketFundingRouter.sol/PolymarketFundingRouter.json",
     outFile: "PolymarketFundingRouter.json",
   },
