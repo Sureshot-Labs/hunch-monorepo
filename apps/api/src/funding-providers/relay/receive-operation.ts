@@ -62,9 +62,13 @@ import {
   relayEvmSequentialQuoteTtlMs,
 } from "../../funding/execution/delegated-funding-config.js";
 import {
-  captureRelayEvmAllowanceBaseline,
+  captureRelayEvmAllowanceAdmission,
   relayEvmAllowanceBaselineSupportMetadata,
 } from "../../funding/execution/relay-evm-allowance-baseline.js";
+import {
+  consumeRelayEvmPriorApprovalReservationInTransaction,
+  relayEvmPriorApprovalSupportMetadata,
+} from "../../funding/execution/relay-evm-prior-approval.js";
 import { relayEvmFundingProfileSpec } from "../../funding/execution/relay-evm-profile-specs.js";
 
 type JsonRecord = Readonly<Record<string, JsonValue>>;
@@ -633,12 +637,19 @@ export function createRelayReceiveReceiptDispositionResolver(
         const sequentialQuoteTtlMs = relayExecutionConfiguration
           ? relayEvmSequentialQuoteTtlMs(relayExecutionConfiguration)
           : 60_000;
-        const baselineAllowance = delegatedRelay
-          ? await captureRelayEvmAllowanceBaseline(delegatedProfile, {
+        const relayAllowanceAdmission = delegatedRelay
+          ? await captureRelayEvmAllowanceAdmission(db, {
               owner: frozen.profile.address,
+              profile: delegatedProfile,
+              userId: receiptTarget.userId,
             })
           : null;
-        if (baselineAllowance && baselineAllowance.raw !== "0") return null;
+        const baselineAllowance = relayAllowanceAdmission?.baseline ?? null;
+        const relayPriorApprovalProof =
+          relayAllowanceAdmission?.priorApprovalProof ?? null;
+        if (baselineAllowance?.raw !== "0" && !relayPriorApprovalProof) {
+          return null;
+        }
         // A detached terminal child starts a new durable operation generation.
         // Relay's operationId must advance with it: reusing the receipt-only
         // correlation can replay the provider's expired quote/order from the
@@ -695,7 +706,16 @@ export function createRelayReceiveReceiptDispositionResolver(
               receiptTarget.receipt.observationRevision,
             fundingReceiveVariantId: receiptTarget.receipt.variantId,
             ...(baselineAllowance
-              ? relayEvmAllowanceBaselineSupportMetadata(baselineAllowance)
+              ? {
+                  ...relayEvmAllowanceBaselineSupportMetadata(
+                    baselineAllowance,
+                  ),
+                  ...(relayPriorApprovalProof
+                    ? relayEvmPriorApprovalSupportMetadata(
+                        relayPriorApprovalProof,
+                      )
+                    : {}),
+                }
               : {}),
           },
         });
@@ -739,6 +759,22 @@ export function createRelayReceiveReceiptDispositionResolver(
               ))
             ) {
               throw new Error("Relay receipt authority changed before commit");
+            }
+            if (
+              delegatedProfile &&
+              relayPriorApprovalProof &&
+              !(await consumeRelayEvmPriorApprovalReservationInTransaction(
+                client,
+                {
+                  now,
+                  owner: frozen.profile.address,
+                  profile: delegatedProfile,
+                  proof: relayPriorApprovalProof,
+                  userId: receiptTarget.userId,
+                },
+              ))
+            ) {
+              throw new Error("Relay receipt allowance changed before commit");
             }
           },
           commit: async (client: PoolClient) => {

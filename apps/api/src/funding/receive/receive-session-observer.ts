@@ -725,7 +725,8 @@ export class FundingReceiveSessionObserver {
         const activeStatus =
           snapshot.session.status === "open" ||
           snapshot.session.status === "processing" ||
-          snapshot.session.status === "review_required"
+          snapshot.session.status === "review_required" ||
+          snapshot.session.status === "recovery_required"
             ? snapshot.session.status
             : null;
         if (!closed && !activeStatus) {
@@ -830,7 +831,13 @@ export class FundingReceiveSessionObserver {
             receiveSessionId: snapshot.session.receiveSessionId,
             expectedVersion: snapshot.session.version,
             observationVariants: nextVariants,
-            status: disposition.sessionStatus,
+            // A later ordinary observation cannot silently clear an earlier
+            // ambiguous/recovery receipt. It remains visible and observable
+            // until the receipt router resolves it.
+            status:
+              snapshot.session.status === "recovery_required"
+                ? "recovery_required"
+                : disposition.sessionStatus,
             lastObservedAt: new Date(selected.observation.observedAt),
             now,
           });

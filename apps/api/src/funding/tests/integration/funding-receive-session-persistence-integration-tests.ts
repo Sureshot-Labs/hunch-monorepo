@@ -14,6 +14,7 @@ import {
 import { AuthService } from "../../../auth.js";
 import { pool } from "../../../db.js";
 import {
+  claimObservableFundingReceiveSessions,
   createOrReuseFundingReceiveSession,
   expireFundingReceiveSessions,
   fetchFundingReceiveReceiptForReview,
@@ -205,6 +206,30 @@ try {
     noOpObservationAt.toISOString(),
   );
 
+  const recoveryAt = new Date(noOpObservationAt.getTime() + 1_000);
+  assert.equal(
+    await updateFundingReceiveSessionObservation(pool, {
+      receiveSessionId: first.snapshot.session.receiveSessionId,
+      expectedVersion: observationAfterRows[0]?.version ?? -1,
+      observationVariants: sessionInput(userId).observationVariants,
+      status: "recovery_required",
+      lastObservedAt: recoveryAt,
+      now: recoveryAt,
+    }),
+    true,
+  );
+  const recoveryClaimed = await claimObservableFundingReceiveSessions(pool, {
+    limit: 1,
+    minimumPollIntervalMs: 1_000,
+    now: new Date(recoveryAt.getTime() + 61_000),
+  });
+  assert.equal(recoveryClaimed.length, 1);
+  assert.equal(
+    recoveryClaimed[0]?.session.status,
+    "recovery_required",
+    "a recoverable session must remain observable instead of becoming a permanent active shell",
+  );
+
   const replacement = await createOrReuseFundingReceiveSession(pool, {
     ...sessionInput(userId),
     policyRevision: "policy_revision_receive_changed_12345678",
@@ -283,7 +308,11 @@ try {
     `,
     [first.snapshot.session.receiveSessionId],
   );
-  assert.equal(rows[0]?.status, "expired");
+  assert.equal(
+    rows[0]?.status,
+    "recovery_required",
+    "the recovery observation window must stay live until its normal expiry",
+  );
 
   const client = await pool.connect();
   try {
@@ -711,6 +740,11 @@ try {
     receiveSessionId: replacement.snapshot.session.receiveSessionId,
   });
   assert.equal(expiredProcessing?.session.status, "expired");
+  const expiredRecovery = await fetchFundingReceiveSessionForUser(pool, {
+    userId,
+    receiveSessionId: first.snapshot.session.receiveSessionId,
+  });
+  assert.equal(expiredRecovery?.session.status, "expired");
   mergeTargetId = await insertUser();
   const [sourceUser, targetUser] = await Promise.all([
     fetchUser(userId),

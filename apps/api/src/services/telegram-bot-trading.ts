@@ -10553,8 +10553,8 @@ export async function handleTelegramBotTradingCallback(
         callbackQueryId: input.callbackQuery.id,
         showAlert: true,
         text:
-          safetyStop?.code === "relay_allowance_cleanup_required"
-            ? "⚠️ A prior Relay approval must be cleared first. Nothing was moved."
+          safetyStop?.code === "relay_allowance_unverified"
+            ? "⚠️ Existing Relay allowance could not be verified. Nothing was moved."
             : safetyStop?.code === "allowance_lane_unavailable"
               ? "⏳ Another funding action is still being checked. Nothing was moved."
               : "⚠️ Funding quote changed or is unavailable. Nothing was moved; reopen Review.",
@@ -10564,16 +10564,16 @@ export async function handleTelegramBotTradingCallback(
         parse_mode: "MarkdownV2",
         text: formatTelegramTradeLifecycleMessageMarkdownV2({
           heading:
-            safetyStop?.code === "relay_allowance_cleanup_required"
-              ? "Funding preparation needs attention."
+            safetyStop?.code === "relay_allowance_unverified"
+              ? "Automatic Relay route unavailable."
               : safetyStop?.code === "allowance_lane_unavailable"
                 ? "Funding preparation is busy."
                 : "Funding quote is no longer current.",
           lines:
-            safetyStop?.code === "relay_allowance_cleanup_required"
+            safetyStop?.code === "relay_allowance_unverified"
               ? [
-                  "A prior Relay approval is still present, so no new Relay action was sent.",
-                  "Nothing was moved or submitted. Clear that approval, then open a fresh Review.",
+                  "An existing Relay allowance could not be proved to belong to a safe Hunch route.",
+                  "Nothing was moved or submitted. You can use Deposit or open a fresh Review.",
                 ]
               : safetyStop?.code === "allowance_lane_unavailable"
                 ? [
@@ -10587,6 +10587,22 @@ export async function handleTelegramBotTradingCallback(
           marketTitle: intent.market_title,
           venue: intent.venue,
         }),
+        reply_markup: {
+          inline_keyboard: [
+            [
+              {
+                callback_data: `hm:v1:deposit:${intent.venue}`,
+                text: "Deposit",
+              },
+            ],
+            [
+              {
+                callback_data: "hm:v1:home",
+                text: "🏠 Home",
+              },
+            ],
+          ],
+        },
       });
       return true;
     }

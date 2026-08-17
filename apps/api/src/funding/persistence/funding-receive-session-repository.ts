@@ -228,7 +228,7 @@ async function refreshFundingReceiveSessionStatus(
           updated_at = $4
       where id = $1
         and user_id = $2
-        and status in ('open', 'processing', 'review_required')
+        and status in ('open', 'processing', 'review_required', 'recovery_required')
     `,
     [input.receiveSessionId, input.userId, status, input.now],
   );
@@ -464,8 +464,16 @@ export async function requestFundingReceiveSessionObservation(
           updated_at = greatest(receive_session.updated_at, $3)
       where receive_session.id = $1
         and receive_session.user_id = $2
-        and receive_session.status in ('open', 'processing', 'review_required')
-        and receive_session.expires_at > $3
+        and (
+          (
+            receive_session.status in ('open', 'processing', 'review_required')
+            and receive_session.expires_at > $3
+          )
+          or (
+            receive_session.status = 'recovery_required'
+            and receive_session.observe_until > $3
+          )
+        )
     `,
     [input.receiveSessionId, input.userId, input.now],
   );
@@ -483,7 +491,7 @@ export async function expireFundingReceiveSessions(
           closed_at = $1,
           version = version + 1,
           updated_at = $1
-      where status in ('open', 'processing', 'review_required')
+      where status in ('open', 'processing', 'review_required', 'recovery_required')
         and expires_at <= $1
     `,
     [input.now],
@@ -529,13 +537,17 @@ export async function claimObservableFundingReceiveSessions(
               and expires_at > $1
             )
             or (
+              status = 'recovery_required'
+              and observe_until > $1
+            )
+            or (
               status in ('expired', 'cancelled')
               and observe_until > $1
             )
           )
           and (
             (
-              status in ('open', 'processing', 'review_required')
+              status in ('open', 'processing', 'review_required', 'recovery_required')
               and observation_requested_at is not null
               and (
                 last_observed_at is null
@@ -554,7 +566,7 @@ export async function claimObservableFundingReceiveSessions(
               )
           )
         order by (
-                   status in ('open', 'processing', 'review_required')
+                   status in ('open', 'processing', 'review_required', 'recovery_required')
                    and observation_requested_at is not null
                    and (
                      last_observed_at is null
@@ -1276,7 +1288,7 @@ export async function updateFundingReceiveSessionObservation(
           updated_at = $6
       where id = $1
         and version = $2
-        and status in ('open', 'processing', 'review_required')
+        and status in ('open', 'processing', 'review_required', 'recovery_required')
     `,
     [
       input.receiveSessionId,
