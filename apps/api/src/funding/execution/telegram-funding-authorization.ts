@@ -997,8 +997,7 @@ export async function ensureTelegramRelayEvmFundingAuthorization(
   const venueId = input.venueId ?? "polymarket";
   const candidate = await resolveTelegramFundingProvisionWallet(pool, {
     ...input,
-    controllerNetworkId:
-      venueId === "limitless" ? "evm:8453" : "evm:137",
+    controllerNetworkId: venueId === "limitless" ? "evm:8453" : "evm:137",
   });
   if (!candidate || candidate.controllerWalletId !== input.controllerWalletId) {
     return null;

@@ -989,7 +989,7 @@ await test("compiles full V2 intent to the reviewed runtime catalog", () => {
       assets: 6,
       locations: 8,
       venues: 2,
-    routes: 9,
+      routes: 9,
       privy: 2,
       preparation: 4,
       positionActions: 0,

@@ -8,10 +8,13 @@ import type { FundingRuntimePolicy } from "../../policies/funding-policy.js";
 import { withWithdrawalPlanningContract } from "../../domain/withdrawal-contract.js";
 import { compileFundingIntentPolicy } from "../../policies/funding-policy-v2.js";
 import { PRIVY_USER_AUTHORIZED_EVM_SPONSORSHIP_POLICY_ID } from "../../execution/sponsorship-policy.js";
+import { TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID } from "../../execution/delegated-funding-profile-ids.js";
 import { SOLANA_NATIVE_EXECUTION_RESERVE_LAMPORTS } from "../../domain/network-fees.js";
 import {
   buildPolymarketPreRouteHandoffSteps,
   deriveProductionRelayEligibleSourceFacts,
+  filterRelayEligibleSourceFactsForExecutionProfile,
+  restrictRelayRoutesToExecutionProfile,
 } from "../../planner/production-source-planner.js";
 import { groupWalletExecutableActions } from "../../planner/evm-action-batching.js";
 
@@ -1145,6 +1148,50 @@ assert.equal(
     purpose: "withdrawal",
   }).length,
   1,
+);
+
+const envelopeFacts = deriveProductionRelayEligibleSourceFacts({
+  accountId: ACCOUNT_ID,
+  account: account(),
+  policy: policy(),
+  requiredAmount: { asset: POLYGON_PUSD, raw: "3000000" },
+});
+const [baseEnvelopeFact] = envelopeFacts;
+assert.ok(baseEnvelopeFact);
+const irrelevantEnvelopeFact = {
+  ...baseEnvelopeFact,
+  componentId: "component_irrelevant_polygon_asset_12345678",
+  quoteInputAmount: { asset: POLYGON_PUSD, raw: "3000000" },
+};
+assert.deepEqual(
+  filterRelayEligibleSourceFactsForExecutionProfile(
+    [irrelevantEnvelopeFact, baseEnvelopeFact],
+    TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
+  ).map((fact) => fact.componentId),
+  [baseEnvelopeFact.componentId],
+);
+assert.equal(
+  filterRelayEligibleSourceFactsForExecutionProfile(
+    [baseEnvelopeFact],
+    "unknown_server_execution_profile",
+  ).length,
+  0,
+);
+
+const [baseRoute] = policy().routes;
+assert.ok(baseRoute);
+const unrelatedRelayRoute = {
+  ...baseRoute,
+  routeId: "polygon-pusd-to-base-usdc",
+  sourceAsset: POLYGON_PUSD,
+  destinationAsset: BASE_USDC,
+};
+assert.deepEqual(
+  restrictRelayRoutesToExecutionProfile(
+    policy({ routes: [unrelatedRelayRoute, baseRoute] }),
+    TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
+  ).routes.map((route) => route.routeId),
+  ["base-usdc-to-polygon-pusd"],
 );
 
 console.log(

@@ -4769,9 +4769,11 @@ function evaluateLimitlessBalanceReadiness(usdcBalance: bigint) {
   });
 }
 
-function limitlessClobBotTradingDisabledReadiness(input: {
-  maxExecutableBuyUsd?: number;
-} = {}): TradingReadiness {
+function limitlessClobBotTradingDisabledReadiness(
+  input: {
+    maxExecutableBuyUsd?: number;
+  } = {},
+): TradingReadiness {
   return readiness("limitless", capabilities, {
     ok: false,
     code: "limitless_clob_slippage_guard_unavailable",

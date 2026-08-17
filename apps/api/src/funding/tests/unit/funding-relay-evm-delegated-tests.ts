@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { Interface, MaxUint256 } from "ethers";
+import { Interface } from "ethers";
 
 import { stableWalletOpaqueId } from "../../../account-value/canonical.js";
 import {

@@ -41,6 +41,7 @@ import {
   fundingRouteExperienceFingerprint,
 } from "../persistence/route-experience-repository.js";
 import { PRIVY_USER_AUTHORIZED_EVM_SPONSORSHIP_POLICY_ID } from "../execution/sponsorship-policy.js";
+import { relayEvmFundingProfileSpec } from "../execution/relay-evm-profile-specs.js";
 import {
   FundingPlannerError,
   assertSameAsset,
@@ -559,6 +560,45 @@ export function deriveProductionRelayEligibleSourceFacts(input: {
   return facts;
 }
 
+/**
+ * A server execution profile is not merely quote metadata. It is the exact
+ * delegated authority envelope for one source asset and a finite route set.
+ * Restrict the candidate inventory before Relay's quote batch limit is
+ * applied; otherwise unrelated wallet assets can consume the batch and hide
+ * the executable source for the selected envelope.
+ */
+export function filterRelayEligibleSourceFactsForExecutionProfile(
+  facts: readonly RelayEligibleSourceFact[],
+  serverExecutionProfileId: string | null | undefined,
+): readonly RelayEligibleSourceFact[] {
+  if (!serverExecutionProfileId) return facts;
+  const profile = relayEvmFundingProfileSpec(serverExecutionProfileId);
+  if (!profile) return [];
+  return facts.filter((fact) =>
+    sameAsset(fact.quoteInputAmount.asset, profile.sourceAsset),
+  );
+}
+
+export function restrictRelayRoutesToExecutionProfile(
+  policy: FundingRuntimePolicy,
+  serverExecutionProfileId: string | null | undefined,
+): FundingRuntimePolicy {
+  if (!serverExecutionProfileId) return policy;
+  const profile = relayEvmFundingProfileSpec(serverExecutionProfileId);
+  return {
+    ...policy,
+    routes: policy.routes.filter(
+      (route) =>
+        route.providerId !== "relay" ||
+        Boolean(
+          profile &&
+          profile.routeIds.includes(route.routeId) &&
+          sameAsset(route.sourceAsset, profile.sourceAsset),
+        ),
+    ),
+  };
+}
+
 function maximumVenuePreparationContributionRaw(
   sources: readonly PlannedSourceOption[],
   requiredAmount: Money,
@@ -690,6 +730,10 @@ export class ProductionFundingSourcePlanner {
     const relayDiscovery = relayRequirement
       ? await this.relayPlanner().discover({
           ...input,
+          policy: restrictRelayRoutesToExecutionProfile(
+            input.policy,
+            input.request.serverExecutionProfileId,
+          ),
           requiredAmount: relayRequirement,
         })
       : { sources: [], reasonCodes: [] };
@@ -855,20 +899,23 @@ export class ProductionFundingSourcePlanner {
       input.request.purpose === "withdrawal"
         ? withWithdrawalPlanningContract(basePolicy, input.requiredAmount.asset)
         : basePolicy;
-    return deriveProductionRelayEligibleSourceFacts({
-      accountId: input.accountId,
-      account: this.account,
-      policy,
-      requiredAmount: input.requiredAmount,
-      confirmedSourceAmount: input.request.confirmedSourceAmount,
-      destinationLocationPatternId:
-        input.destination.destinationLocationPatternId,
-      purpose: input.request.purpose,
-      maximumSlippageBps: Math.min(
-        input.request.maxSlippageBps ?? policy.placement.maximumSlippageBps,
-        policy.placement.maximumSlippageBps,
-      ),
-    });
+    return filterRelayEligibleSourceFactsForExecutionProfile(
+      deriveProductionRelayEligibleSourceFacts({
+        accountId: input.accountId,
+        account: this.account,
+        policy,
+        requiredAmount: input.requiredAmount,
+        confirmedSourceAmount: input.request.confirmedSourceAmount,
+        destinationLocationPatternId:
+          input.destination.destinationLocationPatternId,
+        purpose: input.request.purpose,
+        maximumSlippageBps: Math.min(
+          input.request.maxSlippageBps ?? policy.placement.maximumSlippageBps,
+          policy.placement.maximumSlippageBps,
+        ),
+      }),
+      input.request.serverExecutionProfileId,
+    );
   }
 
   private currentPolicy(): FundingRuntimePolicy {
