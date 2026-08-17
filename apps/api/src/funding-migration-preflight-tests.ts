@@ -106,6 +106,39 @@ const migration0208 = await readFile(
   ),
   "utf8",
 );
+
+const migration0221 = await readFile(
+  new URL(
+    "../../../packages/db/migrations/0221_telegram_app_handoff_intents.sql",
+    import.meta.url,
+  ),
+  "utf8",
+);
+assert.match(
+  migration0221,
+  /create table if not exists telegram_app_handoffs[\s\S]*?token_hash text not null unique[\s\S]*?plan_fingerprint text not null[\s\S]*?policy_revision text not null/u,
+  "0221 must persist only a hashed handoff token and immutable plan scope",
+);
+assert.match(
+  migration0221,
+  /unique \(user_id, telegram_user_id\)[\s\S]*?foreign key \(user_id, telegram_user_id\)[\s\S]*?references user_telegram_accounts\(user_id, telegram_user_id\)/u,
+  "0221 must bind the Telegram identity to the same Hunch user in the database",
+);
+assert.match(
+  migration0221,
+  /claimed_by_user_id uuid references users\(id\) on delete cascade[\s\S]*?claimed_by_user_id is null or claimed_by_user_id = user_id/u,
+  "0221 must keep every claim bound to the handoff owner",
+);
+assert.match(
+  migration0221,
+  /create trigger telegram_app_handoffs_guard[\s\S]*?before update on telegram_app_handoffs/u,
+  "0221 must fence only future handoff state changes",
+);
+assert.doesNotMatch(
+  migration0221,
+  /(?:raise exception|update|delete)[\s\S]*?telegram_app_handoffs[\s\S]*?(?:legacy|historical)/iu,
+  "0221 must not perform historical handoff cleanup during deployment",
+);
 assert.match(
   migration0208,
   /refund_recanonicalization[\s\S]*?old\.kind = 'refund_credit'[\s\S]*?old\.network_id = 'evm:8453'[\s\S]*?0x833589fcd6edb6e08f4c7c32d4f71b54bda02913[\s\S]*?relay_owned_refund_observation_v1[\s\S]*?relayRefundCanonicalityHistory/u,
@@ -149,7 +182,8 @@ const db = {
           params[0].includes("0216_telegram_trade_shortfall_funding.sql") &&
           params[0].includes(
             "0217_telegram_app_handoff_funding_confirmation.sql",
-          ),
+          ) &&
+          params[0].includes("0221_telegram_app_handoff_intents.sql"),
       );
       return { rows: [] };
     }

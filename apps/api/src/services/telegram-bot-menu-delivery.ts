@@ -32,6 +32,36 @@ export type TelegramBotMenuDeliveryOutcome =
   | "render_unavailable"
   | "other";
 
+const HOME_CALLBACK_DATA = "hm:v1:home";
+
+/**
+ * Every private interactive card needs one deterministic escape route.  This
+ * runs at the last menu-delivery boundary, so refresh/edit paths cannot drop
+ * Home or append it twice.
+ */
+function withTelegramBotMenuHome(
+  message: TelegramBotMenuMessage,
+): TelegramBotMenuMessage {
+  const rows = message.reply_markup?.inline_keyboard ?? [];
+  const hasHome = rows.some((row) =>
+    row.some(
+      (button) =>
+        "callback_data" in button &&
+        button.callback_data === HOME_CALLBACK_DATA,
+    ),
+  );
+  if (hasHome) return message;
+  return {
+    ...message,
+    reply_markup: {
+      inline_keyboard: [
+        ...rows,
+        [{ callback_data: HOME_CALLBACK_DATA, text: "🏠 Home" }],
+      ],
+    },
+  };
+}
+
 export function classifyTelegramBotMenuDeliveryResult(
   result: TelegramSendResult,
 ): Readonly<{
@@ -119,6 +149,7 @@ export async function sendOrEditTelegramBotMenuMessage(input: {
   shouldDeliver?: () => Promise<boolean>;
   transport: TelegramBotMenuTransport;
 }): Promise<TelegramSendResult> {
+  const message = withTelegramBotMenuHome(input.message);
   const superseded = (): TelegramSendResult => ({
     error: "other",
     message: "superseded",
@@ -132,9 +163,9 @@ export async function sendOrEditTelegramBotMenuMessage(input: {
       chat_id: input.chatId,
       disable_web_page_preview: true,
       message_id: input.messageId,
-      parse_mode: input.message.parse_mode ?? "MarkdownV2",
-      reply_markup: input.message.reply_markup,
-      text: input.message.text,
+      parse_mode: message.parse_mode ?? "MarkdownV2",
+      reply_markup: message.reply_markup,
+      text: message.text,
     });
     if (edited.ok || /message is not modified/i.test(edited.message)) {
       return edited;
@@ -144,7 +175,7 @@ export async function sendOrEditTelegramBotMenuMessage(input: {
     // Sending the same keyboard as a new message would create a dead card.
     if (
       edited.error !== "message_not_editable" ||
-      typeof input.message.fundingContextId === "string"
+      typeof message.fundingContextId === "string"
     ) {
       return edited;
     }
@@ -155,8 +186,8 @@ export async function sendOrEditTelegramBotMenuMessage(input: {
   return input.transport.sendMessage({
     chat_id: input.chatId,
     disable_web_page_preview: true,
-    parse_mode: input.message.parse_mode ?? "MarkdownV2",
-    reply_markup: input.message.reply_markup,
-    text: input.message.text,
+    parse_mode: message.parse_mode ?? "MarkdownV2",
+    reply_markup: message.reply_markup,
+    text: message.text,
   });
 }

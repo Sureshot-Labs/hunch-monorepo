@@ -20,8 +20,10 @@ import {
 } from "./services/telegram-bot-trade-input-context.js";
 import {
   beginSignalBotTradeInput,
+  cancelSignalBotTradeInput,
   handleSignalBotTradeInput,
 } from "./services/telegram-bot-trade-input.js";
+import type { TelegramInlineKeyboard } from "./services/signal-bot-contracts.js";
 import { handleTelegramBotRewardsInput } from "./services/telegram-bot-rewards-menu.js";
 
 class FakeRedis {
@@ -543,6 +545,73 @@ assert.equal(
     })
   )?.kind,
   "awaiting_custom_sell_amount",
+);
+
+assert.deepEqual(
+  parseTelegramBotTradingCallbackData(`hbt:cancel_input:${contextId}`),
+  { inputContextId: contextId, type: "cancel_input" },
+);
+let cancelledKeyboard: TelegramInlineKeyboard["inline_keyboard"] | undefined;
+assert.equal(
+  await cancelSignalBotTradeInput({
+    chatId: "42",
+    contextId,
+    message: { text: "Back to the market" },
+    redis,
+    telegramUserId: 42,
+    transport: {
+      editMessageText: async (message) => {
+        cancelledKeyboard = message.reply_markup?.inline_keyboard;
+        return { message: "ok", messageId: 12, ok: true as const };
+      },
+      sendMessage: async () => ({
+        message: "unexpected standalone send",
+        messageId: 13,
+        ok: true as const,
+      }),
+    },
+  }),
+  true,
+);
+assert.equal(
+  cancelledKeyboard
+    ?.flat()
+    .filter(
+      (button) =>
+        "callback_data" in button && button.callback_data === "hm:v1:home",
+    ).length,
+  1,
+);
+assert.equal(
+  await readSignalBotMenuInput({ chatId: "42", redis, telegramUserId: 42 }),
+  null,
+);
+assert.equal(
+  await cancelSignalBotTradeInput({
+    chatId: "42",
+    contextId,
+    message: { text: "must not deliver" },
+    redis,
+    telegramUserId: 42,
+    transport: {
+      sendMessage: async () => {
+        throw new Error("stale cancel must not send");
+      },
+    },
+  }),
+  false,
+);
+
+assert.ok(
+  await writeSignalBotTradeMenuInput({
+    action: "sell",
+    chatId: "42",
+    contextId,
+    expiresAt: context.expiresAt,
+    menuMessageId: 12,
+    redis,
+    telegramUserId: 42,
+  }),
 );
 
 let recoveryStandaloneSends = 0;

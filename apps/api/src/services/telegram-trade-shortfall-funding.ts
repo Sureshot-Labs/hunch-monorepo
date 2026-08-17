@@ -40,6 +40,19 @@ import { RELAY_ROUTE_SPECS } from "../funding-providers/relay/mappings.js";
 type Venue = "limitless" | "polymarket";
 type Side = "NO" | "YES";
 
+/** A non-quote safety stop that must never be presented as quote expiry. */
+export class TelegramTradeShortfallCommitError extends Error {
+  constructor(
+    readonly code:
+      | "relay_allowance_cleanup_required"
+      | "allowance_lane_unavailable",
+    message: string,
+  ) {
+    super(message);
+    this.name = "TelegramTradeShortfallCommitError";
+  }
+}
+
 export type TelegramTradeShortfallProposal = Readonly<{
   version: 1;
   kind: "internal_stable_route";
@@ -779,7 +792,10 @@ export class TelegramTradeShortfallFundingService {
         })
       : null;
     if (relayAllowanceBaseline?.raw !== "0") {
-      throw new Error("trade funding Relay allowance baseline is not clear");
+      throw new TelegramTradeShortfallCommitError(
+        "relay_allowance_cleanup_required",
+        "trade funding Relay allowance baseline is not clear",
+      );
     }
     const prepared = await this.runtime.prepareCommit(input.userId, {
       quoteId: quote.quoteId,
@@ -799,7 +815,10 @@ export class TelegramTradeShortfallFundingService {
           userId: input.userId,
         }))
       ) {
-        throw new Error("trade funding allowance lane is unavailable");
+        throw new TelegramTradeShortfallCommitError(
+          "allowance_lane_unavailable",
+          "trade funding allowance lane is unavailable",
+        );
       }
       const lockedIntent = await client.query<{ status: string }>(
         `select status

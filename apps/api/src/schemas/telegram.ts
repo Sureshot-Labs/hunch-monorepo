@@ -29,6 +29,47 @@ export const telegramContextErrorResponseSchema = z.object({
   message: z.string().optional(),
 });
 
+const telegramAppHandoffTokenSchema = z
+  .string()
+  .trim()
+  .regex(/^th1_[A-Za-z0-9_-]{43}$/);
+
+export const telegramAppHandoffRequestSchema = z
+  .object({
+    initDataRaw: z
+      .string()
+      .trim()
+      .min(1)
+      .max(8 * 1024),
+    token: telegramAppHandoffTokenSchema,
+  })
+  .strict();
+
+export const telegramAppHandoffCommitRequestSchema =
+  telegramAppHandoffRequestSchema
+    .extend({
+      planFingerprint: z.string().regex(/^[0-9a-f]{64}$/i),
+    })
+    .strict();
+
+export const telegramAppHandoffResponseSchema = z.object({
+  handoff: z.object({
+    authorityFingerprint: z.string(),
+    cancelledAt: z.string().nullable(),
+    claimedAt: z.string().nullable(),
+    committedAt: z.string().nullable(),
+    expiresAt: z.string(),
+    expiredAt: z.string().nullable(),
+    id: z.string().uuid(),
+    planFingerprint: z.string(),
+    planSnapshot: z.record(z.string(), z.unknown()),
+    policyRevision: z.string(),
+    quoteSnapshot: z.record(z.string(), z.unknown()),
+    state: z.enum(["issued", "claimed", "committed", "cancelled", "expired"]),
+    tradeIntentId: z.string().uuid(),
+  }),
+});
+
 export const telegramGroupMembershipStateSchema = z.enum([
   "member",
   "not_member",

@@ -56,7 +56,10 @@ import {
   describeTelegramBotTradingInternalApiError,
 } from "./services/telegram-bot-trading-client.js";
 import { createTelegramAccountValueLoader } from "./services/telegram-account-value-menu.js";
-import { beginSignalBotTradeInput } from "./services/telegram-bot-trade-input.js";
+import {
+  beginSignalBotTradeInput,
+  cancelSignalBotTradeInput,
+} from "./services/telegram-bot-trade-input.js";
 import { withTelegramPrivateNavigation } from "./services/telegram-bot-private-navigation.js";
 import { formatTelegramCalloutMarkdownV2 } from "./services/telegram-bot-trading-presentation.js";
 import { buildHunchMiniAppWebButton } from "./services/telegram-mini-app-buttons.js";
@@ -713,12 +716,13 @@ export async function runSignalBotRunner(): Promise<void> {
                     return fallbackMessage;
                   })
               : fallbackMessage;
+            const navigableMessage = withTelegramPrivateNavigation(message);
             const result = await telegram.sendMessage({
               chat_id: input.chatId,
               disable_web_page_preview: true,
-              parse_mode: message.parse_mode ?? "MarkdownV2",
-              reply_markup: message.reply_markup,
-              text: message.text,
+              parse_mode: navigableMessage.parse_mode ?? "MarkdownV2",
+              reply_markup: navigableMessage.reply_markup,
+              text: navigableMessage.text,
             });
             return result.ok;
           },
@@ -750,6 +754,23 @@ export async function runSignalBotRunner(): Promise<void> {
                         transport: telegram,
                       });
                     },
+                    cancelTradeInput: (cancel) => {
+                      const chatId =
+                        callbackQuery.message?.chat?.id == null
+                          ? null
+                          : String(callbackQuery.message.chat.id);
+                      const telegramUserId = callbackQuery.from?.id;
+                      if (!chatId || !telegramUserId)
+                        return Promise.resolve(false);
+                      return cancelSignalBotTradeInput({
+                        chatId,
+                        contextId: cancel.contextId,
+                        message: cancel.message,
+                        redis,
+                        telegramUserId,
+                        transport: telegram,
+                      });
+                    },
                     callbackQuery,
                     editMessageText: (message) =>
                       telegram.editMessageText({
@@ -757,12 +778,15 @@ export async function runSignalBotRunner(): Promise<void> {
                         disable_web_page_preview: true,
                         parse_mode: message.parse_mode ?? "MarkdownV2",
                       }),
-                    sendMessage: (message) =>
-                      telegram.sendMessage({
-                        ...message,
+                    sendMessage: (message) => {
+                      const navigableMessage =
+                        withTelegramPrivateNavigation(message);
+                      return telegram.sendMessage({
+                        ...navigableMessage,
                         disable_web_page_preview: true,
-                        parse_mode: message.parse_mode ?? "MarkdownV2",
-                      }),
+                        parse_mode: navigableMessage.parse_mode ?? "MarkdownV2",
+                      });
+                    },
                     telegramMiniAppEnabled:
                       config.telegramMiniAppLinkBase != null,
                   })
