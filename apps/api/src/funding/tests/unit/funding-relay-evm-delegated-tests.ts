@@ -34,6 +34,10 @@ import {
   captureRelayEvmAllowanceBaseline,
   relayEvmAllowanceBaselineSupportMetadata,
 } from "../../execution/relay-evm-allowance-baseline.js";
+import {
+  parseRelayEvmPriorApprovalProof,
+  relayEvmPriorApprovalSupportMetadata,
+} from "../../execution/relay-evm-prior-approval.js";
 import { relayEvmUsdCapMatchesRaw } from "../../execution/delegated-funding-capability-resolver.js";
 import {
   buildTelegramRelayEvmAutomationPolicyV3,
@@ -88,6 +92,27 @@ assert.deepEqual(
     relayApprovalBaselineAllowanceRevision: "c".repeat(64),
   },
   "every Relay origin must persist the same pre-approval ownership baseline",
+);
+const priorApprovalProof = parseRelayEvmPriorApprovalProof({
+  allowanceRaw: RAW,
+  approvalBlock: "123",
+  approvalBlockHash: `0x${"ab".repeat(32)}`,
+  approvalReceiptId: "11111111-1111-4111-8111-111111111111",
+  approvalTransactionHash: `0x${"51".repeat(32)}`,
+  ownershipRevision: "e".repeat(64),
+  sourceOperationId: "22222222-2222-4222-8222-222222222222",
+});
+assert.ok(priorApprovalProof);
+assert.deepEqual(relayEvmPriorApprovalSupportMetadata(priorApprovalProof), {
+  relayPriorApprovalProof: priorApprovalProof,
+});
+assert.equal(
+  parseRelayEvmPriorApprovalProof({
+    ...priorApprovalProof,
+    allowanceRaw: "0",
+  }),
+  null,
+  "a zero or malformed prior allowance can never enable replacement approval",
 );
 assert.deepEqual(
   parseRelayEvmAllowanceObservation(anchoredAllowance),

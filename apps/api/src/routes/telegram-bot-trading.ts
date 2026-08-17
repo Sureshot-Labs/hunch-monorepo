@@ -980,7 +980,8 @@ async function registerTelegramBotTradingRoutes(
             and receive_session.status in (
               'open',
               'processing',
-              'review_required'
+              'review_required',
+              'recovery_required'
             )
             and receive_session.expires_at > now()
           order by funding_context.created_at desc, funding_context.id desc

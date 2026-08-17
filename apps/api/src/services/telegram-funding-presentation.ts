@@ -327,6 +327,7 @@ export function buildTelegramFundingDeliveryQueuedMessage(input: {
 
 export function buildTelegramFundingActiveElsewhereMessage(
   input: Readonly<{
+    canCancel?: boolean;
     projection?: TelegramFundingProgressProjection | null;
     venue?: string;
   }> = {},
@@ -350,12 +351,16 @@ export function buildTelegramFundingActiveElsewhereMessage(
             text: summary ? "🔄 Refresh active Deposit" : "Open Deposit",
           },
         ],
-        [
-          {
-            callback_data: "hm:v1:deposit_cancel_active",
-            text: "Cancel active Deposit",
-          },
-        ],
+        ...(input.canCancel === true
+          ? [
+              [
+                {
+                  callback_data: "hm:v1:deposit_cancel_active",
+                  text: "Cancel active Deposit",
+                },
+              ],
+            ]
+          : []),
         [{ callback_data: "hm:v1:home", text: "🏠 Home" }],
       ],
     },

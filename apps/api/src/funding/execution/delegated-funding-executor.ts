@@ -72,6 +72,11 @@ export type DelegatedFundingExecutionClaim = Readonly<{
   policyId: string;
   privyWalletId: string;
   profileId: string;
+  /**
+   * A terminal Hunch approval that is proven to be the present allowance
+   * head. It fences only a replacement approve; it never authorizes deposit.
+   */
+  relayPriorApprovalProof?: JsonRecord | null;
   receiptRaw: string;
   sponsor: boolean;
   signerFingerprint: string;

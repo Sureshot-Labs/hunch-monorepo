@@ -34,6 +34,9 @@ import {
   RELAY_CLEANUP_CANONICAL_WATCH_MS,
   type RelayEvmAllowanceReader,
 } from "../../execution/relay-evm-delegated-executor-profile.js";
+import { captureRelayEvmAllowanceAdmission } from "../../execution/relay-evm-allowance-baseline.js";
+import { consumeRelayEvmPriorApprovalReservationInTransaction } from "../../execution/relay-evm-prior-approval.js";
+import { relayEvmFundingProfileSpec } from "../../execution/relay-evm-profile-specs.js";
 import { lockTelegramFundingLinkLifecycle } from "../../execution/telegram-funding-link-lifecycle-lock.js";
 import {
   POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
@@ -5325,6 +5328,259 @@ try {
   assert.equal(relayLaneSecondWave.submitted, 1);
   assert.deepEqual(relayLaneBroadcasts, [relayLaneHead, relayLaneFollower]);
 
+  // A terminal route with one exact Hunch approval and no deposit attempt is
+  // never reused. It can only make room for a new operation which emits its
+  // own exact approve before any deposit is eligible.
+  const priorApprovalRoute = await createRelayFixture("2000000");
+  const priorAllowanceAtApproval = relayAllowanceEvidence(
+    "2000000",
+    "200",
+    "approval-ownership",
+    `0x${"51".repeat(32)}`,
+    "finalized",
+    "200",
+  );
+  const priorAllowance = relayAllowanceEvidence(
+    "2000000",
+    "301",
+    "approval-ownership",
+    `0x${"51".repeat(32)}`,
+    "finalized",
+    "301",
+  );
+  let priorApprovalSends = 0;
+  assert.equal(
+    (
+      await relayExecutor(
+        [
+          relayAllowanceEvidence("0", "300"),
+          relayAllowanceEvidence("0", "300"),
+        ],
+        () => {
+          priorApprovalSends += 1;
+        },
+      ).runBatch({ limit: 1, now })
+    ).submitted,
+    1,
+  );
+  await recordRelayApprovalSuccess(
+    priorApprovalRoute,
+    new Date(now.getTime() + 1),
+    priorAllowanceAtApproval.blockHash,
+  );
+  await pool.query(
+    `update funding_step_receipt_observations
+        set evidence = evidence || jsonb_build_object(
+              'allowanceExact', true,
+              'allowanceRaw', '2000000',
+              'allowanceBlock', '200',
+              'allowanceBlockHash', $2::text,
+              'allowanceObservationRevision', $3::text
+            ),
+            updated_at = $4
+      where operation_id = $1::uuid
+        and step_id = $5::uuid
+        and status = 'finalized'
+        and canonical`,
+    [
+      priorApprovalRoute.operationId,
+      priorAllowanceAtApproval.blockHash,
+      priorAllowance.revision,
+      new Date(now.getTime() + 1),
+      priorApprovalRoute.approvalStepId,
+    ],
+  );
+  await tx(pool, async (client) => {
+    const current = await client.query<{
+      progress_stage: "committed" | "source_action";
+      status: "in_progress" | "reconcile_required";
+      version: string | number;
+    }>(
+      `select status, progress_stage, version
+         from funding_operations
+        where id = $1::uuid
+        for update`,
+      [priorApprovalRoute.operationId],
+    );
+    const operation = current.rows[0];
+    assert.ok(operation);
+    let version = Number(operation.version);
+    let status = operation.status;
+    let stage = operation.progress_stage;
+    if (stage === "committed") {
+      const activated = await transitionFundingOperationInTransaction(client, {
+        operationId: priorApprovalRoute.operationId,
+        scope: { kind: "worker" },
+        expectedVersion: version,
+        expectedState: { status, stage },
+        nextState: { status: "in_progress", stage: "source_action" },
+        now: new Date(now.getTime() + 2),
+      });
+      version = activated.version;
+      status = "in_progress";
+      stage = "source_action";
+    }
+    if (status === "in_progress") {
+      const reconciling = await transitionFundingOperationInTransaction(
+        client,
+        {
+          operationId: priorApprovalRoute.operationId,
+          scope: { kind: "worker" },
+          expectedVersion: version,
+          expectedState: { status, stage },
+          nextState: { status: "reconcile_required", stage },
+          now: new Date(now.getTime() + 2),
+        },
+      );
+      version = reconciling.version;
+      status = "reconcile_required";
+    }
+    await transitionFundingOperationInTransaction(client, {
+      operationId: priorApprovalRoute.operationId,
+      scope: { kind: "worker" },
+      expectedVersion: version,
+      expectedState: { status, stage },
+      nextState: { status: "failed", stage: "terminal" },
+      errorCode: "test_terminal_approve_without_deposit",
+      now: new Date(now.getTime() + 2),
+    });
+  });
+  assert.equal(priorApprovalSends, 1);
+
+  const freshRelayRoute = await createRelayFixture("1000000", {
+    base: priorApprovalRoute.base,
+  });
+  const priorProfile = relayEvmFundingProfileSpec(
+    TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
+  );
+  assert.ok(priorProfile);
+  const wrongBlockAdmission = await captureRelayEvmAllowanceAdmission(pool, {
+    owner: priorApprovalRoute.walletAddress,
+    profile: priorProfile,
+    userId: priorApprovalRoute.base.userId,
+    reader: async () => priorAllowance,
+  });
+  assert.equal(
+    wrongBlockAdmission.priorApprovalProof,
+    null,
+    "a historical proof must be anchored to the original approval block",
+  );
+  const changedOwnershipAdmission = await captureRelayEvmAllowanceAdmission(
+    pool,
+    {
+      owner: priorApprovalRoute.walletAddress,
+      profile: priorProfile,
+      userId: priorApprovalRoute.base.userId,
+      reader: async (input) =>
+        input.blockNumber === "200"
+          ? priorAllowanceAtApproval
+          : relayAllowanceEvidence(
+              "2000000",
+              "301",
+              "later-matching-approval",
+              `0x${"51".repeat(32)}`,
+              "finalized",
+              "301",
+            ),
+    },
+  );
+  assert.equal(
+    changedOwnershipAdmission.priorApprovalProof,
+    null,
+    "a later matching approval, even in the same transaction, invalidates the prior proof",
+  );
+  const admission = await captureRelayEvmAllowanceAdmission(pool, {
+    owner: priorApprovalRoute.walletAddress,
+    profile: priorProfile,
+    userId: priorApprovalRoute.base.userId,
+    reader: async (input) =>
+      input.blockNumber === "200" ? priorAllowanceAtApproval : priorAllowance,
+  });
+  const priorApprovalProof = admission.priorApprovalProof;
+  assert.ok(priorApprovalProof);
+  await tx(pool, async (client) => {
+    assert.equal(
+      await lockFundingAuthorizationReservationScope(client, {
+        authorizationId: freshRelayRoute.authorizationId,
+        userId: freshRelayRoute.base.userId,
+      }),
+      true,
+    );
+    assert.equal(
+      await consumeRelayEvmPriorApprovalReservationInTransaction(client, {
+        now: new Date(now.getTime() + 3),
+        owner: freshRelayRoute.walletAddress,
+        profile: priorProfile,
+        proof: priorApprovalProof,
+        userId: freshRelayRoute.base.userId,
+      }),
+      true,
+    );
+    assert.equal(
+      await consumeRelayEvmPriorApprovalReservationInTransaction(client, {
+        now: new Date(now.getTime() + 3),
+        owner: freshRelayRoute.walletAddress,
+        profile: priorProfile,
+        proof: priorApprovalProof,
+        userId: freshRelayRoute.base.userId,
+      }),
+      true,
+      "a terminal pre-deposit reservation may already have been released",
+    );
+    const metadata = await client.query(
+      `update funding_operations
+          set support_metadata = support_metadata || $2::jsonb,
+              updated_at = $3,
+              version = version + 1
+        where id = $1::uuid`,
+      [
+        freshRelayRoute.operationId,
+        JSON.stringify({ relayPriorApprovalProof: priorApprovalProof }),
+        new Date(now.getTime() + 3),
+      ],
+    );
+    assert.equal(metadata.rowCount, 1);
+  });
+  const priorApprovalReservation = await pool.query<{ status: string }>(
+    `select status
+       from telegram_funding_authorization_reservations
+      where funding_operation_id = $1::uuid`,
+    [priorApprovalRoute.operationId],
+  );
+  assert.equal(priorApprovalReservation.rows[0]?.status, "released");
+  const priorDepositAttempts = await pool.query<{ count: string }>(
+    `select count(*)::text as count
+       from funding_operation_step_attempts
+      where step_id = $1::uuid`,
+    [priorApprovalRoute.depositStepId],
+  );
+  assert.equal(priorDepositAttempts.rows[0]?.count, "0");
+  const freshRelayBroadcasts: string[] = [];
+  const freshRelayExecutor = relayExecutor(
+    [priorAllowance, priorAllowance],
+    (claim) => freshRelayBroadcasts.push(claim.operationId),
+  );
+  assert.equal(
+    (
+      await freshRelayExecutor.runBatch({
+        limit: 1,
+        now: new Date(now.getTime() + 4),
+      })
+    ).submitted,
+    1,
+  );
+  assert.deepEqual(freshRelayBroadcasts, [freshRelayRoute.operationId]);
+  assert.equal(
+    (
+      await freshRelayExecutor.runBatch({
+        limit: 1,
+        now: new Date(now.getTime() + 5),
+      })
+    ).submitted,
+    0,
+    "the consumed proof cannot create a second successor approve",
+  );
+
   const relayDepositOwnershipRace = await createRelayFixture();
   const relayDepositOwnershipBroadcasts = { value: 0 };
   const relayDepositOwnedApproval = relayAllowanceEvidence(
@@ -5898,7 +6154,7 @@ try {
   assert.deepEqual(terminalHolderState.rows[0], {
     follower_operation_status: "failed",
     follower_reservation_status: "released",
-    holder_reason: "terminal_without_broadcast",
+    holder_reason: "terminal_without_deposit",
     holder_reservation_status: "released",
   });
 

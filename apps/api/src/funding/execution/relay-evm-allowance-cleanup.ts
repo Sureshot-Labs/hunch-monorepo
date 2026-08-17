@@ -33,6 +33,7 @@ type CleanupCandidate = Readonly<{
   subjectLookupHmac: string;
   subjectLookupKeyVersion: number;
   userId: string;
+  venueId: string;
   venueBindingSnapshot: JsonRecord | null;
   walletAddress: string;
   cleanupContext: "approval_exhausted" | "pre_deposit_failure" | "post_deposit";
@@ -56,6 +57,7 @@ async function loadCleanupCandidate(
     subject_lookup_hmac: string;
     subject_lookup_key_version: number;
     user_id: string;
+    venue_id: string;
     venue_binding_snapshot: JsonRecord | null;
     wallet_address: string;
     approval_succeeded: boolean;
@@ -71,6 +73,7 @@ async function loadCleanupCandidate(
             operation.venue_binding_snapshot,
             operation.original_subject_lookup_hmac as subject_lookup_hmac,
             operation.subject_lookup_key_version,
+            operation.venue_id,
             deposit_step.id as deposit_step_id,
             funding_authorization.id as authorization_id,
             funding_authorization.wallet_address,
@@ -183,6 +186,7 @@ async function loadCleanupCandidate(
     subjectLookupHmac: row.subject_lookup_hmac,
     subjectLookupKeyVersion: row.subject_lookup_key_version,
     userId: row.user_id,
+    venueId: row.venue_id,
     venueBindingSnapshot: row.venue_binding_snapshot,
     walletAddress: row.wallet_address,
     cleanupContext: row.deposit_succeeded
@@ -249,7 +253,9 @@ export async function createRelayAllowanceCleanupOperationInTransaction(
       sourceSnapshot: candidate.sourceSnapshot,
       destinationTargetSnapshot: candidate.destinationSnapshot,
       externalRecipientId: null,
-      venueId: "polymarket",
+      // Cleanup belongs to the route that created the residual allowance. A
+      // Relay profile may settle another venue, so never substitute a venue.
+      venueId: candidate.venueId,
       marketId: null,
       marketContextSnapshot: null,
       venueBindingSnapshot: candidate.venueBindingSnapshot,
