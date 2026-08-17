@@ -18,9 +18,13 @@ import {
   loadActiveTelegramFundingAuthorization,
   telegramFundingAuthorizationFingerprint,
 } from "../funding/execution/telegram-funding-authorization.js";
+import { loadRelayEvmExecutionConfiguration } from "../funding/execution/delegated-funding-config.js";
 import { resolveTelegramFundingProvisionWallet } from "../funding/execution/telegram-funding-managed-wallet.js";
 import { POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID } from "../funding/execution/delegated-funding-profile-ids.js";
-import { RELAY_EVM_FUNDING_PROFILE_SPECS } from "../funding/execution/relay-evm-profile-specs.js";
+import {
+  RELAY_EVM_FUNDING_PROFILE_SPECS,
+  relayEvmFundingProfileSpec,
+} from "../funding/execution/relay-evm-profile-specs.js";
 import { fundingSidecarRuntimeConfig } from "../funding/runtime/sidecar-runtime-config.js";
 import {
   BASE_USDC,
@@ -222,6 +226,47 @@ export function resolveTelegramTradeShortfallCommitAmounts(
     throw new Error("trade funding proposal lacks its exact shortfall");
   }
   return { fundingDestinationAmount, tradeDestinationAmount };
+}
+
+/**
+ * A short-lived market quote is only the user's confirmation boundary. A
+ * delegated Relay action has its own signed provider deadline and must retain
+ * enough time for approve then deposit before we create an operation.
+ */
+export function assertTelegramTradeShortfallDelegatedRelayActionTtl(input: {
+  plan: Readonly<{
+    segments: readonly Readonly<{
+      providerId: string;
+      quoteExpiresAt: string;
+    }>[];
+    steps: readonly Readonly<{ actionExpiresAt?: string | null }>[];
+  }>;
+  profileId: string;
+  now?: Date;
+}): void {
+  if (!relayEvmFundingProfileSpec(input.profileId)) return;
+  const deadlines = [
+    ...input.plan.segments
+      .filter((segment) => segment.providerId === "relay")
+      .map((segment) => Date.parse(segment.quoteExpiresAt)),
+    ...input.plan.steps.flatMap((step) =>
+      typeof step.actionExpiresAt === "string"
+        ? [Date.parse(step.actionExpiresAt)]
+        : [],
+    ),
+  ];
+  const earliestDeadline = Math.min(...deadlines);
+  const now = input.now ?? new Date();
+  const configuration = loadRelayEvmExecutionConfiguration();
+  if (
+    deadlines.length === 0 ||
+    !Number.isFinite(earliestDeadline) ||
+    earliestDeadline - now.getTime() < configuration.minimumSequentialTtlMs
+  ) {
+    throw new Error(
+      "trade funding delegated quote lacks sequential execution TTL",
+    );
+  }
 }
 
 function optionSourceAssets(option: SourceOption): readonly AssetRef[] {
@@ -673,6 +718,10 @@ export class TelegramTradeShortfallFundingService {
       quoteId: quote.quoteId,
       consentToken: quote.consentToken,
       idempotencyKey: `telegram-trade-funding:${input.tradeIntentId}`,
+    });
+    assertTelegramTradeShortfallDelegatedRelayActionTtl({
+      plan: prepared.operation.quote.planSnapshot,
+      profileId: input.proposal.serverExecutionProfileId,
     });
     return tx(this.pool, async (client: PoolClient) => {
       await lockFundingPolicyForTransaction(client);

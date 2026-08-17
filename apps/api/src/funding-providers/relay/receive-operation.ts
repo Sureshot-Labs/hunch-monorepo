@@ -57,10 +57,12 @@ import {
   relayReceiveQuotePlan,
 } from "./receive-routing.js";
 import { RelayWalletQuoteAdapter } from "./wallet-adapter.js";
-import { loadRelayEvmExecutionConfiguration } from "../../funding/execution/delegated-funding-config.js";
+import {
+  loadRelayEvmExecutionConfiguration,
+  relayEvmSequentialQuoteTtlMs,
+} from "../../funding/execution/delegated-funding-config.js";
 import { readRelayEvmAllowance } from "../../funding/execution/relay-evm-delegated-executor-profile.js";
 import { relayEvmFundingProfileSpec } from "../../funding/execution/relay-evm-profile-specs.js";
-import { DELEGATED_PROVIDER_REPLAY_MS } from "../../funding/execution/delegated-funding-recovery-policy.js";
 
 type JsonRecord = Readonly<Record<string, JsonValue>>;
 type RuntimeRoute = FundingRuntimePolicy["routes"][number];
@@ -626,7 +628,7 @@ export function createRelayReceiveReceiptDispositionResolver(
         const minimumSequentialTtlMs =
           relayExecutionConfiguration?.minimumSequentialTtlMs ?? 0;
         const sequentialQuoteTtlMs = relayExecutionConfiguration
-          ? DELEGATED_PROVIDER_REPLAY_MS + minimumSequentialTtlMs + 30_000
+          ? relayEvmSequentialQuoteTtlMs(relayExecutionConfiguration)
           : 60_000;
         const baselineAllowance = delegatedRelay
           ? await readRelayEvmAllowance(delegatedProfile, {

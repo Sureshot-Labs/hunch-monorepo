@@ -133,6 +133,16 @@ export type RelayPlanningQuoteResult =
   | RelayPlanningQuoteRejection
   | null;
 
+/**
+ * Server-owned delegated Relay actions can outlive the short UI quote that
+ * initiated their funding flow. The provider quote still needs a bounded
+ * deadline, but it must retain enough time for its sequential on-chain work.
+ */
+export type RelayServerExecutionQuoteWindow = Readonly<{
+  maximumQuoteTtlMs: number;
+  minimumRemainingTtlMs: number;
+}>;
+
 function isRelayPlanningQuoteRejection(
   value: RelayPlanningQuote | RelayPlanningQuoteRejection,
 ): value is RelayPlanningQuoteRejection {
@@ -160,12 +170,16 @@ export type RelayFirstSourcePlannerDependencies = Readonly<{
       minimumOutput: Money;
       quoteCorrelationId: string;
       deadline: Date;
+      maximumQuoteTtlMs?: number;
       policyRevision: string;
       serverExecutionProfileId?: string;
       signal: AbortSignal;
       timeoutMs: number;
     }>,
   ): Promise<RelayPlanningQuoteResult>;
+  serverExecutionQuoteWindow?(
+    serverExecutionProfileId: string,
+  ): RelayServerExecutionQuoteWindow | null;
   observeRoute(
     input: Readonly<{
       route: FundingRuntimePolicy["routes"][number];
@@ -398,7 +412,11 @@ function quoteDeadline(
   request: FundingDiscoveryRequest,
   policy: FundingRuntimePolicy,
   now: Date,
+  serverExecutionWindow: RelayServerExecutionQuoteWindow | null,
 ): Date {
+  if (serverExecutionWindow) {
+    return new Date(now.getTime() + serverExecutionWindow.maximumQuoteTtlMs);
+  }
   const policyDeadline = new Date(now.getTime() + policy.ttl.quoteMs);
   if (!request.deadline) return policyDeadline;
   const requestedDeadline = new Date(request.deadline);
@@ -530,7 +548,17 @@ export class RelayFirstSourcePlanner {
       (provider) => provider.providerId === "relay",
     );
     if (!relayProvider) return { sources: [], reasonCodes: [] };
-    const deadline = quoteDeadline(input.request, input.policy, input.now);
+    const serverExecutionWindow = input.request.serverExecutionProfileId
+      ? (this.dependencies.serverExecutionQuoteWindow?.(
+          input.request.serverExecutionProfileId,
+        ) ?? null)
+      : null;
+    const deadline = quoteDeadline(
+      input.request,
+      input.policy,
+      input.now,
+      serverExecutionWindow,
+    );
     const limits = effectiveFundingEconomicsLimits(input.policy, {
       maximumFeeUsd: input.request.maxFeeUsd,
       maximumSlippageBps: input.request.maxSlippageBps,
@@ -633,6 +661,12 @@ export class RelayFirstSourcePlanner {
                   source.quoteMinimumOutput ?? input.requiredAmount,
                 quoteCorrelationId,
                 deadline,
+                ...(serverExecutionWindow
+                  ? {
+                      maximumQuoteTtlMs:
+                        serverExecutionWindow.maximumQuoteTtlMs,
+                    }
+                  : {}),
                 policyRevision: input.policyRevision,
                 ...(input.request.serverExecutionProfileId
                   ? {
@@ -672,6 +706,13 @@ export class RelayFirstSourcePlanner {
             deadline,
             now: input.now,
           });
+          if (
+            serverExecutionWindow &&
+            Date.parse(plannedQuote.candidate.expiresAt) - input.now.getTime() <
+              serverExecutionWindow.minimumRemainingTtlMs
+          ) {
+            return { kind: "transient_unknown" };
+          }
           const observation = await this.dependencies.observeRoute({
             route,
             amountBand: routeAmountBand(plannedQuote.sourceEstimatedUsd),
