@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   parseTelegramCustomBuyAmount,
   parseTelegramCustomSellAmount,
+  resolveTelegramCustomSellSides,
   telegramBotTradingTestHooks,
 } from "./services/telegram-bot-trading.js";
 import { parseTelegramBotTradingCallbackData } from "./services/telegram-bot-trading-client.js";
@@ -92,6 +93,14 @@ assert.deepEqual(parseTelegramCustomSellAmount("all", availableRaw), {
   sellPercent: 100,
   sharesRaw: availableRaw,
 });
+assert.deepEqual(
+  resolveTelegramCustomSellSides([
+    { side: "YES", options: [] },
+    { side: "NO", options: [{} as never] },
+  ]),
+  ["NO"],
+  "dust without an executable quote must not expose Custom sell",
+);
 for (const value of [
   "0",
   "0%",
