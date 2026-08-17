@@ -23,6 +23,7 @@ const MIGRATION_0214 = "0214_funding_receive_observation_wake.sql";
 const MIGRATION_0215 = "0215_telegram_buy_delivery_modes.sql";
 const MIGRATION_0216 = "0216_telegram_trade_shortfall_funding.sql";
 const MIGRATION_0217 = "0217_telegram_app_handoff_funding_confirmation.sql";
+const MIGRATION_0221 = "0221_telegram_app_handoff_intents.sql";
 const FUNDING_MIGRATIONS = [
   MIGRATION_0184,
   MIGRATION_0193,
@@ -43,6 +44,7 @@ const FUNDING_MIGRATIONS = [
   MIGRATION_0215,
   MIGRATION_0216,
   MIGRATION_0217,
+  MIGRATION_0221,
 ] as const;
 
 const LEGACY_CLASSIFIER_SQL = `
@@ -102,6 +104,7 @@ export type FundingMigrationPreflightReport = Readonly<{
   delegatedFundingExecutionObjects: boolean;
   delegatedFundingWalletRetentionObjects: boolean;
   telegramFundingOwnerDeliveryObjects: boolean;
+  telegramAppHandoffObjects: boolean;
   relayEvmDelegatedFundingObjects: boolean;
   telegramOpenMutationConstraints: boolean;
   telegramTradeShortfallFundingObjects: boolean;
@@ -1194,11 +1197,7 @@ export async function inspectFundingMigrationPreflight(
       db,
       "public.telegram_trade_intents",
       "telegram_trade_intents_delivery_authority_check",
-      [
-        "delivery_mode = 'bot_submit'",
-        "limitless",
-        "submit_started_at is null",
-      ],
+      ["delivery_mode = 'bot_submit'", "submit_started_at is null"],
     )) &&
     (await constraintDefinitionIncludes(
       db,
@@ -1253,6 +1252,30 @@ export async function inspectFundingMigrationPreflight(
       "telegram_trade_intents_delivery_authority_check",
       ["fundingstate", "fundingproposal", "funding_operation_id is not null"],
     );
+  const hasTelegramAppHandoffObjects =
+    (await relationExists(db, "public.telegram_app_handoffs")) &&
+    (await columnExists(db, "telegram_app_handoffs", "token_hash")) &&
+    (await columnExists(db, "telegram_app_handoffs", "plan_fingerprint")) &&
+    (await columnExists(db, "telegram_app_handoffs", "policy_revision")) &&
+    (await triggerExists(
+      db,
+      "public.telegram_app_handoffs",
+      "telegram_app_handoffs_guard",
+    )) &&
+    (await constraintDefinitionIncludes(
+      db,
+      "public.user_telegram_accounts",
+      "user_telegram_accounts_user_telegram_unique",
+      ["unique (user_id, telegram_user_id)"],
+    )) &&
+    (await functionDefinitionIncludes(db, "guard_telegram_app_handoff_update", [
+      "new.token_hash <> old.token_hash",
+      "old.state = 'issued'",
+      "new.state = 'claimed'",
+      "new.claimed_by_user_id = new.user_id",
+      "old.state = 'claimed'",
+      "new.state = 'committed'",
+    ]));
   const hasTelegramProjectionWatermark =
     hasTelegramFundingSessions &&
     (await columnExists(
@@ -1471,6 +1494,13 @@ export async function inspectFundingMigrationPreflight(
       hasTelegramAppHandoffFundingConfirmation,
       "app-handoff funding confirmation exists before 0217 is recorded",
     ],
+    [
+      MIGRATION_0221,
+      hasTelegramAppHandoffObjects,
+      "0221 is recorded but sealed Telegram app-handoff objects are incomplete",
+      hasTelegramAppHandoffObjects,
+      "sealed Telegram app-handoff objects exist before 0221 is recorded",
+    ],
   ] as const;
   const partialObjects = migrationDriftChecks.flatMap(
     ([migration, complete, incompleteMessage, present, presentMessage]) =>
@@ -1671,6 +1701,7 @@ export async function inspectFundingMigrationPreflight(
     delegatedFundingWalletRetentionObjects:
       hasDelegatedFundingWalletRetentionObjects,
     telegramFundingOwnerDeliveryObjects: hasTelegramFundingOwnerDeliveryObjects,
+    telegramAppHandoffObjects: hasTelegramAppHandoffObjects,
     relayEvmDelegatedFundingObjects: hasRelayEvmDelegatedFundingObjects,
     telegramOpenMutationConstraints: hasTelegramOpenMutationConstraints,
     telegramTradeShortfallFundingObjects:
@@ -1692,6 +1723,7 @@ function formatHuman(report: FundingMigrationPreflightReport): string {
     `0204 delegated funding execution objects: ${report.delegatedFundingExecutionObjects ? "ready" : "missing"}`,
     `0206 delegated funding wallet retention objects: ${report.delegatedFundingWalletRetentionObjects ? "ready" : "missing"}`,
     `0207 Telegram funding owner delivery objects: ${report.telegramFundingOwnerDeliveryObjects ? "ready" : "missing"}`,
+    `0221 sealed Telegram app-handoff objects: ${report.telegramAppHandoffObjects ? "ready" : "missing"}`,
     `0208 Relay EVM delegated funding objects: ${report.relayEvmDelegatedFundingObjects ? "ready" : "missing"}`,
     `Malformed receive review evidence: ${report.malformedReceiveReviewEvidence ?? "n/a"}`,
     `Unresolved address disclosures without edit target: ${report.unresolvedAddressDisclosureWithoutEditTarget ?? "n/a"}`,

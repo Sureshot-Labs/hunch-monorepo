@@ -3,6 +3,7 @@
 import assert from "node:assert/strict";
 
 import { RELAY_PINNED_ASSETS } from "../../../funding-providers/relay/mappings.js";
+import { TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID } from "../../execution/delegated-funding-profile-ids.js";
 
 import {
   FundingPersistenceError,
@@ -3684,6 +3685,141 @@ await test("commit revalidates policy and durable source facts under the locked 
       }),
     /policy changed/i,
   );
+});
+
+await test("Relay server execution separates its provider deadline from the short UI quote", async () => {
+  const relayRoute = {
+    routeId: "relay_server_execution_ttl_12345678",
+    enabled: true,
+    providerId: "relay",
+    capability: "same_network_swap" as const,
+    adapterId: "relay_quote_v2",
+    adapterVersion: 1,
+    sourceLocationPatternId: "wallet_polygon",
+    destinationLocationPatternId: "venue_polymarket",
+    sourceAsset: POLYGON_PUSD,
+    destinationAsset: POLYGON_PUSD,
+    actionValidatorId: "validator_relay",
+    networkExecutorId: "executor_evm",
+    reconcilerId: "reconciler_relay",
+    refundSemanticsId: "refund_relay",
+    destinationObserverId: "observer_relay",
+    experienceMode: "prepare_first" as const,
+    measuredObservationCount: 0,
+    minimumInlineObservationCount: 20,
+    fallbackKind: null,
+    depositAddress: null,
+  };
+  const policy = mutablePolicy();
+  policy.providers = [
+    { providerId: "relay", enabledCapabilities: ["same_network_swap"] },
+  ];
+  policy.routes = [relayRoute];
+  const exactDestination = candidate();
+  const request = intent("trade_shortfall", "1000000", {
+    deadline: new Date(NOW.getTime() + 30_000).toISOString(),
+    serverExecutionProfileId: TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
+  });
+  const placement = decidePlacement({
+    intent: request,
+    target: exactDestination.target,
+    targetVenueId: "polymarket",
+    targetRequirement: { asset: POLYGON_PUSD, raw: "1000000" },
+    availableNow: exactDestination.availableNow,
+    selectionReason: "explicit",
+    policy,
+  });
+  const exactSource = sourceOption("1000000").source;
+  let observedDeadlineIso: string | null = null;
+  let observedMaximumTtlMs: number | undefined;
+  const planner = new RelayFirstSourcePlanner({
+    listEligibleSources: async () => [
+      {
+        componentId: "component_server_execution_ttl_12345678",
+        sourceLocationPatternId: "wallet_polygon",
+        safeLabel: "Polygon wallet pUSD",
+        source: exactSource,
+        quoteInputAmount: { asset: POLYGON_PUSD, raw: "1000000" },
+        maximumSourceRaw: "1000000",
+        maximumSlippageBps: 100,
+        estimatedUsd: "1",
+        transferable: true,
+        riskEligible: true,
+        walletExecutionReady: true,
+        nativeGasReady: true,
+        freshness: "fresh",
+      },
+    ],
+    quoteRelay: async ({
+      deadline,
+      maximumQuoteTtlMs,
+      minimumOutput,
+      sourceAmount,
+    }) => {
+      observedDeadlineIso = deadline.toISOString();
+      observedMaximumTtlMs = maximumQuoteTtlMs;
+      return {
+        sourceAmount,
+        sourceEstimatedUsd: "1",
+        candidate: {
+          providerId: "relay",
+          adapterVersion: 1,
+          capability: "same_network_swap",
+          amountMode: "exact_input",
+          source: exactSource,
+          destination: exactDestination.target,
+          expectedOutput: minimumOutput,
+          minimumOutput,
+          fees: [],
+          eta: { minSeconds: 5, maxSeconds: 15 },
+          expiresAt: deadline.toISOString(),
+          actionKinds: ["evm_transaction"],
+          refundSemantics: "owned_refund",
+          opaqueQuoteRef: "opaque_server_execution_ttl_12345678",
+        },
+        feeUsd: [],
+        minimumDestinationEstimatedUsd: "1",
+        executionPlan: {
+          kind: "wallet_route",
+          segments: [
+            {
+              segmentId: "segment_server_execution_ttl_12345678",
+              providerId: "relay",
+              adapterId: "relay_quote_v2",
+              adapterVersion: 1,
+              source: exactSource,
+              destination: exactDestination.target,
+              amountMode: "exact_input",
+            },
+          ],
+        },
+        commitPlan: commitPlan(sourceAmount.raw),
+      };
+    },
+    serverExecutionQuoteWindow: () => ({
+      maximumQuoteTtlMs: 375_000,
+      minimumRemainingTtlMs: 45_000,
+    }),
+    observeRoute: async () => null,
+  });
+  const sources = await planner.list({
+    accountId: USER_ID,
+    request,
+    marketContext: null,
+    destination: toResolvedRouteDestination(exactDestination),
+    placement,
+    requiredAmount: { asset: POLYGON_PUSD, raw: "1000000" },
+    policy,
+    policyRevision: "policy_server_execution_ttl_12345678",
+    now: NOW,
+  });
+  assert.equal(observedMaximumTtlMs, 375_000);
+  assert.equal(
+    observedDeadlineIso,
+    new Date(NOW.getTime() + 375_000).toISOString(),
+    "a short market quote must not truncate the server-owned Relay action",
+  );
+  assert.equal(sources.length, 1);
 });
 
 console.log("[funding-planner-tests] complete");

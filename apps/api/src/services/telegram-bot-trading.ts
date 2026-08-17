@@ -19,6 +19,7 @@ import {
 import {
   resolveSignalBotTradingPolicyFromDb,
   resolveSignalBotTradingPolicyStateFromDb,
+  type TelegramMiniAppHandoffMode,
   type SignalBotPolicy,
 } from "./signal-bot-trading-policy.js";
 import {
@@ -76,6 +77,7 @@ import type {
   TelegramTradeShortfallInspection,
   TelegramTradeShortfallProposal,
 } from "./telegram-trade-shortfall-funding.js";
+import { TelegramTradeShortfallCommitError } from "./telegram-trade-shortfall-funding.js";
 
 import { isDefinitiveSubmitRejection } from "./telegram-bot-trading-submit-error.js";
 import {
@@ -153,16 +155,22 @@ export type TelegramBuyDeliveryMode =
 export function resolveTelegramBuyDeliveryMode(
   input: Readonly<{
     commonBuySurfaceReady: boolean;
+    miniAppHandoffMode: TelegramMiniAppHandoffMode;
     telegramMiniAppEnabled: boolean;
     venue: TelegramBotTradingVenue;
     venueAllowedForBotSubmit: boolean;
   }>,
 ): TelegramBuyDeliveryMode {
   if (!input.commonBuySurfaceReady) return "direct_deposit_only";
+  const canHandoff =
+    input.telegramMiniAppEnabled && input.miniAppHandoffMode !== "off";
+  if (canHandoff && input.miniAppHandoffMode === "always") {
+    return "app_handoff";
+  }
   if (input.venue === "polymarket" && input.venueAllowedForBotSubmit) {
     return "bot_submit";
   }
-  if (input.venue === "limitless" && input.telegramMiniAppEnabled) {
+  if (canHandoff && input.miniAppHandoffMode === "fallback") {
     return "app_handoff";
   }
   return "direct_deposit_only";
@@ -2819,6 +2827,7 @@ export function buildUnlinkedTelegramBotTradingStatus(input: {
           buyContinuationEnabled: false,
           customTradeInputEnabled: false,
           fundingReceiveEnabled: false,
+          miniAppHandoffMode: "off",
           tradingEnabled: false,
           tradingActions: ["buy"],
           tradingVenues: ["polymarket"],
@@ -4895,6 +4904,7 @@ export async function buildTelegramBotTradingMarketMessage(input: {
     Boolean(input.trading);
   const buyDeliveryMode = resolveTelegramBuyDeliveryMode({
     commonBuySurfaceReady,
+    miniAppHandoffMode: policy.miniAppHandoffMode,
     telegramMiniAppEnabled: input.telegramMiniAppEnabled === true,
     venue: market.venue,
     venueAllowedForBotSubmit: authorizationVenueAllowed,
@@ -5452,6 +5462,8 @@ export async function buildTelegramBotTradingMarketMessage(input: {
     keyboard.push([
       { callback_data: input.context.returnCallbackData, text: "⬅️ Back" },
     ]);
+  } else {
+    keyboard.push([{ callback_data: "hm:v1:home", text: "🏠 Home" }]);
   }
 
   const marketIdentityStartIndex = 2;
@@ -6005,6 +6017,36 @@ function buildTelegramTradeAuthorityBinding(
       walletChain: authorization.wallet_chain,
     }),
     walletChain: authorization.wallet_chain,
+  };
+}
+
+/**
+ * Returns the policy and EVM authority scope that a sealed Mini App handoff
+ * must still match when its web consumer claims it.  It deliberately does not
+ * require direct bot execution for a venue: the handoff is user-executed.
+ */
+export async function resolveTelegramAppHandoffCurrentScope(input: {
+  db: DbQuery;
+  telegramUserId: string;
+}): Promise<{ authorityFingerprint: string; policyRevision: string } | null> {
+  const [policyState, authorization] = await Promise.all([
+    resolveSignalBotTradingPolicyStateFromDb(input.db),
+    loadEnabledEvmAuthorization(input.db, input.telegramUserId),
+  ]);
+  const authority = authorization
+    ? buildTelegramTradeAuthorityBinding(authorization)
+    : null;
+  if (
+    !policyState.policy.buyContinuationEnabled ||
+    !policyState.policy.fundingReceiveEnabled ||
+    policyState.policy.miniAppHandoffMode === "off" ||
+    !authority
+  ) {
+    return null;
+  }
+  return {
+    authorityFingerprint: telegramBotTradeAuthorityFingerprint(authority),
+    policyRevision: policyState.policyRevision,
   };
 }
 
@@ -8283,9 +8325,7 @@ async function previewTelegramTradeIntent(input: {
   } catch (error) {
     const normalized = input.trading.normalizeError(input.intent.venue, error);
     const failed = await updateIntentStatus({
-      allowedStatuses: input.fundingReturnResume
-        ? ["draft"]
-        : ["draft", "previewed"],
+      allowedStatuses: ["draft", "previewed"],
       db: input.db,
       errorCode: normalized.code,
       errorMessage: normalized.message,
@@ -8377,7 +8417,7 @@ async function previewTelegramTradeIntent(input: {
     });
     if (fundingPreview.state !== "ready") {
       if (input.fundingReturnResume) {
-        await updateIntentStatus({
+        const previewRecorded = await updateIntentStatus({
           allowedStatuses: ["draft", "previewed"],
           db: input.db,
           errorCode: "funding_continuation_shortfall_changed",
@@ -8390,18 +8430,19 @@ async function previewTelegramTradeIntent(input: {
             previewQuote: quote,
             stage: "funding_continuation_preview",
           },
-          status: "failed",
+          status: "previewed",
         });
+        if (!previewRecorded) return;
         await input.sendMessage({
           chat_id: input.chatId,
           parse_mode: "MarkdownV2",
           text: formatTelegramTradeLifecycleMessageMarkdownV2({
-            heading: "More funding is required.",
+            heading: "Fresh funding amount needed.",
             lines: [
               `The fresh quote now needs ${formatUsd(maxSpendUsd)}, but only ${formatUsd(
                 fundingPreview.availableUsd,
               )} is executable.`,
-              "Nothing was submitted. Refresh the existing funding session after adding funds.",
+              "Nothing was submitted. Add the difference, then check funding again.",
             ],
             marketTitle: input.intent.market_title,
             venue: input.intent.venue,
@@ -8743,9 +8784,7 @@ async function previewTelegramTradeIntent(input: {
     }
   }
   const previewRecorded = await updateIntentStatus({
-    allowedStatuses: input.fundingReturnResume
-      ? ["draft"]
-      : ["draft", "previewed"],
+    allowedStatuses: ["draft", "previewed"],
     db: input.db,
     intentId: input.intent.id,
     quoteSnapshot: buildTelegramTradeQuotePreview(quote),
@@ -10484,6 +10523,32 @@ export async function handleTelegramBotTradingCallback(
       });
       return true;
     } catch (error) {
+      const safetyStop =
+        error instanceof TelegramTradeShortfallCommitError ? error : null;
+      try {
+        await updateIntentStatus({
+          allowedStatuses: ["confirming"],
+          db: input.db,
+          errorCode: safetyStop?.code ?? "funding_quote_rejected_pre_submit",
+          errorMessage: safetyStop
+            ? safetyStop.message
+            : "The confirmed funding quote could not be committed before any external action.",
+          intentId: intent.id,
+          status: "cancelled",
+        });
+      } catch (statusError) {
+        input.log?.warn?.(
+          {
+            error:
+              statusError instanceof Error
+                ? statusError.message
+                : "unknown_error",
+            event: "telegram_trade_shortfall_commit_terminalization_failed",
+            intentId: intent.id,
+          },
+          "Telegram trade shortfall rejection could not terminalize the intent",
+        );
+      }
       input.log?.warn?.(
         {
           error: error instanceof Error ? error.message : "unknown_error",
@@ -10495,7 +10560,57 @@ export async function handleTelegramBotTradingCallback(
       await input.answerCallbackQuery({
         callbackQueryId: input.callbackQuery.id,
         showAlert: true,
-        text: "⚠️ Funding quote changed or is unavailable. Nothing was moved; reopen Review.",
+        text:
+          safetyStop?.code === "relay_allowance_unverified"
+            ? "⚠️ Existing Relay allowance could not be verified. Nothing was moved."
+            : safetyStop?.code === "allowance_lane_unavailable"
+              ? "⏳ Another funding action is still being checked. Nothing was moved."
+              : "⚠️ Funding quote changed or is unavailable. Nothing was moved; reopen Review.",
+      });
+      await input.sendMessage({
+        chat_id: chatId,
+        parse_mode: "MarkdownV2",
+        text: formatTelegramTradeLifecycleMessageMarkdownV2({
+          heading:
+            safetyStop?.code === "relay_allowance_unverified"
+              ? "Automatic Relay route unavailable."
+              : safetyStop?.code === "allowance_lane_unavailable"
+                ? "Funding preparation is busy."
+                : "Funding quote is no longer current.",
+          lines:
+            safetyStop?.code === "relay_allowance_unverified"
+              ? [
+                  "An existing Relay allowance could not be proved to belong to a safe Hunch route.",
+                  "Nothing was moved or submitted. You can use Deposit or open a fresh Review.",
+                ]
+              : safetyStop?.code === "allowance_lane_unavailable"
+                ? [
+                    "Another funding action is holding this wallet lane while it is checked.",
+                    "Nothing was moved or submitted. Try again shortly.",
+                  ]
+                : [
+                    "Nothing was moved or submitted.",
+                    "Open the market again to receive a fresh Review.",
+                  ],
+          marketTitle: intent.market_title,
+          venue: intent.venue,
+        }),
+        reply_markup: {
+          inline_keyboard: [
+            [
+              {
+                callback_data: `hm:v1:deposit:${intent.venue}`,
+                text: "Deposit",
+              },
+            ],
+            [
+              {
+                callback_data: "hm:v1:home",
+                text: "🏠 Home",
+              },
+            ],
+          ],
+        },
       });
       return true;
     }

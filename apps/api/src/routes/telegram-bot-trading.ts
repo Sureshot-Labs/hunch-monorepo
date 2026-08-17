@@ -370,6 +370,12 @@ const internalTradeInputBeginBodySchema =
     action: z.enum(["buy", "sell"]),
   });
 
+const internalTradeInputCancelBodySchema =
+  internalTradeInputMessageIdentitySchema.extend({
+    appBaseUrl: z.string().trim().url(),
+    telegramMiniAppEnabled: z.boolean().optional(),
+  });
+
 const internalTradeInputCompleteBodySchema =
   internalTradeInputMessageIdentitySchema.extend({
     appBaseUrl: z.string().trim().url(),
@@ -974,7 +980,8 @@ async function registerTelegramBotTradingRoutes(
             and receive_session.status in (
               'open',
               'processing',
-              'review_required'
+              'review_required',
+              'recovery_required'
             )
             and receive_session.expires_at > now()
           order by funding_context.created_at desc, funding_context.id desc
@@ -1707,11 +1714,77 @@ async function registerTelegramBotTradingRoutes(
             escapeTelegramMarkdownV2(instruction),
             "",
             escapeTelegramMarkdownV2(
-              "Send /cancel or use another menu action to stop this input.",
+              "Use Cancel below or another menu action to stop this input.",
             ),
           ]),
+          reply_markup: {
+            inline_keyboard: [
+              [
+                {
+                  callback_data: `hbt:cancel_input:${context.id}`,
+                  text: "✖️ Cancel input",
+                },
+              ],
+            ],
+          },
         },
       });
+    },
+  );
+
+  api.post(
+    "/internal/telegram-bot/trading/input-contexts/:id/cancel",
+    {
+      preHandler: [requireInternal, requirePrivateTelegramChat],
+      schema: {
+        body: internalTradeInputCancelBodySchema,
+        params: internalTradeInputParamsSchema,
+      },
+    },
+    async (request, reply) => {
+      const chatId = String(request.body.chatId);
+      const telegramUserId = String(request.body.telegramUserId);
+      const redis = await getRedis().catch(() => null);
+      if (!redis) {
+        return reply.code(503).send({ error: "input_context_unavailable" });
+      }
+      const [context, link] = await Promise.all([
+        readTelegramBotTradeInputContext({ id: request.params.id, redis }),
+        resolveActiveTelegramAccountLink({ db, telegramUserId }),
+      ]);
+      if (!context) {
+        return reply.code(410).send({ error: "input_context_expired" });
+      }
+      if (
+        !link ||
+        context.telegramUserId !== telegramUserId ||
+        context.chatId !== chatId ||
+        !telegramBotTradeInputMessageScopeMatches(
+          context.messageScope,
+          request.body.telegramMessageId,
+        ) ||
+        !(await isTelegramBotTradeInputContextAuthorityCurrent({
+          context,
+          db,
+          telegramUserId,
+        }))
+      ) {
+        return reply.code(403).send({ error: "input_context_mismatch" });
+      }
+      return reply.send(
+        await buildTelegramBotTradingMarketMessage({
+          appBaseUrl: request.body.appBaseUrl,
+          chatId,
+          context: { focusSide: context.side, origin: "direct" },
+          db,
+          marketRef: context.marketId,
+          telegramMessageId: request.body.telegramMessageId,
+          telegramMiniAppEnabled: request.body.telegramMiniAppEnabled,
+          telegramUserId,
+          trading: createTradingForRequest(request),
+          writeTradeInputContext,
+        }),
+      );
     },
   );
 
@@ -2192,6 +2265,7 @@ export const telegramBotTradingRouteTestHooks = {
   internalFundingSessionBodySchema,
   internalMarketCardBodySchema,
   internalTradeInputBeginBodySchema,
+  internalTradeInputCancelBodySchema,
   internalTradeInputCompleteBodySchema,
   internalTradeInputParamsSchema,
 };

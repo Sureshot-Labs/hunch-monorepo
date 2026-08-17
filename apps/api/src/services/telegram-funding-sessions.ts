@@ -960,7 +960,12 @@ async function lockActiveTelegramFundingOpenContext(
                '{location,details,controllerWalletId}' = $6
         )
         and ($7::text is null or receive.venue_binding_option_id = $7)
-        and receive.status in ('open', 'processing', 'review_required')
+        and receive.status in (
+          'open',
+          'processing',
+          'review_required',
+          'recovery_required'
+        )
         and receive.expires_at > $4
       order by context.created_at desc, context.id desc
       for update of context, receive
@@ -1491,10 +1496,16 @@ export async function appendTelegramFundingConsent(
             from request_clock
             where receive_session.id = $1
               and receive_session.user_id = $2
-              and receive_session.status in (
-                    'open', 'processing', 'review_required'
-                  )
-              and receive_session.expires_at > request_clock.requested_at
+              and (
+                (
+                  receive_session.status in ('open', 'processing', 'review_required')
+                  and receive_session.expires_at > request_clock.requested_at
+                )
+                or (
+                  receive_session.status = 'recovery_required'
+                  and receive_session.observe_until > request_clock.requested_at
+                )
+              )
           `,
           [replayContext.receive_session_id, input.userId],
         );
@@ -1760,10 +1771,16 @@ export async function appendTelegramFundingConsent(
         from request_clock
         where receive_session.id = $1
           and receive_session.user_id = $2
-          and receive_session.status in (
-                'open', 'processing', 'review_required'
-              )
-          and receive_session.expires_at > request_clock.requested_at
+          and (
+            (
+              receive_session.status in ('open', 'processing', 'review_required')
+              and receive_session.expires_at > request_clock.requested_at
+            )
+            or (
+              receive_session.status = 'recovery_required'
+              and receive_session.observe_until > request_clock.requested_at
+            )
+          )
       `,
       [contextRow.receive_session_id, input.userId],
     );

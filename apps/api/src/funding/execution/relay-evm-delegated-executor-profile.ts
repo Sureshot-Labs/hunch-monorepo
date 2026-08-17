@@ -50,6 +50,10 @@ import { resolveTelegramRelayEvmCapability } from "./delegated-funding-capabilit
 import { validateRelayDelegatedEvmAction } from "./relay-evm-delegated-profile.js";
 import { createRelayAllowanceCleanupOperationInTransaction } from "./relay-evm-allowance-cleanup.js";
 import {
+  parseRelayEvmPriorApprovalProof,
+  verifyRelayEvmPriorApprovalInTransaction,
+} from "./relay-evm-prior-approval.js";
+import {
   classifyRelayCleanupAllowance,
   parseRelayEvmAllowanceObservation,
   type RelayEvmAllowanceObservation,
@@ -104,6 +108,7 @@ type RelayClaimRow = TelegramFundingAuthorizationRow &
     policy_revision: string;
     policy_version: string | number;
     receipt_raw: string;
+    relay_prior_approval_proof: JsonRecord | null;
     step_id: string;
   }>;
 
@@ -853,6 +858,7 @@ function claimFromRow(
     policyId: row.policy_id,
     privyWalletId: row.privy_wallet_id,
     profileId: profile.profileId,
+    relayPriorApprovalProof: row.relay_prior_approval_proof,
     receiptRaw: row.receipt_raw,
     signerFingerprint: row.signer_fingerprint,
     signerId: row.signer_id,
@@ -870,11 +876,20 @@ function claimFromRow(
   };
 }
 
-async function releaseRelayForeignAllowanceLaneInTransaction(
+/**
+ * A route which never crossed a deposit broadcast boundary has not moved
+ * value. An attempt may already exist because it is claimed before the
+ * read-only pre-broadcast validation; it remains safe only while no attempt
+ * can have reached a provider or chain. Retire its lane atomically so the
+ * next route can make a new, exact approve.
+ */
+async function retireRelayPreDepositRouteInTransaction(
   client: PoolClient,
   input: Readonly<{
+    errorCode: string;
     operationId: string;
     observed: RelayEvmAllowanceObservation;
+    reason: string;
     now: Date;
   }>,
 ): Promise<boolean> {
@@ -914,6 +929,20 @@ async function releaseRelayForeignAllowanceLaneInTransaction(
              and deposit_receipt.canonical
              and deposit_receipt.action_match
         )
+        and not exists (
+          select 1
+            from funding_operation_step_attempts deposit_attempt
+           where deposit_attempt.step_id = deposit_step.id
+             and deposit_attempt.broadcast_may_have_occurred
+             and not exists (
+               select 1
+                 from funding_step_receipt_observations deposit_receipt
+                where deposit_receipt.attempt_id = deposit_attempt.id
+                  and deposit_receipt.status = 'failed'
+                  and deposit_receipt.canonical
+                  and deposit_receipt.action_match
+             )
+        )
       for update of operation_row, reservation_row, deposit_step`,
     [input.operationId],
   );
@@ -940,7 +969,7 @@ async function releaseRelayForeignAllowanceLaneInTransaction(
               'allowanceBlockHash', $6::text,
               'allowanceObservationRevision', $7::text,
               'lastAllowanceMutationTransactionHash', $8::text,
-              'reason', 'foreign_allowance_ownership'
+              'reason', $9::text
             ),
             updated_at = $2
       where id = $1::uuid and status = 'reserved'`,
@@ -953,10 +982,11 @@ async function releaseRelayForeignAllowanceLaneInTransaction(
       input.observed.blockHash,
       input.observed.revision,
       input.observed.lastMutationTransactionHash,
+      input.reason,
     ],
   );
   if (released.rowCount !== 1) {
-    throw new Error("Relay foreign allowance lane release was not applied");
+    throw new Error("Relay pre-deposit lane release was not applied");
   }
   let operationVersion = Number(row.operation_version);
   let operationStatus = row.operation_status;
@@ -981,7 +1011,7 @@ async function releaseRelayForeignAllowanceLaneInTransaction(
       expectedVersion: operationVersion,
       expectedState: { status: operationStatus, stage: operationStage },
       nextState: { status: "reconcile_required", stage: "source_action" },
-      errorCode: "relay_allowance_ownership_changed",
+      errorCode: input.errorCode,
       now: input.now,
     });
     operationVersion = reconciling.version;
@@ -992,7 +1022,7 @@ async function releaseRelayForeignAllowanceLaneInTransaction(
     expectedVersion: operationVersion,
     expectedState: { status: "reconcile_required", stage: "source_action" },
     nextState: { status: "failed", stage: "terminal" },
-    errorCode: "relay_allowance_ownership_changed",
+    errorCode: input.errorCode,
     supportMetadataPatch: {
       observedAllowanceBlock: input.observed.blockNumber,
       observedAllowanceBlockHash: input.observed.blockHash,
@@ -1357,10 +1387,12 @@ async function reconcileRelayPostconditions(
             now,
           ],
         );
-        await releaseRelayForeignAllowanceLaneInTransaction(client, {
+        await retireRelayPreDepositRouteInTransaction(client, {
+          errorCode: "relay_allowance_ownership_changed",
           operationId: approvalRow.operation_id,
           observed,
           now,
+          reason: "foreign_allowance_ownership",
         });
       }
       await client.query(
@@ -1613,10 +1645,15 @@ async function reconcileRelayPostconditions(
 
   const strandedAllowance = await client.query<{
     approval_receipt_id: string;
+    deposit_attempt_count: string | number;
     operation_id: string;
     wallet_address: string;
   }>(
     `select approval_receipt.id as approval_receipt_id,
+            (select count(*)
+               from funding_operation_step_attempts deposit_attempt
+              where deposit_attempt.step_id = deposit_step.id
+            ) as deposit_attempt_count,
             operation.id as operation_id,
             funding_authorization.wallet_address
        from funding_operations operation
@@ -1688,10 +1725,22 @@ async function reconcileRelayPostconditions(
   const strandedAllowanceRow = strandedAllowance.rows[0];
   if (strandedAllowanceRow && maintenance?.kind === "stranded") {
     const observed = maintenance.allowance;
-    if (
-      BigInt(observed.raw) > 0n &&
+    if (Number(strandedAllowanceRow.deposit_attempt_count) === 0) {
+      // The approve is canonical but deposit was never claimed. It is safe to
+      // retire this route; the next route always sends its own exact approve.
+      await retireRelayPreDepositRouteInTransaction(client, {
+        errorCode: "relay_deposit_expired_before_broadcast",
+        operationId: strandedAllowanceRow.operation_id,
+        observed,
+        now,
+        reason: "deposit_not_started",
+      });
+    } else if (
+      observed.raw !== "0" &&
       relayAllowanceMutationIsOwned(maintenance)
     ) {
+      // A deposit reached the provider and failed canonically. Keep the
+      // existing bounded cleanup/reorg fence for its residual allowance.
       await createRelayAllowanceCleanupOperationInTransaction(client, {
         profile,
         parentOperationId: strandedAllowanceRow.operation_id,
@@ -1701,9 +1750,7 @@ async function reconcileRelayPostconditions(
         allowanceMutationBaselineBlock: maintenance.mutationBaselineBlock ?? "",
         now,
       });
-    } else if (BigInt(observed.raw) > 0n) {
-      // A cleanup may revoke only a residual whose last mutation is one of the
-      // canonical Hunch transactions that created or consumed the allowance.
+    } else if (observed.raw !== "0") {
       await client.query(
         `update funding_step_receipt_observations
             set evidence = evidence || jsonb_build_object(
@@ -1718,10 +1765,12 @@ async function reconcileRelayPostconditions(
           now,
         ],
       );
-      await releaseRelayForeignAllowanceLaneInTransaction(client, {
+      await retireRelayPreDepositRouteInTransaction(client, {
+        errorCode: "relay_allowance_ownership_changed",
         operationId: strandedAllowanceRow.operation_id,
         observed,
         now,
+        reason: "foreign_allowance_ownership",
       });
     }
   }
@@ -2262,6 +2311,7 @@ async function claimRelayCleanup(
             cleanup_step.action_fingerprint,
             cleanup_step.action_validation_result,
             null::text as allowance_mutation_baseline_block,
+            null::jsonb as relay_prior_approval_proof,
             cleanup_step.executor_id,
             cleanup_step.normalized_action,
             cleanup_step.payer_requirement,
@@ -2366,73 +2416,6 @@ async function claimRelayCleanup(
       authorization.policyId === input.configuration.policyId &&
       authorization.policyFingerprint === input.configuration.policyFingerprint,
   });
-}
-
-/**
- * A cancelled terminal route that never created an attempt has no allowance,
- * provider reference, or external side effect to reconcile. Its rolling-cap
- * reservation must not remain the head of the lane and strand later routes.
- */
-async function releaseTerminalFundingReservationWithoutAttempt(
-  client: PoolClient,
-  input: Readonly<{ now: Date }>,
-): Promise<void> {
-  const { rows } = await client.query<{
-    authorization_id: string;
-    operation_id: string;
-    reservation_id: string;
-    user_id: string;
-  }>(
-    `select reservation.id as reservation_id,
-            reservation.funding_operation_id as operation_id,
-            funding_authorization.id::text as authorization_id,
-            operation.user_id
-       from telegram_funding_authorization_reservations reservation
-       join telegram_funding_authorizations funding_authorization
-         on funding_authorization.id = reservation.authorization_id
-       join funding_operations operation
-         on operation.id = reservation.funding_operation_id
-       where reservation.status = 'reserved'
-         and operation.status in ('cancelled', 'failed')
-         and operation.progress_stage = 'terminal'
-         and not exists (
-           select 1
-             from funding_operation_step_attempts attempt
-             join funding_operation_steps operation_step
-               on operation_step.id = attempt.step_id
-            where operation_step.operation_id = operation.id
-         )
-       order by reservation.reserved_at, reservation.id
-       for update of reservation, funding_authorization, operation
-                     skip locked
-       limit 1`,
-  );
-  const row = rows[0];
-  if (!row) return;
-  if (
-    !(await tryLockFundingAuthorizationReservationScope(client, {
-      authorizationId: row.authorization_id,
-      userId: row.user_id,
-    }))
-  ) {
-    return;
-  }
-  const released = await client.query(
-    `update telegram_funding_authorization_reservations
-        set status = 'released',
-            resolved_at = $2,
-            resolution_evidence = resolution_evidence ||
-              jsonb_build_object(
-                'operationId', $3::text,
-                'reason', 'terminal_without_broadcast'
-              ),
-            updated_at = $2
-      where id = $1::uuid and status = 'reserved'`,
-    [row.reservation_id, input.now, row.operation_id],
-  );
-  if (released.rowCount !== 1) {
-    throw new Error("terminal funding reservation release was lost");
-  }
 }
 
 /**
@@ -2588,6 +2571,81 @@ async function expireRelayActionBeforeBroadcast(
   };
 }
 
+/**
+ * A terminal route with no deposit attempt has no possible source debit.
+ * Its previous approve is retained as evidence, but its lane/cap reservation
+ * must not block the next independently approved route.
+ */
+async function releaseTerminalRelayPreDepositReservation(
+  client: PoolClient,
+  input: Readonly<{ now: Date; profile: RelayEvmFundingProfileSpec }>,
+): Promise<void> {
+  const { rows } = await client.query<{
+    authorization_id: string;
+    operation_id: string;
+    reservation_id: string;
+    user_id: string;
+  }>(
+    `select reservation.id::text as reservation_id,
+            reservation.funding_operation_id::text as operation_id,
+            funding_authorization.id::text as authorization_id,
+            operation_row.user_id::text as user_id
+       from telegram_funding_authorization_reservations reservation
+       join telegram_funding_authorizations funding_authorization
+         on funding_authorization.id = reservation.authorization_id
+       join funding_operations operation_row
+         on operation_row.id = reservation.funding_operation_id
+       join funding_operation_steps deposit_step
+         on deposit_step.operation_id = operation_row.id
+        and deposit_step.action_validation_result ->> 'relayStepKind' =
+              'deposit'
+      where reservation.status = 'reserved'
+        and funding_authorization.profile_id = $1
+        and operation_row.status in ('completed', 'refunded', 'failed', 'cancelled')
+        and operation_row.progress_stage = 'terminal'
+        and not exists (
+          select 1
+            from funding_operation_step_attempts deposit_attempt
+           where deposit_attempt.step_id = deposit_step.id
+        )
+        and not exists (
+          select 1
+            from funding_step_receipt_observations deposit_receipt
+           where deposit_receipt.step_id = deposit_step.id
+        )
+      order by reservation.reserved_at, reservation.id
+      for update of reservation, funding_authorization, operation_row, deposit_step
+                    skip locked
+      limit 1`,
+    [input.profile.profileId],
+  );
+  const row = rows[0];
+  if (
+    !row ||
+    !(await tryLockFundingAuthorizationReservationScope(client, {
+      authorizationId: row.authorization_id,
+      userId: row.user_id,
+    }))
+  ) {
+    return;
+  }
+  const released = await client.query(
+    `update telegram_funding_authorization_reservations
+        set status = 'released',
+            resolved_at = $2,
+            resolution_evidence = resolution_evidence || jsonb_build_object(
+              'operationId', $3::text,
+              'reason', 'terminal_without_deposit'
+            ),
+            updated_at = $2
+      where id = $1::uuid and status = 'reserved'`,
+    [row.reservation_id, input.now, row.operation_id],
+  );
+  if (released.rowCount !== 1) {
+    throw new Error("terminal Relay pre-deposit reservation release was lost");
+  }
+}
+
 async function claimRelay(
   client: PoolClient,
   input: Readonly<{
@@ -2598,8 +2656,9 @@ async function claimRelay(
     profile: RelayEvmFundingProfileSpec;
   }>,
 ): Promise<DelegatedFundingProfileClaim | null> {
-  await releaseTerminalFundingReservationWithoutAttempt(client, {
+  await releaseTerminalRelayPreDepositReservation(client, {
     now: input.now,
+    profile: input.profile,
   });
   const controlPlaneAllowed = relayControlPlaneAllowed(
     input.configuration,
@@ -2664,6 +2723,8 @@ async function claimRelay(
               )
               else null
             end as allowance_mutation_baseline_block,
+            operation.support_metadata -> 'relayPriorApprovalProof'
+              as relay_prior_approval_proof,
             step.executor_id,
             step.normalized_action,
             step.payer_requirement,
@@ -2883,6 +2944,8 @@ async function recoverRelay(
               )
               else null
             end as allowance_mutation_baseline_block,
+            operation.support_metadata -> 'relayPriorApprovalProof'
+              as relay_prior_approval_proof,
             step.executor_id,
             step.normalized_action,
             step.payer_requirement,
@@ -2979,6 +3042,7 @@ async function recoverRelay(
               cleanup_step.action_fingerprint,
               cleanup_step.action_validation_result,
               null::text as allowance_mutation_baseline_block,
+              null::jsonb as relay_prior_approval_proof,
               cleanup_step.executor_id,
               cleanup_step.normalized_action,
               cleanup_step.payer_requirement,
@@ -3387,6 +3451,50 @@ async function preBroadcastRelay(
       diagnosticCode: "allowance_observation_missing" as const,
     };
   }
+  const priorApprovalProof =
+    validated.kind === "approve"
+      ? parseRelayEvmPriorApprovalProof(input.claim.relayPriorApprovalProof)
+      : null;
+  if (
+    validated.kind === "approve" &&
+    input.claim.relayPriorApprovalProof != null &&
+    !priorApprovalProof
+  ) {
+    return {
+      kind: "hard_invalid" as const,
+      reasonCode: "delegated_action_invalid" as const,
+      diagnosticCode: "prior_approval_proof_invalid" as const,
+    };
+  }
+  if (
+    priorApprovalProof &&
+    !(await verifyRelayEvmPriorApprovalInTransaction(client, {
+      owner: input.claim.walletAddress,
+      profile: input.profile,
+      proof: priorApprovalProof,
+      userId: input.claim.userId,
+    }))
+  ) {
+    return {
+      kind: "hard_invalid" as const,
+      reasonCode: "delegated_action_invalid" as const,
+      diagnosticCode: "prior_approval_proof_invalid" as const,
+    };
+  }
+  if (
+    priorApprovalProof &&
+    (observed.finality !== "finalized" ||
+      observed.raw !== priorApprovalProof.allowanceRaw ||
+      observed.ownershipRevision !== priorApprovalProof.ownershipRevision ||
+      observed.lastMutationTransactionHash !==
+        priorApprovalProof.approvalTransactionHash)
+  ) {
+    return {
+      kind: "hard_invalid" as const,
+      reasonCode: "delegated_action_invalid" as const,
+      diagnosticCode: "allowance_owner_tx_mismatch" as const,
+    };
+  }
   if (
     validated.kind === "deposit" &&
     (!input.claim.allowanceMutationBaselineBlock ||
@@ -3441,7 +3549,9 @@ async function preBroadcastRelay(
     return { kind: "already_satisfied" as const };
   }
   const expected =
-    validated.kind === "approve" ? 0n : BigInt(input.claim.receiptRaw);
+    validated.kind === "approve"
+      ? BigInt(priorApprovalProof?.allowanceRaw ?? "0")
+      : BigInt(input.claim.receiptRaw);
   if (validated.kind !== "cleanup" && observedAllowance !== expected) {
     return {
       kind: "hard_invalid" as const,
@@ -4149,10 +4259,12 @@ async function finalizeRelayHardInvalidInTransaction(
         input.now,
       ],
     );
-    await releaseRelayForeignAllowanceLaneInTransaction(client, {
+    await retireRelayPreDepositRouteInTransaction(client, {
+      errorCode: "relay_allowance_ownership_changed",
       operationId: input.claim.operationId,
       observed,
       now: input.now,
+      reason: "foreign_allowance_ownership",
     });
     return;
   }
@@ -4288,21 +4400,31 @@ export function createRelayEvmDelegatedFundingProfile(
       recoverRelay(client, { ...recoverInput, profile }),
     observeBeforeClaim: (pool, input) =>
       observeRelayPostcondition(pool, allowance, input.now, profile),
-    observePreBroadcast: (claim) =>
-      allowance({
+    observePreBroadcast: (claim) => {
+      const priorApprovalProof = parseRelayEvmPriorApprovalProof(
+        claim.relayPriorApprovalProof,
+      );
+      return allowance({
         owner: claim.walletAddress,
         blockNumber: null,
         finality:
-          claim.actionValidationResult.relayStepKind === "cleanup"
+          claim.actionValidationResult.relayStepKind === "cleanup" ||
+          priorApprovalProof
             ? "finalized"
             : "latest",
         mutationBaselineBlock:
+          // A successor route that follows an earlier Hunch approval must
+          // inspect from that approval, not from the later planning read. The
+          // latter would hide the prior mutation and make a safe fresh approve
+          // look like foreign drift before it reaches the durable boundary.
+          priorApprovalProof?.approvalBlock ??
           claim.allowanceMutationBaselineBlock ??
           (typeof claim.actionValidationResult
             .allowanceMutationBaselineBlock === "string"
             ? claim.actionValidationResult.allowanceMutationBaselineBlock
             : null),
-      }),
+      });
+    },
     preBroadcastDecisionInTransaction: (client, boundaryInput) =>
       preBroadcastRelay(client, { ...boundaryInput, configuration, profile }),
     finalizeAlreadySatisfiedInTransaction: (client, finalizeInput) =>

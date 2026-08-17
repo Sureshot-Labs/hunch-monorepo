@@ -182,6 +182,12 @@ const tests: TestCase[] = [
         ),
         "b_cG9seW1hcmtldDpldmVudC0xfHBvbHltYXJrZXQ6bWFya2V0LTF8WXwxMA",
       );
+      const handoff = `handoff_th1_${"a".repeat(43)}`;
+      assert.equal(normalizeTelegramStartParam(handoff), handoff);
+      assert.equal(
+        normalizeTelegramStartParam(`handoff_th1_${"a".repeat(42)}`),
+        null,
+      );
       assert.equal(
         normalizeTelegramStartParam("m_cDpldmVudC0xfG1hcmtldC0xfFk"),
         "m_cDpldmVudC0xfG1hcmtldC0xfFk",

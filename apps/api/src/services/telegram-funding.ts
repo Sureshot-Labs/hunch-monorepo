@@ -719,7 +719,16 @@ export class TelegramFundingService {
       input.context.telegramMessageId != null &&
       input.telegramMessageId !== input.context.telegramMessageId
     ) {
+      const cancellation = await this.pool.query<{ can_cancel: boolean }>(
+        `select not exists (
+           select 1
+           from funding_receive_receipts receipt
+           where receipt.receive_session_id = $1::uuid
+         ) as can_cancel`,
+        [input.context.receiveSessionId],
+      );
       return buildTelegramFundingActiveElsewhereMessage({
+        canCancel: cancellation.rows[0]?.can_cancel === true,
         projection: parseTelegramFundingProgressProjection(
           input.context.latestProgressProjection,
         ),

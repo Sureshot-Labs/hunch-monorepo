@@ -119,7 +119,12 @@ async function resolveActiveTelegramDeposit(input: {
         and funding_context.cancelled_at is null
         and funding_context.latest_terminal_projection is null
         and funding_context.expires_at > now()
-        and receive_session.status in ('open', 'processing', 'review_required')
+        and receive_session.status in (
+          'open',
+          'processing',
+          'review_required',
+          'recovery_required'
+        )
         and receive_session.expires_at > now()
         and receive_session.venue_id in ('polymarket', 'limitless')
       order by funding_context.created_at desc, funding_context.id desc

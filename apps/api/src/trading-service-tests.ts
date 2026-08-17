@@ -3340,7 +3340,7 @@ const tests: TestCase[] = [
       assert.match(confirmLifecycleBlock, /onSubmitted/);
       assert.match(
         previewBlock,
-        /allowedStatuses: input\.fundingReturnResume[\s\S]*?\["draft"\][\s\S]*?\["draft", "previewed"\]/,
+        /fundingReturnResume[\s\S]*?allowedStatuses: \["draft", "previewed"\]/,
       );
       assert.match(
         confirmLifecycleBlock,

@@ -41,6 +41,10 @@ import {
   fundingRouteExperienceFingerprint,
 } from "../persistence/route-experience-repository.js";
 import { PRIVY_USER_AUTHORIZED_EVM_SPONSORSHIP_POLICY_ID } from "../execution/sponsorship-policy.js";
+import {
+  loadRelayEvmExecutionConfiguration,
+  relayEvmSequentialQuoteTtlMs,
+} from "../execution/delegated-funding-config.js";
 import { relayEvmFundingProfileSpec } from "../execution/relay-evm-profile-specs.js";
 import {
   FundingPlannerError,
@@ -851,6 +855,14 @@ export class ProductionFundingSourcePlanner {
     return new RelayFirstSourcePlanner({
       listEligibleSources: (input) => this.listEligibleSources(input),
       quoteRelay: (input) => this.quoteRelay(input),
+      serverExecutionQuoteWindow: (profileId) => {
+        if (!relayEvmFundingProfileSpec(profileId)) return null;
+        const configuration = loadRelayEvmExecutionConfiguration();
+        return {
+          maximumQuoteTtlMs: relayEvmSequentialQuoteTtlMs(configuration),
+          minimumRemainingTtlMs: configuration.minimumSequentialTtlMs,
+        };
+      },
       observeRoute: async ({ route, amountBand, now }) => {
         const lookupKey = process.env.FUNDING_REFERENCE_LOOKUP_HMAC_KEY?.trim();
         const keyVersion =
@@ -982,6 +994,9 @@ export class ProductionFundingSourcePlanner {
         senderWalletId: profile.walletId,
         quoteCorrelationId: input.quoteCorrelationId,
         deadline: input.deadline,
+        ...(input.maximumQuoteTtlMs
+          ? { maximumQuoteTtlMs: input.maximumQuoteTtlMs }
+          : {}),
         maximumSlippageBps: input.source.maximumSlippageBps,
       });
     } catch (error) {

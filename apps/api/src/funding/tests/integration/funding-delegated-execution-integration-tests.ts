@@ -34,6 +34,9 @@ import {
   RELAY_CLEANUP_CANONICAL_WATCH_MS,
   type RelayEvmAllowanceReader,
 } from "../../execution/relay-evm-delegated-executor-profile.js";
+import { captureRelayEvmAllowanceAdmission } from "../../execution/relay-evm-allowance-baseline.js";
+import { consumeRelayEvmPriorApprovalReservationInTransaction } from "../../execution/relay-evm-prior-approval.js";
+import { relayEvmFundingProfileSpec } from "../../execution/relay-evm-profile-specs.js";
 import { lockTelegramFundingLinkLifecycle } from "../../execution/telegram-funding-link-lifecycle-lock.js";
 import {
   POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
@@ -124,6 +127,7 @@ import {
   buildPolymarketFundingPlan,
   type PolymarketFundingPlan,
 } from "../../../services/polymarket-funding-router.js";
+import { activateTelegramTradeShortfallRelayApprovalInTransaction } from "../../../services/telegram-trade-shortfall-funding.js";
 
 const suffix = crypto.randomUUID();
 const now = new Date();
@@ -2545,6 +2549,145 @@ try {
       new Date(now.getTime() + 86_400_000),
     ],
   );
+
+  async function assertTelegramTradeShortfallRelayActivation(): Promise<void> {
+    // A Relay shortfall has no incoming receive receipt to wake its first
+    // delegated step. Its confirmed trade intent and scoped cap reservation are
+    // the activation boundary instead.
+    const tradeOriginRelay = await createRelayFixture("750000");
+    const tradeOriginRelayAuthorization = await pool.query<{ id: string }>(
+      `select trading_authorization.id
+       from telegram_bot_trading_authorizations trading_authorization
+      where trading_authorization.user_id = $1::uuid
+        and trading_authorization.telegram_user_id = (
+          select telegram_user_id
+            from user_telegram_accounts telegram_account
+           where telegram_account.id = $2::uuid
+        )
+        and trading_authorization.enabled = true
+      limit 1`,
+      [tradeOriginRelay.base.userId, tradeOriginRelay.base.telegramAccountId],
+    );
+    const tradeOriginRelayAuthorizationId =
+      tradeOriginRelayAuthorization.rows[0]?.id;
+    assert.ok(tradeOriginRelayAuthorizationId);
+    const tradeOriginRelayEventId = crypto.randomUUID();
+    const tradeOriginRelayMarketId = crypto.randomUUID();
+    tradeOriginEventIds.push(tradeOriginRelayEventId);
+    tradeOriginMarketIds.push(tradeOriginRelayMarketId);
+    await pool.query(
+      `insert into unified_events (
+       id, venue, venue_event_id, title, status, end_date
+     ) values (
+       $1::uuid, 'polymarket', $2, 'Trade-origin Relay funding event',
+       'ACTIVE', clock_timestamp() + interval '1 day'
+     )`,
+      [tradeOriginRelayEventId, `trade-origin-relay-event-${suffix}`],
+    );
+    await pool.query(
+      `insert into unified_markets (
+       id, venue, venue_market_id, event_id, title, status, market_type,
+       close_time, expiration_time, outcomes, clob_token_ids, metadata
+     ) values (
+       $1::uuid, 'polymarket', $2, $3::uuid,
+       'Trade-origin Relay funding market', 'ACTIVE', 'binary',
+       clock_timestamp() + interval '1 day',
+       clock_timestamp() + interval '1 day', '["Yes","No"]',
+       '["trade-origin-relay-yes","trade-origin-relay-no"]', '{}'::jsonb
+     )`,
+      [
+        tradeOriginRelayMarketId,
+        `trade-origin-relay-market-${suffix}`,
+        tradeOriginRelayEventId,
+      ],
+    );
+    const tradeOriginRelayIntentId = crypto.randomUUID();
+    tradeOriginIntentIds.push(tradeOriginRelayIntentId);
+    await pool.query(
+      `insert into telegram_trade_intents (
+       id, telegram_user_id, user_id, authorization_id, chat_id,
+       telegram_message_id, action, venue, market_id, side, amount_usd,
+       status, expires_at, idempotency_key, funding_operation_id
+     ) values (
+       $1::uuid, $2, $3::uuid, $4::uuid, $2, '751', 'buy', 'polymarket',
+       $5, 'YES', 0.75, 'funding', clock_timestamp() + interval '30 minutes',
+       $6, $7::uuid
+     )`,
+      [
+        tradeOriginRelayIntentId,
+        (
+          await pool.query<{ telegram_user_id: string }>(
+            `select telegram_user_id
+             from user_telegram_accounts
+            where id = $1::uuid`,
+            [tradeOriginRelay.base.telegramAccountId],
+          )
+        ).rows[0]?.telegram_user_id,
+        tradeOriginRelay.base.userId,
+        tradeOriginRelayAuthorizationId,
+        tradeOriginRelayMarketId,
+        `trade-origin-relay-${suffix}`,
+        tradeOriginRelay.operationId,
+      ],
+    );
+    await tx(pool, async (client) => {
+      // Fixture construction: this replaces the receipt-origin linkage with the
+      // exact durable shape created by the shortfall commit transaction.
+      await client.query("set local session_replication_role = replica");
+      await client.query(
+        `update funding_operations
+          set purpose = 'trade_shortfall',
+              support_metadata =
+                (support_metadata - 'fundingReceiveReceiptId'
+                                  - 'telegramFundingConsentId'
+                                  - 'telegramFundingConsentFingerprint') ||
+                jsonb_build_object(
+                  'telegramTradeIntentId', $2::text,
+                  'delegatedOriginKind', 'trade_shortfall_intent'
+                )
+        where id = $1::uuid`,
+        [tradeOriginRelay.operationId, tradeOriginRelayIntentId],
+      );
+      await client.query(
+        `update telegram_funding_authorization_reservations
+          set receive_receipt_id = null,
+              source_trade_intent_id = $2::uuid
+        where funding_operation_id = $1::uuid`,
+        [tradeOriginRelay.operationId, tradeOriginRelayIntentId],
+      );
+      await client.query(
+        `update funding_operation_steps
+          set state = 'planned'
+        where id = $1::uuid`,
+        [tradeOriginRelay.approvalStepId],
+      );
+    });
+    await tx(pool, (client) =>
+      activateTelegramTradeShortfallRelayApprovalInTransaction(client, {
+        operationId: tradeOriginRelay.operationId,
+        profileId: TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
+        tradeIntentId: tradeOriginRelayIntentId,
+      }),
+    );
+    const tradeOriginRelaySteps = await pool.query<{
+      ordinal: number;
+      state: string;
+    }>(
+      `select ordinal, state
+       from funding_operation_steps
+      where operation_id = $1::uuid
+      order by ordinal`,
+      [tradeOriginRelay.operationId],
+    );
+    assert.deepEqual(
+      tradeOriginRelaySteps.rows,
+      [
+        { ordinal: 0, state: "action_required" },
+        { ordinal: 1, state: "planned" },
+      ],
+      "a shortfall activates only its initial Relay approval",
+    );
+  }
 
   const hugeRaw = (2n ** 255n).toString();
   const concurrent = await createFixture(hugeRaw, true);
@@ -5185,6 +5328,259 @@ try {
   assert.equal(relayLaneSecondWave.submitted, 1);
   assert.deepEqual(relayLaneBroadcasts, [relayLaneHead, relayLaneFollower]);
 
+  // A terminal route with one exact Hunch approval and no deposit attempt is
+  // never reused. It can only make room for a new operation which emits its
+  // own exact approve before any deposit is eligible.
+  const priorApprovalRoute = await createRelayFixture("2000000");
+  const priorAllowanceAtApproval = relayAllowanceEvidence(
+    "2000000",
+    "200",
+    "approval-ownership",
+    `0x${"51".repeat(32)}`,
+    "finalized",
+    "200",
+  );
+  const priorAllowance = relayAllowanceEvidence(
+    "2000000",
+    "301",
+    "approval-ownership",
+    `0x${"51".repeat(32)}`,
+    "finalized",
+    "301",
+  );
+  let priorApprovalSends = 0;
+  assert.equal(
+    (
+      await relayExecutor(
+        [
+          relayAllowanceEvidence("0", "300"),
+          relayAllowanceEvidence("0", "300"),
+        ],
+        () => {
+          priorApprovalSends += 1;
+        },
+      ).runBatch({ limit: 1, now })
+    ).submitted,
+    1,
+  );
+  await recordRelayApprovalSuccess(
+    priorApprovalRoute,
+    new Date(now.getTime() + 1),
+    priorAllowanceAtApproval.blockHash,
+  );
+  await pool.query(
+    `update funding_step_receipt_observations
+        set evidence = evidence || jsonb_build_object(
+              'allowanceExact', true,
+              'allowanceRaw', '2000000',
+              'allowanceBlock', '200',
+              'allowanceBlockHash', $2::text,
+              'allowanceObservationRevision', $3::text
+            ),
+            updated_at = $4
+      where operation_id = $1::uuid
+        and step_id = $5::uuid
+        and status = 'finalized'
+        and canonical`,
+    [
+      priorApprovalRoute.operationId,
+      priorAllowanceAtApproval.blockHash,
+      priorAllowance.revision,
+      new Date(now.getTime() + 1),
+      priorApprovalRoute.approvalStepId,
+    ],
+  );
+  await tx(pool, async (client) => {
+    const current = await client.query<{
+      progress_stage: "committed" | "source_action";
+      status: "in_progress" | "reconcile_required";
+      version: string | number;
+    }>(
+      `select status, progress_stage, version
+         from funding_operations
+        where id = $1::uuid
+        for update`,
+      [priorApprovalRoute.operationId],
+    );
+    const operation = current.rows[0];
+    assert.ok(operation);
+    let version = Number(operation.version);
+    let status = operation.status;
+    let stage = operation.progress_stage;
+    if (stage === "committed") {
+      const activated = await transitionFundingOperationInTransaction(client, {
+        operationId: priorApprovalRoute.operationId,
+        scope: { kind: "worker" },
+        expectedVersion: version,
+        expectedState: { status, stage },
+        nextState: { status: "in_progress", stage: "source_action" },
+        now: new Date(now.getTime() + 2),
+      });
+      version = activated.version;
+      status = "in_progress";
+      stage = "source_action";
+    }
+    if (status === "in_progress") {
+      const reconciling = await transitionFundingOperationInTransaction(
+        client,
+        {
+          operationId: priorApprovalRoute.operationId,
+          scope: { kind: "worker" },
+          expectedVersion: version,
+          expectedState: { status, stage },
+          nextState: { status: "reconcile_required", stage },
+          now: new Date(now.getTime() + 2),
+        },
+      );
+      version = reconciling.version;
+      status = "reconcile_required";
+    }
+    await transitionFundingOperationInTransaction(client, {
+      operationId: priorApprovalRoute.operationId,
+      scope: { kind: "worker" },
+      expectedVersion: version,
+      expectedState: { status, stage },
+      nextState: { status: "failed", stage: "terminal" },
+      errorCode: "test_terminal_approve_without_deposit",
+      now: new Date(now.getTime() + 2),
+    });
+  });
+  assert.equal(priorApprovalSends, 1);
+
+  const freshRelayRoute = await createRelayFixture("1000000", {
+    base: priorApprovalRoute.base,
+  });
+  const priorProfile = relayEvmFundingProfileSpec(
+    TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
+  );
+  assert.ok(priorProfile);
+  const wrongBlockAdmission = await captureRelayEvmAllowanceAdmission(pool, {
+    owner: priorApprovalRoute.walletAddress,
+    profile: priorProfile,
+    userId: priorApprovalRoute.base.userId,
+    reader: async () => priorAllowance,
+  });
+  assert.equal(
+    wrongBlockAdmission.priorApprovalProof,
+    null,
+    "a historical proof must be anchored to the original approval block",
+  );
+  const changedOwnershipAdmission = await captureRelayEvmAllowanceAdmission(
+    pool,
+    {
+      owner: priorApprovalRoute.walletAddress,
+      profile: priorProfile,
+      userId: priorApprovalRoute.base.userId,
+      reader: async (input) =>
+        input.blockNumber === "200"
+          ? priorAllowanceAtApproval
+          : relayAllowanceEvidence(
+              "2000000",
+              "301",
+              "later-matching-approval",
+              `0x${"51".repeat(32)}`,
+              "finalized",
+              "301",
+            ),
+    },
+  );
+  assert.equal(
+    changedOwnershipAdmission.priorApprovalProof,
+    null,
+    "a later matching approval, even in the same transaction, invalidates the prior proof",
+  );
+  const admission = await captureRelayEvmAllowanceAdmission(pool, {
+    owner: priorApprovalRoute.walletAddress,
+    profile: priorProfile,
+    userId: priorApprovalRoute.base.userId,
+    reader: async (input) =>
+      input.blockNumber === "200" ? priorAllowanceAtApproval : priorAllowance,
+  });
+  const priorApprovalProof = admission.priorApprovalProof;
+  assert.ok(priorApprovalProof);
+  await tx(pool, async (client) => {
+    assert.equal(
+      await lockFundingAuthorizationReservationScope(client, {
+        authorizationId: freshRelayRoute.authorizationId,
+        userId: freshRelayRoute.base.userId,
+      }),
+      true,
+    );
+    assert.equal(
+      await consumeRelayEvmPriorApprovalReservationInTransaction(client, {
+        now: new Date(now.getTime() + 3),
+        owner: freshRelayRoute.walletAddress,
+        profile: priorProfile,
+        proof: priorApprovalProof,
+        userId: freshRelayRoute.base.userId,
+      }),
+      true,
+    );
+    assert.equal(
+      await consumeRelayEvmPriorApprovalReservationInTransaction(client, {
+        now: new Date(now.getTime() + 3),
+        owner: freshRelayRoute.walletAddress,
+        profile: priorProfile,
+        proof: priorApprovalProof,
+        userId: freshRelayRoute.base.userId,
+      }),
+      true,
+      "a terminal pre-deposit reservation may already have been released",
+    );
+    const metadata = await client.query(
+      `update funding_operations
+          set support_metadata = support_metadata || $2::jsonb,
+              updated_at = $3,
+              version = version + 1
+        where id = $1::uuid`,
+      [
+        freshRelayRoute.operationId,
+        JSON.stringify({ relayPriorApprovalProof: priorApprovalProof }),
+        new Date(now.getTime() + 3),
+      ],
+    );
+    assert.equal(metadata.rowCount, 1);
+  });
+  const priorApprovalReservation = await pool.query<{ status: string }>(
+    `select status
+       from telegram_funding_authorization_reservations
+      where funding_operation_id = $1::uuid`,
+    [priorApprovalRoute.operationId],
+  );
+  assert.equal(priorApprovalReservation.rows[0]?.status, "released");
+  const priorDepositAttempts = await pool.query<{ count: string }>(
+    `select count(*)::text as count
+       from funding_operation_step_attempts
+      where step_id = $1::uuid`,
+    [priorApprovalRoute.depositStepId],
+  );
+  assert.equal(priorDepositAttempts.rows[0]?.count, "0");
+  const freshRelayBroadcasts: string[] = [];
+  const freshRelayExecutor = relayExecutor(
+    [priorAllowance, priorAllowance],
+    (claim) => freshRelayBroadcasts.push(claim.operationId),
+  );
+  assert.equal(
+    (
+      await freshRelayExecutor.runBatch({
+        limit: 1,
+        now: new Date(now.getTime() + 4),
+      })
+    ).submitted,
+    1,
+  );
+  assert.deepEqual(freshRelayBroadcasts, [freshRelayRoute.operationId]);
+  assert.equal(
+    (
+      await freshRelayExecutor.runBatch({
+        limit: 1,
+        now: new Date(now.getTime() + 5),
+      })
+    ).submitted,
+    0,
+    "the consumed proof cannot create a second successor approve",
+  );
+
   const relayDepositOwnershipRace = await createRelayFixture();
   const relayDepositOwnershipBroadcasts = { value: 0 };
   const relayDepositOwnedApproval = relayAllowanceEvidence(
@@ -5691,7 +6087,9 @@ try {
     await holderMutation.query("set local session_replication_role = replica");
     await holderMutation.query(
       `update funding_operations
-          set status = 'cancelled', progress_stage = 'terminal'
+          set status = 'cancelled',
+              progress_stage = 'terminal',
+              completed_at = clock_timestamp()
         where id = $1`,
       [terminalLaneHolder.operationId],
     );
@@ -5756,7 +6154,7 @@ try {
   assert.deepEqual(terminalHolderState.rows[0], {
     follower_operation_status: "failed",
     follower_reservation_status: "released",
-    holder_reason: "terminal_without_broadcast",
+    holder_reason: "terminal_without_deposit",
     holder_reservation_status: "released",
   });
 
@@ -7595,6 +7993,8 @@ try {
   assert.equal(reminedRefundState.rows[0]?.canonical, true);
   assert.equal(reminedRefundState.rows[0]?.finality_status, "finalized");
   assert.ok(Array.isArray(reminedRefundState.rows[0]?.history));
+
+  await assertTelegramTradeShortfallRelayActivation();
 
   console.log(
     "[funding-delegated-execution-integration-tests] full-receipt concurrency, malformed action, soft pause/desired-state resume, lifecycle locking, pre-broadcast revocation, and ambiguous recovery passed",

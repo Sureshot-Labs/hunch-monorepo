@@ -4,6 +4,7 @@ import {
   POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
   TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
 } from "./delegated-funding-profile-ids.js";
+import { DELEGATED_PROVIDER_REPLAY_MS } from "./delegated-funding-recovery-policy.js";
 import { privyAuthorizationPrivateKeyIsValid } from "./privy-authorization-key.js";
 
 type Environment = Readonly<Record<string, string | undefined>>;
@@ -35,6 +36,20 @@ export type RelayEvmExecutionConfiguration = Readonly<{
   maxSourceRaw: string;
   minimumSequentialTtlMs: number;
 }>;
+
+/**
+ * A Relay EVM route contains two signed calls (approve, then deposit). Its
+ * provider quote must survive both calls and the conservative replay window
+ * used after a durable provider boundary. This is distinct from a market
+ * quote's short user-confirmation TTL.
+ */
+export function relayEvmSequentialQuoteTtlMs(
+  configuration: Pick<RelayEvmExecutionConfiguration, "minimumSequentialTtlMs">,
+): number {
+  return (
+    DELEGATED_PROVIDER_REPLAY_MS + configuration.minimumSequentialTtlMs + 30_000
+  );
+}
 
 export function loadRelayEvmExecutionConfiguration(
   source: Environment = process.env,

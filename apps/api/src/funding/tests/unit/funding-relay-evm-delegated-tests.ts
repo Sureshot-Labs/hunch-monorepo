@@ -30,6 +30,14 @@ import {
   classifyRelayCleanupAllowance,
   parseRelayEvmAllowanceObservation,
 } from "../../execution/relay-evm-allowance-state.js";
+import {
+  captureRelayEvmAllowanceBaseline,
+  relayEvmAllowanceBaselineSupportMetadata,
+} from "../../execution/relay-evm-allowance-baseline.js";
+import {
+  parseRelayEvmPriorApprovalProof,
+  relayEvmPriorApprovalSupportMetadata,
+} from "../../execution/relay-evm-prior-approval.js";
 import { relayEvmUsdCapMatchesRaw } from "../../execution/delegated-funding-capability-resolver.js";
 import {
   buildTelegramRelayEvmAutomationPolicyV3,
@@ -61,6 +69,51 @@ const anchoredAllowance = {
   ownershipRevision: "e".repeat(64),
   lastMutationTransactionHash: `0x${"51".repeat(32)}`,
 };
+const relayProfile =
+  RELAY_EVM_FUNDING_PROFILE_SPECS[TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID];
+assert.ok(relayProfile);
+const capturedAllowanceBaseline = await captureRelayEvmAllowanceBaseline(
+  relayProfile,
+  {
+    owner: WALLET,
+    reader: async (input) => {
+      assert.deepEqual(input, { owner: WALLET, blockNumber: null });
+      return anchoredAllowance;
+    },
+  },
+);
+assert.equal(capturedAllowanceBaseline, anchoredAllowance);
+assert.deepEqual(
+  relayEvmAllowanceBaselineSupportMetadata(capturedAllowanceBaseline),
+  {
+    relayApprovalBaselineAllowanceRaw: RAW,
+    relayApprovalBaselineAllowanceBlock: "123",
+    relayApprovalBaselineAllowanceBlockHash: `0x${"ab".repeat(32)}`,
+    relayApprovalBaselineAllowanceRevision: "c".repeat(64),
+  },
+  "every Relay origin must persist the same pre-approval ownership baseline",
+);
+const priorApprovalProof = parseRelayEvmPriorApprovalProof({
+  allowanceRaw: RAW,
+  approvalBlock: "123",
+  approvalBlockHash: `0x${"ab".repeat(32)}`,
+  approvalReceiptId: "11111111-1111-4111-8111-111111111111",
+  approvalTransactionHash: `0x${"51".repeat(32)}`,
+  ownershipRevision: "e".repeat(64),
+  sourceOperationId: "22222222-2222-4222-8222-222222222222",
+});
+assert.ok(priorApprovalProof);
+assert.deepEqual(relayEvmPriorApprovalSupportMetadata(priorApprovalProof), {
+  relayPriorApprovalProof: priorApprovalProof,
+});
+assert.equal(
+  parseRelayEvmPriorApprovalProof({
+    ...priorApprovalProof,
+    allowanceRaw: "0",
+  }),
+  null,
+  "a zero or malformed prior allowance can never enable replacement approval",
+);
 assert.deepEqual(
   parseRelayEvmAllowanceObservation(anchoredAllowance),
   anchoredAllowance,
