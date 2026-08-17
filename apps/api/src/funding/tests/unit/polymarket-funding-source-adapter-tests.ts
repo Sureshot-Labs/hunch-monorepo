@@ -4,7 +4,10 @@ import assert from "node:assert/strict";
 
 import type { AccountValueReadModel } from "../../../account-value/runtime-service.js";
 import type { FundingPurpose } from "../../domain/types.js";
-import { POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID } from "../../execution/delegated-funding-profile-ids.js";
+import {
+  POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
+  TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
+} from "../../execution/delegated-funding-profile-ids.js";
 import { PRIVY_USER_AUTHORIZED_EVM_SPONSORSHIP_POLICY_ID } from "../../execution/sponsorship-policy.js";
 import { PolymarketFundingSourceAdapter } from "../../preparation/polymarket-funding-source-adapter.js";
 import { polymarketFundingEvidence } from "../../preparation/polymarket-funding-snapshot.js";
@@ -253,6 +256,19 @@ assert.deepEqual(
   delegated.commitPlan.reservations.map((entry) => entry.rawAmount),
   ["1000000"],
   "delegated wrap must bind only the exact received USDC.e amount",
+);
+
+const relayProfileInput = planningInput();
+assert.deepEqual(
+  await adapter.list({
+    ...relayProfileInput,
+    request: {
+      ...relayProfileInput.request,
+      serverExecutionProfileId: TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
+    },
+  }),
+  [],
+  "a Relay profile must not inherit a partial Polygon preparation and become a residual-only composite",
 );
 
 const missingExactInput = new PolymarketFundingSourceAdapter(account(false), {
