@@ -61,7 +61,10 @@ import {
   loadRelayEvmExecutionConfiguration,
   relayEvmSequentialQuoteTtlMs,
 } from "../../funding/execution/delegated-funding-config.js";
-import { readRelayEvmAllowance } from "../../funding/execution/relay-evm-delegated-executor-profile.js";
+import {
+  captureRelayEvmAllowanceBaseline,
+  relayEvmAllowanceBaselineSupportMetadata,
+} from "../../funding/execution/relay-evm-allowance-baseline.js";
 import { relayEvmFundingProfileSpec } from "../../funding/execution/relay-evm-profile-specs.js";
 
 type JsonRecord = Readonly<Record<string, JsonValue>>;
@@ -631,9 +634,8 @@ export function createRelayReceiveReceiptDispositionResolver(
           ? relayEvmSequentialQuoteTtlMs(relayExecutionConfiguration)
           : 60_000;
         const baselineAllowance = delegatedRelay
-          ? await readRelayEvmAllowance(delegatedProfile, {
+          ? await captureRelayEvmAllowanceBaseline(delegatedProfile, {
               owner: frozen.profile.address,
-              blockNumber: null,
             })
           : null;
         if (baselineAllowance && baselineAllowance.raw !== "0") return null;
@@ -693,15 +695,7 @@ export function createRelayReceiveReceiptDispositionResolver(
               receiptTarget.receipt.observationRevision,
             fundingReceiveVariantId: receiptTarget.receipt.variantId,
             ...(baselineAllowance
-              ? {
-                  relayApprovalBaselineAllowanceRaw: baselineAllowance.raw,
-                  relayApprovalBaselineAllowanceBlock:
-                    baselineAllowance.blockNumber,
-                  relayApprovalBaselineAllowanceBlockHash:
-                    baselineAllowance.blockHash,
-                  relayApprovalBaselineAllowanceRevision:
-                    baselineAllowance.revision,
-                }
+              ? relayEvmAllowanceBaselineSupportMetadata(baselineAllowance)
               : {}),
           },
         });

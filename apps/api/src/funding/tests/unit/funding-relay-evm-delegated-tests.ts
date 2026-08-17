@@ -30,6 +30,10 @@ import {
   classifyRelayCleanupAllowance,
   parseRelayEvmAllowanceObservation,
 } from "../../execution/relay-evm-allowance-state.js";
+import {
+  captureRelayEvmAllowanceBaseline,
+  relayEvmAllowanceBaselineSupportMetadata,
+} from "../../execution/relay-evm-allowance-baseline.js";
 import { relayEvmUsdCapMatchesRaw } from "../../execution/delegated-funding-capability-resolver.js";
 import {
   buildTelegramRelayEvmAutomationPolicyV3,
@@ -61,6 +65,30 @@ const anchoredAllowance = {
   ownershipRevision: "e".repeat(64),
   lastMutationTransactionHash: `0x${"51".repeat(32)}`,
 };
+const relayProfile =
+  RELAY_EVM_FUNDING_PROFILE_SPECS[TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID];
+assert.ok(relayProfile);
+const capturedAllowanceBaseline = await captureRelayEvmAllowanceBaseline(
+  relayProfile,
+  {
+    owner: WALLET,
+    reader: async (input) => {
+      assert.deepEqual(input, { owner: WALLET, blockNumber: null });
+      return anchoredAllowance;
+    },
+  },
+);
+assert.equal(capturedAllowanceBaseline, anchoredAllowance);
+assert.deepEqual(
+  relayEvmAllowanceBaselineSupportMetadata(capturedAllowanceBaseline),
+  {
+    relayApprovalBaselineAllowanceRaw: RAW,
+    relayApprovalBaselineAllowanceBlock: "123",
+    relayApprovalBaselineAllowanceBlockHash: `0x${"ab".repeat(32)}`,
+    relayApprovalBaselineAllowanceRevision: "c".repeat(64),
+  },
+  "every Relay origin must persist the same pre-approval ownership baseline",
+);
 assert.deepEqual(
   parseRelayEvmAllowanceObservation(anchoredAllowance),
   anchoredAllowance,
