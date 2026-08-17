@@ -10484,6 +10484,29 @@ export async function handleTelegramBotTradingCallback(
       });
       return true;
     } catch (error) {
+      try {
+        await updateIntentStatus({
+          allowedStatuses: ["confirming"],
+          db: input.db,
+          errorCode: "funding_quote_rejected_pre_submit",
+          errorMessage:
+            "The confirmed funding quote could not be committed before any external action.",
+          intentId: intent.id,
+          status: "cancelled",
+        });
+      } catch (statusError) {
+        input.log?.warn?.(
+          {
+            error:
+              statusError instanceof Error
+                ? statusError.message
+                : "unknown_error",
+            event: "telegram_trade_shortfall_commit_terminalization_failed",
+            intentId: intent.id,
+          },
+          "Telegram trade shortfall rejection could not terminalize the intent",
+        );
+      }
       input.log?.warn?.(
         {
           error: error instanceof Error ? error.message : "unknown_error",
@@ -10496,6 +10519,19 @@ export async function handleTelegramBotTradingCallback(
         callbackQueryId: input.callbackQuery.id,
         showAlert: true,
         text: "⚠️ Funding quote changed or is unavailable. Nothing was moved; reopen Review.",
+      });
+      await input.sendMessage({
+        chat_id: chatId,
+        parse_mode: "MarkdownV2",
+        text: formatTelegramTradeLifecycleMessageMarkdownV2({
+          heading: "Funding quote is no longer current.",
+          lines: [
+            "Nothing was moved or submitted.",
+            "Open the market again to receive a fresh Review.",
+          ],
+          marketTitle: intent.market_title,
+          venue: intent.venue,
+        }),
       });
       return true;
     }
