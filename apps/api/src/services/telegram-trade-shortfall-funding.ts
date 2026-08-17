@@ -73,6 +73,7 @@ export type TelegramTradeShortfallIdentity = Readonly<{
   marketContextId: string;
   side: Side;
   maximumSpendUsd: string;
+  additionalFundingUsd?: string;
   maxFeeUsd: string;
   maxSlippageBps: number;
   deadline: string;
@@ -107,7 +108,7 @@ function usdToStableRaw(value: string): string {
   ).toString();
 }
 
-function tradeShortfallRequest(
+export function buildTelegramTradeShortfallRequest(
   input: TelegramTradeShortfallIdentity,
   serverExecutionProfileId?: string,
 ): FundingDiscoveryRequest {
@@ -118,6 +119,14 @@ function tradeShortfallRequest(
   return {
     purpose: "trade_shortfall",
     requestedDestinationAmount,
+    ...(input.additionalFundingUsd
+      ? {
+          serverAdditionalDestinationAmount: {
+            asset: requestedDestinationAmount.asset,
+            raw: usdToStableRaw(input.additionalFundingUsd),
+          },
+        }
+      : {}),
     confirmedSourceAmount: null,
     marketContextId: input.marketContextId,
     consumerIntent: {
@@ -362,7 +371,7 @@ export class TelegramTradeShortfallFundingService {
     )) {
       const plan = await this.runtime.liquidity(
         input.userId,
-        tradeShortfallRequest(input, profileId),
+        buildTelegramTradeShortfallRequest(input, profileId),
       );
       if (plan.completeness !== "complete" || plan.errors.length > 0) {
         unavailableReasonCodes.push(
@@ -445,7 +454,7 @@ export class TelegramTradeShortfallFundingService {
     }
     const delegatedPlan = await this.runtime.liquidity(
       input.userId,
-      tradeShortfallRequest(input, profileId),
+      buildTelegramTradeShortfallRequest(input, profileId),
     );
     if (
       delegatedPlan.completeness !== "complete" ||
@@ -496,7 +505,7 @@ export class TelegramTradeShortfallFundingService {
     ) {
       throw new Error("trade funding proposal expired or changed");
     }
-    const requestedDestinationAmount = tradeShortfallRequest(
+    const requestedDestinationAmount = buildTelegramTradeShortfallRequest(
       input,
       input.proposal.serverExecutionProfileId,
     ).requestedDestinationAmount;

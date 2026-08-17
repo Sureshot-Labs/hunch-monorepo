@@ -14,6 +14,7 @@ import {
   POLYGON_PUSD,
 } from "./funding-providers/relay/rehearsal.js";
 import {
+  buildTelegramTradeShortfallRequest,
   resolveTelegramTradeShortfallExecutionProfile,
   selectTelegramTradeShortfallAutomatedOption,
   telegramTradeShortfallExecutionProfiles,
@@ -29,6 +30,29 @@ const baseUsdc: AssetRef = {
   assetId: BASE_USDC,
   decimals: 6,
 };
+
+const exactTopUpRequest = buildTelegramTradeShortfallRequest({
+  authorizationId: "authorization_shortfall_fixture_12345678",
+  telegramAccountId: "telegram_account_fixture_12345678",
+  telegramUserId: "telegram_user_fixture_12345678",
+  tradeIntentId: "trade_intent_fixture_12345678",
+  userId: "user_shortfall_fixture_12345678",
+  venue: "polymarket",
+  marketId: "polymarket:3192057",
+  marketContextId: "market_context_shortfall_fixture_12345678",
+  side: "YES",
+  maximumSpendUsd: "14.201601",
+  additionalFundingUsd: "0.50",
+  maxFeeUsd: "14.201601",
+  maxSlippageBps: 500,
+  deadline: "2026-08-17T12:38:00.000Z",
+});
+assert.equal(exactTopUpRequest.requestedDestinationAmount?.raw, "14201601");
+assert.equal(
+  exactTopUpRequest.serverAdditionalDestinationAmount?.raw,
+  "500000",
+  "Telegram must plan the consumer-confirmed top-up rather than recomputing shortfall from Deposit Wallet cash only",
+);
 
 function option(
   source: SourceOption["source"],

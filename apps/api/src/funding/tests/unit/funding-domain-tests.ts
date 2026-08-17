@@ -340,6 +340,16 @@ await test("freezes authenticated discovery, quote, and commit boundaries", () =
   assert.equal(
     fundingDiscoveryRequestSchema.safeParse({
       ...tradeDiscovery,
+      serverAdditionalDestinationAmount: {
+        asset: polygonPusd,
+        raw: "1",
+      },
+    }).success,
+    false,
+  );
+  assert.equal(
+    fundingDiscoveryRequestSchema.safeParse({
+      ...tradeDiscovery,
       purpose: "withdrawal",
       marketContextId: null,
       destinationOptionId: null,

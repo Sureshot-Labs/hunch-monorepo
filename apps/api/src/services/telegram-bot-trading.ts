@@ -1356,6 +1356,7 @@ function telegramTradeFundingIdentity(input: {
   intent: TelegramTradeIntentRow;
   market: TelegramBotMarketRow;
   maximumSpendUsd: number;
+  additionalFundingUsd?: string;
   policy: SignalBotPolicy;
   quoteExpiresAt: Date | string | null | undefined;
   side: TelegramBotTradingSide;
@@ -1386,6 +1387,9 @@ function telegramTradeFundingIdentity(input: {
     marketContextId,
     side: input.side,
     maximumSpendUsd: String(input.maximumSpendUsd),
+    ...(input.additionalFundingUsd
+      ? { additionalFundingUsd: input.additionalFundingUsd }
+      : {}),
     maxFeeUsd: String(Math.max(0.01, input.maximumSpendUsd)),
     maxSlippageBps: input.policy.maxSlippageBps,
     deadline: deadline.toISOString(),
@@ -8412,6 +8416,9 @@ async function previewTelegramTradeIntent(input: {
               intent: input.intent,
               market: input.market,
               maximumSpendUsd: maxSpendUsd,
+              additionalFundingUsd: resolveTelegramMinimumFundingUsd(
+                fundingPreview.shortfallUsd,
+              ),
               policy: input.policy,
               quoteExpiresAt: quote.expiresAt,
               side,

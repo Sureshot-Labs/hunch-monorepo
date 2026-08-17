@@ -318,6 +318,13 @@ export type FundingIntent = Readonly<{
   controllerWalletRef?: string | null;
   /** Internal only: public request schemas intentionally omit this field. */
   serverExecutionProfileId?: string | null;
+  /**
+   * Internal only: an authoritative consumer may already include executable
+   * venue preparation in its available-funds calculation. In that case this
+   * is the exact additional destination credit still required by the trade.
+   * Public request schemas intentionally omit this field.
+   */
+  serverAdditionalDestinationAmount?: Money | null;
   maxFeeUsd: string | null;
   maxSlippageBps: number | null;
   deadline: string | null;

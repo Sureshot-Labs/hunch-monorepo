@@ -113,7 +113,26 @@ export function decidePlacement(
       "trade collateral",
     );
     assertSameAsset(requested.asset, targetRequirement.asset, "trade target");
-    const shortfallRaw = subtractFloor(requested.raw, availableNow.raw);
+    const serverAdditionalDestination =
+      intent.serverAdditionalDestinationAmount ?? null;
+    if (serverAdditionalDestination) {
+      assertSameAsset(
+        serverAdditionalDestination.asset,
+        requested.asset,
+        "server-confirmed trade shortfall",
+      );
+      if (
+        rawAmount(serverAdditionalDestination.raw) > rawAmount(requested.raw)
+      ) {
+        throw new FundingPlannerError(
+          "invalid_amount",
+          "server-confirmed trade shortfall exceeds the trade collateral",
+        );
+      }
+    }
+    const shortfallRaw = serverAdditionalDestination
+      ? serverAdditionalDestination.raw
+      : subtractFloor(requested.raw, availableNow.raw);
     const minimumExecutableDestination = input.minimumExecutableDestination;
     if (minimumExecutableDestination) {
       assertSameAsset(
