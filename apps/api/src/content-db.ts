@@ -1,7 +1,7 @@
 import { createPgPool, type Pool } from "@hunch/infra";
 
 export const CONTENT_SCHEMA_MIGRATION =
-  "0213_content_editorial_graph.sql" as const;
+  "0224_content_service_actor_contract.sql" as const;
 
 export type ContentPoolOptions = {
   connectionString: string;
@@ -49,7 +49,7 @@ export async function checkContentDatabaseReady(
           where filename = $1
         ) as migration_ready,
         (
-          select count(*) = 10
+          select count(*) = 13
           from pg_class relation
           join pg_namespace namespace on namespace.oid = relation.relnamespace
           where namespace.nspname = 'public'
@@ -57,7 +57,7 @@ export async function checkContentDatabaseReady(
             and relation.relname = any ($2::text[])
         ) as schema_objects_ready,
         (
-          select count(*) = 20
+          select count(*) = 33
           from pg_constraint constraint_record
           join pg_namespace namespace
             on namespace.oid = constraint_record.connamespace
@@ -78,6 +78,9 @@ export async function checkContentDatabaseReady(
         "content_outbox",
         "content_storage_deletion_jobs",
         "content_audit_events",
+        "admin_service_principals",
+        "admin_service_credentials",
+        "content_machine_idempotency_keys",
       ],
       [
         "uq_content_article_versions_id_article",
@@ -100,6 +103,19 @@ export async function checkContentDatabaseReady(
         "content_article_versions_content_kind_check",
         "content_article_drafts_editorial_graph_check",
         "content_article_versions_editorial_graph_check",
+        "admin_service_principals_status_check",
+        "admin_service_credentials_scopes_check",
+        "content_audit_events_actor_kind_expand_check",
+        "content_machine_idempotency_key_check",
+        "content_machine_idempotency_lease_check",
+        "content_machine_idempotency_result_check",
+        "content_audit_events_actor_contract_check",
+        "content_articles_created_actor_check",
+        "content_articles_updated_actor_check",
+        "content_article_drafts_updated_actor_check",
+        "content_article_versions_created_actor_check",
+        "content_assets_created_actor_check",
+        "content_assets_updated_actor_check",
       ],
     ],
   );

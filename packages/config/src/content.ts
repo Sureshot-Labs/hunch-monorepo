@@ -3,6 +3,16 @@ export const CONTENT_RENDERER_CONTRACT_ID =
 
 export type ContentRuntimeConfig = {
   enabled: boolean;
+  journalServiceApiEnabled: boolean;
+  journalServiceReviewSubmitEnabled: boolean;
+  journalServiceTokenPepper: string;
+  journalServiceCredentialMaxTtlDays: number;
+  journalServiceReadRatePerMinute: number;
+  journalServiceMutationRatePerMinute: number;
+  journalServiceUploadRatePerMinute: number;
+  journalServiceMaxConcurrentVerifications: number;
+  journalServiceDailyUploadBytes: number;
+  journalServiceIdempotencyLeaseSec: number;
   publishingEnabled: boolean;
   requireApproval: boolean;
   rendererContractId: string;
@@ -87,6 +97,20 @@ export function resolveContentRuntimeConfig(
 ): ContentRuntimeConfig {
   const production = nodeEnv.toLowerCase() === "production";
   const enabled = bool(source, "CONTENT_ENABLED", false);
+  const journalServiceApiEnabled = bool(
+    source,
+    "JOURNAL_SERVICE_API_ENABLED",
+    false,
+  );
+  const journalServiceReviewSubmitEnabled = bool(
+    source,
+    "JOURNAL_SERVICE_REVIEW_SUBMIT_ENABLED",
+    false,
+  );
+  const journalServiceTokenPepper = text(
+    source,
+    "JOURNAL_SERVICE_TOKEN_PEPPER",
+  );
   const publishingEnabled = bool(source, "CONTENT_PUBLISHING_ENABLED", false);
   const workerEnabled = bool(source, "CONTENT_WORKER_ENABLED", false);
   const revalidateUrl = text(source, "CONTENT_REVALIDATE_URL");
@@ -127,6 +151,21 @@ export function resolveContentRuntimeConfig(
   if (previewSecret && previewSecret.length < 32) {
     throw new Error(
       "[env] CONTENT_PREVIEW_SECRET must be at least 32 characters",
+    );
+  }
+  if (journalServiceApiEnabled && !enabled) {
+    throw new Error(
+      "[env] CONTENT_ENABLED must be true when JOURNAL_SERVICE_API_ENABLED is enabled",
+    );
+  }
+  if (journalServiceApiEnabled && journalServiceTokenPepper.length < 32) {
+    throw new Error(
+      "[env] JOURNAL_SERVICE_TOKEN_PEPPER must be at least 32 characters when the service API is enabled",
+    );
+  }
+  if (journalServiceReviewSubmitEnabled && !journalServiceApiEnabled) {
+    throw new Error(
+      "[env] JOURNAL_SERVICE_API_ENABLED must be true when JOURNAL_SERVICE_REVIEW_SUBMIT_ENABLED is enabled",
     );
   }
   if (Boolean(assetS3AccessKeyId) !== Boolean(assetS3SecretAccessKey)) {
@@ -184,6 +223,58 @@ export function resolveContentRuntimeConfig(
 
   return {
     enabled,
+    journalServiceApiEnabled,
+    journalServiceReviewSubmitEnabled,
+    journalServiceTokenPepper,
+    journalServiceCredentialMaxTtlDays: int(
+      source,
+      "JOURNAL_SERVICE_CREDENTIAL_MAX_TTL_DAYS",
+      90,
+      1,
+      365,
+    ),
+    journalServiceReadRatePerMinute: int(
+      source,
+      "JOURNAL_SERVICE_READ_RATE_PER_MINUTE",
+      120,
+      1,
+      10_000,
+    ),
+    journalServiceMutationRatePerMinute: int(
+      source,
+      "JOURNAL_SERVICE_MUTATION_RATE_PER_MINUTE",
+      30,
+      1,
+      1_000,
+    ),
+    journalServiceUploadRatePerMinute: int(
+      source,
+      "JOURNAL_SERVICE_UPLOAD_RATE_PER_MINUTE",
+      10,
+      1,
+      1_000,
+    ),
+    journalServiceMaxConcurrentVerifications: int(
+      source,
+      "JOURNAL_SERVICE_MAX_CONCURRENT_VERIFICATIONS",
+      5,
+      1,
+      100,
+    ),
+    journalServiceDailyUploadBytes: int(
+      source,
+      "JOURNAL_SERVICE_DAILY_UPLOAD_BYTES",
+      500_000_000,
+      1_000_000,
+      10_000_000_000,
+    ),
+    journalServiceIdempotencyLeaseSec: int(
+      source,
+      "JOURNAL_SERVICE_IDEMPOTENCY_LEASE_SEC",
+      30,
+      5,
+      300,
+    ),
     publishingEnabled,
     requireApproval: bool(source, "CONTENT_REQUIRE_APPROVAL", true),
     rendererContractId,

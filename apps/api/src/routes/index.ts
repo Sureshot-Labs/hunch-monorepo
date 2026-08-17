@@ -53,6 +53,10 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     ]);
     await app.register(contentRoutes);
     await app.register(adminContentRoutes);
+    if (env.journalServiceApiEnabled) {
+      const { serviceJournalRoutes } = await import("./service-journal.js");
+      await app.register(serviceJournalRoutes);
+    }
   }
   await app.register(privyWebhookRoutes);
   await app.register(fundingRelayWebhookRoutes);

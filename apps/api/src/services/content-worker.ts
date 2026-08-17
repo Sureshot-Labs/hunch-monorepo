@@ -225,7 +225,8 @@ export async function publishDueContentVersions(
             published_at = $6,
             scheduled_for = null,
             published_by_admin_id = $7,
-            updated_by_admin_id = $7
+            updated_by_admin_id = $7,
+            updated_by_service_principal_id = null
           where id = $1
         `,
           [
@@ -250,18 +251,24 @@ export async function publishDueContentVersions(
           `
           insert into content_audit_events (
             action, article_id, version_id, actor_admin_id,
-            metadata
+            actor_kind, actor_service_principal_id, actor_label, metadata
           ) values (
-            'article.scheduled_publication_completed', $1, $2, $3,
-            $4::jsonb
+            'article.scheduled_publication_completed', $1, $2, null,
+            'system', null, 'content-worker', $3::jsonb
           )
         `,
           [
             job.article_id,
             version.id,
-            version.created_by_admin_id,
             JSON.stringify({
               scheduledFor: new Date(job.run_at).toISOString(),
+              initiatedBy: version.created_by_admin_id
+                ? {
+                    kind: "admin",
+                    id: version.created_by_admin_id,
+                    label: `admin:${version.created_by_admin_id}`,
+                  }
+                : null,
             }),
           ],
         );

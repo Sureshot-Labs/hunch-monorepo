@@ -496,6 +496,7 @@ const publishableArticle: ContentArticle = {
     toc: [],
     contentHash: "a".repeat(64),
     updatedByAdminId: null,
+    updatedByServicePrincipalId: null,
     createdAt: "2026-07-28T12:00:00.000Z",
     updatedAt: "2026-07-28T12:00:00.000Z",
   },
@@ -504,6 +505,8 @@ const publishableArticle: ContentArticle = {
   archivedAt: null,
   createdByAdminId: null,
   updatedByAdminId: null,
+  createdByServicePrincipalId: null,
+  updatedByServicePrincipalId: null,
   publishedByAdminId: null,
   createdAt: "2026-07-28T12:00:00.000Z",
   updatedAt: "2026-07-28T12:00:00.000Z",
@@ -620,6 +623,8 @@ test("supports AWS IAM-role storage without long-lived static keys", () => {
 test("defaults content off and validates production storage safely", () => {
   const defaults = resolveContentRuntimeConfig({}, "production");
   assert.equal(defaults.enabled, false);
+  assert.equal(defaults.journalServiceApiEnabled, false);
+  assert.equal(defaults.journalServiceReviewSubmitEnabled, false);
   assert.equal(defaults.publishingEnabled, false);
   assert.equal(defaults.workerEnabled, false);
   assert.throws(() =>
@@ -660,6 +665,50 @@ test("defaults content off and validates production storage safely", () => {
       ),
     /static content S3 credentials are forbidden/,
   );
+});
+
+test("requires an explicit content boundary and pepper for the journal service", () => {
+  assert.throws(
+    () =>
+      resolveContentRuntimeConfig(
+        { JOURNAL_SERVICE_API_ENABLED: "true" },
+        "production",
+      ),
+    /CONTENT_ENABLED must be true/,
+  );
+  assert.throws(
+    () =>
+      resolveContentRuntimeConfig(
+        {
+          CONTENT_ENABLED: "true",
+          JOURNAL_SERVICE_API_ENABLED: "true",
+          JOURNAL_SERVICE_TOKEN_PEPPER: "short",
+        },
+        "production",
+      ),
+    /JOURNAL_SERVICE_TOKEN_PEPPER must be at least 32 characters/,
+  );
+  assert.throws(
+    () =>
+      resolveContentRuntimeConfig(
+        { JOURNAL_SERVICE_REVIEW_SUBMIT_ENABLED: "true" },
+        "production",
+      ),
+    /JOURNAL_SERVICE_API_ENABLED must be true/,
+  );
+  const enabled = resolveContentRuntimeConfig(
+    {
+      CONTENT_ENABLED: "true",
+      JOURNAL_SERVICE_API_ENABLED: "true",
+      JOURNAL_SERVICE_TOKEN_PEPPER: "p".repeat(32),
+    },
+    "production",
+  );
+  assert.equal(enabled.journalServiceApiEnabled, true);
+  assert.equal(enabled.journalServiceReadRatePerMinute, 120);
+  assert.equal(enabled.journalServiceMutationRatePerMinute, 30);
+  assert.equal(enabled.journalServiceUploadRatePerMinute, 10);
+  assert.equal(enabled.journalServiceMaxConcurrentVerifications, 5);
 });
 
 test("requires a complete fail-closed publishing configuration", () => {
@@ -856,12 +905,15 @@ test("registers gated protected routes and the content schema migrations", () =>
         "enable trigger content_article_versions_immutable",
       ),
   );
-  assert.match(contentDb, /0213_content_editorial_graph\.sql/);
-  assert.match(contentDb, /select count\(\*\) = 20/);
+  assert.match(contentDb, /0224_content_service_actor_contract\.sql/);
+  assert.match(contentDb, /select count\(\*\) = 13/);
+  assert.match(contentDb, /select count\(\*\) = 33/);
   assert.match(contentDb, /content_outbox_version_id_fkey/);
   assert.ok(
     prebuiltDeploy.indexOf('"${compose[@]}" run --rm api') <
-      prebuiltDeploy.indexOf('"${compose[@]}" down --remove-orphans'),
+      prebuiltDeploy.indexOf(
+        '"${compose[@]}" stop "${application_services[@]}"',
+      ),
   );
   const migrationFailureGuard = prebuiltDeploy.match(
     /if ! "\$\{compose\[@\]\}" run --rm api[\s\S]*?Migration failed; existing application containers were left running\.[\s\S]*?exit 1[\s\S]*?fi/,
@@ -869,7 +921,9 @@ test("registers gated protected routes and the content schema migrations", () =>
   assert.ok(migrationFailureGuard);
   assert.ok(
     prebuiltDeploy.indexOf(migrationFailureGuard[0]) <
-      prebuiltDeploy.indexOf('"${compose[@]}" down --remove-orphans'),
+      prebuiltDeploy.indexOf(
+        '"${compose[@]}" stop "${application_services[@]}"',
+      ),
   );
   assert.equal(CONTENT_RENDERER_CONTRACT_ID, "hunch-content-document-v1");
 });

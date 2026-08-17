@@ -38,6 +38,13 @@ import {
   type ContentTocItem,
 } from "./content-document.js";
 import { ContentError } from "./content-errors.js";
+import {
+  adminContentActor,
+  contentActorAdminId,
+  contentActorServicePrincipalId,
+  systemContentActor,
+  type ContentActor,
+} from "./content-actor.js";
 import { promoteContentRoute } from "./content-routes.js";
 
 export { ContentError } from "./content-errors.js";
@@ -56,6 +63,8 @@ type ArticleStateRow = {
   archived_at: Date | string | null;
   created_by_admin_id: string | null;
   updated_by_admin_id: string | null;
+  created_by_service_principal_id: string | null;
+  updated_by_service_principal_id: string | null;
   published_by_admin_id: string | null;
   article_created_at: Date | string;
   article_updated_at: Date | string;
@@ -87,6 +96,7 @@ type DraftRow = {
   toc: unknown;
   content_hash: string;
   updated_by_admin_id: string | null;
+  updated_by_service_principal_id: string | null;
   draft_created_at: Date | string;
   draft_updated_at: Date | string;
 };
@@ -125,6 +135,7 @@ type VersionRow = {
   toc: unknown;
   content_hash: string;
   created_by_admin_id: string | null;
+  created_by_service_principal_id: string | null;
   created_at: Date | string;
 };
 
@@ -139,6 +150,7 @@ type VersionSummaryRow = Pick<
   | "slug"
   | "content_hash"
   | "created_by_admin_id"
+  | "created_by_service_principal_id"
   | "created_at"
 >;
 
@@ -183,6 +195,7 @@ export type ContentArticleDraft = {
   toc: ContentTocItem[];
   contentHash: string;
   updatedByAdminId: string | null;
+  updatedByServicePrincipalId: string | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -203,6 +216,8 @@ export type ContentArticle = {
   archivedAt: string | null;
   createdByAdminId: string | null;
   updatedByAdminId: string | null;
+  createdByServicePrincipalId: string | null;
+  updatedByServicePrincipalId: string | null;
   publishedByAdminId: string | null;
   createdAt: string;
   updatedAt: string;
@@ -222,15 +237,27 @@ export type ContentArticleVersionSummary = {
   slug: string;
   contentHash: string;
   createdByAdminId: string | null;
+  createdByServicePrincipalId: string | null;
   createdAt: string;
 };
 
 export type ContentArticleVersion = ContentArticleVersionSummary & {
   snapshot: Omit<
     ContentArticleDraft,
-    "revision" | "updatedByAdminId" | "createdAt" | "updatedAt"
+    | "revision"
+    | "updatedByAdminId"
+    | "updatedByServicePrincipalId"
+    | "createdAt"
+    | "updatedAt"
   >;
 };
+
+export type ContentActorInput = ContentActor | string | null;
+
+function normalizeContentActor(input: ContentActorInput): ContentActor {
+  if (typeof input === "string") return adminContentActor(input);
+  return input ?? systemContentActor("legacy-system");
+}
 
 export type PublicContentArticleSummary = {
   id: string;
@@ -368,6 +395,8 @@ const ARTICLE_STATE_COLUMNS = `
   a.archived_at,
   a.created_by_admin_id,
   a.updated_by_admin_id,
+  a.created_by_service_principal_id,
+  a.updated_by_service_principal_id,
   a.published_by_admin_id,
   a.created_at as article_created_at,
   a.updated_at as article_updated_at
@@ -399,6 +428,7 @@ const DRAFT_COLUMNS = `
   d.toc,
   d.content_hash,
   d.updated_by_admin_id,
+  d.updated_by_service_principal_id,
   d.created_at as draft_created_at,
   d.updated_at as draft_updated_at
 `;
@@ -429,6 +459,7 @@ const DRAFT_SUMMARY_COLUMNS = `
   '[]'::jsonb as toc,
   d.content_hash,
   d.updated_by_admin_id,
+  d.updated_by_service_principal_id,
   d.created_at as draft_created_at,
   d.updated_at as draft_updated_at
 `;
@@ -462,6 +493,7 @@ const VERSION_COLUMNS = `
   v.toc,
   v.content_hash,
   v.created_by_admin_id,
+  v.created_by_service_principal_id,
   v.created_at
 `;
 
@@ -526,6 +558,7 @@ function draftFromRow(row: DraftRow): ContentArticleDraft {
     revision: row.revision,
     ...snapshotFromRow(row),
     updatedByAdminId: row.updated_by_admin_id,
+    updatedByServicePrincipalId: row.updated_by_service_principal_id,
     createdAt: requiredIso(row.draft_created_at),
     updatedAt: requiredIso(row.draft_updated_at),
   };
@@ -572,6 +605,8 @@ function articleFromRow(row: AdminArticleRow): ContentArticle {
     archivedAt: iso(row.archived_at),
     createdByAdminId: row.created_by_admin_id,
     updatedByAdminId: row.updated_by_admin_id,
+    createdByServicePrincipalId: row.created_by_service_principal_id,
+    updatedByServicePrincipalId: row.updated_by_service_principal_id,
     publishedByAdminId: row.published_by_admin_id,
     createdAt: requiredIso(row.article_created_at),
     updatedAt: draft.updatedAt,
@@ -789,6 +824,11 @@ async function requireArticleForUpdate(
       "content_revision_conflict",
       "Article draft was changed by another editor",
       409,
+      undefined,
+      {
+        currentRevision: row.revision,
+        currentContentHash: row.content_hash,
+      },
     );
   }
   return row;
@@ -1249,12 +1289,104 @@ export function validateArticlePublishability(article: ContentArticle): void {
   }
 }
 
+export type ContentValidationIssue = {
+  code: string;
+  path: string;
+  message: string;
+};
+
+function structuredValidationIssue(message: string): ContentValidationIssue {
+  const normalized = message.toLowerCase();
+  const known: Array<[RegExp, string, string]> = [
+    [/title is required/, "title_required", "title"],
+    [/excerpt is required/, "excerpt_required", "excerpt"],
+    [/list cover is required/, "list_cover_required", "listCover"],
+    [/query cluster/, "query_cluster_invalid", "editorialGraph.queryCluster"],
+    [
+      /primary intent/,
+      "primary_intent_invalid",
+      "editorialGraph.primaryIntent",
+    ],
+    [/author byline/, "author_byline_required", "author.showByline"],
+    [/author profile url/, "author_url_required", "author.url"],
+    [/author bio/, "author_bio_required", "author.bio"],
+    [/social image/, "social_image_required", "socialImage"],
+    [/citation|references block/, "sources_required", "editorialGraph.sources"],
+    [/asset/, "asset_invalid", "document"],
+    [/related article/, "related_article_invalid", "document"],
+    [/parent hub/, "parent_hub_invalid", "editorialGraph.parentHubId"],
+  ];
+  const matched = known.find(([pattern]) => pattern.test(normalized));
+  if (matched) return { code: matched[1], path: matched[2], message };
+  return { code: "content_validation_failed", path: "document", message };
+}
+
+function messagesFromValidationError(error: unknown): string[] {
+  if (error instanceof ContentError) {
+    return error.issues?.length ? error.issues : [error.message];
+  }
+  throw error;
+}
+
+export async function validateContentArticleForService(
+  pool: Pool,
+  articleId: string,
+): Promise<{
+  ready: boolean;
+  issues: ContentValidationIssue[];
+  currentRevision: number;
+  currentContentHash: string;
+}> {
+  return tx(pool, async (db) => {
+    const row = await getArticleRow(db, articleId);
+    if (!row) {
+      throw new ContentError(
+        "content_article_not_found",
+        "Content article not found",
+        404,
+      );
+    }
+    const article = articleFromRow(row);
+    const messages = [...publishabilityIssues(article.draft)];
+    for (const validate of [
+      () => validateDraftAssetsForPublication(db, article.draft),
+      () =>
+        validateRelatedArticlesForPublication(
+          db,
+          article.id,
+          article.draft.document,
+        ),
+      () => validateEditorialGraphForPublication(db, article.id, article.draft),
+    ]) {
+      try {
+        await validate();
+      } catch (error) {
+        messages.push(...messagesFromValidationError(error));
+      }
+    }
+    const issues = [...new Set(messages)]
+      .map(structuredValidationIssue)
+      .sort((left, right) =>
+        `${left.path}:${left.code}:${left.message}`.localeCompare(
+          `${right.path}:${right.code}:${right.message}`,
+        ),
+      );
+    return {
+      ready: issues.length === 0,
+      issues,
+      currentRevision: article.draft.revision,
+      currentContentHash: article.draft.contentHash,
+    };
+  });
+}
+
 async function insertDraft(
   db: DbQuery,
   articleId: string,
   draft: NormalizedDraft,
-  actorAdminId: string | null,
+  actorInput: ContentActorInput,
 ): Promise<void> {
+  const actor = normalizeContentActor(actorInput);
   const derived = deriveDraft(draft);
   await db.query(
     `
@@ -1262,12 +1394,13 @@ async function insertDraft(
         article_id, schema_version, content_kind, editorial_graph, slug, title,
         excerpt, document, list_cover, hero_image, social_image, seo, author,
         category, tags, tag_slugs, locale, featured, plain_text, word_count,
-        reading_time_minutes, toc, content_hash, updated_by_admin_id
+        reading_time_minutes, toc, content_hash, updated_by_admin_id,
+        updated_by_service_principal_id
       ) values (
         $1, $2, $3, $4::jsonb, $5, $6, $7, $8::jsonb,
         $9::jsonb, $10::jsonb, $11::jsonb, $12::jsonb, $13::jsonb,
         $14::jsonb, $15::jsonb, $16, $17, $18, $19, $20, $21,
-        $22::jsonb, $23, $24
+        $22::jsonb, $23, $24, $25
       )
     `,
     [
@@ -1294,7 +1427,8 @@ async function insertDraft(
       derived.readingTimeMinutes,
       json(derived.toc),
       derived.contentHash,
-      actorAdminId,
+      contentActorAdminId(actor),
+      contentActorServicePrincipalId(actor),
     ],
   );
   await syncDraftAssetUsages(db, articleId, draftAssetReferences(draft));
@@ -1303,37 +1437,54 @@ async function insertDraft(
 export async function createContentArticle(
   pool: Pool,
   body: ContentArticleCreateBody,
-  actorAdminId: string | null,
+  actorInput: ContentActorInput,
+  requestedId?: string,
 ): Promise<ContentArticleMutationResult> {
+  return tx(pool, (db) =>
+    createContentArticleInTransaction(db, body, actorInput, requestedId),
+  );
+}
+
+export async function createContentArticleInTransaction(
+  db: DbQuery,
+  body: ContentArticleCreateBody,
+  actorInput: ContentActorInput,
+  requestedId?: string,
+): Promise<ContentArticleMutationResult> {
+  const actor = normalizeContentActor(actorInput);
   const draft = normalizeCreate(body);
   try {
-    return await tx(pool, async (db) => {
-      const { rows } = await db.query<{ id: string }>(
-        `
+    const { rows } = await db.query<{ id: string }>(
+      `
           insert into content_articles (
-            editorial_status, created_by_admin_id, updated_by_admin_id
-          ) values ('draft', $1, $1)
+            id, editorial_status, created_by_admin_id, updated_by_admin_id,
+            created_by_service_principal_id,
+            updated_by_service_principal_id
+          ) values (coalesce($1::uuid, gen_random_uuid()), 'draft', $2, $2, $3, $3)
           returning id
         `,
-        [actorAdminId],
-      );
-      const id = rows[0].id;
-      await reserveDraftSlug(db, id, null, draft.slug);
-      await insertDraft(db, id, draft, actorAdminId);
-      await insertContentAuditEvent(db, {
-        action: "article.created",
-        articleId: id,
-        actorAdminId,
-      });
-      const created = await getArticleRow(db, id);
-      if (!created)
-        throw new Error("Created content article could not be loaded");
-      return {
-        article: articleFromRow(created),
-        previousSlug: null,
-        publicContentChanged: false,
-      };
+      [
+        requestedId ?? null,
+        contentActorAdminId(actor),
+        contentActorServicePrincipalId(actor),
+      ],
+    );
+    const id = rows[0].id;
+    await reserveDraftSlug(db, id, null, draft.slug);
+    await insertDraft(db, id, draft, actor);
+    await insertContentAuditEvent(db, {
+      action: "article.created",
+      articleId: id,
+      actor,
     });
+    const created = await getArticleRow(db, id);
+    if (!created)
+      throw new Error("Created content article could not be loaded");
+    return {
+      article: articleFromRow(created),
+      previousSlug: null,
+      publicContentChanged: false,
+    };
   } catch (error) {
     if (uniqueViolation(error)) throw slugConflict();
     throw error;
@@ -1344,8 +1495,9 @@ export async function updateContentArticle(
   pool: Pool,
   id: string,
   body: ContentArticleUpdateBody,
-  actorAdminId: string | null,
+  actorInput: ContentActorInput,
 ): Promise<ContentArticleMutationResult> {
+  const actor = normalizeContentActor(actorInput);
   try {
     return await tx(pool, async (db) => {
       const existingRow = await requireArticleForUpdate(
@@ -1354,6 +1506,13 @@ export async function updateContentArticle(
         contentArticleUpdateBodySchema.parse(body).expectedRevision,
       );
       const existing = articleFromRow(existingRow);
+      if (actor.kind === "service" && existing.archivedAt) {
+        throw new ContentError(
+          "content_article_archived",
+          "Archived articles cannot be updated by the journal service",
+          409,
+        );
+      }
       const next = mergeDraft(existing.draft, body);
       const derived = deriveDraft(next);
       if (derived.contentHash === existing.draft.contentHash) {
@@ -1364,6 +1523,9 @@ export async function updateContentArticle(
         };
       }
       await reserveDraftSlug(db, id, existing.draft.slug, next.slug);
+      if (actor.kind === "service") {
+        await createCheckpointInTransaction(db, id, existing.draft, actor);
+      }
       const { rows } = await db.query<{ revision: number }>(
         `
           update content_article_drafts
@@ -1391,8 +1553,9 @@ export async function updateContentArticle(
             reading_time_minutes = $20,
             toc = $21::jsonb,
             content_hash = $22,
-            updated_by_admin_id = $23
-          where article_id = $24 and revision = $25
+            updated_by_admin_id = $23,
+            updated_by_service_principal_id = $24
+          where article_id = $25 and revision = $26
           returning revision
         `,
         [
@@ -1418,7 +1581,8 @@ export async function updateContentArticle(
           derived.readingTimeMinutes,
           json(derived.toc),
           derived.contentHash,
-          actorAdminId,
+          contentActorAdminId(actor),
+          contentActorServicePrincipalId(actor),
           id,
           existing.draft.revision,
         ],
@@ -1428,19 +1592,38 @@ export async function updateContentArticle(
           "content_revision_conflict",
           "Article draft was changed by another editor",
           409,
+          undefined,
+          {
+            currentRevision: existing.draft.revision,
+            currentContentHash: existing.draft.contentHash,
+          },
         );
       }
-      if (existing.editorialStatus !== "draft") {
-        await db.query(
-          `
-            update content_articles
-            set editorial_status = 'draft', updated_by_admin_id = $2
-            where id = $1
-          `,
-          [id, actorAdminId],
-        );
-      }
+      await db.query(
+        `
+          update content_articles
+          set editorial_status = 'draft',
+              updated_by_admin_id = $2,
+              updated_by_service_principal_id = $3
+          where id = $1
+        `,
+        [id, contentActorAdminId(actor), contentActorServicePrincipalId(actor)],
+      );
       await syncDraftAssetUsages(db, id, draftAssetReferences(next));
+      await insertContentAuditEvent(db, {
+        action: "article.updated",
+        articleId: id,
+        actor,
+        metadata: {
+          previousRevision: existing.draft.revision,
+          newRevision: existing.draft.revision + 1,
+          previousContentHash: existing.draft.contentHash,
+          newContentHash: derived.contentHash,
+          changedFields: Object.keys(body)
+            .filter((key) => key !== "expectedRevision")
+            .sort(),
+        },
+      });
       const updated = await getArticleRow(db, id);
       if (!updated)
         throw new Error("Updated content article could not be loaded");
@@ -1569,6 +1752,7 @@ function versionSummary(row: VersionSummaryRow): ContentArticleVersionSummary {
     slug: row.slug,
     contentHash: row.content_hash,
     createdByAdminId: row.created_by_admin_id,
+    createdByServicePrincipalId: row.created_by_service_principal_id,
     createdAt: requiredIso(row.created_at),
   };
 }
@@ -1578,8 +1762,9 @@ async function insertVersion(
   articleId: string,
   draft: ContentArticleDraft,
   kind: ContentVersionKind,
-  actorAdminId: string | null,
+  actorInput: ContentActorInput,
 ): Promise<VersionMutationRow> {
+  const actor = normalizeContentActor(actorInput);
   const { rows: numberRows } = await db.query<{ version_number: number }>(
     `select coalesce(max(version_number), 0) + 1 as version_number from content_article_versions where article_id = $1`,
     [articleId],
@@ -1592,17 +1777,18 @@ async function insertVersion(
         schema_version, content_kind, editorial_graph, slug, title, excerpt,
         document, list_cover, hero_image, social_image, seo, author, category,
         tags, tag_slugs, locale, featured, plain_text, word_count,
-        reading_time_minutes, toc, content_hash, created_by_admin_id
+        reading_time_minutes, toc, content_hash, created_by_admin_id,
+        created_by_service_principal_id
       ) values (
         $1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11::jsonb,
         $12::jsonb, $13::jsonb, $14::jsonb, $15::jsonb, $16::jsonb,
         $17::jsonb, $18::jsonb, $19, $20, $21, $22, $23, $24,
-        $25::jsonb, $26, $27
+        $25::jsonb, $26, $27, $28
       )
       returning
         id, article_id, version_number, source_draft_revision, kind,
         title, slug, content_hash, tag_slugs, featured,
-        created_by_admin_id, created_at
+        created_by_admin_id, created_by_service_principal_id, created_at
     `,
     [
       articleId,
@@ -1631,7 +1817,8 @@ async function insertVersion(
       draft.readingTimeMinutes,
       json(draft.toc),
       draft.contentHash,
-      actorAdminId,
+      contentActorAdminId(actor),
+      contentActorServicePrincipalId(actor),
     ],
   );
   const version = rows[0];
@@ -1685,22 +1872,30 @@ async function insertContentAuditEvent(
   inputs: {
     action: string;
     articleId: string;
-    actorAdminId: string | null;
+    actor?: ContentActorInput;
+    actorAdminId?: string | null;
     versionId?: string | null;
     metadata?: Record<string, unknown>;
   },
 ): Promise<void> {
+  const actor = normalizeContentActor(
+    inputs.actor ?? inputs.actorAdminId ?? null,
+  );
   await db.query(
     `
       insert into content_audit_events (
-        action, article_id, version_id, actor_admin_id, metadata
-      ) values ($1, $2, $3, $4, $5::jsonb)
+        action, article_id, version_id, actor_admin_id,
+        actor_kind, actor_service_principal_id, actor_label, metadata
+      ) values ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
     `,
     [
       inputs.action,
       inputs.articleId,
       inputs.versionId ?? null,
-      inputs.actorAdminId,
+      contentActorAdminId(actor),
+      actor.kind,
+      contentActorServicePrincipalId(actor),
+      actor.label,
       json(inputs.metadata ?? {}),
     ],
   );
@@ -1719,7 +1914,12 @@ async function cancelScheduledPublication(db: DbQuery, articleId: string) {
 
 export async function createContentArticleCheckpoint(
   pool: Pool,
-  inputs: { id: string; expectedRevision: number; actorAdminId: string | null },
+  inputs: {
+    id: string;
+    expectedRevision: number;
+    actorAdminId?: string | null;
+    actor?: ContentActorInput;
+  },
 ): Promise<ContentArticleVersionSummary> {
   return tx(pool, async (db) => {
     const row = await requireArticleForUpdate(
@@ -1727,39 +1927,54 @@ export async function createContentArticleCheckpoint(
       inputs.id,
       inputs.expectedRevision,
     );
-    const draft = draftFromRow(row);
-    const { rows: existingRows } = await db.query<VersionSummaryRow>(
-      `
+    return createCheckpointInTransaction(
+      db,
+      inputs.id,
+      draftFromRow(row),
+      inputs.actor ?? inputs.actorAdminId ?? null,
+    );
+  });
+}
+
+async function createCheckpointInTransaction(
+  db: DbQuery,
+  articleId: string,
+  draft: ContentArticleDraft,
+  actorInput: ContentActorInput,
+): Promise<ContentArticleVersionSummary> {
+  const actor = normalizeContentActor(actorInput);
+  const { rows: existingRows } = await db.query<VersionSummaryRow>(
+    `
         select
           v.id, v.article_id, v.version_number, v.source_draft_revision,
           v.kind, v.title, v.slug, v.content_hash,
-          v.created_by_admin_id, v.created_at
+          v.created_by_admin_id, v.created_by_service_principal_id, v.created_at
         from content_article_versions v
         where v.article_id = $1 and v.kind = 'checkpoint'
         order by v.created_at desc, v.id desc
         limit 1
       `,
-      [inputs.id],
-    );
-    const existing = existingRows[0];
-    if (existing?.content_hash === draft.contentHash) {
-      return versionSummary(existing);
-    }
-    const checkpoint = await insertVersion(
-      db,
-      inputs.id,
-      draft,
-      "checkpoint",
-      inputs.actorAdminId,
-    );
-    await insertContentAuditEvent(db, {
-      action: "article.checkpoint_created",
-      articleId: inputs.id,
-      versionId: checkpoint.id,
-      actorAdminId: inputs.actorAdminId,
-    });
-    await db.query(
-      `
+    [articleId],
+  );
+  const existing = existingRows[0];
+  if (existing?.content_hash === draft.contentHash) {
+    return versionSummary(existing);
+  }
+  const checkpoint = await insertVersion(
+    db,
+    articleId,
+    draft,
+    "checkpoint",
+    actor,
+  );
+  await insertContentAuditEvent(db, {
+    action: "article.checkpoint_created",
+    articleId,
+    versionId: checkpoint.id,
+    actor,
+  });
+  await db.query(
+    `
         delete from content_article_versions
         where id in (
           select id
@@ -1769,10 +1984,9 @@ export async function createContentArticleCheckpoint(
           offset $2
         )
       `,
-      [inputs.id, CONTENT_MAX_CHECKPOINTS_PER_ARTICLE],
-    );
-    return versionSummary(checkpoint);
-  });
+    [articleId, CONTENT_MAX_CHECKPOINTS_PER_ARTICLE],
+  );
+  return versionSummary(checkpoint);
 }
 
 export async function publishContentArticle(
@@ -1842,7 +2056,8 @@ export async function publishContentArticle(
             scheduled_version_id = $2,
             scheduled_for = $3,
             archived_at = null,
-            updated_by_admin_id = $4
+            updated_by_admin_id = $4,
+            updated_by_service_principal_id = null
           where id = $1
         `,
         [inputs.id, version.id, requestedAt, inputs.actorAdminId],
@@ -1878,6 +2093,7 @@ export async function publishContentArticle(
             published_at = $6,
             archived_at = null,
             updated_by_admin_id = $7,
+            updated_by_service_principal_id = null,
             published_by_admin_id = $7
           where id = $1
         `,
@@ -1947,7 +2163,8 @@ export async function cancelContentArticleSchedule(
       `
         update content_articles
         set scheduled_version_id = null, scheduled_for = null,
-            updated_by_admin_id = $2
+            updated_by_admin_id = $2,
+            updated_by_service_principal_id = null
         where id = $1
       `,
       [inputs.id, inputs.actorAdminId],
@@ -2009,7 +2226,8 @@ export async function unpublishContentArticle(
           published_featured = false,
           published_at = null,
           scheduled_for = null,
-          updated_by_admin_id = $2
+          updated_by_admin_id = $2,
+          updated_by_service_principal_id = null
         where id = $1
       `,
       [inputs.id, inputs.actorAdminId],
@@ -2065,7 +2283,8 @@ export async function archiveContentArticle(
       `
         update content_articles
         set archived_at = now(), scheduled_version_id = null,
-            scheduled_for = null, updated_by_admin_id = $2
+            scheduled_for = null, updated_by_admin_id = $2,
+            updated_by_service_principal_id = null
         where id = $1
       `,
       [inputs.id, inputs.actorAdminId],
@@ -2104,10 +2323,14 @@ export async function transitionContentArticleReview(
   inputs: {
     id: string;
     expectedRevision: number;
-    actorAdminId: string | null;
+    actorAdminId?: string | null;
+    actor?: ContentActorInput;
     status: ContentEditorialStatus;
   },
 ): Promise<ContentArticle> {
+  const actor = normalizeContentActor(
+    inputs.actor ?? inputs.actorAdminId ?? null,
+  );
   return tx(pool, async (db) => {
     const row = await requireArticleForUpdate(
       db,
@@ -2136,10 +2359,16 @@ export async function transitionContentArticleReview(
     await db.query(
       `
         update content_articles
-        set editorial_status = $2, updated_by_admin_id = $3
+        set editorial_status = $2, updated_by_admin_id = $3,
+            updated_by_service_principal_id = $4
         where id = $1
       `,
-      [inputs.id, inputs.status, inputs.actorAdminId],
+      [
+        inputs.id,
+        inputs.status,
+        contentActorAdminId(actor),
+        contentActorServicePrincipalId(actor),
+      ],
     );
     await db.query(
       "update content_article_drafts set revision = revision + 1 where article_id = $1",
@@ -2148,7 +2377,7 @@ export async function transitionContentArticleReview(
     await insertContentAuditEvent(db, {
       action: `article.review_${inputs.status}`,
       articleId: inputs.id,
-      actorAdminId: inputs.actorAdminId,
+      actor,
     });
     const updated = await getArticleRow(db, inputs.id);
     if (!updated) throw new Error("Transitioned article could not be loaded");
@@ -2171,7 +2400,7 @@ export async function listContentArticleVersions(
       select
         v.id, v.article_id, v.version_number, v.source_draft_revision,
         v.kind, v.title, v.slug, v.content_hash,
-        v.created_by_admin_id, v.created_at
+        v.created_by_admin_id, v.created_by_service_principal_id, v.created_at
       from content_article_versions v
       where v.article_id = $1
         and (
@@ -2227,6 +2456,14 @@ export type ContentAuditEvent = {
   assetId: string | null;
   versionId: string | null;
   actorAdminId: string | null;
+  actorServicePrincipalId: string | null;
+  actorKind: "admin" | "service" | "system";
+  actorLabel: string;
+  actor: {
+    kind: "admin" | "service" | "system";
+    id: string | null;
+    label: string;
+  };
   metadata: Record<string, unknown>;
   createdAt: string;
 };
@@ -2245,13 +2482,16 @@ export async function listContentArticleAudit(
     asset_id: string | null;
     version_id: string | null;
     actor_admin_id: string | null;
+    actor_service_principal_id: string | null;
+    actor_kind: "admin" | "service" | "system" | null;
+    actor_label: string | null;
     metadata: Record<string, unknown>;
     created_at: Date | string;
   }>(
     `
       select
         id, action, article_id, asset_id, version_id, actor_admin_id,
-        metadata, created_at
+        actor_service_principal_id, actor_kind, actor_label, metadata, created_at
       from content_audit_events
       where article_id = $1
         and (
@@ -2269,16 +2509,31 @@ export async function listContentArticleAudit(
     ],
   );
   const selected = rows.slice(0, inputs.limit);
-  const items = selected.map((row) => ({
-    id: String(row.id),
-    action: row.action,
-    articleId: row.article_id,
-    assetId: row.asset_id,
-    versionId: row.version_id,
-    actorAdminId: row.actor_admin_id,
-    metadata: row.metadata,
-    createdAt: requiredIso(row.created_at),
-  }));
+  const items = selected.map((row) => {
+    const actorKind =
+      row.actor_kind ?? (row.actor_admin_id ? "admin" : "system");
+    const actorId =
+      actorKind === "admin"
+        ? row.actor_admin_id
+        : actorKind === "service"
+          ? row.actor_service_principal_id
+          : null;
+    const actorLabel = row.actor_label ?? `${actorKind}:${actorId ?? "legacy"}`;
+    return {
+      id: String(row.id),
+      action: row.action,
+      articleId: row.article_id,
+      assetId: row.asset_id,
+      versionId: row.version_id,
+      actorAdminId: row.actor_admin_id,
+      actorServicePrincipalId: row.actor_service_principal_id,
+      actorKind,
+      actorLabel,
+      actor: { kind: actorKind, id: actorId, label: actorLabel },
+      metadata: row.metadata,
+      createdAt: requiredIso(row.created_at),
+    };
+  });
   const last = items.at(-1);
   return {
     items,
@@ -2351,7 +2606,8 @@ export async function restoreContentArticleVersion(
           reading_time_minutes = $21,
           toc = $22::jsonb,
           content_hash = $23,
-          updated_by_admin_id = $24
+          updated_by_admin_id = $24,
+          updated_by_service_principal_id = null
         where article_id = $1 and revision = $25
       `,
       [
@@ -2396,7 +2652,8 @@ export async function restoreContentArticleVersion(
             published_featured = false,
             published_at = null,
             scheduled_for = null,
-            updated_by_admin_id = $2
+            updated_by_admin_id = $2,
+            updated_by_service_principal_id = null
           where id = $1
         `,
         [inputs.id, inputs.actorAdminId],
@@ -2407,7 +2664,10 @@ export async function restoreContentArticleVersion(
       );
     } else {
       await db.query(
-        `update content_articles set editorial_status = 'draft', updated_by_admin_id = $2 where id = $1`,
+        `update content_articles
+         set editorial_status = 'draft', updated_by_admin_id = $2,
+             updated_by_service_principal_id = null
+         where id = $1`,
         [inputs.id, inputs.actorAdminId],
       );
     }

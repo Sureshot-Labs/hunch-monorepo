@@ -815,6 +815,24 @@ const aggMarketCredential = resolveAggMarketCredential();
 export const env = {
   content: contentRuntimeConfig,
   contentEnabled: contentRuntimeConfig.enabled,
+  journalServiceApiEnabled: contentRuntimeConfig.journalServiceApiEnabled,
+  journalServiceReviewSubmitEnabled:
+    contentRuntimeConfig.journalServiceReviewSubmitEnabled,
+  journalServiceTokenPepper: contentRuntimeConfig.journalServiceTokenPepper,
+  journalServiceCredentialMaxTtlDays:
+    contentRuntimeConfig.journalServiceCredentialMaxTtlDays,
+  journalServiceReadRatePerMinute:
+    contentRuntimeConfig.journalServiceReadRatePerMinute,
+  journalServiceMutationRatePerMinute:
+    contentRuntimeConfig.journalServiceMutationRatePerMinute,
+  journalServiceUploadRatePerMinute:
+    contentRuntimeConfig.journalServiceUploadRatePerMinute,
+  journalServiceMaxConcurrentVerifications:
+    contentRuntimeConfig.journalServiceMaxConcurrentVerifications,
+  journalServiceDailyUploadBytes:
+    contentRuntimeConfig.journalServiceDailyUploadBytes,
+  journalServiceIdempotencyLeaseSec:
+    contentRuntimeConfig.journalServiceIdempotencyLeaseSec,
   contentPublishingEnabled: contentRuntimeConfig.publishingEnabled,
   contentRequireApproval: contentRuntimeConfig.requireApproval,
   contentRendererContractId: contentRuntimeConfig.rendererContractId,

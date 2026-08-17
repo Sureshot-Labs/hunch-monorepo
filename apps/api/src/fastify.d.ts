@@ -5,6 +5,11 @@ import type {
   AdminActor,
   AdminSession,
 } from "./services/admin-auth.js";
+import type { ContentActor } from "./services/content-actor.js";
+import type {
+  JournalServiceCredential,
+  JournalServicePrincipal,
+} from "./services/journal-service-auth.js";
 
 declare module "fastify" {
   interface FastifyRequest {
@@ -14,6 +19,11 @@ declare module "fastify" {
     adminAccount?: AdminAccount;
     adminActor?: AdminActor;
     adminSession?: AdminSession;
+    contentActor?: ContentActor;
+    journalServicePrincipal?: JournalServicePrincipal;
+    journalServiceCredential?: JournalServiceCredential;
+    journalServiceClientIp?: string;
+    journalServiceRequiredScope?: string;
     _t0?: number;
   }
 }

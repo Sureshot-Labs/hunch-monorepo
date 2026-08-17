@@ -334,6 +334,10 @@ export const contentAssetUpdateBodySchema = z
     creditUrl: z.string().trim().url().max(2_048).nullable().optional(),
     focalX: z.number().min(0).max(1).nullable().optional(),
     focalY: z.number().min(0).max(1).nullable().optional(),
+    sourceType: z
+      .enum(["app-screenshot", "telegram-screenshot", "generated-editorial"])
+      .optional(),
+    license: z.string().trim().min(1).max(200).nullable().optional(),
   })
   .strict()
   .refine((value) => Object.keys(value).length > 0, {
@@ -342,6 +346,36 @@ export const contentAssetUpdateBodySchema = z
 
 export const contentAssetIdParamsSchema = z.object({
   id: z.string().uuid(),
+});
+
+export const journalServiceIdempotencyHeadersSchema = z
+  .object({
+    "idempotency-key": z
+      .string()
+      .min(8)
+      .max(128)
+      .regex(/^[A-Za-z0-9._:-]+$/),
+  })
+  .passthrough();
+
+export const journalServiceAssetCreateBodySchema = contentAssetCreateBodySchema
+  .omit({ kind: true, metadata: true })
+  .extend({
+    sourceType: z.enum([
+      "app-screenshot",
+      "telegram-screenshot",
+      "generated-editorial",
+    ]),
+    license: z.string().trim().min(1).max(200).nullable().optional(),
+  })
+  .strict();
+
+export const journalServiceAssetUpdateBodySchema = contentAssetUpdateBodySchema;
+
+export const journalServiceAssetsQuerySchema = z.object({
+  cursor: contentCursorSchema,
+  limit: z.coerce.number().int().min(1).max(100).default(30),
+  status: contentAssetStatusSchema.optional(),
 });
 
 export const adminContentAssetsQuerySchema = z.object({
@@ -376,4 +410,10 @@ export type ContentAssetCompleteBody = z.infer<
 >;
 export type ContentAssetUpdateBody = z.infer<
   typeof contentAssetUpdateBodySchema
+>;
+export type JournalServiceAssetCreateBody = z.infer<
+  typeof journalServiceAssetCreateBodySchema
+>;
+export type JournalServiceAssetUpdateBody = z.infer<
+  typeof journalServiceAssetUpdateBodySchema
 >;
