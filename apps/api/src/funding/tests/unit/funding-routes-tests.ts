@@ -434,6 +434,11 @@ async function buildApp(overrides: Partial<FundingRouteDependencies> = {}) {
       })),
     }),
     liquidity: async () => liquidity(),
+    tradeShortfallPreflight: async () => ({
+      additionalDestinationAmount: null,
+      fundingRequired: true,
+      liquidity: liquidity(),
+    }),
     quote: async () => quote(),
     commit: async () => ({ operation: operation(), replayed: false }),
     operation: async () => operation(),
@@ -1009,6 +1014,94 @@ await test("trade shortfall liquidity forwards the selected controller wallet", 
     });
     assert.equal(response.statusCode, 200);
     assert.equal(observedControllerWalletRef, controllerWalletRef);
+  } finally {
+    await app.close();
+  }
+});
+
+await test("trusted trade preflight owns the derived shortfall", async () => {
+  const controllerWalletRef = "20000000-0000-4000-8000-000000000002";
+  let observedUserId: string | null = null;
+  let observedRequest: unknown = null;
+  const app = await buildApp({
+    tradeShortfallPreflight: async (userId, request) => {
+      observedUserId = userId;
+      observedRequest = request;
+      return {
+        additionalDestinationAmount: { asset: ASSET, raw: "500000" },
+        fundingRequired: true,
+        liquidity: liquidity(),
+      };
+    },
+  });
+  try {
+    const payload = {
+      purpose: "trade_shortfall",
+      requestedDestinationAmount: { asset: ASSET, raw: "14201601" },
+      confirmedSourceAmount: null,
+      marketContextId: "token-yes",
+      consumerIntent: {
+        venueId: "polymarket",
+        marketId: "polymarket:market-1",
+        marketContextId: "token-yes",
+        side: "BUY",
+        spend: { asset: ASSET, raw: "14201601" },
+      },
+      destinationOptionId: "destination_poly_12345678",
+      withdrawalRecipientId: null,
+      venueBindingOptionId: "binding_poly_12345678",
+      controllerWalletRef,
+      maxFeeUsd: null,
+      maxSlippageBps: null,
+      deadline: null,
+    };
+    const response = await app.inject({
+      method: "POST",
+      url: "/funding/trade-shortfall-preflight",
+      payload,
+    });
+    assert.equal(response.statusCode, 200);
+    assert.equal(observedUserId, USER_ID);
+    assert.deepEqual(observedRequest, payload);
+    assert.equal(response.json().additionalDestinationAmount.raw, "500000");
+    assert.equal(response.json().fundingRequired, true);
+  } finally {
+    await app.close();
+  }
+});
+
+await test("trusted trade preflight rejects non-trade input before planning", async () => {
+  let calls = 0;
+  const app = await buildApp({
+    tradeShortfallPreflight: async () => {
+      calls += 1;
+      return {
+        additionalDestinationAmount: null,
+        fundingRequired: true,
+        liquidity: liquidity(),
+      };
+    },
+  });
+  try {
+    const response = await app.inject({
+      method: "POST",
+      url: "/funding/trade-shortfall-preflight",
+      payload: {
+        purpose: "add_funds",
+        requestedDestinationAmount: { asset: ASSET, raw: "1000000" },
+        confirmedSourceAmount: null,
+        marketContextId: null,
+        destinationOptionId: "destination_poly_12345678",
+        withdrawalRecipientId: null,
+        venueBindingOptionId: null,
+        controllerWalletRef: "20000000-0000-4000-8000-000000000002",
+        maxFeeUsd: null,
+        maxSlippageBps: null,
+        deadline: null,
+      },
+    });
+    assert.equal(response.statusCode, 400);
+    assert.equal(calls, 0);
   } finally {
     await app.close();
   }

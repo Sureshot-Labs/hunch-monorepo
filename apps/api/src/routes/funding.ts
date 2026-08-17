@@ -9,6 +9,7 @@ import type { ZodTypeProvider } from "fastify-type-provider-zod";
 
 import { createAuthMiddleware } from "../auth.js";
 import { pool } from "../db.js";
+import { buildAccountValueReadModel } from "../account-value/runtime-service.js";
 import type {
   FundingCommitRequest,
   FundingDestinationOption,
@@ -26,6 +27,7 @@ import {
   FundingPlanningRuntime,
   type FundingDestinationQuery,
 } from "../funding/planner/runtime-service.js";
+import { preflightTrustedTradeShortfall } from "../funding/planner/trade-shortfall-preflight.js";
 import {
   FundingReceiveSessionService,
   type FundingReceiveSessionResponse,
@@ -55,6 +57,8 @@ import {
   fundingDestinationsQuerySchema,
   fundingDestinationsResponseSchema,
   fundingLiquidityResponseSchema,
+  fundingTradeShortfallPreflightRequestSchema,
+  fundingTradeShortfallPreflightResponseSchema,
   fundingDiscoveryRequestSchema,
   fundingOperationParamsSchema,
   fundingOperationActionParamsSchema,
@@ -86,6 +90,7 @@ import {
   fundingWithdrawalDestinationRevokeResponseSchema,
   externalIngressInstructionSchema,
 } from "../schemas/funding.js";
+import { createApiTradingApplicationService } from "../services/api-trading-service.js";
 
 const DEFAULT_FUNDING_REQUESTS_PER_MINUTE = 30;
 const ACTIVE_FUNDING_READ_REQUESTS_PER_MINUTE = 180;
@@ -205,6 +210,16 @@ export type FundingRouteDependencies = Readonly<{
     userId: string,
     request: FundingDiscoveryRequest,
   ): Promise<IntentLiquidityProjection>;
+  tradeShortfallPreflight(
+    userId: string,
+    request: FundingDiscoveryRequest,
+  ): Promise<
+    Readonly<{
+      additionalDestinationAmount: FundingDiscoveryRequest["requestedDestinationAmount"];
+      fundingRequired: boolean;
+      liquidity: IntentLiquidityProjection | null;
+    }>
+  >;
   quote(
     userId: string,
     request: FundingQuoteRequest,
@@ -1127,6 +1142,43 @@ export function registerFundingRoutes(
   );
 
   z.post(
+    "/funding/trade-shortfall-preflight",
+    {
+      preHandler: dependencies.authenticate,
+      schema: {
+        body: fundingTradeShortfallPreflightRequestSchema,
+        response: {
+          200: fundingTradeShortfallPreflightResponseSchema,
+          ...errors,
+        },
+      },
+    },
+    (request, reply) =>
+      handleFundingRequest(
+        request,
+        reply,
+        dependencies,
+        {
+          endpoint: "trade-shortfall-preflight",
+          logMessage: "Trusted trade shortfall preflight failed",
+          publicError: "Trade funding could not be calculated",
+        },
+        async (userId) => {
+          const result = await dependencies.tradeShortfallPreflight(
+            userId,
+            request.body,
+          );
+          return reply.send(
+            fundingTradeShortfallPreflightResponseSchema.parse({
+              ok: true,
+              ...result,
+            }),
+          );
+        },
+      ),
+  );
+
+  z.post(
     "/funding/liquidity",
     {
       preHandler: dependencies.authenticate,
@@ -1361,6 +1413,18 @@ export const fundingRoutes: FastifyPluginAsync = async (app) => {
     reconcilePreparationRun: (userId, runId) =>
       runtime.reconcilePreparationRun(userId, runId),
     liquidity: (userId, request) => runtime.liquidity(userId, request),
+    tradeShortfallPreflight: async (userId, request) =>
+      preflightTrustedTradeShortfall({
+        account: await buildAccountValueReadModel({ pool, userId }),
+        liquidity: (trustedRequest) =>
+          runtime.liquidity(userId, trustedRequest),
+        request,
+        trading: createApiTradingApplicationService({
+          logger: app.log,
+          pool,
+        }),
+        userId,
+      }),
     quote: (userId, request) => runtime.quote(userId, request),
     commit: (userId, request) => runtime.commit(userId, request),
     operation: (userId, operationId) => runtime.operation(userId, operationId),

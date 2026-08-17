@@ -45,6 +45,8 @@ export type TelegramTradeShortfallProposal = Readonly<{
   eta: FundingQuoteSummary["eta"];
   destinationOptionId: string;
   venueBindingOptionId: string;
+  /** Exact trusted top-up used to make the stored liquidity projection. */
+  serverAdditionalDestinationAmount: Money;
   requestedDestinationAmount: Money;
   proposalFingerprint: string;
   expiresAt: string;
@@ -74,6 +76,8 @@ export type TelegramTradeShortfallIdentity = Readonly<{
   side: Side;
   maximumSpendUsd: string;
   additionalFundingUsd?: string;
+  /** Exact-raw form replayed from a durable server proposal. */
+  additionalFundingRaw?: string;
   maxFeeUsd: string;
   maxSlippageBps: number;
   deadline: string;
@@ -108,6 +112,25 @@ function usdToStableRaw(value: string): string {
   ).toString();
 }
 
+function exactStableRaw(input: TelegramTradeShortfallIdentity): string | null {
+  const decimalRaw = input.additionalFundingUsd
+    ? usdToStableRaw(input.additionalFundingUsd)
+    : null;
+  if (input.additionalFundingRaw != null) {
+    if (!/^[1-9][0-9]*$/u.test(input.additionalFundingRaw)) {
+      throw new Error("trade funding exact shortfall is invalid");
+    }
+    if (decimalRaw != null && decimalRaw !== input.additionalFundingRaw) {
+      throw new Error("trade funding shortfall representations disagree");
+    }
+    return input.additionalFundingRaw;
+  }
+  if (decimalRaw === "0") {
+    throw new Error("trade funding exact shortfall must be positive");
+  }
+  return decimalRaw;
+}
+
 export function buildTelegramTradeShortfallRequest(
   input: TelegramTradeShortfallIdentity,
   serverExecutionProfileId?: string,
@@ -116,14 +139,15 @@ export function buildTelegramTradeShortfallRequest(
     asset: destinationAsset(input.venue),
     raw: usdToStableRaw(input.maximumSpendUsd),
   };
+  const additionalFundingRaw = exactStableRaw(input);
   return {
     purpose: "trade_shortfall",
     requestedDestinationAmount,
-    ...(input.additionalFundingUsd
+    ...(additionalFundingRaw != null
       ? {
           serverAdditionalDestinationAmount: {
             asset: requestedDestinationAmount.asset,
-            raw: usdToStableRaw(input.additionalFundingUsd),
+            raw: additionalFundingRaw,
           },
         }
       : {}),
@@ -145,6 +169,38 @@ export function buildTelegramTradeShortfallRequest(
     maxSlippageBps: input.maxSlippageBps,
     deadline: input.deadline,
   };
+}
+
+export function buildTelegramTradeShortfallCommitRequest(
+  input: TelegramTradeShortfallIdentity,
+  proposal: Pick<
+    TelegramTradeShortfallProposal,
+    | "requestedDestinationAmount"
+    | "serverAdditionalDestinationAmount"
+    | "serverExecutionProfileId"
+  >,
+): FundingDiscoveryRequest {
+  const serverAdditionalDestinationAmount =
+    proposal.serverAdditionalDestinationAmount;
+  if (
+    !serverAdditionalDestinationAmount ||
+    !sameAsset(
+      serverAdditionalDestinationAmount.asset,
+      proposal.requestedDestinationAmount.asset,
+    ) ||
+    !/^[1-9][0-9]*$/u.test(serverAdditionalDestinationAmount.raw) ||
+    BigInt(serverAdditionalDestinationAmount.raw) >
+      BigInt(proposal.requestedDestinationAmount.raw)
+  ) {
+    throw new Error("trade funding proposal lacks its exact shortfall");
+  }
+  return buildTelegramTradeShortfallRequest(
+    {
+      ...input,
+      additionalFundingRaw: serverAdditionalDestinationAmount.raw,
+    },
+    proposal.serverExecutionProfileId,
+  );
 }
 
 function optionSourceAssets(option: SourceOption): readonly AssetRef[] {
@@ -295,6 +351,7 @@ function proposalFromOption(
   }>,
   option: SourceOption,
   profileId: string,
+  serverAdditionalDestinationAmount: Money,
 ): TelegramTradeShortfallProposal {
   if (
     !projection.destinationOptionId ||
@@ -336,6 +393,7 @@ function proposalFromOption(
     eta: option.eta,
     destinationOptionId: projection.destinationOptionId,
     venueBindingOptionId: projection.venueBindingOptionId,
+    serverAdditionalDestinationAmount,
     requestedDestinationAmount: {
       asset: projection.collateralAsset,
       raw: projection.requestedCollateralRaw,
@@ -480,12 +538,25 @@ export class TelegramTradeShortfallFundingService {
         reasonCodes: ["internal_route_changed_during_delegated_planning"],
       };
     }
+    const delegatedRequest = buildTelegramTradeShortfallRequest(
+      input,
+      profileId,
+    );
+    const serverAdditionalDestinationAmount =
+      delegatedRequest.serverAdditionalDestinationAmount;
+    if (!serverAdditionalDestinationAmount) {
+      return {
+        kind: "temporarily_unavailable",
+        reasonCodes: ["internal_route_shortfall_amount_unavailable"],
+      };
+    }
     return {
       kind: "internal_route",
       proposal: proposalFromOption(
         delegatedPlan,
         delegatedAutomated.option,
         profileId,
+        serverAdditionalDestinationAmount,
       ),
     };
   }
@@ -505,9 +576,9 @@ export class TelegramTradeShortfallFundingService {
     ) {
       throw new Error("trade funding proposal expired or changed");
     }
-    const requestedDestinationAmount = buildTelegramTradeShortfallRequest(
+    const requestedDestinationAmount = buildTelegramTradeShortfallCommitRequest(
       input,
-      input.proposal.serverExecutionProfileId,
+      input.proposal,
     ).requestedDestinationAmount;
     if (
       !requestedDestinationAmount ||

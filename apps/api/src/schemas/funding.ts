@@ -22,6 +22,24 @@ export {
   fundingQuoteRequestSchema,
 };
 
+export const fundingTradeShortfallPreflightRequestSchema =
+  fundingDiscoveryRequestSchema.superRefine((request, context) => {
+    if (request.purpose !== "trade_shortfall") {
+      context.addIssue({
+        code: "custom",
+        path: ["purpose"],
+        message: "trusted preflight is available only for a trade shortfall",
+      });
+    }
+    if (!request.controllerWalletRef) {
+      context.addIssue({
+        code: "custom",
+        path: ["controllerWalletRef"],
+        message: "trusted preflight requires the selected controller wallet",
+      });
+    }
+  });
+
 export const fundingReasonCodeSchema = z.enum(FUNDING_REASON_CODES);
 const preparationPurposeSchema = z.enum([
   "fund",
@@ -801,6 +819,15 @@ export const fundingLiquidityResponseSchema = z
   .object({
     ok: z.literal(true),
     liquidity: intentLiquidityProjectionSchema,
+  })
+  .strict();
+
+export const fundingTradeShortfallPreflightResponseSchema = z
+  .object({
+    ok: z.literal(true),
+    fundingRequired: z.boolean(),
+    additionalDestinationAmount: moneySchema.nullable(),
+    liquidity: intentLiquidityProjectionSchema.nullable(),
   })
   .strict();
 
