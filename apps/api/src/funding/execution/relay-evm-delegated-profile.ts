@@ -18,10 +18,7 @@ const ERC20 = new ethers.Interface([
   "function approve(address spender,uint256 amount)",
 ]);
 
-export type RelayEvmDelegatedStepKind =
-  | "approve"
-  | "deposit"
-  | "cleanup";
+export type RelayEvmDelegatedStepKind = "approve" | "deposit" | "cleanup";
 
 function positiveRaw(value: string): bigint | null {
   return /^[1-9][0-9]*$/u.test(value) ? BigInt(value) : null;

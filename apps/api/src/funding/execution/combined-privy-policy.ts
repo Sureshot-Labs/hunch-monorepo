@@ -42,8 +42,7 @@ export function validateCombinedPolymarketRelayPolicy(
     policy: {
       ...input.policy,
       rules: input.policy.rules.filter(
-        (rule) =>
-          relayEvmPolicyRuleKind(rule) === null,
+        (rule) => relayEvmPolicyRuleKind(rule) === null,
       ),
     },
     profile: input.profile,
@@ -72,10 +71,7 @@ export function validateCombinedPolymarketRelayPolicy(
   return {
     ...polymarketValidation,
     issues: [...polymarketValidation.issues, ...relayIssues],
-    valid:
-      polymarketValidation.valid &&
-      relayValidation.valid &&
-      capMatches,
+    valid: polymarketValidation.valid && relayValidation.valid && capMatches,
     relayMaxSourceRaw: relayValidation.maxSourceRaw,
     relayRulesPresent: true,
   };

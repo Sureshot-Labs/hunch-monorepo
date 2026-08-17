@@ -22,8 +22,7 @@ const MIGRATION_0211 = "0211_funding_receive_receipt_rearm.sql";
 const MIGRATION_0214 = "0214_funding_receive_observation_wake.sql";
 const MIGRATION_0215 = "0215_telegram_buy_delivery_modes.sql";
 const MIGRATION_0216 = "0216_telegram_trade_shortfall_funding.sql";
-const MIGRATION_0217 =
-  "0217_telegram_app_handoff_funding_confirmation.sql";
+const MIGRATION_0217 = "0217_telegram_app_handoff_funding_confirmation.sql";
 const FUNDING_MIGRATIONS = [
   MIGRATION_0184,
   MIGRATION_0193,
@@ -1252,11 +1251,7 @@ export async function inspectFundingMigrationPreflight(
       db,
       "public.telegram_trade_intents",
       "telegram_trade_intents_delivery_authority_check",
-      [
-        "fundingstate",
-        "fundingproposal",
-        "funding_operation_id is not null",
-      ],
+      ["fundingstate", "fundingproposal", "funding_operation_id is not null"],
     );
   const hasTelegramProjectionWatermark =
     hasTelegramFundingSessions &&

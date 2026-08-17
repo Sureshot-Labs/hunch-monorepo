@@ -350,12 +350,10 @@ export class TelegramTradeShortfallFundingService {
     input: TelegramTradeShortfallIdentity,
   ): Promise<TelegramTradeShortfallInspection> {
     const destination = destinationAsset(input.venue);
-    let candidate:
-      | Readonly<{
-          plan: Awaited<ReturnType<FundingPlanningRuntime["liquidity"]>>;
-          profileId: string;
-        }>
-      | null = null;
+    let candidate: Readonly<{
+      plan: Awaited<ReturnType<FundingPlanningRuntime["liquidity"]>>;
+      profileId: string;
+    }> | null = null;
     let completedProfileInspection = false;
     const unavailableReasonCodes: string[] = [];
     for (const profileId of telegramTradeShortfallExecutionProfiles(
