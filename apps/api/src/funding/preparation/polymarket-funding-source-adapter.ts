@@ -180,6 +180,18 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
   private async build(
     input: FundingSourcePlanningInput,
   ): Promise<PlannedSourceOption | null> {
+    // A server execution profile is a single, exact authority envelope.
+    // This adapter can only produce the Polygon USDC.e -> pUSD wrap envelope.
+    // In particular, do not contribute a partial local preparation while a
+    // Relay profile is being evaluated: doing so would turn the otherwise
+    // viable Relay source into a residual-only composite candidate.
+    if (
+      input.request.serverExecutionProfileId != null &&
+      input.request.serverExecutionProfileId !==
+        POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID
+    ) {
+      return null;
+    }
     const facts = input.destinationFacts;
     const snapshot = parsePolymarketFundingEvidence(
       facts?.sourcePlanningEvidence ?? null,
