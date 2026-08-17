@@ -124,6 +124,7 @@ import {
   buildPolymarketFundingPlan,
   type PolymarketFundingPlan,
 } from "../../../services/polymarket-funding-router.js";
+import { activateTelegramTradeShortfallRelayApprovalInTransaction } from "../../../services/telegram-trade-shortfall-funding.js";
 
 const suffix = crypto.randomUUID();
 const now = new Date();
@@ -2545,6 +2546,145 @@ try {
       new Date(now.getTime() + 86_400_000),
     ],
   );
+
+  async function assertTelegramTradeShortfallRelayActivation(): Promise<void> {
+    // A Relay shortfall has no incoming receive receipt to wake its first
+    // delegated step. Its confirmed trade intent and scoped cap reservation are
+    // the activation boundary instead.
+    const tradeOriginRelay = await createRelayFixture("750000");
+    const tradeOriginRelayAuthorization = await pool.query<{ id: string }>(
+      `select trading_authorization.id
+       from telegram_bot_trading_authorizations trading_authorization
+      where trading_authorization.user_id = $1::uuid
+        and trading_authorization.telegram_user_id = (
+          select telegram_user_id
+            from user_telegram_accounts telegram_account
+           where telegram_account.id = $2::uuid
+        )
+        and trading_authorization.enabled = true
+      limit 1`,
+      [tradeOriginRelay.base.userId, tradeOriginRelay.base.telegramAccountId],
+    );
+    const tradeOriginRelayAuthorizationId =
+      tradeOriginRelayAuthorization.rows[0]?.id;
+    assert.ok(tradeOriginRelayAuthorizationId);
+    const tradeOriginRelayEventId = crypto.randomUUID();
+    const tradeOriginRelayMarketId = crypto.randomUUID();
+    tradeOriginEventIds.push(tradeOriginRelayEventId);
+    tradeOriginMarketIds.push(tradeOriginRelayMarketId);
+    await pool.query(
+      `insert into unified_events (
+       id, venue, venue_event_id, title, status, end_date
+     ) values (
+       $1::uuid, 'polymarket', $2, 'Trade-origin Relay funding event',
+       'ACTIVE', clock_timestamp() + interval '1 day'
+     )`,
+      [tradeOriginRelayEventId, `trade-origin-relay-event-${suffix}`],
+    );
+    await pool.query(
+      `insert into unified_markets (
+       id, venue, venue_market_id, event_id, title, status, market_type,
+       close_time, expiration_time, outcomes, clob_token_ids, metadata
+     ) values (
+       $1::uuid, 'polymarket', $2, $3::uuid,
+       'Trade-origin Relay funding market', 'ACTIVE', 'binary',
+       clock_timestamp() + interval '1 day',
+       clock_timestamp() + interval '1 day', '["Yes","No"]',
+       '["trade-origin-relay-yes","trade-origin-relay-no"]', '{}'::jsonb
+     )`,
+      [
+        tradeOriginRelayMarketId,
+        `trade-origin-relay-market-${suffix}`,
+        tradeOriginRelayEventId,
+      ],
+    );
+    const tradeOriginRelayIntentId = crypto.randomUUID();
+    tradeOriginIntentIds.push(tradeOriginRelayIntentId);
+    await pool.query(
+      `insert into telegram_trade_intents (
+       id, telegram_user_id, user_id, authorization_id, chat_id,
+       telegram_message_id, action, venue, market_id, side, amount_usd,
+       status, expires_at, idempotency_key, funding_operation_id
+     ) values (
+       $1::uuid, $2, $3::uuid, $4::uuid, $2, '751', 'buy', 'polymarket',
+       $5, 'YES', 0.75, 'funding', clock_timestamp() + interval '30 minutes',
+       $6, $7::uuid
+     )`,
+      [
+        tradeOriginRelayIntentId,
+        (
+          await pool.query<{ telegram_user_id: string }>(
+            `select telegram_user_id
+             from user_telegram_accounts
+            where id = $1::uuid`,
+            [tradeOriginRelay.base.telegramAccountId],
+          )
+        ).rows[0]?.telegram_user_id,
+        tradeOriginRelay.base.userId,
+        tradeOriginRelayAuthorizationId,
+        tradeOriginRelayMarketId,
+        `trade-origin-relay-${suffix}`,
+        tradeOriginRelay.operationId,
+      ],
+    );
+    await tx(pool, async (client) => {
+      // Fixture construction: this replaces the receipt-origin linkage with the
+      // exact durable shape created by the shortfall commit transaction.
+      await client.query("set local session_replication_role = replica");
+      await client.query(
+        `update funding_operations
+          set purpose = 'trade_shortfall',
+              support_metadata =
+                (support_metadata - 'fundingReceiveReceiptId'
+                                  - 'telegramFundingConsentId'
+                                  - 'telegramFundingConsentFingerprint') ||
+                jsonb_build_object(
+                  'telegramTradeIntentId', $2::text,
+                  'delegatedOriginKind', 'trade_shortfall_intent'
+                )
+        where id = $1::uuid`,
+        [tradeOriginRelay.operationId, tradeOriginRelayIntentId],
+      );
+      await client.query(
+        `update telegram_funding_authorization_reservations
+          set receive_receipt_id = null,
+              source_trade_intent_id = $2::uuid
+        where funding_operation_id = $1::uuid`,
+        [tradeOriginRelay.operationId, tradeOriginRelayIntentId],
+      );
+      await client.query(
+        `update funding_operation_steps
+          set state = 'planned'
+        where id = $1::uuid`,
+        [tradeOriginRelay.approvalStepId],
+      );
+    });
+    await tx(pool, (client) =>
+      activateTelegramTradeShortfallRelayApprovalInTransaction(client, {
+        operationId: tradeOriginRelay.operationId,
+        profileId: TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
+        tradeIntentId: tradeOriginRelayIntentId,
+      }),
+    );
+    const tradeOriginRelaySteps = await pool.query<{
+      ordinal: number;
+      state: string;
+    }>(
+      `select ordinal, state
+       from funding_operation_steps
+      where operation_id = $1::uuid
+      order by ordinal`,
+      [tradeOriginRelay.operationId],
+    );
+    assert.deepEqual(
+      tradeOriginRelaySteps.rows,
+      [
+        { ordinal: 0, state: "action_required" },
+        { ordinal: 1, state: "planned" },
+      ],
+      "a shortfall activates only its initial Relay approval",
+    );
+  }
 
   const hugeRaw = (2n ** 255n).toString();
   const concurrent = await createFixture(hugeRaw, true);
@@ -5691,7 +5831,9 @@ try {
     await holderMutation.query("set local session_replication_role = replica");
     await holderMutation.query(
       `update funding_operations
-          set status = 'cancelled', progress_stage = 'terminal'
+          set status = 'cancelled',
+              progress_stage = 'terminal',
+              completed_at = clock_timestamp()
         where id = $1`,
       [terminalLaneHolder.operationId],
     );
@@ -7595,6 +7737,8 @@ try {
   assert.equal(reminedRefundState.rows[0]?.canonical, true);
   assert.equal(reminedRefundState.rows[0]?.finality_status, "finalized");
   assert.ok(Array.isArray(reminedRefundState.rows[0]?.history));
+
+  await assertTelegramTradeShortfallRelayActivation();
 
   console.log(
     "[funding-delegated-execution-integration-tests] full-receipt concurrency, malformed action, soft pause/desired-state resume, lifecycle locking, pre-broadcast revocation, and ambiguous recovery passed",

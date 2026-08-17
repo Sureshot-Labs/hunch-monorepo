@@ -269,6 +269,58 @@ export function assertTelegramTradeShortfallDelegatedRelayActionTtl(input: {
   }
 }
 
+/**
+ * A receive-origin delegated route is activated only by its atomically linked
+ * receipt. A shortfall route instead has a durable, user-confirmed trade
+ * intent and its own cap reservation. Once both are linked in the same
+ * transaction, activate exactly the initial Relay approval. The dependent
+ * deposit remains planned until the approval receipt is finalized and
+ * allowance ownership is anchored.
+ */
+export async function activateTelegramTradeShortfallRelayApprovalInTransaction(
+  client: Pick<PoolClient, "query">,
+  input: Readonly<{
+    operationId: string;
+    profileId: string;
+    tradeIntentId: string;
+  }>,
+): Promise<void> {
+  if (!relayEvmFundingProfileSpec(input.profileId)) return;
+  const activated = await client.query<{ id: string }>(
+    `update funding_operation_steps approval_step
+        set state = 'action_required', updated_at = clock_timestamp()
+       from funding_operations operation_row
+       join telegram_funding_authorization_reservations reservation_row
+         on reservation_row.funding_operation_id = operation_row.id
+        and reservation_row.source_trade_intent_id = $2::uuid
+        and reservation_row.status = 'reserved'
+       join telegram_trade_intents trade_intent_row
+         on trade_intent_row.id = reservation_row.source_trade_intent_id
+        and trade_intent_row.user_id = operation_row.user_id
+        and trade_intent_row.status = 'funding'
+        and trade_intent_row.funding_operation_id = operation_row.id
+        and trade_intent_row.submit_started_at is null
+      where approval_step.operation_id = operation_row.id
+        and operation_row.id = $1::uuid
+        and operation_row.purpose = 'trade_shortfall'
+        and operation_row.status in (
+          'in_progress', 'reconcile_required', 'recovery_required'
+        )
+        and operation_row.support_metadata ->> 'telegramTradeIntentId' = $2::text
+        and operation_row.support_metadata ->> 'delegatedOriginKind' =
+              'trade_shortfall_intent'
+        and approval_step.executor_id = $3
+        and approval_step.depends_on_step_id is null
+        and approval_step.state = 'planned'
+        and approval_step.action_validation_result ->> 'relayStepKind' = 'approve'
+      returning approval_step.id`,
+    [input.operationId, input.tradeIntentId, input.profileId],
+  );
+  if (activated.rowCount !== 1) {
+    throw new Error("trade funding Relay approval could not be activated");
+  }
+}
+
 function optionSourceAssets(option: SourceOption): readonly AssetRef[] {
   const sources = option.sourceLegs?.map((leg) => leg.sourceAmount.asset) ?? [];
   if (sources.length > 0) return sources;
@@ -870,6 +922,11 @@ export class TelegramTradeShortfallFundingService {
       if ((linked.rowCount ?? 0) !== 1) {
         throw new Error("trade funding operation could not be linked");
       }
+      await activateTelegramTradeShortfallRelayApprovalInTransaction(client, {
+        operationId,
+        profileId: input.proposal.serverExecutionProfileId,
+        tradeIntentId: input.tradeIntentId,
+      });
       return { operationId };
     });
   }
