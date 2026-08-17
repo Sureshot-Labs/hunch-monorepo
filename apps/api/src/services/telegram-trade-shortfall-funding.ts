@@ -20,6 +20,10 @@ import {
 } from "../funding/execution/telegram-funding-authorization.js";
 import { loadRelayEvmExecutionConfiguration } from "../funding/execution/delegated-funding-config.js";
 import { resolveTelegramFundingProvisionWallet } from "../funding/execution/telegram-funding-managed-wallet.js";
+import {
+  captureRelayEvmAllowanceBaseline,
+  relayEvmAllowanceBaselineSupportMetadata,
+} from "../funding/execution/relay-evm-allowance-baseline.js";
 import { POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID } from "../funding/execution/delegated-funding-profile-ids.js";
 import {
   RELAY_EVM_FUNDING_PROFILE_SPECS,
@@ -766,6 +770,17 @@ export class TelegramTradeShortfallFundingService {
     if (!fundingAuthorization) {
       throw new Error("trade funding authorization is unavailable");
     }
+    const relayProfile = relayEvmFundingProfileSpec(
+      input.proposal.serverExecutionProfileId,
+    );
+    const relayAllowanceBaseline = relayProfile
+      ? await captureRelayEvmAllowanceBaseline(relayProfile, {
+          owner: fundingAuthorization.walletAddress,
+        })
+      : null;
+    if (relayAllowanceBaseline?.raw !== "0") {
+      throw new Error("trade funding Relay allowance baseline is not clear");
+    }
     const prepared = await this.runtime.prepareCommit(input.userId, {
       quoteId: quote.quoteId,
       consentToken: quote.consentToken,
@@ -833,7 +848,7 @@ export class TelegramTradeShortfallFundingService {
                   'fundingAuthorizationFingerprint', $4::text,
                   'telegramTradeIntentId', $5::text,
                   'delegatedOriginKind', 'trade_shortfall_intent'
-                ),
+                ) || $6::jsonb,
                 updated_at = clock_timestamp(),
                 version = version + 1
           where id = $1::uuid and user_id = $2::uuid`,
@@ -843,6 +858,11 @@ export class TelegramTradeShortfallFundingService {
           lockedAuthorization.id,
           telegramFundingAuthorizationFingerprint(lockedAuthorization),
           input.tradeIntentId,
+          JSON.stringify(
+            relayAllowanceBaseline
+              ? relayEvmAllowanceBaselineSupportMetadata(relayAllowanceBaseline)
+              : {},
+          ),
         ],
       );
       const capReservation =
