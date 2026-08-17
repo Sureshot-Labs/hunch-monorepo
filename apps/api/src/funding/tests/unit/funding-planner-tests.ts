@@ -559,6 +559,52 @@ await test("Placement Policy keeps Add Funds 100 distinct from trade 5 shortfall
   assert.equal(trade.boundedBuffer, null);
 });
 
+await test("server-confirmed trade top-up preserves executable venue preparation", () => {
+  const policy = mutablePolicy();
+  const placement = decidePlacement({
+    intent: intent("trade_shortfall", "14201601", {
+      serverAdditionalDestinationAmount: {
+        asset: POLYGON_PUSD,
+        raw: "500000",
+      },
+    }),
+    target: target(POLYGON_PUSD),
+    targetVenueId: "polymarket",
+    targetRequirement: { asset: POLYGON_PUSD, raw: "14201601" },
+    // The destination wallet alone is lower than the consumer's executable
+    // balance because the Buy can prepare additional controlled venue funds.
+    availableNow: { asset: POLYGON_PUSD, raw: "12407208" },
+    minimumExecutableDestination: {
+      asset: POLYGON_PUSD,
+      raw: "500000",
+    },
+    selectionReason: "current_trade",
+    policy,
+  });
+
+  assert.equal(placement.destinationRequirement.raw, "500000");
+  assert.equal(placement.sourceAmount.raw, "500000");
+  assert.equal(placement.boundedBuffer, null);
+  assert.throws(
+    () =>
+      decidePlacement({
+        intent: intent("trade_shortfall", "1000000", {
+          serverAdditionalDestinationAmount: {
+            asset: POLYGON_PUSD,
+            raw: "1000001",
+          },
+        }),
+        target: target(POLYGON_PUSD),
+        targetVenueId: "polymarket",
+        targetRequirement: { asset: POLYGON_PUSD, raw: "1000000" },
+        availableNow: { asset: POLYGON_PUSD, raw: "0" },
+        selectionReason: "current_trade",
+        policy,
+      }),
+    /exceeds the trade collateral/i,
+  );
+});
+
 await test("trade buffer is requested explicitly and bounded by raw and USD caps", () => {
   const policy = mutablePolicy();
   policy.placement.maximumBufferBps = 1_000;
