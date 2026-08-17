@@ -107,13 +107,16 @@ const receiveTargetId = "receive_target_telegram_pusd_12345678";
   const activeElsewhere = buildTelegramFundingActiveElsewhereMessage();
   assert.deepEqual(activeElsewhere.reply_markup?.inline_keyboard, [
     [{ callback_data: "hm:v1:deposit", text: "Open Deposit" }],
-    [
-      {
-        callback_data: "hm:v1:deposit_cancel_active",
-        text: "Cancel active Deposit",
-      },
-    ],
     [{ callback_data: "hm:v1:home", text: "🏠 Home" }],
+  ]);
+  const cancellableElsewhere = buildTelegramFundingActiveElsewhereMessage({
+    canCancel: true,
+  });
+  assert.deepEqual(cancellableElsewhere.reply_markup?.inline_keyboard[1], [
+    {
+      callback_data: "hm:v1:deposit_cancel_active",
+      text: "Cancel active Deposit",
+    },
   ]);
 }
 

@@ -19,6 +19,7 @@ import {
 import {
   resolveSignalBotTradingPolicyFromDb,
   resolveSignalBotTradingPolicyStateFromDb,
+  type TelegramMiniAppHandoffMode,
   type SignalBotPolicy,
 } from "./signal-bot-trading-policy.js";
 import {
@@ -154,16 +155,22 @@ export type TelegramBuyDeliveryMode =
 export function resolveTelegramBuyDeliveryMode(
   input: Readonly<{
     commonBuySurfaceReady: boolean;
+    miniAppHandoffMode: TelegramMiniAppHandoffMode;
     telegramMiniAppEnabled: boolean;
     venue: TelegramBotTradingVenue;
     venueAllowedForBotSubmit: boolean;
   }>,
 ): TelegramBuyDeliveryMode {
   if (!input.commonBuySurfaceReady) return "direct_deposit_only";
+  const canHandoff =
+    input.telegramMiniAppEnabled && input.miniAppHandoffMode !== "off";
+  if (canHandoff && input.miniAppHandoffMode === "always") {
+    return "app_handoff";
+  }
   if (input.venue === "polymarket" && input.venueAllowedForBotSubmit) {
     return "bot_submit";
   }
-  if (input.venue === "limitless" && input.telegramMiniAppEnabled) {
+  if (canHandoff && input.miniAppHandoffMode === "fallback") {
     return "app_handoff";
   }
   return "direct_deposit_only";
@@ -4897,6 +4904,7 @@ export async function buildTelegramBotTradingMarketMessage(input: {
     Boolean(input.trading);
   const buyDeliveryMode = resolveTelegramBuyDeliveryMode({
     commonBuySurfaceReady,
+    miniAppHandoffMode: policy.miniAppHandoffMode,
     telegramMiniAppEnabled: input.telegramMiniAppEnabled === true,
     venue: market.venue,
     venueAllowedForBotSubmit: authorizationVenueAllowed,
