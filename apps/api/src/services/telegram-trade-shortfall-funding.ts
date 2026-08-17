@@ -206,25 +206,28 @@ export function resolveTelegramTradeShortfallExecutionProfile(
   return matches.length === 1 ? (matches[0]?.profileId ?? null) : null;
 }
 
-function recommendedOption(
-  options: readonly SourceOption[],
-): SourceOption | null {
-  const selectable = options.filter(
-    (option) =>
-      option.selectable &&
-      option.experienceMode !== "unavailable" &&
-      (option.source.kind === "owned_location" ||
-        option.source.kind === "venue_preparation" ||
-        (option.source.kind === "composite" &&
-          option.sourceLegs?.every(
-            (leg) =>
-              leg.source.kind === "owned_location" ||
-              leg.source.kind === "venue_preparation",
-          ) === true)),
-  );
-  return (
-    selectable.find((option) => option.recommended) ?? selectable[0] ?? null
-  );
+/**
+ * The generic source planner is intentionally free to form the best economic
+ * composite.  Telegram server execution is not: it must select one exact
+ * policy/profile envelope.  Plan each supported envelope independently so a
+ * non-executable composite cannot hide a viable single-source route.
+ */
+export function telegramTradeShortfallExecutionProfiles(
+  venue: Venue,
+  destination: AssetRef,
+): readonly string[] {
+  const profiles = Object.values(RELAY_EVM_FUNDING_PROFILE_SPECS)
+    .filter(
+      (profile) =>
+        profile.venueIds.includes(venue) &&
+        profile.routeIds.some((routeId) => {
+          const route = RELAY_ROUTE_SPECS[routeId];
+          return route ? sameAsset(route.destination, destination) : false;
+        }),
+    )
+    .map((profile) => profile.profileId);
+  if (venue !== "polymarket") return profiles;
+  return [POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID, ...profiles];
 }
 
 function requiresExternalHandoff(option: SourceOption): boolean {
@@ -346,36 +349,60 @@ export class TelegramTradeShortfallFundingService {
   async inspect(
     input: TelegramTradeShortfallIdentity,
   ): Promise<TelegramTradeShortfallInspection> {
-    const initial = await this.runtime.liquidity(
-      input.userId,
-      tradeShortfallRequest(input),
-    );
-    if (initial.completeness !== "complete" || initial.errors.length > 0) {
-      return {
-        kind: "temporarily_unavailable",
-        reasonCodes: [
-          ...initial.reasonCodes,
-          ...initial.errors.map((error) => error.code),
-        ],
-      };
-    }
-    const automated = selectTelegramTradeShortfallAutomatedOption({
-      options: initial.sourceOptions,
-      venue: input.venue,
-      destination: destinationAsset(input.venue),
-    });
-    if (!automated) {
-      const selected = recommendedOption(initial.sourceOptions);
-      if (selected && requiresExternalHandoff(selected)) {
-        return { kind: "external_deposit_required" };
+    const destination = destinationAsset(input.venue);
+    let candidate:
+      | Readonly<{
+          plan: Awaited<ReturnType<FundingPlanningRuntime["liquidity"]>>;
+          profileId: string;
+        }>
+      | null = null;
+    let completedProfileInspection = false;
+    const unavailableReasonCodes: string[] = [];
+    for (const profileId of telegramTradeShortfallExecutionProfiles(
+      input.venue,
+      destination,
+    )) {
+      const plan = await this.runtime.liquidity(
+        input.userId,
+        tradeShortfallRequest(input, profileId),
+      );
+      if (plan.completeness !== "complete" || plan.errors.length > 0) {
+        unavailableReasonCodes.push(
+          ...plan.reasonCodes,
+          ...plan.errors.map((error) => error.code),
+        );
+        continue;
       }
-      return {
-        kind: "temporarily_unavailable",
-        reasonCodes: ["internal_route_requires_unsupported_execution_profile"],
-      };
+      completedProfileInspection = true;
+      const automated = selectTelegramTradeShortfallAutomatedOption({
+        options: plan.sourceOptions,
+        venue: input.venue,
+        destination,
+        requiredProfileId: profileId,
+      });
+      if (automated) {
+        candidate = { plan, profileId: automated.profileId };
+        break;
+      }
     }
-    const profileId = automated.profileId;
-    if (!initial.destinationOptionId || !initial.venueBindingOptionId) {
+    if (!candidate) {
+      if (!completedProfileInspection && unavailableReasonCodes.length > 0) {
+        return {
+          kind: "temporarily_unavailable",
+          reasonCodes: [...new Set(unavailableReasonCodes)],
+        };
+      }
+      // This is a complete, safe planning result, but none of the exact
+      // server-policy envelopes can execute it. Preserve the Buy and use the
+      // ordinary verified Deposit path; never claim that a retry will make an
+      // unsupported composite executable.
+      return { kind: "external_deposit_required" };
+    }
+    const profileId = candidate.profileId;
+    if (
+      !candidate.plan.destinationOptionId ||
+      !candidate.plan.venueBindingOptionId
+    ) {
       return {
         kind: "temporarily_unavailable",
         reasonCodes: ["internal_route_destination_binding_unavailable"],
@@ -398,8 +425,8 @@ export class TelegramTradeShortfallFundingService {
       telegramAccountId: input.telegramAccountId,
       telegramUserId: input.telegramUserId,
       controllerWalletId: controller.controllerWalletId,
-      destinationOptionId: initial.destinationOptionId,
-      venueBindingOptionId: initial.venueBindingOptionId,
+      destinationOptionId: candidate.plan.destinationOptionId,
+      venueBindingOptionId: candidate.plan.venueBindingOptionId,
       venueId: input.venue,
     } as const;
     const provisioned =
@@ -437,7 +464,7 @@ export class TelegramTradeShortfallFundingService {
     const delegatedAutomated = selectTelegramTradeShortfallAutomatedOption({
       options: delegatedPlan.sourceOptions,
       venue: input.venue,
-      destination: destinationAsset(input.venue),
+      destination,
       requiredProfileId: profileId,
     });
     if (!delegatedAutomated) {

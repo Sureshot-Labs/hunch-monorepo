@@ -7,6 +7,7 @@ import {
   POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
   TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
   TELEGRAM_RELAY_POLYGON_PUSD_PROFILE_ID,
+  TELEGRAM_RELAY_POLYGON_USDC_PROFILE_ID,
 } from "./funding/execution/delegated-funding-profile-ids.js";
 import {
   BASE_USDC,
@@ -15,6 +16,7 @@ import {
 import {
   resolveTelegramTradeShortfallExecutionProfile,
   selectTelegramTradeShortfallAutomatedOption,
+  telegramTradeShortfallExecutionProfiles,
 } from "./services/telegram-trade-shortfall-funding.js";
 
 const polygonPusd: AssetRef = {
@@ -94,6 +96,16 @@ assert.equal(
   ),
   TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
   "Base USDC to Polymarket remains the existing Slice D Relay profile",
+);
+
+assert.deepEqual(
+  telegramTradeShortfallExecutionProfiles("polymarket", polygonPusd),
+  [
+    POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
+    TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
+    TELEGRAM_RELAY_POLYGON_USDC_PROFILE_ID,
+  ],
+  "Telegram must plan each exact Polymarket execution profile before considering manual Deposit",
 );
 
 assert.equal(
@@ -183,6 +195,79 @@ assert.equal(
   })?.option.sourceOptionId,
   managedControllerRoute.sourceOptionId,
   "delegated replanning must retain an automatable managed-wallet route when a Deposit Wallet handoff becomes recommended",
+);
+
+const unsupportedCompositeRoute = {
+  ...option(
+    {
+      kind: "composite" as const,
+      legCount: 2,
+    },
+    polygonPusd,
+  ),
+  sourceOptionId: "source_composite_requires_manual_fallback_12345678",
+  sourceLegs: [
+    {
+      sourceLegId: "source_leg_polygon_pusd_12345678",
+      safeLabel: "Polygon pUSD",
+      sourceAmount: { asset: polygonPusd, raw: "300000" },
+      expectedDestination: { asset: polygonPusd, raw: "300000" },
+      minimumDestination: { asset: polygonPusd, raw: "300000" },
+      source: {
+        kind: "owned_location" as const,
+        location: {
+          kind: "wallet" as const,
+          locationId: "location_polygon_pusd_12345678",
+          accountId: "account_fixture_12345678",
+          asset: polygonPusd,
+          details: {},
+        },
+      },
+      fees: [],
+      eta: { minSeconds: 1, maxSeconds: 30 },
+      requiredActions: [],
+    },
+    {
+      sourceLegId: "source_leg_polygon_usdce_12345678",
+      safeLabel: "Polygon USDC.e",
+      sourceAmount: {
+        asset: {
+          networkId: "evm:137",
+          assetId: "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
+          decimals: 6,
+        },
+        raw: "300000",
+      },
+      expectedDestination: { asset: polygonPusd, raw: "300000" },
+      minimumDestination: { asset: polygonPusd, raw: "300000" },
+      source: {
+        kind: "owned_location" as const,
+        location: {
+          kind: "wallet" as const,
+          locationId: "location_polygon_usdce_12345678",
+          accountId: "account_fixture_12345678",
+          asset: {
+            networkId: "evm:137",
+            assetId: "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
+            decimals: 6,
+          },
+          details: {},
+        },
+      },
+      fees: [],
+      eta: { minSeconds: 1, maxSeconds: 30 },
+      requiredActions: [],
+    },
+  ],
+};
+assert.equal(
+  selectTelegramTradeShortfallAutomatedOption({
+    options: [unsupportedCompositeRoute],
+    venue: "polymarket",
+    destination: polygonPusd,
+  }),
+  null,
+  "a composite without one exact delegated profile must fall back to the verified Deposit flow instead of being treated as a retryable planner outage",
 );
 
 console.log(
