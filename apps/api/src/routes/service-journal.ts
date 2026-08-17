@@ -40,6 +40,9 @@ import {
   createContentArticleCheckpoint,
   getAdminContentArticle,
   getContentArticleVersion,
+  journalServiceArticle,
+  journalServiceContentAuditEvent,
+  journalServiceVersion,
   listAdminContentArticles,
   listContentArticleAudit,
   listContentArticleVersions,
@@ -167,7 +170,7 @@ export const serviceJournalRoutes: FastifyPluginAsync = async (app) => {
   z.get(
     "/service/journal/articles",
     {
-      preHandler: auth("journal:read", "read"),
+      onRequest: auth("journal:read", "read"),
       schema: { querystring: adminContentArticlesQuerySchema },
     },
     async (request, reply) => {
@@ -177,7 +180,11 @@ export const serviceJournalRoutes: FastifyPluginAsync = async (app) => {
           request.query,
         );
         reply.header("Cache-Control", "no-store");
-        return reply.send({ ok: true, ...result });
+        return reply.send({
+          ok: true,
+          items: result.items.map(journalServiceArticle),
+          nextCursor: result.nextCursor,
+        });
       } catch (error) {
         return sendServiceError(reply, error);
       }
@@ -187,7 +194,7 @@ export const serviceJournalRoutes: FastifyPluginAsync = async (app) => {
   z.post(
     "/service/journal/articles",
     {
-      preHandler: auth("journal:draft:create", "mutation"),
+      onRequest: auth("journal:draft:create", "mutation"),
       bodyLimit: CONTENT_BODY_LIMIT,
       schema: {
         headers: journalServiceIdempotencyHeadersSchema,
@@ -239,7 +246,7 @@ export const serviceJournalRoutes: FastifyPluginAsync = async (app) => {
           .code(result.claim.replay ? (result.claim.httpStatus ?? 201) : 201)
           .send({
             ok: true,
-            article: result.article,
+            article: journalServiceArticle(result.article),
             idempotentReplay: result.claim.replay,
           });
       } catch (error) {
@@ -251,7 +258,7 @@ export const serviceJournalRoutes: FastifyPluginAsync = async (app) => {
   z.get(
     "/service/journal/articles/:id",
     {
-      preHandler: auth("journal:read", "read"),
+      onRequest: auth("journal:read", "read"),
       schema: { params: contentArticleIdParamsSchema },
     },
     async (request, reply) => {
@@ -264,7 +271,10 @@ export const serviceJournalRoutes: FastifyPluginAsync = async (app) => {
           return reply.code(404).send({ error: "content_article_not_found" });
         }
         reply.header("Cache-Control", "no-store");
-        return reply.send({ ok: true, article });
+        return reply.send({
+          ok: true,
+          article: journalServiceArticle(article),
+        });
       } catch (error) {
         return sendServiceError(reply, error);
       }
@@ -274,7 +284,7 @@ export const serviceJournalRoutes: FastifyPluginAsync = async (app) => {
   z.patch(
     "/service/journal/articles/:id",
     {
-      preHandler: auth("journal:draft:update", "mutation"),
+      onRequest: auth("journal:draft:update", "mutation"),
       bodyLimit: CONTENT_BODY_LIMIT,
       schema: {
         params: contentArticleIdParamsSchema,
@@ -295,7 +305,10 @@ export const serviceJournalRoutes: FastifyPluginAsync = async (app) => {
             : "draft_update_noop",
         );
         reply.header("Cache-Control", "no-store");
-        return reply.send({ ok: true, article: result.article });
+        return reply.send({
+          ok: true,
+          article: journalServiceArticle(result.article),
+        });
       } catch (error) {
         return sendServiceError(reply, error);
       }
@@ -305,7 +318,7 @@ export const serviceJournalRoutes: FastifyPluginAsync = async (app) => {
   z.post(
     "/service/journal/articles/:id/checkpoint",
     {
-      preHandler: auth("journal:draft:checkpoint", "mutation"),
+      onRequest: auth("journal:draft:checkpoint", "mutation"),
       schema: {
         params: contentArticleIdParamsSchema,
         body: contentArticleMutationBodySchema,
@@ -320,7 +333,9 @@ export const serviceJournalRoutes: FastifyPluginAsync = async (app) => {
         });
         recordJournalServiceOutcome("checkpoint_created");
         reply.header("Cache-Control", "no-store");
-        return reply.code(201).send({ ok: true, version });
+        return reply
+          .code(201)
+          .send({ ok: true, version: journalServiceVersion(version) });
       } catch (error) {
         return sendServiceError(reply, error);
       }
@@ -330,7 +345,7 @@ export const serviceJournalRoutes: FastifyPluginAsync = async (app) => {
   z.post(
     "/service/journal/articles/:id/validate",
     {
-      preHandler: auth("journal:validate", "read"),
+      onRequest: auth("journal:validate", "read"),
       schema: { params: contentArticleIdParamsSchema },
     },
     async (request, reply) => {
@@ -353,7 +368,7 @@ export const serviceJournalRoutes: FastifyPluginAsync = async (app) => {
   z.post(
     "/service/journal/articles/:id/preview-token",
     {
-      preHandler: auth("journal:preview:create", "mutation"),
+      onRequest: auth("journal:preview:create", "mutation"),
       schema: {
         params: contentArticleIdParamsSchema,
         body: contentArticlePreviewTokenBodySchema,
@@ -397,7 +412,7 @@ export const serviceJournalRoutes: FastifyPluginAsync = async (app) => {
   z.get(
     "/service/journal/articles/:id/versions",
     {
-      preHandler: auth("journal:read", "read"),
+      onRequest: auth("journal:read", "read"),
       schema: {
         params: contentArticleIdParamsSchema,
         querystring: contentArticleVersionsQuerySchema,
@@ -410,7 +425,11 @@ export const serviceJournalRoutes: FastifyPluginAsync = async (app) => {
           ...request.query,
         });
         reply.header("Cache-Control", "no-store");
-        return reply.send({ ok: true, ...result });
+        return reply.send({
+          ok: true,
+          items: result.items.map(journalServiceVersion),
+          nextCursor: result.nextCursor,
+        });
       } catch (error) {
         return sendServiceError(reply, error);
       }
@@ -420,7 +439,7 @@ export const serviceJournalRoutes: FastifyPluginAsync = async (app) => {
   z.get(
     "/service/journal/articles/:id/versions/:versionId",
     {
-      preHandler: auth("journal:read", "read"),
+      onRequest: auth("journal:read", "read"),
       schema: { params: contentArticleVersionParamsSchema },
     },
     async (request, reply) => {
@@ -434,7 +453,10 @@ export const serviceJournalRoutes: FastifyPluginAsync = async (app) => {
           return reply.code(404).send({ error: "content_version_not_found" });
         }
         reply.header("Cache-Control", "no-store");
-        return reply.send({ ok: true, version });
+        return reply.send({
+          ok: true,
+          version: journalServiceVersion(version),
+        });
       } catch (error) {
         return sendServiceError(reply, error);
       }
@@ -444,7 +466,7 @@ export const serviceJournalRoutes: FastifyPluginAsync = async (app) => {
   z.get(
     "/service/journal/articles/:id/audit",
     {
-      preHandler: auth("journal:read", "read"),
+      onRequest: auth("journal:read", "read"),
       schema: {
         params: contentArticleIdParamsSchema,
         querystring: contentArticleVersionsQuerySchema,
@@ -457,7 +479,11 @@ export const serviceJournalRoutes: FastifyPluginAsync = async (app) => {
           ...request.query,
         });
         reply.header("Cache-Control", "no-store");
-        return reply.send({ ok: true, ...result });
+        return reply.send({
+          ok: true,
+          items: result.items.map(journalServiceContentAuditEvent),
+          nextCursor: result.nextCursor,
+        });
       } catch (error) {
         return sendServiceError(reply, error);
       }
@@ -467,7 +493,7 @@ export const serviceJournalRoutes: FastifyPluginAsync = async (app) => {
   z.get(
     "/service/journal/assets",
     {
-      preHandler: auth("journal:read", "read"),
+      onRequest: auth("journal:read", "read"),
       schema: { querystring: journalServiceAssetsQuerySchema },
     },
     async (request, reply) => {
@@ -491,7 +517,7 @@ export const serviceJournalRoutes: FastifyPluginAsync = async (app) => {
   z.post(
     "/service/journal/assets",
     {
-      preHandler: auth("journal:asset:upload-image", "upload"),
+      onRequest: auth("journal:asset:upload-image", "upload"),
       schema: {
         headers: journalServiceIdempotencyHeadersSchema,
         body: journalServiceAssetCreateBodySchema,
@@ -603,7 +629,7 @@ export const serviceJournalRoutes: FastifyPluginAsync = async (app) => {
   z.post(
     "/service/journal/assets/:id/complete",
     {
-      preHandler: auth("journal:asset:upload-image", "upload"),
+      onRequest: auth("journal:asset:upload-image", "upload"),
       schema: {
         params: contentAssetIdParamsSchema,
         body: contentAssetCompleteBodySchema,
@@ -654,7 +680,7 @@ export const serviceJournalRoutes: FastifyPluginAsync = async (app) => {
   z.patch(
     "/service/journal/assets/:id/metadata",
     {
-      preHandler: auth("journal:asset:upload-image", "upload"),
+      onRequest: auth("journal:asset:upload-image", "upload"),
       schema: {
         params: contentAssetIdParamsSchema,
         body: journalServiceAssetUpdateBodySchema,
@@ -681,7 +707,7 @@ export const serviceJournalRoutes: FastifyPluginAsync = async (app) => {
     z.post(
       "/service/journal/articles/:id/submit-review",
       {
-        preHandler: auth("journal:review:submit", "mutation"),
+        onRequest: auth("journal:review:submit", "mutation"),
         schema: {
           params: contentArticleIdParamsSchema,
           body: contentArticleMutationBodySchema,
@@ -697,7 +723,10 @@ export const serviceJournalRoutes: FastifyPluginAsync = async (app) => {
           });
           recordJournalServiceOutcome("review_submitted");
           reply.header("Cache-Control", "no-store");
-          return reply.send({ ok: true, article });
+          return reply.send({
+            ok: true,
+            article: journalServiceArticle(article),
+          });
         } catch (error) {
           return sendServiceError(reply, error);
         }

@@ -252,6 +252,36 @@ export type ContentArticleVersion = ContentArticleVersionSummary & {
   >;
 };
 
+export type JournalServiceArticle<
+  T extends ContentArticle | AdminContentArticleSummary = ContentArticle,
+> = Omit<
+  T,
+  "createdByAdminId" | "updatedByAdminId" | "publishedByAdminId" | "draft"
+> & {
+  draft: Omit<T["draft"], "updatedByAdminId">;
+};
+
+export function journalServiceArticle<
+  T extends ContentArticle | AdminContentArticleSummary,
+>(article: T): JournalServiceArticle<T> {
+  const {
+    createdByAdminId: _createdByAdminId,
+    updatedByAdminId: _updatedByAdminId,
+    publishedByAdminId: _publishedByAdminId,
+    draft,
+    ...safeArticle
+  } = article;
+  const { updatedByAdminId: _draftUpdatedByAdminId, ...safeDraft } = draft;
+  return { ...safeArticle, draft: safeDraft } as JournalServiceArticle<T>;
+}
+
+export function journalServiceVersion<T extends ContentArticleVersionSummary>(
+  version: T,
+): Omit<T, "createdByAdminId"> {
+  const { createdByAdminId: _createdByAdminId, ...safeVersion } = version;
+  return safeVersion;
+}
+
 export type ContentActorInput = ContentActor | string | null;
 
 function normalizeContentActor(input: ContentActorInput): ContentActor {
@@ -2485,6 +2515,46 @@ export type ContentAuditEvent = {
   metadata: Record<string, unknown>;
   createdAt: string;
 };
+
+export type JournalServiceContentAuditEvent = Omit<
+  ContentAuditEvent,
+  "actorAdminId" | "actorLabel" | "actor" | "metadata"
+> & {
+  actorLabel: string;
+  actor: ContentAuditEvent["actor"];
+  metadata: Record<string, unknown>;
+};
+
+export function journalServiceContentAuditEvent(
+  event: ContentAuditEvent,
+): JournalServiceContentAuditEvent {
+  const {
+    actorAdminId: _actorAdminId,
+    actorLabel: _actorLabel,
+    actor: rawActor,
+    metadata,
+    ...safeEvent
+  } = event;
+  const actor =
+    rawActor.kind === "admin"
+      ? { kind: "admin" as const, id: null, label: "human-admin" }
+      : rawActor;
+  const initiatedBy = metadata.initiatedBy;
+  const safeMetadata =
+    initiatedBy &&
+    typeof initiatedBy === "object" &&
+    !Array.isArray(initiatedBy) &&
+    "kind" in initiatedBy &&
+    initiatedBy.kind === "admin"
+      ? { ...metadata, initiatedBy: { kind: "admin" } }
+      : metadata;
+  return {
+    ...safeEvent,
+    actorLabel: actor.label,
+    actor,
+    metadata: safeMetadata,
+  };
+}
 
 export async function listContentArticleAudit(
   db: DbQuery,

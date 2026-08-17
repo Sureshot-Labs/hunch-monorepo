@@ -247,18 +247,25 @@ const tests: TestCase[] = [
   {
     name: "embedded deposit wallet batch allows USDC.e funding-router approval",
     run: () => {
-      const request = buildEmbeddedPolymarketTypedDataRequest({
-        context: walletContext,
-        typedData: buildDepositWalletBatchTypedData({
-          target: env.polymarketUsdceAddress,
-          value: "0",
-          data: tokenInterface.encodeFunctionData("approve", [
-            env.polymarketFundingRouterAddress,
-            (BigInt(1) << BigInt(256)) - BigInt(1),
-          ]),
-        }),
-      });
-      assert.equal(request.id, "polymarket-typed-data-signature");
+      const previousRouter = env.polymarketFundingRouterAddress;
+      env.polymarketFundingRouterAddress =
+        "0x0fEF62E1CD0600C132070855A45443852940EE72";
+      try {
+        const request = buildEmbeddedPolymarketTypedDataRequest({
+          context: walletContext,
+          typedData: buildDepositWalletBatchTypedData({
+            target: env.polymarketUsdceAddress,
+            value: "0",
+            data: tokenInterface.encodeFunctionData("approve", [
+              env.polymarketFundingRouterAddress,
+              (BigInt(1) << BigInt(256)) - BigInt(1),
+            ]),
+          }),
+        });
+        assert.equal(request.id, "polymarket-typed-data-signature");
+      } finally {
+        env.polymarketFundingRouterAddress = previousRouter;
+      }
     },
   },
   {

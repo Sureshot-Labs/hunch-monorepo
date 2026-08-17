@@ -39,9 +39,11 @@ test("config requires HTTPS outside localhost and explicit existing roots", asyn
       JOURNAL_SERVICE_API_ORIGIN: "http://127.0.0.1:3001",
       JOURNAL_SERVICE_TOKEN: token,
       JOURNAL_MCP_ALLOWED_ROOTS: root,
+      JOURNAL_MCP_ENABLE_REVIEW_SUBMIT: "YES",
     });
     assert.equal(config.apiOrigin.origin, "http://127.0.0.1:3001");
     assert.equal(config.allowedRoots.length, 1);
+    assert.equal(config.enableReviewSubmit, true);
     assert.throws(() =>
       loadJournalMcpConfig({
         JOURNAL_SERVICE_API_ORIGIN: "http://127.0.0.1:3001",
@@ -55,6 +57,16 @@ test("config requires HTTPS outside localhost and explicit existing roots", asyn
         JOURNAL_SERVICE_TOKEN: `hjs_v1.${"a".repeat(36)}.${"A".repeat(43)}`,
         JOURNAL_MCP_ALLOWED_ROOTS: root,
       }),
+    );
+    assert.throws(
+      () =>
+        loadJournalMcpConfig({
+          JOURNAL_SERVICE_API_ORIGIN: "http://127.0.0.1:3001",
+          JOURNAL_SERVICE_TOKEN: token,
+          JOURNAL_MCP_ALLOWED_ROOTS: root,
+          JOURNAL_MCP_ENABLE_REVIEW_SUBMIT: "sometimes",
+        }),
+      /must be a boolean/,
     );
   } finally {
     await rm(root, { recursive: true, force: true });

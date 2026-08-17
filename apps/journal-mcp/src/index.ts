@@ -509,11 +509,10 @@ export function createJournalMcpServer(config: JournalMcpConfig): McpServer {
   return server;
 }
 
-function main(): void {
+async function main(): Promise<void> {
+  let config: JournalMcpConfig;
   try {
-    const config = loadJournalMcpConfig();
-    void serveStdio(() => createJournalMcpServer(config));
-    console.error("Hunch Journal MCP is listening on stdio");
+    config = loadJournalMcpConfig();
   } catch (error) {
     console.error(
       error instanceof Error
@@ -521,7 +520,17 @@ function main(): void {
         : "Hunch Journal MCP failed to start",
     );
     process.exitCode = 1;
+    return;
+  }
+  console.error("Hunch Journal MCP is listening on stdio");
+  try {
+    await serveStdio(() => createJournalMcpServer(config));
+  } catch {
+    console.error("Hunch Journal MCP transport failed");
+    process.exitCode = 1;
   }
 }
 
-if (import.meta.url === new URL(process.argv[1] ?? "", "file:").href) main();
+if (import.meta.url === new URL(process.argv[1] ?? "", "file:").href) {
+  void main();
+}

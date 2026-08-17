@@ -96,9 +96,8 @@ function equalHex(left: string, right: string): boolean {
 
 function bearerToken(request: FastifyRequest): string | null {
   const raw = request.headers.authorization;
-  if (typeof raw !== "string" || !raw.startsWith("Bearer ")) return null;
-  const token = raw.slice("Bearer ".length).trim();
-  return token || null;
+  if (typeof raw !== "string") return null;
+  return /^Bearer[ \t]+(\S+)$/i.exec(raw.trim())?.[1] ?? null;
 }
 
 function rateLimitFor(profile: RateProfile): number {
@@ -251,6 +250,8 @@ export function createJournalServiceMiddleware(
 ) {
   return async (request: FastifyRequest, reply: FastifyReply) => {
     request.journalServiceRequiredScope = options.requiredScope;
+    reply.header("Cache-Control", "no-store");
+    reply.header("Pragma", "no-cache");
     if (!env.journalServiceApiEnabled) {
       recordJournalServiceAuth("feature_disabled");
       return reply.code(404).send({ error: "not_found" });
@@ -277,6 +278,7 @@ export function createJournalServiceMiddleware(
     const token = bearerToken(request);
     if (!token) {
       recordJournalServiceAuth("missing_credential");
+      reply.header("WWW-Authenticate", 'Bearer realm="journal-service"');
       return reply.code(401).send({
         error: "invalid_service_credential",
         message: "Service bearer credential required",
@@ -285,6 +287,9 @@ export function createJournalServiceMiddleware(
     const result = await authenticateJournalServiceCredential(pool, token);
     if (!result.ok) {
       recordJournalServiceAuth(result.error);
+      if (result.statusCode === 401) {
+        reply.header("WWW-Authenticate", 'Bearer realm="journal-service"');
+      }
       return reply.code(result.statusCode).send({
         error: result.error,
         message: result.message,

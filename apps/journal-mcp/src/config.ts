@@ -19,6 +19,14 @@ function required(name: string, env: NodeJS.ProcessEnv): string {
   return value;
 }
 
+function optionalBoolean(name: string, env: NodeJS.ProcessEnv): boolean {
+  const value = env[name]?.trim().toLowerCase();
+  if (!value) return false;
+  if (["1", "true", "yes", "on"].includes(value)) return true;
+  if (["0", "false", "no", "off"].includes(value)) return false;
+  throw new Error(`${name} must be a boolean`);
+}
+
 function isLocalhost(hostname: string): boolean {
   return (
     hostname === "localhost" ||
@@ -84,6 +92,9 @@ export function loadJournalMcpConfig(
     apiOrigin: parseOrigin(required("JOURNAL_SERVICE_API_ORIGIN", env)),
     serviceToken,
     allowedRoots: parseAllowedRoots(required("JOURNAL_MCP_ALLOWED_ROOTS", env)),
-    enableReviewSubmit: env.JOURNAL_MCP_ENABLE_REVIEW_SUBMIT === "true",
+    enableReviewSubmit: optionalBoolean(
+      "JOURNAL_MCP_ENABLE_REVIEW_SUBMIT",
+      env,
+    ),
   };
 }

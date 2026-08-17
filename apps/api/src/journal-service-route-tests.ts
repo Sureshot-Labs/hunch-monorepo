@@ -19,6 +19,7 @@ const original = {
   reviewEnabled: env.journalServiceReviewSubmitEnabled,
   contentConfigEnabled: env.content.enabled,
   contentConfigApiEnabled: env.content.journalServiceApiEnabled,
+  redisUrl: env.redisUrl,
 };
 
 env.contentEnabled = true;
@@ -26,6 +27,7 @@ env.journalServiceApiEnabled = true;
 env.journalServiceReviewSubmitEnabled = false;
 env.content.enabled = true;
 env.content.journalServiceApiEnabled = true;
+env.redisUrl = "";
 
 const app = Fastify({ logger: false }).withTypeProvider<ZodTypeProvider>();
 app.setValidatorCompiler(validatorCompiler);
@@ -81,6 +83,20 @@ try {
     false,
     "submit-review must be absent while its separate flag is disabled",
   );
+
+  const rejectedBeforeValidation = await app.inject({
+    method: "POST",
+    url: "/service/journal/articles",
+    payload: {},
+  });
+  assert.equal(rejectedBeforeValidation.statusCode, 503);
+  assert.equal(
+    rejectedBeforeValidation.json().error,
+    "service_security_backend_unavailable",
+    "fail-closed service auth must run before request body validation",
+  );
+  assert.equal(rejectedBeforeValidation.headers["cache-control"], "no-store");
+  assert.equal(rejectedBeforeValidation.headers.pragma, "no-cache");
 } finally {
   await app.close();
   await closeApiContentPools();
@@ -89,4 +105,5 @@ try {
   env.journalServiceReviewSubmitEnabled = original.reviewEnabled;
   env.content.enabled = original.contentConfigEnabled;
   env.content.journalServiceApiEnabled = original.contentConfigApiEnabled;
+  env.redisUrl = original.redisUrl;
 }

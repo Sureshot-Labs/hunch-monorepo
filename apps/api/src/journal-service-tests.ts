@@ -17,6 +17,13 @@ import {
 } from "./schemas/content.js";
 import { journalServiceAsset } from "./services/content-assets.js";
 import {
+  journalServiceArticle,
+  journalServiceContentAuditEvent,
+  journalServiceVersion,
+  type ContentArticle,
+  type ContentArticleVersion,
+} from "./services/content.js";
+import {
   journalIdempotencyResourceForClaim,
   JournalIdempotencyError,
   type JournalIdempotencyClaim,
@@ -229,6 +236,66 @@ assert.equal("createdByAdminId" in sanitizedAsset, false);
 assert.equal("updatedByAdminId" in sanitizedAsset, false);
 assert.equal("deletedAt" in sanitizedAsset, false);
 assert.equal(sanitizedAsset.createdByServicePrincipalId, principalId);
+
+const sanitizedArticle = journalServiceArticle({
+  createdByAdminId: adminActorId,
+  updatedByAdminId: adminActorId,
+  publishedByAdminId: adminActorId,
+  createdByServicePrincipalId: principalId,
+  updatedByServicePrincipalId: principalId,
+  draft: {
+    updatedByAdminId: adminActorId,
+    updatedByServicePrincipalId: principalId,
+    title: "Visible title",
+  },
+} as unknown as ContentArticle);
+assert.equal("createdByAdminId" in sanitizedArticle, false);
+assert.equal("updatedByAdminId" in sanitizedArticle, false);
+assert.equal("publishedByAdminId" in sanitizedArticle, false);
+assert.equal("updatedByAdminId" in sanitizedArticle.draft, false);
+assert.equal(sanitizedArticle.createdByServicePrincipalId, principalId);
+assert.equal(sanitizedArticle.draft.updatedByServicePrincipalId, principalId);
+
+const sanitizedVersion = journalServiceVersion({
+  id: credentialId,
+  createdByAdminId: adminActorId,
+  createdByServicePrincipalId: principalId,
+} as unknown as ContentArticleVersion);
+assert.equal("createdByAdminId" in sanitizedVersion, false);
+assert.equal(sanitizedVersion.createdByServicePrincipalId, principalId);
+
+const sanitizedAudit = journalServiceContentAuditEvent({
+  id: "1",
+  action: "article.scheduled_publication_completed",
+  articleId: credentialId,
+  assetId: null,
+  versionId: null,
+  actorAdminId: adminActorId,
+  actorServicePrincipalId: null,
+  actorKind: "admin",
+  actorLabel: "admin@example.com",
+  actor: {
+    kind: "admin",
+    id: adminActorId,
+    label: "admin@example.com",
+  },
+  metadata: {
+    initiatedBy: {
+      kind: "admin",
+      id: adminActorId,
+      label: `admin:${adminActorId}`,
+    },
+    currentRevision: 2,
+  },
+  createdAt: "2026-08-17T12:00:00.000Z",
+});
+const sanitizedAuditJson = JSON.stringify(sanitizedAudit);
+assert.equal("actorAdminId" in sanitizedAudit, false);
+assert.equal(sanitizedAudit.actor.id, null);
+assert.equal(sanitizedAudit.actor.label, "human-admin");
+assert.equal(sanitizedAuditJson.includes(adminActorId), false);
+assert.equal(sanitizedAuditJson.includes("admin@example.com"), false);
+assert.deepEqual(sanitizedAudit.metadata.initiatedBy, { kind: "admin" });
 
 const authSource = readFileSync(
   new URL("./services/journal-service-auth.ts", import.meta.url),
