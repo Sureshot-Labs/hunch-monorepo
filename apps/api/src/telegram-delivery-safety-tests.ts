@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 
 import { TelegramBotApiClient } from "./services/signal-bot-telegram-client.js";
+import type { TelegramInlineKeyboard } from "./services/signal-bot-contracts.js";
 import {
   classifyTelegramBotMenuDeliveryResult,
   sendOrEditTelegramBotMenuMessage,
@@ -56,6 +57,47 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         assert.deepEqual(normalized, expected);
         assert.equal("message" in normalized, false);
         assert.equal("error" in normalized, false);
+      }
+    },
+  },
+  {
+    name: "menu delivery adds one Home escape route without duplicating refresh output",
+    run: async () => {
+      const delivered: Array<{
+        reply_markup?: TelegramInlineKeyboard;
+      }> = [];
+      for (const message of [
+        { text: "First render" },
+        {
+          reply_markup: {
+            inline_keyboard: [
+              [{ callback_data: "hm:v1:home", text: "🏠 Home" }],
+            ],
+          },
+          text: "Refreshed render",
+        },
+      ]) {
+        const result = await sendOrEditTelegramBotMenuMessage({
+          chatId: "99",
+          message,
+          transport: {
+            sendMessage: async (sent) => {
+              delivered.push(sent);
+              return { messageId: delivered.length, ok: true };
+            },
+          },
+        });
+        assert.equal(result.ok, true);
+      }
+      for (const message of delivered) {
+        const homes = (message.reply_markup?.inline_keyboard ?? [])
+          .flat()
+          .filter(
+            (button) =>
+              "callback_data" in button &&
+              button.callback_data === "hm:v1:home",
+          );
+        assert.equal(homes.length, 1);
       }
     },
   },

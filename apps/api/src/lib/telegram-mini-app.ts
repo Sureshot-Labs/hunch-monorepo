@@ -75,6 +75,7 @@ export function normalizeTelegramStartParam(
   if (/^e_[A-Za-z0-9_-]{1,510}$/.test(trimmed)) return trimmed;
   if (/^m_[A-Za-z0-9_-]{1,510}$/.test(trimmed)) return trimmed;
   if (/^b_[A-Za-z0-9_-]{1,510}$/.test(trimmed)) return trimmed;
+  if (/^handoff_th1_[A-Za-z0-9_-]{43}$/.test(trimmed)) return trimmed;
   if (/^wt_[A-Za-z0-9_-]{1,509}$/.test(trimmed)) return trimmed;
   if (/^w_[a-z0-9-]{1,16}_[A-Za-z0-9]{3,64}$/.test(trimmed)) {
     return trimmed;

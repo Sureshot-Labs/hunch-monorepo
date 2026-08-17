@@ -54,6 +54,46 @@ export async function beginSignalBotTradeInput(input: {
   return false;
 }
 
+/** Replace the input prompt with its originating market and release Redis state. */
+export async function cancelSignalBotTradeInput(input: {
+  chatId: string;
+  contextId: string;
+  message: TelegramBotTradingClientMessage;
+  redis: TradeInputRedis;
+  telegramUserId: number;
+  transport: TelegramBotMenuTransport;
+}): Promise<boolean> {
+  const state = await readSignalBotMenuInput({
+    chatId: input.chatId,
+    redis: input.redis,
+    telegramUserId: input.telegramUserId,
+  });
+  if (
+    !state ||
+    (state.kind !== "awaiting_custom_buy_amount" &&
+      state.kind !== "awaiting_custom_sell_amount") ||
+    state.contextId !== input.contextId ||
+    state.menuMessageId == null
+  ) {
+    return false;
+  }
+  const delivered = await sendOrEditTelegramBotMenuMessage({
+    chatId: input.chatId,
+    message: input.message,
+    messageId: state.menuMessageId,
+    transport: input.transport,
+  });
+  const outcome = classifyTelegramBotMenuDeliveryResult(delivered).outcome;
+  if (outcome !== "success" && outcome !== "ambiguous") return false;
+  await clearSignalBotMenuInputIfCurrent({
+    chatId: input.chatId,
+    redis: input.redis,
+    stateToken: state.stateToken,
+    telegramUserId: input.telegramUserId,
+  }).catch(() => false);
+  return true;
+}
+
 export async function handleSignalBotTradeInput(input: {
   chatId: string;
   complete: (input: {

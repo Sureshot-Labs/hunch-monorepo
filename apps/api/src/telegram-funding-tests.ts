@@ -2863,18 +2863,29 @@ const defaultPolicy = getDefaultSignalBotPolicy();
 assert.equal(defaultPolicy.buyContinuationEnabled, false);
 assert.equal(defaultPolicy.fundingReceiveEnabled, false);
 assert.equal(defaultPolicy.customTradeInputEnabled, false);
+assert.equal(defaultPolicy.miniAppHandoffMode, "off");
 const {
   buyContinuationEnabled: _legacyMissingBuyContinuationEnabled,
   customTradeInputEnabled: _legacyMissingCustomTradeInputEnabled,
   fundingReceiveEnabled: _legacyMissingFundingReceiveEnabled,
+  miniAppHandoffMode: _legacyMissingMiniAppHandoffMode,
   ...productionLegacyPolicyPayload
 } = defaultPolicy;
 assert.equal(_legacyMissingFundingReceiveEnabled, false);
 assert.equal(_legacyMissingCustomTradeInputEnabled, false);
 assert.equal(_legacyMissingBuyContinuationEnabled, false);
+assert.equal(_legacyMissingMiniAppHandoffMode, "off");
 assert.deepEqual(signalBotSchema.parse({ buyContinuationEnabled: "true" }), {
   buyContinuationEnabled: true,
 });
+assert.deepEqual(signalBotSchema.parse({ miniAppHandoffMode: "fallback" }), {
+  miniAppHandoffMode: "fallback",
+});
+assert.equal(
+  signalBotSchema.safeParse({ miniAppHandoffMode: "when_possible" }).success,
+  false,
+  "the Mini App handoff policy accepts only explicit delivery modes",
+);
 assert.equal(
   signalBotSchema.safeParse({ buyContinuationEnabled: "enabled" }).success,
   false,
@@ -2892,6 +2903,12 @@ assert.equal(productionLegacyPolicy.autoEnableOnTelegramLink, true);
 assert.equal(productionLegacyPolicy.buyContinuationEnabled, false);
 assert.equal(productionLegacyPolicy.fundingReceiveEnabled, false);
 assert.equal(productionLegacyPolicy.customTradeInputEnabled, false);
+assert.equal(productionLegacyPolicy.miniAppHandoffMode, "off");
+const alwaysHandoffPolicy = normalizeSignalBotPolicy({
+  ...defaultPolicy,
+  miniAppHandoffMode: "always",
+});
+assert.equal(alwaysHandoffPolicy.miniAppHandoffMode, "always");
 const receiveOnlyPolicy = normalizeSignalBotPolicy({
   ...defaultPolicy,
   fundingReceiveEnabled: true,

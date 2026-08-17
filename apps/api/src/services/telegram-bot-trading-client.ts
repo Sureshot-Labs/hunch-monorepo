@@ -60,6 +60,10 @@ export type TelegramBotTradingClientCallbackInput = {
     expiresAt: string;
     message: TelegramBotTradingClientMessage;
   }) => Promise<boolean>;
+  cancelTradeInput?: (input: {
+    contextId: string;
+    message: TelegramBotTradingClientMessage;
+  }) => Promise<boolean>;
   telegramMiniAppEnabled?: boolean;
   sendMessage: (input: {
     chat_id: string;
@@ -283,7 +287,7 @@ export type ParsedTelegramBotTradingCallback =
     }
   | {
       inputContextId: string;
-      type: "buy_input" | "sell_input";
+      type: "buy_input" | "sell_input" | "cancel_input";
     };
 
 export function parseTelegramBotTradingCallbackData(
@@ -301,13 +305,16 @@ export function parseTelegramBotTradingCallbackData(
     type !== "retry_buy" &&
     type !== "buy_input" &&
     type !== "sell_input" &&
+    type !== "cancel_input" &&
     type !== "confirm" &&
     type !== "change_amount" &&
     type !== "cancel"
   )
     return null;
   if (!EXACT_UUID_RE.test(intentId ?? "")) return null;
-  return type === "buy_input" || type === "sell_input"
+  return type === "buy_input" ||
+    type === "sell_input" ||
+    type === "cancel_input"
     ? { inputContextId: intentId, type }
     : { type, intentId };
 }
@@ -677,7 +684,11 @@ export function createTelegramBotTradingInternalApiClient(input: {
         });
         return true;
       }
-      if (parsed.type === "buy_input" || parsed.type === "sell_input") {
+      if (
+        parsed.type === "buy_input" ||
+        parsed.type === "sell_input" ||
+        parsed.type === "cancel_input"
+      ) {
         const chat = callbackInput.callbackQuery.message?.chat;
         const telegramUserId = callbackInput.callbackQuery.from?.id;
         const telegramMessageId =
@@ -688,12 +699,43 @@ export function createTelegramBotTradingInternalApiClient(input: {
           telegramUserId == null ||
           telegramMessageId == null ||
           String(chat.id) !== String(telegramUserId) ||
-          !callbackInput.beginTradeInput
+          (parsed.type === "cancel_input"
+            ? !callbackInput.cancelTradeInput
+            : !callbackInput.beginTradeInput)
         ) {
           await callbackInput.answerCallbackQuery({
             callbackQueryId: callbackInput.callbackQuery.id,
             showAlert: true,
             text: "⚠️ Open the original private bot chat to enter an amount.",
+          });
+          return true;
+        }
+        if (parsed.type === "cancel_input") {
+          const cancelled = await post<{
+            message: TelegramBotTradingClientMessage;
+          }>(
+            `/internal/telegram-bot/trading/input-contexts/${parsed.inputContextId}/cancel`,
+            {
+              appBaseUrl: callbackInput.appBaseUrl,
+              chatId: String(chat.id),
+              telegramMessageId,
+              telegramMiniAppEnabled: callbackInput.telegramMiniAppEnabled,
+              telegramUserId,
+            },
+          ).catch(() => null);
+          const completed =
+            cancelled != null && callbackInput.cancelTradeInput
+              ? await callbackInput.cancelTradeInput({
+                  contextId: parsed.inputContextId,
+                  message: cancelled.message,
+                })
+              : false;
+          await callbackInput.answerCallbackQuery({
+            callbackQueryId: callbackInput.callbackQuery.id,
+            showAlert: !completed,
+            text: completed
+              ? "Cancelled. Back to the market."
+              : "⚠️ Custom input is unavailable or expired.",
           });
           return true;
         }
@@ -720,9 +762,10 @@ export function createTelegramBotTradingInternalApiClient(input: {
           });
           return true;
         }
-        const started = await callbackInput
-          .beginTradeInput(begun)
-          .catch(() => false);
+        const beginTradeInput = callbackInput.beginTradeInput;
+        const started = beginTradeInput
+          ? await beginTradeInput(begun).catch(() => false)
+          : false;
         await callbackInput.answerCallbackQuery({
           callbackQueryId: callbackInput.callbackQuery.id,
           showAlert: !started,

@@ -1,4 +1,4 @@
-import type { FastifyPluginAsync, FastifyRequest } from "fastify";
+import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { createAuthMiddleware } from "../auth.js";
 import { pool } from "../db.js";
@@ -14,12 +14,26 @@ import {
   telegramContextBodySchema,
   telegramContextErrorResponseSchema,
   telegramContextSuccessResponseSchema,
+  telegramAppHandoffCommitRequestSchema,
+  telegramAppHandoffRequestSchema,
+  telegramAppHandoffResponseSchema,
   telegramGroupMembershipResponseSchema,
 } from "../schemas/telegram.js";
 import {
   checkTelegramGroupMembership,
   type TelegramGroupMembershipResult,
 } from "../services/telegram-group-membership.js";
+import {
+  cancelTelegramAppHandoff,
+  claimTelegramAppHandoff,
+  commitTelegramAppHandoff,
+  parseTelegramAppHandoffStartParam,
+  resolveTelegramAppHandoff,
+  TelegramAppHandoffError,
+  type TelegramAppHandoff,
+} from "../services/telegram-app-handoff.js";
+import { resolveActiveTelegramAccountLink } from "../services/telegram-account-link.js";
+import { resolveTelegramAppHandoffCurrentScope } from "../services/telegram-bot-trading.js";
 
 export type TelegramRoutesDependencies = {
   authPreHandler?: ReturnType<typeof createAuthMiddleware>;
@@ -60,6 +74,96 @@ async function registerTelegramRoutes(
         redis: await getRedis(),
         userId,
       }));
+
+  const resolveHandoffIdentity = async (
+    request: FastifyRequest,
+    reply: FastifyReply,
+    initDataRaw: string,
+    token: string,
+  ): Promise<{ telegramUserId: string; userId: string } | null> => {
+    const user = request.user;
+    if (!user) {
+      reply.code(401).send({ error: "Unauthorized" });
+      return null;
+    }
+    if (!env.telegramMiniAppEnabled || !env.telegramBotToken) {
+      reply.code(404).send({ error: "telegram_mini_app_disabled" });
+      return null;
+    }
+    try {
+      const context = validateTelegramInitData(initDataRaw, {
+        botToken: env.telegramBotToken,
+        initDataMaxAgeSeconds: env.telegramInitDataMaxAgeSeconds,
+      });
+      const link = await resolveActiveTelegramAccountLink({
+        db: pool,
+        telegramUserId: context.user.id,
+      });
+      if (!link || link.userId !== user.id) {
+        reply.code(403).send({ error: "telegram_handoff_identity_mismatch" });
+        return null;
+      }
+      if (parseTelegramAppHandoffStartParam(context.startParam) !== token) {
+        reply
+          .code(403)
+          .send({ error: "telegram_handoff_start_param_mismatch" });
+        return null;
+      }
+      return { telegramUserId: context.user.id, userId: user.id };
+    } catch (error) {
+      request.log.warn(
+        {
+          reason:
+            error instanceof TelegramInitDataValidationError
+              ? error.code
+              : "unexpected_error",
+          userId: user.id,
+        },
+        "Telegram app handoff identity validation failed",
+      );
+      reply.code(400).send({ error: "invalid_telegram_init_data" });
+      return null;
+    }
+  };
+
+  const sendHandoffError = (reply: FastifyReply, error: unknown) => {
+    if (!(error instanceof TelegramAppHandoffError)) {
+      return reply
+        .code(503)
+        .send({ error: "telegram_app_handoff_unavailable" });
+    }
+    if (
+      error.code === "invalid_token" ||
+      error.code === "not_found" ||
+      error.code === "unauthorized"
+    ) {
+      return reply.code(404).send({ error: "telegram_app_handoff_not_found" });
+    }
+    return reply.code(409).send({ error: error.code });
+  };
+
+  const sendHandoffResponse = async (
+    reply: FastifyReply,
+    operation: () => Promise<TelegramAppHandoff>,
+  ) => {
+    try {
+      const handoff = await operation();
+      reply.header("Cache-Control", "private, no-store");
+      return reply.send({ handoff });
+    } catch (error) {
+      return sendHandoffError(reply, error);
+    }
+  };
+
+  const telegramAppHandoffResponses = {
+    200: telegramAppHandoffResponseSchema,
+    400: telegramContextErrorResponseSchema,
+    401: authErrorResponseSchema,
+    403: telegramContextErrorResponseSchema,
+    404: telegramContextErrorResponseSchema,
+    409: telegramContextErrorResponseSchema,
+    503: telegramContextErrorResponseSchema,
+  };
 
   z.post(
     "/telegram/context",
@@ -217,6 +321,92 @@ async function registerTelegramRoutes(
         cached: result.cached,
         checkedAt: result.checkedAt,
         state: result.state,
+      });
+    },
+  );
+
+  for (const [path, action] of [
+    ["/telegram/app-handoffs/resolve", "resolve"],
+    ["/telegram/app-handoffs/claim", "claim"],
+    ["/telegram/app-handoffs/cancel", "cancel"],
+  ] as const) {
+    z.post(
+      path,
+      {
+        preHandler: authPreHandler,
+        schema: {
+          body: telegramAppHandoffRequestSchema,
+          response: telegramAppHandoffResponses,
+        },
+      },
+      async (request, reply) => {
+        const identity = await resolveHandoffIdentity(
+          request,
+          reply,
+          request.body.initDataRaw,
+          request.body.token,
+        );
+        if (!identity) return;
+        return sendHandoffResponse(reply, async () =>
+          action === "resolve"
+            ? resolveTelegramAppHandoff({
+                db: pool,
+                telegramUserId: identity.telegramUserId,
+                token: request.body.token,
+                userId: identity.userId,
+              })
+            : action === "claim"
+              ? claimTelegramAppHandoff({
+                  db: pool,
+                  telegramUserId: identity.telegramUserId,
+                  token: request.body.token,
+                  userId: identity.userId,
+                })
+              : cancelTelegramAppHandoff({
+                  db: pool,
+                  telegramUserId: identity.telegramUserId,
+                  token: request.body.token,
+                  userId: identity.userId,
+                }),
+        );
+      },
+    );
+  }
+
+  z.post(
+    "/telegram/app-handoffs/commit",
+    {
+      preHandler: authPreHandler,
+      schema: {
+        body: telegramAppHandoffCommitRequestSchema,
+        response: telegramAppHandoffResponses,
+      },
+    },
+    async (request, reply) => {
+      const identity = await resolveHandoffIdentity(
+        request,
+        reply,
+        request.body.initDataRaw,
+        request.body.token,
+      );
+      if (!identity) return;
+      return sendHandoffResponse(reply, async () => {
+        const scope = await resolveTelegramAppHandoffCurrentScope({
+          db: pool,
+          telegramUserId: identity.telegramUserId,
+        });
+        if (!scope) {
+          throw new TelegramAppHandoffError("policy_changed");
+        }
+        return commitTelegramAppHandoff({
+          currentAuthorityFingerprint: scope.authorityFingerprint,
+          currentPolicyRevision: scope.policyRevision,
+          db: pool,
+          planFingerprint: request.body.planFingerprint,
+          telegramUserId: identity.telegramUserId,
+          token: request.body.token,
+          userId: identity.userId,
+        });
       });
     },
   );
