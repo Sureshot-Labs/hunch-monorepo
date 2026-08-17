@@ -14,6 +14,7 @@ import {
   POLYGON_PUSD,
 } from "./funding-providers/relay/rehearsal.js";
 import {
+  buildTelegramTradeShortfallCommitRequest,
   buildTelegramTradeShortfallRequest,
   resolveTelegramTradeShortfallExecutionProfile,
   selectTelegramTradeShortfallAutomatedOption,
@@ -52,6 +53,96 @@ assert.equal(
   exactTopUpRequest.serverAdditionalDestinationAmount?.raw,
   "500000",
   "Telegram must plan the consumer-confirmed top-up rather than recomputing shortfall from Deposit Wallet cash only",
+);
+
+const replayedExactTopUpRequest = buildTelegramTradeShortfallRequest({
+  authorizationId: "authorization_shortfall_fixture_12345678",
+  telegramAccountId: "telegram_account_fixture_12345678",
+  telegramUserId: "telegram_user_fixture_12345678",
+  tradeIntentId: "trade_intent_fixture_12345678",
+  userId: "user_shortfall_fixture_12345678",
+  venue: "polymarket",
+  marketId: "polymarket:3192057",
+  marketContextId: "market_context_shortfall_fixture_12345678",
+  side: "YES",
+  maximumSpendUsd: "14.201601",
+  additionalFundingRaw: "500000",
+  maxFeeUsd: "14.201601",
+  maxSlippageBps: 500,
+  deadline: "2026-08-17T12:38:00.000Z",
+});
+assert.equal(
+  replayedExactTopUpRequest.serverAdditionalDestinationAmount?.raw,
+  "500000",
+  "a durable proposal must replay the exact raw shortfall rather than recomputing it from the full trade cap",
+);
+
+const committedExactTopUpRequest = buildTelegramTradeShortfallCommitRequest(
+  {
+    authorizationId: "authorization_shortfall_fixture_12345678",
+    telegramAccountId: "telegram_account_fixture_12345678",
+    telegramUserId: "telegram_user_fixture_12345678",
+    tradeIntentId: "trade_intent_fixture_12345678",
+    userId: "user_shortfall_fixture_12345678",
+    venue: "polymarket",
+    marketId: "polymarket:3192057",
+    marketContextId: "market_context_shortfall_fixture_12345678",
+    side: "YES",
+    maximumSpendUsd: "14.201601",
+    maxFeeUsd: "14.201601",
+    maxSlippageBps: 500,
+    deadline: "2026-08-17T12:38:00.000Z",
+  },
+  {
+    requestedDestinationAmount: {
+      asset: polygonPusd,
+      raw: "14201601",
+    },
+    serverAdditionalDestinationAmount: {
+      asset: polygonPusd,
+      raw: "500000",
+    },
+    serverExecutionProfileId: TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
+  },
+);
+assert.equal(
+  committedExactTopUpRequest.serverAdditionalDestinationAmount?.raw,
+  "500000",
+  "commit must preserve the proposal's trusted top-up even though its full consumer spend is $14.201601",
+);
+
+assert.throws(
+  () =>
+    buildTelegramTradeShortfallCommitRequest(
+      {
+        authorizationId: "authorization_shortfall_fixture_12345678",
+        telegramAccountId: "telegram_account_fixture_12345678",
+        telegramUserId: "telegram_user_fixture_12345678",
+        tradeIntentId: "trade_intent_fixture_12345678",
+        userId: "user_shortfall_fixture_12345678",
+        venue: "polymarket",
+        marketId: "polymarket:3192057",
+        marketContextId: "market_context_shortfall_fixture_12345678",
+        side: "YES",
+        maximumSpendUsd: "14.201601",
+        maxFeeUsd: "14.201601",
+        maxSlippageBps: 500,
+        deadline: "2026-08-17T12:38:00.000Z",
+      },
+      {
+        requestedDestinationAmount: {
+          asset: polygonPusd,
+          raw: "14201601",
+        },
+        serverAdditionalDestinationAmount: {
+          asset: polygonPusd,
+          raw: "0",
+        },
+        serverExecutionProfileId: TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
+      },
+    ),
+  /exact shortfall/u,
+  "missing or zero stored top-up must fail closed rather than using the full trade cap",
 );
 
 function option(
