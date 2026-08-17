@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import { lstat, open, realpath } from "node:fs/promises";
 import path from "node:path";
@@ -19,17 +20,6 @@ const BLOCKED_COMPONENTS = new Set([
   ".secrets",
   "credentials",
   "secrets",
-]);
-const BLOCKED_EXTENSIONS = new Set([
-  ".env",
-  ".key",
-  ".pem",
-  ".p12",
-  ".pfx",
-  ".crt",
-  ".cer",
-  ".der",
-  ".kdbx",
 ]);
 const MIME_BY_EXTENSION: Record<string, string> = {
   ".jpg": "image/jpeg",
@@ -121,8 +111,6 @@ export async function inspectLocalImage(
     throw new Error("Image path enters a blocked credential directory");
   }
   const extension = path.extname(absolute).toLowerCase();
-  if (BLOCKED_EXTENSIONS.has(extension))
-    throw new Error("Secret-like files cannot be uploaded");
   const expectedMime = MIME_BY_EXTENSION[extension];
   if (!expectedMime)
     throw new Error("Only JPEG, PNG, WebP, AVIF, and GIF files are allowed");
@@ -183,7 +171,6 @@ export async function inspectLocalImage(
     ) {
       throw new Error("Image dimensions exceed the 20,000 px / 100 MP limits");
     }
-    const { createHash } = await import("node:crypto");
     return {
       bytes,
       filename: path.basename(resolved),

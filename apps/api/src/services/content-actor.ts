@@ -21,6 +21,8 @@ export type ContentActor =
   | ServiceContentActor
   | SystemContentActor;
 
+export type ContentActorInput = ContentActor | string | null;
+
 export function adminContentActor(
   id: string,
   label?: string | null,
@@ -41,6 +43,11 @@ export function serviceContentActor(
 
 export function systemContentActor(label: string): SystemContentActor {
   return { kind: "system", id: null, label: label.trim() || "system" };
+}
+
+export function normalizeContentActor(input: ContentActorInput): ContentActor {
+  if (typeof input === "string") return adminContentActor(input);
+  return input ?? systemContentActor("legacy-system");
 }
 
 export function contentActorAdminId(actor: ContentActor): string | null {

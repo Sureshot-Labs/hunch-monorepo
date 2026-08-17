@@ -39,11 +39,10 @@ import {
 } from "./content-document.js";
 import { ContentError } from "./content-errors.js";
 import {
-  adminContentActor,
   contentActorAdminId,
   contentActorServicePrincipalId,
-  systemContentActor,
-  type ContentActor,
+  normalizeContentActor,
+  type ContentActorInput,
 } from "./content-actor.js";
 import { promoteContentRoute } from "./content-routes.js";
 
@@ -280,13 +279,6 @@ export function journalServiceVersion<T extends ContentArticleVersionSummary>(
 ): Omit<T, "createdByAdminId"> {
   const { createdByAdminId: _createdByAdminId, ...safeVersion } = version;
   return safeVersion;
-}
-
-export type ContentActorInput = ContentActor | string | null;
-
-function normalizeContentActor(input: ContentActorInput): ContentActor {
-  if (typeof input === "string") return adminContentActor(input);
-  return input ?? systemContentActor("legacy-system");
 }
 
 export type PublicContentArticleSummary = {

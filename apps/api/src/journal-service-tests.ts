@@ -220,7 +220,11 @@ const sanitizedAsset = journalServiceAsset({
   creditUrl: null,
   focalX: null,
   focalY: null,
-  metadata: { stagingSecret: "never-return" },
+  metadata: {
+    sourceType: "app-screenshot",
+    license: "Editorial use",
+    stagingSecret: "never-return",
+  },
   createdByAdminId: adminActorId,
   createdByServicePrincipalId: principalId,
   updatedByAdminId: adminActorId,
@@ -236,6 +240,8 @@ assert.equal("createdByAdminId" in sanitizedAsset, false);
 assert.equal("updatedByAdminId" in sanitizedAsset, false);
 assert.equal("deletedAt" in sanitizedAsset, false);
 assert.equal(sanitizedAsset.createdByServicePrincipalId, principalId);
+assert.equal(sanitizedAsset.sourceType, "app-screenshot");
+assert.equal(sanitizedAsset.license, "Editorial use");
 
 const sanitizedArticle = journalServiceArticle({
   createdByAdminId: adminActorId,

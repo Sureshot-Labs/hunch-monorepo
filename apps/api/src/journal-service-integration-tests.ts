@@ -58,6 +58,11 @@ async function expectCheckViolation(work: () => Promise<unknown>) {
 try {
   env.journalServiceTokenPepper = pepper;
   await pool.query(
+    `insert into admin_accounts (id, email, status, role)
+     values ($1, $2, 'active', 'sadmin')`,
+    [adminActorId, `${principalKey}@example.com`],
+  );
+  await pool.query(
     `insert into admin_service_principals (id, key, display_name) values ($1, $2, $3)`,
     [principalId, principalKey, "Journal Integration Test"],
   );
@@ -204,7 +209,7 @@ try {
         principalId,
         scopes: ["journal:read", "journal:validate"],
         ttlDays: 30,
-        actorAdminId: null as unknown as string,
+        actorAdminId: adminActorId,
         note: `concurrent issue ${index}`,
       }),
     ),
@@ -238,7 +243,7 @@ try {
     credentialId: issued.value.id,
     scopes: ["journal:read", "journal:draft:update"],
     ttlDays: 30,
-    actorAdminId: null as unknown as string,
+    actorAdminId: adminActorId,
     note: "integration rotation",
   });
   assert.equal(rotated.rotatedCredentialId, issued.value.id);
@@ -268,7 +273,7 @@ try {
         credentialId: issued.value.id,
         scopes: ["journal:read"],
         ttlDays: 30,
-        actorAdminId: null as unknown as string,
+        actorAdminId: adminActorId,
         note: "must not rotate a revoked credential",
       }),
     /already been revoked/,
@@ -602,12 +607,12 @@ try {
   articleId = null;
   await disableJournalServicePrincipal(pool, {
     principalId,
-    actorAdminId: null as unknown as string,
+    actorAdminId: adminActorId,
     reason: "first disable reason",
   });
   await disableJournalServicePrincipal(pool, {
     principalId,
-    actorAdminId: null as unknown as string,
+    actorAdminId: adminActorId,
     reason: "second disable reason",
   });
   const disabledPrincipal = await pool.query<{
@@ -655,6 +660,9 @@ try {
   }
   await pool
     .query(`delete from admin_service_principals where id = $1`, [principalId])
+    .catch(() => undefined);
+  await pool
+    .query(`delete from admin_accounts where id = $1`, [adminActorId])
     .catch(() => undefined);
   await pool
     .query(`delete from content_audit_events where action like $1`, [

@@ -340,6 +340,12 @@ export const contentAssetCompleteBodySchema = z
   })
   .strict();
 
+export const contentAssetSourceTypeSchema = z.enum([
+  "app-screenshot",
+  "telegram-screenshot",
+  "generated-editorial",
+]);
+
 export const contentAssetUpdateBodySchema = z
   .object({
     defaultAlt: z.string().trim().max(500).nullable().optional(),
@@ -348,9 +354,7 @@ export const contentAssetUpdateBodySchema = z
     creditUrl: contentAssetCreditUrlSchema.nullable().optional(),
     focalX: z.number().min(0).max(1).nullable().optional(),
     focalY: z.number().min(0).max(1).nullable().optional(),
-    sourceType: z
-      .enum(["app-screenshot", "telegram-screenshot", "generated-editorial"])
-      .optional(),
+    sourceType: contentAssetSourceTypeSchema.optional(),
     license: z.string().trim().min(1).max(200).nullable().optional(),
   })
   .strict()
@@ -375,11 +379,7 @@ export const journalServiceIdempotencyHeadersSchema = z
 export const journalServiceAssetCreateBodySchema = contentAssetCreateBodySchema
   .omit({ kind: true, metadata: true })
   .extend({
-    sourceType: z.enum([
-      "app-screenshot",
-      "telegram-screenshot",
-      "generated-editorial",
-    ]),
+    sourceType: contentAssetSourceTypeSchema,
     license: z.string().trim().min(1).max(200).nullable().optional(),
   })
   .strict();
@@ -421,6 +421,9 @@ export type ContentAssetCreateBody = z.infer<
 >;
 export type ContentAssetCompleteBody = z.infer<
   typeof contentAssetCompleteBodySchema
+>;
+export type ContentAssetSourceType = z.infer<
+  typeof contentAssetSourceTypeSchema
 >;
 export type ContentAssetUpdateBody = z.infer<
   typeof contentAssetUpdateBodySchema

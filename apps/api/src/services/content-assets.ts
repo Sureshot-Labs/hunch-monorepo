@@ -17,26 +17,20 @@ import type { DbQuery } from "../db.js";
 import {
   contentAssetCompleteBodySchema,
   contentAssetCreateBodySchema,
+  contentAssetSourceTypeSchema,
   contentAssetUpdateBodySchema,
   type ContentAssetCompleteBody,
   type ContentAssetCreateBody,
+  type ContentAssetSourceType,
   type ContentAssetUpdateBody,
 } from "../schemas/content.js";
 import { ContentError } from "./content-errors.js";
 import {
-  adminContentActor,
   contentActorAdminId,
   contentActorServicePrincipalId,
-  systemContentActor,
-  type ContentActor,
+  normalizeContentActor,
+  type ContentActorInput,
 } from "./content-actor.js";
-
-export type ContentAssetActorInput = ContentActor | string | null;
-
-function normalizeAssetActor(input: ContentAssetActorInput): ContentActor {
-  if (typeof input === "string") return adminContentActor(input);
-  return input ?? systemContentActor("legacy-system");
-}
 
 type AssetRow = {
   id: string;
@@ -115,7 +109,10 @@ export type JournalServiceAsset = Omit<
   | "createdByAdminId"
   | "updatedByAdminId"
   | "deletedAt"
->;
+> & {
+  sourceType: ContentAssetSourceType | null;
+  license: string | null;
+};
 
 export function journalServiceAsset(asset: ContentAsset): JournalServiceAsset {
   const {
@@ -126,7 +123,15 @@ export function journalServiceAsset(asset: ContentAsset): JournalServiceAsset {
     deletedAt: _deletedAt,
     ...safe
   } = asset;
-  return safe;
+  const sourceType = contentAssetSourceTypeSchema.safeParse(
+    asset.metadata.sourceType,
+  );
+  const license = asset.metadata.license;
+  return {
+    ...safe,
+    sourceType: sourceType.success ? sourceType.data : null,
+    license: typeof license === "string" ? license : null,
+  };
 }
 
 const ASSET_COLUMNS = `
@@ -255,11 +260,11 @@ async function insertContentAssetAudit(
   input: {
     action: string;
     assetId: string;
-    actor: ContentAssetActorInput;
+    actor: ContentActorInput;
     metadata?: Record<string, unknown>;
   },
 ): Promise<void> {
-  const actor = normalizeAssetActor(input.actor);
+  const actor = normalizeContentActor(input.actor);
   await db.query(
     `
       insert into content_audit_events (
@@ -385,10 +390,10 @@ async function signContentAssetUpload(
 export async function createContentAssetUpload(
   pool: Pool,
   rawBody: ContentAssetCreateBody,
-  actorInput: ContentAssetActorInput,
+  actorInput: ContentActorInput,
   requestedId?: string,
 ): Promise<ContentAssetUploadIntent> {
-  const actor = normalizeAssetActor(actorInput);
+  const actor = normalizeContentActor(actorInput);
   const body = contentAssetCreateBodySchema.parse(rawBody);
   assertUploadPolicy(body);
   const assetId = requestedId ?? randomUUID();
@@ -451,9 +456,9 @@ export async function createContentAssetUpload(
 export async function renewContentAssetUpload(
   db: DbQuery,
   assetId: string,
-  actorInput: ContentAssetActorInput,
+  actorInput: ContentActorInput,
 ): Promise<ContentAssetUploadIntent | { asset: ContentAsset; upload: null }> {
-  const actor = normalizeAssetActor(actorInput);
+  const actor = normalizeContentActor(actorInput);
   const { rows } = await db.query<AssetRow>(
     `select ${ASSET_COLUMNS} from content_assets where id = $1 limit 1`,
     [assetId],
@@ -665,9 +670,9 @@ export async function completeContentAssetUpload(
   pool: Pool,
   assetId: string,
   rawBody: ContentAssetCompleteBody,
-  actorInput: ContentAssetActorInput = null,
+  actorInput: ContentActorInput = null,
 ): Promise<ContentAsset> {
-  const actor = normalizeAssetActor(actorInput);
+  const actor = normalizeContentActor(actorInput);
   const body = contentAssetCompleteBodySchema.parse(rawBody);
   const client = requireStorage();
   const claim = await tx(pool, async (db) => {
@@ -974,9 +979,9 @@ export async function updateContentAsset(
   pool: Pool,
   assetId: string,
   rawBody: ContentAssetUpdateBody,
-  actorInput: ContentAssetActorInput,
+  actorInput: ContentActorInput,
 ): Promise<ContentAsset> {
-  const actor = normalizeAssetActor(actorInput);
+  const actor = normalizeContentActor(actorInput);
   const body = contentAssetUpdateBodySchema.parse(rawBody);
   const metadataPatch: Record<string, unknown> = {};
   if (body.sourceType !== undefined) metadataPatch.sourceType = body.sourceType;
@@ -1119,9 +1124,9 @@ export async function listContentAssets(
 export async function deleteContentAsset(
   pool: Pool,
   assetId: string,
-  actorInput: ContentAssetActorInput = null,
+  actorInput: ContentActorInput = null,
 ): Promise<ContentAsset> {
-  const actor = normalizeAssetActor(actorInput);
+  const actor = normalizeContentActor(actorInput);
   return tx(pool, async (db) => {
     const { rows } = await db.query<AssetRow>(
       `select ${ASSET_COLUMNS} from content_assets where id = $1 for update`,

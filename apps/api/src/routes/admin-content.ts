@@ -46,10 +46,7 @@ import {
   updateContentArticle,
 } from "../services/content.js";
 import { createContentPreviewToken } from "../services/content-preview.js";
-import {
-  adminContentActor,
-  systemContentActor,
-} from "../services/content-actor.js";
+import { adminContentActor } from "../services/content-actor.js";
 import {
   getContentOperationalStatus,
   recordContentRevisionConflict,
@@ -71,7 +68,9 @@ function actorAdminId(request: FastifyRequest): string | null {
 
 function contentActor(request: FastifyRequest) {
   const id = actorAdminId(request);
-  if (!id) return systemContentActor("legacy-admin-system");
+  if (!id) {
+    throw new Error("Admin content actor is missing after authorization");
+  }
   return adminContentActor(
     id,
     request.adminAccount?.email ?? request.adminActor?.email,

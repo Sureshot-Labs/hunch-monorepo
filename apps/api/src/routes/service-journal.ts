@@ -179,7 +179,6 @@ export const serviceJournalRoutes: FastifyPluginAsync = async (app) => {
           contentPool,
           request.query,
         );
-        reply.header("Cache-Control", "no-store");
         return reply.send({
           ok: true,
           items: result.items.map(journalServiceArticle),
@@ -241,7 +240,6 @@ export const serviceJournalRoutes: FastifyPluginAsync = async (app) => {
         if (result.claim.replay) recordJournalServiceOutcome("idempotency_hit");
         if (result.claim.reclaimed)
           recordJournalServiceOutcome("idempotency_lease_reclaimed");
-        reply.header("Cache-Control", "no-store");
         return reply
           .code(result.claim.replay ? (result.claim.httpStatus ?? 201) : 201)
           .send({
@@ -270,7 +268,6 @@ export const serviceJournalRoutes: FastifyPluginAsync = async (app) => {
         if (!article) {
           return reply.code(404).send({ error: "content_article_not_found" });
         }
-        reply.header("Cache-Control", "no-store");
         return reply.send({
           ok: true,
           article: journalServiceArticle(article),
@@ -304,7 +301,6 @@ export const serviceJournalRoutes: FastifyPluginAsync = async (app) => {
             ? "draft_updated"
             : "draft_update_noop",
         );
-        reply.header("Cache-Control", "no-store");
         return reply.send({
           ok: true,
           article: journalServiceArticle(result.article),
@@ -332,7 +328,6 @@ export const serviceJournalRoutes: FastifyPluginAsync = async (app) => {
           actor: serviceActor(request),
         });
         recordJournalServiceOutcome("checkpoint_created");
-        reply.header("Cache-Control", "no-store");
         return reply
           .code(201)
           .send({ ok: true, version: journalServiceVersion(version) });
@@ -357,7 +352,6 @@ export const serviceJournalRoutes: FastifyPluginAsync = async (app) => {
         recordJournalServiceOutcome(
           validation.ready ? "validation_ready" : "validation_not_ready",
         );
-        reply.header("Cache-Control", "no-store");
         return reply.send({ ok: true, validation });
       } catch (error) {
         return sendServiceError(reply, error);
@@ -401,7 +395,6 @@ export const serviceJournalRoutes: FastifyPluginAsync = async (app) => {
           ttlSeconds: request.body.ttlSeconds,
         });
         recordJournalServiceOutcome("preview_created");
-        reply.header("Cache-Control", "no-store");
         return reply.send({ ok: true, preview });
       } catch (error) {
         return sendServiceError(reply, error);
@@ -424,7 +417,6 @@ export const serviceJournalRoutes: FastifyPluginAsync = async (app) => {
           articleId: request.params.id,
           ...request.query,
         });
-        reply.header("Cache-Control", "no-store");
         return reply.send({
           ok: true,
           items: result.items.map(journalServiceVersion),
@@ -452,7 +444,6 @@ export const serviceJournalRoutes: FastifyPluginAsync = async (app) => {
         if (!version) {
           return reply.code(404).send({ error: "content_version_not_found" });
         }
-        reply.header("Cache-Control", "no-store");
         return reply.send({
           ok: true,
           version: journalServiceVersion(version),
@@ -478,7 +469,6 @@ export const serviceJournalRoutes: FastifyPluginAsync = async (app) => {
           articleId: request.params.id,
           ...request.query,
         });
-        reply.header("Cache-Control", "no-store");
         return reply.send({
           ok: true,
           items: result.items.map(journalServiceContentAuditEvent),
@@ -502,7 +492,6 @@ export const serviceJournalRoutes: FastifyPluginAsync = async (app) => {
           ...request.query,
           kind: "image",
         });
-        reply.header("Cache-Control", "no-store");
         return reply.send({
           ok: true,
           items: result.items.map(journalServiceAsset),
@@ -612,7 +601,6 @@ export const serviceJournalRoutes: FastifyPluginAsync = async (app) => {
         if (claim.replay) recordJournalServiceOutcome("idempotency_hit");
         if (claim.reclaimed)
           recordJournalServiceOutcome("idempotency_lease_reclaimed");
-        reply.header("Cache-Control", "no-store");
         return reply.code(claim.replay ? (claim.httpStatus ?? 201) : 201).send({
           ok: true,
           asset: journalServiceAsset(intent.asset),
@@ -667,7 +655,6 @@ export const serviceJournalRoutes: FastifyPluginAsync = async (app) => {
           "upload_bytes_completed",
           request.body.byteSize,
         );
-        reply.header("Cache-Control", "no-store");
         return reply.send({ ok: true, asset: journalServiceAsset(asset) });
       } catch (error) {
         return sendServiceError(reply, error);
@@ -695,7 +682,6 @@ export const serviceJournalRoutes: FastifyPluginAsync = async (app) => {
           serviceActor(request),
         );
         recordJournalServiceOutcome("asset_metadata_updated");
-        reply.header("Cache-Control", "no-store");
         return reply.send({ ok: true, asset: journalServiceAsset(asset) });
       } catch (error) {
         return sendServiceError(reply, error);
@@ -722,7 +708,6 @@ export const serviceJournalRoutes: FastifyPluginAsync = async (app) => {
             status: "in_review",
           });
           recordJournalServiceOutcome("review_submitted");
-          reply.header("Cache-Control", "no-store");
           return reply.send({
             ok: true,
             article: journalServiceArticle(article),
