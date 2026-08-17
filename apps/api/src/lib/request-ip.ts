@@ -1,12 +1,7 @@
 import type { FastifyRequest } from "fastify";
 import { env } from "../env.js";
 import { resolveClientIp, type GeoFenceConfig } from "./geo-fence.js";
-import {
-  checkRateLimit,
-  checkRateLimitStatus,
-  type DistributedControlStatus,
-  type RateLimitErrorMode,
-} from "./rate-limit.js";
+import { checkRateLimit, type RateLimitErrorMode } from "./rate-limit.js";
 
 const requestIpConfig: GeoFenceConfig = {
   enabled: false,
@@ -38,26 +33,4 @@ export async function checkRateLimitForSecurityClientIp(
     { onError: options.onError },
   );
   return { allowed, clientIp, key };
-}
-
-export async function checkRateLimitForSecurityClientIpStatus(
-  request: FastifyRequest,
-  options: {
-    keyPrefix: string;
-    maxRequests: number;
-    windowMs: number;
-  },
-): Promise<{
-  status: DistributedControlStatus;
-  clientIp: string;
-  key: string;
-}> {
-  const clientIp = resolveSecurityClientIp(request);
-  const key = `${options.keyPrefix}:${clientIp}`;
-  const status = await checkRateLimitStatus(
-    key,
-    options.maxRequests,
-    options.windowMs,
-  );
-  return { status, clientIp, key };
 }

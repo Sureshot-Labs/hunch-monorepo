@@ -34,6 +34,5 @@ export function sendContentError(
     error: error.code,
     message: error.message,
     ...(error.issues ? { issues: error.issues } : {}),
-    ...(error.details ? { details: error.details } : {}),
   });
 }

@@ -46,7 +46,10 @@ import {
   updateContentArticle,
 } from "../services/content.js";
 import { createContentPreviewToken } from "../services/content-preview.js";
-import { adminContentActor } from "../services/content-actor.js";
+import {
+  adminContentActor,
+  serviceContentActor,
+} from "../services/content-actor.js";
 import {
   getContentOperationalStatus,
   recordContentRevisionConflict,
@@ -67,12 +70,12 @@ function actorAdminId(request: FastifyRequest): string | null {
 }
 
 function contentActor(request: FastifyRequest) {
-  const id = actorAdminId(request);
-  if (!id) {
-    throw new Error("Admin content actor is missing after authorization");
-  }
+  const service = request.adminServicePrincipal;
+  if (service) return serviceContentActor(service.id, service.displayName);
+  const adminId = actorAdminId(request);
+  if (!adminId) throw new Error("Admin content actor is missing");
   return adminContentActor(
-    id,
+    adminId,
     request.adminAccount?.email ?? request.adminActor?.email,
   );
 }
@@ -300,7 +303,7 @@ export const adminContentRoutes: FastifyPluginAsync = async (app) => {
         const result = await publishContentArticle(contentPool, {
           id: request.params.id,
           expectedRevision: request.body.expectedRevision,
-          actorAdminId: actorAdminId(request),
+          actor: contentActor(request),
           publishAt: request.body.publishAt
             ? new Date(request.body.publishAt)
             : undefined,
@@ -328,7 +331,7 @@ export const adminContentRoutes: FastifyPluginAsync = async (app) => {
         const result = await cancelContentArticleSchedule(contentPool, {
           id: request.params.id,
           expectedRevision: request.body.expectedRevision,
-          actorAdminId: actorAdminId(request),
+          actor: contentActor(request),
         });
         reply.header("Cache-Control", "no-store");
         return reply.send({ ok: true, article: result.article });
@@ -356,7 +359,7 @@ export const adminContentRoutes: FastifyPluginAsync = async (app) => {
           const result = await mutation(contentPool, {
             id: request.params.id,
             expectedRevision: request.body.expectedRevision,
-            actorAdminId: actorAdminId(request),
+            actor: contentActor(request),
           });
           reply.header("Cache-Control", "no-store");
           return reply.send({ ok: true, article: result.article });
@@ -477,7 +480,7 @@ export const adminContentRoutes: FastifyPluginAsync = async (app) => {
           id: request.params.id,
           versionId: request.params.versionId,
           expectedRevision: request.body.expectedRevision,
-          actorAdminId: actorAdminId(request),
+          actor: contentActor(request),
         });
         reply.header("Cache-Control", "no-store");
         return reply.send({ ok: true, article: result.article });

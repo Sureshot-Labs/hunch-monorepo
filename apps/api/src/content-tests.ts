@@ -277,6 +277,37 @@ test("requires a SHA-256 checksum for upload creation and completion", () => {
   );
 });
 
+test("rejects unsafe asset credit URLs", () => {
+  const asset = {
+    kind: "image",
+    originalFilename: "image.png",
+    mimeType: "image/png",
+    expectedByteSize: 100,
+    checksumSha256: "0".repeat(64),
+  };
+  assert.equal(
+    contentAssetCreateBodySchema.safeParse({
+      ...asset,
+      creditUrl: "not a URL",
+    }).success,
+    false,
+  );
+  assert.equal(
+    contentAssetCreateBodySchema.safeParse({
+      ...asset,
+      creditUrl: "javascript:alert(1)",
+    }).success,
+    false,
+  );
+  assert.equal(
+    contentAssetCreateBodySchema.safeParse({
+      ...asset,
+      creditUrl: "https://user:password@example.com/source",
+    }).success,
+    false,
+  );
+});
+
 test("coerces and bounds public pagination", () => {
   assert.equal(
     publicContentArticlesQuerySchema.parse({ limit: "25" }).limit,
@@ -496,7 +527,6 @@ const publishableArticle: ContentArticle = {
     toc: [],
     contentHash: "a".repeat(64),
     updatedByAdminId: null,
-    updatedByServicePrincipalId: null,
     createdAt: "2026-07-28T12:00:00.000Z",
     updatedAt: "2026-07-28T12:00:00.000Z",
   },
@@ -505,8 +535,6 @@ const publishableArticle: ContentArticle = {
   archivedAt: null,
   createdByAdminId: null,
   updatedByAdminId: null,
-  createdByServicePrincipalId: null,
-  updatedByServicePrincipalId: null,
   publishedByAdminId: null,
   createdAt: "2026-07-28T12:00:00.000Z",
   updatedAt: "2026-07-28T12:00:00.000Z",
@@ -623,8 +651,6 @@ test("supports AWS IAM-role storage without long-lived static keys", () => {
 test("defaults content off and validates production storage safely", () => {
   const defaults = resolveContentRuntimeConfig({}, "production");
   assert.equal(defaults.enabled, false);
-  assert.equal(defaults.journalServiceApiEnabled, false);
-  assert.equal(defaults.journalServiceReviewSubmitEnabled, false);
   assert.equal(defaults.publishingEnabled, false);
   assert.equal(defaults.workerEnabled, false);
   assert.throws(() =>
@@ -665,50 +691,6 @@ test("defaults content off and validates production storage safely", () => {
       ),
     /static content S3 credentials are forbidden/,
   );
-});
-
-test("requires an explicit content boundary and pepper for the journal service", () => {
-  assert.throws(
-    () =>
-      resolveContentRuntimeConfig(
-        { JOURNAL_SERVICE_API_ENABLED: "true" },
-        "production",
-      ),
-    /CONTENT_ENABLED must be true/,
-  );
-  assert.throws(
-    () =>
-      resolveContentRuntimeConfig(
-        {
-          CONTENT_ENABLED: "true",
-          JOURNAL_SERVICE_API_ENABLED: "true",
-          JOURNAL_SERVICE_TOKEN_PEPPER: "short",
-        },
-        "production",
-      ),
-    /JOURNAL_SERVICE_TOKEN_PEPPER must be at least 32 characters/,
-  );
-  assert.throws(
-    () =>
-      resolveContentRuntimeConfig(
-        { JOURNAL_SERVICE_REVIEW_SUBMIT_ENABLED: "true" },
-        "production",
-      ),
-    /JOURNAL_SERVICE_API_ENABLED must be true/,
-  );
-  const enabled = resolveContentRuntimeConfig(
-    {
-      CONTENT_ENABLED: "true",
-      JOURNAL_SERVICE_API_ENABLED: "true",
-      JOURNAL_SERVICE_TOKEN_PEPPER: "p".repeat(32),
-    },
-    "production",
-  );
-  assert.equal(enabled.journalServiceApiEnabled, true);
-  assert.equal(enabled.journalServiceReadRatePerMinute, 120);
-  assert.equal(enabled.journalServiceMutationRatePerMinute, 30);
-  assert.equal(enabled.journalServiceUploadRatePerMinute, 10);
-  assert.equal(enabled.journalServiceMaxConcurrentVerifications, 5);
 });
 
 test("requires a complete fail-closed publishing configuration", () => {
@@ -905,9 +887,9 @@ test("registers gated protected routes and the content schema migrations", () =>
         "enable trigger content_article_versions_immutable",
       ),
   );
-  assert.match(contentDb, /0224_content_service_actor_contract\.sql/);
-  assert.match(contentDb, /select count\(\*\) = 13/);
-  assert.match(contentDb, /select count\(\*\) = 33/);
+  assert.match(contentDb, /0222_content_service_actor\.sql/);
+  assert.match(contentDb, /select count\(\*\) = 12/);
+  assert.match(contentDb, /select count\(\*\) = 25/);
   assert.match(contentDb, /content_outbox_version_id_fkey/);
   assert.ok(
     prebuiltDeploy.indexOf('"${compose[@]}" run --rm api') <

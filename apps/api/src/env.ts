@@ -422,6 +422,12 @@ const adminSessionTtlMs = optionalPositiveInt(
   8 * 60 * 60 * 1000,
 );
 const adminTotpIssuer = process.env.ADMIN_TOTP_ISSUER?.trim() || "Hunch Admin";
+const adminServiceTokenPepper =
+  process.env.ADMIN_SERVICE_TOKEN_PEPPER?.trim() || "";
+const adminServiceCredentialMaxTtlDays = optionalPositiveInt(
+  "ADMIN_SERVICE_CREDENTIAL_MAX_TTL_DAYS",
+  90,
+);
 const aiMarketMapEnabled =
   parseOptionalBool(process.env.AI_MARKET_MAP_ENABLED) ?? false;
 const aiMarketMapTriggerMode = parseEnum(
@@ -815,24 +821,6 @@ const aggMarketCredential = resolveAggMarketCredential();
 export const env = {
   content: contentRuntimeConfig,
   contentEnabled: contentRuntimeConfig.enabled,
-  journalServiceApiEnabled: contentRuntimeConfig.journalServiceApiEnabled,
-  journalServiceReviewSubmitEnabled:
-    contentRuntimeConfig.journalServiceReviewSubmitEnabled,
-  journalServiceTokenPepper: contentRuntimeConfig.journalServiceTokenPepper,
-  journalServiceCredentialMaxTtlDays:
-    contentRuntimeConfig.journalServiceCredentialMaxTtlDays,
-  journalServiceReadRatePerMinute:
-    contentRuntimeConfig.journalServiceReadRatePerMinute,
-  journalServiceMutationRatePerMinute:
-    contentRuntimeConfig.journalServiceMutationRatePerMinute,
-  journalServiceUploadRatePerMinute:
-    contentRuntimeConfig.journalServiceUploadRatePerMinute,
-  journalServiceMaxConcurrentVerifications:
-    contentRuntimeConfig.journalServiceMaxConcurrentVerifications,
-  journalServiceDailyUploadBytes:
-    contentRuntimeConfig.journalServiceDailyUploadBytes,
-  journalServiceIdempotencyLeaseSec:
-    contentRuntimeConfig.journalServiceIdempotencyLeaseSec,
   contentPublishingEnabled: contentRuntimeConfig.publishingEnabled,
   contentRequireApproval: contentRuntimeConfig.requireApproval,
   contentRendererContractId: contentRuntimeConfig.rendererContractId,
@@ -946,6 +934,8 @@ export const env = {
   adminEnrollmentTtlMs,
   adminSessionTtlMs,
   adminTotpIssuer,
+  adminServiceTokenPepper,
+  adminServiceCredentialMaxTtlDays,
   marketMapTtlSec: optionalNonNegativeInt("API_MARKET_MAP_TTL_SEC", 10),
   walletIntelTtlSec: optionalNonNegativeInt("API_WALLET_INTEL_TTL_SEC", 30),
   holdersTtlSec: Number(process.env.API_HOLDERS_TTL_SEC ?? "300"),

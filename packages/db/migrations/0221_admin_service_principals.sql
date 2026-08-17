@@ -1,4 +1,4 @@
--- Narrow, revocable service identities for non-human admin workflows.
+-- Revocable API identities for non-human admin workflows.
 
 create or replace function admin_service_text_array_unique(values_to_check text[])
 returns boolean
@@ -33,10 +33,7 @@ create table admin_service_principals (
   constraint admin_service_principals_display_name_check
     check (char_length(display_name) between 1 and 160),
   constraint admin_service_principals_metadata_check
-    check (
-      jsonb_typeof(metadata) = 'object'
-      and pg_column_size(metadata) <= 16384
-    ),
+    check (jsonb_typeof(metadata) = 'object' and pg_column_size(metadata) <= 16384),
   constraint admin_service_principals_disabled_check
     check (
       (status = 'active' and disabled_at is null and disabled_by_admin_id is null)
@@ -44,21 +41,18 @@ create table admin_service_principals (
     )
 );
 
-create index idx_admin_service_principals_status
-  on admin_service_principals (status, updated_at desc, id);
-
 create trigger admin_service_principals_set_updated_at
   before update on admin_service_principals
   for each row execute function update_updated_at_column();
 
 create table admin_service_credentials (
-  id uuid primary key default gen_random_uuid(),
+  id uuid primary key,
   service_principal_id uuid not null
     references admin_service_principals(id) on delete restrict,
   token_hmac text not null unique,
   token_prefix text not null,
   token_last_four text not null,
-  scopes text[] not null,
+  permissions text[] not null,
   expires_at timestamptz not null,
   revoked_at timestamptz,
   last_used_at timestamptz,
@@ -73,20 +67,15 @@ create table admin_service_credentials (
     check (char_length(token_prefix) between 8 and 32),
   constraint admin_service_credentials_token_last_four_check
     check (char_length(token_last_four) = 4),
-  constraint admin_service_credentials_scopes_check
+  constraint admin_service_credentials_permissions_check
     check (
-      cardinality(scopes) between 1 and 8
-      and scopes <@ array[
-        'journal:read',
-        'journal:draft:create',
-        'journal:draft:update',
-        'journal:draft:checkpoint',
-        'journal:asset:upload-image',
-        'journal:validate',
-        'journal:preview:create',
-        'journal:review:submit'
+      cardinality(permissions) between 1 and 3
+      and permissions <@ array[
+        'content:read',
+        'content:write',
+        'content:publish'
       ]::text[]
-      and admin_service_text_array_unique(scopes)
+      and admin_service_text_array_unique(permissions)
     ),
   constraint admin_service_credentials_expiry_check
     check (expires_at > created_at),
@@ -105,11 +94,3 @@ create table admin_service_credentials (
 
 create index idx_admin_service_credentials_principal_created
   on admin_service_credentials (service_principal_id, created_at desc, id desc);
-
-create index idx_admin_service_credentials_active_lookup
-  on admin_service_credentials (id, service_principal_id, expires_at)
-  where revoked_at is null;
-
-create index idx_admin_service_credentials_expiry
-  on admin_service_credentials (expires_at, id)
-  where revoked_at is null;

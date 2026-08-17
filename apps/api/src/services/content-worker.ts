@@ -225,8 +225,7 @@ export async function publishDueContentVersions(
             published_at = $6,
             scheduled_for = null,
             published_by_admin_id = $7,
-            updated_by_admin_id = $7,
-            updated_by_service_principal_id = null
+            updated_by_admin_id = $7
           where id = $1
         `,
           [
@@ -251,24 +250,18 @@ export async function publishDueContentVersions(
           `
           insert into content_audit_events (
             action, article_id, version_id, actor_admin_id,
-            actor_kind, actor_service_principal_id, actor_label, metadata
+            metadata
           ) values (
-            'article.scheduled_publication_completed', $1, $2, null,
-            'system', null, 'content-worker', $3::jsonb
+            'article.scheduled_publication_completed', $1, $2, $3,
+            $4::jsonb
           )
         `,
           [
             job.article_id,
             version.id,
+            version.created_by_admin_id,
             JSON.stringify({
               scheduledFor: new Date(job.run_at).toISOString(),
-              initiatedBy: version.created_by_admin_id
-                ? {
-                    kind: "admin",
-                    id: version.created_by_admin_id,
-                    label: `admin:${version.created_by_admin_id}`,
-                  }
-                : null,
             }),
           ],
         );
@@ -573,22 +566,6 @@ export async function runContentRetention(
     if (!lockRows[0]?.locked) return 0;
 
     const counts: number[] = [];
-    const idempotencyResult = await db.query(
-      `
-        with expired as (
-          select id from content_machine_idempotency_keys
-          where expires_at <= now()
-          order by expires_at, id
-          limit $1
-          for update skip locked
-        )
-        delete from content_machine_idempotency_keys target
-        using expired
-        where target.id = expired.id
-      `,
-      [batchSize],
-    );
-    counts.push(idempotencyResult.rowCount ?? 0);
     for (const statement of [
       `
         with expired as (

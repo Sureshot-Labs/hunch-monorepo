@@ -2,7 +2,6 @@ import { createHash } from "node:crypto";
 import { getRedisStatus } from "../redis.js";
 
 export type RateLimitErrorMode = "fail_open" | "fail_closed";
-export type DistributedControlStatus = "allowed" | "limited" | "unavailable";
 
 type CheckRateLimitOptions = {
   onError?: RateLimitErrorMode;
@@ -84,33 +83,6 @@ redis.call('PEXPIRE', key, ttl_ms)
 return current
 `;
 
-const BUDGET_RESERVE_SCRIPT = `
-local key = KEYS[1]
-local amount = tonumber(ARGV[1])
-local maximum = tonumber(ARGV[2])
-local ttl_ms = tonumber(ARGV[3])
-local reservation = ARGV[4]
-if (not amount) or (not maximum) or (not ttl_ms) or amount < 0 or maximum <= 0 or ttl_ms <= 0 or reservation == '' then
-  return -1
-end
-local reservation_field = 'reservation:' .. reservation
-local reserved_amount = tonumber(redis.call('HGET', key, reservation_field))
-if reserved_amount then
-  if reserved_amount ~= amount then
-    return -1
-  end
-  redis.call('PEXPIRE', key, ttl_ms)
-  return 1
-end
-local current = tonumber(redis.call('HGET', key, 'used') or '0')
-if current + amount > maximum then
-  return 0
-end
-redis.call('HSET', key, 'used', current + amount, reservation_field, amount)
-redis.call('PEXPIRE', key, ttl_ms)
-return 2
-`;
-
 function normalizeKey(input: string): string {
   const trimmed = input.trim();
   return trimmed.length ? trimmed : "unknown";
@@ -180,20 +152,6 @@ export async function checkRateLimit(
   return allowOnError(options);
 }
 
-export async function checkRateLimitStatus(
-  key: string,
-  maxRequests: number = 10,
-  windowMs: number = 60_000,
-): Promise<DistributedControlStatus> {
-  const allowed = await checkRateLimitRedis({
-    key: normalizeKey(key),
-    maxRequests,
-    windowMs,
-  });
-  if (allowed == null) return "unavailable";
-  return allowed ? "allowed" : "limited";
-}
-
 export async function acquireDistributedSlot(
   key: string,
   maxSlots: number,
@@ -212,20 +170,6 @@ export async function acquireDistributedSlot(
   return reply > 0;
 }
 
-export async function acquireDistributedSlotStatus(
-  key: string,
-  maxSlots: number,
-  ttlMs: number,
-): Promise<DistributedControlStatus> {
-  const redisKey = `slot:v1:${compactKey(normalizeKey(key))}`;
-  const reply = await evalLuaNumber(COUNTER_ACQUIRE_SCRIPT, redisKey, [
-    String(maxSlots),
-    String(ttlMs),
-  ]);
-  if (reply == null || reply < 0) return "unavailable";
-  return reply > 0 ? "allowed" : "limited";
-}
-
 export async function releaseDistributedSlot(
   key: string,
   ttlMs: number,
@@ -233,40 +177,4 @@ export async function releaseDistributedSlot(
   const normalizedKey = normalizeKey(key);
   const redisKey = `slot:v1:${compactKey(normalizedKey)}`;
   await evalLuaNumber(COUNTER_RELEASE_SCRIPT, redisKey, [String(ttlMs)]);
-}
-
-export async function reserveDistributedBudgetStatus(
-  key: string,
-  amount: number,
-  maximum: number,
-  ttlMs: number,
-  reservationId: string,
-): Promise<{ status: DistributedControlStatus; reserved: boolean }> {
-  const normalizedReservationId = reservationId.trim();
-  if (
-    !Number.isSafeInteger(amount) ||
-    amount < 0 ||
-    !Number.isSafeInteger(maximum) ||
-    maximum <= 0 ||
-    !Number.isSafeInteger(ttlMs) ||
-    ttlMs <= 0 ||
-    !normalizedReservationId ||
-    normalizedReservationId.length > 128
-  ) {
-    throw new Error(
-      "Distributed budget values or reservation identifier are invalid",
-    );
-  }
-  const redisKey = `budget:v2:${compactKey(normalizeKey(key))}`;
-  const reply = await evalLuaNumber(BUDGET_RESERVE_SCRIPT, redisKey, [
-    String(amount),
-    String(maximum),
-    String(ttlMs),
-    compactKey(normalizedReservationId),
-  ]);
-  if (reply == null || reply < 0) {
-    return { status: "unavailable", reserved: false };
-  }
-  if (reply === 0) return { status: "limited", reserved: false };
-  return { status: "allowed", reserved: reply === 2 };
 }

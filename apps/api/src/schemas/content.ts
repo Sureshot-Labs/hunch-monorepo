@@ -284,15 +284,18 @@ export const contentAssetStatusSchema = z.enum([
 const contentAssetCreditUrlSchema = z
   .string()
   .trim()
-  .url()
   .max(2_048)
   .refine((value) => {
-    const url = new URL(value);
-    return (
-      (url.protocol === "https:" || url.protocol === "http:") &&
-      !url.username &&
-      !url.password
-    );
+    try {
+      const url = new URL(value);
+      return (
+        (url.protocol === "https:" || url.protocol === "http:") &&
+        !url.username &&
+        !url.password
+      );
+    } catch {
+      return false;
+    }
   }, "Only credential-free HTTP(S) credit URLs are allowed");
 
 export const contentAssetCreateBodySchema = z
@@ -340,12 +343,6 @@ export const contentAssetCompleteBodySchema = z
   })
   .strict();
 
-export const contentAssetSourceTypeSchema = z.enum([
-  "app-screenshot",
-  "telegram-screenshot",
-  "generated-editorial",
-]);
-
 export const contentAssetUpdateBodySchema = z
   .object({
     defaultAlt: z.string().trim().max(500).nullable().optional(),
@@ -354,8 +351,6 @@ export const contentAssetUpdateBodySchema = z
     creditUrl: contentAssetCreditUrlSchema.nullable().optional(),
     focalX: z.number().min(0).max(1).nullable().optional(),
     focalY: z.number().min(0).max(1).nullable().optional(),
-    sourceType: contentAssetSourceTypeSchema.optional(),
-    license: z.string().trim().min(1).max(200).nullable().optional(),
   })
   .strict()
   .refine((value) => Object.keys(value).length > 0, {
@@ -364,32 +359,6 @@ export const contentAssetUpdateBodySchema = z
 
 export const contentAssetIdParamsSchema = z.object({
   id: z.string().uuid(),
-});
-
-export const journalServiceIdempotencyHeadersSchema = z
-  .object({
-    "idempotency-key": z
-      .string()
-      .min(8)
-      .max(128)
-      .regex(/^[A-Za-z0-9._:-]+$/),
-  })
-  .passthrough();
-
-export const journalServiceAssetCreateBodySchema = contentAssetCreateBodySchema
-  .omit({ kind: true, metadata: true })
-  .extend({
-    sourceType: contentAssetSourceTypeSchema,
-    license: z.string().trim().min(1).max(200).nullable().optional(),
-  })
-  .strict();
-
-export const journalServiceAssetUpdateBodySchema = contentAssetUpdateBodySchema;
-
-export const journalServiceAssetsQuerySchema = z.object({
-  cursor: contentCursorSchema,
-  limit: z.coerce.number().int().min(1).max(100).default(30),
-  status: contentAssetStatusSchema.optional(),
 });
 
 export const adminContentAssetsQuerySchema = z.object({
@@ -422,15 +391,6 @@ export type ContentAssetCreateBody = z.infer<
 export type ContentAssetCompleteBody = z.infer<
   typeof contentAssetCompleteBodySchema
 >;
-export type ContentAssetSourceType = z.infer<
-  typeof contentAssetSourceTypeSchema
->;
 export type ContentAssetUpdateBody = z.infer<
   typeof contentAssetUpdateBodySchema
->;
-export type JournalServiceAssetCreateBody = z.infer<
-  typeof journalServiceAssetCreateBodySchema
->;
-export type JournalServiceAssetUpdateBody = z.infer<
-  typeof journalServiceAssetUpdateBodySchema
 >;

@@ -10,7 +10,6 @@ export type ContentErrorCode =
   | "content_asset_in_use"
   | "content_asset_busy"
   | "content_asset_complete_mismatch"
-  | "content_article_archived"
   | "content_document_too_complex"
   | "content_storage_unavailable"
   | "content_publishing_disabled"
@@ -25,7 +24,6 @@ export class ContentError extends Error {
     message: string,
     public readonly statusCode: number,
     public readonly issues?: string[],
-    public readonly details?: Record<string, unknown>,
   ) {
     super(message);
     this.name = "ContentError";

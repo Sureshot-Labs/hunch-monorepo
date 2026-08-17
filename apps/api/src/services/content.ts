@@ -40,8 +40,8 @@ import {
 import { ContentError } from "./content-errors.js";
 import {
   contentActorAdminId,
-  contentActorServicePrincipalId,
   normalizeContentActor,
+  type ContentActor,
   type ContentActorInput,
 } from "./content-actor.js";
 import { promoteContentRoute } from "./content-routes.js";
@@ -62,8 +62,6 @@ type ArticleStateRow = {
   archived_at: Date | string | null;
   created_by_admin_id: string | null;
   updated_by_admin_id: string | null;
-  created_by_service_principal_id: string | null;
-  updated_by_service_principal_id: string | null;
   published_by_admin_id: string | null;
   article_created_at: Date | string;
   article_updated_at: Date | string;
@@ -95,7 +93,6 @@ type DraftRow = {
   toc: unknown;
   content_hash: string;
   updated_by_admin_id: string | null;
-  updated_by_service_principal_id: string | null;
   draft_created_at: Date | string;
   draft_updated_at: Date | string;
 };
@@ -134,7 +131,6 @@ type VersionRow = {
   toc: unknown;
   content_hash: string;
   created_by_admin_id: string | null;
-  created_by_service_principal_id: string | null;
   created_at: Date | string;
 };
 
@@ -149,7 +145,6 @@ type VersionSummaryRow = Pick<
   | "slug"
   | "content_hash"
   | "created_by_admin_id"
-  | "created_by_service_principal_id"
   | "created_at"
 >;
 
@@ -194,7 +189,6 @@ export type ContentArticleDraft = {
   toc: ContentTocItem[];
   contentHash: string;
   updatedByAdminId: string | null;
-  updatedByServicePrincipalId: string | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -215,8 +209,6 @@ export type ContentArticle = {
   archivedAt: string | null;
   createdByAdminId: string | null;
   updatedByAdminId: string | null;
-  createdByServicePrincipalId: string | null;
-  updatedByServicePrincipalId: string | null;
   publishedByAdminId: string | null;
   createdAt: string;
   updatedAt: string;
@@ -236,50 +228,15 @@ export type ContentArticleVersionSummary = {
   slug: string;
   contentHash: string;
   createdByAdminId: string | null;
-  createdByServicePrincipalId: string | null;
   createdAt: string;
 };
 
 export type ContentArticleVersion = ContentArticleVersionSummary & {
   snapshot: Omit<
     ContentArticleDraft,
-    | "revision"
-    | "updatedByAdminId"
-    | "updatedByServicePrincipalId"
-    | "createdAt"
-    | "updatedAt"
+    "revision" | "updatedByAdminId" | "createdAt" | "updatedAt"
   >;
 };
-
-export type JournalServiceArticle<
-  T extends ContentArticle | AdminContentArticleSummary = ContentArticle,
-> = Omit<
-  T,
-  "createdByAdminId" | "updatedByAdminId" | "publishedByAdminId" | "draft"
-> & {
-  draft: Omit<T["draft"], "updatedByAdminId">;
-};
-
-export function journalServiceArticle<
-  T extends ContentArticle | AdminContentArticleSummary,
->(article: T): JournalServiceArticle<T> {
-  const {
-    createdByAdminId: _createdByAdminId,
-    updatedByAdminId: _updatedByAdminId,
-    publishedByAdminId: _publishedByAdminId,
-    draft,
-    ...safeArticle
-  } = article;
-  const { updatedByAdminId: _draftUpdatedByAdminId, ...safeDraft } = draft;
-  return { ...safeArticle, draft: safeDraft } as JournalServiceArticle<T>;
-}
-
-export function journalServiceVersion<T extends ContentArticleVersionSummary>(
-  version: T,
-): Omit<T, "createdByAdminId"> {
-  const { createdByAdminId: _createdByAdminId, ...safeVersion } = version;
-  return safeVersion;
-}
 
 export type PublicContentArticleSummary = {
   id: string;
@@ -417,8 +374,6 @@ const ARTICLE_STATE_COLUMNS = `
   a.archived_at,
   a.created_by_admin_id,
   a.updated_by_admin_id,
-  a.created_by_service_principal_id,
-  a.updated_by_service_principal_id,
   a.published_by_admin_id,
   a.created_at as article_created_at,
   a.updated_at as article_updated_at
@@ -450,7 +405,6 @@ const DRAFT_COLUMNS = `
   d.toc,
   d.content_hash,
   d.updated_by_admin_id,
-  d.updated_by_service_principal_id,
   d.created_at as draft_created_at,
   d.updated_at as draft_updated_at
 `;
@@ -481,7 +435,6 @@ const DRAFT_SUMMARY_COLUMNS = `
   '[]'::jsonb as toc,
   d.content_hash,
   d.updated_by_admin_id,
-  d.updated_by_service_principal_id,
   d.created_at as draft_created_at,
   d.updated_at as draft_updated_at
 `;
@@ -515,7 +468,6 @@ const VERSION_COLUMNS = `
   v.toc,
   v.content_hash,
   v.created_by_admin_id,
-  v.created_by_service_principal_id,
   v.created_at
 `;
 
@@ -580,7 +532,6 @@ function draftFromRow(row: DraftRow): ContentArticleDraft {
     revision: row.revision,
     ...snapshotFromRow(row),
     updatedByAdminId: row.updated_by_admin_id,
-    updatedByServicePrincipalId: row.updated_by_service_principal_id,
     createdAt: requiredIso(row.draft_created_at),
     updatedAt: requiredIso(row.draft_updated_at),
   };
@@ -627,8 +578,6 @@ function articleFromRow(row: AdminArticleRow): ContentArticle {
     archivedAt: iso(row.archived_at),
     createdByAdminId: row.created_by_admin_id,
     updatedByAdminId: row.updated_by_admin_id,
-    createdByServicePrincipalId: row.created_by_service_principal_id,
-    updatedByServicePrincipalId: row.updated_by_service_principal_id,
     publishedByAdminId: row.published_by_admin_id,
     createdAt: requiredIso(row.article_created_at),
     updatedAt: draft.updatedAt,
@@ -846,11 +795,6 @@ async function requireArticleForUpdate(
       "content_revision_conflict",
       "Article draft was changed by another editor",
       409,
-      undefined,
-      {
-        currentRevision: row.revision,
-        currentContentHash: row.content_hash,
-      },
     );
   }
   return row;
@@ -1311,97 +1255,6 @@ export function validateArticlePublishability(article: ContentArticle): void {
   }
 }
 
-export type ContentValidationIssue = {
-  code: string;
-  path: string;
-  message: string;
-};
-
-function structuredValidationIssue(message: string): ContentValidationIssue {
-  const normalized = message.toLowerCase();
-  const known: Array<[RegExp, string, string]> = [
-    [/title is required/, "title_required", "title"],
-    [/excerpt is required/, "excerpt_required", "excerpt"],
-    [/list cover is required/, "list_cover_required", "listCover"],
-    [/query cluster/, "query_cluster_invalid", "editorialGraph.queryCluster"],
-    [
-      /primary intent/,
-      "primary_intent_invalid",
-      "editorialGraph.primaryIntent",
-    ],
-    [/author byline/, "author_byline_required", "author.showByline"],
-    [/author profile url/, "author_url_required", "author.url"],
-    [/author bio/, "author_bio_required", "author.bio"],
-    [/social image/, "social_image_required", "socialImage"],
-    [/citation|references block/, "sources_required", "editorialGraph.sources"],
-    [/asset/, "asset_invalid", "document"],
-    [/related article/, "related_article_invalid", "document"],
-    [/parent hub/, "parent_hub_invalid", "editorialGraph.parentHubId"],
-  ];
-  const matched = known.find(([pattern]) => pattern.test(normalized));
-  if (matched) return { code: matched[1], path: matched[2], message };
-  return { code: "content_validation_failed", path: "document", message };
-}
-
-function messagesFromValidationError(error: unknown): string[] {
-  if (error instanceof ContentError) {
-    return error.issues?.length ? error.issues : [error.message];
-  }
-  throw error;
-}
-
-export async function validateContentArticleForService(
-  pool: Pool,
-  articleId: string,
-): Promise<{
-  ready: boolean;
-  issues: ContentValidationIssue[];
-  currentRevision: number;
-  currentContentHash: string;
-}> {
-  return tx(pool, async (db) => {
-    const row = await getArticleRow(db, articleId);
-    if (!row) {
-      throw new ContentError(
-        "content_article_not_found",
-        "Content article not found",
-        404,
-      );
-    }
-    const article = articleFromRow(row);
-    const messages = [...publishabilityIssues(article.draft)];
-    for (const validate of [
-      () => validateDraftAssetsForPublication(db, article.draft),
-      () =>
-        validateRelatedArticlesForPublication(
-          db,
-          article.id,
-          article.draft.document,
-        ),
-      () => validateEditorialGraphForPublication(db, article.id, article.draft),
-    ]) {
-      try {
-        await validate();
-      } catch (error) {
-        messages.push(...messagesFromValidationError(error));
-      }
-    }
-    const issues = [...new Set(messages)]
-      .map(structuredValidationIssue)
-      .sort((left, right) =>
-        `${left.path}:${left.code}:${left.message}`.localeCompare(
-          `${right.path}:${right.code}:${right.message}`,
-        ),
-      );
-    return {
-      ready: issues.length === 0,
-      issues,
-      currentRevision: article.draft.revision,
-      currentContentHash: article.draft.contentHash,
-    };
-  });
-}
-
 async function insertDraft(
   db: DbQuery,
   articleId: string,
@@ -1416,13 +1269,12 @@ async function insertDraft(
         article_id, schema_version, content_kind, editorial_graph, slug, title,
         excerpt, document, list_cover, hero_image, social_image, seo, author,
         category, tags, tag_slugs, locale, featured, plain_text, word_count,
-        reading_time_minutes, toc, content_hash, updated_by_admin_id,
-        updated_by_service_principal_id
+        reading_time_minutes, toc, content_hash, updated_by_admin_id
       ) values (
         $1, $2, $3, $4::jsonb, $5, $6, $7, $8::jsonb,
         $9::jsonb, $10::jsonb, $11::jsonb, $12::jsonb, $13::jsonb,
         $14::jsonb, $15::jsonb, $16, $17, $18, $19, $20, $21,
-        $22::jsonb, $23, $24, $25
+        $22::jsonb, $23, $24
       )
     `,
     [
@@ -1450,7 +1302,6 @@ async function insertDraft(
       json(derived.toc),
       derived.contentHash,
       contentActorAdminId(actor),
-      contentActorServicePrincipalId(actor),
     ],
   );
   await syncDraftAssetUsages(db, articleId, draftAssetReferences(draft));
@@ -1460,53 +1311,37 @@ export async function createContentArticle(
   pool: Pool,
   body: ContentArticleCreateBody,
   actorInput: ContentActorInput,
-  requestedId?: string,
-): Promise<ContentArticleMutationResult> {
-  return tx(pool, (db) =>
-    createContentArticleInTransaction(db, body, actorInput, requestedId),
-  );
-}
-
-export async function createContentArticleInTransaction(
-  db: DbQuery,
-  body: ContentArticleCreateBody,
-  actorInput: ContentActorInput,
-  requestedId?: string,
 ): Promise<ContentArticleMutationResult> {
   const actor = normalizeContentActor(actorInput);
   const draft = normalizeCreate(body);
   try {
-    const { rows } = await db.query<{ id: string }>(
-      `
+    return await tx(pool, async (db) => {
+      const { rows } = await db.query<{ id: string }>(
+        `
           insert into content_articles (
-            id, editorial_status, created_by_admin_id, updated_by_admin_id,
-            created_by_service_principal_id,
-            updated_by_service_principal_id
-          ) values (coalesce($1::uuid, gen_random_uuid()), 'draft', $2, $2, $3, $3)
+            editorial_status, created_by_admin_id, updated_by_admin_id
+          ) values ('draft', $1, $1)
           returning id
         `,
-      [
-        requestedId ?? null,
-        contentActorAdminId(actor),
-        contentActorServicePrincipalId(actor),
-      ],
-    );
-    const id = rows[0].id;
-    await reserveDraftSlug(db, id, null, draft.slug);
-    await insertDraft(db, id, draft, actor);
-    await insertContentAuditEvent(db, {
-      action: "article.created",
-      articleId: id,
-      actor,
+        [contentActorAdminId(actor)],
+      );
+      const id = rows[0].id;
+      await reserveDraftSlug(db, id, null, draft.slug);
+      await insertDraft(db, id, draft, actor);
+      await insertContentAuditEvent(db, {
+        action: "article.created",
+        articleId: id,
+        actor,
+      });
+      const created = await getArticleRow(db, id);
+      if (!created)
+        throw new Error("Created content article could not be loaded");
+      return {
+        article: articleFromRow(created),
+        previousSlug: null,
+        publicContentChanged: false,
+      };
     });
-    const created = await getArticleRow(db, id);
-    if (!created)
-      throw new Error("Created content article could not be loaded");
-    return {
-      article: articleFromRow(created),
-      previousSlug: null,
-      publicContentChanged: false,
-    };
   } catch (error) {
     if (uniqueViolation(error)) throw slugConflict();
     throw error;
@@ -1528,13 +1363,6 @@ export async function updateContentArticle(
         contentArticleUpdateBodySchema.parse(body).expectedRevision,
       );
       const existing = articleFromRow(existingRow);
-      if (actor.kind === "service" && existing.archivedAt) {
-        throw new ContentError(
-          "content_article_archived",
-          "Archived articles cannot be updated by the journal service",
-          409,
-        );
-      }
       const next = mergeDraft(existing.draft, body);
       const derived = deriveDraft(next);
       if (derived.contentHash === existing.draft.contentHash) {
@@ -1545,9 +1373,6 @@ export async function updateContentArticle(
         };
       }
       await reserveDraftSlug(db, id, existing.draft.slug, next.slug);
-      if (actor.kind === "service") {
-        await createCheckpointInTransaction(db, id, existing.draft, actor);
-      }
       const { rows } = await db.query<{ revision: number }>(
         `
           update content_article_drafts
@@ -1575,9 +1400,8 @@ export async function updateContentArticle(
             reading_time_minutes = $20,
             toc = $21::jsonb,
             content_hash = $22,
-            updated_by_admin_id = $23,
-            updated_by_service_principal_id = $24
-          where article_id = $25 and revision = $26
+            updated_by_admin_id = $23
+          where article_id = $24 and revision = $25
           returning revision
         `,
         [
@@ -1604,7 +1428,6 @@ export async function updateContentArticle(
           json(derived.toc),
           derived.contentHash,
           contentActorAdminId(actor),
-          contentActorServicePrincipalId(actor),
           id,
           existing.draft.revision,
         ],
@@ -1614,23 +1437,18 @@ export async function updateContentArticle(
           "content_revision_conflict",
           "Article draft was changed by another editor",
           409,
-          undefined,
-          {
-            currentRevision: existing.draft.revision,
-            currentContentHash: existing.draft.contentHash,
-          },
         );
       }
-      await db.query(
-        `
-          update content_articles
-          set editorial_status = 'draft',
-              updated_by_admin_id = $2,
-              updated_by_service_principal_id = $3
-          where id = $1
-        `,
-        [id, contentActorAdminId(actor), contentActorServicePrincipalId(actor)],
-      );
+      if (existing.editorialStatus !== "draft") {
+        await db.query(
+          `
+            update content_articles
+            set editorial_status = 'draft', updated_by_admin_id = $2
+            where id = $1
+          `,
+          [id, contentActorAdminId(actor)],
+        );
+      }
       await syncDraftAssetUsages(db, id, draftAssetReferences(next));
       await insertContentAuditEvent(db, {
         action: "article.updated",
@@ -1639,11 +1457,6 @@ export async function updateContentArticle(
         metadata: {
           previousRevision: existing.draft.revision,
           newRevision: existing.draft.revision + 1,
-          previousContentHash: existing.draft.contentHash,
-          newContentHash: derived.contentHash,
-          changedFields: Object.keys(body)
-            .filter((key) => key !== "expectedRevision")
-            .sort(),
         },
       });
       const updated = await getArticleRow(db, id);
@@ -1774,7 +1587,6 @@ function versionSummary(row: VersionSummaryRow): ContentArticleVersionSummary {
     slug: row.slug,
     contentHash: row.content_hash,
     createdByAdminId: row.created_by_admin_id,
-    createdByServicePrincipalId: row.created_by_service_principal_id,
     createdAt: requiredIso(row.created_at),
   };
 }
@@ -1799,18 +1611,17 @@ async function insertVersion(
         schema_version, content_kind, editorial_graph, slug, title, excerpt,
         document, list_cover, hero_image, social_image, seo, author, category,
         tags, tag_slugs, locale, featured, plain_text, word_count,
-        reading_time_minutes, toc, content_hash, created_by_admin_id,
-        created_by_service_principal_id
+        reading_time_minutes, toc, content_hash, created_by_admin_id
       ) values (
         $1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11::jsonb,
         $12::jsonb, $13::jsonb, $14::jsonb, $15::jsonb, $16::jsonb,
         $17::jsonb, $18::jsonb, $19, $20, $21, $22, $23, $24,
-        $25::jsonb, $26, $27, $28
+        $25::jsonb, $26, $27
       )
       returning
         id, article_id, version_number, source_draft_revision, kind,
         title, slug, content_hash, tag_slugs, featured,
-        created_by_admin_id, created_by_service_principal_id, created_at
+        created_by_admin_id, created_at
     `,
     [
       articleId,
@@ -1840,7 +1651,6 @@ async function insertVersion(
       json(draft.toc),
       draft.contentHash,
       contentActorAdminId(actor),
-      contentActorServicePrincipalId(actor),
     ],
   );
   const version = rows[0];
@@ -1894,15 +1704,12 @@ async function insertContentAuditEvent(
   inputs: {
     action: string;
     articleId: string;
-    actor?: ContentActorInput;
-    actorAdminId?: string | null;
+    actor: ContentActorInput;
     versionId?: string | null;
     metadata?: Record<string, unknown>;
   },
 ): Promise<void> {
-  const actor = normalizeContentActor(
-    inputs.actor ?? inputs.actorAdminId ?? null,
-  );
+  const actor = normalizeContentActor(inputs.actor);
   await db.query(
     `
       insert into content_audit_events (
@@ -1916,7 +1723,7 @@ async function insertContentAuditEvent(
       inputs.versionId ?? null,
       contentActorAdminId(actor),
       actor.kind,
-      contentActorServicePrincipalId(actor),
+      actor.kind === "service" ? actor.id : null,
       actor.label,
       json(inputs.metadata ?? {}),
     ],
@@ -1936,67 +1743,48 @@ async function cancelScheduledPublication(db: DbQuery, articleId: string) {
 
 export async function createContentArticleCheckpoint(
   pool: Pool,
-  inputs: {
-    id: string;
-    expectedRevision: number;
-    actorAdminId?: string | null;
-    actor?: ContentActorInput;
-  },
+  inputs: { id: string; expectedRevision: number; actor: ContentActorInput },
 ): Promise<ContentArticleVersionSummary> {
+  const actor = normalizeContentActor(inputs.actor);
   return tx(pool, async (db) => {
     const row = await requireArticleForUpdate(
       db,
       inputs.id,
       inputs.expectedRevision,
     );
-    return createCheckpointInTransaction(
-      db,
-      inputs.id,
-      draftFromRow(row),
-      inputs.actor ?? inputs.actorAdminId ?? null,
-    );
-  });
-}
-
-async function createCheckpointInTransaction(
-  db: DbQuery,
-  articleId: string,
-  draft: ContentArticleDraft,
-  actorInput: ContentActorInput,
-): Promise<ContentArticleVersionSummary> {
-  const actor = normalizeContentActor(actorInput);
-  const { rows: existingRows } = await db.query<VersionSummaryRow>(
-    `
+    const draft = draftFromRow(row);
+    const { rows: existingRows } = await db.query<VersionSummaryRow>(
+      `
         select
           v.id, v.article_id, v.version_number, v.source_draft_revision,
           v.kind, v.title, v.slug, v.content_hash,
-          v.created_by_admin_id, v.created_by_service_principal_id, v.created_at
+          v.created_by_admin_id, v.created_at
         from content_article_versions v
         where v.article_id = $1 and v.kind = 'checkpoint'
         order by v.created_at desc, v.id desc
         limit 1
       `,
-    [articleId],
-  );
-  const existing = existingRows[0];
-  if (existing?.content_hash === draft.contentHash) {
-    return versionSummary(existing);
-  }
-  const checkpoint = await insertVersion(
-    db,
-    articleId,
-    draft,
-    "checkpoint",
-    actor,
-  );
-  await insertContentAuditEvent(db, {
-    action: "article.checkpoint_created",
-    articleId,
-    versionId: checkpoint.id,
-    actor,
-  });
-  await db.query(
-    `
+      [inputs.id],
+    );
+    const existing = existingRows[0];
+    if (existing?.content_hash === draft.contentHash) {
+      return versionSummary(existing);
+    }
+    const checkpoint = await insertVersion(
+      db,
+      inputs.id,
+      draft,
+      "checkpoint",
+      actor,
+    );
+    await insertContentAuditEvent(db, {
+      action: "article.checkpoint_created",
+      articleId: inputs.id,
+      versionId: checkpoint.id,
+      actor,
+    });
+    await db.query(
+      `
         delete from content_article_versions
         where id in (
           select id
@@ -2006,9 +1794,10 @@ async function createCheckpointInTransaction(
           offset $2
         )
       `,
-    [articleId, CONTENT_MAX_CHECKPOINTS_PER_ARTICLE],
-  );
-  return versionSummary(checkpoint);
+      [inputs.id, CONTENT_MAX_CHECKPOINTS_PER_ARTICLE],
+    );
+    return versionSummary(checkpoint);
+  });
 }
 
 export async function publishContentArticle(
@@ -2016,11 +1805,12 @@ export async function publishContentArticle(
   inputs: {
     id: string;
     expectedRevision: number;
-    actorAdminId: string | null;
+    actor: ContentActorInput;
     publishAt?: Date;
     requireApproval?: boolean;
   },
 ): Promise<ContentArticleMutationResult> {
+  const actor = normalizeContentActor(inputs.actor);
   return tx(pool, async (db) => {
     const row = await requireArticleForUpdate(
       db,
@@ -2065,7 +1855,7 @@ export async function publishContentArticle(
       inputs.id,
       existing.draft,
       scheduled ? "scheduled" : "published",
-      inputs.actorAdminId,
+      actor,
     );
     await cancelScheduledPublication(db, inputs.id);
     let previousSlug: string | null = null;
@@ -2078,11 +1868,10 @@ export async function publishContentArticle(
             scheduled_version_id = $2,
             scheduled_for = $3,
             archived_at = null,
-            updated_by_admin_id = $4,
-            updated_by_service_principal_id = null
+            updated_by_admin_id = $4
           where id = $1
         `,
-        [inputs.id, version.id, requestedAt, inputs.actorAdminId],
+        [inputs.id, version.id, requestedAt, contentActorAdminId(actor)],
       );
       await db.query(
         `
@@ -2115,7 +1904,6 @@ export async function publishContentArticle(
             published_at = $6,
             archived_at = null,
             updated_by_admin_id = $7,
-            updated_by_service_principal_id = null,
             published_by_admin_id = $7
           where id = $1
         `,
@@ -2126,7 +1914,7 @@ export async function publishContentArticle(
           version.tag_slugs,
           version.featured,
           now,
-          inputs.actorAdminId,
+          contentActorAdminId(actor),
         ],
       );
       await insertOutbox(db, {
@@ -2142,7 +1930,7 @@ export async function publishContentArticle(
       action: scheduled ? "article.scheduled" : "article.published",
       articleId: inputs.id,
       versionId: version.id,
-      actorAdminId: inputs.actorAdminId,
+      actor,
       metadata: scheduled
         ? { publishAt: requestedAt.toISOString() }
         : { previousSlug },
@@ -2164,8 +1952,9 @@ export async function publishContentArticle(
 
 export async function cancelContentArticleSchedule(
   pool: Pool,
-  inputs: { id: string; expectedRevision: number; actorAdminId: string | null },
+  inputs: { id: string; expectedRevision: number; actor: ContentActorInput },
 ): Promise<ContentArticleMutationResult> {
+  const actor = normalizeContentActor(inputs.actor);
   return tx(pool, async (db) => {
     const row = await requireArticleForUpdate(
       db,
@@ -2185,11 +1974,10 @@ export async function cancelContentArticleSchedule(
       `
         update content_articles
         set scheduled_version_id = null, scheduled_for = null,
-            updated_by_admin_id = $2,
-            updated_by_service_principal_id = null
+            updated_by_admin_id = $2
         where id = $1
       `,
-      [inputs.id, inputs.actorAdminId],
+      [inputs.id, contentActorAdminId(actor)],
     );
     await db.query(
       "update content_article_drafts set revision = revision + 1 where article_id = $1",
@@ -2199,7 +1987,7 @@ export async function cancelContentArticleSchedule(
       action: "article.schedule_cancelled",
       articleId: inputs.id,
       versionId: existing.scheduled.versionId,
-      actorAdminId: inputs.actorAdminId,
+      actor,
     });
     const updated = await getArticleRow(db, inputs.id);
     if (!updated) throw new Error("Content article could not be loaded");
@@ -2213,8 +2001,9 @@ export async function cancelContentArticleSchedule(
 
 export async function unpublishContentArticle(
   pool: Pool,
-  inputs: { id: string; expectedRevision: number; actorAdminId: string | null },
+  inputs: { id: string; expectedRevision: number; actor: ContentActorInput },
 ): Promise<ContentArticleMutationResult> {
+  const actor = normalizeContentActor(inputs.actor);
   return tx(pool, async (db) => {
     const row = await requireArticleForUpdate(
       db,
@@ -2248,11 +2037,10 @@ export async function unpublishContentArticle(
           published_featured = false,
           published_at = null,
           scheduled_for = null,
-          updated_by_admin_id = $2,
-          updated_by_service_principal_id = null
+          updated_by_admin_id = $2
         where id = $1
       `,
-      [inputs.id, inputs.actorAdminId],
+      [inputs.id, contentActorAdminId(actor)],
     );
     if (existing.published) {
       await insertOutbox(db, {
@@ -2266,7 +2054,7 @@ export async function unpublishContentArticle(
       action: "article.unpublished",
       articleId: inputs.id,
       versionId: existing.published?.versionId ?? existing.scheduled?.versionId,
-      actorAdminId: inputs.actorAdminId,
+      actor,
     });
     await db.query(
       "update content_article_drafts set revision = revision + 1 where article_id = $1",
@@ -2284,8 +2072,9 @@ export async function unpublishContentArticle(
 
 export async function archiveContentArticle(
   pool: Pool,
-  inputs: { id: string; expectedRevision: number; actorAdminId: string | null },
+  inputs: { id: string; expectedRevision: number; actor: ContentActorInput },
 ): Promise<ContentArticleMutationResult> {
+  const actor = normalizeContentActor(inputs.actor);
   return tx(pool, async (db) => {
     const row = await requireArticleForUpdate(
       db,
@@ -2305,11 +2094,10 @@ export async function archiveContentArticle(
       `
         update content_articles
         set archived_at = now(), scheduled_version_id = null,
-            scheduled_for = null, updated_by_admin_id = $2,
-            updated_by_service_principal_id = null
+            scheduled_for = null, updated_by_admin_id = $2
         where id = $1
       `,
-      [inputs.id, inputs.actorAdminId],
+      [inputs.id, contentActorAdminId(actor)],
     );
     if (existing.published) {
       await insertOutbox(db, {
@@ -2324,7 +2112,7 @@ export async function archiveContentArticle(
       action: "article.archived",
       articleId: inputs.id,
       versionId: existing.published?.versionId ?? null,
-      actorAdminId: inputs.actorAdminId,
+      actor,
     });
     await db.query(
       "update content_article_drafts set revision = revision + 1 where article_id = $1",
@@ -2345,14 +2133,11 @@ export async function transitionContentArticleReview(
   inputs: {
     id: string;
     expectedRevision: number;
-    actorAdminId?: string | null;
-    actor?: ContentActorInput;
+    actor: ContentActorInput;
     status: ContentEditorialStatus;
   },
 ): Promise<ContentArticle> {
-  const actor = normalizeContentActor(
-    inputs.actor ?? inputs.actorAdminId ?? null,
-  );
+  const actor = normalizeContentActor(inputs.actor);
   return tx(pool, async (db) => {
     const row = await requireArticleForUpdate(
       db,
@@ -2364,24 +2149,6 @@ export async function transitionContentArticleReview(
       throw new ContentError(
         "content_article_not_publishable",
         "Restore or publish an archived article before changing review state",
-        409,
-      );
-    }
-    if (actor.kind === "service" && inputs.status !== "in_review") {
-      throw new ContentError(
-        "content_article_not_publishable",
-        "Journal service actors can only submit drafts for review",
-        403,
-      );
-    }
-    if (
-      actor.kind === "service" &&
-      article.editorialStatus !== "draft" &&
-      article.editorialStatus !== "in_review"
-    ) {
-      throw new ContentError(
-        "content_article_not_publishable",
-        "Only a draft can be submitted for review by the journal service",
         409,
       );
     }
@@ -2399,16 +2166,10 @@ export async function transitionContentArticleReview(
     await db.query(
       `
         update content_articles
-        set editorial_status = $2, updated_by_admin_id = $3,
-            updated_by_service_principal_id = $4
+        set editorial_status = $2, updated_by_admin_id = $3
         where id = $1
       `,
-      [
-        inputs.id,
-        inputs.status,
-        contentActorAdminId(actor),
-        contentActorServicePrincipalId(actor),
-      ],
+      [inputs.id, inputs.status, contentActorAdminId(actor)],
     );
     await db.query(
       "update content_article_drafts set revision = revision + 1 where article_id = $1",
@@ -2440,7 +2201,7 @@ export async function listContentArticleVersions(
       select
         v.id, v.article_id, v.version_number, v.source_draft_revision,
         v.kind, v.title, v.slug, v.content_hash,
-        v.created_by_admin_id, v.created_by_service_principal_id, v.created_at
+        v.created_by_admin_id, v.created_at
       from content_article_versions v
       where v.article_id = $1
         and (
@@ -2497,56 +2258,10 @@ export type ContentAuditEvent = {
   versionId: string | null;
   actorAdminId: string | null;
   actorServicePrincipalId: string | null;
-  actorKind: "admin" | "service" | "system";
-  actorLabel: string;
-  actor: {
-    kind: "admin" | "service" | "system";
-    id: string | null;
-    label: string;
-  };
+  actor: ContentActor;
   metadata: Record<string, unknown>;
   createdAt: string;
 };
-
-export type JournalServiceContentAuditEvent = Omit<
-  ContentAuditEvent,
-  "actorAdminId" | "actorLabel" | "actor" | "metadata"
-> & {
-  actorLabel: string;
-  actor: ContentAuditEvent["actor"];
-  metadata: Record<string, unknown>;
-};
-
-export function journalServiceContentAuditEvent(
-  event: ContentAuditEvent,
-): JournalServiceContentAuditEvent {
-  const {
-    actorAdminId: _actorAdminId,
-    actorLabel: _actorLabel,
-    actor: rawActor,
-    metadata,
-    ...safeEvent
-  } = event;
-  const actor =
-    rawActor.kind === "admin"
-      ? { kind: "admin" as const, id: null, label: "human-admin" }
-      : rawActor;
-  const initiatedBy = metadata.initiatedBy;
-  const safeMetadata =
-    initiatedBy &&
-    typeof initiatedBy === "object" &&
-    !Array.isArray(initiatedBy) &&
-    "kind" in initiatedBy &&
-    initiatedBy.kind === "admin"
-      ? { ...metadata, initiatedBy: { kind: "admin" } }
-      : metadata;
-  return {
-    ...safeEvent,
-    actorLabel: actor.label,
-    actor,
-    metadata: safeMetadata,
-  };
-}
 
 export async function listContentArticleAudit(
   db: DbQuery,
@@ -2563,8 +2278,8 @@ export async function listContentArticleAudit(
     version_id: string | null;
     actor_admin_id: string | null;
     actor_service_principal_id: string | null;
-    actor_kind: "admin" | "service" | "system" | null;
-    actor_label: string | null;
+    actor_kind: ContentActor["kind"];
+    actor_label: string;
     metadata: Record<string, unknown>;
     created_at: Date | string;
   }>(
@@ -2590,15 +2305,12 @@ export async function listContentArticleAudit(
   );
   const selected = rows.slice(0, inputs.limit);
   const items = selected.map((row) => {
-    const actorKind =
-      row.actor_kind ?? (row.actor_admin_id ? "admin" : "system");
     const actorId =
-      actorKind === "admin"
+      row.actor_kind === "admin"
         ? row.actor_admin_id
-        : actorKind === "service"
+        : row.actor_kind === "service"
           ? row.actor_service_principal_id
           : null;
-    const actorLabel = row.actor_label ?? `${actorKind}:${actorId ?? "legacy"}`;
     return {
       id: String(row.id),
       action: row.action,
@@ -2607,9 +2319,11 @@ export async function listContentArticleAudit(
       versionId: row.version_id,
       actorAdminId: row.actor_admin_id,
       actorServicePrincipalId: row.actor_service_principal_id,
-      actorKind,
-      actorLabel,
-      actor: { kind: actorKind, id: actorId, label: actorLabel },
+      actor: {
+        kind: row.actor_kind,
+        id: actorId,
+        label: row.actor_label,
+      } as ContentActor,
       metadata: row.metadata,
       createdAt: requiredIso(row.created_at),
     };
@@ -2630,9 +2344,10 @@ export async function restoreContentArticleVersion(
     id: string;
     versionId: string;
     expectedRevision: number;
-    actorAdminId: string | null;
+    actor: ContentActorInput;
   },
 ): Promise<ContentArticleMutationResult> {
+  const actor = normalizeContentActor(inputs.actor);
   return tx(pool, async (db) => {
     const currentRow = await requireArticleForUpdate(
       db,
@@ -2686,8 +2401,7 @@ export async function restoreContentArticleVersion(
           reading_time_minutes = $21,
           toc = $22::jsonb,
           content_hash = $23,
-          updated_by_admin_id = $24,
-          updated_by_service_principal_id = null
+          updated_by_admin_id = $24
         where article_id = $1 and revision = $25
       `,
       [
@@ -2714,7 +2428,7 @@ export async function restoreContentArticleVersion(
         snapshot.readingTimeMinutes,
         json(snapshot.toc),
         snapshot.contentHash,
-        inputs.actorAdminId,
+        contentActorAdminId(actor),
         inputs.expectedRevision,
       ],
     );
@@ -2732,11 +2446,10 @@ export async function restoreContentArticleVersion(
             published_featured = false,
             published_at = null,
             scheduled_for = null,
-            updated_by_admin_id = $2,
-            updated_by_service_principal_id = null
+            updated_by_admin_id = $2
           where id = $1
         `,
-        [inputs.id, inputs.actorAdminId],
+        [inputs.id, contentActorAdminId(actor)],
       );
       await db.query(
         `update content_routes set kind = 'reserved' where article_id = $1 and kind = 'current'`,
@@ -2744,11 +2457,8 @@ export async function restoreContentArticleVersion(
       );
     } else {
       await db.query(
-        `update content_articles
-         set editorial_status = 'draft', updated_by_admin_id = $2,
-             updated_by_service_principal_id = null
-         where id = $1`,
-        [inputs.id, inputs.actorAdminId],
+        `update content_articles set editorial_status = 'draft', updated_by_admin_id = $2 where id = $1`,
+        [inputs.id, contentActorAdminId(actor)],
       );
     }
     await syncDraftAssetUsages(db, inputs.id, draftAssetReferences(snapshot));
@@ -2756,7 +2466,7 @@ export async function restoreContentArticleVersion(
       action: "article.version_restored",
       articleId: inputs.id,
       versionId: inputs.versionId,
-      actorAdminId: inputs.actorAdminId,
+      actor,
     });
     const updated = await getArticleRow(db, inputs.id);
     if (!updated) throw new Error("Restored article could not be loaded");
