@@ -2066,6 +2066,20 @@ type TelegramExecutableSellResolution = {
   side: TelegramBotTradingSide;
 };
 
+export function resolveTelegramCustomSellSides(
+  resolutions: readonly Pick<
+    TelegramExecutableSellResolution,
+    "options" | "side"
+  >[],
+): readonly TelegramBotTradingSide[] {
+  // A dust ERC-1155 balance is not by itself a sellable position. Only offer
+  // custom sell after the same live quote path produced at least one
+  // executable sell amount for that exact outcome.
+  return resolutions
+    .filter((resolution) => resolution.options.length > 0)
+    .map((resolution) => resolution.side);
+}
+
 export function resolveExecutablePolymarketSellSharesRaw(input: {
   availableRaw: bigint;
   quote: TradeQuote;
@@ -4947,9 +4961,7 @@ export async function buildTelegramBotTradingMarketMessage(input: {
   const sellOptions = sellResolutions.flatMap(
     (resolution) => resolution.options,
   );
-  const customSellSides = sellResolutions
-    .filter((resolution) => resolution.availableRaw > 0n)
-    .map((resolution) => resolution.side);
+  const customSellSides = resolveTelegramCustomSellSides(sellResolutions);
   const canBuildCustomSell =
     canBuildSellOptions &&
     policy.customTradeInputEnabled &&
