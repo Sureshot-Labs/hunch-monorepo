@@ -194,7 +194,11 @@ export async function disableJournalServicePrincipal(
         update admin_service_principals
         set status = 'disabled', disabled_at = coalesce(disabled_at, now()),
             disabled_by_admin_id = coalesce(disabled_by_admin_id, $2),
-            metadata = metadata || jsonb_build_object('disabledNote', $3::text)
+            metadata = case
+              when disabled_at is null
+                then metadata || jsonb_build_object('disabledNote', $3::text)
+              else metadata
+            end
         where id = $1
         returning id
       `,

@@ -10,7 +10,10 @@ import {
 } from "./content-test-runtime.js";
 import { env } from "./env.js";
 import { authenticateJournalServiceCredential } from "./services/journal-service-auth.js";
-import { issueJournalServiceCredential } from "./services/journal-service-principals.js";
+import {
+  disableJournalServicePrincipal,
+  issueJournalServiceCredential,
+} from "./services/journal-service-principals.js";
 import {
   claimJournalIdempotency,
   claimJournalIdempotencyInTransaction,
@@ -303,6 +306,31 @@ try {
       error instanceof JournalIdempotencyError &&
       error.code === "idempotency_key_reused",
   );
+  await pool.query(
+    `
+      update content_machine_idempotency_keys
+      set created_at = now() - interval '8 days',
+          expires_at = now() - interval '1 second'
+      where service_principal_id = $1 and idempotency_key = $2
+    `,
+    [principalId, key],
+  );
+  const expiredKeyHash = journalIdempotencyRequestHash("create_article", {
+    slug: "reused-after-expiry",
+  });
+  const expiredKeyClaim = await claimJournalIdempotency(pool, {
+    principalId,
+    operation: "create_article",
+    idempotencyKey: key,
+    requestHash: expiredKeyHash,
+    resourceType: "article",
+  });
+  assert.equal(expiredKeyClaim.replay, false);
+  assert.notEqual(expiredKeyClaim.resourceId, firstClaim.resourceId);
+  await completeJournalIdempotency(pool, expiredKeyClaim, {
+    httpStatus: 201,
+    response: { articleId: expiredKeyClaim.resourceId },
+  });
   const stored = await pool.query<{ response: Record<string, unknown> }>(
     `select response from content_machine_idempotency_keys where service_principal_id = $1 and idempotency_key = $2`,
     [principalId, key],
@@ -508,6 +536,26 @@ try {
   await pool.query(`delete from content_assets where id = $1`, [assetId]);
   await pool.query(`delete from content_articles where id = $1`, [articleId]);
   articleId = null;
+  await disableJournalServicePrincipal(pool, {
+    principalId,
+    actorAdminId: null as unknown as string,
+    reason: "first disable reason",
+  });
+  await disableJournalServicePrincipal(pool, {
+    principalId,
+    actorAdminId: null as unknown as string,
+    reason: "second disable reason",
+  });
+  const disabledPrincipal = await pool.query<{
+    disabled_note: string | null;
+  }>(
+    `select metadata ->> 'disabledNote' as disabled_note from admin_service_principals where id = $1`,
+    [principalId],
+  );
+  assert.equal(
+    disabledPrincipal.rows[0]?.disabled_note,
+    "first disable reason",
+  );
   await pool.query(`delete from admin_service_principals where id = $1`, [
     principalId,
   ]);

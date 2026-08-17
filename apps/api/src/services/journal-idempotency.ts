@@ -47,6 +47,21 @@ export type JournalIdempotencyClaim = {
   response: Record<string, unknown> | null;
 };
 
+export function journalIdempotencyResourceForClaim<T>(
+  claim: JournalIdempotencyClaim,
+  resource: T | null | undefined,
+  resourceType: "article" | "asset",
+): T | null {
+  if (claim.replay && resource == null) {
+    throw new JournalIdempotencyError(
+      "idempotency_result_unavailable",
+      `The ${resourceType} created by this idempotent request is no longer available`,
+      409,
+    );
+  }
+  return resource ?? null;
+}
+
 export function journalIdempotencyRequestHash(
   operation: JournalIdempotencyOperation,
   body: unknown,
@@ -76,6 +91,16 @@ export async function claimJournalIdempotencyInTransaction(
 ): Promise<JournalIdempotencyClaim> {
   const leaseOwner = randomUUID();
   const resourceId = input.proposedResourceId ?? randomUUID();
+  await db.query(
+    `
+      delete from content_machine_idempotency_keys
+      where service_principal_id = $1
+        and operation = $2
+        and idempotency_key = $3
+        and expires_at <= now()
+    `,
+    [input.principalId, input.operation, input.idempotencyKey],
+  );
   const inserted = await db.query<IdempotencyRow>(
     `
         insert into content_machine_idempotency_keys (

@@ -25,6 +25,19 @@ const articleStatus = z.enum([
 const articleKind = z.enum(["guide", "news", "analysis", "research", "update"]);
 const jsonObject = z.record(z.string(), z.json());
 const nullableJsonObject = jsonObject.nullable();
+const credentialFreeHttpUrl = z
+  .string()
+  .trim()
+  .url()
+  .max(2_048)
+  .refine((value) => {
+    const url = new URL(value);
+    return (
+      (url.protocol === "https:" || url.protocol === "http:") &&
+      !url.username &&
+      !url.password
+    );
+  }, "Only credential-free HTTP(S) URLs are allowed");
 const editableArticleFields = {
   contentKind: articleKind.optional(),
   editorialGraph: jsonObject.optional(),
@@ -327,7 +340,7 @@ export function createJournalMcpServer(config: JournalMcpConfig): McpServer {
           alt: z.string().trim().min(1).max(500),
           caption: z.string().trim().max(2_000).nullable().optional(),
           credit_name: z.string().trim().max(200).nullable().optional(),
-          credit_url: z.string().trim().url().max(2_048).nullable().optional(),
+          credit_url: credentialFreeHttpUrl.nullable().optional(),
           source_type: z.enum([
             "app-screenshot",
             "telegram-screenshot",

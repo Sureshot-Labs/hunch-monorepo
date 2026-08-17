@@ -6,8 +6,8 @@ import { getApiContentPools } from "../content-runtime.js";
 import { env } from "../env.js";
 import {
   acquireDistributedSlotStatus,
-  consumeDistributedBudgetStatus,
   releaseDistributedSlot,
+  reserveDistributedBudgetStatus,
 } from "../lib/rate-limit.js";
 import {
   adminContentArticlesQuerySchema,
@@ -58,6 +58,7 @@ import {
   claimJournalIdempotencyInTransaction,
   completeJournalIdempotency,
   completeJournalIdempotencyInTransaction,
+  journalIdempotencyResourceForClaim,
   journalIdempotencyRequestHash,
   JournalIdempotencyError,
   releaseJournalIdempotencyLease,
@@ -206,7 +207,11 @@ export const serviceJournalRoutes: FastifyPluginAsync = async (app) => {
             ),
             resourceType: "article",
           });
-          let article = await getAdminContentArticle(db, claim.resourceId);
+          let article = journalIdempotencyResourceForClaim(
+            claim,
+            await getAdminContentArticle(db, claim.resourceId),
+            "article",
+          );
           if (!article) {
             article = (
               await createContentArticleInTransaction(
@@ -523,30 +528,35 @@ export const serviceJournalRoutes: FastifyPluginAsync = async (app) => {
           ),
           resourceType: "asset",
         });
-        const existing = await getContentAsset(contentPool, claim.resourceId);
+        const existing = journalIdempotencyResourceForClaim(
+          claim,
+          await getContentAsset(contentPool, claim.resourceId),
+          "asset",
+        );
         if (!existing) {
-          const budgetStatus = await consumeDistributedBudgetStatus(
+          const budget = await reserveDistributedBudgetStatus(
             `journal-service:daily-upload:${principalId(request)}:${new Date()
               .toISOString()
               .slice(0, 10)}`,
             body.expectedByteSize,
             env.journalServiceDailyUploadBytes,
             26 * 60 * 60 * 1_000,
+            claim.rowId,
           );
-          if (budgetStatus === "unavailable") {
+          if (budget.status === "unavailable") {
             await releaseClaimOnError(contentPool, claim);
             return reply
               .code(503)
               .send({ error: "service_security_backend_unavailable" });
           }
-          if (budgetStatus === "limited") {
+          if (budget.status === "limited") {
             reply.header("Retry-After", "3600");
             await releaseClaimOnError(contentPool, claim);
             return reply
               .code(429)
               .send({ error: "service_upload_quota_exceeded" });
           }
-          budgetReserved = true;
+          budgetReserved = budget.reserved;
         }
         const intent = existing
           ? await renewContentAssetUpload(

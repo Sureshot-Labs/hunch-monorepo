@@ -281,6 +281,20 @@ export const contentAssetStatusSchema = z.enum([
   "deleted",
 ]);
 
+const contentAssetCreditUrlSchema = z
+  .string()
+  .trim()
+  .url()
+  .max(2_048)
+  .refine((value) => {
+    const url = new URL(value);
+    return (
+      (url.protocol === "https:" || url.protocol === "http:") &&
+      !url.username &&
+      !url.password
+    );
+  }, "Only credential-free HTTP(S) credit URLs are allowed");
+
 export const contentAssetCreateBodySchema = z
   .object({
     kind: contentAssetKindSchema,
@@ -295,7 +309,7 @@ export const contentAssetCreateBodySchema = z
     defaultAlt: z.string().trim().max(500).nullable().optional(),
     defaultCaption: z.string().trim().max(2_000).nullable().optional(),
     creditName: z.string().trim().max(200).nullable().optional(),
-    creditUrl: z.string().trim().url().max(2_048).nullable().optional(),
+    creditUrl: contentAssetCreditUrlSchema.nullable().optional(),
     metadata: z
       .record(z.string(), z.unknown())
       .refine(
@@ -331,7 +345,7 @@ export const contentAssetUpdateBodySchema = z
     defaultAlt: z.string().trim().max(500).nullable().optional(),
     defaultCaption: z.string().trim().max(2_000).nullable().optional(),
     creditName: z.string().trim().max(200).nullable().optional(),
-    creditUrl: z.string().trim().url().max(2_048).nullable().optional(),
+    creditUrl: contentAssetCreditUrlSchema.nullable().optional(),
     focalX: z.number().min(0).max(1).nullable().optional(),
     focalY: z.number().min(0).max(1).nullable().optional(),
     sourceType: z

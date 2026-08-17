@@ -12,7 +12,7 @@
     "check": "pnpm typecheck && pnpm lint && pnpm test:fast",
     "test": "pnpm test:api && pnpm test:finance-worker",
     "test:api": "pnpm -F api run test",
-    "test:fast": "pnpm -F api run test:fast && pnpm -F finance-worker run test",
+    "test:fast": "pnpm -F api run test:fast && pnpm -F finance-worker run test && pnpm -F journal-mcp run test",
     "test:finance-worker": "pnpm -F finance-worker run test",
     "format": "prettier -w apps packages --ignore-path .gitignore --ignore-unknown",
     "format:check": "prettier -c apps packages --ignore-path .gitignore --ignore-unknown",

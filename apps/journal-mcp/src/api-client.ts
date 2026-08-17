@@ -65,10 +65,21 @@ async function readJson(response: Response): Promise<unknown> {
   if (declaredLength > MAX_API_RESPONSE_BYTES) {
     throw new Error("Journal API response exceeds the local safety limit");
   }
-  const text = await response.text();
-  if (Buffer.byteLength(text, "utf8") > MAX_API_RESPONSE_BYTES) {
-    throw new Error("Journal API response exceeds the local safety limit");
+  const reader = response.body?.getReader();
+  if (!reader) return {};
+  const chunks: Uint8Array[] = [];
+  let byteLength = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    byteLength += value.byteLength;
+    if (byteLength > MAX_API_RESPONSE_BYTES) {
+      await reader.cancel();
+      throw new Error("Journal API response exceeds the local safety limit");
+    }
+    chunks.push(value);
   }
+  const text = Buffer.concat(chunks, byteLength).toString("utf8");
   if (!text) return {};
   try {
     return JSON.parse(text) as unknown;
@@ -134,6 +145,9 @@ export class JournalApiClient {
     bytes: Buffer,
   ): Promise<void> {
     const url = new URL(urlValue);
+    if (url.username || url.password) {
+      throw new Error("Upload target must not contain credentials");
+    }
     if (
       url.protocol !== "https:" &&
       !(

@@ -573,6 +573,22 @@ export async function runContentRetention(
     if (!lockRows[0]?.locked) return 0;
 
     const counts: number[] = [];
+    const idempotencyResult = await db.query(
+      `
+        with expired as (
+          select id from content_machine_idempotency_keys
+          where expires_at <= now()
+          order by expires_at, id
+          limit $1
+          for update skip locked
+        )
+        delete from content_machine_idempotency_keys target
+        using expired
+        where target.id = expired.id
+      `,
+      [batchSize],
+    );
+    counts.push(idempotencyResult.rowCount ?? 0);
     for (const statement of [
       `
         with expired as (

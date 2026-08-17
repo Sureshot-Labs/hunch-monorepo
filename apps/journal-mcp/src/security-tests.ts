@@ -40,6 +40,20 @@ test("config requires HTTPS outside localhost and explicit existing roots", asyn
     });
     assert.equal(config.apiOrigin.origin, "http://127.0.0.1:3001");
     assert.equal(config.allowedRoots.length, 1);
+    assert.throws(() =>
+      loadJournalMcpConfig({
+        JOURNAL_SERVICE_API_ORIGIN: "http://127.0.0.1:3001",
+        JOURNAL_SERVICE_TOKEN: token.replace("hjs_v1", "HJS_V1"),
+        JOURNAL_MCP_ALLOWED_ROOTS: root,
+      }),
+    );
+    assert.throws(() =>
+      loadJournalMcpConfig({
+        JOURNAL_SERVICE_API_ORIGIN: "http://127.0.0.1:3001",
+        JOURNAL_SERVICE_TOKEN: `hjs_v1.${"a".repeat(36)}.${"A".repeat(43)}`,
+        JOURNAL_MCP_ALLOWED_ROOTS: root,
+      }),
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -124,4 +138,53 @@ test("API redirects are rejected before Authorization reaches a second origin", 
     first.close();
     second.close();
   }
+});
+
+test("API responses are bounded while streaming without Content-Length", async () => {
+  const origin = createServer((_request, response) => {
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(Buffer.alloc(4_000_001, 0x20));
+  });
+  origin.listen(0, "127.0.0.1");
+  await once(origin, "listening");
+  const port = (origin.address() as { port: number }).port;
+  const config: JournalMcpConfig = {
+    apiOrigin: new URL(`http://127.0.0.1:${port}`),
+    serviceToken: token,
+    allowedRoots: [],
+    enableReviewSubmit: false,
+  };
+  try {
+    await assert.rejects(
+      () =>
+        new JournalApiClient(config).request(
+          "GET",
+          "/service/journal/articles",
+        ),
+      /request failed/,
+    );
+  } finally {
+    origin.close();
+  }
+});
+
+test("presigned uploads reject embedded URL credentials", async () => {
+  const config: JournalMcpConfig = {
+    apiOrigin: new URL("http://127.0.0.1:3001"),
+    serviceToken: token,
+    allowedRoots: [],
+    enableReviewSubmit: false,
+  };
+  await assert.rejects(
+    () =>
+      new JournalApiClient(config).uploadPresigned(
+        "https://user:password@example.com/upload",
+        {
+          "content-type": "image/png",
+          "x-amz-checksum-sha256": "checksum",
+        },
+        onePixelPng,
+      ),
+    /must not contain credentials/,
+  );
 });

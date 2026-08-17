@@ -73,7 +73,11 @@ export function loadJournalMcpConfig(
   env: NodeJS.ProcessEnv = process.env,
 ): JournalMcpConfig {
   const serviceToken = required("JOURNAL_SERVICE_TOKEN", env);
-  if (!/^hjs_v1\.[0-9a-f-]{36}\.[A-Za-z0-9_-]{43}$/i.test(serviceToken)) {
+  if (
+    !/^hjs_v1\.[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.[A-Za-z0-9_-]{43}$/.test(
+      serviceToken,
+    )
+  ) {
     throw new Error("JOURNAL_SERVICE_TOKEN has an invalid format");
   }
   return {

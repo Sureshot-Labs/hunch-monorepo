@@ -4,10 +4,7 @@ import type { Pool } from "@hunch/infra";
 
 import { env } from "../env.js";
 import { checkRateLimitStatus } from "../lib/rate-limit.js";
-import {
-  checkRateLimitForSecurityClientIpStatus,
-  resolveSecurityClientIp,
-} from "../lib/request-ip.js";
+import { checkRateLimitForSecurityClientIpStatus } from "../lib/request-ip.js";
 import { serviceContentActor } from "./content-actor.js";
 import { recordJournalServiceAuth } from "./journal-service-observability.js";
 
@@ -324,7 +321,6 @@ export function createJournalServiceMiddleware(
       result.principal.id,
       result.principal.displayName,
     );
-    request.journalServiceClientIp = resolveSecurityClientIp(request);
     recordJournalServiceAuth("success");
   };
 }

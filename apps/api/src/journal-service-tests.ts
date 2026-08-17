@@ -5,15 +5,22 @@ import { readFileSync } from "node:fs";
 
 import type { Pool } from "@hunch/infra";
 
+import { reserveDistributedBudgetStatus } from "./lib/rate-limit.js";
 import {
   authenticateJournalServiceCredential,
   journalServiceTokenHmac,
 } from "./services/journal-service-auth.js";
 import {
   journalServiceAssetCreateBodySchema,
+  journalServiceAssetUpdateBodySchema,
   journalServiceIdempotencyHeadersSchema,
 } from "./schemas/content.js";
 import { journalServiceAsset } from "./services/content-assets.js";
+import {
+  journalIdempotencyResourceForClaim,
+  JournalIdempotencyError,
+  type JournalIdempotencyClaim,
+} from "./services/journal-idempotency.js";
 
 const credentialId = "00000000-0000-4000-8000-000000000101";
 const principalId = "00000000-0000-4000-8000-000000000102";
@@ -124,6 +131,10 @@ assert.equal(
   }).success,
   false,
 );
+await assert.rejects(
+  () => reserveDistributedBudgetStatus("daily", 100, 1_000, 60_000, ""),
+  /reservation identifier are invalid/,
+);
 assert.equal(
   journalServiceAssetCreateBodySchema.safeParse({
     kind: "video",
@@ -135,6 +146,52 @@ assert.equal(
   }).success,
   false,
   "service upload schema must not accept a client-selected kind",
+);
+const unsafeCreditUrl = {
+  originalFilename: "capture.png",
+  mimeType: "image/png",
+  expectedByteSize: 100,
+  checksumSha256: "0".repeat(64),
+  sourceType: "app-screenshot",
+  creditUrl: "javascript:alert(1)",
+};
+assert.equal(
+  journalServiceAssetCreateBodySchema.safeParse(unsafeCreditUrl).success,
+  false,
+  "service uploads must reject non-HTTP(S) credit URLs",
+);
+assert.equal(
+  journalServiceAssetUpdateBodySchema.safeParse({
+    creditUrl: "https://user:password@example.com/credit",
+  }).success,
+  false,
+  "asset updates must reject URLs containing credentials",
+);
+
+const replayClaim: JournalIdempotencyClaim = {
+  rowId: "1",
+  leaseOwner: null,
+  resourceId: "00000000-0000-4000-8000-000000000104",
+  replay: true,
+  reclaimed: false,
+  httpStatus: 201,
+  response: { articleId: "00000000-0000-4000-8000-000000000104" },
+};
+assert.throws(
+  () => journalIdempotencyResourceForClaim(replayClaim, null, "article"),
+  (error: unknown) =>
+    error instanceof JournalIdempotencyError &&
+    error.code === "idempotency_result_unavailable" &&
+    error.statusCode === 409,
+  "a replay must not recreate a resource that was deleted after creation",
+);
+assert.equal(
+  journalIdempotencyResourceForClaim(
+    { ...replayClaim, replay: false },
+    null,
+    "article",
+  ),
+  null,
 );
 
 const sanitizedAsset = journalServiceAsset({

@@ -22,7 +22,6 @@ declare module "fastify" {
     contentActor?: ContentActor;
     journalServicePrincipal?: JournalServicePrincipal;
     journalServiceCredential?: JournalServiceCredential;
-    journalServiceClientIp?: string;
     journalServiceRequiredScope?: string;
     _t0?: number;
   }
