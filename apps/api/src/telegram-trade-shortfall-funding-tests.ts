@@ -14,6 +14,7 @@ import {
   POLYGON_PUSD,
 } from "./funding-providers/relay/rehearsal.js";
 import {
+  assertTelegramTradeShortfallDelegatedRelayActionTtl,
   buildTelegramTradeShortfallCommitRequest,
   buildTelegramTradeShortfallRequest,
   resolveTelegramTradeShortfallCommitAmounts,
@@ -149,6 +150,47 @@ assert.equal(
   committedExactTopUpAmounts.fundingDestinationAmount.raw,
   "500000",
   "the frozen source option must be re-quoted with its exact funding leg, not the full trade ceiling",
+);
+
+const sequentialTtlNow = new Date("2026-08-17T12:00:00.000Z");
+assert.throws(
+  () =>
+    assertTelegramTradeShortfallDelegatedRelayActionTtl({
+      profileId: TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
+      now: sequentialTtlNow,
+      plan: {
+        segments: [
+          {
+            providerId: "relay",
+            quoteExpiresAt: new Date(
+              sequentialTtlNow.getTime() + 30_000,
+            ).toISOString(),
+          },
+        ],
+        steps: [],
+      },
+    }),
+  /lacks sequential execution TTL/u,
+  "shortfall must fail before commit when Relay cannot retain the approve-to-deposit window",
+);
+assert.doesNotThrow(
+  () =>
+    assertTelegramTradeShortfallDelegatedRelayActionTtl({
+      profileId: TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
+      now: sequentialTtlNow,
+      plan: {
+        segments: [
+          {
+            providerId: "relay",
+            quoteExpiresAt: new Date(
+              sequentialTtlNow.getTime() + 45_000,
+            ).toISOString(),
+          },
+        ],
+        steps: [],
+      },
+    }),
+  "the exact configured sequential window remains admissible",
 );
 
 assert.throws(
