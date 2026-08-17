@@ -203,6 +203,27 @@ export function buildTelegramTradeShortfallCommitRequest(
   );
 }
 
+export function resolveTelegramTradeShortfallCommitAmounts(
+  input: TelegramTradeShortfallIdentity,
+  proposal: Pick<
+    TelegramTradeShortfallProposal,
+    | "requestedDestinationAmount"
+    | "serverAdditionalDestinationAmount"
+    | "serverExecutionProfileId"
+  >,
+): Readonly<{
+  fundingDestinationAmount: Money;
+  tradeDestinationAmount: Money;
+}> {
+  const request = buildTelegramTradeShortfallCommitRequest(input, proposal);
+  const tradeDestinationAmount = request.requestedDestinationAmount;
+  const fundingDestinationAmount = request.serverAdditionalDestinationAmount;
+  if (!tradeDestinationAmount || !fundingDestinationAmount) {
+    throw new Error("trade funding proposal lacks its exact shortfall");
+  }
+  return { fundingDestinationAmount, tradeDestinationAmount };
+}
+
 function optionSourceAssets(option: SourceOption): readonly AssetRef[] {
   const sources = option.sourceLegs?.map((leg) => leg.sourceAmount.asset) ?? [];
   if (sources.length > 0) return sources;
@@ -576,12 +597,15 @@ export class TelegramTradeShortfallFundingService {
     ) {
       throw new Error("trade funding proposal expired or changed");
     }
-    const requestedDestinationAmount = buildTelegramTradeShortfallCommitRequest(
+    const commitAmounts = resolveTelegramTradeShortfallCommitAmounts(
       input,
       input.proposal,
-    ).requestedDestinationAmount;
+    );
+    const requestedDestinationAmount = commitAmounts.tradeDestinationAmount;
+    const fundingDestinationAmount = commitAmounts.fundingDestinationAmount;
     if (
       !requestedDestinationAmount ||
+      !fundingDestinationAmount ||
       requestedDestinationAmount.raw !==
         input.proposal.requestedDestinationAmount.raw ||
       !sameAsset(
@@ -595,7 +619,10 @@ export class TelegramTradeShortfallFundingService {
       liquidityProjectionId: input.proposal.liquidityProjectionId,
       selectedSourceOptionId: input.proposal.selectedSourceOptionId,
       confirmedSourceAmount: null,
-      requestedDestinationAmount,
+      // The saved source option is a quote for the shortfall leg, not the
+      // complete Buy ceiling. The full ceiling above remains independently
+      // bound to the proposal and is used by the later Buy Review.
+      requestedDestinationAmount: fundingDestinationAmount,
     });
     if (
       BigInt(quote.minimumDestination.raw) <
