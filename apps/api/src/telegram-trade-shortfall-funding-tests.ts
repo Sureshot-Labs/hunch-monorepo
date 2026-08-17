@@ -16,6 +16,7 @@ import {
 import {
   buildTelegramTradeShortfallCommitRequest,
   buildTelegramTradeShortfallRequest,
+  resolveTelegramTradeShortfallCommitAmounts,
   resolveTelegramTradeShortfallExecutionProfile,
   selectTelegramTradeShortfallAutomatedOption,
   telegramTradeShortfallExecutionProfiles,
@@ -109,6 +110,45 @@ assert.equal(
   committedExactTopUpRequest.serverAdditionalDestinationAmount?.raw,
   "500000",
   "commit must preserve the proposal's trusted top-up even though its full consumer spend is $14.201601",
+);
+
+const committedExactTopUpAmounts = resolveTelegramTradeShortfallCommitAmounts(
+  {
+    authorizationId: "authorization_shortfall_fixture_12345678",
+    telegramAccountId: "telegram_account_fixture_12345678",
+    telegramUserId: "telegram_user_fixture_12345678",
+    tradeIntentId: "trade_intent_fixture_12345678",
+    userId: "user_shortfall_fixture_12345678",
+    venue: "polymarket",
+    marketId: "polymarket:3192057",
+    marketContextId: "market_context_shortfall_fixture_12345678",
+    side: "YES",
+    maximumSpendUsd: "14.201601",
+    maxFeeUsd: "14.201601",
+    maxSlippageBps: 500,
+    deadline: "2026-08-17T12:38:00.000Z",
+  },
+  {
+    requestedDestinationAmount: {
+      asset: polygonPusd,
+      raw: "14201601",
+    },
+    serverAdditionalDestinationAmount: {
+      asset: polygonPusd,
+      raw: "500000",
+    },
+    serverExecutionProfileId: TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
+  },
+);
+assert.equal(
+  committedExactTopUpAmounts.tradeDestinationAmount.raw,
+  "14201601",
+  "the trade ceiling remains bound to the proposal",
+);
+assert.equal(
+  committedExactTopUpAmounts.fundingDestinationAmount.raw,
+  "500000",
+  "the frozen source option must be re-quoted with its exact funding leg, not the full trade ceiling",
 );
 
 assert.throws(
