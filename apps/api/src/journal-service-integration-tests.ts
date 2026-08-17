@@ -13,6 +13,7 @@ import { authenticateJournalServiceCredential } from "./services/journal-service
 import {
   disableJournalServicePrincipal,
   issueJournalServiceCredential,
+  rotateJournalServiceCredential,
 } from "./services/journal-service-principals.js";
 import {
   claimJournalIdempotency,
@@ -28,6 +29,7 @@ import {
   createContentArticle,
   createContentArticleInTransaction,
   listContentArticleVersions,
+  transitionContentArticleReview,
   updateContentArticle,
   validateContentArticleForService,
 } from "./services/content.js";
@@ -232,10 +234,26 @@ try {
     },
   );
   assert.equal(authenticated.ok, true);
-  await pool.query(
-    `update admin_service_credentials set revoked_at = now(), revoked_reason = 'integration revoke' where id = $1`,
-    [issued.value.id],
+  const rotated = await rotateJournalServiceCredential(pool, {
+    credentialId: issued.value.id,
+    scopes: ["journal:read", "journal:draft:update"],
+    ttlDays: 30,
+    actorAdminId: null as unknown as string,
+    note: "integration rotation",
+  });
+  assert.equal(rotated.rotatedCredentialId, issued.value.id);
+  const replacement = await authenticateJournalServiceCredential(
+    pool,
+    rotated.token,
+    { pepper },
   );
+  assert.equal(replacement.ok, true);
+  if (replacement.ok) {
+    assert.deepEqual(replacement.credential.scopes, [
+      "journal:draft:update",
+      "journal:read",
+    ]);
+  }
   const revoked = await authenticateJournalServiceCredential(
     pool,
     issued.value.token,
@@ -244,6 +262,17 @@ try {
     },
   );
   assert.equal(revoked.ok ? null : revoked.error, "revoked_service_credential");
+  await assert.rejects(
+    () =>
+      rotateJournalServiceCredential(pool, {
+        credentialId: issued.value.id,
+        scopes: ["journal:read"],
+        ttlDays: 30,
+        actorAdminId: null as unknown as string,
+        note: "must not rotate a revoked credential",
+      }),
+    /already been revoked/,
+  );
 
   const key = `integration:${randomUUID()}`;
   const requestHash = journalIdempotencyRequestHash("create_article", {
@@ -447,6 +476,41 @@ try {
     [articleId],
   );
   assert.deepEqual(noOpCounts.rows[0], { versions: "1", updates: "1" });
+
+  await assert.rejects(
+    () =>
+      transitionContentArticleReview(pool, {
+        id: articleId as string,
+        expectedRevision: 2,
+        actor,
+        status: "approved",
+      }),
+    (error: unknown) =>
+      error instanceof ContentError &&
+      error.code === "content_article_not_publishable" &&
+      error.statusCode === 403,
+  );
+  await pool.query(
+    `update content_articles set editorial_status = 'approved' where id = $1`,
+    [articleId],
+  );
+  await assert.rejects(
+    () =>
+      transitionContentArticleReview(pool, {
+        id: articleId as string,
+        expectedRevision: 2,
+        actor,
+        status: "in_review",
+      }),
+    (error: unknown) =>
+      error instanceof ContentError &&
+      error.code === "content_article_not_publishable" &&
+      error.statusCode === 409,
+  );
+  await pool.query(
+    `update content_articles set editorial_status = 'draft' where id = $1`,
+    [articleId],
+  );
 
   await assert.rejects(
     () =>

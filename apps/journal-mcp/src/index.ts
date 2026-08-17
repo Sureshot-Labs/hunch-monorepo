@@ -82,6 +82,24 @@ const changesSchema = z
     message: "At least one top-level change is required",
   });
 
+const imageMetadataChangesSchema = z
+  .object({
+    alt: z.string().trim().max(500).nullable().optional(),
+    caption: z.string().trim().max(2_000).nullable().optional(),
+    credit_name: z.string().trim().max(200).nullable().optional(),
+    credit_url: credentialFreeHttpUrl.nullable().optional(),
+    focal_x: z.number().min(0).max(1).nullable().optional(),
+    focal_y: z.number().min(0).max(1).nullable().optional(),
+    source_type: z
+      .enum(["app-screenshot", "telegram-screenshot", "generated-editorial"])
+      .optional(),
+    license: z.string().trim().min(1).max(200).nullable().optional(),
+  })
+  .strict()
+  .refine((changes) => Object.keys(changes).length > 0, {
+    message: "At least one image metadata change is required",
+  });
+
 type ToolResult = {
   content: Array<{ type: "text"; text: string }>;
   isError?: boolean;
@@ -105,6 +123,7 @@ async function runTool(operation: () => Promise<unknown>): Promise<ToolResult> {
               error: error.body.error ?? "journal_api_error",
               message: error.message,
               status: error.status,
+              ...(error.body.issues ? { issues: error.body.issues } : {}),
               ...(error.body.details ? { details: error.body.details } : {}),
             }),
           },
@@ -410,6 +429,39 @@ export function createJournalMcpServer(config: JournalMcpConfig): McpServer {
           },
         );
       }),
+  );
+
+  server.registerTool(
+    "journal_update_image_metadata",
+    {
+      description:
+        "Update metadata for an image created by this service principal. Omitted fields are unchanged; null clears a nullable field.",
+      inputSchema: z
+        .object({
+          asset_id: uuid,
+          changes: imageMetadataChangesSchema,
+        })
+        .strict(),
+    },
+    ({ asset_id, changes }) =>
+      runTool(() =>
+        api.request(
+          "PATCH",
+          `/service/journal/assets/${encodeURIComponent(asset_id)}/metadata`,
+          {
+            body: {
+              defaultAlt: changes.alt,
+              defaultCaption: changes.caption,
+              creditName: changes.credit_name,
+              creditUrl: changes.credit_url,
+              focalX: changes.focal_x,
+              focalY: changes.focal_y,
+              sourceType: changes.source_type,
+              license: changes.license,
+            },
+          },
+        ),
+      ),
   );
 
   server.registerTool(

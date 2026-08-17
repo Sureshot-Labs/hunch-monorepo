@@ -2345,6 +2345,24 @@ export async function transitionContentArticleReview(
         409,
       );
     }
+    if (actor.kind === "service" && inputs.status !== "in_review") {
+      throw new ContentError(
+        "content_article_not_publishable",
+        "Journal service actors can only submit drafts for review",
+        403,
+      );
+    }
+    if (
+      actor.kind === "service" &&
+      article.editorialStatus !== "draft" &&
+      article.editorialStatus !== "in_review"
+    ) {
+      throw new ContentError(
+        "content_article_not_publishable",
+        "Only a draft can be submitted for review by the journal service",
+        409,
+      );
+    }
     if (article.editorialStatus === inputs.status) return article;
     if (inputs.status === "approved") {
       validateArticlePublishability(article);

@@ -13,6 +13,7 @@ type RequestOptions = {
 type SafeApiErrorBody = {
   error?: string;
   message?: string;
+  issues?: string[];
   details?: {
     currentRevision?: number;
     currentContentHash?: string;
@@ -38,6 +39,12 @@ function safeErrorBody(value: unknown): SafeApiErrorBody {
     !Array.isArray(record.details)
       ? (record.details as Record<string, unknown>)
       : undefined;
+  const issues = Array.isArray(record.issues)
+    ? record.issues
+        .filter((issue): issue is string => typeof issue === "string")
+        .slice(0, 50)
+        .map((issue) => issue.slice(0, 500))
+    : undefined;
   return {
     ...(typeof record.error === "string"
       ? { error: record.error.slice(0, 160) }
@@ -45,6 +52,7 @@ function safeErrorBody(value: unknown): SafeApiErrorBody {
     ...(typeof record.message === "string"
       ? { message: record.message.slice(0, 500) }
       : {}),
+    ...(issues?.length ? { issues } : {}),
     ...(details
       ? {
           details: {
@@ -100,6 +108,12 @@ export class JournalApiClient {
       throw new Error("Refusing to call a non-Journal service path");
     }
     const url = new URL(pathname, this.config.apiOrigin);
+    if (
+      url.origin !== this.config.apiOrigin.origin ||
+      !url.pathname.startsWith("/service/journal/")
+    ) {
+      throw new Error("Refusing to call a non-Journal service URL");
+    }
     for (const [key, value] of Object.entries(options.query ?? {})) {
       if (value !== undefined) url.searchParams.set(key, String(value));
     }
@@ -184,6 +198,7 @@ export class JournalApiClient {
         headers,
         body: Uint8Array.from(bytes),
       });
+      await response.body?.cancel().catch(() => undefined);
       if (!response.ok) throw new Error("Object storage rejected the upload");
     } catch (error) {
       if (error instanceof Error && error.name === "AbortError") {

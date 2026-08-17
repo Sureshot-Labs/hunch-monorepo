@@ -155,6 +155,9 @@ export async function inspectLocalImage(
     ) {
       throw new Error("Image changed while it was being opened");
     }
+    if (opened.nlink > 1) {
+      throw new Error("Image path must not be a hard-linked file");
+    }
     const bytes = await handle.readFile();
     if (bytes.length !== opened.size || bytes.length > MAX_IMAGE_BYTES) {
       throw new Error("Image changed while it was being read");

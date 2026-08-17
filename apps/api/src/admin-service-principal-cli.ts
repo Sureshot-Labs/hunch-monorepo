@@ -7,6 +7,7 @@ import {
   issueJournalServiceCredential,
   listJournalServicePrincipals,
   revokeJournalServiceCredential,
+  rotateJournalServiceCredential,
 } from "./services/journal-service-principals.js";
 
 type Command =
@@ -32,7 +33,7 @@ function required(args: string[], flag: string): string {
 
 function productionConfirmed(args: string[]): void {
   if (
-    process.env.NODE_ENV === "production" &&
+    process.env.NODE_ENV?.toLowerCase() === "production" &&
     !args.includes("--confirm-production")
   ) {
     throw new Error("--confirm-production is required in production");
@@ -44,12 +45,12 @@ function usage() {
 Usage:
   pnpm -F api admin:service-principal create --key <key> --display-name <name> --actor-admin-id <uuid> --note <text>
   pnpm -F api admin:service-principal issue --principal-id <uuid> --scopes <comma-list> [--ttl-days <days>] --actor-admin-id <uuid> --note <text>
-  pnpm -F api admin:service-principal rotate --principal-id <uuid> --scopes <comma-list> [--ttl-days <days>] --actor-admin-id <uuid> --note <text>
+  pnpm -F api admin:service-principal rotate --credential-id <uuid> --scopes <comma-list> [--ttl-days <days>] --actor-admin-id <uuid> --note <text>
   pnpm -F api admin:service-principal revoke --credential-id <uuid> --actor-admin-id <uuid> --reason <text>
   pnpm -F api admin:service-principal disable --principal-id <uuid> --actor-admin-id <uuid> --reason <text>
   pnpm -F api admin:service-principal list
 
-Credential TTL defaults to 30 days. Add --confirm-production to every mutating production command. Plaintext tokens are printed once and are never accepted as arguments.
+Credential TTL defaults to 30 days. Rotation atomically revokes the selected credential and issues its replacement. Add --confirm-production to every mutating production command. Plaintext tokens are printed once and are never accepted as arguments.
 `.trim();
 }
 
@@ -80,10 +81,22 @@ async function main() {
     console.log(JSON.stringify(created, null, 2));
     return;
   }
-  if (command === "issue" || command === "rotate") {
+  if (command === "issue") {
     const ttlDays = Number(value(args, "--ttl-days") ?? "30");
     const issued = await issueJournalServiceCredential(pool, {
       principalId: required(args, "--principal-id"),
+      scopes: required(args, "--scopes").split(","),
+      ttlDays,
+      actorAdminId,
+      note: required(args, "--note"),
+    });
+    console.log(JSON.stringify(issued, null, 2));
+    return;
+  }
+  if (command === "rotate") {
+    const ttlDays = Number(value(args, "--ttl-days") ?? "30");
+    const issued = await rotateJournalServiceCredential(pool, {
+      credentialId: required(args, "--credential-id"),
       scopes: required(args, "--scopes").split(","),
       ttlDays,
       actorAdminId,

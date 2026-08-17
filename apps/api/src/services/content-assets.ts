@@ -830,7 +830,7 @@ export async function completeContentAssetUpload(
   } catch (error) {
     issues.push(
       `uploaded object could not be inspected: ${
-        error instanceof Error ? error.message : "unknown error"
+        error instanceof Error ? error.message.slice(0, 1_000) : "unknown error"
       }`,
     );
   }
@@ -846,7 +846,11 @@ export async function completeContentAssetUpload(
       "content_asset_not_ready",
       "Uploaded object failed verification",
       422,
-      issues,
+      issues.map((issue) =>
+        issue.startsWith("uploaded object could not be inspected:")
+          ? "uploaded object could not be inspected"
+          : issue,
+      ),
     );
   }
   try {
@@ -935,7 +939,7 @@ export async function completeContentAssetUpload(
   } catch (error) {
     const promotionIssues = [
       `asset promotion failed: ${
-        error instanceof Error ? error.message : "unknown error"
+        error instanceof Error ? error.message.slice(0, 1_000) : "unknown error"
       }`,
     ];
     await failAssetVerification(
@@ -950,7 +954,7 @@ export async function completeContentAssetUpload(
       "content_asset_not_ready",
       "Uploaded object could not be promoted safely",
       502,
-      promotionIssues,
+      ["asset promotion failed"],
     );
   }
 }

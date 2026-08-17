@@ -15,6 +15,11 @@ Optional `JOURNAL_MCP_ENABLE_REVIEW_SUBMIT=true` registers the submit-review
 tool. It is absent by default and still requires the backend feature flag and
 the `journal:review:submit` credential scope.
 
+Image tools can upload from allowlisted roots and update metadata only on
+assets created by the same service principal. Article tools can draft,
+checkpoint, validate, preview, and optionally submit for human review; they
+cannot approve, publish, schedule, archive, or delete.
+
 Run locally with `pnpm -F journal-mcp dev` or build and use
 `pnpm -F journal-mcp start`. STDOUT is reserved for the MCP protocol; startup
 and configuration failures are written only to STDERR and never include the

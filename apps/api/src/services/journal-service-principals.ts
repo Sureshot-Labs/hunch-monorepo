@@ -43,6 +43,103 @@ async function tx<T>(pool: Pool, work: (client: PoolClient) => Promise<T>) {
   }
 }
 
+function assertCredentialTtl(ttlDays: number): void {
+  if (
+    !Number.isInteger(ttlDays) ||
+    ttlDays < 1 ||
+    ttlDays > env.journalServiceCredentialMaxTtlDays
+  ) {
+    throw new Error(
+      `Credential TTL must be between 1 and ${env.journalServiceCredentialMaxTtlDays} days`,
+    );
+  }
+}
+
+async function lockActivePrincipal(client: PoolClient, principalId: string) {
+  const principal = await client.query<{
+    id: string;
+    status: "active" | "disabled";
+  }>(
+    `select id, status from admin_service_principals where id = $1 for update`,
+    [principalId],
+  );
+  const row = principal.rows[0];
+  if (!row) throw new Error("Service principal not found");
+  if (row.status !== "active") throw new Error("Service principal is disabled");
+  return row;
+}
+
+async function assertCredentialCapacity(
+  client: PoolClient,
+  principalId: string,
+): Promise<void> {
+  const active = await client.query<{ count: string }>(
+    `
+      select count(*)::text as count
+      from admin_service_credentials
+      where service_principal_id = $1
+        and revoked_at is null
+        and expires_at > now()
+    `,
+    [principalId],
+  );
+  if (Number(active.rows[0]?.count ?? 0) >= 2) {
+    throw new Error("Service principal already has two active credentials");
+  }
+}
+
+async function insertJournalServiceCredential(
+  client: PoolClient,
+  input: {
+    principalId: string;
+    scopes: JournalServiceScope[];
+    ttlDays: number;
+    actorAdminId: string;
+    note: string;
+  },
+) {
+  const credentialId = randomUUID();
+  const generated = generateJournalServiceToken(credentialId);
+  const { rows } = await client.query<{
+    id: string;
+    expires_at: Date | string;
+    created_at: Date | string;
+  }>(
+    `
+      insert into admin_service_credentials (
+        id, service_principal_id, token_hmac, token_prefix, token_last_four,
+        scopes, expires_at, created_by_admin_id, created_note
+      ) values (
+        $1, $2, $3, $4, $5, $6::text[],
+        now() + ($7::text || ' days')::interval, $8, $9
+      )
+      returning id, expires_at, created_at
+    `,
+    [
+      credentialId,
+      input.principalId,
+      generated.tokenHmac,
+      generated.tokenPrefix,
+      generated.tokenLastFour,
+      input.scopes,
+      input.ttlDays,
+      input.actorAdminId,
+      input.note,
+    ],
+  );
+  const credential = rows[0];
+  return {
+    id: credential.id,
+    principalId: input.principalId,
+    token: generated.token,
+    tokenPrefix: generated.tokenPrefix,
+    tokenLastFour: generated.tokenLastFour,
+    scopes: input.scopes,
+    expiresAt: new Date(credential.expires_at).toISOString(),
+    createdAt: new Date(credential.created_at).toISOString(),
+  };
+}
+
 export async function createJournalServicePrincipal(
   pool: Pool,
   input: {
@@ -83,83 +180,75 @@ export async function issueJournalServiceCredential(
 ) {
   const scopes = assertScopes(input.scopes);
   const note = assertNote(input.note);
-  if (
-    !Number.isInteger(input.ttlDays) ||
-    input.ttlDays < 1 ||
-    input.ttlDays > env.journalServiceCredentialMaxTtlDays
-  ) {
-    throw new Error(
-      `Credential TTL must be between 1 and ${env.journalServiceCredentialMaxTtlDays} days`,
-    );
-  }
+  assertCredentialTtl(input.ttlDays);
 
   return tx(pool, async (client) => {
-    const principal = await client.query<{
-      id: string;
-      status: "active" | "disabled";
-    }>(
-      `select id, status from admin_service_principals where id = $1 for update`,
-      [input.principalId],
-    );
-    const row = principal.rows[0];
-    if (!row) throw new Error("Service principal not found");
-    if (row.status !== "active")
-      throw new Error("Service principal is disabled");
+    const principal = await lockActivePrincipal(client, input.principalId);
+    await assertCredentialCapacity(client, principal.id);
+    return insertJournalServiceCredential(client, {
+      principalId: principal.id,
+      scopes,
+      ttlDays: input.ttlDays,
+      actorAdminId: input.actorAdminId,
+      note,
+    });
+  });
+}
 
-    const active = await client.query<{ count: string }>(
-      `
-        select count(*)::text as count
-        from admin_service_credentials
-        where service_principal_id = $1
-          and revoked_at is null
-          and expires_at > now()
-      `,
-      [row.id],
+export async function rotateJournalServiceCredential(
+  pool: Pool,
+  input: {
+    credentialId: string;
+    scopes: string[];
+    ttlDays: number;
+    actorAdminId: string;
+    note: string;
+  },
+) {
+  const scopes = assertScopes(input.scopes);
+  const note = assertNote(input.note);
+  assertCredentialTtl(input.ttlDays);
+
+  return tx(pool, async (client) => {
+    const lookup = await client.query<{ service_principal_id: string }>(
+      `select service_principal_id from admin_service_credentials where id = $1`,
+      [input.credentialId],
     );
-    if (Number(active.rows[0]?.count ?? 0) >= 2) {
-      throw new Error("Service principal already has two active credentials");
+    const principalId = lookup.rows[0]?.service_principal_id;
+    if (!principalId) throw new Error("Service credential not found");
+    await lockActivePrincipal(client, principalId);
+
+    const existing = await client.query<{ revoked_at: Date | string | null }>(
+      `
+        select revoked_at
+        from admin_service_credentials
+        where id = $1 and service_principal_id = $2
+        for update
+      `,
+      [input.credentialId, principalId],
+    );
+    if (!existing.rows[0]) throw new Error("Service credential not found");
+    if (existing.rows[0].revoked_at) {
+      throw new Error("Service credential has already been revoked");
     }
 
-    const credentialId = randomUUID();
-    const generated = generateJournalServiceToken(credentialId);
-    const { rows } = await client.query<{
-      id: string;
-      expires_at: Date | string;
-      created_at: Date | string;
-    }>(
+    await client.query(
       `
-        insert into admin_service_credentials (
-          id, service_principal_id, token_hmac, token_prefix, token_last_four,
-          scopes, expires_at, created_by_admin_id, created_note
-        ) values (
-          $1, $2, $3, $4, $5, $6::text[],
-          now() + ($7::text || ' days')::interval, $8, $9
-        )
-        returning id, expires_at, created_at
+        update admin_service_credentials
+        set revoked_at = now(), revoked_by_admin_id = $2, revoked_reason = $3
+        where id = $1
       `,
-      [
-        credentialId,
-        row.id,
-        generated.tokenHmac,
-        generated.tokenPrefix,
-        generated.tokenLastFour,
-        scopes,
-        input.ttlDays,
-        input.actorAdminId,
-        note,
-      ],
+      [input.credentialId, input.actorAdminId, note],
     );
-    const credential = rows[0];
-    return {
-      id: credential.id,
-      principalId: row.id,
-      token: generated.token,
-      tokenPrefix: generated.tokenPrefix,
-      tokenLastFour: generated.tokenLastFour,
+    await assertCredentialCapacity(client, principalId);
+    const issued = await insertJournalServiceCredential(client, {
+      principalId,
       scopes,
-      expiresAt: new Date(credential.expires_at).toISOString(),
-      createdAt: new Date(credential.created_at).toISOString(),
-    };
+      ttlDays: input.ttlDays,
+      actorAdminId: input.actorAdminId,
+      note,
+    });
+    return { ...issued, rotatedCredentialId: input.credentialId };
   });
 }
 

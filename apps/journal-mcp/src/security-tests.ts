@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
 import {
+  link as createHardLink,
   mkdtemp,
   mkdir,
   realpath,
@@ -13,9 +14,10 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { JournalApiClient } from "./api-client.js";
+import { JournalApiClient, JournalApiError } from "./api-client.js";
 import { loadJournalMcpConfig, type JournalMcpConfig } from "./config.js";
 import { inspectLocalImage } from "./image-file.js";
+import { createJournalMcpServer } from "./index.js";
 
 const token = `hjs_v1.00000000-0000-4000-8000-000000000001.${"A".repeat(43)}`;
 const onePixelPng = Buffer.from(
@@ -66,6 +68,7 @@ test("image inspection rejects outside paths, symlinks, blocked dirs, and MIME m
   const valid = path.join(root, "valid.png");
   const mismatch = path.join(root, "mismatch.jpg");
   const link = path.join(root, "linked.png");
+  const hardLink = path.join(root, "hard-linked.png");
   const blockedDir = path.join(root, ".ssh");
   await writeFile(valid, onePixelPng);
   await writeFile(mismatch, onePixelPng);
@@ -78,6 +81,11 @@ test("image inspection rejects outside paths, symlinks, blocked dirs, and MIME m
     assert.deepEqual(
       [image.mimeType, image.width, image.height],
       ["image/png", 1, 1],
+    );
+    await createHardLink(valid, hardLink);
+    await assert.rejects(
+      () => inspectLocalImage(hardLink, roots),
+      /hard-linked file/,
     );
     await assert.rejects(() =>
       inspectLocalImage(path.join(parent, "outside.png"), roots),
@@ -140,6 +148,73 @@ test("API redirects are rejected before Authorization reaches a second origin", 
   }
 });
 
+test("API path normalization cannot escape the Journal namespace", async () => {
+  const config: JournalMcpConfig = {
+    apiOrigin: new URL("http://127.0.0.1:3001"),
+    serviceToken: token,
+    allowedRoots: [],
+    enableReviewSubmit: false,
+  };
+  await assert.rejects(
+    () =>
+      new JournalApiClient(config).request(
+        "GET",
+        "/service/journal/../../admin/content",
+      ),
+    /non-Journal service URL/,
+  );
+  await assert.rejects(
+    () =>
+      new JournalApiClient(config).request(
+        "GET",
+        "/service/journal/%2e%2e/%2e%2e/admin/content",
+      ),
+    /non-Journal service URL/,
+  );
+});
+
+test("API errors retain only bounded string validation issues", async () => {
+  const origin = createServer((_request, response) => {
+    response.writeHead(422, { "content-type": "application/json" });
+    response.end(
+      JSON.stringify({
+        error: "content_article_not_publishable",
+        issues: [
+          ...Array.from(
+            { length: 60 },
+            (_, index) => `${index}:${"x".repeat(600)}`,
+          ),
+          { unsafe: true },
+        ],
+      }),
+    );
+  });
+  origin.listen(0, "127.0.0.1");
+  await once(origin, "listening");
+  const port = (origin.address() as { port: number }).port;
+  const config: JournalMcpConfig = {
+    apiOrigin: new URL(`http://127.0.0.1:${port}`),
+    serviceToken: token,
+    allowedRoots: [],
+    enableReviewSubmit: false,
+  };
+  try {
+    await assert.rejects(
+      () =>
+        new JournalApiClient(config).request(
+          "POST",
+          "/service/journal/articles/example/validate",
+        ),
+      (error: unknown) =>
+        error instanceof JournalApiError &&
+        error.body.issues?.length === 50 &&
+        error.body.issues.every((issue) => issue.length <= 500),
+    );
+  } finally {
+    origin.close();
+  }
+});
+
 test("API responses are bounded while streaming without Content-Length", async () => {
   const origin = createServer((_request, response) => {
     response.writeHead(200, { "content-type": "application/json" });
@@ -187,4 +262,14 @@ test("presigned uploads reject embedded URL credentials", async () => {
       ),
     /must not contain credentials/,
   );
+});
+
+test("MCP exposes the backend image metadata update surface", () => {
+  const server = createJournalMcpServer({
+    apiOrigin: new URL("http://127.0.0.1:3001"),
+    serviceToken: token,
+    allowedRoots: [],
+    enableReviewSubmit: false,
+  });
+  assert.ok(server.toolInputSchemaJson("journal_update_image_metadata"));
 });
