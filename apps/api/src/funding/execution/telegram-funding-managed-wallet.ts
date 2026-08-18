@@ -38,6 +38,11 @@ async function resolveTelegramFundingManagedWallet(
     telegramAccountId: string;
     telegramUserId: string;
     controllerNetworkId?: "evm:137" | "evm:8453";
+    /**
+     * The venue whose delegated funding authority is about to be provisioned.
+     * This must be the destination venue, not an unrelated default venue.
+     */
+    executionVenueId?: "polymarket" | "limitless";
   }>,
   requireExecutionReady: boolean,
 ): Promise<TelegramFundingProvisionWallet | null> {
@@ -76,7 +81,7 @@ async function resolveTelegramFundingManagedWallet(
         and trading_authorization.telegram_user_id = $3
         and trading_authorization.wallet_chain = 'ethereum'
         and (
-          ($4::boolean and 'polymarket' = any(trading_authorization.enabled_venues))
+          ($4::boolean and $5::text = any(trading_authorization.enabled_venues))
           or (
             not $4::boolean
             and trading_authorization.enabled_venues && array['polymarket', 'limitless']::text[]
@@ -96,6 +101,7 @@ async function resolveTelegramFundingManagedWallet(
       input.telegramAccountId,
       input.telegramUserId,
       requireExecutionReady,
+      input.executionVenueId ?? null,
     ],
   );
   const row = rows[0];
@@ -119,6 +125,7 @@ export function resolveTelegramFundingManagedWalletIdentity(
     telegramAccountId: string;
     telegramUserId: string;
     controllerNetworkId?: "evm:137" | "evm:8453";
+    executionVenueId?: "polymarket" | "limitless";
   }>,
 ): Promise<TelegramFundingProvisionWallet | null> {
   // Wallet identity survives a user/control-plane pause. Ownership checks must
@@ -133,6 +140,7 @@ export function resolveTelegramFundingProvisionWallet(
     telegramAccountId: string;
     telegramUserId: string;
     controllerNetworkId?: "evm:137" | "evm:8453";
+    executionVenueId?: "polymarket" | "limitless";
   }>,
 ): Promise<TelegramFundingProvisionWallet | null> {
   return resolveTelegramFundingManagedWallet(pool, input, true);

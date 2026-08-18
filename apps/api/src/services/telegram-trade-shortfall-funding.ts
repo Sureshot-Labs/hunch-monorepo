@@ -697,6 +697,7 @@ export class TelegramTradeShortfallFundingService {
       telegramAccountId: input.telegramAccountId,
       telegramUserId: input.telegramUserId,
       controllerNetworkId: input.venue === "limitless" ? "evm:8453" : "evm:137",
+      executionVenueId: input.venue,
     });
     if (!controller) {
       return {
@@ -722,7 +723,7 @@ export class TelegramTradeShortfallFundingService {
         })
       : await ensureTelegramRelayEvmFundingAuthorization(
           this.pool,
-          authorizationInput,
+          { ...authorizationInput, profileId },
         );
     if (!provisioned) {
       return {
