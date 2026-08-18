@@ -10,6 +10,7 @@ import {
 import {
   computePolymarketClobOpenOrderLocks,
   computePolymarketExecutableFunds,
+  computePolymarketFundingRouterPusdAvailableRaw,
   evaluatePolymarketBuyApprovalReadiness,
   POLYMARKET_BUY_APPROVAL_THRESHOLD,
   polymarketAllowanceSatisfiesBuyApproval,
@@ -175,6 +176,41 @@ const tests: TestCase[] = [
       assert.equal(funds.signerLockedRaw, 0n);
       assert.equal(funds.signerPusdTopUpRaw, 800_000_000n);
       assert.equal(funds.signerUsdceTopUpRaw, 42_710_000n);
+    },
+  },
+  {
+    name: "controller pUSD requires observed Router allowance unless exact approval can be prepared",
+    run: () => {
+      assert.equal(
+        computePolymarketFundingRouterPusdAvailableRaw({
+          controllerPusdAvailableRaw: 1_000_000n,
+          controllerRouterAllowanceRaw: 250_000n,
+        }),
+        250_000n,
+      );
+      assert.equal(
+        computePolymarketFundingRouterPusdAvailableRaw({
+          controllerPusdAvailableRaw: 1_000_000n,
+          controllerRouterAllowanceRaw: 0n,
+        }),
+        0n,
+      );
+      assert.equal(
+        computePolymarketFundingRouterPusdAvailableRaw({
+          controllerPusdAvailableRaw: 1_000_000n,
+          controllerRouterAllowanceRaw: 0n,
+          controllerRouterApprovalCanBePrepared: true,
+        }),
+        1_000_000n,
+      );
+      assert.equal(
+        computePolymarketFundingRouterPusdAvailableRaw({
+          controllerPusdAvailableRaw: 1_000_000n,
+          controllerRouterAllowanceRaw: null,
+          controllerRouterApprovalCanBePrepared: true,
+        }),
+        0n,
+      );
     },
   },
   {

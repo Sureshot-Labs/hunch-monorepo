@@ -148,13 +148,18 @@ export function hasConfiguredPrivyBotPolicyForActions(
 }
 
 const POLICY_FUNDING_CAP_CACHE_TTL_MS = 15_000;
-let policyFundingCapCache: {
+export type PolymarketFundingRouterPolicyCapability = Readonly<{
+  controllerPusdApprovalEnabled: boolean;
+  fundingMaxRaw: bigint;
+}>;
+
+let policyFundingCapabilityCache: {
   expiresAt: number;
   key: string;
-  value: Promise<bigint>;
+  value: Promise<PolymarketFundingRouterPolicyCapability>;
 } | null = null;
 
-export async function resolvePolymarketBotPolicyFundingCapRaw(): Promise<bigint> {
+export async function resolvePolymarketBotPolicyFundingCapability(): Promise<PolymarketFundingRouterPolicyCapability> {
   const policyId = env.privyPolymarketBotBuySellPolicyId.trim();
   const fundingRouterAddress = env.polymarketFundingRouterAddress.trim();
   const policyMaxBuyUsd = env.privyPolymarketBotBuyPolicyMaxUsd;
@@ -173,10 +178,10 @@ export async function resolvePolymarketBotPolicyFundingCapRaw(): Promise<bigint>
   ].join("|");
   const now = Date.now();
   if (
-    policyFundingCapCache?.key === key &&
-    policyFundingCapCache.expiresAt > now
+    policyFundingCapabilityCache?.key === key &&
+    policyFundingCapabilityCache.expiresAt > now
   ) {
-    return policyFundingCapCache.value;
+    return policyFundingCapabilityCache.value;
   }
 
   const value = (async () => {
@@ -198,9 +203,13 @@ export async function resolvePolymarketBotPolicyFundingCapRaw(): Promise<bigint>
     ) {
       throw new Error("Configured Privy Polymarket policy is unsafe.");
     }
-    return validation.fundingMaxRaw;
+    return {
+      controllerPusdApprovalEnabled:
+        validation.fundingRouterControllerApprovalPresent === true,
+      fundingMaxRaw: validation.fundingMaxRaw,
+    };
   })();
-  policyFundingCapCache = {
+  policyFundingCapabilityCache = {
     expiresAt: now + POLICY_FUNDING_CAP_CACHE_TTL_MS,
     key,
     value,
@@ -208,9 +217,15 @@ export async function resolvePolymarketBotPolicyFundingCapRaw(): Promise<bigint>
   try {
     return await value;
   } catch (error) {
-    if (policyFundingCapCache?.value === value) policyFundingCapCache = null;
+    if (policyFundingCapabilityCache?.value === value) {
+      policyFundingCapabilityCache = null;
+    }
     throw error;
   }
+}
+
+export async function resolvePolymarketBotPolicyFundingCapRaw(): Promise<bigint> {
+  return (await resolvePolymarketBotPolicyFundingCapability()).fundingMaxRaw;
 }
 
 function signerStatus(
