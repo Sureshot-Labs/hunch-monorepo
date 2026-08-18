@@ -34,9 +34,6 @@ import {
   RELAY_CLEANUP_CANONICAL_WATCH_MS,
   type RelayEvmAllowanceReader,
 } from "../../execution/relay-evm-delegated-executor-profile.js";
-import { captureRelayEvmAllowanceAdmission } from "../../execution/relay-evm-allowance-baseline.js";
-import { consumeRelayEvmPriorApprovalReservationInTransaction } from "../../execution/relay-evm-prior-approval.js";
-import { relayEvmFundingProfileSpec } from "../../execution/relay-evm-profile-specs.js";
 import { lockTelegramFundingLinkLifecycle } from "../../execution/telegram-funding-link-lifecycle-lock.js";
 import {
   POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
@@ -5328,9 +5325,8 @@ try {
   assert.equal(relayLaneSecondWave.submitted, 1);
   assert.deepEqual(relayLaneBroadcasts, [relayLaneHead, relayLaneFollower]);
 
-  // A terminal route with one exact Hunch approval and no deposit attempt is
-  // never reused. It can only make room for a new operation which emits its
-  // own exact approve before any deposit is eligible.
+  // A terminal pre-deposit route leaves its old allowance alone. A fresh
+  // operation must still emit its own exact approve before its deposit can run.
   const priorApprovalRoute = await createRelayFixture("2000000");
   const priorAllowanceAtApproval = relayAllowanceEvidence(
     "2000000",
@@ -5450,104 +5446,17 @@ try {
   const freshRelayRoute = await createRelayFixture("1000000", {
     base: priorApprovalRoute.base,
   });
-  const priorProfile = relayEvmFundingProfileSpec(
-    TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
-  );
-  assert.ok(priorProfile);
-  const wrongBlockAdmission = await captureRelayEvmAllowanceAdmission(pool, {
-    owner: priorApprovalRoute.walletAddress,
-    profile: priorProfile,
-    userId: priorApprovalRoute.base.userId,
-    reader: async () => priorAllowance,
-  });
-  assert.equal(
-    wrongBlockAdmission.priorApprovalProof,
-    null,
-    "a historical proof must be anchored to the original approval block",
-  );
-  const changedOwnershipAdmission = await captureRelayEvmAllowanceAdmission(
-    pool,
-    {
-      owner: priorApprovalRoute.walletAddress,
-      profile: priorProfile,
-      userId: priorApprovalRoute.base.userId,
-      reader: async (input) =>
-        input.blockNumber === "200"
-          ? priorAllowanceAtApproval
-          : relayAllowanceEvidence(
-              "2000000",
-              "301",
-              "later-matching-approval",
-              `0x${"51".repeat(32)}`,
-              "finalized",
-              "301",
-            ),
-    },
-  );
-  assert.equal(
-    changedOwnershipAdmission.priorApprovalProof,
-    null,
-    "a later matching approval, even in the same transaction, invalidates the prior proof",
-  );
-  const admission = await captureRelayEvmAllowanceAdmission(pool, {
-    owner: priorApprovalRoute.walletAddress,
-    profile: priorProfile,
-    userId: priorApprovalRoute.base.userId,
-    reader: async (input) =>
-      input.blockNumber === "200" ? priorAllowanceAtApproval : priorAllowance,
-  });
-  const priorApprovalProof = admission.priorApprovalProof;
-  assert.ok(priorApprovalProof);
-  await tx(pool, async (client) => {
-    assert.equal(
-      await lockFundingAuthorizationReservationScope(client, {
-        authorizationId: freshRelayRoute.authorizationId,
-        userId: freshRelayRoute.base.userId,
-      }),
-      true,
-    );
-    assert.equal(
-      await consumeRelayEvmPriorApprovalReservationInTransaction(client, {
-        now: new Date(now.getTime() + 3),
-        owner: freshRelayRoute.walletAddress,
-        profile: priorProfile,
-        proof: priorApprovalProof,
-        userId: freshRelayRoute.base.userId,
-      }),
-      true,
-    );
-    assert.equal(
-      await consumeRelayEvmPriorApprovalReservationInTransaction(client, {
-        now: new Date(now.getTime() + 3),
-        owner: freshRelayRoute.walletAddress,
-        profile: priorProfile,
-        proof: priorApprovalProof,
-        userId: freshRelayRoute.base.userId,
-      }),
-      true,
-      "a terminal pre-deposit reservation may already have been released",
-    );
-    const metadata = await client.query(
-      `update funding_operations
-          set support_metadata = support_metadata || $2::jsonb,
-              updated_at = $3,
-              version = version + 1
-        where id = $1::uuid`,
-      [
-        freshRelayRoute.operationId,
-        JSON.stringify({ relayPriorApprovalProof: priorApprovalProof }),
-        new Date(now.getTime() + 3),
-      ],
-    );
-    assert.equal(metadata.rowCount, 1);
-  });
   const priorApprovalReservation = await pool.query<{ status: string }>(
     `select status
        from telegram_funding_authorization_reservations
       where funding_operation_id = $1::uuid`,
     [priorApprovalRoute.operationId],
   );
-  assert.equal(priorApprovalReservation.rows[0]?.status, "released");
+  assert.equal(
+    priorApprovalReservation.rows[0]?.status,
+    "reserved",
+    "this fixture terminalizes directly; the reducer performs the production release",
+  );
   const priorDepositAttempts = await pool.query<{ count: string }>(
     `select count(*)::text as count
        from funding_operation_step_attempts
@@ -5578,7 +5487,7 @@ try {
       })
     ).submitted,
     0,
-    "the consumed proof cannot create a second successor approve",
+    "the fresh route cannot create a second approve attempt",
   );
 
   const relayDepositOwnershipRace = await createRelayFixture();

@@ -21,13 +21,9 @@ import {
 import { loadRelayEvmExecutionConfiguration } from "../funding/execution/delegated-funding-config.js";
 import { resolveTelegramFundingProvisionWallet } from "../funding/execution/telegram-funding-managed-wallet.js";
 import {
-  captureRelayEvmAllowanceAdmission,
+  captureRelayEvmAllowanceBaseline,
   relayEvmAllowanceBaselineSupportMetadata,
 } from "../funding/execution/relay-evm-allowance-baseline.js";
-import {
-  consumeRelayEvmPriorApprovalReservationInTransaction,
-  relayEvmPriorApprovalSupportMetadata,
-} from "../funding/execution/relay-evm-prior-approval.js";
 import { POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID } from "../funding/execution/delegated-funding-profile-ids.js";
 import {
   RELAY_EVM_FUNDING_PROFILE_SPECS,
@@ -47,7 +43,7 @@ type Side = "NO" | "YES";
 /** A non-quote safety stop that must never be presented as quote expiry. */
 export class TelegramTradeShortfallCommitError extends Error {
   constructor(
-    readonly code: "relay_allowance_unverified" | "allowance_lane_unavailable",
+    readonly code: "allowance_lane_unavailable",
     message: string,
   ) {
     super(message);
@@ -788,22 +784,11 @@ export class TelegramTradeShortfallFundingService {
     const relayProfile = relayEvmFundingProfileSpec(
       input.proposal.serverExecutionProfileId,
     );
-    const relayAllowanceAdmission = relayProfile
-      ? await captureRelayEvmAllowanceAdmission(this.pool, {
+    const relayAllowanceBaseline = relayProfile
+      ? await captureRelayEvmAllowanceBaseline(relayProfile, {
           owner: fundingAuthorization.walletAddress,
-          profile: relayProfile,
-          userId: input.userId,
         })
       : null;
-    const relayAllowanceBaseline = relayAllowanceAdmission?.baseline ?? null;
-    const relayPriorApprovalProof =
-      relayAllowanceAdmission?.priorApprovalProof ?? null;
-    if (relayAllowanceBaseline?.raw !== "0" && !relayPriorApprovalProof) {
-      throw new TelegramTradeShortfallCommitError(
-        "relay_allowance_unverified",
-        "trade funding Relay allowance cannot be proved Hunch-owned",
-      );
-    }
     const prepared = await this.runtime.prepareCommit(input.userId, {
       quoteId: quote.quoteId,
       consentToken: quote.consentToken,
@@ -813,7 +798,6 @@ export class TelegramTradeShortfallFundingService {
       plan: prepared.operation.quote.planSnapshot,
       profileId: input.proposal.serverExecutionProfileId,
     });
-    const commitNow = new Date();
     return tx(this.pool, async (client: PoolClient) => {
       await lockFundingPolicyForTransaction(client);
       if (
@@ -863,22 +847,6 @@ export class TelegramTradeShortfallFundingService {
       if (!lockedAuthorization) {
         throw new Error("trade funding authorization changed");
       }
-      if (
-        relayProfile &&
-        relayPriorApprovalProof &&
-        !(await consumeRelayEvmPriorApprovalReservationInTransaction(client, {
-          now: commitNow,
-          owner: lockedAuthorization.walletAddress,
-          profile: relayProfile,
-          proof: relayPriorApprovalProof,
-          userId: input.userId,
-        }))
-      ) {
-        throw new TelegramTradeShortfallCommitError(
-          "relay_allowance_unverified",
-          "trade funding Relay allowance changed before commit",
-        );
-      }
       const committed = await this.runtime.commitPreparedInTransaction(
         client,
         prepared,
@@ -907,11 +875,6 @@ export class TelegramTradeShortfallFundingService {
                   ...relayEvmAllowanceBaselineSupportMetadata(
                     relayAllowanceBaseline,
                   ),
-                  ...(relayPriorApprovalProof
-                    ? relayEvmPriorApprovalSupportMetadata(
-                        relayPriorApprovalProof,
-                      )
-                    : {}),
                 }
               : {},
           ),

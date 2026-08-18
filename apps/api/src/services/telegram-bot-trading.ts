@@ -10563,37 +10563,28 @@ export async function handleTelegramBotTradingCallback(
         callbackQueryId: input.callbackQuery.id,
         showAlert: true,
         text:
-          safetyStop?.code === "relay_allowance_unverified"
-            ? "⚠️ Existing Relay allowance could not be verified. Nothing was moved."
-            : safetyStop?.code === "allowance_lane_unavailable"
-              ? "⏳ Another funding action is still being checked. Nothing was moved."
-              : "⚠️ Funding quote changed or is unavailable. Nothing was moved; reopen Review.",
+          safetyStop?.code === "allowance_lane_unavailable"
+            ? "⏳ Another funding action is still being checked. Nothing was moved."
+            : "⚠️ Funding quote changed or is unavailable. Nothing was moved; reopen Review.",
       });
       await input.sendMessage({
         chat_id: chatId,
         parse_mode: "MarkdownV2",
         text: formatTelegramTradeLifecycleMessageMarkdownV2({
           heading:
-            safetyStop?.code === "relay_allowance_unverified"
-              ? "Automatic Relay route unavailable."
-              : safetyStop?.code === "allowance_lane_unavailable"
-                ? "Funding preparation is busy."
-                : "Funding quote is no longer current.",
+            safetyStop?.code === "allowance_lane_unavailable"
+              ? "Funding preparation is busy."
+              : "Funding quote is no longer current.",
           lines:
-            safetyStop?.code === "relay_allowance_unverified"
+            safetyStop?.code === "allowance_lane_unavailable"
               ? [
-                  "An existing Relay allowance could not be proved to belong to a safe Hunch route.",
-                  "Nothing was moved or submitted. You can use Deposit or open a fresh Review.",
+                  "Another funding action is holding this wallet lane while it is checked.",
+                  "Nothing was moved or submitted. Try again shortly.",
                 ]
-              : safetyStop?.code === "allowance_lane_unavailable"
-                ? [
-                    "Another funding action is holding this wallet lane while it is checked.",
-                    "Nothing was moved or submitted. Try again shortly.",
-                  ]
-                : [
-                    "Nothing was moved or submitted.",
-                    "Open the market again to receive a fresh Review.",
-                  ],
+              : [
+                  "Nothing was moved or submitted.",
+                  "Open the market again to receive a fresh Review.",
+                ],
           marketTitle: intent.market_title,
           venue: intent.venue,
         }),
