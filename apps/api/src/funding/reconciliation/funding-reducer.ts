@@ -60,6 +60,7 @@ type StoredFundingSegmentRow = {
 };
 
 type StoredFundingStepStateRow = {
+  action_validation_result: JsonRecord;
   id: string;
   segment_id: string | null;
   state:
@@ -277,12 +278,17 @@ export function deriveTargetState(
     (observation) =>
       isCanonicalFinal(observation) && observation.kind !== "venue_readiness",
   );
+  const delegatedRelayStepsSucceeded =
+    (steps.length === 2 && steps.every((step) => step.state === "succeeded")) ||
+    (steps.length === 1 &&
+      steps[0]?.state === "succeeded" &&
+      steps[0].action_validation_result.relayStepKind === "deposit" &&
+      steps[0].action_validation_result.relayAllowanceMode === "preexisting");
   const delegatedRelayReady =
     !DELEGATED_RELAY_EVM_ROUTE_IDS.has(
       String(operation.supportMetadata.routeId ?? ""),
     ) ||
-    (steps.length === 2 &&
-      steps.every((step) => step.state === "succeeded") &&
+    (delegatedRelayStepsSucceeded &&
       hasFinalObservation(observations, "source_debit"));
   const recoveryTarget = (): FundingOperationState => {
     const exact = recoveryTargetFor(current);
@@ -984,7 +990,7 @@ export async function reduceFundingOperationInTransaction(
   });
   const stepResult = await client.query<StoredFundingStepStateRow>(
     `
-      select id, segment_id, state
+      select id, segment_id, state, action_validation_result
       from funding_operation_steps
       where operation_id = $1
       order by ordinal
