@@ -9,6 +9,7 @@ import {
 } from "../domain/asset-identity.js";
 import { fundingSidecarRuntimeConfig } from "../runtime/sidecar-runtime-config.js";
 import {
+  loadPolymarketPusdFundExecutionConfiguration,
   loadPolymarketWrapExecutionConfiguration,
   polymarketWrapExecutionConfigurationReady,
   polymarketWrapExecutorEnvironmentReady,
@@ -17,7 +18,10 @@ import {
   relayEvmExecutionConfigurationReady,
   type RelayEvmExecutionConfiguration,
 } from "./delegated-funding-config.js";
-import { POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID } from "./delegated-funding-profile-ids.js";
+import {
+  POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
+  POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
+} from "./delegated-funding-profile-ids.js";
 import type { DelegatedFundingSecurityClass } from "./delegated-funding-profile-ids.js";
 import type { DelegatedFundingPreBroadcastDecision } from "./delegated-funding-capability.js";
 import {
@@ -854,6 +858,7 @@ export type EnsureTelegramFundingAuthorizationDependencies = Readonly<{
   inspectWalletProfile?: (input: {
     walletAddress: string;
     walletId: string;
+    profileId: string;
   }) => Promise<PrivyWalletProfileInspection>;
 }>;
 
@@ -873,6 +878,9 @@ export async function ensureTelegramFundingAuthorization(
     destinationOptionId: string;
     venueBindingOptionId: string;
     venueId?: "limitless" | "polymarket";
+    profileId?:
+      | typeof POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID
+      | typeof POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID;
     now?: Date;
   }>,
   dependencies: EnsureTelegramFundingAuthorizationDependencies = {},
@@ -880,7 +888,9 @@ export async function ensureTelegramFundingAuthorization(
   const environment = dependencies.environment ?? process.env;
   const configuration =
     dependencies.configuration ??
-    loadPolymarketWrapExecutionConfiguration(environment);
+    (input.profileId === POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID
+      ? loadPolymarketPusdFundExecutionConfiguration(environment)
+      : loadPolymarketWrapExecutionConfiguration(environment));
   if (
     !polymarketWrapExecutionConfigurationReady(configuration) ||
     !(
@@ -927,13 +937,15 @@ export async function ensureTelegramFundingAuthorization(
         relayMaxSourceRaw: relayConfiguration.maxSourceRaw,
       },
     });
-    inspectWalletProfile = (wallet) => driver.inspectWalletProfile(wallet);
+    inspectWalletProfile = (wallet) =>
+      driver.inspectWalletProfileForProfile(wallet);
   }
   let inspection: PrivyWalletProfileInspection = "unavailable";
   try {
     inspection = await inspectWalletProfile({
       walletId: candidate.privyWalletId,
       walletAddress: candidate.walletAddress,
+      profileId: input.profileId ?? POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
     });
   } catch {
     inspection = "unavailable";
@@ -953,6 +965,15 @@ export async function ensureTelegramFundingAuthorization(
       ...input,
       ...candidate,
       configuration,
+      profileId: input.profileId,
+      sourceAsset:
+        input.profileId === POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID
+          ? {
+              networkId: "evm:137",
+              assetId: fundingSidecarRuntimeConfig.polymarketPusdAddress,
+              decimals: 6,
+            }
+          : undefined,
       expectedActiveAuthorizationIds: provisioningState.generation.activeIds,
       replaceExisting: true,
     });

@@ -1,4 +1,5 @@
 import type { PoolClient } from "@hunch/infra";
+import { Interface } from "ethers";
 
 import type { AccountValueReadModel } from "../../account-value/runtime-service.js";
 import { stableOpaqueId } from "../../account-value/canonical.js";
@@ -23,12 +24,17 @@ import type { FundingCommitPlan } from "../persistence/funding-operation-reposit
 import { sameAccountAddress } from "../domain/asset-identity.js";
 import { sameAsset } from "../planner/money.js";
 import { minimumAutomaticTradeRefillUsd } from "../planner/placement-policy.js";
+import { POLYMARKET_FUNDING_ROUTER_MAX_APPROVAL_RAW } from "../../services/polymarket-automation-policy.js";
 import {
   findExactFundingWalletProfile,
   type FundingSourceAdapter,
   type FundingSourcePlanningInput,
 } from "../planner/source-adapter.js";
-import { POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID } from "../execution/delegated-funding-profile-ids.js";
+import {
+  isPolymarketDepositRouterProfileId,
+  POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
+  POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
+} from "../execution/delegated-funding-profile-ids.js";
 import { fundingSidecarRuntimeConfig } from "../runtime/sidecar-runtime-config.js";
 import {
   commitPlanRunsWithoutUserWalletAction,
@@ -46,6 +52,10 @@ import {
 import { lockPolymarketFundingOperationPredecessor } from "./polymarket-funding-commit-guard.js";
 
 type JsonRecord = Readonly<Record<string, JsonValue>>;
+
+const ERC20_APPROVAL = new Interface([
+  "function approve(address spender,uint256 amount) returns (bool)",
+]);
 
 function jsonRecord(value: unknown): JsonRecord {
   return value as JsonRecord;
@@ -181,14 +191,14 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
     input: FundingSourcePlanningInput,
   ): Promise<PlannedSourceOption | null> {
     // A server execution profile is a single, exact authority envelope.
-    // This adapter can only produce the Polygon USDC.e -> pUSD wrap envelope.
     // In particular, do not contribute a partial local preparation while a
     // Relay profile is being evaluated: doing so would turn the otherwise
     // viable Relay source into a residual-only composite candidate.
     if (
       input.request.serverExecutionProfileId != null &&
-      input.request.serverExecutionProfileId !==
-        POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID
+      !isPolymarketDepositRouterProfileId(
+        input.request.serverExecutionProfileId,
+      )
     ) {
       return null;
     }
@@ -226,7 +236,10 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
     ) {
       return null;
     }
-    const buildPlan = (maximumFundingRaw: bigint) =>
+    const buildPlan = (
+      maximumFundingRaw: bigint,
+      routerPusdAllowanceRaw = BigInt(snapshot.routerPusdAllowanceRaw),
+    ) =>
       buildMaximumPolymarketFundingPlan({
         signer: snapshot.signerAddress,
         depositWallet: snapshot.depositWallet,
@@ -242,7 +255,7 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
         signerPusdRaw: BigInt(snapshot.signerPusdRaw),
         signerLockedRaw: 0n,
         signerUsdceRaw: BigInt(snapshot.signerUsdceRaw),
-        routerPusdAllowanceRaw: BigInt(snapshot.routerPusdAllowanceRaw),
+        routerPusdAllowanceRaw,
         routerUsdceAllowanceRaw: BigInt(snapshot.routerUsdceAllowanceRaw),
         fundingCapRaw: BigInt(snapshot.fundingCapRaw),
       });
@@ -250,6 +263,9 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
     const delegatedWrap =
       input.request.serverExecutionProfileId ===
       POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID;
+    const delegatedPusdFund =
+      input.request.serverExecutionProfileId ===
+      POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID;
     let plan;
     try {
       plan = delegatedWrap
@@ -257,7 +273,12 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
             receiptRaw: input.requiredAmount.raw,
             snapshot,
           })
-        : buildPlan(requiredRaw);
+        : buildPlan(
+            requiredRaw,
+            delegatedPusdFund
+              ? POLYMARKET_FUNDING_ROUTER_MAX_APPROVAL_RAW
+              : undefined,
+          );
       if (!delegatedWrap && plan && BigInt(plan.totalAmountRaw) < requiredRaw) {
         const minimumRelayRaw = minimumAutomaticRelayDestinationRaw(input);
         if (minimumRelayRaw == null) return null;
@@ -281,6 +302,17 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
       raw: plan.totalAmountRaw,
     };
     const fullyFunded = plan.totalAmountRaw === input.requiredAmount.raw;
+    if (
+      delegatedPusdFund &&
+      (plan.pUsdAmountRaw !== input.requiredAmount.raw ||
+        plan.depositUsdceAmountRaw !== "0" ||
+        plan.signerUsdceAmountRaw !== "0")
+    ) {
+      return null;
+    }
+    const requiresPusdApproval =
+      delegatedPusdFund &&
+      BigInt(snapshot.routerPusdAllowanceRaw) < BigInt(plan.pUsdAmountRaw);
     const usdceAsset = this.config.usdceAsset;
     const exactInputs = [
       {
@@ -333,6 +365,30 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
       operationId: quoteCorrelationId,
       plan,
     });
+    if (action.kind !== "evm_transaction") return null;
+    const approvalAction = requiresPusdApproval
+      ? (() => {
+          const approval = {
+            kind: "evm_transaction" as const,
+            networkId: "evm:137",
+            senderWalletId: action.senderWalletId,
+            to: facts.option.requiredAsset.assetId,
+            data: ERC20_APPROVAL.encodeFunctionData("approve", [
+              snapshot.routerAddress,
+              POLYMARKET_FUNDING_ROUTER_MAX_APPROVAL_RAW,
+            ]),
+            valueRaw: "0",
+            gasLimitRaw: null,
+          };
+          return {
+            ...approval,
+            actionId: `action_${canonicalJsonHash({
+              approval,
+              operationId: quoteCorrelationId,
+            }).slice(0, 32)}`,
+          };
+        })()
+      : null;
     const sponsorship = resolveActionSponsorship({ action, profile });
     const source = {
       kind: "venue_preparation" as const,
@@ -348,6 +404,30 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
       kind: "venue_preparation",
       safeLabel: "Prepare Polymarket Deposit Wallet funds",
       source,
+      ...(delegatedWrap || delegatedPusdFund
+        ? {
+            sourceLegs: resolvedInputs.map((entry) => ({
+              sourceLegId: stableOpaqueId(
+                "source_leg",
+                canonicalJsonHash({
+                  componentId: entry.resolved.component.componentId,
+                  rawAmount: entry.rawAmount,
+                }),
+              ),
+              safeLabel: "Polymarket funding source",
+              source: {
+                kind: "owned_location" as const,
+                location: entry.resolved.component.location,
+              },
+              sourceAmount: { asset: entry.asset, raw: entry.rawAmount },
+              expectedDestination: plannedDestinationAmount,
+              minimumDestination: plannedDestinationAmount,
+              fees: [],
+              eta: { minSeconds: 5, maxSeconds: 90 },
+              requiredActions: [],
+            })),
+          }
+        : {}),
       amountMode: "exact_output",
       maximumSourceRaw: plan.totalAmountRaw,
       expectedDestination: plannedDestinationAmount,
@@ -361,10 +441,21 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
       eta: { minSeconds: 5, maxSeconds: 90 },
       experienceMode: "prepare_first",
       requiredActions: [
+        ...(approvalAction
+          ? [
+              {
+                kind: "evm_transaction" as const,
+                safeLabel: "Approve Polymarket Funding Router",
+                actor: "server" as const,
+                valueMoving: false,
+                sponsorship: "requested" as const,
+              },
+            ]
+          : []),
         {
           kind: "evm_transaction",
           safeLabel: "Fund Polymarket Deposit Wallet",
-          actor: delegatedWrap ? "server" : "user",
+          actor: delegatedWrap || delegatedPusdFund ? "server" : "user",
           valueMoving: true,
           sponsorship:
             sponsorship.payerRequirement === "privy_sponsor"
@@ -397,9 +488,13 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
         venueBindingSnapshot: jsonRecord(facts.venueBinding),
         walletExecutionSnapshot: jsonRecord(profile),
         placementSnapshot: jsonRecord(input.placement),
-        requestedSourceAmount: delegatedWrap
-          ? jsonRecord({ asset: usdceAsset, raw: plan.totalAmountRaw })
-          : null,
+        requestedSourceAmount:
+          delegatedWrap || delegatedPusdFund
+            ? jsonRecord({
+                asset: delegatedWrap ? usdceAsset : facts.option.requiredAsset,
+                raw: plan.totalAmountRaw,
+              })
+            : null,
         requestedDestinationAmount: jsonRecord(plannedDestinationAmount),
         supportMetadata: {
           preparationKind: "polymarket_funding_router",
@@ -416,19 +511,43 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
       },
       segments: [],
       steps: [
+        ...(approvalAction
+          ? [
+              {
+                ordinal: 0,
+                segmentOrdinal: null,
+                stepKind: "venue_preparation" as const,
+                state: "planned" as const,
+                actionFingerprint: canonicalJsonHash(approvalAction),
+                executorId: POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
+                payerRequirement: "privy_sponsor" as const,
+                dependsOnOrdinal: null,
+                normalizedAction: jsonRecord(approvalAction),
+                actionExpiresAt: null,
+                actionValidationResult: {
+                  kind: "controller_pusd_router_approval",
+                  routerAddress: snapshot.routerAddress,
+                },
+              },
+            ]
+          : []),
         {
-          ordinal: 0,
+          ordinal: approvalAction ? 1 : 0,
           segmentOrdinal: null,
           stepKind: "venue_preparation",
-          state: delegatedWrap ? "planned" : "action_required",
+          state:
+            delegatedWrap || delegatedPusdFund ? "planned" : "action_required",
           actionFingerprint: canonicalJsonHash(action),
-          executorId: delegatedWrap
-            ? POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID
-            : "wallet_profile_evm_v1",
+          executorId:
+            delegatedWrap || delegatedPusdFund
+              ? input.request.serverExecutionProfileId
+              : "wallet_profile_evm_v1",
           payerRequirement: sponsorship.payerRequirement,
-          dependsOnOrdinal: null,
+          dependsOnOrdinal: approvalAction ? 0 : null,
           normalizedAction: jsonRecord(action),
-          ...(delegatedWrap ? { actionExpiresAt: null } : {}),
+          ...(delegatedWrap || delegatedPusdFund
+            ? { actionExpiresAt: null }
+            : {}),
           actionValidationResult: {
             ...buildPolymarketFundingActionValidation({
               destinationAssetId:

@@ -1033,6 +1033,11 @@ const tests: TestCase[] = [
       });
       assert.equal(combinedValidation.valid, true);
       assert.equal(combinedValidation.fundingMaxRaw, policyFundingMaxRaw);
+      assert.equal(
+        combinedValidation.fundingRouterPusdFundPresent,
+        true,
+        "the existing bounded Router totalAmount rule also covers exact controller-pUSD funding",
+      );
       const combinedWithRelay = buildCombinedPolicyWithRelay();
       const combinedRelayValidation = validateCombinedPolymarketRelayPolicy({
         builderCode: policyBuilderCode,

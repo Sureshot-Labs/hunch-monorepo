@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 
 import type { AssetRef, SourceOption } from "./funding/domain/types.js";
 import {
+  POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
   POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
   TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
   TELEGRAM_RELAY_POLYGON_PUSD_PROFILE_ID,
@@ -12,6 +13,7 @@ import {
 import {
   BASE_USDC,
   POLYGON_PUSD,
+  POLYGON_USDCE_LEGACY,
 } from "./funding-providers/relay/rehearsal.js";
 import {
   assertTelegramTradeShortfallDelegatedRelayActionTtl,
@@ -31,6 +33,11 @@ const polygonPusd: AssetRef = {
 const baseUsdc: AssetRef = {
   networkId: "evm:8453",
   assetId: BASE_USDC,
+  decimals: 6,
+};
+const polygonUsdce: AssetRef = {
+  networkId: "evm:137",
+  assetId: POLYGON_USDCE_LEGACY,
   decimals: 6,
 };
 
@@ -230,6 +237,7 @@ assert.throws(
 function option(
   source: SourceOption["source"],
   destination: AssetRef,
+  sourceAsset?: AssetRef,
 ): SourceOption {
   return {
     sourceOptionId: "source_shortfall_fixture_12345678",
@@ -239,6 +247,26 @@ function option(
         : "wallet_asset",
     safeLabel: "Existing Hunch balance",
     source,
+    ...(sourceAsset &&
+    (source.kind === "owned_location" ||
+      source.kind === "external_ingress" ||
+      source.kind === "venue_preparation")
+      ? {
+          sourceLegs: [
+            {
+              sourceLegId: "source_leg_shortfall_fixture_12345678",
+              safeLabel: "Funding source",
+              source,
+              sourceAmount: { asset: sourceAsset, raw: "1000000" },
+              expectedDestination: { asset: destination, raw: "1000000" },
+              minimumDestination: { asset: destination, raw: "990000" },
+              fees: [],
+              eta: { minSeconds: 1, maxSeconds: 30 },
+              requiredActions: [],
+            },
+          ],
+        }
+      : {}),
     amountMode: "exact_output",
     maximumSourceRaw: "1000000",
     expectedDestination: { asset: destination, raw: "1000000" },
@@ -265,12 +293,32 @@ assert.equal(
         inputCount: 1,
       },
       polygonPusd,
+      polygonUsdce,
     ),
     "polymarket",
     polygonPusd,
   ),
   POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
   "Polygon USDC.e preparation must use Slice C instead of Relay",
+);
+
+assert.equal(
+  resolveTelegramTradeShortfallExecutionProfile(
+    option(
+      {
+        kind: "venue_preparation",
+        venueId: "polymarket",
+        venueBindingId: "binding_polymarket_fixture_12345678",
+        inputCount: 1,
+      },
+      polygonPusd,
+      polygonPusd,
+    ),
+    "polymarket",
+    polygonPusd,
+  ),
+  POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
+  "controller Polygon pUSD preparation must use the exact Funding Router profile",
 );
 
 assert.equal(
@@ -299,6 +347,7 @@ assert.deepEqual(
   telegramTradeShortfallExecutionProfiles("polymarket", polygonPusd),
   [
     POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
+    POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
     TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
     TELEGRAM_RELAY_POLYGON_USDC_PROFILE_ID,
   ],

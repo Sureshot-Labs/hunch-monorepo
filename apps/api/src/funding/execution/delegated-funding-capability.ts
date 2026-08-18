@@ -1,7 +1,7 @@
 import type { FundingControlPlaneSnapshot } from "../policies/funding-policy-sidecar.js";
 import type { PolymarketWrapExecutionConfiguration } from "./delegated-funding-config.js";
 import { polymarketWrapProfileConfigured } from "./delegated-funding-config.js";
-import { POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID } from "./delegated-funding-profile-ids.js";
+import { POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID } from "./delegated-funding-profile-ids.js";
 
 export type DelegatedFundingCapabilityDecision =
   | Readonly<{ kind: "allowed" }>
@@ -76,7 +76,11 @@ export function classifyPolymarketWrapControlPlane(input: {
   }
   if (
     !input.policy.policy.venues.includes("polymarket") ||
-    !input.policy.policy.receive.assets.includes("polygon:usdce")
+    !input.policy.policy.receive.assets.includes(
+      input.configuration.profileId === POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID
+        ? "polygon:pusd"
+        : "polygon:usdce",
+    )
   ) {
     return {
       kind: "hard_invalid",
@@ -110,7 +114,7 @@ export function classifyPolymarketWrapControlPlane(input: {
   );
   if (
     !venue?.delegatedExecutionEnabled ||
-    !venue.delegatedPolicyIds.includes(POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID)
+    !venue.delegatedPolicyIds.includes(input.configuration.profileId)
   ) {
     return {
       kind: "hard_invalid",

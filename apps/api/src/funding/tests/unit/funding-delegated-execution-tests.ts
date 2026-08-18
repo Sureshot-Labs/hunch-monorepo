@@ -31,9 +31,11 @@ import {
   fundingPolicyRevisionMayResume,
 } from "../../execution/delegated-funding-capability.js";
 import {
+  POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
   POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
   delegatedFundingProfile,
   validatePolymarketDepositUsdceWrapAction,
+  validatePolymarketDepositPusdFundAction,
   validatePolymarketDepositUsdceWrapPolicy,
 } from "../../execution/delegated-funding-profiles.js";
 import {
@@ -536,6 +538,27 @@ assert.throws(
       walletId: WALLET_ID,
     }),
   /full USDC\.e receipt/u,
+);
+
+assert.deepEqual(
+  validatePolymarketDepositPusdFundAction({
+    action: action(1_000_000n, 1_000_000n),
+    expectedRaw: "1000000",
+    routerAddress: ROUTER,
+    walletId: WALLET_ID,
+  }),
+  { expectedNonce: 77n, totalAmount: 1_000_000n },
+  "controller pUSD profile requires totalAmount and pUsdAmount to match the exact shortfall",
+);
+assert.throws(
+  () =>
+    validatePolymarketDepositPusdFundAction({
+      action: action(1_000_000n, 999_999n),
+      expectedRaw: "1000000",
+      routerAddress: ROUTER,
+      walletId: WALLET_ID,
+    }),
+  /exactly the confirmed controller pUSD shortfall/u,
 );
 assert.throws(
   () =>
@@ -1262,6 +1285,7 @@ assert.ok(polymarket);
 assert.equal(polymarket.delegatedExecutionEnabled, true);
 assert.deepEqual(polymarket.delegatedPolicyIds, [
   POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
+  POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
 ]);
 assert.equal(polymarket.delegatedDailyCapUsd, null);
 
