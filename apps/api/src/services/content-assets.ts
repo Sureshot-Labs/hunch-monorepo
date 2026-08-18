@@ -23,6 +23,12 @@ import {
   type ContentAssetUpdateBody,
 } from "../schemas/content.js";
 import { ContentError } from "./content-errors.js";
+import {
+  contentActorAdminId,
+  normalizeContentActor,
+  type ContentActor,
+  type ContentActorInput,
+} from "./content-actor.js";
 
 type AssetRow = {
   id: string;
@@ -204,6 +210,34 @@ function assetFromRow(row: AssetRow): ContentAsset {
   };
 }
 
+async function insertContentAssetAudit(
+  db: DbQuery,
+  input: {
+    action: string;
+    assetId: string;
+    actor: ContentActor;
+    metadata?: Record<string, unknown>;
+  },
+): Promise<void> {
+  await db.query(
+    `
+      insert into content_audit_events (
+        action, asset_id, actor_admin_id, actor_kind,
+        actor_service_principal_id, actor_label, metadata
+      ) values ($1, $2, $3, $4, $5, $6, $7::jsonb)
+    `,
+    [
+      input.action,
+      input.assetId,
+      contentActorAdminId(input.actor),
+      input.actor.kind,
+      input.actor.kind === "service" ? input.actor.id : null,
+      input.actor.label,
+      JSON.stringify(input.metadata ?? {}),
+    ],
+  );
+}
+
 function storageConfigured(): boolean {
   return getContentServiceRuntime().assetStorageConfigured;
 }
@@ -281,8 +315,9 @@ function assertUploadPolicy(body: ContentAssetCreateBody) {
 export async function createContentAssetUpload(
   pool: Pool,
   rawBody: ContentAssetCreateBody,
-  actorAdminId: string | null,
+  actorInput: ContentActorInput,
 ): Promise<ContentAssetUploadIntent> {
+  const actor = normalizeContentActor(actorInput);
   const config = getContentServiceRuntime();
   const body = contentAssetCreateBodySchema.parse(rawBody);
   assertUploadPolicy(body);
@@ -308,36 +343,44 @@ export async function createContentAssetUpload(
     // in X-Amz-SignedHeaders instead of being hoisted into the query string.
     unhoistableHeaders: new Set([CONTENT_CHECKSUM_HEADER]),
   });
-  const { rows } = await pool.query<AssetRow>(
-    `
-      insert into content_assets (
-        id, status, kind, storage_key, public_url, original_filename, mime_type,
-        byte_size, checksum_sha256, default_alt, default_caption, credit_name,
-        credit_url, metadata, created_by_admin_id
-      ) values (
-        $1, 'pending', $2, $3, null, $4, $5, $6, $7, $8, $9, $10, $11,
-        $12::jsonb, $13
-      )
-      returning ${ASSET_COLUMNS}
-    `,
-    [
+  const asset = await tx(pool, async (db) => {
+    const { rows } = await db.query<AssetRow>(
+      `
+        insert into content_assets (
+          id, status, kind, storage_key, public_url, original_filename, mime_type,
+          byte_size, checksum_sha256, default_alt, default_caption, credit_name,
+          credit_url, metadata, created_by_admin_id
+        ) values (
+          $1, 'pending', $2, $3, null, $4, $5, $6, $7, $8, $9, $10, $11,
+          $12::jsonb, $13
+        )
+        returning ${ASSET_COLUMNS}
+      `,
+      [
+        assetId,
+        body.kind,
+        key,
+        body.originalFilename,
+        body.mimeType.toLowerCase(),
+        body.expectedByteSize,
+        body.checksumSha256,
+        body.defaultAlt ?? null,
+        body.defaultCaption ?? null,
+        body.creditName ?? null,
+        body.creditUrl ?? null,
+        JSON.stringify(body.metadata ?? {}),
+        contentActorAdminId(actor),
+      ],
+    );
+    await insertContentAssetAudit(db, {
+      action: "asset.upload_created",
       assetId,
-      body.kind,
-      key,
-      body.originalFilename,
-      body.mimeType.toLowerCase(),
-      body.expectedByteSize,
-      body.checksumSha256,
-      body.defaultAlt ?? null,
-      body.defaultCaption ?? null,
-      body.creditName ?? null,
-      body.creditUrl ?? null,
-      JSON.stringify(body.metadata ?? {}),
-      actorAdminId,
-    ],
-  );
+      actor,
+    });
+    return rows[0];
+  });
   return {
-    asset: assetFromRow(rows[0]),
+    asset: assetFromRow(asset),
     upload: {
       method: "PUT",
       url,
@@ -526,8 +569,9 @@ export async function completeContentAssetUpload(
   pool: Pool,
   assetId: string,
   rawBody: ContentAssetCompleteBody,
-  actorAdminId: string | null = null,
+  actorInput: ContentActorInput = null,
 ): Promise<ContentAsset> {
+  const actor = normalizeContentActor(actorInput);
   const body = contentAssetCompleteBodySchema.parse(rawBody);
   const client = requireStorage();
   const claim = await tx(pool, async (db) => {
@@ -543,7 +587,19 @@ export async function completeContentAssetUpload(
         404,
       );
     }
-    if (existing.status === "ready") return { existing, ready: true as const };
+    if (existing.status === "ready") {
+      if (
+        Number(existing.byte_size) !== body.byteSize ||
+        existing.checksum_sha256 !== body.checksumSha256
+      ) {
+        throw new ContentError(
+          "content_asset_complete_mismatch",
+          "Completed asset parameters do not match the original upload",
+          409,
+        );
+      }
+      return { existing, ready: true as const };
+    }
     if (existing.status !== "pending") {
       throw new ContentError(
         "content_asset_busy",
@@ -661,23 +717,28 @@ export async function completeContentAssetUpload(
   } catch (error) {
     issues.push(
       `uploaded object could not be inspected: ${
-        error instanceof Error ? error.message : "unknown error"
+        error instanceof Error ? error.message.slice(0, 1_000) : "unknown error"
       }`,
     );
   }
   if (issues.length > 0) {
+    const publicIssues = issues.map((issue) =>
+      issue.startsWith("uploaded object could not be inspected:")
+        ? "uploaded object could not be inspected"
+        : issue,
+    );
     await failAssetVerification(
       pool,
       assetId,
       existing.storage_key,
       targetKey,
-      issues,
+      publicIssues,
     );
     throw new ContentError(
       "content_asset_not_ready",
       "Uploaded object failed verification",
       422,
-      issues,
+      publicIssues,
     );
   }
   try {
@@ -746,34 +807,27 @@ export async function completeContentAssetUpload(
         existing.storage_key,
         stagingDeletionAvailableAt(),
       );
-      await db.query(
-        `
-          insert into content_audit_events (action, asset_id, actor_admin_id)
-          values ('asset.ready', $1, $2)
-        `,
-        [assetId, actorAdminId],
-      );
+      await insertContentAssetAudit(db, {
+        action: "asset.ready",
+        assetId,
+        actor,
+      });
       return assetFromRow(updatedRows[0]);
     });
   } catch (error) {
-    const promotionIssues = [
-      `asset promotion failed: ${
-        error instanceof Error ? error.message : "unknown error"
-      }`,
-    ];
     await failAssetVerification(
       pool,
       assetId,
       existing.storage_key,
       targetKey,
-      promotionIssues,
+      ["asset promotion failed"],
     );
     if (error instanceof ContentError) throw error;
     throw new ContentError(
       "content_asset_not_ready",
       "Uploaded object could not be promoted safely",
       502,
-      promotionIssues,
+      ["asset promotion failed"],
     );
   }
 }
@@ -793,8 +847,9 @@ export async function updateContentAsset(
   pool: Pool,
   assetId: string,
   rawBody: ContentAssetUpdateBody,
-  actorAdminId: string | null,
+  actorInput: ContentActorInput,
 ): Promise<ContentAsset> {
+  const actor = normalizeContentActor(actorInput);
   const body = contentAssetUpdateBodySchema.parse(rawBody);
   return tx(pool, async (db) => {
     const { rows } = await db.query<AssetRow>(
@@ -833,13 +888,11 @@ export async function updateContentAsset(
         404,
       );
     }
-    await db.query(
-      `
-        insert into content_audit_events (action, asset_id, actor_admin_id)
-        values ('asset.metadata_updated', $1, $2)
-      `,
-      [assetId, actorAdminId],
-    );
+    await insertContentAssetAudit(db, {
+      action: "asset.metadata_updated",
+      assetId,
+      actor,
+    });
     return assetFromRow(rows[0]);
   });
 }
@@ -927,8 +980,9 @@ export async function listContentAssets(
 export async function deleteContentAsset(
   pool: Pool,
   assetId: string,
-  actorAdminId: string | null = null,
+  actorInput: ContentActorInput = null,
 ): Promise<ContentAsset> {
+  const actor = normalizeContentActor(actorInput);
   return tx(pool, async (db) => {
     const { rows } = await db.query<AssetRow>(
       `select ${ASSET_COLUMNS} from content_assets where id = $1 for update`,
@@ -981,13 +1035,11 @@ export async function deleteContentAsset(
     if (typeof verificationTarget === "string" && verificationTarget) {
       await enqueueStorageDeletion(db, verificationTarget);
     }
-    await db.query(
-      `
-        insert into content_audit_events (action, asset_id, actor_admin_id)
-        values ('asset.deleted', $1, $2)
-      `,
-      [assetId, actorAdminId],
-    );
+    await insertContentAssetAudit(db, {
+      action: "asset.deleted",
+      assetId,
+      actor,
+    });
     return assetFromRow(updatedRows[0]);
   });
 }

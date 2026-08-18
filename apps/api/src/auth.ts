@@ -28,7 +28,13 @@ import {
   attachAdminSessionToRequest,
   type AdminPermission,
   type AdminRole,
+  readAdminBearerToken,
 } from "./services/admin-auth.js";
+import {
+  adminServiceHasPermissions,
+  authenticateAdminServiceCredential,
+  isAdminServiceToken,
+} from "./services/admin-service-auth.js";
 import { recordTelegramLifecycleAnalytics } from "./services/telegram-lifecycle-analytics.js";
 import {
   blockTelegramBotTradingLinkGeneration,
@@ -2914,15 +2920,60 @@ export function createAuthMiddleware(options: AuthMiddlewareOptions = {}) {
 export function createAdminMiddleware(options: AdminMiddlewareOptions = {}) {
   const auth = createAuthMiddleware(options);
   return async (request: FastifyRequest, reply: FastifyReply) => {
+    const requiredPermissions =
+      options.requiredAdminPermissions ??
+      (options.requiredAdminPermission
+        ? [options.requiredAdminPermission]
+        : options.minAdminRole
+          ? []
+          : ["users:write" as const]);
+    const bearer = readAdminBearerToken(request);
+    if (bearer && isAdminServiceToken(bearer)) {
+      reply.header("Cache-Control", "no-store");
+      reply.header("Pragma", "no-cache");
+      const rateLimit = await checkRateLimitForSecurityClientIp(request, {
+        keyPrefix: "admin-service",
+        maxRequests: 120,
+        windowMs: 60_000,
+        onError: "fail_closed",
+      });
+      if (!rateLimit.allowed) {
+        return reply.code(429).send({ error: "Rate limit exceeded" });
+      }
+      const service = await authenticateAdminServiceCredential(pool, bearer);
+      if (!service.ok) {
+        reply.header("WWW-Authenticate", 'Bearer realm="hunch-admin-api"');
+        return reply.code(service.statusCode).send({
+          error: service.error,
+          message: service.message,
+        });
+      }
+      if (options.minAdminRole) {
+        return reply.code(403).send({
+          error: "admin_permission_required",
+          message: "Human admin access required",
+        });
+      }
+      if (
+        !adminServiceHasPermissions(
+          service.credential.permissions,
+          requiredPermissions,
+        )
+      ) {
+        return reply.code(403).send({
+          error: "admin_permission_required",
+          message: "Admin API key permission required",
+        });
+      }
+      request.adminServicePrincipal = service.principal;
+      request.adminServiceCredential = service.credential;
+      return;
+    }
     const adminSession = await attachAdminSessionToRequest(request, {
       minRole: options.minAdminRole,
-      requiredPermissions:
-        options.requiredAdminPermissions ??
-        (options.requiredAdminPermission
-          ? [options.requiredAdminPermission]
-          : options.minAdminRole
-            ? undefined
-            : ["users:write"]),
+      requiredPermissions: requiredPermissions.length
+        ? requiredPermissions
+        : undefined,
       requireCsrf: requiresCsrf(request.method),
     });
     if (adminSession.ok) {

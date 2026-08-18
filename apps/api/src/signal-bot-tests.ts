@@ -4198,6 +4198,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       let buyContinuationEnabled = false;
       let customTradeInputEnabled = false;
       let fundingReceiveEnabled = false;
+      let miniAppHandoffMode: "off" | "fallback" | "always" = "off";
       let policyTradingEnabled = true;
       let tradingActions: Array<"buy" | "sell"> = ["buy"];
       let tradingVenues = ["polymarket"];
@@ -4220,6 +4221,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
                           buyContinuationEnabled,
                           customTradeInputEnabled,
                           fundingReceiveEnabled,
+                          miniAppHandoffMode,
                           tradingEnabled: policyTradingEnabled,
                           tradingActions,
                           tradingVenues,
@@ -4363,8 +4365,19 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.match(message.text, /Direct bot trading is disabled/);
       const buttons = message.reply_markup?.inline_keyboard.flat() ?? [];
       assert.equal(
-        buttons.some((button) => "callback_data" in button),
+        buttons.some(
+          (button) =>
+            "callback_data" in button &&
+            button.callback_data?.startsWith("hbt:"),
+        ),
         false,
+      );
+      assert.equal(
+        buttons.some(
+          (button) =>
+            "callback_data" in button && button.callback_data === "hm:v1:home",
+        ),
+        true,
       );
       assert.equal(
         buttons.some((button) => "web_app" in button),
@@ -4528,13 +4541,20 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       const repairableButtons =
         repairableMessage.reply_markup?.inline_keyboard.flat() ?? [];
       assert.equal(
-        repairableButtons.filter((button) => "callback_data" in button).length,
+        repairableButtons.filter(
+          (button) =>
+            "callback_data" in button &&
+            button.callback_data?.startsWith("hbt:"),
+        ).length,
         2,
       );
       assert.match(repairableMessage.text, /Buttons valid for 2 minutes/);
       assert.match(
-        repairableButtons.find((button) => "callback_data" in button)?.text ??
-          "",
+        repairableButtons.find(
+          (button) =>
+            "callback_data" in button &&
+            button.callback_data?.startsWith("hbt:"),
+        )?.text ?? "",
         /\$1 · YES/,
       );
       assert.doesNotMatch(repairableMessage.text, /approvals are missing/);
@@ -4699,11 +4719,19 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       const unfundedButtons =
         unfundedMessage.reply_markup?.inline_keyboard.flat() ?? [];
       assert.equal(
-        unfundedButtons.filter((button) => "callback_data" in button).length,
-        3,
+        unfundedButtons.filter(
+          (button) =>
+            "callback_data" in button &&
+            button.callback_data?.startsWith("hbt:"),
+        ).length,
+        2,
       );
       assert.match(
-        unfundedButtons.find((button) => "callback_data" in button)?.text ?? "",
+        unfundedButtons.find(
+          (button) =>
+            "callback_data" in button &&
+            button.callback_data?.startsWith("hbt:"),
+        )?.text ?? "",
         /\$1 · YES/,
       );
       assert.match(unfundedMessage.text, /Buttons valid/);
@@ -4736,7 +4764,11 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(
         closedMessage.reply_markup?.inline_keyboard
           .flat()
-          .some((button) => "callback_data" in button),
+          .some(
+            (button) =>
+              "callback_data" in button &&
+              button.callback_data?.startsWith("hbt:"),
+          ),
         false,
       );
       assert.match(closedMessage.text, /not open for new bot trades/i);
@@ -4748,6 +4780,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       customTradeInputEnabled = true;
       buyContinuationEnabled = true;
       fundingReceiveEnabled = true;
+      miniAppHandoffMode = "fallback";
       const limitlessCustomContexts: Array<{
         deliveryMode: string;
         side: string;
@@ -4990,7 +5023,11 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.match(message.text, /Existing trade is still resolving/);
       const buttons = message.reply_markup?.inline_keyboard.flat() ?? [];
       assert.equal(
-        buttons.some((button) => "callback_data" in button),
+        buttons.some(
+          (button) =>
+            "callback_data" in button &&
+            button.callback_data?.startsWith("hbt:"),
+        ),
         false,
       );
     },
@@ -5125,7 +5162,11 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.match(message.text, /No bot buy presets are configured/);
       const buttons = message.reply_markup?.inline_keyboard.flat() ?? [];
       assert.equal(
-        buttons.some((button) => "callback_data" in button),
+        buttons.some(
+          (button) =>
+            "callback_data" in button &&
+            button.callback_data?.startsWith("hbt:"),
+        ),
         false,
       );
       assert.equal(
@@ -5214,7 +5255,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         telegram.messages[0]?.reply_markup?.inline_keyboard
           .flat()
           .map(({ text }) => text),
-        ["Sign in to Hunch"],
+        ["Sign in to Hunch", "🏠 Home"],
       );
       assert.equal(telegram.edits.length, 0);
     },
@@ -9791,7 +9832,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         assert.match(message.text, /Welcome to Hunch/);
         assert.match(message.text, /enable Telegram Trading in Hunch/);
         const buttons = message.reply_markup.inline_keyboard.flat();
-        assert.equal(buttons.length, 1);
+        assert.equal(buttons.length, 2);
         const button = buttons[0];
         assert.ok(button);
         assert.equal(button.text, "Sign in to Hunch");
@@ -9799,6 +9840,10 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           assert.fail("guest onboarding must use a Mini App button");
         }
         assert.match(button.web_app.url, /\/tg\?hunchTgOnboarding=1$/);
+        assert.deepEqual(buttons[1], {
+          callback_data: "hm:v1:home",
+          text: "🏠 Home",
+        });
         assert.doesNotMatch(
           message.text,
           /\/(?:menu|market|trade_status|settings|help)/,
@@ -10401,7 +10446,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.match(guestHome?.text ?? "", /Welcome to Hunch/);
       assert.deepEqual(
         guestHome?.reply_markup?.inline_keyboard.flat().map(({ text }) => text),
-        ["Sign in to Hunch"],
+        ["Sign in to Hunch", "🏠 Home"],
       );
     },
   },
@@ -10501,7 +10546,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           .at(-1)
           ?.reply_markup?.inline_keyboard.flat()
           .map(({ text }) => text),
-        [],
+        ["🏠 Home"],
       );
 
       assert.equal(
@@ -10752,7 +10797,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         telegram.messages[0]?.reply_markup?.inline_keyboard
           .flat()
           .map(({ text }) => text),
-        ["Sign in to Hunch"],
+        ["Sign in to Hunch", "🏠 Home"],
       );
 
       for (const command of ["/trade_status", "/disable_trading"]) {
@@ -10780,9 +10825,11 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         });
         assert.equal(personalActionCalls, 0);
         assert.match(telegram.messages[0]?.text ?? "", /Welcome to Hunch/);
-        assert.equal(
-          telegram.messages[0]?.reply_markup?.inline_keyboard.flat().length,
-          1,
+        assert.deepEqual(
+          telegram.messages[0]?.reply_markup?.inline_keyboard
+            .flat()
+            .map(({ text }) => text),
+          ["Sign in to Hunch", "🏠 Home"],
         );
       }
     },
