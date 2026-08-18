@@ -8,6 +8,7 @@ import type {
   SourceOption,
 } from "../funding/domain/types.js";
 import { sameAsset } from "../funding/domain/asset-identity.js";
+import { FundingPlannerError } from "../funding/planner/money.js";
 import { FundingPlanningRuntime } from "../funding/planner/runtime-service.js";
 import { canonicalJsonHash } from "../funding/persistence/canonical.js";
 import { lockFundingAuthorizationReservationScope } from "../funding/persistence/funding-authorization-reservation-lock.js";
@@ -39,6 +40,12 @@ import { RELAY_ROUTE_SPECS } from "../funding-providers/relay/mappings.js";
 
 type Venue = "limitless" | "polymarket";
 type Side = "NO" | "YES";
+
+function shortfallPlannerFailureReasonCode(error: unknown): string {
+  return error instanceof FundingPlannerError
+    ? `funding_planner_${error.code}`
+    : "funding_planner_unavailable";
+}
 
 /** A non-quote safety stop that must never be presented as quote expiry. */
 export class TelegramTradeShortfallCommitError extends Error {
@@ -560,10 +567,24 @@ export class TelegramTradeShortfallFundingService {
       input.venue,
       destination,
     )) {
-      const plan = await this.runtime.liquidity(
-        input.userId,
-        buildTelegramTradeShortfallRequest(input, profileId),
-      );
+      let plan: Awaited<ReturnType<FundingPlanningRuntime["liquidity"]>>;
+      try {
+        plan = await this.runtime.liquidity(
+          input.userId,
+          buildTelegramTradeShortfallRequest(input, profileId),
+        );
+      } catch (error) {
+        const reasonCode = shortfallPlannerFailureReasonCode(error);
+        console.warn("[telegram-trade-shortfall] profile inspection failed", {
+          errorMessage:
+            error instanceof Error ? error.message : "unknown_error",
+          errorName: error instanceof Error ? error.name : typeof error,
+          profileId,
+          reasonCode,
+        });
+        unavailableReasonCodes.push(reasonCode);
+        continue;
+      }
       if (plan.completeness !== "complete" || plan.errors.length > 0) {
         unavailableReasonCodes.push(
           ...plan.reasonCodes,
@@ -643,10 +664,29 @@ export class TelegramTradeShortfallFundingService {
         reasonCodes: ["internal_route_delegated_authority_unavailable"],
       };
     }
-    const delegatedPlan = await this.runtime.liquidity(
-      input.userId,
-      buildTelegramTradeShortfallRequest(input, profileId),
-    );
+    let delegatedPlan: Awaited<ReturnType<FundingPlanningRuntime["liquidity"]>>;
+    try {
+      delegatedPlan = await this.runtime.liquidity(
+        input.userId,
+        buildTelegramTradeShortfallRequest(input, profileId),
+      );
+    } catch (error) {
+      const reasonCode = shortfallPlannerFailureReasonCode(error);
+      console.warn(
+        "[telegram-trade-shortfall] delegated profile recheck failed",
+        {
+          errorMessage:
+            error instanceof Error ? error.message : "unknown_error",
+          errorName: error instanceof Error ? error.name : typeof error,
+          profileId,
+          reasonCode,
+        },
+      );
+      return {
+        kind: "temporarily_unavailable",
+        reasonCodes: [reasonCode],
+      };
+    }
     if (
       delegatedPlan.completeness !== "complete" ||
       delegatedPlan.errors.length > 0
