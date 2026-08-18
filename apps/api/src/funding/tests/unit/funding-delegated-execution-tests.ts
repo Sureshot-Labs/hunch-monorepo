@@ -549,17 +549,37 @@ assert.deepEqual(
     walletId: WALLET_ID,
   }),
   { expectedNonce: 77n, totalAmount: 1_000_000n },
-  "controller pUSD profile requires totalAmount and pUsdAmount to match the exact shortfall",
+  "controller pUSD-only Router funding remains valid",
+);
+assert.deepEqual(
+  validatePolymarketDepositPusdFundAction({
+    action: action(1_000_000n, 700_000n),
+    expectedRaw: "1000000",
+    routerAddress: ROUTER,
+    walletId: WALLET_ID,
+  }),
+  { expectedNonce: 77n, totalAmount: 1_000_000n },
+  "the same bounded Router call may combine controller pUSD with controller USDC.e",
 );
 assert.throws(
   () =>
     validatePolymarketDepositPusdFundAction({
-      action: action(1_000_000n, 999_999n),
+      action: action(1_000_000n, 0n),
       expectedRaw: "1000000",
       routerAddress: ROUTER,
       walletId: WALLET_ID,
     }),
-  /exactly the confirmed controller pUSD shortfall/u,
+  /confirmed controller pUSD amount/u,
+);
+assert.throws(
+  () =>
+    validatePolymarketDepositPusdFundAction({
+      action: action(1_000_000n, 1_000_001n),
+      expectedRaw: "1000000",
+      routerAddress: ROUTER,
+      walletId: WALLET_ID,
+    }),
+  /confirmed controller pUSD amount/u,
 );
 assert.throws(
   () =>

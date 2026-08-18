@@ -295,36 +295,40 @@ assert.equal(
 );
 assert.equal(delegatedPusd.commitPlan.steps[0]?.state, "planned");
 
-const [delegatedPusdNeedsApproval] = await adapter.list(
-  delegatedPusdPlanningInput("0"),
+assert.deepEqual(
+  await adapter.list(delegatedPusdPlanningInput("0")),
+  [],
+  "the bounded Router fund envelope must not silently introduce an unapproved token approval",
 );
-assert.ok(delegatedPusdNeedsApproval);
+
+const mixedControllerInput = planningInput(
+  "1800000",
+  "1800000",
+  "300000",
+  "trade_shortfall",
+  "1500000",
+  "0",
+);
+const [delegatedPusdAndUsdce] = await adapter.list({
+  ...mixedControllerInput,
+  request: {
+    ...mixedControllerInput.request,
+    serverExecutionProfileId: POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
+  },
+});
+assert.ok(delegatedPusdAndUsdce);
 assert.equal(
-  delegatedPusdNeedsApproval.option.sourceLegs,
+  delegatedPusdAndUsdce.option.safeLabel,
+  "Use controller pUSD + USDC.e in one Polymarket funding step",
+);
+assert.equal(
+  delegatedPusdAndUsdce.option.sourceLegs,
   undefined,
-  "the approval-plus-fund sequence remains one source, never a composite",
+  "one Router fund call is one venue-preparation action, not a generic composite route",
 );
 assert.deepEqual(
-  delegatedPusdNeedsApproval.commitPlan.steps.map((step) => ({
-    executorId: step.executorId,
-    kind: step.actionValidationResult.kind,
-    dependsOnOrdinal: step.dependsOnOrdinal,
-    ordinal: step.ordinal,
-  })),
-  [
-    {
-      executorId: POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
-      kind: "controller_pusd_router_approval",
-      dependsOnOrdinal: null,
-      ordinal: 0,
-    },
-    {
-      executorId: POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
-      kind: undefined,
-      dependsOnOrdinal: 0,
-      ordinal: 1,
-    },
-  ],
+  delegatedPusdAndUsdce.commitPlan.reservations.map((entry) => entry.rawAmount),
+  ["1500000", "300000"],
 );
 
 const relayProfileInput = planningInput();

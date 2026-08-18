@@ -515,7 +515,7 @@ function proposalSourceAmounts(
   ) {
     return [
       {
-        safeLabel: "Polymarket controller balance",
+        safeLabel: option.safeLabel,
         amount: {
           asset:
             profileId === POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID
@@ -885,10 +885,40 @@ export class TelegramTradeShortfallFundingService {
       0n,
     );
     if (sourceRaw <= 0n) throw new Error("trade funding source is empty");
-    const exactSourceAsset = quote.sourceAmounts[0]?.amount.asset;
-    if (!exactSourceAsset || quote.sourceAmounts.length !== 1) {
+    const pUsdAsset: AssetRef = {
+      networkId: "evm:137",
+      assetId:
+        fundingSidecarRuntimeConfig.polymarketPusdAddress || POLYGON_PUSD,
+      decimals: 6,
+    };
+    const routerPusdFunding =
+      input.proposal.serverExecutionProfileId ===
+      POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID;
+    const routerSourcesValid =
+      routerPusdFunding &&
+      quote.sourceAmounts.length >= 1 &&
+      quote.sourceAmounts.length <= 2 &&
+      quote.sourceAmounts.some((source) =>
+        sameAsset(source.amount.asset, pUsdAsset),
+      ) &&
+      quote.sourceAmounts.every(
+        (source) =>
+          sameAsset(source.amount.asset, pUsdAsset) ||
+          sameAsset(source.amount.asset, {
+            networkId: "evm:137",
+            assetId: POLYGON_USDCE_LEGACY,
+            decimals: 6,
+          }),
+      );
+    const exactSourceAsset = routerPusdFunding
+      ? pUsdAsset
+      : quote.sourceAmounts[0]?.amount.asset;
+    if (
+      !exactSourceAsset ||
+      (!routerSourcesValid && quote.sourceAmounts.length !== 1)
+    ) {
       throw new Error(
-        "trade funding delegated execution requires one exact stable source",
+        "trade funding delegated execution requires its exact permitted stable source set",
       );
     }
     const securityClass = isPolymarketDepositRouterProfileId(

@@ -737,10 +737,11 @@ export function validatePolymarketDepositPusdFundAction(
   const decoded = decodePolymarketFundingCalldata(input.action.data);
   if (
     decoded.totalAmount !== expectedRaw ||
-    decoded.pUsdAmount !== expectedRaw
+    decoded.pUsdAmount <= 0n ||
+    decoded.pUsdAmount > expectedRaw
   ) {
     throw new Error(
-      "delegated pUSD funding must consume exactly the confirmed controller pUSD shortfall",
+      "delegated Router funding must consume the confirmed controller pUSD amount within its exact total",
     );
   }
   return {
