@@ -22,6 +22,7 @@ import { fundingSidecarRuntimeConfig } from "../runtime/sidecar-runtime-config.j
 import { sameAccountAddress } from "../domain/asset-identity.js";
 import { validateCombinedPolymarketRelayPolicy } from "./combined-privy-policy.js";
 import { relayEvmPolicyHasExactAssetPair } from "./delegated-funding-profiles.js";
+import { POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID } from "./delegated-funding-profile-ids.js";
 import { relayEvmFundingProfileSpec } from "./relay-evm-profile-specs.js";
 
 export type PrivyDelegatedFundingDriverConfig = Readonly<{
@@ -398,6 +399,14 @@ export class PrivyDelegatedFundingDriver implements DelegatedFundingNetworkDrive
         if (!policyValidation.valid) {
           throw new PrivyDelegatedFundingProfileInvalidError(
             "Privy automation policy is not the exact combined BUY+SELL+FUNDING profile",
+          );
+        }
+        if (
+          input.requiredProfileId === POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID &&
+          !policyValidation.fundingRouterPusdFundPresent
+        ) {
+          throw new PrivyDelegatedFundingProfileInvalidError(
+            "Privy automation policy lacks the exact controller-pUSD Funding Router rule",
           );
         }
         const relayProfile = relayEvmFundingProfileSpec(

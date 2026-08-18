@@ -1,6 +1,9 @@
 import type { PrivyPolicyMetadata } from "../privy-service.js";
 import { isRecord } from "../lib/type-guards.js";
-import { isExactPolymarketDepositUsdceWrapRule } from "../funding/execution/delegated-funding-profiles.js";
+import {
+  isExactPolymarketDepositPusdFundRule,
+  isExactPolymarketDepositUsdceWrapRule,
+} from "../funding/execution/delegated-funding-profiles.js";
 import {
   canonicalAccountAddress,
   isEvmAddress,
@@ -26,6 +29,8 @@ export type PolicyValidationResult = {
    * over the canonical Polygon pUSD token and immutable Funding Router.
    */
   fundingRouterControllerApprovalPresent?: boolean;
+  /** Present only when the exact bounded controller-pUSD Router rule exists. */
+  fundingRouterPusdFundPresent?: boolean;
   issues: string[];
   valid: boolean;
 };
@@ -810,6 +815,7 @@ export function validatePolymarketBotPolicyProfile(input: {
   policy: PrivyPolicyMetadata;
   profile: PrivyBotPolicyProfile;
 }): PolicyValidationResult {
+  const maxBuyRaw = String(Math.round(input.maxBuyUsd * 1_000_000));
   const expectedKinds: Record<
     PrivyBotPolicyProfile,
     readonly PolymarketPolicyRuleKind[]
@@ -827,6 +833,7 @@ export function validatePolymarketBotPolicyProfile(input: {
     ],
   };
   const expected = new Set(expectedKinds[input.profile]);
+  const allowed = new Set(expected);
   const counts = new Map<PolymarketPolicyRuleKind, number>();
   const nonAllowRules = input.policy.rules.filter(
     (candidate) => candidate.action !== "ALLOW",
@@ -859,7 +866,7 @@ export function validatePolymarketBotPolicyProfile(input: {
     }
   }
   for (const [kind, count] of counts) {
-    if (!expected.has(kind) && count > 0) {
+    if (!allowed.has(kind) && count > 0) {
       shapeIssues.push(
         `Policy profile ${input.profile} contains unexpected ${kind} permissions.`,
       );
@@ -923,6 +930,16 @@ export function validatePolymarketBotPolicyProfile(input: {
       issues.length === 0 &&
       validations.some(
         (value) => value.fundingRouterControllerApprovalPresent === true,
+      ),
+    fundingRouterPusdFundPresent:
+      issues.length === 0 &&
+      input.profile === "buy_sell" &&
+      input.policy.rules.some((rule) =>
+        isExactPolymarketDepositPusdFundRule({
+          routerAddress: input.fundingRouterAddress,
+          maxSourceRaw: maxBuyRaw,
+          rule,
+        }),
       ),
     fundingMaxRaw:
       issues.length === 0

@@ -33,7 +33,10 @@ import {
   DelegatedFundingExecutor,
 } from "../execution/delegated-funding-executor.js";
 import type { PolymarketWrapExecutionConfiguration } from "../execution/delegated-funding-config.js";
-import { loadRelayEvmExecutionConfiguration } from "../execution/delegated-funding-config.js";
+import {
+  loadPolymarketPusdFundExecutionConfiguration,
+  loadRelayEvmExecutionConfiguration,
+} from "../execution/delegated-funding-config.js";
 import { createPrivyDelegatedFundingDriver } from "../execution/privy-delegated-funding-driver.js";
 import { createRelayEvmDelegatedFundingProfile } from "../execution/relay-evm-delegated-executor-profile.js";
 import { RELAY_EVM_FUNDING_PROFILE_SPECS } from "../execution/relay-evm-profile-specs.js";
@@ -360,6 +363,13 @@ export async function runFundingReconciliationJob(
           driver: delegatedDriver,
         })
       : null;
+  const polymarketPusdFundProfile =
+    options.delegatedExecution && delegatedDriver
+      ? createPolymarketWrapDelegatedFundingProfile({
+          configuration: loadPolymarketPusdFundExecutionConfiguration(),
+          driver: delegatedDriver,
+        })
+      : null;
   const relayEvmProfiles =
     options.delegatedExecution && delegatedDriver
       ? Object.values(RELAY_EVM_FUNDING_PROFILE_SPECS).map((profile) =>
@@ -432,9 +442,16 @@ export async function runFundingReconciliationJob(
         }).catch(() => ({ candidates: 0, created: 0, skipped: 0 }))
       : { candidates: 0, created: 0, skipped: 0 };
     const delegatedFundingExecution =
-      (polymarketWrapProfile || relayEvmProfiles.length > 0) && transactionCodec
+      (polymarketWrapProfile ||
+        polymarketPusdFundProfile ||
+        relayEvmProfiles.length > 0) &&
+      transactionCodec
         ? await new DelegatedFundingExecutor(pool, {
-            profiles: [polymarketWrapProfile, ...relayEvmProfiles].filter(
+            profiles: [
+              polymarketWrapProfile,
+              polymarketPusdFundProfile,
+              ...relayEvmProfiles,
+            ].filter(
               (profile): profile is NonNullable<typeof profile> =>
                 profile != null,
             ),

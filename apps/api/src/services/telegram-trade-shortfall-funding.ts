@@ -25,7 +25,11 @@ import {
   captureRelayEvmAllowanceBaseline,
   relayEvmAllowanceBaselineSupportMetadata,
 } from "../funding/execution/relay-evm-allowance-baseline.js";
-import { POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID } from "../funding/execution/delegated-funding-profile-ids.js";
+import {
+  isPolymarketDepositRouterProfileId,
+  POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
+  POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
+} from "../funding/execution/delegated-funding-profile-ids.js";
 import {
   RELAY_EVM_FUNDING_PROFILE_SPECS,
   relayEvmFundingProfileSpec,
@@ -377,6 +381,18 @@ export function resolveTelegramTradeShortfallExecutionProfile(
       decimals: 6,
     })
   ) {
+    const sources = optionSourceAssets(option);
+    if (
+      sources.length === 1 &&
+      sameAsset(sources[0] as AssetRef, {
+        networkId: "evm:137",
+        assetId:
+          fundingSidecarRuntimeConfig.polymarketPusdAddress || POLYGON_PUSD,
+        decimals: 6,
+      })
+    ) {
+      return POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID;
+    }
     return POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID;
   }
   const sources = optionSourceAssets(option);
@@ -432,7 +448,11 @@ export function telegramTradeShortfallExecutionProfiles(
     )
     .map((profile) => profile.profileId);
   if (venue !== "polymarket") return profiles;
-  return [POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID, ...profiles];
+  return [
+    POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
+    POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
+    ...profiles,
+  ];
 }
 
 function requiresExternalHandoff(option: SourceOption): boolean {
@@ -648,16 +668,17 @@ export class TelegramTradeShortfallFundingService {
       venueBindingOptionId: candidate.plan.venueBindingOptionId,
       venueId: input.venue,
     } as const;
-    const provisioned =
-      profileId === POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID
-        ? await ensureTelegramFundingAuthorization(
-            this.pool,
-            authorizationInput,
-          )
-        : await ensureTelegramRelayEvmFundingAuthorization(
-            this.pool,
-            authorizationInput,
-          );
+    const provisioned = isPolymarketDepositRouterProfileId(profileId)
+      ? await ensureTelegramFundingAuthorization(this.pool, {
+          ...authorizationInput,
+          profileId: profileId as
+            | typeof POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID
+            | typeof POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
+        })
+      : await ensureTelegramRelayEvmFundingAuthorization(
+          this.pool,
+          authorizationInput,
+        );
     if (!provisioned) {
       return {
         kind: "temporarily_unavailable",
@@ -797,11 +818,11 @@ export class TelegramTradeShortfallFundingService {
         "trade funding delegated execution requires one exact stable source",
       );
     }
-    const securityClass =
-      input.proposal.serverExecutionProfileId ===
-      POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID
-        ? "closed_destination_transform"
-        : "routed_value_movement";
+    const securityClass = isPolymarketDepositRouterProfileId(
+      input.proposal.serverExecutionProfileId,
+    )
+      ? "closed_destination_transform"
+      : "routed_value_movement";
     const fundingAuthorization = await loadActiveTelegramFundingAuthorization(
       this.pool,
       {
