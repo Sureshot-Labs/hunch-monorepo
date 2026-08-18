@@ -1581,14 +1581,11 @@ async function completeReadyFundingOperation(
     },
     now: input.now,
   });
-  await releaseCompletedTradeShortfallSourceReservationsInTransaction(
-    client,
-    {
-      operationId: operation.id,
-      userId: input.userId,
-      now: input.now,
-    },
-  );
+  await releaseCompletedTradeShortfallSourceReservationsInTransaction(client, {
+    operationId: operation.id,
+    userId: input.userId,
+    now: input.now,
+  });
 }
 
 /**

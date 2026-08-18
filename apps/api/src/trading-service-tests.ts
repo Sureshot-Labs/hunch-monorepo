@@ -95,6 +95,7 @@ const policyExchangeAddresses = [
 ] as const;
 const policyFundingRouterAddress = "0x0000000000000000000000000000000000000003";
 const policyPusdAddress = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB";
+const policyUsdceAddress = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
 const policyFundingMaxRaw = 2_200_000n;
 const policyBuilderCode = `0x${"11".repeat(32)}`;
 const policyFundingAbi = [
@@ -124,7 +125,10 @@ const policyFundingRouterApprovalAbi = [
   },
 ];
 
-function fundingRouterControllerApprovalRule(): PrivyPolicyMetadata["rules"][number] {
+function fundingRouterControllerApprovalRule(
+  tokenAddress = policyPusdAddress,
+  tokenLabel = "pUSD",
+): PrivyPolicyMetadata["rules"][number] {
   return {
     action: "ALLOW",
     conditions: [
@@ -138,7 +142,7 @@ function fundingRouterControllerApprovalRule(): PrivyPolicyMetadata["rules"][num
         field: "to",
         field_source: "ethereum_transaction",
         operator: "eq",
-        value: policyPusdAddress,
+        value: tokenAddress,
       },
       {
         field: "value",
@@ -168,9 +172,9 @@ function fundingRouterControllerApprovalRule(): PrivyPolicyMetadata["rules"][num
         value: POLYMARKET_FUNDING_ROUTER_MAX_APPROVAL_RAW.toString(),
       },
     ],
-    id: "funding-router-controller-approval",
+    id: `funding-router-controller-${tokenLabel.toLowerCase()}-approval`,
     method: "eth_sendTransaction",
-    name: "Funding Router controller pUSD approval",
+    name: `Funding Router controller ${tokenLabel} approval`,
   };
 }
 const policyRedemptionAdapterAddresses = [
@@ -393,6 +397,7 @@ function buildValidPolymarketBuySellPolicy(): PrivyPolicyMetadata {
     rules: [
       ...buy.rules,
       fundingRouterControllerApprovalRule(),
+      fundingRouterControllerApprovalRule(policyUsdceAddress, "USDC.e"),
       structuredClone(sell.rules[1] as never),
       {
         action: "ALLOW",

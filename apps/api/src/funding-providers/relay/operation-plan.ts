@@ -329,10 +329,8 @@ export function relayDelegatedCommitSteps(
       relayStepKind:
         !usesExistingAllowance && ordinal === 0 ? "approve" : "deposit",
       requiresSingleOperationBundle: true,
-      ...(usesExistingAllowance
-        ? { relayAllowanceMode: "preexisting" }
-        : {}),
-      ...((usesExistingAllowance || ordinal === 1)
+      ...(usesExistingAllowance ? { relayAllowanceMode: "preexisting" } : {}),
+      ...(usesExistingAllowance || ordinal === 1
         ? {
             postconditionEvidenceKind: "exact_erc20_source_debit_v1",
             expectedSourceAssetId: input.sourceAmount.asset.assetId,

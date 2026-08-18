@@ -31,6 +31,8 @@ export type PolicyValidationResult = {
   fundingRouterControllerApprovalPresent?: boolean;
   /** Present only when the exact bounded controller-pUSD Router rule exists. */
   fundingRouterPusdFundPresent?: boolean;
+  /** Present only when the exact controller-USDC.e Router approval exists. */
+  fundingRouterUsdceApprovalPresent?: boolean;
   issues: string[];
   valid: boolean;
 };
@@ -38,6 +40,7 @@ export type PolicyValidationResult = {
 export const POLYMARKET_FUNDING_ROUTER_MAX_APPROVAL_RAW = (1n << 256n) - 1n;
 
 const POLYMARKET_PUSD_ADDRESS = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB";
+const POLYMARKET_USDCE_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
 
 type TypedDataField = { name: string; type: string };
 
@@ -353,7 +356,7 @@ function readExactFundingRuleCap(input: {
 function readExactFundingRouterControllerApprovalRule(input: {
   conditions: Record<string, unknown>[];
   fundingRouterAddress: string;
-  pUsdAddress: string;
+  tokenAddress: string;
 }): boolean {
   if (
     !hasExactCondition({
@@ -366,7 +369,7 @@ function readExactFundingRouterControllerApprovalRule(input: {
       conditions: input.conditions,
       field: "to",
       fieldSource: "ethereum_transaction",
-      value: input.pUsdAddress,
+      value: input.tokenAddress,
     }) ||
     !hasExactZeroCondition({
       conditions: input.conditions,
@@ -467,6 +470,7 @@ export function validatePolymarketBotPolicy(input: {
   let fundingCovered = false;
   let fundingMaxRaw: bigint | null = null;
   let fundingRouterControllerApprovalPresent = false;
+  let fundingRouterUsdceApprovalPresent = false;
   const directCoverage = new Set<string>();
   const depositCoverage = new Set<string>();
   const allowRules = input.policy.rules.filter(
@@ -491,13 +495,29 @@ export function validatePolymarketBotPolicy(input: {
       const controllerApproval = readExactFundingRouterControllerApprovalRule({
         conditions,
         fundingRouterAddress: normalizedFundingRouter,
-        pUsdAddress: normalizedPusd,
+        tokenAddress: normalizedPusd,
       });
       if (controllerApproval) {
         if (fundingRouterControllerApprovalPresent) {
           issues.push("Funding Router controller approval rule is duplicated.");
         } else {
           fundingRouterControllerApprovalPresent = true;
+        }
+        continue;
+      }
+      const controllerUsdceApproval =
+        readExactFundingRouterControllerApprovalRule({
+          conditions,
+          fundingRouterAddress: normalizedFundingRouter,
+          tokenAddress: POLYMARKET_USDCE_ADDRESS,
+        });
+      if (controllerUsdceApproval) {
+        if (fundingRouterUsdceApprovalPresent) {
+          issues.push(
+            "Funding Router controller USDC.e approval rule is duplicated.",
+          );
+        } else {
+          fundingRouterUsdceApprovalPresent = true;
         }
         continue;
       }
@@ -614,6 +634,7 @@ export function validatePolymarketBotPolicy(input: {
   return {
     fundingMaxRaw: issues.length === 0 ? fundingMaxRaw : null,
     fundingRouterControllerApprovalPresent,
+    fundingRouterUsdceApprovalPresent,
     issues,
     valid: issues.length === 0,
   };
@@ -746,6 +767,7 @@ type PolymarketPolicyRuleKind =
   | "clob_auth"
   | "funding"
   | "funding_controller_approval"
+  | "funding_controller_usdce_approval"
   | "funding_wrap"
   | "direct_buy"
   | "deposit_buy"
@@ -761,10 +783,19 @@ function classifyPolymarketPolicyAllowRule(
       readExactFundingRouterControllerApprovalRule({
         conditions: readPolicyConditions(rule),
         fundingRouterAddress,
-        pUsdAddress: POLYMARKET_PUSD_ADDRESS,
+        tokenAddress: POLYMARKET_PUSD_ADDRESS,
       })
     ) {
       return "funding_controller_approval";
+    }
+    if (
+      readExactFundingRouterControllerApprovalRule({
+        conditions: readPolicyConditions(rule),
+        fundingRouterAddress,
+        tokenAddress: POLYMARKET_USDCE_ADDRESS,
+      })
+    ) {
+      return "funding_controller_usdce_approval";
     }
     return isExactPolymarketDepositUsdceWrapRule({
       routerAddress: fundingRouterAddress,
@@ -826,6 +857,7 @@ export function validatePolymarketBotPolicyProfile(input: {
       "clob_auth",
       "funding",
       "funding_controller_approval",
+      "funding_controller_usdce_approval",
       "funding_wrap",
       "direct_buy",
       "deposit_buy",
@@ -911,6 +943,7 @@ export function validatePolymarketBotPolicyProfile(input: {
                   "clob_auth",
                   "funding",
                   "funding_controller_approval",
+                  "funding_controller_usdce_approval",
                   "direct_buy",
                   "deposit_buy",
                 ]),

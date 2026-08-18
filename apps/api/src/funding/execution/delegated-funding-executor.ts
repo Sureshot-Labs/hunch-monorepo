@@ -83,28 +83,33 @@ function validatePolymarketDepositRouterAction(
     return;
   }
   if (input.profileId === POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID) {
-    if (
-      input.action.kind === "evm_transaction" &&
-      input.action.to.toLowerCase() ===
-        fundingSidecarRuntimeConfig.polymarketPusdAddress.toLowerCase()
-    ) {
-      if (
-        input.action.networkId !== "evm:137" ||
-        input.action.senderWalletId !== input.walletId ||
-        input.action.valueRaw !== "0"
-      ) {
-        throw new Error("controller pUSD Router approval is invalid");
-      }
-      const decoded = ERC20_APPROVAL.decodeFunctionData(
-        "approve",
-        input.action.data,
+    const action = input.action;
+    if (action.kind === "evm_transaction") {
+      const isRouterTokenApproval = [
+        fundingSidecarRuntimeConfig.polymarketPusdAddress,
+        fundingSidecarRuntimeConfig.polymarketUsdceAddress,
+      ].some(
+        (tokenAddress) =>
+          action.to.toLowerCase() === tokenAddress.toLowerCase(),
       );
+      if (!isRouterTokenApproval) {
+        validatePolymarketDepositPusdFundAction(shared);
+        return;
+      }
+      if (
+        action.networkId !== "evm:137" ||
+        action.senderWalletId !== input.walletId ||
+        action.valueRaw !== "0"
+      ) {
+        throw new Error("controller Router token approval is invalid");
+      }
+      const decoded = ERC20_APPROVAL.decodeFunctionData("approve", action.data);
       if (
         String(decoded[0]).toLowerCase() !==
           POLYMARKET_FUNDING_ROUTER.polygon.toLowerCase() ||
         BigInt(decoded[1]) !== POLYMARKET_FUNDING_ROUTER_MAX_APPROVAL_RAW
       ) {
-        throw new Error("controller pUSD Router approval is invalid");
+        throw new Error("controller Router token approval is invalid");
       }
       return;
     }

@@ -17,6 +17,7 @@ Tools:
   admin:points     -> /app/apps/api/dist/admin-points.js via run-with-secrets
   fees:collect     -> /app/apps/api/dist/collect-fees.js via run-with-secrets
   rewards:payout   -> /app/apps/api/dist/rewards-payout.js via run-with-secrets
+  privy:policy:sync -> apply a reviewed complete policy manifest via ops/privy-policy-sync.sh
   migrate          -> /app/packages/db/dist/migrate.js via run-with-secrets
   run -- <cmd>     -> run an arbitrary command inside hunch-api
   psql "<sql>"     -> run SQL against hunch-postgres using container env
@@ -78,6 +79,10 @@ case "${tool}" in
     ;;
   rewards:payout|rewards-payout)
     cmd="$(node_with_secrets /app/apps/api/dist/rewards-payout.js "$@")"
+    ;;
+  privy:policy:sync)
+    echo "Use ops/privy-policy-sync.sh --manifest <reviewed-policy.json> [--execute --confirm 'SYNC PRIVY POLICY MANIFEST']" >&2
+    exit 2
     ;;
   migrate)
     cmd="$(node_with_secrets /app/packages/db/dist/migrate.js "$@")"

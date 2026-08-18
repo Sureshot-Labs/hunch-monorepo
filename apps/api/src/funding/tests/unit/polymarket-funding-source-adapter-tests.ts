@@ -108,6 +108,7 @@ function planningInput(
   purpose: FundingPurpose = "trade_shortfall",
   routerPusdAllowanceRaw = "1500000",
   depositPusdRaw = "1500000",
+  routerUsdceAllowanceRaw = signerUsdceRaw,
 ): FundingSourcePlanningInput {
   const settlementLocation = {
     kind: "venue_account",
@@ -172,7 +173,7 @@ function planningInput(
         routerNonceRaw: "7",
         depositRouterUsdceAllowanceRaw: "1000000",
         routerPusdAllowanceRaw,
-        routerUsdceAllowanceRaw: signerUsdceRaw,
+        routerUsdceAllowanceRaw,
         clobPusdRaw: "1500000",
         observedAt: "2026-07-24T12:00:00.000Z",
       }),
@@ -295,10 +296,32 @@ assert.equal(
 );
 assert.equal(delegatedPusd.commitPlan.steps[0]?.state, "planned");
 
+const [delegatedPusdNeedsApproval] = await adapter.list(
+  delegatedPusdPlanningInput("0"),
+);
+assert.ok(delegatedPusdNeedsApproval);
 assert.deepEqual(
-  await adapter.list(delegatedPusdPlanningInput("0")),
-  [],
-  "the bounded Router fund envelope must not silently introduce an unapproved token approval",
+  delegatedPusdNeedsApproval.commitPlan.steps.map((step) => ({
+    executorId: step.executorId,
+    kind: step.actionValidationResult.kind,
+    dependsOnOrdinal: step.dependsOnOrdinal,
+    ordinal: step.ordinal,
+  })),
+  [
+    {
+      executorId: POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
+      kind: "controller_pusd_router_approval",
+      dependsOnOrdinal: null,
+      ordinal: 0,
+    },
+    {
+      executorId: POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
+      kind: undefined,
+      dependsOnOrdinal: 0,
+      ordinal: 1,
+    },
+  ],
+  "the exact policy-approved controller pUSD approval must precede Router fund when required",
 );
 
 const mixedControllerInput = planningInput(
@@ -306,7 +329,8 @@ const mixedControllerInput = planningInput(
   "1800000",
   "300000",
   "trade_shortfall",
-  "1500000",
+  "0",
+  "0",
   "0",
 );
 const [delegatedPusdAndUsdce] = await adapter.list({
@@ -329,6 +353,27 @@ assert.equal(
 assert.deepEqual(
   delegatedPusdAndUsdce.commitPlan.reservations.map((entry) => entry.rawAmount),
   ["1500000", "300000"],
+);
+assert.deepEqual(
+  delegatedPusdAndUsdce.commitPlan.steps.map((step) => ({
+    kind: step.actionValidationResult.kind,
+    dependsOnOrdinal: step.dependsOnOrdinal,
+    ordinal: step.ordinal,
+  })),
+  [
+    {
+      kind: "controller_usdce_router_approval",
+      dependsOnOrdinal: null,
+      ordinal: 0,
+    },
+    {
+      kind: "controller_pusd_router_approval",
+      dependsOnOrdinal: 0,
+      ordinal: 1,
+    },
+    { kind: undefined, dependsOnOrdinal: 1, ordinal: 2 },
+  ],
+  "two missing token approvals must be serialized before the one Router fund call",
 );
 
 const relayProfileInput = planningInput();

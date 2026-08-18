@@ -136,8 +136,10 @@ export async function activateStalledTelegramTradeShortfallInitialStepsInTransac
 }
 
 /**
- * A Router approval is a normal transaction receipt. Once it is canonical,
- * unlock exactly its dependent Router fund action for the same shortfall.
+ * Router approvals are ordinary transaction steps. Once one is canonical,
+ * unlock exactly its one dependent Router step: another exact approval or the
+ * final fund call. This keeps a two-token Router plan serial without a
+ * separate state machine.
  */
 export async function activateTelegramTradeShortfallRouterDependentFundInTransaction(
   client: Pick<PoolClient, "query">,
@@ -170,7 +172,7 @@ export async function activateTelegramTradeShortfallRouterDependentFundInTransac
         and fund_step.operation_id = approval_step.operation_id
         and fund_step.depends_on_step_id = approval_step.id
         and fund_step.executor_id = approval_step.executor_id
-        and fund_step.step_kind = 'venue_preparation'
+        and fund_step.step_kind in ('transaction', 'venue_preparation')
         and fund_step.state = 'planned'
         and (
           approval_step.executor_id = 'polymarket_deposit_pusd_fund_v1'

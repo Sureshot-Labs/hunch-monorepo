@@ -1,4 +1,5 @@
 import type { PoolClient } from "@hunch/infra";
+import { Interface } from "ethers";
 
 import type { AccountValueReadModel } from "../../account-value/runtime-service.js";
 import { stableOpaqueId } from "../../account-value/canonical.js";
@@ -24,6 +25,7 @@ import type { FundingCommitPlan } from "../persistence/funding-operation-reposit
 import { sameAccountAddress } from "../domain/asset-identity.js";
 import { sameAsset } from "../planner/money.js";
 import { minimumAutomaticTradeRefillUsd } from "../planner/placement-policy.js";
+import { POLYMARKET_FUNDING_ROUTER_MAX_APPROVAL_RAW } from "../../services/polymarket-automation-policy.js";
 import {
   findExactFundingWalletProfile,
   type FundingSourceAdapter,
@@ -51,6 +53,10 @@ import {
 import { lockPolymarketFundingOperationPredecessor } from "./polymarket-funding-commit-guard.js";
 
 type JsonRecord = Readonly<Record<string, JsonValue>>;
+
+const ERC20_APPROVAL = new Interface([
+  "function approve(address spender,uint256 amount) returns (bool)",
+]);
 
 function jsonRecord(value: unknown): JsonRecord {
   return value as JsonRecord;
@@ -285,8 +291,14 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
               signerPusdRaw: BigInt(snapshot.signerPusdRaw),
               signerLockedRaw: 0n,
               signerUsdceRaw: BigInt(snapshot.signerUsdceRaw),
-              routerPusdAllowanceRaw: BigInt(snapshot.routerPusdAllowanceRaw),
-              routerUsdceAllowanceRaw: BigInt(snapshot.routerUsdceAllowanceRaw),
+              // These exact MaxUint approvals are separate, policy-bounded
+              // prerequisite steps when absent. Plan the Router call against
+              // that post-approval state; the actual snapshots below decide
+              // which prerequisites to persist.
+              routerPusdAllowanceRaw:
+                POLYMARKET_FUNDING_ROUTER_MAX_APPROVAL_RAW,
+              routerUsdceAllowanceRaw:
+                POLYMARKET_FUNDING_ROUTER_MAX_APPROVAL_RAW,
               fundingCapRaw: BigInt(snapshot.fundingCapRaw),
             })
           : buildPlan(requiredRaw);
@@ -319,18 +331,13 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
     ) {
       return null;
     }
-    // The existing Privy envelope authorizes the bounded Router `fund` call,
-    // not a new token approval. Do not create a route that could reach an
-    // avoidable approval failure: both controller allowances must already
-    // cover their exact legs.
-    if (
+    const requiresUsdceApproval =
       delegatedPusdFund &&
-      (BigInt(snapshot.routerPusdAllowanceRaw) < BigInt(plan.pUsdAmountRaw) ||
-        BigInt(snapshot.routerUsdceAllowanceRaw) <
-          BigInt(plan.signerUsdceAmountRaw))
-    ) {
-      return null;
-    }
+      BigInt(snapshot.routerUsdceAllowanceRaw) <
+        BigInt(plan.signerUsdceAmountRaw);
+    const requiresPusdApproval =
+      delegatedPusdFund &&
+      BigInt(snapshot.routerPusdAllowanceRaw) < BigInt(plan.pUsdAmountRaw);
     const usdceAsset = this.config.usdceAsset;
     const exactInputs = [
       {
@@ -384,6 +391,45 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
       plan,
     });
     if (action.kind !== "evm_transaction") return null;
+    const approvalAction = (assetId: string) => {
+      const approval = {
+        kind: "evm_transaction" as const,
+        networkId: "evm:137",
+        senderWalletId: action.senderWalletId,
+        to: assetId,
+        data: ERC20_APPROVAL.encodeFunctionData("approve", [
+          snapshot.routerAddress,
+          POLYMARKET_FUNDING_ROUTER_MAX_APPROVAL_RAW,
+        ]),
+        valueRaw: "0",
+        gasLimitRaw: null,
+      };
+      return {
+        ...approval,
+        actionId: `action_${canonicalJsonHash({
+          approval,
+          operationId: quoteCorrelationId,
+        }).slice(0, 32)}`,
+      };
+    };
+    const approvalActions = [
+      ...(requiresUsdceApproval
+        ? [
+            {
+              action: approvalAction(usdceAsset.assetId),
+              actionKind: "controller_usdce_router_approval" as const,
+            },
+          ]
+        : []),
+      ...(requiresPusdApproval
+        ? [
+            {
+              action: approvalAction(facts.option.requiredAsset.assetId),
+              actionKind: "controller_pusd_router_approval" as const,
+            },
+          ]
+        : []),
+    ];
     const sponsorship = resolveActionSponsorship({ action, profile });
     const source = {
       kind: "venue_preparation" as const,
@@ -415,6 +461,13 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
       eta: { minSeconds: 5, maxSeconds: 90 },
       experienceMode: "prepare_first",
       requiredActions: [
+        ...approvalActions.map(() => ({
+          kind: "evm_transaction" as const,
+          safeLabel: "Approve Polymarket Funding Router",
+          actor: "server" as const,
+          valueMoving: false,
+          sponsorship: "requested" as const,
+        })),
         {
           kind: "evm_transaction",
           safeLabel: "Fund Polymarket Deposit Wallet",
@@ -474,8 +527,24 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
       },
       segments: [],
       steps: [
+        ...approvalActions.map((approval, ordinal) => ({
+          ordinal,
+          segmentOrdinal: null,
+          stepKind: "transaction" as const,
+          state: "planned" as const,
+          actionFingerprint: canonicalJsonHash(approval.action),
+          executorId: POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
+          payerRequirement: "privy_sponsor" as const,
+          dependsOnOrdinal: ordinal === 0 ? null : ordinal - 1,
+          normalizedAction: jsonRecord(approval.action),
+          actionExpiresAt: null,
+          actionValidationResult: {
+            kind: approval.actionKind,
+            routerAddress: snapshot.routerAddress,
+          },
+        })),
         {
-          ordinal: 0,
+          ordinal: approvalActions.length,
           segmentOrdinal: null,
           stepKind: "venue_preparation",
           state:
@@ -486,7 +555,8 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
               ? input.request.serverExecutionProfileId
               : "wallet_profile_evm_v1",
           payerRequirement: sponsorship.payerRequirement,
-          dependsOnOrdinal: null,
+          dependsOnOrdinal:
+            approvalActions.length > 0 ? approvalActions.length - 1 : null,
           normalizedAction: jsonRecord(action),
           ...(delegatedWrap || delegatedPusdFund
             ? { actionExpiresAt: null }

@@ -44,6 +44,8 @@
     "funding:migration:preflight": "tsx src/funding-migration-preflight.ts",
     "funding:authorization:grant": "tsx src/funding-authorization-admin.ts",
     "funding:authorization:revoke": "tsx src/funding-authorization-admin.ts --revoke",
+    "privy:policy:router-usdce-approval": "tsx src/privy-policy-router-usdce-approval.ts",
+    "privy:policy:sync": "tsx src/privy-policy-sync.ts",
     "telegram:trading:migration:preflight": "tsx src/telegram-trading-migration-preflight.ts",
     "funding:wallet-profiles:backfill": "tsx src/funding-wallet-profile-backfill.ts",
     "relay:rehearsal": "tsx src/relay-live-rehearsal.ts",
