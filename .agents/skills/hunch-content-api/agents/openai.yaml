@@ -1,0 +1,4 @@
+interface:
+  display_name: "Hunch Content API"
+  short_description: "Edit Hunch content through scoped admin API"
+  default_prompt: "Use $hunch-content-api to update a Hunch article safely through the scoped admin API."

@@ -47,6 +47,10 @@ import {
 } from "../services/content.js";
 import { createContentPreviewToken } from "../services/content-preview.js";
 import {
+  adminContentActor,
+  serviceContentActor,
+} from "../services/content-actor.js";
+import {
   getContentOperationalStatus,
   recordContentRevisionConflict,
 } from "../services/content-observability.js";
@@ -63,6 +67,17 @@ function sendContentError(reply: FastifyReply, error: unknown) {
 
 function actorAdminId(request: FastifyRequest): string | null {
   return request.adminAccount?.id ?? request.adminActor?.id ?? null;
+}
+
+function contentActor(request: FastifyRequest) {
+  const service = request.adminServicePrincipal;
+  if (service) return serviceContentActor(service.id, service.displayName);
+  const adminId = actorAdminId(request);
+  if (!adminId) throw new Error("Admin content actor is missing");
+  return adminContentActor(
+    adminId,
+    request.adminAccount?.email ?? request.adminActor?.email,
+  );
 }
 
 export const adminContentRoutes: FastifyPluginAsync = async (app) => {
@@ -127,7 +142,7 @@ export const adminContentRoutes: FastifyPluginAsync = async (app) => {
         const result = await createContentArticle(
           contentPool,
           request.body,
-          actorAdminId(request),
+          contentActor(request),
         );
         reply.header("Cache-Control", "no-store");
         return reply.code(201).send({ ok: true, article: result.article });
@@ -173,7 +188,7 @@ export const adminContentRoutes: FastifyPluginAsync = async (app) => {
           contentPool,
           request.params.id,
           request.body,
-          actorAdminId(request),
+          contentActor(request),
         );
         reply.header("Cache-Control", "no-store");
         return reply.send({ ok: true, article: result.article });
@@ -240,7 +255,7 @@ export const adminContentRoutes: FastifyPluginAsync = async (app) => {
           const article = await transitionContentArticleReview(contentPool, {
             id: request.params.id,
             expectedRevision: request.body.expectedRevision,
-            actorAdminId: actorAdminId(request),
+            actor: contentActor(request),
             status,
           });
           reply.header("Cache-Control", "no-store");
@@ -288,7 +303,7 @@ export const adminContentRoutes: FastifyPluginAsync = async (app) => {
         const result = await publishContentArticle(contentPool, {
           id: request.params.id,
           expectedRevision: request.body.expectedRevision,
-          actorAdminId: actorAdminId(request),
+          actor: contentActor(request),
           publishAt: request.body.publishAt
             ? new Date(request.body.publishAt)
             : undefined,
@@ -316,7 +331,7 @@ export const adminContentRoutes: FastifyPluginAsync = async (app) => {
         const result = await cancelContentArticleSchedule(contentPool, {
           id: request.params.id,
           expectedRevision: request.body.expectedRevision,
-          actorAdminId: actorAdminId(request),
+          actor: contentActor(request),
         });
         reply.header("Cache-Control", "no-store");
         return reply.send({ ok: true, article: result.article });
@@ -344,7 +359,7 @@ export const adminContentRoutes: FastifyPluginAsync = async (app) => {
           const result = await mutation(contentPool, {
             id: request.params.id,
             expectedRevision: request.body.expectedRevision,
-            actorAdminId: actorAdminId(request),
+            actor: contentActor(request),
           });
           reply.header("Cache-Control", "no-store");
           return reply.send({ ok: true, article: result.article });
@@ -369,7 +384,7 @@ export const adminContentRoutes: FastifyPluginAsync = async (app) => {
         const version = await createContentArticleCheckpoint(contentPool, {
           id: request.params.id,
           expectedRevision: request.body.expectedRevision,
-          actorAdminId: actorAdminId(request),
+          actor: contentActor(request),
         });
         reply.header("Cache-Control", "no-store");
         return reply.code(201).send({ ok: true, version });
@@ -465,7 +480,7 @@ export const adminContentRoutes: FastifyPluginAsync = async (app) => {
           id: request.params.id,
           versionId: request.params.versionId,
           expectedRevision: request.body.expectedRevision,
-          actorAdminId: actorAdminId(request),
+          actor: contentActor(request),
         });
         reply.header("Cache-Control", "no-store");
         return reply.send({ ok: true, article: result.article });
@@ -500,7 +515,7 @@ export const adminContentRoutes: FastifyPluginAsync = async (app) => {
         const intent = await createContentAssetUpload(
           contentPool,
           request.body,
-          actorAdminId(request),
+          contentActor(request),
         );
         reply.header("Cache-Control", "no-store");
         return reply.code(201).send({ ok: true, ...intent });
@@ -542,7 +557,7 @@ export const adminContentRoutes: FastifyPluginAsync = async (app) => {
           contentPool,
           request.params.id,
           request.body,
-          actorAdminId(request),
+          contentActor(request),
         );
         reply.header("Cache-Control", "no-store");
         return reply.send({ ok: true, asset });
@@ -567,7 +582,7 @@ export const adminContentRoutes: FastifyPluginAsync = async (app) => {
           contentPool,
           request.params.id,
           request.body,
-          actorAdminId(request),
+          contentActor(request),
         );
         reply.header("Cache-Control", "no-store");
         return reply.send({ ok: true, asset });
@@ -585,7 +600,7 @@ export const adminContentRoutes: FastifyPluginAsync = async (app) => {
         const asset = await deleteContentAsset(
           contentPool,
           request.params.id,
-          actorAdminId(request),
+          contentActor(request),
         );
         reply.header("Cache-Control", "no-store");
         return reply.send({ ok: true, asset });

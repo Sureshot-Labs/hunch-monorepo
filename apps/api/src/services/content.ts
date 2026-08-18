@@ -38,6 +38,12 @@ import {
   type ContentTocItem,
 } from "./content-document.js";
 import { ContentError } from "./content-errors.js";
+import {
+  contentActorAdminId,
+  normalizeContentActor,
+  type ContentActor,
+  type ContentActorInput,
+} from "./content-actor.js";
 import { promoteContentRoute } from "./content-routes.js";
 
 export { ContentError } from "./content-errors.js";
@@ -1253,8 +1259,9 @@ async function insertDraft(
   db: DbQuery,
   articleId: string,
   draft: NormalizedDraft,
-  actorAdminId: string | null,
+  actorInput: ContentActorInput,
 ): Promise<void> {
+  const actor = normalizeContentActor(actorInput);
   const derived = deriveDraft(draft);
   await db.query(
     `
@@ -1294,7 +1301,7 @@ async function insertDraft(
       derived.readingTimeMinutes,
       json(derived.toc),
       derived.contentHash,
-      actorAdminId,
+      contentActorAdminId(actor),
     ],
   );
   await syncDraftAssetUsages(db, articleId, draftAssetReferences(draft));
@@ -1303,8 +1310,9 @@ async function insertDraft(
 export async function createContentArticle(
   pool: Pool,
   body: ContentArticleCreateBody,
-  actorAdminId: string | null,
+  actorInput: ContentActorInput,
 ): Promise<ContentArticleMutationResult> {
+  const actor = normalizeContentActor(actorInput);
   const draft = normalizeCreate(body);
   try {
     return await tx(pool, async (db) => {
@@ -1315,15 +1323,15 @@ export async function createContentArticle(
           ) values ('draft', $1, $1)
           returning id
         `,
-        [actorAdminId],
+        [contentActorAdminId(actor)],
       );
       const id = rows[0].id;
       await reserveDraftSlug(db, id, null, draft.slug);
-      await insertDraft(db, id, draft, actorAdminId);
+      await insertDraft(db, id, draft, actor);
       await insertContentAuditEvent(db, {
         action: "article.created",
         articleId: id,
-        actorAdminId,
+        actor,
       });
       const created = await getArticleRow(db, id);
       if (!created)
@@ -1344,8 +1352,9 @@ export async function updateContentArticle(
   pool: Pool,
   id: string,
   body: ContentArticleUpdateBody,
-  actorAdminId: string | null,
+  actorInput: ContentActorInput,
 ): Promise<ContentArticleMutationResult> {
+  const actor = normalizeContentActor(actorInput);
   try {
     return await tx(pool, async (db) => {
       const existingRow = await requireArticleForUpdate(
@@ -1418,7 +1427,7 @@ export async function updateContentArticle(
           derived.readingTimeMinutes,
           json(derived.toc),
           derived.contentHash,
-          actorAdminId,
+          contentActorAdminId(actor),
           id,
           existing.draft.revision,
         ],
@@ -1437,10 +1446,19 @@ export async function updateContentArticle(
             set editorial_status = 'draft', updated_by_admin_id = $2
             where id = $1
           `,
-          [id, actorAdminId],
+          [id, contentActorAdminId(actor)],
         );
       }
       await syncDraftAssetUsages(db, id, draftAssetReferences(next));
+      await insertContentAuditEvent(db, {
+        action: "article.updated",
+        articleId: id,
+        actor,
+        metadata: {
+          previousRevision: existing.draft.revision,
+          newRevision: existing.draft.revision + 1,
+        },
+      });
       const updated = await getArticleRow(db, id);
       if (!updated)
         throw new Error("Updated content article could not be loaded");
@@ -1578,8 +1596,9 @@ async function insertVersion(
   articleId: string,
   draft: ContentArticleDraft,
   kind: ContentVersionKind,
-  actorAdminId: string | null,
+  actorInput: ContentActorInput,
 ): Promise<VersionMutationRow> {
+  const actor = normalizeContentActor(actorInput);
   const { rows: numberRows } = await db.query<{ version_number: number }>(
     `select coalesce(max(version_number), 0) + 1 as version_number from content_article_versions where article_id = $1`,
     [articleId],
@@ -1631,7 +1650,7 @@ async function insertVersion(
       draft.readingTimeMinutes,
       json(draft.toc),
       draft.contentHash,
-      actorAdminId,
+      contentActorAdminId(actor),
     ],
   );
   const version = rows[0];
@@ -1685,22 +1704,27 @@ async function insertContentAuditEvent(
   inputs: {
     action: string;
     articleId: string;
-    actorAdminId: string | null;
+    actor: ContentActorInput;
     versionId?: string | null;
     metadata?: Record<string, unknown>;
   },
 ): Promise<void> {
+  const actor = normalizeContentActor(inputs.actor);
   await db.query(
     `
       insert into content_audit_events (
-        action, article_id, version_id, actor_admin_id, metadata
-      ) values ($1, $2, $3, $4, $5::jsonb)
+        action, article_id, version_id, actor_admin_id,
+        actor_kind, actor_service_principal_id, actor_label, metadata
+      ) values ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
     `,
     [
       inputs.action,
       inputs.articleId,
       inputs.versionId ?? null,
-      inputs.actorAdminId,
+      contentActorAdminId(actor),
+      actor.kind,
+      actor.kind === "service" ? actor.id : null,
+      actor.label,
       json(inputs.metadata ?? {}),
     ],
   );
@@ -1719,8 +1743,9 @@ async function cancelScheduledPublication(db: DbQuery, articleId: string) {
 
 export async function createContentArticleCheckpoint(
   pool: Pool,
-  inputs: { id: string; expectedRevision: number; actorAdminId: string | null },
+  inputs: { id: string; expectedRevision: number; actor: ContentActorInput },
 ): Promise<ContentArticleVersionSummary> {
+  const actor = normalizeContentActor(inputs.actor);
   return tx(pool, async (db) => {
     const row = await requireArticleForUpdate(
       db,
@@ -1750,13 +1775,13 @@ export async function createContentArticleCheckpoint(
       inputs.id,
       draft,
       "checkpoint",
-      inputs.actorAdminId,
+      actor,
     );
     await insertContentAuditEvent(db, {
       action: "article.checkpoint_created",
       articleId: inputs.id,
       versionId: checkpoint.id,
-      actorAdminId: inputs.actorAdminId,
+      actor,
     });
     await db.query(
       `
@@ -1780,11 +1805,12 @@ export async function publishContentArticle(
   inputs: {
     id: string;
     expectedRevision: number;
-    actorAdminId: string | null;
+    actor: ContentActorInput;
     publishAt?: Date;
     requireApproval?: boolean;
   },
 ): Promise<ContentArticleMutationResult> {
+  const actor = normalizeContentActor(inputs.actor);
   return tx(pool, async (db) => {
     const row = await requireArticleForUpdate(
       db,
@@ -1829,7 +1855,7 @@ export async function publishContentArticle(
       inputs.id,
       existing.draft,
       scheduled ? "scheduled" : "published",
-      inputs.actorAdminId,
+      actor,
     );
     await cancelScheduledPublication(db, inputs.id);
     let previousSlug: string | null = null;
@@ -1845,7 +1871,7 @@ export async function publishContentArticle(
             updated_by_admin_id = $4
           where id = $1
         `,
-        [inputs.id, version.id, requestedAt, inputs.actorAdminId],
+        [inputs.id, version.id, requestedAt, contentActorAdminId(actor)],
       );
       await db.query(
         `
@@ -1888,7 +1914,7 @@ export async function publishContentArticle(
           version.tag_slugs,
           version.featured,
           now,
-          inputs.actorAdminId,
+          contentActorAdminId(actor),
         ],
       );
       await insertOutbox(db, {
@@ -1904,7 +1930,7 @@ export async function publishContentArticle(
       action: scheduled ? "article.scheduled" : "article.published",
       articleId: inputs.id,
       versionId: version.id,
-      actorAdminId: inputs.actorAdminId,
+      actor,
       metadata: scheduled
         ? { publishAt: requestedAt.toISOString() }
         : { previousSlug },
@@ -1926,8 +1952,9 @@ export async function publishContentArticle(
 
 export async function cancelContentArticleSchedule(
   pool: Pool,
-  inputs: { id: string; expectedRevision: number; actorAdminId: string | null },
+  inputs: { id: string; expectedRevision: number; actor: ContentActorInput },
 ): Promise<ContentArticleMutationResult> {
+  const actor = normalizeContentActor(inputs.actor);
   return tx(pool, async (db) => {
     const row = await requireArticleForUpdate(
       db,
@@ -1950,7 +1977,7 @@ export async function cancelContentArticleSchedule(
             updated_by_admin_id = $2
         where id = $1
       `,
-      [inputs.id, inputs.actorAdminId],
+      [inputs.id, contentActorAdminId(actor)],
     );
     await db.query(
       "update content_article_drafts set revision = revision + 1 where article_id = $1",
@@ -1960,7 +1987,7 @@ export async function cancelContentArticleSchedule(
       action: "article.schedule_cancelled",
       articleId: inputs.id,
       versionId: existing.scheduled.versionId,
-      actorAdminId: inputs.actorAdminId,
+      actor,
     });
     const updated = await getArticleRow(db, inputs.id);
     if (!updated) throw new Error("Content article could not be loaded");
@@ -1974,8 +2001,9 @@ export async function cancelContentArticleSchedule(
 
 export async function unpublishContentArticle(
   pool: Pool,
-  inputs: { id: string; expectedRevision: number; actorAdminId: string | null },
+  inputs: { id: string; expectedRevision: number; actor: ContentActorInput },
 ): Promise<ContentArticleMutationResult> {
+  const actor = normalizeContentActor(inputs.actor);
   return tx(pool, async (db) => {
     const row = await requireArticleForUpdate(
       db,
@@ -2012,7 +2040,7 @@ export async function unpublishContentArticle(
           updated_by_admin_id = $2
         where id = $1
       `,
-      [inputs.id, inputs.actorAdminId],
+      [inputs.id, contentActorAdminId(actor)],
     );
     if (existing.published) {
       await insertOutbox(db, {
@@ -2026,7 +2054,7 @@ export async function unpublishContentArticle(
       action: "article.unpublished",
       articleId: inputs.id,
       versionId: existing.published?.versionId ?? existing.scheduled?.versionId,
-      actorAdminId: inputs.actorAdminId,
+      actor,
     });
     await db.query(
       "update content_article_drafts set revision = revision + 1 where article_id = $1",
@@ -2044,8 +2072,9 @@ export async function unpublishContentArticle(
 
 export async function archiveContentArticle(
   pool: Pool,
-  inputs: { id: string; expectedRevision: number; actorAdminId: string | null },
+  inputs: { id: string; expectedRevision: number; actor: ContentActorInput },
 ): Promise<ContentArticleMutationResult> {
+  const actor = normalizeContentActor(inputs.actor);
   return tx(pool, async (db) => {
     const row = await requireArticleForUpdate(
       db,
@@ -2068,7 +2097,7 @@ export async function archiveContentArticle(
             scheduled_for = null, updated_by_admin_id = $2
         where id = $1
       `,
-      [inputs.id, inputs.actorAdminId],
+      [inputs.id, contentActorAdminId(actor)],
     );
     if (existing.published) {
       await insertOutbox(db, {
@@ -2083,7 +2112,7 @@ export async function archiveContentArticle(
       action: "article.archived",
       articleId: inputs.id,
       versionId: existing.published?.versionId ?? null,
-      actorAdminId: inputs.actorAdminId,
+      actor,
     });
     await db.query(
       "update content_article_drafts set revision = revision + 1 where article_id = $1",
@@ -2104,10 +2133,11 @@ export async function transitionContentArticleReview(
   inputs: {
     id: string;
     expectedRevision: number;
-    actorAdminId: string | null;
+    actor: ContentActorInput;
     status: ContentEditorialStatus;
   },
 ): Promise<ContentArticle> {
+  const actor = normalizeContentActor(inputs.actor);
   return tx(pool, async (db) => {
     const row = await requireArticleForUpdate(
       db,
@@ -2139,7 +2169,7 @@ export async function transitionContentArticleReview(
         set editorial_status = $2, updated_by_admin_id = $3
         where id = $1
       `,
-      [inputs.id, inputs.status, inputs.actorAdminId],
+      [inputs.id, inputs.status, contentActorAdminId(actor)],
     );
     await db.query(
       "update content_article_drafts set revision = revision + 1 where article_id = $1",
@@ -2148,7 +2178,7 @@ export async function transitionContentArticleReview(
     await insertContentAuditEvent(db, {
       action: `article.review_${inputs.status}`,
       articleId: inputs.id,
-      actorAdminId: inputs.actorAdminId,
+      actor,
     });
     const updated = await getArticleRow(db, inputs.id);
     if (!updated) throw new Error("Transitioned article could not be loaded");
@@ -2227,6 +2257,8 @@ export type ContentAuditEvent = {
   assetId: string | null;
   versionId: string | null;
   actorAdminId: string | null;
+  actorServicePrincipalId: string | null;
+  actor: ContentActor;
   metadata: Record<string, unknown>;
   createdAt: string;
 };
@@ -2245,13 +2277,16 @@ export async function listContentArticleAudit(
     asset_id: string | null;
     version_id: string | null;
     actor_admin_id: string | null;
+    actor_service_principal_id: string | null;
+    actor_kind: ContentActor["kind"];
+    actor_label: string;
     metadata: Record<string, unknown>;
     created_at: Date | string;
   }>(
     `
       select
         id, action, article_id, asset_id, version_id, actor_admin_id,
-        metadata, created_at
+        actor_service_principal_id, actor_kind, actor_label, metadata, created_at
       from content_audit_events
       where article_id = $1
         and (
@@ -2269,16 +2304,30 @@ export async function listContentArticleAudit(
     ],
   );
   const selected = rows.slice(0, inputs.limit);
-  const items = selected.map((row) => ({
-    id: String(row.id),
-    action: row.action,
-    articleId: row.article_id,
-    assetId: row.asset_id,
-    versionId: row.version_id,
-    actorAdminId: row.actor_admin_id,
-    metadata: row.metadata,
-    createdAt: requiredIso(row.created_at),
-  }));
+  const items = selected.map((row) => {
+    const actorId =
+      row.actor_kind === "admin"
+        ? row.actor_admin_id
+        : row.actor_kind === "service"
+          ? row.actor_service_principal_id
+          : null;
+    return {
+      id: String(row.id),
+      action: row.action,
+      articleId: row.article_id,
+      assetId: row.asset_id,
+      versionId: row.version_id,
+      actorAdminId: row.actor_admin_id,
+      actorServicePrincipalId: row.actor_service_principal_id,
+      actor: {
+        kind: row.actor_kind,
+        id: actorId,
+        label: row.actor_label,
+      } as ContentActor,
+      metadata: row.metadata,
+      createdAt: requiredIso(row.created_at),
+    };
+  });
   const last = items.at(-1);
   return {
     items,
@@ -2295,9 +2344,10 @@ export async function restoreContentArticleVersion(
     id: string;
     versionId: string;
     expectedRevision: number;
-    actorAdminId: string | null;
+    actor: ContentActorInput;
   },
 ): Promise<ContentArticleMutationResult> {
+  const actor = normalizeContentActor(inputs.actor);
   return tx(pool, async (db) => {
     const currentRow = await requireArticleForUpdate(
       db,
@@ -2378,7 +2428,7 @@ export async function restoreContentArticleVersion(
         snapshot.readingTimeMinutes,
         json(snapshot.toc),
         snapshot.contentHash,
-        inputs.actorAdminId,
+        contentActorAdminId(actor),
         inputs.expectedRevision,
       ],
     );
@@ -2399,7 +2449,7 @@ export async function restoreContentArticleVersion(
             updated_by_admin_id = $2
           where id = $1
         `,
-        [inputs.id, inputs.actorAdminId],
+        [inputs.id, contentActorAdminId(actor)],
       );
       await db.query(
         `update content_routes set kind = 'reserved' where article_id = $1 and kind = 'current'`,
@@ -2408,7 +2458,7 @@ export async function restoreContentArticleVersion(
     } else {
       await db.query(
         `update content_articles set editorial_status = 'draft', updated_by_admin_id = $2 where id = $1`,
-        [inputs.id, inputs.actorAdminId],
+        [inputs.id, contentActorAdminId(actor)],
       );
     }
     await syncDraftAssetUsages(db, inputs.id, draftAssetReferences(snapshot));
@@ -2416,7 +2466,7 @@ export async function restoreContentArticleVersion(
       action: "article.version_restored",
       articleId: inputs.id,
       versionId: inputs.versionId,
-      actorAdminId: inputs.actorAdminId,
+      actor,
     });
     const updated = await getArticleRow(db, inputs.id);
     if (!updated) throw new Error("Restored article could not be loaded");

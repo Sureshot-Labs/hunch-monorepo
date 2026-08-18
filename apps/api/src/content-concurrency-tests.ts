@@ -64,7 +64,7 @@ async function scheduleArticle(label: string) {
   const scheduled = await publishContentArticle(pool, {
     id: article.id,
     expectedRevision: article.draft.revision,
-    actorAdminId: null,
+    actor: null,
     publishAt: new Date(Date.now() + 60_000),
     requireApproval: false,
   });
@@ -151,7 +151,7 @@ try {
       cancelContentArticleSchedule(pool, {
         id: race.id,
         expectedRevision: race.draft.revision,
-        actorAdminId: null,
+        actor: null,
       }),
       publishDueContentVersions(pool, 1, `test-race-${index}-${suffix}`),
     ]);

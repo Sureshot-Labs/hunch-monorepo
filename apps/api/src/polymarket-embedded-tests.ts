@@ -546,10 +546,14 @@ const tests: TestCase[] = [
   },
 ];
 
+const originalFundingRouter = env.polymarketFundingRouterAddress;
+env.polymarketFundingRouterAddress ||=
+  "0x0fEF62E1CD0600C132070855A45443852940EE72";
 let passed = 0;
 for (const test of tests) {
   await test.run();
   passed += 1;
 }
+env.polymarketFundingRouterAddress = originalFundingRouter;
 
 console.log(`[polymarket-embedded-tests] passed ${passed}/${tests.length}`);

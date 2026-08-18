@@ -5458,12 +5458,14 @@ export async function buildTelegramBotTradingMarketMessage(input: {
         ? "Trade in Hunch"
         : "Open market",
   });
-  if (input.context?.returnCallbackData) {
-    keyboard.push([
-      { callback_data: input.context.returnCallbackData, text: "⬅️ Back" },
-    ]);
-  } else {
-    keyboard.push([{ callback_data: "hm:v1:home", text: "🏠 Home" }]);
+  if (!input.isAdminTest && !input.publicBrowseOnly) {
+    if (input.context?.returnCallbackData) {
+      keyboard.push([
+        { callback_data: input.context.returnCallbackData, text: "⬅️ Back" },
+      ]);
+    } else {
+      keyboard.push([{ callback_data: "hm:v1:home", text: "🏠 Home" }]);
+    }
   }
 
   const marketIdentityStartIndex = 2;
