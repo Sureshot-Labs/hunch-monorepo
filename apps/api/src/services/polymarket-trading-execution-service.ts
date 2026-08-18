@@ -4775,6 +4775,27 @@ export async function syncPolymarketBalanceAllowanceRoute(input: {
   };
 }
 
+async function syncPolymarketCollateralAfterFunding(input: {
+  log?: PolymarketRouteLogger | null;
+  signer: string;
+  userId: string;
+}): Promise<void> {
+  const balanceSync = await syncPolymarketBalanceAllowanceRoute({
+    body: { assetType: "COLLATERAL", signatureType: 3 },
+    log: input.log,
+    signer: input.signer,
+    userId: input.userId,
+  });
+  if (!balanceSync.ok) {
+    throw tradingError({
+      code: "funding_balance_sync_unavailable",
+      message:
+        "Polymarket collateral balance sync is temporarily unavailable after funding.",
+      venue: "polymarket",
+    });
+  }
+}
+
 export async function cancelPolymarketOrderRoute(input: {
   body: PolymarketCancelOrderBody;
   log?: PolymarketRouteLogger | null;
@@ -8145,6 +8166,17 @@ async function prepareTrade(
       await resolvePolymarketBotPolicyFundingCapability();
     const canPrepareControllerPusdApproval =
       intent.actor.kind === "telegram_bot" && !intent.fundingReservation;
+    // A durable Telegram FundingOperation proves the exact on-chain Deposit
+    // Wallet credit, but Polymarket's CLOB balance may not reflect it yet.
+    // Synchronize before the first executable-funds read; otherwise a just-ready
+    // funding operation can be incorrectly rejected before submit.
+    if (intent.actor.kind === "telegram_bot" && intent.fundingReservation) {
+      await syncPolymarketCollateralAfterFunding({
+        log: ctx.logger,
+        signer,
+        userId: intent.actor.userId,
+      });
+    }
     let setupBroadcastBoundaryEntered = false;
     const enterSetupBroadcastBoundary = async () => {
       if (setupBroadcastBoundaryEntered) return;
@@ -8286,19 +8318,11 @@ async function prepareTrade(
           sponsor: true,
         },
       });
-      const balanceSync = await syncPolymarketBalanceAllowanceRoute({
-        body: { assetType: "COLLATERAL", signatureType: 3 },
+      await syncPolymarketCollateralAfterFunding({
         log: ctx.logger,
         signer,
         userId: intent.actor.userId,
       });
-      if (!balanceSync.ok) {
-        throw tradingError({
-          code: "insufficient_readiness",
-          message: "Polymarket balance sync failed after funding.",
-          venue: "polymarket",
-        });
-      }
       executableFunds = await resolvePolymarketMaxSpendFunds({
         allowMissingRouterPusdApproval:
           canPrepareControllerPusdApproval &&

@@ -3702,7 +3702,11 @@ const tests: TestCase[] = [
         prepareBlock,
         /onBeforeBroadcast: enterSetupBroadcastBoundary/,
       );
-      assert.match(prepareBlock, /syncPolymarketBalanceAllowanceRoute/);
+      assert.match(prepareBlock, /syncPolymarketCollateralAfterFunding/);
+      assert.match(
+        prepareBlock,
+        /intent\.actor\.kind === "telegram_bot" && intent\.fundingReservation[\s\S]*?syncPolymarketCollateralAfterFunding[\s\S]*?let executableFunds = await resolvePolymarketMaxSpendFunds/,
+      );
       assert.ok(preflightIndex > builderValidationIndex);
       assert.ok(setupFenceIndex > preflightIndex);
       assert.ok(fundingIndex > preflightIndex);
