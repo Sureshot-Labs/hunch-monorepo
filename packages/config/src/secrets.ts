@@ -73,6 +73,7 @@ export const SECRET_BUNDLE_KEYS: Record<BundleName, readonly string[]> = {
     "ALCHEMY_BASE_NFT_BASE_URL",
   ],
   api: [
+    "ADMIN_SERVICE_TOKEN_PEPPER",
     "PRIVY_APP_ID",
     "PRIVY_APP_SECRET",
     "PRIVY_WALLET_AUTHORIZATION_ID",

@@ -20,9 +20,19 @@ export type PrivyBotPolicyProfile = "buy" | "sell" | "buy_sell";
 
 export type PolicyValidationResult = {
   fundingMaxRaw?: bigint | null;
+  /**
+   * A staged policy may omit this rule while the Funding Router is not used
+   * for controller-wallet top-ups.  When it is present, its shape is closed
+   * over the canonical Polygon pUSD token and immutable Funding Router.
+   */
+  fundingRouterControllerApprovalPresent?: boolean;
   issues: string[];
   valid: boolean;
 };
+
+export const POLYMARKET_FUNDING_ROUTER_MAX_APPROVAL_RAW = (1n << 256n) - 1n;
+
+const POLYMARKET_PUSD_ADDRESS = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB";
 
 type TypedDataField = { name: string; type: string };
 
@@ -248,6 +258,34 @@ function hasExactFundingAbi(condition: Record<string, unknown>): boolean {
   });
 }
 
+function hasExactFundingRouterApprovalAbi(
+  condition: Record<string, unknown>,
+): boolean {
+  const abi = condition.abi;
+  if (!Array.isArray(abi) || abi.length !== 1 || !isRecord(abi[0])) {
+    return false;
+  }
+  const item = abi[0];
+  if (
+    item.type !== "function" ||
+    item.name !== "approve" ||
+    item.stateMutability !== "nonpayable" ||
+    !Array.isArray(item.inputs) ||
+    item.inputs.length !== 2
+  ) {
+    return false;
+  }
+  const inputs = item.inputs;
+  return ["spender", "amount"].every((name, index) => {
+    const parameter = inputs[index];
+    return (
+      isRecord(parameter) &&
+      parameter.name === name &&
+      parameter.type === (index === 0 ? "address" : "uint256")
+    );
+  });
+}
+
 function readExactFundingRuleCap(input: {
   conditions: Record<string, unknown>[];
   routerAddress: string;
@@ -307,11 +345,92 @@ function readExactFundingRuleCap(input: {
   }
 }
 
+function readExactFundingRouterControllerApprovalRule(input: {
+  conditions: Record<string, unknown>[];
+  fundingRouterAddress: string;
+  pUsdAddress: string;
+}): boolean {
+  if (
+    !hasExactCondition({
+      conditions: input.conditions,
+      field: "chain_id",
+      fieldSource: "ethereum_transaction",
+      value: String(POLYMARKET_POLYGON_CHAIN_ID),
+    }) ||
+    !hasExactAddressCondition({
+      conditions: input.conditions,
+      field: "to",
+      fieldSource: "ethereum_transaction",
+      value: input.pUsdAddress,
+    }) ||
+    !hasExactZeroCondition({
+      conditions: input.conditions,
+      field: "value",
+      fieldSource: "ethereum_transaction",
+    })
+  ) {
+    return false;
+  }
+  const calldataConditions = input.conditions.filter(
+    (condition) => condition.field_source === "ethereum_calldata",
+  );
+  if (
+    calldataConditions.length !== 3 ||
+    !calldataConditions.every(hasExactFundingRouterApprovalAbi)
+  ) {
+    return false;
+  }
+  const functionName = calldataConditions.find(
+    (condition) => condition.field === "function_name",
+  );
+  const spender = calldataConditions.find(
+    (condition) => condition.field === "approve.spender",
+  );
+  const amount = calldataConditions.find(
+    (condition) => condition.field === "approve.amount",
+  );
+  return Boolean(
+    functionName &&
+    functionName.operator === "eq" &&
+    stringValues(functionName.value).length === 1 &&
+    stringValues(functionName.value).some(
+      (value) => normalizeScalar(value) === "approve",
+    ) &&
+    spender &&
+    spender.operator === "eq" &&
+    hasExactFundingRouterApprovalAbi(spender) &&
+    addressConditionValues({
+      conditions: [spender],
+      field: "approve.spender",
+      fieldSource: "ethereum_calldata",
+      operators: ["eq"],
+    }).length === 1 &&
+    hasExactAddressCondition({
+      conditions: [spender],
+      field: "approve.spender",
+      fieldSource: "ethereum_calldata",
+      value: input.fundingRouterAddress,
+    }) &&
+    amount &&
+    amount.operator === "eq" &&
+    hasExactFundingRouterApprovalAbi(amount) &&
+    stringValues(amount.value).length === 1 &&
+    stringValues(amount.value).some((value) => {
+      try {
+        return BigInt(value) === POLYMARKET_FUNDING_ROUTER_MAX_APPROVAL_RAW;
+      } catch {
+        return false;
+      }
+    }),
+  );
+}
+
 export function validatePolymarketBotPolicy(input: {
   exchangeAddresses: readonly string[];
   fundingRouterAddress: string;
   maxBuyUsd: number;
   policy: PrivyPolicyMetadata;
+  pUsdAddress?: string;
 }): PolicyValidationResult {
   const issues: string[] = [];
   if (input.policy.chainType !== "ethereum") {
@@ -322,8 +441,13 @@ export function validatePolymarketBotPolicy(input: {
   }
   const normalizedFundingRouter =
     canonicalEvmAddress(input.fundingRouterAddress) ?? "";
+  const normalizedPusd =
+    canonicalEvmAddress(input.pUsdAddress ?? POLYMARKET_PUSD_ADDRESS) ?? "";
   if (!normalizedFundingRouter) {
     issues.push("Funding router address must be configured.");
+  }
+  if (!normalizedPusd) {
+    issues.push("Polygon pUSD address must be configured.");
   }
   const allowedExchangeAddresses = canonicalEvmAddressSet(
     input.exchangeAddresses,
@@ -337,6 +461,7 @@ export function validatePolymarketBotPolicy(input: {
   let clobAuthCovered = false;
   let fundingCovered = false;
   let fundingMaxRaw: bigint | null = null;
+  let fundingRouterControllerApprovalPresent = false;
   const directCoverage = new Set<string>();
   const depositCoverage = new Set<string>();
   const allowRules = input.policy.rules.filter(
@@ -358,6 +483,19 @@ export function validatePolymarketBotPolicy(input: {
   for (const rule of allowRules) {
     const conditions = readPolicyConditions(rule);
     if (rule.method === "eth_sendTransaction") {
+      const controllerApproval = readExactFundingRouterControllerApprovalRule({
+        conditions,
+        fundingRouterAddress: normalizedFundingRouter,
+        pUsdAddress: normalizedPusd,
+      });
+      if (controllerApproval) {
+        if (fundingRouterControllerApprovalPresent) {
+          issues.push("Funding Router controller approval rule is duplicated.");
+        } else {
+          fundingRouterControllerApprovalPresent = true;
+        }
+        continue;
+      }
       const cap = readExactFundingRuleCap({
         conditions,
         routerAddress: normalizedFundingRouter,
@@ -470,6 +608,7 @@ export function validatePolymarketBotPolicy(input: {
   }
   return {
     fundingMaxRaw: issues.length === 0 ? fundingMaxRaw : null,
+    fundingRouterControllerApprovalPresent,
     issues,
     valid: issues.length === 0,
   };

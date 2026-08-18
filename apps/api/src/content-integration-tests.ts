@@ -119,7 +119,7 @@ try {
   await publishContentArticle(pool, {
     id: relatedCreated.article.id,
     expectedRevision: 1,
-    actorAdminId: null,
+    actor: null,
     requireApproval: false,
   });
 
@@ -183,7 +183,7 @@ try {
   const firstPublished = await publishContentArticle(pool, {
     id: articleId,
     expectedRevision: 1,
-    actorAdminId: null,
+    actor: null,
     requireApproval: false,
   });
   assert.equal(firstPublished.article.status, "published");
@@ -210,13 +210,13 @@ try {
   const checkpoint = await createContentArticleCheckpoint(pool, {
     id: articleId,
     expectedRevision: 2,
-    actorAdminId: null,
+    actor: null,
   });
   assert.equal(checkpoint.kind, "checkpoint");
   const duplicateCheckpoint = await createContentArticleCheckpoint(pool, {
     id: articleId,
     expectedRevision: 2,
-    actorAdminId: null,
+    actor: null,
   });
   assert.equal(duplicateCheckpoint.id, checkpoint.id);
 
@@ -256,7 +256,7 @@ try {
   const republished = await publishContentArticle(pool, {
     id: articleId,
     expectedRevision: 3,
-    actorAdminId: null,
+    actor: null,
     requireApproval: false,
   });
   assert.equal(republished.article.draft.revision, 4);
@@ -307,7 +307,7 @@ try {
     id: articleId,
     versionId: firstVersion.id,
     expectedRevision: 4,
-    actorAdminId: null,
+    actor: null,
   });
   assert.equal(restored.article.draft.slug, originalSlug);
   assert.equal(restored.article.draft.revision, 5);
@@ -319,7 +319,7 @@ try {
   const unpublished = await unpublishContentArticle(pool, {
     id: articleId,
     expectedRevision: 5,
-    actorAdminId: null,
+    actor: null,
   });
   assert.equal(unpublished.article.status, "draft");
   assert.equal(unpublished.article.draft.revision, 6);
@@ -328,7 +328,7 @@ try {
   const scheduled = await publishContentArticle(pool, {
     id: articleId,
     expectedRevision: 6,
-    actorAdminId: null,
+    actor: null,
     publishAt: new Date(Date.now() + 60_000),
     requireApproval: false,
   });
@@ -338,7 +338,7 @@ try {
   const cancelled = await cancelContentArticleSchedule(pool, {
     id: articleId,
     expectedRevision: 7,
-    actorAdminId: null,
+    actor: null,
   });
   assert.equal(cancelled.article.scheduled, null);
   assert.equal(cancelled.article.draft.revision, 8);
@@ -347,7 +347,7 @@ try {
   const rescheduled = await publishContentArticle(pool, {
     id: articleId,
     expectedRevision: 8,
-    actorAdminId: null,
+    actor: null,
     publishAt: new Date(Date.now() + 60_000),
     requireApproval: false,
   });

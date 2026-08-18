@@ -249,6 +249,23 @@ try {
   assert.match(ready.storageKey, /^content\//);
   assert.equal(objects.has(ready.storageKey), true);
   storageKeys.add(ready.storageKey);
+  await assert.rejects(
+    () =>
+      completeContentAssetUpload(
+        testPool,
+        ready.id,
+        {
+          byteSize: png.length,
+          checksumSha256: "f".repeat(64),
+          width: 1,
+          height: 1,
+        },
+        null,
+      ),
+    (error: unknown) =>
+      error instanceof ContentError &&
+      error.code === "content_asset_complete_mismatch",
+  );
 
   await prioritizeStorageDeletion(intent.asset.storageKey);
   await dispatchContentStorageDeletions(
@@ -270,6 +287,37 @@ try {
     logger,
   );
   assert.equal(objects.has(ready.storageKey), false);
+
+  const missingIntent = await createContentAssetUpload(
+    testPool,
+    {
+      kind: "image",
+      originalFilename: "missing.png",
+      mimeType: "image/png",
+      expectedByteSize: png.length,
+      checksumSha256: pngChecksum,
+    },
+    null,
+  );
+  assetIds.push(missingIntent.asset.id);
+  storageKeys.add(missingIntent.asset.storageKey);
+  await assert.rejects(
+    () =>
+      completeContentAssetUpload(
+        testPool,
+        missingIntent.asset.id,
+        { byteSize: png.length, checksumSha256: pngChecksum },
+        null,
+      ),
+    (error: unknown) => {
+      assert.ok(error instanceof ContentError);
+      assert.equal(error.code, "content_asset_not_ready");
+      assert.deepEqual(error.issues, [
+        "uploaded object could not be inspected",
+      ]);
+      return true;
+    },
+  );
 
   const fakePdf = Buffer.from("this is not a pdf", "utf8");
   const fakePdfChecksum = checksumHex(fakePdf);
