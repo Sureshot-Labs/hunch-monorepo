@@ -277,6 +277,37 @@ test("requires a SHA-256 checksum for upload creation and completion", () => {
   );
 });
 
+test("rejects unsafe asset credit URLs", () => {
+  const asset = {
+    kind: "image",
+    originalFilename: "image.png",
+    mimeType: "image/png",
+    expectedByteSize: 100,
+    checksumSha256: "0".repeat(64),
+  };
+  assert.equal(
+    contentAssetCreateBodySchema.safeParse({
+      ...asset,
+      creditUrl: "not a URL",
+    }).success,
+    false,
+  );
+  assert.equal(
+    contentAssetCreateBodySchema.safeParse({
+      ...asset,
+      creditUrl: "javascript:alert(1)",
+    }).success,
+    false,
+  );
+  assert.equal(
+    contentAssetCreateBodySchema.safeParse({
+      ...asset,
+      creditUrl: "https://user:password@example.com/source",
+    }).success,
+    false,
+  );
+});
+
 test("coerces and bounds public pagination", () => {
   assert.equal(
     publicContentArticlesQuerySchema.parse({ limit: "25" }).limit,
@@ -856,12 +887,15 @@ test("registers gated protected routes and the content schema migrations", () =>
         "enable trigger content_article_versions_immutable",
       ),
   );
-  assert.match(contentDb, /0213_content_editorial_graph\.sql/);
-  assert.match(contentDb, /select count\(\*\) = 20/);
+  assert.match(contentDb, /0222_content_service_actor\.sql/);
+  assert.match(contentDb, /select count\(\*\) = 12/);
+  assert.match(contentDb, /select count\(\*\) = 25/);
   assert.match(contentDb, /content_outbox_version_id_fkey/);
   assert.ok(
     prebuiltDeploy.indexOf('"${compose[@]}" run --rm api') <
-      prebuiltDeploy.indexOf('"${compose[@]}" down --remove-orphans'),
+      prebuiltDeploy.indexOf(
+        '"${compose[@]}" stop "${application_services[@]}"',
+      ),
   );
   const migrationFailureGuard = prebuiltDeploy.match(
     /if ! "\$\{compose\[@\]\}" run --rm api[\s\S]*?Migration failed; existing application containers were left running\.[\s\S]*?exit 1[\s\S]*?fi/,
@@ -869,7 +903,9 @@ test("registers gated protected routes and the content schema migrations", () =>
   assert.ok(migrationFailureGuard);
   assert.ok(
     prebuiltDeploy.indexOf(migrationFailureGuard[0]) <
-      prebuiltDeploy.indexOf('"${compose[@]}" down --remove-orphans'),
+      prebuiltDeploy.indexOf(
+        '"${compose[@]}" stop "${application_services[@]}"',
+      ),
   );
   assert.equal(CONTENT_RENDERER_CONTRACT_ID, "hunch-content-document-v1");
 });

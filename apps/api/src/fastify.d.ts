@@ -5,6 +5,10 @@ import type {
   AdminActor,
   AdminSession,
 } from "./services/admin-auth.js";
+import type {
+  AdminServiceCredential,
+  AdminServicePrincipal,
+} from "./services/admin-service-auth.js";
 
 declare module "fastify" {
   interface FastifyRequest {
@@ -14,6 +18,8 @@ declare module "fastify" {
     adminAccount?: AdminAccount;
     adminActor?: AdminActor;
     adminSession?: AdminSession;
+    adminServicePrincipal?: AdminServicePrincipal;
+    adminServiceCredential?: AdminServiceCredential;
     _t0?: number;
   }
 }
