@@ -622,10 +622,12 @@ export class TelegramTradeShortfallFundingService {
     input: TelegramTradeShortfallIdentity,
   ): Promise<TelegramTradeShortfallInspection> {
     const destination = destinationAsset(input.venue);
-    let candidate: Readonly<{
-      plan: Awaited<ReturnType<FundingPlanningRuntime["liquidity"]>>;
-      profileId: string;
-    }> | null = null;
+    const plannedCandidates: Array<
+      Readonly<{
+        plan: Awaited<ReturnType<FundingPlanningRuntime["liquidity"]>>;
+        profileId: string;
+      }>
+    > = [];
     let completedProfileInspection = false;
     const unavailableReasonCodes: string[] = [];
     for (const profileId of telegramTradeShortfallExecutionProfiles(
@@ -665,11 +667,10 @@ export class TelegramTradeShortfallFundingService {
         requiredProfileId: profileId,
       });
       if (automated) {
-        candidate = { plan, profileId: automated.profileId };
-        break;
+        plannedCandidates.push({ plan, profileId: automated.profileId });
       }
     }
-    if (!candidate) {
+    if (plannedCandidates.length === 0) {
       if (!completedProfileInspection && unavailableReasonCodes.length > 0) {
         return {
           kind: "temporarily_unavailable",
@@ -681,16 +682,6 @@ export class TelegramTradeShortfallFundingService {
       // ordinary verified Deposit path; never claim that a retry will make an
       // unsupported composite executable.
       return { kind: "external_deposit_required" };
-    }
-    const profileId = candidate.profileId;
-    if (
-      !candidate.plan.destinationOptionId ||
-      !candidate.plan.venueBindingOptionId
-    ) {
-      return {
-        kind: "temporarily_unavailable",
-        reasonCodes: ["internal_route_destination_binding_unavailable"],
-      };
     }
     const controller = await resolveTelegramFundingProvisionWallet(this.pool, {
       userId: input.userId,
@@ -705,32 +696,55 @@ export class TelegramTradeShortfallFundingService {
         reasonCodes: ["internal_route_controller_wallet_unavailable"],
       };
     }
-    const authorizationInput = {
-      userId: input.userId,
-      telegramAccountId: input.telegramAccountId,
-      telegramUserId: input.telegramUserId,
-      controllerWalletId: controller.controllerWalletId,
-      destinationOptionId: candidate.plan.destinationOptionId,
-      venueBindingOptionId: candidate.plan.venueBindingOptionId,
-      venueId: input.venue,
-    } as const;
-    const provisioned = isPolymarketDepositRouterProfileId(profileId)
-      ? await ensureTelegramFundingAuthorization(this.pool, {
-          ...authorizationInput,
-          profileId: profileId as
-            | typeof POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID
-            | typeof POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
-        })
-      : await ensureTelegramRelayEvmFundingAuthorization(
-          this.pool,
-          { ...authorizationInput, profileId },
+    let candidate: (typeof plannedCandidates)[number] | null = null;
+    for (const plannedCandidate of plannedCandidates) {
+      if (
+        !plannedCandidate.plan.destinationOptionId ||
+        !plannedCandidate.plan.venueBindingOptionId
+      ) {
+        unavailableReasonCodes.push(
+          "internal_route_destination_binding_unavailable",
         );
-    if (!provisioned) {
+        continue;
+      }
+      const authorizationInput = {
+        userId: input.userId,
+        telegramAccountId: input.telegramAccountId,
+        telegramUserId: input.telegramUserId,
+        controllerWalletId: controller.controllerWalletId,
+        destinationOptionId: plannedCandidate.plan.destinationOptionId,
+        venueBindingOptionId: plannedCandidate.plan.venueBindingOptionId,
+        venueId: input.venue,
+      } as const;
+      const provisioned = isPolymarketDepositRouterProfileId(
+        plannedCandidate.profileId,
+      )
+        ? await ensureTelegramFundingAuthorization(this.pool, {
+            ...authorizationInput,
+            profileId: plannedCandidate.profileId as
+              | typeof POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID
+              | typeof POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
+          })
+        : await ensureTelegramRelayEvmFundingAuthorization(this.pool, {
+            ...authorizationInput,
+            profileId: plannedCandidate.profileId,
+          });
+      if (!provisioned) {
+        unavailableReasonCodes.push(
+          "internal_route_delegated_authority_unavailable",
+        );
+        continue;
+      }
+      candidate = plannedCandidate;
+      break;
+    }
+    if (!candidate) {
       return {
         kind: "temporarily_unavailable",
-        reasonCodes: ["internal_route_delegated_authority_unavailable"],
+        reasonCodes: [...new Set(unavailableReasonCodes)],
       };
     }
+    const profileId = candidate.profileId;
     let delegatedPlan: Awaited<ReturnType<FundingPlanningRuntime["liquidity"]>>;
     try {
       delegatedPlan = await this.runtime.liquidity(
