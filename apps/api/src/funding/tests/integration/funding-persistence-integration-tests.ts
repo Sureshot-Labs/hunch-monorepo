@@ -3768,6 +3768,22 @@ async function testTransactionalPersistenceContracts(): Promise<void> {
       },
       { stage: "terminal", status: "completed" },
     );
+    const sourceReservationsAfterConsumerResolution = await client.query<{
+      state: string;
+    }>(
+      `
+        select state
+        from balance_reservations
+        where operation_id = $1
+          and mode <> 'settled_for_consumer'
+      `,
+      [committedB.operation.id],
+    );
+    assert.deepEqual(
+      sourceReservationsAfterConsumerResolution.rows.map((row) => row.state),
+      ["released"],
+      "a completed shortfall cannot keep subtracting its pre-route source from later funding plans",
+    );
 
     await client.query(
       `

@@ -1542,6 +1542,18 @@ async function completeReadyFundingOperation(
     operation.status === "completed" &&
     operation.progressStage === "terminal"
   ) {
+    // A previous consumer-resolution commit may have completed before the
+    // source reservation was released.  The source debit is already final in
+    // this state; retaining it would understate the next route's available
+    // balance forever.  Do not touch the settled consumer reservation here.
+    await releaseCompletedTradeShortfallSourceReservationsInTransaction(
+      client,
+      {
+        operationId: operation.id,
+        userId: input.userId,
+        now: input.now,
+      },
+    );
     return;
   }
   if (
@@ -1569,6 +1581,58 @@ async function completeReadyFundingOperation(
     },
     now: input.now,
   });
+  await releaseCompletedTradeShortfallSourceReservationsInTransaction(
+    client,
+    {
+      operationId: operation.id,
+      userId: input.userId,
+      now: input.now,
+    },
+  );
+}
+
+/**
+ * A completed shortfall has already placed the exact destination amount at
+ * the venue.  Its source reservation is therefore no longer a liability.
+ * Keep the consumer reservation separate: it binds the next exact trade,
+ * whereas these reservations only guarded the route before it became ready.
+ */
+export async function releaseCompletedTradeShortfallSourceReservationsInTransaction(
+  client: Pick<PoolClient, "query">,
+  input: Readonly<{
+    operationId: string;
+    userId: string;
+    now?: Date;
+  }>,
+): Promise<number> {
+  const now = input.now ?? new Date();
+  const result = await client.query<{ id: string }>(
+    `
+      select reservation.id
+      from balance_reservations reservation
+      join funding_operations operation
+        on operation.id = reservation.operation_id
+       and operation.user_id = reservation.user_id
+      where reservation.operation_id = $1
+        and reservation.user_id = $2
+        and reservation.state = 'active'
+        and reservation.mode <> 'settled_for_consumer'
+        and operation.purpose = 'trade_shortfall'
+        and operation.status = 'completed'
+        and operation.progress_stage = 'terminal'
+      order by reservation.id
+      for update of reservation
+    `,
+    [input.operationId, input.userId],
+  );
+  for (const row of result.rows) {
+    await releaseFundingReservationInTransaction(client, {
+      reservationId: row.id,
+      outcomeReason: "completed_trade_shortfall_source_released",
+      now,
+    });
+  }
+  return result.rows.length;
 }
 
 export async function consumeFundingReservationForLinkedConsumerInTransaction(
