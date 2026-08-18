@@ -392,6 +392,7 @@ function buildValidPolymarketBuySellPolicy(): PrivyPolicyMetadata {
     id: "buy-sell-policy",
     rules: [
       ...buy.rules,
+      fundingRouterControllerApprovalRule(),
       structuredClone(sell.rules[1] as never),
       {
         action: "ALLOW",
