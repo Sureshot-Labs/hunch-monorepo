@@ -114,6 +114,35 @@ function validatePolymarketDepositRouterAction(
   throw new Error("unknown Polymarket Deposit Router profile");
 }
 
+/**
+ * The Router profiles have different source assets.  Keep the authority scope
+ * beside the action validator so every boundary re-check addresses the exact
+ * profile that was committed, rather than silently falling back to USDC.e.
+ */
+export function polymarketRouterAuthorityScope(
+  profileId: PolymarketWrapExecutionConfiguration["profileId"],
+) {
+  const sourceAssetId =
+    profileId === POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID
+      ? fundingSidecarRuntimeConfig.polymarketPusdAddress
+      : fundingSidecarRuntimeConfig.polymarketUsdceAddress;
+  return {
+    profileId,
+    securityClass: "closed_destination_transform" as const,
+    sourceAsset: {
+      networkId: "evm:137",
+      assetId: sourceAssetId,
+      decimals: 6,
+    },
+    destinationAsset: {
+      networkId: "evm:137",
+      assetId: fundingSidecarRuntimeConfig.polymarketPusdAddress,
+      decimals: 6,
+    },
+    venueId: "polymarket" as const,
+  };
+}
+
 export type DelegatedFundingExecutionClaim = Readonly<{
   action: NormalizedAction;
   allowanceMutationBaselineBlock?: string | null;
@@ -1274,6 +1303,7 @@ async function polymarketWrapPreBroadcastDecisionInTransaction(
         destinationOptionId: input.claim.destinationOptionId,
         venueBindingOptionId: input.claim.venueBindingOptionId,
         configuration: input.configuration,
+        ...polymarketRouterAuthorityScope(input.configuration.profileId),
         expectedAuthorizationId: input.claim.authorizationId,
         expectedAuthorizationFingerprint: input.claim.authorizationFingerprint,
         now: row.checked_at,

@@ -22,6 +22,10 @@ export type DelegatedFundingCapabilityDecision =
         | "allowance_observation_missing"
         | "allowance_owner_tx_mismatch"
         | "approval_dependency_missing"
+        | "authority_missing"
+        | "authority_operator_revoked"
+        | "authority_runtime_mismatch"
+        | "authority_snapshot_changed"
         | "prior_approval_proof_invalid"
         | "reservation_lane_missing";
       reasonCode:

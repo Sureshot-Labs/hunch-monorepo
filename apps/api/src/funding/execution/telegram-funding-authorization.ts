@@ -365,6 +365,7 @@ export async function resolveCurrentTelegramFundingAuthority(
     return {
       kind: "hard_invalid",
       reasonCode: "delegated_authority_invalid",
+      diagnosticCode: "authority_operator_revoked",
     };
   }
   const automationEnabled = preference.rows[0]?.desired_enabled === true;
@@ -384,8 +385,14 @@ export async function resolveCurrentTelegramFundingAuthority(
     lock: input.lock,
     requireTradingEnabled: automationEnabled,
   });
+  if (!authorization) {
+    return {
+      kind: "hard_invalid",
+      reasonCode: "delegated_authority_invalid",
+      diagnosticCode: "authority_missing",
+    };
+  }
   if (
-    !authorization ||
     (input.expectedAuthorizationId !== undefined &&
       authorization.id !== input.expectedAuthorizationId) ||
     (input.expectedAuthorizationFingerprint !== undefined &&
@@ -395,6 +402,7 @@ export async function resolveCurrentTelegramFundingAuthority(
     return {
       kind: "hard_invalid",
       reasonCode: "delegated_authority_invalid",
+      diagnosticCode: "authority_snapshot_changed",
     };
   }
   if (
@@ -417,6 +425,7 @@ export async function resolveCurrentTelegramFundingAuthority(
     return {
       kind: "hard_invalid",
       reasonCode: "delegated_authority_invalid",
+      diagnosticCode: "authority_runtime_mismatch",
     };
   }
   if (!automationEnabled) {

@@ -20,6 +20,7 @@ import type { NormalizedAction } from "../../domain/types.js";
 import {
   createPolymarketWrapDelegatedFundingProfile,
   delegatedFundingProfileOrder,
+  polymarketRouterAuthorityScope,
 } from "../../execution/delegated-funding-executor.js";
 import {
   loadPolymarketWrapExecutionConfiguration,
@@ -1271,6 +1272,26 @@ assert.equal(
   })?.profileId,
   POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
 );
+
+{
+  const pUsdScope = polymarketRouterAuthorityScope(
+    POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
+  );
+  const usdceScope = polymarketRouterAuthorityScope(
+    POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
+  );
+  assert.equal(pUsdScope.profileId, POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID);
+  assert.equal(
+    pUsdScope.sourceAsset.assetId,
+    pUsdScope.destinationAsset.assetId,
+    "pUSD Router funding must re-check the pUSD authority, not the USDC.e wrapper default",
+  );
+  assert.notEqual(
+    usdceScope.sourceAsset.assetId,
+    pUsdScope.sourceAsset.assetId,
+    "the two Router profiles intentionally have distinct source authority scopes",
+  );
+}
 
 const compiled = compileFundingIntentPolicy({
   version: 2,
