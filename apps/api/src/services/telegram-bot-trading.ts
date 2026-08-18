@@ -10986,14 +10986,26 @@ export async function handleTelegramBotTradingCallback(
         showAlert: true,
         text: "⚠️ Price moved. Review a new quote before trading.",
       });
+      const reopenMarketButton = buildTelegramTradingMiniAppButton({
+        appBaseUrl: input.appBaseUrl,
+        path: openMarketUrl(input.appBaseUrl, market),
+        telegramMiniAppEnabled: input.telegramMiniAppEnabled,
+        text: "Open market again",
+      });
       await input.sendMessage({
         chat_id: chatId,
         parse_mode: "MarkdownV2",
+        reply_markup: {
+          inline_keyboard: [
+            ...(reopenMarketButton ? [[reopenMarketButton]] : []),
+            [{ callback_data: "hm:v1:home", text: "🏠 Home" }],
+          ],
+        },
         text: formatTelegramTradeLifecycleMessageMarkdownV2({
           heading: "Trade not submitted.",
           lines: [
             "The quote moved beyond your confirmed tolerance.",
-            "Nothing was submitted. Send /market again for a new preview.",
+            "Nothing was submitted. Open the market for a new preview.",
           ],
           marketTitle: intent.market_title,
           venue: intent.venue,
