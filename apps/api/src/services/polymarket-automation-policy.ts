@@ -740,6 +740,7 @@ export function validatePolymarketBotSellPolicy(input: {
 type PolymarketPolicyRuleKind =
   | "clob_auth"
   | "funding"
+  | "funding_controller_approval"
   | "funding_wrap"
   | "direct_buy"
   | "deposit_buy"
@@ -751,6 +752,15 @@ function classifyPolymarketPolicyAllowRule(
   fundingRouterAddress: string,
 ): PolymarketPolicyRuleKind {
   if (rule.method === "eth_sendTransaction") {
+    if (
+      readExactFundingRouterControllerApprovalRule({
+        conditions: readPolicyConditions(rule),
+        fundingRouterAddress,
+        pUsdAddress: POLYMARKET_PUSD_ADDRESS,
+      })
+    ) {
+      return "funding_controller_approval";
+    }
     return isExactPolymarketDepositUsdceWrapRule({
       routerAddress: fundingRouterAddress,
       rule,
@@ -809,6 +819,7 @@ export function validatePolymarketBotPolicyProfile(input: {
     buy_sell: [
       "clob_auth",
       "funding",
+      "funding_controller_approval",
       "funding_wrap",
       "direct_buy",
       "deposit_buy",
@@ -889,7 +900,13 @@ export function validatePolymarketBotPolicyProfile(input: {
               fundingRouterAddress: input.fundingRouterAddress,
               maxBuyUsd: input.maxBuyUsd,
               policy: selectRules(
-                new Set(["clob_auth", "funding", "direct_buy", "deposit_buy"]),
+                new Set([
+                  "clob_auth",
+                  "funding",
+                  "funding_controller_approval",
+                  "direct_buy",
+                  "deposit_buy",
+                ]),
               ),
             }),
             validatePolymarketBotSellPolicy({
@@ -902,6 +919,11 @@ export function validatePolymarketBotPolicyProfile(input: {
     new Set([...shapeIssues, ...validations.flatMap((value) => value.issues)]),
   );
   return {
+    fundingRouterControllerApprovalPresent:
+      issues.length === 0 &&
+      validations.some(
+        (value) => value.fundingRouterControllerApprovalPresent === true,
+      ),
     fundingMaxRaw:
       issues.length === 0
         ? (validations.find((value) => value.fundingMaxRaw != null)
