@@ -1,4 +1,7 @@
-import { parseUnsignedDecimal } from "../account-value/decimal.js";
+import {
+  addUnsignedDecimals,
+  parseUnsignedDecimal,
+} from "../account-value/decimal.js";
 import type { AccountValueReadModel } from "../account-value/runtime-service.js";
 import { resolveKnownAccountAssetSymbol } from "../account-value/known-asset-catalog.js";
 import {
@@ -69,6 +72,71 @@ function venueLabel(venueId: string | null | undefined): string | null {
   if (venueId === "limitless") return "Limitless";
   if (venueId === "kalshi") return "Kalshi";
   return null;
+}
+
+function locationDetail(
+  component: AccountComponent,
+  key: string,
+): string | null {
+  const value = component.location.details[key];
+  return typeof value === "string" ? value : null;
+}
+
+function isPolymarketSafeFunder(component: AccountComponent): boolean {
+  return (
+    component.location.kind === "venue_account" &&
+    component.category === "cash" &&
+    locationDetail(component, "venueId") === "polymarket" &&
+    locationDetail(component, "polymarketFunderKind") === "safe"
+  );
+}
+
+function hasPolymarketDepositWallet(account: AccountValueReadModel): boolean {
+  return account.projection.components.some(
+    (component) =>
+      component.location.kind === "venue_account" &&
+      locationDetail(component, "venueId") === "polymarket" &&
+      locationDetail(component, "polymarketFunderKind") === "deposit_wallet",
+  );
+}
+
+function isNonRoutableLegacyPolymarketSafe(
+  account: AccountValueReadModel,
+  component: AccountComponent,
+): boolean {
+  return (
+    hasPolymarketDepositWallet(account) && isPolymarketSafeFunder(component)
+  );
+}
+
+function venueTradingBalance(input: {
+  account: AccountValueReadModel;
+  venueId: "polymarket" | "limitless";
+}): Readonly<{ legacyUsd: string; routableUsd: string }> {
+  const componentById = new Map(
+    input.account.projection.components.map((component) => [
+      component.componentId,
+      component,
+    ]),
+  );
+  const routable: string[] = [];
+  const legacy: string[] = [];
+  for (const availability of input.account.cashAvailability.components) {
+    if (availability.venueId !== input.venueId) continue;
+    const component = componentById.get(availability.componentId);
+    if (!component) continue;
+    const value = availability.availableEstimatedUsd;
+    if (value == null) continue;
+    if (isNonRoutableLegacyPolymarketSafe(input.account, component)) {
+      legacy.push(value);
+    } else {
+      routable.push(value);
+    }
+  }
+  return {
+    legacyUsd: addUnsignedDecimals(legacy),
+    routableUsd: addUnsignedDecimals(routable),
+  };
 }
 
 function groupDigits(value: string): string {
@@ -409,8 +477,8 @@ export function buildTelegramAccountValueMessage(input: {
       : account.headline.label;
   const cashLabel =
     account.cashAvailability.completeness === "partial"
-      ? "Known cash available · partial"
-      : "Cash available";
+      ? "Known cash holdings · partial"
+      : "Cash holdings";
   const portfolioPartial =
     account.projection.valuationCompleteness === "partial" ||
     account.projection.positionValuationCompleteness === "partial";
@@ -444,17 +512,22 @@ export function buildTelegramAccountValueMessage(input: {
   );
   for (const venueId of ["polymarket", "limitless"] as const) {
     const venue = account.venues[venueId];
-    const available = `${formatUsd(venue?.cashAvailableEstimatedUsd ?? "0")} ${
+    const trading = venueTradingBalance({ account, venueId });
+    const routable = `${formatUsd(trading.routableUsd)} ${
       account.cashAvailability.completeness === "partial"
-        ? "known available · partial"
-        : "available"
+        ? "known routable · partial"
+        : "routable"
     }`;
+    const legacy =
+      trading.legacyUsd === "0"
+        ? null
+        : `${formatUsd(trading.legacyUsd)} legacy wallet`;
     const portfolio = `${formatUsd(
       venue?.totalPortfolioEstimatedUsd ?? "0",
     )} ${portfolioPartial ? "known portfolio" : "portfolio"}`;
     lines.push(
       escapeTelegramMarkdownV2(
-        `• ${venueLabel(venueId)} — ${available} · ${portfolio}`,
+        `• ${venueLabel(venueId)} — ${[routable, legacy, portfolio].filter(Boolean).join(" · ")}`,
       ),
     );
   }
