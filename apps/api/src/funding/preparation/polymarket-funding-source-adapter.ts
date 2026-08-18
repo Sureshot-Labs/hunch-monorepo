@@ -8,6 +8,7 @@ import {
   rawForUsdCeil,
 } from "../../account-value/decimal.js";
 import {
+  buildPolymarketFundingPlan,
   buildMaximumPolymarketFundingPlan,
   PolymarketFundingPlanError,
 } from "../../services/polymarket-funding-router.js";
@@ -273,12 +274,28 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
             receiptRaw: input.requiredAmount.raw,
             snapshot,
           })
-        : buildPlan(
-            requiredRaw,
-            delegatedPusdFund
-              ? POLYMARKET_FUNDING_ROUTER_MAX_APPROVAL_RAW
-              : undefined,
-          );
+        : delegatedPusdFund
+          ? buildPolymarketFundingPlan({
+              signer: snapshot.signerAddress,
+              depositWallet: snapshot.depositWallet,
+              routerAddress: snapshot.routerAddress,
+              routerNonce: BigInt(snapshot.routerNonceRaw),
+              requiredRaw,
+              // The pUSD profile has one exact authority envelope.  It must
+              // never silently absorb USDC.e into a pUSD-only Router call.
+              depositPusdRaw: 0n,
+              depositLockedRaw: 0n,
+              depositUsdceRaw: 0n,
+              depositRouterUsdceAllowanceRaw: 0n,
+              signerPusdRaw: BigInt(snapshot.signerPusdRaw),
+              signerLockedRaw: 0n,
+              signerUsdceRaw: 0n,
+              routerPusdAllowanceRaw:
+                POLYMARKET_FUNDING_ROUTER_MAX_APPROVAL_RAW,
+              routerUsdceAllowanceRaw: 0n,
+              fundingCapRaw: BigInt(snapshot.fundingCapRaw),
+            })
+          : buildPlan(requiredRaw);
       if (!delegatedWrap && plan && BigInt(plan.totalAmountRaw) < requiredRaw) {
         const minimumRelayRaw = minimumAutomaticRelayDestinationRaw(input);
         if (minimumRelayRaw == null) return null;
@@ -404,30 +421,6 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
       kind: "venue_preparation",
       safeLabel: "Prepare Polymarket Deposit Wallet funds",
       source,
-      ...(delegatedWrap || delegatedPusdFund
-        ? {
-            sourceLegs: resolvedInputs.map((entry) => ({
-              sourceLegId: stableOpaqueId(
-                "source_leg",
-                canonicalJsonHash({
-                  componentId: entry.resolved.component.componentId,
-                  rawAmount: entry.rawAmount,
-                }),
-              ),
-              safeLabel: "Polymarket funding source",
-              source: {
-                kind: "owned_location" as const,
-                location: entry.resolved.component.location,
-              },
-              sourceAmount: { asset: entry.asset, raw: entry.rawAmount },
-              expectedDestination: plannedDestinationAmount,
-              minimumDestination: plannedDestinationAmount,
-              fees: [],
-              eta: { minSeconds: 5, maxSeconds: 90 },
-              requiredActions: [],
-            })),
-          }
-        : {}),
       amountMode: "exact_output",
       maximumSourceRaw: plan.totalAmountRaw,
       expectedDestination: plannedDestinationAmount,

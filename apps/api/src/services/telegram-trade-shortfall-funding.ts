@@ -480,11 +480,18 @@ export function selectTelegramTradeShortfallAutomatedOption(input: {
     ) {
       return [];
     }
-    const profileId = resolveTelegramTradeShortfallExecutionProfile(
-      option,
-      input.venue,
-      input.destination,
-    );
+    const profileId =
+      input.requiredProfileId &&
+      isPolymarketDepositRouterProfileId(input.requiredProfileId) &&
+      option.kind === "venue_preparation" &&
+      option.source.kind === "venue_preparation" &&
+      option.source.venueId === "polymarket"
+        ? input.requiredProfileId
+        : resolveTelegramTradeShortfallExecutionProfile(
+            option,
+            input.venue,
+            input.destination,
+          );
     if (
       !profileId ||
       (input.requiredProfileId && profileId !== input.requiredProfileId)
@@ -498,6 +505,55 @@ export function selectTelegramTradeShortfallAutomatedOption(input: {
     candidates[0] ??
     null
   );
+}
+
+function proposalSourceAmounts(
+  option: SourceOption,
+  profileId: string,
+  destination: Money,
+): FundingQuoteSummary["sourceAmounts"] {
+  const sourceLegAmounts = option.sourceLegs?.map((leg) => ({
+    safeLabel: leg.safeLabel,
+    amount: leg.sourceAmount,
+  }));
+  if (sourceLegAmounts?.length) return sourceLegAmounts;
+  if (
+    option.source.kind === "owned_location" &&
+    option.maximumSourceRaw != null
+  ) {
+    return [
+      {
+        safeLabel: option.safeLabel,
+        amount: {
+          asset: option.source.location.asset,
+          raw: option.maximumSourceRaw,
+        },
+      },
+    ];
+  }
+  if (
+    option.source.kind === "venue_preparation" &&
+    option.maximumSourceRaw != null &&
+    isPolymarketDepositRouterProfileId(profileId)
+  ) {
+    return [
+      {
+        safeLabel: "Polymarket controller balance",
+        amount: {
+          asset:
+            profileId === POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID
+              ? {
+                  networkId: "evm:137",
+                  assetId: POLYGON_USDCE_LEGACY,
+                  decimals: 6,
+                }
+              : destination.asset,
+          raw: option.maximumSourceRaw,
+        },
+      },
+    ];
+  }
+  return [];
 }
 
 function proposalFromOption(
@@ -521,22 +577,11 @@ function proposalFromOption(
   ) {
     throw new Error("trade funding quote is missing its exact destination");
   }
-  const sourceAmounts =
-    option.sourceLegs?.map((leg) => ({
-      safeLabel: leg.safeLabel,
-      amount: leg.sourceAmount,
-    })) ??
-    (option.source.kind === "owned_location" && option.maximumSourceRaw
-      ? [
-          {
-            safeLabel: option.safeLabel,
-            amount: {
-              asset: option.source.location.asset,
-              raw: option.maximumSourceRaw,
-            },
-          },
-        ]
-      : []);
+  const sourceAmounts = proposalSourceAmounts(
+    option,
+    profileId,
+    option.expectedDestination,
+  );
   if (sourceAmounts.length === 0) {
     throw new Error("trade funding route has no exact source amount");
   }
