@@ -1195,6 +1195,7 @@ async function createRelayFixture(
       controllerWalletId: base.actionWalletId,
       destinationOptionId: identity.destination_option_id,
       venueBindingOptionId: identity.venue_binding_option_id,
+      profileId: TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
       now,
     },
     {
@@ -1203,6 +1204,7 @@ async function createRelayFixture(
     },
   );
   assert.ok(authorization);
+  assert.equal(authorization.profileId, TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID);
   extraAuthorizationIds.push(authorization.id);
   const policy = await resolveFundingPolicy(pool);
   const relayVariantId = opaque("base_usdc_variant");
