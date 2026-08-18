@@ -5443,6 +5443,10 @@ try {
       now: new Date(now.getTime() + 2),
     });
   });
+  await reduceFundingOperation(pool, {
+    operationId: priorApprovalRoute.operationId,
+    now: new Date(now.getTime() + 3),
+  });
   assert.equal(priorApprovalSends, 1);
 
   const freshRelayRoute = await createRelayFixture("1000000", {
@@ -5456,8 +5460,8 @@ try {
   );
   assert.equal(
     priorApprovalReservation.rows[0]?.status,
-    "reserved",
-    "this fixture terminalizes directly; the reducer performs the production release",
+    "released",
+    "a terminal pre-deposit route must release its lane and rolling-cap slot",
   );
   const priorDepositAttempts = await pool.query<{ count: string }>(
     `select count(*)::text as count
@@ -6302,6 +6306,91 @@ try {
     parent_status: "recovery_required",
     reservation_status: "cleanup_required",
   });
+
+  // A cleanup_required reservation belongs to its cleanup child, not to the
+  // parent. Even if the parent is already terminal, it must keep the shared
+  // allowance lane until that child has itself reached a terminal outcome.
+  const foreignDriftCleanup = await pool.query<{
+    cleanup_operation_id: string;
+  }>(
+    `select cleanup_operation_id::text as cleanup_operation_id
+       from telegram_funding_authorization_reservations
+      where funding_operation_id = $1::uuid
+        and status = 'cleanup_required'`,
+    [foreignDriftRelay.operationId],
+  );
+  const foreignDriftCleanupOperationId =
+    foreignDriftCleanup.rows[0]?.cleanup_operation_id;
+  assert.ok(foreignDriftCleanupOperationId);
+  const foreignDriftParentTerminal = await pool.connect();
+  try {
+    await foreignDriftParentTerminal.query("begin");
+    await foreignDriftParentTerminal.query(
+      "set local session_replication_role = replica",
+    );
+    await foreignDriftParentTerminal.query(
+      `update funding_operations
+          set status = 'failed',
+              progress_stage = 'terminal',
+              completed_at = $2
+        where id = $1::uuid`,
+      [
+        foreignDriftRelay.operationId,
+        new Date(now.getTime() + 15 * 60_000 + 6),
+      ],
+    );
+    await foreignDriftParentTerminal.query("commit");
+  } catch (error) {
+    await foreignDriftParentTerminal.query("rollback");
+    throw error;
+  } finally {
+    foreignDriftParentTerminal.release();
+  }
+  const cleanupLaneFollower = await createRelayFixture("1000000", {
+    base: foreignDriftRelay.base,
+  });
+  const cleanupLaneFollowerBroadcasts: Array<string> = [];
+  await relayExecutor(
+    [relayAllowanceEvidence("2000000", "42", "foreign")],
+    (claim) => cleanupLaneFollowerBroadcasts.push(claim.operationId),
+  ).runBatch({ limit: 20, now: new Date(now.getTime() + 15 * 60_000 + 7) });
+  assert.equal(
+    cleanupLaneFollowerBroadcasts.length,
+    0,
+    "a live cleanup child must retain the lane even after its parent is terminal",
+  );
+
+  await reduceFundingOperation(pool, {
+    operationId: foreignDriftCleanupOperationId,
+    now: new Date(now.getTime() + 15 * 60_000 + 8),
+  });
+  const cleanupTerminalState = await pool.query<{
+    cleanup_status: string;
+    reservation_status: string;
+    reason: string | null;
+  }>(
+    `select cleanup.status as cleanup_status,
+            reservation.status as reservation_status,
+            reservation.resolution_evidence ->> 'reason' as reason
+       from telegram_funding_authorization_reservations reservation
+       join funding_operations cleanup
+         on cleanup.id = reservation.cleanup_operation_id
+      where cleanup.id = $1::uuid`,
+    [foreignDriftCleanupOperationId],
+  );
+  assert.deepEqual(cleanupTerminalState.rows[0], {
+    cleanup_status: "failed",
+    reason: "cleanup_terminal_without_allowance_change",
+    reservation_status: "released",
+  });
+  const cleanupLaneReleased = await relayExecutor(
+    [relayAllowanceEvidence("2000000", "42", "foreign")],
+    (claim) => cleanupLaneFollowerBroadcasts.push(claim.operationId),
+  ).runBatch({ limit: 20, now: new Date(now.getTime() + 15 * 60_000 + 9) });
+  assert.equal(cleanupLaneReleased.submitted, 1);
+  assert.deepEqual(cleanupLaneFollowerBroadcasts, [
+    cleanupLaneFollower.operationId,
+  ]);
 
   const foreignLastMutationRelay = await createRelayFixture();
   const foreignLastMutationBroadcasts = { value: 0 };

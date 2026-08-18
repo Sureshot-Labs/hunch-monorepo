@@ -2381,7 +2381,7 @@ function buildTelegramTradeConfirmationMessage(input: {
         "",
         formatTelegramVenueFieldMarkdownV2(input.intent.venue),
         `🎯 ${formatTelegramFieldMarkdownV2("Market", input.intent.market_title)}`,
-        `↔️ ${formatTelegramFieldMarkdownV2("Side", side)}`,
+        `↔️ ${formatTelegramFieldMarkdownV2("Side", sideLabel(input.market, side))}`,
         "",
         `📊 ${formatTelegramFieldMarkdownV2(
           action === "BUY" ? "Current ask" : "Current bid",
@@ -2530,7 +2530,7 @@ function buildTelegramTradeAppHandoffMessage(input: {
         "",
         formatTelegramVenueFieldMarkdownV2(input.intent.venue),
         `🎯 ${formatTelegramFieldMarkdownV2("Market", input.intent.market_title)}`,
-        `↔️ ${formatTelegramFieldMarkdownV2("Side", side)}`,
+        `↔️ ${formatTelegramFieldMarkdownV2("Side", sideLabel(input.market, side))}`,
         "",
         `📊 ${formatTelegramFieldMarkdownV2(
           "Current ask",
@@ -10119,6 +10119,7 @@ export async function handleTelegramBotTradingCallback(
       operation_status: string;
       progress_stage: string;
       reservation_id: string | null;
+      has_broadcast_boundary: boolean;
     }>(
       `select operation.status as operation_status,
               operation.progress_stage,
@@ -10131,7 +10132,17 @@ export async function handleTelegramBotTradingCallback(
                    and reservation.state = 'active'
                  order by reservation.id
                  limit 1
-              ) as reservation_id
+              ) as reservation_id,
+              exists (
+                select 1
+                  from funding_operation_step_attempts attempt
+                  join funding_operation_steps step on step.id = attempt.step_id
+                 where step.operation_id = operation.id
+                   and (
+                     attempt.broadcast_may_have_occurred
+                     or attempt.outcome in ('submitted', 'ambiguous', 'succeeded')
+                   )
+              ) as has_broadcast_boundary
          from funding_operations operation
         where operation.id = $1::uuid
           and operation.user_id = $2::uuid`,
@@ -10146,7 +10157,8 @@ export async function handleTelegramBotTradingCallback(
       const terminalFunding =
         funding?.operation_status === "cancelled" ||
         funding?.operation_status === "failed" ||
-        funding?.operation_status === "refunded";
+        funding?.operation_status === "refunded" ||
+        funding?.operation_status === "completed";
       if (terminalFunding) {
         await updateIntentStatus({
           allowedStatuses: ["funding"],
@@ -10178,16 +10190,29 @@ export async function handleTelegramBotTradingCallback(
             text: "Open market",
           })
         : null;
+      const canCancelPreparation =
+        !terminalFunding &&
+        funding?.operation_status !== "recovery_required" &&
+        funding?.operation_status !== "reconcile_required" &&
+        funding?.has_broadcast_boundary !== true;
       const progressRows = terminalFunding
-        ? telegramTradingButtonRows(openMarketButton)
+        ? [
+            ...telegramTradingButtonRows(openMarketButton),
+            [{ callback_data: "hm:v1:home", text: "🏠 Home" }],
+          ]
         : [
             [retryButton],
-            [
-              {
-                callback_data: `${TELEGRAM_BOT_TRADING_CALLBACK_PREFIX}:cancel:${intent.id}`,
-                text: "❌ Cancel preparation",
-              },
-            ],
+            ...(canCancelPreparation
+              ? [
+                  [
+                    {
+                      callback_data: `${TELEGRAM_BOT_TRADING_CALLBACK_PREFIX}:cancel:${intent.id}`,
+                      text: "❌ Cancel preparation",
+                    },
+                  ],
+                ]
+              : []),
+            [{ callback_data: "hm:v1:home", text: "🏠 Home" }],
           ];
       await input.sendMessage({
         chat_id: chatId,
@@ -10204,6 +10229,12 @@ export async function handleTelegramBotTradingCallback(
                 "No trade was submitted and this route will not be retried automatically. Open the market to build a fresh quote.",
               ]
             : [
+                intent.side && market
+                  ? `↔️ ${formatTelegramFieldMarkdownV2(
+                      "Side",
+                      sideLabel(market, intent.side),
+                    )}`
+                  : null,
                 `Order: ${formatUsd(Number(intent.amount_usd ?? 0))}`,
                 `Status: ${telegramFundingProgressLabel(
                   funding?.progress_stage ?? null,
@@ -10578,13 +10609,22 @@ export async function handleTelegramBotTradingCallback(
         ...fundingIdentity,
         proposal: tradeFundingProposal,
       });
+      await input.db.query(
+        `update telegram_trade_intents
+            set result = result || jsonb_build_object(
+                  'shortfallSideLabel', $2::text
+                ),
+                updated_at = clock_timestamp()
+          where id = $1::uuid
+            and status = 'funding'`,
+        [intent.id, sideLabel(market, side)],
+      );
       await input.answerCallbackQuery({
         callbackQueryId: input.callbackQuery.id,
         text: "✅ Internal funding started.",
       });
-      await input.sendMessage({
-        chat_id: chatId,
-        parse_mode: "MarkdownV2",
+      const startingMessage = {
+        parse_mode: "MarkdownV2" as const,
         reply_markup: {
           inline_keyboard: [
             [
@@ -10600,9 +10640,14 @@ export async function handleTelegramBotTradingCallback(
           ],
         },
         text: formatTelegramTradeLifecycleMessageMarkdownV2({
-          heading: "Preparing funds for this Buy.",
+          heading: "Starting preparation.",
           lines: [
+            `↔️ ${formatTelegramFieldMarkdownV2(
+              "Side",
+              sideLabel(market, side),
+            )}`,
             `Order: ${formatUsd(Number(intent.amount_usd ?? 0))}`,
+            "Status: Starting automatically.",
             "Source: existing Hunch balance.",
             ...(tradeFundingProposal.eta
               ? [
@@ -10616,7 +10661,8 @@ export async function handleTelegramBotTradingCallback(
           marketTitle: intent.market_title,
           venue: intent.venue,
         }),
-      });
+      };
+      await input.sendMessage({ chat_id: chatId, ...startingMessage });
       return true;
     } catch (error) {
       const safetyStop =

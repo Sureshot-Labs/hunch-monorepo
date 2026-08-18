@@ -129,6 +129,8 @@ const RELAY_ALLOWANCE_LANE_HEAD_PREDICATE = `not exists (
     from telegram_funding_authorization_reservations prior_reservation
     join telegram_funding_authorizations prior_funding_authorization
       on prior_funding_authorization.id = prior_reservation.authorization_id
+    join funding_operations prior_operation
+      on prior_operation.id = prior_reservation.funding_operation_id
    where prior_reservation.status in ('reserved', 'cleanup_required')
      and prior_reservation.id <> reservation.id
      and prior_funding_authorization.wallet_chain =
@@ -143,6 +145,14 @@ const RELAY_ALLOWANCE_LANE_HEAD_PREDICATE = `not exists (
            lower(funding_authorization.source_asset_id)
      and (prior_reservation.reserved_at, prior_reservation.id) <
            (reservation.reserved_at, reservation.id)
+     -- A completed/failed/cancelled route can no longer mutate this allowance.
+     -- Its accounting row may be retained for audit, but it must not retain the
+     -- shared lane forever. cleanup_required deliberately remains a head:
+     -- that state represents a separately-live cleanup operation.
+     and (
+       prior_reservation.status = 'cleanup_required'
+       or prior_operation.status not in ('completed', 'refunded', 'failed', 'cancelled')
+     )
 )`;
 
 export async function readRelayEvmAllowance(
@@ -3474,9 +3484,11 @@ async function preBroadcastRelay(
   // is the dependency fence for the following deposit.
   if (validated.kind === "approve") return { kind: "allowed" as const };
   // Relay can omit approve when an existing controller allowance already
-  // covers this exact deposit. The policy still constrains the eventual
-  // deposit calldata; do not invent an approval receipt or require ownership
-  // provenance for an allowance this route did not create.
+  // covers this exact deposit. That allowance may be a prior Hunch route or
+  // a user-managed allowance: it is never authority by itself. The current
+  // route still has its own active reservation and exact policy-bound Relay
+  // deposit calldata, so do not invent an approval receipt, require historic
+  // ownership provenance, or schedule a zero-cleanup for it.
   if (usesPreexistingAllowance) {
     const expected = BigInt(input.claim.receiptRaw);
     if (observedAllowance < expected) {

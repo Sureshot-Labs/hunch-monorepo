@@ -1151,6 +1151,36 @@ export async function reduceFundingOperationInTransaction(
       [operation.id, operation.status, now],
     );
   }
+  if (operation.status === "failed" || operation.status === "cancelled") {
+    // A terminal route cannot retain an allowance lane or rolling-cap slot.
+    // A direct reservation belongs to this operation; a cleanup_required row
+    // belongs to its zero-allowance cleanup child. Both are safe to release
+    // once that exact operation is terminal: neither can still broadcast.
+    await client.query(
+      `update telegram_funding_authorization_reservations reservation
+          set status = 'released',
+              resolved_at = $2,
+              resolution_evidence = resolution_evidence || jsonb_build_object(
+                'operationStatus', $3::text,
+                'operationId', $1::text,
+                'reason', case
+                  when reservation.cleanup_operation_id = $1::uuid
+                    then 'cleanup_terminal_without_allowance_change'
+                  else 'terminal_without_source_debit'
+                end
+              ),
+              updated_at = $2
+        where (
+                reservation.funding_operation_id = $1::uuid
+                and reservation.status = 'reserved'
+              )
+           or (
+                reservation.cleanup_operation_id = $1::uuid
+                and reservation.status = 'cleanup_required'
+              )`,
+      [operation.id, now, operation.status],
+    );
+  }
 
   return {
     operationId: operation.id,
