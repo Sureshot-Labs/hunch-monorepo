@@ -12,6 +12,7 @@ import { FundingPlannerError } from "../funding/planner/money.js";
 import { FundingPlanningRuntime } from "../funding/planner/runtime-service.js";
 import { canonicalJsonHash } from "../funding/persistence/canonical.js";
 import { lockFundingAuthorizationReservationScope } from "../funding/persistence/funding-authorization-reservation-lock.js";
+import { releaseCompletedTradeShortfallSourceReservationsInTransaction } from "../funding/persistence/funding-evidence-repository.js";
 import { lockFundingPolicyForTransaction } from "../funding/policies/funding-policy-service.js";
 import {
   ensureTelegramFundingAuthorization,
@@ -597,6 +598,42 @@ export class TelegramTradeShortfallFundingService {
   async inspect(
     input: TelegramTradeShortfallIdentity,
   ): Promise<TelegramTradeShortfallInspection> {
+    // This is accounting repair, not a route retry.  A prior shortfall may
+    // have reached the venue, then lost its consumer before submission.  Its
+    // terminal source reservation must not suppress the fresh plan's real
+    // wallet balance.
+    await tx(this.pool, async (client) => {
+      const completed = await client.query<{ id: string }>(
+        `
+          select id
+          from funding_operations
+          where user_id = $1
+            and purpose = 'trade_shortfall'
+            and status = 'completed'
+            and progress_stage = 'terminal'
+            and exists (
+              select 1
+              from balance_reservations reservation
+              where reservation.operation_id = funding_operations.id
+                and reservation.user_id = funding_operations.user_id
+                and reservation.state = 'active'
+                and reservation.mode <> 'settled_for_consumer'
+            )
+          order by updated_at
+          for update
+        `,
+        [input.userId],
+      );
+      for (const operation of completed.rows) {
+        await releaseCompletedTradeShortfallSourceReservationsInTransaction(
+          client,
+          {
+            operationId: operation.id,
+            userId: input.userId,
+          },
+        );
+      }
+    });
     const destination = destinationAsset(input.venue);
     const plannedCandidates: Array<
       Readonly<{
