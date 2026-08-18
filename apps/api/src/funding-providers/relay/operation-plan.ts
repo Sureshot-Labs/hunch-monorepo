@@ -256,18 +256,28 @@ export function relayDelegatedCommitSteps(
     serverExecutionProfileId: string;
   }>,
 ): readonly FundingCommitStep[] {
+  const quotedDepositStep =
+    input.steps.length === 1
+      ? input.steps[0]
+      : input.steps.length === 2
+        ? input.steps[1]
+        : undefined;
+  const usesExistingAllowance = input.steps.length === 1;
   if (
-    input.steps.length !== 2 ||
-    typeof input.steps[0]?.normalizedAction.actionId !== "string" ||
-    !input.steps[0].normalizedAction.actionId.endsWith(":approve") ||
-    typeof input.steps[1]?.normalizedAction.actionId !== "string" ||
-    !input.steps[1].normalizedAction.actionId.endsWith(":deposit")
+    !quotedDepositStep ||
+    typeof quotedDepositStep.normalizedAction.actionId !== "string" ||
+    !quotedDepositStep.normalizedAction.actionId.endsWith(":deposit") ||
+    (usesExistingAllowance && quotedDepositStep.dependsOnOrdinal !== null) ||
+    (!usesExistingAllowance &&
+      (typeof input.steps[0]?.normalizedAction.actionId !== "string" ||
+        !input.steps[0].normalizedAction.actionId.endsWith(":approve") ||
+        input.steps[0].dependsOnOrdinal !== null ||
+        quotedDepositStep.dependsOnOrdinal !== 0))
   ) {
     throw new Error(
-      "delegated Relay EVM route requires exact approve/deposit steps",
+      "delegated Relay EVM route requires exact deposit or approve/deposit steps",
     );
   }
-  const quotedDepositStep = input.steps[1];
   const quotedDepositAction = quotedDepositStep.normalizedAction;
   if (
     quotedDepositAction.kind !== "evm_transaction" ||
@@ -292,32 +302,37 @@ export function relayDelegatedCommitSteps(
     ...quotedDepositAction,
     data: canonicalDeposit.data,
   });
-  const committedSteps = [
-    input.steps[0],
-    {
-      ...quotedDepositStep,
-      actionFingerprint: canonicalJsonHash(canonicalDepositAction),
-      normalizedAction: canonicalDepositAction,
-      actionValidationResult: jsonRecord({
-        ...quotedDepositStep.actionValidationResult,
-        quotedActionFingerprint: quotedDepositStep.actionFingerprint,
-        quotedDepositorAddress: input.profile.address,
-        committedDepositorMode: "msg_sender_via_zero",
-        relayOrderId: canonicalDeposit.orderId,
-      }),
-    },
-  ];
+  const committedDepositStep = {
+    ...quotedDepositStep,
+    actionFingerprint: canonicalJsonHash(canonicalDepositAction),
+    normalizedAction: canonicalDepositAction,
+    actionValidationResult: jsonRecord({
+      ...quotedDepositStep.actionValidationResult,
+      quotedActionFingerprint: quotedDepositStep.actionFingerprint,
+      quotedDepositorAddress: input.profile.address,
+      committedDepositorMode: "msg_sender_via_zero",
+      relayOrderId: canonicalDeposit.orderId,
+    }),
+  };
+  const committedSteps = usesExistingAllowance
+    ? [committedDepositStep]
+    : [input.steps[0] as FundingCommitStep, committedDepositStep];
   return committedSteps.map((step, ordinal) => ({
     ...step,
-    stepKind: ordinal === 0 ? "approval" : step.stepKind,
+    stepKind:
+      !usesExistingAllowance && ordinal === 0 ? "approval" : step.stepKind,
     state: "planned",
     executorId: input.serverExecutionProfileId,
     actionValidationResult: jsonRecord({
       ...step.actionValidationResult,
       delegatedProfileId: input.serverExecutionProfileId,
-      relayStepKind: ordinal === 0 ? "approve" : "deposit",
+      relayStepKind:
+        !usesExistingAllowance && ordinal === 0 ? "approve" : "deposit",
       requiresSingleOperationBundle: true,
-      ...(ordinal === 1
+      ...(usesExistingAllowance
+        ? { relayAllowanceMode: "preexisting" }
+        : {}),
+      ...((usesExistingAllowance || ordinal === 1)
         ? {
             postconditionEvidenceKind: "exact_erc20_source_debit_v1",
             expectedSourceAssetId: input.sourceAmount.asset.assetId,
