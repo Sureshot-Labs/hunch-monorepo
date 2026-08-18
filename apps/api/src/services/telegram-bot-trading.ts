@@ -10015,7 +10015,7 @@ export async function handleTelegramBotTradingCallback(
     policy,
     authorization?.max_amount_usd ?? null,
   );
-  const tradeReadiness =
+  let tradeReadiness =
     authorization && market
       ? await resolveTelegramTradingReadiness({
           action: action === "SELL" ? "SELL" : "BUY",
@@ -10242,6 +10242,17 @@ export async function handleTelegramBotTradingCallback(
     intent.status = resumeStatus;
     intent.funding_reservation_id = funding.reservation_id;
     fundingResumedForExecution = resumeStatus === "confirming";
+    // The readiness above was read before the durable funding operation became
+    // ready. Re-read it for presentation/repair, but do not use its old
+    // available-balance snapshot to reject the amount just reserved for this
+    // exact intent below.
+    tradeReadiness = await resolveTelegramTradingReadiness({
+      action: action === "SELL" ? "SELL" : "BUY",
+      authorization,
+      market: marketForCallbackReadiness(action, market),
+      trading: input.trading,
+      venue: intent.venue,
+    });
     await input.answerCallbackQuery({
       callbackQueryId: input.callbackQuery.id,
       text:
@@ -10888,7 +10899,8 @@ export async function handleTelegramBotTradingCallback(
       (action === "BUY" &&
         quoteMaxSpendUsd != null &&
         quoteMaxSpendUsd > maxAmountUsd) ||
-      (tradeReadiness?.maxExecutableBuyUsd != null &&
+      (!fundingResumedForExecution &&
+        tradeReadiness?.maxExecutableBuyUsd != null &&
         action === "BUY" &&
         quoteMaxSpendUsd != null &&
         quoteMaxSpendUsd > tradeReadiness.maxExecutableBuyUsd)
@@ -10915,9 +10927,26 @@ export async function handleTelegramBotTradingCallback(
         showAlert: true,
         text: "⚠️ Price moved. Send /market again.",
       });
+      const openMarketButton = buildTelegramTradingMiniAppButton({
+        appBaseUrl: input.appBaseUrl,
+        path: openMarketUrl(input.appBaseUrl, market),
+        telegramMiniAppEnabled: input.telegramMiniAppEnabled,
+        text: "Open market",
+      });
       await input.sendMessage({
         chat_id: chatId,
         parse_mode: "MarkdownV2",
+        reply_markup: {
+          inline_keyboard: [
+            ...(openMarketButton ? [[openMarketButton]] : []),
+            [
+              {
+                callback_data: "hm:v1:home",
+                text: "🏠 Home",
+              },
+            ],
+          ],
+        },
         text: formatTelegramTradeLifecycleMessageMarkdownV2({
           heading: "Trade not submitted.",
           lines: [
