@@ -1,5 +1,7 @@
 import { tx, type Pool, type PoolClient } from "@hunch/infra";
 
+import { activateTelegramTradeShortfallRouterDependentFundInTransaction } from "../execution/telegram-trade-shortfall-activation.js";
+
 import { isReceiptBearingFundingActionKind } from "../domain/action-kinds.js";
 import type { JsonValue, NormalizedAction } from "../domain/types.js";
 import { normalizedActionSchema } from "../domain/schemas.js";
@@ -537,6 +539,19 @@ export async function applyFundingStepReceiptEvidenceInTransaction(
       throw new FundingPersistenceError(
         "invalid_state_transition",
         "funding step state changed while applying receipt evidence",
+      );
+    }
+    if (
+      nextStepState === "succeeded" &&
+      scoped.step_kind === "transaction" &&
+      input.receipt.status === "finalized"
+    ) {
+      await activateTelegramTradeShortfallRouterDependentFundInTransaction(
+        client,
+        {
+          operationId: input.operationId,
+          approvalStepId: input.stepId,
+        },
       );
     }
   }

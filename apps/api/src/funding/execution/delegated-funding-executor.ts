@@ -56,6 +56,7 @@ import {
   DELEGATED_PROVIDER_REPLAY_MS,
   DELEGATED_UNBROADCAST_RETRY_MS,
 } from "./delegated-funding-recovery-policy.js";
+import { activateStalledTelegramTradeShortfallInitialStepsInTransaction } from "./telegram-trade-shortfall-activation.js";
 
 type JsonRecord = Readonly<Record<string, JsonValue>>;
 
@@ -1555,6 +1556,13 @@ export class DelegatedFundingExecutor {
           : await tx(this.pool, async (client) => {
               await lockFundingPolicyForTransaction(client);
               const currentPolicy = await resolveFundingPolicy(client);
+              // Shortfall consent is durable. Repair only a root that still
+              // has zero attempts before claiming, so an older deployment
+              // cannot leave it indefinitely planned/requeued.
+              await activateStalledTelegramTradeShortfallInitialStepsInTransaction(
+                client,
+                { limit, profileId: runtime.profileId },
+              );
               const controlDecision =
                 runtime.controlPlaneDecision(currentPolicy);
               const rejected = await runtime.rejectInvalidInTransaction(
