@@ -964,6 +964,11 @@ export function validatePolymarketBotPolicyProfile(input: {
       validations.some(
         (value) => value.fundingRouterControllerApprovalPresent === true,
       ),
+    fundingRouterUsdceApprovalPresent:
+      issues.length === 0 &&
+      validations.some(
+        (value) => value.fundingRouterUsdceApprovalPresent === true,
+      ),
     fundingRouterPusdFundPresent:
       issues.length === 0 &&
       input.profile === "buy_sell" &&
