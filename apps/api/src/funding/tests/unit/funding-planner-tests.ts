@@ -606,6 +606,32 @@ await test("server-confirmed trade top-up preserves executable venue preparation
   );
 });
 
+await test("server-confirmed trade top-up is never silently raised to the generic refill floor", () => {
+  const policy = mutablePolicy();
+  const placement = decidePlacement({
+    intent: intent("trade_shortfall", "14750451", {
+      serverAdditionalDestinationAmount: {
+        asset: POLYGON_PUSD,
+        raw: "320000",
+      },
+    }),
+    target: target(POLYGON_PUSD),
+    targetVenueId: "polymarket",
+    targetRequirement: { asset: POLYGON_PUSD, raw: "14750451" },
+    availableNow: { asset: POLYGON_PUSD, raw: "14430451" },
+    minimumExecutableDestination: {
+      asset: POLYGON_PUSD,
+      raw: "500000",
+    },
+    selectionReason: "current_trade",
+    policy,
+  });
+
+  assert.equal(placement.destinationRequirement.raw, "320000");
+  assert.equal(placement.sourceAmount.raw, "320000");
+  assert.equal(placement.boundedBuffer, null);
+});
+
 await test("trade buffer is requested explicitly and bounded by raw and USD caps", () => {
   const policy = mutablePolicy();
   policy.placement.maximumBufferBps = 1_000;
