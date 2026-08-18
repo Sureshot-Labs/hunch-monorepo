@@ -267,6 +267,15 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
     const delegatedPusdFund =
       input.request.serverExecutionProfileId ===
       POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID;
+    // The generic runtime snapshot derives its funding capacity from the
+    // *current* Router allowances.  That is correct for a user-signed route,
+    // but circular for this exact delegated profile: missing approvals are
+    // durable prerequisite steps in the same operation.  Plan only the exact
+    // shortfall here; the Privy profile validator and the executor still
+    // enforce the configured policy cap before any approval or fund call.
+    const planningFundingCapRaw = delegatedPusdFund
+      ? requiredRaw
+      : BigInt(snapshot.fundingCapRaw);
     let plan;
     try {
       plan = delegatedWrap
@@ -299,7 +308,7 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
                 POLYMARKET_FUNDING_ROUTER_MAX_APPROVAL_RAW,
               routerUsdceAllowanceRaw:
                 POLYMARKET_FUNDING_ROUTER_MAX_APPROVAL_RAW,
-              fundingCapRaw: BigInt(snapshot.fundingCapRaw),
+              fundingCapRaw: planningFundingCapRaw,
             })
           : buildPlan(requiredRaw);
       if (!delegatedWrap && plan && BigInt(plan.totalAmountRaw) < requiredRaw) {

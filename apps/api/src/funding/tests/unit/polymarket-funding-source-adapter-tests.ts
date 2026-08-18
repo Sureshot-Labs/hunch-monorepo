@@ -376,6 +376,33 @@ assert.deepEqual(
   "two missing token approvals must be serialized before the one Router fund call",
 );
 
+const zeroAllowanceDerivedCapInput = planningInput(
+  "0",
+  "1800000",
+  "300000",
+  "trade_shortfall",
+  "0",
+  "0",
+  "0",
+);
+const [delegatedPusdWithZeroAllowanceDerivedCap] = await adapter.list({
+  ...zeroAllowanceDerivedCapInput,
+  request: {
+    ...zeroAllowanceDerivedCapInput.request,
+    serverExecutionProfileId: POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
+  },
+});
+assert.ok(
+  delegatedPusdWithZeroAllowanceDerivedCap,
+  "a missing current Router allowance must not turn an otherwise exact delegated pUSD + USDC.e route into Deposit fallback",
+);
+assert.deepEqual(
+  delegatedPusdWithZeroAllowanceDerivedCap.commitPlan.reservations.map(
+    (entry) => entry.rawAmount,
+  ),
+  ["1500000", "300000"],
+);
+
 const relayProfileInput = planningInput();
 assert.deepEqual(
   await adapter.list({
