@@ -1780,6 +1780,7 @@ async function reconcileRelayPostconditions(
     segment_id: string;
     expected_raw: string;
     tx_hash: string;
+    uses_preexisting_allowance: boolean;
     wallet_address: string;
   }>(
     `select deposit_receipt.id as deposit_receipt_id,
@@ -1792,6 +1793,9 @@ async function reconcileRelayPostconditions(
             segment.id as segment_id,
             reservation.source_raw::text as expected_raw,
             deposit_receipt.evidence ->> 'transactionHash' as tx_hash,
+            (deposit_step.action_validation_result ->>
+              'relayAllowanceMode') = 'preexisting'
+              as uses_preexisting_allowance,
             funding_authorization.wallet_address
        from funding_operation_steps deposit_step
        join funding_step_receipt_observations deposit_receipt
@@ -1851,7 +1855,11 @@ async function reconcileRelayPostconditions(
     maintenance.expectedBlockHash === maintenance.allowance.blockHash
   ) {
     const observed = maintenance.allowance;
-    if (observed.raw !== "0" && relayAllowanceMutationIsOwned(maintenance)) {
+    if (
+      !depositRow.uses_preexisting_allowance &&
+      observed.raw !== "0" &&
+      relayAllowanceMutationIsOwned(maintenance)
+    ) {
       await createRelayAllowanceCleanupOperationInTransaction(client, {
         profile,
         parentOperationId: depositRow.operation_id,
@@ -1863,7 +1871,7 @@ async function reconcileRelayPostconditions(
       });
       return;
     }
-    if (observed.raw !== "0") {
+    if (!depositRow.uses_preexisting_allowance && observed.raw !== "0") {
       await client.query(
         `update funding_step_receipt_observations
             set evidence = evidence || jsonb_build_object(
@@ -1904,21 +1912,26 @@ async function reconcileRelayPostconditions(
     });
     await client.query(
       `update funding_step_receipt_observations
-          set evidence = evidence || jsonb_build_object(
-                'allowanceZero', true,
-                'allowanceRaw', '0',
-                'allowanceBlock', $2::text,
-                'allowanceBlockHash', $3::text,
-                'allowanceObservationRevision', $4::text
-              ),
-              observed_at = greatest(observed_at, $5),
-              updated_at = $5
+          set evidence = evidence || $2::jsonb,
+              observed_at = greatest(observed_at, $3),
+              updated_at = $3
         where id = $1 and status = 'finalized'`,
       [
         depositRow.deposit_receipt_id,
-        observed.blockNumber,
-        observed.blockHash,
-        observed.revision,
+        depositRow.uses_preexisting_allowance
+          ? {
+              preexistingAllowanceUsed: true,
+              allowanceBlock: observed.blockNumber,
+              allowanceBlockHash: observed.blockHash,
+              allowanceObservationRevision: observed.revision,
+            }
+          : {
+              allowanceZero: true,
+              allowanceRaw: "0",
+              allowanceBlock: observed.blockNumber,
+              allowanceBlockHash: observed.blockHash,
+              allowanceObservationRevision: observed.revision,
+            },
         now,
       ],
     );
@@ -3256,9 +3269,13 @@ async function preBroadcastRelay(
       }
     );
   }
-  let dependencyApprovalLocked = validated.kind !== "deposit";
+  const usesPreexistingAllowance =
+    validated.kind === "deposit" &&
+    input.claim.actionValidationResult.relayAllowanceMode === "preexisting";
+  let dependencyApprovalLocked =
+    validated.kind !== "deposit" || usesPreexistingAllowance;
   let dependencyApprovalTransactionHash: string | null = null;
-  if (validated.kind === "deposit") {
+  if (validated.kind === "deposit" && !usesPreexistingAllowance) {
     const dependency = await client.query<{
       approval_transaction_hash: string;
       id: string;
@@ -3441,6 +3458,7 @@ async function preBroadcastRelay(
   }
   if (
     validated.kind === "deposit" &&
+    !usesPreexistingAllowance &&
     (!input.claim.allowanceMutationBaselineBlock ||
       !/^(0|[1-9][0-9]*)$/u.test(input.claim.allowanceMutationBaselineBlock))
   ) {
@@ -3455,6 +3473,21 @@ async function preBroadcastRelay(
   // Its own finalized receipt, rather than historical ownership inference,
   // is the dependency fence for the following deposit.
   if (validated.kind === "approve") return { kind: "allowed" as const };
+  // Relay can omit approve when an existing controller allowance already
+  // covers this exact deposit. The policy still constrains the eventual
+  // deposit calldata; do not invent an approval receipt or require ownership
+  // provenance for an allowance this route did not create.
+  if (usesPreexistingAllowance) {
+    const expected = BigInt(input.claim.receiptRaw);
+    if (observedAllowance < expected) {
+      return {
+        kind: "hard_invalid" as const,
+        reasonCode: "delegated_action_invalid" as const,
+        diagnosticCode: "allowance_amount_mismatch" as const,
+      };
+    }
+    return { kind: "allowed" as const };
+  }
   const depositAllowanceOwned =
     validated.kind !== "deposit" ||
     (observed.ownershipRevision !== null &&

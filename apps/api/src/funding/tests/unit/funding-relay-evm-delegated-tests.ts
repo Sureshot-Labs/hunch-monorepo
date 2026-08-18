@@ -620,6 +620,48 @@ assert.deepEqual(
   "both steps remain inert until the atomic receipt link activates approve",
 );
 
+const delegatedDepositOnlySteps = relayDelegatedCommitSteps({
+  steps: [
+    {
+      ordinal: 0,
+      segmentOrdinal: 0,
+      stepKind: "transaction",
+      state: "action_required",
+      actionFingerprint: "deposit-only-fingerprint",
+      executorId: "web",
+      payerRequirement: "privy_sponsor",
+      dependsOnOrdinal: null,
+      normalizedAction: {
+        ...actionBase,
+        actionId: "relay:fixture:deposit",
+        to: RELAY_DEPOSITORY_V2,
+        data: deposit.encodeFunctionData("depositErc20", [
+          WALLET,
+          BASE_USDC,
+          RAW,
+          orderId,
+        ]),
+      },
+      actionValidationResult: {},
+    },
+  ],
+  sourceAmount: {
+    asset: { networkId: "evm:8453", assetId: BASE_USDC, decimals: 6 },
+    raw: RAW,
+  },
+  profile: atomicWalletProfile,
+  serverExecutionProfileId: TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
+});
+assert.deepEqual(
+  delegatedDepositOnlySteps.map((step) => [
+    step.actionValidationResult.relayStepKind,
+    step.actionValidationResult.relayAllowanceMode,
+    step.dependsOnOrdinal,
+  ]),
+  [["deposit", "preexisting", null]],
+  "an exact Relay deposit-only quote is a root action when the controller already has allowance",
+);
+
 const depositWallet = "0x7777777777777777777777777777777777777777";
 const polygonActionBase = { ...actionBase, networkId: "evm:137" };
 const delegatedApproveStep = delegatedSteps[0];
