@@ -509,7 +509,10 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
               {
                 ordinal: 0,
                 segmentOrdinal: null,
-                stepKind: "venue_preparation" as const,
+                // This is an ERC-20 approval, not the Router's destination
+                // preparation. Its canonical receipt must therefore satisfy
+                // the dependency and unlock the following `fund` step.
+                stepKind: "transaction" as const,
                 state: "planned" as const,
                 actionFingerprint: canonicalJsonHash(approvalAction),
                 executorId: POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
