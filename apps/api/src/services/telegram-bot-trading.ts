@@ -9926,21 +9926,15 @@ export async function handleTelegramBotTradingCallback(
   }
   const cancellationOperationId = intent.funding_operation_id;
   const cancellationUserId = intent.user_id;
-  const cancellingFundingPreparation =
+  const cancellingFundingIntent =
     parsed.type === "cancel" &&
     intent.status === "funding" &&
     cancellationOperationId != null &&
     cancellationUserId != null &&
     intent.submit_started_at == null;
-  if (cancellingFundingPreparation) {
-    if (!input.cancelFundingOperation) {
-      await input.answerCallbackQuery({
-        callbackQueryId: input.callbackQuery.id,
-        showAlert: true,
-        text: "⚠️ Funding cancellation is temporarily unavailable. Nothing was changed.",
-      });
-      return true;
-    }
+  let cancellingFundingPreparation = false;
+  let cancellingBuyContinuation = false;
+  if (cancellingFundingIntent) {
     const cancellationSafety = await input.db.query<{
       external_boundary_crossed: boolean;
     }>(
@@ -9964,26 +9958,30 @@ export async function handleTelegramBotTradingCallback(
         and operation_row.user_id = $2::uuid`,
       [cancellationOperationId, cancellationUserId],
     );
-    if (cancellationSafety.rows[0]?.external_boundary_crossed !== false) {
-      await input.answerCallbackQuery({
-        callbackQueryId: input.callbackQuery.id,
-        showAlert: true,
-        text: "⏳ Funding has already started. Check its status; it cannot be cancelled safely.",
-      });
-      return true;
-    }
-    try {
-      await input.cancelFundingOperation({
-        operationId: cancellationOperationId,
-        userId: cancellationUserId,
-      });
-    } catch {
-      await input.answerCallbackQuery({
-        callbackQueryId: input.callbackQuery.id,
-        showAlert: true,
-        text: "⏳ Funding has already started. Check its status; it cannot be cancelled safely.",
-      });
-      return true;
+    if (cancellationSafety.rows[0]?.external_boundary_crossed === false) {
+      if (!input.cancelFundingOperation) {
+        await input.answerCallbackQuery({
+          callbackQueryId: input.callbackQuery.id,
+          showAlert: true,
+          text: "⚠️ Funding cancellation is temporarily unavailable. Nothing was changed.",
+        });
+        return true;
+      }
+      try {
+        await input.cancelFundingOperation({
+          operationId: cancellationOperationId,
+          userId: cancellationUserId,
+        });
+        cancellingFundingPreparation = true;
+      } catch {
+        // A worker can cross the boundary after the read above. It is still
+        // always safe to stop only the Buy continuation.
+        cancellingBuyContinuation = true;
+      }
+    } else {
+      // Funding is on-chain now and must continue to reconciliation. Cancel
+      // only the Buy intent; the ready balance becomes ordinary venue cash.
+      cancellingBuyContinuation = true;
     }
   }
   const exitsToMarket =
@@ -10042,7 +10040,7 @@ export async function handleTelegramBotTradingCallback(
       (await updateIntentStatus({
         allowedStatuses: [
           ...PENDING_INTENT_STATUSES,
-          ...(cancellingFundingPreparation ? ["funding"] : []),
+          ...(cancellingFundingIntent ? ["funding"] : []),
           ...(canExitExternalHandoff ? ["external_handoff"] : []),
         ],
         db: input.db,
@@ -10053,6 +10051,8 @@ export async function handleTelegramBotTradingCallback(
         errorMessage:
           parsed.type === "change_amount"
             ? "The user returned to choose a different amount."
+            : cancellingBuyContinuation
+              ? "The user cancelled the Buy after funding started; funding will settle without a venue order."
             : "The user returned to the market card.",
         intentId: intent.id,
         status: "cancelled",
@@ -10068,6 +10068,8 @@ export async function handleTelegramBotTradingCallback(
           ? "Choose a new amount."
           : cancellingFundingPreparation
             ? "Preparation cancelled. No money was moved."
+            : cancellingBuyContinuation
+              ? "Buy cancelled. Funding will settle safely without submitting a trade."
             : "Trade cancelled. Choose another option.",
     });
     const marketMessage = await buildTelegramBotTradingMarketMessage({
@@ -10944,7 +10946,7 @@ export async function handleTelegramBotTradingCallback(
               : []),
             intent.delivery_mode === "app_handoff"
               ? "When ready, the final Buy will open in Hunch. No trade has been submitted yet."
-              : "When ready, the Buy will be re-quoted within your confirmed limits.",
+              : "When ready, Hunch will check a fresh quote and Buy automatically within your confirmed limits.",
           ],
           marketTitle: intent.market_title,
           venue: intent.venue,
@@ -11581,9 +11583,29 @@ export async function handleTelegramBotTradingCallback(
                 : "⚠️"
           } ${resolution.callbackText}`,
     });
+    const filledMarketButton =
+      resolution.intentStatus === "filled" && !postSubmitError
+        ? buildTelegramTradingMiniAppButton({
+            appBaseUrl: input.appBaseUrl,
+            path: openMarketUrl(input.appBaseUrl, market),
+            telegramMiniAppEnabled: input.telegramMiniAppEnabled,
+            text: "🎯 Trade this market",
+          })
+        : null;
+    const filledKeyboard =
+      resolution.intentStatus === "filled" && !postSubmitError
+        ? {
+            inline_keyboard: [
+              ...telegramTradingButtonRows(filledMarketButton),
+              [{ callback_data: "hm:v1:positions", text: "💼 My positions" }],
+              [{ callback_data: "hm:v1:home", text: "🏠 Home" }],
+            ],
+          }
+        : undefined;
     await input.sendMessage({
       chat_id: chatId,
       parse_mode: "MarkdownV2",
+      ...(filledKeyboard ? { reply_markup: filledKeyboard } : {}),
       text: formatTelegramTradeLifecycleMessageMarkdownV2({
         heading: resolution.messageTitle,
         lines: [

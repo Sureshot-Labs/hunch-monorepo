@@ -6,6 +6,7 @@ import {
   isTelegramRouterContinuationHardReason,
   telegramPolymarketRootRequiresRouterContinuationSql,
 } from "../funding/reconciliation/telegram-router-continuation-state.js";
+import { releaseFundingReservationForAbandonedTradeInTransaction } from "../funding/persistence/funding-evidence-repository.js";
 
 import {
   escapeTelegramMarkdownV2,
@@ -34,6 +35,7 @@ type TradeFundingProgress = Readonly<{
   amountUsd: string;
   attemptStateFingerprint: string;
   canCancel: boolean;
+  canCancelBuy: boolean;
   fundingAmountLabel: string | null;
   intentId: string;
   marketTitle: string;
@@ -46,7 +48,7 @@ type TradeFundingProgress = Readonly<{
   stepStateFingerprint: string;
   state: TradeFundingState;
   venue: string;
-  version: 1 | 2;
+  version: 1 | 2 | 3;
 }>;
 
 type ProjectionCandidate = Readonly<{
@@ -54,6 +56,7 @@ type ProjectionCandidate = Readonly<{
   attempt_state_fingerprint: string;
   chat_id: string | null;
   continuation_id: string | null;
+  consumer_reservation_id: string | null;
   error_code: string | null;
   funding_operation_id: string | null;
   funding_destination_asset_id: string | null;
@@ -75,6 +78,7 @@ type ProjectionCandidate = Readonly<{
   step_state_fingerprint: string;
   telegram_message_id: string | null;
   telegram_user_id: string;
+  tracked_operation_id: string | null;
   user_id: string | null;
   venue: string;
   has_automatic_provider_reference_wait: boolean;
@@ -99,7 +103,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function parseProgress(value: unknown): TradeFundingProgress | null {
-  if (!isRecord(value) || (value.version !== 1 && value.version !== 2)) {
+  if (
+    !isRecord(value) ||
+    (value.version !== 1 && value.version !== 2 && value.version !== 3)
+  ) {
     return null;
   }
   if (
@@ -109,6 +116,7 @@ function parseProgress(value: unknown): TradeFundingProgress | null {
     typeof value.sideLabel !== "string" ||
     typeof value.amountUsd !== "string" ||
     typeof value.canCancel !== "boolean" ||
+    typeof value.canCancelBuy !== "boolean" ||
     typeof value.state !== "string"
   ) {
     return null;
@@ -255,6 +263,12 @@ function liveProgressFor(candidate: ProjectionCandidate): TradeFundingProgress {
       !candidate.has_broadcast_boundary &&
       !candidate.has_started_attempt &&
       !ready,
+    // Funding already broadcast cannot be reversed safely. Its linked Buy can
+    // still be cancelled before any venue order is submitted.
+    canCancelBuy:
+      candidate.status === "funding" &&
+      !terminal &&
+      candidate.has_broadcast_boundary,
     fundingAmountLabel: fundingAmountLabel(candidate),
     intentId: candidate.id,
     marketTitle: candidate.market_title,
@@ -267,9 +281,7 @@ function liveProgressFor(candidate: ProjectionCandidate): TradeFundingProgress {
     stepStateFingerprint: candidate.step_state_fingerprint,
     state,
     venue: candidate.venue,
-    // Bump the card contract so existing terminal cards are revised to expose
-    // the direct Open market escape rather than an inert status affordance.
-    version: 2,
+    version: 3,
   };
 }
 
@@ -290,6 +302,7 @@ function progressFor(candidate: ProjectionCandidate): TradeFundingProgress {
     ...live,
     attemptStateFingerprint: "",
     canCancel: false,
+    canCancelBuy: false,
     operationStatus: null,
     progressStage: null,
     reasonCode: candidate.error_code ?? live.reasonCode,
@@ -319,7 +332,8 @@ function sameProgress(
     left.attemptStateFingerprint === right.attemptStateFingerprint &&
     left.receiptStateFingerprint === right.receiptStateFingerprint &&
     left.state === right.state &&
-    left.canCancel === right.canCancel
+    left.canCancel === right.canCancel &&
+    left.canCancelBuy === right.canCancelBuy
   );
 }
 
@@ -344,6 +358,17 @@ async function listCandidates(
             intent.error_code,
             intent.result,
             intent.funding_operation_id::text,
+            tracked_operation.id::text as tracked_operation_id,
+            (
+              select reservation.id::text
+              from balance_reservations reservation
+              where reservation.operation_id = tracked_operation.id
+                and reservation.user_id = intent.user_id
+                and reservation.mode = 'settled_for_consumer'
+                and reservation.state = 'active'
+              order by reservation.id
+              limit 1
+            ) as consumer_reservation_id,
             tracked_operation.destination_amount #>> '{asset,assetId}'
               as funding_destination_asset_id,
             tracked_operation.destination_amount #>> '{asset,decimals}'
@@ -475,6 +500,26 @@ export async function runTelegramTradeShortfallProgressProjectionBatch(
     const candidates = await listCandidates(client, limit);
     let created = 0;
     for (const candidate of candidates) {
+      // A cancelled Buy must never consume funded venue cash. Once the route
+      // is ready, release just its consumer reservation; the transfer itself
+      // is already final and is not cancelled or moved again.
+      if (
+        candidate.status === "cancelled" &&
+        candidate.operation_status === "ready" &&
+        candidate.progress_stage === "ready_for_consumer" &&
+        candidate.tracked_operation_id &&
+        candidate.consumer_reservation_id &&
+        candidate.user_id
+      ) {
+        await releaseFundingReservationForAbandonedTradeInTransaction(client, {
+          userId: candidate.user_id,
+          link: {
+            operationId: candidate.tracked_operation_id,
+            reservationId: candidate.consumer_reservation_id,
+          },
+          outcomeReason: "telegram_buy_cancelled_after_funding",
+        });
+      }
       const progress = progressFor(candidate);
       const existing = parseProgress(candidate.result.shortfallProgress);
       if (sameProgress(existing, progress)) continue;
@@ -630,7 +675,7 @@ function progressText(progress: TradeFundingProgress): string {
     ready: [
       "✅",
       "Funding confirmed",
-      "Funding is confirmed. Hunch is preparing the fresh Buy review automatically.",
+      "Funding is confirmed. Hunch is checking a fresh quote and will Buy automatically within your confirmed limits.",
     ],
     needs_attention: [
       "⚠️",
@@ -687,6 +732,14 @@ function progressKeyboard(
       {
         callback_data: `${CALLBACK_PREFIX}:cancel:${progress.intentId}`,
         text: "❌ Cancel preparation",
+      },
+    ]);
+  }
+  if (progress.canCancelBuy) {
+    rows.push([
+      {
+        callback_data: `${CALLBACK_PREFIX}:cancel:${progress.intentId}`,
+        text: "❌ Cancel Buy",
       },
     ]);
   }
