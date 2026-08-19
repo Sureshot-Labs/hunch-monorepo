@@ -710,7 +710,7 @@ test("requires a complete fail-closed publishing configuration", () => {
         CONTENT_WORKER_ENABLED: "true",
         CONTENT_RENDERER_CONTRACT_ID: "hunch-content-document-v1",
         CONTENT_REVALIDATE_URL:
-          "https://app.hunch.trade/api/content/revalidate",
+          "https://www.hunch.trade/api/content/revalidate",
         CONTENT_REVALIDATE_SECRET: "r".repeat(32),
         CONTENT_ASSET_S3_BUCKET: "hunch-content",
         CONTENT_ASSET_PUBLIC_BASE_URL: "https://content.hunch.trade",
@@ -760,6 +760,10 @@ test("registers gated protected routes and the content schema migrations", () =>
   );
   const prebuiltDeploy = readFileSync(
     new URL("../../../ops/deploy-ec2-prebuilt.sh", import.meta.url),
+    "utf8",
+  );
+  const productionCompose = readFileSync(
+    new URL("../../../ops/docker-compose.prod.yml", import.meta.url),
     "utf8",
   );
   const expectedPublicPaths = [
@@ -906,6 +910,10 @@ test("registers gated protected routes and the content schema migrations", () =>
       prebuiltDeploy.indexOf(
         '"${compose[@]}" stop "${application_services[@]}"',
       ),
+  );
+  assert.match(
+    productionCompose,
+    /CONTENT_REVALIDATE_URL: \$\{CONTENT_REVALIDATE_URL_OVERRIDE:-https:\/\/www\.hunch\.trade\/api\/content\/revalidate\}/,
   );
   assert.equal(CONTENT_RENDERER_CONTRACT_ID, "hunch-content-document-v1");
 });

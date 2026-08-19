@@ -95,6 +95,10 @@ services:
       HOST: ${HOST:-0.0.0.0}
       PORT: ${PORT:-3001}
       HUNCH_JS_RUNTIME: ${HUNCH_API_JS_RUNTIME:-bun}
+      # The CMS invalidates the public Journal, not the trading app. Keep the
+      # production target explicit so a stale env-file value cannot silently
+      # dead-letter every publish event.
+      CONTENT_REVALIDATE_URL: ${CONTENT_REVALIDATE_URL_OVERRIDE:-https://www.hunch.trade/api/content/revalidate}
       # Keep the disabled CMS deploy-safe before /hunch/prod/content exists.
       # When enabling CMS, set the suffix to ",aws-sm:/hunch/prod/content".
       HUNCH_SECRET_BUNDLES: ${HUNCH_SECRET_BUNDLES_API:-aws-sm:/hunch/prod/shared,aws-sm:/hunch/prod/api,aws-sm:/hunch/prod/polymarket-builder,aws-sm:/hunch/prod/rewards,aws-sm:/hunch/prod/ai,aws-sm:/hunch/prod/ops}${HUNCH_SECRET_BUNDLES_CONTENT_SUFFIX:-}
