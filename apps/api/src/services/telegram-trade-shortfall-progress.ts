@@ -192,7 +192,7 @@ async function listCandidates(
             intent.chat_id,
             intent.telegram_message_id::text,
             intent.venue,
-            intent.market_title,
+            coalesce(market.title, intent.market_id, 'Market') as market_title,
             intent.side,
             intent.amount_usd::text,
             intent.status,
@@ -249,6 +249,8 @@ async function listCandidates(
        from telegram_trade_intents intent
        join funding_operations operation
          on operation.id = intent.funding_operation_id
+       left join unified_markets market
+         on market.id = intent.market_id
       where intent.status in ('funding', 'failed', 'cancelled')
         and intent.funding_operation_id is not null
       order by intent.updated_at, intent.id
