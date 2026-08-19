@@ -1,4 +1,6 @@
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
 const test = require("node:test");
 
 const {
@@ -6,10 +8,14 @@ const {
   inferAssetKind,
   inferMimeType,
   parseArgs,
+  parseSessionEnvelope,
+  releaseJsonOutput,
+  reserveJsonOutput,
   requiredConfirmation,
   resolveContentUrl,
   safeApiErrorPayload,
   validateBaseUrl,
+  validateOutputPath,
 } = require("./hunch-content-api.js");
 
 test("accepts the production service token format", () => {
@@ -117,6 +123,60 @@ test("accepts stdin as a JSON source and rejects unknown options", () => {
     () => parseArgs(["operations", "--methd", "GET"]),
     /Unknown option: --methd/,
   );
+});
+
+test("accepts strict JSON session envelopes", () => {
+  assert.deepEqual(
+    parseSessionEnvelope(
+      JSON.stringify({
+        id: "read-1",
+        argv: ["request", "/admin/content/articles?limit=1"],
+      }),
+    ),
+    {
+      id: "read-1",
+      argv: ["request", "/admin/content/articles?limit=1"],
+    },
+  );
+  assert.throws(
+    () =>
+      parseSessionEnvelope(
+        JSON.stringify({ id: "unsafe", argv: ["operations"], token: "x" }),
+      ),
+    /only accepts id and argv/,
+  );
+  assert.throws(
+    () => parseSessionEnvelope(JSON.stringify({ id: "missing-argv" })),
+    /argv must be a non-empty string array/,
+  );
+});
+
+test("restricts response exports to temporary storage", () => {
+  assert.equal(
+    validateOutputPath("/tmp/hunch-content-article.json"),
+    "/tmp/hunch-content-article.json",
+  );
+  assert.throws(
+    () => validateOutputPath("./article.json"),
+    /restricted to \/tmp/,
+  );
+});
+
+test("reserves output before a request and refuses an existing target", () => {
+  const directory = fs.mkdtempSync("/tmp/hunch-content-output-");
+  const outputPath = path.join(directory, "response.json");
+  try {
+    assert.equal(reserveJsonOutput(outputPath), outputPath);
+    assert.equal(fs.statSync(outputPath).mode & 0o777, 0o600);
+    assert.throws(
+      () => reserveJsonOutput(outputPath),
+      /refuses to overwrite an existing file/,
+    );
+    releaseJsonOutput(outputPath);
+    assert.equal(fs.existsSync(outputPath), false);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test("infers common content asset types", () => {
