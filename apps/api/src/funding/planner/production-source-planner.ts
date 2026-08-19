@@ -1043,6 +1043,12 @@ export class ProductionFundingSourcePlanner {
       ...(input.serverExecutionProfileId
         ? { serverExecutionProfileId: input.serverExecutionProfileId }
         : {}),
+      ...(input.persistentApprovalCapRaw
+        ? {
+            persistentApprovalCapRaw:
+              input.persistentApprovalCapRaw,
+          }
+        : {}),
       source: input.source,
     });
   }

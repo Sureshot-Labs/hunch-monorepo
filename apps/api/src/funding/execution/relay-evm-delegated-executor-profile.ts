@@ -1325,7 +1325,10 @@ async function reconcileRelayPostconditions(
             approval_receipt.ledger_height as approval_block,
             deposit_step.id as deposit_step_id,
             operation.id as operation_id,
-            reservation.source_raw::text as expected_raw,
+            coalesce(
+              approval_step.action_validation_result ->> 'relayApprovalCapRaw',
+              reservation.source_raw::text
+            ) as expected_raw,
             funding_authorization.wallet_address
        from funding_operation_steps approval_step
        join funding_operation_steps deposit_step
@@ -2747,7 +2750,11 @@ async function claimRelay(
                   and dependency_receipt.evidence ->>
                         'singleOperationBundle' = 'true'
                   and dependency_receipt.evidence ->> 'allowanceRaw' =
-                        reservation.source_raw::text
+                        coalesce(
+                          dependency.action_validation_result ->>
+                            'relayApprovalCapRaw',
+                          reservation.source_raw::text
+                        )
                   and dependency_receipt.evidence ->> 'allowanceBlock' =
                         dependency_receipt.ledger_height
                   and lower(
@@ -2853,7 +2860,11 @@ async function claimRelay(
                        'relayStepKind' = 'approve'
                  and dependency_receipt.evidence ->> 'allowanceExact' = 'true'
                  and dependency_receipt.evidence ->> 'allowanceRaw' =
-                       reservation.source_raw::text
+                       coalesce(
+                         dependency.action_validation_result ->>
+                           'relayApprovalCapRaw',
+                         reservation.source_raw::text
+                       )
                  and dependency_receipt.evidence ->> 'allowanceBlock' =
                        dependency_receipt.ledger_height
                  and lower(
@@ -2966,7 +2977,11 @@ async function recoverRelay(
                   and dependency_receipt.evidence ->>
                         'singleOperationBundle' = 'true'
                   and dependency_receipt.evidence ->> 'allowanceRaw' =
-                        reservation.source_raw::text
+                        coalesce(
+                          dependency.action_validation_result ->>
+                            'relayApprovalCapRaw',
+                          reservation.source_raw::text
+                        )
                   and dependency_receipt.evidence ->> 'allowanceBlock' =
                         dependency_receipt.ledger_height
                   and lower(
