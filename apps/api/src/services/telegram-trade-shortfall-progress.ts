@@ -11,7 +11,9 @@ import { releaseFundingReservationForAbandonedTradeInTransaction } from "../fund
 import {
   escapeTelegramMarkdownV2,
   formatTelegramBoldMarkdownV2,
+  formatTelegramCodeMarkdownV2,
   formatTelegramFieldMarkdownV2,
+  formatTelegramFieldWithMarkdownV2,
   joinTelegramMarkdownV2Lines,
 } from "./telegram-bot-trading-presentation.js";
 import { formatTelegramVenueLabel } from "./telegram-market-identity.js";
@@ -48,6 +50,7 @@ type TradeFundingProgress = Readonly<{
   sourceRoute: string | null;
   stepStateFingerprint: string;
   state: TradeFundingState;
+  venueOrderId: string | null;
   venue: string;
   version: 1 | 2 | 3;
 }>;
@@ -82,6 +85,7 @@ type ProjectionCandidate = Readonly<{
   tracked_operation_id: string | null;
   user_id: string | null;
   venue: string;
+  venue_order_id: string | null;
   has_automatic_provider_reference_wait: boolean;
   has_broadcast_boundary: boolean;
   has_started_attempt: boolean;
@@ -135,7 +139,15 @@ function parseProgress(value: unknown): TradeFundingProgress | null {
   ) {
     return null;
   }
-  return value as unknown as TradeFundingProgress;
+  // Older delivered cards predate venueOrderId. Normalising them to null keeps
+  // the projector revision-stable until an actual venue order exists.
+  return {
+    ...value,
+    venueOrderId:
+      typeof value.venueOrderId === "string" && value.venueOrderId.trim()
+        ? value.venueOrderId
+        : null,
+  } as TradeFundingProgress;
 }
 
 function sideLabel(candidate: ProjectionCandidate): string {
@@ -282,6 +294,7 @@ function liveProgressFor(candidate: ProjectionCandidate): TradeFundingProgress {
     sourceRoute: sourceRoute(candidate),
     stepStateFingerprint: candidate.step_state_fingerprint,
     state,
+    venueOrderId: candidate.venue_order_id,
     venue: candidate.venue,
     version: 3,
   };
@@ -331,6 +344,7 @@ function sameProgress(
     left.venue === right.venue &&
     left.marketTitle === right.marketTitle &&
     left.sideLabel === right.sideLabel &&
+    left.venueOrderId === right.venueOrderId &&
     left.sourceRoute === right.sourceRoute &&
     left.amountUsd === right.amountUsd &&
     left.fundingAmountLabel === right.fundingAmountLabel &&
@@ -357,6 +371,7 @@ async function listCandidates(
             intent.chat_id,
             intent.telegram_message_id::text,
             intent.venue,
+            intent.venue_order_id,
             coalesce(market.title, intent.market_id, 'Market') as market_title,
             intent.side,
             funding_authorization.source_network_id,
@@ -705,6 +720,12 @@ function progressText(progress: TradeFundingProgress): string {
       `🎯 ${formatTelegramFieldMarkdownV2("Market", progress.marketTitle)}`,
       `↔️ ${formatTelegramFieldMarkdownV2("Side", progress.sideLabel)}`,
       `🛒 ${formatTelegramFieldMarkdownV2("Buy target", `$${progress.amountUsd}`)}`,
+      progress.venueOrderId
+        ? `🔗 ${formatTelegramFieldWithMarkdownV2(
+            "Order",
+            formatTelegramCodeMarkdownV2(progress.venueOrderId),
+          )}`
+        : null,
       progress.fundingAmountLabel
         ? `💸 ${formatTelegramFieldMarkdownV2("Funding", progress.fundingAmountLabel)}`
         : null,
