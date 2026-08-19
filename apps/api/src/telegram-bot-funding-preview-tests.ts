@@ -131,6 +131,18 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           },
         );
       assert.match(rejected, /^⚠️ /u);
+      const preparing =
+        telegramBotTradingTestHooks.formatTelegramTradeLifecycleMessageMarkdownV2(
+          {
+            heading: "Starting preparation.",
+            lines: ["Side: Cut"],
+            marketTitle: "Will it happen?",
+            tone: "working",
+            venue: "polymarket",
+          },
+        );
+      assert.match(preparing, /\*Side:\* Cut/u);
+      assert.doesNotMatch(preparing, /\\\*Side/u);
       const payout =
         telegramBotTradingTestHooks.formatTelegramUsdcLineMarkdownV2(
           "Received: $10.00 pUSD",
