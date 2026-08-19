@@ -22,6 +22,7 @@ import { pollFundingPostconditions } from "../preparation/postcondition-driver.j
 import { DirectIngressDestinationObserver } from "../reconciliation/direct-ingress-observer.js";
 import { OwnedRouteDestinationObserver } from "../reconciliation/owned-route-destination-observer.js";
 import { RelayOwnedRefundObserver } from "../reconciliation/relay-owned-refund-observer.js";
+import { runTelegramRouterContinuation } from "../reconciliation/telegram-router-continuation.js";
 import { FundingReceiveSessionObserver } from "../receive/receive-session-observer.js";
 import {
   FundingReceiveReceiptRouter,
@@ -581,6 +582,15 @@ export async function runFundingReconciliationJob(
       providerPoll: (operationId, now) =>
         driver.pollOperation(pool, operationId, now),
       destinationPoll: pollDestination,
+    });
+  }
+  if (referenceProtection && delegatedDriver) {
+    await runTelegramRouterContinuation(pool, {
+      limit: options.limit ?? 25,
+      subjectLookupHmacKey: referenceProtection.referenceLookupHmacKey,
+      subjectLookupKeyVersion: referenceProtection.referenceKeyVersion,
+      inspectRouterProfile: (input) =>
+        delegatedDriver.inspectWalletProfileForProfile(input),
     });
   }
   const finalTelegramFundingProgress =

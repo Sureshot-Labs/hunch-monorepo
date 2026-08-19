@@ -3682,9 +3682,29 @@ const tests: TestCase[] = [
         prepareBlock,
         /requires a completed FundingOperation, venue-visible pUSD, and a fresh quote/,
       );
+      // Router movement belongs to the durable polymarket_deposit_pusd_fund_v1
+      // profile. A reservation-backed Telegram Buy must therefore be rejected
+      // before prepareTrade can issue a direct Router setup transaction, so
+      // anchor this on the Router branch rather than on the unrelated
+      // controller pUSD approval branch that shares the same expression.
+      const routerGuardIndex = prepareBlock.indexOf(
+        "const useLegacyTelegramFunding",
+      );
+      const routerSendIndex = prepareBlock.indexOf('kind: "funding_router"');
+      assert.notEqual(routerGuardIndex, -1);
+      assert.notEqual(routerSendIndex, -1);
+      assert.ok(routerGuardIndex < routerSendIndex);
+      const routerGuardBlock = prepareBlock.slice(
+        routerGuardIndex,
+        routerSendIndex,
+      );
       assert.match(
-        prepareBlock,
+        routerGuardBlock,
         /intent\.actor\.kind === "telegram_bot" && !intent\.fundingReservation/,
+      );
+      assert.match(
+        routerGuardBlock,
+        /if \(!useLegacyTelegramFunding\)[\s\S]*?throw tradingError/,
       );
       const setupExecutorBlock = sourceSlice(
         executionSource,

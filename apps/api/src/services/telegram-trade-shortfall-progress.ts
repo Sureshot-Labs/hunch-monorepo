@@ -114,7 +114,7 @@ function sideLabel(candidate: ProjectionCandidate): string {
     : (candidate.side ?? "Buy");
 }
 
-function progressFor(candidate: ProjectionCandidate): TradeFundingProgress {
+function liveProgressFor(candidate: ProjectionCandidate): TradeFundingProgress {
   const terminal = ["completed", "refunded", "failed", "cancelled"].includes(
     candidate.operation_status ?? "",
   );
@@ -159,6 +159,32 @@ function progressFor(candidate: ProjectionCandidate): TradeFundingProgress {
   };
 }
 
+/**
+ * The intent is the Buy. Once it is failed or cancelled nothing revives it, so
+ * the intent — not the funding operation it links to — decides the card: a
+ * later `operation = ready` must never restore a "Funding ready" card over a
+ * stopped one. Pinning the operation-derived fields also settles the revision,
+ * so a stopped card is written once instead of re-edited on every subsequent
+ * operation change.
+ */
+function progressFor(candidate: ProjectionCandidate): TradeFundingProgress {
+  const live = liveProgressFor(candidate);
+  if (candidate.status !== "failed" && candidate.status !== "cancelled") {
+    return live;
+  }
+  return {
+    ...live,
+    attemptStateFingerprint: "",
+    canCancel: false,
+    operationStatus: null,
+    progressStage: null,
+    reasonCode: candidate.error_code ?? live.reasonCode,
+    receiptStateFingerprint: "",
+    state: "stopped",
+    stepStateFingerprint: "",
+  };
+}
+
 function sameProgress(
   left: TradeFundingProgress | null,
   right: TradeFundingProgress,
@@ -199,16 +225,16 @@ async function listCandidates(
             intent.error_code,
             intent.result,
             intent.funding_operation_id::text,
-            operation.status as operation_status,
-            operation.progress_stage,
-            operation.error_code as operation_error_code,
+            tracked_operation.status as operation_status,
+            tracked_operation.progress_stage,
+            tracked_operation.error_code as operation_error_code,
             coalesce((
               select string_agg(
                        step.ordinal::text || ':' || step.state,
                        ',' order by step.ordinal
                      )
                 from funding_operation_steps step
-               where step.operation_id = operation.id
+               where step.operation_id = tracked_operation.id
             ), '') as step_state_fingerprint,
             coalesce((
               select string_agg(
@@ -217,7 +243,7 @@ async function listCandidates(
                      )
                 from funding_step_receipt_observations receipt
                 join funding_operation_steps step on step.id = receipt.step_id
-               where step.operation_id = operation.id
+               where step.operation_id = tracked_operation.id
             ), '') as receipt_state_fingerprint,
             coalesce((
               select string_agg(
@@ -227,13 +253,13 @@ async function listCandidates(
                      )
                 from funding_operation_step_attempts attempt
                 join funding_operation_steps step on step.id = attempt.step_id
-               where step.operation_id = operation.id
+               where step.operation_id = tracked_operation.id
             ), '') as attempt_state_fingerprint,
             exists (
               select 1
                 from funding_operation_step_attempts attempt
                 join funding_operation_steps step on step.id = attempt.step_id
-               where step.operation_id = operation.id
+               where step.operation_id = tracked_operation.id
                  and (
                    attempt.broadcast_may_have_occurred
                    or attempt.outcome in ('submitted', 'ambiguous', 'succeeded')
@@ -243,12 +269,30 @@ async function listCandidates(
               select 1
                 from funding_operation_step_attempts attempt
                 join funding_operation_steps step on step.id = attempt.step_id
-               where step.operation_id = operation.id
+               where step.operation_id = tracked_operation.id
                  and attempt.outcome = 'started'
             ) as has_started_attempt
        from telegram_trade_intents intent
        join funding_operations operation
          on operation.id = intent.funding_operation_id
+       left join lateral (
+         select continuation.*
+           from funding_operations continuation
+          where continuation.user_id = operation.user_id
+            and continuation.support_metadata ->> 'telegramTradeIntentId' = intent.id::text
+            and continuation.support_metadata ->> 'continuationOfOperationId' = operation.id::text
+          order by continuation.created_at desc, continuation.id desc
+          limit 1
+       ) continuation on true
+       cross join lateral (
+         select coalesce(continuation.id, operation.id) as id,
+                coalesce(continuation.status, operation.status) as status,
+                coalesce(continuation.progress_stage, operation.progress_stage) as progress_stage,
+                case
+                  when continuation.id is null then operation.error_code
+                  else continuation.error_code
+                end as error_code
+       ) tracked_operation
        left join unified_markets market
          on market.id = intent.market_id
       where intent.status in ('funding', 'failed', 'cancelled')

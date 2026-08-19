@@ -8277,6 +8277,10 @@ async function prepareTrade(
       requiredSpendRaw,
     });
     if (fundingPlan) {
+      // A funding reservation is authority for exactly one durable, validated
+      // Router operation, never for an arbitrary setup transaction issued from
+      // trade preparation. Router movement belongs to the
+      // polymarket_deposit_pusd_fund_v1 profile; prepareTrade only prepares.
       const useLegacyTelegramFunding =
         intent.actor.kind === "telegram_bot" && !intent.fundingReservation;
       if (!useLegacyTelegramFunding) {
