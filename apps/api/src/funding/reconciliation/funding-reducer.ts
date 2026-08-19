@@ -1342,6 +1342,10 @@ const RECONCILIATION_ACTIVE_STATUSES = new Set<FundingOperationState["status"]>(
   ["in_progress", "reconcile_required"],
 );
 export const DEFAULT_FUNDING_RECONCILIATION_TERMINAL_TIMEOUT_MS = 90_000;
+// Receipt application and the operation reducer run in separate durable
+// passes. Give the reducer two ordinary polls to consume already-finalized
+// action evidence, but never suppress a genuinely missing postcondition.
+export const FUNDING_RECONCILIATION_EVIDENCE_REDUCTION_GRACE_MS = 30_000;
 export const FUNDING_RECONCILIATION_TIMEOUT_ERROR_CODE =
   "reconciliation_evidence_timeout";
 export const TERMINAL_REFUND_REORG_UNRESOLVED_ERROR_CODE =
@@ -1374,6 +1378,7 @@ export function fundingReconciliationTerminalTimeoutReached(
 
 export function fundingReconciliationDisposition(
   input: Readonly<{
+    canonicalFinalizedStepEvidencePendingReduction?: boolean;
     state: FundingOperationState;
     recoveryMode?: FundingRecoveryMode | null;
     reductionCompleted: boolean;
@@ -1387,6 +1392,24 @@ export function fundingReconciliationDisposition(
   }
   if (input.state.status === "recovery_required") {
     return input.recoveryMode === "automatic_evidence" ? "requeue" : "complete";
+  }
+  // The timeout protects a missing-evidence wait. It must not turn already
+  // canonical, finalized action evidence into a recovery incident merely
+  // because the reducer has not consumed it on this pass yet. This is only a
+  // bounded reducer-lag grace period: destination/readiness evidence still
+  // has to arrive or the ordinary timeout becomes visible.
+  if (
+    input.canonicalFinalizedStepEvidencePendingReduction &&
+    (input.reconciliationStartedAt == null ||
+      !fundingReconciliationTerminalTimeoutReached({
+        reconciliationStartedAt: input.reconciliationStartedAt,
+        now: input.now,
+        terminalTimeoutMs:
+          input.terminalTimeoutMs +
+          FUNDING_RECONCILIATION_EVIDENCE_REDUCTION_GRACE_MS,
+      }))
+  ) {
+    return "requeue";
   }
   if (!RECONCILIATION_ACTIVE_STATUSES.has(input.state.status)) {
     return "requeue";
@@ -1505,6 +1528,38 @@ async function fundingReconciliationWaitState(
     providerReferenceRecoveryAt:
       result.rows[0]?.provider_reference_recovery_at ?? null,
   };
+}
+
+async function hasCanonicalFinalizedStepEvidencePendingReduction(
+  pool: Pool,
+  operationId: string,
+): Promise<boolean> {
+  const result = await pool.query<{ reducible: boolean }>(
+    `select
+        exists (
+          select 1
+            from funding_operation_steps step
+           where step.operation_id = $1::uuid
+        )
+        and not exists (
+          select 1
+            from funding_operation_steps step
+           where step.operation_id = $1::uuid
+             and (
+               step.state <> 'succeeded'
+               or not exists (
+                 select 1
+                   from funding_step_receipt_observations receipt
+                  where receipt.step_id = step.id
+                    and receipt.status = 'finalized'
+                    and receipt.canonical
+                    and receipt.action_match
+               )
+             )
+        ) as reducible`,
+    [operationId],
+  );
+  return result.rows[0]?.reducible === true;
 }
 
 async function awaitingUnbroadcastActionReport(
@@ -2129,6 +2184,12 @@ async function processLease(
       reduction.terminal &&
       !reduction.reorgBlockedByTerminalState &&
       relayReceiptReorgWatch?.rows[0]?.watching !== true;
+    const canonicalFinalizedStepEvidencePendingReduction = reductionCompleted
+      ? false
+      : await hasCanonicalFinalizedStepEvidencePendingReduction(
+          pool,
+          lease.operationId,
+        );
     const terminalRefundReorgIncident =
       reduction.terminal && reduction.reorgBlockedByTerminalState
         ? await pool.query<{ incident: boolean }>(
@@ -2178,6 +2239,7 @@ async function processLease(
           now: options.now,
         });
     const disposition = fundingReconciliationDisposition({
+      canonicalFinalizedStepEvidencePendingReduction,
       state: reduction.finalState,
       recoveryMode: reduction.recoveryMode,
       reductionCompleted,

@@ -274,12 +274,47 @@ pnpm content:api -- upload /path/to/screenshot.png \
   --alt "Prediction market order ticket in Hunch"
 ```
 
+For a multi-step editing or publishing run, start one bounded session so
+Keychain is read once instead of prompting for every request:
+
+```bash
+HUNCH_CONTENT_SESSION_IDLE_TIMEOUT_MS=3600000 \
+  pnpm content:api -- session
+```
+
+The session reads one line-delimited JSON command at a time and returns one
+line-delimited JSON result with the same request ID:
+
+```json
+{"id":"status","argv":["operations"]}
+{"id":"read-article","argv":["request","/admin/content/articles/ARTICLE_ID","--output","/tmp/hunch-article.json"]}
+{"id":"close","argv":["close"]}
+```
+
+Session mode keeps the API key only in process memory, closes after 15 minutes
+of inactivity by default, rejects nested sessions, and reserves stdin for
+commands. Request bodies must therefore use a JSON file rather than
+`--body -`. Override the idle timeout only for an active bounded task and close
+the session when the task is complete.
+
+Use `--output /tmp/<unique-file>.json` for large responses and responses that
+contain a short-lived preview token. The helper creates the file with mode
+`0600`, follows real temporary-directory boundaries, and refuses an existing
+target before it sends the API request. This preflight is important for
+non-idempotent action requests: a local filename collision cannot leave the
+remote mutation successful while the helper reports only a write error.
+
 The helper only resolves paths below `/admin/content/*`, rejects redirects and
 credential-bearing base URLs, sanitizes API errors, and never retries
 non-idempotent requests. It requires `--confirm-publish` for approval,
 publication, scheduling, unpublication, or archival; `--confirm-restore` for a
 version restore; and `--confirm-delete` for deletion. These flags are local
 safety gates and do not replace the user-intent rules in the agent skill.
+
+Each standalone helper invocation reads Keychain again and can therefore show
+another macOS authorization prompt. Use session mode for a related sequence of
+reads, uploads, edits, review transitions, and publication checks rather than
+choosing permanent Keychain access.
 
 The default endpoint is `https://api.hunch.trade`. Use
 `HUNCH_ADMIN_API_BASE_URL` to override it. Plain HTTP is rejected unless the

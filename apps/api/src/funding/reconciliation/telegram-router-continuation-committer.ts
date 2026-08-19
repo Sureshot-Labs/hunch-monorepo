@@ -23,6 +23,8 @@ import {
   commitFundingOperationInTransaction,
   createFundingQuoteInTransaction,
   FUNDING_OPERATION_RECONCILIATION_TTL_MS,
+  releaseFundingReservationInTransaction,
+  transitionFundingOperationInTransaction,
   type FundingCommitPlan,
 } from "../persistence/funding-operation-repository.js";
 import { resolveFundingPolicy } from "../policies/funding-policy-service.js";
@@ -44,6 +46,14 @@ const erc20Interface = new Interface([
   "function approve(address spender,uint256 amount) returns (bool)",
 ]);
 
+const ROUTER_CONTINUATION_HARD_REASON_CODES = new Set([
+  "router_authorization_missing",
+  "router_authorization_mismatch",
+  "router_policy_or_wallet_setup_invalid",
+  "router_root_amount_unavailable",
+]);
+const ROUTER_CONTINUATION_HARD_FAILURE_LIMIT = 3;
+
 type CandidateRow = TelegramFundingAuthorizationRow &
   Readonly<{
     root_operation_id: string;
@@ -52,6 +62,7 @@ type CandidateRow = TelegramFundingAuthorizationRow &
     market_id: string | null;
     trade_intent_id: string;
     user_id: string;
+    funding_authorization_id: string | null;
   }>;
 
 type ExactRootAmount = Readonly<{ asset: AssetRef; raw: string }>;
@@ -344,6 +355,7 @@ function candidateSql(): string {
                  root_operation.market_id,
                  trade_intent.id::text as trade_intent_id,
                  trade_intent.user_id,
+                 funding_authorization.id::text as funding_authorization_id,
                  funding_authorization.*
             from telegram_trade_intents trade_intent
             join funding_operations root_operation
@@ -365,7 +377,7 @@ function candidateSql(): string {
                  and reservation_row.mode = 'settled_for_consumer'
                  and reservation_row.state = 'active'
             ) root_ready_reservation on true
-            join lateral (
+            left join lateral (
               select authorization_row.*
                 from telegram_funding_authorizations authorization_row
                where authorization_row.user_id = trade_intent.user_id
@@ -403,6 +415,209 @@ function candidateSql(): string {
            limit $2`;
 }
 
+async function recordContinuationWait(
+  pool: Pool,
+  input: Readonly<{ intentId: string; rootOperationId: string; reasonCode: string }>,
+): Promise<number> {
+  const hardReason = ROUTER_CONTINUATION_HARD_REASON_CODES.has(input.reasonCode);
+  const result = await pool.query<{ hard_failure_count: string | null }>(
+    `update telegram_trade_intents
+        set result = coalesce(result, '{}'::jsonb) || jsonb_build_object(
+              'fundingContinuationState', 'waiting',
+              'fundingContinuationReasonCode', $3::text,
+              'fundingContinuationUpdatedAt', clock_timestamp(),
+              'fundingContinuationHardFailureCount', case
+                when $4::boolean then least(
+                  case
+                    when result ->> 'fundingContinuationReasonCode' = $3::text
+                     and result ->> 'fundingContinuationState' = 'waiting'
+                    then case
+                      when coalesce(result ->> 'fundingContinuationHardFailureCount', '') ~ '^[0-9]{1,6}$'
+                      then (result ->> 'fundingContinuationHardFailureCount')::int
+                      else 0
+                    end
+                    else 0
+                  end + 1,
+                  $5::int
+                )
+                else 0
+              end
+            ),
+            updated_at = clock_timestamp()
+      where id = $1::uuid
+        and status = 'funding'
+        and funding_operation_id = $2::uuid
+        and submit_started_at is null
+        and (
+          result ->> 'fundingContinuationState' is distinct from 'waiting'
+          or result ->> 'fundingContinuationReasonCode' is distinct from $3::text
+          or (
+            $4::boolean
+            and case
+              when coalesce(result ->> 'fundingContinuationHardFailureCount', '') ~ '^[0-9]{1,6}$'
+              then (result ->> 'fundingContinuationHardFailureCount')::int
+              else 0
+            end < $5::int
+          )
+        )
+      returning case
+        when coalesce(result ->> 'fundingContinuationHardFailureCount', '') ~ '^[0-9]{1,6}$'
+        then (result ->> 'fundingContinuationHardFailureCount')::int
+        else 0
+      end as hard_failure_count`,
+    [
+      input.intentId,
+      input.rootOperationId,
+      input.reasonCode,
+      hardReason,
+      ROUTER_CONTINUATION_HARD_FAILURE_LIMIT,
+    ],
+  );
+  if (result.rows[0]) {
+    return Number(result.rows[0].hard_failure_count ?? 0);
+  }
+  // A capped hard reason intentionally does not rewrite the intent every
+  // worker pass. Still return its durable count so a prior CAS miss can be
+  // retried rather than leaving the ready root permanently blocked.
+  const current = await pool.query<{ hard_failure_count: string | null }>(
+    `select case
+              when coalesce(result ->> 'fundingContinuationHardFailureCount', '') ~ '^[0-9]{1,6}$'
+              then (result ->> 'fundingContinuationHardFailureCount')::int
+              else 0
+            end as hard_failure_count
+       from telegram_trade_intents
+      where id = $1::uuid
+        and status = 'funding'
+        and funding_operation_id = $2::uuid
+        and submit_started_at is null`,
+    [input.intentId, input.rootOperationId],
+  );
+  return Number(current.rows[0]?.hard_failure_count ?? 0);
+}
+
+async function hardBlockRouterContinuation(
+  pool: Pool,
+  input: Readonly<{ intentId: string; rootOperationId: string; userId: string; reasonCode: string }>,
+): Promise<boolean> {
+  return tx(pool, async (client) => {
+    const rows = await client.query<{
+      id: string;
+      status: "ready" | string;
+      progress_stage: "ready_for_consumer" | string;
+      version: number;
+    }>(
+      `select root_operation.id, root_operation.status, root_operation.progress_stage,
+              root_operation.version
+         from telegram_trade_intents trade_intent
+         join funding_operations root_operation
+           on root_operation.id = trade_intent.funding_operation_id
+        where trade_intent.id = $1::uuid
+          and trade_intent.user_id = $2::uuid
+          and trade_intent.status = 'funding'
+          and trade_intent.submit_started_at is null
+          and root_operation.id = $3::uuid
+          and root_operation.status = 'ready'
+          and root_operation.progress_stage = 'ready_for_consumer'
+          and not exists (
+            select 1
+              from funding_operations child_operation
+             where child_operation.user_id = root_operation.user_id
+               and child_operation.support_metadata ->> 'telegramTradeIntentId' = trade_intent.id::text
+               and child_operation.support_metadata ->> 'continuationOfOperationId' = root_operation.id::text
+          )
+        for update of trade_intent, root_operation`,
+      [input.intentId, input.userId, input.rootOperationId],
+    );
+    const root = rows.rows[0];
+    if (!root) return false;
+    const reservations = await client.query<{ id: string }>(
+      `select id
+         from balance_reservations
+        where operation_id = $1::uuid
+          and user_id = $2::uuid
+          and mode = 'settled_for_consumer'
+          and state = 'active'
+        for update`,
+      [input.rootOperationId, input.userId],
+    );
+    if (reservations.rows.length !== 1) return false;
+    const reservation = reservations.rows[0];
+    if (!reservation) return false;
+    const now = new Date();
+    await releaseFundingReservationInTransaction(client, {
+      reservationId: reservation.id,
+      outcomeReason: "trade_shortfall_router_continuation_hard_blocked",
+      now,
+    });
+    await transitionFundingOperationInTransaction(client, {
+      operationId: root.id,
+      scope: { kind: "worker" },
+      expectedVersion: root.version,
+      expectedState: { status: "ready", stage: "ready_for_consumer" },
+      nextState: { status: "completed", stage: "terminal" },
+      supportMetadataPatch: {
+        consumerResolution: "released_to_controller_cash",
+        consumerResolvedAt: now.toISOString(),
+        consumerResolutionReason: "router_continuation_hard_blocked",
+        routerContinuationReasonCode: input.reasonCode,
+      },
+      now,
+    });
+    await client.query(
+      `update telegram_funding_authorization_reservations
+          set status = 'settled',
+              resolved_at = $2,
+              resolution_evidence = resolution_evidence || jsonb_build_object(
+                'operationStatus', 'completed',
+                'operationId', $1::text,
+                'reason', 'router_continuation_hard_blocked'
+              ),
+              updated_at = $2
+        where funding_operation_id = $1::uuid
+          and status = 'reserved'`,
+      [root.id, now],
+    );
+    const terminalized = await client.query(
+      `update telegram_trade_intents
+          set status = 'failed',
+              error_code = $2::text,
+              error_message = 'Polymarket funding setup changed before the final Router step. No trade was submitted.',
+              result = coalesce(result, '{}'::jsonb) || jsonb_build_object(
+                'fundingContinuationState', 'hard_blocked',
+                'fundingContinuationReasonCode', $2::text,
+                'fundingContinuationTerminalizedAt', $3::timestamptz
+              ),
+              updated_at = $3
+        where id = $1::uuid
+          and status = 'funding'
+          and submit_started_at is null`,
+      [input.intentId, input.reasonCode, now],
+    );
+    if (terminalized.rowCount !== 1) {
+      throw new Error("Router continuation intent changed before hard-block commit");
+    }
+    return true;
+  });
+}
+
+async function recordRouterContinuationWait(
+  pool: Pool,
+  input: Readonly<{
+    intentId: string;
+    rootOperationId: string;
+    userId: string;
+    reasonCode: string;
+  }>,
+): Promise<void> {
+  const failures = await recordContinuationWait(pool, input);
+  if (
+    failures >= ROUTER_CONTINUATION_HARD_FAILURE_LIMIT &&
+    ROUTER_CONTINUATION_HARD_REASON_CODES.has(input.reasonCode)
+  ) {
+    await hardBlockRouterContinuation(pool, input);
+  }
+}
+
 export async function runTelegramRouterContinuationCommitter(
   pool: Pool,
   input: Readonly<{
@@ -418,9 +633,6 @@ export async function runTelegramRouterContinuationCommitter(
   }>,
 ): Promise<Readonly<{ created: number; skipped: number }>> {
   const configuration = loadPolymarketPusdFundExecutionConfiguration();
-  if (!polymarketWrapExecutionConfigurationReady(configuration)) {
-    return { created: 0, skipped: 0 };
-  }
   const rows = await pool.query<CandidateRow>(
     candidateSql(),
     [
@@ -431,16 +643,46 @@ export async function runTelegramRouterContinuationCommitter(
   );
   let created = 0;
   let skipped = 0;
+  if (!polymarketWrapExecutionConfigurationReady(configuration)) {
+    for (const row of rows.rows) {
+      await recordRouterContinuationWait(pool, {
+        intentId: row.trade_intent_id,
+        rootOperationId: row.root_operation_id,
+        userId: row.user_id,
+        reasonCode: "router_execution_configuration_unavailable",
+      });
+    }
+    return { created: 0, skipped: rows.rows.length };
+  }
   for (const row of rows.rows) {
-    const authorization = telegramFundingAuthorizationFromRow(row);
     const amount = readExactRootAmount(row);
+    if (!row.funding_authorization_id) {
+      await recordRouterContinuationWait(pool, {
+        intentId: row.trade_intent_id,
+        rootOperationId: row.root_operation_id,
+        userId: row.user_id,
+        reasonCode: "router_authorization_missing",
+      });
+      skipped += 1;
+      continue;
+    }
+    if (!amount) {
+      await recordRouterContinuationWait(pool, {
+        intentId: row.trade_intent_id,
+        rootOperationId: row.root_operation_id,
+        userId: row.user_id,
+        reasonCode: "router_root_amount_unavailable",
+      });
+      skipped += 1;
+      continue;
+    }
+    const authorization = telegramFundingAuthorizationFromRow(row);
     const expectedAsset: AssetRef = {
       networkId: "evm:137",
       assetId: fundingSidecarRuntimeConfig.polymarketPusdAddress,
       decimals: 6,
     };
     if (
-      !amount ||
       !sameAsset(amount.asset, expectedAsset) ||
       authorization.profileId !== POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID ||
       authorization.signerId !== configuration.signerId ||
@@ -450,23 +692,43 @@ export async function runTelegramRouterContinuationCommitter(
       !sameAsset(authorization.sourceAsset, expectedAsset) ||
       !sameAsset(authorization.destinationAsset, expectedAsset)
     ) {
+      await recordRouterContinuationWait(pool, {
+        intentId: row.trade_intent_id,
+        rootOperationId: row.root_operation_id,
+        userId: row.user_id,
+        reasonCode: "router_authorization_mismatch",
+      });
       skipped += 1;
       continue;
     }
     try {
-      if (
-        (await input.inspectRouterProfile({
-          walletAddress: authorization.walletAddress,
-          walletId: authorization.privyWalletId,
-          profileId: POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
-        })) !== "valid"
-      ) {
+      const profileState = await input.inspectRouterProfile({
+        walletAddress: authorization.walletAddress,
+        walletId: authorization.privyWalletId,
+        profileId: POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
+      });
+      if (profileState !== "valid") {
+        await recordRouterContinuationWait(pool, {
+          intentId: row.trade_intent_id,
+          rootOperationId: row.root_operation_id,
+          userId: row.user_id,
+          reasonCode:
+            profileState === "invalid"
+              ? "router_policy_or_wallet_setup_invalid"
+              : "router_policy_or_wallet_setup_unavailable",
+        });
         skipped += 1;
         continue;
       }
       const now = new Date();
       const live = await loadLiveRouterFacts({ authorization, amount });
       if (!live) {
+        await recordRouterContinuationWait(pool, {
+          intentId: row.trade_intent_id,
+          rootOperationId: row.root_operation_id,
+          userId: row.user_id,
+          reasonCode: "router_source_balance_or_rpc_unavailable",
+        });
         skipped += 1;
         continue;
       }
@@ -569,7 +831,9 @@ export async function runTelegramRouterContinuationCommitter(
           `update telegram_trade_intents
               set result = coalesce(result, '{}'::jsonb) || jsonb_build_object(
                     'fundingContinuationOperationId', $2::text,
-                    'fundingContinuationCommittedAt', clock_timestamp()
+                    'fundingContinuationCommittedAt', clock_timestamp(),
+                    'fundingContinuationState', 'committed',
+                    'fundingContinuationReasonCode', null
                   ),
                   updated_at = clock_timestamp()
             where id = $1::uuid
@@ -587,6 +851,12 @@ export async function runTelegramRouterContinuationCommitter(
       });
       if (!committed.replayed) created += 1;
     } catch (error) {
+      await recordRouterContinuationWait(pool, {
+        intentId: row.trade_intent_id,
+        rootOperationId: row.root_operation_id,
+        userId: row.user_id,
+        reasonCode: "router_continuation_commit_retrying",
+      });
       console.warn("[telegram-router-continuation] commit skipped", {
         intentId: row.trade_intent_id,
         rootOperationId: row.root_operation_id,

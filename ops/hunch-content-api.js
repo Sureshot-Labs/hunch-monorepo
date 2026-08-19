@@ -2,6 +2,7 @@ const { createHash } = require("node:crypto");
 const { spawnSync } = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
+const readline = require("node:readline");
 
 // Node 18+ has global fetch; keep the workspace dependency as a fallback.
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -31,6 +32,7 @@ const VALUE_OPTIONS = new Set([
   "--metadata",
   "--method",
   "--mime",
+  "--output",
 ]);
 const MIME_BY_EXTENSION = new Map([
   [".avif", "image/avif"],
@@ -77,6 +79,7 @@ Usage:
   pnpm content:api -- operations
   pnpm content:api -- request <path> [--method GET|POST|PATCH|DELETE] [--body <file|->]
   pnpm content:api -- upload <file> [--mime <type>] [--kind <kind>] [metadata options]
+  pnpm content:api -- session
 
 Request safety flags:
   --confirm-publish  Required for approve, publish, cancel-schedule, unpublish, archive
@@ -90,16 +93,24 @@ Upload metadata options:
   --credit-url <url>    Credential-free HTTP(S) credit URL
   --metadata <file>     JSON object stored as asset metadata
 
+Output option:
+  --output </tmp/file>  Save JSON in a private temporary file with mode 0600
+
 Environment overrides:
   HUNCH_ADMIN_API_BASE_URL
   HUNCH_ADMIN_API_KEYCHAIN_SERVICE
   HUNCH_ADMIN_API_KEYCHAIN_ACCOUNT
   HUNCH_CONTENT_API_TIMEOUT_MS
   HUNCH_CONTENT_UPLOAD_TIMEOUT_MS
+  HUNCH_CONTENT_SESSION_IDLE_TIMEOUT_MS
   HUNCH_CONTENT_ALLOW_HTTP_LOCALHOST=1
 
 The API key is read from macOS Keychain at runtime. It is never accepted as a
 command-line argument or printed. Use an exact /admin/content/* path.
+
+Session mode reads one JSON object per line: {"id":"1","argv":["operations"]}.
+It reads Keychain once, keeps the token only in process memory, and closes after
+15 minutes without input. Use {"id":"close","argv":["close"]} to exit.
 `.trim(),
   );
 }
@@ -384,6 +395,72 @@ function validateCreditUrl(rawUrl) {
   return url.toString();
 }
 
+function validateOutputPath(rawPath) {
+  if (typeof rawPath !== "string" || rawPath.length === 0) {
+    throw new CliError("--output requires a path below /tmp");
+  }
+  const resolved = path.resolve(rawPath);
+  if (!resolved.startsWith("/tmp/") && !resolved.startsWith("/private/tmp/")) {
+    throw new CliError("--output is restricted to /tmp");
+  }
+  let realParent;
+  try {
+    realParent = fs.realpathSync(path.dirname(resolved));
+  } catch {
+    throw new CliError("--output parent directory must already exist");
+  }
+  const temporaryRoots = ["/tmp", "/private/tmp"].map((root) =>
+    fs.realpathSync(root),
+  );
+  if (
+    !temporaryRoots.some(
+      (root) => realParent === root || realParent.startsWith(`${root}/`),
+    )
+  ) {
+    throw new CliError("--output is restricted to /tmp");
+  }
+  return resolved;
+}
+
+function reserveJsonOutput(rawPath) {
+  const outputPath = validateOutputPath(rawPath);
+  try {
+    const descriptor = fs.openSync(outputPath, "wx", 0o600);
+    fs.closeSync(descriptor);
+  } catch (error) {
+    if (error && typeof error === "object" && error.code === "EEXIST") {
+      throw new CliError("--output refuses to overwrite an existing file");
+    }
+    throw new CliError("Unable to reserve --output JSON file");
+  }
+  return outputPath;
+}
+
+function releaseJsonOutput(outputPath) {
+  if (!outputPath) return;
+  try {
+    fs.unlinkSync(outputPath);
+  } catch (error) {
+    if (!error || typeof error !== "object" || error.code !== "ENOENT") {
+      throw new CliError("Unable to release --output JSON file");
+    }
+  }
+}
+
+function persistJsonResult(outputPath, value) {
+  try {
+    fs.writeFileSync(outputPath, `${JSON.stringify(value, null, 2)}\n`, {
+      encoding: "utf8",
+      flag: "w",
+      mode: 0o600,
+    });
+  } catch (error) {
+    releaseJsonOutput(outputPath);
+    throw new CliError("Unable to write --output JSON file");
+  }
+  return { ok: true, savedTo: outputPath };
+}
+
 async function uploadAsset(getClient, parsed, uploadTimeoutMs) {
   const fileArg = parsed.positional[1];
   if (!fileArg) throw new CliError("upload requires a file path");
@@ -498,87 +575,85 @@ function printJson(value) {
   process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
 }
 
-function printError(error) {
+function errorPayload(error) {
   if (error instanceof ApiError) {
-    printJson({
+    return {
       ok: false,
       status: error.status,
       ...(error.payload || { error: "content_api_request_failed" }),
       ...(error.retryAfter ? { retryAfter: error.retryAfter } : {}),
       ...(error.details ? { details: error.details } : {}),
-    });
-    return;
+    };
   }
   if (error instanceof CliError) {
-    printJson({
+    return {
       ok: false,
       error: "content_api_cli_error",
       message: error.message,
       ...(Object.keys(error.details || {}).length > 0
         ? { details: error.details }
         : {}),
-    });
-    return;
+    };
   }
-  printJson({
+  return {
     ok: false,
     error: "content_api_cli_unexpected_error",
     message: "Unexpected local helper failure",
-  });
+  };
 }
 
-async function main(argv = process.argv.slice(2)) {
-  const parsed = parseArgs(argv);
-  if (
-    hasOption(parsed, "--help") ||
-    hasOption(parsed, "-h") ||
-    !parsed.positional[0]
-  ) {
-    usage();
-    return;
-  }
+function printError(error) {
+  printJson(errorPayload(error));
+}
 
+function parseSessionEnvelope(line) {
+  let value;
+  try {
+    value = JSON.parse(line);
+  } catch {
+    throw new CliError("Session input must be valid JSON");
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new CliError("Session input must be a JSON object");
+  }
+  const keys = Object.keys(value);
+  if (keys.some((key) => !["id", "argv"].includes(key))) {
+    throw new CliError("Session input only accepts id and argv");
+  }
+  if (
+    typeof value.id !== "string" ||
+    value.id.length < 1 ||
+    value.id.length > 100
+  ) {
+    throw new CliError("Session id must be a string between 1 and 100 chars");
+  }
+  if (
+    !Array.isArray(value.argv) ||
+    value.argv.length < 1 ||
+    value.argv.length > 100 ||
+    value.argv.some((part) => typeof part !== "string" || part.length > 10_000)
+  ) {
+    throw new CliError("Session argv must be a non-empty string array");
+  }
+  return { id: value.id, argv: value.argv };
+}
+
+async function executeParsedCommand(
+  parsed,
+  { baseUrl, getClient, uploadTimeoutMs, sessionMode = false },
+) {
   const command = parsed.positional[0];
+  if (!command) throw new CliError("A content API command is required");
   if (!["operations", "request", "upload"].includes(command)) {
     throw new CliError(`Unknown command: ${command}`);
   }
 
-  const allowHttpLocalhost =
-    process.env.HUNCH_CONTENT_ALLOW_HTTP_LOCALHOST === "1";
-  const baseUrl = validateBaseUrl(
-    process.env.HUNCH_ADMIN_API_BASE_URL || DEFAULT_BASE_URL,
-    allowHttpLocalhost,
-  );
-  const timeoutMs = positiveInteger(
-    process.env.HUNCH_CONTENT_API_TIMEOUT_MS,
-    30_000,
-    "HUNCH_CONTENT_API_TIMEOUT_MS",
-  );
-  const uploadTimeoutMs = positiveInteger(
-    process.env.HUNCH_CONTENT_UPLOAD_TIMEOUT_MS,
-    120_000,
-    "HUNCH_CONTENT_UPLOAD_TIMEOUT_MS",
-  );
-  const getClient = () => {
-    const token = readKeychainApiKey({
-      service:
-        process.env.HUNCH_ADMIN_API_KEYCHAIN_SERVICE ||
-        DEFAULT_KEYCHAIN_SERVICE,
-      account:
-        process.env.HUNCH_ADMIN_API_KEYCHAIN_ACCOUNT ||
-        DEFAULT_KEYCHAIN_ACCOUNT,
-    });
-    return createApiClient({ baseUrl, token, timeoutMs });
-  };
-
   if (command === "operations") {
-    printJson(await getClient().request("GET", "/admin/content/operations"));
-    return;
+    return getClient().request("GET", "/admin/content/operations");
   }
 
   if (command === "upload") {
-    printJson(await uploadAsset(getClient, parsed, uploadTimeoutMs));
-    return;
+    return uploadAsset(getClient, parsed, uploadTimeoutMs);
   }
 
   const rawPath = parsed.positional[1];
@@ -602,10 +677,169 @@ async function main(argv = process.argv.slice(2)) {
   if (method === "GET" && bodySource) {
     throw new CliError("GET requests must not include --body");
   }
+  if (sessionMode && bodySource === "-") {
+    throw new CliError(
+      "Session requests must read --body from a file because stdin carries commands",
+    );
+  }
   const body = bodySource
     ? await readJsonSource(bodySource, "--body")
     : undefined;
-  printJson(await getClient().request(method, rawPath, body));
+  return getClient().request(method, rawPath, body);
+}
+
+async function runSession({ baseUrl, client, idleTimeoutMs, uploadTimeoutMs }) {
+  const input = readline.createInterface({
+    input: process.stdin,
+    crlfDelay: Infinity,
+    terminal: false,
+  });
+  let idleTimer;
+  let timedOut = false;
+  const resetIdleTimer = () => {
+    clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => {
+      timedOut = true;
+      input.close();
+    }, idleTimeoutMs);
+    idleTimer.unref();
+  };
+  const writeLine = (value) => {
+    process.stdout.write(`${JSON.stringify(value)}\n`);
+  };
+
+  writeLine({
+    ok: true,
+    session: { state: "ready", idleTimeoutMs },
+  });
+  resetIdleTimer();
+  for await (const rawLine of input) {
+    resetIdleTimer();
+    const line = rawLine.trim();
+    if (!line) continue;
+    let envelope;
+    try {
+      envelope = parseSessionEnvelope(line);
+      if (envelope.argv[0] === "close") {
+        writeLine({
+          ok: true,
+          sessionRequestId: envelope.id,
+          session: { state: "closing" },
+        });
+        break;
+      }
+      if (envelope.argv[0] === "session") {
+        throw new CliError("Nested content API sessions are not allowed");
+      }
+      const commandArgs = parseArgs(envelope.argv);
+      const rawOutputPath = option(commandArgs, "--output");
+      const outputPath = rawOutputPath
+        ? reserveJsonOutput(rawOutputPath)
+        : null;
+      let result;
+      try {
+        result = await executeParsedCommand(commandArgs, {
+          baseUrl,
+          getClient: () => client,
+          uploadTimeoutMs,
+          sessionMode: true,
+        });
+      } catch (error) {
+        releaseJsonOutput(outputPath);
+        throw error;
+      }
+      writeLine({
+        ok: true,
+        sessionRequestId: envelope.id,
+        result: outputPath ? persistJsonResult(outputPath, result) : result,
+      });
+    } catch (error) {
+      writeLine({
+        sessionRequestId: envelope?.id ?? null,
+        ...errorPayload(error),
+      });
+    }
+  }
+  clearTimeout(idleTimer);
+  writeLine({
+    ok: true,
+    session: { state: "closed", reason: timedOut ? "idle_timeout" : "client" },
+  });
+}
+
+async function main(argv = process.argv.slice(2)) {
+  const parsed = parseArgs(argv);
+  if (
+    hasOption(parsed, "--help") ||
+    hasOption(parsed, "-h") ||
+    !parsed.positional[0]
+  ) {
+    usage();
+    return;
+  }
+
+  const command = parsed.positional[0];
+  if (!["operations", "request", "session", "upload"].includes(command)) {
+    throw new CliError(`Unknown command: ${command}`);
+  }
+
+  const allowHttpLocalhost =
+    process.env.HUNCH_CONTENT_ALLOW_HTTP_LOCALHOST === "1";
+  const baseUrl = validateBaseUrl(
+    process.env.HUNCH_ADMIN_API_BASE_URL || DEFAULT_BASE_URL,
+    allowHttpLocalhost,
+  );
+  const timeoutMs = positiveInteger(
+    process.env.HUNCH_CONTENT_API_TIMEOUT_MS,
+    30_000,
+    "HUNCH_CONTENT_API_TIMEOUT_MS",
+  );
+  const uploadTimeoutMs = positiveInteger(
+    process.env.HUNCH_CONTENT_UPLOAD_TIMEOUT_MS,
+    120_000,
+    "HUNCH_CONTENT_UPLOAD_TIMEOUT_MS",
+  );
+  const sessionIdleTimeoutMs = positiveInteger(
+    process.env.HUNCH_CONTENT_SESSION_IDLE_TIMEOUT_MS,
+    900_000,
+    "HUNCH_CONTENT_SESSION_IDLE_TIMEOUT_MS",
+  );
+  const getClient = () => {
+    const token = readKeychainApiKey({
+      service:
+        process.env.HUNCH_ADMIN_API_KEYCHAIN_SERVICE ||
+        DEFAULT_KEYCHAIN_SERVICE,
+      account:
+        process.env.HUNCH_ADMIN_API_KEYCHAIN_ACCOUNT ||
+        DEFAULT_KEYCHAIN_ACCOUNT,
+    });
+    return createApiClient({ baseUrl, token, timeoutMs });
+  };
+
+  if (command === "session") {
+    const client = getClient();
+    await runSession({
+      baseUrl,
+      client,
+      idleTimeoutMs: sessionIdleTimeoutMs,
+      uploadTimeoutMs,
+    });
+    return;
+  }
+  const rawOutputPath = option(parsed, "--output");
+  const outputPath = rawOutputPath ? reserveJsonOutput(rawOutputPath) : null;
+  let result;
+  try {
+    result = await executeParsedCommand(parsed, {
+      baseUrl,
+      getClient,
+      uploadTimeoutMs,
+    });
+  } catch (error) {
+    releaseJsonOutput(outputPath);
+    throw error;
+  }
+  printJson(outputPath ? persistJsonResult(outputPath, result) : result);
 }
 
 if (require.main === module) {
@@ -620,8 +854,12 @@ module.exports = {
   inferAssetKind,
   inferMimeType,
   parseArgs,
+  parseSessionEnvelope,
+  releaseJsonOutput,
+  reserveJsonOutput,
   requiredConfirmation,
   resolveContentUrl,
   safeApiErrorPayload,
   validateBaseUrl,
+  validateOutputPath,
 };

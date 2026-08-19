@@ -1,5 +1,7 @@
 import { tx, type Pool, type PoolClient } from "@hunch/infra";
 
+import { isTelegramPolymarketRouterContinuationPending } from "../funding/reconciliation/telegram-router-continuation-state.js";
+
 import {
   escapeTelegramMarkdownV2,
   formatTelegramBoldMarkdownV2,
@@ -43,6 +45,7 @@ type ProjectionCandidate = Readonly<{
   amount_usd: string | null;
   attempt_state_fingerprint: string;
   chat_id: string | null;
+  continuation_id: string | null;
   error_code: string | null;
   funding_operation_id: string | null;
   id: string;
@@ -52,6 +55,7 @@ type ProjectionCandidate = Readonly<{
   progress_stage: string | null;
   receipt_state_fingerprint: string;
   result: Record<string, unknown>;
+  root_requires_router_continuation: boolean;
   side: string | null;
   status: string;
   step_state_fingerprint: string;
@@ -124,8 +128,39 @@ function liveProgressFor(candidate: ProjectionCandidate): TradeFundingProgress {
   const awaitingReconciliation =
     candidate.operation_status === "recovery_required" ||
     candidate.operation_status === "reconcile_required";
-  const reasonCode = candidate.operation_error_code ?? candidate.error_code;
-  const state: TradeFundingState = ready
+  // A Relay root only makes pUSD available at the controller. It is not ready
+  // for a Polymarket Buy until its exact Router continuation exists and has
+  // reached the consumer-ready state. Keeping this as preparing prevents a
+  // Refresh from re-quoting/trading the intermediate balance.
+  const routerContinuationPending =
+    isTelegramPolymarketRouterContinuationPending({
+      continuationId: candidate.continuation_id,
+      operationStatus: candidate.operation_status,
+      progressStage: candidate.progress_stage,
+      rootRequiresRouterContinuation:
+        candidate.root_requires_router_continuation,
+      venue: candidate.venue,
+    });
+  const continuationReason = candidate.result.fundingContinuationReasonCode;
+  const routerContinuationNeedsAttention =
+    routerContinuationPending &&
+    typeof continuationReason === "string" &&
+    [
+      "router_authorization_missing",
+      "router_authorization_mismatch",
+      "router_policy_or_wallet_setup_invalid",
+      "router_root_amount_unavailable",
+    ].includes(continuationReason);
+  const reasonCode = routerContinuationPending
+    ? (typeof continuationReason === "string"
+        ? continuationReason
+        : "router_continuation_pending")
+    : (candidate.operation_error_code ?? candidate.error_code);
+  const state: TradeFundingState = routerContinuationPending
+    ? routerContinuationNeedsAttention
+      ? "needs_attention"
+      : "preparing"
+    : ready
     ? "ready"
     : terminal
       ? "stopped"
@@ -225,6 +260,16 @@ async function listCandidates(
             intent.error_code,
             intent.result,
             intent.funding_operation_id::text,
+            continuation.id::text as continuation_id,
+            exists (
+              select 1
+                from funding_operation_steps root_step
+               where root_step.operation_id = operation.id
+                 and root_step.executor_id in (
+                   'telegram_relay_evm_funding_v1',
+                   'telegram_relay_polygon_usdc_v1'
+                 )
+            ) as root_requires_router_continuation,
             tracked_operation.status as operation_status,
             tracked_operation.progress_stage,
             tracked_operation.error_code as operation_error_code,
@@ -387,6 +432,33 @@ export async function runTelegramTradeShortfallProgressProjectionBatch(
 }
 
 function progressText(progress: TradeFundingProgress): string {
+  if (progress.reasonCode?.startsWith("router_")) {
+    const pending = progress.reasonCode === "router_continuation_pending";
+    return joinTelegramMarkdownV2Lines([
+      `${pending ? "🔄" : "⚠️"} ${formatTelegramBoldMarkdownV2(
+        pending ? "Moving funds into Polymarket" : "Polymarket funding needs attention",
+      )}`,
+      "",
+      `🔵 ${formatTelegramFieldMarkdownV2("Venue", progress.venue)}`,
+      `🎯 ${formatTelegramFieldMarkdownV2("Market", progress.marketTitle)}`,
+      `↔️ ${formatTelegramFieldMarkdownV2("Side", progress.sideLabel)}`,
+      `💲 ${formatTelegramFieldMarkdownV2("Order", `$${progress.amountUsd}`)}`,
+      pending
+        ? null
+        : `ℹ️ ${formatTelegramFieldMarkdownV2(
+            "Status",
+            progress.reasonCode.replaceAll("_", " "),
+          )}`,
+      "",
+      escapeTelegramMarkdownV2(
+        pending
+          ? "The Relay transfer is ready. The final Polymarket funding step is being prepared automatically. The Buy has not been submitted yet."
+          : progress.reasonCode === "router_root_amount_unavailable"
+            ? "The Relay transfer remains safe at your controller, but its exact received amount could not be reconstructed. The final Polymarket step was not sent."
+            : "The Relay transfer remains safe at your controller. The final Polymarket step was not sent; the bot will retry only when its exact wallet and policy checks are valid.",
+      ),
+    ].filter((line): line is string => line != null));
+  }
   const status = {
     starting: [
       "ℹ️",
