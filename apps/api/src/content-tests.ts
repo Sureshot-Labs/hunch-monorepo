@@ -911,9 +911,13 @@ test("registers gated protected routes and the content schema migrations", () =>
         '"${compose[@]}" stop "${application_services[@]}"',
       ),
   );
-  assert.match(
-    productionCompose,
-    /CONTENT_REVALIDATE_URL: \$\{CONTENT_REVALIDATE_URL_OVERRIDE:-https:\/\/www\.hunch\.trade\/api\/content\/revalidate\}/,
+  assert.equal(
+    [
+      ...productionCompose.matchAll(
+        /CONTENT_REVALIDATE_URL: \$\{CONTENT_REVALIDATE_URL_OVERRIDE:-https:\/\/www\.hunch\.trade\/api\/content\/revalidate\}/g,
+      ),
+    ].length,
+    2,
   );
   assert.equal(CONTENT_RENDERER_CONTRACT_ID, "hunch-content-document-v1");
 });

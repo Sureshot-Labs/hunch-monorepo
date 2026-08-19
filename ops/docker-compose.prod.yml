@@ -241,6 +241,9 @@ services:
       - /opt/hunch/.env
     environment:
       HUNCH_JS_RUNTIME: ${HUNCH_WORKER_JS_RUNTIME:-bun}
+      # Content outbox delivery runs in this worker, so it must target the
+      # public Journal endpoint just like the API service configuration.
+      CONTENT_REVALIDATE_URL: ${CONTENT_REVALIDATE_URL_OVERRIDE:-https://www.hunch.trade/api/content/revalidate}
       HUNCH_SECRET_BUNDLES: ${HUNCH_SECRET_BUNDLES_FINANCE_WORKER:-aws-sm:/hunch/prod/shared,aws-sm:/hunch/prod/api,aws-sm:/hunch/prod/polymarket-builder,aws-sm:/hunch/prod/rewards}${HUNCH_SECRET_BUNDLES_CONTENT_SUFFIX:-}
     volumes:
       - /opt/hunch/.env:/app/.env:ro
