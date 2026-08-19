@@ -8942,7 +8942,11 @@ async function previewTelegramTradeIntent(input: {
     }
   }
   const previewRecorded = await updateIntentStatus({
-    allowedStatuses: ["draft", "previewed"],
+    // A quote is the immutable Review snapshot. Concurrent callbacks can each
+    // obtain a live quote, but only the draft CAS may publish one; every loser
+    // below reloads and renders that single stored Review instead of replacing
+    // its price/expiry under the user's feet.
+    allowedStatuses: ["draft"],
     db: input.db,
     intentId: input.intent.id,
     quoteSnapshot: buildTelegramTradeQuotePreview(quote),
@@ -10167,6 +10171,17 @@ export async function handleTelegramBotTradingCallback(
     normalizeVenues(authorization?.enabled_venues ?? []),
     authorization?.wallet_chain,
   );
+  // A ready FundingOperation is an exact, durable reserve for this Buy. The
+  // generic CLOB readiness read can legitimately lag that on-chain credit, so
+  // do not reject a funding-resume before its own operation/reservation fence
+  // below has had a chance to validate it. All policy, wallet, market, amount,
+  // and venue gates remain unchanged.
+  const resumingDurableFunding =
+    parsed.type === "retry_buy" &&
+    intent.status === "funding" &&
+    intent.delivery_mode === "bot_submit" &&
+    intent.action === "buy" &&
+    intent.funding_operation_id != null;
   const maxAmountUsd = effectiveMaxTradeAmountUsd(
     policy,
     authorization?.max_amount_usd ?? null,
@@ -10210,7 +10225,8 @@ export async function handleTelegramBotTradingCallback(
     (intent.delivery_mode === "app_handoff" &&
       (intent.action !== "buy" || intent.venue !== "limitless")) ||
     (action === "BUY"
-      ? !canPreviewBuyForDelivery({
+      ? !resumingDurableFunding &&
+        !canPreviewBuyForDelivery({
           deliveryMode: intent.delivery_mode,
           readiness: tradeReadiness,
         })
@@ -10508,6 +10524,8 @@ export async function handleTelegramBotTradingCallback(
       `update telegram_trade_intents
           set status = $3,
               funding_reservation_id = $2::uuid,
+              error_code = null,
+              error_message = null,
               result = coalesce(result, '{}'::jsonb) || jsonb_build_object(
                 'fundingReadyAt', clock_timestamp(),
                 'fundingProposalConsumedAt', clock_timestamp(),
@@ -11566,6 +11584,47 @@ export async function handleTelegramBotTradingCallback(
     const submitted = submittedRefs as SubmittedTradeRefs | null;
     const definitiveSubmitRejection =
       submitStarted && isDefinitiveSubmitRejection(normalized);
+    // A canonical FundingOperation reserves the exact source amount for this
+    // intent. Polymarket can acknowledge its Deposit Wallet balance a little
+    // after the on-chain receipt. Put the intent back into the durable funding
+    // state so the automatic continuation retries its sync + fresh quote; do
+    // not terminalize a funded Buy or release its reservation.
+    if (
+      normalized.code === "funding_balance_pending" &&
+      fundingResumedForExecution &&
+      !submitStarted &&
+      setupTransactions.length === 0
+    ) {
+      const waiting = await input.db.query(
+        `update telegram_trade_intents
+            set status = 'funding',
+                funding_reservation_id = null,
+                error_code = 'funding_balance_pending',
+                error_message = $2,
+                result = coalesce(result, '{}'::jsonb) || jsonb_build_object(
+                  'fundingVenueBalancePendingAt', clock_timestamp(),
+                  'stage', 'waiting_for_venue_balance'
+                ),
+                updated_at = clock_timestamp()
+          where id = $1::uuid
+            and status = 'executing'
+            and submit_started_at is null`,
+        [intent.id, normalized.message],
+      );
+      if ((waiting.rowCount ?? 0) !== 1) {
+        await answerIntentAlreadyProcessed(input, intent);
+        return true;
+      }
+      input.log?.info?.(
+        { intentId: intent.id, venue: intent.venue },
+        "Telegram funded Buy is waiting for venue balance visibility",
+      );
+      await input.answerCallbackQuery({
+        callbackQueryId: input.callbackQuery.id,
+        text: "⏳ Waiting for Polymarket balance confirmation…",
+      });
+      return true;
+    }
     if (submitted) {
       input.log?.warn?.(
         {

@@ -51,6 +51,8 @@ import {
   deliverTelegramFundingActions,
 } from "./services/telegram-funding-delivery.js";
 import { deliverTelegramTradeShortfallProgress } from "./services/telegram-trade-shortfall-progress.js";
+import { claimTelegramTradeShortfallAutoResume } from "./services/telegram-trade-shortfall-auto-resume.js";
+import { TELEGRAM_BOT_TRADING_CALLBACK_PREFIX } from "./services/telegram-bot-trading-client.js";
 import { resolveTelegramNotificationsPolicy } from "./services/telegram-notification-policy.js";
 import {
   createTelegramBotTradingInternalApiClient,
@@ -281,6 +283,48 @@ export async function runSignalBotRunner(): Promise<void> {
     const drainFundingDelivery = (): Promise<void> => {
       fundingDeliveryInFlight ??= (async () => {
         try {
+          if (tradingInternalApi) {
+            const candidate = await claimTelegramTradeShortfallAutoResume(db);
+            if (candidate) {
+              await tradingInternalApi.handleCallback({
+                answerCallbackQuery: async () => undefined,
+                appBaseUrl: config.appBaseUrl,
+                callbackQuery: {
+                  data: `${TELEGRAM_BOT_TRADING_CALLBACK_PREFIX}:retry_buy:${candidate.intentId}`,
+                  from: { id: candidate.telegramUserId },
+                  id: `funding-auto-resume:${candidate.intentId}`,
+                  message: {
+                    chat: { id: candidate.chatId, type: "private" },
+                    message_id: candidate.telegramMessageId,
+                  },
+                },
+                editMessageText: ({
+                  chat_id,
+                  message_id,
+                  parse_mode,
+                  reply_markup,
+                  text,
+                }) =>
+                  telegram.editMessageText({
+                    chat_id,
+                    disable_web_page_preview: false,
+                    message_id,
+                    parse_mode: parse_mode ?? "MarkdownV2",
+                    ...(reply_markup ? { reply_markup } : {}),
+                    text,
+                  }),
+                sendMessage: (message) =>
+                  telegram.sendMessage({
+                    disable_web_page_preview: false,
+                    ...message,
+                  }),
+                telegramMiniAppEnabled: config.telegramMiniAppLinkBase != null,
+              });
+              log("signal_bot_trade_shortfall_auto_resume", {
+                intentId: candidate.intentId,
+              });
+            }
+          }
           const fundingDelivery = await deliverTelegramFundingActions({
             pool: db,
             limit: 25,

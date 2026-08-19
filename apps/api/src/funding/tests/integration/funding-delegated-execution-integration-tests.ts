@@ -31,6 +31,7 @@ import type {
 } from "../../execution/delegated-funding-config.js";
 import {
   createRelayEvmDelegatedFundingProfile,
+  recordFinalizedRelaySourceDebitForOperation,
   RELAY_CLEANUP_CANONICAL_WATCH_MS,
   type RelayEvmAllowanceReader,
 } from "../../execution/relay-evm-delegated-executor-profile.js";
@@ -56,6 +57,7 @@ import {
   TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
   TELEGRAM_RELAY_POLYGON_PUSD_PROFILE_ID,
 } from "../../execution/delegated-funding-profile-ids.js";
+import { RELAY_EVM_FUNDING_PROFILE_SPECS } from "../../execution/relay-evm-profile-specs.js";
 import {
   BASE_USDC,
   POLYGON_PUSD,
@@ -168,6 +170,9 @@ const relayConfiguration: RelayEvmExecutionConfiguration = {
   maxSourceRaw: "10000000",
   minimumSequentialTtlMs: 30_000,
 };
+const relayEvmProfile =
+  RELAY_EVM_FUNDING_PROFILE_SPECS[TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID];
+if (!relayEvmProfile) throw new Error("Relay EVM fixture profile is missing");
 const referenceCodec: FundingTransactionReferenceCodec = {
   keyVersion: 1,
   encrypt: (value) => `cipher:${value}`,
@@ -6464,6 +6469,24 @@ try {
     ledgerHeight: postDepositResidual.blockNumber,
     transactionHash: postDepositTransactionHash,
   });
+  assert.equal(
+    await recordFinalizedRelaySourceDebitForOperation(pool, {
+      now: new Date(now.getTime() + 3),
+      operationId: postDepositAlreadyZeroRelay.operationId,
+      profile: relayEvmProfile,
+    }),
+    true,
+    "the reconciliation job records exact source debit before reducing readiness",
+  );
+  assert.equal(
+    await recordFinalizedRelaySourceDebitForOperation(pool, {
+      now: new Date(now.getTime() + 3),
+      operationId: postDepositAlreadyZeroRelay.operationId,
+      profile: relayEvmProfile,
+    }),
+    false,
+    "the operation-scoped source debit poll is idempotent",
+  );
   const postDepositSourceDebit = await relayExecutor(
     [
       postDepositResidual,

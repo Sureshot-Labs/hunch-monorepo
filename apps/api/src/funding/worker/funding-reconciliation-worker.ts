@@ -40,7 +40,10 @@ import {
   loadRelayEvmExecutionConfiguration,
 } from "../execution/delegated-funding-config.js";
 import { createPrivyDelegatedFundingDriver } from "../execution/privy-delegated-funding-driver.js";
-import { createRelayEvmDelegatedFundingProfile } from "../execution/relay-evm-delegated-executor-profile.js";
+import {
+  createRelayEvmDelegatedFundingProfile,
+  recordFinalizedRelaySourceDebitForOperation,
+} from "../execution/relay-evm-delegated-executor-profile.js";
 import { RELAY_EVM_FUNDING_PROFILE_SPECS } from "../execution/relay-evm-profile-specs.js";
 import {
   resolveTelegramFundingReceiptDisposition,
@@ -415,6 +418,10 @@ export async function runFundingReconciliationJob(
           }),
         )
       : [];
+  const relayEvmProfileSpecs = relayEvmProfiles.flatMap((runtime) => {
+    const profile = RELAY_EVM_FUNDING_PROFILE_SPECS[runtime.profileId];
+    return profile ? [profile] : [];
+  });
   const operationPreparers = new Map<
     string,
     TelegramFundingReceiptOperationPreparer
@@ -524,20 +531,43 @@ export async function runFundingReconciliationJob(
             }),
         })
       : null;
-  const evidencePollers =
-    receiptDriver && polymarketPostconditionDriver
+  const postconditionPoll =
+    polymarketPostconditionDriver || relayEvmProfiles.length > 0
+      ? async (operationId: string, now: Date) => {
+          const polymarket = polymarketPostconditionDriver
+            ? await pollFundingPostconditions(
+                [polymarketPostconditionDriver],
+                pool,
+                operationId,
+                now,
+              )
+            : { postconditionsPolled: 0 };
+          let relaySourceDebitsRecorded = 0;
+          for (const profile of relayEvmProfileSpecs) {
+            if (
+              await recordFinalizedRelaySourceDebitForOperation(pool, {
+                now,
+                operationId,
+                profile,
+              })
+            )
+              relaySourceDebitsRecorded += 1;
+          }
+          return {
+            postconditionsPolled:
+              polymarket.postconditionsPolled + relaySourceDebitsRecorded,
+          };
+        }
+      : undefined;
+  const evidencePollers = {
+    ...(receiptDriver
       ? {
           receiptPoll: (operationId: string, now: Date) =>
             receiptDriver.pollOperation(pool, operationId, now),
-          postconditionPoll: (operationId: string, now: Date) =>
-            pollFundingPostconditions(
-              [polymarketPostconditionDriver],
-              pool,
-              operationId,
-              now,
-            ),
         }
-      : {};
+      : {}),
+    ...(postconditionPoll ? { postconditionPoll } : {}),
+  };
   const pollDestination = async (operationId: string, now: Date) => {
     const [direct, ownedRoute, refund] = await Promise.all([
       directIngressObserver.pollOperation(pool, operationId, now),

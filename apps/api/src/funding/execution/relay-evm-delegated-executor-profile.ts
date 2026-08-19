@@ -1,5 +1,5 @@
 import { ethers } from "ethers";
-import type { Pool, PoolClient } from "@hunch/infra";
+import { tx, type Pool, type PoolClient } from "@hunch/infra";
 
 import type {
   JsonValue,
@@ -3617,9 +3617,10 @@ async function allocateFinalizedRelaySourceDebitInTransaction(
   client: PoolClient,
   input: Readonly<{
     now: Date;
+    operationId?: string;
     profile: RelayEvmFundingProfileSpec;
   }>,
-): Promise<void> {
+): Promise<boolean> {
   const { rows } = await client.query<
     RelayPostDepositEvidence & {
       authorizationId: string;
@@ -3658,6 +3659,7 @@ async function allocateFinalizedRelaySourceDebitInTransaction(
          on funding_authorization.id::text =
               operation.support_metadata ->> 'fundingAuthorizationId'
       where deposit_step.executor_id = $1
+        and ($2::uuid is null or operation.id = $2::uuid)
         and deposit_step.state = 'succeeded'
         and deposit_receipt.evidence ->> 'attributedSourceRaw' =
               reservation.source_raw::text
@@ -3676,7 +3678,7 @@ async function allocateFinalizedRelaySourceDebitInTransaction(
       for update of operation, deposit_step, deposit_receipt, reservation
       skip locked
       limit 1`,
-    [input.profile.profileId],
+    [input.profile.profileId, input.operationId ?? null],
   );
   const evidence = rows[0];
   if (
@@ -3686,7 +3688,7 @@ async function allocateFinalizedRelaySourceDebitInTransaction(
       userId: evidence.userId,
     }))
   ) {
-    return;
+    return false;
   }
   await allocateFundingObservationInTransaction(client, {
     operationId: evidence.parentOperationId,
@@ -3719,6 +3721,26 @@ async function allocateFinalizedRelaySourceDebitInTransaction(
             updated_at = $2
       where id = $1::uuid and status = 'finalized'`,
     [evidence.depositReceiptId, input.now],
+  );
+  return true;
+}
+
+/**
+ * Reconciliation jobs must record the exact canonical Relay debit before the
+ * generic reducer evaluates readiness. The executor's opportunistic batch
+ * maintenance remains useful, but it is not a liveness mechanism for an
+ * already-finalized operation.
+ */
+export async function recordFinalizedRelaySourceDebitForOperation(
+  pool: Pool,
+  input: Readonly<{
+    now: Date;
+    operationId: string;
+    profile: RelayEvmFundingProfileSpec;
+  }>,
+): Promise<boolean> {
+  return tx(pool, (client) =>
+    allocateFinalizedRelaySourceDebitInTransaction(client, input),
   );
 }
 

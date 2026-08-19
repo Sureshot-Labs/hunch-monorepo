@@ -8285,9 +8285,14 @@ async function prepareTrade(
         intent.actor.kind === "telegram_bot" && !intent.fundingReservation;
       if (!useLegacyTelegramFunding) {
         throw tradingError({
-          code: "insufficient_readiness",
+          // The FundingOperation is already canonical and reserved for this
+          // exact Buy. A just-finalized Deposit Wallet credit can take a short
+          // time to appear in the CLOB's executable-balance read even after a
+          // sync request. That is a venue-indexing delay, not a lost route or
+          // a permanent wallet/setup failure.
+          code: "funding_balance_pending",
           message:
-            "Polymarket buy requires a completed FundingOperation, venue-visible pUSD, and a fresh quote.",
+            "Polymarket is still reflecting the confirmed funding balance.",
           venue: "polymarket",
         });
       }
