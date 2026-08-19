@@ -9,7 +9,7 @@ Use the existing `/admin/content/*` HTTP surface directly. Keep authentication a
 
 ## Prepare
 
-1. On macOS, use `pnpm content:api -- operations` when `ops/hunch-content-api.js` is present. It reads the `hunch-admin-api-codex-prod` / `codex` item from Keychain and requires the macOS access prompt. Elsewhere, require `HUNCH_ADMIN_API_BASE_URL` and `HUNCH_ADMIN_API_KEY` in the secure process environment. Ask the user to configure credentials outside chat when missing; never ask them to paste a key into the conversation.
+1. On macOS, use `pnpm content:api -- operations` when `ops/hunch-content-api.js` is present. It reads the `hunch-admin-api-codex-prod` / `codex` item from Keychain and requires the macOS access prompt. For a related sequence of two or more operations, prefer one bounded `pnpm content:api -- session` so Keychain is read once; close the session after the task. Elsewhere, require `HUNCH_ADMIN_API_BASE_URL` and `HUNCH_ADMIN_API_KEY` in the secure process environment. Ask the user to configure credentials outside chat when missing; never ask them to paste a key into the conversation.
 2. Never print, persist, or place the key in a URL. Send it only as `Authorization: Bearer $HUNCH_ADMIN_API_KEY` over HTTPS, except for an explicitly requested localhost test.
 3. In a source checkout, read `apps/api/src/routes/admin-content.ts` and the relevant definitions in `apps/api/src/schemas/content.ts` before constructing a request. Treat them as the canonical contract instead of copying schemas into this skill.
 4. Call `GET /admin/content/operations` first to verify access. Stop on `401`; report the missing permission on `403`; back off on `429`.
@@ -30,7 +30,10 @@ pnpm content:api -- operations
 pnpm content:api -- request "/admin/content/articles?limit=25"
 pnpm content:api -- request "/admin/content/articles/${ARTICLE_ID}" \
   --method PATCH --body /path/to/update.json
+pnpm content:api -- session
 ```
+
+Session input is line-delimited JSON such as `{"id":"read","argv":["request","/admin/content/articles/ARTICLE_ID"]}`. In session mode, request bodies must be file-backed because stdin carries commands. Use `--output /tmp/<unique-file>.json` for large responses or preview-token responses; the helper creates a private `0600` file and refuses an existing path before making the request. Never print a preview token.
 
 The helper requires explicit confirmation flags for publish-state changes, restores, and deletes. Pass them only after the user has explicitly requested that operation. It keeps signed asset upload URLs internal when using `pnpm content:api -- upload`.
 
