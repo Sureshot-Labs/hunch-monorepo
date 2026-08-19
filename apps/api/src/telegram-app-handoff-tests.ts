@@ -50,6 +50,11 @@ function createFakePool() {
       if (["begin", "commit", "rollback"].includes(normalized))
         return { rows: [] };
       if (normalized.startsWith("insert into telegram_app_handoffs")) {
+        assert.match(
+          normalized,
+          /on conflict do nothing/u,
+          "real PostgreSQL retries must remain readable after a uniqueness conflict",
+        );
         if (handoffIssued) return { rows: [] };
         handoffIssued = true;
         tokenHash = String(params[3]);
@@ -57,6 +62,15 @@ function createFakePool() {
       }
       if (normalized.startsWith("select exists("))
         return { rows: [{ exists: handoffIssued }] };
+      if (
+        normalized.includes("from telegram_app_handoffs") &&
+        normalized.includes("where trade_intent_id = $1::uuid")
+      ) {
+        return {
+          rows:
+            params[0] === INTENT_ID && params[1] === tokenHash ? [row()] : [],
+        };
+      }
       if (
         normalized.startsWith(
           "update telegram_app_handoffs handoff_row set state = 'expired'",
@@ -87,6 +101,11 @@ function createFakePool() {
         assert.equal(state, "claimed");
         state = "committed";
         return { rows: [row()] };
+      }
+      if (normalized.startsWith("update telegram_trade_intents intent")) {
+        assert.equal(params[0], INTENT_ID);
+        assert.equal(params[2], HANDOFF_ID);
+        return { rowCount: 1, rows: [] };
       }
       if (normalized.includes("set state = 'cancelled'")) {
         assert.ok(state === "issued" || state === "claimed");
@@ -152,6 +171,35 @@ await assert.rejects(
   }),
   (error: unknown) =>
     error instanceof TelegramAppHandoffError && error.code === "already_issued",
+);
+
+const deterministic = createFakePool();
+const deterministicFirst = await issueTelegramAppHandoff({
+  authorityFingerprint: AUTHORITY_FINGERPRINT,
+  db: deterministic.pool as never,
+  planSnapshot: { destination: "polymarket" },
+  policyRevision: "policy-1",
+  quoteSnapshot: { maxSpendUsd: "2.50" },
+  telegramUserId: TELEGRAM_USER_ID,
+  tokenSecret: "test-delivery-secret",
+  tradeIntentId: INTENT_ID,
+  userId: USER_ID,
+});
+const deterministicRetry = await issueTelegramAppHandoff({
+  authorityFingerprint: AUTHORITY_FINGERPRINT,
+  db: deterministic.pool as never,
+  planSnapshot: { destination: "polymarket" },
+  policyRevision: "policy-1",
+  quoteSnapshot: { maxSpendUsd: "2.50" },
+  telegramUserId: TELEGRAM_USER_ID,
+  tokenSecret: "test-delivery-secret",
+  tradeIntentId: INTENT_ID,
+  userId: USER_ID,
+});
+assert.equal(
+  deterministicRetry.token,
+  deterministicFirst.token,
+  "delivery retries recover the same opaque token without storing it raw",
 );
 await assert.rejects(
   resolveTelegramAppHandoff({
@@ -247,6 +295,21 @@ assert.equal(
     })
   ).state,
   "committed",
+);
+assert.equal(
+  (
+    await commitTelegramAppHandoff({
+      currentAuthorityFingerprint: AUTHORITY_FINGERPRINT,
+      currentPolicyRevision: "policy-1",
+      db: fixture.pool as never,
+      planFingerprint: issued.handoff.planFingerprint,
+      telegramUserId: TELEGRAM_USER_ID,
+      token: issued.token,
+      userId: USER_ID,
+    })
+  ).state,
+  "committed",
+  "commit retries attach to the same consumed handoff",
 );
 
 const cancellable = createFakePool();

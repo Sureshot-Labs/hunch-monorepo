@@ -229,6 +229,62 @@ export HUNCH_ADMIN_API_BASE_URL="https://<api-host>"
 export HUNCH_ADMIN_API_KEY="<load-from-secret-manager>"
 ```
 
+### Codex Desktop on macOS: use Keychain
+
+For a local Codex workflow, the repository includes a helper that reads one
+dedicated generic-password item from macOS Keychain. The key never appears in
+the command line, repository, `.env`, or helper output.
+
+Create the item from a human-controlled terminal. Supplying `-w` last prompts
+for the value without placing it in shell history; `-T ""` prevents the
+creating executable from receiving permanent access:
+
+```bash
+security add-generic-password \
+  -a codex \
+  -s hunch-admin-api-codex-prod \
+  -l "Hunch Codex" \
+  -T "" \
+  -w
+```
+
+Then verify the scoped API from the repository root:
+
+```bash
+pnpm content:api -- operations
+```
+
+macOS should request access to the Keychain item. Choose **Allow Once**, not
+**Always Allow**. Codex may also require an execution approval because Keychain
+and production network access are outside the workspace sandbox.
+
+The helper supports three entry points:
+
+```bash
+# Read operational status.
+pnpm content:api -- operations
+
+# Call an exact content endpoint. Bodies come from a JSON file or stdin.
+pnpm content:api -- request "/admin/content/articles?limit=25"
+pnpm content:api -- request "/admin/content/articles/${ARTICLE_ID}" \
+  --method PATCH --body /path/to/update.json
+
+# Create, upload, and complete an asset without exposing its signed URL.
+pnpm content:api -- upload /path/to/screenshot.png \
+  --alt "Prediction market order ticket in Hunch"
+```
+
+The helper only resolves paths below `/admin/content/*`, rejects redirects and
+credential-bearing base URLs, sanitizes API errors, and never retries
+non-idempotent requests. It requires `--confirm-publish` for approval,
+publication, scheduling, unpublication, or archival; `--confirm-restore` for a
+version restore; and `--confirm-delete` for deletion. These flags are local
+safety gates and do not replace the user-intent rules in the agent skill.
+
+The default endpoint is `https://api.hunch.trade`. Use
+`HUNCH_ADMIN_API_BASE_URL` to override it. Plain HTTP is rejected unless the
+host is localhost and `HUNCH_CONTENT_ALLOW_HTTP_LOCALHOST=1` is set explicitly.
+
 The Codex instructions in this repository are located at
 `.agents/skills/hunch-content-api/SKILL.md`. For content tasks, the agent must
 use this skill and must never ask for the key to be pasted into the

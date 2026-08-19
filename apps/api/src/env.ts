@@ -381,6 +381,8 @@ const authAccessState = parseEnum(
 const telegramMiniAppEnabled =
   parseOptionalBool(process.env.HUNCH_TELEGRAM_MINI_APP_ENABLED) ?? false;
 const telegramBotToken = process.env.HUNCH_TELEGRAM_BOT_TOKEN?.trim() || "";
+const telegramMiniAppLinkBase =
+  process.env.HUNCH_SIGNAL_BOT_TELEGRAM_MINI_APP_LINK_BASE?.trim() || "";
 const telegramMembershipBotId =
   process.env.HUNCH_TELEGRAM_MEMBERSHIP_BOT_ID?.trim() || "";
 const telegramMembershipChatId =
@@ -914,6 +916,7 @@ export const env = {
     true,
   authAccessState,
   telegramMiniAppEnabled,
+  telegramMiniAppLinkBase,
   telegramBotToken,
   telegramMembershipBotId,
   telegramMembershipChatId,

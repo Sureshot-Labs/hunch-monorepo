@@ -190,7 +190,7 @@ try {
       error.code === "23514" &&
       "constraint" in error &&
       error.constraint === "telegram_trade_intents_delivery_authority_check",
-    "app handoff may confirm funding consent but must never enter trade execution",
+    "an uncommitted app handoff may confirm funding consent but must never enter trade execution",
   );
   await client.query("rollback to savepoint app_handoff_execution_rejected");
 
