@@ -432,6 +432,20 @@ export function telegramTradeShortfallExecutionProfiles(
   ];
 }
 
+function requiresPolymarketPusdRouterContinuation(
+  venue: Venue,
+  profileId: string,
+): boolean {
+  if (venue !== "polymarket") return false;
+  const profile = relayEvmFundingProfileSpec(profileId);
+  return (
+    profile?.routeIds.some((routeId) => {
+      const route = RELAY_ROUTE_SPECS[routeId];
+      return route ? sameAsset(route.destination, destinationAsset("polymarket")) : false;
+    }) ?? false
+  );
+}
+
 function requiresExternalHandoff(option: SourceOption): boolean {
   return option.requiredActions.some(
     (action) => action.kind === "external_handoff",
@@ -749,6 +763,24 @@ export class TelegramTradeShortfallFundingService {
         );
         continue;
       }
+      // A Relay route that reaches Polygon pUSD only prepares controller
+      // funds. Its mandatory next leg is the exact Router fund action, so do
+      // not commit the root unless that child authority is already durable.
+      if (
+        requiresPolymarketPusdRouterContinuation(
+          input.venue,
+          plannedCandidate.profileId,
+        ) &&
+        !(await ensureTelegramFundingAuthorization(this.pool, {
+          ...authorizationInput,
+          profileId: POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
+        }))
+      ) {
+        unavailableReasonCodes.push(
+          "internal_route_router_authority_unavailable",
+        );
+        continue;
+      }
       candidate = plannedCandidate;
       break;
     }
@@ -946,6 +978,32 @@ export class TelegramTradeShortfallFundingService {
     if (!fundingAuthorization) {
       throw new Error("trade funding authorization is unavailable");
     }
+    const routerContinuationRequired =
+      requiresPolymarketPusdRouterContinuation(
+        input.venue,
+        input.proposal.serverExecutionProfileId,
+      );
+    const routerAuthorization = routerContinuationRequired
+      ? await loadActiveTelegramFundingAuthorization(
+        this.pool,
+        {
+          userId: input.userId,
+          telegramAccountId: input.telegramAccountId,
+          telegramUserId: input.telegramUserId,
+          destinationOptionId: quote.destinationOptionId as string,
+          venueBindingOptionId: quote.venueBindingOptionId as string,
+          venueId: "polymarket",
+          profileId: POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
+          securityClass: "closed_destination_transform",
+          sourceAsset: pUsdAsset,
+          destinationAsset: pUsdAsset,
+          requireTradingEnabled: true,
+        },
+      )
+      : null;
+    if (routerContinuationRequired && !routerAuthorization) {
+      throw new Error("trade funding Router authorization is unavailable");
+    }
     const relayProfile = relayEvmFundingProfileSpec(
       input.proposal.serverExecutionProfileId,
     );
@@ -1017,6 +1075,27 @@ export class TelegramTradeShortfallFundingService {
       );
       if (!lockedAuthorization) {
         throw new Error("trade funding authorization changed");
+      }
+      if (routerContinuationRequired) {
+        const lockedRouterAuthorization =
+          await loadActiveTelegramFundingAuthorization(client, {
+            userId: input.userId,
+            telegramAccountId: input.telegramAccountId,
+            telegramUserId: input.telegramUserId,
+            destinationOptionId: quote.destinationOptionId as string,
+            venueBindingOptionId: quote.venueBindingOptionId as string,
+            venueId: "polymarket",
+            expectedAuthorizationId: routerAuthorization?.id,
+            profileId: POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
+            securityClass: "closed_destination_transform",
+            sourceAsset: pUsdAsset,
+            destinationAsset: pUsdAsset,
+            lock: true,
+            requireTradingEnabled: true,
+          });
+        if (!lockedRouterAuthorization) {
+          throw new Error("trade funding Router authorization changed");
+        }
       }
       const committed = await this.runtime.commitPreparedInTransaction(
         client,
