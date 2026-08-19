@@ -70,6 +70,51 @@ export const telegramAppHandoffResponseSchema = z.object({
   }),
 });
 
+export const telegramAppHandoffProjectionSchema = z.object({
+  amountUsd: z.number().nullable(),
+  canAutoClose: z.boolean(),
+  continuesInBackground: z.boolean(),
+  error: z
+    .object({
+      code: z.string().nullable(),
+      message: z.string().nullable(),
+    })
+    .nullable(),
+  eventTitle: z.string().nullable(),
+  funding: z
+    .object({
+      operationId: z.string().uuid(),
+      progressStage: z.string().nullable(),
+      status: z.string().nullable(),
+    })
+    .nullable(),
+  marketTitle: z.string(),
+  order: z.object({
+    executionId: z.string().uuid().nullable(),
+    orderId: z.string().uuid().nullable(),
+    txSignature: z.string().nullable(),
+    venueOrderId: z.string().nullable(),
+  }),
+  outcome: z.string(),
+  revision: z.string().datetime(),
+  stage: z.enum([
+    "attaching",
+    "failed",
+    "funding",
+    "reconciling",
+    "submitting",
+    "success",
+  ]),
+  status: z.string(),
+  terminal: z.boolean(),
+  tradeIntentId: z.string().uuid(),
+  venue: z.enum(["kalshi", "limitless", "polymarket"]),
+});
+
+export const telegramAppHandoffProjectionResponseSchema = z.object({
+  projection: telegramAppHandoffProjectionSchema,
+});
+
 export const telegramGroupMembershipStateSchema = z.enum([
   "member",
   "not_member",

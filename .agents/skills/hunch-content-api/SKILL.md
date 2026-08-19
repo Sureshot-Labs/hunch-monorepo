@@ -5,11 +5,11 @@ description: Read, create, edit, review, publish, archive, and manage media for 
 
 # Hunch Content API
 
-Use the existing `/admin/content/*` HTTP surface directly. Keep authentication and authorization on the API; keep this skill instruction-only.
+Use the existing `/admin/content/*` HTTP surface directly. Keep authentication and authorization on the API; keep this skill instruction-only. In this repository, prefer the Keychain-backed `pnpm content:api -- ...` helper so credentials never enter a command, file, or model-visible output.
 
 ## Prepare
 
-1. Require `HUNCH_ADMIN_API_BASE_URL` and `HUNCH_ADMIN_API_KEY` in the secure process environment. Ask the user to configure them outside chat when missing; never ask them to paste a key into the conversation.
+1. On macOS, use `pnpm content:api -- operations` when `ops/hunch-content-api.js` is present. It reads the `hunch-admin-api-codex-prod` / `codex` item from Keychain and requires the macOS access prompt. Elsewhere, require `HUNCH_ADMIN_API_BASE_URL` and `HUNCH_ADMIN_API_KEY` in the secure process environment. Ask the user to configure credentials outside chat when missing; never ask them to paste a key into the conversation.
 2. Never print, persist, or place the key in a URL. Send it only as `Authorization: Bearer $HUNCH_ADMIN_API_KEY` over HTTPS, except for an explicitly requested localhost test.
 3. In a source checkout, read `apps/api/src/routes/admin-content.ts` and the relevant definitions in `apps/api/src/schemas/content.ts` before constructing a request. Treat them as the canonical contract instead of copying schemas into this skill.
 4. Call `GET /admin/content/operations` first to verify access. Stop on `401`; report the missing permission on `403`; back off on `429`.
@@ -23,7 +23,18 @@ Use the existing `/admin/content/*` HTTP surface directly. Keep authentication a
 - For assets, follow the API's three steps: create the upload intent, upload directly to the returned signed storage URL with the exact required checksum and headers, then complete the asset through the API. Do not proxy file bytes through the admin API.
 - Use credential-free `http` or `https` credit URLs only. Do not send embedded credentials, `javascript:` URLs, or arbitrary document fields.
 
-Use a direct HTTP client such as:
+With the repository helper, use exact `/admin/content/*` paths and JSON files or stdin for bodies:
+
+```sh
+pnpm content:api -- operations
+pnpm content:api -- request "/admin/content/articles?limit=25"
+pnpm content:api -- request "/admin/content/articles/${ARTICLE_ID}" \
+  --method PATCH --body /path/to/update.json
+```
+
+The helper requires explicit confirmation flags for publish-state changes, restores, and deletes. Pass them only after the user has explicitly requested that operation. It keeps signed asset upload URLs internal when using `pnpm content:api -- upload`.
+
+When the helper is unavailable, use a direct HTTP client such as:
 
 ```sh
 curl -sS --fail-with-body \
