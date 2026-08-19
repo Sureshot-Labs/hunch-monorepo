@@ -8,6 +8,11 @@ import {
 } from "../funding/persistence/canonical.js";
 import type { JsonObject } from "../funding/domain/types.js";
 
+/**
+ * Opaque token for the sealed Telegram → Mini App *trade* handoff. It conveys
+ * consent for a fingerprinted intent; it is unrelated to a funding action
+ * whose kind is `external_handoff`.
+ */
 export const TELEGRAM_APP_HANDOFF_TOKEN_PREFIX = "th1_";
 export const TELEGRAM_APP_HANDOFF_START_PARAM_PREFIX = "handoff_";
 const TELEGRAM_APP_HANDOFF_TOKEN_RE = /^th1_[A-Za-z0-9_-]{43}$/;
@@ -16,6 +21,12 @@ const SHA256_HEX_RE = /^[0-9a-f]{64}$/;
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
+/**
+ * Lifecycle of the sealed trade handoff itself, not of its funding operation:
+ * issued = bot created it; claimed = the bound Mini App user opened it;
+ * committed = exact plan accepted for execution; cancelled/expired are final
+ * pre-commit exits. Funding and trade state continue in their own records.
+ */
 export type TelegramAppHandoffState =
   | "issued"
   | "claimed"
@@ -107,7 +118,8 @@ export class TelegramAppHandoffError extends Error {
       | "not_found"
       | "plan_changed"
       | "policy_changed"
-      | "unauthorized",
+      | "unauthorized"
+      | "venue_unsupported",
   ) {
     super(code);
     this.name = "TelegramAppHandoffError";

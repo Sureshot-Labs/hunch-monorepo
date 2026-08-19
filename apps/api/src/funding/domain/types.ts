@@ -817,6 +817,11 @@ export type SignatureAction = Readonly<{
 }>;
 
 export type ExternalHandoffAction = Readonly<{
+  /**
+   * A client-wallet funding action handed to its adapter (for example a wallet
+   * signature or Deposit Wallet action). This is deliberately distinct from
+   * Telegram's sealed `app_handoff` trade-delivery mode and `th1_` token.
+   */
   kind: "external_handoff";
   actionId: string;
   networkId: NetworkId;

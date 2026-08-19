@@ -159,30 +159,84 @@ export type TelegramBotTradingVenue = "kalshi" | "limitless" | "polymarket";
 export type TelegramBotTradingAction = "buy" | "sell" | "redeem";
 export type TelegramBotTradingSide = "NO" | "YES";
 export type TelegramBotTradingWalletChain = "ethereum" | "solana";
+/**
+ * How a Telegram Buy intent is delivered after its exact plan is known.
+ *
+ * `app_handoff` is the sealed Telegram → Mini App trade handoff. It is not
+ * the funding-domain `external_handoff` action, which asks a client wallet to
+ * perform one funding action. `direct_deposit_only` is a receive-address flow,
+ * not an executable trade plan.
+ */
 export type TelegramBuyDeliveryMode =
+  /** A sealed, one-time Mini App handoff will continue this exact intent. */
   | "app_handoff"
+  /** The bot's delegated server executor may submit this exact Buy itself. */
   | "bot_submit"
+  /** No exact executor is available; offer a normal Deposit instead. */
   | "direct_deposit_only";
+
+/**
+ * Consent to a sealed Mini App handoff and an executor's ability to finish it
+ * are separate facts. Polymarket supports both execution surfaces; Limitless
+ * currently supports only the sealed EVM handoff.
+ */
+export type TelegramBuyExecutionCapability = Readonly<{
+  /** A sealed Mini App consumer is implemented for this venue and chain. */
+  sealedAppHandoffExact: boolean;
+  /** The Telegram server has a narrowly authorized exact Buy executor. */
+  serverBotExact: boolean;
+}>;
+
+export function resolveTelegramBuyExecutionCapability(input: Readonly<{
+  venue: TelegramBotTradingVenue;
+  walletChain: TelegramBotTradingWalletChain | null;
+}>): TelegramBuyExecutionCapability {
+  if (input.walletChain !== "ethereum") {
+    return { sealedAppHandoffExact: false, serverBotExact: false };
+  }
+  if (input.venue === "polymarket") {
+    return { sealedAppHandoffExact: true, serverBotExact: true };
+  }
+  if (input.venue === "limitless") {
+    return { sealedAppHandoffExact: true, serverBotExact: false };
+  }
+  return { sealedAppHandoffExact: false, serverBotExact: false };
+}
+
+export function isTelegramSealedAppHandoffVenue(
+  venue: TelegramBotTradingVenue,
+): boolean {
+  return resolveTelegramBuyExecutionCapability({
+    venue,
+    walletChain: "ethereum",
+  }).sealedAppHandoffExact;
+}
 
 export function resolveTelegramBuyDeliveryMode(
   input: Readonly<{
+    capability: TelegramBuyExecutionCapability;
     commonBuySurfaceReady: boolean;
     miniAppHandoffMode: TelegramMiniAppHandoffMode;
     telegramMiniAppEnabled: boolean;
-    venue: TelegramBotTradingVenue;
     venueAllowedForBotSubmit: boolean;
   }>,
 ): TelegramBuyDeliveryMode {
   if (!input.commonBuySurfaceReady) return "direct_deposit_only";
   const canHandoff =
-    input.telegramMiniAppEnabled && input.miniAppHandoffMode !== "off";
-  if (canHandoff && input.miniAppHandoffMode === "always") {
-    return "app_handoff";
+    input.telegramMiniAppEnabled &&
+    input.miniAppHandoffMode !== "off" &&
+    input.capability.sealedAppHandoffExact;
+  const canBotSubmit =
+    input.capability.serverBotExact && input.venueAllowedForBotSubmit;
+  if (input.miniAppHandoffMode === "always") {
+    return canHandoff
+      ? "app_handoff"
+      : canBotSubmit
+        ? "bot_submit"
+        : "direct_deposit_only";
   }
-  if (input.venue === "polymarket" && input.venueAllowedForBotSubmit) {
-    return "bot_submit";
-  }
-  if (canHandoff && input.miniAppHandoffMode === "fallback") {
+  if (canBotSubmit) return "bot_submit";
+  if (input.miniAppHandoffMode === "fallback" && canHandoff) {
     return "app_handoff";
   }
   return "direct_deposit_only";
@@ -1393,6 +1447,12 @@ function telegramTradeMarketContextId(
   return side === "YES" ? market.token_yes : market.token_no;
 }
 
+function telegramShortfallVenue(
+  venue: TelegramBotTradingVenue,
+): "limitless" | "polymarket" | null {
+  return venue === "limitless" || venue === "polymarket" ? venue : null;
+}
+
 function telegramTradeFundingIdentity(input: {
   authorization: TelegramBotTradingAuthorizationRow;
   intent: TelegramTradeIntentRow;
@@ -1403,11 +1463,14 @@ function telegramTradeFundingIdentity(input: {
   quoteExpiresAt: Date | string | null | undefined;
   side: TelegramBotTradingSide;
 }): TelegramTradeShortfallIdentity | null {
+  const venue = telegramShortfallVenue(input.intent.venue);
   const marketContextId = telegramTradeMarketContextId(
     input.market,
     input.side,
   );
-  if (!marketContextId || !Number.isFinite(input.maximumSpendUsd)) return null;
+  if (!venue || !marketContextId || !Number.isFinite(input.maximumSpendUsd)) {
+    return null;
+  }
   const quoteDeadline =
     input.quoteExpiresAt instanceof Date
       ? input.quoteExpiresAt
@@ -1424,7 +1487,7 @@ function telegramTradeFundingIdentity(input: {
     telegramUserId: input.authorization.telegram_user_id,
     tradeIntentId: input.intent.id,
     userId: input.authorization.user_id,
-    venue: input.intent.venue === "limitless" ? "limitless" : "polymarket",
+    venue,
     marketId: input.intent.market_id,
     marketContextId,
     side: input.side,
@@ -2620,9 +2683,13 @@ async function issueTelegramTradeAppHandoffMessage(input: {
   quote: TradeQuote | TelegramTradeQuotePreview;
   telegramMiniAppLinkBase?: string | null;
 }): Promise<TelegramBotTradingMessage> {
+  if (!isTelegramSealedAppHandoffVenue(input.intent.venue)) {
+    throw new TelegramAppHandoffError("venue_unsupported");
+  }
   const scope = await resolveTelegramAppHandoffCurrentScope({
     db: input.db,
     telegramUserId: input.intent.telegram_user_id,
+    venue: input.intent.venue,
   });
   const authority = buildTelegramTradeAuthorityBinding(input.authorization);
   if (
@@ -4941,6 +5008,9 @@ export async function buildTelegramBotTradingMarketMessage(input: {
     telegramUserId,
     market.venue,
   );
+  // Limitless is deliberately not an unattended bot-submit venue. Its sealed
+  // path uses the user's managed EVM authority; Polymarket already has that
+  // authority through its venue-bound authorization.
   const handoffAuthorization =
     market.venue === "limitless"
       ? await loadEnabledEvmAuthorization(input.db, telegramUserId)
@@ -4960,6 +5030,16 @@ export async function buildTelegramBotTradingMarketMessage(input: {
   );
   const authorizationVenueAllowed =
     authorization != null && authorizationVenues.includes(market.venue);
+  const buyExecutionCapability = resolveTelegramBuyExecutionCapability({
+    venue: market.venue,
+    walletChain: buyAuthorization?.wallet_chain ?? null,
+  });
+  const sealedAppHandoffAvailable =
+    input.telegramMiniAppEnabled === true &&
+    policy.miniAppHandoffMode !== "off" &&
+    policy.fundingReceiveEnabled &&
+    policy.buyContinuationEnabled &&
+    buyExecutionCapability.sealedAppHandoffExact;
   const [automationAllowed, buyAllowed, redeemAllowed, sellAllowed] =
     await Promise.all([
       venueLifecycleAllows(input.db, market.venue, "automation"),
@@ -5043,24 +5123,18 @@ export async function buildTelegramBotTradingMarketMessage(input: {
     buyAllowed &&
     policy.tradingEnabled &&
     policy.tradingActions.includes("buy") &&
-    (policyVenueAllowed ||
-      (market.venue === "limitless" &&
-        input.telegramMiniAppEnabled === true &&
-        policy.fundingReceiveEnabled &&
-        policy.buyContinuationEnabled)) &&
+    (policyVenueAllowed || sealedAppHandoffAvailable) &&
     marketOrderable &&
     buyAuthorization?.enabled === true &&
     Boolean(buyAuthorization.privy_wallet_id) &&
     Boolean(buyAuthorityBinding) &&
-    (canPreviewBuyForReadiness(buyReadiness) ||
-      (market.venue === "limitless" &&
-        input.telegramMiniAppEnabled === true)) &&
+    (canPreviewBuyForReadiness(buyReadiness) || sealedAppHandoffAvailable) &&
     Boolean(input.trading);
   const buyDeliveryMode = resolveTelegramBuyDeliveryMode({
+    capability: buyExecutionCapability,
     commonBuySurfaceReady,
     miniAppHandoffMode: policy.miniAppHandoffMode,
     telegramMiniAppEnabled: input.telegramMiniAppEnabled === true,
-    venue: market.venue,
     venueAllowedForBotSubmit: authorizationVenueAllowed,
   });
   const canBuildBuyAuthority = buyDeliveryMode !== "direct_deposit_only";
@@ -5350,12 +5424,11 @@ export async function buildTelegramBotTradingMarketMessage(input: {
     action: "buy" | "sell",
     side: TelegramBotTradingSide,
   ): Promise<TelegramBotTradingButton | null> => {
+    const contextVenue = telegramShortfallVenue(market.venue);
     if (
       !input.writeTradeInputContext ||
-      (action === "sell" && market.venue !== "polymarket") ||
-      (action === "buy" &&
-        market.venue !== "polymarket" &&
-        market.venue !== "limitless") ||
+      !contextVenue ||
+      (action === "sell" && contextVenue !== "polymarket") ||
       !(action === "buy" ? buyAuthorityBinding : authorityBinding)
     ) {
       return null;
@@ -5398,7 +5471,7 @@ export async function buildTelegramBotTradingMarketMessage(input: {
           action === "buy"
             ? (buyDeliveryMode as StoredTelegramBuyDeliveryMode)
             : "bot_submit",
-        venue: market.venue === "limitless" ? "limitless" : "polymarket",
+        venue: contextVenue,
         version: 2,
       })
       .catch(() => false);
@@ -6185,7 +6258,9 @@ function buildTelegramTradeAuthorityBinding(
 export async function resolveTelegramAppHandoffCurrentScope(input: {
   db: DbQuery;
   telegramUserId: string;
+  venue: TelegramBotTradingVenue;
 }): Promise<{ authorityFingerprint: string; policyRevision: string } | null> {
+  if (!isTelegramSealedAppHandoffVenue(input.venue)) return null;
   const [policyState, authorization] = await Promise.all([
     resolveSignalBotTradingPolicyStateFromDb(input.db),
     loadEnabledEvmAuthorization(input.db, input.telegramUserId),
@@ -6205,6 +6280,15 @@ export async function resolveTelegramAppHandoffCurrentScope(input: {
     authorityFingerprint: telegramBotTradeAuthorityFingerprint(authority),
     policyRevision: policyState.policyRevision,
   };
+}
+
+export function telegramVenueFromSealedHandoffSnapshot(
+  snapshot: Record<string, unknown>,
+): TelegramBotTradingVenue | null {
+  const venue = snapshot.venue;
+  return venue === "polymarket" || venue === "limitless" || venue === "kalshi"
+    ? venue
+    : null;
 }
 
 function sameTelegramTradeAuthorityBinding(
@@ -6470,7 +6554,7 @@ export function createTelegramFundingBuyContinuationDecorator(input: {
           ),
         )) ||
       (buyReturn.continuationMode === "app_handoff" &&
-        continuationVenue !== "limitless")
+        !isTelegramSealedAppHandoffVenue(continuationVenue))
     ) {
       return presentation.message;
     }
@@ -8774,6 +8858,7 @@ async function previewTelegramTradeIntent(input: {
         });
         return;
       }
+      const fundingVenue = telegramShortfallVenue(input.intent.venue);
       if (
         shouldOpenTelegramFundingBuyReturn({
           amountUsd,
@@ -8782,7 +8867,8 @@ async function previewTelegramTradeIntent(input: {
           hasOpener: input.openFundingBuyReturn != null,
         }) &&
         input.openFundingBuyReturn &&
-        amountUsd != null
+        amountUsd != null &&
+        fundingVenue != null
       ) {
         let fundingMessage: TelegramBotTradingMessage | null;
         try {
@@ -8804,8 +8890,7 @@ async function previewTelegramTradeIntent(input: {
                 ? null
                 : Number(input.intent.telegram_message_id),
             telegramUserId: input.intent.telegram_user_id,
-            venue:
-              input.intent.venue === "limitless" ? "limitless" : "polymarket",
+            venue: fundingVenue,
           });
         } catch (error) {
           const errorCode =
@@ -9289,10 +9374,16 @@ export async function completeTelegramBotTradeInput(input: {
     loadMarketById(input.db, intent?.market_id ?? context?.marketId ?? ""),
   ]);
   const targetVenue = intent?.venue ?? context?.venue ?? "polymarket";
-  const deliveryMode =
-    intent?.delivery_mode ??
-    context?.deliveryMode ??
-    (targetVenue === "limitless" ? "app_handoff" : "bot_submit");
+  const deliveryMode = intent?.delivery_mode ?? context?.deliveryMode;
+  if (!deliveryMode) {
+    return {
+      completed: false,
+      message: buildTelegramTradeInputNotice({
+        body: "This request is missing its execution method. Open the market card again.",
+        title: "Input unavailable",
+      }),
+    };
+  }
   const authorization =
     deliveryMode === "app_handoff"
       ? await loadEnabledEvmAuthorization(input.db, input.telegramUserId)
@@ -9303,10 +9394,14 @@ export async function completeTelegramBotTradeInput(input: {
         );
   const marketId = intent?.market_id ?? context?.marketId ?? "";
   const side = intent?.side ?? context?.side ?? null;
+  const executionCapability = resolveTelegramBuyExecutionCapability({
+    venue: targetVenue,
+    walletChain: authorization?.wallet_chain ?? null,
+  });
   const policyVenueAllowsDelivery =
     policy.tradingVenues.includes(targetVenue) ||
     (deliveryMode === "app_handoff" &&
-      targetVenue === "limitless" &&
+      executionCapability.sealedAppHandoffExact &&
       policy.fundingReceiveEnabled &&
       policy.buyContinuationEnabled);
   const actionAllowed =
@@ -9851,6 +9946,7 @@ export async function handleTelegramBotTradingCallback(
     );
     intent.telegram_message_id = String(input.callbackQuery.message.message_id);
   }
+  const restoredFundingVenue = telegramShortfallVenue(intent.venue);
   if (
     parsed.type === "retry_buy" &&
     intent.status === "cancelled" &&
@@ -9859,7 +9955,8 @@ export async function handleTelegramBotTradingCallback(
     intent.authorization_id &&
     intent.side &&
     intent.amount_usd &&
-    input.openFundingBuyReturn
+    input.openFundingBuyReturn &&
+    restoredFundingVenue != null
   ) {
     try {
       const fundingMessage = await input.openFundingBuyReturn({
@@ -9874,7 +9971,7 @@ export async function handleTelegramBotTradingCallback(
         sourceIntentId: intent.id,
         telegramMessageId: callbackMessageId,
         telegramUserId: intent.telegram_user_id,
-        venue: intent.venue === "limitless" ? "limitless" : "polymarket",
+        venue: restoredFundingVenue,
       });
       if (fundingMessage) {
         await input.answerCallbackQuery({

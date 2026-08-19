@@ -36,8 +36,10 @@ import {
 import { resolveActiveTelegramAccountLink } from "../services/telegram-account-link.js";
 import {
   executeCommittedTelegramAppHandoff,
+  isTelegramSealedAppHandoffVenue,
   loadTelegramAppHandoffProjection,
   resolveTelegramAppHandoffCurrentScope,
+  telegramVenueFromSealedHandoffSnapshot,
 } from "../services/telegram-bot-trading.js";
 import { createApiTradingApplicationService } from "../services/api-trading-service.js";
 import { inspectServerEvmWalletAuthorization } from "../services/api-trading-wallet-signing.js";
@@ -398,9 +400,22 @@ async function registerTelegramRoutes(
       );
       if (!identity) return;
       return sendHandoffResponse(reply, async () => {
+        const handoff = await resolveTelegramAppHandoff({
+          db: pool,
+          telegramUserId: identity.telegramUserId,
+          token: request.body.token,
+          userId: identity.userId,
+        });
+        const venue = telegramVenueFromSealedHandoffSnapshot(
+          handoff.planSnapshot,
+        );
+        if (!venue || !isTelegramSealedAppHandoffVenue(venue)) {
+          throw new TelegramAppHandoffError("venue_unsupported");
+        }
         const scope = await resolveTelegramAppHandoffCurrentScope({
           db: pool,
           telegramUserId: identity.telegramUserId,
+          venue,
         });
         if (!scope) {
           throw new TelegramAppHandoffError("policy_changed");
@@ -501,9 +516,16 @@ async function registerTelegramRoutes(
         if (handoff.state !== "committed") {
           throw new TelegramAppHandoffError("not_committable");
         }
+        const venue = telegramVenueFromSealedHandoffSnapshot(
+          handoff.planSnapshot,
+        );
+        if (!venue || !isTelegramSealedAppHandoffVenue(venue)) {
+          throw new TelegramAppHandoffError("venue_unsupported");
+        }
         const scope = await resolveTelegramAppHandoffCurrentScope({
           db: pool,
           telegramUserId: identity.telegramUserId,
+          venue,
         });
         if (
           !scope ||

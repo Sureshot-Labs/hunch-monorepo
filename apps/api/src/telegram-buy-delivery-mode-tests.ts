@@ -2,36 +2,52 @@
 
 import assert from "node:assert/strict";
 
-import { resolveTelegramBuyDeliveryMode } from "./services/telegram-bot-trading.js";
+import {
+  resolveTelegramBuyDeliveryMode,
+  resolveTelegramBuyExecutionCapability,
+} from "./services/telegram-bot-trading.js";
+
+const polymarketEvm = resolveTelegramBuyExecutionCapability({
+  venue: "polymarket",
+  walletChain: "ethereum",
+});
+const limitlessEvm = resolveTelegramBuyExecutionCapability({
+  venue: "limitless",
+  walletChain: "ethereum",
+});
+const kalshiSolana = resolveTelegramBuyExecutionCapability({
+  venue: "kalshi",
+  walletChain: "solana",
+});
 
 assert.equal(
   resolveTelegramBuyDeliveryMode({
+    capability: polymarketEvm,
     commonBuySurfaceReady: true,
     miniAppHandoffMode: "fallback",
     telegramMiniAppEnabled: true,
-    venue: "polymarket",
     venueAllowedForBotSubmit: true,
   }),
   "bot_submit",
 );
 assert.equal(
   resolveTelegramBuyDeliveryMode({
+    capability: limitlessEvm,
     commonBuySurfaceReady: true,
     miniAppHandoffMode: "fallback",
     telegramMiniAppEnabled: true,
-    venue: "limitless",
     venueAllowedForBotSubmit: false,
   }),
   "app_handoff",
-  "Limitless app handoff must not depend on the bot signer venue allowlist",
+  "the sealed EVM handoff must not depend on the bot signer venue allowlist",
 );
-for (const venue of ["limitless", "polymarket"] as const) {
+for (const capability of [limitlessEvm, polymarketEvm]) {
   assert.equal(
     resolveTelegramBuyDeliveryMode({
+      capability,
       commonBuySurfaceReady: false,
       miniAppHandoffMode: "fallback",
       telegramMiniAppEnabled: true,
-      venue,
       venueAllowedForBotSubmit: true,
     }),
     "direct_deposit_only",
@@ -40,20 +56,20 @@ for (const venue of ["limitless", "polymarket"] as const) {
 }
 assert.equal(
   resolveTelegramBuyDeliveryMode({
+    capability: limitlessEvm,
     commonBuySurfaceReady: true,
     miniAppHandoffMode: "fallback",
     telegramMiniAppEnabled: false,
-    venue: "limitless",
     venueAllowedForBotSubmit: false,
   }),
   "direct_deposit_only",
 );
 assert.equal(
   resolveTelegramBuyDeliveryMode({
+    capability: limitlessEvm,
     commonBuySurfaceReady: true,
     miniAppHandoffMode: "off",
     telegramMiniAppEnabled: true,
-    venue: "limitless",
     venueAllowedForBotSubmit: false,
   }),
   "direct_deposit_only",
@@ -61,14 +77,29 @@ assert.equal(
 );
 assert.equal(
   resolveTelegramBuyDeliveryMode({
+    capability: polymarketEvm,
     commonBuySurfaceReady: true,
     miniAppHandoffMode: "always",
     telegramMiniAppEnabled: true,
-    venue: "polymarket",
     venueAllowedForBotSubmit: true,
   }),
   "app_handoff",
   "always must select Hunch before direct bot submission",
+);
+assert.deepEqual(kalshiSolana, {
+  sealedAppHandoffExact: false,
+  serverBotExact: false,
+});
+assert.equal(
+  resolveTelegramBuyDeliveryMode({
+    capability: kalshiSolana,
+    commonBuySurfaceReady: true,
+    miniAppHandoffMode: "always",
+    telegramMiniAppEnabled: true,
+    venueAllowedForBotSubmit: true,
+  }),
+  "direct_deposit_only",
+  "always must never issue an unexecutable sealed handoff",
 );
 
 console.log("[telegram-buy-delivery-mode-tests] passed");
