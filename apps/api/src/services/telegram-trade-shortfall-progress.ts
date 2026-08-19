@@ -1,7 +1,10 @@
 import { tx, type Pool, type PoolClient } from "@hunch/infra";
 
-import { isTelegramPolymarketRouterContinuationPending } from "../funding/reconciliation/telegram-router-continuation-state.js";
-import { isTelegramRouterContinuationHardReason } from "../funding/reconciliation/telegram-router-continuation-state.js";
+import {
+  isTelegramPolymarketRouterContinuationPending,
+  isTelegramRouterContinuationHardReason,
+  telegramPolymarketRootRequiresRouterContinuationSql,
+} from "../funding/reconciliation/telegram-router-continuation-state.js";
 
 import {
   escapeTelegramMarkdownV2,
@@ -259,15 +262,8 @@ async function listCandidates(
             intent.result,
             intent.funding_operation_id::text,
             continuation.id::text as continuation_id,
-            exists (
-              select 1
-                from funding_operation_steps root_step
-               where root_step.operation_id = operation.id
-                 and root_step.executor_id in (
-                   'telegram_relay_evm_funding_v1',
-                   'telegram_relay_polygon_usdc_v1'
-                 )
-            ) as root_requires_router_continuation,
+            ${telegramPolymarketRootRequiresRouterContinuationSql("operation")}
+              as root_requires_router_continuation,
             tracked_operation.status as operation_status,
             tracked_operation.progress_stage,
             tracked_operation.error_code as operation_error_code,

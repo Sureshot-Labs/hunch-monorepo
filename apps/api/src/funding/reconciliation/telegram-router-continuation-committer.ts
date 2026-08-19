@@ -38,7 +38,10 @@ import { fetchErc20Allowance, fetchErc20BalanceOf, fetchEvmCall } from "../../se
 import { POLYMARKET_FUNDING_ROUTER_MAX_APPROVAL_RAW } from "../../services/polymarket-automation-policy.js";
 import { resolveActionSponsorship } from "../execution/sponsorship-policy.js";
 import { fundingSidecarRuntimeConfig } from "../runtime/sidecar-runtime-config.js";
-import { isTelegramRouterContinuationHardReason } from "./telegram-router-continuation-state.js";
+import {
+  isTelegramRouterContinuationHardReason,
+  telegramPolymarketRootRequiresRouterContinuationSql,
+} from "./telegram-router-continuation-state.js";
 
 type JsonRecord = Readonly<Record<string, JsonValue>>;
 
@@ -426,14 +429,7 @@ function candidateSql(): string {
              and trade_intent.action = 'buy'
              and root_operation.status = 'ready'
              and root_operation.progress_stage = 'ready_for_consumer'
-             and exists (
-               select 1 from funding_operation_steps root_step
-                where root_step.operation_id = root_operation.id
-                  and root_step.executor_id in (
-                    'telegram_relay_evm_funding_v1',
-                    'telegram_relay_polygon_usdc_v1'
-                  )
-             )
+             and ${telegramPolymarketRootRequiresRouterContinuationSql("root_operation")}
              and not exists (
                select 1 from funding_operations child_operation
                 where child_operation.user_id = root_operation.user_id

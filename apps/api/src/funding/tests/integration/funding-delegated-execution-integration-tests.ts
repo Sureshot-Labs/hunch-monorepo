@@ -2803,6 +2803,24 @@ try {
       inspectRouterProfile: async () => "valid" as const,
       tradeIntentId: intentId,
     };
+    assert.deepEqual(
+      await runTelegramRouterContinuationCommitter(pool, committerInput),
+      { created: 0, skipped: 0 },
+      "a Relay root that delivered directly to the Polymarket Deposit Wallet must not create a second Router leg",
+    );
+    await tx(pool, async (client) => {
+      await client.query("set local session_replication_role = replica");
+      await client.query(
+        `update funding_operations
+            set destination_target_snapshot = jsonb_set(
+                  destination_target_snapshot,
+                  '{location,kind}',
+                  '"wallet"'::jsonb
+                )
+          where id = $1::uuid`,
+        [root.operationId],
+      );
+    });
     for (const expectedFailures of [1, 2] as const) {
       assert.deepEqual(
         await runTelegramRouterContinuationCommitter(pool, committerInput),
