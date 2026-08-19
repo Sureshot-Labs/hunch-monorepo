@@ -4,12 +4,17 @@ import type {
   ApiVenueTradingExecutor,
   SupportedBotTradingVenue,
 } from "./api-trading-types.js";
-import { releaseFundingReservationForDefinitiveTradeFailure } from "../funding/persistence/funding-evidence-repository.js";
+import {
+  fetchFundingConsumerReservationForUser,
+  releaseFundingReservationForAbandonedTrade,
+  releaseFundingReservationForDefinitiveTradeFailure,
+} from "../funding/persistence/funding-evidence-repository.js";
 import { canonicalJsonHash } from "../funding/persistence/canonical.js";
 import {
   buildFundingTradeConsumerIntent,
   type FundingTradeConsumerIntent,
 } from "../funding/persistence/funding-trade-consumer-intent.js";
+import { sameAsset } from "../funding/domain/asset-identity.js";
 import {
   claimFundingTradeAttempt,
   FundingTradeAttemptError,
@@ -169,14 +174,14 @@ export function createApiTradingApplicationService(
       decimals: number;
     }> | null = null;
     if (prepared.venue === "polymarket") {
-      const order = isRecord(payload.orderPayload)
-        ? payload.orderPayload
-        : null;
       marketContextId =
         (typeof payload.tokenId === "string" && payload.tokenId) ||
         intent.target.tokenId ||
         null;
-      raw = rawInteger(order?.makerAmount);
+      // Polymarket makerAmount is the nominal order value. The funding
+      // reservation is intentionally bound to the fee-inclusive maximum
+      // collateral spend confirmed by the user.
+      raw = rawInteger(payload.requiredSpendRaw);
       asset = {
         networkId: "evm:137",
         assetId: env.polymarketUsdcAddress,
@@ -226,6 +231,56 @@ export function createApiTradingApplicationService(
     });
   };
 
+  const fundingReservationConsumerIntentForPrepared = async (
+    prepared: PreparedTrade,
+  ): Promise<FundingTradeConsumerIntent> => {
+    const actual = fundingConsumerIntentForPrepared(prepared);
+    const link = prepared.intent.fundingReservation;
+    if (!link || prepared.venue !== "polymarket") return actual;
+
+    const reservation = await fetchFundingConsumerReservationForUser(
+      input.pool,
+      {
+        userId: prepared.intent.actor.userId,
+        operationId: link.operationId,
+      },
+    );
+    if (!reservation || reservation.reservationId !== link.reservationId) {
+      throw new TradingServiceError({
+        code: "insufficient_readiness",
+        message: "Funding reservation is no longer ready for this Buy.",
+        statusCode: 409,
+        venue: "polymarket",
+      });
+    }
+    const confirmed = reservation.consumerIntent;
+    if (
+      confirmed.venueId !== actual.venueId ||
+      confirmed.marketId !== actual.marketId ||
+      confirmed.marketContextId !== actual.marketContextId ||
+      !sameAsset(confirmed.spend.asset, actual.spend.asset)
+    ) {
+      throw new TradingServiceError({
+        code: "insufficient_readiness",
+        message: "Funding reservation does not match this market and outcome.",
+        statusCode: 409,
+        venue: "polymarket",
+      });
+    }
+    if (BigInt(actual.spend.raw) > BigInt(confirmed.spend.raw)) {
+      throw new TradingServiceError({
+        code: "quote_unavailable",
+        message:
+          "The fresh Polymarket quote exceeds your confirmed maximum spend.",
+        statusCode: 409,
+        venue: "polymarket",
+      });
+    }
+    // Claim with the immutable consumer identity that funded this Buy. The
+    // fresh order may spend less within that confirmed fee-inclusive bound.
+    return confirmed;
+  };
+
   return {
     applyTradeEffects: (effectsInput) =>
       executorFor(effectsInput.intent.venue).applyTradeEffects(effectsInput),
@@ -252,6 +307,11 @@ export function createApiTradingApplicationService(
                   venue: intent.venue,
                 });
               }
+              // Keep the reservation lookup in the same narrowed branch as
+              // the claim. It is the exact fee-inclusive consumer identity
+              // for this prepared Buy, never a nullable optional value.
+              const fundingConsumerIntent =
+                await fundingReservationConsumerIntentForPrepared(prepared);
               const canonicalFingerprint = canonicalJsonHash({
                 action: intent.action,
                 amount: intent.amount,
@@ -289,7 +349,7 @@ export function createApiTradingApplicationService(
                   key: intent.idempotencyKey,
                 })}`,
                 canonicalFingerprint,
-                consumerIntent: fundingConsumerIntentForPrepared(prepared),
+                consumerIntent: fundingConsumerIntent,
                 externalReference,
               }).catch((error: unknown) => {
                 if (!(error instanceof FundingTradeAttemptError)) throw error;
@@ -399,6 +459,16 @@ export function createApiTradingApplicationService(
             outcome: "ambiguous",
             errorCode: "trade_submit_state_unknown",
             broadcastMayHaveOccurred: true,
+          }).catch(() => {});
+        } else if (intent.fundingReservation) {
+          // No durable trade attempt exists, so no venue submission could have
+          // started. Release the ready funding to ordinary venue cash: a fresh
+          // review must see the confirmed money rather than inherit a stale
+          // reservation from a rejected pre-submit quote.
+          await releaseFundingReservationForAbandonedTrade(input.pool, {
+            userId: intent.actor.userId,
+            link: intent.fundingReservation,
+            outcomeReason: "trade_pre_submit_rejected",
           }).catch(() => {});
         }
         throw error;

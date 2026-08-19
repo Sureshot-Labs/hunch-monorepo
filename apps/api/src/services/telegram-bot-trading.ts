@@ -11045,16 +11045,7 @@ export async function handleTelegramBotTradingCallback(
                 text: "Deposit",
               },
             ],
-            [
-              {
-                callback_data: "hm:v1:positions",
-                text: "💼 My positions",
-              },
-              {
-                callback_data: "hm:v1:home",
-                text: "🏠 Home",
-              },
-            ],
+            [{ callback_data: "hm:v1:home", text: "🏠 Home" }],
           ],
         },
       });
