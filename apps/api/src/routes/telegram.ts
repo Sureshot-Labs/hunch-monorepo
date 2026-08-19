@@ -15,6 +15,7 @@ import {
   telegramContextErrorResponseSchema,
   telegramContextSuccessResponseSchema,
   telegramAppHandoffCommitRequestSchema,
+  telegramAppHandoffProjectionResponseSchema,
   telegramAppHandoffRequestSchema,
   telegramAppHandoffResponseSchema,
   telegramGroupMembershipResponseSchema,
@@ -33,7 +34,13 @@ import {
   type TelegramAppHandoff,
 } from "../services/telegram-app-handoff.js";
 import { resolveActiveTelegramAccountLink } from "../services/telegram-account-link.js";
-import { resolveTelegramAppHandoffCurrentScope } from "../services/telegram-bot-trading.js";
+import {
+  executeCommittedTelegramAppHandoff,
+  loadTelegramAppHandoffProjection,
+  resolveTelegramAppHandoffCurrentScope,
+} from "../services/telegram-bot-trading.js";
+import { createApiTradingApplicationService } from "../services/api-trading-service.js";
+import { inspectServerEvmWalletAuthorization } from "../services/api-trading-wallet-signing.js";
 
 export type TelegramRoutesDependencies = {
   authPreHandler?: ReturnType<typeof createAuthMiddleware>;
@@ -408,6 +415,126 @@ async function registerTelegramRoutes(
           userId: identity.userId,
         });
       });
+    },
+  );
+
+  z.post(
+    "/telegram/app-handoffs/projection",
+    {
+      preHandler: authPreHandler,
+      schema: {
+        body: telegramAppHandoffRequestSchema,
+        response: {
+          ...telegramAppHandoffResponses,
+          200: telegramAppHandoffProjectionResponseSchema,
+        },
+      },
+    },
+    async (request, reply) => {
+      const identity = await resolveHandoffIdentity(
+        request,
+        reply,
+        request.body.initDataRaw,
+        request.body.token,
+      );
+      if (!identity) return;
+      try {
+        const handoff = await resolveTelegramAppHandoff({
+          db: pool,
+          telegramUserId: identity.telegramUserId,
+          token: request.body.token,
+          userId: identity.userId,
+        });
+        const projection = await loadTelegramAppHandoffProjection(pool, {
+          telegramUserId: identity.telegramUserId,
+          tradeIntentId: handoff.tradeIntentId,
+          userId: identity.userId,
+        });
+        if (!projection) {
+          return reply
+            .code(404)
+            .send({ error: "telegram_app_handoff_not_found" });
+        }
+        reply.header("Cache-Control", "private, no-store");
+        return reply.send({ projection });
+      } catch (error) {
+        return sendHandoffError(reply, error);
+      }
+    },
+  );
+
+  z.post(
+    "/telegram/app-handoffs/execute",
+    {
+      preHandler: authPreHandler,
+      schema: {
+        body: telegramAppHandoffRequestSchema,
+        response: {
+          ...telegramAppHandoffResponses,
+          200: telegramAppHandoffProjectionResponseSchema,
+        },
+      },
+    },
+    async (request, reply) => {
+      const identity = await resolveHandoffIdentity(
+        request,
+        reply,
+        request.body.initDataRaw,
+        request.body.token,
+      );
+      if (!identity) return;
+      if (
+        !env.financeTelegramTradeIntentsEnabled ||
+        !env.telegramVenueReconcileEnabled
+      ) {
+        return reply
+          .code(503)
+          .send({ error: "telegram_app_handoff_execution_unavailable" });
+      }
+      try {
+        const handoff = await resolveTelegramAppHandoff({
+          db: pool,
+          telegramUserId: identity.telegramUserId,
+          token: request.body.token,
+          userId: identity.userId,
+        });
+        if (handoff.state !== "committed") {
+          throw new TelegramAppHandoffError("not_committable");
+        }
+        const scope = await resolveTelegramAppHandoffCurrentScope({
+          db: pool,
+          telegramUserId: identity.telegramUserId,
+        });
+        if (
+          !scope ||
+          scope.policyRevision !== handoff.policyRevision ||
+          scope.authorityFingerprint !== handoff.authorityFingerprint
+        ) {
+          throw new TelegramAppHandoffError("policy_changed");
+        }
+        const projection = await executeCommittedTelegramAppHandoff({
+          appBaseUrl: "https://app.hunch.trade",
+          db: pool,
+          log: request.log,
+          signerInspector: inspectServerEvmWalletAuthorization,
+          telegramUserId: identity.telegramUserId,
+          tradeIntentId: handoff.tradeIntentId,
+          trading: createApiTradingApplicationService({
+            logger: request.log,
+            pool,
+          }),
+          userId: identity.userId,
+        });
+        if (!projection) {
+          return reply
+            .code(404)
+            .send({ error: "telegram_app_handoff_not_found" });
+        }
+        reply.header("Cache-Control", "private, no-store");
+        return reply.send({ projection });
+      } catch (error) {
+        return sendHandoffError(reply, error);
+      }
     },
   );
 }

@@ -96,7 +96,14 @@ import {
   formatTelegramQuoteTtl as formatQuoteTtl,
   formatTelegramTtl as formatTtl,
 } from "./telegram-bot-trading-presentation.js";
-import { buildHunchMiniAppWebButton } from "./telegram-mini-app-buttons.js";
+import {
+  buildHunchMiniAppDeepLinkButton,
+  buildHunchMiniAppWebButton,
+} from "./telegram-mini-app-buttons.js";
+import {
+  issueTelegramAppHandoff,
+  TelegramAppHandoffError,
+} from "./telegram-app-handoff.js";
 import {
   recordTelegramLifecycleAnalytics,
   resolveTelegramLifecycleChain,
@@ -2466,7 +2473,9 @@ function buildTelegramTradeConfirmationMessage(input: {
           bodyMarkdownV2: escapeMarkdown(
             fundingProposal
               ? "Confirm authorizes the shown internal funding route and this Buy within the displayed limits. No external Deposit is required."
-              : "This is a real trade. Confirm only if you want the bot to submit it now.",
+              : input.intent.delivery_mode === "app_handoff"
+                ? "Confirm authorizes this Buy within the displayed limits. Hunch will open only as a protected processing window; no second Buy click is required."
+                : "This is a real trade. Confirm only if you want the bot to submit it now.",
           ),
           icon: "⚠️",
           title: "Real trade",
@@ -2477,30 +2486,24 @@ function buildTelegramTradeConfirmationMessage(input: {
 }
 
 function buildTelegramTradeAppHandoffMessage(input: {
-  appBaseUrl: string;
   intent: TelegramTradeIntentRow;
   market: TelegramBotMarketRow;
   policy: SignalBotPolicy;
   quote: TradeQuote | TelegramTradeQuotePreview;
-  telegramMiniAppEnabled?: boolean;
+  startParam: string;
+  telegramMiniAppLinkBase?: string | null;
 }): TelegramBotTradingMessage {
   const { amountUsd } = readTelegramTradeIntentAmount(input.intent);
   const side = input.intent.side ?? "YES";
-  const startParam = input.market.event_id
-    ? buildSignalBotBuyStartParam({
-        amountUsd,
-        eventId: input.market.event_id,
-        marketId: input.market.id,
-        side,
-      })
-    : null;
-  const buyButton = buildHunchMiniAppWebButton({
-    appBaseUrl: input.appBaseUrl,
-    enabled: input.telegramMiniAppEnabled === true,
-    path: openMarketUrl(input.appBaseUrl, input.market),
-    startParam,
-    text: "Buy in Hunch",
+  const buyButton = buildHunchMiniAppDeepLinkButton({
+    miniAppLinkBase:
+      input.telegramMiniAppLinkBase ?? env.telegramMiniAppLinkBase,
+    startParam: input.startParam,
+    text: "Track confirmed buy",
   });
+  if (!buyButton) {
+    throw new TelegramAppHandoffError("not_committable");
+  }
   const quoteExpiresAt =
     input.quote.expiresAt instanceof Date
       ? input.quote.expiresAt
@@ -2509,24 +2512,10 @@ function buildTelegramTradeAppHandoffMessage(input: {
         : null;
   return {
     parse_mode: "MarkdownV2",
-    reply_markup: {
-      inline_keyboard: [
-        ...(buyButton ? [[buyButton]] : []),
-        [
-          {
-            callback_data: `${TELEGRAM_BOT_TRADING_CALLBACK_PREFIX}:change_amount:${input.intent.id}`,
-            text: "Change amount",
-          },
-          {
-            callback_data: `${TELEGRAM_BOT_TRADING_CALLBACK_PREFIX}:cancel:${input.intent.id}`,
-            text: "❌ Cancel",
-          },
-        ],
-      ],
-    },
+    reply_markup: { inline_keyboard: [[buyButton]] },
     text: joinTelegramMarkdownV2Lines(
       [
-        `🟢 ${formatTelegramBoldMarkdownV2("Review buy")}`,
+        `🟢 ${formatTelegramBoldMarkdownV2("Buy confirmed")}`,
         "",
         formatTelegramVenueFieldMarkdownV2(input.intent.venue),
         `🎯 ${formatTelegramFieldMarkdownV2("Market", input.intent.market_title)}`,
@@ -2567,14 +2556,123 @@ function buildTelegramTradeAppHandoffMessage(input: {
         "",
         formatTelegramCalloutMarkdownV2({
           bodyMarkdownV2: escapeMarkdown(
-            "The bot will not submit this order. Hunch opens with this market, side, and amount selected; review the fresh app quote and press Buy there.",
+            "Your Buy is confirmed. Open Hunch to watch the protected funding and order operation; no second Buy click is required.",
           ),
           icon: "ℹ️",
-          title: "Finish in Hunch",
+          title: "Open processing window",
         }),
       ].filter((line): line is string => line != null),
     ),
   };
+}
+
+function asTelegramTradeQuotePreview(
+  quote: TradeQuote | TelegramTradeQuotePreview,
+): TelegramTradeQuotePreview {
+  return "venue" in quote ? buildTelegramTradeQuotePreview(quote) : quote;
+}
+
+async function issueTelegramTradeAppHandoffMessage(input: {
+  authorization: TelegramBotTradingAuthorizationRow;
+  db: DbQuery;
+  intent: TelegramTradeIntentRow;
+  market: TelegramBotMarketRow;
+  policy: SignalBotPolicy;
+  quote: TradeQuote | TelegramTradeQuotePreview;
+  telegramMiniAppLinkBase?: string | null;
+}): Promise<TelegramBotTradingMessage> {
+  const scope = await resolveTelegramAppHandoffCurrentScope({
+    db: input.db,
+    telegramUserId: input.intent.telegram_user_id,
+  });
+  const authority = buildTelegramTradeAuthorityBinding(input.authorization);
+  if (
+    !scope ||
+    !authority ||
+    scope.authorityFingerprint !==
+      telegramBotTradeAuthorityFingerprint(authority)
+  ) {
+    throw new TelegramAppHandoffError("policy_changed");
+  }
+  const { amountUsd } = readTelegramTradeIntentAmount(input.intent);
+  const quoteSnapshot = asTelegramTradeQuotePreview(input.quote);
+  const issued = await issueTelegramAppHandoff({
+    authorityFingerprint: scope.authorityFingerprint,
+    db: input.db as Pool,
+    expiresAt: input.intent.expires_at,
+    planSnapshot: {
+      action: "buy",
+      amountUsd,
+      eventId: input.intent.event_id,
+      eventTitle: input.market.event_title,
+      fundingOperationId: input.intent.funding_operation_id,
+      fundingReservationId: input.intent.funding_reservation_id,
+      marketId: input.intent.market_id,
+      marketTitle: input.intent.market_title,
+      maxSlippageBps: input.policy.maxSlippageBps,
+      outcome: sideLabel(input.market, input.intent.side ?? "YES"),
+      side: input.intent.side,
+      venue: input.intent.venue,
+      version: 1,
+    },
+    policyRevision: scope.policyRevision,
+    quoteSnapshot,
+    telegramUserId: input.intent.telegram_user_id,
+    tokenSecret: env.telegramBotToken || undefined,
+    tradeIntentId: input.intent.id,
+    userId: input.authorization.user_id,
+  });
+  return buildTelegramTradeAppHandoffMessage({
+    intent: input.intent,
+    market: input.market,
+    policy: input.policy,
+    quote: input.quote,
+    startParam: issued.startParam,
+    telegramMiniAppLinkBase: input.telegramMiniAppLinkBase,
+  });
+}
+
+async function sealConfirmedTelegramAppHandoff(input: {
+  authorization: TelegramBotTradingAuthorizationRow;
+  db: DbQuery;
+  intent: TelegramTradeIntentRow;
+  market: TelegramBotMarketRow;
+  policy: SignalBotPolicy;
+  quote: TradeQuote | TelegramTradeQuotePreview;
+}): Promise<TelegramBotTradingMessage | null> {
+  if (input.intent.status !== "external_handoff") {
+    const handedOff = await updateIntentStatus({
+      allowedStatuses: ["draft", "previewed"],
+      db: input.db,
+      errorCode: "external_handoff_required",
+      errorMessage: "The confirmed Buy continues in the Hunch Mini App.",
+      intentId: input.intent.id,
+      quoteSnapshot: asTelegramTradeQuotePreview(input.quote),
+      result: {
+        appHandoff: {
+          amountUsd: readTelegramTradeIntentAmount(input.intent).amountUsd,
+          botConfirmedAt: new Date().toISOString(),
+          marketId: input.intent.market_id,
+          side: input.intent.side,
+          venue: input.intent.venue,
+          version: 1,
+        },
+        previewQuote: input.quote,
+      },
+      status: "external_handoff",
+    });
+    if (!handedOff) return null;
+  }
+  const current = await loadIntent(input.db, input.intent.id);
+  if (!current || current.status !== "external_handoff") return null;
+  return issueTelegramTradeAppHandoffMessage({
+    authorization: input.authorization,
+    db: input.db,
+    intent: current,
+    market: input.market,
+    policy: input.policy,
+    quote: input.quote,
+  });
 }
 
 function sideLabel(market: TelegramBotMarketRow, side: TelegramBotTradingSide) {
@@ -4540,7 +4638,12 @@ async function transitionIntentToExecuting(input: {
   db: DbQuery;
   intent: TelegramTradeIntentRow;
 }): Promise<"authority_changed" | "executing" | "overtaken"> {
-  if (input.intent.delivery_mode !== "bot_submit") return "overtaken";
+  const committedAppHandoff =
+    input.intent.delivery_mode === "app_handoff" &&
+    readTelegramAppHandoffExecutionMarker(input.intent) != null;
+  if (input.intent.delivery_mode !== "bot_submit" && !committedAppHandoff) {
+    return "overtaken";
+  }
   return withLockedTelegramIntentAuthority({
     callback: async (client, currentAuthorization) => {
       if (!currentAuthorization) {
@@ -4569,7 +4672,12 @@ async function markTelegramIntentSubmitBoundary(input: {
   intent: TelegramTradeIntentRow;
   result: Record<string, unknown>;
 }): Promise<boolean> {
-  if (input.intent.delivery_mode !== "bot_submit") return false;
+  const committedAppHandoff =
+    input.intent.delivery_mode === "app_handoff" &&
+    readTelegramAppHandoffExecutionMarker(input.intent) != null;
+  if (input.intent.delivery_mode !== "bot_submit" && !committedAppHandoff) {
+    return false;
+  }
   return withLockedTelegramIntentAuthority({
     callback: async (client, currentAuthorization) => {
       if (!currentAuthorization) return false;
@@ -4578,7 +4686,8 @@ async function markTelegramIntentSubmitBoundary(input: {
       });
       if (
         !currentIntent ||
-        currentIntent.delivery_mode !== "bot_submit" ||
+        (currentIntent.delivery_mode !== "bot_submit" &&
+          readTelegramAppHandoffExecutionMarker(currentIntent) == null) ||
         currentIntent.status !== "executing" ||
         !intentMatchesTelegramTradeAuthority({
           authorization: currentAuthorization,
@@ -6030,8 +6139,9 @@ function buildTelegramTradeAuthorityBinding(
 
 /**
  * Returns the policy and EVM authority scope that a sealed Mini App handoff
- * must still match when its web consumer claims it.  It deliberately does not
- * require direct bot execution for a venue: the handoff is user-executed.
+ * must still match when its web consumer claims or executes it. It deliberately
+ * does not require the unattended venue allowlist: the exact bot-confirmed
+ * handoff is a separate, narrowly scoped authority boundary.
  */
 export async function resolveTelegramAppHandoffCurrentScope(input: {
   db: DbQuery;
@@ -6091,6 +6201,28 @@ function buildIntentAuthorityResult(
   binding: TelegramBotTradeAuthorityBinding,
 ): Record<string, unknown> {
   return { telegramAuthority: { ...binding, version: 1 } };
+}
+
+function readTelegramAppHandoffExecutionMarker(
+  intent: TelegramTradeIntentRow,
+): { committedAt: string; handoffId: string } | null {
+  const marker = isRecord(intent.result.appHandoffExecution)
+    ? intent.result.appHandoffExecution
+    : null;
+  if (
+    !marker ||
+    marker.version !== 1 ||
+    typeof marker.committedAt !== "string" ||
+    !marker.committedAt.trim() ||
+    typeof marker.handoffId !== "string" ||
+    !marker.handoffId.trim()
+  ) {
+    return null;
+  }
+  return {
+    committedAt: marker.committedAt,
+    handoffId: marker.handoffId,
+  };
 }
 
 function intentMatchesTelegramTradeAuthority(input: {
@@ -6562,15 +6694,13 @@ export function createTelegramFundingBuyContinuationDecorator(input: {
           handoffIntent.quote_snapshot,
         );
         if (storedQuote) {
-          handoffMessage = buildTelegramTradeAppHandoffMessage({
-            appBaseUrl: normalizeBaseUrl(
-              input.appBaseUrl ?? "https://app.hunch.trade",
-            ),
+          handoffMessage = await issueTelegramTradeAppHandoffMessage({
+            authorization,
+            db: input.pool,
             intent: handoffIntent,
             market,
             policy,
             quote: storedQuote,
-            telegramMiniAppEnabled: true,
           });
         }
       } else if (["draft", "previewed"].includes(handoffIntent.status)) {
@@ -8804,38 +8934,34 @@ async function previewTelegramTradeIntent(input: {
     return;
   }
   if (input.intent.delivery_mode === "app_handoff") {
-    const handedOff = await updateIntentStatus({
-      allowedStatuses: ["previewed"],
-      db: input.db,
-      errorCode: "external_handoff_required",
-      errorMessage: "The user must finish this Buy in Hunch.",
-      intentId: input.intent.id,
-      quoteSnapshot: buildTelegramTradeQuotePreview(quote),
-      result: {
-        appHandoff: {
-          amountUsd,
-          marketId: input.intent.market_id,
-          side,
-          venue: input.intent.venue,
-          version: 1,
-        },
-        previewQuote: quote,
-      },
-      status: "external_handoff",
-    });
-    if (!handedOff) return;
     const current = await loadIntent(input.db, input.intent.id);
     if (!current) return;
+    if (!current.funding_reservation_id) {
+      await input.sendMessage({
+        chat_id: input.chatId,
+        ...buildTelegramTradeConfirmationMessage({
+          authorization: input.authorization,
+          intent: current,
+          market: input.market,
+          policy: input.policy,
+          quote,
+          readiness: input.readiness,
+        }),
+      });
+      return;
+    }
+    const handoffMessage = await sealConfirmedTelegramAppHandoff({
+      authorization: input.authorization,
+      db: input.db,
+      intent: current,
+      market: input.market,
+      policy: input.policy,
+      quote,
+    });
+    if (!handoffMessage) return;
     await input.sendMessage({
       chat_id: input.chatId,
-      ...buildTelegramTradeAppHandoffMessage({
-        appBaseUrl: input.appBaseUrl,
-        intent: current,
-        market: input.market,
-        policy: input.policy,
-        quote,
-        telegramMiniAppEnabled: input.telegramMiniAppEnabled,
-      }),
+      ...handoffMessage,
     });
     return;
   }
@@ -9831,10 +9957,16 @@ export async function handleTelegramBotTradingCallback(
     intent.status === "external_handoff" &&
     intent.delivery_mode === "app_handoff" &&
     intent.submit_started_at == null;
+  const canDeliverExternalHandoff =
+    (parsed.type === "confirm" || parsed.type === "retry_buy") &&
+    intent.status === "external_handoff" &&
+    intent.delivery_mode === "app_handoff" &&
+    intent.submit_started_at == null;
   if (
     (isTerminalIntentStatus(intent.status) || intent.status === "executing") &&
     !canReplayMarketExit &&
-    !canExitExternalHandoff
+    !canExitExternalHandoff &&
+    !canDeliverExternalHandoff
   ) {
     await answerIntentAlreadyProcessed(input, intent);
     return true;
@@ -10113,7 +10245,69 @@ export async function handleTelegramBotTradingCallback(
     }
     return true;
   }
-  let fundingResumedForExecution = false;
+  if (
+    (parsed.type === "confirm" ||
+      (parsed.type === "retry_buy" && intent.status === "external_handoff")) &&
+    intent.delivery_mode === "app_handoff" &&
+    ["previewed", "external_handoff"].includes(intent.status)
+  ) {
+    const confirmedQuote = readTelegramTradeQuotePreview(intent.quote_snapshot);
+    if (!confirmedQuote) {
+      await updateIntentStatus({
+        allowedStatuses: ["previewed", "external_handoff"],
+        db: input.db,
+        errorCode: "handoff_quote_missing",
+        errorMessage: "The confirmed handoff quote is unavailable.",
+        intentId: intent.id,
+        status: "failed",
+      });
+      await input.answerCallbackQuery({
+        callbackQueryId: input.callbackQuery.id,
+        showAlert: true,
+        text: "⚠️ The quote is unavailable. Open the market again.",
+      });
+      return true;
+    }
+    try {
+      const handoffMessage = await sealConfirmedTelegramAppHandoff({
+        authorization,
+        db: input.db,
+        intent,
+        market,
+        policy,
+        quote: confirmedQuote,
+      });
+      if (!handoffMessage) {
+        await answerIntentAlreadyProcessed(input, intent);
+        return true;
+      }
+      await input.answerCallbackQuery({
+        callbackQueryId: input.callbackQuery.id,
+        text: "✅ Buy confirmed. Open Hunch to track it.",
+      });
+      await input.sendMessage({ chat_id: chatId, ...handoffMessage });
+    } catch (error) {
+      input.log?.warn?.(
+        {
+          error: error instanceof Error ? error.message : "unknown_error",
+          event: "telegram_app_handoff_issue_failed",
+          intentId: intent.id,
+        },
+        "Confirmed Telegram app handoff could not be issued",
+      );
+      await input.answerCallbackQuery({
+        callbackQueryId: input.callbackQuery.id,
+        showAlert: true,
+        text: "⚠️ The processing window is temporarily unavailable. Try Confirm again.",
+      });
+    }
+    return true;
+  }
+
+  let fundingResumedForExecution =
+    intent.delivery_mode === "app_handoff" &&
+    intent.funding_reservation_id != null &&
+    readTelegramAppHandoffExecutionMarker(intent) != null;
   if (parsed.type === "retry_buy" && intent.status === "funding") {
     const fundingState = await input.db.query<{
       operation_status: string;
@@ -10897,14 +11091,23 @@ export async function handleTelegramBotTradingCallback(
         return true;
       }
     }
-    if (
-      !(await isTelegramBotTradingAuthorizationEnabled(
-        input.db,
-        authorization,
-        intent.venue,
-        intent,
-      ))
-    ) {
+    const authorizationStillEnabled =
+      intent.delivery_mode === "app_handoff" &&
+      readTelegramAppHandoffExecutionMarker(intent)
+        ? intentMatchesTelegramTradeAuthority({
+            authorization: await loadEnabledEvmAuthorization(
+              input.db,
+              authorization.telegram_user_id,
+            ),
+            intent,
+          })
+        : await isTelegramBotTradingAuthorizationEnabled(
+            input.db,
+            authorization,
+            intent.venue,
+            intent,
+          );
+    if (!authorizationStillEnabled) {
       await updateIntentStatus({
         allowedStatuses: ["executing"],
         db: input.db,
@@ -11538,4 +11741,213 @@ export async function captureTelegramBotTradingCallback(input: {
     writeTradeInputContext: input.writeTradeInputContext,
   });
   return { answers, handled, messages };
+}
+
+export type TelegramAppHandoffProjection = Readonly<{
+  amountUsd: number | null;
+  canAutoClose: boolean;
+  continuesInBackground: boolean;
+  error: Readonly<{ code: string | null; message: string | null }> | null;
+  eventTitle: string | null;
+  funding: Readonly<{
+    operationId: string;
+    progressStage: string | null;
+    status: string | null;
+  }> | null;
+  marketTitle: string;
+  order: Readonly<{
+    executionId: string | null;
+    orderId: string | null;
+    txSignature: string | null;
+    venueOrderId: string | null;
+  }>;
+  outcome: string;
+  revision: string;
+  stage:
+    | "attaching"
+    | "failed"
+    | "funding"
+    | "reconciling"
+    | "submitting"
+    | "success";
+  status: string;
+  terminal: boolean;
+  tradeIntentId: string;
+  venue: TelegramBotTradingVenue;
+}>;
+
+export async function loadTelegramAppHandoffProjection(
+  db: DbQuery,
+  input: Readonly<{
+    telegramUserId: string;
+    tradeIntentId: string;
+    userId: string;
+  }>,
+): Promise<TelegramAppHandoffProjection | null> {
+  const projection = await db.query<{
+    amount_usd: string | null;
+    error_code: string | null;
+    error_message: string | null;
+    event_title: string | null;
+    execution_id: string | null;
+    funding_operation_id: string | null;
+    funding_progress_stage: string | null;
+    funding_status: string | null;
+    id: string;
+    market_title: string;
+    order_id: string | null;
+    outcomes: string | null;
+    side: TelegramBotTradingSide | null;
+    status: string;
+    tx_signature: string | null;
+    updated_at: Date;
+    venue: TelegramBotTradingVenue;
+    venue_order_id: string | null;
+  }>(
+    `select intent.amount_usd,
+            intent.error_code,
+            intent.error_message,
+            event_row.title as event_title,
+            intent.execution_id::text,
+            intent.funding_operation_id::text,
+            funding.progress_stage as funding_progress_stage,
+            funding.status as funding_status,
+            intent.id::text,
+            market.title as market_title,
+            intent.order_id::text,
+            market.outcomes,
+            intent.side,
+            intent.status,
+            intent.tx_signature,
+            intent.updated_at,
+            intent.venue,
+            intent.venue_order_id
+       from telegram_trade_intents intent
+       join unified_markets market on market.id = intent.market_id
+       left join unified_events event_row on event_row.id = market.event_id
+       left join funding_operations funding
+         on funding.id = intent.funding_operation_id
+        and funding.user_id = intent.user_id
+      where intent.id = $1::uuid
+        and intent.user_id = $2::uuid
+        and intent.telegram_user_id = $3
+        and intent.delivery_mode = 'app_handoff'
+        and intent.action = 'buy'
+      limit 1`,
+    [input.tradeIntentId, input.userId, input.telegramUserId],
+  );
+  const row = projection.rows[0];
+  if (!row) return null;
+  const terminalFailure = ["cancelled", "expired", "failed"].includes(
+    row.status,
+  );
+  const success = row.status === "filled";
+  const reconciling = ["reconcile_required", "submitted"].includes(row.status);
+  const fundingActive =
+    row.funding_operation_id != null &&
+    row.funding_status != null &&
+    !["completed", "failed", "cancelled", "refunded"].includes(
+      row.funding_status,
+    ) &&
+    row.funding_progress_stage !== "ready_for_consumer";
+  const side = row.side ?? "YES";
+  const amountUsd = parseNumber(row.amount_usd);
+  return {
+    amountUsd,
+    canAutoClose: success,
+    continuesInBackground: reconciling || row.status === "executing",
+    error:
+      row.error_code || row.error_message
+        ? { code: row.error_code, message: row.error_message }
+        : null,
+    eventTitle: row.event_title,
+    funding: row.funding_operation_id
+      ? {
+          operationId: row.funding_operation_id,
+          progressStage: row.funding_progress_stage,
+          status: row.funding_status,
+        }
+      : null,
+    marketTitle: row.market_title,
+    order: {
+      executionId: row.execution_id,
+      orderId: row.order_id,
+      txSignature: row.tx_signature,
+      venueOrderId: row.venue_order_id,
+    },
+    outcome: outcomeLabelOrSide(row.outcomes, side),
+    revision: row.updated_at.toISOString(),
+    stage: success
+      ? "success"
+      : terminalFailure
+        ? "failed"
+        : fundingActive
+          ? "funding"
+          : reconciling
+            ? "reconciling"
+            : row.status === "confirming" || row.status === "external_handoff"
+              ? "attaching"
+              : "submitting",
+    status: row.status,
+    terminal: success || terminalFailure,
+    tradeIntentId: row.id,
+    venue: row.venue,
+  };
+}
+
+export async function executeCommittedTelegramAppHandoff(
+  input: Readonly<{
+    appBaseUrl: string;
+    db: DbQuery;
+    log?: TelegramBotTradingCallbackInput["log"];
+    signerInspector?: TelegramBotTradingSignerInspector;
+    telegramUserId: string;
+    tradeIntentId: string;
+    trading: ApiBotTradingExecutor;
+    userId: string;
+  }>,
+): Promise<TelegramAppHandoffProjection | null> {
+  const intent = await loadIntent(input.db, input.tradeIntentId);
+  if (
+    !intent ||
+    intent.user_id !== input.userId ||
+    intent.telegram_user_id !== input.telegramUserId ||
+    intent.delivery_mode !== "app_handoff" ||
+    readTelegramAppHandoffExecutionMarker(intent) == null
+  ) {
+    return null;
+  }
+  if (intent.status === "confirming") {
+    const senderId = Number(input.telegramUserId);
+    if (!Number.isSafeInteger(senderId) || senderId <= 0 || !intent.chat_id) {
+      return null;
+    }
+    const messageId = Number(intent.telegram_message_id);
+    await captureTelegramBotTradingCallback({
+      appBaseUrl: input.appBaseUrl,
+      callbackQuery: {
+        data: `${TELEGRAM_BOT_TRADING_CALLBACK_PREFIX}:confirm:${intent.id}`,
+        from: { id: senderId },
+        id: `app-handoff:${intent.id}`,
+        message: {
+          chat: { id: intent.chat_id, type: "private" },
+          ...(Number.isSafeInteger(messageId) && messageId > 0
+            ? { message_id: messageId }
+            : {}),
+        },
+      },
+      db: input.db,
+      expectedIntentId: intent.id,
+      expectedType: "confirm",
+      log: input.log,
+      signerInspector: input.signerInspector,
+      telegramMiniAppEnabled: true,
+      trading: input.trading,
+    });
+  }
+  return loadTelegramAppHandoffProjection(input.db, {
+    telegramUserId: input.telegramUserId,
+    tradeIntentId: input.tradeIntentId,
+    userId: input.userId,
+  });
 }

@@ -160,10 +160,16 @@ function normalizeTelegramUserId(value: string): string {
   return normalized;
 }
 
-function createOpaqueToken(): string {
-  return `${TELEGRAM_APP_HANDOFF_TOKEN_PREFIX}${crypto
-    .randomBytes(32)
-    .toString("base64url")}`;
+function createOpaqueToken(
+  deterministicInput?: Readonly<{ payload: string; secret: string }>,
+): string {
+  const bytes = deterministicInput
+    ? crypto
+        .createHmac("sha256", deterministicInput.secret)
+        .update(deterministicInput.payload)
+        .digest()
+    : crypto.randomBytes(32);
+  return `${TELEGRAM_APP_HANDOFF_TOKEN_PREFIX}${bytes.toString("base64url")}`;
 }
 
 function handoffStartParam(token: string): string {
@@ -300,6 +306,7 @@ export async function issueTelegramAppHandoff(input: {
   policyRevision: string;
   quoteSnapshot: JsonObject;
   telegramUserId: string;
+  tokenSecret?: string;
   tradeIntentId: string;
   userId: string;
 }): Promise<IssuedTelegramAppHandoff> {
@@ -325,7 +332,15 @@ export async function issueTelegramAppHandoff(input: {
   const tradeIntentId = normalizeUuid(input.tradeIntentId, "tradeIntentId");
   const telegramUserId = normalizeTelegramUserId(input.telegramUserId);
   const userId = normalizeUuid(input.userId, "userId");
-  const token = createOpaqueToken();
+  const tokenSecret = input.tokenSecret?.trim() || null;
+  const token = createOpaqueToken(
+    tokenSecret
+      ? {
+          payload: [tradeIntentId, userId, telegramUserId].join(":"),
+          secret: tokenSecret,
+        }
+      : undefined,
+  );
   const tokenHash = hashOpaqueToken(token);
   const planFingerprint = canonicalJsonHash({
     authorityFingerprint,
@@ -370,6 +385,7 @@ export async function issueTelegramAppHandoff(input: {
          and intent.action = 'buy'
          and intent.delivery_mode = 'app_handoff'
          and intent.status in ('previewed', 'confirming', 'funding', 'external_handoff')
+       on conflict do nothing
        returning ${handoffReturningColumns}`,
       [
         tradeIntentId,
@@ -386,6 +402,19 @@ export async function issueTelegramAppHandoff(input: {
     );
     if (inserted.rows[0]) return mapRow(inserted.rows[0]);
 
+    if (tokenSecret) {
+      const existingDeterministic = await client.query<TelegramAppHandoffRow>(
+        `select ${handoffReturningColumns}
+             from telegram_app_handoffs
+            where trade_intent_id = $1::uuid
+              and token_hash = $2
+            limit 1`,
+        [tradeIntentId, tokenHash],
+      );
+      if (existingDeterministic.rows[0]) {
+        return mapRow(existingDeterministic.rows[0]);
+      }
+    }
     const existing = await client.query<{ exists: boolean }>(
       `select exists(
          select 1
@@ -508,7 +537,7 @@ export async function commitTelegramAppHandoff(input: {
     input,
     { forUpdate: true },
     async ({ client, row }) => {
-      if (row.state !== "claimed") {
+      if (row.state !== "claimed" && row.state !== "committed") {
         throw new TelegramAppHandoffError("not_committable");
       }
       if (row.plan_fingerprint !== planFingerprint) {
@@ -520,16 +549,45 @@ export async function commitTelegramAppHandoff(input: {
       ) {
         throw new TelegramAppHandoffError("policy_changed");
       }
-      const committed = await client.query<TelegramAppHandoffRow>(
-        `update telegram_app_handoffs handoff_row
-          set state = 'committed', committed_at = clock_timestamp()
-        where handoff_row.id = $1::uuid
-          and handoff_row.state = 'claimed'
-          returning ${handoffReturningColumns}`,
-        [row.id],
-      );
-      const committedRow = committed.rows[0];
+      const committedRow =
+        row.state === "committed"
+          ? row
+          : (
+              await client.query<TelegramAppHandoffRow>(
+                `update telegram_app_handoffs handoff_row
+                  set state = 'committed', committed_at = clock_timestamp()
+                where handoff_row.id = $1::uuid
+                  and handoff_row.state = 'claimed'
+                returning ${handoffReturningColumns}`,
+                [row.id],
+              )
+            ).rows[0];
       if (!committedRow) throw new TelegramAppHandoffError("not_committable");
+      const attached = await client.query(
+        `update telegram_trade_intents intent
+            set status = case
+                  when intent.status in ('previewed', 'external_handoff')
+                    then 'confirming'
+                  else intent.status
+                end,
+                result = coalesce(intent.result, '{}'::jsonb)
+                  || jsonb_build_object(
+                    'appHandoffExecution',
+                    jsonb_build_object(
+                      'committedAt', coalesce($2::timestamptz, clock_timestamp()),
+                      'handoffId', $3::uuid,
+                      'version', 1
+                    )
+                  ),
+                updated_at = clock_timestamp()
+          where intent.id = $1::uuid
+            and intent.delivery_mode = 'app_handoff'
+            and intent.action = 'buy'`,
+        [row.trade_intent_id, committedRow.committed_at, row.id],
+      );
+      if ((attached.rowCount ?? 0) !== 1) {
+        throw new TelegramAppHandoffError("not_committable");
+      }
       return mapRow(committedRow);
     },
   );

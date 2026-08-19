@@ -114,6 +114,13 @@ const migration0221 = await readFile(
   ),
   "utf8",
 );
+const migration0225 = await readFile(
+  new URL(
+    "../../../packages/db/migrations/0225_telegram_app_handoff_execution.sql",
+    import.meta.url,
+  ),
+  "utf8",
+);
 assert.match(
   migration0221,
   /create table if not exists telegram_app_handoffs[\s\S]*?token_hash text not null unique[\s\S]*?plan_fingerprint text not null[\s\S]*?policy_revision text not null/u,
@@ -138,6 +145,16 @@ assert.doesNotMatch(
   migration0221,
   /(?:raise exception|update|delete)[\s\S]*?telegram_app_handoffs[\s\S]*?(?:legacy|historical)/iu,
   "0221 must not perform historical handoff cleanup during deployment",
+);
+assert.match(
+  migration0225,
+  /result -> 'appHandoffExecution'[\s\S]*?result -> 'appHandoffExecution' ->> 'version' = '1'[\s\S]*?result -> 'appHandoffExecution' ->> 'committedAt'[\s\S]*?status in \([\s\S]*?'executing'[\s\S]*?'filled'[\s\S]*?'reconcile_required'/u,
+  "0225 must require a committed sealed marker before an app handoff can execute",
+);
+assert.match(
+  migration0225,
+  /status not in \([\s\S]*?'executing'[\s\S]*?'filled'[\s\S]*?'reconcile_required'[\s\S]*?submit_started_at is null[\s\S]*?tx_signature is null/u,
+  "0225 must preserve the no-submit fence for uncommitted app handoffs",
 );
 assert.match(
   migration0208,
@@ -183,7 +200,8 @@ const db = {
           params[0].includes(
             "0217_telegram_app_handoff_funding_confirmation.sql",
           ) &&
-          params[0].includes("0221_telegram_app_handoff_intents.sql"),
+          params[0].includes("0221_telegram_app_handoff_intents.sql") &&
+          params[0].includes("0225_telegram_app_handoff_execution.sql"),
       );
       return { rows: [] };
     }
