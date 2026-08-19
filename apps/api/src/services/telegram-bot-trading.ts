@@ -365,6 +365,22 @@ export type TelegramBotTradingMessage = {
   text: string;
 };
 
+function telegramSentMessageId(value: unknown): number | null {
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    !Object.hasOwn(value, "messageId")
+  ) {
+    return null;
+  }
+  const messageId = (value as { messageId?: unknown }).messageId;
+  return typeof messageId === "number" &&
+    Number.isSafeInteger(messageId) &&
+    messageId > 0
+    ? messageId
+    : null;
+}
+
 export type TelegramFundingBuyReturnOpener = (
   input: Readonly<{
     authorizationId: string;
@@ -10900,7 +10916,21 @@ export async function handleTelegramBotTradingCallback(
           venue: intent.venue,
         }),
       };
-      await input.sendMessage({ chat_id: chatId, ...startingMessage });
+      const sentStartingMessage = await input.sendMessage({
+        chat_id: chatId,
+        ...startingMessage,
+      });
+      const startingMessageId = telegramSentMessageId(sentStartingMessage);
+      if (startingMessageId != null) {
+        await input.db.query(
+          `update telegram_trade_intents
+              set telegram_message_id = $2::bigint,
+                  updated_at = clock_timestamp()
+            where id = $1::uuid and status = 'funding'`,
+          [intent.id, startingMessageId],
+        );
+        intent.telegram_message_id = String(startingMessageId);
+      }
       return true;
     } catch (error) {
       const safetyStop =
