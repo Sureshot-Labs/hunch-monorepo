@@ -226,6 +226,8 @@ type PolymarketPreparedPayload = PreparedPayloadBase & {
   orderType: "FOK";
   positionWalletAddress: string;
   price: number | null;
+  /** Fee-inclusive collateral cap required by this signed BUY order. */
+  requiredSpendRaw: string | null;
   size: number | null;
   tokenId: string | null;
 };
@@ -8154,6 +8156,7 @@ async function prepareTrade(
       venue: "polymarket",
     });
   }
+  let requiredSpendRawForFunding: bigint | null = null;
   if (action === "BUY") {
     const preparedQuote = inspectPolymarketPreparedQuote({
       candidate,
@@ -8162,6 +8165,7 @@ async function prepareTrade(
     rawQuote = preparedQuote.rawQuote;
     feePolicySnapshot = preparedQuote.feePolicySnapshot;
     const { funderExecutionKind, requiredSpendRaw } = preparedQuote;
+    requiredSpendRawForFunding = requiredSpendRaw;
     const fundingRouterPolicy =
       await resolvePolymarketBotPolicyFundingCapability();
     const canPrepareControllerPusdApproval =
@@ -8473,6 +8477,7 @@ async function prepareTrade(
       orderType: "FOK",
       positionWalletAddress: candidate.funder,
       price: readNumber(rawQuote.price),
+      requiredSpendRaw: requiredSpendRawForFunding?.toString() ?? null,
       size: readNumber(rawQuote.size),
       tokenId,
       feePolicySnapshot,

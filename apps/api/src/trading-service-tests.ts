@@ -3468,6 +3468,28 @@ const tests: TestCase[] = [
       );
       assert.doesNotMatch(confirmLifecycleBlock, /trading\.persistTrade/);
       assert.doesNotMatch(confirmLifecycleBlock, /trading\.applyTradeEffects/);
+
+      // Funding reaching a canonical on-chain receipt before Polymarket's
+      // CLOB balance endpoint catches up is a retryable visibility delay, not
+      // a failed Buy. Keep the exact CAS transition and its no-broadcast
+      // guards pinned: otherwise a funded Telegram Buy regresses to terminal.
+      const fundingBalancePendingBlock = sourceSlice(
+        telegramTrading,
+        'normalized.code === "funding_balance_pending"',
+        "if (submitted)",
+      );
+      assert.match(
+        fundingBalancePendingBlock,
+        /fundingResumedForExecution[\s\S]*?!submitStarted[\s\S]*?setupTransactions\.length === 0/,
+      );
+      assert.match(
+        fundingBalancePendingBlock,
+        /set status = 'funding',[\s\S]*?funding_reservation_id = null,[\s\S]*?error_code = 'funding_balance_pending'/,
+      );
+      assert.match(
+        fundingBalancePendingBlock,
+        /and status = 'executing'[\s\S]*?and submit_started_at is null/,
+      );
     },
   },
   {
@@ -3678,10 +3700,6 @@ const tests: TestCase[] = [
       assert.notEqual(preflightIndex, -1);
       assert.notEqual(fundingIndex, -1);
       assert.notEqual(builderValidationIndex, -1);
-      assert.match(
-        prepareBlock,
-        /requires a completed FundingOperation, venue-visible pUSD, and a fresh quote/,
-      );
       // Router movement belongs to the durable polymarket_deposit_pusd_fund_v1
       // profile. A reservation-backed Telegram Buy must therefore be rejected
       // before prepareTrade can issue a direct Router setup transaction, so

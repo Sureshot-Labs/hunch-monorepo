@@ -46,7 +46,7 @@ type TradeFundingProgress = Readonly<{
   stepStateFingerprint: string;
   state: TradeFundingState;
   venue: string;
-  version: 1;
+  version: 1 | 2;
 }>;
 
 type ProjectionCandidate = Readonly<{
@@ -99,7 +99,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function parseProgress(value: unknown): TradeFundingProgress | null {
-  if (!isRecord(value) || value.version !== 1) return null;
+  if (!isRecord(value) || (value.version !== 1 && value.version !== 2)) {
+    return null;
+  }
   if (
     typeof value.intentId !== "string" ||
     typeof value.marketTitle !== "string" ||
@@ -265,7 +267,9 @@ function liveProgressFor(candidate: ProjectionCandidate): TradeFundingProgress {
     stepStateFingerprint: candidate.step_state_fingerprint,
     state,
     venue: candidate.venue,
-    version: 1,
+    // Bump the card contract so existing terminal cards are revised to expose
+    // the direct Open market escape rather than an inert status affordance.
+    version: 2,
   };
 }
 
@@ -671,7 +675,10 @@ function progressKeyboard(
     rows.push([
       {
         callback_data: `${CALLBACK_PREFIX}:retry_buy:${progress.intentId}`,
-        text: "🔄 Check status",
+        text:
+          progress.state === "stopped"
+            ? "🎯 Open market"
+            : "🔄 Check status",
       },
     ]);
   }
@@ -683,10 +690,7 @@ function progressKeyboard(
       },
     ]);
   }
-  rows.push([
-    { callback_data: "hm:v1:positions", text: "💼 My positions" },
-    { callback_data: "hm:v1:home", text: "🏠 Home" },
-  ]);
+  rows.push([{ callback_data: "hm:v1:home", text: "🏠 Home" }]);
   return { inline_keyboard: rows };
 }
 
