@@ -6464,7 +6464,7 @@ try {
     ledgerHeight: postDepositResidual.blockNumber,
     transactionHash: postDepositTransactionHash,
   });
-  const postDepositAlreadyZero = await relayExecutor(
+  const postDepositSourceDebit = await relayExecutor(
     [
       postDepositResidual,
       relayAllowanceEvidence("0", "135", "0", null, "finalized"),
@@ -6473,18 +6473,14 @@ try {
       postDepositAlreadyZeroBroadcasts.value += 1;
     },
   ).runBatch({ limit: 1, now: new Date(now.getTime() + 4) });
-  assert.equal(
-    postDepositAlreadyZero.alreadySatisfied,
-    1,
-    JSON.stringify(postDepositAlreadyZero),
-  );
+  assert.equal(postDepositSourceDebit.alreadySatisfied, 0);
   assert.equal(
     postDepositAlreadyZeroBroadcasts.value,
     2,
-    "an already-zero post-deposit cleanup must not broadcast a revoke",
+    "a finalized Relay deposit must not trigger a post-deposit revoke",
   );
-  const postDepositAlreadyZeroState = await pool.query<{
-    cleanup_status: string;
+  const postDepositSourceDebitState = await pool.query<{
+    cleanup_status: string | null;
     parent_status: string;
     reservation_status: string;
     source_debit_count: string;
@@ -6496,7 +6492,7 @@ try {
             count(source_debit.id)::text as source_debit_count,
             max(source_debit.raw_amount)::text as source_debit_raw
        from telegram_funding_authorization_reservations reservation
-       join funding_operations cleanup
+       left join funding_operations cleanup
          on cleanup.id = reservation.cleanup_operation_id
        join funding_operations parent
          on parent.id = reservation.funding_operation_id
@@ -6508,10 +6504,10 @@ try {
       group by cleanup.status, parent.status, reservation.status`,
     [postDepositAlreadyZeroRelay.operationId],
   );
-  assert.deepEqual(postDepositAlreadyZeroState.rows[0], {
-    cleanup_status: "completed",
+  assert.deepEqual(postDepositSourceDebitState.rows[0], {
+    cleanup_status: null,
     parent_status: "in_progress",
-    reservation_status: "cleaned",
+    reservation_status: "reserved",
     source_debit_count: "1",
     source_debit_raw: "2000000",
   });

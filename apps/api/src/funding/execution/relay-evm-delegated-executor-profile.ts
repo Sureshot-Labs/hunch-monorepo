@@ -728,6 +728,14 @@ async function observeRelayPostcondition(
                 is distinct from 'true'
           and deposit_receipt.evidence ->> 'allowanceOwnershipRejected'
                 is distinct from 'true'
+          and not exists (
+            select 1
+              from funding_observations source_debit
+             where source_debit.operation_id = operation.id
+               and source_debit.kind = 'source_debit'
+               and source_debit.canonical
+               and source_debit.finality_status = 'finalized'
+          )
        union all
        select 5, 'cleanup', cleanup_receipt.id::text,
               cleanup_operation.id::text,
@@ -1198,6 +1206,10 @@ async function reconcileRelayPostconditions(
       return;
     }
   }
+  await allocateFinalizedRelaySourceDebitInTransaction(client, {
+    now,
+    profile,
+  });
   if (allowRetry)
     await client.query(
       `update funding_operation_steps step
@@ -1831,6 +1843,14 @@ async function reconcileRelayPostconditions(
          and deposit_receipt.evidence ->> 'sourceDebitEventIndex' is not null
          and deposit_receipt.evidence ->> 'transactionHash' is not null
          and deposit_receipt.evidence ->> 'allowanceZero' is distinct from 'true'
+         and not exists (
+           select 1
+             from funding_observations source_debit
+            where source_debit.operation_id = operation.id
+              and source_debit.kind = 'source_debit'
+              and source_debit.canonical
+              and source_debit.finality_status = 'finalized'
+         )
        order by deposit_receipt.observed_at
        for update of deposit_step, deposit_receipt, operation
        limit 1`,
@@ -3587,6 +3607,120 @@ type RelayPostDepositEvidence = Readonly<{
   expectedRaw: string;
   walletAddress: string;
 }>;
+
+/**
+ * A finalized, action-matched Relay deposit receipt is the source-debit proof.
+ * It must not wait for a later allowance read or cleanup transaction: allowance
+ * is authority for the deposit, not evidence that the deposited token moved.
+ */
+async function allocateFinalizedRelaySourceDebitInTransaction(
+  client: PoolClient,
+  input: Readonly<{
+    now: Date;
+    profile: RelayEvmFundingProfileSpec;
+  }>,
+): Promise<void> {
+  const { rows } = await client.query<
+    RelayPostDepositEvidence & {
+      authorizationId: string;
+      userId: string;
+    }
+  >(
+    `select operation.id as "parentOperationId",
+            segment.id as "segmentId",
+            deposit_receipt.id as "depositReceiptId",
+            deposit_receipt.attempt_id as "depositAttemptId",
+            deposit_receipt.evidence ->> 'transactionHash'
+              as "depositTransactionHash",
+            deposit_receipt.evidence ->> 'sourceDebitEventIndex'
+              as "depositEventIndex",
+            deposit_receipt.observed_at as "depositObservedAt",
+            deposit_receipt.ledger_height as "depositBlock",
+            deposit_receipt.block_hash as "depositBlockHash",
+            reservation.source_raw::text as "expectedRaw",
+            funding_authorization.wallet_address as "walletAddress",
+            funding_authorization.id::text as "authorizationId",
+            funding_authorization.user_id::text as "userId"
+       from funding_operation_steps deposit_step
+       join funding_step_receipt_observations deposit_receipt
+         on deposit_receipt.step_id = deposit_step.id
+        and deposit_receipt.status = 'finalized'
+        and deposit_receipt.action_match
+        and deposit_receipt.canonical
+        and deposit_receipt.evidence ->> 'singleOperationBundle' = 'true'
+       join funding_operations operation on operation.id = deposit_step.operation_id
+       join funding_operation_segments segment
+         on segment.operation_id = operation.id and segment.ordinal = 0
+       join telegram_funding_authorization_reservations reservation
+         on reservation.funding_operation_id = operation.id
+        and reservation.status = 'reserved'
+       join telegram_funding_authorizations funding_authorization
+         on funding_authorization.id::text =
+              operation.support_metadata ->> 'fundingAuthorizationId'
+      where deposit_step.executor_id = $1
+        and deposit_step.state = 'succeeded'
+        and deposit_receipt.evidence ->> 'attributedSourceRaw' =
+              reservation.source_raw::text
+        and deposit_receipt.block_hash is not null
+        and deposit_receipt.evidence ->> 'sourceDebitEventIndex' is not null
+        and deposit_receipt.evidence ->> 'transactionHash' is not null
+        and not exists (
+          select 1
+            from funding_observations source_debit
+           where source_debit.operation_id = operation.id
+             and source_debit.kind = 'source_debit'
+             and source_debit.canonical
+             and source_debit.finality_status = 'finalized'
+        )
+      order by deposit_receipt.observed_at
+      for update of operation, deposit_step, deposit_receipt, reservation
+      skip locked
+      limit 1`,
+    [input.profile.profileId],
+  );
+  const evidence = rows[0];
+  if (
+    !evidence ||
+    !(await lockFundingAuthorizationReservationScope(client, {
+      authorizationId: evidence.authorizationId,
+      userId: evidence.userId,
+    }))
+  ) {
+    return;
+  }
+  await allocateFundingObservationInTransaction(client, {
+    operationId: evidence.parentOperationId,
+    segmentId: evidence.segmentId,
+    kind: "source_debit",
+    networkId: input.profile.sourceAsset.networkId,
+    assetId: input.profile.sourceAsset.assetId,
+    assetDecimals: input.profile.sourceAsset.decimals,
+    txHash: evidence.depositTransactionHash,
+    eventIndex: evidence.depositEventIndex,
+    fromAddress: evidence.walletAddress,
+    toAddress: RELAY_DEPOSITORY_V2,
+    rawAmount: evidence.expectedRaw,
+    observedAt: evidence.depositObservedAt,
+    ledgerHeight: evidence.depositBlock,
+    blockHash: evidence.depositBlockHash,
+    finalityStatus: "finalized",
+    finalizedAt: input.now,
+    metadata: {
+      relayDelegatedProfile: input.profile.profileId,
+      receiptAttemptId: evidence.depositAttemptId,
+    },
+  });
+  await client.query(
+    `update funding_step_receipt_observations
+        set evidence = evidence || jsonb_build_object(
+              'sourceDebitRecorded', true,
+              'sourceDebitRecordedAt', $2::timestamptz
+            ),
+            updated_at = $2
+      where id = $1::uuid and status = 'finalized'`,
+    [evidence.depositReceiptId, input.now],
+  );
+}
 
 async function allocateRelayPostDepositSourceDebitInTransaction(
   client: PoolClient,

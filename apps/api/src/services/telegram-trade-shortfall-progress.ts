@@ -1,5 +1,6 @@
 import { tx, type Pool, type PoolClient } from "@hunch/infra";
 
+import { resolveKnownAccountAssetSymbol } from "../account-value/known-asset-catalog.js";
 import {
   isTelegramPolymarketRouterContinuationPending,
   isTelegramRouterContinuationHardReason,
@@ -39,6 +40,7 @@ type TradeFundingProgress = Readonly<{
   receiptStateFingerprint: string;
   reasonCode: string | null;
   sideLabel: string;
+  sourceRoute: string | null;
   stepStateFingerprint: string;
   state: TradeFundingState;
   venue: string;
@@ -61,6 +63,9 @@ type ProjectionCandidate = Readonly<{
   result: Record<string, unknown>;
   root_requires_router_continuation: boolean;
   side: string | null;
+  source_asset_id: string | null;
+  source_asset_decimals: number | null;
+  source_network_id: string | null;
   status: string;
   step_state_fingerprint: string;
   telegram_message_id: string | null;
@@ -121,6 +126,37 @@ function sideLabel(candidate: ProjectionCandidate): string {
   return typeof stored === "string" && stored.trim()
     ? stored.trim()
     : (candidate.side ?? "Buy");
+}
+
+function fundingNetworkLabel(networkId: string): string {
+  if (networkId === "evm:8453") return "Base";
+  if (networkId === "evm:137") return "Polygon";
+  if (networkId === "solana:mainnet") return "Solana";
+  return "source wallet";
+}
+
+function fundingDestinationAsset(venue: string): string {
+  if (venue === "polymarket") return "pUSD";
+  if (venue === "limitless") return "USDC";
+  return "funds";
+}
+
+function sourceRoute(candidate: ProjectionCandidate): string | null {
+  if (!candidate.source_network_id || !candidate.source_asset_id) return null;
+  if (candidate.source_asset_decimals == null) return null;
+  const symbol =
+    resolveKnownAccountAssetSymbol({
+      assetId: candidate.source_asset_id,
+      decimals: candidate.source_asset_decimals,
+      networkId: candidate.source_network_id,
+    }) ?? "funds";
+  const venue =
+    candidate.venue === "polymarket"
+      ? "Polymarket"
+      : candidate.venue === "limitless"
+        ? "Limitless"
+        : candidate.venue;
+  return `${fundingNetworkLabel(candidate.source_network_id)} ${symbol} → ${venue} ${fundingDestinationAsset(candidate.venue)}`;
 }
 
 function liveProgressFor(candidate: ProjectionCandidate): TradeFundingProgress {
@@ -188,6 +224,7 @@ function liveProgressFor(candidate: ProjectionCandidate): TradeFundingProgress {
     receiptStateFingerprint: candidate.receipt_state_fingerprint,
     reasonCode,
     sideLabel: sideLabel(candidate),
+    sourceRoute: sourceRoute(candidate),
     stepStateFingerprint: candidate.step_state_fingerprint,
     state,
     venue: candidate.venue,
@@ -231,6 +268,7 @@ function sameProgress(
     left.venue === right.venue &&
     left.marketTitle === right.marketTitle &&
     left.sideLabel === right.sideLabel &&
+    left.sourceRoute === right.sourceRoute &&
     left.amountUsd === right.amountUsd &&
     left.operationStatus === right.operationStatus &&
     left.progressStage === right.progressStage &&
@@ -256,6 +294,9 @@ async function listCandidates(
             intent.venue,
             coalesce(market.title, intent.market_id, 'Market') as market_title,
             intent.side,
+            funding_authorization.source_network_id,
+            funding_authorization.source_asset_id,
+            funding_authorization.source_asset_decimals,
             intent.amount_usd::text,
             intent.status,
             intent.error_code,
@@ -340,6 +381,11 @@ async function listCandidates(
           order by continuation.created_at desc, continuation.id desc
           limit 1
        ) continuation on true
+       left join telegram_funding_authorizations funding_authorization
+         on funding_authorization.id::text = coalesce(
+              continuation.support_metadata ->> 'fundingAuthorizationId',
+              operation.support_metadata ->> 'fundingAuthorizationId'
+            )
        cross join lateral (
          select coalesce(continuation.id, operation.id) as id,
                 coalesce(continuation.status, operation.status) as status,
@@ -460,7 +506,10 @@ function progressText(progress: TradeFundingProgress): string {
       `🔵 ${formatTelegramFieldMarkdownV2("Venue", progress.venue)}`,
       `🎯 ${formatTelegramFieldMarkdownV2("Market", progress.marketTitle)}`,
       `↔️ ${formatTelegramFieldMarkdownV2("Side", progress.sideLabel)}`,
-      `💲 ${formatTelegramFieldMarkdownV2("Order", `$${progress.amountUsd}`)}`,
+      `🛒 ${formatTelegramFieldMarkdownV2("Buy", `$${progress.amountUsd}`)}`,
+      progress.sourceRoute
+        ? `🔄 ${formatTelegramFieldMarkdownV2("Funding route", progress.sourceRoute)}`
+        : null,
       waiting
         ? null
         : `ℹ️ ${formatTelegramFieldMarkdownV2(
@@ -488,12 +537,12 @@ function progressText(progress: TradeFundingProgress): string {
     preparing: [
       "🔄",
       "Preparing source funds",
-      "The source route is running automatically.",
+      "The funding transfer is running automatically. The Buy has not been submitted.",
     ],
     submitted: [
       "⏳",
       "Confirming funding",
-      "A transaction was sent. The bot is confirming it automatically.",
+      "The funding transaction was sent. The bot is confirming it automatically; the Buy has not been submitted.",
     ],
     ready: [
       "✅",
@@ -519,7 +568,10 @@ function progressText(progress: TradeFundingProgress): string {
       `🔵 ${formatTelegramFieldMarkdownV2("Venue", progress.venue)}`,
       `🎯 ${formatTelegramFieldMarkdownV2("Market", progress.marketTitle)}`,
       `↔️ ${formatTelegramFieldMarkdownV2("Side", progress.sideLabel)}`,
-      `💲 ${formatTelegramFieldMarkdownV2("Order", `$${progress.amountUsd}`)}`,
+      `🛒 ${formatTelegramFieldMarkdownV2("Buy", `$${progress.amountUsd}`)}`,
+      progress.sourceRoute
+        ? `🔄 ${formatTelegramFieldMarkdownV2("Funding route", progress.sourceRoute)}`
+        : null,
       progress.reasonCode
         ? `ℹ️ ${formatTelegramFieldMarkdownV2("Status", progress.reasonCode.replaceAll("_", " "))}`
         : null,
