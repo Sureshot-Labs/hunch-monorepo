@@ -6,7 +6,10 @@ import type { Pool } from "@hunch/infra";
 import type { DbQuery } from "../db.js";
 import { canonicalJsonHash } from "../funding/persistence/canonical.js";
 import { sameAccountAddress } from "../funding/domain/asset-identity.js";
-import { isTelegramPolymarketRouterContinuationPending } from "../funding/reconciliation/telegram-router-continuation-state.js";
+import {
+  isTelegramPolymarketRouterContinuationPending,
+  telegramPolymarketRootRequiresRouterContinuationSql,
+} from "../funding/reconciliation/telegram-router-continuation-state.js";
 import { lockTelegramFundingLinkLifecycle } from "../funding/execution/telegram-funding-link-lifecycle-lock.js";
 import { env } from "../env.js";
 import { isRecord } from "../lib/type-guards.js";
@@ -10323,15 +10326,8 @@ export async function handleTelegramBotTradingCallback(
       has_broadcast_boundary: boolean;
     }>(
       `select continuation.id::text as continuation_id,
-              exists (
-                select 1
-                  from funding_operation_steps root_step
-                 where root_step.operation_id = operation.id
-                   and root_step.executor_id in (
-                     'telegram_relay_evm_funding_v1',
-                     'telegram_relay_polygon_usdc_v1'
-                   )
-              ) as root_requires_router_continuation,
+              ${telegramPolymarketRootRequiresRouterContinuationSql("operation")}
+                as root_requires_router_continuation,
               tracked_operation.status as operation_status,
               tracked_operation.progress_stage,
               (
