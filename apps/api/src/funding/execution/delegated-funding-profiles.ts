@@ -10,6 +10,7 @@ import {
   RELAY_SELF_DEPOSITOR,
 } from "../../funding-providers/relay/rehearsal.js";
 import {
+  POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
   POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
   TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
   TELEGRAM_RELAY_POLYGON_PUSD_PROFILE_ID,
@@ -19,6 +20,7 @@ import {
 } from "./delegated-funding-profile-ids.js";
 
 export {
+  POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
   POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
   TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
   TELEGRAM_RELAY_POLYGON_PUSD_PROFILE_ID,
@@ -44,6 +46,13 @@ export const DELEGATED_FUNDING_EXECUTION_PROFILES: Readonly<
     networkId: "evm:137",
     venueId: "polymarket",
     executorId: POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
+  }),
+  [POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID]: Object.freeze({
+    profileId: POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
+    securityClass: "closed_destination_transform",
+    networkId: "evm:137",
+    venueId: "polymarket",
+    executorId: POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
   }),
   [TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID]: Object.freeze({
     profileId: TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
@@ -547,6 +556,79 @@ export function isExactPolymarketDepositUsdceWrapRule(
   );
 }
 
+/**
+ * The existing Router permission bounds the transaction's total amount.  The
+ * Router itself enforces that pUsdAmount is part of that total, while the
+ * caller below additionally requires them to be equal for this one-source
+ * path.  Do not require a second pUsdAmount policy condition: production's
+ * canonical Router rule deliberately has only this totalAmount ceiling.
+ */
+export function isExactPolymarketDepositPusdFundRule(
+  input: Readonly<{
+    routerAddress: string;
+    maxSourceRaw: string;
+    rule: Readonly<Record<string, unknown>>;
+  }>,
+): boolean {
+  const expectedRouter = input.routerAddress.trim().toLowerCase();
+  if (
+    !/^0x[0-9a-f]{40}$/u.test(expectedRouter) ||
+    !/^[1-9][0-9]*$/u.test(input.maxSourceRaw) ||
+    input.rule.action !== "ALLOW" ||
+    input.rule.method !== "eth_sendTransaction"
+  ) {
+    return false;
+  }
+  const rawConditions = Array.isArray(input.rule.conditions)
+    ? input.rule.conditions
+    : [];
+  const conditions = rawConditions
+    .map(record)
+    .filter((condition): condition is PolicyCondition => condition != null);
+  return (
+    conditions.length === 5 &&
+    conditions.length === rawConditions.length &&
+    exactCondition(conditions, {
+      field: "chain_id",
+      fieldSource: "ethereum_transaction",
+      operator: "eq",
+      value: "137",
+    }) &&
+    exactCondition(conditions, {
+      field: "to",
+      fieldSource: "ethereum_transaction",
+      operator: "eq",
+      value: expectedRouter,
+    }) &&
+    exactCondition(conditions, {
+      field: "value",
+      fieldSource: "ethereum_transaction",
+      operator: "eq",
+      value: "0x0",
+    }) &&
+    exactCondition(conditions, {
+      field: "function_name",
+      fieldSource: "ethereum_calldata",
+      operator: "eq",
+      value: "fund",
+      requireAbi: true,
+    }) &&
+    (() => {
+      const totalCap = positiveCapCondition(
+        conditions,
+        "fund.totalAmount",
+        FUND_ABI,
+      );
+      return totalCap != null && totalCap >= BigInt(input.maxSourceRaw);
+    })() &&
+    !conditions.some(
+      (condition) =>
+        condition.field === "fund.pUsdAmount" ||
+        condition.field === "fund.expectedNonce",
+    )
+  );
+}
+
 export function validatePolymarketDepositUsdceWrapPolicy(
   input: Readonly<{
     policy: DelegatedFundingPrivyPolicy;
@@ -623,6 +705,43 @@ export function validatePolymarketDepositUsdceWrapAction(
   if (decoded.totalAmount !== expectedRaw || decoded.pUsdAmount !== 0n) {
     throw new Error(
       "delegated wrap must consume exactly the full USDC.e receipt",
+    );
+  }
+  return {
+    expectedNonce: decoded.expectedNonce,
+    totalAmount: decoded.totalAmount,
+  };
+}
+
+export function validatePolymarketDepositPusdFundAction(
+  input: Readonly<{
+    action: NormalizedAction;
+    expectedRaw: string;
+    routerAddress: string;
+    walletId: string;
+  }>,
+): Readonly<{ expectedNonce: bigint; totalAmount: bigint }> {
+  const expectedRaw = positiveRaw(input.expectedRaw);
+  if (
+    input.action.kind !== "evm_transaction" ||
+    input.action.networkId !== "evm:137" ||
+    input.action.senderWalletId !== input.walletId ||
+    input.action.to.toLowerCase() !== input.routerAddress.toLowerCase() ||
+    input.action.valueRaw !== "0" ||
+    expectedRaw == null
+  ) {
+    throw new Error(
+      "delegated pUSD funding action differs from its closed-destination profile",
+    );
+  }
+  const decoded = decodePolymarketFundingCalldata(input.action.data);
+  if (
+    decoded.totalAmount !== expectedRaw ||
+    decoded.pUsdAmount <= 0n ||
+    decoded.pUsdAmount > expectedRaw
+  ) {
+    throw new Error(
+      "delegated Router funding must consume the confirmed controller pUSD amount within its exact total",
     );
   }
   return {

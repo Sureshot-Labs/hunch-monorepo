@@ -28,12 +28,16 @@ import {
   type FundingReceiveReceiptDispositionResolver,
 } from "../receive/receive-receipt-router.js";
 import { runTelegramFundingProgressProjectionBatch } from "../../services/telegram-funding-progress-projector.js";
+import { runTelegramTradeShortfallProgressProjectionBatch } from "../../services/telegram-trade-shortfall-progress.js";
 import {
   createPolymarketWrapDelegatedFundingProfile,
   DelegatedFundingExecutor,
 } from "../execution/delegated-funding-executor.js";
 import type { PolymarketWrapExecutionConfiguration } from "../execution/delegated-funding-config.js";
-import { loadRelayEvmExecutionConfiguration } from "../execution/delegated-funding-config.js";
+import {
+  loadPolymarketPusdFundExecutionConfiguration,
+  loadRelayEvmExecutionConfiguration,
+} from "../execution/delegated-funding-config.js";
 import { createPrivyDelegatedFundingDriver } from "../execution/privy-delegated-funding-driver.js";
 import { createRelayEvmDelegatedFundingProfile } from "../execution/relay-evm-delegated-executor-profile.js";
 import { RELAY_EVM_FUNDING_PROFILE_SPECS } from "../execution/relay-evm-profile-specs.js";
@@ -149,6 +153,9 @@ export type FundingReconciliationJobResult =
         telegramFundingProgress: Awaited<
           ReturnType<typeof runTelegramFundingProgressProjectionBatch>
         >;
+        telegramTradeShortfallProgress: Awaited<
+          ReturnType<typeof runTelegramTradeShortfallProgressProjectionBatch>
+        >;
       }>)
   | Readonly<{
       skipped: true;
@@ -163,6 +170,7 @@ export type FundingReconciliationJobResult =
       receiveRouting: null;
       delegatedFundingExecution: null;
       telegramFundingProgress: null;
+      telegramTradeShortfallProgress: null;
     }>;
 
 export async function isFundingReconciliationSchemaReady(
@@ -209,6 +217,7 @@ export async function isFundingReconciliationSchemaReady(
           select required.column_name
           from (values
             ('funding_session_id'),
+            ('trade_intent_id'),
             ('state_revision'),
             ('delivery_attempt_id')
           ) as required(column_name)
@@ -219,6 +228,16 @@ export async function isFundingReconciliationSchemaReady(
               and attribute.attname = required.column_name
               and not attribute.attisdropped
           )
+        )
+        and exists (
+          select 1
+          from pg_constraint constraint_row
+          where constraint_row.conrelid =
+                  to_regclass('public.telegram_bot_action_outbox')
+            and constraint_row.conname =
+                  'telegram_bot_action_outbox_delivery_unknown_check'
+            and lower(pg_get_constraintdef(constraint_row.oid))
+                  like '%funding_qr%'
         )
         and exists (
           select 1
@@ -269,8 +288,7 @@ export async function isFundingReconciliationSchemaReady(
           from (values
             ('telegram_bot_action_outbox_action_check'),
             ('telegram_bot_action_outbox_shape_check'),
-            ('telegram_bot_action_outbox_delivery_attempt_check'),
-            ('telegram_bot_action_outbox_delivery_unknown_check')
+            ('telegram_bot_action_outbox_delivery_attempt_check')
           ) as required(constraint_name)
           where not exists (
             select 1
@@ -280,6 +298,8 @@ export async function isFundingReconciliationSchemaReady(
               and constraint_row.conname = required.constraint_name
               and lower(pg_get_constraintdef(constraint_row.oid))
                     like '%funding_qr%'
+              and lower(pg_get_constraintdef(constraint_row.oid))
+                    like '%trade_funding_edit%'
           )
         )
         and exists (
@@ -297,6 +317,22 @@ export async function isFundingReconciliationSchemaReady(
                   index_row.indpred,
                   index_row.indrelid
                 )) like '%funding_qr%'
+        )
+        and exists (
+          select 1
+          from pg_index index_row
+          join pg_class index_relation
+            on index_relation.oid = index_row.indexrelid
+          join pg_namespace namespace
+            on namespace.oid = index_relation.relnamespace
+          where namespace.nspname = 'public'
+            and index_relation.relname =
+                  'telegram_bot_action_outbox_trade_funding_unique'
+            and index_row.indisunique
+            and lower(pg_get_expr(
+                  index_row.indpred,
+                  index_row.indrelid
+                )) like '%trade_funding_edit%'
         )
         as ready
     `,
@@ -322,6 +358,7 @@ export async function runFundingReconciliationJob(
       receiveRouting: null,
       delegatedFundingExecution: null,
       telegramFundingProgress: null,
+      telegramTradeShortfallProgress: null,
     };
   }
   const relay = options.relay;
@@ -357,6 +394,13 @@ export async function runFundingReconciliationJob(
     options.delegatedExecution && delegatedDriver
       ? createPolymarketWrapDelegatedFundingProfile({
           configuration: options.delegatedExecution.configuration,
+          driver: delegatedDriver,
+        })
+      : null;
+  const polymarketPusdFundProfile =
+    options.delegatedExecution && delegatedDriver
+      ? createPolymarketWrapDelegatedFundingProfile({
+          configuration: loadPolymarketPusdFundExecutionConfiguration(),
           driver: delegatedDriver,
         })
       : null;
@@ -432,9 +476,16 @@ export async function runFundingReconciliationJob(
         }).catch(() => ({ candidates: 0, created: 0, skipped: 0 }))
       : { candidates: 0, created: 0, skipped: 0 };
     const delegatedFundingExecution =
-      (polymarketWrapProfile || relayEvmProfiles.length > 0) && transactionCodec
+      (polymarketWrapProfile ||
+        polymarketPusdFundProfile ||
+        relayEvmProfiles.length > 0) &&
+      transactionCodec
         ? await new DelegatedFundingExecutor(pool, {
-            profiles: [polymarketWrapProfile, ...relayEvmProfiles].filter(
+            profiles: [
+              polymarketWrapProfile,
+              polymarketPusdFundProfile,
+              ...relayEvmProfiles,
+            ].filter(
               (profile): profile is NonNullable<typeof profile> =>
                 profile != null,
             ),
@@ -548,11 +599,20 @@ export async function runFundingReconciliationJob(
       receive.earlyTelegramFundingProgress.skipped +
       finalTelegramFundingProgress.skipped,
   };
+  const telegramTradeShortfallProgress =
+    await runTelegramTradeShortfallProgressProjectionBatch(pool, {
+      limit: options.limit ?? 25,
+    });
   const {
     earlyTelegramFundingProgress: _earlyTelegramFundingProgress,
     ...receiveResult
   } = receive;
-  return { ...result, ...receiveResult, telegramFundingProgress };
+  return {
+    ...result,
+    ...receiveResult,
+    telegramFundingProgress,
+    telegramTradeShortfallProgress,
+  };
 }
 
 export type {

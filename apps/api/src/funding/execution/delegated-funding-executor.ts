@@ -1,5 +1,6 @@
 import { POLYMARKET_FUNDING_ROUTER } from "@hunch/contracts";
 import { tx, type Pool, type PoolClient } from "@hunch/infra";
+import { Interface } from "ethers";
 
 import { stableWalletOpaqueId } from "../../account-value/canonical.js";
 import { normalizedActionSchema } from "../domain/schemas.js";
@@ -35,7 +36,9 @@ import {
 } from "./delegated-funding-capability.js";
 import {
   delegatedFundingProfile,
+  POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
   POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
+  validatePolymarketDepositPusdFundAction,
   validatePolymarketDepositUsdceWrapAction,
 } from "./delegated-funding-profiles.js";
 import {
@@ -46,13 +49,104 @@ import {
 } from "./telegram-funding-authorization.js";
 import { lockTelegramFundingLinkLifecycle } from "./telegram-funding-link-lifecycle-lock.js";
 import { lockFundingControllerWallet } from "./funding-controller-wallet-lock.js";
+import { fundingSidecarRuntimeConfig } from "../runtime/sidecar-runtime-config.js";
+import { POLYMARKET_FUNDING_ROUTER_MAX_APPROVAL_RAW } from "../../services/polymarket-automation-policy.js";
 import {
   DELEGATED_PROVIDER_LOOKUP_DELAY_MS,
   DELEGATED_PROVIDER_REPLAY_MS,
   DELEGATED_UNBROADCAST_RETRY_MS,
 } from "./delegated-funding-recovery-policy.js";
+import { activateStalledTelegramTradeShortfallInitialStepsInTransaction } from "./telegram-trade-shortfall-activation.js";
 
 type JsonRecord = Readonly<Record<string, JsonValue>>;
+
+const ERC20_APPROVAL = new Interface([
+  "function approve(address spender,uint256 amount) returns (bool)",
+]);
+
+function validatePolymarketDepositRouterAction(
+  input: Readonly<{
+    action: NormalizedAction;
+    expectedRaw: string;
+    profileId: string;
+    walletId: string;
+  }>,
+): void {
+  const shared = {
+    action: input.action,
+    expectedRaw: input.expectedRaw,
+    routerAddress: POLYMARKET_FUNDING_ROUTER.polygon,
+    walletId: input.walletId,
+  };
+  if (input.profileId === POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID) {
+    validatePolymarketDepositUsdceWrapAction(shared);
+    return;
+  }
+  if (input.profileId === POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID) {
+    const action = input.action;
+    if (action.kind === "evm_transaction") {
+      const isRouterTokenApproval = [
+        fundingSidecarRuntimeConfig.polymarketPusdAddress,
+        fundingSidecarRuntimeConfig.polymarketUsdceAddress,
+      ].some(
+        (tokenAddress) =>
+          action.to.toLowerCase() === tokenAddress.toLowerCase(),
+      );
+      if (!isRouterTokenApproval) {
+        validatePolymarketDepositPusdFundAction(shared);
+        return;
+      }
+      if (
+        action.networkId !== "evm:137" ||
+        action.senderWalletId !== input.walletId ||
+        action.valueRaw !== "0"
+      ) {
+        throw new Error("controller Router token approval is invalid");
+      }
+      const decoded = ERC20_APPROVAL.decodeFunctionData("approve", action.data);
+      if (
+        String(decoded[0]).toLowerCase() !==
+          POLYMARKET_FUNDING_ROUTER.polygon.toLowerCase() ||
+        BigInt(decoded[1]) !== POLYMARKET_FUNDING_ROUTER_MAX_APPROVAL_RAW
+      ) {
+        throw new Error("controller Router token approval is invalid");
+      }
+      return;
+    }
+    validatePolymarketDepositPusdFundAction(shared);
+    return;
+  }
+  throw new Error("unknown Polymarket Deposit Router profile");
+}
+
+/**
+ * The Router profiles have different source assets.  Keep the authority scope
+ * beside the action validator so every boundary re-check addresses the exact
+ * profile that was committed, rather than silently falling back to USDC.e.
+ */
+export function polymarketRouterAuthorityScope(
+  profileId: PolymarketWrapExecutionConfiguration["profileId"],
+) {
+  const sourceAssetId =
+    profileId === POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID
+      ? fundingSidecarRuntimeConfig.polymarketPusdAddress
+      : fundingSidecarRuntimeConfig.polymarketUsdceAddress;
+  return {
+    profileId,
+    securityClass: "closed_destination_transform" as const,
+    sourceAsset: {
+      networkId: "evm:137",
+      assetId: sourceAssetId,
+      decimals: 6,
+    },
+    destinationAsset: {
+      networkId: "evm:137",
+      assetId: fundingSidecarRuntimeConfig.polymarketPusdAddress,
+      decimals: 6,
+    },
+    venueId: "polymarket" as const,
+  };
+}
 
 export type DelegatedFundingExecutionClaim = Readonly<{
   action: NormalizedAction;
@@ -72,11 +166,6 @@ export type DelegatedFundingExecutionClaim = Readonly<{
   policyId: string;
   privyWalletId: string;
   profileId: string;
-  /**
-   * A terminal Hunch approval that is proven to be the present allowance
-   * head. It fences only a replacement approve; it never authorizes deposit.
-   */
-  relayPriorApprovalProof?: JsonRecord | null;
   receiptRaw: string;
   sponsor: boolean;
   signerFingerprint: string;
@@ -525,7 +614,7 @@ async function rejectInvalidPolymarketWrapInTransaction(
       limit 1
     `,
     [
-      POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
+      input.configuration.profileId,
       input.controlDecision.kind === "hard_invalid",
       input.configuration.signerId,
       input.configuration.signerFingerprint,
@@ -560,6 +649,7 @@ async function rejectInvalidPolymarketWrapInTransaction(
 async function claimPolymarketWrapInTransaction(
   client: PoolClient,
   input: Readonly<{
+    configuration: PolymarketWrapExecutionConfiguration;
     policy: ResolvedFundingPolicy;
     now: Date;
   }>,
@@ -693,7 +783,7 @@ async function claimPolymarketWrapInTransaction(
       for update of operation, step, funding_authorization skip locked
       limit 1
     `,
-    [POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID],
+    [input.configuration.profileId],
   );
   const row = rows[0];
   if (!row) return null;
@@ -742,11 +832,11 @@ async function claimPolymarketWrapInTransaction(
   }
   const expectedActionWalletId = actionWalletId(row);
   try {
-    validatePolymarketDepositUsdceWrapAction({
+    validatePolymarketDepositRouterAction({
       action,
       expectedRaw: row.receipt_raw,
-      routerAddress: POLYMARKET_FUNDING_ROUTER.polygon,
       walletId: expectedActionWalletId,
+      profileId: input.configuration.profileId,
     });
   } catch {
     return rejectClaim("delegated_action_invalid");
@@ -789,6 +879,7 @@ async function claimPolymarketWrapInTransaction(
 async function recoverPolymarketWrapInTransaction(
   client: PoolClient,
   input: Readonly<{
+    configuration: PolymarketWrapExecutionConfiguration;
     recoverProviderReplayBefore: Date;
     recoverUnbroadcastRetryBefore: Date;
     now: Date;
@@ -920,7 +1011,7 @@ async function recoverPolymarketWrapInTransaction(
       limit 1
     `,
     [
-      POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
+      input.configuration.profileId,
       input.recoverUnbroadcastRetryBefore,
       input.recoverProviderReplayBefore,
     ],
@@ -952,11 +1043,11 @@ async function recoverPolymarketWrapInTransaction(
     throw new Error("delegated funding recovery action is invalid");
   }
   const expectedActionWalletId = actionWalletId(row);
-  validatePolymarketDepositUsdceWrapAction({
+  validatePolymarketDepositRouterAction({
     action,
     expectedRaw: row.receipt_raw,
-    routerAddress: POLYMARKET_FUNDING_ROUTER.polygon,
     walletId: expectedActionWalletId,
+    profileId: input.configuration.profileId,
   });
   return executionClaimFromRow(row, {
     action,
@@ -1197,11 +1288,11 @@ async function polymarketWrapPreBroadcastDecisionInTransaction(
     ) {
       throw new Error("delegated action fingerprint changed");
     }
-    validatePolymarketDepositUsdceWrapAction({
+    validatePolymarketDepositRouterAction({
       action,
       expectedRaw: row.receipt_raw,
-      routerAddress: POLYMARKET_FUNDING_ROUTER.polygon,
       walletId: input.claim.actionWalletId,
+      profileId: input.configuration.profileId,
     });
   } catch {
     return {
@@ -1217,6 +1308,7 @@ async function polymarketWrapPreBroadcastDecisionInTransaction(
         destinationOptionId: input.claim.destinationOptionId,
         venueBindingOptionId: input.claim.venueBindingOptionId,
         configuration: input.configuration,
+        ...polymarketRouterAuthorityScope(input.configuration.profileId),
         expectedAuthorizationId: input.claim.authorizationId,
         expectedAuthorizationFingerprint: input.claim.authorizationFingerprint,
         now: row.checked_at,
@@ -1255,7 +1347,7 @@ export function createPolymarketWrapDelegatedFundingProfile(
   }>,
 ): DelegatedFundingRuntimeProfile {
   return {
-    profileId: POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
+    profileId: input.configuration.profileId,
     controlPlaneDecision: (policy) =>
       classifyPolymarketWrapControlPlane({
         configuration: input.configuration,
@@ -1268,10 +1360,14 @@ export function createPolymarketWrapDelegatedFundingProfile(
       }),
     claimInTransaction: (client, claimInput) =>
       claimPolymarketWrapInTransaction(client, {
+        configuration: input.configuration,
         ...claimInput,
       }),
     recoverInTransaction: (client, recoveryInput) =>
-      recoverPolymarketWrapInTransaction(client, recoveryInput),
+      recoverPolymarketWrapInTransaction(client, {
+        configuration: input.configuration,
+        ...recoveryInput,
+      }),
     preBroadcastDecisionInTransaction: (client, boundaryInput) =>
       polymarketWrapPreBroadcastDecisionInTransaction(client, {
         configuration: input.configuration,
@@ -1495,6 +1591,13 @@ export class DelegatedFundingExecutor {
           : await tx(this.pool, async (client) => {
               await lockFundingPolicyForTransaction(client);
               const currentPolicy = await resolveFundingPolicy(client);
+              // Shortfall consent is durable. Repair only a root that still
+              // has zero attempts before claiming, so an older deployment
+              // cannot leave it indefinitely planned/requeued.
+              await activateStalledTelegramTradeShortfallInitialStepsInTransaction(
+                client,
+                { limit, profileId: runtime.profileId },
+              );
               const controlDecision =
                 runtime.controlPlaneDecision(currentPolicy);
               const rejected = await runtime.rejectInvalidInTransaction(

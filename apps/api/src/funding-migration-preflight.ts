@@ -1243,7 +1243,12 @@ export async function inspectFundingMigrationPreflight(
     (await functionDefinitionIncludes(
       db,
       "guard_telegram_funding_authorization_reservation_update",
-      ["new.source_trade_intent_id", "old.source_trade_intent_id"],
+      [
+        "new.source_trade_intent_id",
+        "old.source_trade_intent_id",
+        "old.status = 'cleanup_required'",
+        "new.status in ('cleaned', 'released')",
+      ],
     ));
   const hasTelegramAppHandoffFundingConfirmation =
     await constraintDefinitionIncludes(

@@ -73,6 +73,7 @@ import {
   POLYMARKET_ORDER_TYPES,
   POLYMARKET_TYPED_DATA_SIGN_TYPES,
 } from "./services/polymarket-signing-schema.js";
+import { POLYMARKET_FUNDING_ROUTER_MAX_APPROVAL_RAW } from "./services/polymarket-automation-policy.js";
 import type { PreparedTrade, SubmitResult } from "./services/trading-types.js";
 
 type TestCase = {
@@ -93,6 +94,8 @@ const policyExchangeAddresses = [
   "0x0000000000000000000000000000000000000002",
 ] as const;
 const policyFundingRouterAddress = "0x0000000000000000000000000000000000000003";
+const policyPusdAddress = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB";
+const policyUsdceAddress = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
 const policyFundingMaxRaw = 2_200_000n;
 const policyBuilderCode = `0x${"11".repeat(32)}`;
 const policyFundingAbi = [
@@ -108,6 +111,72 @@ const policyFundingAbi = [
     outputs: [],
   },
 ];
+
+const policyFundingRouterApprovalAbi = [
+  {
+    type: "function",
+    name: "approve",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "spender", type: "address" },
+      { name: "amount", type: "uint256" },
+    ],
+    outputs: [],
+  },
+];
+
+function fundingRouterControllerApprovalRule(
+  tokenAddress = policyPusdAddress,
+  tokenLabel = "pUSD",
+): PrivyPolicyMetadata["rules"][number] {
+  return {
+    action: "ALLOW",
+    conditions: [
+      {
+        field: "chain_id",
+        field_source: "ethereum_transaction",
+        operator: "eq",
+        value: "137",
+      },
+      {
+        field: "to",
+        field_source: "ethereum_transaction",
+        operator: "eq",
+        value: tokenAddress,
+      },
+      {
+        field: "value",
+        field_source: "ethereum_transaction",
+        operator: "eq",
+        value: "0x0",
+      },
+      {
+        abi: policyFundingRouterApprovalAbi,
+        field: "function_name",
+        field_source: "ethereum_calldata",
+        operator: "eq",
+        value: "approve",
+      },
+      {
+        abi: policyFundingRouterApprovalAbi,
+        field: "approve.spender",
+        field_source: "ethereum_calldata",
+        operator: "eq",
+        value: policyFundingRouterAddress,
+      },
+      {
+        abi: policyFundingRouterApprovalAbi,
+        field: "approve.amount",
+        field_source: "ethereum_calldata",
+        operator: "eq",
+        value: POLYMARKET_FUNDING_ROUTER_MAX_APPROVAL_RAW.toString(),
+      },
+    ],
+    id: `funding-router-controller-${tokenLabel.toLowerCase()}-approval`,
+    method: "eth_sendTransaction",
+    name: `Funding Router controller ${tokenLabel} approval`,
+  };
+}
 const policyRedemptionAdapterAddresses = [
   "0x0000000000000000000000000000000000000004",
   "0x0000000000000000000000000000000000000005",
@@ -327,6 +396,8 @@ function buildValidPolymarketBuySellPolicy(): PrivyPolicyMetadata {
     id: "buy-sell-policy",
     rules: [
       ...buy.rules,
+      fundingRouterControllerApprovalRule(),
+      fundingRouterControllerApprovalRule(policyUsdceAddress, "USDC.e"),
       structuredClone(sell.rules[1] as never),
       {
         action: "ALLOW",
@@ -777,6 +848,41 @@ const tests: TestCase[] = [
       });
       assert.equal(validation.valid, true);
       assert.equal(validation.fundingMaxRaw, policyFundingMaxRaw);
+      assert.equal(validation.fundingRouterControllerApprovalPresent, false);
+
+      const controllerApprovalPolicy = structuredClone(validPolicy);
+      controllerApprovalPolicy.rules.push(
+        fundingRouterControllerApprovalRule(),
+      );
+      const controllerApprovalValidation = validatePolymarketBotPolicy({
+        exchangeAddresses: policyExchangeAddresses,
+        fundingRouterAddress: policyFundingRouterAddress,
+        maxBuyUsd: 2,
+        policy: controllerApprovalPolicy,
+      });
+      assert.equal(controllerApprovalValidation.valid, true);
+      assert.equal(
+        controllerApprovalValidation.fundingRouterControllerApprovalPresent,
+        true,
+      );
+
+      const unsafeControllerApprovalPolicy = structuredClone(
+        controllerApprovalPolicy,
+      );
+      const controllerApprovalConditions =
+        unsafeControllerApprovalPolicy.rules.at(-1)?.conditions;
+      assert.ok(Array.isArray(controllerApprovalConditions));
+      (controllerApprovalConditions[4] as Record<string, unknown>).value =
+        policyExchangeAddresses[0];
+      assert.equal(
+        validatePolymarketBotPolicy({
+          exchangeAddresses: policyExchangeAddresses,
+          fundingRouterAddress: policyFundingRouterAddress,
+          maxBuyUsd: 2,
+          policy: unsafeControllerApprovalPolicy,
+        }).valid,
+        false,
+      );
 
       const raisedFundingPolicy = structuredClone(validPolicy);
       const fundingConditions = raisedFundingPolicy.rules[3]?.conditions;
@@ -932,6 +1038,16 @@ const tests: TestCase[] = [
       });
       assert.equal(combinedValidation.valid, true);
       assert.equal(combinedValidation.fundingMaxRaw, policyFundingMaxRaw);
+      assert.equal(
+        combinedValidation.fundingRouterUsdceApprovalPresent,
+        true,
+        "the exact controller-USDC.e Router approval survives BUY+SELL policy partitioning",
+      );
+      assert.equal(
+        combinedValidation.fundingRouterPusdFundPresent,
+        true,
+        "the existing bounded Router totalAmount rule also covers exact controller-pUSD funding",
+      );
       const combinedWithRelay = buildCombinedPolicyWithRelay();
       const combinedRelayValidation = validateCombinedPolymarketRelayPolicy({
         builderCode: policyBuilderCode,
@@ -3554,7 +3670,7 @@ const tests: TestCase[] = [
         "assertPolymarketPreparedFunds",
       );
       const fundingIndex = prepareBlock.indexOf(
-        "executeServerEmbeddedEthereumTransaction",
+        "executePolymarketSetupTransaction",
       );
       const builderValidationIndex = prepareBlock.indexOf(
         "validatePolymarketOrderBuilderCodeForConfig",
@@ -3570,22 +3686,30 @@ const tests: TestCase[] = [
         prepareBlock,
         /intent\.actor\.kind === "telegram_bot" && !intent\.fundingReservation/,
       );
-      assert.match(
-        prepareBlock,
-        /onSetupTransactionSubmitted\?\.\(\{[\s\S]*?referenceId: fundingReferenceId,[\s\S]*?transactionId: null,[\s\S]*?txHash: null/,
+      const setupExecutorBlock = sourceSlice(
+        executionSource,
+        "async function executePolymarketSetupTransaction(",
+        "function readMakerAmountFromOrderPayload",
       );
       const setupFenceIndex = prepareBlock.indexOf(
-        "onBeforeSetupTransactionBroadcast",
+        "onBeforeBroadcast: enterSetupBroadcastBoundary",
       );
-      const setupPlaceholderIndex = prepareBlock.indexOf(
-        "onSetupTransactionSubmitted?.({",
+      assert.match(
+        setupExecutorBlock,
+        /onBeforeBroadcast\?\.\(\)[\s\S]*?onSubmitted\?\.\(\{[\s\S]*?transactionId: null,[\s\S]*?txHash: null[\s\S]*?executeServerEmbeddedEthereumTransaction/,
       );
-      assert.match(prepareBlock, /executeServerEmbeddedEthereumTransaction/);
-      assert.match(prepareBlock, /syncPolymarketBalanceAllowanceRoute/);
+      assert.match(
+        prepareBlock,
+        /onBeforeBroadcast: enterSetupBroadcastBoundary/,
+      );
+      assert.match(prepareBlock, /syncPolymarketCollateralAfterFunding/);
+      assert.match(
+        prepareBlock,
+        /intent\.actor\.kind === "telegram_bot" && intent\.fundingReservation[\s\S]*?syncPolymarketCollateralAfterFunding[\s\S]*?let executableFunds = await resolvePolymarketMaxSpendFunds/,
+      );
       assert.ok(preflightIndex > builderValidationIndex);
       assert.ok(setupFenceIndex > preflightIndex);
-      assert.ok(setupPlaceholderIndex > setupFenceIndex);
-      assert.ok(fundingIndex > setupPlaceholderIndex);
+      assert.ok(fundingIndex > preflightIndex);
       const factoryStart = executionSource.indexOf(
         "export function createPolymarketTradingExecutionService",
       );

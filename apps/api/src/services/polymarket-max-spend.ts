@@ -110,6 +110,25 @@ export function computePolymarketExecutableFunds(inputs: {
   };
 }
 
+/**
+ * Controller pUSD becomes executable for Router funding only after the
+ * observed allowance permits it, or when the exact policy-gated approval can
+ * be prepared by the same server execution path.
+ */
+export function computePolymarketFundingRouterPusdAvailableRaw(inputs: {
+  controllerPusdAvailableRaw: bigint;
+  controllerRouterAllowanceRaw: bigint | null;
+  controllerRouterApprovalCanBePrepared?: boolean;
+}): bigint {
+  if (inputs.controllerRouterAllowanceRaw == null) return 0n;
+  if (inputs.controllerRouterApprovalCanBePrepared) {
+    return positiveBigInt(inputs.controllerPusdAvailableRaw);
+  }
+  const balance = positiveBigInt(inputs.controllerPusdAvailableRaw);
+  const allowance = positiveBigInt(inputs.controllerRouterAllowanceRaw);
+  return balance < allowance ? balance : allowance;
+}
+
 export function computePolymarketClobOpenOrderLocks(inputs: {
   orders: unknown[];
   wallets: string[];

@@ -9,6 +9,7 @@ import {
 } from "../domain/asset-identity.js";
 import { fundingSidecarRuntimeConfig } from "../runtime/sidecar-runtime-config.js";
 import {
+  loadPolymarketPusdFundExecutionConfiguration,
   loadPolymarketWrapExecutionConfiguration,
   polymarketWrapExecutionConfigurationReady,
   polymarketWrapExecutorEnvironmentReady,
@@ -17,7 +18,10 @@ import {
   relayEvmExecutionConfigurationReady,
   type RelayEvmExecutionConfiguration,
 } from "./delegated-funding-config.js";
-import { POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID } from "./delegated-funding-profile-ids.js";
+import {
+  POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
+  POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
+} from "./delegated-funding-profile-ids.js";
 import type { DelegatedFundingSecurityClass } from "./delegated-funding-profile-ids.js";
 import type { DelegatedFundingPreBroadcastDecision } from "./delegated-funding-capability.js";
 import {
@@ -361,6 +365,7 @@ export async function resolveCurrentTelegramFundingAuthority(
     return {
       kind: "hard_invalid",
       reasonCode: "delegated_authority_invalid",
+      diagnosticCode: "authority_operator_revoked",
     };
   }
   const automationEnabled = preference.rows[0]?.desired_enabled === true;
@@ -380,8 +385,14 @@ export async function resolveCurrentTelegramFundingAuthority(
     lock: input.lock,
     requireTradingEnabled: automationEnabled,
   });
+  if (!authorization) {
+    return {
+      kind: "hard_invalid",
+      reasonCode: "delegated_authority_invalid",
+      diagnosticCode: "authority_missing",
+    };
+  }
   if (
-    !authorization ||
     (input.expectedAuthorizationId !== undefined &&
       authorization.id !== input.expectedAuthorizationId) ||
     (input.expectedAuthorizationFingerprint !== undefined &&
@@ -391,6 +402,7 @@ export async function resolveCurrentTelegramFundingAuthority(
     return {
       kind: "hard_invalid",
       reasonCode: "delegated_authority_invalid",
+      diagnosticCode: "authority_snapshot_changed",
     };
   }
   if (
@@ -413,6 +425,7 @@ export async function resolveCurrentTelegramFundingAuthority(
     return {
       kind: "hard_invalid",
       reasonCode: "delegated_authority_invalid",
+      diagnosticCode: "authority_runtime_mismatch",
     };
   }
   if (!automationEnabled) {
@@ -780,6 +793,7 @@ async function revokeTelegramFundingAuthorizationForRoute(
     authorizationIds: readonly string[];
     userId: string;
     venueBindingOptionId: string;
+    profileId: string;
     now: Date;
   }>,
 ): Promise<void> {
@@ -797,7 +811,7 @@ async function revokeTelegramFundingAuthorizationForRoute(
           and revoked_at is null`,
       [
         input.userId,
-        POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
+        input.profileId,
         input.venueBindingOptionId,
         input.authorizationIds,
         input.now,
@@ -808,7 +822,11 @@ async function revokeTelegramFundingAuthorizationForRoute(
 
 async function loadTelegramFundingAuthorizationGeneration(
   pool: Pick<Pool, "query">,
-  input: Readonly<{ userId: string; venueBindingOptionId: string }>,
+  input: Readonly<{
+    userId: string;
+    venueBindingOptionId: string;
+    profileId: string;
+  }>,
 ): Promise<
   Readonly<{
     activeIds: readonly string[];
@@ -826,7 +844,7 @@ async function loadTelegramFundingAuthorizationGeneration(
         and profile_id = $2
         and revoked_at is null
       order by id`,
-    [input.userId, POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID],
+    [input.userId, input.profileId],
   );
   const preference = await pool.query<{
     funding_operator_revoked_at: Date | null;
@@ -854,6 +872,7 @@ export type EnsureTelegramFundingAuthorizationDependencies = Readonly<{
   inspectWalletProfile?: (input: {
     walletAddress: string;
     walletId: string;
+    profileId: string;
   }) => Promise<PrivyWalletProfileInspection>;
 }>;
 
@@ -873,6 +892,9 @@ export async function ensureTelegramFundingAuthorization(
     destinationOptionId: string;
     venueBindingOptionId: string;
     venueId?: "limitless" | "polymarket";
+    profileId?:
+      | typeof POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID
+      | typeof POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID;
     now?: Date;
   }>,
   dependencies: EnsureTelegramFundingAuthorizationDependencies = {},
@@ -880,7 +902,9 @@ export async function ensureTelegramFundingAuthorization(
   const environment = dependencies.environment ?? process.env;
   const configuration =
     dependencies.configuration ??
-    loadPolymarketWrapExecutionConfiguration(environment);
+    (input.profileId === POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID
+      ? loadPolymarketPusdFundExecutionConfiguration(environment)
+      : loadPolymarketWrapExecutionConfiguration(environment));
   if (
     !polymarketWrapExecutionConfigurationReady(configuration) ||
     !(
@@ -888,28 +912,52 @@ export async function ensureTelegramFundingAuthorization(
       polymarketWrapExecutorEnvironmentReady(environment)
     )
   ) {
+    console.warn(
+      "[telegram-funding-authority] profile configuration unavailable",
+      {
+        profileId: input.profileId ?? POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
+        venueId: input.venueId ?? "polymarket",
+      },
+    );
     return null;
   }
   const provisioningState = await tx(pool, async (client) => {
     await lockTelegramFundingLinkLifecycle(client, input.userId);
     const generation = await loadTelegramFundingAuthorizationGeneration(
       client,
-      input,
+      {
+        userId: input.userId,
+        venueBindingOptionId: input.venueBindingOptionId,
+        profileId: input.profileId ?? POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
+      },
     );
-    const candidate = await resolveTelegramFundingProvisionWallet(
-      client,
-      input,
-    );
+    const candidate = await resolveTelegramFundingProvisionWallet(client, {
+      ...input,
+      executionVenueId: input.venueId ?? "polymarket",
+    });
     return { candidate, generation };
   });
-  if (provisioningState.generation.operatorRevoked) return null;
+  if (provisioningState.generation.operatorRevoked) {
+    console.warn("[telegram-funding-authority] authority generation revoked", {
+      profileId: input.profileId ?? POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
+      venueId: input.venueId ?? "polymarket",
+    });
+    return null;
+  }
   const candidate = provisioningState.candidate;
-  if (!candidate) return null;
+  if (!candidate) {
+    console.warn("[telegram-funding-authority] managed wallet unavailable", {
+      profileId: input.profileId ?? POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
+      venueId: input.venueId ?? "polymarket",
+    });
+    return null;
+  }
   if (candidate.controllerWalletId !== input.controllerWalletId) {
     await revokeTelegramFundingAuthorizationForRoute(pool, {
       authorizationIds: provisioningState.generation.routeIds,
       userId: input.userId,
       venueBindingOptionId: input.venueBindingOptionId,
+      profileId: input.profileId ?? POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
       now: input.now ?? new Date(),
     });
     return null;
@@ -927,25 +975,38 @@ export async function ensureTelegramFundingAuthorization(
         relayMaxSourceRaw: relayConfiguration.maxSourceRaw,
       },
     });
-    inspectWalletProfile = (wallet) => driver.inspectWalletProfile(wallet);
+    inspectWalletProfile = (wallet) =>
+      driver.inspectWalletProfileForProfile(wallet);
   }
   let inspection: PrivyWalletProfileInspection = "unavailable";
   try {
     inspection = await inspectWalletProfile({
       walletId: candidate.privyWalletId,
       walletAddress: candidate.walletAddress,
+      profileId: input.profileId ?? POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
     });
   } catch {
     inspection = "unavailable";
   }
-  if (inspection === "unavailable") return null;
+  if (inspection === "unavailable") {
+    console.warn(
+      "[telegram-funding-authority] Privy profile inspection unavailable",
+      {
+        profileId: input.profileId ?? POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
+        venueId: input.venueId ?? "polymarket",
+      },
+    );
+    return null;
+  }
   if (inspection === "invalid") {
-    await revokeTelegramFundingAuthorizationForRoute(pool, {
-      authorizationIds: provisioningState.generation.routeIds,
-      userId: input.userId,
-      venueBindingOptionId: input.venueBindingOptionId,
-      now: input.now ?? new Date(),
+    console.warn("[telegram-funding-authority] Privy profile is invalid", {
+      profileId: input.profileId ?? POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
+      venueId: input.venueId ?? "polymarket",
     });
+    // An invalid alternative profile is not evidence that a different exact
+    // route is unsafe.  The shortfall selector may safely try that next route;
+    // never revoke its durable authority as a side effect of this read-only
+    // capability check.
     return null;
   }
   try {
@@ -953,6 +1014,15 @@ export async function ensureTelegramFundingAuthorization(
       ...input,
       ...candidate,
       configuration,
+      profileId: input.profileId,
+      sourceAsset:
+        input.profileId === POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID
+          ? {
+              networkId: "evm:137",
+              assetId: fundingSidecarRuntimeConfig.polymarketPusdAddress,
+              decimals: 6,
+            }
+          : undefined,
       expectedActiveAuthorizationIds: provisioningState.generation.activeIds,
       replaceExisting: true,
     });
@@ -977,6 +1047,8 @@ export async function ensureTelegramRelayEvmFundingAuthorization(
     destinationOptionId: string;
     venueBindingOptionId: string;
     venueId?: "limitless" | "polymarket";
+    /** Provision exactly the profile already selected by the planner. */
+    profileId?: string;
     now?: Date;
   }>,
   dependencies: Readonly<{
@@ -993,13 +1065,30 @@ export async function ensureTelegramRelayEvmFundingAuthorization(
   const configuration =
     dependencies.configuration ??
     loadRelayEvmExecutionConfiguration(environment);
-  if (!relayEvmExecutionConfigurationReady(configuration)) return null;
+  if (!relayEvmExecutionConfigurationReady(configuration)) {
+    console.warn(
+      "[telegram-funding-authority] Relay configuration unavailable",
+      {
+        profileId: input.profileId ?? null,
+        venueId: input.venueId ?? "polymarket",
+      },
+    );
+    return null;
+  }
   const venueId = input.venueId ?? "polymarket";
   const candidate = await resolveTelegramFundingProvisionWallet(pool, {
     ...input,
     controllerNetworkId: venueId === "limitless" ? "evm:8453" : "evm:137",
+    executionVenueId: venueId,
   });
   if (!candidate || candidate.controllerWalletId !== input.controllerWalletId) {
+    console.warn(
+      "[telegram-funding-authority] Relay managed wallet unavailable",
+      {
+        profileId: input.profileId ?? null,
+        venueId,
+      },
+    );
     return null;
   }
   let inspect = dependencies.inspectWalletProfile;
@@ -1016,9 +1105,15 @@ export async function ensureTelegramRelayEvmFundingAuthorization(
     });
     inspect = (wallet) => driver.inspectWalletProfileForProfile(wallet);
   }
-  const profiles = Object.values(RELAY_EVM_FUNDING_PROFILE_SPECS).filter(
-    (profile) => profile.venueIds.includes(venueId),
-  );
+  const selectedProfile = input.profileId
+    ? RELAY_EVM_FUNDING_PROFILE_SPECS[input.profileId]
+    : null;
+  if (input.profileId && !selectedProfile) return null;
+  const profiles = (
+    selectedProfile
+      ? [selectedProfile]
+      : Object.values(RELAY_EVM_FUNDING_PROFILE_SPECS)
+  ).filter((profile) => profile.venueIds.includes(venueId));
   const granted: TelegramFundingAuthorization[] = [];
   for (const profile of profiles) {
     const inspection = await inspect({
@@ -1026,7 +1121,17 @@ export async function ensureTelegramRelayEvmFundingAuthorization(
       walletAddress: candidate.walletAddress,
       profileId: profile.profileId,
     }).catch(() => "unavailable" as const);
-    if (inspection !== "valid") continue;
+    if (inspection !== "valid") {
+      console.warn(
+        "[telegram-funding-authority] Relay Privy profile unavailable",
+        {
+          inspection,
+          profileId: profile.profileId,
+          venueId,
+        },
+      );
+      continue;
+    }
     const route = profile.routeIds
       .map((routeId) => RELAY_ROUTE_SPECS[routeId])
       .find(

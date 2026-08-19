@@ -290,10 +290,10 @@ await test("Telegram Account Value presenter preserves accounting groups and deg
   });
   assert.equal(rendered.parse_mode, "MarkdownV2");
   assert.match(rendered.text, /Known estimated assets.*\$39\\\.00/u);
-  assert.match(rendered.text, /Known cash available.*\$32\\\.00/u);
+  assert.match(rendered.text, /Known cash holdings.*\$32\\\.00/u);
   assert.match(rendered.text, /Known portfolio value.*\$64\\\.00/u);
-  assert.match(rendered.text, /Polymarket.*\$9\\\.00 known available/u);
-  assert.match(rendered.text, /Limitless.*\$20\\\.00 known available/u);
+  assert.match(rendered.text, /Polymarket.*\$9\\\.00 known routable/u);
+  assert.match(rendered.text, /Limitless.*\$20\\\.00 known routable/u);
   assert.match(rendered.text, /Base wallet.*20 USDC.*20 available/u);
   assert.match(rendered.text, /Polygon wallet.*5 USDC\\\.e.*stale/u);
   assert.match(rendered.text, /Solana wallet.*3 USDC.*3 available/u);
@@ -319,6 +319,81 @@ await test("Telegram Account Value presenter preserves accounting groups and deg
       "hm:v1:trading:market_input",
       "hm:v1:home",
     ],
+  );
+});
+
+await test("Telegram Account Value separates an obsolete Polymarket Safe from routable funds", () => {
+  const account = buildAccountFixture();
+  const source = account.projection.components.find(
+    (entry) => entry.componentId === "pm-pusd",
+  );
+  const availability = account.cashAvailability.components.find(
+    (entry) => entry.componentId === "pm-pusd",
+  );
+  assert.ok(source);
+  assert.ok(availability);
+  const activeDeposit = {
+    ...source,
+    amount: { ...source.amount, raw: "1000000" },
+    componentId: "pm-active-deposit",
+    estimatedUsd: estimate("1"),
+    location: {
+      ...source.location,
+      details: {
+        ...source.location.details,
+        polymarketFunderKind: "deposit_wallet",
+      },
+    },
+  };
+  const legacySafe = {
+    ...source,
+    amount: { ...source.amount, raw: "1042912" },
+    componentId: "pm-legacy-safe",
+    estimatedUsd: estimate("1.042912"),
+    location: {
+      ...source.location,
+      details: {
+        ...source.location.details,
+        polymarketFunderKind: "safe",
+      },
+    },
+  };
+  const rendered = buildTelegramAccountValueMessage({
+    account: {
+      ...account,
+      cashAvailability: {
+        ...account.cashAvailability,
+        components: [
+          ...account.cashAvailability.components,
+          {
+            ...availability,
+            amount: activeDeposit.amount,
+            availableEstimatedUsd: "1",
+            availableRaw: "1000000",
+            componentId: activeDeposit.componentId,
+          },
+          {
+            ...availability,
+            amount: legacySafe.amount,
+            availableEstimatedUsd: "1.042912",
+            availableRaw: "1042912",
+            componentId: legacySafe.componentId,
+          },
+        ],
+      },
+      projection: {
+        ...account.projection,
+        components: [
+          ...account.projection.components,
+          activeDeposit,
+          legacySafe,
+        ],
+      },
+    },
+  });
+  assert.match(
+    rendered.text,
+    /Polymarket.*\$10\\\.00 known routable.*\$1\\\.04 legacy wallet/u,
   );
 });
 

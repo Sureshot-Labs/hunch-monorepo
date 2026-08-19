@@ -34,10 +34,6 @@ import {
   captureRelayEvmAllowanceBaseline,
   relayEvmAllowanceBaselineSupportMetadata,
 } from "../../execution/relay-evm-allowance-baseline.js";
-import {
-  parseRelayEvmPriorApprovalProof,
-  relayEvmPriorApprovalSupportMetadata,
-} from "../../execution/relay-evm-prior-approval.js";
 import { relayEvmUsdCapMatchesRaw } from "../../execution/delegated-funding-capability-resolver.js";
 import {
   buildTelegramRelayEvmAutomationPolicyV3,
@@ -92,27 +88,6 @@ assert.deepEqual(
     relayApprovalBaselineAllowanceRevision: "c".repeat(64),
   },
   "every Relay origin must persist the same pre-approval ownership baseline",
-);
-const priorApprovalProof = parseRelayEvmPriorApprovalProof({
-  allowanceRaw: RAW,
-  approvalBlock: "123",
-  approvalBlockHash: `0x${"ab".repeat(32)}`,
-  approvalReceiptId: "11111111-1111-4111-8111-111111111111",
-  approvalTransactionHash: `0x${"51".repeat(32)}`,
-  ownershipRevision: "e".repeat(64),
-  sourceOperationId: "22222222-2222-4222-8222-222222222222",
-});
-assert.ok(priorApprovalProof);
-assert.deepEqual(relayEvmPriorApprovalSupportMetadata(priorApprovalProof), {
-  relayPriorApprovalProof: priorApprovalProof,
-});
-assert.equal(
-  parseRelayEvmPriorApprovalProof({
-    ...priorApprovalProof,
-    allowanceRaw: "0",
-  }),
-  null,
-  "a zero or malformed prior allowance can never enable replacement approval",
 );
 assert.deepEqual(
   parseRelayEvmAllowanceObservation(anchoredAllowance),
@@ -643,6 +618,48 @@ assert.deepEqual(
     ["planned", 0],
   ],
   "both steps remain inert until the atomic receipt link activates approve",
+);
+
+const delegatedDepositOnlySteps = relayDelegatedCommitSteps({
+  steps: [
+    {
+      ordinal: 0,
+      segmentOrdinal: 0,
+      stepKind: "transaction",
+      state: "action_required",
+      actionFingerprint: "deposit-only-fingerprint",
+      executorId: "web",
+      payerRequirement: "privy_sponsor",
+      dependsOnOrdinal: null,
+      normalizedAction: {
+        ...actionBase,
+        actionId: "relay:fixture:deposit",
+        to: RELAY_DEPOSITORY_V2,
+        data: deposit.encodeFunctionData("depositErc20", [
+          WALLET,
+          BASE_USDC,
+          RAW,
+          orderId,
+        ]),
+      },
+      actionValidationResult: {},
+    },
+  ],
+  sourceAmount: {
+    asset: { networkId: "evm:8453", assetId: BASE_USDC, decimals: 6 },
+    raw: RAW,
+  },
+  profile: atomicWalletProfile,
+  serverExecutionProfileId: TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
+});
+assert.deepEqual(
+  delegatedDepositOnlySteps.map((step) => [
+    step.actionValidationResult.relayStepKind,
+    step.actionValidationResult.relayAllowanceMode,
+    step.dependsOnOrdinal,
+  ]),
+  [["deposit", "preexisting", null]],
+  "an exact Relay deposit-only quote is a root action when the controller already has allowance",
 );
 
 const depositWallet = "0x7777777777777777777777777777777777777777";

@@ -9,6 +9,7 @@ import { z } from "zod";
 
 import { createAuthMiddleware } from "../auth.js";
 import { pool, type DbQuery } from "../db.js";
+import { cancelFundingOperationForUser } from "../funding/reconciliation/funding-operation-cancellation.js";
 import { env } from "../env.js";
 import { getRedis } from "../redis.js";
 import { evaluateGeoFence, type GeoFenceConfig } from "../lib/geo-fence.js";
@@ -1592,6 +1593,9 @@ async function registerTelegramBotTradingRoutes(
         tradeShortfallFundingService.inspect(input),
       commitTradeShortfall: (input) =>
         tradeShortfallFundingService.commit(input),
+      cancelFundingOperation: async (input) => {
+        await cancelFundingOperationForUser(pool, input);
+      },
       signerInspector,
       telegramMiniAppEnabled: request.body.telegramMiniAppEnabled,
       trading: createTradingForRequest(request as FastifyRequest),
@@ -1620,6 +1624,9 @@ async function registerTelegramBotTradingRoutes(
         tradeShortfallFundingService.inspect(input),
       commitTradeShortfall: (input) =>
         tradeShortfallFundingService.commit(input),
+      cancelFundingOperation: async (input) => {
+        await cancelFundingOperationForUser(pool, input);
+      },
       signerInspector,
       telegramMiniAppEnabled: request.body.telegramMiniAppEnabled,
       trading: createTradingForRequest(request as FastifyRequest),

@@ -50,6 +50,7 @@ import {
   createTelegramFundingRenderCoordinator,
   deliverTelegramFundingActions,
 } from "./services/telegram-funding-delivery.js";
+import { deliverTelegramTradeShortfallProgress } from "./services/telegram-trade-shortfall-progress.js";
 import { resolveTelegramNotificationsPolicy } from "./services/telegram-notification-policy.js";
 import {
   createTelegramBotTradingInternalApiClient,
@@ -300,6 +301,16 @@ export async function runSignalBotRunner(): Promise<void> {
           });
           if (fundingDelivery.claimed > 0) {
             log("signal_bot_funding_delivery", fundingDelivery);
+          }
+          const shortfallDelivery = await deliverTelegramTradeShortfallProgress(
+            {
+              pool: db,
+              limit: 25,
+              telegram,
+            },
+          );
+          if (shortfallDelivery.claimed > 0) {
+            log("signal_bot_trade_shortfall_delivery", shortfallDelivery);
           }
         } catch (error) {
           log("signal_bot_funding_delivery_error", {

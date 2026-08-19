@@ -53,7 +53,7 @@ import {
   parsePreparedPayload,
   POLYGON_CHAIN_ID,
   readiness,
-  resolvePolymarketBotPolicyFundingCapRaw,
+  resolvePolymarketBotPolicyFundingCapability,
   readNumber,
   readString,
   signEvmTypedData,
@@ -65,6 +65,7 @@ import {
   ZERO_BYTES32,
   type PreparedPayloadBase,
 } from "./api-trading-common.js";
+import { POLYMARKET_FUNDING_ROUTER_MAX_APPROVAL_RAW } from "./polymarket-automation-policy.js";
 import type {
   ApiTradingApplicationServiceInput,
   ApiVenueTradingExecutor,
@@ -98,7 +99,10 @@ import {
   getEmbeddedExecutionSingleFlightPromise,
   runEmbeddedExecutionSingleFlight,
 } from "./embedded-execution-singleflight.js";
-import { executeServerEmbeddedEthereumTransaction } from "./embedded-ethereum.js";
+import {
+  executeServerEmbeddedEthereumTransaction,
+  type EmbeddedEthereumTransactionSpec,
+} from "./embedded-ethereum.js";
 import { toPublicFundingTradeError } from "./funding-trade-public-errors.js";
 import { requestPolymarketCredentials } from "./polymarket-credentials.js";
 import {
@@ -166,6 +170,7 @@ import {
   computePolymarketClobOpenOrderLocks,
   computePolymarketClobOpenPositionLocks,
   computePolymarketExecutableFunds,
+  computePolymarketFundingRouterPusdAvailableRaw,
   evaluatePolymarketBuyApprovalReadiness,
   polymarketAllowanceSatisfiesBuyApproval,
   polymarketPositionLockKey,
@@ -203,6 +208,9 @@ const POLYMARKET_SERVICE_NOT_READY_STATUS = 425;
 const POLYMARKET_SUBMIT_SETTLEMENT_ATTEMPTS = 5;
 const POLYMARKET_SUBMIT_SETTLEMENT_DELAY_MS = 800;
 const EVM_ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
+const ERC20_APPROVAL_INTERFACE = new ethers.Interface([
+  "function approve(address spender,uint256 amount) returns (bool)",
+]);
 
 type PolymarketL2RequestResult = Awaited<
   ReturnType<typeof polymarketL2Request>
@@ -4767,6 +4775,27 @@ export async function syncPolymarketBalanceAllowanceRoute(input: {
   };
 }
 
+async function syncPolymarketCollateralAfterFunding(input: {
+  log?: PolymarketRouteLogger | null;
+  signer: string;
+  userId: string;
+}): Promise<void> {
+  const balanceSync = await syncPolymarketBalanceAllowanceRoute({
+    body: { assetType: "COLLATERAL", signatureType: 3 },
+    log: input.log,
+    signer: input.signer,
+    userId: input.userId,
+  });
+  if (!balanceSync.ok) {
+    throw tradingError({
+      code: "funding_balance_sync_unavailable",
+      message:
+        "Polymarket collateral balance sync is temporarily unavailable after funding.",
+      venue: "polymarket",
+    });
+  }
+}
+
 export async function cancelPolymarketOrderRoute(input: {
   body: PolymarketCancelOrderBody;
   log?: PolymarketRouteLogger | null;
@@ -6133,6 +6162,12 @@ export type PolymarketMaxSpendOnchainSnapshot = Readonly<{
 }>;
 
 export async function resolvePolymarketMaxSpendFunds(inputs: {
+  /**
+   * True only when the current verified Privy policy includes the exact
+   * controller pUSD -> FundingRouter approval rule. This lets readiness
+   * include pUSD that the execution path can prepare before `fund()`.
+   */
+  allowMissingRouterPusdApproval?: boolean;
   creds: PolymarketL2Credentials;
   funder: string;
   funderExecutionKind: PolymarketFunderExecutionKind;
@@ -6224,12 +6259,14 @@ export async function resolvePolymarketMaxSpendFunds(inputs: {
     signerLockedRaw,
     signerUsdceRaw: snapshot.signerUsdceBalance,
   });
-  const routerPusdAvailableRaw =
-    snapshot.fundingRouterPusdAllowance == null
-      ? 0n
-      : funds.signerPusdTopUpRaw < snapshot.fundingRouterPusdAllowance
-        ? funds.signerPusdTopUpRaw
-        : snapshot.fundingRouterPusdAllowance;
+  const routerPusdAvailableRaw = computePolymarketFundingRouterPusdAvailableRaw(
+    {
+      controllerPusdAvailableRaw: funds.signerPusdTopUpRaw,
+      controllerRouterAllowanceRaw: snapshot.fundingRouterPusdAllowance,
+      controllerRouterApprovalCanBePrepared:
+        inputs.allowMissingRouterPusdApproval,
+    },
+  );
   const routerUsdceAvailableRaw =
     snapshot.fundingRouterUsdceAllowance == null
       ? 0n
@@ -6278,6 +6315,44 @@ export async function resolvePolymarketMaxSpendFunds(inputs: {
   };
 }
 
+type PreparedPolymarketFundingRouterFunds = Awaited<
+  ReturnType<typeof resolvePolymarketMaxSpendFunds>
+> &
+  Readonly<{
+    fundingRouterDepositUsdceAllowance: bigint;
+    fundingRouterNonce: bigint;
+    fundingRouterPusdAllowance: bigint;
+    fundingRouterUsdceAllowance: bigint;
+  }>;
+
+function buildPolymarketFundingPlanFromPreparedFunds(input: {
+  funder: string;
+  funderExecutionKind: PolymarketFunderExecutionKind;
+  funds: PreparedPolymarketFundingRouterFunds;
+  requiredSpendRaw: bigint;
+  routerPusdAllowanceRaw: bigint;
+  signer: string;
+}): PolymarketFundingPlan | null {
+  return buildPolymarketFundingPlan({
+    signer: input.signer,
+    depositWallet: input.funder,
+    routerAddress: env.polymarketFundingRouterAddress,
+    routerNonce: input.funds.fundingRouterNonce,
+    requiredRaw: input.requiredSpendRaw,
+    depositPusdRaw: input.funds.funderPusdRaw,
+    depositUsdceRaw: input.funds.funderUsdceRaw,
+    depositRouterUsdceAllowanceRaw:
+      input.funds.fundingRouterDepositUsdceAllowance,
+    depositLockedRaw: input.funds.funderLockedRaw,
+    signerPusdRaw: input.funds.signerPusdTopUpRaw,
+    signerLockedRaw: 0n,
+    signerUsdceRaw: input.funds.signerUsdceTopUpRaw,
+    routerPusdAllowanceRaw: input.routerPusdAllowanceRaw,
+    routerUsdceAllowanceRaw: input.funds.fundingRouterUsdceAllowance,
+    fundingCapRaw: input.funds.fundingCapRaw,
+  });
+}
+
 export function buildPreparedPolymarketFundingPlan(input: {
   funder: string;
   funderExecutionKind: PolymarketFunderExecutionKind;
@@ -6307,23 +6382,10 @@ export function buildPreparedPolymarketFundingPlan(input: {
     });
   }
   try {
-    return buildPolymarketFundingPlan({
-      signer: input.signer,
-      depositWallet: input.funder,
-      routerAddress: env.polymarketFundingRouterAddress,
-      routerNonce: input.funds.fundingRouterNonce,
-      requiredRaw: input.requiredSpendRaw,
-      depositPusdRaw: input.funds.funderPusdRaw,
-      depositUsdceRaw: input.funds.funderUsdceRaw,
-      depositRouterUsdceAllowanceRaw:
-        input.funds.fundingRouterDepositUsdceAllowance,
-      depositLockedRaw: input.funds.funderLockedRaw,
-      signerPusdRaw: input.funds.signerPusdTopUpRaw,
-      signerLockedRaw: 0n,
-      signerUsdceRaw: input.funds.signerUsdceTopUpRaw,
+    return buildPolymarketFundingPlanFromPreparedFunds({
+      ...input,
+      funds: input.funds as PreparedPolymarketFundingRouterFunds,
       routerPusdAllowanceRaw: input.funds.fundingRouterPusdAllowance,
-      routerUsdceAllowanceRaw: input.funds.fundingRouterUsdceAllowance,
-      fundingCapRaw: input.funds.fundingCapRaw,
     });
   } catch (error) {
     if (!(error instanceof PolymarketFundingPlanError)) throw error;
@@ -6333,6 +6395,93 @@ export function buildPreparedPolymarketFundingPlan(input: {
       venue: "polymarket",
     });
   }
+}
+
+/**
+ * The controller's pUSD approval is a preparation prerequisite, never a
+ * funding instruction.  Build the exact existing router plan with the
+ * maximum approval only to determine whether that prerequisite is needed;
+ * the real plan is rebuilt from the observed allowance afterwards.
+ */
+function requiresPolymarketFundingRouterControllerPusdApproval(input: {
+  funder: string;
+  funderExecutionKind: PolymarketFunderExecutionKind;
+  funds: Awaited<ReturnType<typeof resolvePolymarketMaxSpendFunds>>;
+  requiredSpendRaw: bigint;
+  signer: string;
+}): boolean {
+  if (
+    input.funderExecutionKind !== "deposit_wallet" ||
+    input.requiredSpendRaw <= input.funds.funderPusdAvailableRaw ||
+    input.funds.fundingRouterNonce == null ||
+    input.funds.fundingRouterDepositUsdceAllowance == null ||
+    input.funds.fundingRouterPusdAllowance == null ||
+    input.funds.fundingRouterUsdceAllowance == null ||
+    !env.polymarketFundingRouterAddress
+  ) {
+    return false;
+  }
+  try {
+    const potentialPlan = buildPolymarketFundingPlanFromPreparedFunds({
+      ...input,
+      funds: input.funds as PreparedPolymarketFundingRouterFunds,
+      routerPusdAllowanceRaw: POLYMARKET_FUNDING_ROUTER_MAX_APPROVAL_RAW,
+    });
+    return (
+      potentialPlan != null &&
+      BigInt(potentialPlan.pUsdAmountRaw) >
+        input.funds.fundingRouterPusdAllowance
+    );
+  } catch (error) {
+    if (error instanceof PolymarketFundingPlanError) return false;
+    throw error;
+  }
+}
+
+async function executePolymarketSetupTransaction(input: {
+  kind: "approval" | "funding_router";
+  onBeforeBroadcast?: () => Promise<void> | void;
+  onSubmitted?: PrepareTradeInput["onSetupTransactionSubmitted"];
+  referenceId: string;
+  signer: string;
+  transaction: Omit<EmbeddedEthereumTransactionSpec, "referenceId">;
+  walletId: string;
+}): Promise<void> {
+  const recordedAt = new Date().toISOString();
+  let acceptedTransactionId: string | null = null;
+  await input.onBeforeBroadcast?.();
+  await input.onSubmitted?.({
+    kind: input.kind,
+    recordedAt,
+    referenceId: input.referenceId,
+    transactionId: null,
+    txHash: null,
+  });
+  await executeServerEmbeddedEthereumTransaction({
+    chainId: POLYGON_CHAIN_ID,
+    signer: input.signer,
+    walletId: input.walletId,
+    walletClient: createServerWalletClient(),
+    transaction: { ...input.transaction, referenceId: input.referenceId },
+    onAccepted: async (reference) => {
+      acceptedTransactionId = reference.transactionId;
+      await input.onSubmitted?.({
+        kind: input.kind,
+        recordedAt,
+        referenceId: reference.referenceId ?? input.referenceId,
+        transactionId: reference.transactionId,
+        txHash: reference.txHash,
+      });
+    },
+    onSubmitted: (txHash) =>
+      input.onSubmitted?.({
+        kind: input.kind,
+        recordedAt,
+        referenceId: input.referenceId,
+        transactionId: acceptedTransactionId,
+        txHash,
+      }),
+  });
 }
 
 function readMakerAmountFromOrderPayload(orderPayload: unknown): bigint | null {
@@ -7588,12 +7737,16 @@ async function getReadiness(
     }
   }
   try {
-    const policyFundingCapRaw = await resolvePolymarketBotPolicyFundingCapRaw();
+    const fundingRouterPolicy =
+      await resolvePolymarketBotPolicyFundingCapability();
     const funds = await resolvePolymarketMaxSpendFunds({
+      allowMissingRouterPusdApproval:
+        input.actor.kind === "telegram_bot" &&
+        fundingRouterPolicy.controllerPusdApprovalEnabled,
       creds: l2Creds,
       funder: funderCandidate.funder,
       funderExecutionKind,
-      fundingCapRaw: policyFundingCapRaw,
+      fundingCapRaw: fundingRouterPolicy.fundingMaxRaw,
       negRisk: targetMarket
         ? readPolymarketNegRiskFromMarket(targetMarket)
         : null,
@@ -8009,12 +8162,35 @@ async function prepareTrade(
     rawQuote = preparedQuote.rawQuote;
     feePolicySnapshot = preparedQuote.feePolicySnapshot;
     const { funderExecutionKind, requiredSpendRaw } = preparedQuote;
-    const policyFundingCapRaw = await resolvePolymarketBotPolicyFundingCapRaw();
+    const fundingRouterPolicy =
+      await resolvePolymarketBotPolicyFundingCapability();
+    const canPrepareControllerPusdApproval =
+      intent.actor.kind === "telegram_bot" && !intent.fundingReservation;
+    // A durable Telegram FundingOperation proves the exact on-chain Deposit
+    // Wallet credit, but Polymarket's CLOB balance may not reflect it yet.
+    // Synchronize before the first executable-funds read; otherwise a just-ready
+    // funding operation can be incorrectly rejected before submit.
+    if (intent.actor.kind === "telegram_bot" && intent.fundingReservation) {
+      await syncPolymarketCollateralAfterFunding({
+        log: ctx.logger,
+        signer,
+        userId: intent.actor.userId,
+      });
+    }
+    let setupBroadcastBoundaryEntered = false;
+    const enterSetupBroadcastBoundary = async () => {
+      if (setupBroadcastBoundaryEntered) return;
+      await input.onBeforeSetupTransactionBroadcast?.();
+      setupBroadcastBoundaryEntered = true;
+    };
     let executableFunds = await resolvePolymarketMaxSpendFunds({
+      allowMissingRouterPusdApproval:
+        canPrepareControllerPusdApproval &&
+        fundingRouterPolicy.controllerPusdApprovalEnabled,
       creds: l2Creds,
       funder: candidate.funder,
       funderExecutionKind,
-      fundingCapRaw: policyFundingCapRaw,
+      fundingCapRaw: fundingRouterPolicy.fundingMaxRaw,
       negRisk: readPolymarketNegRisk({ market, quote: rawQuote }),
       pool: ctx.pool,
       signer,
@@ -8025,6 +8201,74 @@ async function prepareTrade(
       executableFundsRaw: executableFunds.executableFundsRaw,
       requiredSpendRaw,
     });
+    const needsControllerPusdApproval =
+      canPrepareControllerPusdApproval &&
+      fundingRouterPolicy.controllerPusdApprovalEnabled &&
+      requiresPolymarketFundingRouterControllerPusdApproval({
+        signer,
+        funder: candidate.funder,
+        funderExecutionKind,
+        funds: executableFunds,
+        requiredSpendRaw,
+      });
+    if (needsControllerPusdApproval) {
+      if (!env.polymarketFundingRouterAddress) {
+        throw tradingError({
+          code: "insufficient_readiness",
+          message: "Polymarket funding router is not configured.",
+          venue: "polymarket",
+        });
+      }
+      const fundingApprovalReferenceId = `hunch:tgfundapprove:${
+        intent.id?.trim() ||
+        crypto
+          .createHash("sha256")
+          .update(intent.idempotencyKey)
+          .digest("hex")
+          .slice(0, 32)
+      }`.slice(0, 64);
+      await assertServerEvmWalletAuthorization({
+        action: "BUY",
+        privyUserId: intent.executionAuthorization?.privyUserId,
+        signer,
+        venue: "polymarket",
+        walletId: getPrivyWalletId(intent),
+      });
+      await executePolymarketSetupTransaction({
+        kind: "approval",
+        onBeforeBroadcast: enterSetupBroadcastBoundary,
+        onSubmitted: input.onSetupTransactionSubmitted,
+        referenceId: fundingApprovalReferenceId,
+        signer,
+        walletId: getPrivyWalletId(intent),
+        transaction: {
+          id: "polymarket-funding-router-controller-pusd-approval",
+          label: "Polymarket funding router pUSD approval",
+          to: env.polymarketUsdcAddress,
+          data: ERC20_APPROVAL_INTERFACE.encodeFunctionData("approve", [
+            env.polymarketFundingRouterAddress,
+            POLYMARKET_FUNDING_ROUTER_MAX_APPROVAL_RAW,
+          ]),
+          value: "0x0",
+          sponsor: true,
+        },
+      });
+      executableFunds = await resolvePolymarketMaxSpendFunds({
+        creds: l2Creds,
+        funder: candidate.funder,
+        funderExecutionKind,
+        fundingCapRaw: fundingRouterPolicy.fundingMaxRaw,
+        negRisk: readPolymarketNegRisk({ market, quote: rawQuote }),
+        pool: ctx.pool,
+        signer,
+        userId: intent.actor.userId,
+      });
+      assertPolymarketPreparedFunds({
+        buyApprovalOk: executableFunds.buyApproval.ok,
+        executableFundsRaw: executableFunds.executableFundsRaw,
+        requiredSpendRaw,
+      });
+    }
     const fundingPlan = buildPreparedPolymarketFundingPlan({
       signer,
       funder: candidate.funder,
@@ -8051,8 +8295,6 @@ async function prepareTrade(
           .digest("hex")
           .slice(0, 40)
       }`.slice(0, 64);
-      const recordedAt = new Date().toISOString();
-      let acceptedTransactionId: string | null = null;
       await assertServerEvmWalletAuthorization({
         action: "BUY",
         privyUserId: intent.executionAuthorization?.privyUserId,
@@ -8060,19 +8302,13 @@ async function prepareTrade(
         venue: "polymarket",
         walletId: getPrivyWalletId(intent),
       });
-      await input.onBeforeSetupTransactionBroadcast?.();
-      await input.onSetupTransactionSubmitted?.({
+      await executePolymarketSetupTransaction({
         kind: "funding_router",
-        recordedAt,
+        onBeforeBroadcast: enterSetupBroadcastBoundary,
+        onSubmitted: input.onSetupTransactionSubmitted,
         referenceId: fundingReferenceId,
-        transactionId: null,
-        txHash: null,
-      });
-      await executeServerEmbeddedEthereumTransaction({
-        chainId: POLYGON_CHAIN_ID,
         signer,
         walletId: getPrivyWalletId(intent),
-        walletClient: createServerWalletClient(),
         transaction: {
           id: "polymarket-funding-router",
           label: "Polymarket funding router",
@@ -8080,45 +8316,21 @@ async function prepareTrade(
           data: fundingPlan.calldata,
           value: "0x0",
           sponsor: true,
-          referenceId: fundingReferenceId,
         },
-        onAccepted: async (reference) => {
-          acceptedTransactionId = reference.transactionId;
-          await input.onSetupTransactionSubmitted?.({
-            kind: "funding_router",
-            recordedAt,
-            referenceId: reference.referenceId ?? fundingReferenceId,
-            transactionId: reference.transactionId,
-            txHash: reference.txHash,
-          });
-        },
-        onSubmitted: (txHash) =>
-          input.onSetupTransactionSubmitted?.({
-            kind: "funding_router",
-            recordedAt,
-            referenceId: fundingReferenceId,
-            transactionId: acceptedTransactionId,
-            txHash,
-          }),
       });
-      const balanceSync = await syncPolymarketBalanceAllowanceRoute({
-        body: { assetType: "COLLATERAL", signatureType: 3 },
+      await syncPolymarketCollateralAfterFunding({
         log: ctx.logger,
         signer,
         userId: intent.actor.userId,
       });
-      if (!balanceSync.ok) {
-        throw tradingError({
-          code: "insufficient_readiness",
-          message: "Polymarket balance sync failed after funding.",
-          venue: "polymarket",
-        });
-      }
       executableFunds = await resolvePolymarketMaxSpendFunds({
+        allowMissingRouterPusdApproval:
+          canPrepareControllerPusdApproval &&
+          fundingRouterPolicy.controllerPusdApprovalEnabled,
         creds: l2Creds,
         funder: candidate.funder,
         funderExecutionKind,
-        fundingCapRaw: policyFundingCapRaw,
+        fundingCapRaw: fundingRouterPolicy.fundingMaxRaw,
         negRisk: readPolymarketNegRisk({ market, quote: rawQuote }),
         pool: ctx.pool,
         signer,

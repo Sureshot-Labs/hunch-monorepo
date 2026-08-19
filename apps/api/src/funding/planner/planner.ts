@@ -47,6 +47,7 @@ import {
   type FundingPlanningStore,
   type PlannedSourceOption,
 } from "./planning-types.js";
+import { POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID } from "../execution/delegated-funding-profile-ids.js";
 
 export type FundingSourcePlanningRequest = Readonly<{
   accountId: string;
@@ -207,6 +208,23 @@ function validatePlannedSources(
     }
     const segmentCount = source.commitPlan.segments.length;
     const planKind = source.commitPlan.operation.planKind;
+    const steps = source.commitPlan.steps;
+    const isPusdRouterApprovalThenFund =
+      steps.length === 2 &&
+      steps[0]?.ordinal === 0 &&
+      steps[0]?.stepKind === "venue_preparation" &&
+      steps[0]?.state === "planned" &&
+      steps[0]?.segmentOrdinal === null &&
+      steps[0]?.executorId === POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID &&
+      steps[0]?.dependsOnOrdinal === null &&
+      steps[0]?.actionValidationResult.kind ===
+        "controller_pusd_router_approval" &&
+      steps[1]?.ordinal === 1 &&
+      steps[1]?.stepKind === "venue_preparation" &&
+      steps[1]?.state === "planned" &&
+      steps[1]?.segmentOrdinal === null &&
+      steps[1]?.executorId === POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID &&
+      steps[1]?.dependsOnOrdinal === 0;
     const composite =
       source.option.kind === "composite" ||
       source.option.source.kind === "composite" ||
@@ -235,9 +253,12 @@ function validatePlannedSources(
       planKind === "venue_preparation" &&
       (source.option.kind !== "venue_preparation" ||
         source.option.source.kind !== "venue_preparation" ||
-        source.commitPlan.steps.length !== 1 ||
-        source.commitPlan.steps[0]?.stepKind !== "venue_preparation" ||
-        source.commitPlan.steps[0]?.segmentOrdinal !== null ||
+        !(
+          (steps.length === 1 &&
+            steps[0]?.stepKind === "venue_preparation" &&
+            steps[0]?.segmentOrdinal === null) ||
+          isPusdRouterApprovalThenFund
+        ) ||
         source.commitPlan.reservations.length !==
           source.option.source.inputCount ||
         source.commitPlan.reservations.some(

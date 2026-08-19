@@ -50,10 +50,6 @@ import { resolveTelegramRelayEvmCapability } from "./delegated-funding-capabilit
 import { validateRelayDelegatedEvmAction } from "./relay-evm-delegated-profile.js";
 import { createRelayAllowanceCleanupOperationInTransaction } from "./relay-evm-allowance-cleanup.js";
 import {
-  parseRelayEvmPriorApprovalProof,
-  verifyRelayEvmPriorApprovalInTransaction,
-} from "./relay-evm-prior-approval.js";
-import {
   classifyRelayCleanupAllowance,
   parseRelayEvmAllowanceObservation,
   type RelayEvmAllowanceObservation,
@@ -108,7 +104,6 @@ type RelayClaimRow = TelegramFundingAuthorizationRow &
     policy_revision: string;
     policy_version: string | number;
     receipt_raw: string;
-    relay_prior_approval_proof: JsonRecord | null;
     step_id: string;
   }>;
 
@@ -134,6 +129,8 @@ const RELAY_ALLOWANCE_LANE_HEAD_PREDICATE = `not exists (
     from telegram_funding_authorization_reservations prior_reservation
     join telegram_funding_authorizations prior_funding_authorization
       on prior_funding_authorization.id = prior_reservation.authorization_id
+    join funding_operations prior_operation
+      on prior_operation.id = prior_reservation.funding_operation_id
    where prior_reservation.status in ('reserved', 'cleanup_required')
      and prior_reservation.id <> reservation.id
      and prior_funding_authorization.wallet_chain =
@@ -148,6 +145,14 @@ const RELAY_ALLOWANCE_LANE_HEAD_PREDICATE = `not exists (
            lower(funding_authorization.source_asset_id)
      and (prior_reservation.reserved_at, prior_reservation.id) <
            (reservation.reserved_at, reservation.id)
+     -- A completed/failed/cancelled route can no longer mutate this allowance.
+     -- Its accounting row may be retained for audit, but it must not retain the
+     -- shared lane forever. cleanup_required deliberately remains a head:
+     -- that state represents a separately-live cleanup operation.
+     and (
+       prior_reservation.status = 'cleanup_required'
+       or prior_operation.status not in ('completed', 'refunded', 'failed', 'cancelled')
+     )
 )`;
 
 export async function readRelayEvmAllowance(
@@ -858,7 +863,6 @@ function claimFromRow(
     policyId: row.policy_id,
     privyWalletId: row.privy_wallet_id,
     profileId: profile.profileId,
-    relayPriorApprovalProof: row.relay_prior_approval_proof,
     receiptRaw: row.receipt_raw,
     signerFingerprint: row.signer_fingerprint,
     signerId: row.signer_id,
@@ -1786,6 +1790,7 @@ async function reconcileRelayPostconditions(
     segment_id: string;
     expected_raw: string;
     tx_hash: string;
+    uses_preexisting_allowance: boolean;
     wallet_address: string;
   }>(
     `select deposit_receipt.id as deposit_receipt_id,
@@ -1798,6 +1803,9 @@ async function reconcileRelayPostconditions(
             segment.id as segment_id,
             reservation.source_raw::text as expected_raw,
             deposit_receipt.evidence ->> 'transactionHash' as tx_hash,
+            (deposit_step.action_validation_result ->>
+              'relayAllowanceMode') = 'preexisting'
+              as uses_preexisting_allowance,
             funding_authorization.wallet_address
        from funding_operation_steps deposit_step
        join funding_step_receipt_observations deposit_receipt
@@ -1857,7 +1865,11 @@ async function reconcileRelayPostconditions(
     maintenance.expectedBlockHash === maintenance.allowance.blockHash
   ) {
     const observed = maintenance.allowance;
-    if (observed.raw !== "0" && relayAllowanceMutationIsOwned(maintenance)) {
+    if (
+      !depositRow.uses_preexisting_allowance &&
+      observed.raw !== "0" &&
+      relayAllowanceMutationIsOwned(maintenance)
+    ) {
       await createRelayAllowanceCleanupOperationInTransaction(client, {
         profile,
         parentOperationId: depositRow.operation_id,
@@ -1869,7 +1881,7 @@ async function reconcileRelayPostconditions(
       });
       return;
     }
-    if (observed.raw !== "0") {
+    if (!depositRow.uses_preexisting_allowance && observed.raw !== "0") {
       await client.query(
         `update funding_step_receipt_observations
             set evidence = evidence || jsonb_build_object(
@@ -1910,21 +1922,26 @@ async function reconcileRelayPostconditions(
     });
     await client.query(
       `update funding_step_receipt_observations
-          set evidence = evidence || jsonb_build_object(
-                'allowanceZero', true,
-                'allowanceRaw', '0',
-                'allowanceBlock', $2::text,
-                'allowanceBlockHash', $3::text,
-                'allowanceObservationRevision', $4::text
-              ),
-              observed_at = greatest(observed_at, $5),
-              updated_at = $5
+          set evidence = evidence || $2::jsonb,
+              observed_at = greatest(observed_at, $3),
+              updated_at = $3
         where id = $1 and status = 'finalized'`,
       [
         depositRow.deposit_receipt_id,
-        observed.blockNumber,
-        observed.blockHash,
-        observed.revision,
+        depositRow.uses_preexisting_allowance
+          ? {
+              preexistingAllowanceUsed: true,
+              allowanceBlock: observed.blockNumber,
+              allowanceBlockHash: observed.blockHash,
+              allowanceObservationRevision: observed.revision,
+            }
+          : {
+              allowanceZero: true,
+              allowanceRaw: "0",
+              allowanceBlock: observed.blockNumber,
+              allowanceBlockHash: observed.blockHash,
+              allowanceObservationRevision: observed.revision,
+            },
         now,
       ],
     );
@@ -2311,7 +2328,6 @@ async function claimRelayCleanup(
             cleanup_step.action_fingerprint,
             cleanup_step.action_validation_result,
             null::text as allowance_mutation_baseline_block,
-            null::jsonb as relay_prior_approval_proof,
             cleanup_step.executor_id,
             cleanup_step.normalized_action,
             cleanup_step.payer_requirement,
@@ -2723,8 +2739,6 @@ async function claimRelay(
               )
               else null
             end as allowance_mutation_baseline_block,
-            operation.support_metadata -> 'relayPriorApprovalProof'
-              as relay_prior_approval_proof,
             step.executor_id,
             step.normalized_action,
             step.payer_requirement,
@@ -2944,8 +2958,6 @@ async function recoverRelay(
               )
               else null
             end as allowance_mutation_baseline_block,
-            operation.support_metadata -> 'relayPriorApprovalProof'
-              as relay_prior_approval_proof,
             step.executor_id,
             step.normalized_action,
             step.payer_requirement,
@@ -3042,7 +3054,6 @@ async function recoverRelay(
               cleanup_step.action_fingerprint,
               cleanup_step.action_validation_result,
               null::text as allowance_mutation_baseline_block,
-              null::jsonb as relay_prior_approval_proof,
               cleanup_step.executor_id,
               cleanup_step.normalized_action,
               cleanup_step.payer_requirement,
@@ -3268,9 +3279,13 @@ async function preBroadcastRelay(
       }
     );
   }
-  let dependencyApprovalLocked = validated.kind !== "deposit";
+  const usesPreexistingAllowance =
+    validated.kind === "deposit" &&
+    input.claim.actionValidationResult.relayAllowanceMode === "preexisting";
+  let dependencyApprovalLocked =
+    validated.kind !== "deposit" || usesPreexistingAllowance;
   let dependencyApprovalTransactionHash: string | null = null;
-  if (validated.kind === "deposit") {
+  if (validated.kind === "deposit" && !usesPreexistingAllowance) {
     const dependency = await client.query<{
       approval_transaction_hash: string;
       id: string;
@@ -3451,52 +3466,9 @@ async function preBroadcastRelay(
       diagnosticCode: "allowance_observation_missing" as const,
     };
   }
-  const priorApprovalProof =
-    validated.kind === "approve"
-      ? parseRelayEvmPriorApprovalProof(input.claim.relayPriorApprovalProof)
-      : null;
-  if (
-    validated.kind === "approve" &&
-    input.claim.relayPriorApprovalProof != null &&
-    !priorApprovalProof
-  ) {
-    return {
-      kind: "hard_invalid" as const,
-      reasonCode: "delegated_action_invalid" as const,
-      diagnosticCode: "prior_approval_proof_invalid" as const,
-    };
-  }
-  if (
-    priorApprovalProof &&
-    !(await verifyRelayEvmPriorApprovalInTransaction(client, {
-      owner: input.claim.walletAddress,
-      profile: input.profile,
-      proof: priorApprovalProof,
-      userId: input.claim.userId,
-    }))
-  ) {
-    return {
-      kind: "hard_invalid" as const,
-      reasonCode: "delegated_action_invalid" as const,
-      diagnosticCode: "prior_approval_proof_invalid" as const,
-    };
-  }
-  if (
-    priorApprovalProof &&
-    (observed.finality !== "finalized" ||
-      observed.raw !== priorApprovalProof.allowanceRaw ||
-      observed.ownershipRevision !== priorApprovalProof.ownershipRevision ||
-      observed.lastMutationTransactionHash !==
-        priorApprovalProof.approvalTransactionHash)
-  ) {
-    return {
-      kind: "hard_invalid" as const,
-      reasonCode: "delegated_action_invalid" as const,
-      diagnosticCode: "allowance_owner_tx_mismatch" as const,
-    };
-  }
   if (
     validated.kind === "deposit" &&
+    !usesPreexistingAllowance &&
     (!input.claim.allowanceMutationBaselineBlock ||
       !/^(0|[1-9][0-9]*)$/u.test(input.claim.allowanceMutationBaselineBlock))
   ) {
@@ -3507,6 +3479,27 @@ async function preBroadcastRelay(
     };
   }
   const observedAllowance = BigInt(observed.raw);
+  // A fresh exact approve is safe regardless of the preceding allowance.
+  // Its own finalized receipt, rather than historical ownership inference,
+  // is the dependency fence for the following deposit.
+  if (validated.kind === "approve") return { kind: "allowed" as const };
+  // Relay can omit approve when an existing controller allowance already
+  // covers this exact deposit. That allowance may be a prior Hunch route or
+  // a user-managed allowance: it is never authority by itself. The current
+  // route still has its own active reservation and exact policy-bound Relay
+  // deposit calldata, so do not invent an approval receipt, require historic
+  // ownership provenance, or schedule a zero-cleanup for it.
+  if (usesPreexistingAllowance) {
+    const expected = BigInt(input.claim.receiptRaw);
+    if (observedAllowance < expected) {
+      return {
+        kind: "hard_invalid" as const,
+        reasonCode: "delegated_action_invalid" as const,
+        diagnosticCode: "allowance_amount_mismatch" as const,
+      };
+    }
+    return { kind: "allowed" as const };
+  }
   const depositAllowanceOwned =
     validated.kind !== "deposit" ||
     (observed.ownershipRevision !== null &&
@@ -3548,10 +3541,7 @@ async function preBroadcastRelay(
     }
     return { kind: "already_satisfied" as const };
   }
-  const expected =
-    validated.kind === "approve"
-      ? BigInt(priorApprovalProof?.allowanceRaw ?? "0")
-      : BigInt(input.claim.receiptRaw);
+  const expected = BigInt(input.claim.receiptRaw);
   if (validated.kind !== "cleanup" && observedAllowance !== expected) {
     return {
       kind: "hard_invalid" as const,
@@ -4400,31 +4390,21 @@ export function createRelayEvmDelegatedFundingProfile(
       recoverRelay(client, { ...recoverInput, profile }),
     observeBeforeClaim: (pool, input) =>
       observeRelayPostcondition(pool, allowance, input.now, profile),
-    observePreBroadcast: (claim) => {
-      const priorApprovalProof = parseRelayEvmPriorApprovalProof(
-        claim.relayPriorApprovalProof,
-      );
-      return allowance({
+    observePreBroadcast: (claim) =>
+      allowance({
         owner: claim.walletAddress,
         blockNumber: null,
         finality:
-          claim.actionValidationResult.relayStepKind === "cleanup" ||
-          priorApprovalProof
+          claim.actionValidationResult.relayStepKind === "cleanup"
             ? "finalized"
             : "latest",
         mutationBaselineBlock:
-          // A successor route that follows an earlier Hunch approval must
-          // inspect from that approval, not from the later planning read. The
-          // latter would hide the prior mutation and make a safe fresh approve
-          // look like foreign drift before it reaches the durable boundary.
-          priorApprovalProof?.approvalBlock ??
           claim.allowanceMutationBaselineBlock ??
           (typeof claim.actionValidationResult
             .allowanceMutationBaselineBlock === "string"
             ? claim.actionValidationResult.allowanceMutationBaselineBlock
             : null),
-      });
-    },
+      }),
     preBroadcastDecisionInTransaction: (client, boundaryInput) =>
       preBroadcastRelay(client, { ...boundaryInput, configuration, profile }),
     finalizeAlreadySatisfiedInTransaction: (client, finalizeInput) =>

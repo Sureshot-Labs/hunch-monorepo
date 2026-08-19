@@ -19,7 +19,10 @@ import {
   type FundingPolicyValidationIssue,
   type FundingRuntimePolicy,
 } from "./funding-policy.js";
-import { POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID } from "../execution/delegated-funding-profile-ids.js";
+import {
+  POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
+  POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
+} from "../execution/delegated-funding-profile-ids.js";
 import { RELAY_EVM_FUNDING_PROFILE_SPECS } from "../execution/relay-evm-profile-specs.js";
 
 export const FUNDING_VENUE_IDS = deepFreeze([
@@ -372,6 +375,10 @@ export function compileFundingIntentPolicy(
         venueId === "polymarket" &&
         !policy.paused &&
         policy.receive.assets.includes("polygon:usdce");
+      const delegatedPusdFund =
+        venueId === "polymarket" &&
+        !policy.paused &&
+        policy.receive.assets.includes("polygon:pusd");
       const relayProfileIds = Object.values(
         RELAY_EVM_FUNDING_PROFILE_SPECS,
       ).flatMap((profile) =>
@@ -396,9 +403,13 @@ export function compileFundingIntentPolicy(
         fundingEnabled: venueActive(policy, venueId),
         tradingEnabled: false,
         withdrawalEnabled: false,
-        delegatedExecutionEnabled: delegatedWrap || delegatedRelayEvm,
+        delegatedExecutionEnabled:
+          delegatedWrap || delegatedPusdFund || delegatedRelayEvm,
         delegatedPolicyIds: [
           ...(delegatedWrap ? [POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID] : []),
+          ...(delegatedPusdFund
+            ? [POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID]
+            : []),
           ...(delegatedRelayEvm ? relayProfileIds : []),
         ],
         delegatedDailyCapUsd: delegatedRelayEvm

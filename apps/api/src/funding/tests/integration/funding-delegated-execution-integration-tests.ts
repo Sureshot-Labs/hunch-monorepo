@@ -34,9 +34,6 @@ import {
   RELAY_CLEANUP_CANONICAL_WATCH_MS,
   type RelayEvmAllowanceReader,
 } from "../../execution/relay-evm-delegated-executor-profile.js";
-import { captureRelayEvmAllowanceAdmission } from "../../execution/relay-evm-allowance-baseline.js";
-import { consumeRelayEvmPriorApprovalReservationInTransaction } from "../../execution/relay-evm-prior-approval.js";
-import { relayEvmFundingProfileSpec } from "../../execution/relay-evm-profile-specs.js";
 import { lockTelegramFundingLinkLifecycle } from "../../execution/telegram-funding-link-lifecycle-lock.js";
 import {
   POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
@@ -1198,6 +1195,7 @@ async function createRelayFixture(
       controllerWalletId: base.actionWalletId,
       destinationOptionId: identity.destination_option_id,
       venueBindingOptionId: identity.venue_binding_option_id,
+      profileId: TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
       now,
     },
     {
@@ -1206,6 +1204,7 @@ async function createRelayFixture(
     },
   );
   assert.ok(authorization);
+  assert.equal(authorization.profileId, TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID);
   extraAuthorizationIds.push(authorization.id);
   const policy = await resolveFundingPolicy(pool);
   const relayVariantId = opaque("base_usdc_variant");
@@ -5328,9 +5327,8 @@ try {
   assert.equal(relayLaneSecondWave.submitted, 1);
   assert.deepEqual(relayLaneBroadcasts, [relayLaneHead, relayLaneFollower]);
 
-  // A terminal route with one exact Hunch approval and no deposit attempt is
-  // never reused. It can only make room for a new operation which emits its
-  // own exact approve before any deposit is eligible.
+  // A terminal pre-deposit route leaves its old allowance alone. A fresh
+  // operation must still emit its own exact approve before its deposit can run.
   const priorApprovalRoute = await createRelayFixture("2000000");
   const priorAllowanceAtApproval = relayAllowanceEvidence(
     "2000000",
@@ -5445,101 +5443,14 @@ try {
       now: new Date(now.getTime() + 2),
     });
   });
+  await reduceFundingOperation(pool, {
+    operationId: priorApprovalRoute.operationId,
+    now: new Date(now.getTime() + 3),
+  });
   assert.equal(priorApprovalSends, 1);
 
   const freshRelayRoute = await createRelayFixture("1000000", {
     base: priorApprovalRoute.base,
-  });
-  const priorProfile = relayEvmFundingProfileSpec(
-    TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
-  );
-  assert.ok(priorProfile);
-  const wrongBlockAdmission = await captureRelayEvmAllowanceAdmission(pool, {
-    owner: priorApprovalRoute.walletAddress,
-    profile: priorProfile,
-    userId: priorApprovalRoute.base.userId,
-    reader: async () => priorAllowance,
-  });
-  assert.equal(
-    wrongBlockAdmission.priorApprovalProof,
-    null,
-    "a historical proof must be anchored to the original approval block",
-  );
-  const changedOwnershipAdmission = await captureRelayEvmAllowanceAdmission(
-    pool,
-    {
-      owner: priorApprovalRoute.walletAddress,
-      profile: priorProfile,
-      userId: priorApprovalRoute.base.userId,
-      reader: async (input) =>
-        input.blockNumber === "200"
-          ? priorAllowanceAtApproval
-          : relayAllowanceEvidence(
-              "2000000",
-              "301",
-              "later-matching-approval",
-              `0x${"51".repeat(32)}`,
-              "finalized",
-              "301",
-            ),
-    },
-  );
-  assert.equal(
-    changedOwnershipAdmission.priorApprovalProof,
-    null,
-    "a later matching approval, even in the same transaction, invalidates the prior proof",
-  );
-  const admission = await captureRelayEvmAllowanceAdmission(pool, {
-    owner: priorApprovalRoute.walletAddress,
-    profile: priorProfile,
-    userId: priorApprovalRoute.base.userId,
-    reader: async (input) =>
-      input.blockNumber === "200" ? priorAllowanceAtApproval : priorAllowance,
-  });
-  const priorApprovalProof = admission.priorApprovalProof;
-  assert.ok(priorApprovalProof);
-  await tx(pool, async (client) => {
-    assert.equal(
-      await lockFundingAuthorizationReservationScope(client, {
-        authorizationId: freshRelayRoute.authorizationId,
-        userId: freshRelayRoute.base.userId,
-      }),
-      true,
-    );
-    assert.equal(
-      await consumeRelayEvmPriorApprovalReservationInTransaction(client, {
-        now: new Date(now.getTime() + 3),
-        owner: freshRelayRoute.walletAddress,
-        profile: priorProfile,
-        proof: priorApprovalProof,
-        userId: freshRelayRoute.base.userId,
-      }),
-      true,
-    );
-    assert.equal(
-      await consumeRelayEvmPriorApprovalReservationInTransaction(client, {
-        now: new Date(now.getTime() + 3),
-        owner: freshRelayRoute.walletAddress,
-        profile: priorProfile,
-        proof: priorApprovalProof,
-        userId: freshRelayRoute.base.userId,
-      }),
-      true,
-      "a terminal pre-deposit reservation may already have been released",
-    );
-    const metadata = await client.query(
-      `update funding_operations
-          set support_metadata = support_metadata || $2::jsonb,
-              updated_at = $3,
-              version = version + 1
-        where id = $1::uuid`,
-      [
-        freshRelayRoute.operationId,
-        JSON.stringify({ relayPriorApprovalProof: priorApprovalProof }),
-        new Date(now.getTime() + 3),
-      ],
-    );
-    assert.equal(metadata.rowCount, 1);
   });
   const priorApprovalReservation = await pool.query<{ status: string }>(
     `select status
@@ -5547,7 +5458,11 @@ try {
       where funding_operation_id = $1::uuid`,
     [priorApprovalRoute.operationId],
   );
-  assert.equal(priorApprovalReservation.rows[0]?.status, "released");
+  assert.equal(
+    priorApprovalReservation.rows[0]?.status,
+    "released",
+    "a terminal pre-deposit route must release its lane and rolling-cap slot",
+  );
   const priorDepositAttempts = await pool.query<{ count: string }>(
     `select count(*)::text as count
        from funding_operation_step_attempts
@@ -5578,7 +5493,7 @@ try {
       })
     ).submitted,
     0,
-    "the consumed proof cannot create a second successor approve",
+    "the fresh route cannot create a second approve attempt",
   );
 
   const relayDepositOwnershipRace = await createRelayFixture();
@@ -6391,6 +6306,91 @@ try {
     parent_status: "recovery_required",
     reservation_status: "cleanup_required",
   });
+
+  // A cleanup_required reservation belongs to its cleanup child, not to the
+  // parent. Even if the parent is already terminal, it must keep the shared
+  // allowance lane until that child has itself reached a terminal outcome.
+  const foreignDriftCleanup = await pool.query<{
+    cleanup_operation_id: string;
+  }>(
+    `select cleanup_operation_id::text as cleanup_operation_id
+       from telegram_funding_authorization_reservations
+      where funding_operation_id = $1::uuid
+        and status = 'cleanup_required'`,
+    [foreignDriftRelay.operationId],
+  );
+  const foreignDriftCleanupOperationId =
+    foreignDriftCleanup.rows[0]?.cleanup_operation_id;
+  assert.ok(foreignDriftCleanupOperationId);
+  const foreignDriftParentTerminal = await pool.connect();
+  try {
+    await foreignDriftParentTerminal.query("begin");
+    await foreignDriftParentTerminal.query(
+      "set local session_replication_role = replica",
+    );
+    await foreignDriftParentTerminal.query(
+      `update funding_operations
+          set status = 'failed',
+              progress_stage = 'terminal',
+              completed_at = $2
+        where id = $1::uuid`,
+      [
+        foreignDriftRelay.operationId,
+        new Date(now.getTime() + 15 * 60_000 + 6),
+      ],
+    );
+    await foreignDriftParentTerminal.query("commit");
+  } catch (error) {
+    await foreignDriftParentTerminal.query("rollback");
+    throw error;
+  } finally {
+    foreignDriftParentTerminal.release();
+  }
+  const cleanupLaneFollower = await createRelayFixture("1000000", {
+    base: foreignDriftRelay.base,
+  });
+  const cleanupLaneFollowerBroadcasts: Array<string> = [];
+  await relayExecutor(
+    [relayAllowanceEvidence("2000000", "42", "foreign")],
+    (claim) => cleanupLaneFollowerBroadcasts.push(claim.operationId),
+  ).runBatch({ limit: 20, now: new Date(now.getTime() + 15 * 60_000 + 7) });
+  assert.equal(
+    cleanupLaneFollowerBroadcasts.length,
+    0,
+    "a live cleanup child must retain the lane even after its parent is terminal",
+  );
+
+  await reduceFundingOperation(pool, {
+    operationId: foreignDriftCleanupOperationId,
+    now: new Date(now.getTime() + 15 * 60_000 + 8),
+  });
+  const cleanupTerminalState = await pool.query<{
+    cleanup_status: string;
+    reservation_status: string;
+    reason: string | null;
+  }>(
+    `select cleanup.status as cleanup_status,
+            reservation.status as reservation_status,
+            reservation.resolution_evidence ->> 'reason' as reason
+       from telegram_funding_authorization_reservations reservation
+       join funding_operations cleanup
+         on cleanup.id = reservation.cleanup_operation_id
+      where cleanup.id = $1::uuid`,
+    [foreignDriftCleanupOperationId],
+  );
+  assert.deepEqual(cleanupTerminalState.rows[0], {
+    cleanup_status: "failed",
+    reason: "cleanup_terminal_without_allowance_change",
+    reservation_status: "released",
+  });
+  const cleanupLaneReleased = await relayExecutor(
+    [relayAllowanceEvidence("2000000", "42", "foreign")],
+    (claim) => cleanupLaneFollowerBroadcasts.push(claim.operationId),
+  ).runBatch({ limit: 20, now: new Date(now.getTime() + 15 * 60_000 + 9) });
+  assert.equal(cleanupLaneReleased.submitted, 1);
+  assert.deepEqual(cleanupLaneFollowerBroadcasts, [
+    cleanupLaneFollower.operationId,
+  ]);
 
   const foreignLastMutationRelay = await createRelayFixture();
   const foreignLastMutationBroadcasts = { value: 0 };

@@ -195,6 +195,22 @@ export async function cancelFundingOperationForUser(
         "funding operation disappeared after cancellation",
       );
     }
+    if (cancelled.status === "cancelled") {
+      await client.query(
+        `update telegram_funding_authorization_reservations
+            set status = 'released',
+                resolved_at = $2,
+                resolution_evidence = resolution_evidence || jsonb_build_object(
+                  'operationStatus', 'cancelled',
+                  'operationId', $1::text,
+                  'reason', 'cancelled_before_broadcast'
+                ),
+                updated_at = $2
+          where funding_operation_id = $1::uuid
+            and status = 'reserved'`,
+        [input.operationId, now],
+      );
+    }
     return cancelled;
   });
 }

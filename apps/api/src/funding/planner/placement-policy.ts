@@ -176,8 +176,13 @@ export function decidePlacement(
     }
     const explicitlyBufferedRaw =
       rawAmount(shortfallRaw) + rawAmount(bufferRaw);
+    // A server-confirmed shortfall is already the exact additional collateral
+    // required by the frozen trade quote.  Do not silently enlarge it to the
+    // generic automatic-refill floor: that can make a fully usable set of
+    // small controller balances look insufficient and incorrectly send the
+    // user to Deposit.  The floor remains for unconfirmed/general shortfalls.
     const minimumRefillRaw =
-      rawAmount(shortfallRaw) === 0n
+      serverAdditionalDestination || rawAmount(shortfallRaw) === 0n
         ? 0n
         : rawAmount(minimumExecutableDestination?.raw ?? "0") >
             rawAmount(requested.raw)

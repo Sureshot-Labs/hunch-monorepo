@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import type { AccountValueReadModel } from "../../../account-value/runtime-service.js";
 import type { FundingPurpose } from "../../domain/types.js";
 import {
+  POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
   POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
   TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
 } from "../../execution/delegated-funding-profile-ids.js";
@@ -105,6 +106,9 @@ function planningInput(
   requiredRaw = "4000000",
   signerUsdceRaw = "1500000",
   purpose: FundingPurpose = "trade_shortfall",
+  routerPusdAllowanceRaw = "1500000",
+  depositPusdRaw = "1500000",
+  routerUsdceAllowanceRaw = signerUsdceRaw,
 ): FundingSourcePlanningInput {
   const settlementLocation = {
     kind: "venue_account",
@@ -159,8 +163,8 @@ function planningInput(
       sourcePlanningEvidence: polymarketFundingEvidence({
         signerAddress: SIGNER,
         depositWallet: DEPOSIT,
-        depositPusdRaw: "1500000",
-        depositLockedRaw: "500000",
+        depositPusdRaw,
+        depositLockedRaw: depositPusdRaw === "0" ? "0" : "500000",
         depositUsdceRaw: "1000000",
         signerPusdRaw: "1500000",
         signerUsdceRaw,
@@ -168,8 +172,8 @@ function planningInput(
         routerAddress: ROUTER,
         routerNonceRaw: "7",
         depositRouterUsdceAllowanceRaw: "1000000",
-        routerPusdAllowanceRaw: "1500000",
-        routerUsdceAllowanceRaw: signerUsdceRaw,
+        routerPusdAllowanceRaw,
+        routerUsdceAllowanceRaw,
         clobPusdRaw: "1500000",
         observedAt: "2026-07-24T12:00:00.000Z",
       }),
@@ -201,6 +205,26 @@ function delegatedPlanningInput(): FundingSourcePlanningInput {
     request: {
       ...input.request,
       serverExecutionProfileId: POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
+    },
+  };
+}
+
+function delegatedPusdPlanningInput(
+  routerPusdAllowanceRaw = "1500000",
+): FundingSourcePlanningInput {
+  const input = planningInput(
+    "1000000",
+    "1000000",
+    "0",
+    "trade_shortfall",
+    routerPusdAllowanceRaw,
+    "0",
+  );
+  return {
+    ...input,
+    request: {
+      ...input.request,
+      serverExecutionProfileId: POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
     },
   };
 }
@@ -256,6 +280,127 @@ assert.deepEqual(
   delegated.commitPlan.reservations.map((entry) => entry.rawAmount),
   ["1000000"],
   "delegated wrap must bind only the exact received USDC.e amount",
+);
+
+const [delegatedPusd] = await adapter.list(delegatedPusdPlanningInput());
+assert.ok(delegatedPusd);
+assert.equal(
+  delegatedPusd.option.sourceLegs,
+  undefined,
+  "a single Router pUSD preparation must not masquerade as a composite source",
+);
+assert.equal(delegatedPusd.commitPlan.steps.length, 1);
+assert.equal(
+  delegatedPusd.commitPlan.steps[0]?.executorId,
+  POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
+);
+assert.equal(delegatedPusd.commitPlan.steps[0]?.state, "planned");
+
+const [delegatedPusdNeedsApproval] = await adapter.list(
+  delegatedPusdPlanningInput("0"),
+);
+assert.ok(delegatedPusdNeedsApproval);
+assert.deepEqual(
+  delegatedPusdNeedsApproval.commitPlan.steps.map((step) => ({
+    executorId: step.executorId,
+    kind: step.actionValidationResult.kind,
+    dependsOnOrdinal: step.dependsOnOrdinal,
+    ordinal: step.ordinal,
+  })),
+  [
+    {
+      executorId: POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
+      kind: "controller_pusd_router_approval",
+      dependsOnOrdinal: null,
+      ordinal: 0,
+    },
+    {
+      executorId: POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
+      kind: undefined,
+      dependsOnOrdinal: 0,
+      ordinal: 1,
+    },
+  ],
+  "the exact policy-approved controller pUSD approval must precede Router fund when required",
+);
+
+const mixedControllerInput = planningInput(
+  "1800000",
+  "1800000",
+  "300000",
+  "trade_shortfall",
+  "0",
+  "0",
+  "0",
+);
+const [delegatedPusdAndUsdce] = await adapter.list({
+  ...mixedControllerInput,
+  request: {
+    ...mixedControllerInput.request,
+    serverExecutionProfileId: POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
+  },
+});
+assert.ok(delegatedPusdAndUsdce);
+assert.equal(
+  delegatedPusdAndUsdce.option.safeLabel,
+  "Use controller pUSD + USDC.e in one Polymarket funding step",
+);
+assert.equal(
+  delegatedPusdAndUsdce.option.sourceLegs,
+  undefined,
+  "one Router fund call is one venue-preparation action, not a generic composite route",
+);
+assert.deepEqual(
+  delegatedPusdAndUsdce.commitPlan.reservations.map((entry) => entry.rawAmount),
+  ["1500000", "300000"],
+);
+assert.deepEqual(
+  delegatedPusdAndUsdce.commitPlan.steps.map((step) => ({
+    kind: step.actionValidationResult.kind,
+    dependsOnOrdinal: step.dependsOnOrdinal,
+    ordinal: step.ordinal,
+  })),
+  [
+    {
+      kind: "controller_usdce_router_approval",
+      dependsOnOrdinal: null,
+      ordinal: 0,
+    },
+    {
+      kind: "controller_pusd_router_approval",
+      dependsOnOrdinal: 0,
+      ordinal: 1,
+    },
+    { kind: undefined, dependsOnOrdinal: 1, ordinal: 2 },
+  ],
+  "two missing token approvals must be serialized before the one Router fund call",
+);
+
+const zeroAllowanceDerivedCapInput = planningInput(
+  "0",
+  "1800000",
+  "300000",
+  "trade_shortfall",
+  "0",
+  "0",
+  "0",
+);
+const [delegatedPusdWithZeroAllowanceDerivedCap] = await adapter.list({
+  ...zeroAllowanceDerivedCapInput,
+  request: {
+    ...zeroAllowanceDerivedCapInput.request,
+    serverExecutionProfileId: POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
+  },
+});
+assert.ok(
+  delegatedPusdWithZeroAllowanceDerivedCap,
+  "a missing current Router allowance must not turn an otherwise exact delegated pUSD + USDC.e route into Deposit fallback",
+);
+assert.deepEqual(
+  delegatedPusdWithZeroAllowanceDerivedCap.commitPlan.reservations.map(
+    (entry) => entry.rawAmount,
+  ),
+  ["1500000", "300000"],
 );
 
 const relayProfileInput = planningInput();

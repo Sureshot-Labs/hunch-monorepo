@@ -8,9 +8,11 @@ import type {
   SourceOption,
 } from "../funding/domain/types.js";
 import { sameAsset } from "../funding/domain/asset-identity.js";
+import { FundingPlannerError } from "../funding/planner/money.js";
 import { FundingPlanningRuntime } from "../funding/planner/runtime-service.js";
 import { canonicalJsonHash } from "../funding/persistence/canonical.js";
 import { lockFundingAuthorizationReservationScope } from "../funding/persistence/funding-authorization-reservation-lock.js";
+import { releaseCompletedTradeShortfallSourceReservationsInTransaction } from "../funding/persistence/funding-evidence-repository.js";
 import { lockFundingPolicyForTransaction } from "../funding/policies/funding-policy-service.js";
 import {
   ensureTelegramFundingAuthorization,
@@ -21,14 +23,15 @@ import {
 import { loadRelayEvmExecutionConfiguration } from "../funding/execution/delegated-funding-config.js";
 import { resolveTelegramFundingProvisionWallet } from "../funding/execution/telegram-funding-managed-wallet.js";
 import {
-  captureRelayEvmAllowanceAdmission,
+  captureRelayEvmAllowanceBaseline,
   relayEvmAllowanceBaselineSupportMetadata,
 } from "../funding/execution/relay-evm-allowance-baseline.js";
 import {
-  consumeRelayEvmPriorApprovalReservationInTransaction,
-  relayEvmPriorApprovalSupportMetadata,
-} from "../funding/execution/relay-evm-prior-approval.js";
-import { POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID } from "../funding/execution/delegated-funding-profile-ids.js";
+  isPolymarketDepositRouterProfileId,
+  POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
+  POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
+} from "../funding/execution/delegated-funding-profile-ids.js";
+import { activateTelegramTradeShortfallInitialStepInTransaction } from "../funding/execution/telegram-trade-shortfall-activation.js";
 import {
   RELAY_EVM_FUNDING_PROFILE_SPECS,
   relayEvmFundingProfileSpec,
@@ -44,10 +47,16 @@ import { RELAY_ROUTE_SPECS } from "../funding-providers/relay/mappings.js";
 type Venue = "limitless" | "polymarket";
 type Side = "NO" | "YES";
 
+function shortfallPlannerFailureReasonCode(error: unknown): string {
+  return error instanceof FundingPlannerError
+    ? `funding_planner_${error.code}`
+    : "funding_planner_unavailable";
+}
+
 /** A non-quote safety stop that must never be presented as quote expiry. */
 export class TelegramTradeShortfallCommitError extends Error {
   constructor(
-    readonly code: "relay_allowance_unverified" | "allowance_lane_unavailable",
+    readonly code: "allowance_lane_unavailable",
     message: string,
   ) {
     super(message);
@@ -296,7 +305,7 @@ export function assertTelegramTradeShortfallDelegatedRelayActionTtl(input: {
  * deposit remains planned until the approval receipt is finalized and
  * allowance ownership is anchored.
  */
-export async function activateTelegramTradeShortfallRelayApprovalInTransaction(
+export async function activateTelegramTradeShortfallInitialActionInTransaction(
   client: Pick<PoolClient, "query">,
   input: Readonly<{
     operationId: string;
@@ -304,41 +313,16 @@ export async function activateTelegramTradeShortfallRelayApprovalInTransaction(
     tradeIntentId: string;
   }>,
 ): Promise<void> {
-  if (!relayEvmFundingProfileSpec(input.profileId)) return;
-  const activated = await client.query<{ id: string }>(
-    `update funding_operation_steps approval_step
-        set state = 'action_required', updated_at = clock_timestamp()
-       from funding_operations operation_row
-       join telegram_funding_authorization_reservations reservation_row
-         on reservation_row.funding_operation_id = operation_row.id
-        and reservation_row.source_trade_intent_id = $2::uuid
-        and reservation_row.status = 'reserved'
-       join telegram_trade_intents trade_intent_row
-         on trade_intent_row.id = reservation_row.source_trade_intent_id
-        and trade_intent_row.user_id = operation_row.user_id
-        and trade_intent_row.status = 'funding'
-        and trade_intent_row.funding_operation_id = operation_row.id
-        and trade_intent_row.submit_started_at is null
-      where approval_step.operation_id = operation_row.id
-        and operation_row.id = $1::uuid
-        and operation_row.purpose = 'trade_shortfall'
-        and operation_row.status in (
-          'in_progress', 'reconcile_required', 'recovery_required'
-        )
-        and operation_row.support_metadata ->> 'telegramTradeIntentId' = $2::text
-        and operation_row.support_metadata ->> 'delegatedOriginKind' =
-              'trade_shortfall_intent'
-        and approval_step.executor_id = $3
-        and approval_step.depends_on_step_id is null
-        and approval_step.state = 'planned'
-        and approval_step.action_validation_result ->> 'relayStepKind' = 'approve'
-      returning approval_step.id`,
-    [input.operationId, input.tradeIntentId, input.profileId],
-  );
-  if (activated.rowCount !== 1) {
-    throw new Error("trade funding Relay approval could not be activated");
+  const activated =
+    await activateTelegramTradeShortfallInitialStepInTransaction(client, input);
+  if (!activated) {
+    throw new Error("trade funding initial action could not be activated");
   }
 }
+
+/** @deprecated Use the profile-aware activation helper above. */
+export const activateTelegramTradeShortfallRelayApprovalInTransaction =
+  activateTelegramTradeShortfallInitialActionInTransaction;
 
 function optionSourceAssets(option: SourceOption): readonly AssetRef[] {
   const sources = option.sourceLegs?.map((leg) => leg.sourceAmount.asset) ?? [];
@@ -374,6 +358,18 @@ export function resolveTelegramTradeShortfallExecutionProfile(
       decimals: 6,
     })
   ) {
+    const sources = optionSourceAssets(option);
+    if (
+      sources.length === 1 &&
+      sameAsset(sources[0] as AssetRef, {
+        networkId: "evm:137",
+        assetId:
+          fundingSidecarRuntimeConfig.polymarketPusdAddress || POLYGON_PUSD,
+        decimals: 6,
+      })
+    ) {
+      return POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID;
+    }
     return POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID;
   }
   const sources = optionSourceAssets(option);
@@ -429,7 +425,11 @@ export function telegramTradeShortfallExecutionProfiles(
     )
     .map((profile) => profile.profileId);
   if (venue !== "polymarket") return profiles;
-  return [POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID, ...profiles];
+  return [
+    POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
+    POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
+    ...profiles,
+  ];
 }
 
 function requiresExternalHandoff(option: SourceOption): boolean {
@@ -457,11 +457,18 @@ export function selectTelegramTradeShortfallAutomatedOption(input: {
     ) {
       return [];
     }
-    const profileId = resolveTelegramTradeShortfallExecutionProfile(
-      option,
-      input.venue,
-      input.destination,
-    );
+    const profileId =
+      input.requiredProfileId &&
+      isPolymarketDepositRouterProfileId(input.requiredProfileId) &&
+      option.kind === "venue_preparation" &&
+      option.source.kind === "venue_preparation" &&
+      option.source.venueId === "polymarket"
+        ? input.requiredProfileId
+        : resolveTelegramTradeShortfallExecutionProfile(
+            option,
+            input.venue,
+            input.destination,
+          );
     if (
       !profileId ||
       (input.requiredProfileId && profileId !== input.requiredProfileId)
@@ -475,6 +482,55 @@ export function selectTelegramTradeShortfallAutomatedOption(input: {
     candidates[0] ??
     null
   );
+}
+
+function proposalSourceAmounts(
+  option: SourceOption,
+  profileId: string,
+  destination: Money,
+): FundingQuoteSummary["sourceAmounts"] {
+  const sourceLegAmounts = option.sourceLegs?.map((leg) => ({
+    safeLabel: leg.safeLabel,
+    amount: leg.sourceAmount,
+  }));
+  if (sourceLegAmounts?.length) return sourceLegAmounts;
+  if (
+    option.source.kind === "owned_location" &&
+    option.maximumSourceRaw != null
+  ) {
+    return [
+      {
+        safeLabel: option.safeLabel,
+        amount: {
+          asset: option.source.location.asset,
+          raw: option.maximumSourceRaw,
+        },
+      },
+    ];
+  }
+  if (
+    option.source.kind === "venue_preparation" &&
+    option.maximumSourceRaw != null &&
+    isPolymarketDepositRouterProfileId(profileId)
+  ) {
+    return [
+      {
+        safeLabel: option.safeLabel,
+        amount: {
+          asset:
+            profileId === POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID
+              ? {
+                  networkId: "evm:137",
+                  assetId: POLYGON_USDCE_LEGACY,
+                  decimals: 6,
+                }
+              : destination.asset,
+          raw: option.maximumSourceRaw,
+        },
+      },
+    ];
+  }
+  return [];
 }
 
 function proposalFromOption(
@@ -498,22 +554,11 @@ function proposalFromOption(
   ) {
     throw new Error("trade funding quote is missing its exact destination");
   }
-  const sourceAmounts =
-    option.sourceLegs?.map((leg) => ({
-      safeLabel: leg.safeLabel,
-      amount: leg.sourceAmount,
-    })) ??
-    (option.source.kind === "owned_location" && option.maximumSourceRaw
-      ? [
-          {
-            safeLabel: option.safeLabel,
-            amount: {
-              asset: option.source.location.asset,
-              raw: option.maximumSourceRaw,
-            },
-          },
-        ]
-      : []);
+  const sourceAmounts = proposalSourceAmounts(
+    option,
+    profileId,
+    option.expectedDestination,
+  );
   if (sourceAmounts.length === 0) {
     throw new Error("trade funding route has no exact source amount");
   }
@@ -553,21 +598,73 @@ export class TelegramTradeShortfallFundingService {
   async inspect(
     input: TelegramTradeShortfallIdentity,
   ): Promise<TelegramTradeShortfallInspection> {
+    // This is accounting repair, not a route retry.  A prior shortfall may
+    // have reached the venue, then lost its consumer before submission.  Its
+    // terminal source reservation must not suppress the fresh plan's real
+    // wallet balance.
+    await tx(this.pool, async (client) => {
+      const completed = await client.query<{ id: string }>(
+        `
+          select id
+          from funding_operations
+          where user_id = $1
+            and purpose = 'trade_shortfall'
+            and status = 'completed'
+            and progress_stage = 'terminal'
+            and exists (
+              select 1
+              from balance_reservations reservation
+              where reservation.operation_id = funding_operations.id
+                and reservation.user_id = funding_operations.user_id
+                and reservation.state = 'active'
+                and reservation.mode <> 'settled_for_consumer'
+            )
+          order by updated_at
+          for update
+        `,
+        [input.userId],
+      );
+      for (const operation of completed.rows) {
+        await releaseCompletedTradeShortfallSourceReservationsInTransaction(
+          client,
+          {
+            operationId: operation.id,
+            userId: input.userId,
+          },
+        );
+      }
+    });
     const destination = destinationAsset(input.venue);
-    let candidate: Readonly<{
-      plan: Awaited<ReturnType<FundingPlanningRuntime["liquidity"]>>;
-      profileId: string;
-    }> | null = null;
+    const plannedCandidates: Array<
+      Readonly<{
+        plan: Awaited<ReturnType<FundingPlanningRuntime["liquidity"]>>;
+        profileId: string;
+      }>
+    > = [];
     let completedProfileInspection = false;
     const unavailableReasonCodes: string[] = [];
     for (const profileId of telegramTradeShortfallExecutionProfiles(
       input.venue,
       destination,
     )) {
-      const plan = await this.runtime.liquidity(
-        input.userId,
-        buildTelegramTradeShortfallRequest(input, profileId),
-      );
+      let plan: Awaited<ReturnType<FundingPlanningRuntime["liquidity"]>>;
+      try {
+        plan = await this.runtime.liquidity(
+          input.userId,
+          buildTelegramTradeShortfallRequest(input, profileId),
+        );
+      } catch (error) {
+        const reasonCode = shortfallPlannerFailureReasonCode(error);
+        console.warn("[telegram-trade-shortfall] profile inspection failed", {
+          errorMessage:
+            error instanceof Error ? error.message : "unknown_error",
+          errorName: error instanceof Error ? error.name : typeof error,
+          profileId,
+          reasonCode,
+        });
+        unavailableReasonCodes.push(reasonCode);
+        continue;
+      }
       if (plan.completeness !== "complete" || plan.errors.length > 0) {
         unavailableReasonCodes.push(
           ...plan.reasonCodes,
@@ -583,11 +680,10 @@ export class TelegramTradeShortfallFundingService {
         requiredProfileId: profileId,
       });
       if (automated) {
-        candidate = { plan, profileId: automated.profileId };
-        break;
+        plannedCandidates.push({ plan, profileId: automated.profileId });
       }
     }
-    if (!candidate) {
+    if (plannedCandidates.length === 0) {
       if (!completedProfileInspection && unavailableReasonCodes.length > 0) {
         return {
           kind: "temporarily_unavailable",
@@ -600,21 +696,12 @@ export class TelegramTradeShortfallFundingService {
       // unsupported composite executable.
       return { kind: "external_deposit_required" };
     }
-    const profileId = candidate.profileId;
-    if (
-      !candidate.plan.destinationOptionId ||
-      !candidate.plan.venueBindingOptionId
-    ) {
-      return {
-        kind: "temporarily_unavailable",
-        reasonCodes: ["internal_route_destination_binding_unavailable"],
-      };
-    }
     const controller = await resolveTelegramFundingProvisionWallet(this.pool, {
       userId: input.userId,
       telegramAccountId: input.telegramAccountId,
       telegramUserId: input.telegramUserId,
       controllerNetworkId: input.venue === "limitless" ? "evm:8453" : "evm:137",
+      executionVenueId: input.venue,
     });
     if (!controller) {
       return {
@@ -622,35 +709,78 @@ export class TelegramTradeShortfallFundingService {
         reasonCodes: ["internal_route_controller_wallet_unavailable"],
       };
     }
-    const authorizationInput = {
-      userId: input.userId,
-      telegramAccountId: input.telegramAccountId,
-      telegramUserId: input.telegramUserId,
-      controllerWalletId: controller.controllerWalletId,
-      destinationOptionId: candidate.plan.destinationOptionId,
-      venueBindingOptionId: candidate.plan.venueBindingOptionId,
-      venueId: input.venue,
-    } as const;
-    const provisioned =
-      profileId === POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID
-        ? await ensureTelegramFundingAuthorization(
-            this.pool,
-            authorizationInput,
-          )
-        : await ensureTelegramRelayEvmFundingAuthorization(
-            this.pool,
-            authorizationInput,
-          );
-    if (!provisioned) {
+    let candidate: (typeof plannedCandidates)[number] | null = null;
+    for (const plannedCandidate of plannedCandidates) {
+      if (
+        !plannedCandidate.plan.destinationOptionId ||
+        !plannedCandidate.plan.venueBindingOptionId
+      ) {
+        unavailableReasonCodes.push(
+          "internal_route_destination_binding_unavailable",
+        );
+        continue;
+      }
+      const authorizationInput = {
+        userId: input.userId,
+        telegramAccountId: input.telegramAccountId,
+        telegramUserId: input.telegramUserId,
+        controllerWalletId: controller.controllerWalletId,
+        destinationOptionId: plannedCandidate.plan.destinationOptionId,
+        venueBindingOptionId: plannedCandidate.plan.venueBindingOptionId,
+        venueId: input.venue,
+      } as const;
+      const provisioned = isPolymarketDepositRouterProfileId(
+        plannedCandidate.profileId,
+      )
+        ? await ensureTelegramFundingAuthorization(this.pool, {
+            ...authorizationInput,
+            profileId: plannedCandidate.profileId as
+              | typeof POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID
+              | typeof POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
+          })
+        : await ensureTelegramRelayEvmFundingAuthorization(this.pool, {
+            ...authorizationInput,
+            profileId: plannedCandidate.profileId,
+          });
+      if (!provisioned) {
+        unavailableReasonCodes.push(
+          "internal_route_delegated_authority_unavailable",
+        );
+        continue;
+      }
+      candidate = plannedCandidate;
+      break;
+    }
+    if (!candidate) {
       return {
         kind: "temporarily_unavailable",
-        reasonCodes: ["internal_route_delegated_authority_unavailable"],
+        reasonCodes: [...new Set(unavailableReasonCodes)],
       };
     }
-    const delegatedPlan = await this.runtime.liquidity(
-      input.userId,
-      buildTelegramTradeShortfallRequest(input, profileId),
-    );
+    const profileId = candidate.profileId;
+    let delegatedPlan: Awaited<ReturnType<FundingPlanningRuntime["liquidity"]>>;
+    try {
+      delegatedPlan = await this.runtime.liquidity(
+        input.userId,
+        buildTelegramTradeShortfallRequest(input, profileId),
+      );
+    } catch (error) {
+      const reasonCode = shortfallPlannerFailureReasonCode(error);
+      console.warn(
+        "[telegram-trade-shortfall] delegated profile recheck failed",
+        {
+          errorMessage:
+            error instanceof Error ? error.message : "unknown_error",
+          errorName: error instanceof Error ? error.name : typeof error,
+          profileId,
+          reasonCode,
+        },
+      );
+      return {
+        kind: "temporarily_unavailable",
+        reasonCodes: [reasonCode],
+      };
+    }
     if (
       delegatedPlan.completeness !== "complete" ||
       delegatedPlan.errors.length > 0
@@ -755,17 +885,47 @@ export class TelegramTradeShortfallFundingService {
       0n,
     );
     if (sourceRaw <= 0n) throw new Error("trade funding source is empty");
-    const exactSourceAsset = quote.sourceAmounts[0]?.amount.asset;
-    if (!exactSourceAsset || quote.sourceAmounts.length !== 1) {
+    const pUsdAsset: AssetRef = {
+      networkId: "evm:137",
+      assetId:
+        fundingSidecarRuntimeConfig.polymarketPusdAddress || POLYGON_PUSD,
+      decimals: 6,
+    };
+    const routerPusdFunding =
+      input.proposal.serverExecutionProfileId ===
+      POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID;
+    const routerSourcesValid =
+      routerPusdFunding &&
+      quote.sourceAmounts.length >= 1 &&
+      quote.sourceAmounts.length <= 2 &&
+      quote.sourceAmounts.some((source) =>
+        sameAsset(source.amount.asset, pUsdAsset),
+      ) &&
+      quote.sourceAmounts.every(
+        (source) =>
+          sameAsset(source.amount.asset, pUsdAsset) ||
+          sameAsset(source.amount.asset, {
+            networkId: "evm:137",
+            assetId: POLYGON_USDCE_LEGACY,
+            decimals: 6,
+          }),
+      );
+    const exactSourceAsset = routerPusdFunding
+      ? pUsdAsset
+      : quote.sourceAmounts[0]?.amount.asset;
+    if (
+      !exactSourceAsset ||
+      (!routerSourcesValid && quote.sourceAmounts.length !== 1)
+    ) {
       throw new Error(
-        "trade funding delegated execution requires one exact stable source",
+        "trade funding delegated execution requires its exact permitted stable source set",
       );
     }
-    const securityClass =
-      input.proposal.serverExecutionProfileId ===
-      POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID
-        ? "closed_destination_transform"
-        : "routed_value_movement";
+    const securityClass = isPolymarketDepositRouterProfileId(
+      input.proposal.serverExecutionProfileId,
+    )
+      ? "closed_destination_transform"
+      : "routed_value_movement";
     const fundingAuthorization = await loadActiveTelegramFundingAuthorization(
       this.pool,
       {
@@ -788,22 +948,11 @@ export class TelegramTradeShortfallFundingService {
     const relayProfile = relayEvmFundingProfileSpec(
       input.proposal.serverExecutionProfileId,
     );
-    const relayAllowanceAdmission = relayProfile
-      ? await captureRelayEvmAllowanceAdmission(this.pool, {
+    const relayAllowanceBaseline = relayProfile
+      ? await captureRelayEvmAllowanceBaseline(relayProfile, {
           owner: fundingAuthorization.walletAddress,
-          profile: relayProfile,
-          userId: input.userId,
         })
       : null;
-    const relayAllowanceBaseline = relayAllowanceAdmission?.baseline ?? null;
-    const relayPriorApprovalProof =
-      relayAllowanceAdmission?.priorApprovalProof ?? null;
-    if (relayAllowanceBaseline?.raw !== "0" && !relayPriorApprovalProof) {
-      throw new TelegramTradeShortfallCommitError(
-        "relay_allowance_unverified",
-        "trade funding Relay allowance cannot be proved Hunch-owned",
-      );
-    }
     const prepared = await this.runtime.prepareCommit(input.userId, {
       quoteId: quote.quoteId,
       consentToken: quote.consentToken,
@@ -813,7 +962,6 @@ export class TelegramTradeShortfallFundingService {
       plan: prepared.operation.quote.planSnapshot,
       profileId: input.proposal.serverExecutionProfileId,
     });
-    const commitNow = new Date();
     return tx(this.pool, async (client: PoolClient) => {
       await lockFundingPolicyForTransaction(client);
       if (
@@ -863,22 +1011,6 @@ export class TelegramTradeShortfallFundingService {
       if (!lockedAuthorization) {
         throw new Error("trade funding authorization changed");
       }
-      if (
-        relayProfile &&
-        relayPriorApprovalProof &&
-        !(await consumeRelayEvmPriorApprovalReservationInTransaction(client, {
-          now: commitNow,
-          owner: lockedAuthorization.walletAddress,
-          profile: relayProfile,
-          proof: relayPriorApprovalProof,
-          userId: input.userId,
-        }))
-      ) {
-        throw new TelegramTradeShortfallCommitError(
-          "relay_allowance_unverified",
-          "trade funding Relay allowance changed before commit",
-        );
-      }
       const committed = await this.runtime.commitPreparedInTransaction(
         client,
         prepared,
@@ -907,11 +1039,6 @@ export class TelegramTradeShortfallFundingService {
                   ...relayEvmAllowanceBaselineSupportMetadata(
                     relayAllowanceBaseline,
                   ),
-                  ...(relayPriorApprovalProof
-                    ? relayEvmPriorApprovalSupportMetadata(
-                        relayPriorApprovalProof,
-                      )
-                    : {}),
                 }
               : {},
           ),
@@ -994,7 +1121,7 @@ export class TelegramTradeShortfallFundingService {
       if ((linked.rowCount ?? 0) !== 1) {
         throw new Error("trade funding operation could not be linked");
       }
-      await activateTelegramTradeShortfallRelayApprovalInTransaction(client, {
+      await activateTelegramTradeShortfallInitialActionInTransaction(client, {
         operationId,
         profileId: input.proposal.serverExecutionProfileId,
         tradeIntentId: input.tradeIntentId,

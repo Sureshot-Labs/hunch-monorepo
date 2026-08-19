@@ -94,7 +94,7 @@ const step = (
     | "recovery_required"
     | "failed"
     | "cancelled",
-) => ({ id, segment_id: segmentId, state });
+) => ({ id, segment_id: segmentId, state, action_validation_result: {} });
 const destinationObservation = (
   segmentId: string | null,
   rawAmount: string,
@@ -280,6 +280,34 @@ assert.deepEqual(
     ],
   ).target,
   { status: "completed", stage: "terminal" },
+);
+
+const delegatedDepositOnlyOperation = {
+  ...operation,
+  supportMetadata: { routeId: "base-usdc-to-polygon-pusd" },
+};
+const delegatedDepositOnlySourceDebit = {
+  ...destinationObservation(null, "10000000", "51", "source_debit"),
+  operationId: delegatedDepositOnlyOperation.id,
+  networkId: "evm:8453",
+};
+assert.deepEqual(
+  deriveTargetState(
+    delegatedDepositOnlyOperation,
+    [legOne, legTwo, delegatedDepositOnlySourceDebit],
+    segments.map((segment) => ({ ...segment, status: "succeeded" as const })),
+    [
+      {
+        ...step("00000000-0000-4000-8000-000000000051", null, "succeeded"),
+        action_validation_result: {
+          relayStepKind: "deposit",
+          relayAllowanceMode: "preexisting",
+        },
+      },
+    ],
+  ).target,
+  { status: "ready", stage: "ready_for_consumer" },
+  "a canonical deposit-only Relay source debit is sufficient for a preexisting allowance route",
 );
 
 console.log(

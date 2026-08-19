@@ -20,6 +20,7 @@ import type { NormalizedAction } from "../../domain/types.js";
 import {
   createPolymarketWrapDelegatedFundingProfile,
   delegatedFundingProfileOrder,
+  polymarketRouterAuthorityScope,
 } from "../../execution/delegated-funding-executor.js";
 import {
   loadPolymarketWrapExecutionConfiguration,
@@ -31,9 +32,11 @@ import {
   fundingPolicyRevisionMayResume,
 } from "../../execution/delegated-funding-capability.js";
 import {
+  POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
   POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
   delegatedFundingProfile,
   validatePolymarketDepositUsdceWrapAction,
+  validatePolymarketDepositPusdFundAction,
   validatePolymarketDepositUsdceWrapPolicy,
 } from "../../execution/delegated-funding-profiles.js";
 import {
@@ -536,6 +539,47 @@ assert.throws(
       walletId: WALLET_ID,
     }),
   /full USDC\.e receipt/u,
+);
+
+assert.deepEqual(
+  validatePolymarketDepositPusdFundAction({
+    action: action(1_000_000n, 1_000_000n),
+    expectedRaw: "1000000",
+    routerAddress: ROUTER,
+    walletId: WALLET_ID,
+  }),
+  { expectedNonce: 77n, totalAmount: 1_000_000n },
+  "controller pUSD-only Router funding remains valid",
+);
+assert.deepEqual(
+  validatePolymarketDepositPusdFundAction({
+    action: action(1_000_000n, 700_000n),
+    expectedRaw: "1000000",
+    routerAddress: ROUTER,
+    walletId: WALLET_ID,
+  }),
+  { expectedNonce: 77n, totalAmount: 1_000_000n },
+  "the same bounded Router call may combine controller pUSD with controller USDC.e",
+);
+assert.throws(
+  () =>
+    validatePolymarketDepositPusdFundAction({
+      action: action(1_000_000n, 0n),
+      expectedRaw: "1000000",
+      routerAddress: ROUTER,
+      walletId: WALLET_ID,
+    }),
+  /confirmed controller pUSD amount/u,
+);
+assert.throws(
+  () =>
+    validatePolymarketDepositPusdFundAction({
+      action: action(1_000_000n, 1_000_001n),
+      expectedRaw: "1000000",
+      routerAddress: ROUTER,
+      walletId: WALLET_ID,
+    }),
+  /confirmed controller pUSD amount/u,
 );
 assert.throws(
   () =>
@@ -1249,6 +1293,26 @@ assert.equal(
   POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
 );
 
+{
+  const pUsdScope = polymarketRouterAuthorityScope(
+    POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
+  );
+  const usdceScope = polymarketRouterAuthorityScope(
+    POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
+  );
+  assert.equal(pUsdScope.profileId, POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID);
+  assert.equal(
+    pUsdScope.sourceAsset.assetId,
+    pUsdScope.destinationAsset.assetId,
+    "pUSD Router funding must re-check the pUSD authority, not the USDC.e wrapper default",
+  );
+  assert.notEqual(
+    usdceScope.sourceAsset.assetId,
+    pUsdScope.sourceAsset.assetId,
+    "the two Router profiles intentionally have distinct source authority scopes",
+  );
+}
+
 const compiled = compileFundingIntentPolicy({
   version: 2,
   venues: ["polymarket"],
@@ -1262,6 +1326,7 @@ assert.ok(polymarket);
 assert.equal(polymarket.delegatedExecutionEnabled, true);
 assert.deepEqual(polymarket.delegatedPolicyIds, [
   POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
+  POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
 ]);
 assert.equal(polymarket.delegatedDailyCapUsd, null);
 

@@ -747,6 +747,12 @@ export type TelegramBotTradingCallbackInput = {
       proposal: TelegramTradeShortfallProposal;
     },
   ) => Promise<Readonly<{ operationId: string }>>;
+  cancelFundingOperation?: (
+    input: Readonly<{
+      operationId: string;
+      userId: string;
+    }>,
+  ) => Promise<void>;
   sendMessage: (input: {
     chat_id: string;
     parse_mode?: "MarkdownV2";
@@ -2375,7 +2381,7 @@ function buildTelegramTradeConfirmationMessage(input: {
         "",
         formatTelegramVenueFieldMarkdownV2(input.intent.venue),
         `🎯 ${formatTelegramFieldMarkdownV2("Market", input.intent.market_title)}`,
-        `↔️ ${formatTelegramFieldMarkdownV2("Side", side)}`,
+        `↔️ ${formatTelegramFieldMarkdownV2("Side", sideLabel(input.market, side))}`,
         "",
         `📊 ${formatTelegramFieldMarkdownV2(
           action === "BUY" ? "Current ask" : "Current bid",
@@ -2524,7 +2530,7 @@ function buildTelegramTradeAppHandoffMessage(input: {
         "",
         formatTelegramVenueFieldMarkdownV2(input.intent.venue),
         `🎯 ${formatTelegramFieldMarkdownV2("Market", input.intent.market_title)}`,
-        `↔️ ${formatTelegramFieldMarkdownV2("Side", side)}`,
+        `↔️ ${formatTelegramFieldMarkdownV2("Side", sideLabel(input.market, side))}`,
         "",
         `📊 ${formatTelegramFieldMarkdownV2(
           "Current ask",
@@ -9752,6 +9758,68 @@ export async function handleTelegramBotTradingCallback(
     });
     return true;
   }
+  const cancellationOperationId = intent.funding_operation_id;
+  const cancellationUserId = intent.user_id;
+  const cancellingFundingPreparation =
+    parsed.type === "cancel" &&
+    intent.status === "funding" &&
+    cancellationOperationId != null &&
+    cancellationUserId != null &&
+    intent.submit_started_at == null;
+  if (cancellingFundingPreparation) {
+    if (!input.cancelFundingOperation) {
+      await input.answerCallbackQuery({
+        callbackQueryId: input.callbackQuery.id,
+        showAlert: true,
+        text: "⚠️ Funding cancellation is temporarily unavailable. Nothing was changed.",
+      });
+      return true;
+    }
+    const cancellationSafety = await input.db.query<{
+      external_boundary_crossed: boolean;
+    }>(
+      `select exists (
+         select 1
+         from funding_operation_steps step_row
+         left join funding_operation_step_attempts attempt_row
+           on attempt_row.step_id = step_row.id
+         where step_row.operation_id = $1::uuid
+           and (
+             attempt_row.id is not null
+             or step_row.state not in ('planned', 'action_required')
+           )
+       ) or exists (
+         select 1
+         from funding_observations observation_row
+         where observation_row.operation_id = $1::uuid
+       ) as external_boundary_crossed
+       from funding_operations operation_row
+      where operation_row.id = $1::uuid
+        and operation_row.user_id = $2::uuid`,
+      [cancellationOperationId, cancellationUserId],
+    );
+    if (cancellationSafety.rows[0]?.external_boundary_crossed !== false) {
+      await input.answerCallbackQuery({
+        callbackQueryId: input.callbackQuery.id,
+        showAlert: true,
+        text: "⏳ Funding has already started. Check its status; it cannot be cancelled safely.",
+      });
+      return true;
+    }
+    try {
+      await input.cancelFundingOperation({
+        operationId: cancellationOperationId,
+        userId: cancellationUserId,
+      });
+    } catch {
+      await input.answerCallbackQuery({
+        callbackQueryId: input.callbackQuery.id,
+        showAlert: true,
+        text: "⏳ Funding has already started. Check its status; it cannot be cancelled safely.",
+      });
+      return true;
+    }
+  }
   const exitsToMarket =
     parsed.type === "cancel" || parsed.type === "change_amount";
   const canReplayMarketExit =
@@ -9798,6 +9866,7 @@ export async function handleTelegramBotTradingCallback(
       (await updateIntentStatus({
         allowedStatuses: [
           ...PENDING_INTENT_STATUSES,
+          ...(cancellingFundingPreparation ? ["funding"] : []),
           ...(canExitExternalHandoff ? ["external_handoff"] : []),
         ],
         db: input.db,
@@ -9821,7 +9890,9 @@ export async function handleTelegramBotTradingCallback(
       text:
         parsed.type === "change_amount"
           ? "Choose a new amount."
-          : "Trade cancelled. Choose another option.",
+          : cancellingFundingPreparation
+            ? "Preparation cancelled. No money was moved."
+            : "Trade cancelled. Choose another option.",
     });
     const marketMessage = await buildTelegramBotTradingMarketMessage({
       appBaseUrl: input.appBaseUrl,
@@ -9944,7 +10015,7 @@ export async function handleTelegramBotTradingCallback(
     policy,
     authorization?.max_amount_usd ?? null,
   );
-  const tradeReadiness =
+  let tradeReadiness =
     authorization && market
       ? await resolveTelegramTradingReadiness({
           action: action === "SELL" ? "SELL" : "BUY",
@@ -10048,6 +10119,7 @@ export async function handleTelegramBotTradingCallback(
       operation_status: string;
       progress_stage: string;
       reservation_id: string | null;
+      has_broadcast_boundary: boolean;
     }>(
       `select operation.status as operation_status,
               operation.progress_stage,
@@ -10060,7 +10132,17 @@ export async function handleTelegramBotTradingCallback(
                    and reservation.state = 'active'
                  order by reservation.id
                  limit 1
-              ) as reservation_id
+              ) as reservation_id,
+              exists (
+                select 1
+                  from funding_operation_step_attempts attempt
+                  join funding_operation_steps step on step.id = attempt.step_id
+                 where step.operation_id = operation.id
+                   and (
+                     attempt.broadcast_may_have_occurred
+                     or attempt.outcome in ('submitted', 'ambiguous', 'succeeded')
+                   )
+              ) as has_broadcast_boundary
          from funding_operations operation
         where operation.id = $1::uuid
           and operation.user_id = $2::uuid`,
@@ -10075,7 +10157,8 @@ export async function handleTelegramBotTradingCallback(
       const terminalFunding =
         funding?.operation_status === "cancelled" ||
         funding?.operation_status === "failed" ||
-        funding?.operation_status === "refunded";
+        funding?.operation_status === "refunded" ||
+        funding?.operation_status === "completed";
       if (terminalFunding) {
         await updateIntentStatus({
           allowedStatuses: ["funding"],
@@ -10107,9 +10190,30 @@ export async function handleTelegramBotTradingCallback(
             text: "Open market",
           })
         : null;
+      const canCancelPreparation =
+        !terminalFunding &&
+        funding?.operation_status !== "recovery_required" &&
+        funding?.operation_status !== "reconcile_required" &&
+        funding?.has_broadcast_boundary !== true;
       const progressRows = terminalFunding
-        ? telegramTradingButtonRows(openMarketButton)
-        : [[retryButton]];
+        ? [
+            ...telegramTradingButtonRows(openMarketButton),
+            [{ callback_data: "hm:v1:home", text: "🏠 Home" }],
+          ]
+        : [
+            [retryButton],
+            ...(canCancelPreparation
+              ? [
+                  [
+                    {
+                      callback_data: `${TELEGRAM_BOT_TRADING_CALLBACK_PREFIX}:cancel:${intent.id}`,
+                      text: "❌ Cancel preparation",
+                    },
+                  ],
+                ]
+              : []),
+            [{ callback_data: "hm:v1:home", text: "🏠 Home" }],
+          ];
       await input.sendMessage({
         chat_id: chatId,
         parse_mode: "MarkdownV2",
@@ -10125,6 +10229,12 @@ export async function handleTelegramBotTradingCallback(
                 "No trade was submitted and this route will not be retried automatically. Open the market to build a fresh quote.",
               ]
             : [
+                intent.side && market
+                  ? `↔️ ${formatTelegramFieldMarkdownV2(
+                      "Side",
+                      sideLabel(market, intent.side),
+                    )}`
+                  : null,
                 `Order: ${formatUsd(Number(intent.amount_usd ?? 0))}`,
                 `Status: ${telegramFundingProgressLabel(
                   funding?.progress_stage ?? null,
@@ -10163,6 +10273,17 @@ export async function handleTelegramBotTradingCallback(
     intent.status = resumeStatus;
     intent.funding_reservation_id = funding.reservation_id;
     fundingResumedForExecution = resumeStatus === "confirming";
+    // The readiness above was read before the durable funding operation became
+    // ready. Re-read it for presentation/repair, but do not use its old
+    // available-balance snapshot to reject the amount just reserved for this
+    // exact intent below.
+    tradeReadiness = await resolveTelegramTradingReadiness({
+      action: action === "SELL" ? "SELL" : "BUY",
+      authorization,
+      market: marketForCallbackReadiness(action, market),
+      trading: input.trading,
+      venue: intent.venue,
+    });
     await input.answerCallbackQuery({
       callbackQueryId: input.callbackQuery.id,
       text:
@@ -10488,27 +10609,45 @@ export async function handleTelegramBotTradingCallback(
         ...fundingIdentity,
         proposal: tradeFundingProposal,
       });
+      await input.db.query(
+        `update telegram_trade_intents
+            set result = result || jsonb_build_object(
+                  'shortfallSideLabel', $2::text
+                ),
+                updated_at = clock_timestamp()
+          where id = $1::uuid
+            and status = 'funding'`,
+        [intent.id, sideLabel(market, side)],
+      );
       await input.answerCallbackQuery({
         callbackQueryId: input.callbackQuery.id,
         text: "✅ Internal funding started.",
       });
-      await input.sendMessage({
-        chat_id: chatId,
-        parse_mode: "MarkdownV2",
+      const startingMessage = {
+        parse_mode: "MarkdownV2" as const,
         reply_markup: {
           inline_keyboard: [
             [
               {
                 callback_data: `${TELEGRAM_BOT_TRADING_CALLBACK_PREFIX}:retry_buy:${intent.id}`,
-                text: "🔄 Check funding & continue",
+                text: "Check status",
+              },
+              {
+                callback_data: `${TELEGRAM_BOT_TRADING_CALLBACK_PREFIX}:cancel:${intent.id}`,
+                text: "❌ Cancel preparation",
               },
             ],
           ],
         },
         text: formatTelegramTradeLifecycleMessageMarkdownV2({
-          heading: "Preparing funds for this Buy.",
+          heading: "Starting preparation.",
           lines: [
+            `↔️ ${formatTelegramFieldMarkdownV2(
+              "Side",
+              sideLabel(market, side),
+            )}`,
             `Order: ${formatUsd(Number(intent.amount_usd ?? 0))}`,
+            "Status: Starting automatically.",
             "Source: existing Hunch balance.",
             ...(tradeFundingProposal.eta
               ? [
@@ -10522,7 +10661,8 @@ export async function handleTelegramBotTradingCallback(
           marketTitle: intent.market_title,
           venue: intent.venue,
         }),
-      });
+      };
+      await input.sendMessage({ chat_id: chatId, ...startingMessage });
       return true;
     } catch (error) {
       const safetyStop =
@@ -10563,37 +10703,28 @@ export async function handleTelegramBotTradingCallback(
         callbackQueryId: input.callbackQuery.id,
         showAlert: true,
         text:
-          safetyStop?.code === "relay_allowance_unverified"
-            ? "⚠️ Existing Relay allowance could not be verified. Nothing was moved."
-            : safetyStop?.code === "allowance_lane_unavailable"
-              ? "⏳ Another funding action is still being checked. Nothing was moved."
-              : "⚠️ Funding quote changed or is unavailable. Nothing was moved; reopen Review.",
+          safetyStop?.code === "allowance_lane_unavailable"
+            ? "⏳ Another funding action is still being checked. Nothing was moved."
+            : "⚠️ Funding quote changed or is unavailable. Nothing was moved; reopen Review.",
       });
       await input.sendMessage({
         chat_id: chatId,
         parse_mode: "MarkdownV2",
         text: formatTelegramTradeLifecycleMessageMarkdownV2({
           heading:
-            safetyStop?.code === "relay_allowance_unverified"
-              ? "Automatic Relay route unavailable."
-              : safetyStop?.code === "allowance_lane_unavailable"
-                ? "Funding preparation is busy."
-                : "Funding quote is no longer current.",
+            safetyStop?.code === "allowance_lane_unavailable"
+              ? "Funding preparation is busy."
+              : "Funding quote is no longer current.",
           lines:
-            safetyStop?.code === "relay_allowance_unverified"
+            safetyStop?.code === "allowance_lane_unavailable"
               ? [
-                  "An existing Relay allowance could not be proved to belong to a safe Hunch route.",
-                  "Nothing was moved or submitted. You can use Deposit or open a fresh Review.",
+                  "Another funding action is holding this wallet lane while it is checked.",
+                  "Nothing was moved or submitted. Try again shortly.",
                 ]
-              : safetyStop?.code === "allowance_lane_unavailable"
-                ? [
-                    "Another funding action is holding this wallet lane while it is checked.",
-                    "Nothing was moved or submitted. Try again shortly.",
-                  ]
-                : [
-                    "Nothing was moved or submitted.",
-                    "Open the market again to receive a fresh Review.",
-                  ],
+              : [
+                  "Nothing was moved or submitted.",
+                  "Open the market again to receive a fresh Review.",
+                ],
           marketTitle: intent.market_title,
           venue: intent.venue,
         }),
@@ -10814,7 +10945,8 @@ export async function handleTelegramBotTradingCallback(
       (action === "BUY" &&
         quoteMaxSpendUsd != null &&
         quoteMaxSpendUsd > maxAmountUsd) ||
-      (tradeReadiness?.maxExecutableBuyUsd != null &&
+      (!fundingResumedForExecution &&
+        tradeReadiness?.maxExecutableBuyUsd != null &&
         action === "BUY" &&
         quoteMaxSpendUsd != null &&
         quoteMaxSpendUsd > tradeReadiness.maxExecutableBuyUsd)
@@ -10841,9 +10973,26 @@ export async function handleTelegramBotTradingCallback(
         showAlert: true,
         text: "⚠️ Price moved. Send /market again.",
       });
+      const openMarketButton = buildTelegramTradingMiniAppButton({
+        appBaseUrl: input.appBaseUrl,
+        path: openMarketUrl(input.appBaseUrl, market),
+        telegramMiniAppEnabled: input.telegramMiniAppEnabled,
+        text: "Open market",
+      });
       await input.sendMessage({
         chat_id: chatId,
         parse_mode: "MarkdownV2",
+        reply_markup: {
+          inline_keyboard: [
+            ...(openMarketButton ? [[openMarketButton]] : []),
+            [
+              {
+                callback_data: "hm:v1:home",
+                text: "🏠 Home",
+              },
+            ],
+          ],
+        },
         text: formatTelegramTradeLifecycleMessageMarkdownV2({
           heading: "Trade not submitted.",
           lines: [
@@ -10883,14 +11032,26 @@ export async function handleTelegramBotTradingCallback(
         showAlert: true,
         text: "⚠️ Price moved. Review a new quote before trading.",
       });
+      const reopenMarketButton = buildTelegramTradingMiniAppButton({
+        appBaseUrl: input.appBaseUrl,
+        path: openMarketUrl(input.appBaseUrl, market),
+        telegramMiniAppEnabled: input.telegramMiniAppEnabled,
+        text: "Open market again",
+      });
       await input.sendMessage({
         chat_id: chatId,
         parse_mode: "MarkdownV2",
+        reply_markup: {
+          inline_keyboard: [
+            ...(reopenMarketButton ? [[reopenMarketButton]] : []),
+            [{ callback_data: "hm:v1:home", text: "🏠 Home" }],
+          ],
+        },
         text: formatTelegramTradeLifecycleMessageMarkdownV2({
           heading: "Trade not submitted.",
           lines: [
             "The quote moved beyond your confirmed tolerance.",
-            "Nothing was submitted. Send /market again for a new preview.",
+            "Nothing was submitted. Open the market for a new preview.",
           ],
           marketTitle: intent.market_title,
           venue: intent.venue,
@@ -11327,6 +11488,7 @@ export async function captureTelegramBotTradingCallback(input: {
   openFundingBuyReturn?: TelegramFundingBuyReturnOpener;
   inspectTradeShortfall?: TelegramBotTradingCallbackInput["inspectTradeShortfall"];
   commitTradeShortfall?: TelegramBotTradingCallbackInput["commitTradeShortfall"];
+  cancelFundingOperation?: TelegramBotTradingCallbackInput["cancelFundingOperation"];
   signerInspector?: TelegramBotTradingSignerInspector;
   telegramMiniAppEnabled?: boolean;
   trading?: ApiBotTradingExecutor;
@@ -11350,6 +11512,7 @@ export async function captureTelegramBotTradingCallback(input: {
     openFundingBuyReturn: input.openFundingBuyReturn,
     inspectTradeShortfall: input.inspectTradeShortfall,
     commitTradeShortfall: input.commitTradeShortfall,
+    cancelFundingOperation: input.cancelFundingOperation,
     signerInspector: input.signerInspector,
     sendMessage: async (message) => {
       messages.push(message);
