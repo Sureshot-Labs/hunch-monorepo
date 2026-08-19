@@ -9896,9 +9896,10 @@ export async function handleTelegramBotTradingCallback(
   if (
     parsed.type === "retry_buy" &&
     intent.action === "buy" &&
-    intent.funding_operation_id != null &&
-    intent.submit_started_at == null &&
-    ["cancelled", "expired", "failed", "filled"].includes(intent.status)
+    (intent.status === "filled" ||
+      (intent.funding_operation_id != null &&
+        intent.submit_started_at == null &&
+        ["cancelled", "expired", "failed"].includes(intent.status)))
   ) {
     await input.answerCallbackQuery({
       callbackQueryId: input.callbackQuery.id,
@@ -10955,10 +10956,7 @@ export async function handleTelegramBotTradingCallback(
           heading: "Starting preparation.",
           tone: "working",
           lines: [
-            `↔️ ${formatTelegramFieldMarkdownV2(
-              "Side",
-              sideLabel(market, side),
-            )}`,
+            `Side: ${sideLabel(market, side)}`,
             `Order: ${formatUsd(Number(intent.amount_usd ?? 0))}`,
             "Status: Starting automatically.",
             "Source: existing Hunch balance.",
