@@ -27,7 +27,10 @@ import type { FundingCommitStep } from "../../funding/persistence/funding-operat
 import { resolveActionSponsorship } from "../../funding/execution/sponsorship-policy.js";
 import { RelayPinnedActionValidator } from "./action-validator.js";
 import { isRelayPinnedStableAsset } from "./mappings.js";
-import { canonicalizeRelayDepositoryV2SelfBoundAction } from "./rehearsal.js";
+import {
+  RELAY_DEPOSITORY_V2,
+  canonicalizeRelayDepositoryV2SelfBoundAction,
+} from "./rehearsal.js";
 import type { createRelayReferenceCodec } from "./reference-codec.js";
 import type { NormalizedRelayWalletQuote } from "./wallet-adapter.js";
 
@@ -35,6 +38,9 @@ const POLYMARKET_DEPOSIT_WALLET_HANDOFF_EXECUTOR_ID =
   "polymarket_deposit_wallet_relayer_v1";
 const ERC20_TRANSFER_INTERFACE = new Interface([
   "function transfer(address recipient,uint256 amount)",
+]);
+const ERC20_APPROVE_INTERFACE = new Interface([
+  "function approve(address spender,uint256 amount)",
 ]);
 
 export function groupRelayExecutableActions(input: {
@@ -254,6 +260,7 @@ export function relayDelegatedCommitSteps(
     sourceAmount: Money;
     profile: WalletExecutionProfile;
     serverExecutionProfileId: string;
+    persistentApprovalCapRaw?: string;
   }>,
 ): readonly FundingCommitStep[] {
   const quotedDepositStep =
@@ -263,6 +270,16 @@ export function relayDelegatedCommitSteps(
         ? input.steps[1]
         : undefined;
   const usesExistingAllowance = input.steps.length === 1;
+  const persistentApprovalCapRaw = input.persistentApprovalCapRaw;
+  const usesPersistentApproval =
+    !usesExistingAllowance && persistentApprovalCapRaw != null;
+  if (
+    usesPersistentApproval &&
+    (!/^[1-9][0-9]*$/u.test(persistentApprovalCapRaw) ||
+      BigInt(input.sourceAmount.raw) > BigInt(persistentApprovalCapRaw))
+  ) {
+    throw new Error("delegated Relay persistent approval cap is invalid");
+  }
   if (
     !quotedDepositStep ||
     typeof quotedDepositStep.normalizedAction.actionId !== "string" ||
@@ -314,9 +331,29 @@ export function relayDelegatedCommitSteps(
       relayOrderId: canonicalDeposit.orderId,
     }),
   };
+  const quotedApprovalStep = input.steps[0] as FundingCommitStep | undefined;
+  const canonicalApprovalAction =
+    usesPersistentApproval && quotedApprovalStep
+      ? jsonRecord({
+          ...quotedApprovalStep.normalizedAction,
+          to: input.sourceAmount.asset.assetId,
+          data: ERC20_APPROVE_INTERFACE.encodeFunctionData("approve", [
+            RELAY_DEPOSITORY_V2,
+            BigInt(persistentApprovalCapRaw),
+          ]),
+        })
+      : null;
+  const committedApprovalStep =
+    canonicalApprovalAction && quotedApprovalStep
+      ? {
+          ...quotedApprovalStep,
+          actionFingerprint: canonicalJsonHash(canonicalApprovalAction),
+          normalizedAction: canonicalApprovalAction,
+        }
+      : quotedApprovalStep;
   const committedSteps = usesExistingAllowance
     ? [committedDepositStep]
-    : [input.steps[0] as FundingCommitStep, committedDepositStep];
+    : [committedApprovalStep as FundingCommitStep, committedDepositStep];
   return committedSteps.map((step, ordinal) => ({
     ...step,
     stepKind:
@@ -330,6 +367,15 @@ export function relayDelegatedCommitSteps(
         !usesExistingAllowance && ordinal === 0 ? "approve" : "deposit",
       requiresSingleOperationBundle: true,
       ...(usesExistingAllowance ? { relayAllowanceMode: "preexisting" } : {}),
+      ...(!usesExistingAllowance && ordinal === 0 && usesPersistentApproval
+        ? {
+            relayApprovalCapRaw: persistentApprovalCapRaw,
+            relayAllowancePersistence: "bounded_cap",
+          }
+        : {}),
+      ...(!usesExistingAllowance && ordinal === 1 && usesPersistentApproval
+        ? { relayAllowanceMode: "preexisting" }
+        : {}),
       ...(usesExistingAllowance || ordinal === 1
         ? {
             postconditionEvidenceKind: "exact_erc20_source_debit_v1",
@@ -379,6 +425,7 @@ export async function buildRelayPlanningQuote(
     quoteCorrelationId: string;
     route: FundingRuntimePolicy["routes"][number];
     serverExecutionProfileId?: string;
+    persistentApprovalCapRaw?: string;
     source: RelayEligibleSourceFact;
     supportMetadata?: Readonly<Record<string, JsonValue>>;
   }>,
@@ -416,6 +463,9 @@ export async function buildRelayPlanningQuote(
           sourceAmount: input.quote.sourceAmount,
           profile: input.profile,
           serverExecutionProfileId: input.serverExecutionProfileId,
+          ...(input.persistentApprovalCapRaw
+            ? { persistentApprovalCapRaw: input.persistentApprovalCapRaw }
+            : {}),
         })
       : clientSteps;
   const plan = {

@@ -24,6 +24,20 @@ function positiveRaw(value: string): bigint | null {
   return /^[1-9][0-9]*$/u.test(value) ? BigInt(value) : null;
 }
 
+function expectedApprovalRaw(
+  actionValidationResult: JsonRecord,
+  fallback: bigint,
+): bigint {
+  const configured = actionValidationResult.relayApprovalCapRaw;
+  if (configured == null) return fallback;
+  if (typeof configured !== "string") {
+    throw new Error("Relay approval cap is malformed");
+  }
+  const cap = positiveRaw(configured);
+  if (cap == null) throw new Error("Relay approval cap is malformed");
+  return cap;
+}
+
 export function validateRelayDelegatedEvmAction(
   input: Readonly<{
     action: NormalizedAction;
@@ -67,7 +81,10 @@ export function validateRelayDelegatedEvmAction(
         String(decoded.spender),
         RELAY_DEPOSITORY_V2,
       ) ||
-      BigInt(decoded.amount) !== (kind === "cleanup" ? 0n : amount)
+      BigInt(decoded.amount) !==
+        (kind === "cleanup"
+          ? 0n
+          : expectedApprovalRaw(input.actionValidationResult, amount))
     ) {
       throw new Error("Relay approval spender or amount differs");
     }

@@ -319,6 +319,11 @@ export type FundingIntent = Readonly<{
   /** Internal only: public request schemas intentionally omit this field. */
   serverExecutionProfileId?: string | null;
   /**
+   * Internal only: exact bounded ERC-20 allowance selected from the locked
+   * delegated authorization. It is never derived from a wallet balance.
+   */
+  relayPersistentApprovalCapRaw?: string | null;
+  /**
    * Internal only: an authoritative consumer may already include executable
    * venue preparation in its available-funds calculation. In that case this
    * is the exact additional destination credit still required by the trade.

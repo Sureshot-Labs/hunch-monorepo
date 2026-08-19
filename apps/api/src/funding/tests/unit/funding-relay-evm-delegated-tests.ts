@@ -620,6 +620,64 @@ assert.deepEqual(
   "both steps remain inert until the atomic receipt link activates approve",
 );
 
+const persistentDelegatedSteps = relayDelegatedCommitSteps({
+  steps: delegatedSteps.map((step, ordinal) => ({
+    ...step,
+    state: "action_required" as const,
+    ...(ordinal === 1
+      ? {
+          normalizedAction: {
+            ...step.normalizedAction,
+            data: deposit.encodeFunctionData("depositErc20", [
+              WALLET,
+              BASE_USDC,
+              RAW,
+              orderId,
+            ]),
+          },
+        }
+      : {}),
+  })),
+  sourceAmount: {
+    asset: { networkId: "evm:8453", assetId: BASE_USDC, decimals: 6 },
+    raw: RAW,
+  },
+  profile: atomicWalletProfile,
+  serverExecutionProfileId: TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
+  persistentApprovalCapRaw: CAP,
+});
+const persistentApprove = persistentDelegatedSteps[0];
+const persistentDeposit = persistentDelegatedSteps[1];
+assert.ok(persistentApprove && persistentDeposit);
+assert.equal(
+  approve.decodeFunctionData(
+    "approve",
+    String(persistentApprove.normalizedAction.data),
+  ).amount,
+  BigInt(CAP),
+  "the first delegated route approves only the authorization policy cap",
+);
+assert.equal(
+  persistentApprove.actionValidationResult.relayApprovalCapRaw,
+  CAP,
+);
+assert.equal(
+  persistentDeposit.actionValidationResult.relayAllowanceMode,
+  "preexisting",
+  "the dependent exact deposit consumes the bounded allowance like a later deposit-only route",
+);
+assert.doesNotThrow(() =>
+  validateRelayDelegatedEvmAction({
+    action: persistentApprove.normalizedAction as never,
+    actionValidationResult: persistentApprove.actionValidationResult,
+    expectedRaw: RAW,
+    walletAddress: WALLET,
+    walletId: WALLET_ID,
+    profile: relayProfile,
+  }),
+  "validator accepts the cap only when it is durably attached to this approval step",
+);
+
 const delegatedDepositOnlySteps = relayDelegatedCommitSteps({
   steps: [
     {

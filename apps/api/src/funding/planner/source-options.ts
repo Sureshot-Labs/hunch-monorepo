@@ -173,6 +173,7 @@ export type RelayFirstSourcePlannerDependencies = Readonly<{
       maximumQuoteTtlMs?: number;
       policyRevision: string;
       serverExecutionProfileId?: string;
+      persistentApprovalCapRaw?: string;
       signal: AbortSignal;
       timeoutMs: number;
     }>,
@@ -672,6 +673,12 @@ export class RelayFirstSourcePlanner {
                   ? {
                       serverExecutionProfileId:
                         input.request.serverExecutionProfileId,
+                    }
+                  : {}),
+                ...(input.request.relayPersistentApprovalCapRaw
+                  ? {
+                      persistentApprovalCapRaw:
+                        input.request.relayPersistentApprovalCapRaw,
                     }
                   : {}),
               },

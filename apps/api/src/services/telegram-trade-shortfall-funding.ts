@@ -70,6 +70,8 @@ export type TelegramTradeShortfallProposal = Readonly<{
   liquidityProjectionId: string;
   selectedSourceOptionId: string;
   serverExecutionProfileId: string;
+  /** Bounded allowance cap included in the reviewed delegated Relay plan. */
+  relayPersistentApprovalCapRaw?: string;
   sourceAmounts: FundingQuoteSummary["sourceAmounts"];
   expectedDestination: Money;
   minimumDestination: Money;
@@ -166,6 +168,7 @@ function exactStableRaw(input: TelegramTradeShortfallIdentity): string | null {
 export function buildTelegramTradeShortfallRequest(
   input: TelegramTradeShortfallIdentity,
   serverExecutionProfileId?: string,
+  relayPersistentApprovalCapRaw?: string,
 ): FundingDiscoveryRequest {
   const requestedDestinationAmount = {
     asset: destinationAsset(input.venue),
@@ -197,6 +200,9 @@ export function buildTelegramTradeShortfallRequest(
     venueBindingOptionId: null,
     controllerWalletRef: null,
     ...(serverExecutionProfileId ? { serverExecutionProfileId } : {}),
+    ...(relayPersistentApprovalCapRaw
+      ? { relayPersistentApprovalCapRaw }
+      : {}),
     maxFeeUsd: input.maxFeeUsd,
     maxSlippageBps: input.maxSlippageBps,
     deadline: input.deadline,
@@ -210,6 +216,7 @@ export function buildTelegramTradeShortfallCommitRequest(
     | "requestedDestinationAmount"
     | "serverAdditionalDestinationAmount"
     | "serverExecutionProfileId"
+    | "relayPersistentApprovalCapRaw"
   >,
 ): FundingDiscoveryRequest {
   const serverAdditionalDestinationAmount =
@@ -232,6 +239,7 @@ export function buildTelegramTradeShortfallCommitRequest(
       additionalFundingRaw: serverAdditionalDestinationAmount.raw,
     },
     proposal.serverExecutionProfileId,
+    proposal.relayPersistentApprovalCapRaw,
   );
 }
 
@@ -242,6 +250,7 @@ export function resolveTelegramTradeShortfallCommitAmounts(
     | "requestedDestinationAmount"
     | "serverAdditionalDestinationAmount"
     | "serverExecutionProfileId"
+    | "relayPersistentApprovalCapRaw"
   >,
 ): Readonly<{
   fundingDestinationAmount: Money;
@@ -559,6 +568,7 @@ function proposalFromOption(
   option: SourceOption,
   profileId: string,
   serverAdditionalDestinationAmount: Money,
+  relayPersistentApprovalCapRaw?: string,
 ): TelegramTradeShortfallProposal {
   if (
     !projection.destinationOptionId ||
@@ -582,6 +592,9 @@ function proposalFromOption(
     liquidityProjectionId: projection.liquidityProjectionId,
     selectedSourceOptionId: option.sourceOptionId,
     serverExecutionProfileId: profileId,
+    ...(relayPersistentApprovalCapRaw
+      ? { relayPersistentApprovalCapRaw }
+      : {}),
     sourceAmounts,
     expectedDestination: option.expectedDestination,
     minimumDestination: option.minimumDestination,
@@ -663,6 +676,7 @@ export class TelegramTradeShortfallFundingService {
       Readonly<{
         plan: Awaited<ReturnType<FundingPlanningRuntime["liquidity"]>>;
         profileId: string;
+        relayPersistentApprovalCapRaw?: string;
       }>
     > = [];
     let completedProfileInspection = false;
@@ -790,7 +804,13 @@ export class TelegramTradeShortfallFundingService {
         );
         continue;
       }
-      candidate = plannedCandidate;
+      candidate = {
+        ...plannedCandidate,
+        ...(relayEvmFundingProfileSpec(plannedCandidate.profileId) &&
+        provisioned.maxSourceRaw
+          ? { relayPersistentApprovalCapRaw: provisioned.maxSourceRaw }
+          : {}),
+      };
       break;
     }
     if (!candidate) {
@@ -821,7 +841,11 @@ export class TelegramTradeShortfallFundingService {
     try {
       delegatedPlan = await this.runtime.liquidity(
         input.userId,
-        buildTelegramTradeShortfallRequest(exactInput, profileId),
+        buildTelegramTradeShortfallRequest(
+          exactInput,
+          profileId,
+          candidate.relayPersistentApprovalCapRaw,
+        ),
       );
     } catch (error) {
       const reasonCode = shortfallPlannerFailureReasonCode(error);
@@ -873,6 +897,7 @@ export class TelegramTradeShortfallFundingService {
     const delegatedRequest = buildTelegramTradeShortfallRequest(
       exactInput,
       profileId,
+      candidate.relayPersistentApprovalCapRaw,
     );
     const serverAdditionalDestinationAmount =
       delegatedRequest.serverAdditionalDestinationAmount;
@@ -889,6 +914,7 @@ export class TelegramTradeShortfallFundingService {
         delegatedAutomated.option,
         profileId,
         serverAdditionalDestinationAmount,
+        candidate.relayPersistentApprovalCapRaw,
       ),
     };
   }
@@ -907,6 +933,12 @@ export class TelegramTradeShortfallFundingService {
       new Date(input.proposal.expiresAt).getTime() <= Date.now()
     ) {
       throw new Error("trade funding proposal expired or changed");
+    }
+    if (
+      input.proposal.relayPersistentApprovalCapRaw != null &&
+      !/^[1-9][0-9]*$/u.test(input.proposal.relayPersistentApprovalCapRaw)
+    ) {
+      throw new Error("trade funding Relay approval cap is invalid");
     }
     const commitAmounts = resolveTelegramTradeShortfallCommitAmounts(
       input,
@@ -1107,6 +1139,14 @@ export class TelegramTradeShortfallFundingService {
       );
       if (!lockedAuthorization) {
         throw new Error("trade funding authorization changed");
+      }
+      if (
+        relayEvmFundingProfileSpec(input.proposal.serverExecutionProfileId) &&
+        input.proposal.relayPersistentApprovalCapRaw != null &&
+        input.proposal.relayPersistentApprovalCapRaw !==
+          lockedAuthorization.maxSourceRaw
+      ) {
+        throw new Error("trade funding Relay approval cap changed");
       }
       if (routerContinuationRequired) {
         const lockedRouterAuthorization =
