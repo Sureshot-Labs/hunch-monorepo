@@ -745,6 +745,97 @@ async function ensureSettledConsumerReservation(
   now: Date,
 ): Promise<void> {
   if (operation.purpose !== "trade_shortfall") return;
+  const continuationOfOperationId =
+    typeof operation.supportMetadata.continuationOfOperationId === "string"
+      ? operation.supportMetadata.continuationOfOperationId
+      : null;
+  if (continuationOfOperationId) {
+    const parentOperation = await client.query<{
+      id: string;
+      progress_stage: FundingOperationRow["progressStage"];
+      status: FundingOperationRow["status"];
+      version: number;
+    }>(
+      `select id, status, progress_stage, version
+         from funding_operations
+        where id = $1::uuid
+          and user_id = $2::uuid
+        for update`,
+      [continuationOfOperationId, operation.userId],
+    );
+    const parent = parentOperation.rows[0];
+    if (!parent) {
+      throw new Error("trade shortfall continuation parent is missing");
+    }
+    const parentIsReady =
+      parent.status === "ready" &&
+      parent.progress_stage === "ready_for_consumer";
+    const parentIsTerminal = ["completed", "refunded", "failed", "cancelled"].includes(
+      parent.status,
+    );
+    if (!parentIsReady && !parentIsTerminal) {
+      throw new Error("trade shortfall continuation parent is not consumable");
+    }
+    if (parentIsReady) {
+      const parentReservations = await client.query<{ id: string }>(
+        `select id
+           from balance_reservations
+          where operation_id = $1::uuid
+            and user_id = $2::uuid
+            and mode = 'settled_for_consumer'
+            and state = 'active'
+          for update`,
+        [continuationOfOperationId, operation.userId],
+      );
+      if (parentReservations.rows.length === 0) {
+        throw new Error("trade shortfall continuation parent has no ready balance");
+      }
+      if (parentReservations.rows.length !== 1) {
+        throw new Error("trade shortfall continuation parent has multiple ready balances");
+      }
+      const reservation = parentReservations.rows[0];
+      if (!reservation) {
+        throw new Error("trade shortfall continuation parent ready balance is missing");
+      }
+      await releaseFundingReservationInTransaction(client, {
+        reservationId: reservation.id,
+        outcomeReason: "trade_shortfall_continuation_consumed_parent_ready_balance",
+        now,
+      });
+      await transitionFundingOperationInTransaction(client, {
+        operationId: parent.id,
+        scope: { kind: "worker" },
+        expectedVersion: parent.version,
+        expectedState: {
+          status: parent.status,
+          stage: parent.progress_stage,
+        },
+        nextState: { status: "completed", stage: "terminal" },
+        supportMetadataPatch: {
+          consumerResolution: "consumed_by_continuation",
+          consumerResolvedAt: now.toISOString(),
+          consumerResolutionReason: "continuation_ready",
+          continuationOperationId: operation.id,
+        },
+        now,
+      });
+      await client.query(
+        `update telegram_funding_authorization_reservations
+            set status = 'settled',
+                resolved_at = $2,
+                resolution_evidence = resolution_evidence || jsonb_build_object(
+                  'operationStatus', 'completed',
+                  'operationId', $1::text,
+                  'reason', 'consumed_by_continuation',
+                  'continuationOperationId', $3::text
+                ),
+                updated_at = $2
+          where funding_operation_id = $1::uuid
+            and status = 'reserved'`,
+        [parent.id, now, operation.id],
+      );
+    }
+  }
   const destination = parseMoneyJson(
     operation.actualDestinationAmount ?? operation.requestedDestinationAmount,
   );

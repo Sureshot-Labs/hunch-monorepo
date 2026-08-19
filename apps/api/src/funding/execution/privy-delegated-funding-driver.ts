@@ -404,10 +404,11 @@ export class PrivyDelegatedFundingDriver implements DelegatedFundingNetworkDrive
         if (
           input.requiredProfileId === POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID &&
           (!policyValidation.fundingRouterPusdFundPresent ||
-            !policyValidation.fundingRouterUsdceApprovalPresent)
+            !policyValidation.fundingRouterUsdceApprovalPresent ||
+            !policyValidation.fundingRouterControllerApprovalPresent)
         ) {
           throw new PrivyDelegatedFundingProfileInvalidError(
-            "Privy automation policy lacks the exact Funding Router pUSD/USDC.e rules",
+            "Privy automation policy lacks the exact Funding Router pUSD approval/fund rules",
           );
         }
         const relayProfile = relayEvmFundingProfileSpec(

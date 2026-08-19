@@ -597,6 +597,7 @@ export class TelegramTradeShortfallFundingService {
 
   async inspect(
     input: TelegramTradeShortfallIdentity,
+    options: Readonly<{ requiredProfileId?: string }> = {},
   ): Promise<TelegramTradeShortfallInspection> {
     // This is accounting repair, not a route retry.  A prior shortfall may
     // have reached the venue, then lost its consumer before submission.  Its
@@ -643,10 +644,10 @@ export class TelegramTradeShortfallFundingService {
     > = [];
     let completedProfileInspection = false;
     const unavailableReasonCodes: string[] = [];
-    for (const profileId of telegramTradeShortfallExecutionProfiles(
-      input.venue,
-      destination,
-    )) {
+    const profileIds = options.requiredProfileId
+      ? [options.requiredProfileId]
+      : telegramTradeShortfallExecutionProfiles(input.venue, destination);
+    for (const profileId of profileIds) {
       let plan: Awaited<ReturnType<FundingPlanningRuntime["liquidity"]>>;
       try {
         plan = await this.runtime.liquidity(
@@ -982,10 +983,16 @@ export class TelegramTradeShortfallFundingService {
           where id = $1::uuid
             and user_id = $2::uuid
             and authorization_id = $3::uuid
-            and status = 'confirming'
+            and status = $4
+            and funding_operation_id is null
             and submit_started_at is null
           for update`,
-        [input.tradeIntentId, input.userId, input.authorizationId],
+        [
+          input.tradeIntentId,
+          input.userId,
+          input.authorizationId,
+          "confirming",
+        ],
       );
       if (!lockedIntent.rows[0]) {
         throw new Error("trade funding intent is no longer confirmable");
@@ -1033,15 +1040,13 @@ export class TelegramTradeShortfallFundingService {
           lockedAuthorization.id,
           telegramFundingAuthorizationFingerprint(lockedAuthorization),
           input.tradeIntentId,
-          JSON.stringify(
-            relayAllowanceBaseline
-              ? {
-                  ...relayEvmAllowanceBaselineSupportMetadata(
-                    relayAllowanceBaseline,
-                  ),
-                }
-              : {},
-          ),
+          JSON.stringify({
+            ...(relayAllowanceBaseline
+              ? relayEvmAllowanceBaselineSupportMetadata(
+                  relayAllowanceBaseline,
+                )
+              : {}),
+          }),
         ],
       );
       const capReservation =
@@ -1129,4 +1134,5 @@ export class TelegramTradeShortfallFundingService {
       return { operationId };
     });
   }
+
 }

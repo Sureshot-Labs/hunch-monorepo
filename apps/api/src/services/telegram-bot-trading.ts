@@ -10121,13 +10121,13 @@ export async function handleTelegramBotTradingCallback(
       reservation_id: string | null;
       has_broadcast_boundary: boolean;
     }>(
-      `select operation.status as operation_status,
-              operation.progress_stage,
+      `select tracked_operation.status as operation_status,
+              tracked_operation.progress_stage,
               (
                 select reservation.id::text
                   from balance_reservations reservation
-                 where reservation.operation_id = operation.id
-                   and reservation.user_id = operation.user_id
+                 where reservation.operation_id = tracked_operation.id
+                   and reservation.user_id = tracked_operation.user_id
                    and reservation.mode = 'settled_for_consumer'
                    and reservation.state = 'active'
                  order by reservation.id
@@ -10137,16 +10137,31 @@ export async function handleTelegramBotTradingCallback(
                 select 1
                   from funding_operation_step_attempts attempt
                   join funding_operation_steps step on step.id = attempt.step_id
-                 where step.operation_id = operation.id
+               where step.operation_id = tracked_operation.id
                    and (
                      attempt.broadcast_may_have_occurred
                      or attempt.outcome in ('submitted', 'ambiguous', 'succeeded')
                    )
               ) as has_broadcast_boundary
          from funding_operations operation
+         left join lateral (
+           select continuation.*
+             from funding_operations continuation
+            where continuation.user_id = operation.user_id
+              and continuation.support_metadata ->> 'telegramTradeIntentId' = $3::text
+              and continuation.support_metadata ->> 'continuationOfOperationId' = operation.id::text
+            order by continuation.created_at desc, continuation.id desc
+            limit 1
+         ) continuation on true
+         cross join lateral (
+           select coalesce(continuation.id, operation.id) as id,
+                  coalesce(continuation.user_id, operation.user_id) as user_id,
+                  coalesce(continuation.status, operation.status) as status,
+                  coalesce(continuation.progress_stage, operation.progress_stage) as progress_stage
+         ) tracked_operation
         where operation.id = $1::uuid
           and operation.user_id = $2::uuid`,
-      [intent.funding_operation_id, intent.user_id],
+      [intent.funding_operation_id, intent.user_id, intent.id],
     );
     const funding = fundingState.rows[0];
     if (

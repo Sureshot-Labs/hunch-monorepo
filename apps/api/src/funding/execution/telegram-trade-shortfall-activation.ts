@@ -41,7 +41,11 @@ export async function activateTelegramTradeShortfallInitialStepInTransaction(
               operation_row.support_metadata ->> 'telegramTradeIntentId'
         and trade_intent_row.user_id = operation_row.user_id
         and trade_intent_row.status = 'funding'
-        and trade_intent_row.funding_operation_id = operation_row.id
+        and (
+          trade_intent_row.funding_operation_id = operation_row.id
+          or trade_intent_row.funding_operation_id::text =
+               operation_row.support_metadata ->> 'continuationOfOperationId'
+        )
         and trade_intent_row.submit_started_at is null
        left join telegram_funding_authorization_reservations reservation_row
          on reservation_row.funding_operation_id = operation_row.id
@@ -94,7 +98,11 @@ export async function activateStalledTelegramTradeShortfallInitialStepsInTransac
                 operation_row.support_metadata ->> 'telegramTradeIntentId'
           and trade_intent_row.user_id = operation_row.user_id
           and trade_intent_row.status = 'funding'
-          and trade_intent_row.funding_operation_id = operation_row.id
+          and (
+            trade_intent_row.funding_operation_id = operation_row.id
+            or trade_intent_row.funding_operation_id::text =
+                 operation_row.support_metadata ->> 'continuationOfOperationId'
+          )
           and trade_intent_row.submit_started_at is null
          left join telegram_funding_authorization_reservations reservation_row
            on reservation_row.funding_operation_id = operation_row.id
@@ -156,7 +164,11 @@ export async function activateTelegramTradeShortfallRouterDependentFundInTransac
               operation_row.support_metadata ->> 'telegramTradeIntentId'
         and trade_intent_row.user_id = operation_row.user_id
         and trade_intent_row.status = 'funding'
-        and trade_intent_row.funding_operation_id = operation_row.id
+        and (
+          trade_intent_row.funding_operation_id = operation_row.id
+          or trade_intent_row.funding_operation_id::text =
+               operation_row.support_metadata ->> 'continuationOfOperationId'
+        )
        left join telegram_funding_authorization_reservations reservation_row
          on reservation_row.funding_operation_id = operation_row.id
         and reservation_row.source_trade_intent_id = trade_intent_row.id

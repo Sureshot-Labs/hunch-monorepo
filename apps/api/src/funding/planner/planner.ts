@@ -212,7 +212,7 @@ function validatePlannedSources(
     const isPusdRouterApprovalThenFund =
       steps.length === 2 &&
       steps[0]?.ordinal === 0 &&
-      steps[0]?.stepKind === "venue_preparation" &&
+      steps[0]?.stepKind === "transaction" &&
       steps[0]?.state === "planned" &&
       steps[0]?.segmentOrdinal === null &&
       steps[0]?.executorId === POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID &&
