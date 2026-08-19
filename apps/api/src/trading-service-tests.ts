@@ -3490,6 +3490,31 @@ const tests: TestCase[] = [
         fundingBalancePendingBlock,
         /and status = 'executing'[\s\S]*?and submit_started_at is null/,
       );
+
+      // After a funding broadcast, cancelling must stop only the Buy. The
+      // transfer keeps reconciling and, once ready, its consumer reservation
+      // is released to ordinary venue cash rather than a later auto-submit.
+      const progressSource = readFileSync(
+        resolve(apiSrcDir, "services/telegram-trade-shortfall-progress.ts"),
+        "utf8",
+      );
+      const cancelFundingBlock = sourceSlice(
+        telegramTrading,
+        "const cancellingFundingIntent =",
+        "const exitsToMarket =",
+      );
+      assert.match(
+        cancelFundingBlock,
+        /external_boundary_crossed === false[\s\S]*?cancelFundingOperation[\s\S]*?else[\s\S]*?cancellingBuyContinuation = true/,
+      );
+      assert.match(
+        progressSource,
+        /canCancelBuy:[\s\S]*?candidate\.has_broadcast_boundary/,
+      );
+      assert.match(
+        progressSource,
+        /releaseFundingReservationForAbandonedTradeInTransaction[\s\S]*?telegram_buy_cancelled_after_funding/,
+      );
     },
   },
   {
