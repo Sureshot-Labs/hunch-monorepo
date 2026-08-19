@@ -104,6 +104,7 @@ import {
   reduceFundingOperation,
   runFundingReconciliationBatch,
 } from "../../reconciliation/funding-reducer.js";
+import { runTelegramRouterContinuationCommitter } from "../../reconciliation/telegram-router-continuation-committer.js";
 import { OwnedRouteDestinationObserver } from "../../reconciliation/owned-route-destination-observer.js";
 import { RelayOwnedRefundObserver } from "../../reconciliation/relay-owned-refund-observer.js";
 import { PolymarketFundingPostconditionDriver } from "../../preparation/polymarket-funding-reconciler.js";
@@ -373,6 +374,7 @@ async function createFixture(
         assert.deepEqual(input, {
           walletAddress,
           walletId: privyWalletId,
+          profileId: POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
         });
         return "valid";
       },
@@ -845,7 +847,11 @@ async function createFixture(
     try {
       assert.deepEqual(
         await telegramUsdceWrapRoutingDecision(pool, target),
-        { kind: "hard_invalid", reasonCode: "delegated_authority_invalid" },
+        {
+          kind: "hard_invalid",
+          reasonCode: "delegated_authority_invalid",
+          diagnosticCode: "authority_missing",
+        },
         "hard wallet invalidation must win over incomplete runtime config",
       );
     } finally {
@@ -2686,6 +2692,230 @@ try {
       ],
       "a shortfall activates only its initial Relay approval",
     );
+  }
+
+  async function assertTelegramRouterContinuationHardBlock(): Promise<void> {
+    // A ready Relay parent with no active Router authorization must not hold
+    // its consumer balance or Relay allowance lane indefinitely. Three
+    // identical hard observations terminalize only this pre-submit intent and
+    // release its funds back to the controller.
+    const root = await createRelayFixture("750000");
+    const tradingAuthorization = await pool.query<{ id: string }>(
+      `select trading_authorization.id
+         from telegram_bot_trading_authorizations trading_authorization
+        where trading_authorization.user_id = $1::uuid
+          and trading_authorization.telegram_user_id = (
+            select telegram_account.telegram_user_id
+              from user_telegram_accounts telegram_account
+             where telegram_account.id = $2::uuid
+          )
+          and trading_authorization.enabled = true
+        limit 1`,
+      [root.base.userId, root.base.telegramAccountId],
+    );
+    const tradingAuthorizationId = tradingAuthorization.rows[0]?.id;
+    assert.ok(tradingAuthorizationId);
+    const intentId = crypto.randomUUID();
+    tradeOriginIntentIds.push(intentId);
+    await pool.query(
+      `insert into telegram_trade_intents (
+         id, telegram_user_id, user_id, authorization_id, chat_id,
+         telegram_message_id, action, venue, market_id, side, amount_usd,
+         status, expires_at, idempotency_key, funding_operation_id
+       ) values (
+         $1::uuid, $2, $3::uuid, $4::uuid, $2, '752', 'buy', 'polymarket',
+         $5, 'YES', 0.75, 'funding', clock_timestamp() + interval '30 minutes',
+         $6, $7::uuid
+       )`,
+      [
+        intentId,
+        (
+          await pool.query<{ telegram_user_id: string }>(
+            `select telegram_user_id
+               from user_telegram_accounts
+              where id = $1::uuid`,
+            [root.base.telegramAccountId],
+          )
+        ).rows[0]?.telegram_user_id,
+        root.base.userId,
+        tradingAuthorizationId,
+        tradeOriginMarketId,
+        `router-hard-block-${suffix}`,
+        root.operationId,
+      ],
+    );
+    await tx(pool, async (client) => {
+      // Fixture construction only: make the ordinary Relay fixture the
+      // canonical ready parent that a Router continuation consumes.
+      await client.query("set local session_replication_role = replica");
+      await client.query(
+        `update funding_operations
+            set purpose = 'trade_shortfall',
+                status = 'ready',
+                progress_stage = 'ready_for_consumer',
+                actual_destination_amount = $3::jsonb,
+                support_metadata =
+                  (support_metadata - 'fundingReceiveReceiptId'
+                                    - 'telegramFundingConsentId'
+                                    - 'telegramFundingConsentFingerprint') ||
+                  jsonb_build_object(
+                    'telegramTradeIntentId', $2::text,
+                    'delegatedOriginKind', 'trade_shortfall_intent'
+                  ),
+                updated_at = $4
+          where id = $1::uuid`,
+        [
+          root.operationId,
+          intentId,
+          JSON.stringify({ asset: pUsd, raw: "750000" }),
+          now,
+        ],
+      );
+      await client.query(
+        `update telegram_funding_authorization_reservations
+            set receive_receipt_id = null,
+                source_trade_intent_id = $2::uuid
+          where funding_operation_id = $1::uuid`,
+        [root.operationId, intentId],
+      );
+    });
+    await pool.query(
+      `insert into balance_reservations (
+         user_id, operation_id, component_id, location_id, network_id,
+         asset_id, asset_decimals, raw_amount, mode, expires_at
+       ) values (
+         $1::uuid, $2::uuid, $3, $4, $5, $6, 6, '750000',
+         'settled_for_consumer', clock_timestamp() + interval '30 minutes'
+       )`,
+      [
+        root.base.userId,
+        root.operationId,
+        `router-hard-block:${intentId}`,
+        root.walletId,
+        pUsd.networkId,
+        pUsd.assetId,
+      ],
+    );
+    const committerInput = {
+      limit: 1,
+      subjectLookupHmacKey: "test-hmac-key",
+      subjectLookupKeyVersion: 1,
+      inspectRouterProfile: async () => "valid" as const,
+      tradeIntentId: intentId,
+    };
+    for (const expectedFailures of [1, 2] as const) {
+      assert.deepEqual(
+        await runTelegramRouterContinuationCommitter(pool, committerInput),
+        { created: 0, skipped: 1 },
+      );
+      const waiting = await pool.query<{
+        status: string;
+        failure_count: string;
+      }>(
+        `select status,
+                result ->> 'fundingContinuationHardFailureCount' as failure_count
+           from telegram_trade_intents
+          where id = $1::uuid`,
+        [intentId],
+      );
+      assert.deepEqual(waiting.rows, [
+        { status: "funding", failure_count: String(expectedFailures) },
+      ]);
+    }
+    const hardBlockPreconditions = await pool.query<{
+      root_count: string;
+      consumer_reservation_count: string;
+    }>(
+      `select (
+                select count(*)::text
+                  from telegram_trade_intents trade_intent
+                  join funding_operations root_operation
+                    on root_operation.id = trade_intent.funding_operation_id
+                 where trade_intent.id = $1::uuid
+                   and trade_intent.user_id = $2::uuid
+                   and trade_intent.status = 'funding'
+                   and trade_intent.submit_started_at is null
+                   and root_operation.id = $3::uuid
+                   and root_operation.status = 'ready'
+                   and root_operation.progress_stage = 'ready_for_consumer'
+                   and not exists (
+                     select 1
+                       from funding_operations child_operation
+                      where child_operation.user_id = root_operation.user_id
+                        and child_operation.support_metadata ->> 'telegramTradeIntentId' = trade_intent.id::text
+                        and child_operation.support_metadata ->> 'continuationOfOperationId' = root_operation.id::text
+                   )
+              ) as root_count,
+              (
+                select count(*)::text
+                  from balance_reservations reservation_row
+                 where reservation_row.operation_id = $3::uuid
+                   and reservation_row.user_id = $2::uuid
+                   and reservation_row.mode = 'settled_for_consumer'
+                   and reservation_row.state = 'active'
+              ) as consumer_reservation_count`,
+      [intentId, root.base.userId, root.operationId],
+    );
+    assert.deepEqual(hardBlockPreconditions.rows, [
+      { root_count: "1", consumer_reservation_count: "1" },
+    ]);
+    assert.deepEqual(
+      await runTelegramRouterContinuationCommitter(pool, committerInput),
+      { created: 0, skipped: 1 },
+    );
+    const terminal = await pool.query<{
+      intent_status: string;
+      error_code: string | null;
+      continuation_state: string | null;
+      failure_count: string | null;
+      operation_status: string;
+      progress_stage: string;
+      consumer_resolution: string | null;
+      reservation_state: string;
+      lane_status: string;
+      child_count: string;
+    }>(
+      `select trade_intent.status as intent_status,
+              trade_intent.error_code,
+              trade_intent.result ->> 'fundingContinuationState' as continuation_state,
+              trade_intent.result ->> 'fundingContinuationHardFailureCount' as failure_count,
+              root_operation.status as operation_status,
+              root_operation.progress_stage,
+              root_operation.support_metadata ->> 'consumerResolution' as consumer_resolution,
+              balance_reservation.state as reservation_state,
+              lane_reservation.status as lane_status,
+              (
+                select count(*)::text
+                  from funding_operations child_operation
+                 where child_operation.user_id = root_operation.user_id
+                   and child_operation.support_metadata ->> 'telegramTradeIntentId' = trade_intent.id::text
+                   and child_operation.support_metadata ->> 'continuationOfOperationId' = root_operation.id::text
+              ) as child_count
+         from telegram_trade_intents trade_intent
+         join funding_operations root_operation
+           on root_operation.id = trade_intent.funding_operation_id
+         join balance_reservations balance_reservation
+           on balance_reservation.operation_id = root_operation.id
+          and balance_reservation.mode = 'settled_for_consumer'
+         join telegram_funding_authorization_reservations lane_reservation
+           on lane_reservation.funding_operation_id = root_operation.id
+        where trade_intent.id = $1::uuid`,
+      [intentId],
+    );
+    assert.deepEqual(terminal.rows, [
+      {
+        intent_status: "failed",
+        error_code: "router_authorization_missing",
+        continuation_state: "hard_blocked",
+        failure_count: "3",
+        operation_status: "completed",
+        progress_stage: "terminal",
+        consumer_resolution: "released_to_controller_cash",
+        reservation_state: "released",
+        lane_status: "settled",
+        child_count: "0",
+      },
+    ]);
   }
 
   const hugeRaw = (2n ** 255n).toString();
@@ -5445,7 +5675,9 @@ try {
   });
   await reduceFundingOperation(pool, {
     operationId: priorApprovalRoute.operationId,
-    now: new Date(now.getTime() + 3),
+    // This fixture was created after the module-level scenario timestamp;
+    // segment submission timestamps must never precede the persisted row.
+    now: new Date(),
   });
   assert.equal(priorApprovalSends, 1);
 
@@ -6332,7 +6564,8 @@ try {
       `update funding_operations
           set status = 'failed',
               progress_stage = 'terminal',
-              completed_at = $2
+              completed_at = $2,
+              recovery_mode = null
         where id = $1::uuid`,
       [
         foreignDriftRelay.operationId,
@@ -7995,6 +8228,7 @@ try {
   assert.ok(Array.isArray(reminedRefundState.rows[0]?.history));
 
   await assertTelegramTradeShortfallRelayActivation();
+  await assertTelegramRouterContinuationHardBlock();
 
   console.log(
     "[funding-delegated-execution-integration-tests] full-receipt concurrency, malformed action, soft pause/desired-state resume, lifecycle locking, pre-broadcast revocation, and ambiguous recovery passed",

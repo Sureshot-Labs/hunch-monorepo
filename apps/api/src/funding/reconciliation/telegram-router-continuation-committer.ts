@@ -38,6 +38,7 @@ import { fetchErc20Allowance, fetchErc20BalanceOf, fetchEvmCall } from "../../se
 import { POLYMARKET_FUNDING_ROUTER_MAX_APPROVAL_RAW } from "../../services/polymarket-automation-policy.js";
 import { resolveActionSponsorship } from "../execution/sponsorship-policy.js";
 import { fundingSidecarRuntimeConfig } from "../runtime/sidecar-runtime-config.js";
+import { isTelegramRouterContinuationHardReason } from "./telegram-router-continuation-state.js";
 
 type JsonRecord = Readonly<Record<string, JsonValue>>;
 
@@ -46,12 +47,6 @@ const erc20Interface = new Interface([
   "function approve(address spender,uint256 amount) returns (bool)",
 ]);
 
-const ROUTER_CONTINUATION_HARD_REASON_CODES = new Set([
-  "router_authorization_missing",
-  "router_authorization_mismatch",
-  "router_policy_or_wallet_setup_invalid",
-  "router_root_amount_unavailable",
-]);
 const ROUTER_CONTINUATION_HARD_FAILURE_LIMIT = 3;
 
 type CandidateRow = TelegramFundingAuthorizationRow &
@@ -66,6 +61,19 @@ type CandidateRow = TelegramFundingAuthorizationRow &
   }>;
 
 type ExactRootAmount = Readonly<{ asset: AssetRef; raw: string }>;
+
+type LiveRouterFacts =
+  | Readonly<{
+      kind: "ready";
+      allowanceRaw: bigint;
+      controllerPusdRaw: bigint;
+      depositPusdRaw: bigint;
+      depositWallet: string;
+      nonce: bigint;
+    }>
+  | Readonly<{ kind: "source_balance_insufficient" }>
+  | Readonly<{ kind: "polygon_rpc_unavailable" }>
+  | Readonly<{ kind: "deposit_wallet_unavailable" }>;
 
 function jsonRecord(value: unknown): JsonRecord {
   return value as JsonRecord;
@@ -160,26 +168,44 @@ async function routerNonce(input: Readonly<{ signerAddress: string }>): Promise<
 async function loadLiveRouterFacts(input: Readonly<{
   authorization: TelegramFundingAuthorization;
   amount: ExactRootAmount;
-}>) {
-  const deposit = await inspectPolymarketDepositWallet({
-    owner: input.authorization.walletAddress,
-    rpcUrl: fundingSidecarRuntimeConfig.polygonRpcUrl,
-    timeoutMs: fundingSidecarRuntimeConfig.polygonRpcTimeoutMs,
-  });
-  if (!deposit.deployed) return null;
+}>): Promise<LiveRouterFacts> {
+  let deposit;
+  try {
+    deposit = await inspectPolymarketDepositWallet({
+      owner: input.authorization.walletAddress,
+      rpcUrl: fundingSidecarRuntimeConfig.polygonRpcUrl,
+      timeoutMs: fundingSidecarRuntimeConfig.polygonRpcTimeoutMs,
+    });
+  } catch {
+    return { kind: "polygon_rpc_unavailable" };
+  }
+  if (!deposit.deployed) return { kind: "deposit_wallet_unavailable" };
   const depositWallet = deposit.address;
   const rpc = {
     rpcUrl: fundingSidecarRuntimeConfig.polygonRpcUrl,
     timeoutMs: fundingSidecarRuntimeConfig.polygonRpcTimeoutMs,
   };
-  const [controllerPusdRaw, depositPusdRaw, allowanceRaw, nonce] = await Promise.all([
-    fetchErc20BalanceOf({ ...rpc, tokenAddress: fundingSidecarRuntimeConfig.polymarketPusdAddress, owner: input.authorization.walletAddress }),
-    fetchErc20BalanceOf({ ...rpc, tokenAddress: fundingSidecarRuntimeConfig.polymarketPusdAddress, owner: depositWallet }),
-    fetchErc20Allowance({ ...rpc, tokenAddress: fundingSidecarRuntimeConfig.polymarketPusdAddress, owner: input.authorization.walletAddress, spender: POLYMARKET_FUNDING_ROUTER.polygon }),
-    routerNonce({ signerAddress: input.authorization.walletAddress }),
-  ]);
-  if (controllerPusdRaw < BigInt(input.amount.raw)) return null;
-  return { allowanceRaw, controllerPusdRaw, depositPusdRaw, depositWallet, nonce };
+  try {
+    const [controllerPusdRaw, depositPusdRaw, allowanceRaw, nonce] = await Promise.all([
+      fetchErc20BalanceOf({ ...rpc, tokenAddress: fundingSidecarRuntimeConfig.polymarketPusdAddress, owner: input.authorization.walletAddress }),
+      fetchErc20BalanceOf({ ...rpc, tokenAddress: fundingSidecarRuntimeConfig.polymarketPusdAddress, owner: depositWallet }),
+      fetchErc20Allowance({ ...rpc, tokenAddress: fundingSidecarRuntimeConfig.polymarketPusdAddress, owner: input.authorization.walletAddress, spender: POLYMARKET_FUNDING_ROUTER.polygon }),
+      routerNonce({ signerAddress: input.authorization.walletAddress }),
+    ]);
+    if (controllerPusdRaw < BigInt(input.amount.raw)) {
+      return { kind: "source_balance_insufficient" };
+    }
+    return {
+      kind: "ready",
+      allowanceRaw,
+      controllerPusdRaw,
+      depositPusdRaw,
+      depositWallet,
+      nonce,
+    };
+  } catch {
+    return { kind: "polygon_rpc_unavailable" };
+  }
 }
 
 function buildPlan(input: Readonly<{
@@ -189,7 +215,7 @@ function buildPlan(input: Readonly<{
   amount: ExactRootAmount;
   marketContextSnapshot: JsonRecord | null;
   marketId: string | null;
-  live: Awaited<ReturnType<typeof loadLiveRouterFacts>> & {};
+  live: Extract<LiveRouterFacts, { kind: "ready" }>;
   now: Date;
 }>): FundingCommitPlan {
   const live = input.live;
@@ -354,9 +380,12 @@ function candidateSql(): string {
                  root_operation.market_context_snapshot,
                  root_operation.market_id,
                  trade_intent.id::text as trade_intent_id,
-                 trade_intent.user_id,
                  funding_authorization.id::text as funding_authorization_id,
-                 funding_authorization.*
+                 funding_authorization.*,
+                 -- Keep the candidate's owner even when the optional Router
+                 -- authorization is absent. Its wildcard columns would
+                 -- otherwise overwrite user_id with NULL in node-postgres.
+                 trade_intent.user_id as user_id
             from telegram_trade_intents trade_intent
             join funding_operations root_operation
               on root_operation.id = trade_intent.funding_operation_id
@@ -419,7 +448,7 @@ async function recordContinuationWait(
   pool: Pool,
   input: Readonly<{ intentId: string; rootOperationId: string; reasonCode: string }>,
 ): Promise<number> {
-  const hardReason = ROUTER_CONTINUATION_HARD_REASON_CODES.has(input.reasonCode);
+  const hardReason = isTelegramRouterContinuationHardReason(input.reasonCode);
   const result = await pool.query<{ hard_failure_count: string | null }>(
     `update telegram_trade_intents
         set result = coalesce(result, '{}'::jsonb) || jsonb_build_object(
@@ -504,7 +533,7 @@ async function hardBlockRouterContinuation(
       id: string;
       status: "ready" | string;
       progress_stage: "ready_for_consumer" | string;
-      version: number;
+      version: string | number;
     }>(
       `select root_operation.id, root_operation.status, root_operation.progress_stage,
               root_operation.version
@@ -552,7 +581,7 @@ async function hardBlockRouterContinuation(
     await transitionFundingOperationInTransaction(client, {
       operationId: root.id,
       scope: { kind: "worker" },
-      expectedVersion: root.version,
+      expectedVersion: Number(root.version),
       expectedState: { status: "ready", stage: "ready_for_consumer" },
       nextState: { status: "completed", stage: "terminal" },
       supportMetadataPatch: {
@@ -612,7 +641,7 @@ async function recordRouterContinuationWait(
   const failures = await recordContinuationWait(pool, input);
   if (
     failures >= ROUTER_CONTINUATION_HARD_FAILURE_LIMIT &&
-    ROUTER_CONTINUATION_HARD_REASON_CODES.has(input.reasonCode)
+    isTelegramRouterContinuationHardReason(input.reasonCode)
   ) {
     await hardBlockRouterContinuation(pool, input);
   }
@@ -722,12 +751,17 @@ export async function runTelegramRouterContinuationCommitter(
       }
       const now = new Date();
       const live = await loadLiveRouterFacts({ authorization, amount });
-      if (!live) {
+      if (live.kind !== "ready") {
         await recordRouterContinuationWait(pool, {
           intentId: row.trade_intent_id,
           rootOperationId: row.root_operation_id,
           userId: row.user_id,
-          reasonCode: "router_source_balance_or_rpc_unavailable",
+          reasonCode:
+            live.kind === "polygon_rpc_unavailable"
+              ? "router_polygon_rpc_unavailable"
+              : live.kind === "source_balance_insufficient"
+                ? "router_source_balance_insufficient"
+                : "router_deposit_wallet_unavailable",
         });
         skipped += 1;
         continue;

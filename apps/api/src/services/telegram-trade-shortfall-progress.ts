@@ -1,6 +1,7 @@
 import { tx, type Pool, type PoolClient } from "@hunch/infra";
 
 import { isTelegramPolymarketRouterContinuationPending } from "../funding/reconciliation/telegram-router-continuation-state.js";
+import { isTelegramRouterContinuationHardReason } from "../funding/reconciliation/telegram-router-continuation-state.js";
 
 import {
   escapeTelegramMarkdownV2,
@@ -63,6 +64,7 @@ type ProjectionCandidate = Readonly<{
   telegram_user_id: string;
   user_id: string | null;
   venue: string;
+  has_automatic_provider_reference_wait: boolean;
   has_broadcast_boundary: boolean;
   has_started_attempt: boolean;
 }>;
@@ -128,6 +130,8 @@ function liveProgressFor(candidate: ProjectionCandidate): TradeFundingProgress {
   const awaitingReconciliation =
     candidate.operation_status === "recovery_required" ||
     candidate.operation_status === "reconcile_required";
+  const automaticProviderReferenceWait =
+    candidate.has_automatic_provider_reference_wait;
   // A Relay root only makes pUSD available at the controller. It is not ready
   // for a Polymarket Buy until its exact Router continuation exists and has
   // reached the consumer-ready state. Keeping this as preparing prevents a
@@ -144,13 +148,7 @@ function liveProgressFor(candidate: ProjectionCandidate): TradeFundingProgress {
   const continuationReason = candidate.result.fundingContinuationReasonCode;
   const routerContinuationNeedsAttention =
     routerContinuationPending &&
-    typeof continuationReason === "string" &&
-    [
-      "router_authorization_missing",
-      "router_authorization_mismatch",
-      "router_policy_or_wallet_setup_invalid",
-      "router_root_amount_unavailable",
-    ].includes(continuationReason);
+    isTelegramRouterContinuationHardReason(continuationReason);
   const reasonCode = routerContinuationPending
     ? (typeof continuationReason === "string"
         ? continuationReason
@@ -164,8 +162,8 @@ function liveProgressFor(candidate: ProjectionCandidate): TradeFundingProgress {
     ? "ready"
     : terminal
       ? "stopped"
-      : awaitingReconciliation
-        ? "needs_attention"
+        : awaitingReconciliation && !automaticProviderReferenceWait
+          ? "needs_attention"
         : candidate.has_broadcast_boundary
           ? "submitted"
           : candidate.has_started_attempt
@@ -315,6 +313,23 @@ async function listCandidates(
                 from funding_operation_step_attempts attempt
                 join funding_operation_steps step on step.id = attempt.step_id
                where step.operation_id = tracked_operation.id
+                 and attempt.outcome = 'ambiguous'
+                 and attempt.broadcast_may_have_occurred
+                 and attempt.reference_kind = 'provider_receipt'
+                 and not exists (
+                   select 1
+                     from funding_step_receipt_observations receipt
+                    where receipt.attempt_id = attempt.id
+                      and receipt.status = 'finalized'
+                      and receipt.canonical
+                      and receipt.action_match
+                 )
+            ) as has_automatic_provider_reference_wait,
+            exists (
+              select 1
+                from funding_operation_step_attempts attempt
+                join funding_operation_steps step on step.id = attempt.step_id
+               where step.operation_id = tracked_operation.id
                  and attempt.outcome = 'started'
             ) as has_started_attempt
        from telegram_trade_intents intent
@@ -434,16 +449,23 @@ export async function runTelegramTradeShortfallProgressProjectionBatch(
 function progressText(progress: TradeFundingProgress): string {
   if (progress.reasonCode?.startsWith("router_")) {
     const pending = progress.reasonCode === "router_continuation_pending";
+    const polygonRpcUnavailable =
+      progress.reasonCode === "router_polygon_rpc_unavailable";
+    const waiting = pending || polygonRpcUnavailable;
     return joinTelegramMarkdownV2Lines([
-      `${pending ? "🔄" : "⚠️"} ${formatTelegramBoldMarkdownV2(
-        pending ? "Moving funds into Polymarket" : "Polymarket funding needs attention",
+      `${waiting ? "🔄" : "⚠️"} ${formatTelegramBoldMarkdownV2(
+        pending
+          ? "Moving funds into Polymarket"
+          : polygonRpcUnavailable
+            ? "Waiting for Polygon confirmation service"
+            : "Polymarket funding needs attention",
       )}`,
       "",
       `🔵 ${formatTelegramFieldMarkdownV2("Venue", progress.venue)}`,
       `🎯 ${formatTelegramFieldMarkdownV2("Market", progress.marketTitle)}`,
       `↔️ ${formatTelegramFieldMarkdownV2("Side", progress.sideLabel)}`,
       `💲 ${formatTelegramFieldMarkdownV2("Order", `$${progress.amountUsd}`)}`,
-      pending
+      waiting
         ? null
         : `ℹ️ ${formatTelegramFieldMarkdownV2(
             "Status",
@@ -453,6 +475,8 @@ function progressText(progress: TradeFundingProgress): string {
       escapeTelegramMarkdownV2(
         pending
           ? "The Relay transfer is ready. The final Polymarket funding step is being prepared automatically. The Buy has not been submitted yet."
+          : polygonRpcUnavailable
+            ? "Your Relay funds remain safe at the controller. The worker cannot currently read Polygon, so it will retry automatically when the Polygon confirmation service is available. The Buy has not been submitted yet."
           : progress.reasonCode === "router_root_amount_unavailable"
             ? "The Relay transfer remains safe at your controller, but its exact received amount could not be reconstructed. The final Polymarket step was not sent."
             : "The Relay transfer remains safe at your controller. The final Polymarket step was not sent; the bot will retry only when its exact wallet and policy checks are valid.",

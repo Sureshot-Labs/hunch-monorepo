@@ -24,7 +24,10 @@ import {
   selectTelegramTradeShortfallAutomatedOption,
   telegramTradeShortfallExecutionProfiles,
 } from "./services/telegram-trade-shortfall-funding.js";
-import { isTelegramPolymarketRouterContinuationPending } from "./funding/reconciliation/telegram-router-continuation-state.js";
+import {
+  isTelegramPolymarketRouterContinuationPending,
+  isTelegramRouterContinuationHardReason,
+} from "./funding/reconciliation/telegram-router-continuation-state.js";
 
 assert.equal(
   isTelegramPolymarketRouterContinuationPending({
@@ -47,6 +50,20 @@ assert.equal(
   }),
   false,
   "a direct Limitless Relay route must not wait for a Polymarket Router child",
+);
+assert.equal(
+  isTelegramRouterContinuationHardReason(
+    "router_deposit_wallet_unavailable",
+  ),
+  true,
+  "a missing Deposit Wallet must eventually release a stranded Relay root",
+);
+assert.equal(
+  isTelegramRouterContinuationHardReason(
+    "router_polygon_rpc_unavailable",
+  ),
+  false,
+  "an unavailable Polygon RPC must remain retryable",
 );
 
 const polygonPusd: AssetRef = {
