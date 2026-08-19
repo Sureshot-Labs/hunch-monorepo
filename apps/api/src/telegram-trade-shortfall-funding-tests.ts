@@ -24,6 +24,30 @@ import {
   selectTelegramTradeShortfallAutomatedOption,
   telegramTradeShortfallExecutionProfiles,
 } from "./services/telegram-trade-shortfall-funding.js";
+import { isTelegramPolymarketRouterContinuationPending } from "./funding/reconciliation/telegram-router-continuation-state.js";
+
+assert.equal(
+  isTelegramPolymarketRouterContinuationPending({
+    continuationId: null,
+    operationStatus: "ready",
+    progressStage: "ready_for_consumer",
+    rootRequiresRouterContinuation: true,
+    venue: "polymarket",
+  }),
+  true,
+  "a ready Relay root is still intermediate until its Polymarket Router child exists",
+);
+assert.equal(
+  isTelegramPolymarketRouterContinuationPending({
+    continuationId: null,
+    operationStatus: "ready",
+    progressStage: "ready_for_consumer",
+    rootRequiresRouterContinuation: true,
+    venue: "limitless",
+  }),
+  false,
+  "a direct Limitless Relay route must not wait for a Polymarket Router child",
+);
 
 const polygonPusd: AssetRef = {
   networkId: "evm:137",

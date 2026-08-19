@@ -14,6 +14,7 @@ import {
   PRODUCTION_FUNDING_REGISTRY,
 } from "../../policies/funding-policy.js";
 import {
+  FUNDING_RECONCILIATION_EVIDENCE_REDUCTION_GRACE_MS,
   fundingReconciliationDisposition,
   fundingReconciliationPollDelayMs,
   fundingReconciliationTerminalTimeoutReached,
@@ -42,6 +43,31 @@ const tests: readonly Test[] = [
       assert.equal(
         fundingReconciliationDisposition({
           ...common,
+          canonicalFinalizedStepEvidencePendingReduction: true,
+          state: { status: "in_progress", stage: "source_action" },
+          reductionCompleted: false,
+        }),
+        "requeue",
+        "already-finalized canonical step evidence must be reduced, not timed out",
+      );
+      assert.equal(
+        fundingReconciliationDisposition({
+          ...common,
+          canonicalFinalizedStepEvidencePendingReduction: true,
+          state: { status: "in_progress", stage: "source_action" },
+          reductionCompleted: false,
+          now: new Date(
+            startedAt.getTime() +
+              common.terminalTimeoutMs +
+              FUNDING_RECONCILIATION_EVIDENCE_REDUCTION_GRACE_MS,
+          ),
+        }),
+        "recovery_required",
+        "finalized step receipts cannot hide a missing operation postcondition forever",
+      );
+      assert.equal(
+        fundingReconciliationDisposition({
+          ...common,
           state: {
             status: "awaiting_external_funds",
             stage: "source_action",
@@ -63,9 +89,12 @@ const tests: readonly Test[] = [
         fundingReconciliationDisposition({
           ...common,
           state: { status: "recovery_required", stage: "source_action" },
+          canonicalFinalizedStepEvidencePendingReduction: true,
+          recoveryMode: "manual_review",
           reductionCompleted: false,
         }),
         "complete",
+        "manual recovery remains an explicit operator boundary even when step receipts finalized",
       );
       assert.equal(
         fundingReconciliationDisposition({

@@ -6,6 +6,7 @@ import type { Pool } from "@hunch/infra";
 import type { DbQuery } from "../db.js";
 import { canonicalJsonHash } from "../funding/persistence/canonical.js";
 import { sameAccountAddress } from "../funding/domain/asset-identity.js";
+import { isTelegramPolymarketRouterContinuationPending } from "../funding/reconciliation/telegram-router-continuation-state.js";
 import { lockTelegramFundingLinkLifecycle } from "../funding/execution/telegram-funding-link-lifecycle-lock.js";
 import { env } from "../env.js";
 import { isRecord } from "../lib/type-guards.js";
@@ -9971,7 +9972,11 @@ export async function handleTelegramBotTradingCallback(
     await answerIntentAlreadyProcessed(input, intent);
     return true;
   }
-  if (intent.expires_at.getTime() <= Date.now()) {
+  // A committed shortfall has durable funding in flight. Its original quote
+  // TTL cannot make its status/check callbacks unreachable; readiness will
+  // still obtain a fresh quote inside the confirmed bounds when funding is
+  // actually ready.
+  if (intent.status !== "funding" && intent.expires_at.getTime() <= Date.now()) {
     const expired = await updateIntentStatus({
       allowedStatuses: PENDING_INTENT_STATUSES,
       db: input.db,
@@ -10310,12 +10315,24 @@ export async function handleTelegramBotTradingCallback(
     readTelegramAppHandoffExecutionMarker(intent) != null;
   if (parsed.type === "retry_buy" && intent.status === "funding") {
     const fundingState = await input.db.query<{
+      continuation_id: string | null;
       operation_status: string;
       progress_stage: string;
       reservation_id: string | null;
+      root_requires_router_continuation: boolean;
       has_broadcast_boundary: boolean;
     }>(
-      `select tracked_operation.status as operation_status,
+      `select continuation.id::text as continuation_id,
+              exists (
+                select 1
+                  from funding_operation_steps root_step
+                 where root_step.operation_id = operation.id
+                   and root_step.executor_id in (
+                     'telegram_relay_evm_funding_v1',
+                     'telegram_relay_polygon_usdc_v1'
+                   )
+              ) as root_requires_router_continuation,
+              tracked_operation.status as operation_status,
               tracked_operation.progress_stage,
               (
                 select reservation.id::text
@@ -10358,6 +10375,22 @@ export async function handleTelegramBotTradingCallback(
       [intent.funding_operation_id, intent.user_id, intent.id],
     );
     const funding = fundingState.rows[0];
+    const routerContinuationPending =
+      isTelegramPolymarketRouterContinuationPending({
+        continuationId: funding?.continuation_id,
+        operationStatus: funding?.operation_status,
+        progressStage: funding?.progress_stage,
+        rootRequiresRouterContinuation:
+          funding?.root_requires_router_continuation === true,
+        venue: intent.venue,
+      });
+    if (routerContinuationPending) {
+      await input.answerCallbackQuery({
+        callbackQueryId: input.callbackQuery.id,
+        text: "⏳ Moving pUSD into Polymarket.",
+      });
+      return true;
+    }
     if (
       funding?.operation_status !== "ready" ||
       funding.progress_stage !== "ready_for_consumer" ||
