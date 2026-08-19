@@ -646,21 +646,15 @@ function progressText(progress: TradeFundingProgress): string {
         progress.sourceRoute
           ? `🔄 ${formatTelegramFieldMarkdownV2("Funding route", progress.sourceRoute)}`
           : null,
-        waiting
-          ? null
-          : `ℹ️ ${formatTelegramFieldMarkdownV2(
-              "Status",
-              progress.reasonCode.replaceAll("_", " "),
-            )}`,
         "",
         escapeTelegramMarkdownV2(
           pending
-            ? "The Relay transfer is ready. The final Polymarket funding step is being prepared automatically. The Buy has not been submitted yet."
+            ? "Your funds are ready. The final Polymarket funding step is being prepared automatically. The Buy has not been submitted yet."
             : polygonRpcUnavailable
-              ? "Your Relay funds remain safe at the controller. The worker cannot currently read Polygon, so it will retry automatically when the Polygon confirmation service is available. The Buy has not been submitted yet."
+              ? "Your funds are safe. Hunch can't reach Polygon right now and will retry automatically. The Buy has not been submitted yet."
               : progress.reasonCode === "router_root_amount_unavailable"
-                ? "The Relay transfer remains safe at your controller, but its exact received amount could not be reconstructed. The final Polymarket step was not sent."
-                : "The Relay transfer remains safe at your controller. The final Polymarket step was not sent; the bot will retry only when its exact wallet and policy checks are valid.",
+                ? "Your funds are safe, but Hunch could not confirm the exact amount received. The final funding step was not sent."
+                : "Your funds are safe. The final funding step was not sent; Hunch will retry when wallet setup is ready.",
         ),
       ].filter((line): line is string => line != null),
     );
@@ -716,9 +710,6 @@ function progressText(progress: TradeFundingProgress): string {
         : null,
       progress.sourceRoute
         ? `🔄 ${formatTelegramFieldMarkdownV2("Funding route", progress.sourceRoute)}`
-        : null,
-      progress.reasonCode
-        ? `ℹ️ ${formatTelegramFieldMarkdownV2("Status", progress.reasonCode.replaceAll("_", " "))}`
         : null,
       "",
       escapeTelegramMarkdownV2(body),

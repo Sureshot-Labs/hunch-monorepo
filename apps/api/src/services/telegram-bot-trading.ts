@@ -295,24 +295,24 @@ function formatTelegramMarketCardLineMarkdownV2(value: string): string {
     : rendered;
 }
 
+type TelegramTradeLifecycleTone = "info" | "ok" | "warn" | "working";
+
 function formatTelegramTradeLifecycleMessageMarkdownV2(input: {
   heading: string;
   lines?: Array<string | null>;
   marketTitle: string;
+  tone: TelegramTradeLifecycleTone;
   venue: string;
 }): string {
   const normalizedHeading = input.heading.replace(/[.!]+$/g, "");
-  const headingIcon = /filled|completed|submitted|ready|success/i.test(
-    normalizedHeading,
-  )
-    ? "✅"
-    : /processing|resolving|checking|loading|building/i.test(normalizedHeading)
-      ? "⏳"
-      : /failed|not |unavailable|expired|cancel|changed|attention|unknown/i.test(
-            normalizedHeading,
-          )
-        ? "⚠️"
-        : "ℹ️";
+  const headingIcon =
+    input.tone === "ok"
+      ? "✅"
+      : input.tone === "working"
+        ? "⏳"
+        : input.tone === "warn"
+          ? "⚠️"
+          : "ℹ️";
   const detailLines = (input.lines ?? [])
     .filter((line): line is string => line != null)
     .map((line) => {
@@ -8364,6 +8364,7 @@ async function handleTelegramRedeemCallback(input: {
           accepted && !definitiveFailure
             ? "Redemption is still resolving."
             : "Redemption failed before submission.",
+        tone: accepted && !definitiveFailure ? "working" : "warn",
         lines: [
           accepted && !definitiveFailure
             ? "The bot is checking automatically; do not retry this market."
@@ -8476,6 +8477,7 @@ async function previewTelegramTradeIntent(input: {
       parse_mode: "MarkdownV2",
       text: formatTelegramTradeLifecycleMessageMarkdownV2({
         heading: "Trade is still resolving.",
+        tone: "working",
         lines: [
           "The bot is checking the venue automatically; no action is needed. Check /trade_status before retrying.",
         ],
@@ -8519,6 +8521,7 @@ async function previewTelegramTradeIntent(input: {
           parse_mode: "MarkdownV2",
           text: formatTelegramTradeLifecycleMessageMarkdownV2({
             heading: "A newer trade state is already available.",
+            tone: "warn",
             lines: ["Use the latest confirmation or check /trade_status."],
             marketTitle: input.intent.market_title,
             venue: input.intent.venue,
@@ -8532,6 +8535,7 @@ async function previewTelegramTradeIntent(input: {
       parse_mode: "MarkdownV2",
       text: formatTelegramTradeLifecycleMessageMarkdownV2({
         heading: "Unable to build a safe current quote.",
+        tone: "warn",
         lines: ["Nothing was submitted. Send /market again."],
         marketTitle: input.intent.market_title,
         venue: input.intent.venue,
@@ -8570,6 +8574,7 @@ async function previewTelegramTradeIntent(input: {
       parse_mode: "MarkdownV2",
       text: formatTelegramTradeLifecycleMessageMarkdownV2({
         heading: "Trade not submitted.",
+        tone: "warn",
         lines: [
           minimumBlocking
             ? "The current quote does not meet venue requirements."
@@ -8615,6 +8620,7 @@ async function previewTelegramTradeIntent(input: {
           parse_mode: "MarkdownV2",
           text: formatTelegramTradeLifecycleMessageMarkdownV2({
             heading: "Fresh funding amount needed.",
+            tone: "warn",
             lines: [
               `The fresh quote now needs ${formatUsd(maxSpendUsd)}, but only ${formatUsd(
                 fundingPreview.availableUsd,
@@ -8677,6 +8683,7 @@ async function previewTelegramTradeIntent(input: {
           parse_mode: "MarkdownV2",
           text: formatTelegramTradeLifecycleMessageMarkdownV2({
             heading: "Checking available Hunch funds.",
+            tone: "working",
             lines: [
               "The internal balance or route could not be verified safely. No Deposit was opened and nothing was submitted. Try again shortly.",
             ],
@@ -8759,6 +8766,7 @@ async function previewTelegramTradeIntent(input: {
           parse_mode: "MarkdownV2",
           text: formatTelegramTradeLifecycleMessageMarkdownV2({
             heading: "Funding route is still being checked.",
+            tone: "working",
             lines: ["No Deposit was opened. Try again shortly."],
             marketTitle: input.intent.market_title,
             venue: input.intent.venue,
@@ -8822,6 +8830,7 @@ async function previewTelegramTradeIntent(input: {
             parse_mode: "MarkdownV2",
             text: formatTelegramTradeLifecycleMessageMarkdownV2({
               heading: "Receive setup is temporarily unavailable.",
+              tone: "warn",
               lines: [
                 "The existing trade was not submitted or replaced. Try again shortly.",
               ],
@@ -9023,6 +9032,7 @@ async function previewTelegramTradeIntent(input: {
           confirming === "blocked"
             ? "Trade is still resolving."
             : "Trade state changed while opening confirmation.",
+        tone: confirming === "blocked" ? "working" : "warn",
         lines: ["Check /trade_status before trying again."],
         marketTitle: input.intent.market_title,
         venue: input.intent.venue,
@@ -9915,7 +9925,8 @@ export async function handleTelegramBotTradingCallback(
       ...(marketMessage ?? {
         parse_mode: "MarkdownV2" as const,
         text: formatTelegramTradeLifecycleMessageMarkdownV2({
-          heading: "Funding stopped safely.",
+          heading: "Funding stopped.",
+          tone: "warn",
           lines: ["Open the market again to build a fresh Buy."],
           marketTitle: intent.market_title,
           venue: intent.venue,
@@ -10096,6 +10107,7 @@ export async function handleTelegramBotTradingCallback(
         parse_mode: "MarkdownV2" as const,
         text: formatTelegramTradeLifecycleMessageMarkdownV2({
           heading: "Trade cancelled.",
+          tone: "info",
           lines: ["Open the market again to choose another amount."],
           marketTitle: intent.market_title,
           venue: intent.venue,
@@ -10293,6 +10305,7 @@ export async function handleTelegramBotTradingCallback(
           : {}),
         text: formatTelegramTradeLifecycleMessageMarkdownV2({
           heading: "Direct bot trading is not ready.",
+          tone: "warn",
           lines: [
             tradeReadiness?.message ?? "Open Hunch to trade this market.",
           ],
@@ -10510,8 +10523,9 @@ export async function handleTelegramBotTradingCallback(
           : {}),
         text: formatTelegramTradeLifecycleMessageMarkdownV2({
           heading: terminalFunding
-            ? "Funding route stopped safely."
+            ? "Funding stopped."
             : "Preparing funds for this Buy.",
+          tone: terminalFunding ? "warn" : "working",
           lines: terminalFunding
             ? [
                 "No trade was submitted and this route will not be retried automatically. Open the market to build a fresh quote.",
@@ -10604,6 +10618,7 @@ export async function handleTelegramBotTradingCallback(
         parse_mode: "MarkdownV2",
         text: formatTelegramTradeLifecycleMessageMarkdownV2({
           heading: "Trade is still resolving.",
+          tone: "working",
           lines: [
             "The bot is checking the venue automatically; no action is needed. Check /trade_status before retrying.",
           ],
@@ -10677,6 +10692,7 @@ export async function handleTelegramBotTradingCallback(
         parse_mode: "MarkdownV2",
         text: formatTelegramTradeLifecycleMessageMarkdownV2({
           heading: "Unable to build a safe current quote.",
+          tone: "warn",
           lines: ["Nothing was submitted. Send /market again."],
           marketTitle: intent.market_title,
           venue: intent.venue,
@@ -10710,6 +10726,7 @@ export async function handleTelegramBotTradingCallback(
         parse_mode: "MarkdownV2",
         text: formatTelegramTradeLifecycleMessageMarkdownV2({
           heading: "Price moved.",
+          tone: "warn",
           lines: ["Nothing was submitted. Send /market again."],
           marketTitle: intent.market_title,
           venue: intent.venue,
@@ -10737,6 +10754,7 @@ export async function handleTelegramBotTradingCallback(
         parse_mode: "MarkdownV2",
         text: formatTelegramTradeLifecycleMessageMarkdownV2({
           heading: "Trade not submitted.",
+          tone: "warn",
           lines: [
             action === "BUY"
               ? `Maximum total spend ${formatUsd(previewMaxSpendUsd)} is no longer executable within your ${formatUsd(maxAmountUsd)} limit.`
@@ -10788,6 +10806,7 @@ export async function handleTelegramBotTradingCallback(
             : {}),
           text: formatTelegramTradeLifecycleMessageMarkdownV2({
             heading: "More spendable funds required.",
+            tone: "warn",
             lines: ["Open Hunch to continue."],
             marketTitle: market.title,
             venue: intent.venue,
@@ -10810,6 +10829,7 @@ export async function handleTelegramBotTradingCallback(
         parse_mode: "MarkdownV2",
         text: formatTelegramTradeLifecycleMessageMarkdownV2({
           heading: "Trade state changed while loading the quote.",
+          tone: "warn",
           lines: ["Send /market again."],
           marketTitle: intent.market_title,
           venue: intent.venue,
@@ -10828,6 +10848,7 @@ export async function handleTelegramBotTradingCallback(
         parse_mode: "MarkdownV2",
         text: formatTelegramTradeLifecycleMessageMarkdownV2({
           heading: "Trade is still resolving.",
+          tone: "working",
           lines: [
             "The bot is checking the venue automatically; no action is needed. Check /trade_status before retrying.",
           ],
@@ -10843,6 +10864,7 @@ export async function handleTelegramBotTradingCallback(
         parse_mode: "MarkdownV2",
         text: formatTelegramTradeLifecycleMessageMarkdownV2({
           heading: "Trade state changed while opening confirmation.",
+          tone: "warn",
           lines: ["Check /trade_status before trying again."],
           marketTitle: intent.market_title,
           venue: intent.venue,
@@ -10931,6 +10953,7 @@ export async function handleTelegramBotTradingCallback(
         },
         text: formatTelegramTradeLifecycleMessageMarkdownV2({
           heading: "Starting preparation.",
+          tone: "working",
           lines: [
             `↔️ ${formatTelegramFieldMarkdownV2(
               "Side",
@@ -11025,6 +11048,7 @@ export async function handleTelegramBotTradingCallback(
             safetyStop?.code === "allowance_lane_unavailable"
               ? "Funding preparation is busy."
               : "Funding quote is no longer current.",
+          tone: "warn",
           lines:
             safetyStop?.code === "allowance_lane_unavailable"
               ? [
@@ -11180,6 +11204,7 @@ export async function handleTelegramBotTradingCallback(
             : {}),
           text: formatTelegramTradeLifecycleMessageMarkdownV2({
             heading: "Trading setup needs attention.",
+            tone: "warn",
             lines: [message],
             marketTitle: intent.market_title,
             venue: intent.venue,
@@ -11310,6 +11335,7 @@ export async function handleTelegramBotTradingCallback(
         },
         text: formatTelegramTradeLifecycleMessageMarkdownV2({
           heading: "Trade not submitted.",
+          tone: "warn",
           lines: [
             `${action} ${side} · ${tradeAmountLabel}`,
             action === "BUY"
@@ -11364,6 +11390,7 @@ export async function handleTelegramBotTradingCallback(
         },
         text: formatTelegramTradeLifecycleMessageMarkdownV2({
           heading: "Trade not submitted.",
+          tone: "warn",
           lines: [
             "The quote moved beyond your confirmed tolerance.",
             "Nothing was submitted. Open the market for a new preview.",
@@ -11544,6 +11571,7 @@ export async function handleTelegramBotTradingCallback(
         parse_mode: "MarkdownV2",
         text: formatTelegramTradeLifecycleMessageMarkdownV2({
           heading: "Trade status changed while recording.",
+          tone: "warn",
           lines: [
             currentIntent?.status
               ? `Current bot status: ${currentIntent.status}`
@@ -11608,6 +11636,14 @@ export async function handleTelegramBotTradingCallback(
       ...(filledKeyboard ? { reply_markup: filledKeyboard } : {}),
       text: formatTelegramTradeLifecycleMessageMarkdownV2({
         heading: resolution.messageTitle,
+        tone:
+          postSubmitError
+            ? "warn"
+            : resolution.intentStatus === "filled"
+              ? "ok"
+              : resolution.intentStatus === "submitted"
+                ? "working"
+                : "warn",
         lines: [
           `${action} ${side} · ${tradeAmountLabel}`,
           venueOrderId ? `Order: ${venueOrderId}` : null,
@@ -11701,6 +11737,7 @@ export async function handleTelegramBotTradingCallback(
         parse_mode: "MarkdownV2",
         text: formatTelegramTradeLifecycleMessageMarkdownV2({
           heading: "Trade submitted.",
+          tone: "working",
           lines: [
             `${action} ${side} · ${tradeAmountLabel}`,
             submitted.venueOrderId ? `Order: ${submitted.venueOrderId}` : null,
@@ -11745,6 +11782,7 @@ export async function handleTelegramBotTradingCallback(
         parse_mode: "MarkdownV2",
         text: formatTelegramTradeLifecycleMessageMarkdownV2({
           heading: "Trade status is unknown.",
+          tone: "working",
           lines: [
             `${action} ${side} · ${tradeAmountLabel}`,
             "The bot is checking the venue automatically; no action is needed. Check /trade_status before retrying.",
@@ -11781,6 +11819,7 @@ export async function handleTelegramBotTradingCallback(
         parse_mode: "MarkdownV2",
         text: formatTelegramTradeLifecycleMessageMarkdownV2({
           heading: "Funding status is still resolving.",
+          tone: "working",
           lines: [
             "The bot is checking automatically. /trade_status will clear this trade after confirmation or revert; do not retry yet.",
           ],
@@ -11832,6 +11871,7 @@ export async function handleTelegramBotTradingCallback(
         heading: definitiveSubmitRejection
           ? "Trade rejected."
           : "Trade failed.",
+        tone: "warn",
         lines: [
           definitiveSubmitRejection
             ? "Nothing was submitted. Refresh the market card before trying again."

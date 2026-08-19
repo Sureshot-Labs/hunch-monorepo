@@ -68,7 +68,6 @@ export async function claimTelegramTradeShortfallAutoResume(
                and reservation.mode = 'settled_for_consumer'
                and reservation.state = 'active'
           )
-          and intent.updated_at <= clock_timestamp() - interval '10 seconds'
         order by intent.updated_at, intent.id
         for update of intent skip locked
         limit 1`,
