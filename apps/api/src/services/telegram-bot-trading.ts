@@ -4,6 +4,7 @@ import { ethers } from "ethers";
 import { AuthService } from "../auth.js";
 import type { Pool } from "@hunch/infra";
 import type { DbQuery } from "../db.js";
+import { resolveKnownAccountAssetSymbol } from "../account-value/known-asset-catalog.js";
 import { canonicalJsonHash } from "../funding/persistence/canonical.js";
 import { sameAccountAddress } from "../funding/domain/asset-identity.js";
 import {
@@ -1463,6 +1464,24 @@ function readTelegramTradeShortfallProposal(
   return value as TelegramTradeShortfallProposal;
 }
 
+function telegramFundingSourceLabel(
+  source: TelegramTradeShortfallProposal["sourceAmounts"][number],
+): string {
+  const network =
+    source.amount.asset.networkId === "evm:8453"
+      ? "Base"
+      : source.amount.asset.networkId === "evm:137"
+        ? "Polygon"
+        : source.amount.asset.networkId === "solana:mainnet"
+          ? "Solana"
+          : null;
+  const symbol = resolveKnownAccountAssetSymbol(source.amount.asset);
+  // Never expose opaque CAIP/network identifiers on a Telegram trade card.
+  // An unrecognised source is deliberately presented generically instead of
+  // guessing an asset from its raw address or internal planner label.
+  return network && symbol ? `${network} ${symbol}` : "Hunch wallet balance";
+}
+
 export function resolveTelegramFundingBuyDepositRequirement(input: {
   executableFundsUsd: number;
   maximumSpendUsd: number;
@@ -2363,7 +2382,7 @@ function buildTelegramTradeConfirmationMessage(input: {
     input.intent.result,
   );
   const fundingSourceLabel = fundingProposal?.sourceAmounts
-    .map((source) => source.safeLabel)
+    .map(telegramFundingSourceLabel)
     .join(" + ");
   const quoteExpiresAt =
     input.quote.expiresAt instanceof Date
@@ -8615,9 +8634,6 @@ async function previewTelegramTradeIntent(input: {
               intent: input.intent,
               market: input.market,
               maximumSpendUsd: maxSpendUsd,
-              additionalFundingUsd: resolveTelegramMinimumFundingUsd(
-                fundingPreview.shortfallUsd,
-              ),
               policy: input.policy,
               quoteExpiresAt: quote.expiresAt,
               side,
@@ -10993,6 +11009,12 @@ export async function handleTelegramBotTradingCallback(
             ? "⏳ Another funding action is still being checked. Nothing was moved."
             : "⚠️ Funding quote changed or is unavailable. Nothing was moved; reopen Review.",
       });
+      const reopenMarketButton = buildTelegramTradingMiniAppButton({
+        appBaseUrl: input.appBaseUrl,
+        path: openMarketUrl(input.appBaseUrl, market),
+        telegramMiniAppEnabled: input.telegramMiniAppEnabled,
+        text: "🎯 Open market",
+      });
       await input.sendMessage({
         chat_id: chatId,
         parse_mode: "MarkdownV2",
@@ -11016,6 +11038,7 @@ export async function handleTelegramBotTradingCallback(
         }),
         reply_markup: {
           inline_keyboard: [
+            ...telegramTradingButtonRows(reopenMarketButton),
             [
               {
                 callback_data: `hm:v1:deposit:${intent.venue}`,
@@ -11023,6 +11046,10 @@ export async function handleTelegramBotTradingCallback(
               },
             ],
             [
+              {
+                callback_data: "hm:v1:positions",
+                text: "💼 My positions",
+              },
               {
                 callback_data: "hm:v1:home",
                 text: "🏠 Home",

@@ -13,6 +13,7 @@ import {
   formatTelegramFieldMarkdownV2,
   joinTelegramMarkdownV2Lines,
 } from "./telegram-bot-trading-presentation.js";
+import { formatTelegramVenueLabel } from "./telegram-market-identity.js";
 import {
   TELEGRAM_BOT_TRADING_CALLBACK_PREFIX,
   type TelegramBotTradingClientButton,
@@ -33,6 +34,7 @@ type TradeFundingProgress = Readonly<{
   amountUsd: string;
   attemptStateFingerprint: string;
   canCancel: boolean;
+  fundingAmountLabel: string | null;
   intentId: string;
   marketTitle: string;
   operationStatus: string | null;
@@ -54,6 +56,9 @@ type ProjectionCandidate = Readonly<{
   continuation_id: string | null;
   error_code: string | null;
   funding_operation_id: string | null;
+  funding_destination_asset_id: string | null;
+  funding_destination_decimals: string | null;
+  funding_destination_raw: string | null;
   id: string;
   market_title: string;
   operation_error_code: string | null;
@@ -141,6 +146,31 @@ function fundingDestinationAsset(venue: string): string {
   return "funds";
 }
 
+function fundingAmountLabel(candidate: ProjectionCandidate): string | null {
+  const raw = candidate.funding_destination_raw;
+  const decimals = Number(candidate.funding_destination_decimals);
+  if (!raw || !/^\d+$/.test(raw) || !Number.isSafeInteger(decimals)) {
+    return null;
+  }
+  const symbol = resolveKnownAccountAssetSymbol({
+    assetId: candidate.funding_destination_asset_id ?? "",
+    decimals,
+    networkId: candidate.venue === "polymarket" ? "evm:137" : "",
+  });
+  if (!symbol) return null;
+  const amount = BigInt(raw);
+  const scale = 10n ** BigInt(decimals);
+  const whole = amount / scale;
+  const fractionalRaw = (amount % scale)
+    .toString()
+    .padStart(decimals, "0");
+  const omittedNonZeroFraction = /[1-9]/u.test(fractionalRaw.slice(6));
+  const fraction = fractionalRaw.slice(0, 6).replace(/0+$/, "");
+  return `${whole.toString()}${fraction ? `.${fraction}` : ""}${
+    omittedNonZeroFraction ? "…" : ""
+  } ${symbol}`;
+}
+
 function sourceRoute(candidate: ProjectionCandidate): string | null {
   if (!candidate.source_network_id || !candidate.source_asset_id) return null;
   if (candidate.source_asset_decimals == null) return null;
@@ -223,6 +253,7 @@ function liveProgressFor(candidate: ProjectionCandidate): TradeFundingProgress {
       !candidate.has_broadcast_boundary &&
       !candidate.has_started_attempt &&
       !ready,
+    fundingAmountLabel: fundingAmountLabel(candidate),
     intentId: candidate.id,
     marketTitle: candidate.market_title,
     operationStatus: candidate.operation_status,
@@ -276,6 +307,7 @@ function sameProgress(
     left.sideLabel === right.sideLabel &&
     left.sourceRoute === right.sourceRoute &&
     left.amountUsd === right.amountUsd &&
+    left.fundingAmountLabel === right.fundingAmountLabel &&
     left.operationStatus === right.operationStatus &&
     left.progressStage === right.progressStage &&
     left.reasonCode === right.reasonCode &&
@@ -308,6 +340,12 @@ async function listCandidates(
             intent.error_code,
             intent.result,
             intent.funding_operation_id::text,
+            tracked_operation.destination_amount #>> '{asset,assetId}'
+              as funding_destination_asset_id,
+            tracked_operation.destination_amount #>> '{asset,decimals}'
+              as funding_destination_decimals,
+            tracked_operation.destination_amount #>> '{raw}'
+              as funding_destination_raw,
             continuation.id::text as continuation_id,
             ${telegramPolymarketRootRequiresRouterContinuationSql("operation")}
               as root_requires_router_continuation,
@@ -396,6 +434,12 @@ async function listCandidates(
          select coalesce(continuation.id, operation.id) as id,
                 coalesce(continuation.status, operation.status) as status,
                 coalesce(continuation.progress_stage, operation.progress_stage) as progress_stage,
+                coalesce(
+                  continuation.actual_destination_amount,
+                  operation.actual_destination_amount,
+                  continuation.requested_destination_amount,
+                  operation.requested_destination_amount
+                ) as destination_amount,
                 case
                   when continuation.id is null then operation.error_code
                   else continuation.error_code
@@ -502,10 +546,13 @@ function progressText(progress: TradeFundingProgress): string {
           "Waiting for Polymarket balance confirmation",
         )}`,
         "",
-        `🔵 ${formatTelegramFieldMarkdownV2("Venue", progress.venue)}`,
+        `🔵 ${formatTelegramFieldMarkdownV2("Venue", formatTelegramVenueLabel(progress.venue))}`,
         `🎯 ${formatTelegramFieldMarkdownV2("Market", progress.marketTitle)}`,
         `↔️ ${formatTelegramFieldMarkdownV2("Side", progress.sideLabel)}`,
-        `🛒 ${formatTelegramFieldMarkdownV2("Buy", `$${progress.amountUsd}`)}`,
+        `🛒 ${formatTelegramFieldMarkdownV2("Buy target", `$${progress.amountUsd}`)}`,
+        progress.fundingAmountLabel
+          ? `💸 ${formatTelegramFieldMarkdownV2("Funding", progress.fundingAmountLabel)}`
+          : null,
         progress.sourceRoute
           ? `🔄 ${formatTelegramFieldMarkdownV2("Funding route", progress.sourceRoute)}`
           : null,
@@ -531,10 +578,13 @@ function progressText(progress: TradeFundingProgress): string {
               : "Polymarket funding needs attention",
         )}`,
         "",
-        `🔵 ${formatTelegramFieldMarkdownV2("Venue", progress.venue)}`,
+        `🔵 ${formatTelegramFieldMarkdownV2("Venue", formatTelegramVenueLabel(progress.venue))}`,
         `🎯 ${formatTelegramFieldMarkdownV2("Market", progress.marketTitle)}`,
         `↔️ ${formatTelegramFieldMarkdownV2("Side", progress.sideLabel)}`,
-        `🛒 ${formatTelegramFieldMarkdownV2("Buy", `$${progress.amountUsd}`)}`,
+        `🛒 ${formatTelegramFieldMarkdownV2("Buy target", `$${progress.amountUsd}`)}`,
+        progress.fundingAmountLabel
+          ? `💸 ${formatTelegramFieldMarkdownV2("Funding", progress.fundingAmountLabel)}`
+          : null,
         progress.sourceRoute
           ? `🔄 ${formatTelegramFieldMarkdownV2("Funding route", progress.sourceRoute)}`
           : null,
@@ -575,8 +625,8 @@ function progressText(progress: TradeFundingProgress): string {
     ],
     ready: [
       "✅",
-      "Funding ready",
-      "Preparing a fresh Buy review within your confirmed limits.",
+      "Funding confirmed",
+      "Funding is confirmed. Hunch is preparing the fresh Buy review automatically.",
     ],
     needs_attention: [
       "⚠️",
@@ -594,10 +644,13 @@ function progressText(progress: TradeFundingProgress): string {
     [
       `${icon} ${formatTelegramBoldMarkdownV2(heading)}`,
       "",
-      `🔵 ${formatTelegramFieldMarkdownV2("Venue", progress.venue)}`,
+      `🔵 ${formatTelegramFieldMarkdownV2("Venue", formatTelegramVenueLabel(progress.venue))}`,
       `🎯 ${formatTelegramFieldMarkdownV2("Market", progress.marketTitle)}`,
       `↔️ ${formatTelegramFieldMarkdownV2("Side", progress.sideLabel)}`,
-      `🛒 ${formatTelegramFieldMarkdownV2("Buy", `$${progress.amountUsd}`)}`,
+      `🛒 ${formatTelegramFieldMarkdownV2("Buy target", `$${progress.amountUsd}`)}`,
+      progress.fundingAmountLabel
+        ? `💸 ${formatTelegramFieldMarkdownV2("Funding", progress.fundingAmountLabel)}`
+        : null,
       progress.sourceRoute
         ? `🔄 ${formatTelegramFieldMarkdownV2("Funding route", progress.sourceRoute)}`
         : null,
@@ -613,14 +666,15 @@ function progressText(progress: TradeFundingProgress): string {
 function progressKeyboard(
   progress: TradeFundingProgress,
 ): TelegramBotTradingClientReplyMarkup {
-  const rows: TelegramBotTradingClientButton[][] = [
-    [
+  const rows: TelegramBotTradingClientButton[][] = [];
+  if (progress.state === "needs_attention" || progress.state === "stopped") {
+    rows.push([
       {
         callback_data: `${CALLBACK_PREFIX}:retry_buy:${progress.intentId}`,
         text: "🔄 Check status",
       },
-    ],
-  ];
+    ]);
+  }
   if (progress.canCancel) {
     rows.push([
       {
@@ -629,7 +683,10 @@ function progressKeyboard(
       },
     ]);
   }
-  rows.push([{ callback_data: "hm:v1:home", text: "🏠 Home" }]);
+  rows.push([
+    { callback_data: "hm:v1:positions", text: "💼 My positions" },
+    { callback_data: "hm:v1:home", text: "🏠 Home" },
+  ]);
   return { inline_keyboard: rows };
 }
 

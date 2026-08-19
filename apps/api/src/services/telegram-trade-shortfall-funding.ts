@@ -650,6 +650,15 @@ export class TelegramTradeShortfallFundingService {
       }
     });
     const destination = destinationAsset(input.venue);
+    // A Telegram card's preliminary balance can include assets only the web
+    // composite flow can consume.  The server executor must first let the
+    // planner observe the selected venue destination without that estimate,
+    // then bind the delegated quote to the resulting exact raw shortfall.
+    const observedBalanceInput: TelegramTradeShortfallIdentity = {
+      ...input,
+      additionalFundingRaw: undefined,
+      additionalFundingUsd: undefined,
+    };
     const plannedCandidates: Array<
       Readonly<{
         plan: Awaited<ReturnType<FundingPlanningRuntime["liquidity"]>>;
@@ -666,7 +675,7 @@ export class TelegramTradeShortfallFundingService {
       try {
         plan = await this.runtime.liquidity(
           input.userId,
-          buildTelegramTradeShortfallRequest(input, profileId),
+          buildTelegramTradeShortfallRequest(observedBalanceInput, profileId),
         );
       } catch (error) {
         const reasonCode = shortfallPlannerFailureReasonCode(error);
@@ -791,11 +800,28 @@ export class TelegramTradeShortfallFundingService {
       };
     }
     const profileId = candidate.profileId;
+    // The Telegram preview can include controller assets which are convertible
+    // in the general web flow but not by this exact delegated profile.  Never
+    // use that display estimate as the server route amount.  The first
+    // projection observes the actual destination balance; freeze its exact
+    // raw shortfall and quote the selected profile for that amount.
+    const exactAdditionalRaw = candidate.plan.shortfallRaw;
+    if (!/^[1-9][0-9]*$/u.test(exactAdditionalRaw)) {
+      return {
+        kind: "temporarily_unavailable",
+        reasonCodes: ["internal_route_shortfall_amount_unavailable"],
+      };
+    }
+    const exactInput: TelegramTradeShortfallIdentity = {
+      ...input,
+      additionalFundingRaw: exactAdditionalRaw,
+      additionalFundingUsd: undefined,
+    };
     let delegatedPlan: Awaited<ReturnType<FundingPlanningRuntime["liquidity"]>>;
     try {
       delegatedPlan = await this.runtime.liquidity(
         input.userId,
-        buildTelegramTradeShortfallRequest(input, profileId),
+        buildTelegramTradeShortfallRequest(exactInput, profileId),
       );
     } catch (error) {
       const reasonCode = shortfallPlannerFailureReasonCode(error);
@@ -826,6 +852,12 @@ export class TelegramTradeShortfallFundingService {
         ],
       };
     }
+    if (delegatedPlan.shortfallRaw !== exactAdditionalRaw) {
+      return {
+        kind: "temporarily_unavailable",
+        reasonCodes: ["internal_route_destination_balance_changed"],
+      };
+    }
     const delegatedAutomated = selectTelegramTradeShortfallAutomatedOption({
       options: delegatedPlan.sourceOptions,
       venue: input.venue,
@@ -839,7 +871,7 @@ export class TelegramTradeShortfallFundingService {
       };
     }
     const delegatedRequest = buildTelegramTradeShortfallRequest(
-      input,
+      exactInput,
       profileId,
     );
     const serverAdditionalDestinationAmount =
