@@ -24,6 +24,7 @@ import {
 const CALLBACK_PREFIX = TELEGRAM_BOT_TRADING_CALLBACK_PREFIX;
 
 type TradeFundingState =
+  | "filled"
   | "starting"
   | "preparing"
   | "submitted"
@@ -129,6 +130,7 @@ function parseProgress(value: unknown): TradeFundingProgress | null {
       "ready",
       "needs_attention",
       "stopped",
+      "filled",
     ].includes(value.state)
   ) {
     return null;
@@ -295,7 +297,11 @@ function liveProgressFor(candidate: ProjectionCandidate): TradeFundingProgress {
  */
 function progressFor(candidate: ProjectionCandidate): TradeFundingProgress {
   const live = liveProgressFor(candidate);
-  if (candidate.status !== "failed" && candidate.status !== "cancelled") {
+  if (
+    candidate.status !== "failed" &&
+    candidate.status !== "cancelled" &&
+    candidate.status !== "filled"
+  ) {
     return live;
   }
   return {
@@ -305,9 +311,12 @@ function progressFor(candidate: ProjectionCandidate): TradeFundingProgress {
     canCancelBuy: false,
     operationStatus: null,
     progressStage: null,
-    reasonCode: candidate.error_code ?? live.reasonCode,
+    reasonCode:
+      candidate.status === "filled"
+        ? null
+        : (candidate.error_code ?? live.reasonCode),
     receiptStateFingerprint: "",
-    state: "stopped",
+    state: candidate.status === "filled" ? "filled" : "stopped",
     stepStateFingerprint: "",
   };
 }
@@ -476,7 +485,7 @@ async function listCandidates(
        ) tracked_operation
        left join unified_markets market
          on market.id = intent.market_id
-      where intent.status in ('funding', 'failed', 'cancelled')
+      where intent.status in ('funding', 'failed', 'cancelled', 'filled')
         and intent.funding_operation_id is not null
       order by intent.updated_at, intent.id
       limit $1
@@ -536,7 +545,7 @@ export async function runTelegramTradeShortfallProgressProjectionBatch(
                 ),
                 updated_at = clock_timestamp()
           where id = $1::uuid
-            and status in ('funding', 'failed', 'cancelled')`,
+            and status in ('funding', 'failed', 'cancelled', 'filled')`,
         [candidate.id, JSON.stringify(progress), revision],
       );
       if (updated.rowCount !== 1) continue;
@@ -687,6 +696,11 @@ function progressText(progress: TradeFundingProgress): string {
       "Funding stopped",
       "No trade was submitted. Open the market for a fresh Review.",
     ],
+    filled: [
+      "✅",
+      "Trade filled",
+      "The Buy was filled successfully.",
+    ],
   } as const;
   const [icon, heading, body] = status[progress.state];
   return joinTelegramMarkdownV2Lines(
@@ -716,6 +730,17 @@ function progressKeyboard(
   progress: TradeFundingProgress,
 ): TelegramBotTradingClientReplyMarkup {
   const rows: TelegramBotTradingClientButton[][] = [];
+  if (progress.state === "filled") {
+    rows.push([
+      {
+        callback_data: `${CALLBACK_PREFIX}:retry_buy:${progress.intentId}`,
+        text: "🎯 Trade this market",
+      },
+    ]);
+    rows.push([
+      { callback_data: "hm:v1:positions", text: "💼 My positions" },
+    ]);
+  }
   if (progress.state === "needs_attention" || progress.state === "stopped") {
     rows.push([
       {

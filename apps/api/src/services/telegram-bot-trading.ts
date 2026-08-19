@@ -9888,7 +9888,7 @@ export async function handleTelegramBotTradingCallback(
     intent.action === "buy" &&
     intent.funding_operation_id != null &&
     intent.submit_started_at == null &&
-    ["cancelled", "expired", "failed"].includes(intent.status)
+    ["cancelled", "expired", "failed", "filled"].includes(intent.status)
   ) {
     await input.answerCallbackQuery({
       callbackQueryId: input.callbackQuery.id,

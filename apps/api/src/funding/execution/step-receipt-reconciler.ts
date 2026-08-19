@@ -35,7 +35,11 @@ import type { FundingTransactionReferenceCodec } from "./transaction-reference-c
 type JsonRecord = Readonly<Record<string, JsonValue>>;
 
 export const EVM_FUNDING_ACTION_FINALITY_CONFIRMATIONS = 12;
-export const FAST_EVM_FUNDING_ACTION_FINALITY_CONFIRMATIONS = 2;
+// Base and Polygon funding actions follow the same one-canonical-block
+// threshold as the Mini App. Subsequent reconciliation keeps watching the
+// block hash, so a later reorg still reopens the durable route rather than
+// treating one confirmation as irreversible history.
+export const FAST_EVM_FUNDING_ACTION_FINALITY_CONFIRMATIONS = 1;
 
 const FAST_FINALITY_EVM_CHAIN_IDS = new Set([137n, 8453n]);
 

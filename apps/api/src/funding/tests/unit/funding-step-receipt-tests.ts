@@ -53,8 +53,8 @@ const evmReceipt = {
   logs: [],
 };
 
-assert.equal(evmFundingActionFinalityConfirmations(137n), 2);
-assert.equal(evmFundingActionFinalityConfirmations(8453n), 2);
+assert.equal(evmFundingActionFinalityConfirmations(137n), 1);
+assert.equal(evmFundingActionFinalityConfirmations(8453n), 1);
 assert.equal(
   evmFundingActionFinalityConfirmations(1n),
   EVM_FUNDING_ACTION_FINALITY_CONFIRMATIONS,
