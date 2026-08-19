@@ -189,25 +189,31 @@ function liveProgressFor(candidate: ProjectionCandidate): TradeFundingProgress {
     routerContinuationPending &&
     isTelegramRouterContinuationHardReason(continuationReason);
   const reasonCode = routerContinuationPending
-    ? (typeof continuationReason === "string"
-        ? continuationReason
-        : "router_continuation_pending")
+    ? typeof continuationReason === "string"
+      ? continuationReason
+      : "router_continuation_pending"
     : (candidate.operation_error_code ?? candidate.error_code);
+  const venueBalancePending =
+    ready &&
+    candidate.status === "funding" &&
+    candidate.error_code === "funding_balance_pending";
   const state: TradeFundingState = routerContinuationPending
     ? routerContinuationNeedsAttention
       ? "needs_attention"
       : "preparing"
-    : ready
-    ? "ready"
-    : terminal
-      ? "stopped"
-        : awaitingReconciliation && !automaticProviderReferenceWait
-          ? "needs_attention"
-        : candidate.has_broadcast_boundary
-          ? "submitted"
-          : candidate.has_started_attempt
-            ? "preparing"
-            : "starting";
+    : venueBalancePending
+      ? "preparing"
+      : ready
+        ? "ready"
+        : terminal
+          ? "stopped"
+          : awaitingReconciliation && !automaticProviderReferenceWait
+            ? "needs_attention"
+            : candidate.has_broadcast_boundary
+              ? "submitted"
+              : candidate.has_started_attempt
+                ? "preparing"
+                : "starting";
   return {
     amountUsd: candidate.amount_usd ?? "0",
     attemptStateFingerprint: candidate.attempt_state_fingerprint,
@@ -489,44 +495,67 @@ export async function runTelegramTradeShortfallProgressProjectionBatch(
 }
 
 function progressText(progress: TradeFundingProgress): string {
+  if (progress.reasonCode === "funding_balance_pending") {
+    return joinTelegramMarkdownV2Lines(
+      [
+        `🔄 ${formatTelegramBoldMarkdownV2(
+          "Waiting for Polymarket balance confirmation",
+        )}`,
+        "",
+        `🔵 ${formatTelegramFieldMarkdownV2("Venue", progress.venue)}`,
+        `🎯 ${formatTelegramFieldMarkdownV2("Market", progress.marketTitle)}`,
+        `↔️ ${formatTelegramFieldMarkdownV2("Side", progress.sideLabel)}`,
+        `🛒 ${formatTelegramFieldMarkdownV2("Buy", `$${progress.amountUsd}`)}`,
+        progress.sourceRoute
+          ? `🔄 ${formatTelegramFieldMarkdownV2("Funding route", progress.sourceRoute)}`
+          : null,
+        "",
+        escapeTelegramMarkdownV2(
+          "Funding is confirmed. Polymarket is still reflecting the deposit in its trading balance; Hunch will retry the fresh Buy review automatically. The Buy has not been submitted yet.",
+        ),
+      ].filter((line): line is string => line != null),
+    );
+  }
   if (progress.reasonCode?.startsWith("router_")) {
     const pending = progress.reasonCode === "router_continuation_pending";
     const polygonRpcUnavailable =
       progress.reasonCode === "router_polygon_rpc_unavailable";
     const waiting = pending || polygonRpcUnavailable;
-    return joinTelegramMarkdownV2Lines([
-      `${waiting ? "🔄" : "⚠️"} ${formatTelegramBoldMarkdownV2(
-        pending
-          ? "Moving funds into Polymarket"
-          : polygonRpcUnavailable
-            ? "Waiting for Polygon confirmation service"
-            : "Polymarket funding needs attention",
-      )}`,
-      "",
-      `🔵 ${formatTelegramFieldMarkdownV2("Venue", progress.venue)}`,
-      `🎯 ${formatTelegramFieldMarkdownV2("Market", progress.marketTitle)}`,
-      `↔️ ${formatTelegramFieldMarkdownV2("Side", progress.sideLabel)}`,
-      `🛒 ${formatTelegramFieldMarkdownV2("Buy", `$${progress.amountUsd}`)}`,
-      progress.sourceRoute
-        ? `🔄 ${formatTelegramFieldMarkdownV2("Funding route", progress.sourceRoute)}`
-        : null,
-      waiting
-        ? null
-        : `ℹ️ ${formatTelegramFieldMarkdownV2(
-            "Status",
-            progress.reasonCode.replaceAll("_", " "),
-          )}`,
-      "",
-      escapeTelegramMarkdownV2(
-        pending
-          ? "The Relay transfer is ready. The final Polymarket funding step is being prepared automatically. The Buy has not been submitted yet."
-          : polygonRpcUnavailable
-            ? "Your Relay funds remain safe at the controller. The worker cannot currently read Polygon, so it will retry automatically when the Polygon confirmation service is available. The Buy has not been submitted yet."
-          : progress.reasonCode === "router_root_amount_unavailable"
-            ? "The Relay transfer remains safe at your controller, but its exact received amount could not be reconstructed. The final Polymarket step was not sent."
-            : "The Relay transfer remains safe at your controller. The final Polymarket step was not sent; the bot will retry only when its exact wallet and policy checks are valid.",
-      ),
-    ].filter((line): line is string => line != null));
+    return joinTelegramMarkdownV2Lines(
+      [
+        `${waiting ? "🔄" : "⚠️"} ${formatTelegramBoldMarkdownV2(
+          pending
+            ? "Moving funds into Polymarket"
+            : polygonRpcUnavailable
+              ? "Waiting for Polygon confirmation service"
+              : "Polymarket funding needs attention",
+        )}`,
+        "",
+        `🔵 ${formatTelegramFieldMarkdownV2("Venue", progress.venue)}`,
+        `🎯 ${formatTelegramFieldMarkdownV2("Market", progress.marketTitle)}`,
+        `↔️ ${formatTelegramFieldMarkdownV2("Side", progress.sideLabel)}`,
+        `🛒 ${formatTelegramFieldMarkdownV2("Buy", `$${progress.amountUsd}`)}`,
+        progress.sourceRoute
+          ? `🔄 ${formatTelegramFieldMarkdownV2("Funding route", progress.sourceRoute)}`
+          : null,
+        waiting
+          ? null
+          : `ℹ️ ${formatTelegramFieldMarkdownV2(
+              "Status",
+              progress.reasonCode.replaceAll("_", " "),
+            )}`,
+        "",
+        escapeTelegramMarkdownV2(
+          pending
+            ? "The Relay transfer is ready. The final Polymarket funding step is being prepared automatically. The Buy has not been submitted yet."
+            : polygonRpcUnavailable
+              ? "Your Relay funds remain safe at the controller. The worker cannot currently read Polygon, so it will retry automatically when the Polygon confirmation service is available. The Buy has not been submitted yet."
+              : progress.reasonCode === "router_root_amount_unavailable"
+                ? "The Relay transfer remains safe at your controller, but its exact received amount could not be reconstructed. The final Polymarket step was not sent."
+                : "The Relay transfer remains safe at your controller. The final Polymarket step was not sent; the bot will retry only when its exact wallet and policy checks are valid.",
+        ),
+      ].filter((line): line is string => line != null),
+    );
   }
   const status = {
     starting: [

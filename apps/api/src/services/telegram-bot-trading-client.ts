@@ -789,6 +789,8 @@ export function createTelegramBotTradingInternalApiClient(input: {
             : parsed.type === "change_amount"
               ? `/internal/telegram-bot/trading/intents/${parsed.intentId}/change-amount`
               : `/internal/telegram-bot/trading/intents/${parsed.intentId}/execute`;
+      const executionBounded =
+        parsed.type === "confirm" || parsed.type === "retry_buy";
       const confirmAcknowledged = parsed.type === "confirm";
       if (confirmAcknowledged) {
         await callbackInput.answerCallbackQuery({
@@ -818,7 +820,7 @@ export function createTelegramBotTradingInternalApiClient(input: {
             callbackQuery: callbackInput.callbackQuery,
             telegramMiniAppEnabled: callbackInput.telegramMiniAppEnabled,
           },
-          parsed.type === "confirm" ? { timeoutMs: executeTimeoutMs } : {},
+          executionBounded ? { timeoutMs: executeTimeoutMs } : {},
         );
       } catch (error) {
         if (

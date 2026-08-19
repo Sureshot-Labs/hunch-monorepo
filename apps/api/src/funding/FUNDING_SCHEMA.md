@@ -1,0 +1,80 @@
+# Funding and balance data map
+
+This is the operational schema map for funding and the balance card. It is a
+**query aid**, not a replacement for PostgreSQL: before running production SQL,
+confirm every referenced relation and column with `information_schema.columns`
+on the target database. Never invent an event table: funding has no
+`funding_operation_events` relation.
+
+The lists below were generated from the local PostgreSQL schema after migration
+`0225`; migrations under `packages/db/migrations/` remain the authoritative
+history. When a migration changes one of these relations, update this file in
+the same change.
+
+## Operational rules
+
+1. Start a production read with `information_schema.columns` when changing a
+   query or investigating an unfamiliar relation.
+2. Use the durable facts in this order: operation → step → attempt → receipt →
+   observation. A transaction is not proven merely because an attempt exists.
+3. `funding_operation_step_attempts.broadcast_may_have_occurred` is the
+   broadcast boundary column. There is no `broadcast_boundary_crossed` column.
+4. `funding_observations` is the operation-level ledger. The source debit is
+   `kind = 'source_debit'`; destination/venue facts are separate rows.
+5. `funding_step_receipt_observations` is per-step canonical receipt evidence;
+   it is not an event stream.
+
+## Funding core
+
+| Relation | Columns (in physical order) |
+| --- | --- |
+| `funding_operations` | `id`, `user_id`, `quote_id`, `purpose`, `status`, `progress_stage`, `experience_mode`, `plan_kind`, `idempotency_key`, `commit_request_hash`, `plan_hash`, `policy_version`, `policy_revision`, `source_snapshot`, `destination_target_snapshot`, `external_recipient_id`, `venue_id`, `market_id`, `market_context_snapshot`, `venue_binding_snapshot`, `wallet_execution_snapshot`, `placement_snapshot`, `requested_source_amount`, `requested_destination_amount`, `actual_source_amount`, `actual_destination_amount`, `quote_snapshot`, `consent_snapshot`, `error_code`, `support_metadata`, `original_subject_lookup_hmac`, `subject_lookup_key_version`, `version`, `created_at`, `updated_at`, `completed_at`, `recovery_mode`, `expires_at` |
+| `funding_operation_segments` | `id`, `operation_id`, `ordinal`, `provider_id`, `adapter_id`, `adapter_version`, `segment_kind`, `status`, `source_snapshot`, `destination_target_snapshot`, `quoted_input`, `quoted_expected_output`, `quoted_min_output`, `actual_input`, `actual_output`, `provider_quote_ref_ciphertext`, `provider_quote_ref_lookup_hmac`, `deposit_address_ciphertext`, `deposit_address_lookup_hmac`, `lookup_key_version`, `refund_location_snapshot`, `quote_expires_at`, `submitted_at`, `settled_at`, `raw_status`, `support_metadata`, `created_at`, `updated_at` |
+| `funding_operation_steps` | `id`, `operation_id`, `segment_id`, `ordinal`, `step_kind`, `state`, `action_fingerprint`, `executor_id`, `payer_requirement`, `depends_on_step_id`, `normalized_action`, `action_validation_result`, `created_at`, `updated_at`, `action_expires_at` |
+| `funding_operation_step_attempts` | `id`, `step_id`, `attempt_number`, `canonical_action_fingerprint`, `executor_id`, `outcome`, `broadcast_may_have_occurred`, `reference_kind`, `receipt_ref_ciphertext`, `receipt_ref_lookup_hmac`, `lookup_key_version`, `actual_costs`, `started_at`, `finished_at`, `created_at`, `updated_at` |
+| `funding_step_receipt_observations` | `id`, `operation_id`, `step_id`, `attempt_id`, `network_id`, `status`, `action_match`, `ledger_height`, `block_hash`, `canonical`, `failure_code`, `evidence`, `first_seen_at`, `observed_at`, `finalized_at`, `reorged_at`, `created_at`, `updated_at` |
+| `funding_observations` | `id`, `operation_id`, `segment_id`, `kind`, `network_id`, `asset_id`, `tx_hash`, `event_index`, `from_address`, `to_address`, `raw_amount`, `observed_at`, `ledger_height`, `block_hash`, `finality_status`, `canonical`, `reorged_at`, `finalized_at`, `metadata`, `created_at`, `updated_at`, `asset_decimals` |
+| `funding_provider_requests` | `id`, `segment_id`, `request_kind`, `request_ref_ciphertext`, `request_ref_lookup_hmac`, `raw_status`, `discovery_source`, `lookup_key_version`, `first_seen_at`, `last_seen_at`, `support_metadata`, `created_at`, `updated_at` |
+| `funding_reconciliation_jobs` | `id`, `operation_id`, `status`, `due_at`, `priority`, `lease_owner`, `lease_token`, `lease_until`, `attempt_count`, `last_error_code`, `last_error_summary`, `completed_at`, `created_at`, `updated_at` |
+| `funding_route_observations` | `id`, `user_id`, `operation_id`, `route_key_hmac`, `route_key_version`, `provider_id`, `adapter_version`, `amount_band`, `started_at`, `finished_at`, `latency_stages`, `outcome`, `refund_observed`, `recovery_required`, `policy_revision`, `reason_codes`, `support_metadata`, `created_at`, `updated_at` |
+| `funding_quotes` | `id`, `user_id`, `discovery_projection_id`, `selected_source_option_snapshot`, `market_context_snapshot`, `destination_option_snapshot`, `venue_binding_snapshot`, `plan_snapshot`, `policy_version`, `policy_revision`, `canonical_request_hash`, `plan_hash`, `consent_token_hash`, `expires_at`, `consumed_at`, `invalidated_at`, `invalidation_reason`, `created_at`, `updated_at`, `commit_scope` |
+| `balance_reservations` | `id`, `user_id`, `operation_id`, `segment_id`, `component_id`, `location_id`, `network_id`, `asset_id`, `asset_decimals`, `raw_amount`, `mode`, `state`, `expires_at`, `consumer_kind`, `consumer_ref`, `outcome_reason`, `consumed_at`, `released_at`, `created_at`, `updated_at` |
+
+## Receive flow
+
+| Relation | Columns |
+| --- | --- |
+| `funding_receive_sessions` | `id`, `user_id`, `status`, `venue_id`, `destination_option_id`, `venue_binding_option_id`, `destination_asset`, `destination_target_snapshot`, `venue_binding_snapshot`, `funding_methods`, `receive_targets`, `observation_variants`, `selected_receive_target_id`, `automation_policy`, `policy_version`, `policy_revision`, `ownership_revision`, `version`, `opened_at`, `last_observed_at`, `expires_at`, `observe_until`, `closed_at`, `created_at`, `updated_at`, `observation_start_variants`, `owner_channel`, `observation_requested_at` |
+| `funding_receive_receipts` | `id`, `receive_session_id`, `user_id`, `variant_id`, `network_id`, `asset_id`, `asset_decimals`, `destination_address`, `raw_amount`, `observation_revision`, `tx_hash`, `event_index`, `ledger_height`, `block_hash`, `source_address`, `observed_at`, `status`, `handling`, `child_funding_operation_id`, `review_quote_id`, `evidence`, `created_at`, `updated_at`, `routing_disposition`, `routing_attempt_count`, `routing_next_attempt_at`, `routing_last_attempt_at`, `routing_last_error_code` |
+| `funding_receive_canonical_events` | `id`, `network_id`, `asset_id`, `asset_decimals`, `destination_address`, `source_address`, `raw_amount`, `tx_hash`, `event_index`, `ledger_height`, `block_hash`, `observed_at`, `allocation_status`, `allocated_receive_session_id`, `allocated_receipt_id`, `allocation_error_code`, `first_observed_at`, `last_observed_at`, `allocated_at` |
+
+## Telegram funding and trade intent
+
+| Relation | Columns |
+| --- | --- |
+| `telegram_trade_intents` | `id`, `telegram_user_id`, `user_id`, `authorization_id`, `chat_id`, `telegram_message_id`, `callback_query_id`, `action`, `venue`, `market_id`, `event_id`, `side`, `amount_usd`, `sell_percent`, `shares_raw`, `status`, `quote_snapshot`, `policy_snapshot`, `order_id`, `execution_id`, `venue_order_id`, `tx_signature`, `prepared_snapshot`, `result`, `error_code`, `error_message`, `expires_at`, `confirmed_at`, `submitted_at`, `created_at`, `updated_at`, `idempotency_key`, `submit_started_at`, `funding_operation_id`, `funding_reservation_id`, `delivery_mode` |
+| `telegram_funding_authorizations` | `id`, `user_id`, `telegram_account_id`, `telegram_user_id`, `user_wallet_id`, `privy_wallet_id`, `wallet_address`, `wallet_chain`, `profile_id`, `security_class`, `signer_id`, `signer_fingerprint`, `policy_id`, `policy_fingerprint`, `venue_id`, `destination_option_id`, `venue_binding_option_id`, `source_network_id`, `source_asset_id`, `source_asset_decimals`, `destination_network_id`, `destination_asset_id`, `destination_asset_decimals`, `granted_at`, `expires_at`, `revoked_at`, `created_at`, `updated_at`, `max_source_raw` |
+| `telegram_funding_authorization_reservations` | `id`, `authorization_id`, `receive_receipt_id`, `funding_operation_id`, `cleanup_operation_id`, `cleanup_allowance_revision`, `source_raw`, `status`, `reserved_at`, `resolved_at`, `refund_cursor_block`, `resolution_evidence`, `created_at`, `updated_at`, `source_trade_intent_id` |
+| `telegram_funding_sessions` | `id`, `user_id`, `telegram_account_id`, `telegram_user_id`, `chat_id`, `telegram_message_id`, `receive_session_id`, `receive_owner_channel`, `origin`, `market_id`, `event_id`, `side`, `requested_spend_usd`, `active_consent_revision`, `idempotency_key`, `expires_at`, `resume_generation`, `resume_intent_id`, `resumed_at`, `cancelled_at`, `progress_revision`, `progress_fingerprint`, `latest_progress_projection`, `projected_receive_version`, `projected_consent_revision`, `projection_checked_at`, `latest_terminal_revision`, `latest_terminal_projection`, `last_delivered_revision`, `delivery_lease_outbox_id`, `delivery_lease_attempt_id`, `delivery_lease_expires_at`, `created_at`, `updated_at`, `active_buy_return_revision`, `projected_buy_return_revision`, `projected_buy_policy_revision`, `address_disclosure_attempt_revision`, `address_disclosure_message_id`, `address_delivered_revision`, `address_redacted_revision`, `minimum_funding_usd` |
+| `telegram_funding_consents` | `id`, `telegram_funding_session_id`, `revision`, `selected_receive_target_id`, `selected_asset_network_id`, `selected_asset_id`, `selected_asset_decimals`, `consented_variant_ids`, `automation_enabled`, `max_auto_execute_source_raw`, `automation_policy_snapshot`, `consent_fingerprint`, `consented_at` |
+| `telegram_funding_mutations` | `id`, `funding_context_id`, `action`, `idempotency_key`, `request_fingerprint`, `response_payload`, `consent_revision`, `created_at`, `buy_return_revision`, `resume_generation`, `resume_intent_id`, `continuation_id`, `review_receipt_id`, `review_quote_id` |
+
+## Balance card sources
+
+| Relation | Columns used by account/balance work |
+| --- | --- |
+| `user_wallets` | `id`, `user_id`, `wallet_address`, `wallet_type`, `is_primary`, `is_verified`, `verification_signature`, `created_at`, `updated_at`, `name`, `privy_wallet_id`, `wallet_source`, `is_internal_wallet`, `privy_profile_updated_at`, `wallet_address_norm` |
+| `wallets` | `id`, `address`, `chain`, `label`, `is_system_flagged`, `metadata`, `first_seen_at`, `last_seen_at`, `created_at`, `updated_at` |
+| `wallet_onchain_state` | `wallet_id`, `chain`, `wallet_address`, `wallet_kind`, `owner_wallet_id`, `owner_address`, `owner_source`, `owner_confidence`, `identity_resolved_at`, `wallet_balances`, `owner_balances`, `wallet_usd_like_balance`, `owner_usd_like_balance`, `balance_as_of`, `created_at`, `updated_at` |
+| `positions` | `id`, `user_id`, `venue`, `token_id`, `side`, `size`, `average_price`, `unrealized_pnl`, `realized_pnl`, `last_updated_at`, `created_at`, `updated_at`, `wallet_address`, `is_hidden`, `hidden_reason`, `hidden_at`, `position_scope` |
+| `balance_reservations` | See Funding core above; it determines spendable/routable rather than gross holdings. |
+
+## Known semantics that prevent bad diagnosis
+
+- `Updated` on the Telegram balance card is aggregation/projection time, not
+  proof that every price source is fresh.
+- `positions.position_scope = 'own'` is the user portfolio input; followed
+  wallet positions must not make a user card stale.
+- A stale or unpriced own position can make the aggregate card partial while
+  cash/on-chain wallet amounts remain fresh. Show that cause explicitly in UI
+  instead of implying the cash number itself is stale.
