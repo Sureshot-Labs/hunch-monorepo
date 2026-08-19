@@ -114,12 +114,23 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
             heading: "Trade submitted.",
             lines: ["BUY YES · $10.00", "Check /trade_status before retrying."],
             marketTitle: "Will it happen?",
+            tone: "working",
             venue: "polymarket",
           },
         );
       assert.match(lifecycle, new RegExp(TELEGRAM_CUSTOM_EMOJI.polymarket.id));
       assert.match(lifecycle, /\) \*Venue:\* Polymarket/);
       assert.match(lifecycle, /Check `\/trade_status` before retrying\\\./);
+      const rejected =
+        telegramBotTradingTestHooks.formatTelegramTradeLifecycleMessageMarkdownV2(
+          {
+            heading: "Trade not submitted.",
+            marketTitle: "Will it happen?",
+            tone: "warn",
+            venue: "polymarket",
+          },
+        );
+      assert.match(rejected, /^⚠️ /u);
       const payout =
         telegramBotTradingTestHooks.formatTelegramUsdcLineMarkdownV2(
           "Received: $10.00 pUSD",
