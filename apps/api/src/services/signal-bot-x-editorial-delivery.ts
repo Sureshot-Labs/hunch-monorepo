@@ -24,11 +24,17 @@ import {
   type XEditorialDraftV1,
   type XEditorialMessageKind,
 } from "./x-editorial-draft.js";
+import { buildSignalBotHolderTrackingUrl } from "./signal-bot-mini-app-links.js";
 
 type SignalBotXEditorialDeliveryRow = {
   id: string;
   metrics: unknown;
   telegram_message_id: string | number | null;
+};
+
+export type XEditorialHolderLink = {
+  labels: string[];
+  url: string;
 };
 
 export const X_EDITORIAL_MAX_COMPOSE_ATTEMPTS = 3;
@@ -439,6 +445,90 @@ function escapeMarkdownV2(value: string): string {
   return value.replace(/([_*[\]()~`>#+\-=|{}.!\\])/g, "\\$1");
 }
 
+function escapeMarkdownV2Url(value: string): string {
+  return value.replace(/([\\)])/g, "\\$1");
+}
+
+function buildXEditorialHolderLabels(
+  values: Array<string | null | undefined>,
+): string[] {
+  const labels = new Set<string>();
+  for (const value of values) {
+    const label = value?.trim();
+    if (!label) continue;
+    labels.add(label);
+    const handle = label.startsWith("@") ? label.slice(1) : label;
+    if (/^[A-Za-z0-9_]{2,64}$/.test(handle)) {
+      labels.add(`@${handle}`);
+      labels.add(handle);
+    }
+  }
+  return [...labels].sort((left, right) => right.length - left.length);
+}
+
+function buildXEditorialHolderLink(input: {
+  address: string | null | undefined;
+  appBaseUrl: string;
+  chain: string | null | undefined;
+  displayNames: Array<string | null | undefined>;
+  eventId: string | null | undefined;
+  marketId: string | null | undefined;
+  noteId: string | null | undefined;
+  side: "NO" | "YES" | null | undefined;
+}): XEditorialHolderLink | null {
+  const url = buildSignalBotHolderTrackingUrl({
+    address: input.address,
+    appBaseUrl: input.appBaseUrl,
+    chain: input.chain,
+    eventId: input.eventId,
+    marketId: input.marketId,
+    noteId: input.noteId,
+    side: input.side,
+  });
+  const labels = buildXEditorialHolderLabels(input.displayNames);
+  return url && labels.length > 0 ? { labels, url } : null;
+}
+
+function buildInitialHolderLink(input: {
+  appBaseUrl: string;
+  note: SignalBotNote;
+}): XEditorialHolderLink | null {
+  return buildXEditorialHolderLink({
+    address: input.note.holderAddress,
+    appBaseUrl: input.appBaseUrl,
+    chain: input.note.holderChain,
+    displayNames: [
+      input.note.holderIdentityDisplayName,
+      input.note.holderDisplayName,
+    ],
+    eventId: input.note.eventId,
+    marketId: input.note.marketId,
+    noteId: input.note.id,
+    side: input.note.holderSide,
+  });
+}
+
+function buildFollowthroughHolderLink(input: {
+  appBaseUrl: string;
+  candidate: SignalBotFollowthroughCandidateRow;
+  signalSide: "NO" | "YES" | null;
+}): XEditorialHolderLink | null {
+  const holderMeta = asObject(input.candidate.holder_target_meta);
+  return buildXEditorialHolderLink({
+    address: input.candidate.holder_address,
+    appBaseUrl: input.appBaseUrl,
+    chain: input.candidate.holder_chain,
+    displayNames: [
+      asTrimmedString(holderMeta.identityDisplayName),
+      asTrimmedString(holderMeta.holderDescriptor),
+    ],
+    eventId: input.candidate.event_id,
+    marketId: input.candidate.market_id,
+    noteId: input.candidate.thread_root_note_id,
+    side: input.signalSide,
+  });
+}
+
 function sentence(value: string): string {
   const trimmed = value.trim();
   if (!trimmed) return "";
@@ -766,13 +856,18 @@ export function buildXEditorialFallbackPost(input: {
 
 export function buildXEditorialTelegramDraftMessage(input: {
   draft: XEditorialDraftV1;
+  holderLink?: XEditorialHolderLink | null;
 }): string {
   const postText = input.draft.postText ?? "";
-  const ranges: Array<{
+  type MarkdownRange = {
+    children: MarkdownRange[];
     end: number;
-    marker: "*" | "_";
+    kind: "format" | "link";
+    marker?: "*" | "_";
     start: number;
-  }> = [];
+    url?: string;
+  };
+  const formattingRanges: MarkdownRange[] = [];
   for (const span of input.draft.formatting) {
     const start = postText.indexOf(span.text);
     const end = start + span.text.length;
@@ -780,33 +875,121 @@ export function buildXEditorialTelegramDraftMessage(input: {
       start < 0 ||
       span.text.includes("\n") ||
       postText.indexOf(span.text, end) >= 0 ||
-      ranges.some((range) => start < range.end && end > range.start)
+      formattingRanges.some((range) => start < range.end && end > range.start)
     ) {
       continue;
     }
-    ranges.push({
+    formattingRanges.push({
+      children: [],
       end,
+      kind: "format",
       marker: span.style === "bold" ? "*" : "_",
       start,
     });
   }
-  ranges.sort((left, right) => left.start - right.start);
-  const formattedPost: string[] = [];
-  let cursor = 0;
-  for (const range of ranges) {
-    formattedPost.push(escapeMarkdownV2(postText.slice(cursor, range.start)));
-    formattedPost.push(
-      `${range.marker}${escapeMarkdownV2(postText.slice(range.start, range.end))}${range.marker}`,
-    );
-    cursor = range.end;
+
+  const linkRanges: MarkdownRange[] = [];
+  if (input.holderLink && isSafeHttpUrl(input.holderLink.url)) {
+    const lowerPostText = postText.toLocaleLowerCase("en-US");
+    const occupied: Array<{ end: number; start: number }> = [];
+    const labels = [
+      ...new Set(input.holderLink.labels.map((label) => label.trim())),
+    ]
+      .filter(Boolean)
+      .sort((left, right) => right.length - left.length);
+    for (const label of labels) {
+      const lowerLabel = label.toLocaleLowerCase("en-US");
+      let fromIndex = 0;
+      while (fromIndex < postText.length) {
+        const start = lowerPostText.indexOf(lowerLabel, fromIndex);
+        if (start < 0) break;
+        const end = start + label.length;
+        fromIndex = Math.max(end, start + 1);
+        const before = postText[start - 1] ?? "";
+        const after = postText[end] ?? "";
+        const hasSafeBoundary =
+          !/[A-Za-z0-9_]/.test(before) && !/[A-Za-z0-9_]/.test(after);
+        const overlapsExisting = occupied.some(
+          (range) => start < range.end && end > range.start,
+        );
+        const partiallyOverlapsFormatting = formattingRanges.some(
+          (range) =>
+            start < range.end &&
+            end > range.start &&
+            !(
+              (range.start <= start && range.end >= end) ||
+              (start <= range.start && end >= range.end)
+            ),
+        );
+        if (
+          !hasSafeBoundary ||
+          overlapsExisting ||
+          partiallyOverlapsFormatting
+        ) {
+          continue;
+        }
+        occupied.push({ end, start });
+        linkRanges.push({
+          children: [],
+          end,
+          kind: "link",
+          start,
+          url: input.holderLink.url,
+        });
+      }
+    }
   }
-  formattedPost.push(escapeMarkdownV2(postText.slice(cursor)));
-  return formattedPost.join("");
+
+  const ranges = [...formattingRanges, ...linkRanges].sort((left, right) => {
+    if (left.start !== right.start) return left.start - right.start;
+    if (left.end !== right.end) return right.end - left.end;
+    return left.kind === right.kind ? 0 : left.kind === "format" ? -1 : 1;
+  });
+  const roots: MarkdownRange[] = [];
+  const stack: MarkdownRange[] = [];
+  for (const range of ranges) {
+    while (
+      stack.length > 0 &&
+      !(
+        (stack.at(-1)?.start ?? 0) <= range.start &&
+        (stack.at(-1)?.end ?? 0) >= range.end
+      )
+    ) {
+      stack.pop();
+    }
+    const parent = stack.at(-1);
+    if (parent) parent.children.push(range);
+    else roots.push(range);
+    stack.push(range);
+  }
+
+  const renderSlice = (
+    start: number,
+    end: number,
+    children: MarkdownRange[],
+  ): string => {
+    const rendered: string[] = [];
+    let cursor = start;
+    for (const child of children) {
+      rendered.push(escapeMarkdownV2(postText.slice(cursor, child.start)));
+      const content = renderSlice(child.start, child.end, child.children);
+      rendered.push(
+        child.kind === "format"
+          ? `${child.marker}${content}${child.marker}`
+          : `[${content}](${escapeMarkdownV2Url(child.url ?? "")})`,
+      );
+      cursor = child.end;
+    }
+    rendered.push(escapeMarkdownV2(postText.slice(cursor, end)));
+    return rendered.join("");
+  };
+  return renderSlice(0, postText.length, roots);
 }
 
 async function sendPreviewDraft(input: {
   chatId: string;
   composer: XEditorialDraftComposer;
+  holderLink?: XEditorialHolderLink | null;
   source: XEditorialDraftSource;
   telegram: SignalBotTelegramClient;
 }): Promise<SignalBotXEditorialPublicationResult> {
@@ -875,6 +1058,7 @@ async function sendPreviewDraft(input: {
       `🧪 _${escapeMarkdownV2("Preview only — not recorded.")}_`,
       buildXEditorialTelegramDraftMessage({
         draft,
+        holderLink: input.holderLink,
       }),
     ].join("\n\n"),
   });
@@ -913,6 +1097,10 @@ export async function sendXEditorialNotePreview(input: {
   const result = await sendPreviewDraft({
     chatId: input.chatId,
     composer,
+    holderLink: buildInitialHolderLink({
+      appBaseUrl: input.config.appBaseUrl,
+      note: input.note,
+    }),
     source: buildInitialSource({
       ...input,
       appBaseUrl: input.config.appBaseUrl,
@@ -956,6 +1144,11 @@ export async function sendXEditorialFollowthroughPreview(input: {
   const result = await sendPreviewDraft({
     chatId,
     composer,
+    holderLink: buildFollowthroughHolderLink({
+      appBaseUrl: input.config.appBaseUrl,
+      candidate: input.candidate,
+      signalSide: input.stats.signalSide,
+    }),
     source: buildFollowthroughSource({
       ...input,
       appBaseUrl: input.config.appBaseUrl,
@@ -972,6 +1165,7 @@ async function deliverDraft(input: {
   chatId: string;
   composer: XEditorialDraftComposer;
   db: DbQuery;
+  holderLink?: XEditorialHolderLink | null;
   messageKind: XEditorialMessageKind;
   noteId: string;
   source: XEditorialDraftSource;
@@ -1178,6 +1372,7 @@ async function deliverDraft(input: {
     parse_mode: "MarkdownV2",
     text: buildXEditorialTelegramDraftMessage({
       draft,
+      holderLink: input.holderLink,
     }),
   });
   if (!result.ok) {
@@ -1237,6 +1432,10 @@ export async function publishXEditorialNote(input: {
   return deliverDraft({
     ...input,
     composer,
+    holderLink: buildInitialHolderLink({
+      appBaseUrl: input.appBaseUrl,
+      note: input.note,
+    }),
     messageKind: input.kind,
     noteId: input.note.id,
     source: buildInitialSource({ ...input, recentOpenings }),
@@ -1272,6 +1471,11 @@ export async function publishXEditorialFollowthrough(input: {
     chatId,
     composer,
     db: input.db,
+    holderLink: buildFollowthroughHolderLink({
+      appBaseUrl: input.appBaseUrl,
+      candidate: input.candidate,
+      signalSide: input.stats.signalSide,
+    }),
     messageKind: input.kind,
     noteId: input.candidate.thread_root_note_id,
     source: buildFollowthroughSource({ ...input, recentOpenings }),
