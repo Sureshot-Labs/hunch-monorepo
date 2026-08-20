@@ -1591,6 +1591,8 @@ async function registerTelegramBotTradingRoutes(
         ),
       inspectTradeShortfall: (input) =>
         tradeShortfallFundingService.inspect(input),
+      inspectMiniAppFunding: (input, trade) =>
+        tradeShortfallFundingService.inspectMiniAppFunding(input, trade),
       commitTradeShortfall: (input) =>
         tradeShortfallFundingService.commit(input),
       cancelFundingOperation: async (input) => {
@@ -1622,6 +1624,8 @@ async function registerTelegramBotTradingRoutes(
         ),
       inspectTradeShortfall: (input) =>
         tradeShortfallFundingService.inspect(input),
+      inspectMiniAppFunding: (input, trade) =>
+        tradeShortfallFundingService.inspectMiniAppFunding(input, trade),
       commitTradeShortfall: (input) =>
         tradeShortfallFundingService.commit(input),
       cancelFundingOperation: async (input) => {
@@ -1843,6 +1847,8 @@ async function registerTelegramBotTradingRoutes(
           ),
         inspectTradeShortfall: (input) =>
           tradeShortfallFundingService.inspect(input),
+        inspectMiniAppFunding: (input, trade) =>
+          tradeShortfallFundingService.inspectMiniAppFunding(input, trade),
         telegramMessageId: request.body.telegramMessageId,
         telegramMiniAppEnabled: request.body.telegramMiniAppEnabled,
         telegramUserId,

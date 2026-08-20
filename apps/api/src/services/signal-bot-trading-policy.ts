@@ -12,6 +12,14 @@ export type SignalBotTradingVenue = "polymarket" | "limitless" | "kalshi";
  * funding/trade plan that the server-side automation policy cannot execute.
  */
 export type TelegramMiniAppHandoffMode = "off" | "fallback" | "always";
+/**
+ * The client protocol understood by the deployed Mini App. Mode decides when
+ * a handoff is chosen; this version decides whether the generic sealed
+ * contract may be issued. Version 1 is an inert compatibility value for
+ * already-issued rows only; new handoffs are issued exclusively as version 2.
+ * Keeping them separate avoids an environment-only rollout switch.
+ */
+export type TelegramMiniAppHandoffContractVersion = 1 | 2;
 
 export type SignalBotPolicy = {
   autoEnableOnTelegramLink: boolean;
@@ -20,6 +28,7 @@ export type SignalBotPolicy = {
   buyContinuationEnabled: boolean;
   customTradeInputEnabled: boolean;
   fundingReceiveEnabled: boolean;
+  miniAppHandoffContractVersion: TelegramMiniAppHandoffContractVersion;
   miniAppHandoffMode: TelegramMiniAppHandoffMode;
   tradingEnabled: boolean;
   tradingActions: SignalBotTradingAction[];
@@ -50,6 +59,10 @@ const signalBotTradingVenueSchema = z.enum([
   "kalshi",
 ]);
 const telegramMiniAppHandoffModeSchema = z.enum(["off", "fallback", "always"]);
+const telegramMiniAppHandoffContractVersionSchema = z.union([
+  z.literal(1),
+  z.literal(2),
+]);
 
 export const signalBotSchema = z
   .object({
@@ -59,6 +72,7 @@ export const signalBotSchema = z
     buyContinuationEnabled: strictBoolean,
     customTradeInputEnabled: strictBoolean,
     fundingReceiveEnabled: strictBoolean,
+    miniAppHandoffContractVersion: telegramMiniAppHandoffContractVersionSchema,
     miniAppHandoffMode: telegramMiniAppHandoffModeSchema,
     tradingEnabled: strictBoolean,
     tradingActions: z.array(signalBotTradingActionSchema).max(8),
@@ -106,6 +120,7 @@ export function getDefaultSignalBotPolicy(): SignalBotPolicy {
     buyContinuationEnabled: false,
     customTradeInputEnabled: false,
     fundingReceiveEnabled: false,
+    miniAppHandoffContractVersion: 1,
     miniAppHandoffMode: "off",
     tradingEnabled: false,
     tradingActions: ["buy"],
@@ -136,6 +151,7 @@ export function normalizeSignalBotPolicy(
     | "buyContinuationEnabled"
     | "customTradeInputEnabled"
     | "fundingReceiveEnabled"
+    | "miniAppHandoffContractVersion"
     | "miniAppHandoffMode"
   > &
     Partial<
@@ -147,6 +163,7 @@ export function normalizeSignalBotPolicy(
         | "buyContinuationEnabled"
         | "customTradeInputEnabled"
         | "fundingReceiveEnabled"
+        | "miniAppHandoffContractVersion"
         | "miniAppHandoffMode"
       >
     >,
@@ -196,6 +213,7 @@ export function normalizeSignalBotPolicy(
     buyContinuationEnabled: Boolean(policy.buyContinuationEnabled ?? false),
     customTradeInputEnabled: Boolean(policy.customTradeInputEnabled ?? false),
     fundingReceiveEnabled: Boolean(policy.fundingReceiveEnabled ?? false),
+    miniAppHandoffContractVersion: policy.miniAppHandoffContractVersion ?? 1,
     miniAppHandoffMode: policy.miniAppHandoffMode ?? "off",
     tradingEnabled: Boolean(policy.tradingEnabled),
     tradingActions,

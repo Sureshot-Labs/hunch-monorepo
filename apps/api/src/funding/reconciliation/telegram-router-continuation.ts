@@ -14,11 +14,13 @@ export function runTelegramRouterContinuation(
     limit: number;
     subjectLookupHmacKey: string;
     subjectLookupKeyVersion: number;
-    inspectRouterProfile: (input: Readonly<{
-      walletAddress: string;
-      walletId: string;
-      profileId: string;
-    }>) => Promise<"valid" | "invalid" | "unavailable">;
+    inspectRouterProfile: (
+      input: Readonly<{
+        walletAddress: string;
+        walletId: string;
+        profileId: string;
+      }>,
+    ) => Promise<"valid" | "invalid" | "unavailable">;
     tradeIntentId?: string;
   }>,
 ) {

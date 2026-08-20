@@ -384,6 +384,12 @@ export type SourceOption = Readonly<{
   ingress?: ExternalIngressInstruction;
   sourceLegs?: readonly SourceOptionLeg[];
   amountMode: "exact_input" | "exact_output" | "variable_external";
+  /**
+   * Exact source amount in the provider quote behind this option. It is
+   * distinct from `maximumSourceRaw`, which describes the wallet's available
+   * capacity and must never be treated as consent to debit that whole balance.
+   */
+  quotedSourceAmount?: Money | null;
   maximumSourceRaw: RawAmount | null;
   expectedDestination: Money | null;
   minimumDestination: Money | null;

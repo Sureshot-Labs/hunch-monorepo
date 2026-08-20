@@ -121,6 +121,13 @@ const migration0225 = await readFile(
   ),
   "utf8",
 );
+const migration0226 = await readFile(
+  new URL(
+    "../../../packages/db/migrations/0226_telegram_app_handoff_v2_quote_scope.sql",
+    import.meta.url,
+  ),
+  "utf8",
+);
 assert.match(
   migration0221,
   /create table if not exists telegram_app_handoffs[\s\S]*?token_hash text not null unique[\s\S]*?plan_fingerprint text not null[\s\S]*?policy_revision text not null/u,
@@ -155,6 +162,21 @@ assert.match(
   migration0225,
   /status not in \([\s\S]*?'executing'[\s\S]*?'filled'[\s\S]*?'reconcile_required'[\s\S]*?submit_started_at is null[\s\S]*?tx_signature is null/u,
   "0225 must preserve the no-submit fence for uncommitted app handoffs",
+);
+assert.match(
+  migration0226,
+  /commit_scope ->> 'kind' = 'telegram_app_handoff_v2'[\s\S]*?handoffId[\s\S]*?tradeIntentId/u,
+  "0226 must bind v2 funding quotes to exactly one sealed handoff and trade intent",
+);
+assert.match(
+  migration0226,
+  /appHandoffExecution' ->> 'version' = '2'[\s\S]*?status in \([\s\S]*?'funding'[\s\S]*?status <> 'funding'[\s\S]*?funding_operation_id is not null/u,
+  "0226 must permit v2 funding only after a committed marker and attached operation",
+);
+assert.doesNotMatch(
+  migration0226,
+  /raise exception|\bdelete from\b|\bupdate telegram_app_handoffs\b/iu,
+  "v2 constraint migrations must not mutate historical handoffs or fail deployment on data",
 );
 assert.match(
   migration0208,

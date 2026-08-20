@@ -70,6 +70,63 @@ export const telegramAppHandoffResponseSchema = z.object({
   }),
 });
 
+/** Returned by the only contract issued by new Telegram handoffs: v2. */
+export const telegramAppHandoffClientExecutionSchema = z.object({
+  execution: z.discriminatedUnion("kind", [
+    z.object({
+      fundingOperationId: z.string().uuid(),
+      handoffId: z.string().uuid(),
+      kind: z.literal("client_execution_required"),
+      requiredContractVersion: z.literal(2),
+    }),
+    z.object({
+      fundingOperationId: z.string().uuid(),
+      fundingReservationId: z.string().uuid(),
+      handoffId: z.string().uuid(),
+      kind: z.literal("trade_continuation_required"),
+      requiredContractVersion: z.literal(2),
+    }),
+    z.object({
+      fundingOperationId: z.string().uuid(),
+      fundingReservationId: z.string().uuid(),
+      handoffId: z.string().uuid(),
+      kind: z.literal("trade_continuation_in_flight"),
+      requiredContractVersion: z.literal(2),
+      tradeAttemptId: z.string().uuid(),
+      tradeAttemptState: z.enum([
+        "accepted",
+        "ambiguous",
+        "claimed",
+        "submission_started",
+      ]),
+    }),
+    z.object({
+      handoffId: z.string().uuid(),
+      kind: z.literal("direct_trade_continuation_required"),
+      planFingerprint: z.string().regex(/^[0-9a-f]{64}$/iu),
+      requiredContractVersion: z.literal(2),
+      tradeIntentId: z.string().uuid(),
+    }),
+    z.object({
+      handoffId: z.string().uuid(),
+      kind: z.literal("direct_trade_in_flight"),
+      orderId: z.string().uuid().nullable(),
+      planFingerprint: z.string().regex(/^[0-9a-f]{64}$/iu),
+      requiredContractVersion: z.literal(2),
+      tradeIntentId: z.string().uuid(),
+      venueOrderId: z.string().nullable(),
+    }),
+    z.object({
+      handoffId: z.string().uuid(),
+      kind: z.literal("trade_terminal"),
+      requiredContractVersion: z.literal(2),
+      status: z.enum(["cancelled", "expired", "failed", "filled"]),
+      tradeIntentId: z.string().uuid(),
+    }),
+  ]),
+  handoff: telegramAppHandoffResponseSchema.shape.handoff,
+});
+
 export const telegramAppHandoffProjectionSchema = z.object({
   amountUsd: z.number().nullable(),
   canAutoClose: z.boolean(),
@@ -114,6 +171,11 @@ export const telegramAppHandoffProjectionSchema = z.object({
 export const telegramAppHandoffProjectionResponseSchema = z.object({
   projection: telegramAppHandoffProjectionSchema,
 });
+
+export const telegramAppHandoffExecuteResponseSchema = z.union([
+  telegramAppHandoffProjectionResponseSchema,
+  telegramAppHandoffClientExecutionSchema,
+]);
 
 export const telegramGroupMembershipStateSchema = z.enum([
   "member",

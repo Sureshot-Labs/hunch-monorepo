@@ -204,6 +204,14 @@ export class FundingPlanningRuntime {
     };
   }
 
+  /**
+   * Owner-scoped internal consumers use this to prove a sealed plan was
+   * created under the same funding policy without reaching into runtime state.
+   */
+  async currentPolicyRevision(): Promise<string> {
+    return (await resolveFundingPolicy(this.db)).revision;
+  }
+
   async destinations(
     userId: string,
     query: FundingDestinationQuery,

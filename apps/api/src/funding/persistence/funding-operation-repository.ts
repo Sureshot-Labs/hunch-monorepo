@@ -54,12 +54,24 @@ export class FundingPersistenceError extends Error {
 
 type JsonRecord = Readonly<Record<string, JsonValue>>;
 
-export type FundingQuoteCommitScope = Readonly<{
-  kind: "receive_receipt_review_v1";
-  ownerChannel: FundingReceiveSessionChannel;
-  receiveSessionId: string;
-  receiptId: string;
-}>;
+/**
+ * A commit scope is an internal authority boundary for a quote. It is not
+ * client input: each owner validates its own immutable record before allowing
+ * the generic funding runtime to consume the quote.
+ */
+export type FundingQuoteCommitScope =
+  | Readonly<{
+      kind: "receive_receipt_review_v1";
+      ownerChannel: FundingReceiveSessionChannel;
+      receiveSessionId: string;
+      receiptId: string;
+    }>
+  | Readonly<{
+      /** Sealed Telegram → Mini App v2 materialization; never public API. */
+      kind: "telegram_app_handoff_v2";
+      handoffId: string;
+      tradeIntentId: string;
+    }>;
 
 export type FundingQuoteInsert = Readonly<{
   userId: string;

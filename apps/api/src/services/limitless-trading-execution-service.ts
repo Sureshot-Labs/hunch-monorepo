@@ -31,6 +31,11 @@ import {
   updateOrderFromHistory,
 } from "../repos/orders-repo.js";
 import {
+  assertTelegramAppHandoffV2FundedTradeSubmission,
+  type TelegramAppHandoffV2DirectTradeSubmission,
+  type TelegramAppHandoffV2ScopeAssertion,
+} from "../repos/telegram-app-handoff-v2-direct-trade-repository.js";
+import {
   buildOrderNotification,
   createNotificationSafe,
 } from "./notifications.js";
@@ -60,6 +65,7 @@ import {
   fetchEvmCode,
 } from "./polygon-rpc.js";
 import { fetchLimitlessOnchainSnapshot } from "./limitless-onchain.js";
+import { isLimitlessAmmMarketMetadata } from "./limitless-market-mode.js";
 import { buildLimitlessRedemptionPlan } from "./limitless-redemption-plan.js";
 import { fetchConditionalTokensPayouts } from "./limitless-redemption.js";
 import { recomputePositionMetricsForWallet } from "./positions-metrics.js";
@@ -216,6 +222,8 @@ type LimitlessClientOrderBody = {
   ownerId?: number | null;
   fundingOperationId?: string;
   fundingReservationId?: string;
+  telegramAppHandoffId?: string;
+  telegramAppHandoffPlanFingerprint?: string;
 };
 
 type LimitlessAmmQuoteQuery = {
@@ -3171,6 +3179,7 @@ async function recordLimitlessFokNoFill(input: {
 }
 
 export async function submitLimitlessClientSignedOrder(input: {
+  assertTelegramAppHandoffV2Scope?: TelegramAppHandoffV2ScopeAssertion;
   body: LimitlessClientOrderBody;
   log?: LimitlessRouteLogger | null;
   pool: ApiTradingApplicationServiceInput["pool"];
@@ -3201,6 +3210,14 @@ export async function submitLimitlessClientSignedOrder(input: {
           reservationId: input.body.fundingReservationId,
         }
       : null;
+  const directHandoffBinding =
+    input.body.telegramAppHandoffId &&
+    input.body.telegramAppHandoffPlanFingerprint
+      ? {
+          handoffId: input.body.telegramAppHandoffId,
+          planFingerprint: input.body.telegramAppHandoffPlanFingerprint,
+        }
+      : null;
   if (
     Boolean(input.body.fundingOperationId) !==
     Boolean(input.body.fundingReservationId)
@@ -3211,6 +3228,38 @@ export async function submitLimitlessClientSignedOrder(input: {
       payload: {
         error:
           "fundingOperationId and fundingReservationId must be provided together",
+      },
+    };
+  }
+  if (
+    Boolean(input.body.telegramAppHandoffId) !==
+    Boolean(input.body.telegramAppHandoffPlanFingerprint)
+  ) {
+    return {
+      ok: false,
+      statusCode: 400,
+      payload: {
+        error:
+          "telegramAppHandoffId and telegramAppHandoffPlanFingerprint must be provided together",
+      },
+    };
+  }
+  if (directHandoffBinding && side !== "BUY") {
+    return {
+      ok: false,
+      statusCode: 400,
+      payload: {
+        error: "A Telegram handoff can only submit a sealed Buy",
+      },
+    };
+  }
+  if (directHandoffBinding && !fundingReservation) {
+    return {
+      ok: false,
+      statusCode: 409,
+      payload: {
+        error:
+          "Limitless direct Mini App handoff is not enabled until its CLOB recovery record is available",
       },
     };
   }
@@ -3521,7 +3570,11 @@ export async function submitLimitlessClientSignedOrder(input: {
   const takerAmount = coercedTakerAmount;
   const price = coercedPrice;
   const size = deriveSize(input.body.orderType, side, makerAmount, takerAmount);
-  const clientOrderId = `hunch-${crypto.randomUUID()}`;
+  // The generic v2 funding continuation is single-flight. Reuse its provider
+  // id across two browser tabs instead of duplicating its final venue Buy.
+  const clientOrderId = directHandoffBinding
+    ? `hunch-th2-${directHandoffBinding.handoffId}`
+    : `hunch-${crypto.randomUUID()}`;
   const orderPayload = {
     order: orderForUpstream,
     orderType: input.body.orderType,
@@ -3534,6 +3587,8 @@ export async function submitLimitlessClientSignedOrder(input: {
   let fundingConsumerIntent: ReturnType<
     typeof buildFundingTradeConsumerIntent
   > | null = null;
+  let directHandoffSubmission: TelegramAppHandoffV2DirectTradeSubmission | null =
+    null;
   if (
     fundingReservation &&
     fundingMarketId &&
@@ -3628,6 +3683,67 @@ export async function submitLimitlessClientSignedOrder(input: {
           executionStatus: "UNMATCHED",
           payload: null,
         },
+      };
+    }
+    if (directHandoffBinding) {
+      if (!fundingMarketId || depthQuote.status !== "ready") {
+        return {
+          ok: false,
+          statusCode: 409,
+          payload: { error: "Telegram handoff market binding is unavailable" },
+        };
+      }
+      directHandoffSubmission = {
+        marketId: fundingMarketId,
+        outcomeTokenId: requestedRawTokenId,
+        receiveRaw: Math.floor(
+          depthQuote.executableShares * 1_000_000,
+        ).toString(),
+        signer,
+        spendRaw: makerAmount.toString(),
+        venue: "limitless",
+      };
+    }
+  } else if (directHandoffBinding) {
+    if (!fundingMarketId || coercedSideValue == null) {
+      return {
+        ok: false,
+        statusCode: 409,
+        payload: { error: "Telegram handoff market binding is unavailable" },
+      };
+    }
+    directHandoffSubmission = {
+      marketId: fundingMarketId,
+      outcomeTokenId: requestedRawTokenId,
+      receiveRaw: (coercedSideValue === 0
+        ? takerAmount
+        : makerAmount
+      ).toString(),
+      signer,
+      spendRaw: (coercedSideValue === 0 ? makerAmount : takerAmount).toString(),
+      venue: "limitless",
+    };
+  }
+  if (directHandoffBinding && directHandoffSubmission) {
+    try {
+      if (fundingReservation) {
+        if (!input.assertTelegramAppHandoffV2Scope) {
+          throw new Error("sealed handoff scope cannot be verified");
+        }
+        await assertTelegramAppHandoffV2FundedTradeSubmission(input.pool, {
+          assertCurrentScope: input.assertTelegramAppHandoffV2Scope,
+          binding: directHandoffBinding,
+          operationId: fundingReservation.operationId,
+          reservationId: fundingReservation.reservationId,
+          submission: directHandoffSubmission,
+          userId: input.userId,
+        });
+      }
+    } catch {
+      return {
+        ok: false,
+        statusCode: 409,
+        payload: { error: "Telegram handoff is no longer valid for this Buy" },
       };
     }
   }
@@ -4594,28 +4710,6 @@ export async function recordLimitlessAmmOrder(input: {
   };
 }
 
-function isLimitlessAmmMarket(metadata: unknown): boolean {
-  if (!isRecord(metadata)) return false;
-  const directFlags = [
-    metadata.amm,
-    metadata.isAmm,
-    metadata.is_amm,
-    metadata.ammOnly,
-    metadata.amm_only,
-  ];
-  if (directFlags.some((value) => value === true)) return true;
-  const mode =
-    readString(metadata.executionMode) ??
-    readString(metadata.execution_mode) ??
-    readString(metadata.tradingMode) ??
-    readString(metadata.trading_mode) ??
-    readString(metadata.tradeType) ??
-    readString(metadata.trade_type) ??
-    readString(metadata.marketType) ??
-    readString(metadata.market_type);
-  return mode?.toLowerCase() === "amm";
-}
-
 export function isLimitlessBotClobExecutable(): boolean {
   return false;
 }
@@ -4866,7 +4960,7 @@ async function getReadiness(
       input.target.marketId,
       "limitless",
     );
-    if (isLimitlessAmmMarket(market.metadata)) {
+    if (isLimitlessAmmMarketMetadata(market.metadata)) {
       const marketAddress = readLimitlessAmmMarketAddress(market.metadata);
       if (!marketAddress || !market.token_yes || !market.token_no) {
         return readiness("limitless", capabilities, {
@@ -4891,7 +4985,7 @@ async function getReadiness(
       });
     }
     if (
-      !isLimitlessAmmMarket(market.metadata) &&
+      !isLimitlessAmmMarketMetadata(market.metadata) &&
       input.actor.kind === "telegram_bot" &&
       !isLimitlessBotClobExecutable()
     ) {
@@ -5075,7 +5169,7 @@ async function quote(
     "limitless",
   );
   const side = normalizeSide(intent.outcome ?? intent.target.outcome);
-  if (isLimitlessAmmMarket(market.metadata)) {
+  if (isLimitlessAmmMarketMetadata(market.metadata)) {
     if (!isOrderable(market)) {
       throw tradingError({
         code: "invalid_trade_request",
@@ -5370,7 +5464,7 @@ async function prepareTrade(
     intent.target.marketId,
     "limitless",
   );
-  if (isLimitlessAmmMarket(market.metadata)) {
+  if (isLimitlessAmmMarketMetadata(market.metadata)) {
     return prepareLimitlessAmmTrade({
       intent,
       market,

@@ -4198,6 +4198,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       let buyContinuationEnabled = false;
       let customTradeInputEnabled = false;
       let fundingReceiveEnabled = false;
+      let miniAppHandoffContractVersion: 1 | 2 = 1;
       let miniAppHandoffMode: "off" | "fallback" | "always" = "off";
       let policyTradingEnabled = true;
       let tradingActions: Array<"buy" | "sell"> = ["buy"];
@@ -4221,6 +4222,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
                           buyContinuationEnabled,
                           customTradeInputEnabled,
                           fundingReceiveEnabled,
+                          miniAppHandoffContractVersion,
                           miniAppHandoffMode,
                           tradingEnabled: policyTradingEnabled,
                           tradingActions,
@@ -4780,6 +4782,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       customTradeInputEnabled = true;
       buyContinuationEnabled = true;
       fundingReceiveEnabled = true;
+      miniAppHandoffContractVersion = 2;
       miniAppHandoffMode = "fallback";
       const limitlessCustomContexts: Array<{
         deliveryMode: string;

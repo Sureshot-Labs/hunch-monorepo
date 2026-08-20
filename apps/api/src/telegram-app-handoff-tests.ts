@@ -4,6 +4,7 @@ import {
   cancelTelegramAppHandoff,
   claimTelegramAppHandoff,
   commitTelegramAppHandoff,
+  commitTelegramAppHandoffWithExecution,
   issueTelegramAppHandoff,
   parseTelegramAppHandoffStartParam,
   resolveTelegramAppHandoff,
@@ -310,6 +311,48 @@ assert.equal(
   ).state,
   "committed",
   "commit retries attach to the same consumed handoff",
+);
+
+const v2Commit = createFakePool();
+const v2Issued = await issueTelegramAppHandoff({
+  authorityFingerprint: AUTHORITY_FINGERPRINT,
+  db: v2Commit.pool as never,
+  planSnapshot: { version: 2 },
+  policyRevision: "policy-1",
+  quoteSnapshot: { maxSpendUsd: "2.50" },
+  telegramUserId: TELEGRAM_USER_ID,
+  tradeIntentId: INTENT_ID,
+  userId: USER_ID,
+});
+await claimTelegramAppHandoff({
+  db: v2Commit.pool as never,
+  telegramUserId: TELEGRAM_USER_ID,
+  token: v2Issued.token,
+  userId: USER_ID,
+});
+let v2ExecutionCalls = 0;
+const commitV2 = async () =>
+  commitTelegramAppHandoffWithExecution({
+    commitExecution: async () => {
+      v2ExecutionCalls += 1;
+      return { fundingOperationId: "00000000-0000-4000-8000-000000000004" };
+    },
+    currentAuthorityFingerprint: AUTHORITY_FINGERPRINT,
+    currentPolicyRevision: "policy-1",
+    db: v2Commit.pool as never,
+    planFingerprint: v2Issued.handoff.planFingerprint,
+    telegramUserId: TELEGRAM_USER_ID,
+    token: v2Issued.token,
+    userId: USER_ID,
+  });
+const v2First = await commitV2();
+const v2Retry = await commitV2();
+assert.equal(v2First.handoff.state, "committed");
+assert.deepEqual(v2Retry.execution, v2First.execution);
+assert.equal(
+  v2ExecutionCalls,
+  2,
+  "the v2 callback runs on retry and must return the same existing operation",
 );
 
 const cancellable = createFakePool();

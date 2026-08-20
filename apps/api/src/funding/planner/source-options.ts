@@ -201,6 +201,7 @@ export function buildRelayWalletSourceOption(
     sourceOptionId: string;
     safeLabel: string;
     maximumSourceRaw: string;
+    quotedSourceAmount: Money;
     estimatedUsd: string | null;
     quote: ProviderQuoteCandidate;
     feeUsd: readonly (string | null)[];
@@ -222,7 +223,8 @@ export function buildRelayWalletSourceOption(
   }
   if (
     input.feeUsd.length !== input.quote.fees.length ||
-    rawAmount(input.maximumSourceRaw) === 0n
+    rawAmount(input.maximumSourceRaw) === 0n ||
+    rawAmount(input.quotedSourceAmount.raw) === 0n
   ) {
     throw new Error("Relay source economics are incomplete");
   }
@@ -245,6 +247,9 @@ export function buildRelayWalletSourceOption(
       : input.quote.source.asset;
   if (
     !sourceAsset ||
+    !sameAsset(input.quotedSourceAmount.asset, sourceAsset) ||
+    rawAmount(input.quotedSourceAmount.raw) >
+      rawAmount(input.maximumSourceRaw) ||
     !sameAsset(sourceAsset, input.route.sourceAsset) ||
     !sameAsset(
       input.quote.expectedOutput.asset,
@@ -326,6 +331,7 @@ export function buildRelayWalletSourceOption(
     safeLabel: input.safeLabel,
     source: input.quote.source,
     amountMode: input.quote.amountMode,
+    quotedSourceAmount: input.quotedSourceAmount,
     maximumSourceRaw: input.maximumSourceRaw,
     expectedDestination: input.quote.expectedOutput,
     minimumDestination: input.quote.minimumOutput,
@@ -736,6 +742,7 @@ export class RelayFirstSourcePlanner {
             ),
             safeLabel: source.safeLabel,
             maximumSourceRaw: source.maximumSourceRaw,
+            quotedSourceAmount: plannedQuote.sourceAmount,
             estimatedUsd: plannedQuote.sourceEstimatedUsd,
             quote: plannedQuote.candidate,
             feeUsd: plannedQuote.feeUsd,

@@ -770,9 +770,12 @@ async function ensureSettledConsumerReservation(
     const parentIsReady =
       parent.status === "ready" &&
       parent.progress_stage === "ready_for_consumer";
-    const parentIsTerminal = ["completed", "refunded", "failed", "cancelled"].includes(
-      parent.status,
-    );
+    const parentIsTerminal = [
+      "completed",
+      "refunded",
+      "failed",
+      "cancelled",
+    ].includes(parent.status);
     if (!parentIsReady && !parentIsTerminal) {
       throw new Error("trade shortfall continuation parent is not consumable");
     }
@@ -788,18 +791,25 @@ async function ensureSettledConsumerReservation(
         [continuationOfOperationId, operation.userId],
       );
       if (parentReservations.rows.length === 0) {
-        throw new Error("trade shortfall continuation parent has no ready balance");
+        throw new Error(
+          "trade shortfall continuation parent has no ready balance",
+        );
       }
       if (parentReservations.rows.length !== 1) {
-        throw new Error("trade shortfall continuation parent has multiple ready balances");
+        throw new Error(
+          "trade shortfall continuation parent has multiple ready balances",
+        );
       }
       const reservation = parentReservations.rows[0];
       if (!reservation) {
-        throw new Error("trade shortfall continuation parent ready balance is missing");
+        throw new Error(
+          "trade shortfall continuation parent ready balance is missing",
+        );
       }
       await releaseFundingReservationInTransaction(client, {
         reservationId: reservation.id,
-        outcomeReason: "trade_shortfall_continuation_consumed_parent_ready_balance",
+        outcomeReason:
+          "trade_shortfall_continuation_consumed_parent_ready_balance",
         now,
       });
       await transitionFundingOperationInTransaction(client, {
