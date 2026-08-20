@@ -130,6 +130,11 @@ instruction rather than the historical eight-instruction Jupiter route. The
 July Jupiter fixture remains negative drift evidence, not an accepted alternate
 runtime shape.
 
+The one frozen validator fixture is used consistently for the TypeScript
+reference-order computation, recovered solver signature, Secp256k1 instruction,
+and local Guard/CPI test. The proof rejects a mismatch rather than comparing
+separately copied order IDs.
+
 The captured direct shape was:
 
 - one versioned Solana transaction and one outer instruction;
@@ -529,6 +534,64 @@ Solana propagates signer privilege into a CPI and Relay's `DepositNative`
 expects its `sender` to be a signer, so the guard does not need to custody,
 prefund, or temporarily hold user SOL. This is still a mandatory local-validator
 proof, not an assumption carried into activation.
+
+#### Minimal Rust shape
+
+This is the entire value-moving shape to preserve during implementation. It is
+an illustrative, deliberately incomplete Anchor-style entry point rather than
+copy-paste deployable code: account declarations, error types, parsing, and
+the binding lifecycle are omitted here so the custody boundary is visible.
+
+```rust
+pub fn execute(ctx: Context<Execute>, order: RestrictedRelayOrder) -> Result<()> {
+    let binding = &ctx.accounts.binding;
+    require_keys_eq!(ctx.accounts.source.key(), binding.source);
+    require_keys_eq!(ctx.accounts.destination, binding.destination);
+    require!(Clock::get()?.unix_timestamp < order.deadline, GuardError::Expired);
+
+    // Full Relay order hash + solver signature; never trust a caller-supplied id.
+    let order_id = relay_order_id(&order)?;
+    verify_relay_solver_signature(&ctx.accounts.instructions, order_id)?;
+    validate_restricted_order(&order, binding)?;
+    // SOL only; one pUSD output; bound amount; exact refunds; no calls/fees.
+    require!(!ctx.accounts.replay_marker.used, GuardError::Replay);
+    ctx.accounts.replay_marker.used = true; // rolls back atomically if CPI fails
+
+    // Construct this instruction here. The caller never supplies arbitrary CPI data.
+    let deposit = relay_deposit_native(order.input_amount, order_id);
+    invoke(&deposit, &[
+        ctx.accounts.relay_config.to_account_info(),
+        ctx.accounts.source.to_account_info(), // sender
+        ctx.accounts.source.to_account_info(), // depositor
+        ctx.accounts.relay_vault.to_account_info(),
+        ctx.accounts.system_program.to_account_info(),
+    ])?;
+    Ok(())
+}
+```
+
+The outer transaction contains the pinned Secp256k1 precompile instruction and
+this one Guard instruction. `relay_deposit_native` is constructed only with the
+pinned Relay Depository program/config/vault/discriminator; it is not supplied
+by the caller. The original managed `source` is an outer signer and is passed
+through to the CPI, so the only user-SOL movement is `source -> Relay vault`.
+The replay-marker rent, if any, is paid by the configured Hunch fee payer, not
+by temporarily holding or forwarding user SOL in the Guard.
+
+#### Feasibility-proof scope
+
+A local-validator proof establishes the Guard/CPI mechanics and exact source
+debit only. It deliberately does **not** assert that the currently installed
+Privy policy already authorizes the new top-level Guard instruction: no Privy
+application, policy, signer attachment, or dashboard setting is changed during
+research. The read-back of a restrictive shared policy and a separately
+authorized tiny-value rehearsal remain activation gates.
+
+Likewise, the validator loads the pinned Relay Depository source at the official
+program ID with synthetic config/vault account data. That proves the pinned
+`deposit_native` ABI and transfer semantics, not the deployed mainnet program
+binary or live configuration. Activation must independently freeze and verify
+the deployed program/ProgramData, config, vault, and upgrade-authority state.
 
 The guard program must be immutable at activation: revoke its upgrade authority
 after independent review/audit, or keep it behind a separately governed,
