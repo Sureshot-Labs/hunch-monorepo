@@ -4,7 +4,11 @@ import { POLYMARKET_FUNDING_ROUTER } from "@hunch/contracts";
 import { tx, type Pool, type PoolClient } from "@hunch/infra";
 import { Interface } from "ethers";
 
-import type { AssetRef, JsonValue, WalletExecutionProfile } from "../domain/types.js";
+import type {
+  AssetRef,
+  JsonValue,
+  WalletExecutionProfile,
+} from "../domain/types.js";
 import { sameAsset } from "../domain/asset-identity.js";
 import {
   loadPolymarketPusdFundExecutionConfiguration,
@@ -18,7 +22,10 @@ import {
   type TelegramFundingAuthorizationRow,
 } from "../execution/telegram-funding-authorization.js";
 import { activateTelegramTradeShortfallInitialStepInTransaction } from "../execution/telegram-trade-shortfall-activation.js";
-import { canonicalJsonHash, fundingSubjectLookupHmac } from "../persistence/canonical.js";
+import {
+  canonicalJsonHash,
+  fundingSubjectLookupHmac,
+} from "../persistence/canonical.js";
 import {
   commitFundingOperationInTransaction,
   createFundingQuoteInTransaction,
@@ -33,8 +40,15 @@ import {
   buildPolymarketFundingFollowupAction,
 } from "../preparation/polymarket-funding-followup.js";
 import { inspectPolymarketDepositWallet } from "../../services/polymarket-deposit-wallet-derivation.js";
-import { buildPolymarketFundingPlan, POLYMARKET_FUNDING_ROUTER_ABI } from "../../services/polymarket-funding-router.js";
-import { fetchErc20Allowance, fetchErc20BalanceOf, fetchEvmCall } from "../../services/polygon-rpc.js";
+import {
+  buildPolymarketFundingPlan,
+  POLYMARKET_FUNDING_ROUTER_ABI,
+} from "../../services/polymarket-funding-router.js";
+import {
+  fetchErc20Allowance,
+  fetchErc20BalanceOf,
+  fetchEvmCall,
+} from "../../services/polygon-rpc.js";
 import { POLYMARKET_FUNDING_ROUTER_MAX_APPROVAL_RAW } from "../../services/polymarket-automation-policy.js";
 import { resolveActionSponsorship } from "../execution/sponsorship-policy.js";
 import { fundingSidecarRuntimeConfig } from "../runtime/sidecar-runtime-config.js";
@@ -89,7 +103,11 @@ function readAsset(value: unknown): AssetRef | null {
     typeof asset.assetId === "string" &&
     Number.isInteger(asset.decimals) &&
     typeof asset.decimals === "number"
-    ? { networkId: asset.networkId, assetId: asset.assetId, decimals: asset.decimals }
+    ? {
+        networkId: asset.networkId,
+        assetId: asset.assetId,
+        decimals: asset.decimals,
+      }
     : null;
 }
 
@@ -107,7 +125,9 @@ function readExactRootAmount(row: CandidateRow): ExactRootAmount | null {
     : null;
 }
 
-function profileFor(authorization: TelegramFundingAuthorization): WalletExecutionProfile {
+function profileFor(
+  authorization: TelegramFundingAuthorization,
+): WalletExecutionProfile {
   return {
     walletId: authorization.userWalletId,
     controllerWalletRef: authorization.userWalletId,
@@ -121,7 +141,10 @@ function profileFor(authorization: TelegramFundingAuthorization): WalletExecutio
   };
 }
 
-function bindingFor(authorization: TelegramFundingAuthorization, depositWallet: string) {
+function bindingFor(
+  authorization: TelegramFundingAuthorization,
+  depositWallet: string,
+) {
   const pUsd: AssetRef = {
     networkId: "evm:137",
     assetId: fundingSidecarRuntimeConfig.polymarketPusdAddress,
@@ -155,23 +178,32 @@ function bindingFor(authorization: TelegramFundingAuthorization, depositWallet: 
   };
 }
 
-async function routerNonce(input: Readonly<{ signerAddress: string }>): Promise<bigint> {
+async function routerNonce(
+  input: Readonly<{ signerAddress: string }>,
+): Promise<bigint> {
   const result = await fetchEvmCall({
     rpcUrl: fundingSidecarRuntimeConfig.polygonRpcUrl,
     timeoutMs: fundingSidecarRuntimeConfig.polygonRpcTimeoutMs,
     to: POLYMARKET_FUNDING_ROUTER.polygon,
-    data: fundingRouterInterface.encodeFunctionData("fundingNonce", [input.signerAddress]),
+    data: fundingRouterInterface.encodeFunctionData("fundingNonce", [
+      input.signerAddress,
+    ]),
   });
-  const decoded = fundingRouterInterface.decodeFunctionResult("fundingNonce", result) as unknown;
+  const decoded = fundingRouterInterface.decodeFunctionResult(
+    "fundingNonce",
+    result,
+  ) as unknown;
   const nonce = Array.isArray(decoded) ? decoded[0] : null;
   if (typeof nonce !== "bigint") throw new Error("Router nonce is unavailable");
   return nonce;
 }
 
-async function loadLiveRouterFacts(input: Readonly<{
-  authorization: TelegramFundingAuthorization;
-  amount: ExactRootAmount;
-}>): Promise<LiveRouterFacts> {
+async function loadLiveRouterFacts(
+  input: Readonly<{
+    authorization: TelegramFundingAuthorization;
+    amount: ExactRootAmount;
+  }>,
+): Promise<LiveRouterFacts> {
   let deposit;
   try {
     deposit = await inspectPolymarketDepositWallet({
@@ -189,12 +221,26 @@ async function loadLiveRouterFacts(input: Readonly<{
     timeoutMs: fundingSidecarRuntimeConfig.polygonRpcTimeoutMs,
   };
   try {
-    const [controllerPusdRaw, depositPusdRaw, allowanceRaw, nonce] = await Promise.all([
-      fetchErc20BalanceOf({ ...rpc, tokenAddress: fundingSidecarRuntimeConfig.polymarketPusdAddress, owner: input.authorization.walletAddress }),
-      fetchErc20BalanceOf({ ...rpc, tokenAddress: fundingSidecarRuntimeConfig.polymarketPusdAddress, owner: depositWallet }),
-      fetchErc20Allowance({ ...rpc, tokenAddress: fundingSidecarRuntimeConfig.polymarketPusdAddress, owner: input.authorization.walletAddress, spender: POLYMARKET_FUNDING_ROUTER.polygon }),
-      routerNonce({ signerAddress: input.authorization.walletAddress }),
-    ]);
+    const [controllerPusdRaw, depositPusdRaw, allowanceRaw, nonce] =
+      await Promise.all([
+        fetchErc20BalanceOf({
+          ...rpc,
+          tokenAddress: fundingSidecarRuntimeConfig.polymarketPusdAddress,
+          owner: input.authorization.walletAddress,
+        }),
+        fetchErc20BalanceOf({
+          ...rpc,
+          tokenAddress: fundingSidecarRuntimeConfig.polymarketPusdAddress,
+          owner: depositWallet,
+        }),
+        fetchErc20Allowance({
+          ...rpc,
+          tokenAddress: fundingSidecarRuntimeConfig.polymarketPusdAddress,
+          owner: input.authorization.walletAddress,
+          spender: POLYMARKET_FUNDING_ROUTER.polygon,
+        }),
+        routerNonce({ signerAddress: input.authorization.walletAddress }),
+      ]);
     if (controllerPusdRaw < BigInt(input.amount.raw)) {
       return { kind: "source_balance_insufficient" };
     }
@@ -211,16 +257,18 @@ async function loadLiveRouterFacts(input: Readonly<{
   }
 }
 
-function buildPlan(input: Readonly<{
-  authorization: TelegramFundingAuthorization;
-  rootOperationId: string;
-  tradeIntentId: string;
-  amount: ExactRootAmount;
-  marketContextSnapshot: JsonRecord | null;
-  marketId: string | null;
-  live: Extract<LiveRouterFacts, { kind: "ready" }>;
-  now: Date;
-}>): FundingCommitPlan {
+function buildPlan(
+  input: Readonly<{
+    authorization: TelegramFundingAuthorization;
+    rootOperationId: string;
+    tradeIntentId: string;
+    amount: ExactRootAmount;
+    marketContextSnapshot: JsonRecord | null;
+    marketId: string | null;
+    live: Extract<LiveRouterFacts, { kind: "ready" }>;
+    now: Date;
+  }>,
+): FundingCommitPlan {
   const live = input.live;
   const requiresApproval = live.allowanceRaw < BigInt(input.amount.raw);
   const plan = buildPolymarketFundingPlan({
@@ -242,7 +290,11 @@ function buildPlan(input: Readonly<{
       : live.allowanceRaw,
     routerUsdceAllowanceRaw: 0n,
   });
-  if (!plan || plan.pUsdAmountRaw !== input.amount.raw || plan.usdceAmountRaw !== "0") {
+  if (
+    !plan ||
+    plan.pUsdAmountRaw !== input.amount.raw ||
+    plan.usdceAmountRaw !== "0"
+  ) {
     throw new Error("exact Router continuation plan is unavailable");
   }
   const binding = bindingFor(input.authorization, live.depositWallet);
@@ -274,7 +326,9 @@ function buildPlan(input: Readonly<{
     gasLimitRaw: null,
   };
   const pUsd = input.amount.asset;
-  const reservationExpiresAt = new Date(input.now.getTime() + FUNDING_OPERATION_RECONCILIATION_TTL_MS).toISOString();
+  const reservationExpiresAt = new Date(
+    input.now.getTime() + FUNDING_OPERATION_RECONCILIATION_TTL_MS,
+  ).toISOString();
   const sourceLocationId = `location_${canonicalJsonHash({
     userId: input.authorization.userId,
     wallet: input.authorization.walletAddress.toLowerCase(),
@@ -318,7 +372,8 @@ function buildPlan(input: Readonly<{
         },
         delegatedOriginKind: "trade_shortfall_intent",
         fundingAuthorizationId: input.authorization.id,
-        fundingAuthorizationFingerprint: telegramFundingAuthorizationFingerprint(input.authorization),
+        fundingAuthorizationFingerprint:
+          telegramFundingAuthorizationFingerprint(input.authorization),
         telegramTradeIntentId: input.tradeIntentId,
         continuationOfOperationId: input.rootOperationId,
       },
@@ -326,22 +381,24 @@ function buildPlan(input: Readonly<{
     segments: [],
     steps: [
       ...(requiresApproval
-        ? [{
-            ordinal: 0,
-            segmentOrdinal: null,
-            stepKind: "transaction" as const,
-            state: "planned" as const,
-            actionFingerprint: canonicalJsonHash(approvalAction),
-            executorId: POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
-            payerRequirement: "privy_sponsor" as const,
-            dependsOnOrdinal: null,
-            normalizedAction: jsonRecord(approvalAction),
-            actionValidationResult: {
-              kind: "controller_pusd_router_approval",
-              routerAddress: POLYMARKET_FUNDING_ROUTER.polygon,
+        ? [
+            {
+              ordinal: 0,
+              segmentOrdinal: null,
+              stepKind: "transaction" as const,
+              state: "planned" as const,
+              actionFingerprint: canonicalJsonHash(approvalAction),
+              executorId: POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
+              payerRequirement: "privy_sponsor" as const,
+              dependsOnOrdinal: null,
+              normalizedAction: jsonRecord(approvalAction),
+              actionValidationResult: {
+                kind: "controller_pusd_router_approval",
+                routerAddress: POLYMARKET_FUNDING_ROUTER.polygon,
+              },
+              actionExpiresAt: null,
             },
-            actionExpiresAt: null,
-          }]
+          ]
         : []),
       {
         ordinal: requiresApproval ? 1 : 0,
@@ -363,17 +420,19 @@ function buildPlan(input: Readonly<{
         actionExpiresAt: null,
       },
     ],
-    reservations: [{
-      segmentOrdinal: null,
-      componentId: `asset_${canonicalJsonHash({ sourceLocationId, amount: input.amount }).slice(0, 32)}`,
-      locationId: sourceLocationId,
-      networkId: pUsd.networkId,
-      assetId: pUsd.assetId,
-      assetDecimals: pUsd.decimals,
-      rawAmount: input.amount.raw,
-      mode: "subtract_available",
-      expiresAt: reservationExpiresAt,
-    }],
+    reservations: [
+      {
+        segmentOrdinal: null,
+        componentId: `asset_${canonicalJsonHash({ sourceLocationId, amount: input.amount }).slice(0, 32)}`,
+        locationId: sourceLocationId,
+        networkId: pUsd.networkId,
+        assetId: pUsd.assetId,
+        assetDecimals: pUsd.decimals,
+        rawAmount: input.amount.raw,
+        mode: "subtract_available",
+        expiresAt: reservationExpiresAt,
+      },
+    ],
   };
 }
 
@@ -442,7 +501,11 @@ function candidateSql(): string {
 
 async function recordContinuationWait(
   pool: Pool,
-  input: Readonly<{ intentId: string; rootOperationId: string; reasonCode: string }>,
+  input: Readonly<{
+    intentId: string;
+    rootOperationId: string;
+    reasonCode: string;
+  }>,
 ): Promise<number> {
   const hardReason = isTelegramRouterContinuationHardReason(input.reasonCode);
   const result = await pool.query<{ hard_failure_count: string | null }>(
@@ -522,7 +585,12 @@ async function recordContinuationWait(
 
 async function hardBlockRouterContinuation(
   pool: Pool,
-  input: Readonly<{ intentId: string; rootOperationId: string; userId: string; reasonCode: string }>,
+  input: Readonly<{
+    intentId: string;
+    rootOperationId: string;
+    userId: string;
+    reasonCode: string;
+  }>,
 ): Promise<boolean> {
   return tx(pool, async (client) => {
     const rows = await client.query<{
@@ -619,7 +687,9 @@ async function hardBlockRouterContinuation(
       [input.intentId, input.reasonCode, now],
     );
     if (terminalized.rowCount !== 1) {
-      throw new Error("Router continuation intent changed before hard-block commit");
+      throw new Error(
+        "Router continuation intent changed before hard-block commit",
+      );
     }
     return true;
   });
@@ -649,23 +719,22 @@ export async function runTelegramRouterContinuationCommitter(
     limit: number;
     subjectLookupHmacKey: string;
     subjectLookupKeyVersion: number;
-    inspectRouterProfile: (input: Readonly<{
-      walletAddress: string;
-      walletId: string;
-      profileId: string;
-    }>) => Promise<"valid" | "invalid" | "unavailable">;
+    inspectRouterProfile: (
+      input: Readonly<{
+        walletAddress: string;
+        walletId: string;
+        profileId: string;
+      }>,
+    ) => Promise<"valid" | "invalid" | "unavailable">;
     tradeIntentId?: string;
   }>,
 ): Promise<Readonly<{ created: number; skipped: number }>> {
   const configuration = loadPolymarketPusdFundExecutionConfiguration();
-  const rows = await pool.query<CandidateRow>(
-    candidateSql(),
-    [
-      POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
-      Math.max(1, Math.min(input.limit, 100)),
-      input.tradeIntentId ?? null,
-    ],
-  );
+  const rows = await pool.query<CandidateRow>(candidateSql(), [
+    POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
+    Math.max(1, Math.min(input.limit, 100)),
+    input.tradeIntentId ?? null,
+  ]);
   let created = 0;
   let skipped = 0;
   if (!polymarketWrapExecutionConfigurationReady(configuration)) {
@@ -804,7 +873,11 @@ export async function runTelegramRouterContinuationCommitter(
               and revoked_at is null
               and (expires_at is null or expires_at > clock_timestamp())
             for update`,
-          [authorization.id, row.user_id, POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID],
+          [
+            authorization.id,
+            row.user_id,
+            POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
+          ],
         );
         if (!lockedAuthorization.rows[0]) {
           throw new Error("Router continuation authorization changed");
@@ -822,12 +895,20 @@ export async function runTelegramRouterContinuationCommitter(
           discoveryProjectionId: `telegram-router-continuation:${row.root_operation_id}`,
           selectedSourceOptionSnapshot: { sourceOptionId: "root_relay_pusd" },
           marketContextSnapshot: row.market_context_snapshot,
-          destinationOptionSnapshot: { destinationOptionId: authorization.destinationOptionId },
-          venueBindingSnapshot: { venueBindingOptionId: authorization.venueBindingOptionId },
+          destinationOptionSnapshot: {
+            destinationOptionId: authorization.destinationOptionId,
+          },
+          venueBindingSnapshot: {
+            venueBindingOptionId: authorization.venueBindingOptionId,
+          },
           planSnapshot: plan,
           policyVersion: currentPolicy.runtime.contractVersion,
           policyRevision: currentPolicy.revision,
-          canonicalRequest: { idempotencyKey, rootOperationId: row.root_operation_id, amount },
+          canonicalRequest: {
+            idempotencyKey,
+            rootOperationId: row.root_operation_id,
+            amount,
+          },
           consentToken,
           expiresAt: new Date(now.getTime() + 15 * 60_000),
         });
@@ -837,7 +918,10 @@ export async function runTelegramRouterContinuationCommitter(
           consentToken,
           idempotencyKey,
           plan,
-          subjectLookupHmac: fundingSubjectLookupHmac(row.user_id, input.subjectLookupHmacKey),
+          subjectLookupHmac: fundingSubjectLookupHmac(
+            row.user_id,
+            input.subjectLookupHmacKey,
+          ),
           subjectLookupKeyVersion: input.subjectLookupKeyVersion,
           verifyCurrentFacts: async (verifiedClient) => {
             const stillAuthorized = await verifiedClient.query<{ id: string }>(
@@ -850,10 +934,16 @@ export async function runTelegramRouterContinuationCommitter(
                   and venue_id = 'polymarket'
                   and revoked_at is null
                   and (expires_at is null or expires_at > clock_timestamp())`,
-              [authorization.id, row.user_id, POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID],
+              [
+                authorization.id,
+                row.user_id,
+                POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
+              ],
             );
             if (!stillAuthorized.rows[0]) {
-              throw new Error("Router continuation authorization changed before commit");
+              throw new Error(
+                "Router continuation authorization changed before commit",
+              );
             }
           },
         });

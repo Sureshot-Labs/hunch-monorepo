@@ -1,6 +1,6 @@
 # Backend Design: Human X Drafts in a Private Telegram Channel
 
-Status: V1 implemented; story-gated influencer-style prompt v9, publication-ready numeric facts, fail-visible previews, and link-free Telegram formatting added; live editorial QA remains
+Status: V1 implemented; story-gated influencer-style prompt v14, publication-ready numeric facts, fail-visible previews, direct Telegram formatting, and inline Hunch holder tracking links added; live editorial QA remains
 
 Scope: holder-research signal copy and Telegram delivery
 Decision: no database migration is required for the first production version
@@ -577,10 +577,14 @@ Send one standalone MarkdownV2 editorial package: `postText` as the complete
 message body, with validated `formatting` spans rendered directly as Telegram
 MarkdownV2 bold or italic.
 
-Do not append website or Mini App links. Do not use an inline keyboard, normal
-signal card, Buy/Open CTA, reply thread, evidence table, copy block,
-formatting-instruction lines, or disclaimer. The manager copies only the draft
-body into X.
+Do not append standalone website or Mini App links. When the draft names the
+single tracked holder, render each exact occurrence of that holder's display
+username as an inline link to
+`app.hunch.trade/tracking/wallet/<address>` with the signal context. Do not link
+to the Telegram Mini App from the X-editorial profile. Do not use an inline
+keyboard, normal signal card, Buy/Open CTA, reply thread, evidence table, copy
+block, formatting-instruction lines, or disclaimer. The manager copies only the
+draft body into X.
 
 ### All message families must be routed explicitly
 
@@ -676,7 +680,8 @@ perform its own presentation-specific preparation.
    - add editorial reservation/load/update helpers using
      `signal_bot_messages.metrics`;
    - send a directly formatted MarkdownV2 draft with no inline keyboard;
-   - include no website or Mini App links;
+   - include no appended website or Mini App links;
+   - link exact holder usernames inline to the Hunch website tracker;
    - keep current V11 paths byte-for-byte behaviorally unchanged for the
      default profile.
 2. `apps/api/src/services/x-editorial-draft.ts`
@@ -698,8 +703,8 @@ perform its own presentation-specific preparation.
    - document non-secret composer settings and the existing provider key.
 6. Tests
    - cover composer/schema validation, formatting spans, repair, empty-content
-     recovery, Redis profile compatibility, link-free direct Markdown delivery,
-     persistence, and retry reuse.
+     recovery, Redis profile compatibility, inline holder tracking links,
+     direct Markdown delivery, persistence, and retry reuse.
 
 ## Test Coverage and Remaining QA
 
@@ -709,8 +714,9 @@ Implemented deterministic tests cover:
 - both profiles parse and round-trip, unauthorized users cannot switch them,
   and `/status` reports the active profile and composer state;
 - the editorial channel receives only `postText` with direct Telegram
-  bold/italic, no links, no copy block, no formatting-guidance lines, no inline
-  keyboard, and no trade CTA;
+  bold/italic and exact holder usernames linked to the Hunch website tracker,
+  with no appended links, copy block, formatting-guidance lines, inline
+  keyboard, or trade CTA;
 - invalid or unsafe first output receives one constrained repair;
 - unsafe claims, fabricated personal activity/source claims, unsupported
   numeric claims, market mismatch, and side mismatch fail validation;

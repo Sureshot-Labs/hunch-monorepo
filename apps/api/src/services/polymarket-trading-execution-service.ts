@@ -26,6 +26,13 @@ import { requestPriceRefreshForTokens } from "../lib/price-refresh.js";
 import { isRecord } from "../lib/type-guards.js";
 import { fetchPolymarketMarketInfo } from "../repos/polymarket-markets.js";
 import {
+  assertTelegramAppHandoffV2FundedTradeSubmission,
+  claimTelegramAppHandoffV2DirectTradeSubmission,
+  failTelegramAppHandoffV2DirectTradeSubmission,
+  type TelegramAppHandoffV2DirectTradeSubmission,
+  type TelegramAppHandoffV2ScopeAssertion,
+} from "../repos/telegram-app-handoff-v2-direct-trade-repository.js";
+import {
   fetchStoredOrderWalletContext,
   storeOrder,
 } from "../repos/orders-repo.js";
@@ -275,6 +282,8 @@ type PolymarketClientOrderBody = {
   positionWalletAddress?: string | null;
   fundingOperationId?: string;
   fundingReservationId?: string;
+  telegramAppHandoffId?: string;
+  telegramAppHandoffPlanFingerprint?: string;
 };
 
 type PolymarketOpenOrdersQuery = {
@@ -6834,6 +6843,7 @@ async function signPolymarketOrder(input: {
 }
 
 export async function submitPolymarketClientSignedOrder(input: {
+  assertTelegramAppHandoffV2Scope?: TelegramAppHandoffV2ScopeAssertion;
   body: PolymarketClientOrderBody;
   log?: PolymarketRouteLogger | null;
   pool: ApiTradingApplicationServiceInput["pool"];
@@ -6868,6 +6878,14 @@ export async function submitPolymarketClientSignedOrder(input: {
           reservationId: input.body.fundingReservationId,
         }
       : null;
+  const directHandoffBinding =
+    input.body.telegramAppHandoffId &&
+    input.body.telegramAppHandoffPlanFingerprint
+      ? {
+          handoffId: input.body.telegramAppHandoffId,
+          planFingerprint: input.body.telegramAppHandoffPlanFingerprint,
+        }
+      : null;
   if (
     Boolean(input.body.fundingOperationId) !==
     Boolean(input.body.fundingReservationId)
@@ -6878,6 +6896,28 @@ export async function submitPolymarketClientSignedOrder(input: {
       payload: {
         error:
           "fundingOperationId and fundingReservationId must be provided together",
+      },
+    };
+  }
+  if (
+    Boolean(input.body.telegramAppHandoffId) !==
+    Boolean(input.body.telegramAppHandoffPlanFingerprint)
+  ) {
+    return {
+      ok: false,
+      statusCode: 400,
+      payload: {
+        error:
+          "telegramAppHandoffId and telegramAppHandoffPlanFingerprint must be provided together",
+      },
+    };
+  }
+  if (directHandoffBinding && side !== "BUY") {
+    return {
+      ok: false,
+      statusCode: 400,
+      payload: {
+        error: "A Telegram handoff can only submit a sealed Buy",
       },
     };
   }
@@ -7011,6 +7051,95 @@ export async function submitPolymarketClientSignedOrder(input: {
     };
   }
   const fundingMarketId = marketInfo?.unified_market_id ?? null;
+  // Persist this canonical lookup key before a direct provider call. A
+  // transport loss is then reconcilable instead of becoming an unbound intent.
+  const orderHash = computePolymarketOrderHashV2({
+    exchangeAddress,
+    order: normalizedForHash,
+  });
+  if (directHandoffBinding && orderType !== "FOK") {
+    return {
+      ok: false,
+      statusCode: 400,
+      payload: {
+        error: "A Telegram Mini App direct Buy must use FOK order type",
+      },
+    };
+  }
+  const { price, size } = derivePriceAndSize(order, side);
+  const payload = {
+    order: normalizedOrder,
+    owner: creds.apiKey,
+    orderType,
+    ...(input.body.deferExec !== undefined
+      ? { deferExec: input.body.deferExec }
+      : {}),
+  };
+  const clobCreds = {
+    apiKey: creds.apiKey,
+    apiSecret: creds.apiSecret,
+    apiPassphrase: creds.apiPassphrase,
+  };
+  let directHandoffSubmission: TelegramAppHandoffV2DirectTradeSubmission | null =
+    null;
+  if (directHandoffBinding) {
+    if (!fundingMarketId || !normalizedForHash) {
+      return {
+        ok: false,
+        statusCode: 409,
+        payload: { error: "Telegram handoff market binding is unavailable" },
+      };
+    }
+    directHandoffSubmission = {
+      marketId: fundingMarketId,
+      outcomeTokenId: normalizedForHash.tokenId,
+      receiveRaw: normalizedForHash.takerAmount,
+      signer,
+      spendRaw: normalizedForHash.makerAmount,
+      venue: "polymarket",
+    };
+    try {
+      if (!fundingReservation) {
+        if (!input.assertTelegramAppHandoffV2Scope) {
+          throw new Error("sealed handoff scope cannot be verified");
+        }
+        await claimTelegramAppHandoffV2DirectTradeSubmission(input.pool, {
+          assertCurrentScope: input.assertTelegramAppHandoffV2Scope,
+          binding: directHandoffBinding,
+          reconcileKeys: { orderHash, tradeType: "clob" },
+          recoveryPayload: {
+            action: side,
+            exchangeAddress,
+            feePolicySnapshot,
+            kind: "polymarket",
+            orderHash,
+            // Recovery persists a proven provider order; it never resubmits
+            // this payload, so a marker avoids retaining a client signature.
+            orderPayload: { recovered: true },
+            orderType: "FOK",
+            positionWalletAddress: funder,
+            price,
+            requiredSpendRaw: normalizedForHash.makerAmount,
+            size,
+            tokenId: normalizedForHash.tokenId,
+          },
+          submission: directHandoffSubmission,
+          userId: input.userId,
+        });
+      }
+    } catch (error) {
+      return {
+        ok: false,
+        statusCode: 409,
+        payload: {
+          error:
+            error instanceof Error
+              ? "Telegram handoff is no longer valid for this Buy"
+              : "Telegram handoff is no longer valid for this Buy",
+        },
+      };
+    }
+  }
   const fundingConsumerIntent =
     fundingReservation && fundingMarketId
       ? buildFundingTradeConsumerIntent({
@@ -7041,6 +7170,19 @@ export async function submitPolymarketClientSignedOrder(input: {
         link: fundingReservation,
         intent: fundingConsumerIntent,
       });
+      if (directHandoffBinding && directHandoffSubmission) {
+        if (!input.assertTelegramAppHandoffV2Scope) {
+          throw new Error("sealed handoff scope cannot be verified");
+        }
+        await assertTelegramAppHandoffV2FundedTradeSubmission(input.pool, {
+          assertCurrentScope: input.assertTelegramAppHandoffV2Scope,
+          binding: directHandoffBinding,
+          operationId: fundingReservation.operationId,
+          reservationId: fundingReservation.reservationId,
+          submission: directHandoffSubmission,
+          userId: input.userId,
+        });
+      }
     } catch (error) {
       return {
         ok: false,
@@ -7080,25 +7222,6 @@ export async function submitPolymarketClientSignedOrder(input: {
       }
     }
   }
-
-  const orderHash = computePolymarketOrderHashV2({
-    exchangeAddress,
-    order: normalizedForHash,
-  });
-
-  const payload = {
-    order: normalizedOrder,
-    owner: creds.apiKey,
-    orderType,
-    ...(input.body.deferExec !== undefined
-      ? { deferExec: input.body.deferExec }
-      : {}),
-  };
-  const clobCreds = {
-    apiKey: creds.apiKey,
-    apiSecret: creds.apiSecret,
-    apiPassphrase: creds.apiPassphrase,
-  };
 
   let fundingTradeAttemptId: string | null = null;
   let fundingTradeClaimToken: string | null = null;
@@ -7218,6 +7341,21 @@ export async function submitPolymarketClientSignedOrder(input: {
         log: input.log,
       })
     ) {
+      if (
+        directHandoffBinding &&
+        directHandoffSubmission &&
+        !fundingReservation
+      ) {
+        await failTelegramAppHandoffV2DirectTradeSubmission(input.pool, {
+          binding: directHandoffBinding,
+          reason: {
+            code: POLYMARKET_CREDENTIALS_INVALID_CODE,
+            message: "Polymarket trading credentials were rejected.",
+          },
+          submission: directHandoffSubmission,
+          userId: input.userId,
+        });
+      }
       if (fundingReservation && fundingTradeAttemptId) {
         await releaseFundingReservationForDefinitiveTradeFailure(input.pool, {
           userId: input.userId,
@@ -7283,6 +7421,22 @@ export async function submitPolymarketClientSignedOrder(input: {
         });
       }
     }
+    if (
+      directHandoffBinding &&
+      directHandoffSubmission &&
+      !fundingReservation &&
+      upstream.status < 500
+    ) {
+      await failTelegramAppHandoffV2DirectTradeSubmission(input.pool, {
+        binding: directHandoffBinding,
+        reason: {
+          code: "polymarket_trade_rejected",
+          message: "Polymarket rejected the sealed Buy before accepting it.",
+        },
+        submission: directHandoffSubmission,
+        userId: input.userId,
+      });
+    }
     return {
       ok: false,
       statusCode: responseStatus,
@@ -7302,6 +7456,21 @@ export async function submitPolymarketClientSignedOrder(input: {
   }
 
   if (isRecord(upstream.payload) && upstream.payload.success === false) {
+    if (
+      directHandoffBinding &&
+      directHandoffSubmission &&
+      !fundingReservation
+    ) {
+      await failTelegramAppHandoffV2DirectTradeSubmission(input.pool, {
+        binding: directHandoffBinding,
+        reason: {
+          code: "polymarket_trade_rejected",
+          message: "Polymarket rejected the sealed Buy before accepting it.",
+        },
+        submission: directHandoffSubmission,
+        userId: input.userId,
+      });
+    }
     if (fundingReservation && fundingTradeAttemptId) {
       await releaseFundingReservationForDefinitiveTradeFailure(input.pool, {
         userId: input.userId,
@@ -7346,7 +7515,6 @@ export async function submitPolymarketClientSignedOrder(input: {
   }
 
   const tokenId = extractTokenId(order);
-  const { price, size } = derivePriceAndSize(order, side);
   const statusRaw =
     extractPolymarketOrderStatus(upstream.payload) ?? "submitted";
   const immediateFill = extractPolymarketImmediateFill({
@@ -7440,6 +7608,10 @@ export async function submitPolymarketClientSignedOrder(input: {
     fundingTradeAttemptId: isPolymarketClobNoFillTerminalStatus(status)
       ? null
       : fundingTradeAttemptId,
+    telegramAppHandoffV2DirectTrade:
+      directHandoffBinding && directHandoffSubmission && !fundingReservation
+        ? { ...directHandoffBinding, ...directHandoffSubmission }
+        : null,
   }).catch(async (error) => {
     if (
       fundingTradeAttemptId &&

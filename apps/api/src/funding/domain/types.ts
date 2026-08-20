@@ -384,6 +384,12 @@ export type SourceOption = Readonly<{
   ingress?: ExternalIngressInstruction;
   sourceLegs?: readonly SourceOptionLeg[];
   amountMode: "exact_input" | "exact_output" | "variable_external";
+  /**
+   * Exact source amount in the provider quote behind this option. It is
+   * distinct from `maximumSourceRaw`, which describes the wallet's available
+   * capacity and must never be treated as consent to debit that whole balance.
+   */
+  quotedSourceAmount?: Money | null;
   maximumSourceRaw: RawAmount | null;
   expectedDestination: Money | null;
   minimumDestination: Money | null;
@@ -817,6 +823,11 @@ export type SignatureAction = Readonly<{
 }>;
 
 export type ExternalHandoffAction = Readonly<{
+  /**
+   * A client-wallet funding action handed to its adapter (for example a wallet
+   * signature or Deposit Wallet action). This is deliberately distinct from
+   * Telegram's sealed `app_handoff` trade-delivery mode and `th1_` token.
+   */
   kind: "external_handoff";
   actionId: string;
   networkId: NetworkId;

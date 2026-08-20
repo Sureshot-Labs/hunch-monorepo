@@ -657,24 +657,22 @@ assert.equal(
   BigInt(CAP),
   "the first delegated route approves only the authorization policy cap",
 );
-assert.equal(
-  persistentApprove.actionValidationResult.relayApprovalCapRaw,
-  CAP,
-);
+assert.equal(persistentApprove.actionValidationResult.relayApprovalCapRaw, CAP);
 assert.equal(
   persistentDeposit.actionValidationResult.relayAllowanceMode,
   "preexisting",
   "the dependent exact deposit consumes the bounded allowance like a later deposit-only route",
 );
-assert.doesNotThrow(() =>
-  validateRelayDelegatedEvmAction({
-    action: persistentApprove.normalizedAction as never,
-    actionValidationResult: persistentApprove.actionValidationResult,
-    expectedRaw: RAW,
-    walletAddress: WALLET,
-    walletId: WALLET_ID,
-    profile: relayProfile,
-  }),
+assert.doesNotThrow(
+  () =>
+    validateRelayDelegatedEvmAction({
+      action: persistentApprove.normalizedAction as never,
+      actionValidationResult: persistentApprove.actionValidationResult,
+      expectedRaw: RAW,
+      walletAddress: WALLET,
+      walletId: WALLET_ID,
+      profile: relayProfile,
+    }),
   "validator accepts the cap only when it is durably attached to this approval step",
 );
 

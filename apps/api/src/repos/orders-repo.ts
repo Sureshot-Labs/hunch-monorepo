@@ -6,6 +6,10 @@ import {
 } from "../lib/wallet-address.js";
 import { consumeFundingReservationForLinkedConsumerInTransaction } from "../funding/persistence/funding-evidence-repository.js";
 import { recoverFundingTradeAttemptForOrderInTransaction } from "../funding/persistence/funding-trade-attempt-repository.js";
+import {
+  linkTelegramAppHandoffV2DirectTradeOrderInTransaction,
+  type TelegramAppHandoffV2DirectTradeOrder,
+} from "./telegram-app-handoff-v2-direct-trade-repository.js";
 import type { OrderHistoryRow, OrderRow, PgParams } from "../server-types.js";
 
 const POSITION_DELTA_APPLIED_MARKER = "_hunchPositionDeltaAppliedAt";
@@ -303,6 +307,11 @@ export type StoreOrderInput = {
     reservationId: string;
   }> | null;
   fundingTradeAttemptId?: string | null;
+  /**
+   * A direct v2 Mini App Buy has no FundingOperation. Its sealed Telegram
+   * handoff is instead linked atomically when this ordinary order is stored.
+   */
+  telegramAppHandoffV2DirectTrade?: TelegramAppHandoffV2DirectTradeOrder | null;
   postedAt?: Date | null;
   lastUpdate?: Date | null;
   filledAt?: Date | null;
@@ -326,9 +335,19 @@ export async function storeOrderInTransaction(
   );
   let resolvedFundingReservation = inputs.fundingReservation ?? null;
   let resolvedFundingTradeAttemptId = inputs.fundingTradeAttemptId ?? null;
+  const directHandoffTrade = inputs.telegramAppHandoffV2DirectTrade ?? null;
+  if (directHandoffTrade && resolvedFundingReservation) {
+    throw new Error(
+      "A direct Telegram handoff cannot also consume a funding reservation",
+    );
+  }
+  if (directHandoffTrade && inputs.side !== "BUY") {
+    throw new Error("A direct Telegram handoff can only submit a buy");
+  }
   if (
     !resolvedFundingReservation &&
     !resolvedFundingTradeAttemptId &&
+    !directHandoffTrade &&
     inputs.side === "BUY" &&
     inputs.tokenId
   ) {
@@ -476,6 +495,15 @@ export async function storeOrderInTransaction(
         outcomeReason: "trade_order_recorded",
       });
     }
+    if (directHandoffTrade) {
+      await linkTelegramAppHandoffV2DirectTradeOrderInTransaction(client, {
+        order: directHandoffTrade,
+        orderId: existing.id,
+        orderStatus: existing.status ?? inputs.status,
+        userId: inputs.userId,
+        venueOrderId: inputs.venueOrderId,
+      });
+    }
     return {
       kind: "exists",
       order: {
@@ -547,6 +575,15 @@ export async function storeOrderInTransaction(
       tradeAttemptId: resolvedFundingTradeAttemptId,
       consumer: { kind: "web_order", orderId: inserted.id },
       outcomeReason: "trade_order_recorded",
+    });
+  }
+  if (directHandoffTrade) {
+    await linkTelegramAppHandoffV2DirectTradeOrderInTransaction(client, {
+      order: directHandoffTrade,
+      orderId: inserted.id,
+      orderStatus: inserted.status,
+      userId: inputs.userId,
+      venueOrderId: inputs.venueOrderId,
     });
   }
 

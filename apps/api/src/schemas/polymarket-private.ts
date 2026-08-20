@@ -95,6 +95,11 @@ export const polymarketPlaceOrderBodySchema = z
     positionWalletAddress: zEthAddress.optional(),
     fundingOperationId: z.string().uuid().optional(),
     fundingReservationId: z.string().uuid().optional(),
+    telegramAppHandoffId: z.string().uuid().optional(),
+    telegramAppHandoffPlanFingerprint: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/iu, "Invalid Telegram handoff fingerprint")
+      .optional(),
   })
   .superRefine((value, context) => {
     if (
@@ -104,6 +109,16 @@ export const polymarketPlaceOrderBodySchema = z
         code: z.ZodIssueCode.custom,
         message:
           "fundingOperationId and fundingReservationId must be provided together",
+      });
+    }
+    if (
+      Boolean(value.telegramAppHandoffId) !==
+      Boolean(value.telegramAppHandoffPlanFingerprint)
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          "telegramAppHandoffId and telegramAppHandoffPlanFingerprint must be provided together",
       });
     }
   })

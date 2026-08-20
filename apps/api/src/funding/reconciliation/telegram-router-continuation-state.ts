@@ -40,13 +40,15 @@ export function telegramPolymarketRootRequiresRouterContinuationSql(
   )`;
 }
 
-export function isTelegramPolymarketRouterContinuationPending(input: Readonly<{
-  continuationId: string | null | undefined;
-  operationStatus: string | null | undefined;
-  progressStage: string | null | undefined;
-  rootRequiresRouterContinuation: boolean;
-  venue: string;
-}>): boolean {
+export function isTelegramPolymarketRouterContinuationPending(
+  input: Readonly<{
+    continuationId: string | null | undefined;
+    operationStatus: string | null | undefined;
+    progressStage: string | null | undefined;
+    rootRequiresRouterContinuation: boolean;
+    venue: string;
+  }>,
+): boolean {
   return (
     input.venue === "polymarket" &&
     input.rootRequiresRouterContinuation &&

@@ -8,6 +8,11 @@ import {
 } from "../funding/persistence/canonical.js";
 import type { JsonObject } from "../funding/domain/types.js";
 
+/**
+ * Opaque token for the sealed Telegram → Mini App *trade* handoff. It conveys
+ * consent for a fingerprinted intent; it is unrelated to a funding action
+ * whose kind is `external_handoff`.
+ */
 export const TELEGRAM_APP_HANDOFF_TOKEN_PREFIX = "th1_";
 export const TELEGRAM_APP_HANDOFF_START_PARAM_PREFIX = "handoff_";
 const TELEGRAM_APP_HANDOFF_TOKEN_RE = /^th1_[A-Za-z0-9_-]{43}$/;
@@ -16,6 +21,12 @@ const SHA256_HEX_RE = /^[0-9a-f]{64}$/;
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
+/**
+ * Lifecycle of the sealed trade handoff itself, not of its funding operation:
+ * issued = bot created it; claimed = the bound Mini App user opened it;
+ * committed = exact plan accepted for execution; cancelled/expired are final
+ * pre-commit exits. Funding and trade state continue in their own records.
+ */
 export type TelegramAppHandoffState =
   | "issued"
   | "claimed"
@@ -107,7 +118,8 @@ export class TelegramAppHandoffError extends Error {
       | "not_found"
       | "plan_changed"
       | "policy_changed"
-      | "unauthorized",
+      | "unauthorized"
+      | "venue_unsupported",
   ) {
     super(code);
     this.name = "TelegramAppHandoffError";
@@ -507,12 +519,7 @@ export async function cancelTelegramAppHandoff(input: {
   );
 }
 
-/**
- * Marks the sealed handoff consumed after its future web consumer has verified
- * the exact policy, authority, and immutable plan. It deliberately performs
- * no trade or funding side effect.
- */
-export async function commitTelegramAppHandoff(input: {
+type TelegramAppHandoffCommitInput = Readonly<{
   currentAuthorityFingerprint: string;
   currentPolicyRevision: string;
   db: Pool;
@@ -520,7 +527,129 @@ export async function commitTelegramAppHandoff(input: {
   telegramUserId: string;
   token: string;
   userId: string;
-}): Promise<TelegramAppHandoff> {
+}>;
+
+export type TelegramAppHandoffCommitContext = Readonly<{
+  client: PoolClient;
+  handoff: TelegramAppHandoff;
+}>;
+
+/**
+ * Atomically consumes a sealed v2 handoff with its client continuation.
+ * The callback is invoked even for an already committed handoff so a retried
+ * Mini App request can return its pre-existing operation rather than creating
+ * another one. The callback must be deterministic and side-effect-safe in the
+ * surrounding transaction.
+ */
+export async function commitTelegramAppHandoffWithExecution<T>(
+  input: TelegramAppHandoffCommitInput &
+    Readonly<{
+      commitExecution: (context: TelegramAppHandoffCommitContext) => Promise<T>;
+      /**
+       * Client funding becomes durable `funding`; a sealed direct Buy remains
+       * `external_handoff` because there is no fabricated FundingOperation.
+       */
+      committedIntentStatus?: "external_handoff" | "funding";
+      /**
+       * A v2 consumer can narrow the only intent states it is allowed to
+       * commit. This prevents a cancelled or terminal Telegram intent from
+       * being re-attached by a stale Mini App tab.
+       */
+      allowedIntentStatuses?: readonly string[];
+    }>,
+): Promise<Readonly<{ execution: T; handoff: TelegramAppHandoff }>> {
+  const authorityFingerprint = normalizeSha256(
+    input.currentAuthorityFingerprint,
+    "currentAuthorityFingerprint",
+  );
+  const planFingerprint = normalizeSha256(
+    input.planFingerprint,
+    "planFingerprint",
+  );
+  const policyRevision = normalizeBoundedValue(
+    input.currentPolicyRevision,
+    "currentPolicyRevision",
+  );
+  return withCurrentTelegramAppHandoff(
+    input,
+    { forUpdate: true },
+    async ({ client, row }) => {
+      if (row.state !== "claimed" && row.state !== "committed") {
+        throw new TelegramAppHandoffError("not_committable");
+      }
+      if (row.plan_fingerprint !== planFingerprint) {
+        throw new TelegramAppHandoffError("plan_changed");
+      }
+      if (
+        row.policy_revision !== policyRevision ||
+        row.authority_fingerprint !== authorityFingerprint
+      ) {
+        throw new TelegramAppHandoffError("policy_changed");
+      }
+      const committedRow =
+        row.state === "committed"
+          ? row
+          : (
+              await client.query<TelegramAppHandoffRow>(
+                `update telegram_app_handoffs handoff_row
+                  set state = 'committed', committed_at = clock_timestamp()
+                where handoff_row.id = $1::uuid
+                  and handoff_row.state = 'claimed'
+                returning ${handoffReturningColumns}`,
+                [row.id],
+              )
+            ).rows[0];
+      if (!committedRow) throw new TelegramAppHandoffError("not_committable");
+      const handoff = mapRow(committedRow);
+      const execution = await input.commitExecution({ client, handoff });
+      const attached = await client.query(
+        `update telegram_trade_intents intent
+            set status = case
+                  when intent.status in ('previewed', 'external_handoff', 'confirming')
+                    then $4::text
+                  else intent.status
+                end,
+                result = coalesce(intent.result, '{}'::jsonb)
+                  || jsonb_build_object(
+                    'appHandoffExecution',
+                    jsonb_build_object(
+                      'committedAt', coalesce($2::timestamptz, clock_timestamp()),
+                      'handoffId', $3::uuid,
+                      'version', 2
+                    )
+                  ),
+                updated_at = clock_timestamp()
+          where intent.id = $1::uuid
+            and intent.delivery_mode = 'app_handoff'
+            and intent.action = 'buy'
+            and (
+              cardinality($5::text[]) = 0
+              or intent.status = any($5::text[])
+            )`,
+        [
+          row.trade_intent_id,
+          committedRow.committed_at,
+          row.id,
+          input.committedIntentStatus ?? "funding",
+          input.allowedIntentStatuses ?? [],
+        ],
+      );
+      if ((attached.rowCount ?? 0) !== 1) {
+        throw new TelegramAppHandoffError("not_committable");
+      }
+      return { execution, handoff };
+    },
+  );
+}
+
+/**
+ * Marks the sealed v1 handoff consumed after its web consumer has verified the
+ * exact policy, authority, and immutable plan. V1 deliberately has no funding
+ * side effect: `/execute` replays the original Telegram confirmation.
+ */
+export async function commitTelegramAppHandoff(
+  input: TelegramAppHandoffCommitInput,
+): Promise<TelegramAppHandoff> {
   const authorityFingerprint = normalizeSha256(
     input.currentAuthorityFingerprint,
     "currentAuthorityFingerprint",

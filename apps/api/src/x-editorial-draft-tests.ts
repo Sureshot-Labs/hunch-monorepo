@@ -1307,7 +1307,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
-    name: "Telegram renderer applies editorial formatting without links or a copy block",
+    name: "Telegram renderer applies editorial formatting without a copy block or appended links",
     run: () => {
       const postText =
         "$56.4K is backing Spain.\n\nOne position. No hedge.\n\nEither conviction — or chaos?";
@@ -1336,6 +1336,50 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.match(message, /_Either conviction — or chaos\?_$/);
       assert.doesNotMatch(message, /```|Bold in X|Italic in X|🎨/);
       assert.doesNotMatch(message, /https?:\/\/|Website|Mini App/);
+    },
+  },
+  {
+    name: "Telegram renderer links every exact holder username to Hunch tracking",
+    run: () => {
+      const postText =
+        "@FaceShot has $5.1K backing YES on Bitcoin.\n\nThe market is undecided. @FaceShot is not.";
+      const message = buildXEditorialTelegramDraftMessage({
+        draft: {
+          characterCount: Array.from(postText).length,
+          formatting: [
+            {
+              style: "bold",
+              text: "@FaceShot has $5.1K backing YES on Bitcoin.",
+            },
+            {
+              style: "italic",
+              text: "The market is undecided. @FaceShot is not.",
+            },
+          ],
+          generatedAt: "2026-08-20T01:00:00.000Z",
+          marketId: "polymarket:market-1",
+          model: "test/editorial-model",
+          postText,
+          promptVersion: X_EDITORIAL_PROMPT_VERSION,
+          safetyFlags: [],
+          selectedSide: "YES",
+          sourceDigest: buildXEditorialSourceDigest(source),
+          status: "ready",
+          storyFamily: "fresh_bet",
+          usedFactIds: ["market", "actor"],
+          version: 1,
+        },
+        holderLink: {
+          labels: ["@FaceShot", "FaceShot"],
+          url: "https://app.hunch.trade/tracking/wallet/0xabc?chain=polygon",
+        },
+      });
+      assert.equal((message.match(/\[@FaceShot\]\(/g) ?? []).length, 2);
+      assert.match(
+        message,
+        /^\*\[@FaceShot\]\(https:\/\/app\.hunch\.trade\/tracking\/wallet\/0xabc\?chain=polygon\) has \$5\\\.1K/,
+      );
+      assert.doesNotMatch(message, /startapp=|t\.me\/|Website|Mini App/);
     },
   },
   {

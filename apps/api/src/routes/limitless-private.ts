@@ -79,6 +79,7 @@ import {
   limitlessSlugParamsSchema,
 } from "../schemas/limitless-private.js";
 import { quoteLimitlessClobMarket } from "../services/limitless-clob-quote.js";
+import { matchesTelegramAppHandoffV2CurrentScope } from "../services/telegram-bot-trading.js";
 
 function normalizeAddress(value: string): string {
   return value.trim().toLowerCase();
@@ -1016,6 +1017,12 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
       }
 
       const result = await submitLimitlessClientSignedOrder({
+        assertTelegramAppHandoffV2Scope: async (sealed) => {
+          return matchesTelegramAppHandoffV2CurrentScope({
+            db: pool,
+            sealed,
+          });
+        },
         body: request.body,
         log: request.log,
         pool,

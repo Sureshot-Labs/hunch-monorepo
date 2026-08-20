@@ -1018,6 +1018,7 @@ const destination: FundingTarget = {
   assert.deepEqual(
     PRODUCTION_FUNDING_REGISTRY.networkExecutors.map(({ id }) => id).sort(),
     [
+      "polymarket_deposit_pusd_fund_v1",
       "polymarket_deposit_usdce_wrap_v1",
       "wallet_profile_evm_v1",
       "wallet_profile_svm_v1",

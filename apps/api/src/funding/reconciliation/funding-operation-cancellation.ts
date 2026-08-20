@@ -28,6 +28,42 @@ export function isSafelyCancellableStepLessIngress(
   );
 }
 
+/**
+ * A v2 handoff owns the original Telegram Buy intent even though the generic
+ * operation is executed by the Mini App. Once cancellation is proven safe at
+ * the operation boundary, close that Buy in the same transaction so `/execute`
+ * can never resurrect client actions for a cancelled intent.
+ */
+async function cancelLinkedTelegramV2HandoffIntentInTransaction(input: {
+  client: Parameters<typeof reduceFundingOperationInTransaction>[0];
+  now: Date;
+  operationId: string;
+  userId: string;
+}): Promise<void> {
+  await input.client.query(
+    `update telegram_trade_intents intent
+        set status = 'cancelled',
+            error_code = 'funding_cancelled',
+            error_message = 'Funding was cancelled before money moved. The Buy was cancelled.',
+            result = coalesce(intent.result, '{}'::jsonb)
+              || jsonb_build_object(
+                'appHandoffFundingCancellation',
+                jsonb_build_object(
+                  'operationId', $1::uuid,
+                  'cancelledAt', $3::timestamptz,
+                  'version', 2
+                )
+              ),
+            updated_at = $3::timestamptz
+      where intent.user_id = $2::uuid
+        and intent.funding_operation_id = $1::uuid
+        and intent.status = 'funding'
+        and intent.delivery_mode = 'app_handoff'
+        and intent.result->'appHandoffExecution'->>'version' = '2'`,
+    [input.operationId, input.userId, input.now],
+  );
+}
+
 export async function cancelFundingOperationForUser(
   pool: Pool,
   input: Readonly<{
@@ -109,6 +145,12 @@ export async function cancelFundingOperationForUser(
           "funding operation disappeared after reservation release",
         );
       }
+      await cancelLinkedTelegramV2HandoffIntentInTransaction({
+        client,
+        now,
+        operationId: input.operationId,
+        userId: input.userId,
+      });
       return released;
     }
 
@@ -210,6 +252,12 @@ export async function cancelFundingOperationForUser(
             and status = 'reserved'`,
         [input.operationId, now],
       );
+      await cancelLinkedTelegramV2HandoffIntentInTransaction({
+        client,
+        now,
+        operationId: input.operationId,
+        userId: input.userId,
+      });
     }
     return cancelled;
   });

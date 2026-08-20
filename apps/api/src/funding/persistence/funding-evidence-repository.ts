@@ -15,6 +15,7 @@ import {
   acceptFundingTradeAttemptInTransaction,
   hasUnresolvedFundingTradeAttemptInTransaction,
   recordFundingTradeAttemptOutcomeInTransaction,
+  type FundingTradeAttempt,
 } from "./funding-trade-attempt-repository.js";
 import {
   sameFundingTradeConsumerIntent,
@@ -1332,8 +1333,14 @@ export type FundingConsumerReservation = Readonly<{
 }>;
 
 export async function fetchFundingConsumerReservationForUser(
-  db: Pick<Pool, "query">,
-  input: Readonly<{ userId: string; operationId: string }>,
+  db: Pick<Pool | PoolClient, "query">,
+  input: Readonly<{
+    /** Bind the read to an enclosing intent transition when a caller must
+     * atomically attach the reservation to a consumer. */
+    forUpdate?: boolean;
+    userId: string;
+    operationId: string;
+  }>,
 ): Promise<FundingConsumerReservation | null> {
   const result = await db.query<{
     operation_id: string;
@@ -1373,6 +1380,7 @@ export async function fetchFundingConsumerReservationForUser(
         and operation.progress_stage = 'ready_for_consumer'
       order by reservation.id
       limit 2
+      ${input.forUpdate ? "for update of reservation" : ""}
     `,
     [input.userId, input.operationId],
   );
@@ -1589,6 +1597,88 @@ async function completeReadyFundingOperation(
 }
 
 /**
+ * A v2 handoff retains the original Telegram intent as the durable parent of
+ * a generic web order.  The normal consumer repository is the only point at
+ * which that order/execution is known to be persisted and its reservation is
+ * consumed, so link the two here rather than asking the Mini App to race a
+ * second, Telegram-specific completion callback.
+ *
+ * This is deliberately a conditional no-op for every ordinary web consumer.
+ * The JSON binding was written by the v2 handoff transaction and makes a
+ * reservation UUID alone insufficient to attach an unrelated intent.
+ */
+async function advanceTelegramAppHandoffV2ConsumerInTransaction(
+  client: Pick<PoolClient, "query">,
+  input: Readonly<{
+    attempt: FundingTradeAttempt;
+    consumer: FundingReservationConsumer;
+    externalReference: string;
+    now: Date;
+  }>,
+): Promise<void> {
+  const orderId =
+    input.consumer.kind === "web_order" ? input.consumer.orderId : null;
+  const executionId =
+    input.consumer.kind === "execution" ? input.consumer.executionId : null;
+  const consumerKind =
+    input.consumer.kind === "web_order"
+      ? "web_order"
+      : input.consumer.kind === "execution"
+        ? "execution"
+        : "telegram_trade_intent";
+  const consumerRef =
+    input.consumer.kind === "web_order"
+      ? input.consumer.orderId
+      : input.consumer.kind === "execution"
+        ? input.consumer.executionId
+        : input.consumer.intentId;
+  await client.query(
+    `update telegram_trade_intents intent
+        set status = 'submitted',
+            submit_started_at = coalesce(intent.submit_started_at, $7),
+            submitted_at = coalesce(intent.submitted_at, $7),
+            order_id = coalesce(intent.order_id, $5::uuid),
+            execution_id = coalesce(intent.execution_id, $6::uuid),
+            venue_order_id = coalesce(intent.venue_order_id, $4),
+            result = coalesce(intent.result, '{}'::jsonb) || jsonb_build_object(
+              'appHandoffTradeExecution',
+              jsonb_build_object(
+                'attemptId', $3::uuid,
+                'consumerKind', $8::text,
+                'consumerRef', $9::text,
+                'externalReference', $4::text,
+                'operationId', $1::uuid,
+                'reservationId', $2::uuid,
+                'state', 'accepted',
+                'version', 2
+              )
+            ),
+            updated_at = $7
+      where intent.user_id = $10::uuid
+        and intent.delivery_mode = 'app_handoff'
+        and intent.action = 'buy'
+        and intent.status in ('funding', 'executing', 'submitted')
+        and intent.funding_operation_id = $1::uuid
+        and intent.funding_reservation_id = $2::uuid
+        and intent.result -> 'appHandoffFunding' ->> 'version' = '2'
+        and intent.result -> 'appHandoffFunding' ->> 'operationId' = $1::text
+        and intent.result -> 'appHandoffFundingReady' ->> 'reservationId' = $2::text`,
+    [
+      input.attempt.operationId,
+      input.attempt.reservationId,
+      input.attempt.id,
+      input.externalReference,
+      orderId,
+      executionId,
+      input.now,
+      consumerKind,
+      consumerRef,
+      input.attempt.userId,
+    ],
+  );
+}
+
+/**
  * A completed shortfall has already placed the exact destination amount at
  * the venue.  Its source reservation is therefore no longer a liability.
  * Keep the consumer reservation separate: it binds the next exact trade,
@@ -1784,6 +1874,12 @@ export async function consumeFundingReservationForLinkedConsumerInTransaction(
       [consumerRef, attempt.id, input.userId],
     );
   }
+  await advanceTelegramAppHandoffV2ConsumerInTransaction(client, {
+    attempt,
+    consumer: input.consumer,
+    externalReference,
+    now,
+  });
   await completeReadyFundingOperation(client, {
     userId: input.userId,
     operationId,

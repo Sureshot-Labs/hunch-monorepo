@@ -10,6 +10,27 @@ import {
   type FundingQuoteCommitScope,
   type StoredFundingQuote,
 } from "../persistence/funding-operation-repository.js";
+
+function sameFundingQuoteCommitScope(
+  left: FundingQuoteCommitScope | null,
+  right: FundingQuoteCommitScope | null,
+): boolean {
+  if (!left || !right) return left === right;
+  if (left.kind !== right.kind) return false;
+  if (left.kind === "receive_receipt_review_v1") {
+    return (
+      right.kind === "receive_receipt_review_v1" &&
+      left.ownerChannel === right.ownerChannel &&
+      left.receiveSessionId === right.receiveSessionId &&
+      left.receiptId === right.receiptId
+    );
+  }
+  return (
+    right.kind === "telegram_app_handoff_v2" &&
+    left.handoffId === right.handoffId &&
+    left.tradeIntentId === right.tradeIntentId
+  );
+}
 import type { FundingRuntimePolicy } from "../policies/funding-policy.js";
 import {
   isWithdrawalPurpose,
@@ -79,12 +100,7 @@ export class FundingOperationService {
     }
     const frozenScope = quote.commitScope;
     const requestedScope = input.commitScope ?? null;
-    if (
-      frozenScope?.kind !== requestedScope?.kind ||
-      frozenScope?.ownerChannel !== requestedScope?.ownerChannel ||
-      frozenScope?.receiveSessionId !== requestedScope?.receiveSessionId ||
-      frozenScope?.receiptId !== requestedScope?.receiptId
-    ) {
+    if (!sameFundingQuoteCommitScope(frozenScope, requestedScope)) {
       throw new FundingPersistenceError(
         "quote_mismatch",
         "funding quote must be committed through its frozen owner boundary",

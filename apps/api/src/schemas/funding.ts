@@ -377,6 +377,7 @@ export const sourceOptionSchema = z
     ingress: externalIngressInstructionSchema.optional(),
     sourceLegs: z.array(sourceOptionLegSchema).min(2).max(16).optional(),
     amountMode: z.enum(["exact_input", "exact_output", "variable_external"]),
+    quotedSourceAmount: moneySchema.nullable().optional(),
     maximumSourceRaw: rawAmountSchema.nullable(),
     expectedDestination: moneySchema.nullable(),
     minimumDestination: moneySchema.nullable(),

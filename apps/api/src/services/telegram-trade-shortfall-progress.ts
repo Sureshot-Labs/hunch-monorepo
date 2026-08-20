@@ -11,7 +11,9 @@ import { releaseFundingReservationForAbandonedTradeInTransaction } from "../fund
 import {
   escapeTelegramMarkdownV2,
   formatTelegramBoldMarkdownV2,
+  formatTelegramCodeMarkdownV2,
   formatTelegramFieldMarkdownV2,
+  formatTelegramFieldWithMarkdownV2,
   joinTelegramMarkdownV2Lines,
 } from "./telegram-bot-trading-presentation.js";
 import { formatTelegramVenueLabel } from "./telegram-market-identity.js";
@@ -44,12 +46,19 @@ type TradeFundingProgress = Readonly<{
   progressStage: string | null;
   receiptStateFingerprint: string;
   reasonCode: string | null;
+  /**
+   * The funding operation is durable, but its next action belongs to the
+   * authenticated Mini App. Telegram must present a resume path instead of
+   * implying that the server will sign or submit it.
+   */
+  requiresMiniAppContinuation: boolean;
   sideLabel: string;
   sourceRoute: string | null;
   stepStateFingerprint: string;
   state: TradeFundingState;
+  venueOrderId: string | null;
   venue: string;
-  version: 1 | 2 | 3;
+  version: 1 | 2 | 3 | 4;
 }>;
 
 type ProjectionCandidate = Readonly<{
@@ -58,6 +67,7 @@ type ProjectionCandidate = Readonly<{
   chat_id: string | null;
   continuation_id: string | null;
   consumer_reservation_id: string | null;
+  delivery_mode: string;
   error_code: string | null;
   funding_operation_id: string | null;
   funding_destination_asset_id: string | null;
@@ -82,6 +92,7 @@ type ProjectionCandidate = Readonly<{
   tracked_operation_id: string | null;
   user_id: string | null;
   venue: string;
+  venue_order_id: string | null;
   has_automatic_provider_reference_wait: boolean;
   has_broadcast_boundary: boolean;
   has_started_attempt: boolean;
@@ -106,7 +117,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function parseProgress(value: unknown): TradeFundingProgress | null {
   if (
     !isRecord(value) ||
-    (value.version !== 1 && value.version !== 2 && value.version !== 3)
+    (value.version !== 1 &&
+      value.version !== 2 &&
+      value.version !== 3 &&
+      value.version !== 4)
   ) {
     return null;
   }
@@ -135,7 +149,18 @@ function parseProgress(value: unknown): TradeFundingProgress | null {
   ) {
     return null;
   }
-  return value as unknown as TradeFundingProgress;
+  // Older delivered cards predate venueOrderId. Normalising them to null keeps
+  // the projector revision-stable until an actual venue order exists.
+  return {
+    ...value,
+    // Older cards were all server-executed. Missing is therefore safely
+    // normalised to false while version 4 forces one authoritative edit.
+    requiresMiniAppContinuation: value.requiresMiniAppContinuation === true,
+    venueOrderId:
+      typeof value.venueOrderId === "string" && value.venueOrderId.trim()
+        ? value.venueOrderId
+        : null,
+  } as TradeFundingProgress;
 }
 
 function sideLabel(candidate: ProjectionCandidate): string {
@@ -173,9 +198,7 @@ function fundingAmountLabel(candidate: ProjectionCandidate): string | null {
   const amount = BigInt(raw);
   const scale = 10n ** BigInt(decimals);
   const whole = amount / scale;
-  const fractionalRaw = (amount % scale)
-    .toString()
-    .padStart(decimals, "0");
+  const fractionalRaw = (amount % scale).toString().padStart(decimals, "0");
   const omittedNonZeroFraction = /[1-9]/u.test(fractionalRaw.slice(6));
   const fraction = fractionalRaw.slice(0, 6).replace(/0+$/, "");
   return `${whole.toString()}${fraction ? `.${fraction}` : ""}${
@@ -239,6 +262,10 @@ function liveProgressFor(candidate: ProjectionCandidate): TradeFundingProgress {
     ready &&
     candidate.status === "funding" &&
     candidate.error_code === "funding_balance_pending";
+  const requiresMiniAppContinuation =
+    candidate.delivery_mode === "app_handoff" &&
+    isRecord(candidate.result.appHandoffExecution) &&
+    candidate.result.appHandoffExecution.version === 2;
   const state: TradeFundingState = routerContinuationPending
     ? routerContinuationNeedsAttention
       ? "needs_attention"
@@ -278,12 +305,14 @@ function liveProgressFor(candidate: ProjectionCandidate): TradeFundingProgress {
     progressStage: candidate.progress_stage,
     receiptStateFingerprint: candidate.receipt_state_fingerprint,
     reasonCode,
+    requiresMiniAppContinuation,
     sideLabel: sideLabel(candidate),
     sourceRoute: sourceRoute(candidate),
     stepStateFingerprint: candidate.step_state_fingerprint,
     state,
+    venueOrderId: candidate.venue_order_id,
     venue: candidate.venue,
-    version: 3,
+    version: 4,
   };
 }
 
@@ -331,12 +360,14 @@ function sameProgress(
     left.venue === right.venue &&
     left.marketTitle === right.marketTitle &&
     left.sideLabel === right.sideLabel &&
+    left.venueOrderId === right.venueOrderId &&
     left.sourceRoute === right.sourceRoute &&
     left.amountUsd === right.amountUsd &&
     left.fundingAmountLabel === right.fundingAmountLabel &&
     left.operationStatus === right.operationStatus &&
     left.progressStage === right.progressStage &&
     left.reasonCode === right.reasonCode &&
+    left.requiresMiniAppContinuation === right.requiresMiniAppContinuation &&
     left.stepStateFingerprint === right.stepStateFingerprint &&
     left.attemptStateFingerprint === right.attemptStateFingerprint &&
     left.receiptStateFingerprint === right.receiptStateFingerprint &&
@@ -357,12 +388,14 @@ async function listCandidates(
             intent.chat_id,
             intent.telegram_message_id::text,
             intent.venue,
+            intent.venue_order_id,
             coalesce(market.title, intent.market_id, 'Market') as market_title,
             intent.side,
             funding_authorization.source_network_id,
             funding_authorization.source_asset_id,
             funding_authorization.source_asset_decimals,
             intent.amount_usd::text,
+            intent.delivery_mode,
             intent.status,
             intent.error_code,
             intent.result,
@@ -616,7 +649,9 @@ function progressText(progress: TradeFundingProgress): string {
           : null,
         "",
         escapeTelegramMarkdownV2(
-          "Funding is confirmed. Polymarket is still reflecting the deposit in its trading balance; Hunch will retry the fresh Buy review automatically. The Buy has not been submitted yet.",
+          progress.requiresMiniAppContinuation
+            ? "Funding is confirmed. Polymarket is still reflecting the deposit in its trading balance. Continue in Hunch when it is ready; the Buy has not been submitted."
+            : "Funding is confirmed. Polymarket is still reflecting the deposit in its trading balance; Hunch will retry the fresh Buy review automatically. The Buy has not been submitted yet.",
         ),
       ].filter((line): line is string => line != null),
     );
@@ -649,9 +684,13 @@ function progressText(progress: TradeFundingProgress): string {
         "",
         escapeTelegramMarkdownV2(
           pending
-            ? "Your funds are ready. The final Polymarket funding step is being prepared automatically. The Buy has not been submitted yet."
+            ? progress.requiresMiniAppContinuation
+              ? "Your funds are ready. Continue in Hunch to complete the final Polymarket funding step. The Buy has not been submitted."
+              : "Your funds are ready. The final Polymarket funding step is being prepared automatically. The Buy has not been submitted yet."
             : polygonRpcUnavailable
-              ? "Your funds are safe. Hunch can't reach Polygon right now and will retry automatically. The Buy has not been submitted yet."
+              ? progress.requiresMiniAppContinuation
+                ? "Your funds are safe. Hunch cannot reach Polygon right now. Continue in Hunch after the connection recovers; the Buy has not been submitted."
+                : "Your funds are safe. Hunch can't reach Polygon right now and will retry automatically. The Buy has not been submitted yet."
               : progress.reasonCode === "router_root_amount_unavailable"
                 ? "Your funds are safe, but Hunch could not confirm the exact amount received. The final funding step was not sent."
                 : "Your funds are safe. The final funding step was not sent; Hunch will retry when wallet setup is ready.",
@@ -659,26 +698,35 @@ function progressText(progress: TradeFundingProgress): string {
       ].filter((line): line is string => line != null),
     );
   }
+  const clientExecution = progress.requiresMiniAppContinuation;
   const status = {
     starting: [
       "ℹ️",
       "Starting preparation",
-      "The approved funding route is being started automatically.",
+      clientExecution
+        ? "Open Hunch to start the approved funding action. The Buy has not been submitted."
+        : "The approved funding route is being started automatically.",
     ],
     preparing: [
       "🔄",
       "Preparing source funds",
-      "The funding transfer is running automatically. The Buy has not been submitted.",
+      clientExecution
+        ? "Funding is waiting for the next approved action in Hunch. The Buy has not been submitted."
+        : "The funding transfer is running automatically. The Buy has not been submitted.",
     ],
     submitted: [
       "⏳",
       "Confirming funding",
-      "The funding transaction was sent. The bot is confirming it automatically; the Buy has not been submitted.",
+      clientExecution
+        ? "The funding transaction was sent from Hunch. Hunch is confirming it automatically; the Buy has not been submitted."
+        : "The funding transaction was sent. The bot is confirming it automatically; the Buy has not been submitted.",
     ],
     ready: [
       "✅",
       "Funding confirmed",
-      "Funding is confirmed. Hunch is checking a fresh quote and will Buy automatically within your confirmed limits.",
+      clientExecution
+        ? "Funding is confirmed. Continue in Hunch to use the reserved funds for the Buy within your confirmed limits."
+        : "Funding is confirmed. Hunch is checking a fresh quote and will Buy automatically within your confirmed limits.",
     ],
     needs_attention: [
       "⚠️",
@@ -690,11 +738,7 @@ function progressText(progress: TradeFundingProgress): string {
       "Funding stopped",
       "No trade was submitted. Open the market for a fresh Review.",
     ],
-    filled: [
-      "✅",
-      "Trade filled",
-      "The Buy was filled successfully.",
-    ],
+    filled: ["✅", "Trade filled", "The Buy was filled successfully."],
   } as const;
   const [icon, heading, body] = status[progress.state];
   return joinTelegramMarkdownV2Lines(
@@ -705,6 +749,12 @@ function progressText(progress: TradeFundingProgress): string {
       `🎯 ${formatTelegramFieldMarkdownV2("Market", progress.marketTitle)}`,
       `↔️ ${formatTelegramFieldMarkdownV2("Side", progress.sideLabel)}`,
       `🛒 ${formatTelegramFieldMarkdownV2("Buy target", `$${progress.amountUsd}`)}`,
+      progress.venueOrderId
+        ? `🔗 ${formatTelegramFieldWithMarkdownV2(
+            "Order",
+            formatTelegramCodeMarkdownV2(progress.venueOrderId),
+          )}`
+        : null,
       progress.fundingAmountLabel
         ? `💸 ${formatTelegramFieldMarkdownV2("Funding", progress.fundingAmountLabel)}`
         : null,
@@ -728,18 +778,31 @@ function progressKeyboard(
         text: "🎯 Trade this market",
       },
     ]);
-    rows.push([
-      { callback_data: "hm:v1:positions", text: "💼 My positions" },
-    ]);
+    rows.push([{ callback_data: "hm:v1:positions", text: "💼 My positions" }]);
   }
-  if (progress.state === "needs_attention" || progress.state === "stopped") {
+  if (
+    progress.requiresMiniAppContinuation &&
+    progress.state !== "filled" &&
+    progress.state !== "stopped"
+  ) {
+    // This callback only reopens/reissues the same sealed handoff. It never
+    // sends a client transaction and is safe to expose while the operation is
+    // waiting, confirming, or ready for the trade consumer.
+    rows.push([
+      {
+        callback_data: `${CALLBACK_PREFIX}:retry_buy:${progress.intentId}`,
+        text: "▶️ Continue in Hunch",
+      },
+    ]);
+  } else if (
+    progress.state === "needs_attention" ||
+    progress.state === "stopped"
+  ) {
     rows.push([
       {
         callback_data: `${CALLBACK_PREFIX}:retry_buy:${progress.intentId}`,
         text:
-          progress.state === "stopped"
-            ? "🎯 Open market"
-            : "🔄 Check status",
+          progress.state === "stopped" ? "🎯 Open market" : "🔄 Check status",
       },
     ]);
   }

@@ -1045,8 +1045,7 @@ export class ProductionFundingSourcePlanner {
         : {}),
       ...(input.persistentApprovalCapRaw
         ? {
-            persistentApprovalCapRaw:
-              input.persistentApprovalCapRaw,
+            persistentApprovalCapRaw: input.persistentApprovalCapRaw,
           }
         : {}),
       source: input.source,

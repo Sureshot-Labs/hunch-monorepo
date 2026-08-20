@@ -3515,6 +3515,15 @@ const tests: TestCase[] = [
         progressSource,
         /releaseFundingReservationForAbandonedTradeInTransaction[\s\S]*?telegram_buy_cancelled_after_funding/,
       );
+      // A shortfall Buy has the same durable venue_order_id as a direct Buy.
+      // Its terminal card must retain that copyable proof instead of showing
+      // only the funding route.
+      assert.match(progressSource, /intent\.venue_order_id/);
+      assert.match(progressSource, /venueOrderId: candidate\.venue_order_id/);
+      assert.match(
+        progressSource,
+        /formatTelegramFieldWithMarkdownV2\([\s\S]*?"Order"[\s\S]*?formatTelegramCodeMarkdownV2\(progress\.venueOrderId\)/,
+      );
     },
   },
   {

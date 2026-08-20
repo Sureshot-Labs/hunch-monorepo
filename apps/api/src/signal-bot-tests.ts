@@ -4198,6 +4198,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       let buyContinuationEnabled = false;
       let customTradeInputEnabled = false;
       let fundingReceiveEnabled = false;
+      let miniAppHandoffContractVersion: 1 | 2 = 1;
       let miniAppHandoffMode: "off" | "fallback" | "always" = "off";
       let policyTradingEnabled = true;
       let tradingActions: Array<"buy" | "sell"> = ["buy"];
@@ -4221,6 +4222,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
                           buyContinuationEnabled,
                           customTradeInputEnabled,
                           fundingReceiveEnabled,
+                          miniAppHandoffContractVersion,
                           miniAppHandoffMode,
                           tradingEnabled: policyTradingEnabled,
                           tradingActions,
@@ -4780,6 +4782,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       customTradeInputEnabled = true;
       buyContinuationEnabled = true;
       fundingReceiveEnabled = true;
+      miniAppHandoffContractVersion = 2;
       miniAppHandoffMode = "fallback";
       const limitlessCustomContexts: Array<{
         deliveryMode: string;
@@ -15938,7 +15941,16 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         redis,
       });
       const db = new FakeFollowthroughDb();
-      db.candidateRows = [followthroughCandidateRow()];
+      db.candidateRows = [
+        followthroughCandidateRow({
+          holder_address: "0x8a16eb406b6ecd9334e6202a159c9dd51288c0d5",
+          holder_chain: "polygon",
+          holder_target_meta: {
+            holderDescriptor: "FaceShot",
+            identityDisplayName: "@FaceShot",
+          },
+        }),
+      ];
       db.flowRows = [
         followthroughFlowRow({ baseline_shares: "0", wallet_id: "wallet-1" }),
         followthroughFlowRow({
@@ -15969,7 +15981,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         telegram,
         xEditorialComposer: createTestXEditorialComposer({
           calls,
-          text: "The original YES position is getting follow-through.",
+          text: "@FaceShot is still holding the original YES position.",
         }),
       });
 
@@ -15978,10 +15990,13 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(telegram.messages[0]?.reply_parameters, undefined);
       assert.equal(telegram.messages[0]?.reply_markup, undefined);
       assert.match(telegram.messages[0]?.text ?? "", /^🧪 _Preview only/);
-      assert.match(telegram.messages[0]?.text ?? "", /\*The original YES/);
+      assert.match(
+        telegram.messages[0]?.text ?? "",
+        /\*\[@FaceShot\]\(https:\/\/app\.hunch\.trade\/tracking\/wallet\/0x8a16eb406b6ecd9334e6202a159c9dd51288c0d5\?[^)]*chain=polygon[^)]*\) is still holding/,
+      );
       assert.doesNotMatch(
         telegram.messages[0]?.text ?? "",
-        /https?:\/\/|Website|Mini App/,
+        /t\.me\/|startapp=|Website|Mini App/,
       );
       assert.equal(
         db.queries.filter((query) =>
@@ -16734,7 +16749,20 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       });
       const before = await getSignalBotChatState(redis, "-100");
       const db = new FakeDb();
-      db.rows = [noteRow({ id: "00000000-0000-4000-8000-000000000099" })];
+      db.rows = [
+        noteRow({
+          holder_target_meta: {
+            actorMode: "single_holder",
+            credentialBullets: ["Up $88.2K over the last 30 days"],
+            holderDescriptor: "FaceShot",
+            identityDisplayName: "@FaceShot",
+            openPnlUsd: 4_900,
+            positionUsd: 5_100,
+            side: "YES",
+          },
+          id: "00000000-0000-4000-8000-000000000099",
+        }),
+      ];
       const telegram = new FakeTelegram();
       let composeCalls = 0;
       const outcome = await sendLatestSignalBotTestSignal({
@@ -16752,10 +16780,15 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         xEditorialComposer: async ({ source }) => {
           composeCalls += 1;
           const postText =
-            "$12.3K is backing YES.\n\nOne trader. One concentrated position.";
+            "@FaceShot has $5.1K backing YES.\n\nThe market is undecided. The trader is not.";
           return {
             characterCount: Array.from(postText).length,
-            formatting: [{ style: "bold", text: "$12.3K is backing YES." }],
+            formatting: [
+              {
+                style: "bold",
+                text: "@FaceShot has $5.1K backing YES.",
+              },
+            ],
             generatedAt: "2026-01-02T01:00:00.000Z",
             marketId: source.marketId,
             model: "test/editorial-model",
@@ -16777,12 +16810,12 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(telegram.messages[0]?.reply_markup, undefined);
       assert.match(
         telegram.messages[0]?.text ?? "",
-        /\*\$12\\\.3K is backing YES\\\.\*/,
+        /\*\[@FaceShot\]\(https:\/\/app\.hunch\.trade\/tracking\/wallet\/0xa022ba0a68e11a78348382ff168601012d4d77f8\?[^)]*chain=polygon[^)]*\) has \$5\\\.1K backing YES\\\.\*/,
       );
       assert.match(telegram.messages[0]?.text ?? "", /^🧪 _Preview only/);
       assert.doesNotMatch(
         telegram.messages[0]?.text ?? "",
-        /https?:\/\/|Website|Mini App/,
+        /t\.me\/|startapp=|Website|Mini App/,
       );
       assert.deepEqual(await getSignalBotChatState(redis, "-100"), before);
       assert.equal(

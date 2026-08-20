@@ -4,12 +4,18 @@ import type {
   AssetRef,
   FundingDiscoveryRequest,
   FundingQuoteSummary,
+  JsonObject,
   Money,
   SourceOption,
 } from "../funding/domain/types.js";
 import { sameAsset } from "../funding/domain/asset-identity.js";
 import { FundingPlannerError } from "../funding/planner/money.js";
 import { FundingPlanningRuntime } from "../funding/planner/runtime-service.js";
+import {
+  buildTelegramAppHandoffV2Plan,
+  resolveTelegramAppHandoffFundingCapability,
+  type TelegramAppHandoffV2Plan,
+} from "./telegram-app-handoff-v2.js";
 import { canonicalJsonHash } from "../funding/persistence/canonical.js";
 import { lockFundingAuthorizationReservationScope } from "../funding/persistence/funding-authorization-reservation-lock.js";
 import { releaseCompletedTradeShortfallSourceReservationsInTransaction } from "../funding/persistence/funding-evidence-repository.js";
@@ -96,6 +102,24 @@ export type TelegramTradeShortfallInspection =
   | Readonly<{
       kind: "internal_route";
       proposal: TelegramTradeShortfallProposal;
+    }>;
+
+/**
+ * The Mini App is allowed to execute a generic plan only after this service
+ * has produced it from the same funding runtime used by ordinary web funding.
+ * It intentionally has no Privy grant/provisioning branch: every resulting
+ * action is a user-signed client action.
+ */
+export type TelegramTradeMiniAppFundingInspection =
+  | Readonly<{ kind: "destination_ready" }>
+  | Readonly<{ kind: "external_deposit" }>
+  | Readonly<{
+      kind: "temporarily_unavailable";
+      reasonCodes: readonly string[];
+    }>
+  | Readonly<{
+      kind: "web_funding_plan";
+      plan: TelegramAppHandoffV2Plan;
     }>;
 
 export type TelegramTradeShortfallIdentity = Readonly<{
@@ -200,9 +224,7 @@ export function buildTelegramTradeShortfallRequest(
     venueBindingOptionId: null,
     controllerWalletRef: null,
     ...(serverExecutionProfileId ? { serverExecutionProfileId } : {}),
-    ...(relayPersistentApprovalCapRaw
-      ? { relayPersistentApprovalCapRaw }
-      : {}),
+    ...(relayPersistentApprovalCapRaw ? { relayPersistentApprovalCapRaw } : {}),
     maxFeeUsd: input.maxFeeUsd,
     maxSlippageBps: input.maxSlippageBps,
     deadline: input.deadline,
@@ -450,7 +472,9 @@ function requiresPolymarketPusdRouterContinuation(
   return (
     profile?.routeIds.some((routeId) => {
       const route = RELAY_ROUTE_SPECS[routeId];
-      return route ? sameAsset(route.destination, destinationAsset("polymarket")) : false;
+      return route
+        ? sameAsset(route.destination, destinationAsset("polymarket"))
+        : false;
     }) ?? false
   );
 }
@@ -592,9 +616,7 @@ function proposalFromOption(
     liquidityProjectionId: projection.liquidityProjectionId,
     selectedSourceOptionId: option.sourceOptionId,
     serverExecutionProfileId: profileId,
-    ...(relayPersistentApprovalCapRaw
-      ? { relayPersistentApprovalCapRaw }
-      : {}),
+    ...(relayPersistentApprovalCapRaw ? { relayPersistentApprovalCapRaw } : {}),
     sourceAmounts,
     expectedDestination: option.expectedDestination,
     minimumDestination: option.minimumDestination,
@@ -620,6 +642,102 @@ export class TelegramTradeShortfallFundingService {
 
   constructor(private readonly pool: Pool) {
     this.runtime = new FundingPlanningRuntime(pool);
+  }
+
+  /**
+   * Builds a sealed client-execution envelope for a shortfall. This is not an
+   * operation commit and does not grant an authority: it is a read-only
+   * generic plan inspection used immediately before Telegram seals v2.
+   */
+  async inspectMiniAppFunding(
+    input: TelegramTradeShortfallIdentity,
+    trade: JsonObject,
+  ): Promise<TelegramTradeMiniAppFundingInspection> {
+    const observedBalanceInput: TelegramTradeShortfallIdentity = {
+      ...input,
+      additionalFundingRaw: undefined,
+      additionalFundingUsd: undefined,
+    };
+    let observed;
+    try {
+      observed = await this.runtime.liquidity(
+        input.userId,
+        buildTelegramTradeShortfallRequest(observedBalanceInput),
+      );
+    } catch (error) {
+      return {
+        kind: "temporarily_unavailable",
+        reasonCodes: [shortfallPlannerFailureReasonCode(error)],
+      };
+    }
+    if (observed.completeness !== "complete" || observed.errors.length > 0) {
+      return {
+        kind: "temporarily_unavailable",
+        reasonCodes: [
+          ...observed.reasonCodes,
+          ...observed.errors.map((error) => error.code),
+        ],
+      };
+    }
+    if (!/^[1-9][0-9]*$/u.test(observed.shortfallRaw)) {
+      return { kind: "destination_ready" };
+    }
+    const exactInput: TelegramTradeShortfallIdentity = {
+      ...input,
+      additionalFundingRaw: observed.shortfallRaw,
+      additionalFundingUsd: undefined,
+    };
+    const discoveryRequest = buildTelegramTradeShortfallRequest(exactInput);
+    let plan;
+    try {
+      plan = await this.runtime.liquidity(input.userId, discoveryRequest);
+    } catch (error) {
+      return {
+        kind: "temporarily_unavailable",
+        reasonCodes: [shortfallPlannerFailureReasonCode(error)],
+      };
+    }
+    if (plan.completeness !== "complete" || plan.errors.length > 0) {
+      return {
+        kind: "temporarily_unavailable",
+        reasonCodes: [
+          ...plan.reasonCodes,
+          ...plan.errors.map((error) => error.code),
+        ],
+      };
+    }
+    if (plan.shortfallRaw !== observed.shortfallRaw) {
+      return {
+        kind: "temporarily_unavailable",
+        reasonCodes: ["handoff_destination_balance_changed"],
+      };
+    }
+    const capability = resolveTelegramAppHandoffFundingCapability({
+      projection: plan,
+      serverBotExact: false,
+    });
+    if (capability.kind === "external_deposit") {
+      return { kind: "external_deposit" };
+    }
+    if (capability.kind !== "web_funding_plan") {
+      return {
+        kind: "temporarily_unavailable",
+        reasonCodes: [
+          capability.kind === "unavailable"
+            ? capability.reason
+            : "unexpected_server_funding_capability",
+        ],
+      };
+    }
+    return {
+      kind: "web_funding_plan",
+      plan: buildTelegramAppHandoffV2Plan({
+        discoveryRequest,
+        fundingPolicyRevision: await this.runtime.currentPolicyRevision(),
+        projection: plan,
+        trade,
+      }),
+    };
   }
 
   async inspect(
@@ -1042,15 +1160,12 @@ export class TelegramTradeShortfallFundingService {
     if (!fundingAuthorization) {
       throw new Error("trade funding authorization is unavailable");
     }
-    const routerContinuationRequired =
-      requiresPolymarketPusdRouterContinuation(
-        input.venue,
-        input.proposal.serverExecutionProfileId,
-      );
+    const routerContinuationRequired = requiresPolymarketPusdRouterContinuation(
+      input.venue,
+      input.proposal.serverExecutionProfileId,
+    );
     const routerAuthorization = routerContinuationRequired
-      ? await loadActiveTelegramFundingAuthorization(
-        this.pool,
-        {
+      ? await loadActiveTelegramFundingAuthorization(this.pool, {
           userId: input.userId,
           telegramAccountId: input.telegramAccountId,
           telegramUserId: input.telegramUserId,
@@ -1062,8 +1177,7 @@ export class TelegramTradeShortfallFundingService {
           sourceAsset: pUsdAsset,
           destinationAsset: pUsdAsset,
           requireTradingEnabled: true,
-        },
-      )
+        })
       : null;
     if (routerContinuationRequired && !routerAuthorization) {
       throw new Error("trade funding Router authorization is unavailable");
@@ -1193,9 +1307,7 @@ export class TelegramTradeShortfallFundingService {
           input.tradeIntentId,
           JSON.stringify({
             ...(relayAllowanceBaseline
-              ? relayEvmAllowanceBaselineSupportMetadata(
-                  relayAllowanceBaseline,
-                )
+              ? relayEvmAllowanceBaselineSupportMetadata(relayAllowanceBaseline)
               : {}),
           }),
         ],
@@ -1285,5 +1397,4 @@ export class TelegramTradeShortfallFundingService {
       return { operationId };
     });
   }
-
 }
