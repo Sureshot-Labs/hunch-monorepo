@@ -101,7 +101,8 @@ venue-specific invariants.
    path has a dedicated sidecar-safe planning dependency graph or the process
    secret boundary is explicitly redesigned.
 5. Execute the desktop/mobile, Buy/Sell, cancellation, reload, late-receipt,
-   cross-chain, native SOL pre-address consent/composite-Trade review, and
+   cross-chain, strict SOL/USDC order, plain owned-SOL receive, existing-SOL
+   composite-Trade review, and
    tiny-value venue cases in
    [`verification-plan.md`](./verification-plan.md).
 6. Verify database terminal states and absence of duplicate attempts, orders,

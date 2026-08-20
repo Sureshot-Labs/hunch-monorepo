@@ -1,406 +1,658 @@
-# Slice E Relay SVM activation runbook
+# Slice E Relay Solana funding runbook
 
-This runbook defines the next funding slice for users who want to fund or buy
-with native SOL. The current primary economic route is:
+This runbook is the normative design and activation contract for funding a
+venue from native SOL or canonical Solana USDC. It records the 2026-08-20
+provider research and replaces the earlier assumption that all Solana funding
+must start with delegated execution from a Hunch-managed wallet.
 
-`native SOL -> Relay Depository -> Polygon pUSD -> Polymarket readiness`
+Slice E has two required value-moving tracks plus one independently gated
+no-conversion receive capability. None is deferred:
 
-A fresh read-only quote captured on 2026-08-20 no longer contains an outer
-Jupiter swap. Relay now treats native SOL as a solver currency and returns one
-direct `deposit_native(amount, orderId)` instruction. The July eight-instruction
-Jupiter fixture remains historical drift/regression evidence; it is not an
-activation fixture for the current provider envelope.
+- **Slice E2 — strict Relay Solana ingress:** an external wallet or exchange
+  sends an exact amount of SOL or Solana USDC to a quote-bound, one-time Relay
+  Deposit Address. Relay delivers Polygon pUSD to the user's exact destination;
+- **owned SOL Receive:** native SOL is received at the user's managed Solana
+  address and stays SOL Account Value;
+- **Slice E3 — managed-wallet native-SOL conversion:** SOL already held in the
+  user's Hunch-managed Solana wallet is converted only after a fresh Convert or
+  composite Trade consent. This requires a separately proved delegated-signing
+  boundary. Managed Solana USDC is an independently gated stable sibling, not
+  part of the E3 GO claim.
 
-Solana USDC remains part of the same SVM capability, but it is not the product
-priority. This document is a design and activation contract. It does not
-authorize a Privy policy change, production flag, deployment, or transaction.
+Both tracks reuse the same destination binding, Funding Operation, Relay
+correlation, reconciliation, Account Value, venue-readiness, and Return-to-Buy
+architecture. They do not introduce separate Telegram or trade workflows.
+
+This document does not authorize a policy mutation, capability enablement,
+deployment, signing request, transfer, or production transaction.
 
 ## Product contract
 
-The user chooses the economic intent; Hunch chooses the technical route.
+The user chooses what they have and where they want to trade. Hunch chooses the
+technical route.
 
-- In an active Buy, the single fresh Trade Review states the maximum SOL sold,
-  minimum pUSD received, fees, slippage/price impact, expiry, and that Hunch
-  will convert SOL before placing the order. The existing Trade Confirm
-  authorizes conversion and trade. There is no second conversion prompt.
-- In destination-scoped Add Funds, selecting `SOL on Solana` must disclose the
-  same bounded conversion before the receive address is shown. That selection
-  creates append-only consent for automatic conversion of the canonical
-  receipt inside the frozen cap. Receipt arrival does not add another prompt.
-- SOL that was already present in Account Value and has no matching active
-  Deposit or Trade consent remains owned SOL. It requires a fresh standalone
-  `Convert to <venue stable>` review before value moves.
-- If the eventual quote is outside the frozen amount, fee, slippage, output, or
-  expiry bounds, Hunch preserves the receipt as owned Account Value. It never
-  silently widens consent or substitutes another route.
+- `SOL on Solana` and `USDC on Solana` are first-class funding choices.
+- A user sending native SOL can decline conversion. `Receive SOL` shows the
+  user's current managed Solana address and keeps the receipt as SOL Account
+  Value. `Fund <venue> with SOL` is a different action and discloses conversion
+  before showing a strict Relay address.
+- The destination is the exact venue collateral owned by the same Hunch user;
+  for Polymarket this is Polygon pUSD at the user's canonical Deposit Wallet.
+- A user never chooses Relay, Jupiter, Privy, a signer, policy, program, ALT, or
+  route implementation.
+- Stable input is automatically converted to the destination stable.
+- Volatile conversion is disclosed before a strict venue-funding transfer. A
+  plain `Receive SOL` has no conversion. An active Trade includes conversion in
+  its one Review/Confirm and adds no second prompt.
+- Pre-existing volatile Account Value without Deposit or Trade consent requires
+  a fresh `Convert to <venue stable>` review.
+- SOL is a durable Account Value asset, not a staging token. The Buy planner
+  prefers already-available venue collateral and stable sources. When those do
+  not cover the order, available managed SOL above its reserve becomes a normal
+  internal funding-source option, analogous to an eligible Base balance.
+- An out-of-bounds or failed route preserves owned value and never silently
+  widens consent, changes the destination, or substitutes another asset.
 
-The primary UX says `Pay with SOL`, `SOL will be converted to pUSD`, and the
-economic bounds. It does not mention Jupiter, Relay, Privy, policies, grants,
-program IDs, address lookup tables, or transaction instructions.
+The primary copy is `Pay with SOL` or `Pay with USDC`, followed by the exact
+amount, destination amount floor, fees, expiry, and `converted to pUSD`.
 
-## One shared policy, not one policy per user
+The no-conversion copy is `Receive SOL` followed by `SOL stays as SOL in your
+Hunch balance`. It never promises venue readiness or Return-to-Buy.
 
-Privy policies are reusable resources. Slice E uses:
+## Current implementation status
 
-- the existing Hunch authorization key/quorum;
-- one separate `chain_type=solana` policy per environment;
-- the same Solana policy ID as the signer override on every managed Solana
-  wallet;
-- one exact read-back policy fingerprint checked before every broadcast.
+As of this decision:
 
-The existing combined EVM policy cannot be reused because its chain type is
-`ethereum`. Creating one Solana policy does not imply creating one policy per
-wallet. Managed provisioning idempotently attaches the same signer and policy
-ID to each user's Solana wallet. Per-user wallet, consent, receipt, amount,
-route, and destination facts remain in Hunch authorization and operation
-records; they are not copied into Privy rules.
+- Slice E1 application validation accepts the pinned current direct-Depository
+  wallet-action shape and retains the Jupiter fixture as negative drift evidence;
+- E2 provider research is complete enough to select the strict-address
+  architecture, but the implemented strict adapter is still intentionally
+  native-EVM/controlled-sender only and has no promoted Solana fixture;
+- canonical Solana receipt/action primitives exist, but the user-facing
+  `Receive SOL` contract and its independent route gate are not activated by
+  this document;
+- E3 boundary selection, Solana policy manifest, delegated transport/profile,
+  and live policy rehearsal remain implementation work;
+- no production route, capability, policy, signer attachment, or UI visibility
+  changes merely because this plan was updated.
 
-The current Hunch known-signer contract accepts exactly one override policy for
-this signer/wallet shape. Therefore USDC and SOL profiles share one combined
-Solana policy and retain separate Hunch capability/profile gates. The policy is
-extended only by a complete-manifest compare-and-set update followed by
-read-back fingerprinting.
+## Evidence and corrected Relay commitment model
 
-## Privy policy semantics that the design must respect
+### Protocol v2 signed order
 
-As documented by Privy on 2026-08-20:
+Relay Quote v2 supports `includeProtocolData: true`. The response contains:
 
-1. Each outer Solana instruction is evaluated independently. Every instruction
-   must match an `ALLOW` rule; otherwise the transaction is denied.
-2. `DENY` wins over `ALLOW`, and no matching rule defaults to `DENY`.
-3. `solana_system_program_instruction` exposes decoded System Program fields,
-   including transfer source, destination, and lamports.
-4. `solana_token_program_instruction` exposes decoded SPL Token fields,
-   including instruction name, mint, authority, source, destination, and
-   amount for supported instructions.
-5. `solana_program_instruction` exposes only `programId` for an arbitrary
-   program. It does not expose custom-program instruction bytes, discriminator,
-   account order, signer/writable flags, or protocol order ID.
-6. Address conditions fail when the inspected address is supplied through an
-   Address Lookup Table. Program ID, instruction name, amount, and time
-   conditions remain usable with ALT transactions.
-7. Rules are alternatives. A broad generic System or SPL Token `ALLOW` rule
-   can bypass a narrower amount/mint rule and is forbidden.
-8. `action_request_body` conditions apply to Wallet Action API requests, not to
-   the raw transaction body accepted by `signAndSendTransaction`; they cannot
-   supply the missing Relay instruction-field boundary.
-9. Only `signAndSendTransaction` is allowed. No wildcard RPC rule, message
-   signing, raw transaction signing, key export, or unrelated wallet action is
-   included.
+- `protocol.v2.orderId`;
+- the complete `protocol.v2.orderData`;
+- `protocol.v2.orderSignature`.
+
+The official Relay settlement SDK computes `orderId` from the complete order,
+including:
+
+- input chain, currency, amount, and weight;
+- every refund chain, recipient, currency, minimum, deadline, and extra data;
+- output chain and every payment recipient, currency, minimum amount, and
+  expected amount;
+- calls, fees, deadline, and extra data.
+
+`orderSignature` is the Relay solver's ECDSA signature over `orderId`. A fresh
+read-only native-SOL quote was independently verified by recomputing/recovering
+the EIP-191 signer; it recovered the documented Relay solver
+`0xf70da97812CB96acDF810712Aa562db8dfA3dbEF`. The `orderId` in the signed data
+matched the ID embedded in the Solana Depository instruction.
+
+This is the selected semantic commitment. Hunch does not use the older
+`/requests/:requestId/signature` response as a substitute, and does not ask
+Relay to add destination or refund fields to that older payload.
+
+Verification must use a pinned implementation of Relay's official order hash;
+it must not invent a partial Hunch hash. It must:
+
+1. parse a closed, versioned `orderData` schema;
+2. recompute `orderId` from the full order;
+3. verify `orderSignature` against the pinned Relay solver set;
+4. compare every input, output, refund, call, fee, amount, and deadline with the
+   frozen Hunch intent;
+5. reject extra inputs, outputs, refunds, calls, fees, or unknown fields/shapes.
+
+Primary sources:
+
+- <https://docs.relay.link/references/api/get-quote-v2>
+- <https://docs.relay.link/features/deposit-addresses>
+- <https://docs.relay.link/references/protocol/guides/for-apps>
+- <https://github.com/relayprotocol/relay-settlement>
+
+### Current wallet-action envelope
+
+A fresh read-only native SOL -> Polygon pUSD wallet quote on 2026-08-20 returned
+one direct immutable Relay Depository `deposit_native(amount, orderId)`
+instruction rather than the historical eight-instruction Jupiter route. The
+July Jupiter fixture remains negative drift evidence, not an accepted alternate
+runtime shape.
+
+The captured direct shape was:
+
+- one versioned Solana transaction and one outer instruction;
+- Relay Depository program
+  `99vQwtBwYtrqqD9YSXbdum3KBdxPAVxYTaQ3cfnJSrN2`;
+- Anchor discriminator `0d9e0ddf5fd51c06` (`deposit_native`);
+- exactly 48 data bytes: discriminator, little-endian `u64` amount, and
+  `[u8; 32] order ID`;
+- five accounts, one signer, two writable accounts, and one active ALT;
+- an executable BPF program whose ProgramData has no upgrade authority.
+
+Slice E1 generalized the application validator to the pinned direct-Depository
+Polygon destination while retaining the Jupiter fixture as a negative drift
+case. That closes the fresh-quote availability bug, not the E3 delegated signer
+boundary.
+
+The current direct instruction is bounded in application validation, but a
+Privy policy that can inspect only its program ID cannot see the discriminator,
+amount, order ID, accounts, signer/writable flags, destination, or refunds. A
+program-ID-only rule is therefore not sufficient for delegated E3 activation.
+
+## Slice E2 — strict Relay Solana ingress
+
+### Selected architecture
+
+E2 is the KISS primary ingress for funds outside Hunch custody:
+
+```text
+external wallet or exchange
+        -> one-time strict Relay Solana Deposit Address
+        -> signed Relay order
+        -> user's Polygon pUSD destination
+        -> venue readiness / Account Value / Return-to-Buy
+```
+
+The quote request uses:
+
+```json
+{
+  "useDepositAddress": true,
+  "strict": true,
+  "includeProtocolData": true,
+  "refundTo": "<user-controlled refund location>"
+}
+```
+
+Fresh read-only quote captures returned valid strict Solana Deposit Addresses
+for both native SOL and canonical Solana USDC. No wallet signature, transfer,
+or broadcast was created during that research.
+
+E2 deliberately requires no Hunch delegated Solana signer, managed-wallet
+attachment, Privy Solana policy, Jupiter validator, or Hunch on-chain router.
+The user or their exchange performs the source transfer. Hunch verifies and
+observes the provider order and the owned destination credit.
+
+### Paired no-conversion choice with an independent gate
+
+The same funding picker must also offer a separate owned-receive action when a
+current verified managed Solana wallet exists:
+
+```text
+Receive SOL
+    -> user's managed Solana address
+    -> canonical finalized native-SOL receipt
+    -> SOL Account Value
+```
+
+This is not a Relay order and has no automatic conversion consent. It uses the
+ordinary owned Receive contract: exact current wallet ownership, a cursor set
+before address disclosure, canonical transaction identity, finalized credit,
+and the durable address/QR lifecycle. Initially it accepts native SOL only;
+unsupported SPL tokens are not inferred from symbol text.
+
+It is paired in product presentation, not activation. E2 may be enabled without
+owned Receive, and owned Receive may be enabled without E2 or E3.
+
+The two choices must remain visibly and technically distinct:
+
+| User action                | Address owner             | Result                         |
+| -------------------------- | ------------------------- | ------------------------------ |
+| `Fund Polymarket with SOL` | one-time strict Relay     | Polygon pUSD / venue readiness |
+| `Receive SOL`              | user's managed SVM wallet | owned SOL, no conversion       |
+
+Owned Receive and Buy shortfall are deliberately separate. `Receive SOL` ends
+after canonical SOL credit. Later, when a Buy lacks venue collateral, the
+planner may offer `Pay with existing SOL` only from SOL already present in the
+user's managed wallet/Account Value. It does not show an address or turn the
+shortfall action into a deposit flow. The user performs one fresh
+Review/Confirm for the composite `existing SOL -> pUSD -> Buy`. If available SOL
+is insufficient, that source is honestly insufficient; Hunch does not silently
+open another receive target.
+
+### E2 immutable contract
+
+Before displaying an address or QR, Hunch freezes:
+
+- one Relay request and protocol version;
+- one exact source network and source currency;
+- one exact positive source amount;
+- one exact destination network, currency, and user-owned recipient;
+- every refund recipient/currency, all of which must remain inside the same
+  user's controlled wallet contour;
+- minimum/expected destination output, fees, expiry, and economic caps;
+- full `orderData`, recomputed `orderId`, `orderSignature`, solver identity, and
+  normalized quote fingerprint;
+- the owning Receive/Trade intent and Return-to-Buy generation.
+
+The displayed Deposit Address is one-time and quote-bound. It is not:
+
+- the user's reusable Hunch receive wallet;
+- a 24-hour multi-asset address;
+- valid for both SOL and USDC;
+- reusable after the quote/session reaches a terminal state.
+
+Telegram and web show the exact asset, exact amount, network, address/QR,
+expiry, destination output floor, and refund behavior. Wrong asset, wrong
+network, late payment, underpayment, overpayment, refund, and provider child
+requests remain typed reconciliation states; they never become guessed credit.
+
+For an active Buy, market/price expiry is independent from Relay settlement. If
+funds arrive after the original trade quote is stale, pUSD remains owned and the
+user receives a fresh Review Buy. Hunch never holds an old market order open
+while waiting for an external transfer.
+
+### E2 provider lifecycle and evidence
+
+Completion requires all of:
+
+1. exact request/order correlation, including child request discovery;
+2. provider state that is not unknown, delayed, refunded, or ambiguous;
+3. canonical destination pUSD credit to the frozen user-owned destination;
+4. venue-specific readiness evidence;
+5. exact allocation to the owning funding intent/receipt with no duplicate
+   operation or Buy continuation.
+
+Relay success alone is not accounting completion. A provider refund is owned
+only after the matching source/deposit evidence and exact refund recipient,
+currency, amount, transaction, and request relationship are proved.
+
+### E2 implementation boundary
+
+Extend the existing Relay strict Deposit Address adapter instead of creating a
+second provider client. The current implementation was intentionally limited to
+native-EVM controlled senders, so Solana/manual/exchange ingress is new work and
+must not be activated by merely adding a catalog row.
+
+Reuse:
+
+- Relay Quote/Status/Requests clients and encrypted request correlation;
+- Funding Receive Session/receipt allocation where their contracts apply;
+- Funding Operation and reconciliation state machines;
+- Telegram durable single-card/address/QR lifecycle;
+- destination pUSD and venue-readiness observers;
+- Return-to-Buy generation and fresh trade review.
+
+Add only the missing typed seams:
+
+- strict Solana source/Deposit Address route specs for SOL and canonical USDC;
+- full protocol-v2 order hash/signature verifier;
+- exact strict-address session/presentation contract;
+- manual/exchange-safe refund ownership validation;
+- request/child/refund reconciliation and canonical source-deposit evidence;
+- explicit provider TTL and late/partial/overpayment behavior.
+
+The paired `Receive SOL` route reuses the canonical Solana owned-receipt
+observer and managed-wallet resolver. It does not call Relay, create a Funding
+Operation for conversion, attach a signer/policy, or share the strict address's
+provider correlation.
+
+Receipt allocation creates owned SOL, not a conversion operation or a pending
+Buy continuation. A later Buy discovers that balance through Account Value and
+creates a new composite E3 quote in the ordinary planner.
+
+### Solana USDC support status
+
+The live API and official settlement source accept a strict Solana USDC Deposit
+Address, while some public prose still describes Deposit Addresses in
+native-bridge terms. This is an availability/versioning uncertainty, not a
+reason to weaken validation.
+
+Activation requires a frozen USDC fixture plus a tiny real rehearsal. Written
+Relay confirmation that SPL strict Deposit Addresses are supported/stable is
+useful but not a cryptographic dependency. If the behavior disappears or the
+shape drifts, only the USDC strict route remains unavailable; native SOL and E3
+are not silently substituted.
+
+### E2 activation gates
+
+1. Freeze sanitized current strict SOL and strict USDC quote fixtures with full
+   protocol v2 data and negative mutations.
+2. Implement the official full-order hash/signature verification and pin the
+   accepted solver identity/version update procedure.
+3. Prove address ownership, exact amount/asset, expiry, under/overpayment,
+   wrong-token, child request, delayed, refund, ambiguous, and restart paths.
+4. Prove Telegram/web address and QR lifecycle, terminal redaction, exact
+   message ownership, and no reusable-address wording.
+5. Run disposable-Postgres migration/integration/restart tests and the complete
+   funding regression suite.
+6. Run separately authorized tiny SOL and USDC rehearsals through destination
+   pUSD observation, without placing a Buy.
+7. Run one strict-ingress Return-to-Buy rehearsal and obtain a history-free GO
+   review.
+8. Enable each route independently with conservative caps and observe it to a
+   terminal state before widening.
+
+### Owned SOL Receive activation gates
+
+1. Prove the current managed-wallet address and observer cursor are frozen
+   before disclosure.
+2. Prove finalized canonical native-SOL receipt, duplicate/reorg handling,
+   wallet rotation, address/QR lifecycle, and unsupported-token rejection.
+3. Prove receipt creates only SOL Account Value—no conversion operation,
+   reservation, or Buy continuation.
+4. Run one tiny owned-SOL receive rehearsal and a separate history-free GO
+   review. This gate does not require Relay or a Privy execution policy.
+
+## Slice E3 — managed-wallet native-SOL conversion
+
+E3 begins now as a required research and implementation track. It covers native
+SOL already held in the user's Hunch-managed Solana wallet. E2 cannot replace
+it because there is no external source transfer for that balance. Managed
+Solana USDC may use the same future transport/policy only after its own stable
+profile and GO matrix; E3 does not claim it by implication.
+
+### E3 product cases
+
+- **Active Trade:** one composite Review/Confirm authorizes bounded conversion
+  and the Buy; no second conversion prompt.
+- **Active Trade shortfall:** offer `Pay with existing SOL` from an already
+  observed managed-wallet/Account Value balance. Quote the required SOL at
+  current economics and include conversion in the one Trade Review/Confirm. No
+  receive address is part of this action.
+- **Destination-scoped Add Funds from managed balance:** selection freezes the
+  exact source wallet, asset, cap, destination, and conversion contract.
+- **Pre-existing Account Value:** a standalone fresh Convert review is required
+  before volatile SOL moves.
+
+### E3 planner and source-ranking contract
+
+The planner treats managed SOL as an owned source, not as an automatic sweep:
+
+1. use existing venue collateral when it covers the Buy;
+2. recommend eligible stable balances/routes before selling volatile SOL;
+3. when those balances do not cover the order, expose managed SOL above the
+   configured fee/rent reserve for the remaining shortfall;
+4. allow the user to choose another eligible source explicitly through the
+   existing `Pay with` selector;
+5. freeze one composite plan and show the SOL input cap, pUSD output floor,
+   fees/slippage, expiry, and subsequent Buy before confirmation.
+
+A combined plan may use stable value first and SOL only for the remainder if the
+existing planner can prove sequential reservations and exact postconditions.
+Otherwise it offers SOL as one complete alternative source rather than adding a
+special-case partial route. No background worker may sell SOL just because a
+Buy is underfunded.
+
+### Minimal security objective
+
+The outer signing boundary is custody containment, not an attempt to encode all
+business logic in Privy policy. Even if the Hunch submission process is
+compromised, an authorized transaction must not be able to move value outside:
+
+- the exact user's managed source wallet;
+- native SOL as the E3 source asset;
+- the allowlisted venue stable as destination asset;
+- the same user's frozen destination and refund wallets;
+- a positive bounded input amount, one order, and an expiry/replay boundary.
+
+Application validation remains stricter: it binds the exact serialized action,
+economics, instruction/account flags, provider order, destination floor,
+operation, consent, policy revision, and durable attempt. The two layers must
+not be confused. Economic details that do not enable theft may stay in the
+application layer; destination/refund/asset containment must survive compromise
+of that layer.
+
+### Known Privy constraints and shared-policy shape
+
+Current Privy behavior constrains the E3 solution space:
+
+- policies are reusable; E3 targets one `chain_type=solana` policy per
+  environment, not one policy per user;
+- the same existing Hunch authorization signer/quorum and reviewed policy ID
+  are attached idempotently to each managed Solana wallet;
+- every outer instruction is evaluated separately, `DENY` wins, and no match
+  defaults to deny;
+- decoded System and SPL Token rules expose useful transfer/mint/authority/
+  amount fields, but an arbitrary `solana_program_instruction` exposes only its
+  program ID;
+- address conditions may not work when the inspected address comes from an ALT;
+- `action_request_body` conditions do not decode the raw transaction accepted
+  by `signAndSendTransaction`;
+- rules are alternatives, so a broad generic System/SPL allow would bypass a
+  narrower rule and is forbidden;
+- the manifest allows only the reviewed `signAndSendTransaction` family—no
+  arbitrary message signing, raw transaction signing, key export, wildcard
+  method, or unrelated wallet action.
+
+The complete manifest is compare-and-set, read back, normalized, fingerprinted,
+and checked immediately before broadcast. SOL and USDC may share that one
+policy only if the complete negative matrix proves both instruction families;
+their application capability/profile gates remain separate.
 
 Primary references:
 
 - <https://docs.privy.io/controls/policies/overview>
 - <https://docs.privy.io/controls/policies/example-policies/solana>
 - <https://docs.privy.io/api-reference/wallets/solana/sign-and-send-transaction>
-- <https://docs.privy.io/wallets/gas-and-asset-management/gas/solana>
 
-## Current exact envelopes
+### What the Relay signature solves—and does not solve
 
-The repository already contains provider-neutral `svm_transaction` actions,
-Relay Solana route mappings, strict direct-USDC and native-SOL quote validators,
-canonical Solana receive scanning, finalized receipt reconciliation, and a
-guarded live-rehearsal path. These are real foundations, not delegated
-activation:
+The full signed `orderData` solves the earlier semantic gap: order ID,
+destination currency/recipient, refunds, amount, deadline, outputs, calls, and
+fees are cryptographically tied together by Relay.
 
-- the production delegated Privy driver currently submits EVM actions only;
-- live signer/policy verification currently requires an Ethereum policy;
-- no reviewed Solana policy manifest/fingerprint validator or SVM execution
-  profile is registered;
-- native SOL valuation is disabled until a price/cap policy is selected;
-- the normalized SVM action does not yet freeze fee payer/sponsorship identity.
+It does not alone constrain a stolen Privy signing capability. The current
+Solana Depository instruction carries only amount and order ID, and Privy does
+not decode the signed order or custom instruction. A compromised submitter
+could request and submit another valid Relay order unless the outer boundary
+also verifies that the signed order's destination/refunds/assets stay inside
+the user's contour.
 
-Slice E should fill those narrow seams. It must not duplicate the funding
-planner, receipt router, operation state machine, Telegram lifecycle, or
-reconciliation worker.
+### E3 boundary decision — 2026-08-20
 
-### Current product and rollout impact
+The research selection is now **one atomic managed-wallet guard transaction**,
+not a second Hunch approval server and not a general Solana router:
 
-The live drift is not currently a silent value-moving bug:
+```text
+Relay Quote
+  -> canonical full Relay Order + solver signature
+  -> optional Relay oracle trigger attestation
 
-- production Funding Policy already lists `solana:sol` and `solana:usdc`, so
-  those assets are present in control-plane data even though no delegated SVM
-  capability is active;
-- the production web `main` branch has the unified Funding UI reverted and
-  therefore does not expose the SVM action flow;
-- the web `develop` branch already builds and user-signs normalized
-  `svm_transaction` actions, but the backend rejects the current Polygon quote
-  before an action or quote can be committed;
-- Telegram registers Polygon/Base adapters only and does not advertise a
-  Solana receive route;
-- read-only production aggregates since the current Funding Policy publication
-  contain no persisted Solana funding quote or Solana funding step.
+Privy-managed Solana wallet, one transaction
+  -> Secp256k1 verification instruction(s)
+  -> Hunch Relay Intent Guard
+       -> exact predicate + replay/cap/expiry checks
+       -> CPI Relay Depository.deposit_native(amount, orderId)
+```
 
-The immediate effect is therefore future-web unavailability/UX failure, not an
-unsafe transaction. Before the unified web UI returns to production, either
-update the Polygon validator for the direct Depository shape or remove the
-Solana assets from the published policy. Telegram Solana remains a separate
-Slice E activation and must not become visible merely because the compact
-Funding Policy already contains those assets.
+This is logically two-phase—Relay creates evidence, then the managed wallet
+executes it—but the value movement is one atomic Solana transaction. Do not
+split it into an on-chain `approve` transaction followed by an `execute`
+transaction: that would create needless stale-intent, replay, fee, and recovery
+states.
 
-The historical fixture is not read by production quote execution. Runtime asks
-Relay for a fresh quote and then dispatches validation by route/destination.
-The bug is in that dispatch boundary: Base already selects the direct
-Depository validator, while Polygon still selects the historical
-native-SOL/Jupiter validator. The smallest code change is to parameterize the
-existing direct validator with the exact registered destination, pin the
-Polygon route spec to the direct-Depository shape, and reject every other shape.
-Keep the old fixture as a negative provider-drift test and add a new sanitized
-direct-Polygon fixture; do not dynamically accept both envelopes, delete
-evidence, or add a second Solana execution workflow.
+#### What exists at Relay, and why it is not directly reusable
 
-### Solana USDC direct Relay
+Relay's public `lit-deposit-address` source already implements the right
+_predicate_. Before its TEE signs a transaction from a Relay/Lit-derived deposit
+wallet, it verifies an oracle threshold attestation, canonical full Relay order
+and recomputed `orderId`, solver signature, exact input, every refund, exactly
+one output, no output calls, price impact, and an exact one-instruction Solana
+Depository sweep. Its Solana verifier is the authoritative behavioral reference
+for our restricted E3 order shape.
 
-Current evidence normalizes one Relay Depository instruction and one ALT. The
-Hunch validator binds the exact Relay program, discriminator, raw amount,
-protocol order ID, controlled signer, source ATA/mint, account order,
-signer/writable flags, recipient/refund evidence, and destination floor.
+It is **not** a direct E3 authorizer: its public interface signs only a
+Relay/Lit-derived deposit wallet transaction, not a Privy managed wallet
+transaction, and it does not emit a compact authorization ticket for another
+program to consume. Also, no independent audit evidence for this Lit predicate
+has been established in this repository. A Relay Depository audit must never be
+treated as an audit of this separate verifier.
 
-Privy can independently restrict the method and Relay program ID, but cannot
-read that custom instruction's discriminator, amount, order ID, or accounts.
-Activation therefore also requires proof that the pinned Relay Depository
-program/version is itself a narrow immutable boundary whose other entrypoints
-cannot move user value outside the intended deposit contract.
+The official Depository and Forwarder are execution components, not the missing
+boundary. `deposit_native(amount, id)` transfers SOL and emits `(depositor,
+amount, id)`; it does not validate the full order, user destination, refunds,
+or expiry. The legacy Forwarder merely sweeps its own PDA balance into that
+Depository. Neither is sufficient as the outer E3 verifier.
 
-### Native SOL through the Relay Depository
+References captured during research:
 
-The fresh 2026-08-20 Polygon pUSD quote has this bounded outer shape:
+- <https://github.com/relayprotocol/relay-settlement/blob/main/packages/lit-deposit-address/src/attestation/index.ts>
+- <https://github.com/relayprotocol/relay-settlement/blob/main/packages/lit-deposit-address/src/derivation/vm/solana/SolanaVmWalletDeriver.ts>
+- <https://github.com/relayprotocol/relay-settlement/blob/main/packages/lit-deposit-address/docs/README.md>
+- <https://github.com/relayprotocol/relay-depository/blob/main/packages/solana-vm/programs/relay-depository/src/lib.rs>
+- <https://github.com/relayprotocol/relay-depository/blob/main/packages/solana-vm/programs/relay-forwarder/src/lib.rs>
 
-- one versioned Solana transaction;
-- one outer instruction;
-- official Relay Depository program
-  `99vQwtBwYtrqqD9YSXbdum3KBdxPAVxYTaQ3cfnJSrN2`;
-- Anchor discriminator `0d9e0ddf5fd51c06` (`deposit_native`);
-- exactly 48 data bytes: discriminator, little-endian `u64 amount`, and
-  `[u8; 32] orderId`;
-- five accounts, exactly one signer, and two writable accounts;
-- one active ALT;
-- an executable BPF program whose ProgramData has no upgrade authority.
+#### Selected Plan A — minimal immutable Relay Intent Guard
 
-No wallet signature or broadcast was created during this capture. Official
-Relay documentation confirms that the Depository is non-upgradable, that
-`deposit_native` transfers SOL into its PDA vault, and that the Solana program
-uses the same 8/8/32-byte instruction layout. This is materially smaller than
-the historical Jupiter envelope and reuses the direct-Depository shape already
-validated by Hunch for `solana-sol-to-base-usdc`.
+The guard is a custody boundary, not a second planner. It has no quote client,
+provider HTTP, pricing engine, route selection, Telegram state, or custody
+balance. Its value-moving entry point accepts only the restricted current
+native-SOL order form and does all of the following before its single CPI:
 
-The current Polygon path nevertheless remains fail-closed: it still selects
-the historical native-SOL/Jupiter validator, which rejects the fresh quote at
-`origin swap output currency mismatch`. Slice E must generalize the existing
-direct-Depository validator to bind the route's exact destination instead of
-adding another provider-specific workflow.
+1. proves the managed source wallet signed this transaction;
+2. verifies the pinned Relay solver signature over a recomputed restricted
+   canonical `orderId`; any deployed oracle-attestation requirement is verified
+   against its pinned threshold as well;
+3. requires exactly native SOL, one positive bounded input, one output payment,
+   no output calls, an unexpired deadline, and a fresh `orderId` replay marker;
+4. requires Polygon pUSD and the exact destination/refund wallets stored for
+   that user binding; every refund remains in the user's contour;
+5. enforces the consent/operation cap and leaves the configured SOL fee reserve;
+6. pins the official Relay Depository program, vault, `deposit_native`
+   discriminator, amount, and order ID; then CPI-calls it with the original
+   source wallet as `sender`.
 
-The immutable Depository is strong containment, but a bare Privy program-ID
-allowlist is not exact authorization. Privy cannot inspect the discriminator,
-amount, order ID, account roles, or writable flags for this custom program.
-Relay documents `orderId` as the protocol deposit/correlation identifier; the
-Depository does not verify the requested destination or minimum output. A
-compromised submitter could therefore choose another amount or another Relay
-order while still calling the allowlisted program.
+Solana propagates signer privilege into a CPI and Relay's `DepositNative`
+expects its `sender` to be a signer, so the guard does not need to custody,
+prefund, or temporarily hold user SOL. This is still a mandatory local-validator
+proof, not an assumption carried into activation.
 
-## Selected outer boundary and activation gate
+The guard program must be immutable at activation: revoke its upgrade authority
+after independent review/audit, or keep it behind a separately governed,
+time-delayed upgrade process. The Privy policy pins the exact deployed program
+ID; an upgradeable unrestricted guard is not a custody boundary.
 
-The decision on 2026-08-20 is deliberately split by execution mode:
+#### One shared policy and one per-user binding
 
-- **user-authorized web execution:** use the existing client authorization
-  signature over the prepared Privy request, or the connected-wallet signature
-  over the exact versioned transaction, together with Hunch validation. The
-  current generic frontend SVM assembler already supports one instruction and
-  one ALT; no Relay/Jupiter-specific frontend executor is required;
-- **delegated automatic execution:** reject the current Relay-program-ID-only
-  Privy policy as the outer boundary. The selected target is a narrow on-chain
-  exact-intent router, but it is not implementation-ready until the Relay order
-  ID is cryptographically bound to the authorized destination, refund, minimum
-  output, amount cap, nonce, and expiry. A router that merely CPI-calls the
-  Relay Depository is not a security improvement;
-- **safe fallback:** keep delegated SVM off. If the exact-intent commitment is
-  unavailable, retain user-authorized web execution and do not expose automatic
-  Telegram SOL funding.
+E3 still uses one reusable Privy `chain_type=solana` policy per environment,
+not one policy per wallet. That policy permits only:
 
-Native SOL server execution remains disabled until one of these boundaries is
-proved and reviewed:
+- the Hunch Relay Intent Guard program;
+- the Solana Secp256k1 precompile(s) required to verify Relay EVM signatures;
+- the minimum reviewed Compute Budget instruction(s).
 
-1. **Privy-decoded boundary:** Privy exposes enforceable custom Solana
-   conditions for the Relay `deposit_native`/`deposit_token` discriminator,
-   accounts, signer, order ID, and bounded amount; or
-2. **Narrow on-chain intent boundary:** an immutable, audited Hunch/partner
-   Solana router accepts a user-authorized frozen intent, enforces source wallet,
-   maximum amount, one-time nonce/expiry, exact Relay Depository state/vault,
-   and the authorized Relay order ID before CPI. The order ID must itself be
-   bound to the disclosed destination/refund/minimum-output facts by the user's
-   signature or an independently verified Relay commitment; application DB
-   state alone is insufficient. Privy permits only this router program; or
-3. **Equivalent independent boundary:** a reviewed mechanism provides the same
-   key-compromise containment and is demonstrated by negative live policy
-   tests.
+It explicitly has no direct Relay Depository, Relay Forwarder, Jupiter, System
+transfer, SPL transfer, message-signing, raw-signing, or wildcard RPC path.
+The guard's CPI is safe precisely because the guard validates it; Privy need not
+and cannot decode the guard's custom payload. Every permitted outer instruction
+must remain in the exact policy manifest.
 
-Application validation alone is not sufficient for this gate. A user clicking
-Trade Confirm is necessary economic consent, but it does not replace a
-key-level restriction on what the server signer can submit.
+The only per-user state is one binding PDA, **not** a Privy policy. It binds a
+managed Solana source wallet to its permitted Polymarket destination and Solana
+refund wallet(s). Creation, rotation, and revocation of that binding require a
+user-controlled setup authority outside the delegated E3 execution policy. The
+delegated signer may execute an already-bound intent but may never create or
+change a binding. If this separation cannot be proved, E3 stays off: application
+knowledge that two wallets belong to the same user is not a custody boundary.
 
-If none of the three boundaries is available, the route may remain an explicit
-user-signed client action, but it must not be advertised as delegated automatic
-funding. For external destination-scoped Deposit, a future separately reviewed
-strict Relay Deposit Address could avoid delegated SVM signing entirely. The
-current Hunch adapter is native-EVM/controlled-sender only, so Solana/manual or
-exchange ingress is not an available shortcut. Any extension remains an
-exact-amount, quote/expiry/refund contract and must not be confused with the
-owned reusable receive-address flow.
+#### Future Relay shortcut, not an assumption
 
-## Candidate policy shape after the gate passes
+The smallest future form would be a Relay/Lit-issued signed
+`ExecutionApproval` containing the source wallet, input asset/amount, order ID,
+destination chain/currency/recipient, all refunds, minimum output, and expiry.
+Then the guard could verify this compact ticket plus the binding instead of
+recomputing the restricted full-order hash. The currently public Relay/Lit
+interface does not return such a ticket. It must be obtained from Relay as a
+documented, versioned feature with audit evidence; it is not inferred from the
+existing deposit-wallet signer.
 
-The complete shared Solana policy must contain only reviewed instruction
-families needed by activated SVM profiles:
+An independent Hunch approver/quorum is Plan B only if neither the restricted
+full-order guard nor a Relay-issued approval can be made sound. A
+Relay-program-ID-only Privy rule, arbitrary Solana transaction permission, or
+application-only check is never an alternative.
 
-- `method = signAndSendTransaction` for every rule;
-- exact allowlist of the proved intent-router program, or the Relay Depository
-  only after Privy supports the required decoded custom fields;
-- no System/SPL rules for the current direct native-SOL envelope: its SOL
-  movement is an inner CPI and a System Transfer rule would not bound the outer
-  custom instruction;
-- separate decoded SPL rules only for a route that actually contains outer SPL
-  instructions, with mint and amount restrictions wherever Privy exposes them;
-- exact fee-payer requirement at the Privy or independently enforced boundary;
-  do not assume a static fee payer is policy-visible without proving it;
-- optional time window only as defense in depth, never as the sole amount or
-  destination bound;
-- no general System/SPL allow rule, `method=*`, private-key export, arbitrary
-  signing, historical Jupiter/Relay programs, or unreviewed utility program.
+#### E3 implementation and QA gates
 
-The candidate policy is generated as one complete manifest. The validator
-rejects extra rules, duplicate rules, missing caps, broad alternatives, unknown
-program IDs, the wrong chain type, and a serialized read-back fingerprint that
-differs from the reviewed manifest.
+Before any policy creation, capability enablement, or production transaction:
 
-## Fee payer and zero-SOL wallets
+1. Freeze a fresh direct native-SOL envelope and prove it still has no managed
+   wallet Jupiter step. The historical eight-instruction Jupiter fixture remains
+   a negative drift case, not a supported guard path.
+2. Build the restricted order encoder/hash against the Relay reference and
+   prove byte-for-byte `orderId` parity for positive and mutated fixtures.
+3. Run the guard on a local validator: successful CPI with the original source
+   signer, exact debit, replay rejection, and no guard-held balance.
+4. Run the negative custody matrix: foreign destination/refund/source,
+   wrong asset, output call, fee/cap/reserve breach, wrong solver/attestation,
+   expired or replayed order, altered Depository/vault/discriminator, direct
+   Relay/Jupiter instruction, and policy method escape must all reject.
+5. Prove the binding lifecycle: interactive bind, unauthorized rotate/revoke
+   rejection, post-revoke execution rejection, and user merge/wallet rotation
+   handling.
+6. Prove worker/operation recovery across quote expiry, possible broadcast,
+   final source debit, destination credit, owned refund, policy pause/revocation,
+   and restart—without duplicate deposit or Buy.
+7. Audit/review the frozen guard, deployment immutability, policy manifest, and
+   all generated operation code. Then run a separately authorized tiny-value
+   rehearsal before enabling E3.
 
-`Pay with SOL` naturally has source SOL, but Solana USDC users may have no SOL.
-The normalized action must explicitly identify the fee payer and sponsorship
-mode. The preferred product path is a capped Hunch/Privy fee payer so a user can
-fund with USDC alone. Privy documents both `sponsor: true` server submission and
-custom Solana fee-payer flows; neither is assumed to work with the exact
-delegated wallet/policy until rehearsed.
+### E3 execution and recovery contract
 
-Activation must prove:
+After a boundary is selected, reuse the durable delegated attempt/recovery
+executor and prove:
 
-- who signs as source owner and who pays the fee;
-- that policy evaluation observes the expected fee payer after transaction
-  assembly and sponsorship;
-- that sponsor changes do not alter instruction/account/ALT identity;
-- that a zero-SOL USDC wallet either succeeds through the proved sponsor or is
-  honestly unavailable before address/Buy confirmation;
-- that native SOL input retains the larger of the measured fee/rent reserve and
-  the Funding Policy reserve rather than promising the full balance.
-
-## Required proof matrix
-
-### Read-only envelope capture
-
-Capture fresh normal Relay quotes for both:
-
-- `solana-usdc-to-polygon-pusd`;
-- `solana-sol-to-polygon-pusd`.
-
-Record sanitized program IDs, instruction count/order, discriminators,
-account-role fingerprints, signer/writable sets, ALTs, quote TTL, blockhash
-contract, source/minimum-output bounds, Relay request ID, recipient/refund, and
-program deployment fingerprints. The 2026-08-20 native-SOL capture satisfies
-the read-only shape check but must still be promoted to a sanitized current
-fixture during implementation. A quote change blocks activation; it is not
-silently normalized into the old profile.
-
-### Policy rehearsal
-
-Use a non-production wallet and the real serialized versioned transaction.
-Prove the reviewed positive envelope passes and each mutation below fails at
-the claimed boundary:
-
-- extra instruction or reordered instruction;
-- another program or the historical Jupiter/Relay envelope;
-- changed Relay discriminator/order/recipient/refund;
-- SOL transfer above cap or to another account;
-- wrong SPL mint, source, authority, destination, or amount;
-- unexpected signer/writable flag;
-- unreviewed ALT or movement of a policy-inspected address into an ALT;
-- different fee payer/sponsorship mode;
-- message signing, raw transaction signing, wallet action, or key export;
-- replay after blockhash expiry and lookup after an ambiguous submission.
-
-The test report must state which failures were enforced by Privy, the narrow
-on-chain boundary, and Hunch. A mutation rejected only by Hunch does not count
-as proof of the Privy/on-chain outer boundary.
-
-### Durable execution and recovery
-
-After policy proof, the existing Funding Operation machinery must demonstrate:
-
-- immutable Trade/Deposit consent and exact operation fingerprint;
-- attempt persisted before provider submission;
-- `reference_id`/idempotency correlation and lookup-before-retry;
-- no blind retry for an unresolved signature or expired blockhash;
-- exact finalized source debit and destination pUSD credit;
-- owned refund only after proved source debit and matching Relay reference;
+- exact managed wallet, signer, shared policy ID/fingerprint, authorization,
+  consent, cap, and pause immediately before first broadcast;
+- attempt persisted before provider submission and lookup-before-retry;
+- no blind retry for unresolved signature or expired blockhash;
+- explicit fee payer/sponsorship and zero-SOL USDC behavior;
+- finalized source debit, destination credit, owned refund, and provider
+  reference correlation;
 - restart at every possible-broadcast boundary;
 - no duplicate conversion, Relay deposit, destination credit, or Buy;
-- current wallet, signer, policy ID/fingerprint, authorization, cap, and pause
-  rechecked immediately before first broadcast.
+- pause/revocation blocks new broadcast without disabling recovery of a
+  possible prior broadcast.
 
-## Implementation boundary
+## Shared rollout and rollback
 
-Slice E extends the existing architecture; it does not add another workflow:
+E2 strict ingress, owned SOL Receive, and E3 managed conversion have separate
+route/capability IDs, flags, caps, fixtures, and smoke evidence. Enabling one
+never enables another or both assets implicitly.
 
-- reuse the durable delegated attempt/recovery executor;
-- add an SVM-specific transaction assembler/transport behind the existing
-  executor interface rather than branching Telegram or the receipt router;
-- parameterize signer verification by chain type instead of weakening the EVM
-  verifier;
-- keep Solana quote/action validation in the Relay adapter;
-- add exact Solana source-debit/refund evidence and SVM postconditions;
-- keep API and finance-worker configuration sidecar-safe;
-- retain separate capability IDs and activation flags for Solana USDC and
-  native SOL even though they share one Privy policy.
+Rollback disables only new first broadcasts/address creation for the affected
+track. Observation, provider lookup, reconciliation, destination credit,
+refunds, QR/card terminalization, and recovery continue until every accepted
+request/attempt is terminal. Never detach a signer/policy from an unresolved E3
+possible broadcast.
 
-## Activation sequence
+## Exit criteria
 
-1. Keep the SVM execution gate absent or false.
-2. Freeze the current direct-Depository envelope and choose one acceptable
-   native-SOL outer boundary.
-3. Implement and review the complete Solana policy manifest validator.
-4. Create one owned shared Solana policy, read it back, and record its exact
-   fingerprint. Do not attach it to production wallets yet.
-5. Prove the positive/negative policy matrix on a disposable wallet.
-6. Prove idempotent managed attachment of the same signer/policy to multiple
-   Solana wallets; no per-user policy creation is allowed.
-7. Run disposable-Postgres migration/integration/restart tests and the full
-   funding regression suite.
-8. Run one separately authorized tiny live native-SOL rehearsal with a hard raw
-   cap and no Buy submission, then a second tiny end-to-end Buy rehearsal.
-9. Attach the policy and enable capability only for the reviewed route/profile.
-10. Observe the first real operations until terminal before widening caps.
+### E2 GO
 
-## Rollback
+- external SOL and Solana USDC each produce one exact strict address/order;
+- full order hash/signature, destination, refund, amount, asset, expiry, child,
+  and destination-credit evidence are proved;
+- the UX requires no provider knowledge and Return-to-Buy creates a fresh trade
+  review after readiness;
+- no delegated Solana signer or per-user policy is involved;
 
-1. Disable only the SVM first-broadcast gate; keep receipt observation,
-   reconciliation, provider lookup, and refunds running.
-2. Do not remove the policy or signer from wallets with an unresolved possible
-   broadcast.
-3. Preserve received SOL/USDC as Account Value and present a typed recovery or
-   explicit user-signed path.
-4. After every SVM attempt is terminal, remove unneeded rules through a complete
-   manifest update, read back the fingerprint, and update runtime configuration
-   together.
+### Owned SOL Receive GO
 
-## Exit criterion
+- the exact current managed address is shown only after observation starts;
+- finalized native SOL becomes Account Value without conversion or Buy state;
+- wallet rotation, duplicate receipt, QR/card lifecycle, and unsupported tokens
+  fail closed;
+- neither Relay nor a Privy execution policy is required.
 
-Slice E is ready for activation only when a history-free reviewer can answer
-all of the following with evidence:
+### E3 GO
 
-- one shared Solana policy is attached safely without per-user policies;
-- every instruction in the actual native-SOL transaction is allowed only by an
-  intended rule;
-- arbitrary Relay Depository instructions, amounts, and order IDs cannot be
-  authorized by compromise of the Hunch submission process;
-- fee payer, ALT, blockhash, caps, exact action, source debit, destination
-  credit, refund, retry, restart, and policy-revocation behavior are proved;
-- `Pay with SOL` needs one understandable economic confirmation and no
-  technical route choice or second conversion prompt.
+- managed SOL can fund an active Buy with one economic confirmation;
+- the selected outer boundary prevents value leaving the user's wallet/token
+  contour under submitter compromise;
+- one shared Solana policy is attached idempotently without per-user policies;
+- exact fee payer, caps, source debit, destination credit, refund, retry,
+  restart, pause, revocation, and policy read-back behavior are proved;
+- a history-free reviewer returns GO on the frozen implementation.

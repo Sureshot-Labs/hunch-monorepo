@@ -362,18 +362,26 @@ Review searches:
 The initial normal Add Funds contract is now explicit and consistent across
 the plan, backend source discovery, and web presentation:
 
-| Capability                                                                             | Status                                      | Initial behavior                                                                                                 |
-| -------------------------------------------------------------------------------------- | ------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| destination selection                                                                  | implemented                                 | venue-first, one opaque Hunch-managed Trading Balance per venue                                                  |
-| Hunch-owned source balances, including enabled embedded SOL                            | implemented                                 | route or combine through backend-issued opaque source options                                                    |
-| direct transfer from an external address                                               | implemented                                 | `Deposit crypto` shows the exact final owned address, asset, and network                                         |
-| direct Receive amount handling                                                         | implemented                                 | requested amount is a minimum target; partial transfers accumulate and excess remains Account Value              |
-| Privy handoff                                                                          | implemented, policy-gated                   | exact destination is handed to the configured method; backend observation settles                                |
-| connected external wallet balance in normal `Pay with`                                 | deliberately excluded                       | it is neither auto-selected nor rendered; a future advanced signer contract is required                          |
-| external different-asset/network deposit, such as Phantom SOL directly to Polygon pUSD | not activated                               | direct Receive rejects the implication; strict Relay Deposit Address or a separate advanced contract is required |
-| strict Relay Deposit Address                                                           | architecture and fixtures exist, routes off | exact amount, refund, expiry, and reconciliation evidence remain activation gates                                |
-| one available source                                                                   | implemented                                 | source choice is skipped and the UI proceeds to review                                                           |
-| several sources                                                                        | implemented                                 | backend recommendation plus explicit `Pay with` choice                                                           |
+| Capability                                                  | Status                                 | Initial behavior                                                                                           |
+| ----------------------------------------------------------- | -------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| destination selection                                       | implemented                            | venue-first, one opaque Hunch-managed Trading Balance per venue                                            |
+| Hunch-owned source balances, including enabled embedded SOL | implemented                            | route or combine through backend-issued opaque source options                                              |
+| direct transfer from an external address                    | implemented                            | `Deposit crypto` shows the exact final owned address, asset, and network                                   |
+| direct Receive amount handling                              | implemented                            | requested amount is a minimum target; partial transfers accumulate and excess remains Account Value        |
+| Privy handoff                                               | implemented, policy-gated              | exact destination is handed to the configured method; backend observation settles                          |
+| connected external wallet balance in normal `Pay with`      | deliberately excluded                  | it is neither auto-selected nor rendered; a future advanced signer contract is required                    |
+| strict Relay Deposit Address for controlled EVM source      | architecture and fixtures exist, off   | original exact amount/refund/expiry/reconciliation gates remain                                            |
+| external SOL/Solana-USDC funding to Polygon pUSD            | Slice E2 selected, not activated       | one-time strict Relay address; full signed order, exact amount/refund/expiry/destination evidence required |
+| receive native SOL without conversion                       | Slice E owned-receive requirement, off | show the user's managed Solana address; finalized receipt remains SOL Account Value                        |
+| spend already-owned SOL on a Buy                            | Slice E3 required, off                 | shortfall selects existing Account Value and uses one fresh composite conversion/Trade Review              |
+| one available source                                        | implemented                            | source choice is skipped and the UI proceeds to review                                                     |
+| several sources                                             | implemented                            | backend recommendation plus explicit `Pay with` choice                                                     |
+
+Slice E preserves that source-selection model. Venue collateral and stable
+balances rank ahead of volatile SOL. When they do not cover a Buy, SOL already
+held in the managed wallet/Account Value becomes an eligible internal source
+above its reserve, with one composite conversion/Trade Review. Receiving SOL is
+a separate no-conversion action and does not itself create a Buy continuation.
 
 The direct Receive address is not a Relay address. Sending the displayed
 destination collateral to it is one operation. Sending a different token to an
@@ -446,9 +454,10 @@ Local implementation status on 2026-07-27:
   token account for SPL transfers or the exact owned address for System Program
   transfers, parses exact outer/inner instruction coordinates, and stores
   `(signature, instruction coordinate, slot, containing blockhash)` identity.
-  This is not yet delegated SVM activation. Either asset is advertised only
-  with the same exact owned
-  wallet/location/route evidence as Base. The EVM scanner freezes its
+  This is not yet delegated SVM activation. These code paths describe owned
+  wallet Receive/execution evidence; they do not implement the separate E2
+  strict provider address. Managed execution is advertised only with the same
+  exact owned wallet/location/route evidence as Base. The EVM scanner freezes its
   block cursor before the balance snapshot and before showing the address,
   waits for configured external-ingress finality, and scans accepted tokens'
   canonical `Transfer` events. The same funding controller loads and continues
@@ -469,23 +478,18 @@ Local implementation status on 2026-07-27:
   economics fail closed. Completing one child receipt returns an amount-free
   session to `open`, so later canonical receipts can be accepted without
   reopening or inventing another operation;
-- native SOL remains an explicit WP7 requirement and the primary Slice E
-  product path. The current `review_required` Receive behavior is only an
-  inactive compatibility state; it is not the target UX. An activated
-  destination-scoped `SOL on Solana` option shows bounded conversion consent
-  before the address and then converts the canonical receipt without a second
-  prompt. Pre-existing/unconsented SOL retains a standalone Convert review; an
-  active Trade includes the conversion in its one Review/Confirm. The receive
-  option is emitted only with canonical native transfer identity, an exact
-  owned Solana wallet, an allowlisted Relay route, fee reserve, and the
-  delegated SVM capability. The quote keeps the larger of a measured/policy
-  reserve and the current conservative 0.003 SOL reserve outside its input.
-  A fresh 2026-08-20 quote changed the Polygon path from the historical
-  eight-instruction Jupiter envelope to one immutable Relay Depository
-  `deposit_native` instruction. Current code rejects that drift fail-closed;
-  the July fixture remains regression evidence only. Runtime activation
-  additionally requires the custom Relay instruction key-level/on-chain
-  boundary in
+- native SOL remains an explicit WP7 requirement and Slice E now separates it
+  into exact contracts. External venue funding uses a one-time strict Relay
+  Deposit Address with the complete signed protocol-v2 order; `Receive SOL`
+  uses the user's managed Solana address and leaves the receipt unconverted;
+  and an active Buy may select SOL already in Account Value through one fresh
+  composite Review/Confirm. The Buy shortfall action never shows a receive
+  address. A fresh 2026-08-20 wallet quote changed the managed execution shape
+  from the historical eight-instruction Jupiter envelope to one immutable Relay
+  Depository `deposit_native` instruction, while fresh strict quotes succeeded
+  for both SOL and canonical Solana USDC. The July fixture remains negative
+  regression evidence. Runtime activation follows the separate E2 order/
+  address gates and E3 delegated custody boundary in
   [`../wp8/slice-e-relay-svm-activation-runbook.md`](../wp8/slice-e-relay-svm-activation-runbook.md),
   service restart, active control-plane publication, database persistence
   checks, and tiny-value execution/settlement evidence;
@@ -587,7 +591,10 @@ Solver witness counts are logical coverage only and are not probabilities.
    durable Receive Session for amount-free owned-address observation; each
    canonical receipt creates one exact child operation.
 4. Preserve strict Relay Deposit Address as a separate quote-bound contract.
-   It still requires amount, expiry, refund semantics, and provider evidence.
+   Slice E2 extends it to external SOL/Solana-USDC only with the official full
+   order hash/signature, exact user destination, every owned refund, amount,
+   expiry, child-request, and provider evidence. Keep `Receive SOL` as a
+   different owned-address/no-conversion contract.
 5. Keep all new APIs additive so the previously deployed frontend can continue
    using the current minimum-target endpoints during rollout.
 

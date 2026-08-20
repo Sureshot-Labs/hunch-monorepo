@@ -162,6 +162,22 @@ The Status page still describes `delayed`/`refunded` while its response enum
 lists `refund` and omits those values. Hunch therefore preserves unknown raw
 statuses and keeps them non-terminal instead of inventing optimistic semantics.
 
+### Slice E2 extension evidence — 2026-08-20
+
+The implemented v1 restrictions above remain unchanged. Later quote-only
+research proved a bounded extension path: strict Quote v2 requests with
+`includeProtocolData=true` returned one-time Solana Deposit Addresses for native
+SOL and canonical Solana USDC, together with complete protocol-v2 `orderData`,
+full-order `orderId`, and Relay solver `orderSignature`.
+
+Slice E2 must extend this adapter rather than duplicate it. Its new boundary is
+the official full-order hash/signature plus exact user-owned destination and
+refund evidence. It does not use a Hunch delegated Solana signer. Manual/
+exchange refund ownership, Solana transfer evidence, fixtures, negative
+mutations, and tiny rehearsals remain required before either route is enabled.
+Some Relay prose still sounds native-only despite the live USDC response, so
+the USDC route remains independently gated.
+
 ### Legacy provider isolation
 
 - `AcrossLegacyReconciler` identity covers both stored Swap API v1 and
