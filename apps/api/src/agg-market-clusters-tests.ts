@@ -12,6 +12,7 @@ import {
 import {
   type AggClusterListCacheClient,
   buildAggMarketAlternativesResponse,
+  buildAggMarketAlternativesCacheKey,
   buildAggClusterListResponse,
   clearAggClustersCacheForTests,
   getAggMarketAlternativesResponseCached,
@@ -180,6 +181,9 @@ function dbRow(args: {
 function fakeClient(args: {
   markets: AggVenueMarket[];
   midpoints: AggMidpoint[];
+  marketResolver?: (
+    params: Parameters<AggMarketClient["getVenueMarkets"]>[0],
+  ) => AggVenueMarket[];
   nextCursor?: string | null;
   calls?: { venueMarkets: number; midpoints: number };
   venueMarketParams?: unknown[];
@@ -188,7 +192,10 @@ function fakeClient(args: {
     async getVenueMarkets(params) {
       if (args.calls) args.calls.venueMarkets += 1;
       args.venueMarketParams?.push(params);
-      return { items: args.markets, nextCursor: args.nextCursor ?? null };
+      return {
+        items: args.marketResolver?.(params) ?? args.markets,
+        nextCursor: args.nextCursor ?? null,
+      };
     },
     async getMidpoints(ids) {
       if (args.calls) args.calls.midpoints += 1;
@@ -595,6 +602,140 @@ await test("builds market alternatives from an AGG matched group", async () => {
     (venueMarketParams[0] as { search?: string } | undefined)?.search,
     "Champions League Winner",
   );
+});
+
+await test("uses an explicit raw AGG link only after strict alternatives miss", async () => {
+  const source = market({
+    id: "agg-poly-fed",
+    venue: "polymarket",
+    externalIdentifier: "2252244",
+    question: "No change",
+  });
+  const target = market({
+    id: "agg-limitless-fed",
+    venue: "limitless",
+    externalIdentifier: "353886",
+    question: "No change",
+  });
+  target.matchedVenueMarkets = [source];
+  const venueMarketParams: unknown[] = [];
+
+  const response = await buildAggMarketAlternativesResponse({
+    marketId: "polymarket:2252244",
+    query: {
+      limit: 5,
+      rawMatchedFallbackVenues: ["limitless"],
+      venues: "polymarket,limitless",
+    },
+    client: fakeClient({
+      markets: [],
+      marketResolver: (params) =>
+        params.matchStatus == null && params.venue === "limitless"
+          ? [target]
+          : [],
+      midpoints: [
+        midpoint("agg-poly-fed", 0.72),
+        midpoint("agg-limitless-fed", 0.7195),
+      ],
+      venueMarketParams,
+    }),
+    db: fakeDb([
+      dbRow({
+        id: "polymarket:2252244",
+        venue: "polymarket",
+        venueMarketId: "2252244",
+        title: "No change",
+        eventTitle: "Fed Decision in September?",
+      }),
+      dbRow({
+        id: "limitless:353886",
+        venue: "limitless",
+        venueMarketId: "353886",
+        title: "No change",
+        eventTitle: "Fed Decision in September?",
+      }),
+    ]),
+    now: new Date("2026-08-20T15:40:00.000Z"),
+  });
+
+  assert.ok(response);
+  assert.equal(response.status, "matched");
+  assert.deepEqual(
+    response.alternatives.map((entry) => entry.marketId),
+    ["limitless:353886"],
+  );
+  assert.equal(response.alternatives[0]?.outcomeMapping?.confidence, 1);
+  assert.ok(
+    venueMarketParams.some((params) => {
+      const value = params as {
+        matchStatus?: string[];
+        search?: string;
+        venue?: string;
+      };
+      return (
+        value.venue === "limitless" &&
+        Boolean(value.search) &&
+        value.matchStatus == null
+      );
+    }),
+  );
+});
+
+await test("does not accept a raw Limitless result without the source link", async () => {
+  const unrelatedTarget = market({
+    id: "agg-limitless-unrelated",
+    venue: "limitless",
+    externalIdentifier: "362634",
+    question: "↑ 2,400",
+  });
+
+  const response = await buildAggMarketAlternativesResponse({
+    marketId: "polymarket:3257389",
+    query: {
+      limit: 5,
+      rawMatchedFallbackVenues: ["limitless"],
+      venues: "polymarket,limitless",
+    },
+    client: fakeClient({
+      markets: [],
+      marketResolver: (params) =>
+        params.matchStatus == null && params.venue === "limitless"
+          ? [unrelatedTarget]
+          : [],
+      midpoints: [midpoint("agg-limitless-unrelated", 0.415)],
+    }),
+    db: fakeDb([
+      dbRow({
+        id: "polymarket:3257389",
+        venue: "polymarket",
+        venueMarketId: "3257389",
+        title: "↑ 2,400",
+        eventTitle: "What price will Ethereum hit in August?",
+      }),
+      dbRow({
+        id: "limitless:362634",
+        venue: "limitless",
+        venueMarketId: "362634",
+        title: "↑ 2,400",
+        eventTitle: "What price will Ethereum hit August 17-23?",
+      }),
+    ]),
+    now: new Date("2026-08-20T15:40:00.000Z"),
+  });
+
+  assert.ok(response);
+  assert.equal(response.status, "not_found");
+});
+
+await test("separates raw fallback alternatives cache keys", () => {
+  const standard = buildAggMarketAlternativesCacheKey("polymarket:2252244", {
+    limit: 5,
+  });
+  const fallback = buildAggMarketAlternativesCacheKey("polymarket:2252244", {
+    limit: 5,
+    rawMatchedFallbackVenues: ["limitless"],
+  });
+  assert.notEqual(standard, fallback);
 });
 
 await test("drops expired market alternatives from AGG matched groups", async () => {
