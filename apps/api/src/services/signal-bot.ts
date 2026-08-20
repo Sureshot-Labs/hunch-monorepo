@@ -4318,7 +4318,11 @@ export async function pollSignalBotCommands(
   return handled;
 }
 
-const SIGNAL_BOT_ALTERNATIVES_QUERY = { limit: 8, sourceLimit: 50 };
+const SIGNAL_BOT_ALTERNATIVES_QUERY = {
+  limit: 8,
+  rawMatchedFallbackVenues: ["limitless"] as const,
+  sourceLimit: 50,
+};
 const SIGNAL_BOT_AGG_SUPPORTED_VENUES = new Set<string>(AGG_SUPPORTED_VENUES);
 const SIGNAL_BOT_STATS_AUDIT_LIMIT = 500;
 

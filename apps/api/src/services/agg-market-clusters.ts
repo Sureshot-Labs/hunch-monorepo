@@ -132,6 +132,13 @@ export type AggClusterListResponse = {
 };
 
 export type AggMarketAlternativesQueryInput = {
+  /**
+   * After the normal matched/verified lookup fails, allow a targeted lookup
+   * for these venues that relies on AGG's explicit nested market links. This
+   * is intentionally internal: callers still need a cluster containing the
+   * exact seed market.
+   */
+  rawMatchedFallbackVenues?: readonly AggSupportedVenue[];
   venues?: string;
   limit?: number;
   sourceLimit?: number;
@@ -770,20 +777,18 @@ function buildAlternativeSearchTerms(seed: ClusterMarketSummary): string[] {
   return terms.slice(0, 3);
 }
 
+type AggAlternativeVenueMarketAttempt = {
+  venue?: string;
+  venueEventId?: string;
+  search?: string;
+};
+
 function buildAlternativeVenueMarketAttempts(params: {
   seed: ClusterMarketSummary;
   seedRow: AggClusterMarketRow;
   venues: AggSupportedVenue[];
-}): Array<{
-  venue?: string;
-  venueEventId?: string;
-  search?: string;
-}> {
-  const attempts: Array<{
-    venue?: string;
-    venueEventId?: string;
-    search?: string;
-  }> = [];
+}): AggAlternativeVenueMarketAttempt[] {
+  const attempts: AggAlternativeVenueMarketAttempt[] = [];
 
   if (params.seedRow.event_venue_event_id) {
     attempts.push({
@@ -817,6 +822,65 @@ function buildAlternativeVenueMarketAttempts(params: {
       // Reserve one request for the unscoped top-volume fallback below.
       .slice(0, AGG_ALTERNATIVE_REQUEST_HARD_CAP - 1)
   );
+}
+
+async function findAggMarketAlternativesFromAttempts(params: {
+  attempts: readonly AggAlternativeVenueMarketAttempt[];
+  client: AggMarketClient;
+  db: DbQuery;
+  diagnostics: AggMarketAlternativesDiagnostics;
+  generatedAt: string;
+  matchStatus?: string[];
+  nowMs: number;
+  outputLimit: number;
+  recordEmptySearch?: boolean;
+  seed: ClusterMarketSummary;
+  sourceLimit: number;
+  venues: AggSupportedVenue[];
+}): Promise<AggMarketAlternativesResponse | null> {
+  for (const attempt of params.attempts) {
+    const venueMarketsPage = await params.client.getVenueMarkets({
+      venue: attempt.venue,
+      venueEventId: attempt.venueEventId,
+      search: attempt.search,
+      status: "open",
+      matchStatus: params.matchStatus,
+      limit: params.sourceLimit,
+      sortBy: "volume",
+      sortDir: "desc",
+    });
+    const venueMarkets = venueMarketsPage.items;
+    if (!venueMarkets.length) {
+      if (params.recordEmptySearch && attempt.venue && attempt.search) {
+        params.diagnostics.targetSearchEmpty += 1;
+      }
+      continue;
+    }
+
+    const clusters = await buildAggClustersFromVenueMarkets({
+      venueMarkets,
+      venues: params.venues,
+      client: params.client,
+      db: params.db,
+      generatedAt: params.generatedAt,
+      nowMs: params.nowMs,
+      diagnostics: params.diagnostics,
+    });
+    const cluster = findClusterForMarket(clusters, params.seed.marketId);
+    if (!cluster) continue;
+
+    const response = buildMatchedAlternativesResponseFromCluster({
+      generatedAt: params.generatedAt,
+      seed: params.seed,
+      cluster,
+      venues: params.venues,
+      outputLimit: params.outputLimit,
+      nowMs: params.nowMs,
+      diagnostics: params.diagnostics,
+    });
+    if (response) return response;
+  }
+  return null;
 }
 
 function orderAlternativeMarkets(
@@ -1384,47 +1448,21 @@ export async function buildAggMarketAlternativesResponse(params: {
     seedRow,
     venues,
   });
-
-  for (const attempt of attempts) {
-    const venueMarketsPage = await params.client.getVenueMarkets({
-      venue: attempt.venue,
-      venueEventId: attempt.venueEventId,
-      search: attempt.search,
-      status: "open",
-      matchStatus: ["matched", "verified"],
-      limit: sourceLimit,
-      sortBy: "volume",
-      sortDir: "desc",
-    });
-    const venueMarkets = venueMarketsPage.items;
-    if (!venueMarkets.length) {
-      if (attempt.venue && attempt.search) diagnostics.targetSearchEmpty += 1;
-      continue;
-    }
-
-    const clusters = await buildAggClustersFromVenueMarkets({
-      venueMarkets,
-      venues,
-      client: params.client,
-      db: params.db,
-      generatedAt,
-      nowMs,
-      diagnostics,
-    });
-    const cluster = findClusterForMarket(clusters, seed.marketId);
-    if (!cluster) continue;
-
-    const response = buildMatchedAlternativesResponseFromCluster({
-      generatedAt,
-      seed,
-      cluster,
-      venues,
-      outputLimit,
-      nowMs,
-      diagnostics,
-    });
-    if (response) return response;
-  }
+  const strictResponse = await findAggMarketAlternativesFromAttempts({
+    attempts,
+    client: params.client,
+    db: params.db,
+    diagnostics,
+    generatedAt,
+    matchStatus: ["matched", "verified"],
+    nowMs,
+    outputLimit,
+    recordEmptySearch: true,
+    seed,
+    sourceLimit,
+    venues,
+  });
+  if (strictResponse) return strictResponse;
 
   const cachedCluster = findCachedClusterForMarket({
     marketId: seed.marketId,
@@ -1474,6 +1512,32 @@ export async function buildAggMarketAlternativesResponse(params: {
       });
       if (response) return response;
     }
+  }
+
+  const rawFallbackVenues = new Set(
+    params.query.rawMatchedFallbackVenues ?? [],
+  );
+  if (rawFallbackVenues.size > 0) {
+    const rawTargetAttempts = attempts.filter(
+      (attempt) =>
+        Boolean(attempt.search) &&
+        Boolean(attempt.venue) &&
+        attempt.venue !== seed.venue &&
+        rawFallbackVenues.has(attempt.venue as AggSupportedVenue),
+    );
+    const rawResponse = await findAggMarketAlternativesFromAttempts({
+      attempts: rawTargetAttempts,
+      client: params.client,
+      db: params.db,
+      diagnostics,
+      generatedAt,
+      nowMs,
+      outputLimit,
+      seed,
+      sourceLimit,
+      venues,
+    });
+    if (rawResponse) return rawResponse;
   }
 
   diagnostics.aggNoMatch += 1;
@@ -1621,6 +1685,9 @@ export function buildAggMarketAlternativesCacheKey(
 ): string {
   return JSON.stringify({
     marketId,
+    rawMatchedFallbackVenues: [
+      ...new Set(query.rawMatchedFallbackVenues ?? []),
+    ].sort(),
     venues: parseAggVenues(query.venues).join(","),
     limit: clampInt(query.limit, 10, 50),
     sourceLimit: clampInt(query.sourceLimit, 50, 100),
