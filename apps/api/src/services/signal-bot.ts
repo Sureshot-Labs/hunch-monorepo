@@ -125,6 +125,7 @@ import {
 import {
   buildSignalBotBuyStartParam,
   buildSignalBotHolderStartParam,
+  buildSignalBotHolderTrackingUrl,
   buildSignalBotMiniAppUrl,
   buildSignalBotMarketStartParam,
   normalizeTelegramMiniAppLinkBase,
@@ -732,23 +733,7 @@ export function buildSignalBotHolderUrl(input: {
   noteId?: string | null | undefined;
   side?: "NO" | "YES" | null | undefined;
 }): string | null {
-  const address = input.address?.trim();
-  const chain = input.chain?.trim().toLowerCase();
-  if (!address || !chain) return null;
-  const url = new URL(
-    `/tracking/wallet/${encodeURIComponent(address)}`,
-    input.appBaseUrl ?? "https://app.hunch.trade",
-  );
-  url.searchParams.set("chain", chain);
-  url.searchParams.set("utm_source", "telegram_signal_bot");
-  if (input.eventId) url.searchParams.set("signalEventId", input.eventId);
-  if (input.marketId) url.searchParams.set("signalMarketId", input.marketId);
-  if (input.side) url.searchParams.set("signalSide", input.side);
-  if (input.marketId) {
-    url.searchParams.set("signalSource", "telegram_signal_bot");
-  }
-  if (input.noteId) url.searchParams.set("noteId", input.noteId);
-  return url.toString();
+  return buildSignalBotHolderTrackingUrl(input);
 }
 
 type SignalBotHolderLinkMatch = {
@@ -6466,6 +6451,9 @@ async function loadSignalBotFollowthroughCandidates(input: {
           n.metrics,
           root.metrics as root_metrics,
           pt.target_meta,
+          holder.address as holder_address,
+          holder.chain as holder_chain,
+          holder.target_meta as holder_target_meta,
           m.id as market_id,
           m.event_id,
           m.title as market_title,
@@ -6496,6 +6484,15 @@ async function loadSignalBotFollowthroughCandidates(input: {
          and pt.is_primary = true
         join unified_markets m on m.id = pt.target_id
         left join unified_events e on e.id = m.event_id
+        left join lateral (
+          select w.address, w.chain, t.target_meta
+          from ai_note_targets t
+          join wallets w on w.id = t.target_id::uuid
+          where t.note_id = n.id
+            and t.target_kind = 'wallet'
+          order by t.target_rank asc, t.target_id asc
+          limit 1
+        ) holder on true
         where root.message_kind = 'initial'
           and (
             root.telegram_message_id is not null

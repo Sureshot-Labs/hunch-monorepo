@@ -272,6 +272,9 @@ export type SignalBotFollowthroughCandidateRow = {
   resolved_outcome: string | null;
   resolved_outcome_pct: string | number | null;
   accepting_orders: boolean | null;
+  holder_address?: string | null;
+  holder_chain?: string | null;
+  holder_target_meta?: unknown;
 };
 
 export type SignalBotDeliveryPreparationReason =
