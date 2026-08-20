@@ -23,9 +23,13 @@ import {
 import {
   RELAY_SOLANA_DEPOSITORY,
   SPL_TOKEN_PROGRAM,
-  type ValidatedSolanaRelayQuote,
-  validateRelaySolanaRehearsalQuote,
+  type ValidatedSolanaDirectRelayQuote,
+  validateRelaySolanaDirectQuote,
 } from "./funding-providers/relay/solana-rehearsal.js";
+import {
+  RELAY_ROUTE_SPECS,
+  resolveRelaySolanaDirectDestinationContract,
+} from "./funding-providers/relay/mappings.js";
 
 process.umask(0o077);
 config({ path: resolve(import.meta.dirname, "../../../.env"), override: true });
@@ -42,6 +46,9 @@ const evmWalletPath = resolve(
 const runsDir = resolve(root, "untracked/relay-rehearsal-runs");
 const relayBaseUrl = "https://api.relay.link";
 const scenarioId = "solana-usdc-to-polygon-pusd";
+const directRoute = RELAY_ROUTE_SPECS[scenarioId];
+if (!directRoute) throw new Error("direct Solana rehearsal route is missing");
+const directDestination = resolveRelaySolanaDirectDestinationContract(directRoute);
 const erc20 = new Interface([
   "function balanceOf(address owner) view returns (uint256)",
 ]);
@@ -319,7 +326,7 @@ async function loadLookupTables(
 }
 
 function transactionInstruction(
-  validated: ValidatedSolanaRelayQuote,
+  validated: ValidatedSolanaDirectRelayQuote,
 ): TransactionInstruction {
   return new TransactionInstruction({
     programId: new PublicKey(validated.instruction.programId),
@@ -335,7 +342,7 @@ function transactionInstruction(
 async function validateAccounts(input: {
   connection: Connection;
   user: PublicKey;
-  validated: ValidatedSolanaRelayQuote;
+  validated: ValidatedSolanaDirectRelayQuote;
 }): Promise<{
   lookupTables: AddressLookupTableAccount[];
   programOwnerFingerprint: string;
@@ -504,11 +511,15 @@ async function main(): Promise<void> {
   if (sourceBefore < options.amountRaw) {
     throw new Error("insufficient Solana USDC balance");
   }
-  const validated = validateRelaySolanaRehearsalQuote({
-    amount: options.amountRaw,
-    minimumOutputFloor: options.minimumOutputRaw,
+  const validated = validateRelaySolanaDirectQuote({
+    amountMode: "exact_input",
+    authorizedSourceAmountRaw: options.amountRaw,
+    destination: directDestination,
+    expectedOutputTargetRaw: 1n,
+    minimumOutputFloorRaw: options.minimumOutputRaw,
     quote: quoteResult.body,
     recipient,
+    sourceCurrency: SOLANA_USDC,
     user: user.toBase58(),
   });
   const accountChecks = await validateAccounts({

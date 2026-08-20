@@ -1,9 +1,8 @@
 import { getAssociatedTokenAddressSync } from "@solana/spl-token";
 import { PublicKey } from "@solana/web3.js";
 import { getAddress } from "ethers";
+import type { RelaySolanaDirectDestinationContract } from "./mappings.js";
 import {
-  BASE_USDC,
-  POLYGON_PUSD,
   RELAY_SOLANA_CHAIN_ID,
   RELAY_SOLVER,
   SOLANA_NATIVE,
@@ -16,8 +15,6 @@ export const SPL_TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 export const SPL_ASSOCIATED_TOKEN_PROGRAM =
   "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL";
 export const SOLANA_SYSTEM_PROGRAM = "11111111111111111111111111111111";
-export const POLYGON_USDCE = "0x2791bca1f2de4661ed88a30c99a7a9449aa84174";
-
 type UnknownRecord = Record<string, unknown>;
 
 export type ValidatedSolanaInstruction = {
@@ -29,13 +26,6 @@ export type ValidatedSolanaInstruction = {
     isWritable: boolean;
   }>;
   programId: string;
-};
-
-export type ValidatedSolanaRelayQuote = {
-  expectedOutputRaw: bigint;
-  instruction: ValidatedSolanaInstruction;
-  minimumOutputRaw: bigint;
-  requestId: string;
 };
 
 export type ValidatedSolanaDirectRelayQuote = {
@@ -306,9 +296,15 @@ function validateProtocol(input: {
   return orderId;
 }
 
-export function validateRelaySolanaDirectBaseQuote(input: {
+/**
+ * Validates the sole direct-Depository envelope accepted for SVM funding.
+ * The caller supplies the route-pinned destination contract; no destination
+ * or refund authority is read from the Relay response.
+ */
+export function validateRelaySolanaDirectQuote(input: {
   amountMode: "exact_input" | "expected_output";
   authorizedSourceAmountRaw: bigint;
+  destination: RelaySolanaDirectDestinationContract;
   expectedOutputTargetRaw: bigint;
   minimumOutputFloorRaw: bigint;
   quote: unknown;
@@ -367,9 +363,9 @@ export function validateRelaySolanaDirectBaseQuote(input: {
     );
   }
   const output = currencyAmount(details, "currencyOut", {
-    address: BASE_USDC,
-    chainId: 8453,
-    decimals: 6,
+    address: input.destination.destinationCurrency,
+    chainId: input.destination.destinationChainId,
+    decimals: input.destination.destinationDecimals,
     vm: "evm",
   });
   if (
@@ -379,13 +375,13 @@ export function validateRelaySolanaDirectBaseQuote(input: {
     output.minimumAmount < input.minimumOutputFloorRaw ||
     output.minimumAmount > output.amount
   ) {
-    throw new Error("direct Base USDC output is below the authorized floor");
+    throw new Error("direct Solana output is below the authorized floor");
   }
   const orderId = validateProtocol({
     amount: source.amount,
-    destinationChain: "base",
-    destinationCurrency: BASE_USDC,
-    destinationRefundCurrency: BASE_USDC,
+    destinationChain: input.destination.destinationChain,
+    destinationCurrency: input.destination.destinationCurrency,
+    destinationRefundCurrency: input.destination.destinationRefundCurrency,
     expectedOutputRaw: output.amount,
     minimumOutputRaw: output.minimumAmount,
     protocolValue: quote.protocol,
@@ -557,207 +553,5 @@ export function validateRelaySolanaDirectBaseQuote(input: {
       "string"
         ? String(record(details.currencyIn, "details.currencyIn").amountUsd)
         : null,
-  };
-}
-
-export function validateRelaySolanaRehearsalQuote(input: {
-  amount: bigint;
-  minimumOutputFloor: bigint;
-  quote: unknown;
-  recipient: string;
-  user: string;
-}): ValidatedSolanaRelayQuote {
-  if (input.amount <= 0n) throw new Error("amount must be positive");
-  const user = publicKey(input.user, "user");
-  const recipient = evmAddress(input.recipient, "recipient");
-  const quote = record(input.quote, "quote");
-  if (
-    quote.depositAddress !== undefined &&
-    quote.depositAddress !== "" &&
-    quote.depositAddress !== null
-  ) {
-    throw new Error("Deposit Address mode is forbidden");
-  }
-  const details = record(quote.details, "details");
-  assertExact(
-    publicKey(details.sender, "details.sender"),
-    user,
-    "details.sender",
-  );
-  if (
-    !sameEvmAddress(
-      evmAddress(details.recipient, "details.recipient"),
-      recipient,
-    )
-  ) {
-    throw new Error("details.recipient mismatch");
-  }
-  currencyAmount(details, "currencyIn", {
-    address: SOLANA_USDC,
-    amount: input.amount,
-    chainId: RELAY_SOLANA_CHAIN_ID,
-    decimals: 6,
-    vm: "svm",
-  });
-  const output = currencyAmount(details, "currencyOut", {
-    address: POLYGON_PUSD,
-    chainId: 137,
-    decimals: 6,
-    vm: "evm",
-  });
-  if (output.minimumAmount < input.minimumOutputFloor) {
-    throw new Error("quote minimum output below authorized floor");
-  }
-  validateProtocol({
-    amount: input.amount,
-    destinationChain: "polygon",
-    destinationCurrency: POLYGON_PUSD,
-    destinationRefundCurrency: POLYGON_USDCE,
-    expectedOutputRaw: output.amount,
-    minimumOutputRaw: output.minimumAmount,
-    protocolValue: quote.protocol,
-    recipient,
-    sourceCurrency: SOLANA_USDC,
-    user,
-  });
-
-  const steps = array(quote.steps, "steps");
-  if (steps.length !== 1) throw new Error("unexpected Relay step count");
-  const step = record(steps[0], "steps[0]");
-  assertExact(step.id, "deposit", "step.id");
-  assertExact(step.kind, "transaction", "step.kind");
-  const requestId = string(step.requestId, "step.requestId");
-  const items = array(step.items, "step.items");
-  if (items.length !== 1) throw new Error("deposit item count mismatch");
-  const item = record(items[0], "step.items[0]");
-  assertExact(item.status, "incomplete", "deposit item status");
-  const check = record(item.check, "deposit.check");
-  assertExact(check.method, "GET", "deposit.check.method");
-  const correlatedRequestId = new URL(
-    string(check.endpoint, "deposit.check.endpoint"),
-    "https://api.relay.link",
-  ).searchParams.get("requestId");
-  if (correlatedRequestId !== requestId) {
-    throw new Error("deposit request correlation mismatch");
-  }
-  const data = record(item.data, "deposit.data");
-  const dataKeys = Object.keys(data).sort();
-  if (dataKeys.join(",") !== "addressLookupTableAddresses,instructions") {
-    throw new Error("unexpected Solana action capability");
-  }
-  const lookupTables = array(
-    data.addressLookupTableAddresses,
-    "addressLookupTableAddresses",
-  ).map((value, index) => publicKey(value, `lookupTables[${index}]`));
-  if (lookupTables.length !== 1) {
-    throw new Error("exactly one address lookup table is required");
-  }
-  const instructions = array(data.instructions, "instructions");
-  if (instructions.length !== 1) {
-    throw new Error("exactly one Relay instruction is required");
-  }
-  const instruction = record(instructions[0], "instructions[0]");
-  const programId = publicKey(instruction.programId, "instruction.programId");
-  assertExact(programId, RELAY_SOLANA_DEPOSITORY, "instruction.programId");
-  const encodedData = string(instruction.data, "instruction.data");
-  if (!/^[0-9a-f]+$/iu.test(encodedData) || encodedData.length % 2 !== 0) {
-    throw new Error("instruction.data must be hex without a prefix");
-  }
-  const decodedData = Buffer.from(encodedData, "hex");
-  if (
-    decodedData.byteLength !== 48 ||
-    decodedData.toString("hex").toLowerCase() !== encodedData.toLowerCase()
-  ) {
-    throw new Error("instruction.data encoding or length mismatch");
-  }
-  const keys = array(instruction.keys, "instruction.keys").map(
-    (value, index) => {
-      const key = record(value, `instruction.keys[${index}]`);
-      if (
-        typeof key.isSigner !== "boolean" ||
-        typeof key.isWritable !== "boolean"
-      ) {
-        throw new Error(`instruction.keys[${index}] flags invalid`);
-      }
-      return {
-        pubkey: publicKey(key.pubkey, `instruction.keys[${index}].pubkey`),
-        isSigner: key.isSigner,
-        isWritable: key.isWritable,
-      };
-    },
-  );
-  if (keys.length !== 10) throw new Error("instruction key count mismatch");
-  const signerIndexes = keys.flatMap((key, index) =>
-    key.isSigner ? [index] : [],
-  );
-  if (signerIndexes.length !== 1 || signerIndexes[0] !== 1) {
-    throw new Error("only the controlled burner may sign");
-  }
-  assertExact(
-    required(keys[1], "signer account").pubkey,
-    user,
-    "signer account",
-  );
-  assertExact(
-    required(keys[1], "signer account").isWritable,
-    true,
-    "signer writable flag",
-  );
-  assertExact(
-    required(keys[2], "depositor account").pubkey,
-    user,
-    "depositor account",
-  );
-  assertExact(
-    required(keys[2], "depositor account").isWritable,
-    false,
-    "depositor writable flag",
-  );
-  assertExact(
-    required(keys[4], "mint account").pubkey,
-    SOLANA_USDC,
-    "mint account",
-  );
-  const expectedSourceAta = getAssociatedTokenAddressSync(
-    new PublicKey(SOLANA_USDC),
-    new PublicKey(user),
-  ).toBase58();
-  assertExact(
-    required(keys[5], "source token account").pubkey,
-    expectedSourceAta,
-    "source token account",
-  );
-  assertExact(
-    required(keys[7], "token program").pubkey,
-    SPL_TOKEN_PROGRAM,
-    "token program",
-  );
-  assertExact(
-    required(keys[8], "associated token program").pubkey,
-    SPL_ASSOCIATED_TOKEN_PROGRAM,
-    "associated token program",
-  );
-  assertExact(
-    required(keys[9], "system program").pubkey,
-    SOLANA_SYSTEM_PROGRAM,
-    "system program",
-  );
-  const writableIndexes = keys.flatMap((key, index) =>
-    key.isWritable ? [index] : [],
-  );
-  if (writableIndexes.join(",") !== "1,5,6") {
-    throw new Error("unexpected writable account set");
-  }
-
-  return {
-    expectedOutputRaw: output.amount,
-    minimumOutputRaw: output.minimumAmount,
-    requestId,
-    instruction: {
-      addressLookupTableAddresses: lookupTables,
-      data: decodedData,
-      keys,
-      programId,
-    },
   };
 }

@@ -15,6 +15,7 @@ import {
   BASE_USDC,
   POLYGON_PUSD,
   POLYGON_USDC,
+  POLYGON_USDCE_LEGACY,
   RELAY_SOLANA_CHAIN_ID,
   SOLANA_NATIVE,
   SOLANA_USDC,
@@ -22,9 +23,26 @@ import {
   type RelayRehearsalScenario,
   type RelayRehearsalScenarioId,
 } from "./rehearsal.js";
-import { POLYGON_USDCE } from "./solana-rehearsal.js";
 
 export type RelayVm = "evm" | "svm";
+
+/**
+ * Immutable Relay protocol facts that are not represented by the economic
+ * destination asset itself. A quote never supplies these values as authority:
+ * the SVM parser receives them only from the registered route below.
+ */
+type RelaySolanaDirectDestinationConfig = Readonly<{
+  destinationChain: "base" | "polygon";
+  destinationRefundCurrency: string;
+}>;
+
+export type RelaySolanaDirectDestinationContract =
+  RelaySolanaDirectDestinationConfig &
+    Readonly<{
+      destinationChainId: 137 | 8453;
+      destinationCurrency: string;
+      destinationDecimals: 6;
+    }>;
 
 export type RelayRouteSpec = Readonly<{
   routeId:
@@ -42,6 +60,7 @@ export type RelayRouteSpec = Readonly<{
   destinationVm: RelayVm;
   quoteMode: "exact_input" | "expected_output";
   rehearsalScenario: RelayRehearsalScenario | null;
+  solanaDirectDestination?: RelaySolanaDirectDestinationConfig;
 }>;
 
 export function relayRouteCapability(
@@ -227,6 +246,10 @@ export const RELAY_ROUTE_SPECS: Readonly<Record<string, RelayRouteSpec>> = {
     destinationVm: "evm",
     quoteMode: "exact_input",
     rehearsalScenario: null,
+    solanaDirectDestination: {
+      destinationChain: "polygon",
+      destinationRefundCurrency: POLYGON_USDCE_LEGACY,
+    },
   },
   "solana-usdc-to-base-usdc": {
     routeId: "solana-usdc-to-base-usdc",
@@ -244,6 +267,10 @@ export const RELAY_ROUTE_SPECS: Readonly<Record<string, RelayRouteSpec>> = {
     destinationVm: "evm",
     quoteMode: "expected_output",
     rehearsalScenario: null,
+    solanaDirectDestination: {
+      destinationChain: "base",
+      destinationRefundCurrency: BASE_USDC,
+    },
   },
   "solana-sol-to-polygon-pusd": {
     routeId: "solana-sol-to-polygon-pusd",
@@ -261,6 +288,10 @@ export const RELAY_ROUTE_SPECS: Readonly<Record<string, RelayRouteSpec>> = {
     destinationVm: "evm",
     quoteMode: "expected_output",
     rehearsalScenario: null,
+    solanaDirectDestination: {
+      destinationChain: "polygon",
+      destinationRefundCurrency: POLYGON_USDCE_LEGACY,
+    },
   },
   "solana-sol-to-base-usdc": {
     routeId: "solana-sol-to-base-usdc",
@@ -278,6 +309,10 @@ export const RELAY_ROUTE_SPECS: Readonly<Record<string, RelayRouteSpec>> = {
     destinationVm: "evm",
     quoteMode: "expected_output",
     rehearsalScenario: null,
+    solanaDirectDestination: {
+      destinationChain: "base",
+      destinationRefundCurrency: BASE_USDC,
+    },
   },
 };
 
@@ -303,13 +338,51 @@ export function resolveRelayRouteSpec(
   return matches[0];
 }
 
+/**
+ * Resolves the exact destination protocol contract for the only supported SVM
+ * direct-Depository routes. The quote is not allowed to choose a destination,
+ * refund asset, or route shape.
+ */
+export function resolveRelaySolanaDirectDestinationContract(
+  route: RelayRouteSpec,
+): RelaySolanaDirectDestinationContract {
+  const direct = route.solanaDirectDestination;
+  if (
+    route.sourceVm !== "svm" ||
+    route.destinationVm !== "evm" ||
+    !direct
+  ) {
+    throw new Error("Relay SVM route does not have a direct Depository contract");
+  }
+  const expectedChain =
+    route.destination.networkId === "evm:137"
+      ? "polygon"
+      : route.destination.networkId === "evm:8453"
+        ? "base"
+        : null;
+  if (
+    !expectedChain ||
+    direct.destinationChain !== expectedChain ||
+    route.destination.decimals !== 6
+  ) {
+    throw new Error("Relay SVM direct destination contract is inconsistent");
+  }
+  return {
+    destinationChain: direct.destinationChain,
+    destinationChainId: expectedChain === "polygon" ? 137 : 8453,
+    destinationCurrency: route.destination.assetId,
+    destinationRefundCurrency: direct.destinationRefundCurrency,
+    destinationDecimals: 6,
+  };
+}
+
 // Exported as contract evidence for fixture and registry tests.
 export const RELAY_PINNED_ASSETS = {
   baseUsdc: BASE_USDC.toLowerCase(),
   polygonNative: ZeroAddress,
   polygonPusd: POLYGON_PUSD.toLowerCase(),
   polygonUsdc: "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359",
-  polygonUsdce: POLYGON_USDCE.toLowerCase(),
+  polygonUsdce: POLYGON_USDCE_LEGACY.toLowerCase(),
   solanaNative: SOLANA_NATIVE,
   solanaUsdc: SOLANA_USDC,
 } as const;
