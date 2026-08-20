@@ -50,7 +50,7 @@ import {
   createTelegramFundingRenderCoordinator,
   deliverTelegramFundingActions,
 } from "./services/telegram-funding-delivery.js";
-import { deliverTelegramTradeShortfallProgress } from "./services/telegram-trade-shortfall-progress.js";
+import { deliverTelegramTradeLifecycleProgress } from "./services/telegram-trade-lifecycle-progress.js";
 import { claimTelegramTradeShortfallAutoResume } from "./services/telegram-trade-shortfall-auto-resume.js";
 import { TELEGRAM_BOT_TRADING_CALLBACK_PREFIX } from "./services/telegram-bot-trading-client.js";
 import { resolveTelegramNotificationsPolicy } from "./services/telegram-notification-policy.js";
@@ -346,7 +346,7 @@ export async function runSignalBotRunner(): Promise<void> {
           if (fundingDelivery.claimed > 0) {
             log("signal_bot_funding_delivery", fundingDelivery);
           }
-          const shortfallDelivery = await deliverTelegramTradeShortfallProgress(
+          const shortfallDelivery = await deliverTelegramTradeLifecycleProgress(
             {
               pool: db,
               limit: 25,

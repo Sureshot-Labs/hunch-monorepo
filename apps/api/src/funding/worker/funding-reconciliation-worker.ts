@@ -29,7 +29,7 @@ import {
   type FundingReceiveReceiptDispositionResolver,
 } from "../receive/receive-receipt-router.js";
 import { runTelegramFundingProgressProjectionBatch } from "../../services/telegram-funding-progress-projector.js";
-import { runTelegramTradeShortfallProgressProjectionBatch } from "../../services/telegram-trade-shortfall-progress.js";
+import { runTelegramTradeLifecycleProjectionBatch } from "../../services/telegram-trade-lifecycle-progress.js";
 import {
   createPolymarketWrapDelegatedFundingProfile,
   DelegatedFundingExecutor,
@@ -157,8 +157,8 @@ export type FundingReconciliationJobResult =
         telegramFundingProgress: Awaited<
           ReturnType<typeof runTelegramFundingProgressProjectionBatch>
         >;
-        telegramTradeShortfallProgress: Awaited<
-          ReturnType<typeof runTelegramTradeShortfallProgressProjectionBatch>
+        telegramTradeLifecycleProgress: Awaited<
+          ReturnType<typeof runTelegramTradeLifecycleProjectionBatch>
         >;
       }>)
   | Readonly<{
@@ -174,7 +174,7 @@ export type FundingReconciliationJobResult =
       receiveRouting: null;
       delegatedFundingExecution: null;
       telegramFundingProgress: null;
-      telegramTradeShortfallProgress: null;
+      telegramTradeLifecycleProgress: null;
     }>;
 
 export async function isFundingReconciliationSchemaReady(
@@ -362,7 +362,7 @@ export async function runFundingReconciliationJob(
       receiveRouting: null,
       delegatedFundingExecution: null,
       telegramFundingProgress: null,
-      telegramTradeShortfallProgress: null,
+      telegramTradeLifecycleProgress: null,
     };
   }
   const relay = options.relay;
@@ -639,8 +639,8 @@ export async function runFundingReconciliationJob(
       receive.earlyTelegramFundingProgress.skipped +
       finalTelegramFundingProgress.skipped,
   };
-  const telegramTradeShortfallProgress =
-    await runTelegramTradeShortfallProgressProjectionBatch(pool, {
+  const telegramTradeLifecycleProgress =
+    await runTelegramTradeLifecycleProjectionBatch(pool, {
       limit: options.limit ?? 25,
     });
   const {
@@ -651,7 +651,7 @@ export async function runFundingReconciliationJob(
     ...result,
     ...receiveResult,
     telegramFundingProgress,
-    telegramTradeShortfallProgress,
+    telegramTradeLifecycleProgress,
   };
 }
 

@@ -9139,6 +9139,12 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         finalReasonCode: null,
         sideEffects: ["credential", "approval"],
       });
+      const terminalTradeButton =
+        telegram.messages.at(-1)?.reply_markup?.inline_keyboard[0]?.[0];
+      assert.deepEqual(terminalTradeButton, {
+        callback_data: "hbt:retry_buy:00000000-0000-4000-8000-000000000001",
+        text: "🎯 Trade this market",
+      });
     },
   },
   {

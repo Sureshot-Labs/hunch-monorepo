@@ -25,20 +25,35 @@ import {
 
 const CALLBACK_PREFIX = TELEGRAM_BOT_TRADING_CALLBACK_PREFIX;
 
-type TradeFundingState =
+/**
+ * `trade_funding_edit` is the persisted outbox identifier introduced for the
+ * original shortfall card. Its constraint is already deployed, so keep that
+ * identifier while the payload now represents the whole trade lifecycle.
+ */
+const TELEGRAM_TRADE_LIFECYCLE_OUTBOX_ACTION = "trade_funding_edit";
+
+type TelegramTradeLifecycleState =
+  | "awaiting_client"
   | "filled"
+  | "failed"
+  | "cancelled"
   | "starting"
   | "preparing"
   | "submitted"
   | "ready"
+  | "submitting_trade"
+  | "confirming_trade"
   | "needs_attention"
   | "stopped";
 
-type TradeFundingProgress = Readonly<{
+type TelegramTradeLifecycleProgress = Readonly<{
   amountUsd: string;
   attemptStateFingerprint: string;
   canCancel: boolean;
   canCancelBuy: boolean;
+  /** True only for a sealed v2 Buy that has no funding operation. */
+  isDirectHandoff: boolean;
+  failureMessage: string | null;
   fundingAmountLabel: string | null;
   intentId: string;
   marketTitle: string;
@@ -47,18 +62,18 @@ type TradeFundingProgress = Readonly<{
   receiptStateFingerprint: string;
   reasonCode: string | null;
   /**
-   * The funding operation is durable, but its next action belongs to the
-   * authenticated Mini App. Telegram must present a resume path instead of
-   * implying that the server will sign or submit it.
+   * The next durable boundary belongs to the authenticated Mini App. Telegram
+   * must present a resume path instead of implying that the server will sign
+   * or submit it; this covers both funding actions and a sealed direct Buy.
    */
   requiresMiniAppContinuation: boolean;
   sideLabel: string;
   sourceRoute: string | null;
   stepStateFingerprint: string;
-  state: TradeFundingState;
+  state: TelegramTradeLifecycleState;
   venueOrderId: string | null;
   venue: string;
-  version: 1 | 2 | 3 | 4;
+  version: 1 | 2 | 3 | 4 | 5;
 }>;
 
 type ProjectionCandidate = Readonly<{
@@ -69,6 +84,7 @@ type ProjectionCandidate = Readonly<{
   consumer_reservation_id: string | null;
   delivery_mode: string;
   error_code: string | null;
+  error_message: string | null;
   funding_operation_id: string | null;
   funding_destination_asset_id: string | null;
   funding_destination_decimals: string | null;
@@ -96,9 +112,11 @@ type ProjectionCandidate = Readonly<{
   has_automatic_provider_reference_wait: boolean;
   has_broadcast_boundary: boolean;
   has_started_attempt: boolean;
+  is_direct_v2_handoff: boolean;
+  submit_started_at: Date | null;
 }>;
 
-type TradeFundingOutboxRow = Readonly<{
+type TelegramTradeLifecycleOutboxRow = Readonly<{
   attempt_count: number;
   chat_id: string;
   delivery_attempt_id: string | null;
@@ -114,13 +132,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function parseProgress(value: unknown): TradeFundingProgress | null {
+function parseProgress(value: unknown): TelegramTradeLifecycleProgress | null {
   if (
     !isRecord(value) ||
     (value.version !== 1 &&
       value.version !== 2 &&
       value.version !== 3 &&
-      value.version !== 4)
+      value.version !== 4 &&
+      value.version !== 5)
   ) {
     return null;
   }
@@ -138,13 +157,18 @@ function parseProgress(value: unknown): TradeFundingProgress | null {
   }
   if (
     ![
+      "awaiting_client",
       "starting",
       "preparing",
       "submitted",
       "ready",
+      "submitting_trade",
+      "confirming_trade",
       "needs_attention",
       "stopped",
       "filled",
+      "failed",
+      "cancelled",
     ].includes(value.state)
   ) {
     return null;
@@ -154,13 +178,18 @@ function parseProgress(value: unknown): TradeFundingProgress | null {
   return {
     ...value,
     // Older cards were all server-executed. Missing is therefore safely
-    // normalised to false while version 4 forces one authoritative edit.
+    // normalised to false while version 5 forces one authoritative edit.
     requiresMiniAppContinuation: value.requiresMiniAppContinuation === true,
+    isDirectHandoff: value.isDirectHandoff === true,
+    failureMessage:
+      typeof value.failureMessage === "string" && value.failureMessage.trim()
+        ? value.failureMessage.trim()
+        : null,
     venueOrderId:
       typeof value.venueOrderId === "string" && value.venueOrderId.trim()
         ? value.venueOrderId
         : null,
-  } as TradeFundingProgress;
+  } as TelegramTradeLifecycleProgress;
 }
 
 function sideLabel(candidate: ProjectionCandidate): string {
@@ -224,7 +253,54 @@ function sourceRoute(candidate: ProjectionCandidate): string | null {
   return `${fundingNetworkLabel(candidate.source_network_id)} ${symbol} → ${venue} ${fundingDestinationAsset(candidate.venue)}`;
 }
 
-function liveProgressFor(candidate: ProjectionCandidate): TradeFundingProgress {
+function directHandoffProgressFor(
+  candidate: ProjectionCandidate,
+): TelegramTradeLifecycleProgress {
+  const state: TelegramTradeLifecycleState =
+    candidate.status === "external_handoff"
+      ? "awaiting_client"
+      : candidate.status === "executing"
+        ? "submitting_trade"
+        : ["submitted", "reconcile_required"].includes(candidate.status)
+          ? "confirming_trade"
+          : candidate.status === "filled"
+            ? "filled"
+            : candidate.status === "cancelled"
+              ? "cancelled"
+              : "failed";
+  return {
+    amountUsd: candidate.amount_usd ?? "0",
+    attemptStateFingerprint: "",
+    canCancel:
+      state === "awaiting_client" && candidate.submit_started_at == null,
+    canCancelBuy: false,
+    failureMessage:
+      state === "failed" ? candidate.error_message?.trim() || null : null,
+    fundingAmountLabel: null,
+    intentId: candidate.id,
+    isDirectHandoff: true,
+    marketTitle: candidate.market_title,
+    operationStatus: null,
+    progressStage: null,
+    receiptStateFingerprint: "",
+    reasonCode: state === "failed" ? candidate.error_code : null,
+    requiresMiniAppContinuation: state === "awaiting_client",
+    sideLabel: sideLabel(candidate),
+    sourceRoute: null,
+    stepStateFingerprint: "",
+    state,
+    venueOrderId: candidate.venue_order_id,
+    venue: candidate.venue,
+    version: 5,
+  };
+}
+
+function liveProgressFor(
+  candidate: ProjectionCandidate,
+): TelegramTradeLifecycleProgress {
+  if (candidate.is_direct_v2_handoff) {
+    return directHandoffProgressFor(candidate);
+  }
   const terminal = ["completed", "refunded", "failed", "cancelled"].includes(
     candidate.operation_status ?? "",
   );
@@ -266,7 +342,7 @@ function liveProgressFor(candidate: ProjectionCandidate): TradeFundingProgress {
     candidate.delivery_mode === "app_handoff" &&
     isRecord(candidate.result.appHandoffExecution) &&
     candidate.result.appHandoffExecution.version === 2;
-  const state: TradeFundingState = routerContinuationPending
+  const state: TelegramTradeLifecycleState = routerContinuationPending
     ? routerContinuationNeedsAttention
       ? "needs_attention"
       : "preparing"
@@ -298,8 +374,10 @@ function liveProgressFor(candidate: ProjectionCandidate): TradeFundingProgress {
       candidate.status === "funding" &&
       !terminal &&
       candidate.has_broadcast_boundary,
+    failureMessage: null,
     fundingAmountLabel: fundingAmountLabel(candidate),
     intentId: candidate.id,
+    isDirectHandoff: false,
     marketTitle: candidate.market_title,
     operationStatus: candidate.operation_status,
     progressStage: candidate.progress_stage,
@@ -312,7 +390,7 @@ function liveProgressFor(candidate: ProjectionCandidate): TradeFundingProgress {
     state,
     venueOrderId: candidate.venue_order_id,
     venue: candidate.venue,
-    version: 4,
+    version: 5,
   };
 }
 
@@ -324,7 +402,9 @@ function liveProgressFor(candidate: ProjectionCandidate): TradeFundingProgress {
  * so a stopped card is written once instead of re-edited on every subsequent
  * operation change.
  */
-function progressFor(candidate: ProjectionCandidate): TradeFundingProgress {
+function progressFor(
+  candidate: ProjectionCandidate,
+): TelegramTradeLifecycleProgress {
   const live = liveProgressFor(candidate);
   if (
     candidate.status !== "failed" &&
@@ -345,14 +425,25 @@ function progressFor(candidate: ProjectionCandidate): TradeFundingProgress {
         ? null
         : (candidate.error_code ?? live.reasonCode),
     receiptStateFingerprint: "",
-    state: candidate.status === "filled" ? "filled" : "stopped",
+    failureMessage:
+      candidate.status === "failed"
+        ? candidate.error_message?.trim() || null
+        : null,
+    state:
+      candidate.status === "filled"
+        ? "filled"
+        : candidate.is_direct_v2_handoff
+          ? candidate.status === "cancelled"
+            ? "cancelled"
+            : "failed"
+          : "stopped",
     stepStateFingerprint: "",
   };
 }
 
 function sameProgress(
-  left: TradeFundingProgress | null,
-  right: TradeFundingProgress,
+  left: TelegramTradeLifecycleProgress | null,
+  right: TelegramTradeLifecycleProgress,
 ): boolean {
   return (
     left?.version === right.version &&
@@ -363,6 +454,8 @@ function sameProgress(
     left.venueOrderId === right.venueOrderId &&
     left.sourceRoute === right.sourceRoute &&
     left.amountUsd === right.amountUsd &&
+    left.isDirectHandoff === right.isDirectHandoff &&
+    left.failureMessage === right.failureMessage &&
     left.fundingAmountLabel === right.fundingAmountLabel &&
     left.operationStatus === right.operationStatus &&
     left.progressStage === right.progressStage &&
@@ -398,8 +491,15 @@ async function listCandidates(
             intent.delivery_mode,
             intent.status,
             intent.error_code,
+            intent.error_message,
             intent.result,
+            intent.submit_started_at,
             intent.funding_operation_id::text,
+            (
+              intent.delivery_mode = 'app_handoff'
+              and intent.funding_operation_id is null
+              and intent.result -> 'appHandoffExecution' ->> 'version' = '2'
+            ) as is_direct_v2_handoff,
             tracked_operation.id::text as tracked_operation_id,
             (
               select reservation.id::text
@@ -485,7 +585,7 @@ async function listCandidates(
                  and attempt.outcome = 'started'
             ) as has_started_attempt
        from telegram_trade_intents intent
-       join funding_operations operation
+       left join funding_operations operation
          on operation.id = intent.funding_operation_id
        left join lateral (
          select continuation.*
@@ -518,118 +618,194 @@ async function listCandidates(
        ) tracked_operation
        left join unified_markets market
          on market.id = intent.market_id
-      where intent.status in ('funding', 'failed', 'cancelled', 'filled')
-        and intent.funding_operation_id is not null
-      order by intent.updated_at, intent.id
+      where intent.status in (
+              'external_handoff', 'funding', 'executing', 'submitted',
+              'reconcile_required', 'failed', 'cancelled', 'filled'
+            )
+        and (
+          intent.funding_operation_id is not null
+          or (
+            intent.delivery_mode = 'app_handoff'
+            and intent.funding_operation_id is null
+            and intent.result -> 'appHandoffExecution' ->> 'version' = '2'
+          )
+        )
+      -- Keep the existing funded-card path first. Direct handoff projections
+      -- are additive and must not consume a whole worker batch while a live
+      -- FundingOperation is waiting to render its next durable transition.
+      order by (intent.funding_operation_id is null), intent.updated_at, intent.id
       limit $1
-      for update of intent, operation skip locked`,
+      for update of intent skip locked`,
     [limit],
   );
   return rows;
 }
 
 /**
- * Turn durable shortfall operation changes into one revisioned Telegram-card
- * edit. This is deliberately a projector: Refresh reads state but never moves
- * money, while the finance worker advances the operation independently.
+ * Turn durable Telegram trade transitions into one revisioned source-card
+ * edit. Funding state, client handoff state, and ordinary venue reconciliation
+ * are all reflected here; Refresh reads state but never moves money.
  */
-export async function runTelegramTradeShortfallProgressProjectionBatch(
-  pool: Pool,
+export async function runTelegramTradeLifecycleProjectionBatchInTransaction(
+  client: PoolClient,
   input: Readonly<{ limit?: number }> = {},
 ): Promise<Readonly<{ candidates: number; created: number; skipped: number }>> {
   const limit = Math.max(1, Math.min(input.limit ?? 25, 100));
-  return tx(pool, async (client) => {
-    const candidates = await listCandidates(client, limit);
-    let created = 0;
-    for (const candidate of candidates) {
-      // A cancelled Buy must never consume funded venue cash. Once the route
-      // is ready, release just its consumer reservation; the transfer itself
-      // is already final and is not cancelled or moved again.
-      if (
-        candidate.status === "cancelled" &&
-        candidate.operation_status === "ready" &&
-        candidate.progress_stage === "ready_for_consumer" &&
-        candidate.tracked_operation_id &&
-        candidate.consumer_reservation_id &&
-        candidate.user_id
-      ) {
-        await releaseFundingReservationForAbandonedTradeInTransaction(client, {
-          userId: candidate.user_id,
-          link: {
-            operationId: candidate.tracked_operation_id,
-            reservationId: candidate.consumer_reservation_id,
-          },
-          outcomeReason: "telegram_buy_cancelled_after_funding",
-        });
-      }
-      const progress = progressFor(candidate);
-      const existing = parseProgress(candidate.result.shortfallProgress);
-      if (sameProgress(existing, progress)) continue;
-      const revision =
-        typeof candidate.result.shortfallProgressRevision === "number" &&
-        Number.isSafeInteger(candidate.result.shortfallProgressRevision)
-          ? candidate.result.shortfallProgressRevision + 1
-          : 1;
-      const updated = await client.query(
-        `update telegram_trade_intents
+  const candidates = await listCandidates(client, limit);
+  let created = 0;
+  for (const candidate of candidates) {
+    // A cancelled Buy must never consume funded venue cash. Once the route
+    // is ready, release just its consumer reservation; the transfer itself
+    // is already final and is not cancelled or moved again.
+    if (
+      candidate.status === "cancelled" &&
+      candidate.operation_status === "ready" &&
+      candidate.progress_stage === "ready_for_consumer" &&
+      candidate.tracked_operation_id &&
+      candidate.consumer_reservation_id &&
+      candidate.user_id
+    ) {
+      await releaseFundingReservationForAbandonedTradeInTransaction(client, {
+        userId: candidate.user_id,
+        link: {
+          operationId: candidate.tracked_operation_id,
+          reservationId: candidate.consumer_reservation_id,
+        },
+        outcomeReason: "telegram_buy_cancelled_after_funding",
+      });
+    }
+    const progress = progressFor(candidate);
+    const existing = parseProgress(candidate.result.shortfallProgress);
+    if (sameProgress(existing, progress)) continue;
+    const revision =
+      typeof candidate.result.shortfallProgressRevision === "number" &&
+      Number.isSafeInteger(candidate.result.shortfallProgressRevision)
+        ? candidate.result.shortfallProgressRevision + 1
+        : 1;
+    const updated = await client.query(
+      `update telegram_trade_intents
             set result = result || jsonb_build_object(
                   'shortfallProgress', $2::jsonb,
                   'shortfallProgressRevision', $3::int
                 ),
                 updated_at = clock_timestamp()
           where id = $1::uuid
-            and status in ('funding', 'failed', 'cancelled', 'filled')`,
-        [candidate.id, JSON.stringify(progress), revision],
-      );
-      if (updated.rowCount !== 1) continue;
-      if (
-        candidate.chat_id &&
-        candidate.telegram_message_id &&
-        candidate.user_id
-      ) {
-        // A later durable revision is authoritative. Old pending/retry edits
-        // must never be delivered after it and restore stale card content.
-        await client.query(
-          `update telegram_bot_action_outbox
+            and status in (
+              'external_handoff', 'funding', 'executing', 'submitted',
+              'reconcile_required', 'failed', 'cancelled', 'filled'
+            )`,
+      [candidate.id, JSON.stringify(progress), revision],
+    );
+    if (updated.rowCount !== 1) continue;
+    if (
+      candidate.chat_id &&
+      candidate.telegram_message_id &&
+      candidate.user_id
+    ) {
+      // A later durable revision is authoritative. Old pending/retry edits
+      // must never be delivered after it and restore stale card content.
+      await client.query(
+        `update telegram_bot_action_outbox
               set status = 'dead',
-                  last_error = 'trade_funding_edit_superseded',
+                  last_error = 'telegram_trade_lifecycle_edit_superseded',
                   updated_at = clock_timestamp()
             where trade_intent_id = $1::uuid
-              and action = 'trade_funding_edit'
+              and action = $3::text
               and state_revision < $2::int
               and status in ('pending', 'retry')`,
-          [candidate.id, revision],
-        );
-        await client.query(
-          `insert into telegram_bot_action_outbox (
+        [candidate.id, revision, TELEGRAM_TRADE_LIFECYCLE_OUTBOX_ACTION],
+      );
+      await client.query(
+        `insert into telegram_bot_action_outbox (
              action, user_id, telegram_user_id, trade_intent_id,
              state_revision, payload
            ) values (
-             'trade_funding_edit', $1::uuid, $2, $3::uuid, $4, $5::jsonb
+             $1::text, $2::uuid, $3, $4::uuid, $5, $6::jsonb
            )
            on conflict (trade_intent_id, state_revision, action)
-             where action = 'trade_funding_edit'
+             where action = '${TELEGRAM_TRADE_LIFECYCLE_OUTBOX_ACTION}'
            do nothing`,
-          [
-            candidate.user_id,
-            candidate.telegram_user_id,
-            candidate.id,
-            revision,
-            JSON.stringify(progress),
-          ],
-        );
-      }
-      created += 1;
+        [
+          TELEGRAM_TRADE_LIFECYCLE_OUTBOX_ACTION,
+          candidate.user_id,
+          candidate.telegram_user_id,
+          candidate.id,
+          revision,
+          JSON.stringify(progress),
+        ],
+      );
     }
-    return {
-      candidates: candidates.length,
-      created,
-      skipped: candidates.length - created,
-    };
-  });
+    created += 1;
+  }
+  return {
+    candidates: candidates.length,
+    created,
+    skipped: candidates.length - created,
+  };
 }
 
-function progressText(progress: TradeFundingProgress): string {
+export async function runTelegramTradeLifecycleProjectionBatch(
+  pool: Pool,
+  input: Readonly<{ limit?: number }> = {},
+): Promise<Readonly<{ candidates: number; created: number; skipped: number }>> {
+  return tx(pool, (client) =>
+    runTelegramTradeLifecycleProjectionBatchInTransaction(client, input),
+  );
+}
+
+function directHandoffText(progress: TelegramTradeLifecycleProgress): string {
+  const status = {
+    awaiting_client: [
+      "▶️",
+      "Continue Buy in Hunch",
+      "Your confirmed Buy is ready in Hunch. No order has been submitted.",
+    ],
+    submitting_trade: [
+      "⏳",
+      "Submitting Buy",
+      "Hunch is submitting your Buy and recording the venue result automatically.",
+    ],
+    confirming_trade: [
+      "⏳",
+      "Confirming Buy",
+      "The Buy may have reached the venue. Hunch is checking the result automatically.",
+    ],
+    filled: ["✅", "Trade filled", "The Buy was filled successfully."],
+    failed: [
+      "⚠️",
+      "Trade failed",
+      progress.failureMessage ??
+        "The Buy failed before a confirmed venue submission. No order is being retried automatically.",
+    ],
+    cancelled: [
+      "ℹ️",
+      "Buy cancelled",
+      "No order was submitted. Open the market to choose another Buy.",
+    ],
+  } as const;
+  const [icon, heading, body] = status[progress.state as keyof typeof status];
+  return joinTelegramMarkdownV2Lines(
+    [
+      `${icon} ${formatTelegramBoldMarkdownV2(heading)}`,
+      "",
+      `🔵 ${formatTelegramFieldMarkdownV2("Venue", formatTelegramVenueLabel(progress.venue))}`,
+      `🎯 ${formatTelegramFieldMarkdownV2("Market", progress.marketTitle)}`,
+      `↔️ ${formatTelegramFieldMarkdownV2("Side", progress.sideLabel)}`,
+      `🛒 ${formatTelegramFieldMarkdownV2("Buy", `$${progress.amountUsd}`)}`,
+      progress.venueOrderId
+        ? `🔗 ${formatTelegramFieldWithMarkdownV2(
+            "Order",
+            formatTelegramCodeMarkdownV2(progress.venueOrderId),
+          )}`
+        : null,
+      "",
+      escapeTelegramMarkdownV2(body),
+    ].filter((line): line is string => line != null),
+  );
+}
+
+function progressText(progress: TelegramTradeLifecycleProgress): string {
+  if (progress.isDirectHandoff) return directHandoffText(progress);
   if (progress.reasonCode === "funding_balance_pending") {
     return joinTelegramMarkdownV2Lines(
       [
@@ -740,7 +916,7 @@ function progressText(progress: TradeFundingProgress): string {
     ],
     filled: ["✅", "Trade filled", "The Buy was filled successfully."],
   } as const;
-  const [icon, heading, body] = status[progress.state];
+  const [icon, heading, body] = status[progress.state as keyof typeof status];
   return joinTelegramMarkdownV2Lines(
     [
       `${icon} ${formatTelegramBoldMarkdownV2(heading)}`,
@@ -768,9 +944,53 @@ function progressText(progress: TradeFundingProgress): string {
 }
 
 function progressKeyboard(
-  progress: TradeFundingProgress,
+  progress: TelegramTradeLifecycleProgress,
 ): TelegramBotTradingClientReplyMarkup {
   const rows: TelegramBotTradingClientButton[][] = [];
+  if (progress.isDirectHandoff) {
+    if (progress.state === "filled") {
+      rows.push([
+        {
+          callback_data: `${CALLBACK_PREFIX}:retry_buy:${progress.intentId}`,
+          text: "🎯 Trade this market",
+        },
+      ]);
+      rows.push([
+        { callback_data: "hm:v1:positions", text: "💼 My positions" },
+      ]);
+    } else if (progress.state === "awaiting_client") {
+      rows.push([
+        {
+          callback_data: `${CALLBACK_PREFIX}:retry_buy:${progress.intentId}`,
+          text: "▶️ Continue in Hunch",
+        },
+      ]);
+    } else if (progress.state === "failed" || progress.state === "cancelled") {
+      rows.push([
+        {
+          callback_data: `${CALLBACK_PREFIX}:retry_buy:${progress.intentId}`,
+          text: "🎯 Open market",
+        },
+      ]);
+    } else {
+      rows.push([
+        {
+          callback_data: `${CALLBACK_PREFIX}:retry_buy:${progress.intentId}`,
+          text: "🔄 Check status",
+        },
+      ]);
+    }
+    if (progress.canCancel) {
+      rows.push([
+        {
+          callback_data: `${CALLBACK_PREFIX}:cancel:${progress.intentId}`,
+          text: "❌ Cancel Buy",
+        },
+      ]);
+    }
+    rows.push([{ callback_data: "hm:v1:home", text: "🏠 Home" }]);
+    return { inline_keyboard: rows };
+  }
   if (progress.state === "filled") {
     rows.push([
       {
@@ -826,11 +1046,11 @@ function progressKeyboard(
   return { inline_keyboard: rows };
 }
 
-async function claimTradeFundingOutbox(
+async function claimTelegramTradeLifecycleOutbox(
   pool: Pool,
-): Promise<TradeFundingOutboxRow | null> {
+): Promise<TelegramTradeLifecycleOutboxRow | null> {
   return tx(pool, async (client) => {
-    const { rows } = await client.query<TradeFundingOutboxRow>(
+    const { rows } = await client.query<TelegramTradeLifecycleOutboxRow>(
       `select outbox.id,
               outbox.trade_intent_id::text,
               outbox.state_revision,
@@ -842,7 +1062,7 @@ async function claimTradeFundingOutbox(
               intent.telegram_message_id::text
          from telegram_bot_action_outbox outbox
          join telegram_trade_intents intent on intent.id = outbox.trade_intent_id
-        where outbox.action = 'trade_funding_edit'
+        where outbox.action = $1::text
           and outbox.status in ('pending', 'retry')
           and outbox.next_attempt_at <= clock_timestamp()
           and intent.chat_id is not null
@@ -852,6 +1072,7 @@ async function claimTradeFundingOutbox(
         order by outbox.next_attempt_at, outbox.created_at
         for update of outbox, intent skip locked
         limit 1`,
+      [TELEGRAM_TRADE_LIFECYCLE_OUTBOX_ACTION],
     );
     const row = rows[0];
     if (!row) return null;
@@ -874,7 +1095,7 @@ async function claimTradeFundingOutbox(
   });
 }
 
-export async function deliverTelegramTradeShortfallProgress(
+export async function deliverTelegramTradeLifecycleProgress(
   input: Readonly<{
     limit?: number;
     pool: Pool;
@@ -895,7 +1116,7 @@ export async function deliverTelegramTradeShortfallProgress(
   let delivered = 0;
   let retried = 0;
   while (claimed < limit) {
-    const row = await claimTradeFundingOutbox(input.pool);
+    const row = await claimTelegramTradeLifecycleOutbox(input.pool);
     if (!row) break;
     claimed += 1;
     const progress = parseProgress(row.payload);
@@ -907,7 +1128,7 @@ export async function deliverTelegramTradeShortfallProgress(
     ) {
       await input.pool.query(
         `update telegram_bot_action_outbox
-            set status = 'dead', last_error = 'trade_funding_payload_invalid',
+            set status = 'dead', last_error = 'telegram_trade_lifecycle_payload_invalid',
                 updated_at = clock_timestamp()
           where id = $1::uuid and status = 'sending'`,
         [row.id],
@@ -938,7 +1159,7 @@ export async function deliverTelegramTradeShortfallProgress(
         `update telegram_bot_action_outbox
             set status = 'retry',
                 next_attempt_at = clock_timestamp() + interval '3 seconds',
-                last_error = 'trade_funding_edit_failed',
+                last_error = 'telegram_trade_lifecycle_edit_failed',
                 delivery_attempt_id = null,
                 delivery_started_at = null,
                 updated_at = clock_timestamp()
