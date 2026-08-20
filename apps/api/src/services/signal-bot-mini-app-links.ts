@@ -183,6 +183,34 @@ export function buildSignalBotMiniAppUrl(input: {
   }
 }
 
+export function buildSignalBotHolderTrackingUrl(input: {
+  address: string | null | undefined;
+  appBaseUrl?: string | null | undefined;
+  chain: string | null | undefined;
+  eventId?: string | null | undefined;
+  marketId?: string | null | undefined;
+  noteId?: string | null | undefined;
+  side?: "NO" | "YES" | null | undefined;
+}): string | null {
+  const address = input.address?.trim();
+  const chain = input.chain?.trim().toLowerCase();
+  if (!address || !chain) return null;
+  const url = new URL(
+    `/tracking/wallet/${encodeURIComponent(address)}`,
+    input.appBaseUrl ?? "https://app.hunch.trade",
+  );
+  url.searchParams.set("chain", chain);
+  url.searchParams.set("utm_source", "telegram_signal_bot");
+  if (input.eventId) url.searchParams.set("signalEventId", input.eventId);
+  if (input.marketId) url.searchParams.set("signalMarketId", input.marketId);
+  if (input.side) url.searchParams.set("signalSide", input.side);
+  if (input.marketId) {
+    url.searchParams.set("signalSource", "telegram_signal_bot");
+  }
+  if (input.noteId) url.searchParams.set("noteId", input.noteId);
+  return url.toString();
+}
+
 export function buildSignalBotTelegramWebAppUrl(input: {
   appBaseUrl: string;
   startParam: string | null | undefined;
