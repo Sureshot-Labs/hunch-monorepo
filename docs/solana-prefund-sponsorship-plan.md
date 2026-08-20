@@ -17,6 +17,14 @@ The safer model is one reusable preflight gate for every Solana operation:
 
 This makes sponsorship a small Privy-backed bootstrap tool, not a standing subsidy for user-owned account rent.
 
+This document remains the default for DFlow, Across, deBridge, and generic
+Solana operations. It does not activate or define Relay SVM funding. Slice E may
+use an explicit capped transaction fee payer for Solana USDC or retain a native
+SOL fee/rent reserve only after the separate policy, fee-payer, and
+custom-program proof in
+[`funding/wp8/slice-e-relay-svm-activation-runbook.md`](./funding/wp8/slice-e-relay-svm-activation-runbook.md).
+That narrow exception does not authorize broad Solana sponsorship.
+
 Develop branch scope:
 
 - Start from `develop`; the current Solana sponsorship branch is reference-only.
@@ -246,6 +254,8 @@ Sponsorship policy for the `develop` implementation:
 - Local Hunch sponsor-wallet flow: do not implement.
 - Sponsorship ledger/reclaim flow: not part of the `develop` implementation.
 - DFlow market init remains allowed only as a Privy-sponsored dedicated admin/system endpoint, not as user trade sponsorship.
+- Relay SVM funding is governed by its own disabled-by-default Slice E
+  capability and activation runbook; this prefund policy cannot enable it.
 
 Introduce one policy section for the shared readiness gate:
 
@@ -351,6 +361,11 @@ The prefund validator should check:
 - expiry and replay protection.
 
 If the validator cannot prove the transaction is a bounded prefund, it must refuse sponsorship.
+
+For custom Solana programs, an application validator and a program-ID allowlist
+do not by themselves prove the outer signer boundary. Any Relay route
+must additionally satisfy the Slice E negative policy matrix or use an
+independently enforced narrow on-chain boundary.
 
 The implementation should not introduce a sponsorship ledger. Keep only short-lived prepare/intent state, preferably in Redis or an equivalent TTL cache, for digest binding, expiry, and replay protection.
 

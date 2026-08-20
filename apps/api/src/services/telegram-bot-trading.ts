@@ -10706,6 +10706,9 @@ export async function handleTelegramBotTradingCallback(
     intent.telegram_message_id = String(input.callbackQuery.message.message_id);
   }
   const restoredFundingVenue = telegramShortfallVenue(intent.venue);
+  const isV2DirectHandoff =
+    intent.funding_operation_id == null &&
+    readTelegramAppHandoffV2Plan(intent)?.kind === "direct_trade";
   if (
     parsed.type === "retry_buy" &&
     intent.status === "cancelled" &&
@@ -10753,6 +10756,8 @@ export async function handleTelegramBotTradingCallback(
     parsed.type === "retry_buy" &&
     intent.action === "buy" &&
     (intent.status === "filled" ||
+      (isV2DirectHandoff &&
+        ["cancelled", "expired", "failed"].includes(intent.status)) ||
       (intent.funding_operation_id != null &&
         intent.submit_started_at == null &&
         ["cancelled", "expired", "failed"].includes(intent.status)))
@@ -10868,6 +10873,20 @@ export async function handleTelegramBotTradingCallback(
     intent.status === "external_handoff" &&
     intent.delivery_mode === "app_handoff" &&
     intent.submit_started_at == null;
+  if (
+    parsed.type === "retry_buy" &&
+    isV2DirectHandoff &&
+    ["executing", "submitted", "reconcile_required"].includes(intent.status)
+  ) {
+    // The Mini App already crossed the direct venue-submit boundary. A status
+    // tap is deliberately read-only: reconciliation owns the next durable
+    // transition and the original card will be edited when it arrives.
+    await input.answerCallbackQuery({
+      callbackQueryId: input.callbackQuery.id,
+      text: "⏳ Hunch is checking the Buy automatically.",
+    });
+    return true;
+  }
   if (
     (isTerminalIntentStatus(intent.status) || intent.status === "executing") &&
     !canReplayMarketExit &&
@@ -12476,14 +12495,16 @@ export async function handleTelegramBotTradingCallback(
                 : "⚠️"
           } ${resolution.callbackText}`,
     });
+    // A terminal card is still part of the Telegram trading journey.  This is
+    // deliberately a callback—not a Mini App link—so it restores the market
+    // card with its live quote, presets, position context, and Back/Home rows.
+    // The Mini App is reserved for an explicit sealed-handoff continuation.
     const filledMarketButton =
       resolution.intentStatus === "filled" && !postSubmitError
-        ? buildTelegramTradingMiniAppButton({
-            appBaseUrl: input.appBaseUrl,
-            path: openMarketUrl(input.appBaseUrl, market),
-            telegramMiniAppEnabled: input.telegramMiniAppEnabled,
+        ? {
+            callback_data: `${TELEGRAM_BOT_TRADING_CALLBACK_PREFIX}:retry_buy:${intent.id}`,
             text: "🎯 Trade this market",
-          })
+          }
         : null;
     const filledKeyboard =
       resolution.intentStatus === "filled" && !postSubmitError

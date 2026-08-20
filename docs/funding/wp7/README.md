@@ -439,13 +439,15 @@ Local implementation status on 2026-07-27:
   only when one exact owned source-location policy, one enabled route, wallet
   ownership, signing mode, observer capability, and destination binding all
   agree; route evidence or an aggregate wallet balance alone is insufficient.
-  Solana USDC and native SOL are now code-registered behind the shared
+  Solana USDC and native SOL are code-registered for receive, planning, exact
+  quote/action validation, and reconciliation behind the shared
   `solana_transfer_v1` canonical event capability. The scanner freezes a
   finalized slot before showing the owner address, watches the derived USDC
   token account for SPL transfers or the exact owned address for System Program
   transfers, parses exact outer/inner instruction coordinates, and stores
   `(signature, instruction coordinate, slot, containing blockhash)` identity.
-  Either asset is advertised only with the same exact owned
+  This is not yet delegated SVM activation. Either asset is advertised only
+  with the same exact owned
   wallet/location/route evidence as Base. The EVM scanner freezes its
   block cursor before the balance snapshot and before showing the address,
   waits for configured external-ingress finality, and scans accepted tokens'
@@ -467,18 +469,26 @@ Local implementation status on 2026-07-27:
   economics fail closed. Completing one child receipt returns an amount-free
   session to `open`, so later canonical receipts can be accepted without
   reopening or inventing another operation;
-- native SOL remains an explicit WP7 requirement and is code-complete as a
-  `review_required` Receive variant; it is not misclassified as an automatic
-  stable path. Its receive option is emitted only with canonical native
-  transfer identity, an exact owned Solana wallet, and an allowlisted Relay
-  route. Receipt ownership becomes Account Value first; the UI then asks once
-  for economic consent showing SOL sold, minimum collateral received, fee,
-  price impact, expiry, and refusal. Acceptance reuses the same
-  liquidity/quote/commit and Funding Operation controller as every other route.
-  The quote keeps a conservative 0.003 SOL reserve outside its input for source
-  execution costs. Runtime activation still requires a service restart, active
-  control-plane route publication, database persistence checks, and tiny-value
-  execution/settlement evidence;
+- native SOL remains an explicit WP7 requirement and the primary Slice E
+  product path. The current `review_required` Receive behavior is only an
+  inactive compatibility state; it is not the target UX. An activated
+  destination-scoped `SOL on Solana` option shows bounded conversion consent
+  before the address and then converts the canonical receipt without a second
+  prompt. Pre-existing/unconsented SOL retains a standalone Convert review; an
+  active Trade includes the conversion in its one Review/Confirm. The receive
+  option is emitted only with canonical native transfer identity, an exact
+  owned Solana wallet, an allowlisted Relay route, fee reserve, and the
+  delegated SVM capability. The quote keeps the larger of a measured/policy
+  reserve and the current conservative 0.003 SOL reserve outside its input.
+  A fresh 2026-08-20 quote changed the Polygon path from the historical
+  eight-instruction Jupiter envelope to one immutable Relay Depository
+  `deposit_native` instruction. Current code rejects that drift fail-closed;
+  the July fixture remains regression evidence only. Runtime activation
+  additionally requires the custom Relay instruction key-level/on-chain
+  boundary in
+  [`../wp8/slice-e-relay-svm-activation-runbook.md`](../wp8/slice-e-relay-svm-activation-runbook.md),
+  service restart, active control-plane publication, database persistence
+  checks, and tiny-value execution/settlement evidence;
 - this code is not runtime-activated until migration, service restart, database
   integration, and live route evidence pass. For Polygon Receive Sessions the
   worker scans at most one active/recovery session for each global

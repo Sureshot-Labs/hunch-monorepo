@@ -408,10 +408,26 @@ exact `solana-sol-to-polygon-pusd` route. Add Funds and trade shortfall express
 the desired pUSD receipt; the Relay adapter uses `EXPECTED_OUTPUT` with a
 bounded output buffer because live `EXACT_OUTPUT` returned
 `NO_SWAP_ROUTES_FOUND`. The planner reserves 0.003 SOL outside the quoted input,
-and the fail-closed SVM validator binds the controlled signer, derived
-USDC/WSOL accounts, exact SOL wrap amount, Jupiter amount/slippage tail, zero
-platform fee, Relay protocol order/refund paths, destination pUSD floor, and
-memo/status correlation before the action can be prepared.
+and the historical fail-closed SVM validator binds the controlled signer,
+derived USDC/WSOL accounts, exact SOL wrap amount, Jupiter amount/slippage tail,
+zero platform fee, Relay protocol order/refund paths, destination pUSD floor,
+and memo/status correlation before the action can be prepared. A fresh
+2026-08-20 quote instead returns one direct immutable Relay Depository
+`deposit_native` instruction, the same action family already modeled for the
+Base route. Current Polygon validation rejects that provider drift before
+commit; Slice E must generalize the direct validator and retain the Jupiter
+fixture only as a negative regression case.
+
+Native SOL always requires explicit economic consent, but the surface depends
+on the user intent. A destination-scoped Deposit obtains bounded conversion
+consent before revealing the receive address and may convert the matching
+canonical receipt without another prompt. An active Trade includes conversion
+inside its single fresh Review/Confirm. Pre-existing, unexpected, or
+out-of-bounds SOL remains Account Value and uses a separate fresh Convert
+review. Delegated execution remains disabled until the shared Solana policy and
+custom Relay instruction boundary pass the normative
+[`../wp8/slice-e-relay-svm-activation-runbook.md`](../wp8/slice-e-relay-svm-activation-runbook.md);
+application validation alone is not activation evidence.
 
 Generic direct Receive and strict Relay ingress are different contracts.
 Privy/manual direct Receive uses a minimum target: partial transfers accumulate,

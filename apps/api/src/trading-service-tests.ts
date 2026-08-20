@@ -3495,7 +3495,7 @@ const tests: TestCase[] = [
       // transfer keeps reconciling and, once ready, its consumer reservation
       // is released to ordinary venue cash rather than a later auto-submit.
       const progressSource = readFileSync(
-        resolve(apiSrcDir, "services/telegram-trade-shortfall-progress.ts"),
+        resolve(apiSrcDir, "services/telegram-trade-lifecycle-progress.ts"),
         "utf8",
       );
       const cancelFundingBlock = sourceSlice(

@@ -205,8 +205,12 @@ are stored atomically. Retry exhaustion, a pre-broadcast child failure, or a
 legacy incomplete review that cannot reconstruct both fails closed to
 `recovery_required` rather than exposing a dead review state.
 A standalone surface exchanges that evidence for a fresh quote and an explicit
-confirmation. A Trade surface instead includes the same conversion inside its
-existing composite quote and single confirmation.
+confirmation when the value is pre-existing, unexpected, or lacks a valid
+destination-scoped Deposit consent. A volatile Deposit instead obtains bounded
+conversion consent before revealing the address; its matching canonical
+receipt may become `automatic_execution` inside those frozen bounds without a
+second prompt. A Trade surface includes the same conversion inside its existing
+composite quote and single confirmation.
 
 Frozen presentation is durable evidence, including exact button, settlement,
 and instruction copy. Migration 0206 upgrades trusted legacy projections from
@@ -218,12 +222,14 @@ lost edit target never falls back to an untrackable address message.
 This profile is the stable-to-stable foundation, not authority to convert any
 asset silently. Future Relay adapters may auto-convert supported stablecoins to
 the stable accepted by the destination venue. A volatile source such as SOL
-must instead be explicitly represented in a fresh quote. Standalone funding
-uses a separately reviewed `Convert to <venue stable>` action; an already
-started Trade shows the conversion in its composite quote and its existing
-Trade Confirm authorizes the whole route without a second prompt. Both may
-reuse the same operation, attempt, recovery, and delivery machinery, but must
-not reuse this slice's stable automation consent.
+must instead be explicitly represented in a bounded economic review. A
+destination-scoped Deposit performs that review before revealing the address
+and needs no second prompt for a matching in-bounds receipt. Pre-existing or
+unconsented Account Value uses a separately reviewed `Convert to <venue stable>`
+action. An already-started Trade shows the conversion in its composite quote
+and its existing Trade Confirm authorizes the whole route without a second
+prompt. All three may reuse the same operation, attempt, recovery, and delivery
+machinery, but must not reuse this slice's stable automation consent.
 
 ## Capability and pause semantics
 

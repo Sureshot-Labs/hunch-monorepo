@@ -117,11 +117,13 @@ Polygon and Base use the canonical ERC-20 event capability; Base must still
 remain unadvertised unless its exact owned source-location policy and route
 evidence pass. Solana USDC and native SOL use the canonical
 `solana_transfer_v1` signature/instruction capability and are subject to the
-same exact wallet/location/route gate. Unit fixtures now cover SPL USDC and
-System Program native transfers plus the `review_required` disposition. Runtime
-activation remains blocked until migration `0190`, persistence integration,
-service restart, exact route discovery, and a tiny-value review/commit test
-pass.
+same exact wallet/location/route gate. Unit fixtures cover SPL USDC and System
+Program native transfers; the existing `review_required` native-SOL disposition
+is an inactive compatibility path, not the target Deposit UX. Runtime
+activation remains blocked until persistence integration, service restart,
+exact route discovery, the positive/negative Privy/on-chain policy matrix in
+[`../wp8/slice-e-relay-svm-activation-runbook.md`](../wp8/slice-e-relay-svm-activation-runbook.md),
+and tiny-value delegated execution evidence pass.
 
 ## 4. Tiny-value live matrix
 
@@ -148,21 +150,28 @@ timestamps, and final database state for every case.
 8. Existing owned native SOL source: create a small SOL balance on the test
    user's Solana
    wallet, use it first as the source for a Limitless Base USDC BUY shortfall
-   through the direct `solana-sol-to-base-usdc` route, require the economic
-   review, and retain enough SOL for any unsponsored source action. Record
-   quote, signature-to-confirmation, Relay fill, destination-observation, and
-   resumed-Buy timings separately. Then test the Polygon pUSD route independently.
+   through the direct `solana-sol-to-base-usdc` route, show the conversion in
+   the one composite Trade Review/Confirm, and retain enough SOL for any
+   unsponsored source action. Assert there is no second conversion prompt.
+   Record quote, signature-to-confirmation, Relay fill,
+   destination-observation, and resumed-Buy timings separately. Then test the
+   priority Polygon path `native SOL -> Relay Depository -> pUSD -> Buy`
+   independently.
 9. External native SOL Receive: choose Polymarket or Limitless, `Send crypto`,
-   SOL/Solana, verify that the exact Solana address and QR are shown, send a
-   tiny transfer, observe a canonical native receipt in `review_required`,
-   review the live minimum output/fees/expiry, commit once, and verify the
-   linked child Funding Operation reaches the selected Trading Balance.
+   SOL/Solana, verify that bounded conversion disclosure/consent is required
+   before the exact Solana address and QR are shown, send a tiny transfer, and
+   observe a canonical native receipt. When the fresh quote stays inside the
+   frozen bounds, assert that it commits once without another prompt and the
+   linked child Funding Operation reaches the selected Trading Balance. Repeat
+   with an out-of-bounds quote and assert the SOL remains owned while a fresh
+   standalone Convert review is offered.
 10. External Solana ingress: after the specific Solana USDC/SOL receive
     capability is activated, choose it in Add Funds, verify the Solana address
     and exact asset instructions, send a tiny amount, then verify
     `solana-usdc-to-base-usdc` direct stable routing or
-    `solana-sol-to-base-usdc` post-receipt volatile review for Limitless. Assert
-    that no Polygon intermediate child operation is created.
+    `solana-sol-to-base-usdc` bounded pre-address volatile conversion for
+    Limitless. Assert that no Polygon intermediate child operation or duplicate
+    post-receipt conversion prompt is created.
 11. Composite source: split value across two eligible Hunch balances so neither
     alone covers the BUY but the backend composite option does. Verify one
     operation, sequential legs, one review, and one settled consumer

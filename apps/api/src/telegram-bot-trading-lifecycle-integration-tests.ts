@@ -21,6 +21,7 @@ import {
   captureTelegramBotTradingCallback,
   reconcileStaleTelegramTradeIntents,
 } from "./services/telegram-bot-trading.js";
+import { runTelegramTradeLifecycleProjectionBatchInTransaction } from "./services/telegram-trade-lifecycle-progress.js";
 
 const client = await pool.connect();
 
@@ -461,6 +462,82 @@ try {
     "Cancel returns to the complete market action card instead of ending navigation",
   );
 
+  // A direct v2 handoff has no FundingOperation. Its exact Buy still owns the
+  // original Telegram card, so each ordinary intent transition must create one
+  // monotonic edit rather than wait for the funding-only projector forever.
+  const directLifecycleIntent = await client.query<{ id: string }>(
+    `insert into telegram_trade_intents (
+       telegram_user_id, user_id, authorization_id, chat_id,
+       telegram_message_id, action, venue, market_id, event_id, side,
+       amount_usd, status, expires_at, idempotency_key, delivery_mode, result
+     ) values (
+       $1, $2, $3, $1, '701', 'buy', 'polymarket', $4, $5, 'YES',
+       1, 'external_handoff', now() + interval '2 minutes', $6, 'app_handoff',
+       jsonb_build_object(
+         'appHandoffExecution',
+         jsonb_build_object('version', 2, 'committedAt', now()::text)
+       )
+     ) returning id`,
+    [
+      telegramUserId,
+      userId,
+      authorization.id,
+      marketId,
+      eventId,
+      `direct-lifecycle:${suffix}`,
+    ],
+  );
+  const directLifecycleIntentId = directLifecycleIntent.rows[0]?.id;
+  assert.ok(directLifecycleIntentId);
+
+  const awaitingClient =
+    await runTelegramTradeLifecycleProjectionBatchInTransaction(client);
+  assert.equal(awaitingClient.created, 1);
+  await client.query(
+    `update telegram_trade_intents
+        set status = 'executing',
+            submit_started_at = now(),
+            updated_at = now()
+      where id = $1::uuid`,
+    [directLifecycleIntentId],
+  );
+  const submittingDirect =
+    await runTelegramTradeLifecycleProjectionBatchInTransaction(client);
+  assert.equal(submittingDirect.created, 1);
+  await client.query(
+    `update telegram_trade_intents
+        set status = 'filled',
+            venue_order_id = 'direct-lifecycle-order',
+            updated_at = now()
+      where id = $1::uuid`,
+    [directLifecycleIntentId],
+  );
+  const filledDirect =
+    await runTelegramTradeLifecycleProjectionBatchInTransaction(client);
+  assert.equal(filledDirect.created, 1);
+  const unchangedDirect =
+    await runTelegramTradeLifecycleProjectionBatchInTransaction(client);
+  assert.equal(unchangedDirect.created, 0);
+  const directLifecycleOutbox = await client.query<{
+    revision: number;
+    state: string;
+    status: string;
+  }>(
+    `select outbox.state_revision as revision,
+            outbox.payload ->> 'state' as state,
+            outbox.status
+       from telegram_bot_action_outbox outbox
+      where outbox.trade_intent_id = $1::uuid
+        and outbox.action = 'trade_funding_edit'
+      order by outbox.state_revision`,
+    [directLifecycleIntentId],
+  );
+  assert.deepEqual(directLifecycleOutbox.rows, [
+    { revision: 1, state: "awaiting_client", status: "dead" },
+    { revision: 2, state: "submitting_trade", status: "dead" },
+    { revision: 3, state: "filled", status: "pending" },
+  ]);
+
   const terminalFundingQuote = await client.query<{ id: string }>(
     `insert into funding_quotes (
        user_id, discovery_projection_id, selected_source_option_snapshot,
@@ -555,6 +632,21 @@ try {
       )
     ).rows[0]?.status,
     "failed",
+  );
+  const projectedTerminalFunding =
+    await runTelegramTradeLifecycleProjectionBatchInTransaction(client);
+  assert.equal(projectedTerminalFunding.created, 1);
+  assert.equal(
+    (
+      await client.query<{ state: string | null }>(
+        `select result -> 'shortfallProgress' ->> 'state' as state
+           from telegram_trade_intents
+          where id = $1::uuid`,
+        [staleFundingIntent.rows[0]?.id],
+      )
+    ).rows[0]?.state,
+    "stopped",
+    "A terminal funded shortfall keeps the existing Funding stopped renderer",
   );
 
   const actionRows = await client.query<{ action: string }>(

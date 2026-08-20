@@ -450,15 +450,20 @@ sources:
    bounded automatic conversion to the stable collateral accepted by the venue.
    The session freezes destination, asset identity, expiry, route class, caps,
    signer, fee/slippage policy, and recovery contract before showing the address.
-2. Selecting a volatile option such as `SOL on Solana` authorizes only receipt
-   and ownership tracking. It never authorizes selling the asset. The user may
-   still send SOL to the verified owned address without understanding Relay,
-   policies, grants, or signers.
-3. In standalone Deposit or Account Value, an observed volatile balance gets an
+2. Selecting a destination-scoped volatile option such as `SOL on Solana`
+   presents explicit bounded conversion consent before the verified address is
+   revealed. The review states the source asset, destination stable, maximum raw
+   input, maximum fee/slippage, output-floor policy, expiry, and refusal.
+   Selection authorizes automatic conversion of the later canonical receipt
+   only inside those frozen bounds; it does not authorize another asset,
+   destination, route, or amount.
+3. A pre-existing volatile Account Value balance, an unexpected receipt, or a
+   receipt whose eventual quote is outside the frozen Deposit bounds gets an
    explicit `Convert to <venue stable>` CTA. Opening it obtains a fresh quote and
    shows exact/max input, expected and minimum output, fees, price impact,
    slippage, route expiry, and destination. The user explicitly confirms before
-   commit; until then the asset remains ordinary owned Account Value.
+   commit; until then the asset remains ordinary owned Account Value. A valid
+   destination-scoped Deposit receipt does not ask again after arrival.
 4. In an already-started Trade, the fresh composite trade quote visibly includes
    the volatile conversion and all of the same economic bounds. The existing
    Trade Review/Confirm authorizes the complete conversion-plus-trade route;
@@ -468,10 +473,12 @@ sources:
    ownership and enters a typed unavailable/recovery state; it never substitutes
    an asset, destination, or route.
 
-The standalone volatile happy path is therefore `choose destination` -> `send`
--> `received as Account Value` -> `Convert to <venue stable>` -> `review and
-confirm fresh quote` -> `ready to trade`. The active-Trade path is `fresh
-composite quote` -> `one Trade Confirm` -> `convert and route` -> `place trade`.
+The destination-scoped volatile Deposit happy path is therefore `choose
+destination` -> `review bounded SOL conversion` -> `show address and send` ->
+`convert canonical receipt inside bounds` -> `ready to trade`. Pre-existing or
+unconsented Account Value uses `Convert to <venue stable>` -> `review and
+confirm fresh quote`. The active-Trade path is `fresh composite quote` -> `one
+Trade Confirm` -> `convert and route` -> `place trade`.
 
 Normative Add Funds decision flow:
 
@@ -676,11 +683,18 @@ feed Base USDC without a Polygon intermediate. Native SOL is a typed Solana
 Receive variant with canonical System Program transfer identity. Its current
 code-level `review_required` behavior predates section 2.9.1 and must remain
 rollout-disabled until it is replaced by destination-scoped
-`automatic_conversion` with the required disclosure, caps, recovery, and live
-evidence. Native Polygon USDC without an exact registered route and other
-unregistered assets remain future adapters, not symbol aliases. Native SOL is
-never auto-sold merely because it arrived outside such an explicitly selected
-Receive Session.
+`automatic_conversion` with the required pre-address disclosure/consent, caps,
+recovery, and live evidence. Native Polygon USDC without an exact registered
+route and other unregistered assets remain future adapters, not symbol aliases.
+Native SOL is never auto-sold merely because it arrived outside such an
+explicitly selected Receive Session or an already-confirmed Trade.
+
+Native SOL -> Relay Depository is the first Slice E product priority, not a
+secondary follow-up to Solana USDC. Its delegated activation additionally
+requires the key-level custom-program boundary in
+[`funding/wp8/slice-e-relay-svm-activation-runbook.md`](./funding/wp8/slice-e-relay-svm-activation-runbook.md).
+A Privy policy that only allowlists the Relay Depository program ID is not exact
+instruction authorization.
 
 #### Open top-up session and child-operation contract
 
@@ -703,10 +717,12 @@ Operation:
    route class, maximum fee/slippage, amount cap, signer, and destination
    policy.
 5. An activated volatile Receive option such as native SOL may show an owned
-   receive address without inventing an amount, but selection authorizes receipt
-   tracking only. After observation, standalone funding exposes an explicit
-   quoted `Convert to <venue stable>` action; an active Trade instead includes
-   the conversion in its one fresh composite quote and Trade Confirm. A receipt
+   receive address without inventing an amount only after the user accepts its
+   bounded destination-scoped conversion contract. A canonical receipt inside
+   that contract routes automatically without another prompt. Pre-existing,
+   unexpected, or out-of-bounds volatile value exposes an explicit quoted
+   `Convert to <venue stable>` action; an active Trade instead includes the
+   conversion in its one fresh composite quote and Trade Confirm. A receipt
    cannot inherit stable-automation authority from the address it reached.
 6. A late receipt is never lost because a UI session expired. It remains owned
    Account Value and is either associated with a recoverable session or shown
@@ -739,11 +755,13 @@ contracts but remain different user journeys:
   Default to the recommended proven option, but expose every other activated
   option with direct or automatic-conversion semantics. Before revealing an
   stable automatic-conversion address, disclose that received stable funds are
-  converted to the venue's accepted stable without another prompt. A volatile
-  option discloses that receipt is tracked first and standalone conversion
-  requires the later quoted `Convert to <venue stable>` confirmation. Then show
-  the exact network, asset contract label, address, QR, copy action, warnings,
-  and durable status. Unsupported routes are absent, not optimistic.
+  converted to the venue's accepted stable without another prompt. Before
+  revealing a volatile address, show and require the bounded conversion consent;
+  a matching receipt then converts without another prompt. Pre-existing,
+  unexpected, or out-of-bounds volatile value retains the later quoted
+  `Convert to <venue stable>` path. Then show the exact network, asset contract
+  label, address, QR, copy action, warnings, and durable status. Unsupported
+  routes are absent, not optimistic.
 - **Convert**: use the canonical large `From`/`To` balance cards, venue and
   asset/network labels, amount plus `Max`, computed receive amount, fee,
   price impact, ETA, expiry, and an optional advanced slippage control. Raw
@@ -1000,6 +1018,15 @@ An exact Privy action policy applies to the wallet action API actually used.
 Privy-managed EIP-7702 sponsorship may be accepted only through its pinned,
 action-validated execution profile. A provider-supplied Relay
 `authorizationList` is not forwarded merely because Privy can use EIP-7702.
+
+For Solana, Privy evaluates every outer instruction independently and defaults
+unmatched instructions to deny. Its arbitrary-program policy source exposes a
+program ID, not Relay instruction bytes, amount, order ID, or account roles; Wallet Action
+`action_request_body` conditions do not constrain raw
+`signAndSendTransaction` payloads. Therefore a custom-program allowlist plus an
+application validator is not a sufficient delegated native-SOL boundary. The
+full decision and negative-proof contract lives in
+[`funding/wp8/slice-e-relay-svm-activation-runbook.md`](./funding/wp8/slice-e-relay-svm-activation-runbook.md).
 
 ### 5.3 Across
 
@@ -2675,6 +2702,12 @@ Extract only venue-neutral behavior from existing Solana code:
 The new boundary imports no Kalshi/DFlow service. Sponsoring an ATA that can be
 closed for rent to an unintended recipient fails validation.
 
+This shared implementation boundary is not an activation claim. System and SPL
+Token policy rules may use Privy's decoded instruction fields, while Relay
+custom-program instructions still require the separately proved outer boundary
+in the Slice E runbook. No generic `programId` allowlist or
+broad Solana signer grant may substitute for that proof.
+
 ## 15. Venue capabilities
 
 ### 15.1 Polymarket
@@ -3032,20 +3065,22 @@ Sell/Redeem.
 
 1. User chooses `Polymarket`, then the activated `SOL on Solana` Deposit crypto
    option. An amount is not required for an owned Receive target.
-2. Before showing the address, Hunch says the received SOL will remain owned
-   value until the user converts it. Choosing the option authorizes receipt
-   tracking, not sale or conversion.
+2. Before showing the address, Hunch says the received SOL will be converted to
+   pUSD and shows the destination, maximum accepted input/cap, maximum fee and
+   slippage, output-floor policy, expiry, and refusal. Choosing the reviewed
+   option authorizes that bounded conversion for the later canonical receipt.
 3. Backend freezes the exact destination binding, receive target, native-SOL
-   identity, expiry, and observer cursor before tracking starts and the address
-   is revealed.
+   identity, expiry, observer cursor, conversion class, raw cap, fee/slippage
+   caps, output-floor policy, signer, and policy revision before tracking starts
+   and the address is revealed.
 4. The canonical receipt fixes the available input amount and records it in
-   Account Value. Standalone Add Funds shows `Convert to pUSD`; opening it gets
-   a fresh exact-input or exact-output quote with fee, slippage, minimum output,
-   price impact, and expiry.
-5. Only the user's explicit Convert confirmation commits the standalone route.
-   If this funding is already part of a Trade, the same conversion is instead
-   included visibly in the one fresh composite Trade quote and its Trade
-   Confirm, with no second prompt.
+   Account Value. If a fresh Relay quote stays inside the frozen contract, the
+   receipt commits automatically; there is no second conversion prompt. If it
+   does not, the SOL remains owned and a later `Convert to pUSD` action requires
+   a fresh review.
+5. If funding is already part of a Trade, the same conversion is included
+   visibly in the one fresh composite Trade quote and its Trade Confirm, with
+   no separate Deposit or conversion confirmation.
 6. Execute and reconcile the activated Solana SOL → Polygon pUSD route, then any
    exact Polymarket readiness step. Provider submission is progress, not success.
 7. Destination observation makes the received value ordinary Polymarket cash
@@ -3065,8 +3100,9 @@ Sell/Redeem.
    quoteable, and inside policy.
 3. Relay `EXPECTED_OUTPUT` derives the bounded source input required for the
    Base USDC shortfall and returns one SVM transaction. Solana USDC may proceed
-   automatically inside equivalent-stable caps. Native SOL always requires
-   explicit economic consent: a standalone Convert confirmation, or the one
+   automatically inside equivalent-stable caps. Native SOL requires explicit
+   economic consent supplied by a matching destination-scoped Deposit, a
+   standalone Convert confirmation for pre-existing Account Value, or the one
    composite Trade Review/Confirm when a Trade is already in progress.
 4. The fail-closed validator binds source amount, protocol order ID, controlled
    Solana signer, Base USDC recipient/refund, instruction discriminator, and
@@ -4626,6 +4662,8 @@ Each route requires:
 - exact destination observation and venue readiness;
 - amount-band fee/output/latency measurement;
 - tiny-value successful settlement where permitted;
+- for delegated routes, exact serialized signer/policy read-back plus negative
+  mutations proving the outer boundary independently of application validation;
 - support runbook and alert coverage;
 - admin policy entry and rollback behavior.
 
@@ -5025,6 +5063,10 @@ Privy:
 - [Gas sponsorship security](https://docs.privy.io/wallets/gas-and-asset-management/gas/security)
 - [Wallet actions](https://docs.privy.io/wallets/actions/overview)
 - [Wallet policies and controls](https://docs.privy.io/security/wallet-infrastructure/policy-and-controls)
+- [Policy overview and evaluation semantics](https://docs.privy.io/controls/policies/overview)
+- [Solana policy examples and limitations](https://docs.privy.io/controls/policies/example-policies/solana)
+- [Solana sign-and-send API](https://docs.privy.io/api-reference/wallets/solana/sign-and-send-transaction)
+- [Solana gas sponsorship](https://docs.privy.io/wallets/gas-and-asset-management/gas/solana)
 - [Connected and linked wallets](https://docs.privy.io/wallets/wallets/get-a-wallet/get-connected-wallet)
 - [Global wallet consent and execution](https://docs.privy.io/wallets/global-wallets/overview)
 
