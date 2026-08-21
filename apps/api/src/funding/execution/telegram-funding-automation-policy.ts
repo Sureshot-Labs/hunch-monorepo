@@ -1,4 +1,5 @@
 import type { AssetRef, JsonValue } from "../domain/types.js";
+import { isPositiveRawAmount } from "../domain/raw-amount.js";
 import type { DirectIngressObservationVariant } from "../reconciliation/direct-ingress-observer.js";
 import { sameAsset } from "../domain/asset-identity.js";
 import type { TelegramFundingAuthorization } from "./telegram-funding-authorization.js";
@@ -318,7 +319,7 @@ export function buildTelegramRelayEvmAutomationPolicyV3(
     !isTelegramRelayEvmFundingProfileId(input.authorization.profileId) ||
     input.authorization.securityClass !== "routed_value_movement" ||
     input.authorization.maxSourceRaw == null ||
-    !/^[1-9][0-9]*$/u.test(input.authorization.maxSourceRaw) ||
+    !isPositiveRawAmount(input.authorization.maxSourceRaw) ||
     !isTelegramRelayIngressNetworkId(sourceNetworkId) ||
     !isTelegramRelayVenueId(input.authorization.venueId) ||
     !sameAsset(input.sourceAsset, input.authorization.sourceAsset) ||
@@ -382,8 +383,7 @@ export function parseTelegramRelayEvmAutomationPolicyV3(
     !isTelegramRelayEvmFundingProfileId(candidate.profileId) ||
     candidate.fullReceipt !== false ||
     !isTelegramRelayVenueId(candidate.venueId) ||
-    typeof candidate.maxSourceRaw !== "string" ||
-    !/^[1-9][0-9]*$/u.test(candidate.maxSourceRaw)
+    !isPositiveRawAmount(candidate.maxSourceRaw)
   )
     return null;
   const sourceAsset = asset(candidate.sourceAsset);

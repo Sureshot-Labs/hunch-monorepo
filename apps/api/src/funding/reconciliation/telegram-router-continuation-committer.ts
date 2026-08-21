@@ -9,6 +9,7 @@ import type {
   JsonValue,
   WalletExecutionProfile,
 } from "../domain/types.js";
+import { isPositiveRawAmount } from "../domain/raw-amount.js";
 import { sameAsset } from "../domain/asset-identity.js";
 import {
   loadPolymarketPusdFundExecutionConfiguration,
@@ -120,9 +121,7 @@ function readExactRootAmount(row: CandidateRow): ExactRootAmount | null {
     typeof row.root_amount === "object" && row.root_amount !== null
       ? readAsset((row.root_amount as Record<string, unknown>).asset)
       : null;
-  return typeof raw === "string" && /^[1-9][0-9]*$/u.test(raw) && asset
-    ? { asset, raw }
-    : null;
+  return isPositiveRawAmount(raw) && asset ? { asset, raw } : null;
 }
 
 function profileFor(

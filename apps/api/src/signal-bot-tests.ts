@@ -7213,6 +7213,31 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
+    name: "temporary shortfall failure offers retry, market exit, Deposit and Home",
+    run: () => {
+      const intentId = "11111111-1111-4111-8111-111111111111";
+      assert.deepEqual(
+        telegramBotTradingTestHooks
+          .buildTelegramTradeShortfallUnavailableReplyMarkup(
+            intentId,
+            "polymarket",
+          )
+          .inline_keyboard.flat()
+          .map((button) =>
+            "callback_data" in button
+              ? [button.text, button.callback_data]
+              : [button.text, null],
+          ),
+        [
+          ["🔄 Retry balance check", `hbt:retry_buy:${intentId}`],
+          ["⬅️ Back to market", `hbt:cancel:${intentId}`],
+          ["Deposit", "hm:v1:deposit:polymarket"],
+          ["🏠 Home", "hm:v1:home"],
+        ],
+      );
+    },
+  },
+  {
     name: "Telegram venue status serializes ready, setup, funding and unavailable states",
     run: () => {
       const authorization = {

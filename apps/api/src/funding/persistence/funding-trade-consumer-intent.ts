@@ -1,6 +1,10 @@
 import type { AssetRef, Money } from "../domain/types.js";
 import { canonicalAssetId, sameAsset } from "../domain/asset-identity.js";
 import {
+  isPositiveRawAmount,
+  parsePositiveRawAmount,
+} from "../domain/raw-amount.js";
+import {
   assertVenueLocalMarketContextId,
   isCanonicalUnifiedMarketId,
 } from "../domain/market-identity.js";
@@ -22,7 +26,7 @@ export type FundingTradeConsumerIntentInput = Omit<
 >;
 
 function assertPositiveRaw(raw: string): void {
-  if (!/^[1-9][0-9]*$/.test(raw)) {
+  if (!isPositiveRawAmount(raw)) {
     throw new Error("funding trade spend must be a positive raw-unit integer");
   }
 }
@@ -132,19 +136,20 @@ export function storedFundingTradeConsumerIntent(
     typeof context.marketContextId !== "string" ||
     typeof context.venueId !== "string" ||
     typeof context.marketId !== "string" ||
-    typeof context.requestedCollateralRaw !== "string" ||
-    !/^[1-9][0-9]*$/.test(context.requestedCollateralRaw) ||
-    typeof requestedFunding.raw !== "string" ||
-    !/^[1-9][0-9]*$/.test(requestedFunding.raw) ||
+    !isPositiveRawAmount(context.requestedCollateralRaw) ||
+    !isPositiveRawAmount(requestedFunding.raw) ||
     stored.operationVenueId !== context.venueId ||
     stored.operationMarketId !== context.marketId ||
     !sameAsset(collateralAsset, requestedFundingAsset) ||
     !sameAsset(collateralAsset, stored.reservationAsset) ||
-    !/^[1-9][0-9]*$/.test(stored.reservationRawAmount) ||
-    BigInt(stored.reservationRawAmount) < BigInt(requestedFunding.raw)
+    !isPositiveRawAmount(stored.reservationRawAmount)
   ) {
     return null;
   }
+  const reservationRaw = parsePositiveRawAmount(stored.reservationRawAmount);
+  const requestedFundingRaw = parsePositiveRawAmount(requestedFunding.raw);
+  if (reservationRaw == null || requestedFundingRaw == null) return null;
+  if (reservationRaw < requestedFundingRaw) return null;
   try {
     return buildFundingTradeConsumerIntent({
       venueId: context.venueId,

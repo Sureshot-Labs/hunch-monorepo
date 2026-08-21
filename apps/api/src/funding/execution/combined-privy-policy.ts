@@ -1,4 +1,5 @@
 import type { PrivyPolicyMetadata } from "../../privy-service.js";
+import { parsePositiveRawAmount } from "../domain/raw-amount.js";
 import {
   type PolicyValidationResult,
   type PrivyBotPolicyProfile,
@@ -59,9 +60,9 @@ export function validateCombinedPolymarketRelayPolicy(
 
   const relayValidation = validateRelayEvmPolicyRules(input.policy.rules);
   const expectedCap = input.relayMaxSourceRaw?.trim() ?? "";
+  const expectedCapRaw = parsePositiveRawAmount(expectedCap);
   const capMatches =
-    /^[1-9][0-9]*$/u.test(expectedCap) &&
-    relayValidation.maxSourceRaw === BigInt(expectedCap);
+    expectedCapRaw != null && relayValidation.maxSourceRaw === expectedCapRaw;
   const relayIssues = [...relayValidation.issues];
   if (!capMatches) {
     relayIssues.push(

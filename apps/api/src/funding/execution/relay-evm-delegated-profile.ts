@@ -1,6 +1,7 @@
 import { ethers } from "ethers";
 
 import type { JsonValue, NormalizedAction } from "../domain/types.js";
+import { parsePositiveRawAmount } from "../domain/raw-amount.js";
 import { sameAccountAddress } from "../domain/asset-identity.js";
 import {
   RELAY_DEPOSITORY_V2,
@@ -21,7 +22,7 @@ const ERC20 = new ethers.Interface([
 export type RelayEvmDelegatedStepKind = "approve" | "deposit" | "cleanup";
 
 function positiveRaw(value: string): bigint | null {
-  return /^[1-9][0-9]*$/u.test(value) ? BigInt(value) : null;
+  return parsePositiveRawAmount(value);
 }
 
 function expectedApprovalRaw(

@@ -19,6 +19,7 @@ import {
   assertTelegramTradeShortfallDelegatedRelayActionTtl,
   buildTelegramTradeShortfallCommitRequest,
   buildTelegramTradeShortfallRequest,
+  isTelegramTradeShortfallBalanceStable,
   resolveTelegramTradeShortfallCommitAmounts,
   resolveTelegramTradeShortfallExecutionProfile,
   selectedTelegramTradeShortfallFundingRaw,
@@ -102,6 +103,16 @@ assert.equal(
   }),
   null,
   "a selected route cannot underfund the observed trade shortfall",
+);
+assert.equal(
+  isTelegramTradeShortfallBalanceStable("324098", "324098"),
+  true,
+  "a route-floor replan keeps the economic gap stable even when it funds 500000 raw",
+);
+assert.equal(
+  isTelegramTradeShortfallBalanceStable("324098", "324099"),
+  false,
+  "a real destination balance change still invalidates the delegated replan",
 );
 
 const exactTopUpRequest = buildTelegramTradeShortfallRequest({

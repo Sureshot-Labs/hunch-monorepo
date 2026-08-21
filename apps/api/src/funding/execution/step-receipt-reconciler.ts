@@ -21,6 +21,7 @@ import type {
   JsonValue,
   SvmTransactionAction,
 } from "../domain/types.js";
+import { isPositiveRawAmount } from "../domain/raw-amount.js";
 import {
   applyFundingStepReceiptEvidence,
   listFundingStepReceiptTargets,
@@ -413,8 +414,7 @@ function exactErc20SourceDebit(
     typeof assetId !== "string" ||
     typeof source !== "string" ||
     typeof recipient !== "string" ||
-    typeof expectedRaw !== "string" ||
-    !/^[1-9][0-9]*$/u.test(expectedRaw)
+    !isPositiveRawAmount(expectedRaw)
   )
     return {
       required: true,

@@ -2,6 +2,7 @@ import { tx, type Pool, type PoolClient } from "@hunch/infra";
 
 import { canonicalJsonHash } from "../persistence/canonical.js";
 import type { AssetRef } from "../domain/types.js";
+import { isPositiveRawAmount } from "../domain/raw-amount.js";
 import {
   canonicalAccountAddress,
   sameAccountAddress,
@@ -529,7 +530,7 @@ export async function grantTelegramFundingAuthorization(
   const venueId = input.venueId ?? "polymarket";
   if (
     securityClass === "routed_value_movement" &&
-    (maxSourceRaw == null || !/^[1-9][0-9]*$/u.test(maxSourceRaw))
+    (maxSourceRaw == null || !isPositiveRawAmount(maxSourceRaw))
   ) {
     throw new Error("routed funding authorization requires a positive cap");
   }

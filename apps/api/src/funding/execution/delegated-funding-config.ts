@@ -1,5 +1,6 @@
 import { POLYMARKET_FUNDING_ROUTER } from "@hunch/contracts";
 
+import { isPositiveRawAmount } from "../domain/raw-amount.js";
 import {
   POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
   POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
@@ -88,7 +89,7 @@ export function relayEvmProfileConfigured(
     config.signerFingerprint.length >= 32 &&
     config.policyId.length >= 3 &&
     config.policyFingerprint.length >= 32 &&
-    /^[1-9][0-9]*$/u.test(config.maxSourceRaw) &&
+    isPositiveRawAmount(config.maxSourceRaw) &&
     config.minimumSequentialTtlMs >= 30_000
   );
 }

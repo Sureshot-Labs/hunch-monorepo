@@ -5,6 +5,7 @@ import type {
   FundingReceiveSessionChannel,
   JsonValue,
 } from "../domain/types.js";
+import { isPositiveRawAmount } from "../domain/raw-amount.js";
 import {
   canonicalAccountAddress,
   canonicalAssetId,
@@ -869,7 +870,7 @@ function commitReservations(
     const key = `${reservation.componentId}\u0000${reservation.mode}`;
     if (
       keys.has(key) ||
-      !/^[1-9][0-9]*$/.test(reservation.rawAmount) ||
+      !isPositiveRawAmount(reservation.rawAmount) ||
       (reservation.segmentOrdinal !== null &&
         (!Number.isInteger(reservation.segmentOrdinal) ||
           reservation.segmentOrdinal < 0)) ||
