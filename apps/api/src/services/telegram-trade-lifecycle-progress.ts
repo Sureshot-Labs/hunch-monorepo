@@ -982,14 +982,13 @@ function progressKeyboard(
   progress: TelegramTradeLifecycleProgress,
 ): TelegramBotTradingClientReplyMarkup {
   const rows: TelegramBotTradingClientButton[][] = [];
+  const openMarket = {
+    callback_data: `${CALLBACK_PREFIX}:open_market:${progress.intentId}`,
+    text: "🎯 Open market",
+  } as const;
   if (progress.isDirectHandoff) {
     if (progress.state === "filled") {
-      rows.push([
-        {
-          callback_data: `${CALLBACK_PREFIX}:retry_buy:${progress.intentId}`,
-          text: "🎯 Trade this market",
-        },
-      ]);
+      rows.push([{ ...openMarket, text: "🎯 Trade this market" }]);
       rows.push([
         { callback_data: "hm:v1:positions", text: "💼 My positions" },
       ]);
@@ -1001,12 +1000,7 @@ function progressKeyboard(
         },
       ]);
     } else if (progress.state === "failed" || progress.state === "cancelled") {
-      rows.push([
-        {
-          callback_data: `${CALLBACK_PREFIX}:retry_buy:${progress.intentId}`,
-          text: "🎯 Open market",
-        },
-      ]);
+      rows.push([openMarket]);
     } else {
       rows.push([
         {
@@ -1027,12 +1021,7 @@ function progressKeyboard(
     return { inline_keyboard: rows };
   }
   if (progress.state === "filled") {
-    rows.push([
-      {
-        callback_data: `${CALLBACK_PREFIX}:retry_buy:${progress.intentId}`,
-        text: "🎯 Trade this market",
-      },
-    ]);
+    rows.push([{ ...openMarket, text: "🎯 Trade this market" }]);
     rows.push([{ callback_data: "hm:v1:positions", text: "💼 My positions" }]);
   }
   if (
@@ -1054,11 +1043,12 @@ function progressKeyboard(
     progress.state === "stopped"
   ) {
     rows.push([
-      {
-        callback_data: `${CALLBACK_PREFIX}:retry_buy:${progress.intentId}`,
-        text:
-          progress.state === "stopped" ? "🎯 Open market" : "🔄 Check status",
-      },
+      progress.state === "stopped"
+        ? openMarket
+        : {
+            callback_data: `${CALLBACK_PREFIX}:retry_buy:${progress.intentId}`,
+            text: "🔄 Check status",
+          },
     ]);
   }
   if (progress.canCancel) {
@@ -1080,6 +1070,10 @@ function progressKeyboard(
   rows.push([{ callback_data: "hm:v1:home", text: "🏠 Home" }]);
   return { inline_keyboard: rows };
 }
+
+export const telegramTradeLifecycleProgressTestHooks = {
+  progressKeyboard,
+};
 
 async function claimTelegramTradeLifecycleOutbox(
   pool: Pool,

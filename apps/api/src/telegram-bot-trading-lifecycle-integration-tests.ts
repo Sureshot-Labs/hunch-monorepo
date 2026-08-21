@@ -462,6 +462,172 @@ try {
     "Cancel returns to the complete market action card instead of ending navigation",
   );
 
+  const insertExpiredIntent = async (
+    label: string,
+    action: "buy" | "redeem" | "sell",
+  ) => {
+    const result = await client.query<{ id: string }>(
+      `insert into telegram_trade_intents (
+         telegram_user_id, user_id, authorization_id, chat_id,
+         telegram_message_id, action, venue, market_id, side, amount_usd,
+         shares_raw, status, expires_at, idempotency_key
+       ) values (
+         $1, $2, $3, $1, '700', $5, 'polymarket', $4,
+         case when $5 = 'redeem' then null else 'YES' end,
+         case when $5 = 'buy' then 1 else null end,
+         case when $5 = 'sell' then '1000000' else null end,
+         'confirming', now() - interval '1 minute', $6
+       ) returning id`,
+      [
+        telegramUserId,
+        userId,
+        authorization.id,
+        marketId,
+        action,
+        `${label}-${suffix}`,
+      ],
+    );
+    const id = result.rows[0]?.id;
+    assert.ok(id);
+    return id;
+  };
+  const invokeIntentNavigation = async (
+    intentId: string,
+    type: "cancel" | "open_market" | "retry_buy",
+  ) =>
+    captureTelegramBotTradingCallback({
+      appBaseUrl: "https://app.hunch.trade",
+      callbackQuery: {
+        data: `hbt:${type}:${intentId}`,
+        from: { id: telegramUserId as never },
+        id: `${type}-navigation-${suffix}`,
+        message: {
+          chat: { id: telegramUserId, type: "private" },
+          message_id: 700,
+        },
+      },
+      db,
+      expectedIntentId: intentId,
+      ...(type === "open_market" ? { expectedType: type } : {}),
+      signerInspector,
+      trading,
+    });
+  for (const action of ["buy", "sell", "redeem"] as const) {
+    const expiredIntentId = await insertExpiredIntent(`expired-${action}`, action);
+    const expiredExit = await invokeIntentNavigation(expiredIntentId, "cancel");
+    assert.equal(expiredExit.handled, true);
+    assert.equal(
+      (
+        await client.query<{ status: string }>(
+          `select status from telegram_trade_intents where id = $1::uuid`,
+          [expiredIntentId],
+        )
+      ).rows[0]?.status,
+      "expired",
+      `expired ${action} exits without reviving its intent`,
+    );
+    assert.ok(
+      expiredExit.messages.at(-1)?.reply_markup?.inline_keyboard.some((row) =>
+        row.some((button) => button.text === "🏠 Home"),
+      ),
+      `expired ${action} returns a navigable market card`,
+    );
+  }
+  const expiredOpenIntentId = await insertExpiredIntent("expired-open", "buy");
+  const expiredOpen = await invokeIntentNavigation(
+    expiredOpenIntentId,
+    "open_market",
+  );
+  assert.equal(expiredOpen.handled, true);
+  assert.match(
+    expiredOpen.answers[0]?.text ?? "",
+    /Opening the current market card/u,
+  );
+  assert.equal(
+    (
+      await client.query<{ status: string }>(
+        `select status from telegram_trade_intents where id = $1::uuid`,
+        [expiredOpenIntentId],
+      )
+    ).rows[0]?.status,
+    "confirming",
+    "open_market is navigation only and must not revive or otherwise mutate an expired intent",
+  );
+
+  const appHandoffExit = await client.query<{ id: string }>(
+    `insert into telegram_trade_intents (
+       telegram_user_id, user_id, authorization_id, chat_id,
+       telegram_message_id, action, venue, market_id, side, amount_usd,
+       status, expires_at, idempotency_key, delivery_mode, result
+     ) values (
+       $1, $2, $3, $1, '700', 'buy', 'polymarket', $4, 'YES', 1,
+       'external_handoff', now() + interval '2 minutes', $5, 'app_handoff',
+       jsonb_build_object(
+         'appHandoffExecution',
+         jsonb_build_object('version', 2, 'committedAt', now()::text)
+       )
+     ) returning id`,
+    [
+      telegramUserId,
+      userId,
+      authorization.id,
+      marketId,
+      `external-handoff-exit:${suffix}`,
+    ],
+  );
+  const appHandoffExitId = appHandoffExit.rows[0]?.id;
+  assert.ok(appHandoffExitId);
+  const cancelledHandoff = await invokeIntentNavigation(appHandoffExitId, "cancel");
+  assert.equal(cancelledHandoff.handled, true);
+  assert.equal(
+    (
+      await client.query<{ status: string }>(
+        `select status from telegram_trade_intents where id = $1::uuid`,
+        [appHandoffExitId],
+      )
+    ).rows[0]?.status,
+    "cancelled",
+    "a pre-submit Mini App handoff must be cancelled rather than treated as terminal navigation",
+  );
+  await client.query(`delete from telegram_trade_intents where id = $1::uuid`, [
+    appHandoffExitId,
+  ]);
+
+  const insertTerminalSellIntent = async (label: string, status: string) => {
+    const result = await client.query<{ id: string }>(
+      `insert into telegram_trade_intents (
+         telegram_user_id, user_id, authorization_id, chat_id,
+         telegram_message_id, action, venue, market_id, side, shares_raw,
+         status, venue_order_id, expires_at, idempotency_key
+       ) values (
+         $1, $2, $3, $1, '700', 'sell', 'polymarket', $4, 'YES', '1000000',
+         $5, case when $5 = 'filled' then 'terminal-sell-' || $6 else null end,
+         now() + interval '2 minutes', $6
+       ) returning id`,
+      [
+        telegramUserId,
+        userId,
+        authorization.id,
+        marketId,
+        status,
+        `${label}-${suffix}`,
+      ],
+    );
+    const id = result.rows[0]?.id;
+    assert.ok(id);
+    return id;
+  };
+  for (const status of ["filled", "failed"]) {
+    const intentId = await insertTerminalSellIntent(`sell-${status}`, status);
+    const reopened = await invokeIntentNavigation(intentId, "retry_buy");
+    assert.equal(reopened.handled, true);
+    assert.match(
+      reopened.answers[0]?.text ?? "",
+      /Opening a fresh market card/u,
+      `legacy terminal Sell ${status} card still reopens the market`,
+    );
+  }
+
   // A direct v2 handoff has no FundingOperation. Its exact Buy still owns the
   // original Telegram card, so each ordinary intent transition must create one
   // monotonic edit rather than wait for the funding-only projector forever.

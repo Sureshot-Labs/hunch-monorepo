@@ -15,6 +15,7 @@ import {
   writeSignalBotMenuInput,
 } from "./services/telegram-bot-menu-state.js";
 import { parseTelegramBotTradingCallbackData } from "./services/telegram-bot-trading-client.js";
+import { telegramTradeLifecycleProgressTestHooks } from "./services/telegram-trade-lifecycle-progress.js";
 
 const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
   {
@@ -27,6 +28,59 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         intentId,
         type: "retry_buy",
       });
+    },
+  },
+  {
+    name: "open market callback remains valid and bounded",
+    run: () => {
+      const intentId = "00000000-0000-4000-8000-000000000001";
+      const data = `hbt:open_market:${intentId}`;
+      assert.ok(data.length <= 64);
+      assert.deepEqual(parseTelegramBotTradingCallbackData(data), {
+        intentId,
+        type: "open_market",
+      });
+    },
+  },
+  {
+    name: "terminal lifecycle cards expose the same safe market escape",
+    run: () => {
+      const intentId = "00000000-0000-4000-8000-000000000001";
+      for (const progress of [
+        { action: "sell", isDirectHandoff: true, state: "filled" },
+        { action: "sell", isDirectHandoff: true, state: "failed" },
+        { action: "buy", isDirectHandoff: false, state: "stopped" },
+      ]) {
+        const keyboard =
+          telegramTradeLifecycleProgressTestHooks.progressKeyboard({
+            amountUsd: "5",
+            canCancel: false,
+            canCancelBuy: false,
+            intentId,
+            marketTitle: "Market",
+            requiresMiniAppContinuation: false,
+            sideLabel: "YES",
+            venue: "polymarket",
+            ...progress,
+          } as never).inline_keyboard;
+        assert.equal(
+          keyboard.flat().some(
+            (button) =>
+              "callback_data" in button &&
+              button.callback_data === `hbt:open_market:${intentId}`,
+          ),
+          true,
+          `${progress.action}/${progress.state} must expose Open market`,
+        );
+        assert.equal(
+          keyboard.flat().some(
+            (button) =>
+              "callback_data" in button && button.callback_data === "hm:v1:home",
+          ),
+          true,
+          `${progress.action}/${progress.state} must expose Home`,
+        );
+      }
     },
   },
   {
