@@ -1536,7 +1536,18 @@ export async function transitionFundingSegmentInTransaction(
           end,
           raw_status = case when $6::boolean then $7::text else raw_status end,
           submitted_at = coalesce(submitted_at, $8),
-          settled_at = coalesce(settled_at, $9),
+          -- A reducer may observe a segment after its submit timestamp was
+          -- recorded by a neighbouring transaction. Keep the physical time
+          -- invariant even when the reducer's single now value was sampled just
+          -- before that write.
+          settled_at = case
+            when settled_at is not null then settled_at
+            when $9::timestamptz is null then null
+            else greatest(
+              $9::timestamptz,
+              coalesce(submitted_at, $8::timestamptz, $9::timestamptz)
+            )
+          end,
           support_metadata = support_metadata || $10::jsonb
       where id = $1
         and operation_id = $2

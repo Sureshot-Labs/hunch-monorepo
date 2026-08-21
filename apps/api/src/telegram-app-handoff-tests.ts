@@ -22,6 +22,7 @@ function createFakePool() {
     "issued";
   let hadClaim = false;
   let handoffIssued = false;
+  let planSnapshot: Record<string, unknown> = { destination: "polymarket" };
   let tokenHash: string | null = null;
   const queryParams: unknown[][] = [];
   const row = () => ({
@@ -36,7 +37,7 @@ function createFakePool() {
     expired_at: state === "expired" ? new Date("2026-08-17T00:10:01Z") : null,
     id: HANDOFF_ID,
     plan_fingerprint: "b".repeat(64),
-    plan_snapshot: { destination: "polymarket" },
+    plan_snapshot: planSnapshot,
     policy_revision: "policy-1",
     quote_snapshot: { maxSpendUsd: "2.50" },
     state,
@@ -59,6 +60,7 @@ function createFakePool() {
         if (handoffIssued) return { rows: [] };
         handoffIssued = true;
         tokenHash = String(params[3]);
+        planSnapshot = JSON.parse(String(params[8])) as Record<string, unknown>;
         return { rows: [row()] };
       }
       if (normalized.startsWith("select exists("))
@@ -105,11 +107,16 @@ function createFakePool() {
       }
       if (normalized.startsWith("update telegram_trade_intents intent")) {
         assert.equal(params[0], INTENT_ID);
+        if (normalized.includes("set status = 'cancelled'")) {
+          return { rowCount: 1, rows: [] };
+        }
         assert.equal(params[2], HANDOFF_ID);
         return { rowCount: 1, rows: [] };
       }
       if (normalized.includes("set state = 'cancelled'")) {
-        assert.ok(state === "issued" || state === "claimed");
+        assert.ok(
+          state === "issued" || state === "claimed" || state === "committed",
+        );
         state = "cancelled";
         return { rows: [row()] };
       }
@@ -355,6 +362,59 @@ assert.equal(
   "the v2 callback runs on retry and must return the same existing operation",
 );
 
+const v2SellIssue = createFakePool();
+const v2SellIssued = await issueTelegramAppHandoff({
+  authorityFingerprint: AUTHORITY_FINGERPRINT,
+  db: v2SellIssue.pool as never,
+  planSnapshot: {
+    kind: "direct_trade",
+    trade: { action: "sell" },
+    version: 2,
+  },
+  policyRevision: "policy-1",
+  quoteSnapshot: { minimumReceiveUsd: "2.50" },
+  telegramUserId: TELEGRAM_USER_ID,
+  tradeIntentId: INTENT_ID,
+  userId: USER_ID,
+});
+assert.deepEqual(
+  v2SellIssue.queryParams.find((params) => Array.isArray(params[10]))?.[10],
+  ["sell"],
+  "a direct v2 Sell handoff can be issued only for a Sell intent",
+);
+await claimTelegramAppHandoff({
+  db: v2SellIssue.pool as never,
+  telegramUserId: TELEGRAM_USER_ID,
+  token: v2SellIssued.token,
+  userId: USER_ID,
+});
+await commitTelegramAppHandoffWithExecution({
+  allowedIntentActions: ["sell"],
+  allowedIntentStatuses: ["external_handoff"],
+  commitExecution: async () => ({ directTrade: true }),
+  committedIntentStatus: "external_handoff",
+  currentAuthorityFingerprint: AUTHORITY_FINGERPRINT,
+  currentPolicyRevision: "policy-1",
+  db: v2SellIssue.pool as never,
+  executionKind: "direct_trade",
+  planFingerprint: v2SellIssued.handoff.planFingerprint,
+  telegramUserId: TELEGRAM_USER_ID,
+  token: v2SellIssued.token,
+  userId: USER_ID,
+});
+assert.equal(
+  (
+    await cancelTelegramAppHandoff({
+      db: v2SellIssue.pool as never,
+      telegramUserId: TELEGRAM_USER_ID,
+      token: v2SellIssued.token,
+      userId: USER_ID,
+    })
+  ).state,
+  "cancelled",
+  "a committed direct Sell stays cancellable until a direct provider claim",
+);
+
 const cancellable = createFakePool();
 const second = await issueTelegramAppHandoff({
   authorityFingerprint: AUTHORITY_FINGERPRINT,
@@ -378,15 +438,17 @@ assert.equal(
   null,
   "cancelling an unclaimed handoff must not manufacture a claim",
 );
-await assert.rejects(
-  resolveTelegramAppHandoff({
-    db: cancellable.pool as never,
-    telegramUserId: TELEGRAM_USER_ID,
-    token: second.token,
-    userId: USER_ID,
-  }),
-  (error: unknown) =>
-    error instanceof TelegramAppHandoffError && error.code === "not_claimable",
+assert.equal(
+  (
+    await resolveTelegramAppHandoff({
+      db: cancellable.pool as never,
+      telegramUserId: TELEGRAM_USER_ID,
+      token: second.token,
+      userId: USER_ID,
+    })
+  ).state,
+  "cancelled",
+  "a cancelled handoff remains observable so the Mini App can resume safely",
 );
 
 const expired = createFakePool();

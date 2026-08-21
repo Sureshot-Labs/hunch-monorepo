@@ -880,6 +880,16 @@ function validateParsedFundingPolicy(
 
   for (const [index, method] of policy.privyFundingMethods.entries()) {
     const destination = locations.get(method.destinationLocationPatternId);
+    const directDestinationAsset = destination
+      ? assetKey(destination.asset) === assetKey(method.asset)
+      : false;
+    const routedSourceAsset = policy.routes.some(
+      (route) =>
+        route.enabled &&
+        route.destinationLocationPatternId ===
+          method.destinationLocationPatternId &&
+        assetKey(route.sourceAsset) === assetKey(method.asset),
+    );
     if (
       method.enabled &&
       (!method.locallyConfigured ||
@@ -888,13 +898,13 @@ function validateParsedFundingPolicy(
         destination.ownership !== "owned" ||
         !destination.observable ||
         !destination.capabilities.includes("observe") ||
-        assetKey(destination.asset) !== assetKey(method.asset))
+        (!directDestinationAsset && !routedSourceAsset))
     ) {
       addIssue(
         issues,
         "privy_funding_method_unconfigured",
         `privyFundingMethods.${index}`,
-        "enabled Privy method requires local configuration and exact destination",
+        "enabled Privy method requires local configuration, an observable owned destination, and an exact direct or routed asset",
       );
     }
   }

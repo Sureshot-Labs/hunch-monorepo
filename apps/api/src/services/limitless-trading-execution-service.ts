@@ -6,13 +6,11 @@ import { AuthService } from "../auth.js";
 import { env } from "../env.js";
 import {
   assertFundingReservationReadyForTrade,
-  releaseFundingReservationForAbandonedTrade,
   releaseFundingReservationForDefinitiveTradeFailure,
 } from "../funding/persistence/funding-evidence-repository.js";
 import { canonicalJsonHash } from "../funding/persistence/canonical.js";
 import { buildFundingTradeConsumerIntent } from "../funding/persistence/funding-trade-consumer-intent.js";
 import {
-  claimFundingTradeAttempt,
   markFundingTradeAttemptSubmissionStarted,
   recordFundingTradeAttemptOutcome,
 } from "../funding/persistence/funding-trade-attempt-repository.js";
@@ -31,7 +29,7 @@ import {
   updateOrderFromHistory,
 } from "../repos/orders-repo.js";
 import {
-  assertTelegramAppHandoffV2FundedTradeSubmission,
+  claimFundingTradeAttemptForVenueConsumer,
   claimTelegramAppHandoffV2DirectTradeSubmission,
   failTelegramAppHandoffV2DirectTradeSubmission,
   type TelegramAppHandoffV2DirectTradeBinding,
@@ -136,6 +134,7 @@ import {
 } from "./limitless-order-normalization.js";
 import {
   fetchOpenOrderCollateralLocks,
+  fetchOpenOrderPositionLocks,
   normalizeCollateralWalletKey,
 } from "./open-order-collateral.js";
 import type {
@@ -172,6 +171,7 @@ const LIMITLESS_LEGACY_OPERATOR_BY_EXCHANGE: Readonly<Record<string, string>> =
 
 const LIMITLESS_AMM_IFACE = new ethers.Interface([
   "function buy(uint256 investmentAmount,uint256 outcomeIndex,uint256 minOutcomeTokens) returns (uint256)",
+  "function sell(uint256 returnAmount,uint256 outcomeIndex,uint256 maxOutcomeTokens) returns (uint256)",
 ]);
 
 const ERC20_IFACE = new ethers.Interface([
@@ -332,6 +332,8 @@ type LimitlessAmmFundingClaimBody = {
   marketAddress: string;
   marketSlug?: string | null;
   tokenId: string;
+  telegramAppHandoffId?: string;
+  telegramAppHandoffPlanFingerprint?: string;
   transactionData: string;
 };
 
@@ -3145,9 +3147,9 @@ type LimitlessFokNoFillInput = {
   venueOrderId: string | null;
 };
 
-async function recordLimitlessFokNoFill(input: LimitlessFokNoFillInput): Promise<
-  Extract<LimitlessClientSignedOrderResult, { ok: true }>["payload"]
-> {
+async function recordLimitlessFokNoFill(
+  input: LimitlessFokNoFillInput,
+): Promise<Extract<LimitlessClientSignedOrderResult, { ok: true }>["payload"]> {
   if (input.venueOrderId) {
     const now = new Date();
     const rawError = stringifyLimitlessRawError(input.rawPayload);
@@ -3203,18 +3205,20 @@ async function recordLimitlessFokNoFill(input: LimitlessFokNoFillInput): Promise
 }
 
 /**
- * A FOK no-fill is the single CLOB outcome that conclusively proves no Buy
+ * A FOK no-fill is the single CLOB outcome that conclusively proves no trade
  * occurred. Both a rejected FOK response and a successful no-fill response
  * converge here so funding reservations and sealed direct intents cannot
  * drift into different terminal semantics.
  */
-async function finalizeLimitlessFokNoFill(input: LimitlessFokNoFillInput & {
-  clientOrderId: string;
-  directHandoffBinding: TelegramAppHandoffV2DirectTradeBinding | null;
-  directHandoffSubmission: TelegramAppHandoffV2DirectTradeSubmission | null;
-  fundingReservation: TradeIntent["fundingReservation"] | null;
-  fundingTradeAttemptId: string | null;
-}): Promise<Extract<LimitlessClientSignedOrderResult, { ok: true }>["payload"]> {
+async function finalizeLimitlessFokNoFill(
+  input: LimitlessFokNoFillInput & {
+    clientOrderId: string;
+    directHandoffBinding: TelegramAppHandoffV2DirectTradeBinding | null;
+    directHandoffSubmission: TelegramAppHandoffV2DirectTradeSubmission | null;
+    fundingReservation: TradeIntent["fundingReservation"] | null;
+    fundingTradeAttemptId: string | null;
+  },
+): Promise<Extract<LimitlessClientSignedOrderResult, { ok: true }>["payload"]> {
   const noFill = await recordLimitlessFokNoFill(input);
   if (input.fundingReservation && input.fundingTradeAttemptId) {
     await releaseFundingReservationForDefinitiveTradeFailure(input.pool, {
@@ -3236,7 +3240,9 @@ async function finalizeLimitlessFokNoFill(input: LimitlessFokNoFillInput & {
       binding: input.directHandoffBinding,
       reason: {
         code: "limitless_trade_no_fill",
-        message: "Limitless could not fill the sealed Buy. Nothing was bought.",
+        message: `Limitless could not fill the sealed ${
+          input.directHandoffSubmission.action === "sell" ? "Sell" : "Buy"
+        }. Nothing was submitted.`,
       },
       submission: input.directHandoffSubmission,
       userId: input.userId,
@@ -3246,6 +3252,7 @@ async function finalizeLimitlessFokNoFill(input: LimitlessFokNoFillInput & {
 }
 
 function buildLimitlessClobDirectHandoffSubmission(input: {
+  action: "buy" | "sell";
   makerAmount: number | null;
   marketId: string | null;
   signer: string;
@@ -3261,10 +3268,12 @@ function buildLimitlessClobDirectHandoffSubmission(input: {
     return null;
   }
   return {
+    action: input.action,
     executionKind: "clob",
     marketId: input.marketId,
     outcomeTokenId: input.tokenId,
-    // Limitless requires the literal FOK sentinel; the sealed cap is spend.
+    // Limitless requires the literal FOK sentinel. Buy is capped by spend and
+    // Sell by exact source shares; the protocol has no signed proceeds floor.
     receiveRaw: "1",
     signer: input.signer,
     spendRaw: input.makerAmount.toString(),
@@ -3276,11 +3285,13 @@ async function claimLimitlessClobDirectHandoff(input: {
   assertCurrentScope: TelegramAppHandoffV2ScopeAssertion | undefined;
   binding: TelegramAppHandoffV2DirectTradeBinding;
   clientOrderId: string;
+  orderFingerprint: string;
   marketSlug: string;
   orderType: "FOK" | "GTC";
   ownerId: number;
   pool: ApiTradingApplicationServiceInput["pool"];
   price: number | null;
+  readSellPositionAvailableRaw?: () => Promise<string>;
   size: number | null;
   submission: TelegramAppHandoffV2DirectTradeSubmission;
   tokenId: string | null;
@@ -3292,7 +3303,11 @@ async function claimLimitlessClobDirectHandoff(input: {
   await claimTelegramAppHandoffV2DirectTradeSubmission(input.pool, {
     assertCurrentScope: input.assertCurrentScope,
     binding: input.binding,
-    reconcileKeys: { clientOrderId: input.clientOrderId, tradeType: "clob" },
+    reconcileKeys: {
+      clientOrderId: input.clientOrderId,
+      orderFingerprint: input.orderFingerprint,
+      tradeType: "clob",
+    },
     // The durable claim never retains or replays the client signature.
     recoveryPayload: {
       clientOrderId: input.clientOrderId,
@@ -3306,6 +3321,7 @@ async function claimLimitlessClobDirectHandoff(input: {
       size: input.size,
       tokenId: input.tokenId,
     },
+    readSellPositionAvailableRaw: input.readSellPositionAvailableRaw,
     submission: input.submission,
     userId: input.userId,
   });
@@ -3377,23 +3393,14 @@ export async function submitLimitlessClientSignedOrder(input: {
       },
     };
   }
-  if (directHandoffBinding && side !== "BUY") {
-    return {
-      ok: false,
-      statusCode: 400,
-      payload: {
-        error: "A Telegram handoff can only submit a sealed Buy",
-      },
-    };
-  }
   // Telegram v2 never creates a resting Limitless order. It signs one FOK
-  // Buy, so closing or replaying the Mini App cannot leave a GTC order live
-  // at the venue. Its bound is the sealed maximum spend.
+  // trade, so closing or replaying the Mini App cannot leave a GTC order live
+  // at the venue. Buy is bounded by spend; Sell is bounded by source shares.
   if (directHandoffBinding && input.body.orderType !== "FOK") {
     return {
       ok: false,
       statusCode: 400,
-      payload: { error: "A sealed Telegram handoff requires a FOK Buy." },
+      payload: { error: "A sealed Telegram handoff requires a FOK trade." },
     };
   }
   if (fundingReservation && side !== "BUY") {
@@ -3706,8 +3713,31 @@ export async function submitLimitlessClientSignedOrder(input: {
   const takerAmount = coercedTakerAmount;
   const price = coercedPrice;
   const size = deriveSize(input.body.orderType, side, makerAmount, takerAmount);
+  if (side === "SELL") {
+    const requestedSharesRaw = BigInt(makerAmount);
+    if (!directHandoffBinding) {
+      const availability = await resolveLimitlessAvailablePositionRaw({
+        pool: input.pool,
+        signer,
+        tokenId: requestedRawTokenId,
+        userId: input.userId,
+      });
+      if (availability.availableRaw < requestedSharesRaw) {
+        return {
+          ok: false,
+          statusCode: 409,
+          payload: {
+            code: "limitless_sell_balance_changed",
+            error: "Limitless position balance changed.",
+            availableSharesRaw: availability.availableRaw.toString(),
+            requestedSharesRaw: requestedSharesRaw.toString(),
+          },
+        };
+      }
+    }
+  }
   // The generic v2 funding continuation is single-flight. Reuse its provider
-  // id across two browser tabs instead of duplicating its final venue Buy.
+  // id across two browser tabs instead of duplicating its final venue trade.
   const clientOrderId = directHandoffBinding
     ? `hunch-th2-${directHandoffBinding.handoffId}`
     : `hunch-${crypto.randomUUID()}`;
@@ -3719,12 +3749,17 @@ export async function submitLimitlessClientSignedOrder(input: {
     onBehalfOf: ownerId,
     clientOrderId,
   };
+  // Limitless identifies the request by clientOrderId, but a v2 handoff must
+  // never treat that deterministic id as authority to resend changed signed
+  // FOK bytes. Persist the canonical signed-order fingerprint with the claim.
+  const orderFingerprint = canonicalJsonHash(orderForUpstream);
   const fundingMarketId = marketTokens?.marketId ?? null;
   let fundingConsumerIntent: ReturnType<
     typeof buildFundingTradeConsumerIntent
   > | null = null;
   const directHandoffSubmission = directHandoffBinding
     ? buildLimitlessClobDirectHandoffSubmission({
+        action: side === "SELL" ? "sell" : "buy",
         makerAmount,
         marketId: fundingMarketId,
         signer,
@@ -3780,11 +3815,15 @@ export async function submitLimitlessClientSignedOrder(input: {
       };
     }
     try {
-      await assertFundingReservationReadyForTrade(input.pool, {
-        userId: input.userId,
-        link: fundingReservation,
-        intent: fundingConsumerIntent,
-      });
+      if (!directHandoffBinding || !directHandoffSubmission) {
+        await assertFundingReservationReadyForTrade(input.pool, {
+          userId: input.userId,
+          link: fundingReservation,
+          intent: fundingConsumerIntent,
+        });
+      } else if (!input.assertTelegramAppHandoffV2Scope) {
+        throw new Error("sealed handoff scope cannot be verified");
+      }
     } catch (error) {
       return {
         ok: false,
@@ -3793,6 +3832,42 @@ export async function submitLimitlessClientSignedOrder(input: {
       };
     }
   }
+
+  const claimCurrentFundingTradeAttempt = async () => {
+    if (!fundingReservation || !fundingConsumerIntent || !fundingMarketId) {
+      throw new Error("Funding reservation market binding is unavailable");
+    }
+    const canonicalFingerprint = canonicalJsonHash({
+      executionPath: "limitless_clob",
+      marketId: fundingMarketId,
+      marketSlug: input.body.marketSlug,
+      order: orderForUpstream,
+      orderType: input.body.orderType,
+      signer: signer.toLowerCase(),
+    });
+    return claimFundingTradeAttemptForVenueConsumer(input.pool, {
+      canonicalFingerprint,
+      consumerIntent: fundingConsumerIntent,
+      executionPath: "limitless_clob",
+      externalReference: clientOrderId,
+      handoff:
+        directHandoffBinding &&
+        directHandoffSubmission &&
+        input.assertTelegramAppHandoffV2Scope
+          ? {
+              assertCurrentScope: input.assertTelegramAppHandoffV2Scope,
+              binding: directHandoffBinding,
+              submission: directHandoffSubmission,
+            }
+          : null,
+      idempotencyKey: `limitless-clob:${canonicalFingerprint}`,
+      marketId: fundingMarketId,
+      operationId: fundingReservation.operationId,
+      reservationId: fundingReservation.reservationId,
+      userId: input.userId,
+      venueId: "limitless",
+    });
+  };
 
   if (input.body.orderType === "FOK") {
     const amount = normalizeLimitlessRawAmount(makerAmount);
@@ -3814,11 +3889,38 @@ export async function submitLimitlessClientSignedOrder(input: {
     }
     if (isLimitlessClobDefinitiveNoFill(depthQuote.status)) {
       if (fundingReservation) {
-        await releaseFundingReservationForAbandonedTrade(input.pool, {
-          userId: input.userId,
-          link: fundingReservation,
-          outcomeReason: "trade_no_fill",
-        });
+        try {
+          const claim = await claimCurrentFundingTradeAttempt();
+          if (!claim.claimed) {
+            return {
+              ok: false,
+              statusCode: 409,
+              payload: {
+                error:
+                  "This funding reservation already has a trade attempt that must reconcile.",
+              },
+            };
+          }
+          await releaseFundingReservationForDefinitiveTradeFailure(input.pool, {
+            userId: input.userId,
+            link: fundingReservation,
+            tradeAttemptId: claim.attempt.id,
+            outcomeReason: "trade_no_fill",
+            errorCode: "trade_no_fill",
+            externalReference: clientOrderId,
+            broadcastMayHaveOccurred: false,
+            handoffFailure: {
+              code: "trade_no_fill",
+              message: `Limitless had no immediate liquidity for the ${side === "SELL" ? "Sell" : "Buy"}.`,
+            },
+          });
+        } catch (error) {
+          return {
+            ok: false,
+            statusCode: 409,
+            payload: toPublicFundingTradeError(error),
+          };
+        }
       }
       if (
         directHandoffBinding &&
@@ -3830,11 +3932,25 @@ export async function submitLimitlessClientSignedOrder(input: {
             assertCurrentScope: input.assertTelegramAppHandoffV2Scope,
             binding: directHandoffBinding,
             clientOrderId,
+            orderFingerprint,
             marketSlug: input.body.marketSlug,
             orderType: input.body.orderType,
             ownerId,
             pool: input.pool,
             price,
+            ...(side === "SELL"
+              ? {
+                  readSellPositionAvailableRaw: async () =>
+                    (
+                      await resolveLimitlessAvailablePositionRaw({
+                        pool: input.pool,
+                        signer,
+                        tokenId: requestedRawTokenId,
+                        userId: input.userId,
+                      })
+                    ).availableRaw.toString(),
+                }
+              : {}),
             size,
             submission: directHandoffSubmission,
             tokenId,
@@ -3844,7 +3960,7 @@ export async function submitLimitlessClientSignedOrder(input: {
             binding: directHandoffBinding,
             reason: {
               code: "limitless_trade_no_fill",
-              message: "Limitless had no immediate liquidity for the sealed Buy.",
+              message: `Limitless had no immediate liquidity for the sealed ${side === "SELL" ? "Sell" : "Buy"}.`,
             },
             submission: directHandoffSubmission,
             userId: input.userId,
@@ -3853,7 +3969,9 @@ export async function submitLimitlessClientSignedOrder(input: {
           return {
             ok: false,
             statusCode: 409,
-            payload: { error: "Telegram handoff is no longer valid for this Buy" },
+            payload: {
+              error: "Telegram handoff is no longer valid for this trade",
+            },
           };
         }
       }
@@ -3878,24 +3996,32 @@ export async function submitLimitlessClientSignedOrder(input: {
         if (!input.assertTelegramAppHandoffV2Scope) {
           throw new Error("sealed handoff scope cannot be verified");
         }
-        await assertTelegramAppHandoffV2FundedTradeSubmission(input.pool, {
-          assertCurrentScope: input.assertTelegramAppHandoffV2Scope,
-          binding: directHandoffBinding,
-          operationId: fundingReservation.operationId,
-          reservationId: fundingReservation.reservationId,
-          submission: directHandoffSubmission,
-          userId: input.userId,
-        });
+        // The funded consumer's durable attempt claim below performs the
+        // sealed scope check atomically with its no-cancel boundary.
       } else {
         await claimLimitlessClobDirectHandoff({
           binding: directHandoffBinding,
           assertCurrentScope: input.assertTelegramAppHandoffV2Scope,
           clientOrderId,
+          orderFingerprint,
           marketSlug: input.body.marketSlug,
           orderType: input.body.orderType,
           ownerId,
           pool: input.pool,
           price,
+          ...(side === "SELL"
+            ? {
+                readSellPositionAvailableRaw: async () =>
+                  (
+                    await resolveLimitlessAvailablePositionRaw({
+                      pool: input.pool,
+                      signer,
+                      tokenId: requestedRawTokenId,
+                      userId: input.userId,
+                    })
+                  ).availableRaw.toString(),
+              }
+            : {}),
           size,
           submission: directHandoffSubmission,
           tokenId,
@@ -3906,7 +4032,9 @@ export async function submitLimitlessClientSignedOrder(input: {
       return {
         ok: false,
         statusCode: 409,
-        payload: { error: "Telegram handoff is no longer valid for this Buy" },
+        payload: {
+          error: "Telegram handoff is no longer valid for this trade",
+        },
       };
     }
   }
@@ -3914,42 +4042,8 @@ export async function submitLimitlessClientSignedOrder(input: {
   let fundingTradeAttemptId: string | null = null;
   let fundingTradeClaimToken: string | null = null;
   if (fundingReservation) {
-    if (!fundingConsumerIntent) {
-      return {
-        ok: false,
-        statusCode: 409,
-        payload: { error: "Funding reservation market binding is unavailable" },
-      };
-    }
-    const marketId = fundingMarketId;
-    if (!marketId) {
-      return {
-        ok: false,
-        statusCode: 409,
-        payload: { error: "Funding reservation market binding is unavailable" },
-      };
-    }
-    const canonicalFingerprint = canonicalJsonHash({
-      executionPath: "limitless_clob",
-      marketId,
-      marketSlug: input.body.marketSlug,
-      order: orderForUpstream,
-      orderType: input.body.orderType,
-      signer: signer.toLowerCase(),
-    });
     try {
-      const claim = await claimFundingTradeAttempt(input.pool, {
-        userId: input.userId,
-        operationId: fundingReservation.operationId,
-        reservationId: fundingReservation.reservationId,
-        venueId: "limitless",
-        marketId,
-        executionPath: "limitless_clob",
-        idempotencyKey: `limitless-clob:${canonicalFingerprint}`,
-        canonicalFingerprint,
-        consumerIntent: fundingConsumerIntent,
-        externalReference: clientOrderId,
-      });
+      const claim = await claimCurrentFundingTradeAttempt();
       if (!claim.claimed) {
         return {
           ok: false,
@@ -4029,7 +4123,7 @@ export async function submitLimitlessClientSignedOrder(input: {
       });
     }
     // The provider may have accepted a request whose response was lost. Leave
-    // a direct handoff executing for reconciliation; never reopen this Buy.
+    // a direct handoff executing for reconciliation; never reopen this trade.
     throw error;
   }
 
@@ -4084,7 +4178,7 @@ export async function submitLimitlessClientSignedOrder(input: {
             code: "limitless_trade_rejected",
             message:
               upstreamMessage ??
-              "Limitless rejected the sealed Buy before accepting it.",
+              `Limitless rejected the sealed ${side === "SELL" ? "Sell" : "Buy"} before accepting it.`,
           },
           submission: directHandoffSubmission,
           userId: input.userId,
@@ -4456,7 +4550,75 @@ async function resolveLimitlessFundingMarketId(
     : null;
 }
 
+async function buildLimitlessAmmFundingHandoffSubmission(input: {
+  amountUsdRaw: string;
+  marketAddress: string;
+  marketId: string;
+  pool: ApiTradingApplicationServiceInput["pool"];
+  signer: string;
+  tokenId: string;
+  transactionData: string;
+}): Promise<TelegramAppHandoffV2DirectTradeSubmission | null> {
+  let market: LimitlessTradingMarket;
+  try {
+    market = await loadMarketForVenue(input.pool, input.marketId, "limitless");
+  } catch {
+    return null;
+  }
+  const expectedMarketAddress = readLimitlessAmmMarketAddress(market.metadata);
+  if (
+    !expectedMarketAddress ||
+    normalizeAddress(expectedMarketAddress) !==
+      normalizeAddress(input.marketAddress)
+  ) {
+    return null;
+  }
+  const rawTokenId = normalizeLimitlessRawTokenId(input.tokenId);
+  const scopedTokenId = rawTokenId
+    ? normalizeLimitlessScopedTokenId(rawTokenId)
+    : null;
+  const expectedOutcomeIndex =
+    rawTokenId && normalizeLimitlessRawTokenId(market.token_yes) === rawTokenId
+      ? 0n
+      : rawTokenId &&
+          normalizeLimitlessRawTokenId(market.token_no) === rawTokenId
+        ? 1n
+        : null;
+  if (!rawTokenId || !scopedTokenId || expectedOutcomeIndex == null) {
+    return null;
+  }
+  try {
+    const decoded = LIMITLESS_AMM_IFACE.parseTransaction({
+      data: input.transactionData,
+    });
+    if (!decoded || decoded.name !== "buy") return null;
+    const investmentRaw = BigInt(decoded.args[0]);
+    const outcomeIndex = BigInt(decoded.args[1]);
+    const minimumReceiveRaw = BigInt(decoded.args[2]);
+    if (
+      investmentRaw !== BigInt(input.amountUsdRaw) ||
+      outcomeIndex !== expectedOutcomeIndex ||
+      minimumReceiveRaw <= 0n
+    ) {
+      return null;
+    }
+    return {
+      action: "buy",
+      executionKind: "amm",
+      marketId: input.marketId,
+      outcomeTokenId: scopedTokenId,
+      receiveRaw: minimumReceiveRaw.toString(),
+      signer: input.signer,
+      spendRaw: investmentRaw.toString(),
+      venue: "limitless",
+    };
+  } catch {
+    return null;
+  }
+}
+
 export async function claimLimitlessAmmFundingTrade(input: {
+  assertTelegramAppHandoffV2Scope?: TelegramAppHandoffV2ScopeAssertion;
   body: LimitlessAmmFundingClaimBody;
   pool: ApiTradingApplicationServiceInput["pool"];
   signer: string;
@@ -4518,17 +4680,56 @@ export async function claimLimitlessAmmFundingTrade(input: {
     tokenId: normalizeLimitlessScopedTokenId(input.body.tokenId),
     transactionData: input.body.transactionData.toLowerCase(),
   });
+  const directHandoffBinding =
+    input.body.telegramAppHandoffId &&
+    input.body.telegramAppHandoffPlanFingerprint
+      ? {
+          handoffId: input.body.telegramAppHandoffId,
+          planFingerprint: input.body.telegramAppHandoffPlanFingerprint,
+        }
+      : null;
+  const directHandoffSubmission = directHandoffBinding
+    ? await buildLimitlessAmmFundingHandoffSubmission({
+        amountUsdRaw: input.body.amountUsdRaw,
+        marketAddress: input.body.marketAddress,
+        marketId,
+        pool: input.pool,
+        signer: input.signer,
+        tokenId: input.body.tokenId,
+        transactionData: input.body.transactionData,
+      })
+    : null;
+  if (
+    directHandoffBinding &&
+    (!directHandoffSubmission || !input.assertTelegramAppHandoffV2Scope)
+  ) {
+    return {
+      ok: false as const,
+      statusCode: 409,
+      payload: { error: "Telegram handoff is no longer valid for this trade" },
+    };
+  }
   try {
-    const claim = await claimFundingTradeAttempt(input.pool, {
-      userId: input.userId,
-      operationId: input.body.fundingOperationId,
-      reservationId: input.body.fundingReservationId,
-      venueId: "limitless",
-      marketId,
-      executionPath: "limitless_amm",
-      idempotencyKey: input.body.idempotencyKey,
+    const claim = await claimFundingTradeAttemptForVenueConsumer(input.pool, {
       canonicalFingerprint,
       consumerIntent,
+      executionPath: "limitless_amm",
+      handoff:
+        directHandoffBinding &&
+        directHandoffSubmission &&
+        input.assertTelegramAppHandoffV2Scope
+          ? {
+              assertCurrentScope: input.assertTelegramAppHandoffV2Scope,
+              binding: directHandoffBinding,
+              submission: directHandoffSubmission,
+            }
+          : null,
+      idempotencyKey: input.body.idempotencyKey,
+      marketId,
+      operationId: input.body.fundingOperationId,
+      reservationId: input.body.fundingReservationId,
+      userId: input.userId,
+      venueId: "limitless",
     });
     if (!claim.claimed) {
       return {
@@ -4621,7 +4822,7 @@ export async function startLimitlessAmmFundingTrade(input: {
 }
 
 /**
- * Broadcast one client-signed AMM Buy for a sealed v2 handoff.
+ * Broadcast one client-signed AMM trade for a sealed v2 handoff.
  *
  * The raw transaction is validated and its deterministic hash is durably
  * claimed before the RPC broadcast.  This is intentionally not the legacy
@@ -4656,7 +4857,9 @@ export async function broadcastLimitlessAmmTelegramAppHandoffTrade(input: {
     return {
       ok: false,
       statusCode: 400,
-      payload: { error: "A sealed AMM Buy requires an authenticated EVM wallet." },
+      payload: {
+        error: "A sealed AMM trade requires an authenticated EVM wallet.",
+      },
     };
   }
 
@@ -4667,7 +4870,9 @@ export async function broadcastLimitlessAmmTelegramAppHandoffTrade(input: {
     return {
       ok: false,
       statusCode: 400,
-      payload: { error: "The AMM transaction is not a signed EVM transaction." },
+      payload: {
+        error: "The AMM transaction is not a signed EVM transaction.",
+      },
     };
   }
   const txHash = transaction.hash;
@@ -4681,12 +4886,17 @@ export async function broadcastLimitlessAmmTelegramAppHandoffTrade(input: {
     return {
       ok: false,
       statusCode: 400,
-      payload: { error: "The signed AMM transaction does not match this wallet or network." },
+      payload: {
+        error:
+          "The signed AMM transaction does not match this wallet or network.",
+      },
     };
   }
 
   const rawTokenId = normalizeLimitlessRawTokenId(input.body.tokenId);
-  const tokenId = rawTokenId ? normalizeLimitlessScopedTokenId(rawTokenId) : null;
+  const tokenId = rawTokenId
+    ? normalizeLimitlessScopedTokenId(rawTokenId)
+    : null;
   const marketId = rawTokenId
     ? await resolveLimitlessFundingMarketId(input.pool, {
         marketSlug: input.body.marketSlug,
@@ -4730,56 +4940,73 @@ export async function broadcastLimitlessAmmTelegramAppHandoffTrade(input: {
     return {
       ok: false,
       statusCode: 409,
-      payload: { error: "The signed transaction is not for the sealed Limitless AMM market." },
+      payload: {
+        error:
+          "The signed transaction is not for the sealed Limitless AMM market.",
+      },
     };
   }
 
-  let amountUsdRaw: bigint;
-  let minOutcomeTokensRaw: bigint;
+  let action: "BUY" | "SELL" = "BUY";
+  let sourceRaw = 0n;
+  let destinationRaw = 0n;
   try {
     const decoded = LIMITLESS_AMM_IFACE.parseTransaction({
       data: transaction.data,
       value: transaction.value,
     });
-    if (!decoded || decoded.name !== "buy") throw new Error("not_buy");
-    amountUsdRaw = BigInt(decoded.args[0]);
+    if (!decoded || (decoded.name !== "buy" && decoded.name !== "sell")) {
+      throw new Error("not_trade");
+    }
+    action = decoded.name === "sell" ? "SELL" : "BUY";
+    const firstAmount = BigInt(decoded.args[0]);
     const decodedOutcomeIndex = BigInt(decoded.args[1]);
-    minOutcomeTokensRaw = BigInt(decoded.args[2]);
+    const thirdAmount = BigInt(decoded.args[2]);
     if (
-      amountUsdRaw <= 0n ||
-      minOutcomeTokensRaw <= 0n ||
+      firstAmount <= 0n ||
+      thirdAmount <= 0n ||
       decodedOutcomeIndex !== BigInt(expectedOutcomeIndex)
     ) {
       throw new Error("out_of_scope");
     }
+    // buy(investment, outcome, minShares), sell(minReturn, outcome, maxShares)
+    sourceRaw = action === "BUY" ? firstAmount : thirdAmount;
+    destinationRaw = action === "BUY" ? thirdAmount : firstAmount;
   } catch {
     return {
       ok: false,
       statusCode: 400,
-      payload: { error: "The signed transaction is not the exact sealed AMM Buy." },
+      payload: {
+        error: "The signed transaction is not the exact sealed AMM trade.",
+      },
     };
   }
 
-  const amountUsd = Number(amountUsdRaw) / USDC_SCALE;
-  const size = Number(minOutcomeTokensRaw) / USDC_SCALE;
+  const amountUsd =
+    Number(action === "BUY" ? sourceRaw : destinationRaw) / USDC_SCALE;
+  const size =
+    Number(action === "BUY" ? destinationRaw : sourceRaw) / USDC_SCALE;
   if (!Number.isFinite(amountUsd) || !Number.isFinite(size) || size <= 0) {
     return {
       ok: false,
       statusCode: 400,
-      payload: { error: "The AMM transaction amount is outside supported bounds." },
+      payload: {
+        error: "The AMM transaction amount is outside supported bounds.",
+      },
     };
   }
   const submission: TelegramAppHandoffV2DirectTradeSubmission = {
+    action: action === "SELL" ? "sell" : "buy",
     executionKind: "amm",
     marketId,
     outcomeTokenId: tokenId,
-    receiveRaw: minOutcomeTokensRaw.toString(),
+    receiveRaw: destinationRaw.toString(),
     signer,
-    spendRaw: amountUsdRaw.toString(),
+    spendRaw: sourceRaw.toString(),
     venue: "limitless",
   };
   if (
-    !(await venueLifecycleAllowsTradingAction(input.pool, "limitless", "BUY"))
+    !(await venueLifecycleAllowsTradingAction(input.pool, "limitless", action))
   ) {
     return {
       ok: false,
@@ -4795,19 +5022,36 @@ export async function broadcastLimitlessAmmTelegramAppHandoffTrade(input: {
       recoveryPayload: {
         allowanceRaw: "0",
         amountUsd,
-        amountUsdRaw: amountUsdRaw.toString(),
-        approvalAmountRaw: amountUsdRaw.toString(),
+        action,
+        amountUsdRaw: (action === "BUY"
+          ? sourceRaw
+          : destinationRaw
+        ).toString(),
+        approvalAmountRaw: action === "BUY" ? sourceRaw.toString() : "0",
         approvalRequired: false,
         kind: "limitless",
         marketAddress,
-        minOutcomeTokensRaw: minOutcomeTokensRaw.toString(),
+        minimumDestinationRaw: destinationRaw.toString(),
         outcomeIndex: expectedOutcomeIndex,
         price: amountUsd / size,
-        sharesRaw: minOutcomeTokensRaw.toString(),
+        sharesRaw: (action === "BUY" ? destinationRaw : sourceRaw).toString(),
         size,
         tokenId,
         tradeType: "amm",
       },
+      ...(action === "SELL"
+        ? {
+            readSellPositionAvailableRaw: async () =>
+              (
+                await resolveLimitlessAvailablePositionRaw({
+                  pool: input.pool,
+                  signer,
+                  tokenId: rawTokenId,
+                  userId: input.userId,
+                })
+              ).availableRaw.toString(),
+          }
+        : {}),
       submission,
       userId: input.userId,
     });
@@ -4815,7 +5059,7 @@ export async function broadcastLimitlessAmmTelegramAppHandoffTrade(input: {
     return {
       ok: false,
       statusCode: 409,
-      payload: { error: "Telegram handoff is no longer valid for this Buy." },
+      payload: { error: "Telegram handoff is no longer valid for this trade." },
     };
   }
 
@@ -4830,7 +5074,7 @@ export async function broadcastLimitlessAmmTelegramAppHandoffTrade(input: {
   } catch (error) {
     // A lost RPC response can still mean the signed transaction was accepted.
     // Its hash was recorded before this call, so reconciliation—not a second
-    // Buy—owns the next step.
+    // trade—owns the next step.
     input.log?.warn?.(
       { error, txHash, userId: input.userId },
       "Limitless AMM handoff broadcast outcome is ambiguous",
@@ -4852,7 +5096,7 @@ export async function broadcastLimitlessAmmTelegramAppHandoffTrade(input: {
         amountUsd,
         marketSlug: input.body.marketSlug,
         price: amountUsd / size,
-        side: "BUY",
+        side: action,
         size,
         tokenId,
         txHash,
@@ -4875,7 +5119,7 @@ export async function broadcastLimitlessAmmTelegramAppHandoffTrade(input: {
             binding,
             reason: {
               code: "limitless_amm_reverted",
-              message: "The sealed Limitless AMM Buy reverted onchain.",
+              message: `The sealed Limitless AMM ${action === "SELL" ? "Sell" : "Buy"} reverted onchain.`,
             },
             submission,
             userId: input.userId,
@@ -4885,7 +5129,10 @@ export async function broadcastLimitlessAmmTelegramAppHandoffTrade(input: {
             { error, txHash, userId: input.userId },
             "Limitless AMM handoff revert awaits reconciliation",
           );
-          return { ok: true, payload: { ok: true, status: "reconciling", txHash } };
+          return {
+            ok: true,
+            payload: { ok: true, status: "reconciling", txHash },
+          };
         }
         return {
           ok: false,
@@ -4952,13 +5199,6 @@ export async function recordLimitlessAmmOrder(input: {
         error:
           "A direct Telegram handoff cannot also consume a funding reservation",
       },
-    };
-  }
-  if (input.telegramAppHandoffV2DirectTrade && side !== "BUY") {
-    return {
-      ok: false,
-      statusCode: 400,
-      payload: { error: "A Telegram handoff can only submit a sealed Buy" },
     };
   }
   if (input.fundingReservation && side !== "BUY") {
@@ -5245,8 +5485,76 @@ function amountUsdRawValue(intent: TradeIntent): bigint {
   return BigInt(raw);
 }
 
+function amountSharesRawValue(intent: TradeIntent): bigint {
+  if (isRecord(intent.raw)) {
+    const raw = readString(intent.raw.sharesRaw);
+    if (raw && /^\d+$/u.test(raw) && BigInt(raw) > 0n) return BigInt(raw);
+  }
+  if (intent.amount.type !== "shares") {
+    throw tradingError({
+      code: "invalid_trade_request",
+      message: "Sell quantity must be expressed as shares.",
+      venue: "limitless",
+    });
+  }
+  try {
+    const raw = ethers.parseUnits(intent.amount.value, 6);
+    if (raw > 0n) return raw;
+  } catch {
+    // Handled by the common public error below.
+  }
+  throw tradingError({
+    code: "invalid_trade_request",
+    message: "Sell quantity must be positive.",
+    venue: "limitless",
+  });
+}
+
 function amountFromRaw(raw: bigint): number {
   return Number(raw) / USDC_SCALE;
+}
+
+export async function resolveLimitlessAvailablePositionRaw(inputs: {
+  pool: Pick<Pool, "query">;
+  signer: string;
+  tokenId: string;
+  userId: string;
+}): Promise<{
+  availableRaw: bigint;
+  balanceRaw: bigint;
+  lockedRaw: bigint;
+  signer: string;
+}> {
+  const signer = toChecksumAddress(inputs.signer);
+  const tokenId = normalizeLimitlessRawTokenId(inputs.tokenId);
+  if (!signer || !tokenId) {
+    throw new Error(
+      "Limitless sell position requires an EVM wallet and token.",
+    );
+  }
+  const [balances, locks] = await Promise.all([
+    fetchErc1155BalancesByOwner({
+      rpcUrl: env.baseRpcUrl,
+      timeoutMs: env.baseRpcTimeoutMs,
+      contractAddress: env.limitlessConditionalTokensAddress,
+      owner: signer,
+      tokenIds: [tokenId],
+    }),
+    fetchOpenOrderPositionLocks(inputs.pool, {
+      userId: inputs.userId,
+      venue: "limitless",
+      wallet: signer,
+    }),
+  ]);
+  const balanceRaw = balances.get(tokenId) ?? 0n;
+  const lockKey = `${signer.toLowerCase()}:${tokenId}`;
+  const lockedRaw = locks.get(lockKey) ?? 0n;
+  return {
+    availableRaw: balanceRaw > lockedRaw ? balanceRaw - lockedRaw : 0n,
+    balanceRaw,
+    lockedRaw,
+    signer,
+  };
 }
 
 function applySlippageDown(value: bigint, bps: number): bigint {
@@ -5662,6 +5970,7 @@ async function quote(
     "limitless",
   );
   const side = normalizeSide(intent.outcome ?? intent.target.outcome);
+  const action = intent.action;
   if (isLimitlessAmmMarketMetadata(market.metadata)) {
     if (!isOrderable(market)) {
       throw tradingError({
@@ -5680,28 +5989,45 @@ async function quote(
         venue: "limitless",
       });
     }
-    const amountRaw = amountUsdRawValue(intent);
+    const amountUsdRaw = action === "BUY" ? amountUsdRawValue(intent) : null;
+    const amountSharesRaw =
+      action === "SELL" ? amountSharesRawValue(intent) : null;
     const ammQuote = await quoteLimitlessAmmTrade({
       rpcUrl: env.baseRpcUrl,
       timeoutMs: env.baseRpcTimeoutMs,
       marketAddress,
       outcomeIndex,
-      side: "BUY",
-      amountUsdRaw: amountRaw,
-      amountSharesRaw: null,
+      side: action,
+      amountUsdRaw,
+      amountSharesRaw,
     });
     const sharesRaw =
       ammQuote.sharesRaw != null ? BigInt(ammQuote.sharesRaw) : null;
-    if (sharesRaw == null || sharesRaw <= 0n) {
+    const returnAmountRaw =
+      ammQuote.returnAmountRaw != null
+        ? BigInt(ammQuote.returnAmountRaw)
+        : null;
+    if (
+      sharesRaw == null ||
+      sharesRaw <= 0n ||
+      (action === "SELL" && (returnAmountRaw == null || returnAmountRaw <= 0n))
+    ) {
       throw tradingError({
         code: "quote_unavailable",
         message: "Limitless AMM quote is unavailable.",
         venue: "limitless",
       });
     }
-    const amount = amountUsd(intent);
+    const nominalAmountUsd = action === "BUY" ? amountUsd(intent) : null;
     const estimatedShares = amountFromRaw(sharesRaw);
-    const price = estimatedShares > 0 ? amount / estimatedShares : null;
+    const estimatedNotionalUsd =
+      action === "BUY"
+        ? nominalAmountUsd
+        : amountFromRaw(returnAmountRaw ?? 0n);
+    const price =
+      estimatedShares > 0 && estimatedNotionalUsd != null
+        ? estimatedNotionalUsd / estimatedShares
+        : null;
     return {
       venue: "limitless",
       target: {
@@ -5709,26 +6035,30 @@ async function quote(
         tokenId,
         raw: { market, marketAddress, outcomeIndex },
       },
-      action: "BUY",
+      action,
       amount: intent.amount,
+      currentPrice: price,
       price,
       estimatedShares,
-      estimatedNotionalUsd: amount,
-      maxSpendUsd: amount,
-      minReceiveShares: estimatedShares,
+      estimatedNotionalUsd,
+      maxSpendUsd: action === "BUY" ? nominalAmountUsd : null,
+      minimumReceiveUsd: action === "SELL" ? estimatedNotionalUsd : null,
+      minReceiveShares: action === "BUY" ? estimatedShares : null,
       fees: {},
       expiresAt: new Date(Date.now() + 30_000),
       raw: {
-        amountUsdRaw: amountRaw.toString(),
+        amountSharesRaw: amountSharesRaw?.toString() ?? null,
+        amountUsdRaw: amountUsdRaw?.toString() ?? null,
         kind: "limitless_amm",
         marketAddress,
         outcomeIndex,
+        returnAmountRaw: returnAmountRaw?.toString() ?? null,
         sharesRaw: sharesRaw.toString(),
         tokenId,
       },
     };
   }
-  const tokenId = tokenForSide(market, side);
+  const tokenId = normalizeLimitlessRawTokenId(tokenForSide(market, side));
   if (!isOrderable(market)) {
     throw tradingError({
       code: "invalid_trade_request",
@@ -5736,30 +6066,56 @@ async function quote(
       venue: "limitless",
     });
   }
-  const ask = await bestAskForToken(ctx.pool, tokenId);
-  const price = ask;
-  if (!price || price <= 0 || price >= 1) {
+  if (!tokenId || !market.slug) {
     throw tradingError({
-      code: "quote_unavailable",
-      message: "Limitless market price is unavailable.",
+      code: "insufficient_readiness",
+      message: "Limitless CLOB routing data is unavailable.",
       venue: "limitless",
     });
   }
-  const amount = amountUsd(intent);
-  const estimatedShares = amount / price;
+  const orderAmountUsd = action === "BUY" ? amountUsd(intent) : null;
+  const sharesRaw = action === "SELL" ? amountSharesRawValue(intent) : null;
+  const depthQuote = await quoteLimitlessClobMarket({
+    ...(action === "BUY"
+      ? { amountUsd: orderAmountUsd }
+      : { amountShares: amountFromRaw(sharesRaw ?? 0n) }),
+    side: action,
+    slug: market.slug,
+    tokenId,
+  });
+  if (depthQuote.status !== "ready") {
+    throw tradingError({
+      code: "quote_unavailable",
+      message:
+        depthQuote.status === "unavailable"
+          ? "Limitless market depth is unavailable."
+          : "Limitless market has insufficient immediate liquidity.",
+      venue: "limitless",
+    });
+  }
+  const price = depthQuote.averagePrice;
+  const estimatedShares = depthQuote.executableShares;
+  const estimatedNotionalUsd = depthQuote.totalNotional;
   return {
     venue: "limitless",
     target: { ...intent.target, tokenId, raw: { market } },
-    action: "BUY",
+    action,
     amount: intent.amount,
+    currentPrice: price,
     price,
     estimatedShares,
-    estimatedNotionalUsd: amount,
-    maxSpendUsd: amount,
-    minReceiveShares: estimatedShares,
+    estimatedNotionalUsd,
+    maxSpendUsd: action === "BUY" ? orderAmountUsd : null,
+    minimumReceiveUsd: action === "SELL" ? estimatedNotionalUsd : null,
+    minReceiveShares: action === "BUY" ? estimatedShares : null,
     fees: {},
     expiresAt: new Date(Date.now() + 30_000),
-    raw: { price, tokenId },
+    raw: {
+      kind: "limitless_clob",
+      tokenId,
+      totalNotionalUsd: estimatedNotionalUsd,
+      worstPrice: depthQuote.worstPrice,
+    },
   };
 }
 
@@ -6404,6 +6760,7 @@ async function persistTrade(
       venue: "limitless",
     });
   }
+  const orderSide = input.intent.action === "SELL" ? "SELL" : "BUY";
   if (isLimitlessAmmPreparedPayload(payload)) {
     const txHash =
       input.submitResult.orderHash ?? input.submitResult.txSignature;
@@ -6422,7 +6779,7 @@ async function persistTrade(
             ? input.intent.target.venueMarketId
             : undefined,
         price: payload.price ?? undefined,
-        side: "BUY",
+        side: orderSide,
         size: payload.size,
         tokenId: payload.tokenId,
         txHash,
@@ -6469,7 +6826,7 @@ async function persistTrade(
     venue: "limitless",
     venueOrderId: input.submitResult.venueOrderId,
     tokenId: payload.tokenId,
-    side: "BUY",
+    side: orderSide,
     orderType: "FOK",
     price: input.submitResult.price ?? payload.price,
     size: input.submitResult.size ?? payload.size,
@@ -6541,6 +6898,7 @@ async function applyLimitlessTradeEffects(
     };
   }
   if (input.submitResult.status === "filled") {
+    const orderSide = input.intent.action === "SELL" ? "SELL" : "BUY";
     const raw = isRecord(input.persisted.raw) ? input.persisted.raw : null;
     const stored = raw && isRecord(raw.stored) ? raw.stored : null;
     const order = stored && isRecord(stored.order) ? stored.order : null;
@@ -6564,7 +6922,7 @@ async function applyLimitlessTradeEffects(
           venueOrderId,
           orderHash: input.submitResult.orderHash ?? null,
           tokenId,
-          side: "BUY",
+          side: orderSide,
           filledAt,
           lastUpdate: filledAt,
           postedAt,

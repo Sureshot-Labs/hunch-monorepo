@@ -132,12 +132,60 @@ export class FundingTradeAttemptError extends Error {
       | "attempt_conflict"
       | "attempt_not_found"
       | "invalid_state"
+      | "sealed_handoff_required"
       | "reservation_unavailable",
     message: string,
   ) {
     super(message);
     this.name = "FundingTradeAttemptError";
   }
+}
+
+/**
+ * A v2 Mini App funded Buy has one additional durable boundary: its handoff
+ * claim sets the linked Telegram intent to `executing` before a venue request.
+ * Do not let an ordinary web consumer bypass that boundary simply by omitting
+ * the optional handoff fields from its request. The fence deliberately stays
+ * in place after cancellation/terminalization until normal reservation
+ * cleanup releases the row: otherwise a stale caller could submit in the gap.
+ */
+async function assertTelegramAppHandoffV2FundingClaimBoundary(
+  client: Pick<PoolClient, "query">,
+  input: Readonly<{
+    allowTelegramAppHandoffV2?: boolean;
+    operationId: string;
+    reservationId: string;
+    userId: string;
+  }>,
+): Promise<void> {
+  const result = await client.query<{ id: string }>(
+    `select intent.id::text as id
+       from telegram_trade_intents intent
+      where intent.user_id = $1::uuid
+        and intent.funding_operation_id = $2::uuid
+        and intent.funding_reservation_id = $3::uuid
+        and intent.action = 'buy'
+        and intent.delivery_mode = 'app_handoff'
+        and intent.result -> 'appHandoffExecution' ->> 'version' = '2'
+        and (
+          intent.result -> 'appHandoffExecution' ->> 'kind' = 'funding'
+          or (
+            intent.result -> 'appHandoffExecution' ->> 'kind' is null
+            and intent.result -> 'appHandoffFunding' ->> 'version' = '2'
+            and intent.result -> 'appHandoffFunding' ->> 'operationId'
+              = intent.funding_operation_id::text
+            and intent.result -> 'appHandoffFunding' ->> 'handoffId'
+              = intent.result -> 'appHandoffExecution' ->> 'handoffId'
+          )
+        )
+      for update`,
+    [input.userId, input.operationId, input.reservationId],
+  );
+  if (!result.rows[0] || input.allowTelegramAppHandoffV2) return;
+  throw new FundingTradeAttemptError(
+    "sealed_handoff_required",
+    "funding reservation requires its sealed Telegram Mini App handoff binding",
+  );
 }
 
 async function loadReservationForUpdate(
@@ -274,6 +322,8 @@ export async function claimFundingTradeAttemptInTransaction(
     canonicalFingerprint: string;
     consumerIntent: FundingTradeConsumerIntent;
     externalReference?: string | null;
+    /** Only the exact v2 handoff claimer may consume a bound reservation. */
+    allowTelegramAppHandoffV2?: boolean;
     now?: Date;
   }>,
 ): Promise<
@@ -287,6 +337,11 @@ export async function claimFundingTradeAttemptInTransaction(
   }>
 > {
   const now = input.now ?? new Date();
+  // The exact Mini App claimer already locks its handoff/intent before it
+  // reaches this common path. Lock a linked intent first here as well, so an
+  // ordinary request cannot take operation → intent while an exact request
+  // takes intent → operation.
+  await assertTelegramAppHandoffV2FundingClaimBoundary(client, input);
   const scope = await loadReservationForUpdate(client, input);
 
   const activeResult = await client.query<FundingTradeAttemptRow>(

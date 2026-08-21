@@ -22,6 +22,7 @@ export type LimitlessClobQuoteResult =
       executableShares: number;
       availableShares: number;
       minOrderNotionalUsd: number;
+      totalNotional: number;
     }
   | {
       status: "insufficient_depth" | "no_liquidity" | "unavailable";
@@ -116,6 +117,7 @@ async function loadLimitlessClobQuote(
       executableShares: quote.executableShares,
       availableShares: quote.availableShares,
       minOrderNotionalUsd: quote.minOrderNotionalUsd,
+      totalNotional: quote.totalNotional,
     };
   } catch {
     return { status: "unavailable", asOf: null };

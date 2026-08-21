@@ -6,6 +6,7 @@ import type { Pool } from "@hunch/infra";
 import {
   computeBuyCollateralLockedRaw,
   fetchOpenOrderCollateralLocks,
+  fetchOpenOrderPositionLocks,
 } from "./services/open-order-collateral.js";
 
 async function test(name: string, fn: () => Promise<void> | void) {
@@ -99,6 +100,46 @@ await test("legacy rows without signed payload use remaining size times price", 
       orderPayload: null,
     }),
     800_000n,
+  );
+});
+
+await test("Limitless SELL locks remaining exact outcome shares by raw token", async () => {
+  let capturedParams: unknown[] = [];
+  const fakePool = {
+    query: async (_sql: string, params: unknown[]) => {
+      capturedParams = params;
+      return {
+        rows: [
+          {
+            venue: "limitless",
+            wallet_key: "0xwallet000000000000000000000000000000000000",
+            // AMM persistence uses the scoped identifier; availability reads
+            // normalize to raw, so locks must normalize at the same boundary.
+            token_id: "limitless:42:yes",
+            size: "3",
+            filled_size: "1",
+            order_payload: {
+              order: { makerAmount: "3000000", takerAmount: "1" },
+            },
+          },
+        ],
+      };
+    },
+  } as unknown as Pool;
+  const locks = await fetchOpenOrderPositionLocks(fakePool, {
+    userId: "user-1",
+    venue: "limitless",
+    wallet: "0xWallet000000000000000000000000000000000000",
+  });
+  assert.equal(
+    locks.get("0xwallet000000000000000000000000000000000000:42"),
+    2_000_000n,
+  );
+  assert.deepEqual(capturedParams[0], "user-1");
+  assert.deepEqual(capturedParams[1], "limitless");
+  assert.deepEqual(
+    capturedParams[3],
+    "0xwallet000000000000000000000000000000000000",
   );
 });
 

@@ -853,18 +853,26 @@ export class DirectIngressFundingSourceAdapter implements FundingSourceAdapter {
         ),
       );
     }
-    const privyEnabled = input.policy.privyFundingMethods.some(
-      (method) =>
-        method.enabled &&
-        method.locallyConfigured &&
-        method.destinationLocationPatternId ===
-          input.destination.destinationLocationPatternId &&
-        sameAsset(method.asset, input.requiredAmount.asset),
+    const privyAssets = input.policy.privyFundingMethods.flatMap((method) =>
+      method.enabled &&
+      method.locallyConfigured &&
+      method.destinationLocationPatternId ===
+        input.destination.destinationLocationPatternId
+        ? [method.asset]
+        : [],
     );
-    const privyVariants = candidateVariants.filter((variant) =>
-      sameAsset(variant.asset, input.requiredAmount.asset),
-    );
-    if (privyEnabled && privyVariants.length > 0) {
+    // The manual plan remains the durable receive operation. Privy is only a
+    // payment method on that exact selected asset+receiver, so it may expose
+    // a route source (for example native Polygon USDC) as well as the venue
+    // settlement asset without changing receipt or continuation semantics.
+    const privyVariantsById = new Map<string, DirectIngressVariant>();
+    for (const variant of [...candidateVariants, ...receiveSessionVariants]) {
+      if (privyAssets.some((asset) => sameAsset(asset, variant.asset))) {
+        privyVariantsById.set(variant.variantId, variant);
+      }
+    }
+    const privyVariants = [...privyVariantsById.values()];
+    if (privyVariants.length > 0) {
       const privy = sourceOption({
         planning: input,
         kind: "privy_funding_method",

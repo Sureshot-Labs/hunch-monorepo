@@ -376,6 +376,29 @@ assert.deepEqual(
   "compact receive aliases must be an exact allowlist",
 );
 
+const nativePolygonWithCard = await multiAssetAdapter.list({
+  ...v2Input,
+  policy: compileFundingIntentPolicy({
+    version: 2,
+    venues: ["polymarket"],
+    receive: { assets: ["polygon:usdc"], privy: true },
+    paused: false,
+  }),
+});
+assert.deepEqual(
+  nativePolygonWithCard.map((source) => source.option.kind),
+  ["manual_receive", "privy_funding_method"],
+  "a configured Card method must be published for the same exact routed source",
+);
+assert.ok(
+  nativePolygonWithCard[1]?.option.ingress?.receiveTargets?.some((target) =>
+    target.acceptedAssets.some(
+      (accepted) => accepted.asset.assetId === POLYGON_USDC.assetId,
+    ),
+  ),
+  "Card must include the exact native Polygon USDC route source",
+);
+
 assert.deepEqual(
   await multiAssetAdapter.list({
     ...v2Input,

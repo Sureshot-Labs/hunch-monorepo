@@ -1899,6 +1899,8 @@ export async function consumeFundingReservationForLinkedConsumerInTransaction(
 export async function releaseFundingReservationForAbandonedTradeInTransaction(
   client: Pick<PoolClient, "query">,
   input: Readonly<{
+    /** See failTelegramAppHandoffV2FundedIntentWithoutConsumerInTransaction. */
+    handoffFailure?: Readonly<{ code: string; message: string }>;
     userId: string;
     link: FundingTradeReservationLink;
     outcomeReason: string;
@@ -1927,6 +1929,17 @@ export async function releaseFundingReservationForAbandonedTradeInTransaction(
     );
   }
   const now = input.now ?? new Date();
+  if (input.handoffFailure) {
+    await failTelegramAppHandoffV2FundedIntentWithoutConsumerInTransaction(
+      client,
+      {
+        code: input.handoffFailure.code,
+        message: input.handoffFailure.message,
+        operationId: input.link.operationId,
+        userId: input.userId,
+      },
+    );
+  }
   await client.query(
     `
       update funding_trade_attempts
@@ -1967,6 +1980,53 @@ export async function releaseFundingReservationForAbandonedTradeInTransaction(
   });
 }
 
+/**
+ * Close only the v2 funding intent attached to an operation that lost its
+ * reservation without a durable venue order. A definitive provider rejection
+ * can occur after the handoff atomically claimed its attempt, so `executing`
+ * is also safe to close here. Ordinary web funding and any intent with a
+ * durable venue reference retain their existing reconciliation paths.
+ */
+export async function failTelegramAppHandoffV2FundedIntentWithoutConsumerInTransaction(
+  client: Pick<PoolClient, "query">,
+  input: Readonly<{
+    code: string;
+    message: string;
+    operationId: string;
+    userId: string;
+  }>,
+): Promise<void> {
+  await client.query(
+    `update telegram_trade_intents intent
+        set status = 'failed',
+            error_code = $3::text,
+            error_message = $4::text,
+            updated_at = clock_timestamp()
+      where intent.user_id = $1::uuid
+        and intent.funding_operation_id = $2::uuid
+        and intent.action = 'buy'
+        and intent.delivery_mode = 'app_handoff'
+        and intent.status in ('funding', 'executing')
+        and intent.order_id is null
+        and intent.execution_id is null
+        and intent.venue_order_id is null
+        and intent.tx_signature is null
+        and intent.result->'appHandoffExecution'->>'version' = '2'
+        and (
+          intent.result->'appHandoffExecution'->>'kind' = 'funding'
+          or (
+            intent.result->'appHandoffExecution'->>'kind' is null
+            and intent.result->'appHandoffFunding'->>'version' = '2'
+            and intent.result->'appHandoffFunding'->>'operationId'
+              = intent.funding_operation_id::text
+            and intent.result->'appHandoffFunding'->>'handoffId'
+              = intent.result->'appHandoffExecution'->>'handoffId'
+          )
+        )`,
+    [input.userId, input.operationId, input.code, input.message],
+  );
+}
+
 export async function releaseFundingReservationForAbandonedTrade(
   pool: Pool,
   input: Parameters<
@@ -1988,6 +2048,8 @@ export async function releaseFundingReservationForDefinitiveTradeFailure(
     errorCode?: string | null;
     externalReference?: string | null;
     broadcastMayHaveOccurred: boolean;
+    /** Preserve a precise sealed-handoff terminal reason when one is known. */
+    handoffFailure?: Readonly<{ code: string; message: string }>;
     now?: Date;
   }>,
 ): Promise<void> {
@@ -2005,6 +2067,10 @@ export async function releaseFundingReservationForDefinitiveTradeFailure(
       userId: input.userId,
       link: input.link,
       outcomeReason: input.outcomeReason,
+      handoffFailure: input.handoffFailure ?? {
+        code: input.errorCode?.trim() || "funding_trade_failed",
+        message: "Funding could not complete before the Buy was submitted.",
+      },
       now: input.now,
     });
   });

@@ -32,6 +32,14 @@ const CALLBACK_PREFIX = TELEGRAM_BOT_TRADING_CALLBACK_PREFIX;
  */
 const TELEGRAM_TRADE_LIFECYCLE_OUTBOX_ACTION = "trade_funding_edit";
 
+function formatRawShares(raw: string): string {
+  if (!/^\d+$/u.test(raw)) return raw;
+  const padded = raw.padStart(7, "0");
+  const whole = padded.slice(0, -6);
+  const fraction = padded.slice(-6).replace(/0+$/u, "");
+  return fraction ? `${whole}.${fraction}` : whole;
+}
+
 type TelegramTradeLifecycleState =
   | "awaiting_client"
   | "filled"
@@ -47,11 +55,12 @@ type TelegramTradeLifecycleState =
   | "stopped";
 
 type TelegramTradeLifecycleProgress = Readonly<{
+  action: "buy" | "sell";
   amountUsd: string;
   attemptStateFingerprint: string;
   canCancel: boolean;
   canCancelBuy: boolean;
-  /** True only for a sealed v2 Buy that has no funding operation. */
+  /** True only for a sealed v2 direct trade that has no funding operation. */
   isDirectHandoff: boolean;
   failureMessage: string | null;
   fundingAmountLabel: string | null;
@@ -64,19 +73,21 @@ type TelegramTradeLifecycleProgress = Readonly<{
   /**
    * The next durable boundary belongs to the authenticated Mini App. Telegram
    * must present a resume path instead of implying that the server will sign
-   * or submit it; this covers both funding actions and a sealed direct Buy.
+   * or submit it; this covers both funding actions and a sealed direct trade.
    */
   requiresMiniAppContinuation: boolean;
   sideLabel: string;
+  sharesRaw: string | null;
   sourceRoute: string | null;
   stepStateFingerprint: string;
   state: TelegramTradeLifecycleState;
   venueOrderId: string | null;
   venue: string;
-  version: 1 | 2 | 3 | 4 | 5;
+  version: 1 | 2 | 3 | 4 | 5 | 6;
 }>;
 
 type ProjectionCandidate = Readonly<{
+  action: string;
   amount_usd: string | null;
   attempt_state_fingerprint: string;
   chat_id: string | null;
@@ -98,6 +109,7 @@ type ProjectionCandidate = Readonly<{
   result: Record<string, unknown>;
   root_requires_router_continuation: boolean;
   side: string | null;
+  shares_raw: string | null;
   source_asset_id: string | null;
   source_asset_decimals: number | null;
   source_network_id: string | null;
@@ -139,7 +151,8 @@ function parseProgress(value: unknown): TelegramTradeLifecycleProgress | null {
       value.version !== 2 &&
       value.version !== 3 &&
       value.version !== 4 &&
-      value.version !== 5)
+      value.version !== 5 &&
+      value.version !== 6)
   ) {
     return null;
   }
@@ -177,6 +190,11 @@ function parseProgress(value: unknown): TelegramTradeLifecycleProgress | null {
   // the projector revision-stable until an actual venue order exists.
   return {
     ...value,
+    action: value.action === "sell" ? "sell" : "buy",
+    sharesRaw:
+      typeof value.sharesRaw === "string" && /^\d+$/u.test(value.sharesRaw)
+        ? value.sharesRaw
+        : null,
     // Older cards were all server-executed. Missing is therefore safely
     // normalised to false while version 5 forces one authoritative edit.
     requiresMiniAppContinuation: value.requiresMiniAppContinuation === true,
@@ -269,6 +287,7 @@ function directHandoffProgressFor(
               ? "cancelled"
               : "failed";
   return {
+    action: candidate.action === "sell" ? "sell" : "buy",
     amountUsd: candidate.amount_usd ?? "0",
     attemptStateFingerprint: "",
     canCancel:
@@ -286,12 +305,13 @@ function directHandoffProgressFor(
     reasonCode: state === "failed" ? candidate.error_code : null,
     requiresMiniAppContinuation: state === "awaiting_client",
     sideLabel: sideLabel(candidate),
+    sharesRaw: candidate.shares_raw,
     sourceRoute: null,
     stepStateFingerprint: "",
     state,
     venueOrderId: candidate.venue_order_id,
     venue: candidate.venue,
-    version: 5,
+    version: 6,
   };
 }
 
@@ -360,6 +380,7 @@ function liveProgressFor(
                 ? "preparing"
                 : "starting";
   return {
+    action: candidate.action === "sell" ? "sell" : "buy",
     amountUsd: candidate.amount_usd ?? "0",
     attemptStateFingerprint: candidate.attempt_state_fingerprint,
     canCancel:
@@ -385,17 +406,18 @@ function liveProgressFor(
     reasonCode,
     requiresMiniAppContinuation,
     sideLabel: sideLabel(candidate),
+    sharesRaw: candidate.shares_raw,
     sourceRoute: sourceRoute(candidate),
     stepStateFingerprint: candidate.step_state_fingerprint,
     state,
     venueOrderId: candidate.venue_order_id,
     venue: candidate.venue,
-    version: 5,
+    version: 6,
   };
 }
 
 /**
- * The intent is the Buy. Once it is failed or cancelled nothing revives it, so
+ * The intent is the trade. Once it is failed or cancelled nothing revives it, so
  * the intent — not the funding operation it links to — decides the card: a
  * later `operation = ready` must never restore a "Funding ready" card over a
  * stopped one. Pinning the operation-derived fields also settles the revision,
@@ -447,6 +469,7 @@ function sameProgress(
 ): boolean {
   return (
     left?.version === right.version &&
+    left.action === right.action &&
     left.intentId === right.intentId &&
     left.venue === right.venue &&
     left.marketTitle === right.marketTitle &&
@@ -454,6 +477,7 @@ function sameProgress(
     left.venueOrderId === right.venueOrderId &&
     left.sourceRoute === right.sourceRoute &&
     left.amountUsd === right.amountUsd &&
+    left.sharesRaw === right.sharesRaw &&
     left.isDirectHandoff === right.isDirectHandoff &&
     left.failureMessage === right.failureMessage &&
     left.fundingAmountLabel === right.fundingAmountLabel &&
@@ -481,9 +505,11 @@ async function listCandidates(
             intent.chat_id,
             intent.telegram_message_id::text,
             intent.venue,
+            intent.action,
             intent.venue_order_id,
             coalesce(market.title, intent.market_id, 'Market') as market_title,
             intent.side,
+            intent.shares_raw,
             funding_authorization.source_network_id,
             funding_authorization.source_asset_id,
             funding_authorization.source_asset_decimals,
@@ -754,33 +780,35 @@ export async function runTelegramTradeLifecycleProjectionBatch(
 }
 
 function directHandoffText(progress: TelegramTradeLifecycleProgress): string {
+  const trade = progress.action === "sell" ? "Sell" : "Buy";
+  const subject = progress.action === "sell" ? "sell" : "buy";
   const status = {
     awaiting_client: [
       "▶️",
-      "Continue Buy in Hunch",
-      "Your confirmed Buy is ready in Hunch. No order has been submitted.",
+      `Continue ${trade} in Hunch`,
+      `Your confirmed ${trade} is ready in Hunch. No order has been submitted.`,
     ],
     submitting_trade: [
       "⏳",
-      "Submitting Buy",
-      "Hunch is submitting your Buy and recording the venue result automatically.",
+      `Submitting ${trade}`,
+      `Hunch is submitting your ${trade} and recording the venue result automatically.`,
     ],
     confirming_trade: [
       "⏳",
-      "Confirming Buy",
-      "The Buy may have reached the venue. Hunch is checking the result automatically.",
+      `Confirming ${trade}`,
+      `The ${trade} may have reached the venue. Hunch is checking the result automatically.`,
     ],
-    filled: ["✅", "Trade filled", "The Buy was filled successfully."],
+    filled: ["✅", "Trade filled", `The ${trade} was filled successfully.`],
     failed: [
       "⚠️",
       "Trade failed",
       progress.failureMessage ??
-        "The Buy failed before a confirmed venue submission. No order is being retried automatically.",
+        `The ${trade} failed before a confirmed venue submission. No order is being retried automatically.`,
     ],
     cancelled: [
       "ℹ️",
-      "Buy cancelled",
-      "No order was submitted. Open the market to choose another Buy.",
+      `${trade} cancelled`,
+      `No order was submitted. Open the market to choose another ${subject}.`,
     ],
   } as const;
   const [icon, heading, body] = status[progress.state as keyof typeof status];
@@ -791,7 +819,14 @@ function directHandoffText(progress: TelegramTradeLifecycleProgress): string {
       `🔵 ${formatTelegramFieldMarkdownV2("Venue", formatTelegramVenueLabel(progress.venue))}`,
       `🎯 ${formatTelegramFieldMarkdownV2("Market", progress.marketTitle)}`,
       `↔️ ${formatTelegramFieldMarkdownV2("Side", progress.sideLabel)}`,
-      `🛒 ${formatTelegramFieldMarkdownV2("Buy", `$${progress.amountUsd}`)}`,
+      progress.action === "sell"
+        ? `📦 ${formatTelegramFieldMarkdownV2(
+            "Sell",
+            progress.sharesRaw == null
+              ? "unavailable quantity"
+              : `${formatRawShares(progress.sharesRaw)} shares`,
+          )}`
+        : `🛒 ${formatTelegramFieldMarkdownV2("Buy", `$${progress.amountUsd}`)}`,
       progress.venueOrderId
         ? `🔗 ${formatTelegramFieldWithMarkdownV2(
             "Order",
@@ -962,7 +997,7 @@ function progressKeyboard(
       rows.push([
         {
           callback_data: `${CALLBACK_PREFIX}:retry_buy:${progress.intentId}`,
-          text: "▶️ Continue in Hunch",
+          text: `▶️ Continue ${progress.action === "sell" ? "Sell" : "Buy"} in Hunch`,
         },
       ]);
     } else if (progress.state === "failed" || progress.state === "cancelled") {
@@ -984,7 +1019,7 @@ function progressKeyboard(
       rows.push([
         {
           callback_data: `${CALLBACK_PREFIX}:cancel:${progress.intentId}`,
-          text: "❌ Cancel Buy",
+          text: `❌ Cancel ${progress.action === "sell" ? "Sell" : "Buy"}`,
         },
       ]);
     }

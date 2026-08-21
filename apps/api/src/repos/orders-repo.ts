@@ -308,7 +308,7 @@ export type StoreOrderInput = {
   }> | null;
   fundingTradeAttemptId?: string | null;
   /**
-   * A direct v2 Mini App Buy has no FundingOperation. Its sealed Telegram
+   * A direct v2 Mini App trade has no FundingOperation. Its sealed Telegram
    * handoff is instead linked atomically when this ordinary order is stored.
    */
   telegramAppHandoffV2DirectTrade?: TelegramAppHandoffV2DirectTradeOrder | null;
@@ -341,8 +341,14 @@ export async function storeOrderInTransaction(
       "A direct Telegram handoff cannot also consume a funding reservation",
     );
   }
-  if (directHandoffTrade && inputs.side !== "BUY") {
-    throw new Error("A direct Telegram handoff can only submit a buy");
+  if (
+    directHandoffTrade &&
+    inputs.side?.trim().toUpperCase() !==
+      (directHandoffTrade.action ?? "buy").toUpperCase()
+  ) {
+    throw new Error(
+      "A direct Telegram handoff order side does not match its sealed action",
+    );
   }
   if (
     !resolvedFundingReservation &&

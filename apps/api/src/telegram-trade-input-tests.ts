@@ -60,6 +60,23 @@ assert.deepEqual(parseTelegramCustomBuyAmount("$2.50"), {
   amountUsd: 2.5,
   normalized: "2.50",
 });
+
+assert.equal(
+  telegramBotTradingTestHooks.isTelegramEstimatedSellProceeds({
+    raw: { kind: "limitless_clob" },
+    venue: "limitless",
+  } as never),
+  true,
+  "Limitless CLOB FOK has no provider-enforced proceeds floor",
+);
+assert.equal(
+  telegramBotTradingTestHooks.isTelegramEstimatedSellProceeds({
+    raw: { kind: "limitless_amm" },
+    venue: "limitless",
+  } as never),
+  false,
+  "the exact AMM Sell transaction retains its sealed minimum receive",
+);
 for (const value of ["0", "-1", "+1", "1.001", "1e2", "1,25", "1 usd"]) {
   assert.equal(parseTelegramCustomBuyAmount(value), null, value);
 }
@@ -171,6 +188,16 @@ for (const makerAmount of [undefined, "", "0", "1234568", "1.23", "-1"]) {
   );
 }
 
+assert.equal(
+  telegramBotTradingTestHooks.resolveExecutableTelegramSellSharesRaw({
+    availableRaw: 1_517_448n,
+    quote: { action: "SELL", raw: {}, venue: "limitless" } as never,
+    requestedRaw: 1_234_567n,
+  }),
+  1_234_567n,
+  "Limitless custom Sell uses the exact ready quote quantity rather than Polymarket makerAmount",
+);
+
 const sellSurfaceInput = {
   authorizationEnabled: true,
   authorizationHasPrivyWallet: true,
@@ -193,6 +220,20 @@ const sellSurfaceInput = {
 assert.equal(
   telegramBotTradingTestHooks.canAttemptSellSurface(sellSurfaceInput),
   true,
+);
+assert.equal(
+  telegramBotTradingTestHooks.canAttemptSellSurface({
+    ...sellSurfaceInput,
+    authorizationEnabled: false,
+    authorizationHasPrivyWallet: false,
+    authorizationVenueAllowed: false,
+    automationAllowed: false,
+    policyVenueAllowed: false,
+    sealedAppHandoffAvailable: true,
+    venue: "limitless",
+  }),
+  true,
+  "a sealed handoff Sell does not require server trading authority",
 );
 for (const unavailable of [
   { policyTradingEnabled: false },

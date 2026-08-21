@@ -45,6 +45,7 @@ import {
   TelegramAppHandoffV2Error,
 } from "../services/telegram-app-handoff-v2.js";
 import { FundingPlanningRuntime } from "../funding/planner/runtime-service.js";
+import type { TelegramAppHandoffV2TradeVenue } from "../services/telegram-app-handoff-v2-contract.js";
 import { resolveActiveTelegramAccountLink } from "../services/telegram-account-link.js";
 import {
   executeCommittedTelegramAppHandoff,
@@ -98,7 +99,12 @@ type TelegramAppHandoffRouteResponse =
       handoff: TelegramAppHandoff;
     }>;
 
-function requireTelegramAppHandoffV2Plan(handoff: TelegramAppHandoff): boolean {
+function readTelegramAppHandoffV2RouteScope(
+  handoff: TelegramAppHandoff,
+): Readonly<{
+  action: "buy" | "sell";
+  venue: TelegramAppHandoffV2TradeVenue;
+}> | null {
   const generation = telegramAppHandoffPlanGeneration(handoff.planSnapshot);
   if (generation === "unsupported") {
     throw new TelegramAppHandoffV2Error(
@@ -106,11 +112,20 @@ function requireTelegramAppHandoffV2Plan(handoff: TelegramAppHandoff): boolean {
       "sealed handoff uses an unsupported execution-contract generation",
     );
   }
-  if (generation !== "v2") return false;
+  if (generation !== "v2") return null;
   // Parsing is an authorization boundary: never allow a malformed v2 snapshot
   // to fall through into the legacy callback-replay executor.
-  parseTelegramAppHandoffV2Plan(handoff.planSnapshot);
-  return true;
+  const plan = parseTelegramAppHandoffV2Plan(handoff.planSnapshot);
+  const action = plan.trade.action;
+  const venue = telegramVenueFromSealedHandoffSnapshot(handoff.planSnapshot);
+  if (
+    (action !== "buy" && action !== "sell") ||
+    !venue ||
+    !isTelegramAppHandoffV2TradeVenue(venue)
+  ) {
+    throw new TelegramAppHandoffError("venue_unsupported");
+  }
+  return { action, venue };
 }
 
 async function registerTelegramRoutes(
@@ -474,17 +489,13 @@ async function registerTelegramRoutes(
           token: request.body.token,
           userId: identity.userId,
         });
-        if (requireTelegramAppHandoffV2Plan(handoff)) {
-          const venue = telegramVenueFromSealedHandoffSnapshot(
-            handoff.planSnapshot,
-          );
-          if (!venue || !isTelegramAppHandoffV2TradeVenue(venue)) {
-            throw new TelegramAppHandoffError("venue_unsupported");
-          }
+        const v2Scope = readTelegramAppHandoffV2RouteScope(handoff);
+        if (v2Scope) {
           const scope = await resolveTelegramAppHandoffCurrentScope({
+            action: v2Scope.action,
             db: pool,
             telegramUserId: identity.telegramUserId,
-            venue,
+            venue: v2Scope.venue,
             executionContractVersion: 2,
           });
           if (
@@ -563,12 +574,9 @@ async function registerTelegramRoutes(
           token: request.body.token,
           userId: identity.userId,
         });
-        if (requireTelegramAppHandoffV2Plan(handoff)) {
-          // Projection is read-only. A Mini App open must never commit a
-          // funding operation; only `/commit` crosses that financial boundary.
-          reply.header("Cache-Control", "private, no-store");
-          return reply.send({ handoff });
-        }
+        // Validate v2 snapshots even though projection itself is read-only: a
+        // malformed v2 plan must not masquerade as a legacy handoff.
+        readTelegramAppHandoffV2RouteScope(handoff);
         const projection = await loadTelegramAppHandoffProjection(pool, {
           telegramUserId: identity.telegramUserId,
           tradeIntentId: handoff.tradeIntentId,
@@ -614,13 +622,8 @@ async function registerTelegramRoutes(
           token: request.body.token,
           userId: identity.userId,
         });
-        if (requireTelegramAppHandoffV2Plan(handoff)) {
-          const venue = telegramVenueFromSealedHandoffSnapshot(
-            handoff.planSnapshot,
-          );
-          if (!venue || !isTelegramAppHandoffV2TradeVenue(venue)) {
-            throw new TelegramAppHandoffError("venue_unsupported");
-          }
+        const v2Scope = readTelegramAppHandoffV2RouteScope(handoff);
+        if (v2Scope) {
           const execution = await resolveTelegramAppHandoffV2Execution({
             db: pool,
             handoff,
@@ -628,9 +631,10 @@ async function registerTelegramRoutes(
           });
           if (!isTelegramAppHandoffV2ReadOnlyExecution(execution)) {
             const scope = await resolveTelegramAppHandoffCurrentScope({
+              action: v2Scope.action,
               db: pool,
               telegramUserId: identity.telegramUserId,
-              venue,
+              venue: v2Scope.venue,
               executionContractVersion: 2,
             });
             if (

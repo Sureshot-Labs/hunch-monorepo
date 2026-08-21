@@ -1098,6 +1098,11 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         return reply.send({ error: "Unauthorized" });
       }
       const result = await claimLimitlessAmmFundingTrade({
+        assertTelegramAppHandoffV2Scope: async (sealed) =>
+          matchesTelegramAppHandoffV2CurrentScope({
+            db: pool,
+            sealed,
+          }),
         body: request.body,
         pool,
         signer,

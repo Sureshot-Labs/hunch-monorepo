@@ -192,21 +192,40 @@ export const limitlessAmmOrderBodySchema = z
     }
   });
 
-export const limitlessAmmFundingClaimBodySchema = z.object({
-  amountUsdRaw: z.string().regex(/^[1-9][0-9]*$/, "amountUsdRaw is invalid"),
-  fundingOperationId: z.string().uuid(),
-  fundingReservationId: z.string().uuid(),
-  idempotencyKey: z.string().trim().min(8).max(192),
-  marketAddress: zEthAddressRequired,
-  marketSlug: zLimitlessSlug.optional(),
-  tokenId: zRequiredString("tokenId is required"),
-  transactionData: z
-    .string()
-    .regex(/^0x[a-fA-F0-9]+$/, "transactionData is invalid"),
-});
+export const limitlessAmmFundingClaimBodySchema = z
+  .object({
+    amountUsdRaw: z.string().regex(/^[1-9][0-9]*$/, "amountUsdRaw is invalid"),
+    fundingOperationId: z.string().uuid(),
+    fundingReservationId: z.string().uuid(),
+    idempotencyKey: z.string().trim().min(8).max(192),
+    marketAddress: zEthAddressRequired,
+    marketSlug: zLimitlessSlug.optional(),
+    tokenId: zRequiredString("tokenId is required"),
+    transactionData: z
+      .string()
+      .regex(/^0x[a-fA-F0-9]+$/, "transactionData is invalid"),
+    telegramAppHandoffId: z.string().uuid().optional(),
+    telegramAppHandoffPlanFingerprint: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/iu, "Invalid Telegram handoff fingerprint")
+      .optional(),
+  })
+  .superRefine((value, context) => {
+    if (
+      Boolean(value.telegramAppHandoffId) !==
+      Boolean(value.telegramAppHandoffPlanFingerprint)
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          "telegramAppHandoffId and telegramAppHandoffPlanFingerprint must be provided together",
+      });
+    }
+  });
 
 /**
- * A v2 handoff AMM Buy is signed by the Mini App, then broadcast by Hunch.
+ * A v2 handoff AMM Buy or Sell is signed by the Mini App, then broadcast by
+ * Hunch.
  * Keeping the signed bytes in this request lets the API claim its immutable
  * hash before any RPC submission; the value is never stored in Postgres.
  */

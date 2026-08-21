@@ -1000,7 +1000,7 @@ await test("compiles full V2 intent to the reviewed runtime catalog", () => {
       locations: 8,
       venues: 2,
       routes: 9,
-      privy: 2,
+      privy: 3,
       preparation: 4,
       positionActions: 0,
       recommendationOrder: ["polymarket", "limitless"],

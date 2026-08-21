@@ -50,6 +50,7 @@ import {
   type TelegramBotTradingWalletSetupIssue,
   type TelegramBotTradingVenue,
 } from "../services/telegram-bot-trading.js";
+import { isTelegramAppHandoffV2EnabledForVenue } from "../services/telegram-app-handoff-v2-contract.js";
 import { resolveSignalBotTradingPolicyStateFromDb } from "../services/signal-bot-trading-policy.js";
 import {
   claimTelegramBotTradingAutoSetup,
@@ -1694,11 +1695,12 @@ async function registerTelegramBotTradingRoutes(
       const policy = policyState.policy;
       const venueAllowsCustomInput =
         policy.tradingVenues.includes(context.venue) ||
-        (context.action === "buy" &&
-          context.deliveryMode === "app_handoff" &&
-          context.venue === "limitless" &&
-          policy.fundingReceiveEnabled &&
-          policy.buyContinuationEnabled);
+        (context.deliveryMode === "app_handoff" &&
+          isTelegramAppHandoffV2EnabledForVenue({
+            contractVersion: policy.miniAppHandoffContractVersion,
+            mode: policy.miniAppHandoffMode,
+            venue: context.venue,
+          }));
       if (
         !policy.tradingEnabled ||
         !policy.customTradeInputEnabled ||

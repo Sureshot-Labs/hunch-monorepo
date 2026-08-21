@@ -7722,6 +7722,94 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
+    name: "direct Sell retry opens its market instead of rejecting the historical retry callback",
+    run: async () => {
+      const telegram = new FakeTelegram();
+      const db = {
+        query: async (sql: string) => {
+          if (sql.includes("FROM telegram_trade_intents i")) {
+            return {
+              rowCount: 1,
+              rows: [
+                {
+                  id: "00000000-0000-4000-8000-000000000001",
+                  telegram_user_id: "999",
+                  user_id: "user-1",
+                  authorization_id: "authorization-1",
+                  chat_id: "999",
+                  telegram_message_id: null,
+                  delivery_mode: "app_handoff",
+                  action: "sell",
+                  venue: "polymarket",
+                  market_id: "market-1",
+                  event_id: "event-1",
+                  side: "YES",
+                  amount_usd: null,
+                  sell_percent: null,
+                  shares_raw: "5000000",
+                  error_code: null,
+                  error_message: null,
+                  funding_operation_id: null,
+                  funding_reservation_id: null,
+                  status: "filled",
+                  submit_started_at: new Date(),
+                  quote_snapshot: {},
+                  policy_snapshot: {},
+                  result: {
+                    appHandoffV2: {
+                      plan: {
+                        executionContractVersion: 2,
+                        kind: "direct_trade",
+                        trade: {
+                          action: "sell",
+                          controllerWalletAddress:
+                            "0x0000000000000000000000000000000000000001",
+                          eventId: "event-1",
+                          marketId: "market-1",
+                          maxSlippageBps: 500,
+                          minimumReceiveRaw: "1000000",
+                          outcomeTokenId: "token-yes",
+                          sharesRaw: "5000000",
+                          side: "YES",
+                          venue: "polymarket",
+                        },
+                        version: 2,
+                      },
+                    },
+                  },
+                  idempotency_key: "direct-sell-1",
+                  expires_at: new Date(Date.now() + 60_000),
+                  market_title: "Market",
+                  market_status: "ACTIVE",
+                },
+              ],
+            };
+          }
+          return { rowCount: 0, rows: [] };
+        },
+      };
+      const handled = await handleTelegramBotTradingCallback({
+        answerCallbackQuery: (input) => telegram.answerCallbackQuery(input),
+        appBaseUrl: "https://app.hunch.trade",
+        callbackQuery: buildTradeCallbackQuery({
+          data: "hbt:retry_buy:00000000-0000-4000-8000-000000000001",
+        }),
+        db: db as never,
+        sendMessage: (message) => telegram.sendMessage(message as never),
+      });
+      assert.equal(handled, true);
+      assert.match(
+        telegram.callbackAnswers[0]?.text ?? "",
+        /Opening a fresh market card/u,
+      );
+      assert.doesNotMatch(
+        telegram.callbackAnswers[0]?.text ?? "",
+        /does not match/u,
+      );
+      assert.match(telegram.messages[0]?.text ?? "", /Market not found/u);
+    },
+  },
+  {
     name: "trading callback is bound to the original private chat",
     run: async () => {
       const cases = [

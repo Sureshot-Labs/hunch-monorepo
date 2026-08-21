@@ -25,13 +25,30 @@ export function isTelegramAppHandoffV2TradeVenue(
 }
 
 /**
- * Direct Buy is limited to venues whose ordinary web order endpoint makes a
+ * The policy gate is shared by market rendering and callback entrypoints.
+ * Server-bot venue allowlists intentionally do not appear here: a v2 handoff
+ * is signed by the user in the Mini App, not by the unattended bot signer.
+ */
+export function isTelegramAppHandoffV2EnabledForVenue(input: {
+  contractVersion: number;
+  mode: string;
+  venue: unknown;
+}): boolean {
+  return (
+    input.mode !== "off" &&
+    input.contractVersion >= 2 &&
+    isTelegramAppHandoffV2TradeVenue(input.venue)
+  );
+}
+
+/**
+ * Direct trade is limited to venues whose ordinary web order endpoint makes a
  * durable single-flight claim before it calls the venue. This is deliberately
  * separate from server-bot execution: the Mini App signs its own order.
  *
  * A venue entry is not by itself a market-mode capability. The Telegram
- * selector also rejects any execution mode that has no matching consumer;
- * currently that excludes Limitless AMM from the direct CLOB contract.
+ * selector also rejects any execution mode that has no matching consumer.
+ * Limitless has two such consumers: FOK CLOB and the exact signed AMM call.
  */
 export const TELEGRAM_APP_HANDOFF_V2_DIRECT_TRADE_VENUES = [
   "polymarket",
