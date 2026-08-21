@@ -404,32 +404,27 @@ balances are never pulled without their explicit client actions.
 #### 4.5.1 Native SOL and ingress amount contracts
 
 Native SOL is an eligible owned source when the runtime policy enables the
-exact `solana-sol-to-polygon-pusd` route. Add Funds and trade shortfall express
-the desired pUSD receipt; the Relay adapter uses `EXPECTED_OUTPUT` with a
-bounded output buffer because live `EXACT_OUTPUT` returned
-`NO_SWAP_ROUTES_FOUND`. The planner reserves 0.003 SOL outside the quoted input,
-and the historical fail-closed SVM validator binds the controlled signer,
-derived USDC/WSOL accounts, exact SOL wrap amount, Jupiter amount/slippage tail,
-zero platform fee, Relay protocol order/refund paths, destination pUSD floor,
-and memo/status correlation before the action can be prepared. A fresh
-2026-08-20 quote instead returns one direct immutable Relay Depository
-`deposit_native` instruction, the same action family already modeled for the
-Base route. Current Polygon validation rejects that provider drift before
-commit; Slice E must generalize the direct validator and retain the Jupiter
-fixture only as a negative regression case.
+exact `solana-sol-to-polygon-pusd` route. A Buy shortfall may select SOL already
+present in Account Value and quote one composite conversion/Buy; it does not
+show a receive address. The planner reserves 0.003 SOL outside the quoted input.
+A fresh 2026-08-20 managed-wallet quote returns one direct immutable Relay
+Depository `deposit_native` instruction instead of the historical Jupiter
+envelope. The current direct validator and old fixture remain application
+evidence, while the Slice E3 runbook separately requires a delegated custody
+boundary before broadcast.
 
-Native SOL always requires explicit economic consent, but the surface depends
-on the user intent. A destination-scoped Deposit obtains bounded conversion
-consent before revealing the receive address and may convert the matching
-canonical receipt without another prompt. An active Trade includes conversion
-inside its single fresh Review/Confirm. Pre-existing, unexpected, or
-out-of-bounds SOL remains Account Value and uses a separate fresh Convert
-review. Delegated execution remains disabled until the shared Solana policy and
-custom Relay instruction boundary pass the normative
+Native SOL always requires explicit economic consent before conversion, but
+receiving SOL does not. `Receive SOL` shows the user's managed Solana address
+and leaves the finalized receipt as SOL Account Value. External direct venue
+funding uses a different one-time strict Relay address with a fully verified
+signed order. An active Trade may spend already-owned SOL and includes
+conversion inside its single fresh Review/Confirm; pre-existing SOL outside a
+Trade uses a standalone Convert review. Delegated execution remains disabled
+until the shared Solana policy and custody boundary pass the normative
 [`../wp8/slice-e-relay-svm-activation-runbook.md`](../wp8/slice-e-relay-svm-activation-runbook.md);
 application validation alone is not activation evidence.
 
-Generic direct Receive and strict Relay ingress are different contracts.
+Generic owned Receive and strict Relay ingress are different contracts.
 Privy/manual direct Receive uses a minimum target: partial transfers accumulate,
 the operation consumes only the requested amount after the target is reached,
 and excess remains ordinary Account Value. A per-destination advisory

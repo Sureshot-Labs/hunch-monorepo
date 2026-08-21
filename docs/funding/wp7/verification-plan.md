@@ -115,15 +115,24 @@ ingress finality are scanned, and the same `(networkId, txHash, logIndex)`
 cannot be allocated to another session even when session polling overlaps.
 Polygon and Base use the canonical ERC-20 event capability; Base must still
 remain unadvertised unless its exact owned source-location policy and route
-evidence pass. Solana USDC and native SOL use the canonical
-`solana_transfer_v1` signature/instruction capability and are subject to the
-same exact wallet/location/route gate. Unit fixtures cover SPL USDC and System
-Program native transfers; the existing `review_required` native-SOL disposition
-is an inactive compatibility path, not the target Deposit UX. Runtime
-activation remains blocked until persistence integration, service restart,
-exact route discovery, the positive/negative Privy/on-chain policy matrix in
-[`../wp8/slice-e-relay-svm-activation-runbook.md`](../wp8/slice-e-relay-svm-activation-runbook.md),
-and tiny-value delegated execution evidence pass.
+evidence pass. Plain `Receive SOL` uses the canonical `solana_transfer_v1`
+System Program identity and needs current-wallet/observer evidence, but no
+Privy execution policy. Strict E2 SOL/USDC uses its full signed-order/address/
+refund/destination matrix. E3 managed-wallet native-SOL conversion remains
+blocked until the positive/negative Privy or independent custody-boundary
+matrix in
+[`../wp8/slice-e-relay-svm-activation-runbook.md`](../wp8/slice-e-relay-svm-activation-runbook.md)
+and its tiny-value delegated execution evidence both pass. These three gates
+are independent.
+
+For E3, the custody suite is the runbook's selected Guard suite, not a generic
+Solana route test: prove canonical order-hash parity with Relay, solver and
+attestation signature failures, exact binding/source/destination/refund checks,
+cap/reserve/expiry/replay rejection, exact Guard-to-Depository CPI, and Privy
+rejection of every outer instruction except Guard + Secp256k1 + Compute Budget.
+Then prove possible-broadcast recovery, source debit, destination pUSD or
+owned refund, and no duplicate Buy through a disposable database and a
+separately authorized tiny-value rehearsal.
 
 ## 4. Tiny-value live matrix
 
@@ -147,31 +156,25 @@ timestamps, and final database state for every case.
    market, depending on the available local fixture.
 7. Cross-chain source: place an eligible balance on Base, fund a Polygon
    Polymarket BUY, and verify route timing plus exact destination observation.
-8. Existing owned native SOL source: create a small SOL balance on the test
-   user's Solana
-   wallet, use it first as the source for a Limitless Base USDC BUY shortfall
-   through the direct `solana-sol-to-base-usdc` route, show the conversion in
-   the one composite Trade Review/Confirm, and retain enough SOL for any
-   unsponsored source action. Assert there is no second conversion prompt.
-   Record quote, signature-to-confirmation, Relay fill,
-   destination-observation, and resumed-Buy timings separately. Then test the
-   priority Polygon path `native SOL -> Relay Depository -> pUSD -> Buy`
-   independently.
-9. External native SOL Receive: choose Polymarket or Limitless, `Send crypto`,
-   SOL/Solana, verify that bounded conversion disclosure/consent is required
-   before the exact Solana address and QR are shown, send a tiny transfer, and
-   observe a canonical native receipt. When the fresh quote stays inside the
-   frozen bounds, assert that it commits once without another prompt and the
-   linked child Funding Operation reaches the selected Trading Balance. Repeat
-   with an out-of-bounds quote and assert the SOL remains owned while a fresh
-   standalone Convert review is offered.
-10. External Solana ingress: after the specific Solana USDC/SOL receive
-    capability is activated, choose it in Add Funds, verify the Solana address
-    and exact asset instructions, send a tiny amount, then verify
-    `solana-usdc-to-base-usdc` direct stable routing or
-    `solana-sol-to-base-usdc` bounded pre-address volatile conversion for
-    Limitless. Assert that no Polygon intermediate child operation or duplicate
-    post-receipt conversion prompt is created.
+8. Existing owned native SOL source: place a small finalized SOL balance in the
+   test user's managed Solana wallet before starting the Buy. Verify the
+   shortfall planner prefers sufficient venue/stable balances, then offers
+   `Pay with existing SOL` when they do not cover the order, without showing an address,
+   quotes conversion at fresh economics, and performs one composite
+   Review/Confirm for `SOL -> venue stable -> Buy`. Assert no second conversion
+   prompt and no spend above the observed owned balance/reserve.
+9. Plain owned SOL Receive: choose `Receive SOL`, verify the current managed
+   Solana address/QR and explicit `SOL stays SOL` copy, send a tiny transfer,
+   and observe canonical finalized SOL Account Value. Assert that receipt alone
+   creates no conversion Funding Operation and no Buy continuation. Start a
+   later Buy and verify step 8 discovers this already-owned balance.
+10. Strict external Solana venue funding: choose `Fund Polymarket with SOL`,
+    verify one exact strict Relay address plus amount/output/expiry/refund copy,
+    and complete a tiny destination-pUSD rehearsal. Repeat with canonical
+    Solana USDC. Verify the full protocol-v2 order hash/signature, exact user
+    destination, every owned refund, child request, under/overpayment, late,
+    wrong-asset, ambiguous, and restart behavior. A Relay success without
+    canonical destination credit is not completion.
 11. Composite source: split value across two eligible Hunch balances so neither
     alone covers the BUY but the backend composite option does. Verify one
     operation, sequential legs, one review, and one settled consumer

@@ -19,10 +19,13 @@ import {
   expireFundingReceiveSessions,
   fetchFundingReceiveReceiptForReview,
   fetchFundingReceiveSessionForUser,
+  FundingReceiveSessionExactScopeConflictError,
+  FundingReceiveSessionOpenIdempotencyConflictError,
   insertFundingReceiveReceipt,
   listFundingReceiveReceiptsForRouting,
   listFundingReceiveReceiptsForUser,
   recordFundingReceiveReceiptRoutingDisposition,
+  replayFundingReceiveSessionOpenIdempotency,
   settleFundingReceiveReceiptRouting,
   updateFundingReceiveSessionObservation,
 } from "../../persistence/funding-receive-session-repository.js";
@@ -127,7 +130,185 @@ function sessionInput(userId: string) {
 
 const userId = await insertUser();
 let mergeTargetId: string | null = null;
+let genericOptionUserId: string | null = null;
 try {
+  genericOptionUserId = await insertUser();
+  const genericInput = sessionInput(genericOptionUserId);
+  const genericOpen = {
+    ...genericInput,
+    requireExactReceiveScope: true,
+    openIdempotency: {
+      key: "generic-receive-open-idempotency-12345678",
+      requestFingerprint: "a".repeat(64),
+    },
+  } as const;
+  const firstGeneric = await createOrReuseFundingReceiveSession(
+    pool,
+    genericOpen,
+  );
+  const replayedGeneric = await createOrReuseFundingReceiveSession(
+    pool,
+    genericOpen,
+  );
+  assert.equal(replayedGeneric.replayed, true);
+  assert.equal(
+    replayedGeneric.snapshot.session.receiveSessionId,
+    firstGeneric.snapshot.session.receiveSessionId,
+  );
+  const expiredTokenReplay = await replayFundingReceiveSessionOpenIdempotency(
+    pool,
+    {
+      userId: genericOptionUserId,
+      ownerChannel: "web",
+      idempotencyKey: genericOpen.openIdempotency.key,
+      requestFingerprint: genericOpen.openIdempotency.requestFingerprint,
+      now: NOW,
+    },
+  );
+  assert.equal(
+    expiredTokenReplay?.snapshot.session.receiveSessionId,
+    firstGeneric.snapshot.session.receiveSessionId,
+    "the durable open key must replay a created session after its option expires",
+  );
+  const attachedReplayKey = await createOrReuseFundingReceiveSession(pool, {
+    ...genericOpen,
+    openIdempotency: {
+      key: "generic-receive-second-idempotency-12345678",
+      requestFingerprint: genericOpen.openIdempotency.requestFingerprint,
+    },
+  });
+  assert.equal(attachedReplayKey.replayed, true);
+  assert.equal(
+    attachedReplayKey.snapshot.session.receiveSessionId,
+    firstGeneric.snapshot.session.receiveSessionId,
+    "an exact option with a new caller key must record that key on the same session",
+  );
+  await assert.rejects(
+    () =>
+      createOrReuseFundingReceiveSession(pool, {
+        ...genericOpen,
+        openIdempotency: {
+          ...genericOpen.openIdempotency,
+          requestFingerprint: "b".repeat(64),
+        },
+      }),
+    (error: unknown) =>
+      error instanceof FundingReceiveSessionOpenIdempotencyConflictError,
+  );
+
+  const originalTarget = genericInput.receiveTargets[0];
+  const originalVariant = genericInput.observationVariants[0];
+  assert.ok(originalTarget);
+  assert.ok(originalVariant);
+  const alternateAsset = {
+    ...genericInput.destinationAsset,
+    assetId: "0xEfCdEfCdEfCdEfCdEfCdEfCdEfCdEfCdEfCdEfCd",
+  } as const;
+  const alternateTarget = {
+    ...originalTarget,
+    receiveTargetId: "receive_target_generic_alternate_12345678",
+    acceptedAssets: [{ asset: alternateAsset, handling: "direct" as const }],
+  } as const;
+  const alternateVariant = {
+    ...originalVariant,
+    variantId: "ingress_variant_generic_alternate_12345678",
+    asset: alternateAsset,
+  } as const;
+  const alternateGeneric = await createOrReuseFundingReceiveSession(pool, {
+    ...genericInput,
+    receiveTargets: [alternateTarget],
+    observationVariants: [alternateVariant],
+    selectedReceiveTargetId: alternateTarget.receiveTargetId,
+    requireExactReceiveScope: true,
+    openIdempotency: {
+      key: "generic-receive-alternate-idempotency-12345678",
+      requestFingerprint: "c".repeat(64),
+    },
+  });
+  assert.equal(alternateGeneric.replayed, false);
+  assert.notEqual(
+    alternateGeneric.snapshot.session.receiveSessionId,
+    firstGeneric.snapshot.session.receiveSessionId,
+    "a pre-receipt change of exact asset scope supersedes the unspent session",
+  );
+  assert.equal(
+    await updateFundingReceiveSessionObservation(pool, {
+      receiveSessionId: alternateGeneric.snapshot.session.receiveSessionId,
+      expectedVersion: alternateGeneric.snapshot.session.version,
+      observationVariants: [alternateVariant],
+      // Recovery remains a post-money state for generic exact selections:
+      // another asset must not replace it or make an old opaque retry lie.
+      status: "recovery_required",
+      lastObservedAt: new Date(NOW.getTime() + 1_000),
+      now: new Date(NOW.getTime() + 1_000),
+    }),
+    true,
+  );
+  await insertFundingReceiveReceipt(pool, {
+    receiveSessionId: alternateGeneric.snapshot.session.receiveSessionId,
+    userId: genericOptionUserId,
+    variantId: alternateVariant.variantId,
+    asset: alternateAsset,
+    destinationAddress: alternateTarget.destinationAddress,
+    rawAmount: "1",
+    observationRevision: "generic_alternate_observation_12345678",
+    observedAt: new Date(NOW.getTime() + 1_000),
+    status: "observed",
+    handling: "direct",
+    evidence: { test: "generic_receive_scope" },
+    now: new Date(NOW.getTime() + 1_000),
+  });
+  const postMoneyExpiry = new Date(NOW.getTime() + 86_401_000);
+  await expireFundingReceiveSessions(pool, { now: postMoneyExpiry });
+  await assert.rejects(
+    () =>
+      createOrReuseFundingReceiveSession(pool, {
+        ...genericInput,
+        now: postMoneyExpiry,
+        expiresAt: new Date(postMoneyExpiry.getTime() + 86_400_000),
+        observeUntil: new Date(postMoneyExpiry.getTime() + 8 * 86_400_000),
+        requireExactReceiveScope: true,
+        openIdempotency: {
+          key: "generic-receive-conflict-idempotency-12345678",
+          requestFingerprint: "d".repeat(64),
+        },
+      }),
+    (error: unknown) =>
+      error instanceof FundingReceiveSessionExactScopeConflictError,
+  );
+  await assert.rejects(
+    () =>
+      replayFundingReceiveSessionOpenIdempotency(pool, {
+        userId: genericInput.userId,
+        ownerChannel: "web",
+        idempotencyKey: genericOpen.openIdempotency.key,
+        requestFingerprint: genericOpen.openIdempotency.requestFingerprint,
+        now: postMoneyExpiry,
+      }),
+    (error: unknown) =>
+      error instanceof FundingReceiveSessionExactScopeConflictError,
+    "an expired exact-option retry must not surface a replaced asset after its receipt boundary",
+  );
+  // The synthetic recovery state above exists only to exercise the
+  // post-receipt selection guard; remove it before this integration's normal
+  // observable-session assertions choose their fixture.
+  await pool.query(
+    `
+      update funding_receive_sessions
+      set status = 'cancelled',
+          closed_at = $2::timestamptz,
+          expires_at = $2::timestamptz,
+          observe_until = $2::timestamptz + interval '1 millisecond',
+          updated_at = $2::timestamptz,
+          version = version + 1
+      where id = $1
+    `,
+    [
+      alternateGeneric.snapshot.session.receiveSessionId,
+      new Date(NOW.getTime() + 1_001),
+    ],
+  );
+
   const [first, second] = await Promise.all([
     createOrReuseFundingReceiveSession(pool, sessionInput(userId)),
     createOrReuseFundingReceiveSession(pool, sessionInput(userId)),
@@ -228,6 +409,49 @@ try {
     recoveryClaimed[0]?.session.status,
     "recovery_required",
     "a recoverable session must remain observable instead of becoming a permanent active shell",
+  );
+
+  const legacyAfterPresentationExpiry = await createOrReuseFundingReceiveSession(
+    pool,
+    {
+      ...genericInput,
+      policyRevision: "policy_revision_legacy_expiry_12345678",
+      now: postMoneyExpiry,
+      expiresAt: new Date(postMoneyExpiry.getTime() + 86_400_000),
+      observeUntil: new Date(postMoneyExpiry.getTime() + 8 * 86_400_000),
+    },
+  );
+  assert.equal(
+    legacyAfterPresentationExpiry.replayed,
+    false,
+    "legacy destination-scoped opens retain their expiry-based replacement behaviour",
+  );
+  await insertFundingReceiveReceipt(pool, {
+    receiveSessionId:
+      legacyAfterPresentationExpiry.snapshot.session.receiveSessionId,
+    userId: genericOptionUserId,
+    variantId: originalVariant.variantId,
+    asset: genericInput.destinationAsset,
+    destinationAddress: originalTarget.destinationAddress,
+    rawAmount: "1",
+    observationRevision: "legacy_open_receipt_observation_12345678",
+    observedAt: postMoneyExpiry,
+    status: "observed",
+    handling: "direct",
+    evidence: { test: "legacy_open_receipt" },
+    now: postMoneyExpiry,
+  });
+  const legacyAfterOpenReceipt = await createOrReuseFundingReceiveSession(pool, {
+    ...genericInput,
+    policyRevision: "policy_revision_legacy_receipt_12345678",
+    now: new Date(postMoneyExpiry.getTime() + 1_000),
+    expiresAt: new Date(postMoneyExpiry.getTime() + 86_401_000),
+    observeUntil: new Date(postMoneyExpiry.getTime() + 8 * 86_400_000),
+  });
+  assert.equal(
+    legacyAfterOpenReceipt.replayed,
+    false,
+    "a legacy open session with a receipt still requires matching revisions",
   );
 
   const replacement = await createOrReuseFundingReceiveSession(pool, {
@@ -788,6 +1012,10 @@ try {
     await cleanup.query("begin");
     await cleanup.query("set local session_replication_role = replica");
     await cleanup.query(
+      "delete from funding_receive_open_idempotency where user_id = $1",
+      [userId],
+    );
+    await cleanup.query(
       "delete from funding_receive_receipts where user_id = $1",
       [userId],
     );
@@ -796,6 +1024,23 @@ try {
       [userId],
     );
     await cleanup.query("delete from users where id = $1", [userId]);
+    if (genericOptionUserId) {
+      await cleanup.query(
+        "delete from funding_receive_open_idempotency where user_id = $1",
+        [genericOptionUserId],
+      );
+      await cleanup.query(
+        "delete from funding_receive_receipts where user_id = $1",
+        [genericOptionUserId],
+      );
+      await cleanup.query(
+        "delete from funding_receive_sessions where user_id = $1",
+        [genericOptionUserId],
+      );
+      await cleanup.query("delete from users where id = $1", [
+        genericOptionUserId,
+      ]);
+    }
     if (mergeTargetId) {
       await cleanup.query("delete from users where id = $1", [mergeTargetId]);
     }

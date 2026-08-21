@@ -18,6 +18,7 @@ import {
 import { canonicalAccountAddress } from "../domain/asset-identity.js";
 import { allocateFundingObservationInTransaction } from "./funding-operation-repository.js";
 import { lockFundingAuthorizationReservationScope } from "./funding-authorization-reservation-lock.js";
+import { canonicalJsonEqual } from "./canonical.js";
 
 type JsonRecord = Readonly<Record<string, JsonValue>>;
 type ReceiveTargets = NonNullable<ExternalIngressInstruction["receiveTargets"]>;
@@ -33,6 +34,28 @@ export class FundingReceiveSessionChannelConflictError extends Error {
   constructor() {
     super("an active receive session is owned by another channel");
     this.name = "FundingReceiveSessionChannelConflictError";
+  }
+}
+
+export class FundingReceiveSessionExactScopeConflictError extends Error {
+  readonly code = "receive_session_selection_conflict";
+
+  constructor() {
+    super(
+      "another selected asset is already receiving funds for this destination",
+    );
+    this.name = "FundingReceiveSessionExactScopeConflictError";
+  }
+}
+
+export class FundingReceiveSessionOpenIdempotencyConflictError extends Error {
+  readonly code = "receive_session_idempotency_conflict";
+
+  constructor() {
+    super(
+      "receive session idempotency key was already used for another option",
+    );
+    this.name = "FundingReceiveSessionOpenIdempotencyConflictError";
   }
 }
 
@@ -285,6 +308,353 @@ export async function lockFundingReceiveSessionScope(
   ]);
 }
 
+type FundingReceiveOpenIdempotency = Readonly<{
+  key: string;
+  requestFingerprint: string;
+}>;
+
+type ExactReceiveScope = Readonly<{
+  selectedReceiveTargetId: string | null;
+  receiveTargets: ReceiveTargets;
+  requireExactReceiveScope?: boolean;
+}>;
+
+type FundingReceiveOpenIdempotencyRow = Readonly<{
+  receive_session_id: string;
+  request_fingerprint: string;
+}>;
+
+type FundingReceiveOpenIdempotencySessionRow = ReceiveSessionRow &
+  Readonly<{
+    request_fingerprint: string;
+  }>;
+
+/**
+ * A receive session can be presentation-expired while an observed receipt is
+ * still inside its observer grace window. This extra fact is selection-only:
+ * it keeps a second token choice from concealing money that is still being
+ * reconciled, without changing the established expiry/observer lifecycle.
+ */
+type FundingReceiveSelectionSessionRow = ReceiveSessionRow &
+  Readonly<{
+    selection_has_observed_receipt: boolean;
+  }>;
+
+type FundingReceiveSelectionState = Pick<
+  FundingReceiveSelectionSessionRow,
+  "status" | "expires_at" | "observe_until" | "selection_has_observed_receipt"
+>;
+
+function assertFundingReceiveOpenIdempotency(
+  input: FundingReceiveOpenIdempotency,
+): FundingReceiveOpenIdempotency {
+  const key = input.key.trim();
+  if (key.length < 8 || key.length > 256) {
+    throw new FundingReceiveSessionOpenIdempotencyConflictError();
+  }
+  if (!/^[0-9a-f]{64}$/u.test(input.requestFingerprint)) {
+    throw new FundingReceiveSessionOpenIdempotencyConflictError();
+  }
+  return { key, requestFingerprint: input.requestFingerprint };
+}
+
+async function lockFundingReceiveOpenIdempotency(
+  client: Pick<PoolClient, "query">,
+  input: Readonly<{
+    userId: string;
+    ownerChannel: FundingReceiveSessionChannel;
+    idempotency: FundingReceiveOpenIdempotency;
+  }>,
+): Promise<void> {
+  await client.query("select pg_advisory_xact_lock(hashtextextended($1, 0))", [
+    [
+      "funding-receive-open",
+      input.userId,
+      input.ownerChannel,
+      input.idempotency.key,
+    ].join(":"),
+  ]);
+}
+
+async function findFundingReceiveOpenIdempotency(
+  db: Pick<Pool, "query">,
+  input: Readonly<{
+    userId: string;
+    ownerChannel: FundingReceiveSessionChannel;
+    idempotency: FundingReceiveOpenIdempotency;
+    lock?: boolean;
+  }>,
+): Promise<ReceiveSessionRow | null> {
+  const result = await db.query<FundingReceiveOpenIdempotencySessionRow>(
+    `
+      select receive_session.*, open_idempotency.request_fingerprint
+      from funding_receive_open_idempotency open_idempotency
+      join funding_receive_sessions receive_session
+        on receive_session.id = open_idempotency.receive_session_id
+       and receive_session.user_id = open_idempotency.user_id
+       and receive_session.owner_channel = open_idempotency.owner_channel
+      where open_idempotency.user_id = $1
+        and open_idempotency.owner_channel = $2
+        and open_idempotency.idempotency_key = $3
+      ${input.lock ? "for update" : ""}
+      limit 1
+    `,
+    [input.userId, input.ownerChannel, input.idempotency.key],
+  );
+  const row = result.rows[0] ?? null;
+  if (row && row.request_fingerprint !== input.idempotency.requestFingerprint) {
+    throw new FundingReceiveSessionOpenIdempotencyConflictError();
+  }
+  return row;
+}
+
+async function attachFundingReceiveOpenIdempotency(
+  client: Pick<PoolClient, "query">,
+  input: Readonly<{
+    userId: string;
+    ownerChannel: FundingReceiveSessionChannel;
+    idempotency: FundingReceiveOpenIdempotency;
+    receiveSessionId: string;
+    now: Date;
+  }>,
+): Promise<void> {
+  const inserted = await client.query<FundingReceiveOpenIdempotencyRow>(
+    `
+      insert into funding_receive_open_idempotency (
+        user_id,
+        owner_channel,
+        idempotency_key,
+        request_fingerprint,
+        receive_session_id,
+        created_at,
+        updated_at
+      )
+      values ($1, $2, $3, $4, $5, $6, $6)
+      on conflict (user_id, owner_channel, idempotency_key) do nothing
+      returning receive_session_id, request_fingerprint
+    `,
+    [
+      input.userId,
+      input.ownerChannel,
+      input.idempotency.key,
+      input.idempotency.requestFingerprint,
+      input.receiveSessionId,
+      input.now,
+    ],
+  );
+  const row = inserted.rows[0];
+  if (row) return;
+  const existing = await client.query<FundingReceiveOpenIdempotencyRow>(
+    `
+      select receive_session_id, request_fingerprint
+      from funding_receive_open_idempotency
+      where user_id = $1
+        and owner_channel = $2
+        and idempotency_key = $3
+      for update
+      limit 1
+    `,
+    [input.userId, input.ownerChannel, input.idempotency.key],
+  );
+  const persisted = existing.rows[0];
+  if (
+    !persisted ||
+    persisted.receive_session_id !== input.receiveSessionId ||
+    persisted.request_fingerprint !== input.idempotency.requestFingerprint
+  ) {
+    throw new FundingReceiveSessionOpenIdempotencyConflictError();
+  }
+}
+
+function receiveSessionHasCrossedMoneyBoundary(
+  session: Pick<
+    FundingReceiveSelectionState,
+    "status" | "selection_has_observed_receipt"
+  >,
+  includeObservedReceipt: boolean,
+): boolean {
+  return (
+    session.status === "processing" ||
+    session.status === "review_required" ||
+    session.status === "recovery_required" ||
+    (includeObservedReceipt && session.selection_has_observed_receipt)
+  );
+}
+
+function receiveSessionIsCurrentForSelection(
+  session: FundingReceiveSelectionState,
+  now: Date,
+  preserveObservedMoneyBoundary: boolean,
+): boolean {
+  return preserveObservedMoneyBoundary &&
+    receiveSessionHasCrossedMoneyBoundary(session, true)
+    ? session.observe_until > now
+    : session.expires_at > now;
+}
+
+function matchesExactReceiveScope(
+  session: Pick<
+    ReceiveSessionRow,
+    "selected_receive_target_id" | "receive_targets"
+  >,
+  input: ExactReceiveScope,
+): boolean {
+  return (
+    !input.requireExactReceiveScope ||
+    (session.selected_receive_target_id === input.selectedReceiveTargetId &&
+      canonicalJsonEqual(session.receive_targets, input.receiveTargets))
+  );
+}
+
+async function lockCurrentFundingReceiveSessions(
+  client: Pick<PoolClient, "query">,
+  input: Readonly<{
+    userId: string;
+    destinationOptionId: string;
+    venueBindingOptionId: string;
+    /**
+     * Generic token-first opens must see recovery sessions so a different
+     * selected asset cannot silently replace an unresolved money path. Legacy
+     * destination-scoped opens retain their historical recovery behaviour.
+     */
+    includeRecovery: boolean;
+    now: Date;
+  }>,
+): Promise<readonly FundingReceiveSelectionSessionRow[]> {
+  const { rows } = await client.query<FundingReceiveSelectionSessionRow>(
+    `
+      select ${sessionColumns},
+             exists (
+               select 1
+               from funding_receive_receipts receipt
+               where receipt.receive_session_id = funding_receive_sessions.id
+             ) as selection_has_observed_receipt
+      from funding_receive_sessions
+      where user_id = $1
+        and destination_option_id = $2
+        and venue_binding_option_id = $3
+        and (
+          status = any($4::text[])
+          or (
+            $5::boolean
+            and status in ('expired', 'cancelled')
+            and observe_until > $6
+            and exists (
+              select 1
+              from funding_receive_receipts receipt
+              where receipt.receive_session_id = funding_receive_sessions.id
+            )
+          )
+        )
+      order by opened_at desc, id desc
+      for update
+    `,
+    [
+      input.userId,
+      input.destinationOptionId,
+      input.venueBindingOptionId,
+      input.includeRecovery
+        ? ["open", "processing", "review_required", "recovery_required"]
+        : ["open", "processing", "review_required"],
+      input.includeRecovery,
+      input.now,
+    ],
+  );
+  return rows;
+}
+
+function assertReplayDoesNotConflictWithCurrentSelection(
+  replay: ReceiveSessionRow,
+  current: readonly FundingReceiveSelectionSessionRow[],
+  now: Date,
+): void {
+  const currentSessions = current.filter((session) =>
+    receiveSessionIsCurrentForSelection(session, now, true),
+  );
+  if (
+    currentSessions.some(
+      (session) => session.owner_channel !== replay.owner_channel,
+    )
+  ) {
+    throw new FundingReceiveSessionChannelConflictError();
+  }
+  const differentPostMoneySession = currentSessions.find(
+    (session) =>
+      session.id !== replay.id &&
+      receiveSessionHasCrossedMoneyBoundary(session, true) &&
+      !matchesExactReceiveScope(session, {
+        selectedReceiveTargetId: replay.selected_receive_target_id,
+        receiveTargets: replay.receive_targets,
+        requireExactReceiveScope: true,
+      }),
+  );
+  if (differentPostMoneySession) {
+    throw new FundingReceiveSessionExactScopeConflictError();
+  }
+}
+
+async function replayLockedFundingReceiveOpenIdempotency(
+  client: PoolClient,
+  input: Readonly<{
+    userId: string;
+    ownerChannel: FundingReceiveSessionChannel;
+    idempotency: FundingReceiveOpenIdempotency;
+    now: Date;
+  }>,
+): Promise<FundingReceiveSessionPersistenceResult | null> {
+  await lockFundingReceiveOpenIdempotency(client, input);
+  const replay = await findFundingReceiveOpenIdempotency(client, {
+    userId: input.userId,
+    ownerChannel: input.ownerChannel,
+    idempotency: input.idempotency,
+    lock: true,
+  });
+  if (!replay) return null;
+  await lockFundingReceiveSessionScope(client, {
+    userId: replay.user_id,
+    destinationOptionId: replay.destination_option_id,
+    venueBindingOptionId: replay.venue_binding_option_id,
+  });
+  const current = await lockCurrentFundingReceiveSessions(client, {
+    userId: replay.user_id,
+    destinationOptionId: replay.destination_option_id,
+    venueBindingOptionId: replay.venue_binding_option_id,
+    includeRecovery: true,
+    now: input.now,
+  });
+  assertReplayDoesNotConflictWithCurrentSelection(replay, current, input.now);
+  return { snapshot: snapshot(replay), replayed: true };
+}
+
+/**
+ * Replays an opaque Add Funds request before validating its short-lived token.
+ * A prior success remains safe to return after token expiry, unless another
+ * asset has since crossed the money boundary for the same destination.
+ */
+export async function replayFundingReceiveSessionOpenIdempotency(
+  db: Pool,
+  input: Readonly<{
+    userId: string;
+    ownerChannel: FundingReceiveSessionChannel;
+    idempotencyKey: string;
+    requestFingerprint: string;
+    now: Date;
+  }>,
+): Promise<FundingReceiveSessionPersistenceResult | null> {
+  const idempotency = assertFundingReceiveOpenIdempotency({
+    key: input.idempotencyKey,
+    requestFingerprint: input.requestFingerprint,
+  });
+  return tx(db, async (client) => {
+    return replayLockedFundingReceiveOpenIdempotency(client, {
+      userId: input.userId,
+      ownerChannel: input.ownerChannel,
+      idempotency,
+      now: input.now,
+    });
+  });
+}
+
 export async function createOrReuseFundingReceiveSession(
   db: Pool,
   input: Readonly<{
@@ -300,6 +670,14 @@ export async function createOrReuseFundingReceiveSession(
     receiveTargets: ReceiveTargets;
     observationVariants: readonly JsonRecord[];
     selectedReceiveTargetId: string | null;
+    /**
+     * Generic token-first Add Funds binds a session to one asset+receiver.
+     * Legacy destination-scoped callers intentionally retain their existing
+     * all-accepted-assets replay behaviour.
+     */
+    requireExactReceiveScope?: boolean;
+    /** Durable generic-open replay key; legacy callers omit it. */
+    openIdempotency?: FundingReceiveOpenIdempotency;
     automationPolicy: FundingReceiveAutomationPolicy;
     policyVersion: number;
     policyRevision: string;
@@ -315,6 +693,9 @@ export async function createOrReuseFundingReceiveSession(
   preparePersistence?: (client: PoolClient) => Promise<void>,
 ): Promise<FundingReceiveSessionPersistenceResult> {
   const ownerChannel = input.ownerChannel ?? "web";
+  const openIdempotency = input.openIdempotency
+    ? assertFundingReceiveOpenIdempotency(input.openIdempotency)
+    : null;
   return tx(db, async (client) => {
     const finalized = async (
       result: FundingReceiveSessionPersistenceResult,
@@ -323,37 +704,90 @@ export async function createOrReuseFundingReceiveSession(
       return result;
     };
     await preparePersistence?.(client);
+    if (openIdempotency) {
+      const replay = await replayLockedFundingReceiveOpenIdempotency(client, {
+        userId: input.userId,
+        ownerChannel,
+        idempotency: openIdempotency,
+        now: input.now,
+      });
+      if (replay) {
+        return finalized(replay);
+      }
+    }
     await lockFundingReceiveSessionScope(client, input);
-    const existing = await client.query<ReceiveSessionRow>(
-      `
-        select ${sessionColumns}
-        from funding_receive_sessions
-        where user_id = $1
-          and destination_option_id = $2
-          and venue_binding_option_id = $3
-          and status in ('open', 'processing', 'review_required')
-        for update
-      `,
-      [input.userId, input.destinationOptionId, input.venueBindingOptionId],
+    const existing = await lockCurrentFundingReceiveSessions(client, {
+      ...input,
+      includeRecovery: input.requireExactReceiveScope === true,
+      now: input.now,
+    });
+    const preserveObservedMoneyBoundary = input.requireExactReceiveScope === true;
+    for (const staleSession of existing) {
+      if (
+        receiveSessionIsCurrentForSelection(
+          staleSession,
+          input.now,
+          preserveObservedMoneyBoundary,
+        )
+      ) {
+        continue;
+      }
+      await client.query(
+        `
+          update funding_receive_sessions
+          set status = 'expired',
+              closed_at = $2,
+              updated_at = $2,
+              version = version + 1
+          where id = $1
+            and status in ('open', 'processing', 'review_required', 'recovery_required')
+        `,
+        [staleSession.id, input.now],
+      );
+    }
+    const currentSessions = existing.filter((session) =>
+      receiveSessionIsCurrentForSelection(
+        session,
+        input.now,
+        preserveObservedMoneyBoundary,
+      ),
     );
-    const current = existing.rows[0];
     if (
-      current &&
-      current.owner_channel !== ownerChannel &&
-      current.expires_at > input.now
+      currentSessions.some((session) => session.owner_channel !== ownerChannel)
     ) {
       throw new FundingReceiveSessionChannelConflictError();
     }
+    const differentPostMoneySession = currentSessions.find(
+      (session) =>
+        input.requireExactReceiveScope &&
+        receiveSessionHasCrossedMoneyBoundary(session, true) &&
+        !matchesExactReceiveScope(session, input),
+    );
+    if (differentPostMoneySession) {
+      throw new FundingReceiveSessionExactScopeConflictError();
+    }
+    const current = currentSessions[0] ?? null;
     if (
       current &&
       current.owner_channel === ownerChannel &&
-      current.expires_at > input.now &&
       (ownerChannel === "telegram" ||
-        current.status === "processing" ||
-        current.status === "review_required" ||
+        receiveSessionHasCrossedMoneyBoundary(
+          current,
+          preserveObservedMoneyBoundary,
+        ) ||
         (current.policy_revision === input.policyRevision &&
-          current.ownership_revision === input.ownershipRevision))
+          current.ownership_revision === input.ownershipRevision)) &&
+      matchesExactReceiveScope(current, input)
     ) {
+      if (openIdempotency) {
+        await attachFundingReceiveOpenIdempotency(client, {
+          userId: input.userId,
+          ownerChannel,
+          idempotency: openIdempotency,
+          receiveSessionId: current.id,
+          now: input.now,
+        });
+      }
       return finalized({ snapshot: snapshot(current), replayed: true });
     }
     if (current) {
@@ -425,6 +859,15 @@ export async function createOrReuseFundingReceiveSession(
     );
     const row = inserted.rows[0];
     if (!row) throw new Error("funding receive session insert returned no row");
+    if (openIdempotency) {
+      await attachFundingReceiveOpenIdempotency(client, {
+        userId: input.userId,
+        ownerChannel,
+        idempotency: openIdempotency,
+        receiveSessionId: row.id,
+        now: input.now,
+      });
+    }
     return finalized({ snapshot: snapshot(row), replayed: false });
   });
 }

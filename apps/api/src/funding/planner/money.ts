@@ -79,6 +79,9 @@ export type FundingPlannerErrorCode =
   | "market_class_required"
   | "provider_unavailable"
   | "receive_channel_conflict"
+  | "receive_session_idempotency_conflict"
+  | "receive_session_selection_conflict"
+  | "receive_option_expired"
   | "source_not_selected"
   | "stale_projection";
 

@@ -129,9 +129,9 @@ A user can:
   automatic sale;
 - recover or resume a funding operation from web or Telegram Activity;
 - understand every required signature, expected time, fee, and applicable
-  conversion safeguard before committing funds. A destination-scoped Deposit
-  crypto option may authorize bounded automatic conversion without a later
-  per-quote confirmation, as defined in section 2.9.1.
+  conversion safeguard before committing funds. A strict, exact-amount,
+  destination-scoped Deposit crypto option may authorize the quoted conversion
+  without a later post-receipt confirmation, as defined in section 2.9.1.
 
 Normal product copy never exposes Relay, Across, deBridge, provider chain IDs,
 raw calldata, venue deposit contracts, or internal settlement terminology.
@@ -440,8 +440,9 @@ The initial product behavior is now closed:
 
 ### 2.9.1 Stable auto-routing and volatile conversion consent
 
-Status: accepted product decision for future multi-asset Receive slices on
-2026-08-11. It does not change the current Polygon pUSD/USDC.e Slice C scope.
+Status: accepted on 2026-08-11 and amended for the explicit no-conversion SOL
+choice on 2026-08-20. It does not change the current Polygon pUSD/USDC.e Slice
+C scope.
 
 The product contract is intentionally different for stable and volatile
 sources:
@@ -450,35 +451,38 @@ sources:
    bounded automatic conversion to the stable collateral accepted by the venue.
    The session freezes destination, asset identity, expiry, route class, caps,
    signer, fee/slippage policy, and recovery contract before showing the address.
-2. Selecting a destination-scoped volatile option such as `SOL on Solana`
-   presents explicit bounded conversion consent before the verified address is
-   revealed. The review states the source asset, destination stable, maximum raw
-   input, maximum fee/slippage, output-floor policy, expiry, and refusal.
-   Selection authorizes automatic conversion of the later canonical receipt
-   only inside those frozen bounds; it does not authorize another asset,
-   destination, route, or amount.
-3. A pre-existing volatile Account Value balance, an unexpected receipt, or a
+2. Selecting `Fund <venue> with SOL` presents explicit bounded conversion
+   consent before a one-time strict Relay address is revealed. The review states
+   source asset/amount, destination stable, fee/slippage, output floor, expiry,
+   and owned refund behavior. The full signed Relay order binds that exact
+   provider contract.
+3. Selecting `Receive SOL` reveals the user's managed Solana address and creates
+   only owned native-SOL Account Value. It contains no conversion consent,
+   operation, or Buy continuation.
+4. A pre-existing volatile Account Value balance, an unexpected receipt, or a
    receipt whose eventual quote is outside the frozen Deposit bounds gets an
    explicit `Convert to <venue stable>` CTA. Opening it obtains a fresh quote and
    shows exact/max input, expected and minimum output, fees, price impact,
    slippage, route expiry, and destination. The user explicitly confirms before
    commit; until then the asset remains ordinary owned Account Value. A valid
-   destination-scoped Deposit receipt does not ask again after arrival.
-4. In an already-started Trade, the fresh composite trade quote visibly includes
-   the volatile conversion and all of the same economic bounds. The existing
-   Trade Review/Confirm authorizes the complete conversion-plus-trade route;
-   there is no second conversion prompt that can let the quote expire.
-5. A supported stable route or confirmed volatile route executes only while its
+   receipt for the exact strict destination-scoped Deposit order does not ask
+   again after arrival.
+5. In an already-started Trade, existing owned SOL becomes a funding source
+   when venue collateral/stable balances do not cover the order. The fresh
+   composite trade quote visibly includes volatile conversion and all economic
+   bounds. The existing Trade Review/Confirm authorizes the complete
+   conversion-plus-trade route; no address or second conversion prompt appears.
+6. A supported stable route or confirmed volatile route executes only while its
    exact capability and frozen limits still pass. Otherwise Hunch preserves
    ownership and enters a typed unavailable/recovery state; it never substitutes
    an asset, destination, or route.
 
-The destination-scoped volatile Deposit happy path is therefore `choose
-destination` -> `review bounded SOL conversion` -> `show address and send` ->
-`convert canonical receipt inside bounds` -> `ready to trade`. Pre-existing or
-unconsented Account Value uses `Convert to <venue stable>` -> `review and
-confirm fresh quote`. The active-Trade path is `fresh composite quote` -> `one
-Trade Confirm` -> `convert and route` -> `place trade`.
+The strict external volatile Deposit happy path is therefore `choose
+destination and exact amount` -> `review bounded SOL conversion` -> `show
+one-time address and send` -> `settle the exact signed order` -> `ready to
+trade`. Pre-existing or unconsented Account Value uses `Convert to <venue
+stable>` -> `review and confirm fresh quote`. The active-Trade path is `fresh
+composite quote` -> `one Trade Confirm` -> `convert and route` -> `place trade`.
 
 Normative Add Funds decision flow:
 
@@ -526,7 +530,7 @@ Consent mode is a separate typed quote field:
   slippage, outcome, wallet binding, and expiry remain valid.
 - `explicit_economic_review`: a volatile asset sale or another material
   economic choice exists for a pre-existing balance that was not explicitly
-  selected under the destination-scoped Deposit conversion contract. The UI
+  selected under an exact strict Deposit conversion contract. The UI
   shows only amount sold, amount received, fees, price impact, expiry, and
   decline; it never asks for a provider, bridge, spender, or technical route.
 - `external_action`: funds must enter from a user-controlled external source.
@@ -564,9 +568,11 @@ route choices into the UI.
    the same `Buy` selects the exact one-leg route for the requested venue:
    Solana USDC → Polygon pUSD for Polymarket or Solana USDC → Base USDC for
    Limitless. It prepares the Trading Balance and submits after destination
-   observation and a fresh market quote.
+   observation and a fresh market quote. This managed-USDC route has its own
+   stable-sibling capability and GO gate; E3 native-SOL approval does not
+   activate it.
 3. If already-owned native SOL or another volatile balance must be sold without
-   a destination-scoped Deposit selection, Hunch shows one simple economic
+   an exact strict Deposit selection, Hunch shows one simple economic
    review: amount sold, minimum received, fee/price impact, ETA, and expiry.
    The user accepts or declines that sale; no technical route is selected. For
    native SOL, the direct Limitless route is Solana SOL → Base USDC; it must not
@@ -607,7 +613,8 @@ The initial product contract is intentionally narrow:
 | a Hunch-owned embedded wallet, including supported SOL                                          | an opaque existing-balance/combined-balance option | Hunch may quote one Relay leg or a bounded independent multi-leg operation                             |
 | any external wallet or exchange holding an allowlisted asset on a verified owned receive target | `Deposit crypto`                                   | show its network/address and accepted assets; observe receipt and run only a precommitted continuation |
 | a configured Privy funding method                                                               | `Fund with Privy`                                  | hand off the exact destination and wait for backend observation                                        |
-| an external wallet or exchange on another EVM network or Solana                                 | no initial one-operation option                    | fail closed until that typed receive target and its observer/router/recovery path are activated        |
+| an external wallet or exchange holding SOL or canonical Solana USDC                             | `Pay with SOL/USDC`                                | strict exact-amount Relay ingress to venue collateral                                                  |
+| any wallet or exchange sending native SOL to the user's managed address                         | `Receive SOL — keep as SOL`                        | owned SOL Account Value without conversion                                                             |
 
 An owned Receive target is not a Relay deposit address. It accepts only its
 displayed network and exact-contract asset allowlist. It supports two distinct
@@ -636,10 +643,15 @@ detected asset locks the variant and mixed-asset fulfillment still enters typed
 recovery rather than being silently summed or converted.
 
 A strict Relay Deposit Address is a different, exact-amount provider contract.
-It is disabled by default and never masquerades as owned Receive. Chained owned
-ingress is permitted only when quote/commit freezes every accepted variant and
-its follow-up before the address is shown. The observer may select an immutable
-variant; it may not discover or substitute a new route after funds arrive.
+It is disabled by default and never masquerades as owned Receive. Slice E2 uses
+it for external SOL/Solana-USDC -> venue-stable ingress only after freezing and
+verifying Relay protocol-v2 `orderData`, recomputed `orderId`, solver
+`orderSignature`, exact destination, every refund leg, amount, economics, and
+expiry. The one-time provider address is not a reusable multi-asset address.
+Chained owned ingress is permitted only when quote/commit freezes every
+accepted variant and its follow-up before the address is shown. The observer
+may select an immutable variant; it may not discover or substitute a new route
+after funds arrive.
 
 #### Multi-asset observer and chained completion contract
 
@@ -679,19 +691,27 @@ First activated slice:
 The local WP7 correction adds capability-gated receive targets backed by a
 unique controlled execution profile: Base USDC or Solana USDC may feed Polygon
 pUSD, Polygon pUSD may feed Base USDC, and direct Solana USDC/native SOL may
-feed Base USDC without a Polygon intermediate. Native SOL is a typed Solana
-Receive variant with canonical System Program transfer identity. Its current
-code-level `review_required` behavior predates section 2.9.1 and must remain
-rollout-disabled until it is replaced by destination-scoped
-`automatic_conversion` with the required pre-address disclosure/consent, caps,
-recovery, and live evidence. Native Polygon USDC without an exact registered
-route and other unregistered assets remain future adapters, not symbol aliases.
-Native SOL is never auto-sold merely because it arrived outside such an
-explicitly selected Receive Session or an already-confirmed Trade.
+feed Base USDC without a Polygon intermediate. Slice E makes three contracts
+explicit instead of overloading one address:
 
-Native SOL -> Relay Depository is the first Slice E product priority, not a
-secondary follow-up to Solana USDC. Its delegated activation additionally
-requires the key-level custom-program boundary in
+1. external `Fund <venue> with SOL/USDC` uses an exact one-time strict Relay
+   Deposit Address and delivers the venue stable;
+2. `Receive SOL` uses the user's managed Solana address and creates owned SOL
+   Account Value without conversion;
+3. managed-balance `Buy with SOL` converts only after one fresh composite
+   Review/Confirm, using SOL already present in Account Value. It does not show
+   or implicitly open a receive address; insufficient SOL remains an honest
+   insufficient-source result.
+
+The ordinary source ranking prefers existing venue collateral and eligible
+stable balances. If they do not cover the Buy, managed SOL above its reserve is
+shown as an internal funding option, analogous to an eligible Base source. The
+review discloses the SOL input cap, pUSD floor, fees/slippage, expiry, and Buy.
+SOL is never sold merely because it exists or because a shortfall was detected.
+
+Native SOL is never auto-sold merely because it arrived. The strict external
+path requires full Relay order-signature verification; the managed conversion
+path separately requires the key-compromise containment boundary in
 [`funding/wp8/slice-e-relay-svm-activation-runbook.md`](./funding/wp8/slice-e-relay-svm-activation-runbook.md).
 A Privy policy that only allowlists the Relay Depository program ID is not exact
 instruction authorization.
@@ -716,13 +736,14 @@ Operation:
    may be quoted and committed automatically only within the session's frozen
    route class, maximum fee/slippage, amount cap, signer, and destination
    policy.
-5. An activated volatile Receive option such as native SOL may show an owned
-   receive address without inventing an amount only after the user accepts its
-   bounded destination-scoped conversion contract. A canonical receipt inside
-   that contract routes automatically without another prompt. Pre-existing,
-   unexpected, or out-of-bounds volatile value exposes an explicit quoted
-   `Convert to <venue stable>` action; an active Trade instead includes the
-   conversion in its one fresh composite quote and Trade Confirm. A receipt
+5. An activated owned native-SOL Receive option may show the user's managed
+   Solana address without conversion consent. Its canonical receipt stays SOL.
+   A separate strict Relay address may be shown only after exact venue-funding
+   economics are frozen. Pre-existing, unexpected, or out-of-bounds volatile
+   value exposes an explicit quoted `Convert to <venue stable>` action; an
+   active `Buy with SOL` may select already-owned SOL and includes conversion in
+   its one fresh composite quote and Trade Confirm. The shortfall action does
+   not show an address or become a deposit workflow. A receipt
    cannot inherit stable-automation authority from the address it reached.
 6. A late receipt is never lost because a UI session expired. It remains owned
    Account Value and is either associated with a recoverable session or shown
@@ -753,15 +774,14 @@ contracts but remain different user journeys:
   `Other venues (1)`.
 - **Deposit crypto**: after venue and method, show a human asset/network picker.
   Default to the recommended proven option, but expose every other activated
-  option with direct or automatic-conversion semantics. Before revealing an
-  stable automatic-conversion address, disclose that received stable funds are
-  converted to the venue's accepted stable without another prompt. Before
-  revealing a volatile address, show and require the bounded conversion consent;
-  a matching receipt then converts without another prompt. Pre-existing,
-  unexpected, or out-of-bounds volatile value retains the later quoted
-  `Convert to <venue stable>` path. Then show the exact network, asset contract
-  label, address, QR, copy action, warnings, and durable status. Unsupported
-  routes are absent, not optimistic.
+  option with its exact contract. Owned stable automation retains its bounded
+  consent. Strict E2 asks for an exact amount and freezes the full signed Relay
+  order before showing its one-time SOL/USDC address. `Receive SOL` shows the
+  managed address with explicit no-conversion copy. Existing volatile Account
+  Value retains the later quoted `Convert to <venue stable>` or composite Trade
+  path. Then show the exact network, asset contract label, address, QR, copy
+  action, warnings, and durable status. Unsupported routes are absent, not
+  optimistic.
 - **Convert**: use the canonical large `From`/`To` balance cards, venue and
   asset/network labels, amount plus `Max`, computed receive amount, fee,
   price impact, ETA, expiry, and an optional advanced slippage control. Raw
@@ -983,11 +1003,13 @@ As revalidated against the official pages on 2026-07-22:
 - Relay webhooks are HMAC-SHA256 over `${timestamp}.${rawBody}`; Hunch verifies raw
   bytes, a bounded timestamp/replay window, and the signature in constant time.
 
-Therefore the first activatable Deposit Address contract is strict/exact and
-only for a controlled source with a verified user-owned refund location. CEX,
-open/variable, and Privy-on-ramp-to-Relay routes remain disabled until Hunch has
-a separately approved dynamic requote/consent and non-custodial refund design.
-Direct Receive remains the default external ingress in those cases.
+Therefore the original WP4 activatable Deposit Address contract is strict/exact
+and only for a controlled source with a verified user-owned refund location.
+Open/variable and Privy-on-ramp-to-Relay routes remain disabled. Slice E2 is the
+separately approved strict Solana extension: an exchange may be the transfer
+origin only when `refundTo` and every signed order refund leg resolve to a
+verified user-controlled wallet rather than the exchange hot wallet. Direct
+Receive remains the default when that non-custodial refund proof is absent.
 
 ### 5.2 Privy
 
@@ -2469,7 +2491,7 @@ every returned executable item valid; the common action validator remains final.
 Use this plan only when the exact source network/asset, destination, mode,
 refund location, limits, and request tracking pass activation evidence.
 
-Initial recommended scope:
+Original WP4 controlled-EVM scope:
 
 - controlled-wallet ingress in a supported stable asset;
 - strict/exact amount only;
@@ -2479,12 +2501,21 @@ Initial recommended scope:
 - no arbitrary destination call;
 - no reuse as a generic permanent deposit address in v1.
 
+Slice E2 adds external Solana SOL/USDC strict ingress without weakening that
+adapter: exact amount only, one-time address, full signed protocol-v2 order,
+exact user-owned destination, and every refund leg independently resolved to a
+verified user-controlled wallet. The actual sender need not be controlled, but
+no exchange/CEX sender address is ever used as an inferred refund location.
+
 All Deposit Address routes remain off by default. Strict mode may be activated
 route by route only after underpayment, overpayment, wrong token, wrong chain,
-expiration, and refund fixtures plus tiny-value evidence pass. Open/variable
-mode, CEX senders, and app-controlled refund addresses are not executable in the
-initial plan. They require a future staged quote/consent contract and an approved
-non-custodial recovery design.
+expiration, and refund fixtures plus tiny-value evidence pass. For the original
+WP4 controlled-EVM profile, open/variable mode, CEX senders, and app-controlled
+refund addresses remain non-executable. Slice E2 permits an exchange only as
+the origin of the exact transfer; `refundTo` and every signed order refund leg
+must independently resolve to a verified user-controlled wallet. No exchange
+hot-wallet address is inferred as owned. Any broader mode requires a future
+staged quote/consent contract and an approved non-custodial recovery design.
 
 Lifecycle:
 
@@ -2702,11 +2733,16 @@ Extract only venue-neutral behavior from existing Solana code:
 The new boundary imports no Kalshi/DFlow service. Sponsoring an ATA that can be
 closed for rent to an unintended recipient fails validation.
 
-This shared implementation boundary is not an activation claim. System and SPL
-Token policy rules may use Privy's decoded instruction fields, while Relay
-custom-program instructions still require the separately proved outer boundary
-in the Slice E runbook. No generic `programId` allowlist or
-broad Solana signer grant may substitute for that proof.
+This shared implementation boundary is not an activation claim. Slice E2
+strict Deposit Address ingress needs no Hunch Solana signer: the user/exchange
+transfers to a one-time provider address and Hunch verifies the complete signed
+Relay order plus owned destination credit. Managed-wallet Slice E3 is different:
+it uses the Slice E runbook's selected immutable Relay Intent Guard, which
+checks the signed restricted order and user binding before one exact Depository
+CPI. The shared Privy Solana policy allows only Guard + signature precompile +
+minimum Compute Budget instructions. No generic `programId` allowlist, direct
+Relay/Jupiter/System transfer rule, or broad signer grant may substitute for
+that proof.
 
 ## 15. Venue capabilities
 
@@ -3061,36 +3097,43 @@ Sell/Redeem.
 
 ## 19. End-to-end workflows
 
-### 19.1 New SOL deposit to Polymarket
+### 19.1 Receive and hold native SOL
 
-1. User chooses `Polymarket`, then the activated `SOL on Solana` Deposit crypto
-   option. An amount is not required for an owned Receive target.
-2. Before showing the address, Hunch says the received SOL will be converted to
-   pUSD and shows the destination, maximum accepted input/cap, maximum fee and
-   slippage, output-floor policy, expiry, and refusal. Choosing the reviewed
-   option authorizes that bounded conversion for the later canonical receipt.
-3. Backend freezes the exact destination binding, receive target, native-SOL
-   identity, expiry, observer cursor, conversion class, raw cap, fee/slippage
-   caps, output-floor policy, signer, and policy revision before tracking starts
-   and the address is revealed.
-4. The canonical receipt fixes the available input amount and records it in
-   Account Value. If a fresh Relay quote stays inside the frozen contract, the
-   receipt commits automatically; there is no second conversion prompt. If it
-   does not, the SOL remains owned and a later `Convert to pUSD` action requires
-   a fresh review.
-5. If funding is already part of a Trade, the same conversion is included
-   visibly in the one fresh composite Trade quote and its Trade Confirm, with
-   no separate Deposit or conversion confirmation.
-6. Execute and reconcile the activated Solana SOL → Polygon pUSD route, then any
-   exact Polymarket readiness step. Provider submission is progress, not success.
-7. Destination observation makes the received value ordinary Polymarket cash
-   ready to trade. A separately authorized active Buy may continue if still
-   valid; generic Add Funds does not place an order.
-8. If the route cannot execute safely, preserve ownership and enter typed
-   recovery/needs-attention. Do not substitute a route or ask the user to approve
-   a newly discovered rate.
+1. User chooses `Receive SOL — keep as SOL`.
+2. Backend resolves the current managed Solana wallet, starts canonical native
+   receipt observation, then shows that owned address and QR.
+3. A finalized canonical transfer credits SOL Account Value. It creates no
+   conversion operation, venue reservation, or Buy continuation.
+4. A later Convert or Trade discovers this SOL as an existing owned source and
+   obtains fresh economic authorization then.
 
-### 19.1a Existing owned SOL or Solana USDC to Limitless
+### 19.1a External SOL/USDC funding to Polymarket
+
+1. User chooses `Fund Polymarket with SOL` or canonical Solana USDC and supplies
+   the exact amount/intent required by the strict provider contract.
+2. Backend obtains a strict Relay Deposit Address with full protocol-v2 data,
+   recomputes `orderId`, verifies the solver `orderSignature`, and freezes exact
+   source, destination pUSD/user, every refund, amount, economics, and expiry.
+3. Telegram/web shows the one-time asset-specific address/QR and exact payment
+   instructions. It never labels it as the user's reusable Receive address.
+4. Relay request/child state plus canonical destination pUSD evidence determine
+   completion. Refund, partial, excess, late, wrong-asset, and ambiguous paths
+   remain typed reconciliation states.
+5. A Buy continuation always obtains a fresh market Review after readiness.
+
+### 19.1b Polymarket Buy funded from existing SOL
+
+1. Trade intent computes available Polymarket collateral and the shortfall.
+2. Planner prefers sufficient venue/stable balances. If they do not cover the
+   Buy, it offers managed SOL already present in Account Value above its reserve.
+3. The source screen shows the internal movement and one fresh composite quote:
+   maximum SOL input, minimum pUSD output, fees/slippage, expiry, and the Buy.
+4. One Trade Confirm authorizes conversion and Buy. No receive address or second
+   conversion prompt is shown.
+5. Finalized source debit, destination pUSD readiness, and refreshed market
+   quote are required before the Buy is submitted once.
+
+### 19.1c Existing owned SOL or Solana USDC to Limitless
 
 1. Destination resolver fixes the selected Limitless Trading Wallet and Base
    USDC requirement.
@@ -3101,9 +3144,9 @@ Sell/Redeem.
 3. Relay `EXPECTED_OUTPUT` derives the bounded source input required for the
    Base USDC shortfall and returns one SVM transaction. Solana USDC may proceed
    automatically inside equivalent-stable caps. Native SOL requires explicit
-   economic consent supplied by a matching destination-scoped Deposit, a
-   standalone Convert confirmation for pre-existing Account Value, or the one
-   composite Trade Review/Confirm when a Trade is already in progress.
+   economic consent supplied by a standalone Convert confirmation or the one
+   composite Trade Review/Confirm when a Trade is already in progress. A prior
+   `Receive SOL` session is not conversion consent.
 4. The fail-closed validator binds source amount, protocol order ID, controlled
    Solana signer, Base USDC recipient/refund, instruction discriminator, and
    address-lookup-table shape before execution.
@@ -3139,12 +3182,15 @@ Sell/Redeem.
 
 1. User selects `Deposit crypto` after the destination and desired receipt
    amount are known.
-2. Initial exchange/manual ingress uses direct owned Receive in the exact
+2. The original exchange/manual ingress uses direct owned Receive in the exact
    destination collateral and network. The UI displays those immutable details;
    it does not imply that arbitrary source assets can be sent to that address.
    A controlled-wallet source on a different asset/network may offer a
    separately gated strict/exact Relay Deposit Address only with a verified
-   user-owned refund location.
+   user-owned refund location. Slice E2 is the narrow exchange-origin exception:
+   exact SOL or canonical Solana USDC may use its one-time strict address only
+   when `refundTo` and every signed refund leg independently resolve to a
+   verified user-controlled wallet.
 3. For Relay, commit and persist request/address/refund facts before display.
 4. User sends only the instructed asset/network. For direct owned Receive the
    displayed amount is a target: a smaller transfer remains pending, and an
@@ -3264,47 +3310,49 @@ if it would delay the core Add Funds/trade-shortfall path.
 
 ## 20. Failure and side-effect audit
 
-| Condition                                          | Required behavior                                                     | Forbidden behavior                                            |
-| -------------------------------------------------- | --------------------------------------------------------------------- | ------------------------------------------------------------- |
-| Price source stale                                 | mark component stale/partial                                          | show old price as current                                     |
-| Token unpriced                                     | show `estimatedUsd: null`                                             | count it as zero or guessed value                             |
-| Provider unavailable                               | preserve Account Value; route unavailable                             | remove owned asset from headline                              |
-| Source debit observed, destination pending         | replace source with one in-transit estimate                           | drop value or count both                                      |
-| Ambiguous broadcast                                | reconcile required                                                    | retry/broadcast again                                         |
-| Quote expires before signature                     | re-quote and re-confirm changed economics                             | submit stale action                                           |
-| Quote omits source option or changes amount        | reject and return fresh discovery                                     | infer a source or mutate the quote                            |
-| Cross-user opaque ID                               | return no resource and audit/rate-limit                               | reveal ownership or operate on it                             |
-| Relay unknown status                               | preserve raw status and reconcile                                     | map optimistically to success/failure                         |
-| Relay child requote                                | attach child request to same operation                                | create unrelated user operation                               |
-| Deposit wrong asset/network                        | recovery/support state                                                | pretend committed route settled                               |
-| Deposit-address under/overpayment                  | apply pinned mode behavior and actual amount                          | assume requested amount arrived                               |
-| Unsafe refund address                              | route unavailable                                                     | refund to exchange hot wallet                                 |
-| CEX or Privy source requests Relay deposit address | offer direct owned Receive/handoff                                    | create initial-plan Relay instruction                         |
-| Privy modal closes                                 | continue awaiting observation                                         | mark funding complete                                         |
-| Privy says submitted                               | record progress                                                       | credit destination cash                                       |
-| Destination cash observed                          | run required venue preparation                                        | mark venue executable prematurely                             |
-| PM router caller mismatch                          | use owner-authenticated follow-up                                     | pass unverified Relay destination call                        |
-| Slow internal route                                | resumable progress under the exact original Buy                       | hold old quote or submit outside its bounds                   |
-| Trade abandoned after preparation                  | release reservation as venue cash                                     | bridge funds back automatically                               |
-| Existing Limitless balance covers source           | move only shortfall                                                   | sweep whole balance                                           |
-| Headline includes positions                        | change display label/composition only                                 | use positions as executable liquidity                         |
-| Multiple Add Funds destinations                    | show one internal-Hunch venue card and mark recommendation            | expose wallet/network/collateral choice or auto-commit        |
-| One destination and one source                     | go directly to review                                                 | show redundant selection screens                              |
-| External wallet has larger balance                 | keep position/explicit-current-intent/internal precedence             | silently switch Trading Wallet                                |
-| External source selected                           | require supported user signature                                      | server-pull linked assets                                     |
-| External wallet lacks venue setup                  | keep it outside normal Deposit; use a separate explicit advanced flow | call it ready because address/balance exists                  |
-| External binding owns position                     | prepare/redeem through that owner binding                             | switch to Hunch wallet for redemption                         |
-| Token suggestion preference changes                | affect future source suggestions only                                 | mutate active operation, wallet selection, or rebalance money |
-| Across/deBridge new fallback disabled              | do not query/create                                                   | silently use legacy provider                                  |
-| Legacy operation active                            | reconcile stored adapter version                                      | migrate provider mid-flight                                   |
-| deBridge cancellation needs gas                    | recovery action required                                              | claim automatic refund                                        |
-| Sponsorship policy revoked                         | fail closed with repair action                                        | fall back to generic signer                                   |
-| Unknown action/calldata                            | reject and alert                                                      | forward provider payload                                      |
-| Duplicate webhook                                  | idempotent reconcile                                                  | regress or duplicate operation                                |
-| Canonical observation reorgs                       | retain evidence and recompute derived state                           | leave settled value/order eligibility unchanged               |
-| Creation mode turns off mid-operation              | block new work; continue observation/reconcile/refund/recovery        | stop worker or mark active work failed                        |
-| Browser/bot restarts                               | resume from backend operation                                         | depend on local reducer state                                 |
-| Disabled venue                                     | omit exact venue capabilities                                         | infer readiness from indexed data                             |
+| Condition                                        | Required behavior                                                     | Forbidden behavior                                            |
+| ------------------------------------------------ | --------------------------------------------------------------------- | ------------------------------------------------------------- |
+| Price source stale                               | mark component stale/partial                                          | show old price as current                                     |
+| Token unpriced                                   | show `estimatedUsd: null`                                             | count it as zero or guessed value                             |
+| Provider unavailable                             | preserve Account Value; route unavailable                             | remove owned asset from headline                              |
+| Source debit observed, destination pending       | replace source with one in-transit estimate                           | drop value or count both                                      |
+| Ambiguous broadcast                              | reconcile required                                                    | retry/broadcast again                                         |
+| Quote expires before signature                   | re-quote and re-confirm changed economics                             | submit stale action                                           |
+| Quote omits source option or changes amount      | reject and return fresh discovery                                     | infer a source or mutate the quote                            |
+| Cross-user opaque ID                             | return no resource and audit/rate-limit                               | reveal ownership or operate on it                             |
+| Relay unknown status                             | preserve raw status and reconcile                                     | map optimistically to success/failure                         |
+| Relay child requote                              | attach child request to same operation                                | create unrelated user operation                               |
+| Deposit wrong asset/network                      | recovery/support state                                                | pretend committed route settled                               |
+| Deposit-address under/overpayment                | apply pinned mode behavior and actual amount                          | assume requested amount arrived                               |
+| Unsafe refund address                            | route unavailable                                                     | refund to exchange hot wallet                                 |
+| Privy source requests Relay Deposit Address      | offer direct owned Receive/handoff                                    | create Privy-to-Relay instruction                             |
+| CEX origin requests WP4 or unsafe-refund address | offer owned Receive/handoff                                           | infer exchange sender as refund owner                         |
+| CEX origin requests strict E2 with owned refunds | create exact one-time signed-order address                            | reject solely because the transfer originates at an exchange  |
+| Privy modal closes                               | continue awaiting observation                                         | mark funding complete                                         |
+| Privy says submitted                             | record progress                                                       | credit destination cash                                       |
+| Destination cash observed                        | run required venue preparation                                        | mark venue executable prematurely                             |
+| PM router caller mismatch                        | use owner-authenticated follow-up                                     | pass unverified Relay destination call                        |
+| Slow internal route                              | resumable progress under the exact original Buy                       | hold old quote or submit outside its bounds                   |
+| Trade abandoned after preparation                | release reservation as venue cash                                     | bridge funds back automatically                               |
+| Existing Limitless balance covers source         | move only shortfall                                                   | sweep whole balance                                           |
+| Headline includes positions                      | change display label/composition only                                 | use positions as executable liquidity                         |
+| Multiple Add Funds destinations                  | show one internal-Hunch venue card and mark recommendation            | expose wallet/network/collateral choice or auto-commit        |
+| One destination and one source                   | go directly to review                                                 | show redundant selection screens                              |
+| External wallet has larger balance               | keep position/explicit-current-intent/internal precedence             | silently switch Trading Wallet                                |
+| External source selected                         | require supported user signature                                      | server-pull linked assets                                     |
+| External wallet lacks venue setup                | keep it outside normal Deposit; use a separate explicit advanced flow | call it ready because address/balance exists                  |
+| External binding owns position                   | prepare/redeem through that owner binding                             | switch to Hunch wallet for redemption                         |
+| Token suggestion preference changes              | affect future source suggestions only                                 | mutate active operation, wallet selection, or rebalance money |
+| Across/deBridge new fallback disabled            | do not query/create                                                   | silently use legacy provider                                  |
+| Legacy operation active                          | reconcile stored adapter version                                      | migrate provider mid-flight                                   |
+| deBridge cancellation needs gas                  | recovery action required                                              | claim automatic refund                                        |
+| Sponsorship policy revoked                       | fail closed with repair action                                        | fall back to generic signer                                   |
+| Unknown action/calldata                          | reject and alert                                                      | forward provider payload                                      |
+| Duplicate webhook                                | idempotent reconcile                                                  | regress or duplicate operation                                |
+| Canonical observation reorgs                     | retain evidence and recompute derived state                           | leave settled value/order eligibility unchanged               |
+| Creation mode turns off mid-operation            | block new work; continue observation/reconcile/refund/recovery        | stop worker or mark active work failed                        |
+| Browser/bot restarts                             | resume from backend operation                                         | depend on local reducer state                                 |
+| Disabled venue                                   | omit exact venue capabilities                                         | infer readiness from indexed data                             |
 
 ## 21. Runtime policy and admin control
 
@@ -3356,8 +3404,11 @@ Publication fails when any are true:
   validator, reconciler, refund semantics, and destination observation;
 - a Relay Deposit Address route lacks a verified refund location rule, transfer
   observation, request/child-request tracking, or wrong-asset recovery policy;
-- the initial policy enables an open/variable, exchange-sender,
-  Privy-to-Relay, or app-controlled-refund Deposit Address route;
+- the initial policy enables an open/variable, Privy-to-Relay, or
+  app-controlled-refund Deposit Address route;
+- an exchange-sender Deposit Address route is enabled outside strict Slice E2,
+  or without `refundTo` and every signed refund leg independently resolving to
+  a verified user-controlled wallet;
 - a Privy funding method is active without explicit local configuration and
   exact destination support;
 - a provider capability is inferred from another capability;
@@ -4238,6 +4289,23 @@ Official Requests v2 wire rows are pinned as `id` plus ISO-or-numeric
 `updatedAt` and normalized to the internal request correlation only inside the
 Relay module.
 
+#### Slice E2 strict-Solana extension decision — 2026-08-20
+
+WP4's native-EVM/controlled-sender restriction remains true of the implemented
+adapter; it is not evidence that Solana/manual ingress is impossible. Fresh
+read-only Quote v2 calls with `useDepositAddress: true`, `strict: true`,
+`refundTo`, and `includeProtocolData: true` returned strict Solana Deposit
+Addresses for both native SOL and canonical Solana USDC.
+
+Relay also returns complete protocol-v2 `orderData`, its full-order `orderId`,
+and a solver `orderSignature`. Official settlement source hashes all inputs,
+outputs, refunds, calls, fees, deadlines, currencies, amounts, and recipients.
+Slice E2 therefore extends the existing strict adapter and verifies the official
+full-order commitment; it does not request a new partial Relay attestation or
+introduce delegated SVM signing for external ingress. Solana USDC still requires
+a frozen fixture and tiny rehearsal because public prose and live API support
+are not perfectly aligned.
+
 The production static registry now contains the reviewed Relay and legacy
 reconciliation component identities and pinned fixture IDs. WP6 additionally
 registers exact EVM/Solana wallet-profile executor identities, but registration
@@ -4700,7 +4768,7 @@ stops new selection but preserves status polling/webhooks.
 8. No Base parking, automatic consolidation, or rebalance worker.
 9. Token preference defaults to `ask`; economically material conversion of a
    pre-existing discovered balance needs an exact quote and consent. A selected
-   destination-scoped Deposit crypto option instead uses the session consent in
+   exact strict Deposit crypto option instead uses the session consent in
    section 2.9.1 and never adds a post-receipt rate confirmation. Deterministic
    equivalent-collateral conversion may use the consent already given in the
    ingress review when its immutable action, amount, fee, and postconditions are
@@ -4770,7 +4838,12 @@ stops new selection but preserves status polling/webhooks.
 38. `users.id`/`user_id` is the only account identity; all account/funding APIs
     derive it from authentication and enforce ownership on every opaque ID.
 39. Reconciliation/webhook/polling/recovery remain active when creation mode is off.
-40. Privy-to-Relay Deposit Address and CEX-to-Relay Deposit Address are disabled.
+40. Privy-to-Relay Deposit Address remains disabled. CEX-origin Relay Deposit
+    Address remains disabled for the original WP4 controlled-EVM profile and
+    whenever an exchange-controlled address would be inferred as a refund.
+    Strict Slice E2 is the only exception: the exchange may originate the exact
+    transfer only when `refundTo` and every signed refund leg independently
+    resolve to a verified user-controlled wallet.
 41. General Add Funds uses an amount-free Receive Session when the chosen owned
     target can safely accept an open amount. Each canonical receipt creates an
     exact child Funding Operation; an amount is not synthesized as zero.
@@ -4853,7 +4926,9 @@ stops new selection but preserves status polling/webhooks.
   consent, and idempotency payload are frozen before commit;
 - unknown provider action/status fails closed;
 - strict Relay Deposit Address correlation, child requests, under/overpayment,
-  wrong-asset, and refund are covered; open/CEX/Privy composition fails closed;
+  wrong-asset, and refund are covered; open/Privy composition and inferred CEX
+  refunds fail closed. Slice E2 exchange-origin transfers pass only with every
+  refund leg independently bound to a verified user-controlled wallet;
 - Privy and Solana sponsorship mutation suites pass;
 - `finance-worker` leases, webhook/poll wake-up, crash recovery, finality, reorg,
   and actual-cost/rent receipts are proven;
@@ -5091,39 +5166,39 @@ time because provider contracts and enabled routes can change.
 
 ## 33. Completeness matrix
 
-| Requirement                                                         | Normative sections    | Verification sections             |
-| ------------------------------------------------------------------- | --------------------- | --------------------------------- |
-| configurable headline over backend-projected liquid/position totals | 2.2–2.4, 7.4, 9, 15   | 23.1, WP2, 29.1                   |
-| intent-specific executable balance                                  | 2.2–2.3, 7.5, 10      | 23.1, 23.5                        |
-| authenticated account and selected-source quote lifecycle           | 7.1, 7.5, 12.2, 16.2  | 23.3–23.5, WP1, WP5               |
-| full new-deposit placement                                          | 2.6, 11               | 23.1, 19.1                        |
-| shortfall-only existing funds                                       | 2.6, 11               | 19.2, 23.1                        |
-| no automatic rebalance/Base parking                                 | 2.6, 6.3              | 24.4, 29.2                        |
-| supported Tokens and explicit consent                               | 2.5, 9, 10            | 19.3, 23.1                        |
-| simple conditional Deposit UX                                       | 2.6–2.11, 17          | 19.9–19.10, 23.5, 29.1            |
-| slow-route resumable Buy preparation                                | 2.10, 19.6            | 23.5, 29.1                        |
-| current-intent Trading Wallet selection                             | 2.7–2.9, 10.4         | 19.10, 23.1, 23.5                 |
-| shared wallet preparation and owner redemption                      | 2.8, 15.1             | 19.11, 23.1, WP6                  |
-| Relay-first normalized routing                                      | 5.1, 13               | 23.2, 27.3                        |
-| strict Relay Deposit Addresses and disabled open/CEX composition    | 5.1, 13.3–13.4        | 19.4, 23.2                        |
-| Privy funding/sponsorship                                           | 5.2, 14               | 19.5, 23.3                        |
-| Bungee/Across/deBridge migration safety                             | 5.3–5.4, 13.5–13.6    | 23.2, 27.1                        |
-| Polymarket/Limitless readiness                                      | 15                    | 19, 23.7                          |
-| future venue/network flexibility                                    | 7.2, 7.8, 15.3        | 25 WP1, 29.2                      |
-| Telegram parity                                                     | 18                    | 23.6, 29.1                        |
-| exact operations/recovery                                           | 12                    | 20, 23.4, 23.8                    |
-| finance-worker ownership, finality/reorg, and actual costs          | 12.2, 12.5            | 23.4, 23.8, WP3                   |
-| withdrawal recipients outside owned Account Value                   | 7.2, 12.2, 19.7       | 23.3–23.5, WP6                    |
-| user merge/deletion/retention lifecycle                             | 12.6–12.7             | WP0 Lifecycle Matrix, WP3, WP9    |
-| Kalshi exit-only preservation without new exposure                  | 15.4                  | 23.1, WP9 parity evidence         |
-| single-leg/composite execution and deterministic owned ingress      | 2.11, 6.2, 10.3, 13.8 | 23.1–23.4, WP5–WP7                |
-| runtime activation/rollback                                         | 21, 27                | 25 WP9, 29.5                      |
-| KISS/DRY                                                            | 8, 24                 | 23, 29.4                          |
-| legacy code exits instead of becoming permanent growth              | 24, 27.1              | WP0 Legacy Exit Matrix, WP9       |
-| real provider/wallet/venue interaction tests                        | 23.9, 27.3            | WP0 Live Rehearsal Harness, WP9   |
-| no accidental functional regression                                 | 3, 19                 | WP0 Functional Parity Matrix, WP9 |
-| ordinary deployment remains fast                                    | 23.9, 30              | WP9 completion evidence           |
-| implementation order                                                | 25–26                 | work-package completion evidence  |
+| Requirement                                                                                                    | Normative sections    | Verification sections             |
+| -------------------------------------------------------------------------------------------------------------- | --------------------- | --------------------------------- |
+| configurable headline over backend-projected liquid/position totals                                            | 2.2–2.4, 7.4, 9, 15   | 23.1, WP2, 29.1                   |
+| intent-specific executable balance                                                                             | 2.2–2.3, 7.5, 10      | 23.1, 23.5                        |
+| authenticated account and selected-source quote lifecycle                                                      | 7.1, 7.5, 12.2, 16.2  | 23.3–23.5, WP1, WP5               |
+| full new-deposit placement                                                                                     | 2.6, 11               | 23.1, 19.1                        |
+| shortfall-only existing funds                                                                                  | 2.6, 11               | 19.2, 23.1                        |
+| no automatic rebalance/Base parking                                                                            | 2.6, 6.3              | 24.4, 29.2                        |
+| supported Tokens and explicit consent                                                                          | 2.5, 9, 10            | 19.3, 23.1                        |
+| simple conditional Deposit UX                                                                                  | 2.6–2.11, 17          | 19.9–19.10, 23.5, 29.1            |
+| slow-route resumable Buy preparation                                                                           | 2.10, 19.6            | 23.5, 29.1                        |
+| current-intent Trading Wallet selection                                                                        | 2.7–2.9, 10.4         | 19.10, 23.1, 23.5                 |
+| shared wallet preparation and owner redemption                                                                 | 2.8, 15.1             | 19.11, 23.1, WP6                  |
+| Relay-first normalized routing                                                                                 | 5.1, 13               | 23.2, 27.3                        |
+| strict Relay Deposit Addresses; disabled open/inferred-CEX-refund composition; exact E2 owned-refund exception | 5.1, 13.3–13.4        | 19.4, 23.2                        |
+| Privy funding/sponsorship                                                                                      | 5.2, 14               | 19.5, 23.3                        |
+| Bungee/Across/deBridge migration safety                                                                        | 5.3–5.4, 13.5–13.6    | 23.2, 27.1                        |
+| Polymarket/Limitless readiness                                                                                 | 15                    | 19, 23.7                          |
+| future venue/network flexibility                                                                               | 7.2, 7.8, 15.3        | 25 WP1, 29.2                      |
+| Telegram parity                                                                                                | 18                    | 23.6, 29.1                        |
+| exact operations/recovery                                                                                      | 12                    | 20, 23.4, 23.8                    |
+| finance-worker ownership, finality/reorg, and actual costs                                                     | 12.2, 12.5            | 23.4, 23.8, WP3                   |
+| withdrawal recipients outside owned Account Value                                                              | 7.2, 12.2, 19.7       | 23.3–23.5, WP6                    |
+| user merge/deletion/retention lifecycle                                                                        | 12.6–12.7             | WP0 Lifecycle Matrix, WP3, WP9    |
+| Kalshi exit-only preservation without new exposure                                                             | 15.4                  | 23.1, WP9 parity evidence         |
+| single-leg/composite execution and deterministic owned ingress                                                 | 2.11, 6.2, 10.3, 13.8 | 23.1–23.4, WP5–WP7                |
+| runtime activation/rollback                                                                                    | 21, 27                | 25 WP9, 29.5                      |
+| KISS/DRY                                                                                                       | 8, 24                 | 23, 29.4                          |
+| legacy code exits instead of becoming permanent growth                                                         | 24, 27.1              | WP0 Legacy Exit Matrix, WP9       |
+| real provider/wallet/venue interaction tests                                                                   | 23.9, 27.3            | WP0 Live Rehearsal Harness, WP9   |
+| no accidental functional regression                                                                            | 3, 19                 | WP0 Functional Parity Matrix, WP9 |
+| ordinary deployment remains fast                                                                               | 23.9, 30              | WP9 completion evidence           |
+| implementation order                                                                                           | 25–26                 | work-package completion evidence  |
 
 The plan is incomplete if an implementation requirement lacks both a normative
 owner and explicit verification evidence in this matrix.

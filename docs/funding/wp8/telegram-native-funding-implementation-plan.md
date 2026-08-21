@@ -207,15 +207,17 @@ independently sum components and call that result available cash.
 
 ### 4.2 Receive Session
 
-Reuse the existing amount-free session, verified target snapshot, 24-hour
+Reuse the existing session, verified target snapshot, 24-hour
 display window, seven-day late-observation window, canonical EVM/Solana event
 allocation, immutable receipts, and child Funding Operation linkage.
 
-The generic Add Funds session remains amount-free in the first release. A
-Buy-return context may remember the already known intended spend, but Telegram
-does not add a manual amount-entry/indicative-quote branch yet. This keeps
-receipt settlement amount-free and avoids a second quote UX before it provides
-real execution value.
+Opening generic Add Funds and selecting a reusable owned Receive target remain
+amount-free. Strict E2 is the explicit exception: selecting a strict SOL/USDC
+target enters one exact source-amount step, then freezes and verifies the order
+before the address appears. A Buy-return context may provide the known
+destination requirement, but the exact source amount is still displayed before
+quote/address creation. The amount belongs to the strict provider order, not to
+the reusable Receive Session.
 
 ### 4.3 Funding planner and Relay
 
@@ -290,13 +292,16 @@ Session:
   offer predicate in Section 12 is true for the PM Funding Router profile;
 - `USDC on Base — automatic` only when that offer predicate is true for Relay
   EVM;
-- `USDC on Solana — automatic` only when that offer predicate is true for Relay
-  SVM, including its fee-payer and submission-recovery gates.
-- `SOL on Solana — automatic after explicit conversion consent` only when the
-  independently gated native-SOL profile passes its fee-payer, policy-envelope,
-  quote, recovery, and cap proofs. Destination-scoped Deposit obtains that
-  consent before revealing the address; a Trade includes the same bounded
-  conversion in its one quoted Review/Confirm.
+- `Fund with USDC on Solana` through one exact strict Relay Deposit Address only
+  when the E2 signed-order/address/refund/reconciliation gates pass;
+- `Fund with SOL on Solana` through a separate exact strict Relay Deposit
+  Address and explicit conversion economics only when its E2 gates pass;
+- `Receive SOL — keep as SOL` only when the exact current managed Solana wallet
+  and canonical native-receipt observer are available. This creates no
+  conversion consent;
+- `Pay with existing SOL` is not an Add Funds address target. It appears in the
+  Buy source selector only for already-observed SOL Account Value and only when
+  the managed E3 conversion capability passes.
 
 Telegram funding integrates those routes through one registry keyed by the
 frozen `routeKey` and execution `profileId`. A capability-sized adapter owns
@@ -332,19 +337,14 @@ internal deposit endpoint and legacy builder enforce the same rule, so a hidden
 button is not the security boundary. The legacy builder contains no wallet,
 RPC, address-resolution, or QR transport dependency.
 
-The product distinguishes stable routing from volatile conversion. A supported
-stablecoin may be converted automatically to the underlying stable accepted by
-the selected venue. A non-stable asset is never covered by that implicit
-stable-conversion consent. Destination-scoped Deposit therefore shows a
-volatile conversion review before revealing the address: what asset will be
-sold, destination stable, maximum raw input, maximum fee/slippage, output-floor
-policy, expiry, and refusal. Selecting the reviewed option freezes append-only
-consent, so the canonical receipt may execute inside those bounds without a
-second post-receipt prompt. If the eventual quote is outside the frozen bounds,
-the asset remains owned Account Value and requires a fresh `Convert to <venue
-stable>` review. Pre-existing Account Value without matching Deposit consent
-also keeps the separate Convert action. In an already-started Trade flow, the
-fresh trade quote includes the volatile conversion, the Review surface
+The product distinguishes four contracts. An owned supported stable may use the
+existing bounded stable-conversion consent. Strict E2 SOL/USDC freezes an exact
+provider order, amount, economics, destination, refunds, and expiry before its
+one-time address appears; underpayment follows strict fail/refund semantics.
+`Receive SOL` credits SOL Account Value and never authorizes conversion.
+Existing SOL outside a Trade keeps the separate Convert action. In an
+already-started Trade flow, the planner may select existing SOL and the fresh
+trade quote includes volatile conversion. The Review surface
 explicitly says what will be converted and its bounds, and the existing trade
 `Confirm` authorizes the complete route; there is no second conversion prompt
 that could let the quote expire. No surface exposes internal routes, policies,
@@ -379,18 +379,23 @@ therefore shows the nominal order, current maximum spend, available pUSD, and
 the pUSD shortfall rounded up for display. Generic Add Funds remains
 amount-free.
 
-Future activated source assets use the same destination requirement. A stable
-route supplies an exact source amount and its asset selection is sufficient
-consent for the bounded automatic stable conversion. A volatile Deposit route
-supplies a clearly labelled estimate plus hard amount/economic bounds and
-expiry before the address; selecting it authorizes the later canonical receipt
-inside those bounds. Pre-existing volatile Account Value without that consent
-uses a separate `Convert to <venue stable>` review. An already-started Trade
-uses its one composite quoted Review/Confirm.
+That amount-free rule applies to reusable owned/minimum Receive targets. A
+strict E2 target is always exact-amount: generic Add Funds asks for the source
+amount, while Buy-return may derive it from the destination requirement and
+then displays it before quote/address creation.
+
+Future activated source assets use the same destination requirement. A strict
+stable or volatile Relay address supplies an exact source amount and freezes
+the provider order/economics before disclosure. A plain owned Receive target
+does not authorize conversion: `Receive SOL` only credits SOL Account Value.
+Pre-existing volatile Account Value outside a Trade uses a separate
+`Convert to <venue stable>` review. An already-started Trade may select existing
+SOL and uses its one composite quoted Review/Confirm without an address.
 Execution remains bounded by the route's fee, slippage, minimum-output, cap,
-and recovery policy. An
-underfunded transfer keeps waiting for the remainder, while excess destination
-value remains in Account Value. If a safe source quote is unavailable, the bot
+and recovery policy. An underfunded owned/minimum Receive transfer may keep
+waiting for the remainder and excess remains Account Value. Strict E2 instead
+fails/refunds underpayment and fills/refunds excess according to the frozen
+provider contract. If a safe source quote is unavailable, the bot
 shows an explicit unavailable/Refresh state and never invents an amount.
 This paragraph applies to future economically variable routes. Slice C always
 uses the exact full observed USDC.e receipt, has no conversion economics, and
@@ -405,12 +410,26 @@ the edit target is missing/non-editable, the address attempt stops fail-closed;
 it never falls back to a new untrackable message. Address-free terminal cards
 may still use a tracked replacement send.
 
-This contract does not activate native SOL. Solana USDC and native SOL remain
-hidden until their exact capability, fee-payer, policy, quote, confirmation,
-and recovery gates are independently enabled. Native SOL is a first-class
-Slice E product priority, but it must never inherit automatic-stable consent
-merely because it reaches the same Relay destination. Its own pre-address
-Deposit consent or composite Trade Confirm is mandatory.
+This contract does not activate native SOL. Slice E exposes three separate
+choices only behind their own gates:
+
+- `Fund <venue> with SOL/USDC` uses a one-time strict Relay Deposit Address and
+  freezes conversion economics plus the complete signed Relay order before
+  address disclosure;
+- `Receive SOL` shows the user's managed Solana address and leaves the receipt
+  as SOL Account Value without conversion;
+- `Pay with existing SOL` appears in a Buy shortfall only when SOL is already
+  present in Account Value, and converts through the one fresh composite Trade
+  Review/Confirm. It never shows a receive address.
+
+Source recommendation keeps venue collateral and stable balances ahead of
+volatile SOL. If they cannot cover the Buy, SOL above its fee/rent reserve is
+shown like any other eligible internal source (for example an existing Base
+balance), with the conversion and Buy expressed in one review. The existing
+`Pay with` selector may still let the user choose among eligible sources.
+
+Native SOL must never inherit automatic-stable consent merely because it can
+reach the same Relay destination.
 
 Consent classification is fixed by the selection transaction. A non-direct
 selection writes `automation_enabled=true` only when
@@ -865,12 +884,11 @@ signer and policy ID is insufficient.
    - exact committed source amount and bounded fee/slippage;
    - no arbitrary token approval, transfer, or contract call.
 3. `telegram_relay_svm_funding_v1`
-   - native SOL -> Relay Depository -> venue stable is the primary Slice E
-     product path; Solana USDC remains a stable-to-stable sibling;
-   - destination-scoped SOL Deposit freezes explicit bounded conversion consent
-     before showing the address; a Trade uses its one composite Review/Confirm;
-     pre-existing SOL without either consent remains review-required Account
-     Value;
+   - this is Slice E3 managed-wallet execution only; external Slice E2 strict
+     Deposit Address ingress has no Hunch Solana signer/profile;
+   - `Pay with existing SOL` uses SOL already present in managed Account Value;
+     a Trade uses its one composite Review/Confirm, while pre-existing SOL
+     outside a Trade requires a standalone Convert review;
    - exact wallet, mint, amount, program/account allowlist, blockhash/expiry,
      and committed instruction bytes;
    - no reuse of a USDC consent for SOL and no post-receipt consent widening;
@@ -881,7 +899,7 @@ actions use a finite target/spender envelope expressible in Privy policy. If
 the target is dynamic or cannot be safely bounded, the route stays
 user-authorized. Relay Deposit Address is not part of this Privy ingress flow.
 
-Every SVM route additionally requires a fee strategy. Current target facts use
+Every delegated E3 SVM route additionally requires a fee strategy. Current target facts use
 a conservative 3,000,000-lamport (0.003 SOL) reserve, while the normalized SVM
 action does not yet encode a fee payer. The preferred end-state is an explicit,
 capped Hunch/Privy fee-payer relationship represented in the normalized action
@@ -890,9 +908,12 @@ USDC-only funding must not be advertised as zero-SOL capable and native SOL
 must retain the larger of the measured fee/rent reserve and the policy reserve
 outside the quoted input.
 
-Local application validation is necessary but insufficient. Before any live
-activation, prove that the actual Privy policy language can enforce a useful
-outer bound for each profile. Privy evaluates every outer Solana instruction,
+For E2, local verification of the complete Relay protocol-v2 order commitment,
+strict address lifecycle, and canonical owned destination credit is the
+relevant boundary; no Privy Solana policy participates. For delegated E3,
+local application validation is necessary but insufficient. Before any live
+activation, prove that the actual Privy policy language or another independent
+boundary enforces custody containment. Privy evaluates every outer Solana instruction,
 but for arbitrary programs exposes only `programId`; it cannot currently bind
 Relay discriminator bytes, account order, signer/writable flags, amount, or
 protocol order ID. A bare Relay Depository program allowlist is therefore not an
@@ -995,6 +1016,7 @@ POST /internal/telegram-bot/account
 POST /internal/telegram-bot/funding/open
 POST /internal/telegram-bot/funding/session
 POST /internal/telegram-bot/funding/select-target
+POST /internal/telegram-bot/funding/quote-strict
 POST /internal/telegram-bot/funding/cancel
 POST /internal/telegram-bot/funding/review
 POST /internal/telegram-bot/funding/confirm-review
@@ -1008,7 +1030,8 @@ Endpoint responsibilities are single-purpose:
 | `account`                | Build and render current Account Value; never mutate funding/trading state                                                                                                                              |
 | `funding/open`           | Open or restore one amount-free Receive Session for the exact destination binding and return its frozen verified targets; do not select one silently                                                    |
 | `funding/session`        | Read the current channel projection by opaque Telegram funding context ID; address-bearing rendering is reserved for the durable worker's internal `delivery` view                                      |
-| `funding/select-target`  | Validate one exact target+asset from the frozen session, append/CAS its consent revision, queue its durable address/copy/QR projection, and return no address to the interactive callback               |
+| `funding/select-target`  | Validate one exact target+asset. Owned targets append/CAS consent and queue their address projection; strict E2 returns `amount_required` and creates/discloses no address                              |
+| `funding/quote-strict`   | Accept one positive exact source amount (or displayed Buy-derived amount), quote/verify the full signed Relay order, freeze consent/request, and queue the strict address projection                    |
 | `funding/cancel`         | Stop this context from accepting new UI actions; preserve late observation/reconciliation/recovery windows and immutable evidence                                                                       |
 | `funding/review`         | Produce fresh non-binding review economics for one observed non-direct receipt/action-required context                                                                                                  |
 | `funding/confirm-review` | Revalidate current authority/economics and commit exactly one reviewed action using its one-time planner consent/confirmation; do not mutate session automation consent and never trust callback fields |
@@ -1110,7 +1133,10 @@ Required independent semantic controls:
 - Telegram stable auto-execution enabled;
 - PM Funding Router delegated execution enabled;
 - Relay EVM delegated execution enabled;
-- Relay SVM delegated execution enabled;
+- strict Relay Solana Deposit Address creation enabled (E2, no delegated signer);
+- owned native-SOL Receive enabled (no conversion);
+- Relay SVM delegated execution enabled (E3 native SOL only; managed Solana
+  USDC has its own stable-sibling gate);
 - Telegram Buy continuation enabled;
 - emergency delegated broadcast pause.
 
@@ -1428,55 +1454,57 @@ fixture adapters, never public RPC/Relay/Privy/Telegram:
 2. PM USDC.e receipt -> exact Funding Router fake execution -> pUSD ready ->
    fresh Buy review.
 3. Base USDC receipt -> Relay EVM fake execution/reconciliation -> pUSD ready.
-4. Solana USDC receipt -> Relay SVM fake execution/reconciliation -> pUSD ready.
-5. Native SOL Deposit selection -> bounded pre-address consent -> canonical
-   receipt -> exact Relay Depository fake execution -> pUSD ready, with no second
-   conversion prompt.
-6. Native SOL active Buy -> one composite Trade Review/Confirm -> exact
-   Relay Depository fake execution -> fresh market quote -> Buy submission.
-7. Native SOL or another route outside frozen caps -> owned Account Value plus
+4. Strict external Solana USDC order -> exact one-time address -> request/child
+   reconciliation -> canonical pUSD destination credit.
+5. Strict external native SOL order -> exact one-time address -> full signed
+   order verification -> canonical pUSD destination credit.
+6. `Receive SOL` -> canonical managed-wallet receipt -> SOL Account Value, with
+   no conversion operation or Buy continuation.
+7. Existing owned SOL active Buy -> planner source selection -> one composite
+   Trade Review/Confirm -> exact Relay execution -> fresh market quote -> Buy.
+8. Native SOL or another route outside frozen caps -> owned Account Value plus
    fresh Telegram Review/consent -> confirm -> delegated
    execution of the newly committed exact action.
-8. Policy revoked between quote and broadcast -> no broadcast, funds retained,
+9. Policy revoked between quote and broadcast -> no broadcast, funds retained,
    `Setup required` state.
-9. `desired_enabled=false` -> direct receipt still settles; conversion waits for
-   in-bot enable, and no web handoff or broadcast occurs merely because the
-   preference is off.
-10. Worker crash immediately before and after provider acceptance -> no duplicate
+10. `desired_enabled=false` -> direct receipt still settles; conversion waits for
+    in-bot enable, and no web handoff or broadcast occurs merely because the
+    preference is off.
+11. Worker crash immediately before and after provider acceptance -> no duplicate
     transaction.
-11. User selects Polygon pUSD but sends USDC.e to the shared address -> receipt
+12. User selects Polygon pUSD but sends USDC.e to the shared address -> receipt
     observed, no automatic Funding Router broadcast.
-12. Solana USDC wallet has zero SOL -> no false automatic promise or broadcast;
+13. Solana USDC wallet has zero SOL -> no false automatic promise or broadcast;
     sender fee requirement/review is rendered until fee strategy is proven.
-13. Original Telegram progress message is deleted -> terminal ready/recovery
+14. Original Telegram progress message is deleted -> terminal ready/recovery
     arrives as a replacement message.
-14. Automation cap is null or a policy/user/grant cap shrinks -> no unlimited
+15. Automation cap is null or a policy/user/grant cap shrinks -> no unlimited
     execution; a new append-only consent revision is required.
-15. Trading and PM Funding Router signers are both attached -> each inspector
+16. Trading and PM Funding Router signers are both attached -> each inspector
     accepts only its exact registry entry; revoking funding leaves trading
     valid.
-16. Global finance execute is false while the dedicated flag is true -> no
+17. Global finance execute is false while the dedicated flag is true -> no
     broadcast; observation/reconciliation still run.
-17. A resumed Buy intent expires -> duplicate old callback reuses the terminal
+18. A resumed Buy intent expires -> duplicate old callback reuses the terminal
     generation, while a later explicit `Review Buy` advances once and creates a
     fresh intent.
-18. Bot is blocked at readiness, then the user sends `/start` -> exactly one
+19. Bot is blocked at readiness, then the user sends `/start` -> exactly one
     replacement terminal card is delivered from the retained projection.
-19. Receive creation turns off with an existing session -> no new target opens,
+20. Receive creation turns off with an existing session -> no new target opens,
     while its late receipt, progress, reconciliation, and recovery continue.
-20. Global/dedicated execution soft-pauses before submit, then restores with
+21. Global/dedicated execution soft-pauses before submit, then restores with
     identical grant/policy/consent/action -> the pre-submit attempt is proved
     cancelled and exactly one fresh attempt may resume.
-21. Grant/policy fingerprint changes while paused, then availability restores ->
+22. Grant/policy fingerprint changes while paused, then availability restores ->
     the old action never auto-resumes; fresh setup/review is required.
-22. Every product/execution switch turns off after provider acceptance -> no
+23. Every product/execution switch turns off after provider acceptance -> no
     second send; provider lookup and reconciliation still reach terminal state.
-23. Buy continuation restores after funding became ready -> no intent appears
+24. Buy continuation restores after funding became ready -> no intent appears
     until the user explicitly clicks a fresh `Review Buy`.
-24. Stable auto-execution is OFF while all confirmed-execution gates are ON ->
+25. Stable auto-execution is OFF while all confirmed-execution gates are ON ->
     target promises Telegram review, receipt waits for review, and one exact
     confirmation executes without web.
-25. Stable auto-execution and global execute are OFF -> review may display, but
+26. Stable auto-execution and global execute are OFF -> review may display, but
     confirmation cannot broadcast until the global soft pause is restored.
 
 ### 14.5 Static and package checks
@@ -1588,43 +1616,51 @@ Privy activation claim.
 Exit: complete fake-adapter `Base USDC -> Relay -> pUSD -> fresh PM Buy`
 journey. Relay Deposit Address is not used in this flow.
 
-### Slice E — Relay SVM with native SOL priority
+### Slice E — Solana ingress and managed-wallet conversion
 
 Follow
 [the Slice E activation runbook](./slice-e-relay-svm-activation-runbook.md).
 
-1. Promote the fresh native SOL -> Relay Depository -> Polygon pUSD capture to
-   a sanitized fixture, including its one instruction, one ALT, immutable
-   program deployment, account roles, discriminator, amount, order ID,
-   economics, fee payer, quote TTL, and blockhash contract. Retain the July
-   Jupiter envelope only as a negative drift fixture.
-2. Prove a key-level outer boundary for the custom Relay instruction. A
-   program-ID-only allowlist is insufficient because Privy cannot inspect its
-   amount or order ID. Use Privy-decoded custom conditions, an immutable audited
-   narrow on-chain router, or equivalent
-   independently enforced containment; otherwise keep delegated execution off.
-3. Create one shared Solana policy per environment and attach the same existing
-   signer/quorum plus policy ID to every managed Solana wallet. Do not create
-   per-user policies.
-4. Add the sidecar-safe SVM delegated transport/profile while reusing the common
-   durable attempt, lookup-before-retry, reconciliation, refund, and recovery
-   machinery. Parameterize chain-family verification rather than weakening the
-   EVM verifier.
-5. Prove explicit fee-payer/sponsorship behavior, zero-SOL USDC behavior,
-   blockhash expiry, finalized source debit, destination credit, and restart at
-   every possible-broadcast boundary.
-6. Implement the native-SOL product contract: pre-address bounded consent for
-   destination-scoped Deposit, one composite confirmation for Trade, and a
-   separate Convert review only for pre-existing/unconsented Account Value.
-7. Run the full positive/negative policy matrix, disposable-Postgres journey,
-   tiny native-SOL rehearsal, and history-free review before any route gate is
-   enabled. Solana USDC is a sibling proof, not a substitute for native SOL.
+1. **E2 strict external ingress:** capture strict SOL and canonical Solana-USDC
+   Deposit Address fixtures with `includeProtocolData`; verify the official full
+   `orderData -> orderId -> orderSignature` commitment, exact user destination,
+   all owned refunds, amount, economics, expiry, children, and destination
+   credit. Extend the existing Relay adapter rather than adding a provider
+   client. No delegated SVM signer is involved.
+2. **Owned SOL receive:** expose the current managed Solana address as a
+   separate `Receive SOL` action. Canonical finalized receipt creates SOL
+   Account Value and no conversion operation or pending Buy.
+3. **E3 managed conversion:** make existing SOL Account Value discoverable to
+   the Buy planner as `Pay with existing SOL`; build one fresh composite
+   `SOL -> pUSD -> Buy` Review/Confirm with no receive address or second prompt.
+4. Use the selected E3 boundary from the Slice E runbook: one atomic
+   Privy-managed transaction calling the minimal immutable Relay Intent Guard.
+   The guard verifies the restricted canonical Relay order/signature,
+   user-bound destination/refunds, cap, expiry, and replay before its exact
+   Depository CPI. The public Relay/Lit verifier supplies the predicate
+   reference but cannot directly sign a Privy wallet transaction; a
+   Relay-issued compact approval is an optional later simplification, not an
+   activation dependency.
+5. Create at most one shared Solana policy per environment, only for E3, and
+   attach the same existing signer/quorum plus policy ID idempotently. Do not
+   create per-user policies.
+6. Add sidecar-safe SVM delegated transport/profile while reusing durable
+   attempt, lookup-before-retry, reconciliation, refund, and recovery machinery.
+   The shared Privy policy allows only Guard + required Secp256k1 precompile +
+   minimum Compute Budget instructions; it never directly allows Relay,
+   Jupiter, System transfer, or a broad program/RPC rule.
+7. Prove fee payer/sponsorship, zero-SOL USDC, blockhash expiry, finalized
+   source debit, destination credit, restart boundaries, strict-address
+   under/overpayment/refunds, and owned-SOL no-conversion behavior.
+8. Run disposable-Postgres journeys, tiny rehearsals for strict SOL, strict
+   USDC, owned SOL receive, and existing-SOL Buy, then obtain separate
+   history-free GO verdicts before enabling each capability.
 
-Exit: complete `native SOL -> Relay Depository -> pUSD -> fresh PM Buy` with one
-user economic confirmation, an independently enforced outer signing boundary,
-no duplicate broadcast, and terminal destination readiness. If the outer
-boundary cannot be proved, native SOL remains user-signed or unavailable; it
-never inherits a broad delegated signer grant.
+Exit: an external user can either fund Polymarket through a strict SOL/USDC
+order or receive plain SOL; a later Buy can spend already-owned SOL with one
+composite confirmation. E2 has no delegated signer. E3 has one shared policy
+and an independently proved custody boundary, with no duplicate broadcast and
+terminal destination readiness.
 
 ### Slice F — future Limitless expansion (outside this normative package)
 
@@ -1681,7 +1717,7 @@ The local WP8 primitives are complete when:
 ### 16.2 Per-route activation gate
 
 Local fake-adapter success does not make a route ready for production. Each
-Funding Router, Relay EVM, and Relay SVM profile separately requires:
+delegated Funding Router, Relay EVM, and E3 Relay SVM profile separately requires:
 
 - an explicit current Privy policy whose real serialized form was verified;
 - exact grant/profile resolution immediately before broadcast;
@@ -1695,11 +1731,13 @@ Funding Router, Relay EVM, and Relay SVM profile separately requires:
   evidence, execution gates, emergency pause, audit, and runtime policy;
 - a separately authorized production rehearsal and activation decision.
 
-Solana additionally requires the explicit fee-payer strategy and safe blockhash
-expiry contract. For native SOL it also requires the custom-program boundary in
-the Slice E runbook; a Relay Depository program allowlist plus application-only
-validation is not activation evidence. Until then, its local fake journey is
-architecture proof only.
+E2 strict Solana ingress instead requires the full signed-order/address/refund/
+child/destination-evidence gate and no Privy policy. Plain `Receive SOL`
+requires exact current managed-wallet ownership plus canonical receipt evidence
+and no execution profile. E3 additionally requires the explicit fee-payer,
+blockhash, and independent custody-boundary contract in the Slice E runbook; a
+Relay Depository program allowlist plus application-only validation is not
+activation evidence.
 
 ## 17. Explicitly out of scope for this implementation pass
 
@@ -1707,7 +1745,8 @@ architecture proof only.
 - creating/editing real Privy Dashboard policies;
 - real Telegram Bot API calls;
 - real Relay/Privy/RPC transaction execution;
-- native SOL automatic sale outside the separately reviewed Slice E contract;
+- native SOL automatic sale outside a fresh standalone Convert or composite
+  Trade consent under the separately reviewed Slice E3 contract;
 - arbitrary tokens, networks, providers, or user-supplied routes;
 - automatic trade submission after funding;
 - Limitless receive/funding or delegated CLOB/AMM execution; current pass is
@@ -1737,9 +1776,9 @@ accepted into the normative plan:
   message;
 - require a user `Review Buy` callback after readiness before creating a fresh
   trade intent;
-- make native SOL -> Relay Depository the Slice E priority while stopping every
-  SVM promise until fee-payer, custom-program policy, submission, and recovery
-  contracts are proved;
+- split Slice E into strict external SOL/USDC ingress, plain owned SOL receive,
+  and managed-wallet conversion of existing SOL. Only the last requires the
+  Solana signer/policy boundary; all retain separate activation gates;
 - split local fake-adapter completeness from real Privy/Relay route activation.
 
 The final Sol review used a frozen finite-constraint model after strict model
@@ -1798,8 +1837,9 @@ assignments were used.
 
 Three tempting additions were deliberately deferred for KISS:
 
-- manual expected-amount/rate entry in generic Add Funds; the session remains
-  amount-free and Buy already supplies its intended spend;
+- manual amount/rate entry for reusable owned Receive remains deferred; strict
+  E2 has one required exact source-amount step because no exact provider address
+  can exist without it;
 - amount/day limits in the first closed-destination delegated slice; future
   routed-value profiles require their own atomic cap reservation ledger;
 - a separate provider-request service/table. WP8 uses the dedicated immutable

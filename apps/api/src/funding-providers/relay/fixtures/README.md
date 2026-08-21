@@ -87,6 +87,26 @@ Deliberately not called:
   transaction endpoints other than Quote/Status/Requests;
 - Privy mutation/signing, venue mutation, order, or readiness endpoints.
 
+### 2026-08-20 Slice E follow-up (not yet fixture-promoted)
+
+Later read-only/quote-only research, outside the artifact corpus described
+above, called Quote v2 with `useDepositAddress: true`, `strict: true`,
+user-owned `refundTo`, and `includeProtocolData: true`. Fresh native-SOL and
+canonical Solana-USDC requests both returned a Solana Deposit Address plus
+protocol-v2 `orderData`, `orderId`, and solver `orderSignature`. No transfer,
+wallet signature, broadcast, policy mutation, or product activation occurred.
+
+The full-order commitment was checked against Relay's official settlement
+source: inputs, outputs, refunds, calls, fees, amounts, currencies, recipients,
+and deadlines contribute to `orderId`; the solver signs that ID. The native-SOL
+sample recovered Relay's documented solver and its instruction embedded the
+same `orderId`.
+
+These observations select Slice E2's architecture but are not durable fixtures
+yet. Implementation must add sanitized SOL and USDC strict-address fixtures and
+negative mutations before changing any route gate. The historical statement
+that the July corpus did not call Deposit Address mode remains true.
+
 ## Findings encoded by the fixtures
 
 1. Relay's Solana provider chain ID is `792703809`; Hunch's internal Solana ID

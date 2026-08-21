@@ -18,10 +18,12 @@ The safer model is one reusable preflight gate for every Solana operation:
 This makes sponsorship a small Privy-backed bootstrap tool, not a standing subsidy for user-owned account rent.
 
 This document remains the default for DFlow, Across, deBridge, and generic
-Solana operations. It does not activate or define Relay SVM funding. Slice E may
-use an explicit capped transaction fee payer for Solana USDC or retain a native
-SOL fee/rent reserve only after the separate policy, fee-payer, and
-custom-program proof in
+Solana operations. It does not activate or define Relay SVM funding. Slice E2
+strict external ingress and plain `Receive SOL` require no Hunch-sponsored
+source transaction. Slice E3 managed-wallet native-SOL conversion retains a
+bounded native SOL fee/rent reserve. The independently gated managed-Solana-USDC
+sibling may instead use an explicit capped transaction fee payer. Either path
+remains off until its separate policy, fee-payer, and custody-boundary proof in
 [`funding/wp8/slice-e-relay-svm-activation-runbook.md`](./funding/wp8/slice-e-relay-svm-activation-runbook.md).
 That narrow exception does not authorize broad Solana sponsorship.
 
@@ -363,9 +365,13 @@ The prefund validator should check:
 If the validator cannot prove the transaction is a bounded prefund, it must refuse sponsorship.
 
 For custom Solana programs, an application validator and a program-ID allowlist
-do not by themselves prove the outer signer boundary. Any Relay route
-must additionally satisfy the Slice E negative policy matrix or use an
-independently enforced narrow on-chain boundary.
+do not by themselves prove the outer signer boundary. Any managed-wallet Relay
+route must additionally use the Slice E3 Relay Intent Guard or another
+independently proved custody boundary. The selected Guard is the only permitted
+custom-program route: policy allows Guard + Secp256k1 + Compute Budget, while
+the Guard validates the signed order and then makes the exact Relay Depository
+CPI. User/exchange-funded strict E2 ingress has no delegated Hunch Solana signer
+and is outside this sponsorship contract.
 
 The implementation should not introduce a sponsorship ledger. Keep only short-lived prepare/intent state, preferably in Redis or an equivalent TTL cache, for digest binding, expiry, and replay protection.
 

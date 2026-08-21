@@ -15,7 +15,7 @@ import type {
 } from "../domain/types.js";
 import { resolveFundingDestinationChoice } from "../domain/selections.js";
 import { canonicalAccountAddress } from "../domain/asset-identity.js";
-import { FundingPlannerError } from "../planner/money.js";
+import { FundingPlannerError, sameAsset } from "../planner/money.js";
 import {
   FundingPlanningRuntime,
   type PreparedFundingRuntimeCommit,
@@ -28,6 +28,9 @@ import {
   createOrReuseFundingReceiveSession,
   type FundingReceiveSessionPersistenceResult,
   FundingReceiveSessionChannelConflictError,
+  FundingReceiveSessionExactScopeConflictError,
+  FundingReceiveSessionOpenIdempotencyConflictError,
+  replayFundingReceiveSessionOpenIdempotency,
   fetchFundingReceiveReceiptForReview,
   type FundingReceiveReceiptReviewTarget,
   fetchFundingReceiveSessionForUser,
@@ -57,6 +60,14 @@ import {
   FUNDING_RECEIVE_OBSERVATION_GRACE_MS,
   FUNDING_RECEIVE_SESSION_TTL_MS,
 } from "./receive-session-constants.js";
+import {
+  findFundingReceiveOption,
+  fundingReceiveOptionExpiry,
+  ingressSupportsFundingReceiveSelection,
+  fundingReceiveOptionsResponse,
+  listFundingReceiveOptions,
+  type FundingReceiveOptionsResponse,
+} from "./receive-option-catalog.js";
 
 type JsonRecord = Readonly<Record<string, JsonValue>>;
 
@@ -88,6 +99,26 @@ function receiveTargets(
     );
   }
   return ingress.receiveTargets;
+}
+
+function matchesReceiveTarget(
+  candidate: Readonly<{ networkId: string; destinationAddress: string }>,
+  target: Readonly<{ networkId: string; destinationAddress: string }>,
+): boolean {
+  return (
+    candidate.networkId === target.networkId &&
+    canonicalAccountAddress(
+      candidate.networkId,
+      candidate.destinationAddress,
+    ) === canonicalAccountAddress(target.networkId, target.destinationAddress)
+  );
+}
+
+function receiveOpenRequestFingerprint(receiveOptionId: string): string {
+  return canonicalJsonHash({
+    kind: "funding_receive_option_open_v1",
+    receiveOptionId,
+  });
 }
 
 type ReceiveVariantVerificationDependencies = Readonly<{
@@ -232,11 +263,19 @@ export async function verifyFundingReceiveVariants(
   };
 }
 
-export type OpenFundingReceiveSessionRequest = Readonly<{
-  destinationOptionId: string;
-  venueBindingOptionId: string;
-  selectedReceiveTargetId?: string | null;
-}>;
+export type OpenFundingReceiveSessionRequest =
+  | Readonly<{
+      destinationOptionId: string;
+      venueBindingOptionId: string;
+      selectedReceiveTargetId?: string | null;
+    }>
+  | Readonly<{
+      receiveOptionId: string;
+      // Request retries use this caller key. Persistence keeps one active
+      // session per user/destination/binding and additionally compares this
+      // opaque choice's exact receiver+asset scope before replaying it.
+      idempotencyKey: string;
+    }>;
 
 export type FundingReceiveSessionResponse = Readonly<{
   session: FundingReceiveSession;
@@ -295,9 +334,82 @@ export class FundingReceiveSessionService {
   private readonly runtime: FundingPlanningRuntime;
   private readonly planningStore: PostgresFundingPlanningStore;
 
-  constructor(private readonly db: Pool) {
+  constructor(
+    private readonly db: Pool,
+    private readonly optionsConfig: Readonly<{
+      /** Injected by the API route; Telegram only uses legacy opens. */
+      receiveOptionTokenKey?: string;
+    }> = {},
+  ) {
     this.runtime = new FundingPlanningRuntime(db);
     this.planningStore = new PostgresFundingPlanningStore(db);
+  }
+
+  private receiveOptionTokenKey(): string {
+    const key = this.optionsConfig.receiveOptionTokenKey?.trim() ?? "";
+    if (key.length < 32) {
+      throw new FundingPlannerError(
+        "destination_unavailable",
+        "generic receive options are temporarily unavailable",
+      );
+    }
+    return key;
+  }
+
+  async options(userId: string): Promise<FundingReceiveOptionsResponse> {
+    return fundingReceiveOptionsResponse(
+      await listFundingReceiveOptions({
+        runtime: this.runtime,
+        userId,
+        tokenKey: this.receiveOptionTokenKey(),
+      }),
+    );
+  }
+
+  private async resolveOpenRequest(
+    userId: string,
+    request: OpenFundingReceiveSessionRequest,
+    now: Date,
+  ): Promise<
+    Readonly<{
+      destinationOptionId: string;
+      venueBindingOptionId: string;
+      selectedReceiveTargetId?: string | null;
+      selectedReceiveAsset?: AssetRef | null;
+      selectedReceiveTarget?: Readonly<{
+        networkId: string;
+        destinationAddress: string;
+      }>;
+    }>
+  > {
+    if ("destinationOptionId" in request) return request;
+    const expiresAt = fundingReceiveOptionExpiry(request.receiveOptionId);
+    if (!expiresAt || expiresAt.getTime() <= now.getTime()) {
+      throw new FundingPlannerError(
+        "receive_option_expired",
+        "selected receive option expired; refresh the available assets",
+      );
+    }
+    const catalog = await listFundingReceiveOptions({
+      runtime: this.runtime,
+      userId,
+      tokenKey: this.receiveOptionTokenKey(),
+      now,
+      expiresAt,
+    });
+    const resolved = findFundingReceiveOption(catalog, request.receiveOptionId);
+    if (!resolved) {
+      throw new FundingPlannerError(
+        "destination_unavailable",
+        "selected receive option is no longer available",
+      );
+    }
+    return {
+      destinationOptionId: resolved.destinationOptionId,
+      venueBindingOptionId: resolved.venueBindingOptionId,
+      selectedReceiveAsset: resolved.option.asset,
+      selectedReceiveTarget: resolved.receiveTarget,
+    };
   }
 
   async open(
@@ -311,19 +423,74 @@ export class FundingReceiveSessionService {
     ) => Promise<void>,
     preparePersistence?: (client: PoolClient) => Promise<void>,
   ): Promise<FundingReceiveSessionResponse> {
+    if ("receiveOptionId" in request) this.receiveOptionTokenKey();
+    const openIdempotency =
+      "receiveOptionId" in request
+        ? {
+            key: request.idempotencyKey,
+            requestFingerprint: receiveOpenRequestFingerprint(
+              request.receiveOptionId,
+            ),
+          }
+        : null;
+    if (openIdempotency) {
+      try {
+        const existing = await replayFundingReceiveSessionOpenIdempotency(
+          this.db,
+          {
+            userId,
+            ownerChannel,
+            idempotencyKey: openIdempotency.key,
+            requestFingerprint: openIdempotency.requestFingerprint,
+            now,
+          },
+        );
+        if (existing) {
+          const receipts = await listFundingReceiveReceiptsForUser(this.db, {
+            userId,
+            receiveSessionId: existing.snapshot.session.receiveSessionId,
+          });
+          return {
+            session: existing.snapshot.session,
+            receipts,
+            replayed: true,
+          };
+        }
+      } catch (error) {
+        if (error instanceof FundingReceiveSessionChannelConflictError) {
+          throw new FundingPlannerError("receive_channel_conflict", error.message);
+        }
+        if (error instanceof FundingReceiveSessionExactScopeConflictError) {
+          throw new FundingPlannerError(
+            "receive_session_selection_conflict",
+            error.message,
+          );
+        }
+        if (
+          error instanceof FundingReceiveSessionOpenIdempotencyConflictError
+        ) {
+          throw new FundingPlannerError(
+            "receive_session_idempotency_conflict",
+            error.message,
+          );
+        }
+        throw error;
+      }
+    }
+    const resolvedRequest = await this.resolveOpenRequest(userId, request, now);
     const destinationAccess = await this.runtime.destinationAccess(userId, {
       purpose: "fund",
     });
     const destination = resolveFundingDestinationChoice({
       options: destinationAccess.options,
-      destinationOptionId: request.destinationOptionId,
-      venueBindingOptionId: request.venueBindingOptionId,
+      destinationOptionId: resolvedRequest.destinationOptionId,
+      venueBindingOptionId: resolvedRequest.venueBindingOptionId,
     });
     if (!destination) {
       const policyDisabled = resolveFundingDestinationChoice({
         options: destinationAccess.policyDisabledOptions,
-        destinationOptionId: request.destinationOptionId,
-        venueBindingOptionId: request.venueBindingOptionId,
+        destinationOptionId: resolvedRequest.destinationOptionId,
+        venueBindingOptionId: resolvedRequest.venueBindingOptionId,
       });
       if (policyDisabled) {
         throw new FundingPlannerError(
@@ -418,6 +585,22 @@ export class FundingReceiveSessionService {
       );
     }
     const variants = rawVariants.map(parseDirectIngressObservationVariant);
+    const selectedReceiveAsset = resolvedRequest.selectedReceiveAsset;
+    const selectedReceiveTarget = resolvedRequest.selectedReceiveTarget;
+    const selectedVariants = selectedReceiveAsset
+      ? variants.filter(
+          (variant) =>
+            sameAsset(variant.asset, selectedReceiveAsset) &&
+            (!selectedReceiveTarget ||
+              matchesReceiveTarget(variant, selectedReceiveTarget)),
+        )
+      : variants;
+    if (selectedVariants.length === 0) {
+      throw new FundingPlannerError(
+        "destination_unavailable",
+        "selected receive asset is no longer available",
+      );
+    }
     const baselineTarget: DirectIngressObservationTarget = {
       operationId: stableOpaqueId(
         "receive_baseline",
@@ -434,7 +617,7 @@ export class FundingReceiveSessionService {
         status: "awaiting_external_funds",
         stage: "source_action",
       },
-      variants,
+      variants: selectedVariants,
     };
     // Freeze each network's canonical event boundary before its balance
     // snapshot. Independently verified networks remain usable when another
@@ -442,7 +625,7 @@ export class FundingReceiveSessionService {
     const verified = await verifyFundingReceiveVariants(
       this.db,
       baselineTarget,
-      variants,
+      selectedVariants,
     );
     const frozenVariants = verified.variants;
     if (verified.failures.length > 0) {
@@ -483,11 +666,18 @@ export class FundingReceiveSessionService {
         .sort((left, right) => left.variantId.localeCompare(right.variantId)),
     });
     const targets = buildFundingReceiveTargets(frozenVariants);
+    const opaqueSelectedTarget = selectedReceiveTarget
+      ? targets.find((target) =>
+          matchesReceiveTarget(target, selectedReceiveTarget),
+        )
+      : null;
     if (
-      request.selectedReceiveTargetId != null &&
-      !targets.some(
-        (target) => target.receiveTargetId === request.selectedReceiveTargetId,
-      )
+      (selectedReceiveTarget && !opaqueSelectedTarget) ||
+      (resolvedRequest.selectedReceiveTargetId != null &&
+        !targets.some(
+          (target) =>
+            target.receiveTargetId === resolvedRequest.selectedReceiveTargetId,
+        ))
     ) {
       throw new FundingPlannerError(
         "source_not_selected",
@@ -508,7 +698,8 @@ export class FundingReceiveSessionService {
     // An explicit `null` is used by Telegram so a verified address is not
     // revealed before an exact target+asset consent callback.
     const selectedReceiveTargetId = resolveFundingReceiveSelectedTargetId(
-      request.selectedReceiveTargetId,
+      opaqueSelectedTarget?.receiveTargetId ??
+        resolvedRequest.selectedReceiveTargetId,
       recommendedReceiveTargetId,
       ownerChannel,
     );
@@ -527,8 +718,24 @@ export class FundingReceiveSessionService {
             : null;
       const optionIngress = option.ingress;
       if (!kind || !optionIngress) return [];
+      // Manual ingress is narrowed to the opaque asset selection. A Privy
+      // method is only retained when that method itself supports the same
+      // asset at the same receiver; otherwise it would advertise Card for an
+      // asset that only the crypto method can accept.
+      if (
+        kind === "privy" &&
+        resolvedRequest.selectedReceiveAsset != null &&
+        selectedReceiveTarget != null &&
+        !ingressSupportsFundingReceiveSelection({
+          ingress: optionIngress,
+          asset: resolvedRequest.selectedReceiveAsset,
+          receiveTarget: selectedReceiveTarget,
+        })
+      ) {
+        return [];
+      }
       const ingress: ExternalIngressInstruction =
-        kind === "manual"
+        kind === "manual" || resolvedRequest.selectedReceiveAsset != null
           ? {
               ...optionIngress,
               receiveTargets: targets,
@@ -604,6 +811,9 @@ export class FundingReceiveSessionService {
           receiveTargets: targets,
           observationVariants: frozenVariants.map(jsonRecord),
           selectedReceiveTargetId,
+          requireExactReceiveScope:
+            resolvedRequest.selectedReceiveAsset != null,
+          openIdempotency: openIdempotency ?? undefined,
           automationPolicy: {
             stableConversion: "automatic_within_caps",
             volatileConversion: "review_required",
@@ -626,6 +836,18 @@ export class FundingReceiveSessionService {
       if (error instanceof FundingReceiveSessionChannelConflictError) {
         throw new FundingPlannerError(
           "receive_channel_conflict",
+          error.message,
+        );
+      }
+      if (error instanceof FundingReceiveSessionExactScopeConflictError) {
+        throw new FundingPlannerError(
+          "receive_session_selection_conflict",
+          error.message,
+        );
+      }
+      if (error instanceof FundingReceiveSessionOpenIdempotencyConflictError) {
+        throw new FundingPlannerError(
+          "receive_session_idempotency_conflict",
           error.message,
         );
       }
