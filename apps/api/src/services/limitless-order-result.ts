@@ -38,32 +38,51 @@ function normalizeStatus(value: unknown): string | null {
   );
 }
 
-function executionRecord(payload: unknown): Record<string, unknown> | null {
+/**
+ * `/orders/status/batch` wraps an order one level deeper than submit does:
+ * `{ status: "found", data: { order: { order, execution } } }`. Normalize
+ * only that known shape, retaining the older submit/receipt envelopes.
+ */
+function statusOrderRoot(payload: unknown): Record<string, unknown> | null {
   if (!isRecord(payload)) return null;
-  if (isRecord(payload.execution)) return payload.execution;
-  if (isRecord(payload.order) && isRecord(payload.order.execution)) {
-    return payload.order.execution;
+  if (
+    isRecord(payload.data) &&
+    isRecord(payload.data.order) &&
+    isRecord(payload.data.order.order)
+  ) {
+    return payload.data.order;
   }
-  if (isRecord(payload.data)) {
-    if (isRecord(payload.data.execution)) return payload.data.execution;
+  return payload;
+}
+
+function executionRecord(payload: unknown): Record<string, unknown> | null {
+  const root = statusOrderRoot(payload);
+  if (!root) return null;
+  if (isRecord(root.execution)) return root.execution;
+  if (isRecord(root.order) && isRecord(root.order.execution)) {
+    return root.order.execution;
+  }
+  if (isRecord(root.data)) {
+    if (isRecord(root.data.execution)) return root.data.execution;
     if (
-      isRecord(payload.data.order) &&
-      isRecord(payload.data.order.execution)
+      isRecord(root.data.order) &&
+      isRecord(root.data.order.execution)
     ) {
-      return payload.data.order.execution;
+      return root.data.order.execution;
     }
   }
   return null;
 }
 
 function orderRecord(payload: unknown): Record<string, unknown> | null {
-  if (!isRecord(payload)) return null;
-  if (isRecord(payload.order)) return payload.order;
-  if (isRecord(payload.data) && isRecord(payload.data.order)) {
-    return payload.data.order;
+  const root = statusOrderRoot(payload);
+  if (!root) return null;
+  if (isRecord(root.order)) return root.order;
+  if (isRecord(root.data) && isRecord(root.data.order)) {
+    return root.data.order;
   }
-  if (isRecord(payload.data)) return payload.data;
-  return payload;
+  if (isRecord(root.data)) return root.data;
+  return root;
 }
 
 function rawMicroAmount(value: unknown): number | null {
@@ -75,11 +94,12 @@ function rawMicroAmount(value: unknown): number | null {
 }
 
 function makerMatchRecords(payload: unknown): Record<string, unknown>[] {
-  if (!isRecord(payload)) return [];
-  const data = isRecord(payload.data) ? payload.data : null;
-  const order = isRecord(payload.order) ? payload.order : null;
+  const root = statusOrderRoot(payload);
+  if (!root) return [];
+  const data = isRecord(root.data) ? root.data : null;
+  const order = isRecord(root.order) ? root.order : null;
   const matches =
-    payload.makerMatches ?? data?.makerMatches ?? order?.makerMatches ?? null;
+    root.makerMatches ?? data?.makerMatches ?? order?.makerMatches ?? null;
   return Array.isArray(matches) ? matches.filter(isRecord) : [];
 }
 

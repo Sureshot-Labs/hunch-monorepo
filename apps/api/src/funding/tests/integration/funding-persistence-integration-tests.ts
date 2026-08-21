@@ -18,9 +18,14 @@ import { AuthService } from "../../../auth.js";
 import { storeExecutionInTransaction } from "../../../repos/executions-repo.js";
 import { storeOrderInTransaction } from "../../../repos/orders-repo.js";
 import {
+  claimTelegramAppHandoffV2FundedTradeAttemptInTransaction,
   claimTelegramAppHandoffV2DirectTradeSubmissionInTransaction,
   failTelegramAppHandoffV2DirectTradeSubmissionInTransaction,
 } from "../../../repos/telegram-app-handoff-v2-direct-trade-repository.js";
+import {
+  cancelTelegramAppHandoff,
+  resolveTelegramAppHandoff,
+} from "../../../services/telegram-app-handoff.js";
 import {
   applyFundingSourceDebitSuppression,
   loadFundingAccountValueFacts,
@@ -64,7 +69,9 @@ import {
 import { applyFundingStepReceiptEvidenceInTransaction } from "../../persistence/funding-step-receipt-repository.js";
 import {
   claimFundingTradeAttemptInTransaction,
+  FundingTradeAttemptError,
   markFundingTradeAttemptSubmissionStartedInTransaction,
+  recordFundingTradeAttemptOutcomeInTransaction,
 } from "../../persistence/funding-trade-attempt-repository.js";
 import { buildFundingTradeConsumerIntent } from "../../persistence/funding-trade-consumer-intent.js";
 import {
@@ -80,6 +87,7 @@ import {
   runFundingReconciliationBatch,
 } from "../../reconciliation/funding-reducer.js";
 import { OwnedRouteDestinationObserver } from "../../reconciliation/owned-route-destination-observer.js";
+import { hashOpaqueToken } from "../../persistence/canonical.js";
 
 const ASSET = {
   networkId: "eip155:137",
@@ -2561,6 +2569,13 @@ async function testTransactionalPersistenceContracts(): Promise<void> {
       userB,
       userBPrivyId,
     ]);
+    const userBTelegramUserId = `funding-handoff-${crypto.randomUUID()}`;
+    await client.query(
+      `insert into user_telegram_accounts (
+         user_id, privy_user_id, telegram_user_id
+       ) values ($1::uuid, $2, $3)`,
+      [userB, userBPrivyId, userBTelegramUserId],
+    );
     const planA = buildPlan();
     const tokenA = opaque("consent");
     const quoteA = await createFundingQuoteInTransaction(
@@ -3567,6 +3582,7 @@ async function testTransactionalPersistenceContracts(): Promise<void> {
     const reservationBId = reservationBRow.id;
     assert.equal(reservationBRow.raw_amount, "990000");
     const handoffId = crypto.randomUUID();
+    const handoffPlanFingerprint = hash("a");
     const handoffIntent = await client.query<{ id: string }>(
       `insert into telegram_trade_intents (
          telegram_user_id,
@@ -3591,7 +3607,7 @@ async function testTransactionalPersistenceContracts(): Promise<void> {
        )
        returning id::text`,
       [
-        `handoff-${crypto.randomUUID()}`,
+        userBTelegramUserId,
         userB,
         marketId,
         committedB.operation.id,
@@ -3599,6 +3615,7 @@ async function testTransactionalPersistenceContracts(): Promise<void> {
         JSON.stringify({
           appHandoffExecution: {
             committedAt: new Date().toISOString(),
+            handoffId,
             version: 2,
           },
           appHandoffFunding: {
@@ -3622,6 +3639,43 @@ async function testTransactionalPersistenceContracts(): Promise<void> {
       committedB.operation.supportMetadata.test
         ? planB.operation.marketContextSnapshot?.marketContextId
         : "",
+    );
+    await client.query(
+      `insert into telegram_app_handoffs (
+         id, trade_intent_id, user_id, telegram_user_id, token_hash, state,
+         plan_fingerprint, policy_revision, authority_fingerprint,
+         quote_snapshot, plan_snapshot, expires_at, claimed_at,
+         claimed_by_user_id, committed_at
+       ) values (
+         $1::uuid, $2::uuid, $3::uuid, $4, $5, 'committed', $6,
+         'policy-funding', $7, '{}'::jsonb, $8::jsonb,
+         clock_timestamp() + interval '30 minutes', clock_timestamp(),
+         $3::uuid, clock_timestamp()
+       )`,
+      [
+        handoffId,
+        handoffIntentId,
+        userB,
+        userBTelegramUserId,
+        hash("b"),
+        handoffPlanFingerprint,
+        hash("c"),
+        JSON.stringify({
+          kind: "funding",
+          trade: {
+            action: "buy",
+            amountUsd: 1,
+            controllerWalletAddress:
+              "0x00000000000000000000000000000000000000b1",
+            marketId,
+            maxSpendUsd: 1,
+            minReceiveShares: null,
+            outcomeTokenId: marketContextId,
+            venue: "polymarket",
+          },
+          version: 2,
+        }),
+      ],
     );
     const consumerIntent = buildFundingTradeConsumerIntent({
       venueId: "polymarket",
@@ -3723,27 +3777,81 @@ async function testTransactionalPersistenceContracts(): Promise<void> {
       consumerIntent,
       externalReference: tradeExecutionReference,
     } as const;
-    const tradeClaim = await claimFundingTradeAttemptInTransaction(
-      client,
-      tradeClaimInput,
-    );
-    assert.equal(tradeClaim.claimed, true);
-    const replayedTradeClaim = await claimFundingTradeAttemptInTransaction(
-      client,
-      {
-        ...tradeClaimInput,
-        now: new Date(tradeClaim.attempt.claimedAt.getTime() + 1_000),
+    const handoffFundingClaimInput = {
+      ...tradeClaimInput,
+      assertCurrentScope: async () => true,
+      binding: {
+        handoffId,
+        planFingerprint: handoffPlanFingerprint,
+      },
+      submission: {
+        action: "buy" as const,
+        executionKind: "clob" as const,
+        marketId,
+        outcomeTokenId: marketContextId,
+        receiveRaw: "1",
+        signer: "0x00000000000000000000000000000000000000b1",
+        spendRaw: "1000000",
+        venue: "polymarket" as const,
+      },
+    } as const;
+    await assert.rejects(
+      claimFundingTradeAttemptInTransaction(client, tradeClaimInput),
+      (error: unknown) => {
+        assert.ok(error instanceof FundingTradeAttemptError);
+        assert.equal(error.code, "sealed_handoff_required");
+        return true;
       },
     );
+    await client.query("savepoint cancelled_handoff_claim_fence");
+    await client.query(
+      `update telegram_trade_intents
+          set status = 'cancelled'
+        where id = $1::uuid`,
+      [handoffIntentId],
+    );
+    await assert.rejects(
+      claimFundingTradeAttemptInTransaction(client, tradeClaimInput),
+      (error: unknown) => {
+        assert.ok(error instanceof FundingTradeAttemptError);
+        assert.equal(error.code, "sealed_handoff_required");
+        return true;
+      },
+      "a cancelled sealed handoff must keep its reservation fenced until cleanup",
+    );
+    await client.query("rollback to savepoint cancelled_handoff_claim_fence");
+    const tradeClaim =
+      await claimTelegramAppHandoffV2FundedTradeAttemptInTransaction(
+        client,
+        handoffFundingClaimInput,
+      );
+    assert.equal(tradeClaim.claimed, true);
+    const intentAtClaim = await client.query<{
+      status: string;
+      submit_started_at: Date | null;
+    }>(
+      `select status, submit_started_at
+       from telegram_trade_intents
+       where id = $1::uuid`,
+      [handoffIntentId],
+    );
+    assert.equal(intentAtClaim.rows[0]?.status, "executing");
+    assert.ok(
+      intentAtClaim.rows[0]?.submit_started_at,
+      "the funded handoff claim must close Telegram cancellation before provider submission",
+    );
+    const replayedTradeClaim =
+      await claimTelegramAppHandoffV2FundedTradeAttemptInTransaction(client, {
+        ...handoffFundingClaimInput,
+        now: new Date(tradeClaim.attempt.claimedAt.getTime() + 1_000),
+      });
     assert.equal(replayedTradeClaim.claimed, false);
     assert.equal(replayedTradeClaim.attempt.id, tradeClaim.attempt.id);
-    const reclaimedTradeClaim = await claimFundingTradeAttemptInTransaction(
-      client,
-      {
-        ...tradeClaimInput,
+    const reclaimedTradeClaim =
+      await claimTelegramAppHandoffV2FundedTradeAttemptInTransaction(client, {
+        ...handoffFundingClaimInput,
         now: new Date(tradeClaim.attempt.claimLeaseUntil.getTime() + 1),
-      },
-    );
+      });
     assert.equal(reclaimedTradeClaim.claimed, true);
     assert.equal(reclaimedTradeClaim.reason, "reclaimed_before_submission");
     assert.notEqual(
@@ -3759,6 +3867,42 @@ async function testTransactionalPersistenceContracts(): Promise<void> {
         claimToken: reclaimedTradeClaim.attempt.claimToken,
       });
     assert.equal(startedTrade.state, "submission_started");
+    await client.query("savepoint handoff_funding_definitive_failure");
+    await recordFundingTradeAttemptOutcomeInTransaction(client, {
+      userId: userB,
+      attemptId: tradeClaim.attempt.id,
+      outcome: "definitive_failure",
+      errorCode: "trade_no_fill",
+      broadcastMayHaveOccurred: true,
+    });
+    await releaseFundingReservationForAbandonedTradeInTransaction(client, {
+      userId: userB,
+      link: {
+        operationId: committedB.operation.id,
+        reservationId: reservationBId,
+      },
+      outcomeReason: "trade_no_fill",
+      handoffFailure: {
+        code: "trade_no_fill",
+        message: "The venue did not fill the Buy.",
+      },
+    });
+    const intentAfterDefinitiveFailure = await client.query<{
+      error_code: string | null;
+      status: string;
+    }>(
+      `select status, error_code
+         from telegram_trade_intents
+        where id = $1::uuid`,
+      [handoffIntentId],
+    );
+    assert.deepEqual(intentAfterDefinitiveFailure.rows[0], {
+      error_code: "trade_no_fill",
+      status: "failed",
+    });
+    await client.query(
+      "rollback to savepoint handoff_funding_definitive_failure",
+    );
     await expectFundingError(
       releaseFundingReservationForAbandonedTradeInTransaction(client, {
         userId: userB,
@@ -4313,6 +4457,7 @@ async function testTelegramAppHandoffV2DirectTradeBinding(): Promise<void> {
     };
     const venueOrderId = `handoff-direct-order:${crypto.randomUUID()}`;
     const submission = {
+      executionKind: "clob" as const,
       marketId,
       outcomeTokenId,
       receiveRaw: "8000000",
@@ -4447,8 +4592,436 @@ async function testTelegramAppHandoffV2DirectTradeBinding(): Promise<void> {
       }),
       /intent_changed/u,
     );
+
+    const sellIntentId = crypto.randomUUID();
+    const sellHandoffId = crypto.randomUUID();
+    const sellFingerprint = hash("c");
+    const sellPlanSnapshot = {
+      executionContractVersion: 2,
+      kind: "direct_trade",
+      trade: {
+        action: "sell",
+        controllerWalletAddress: "0x00000000000000000000000000000000000000d1",
+        eventId,
+        marketId,
+        maxSlippageBps: 500,
+        minimumReceiveRaw: "1200000",
+        outcomeTokenId,
+        sharesRaw: "5000000",
+        side: "YES",
+        venue: "polymarket",
+      },
+      version: 2,
+    };
+    await client.query(
+      `insert into telegram_trade_intents (
+         id, telegram_user_id, user_id, action, venue, market_id, event_id,
+         side, shares_raw, delivery_mode, status, result, expires_at,
+         idempotency_key
+       ) values (
+         $1::uuid, $2, $3::uuid, 'sell', 'polymarket', $4, $5, 'YES',
+         '5000000', 'app_handoff', 'external_handoff', $6::jsonb,
+         clock_timestamp() + interval '10 minutes', $7
+       )`,
+      [
+        sellIntentId,
+        telegramUserId,
+        userId,
+        marketId,
+        eventId,
+        JSON.stringify({
+          appHandoffExecution: {
+            committedAt: new Date().toISOString(),
+            handoffId: sellHandoffId,
+            kind: "direct_trade",
+            version: 2,
+          },
+        }),
+        `handoff-direct-sell:${crypto.randomUUID()}`,
+      ],
+    );
+    await client.query(
+      `insert into telegram_app_handoffs (
+         id, trade_intent_id, user_id, telegram_user_id, token_hash, state,
+         plan_fingerprint, policy_revision, authority_fingerprint,
+         quote_snapshot, plan_snapshot, expires_at, claimed_at,
+         claimed_by_user_id, committed_at
+       ) values (
+         $1::uuid, $2::uuid, $3::uuid, $4, $5, 'committed', $6,
+         'policy-direct', $7, '{}'::jsonb, $8::jsonb,
+         clock_timestamp() + interval '10 minutes', clock_timestamp(),
+         $3::uuid, clock_timestamp()
+       )`,
+      [
+        sellHandoffId,
+        sellIntentId,
+        userId,
+        telegramUserId,
+        hash("d"),
+        sellFingerprint,
+        hash("e"),
+        JSON.stringify(sellPlanSnapshot),
+      ],
+    );
+    const sellSubmission = {
+      action: "sell" as const,
+      executionKind: "clob" as const,
+      marketId,
+      outcomeTokenId,
+      receiveRaw: "1200000",
+      signer: "0x00000000000000000000000000000000000000d1",
+      spendRaw: "5000000",
+      venue: "polymarket" as const,
+    };
+    await assert.rejects(
+      claimTelegramAppHandoffV2DirectTradeSubmissionInTransaction(client, {
+        assertCurrentScope,
+        binding: { handoffId: sellHandoffId, planFingerprint: sellFingerprint },
+        reconcileKeys: {
+          orderHash: `0x${"ce".repeat(32)}`,
+          tradeType: "clob",
+        },
+        recoveryPayload: {
+          kind: "polymarket",
+          orderPayload: { rejected: true },
+        },
+        submission: { ...sellSubmission, spendRaw: "4000000" },
+        readSellPositionAvailableRaw: async () => "5000000",
+        userId,
+      }),
+      /order_out_of_scope/u,
+      "a sealed Sell must submit the exact reviewed share quantity",
+    );
+    await claimTelegramAppHandoffV2DirectTradeSubmissionInTransaction(client, {
+      assertCurrentScope,
+      binding: { handoffId: sellHandoffId, planFingerprint: sellFingerprint },
+      reconcileKeys: {
+        orderHash: `0x${"cd".repeat(32)}`,
+        tradeType: "clob",
+      },
+      recoveryPayload: {
+        kind: "polymarket",
+        orderPayload: { recovered: true },
+      },
+      readSellPositionAvailableRaw: async () => "5000000",
+      submission: sellSubmission,
+      userId,
+    });
+    // A prior direct Sell has no order row until its provider call returns.
+    // The second claim must still reserve that exact outcome-token debit, or
+    // two Mini App tabs could spend the same shares before persistence catches
+    // up.
+    const competingSellIntentId = crypto.randomUUID();
+    const competingSellHandoffId = crypto.randomUUID();
+    const competingSellFingerprint = hash("f");
+    await client.query(
+      `insert into telegram_trade_intents (
+         id, telegram_user_id, user_id, action, venue, market_id, event_id,
+         side, shares_raw, delivery_mode, status, result, expires_at,
+         idempotency_key
+       ) values (
+         $1::uuid, $2, $3::uuid, 'sell', 'polymarket', $4, $5, 'YES',
+         '5000000', 'app_handoff', 'external_handoff', $6::jsonb,
+         clock_timestamp() + interval '10 minutes', $7
+       )`,
+      [
+        competingSellIntentId,
+        telegramUserId,
+        userId,
+        marketId,
+        eventId,
+        JSON.stringify({
+          appHandoffExecution: {
+            committedAt: new Date().toISOString(),
+            handoffId: competingSellHandoffId,
+            kind: "direct_trade",
+            version: 2,
+          },
+        }),
+        `handoff-direct-sell-competing:${crypto.randomUUID()}`,
+      ],
+    );
+    await client.query(
+      `insert into telegram_app_handoffs (
+         id, trade_intent_id, user_id, telegram_user_id, token_hash, state,
+         plan_fingerprint, policy_revision, authority_fingerprint,
+         quote_snapshot, plan_snapshot, expires_at, claimed_at,
+         claimed_by_user_id, committed_at
+       ) values (
+         $1::uuid, $2::uuid, $3::uuid, $4, $5, 'committed', $6,
+         'policy-direct', $7, '{}'::jsonb, $8::jsonb,
+         clock_timestamp() + interval '10 minutes', clock_timestamp(),
+         $3::uuid, clock_timestamp()
+       )`,
+      [
+        competingSellHandoffId,
+        competingSellIntentId,
+        userId,
+        telegramUserId,
+        hash("a"),
+        competingSellFingerprint,
+        hash("b"),
+        JSON.stringify(sellPlanSnapshot),
+      ],
+    );
+    await assert.rejects(
+      claimTelegramAppHandoffV2DirectTradeSubmissionInTransaction(client, {
+        assertCurrentScope,
+        binding: {
+          handoffId: competingSellHandoffId,
+          planFingerprint: competingSellFingerprint,
+        },
+        reconcileKeys: {
+          orderHash: `0x${"cf".repeat(32)}`,
+          tradeType: "clob",
+        },
+        recoveryPayload: { kind: "polymarket", orderPayload: {} },
+        readSellPositionAvailableRaw: async () => "5000000",
+        submission: sellSubmission,
+        userId,
+      }),
+      /sell_position_unavailable/u,
+      "unpersisted direct Sell claims must consume the same position lane",
+    );
+    // Ordinary order persistence is the durable direct-handoff consumer. It
+    // must accept the sealed SELL side exactly as it accepts the existing Buy
+    // branch; roll it back so the rejection path below remains independently
+    // covered by this same fixture.
+    await client.query("savepoint direct_handoff_sell_order");
+    const sellStored = await storeOrderInTransaction(client, {
+      userId,
+      walletAddress: "0x00000000000000000000000000000000000000d1",
+      venue: "polymarket",
+      venueOrderId: `handoff-direct-sell-order:${crypto.randomUUID()}`,
+      tokenId: outcomeTokenId,
+      side: "SELL",
+      price: 0.24,
+      size: 5,
+      status: "matched",
+      errorMessage: null,
+      rawError: null,
+      telegramAppHandoffV2DirectTrade: {
+        ...binding,
+        handoffId: sellHandoffId,
+        planFingerprint: sellFingerprint,
+        ...sellSubmission,
+      },
+    });
+    assert.equal(sellStored.order.status, "matched");
+    const sellLinked = await client.query<{ status: string }>(
+      `select status
+         from telegram_trade_intents
+        where id = $1::uuid`,
+      [sellIntentId],
+    );
+    assert.equal(sellLinked.rows[0]?.status, "filled");
+    await client.query("rollback to savepoint direct_handoff_sell_order");
+    await failTelegramAppHandoffV2DirectTradeSubmissionInTransaction(client, {
+      binding: { handoffId: sellHandoffId, planFingerprint: sellFingerprint },
+      reason: { code: "sell_rejected", message: "Sealed Sell was rejected." },
+      submission: sellSubmission,
+      userId,
+    });
+    const sellTerminal = await client.query<{ status: string }>(
+      `select status from telegram_trade_intents where id = $1::uuid`,
+      [sellIntentId],
+    );
+    assert.equal(sellTerminal.rows[0]?.status, "failed");
+    await client.query("savepoint reject_invalid_sell_handoff_state");
+    await assert.rejects(
+      client.query(
+        `update telegram_trade_intents
+            set status = 'funding'
+          where id = $1::uuid`,
+        [sellIntentId],
+      ),
+      (error: unknown) =>
+        error instanceof Error &&
+        "constraint" in error &&
+        error.constraint === "telegram_trade_intents_delivery_authority_check",
+      "Sell cannot enter a funding state",
+    );
+    await client.query(
+      "rollback to savepoint reject_invalid_sell_handoff_state",
+    );
   } finally {
     await client.query("rollback");
+    client.release();
+  }
+}
+
+/**
+ * A committed v2 direct handoff can be cancelled before its venue boundary.
+ * This uses the actual PostgreSQL schema because both the immutable handoff
+ * lifecycle and the linked intent cancellation are money-path boundaries.
+ */
+async function testTelegramAppHandoffV2CommittedCancellationStopsLinkedBuy(): Promise<void> {
+  const userId = crypto.randomUUID();
+  const handoffId = crypto.randomUUID();
+  const intentId = crypto.randomUUID();
+  const webFundingPreviewIntentId = crypto.randomUUID();
+  const telegramUserId = (
+    9_000_000_000_000_000_000n + BigInt(crypto.randomInt(1_000_000))
+  ).toString();
+  const privyUserId = `did:privy:handoff-cancel-${crypto.randomUUID()}`;
+  const eventId = opaque("handoff-cancel-event");
+  const marketId = `polymarket:${opaque("handoff-cancel-market")}`;
+  const token = `th1_${crypto.randomBytes(32).toString("base64url")}`;
+  const client = await pool.connect();
+  try {
+    await client.query(
+      `insert into users (id, email, is_active, is_verified)
+       values ($1::uuid, $2, true, true)`,
+      [userId, `funding-cancel-${crypto.randomUUID()}@example.com`],
+    );
+    await client.query(
+      `insert into user_telegram_accounts (
+         user_id, privy_user_id, telegram_user_id
+       ) values ($1::uuid, $2, $3)`,
+      [userId, privyUserId, telegramUserId],
+    );
+    await client.query(
+      `insert into unified_events (
+         id, venue, venue_event_id, title, status, end_date
+       ) values ($1, 'polymarket', $2, 'Cancellation event', 'ACTIVE', now() + interval '1 day')`,
+      [eventId, opaque("handoff-cancel-venue-event")],
+    );
+    await client.query(
+      `insert into unified_markets (
+         id, venue, venue_market_id, event_id, title, status, market_type
+       ) values ($1, 'polymarket', $2, $3, 'Cancellation market', 'ACTIVE', 'binary')`,
+      [marketId, opaque("handoff-cancel-venue-market"), eventId],
+    );
+    await client.query(
+      `insert into telegram_trade_intents (
+         id, telegram_user_id, user_id, action, venue, market_id, event_id,
+         side, amount_usd, delivery_mode, status, result, expires_at,
+         idempotency_key
+       ) values (
+         $1::uuid, $2, $3::uuid, 'buy', 'polymarket', $4, $5, 'YES', 1,
+         'app_handoff', 'external_handoff', '{}'::jsonb,
+         clock_timestamp() + interval '10 minutes', $6
+       )`,
+      [
+        intentId,
+        telegramUserId,
+        userId,
+        marketId,
+        eventId,
+        `handoff-cancel-intent:${crypto.randomUUID()}`,
+      ],
+    );
+    await client.query(
+      `insert into telegram_trade_intents (
+         id, telegram_user_id, user_id, action, venue, market_id, event_id,
+         side, amount_usd, delivery_mode, status, result, expires_at,
+         idempotency_key
+       ) values (
+         $1::uuid, $2, $3::uuid, 'buy', 'polymarket', $4, $5, 'YES', 1,
+         'app_handoff', 'previewed',
+         jsonb_build_object(
+           'appHandoffV2', jsonb_build_object('version', 2, 'plan', '{}'::jsonb),
+           'fundingState', 'web_funding_plan'
+         ),
+         clock_timestamp() + interval '10 minutes', $6
+       )`,
+      [
+        webFundingPreviewIntentId,
+        telegramUserId,
+        userId,
+        marketId,
+        eventId,
+        `handoff-web-funding-preview:${crypto.randomUUID()}`,
+      ],
+    );
+    const confirmedWebFundingPreview = await client.query<{ status: string }>(
+      `update telegram_trade_intents
+          set status = 'confirming'
+        where id = $1::uuid
+        returning status`,
+      [webFundingPreviewIntentId],
+    );
+    assert.equal(
+      confirmedWebFundingPreview.rows[0]?.status,
+      "confirming",
+      "a v2 web funding plan must reach its normal Telegram confirmation card",
+    );
+    await client.query(
+      `insert into telegram_app_handoffs (
+         id, trade_intent_id, user_id, telegram_user_id, token_hash, state,
+         plan_fingerprint, policy_revision, authority_fingerprint,
+         quote_snapshot, plan_snapshot, expires_at, claimed_at,
+         claimed_by_user_id, committed_at
+       ) values (
+         $1::uuid, $2::uuid, $3::uuid, $4, $5, 'committed', $6,
+         'policy-cancel', $7, '{}'::jsonb, $8::jsonb,
+         clock_timestamp() + interval '10 minutes', clock_timestamp(),
+         $3::uuid, clock_timestamp()
+       )`,
+      [
+        handoffId,
+        intentId,
+        userId,
+        telegramUserId,
+        hashOpaqueToken(token),
+        hash("a"),
+        hash("b"),
+        JSON.stringify({
+          executionContractVersion: 2,
+          kind: "direct_trade",
+          trade: { action: "buy" },
+          version: 2,
+        }),
+      ],
+    );
+    const cancelled = await cancelTelegramAppHandoff({
+      db: pool,
+      telegramUserId,
+      token,
+      userId,
+    });
+    assert.equal(cancelled.state, "cancelled");
+    const intent = await client.query<{ status: string }>(
+      `select status from telegram_trade_intents where id = $1::uuid`,
+      [intentId],
+    );
+    assert.equal(
+      intent.rows[0]?.status,
+      "cancelled",
+      "v2 handoff cancellation must stop the future Buy, not only revoke its token",
+    );
+    assert.equal(
+      (
+        await resolveTelegramAppHandoff({
+          db: pool,
+          telegramUserId,
+          token,
+          userId,
+        })
+      ).state,
+      "cancelled",
+      "a cancelled v2 handoff stays observable for Mini App resume",
+    );
+  } finally {
+    await client.query(
+      `delete from telegram_app_handoffs where id = $1::uuid`,
+      [handoffId],
+    );
+    await client.query(
+      `delete from telegram_trade_intents where id = $1::uuid`,
+      [intentId],
+    );
+    await client.query(
+      `delete from telegram_trade_intents where id = $1::uuid`,
+      [webFundingPreviewIntentId],
+    );
+    await client.query(`delete from unified_markets where id = $1`, [marketId]);
+    await client.query(`delete from unified_events where id = $1`, [eventId]);
+    await client.query(
+      `delete from user_telegram_accounts where user_id = $1::uuid`,
+      [userId],
+    );
+    await client.query(`delete from users where id = $1::uuid`, [userId]);
     client.release();
   }
 }
@@ -4528,5 +5101,9 @@ console.log(
 await testTelegramAppHandoffV2DirectTradeBinding();
 console.log(
   "[funding-persistence-integration-tests] ok v2 direct handoff claim and atomic order binding",
+);
+await testTelegramAppHandoffV2CommittedCancellationStopsLinkedBuy();
+console.log(
+  "[funding-persistence-integration-tests] ok committed v2 handoff cancellation stops its linked future Buy",
 );
 console.log("[funding-persistence-integration-tests] complete");

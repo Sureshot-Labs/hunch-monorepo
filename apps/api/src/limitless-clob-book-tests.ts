@@ -191,6 +191,21 @@ test("HTTP 200 nested matched=false is an explicit no-fill", () => {
   assert.equal(result.venueOrderId, "order-1");
 });
 
+test("status-batch envelope unwraps the exact nested order and execution", () => {
+  const result = parseLimitlessOrderResult({
+    status: "found",
+    data: {
+      order: {
+        execution: { matched: false, settlementStatus: "DELAYED" },
+        order: { id: "status-order-1", status: "unmatched" },
+      },
+    },
+  });
+  assert.equal(result.explicitNoFill, true);
+  assert.equal(result.status, "unmatched");
+  assert.equal(result.venueOrderId, "status-order-1");
+});
+
 test("matched=true with delayed settlement remains non-terminal", () => {
   const result = parseLimitlessOrderResult({
     order: { id: "order-2", status: "submitted" },

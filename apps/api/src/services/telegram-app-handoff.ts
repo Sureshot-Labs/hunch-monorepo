@@ -138,6 +138,31 @@ function asJsonObject(value: unknown, field: string): JsonObject {
   return value as JsonObject;
 }
 
+/** A direct v2 handoff is sealed for exactly one trade action. */
+function directV2PlanAction(planSnapshot: JsonObject): "buy" | "sell" | null {
+  if (planSnapshot.version !== 2 || planSnapshot.kind !== "direct_trade") {
+    return null;
+  }
+  const trade = asJsonObject(planSnapshot.trade, "planSnapshot.trade");
+  if (trade.action !== "buy" && trade.action !== "sell") {
+    throw new TypeError("planSnapshot.trade.action must be buy or sell");
+  }
+  return trade.action;
+}
+
+/**
+ * A v2 handoff owns a durable trade intent even when it has materialized a
+ * funding operation.  Cancelling it must therefore cancel the *future trade*
+ * at every pre-venue state; reconciliation may still finish already-broadcast
+ * funding and return those funds to the controller.
+ */
+function isV2TradePlan(planSnapshot: JsonObject): boolean {
+  return (
+    planSnapshot.version === 2 &&
+    (planSnapshot.kind === "direct_trade" || planSnapshot.kind === "funding")
+  );
+}
+
 function normalizeBoundedValue(value: string, field: string): string {
   const normalized = value.trim();
   if (!normalized || normalized.length > 256) {
@@ -361,6 +386,10 @@ export async function issueTelegramAppHandoff(input: {
     quoteSnapshot,
     tradeIntentId,
   });
+  // V1 and v2 funding stay Buy-only. A direct v2 handoff can be either
+  // action, but its durable trade intent must match the one exact sealed plan.
+  const directAction = directV2PlanAction(planSnapshot);
+  const allowedIntentActions = directAction ? [directAction] : ["buy"];
 
   const handoff = await tx(input.db, async (client) => {
     const inserted = await client.query<TelegramAppHandoffRow>(
@@ -394,7 +423,7 @@ export async function issueTelegramAppHandoff(input: {
        where intent.id = $1::uuid
          and intent.user_id = $2::uuid
          and intent.telegram_user_id = $3
-         and intent.action = 'buy'
+         and intent.action = any($11::text[])
          and intent.delivery_mode = 'app_handoff'
          and intent.status in ('previewed', 'confirming', 'funding', 'external_handoff')
        on conflict do nothing
@@ -410,6 +439,7 @@ export async function issueTelegramAppHandoff(input: {
         JSON.stringify(quoteSnapshot),
         JSON.stringify(planSnapshot),
         expiresAt,
+        allowedIntentActions,
       ],
     );
     if (inserted.rows[0]) return mapRow(inserted.rows[0]);
@@ -451,8 +481,6 @@ export async function resolveTelegramAppHandoff(input: {
   userId: string;
 }): Promise<TelegramAppHandoff> {
   return withCurrentTelegramAppHandoff(input, {}, async ({ row }) => {
-    if (row.state === "cancelled")
-      throw new TelegramAppHandoffError("not_claimable");
     return mapRow(row);
   });
 }
@@ -490,7 +518,12 @@ export async function claimTelegramAppHandoff(input: {
   );
 }
 
-/** A user may revoke an unused sealed handoff; revocation never touches funds. */
+/**
+ * A user may cancel a v2 sealed handoff before the venue-submit boundary.
+ * This cancels its durable trade intent, not any already-broadcast funding:
+ * funding reconciliation keeps running safely, but cannot later submit Buy or
+ * Sell. Legacy issued/claimed tokens retain their token-only cancellation.
+ */
 export async function cancelTelegramAppHandoff(input: {
   db: Pool;
   telegramUserId: string;
@@ -501,16 +534,41 @@ export async function cancelTelegramAppHandoff(input: {
     input,
     { forUpdate: true },
     async ({ client, row }) => {
-      if (row.state !== "issued" && row.state !== "claimed") {
+      const v2TradePlan = isV2TradePlan(row.plan_snapshot);
+      const cancellableHandoffStates = v2TradePlan
+        ? ["issued", "claimed", "committed"]
+        : ["issued", "claimed"];
+      if (!cancellableHandoffStates.includes(row.state)) {
         throw new TelegramAppHandoffError("not_cancellable");
+      }
+      if (v2TradePlan) {
+        const cancelledIntent = await client.query(
+          `update telegram_trade_intents intent
+              set status = 'cancelled',
+                  error_code = 'cancelled_by_user',
+                  error_message = 'The user cancelled the sealed Mini App trade before venue submission.',
+                  updated_at = clock_timestamp()
+            where intent.id = $1::uuid
+              and intent.user_id = $2::uuid
+              and intent.delivery_mode = 'app_handoff'
+              and intent.action in ('buy', 'sell')
+              and intent.status in (
+                'draft', 'previewed', 'confirming', 'external_handoff', 'funding'
+              )
+              and intent.submit_started_at is null`,
+          [row.trade_intent_id, row.user_id],
+        );
+        if ((cancelledIntent.rowCount ?? 0) !== 1) {
+          throw new TelegramAppHandoffError("not_cancellable");
+        }
       }
       const cancelled = await client.query<TelegramAppHandoffRow>(
         `update telegram_app_handoffs handoff_row
           set state = 'cancelled', cancelled_at = clock_timestamp()
         where handoff_row.id = $1::uuid
-          and handoff_row.state in ('issued', 'claimed')
+          and handoff_row.state = any($2::text[])
         returning ${handoffReturningColumns}`,
-        [row.id],
+        [row.id, cancellableHandoffStates],
       );
       const cancelledRow = cancelled.rows[0];
       if (!cancelledRow) throw new TelegramAppHandoffError("not_cancellable");
@@ -551,11 +609,21 @@ export async function commitTelegramAppHandoffWithExecution<T>(
        */
       committedIntentStatus?: "external_handoff" | "funding";
       /**
+       * Stored with the execution marker so a direct Sell can never be
+       * confused with a funding-capable Buy by a later database transition.
+       */
+      executionKind?: "direct_trade" | "funding";
+      /**
        * A v2 consumer can narrow the only intent states it is allowed to
        * commit. This prevents a cancelled or terminal Telegram intent from
        * being re-attached by a stale Mini App tab.
        */
       allowedIntentStatuses?: readonly string[];
+      /**
+       * V2 direct handoffs may seal Buy or Sell. Funding callers retain the
+       * default Buy-only boundary so a Sell can never acquire a reservation.
+       */
+      allowedIntentActions?: readonly ("buy" | "sell")[];
     }>,
 ): Promise<Readonly<{ execution: T; handoff: TelegramAppHandoff }>> {
   const authorityFingerprint = normalizeSha256(
@@ -615,13 +683,14 @@ export async function commitTelegramAppHandoffWithExecution<T>(
                     jsonb_build_object(
                       'committedAt', coalesce($2::timestamptz, clock_timestamp()),
                       'handoffId', $3::uuid,
+                      'kind', $7::text,
                       'version', 2
                     )
                   ),
                 updated_at = clock_timestamp()
           where intent.id = $1::uuid
             and intent.delivery_mode = 'app_handoff'
-            and intent.action = 'buy'
+            and intent.action = any($6::text[])
             and (
               cardinality($5::text[]) = 0
               or intent.status = any($5::text[])
@@ -632,6 +701,11 @@ export async function commitTelegramAppHandoffWithExecution<T>(
           row.id,
           input.committedIntentStatus ?? "funding",
           input.allowedIntentStatuses ?? [],
+          input.allowedIntentActions ?? ["buy"],
+          input.executionKind ??
+            (input.committedIntentStatus === "external_handoff"
+              ? "direct_trade"
+              : "funding"),
         ],
       );
       if ((attached.rowCount ?? 0) !== 1) {

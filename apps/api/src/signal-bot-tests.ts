@@ -4191,6 +4191,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       let insertCount = 0;
       let marketOrderable = true;
       let marketVenue = "polymarket";
+      let marketMetadata: Record<string, unknown> = {};
       let readinessMode: "auto" | "disabled" = "disabled";
       let telegramTradingEnabled = true;
       let autoManagedMaxAmountUsd = 1;
@@ -4295,7 +4296,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
                   status: marketOrderable ? "ACTIVE" : "CLOSED",
                   accepting_orders: marketOrderable,
                   outcomes: JSON.stringify(["YES", "NO"]),
-                  metadata: {},
+                  metadata: marketMetadata,
                   close_time: new Date(
                     Date.now() + (marketOrderable ? 60_000 : -60_000),
                   ),
@@ -4868,11 +4869,12 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
               button.callback_data?.startsWith("hbt:buy:"),
           ),
         true,
-        "Limitless presets must enter the bot shortfall flow instead of opening the Mini App",
+        "Limitless CLOB FOK is an exact spend-bounded sealed handoff",
       );
       assert.equal(
         appFallbackButtons.slice(0, 8).some((button) => "web_app" in button),
         false,
+        "the sealed Buy is issued by the amount callbacks, not Open market",
       );
       const yesButton = appFallbackButtons[0];
       const noButton = appFallbackButtons[1];
@@ -4882,6 +4884,37 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         decodeStartAppPayload(readWebAppStartParam(appFallbackButtons[8])),
         "event-1|market-1|",
       );
+
+      // AMM has a separate pre-broadcast endpoint and is available through
+      // the same sealed handoff choice. The Mini App selects that endpoint
+      // from the returned market execution mode.
+      marketMetadata = { executionMode: "amm" };
+      const limitlessAmmMessage = await buildTelegramBotTradingMarketMessage({
+        appBaseUrl: "https://app.hunch.trade",
+        chatId: "999",
+        db: db as never,
+        marketRef: "market-1",
+        signerInspector: readyTelegramSignerInspector,
+        telegramMiniAppEnabled: true,
+        telegramUserId: 999,
+        trading: {
+          getReadiness: async () =>
+            buildTestPolymarketReadiness({
+              code: "telegram_trading_disabled",
+              message: "Direct Limitless trading is not enabled.",
+            }),
+        } as never,
+      });
+      assert.equal(
+        (limitlessAmmMessage.reply_markup?.inline_keyboard.flat() ?? []).some(
+          (button) =>
+            "callback_data" in button &&
+            button.callback_data?.startsWith("hbt:buy:"),
+        ),
+        true,
+        "Limitless AMM is offered through its durable pre-broadcast consumer",
+      );
+      marketMetadata = {};
     },
   },
   {
@@ -7686,6 +7719,94 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         telegram.callbackAnswers[0]?.text ?? "",
         /failed before submission.*Nothing was sent/,
       );
+    },
+  },
+  {
+    name: "direct Sell retry opens its market instead of rejecting the historical retry callback",
+    run: async () => {
+      const telegram = new FakeTelegram();
+      const db = {
+        query: async (sql: string) => {
+          if (sql.includes("FROM telegram_trade_intents i")) {
+            return {
+              rowCount: 1,
+              rows: [
+                {
+                  id: "00000000-0000-4000-8000-000000000001",
+                  telegram_user_id: "999",
+                  user_id: "user-1",
+                  authorization_id: "authorization-1",
+                  chat_id: "999",
+                  telegram_message_id: null,
+                  delivery_mode: "app_handoff",
+                  action: "sell",
+                  venue: "polymarket",
+                  market_id: "market-1",
+                  event_id: "event-1",
+                  side: "YES",
+                  amount_usd: null,
+                  sell_percent: null,
+                  shares_raw: "5000000",
+                  error_code: null,
+                  error_message: null,
+                  funding_operation_id: null,
+                  funding_reservation_id: null,
+                  status: "filled",
+                  submit_started_at: new Date(),
+                  quote_snapshot: {},
+                  policy_snapshot: {},
+                  result: {
+                    appHandoffV2: {
+                      plan: {
+                        executionContractVersion: 2,
+                        kind: "direct_trade",
+                        trade: {
+                          action: "sell",
+                          controllerWalletAddress:
+                            "0x0000000000000000000000000000000000000001",
+                          eventId: "event-1",
+                          marketId: "market-1",
+                          maxSlippageBps: 500,
+                          minimumReceiveRaw: "1000000",
+                          outcomeTokenId: "token-yes",
+                          sharesRaw: "5000000",
+                          side: "YES",
+                          venue: "polymarket",
+                        },
+                        version: 2,
+                      },
+                    },
+                  },
+                  idempotency_key: "direct-sell-1",
+                  expires_at: new Date(Date.now() + 60_000),
+                  market_title: "Market",
+                  market_status: "ACTIVE",
+                },
+              ],
+            };
+          }
+          return { rowCount: 0, rows: [] };
+        },
+      };
+      const handled = await handleTelegramBotTradingCallback({
+        answerCallbackQuery: (input) => telegram.answerCallbackQuery(input),
+        appBaseUrl: "https://app.hunch.trade",
+        callbackQuery: buildTradeCallbackQuery({
+          data: "hbt:retry_buy:00000000-0000-4000-8000-000000000001",
+        }),
+        db: db as never,
+        sendMessage: (message) => telegram.sendMessage(message as never),
+      });
+      assert.equal(handled, true);
+      assert.match(
+        telegram.callbackAnswers[0]?.text ?? "",
+        /Opening a fresh market card/u,
+      );
+      assert.doesNotMatch(
+        telegram.callbackAnswers[0]?.text ?? "",
+        /does not match/u,
+      );
+      assert.match(telegram.messages[0]?.text ?? "", /Market not found/u);
     },
   },
   {

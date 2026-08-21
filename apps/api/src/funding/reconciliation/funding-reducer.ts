@@ -27,6 +27,7 @@ import {
   type FundingReconciliationLease,
   type FundingRecoveryMode,
 } from "../persistence/funding-operation-repository.js";
+import { failTelegramAppHandoffV2FundedIntentWithoutConsumerInTransaction } from "../persistence/funding-evidence-repository.js";
 
 type JsonRecord = Readonly<Record<string, JsonValue>>;
 const DELEGATED_RELAY_EVM_ROUTE_IDS = new Set(
@@ -924,6 +925,16 @@ async function expireSettledConsumerReservation(
   }
   const reservation = result.rows[0];
   if (!reservation) return null;
+  await failTelegramAppHandoffV2FundedIntentWithoutConsumerInTransaction(
+    client,
+    {
+      code: "funding_reservation_expired",
+      message:
+        "Prepared funding was not used before its Buy reservation expired.",
+      operationId: operation.id,
+      userId: operation.userId,
+    },
+  );
   await releaseFundingReservationInTransaction(client, {
     reservationId: reservation.id,
     outcomeReason: "consumer_reservation_expired",

@@ -128,6 +128,7 @@ export const telegramAppHandoffClientExecutionSchema = z.object({
 });
 
 export const telegramAppHandoffProjectionSchema = z.object({
+  action: z.enum(["buy", "sell"]),
   amountUsd: z.number().nullable(),
   canAutoClose: z.boolean(),
   continuesInBackground: z.boolean(),
@@ -146,6 +147,7 @@ export const telegramAppHandoffProjectionSchema = z.object({
     })
     .nullable(),
   marketTitle: z.string(),
+  minimumReceiveRaw: z.string().regex(/^\d+$/u).nullable(),
   order: z.object({
     executionId: z.string().uuid().nullable(),
     orderId: z.string().uuid().nullable(),
@@ -154,6 +156,7 @@ export const telegramAppHandoffProjectionSchema = z.object({
   }),
   outcome: z.string(),
   revision: z.string().datetime(),
+  sharesRaw: z.string().regex(/^\d+$/u).nullable(),
   stage: z.enum([
     "attaching",
     "failed",

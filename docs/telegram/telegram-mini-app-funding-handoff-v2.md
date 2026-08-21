@@ -1,17 +1,20 @@
-# Telegram → Mini App funding handoff v2
+# Telegram → Mini App trade handoff v2
 
 ## Purpose
 
 `handoff_th1_…` is a one-time, user-bound Telegram start parameter. New
-handoffs use one generic contract (v2) and enter the existing funding flow:
+handoffs use one generic contract (v2). A Buy may enter the existing funding
+flow; a Sell is always a direct, client-signed venue trade:
 
 ```text
 Telegram Confirm
-  → sealed trade bounds + bounded funding-source scope
-  → generic FundingPlanningRuntime quote and operation
-  → Mini App action prepare/report loop
-  → funding consumer reservation
-  → fresh trade quote and continuation
+  → sealed trade bounds
+  ├─ Buy with shortfall
+  │   → bounded funding-source scope → generic FundingPlanningRuntime
+  │   → Mini App action prepare/report loop → consumer reservation
+  │   → fresh Buy quote and continuation
+  └─ direct Buy or Sell
+      → ordinary signed venue consumer → reconciliation
 ```
 
 There is no second funding planner and no second operation state machine.
@@ -25,8 +28,9 @@ client protocol:
 - `miniAppHandoffContractVersion`: `1 | 2` (default `1`).
 
 - A v2 handoff requires both version `2` and a non-`off` mode at each
-  materialization boundary; read-only `resolve`/`claim`/`projection` remain
-  safe observations. A policy below version `2` emits no new handoff.
+  materialization boundary. `resolve` and `projection` are read-only; `claim`
+  performs only the durable `issued → claimed` transition. A policy below
+  version `2` emits no new handoff.
 - The old v1 API is retained only to read and safely finish rows issued before
   v2 existed. It is not a frontend integration target and the bot never mints
   a new v1 token.
@@ -39,7 +43,10 @@ The v2 handoff deliberately does **not** inherit the narrower direct-bot / Privy
 automation cap. It may carry any Buy up to the Hunch runtime policy's
 `maxTradeAmountUsd`, provided the user confirms its sealed quote and source
 caps. The direct server path remains limited by its exact Privy envelope.
-This is a client-authorized path, not a way to widen unattended authority.
+Sell has no Buy USD cap or funding policy: it seals exact shares and a quoted
+proceeds value. That value is a provider-enforced lower bound only where the
+venue payload supports one; Limitless CLOB FOK presents it as an estimate.
+Both are client-authorized paths, not ways to widen unattended authority.
 
 ## Capability vocabulary
 
@@ -82,7 +89,9 @@ raw `th1_` token is stored only as a hash. A funding v2 snapshot has:
     fundingPolicyRevision: string,
     destination: {
       venueId: "polymarket" | "limitless",
+      destinationOptionId: string,
       venueBindingId: string,
+      venueBindingOptionId: string,
       controllerWalletId: string,
       requiredAsset: AssetRef,
       topology: string,
@@ -97,10 +106,15 @@ raw `th1_` token is stored only as a hash. A funding v2 snapshot has:
 }
 ```
 
-For a Buy whose destination already has enough executable balance, `kind` is
-`"direct_trade"` and the snapshot has only the versioned trade scope. It has
-no invented funding operation, source debit, or reservation. This is the same
-sealed handoff contract, not a fallback to v1.
+For a Buy whose destination already has enough executable balance, or for any
+Sell, `kind` is `"direct_trade"` and the snapshot has only the versioned trade
+scope. A direct Buy seals `amountUsd`, `maxSpendUsd`, and optional
+`minReceiveShares`; a Sell seals `sharesRaw` and its quoted
+`minimumReceiveRaw`, plus the same exact controller, venue, market, outcome
+token, side, and slippage. The latter is enforced as a minimum receive only
+where the venue order/transaction supports it; Limitless CLOB FOK treats it as
+an estimate. A Sell never has a funding operation, source debit, or
+reservation. This is the same sealed handoff contract, not a fallback to v1.
 
 It never contains calldata, a signature, a raw funding consent token, or a
 provider quote reference. On materialization the backend plans again and may
@@ -141,10 +155,11 @@ prepare or poll.
 The operation idempotency key is
 `telegram-app-handoff:<handoffId>:funding`. A retry or two tabs receive the
 same operation; the intent is attached through the same transaction as the
-commit. `POST /telegram/app-handoffs/execute` returns that same typed v2
-response while client funding is pending and **never** replays the Telegram
-callback. Once the operation has a canonical ready consumer reservation, it
-atomically attaches that reservation to the original intent and returns:
+commit. `POST /telegram/app-handoffs/execute` returns the same envelope shape
+`{ handoff, execution }` while client funding is pending and **never** replays
+the Telegram callback. Once the operation has a canonical ready consumer
+reservation, it atomically attaches that reservation to the original intent
+and returns this `execution` value:
 
 ```ts
 {
@@ -166,18 +181,23 @@ action again. Terminal intent states return `trade_terminal`; neither result
 can authorize a second Buy.
 
 `POST /telegram/app-handoffs/projection` is read-only and cannot materialize
-funding. For v2 it may be used alongside the ordinary funding-operation
-projection to show the intent's current state.
+funding. For v2 it returns the authoritative current intent projection
+(`attaching`, `funding`, `submitting`, `reconciling`, or terminal), including
+the attached operation/order references. `resolve` remains the source of the
+sealed handoff snapshot; projection is the source of runtime state.
 
 The v2 quote is owner-scoped with immutable `commit_scope`:
 
 ```ts
 {
-  kind: ("telegram_app_handoff_v2", handoffId, tradeIntentId);
+  kind: "telegram_app_handoff_v2";
+  handoffId: string;
+  tradeIntentId: string;
 }
 ```
 
-It cannot be committed from the public generic funding endpoint.
+It cannot be committed from the public generic funding endpoint. The direct
+trade branch has no funding quote or operation to commit.
 
 ## Enablement contract
 
@@ -185,11 +205,10 @@ New handoffs have one target contract: **v2 only**. V1 stays readable solely
 so that a token issued before the v2 rollout can finish safely; it is neither
 a feature flag nor a second implementation to test or extend.
 
-The ordinary Polymarket CLOB order path accepts a sealed direct-trade binding.
-Limitless remains available through a funded reservation continuation, but its
-direct CLOB recovery record is not implemented yet, so the bot must not issue
-a direct-trade v2 handoff for it. The exact public fields are deliberately explicit so the
-Mini App cannot mistake this for a funding reservation:
+The ordinary Polymarket and Limitless CLOB paths, plus the Limitless AMM
+broadcast path, accept the same sealed direct-trade binding. The exact public
+fields are deliberately explicit so the Mini App cannot mistake this for a
+funding reservation:
 
 ```ts
 {
@@ -198,26 +217,35 @@ Mini App cannot mistake this for a funding reservation:
 }
 ```
 
-It must validate the same user, handoff state, venue, market, side, maximum
-spend, fee and slippage bounds that were sealed by Telegram. In the _same
+It must validate the same user, handoff state, venue, market, side, and sealed
+source limits: maximum spend for Buy, or maximum shares for Sell. It also
+enforces a provider-supported receive floor where one exists. Limitless CLOB
+FOK is the explicit exception: it has immediate-or-no-fill semantics but no
+provider-enforced price or receive floor, so it spends/sells the sealed source
+amount at the current venue price or does not fill. In the _same
 database transaction_ that persists the resulting order or execution, it must
 advance the original `telegram_trade_intent` to the matching submitted or
 terminal state. A replay must return the already-persisted result and cannot
 create another order.
 
-That is the direct-Buy analogue of the existing funding-reservation consumer
+That is the direct-trade analogue of the existing funding-reservation consumer
 bridge. It does not create a funding operation, reservation, second planner or
-second trade state machine. It simply gives the standard web Buy a durable
+second trade state machine. It simply gives the standard web trade a durable
 reference to its exact Telegram consent. Before the provider request, the
-order endpoint atomically claims the handoff intent; after it persists the
-ordinary order, the same transaction records the order ID on that intent.
+order endpoint atomically claims the handoff intent; a direct Sell claim also
+serializes the exact wallet/outcome debit and counts earlier unpersisted Sell
+claims. After it persists the ordinary order, the same transaction records the
+order ID on that intent.
 
 After the v2 Mini App consumer is present, enabling the feature is only a
 runtime-policy change:
 
-1. Deploy the backend with migration `0226` applied.
-2. Ship the v2 Mini App client and verify one direct Buy and one client-funded
-   Buy end-to-end.
+1. Deploy the backend, including migration `0228_telegram_app_handoff_sell_execution.sql`.
+   It replaces the intent-delivery and handoff-lifecycle write constraints and
+   the lifecycle guard function, all as `NOT VALID` write checks: direct v2
+   Sell is valid, while Sell with funding/reservation or v1 remains impossible.
+2. Ship the v2 Mini App consumer and verify one direct Buy, one direct Sell,
+   and one client-funded Buy end-to-end.
 3. Set `miniAppHandoffContractVersion: 2` and choose
    `miniAppHandoffMode: fallback` or `always`.
 
@@ -228,12 +256,26 @@ nor v2 has been accepted as a production user flow yet.
 
 ## Frontend implementation sequence
 
-`useTelegramTradeHandoff` implements the generic v2 flow:
+`useTelegramTradeHandoff` implements the generic v2 flow. It must first call
+`resolve`, then branch by the returned handoff state instead of blindly
+repeating `claim → commit`:
 
-`resolve → claim → commit`; read `execution.fundingOperationId`, then use the
-existing funding operation endpoints and `useFundingActionExecutor`. A client
-that encounters a pre-v2 row must render a safe unavailable state rather than
-creating a second interpretation of the old callback-replay contract.
+| Resolved state      | Next request                         | Safe retry / resume behavior                                                        |
+| ------------------- | ------------------------------------ | ----------------------------------------------------------------------------------- |
+| `issued`            | `claim`, then `commit`               | A second tab that gets a claim conflict re-resolves and follows the returned state. |
+| `claimed`           | `commit` with the sealed fingerprint | Commit is idempotent; it returns the existing operation or direct continuation.     |
+| `committed`         | `execute` and/or `projection`        | Never claim or commit again; resume the existing operation or direct trade.         |
+| `cancelled`         | `projection` / `execute` read-only   | Show the terminal result; never create another operation or order.                  |
+| expired-token error | No state-changing request            | Show expiry and return to a fresh Telegram Review.                                  |
+
+An `execute` result of `trade_terminal` is likewise read-only regardless of
+the sealed handoff state.
+
+Every v2 endpoint returns `{ handoff, execution }` where it has execution
+state. Read `execution.fundingOperationId`, then use the existing funding
+operation endpoints and `useFundingActionExecutor`. A client that encounters a
+pre-v2 row must render a safe unavailable state rather than creating a second
+interpretation of the old callback-replay contract.
 
 For every required client action:
 
@@ -248,49 +290,140 @@ existing exact Polymarket Deposit Wallet external-handoff executor. Unknown
 `signature` or handoff kinds must fail closed and surface a fresh Review.
 
 When `commit` or `execute` returns `direct_trade_continuation_required`, enter
-the ordinary venue Buy continuation with the sealed `handoffId` and
+the ordinary venue trade continuation with the sealed `handoffId` and
 `planFingerprint`; do not call the funding operation APIs or manufacture a
-reservation. Pass them as `telegramAppHandoffId` and
-`telegramAppHandoffPlanFingerprint` to the normal CLOB order endpoint. The
-normal trade persistence endpoint performs the direct-binding transaction
-described above. Its fresh quote may submit only within the sealed bounds;
-otherwise it presents a fresh Review without moving money.
+reservation. Its fresh quote may submit only within the sealed Buy or Sell
+bounds; otherwise it presents a fresh Review without moving money.
+For Limitless CLOB FOK, see the explicit exact-source/current-price exception
+below rather than treating its preview proceeds as an enforceable quote floor.
 
-Current direct Polymarket v2 execution is FOK-only. Before the provider call,
+Direct Polymarket v2 execution is FOK-only. Before the provider call,
 the endpoint writes the order hash and a non-replayable recovery payload; if
 the response or local persistence is lost, normal reconciliation can persist
 the discovered order without signing or sending a second order.
 
-Limitless has no direct-trade v2 handoff yet: AMM has its own client-transaction
-lifecycle and CLOB still needs a durable pre-provider recovery record. Do not
-issue or enable either direct Limitless path until its matching claim and
-reconciliation boundary are added. This does **not** limit funded Limitless
-continuation: it continues through the existing funding-reservation claim/report
-path.
+Limitless CLOB is a direct sealed-handoff consumer only for **FOK** trades;
+GTC is never used. The sealed scope binds the controller and exact outcome,
+plus Buy maximum spend or Sell maximum shares. Limitless defines signed
+`takerAmount = 1` as a market-order sentinel rather than a provider-enforced
+minimum-receive field, so a CLOB Sell is bounded by its source shares and
+immediate-or-no-fill semantics; its displayed proceeds estimate is not a
+signed floor. Before calling the venue, the API durably claims its deterministic
+`clientOrderId`; reconciliation uses `/orders/status/batch`. A FOK no-fill
+terminates the trade without creating a resting or replacement order. A
+changing CLOB preview before the POST is not a reason to reject this branch:
+FOK executes immediately at the current venue price or fills nothing.
+The direct claim records a canonical fingerprint of the exact signed order as
+well as that id, so a retry can only resend the same signed FOK payload.
 
-After that endpoint claims the direct Buy, `/execute` returns
+For that CLOB branch, call the ordinary endpoint with the existing client-signed
+Limitless order payload and the two sealed-binding fields:
+
+```ts
+POST /trade/limitless/order
+{
+  marketSlug,
+  order, // existing signed Limitless CLOB order; takerAmount is exactly "1"
+  orderType: "FOK",
+  telegramAppHandoffId: handoffId,
+  telegramAppHandoffPlanFingerprint: planFingerprint,
+}
+```
+
+Do not send a client order ID: the backend derives its deterministic one from
+the handoff. If this request times out or its response is lost, first reopen
+the same handoff and read its projection or call `/execute`. If the direct
+claim remains in flight and no persisted order or terminal result exists,
+resend **the same signed FOK order** and the same handoff binding; do **not**
+build or sign a replacement order. The backend reuses its deterministic client
+order ID and reconciliation owns the result.
+
+Limitless AMM has a separate, equally exact direct boundary; it must not call
+the receipt-recorder `POST /trade/limitless/orders/amm` first. The Mini App
+builds either the exact `buy(amount, outcomeIndex, minOutcomeTokens)` or
+`sell(returnAmount, outcomeIndex, maxOutcomeTokens)` transaction, signs its
+raw EIP-155 bytes, then calls:
+
+```ts
+POST /trade/limitless/orders/amm/handoff-broadcast
+{
+  telegramAppHandoffId: handoffId,
+  telegramAppHandoffPlanFingerprint: planFingerprint,
+  tokenId,
+  marketSlug,
+  signedTransaction,
+}
+```
+
+The API verifies the recovered signer, Base chain, AMM address, exact Buy or
+Sell selector, outcome, maximum source debit, and minimum destination receive
+against the sealed scope. It durably claims the raw transaction hash **before**
+broadcasting those same bytes. Timeouts and lost RPC responses remain
+reconcilable by that hash; they never reopen the trade. The signed raw
+transaction is not persisted by the server. If this endpoint returns
+`status: "reconciling"` with `retrySameSignedTransaction: true`, or its HTTP
+response is lost, first re-open the handoff. Resend **only the identical
+signedTransaction bytes** while the direct claim is still executing and there
+is no persisted order or terminal result. Once an order reference or terminal
+projection exists, only poll; never construct or sign a replacement AMM trade.
+The Mini App must use this endpoint before AMM handoffs are advertised by the
+bot; a generic wallet-send followed by the receipt recorder is not a valid
+handoff protocol. Telegram advertises both Limitless CLOB FOK and AMM in
+`fallback` and `always` modes; the Mini App selects this endpoint for AMM.
+
+After that endpoint claims the direct trade, `/execute` returns
 `direct_trade_in_flight` until the normal order reconciliation is terminal.
 That response is informational only: it must never trigger a second submit.
 
 When `/execute` returns `trade_continuation_required`, pass its exact consumer
-reservation to the existing Polymarket or Limitless trade consumer, which
-creates a fresh quote. Continue the Buy automatically only when the new quote
-stays inside the Telegram sealed max-spend, fee, and slippage bounds. Outside
-those bounds, show a fresh Review without moving another source balance.
+reservation to the existing Polymarket or Limitless Buy consumer, which creates
+a fresh quote. Continue only when the new Buy quote stays inside the Telegram
+sealed max-spend, fee, and slippage bounds. Outside those bounds, show a fresh
+Review without moving another source balance.
 Pass the same `handoffId` and `planFingerprint` alongside the reservation as
 `telegramAppHandoffId` and `telegramAppHandoffPlanFingerprint`: the ordinary
 consumer validates both the reservation and the sealed controller/market/spend
 scope immediately before it claims the venue trade attempt.
 
+For a Limitless AMM funding continuation, claim the existing reservation before
+the wallet signs or broadcasts its transaction:
+
+```ts
+POST /trade/limitless/orders/amm/funding-claim
+{
+  fundingOperationId,
+  fundingReservationId,
+  idempotencyKey,
+  marketAddress,
+  marketSlug,
+  tokenId,
+  amountUsdRaw,
+  transactionData, // exact buy(amount, outcomeIndex, minOutcomeTokens)
+  telegramAppHandoffId: handoffId,
+  telegramAppHandoffPlanFingerprint: planFingerprint,
+}
+```
+
+The API checks the calldata, market address, token and exact reservation in one
+transaction with the v2 handoff claim. It then returns the normal attempt id
+and claim token for `funding-start`; do not omit the handoff fields or use an
+unbound AMM claim for a sealed continuation. Once claimed, the Buy has crossed
+its no-cancel boundary and the Mini App must resume that same attempt rather
+than create another one.
+
 ## Cancellation and close
 
-- Before v2 materialization: cancel the handoff.
-- Before any funding broadcast: cancel the funding operation and the linked
-  Telegram Buy atomically; a later `/execute` returns its terminal state and
-  never replays client actions.
-- At/after a broadcast boundary: cancel only the later Buy continuation; the
-  funding operation keeps reconciling to protect money already in flight.
-- `Close` only leaves the screen. It never cancels money or a Buy.
+- `POST /telegram/app-handoffs/cancel` cancels a v2 handoff and linked intent
+  at every pre-venue-submit state (`issued`, `claimed`, or `committed`).
+- Before funding broadcasts, ordinary operation cancellation also stops the
+  funding operation. After a funding broadcast, handoff cancellation stops only
+  the future Buy: funding continues reconciliation, but can never create a
+  reservation-backed venue trade for the cancelled intent.
+- A direct Buy or Sell remains cancellable until its durable direct claim
+  starts. The endpoint atomically cancels both the handoff and linked intent.
+  After claim, `Close` and cancellation only leave the screen while
+  reconciliation finishes the already-submitted trade.
+- `Close` never cancels money or a trade.
 
 ## Solana
 

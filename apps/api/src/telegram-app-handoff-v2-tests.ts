@@ -13,6 +13,7 @@ import {
   isTelegramAppHandoffV2FundingBinding,
   parseTelegramAppHandoffV2Plan,
   resolveTelegramAppHandoffFundingCapability,
+  resolveTelegramAppHandoffV2Execution,
   telegramAppHandoffPlanGeneration,
   telegramAppHandoffV2FundingIdempotencyKey,
   telegramAppHandoffV2SupportsActionKind,
@@ -21,6 +22,8 @@ import {
   isTelegramAppHandoffV2DirectTradeVenue,
   isTelegramAppHandoffV2TradeVenue,
 } from "./services/telegram-app-handoff-v2-contract.js";
+import { requiresTelegramAppHandoffV2MinimumReceive } from "./repos/telegram-app-handoff-v2-direct-trade-repository.js";
+import { limitlessAmmHandoffBroadcastBodySchema } from "./schemas/limitless-private.js";
 
 const POLYGON_PUSD = {
   assetId: "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB",
@@ -249,13 +252,38 @@ assert.equal(isTelegramAppHandoffV2TradeVenue("limitless"), true);
 assert.equal(isTelegramAppHandoffV2DirectTradeVenue("polymarket"), true);
 assert.equal(
   isTelegramAppHandoffV2DirectTradeVenue("limitless"),
-  false,
-  "Limitless V2 funding does not imply a recoverable direct Buy",
+  true,
+  "Limitless direct Buy uses the same durable handoff claim as Polymarket",
 );
 assert.equal(
   isTelegramAppHandoffV2TradeVenue("kalshi"),
   false,
   "a known Hunch venue is not a v2 handoff venue until its consumer exists",
+);
+assert.equal(
+  requiresTelegramAppHandoffV2MinimumReceive({
+    action: "sell",
+    executionKind: "clob",
+    venue: "limitless",
+  }),
+  false,
+  "Limitless CLOB FOK has no provider minimum and is bounded by source shares",
+);
+assert.equal(
+  requiresTelegramAppHandoffV2MinimumReceive({
+    executionKind: "amm",
+    venue: "limitless",
+  }),
+  true,
+  "Limitless AMM carries an exact minimum output",
+);
+assert.equal(
+  requiresTelegramAppHandoffV2MinimumReceive({
+    executionKind: "clob",
+    venue: "polymarket",
+  }),
+  true,
+  "Polymarket CLOB keeps its sealed minimum shares",
 );
 assert.deepEqual(
   resolveTelegramAppHandoffFundingCapability({
@@ -321,15 +349,73 @@ const directTrade = buildTelegramAppHandoffV2DirectTradePlan({
   controllerWalletAddress: "0x0000000000000000000000000000000000000001",
   trade,
 });
+
+assert.equal(
+  limitlessAmmHandoffBroadcastBodySchema.safeParse({
+    telegramAppHandoffId: "00000000-0000-4000-8000-000000000004",
+    telegramAppHandoffPlanFingerprint: "a".repeat(64),
+    signedTransaction: "0x01",
+    tokenId: "123",
+  }).success,
+  true,
+  "AMM handoff accepts the same unprefixed fingerprint persisted by Telegram",
+);
+assert.equal(
+  limitlessAmmHandoffBroadcastBodySchema.safeParse({
+    telegramAppHandoffId: "00000000-0000-4000-8000-000000000004",
+    telegramAppHandoffPlanFingerprint: `0x${"a".repeat(64)}`,
+    signedTransaction: "0x01",
+    tokenId: "123",
+  }).success,
+  false,
+  "AMM handoff must not reinterpret an EVM bytes32 as a Telegram fingerprint",
+);
 assert.equal(directTrade.kind, "direct_trade");
 assert.equal(isTelegramAppHandoffV2Plan(directTrade), true);
+
+const directSellTrade = buildTelegramAppHandoffV2DirectTradePlan({
+  controllerWalletAddress: "0x0000000000000000000000000000000000000001",
+  trade: {
+    action: "sell",
+    controllerWalletAddress: "0x0000000000000000000000000000000000000001",
+    eventId: "event-1",
+    marketId: "limitless:market-1",
+    maxSlippageBps: 500,
+    minimumReceiveRaw: "1234567",
+    outcomeTokenId: "market-token",
+    sharesRaw: "5000000",
+    side: "YES",
+    venue: "limitless",
+  },
+});
+assert.equal(directSellTrade.kind, "direct_trade");
+assert.equal(isTelegramAppHandoffV2Plan(directSellTrade), true);
+assert.equal(
+  isTelegramAppHandoffV2Plan({
+    ...directSellTrade,
+    trade: { ...directSellTrade.trade, minimumReceiveRaw: "0" },
+  }),
+  false,
+  "a sealed Sell must retain a positive minimum receive bound",
+);
+assert.throws(
+  () =>
+    buildTelegramAppHandoffV2Plan({
+      discoveryRequest: request,
+      fundingPolicyRevision: "funding-policy-1",
+      projection: generic,
+      trade: directSellTrade.trade,
+    }),
+  /sealed Sell cannot contain a funding plan/u,
+  "Sell remains direct-only and can never acquire a funding reservation",
+);
 assert.equal(
   isTelegramAppHandoffV2Plan({
     ...directTrade,
     trade: { ...trade, venue: "limitless" },
   }),
-  false,
-  "direct V2 plans cannot represent Limitless until direct recovery exists",
+  true,
+  "direct V2 plans represent the ordinary Limitless client-signed Buy",
 );
 assert.equal(
   isTelegramAppHandoffV2Plan({
@@ -352,7 +438,7 @@ assert.throws(
       ...directTrade,
       trade: { ...trade, maxSpendUsd: 0.5 },
     }),
-  /sealed trade scope is malformed/u,
+  /sealed trade economic bounds are malformed/u,
 );
 assert.equal(
   telegramAppHandoffPlanGeneration({ version: 99 }),
@@ -419,6 +505,33 @@ assert.equal(
   }),
   false,
   "a fresh direct submission remains authority-gated",
+);
+
+const cancelledDirectExecution = await resolveTelegramAppHandoffV2Execution({
+  db: {
+    query: async () => ({ rows: [{ status: "cancelled" }] }),
+  } as never,
+  handoff: {
+    authorityFingerprint: "a".repeat(64),
+    cancelledAt: "2026-08-21T00:00:00.000Z",
+    claimedAt: null,
+    committedAt: null,
+    expiresAt: "2026-08-21T00:10:00.000Z",
+    expiredAt: null,
+    id: "00000000-0000-4000-8000-000000000003",
+    planFingerprint: "b".repeat(64),
+    planSnapshot: directTrade,
+    policyRevision: "policy-1",
+    quoteSnapshot: {},
+    state: "cancelled",
+    tradeIntentId: "00000000-0000-4000-8000-000000000004",
+  },
+  userId: "00000000-0000-4000-8000-000000000001",
+});
+assert.equal(
+  cancelledDirectExecution.kind,
+  "trade_terminal",
+  "a cancelled v2 handoff remains observable instead of becoming a resume dead end",
 );
 
 const ownedExternalHandoff = buildTelegramAppHandoffV2Plan({

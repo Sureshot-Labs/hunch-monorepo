@@ -40,6 +40,13 @@ export function toPublicFundingTradeError(
   }
 
   if (error instanceof FundingTradeAttemptError) {
+    if (error.code === "sealed_handoff_required") {
+      return {
+        code: "funding_trade_state_conflict",
+        error:
+          "This funding trade must continue through its sealed Mini App handoff.",
+      };
+    }
     if (error.code === "reservation_unavailable") {
       return {
         code: "funding_reservation_unavailable",

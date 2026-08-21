@@ -1,5 +1,7 @@
 import type { Pool } from "@hunch/infra";
 
+import { normalizeLimitlessRawTokenId } from "../lib/limitless-token.js";
+
 const MICRO_SCALE = 1_000_000n;
 
 const OPEN_ORDER_STATUSES = [
@@ -25,6 +27,7 @@ type OpenOrderCollateralRow = {
 };
 
 type OpenOrderPositionRow = {
+  venue: Venue;
   wallet_key: string | null;
   token_id: string | null;
   size: string | number | null;
@@ -253,30 +256,64 @@ export async function fetchPolymarketOpenOrderPositionLocks(
   pool: Pick<Pool, "query">,
   inputs: { userId: string; wallet: string },
 ): Promise<Map<string, bigint>> {
+  return fetchOpenOrderPositionLocks(pool, {
+    ...inputs,
+    venue: "polymarket",
+  });
+}
+
+/**
+ * Shares committed by a still-live sell.  This is intentionally separate from
+ * collateral locks: a second sell must not spend outcome tokens that a first
+ * live or ambiguously-submitted sell may already consume.
+ */
+export async function fetchOpenOrderPositionLocks(
+  pool: Pick<Pool, "query">,
+  inputs: { userId: string; venue: Venue; wallet: string },
+): Promise<Map<string, bigint>> {
   const wallet = normalizeCollateralWalletKey(inputs.wallet);
   const locks = new Map<string, bigint>();
   if (!wallet) return locks;
   const { rows } = await pool.query<OpenOrderPositionRow>(
     `SELECT
-       lower(coalesce(nullif(o.order_payload->>'maker', ''), o.wallet_address, o.signer_address)) AS wallet_key,
-       coalesce(nullif(o.order_payload->>'tokenId', ''), o.token_id) AS token_id,
+       lower(o.venue) AS venue,
+       case
+         when lower(o.venue) = 'polymarket' then
+           lower(coalesce(nullif(o.order_payload->>'maker', ''), o.wallet_address, o.signer_address))
+         when lower(o.venue) = 'limitless' then
+           lower(coalesce(o.wallet_address, o.signer_address))
+         else null
+       end AS wallet_key,
+       coalesce(
+         nullif(o.order_payload->>'tokenId', ''),
+         nullif(o.order_payload->'order'->>'tokenId', ''),
+         o.token_id
+       ) AS token_id,
        o.size,
        o.filled_size,
        o.order_payload
      FROM orders o
      WHERE o.user_id = $1
-       AND lower(o.venue) = 'polymarket'
-       AND lower(coalesce(o.status, '')) = ANY($2::text[])
+       AND lower(o.venue) = $2
+       AND lower(coalesce(o.status, '')) = ANY($3::text[])
        AND o.cancelled_at IS NULL
        AND upper(coalesce(o.side, '')) = 'SELL'
-       AND (o.order_type IS NULL OR upper(o.order_type) IN ('GTC', 'GTD'))
-       AND lower(coalesce(nullif(o.order_payload->>'maker', ''), o.wallet_address, o.signer_address)) = $3`,
-    [inputs.userId, [...OPEN_ORDER_STATUSES], wallet],
+       AND case
+         when lower(o.venue) = 'polymarket' then
+           lower(coalesce(nullif(o.order_payload->>'maker', ''), o.wallet_address, o.signer_address))
+         when lower(o.venue) = 'limitless' then
+           lower(coalesce(o.wallet_address, o.signer_address))
+         else null
+       end = $4`,
+    [inputs.userId, inputs.venue, [...OPEN_ORDER_STATUSES], wallet],
   );
   for (const row of rows) {
-    const tokenId = row.token_id?.trim();
+    const tokenId =
+      row.venue === "limitless"
+        ? normalizeLimitlessRawTokenId(row.token_id)
+        : row.token_id?.trim();
     if (!tokenId) continue;
-    const signed = readSignedAmounts("polymarket", row.order_payload);
+    const signed = readSignedAmounts(row.venue, row.order_payload);
     const original =
       signed?.makerAmountRaw ?? parseDecimalToMicro(row.size) ?? 0n;
     const filled = parseDecimalToMicro(row.filled_size) ?? 0n;

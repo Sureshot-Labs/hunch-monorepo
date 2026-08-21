@@ -588,9 +588,9 @@ export function buildTelegramAppHandoffV2Plan(input: {
   return parseV2FundingPlan(plan);
 }
 
-/** Creates a sealed v2 handoff for a Buy that needs no funding operation. */
+/** Creates a sealed v2 handoff for one exact direct Buy or Sell. */
 export function buildTelegramAppHandoffV2DirectTradePlan(input: {
-  /** The verified controller which may submit this one sealed direct Buy. */
+  /** The verified controller which may submit this one sealed direct trade. */
   controllerWalletAddress: string;
   trade: JsonObject;
 }): TelegramAppHandoffV2DirectTradePlan {
@@ -598,7 +598,7 @@ export function buildTelegramAppHandoffV2DirectTradePlan(input: {
   if (!/^0x[0-9a-f]{40}$/iu.test(controllerWalletAddress)) {
     throw new TelegramAppHandoffV2Error(
       "plan_invalid",
-      "sealed direct Buy controller is malformed",
+      "sealed direct trade controller is malformed",
     );
   }
   const plan = parseV2Plan({
@@ -631,8 +631,9 @@ function parseV2Plan(snapshot: JsonObject): TelegramAppHandoffV2Plan {
     );
   }
   const trade = snapshot.trade;
+  const action = trade.action;
   if (
-    trade.action !== "buy" ||
+    (action !== "buy" && action !== "sell") ||
     !isTelegramAppHandoffV2TradeVenue(trade.venue) ||
     (trade.side !== "YES" && trade.side !== "NO") ||
     typeof trade.marketId !== "string" ||
@@ -640,12 +641,6 @@ function parseV2Plan(snapshot: JsonObject): TelegramAppHandoffV2Plan {
     typeof trade.outcomeTokenId !== "string" ||
     !trade.outcomeTokenId ||
     !(typeof trade.eventId === "string" || trade.eventId === null) ||
-    typeof trade.amountUsd !== "number" ||
-    !Number.isFinite(trade.amountUsd) ||
-    trade.amountUsd <= 0 ||
-    typeof trade.maxSpendUsd !== "number" ||
-    !Number.isFinite(trade.maxSpendUsd) ||
-    trade.maxSpendUsd < trade.amountUsd ||
     typeof trade.maxSlippageBps !== "number" ||
     !Number.isInteger(trade.maxSlippageBps) ||
     trade.maxSlippageBps < 0
@@ -653,6 +648,25 @@ function parseV2Plan(snapshot: JsonObject): TelegramAppHandoffV2Plan {
     throw new TelegramAppHandoffV2Error(
       "plan_invalid",
       "sealed trade scope is malformed",
+    );
+  }
+  if (
+    (action === "buy" &&
+      (typeof trade.amountUsd !== "number" ||
+        !Number.isFinite(trade.amountUsd) ||
+        trade.amountUsd <= 0 ||
+        typeof trade.maxSpendUsd !== "number" ||
+        !Number.isFinite(trade.maxSpendUsd) ||
+        trade.maxSpendUsd < trade.amountUsd)) ||
+    (action === "sell" &&
+      (!isRawAmount(trade.sharesRaw) ||
+        !isRawAmount(trade.minimumReceiveRaw) ||
+        BigInt(trade.sharesRaw) <= 0n ||
+        BigInt(trade.minimumReceiveRaw) <= 0n))
+  ) {
+    throw new TelegramAppHandoffV2Error(
+      "plan_invalid",
+      "sealed trade economic bounds are malformed",
     );
   }
   // A v2 handoff always names the one controller allowed to consume its
@@ -665,14 +679,14 @@ function parseV2Plan(snapshot: JsonObject): TelegramAppHandoffV2Plan {
   ) {
     throw new TelegramAppHandoffV2Error(
       "plan_invalid",
-      "sealed Buy controller is malformed",
+      "sealed trade controller is malformed",
     );
   }
   if (snapshot.kind === "direct_trade") {
     if (!isTelegramAppHandoffV2DirectTradeVenue(trade.venue)) {
       throw new TelegramAppHandoffV2Error(
         "plan_invalid",
-        "sealed direct Buy venue is unsupported",
+        "sealed direct trade venue is unsupported",
       );
     }
     return {
@@ -684,6 +698,12 @@ function parseV2Plan(snapshot: JsonObject): TelegramAppHandoffV2Plan {
     };
   }
   const funding = snapshot.funding;
+  if (action !== "buy") {
+    throw new TelegramAppHandoffV2Error(
+      "plan_invalid",
+      "sealed Sell cannot contain a funding plan",
+    );
+  }
   if (
     !isRecord(funding) ||
     !isJsonObject(funding.discoveryRequest) ||
@@ -818,17 +838,27 @@ function sealedTradeMatchesIntent(
     amount_usd: string | null;
     event_id: string | null;
     market_id: string;
+    shares_raw?: string | null;
     side: string | null;
     venue: string;
   }>,
 ): boolean {
-  const sealedAmount = trade.amountUsd;
-  return (
+  const common =
     trade.action === intent.action &&
     trade.venue === intent.venue &&
     trade.marketId === intent.market_id &&
     trade.eventId === intent.event_id &&
-    trade.side === intent.side &&
+    trade.side === intent.side;
+  if (!common) return false;
+  if (trade.action === "sell") {
+    return (
+      typeof trade.sharesRaw === "string" &&
+      intent.shares_raw != null &&
+      trade.sharesRaw === intent.shares_raw
+    );
+  }
+  const sealedAmount = trade.amountUsd;
+  return (
     typeof sealedAmount === "number" &&
     Number.isFinite(sealedAmount) &&
     intent.amount_usd != null &&
@@ -1275,6 +1305,7 @@ async function assertTelegramAppHandoffV2DirectTradeInTransaction(input: {
     amount_usd: string | null;
     event_id: string | null;
     market_id: string;
+    shares_raw: string | null;
     side: string | null;
     status: string;
     venue: string;
@@ -1283,6 +1314,7 @@ async function assertTelegramAppHandoffV2DirectTradeInTransaction(input: {
             intent.amount_usd::text,
             intent.event_id,
             intent.market_id,
+            intent.shares_raw,
             intent.side,
             intent.status,
             intent.venue
@@ -1290,7 +1322,7 @@ async function assertTelegramAppHandoffV2DirectTradeInTransaction(input: {
       where intent.id = $1::uuid
         and intent.user_id = $2::uuid
         and intent.delivery_mode = 'app_handoff'
-        and intent.action = 'buy'
+        and intent.action in ('buy', 'sell')
       for update`,
     [input.tradeIntentId, input.userId],
   );
@@ -1301,7 +1333,7 @@ async function assertTelegramAppHandoffV2DirectTradeInTransaction(input: {
   ) {
     throw new TelegramAppHandoffV2Error(
       "trade_intent_changed",
-      "bound direct Buy differs from the sealed handoff scope",
+      "bound direct trade differs from the sealed handoff scope",
     );
   }
 }
@@ -1467,8 +1499,7 @@ async function resolveTelegramAppHandoffV2TradeTerminal(input: {
       where intent.id = $1::uuid
         and intent.user_id = $2::uuid
         and intent.delivery_mode = 'app_handoff'
-        and intent.action = 'buy'
-        and intent.result -> 'appHandoffExecution' ->> 'version' = '2'
+        and intent.action in ('buy', 'sell')
       limit 1`,
     [input.handoff.tradeIntentId, input.userId],
   );
@@ -1551,18 +1582,18 @@ export async function resolveTelegramAppHandoffV2Execution(input: {
   userId: string;
 }): Promise<TelegramAppHandoffV2Execution> {
   const plan = parseV2Plan(input.handoff.planSnapshot);
-  if (input.handoff.state !== "committed") {
-    throw new TelegramAppHandoffV2Error(
-      "handoff_not_committed",
-      "funding must be committed before client actions can be prepared",
-    );
-  }
   const terminal = await resolveTelegramAppHandoffV2TradeTerminal({
     db: input.db,
     handoff: input.handoff,
     userId: input.userId,
   });
   if (terminal) return terminal;
+  if (input.handoff.state !== "committed") {
+    throw new TelegramAppHandoffV2Error(
+      "handoff_not_committed",
+      "funding must be committed before client actions can be prepared",
+    );
+  }
   if (plan.kind === "direct_trade") {
     const intent = await input.db.query<{
       action: string;
@@ -1571,6 +1602,7 @@ export async function resolveTelegramAppHandoffV2Execution(input: {
       market_id: string;
       order_id: string | null;
       side: string | null;
+      shares_raw: string | null;
       status: string;
       venue: string;
       venue_order_id: string | null;
@@ -1581,6 +1613,7 @@ export async function resolveTelegramAppHandoffV2Execution(input: {
               intent.market_id,
               intent.order_id::text,
               intent.side,
+              intent.shares_raw,
               intent.status,
               intent.venue,
               intent.venue_order_id
@@ -1588,14 +1621,14 @@ export async function resolveTelegramAppHandoffV2Execution(input: {
         where intent.id = $1::uuid
           and intent.user_id = $2::uuid
           and intent.delivery_mode = 'app_handoff'
-          and intent.action = 'buy'`,
+          and intent.action in ('buy', 'sell')`,
       [input.handoff.tradeIntentId, input.userId],
     );
     const directIntent = intent.rows[0];
     if (!directIntent || !sealedTradeMatchesIntent(plan.trade, directIntent)) {
       throw new TelegramAppHandoffV2Error(
         "trade_intent_changed",
-        "bound direct Buy is no longer awaiting the sealed continuation",
+        "bound direct trade is no longer awaiting the sealed continuation",
       );
     }
     if (
@@ -1617,7 +1650,7 @@ export async function resolveTelegramAppHandoffV2Execution(input: {
     if (directIntent.status !== "external_handoff") {
       throw new TelegramAppHandoffV2Error(
         "trade_intent_changed",
-        "bound direct Buy is no longer awaiting the sealed continuation",
+        "bound direct trade is no longer awaiting the sealed continuation",
       );
     }
     return {
@@ -1730,6 +1763,10 @@ export async function materializeTelegramAppHandoffV2Funding(input: {
         };
       },
       committedIntentStatus: "external_handoff",
+      executionKind: "direct_trade",
+      allowedIntentActions: [
+        sealedPlan.trade.action === "sell" ? "sell" : "buy",
+      ],
       allowedIntentStatuses: ["previewed", "confirming", "external_handoff"],
       currentAuthorityFingerprint: input.currentAuthorityFingerprint,
       currentPolicyRevision: input.currentPolicyRevision,
@@ -1765,6 +1802,7 @@ export async function materializeTelegramAppHandoffV2Funding(input: {
         userId: input.userId,
       }),
     currentAuthorityFingerprint: input.currentAuthorityFingerprint,
+    executionKind: "funding",
     currentPolicyRevision: input.currentPolicyRevision,
     db: input.db,
     planFingerprint: input.planFingerprint,

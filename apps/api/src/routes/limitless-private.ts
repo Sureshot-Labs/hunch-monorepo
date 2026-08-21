@@ -22,6 +22,7 @@ import {
   cancelLimitlessOrderRoute,
   cancelLimitlessOrdersBatchRoute,
   connectLimitlessPartnerAccountRoute,
+  broadcastLimitlessAmmTelegramAppHandoffTrade,
   claimLimitlessAmmFundingTrade,
   fetchLimitlessAccountRoute,
   fetchLimitlessMarketExchangeRoute,
@@ -62,6 +63,7 @@ import {
   limitlessAmmFundingClaimBodySchema,
   limitlessAmmFundingOutcomeBodySchema,
   limitlessAmmFundingStartBodySchema,
+  limitlessAmmHandoffBroadcastBodySchema,
   limitlessAmmOrderBodySchema,
   limitlessCancelBatchBodySchema,
   limitlessClobQuoteQuerySchema,
@@ -1040,6 +1042,45 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
   );
 
   /**
+   * POST /orders/amm/handoff-broadcast
+   *
+   * The client has already signed the exact AMM transaction.  The API validates
+   * it against the sealed Telegram scope, records its deterministic hash, and
+   * broadcasts those same bytes.  This is the only direct-handoff AMM send
+   * boundary; `/orders/amm` remains a legacy receipt recorder.
+   */
+  z.post(
+    "/orders/amm/handoff-broadcast",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: { body: limitlessAmmHandoffBroadcastBodySchema },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      const signer = request.walletAddress;
+      if (!user || !signer) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+      const result = await broadcastLimitlessAmmTelegramAppHandoffTrade({
+        assertTelegramAppHandoffV2Scope: async (sealed) => {
+          return matchesTelegramAppHandoffV2CurrentScope({
+            db: pool,
+            sealed,
+          });
+        },
+        body: request.body,
+        log: request.log,
+        pool,
+        signer,
+        userId: user.id,
+      });
+      if (!result.ok) reply.code(result.statusCode);
+      return reply.send(result.payload);
+    },
+  );
+
+  /**
    * POST /orders/amm/funding-claim
    * Claim a funding reservation before the browser can broadcast an AMM buy.
    */
@@ -1057,6 +1098,11 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         return reply.send({ error: "Unauthorized" });
       }
       const result = await claimLimitlessAmmFundingTrade({
+        assertTelegramAppHandoffV2Scope: async (sealed) =>
+          matchesTelegramAppHandoffV2CurrentScope({
+            db: pool,
+            sealed,
+          }),
         body: request.body,
         pool,
         signer,

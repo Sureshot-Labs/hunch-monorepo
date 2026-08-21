@@ -194,6 +194,9 @@ type CatalogVenue = Readonly<{
   settlementAsset: FundingReceiveAssetId;
   settlementLocationPatternId: string;
   directReceiveAssets: readonly FundingReceiveAssetId[];
+  /** Card-capable assets, independently of the broader crypto receive set. */
+  cardReceiveAssets: readonly FundingReceiveAssetId[];
+  /** Stable ID retained for the original settlement-asset Card method. */
   privyMethodId: string;
 }>;
 
@@ -203,12 +206,14 @@ const FUNDING_VENUE_CATALOG: Readonly<Record<FundingVenueId, CatalogVenue>> =
       settlementAsset: "polygon:pusd",
       settlementLocationPatternId: "polymarket-venue-cash-v1",
       directReceiveAssets: ["polygon:pusd", "polygon:usdce"],
+      cardReceiveAssets: ["polygon:pusd", "polygon:usdc"],
       privyMethodId: "privy-polymarket-pusd-v1",
     },
     limitless: {
       settlementAsset: "base:usdc",
       settlementLocationPatternId: "limitless-venue-cash-v1",
       directReceiveAssets: ["base:usdc"],
+      cardReceiveAssets: ["base:usdc"],
       privyMethodId: "privy-limitless-usdc-v1",
     },
   });
@@ -279,6 +284,37 @@ function enabledRoutes(policy: FundingIntentPolicy): readonly CatalogRoute[] {
     (route) =>
       venueActive(policy, route.targetVenue) &&
       selectedAssets.has(route.sourceAsset),
+  );
+}
+
+function privyMethodId(input: {
+  venueId: FundingVenueId;
+  assetId: FundingReceiveAssetId;
+}): string {
+  const venue = FUNDING_VENUE_CATALOG[input.venueId];
+  // Keep the existing settlement-method IDs stable. Additional Card assets
+  // are scoped by the same opaque source-asset aliases used by the route
+  // catalogue; they are runtime policy facts, not frontend routing hints.
+  return input.assetId === venue.settlementAsset
+    ? venue.privyMethodId
+    : `privy-${input.venueId}-${input.assetId.replace(":", "-")}-v1`;
+}
+
+function privyReceiveAssets(input: {
+  policy: FundingIntentPolicy;
+  routes: readonly CatalogRoute[];
+  venueId: FundingVenueId;
+}): readonly FundingReceiveAssetId[] {
+  const venue = FUNDING_VENUE_CATALOG[input.venueId];
+  return venue.cardReceiveAssets.filter(
+    (assetId) =>
+      assetId === venue.settlementAsset ||
+      (input.policy.receive.assets.includes(assetId) &&
+        input.routes.some(
+          (route) =>
+            route.targetVenue === input.venueId &&
+            route.sourceAsset === assetId,
+        )),
   );
 }
 
@@ -438,16 +474,19 @@ export function compileFundingIntentPolicy(
         ? policy.venues.flatMap((venueId) => {
             if (!venueActive(policy, venueId)) return [];
             const catalog = FUNDING_VENUE_CATALOG[venueId];
-            return [
-              {
-                methodId: catalog.privyMethodId,
+            return privyReceiveAssets({ policy, routes, venueId }).map(
+              (assetId) => ({
+                methodId: privyMethodId({ venueId, assetId }),
                 enabled: true,
                 locallyConfigured: true,
                 destinationLocationPatternId:
                   catalog.settlementLocationPatternId,
-                asset: FUNDING_ASSET_CATALOG[catalog.settlementAsset].asset,
-              },
-            ];
+                // Card purchases the exact displayed asset into the selected
+                // owned receiver. That asset can be settlement-native or a
+                // source of one enabled, exact route to this destination.
+                asset: FUNDING_ASSET_CATALOG[assetId].asset,
+              }),
+            );
           })
         : [],
     walletPreparation: policy.venues.flatMap((venueId) =>
@@ -659,9 +698,7 @@ export function fundingVenueReceiveEnabled(
     (method) =>
       method.enabled &&
       method.locallyConfigured &&
-      method.destinationLocationPatternId ===
-        venue.settlementLocationPatternId &&
-      sameAsset(method.asset, settlementAsset),
+      method.destinationLocationPatternId === venue.settlementLocationPatternId,
   );
   return directReceiveReady || routedReceiveReady || privyReady;
 }

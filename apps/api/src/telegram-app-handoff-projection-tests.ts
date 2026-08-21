@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { loadTelegramAppHandoffProjection } from "./services/telegram-bot-trading.js";
 
 const baseRow = {
+  action: "buy" as const,
   amount_usd: "5.00",
   error_code: null,
   error_message: null,
@@ -13,10 +14,12 @@ const baseRow = {
   funding_status: null,
   id: "00000000-0000-4000-8000-000000000002",
   market_title: "Main market",
+  minimum_receive_raw: null,
   order_id: null,
   outcomes: JSON.stringify(["Yes", "No"]),
   result: {},
   side: "YES" as const,
+  shares_raw: null,
   status: "filled",
   tx_signature: "0xabc",
   updated_at: new Date("2026-08-19T00:00:00.000Z"),
@@ -61,5 +64,25 @@ const failed = await loadTelegramAppHandoffProjection(
 assert.equal(failed?.stage, "failed");
 assert.equal(failed?.terminal, true);
 assert.equal(failed?.canAutoClose, false);
+
+const sold = await loadTelegramAppHandoffProjection(
+  {
+    query: async () => ({
+      rows: [
+        {
+          ...baseRow,
+          action: "sell" as const,
+          amount_usd: null,
+          minimum_receive_raw: "1234500",
+          shares_raw: "7000000",
+        },
+      ],
+    }),
+  } as never,
+  identity,
+);
+assert.equal(sold?.action, "sell");
+assert.equal(sold?.sharesRaw, "7000000");
+assert.equal(sold?.minimumReceiveRaw, "1234500");
 
 console.log("[telegram-app-handoff-projection-tests] passed");

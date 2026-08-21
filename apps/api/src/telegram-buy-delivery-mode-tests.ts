@@ -9,6 +9,7 @@ import {
   resolveTelegramBuyExecutionCapability,
   telegramVenueFromSealedHandoffSnapshot,
 } from "./services/telegram-bot-trading.js";
+import { isTelegramAppHandoffV2EnabledForVenue } from "./services/telegram-app-handoff-v2-contract.js";
 import { getDefaultSignalBotPolicy } from "./services/signal-bot-trading-policy.js";
 
 const polymarketEvm = resolveTelegramBuyExecutionCapability({
@@ -23,6 +24,34 @@ const kalshiSolana = resolveTelegramBuyExecutionCapability({
   venue: "kalshi",
   walletChain: "solana",
 });
+
+for (const venue of ["polymarket", "limitless"]) {
+  assert.equal(
+    isTelegramAppHandoffV2EnabledForVenue({
+      contractVersion: 2,
+      mode: "fallback",
+      venue,
+    }),
+    true,
+    `v2 handoff custom inputs remain available for ${venue} without the server-bot venue allowlist`,
+  );
+}
+assert.equal(
+  isTelegramAppHandoffV2EnabledForVenue({
+    contractVersion: 2,
+    mode: "off",
+    venue: "polymarket",
+  }),
+  false,
+);
+assert.equal(
+  isTelegramAppHandoffV2EnabledForVenue({
+    contractVersion: 2,
+    mode: "always",
+    venue: "kalshi",
+  }),
+  false,
+);
 
 assert.equal(
   resolveTelegramBuyDeliveryMode({

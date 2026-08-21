@@ -7,6 +7,8 @@ import {
   fetchEmbeddedEthereumTransactionReceipt,
 } from "./embedded-ethereum.js";
 import { resolveKalshiExecutionSettlementStatus } from "./kalshi-executions.js";
+import { fetchLimitlessOrderStatusByClientOrderIds } from "./limitless-order-status.js";
+import { parseLimitlessOrderResult } from "./limitless-order-result.js";
 import { LIMITLESS_CLOB_CHAIN_ID } from "./limitless-trading-service.js";
 import { inspectPolymarketSubmittedOrder } from "./polymarket-trading-execution-service.js";
 import {
@@ -242,6 +244,10 @@ function reconstructPreparedTrade(
 function limitlessTxHash(row: VenueReconcileIntentRow): string | null {
   const direct = readString(row.tx_signature);
   if (direct) return direct;
+  const preparedHash = readString(preparedKeys(row.prepared_snapshot)?.orderHash);
+  if (/^0x[0-9a-f]{64}$/iu.test(preparedHash ?? "")) {
+    return preparedHash;
+  }
   const venueOrderId = readString(row.venue_order_id);
   return venueOrderId?.match(/^amm:(0x[0-9a-f]{64}):/i)?.[1] ?? null;
 }
@@ -422,7 +428,48 @@ async function inspectVenueSubmit(
     };
   }
   if (row.venue === "limitless") {
-    if (readString(keys?.tradeType) !== "amm") {
+    const tradeType = readString(keys?.tradeType);
+    const clientOrderId = readString(keys?.clientOrderId);
+    if (tradeType === "clob" && clientOrderId) {
+      const status = await fetchLimitlessOrderStatusByClientOrderIds([
+        clientOrderId,
+      ]);
+      const matched = status.get(clientOrderId);
+      if (!matched?.providerOrderId) {
+        return { state: "limitless_clob_status_pending", submitResult: null };
+      }
+      const parsed = parseLimitlessOrderResult(matched.payload);
+      const venueOrderId = parsed.venueOrderId ?? matched.providerOrderId;
+      const explicitTerminalFailure = ["cancelled", "expired", "failed", "rejected"].includes(
+        parsed.status ?? "",
+      );
+      return {
+        state: parsed.terminalFill
+          ? "limitless_clob_filled"
+          : parsed.explicitNoFill
+            ? "limitless_clob_no_fill"
+            : explicitTerminalFailure
+              ? "limitless_clob_rejected"
+              : "limitless_clob_open",
+        submitResult: {
+          venue: "limitless",
+          status: parsed.terminalFill
+            ? "filled"
+            : parsed.explicitNoFill
+              ? "no_fill"
+              : explicitTerminalFailure
+                ? "failed"
+                : "submitted",
+          venueOrderId,
+          orderHash: null,
+          txSignature: parsed.txHash,
+          price: null,
+          size: null,
+          raw: { clientOrderId, recovered: true, status: matched.payload },
+        },
+      };
+    }
+    if (tradeType !== "amm") {
       return { state: "unsupported_limitless_clob", submitResult: null };
     }
     const txHash = limitlessTxHash(row);

@@ -18,7 +18,6 @@ import {
 import { canonicalJsonHash } from "../funding/persistence/canonical.js";
 import { buildFundingTradeConsumerIntent } from "../funding/persistence/funding-trade-consumer-intent.js";
 import {
-  claimFundingTradeAttempt,
   markFundingTradeAttemptSubmissionStarted,
   recordFundingTradeAttemptOutcome,
 } from "../funding/persistence/funding-trade-attempt-repository.js";
@@ -26,7 +25,7 @@ import { requestPriceRefreshForTokens } from "../lib/price-refresh.js";
 import { isRecord } from "../lib/type-guards.js";
 import { fetchPolymarketMarketInfo } from "../repos/polymarket-markets.js";
 import {
-  assertTelegramAppHandoffV2FundedTradeSubmission,
+  claimFundingTradeAttemptForVenueConsumer,
   claimTelegramAppHandoffV2DirectTradeSubmission,
   failTelegramAppHandoffV2DirectTradeSubmission,
   type TelegramAppHandoffV2DirectTradeSubmission,
@@ -6912,15 +6911,6 @@ export async function submitPolymarketClientSignedOrder(input: {
       },
     };
   }
-  if (directHandoffBinding && side !== "BUY") {
-    return {
-      ok: false,
-      statusCode: 400,
-      payload: {
-        error: "A Telegram handoff can only submit a sealed Buy",
-      },
-    };
-  }
   if (fundingReservation && side !== "BUY") {
     return {
       ok: false,
@@ -7062,11 +7052,46 @@ export async function submitPolymarketClientSignedOrder(input: {
       ok: false,
       statusCode: 400,
       payload: {
-        error: "A Telegram Mini App direct Buy must use FOK order type",
+        error: "A Telegram Mini App direct trade must use FOK order type",
       },
     };
   }
   const { price, size } = derivePriceAndSize(order, side);
+  if (side === "SELL") {
+    const requestedSharesRaw = parseBigIntValue(normalizedForHash.makerAmount);
+    const sellTokenId = normalizedForHash.tokenId;
+    if (!requestedSharesRaw || requestedSharesRaw <= 0n || !sellTokenId) {
+      return {
+        ok: false,
+        statusCode: 400,
+        payload: { error: "Polymarket sell order quantity is invalid." },
+      };
+    }
+    if (!directHandoffBinding) {
+      const availability = await resolvePolymarketAvailablePositionRaw({
+        pool: input.pool,
+        signer,
+        tokenId: sellTokenId,
+        userId: input.userId,
+      });
+      if (availability.availableRaw < requestedSharesRaw) {
+        return {
+          ok: false,
+          statusCode: 409,
+          payload: {
+            error: "Polymarket position balance changed",
+            code: POLYMARKET_SELL_BALANCE_CHANGED_CODE,
+            tokenId: sellTokenId,
+            owner: availability.funder,
+            availableSharesRaw: availability.availableRaw.toString(),
+            requestedSharesRaw: requestedSharesRaw.toString(),
+            availableShares: ethers.formatUnits(availability.availableRaw, 6),
+            requestedShares: ethers.formatUnits(requestedSharesRaw, 6),
+          },
+        };
+      }
+    }
+  }
   const payload = {
     order: normalizedOrder,
     owner: creds.apiKey,
@@ -7091,6 +7116,8 @@ export async function submitPolymarketClientSignedOrder(input: {
       };
     }
     directHandoffSubmission = {
+      action: side === "SELL" ? "sell" : "buy",
+      executionKind: "clob",
       marketId: fundingMarketId,
       outcomeTokenId: normalizedForHash.tokenId,
       receiveRaw: normalizedForHash.takerAmount,
@@ -7123,6 +7150,19 @@ export async function submitPolymarketClientSignedOrder(input: {
             size,
             tokenId: normalizedForHash.tokenId,
           },
+          ...(side === "SELL"
+            ? {
+                readSellPositionAvailableRaw: async () =>
+                  (
+                    await resolvePolymarketAvailablePositionRaw({
+                      pool: input.pool,
+                      signer,
+                      tokenId: normalizedForHash.tokenId,
+                      userId: input.userId,
+                    })
+                  ).availableRaw.toString(),
+              }
+            : {}),
           submission: directHandoffSubmission,
           userId: input.userId,
         });
@@ -7134,8 +7174,8 @@ export async function submitPolymarketClientSignedOrder(input: {
         payload: {
           error:
             error instanceof Error
-              ? "Telegram handoff is no longer valid for this Buy"
-              : "Telegram handoff is no longer valid for this Buy",
+              ? "Telegram handoff is no longer valid for this trade"
+              : "Telegram handoff is no longer valid for this trade",
         },
       };
     }
@@ -7165,23 +7205,14 @@ export async function submitPolymarketClientSignedOrder(input: {
       };
     }
     try {
-      await assertFundingReservationReadyForTrade(input.pool, {
-        userId: input.userId,
-        link: fundingReservation,
-        intent: fundingConsumerIntent,
-      });
-      if (directHandoffBinding && directHandoffSubmission) {
-        if (!input.assertTelegramAppHandoffV2Scope) {
-          throw new Error("sealed handoff scope cannot be verified");
-        }
-        await assertTelegramAppHandoffV2FundedTradeSubmission(input.pool, {
-          assertCurrentScope: input.assertTelegramAppHandoffV2Scope,
-          binding: directHandoffBinding,
-          operationId: fundingReservation.operationId,
-          reservationId: fundingReservation.reservationId,
-          submission: directHandoffSubmission,
+      if (!directHandoffBinding || !directHandoffSubmission) {
+        await assertFundingReservationReadyForTrade(input.pool, {
           userId: input.userId,
+          link: fundingReservation,
+          intent: fundingConsumerIntent,
         });
+      } else if (!input.assertTelegramAppHandoffV2Scope) {
+        throw new Error("sealed handoff scope cannot be verified");
       }
     } catch (error) {
       return {
@@ -7189,37 +7220,6 @@ export async function submitPolymarketClientSignedOrder(input: {
         statusCode: 409,
         payload: toPublicFundingTradeError(error),
       };
-    }
-  }
-
-  if (side === "SELL") {
-    const requestedSharesRaw = parseBigIntValue(normalizedForHash.makerAmount);
-    const sellTokenId = normalizedForHash.tokenId;
-    if (requestedSharesRaw != null && requestedSharesRaw > 0n && sellTokenId) {
-      const balances = await fetchErc1155BalancesByOwner({
-        rpcUrl: env.polygonRpcUrl,
-        timeoutMs: env.polygonRpcTimeoutMs,
-        contractAddress: env.polymarketConditionalTokensAddress,
-        owner: funder,
-        tokenIds: [sellTokenId],
-      });
-      const availableSharesRaw = balances.get(sellTokenId) ?? 0n;
-      if (availableSharesRaw < requestedSharesRaw) {
-        return {
-          ok: false,
-          statusCode: 400,
-          payload: {
-            error: "Polymarket position balance changed",
-            code: POLYMARKET_SELL_BALANCE_CHANGED_CODE,
-            tokenId: sellTokenId,
-            owner: funder,
-            availableSharesRaw: availableSharesRaw.toString(),
-            requestedSharesRaw: requestedSharesRaw.toString(),
-            availableShares: ethers.formatUnits(availableSharesRaw, 6),
-            requestedShares: ethers.formatUnits(requestedSharesRaw, 6),
-          },
-        };
-      }
     }
   }
 
@@ -7251,17 +7251,27 @@ export async function submitPolymarketClientSignedOrder(input: {
       signer: signer.toLowerCase(),
     });
     try {
-      const claim = await claimFundingTradeAttempt(input.pool, {
-        userId: input.userId,
-        operationId: fundingReservation.operationId,
-        reservationId: fundingReservation.reservationId,
-        venueId: "polymarket",
-        marketId,
-        executionPath: "polymarket_clob",
-        idempotencyKey: `polymarket-clob:${orderHash}`,
+      const claim = await claimFundingTradeAttemptForVenueConsumer(input.pool, {
         canonicalFingerprint,
         consumerIntent: fundingConsumerIntent,
+        executionPath: "polymarket_clob",
         externalReference: orderHash,
+        handoff:
+          directHandoffBinding &&
+          directHandoffSubmission &&
+          input.assertTelegramAppHandoffV2Scope
+            ? {
+                assertCurrentScope: input.assertTelegramAppHandoffV2Scope,
+                binding: directHandoffBinding,
+                submission: directHandoffSubmission,
+              }
+            : null,
+        idempotencyKey: `polymarket-clob:${orderHash}`,
+        marketId,
+        operationId: fundingReservation.operationId,
+        reservationId: fundingReservation.reservationId,
+        userId: input.userId,
+        venueId: "polymarket",
       });
       if (!claim.claimed) {
         return {
@@ -7431,7 +7441,7 @@ export async function submitPolymarketClientSignedOrder(input: {
         binding: directHandoffBinding,
         reason: {
           code: "polymarket_trade_rejected",
-          message: "Polymarket rejected the sealed Buy before accepting it.",
+          message: `Polymarket rejected the sealed ${side === "SELL" ? "Sell" : "Buy"} before accepting it.`,
         },
         submission: directHandoffSubmission,
         userId: input.userId,
@@ -7465,7 +7475,7 @@ export async function submitPolymarketClientSignedOrder(input: {
         binding: directHandoffBinding,
         reason: {
           code: "polymarket_trade_rejected",
-          message: "Polymarket rejected the sealed Buy before accepting it.",
+          message: `Polymarket rejected the sealed ${side === "SELL" ? "Sell" : "Buy"} before accepting it.`,
         },
         submission: directHandoffSubmission,
         userId: input.userId,
