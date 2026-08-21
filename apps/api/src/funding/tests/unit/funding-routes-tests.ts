@@ -404,6 +404,22 @@ async function buildApp(overrides: Partial<FundingRouteDependencies> = {}) {
       revokedAt: NOW.toISOString(),
     }),
     destinations: async () => [destination()],
+    receiveOptions: async () => ({
+      revision: "r".repeat(64),
+      expiresAt: "2026-07-24T12:05:00.000Z",
+      receiveOptions: [
+        {
+          receiveOptionId: "receive_option_12345678",
+          asset: { ...ASSET, symbol: "Token", name: "Token" },
+          network: { networkId: ASSET.networkId, name: "Polygon" },
+          ingressMethods: ["connected_wallet", "manual_receive"],
+          handling: "direct",
+          minimumDepositRaw: null,
+          recommendedFor: ["crypto"],
+          displayOrder: 0,
+        },
+      ],
+    }),
     inspectPreparation: async () => preparation(),
     prepare: async () => preparationRun(),
     preparationRun: async () => preparationRun(),
@@ -602,6 +618,141 @@ await test("receive session opens without a requested amount", async () => {
   }
 });
 
+await test("receive options expose a token choice without destination internals", async () => {
+  let observedUserId: string | null = null;
+  const app = await buildApp({
+    receiveOptions: async (userId) => {
+      observedUserId = userId;
+      return {
+        revision: "r".repeat(64),
+        expiresAt: "2026-07-24T12:05:00.000Z",
+        receiveOptions: [
+          {
+            receiveOptionId: "receive_option_12345678",
+            asset: { ...ASSET, symbol: "Token", name: "Token" },
+            network: { networkId: ASSET.networkId, name: "Polygon" },
+            ingressMethods: ["connected_wallet", "manual_receive"],
+            handling: "automatic_conversion",
+            minimumDepositRaw: null,
+            recommendedFor: ["crypto"],
+            displayOrder: 0,
+          },
+        ],
+      };
+    },
+  });
+  try {
+    const response = await app.inject({
+      method: "GET",
+      url: "/funding/receive-options",
+    });
+    assert.equal(response.statusCode, 200);
+    assert.equal(observedUserId, USER_ID);
+    assert.deepEqual(response.json(), {
+      ok: true,
+      revision: "r".repeat(64),
+      expiresAt: "2026-07-24T12:05:00.000Z",
+      receiveOptions: [
+        {
+          receiveOptionId: "receive_option_12345678",
+          asset: { ...ASSET, symbol: "Token", name: "Token" },
+          network: { networkId: ASSET.networkId, name: "Polygon" },
+          ingressMethods: ["connected_wallet", "manual_receive"],
+          handling: "automatic_conversion",
+          minimumDepositRaw: null,
+          recommendedFor: ["crypto"],
+          displayOrder: 0,
+        },
+      ],
+    });
+    assert.equal(
+      JSON.stringify(response.json()).includes("binding_poly"),
+      false,
+    );
+    assert.equal(
+      JSON.stringify(response.json()).includes("destination_poly"),
+      false,
+    );
+    assert.match(response.headers["cache-control"] ?? "", /private, no-store/);
+  } finally {
+    await app.close();
+  }
+});
+
+await test("receive session opens from an opaque token choice", async () => {
+  let observedBody: unknown = null;
+  const app = await buildApp({
+    openReceiveSession: async (_userId, request) => {
+      observedBody = request;
+      return {
+        session: receiveSession(),
+        receipts: [],
+        replayed: false,
+      };
+    },
+  });
+  try {
+    const response = await app.inject({
+      method: "POST",
+      url: "/funding/receive-sessions",
+      payload: {
+        receiveOptionId: "receive_option_12345678",
+        idempotencyKey: "receive_option_open_12345678",
+      },
+    });
+    assert.equal(response.statusCode, 200);
+    assert.deepEqual(observedBody, {
+      receiveOptionId: "receive_option_12345678",
+      idempotencyKey: "receive_option_open_12345678",
+    });
+  } finally {
+    await app.close();
+  }
+});
+
+await test("expired opaque receive choices return a refreshable 410", async () => {
+  const app = await buildApp({
+    openReceiveSession: async () => {
+      throw new FundingPlannerError(
+        "receive_option_expired",
+        "selected receive option expired",
+      );
+    },
+  });
+  try {
+    const response = await app.inject({
+      method: "POST",
+      url: "/funding/receive-sessions",
+      payload: {
+        receiveOptionId: "receive_option_12345678",
+        idempotencyKey: "receive_option_open_12345678",
+      },
+    });
+    assert.equal(response.statusCode, 410);
+    assert.equal(response.json().code, "receive_option_expired");
+  } finally {
+    await app.close();
+  }
+});
+
+await test("receive session rejects a mixed exact and opaque selection", async () => {
+  const app = await buildApp();
+  try {
+    const response = await app.inject({
+      method: "POST",
+      url: "/funding/receive-sessions",
+      payload: {
+        receiveOptionId: "receive_option_12345678",
+        destinationOptionId: destination().destinationOptionId,
+        venueBindingOptionId: destination().venueBindingOptionId,
+      },
+    });
+    assert.equal(response.statusCode, 400);
+  } finally {
+    await app.close();
+  }
+});
+
 await test("receive channel conflicts use HTTP 409", async () => {
   const app = await buildApp({
     openReceiveSession: async () => {
@@ -627,6 +778,33 @@ await test("receive channel conflicts use HTTP 409", async () => {
     await app.close();
   }
 });
+
+for (const code of [
+  "receive_session_selection_conflict",
+  "receive_session_idempotency_conflict",
+] as const) {
+  await test(`${code} uses HTTP 409`, async () => {
+    const app = await buildApp({
+      openReceiveSession: async () => {
+        throw new FundingPlannerError(code, "opaque receive open conflicts");
+      },
+    });
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/funding/receive-sessions",
+        payload: {
+          receiveOptionId: "receive_option_12345678",
+          idempotencyKey: "receive_option_open_12345678",
+        },
+      });
+      assert.equal(response.statusCode, 409);
+      assert.equal(response.json().code, code);
+    } finally {
+      await app.close();
+    }
+  });
+}
 
 await test("disabled receive destinations use HTTP 409", async () => {
   const app = await buildApp({

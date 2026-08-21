@@ -9,6 +9,7 @@ import type { ZodTypeProvider } from "fastify-type-provider-zod";
 
 import { createAuthMiddleware } from "../auth.js";
 import { pool } from "../db.js";
+import { env } from "../env.js";
 import { buildAccountValueReadModel } from "../account-value/runtime-service.js";
 import type {
   FundingCommitRequest,
@@ -33,6 +34,7 @@ import {
   type FundingReceiveSessionResponse,
   type OpenFundingReceiveSessionRequest,
 } from "../funding/receive/receive-session-service.js";
+import type { FundingReceiveOptionsResponse } from "../funding/receive/receive-option-catalog.js";
 import { PreparationContractError } from "../funding/preparation/core-adapter.js";
 import { WithdrawalDestinationError } from "../funding/execution/withdrawal-destination-runtime.js";
 import { cancelFundingOperationForUser } from "../funding/reconciliation/funding-operation-cancellation.js";
@@ -79,6 +81,7 @@ import {
   fundingPreparationRunParamsSchema,
   fundingPreparationRunResponseSchema,
   fundingReceiveSessionOpenRequestSchema,
+  fundingReceiveOptionsResponseSchema,
   fundingReceiveReceiptParamsSchema,
   fundingReceiveReceiptReviewQuoteResponseSchema,
   fundingReceiveSessionParamsSchema,
@@ -166,6 +169,7 @@ export type FundingRouteDependencies = Readonly<{
     userId: string,
     query: FundingDestinationQuery,
   ): Promise<readonly FundingDestinationOption[]>;
+  receiveOptions(userId: string): Promise<FundingReceiveOptionsResponse>;
   inspectPreparation(
     userId: string,
     request: Readonly<{
@@ -427,7 +431,12 @@ function errorStatus(error: unknown): number {
     return 400;
   }
   if (error instanceof FundingPlannerError) {
-    if (error.code === "stale_projection") return 410;
+    if (
+      error.code === "stale_projection" ||
+      error.code === "receive_option_expired"
+    ) {
+      return 410;
+    }
     if (error.code === "funding_policy_disabled") return 409;
     if (
       error.code === "invalid_policy" ||
@@ -438,7 +447,9 @@ function errorStatus(error: unknown): number {
     if (
       error.code === "destination_selection_required" ||
       error.code === "source_not_selected" ||
-      error.code === "receive_channel_conflict"
+      error.code === "receive_channel_conflict" ||
+      error.code === "receive_session_idempotency_conflict" ||
+      error.code === "receive_session_selection_conflict"
     ) {
       return 409;
     }
@@ -671,6 +682,36 @@ export function registerFundingRoutes(
           );
         },
       ),
+  );
+
+  z.get(
+    "/funding/receive-options",
+    {
+      preHandler: dependencies.authenticate,
+      schema: {
+        response: { 200: fundingReceiveOptionsResponseSchema, ...errors },
+      },
+    },
+    (request, reply) => {
+      reply.header("Cache-Control", "private, no-store");
+      return handleFundingRequest(
+        request,
+        reply,
+        dependencies,
+        {
+          endpoint: "receive-options",
+          logMessage: "Funding receive options failed",
+          publicError: "Receive options are unavailable",
+        },
+        async (userId) =>
+          reply.send(
+            fundingReceiveOptionsResponseSchema.parse({
+              ok: true,
+              ...(await dependencies.receiveOptions(userId)),
+            }),
+          ),
+      );
+    },
   );
 
   z.post(
@@ -1386,7 +1427,11 @@ export function registerFundingRoutes(
 
 export const fundingRoutes: FastifyPluginAsync = async (app) => {
   const runtime = new FundingPlanningRuntime(pool);
-  const receiveSessions = new FundingReceiveSessionService(pool);
+  // Domain-separated HMAC use keeps receive option IDs opaque without making
+  // sidecar-owned funding modules import API-wide environment configuration.
+  const receiveSessions = new FundingReceiveSessionService(pool, {
+    receiveOptionTokenKey: env.adminServiceTokenPepper,
+  });
   registerFundingRoutes(app, {
     authenticate: createAuthMiddleware(),
     rateLimit: (userId, endpoint) =>
@@ -1400,6 +1445,7 @@ export const fundingRoutes: FastifyPluginAsync = async (app) => {
       ),
     capabilities: () => runtime.capabilities(),
     destinations: (userId, query) => runtime.destinations(userId, query),
+    receiveOptions: (userId) => receiveSessions.options(userId),
     registerWithdrawalDestination: (userId, request) =>
       runtime.registerWithdrawalDestination(userId, request),
     revokeWithdrawalDestination: (userId, recipientId) =>

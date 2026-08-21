@@ -244,13 +244,55 @@ export const externalIngressInstructionSchema = z
     }
   });
 
-export const fundingReceiveSessionOpenRequestSchema = z
+export const fundingReceiveOptionSchema = z
   .object({
-    destinationOptionId: opaqueIdSchema,
-    venueBindingOptionId: opaqueIdSchema,
-    selectedReceiveTargetId: opaqueIdSchema.nullable().optional(),
+    receiveOptionId: opaqueIdSchema,
+    asset: assetRefSchema.extend({
+      symbol: z.string().trim().min(1).max(80),
+      name: z.string().trim().min(1).max(160),
+      variant: z.enum(["native", "bridged"]).optional(),
+    }),
+    network: z
+      .object({
+        networkId: z.string().trim().min(2).max(160),
+        name: z.string().trim().min(1).max(80),
+      })
+      .strict(),
+    ingressMethods: z
+      .array(z.enum(["connected_wallet", "manual_receive", "privy_card"]))
+      .min(1)
+      .max(3),
+    handling: z.enum(["direct", "automatic_conversion", "review_required"]),
+    minimumDepositRaw: rawAmountSchema.nullable(),
+    recommendedFor: z.array(z.enum(["crypto", "card"])).max(2),
+    displayOrder: z.number().int().min(0).max(1024),
   })
   .strict();
+
+export const fundingReceiveOptionsResponseSchema = z
+  .object({
+    ok: z.literal(true),
+    revision: z.string().trim().min(8).max(256),
+    expiresAt: z.string().datetime(),
+    receiveOptions: z.array(fundingReceiveOptionSchema).max(64),
+  })
+  .strict();
+
+export const fundingReceiveSessionOpenRequestSchema = z.union([
+  z
+    .object({
+      destinationOptionId: opaqueIdSchema,
+      venueBindingOptionId: opaqueIdSchema,
+      selectedReceiveTargetId: opaqueIdSchema.nullable().optional(),
+    })
+    .strict(),
+  z
+    .object({
+      receiveOptionId: opaqueIdSchema,
+      idempotencyKey: z.string().trim().min(8).max(256),
+    })
+    .strict(),
+]);
 
 export const fundingReceiveSessionParamsSchema = z
   .object({ id: z.string().uuid() })
