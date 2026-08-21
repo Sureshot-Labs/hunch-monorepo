@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 
 import {
+  completeTelegramBotTradeInput,
   parseTelegramCustomBuyAmount,
   parseTelegramCustomSellAmount,
   resolveTelegramCustomSellSides,
@@ -642,6 +643,66 @@ assert.equal(
   }),
   false,
 );
+
+const expiredInputContextId = "9330c377-ebbf-4fab-927a-df4afc91bffc";
+const expiredInputIntentId = "ee7e9ee3-481d-457d-8a7e-67a1ec69ac75";
+const expiredInputTelegramUserId = "expired-input-user";
+const expiredInputChatId = "expired-input-chat";
+const expiredInputMarketId = "polymarket:expired-input-market";
+const expiredInputFingerprint =
+  telegramBotTradingTestHooks.telegramTradeInputFingerprint({
+    action: "buy",
+    chatId: expiredInputChatId,
+    contextId: expiredInputContextId,
+    marketId: expiredInputMarketId,
+    normalizedValue: "5.00",
+    side: "YES",
+    telegramUserId: expiredInputTelegramUserId,
+  });
+const expiredInputIntent = {
+  action: "buy",
+  chat_id: expiredInputChatId,
+  expires_at: new Date(Date.now() - 1_000),
+  id: expiredInputIntentId,
+  market_id: expiredInputMarketId,
+  result: {
+    telegramInput: {
+      contextId: expiredInputContextId,
+      fingerprint: expiredInputFingerprint,
+      version: 1,
+    },
+  },
+  side: "YES",
+  telegram_user_id: expiredInputTelegramUserId,
+};
+const expiredInputResult = await completeTelegramBotTradeInput({
+  appBaseUrl: "https://app.hunch.trade",
+  chatId: expiredInputChatId,
+  contextId: expiredInputContextId,
+  db: {
+    query: async () => ({ rows: [expiredInputIntent] }),
+  } as never,
+  isLinkCurrent: async () => {
+    throw new Error("expired input must not inspect the current link");
+  },
+  loadContext: async () => {
+    throw new Error("expired persisted input must not load Redis context");
+  },
+  telegramMessageId: 1,
+  telegramUserId: expiredInputTelegramUserId,
+  trading: {} as never,
+  value: "5",
+});
+assert.equal(expiredInputResult.completed, false);
+assert.deepEqual(expiredInputResult.message.reply_markup?.inline_keyboard, [
+  [
+    {
+      callback_data: `hbt:open_market:${expiredInputIntentId}`,
+      text: "🎯 Open market",
+    },
+  ],
+  [{ callback_data: "hm:v1:home", text: "🏠 Home" }],
+]);
 
 assert.ok(
   await writeSignalBotTradeMenuInput({

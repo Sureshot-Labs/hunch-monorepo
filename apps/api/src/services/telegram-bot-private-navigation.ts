@@ -21,12 +21,21 @@ export function withTelegramPrivateNavigation<
   T extends TelegramBotTradingClientMessage,
 >(
   message: T,
-  options: { positions?: boolean } = {},
+  options: { marketCallbackData?: string; positions?: boolean } = {},
 ): T & {
   reply_markup: { inline_keyboard: TelegramBotTradingClientButton[][] };
 } {
   const rows = [...(message.reply_markup?.inline_keyboard ?? [])];
   const navigation: TelegramBotTradingClientButton[] = [];
+  if (
+    options.marketCallbackData &&
+    !hasCallback(rows, options.marketCallbackData)
+  ) {
+    navigation.push({
+      callback_data: options.marketCallbackData,
+      text: "🎯 Open market",
+    });
+  }
   if (options.positions && !hasCallback(rows, `${MENU_PREFIX}positions`)) {
     navigation.push({
       callback_data: `${MENU_PREFIX}positions`,

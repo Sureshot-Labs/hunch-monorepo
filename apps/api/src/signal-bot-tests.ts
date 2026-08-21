@@ -3679,6 +3679,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           : {
               answers: [],
               handled: true,
+              intentStatus: "filled",
               messages: [
                 {
                   chat_id: "999",
@@ -3725,6 +3726,140 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         });
         assert.match(JSON.stringify(terminalEdit), /My positions/);
         assert.match(JSON.stringify(terminalEdit), /Home/);
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    },
+  },
+  {
+    name: "internal trading client keeps active confirmation controls free of terminal market escape",
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      let edited: { reply_markup?: { inline_keyboard: unknown[][] } } | null =
+        null;
+      globalThis.fetch = (async () =>
+        new Response(
+          JSON.stringify({
+            answers: [],
+            handled: true,
+            intentStatus: "funding",
+            messages: [
+              {
+                chat_id: "999",
+                parse_mode: "MarkdownV2",
+                text: "Preparing funding\\.",
+              },
+            ],
+          }),
+          {
+            headers: { "Content-Type": "application/json" },
+            status: 200,
+          },
+        )) as typeof fetch;
+      try {
+        const client = createTelegramBotTradingInternalApiClient({
+          baseUrl: "https://api.hunch.trade",
+          token: "token",
+        });
+        await client.handleCallback({
+          answerCallbackQuery: async () => ({ ok: true }),
+          appBaseUrl: "https://app.hunch.trade",
+          callbackQuery: {
+            data: "hbt:confirm:00000000-0000-4000-8000-000000000001",
+            from: { id: 999 },
+            id: "callback-active-confirmation",
+            message: {
+              chat: { id: 999, type: "private" },
+              message_id: 77,
+            },
+          },
+          editMessageText: async (message) => {
+            edited = message;
+            return { messageId: 77, ok: true };
+          },
+          sendMessage: async () => ({ messageId: 78, ok: true }),
+        });
+        assert.doesNotMatch(JSON.stringify(edited), /hbt:open_market:/u);
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    },
+  },
+  {
+    name: "internal trading client strips scoped custom inputs when a market-card edit falls back to send",
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      const customBuyContextId = "00000000-0000-4000-8000-000000000002";
+      const customSellContextId = "00000000-0000-4000-8000-000000000003";
+      const marketIntentId = "00000000-0000-4000-8000-000000000001";
+      globalThis.fetch = (async () =>
+        new Response(
+          JSON.stringify({
+            answers: [],
+            handled: true,
+            messages: [
+              {
+                chat_id: "999",
+                parse_mode: "MarkdownV2",
+                reply_markup: {
+                  inline_keyboard: [
+                    [
+                      {
+                        callback_data: `hbt:buy_input:${customBuyContextId}`,
+                        text: "Custom buy",
+                      },
+                    ],
+                    [
+                      {
+                        callback_data: `hbt:sell_input:${customSellContextId}`,
+                        text: "Custom sell",
+                      },
+                    ],
+                    [
+                      {
+                        callback_data: `hbt:buy:${marketIntentId}`,
+                        text: "$5 · YES",
+                      },
+                    ],
+                  ],
+                },
+                text: "Market card",
+              },
+            ],
+          }),
+          {
+            headers: { "Content-Type": "application/json" },
+            status: 200,
+          },
+        )) as typeof fetch;
+      try {
+        const client = createTelegramBotTradingInternalApiClient({
+          baseUrl: "https://api.hunch.trade",
+          token: "token",
+        });
+        let sent: { reply_markup?: { inline_keyboard: unknown[][] } } | null =
+          null;
+        await client.handleCallback({
+          answerCallbackQuery: async () => ({ ok: true }),
+          appBaseUrl: "https://app.hunch.trade",
+          callbackQuery: {
+            data: `hbt:open_market:${marketIntentId}`,
+            from: { id: 999 },
+            id: "callback-market-fallback",
+            message: {
+              chat: { id: 999, type: "private" },
+              message_id: 77,
+            },
+          },
+          editMessageText: async () => ({ ok: false }),
+          sendMessage: async (message) => {
+            sent = message;
+            return { messageId: 78, ok: true };
+          },
+        });
+        const serialized = JSON.stringify(sent);
+        assert.doesNotMatch(serialized, /buy_input|sell_input/u);
+        assert.match(serialized, /hbt:buy:/u);
       } finally {
         globalThis.fetch = originalFetch;
       }
@@ -9288,7 +9423,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       const terminalTradeButton =
         telegram.messages.at(-1)?.reply_markup?.inline_keyboard[0]?.[0];
       assert.deepEqual(terminalTradeButton, {
-        callback_data: "hbt:retry_buy:00000000-0000-4000-8000-000000000001",
+        callback_data: "hbt:open_market:00000000-0000-4000-8000-000000000001",
         text: "🎯 Trade this market",
       });
     },

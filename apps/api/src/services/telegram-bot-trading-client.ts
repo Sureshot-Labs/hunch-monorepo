@@ -260,6 +260,7 @@ type CapturedTelegramBotTradingCallbackResult = {
     text?: string;
   }>;
   handled: boolean;
+  intentStatus?: string | null;
   messages: Array<TelegramFundingClientMessage & { chat_id: string }>;
 };
 
@@ -281,6 +282,7 @@ export type ParsedTelegramBotTradingCallback =
         | "sell"
         | "redeem"
         | "retry_buy"
+        | "open_market"
         | "cancel"
         | "change_amount"
         | "confirm";
@@ -303,6 +305,7 @@ export function parseTelegramBotTradingCallbackData(
     type !== "sell" &&
     type !== "redeem" &&
     type !== "retry_buy" &&
+    type !== "open_market" &&
     type !== "buy_input" &&
     type !== "sell_input" &&
     type !== "cancel_input" &&
@@ -325,6 +328,39 @@ function isTelegramBotTradingCallbackData(data: string | undefined): boolean {
     data === TELEGRAM_BOT_TRADING_CALLBACK_PREFIX ||
     data.startsWith(`${TELEGRAM_BOT_TRADING_CALLBACK_PREFIX}:`)
   );
+}
+
+function isFinalTelegramTradeIntentStatus(
+  status: string | null | undefined,
+): boolean {
+  return (
+    status === "filled" ||
+    status === "failed" ||
+    status === "cancelled" ||
+    status === "expired"
+  );
+}
+
+function withoutMessageScopedTradeInputButtons<
+  T extends TelegramBotTradingClientMessage,
+>(message: T): T {
+  const rows = message.reply_markup?.inline_keyboard;
+  if (!rows) return message;
+  const inline_keyboard = rows
+    .map((row) =>
+      row.filter((button) => {
+        if (!("callback_data" in button)) return true;
+        const parsed = parseTelegramBotTradingCallbackData(button.callback_data);
+        return (
+          parsed?.type !== "buy_input" && parsed?.type !== "sell_input"
+        );
+      }),
+    )
+    .filter((row) => row.length > 0);
+  return {
+    ...message,
+    reply_markup: { inline_keyboard },
+  };
 }
 
 function readSuccessfulTelegramResult(value: unknown): {
@@ -781,6 +817,7 @@ export function createTelegramBotTradingInternalApiClient(input: {
       const path =
         parsed.type === "buy" ||
         parsed.type === "retry_buy" ||
+        parsed.type === "open_market" ||
         parsed.type === "sell" ||
         parsed.type === "redeem"
           ? "/internal/telegram-bot/trading/preview-intent"
@@ -909,13 +946,22 @@ export function createTelegramBotTradingInternalApiClient(input: {
       const terminalMessageRaw = confirmAcknowledged
         ? result.messages.at(-1)
         : null;
+      const marketCallbackData = "intentId" in parsed
+        ? isFinalTelegramTradeIntentStatus(result.intentStatus)
+          ? `${TELEGRAM_BOT_TRADING_CALLBACK_PREFIX}:open_market:${parsed.intentId}`
+          : undefined
+        : undefined;
       const terminalMessage = terminalMessageRaw
         ? withTelegramPrivateNavigation(terminalMessageRaw, {
-            positions: true,
+            marketCallbackData,
+            positions: result.intentStatus === "filled",
           })
         : null;
+      // Preview callbacks already return the complete market/confirmation
+      // card, including its own navigation. Only a terminal execution reply
+      // needs the generic private-card escape row here.
       const previewMessage = !confirmAcknowledged
-        ? result.messages.at(-1)
+        ? (result.messages.at(-1) ?? null)
         : null;
       const chatId = callbackInput.callbackQuery.message?.chat?.id;
       const messageId = callbackInput.callbackQuery.message?.message_id;
@@ -974,7 +1020,18 @@ export function createTelegramBotTradingInternalApiClient(input: {
         ) {
           continue;
         }
-        const sendResult = await callbackInput.sendMessage(deliveredMessage);
+        // Custom-input contexts are exact-message scoped. If Telegram refuses
+        // to edit the original card, sending this prebuilt card would put
+        // those buttons on a different message and make them fail closed.
+        // Preserve the rest of the market card; the user can reopen it to
+        // receive a fully scoped Custom control.
+        const fallbackPreviewMessage =
+          !confirmAcknowledged &&
+          index === result.messages.length - 1 &&
+          !previewEdited
+            ? withoutMessageScopedTradeInputButtons(deliveredMessage)
+            : deliveredMessage;
+        const sendResult = await callbackInput.sendMessage(fallbackPreviewMessage);
         if (confirmAcknowledged && index === result.messages.length - 1) {
           const successfulSend = readSuccessfulTelegramResult(sendResult);
           if (successfulSend.ok) {

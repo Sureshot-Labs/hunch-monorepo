@@ -908,6 +908,7 @@ export type TelegramBotTradingCallbackInput = {
     | "buy"
     | "sell"
     | "redeem"
+    | "open_market"
     | "cancel"
     | "change_amount"
     | "confirm"
@@ -957,6 +958,7 @@ type CapturedTelegramBotTradingCallbackResult = {
     text?: string;
   }>;
   handled: boolean;
+  intentStatus: string | null;
   messages: Array<TelegramBotTradingMessage & { chat_id: string }>;
 };
 
@@ -1802,6 +1804,7 @@ export const telegramBotTradingTestHooks = {
   lockTelegramFundingReturnBeforeMarket,
   parseTelegramCustomBuyAmount,
   parseTelegramCustomSellAmount,
+  telegramTradeInputFingerprint,
   venueStatusFromReadiness,
 };
 
@@ -2748,6 +2751,7 @@ function buildTelegramTradeConfirmationMessage(input: {
               ],
             ]
           : []),
+        [{ callback_data: "hm:v1:home", text: "🏠 Home" }],
       ],
     },
     text: joinTelegramMarkdownV2Lines(
@@ -10261,10 +10265,26 @@ function telegramTradeInputFingerprint(input: {
 
 function buildTelegramTradeInputNotice(input: {
   body: string;
+  marketIntentId?: string | null;
   title: string;
 }): TelegramBotTradingMessage {
   return {
     parse_mode: "MarkdownV2",
+    reply_markup: {
+      inline_keyboard: [
+        ...(input.marketIntentId
+          ? [
+              [
+                {
+                  callback_data: `${TELEGRAM_BOT_TRADING_CALLBACK_PREFIX}:open_market:${input.marketIntentId}`,
+                  text: "🎯 Open market",
+                },
+              ],
+            ]
+          : []),
+        [{ callback_data: "hm:v1:home", text: "🏠 Home" }],
+      ],
+    },
     text: formatTelegramCalloutMarkdownV2({
       bodyMarkdownV2: escapeMarkdown(input.body),
       icon: "⚠️",
@@ -10384,6 +10404,20 @@ export async function completeTelegramBotTradeInput(input: {
         message: buildTelegramTradeInputNotice({
           body: "This request was already used with a different amount or identity.",
           title: "Input conflict",
+        }),
+      };
+    }
+    // An input context is scoped to this intent, chat, and Telegram user above.
+    // Once its trade intent has expired, never run the current policy/readiness
+    // path: it cannot make that intent executable again and obscures the only
+    // useful recovery action, opening the same market card for a fresh review.
+    if (intent.expires_at.getTime() <= Date.now()) {
+      return {
+        completed: false,
+        message: buildTelegramTradeInputNotice({
+          body: "This trade intent expired. Open the market card again.",
+          marketIntentId: intent.id,
+          title: "Input expired",
         }),
       };
     }
@@ -10885,6 +10919,7 @@ export async function completeTelegramBotTradeInput(input: {
       completed: false,
       message: buildTelegramTradeInputNotice({
         body: "This trade intent expired. Open the market card again.",
+        marketIntentId: intent?.id,
         title: "Input expired",
       }),
     };
@@ -10894,6 +10929,7 @@ export async function completeTelegramBotTradeInput(input: {
       completed: true,
       message: buildTelegramTradeInputNotice({
         body: `Current trade status: ${intent.status}. Check /trade_status before retrying.`,
+        marketIntentId: intent.id,
         title: "Trade already processed",
       }),
     };
@@ -11018,6 +11054,61 @@ export async function handleTelegramBotTradingCallback(
     intent.telegram_message_id,
     input.callbackQuery.message?.message_id,
   );
+  const marketNavigation = {
+    inline_keyboard: [
+      [
+        {
+          callback_data: `${TELEGRAM_BOT_TRADING_CALLBACK_PREFIX}:open_market:${intent.id}`,
+          text: "🎯 Open market",
+        },
+      ],
+      [{ callback_data: "hm:v1:home", text: "🏠 Home" }],
+    ],
+  } satisfies TelegramBotTradingReplyMarkup;
+  const sendCurrentMarketCard = async (
+    focusSide: TelegramBotTradingSide | null = null,
+  ) => {
+    const marketMessage = await buildTelegramBotTradingMarketMessage({
+      appBaseUrl: input.appBaseUrl,
+      chatId,
+      context: {
+        ...(focusSide ? { focusSide } : {}),
+        origin: "direct",
+      },
+      db: input.db,
+      marketRef: intent.market_id,
+      signerInspector: input.signerInspector,
+      telegramMessageId: callbackMessageId,
+      telegramMiniAppEnabled: input.telegramMiniAppEnabled,
+      telegramUserId: intent.telegram_user_id,
+      trading: input.trading,
+      writeTradeInputContext: input.writeTradeInputContext,
+    }).catch(() => null);
+    await input.sendMessage({
+      chat_id: chatId,
+      ...(marketMessage ?? {
+        parse_mode: "MarkdownV2" as const,
+        reply_markup: marketNavigation,
+        text: formatTelegramTradeLifecycleMessageMarkdownV2({
+          heading: "Market is temporarily unavailable.",
+          tone: "warn",
+          lines: ["Try Open market again or return Home."],
+          marketTitle: intent.market_title,
+          venue: intent.venue,
+        }),
+      }),
+    });
+  };
+  if (parsed.type === "open_market") {
+    // This callback is navigation only. It deliberately works for expired and
+    // terminal intents and never changes a trade, funding operation, or quote.
+    await input.answerCallbackQuery({
+      callbackQueryId: input.callbackQuery.id,
+      text: "Opening the current market card…",
+    });
+    await sendCurrentMarketCard();
+    return true;
+  }
   if (input.callbackQuery.message?.message_id != null) {
     await input.db.query(
       `UPDATE telegram_trade_intents
@@ -11082,49 +11173,16 @@ export async function handleTelegramBotTradingCallback(
   }
   if (
     parsed.type === "retry_buy" &&
-    (intent.action === "buy" || isV2DirectHandoff) &&
-    (intent.status === "filled" ||
-      (isV2DirectHandoff &&
-        ["cancelled", "expired", "failed"].includes(intent.status)) ||
-      (intent.funding_operation_id != null &&
-        intent.submit_started_at == null &&
-        ["cancelled", "expired", "failed"].includes(intent.status)))
+    ["cancelled", "expired", "failed", "filled"].includes(intent.status)
   ) {
+    // Compatibility for cards emitted before `open_market` existed. New cards
+    // use the explicit navigation callback; `retry_buy` remains a real resume
+    // and status action for non-terminal work.
     await input.answerCallbackQuery({
       callbackQueryId: input.callbackQuery.id,
       text: "Opening a fresh market card…",
     });
-    const marketMessage = await buildTelegramBotTradingMarketMessage({
-      appBaseUrl: input.appBaseUrl,
-      chatId,
-      context: {
-        ...(intent.side ? { focusSide: intent.side } : {}),
-        origin: "direct",
-      },
-      db: input.db,
-      marketRef: intent.market_id,
-      signerInspector: input.signerInspector,
-      telegramMessageId: callbackMessageId,
-      telegramMiniAppEnabled: input.telegramMiniAppEnabled,
-      telegramUserId: intent.telegram_user_id,
-      trading: input.trading,
-      writeTradeInputContext: input.writeTradeInputContext,
-    }).catch(() => null);
-    await input.sendMessage({
-      chat_id: chatId,
-      ...(marketMessage ?? {
-        parse_mode: "MarkdownV2" as const,
-        text: formatTelegramTradeLifecycleMessageMarkdownV2({
-          heading: `${intent.action === "sell" ? "Sell" : "Funding"} stopped.`,
-          tone: "warn",
-          lines: [
-            `Open the market again to build a fresh ${intent.action === "sell" ? "Sell" : "Buy"}.`,
-          ],
-          marketTitle: intent.market_title,
-          venue: intent.venue,
-        }),
-      }),
-    });
+    await sendCurrentMarketCard();
     return true;
   }
   const cancellationOperationId = intent.funding_operation_id;
@@ -11189,10 +11247,6 @@ export async function handleTelegramBotTradingCallback(
   }
   const exitsToMarket =
     parsed.type === "cancel" || parsed.type === "change_amount";
-  const canReplayMarketExit =
-    exitsToMarket &&
-    intent.status === "cancelled" &&
-    intent.submit_started_at == null;
   const canExitExternalHandoff =
     exitsToMarket &&
     intent.status === "external_handoff" &&
@@ -11217,10 +11271,86 @@ export async function handleTelegramBotTradingCallback(
     });
     return true;
   }
+  if (exitsToMarket) {
+    const expiredExitIntent =
+      (PENDING_INTENT_STATUSES.includes(intent.status) ||
+        canExitExternalHandoff) &&
+      intent.expires_at.getTime() <= Date.now();
+    if (
+      intent.status === "expired" ||
+      expiredExitIntent ||
+      (isTerminalIntentStatus(intent.status) && !canExitExternalHandoff) ||
+      intent.status === "executing" ||
+      intent.status === "submitted" ||
+      intent.status === "reconcile_required"
+    ) {
+      // An old card cannot authorise a new action. It can always safely return
+      // to the market, including after a trade/funding broadcast boundary.
+      if (expiredExitIntent) {
+        await updateIntentStatus({
+          allowedStatuses: [
+            ...PENDING_INTENT_STATUSES,
+            ...(canExitExternalHandoff ? ["external_handoff"] : []),
+          ],
+          db: input.db,
+          errorCode: "intent_expired",
+          errorMessage: "Trade intent expired.",
+          intentId: intent.id,
+          status: "expired",
+        });
+      }
+      await input.answerCallbackQuery({
+        callbackQueryId: input.callbackQuery.id,
+        text:
+          intent.status === "expired"
+            ? "Quote expired. Opening the market."
+            : "Opening the current market card…",
+      });
+      await sendCurrentMarketCard();
+      return true;
+    }
+    const cancelled = await updateIntentStatus({
+      allowedStatuses: [
+        ...PENDING_INTENT_STATUSES,
+        ...(cancellingFundingIntent ? ["funding"] : []),
+        ...(canExitExternalHandoff ? ["external_handoff"] : []),
+      ],
+      db: input.db,
+      errorCode:
+        parsed.type === "change_amount"
+          ? "amount_change_requested"
+          : "cancelled_by_user",
+      errorMessage:
+        parsed.type === "change_amount"
+          ? "The user returned to choose a different amount."
+          : cancellingBuyContinuation
+            ? "The user cancelled the Buy after funding started; funding will settle without a venue order."
+            : "The user returned to the market card.",
+      intentId: intent.id,
+      status: "cancelled",
+    });
+    if (!cancelled) {
+      await answerIntentAlreadyProcessed(input, intent);
+      return true;
+    }
+    await input.answerCallbackQuery({
+      callbackQueryId: input.callbackQuery.id,
+      text:
+        parsed.type === "change_amount"
+          ? "Choose a new amount."
+          : cancellingFundingPreparation
+            ? "Preparation cancelled. No money was moved."
+            : cancellingBuyContinuation
+              ? "Buy cancelled. Funding will settle safely without submitting a trade."
+              : "Trade cancelled. Choose another option.",
+    });
+    await sendCurrentMarketCard(
+      parsed.type === "change_amount" ? intent.side : null,
+    );
+    return true;
+  }
   if (
     (isTerminalIntentStatus(intent.status) || intent.status === "executing") &&
-    !canReplayMarketExit &&
-    !canExitExternalHandoff &&
     !canDeliverExternalHandoff
   ) {
     await answerIntentAlreadyProcessed(input, intent);
@@ -11248,81 +11378,9 @@ export async function handleTelegramBotTradingCallback(
     }
     await input.answerCallbackQuery({
       callbackQueryId: input.callbackQuery.id,
-      showAlert: true,
-      text: "⚠️ Trade intent expired. Send /market again.",
+      text: "Quote expired. Opening the market.",
     });
-    return true;
-  }
-
-  if (exitsToMarket) {
-    const cancelled =
-      canReplayMarketExit ||
-      (await updateIntentStatus({
-        allowedStatuses: [
-          ...PENDING_INTENT_STATUSES,
-          ...(cancellingFundingIntent ? ["funding"] : []),
-          ...(canExitExternalHandoff ? ["external_handoff"] : []),
-        ],
-        db: input.db,
-        errorCode:
-          parsed.type === "change_amount"
-            ? "amount_change_requested"
-            : "cancelled_by_user",
-        errorMessage:
-          parsed.type === "change_amount"
-            ? "The user returned to choose a different amount."
-            : cancellingBuyContinuation
-              ? "The user cancelled the Buy after funding started; funding will settle without a venue order."
-              : "The user returned to the market card.",
-        intentId: intent.id,
-        status: "cancelled",
-      }));
-    if (!cancelled) {
-      await answerIntentAlreadyProcessed(input, intent);
-      return true;
-    }
-    await input.answerCallbackQuery({
-      callbackQueryId: input.callbackQuery.id,
-      text:
-        parsed.type === "change_amount"
-          ? "Choose a new amount."
-          : cancellingFundingPreparation
-            ? "Preparation cancelled. No money was moved."
-            : cancellingBuyContinuation
-              ? "Buy cancelled. Funding will settle safely without submitting a trade."
-              : "Trade cancelled. Choose another option.",
-    });
-    const marketMessage = await buildTelegramBotTradingMarketMessage({
-      appBaseUrl: input.appBaseUrl,
-      chatId,
-      context: {
-        ...(parsed.type === "change_amount" && intent.side
-          ? { focusSide: intent.side }
-          : {}),
-        origin: "direct",
-      },
-      db: input.db,
-      marketRef: intent.market_id,
-      signerInspector: input.signerInspector,
-      telegramMessageId: callbackMessageId,
-      telegramMiniAppEnabled: input.telegramMiniAppEnabled,
-      telegramUserId: intent.telegram_user_id,
-      trading: input.trading,
-      writeTradeInputContext: input.writeTradeInputContext,
-    }).catch(() => null);
-    await input.sendMessage({
-      chat_id: chatId,
-      ...(marketMessage ?? {
-        parse_mode: "MarkdownV2" as const,
-        text: formatTelegramTradeLifecycleMessageMarkdownV2({
-          heading: "Trade cancelled.",
-          tone: "info",
-          lines: ["Open the market again to choose another amount."],
-          marketTitle: intent.market_title,
-          venue: intent.venue,
-        }),
-      }),
-    });
+    await sendCurrentMarketCard();
     return true;
   }
 
@@ -12832,7 +12890,7 @@ export async function handleTelegramBotTradingCallback(
     const filledMarketButton =
       resolution.intentStatus === "filled" && !postSubmitError
         ? {
-            callback_data: `${TELEGRAM_BOT_TRADING_CALLBACK_PREFIX}:retry_buy:${intent.id}`,
+            callback_data: `${TELEGRAM_BOT_TRADING_CALLBACK_PREFIX}:open_market:${intent.id}`,
             text: "🎯 Trade this market",
           }
         : null;
@@ -13111,6 +13169,7 @@ export async function captureTelegramBotTradingCallback(input: {
     | "buy"
     | "sell"
     | "redeem"
+    | "open_market"
     | "cancel"
     | "change_amount"
     | "confirm"
@@ -13155,7 +13214,17 @@ export async function captureTelegramBotTradingCallback(input: {
     trading: input.trading,
     writeTradeInputContext: input.writeTradeInputContext,
   });
-  return { answers, handled, messages };
+  const parsed = parseTelegramBotTradingCallbackData(input.callbackQuery.data);
+  const currentIntent =
+    parsed && "intentId" in parsed
+      ? await loadIntent(input.db, parsed.intentId).catch(() => null)
+      : null;
+  return {
+    answers,
+    handled,
+    intentStatus: currentIntent?.status ?? null,
+    messages,
+  };
 }
 
 export type TelegramAppHandoffProjection = Readonly<{
