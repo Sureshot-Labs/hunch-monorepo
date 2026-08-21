@@ -1,5 +1,6 @@
 import type { AssetRef, Money } from "../domain/types.js";
 import { canonicalAssetId, sameAsset } from "../domain/asset-identity.js";
+import { isRawAmount } from "../domain/raw-amount.js";
 
 export function normalizeAssetId(asset: AssetRef): string {
   return canonicalAssetId(asset);
@@ -21,7 +22,7 @@ export function assertSameAsset(
 }
 
 export function rawAmount(value: string, label = "amount"): bigint {
-  if (!/^(0|[1-9]\d*)$/.test(value)) {
+  if (!isRawAmount(value)) {
     throw new FundingPlannerError(
       "invalid_amount",
       `${label} must be an unsigned raw-unit integer`,

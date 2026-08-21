@@ -15,6 +15,7 @@ import {
   type FundingTradeConsumerIntent,
 } from "../funding/persistence/funding-trade-consumer-intent.js";
 import { sameAsset } from "../funding/domain/asset-identity.js";
+import { isPositiveRawAmount } from "../funding/domain/raw-amount.js";
 import {
   claimFundingTradeAttempt,
   FundingTradeAttemptError,
@@ -147,7 +148,7 @@ export function createApiTradingApplicationService(
     }
     if (typeof value !== "string") return null;
     const trimmed = value.trim();
-    return /^[1-9][0-9]*$/.test(trimmed) ? trimmed : null;
+    return isPositiveRawAmount(trimmed) ? trimmed : null;
   };
 
   const fundingConsumerIntentForPrepared = (

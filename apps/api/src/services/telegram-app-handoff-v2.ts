@@ -11,6 +11,7 @@ import type {
   SourceOptionLeg,
 } from "../funding/domain/types.js";
 import { fundingDiscoveryRequestSchema } from "../funding/domain/schemas.js";
+import { isRawAmount } from "../funding/domain/raw-amount.js";
 import {
   addUnsignedDecimals,
   compareUnsignedDecimals,
@@ -228,10 +229,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isJsonObject(value: unknown): value is JsonObject {
   return isRecord(value);
-}
-
-function isRawAmount(value: unknown): value is string {
-  return typeof value === "string" && /^(?:0|[1-9][0-9]*)$/u.test(value);
 }
 
 function exactAsset(value: unknown): Money["asset"] | null {

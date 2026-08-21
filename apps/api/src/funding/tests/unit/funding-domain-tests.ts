@@ -12,6 +12,11 @@ import {
   rawAmountSchema,
 } from "../../domain/schemas.js";
 import {
+  isPositiveRawAmount,
+  isRawAmount,
+  parsePositiveRawAmount,
+} from "../../domain/raw-amount.js";
+import {
   selectFundingDestination,
   selectVenueBindingForCurrentIntent,
 } from "../../domain/selections.js";
@@ -80,6 +85,17 @@ async function test(
   await run();
   console.log(`[funding-domain-tests] ok ${name}`);
 }
+
+await test("raw amount guards distinguish zero from positive money", () => {
+  assert.equal(isRawAmount("0"), true);
+  assert.equal(isRawAmount("1000000"), true);
+  assert.equal(isRawAmount("01"), false);
+  assert.equal(isRawAmount("-1"), false);
+  assert.equal(isPositiveRawAmount("0"), false);
+  assert.equal(isPositiveRawAmount("1000000"), true);
+  assert.equal(parsePositiveRawAmount("1000000"), 1_000_000n);
+  assert.equal(parsePositiveRawAmount("0"), null);
+});
 
 function mutableDefaultPolicy(): MutableFundingPolicy {
   return structuredClone(

@@ -7,6 +7,7 @@ import {
 } from "../../account-value/canonical.js";
 import { RELAY_DEPOSITORY_V2 } from "../../funding-providers/relay/rehearsal.js";
 import type { JsonValue } from "../domain/types.js";
+import { isPositiveRawAmount } from "../domain/raw-amount.js";
 import {
   commitFundingOperationInTransaction,
   createFundingQuoteInTransaction,
@@ -210,7 +211,7 @@ export async function createRelayAllowanceCleanupOperationInTransaction(
   }>,
 ): Promise<string | null> {
   if (
-    !/^[1-9][0-9]*$/u.test(input.allowanceRaw) ||
+    !isPositiveRawAmount(input.allowanceRaw) ||
     input.allowanceRevision.length < 32 ||
     !/^(0|[1-9][0-9]*)$/u.test(input.allowanceObservedBlock) ||
     !/^(0|[1-9][0-9]*)$/u.test(input.allowanceMutationBaselineBlock)

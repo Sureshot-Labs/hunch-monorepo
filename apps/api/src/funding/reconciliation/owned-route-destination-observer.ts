@@ -8,6 +8,10 @@ import type {
   JsonValue,
   Money,
 } from "../domain/types.js";
+import {
+  isPositiveRawAmount,
+  parsePositiveRawAmount,
+} from "../domain/raw-amount.js";
 import type { FundingOperationState } from "../domain/transitions.js";
 import { sameAccountAddress } from "../domain/asset-identity.js";
 import {
@@ -126,7 +130,7 @@ function preparationContribution(
     minimum.raw,
     "venuePreparationMinimumDestination.raw",
   );
-  if (!/^[1-9][0-9]*$/.test(raw)) {
+  if (!isPositiveRawAmount(raw)) {
     throw new FundingPersistenceError(
       "quote_mismatch",
       "composite preparation contribution is not positive",
@@ -169,10 +173,12 @@ function parseProviderSegments(
       entry.minimumOutput.raw,
       "providerSegments.minimumOutput.raw",
     );
+    const expectedAmount = parsePositiveRawAmount(expectedRaw);
+    const minimumAmount = parsePositiveRawAmount(minimumRaw);
     if (
-      !/^[1-9][0-9]*$/.test(expectedRaw) ||
-      !/^[1-9][0-9]*$/.test(minimumRaw) ||
-      BigInt(expectedRaw) < BigInt(minimumRaw)
+      expectedAmount == null ||
+      minimumAmount == null ||
+      expectedAmount < minimumAmount
     ) {
       throw new FundingPersistenceError(
         "quote_mismatch",

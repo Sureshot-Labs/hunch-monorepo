@@ -1,4 +1,8 @@
 import type { NormalizedAction } from "../domain/types.js";
+import {
+  isPositiveRawAmount,
+  parsePositiveRawAmount,
+} from "../domain/raw-amount.js";
 import { canonicalJsonHash } from "../persistence/canonical.js";
 import { decodePolymarketFundingCalldata } from "../../services/polymarket-funding-router.js";
 import {
@@ -266,8 +270,7 @@ function positiveCapCondition(
   );
   if (matches.length !== 1) return null;
   const value = scalar(matches[0]?.value);
-  if (!/^[1-9][0-9]*$/u.test(value)) return null;
-  return BigInt(value);
+  return parsePositiveRawAmount(value);
 }
 
 type RelayPolicyAsset = Readonly<{
@@ -379,7 +382,7 @@ export function relayEvmPolicyHasExactAssetPair(
   rules: readonly Readonly<Record<string, unknown>>[],
   input: Readonly<{ chainId: string; token: string; maxSourceRaw: string }>,
 ): boolean {
-  if (!/^[1-9][0-9]*$/u.test(input.maxSourceRaw)) return false;
+  if (!isPositiveRawAmount(input.maxSourceRaw)) return false;
   const matches = rules.flatMap((rule) => {
     const identity = relayEvmPolicyRuleIdentity(rule);
     return identity &&
@@ -573,7 +576,7 @@ export function isExactPolymarketDepositPusdFundRule(
   const expectedRouter = input.routerAddress.trim().toLowerCase();
   if (
     !/^0x[0-9a-f]{40}$/u.test(expectedRouter) ||
-    !/^[1-9][0-9]*$/u.test(input.maxSourceRaw) ||
+    !isPositiveRawAmount(input.maxSourceRaw) ||
     input.rule.action !== "ALLOW" ||
     input.rule.method !== "eth_sendTransaction"
   ) {
@@ -672,12 +675,7 @@ export function validatePolymarketDepositUsdceWrapPolicy(
 }
 
 function positiveRaw(value: unknown): bigint | null {
-  if (typeof value !== "string" || !/^[1-9][0-9]*$/u.test(value)) return null;
-  try {
-    return BigInt(value);
-  } catch {
-    return null;
-  }
+  return parsePositiveRawAmount(value);
 }
 
 export function validatePolymarketDepositUsdceWrapAction(

@@ -9,6 +9,10 @@ import type {
   SourceOption,
 } from "../funding/domain/types.js";
 import { sameAsset } from "../funding/domain/asset-identity.js";
+import {
+  isPositiveRawAmount,
+  parsePositiveRawAmount,
+} from "../funding/domain/raw-amount.js";
 import { FundingPlannerError } from "../funding/planner/money.js";
 import { FundingPlanningRuntime } from "../funding/planner/runtime-service.js";
 import {
@@ -175,7 +179,7 @@ function exactStableRaw(input: TelegramTradeShortfallIdentity): string | null {
     ? usdToStableRaw(input.additionalFundingUsd)
     : null;
   if (input.additionalFundingRaw != null) {
-    if (!/^[1-9][0-9]*$/u.test(input.additionalFundingRaw)) {
+    if (!isPositiveRawAmount(input.additionalFundingRaw)) {
       throw new Error("trade funding exact shortfall is invalid");
     }
     if (decimalRaw != null && decimalRaw !== input.additionalFundingRaw) {
@@ -249,10 +253,17 @@ export function buildTelegramTradeShortfallCommitRequest(
       serverAdditionalDestinationAmount.asset,
       proposal.requestedDestinationAmount.asset,
     ) ||
-    !/^[1-9][0-9]*$/u.test(serverAdditionalDestinationAmount.raw) ||
-    BigInt(serverAdditionalDestinationAmount.raw) >
-      BigInt(proposal.requestedDestinationAmount.raw)
+    !isPositiveRawAmount(serverAdditionalDestinationAmount.raw)
   ) {
+    throw new Error("trade funding proposal lacks its exact shortfall");
+  }
+  const requestedRaw = parsePositiveRawAmount(
+    proposal.requestedDestinationAmount.raw,
+  );
+  const fundingRaw = parsePositiveRawAmount(
+    serverAdditionalDestinationAmount.raw,
+  );
+  if (requestedRaw == null || fundingRaw == null || fundingRaw > requestedRaw) {
     throw new Error("trade funding proposal lacks its exact shortfall");
   }
   return buildTelegramTradeShortfallRequest(
@@ -550,17 +561,24 @@ export function selectedTelegramTradeShortfallFundingRaw(
   if (
     !minimumDestination ||
     !sameAsset(minimumDestination.asset, input.collateralAsset) ||
-    !/^[1-9][0-9]*$/u.test(input.shortfallRaw) ||
-    !/^[1-9][0-9]*$/u.test(input.requestedCollateralRaw) ||
-    !/^[1-9][0-9]*$/u.test(minimumDestination.raw)
+    !isPositiveRawAmount(input.shortfallRaw) ||
+    !isPositiveRawAmount(input.requestedCollateralRaw)
   ) {
     return null;
   }
-  const minimumRaw = BigInt(minimumDestination.raw);
+  const minimumRaw = parsePositiveRawAmount(minimumDestination.raw);
+  const shortfallRaw = parsePositiveRawAmount(input.shortfallRaw);
+  const requestedCollateralRaw = parsePositiveRawAmount(
+    input.requestedCollateralRaw,
+  );
   if (
-    minimumRaw < BigInt(input.shortfallRaw) ||
-    minimumRaw > BigInt(input.requestedCollateralRaw)
+    minimumRaw == null ||
+    shortfallRaw == null ||
+    requestedCollateralRaw == null
   ) {
+    return null;
+  }
+  if (minimumRaw < shortfallRaw || minimumRaw > requestedCollateralRaw) {
     return null;
   }
   return minimumDestination.raw;
@@ -714,7 +732,7 @@ export class TelegramTradeShortfallFundingService {
         ],
       };
     }
-    if (!/^[1-9][0-9]*$/u.test(observed.shortfallRaw)) {
+    if (!isPositiveRawAmount(observed.shortfallRaw)) {
       return { kind: "destination_ready" };
     }
     const exactInput: TelegramTradeShortfallIdentity = {
@@ -1098,7 +1116,7 @@ export class TelegramTradeShortfallFundingService {
     }
     if (
       input.proposal.relayPersistentApprovalCapRaw != null &&
-      !/^[1-9][0-9]*$/u.test(input.proposal.relayPersistentApprovalCapRaw)
+      !isPositiveRawAmount(input.proposal.relayPersistentApprovalCapRaw)
     ) {
       throw new Error("trade funding Relay approval cap is invalid");
     }
