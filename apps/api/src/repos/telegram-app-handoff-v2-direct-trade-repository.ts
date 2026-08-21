@@ -14,6 +14,8 @@ export type TelegramAppHandoffV2DirectTradeBinding = Readonly<{
 }>;
 
 export type TelegramAppHandoffV2DirectTradeSubmission = Readonly<{
+  /** The venue boundary determines whether the sealed minimum is enforceable. */
+  executionKind: "amm" | "clob";
   marketId: string;
   outcomeTokenId: string;
   receiveRaw: string;
@@ -27,11 +29,25 @@ export type TelegramAppHandoffV2DirectTradeOrder =
   TelegramAppHandoffV2DirectTradeBinding &
     TelegramAppHandoffV2DirectTradeSubmission;
 
-/** Durable provider lookup key written before a direct provider call. */
-export type TelegramAppHandoffV2DirectTradeReconcileKeys = Readonly<{
-  orderHash: string;
-  tradeType: "clob";
-}>;
+/**
+ * Durable provider lookup key written before a direct provider call.
+ * Polymarket exposes its signed order hash; Limitless CLOB exposes a client
+ * order id; Limitless AMM uses the hash of the client-signed raw transaction
+ * that the API broadcasts after claiming this row.
+ */
+export type TelegramAppHandoffV2DirectTradeReconcileKeys =
+  | Readonly<{
+      orderHash: string;
+      tradeType: "clob";
+    }>
+  | Readonly<{
+      clientOrderId: string;
+      tradeType: "clob";
+    }>
+  | Readonly<{
+      orderHash: string;
+      tradeType: "amm";
+    }>;
 
 /**
  * Data needed only to persist an order discovered after a provider response
@@ -73,6 +89,7 @@ type LockedDirectTrade = Readonly<{
   fundingReservationId: string | null;
   handoffId: string;
   intentId: string;
+  intentPreparedSnapshot: unknown;
   intentResult: unknown;
   intentStatus: string;
   planFingerprint: string;
@@ -201,9 +218,39 @@ function validateBinding(
 function validateReconcileKeys(
   keys: TelegramAppHandoffV2DirectTradeReconcileKeys,
 ): void {
-  if (!/^0x[0-9a-f]{64}$/iu.test(keys.orderHash) || keys.tradeType !== "clob") {
+  const hasOrderHash =
+    "orderHash" in keys && /^0x[0-9a-f]{64}$/iu.test(keys.orderHash);
+  const hasClientOrderId =
+    "clientOrderId" in keys &&
+    /^hunch-th2-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(
+      keys.clientOrderId,
+    );
+  // Polymarket gives us its signed order hash while Limitless CLOB gives us a
+  // deterministic client order id.  Both are exact, mutually-exclusive CLOB
+  // recovery identities; rejecting the former would break already-supported
+  // Polymarket direct handoffs.
+  const validClob =
+    keys.tradeType === "clob" &&
+    ((hasClientOrderId && !hasOrderHash) ||
+      (hasOrderHash && !hasClientOrderId));
+  const validAmm = keys.tradeType === "amm" && hasOrderHash && !hasClientOrderId;
+  if (!validClob && !validAmm) {
     throw new TelegramAppHandoffV2DirectTradeError("plan_changed");
   }
+}
+
+/**
+ * Limitless CLOB's FOK protocol has no signed minimum-receive field:
+ * `takerAmount = 1` is only the venue's market-order sentinel. Its sealed
+ * direct Buy is therefore constrained by identity and maximum spend, not an
+ * unrelated preview-share estimate. Every other direct consumer has an exact
+ * minimum to enforce.
+ */
+export function requiresTelegramAppHandoffV2MinimumReceive(input: Readonly<{
+  executionKind: TelegramAppHandoffV2DirectTradeSubmission["executionKind"];
+  venue: TelegramAppHandoffV2TradeVenue;
+}>): boolean {
+  return !(input.venue === "limitless" && input.executionKind === "clob");
 }
 
 function validateSubmission(
@@ -229,13 +276,18 @@ function validateSubmission(
     scope.minReceiveShares == null
       ? null
       : decimalToRaw(scope.minReceiveShares, 6, "ceil");
+  const requiresMinimumReceive = requiresTelegramAppHandoffV2MinimumReceive({
+    executionKind: submission.executionKind,
+    venue: scope.venue,
+  });
   if (
     minimumSpendRaw == null ||
     maximumSpendRaw == null ||
     (minimumReceiveRaw == null && scope.minReceiveShares != null) ||
     BigInt(submission.spendRaw) < minimumSpendRaw ||
     BigInt(submission.spendRaw) > maximumSpendRaw ||
-    (minimumReceiveRaw != null &&
+    (requiresMinimumReceive &&
+      minimumReceiveRaw != null &&
       BigInt(submission.receiveRaw) < minimumReceiveRaw)
   ) {
     throw new TelegramAppHandoffV2DirectTradeError("order_out_of_scope");
@@ -277,6 +329,7 @@ async function lockDirectTrade(
     funding_reservation_id: string | null;
     handoff_id: string;
     intent_id: string;
+    intent_prepared_snapshot: unknown;
     intent_result: unknown;
     intent_status: string;
     plan_fingerprint: string;
@@ -288,6 +341,7 @@ async function lockDirectTrade(
             handoff_row.authority_fingerprint,
             handoff_row.policy_revision,
             intent.id::text as intent_id,
+            intent.prepared_snapshot as intent_prepared_snapshot,
             intent.result as intent_result,
             intent.status as intent_status,
             intent.funding_operation_id::text as funding_operation_id,
@@ -314,6 +368,7 @@ async function lockDirectTrade(
     fundingReservationId: row.funding_reservation_id,
     handoffId: row.handoff_id,
     intentId: row.intent_id,
+    intentPreparedSnapshot: row.intent_prepared_snapshot,
     intentResult: row.intent_result,
     intentStatus: row.intent_status,
     planFingerprint: row.plan_fingerprint,
@@ -358,6 +413,27 @@ function assertCurrentDirectTrade(input: {
   );
   validateSubmission(scope, input.submission);
   return scope;
+}
+
+function hasSameReconcileKeys(
+  snapshot: unknown,
+  expected: TelegramAppHandoffV2DirectTradeReconcileKeys,
+): boolean {
+  if (!isRecord(snapshot) || !isRecord(snapshot.reconcileKeys)) return false;
+  const actual = snapshot.reconcileKeys;
+  if ("orderHash" in expected) {
+    return (
+      actual.tradeType === expected.tradeType &&
+      typeof actual.orderHash === "string" &&
+      actual.orderHash.toLowerCase() === expected.orderHash.toLowerCase()
+    );
+  }
+  return (
+    actual.tradeType === "clob" &&
+    "clientOrderId" in expected &&
+    typeof actual.clientOrderId === "string" &&
+    actual.clientOrderId === expected.clientOrderId
+  );
 }
 
 /**
@@ -412,6 +488,19 @@ export async function claimTelegramAppHandoffV2DirectTradeSubmissionInTransactio
     locked,
     submission: input.submission,
   });
+  // A retry with the same provider identity must be harmless.  In particular,
+  // a caller can safely re-broadcast the same signed AMM transaction after a
+  // response loss; the chain deduplicates its hash and this row remains the
+  // only claim.  A changed identity still fails closed below.
+  if (
+    locked.intentStatus === "executing" &&
+    hasSameReconcileKeys(
+      locked.intentPreparedSnapshot,
+      input.reconcileKeys,
+    )
+  ) {
+    return;
+  }
   await assertLiveScope({
     assertion: input.assertCurrentScope,
     locked,
@@ -436,11 +525,8 @@ export async function claimTelegramAppHandoffV2DirectTradeSubmissionInTransactio
             prepared_snapshot = jsonb_build_object(
               'authorizationMode', 'client_signed',
               'preparedId', concat('handoff-v2:', $2::uuid),
-              'reconcileKeys', jsonb_build_object(
-                'orderHash', $4::text,
-                'tradeType', $5::text
-              ),
-              'recoveryPayload', $6::jsonb
+              'reconcileKeys', $4::jsonb,
+              'recoveryPayload', $5::jsonb
             ),
             updated_at = clock_timestamp()
       where intent.id = $1::uuid
@@ -449,8 +535,7 @@ export async function claimTelegramAppHandoffV2DirectTradeSubmissionInTransactio
       locked.intentId,
       locked.handoffId,
       input.binding.planFingerprint.trim().toLowerCase(),
-      input.reconcileKeys.orderHash,
-      input.reconcileKeys.tradeType,
+      JSON.stringify(input.reconcileKeys),
       JSON.stringify(input.recoveryPayload),
     ],
   );

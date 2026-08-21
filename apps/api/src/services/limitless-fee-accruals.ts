@@ -8,9 +8,9 @@ import { fetchActiveFeePolicy } from "../repos/fee-policy.js";
 import { isRecord } from "../lib/type-guards.js";
 import { createEvmRpcProvider } from "./rpc-client-factory.js";
 import {
-  limitlessRequest,
-  extractLimitlessMessage,
-} from "./limitless-client.js";
+  fetchLimitlessOrderStatusBatch as fetchSharedLimitlessOrderStatusBatch,
+  type LimitlessOrderStatusItem,
+} from "./limitless-order-status.js";
 import {
   clearVenueFeeBackfillAttempts,
   markVenueFeeBackfillAttempts,
@@ -36,7 +36,6 @@ const SETTLED_STATUSES = new Set(["MINED", "CONFIRMED"]);
 const FAILED_STATUSES = new Set(["FAILED"]);
 const BACKFILL_RETRY_DELAY_MS = 15 * 60 * 1000;
 const BACKFILL_MAX_RETRY_ATTEMPTS = 8;
-const LIMITLESS_STATUS_BATCH_MAX_ITEMS = 50;
 const ZERO_ASSET_ID = "0";
 const LIMITLESS_ORDER_FILLED_EVENT =
   "event OrderFilled(bytes32 indexed orderHash, address indexed maker, address indexed taker, uint256 makerAssetId, uint256 takerAssetId, uint256 makerAmountFilled, uint256 takerAmountFilled, uint256 fee)";
@@ -61,10 +60,7 @@ export type LimitlessFeeShareConfig = {
   source: "db" | "env";
 };
 
-export type LimitlessOrderStatusItem = {
-  orderId: string;
-  payload: Record<string, unknown>;
-};
+export type { LimitlessOrderStatusItem } from "./limitless-order-status.js";
 
 export type LimitlessAccrualOrderRow = {
   id: string;
@@ -226,13 +222,6 @@ function normalizeSide(value: unknown): "BUY" | "SELL" | null {
   if (parsed === 0) return "BUY";
   if (parsed === 1) return "SELL";
   return null;
-}
-
-function extractResults(payload: unknown): Record<string, unknown>[] {
-  if (isRecord(payload) && Array.isArray(payload.results)) {
-    return payload.results.filter(isRecord);
-  }
-  return [];
 }
 
 function extractStatusData(
@@ -879,50 +868,7 @@ export async function resolveLimitlessFeeShareConfig(
 async function fetchLimitlessOrderStatusBatch(
   lookups: Array<{ orderId: string; clientOrderId?: string | null }>,
 ): Promise<Map<string, LimitlessOrderStatusItem>> {
-  if (!lookups.length) return new Map();
-  const items = lookups.flatMap((lookup) => [
-    { orderId: lookup.orderId },
-    ...(lookup.clientOrderId ? [{ clientOrderId: lookup.clientOrderId }] : []),
-  ]);
-  const out = new Map<string, LimitlessOrderStatusItem>();
-  for (
-    let offset = 0;
-    offset < items.length;
-    offset += LIMITLESS_STATUS_BATCH_MAX_ITEMS
-  ) {
-    const batchItems = items.slice(
-      offset,
-      offset + LIMITLESS_STATUS_BATCH_MAX_ITEMS,
-    );
-    const upstream = await limitlessRequest({
-      method: "POST",
-      requestPath: "/orders/status/batch",
-      auth: "partner_hmac",
-      body: {
-        items: batchItems,
-      },
-    });
-    if (!upstream.ok) {
-      const message = extractLimitlessMessage(upstream.payload);
-      throw new Error(
-        message
-          ? `Limitless order status batch failed (${upstream.status}): ${message}`
-          : `Limitless order status batch failed (${upstream.status}).`,
-      );
-    }
-
-    for (const result of extractResults(upstream.payload)) {
-      if (result.status !== "found") continue;
-      const orderId = textOrNull(result.orderId);
-      const clientOrderId = textOrNull(result.clientOrderId);
-      const statusOrderId = orderId ?? clientOrderId;
-      if (!statusOrderId) continue;
-      const item = { orderId: statusOrderId, payload: result };
-      if (orderId) out.set(orderId, item);
-      if (clientOrderId) out.set(`client:${clientOrderId}`, item);
-    }
-  }
-  return out;
+  return fetchSharedLimitlessOrderStatusBatch(lookups);
 }
 
 async function buildLimitlessVenueShareAccrualResultFromReceipt(inputs: {

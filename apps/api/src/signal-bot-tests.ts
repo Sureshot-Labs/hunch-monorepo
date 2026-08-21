@@ -4191,6 +4191,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       let insertCount = 0;
       let marketOrderable = true;
       let marketVenue = "polymarket";
+      let marketMetadata: Record<string, unknown> = {};
       let readinessMode: "auto" | "disabled" = "disabled";
       let telegramTradingEnabled = true;
       let autoManagedMaxAmountUsd = 1;
@@ -4295,7 +4296,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
                   status: marketOrderable ? "ACTIVE" : "CLOSED",
                   accepting_orders: marketOrderable,
                   outcomes: JSON.stringify(["YES", "NO"]),
-                  metadata: {},
+                  metadata: marketMetadata,
                   close_time: new Date(
                     Date.now() + (marketOrderable ? 60_000 : -60_000),
                   ),
@@ -4868,11 +4869,12 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
               button.callback_data?.startsWith("hbt:buy:"),
           ),
         true,
-        "Limitless presets must enter the bot shortfall flow instead of opening the Mini App",
+        "Limitless CLOB FOK is an exact spend-bounded sealed handoff",
       );
       assert.equal(
         appFallbackButtons.slice(0, 8).some((button) => "web_app" in button),
         false,
+        "the sealed Buy is issued by the amount callbacks, not Open market",
       );
       const yesButton = appFallbackButtons[0];
       const noButton = appFallbackButtons[1];
@@ -4882,6 +4884,37 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         decodeStartAppPayload(readWebAppStartParam(appFallbackButtons[8])),
         "event-1|market-1|",
       );
+
+      // AMM has a separate pre-broadcast endpoint and is available through
+      // the same sealed handoff choice. The Mini App selects that endpoint
+      // from the returned market execution mode.
+      marketMetadata = { executionMode: "amm" };
+      const limitlessAmmMessage = await buildTelegramBotTradingMarketMessage({
+        appBaseUrl: "https://app.hunch.trade",
+        chatId: "999",
+        db: db as never,
+        marketRef: "market-1",
+        signerInspector: readyTelegramSignerInspector,
+        telegramMiniAppEnabled: true,
+        telegramUserId: 999,
+        trading: {
+          getReadiness: async () =>
+            buildTestPolymarketReadiness({
+              code: "telegram_trading_disabled",
+              message: "Direct Limitless trading is not enabled.",
+            }),
+        } as never,
+      });
+      assert.equal(
+        (limitlessAmmMessage.reply_markup?.inline_keyboard.flat() ?? []).some(
+          (button) =>
+            "callback_data" in button &&
+            button.callback_data?.startsWith("hbt:buy:"),
+        ),
+        true,
+        "Limitless AMM is offered through its durable pre-broadcast consumer",
+      );
+      marketMetadata = {};
     },
   },
   {

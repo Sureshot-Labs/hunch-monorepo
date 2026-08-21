@@ -205,6 +205,25 @@ export const limitlessAmmFundingClaimBodySchema = z.object({
     .regex(/^0x[a-fA-F0-9]+$/, "transactionData is invalid"),
 });
 
+/**
+ * A v2 handoff AMM Buy is signed by the Mini App, then broadcast by Hunch.
+ * Keeping the signed bytes in this request lets the API claim its immutable
+ * hash before any RPC submission; the value is never stored in Postgres.
+ */
+export const limitlessAmmHandoffBroadcastBodySchema = z.object({
+  telegramAppHandoffId: z.string().uuid(),
+  // Telegram plan fingerprints are SHA-256 hex without the EVM `0x` prefix.
+  telegramAppHandoffPlanFingerprint: z
+    .string()
+    .regex(/^[0-9a-f]{64}$/iu, "Invalid Telegram handoff fingerprint"),
+  tokenId: zRequiredString("tokenId is required"),
+  marketSlug: zLimitlessSlug.optional(),
+  signedTransaction: z
+    .string()
+    .regex(/^0x[a-fA-F0-9]+$/, "signedTransaction is invalid")
+    .max(65_536, "signedTransaction is too large"),
+});
+
 export const limitlessAmmFundingStartBodySchema = z.object({
   attemptId: z.string().uuid(),
   claimToken: z.string().uuid(),

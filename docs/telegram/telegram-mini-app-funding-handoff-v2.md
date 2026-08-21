@@ -185,10 +185,8 @@ New handoffs have one target contract: **v2 only**. V1 stays readable solely
 so that a token issued before the v2 rollout can finish safely; it is neither
 a feature flag nor a second implementation to test or extend.
 
-The ordinary Polymarket CLOB order path accepts a sealed direct-trade binding.
-Limitless remains available through a funded reservation continuation, but its
-direct CLOB recovery record is not implemented yet, so the bot must not issue
-a direct-trade v2 handoff for it. The exact public fields are deliberately explicit so the
+The ordinary Polymarket and Limitless **CLOB** order paths accept a sealed
+direct-trade binding. The exact public fields are deliberately explicit so the
 Mini App cannot mistake this for a funding reservation:
 
 ```ts
@@ -215,8 +213,8 @@ ordinary order, the same transaction records the order ID on that intent.
 After the v2 Mini App consumer is present, enabling the feature is only a
 runtime-policy change:
 
-1. Deploy the backend with migration `0226` applied.
-2. Ship the v2 Mini App client and verify one direct Buy and one client-funded
+1. Deploy the backend. This protocol needs no schema migration.
+2. Ship the v2 Mini App consumer and verify one direct Buy and one client-funded
    Buy end-to-end.
 3. Set `miniAppHandoffContractVersion: 2` and choose
    `miniAppHandoffMode: fallback` or `always`.
@@ -250,23 +248,77 @@ existing exact Polymarket Deposit Wallet external-handoff executor. Unknown
 When `commit` or `execute` returns `direct_trade_continuation_required`, enter
 the ordinary venue Buy continuation with the sealed `handoffId` and
 `planFingerprint`; do not call the funding operation APIs or manufacture a
-reservation. Pass them as `telegramAppHandoffId` and
-`telegramAppHandoffPlanFingerprint` to the normal CLOB order endpoint. The
-normal trade persistence endpoint performs the direct-binding transaction
-described above. Its fresh quote may submit only within the sealed bounds;
+reservation. Its fresh quote may submit only within the sealed bounds;
 otherwise it presents a fresh Review without moving money.
 
-Current direct Polymarket v2 execution is FOK-only. Before the provider call,
+Direct Polymarket v2 execution is FOK-only. Before the provider call,
 the endpoint writes the order hash and a non-replayable recovery payload; if
 the response or local persistence is lost, normal reconciliation can persist
 the discovered order without signing or sending a second order.
 
-Limitless has no direct-trade v2 handoff yet: AMM has its own client-transaction
-lifecycle and CLOB still needs a durable pre-provider recovery record. Do not
-issue or enable either direct Limitless path until its matching claim and
-reconciliation boundary are added. This does **not** limit funded Limitless
-continuation: it continues through the existing funding-reservation claim/report
-path.
+Limitless CLOB is a direct sealed-handoff consumer only for **FOK** Buys;
+GTC is never used. The sealed scope binds the controller, outcome and exact
+nominal/max spend. Limitless defines signed `takerAmount = 1` as a market-order
+sentinel rather than a minimum-receive field, so the generic minimum-shares
+estimate is intentionally not imposed on this FOK request. Before calling the
+venue, the API durably claims its deterministic `clientOrderId`; reconciliation
+uses `/orders/status/batch`. A FOK no-fill terminates the Buy without creating
+a resting or replacement order. A changing CLOB preview before the POST is not
+a reason to reject this branch: FOK executes immediately at the current venue
+price or fills nothing, while the sealed maximum spend remains the bound.
+
+For that CLOB branch, call the ordinary endpoint with the existing client-signed
+Limitless order payload and the two sealed-binding fields:
+
+```ts
+POST /trade/limitless/order
+{
+  marketSlug,
+  order, // existing signed Limitless CLOB order; takerAmount is exactly "1"
+  orderType: "FOK",
+  telegramAppHandoffId: handoffId,
+  telegramAppHandoffPlanFingerprint: planFingerprint,
+}
+```
+
+Do not send a client order ID: the backend derives its deterministic one from
+the handoff. If this request times out or its response is lost, first reopen
+the same handoff and read its projection or call `/execute`. If it remains
+`executing` with no terminal result, resend **the same signed FOK order** and
+the same handoff binding; do **not** build or sign a replacement order. The
+backend reuses its deterministic client order ID and reconciliation owns the
+result.
+
+Limitless AMM has a separate, equally exact direct boundary; it must not call
+the receipt-recorder `POST /trade/limitless/orders/amm` first. The Mini App
+builds the exact `buy(amount, outcomeIndex, minOutcomeTokens)` transaction,
+signs its raw EIP-155 bytes, then calls:
+
+```ts
+POST /trade/limitless/orders/amm/handoff-broadcast
+{
+  telegramAppHandoffId: handoffId,
+  telegramAppHandoffPlanFingerprint: planFingerprint,
+  tokenId,
+  marketSlug,
+  signedTransaction,
+}
+```
+
+The API verifies the recovered signer, Base chain, AMM address, `buy` selector,
+outcome, USDC debit and minimum output against the sealed scope. It durably
+claims the raw transaction hash **before** broadcasting those same bytes.
+Timeouts and lost RPC responses remain reconcilable by that hash; they never
+reopen the Buy. The signed raw transaction is not persisted by the server. If
+this endpoint returns `status: "reconciling"` with
+`retrySameSignedTransaction: true`, or its HTTP response is lost, retain and
+resend **only the identical signedTransaction bytes** to this same endpoint.
+It produces the same hash and reuses the existing claim; never construct or
+sign a replacement AMM Buy. The Mini App must use this endpoint before AMM
+handoffs are advertised by the bot; a generic wallet-send followed by the
+receipt recorder is not a valid handoff protocol. Telegram advertises both
+Limitless CLOB FOK and AMM in `fallback` and `always` modes; the Mini App
+selects this endpoint for AMM.
 
 After that endpoint claims the direct Buy, `/execute` returns
 `direct_trade_in_flight` until the normal order reconciliation is terminal.

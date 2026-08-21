@@ -21,6 +21,8 @@ import {
   isTelegramAppHandoffV2DirectTradeVenue,
   isTelegramAppHandoffV2TradeVenue,
 } from "./services/telegram-app-handoff-v2-contract.js";
+import { requiresTelegramAppHandoffV2MinimumReceive } from "./repos/telegram-app-handoff-v2-direct-trade-repository.js";
+import { limitlessAmmHandoffBroadcastBodySchema } from "./schemas/limitless-private.js";
 
 const POLYGON_PUSD = {
   assetId: "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB",
@@ -249,13 +251,37 @@ assert.equal(isTelegramAppHandoffV2TradeVenue("limitless"), true);
 assert.equal(isTelegramAppHandoffV2DirectTradeVenue("polymarket"), true);
 assert.equal(
   isTelegramAppHandoffV2DirectTradeVenue("limitless"),
-  false,
-  "Limitless V2 funding does not imply a recoverable direct Buy",
+  true,
+  "Limitless direct Buy uses the same durable handoff claim as Polymarket",
 );
 assert.equal(
   isTelegramAppHandoffV2TradeVenue("kalshi"),
   false,
   "a known Hunch venue is not a v2 handoff venue until its consumer exists",
+);
+assert.equal(
+  requiresTelegramAppHandoffV2MinimumReceive({
+    executionKind: "clob",
+    venue: "limitless",
+  }),
+  false,
+  "Limitless CLOB FOK is limited by sealed spend, not preview shares",
+);
+assert.equal(
+  requiresTelegramAppHandoffV2MinimumReceive({
+    executionKind: "amm",
+    venue: "limitless",
+  }),
+  true,
+  "Limitless AMM carries an exact minimum output",
+);
+assert.equal(
+  requiresTelegramAppHandoffV2MinimumReceive({
+    executionKind: "clob",
+    venue: "polymarket",
+  }),
+  true,
+  "Polymarket CLOB keeps its sealed minimum shares",
 );
 assert.deepEqual(
   resolveTelegramAppHandoffFundingCapability({
@@ -321,6 +347,27 @@ const directTrade = buildTelegramAppHandoffV2DirectTradePlan({
   controllerWalletAddress: "0x0000000000000000000000000000000000000001",
   trade,
 });
+
+assert.equal(
+  limitlessAmmHandoffBroadcastBodySchema.safeParse({
+    telegramAppHandoffId: "00000000-0000-4000-8000-000000000004",
+    telegramAppHandoffPlanFingerprint: "a".repeat(64),
+    signedTransaction: "0x01",
+    tokenId: "123",
+  }).success,
+  true,
+  "AMM handoff accepts the same unprefixed fingerprint persisted by Telegram",
+);
+assert.equal(
+  limitlessAmmHandoffBroadcastBodySchema.safeParse({
+    telegramAppHandoffId: "00000000-0000-4000-8000-000000000004",
+    telegramAppHandoffPlanFingerprint: `0x${"a".repeat(64)}`,
+    signedTransaction: "0x01",
+    tokenId: "123",
+  }).success,
+  false,
+  "AMM handoff must not reinterpret an EVM bytes32 as a Telegram fingerprint",
+);
 assert.equal(directTrade.kind, "direct_trade");
 assert.equal(isTelegramAppHandoffV2Plan(directTrade), true);
 assert.equal(
@@ -328,8 +375,8 @@ assert.equal(
     ...directTrade,
     trade: { ...trade, venue: "limitless" },
   }),
-  false,
-  "direct V2 plans cannot represent Limitless until direct recovery exists",
+  true,
+  "direct V2 plans represent the ordinary Limitless client-signed Buy",
 );
 assert.equal(
   isTelegramAppHandoffV2Plan({

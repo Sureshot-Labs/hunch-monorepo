@@ -7091,6 +7091,7 @@ export async function submitPolymarketClientSignedOrder(input: {
       };
     }
     directHandoffSubmission = {
+      executionKind: "clob",
       marketId: fundingMarketId,
       outcomeTokenId: normalizedForHash.tokenId,
       receiveRaw: normalizedForHash.takerAmount,

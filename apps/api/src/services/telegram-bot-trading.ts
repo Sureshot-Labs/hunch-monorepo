@@ -2863,6 +2863,16 @@ function canUseTelegramAppHandoffV2(input: {
   );
 }
 
+/**
+ * Direct v2 plans select one of the ordinary web consumers which takes a
+ * durable claim before its provider/chain boundary.
+ */
+function hasTelegramAppHandoffV2DirectMarketConsumer(
+  venue: TelegramBotTradingVenue,
+): boolean {
+  return isTelegramAppHandoffV2DirectTradeVenue(venue);
+}
+
 function canUseTelegramAppHandoffV2DirectTrade(input: {
   intent: TelegramTradeIntentRow;
   policy: SignalBotPolicy;
@@ -2870,13 +2880,11 @@ function canUseTelegramAppHandoffV2DirectTrade(input: {
 }): boolean {
   return (
     canUseTelegramAppHandoffV2(input) &&
-    // Direct plans cross an ordinary venue-order boundary. Polymarket stores a
-    // deterministic order hash before the provider call and can reconcile an
-    // ambiguous response. Limitless funded plans are supported through the
-    // generic reservation path, but its direct CLOB and AMM paths do not yet
-    // have an equivalent pre-provider recovery record, so never issue a
-    // sealed direct Buy that could become unrecoverable after a transport loss.
-    isTelegramAppHandoffV2DirectTradeVenue(input.intent.venue)
+    // Direct plans cross an ordinary venue-order boundary. Each supported
+    // consumer takes its deterministic durable claim before it calls the
+    // provider: Polymarket uses its signed order hash, Limitless CLOB uses a
+    // client order id, and Limitless AMM uses the signed transaction hash.
+    hasTelegramAppHandoffV2DirectMarketConsumer(input.intent.venue)
   );
 }
 
@@ -5276,7 +5284,8 @@ export async function buildTelegramBotTradingMarketMessage(input: {
   const sealedAppHandoffAvailable =
     v2HandoffPolicyEnabled &&
     buyExecutionCapability.sealedAppHandoffExact &&
-    handoffAuthorityBinding != null;
+    handoffAuthorityBinding != null &&
+    hasTelegramAppHandoffV2DirectMarketConsumer(market.venue);
   const [automationAllowed, buyAllowed, redeemAllowed, sellAllowed] =
     await Promise.all([
       venueLifecycleAllows(input.db, market.venue, "automation"),
@@ -5374,7 +5383,12 @@ export async function buildTelegramBotTradingMarketMessage(input: {
   const buyDeliveryMode = resolveTelegramBuyDeliveryMode({
     capability: buyExecutionCapability,
     commonBuySurfaceReady,
-    handoffContractAvailable: v2HandoffPolicyEnabled,
+    // A policy can allow v2 generally while a particular market still has no
+    // exact web consumer (for example an AMM without its pre-broadcast
+    // handoff boundary).  Delivery must use the same market-scoped fact as
+    // the buttons and custom-input path; otherwise `always` advertises an
+    // operation that cannot be completed safely.
+    handoffContractAvailable: sealedAppHandoffAvailable,
     miniAppHandoffMode: policy.miniAppHandoffMode,
     telegramMiniAppEnabled: input.telegramMiniAppEnabled === true,
     venueAllowedForBotSubmit: authorizationVenueAllowed,

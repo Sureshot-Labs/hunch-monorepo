@@ -32,6 +32,9 @@ import {
 } from "../repos/orders-repo.js";
 import {
   assertTelegramAppHandoffV2FundedTradeSubmission,
+  claimTelegramAppHandoffV2DirectTradeSubmission,
+  failTelegramAppHandoffV2DirectTradeSubmission,
+  type TelegramAppHandoffV2DirectTradeBinding,
   type TelegramAppHandoffV2DirectTradeSubmission,
   type TelegramAppHandoffV2ScopeAssertion,
 } from "../repos/telegram-app-handoff-v2-direct-trade-repository.js";
@@ -312,6 +315,15 @@ type LimitlessAmmOrderBody = {
   fundingTradeAttemptId?: string;
 };
 
+type LimitlessAmmHandoffBroadcastBody = {
+  marketSlug?: string | null;
+  telegramAppHandoffId: string;
+  telegramAppHandoffPlanFingerprint: string;
+  tokenId: string;
+  /** Fully signed EIP-155 transaction. It is never persisted or replayed. */
+  signedTransaction: string;
+};
+
 type LimitlessAmmFundingClaimBody = {
   amountUsdRaw: string;
   fundingOperationId: string;
@@ -433,6 +445,16 @@ function mapLimitlessUpstreamStatus(status: number): number {
   if (status === 401 || status === 403) return 400;
   if (status >= 400 && status < 500) return status;
   return 502;
+}
+
+/**
+ * These are the only client responses that prove the CLOB rejected the order
+ * before it could create one. Timeout, conflict and throttling responses can
+ * all be returned after a proxy/venue boundary and must remain reconcilable by
+ * the deterministic client order ID.
+ */
+function isLimitlessClobDefinitiveClientRejection(status: number): boolean {
+  return status >= 400 && status < 500 && ![408, 409, 429].includes(status);
 }
 
 function buildLimitlessOnBehalfHeaders(
@@ -3110,7 +3132,7 @@ function extractLimitlessSubmittedOrder(payload: unknown): {
   };
 }
 
-async function recordLimitlessFokNoFill(input: {
+type LimitlessFokNoFillInput = {
   orderPayload: unknown;
   pool: ApiTradingApplicationServiceInput["pool"];
   price: number | null;
@@ -3121,7 +3143,9 @@ async function recordLimitlessFokNoFill(input: {
   tokenId: string | null;
   userId: string;
   venueOrderId: string | null;
-}): Promise<
+};
+
+async function recordLimitlessFokNoFill(input: LimitlessFokNoFillInput): Promise<
   Extract<LimitlessClientSignedOrderResult, { ok: true }>["payload"]
 > {
   if (input.venueOrderId) {
@@ -3176,6 +3200,115 @@ async function recordLimitlessFokNoFill(input: {
     orderId: input.venueOrderId ?? undefined,
     payload: input.rawPayload,
   };
+}
+
+/**
+ * A FOK no-fill is the single CLOB outcome that conclusively proves no Buy
+ * occurred. Both a rejected FOK response and a successful no-fill response
+ * converge here so funding reservations and sealed direct intents cannot
+ * drift into different terminal semantics.
+ */
+async function finalizeLimitlessFokNoFill(input: LimitlessFokNoFillInput & {
+  clientOrderId: string;
+  directHandoffBinding: TelegramAppHandoffV2DirectTradeBinding | null;
+  directHandoffSubmission: TelegramAppHandoffV2DirectTradeSubmission | null;
+  fundingReservation: TradeIntent["fundingReservation"] | null;
+  fundingTradeAttemptId: string | null;
+}): Promise<Extract<LimitlessClientSignedOrderResult, { ok: true }>["payload"]> {
+  const noFill = await recordLimitlessFokNoFill(input);
+  if (input.fundingReservation && input.fundingTradeAttemptId) {
+    await releaseFundingReservationForDefinitiveTradeFailure(input.pool, {
+      userId: input.userId,
+      link: input.fundingReservation,
+      tradeAttemptId: input.fundingTradeAttemptId,
+      outcomeReason: "trade_no_fill",
+      errorCode: "trade_no_fill",
+      externalReference: input.venueOrderId ?? input.clientOrderId,
+      broadcastMayHaveOccurred: true,
+    });
+  }
+  if (
+    input.directHandoffBinding &&
+    input.directHandoffSubmission &&
+    !input.fundingReservation
+  ) {
+    await failTelegramAppHandoffV2DirectTradeSubmission(input.pool, {
+      binding: input.directHandoffBinding,
+      reason: {
+        code: "limitless_trade_no_fill",
+        message: "Limitless could not fill the sealed Buy. Nothing was bought.",
+      },
+      submission: input.directHandoffSubmission,
+      userId: input.userId,
+    });
+  }
+  return noFill;
+}
+
+function buildLimitlessClobDirectHandoffSubmission(input: {
+  makerAmount: number | null;
+  marketId: string | null;
+  signer: string;
+  tokenId: string | null;
+}): TelegramAppHandoffV2DirectTradeSubmission | null {
+  if (
+    !input.marketId ||
+    !input.tokenId ||
+    input.makerAmount == null ||
+    !Number.isSafeInteger(input.makerAmount) ||
+    input.makerAmount <= 0
+  ) {
+    return null;
+  }
+  return {
+    executionKind: "clob",
+    marketId: input.marketId,
+    outcomeTokenId: input.tokenId,
+    // Limitless requires the literal FOK sentinel; the sealed cap is spend.
+    receiveRaw: "1",
+    signer: input.signer,
+    spendRaw: input.makerAmount.toString(),
+    venue: "limitless",
+  };
+}
+
+async function claimLimitlessClobDirectHandoff(input: {
+  assertCurrentScope: TelegramAppHandoffV2ScopeAssertion | undefined;
+  binding: TelegramAppHandoffV2DirectTradeBinding;
+  clientOrderId: string;
+  marketSlug: string;
+  orderType: "FOK" | "GTC";
+  ownerId: number;
+  pool: ApiTradingApplicationServiceInput["pool"];
+  price: number | null;
+  size: number | null;
+  submission: TelegramAppHandoffV2DirectTradeSubmission;
+  tokenId: string | null;
+  userId: string;
+}): Promise<void> {
+  if (!input.assertCurrentScope) {
+    throw new Error("sealed handoff scope cannot be verified");
+  }
+  await claimTelegramAppHandoffV2DirectTradeSubmission(input.pool, {
+    assertCurrentScope: input.assertCurrentScope,
+    binding: input.binding,
+    reconcileKeys: { clientOrderId: input.clientOrderId, tradeType: "clob" },
+    // The durable claim never retains or replays the client signature.
+    recoveryPayload: {
+      clientOrderId: input.clientOrderId,
+      kind: "limitless",
+      marketSlug: input.marketSlug,
+      orderPayload: { clientOrderId: input.clientOrderId },
+      orderType: input.orderType,
+      ownerId: input.ownerId,
+      price: input.price,
+      requestAuth: { auth: "partner_hmac" },
+      size: input.size,
+      tokenId: input.tokenId,
+    },
+    submission: input.submission,
+    userId: input.userId,
+  });
 }
 
 export async function submitLimitlessClientSignedOrder(input: {
@@ -3253,14 +3386,14 @@ export async function submitLimitlessClientSignedOrder(input: {
       },
     };
   }
-  if (directHandoffBinding && !fundingReservation) {
+  // Telegram v2 never creates a resting Limitless order. It signs one FOK
+  // Buy, so closing or replaying the Mini App cannot leave a GTC order live
+  // at the venue. Its bound is the sealed maximum spend.
+  if (directHandoffBinding && input.body.orderType !== "FOK") {
     return {
       ok: false,
-      statusCode: 409,
-      payload: {
-        error:
-          "Limitless direct Mini App handoff is not enabled until its CLOB recovery record is available",
-      },
+      statusCode: 400,
+      payload: { error: "A sealed Telegram handoff requires a FOK Buy." },
     };
   }
   if (fundingReservation && side !== "BUY") {
@@ -3425,6 +3558,9 @@ export async function submitLimitlessClientSignedOrder(input: {
   }
 
   if (input.body.orderType === "FOK") {
+    // Limitless defines FOK takerAmount as the literal market-order sentinel.
+    // It is not a minimum-receive field, so no sealed handoff may reinterpret
+    // it as one. AMM uses its signed minOutcomeTokens argument instead.
     if (coercedTakerAmount !== 1) {
       return {
         ok: false,
@@ -3587,8 +3723,21 @@ export async function submitLimitlessClientSignedOrder(input: {
   let fundingConsumerIntent: ReturnType<
     typeof buildFundingTradeConsumerIntent
   > | null = null;
-  let directHandoffSubmission: TelegramAppHandoffV2DirectTradeSubmission | null =
-    null;
+  const directHandoffSubmission = directHandoffBinding
+    ? buildLimitlessClobDirectHandoffSubmission({
+        makerAmount,
+        marketId: fundingMarketId,
+        signer,
+        tokenId,
+      })
+    : null;
+  if (directHandoffBinding && !directHandoffSubmission) {
+    return {
+      ok: false,
+      statusCode: 409,
+      payload: { error: "Telegram handoff market binding is unavailable" },
+    };
+  }
   if (
     fundingReservation &&
     fundingMarketId &&
@@ -3671,6 +3820,43 @@ export async function submitLimitlessClientSignedOrder(input: {
           outcomeReason: "trade_no_fill",
         });
       }
+      if (
+        directHandoffBinding &&
+        directHandoffSubmission &&
+        !fundingReservation
+      ) {
+        try {
+          await claimLimitlessClobDirectHandoff({
+            assertCurrentScope: input.assertTelegramAppHandoffV2Scope,
+            binding: directHandoffBinding,
+            clientOrderId,
+            marketSlug: input.body.marketSlug,
+            orderType: input.body.orderType,
+            ownerId,
+            pool: input.pool,
+            price,
+            size,
+            submission: directHandoffSubmission,
+            tokenId,
+            userId: input.userId,
+          });
+          await failTelegramAppHandoffV2DirectTradeSubmission(input.pool, {
+            binding: directHandoffBinding,
+            reason: {
+              code: "limitless_trade_no_fill",
+              message: "Limitless had no immediate liquidity for the sealed Buy.",
+            },
+            submission: directHandoffSubmission,
+            userId: input.userId,
+          });
+        } catch {
+          return {
+            ok: false,
+            statusCode: 409,
+            payload: { error: "Telegram handoff is no longer valid for this Buy" },
+          };
+        }
+      }
       return {
         ok: true,
         payload: {
@@ -3685,44 +3871,6 @@ export async function submitLimitlessClientSignedOrder(input: {
         },
       };
     }
-    if (directHandoffBinding) {
-      if (!fundingMarketId || depthQuote.status !== "ready") {
-        return {
-          ok: false,
-          statusCode: 409,
-          payload: { error: "Telegram handoff market binding is unavailable" },
-        };
-      }
-      directHandoffSubmission = {
-        marketId: fundingMarketId,
-        outcomeTokenId: requestedRawTokenId,
-        receiveRaw: Math.floor(
-          depthQuote.executableShares * 1_000_000,
-        ).toString(),
-        signer,
-        spendRaw: makerAmount.toString(),
-        venue: "limitless",
-      };
-    }
-  } else if (directHandoffBinding) {
-    if (!fundingMarketId || coercedSideValue == null) {
-      return {
-        ok: false,
-        statusCode: 409,
-        payload: { error: "Telegram handoff market binding is unavailable" },
-      };
-    }
-    directHandoffSubmission = {
-      marketId: fundingMarketId,
-      outcomeTokenId: requestedRawTokenId,
-      receiveRaw: (coercedSideValue === 0
-        ? takerAmount
-        : makerAmount
-      ).toString(),
-      signer,
-      spendRaw: (coercedSideValue === 0 ? makerAmount : takerAmount).toString(),
-      venue: "limitless",
-    };
   }
   if (directHandoffBinding && directHandoffSubmission) {
     try {
@@ -3736,6 +3884,21 @@ export async function submitLimitlessClientSignedOrder(input: {
           operationId: fundingReservation.operationId,
           reservationId: fundingReservation.reservationId,
           submission: directHandoffSubmission,
+          userId: input.userId,
+        });
+      } else {
+        await claimLimitlessClobDirectHandoff({
+          binding: directHandoffBinding,
+          assertCurrentScope: input.assertTelegramAppHandoffV2Scope,
+          clientOrderId,
+          marketSlug: input.body.marketSlug,
+          orderType: input.body.orderType,
+          ownerId,
+          pool: input.pool,
+          price,
+          size,
+          submission: directHandoffSubmission,
+          tokenId,
           userId: input.userId,
         });
       }
@@ -3826,6 +3989,28 @@ export async function submitLimitlessClientSignedOrder(input: {
     }
   }
 
+  const finalizeCurrentFokNoFill = (
+    rawPayload: unknown,
+    venueOrderId: string | null,
+  ) =>
+    finalizeLimitlessFokNoFill({
+      clientOrderId,
+      directHandoffBinding,
+      directHandoffSubmission,
+      fundingReservation,
+      fundingTradeAttemptId,
+      orderPayload,
+      pool: input.pool,
+      price,
+      rawPayload,
+      side,
+      signer,
+      size,
+      tokenId,
+      userId: input.userId,
+      venueOrderId,
+    });
+
   let upstream: Awaited<ReturnType<typeof submitLimitlessClobOrderToVenue>>;
   try {
     upstream = await submitLimitlessClobOrderToVenue({
@@ -3843,6 +4028,8 @@ export async function submitLimitlessClientSignedOrder(input: {
         broadcastMayHaveOccurred: true,
       });
     }
+    // The provider may have accepted a request whose response was lost. Leave
+    // a direct handoff executing for reconciliation; never reopen this Buy.
     throw error;
   }
 
@@ -3853,29 +4040,10 @@ export async function submitLimitlessClientSignedOrder(input: {
       isLimitlessFokUnmatchedMessage(upstreamMessage)
     ) {
       const venueOrderId = extractLimitlessOrderIdFromMessage(upstreamMessage);
-      const noFill = await recordLimitlessFokNoFill({
-        orderPayload,
-        pool: input.pool,
-        price,
-        rawPayload: upstream.payload,
-        side,
-        signer,
-        size,
-        tokenId,
-        userId: input.userId,
+      const noFill = await finalizeCurrentFokNoFill(
+        upstream.payload,
         venueOrderId,
-      });
-      if (fundingReservation && fundingTradeAttemptId) {
-        await releaseFundingReservationForDefinitiveTradeFailure(input.pool, {
-          userId: input.userId,
-          link: fundingReservation,
-          tradeAttemptId: fundingTradeAttemptId,
-          outcomeReason: "trade_no_fill",
-          errorCode: "trade_no_fill",
-          externalReference: venueOrderId ?? clientOrderId,
-          broadcastMayHaveOccurred: true,
-        });
-      }
+      );
       return {
         ok: true,
         payload: noFill,
@@ -3903,6 +4071,34 @@ export async function submitLimitlessClientSignedOrder(input: {
         });
       }
     }
+    if (
+      directHandoffBinding &&
+      directHandoffSubmission &&
+      !fundingReservation &&
+      isLimitlessClobDefinitiveClientRejection(upstream.status)
+    ) {
+      try {
+        await failTelegramAppHandoffV2DirectTradeSubmission(input.pool, {
+          binding: directHandoffBinding,
+          reason: {
+            code: "limitless_trade_rejected",
+            message:
+              upstreamMessage ??
+              "Limitless rejected the sealed Buy before accepting it.",
+          },
+          submission: directHandoffSubmission,
+          userId: input.userId,
+        });
+      } catch (error) {
+        input.log?.warn?.(
+          { error, clientOrderId, userId: input.userId },
+          "Limitless direct rejection remains reconciling",
+        );
+      }
+    }
+    // A timeout, conflict, throttle, 5xx, or a failed terminal write is not
+    // proof that a CLOB request did not reach the venue. Those direct
+    // handoffs remain executing until the exact clientOrderId has a result.
     return {
       ok: false,
       statusCode: mapLimitlessUpstreamStatus(upstream.status),
@@ -3920,29 +4116,10 @@ export async function submitLimitlessClientSignedOrder(input: {
   const parsedResult = parseLimitlessOrderResult(upstream.payload);
 
   if (input.body.orderType === "FOK" && parsedResult.explicitNoFill) {
-    const noFill = await recordLimitlessFokNoFill({
-      orderPayload,
-      pool: input.pool,
-      price,
-      rawPayload: upstream.payload,
-      side,
-      signer,
-      size,
-      tokenId,
-      userId: input.userId,
+    const noFill = await finalizeCurrentFokNoFill(
+      upstream.payload,
       venueOrderId,
-    });
-    if (fundingReservation && fundingTradeAttemptId) {
-      await releaseFundingReservationForDefinitiveTradeFailure(input.pool, {
-        userId: input.userId,
-        link: fundingReservation,
-        tradeAttemptId: fundingTradeAttemptId,
-        outcomeReason: "trade_no_fill",
-        errorCode: "trade_no_fill",
-        externalReference: venueOrderId ?? clientOrderId,
-        broadcastMayHaveOccurred: true,
-      });
-    }
+    );
     return {
       ok: true,
       payload: noFill,
@@ -4013,6 +4190,10 @@ export async function submitLimitlessClientSignedOrder(input: {
     orderHash: parsedResult.txHash,
     fundingReservation,
     fundingTradeAttemptId,
+    telegramAppHandoffV2DirectTrade:
+      directHandoffBinding && directHandoffSubmission && !fundingReservation
+        ? { ...directHandoffBinding, ...directHandoffSubmission }
+        : null,
     lastUpdate: confirmedFillAt,
     filledAt: confirmedFillAt,
   }).catch(async (error) => {
@@ -4439,6 +4620,295 @@ export async function startLimitlessAmmFundingTrade(input: {
   }
 }
 
+/**
+ * Broadcast one client-signed AMM Buy for a sealed v2 handoff.
+ *
+ * The raw transaction is validated and its deterministic hash is durably
+ * claimed before the RPC broadcast.  This is intentionally not the legacy
+ * `/orders/amm` receipt recorder: a post-broadcast callback alone cannot
+ * recover a Mini App that closes between wallet send and HTTP return.
+ */
+export async function broadcastLimitlessAmmTelegramAppHandoffTrade(input: {
+  assertTelegramAppHandoffV2Scope?: TelegramAppHandoffV2ScopeAssertion;
+  body: LimitlessAmmHandoffBroadcastBody;
+  log?: LimitlessRouteLogger | null;
+  pool: ApiTradingApplicationServiceInput["pool"];
+  signer: string;
+  userId: string;
+}): Promise<
+  | {
+      ok: true;
+      payload: {
+        ok: true;
+        retrySameSignedTransaction?: true;
+        status: "submitted" | "reconciling";
+        txHash: string;
+      };
+    }
+  | { ok: false; statusCode: number; payload: { error: string } }
+> {
+  const signer = toChecksumAddress(input.signer);
+  const binding: TelegramAppHandoffV2DirectTradeBinding = {
+    handoffId: input.body.telegramAppHandoffId,
+    planFingerprint: input.body.telegramAppHandoffPlanFingerprint,
+  };
+  if (!signer || !input.assertTelegramAppHandoffV2Scope) {
+    return {
+      ok: false,
+      statusCode: 400,
+      payload: { error: "A sealed AMM Buy requires an authenticated EVM wallet." },
+    };
+  }
+
+  let transaction: ethers.Transaction;
+  try {
+    transaction = ethers.Transaction.from(input.body.signedTransaction);
+  } catch {
+    return {
+      ok: false,
+      statusCode: 400,
+      payload: { error: "The AMM transaction is not a signed EVM transaction." },
+    };
+  }
+  const txHash = transaction.hash;
+  if (
+    !txHash ||
+    !transaction.from ||
+    normalizeAddress(transaction.from) !== normalizeAddress(signer) ||
+    transaction.chainId !== BigInt(LIMITLESS_CHAIN_ID) ||
+    transaction.value !== 0n
+  ) {
+    return {
+      ok: false,
+      statusCode: 400,
+      payload: { error: "The signed AMM transaction does not match this wallet or network." },
+    };
+  }
+
+  const rawTokenId = normalizeLimitlessRawTokenId(input.body.tokenId);
+  const tokenId = rawTokenId ? normalizeLimitlessScopedTokenId(rawTokenId) : null;
+  const marketId = rawTokenId
+    ? await resolveLimitlessFundingMarketId(input.pool, {
+        marketSlug: input.body.marketSlug,
+        tokenId: rawTokenId,
+      })
+    : null;
+  if (!rawTokenId || !tokenId || !marketId) {
+    return {
+      ok: false,
+      statusCode: 409,
+      payload: { error: "The sealed AMM market or outcome is unavailable." },
+    };
+  }
+
+  let market: LimitlessTradingMarket;
+  try {
+    market = await loadMarketForVenue(input.pool, marketId, "limitless");
+  } catch {
+    return {
+      ok: false,
+      statusCode: 409,
+      payload: { error: "The sealed AMM market is no longer available." },
+    };
+  }
+  const marketAddress = readLimitlessAmmMarketAddress(market.metadata);
+  // The token, rather than a label, is the durable outcome identity.  Derive
+  // the AMM index from that token and reject a transaction for any other leg.
+  const expectedOutcomeIndex =
+    normalizeLimitlessRawTokenId(market.token_yes) === rawTokenId
+      ? 0
+      : normalizeLimitlessRawTokenId(market.token_no) === rawTokenId
+        ? 1
+        : null;
+  if (
+    !isLimitlessAmmMarketMetadata(market.metadata) ||
+    !marketAddress ||
+    expectedOutcomeIndex == null ||
+    !transaction.to ||
+    normalizeAddress(transaction.to) !== normalizeAddress(marketAddress)
+  ) {
+    return {
+      ok: false,
+      statusCode: 409,
+      payload: { error: "The signed transaction is not for the sealed Limitless AMM market." },
+    };
+  }
+
+  let amountUsdRaw: bigint;
+  let minOutcomeTokensRaw: bigint;
+  try {
+    const decoded = LIMITLESS_AMM_IFACE.parseTransaction({
+      data: transaction.data,
+      value: transaction.value,
+    });
+    if (!decoded || decoded.name !== "buy") throw new Error("not_buy");
+    amountUsdRaw = BigInt(decoded.args[0]);
+    const decodedOutcomeIndex = BigInt(decoded.args[1]);
+    minOutcomeTokensRaw = BigInt(decoded.args[2]);
+    if (
+      amountUsdRaw <= 0n ||
+      minOutcomeTokensRaw <= 0n ||
+      decodedOutcomeIndex !== BigInt(expectedOutcomeIndex)
+    ) {
+      throw new Error("out_of_scope");
+    }
+  } catch {
+    return {
+      ok: false,
+      statusCode: 400,
+      payload: { error: "The signed transaction is not the exact sealed AMM Buy." },
+    };
+  }
+
+  const amountUsd = Number(amountUsdRaw) / USDC_SCALE;
+  const size = Number(minOutcomeTokensRaw) / USDC_SCALE;
+  if (!Number.isFinite(amountUsd) || !Number.isFinite(size) || size <= 0) {
+    return {
+      ok: false,
+      statusCode: 400,
+      payload: { error: "The AMM transaction amount is outside supported bounds." },
+    };
+  }
+  const submission: TelegramAppHandoffV2DirectTradeSubmission = {
+    executionKind: "amm",
+    marketId,
+    outcomeTokenId: tokenId,
+    receiveRaw: minOutcomeTokensRaw.toString(),
+    signer,
+    spendRaw: amountUsdRaw.toString(),
+    venue: "limitless",
+  };
+  if (
+    !(await venueLifecycleAllowsTradingAction(input.pool, "limitless", "BUY"))
+  ) {
+    return {
+      ok: false,
+      statusCode: 409,
+      payload: { error: "Limitless trading action is temporarily disabled" },
+    };
+  }
+  try {
+    await claimTelegramAppHandoffV2DirectTradeSubmission(input.pool, {
+      assertCurrentScope: input.assertTelegramAppHandoffV2Scope,
+      binding,
+      reconcileKeys: { orderHash: txHash, tradeType: "amm" },
+      recoveryPayload: {
+        allowanceRaw: "0",
+        amountUsd,
+        amountUsdRaw: amountUsdRaw.toString(),
+        approvalAmountRaw: amountUsdRaw.toString(),
+        approvalRequired: false,
+        kind: "limitless",
+        marketAddress,
+        minOutcomeTokensRaw: minOutcomeTokensRaw.toString(),
+        outcomeIndex: expectedOutcomeIndex,
+        price: amountUsd / size,
+        sharesRaw: minOutcomeTokensRaw.toString(),
+        size,
+        tokenId,
+        tradeType: "amm",
+      },
+      submission,
+      userId: input.userId,
+    });
+  } catch {
+    return {
+      ok: false,
+      statusCode: 409,
+      payload: { error: "Telegram handoff is no longer valid for this Buy." },
+    };
+  }
+
+  try {
+    const provider = new ethers.JsonRpcProvider(env.baseRpcUrl);
+    const broadcast = await provider.broadcastTransaction(
+      input.body.signedTransaction,
+    );
+    if (broadcast.hash.toLowerCase() !== txHash.toLowerCase()) {
+      throw new Error("RPC returned a different transaction hash");
+    }
+  } catch (error) {
+    // A lost RPC response can still mean the signed transaction was accepted.
+    // Its hash was recorded before this call, so reconciliation—not a second
+    // Buy—owns the next step.
+    input.log?.warn?.(
+      { error, txHash, userId: input.userId },
+      "Limitless AMM handoff broadcast outcome is ambiguous",
+    );
+    return {
+      ok: true,
+      payload: {
+        ok: true,
+        retrySameSignedTransaction: true,
+        status: "reconciling",
+        txHash,
+      },
+    };
+  }
+
+  try {
+    const recorded = await recordLimitlessAmmOrder({
+      body: {
+        amountUsd,
+        marketSlug: input.body.marketSlug,
+        price: amountUsd / size,
+        side: "BUY",
+        size,
+        tokenId,
+        txHash,
+      },
+      log: input.log,
+      onchainConfirmed: false,
+      pool: input.pool,
+      settlementMode: "confirmed",
+      signer,
+      telegramAppHandoffV2DirectTrade: { ...binding, ...submission },
+      userId: input.userId,
+    });
+    if (!recorded.ok) {
+      const knownRevert = recorded.payload.error
+        .toLowerCase()
+        .includes("failed onchain");
+      if (knownRevert) {
+        try {
+          await failTelegramAppHandoffV2DirectTradeSubmission(input.pool, {
+            binding,
+            reason: {
+              code: "limitless_amm_reverted",
+              message: "The sealed Limitless AMM Buy reverted onchain.",
+            },
+            submission,
+            userId: input.userId,
+          });
+        } catch (error) {
+          input.log?.warn?.(
+            { error, txHash, userId: input.userId },
+            "Limitless AMM handoff revert awaits reconciliation",
+          );
+          return { ok: true, payload: { ok: true, status: "reconciling", txHash } };
+        }
+        return {
+          ok: false,
+          statusCode: recorded.statusCode,
+          payload: recorded.payload,
+        };
+      }
+      input.log?.warn?.(
+        { error: recorded.payload.error, txHash, userId: input.userId },
+        "Limitless AMM handoff record is awaiting reconciliation",
+      );
+      return { ok: true, payload: { ok: true, status: "reconciling", txHash } };
+    }
+  } catch (error) {
+    input.log?.warn?.(
+      { error, txHash, userId: input.userId },
+      "Limitless AMM handoff broadcast persisted for reconciliation",
+    );
+    return { ok: true, payload: { ok: true, status: "reconciling", txHash } };
+  }
+  return { ok: true, payload: { ok: true, status: "submitted", txHash } };
+}
+
 export async function recordLimitlessAmmOrder(input: {
   body: LimitlessAmmOrderBody;
   log?: LimitlessRouteLogger | null;
@@ -4448,6 +4918,10 @@ export async function recordLimitlessAmmOrder(input: {
   source?: Record<string, unknown> | null;
   fundingReservation?: TradeIntent["fundingReservation"];
   fundingTradeAttemptId?: string | null;
+  telegramAppHandoffV2DirectTrade?:
+    | (TelegramAppHandoffV2DirectTradeBinding &
+        TelegramAppHandoffV2DirectTradeSubmission)
+    | null;
   signer: string;
   userId: string;
 }): Promise<LimitlessAmmRecordRouteResult> {
@@ -4470,6 +4944,23 @@ export async function recordLimitlessAmmOrder(input: {
   }
 
   const side = input.body.side;
+  if (input.telegramAppHandoffV2DirectTrade && input.fundingReservation) {
+    return {
+      ok: false,
+      statusCode: 409,
+      payload: {
+        error:
+          "A direct Telegram handoff cannot also consume a funding reservation",
+      },
+    };
+  }
+  if (input.telegramAppHandoffV2DirectTrade && side !== "BUY") {
+    return {
+      ok: false,
+      statusCode: 400,
+      payload: { error: "A Telegram handoff can only submit a sealed Buy" },
+    };
+  }
   if (input.fundingReservation && side !== "BUY") {
     return {
       ok: false,
@@ -4556,6 +5047,8 @@ export async function recordLimitlessAmmOrder(input: {
     orderHash: txHash,
     fundingReservation: input.fundingReservation,
     fundingTradeAttemptId: input.fundingTradeAttemptId,
+    telegramAppHandoffV2DirectTrade:
+      input.telegramAppHandoffV2DirectTrade ?? null,
     postedAt: now,
     lastUpdate: now,
     filledAt,

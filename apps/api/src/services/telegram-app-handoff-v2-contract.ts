@@ -25,12 +25,17 @@ export function isTelegramAppHandoffV2TradeVenue(
 }
 
 /**
- * Direct Buy has a stricter contract than a funded continuation.  Limitless
- * is in the broader V2 registry because its funded reservation consumer is
- * implemented, but it has no durable direct CLOB/AMM recovery record yet.
+ * Direct Buy is limited to venues whose ordinary web order endpoint makes a
+ * durable single-flight claim before it calls the venue. This is deliberately
+ * separate from server-bot execution: the Mini App signs its own order.
+ *
+ * A venue entry is not by itself a market-mode capability. The Telegram
+ * selector also rejects any execution mode that has no matching consumer;
+ * currently that excludes Limitless AMM from the direct CLOB contract.
  */
 export const TELEGRAM_APP_HANDOFF_V2_DIRECT_TRADE_VENUES = [
   "polymarket",
+  "limitless",
 ] as const;
 
 export type TelegramAppHandoffV2DirectTradeVenue =

@@ -4313,6 +4313,7 @@ async function testTelegramAppHandoffV2DirectTradeBinding(): Promise<void> {
     };
     const venueOrderId = `handoff-direct-order:${crypto.randomUUID()}`;
     const submission = {
+      executionKind: "clob" as const,
       marketId,
       outcomeTokenId,
       receiveRaw: "8000000",
