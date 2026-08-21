@@ -531,6 +531,41 @@ export function selectTelegramTradeShortfallAutomatedOption(input: {
   );
 }
 
+/**
+ * Freeze the exact funding leg that the selected server route can actually
+ * guarantee. A trade can be short by less than a route's executable floor
+ * (for example, a $0.324 pUSD gap with a $0.50 Relay minimum). Replanning
+ * only the gap would make the same selected route fail its own economics
+ * checks. The residual stays as controller collateral for the same Buy.
+ */
+export function selectedTelegramTradeShortfallFundingRaw(
+  input: Readonly<{
+    collateralAsset: AssetRef;
+    requestedCollateralRaw: string;
+    shortfallRaw: string;
+    option: Pick<SourceOption, "minimumDestination">;
+  }>,
+): string | null {
+  const minimumDestination = input.option.minimumDestination;
+  if (
+    !minimumDestination ||
+    !sameAsset(minimumDestination.asset, input.collateralAsset) ||
+    !/^[1-9][0-9]*$/u.test(input.shortfallRaw) ||
+    !/^[1-9][0-9]*$/u.test(input.requestedCollateralRaw) ||
+    !/^[1-9][0-9]*$/u.test(minimumDestination.raw)
+  ) {
+    return null;
+  }
+  const minimumRaw = BigInt(minimumDestination.raw);
+  if (
+    minimumRaw < BigInt(input.shortfallRaw) ||
+    minimumRaw > BigInt(input.requestedCollateralRaw)
+  ) {
+    return null;
+  }
+  return minimumDestination.raw;
+}
+
 function proposalSourceAmounts(
   option: SourceOption,
   profileId: string,
@@ -794,6 +829,7 @@ export class TelegramTradeShortfallFundingService {
       Readonly<{
         plan: Awaited<ReturnType<FundingPlanningRuntime["liquidity"]>>;
         profileId: string;
+        fundingDestinationRaw: string;
         relayPersistentApprovalCapRaw?: string;
       }>
     > = [];
@@ -836,7 +872,23 @@ export class TelegramTradeShortfallFundingService {
         requiredProfileId: profileId,
       });
       if (automated) {
-        plannedCandidates.push({ plan, profileId: automated.profileId });
+        const fundingDestinationRaw = selectedTelegramTradeShortfallFundingRaw({
+          collateralAsset: plan.collateralAsset,
+          requestedCollateralRaw: plan.requestedCollateralRaw,
+          shortfallRaw: plan.shortfallRaw,
+          option: automated.option,
+        });
+        if (fundingDestinationRaw) {
+          plannedCandidates.push({
+            plan,
+            profileId: automated.profileId,
+            fundingDestinationRaw,
+          });
+        } else {
+          unavailableReasonCodes.push(
+            "internal_route_shortfall_amount_unavailable",
+          );
+        }
       }
     }
     if (plannedCandidates.length === 0) {
@@ -938,18 +990,10 @@ export class TelegramTradeShortfallFundingService {
       };
     }
     const profileId = candidate.profileId;
-    // The Telegram preview can include controller assets which are convertible
-    // in the general web flow but not by this exact delegated profile.  Never
-    // use that display estimate as the server route amount.  The first
-    // projection observes the actual destination balance; freeze its exact
-    // raw shortfall and quote the selected profile for that amount.
-    const exactAdditionalRaw = candidate.plan.shortfallRaw;
-    if (!/^[1-9][0-9]*$/u.test(exactAdditionalRaw)) {
-      return {
-        kind: "temporarily_unavailable",
-        reasonCodes: ["internal_route_shortfall_amount_unavailable"],
-      };
-    }
+    // The generic preview can include controller assets that the delegated
+    // profile cannot consume. Requote exactly the selected route's guaranteed
+    // funding amount, rather than a smaller display-only shortfall.
+    const exactAdditionalRaw = candidate.fundingDestinationRaw;
     const exactInput: TelegramTradeShortfallIdentity = {
       ...input,
       additionalFundingRaw: exactAdditionalRaw,

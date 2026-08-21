@@ -21,6 +21,7 @@ import {
   buildTelegramTradeShortfallRequest,
   resolveTelegramTradeShortfallCommitAmounts,
   resolveTelegramTradeShortfallExecutionProfile,
+  selectedTelegramTradeShortfallFundingRaw,
   selectTelegramTradeShortfallAutomatedOption,
   telegramTradeShortfallExecutionProfiles,
 } from "./services/telegram-trade-shortfall-funding.js";
@@ -77,6 +78,31 @@ const polygonUsdce: AssetRef = {
   assetId: POLYGON_USDCE_LEGACY,
   decimals: 6,
 };
+
+assert.equal(
+  selectedTelegramTradeShortfallFundingRaw({
+    collateralAsset: polygonPusd,
+    requestedCollateralRaw: "3000000",
+    shortfallRaw: "324098",
+    option: {
+      minimumDestination: { asset: polygonPusd, raw: "500000" },
+    },
+  }),
+  "500000",
+  "a delegated replan must preserve the selected Relay route's executable floor when the trade shortfall is smaller",
+);
+assert.equal(
+  selectedTelegramTradeShortfallFundingRaw({
+    collateralAsset: polygonPusd,
+    requestedCollateralRaw: "3000000",
+    shortfallRaw: "500000",
+    option: {
+      minimumDestination: { asset: polygonPusd, raw: "499999" },
+    },
+  }),
+  null,
+  "a selected route cannot underfund the observed trade shortfall",
+);
 
 const exactTopUpRequest = buildTelegramTradeShortfallRequest({
   authorizationId: "authorization_shortfall_fixture_12345678",
