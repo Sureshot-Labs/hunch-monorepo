@@ -42,6 +42,7 @@ import {
 import {
   parseTelegramBotTradingCallbackData,
   TELEGRAM_BOT_TRADING_CALLBACK_PREFIX,
+  type TelegramBotTradingClientReplyMarkup,
 } from "./telegram-bot-trading-client.js";
 import { normalizeKalshiTradeEligibility } from "./kalshi-trade-eligibility.js";
 import {
@@ -313,6 +314,33 @@ const EXISTING_TRADE_RESOLVING_MESSAGE =
   "Existing trade is still resolving. The bot is checking the venue automatically; no action is needed. Check /trade_status before retrying.";
 const UNKNOWN_TRADE_RESOLVING_MESSAGE =
   "Trade status is unknown. The bot is checking the venue automatically; no action is needed. Check /trade_status before retrying.";
+
+function buildTelegramTradeShortfallUnavailableReplyMarkup(
+  intentId: string,
+  venue: TelegramBotTradingVenue,
+): TelegramBotTradingClientReplyMarkup {
+  return {
+    inline_keyboard: [
+      [
+        {
+          callback_data: `${TELEGRAM_BOT_TRADING_CALLBACK_PREFIX}:retry_buy:${intentId}`,
+          text: "🔄 Retry balance check",
+        },
+      ],
+      [
+        {
+          callback_data: `${TELEGRAM_BOT_TRADING_CALLBACK_PREFIX}:cancel:${intentId}`,
+          text: "⬅️ Back to market",
+        },
+        {
+          callback_data: `hm:v1:deposit:${venue}`,
+          text: "Deposit",
+        },
+      ],
+      [{ callback_data: "hm:v1:home", text: "🏠 Home" }],
+    ],
+  };
+}
 
 function formatTelegramVenueFieldMarkdownV2(venue: string): string {
   const emoji = telegramCustomEmojiMarkdownV2ForVenue(venue);
@@ -1748,6 +1776,7 @@ function venueStatusFromReadiness(input: {
 }
 
 export const telegramBotTradingTestHooks = {
+  buildTelegramTradeShortfallUnavailableReplyMarkup,
   buildTelegramTradeAuthorityBinding,
   buildTelegramSellTradeIntent,
   canAttemptSellSurface,
@@ -9741,20 +9770,10 @@ async function previewTelegramTradeIntent(input: {
             marketTitle: input.intent.market_title,
             venue: input.intent.venue,
           }),
-          reply_markup: {
-            inline_keyboard: [
-              [
-                {
-                  callback_data: `${TELEGRAM_BOT_TRADING_CALLBACK_PREFIX}:retry_buy:${input.intent.id}`,
-                  text: "🔄 Retry balance check",
-                },
-                {
-                  callback_data: `hm:v1:deposit:${input.intent.venue}`,
-                  text: "Deposit",
-                },
-              ],
-            ],
-          },
+          reply_markup: buildTelegramTradeShortfallUnavailableReplyMarkup(
+            input.intent.id,
+            input.intent.venue,
+          ),
         });
         return;
       }

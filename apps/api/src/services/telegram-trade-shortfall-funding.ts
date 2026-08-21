@@ -584,6 +584,22 @@ export function selectedTelegramTradeShortfallFundingRaw(
   return minimumDestination.raw;
 }
 
+/**
+ * The delegated replan may intentionally fund more than the economic gap to
+ * satisfy a route floor. The destination balance is stable when that gap is
+ * unchanged between planning passes; it is not required to equal the larger
+ * funding leg.
+ */
+export function isTelegramTradeShortfallBalanceStable(
+  initialShortfallRaw: string,
+  replannedShortfallRaw: string,
+): boolean {
+  return (
+    isPositiveRawAmount(initialShortfallRaw) &&
+    initialShortfallRaw === replannedShortfallRaw
+  );
+}
+
 function proposalSourceAmounts(
   option: SourceOption,
   profileId: string,
@@ -1056,7 +1072,12 @@ export class TelegramTradeShortfallFundingService {
         ],
       };
     }
-    if (delegatedPlan.shortfallRaw !== exactAdditionalRaw) {
+    if (
+      !isTelegramTradeShortfallBalanceStable(
+        candidate.plan.shortfallRaw,
+        delegatedPlan.shortfallRaw,
+      )
+    ) {
       return {
         kind: "temporarily_unavailable",
         reasonCodes: ["internal_route_destination_balance_changed"],
