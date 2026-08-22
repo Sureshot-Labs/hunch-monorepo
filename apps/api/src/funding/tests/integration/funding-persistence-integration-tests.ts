@@ -88,6 +88,7 @@ import {
 } from "../../reconciliation/funding-reducer.js";
 import { OwnedRouteDestinationObserver } from "../../reconciliation/owned-route-destination-observer.js";
 import { hashOpaqueToken } from "../../persistence/canonical.js";
+import { loadTelegramAppHandoffProjection } from "../../../services/telegram-bot-trading.js";
 
 const ASSET = {
   networkId: "eip155:137",
@@ -4448,6 +4449,19 @@ async function testTelegramAppHandoffV2DirectTradeBinding(): Promise<void> {
         hash("a"),
         JSON.stringify(planSnapshot),
       ],
+    );
+    const handoffProjection = await loadTelegramAppHandoffProjection(
+      client as never,
+      {
+        telegramUserId,
+        tradeIntentId: intentId,
+        userId,
+      },
+    );
+    assert.equal(
+      handoffProjection?.stage,
+      "attaching",
+      "v2 projection query must parse against the real handoff schema",
     );
     const binding = { handoffId, planFingerprint: fingerprint } as const;
     const assertCurrentScope = async () => true;
