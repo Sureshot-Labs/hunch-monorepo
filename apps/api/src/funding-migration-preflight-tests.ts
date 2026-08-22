@@ -128,6 +128,13 @@ const migration0226 = await readFile(
   ),
   "utf8",
 );
+const migration0231 = await readFile(
+  new URL(
+    "../../../packages/db/migrations/0231_funding_polymarket_pre_route_handoff.sql",
+    import.meta.url,
+  ),
+  "utf8",
+);
 assert.match(
   migration0221,
   /create table if not exists telegram_app_handoffs[\s\S]*?token_hash text not null unique[\s\S]*?plan_fingerprint text not null[\s\S]*?policy_revision text not null/u,
@@ -177,6 +184,21 @@ assert.doesNotMatch(
   migration0226,
   /raise exception|\bdelete from\b|\bupdate telegram_app_handoffs\b/iu,
   "v2 constraint migrations must not mutate historical handoffs or fail deployment on data",
+);
+assert.match(
+  migration0231,
+  /segment_id is null[\s\S]*?step_kind = 'external_handoff'[\s\S]*?executor_id = 'polymarket_deposit_wallet_relayer_v1'[\s\S]*?handoffKind'[\s\S]*?polymarket_deposit_wallet_transfer[\s\S]*?topology'[\s\S]*?deposit_wallet/u,
+  "0231 must permit only the exact Polymarket Deposit Wallet pre-route envelope",
+);
+assert.match(
+  migration0231,
+  /dependent_step\.depends_on_step_id = pre_route_step\.id[\s\S]*?dependent_step\.segment_id is not null/u,
+  "0231 must require an unbound pre-route handoff to gate a bound provider step",
+);
+assert.doesNotMatch(
+  migration0231,
+  /\b(?:insert into|update|delete from|truncate)\b/iu,
+  "0231 must replace only the invariant function and never rewrite production rows",
 );
 assert.match(
   migration0208,

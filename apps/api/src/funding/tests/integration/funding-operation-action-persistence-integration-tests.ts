@@ -293,6 +293,180 @@ try {
     subjectLookupHmac: hash("user"),
     subjectLookupKeyVersion: 1,
   });
+
+  const preRouteRelayAction = {
+    ...secondAction,
+    actionId: opaque("action"),
+    senderWalletId: sourceLocation.details.walletId,
+  } as const;
+  const primarySegment = plan.segments[0];
+  const handoffStep = plan.steps[0];
+  const primaryReservation = plan.reservations[0];
+  assert.ok(primarySegment);
+  assert.ok(handoffStep);
+  assert.ok(primaryReservation);
+  const preRoutePlan: FundingCommitPlan = {
+    operation: {
+      ...plan.operation,
+      planKind: "wallet_route",
+      sourceSnapshot: { kind: "owned_location", location: sourceLocation },
+      supportMetadata: { test: true, preRouteHandoff: true },
+    },
+    segments: [
+      {
+        ...primarySegment,
+        providerQuoteRefCiphertext: "ciphertext:pre-route-request",
+        providerQuoteRefLookupHmac: hash("pre-route-request"),
+        quoteExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+      },
+    ],
+    steps: [
+      {
+        ...handoffStep,
+        segmentOrdinal: null,
+      },
+      {
+        ordinal: 1,
+        segmentOrdinal: 0,
+        stepKind: "transaction",
+        state: "action_required",
+        actionFingerprint: canonicalJsonHash(preRouteRelayAction),
+        executorId: "wallet_profile_evm_v1",
+        payerRequirement: "user",
+        dependsOnOrdinal: 0,
+        normalizedAction: preRouteRelayAction,
+        actionValidationResult: { valid: true },
+      },
+    ],
+    reservations: [
+      {
+        ...primaryReservation,
+        componentId: opaque("component"),
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      },
+    ],
+  };
+  const preRouteConsentToken = opaque("consent");
+  const preRouteQuote = await createFundingQuoteInTransaction(client, {
+    userId,
+    discoveryProjectionId: opaque("projection"),
+    selectedSourceOptionSnapshot: preRoutePlan.operation.sourceSnapshot ?? {},
+    marketContextSnapshot: null,
+    destinationOptionSnapshot: preRoutePlan.operation.destinationTargetSnapshot,
+    venueBindingSnapshot: null,
+    planSnapshot: preRoutePlan,
+    policyVersion: 1,
+    policyRevision: "policy_revision_pre_route_handoff",
+    canonicalRequest: { source: preRoutePlan.operation.sourceSnapshot },
+    consentToken: preRouteConsentToken,
+    expiresAt: new Date(Date.now() + 60_000),
+  });
+  const preRouteCommitted = await commitFundingOperationInTransaction(client, {
+    userId,
+    quoteId: preRouteQuote.id,
+    consentToken: preRouteConsentToken,
+    idempotencyKey: opaque("idempotency"),
+    plan: preRoutePlan,
+    subjectLookupHmac: hash("pre-route-user"),
+    subjectLookupKeyVersion: 1,
+  });
+  await client.query("set constraints all immediate");
+  const preRouteShape = await client.query<{
+    action_expires_at: Date;
+    depends_on_step_id: string | null;
+    ordinal: number;
+    quote_expires_at: Date | null;
+    segment_id: string | null;
+  }>(
+    `
+      select
+        funding_step.action_expires_at,
+        funding_step.depends_on_step_id,
+        funding_step.ordinal,
+        funding_segment.quote_expires_at,
+        funding_step.segment_id
+      from funding_operation_steps funding_step
+      left join funding_operation_segments funding_segment
+        on funding_segment.id = funding_step.segment_id
+      where funding_step.operation_id = $1
+      order by funding_step.ordinal
+    `,
+    [preRouteCommitted.operation.id],
+  );
+  assert.equal(preRouteShape.rows.length, 2);
+  assert.equal(preRouteShape.rows[0]?.segment_id, null);
+  assert.equal(preRouteShape.rows[0]?.depends_on_step_id, null);
+  assert.ok(preRouteShape.rows[0]?.action_expires_at);
+  assert.ok(preRouteShape.rows[1]?.segment_id);
+  assert.ok(preRouteShape.rows[1]?.depends_on_step_id);
+  assert.ok(preRouteShape.rows[1]?.quote_expires_at);
+  const storedPreRouteStep = preRouteShape.rows[0];
+  const storedRelayStep = preRouteShape.rows[1];
+  assert.ok(storedPreRouteStep);
+  assert.ok(storedRelayStep?.quote_expires_at);
+  assert.ok(
+    storedPreRouteStep.action_expires_at.getTime() >
+      storedRelayStep.quote_expires_at.getTime(),
+    "the user-authorized pre-route handoff must outlive the downstream Relay quote",
+  );
+  await client.query("set constraints all deferred");
+
+  await client.query("savepoint invalid_pre_route_shape");
+  const storedHandoffStep = preRoutePlan.steps[0];
+  const storedRelayActionStep = preRoutePlan.steps[1];
+  const storedReservation = preRoutePlan.reservations[0];
+  assert.ok(storedHandoffStep);
+  assert.ok(storedRelayActionStep);
+  assert.ok(storedReservation);
+  const invalidPreRoutePlan: FundingCommitPlan = {
+    ...preRoutePlan,
+    steps: [
+      {
+        ...storedHandoffStep,
+        executorId: "wallet_profile_evm_v1",
+      },
+      storedRelayActionStep,
+    ],
+    reservations: [
+      {
+        ...storedReservation,
+        componentId: opaque("component"),
+      },
+    ],
+  };
+  const invalidConsentToken = opaque("consent");
+  const invalidQuote = await createFundingQuoteInTransaction(client, {
+    userId,
+    discoveryProjectionId: opaque("projection"),
+    selectedSourceOptionSnapshot:
+      invalidPreRoutePlan.operation.sourceSnapshot ?? {},
+    marketContextSnapshot: null,
+    destinationOptionSnapshot:
+      invalidPreRoutePlan.operation.destinationTargetSnapshot,
+    venueBindingSnapshot: null,
+    planSnapshot: invalidPreRoutePlan,
+    policyVersion: 1,
+    policyRevision: "policy_revision_invalid_pre_route_handoff",
+    canonicalRequest: { source: invalidPreRoutePlan.operation.sourceSnapshot },
+    consentToken: invalidConsentToken,
+    expiresAt: new Date(Date.now() + 60_000),
+  });
+  await commitFundingOperationInTransaction(client, {
+    userId,
+    quoteId: invalidQuote.id,
+    consentToken: invalidConsentToken,
+    idempotencyKey: opaque("idempotency"),
+    plan: invalidPreRoutePlan,
+    subjectLookupHmac: hash("invalid-pre-route-user"),
+    subjectLookupKeyVersion: 1,
+  });
+  await assert.rejects(
+    client.query("set constraints all immediate"),
+    /only exact venue preparation or Polymarket pre-route handoff steps may be unbound/u,
+  );
+  await client.query("rollback to savepoint invalid_pre_route_shape");
+  await client.query("set constraints all deferred");
+
   const stepResult = await client.query<{
     id: string;
     ordinal: number;
