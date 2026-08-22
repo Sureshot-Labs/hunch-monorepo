@@ -258,7 +258,8 @@ const generic = projection([evmSource, solanaSource]);
 const LIMITLESS_DESTINATION_OPTION_ID = "destination-limitless";
 const LIMITLESS_BINDING_OPTION_ID = "limitless-binding-option";
 const LIMITLESS_CONTROLLER_WALLET_ID = "wallet-limitless";
-const LIMITLESS_SOURCE_LOCATION_ID = "wallet-polymarket-pusd";
+const LIMITLESS_SOURCE_LOCATION_ID = "wallet-polymarket-execution";
+const LIMITLESS_BALANCE_LOCATION_ID = "wallet-polymarket-pusd";
 const limitlessRequest: FundingDiscoveryRequest = {
   ...request,
   consumerIntent: {
@@ -304,6 +305,7 @@ const limitlessSource = (
       asset: POLYGON_PUSD,
       details: {
         address: "0x2222222222222222222222222222222222222222",
+        balanceLocationId: LIMITLESS_BALANCE_LOCATION_ID,
         walletId: "wallet-polymarket",
       },
       kind: "wallet",
@@ -441,68 +443,96 @@ assert.equal(
   "the source debit receives the same bounded tolerance as the funding fee",
 );
 const materialized = {
+  expectedSourceOptionId: null as string | null,
   request: null as FundingDiscoveryRequest | null,
   sourceOptionId: null as string | null,
 };
-const currentLimitlessProjection = limitlessProjection([
-  limitlessSource("1042322", "22346", "0.022346"),
-]);
-await prepareTelegramAppHandoffV2Funding({
-  handoffId: "00000000-0000-4000-8000-000000000010",
-  planSnapshot: movingFeePlan,
-  runtime: {
-    currentPolicyRevision: async () => "funding-policy-1",
-    liquidity: async (_userId: string, fundingRequest: FundingDiscoveryRequest) => {
-      materialized.request = fundingRequest;
-      return currentLimitlessProjection;
+async function materializeLimitlessPlan(
+  planSnapshot: typeof movingFeePlan,
+  reservationRaw: string,
+  transformSnapshot?: (snapshot: SourceOption) => unknown,
+): Promise<void> {
+  const currentLimitlessProjection = limitlessProjection([
+    {
+      ...limitlessSource(reservationRaw, "22346", "0.022346"),
+      requiredActions: [
+        {
+          actor: "user",
+          kind: "evm_transaction_batch",
+          safeLabel: "Authorize and transfer pUSD",
+          sponsorship: "requested",
+          valueMoving: true,
+        },
+      ],
     },
-    prepareCommit: async () =>
-      ({
-        operation: {
-          quote: {
-            planSnapshot: {
-              operation: {
-                destinationTargetSnapshot: {
-                  kind: "owned_location",
-                  location: {
-                    asset: BASE_USDC,
-                    details: {
-                      controllerWalletId: LIMITLESS_CONTROLLER_WALLET_ID,
+  ]);
+  materialized.expectedSourceOptionId =
+    currentLimitlessProjection.sourceOptions[0]?.sourceOptionId ?? null;
+  await prepareTelegramAppHandoffV2Funding({
+    handoffId: "00000000-0000-4000-8000-000000000010",
+    planSnapshot,
+    runtime: {
+      currentPolicyRevision: async () => "funding-policy-1",
+      liquidity: async (
+        _userId: string,
+        fundingRequest: FundingDiscoveryRequest,
+      ) => {
+        materialized.request = fundingRequest;
+        return currentLimitlessProjection;
+      },
+      prepareCommit: async () =>
+        ({
+          operation: {
+            quote: {
+              selectedSourceOptionSnapshot:
+                transformSnapshot?.(
+                  currentLimitlessProjection.sourceOptions[0] as SourceOption,
+                ) ?? currentLimitlessProjection.sourceOptions[0],
+              planSnapshot: {
+                operation: {
+                  destinationTargetSnapshot: {
+                    kind: "owned_location",
+                    location: {
+                      asset: BASE_USDC,
+                      details: {
+                        controllerWalletId: LIMITLESS_CONTROLLER_WALLET_ID,
+                      },
                     },
                   },
+                  planKind: "wallet_route",
+                  venueBindingSnapshot: {
+                    venueBindingOptionId: LIMITLESS_BINDING_OPTION_ID,
+                  },
+                  venueId: "limitless",
                 },
-                planKind: "wallet_route",
-                venueBindingSnapshot: {
-                  venueBindingOptionId: LIMITLESS_BINDING_OPTION_ID,
-                },
-                venueId: "limitless",
+                reservations: [
+                  {
+                    assetDecimals: POLYGON_PUSD.decimals,
+                    assetId: POLYGON_PUSD.assetId,
+                    locationId: LIMITLESS_BALANCE_LOCATION_ID,
+                    mode: "subtract_available",
+                    networkId: POLYGON_PUSD.networkId,
+                    rawAmount: reservationRaw,
+                  },
+                ],
+                steps: [],
               },
-              reservations: [
-                {
-                  assetDecimals: POLYGON_PUSD.decimals,
-                  assetId: POLYGON_PUSD.assetId,
-                  locationId: LIMITLESS_SOURCE_LOCATION_ID,
-                  mode: "subtract_available",
-                  networkId: POLYGON_PUSD.networkId,
-                  rawAmount: "1042322",
-                },
-              ],
-              steps: [],
             },
           },
-        },
-      }) as never,
-    quoteForCommitScope: async (
-      _userId: string,
-      quoteRequest: { selectedSourceOptionId: string },
-    ) => {
-      materialized.sourceOptionId = quoteRequest.selectedSourceOptionId;
-      return { consentToken: "consent-token", quoteId: "quote-id" } as never;
-    },
-  } as unknown as FundingPlanningRuntime,
-  tradeIntentId: "00000000-0000-4000-8000-000000000011",
-  userId: "00000000-0000-4000-8000-000000000001",
-});
+        }) as never,
+      quoteForCommitScope: async (
+        _userId: string,
+        quoteRequest: { selectedSourceOptionId: string },
+      ) => {
+        materialized.sourceOptionId = quoteRequest.selectedSourceOptionId;
+        return { consentToken: "consent-token", quoteId: "quote-id" } as never;
+      },
+    } as unknown as FundingPlanningRuntime,
+    tradeIntentId: "00000000-0000-4000-8000-000000000011",
+    userId: "00000000-0000-4000-8000-000000000001",
+  });
+}
+await materializeLimitlessPlan(movingFeePlan, "1042322");
 assert.equal(
   materialized.request?.maxFeeUsd,
   "0.02344965",
@@ -510,8 +540,59 @@ assert.equal(
 );
 assert.equal(
   materialized.sourceOptionId,
-  currentLimitlessProjection.sourceOptions[0]?.sourceOptionId,
+  materialized.expectedSourceOptionId,
   "the production re-quote remains inside the sealed source scope",
+);
+const sealedLimitlessSource = movingFeePlan.funding.sourceDebits[0];
+assert.ok(sealedLimitlessSource);
+const aliasCaps = [
+  { ...sealedLimitlessSource, maximumRaw: "1042000" },
+  {
+    ...sealedLimitlessSource,
+    locationId: LIMITLESS_BALANCE_LOCATION_ID,
+    maximumRaw: "1043000",
+  },
+];
+for (const sourceDebits of [aliasCaps, [...aliasCaps].reverse()]) {
+  await materializeLimitlessPlan(
+    {
+      ...movingFeePlan,
+      funding: { ...movingFeePlan.funding, sourceDebits },
+    },
+    "1042500",
+  );
+}
+await assert.rejects(
+  materializeLimitlessPlan(
+    {
+      ...movingFeePlan,
+      funding: { ...movingFeePlan.funding, sourceDebits: aliasCaps },
+    },
+    "1043001",
+  ),
+  /fresh funding plan exceeds the sealed source scope/u,
+  "alias ordering never permits a debit above the highest sealed cap",
+);
+await assert.rejects(
+  materializeLimitlessPlan(movingFeePlan, "1042322", (snapshot) => ({
+    ...snapshot,
+    sourceLegs: [{ source: snapshot.source }],
+  })),
+  /fresh funding plan exceeds the sealed source scope/u,
+  "a non-composite snapshot cannot inject an owned alias through source legs",
+);
+await assert.rejects(
+  materializeLimitlessPlan(movingFeePlan, "1042322", (snapshot) => ({
+    ...snapshot,
+    kind: "composite",
+    source: { kind: "composite", legCount: 2 },
+    sourceLegs: [
+      { source: snapshot.source },
+      { source: { kind: "owned_location", location: null } },
+    ],
+  })),
+  /fresh funding plan exceeds the sealed source scope/u,
+  "one malformed composite leg rejects the entire prepared source topology",
 );
 const capacityOnlyPlan = buildTelegramAppHandoffV2Plan({
   discoveryRequest: request,
@@ -547,38 +628,32 @@ const legacyActionBoundBaseScope = sealed.funding.sourceDebits.map((scope) =>
     : scope,
 );
 assert.equal(
-  telegramAppHandoffV2SourceOptionWithinScope(
-    legacyActionBoundBaseScope,
-    {
-      ...evmSource,
-      requiredActions: [
-        {
-          actor: "user",
-          kind: "evm_transaction_batch",
-          safeLabel: "Approve and send USDC",
-          sponsorship: "requested",
-          valueMoving: true,
-        },
-      ],
-    },
-  ),
+  telegramAppHandoffV2SourceOptionWithinScope(legacyActionBoundBaseScope, {
+    ...evmSource,
+    requiredActions: [
+      {
+        actor: "user",
+        kind: "evm_transaction_batch",
+        safeLabel: "Approve and send USDC",
+        sponsorship: "requested",
+        valueMoving: true,
+      },
+    ],
+  }),
   true,
   "a legacy action-bound scope accepts a fresh setup change on its owned source",
 );
 assert.equal(
-  telegramAppHandoffV2SourceOptionWithinScope(
-    sealed.funding.sourceDebits,
-    {
-      ...evmSource,
-      source: {
-        kind: "owned_location",
-        location: {
-          ...baseOwnedSource.location,
-          locationId: "wallet-other-usdc",
-        },
+  telegramAppHandoffV2SourceOptionWithinScope(sealed.funding.sourceDebits, {
+    ...evmSource,
+    source: {
+      kind: "owned_location",
+      location: {
+        ...baseOwnedSource.location,
+        locationId: "wallet-other-usdc",
       },
     },
-  ),
+  }),
   false,
   "a matching asset on another owned location is never inside the sealed scope",
 );

@@ -26,6 +26,7 @@ import {
   commitPlanRunsWithoutUserWalletAction,
   type PlannedSourceOption,
 } from "./planning-types.js";
+import { fundingOwnedSourceIncludesLocation } from "./source-adapter.js";
 
 /**
  * The subset search is exhaustive within an explicit operational bound so
@@ -170,12 +171,7 @@ function reservationLocationMatchesSource(
   source: Extract<FundingSourceRef, Readonly<{ kind: "owned_location" }>>,
   reservation: FundingCommitReservation,
 ): boolean {
-  const balanceLocationId = source.location.details.balanceLocationId;
-  return (
-    reservation.locationId === source.location.locationId ||
-    (typeof balanceLocationId === "string" &&
-      reservation.locationId === balanceLocationId)
-  );
+  return fundingOwnedSourceIncludesLocation(source, reservation.locationId);
 }
 
 function providerCandidate(source: PlannedSourceOption): CompositeCandidate {
