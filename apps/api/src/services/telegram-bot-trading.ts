@@ -310,6 +310,19 @@ type StoredTelegramBuyDeliveryMode = Exclude<
   "direct_deposit_only"
 >;
 
+/**
+ * A sealed v2 plan is produced by the initial app-handoff preview itself.
+ * Requiring it on a new draft would therefore reject every fresh handoff
+ * before the quote and plan can be recorded. Any later app-handoff state must
+ * already carry the plan it asks the Mini App to execute.
+ */
+export function isInitialTelegramAppHandoffProposal(input: Readonly<{
+  deliveryMode: TelegramBuyDeliveryMode;
+  status: string;
+}>): boolean {
+  return input.deliveryMode === "app_handoff" && input.status === "draft";
+}
+
 const EXISTING_TRADE_RESOLVING_MESSAGE =
   "Existing trade is still resolving. The bot is checking the venue automatically; no action is needed. Check /trade_status before retrying.";
 const UNKNOWN_TRADE_RESOLVING_MESSAGE =
@@ -11407,6 +11420,10 @@ export async function handleTelegramBotTradingCallback(
   const action: "BUY" | "SELL" = intent.action === "sell" ? "SELL" : "BUY";
   const side = intent.side;
   const appHandoffV2Plan = readTelegramAppHandoffV2Plan(intent);
+  const initialAppHandoffProposal = isInitialTelegramAppHandoffProposal({
+    deliveryMode: intent.delivery_mode,
+    status: intent.status,
+  });
   const tradeAmountLabel =
     action === "SELL" && sharesRaw != null
       ? `${ethers.formatUnits(sharesRaw, 6)} shares`
@@ -11525,7 +11542,9 @@ export async function handleTelegramBotTradingCallback(
     !authorization.privy_wallet_id ||
     (intent.delivery_mode === "bot_submit" &&
       !isVenueAllowed(intent.venue, policy, authorizationVenues)) ||
-    (intent.delivery_mode === "app_handoff" && appHandoffV2Plan == null) ||
+    (intent.delivery_mode === "app_handoff" &&
+      !initialAppHandoffProposal &&
+      appHandoffV2Plan == null) ||
     (action === "BUY"
       ? !resumingDurableFunding &&
         !canPreviewBuyForDelivery({

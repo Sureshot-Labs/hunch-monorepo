@@ -365,6 +365,179 @@ try {
   ).rows[0];
   assert.ok(authorization?.id);
 
+  // A sealed Mini App handoff is intentionally usable even where the
+  // unattended executor has no CLOB slippage guard. Its initial draft must
+  // reach preview, which is the transition that records the sealed v2 plan.
+  await client.query(
+    `update runtime_policies
+        set payload = $2::jsonb
+      where policy_key = 'signal_bot'
+        and created_by = $1::uuid`,
+    [
+      userId,
+      JSON.stringify({
+        autoEnableOnTelegramLink: true,
+        autoManagedMaxAmountUsd: 2,
+        autoManagedVenues: ["polymarket"],
+        buyContinuationEnabled: true,
+        customTradeInputEnabled: true,
+        fundingReceiveEnabled: true,
+        miniAppHandoffContractVersion: 2,
+        miniAppHandoffMode: "fallback",
+        tradingEnabled: true,
+        tradingActions: ["buy"],
+        tradingVenues: ["polymarket"],
+        buyAmountPresetsUsd: [1],
+        maxTradeAmountUsd: 2,
+        maxSlippageBps: 500,
+        intentTtlSec: 120,
+      }),
+    ],
+  );
+  const limitlessEventId = `limitless:telegram-handoff-${suffix}`;
+  const limitlessMarketId = `limitless:telegram-handoff-market-${suffix}`;
+  await client.query(
+    `insert into unified_events (
+       id, venue, venue_event_id, title, status, end_date
+     ) values ($1, 'limitless', $2, 'Limitless handoff event', 'ACTIVE', now() + interval '1 day')`,
+    [limitlessEventId, `event-${suffix}`],
+  );
+  await client.query(
+    `insert into unified_markets (
+       id, venue, venue_market_id, event_id, title, status, market_type,
+       close_time, expiration_time, outcomes, clob_token_ids, metadata
+     ) values (
+       $1, 'limitless', $2, $3, 'Limitless handoff market', 'ACTIVE', 'binary',
+       now() + interval '1 day', now() + interval '1 day',
+       '["Yes","No"]', '["limitless-yes","limitless-no"]', '{}'::jsonb
+     )`,
+    [limitlessMarketId, `market-${suffix}`, limitlessEventId],
+  );
+  // Trade handoff seals the exact venue outcome token. Production markets get
+  // these identities from the indexer rather than inferring them from the
+  // display-only clob_token_ids JSON, so the fixture must model that boundary.
+  await client.query(
+    `insert into unified_market_tokens (market_id, token_id, venue, outcome_side)
+     values
+       ($1, 'limitless-yes', 'limitless', 'YES'),
+       ($1, 'limitless-no', 'limitless', 'NO')`,
+    [limitlessMarketId],
+  );
+  const limitlessHandoffIntent = await client.query<{ id: string }>(
+    `insert into telegram_trade_intents (
+       telegram_user_id, user_id, authorization_id, chat_id,
+       telegram_message_id, delivery_mode, action, venue, market_id, event_id,
+       side, amount_usd, status, quote_snapshot, policy_snapshot, result,
+       expires_at, idempotency_key
+     ) values (
+       $1, $2, $3, $1, '701', 'app_handoff', 'buy', 'limitless', $4, $5,
+       'YES', 1, 'draft', '{}'::jsonb, '{}'::jsonb,
+       jsonb_build_object(
+         'telegramAuthority',
+         jsonb_build_object(
+           'version', 1,
+           'authorizationId', $9::text,
+           'telegramAccountLinkId', (
+             select id::text from user_telegram_accounts where user_id = $2 limit 1
+           ),
+           'userId', $2::text,
+           'walletAddress', $6::text,
+           'walletChain', 'ethereum',
+           'privyWalletId', $7::text
+         )
+       ),
+       now() + interval '2 minutes', $8
+     ) returning id`,
+    [
+      telegramUserId,
+      userId,
+      authorization.id,
+      limitlessMarketId,
+      limitlessEventId,
+      walletAddress,
+      walletId,
+      `limitless-initial-handoff:${suffix}`,
+      authorization.id,
+    ],
+  );
+  const limitlessHandoffIntentId = limitlessHandoffIntent.rows[0]?.id;
+  assert.ok(limitlessHandoffIntentId);
+  const limitlessClobHandoffTrading = {
+    getReadiness: async () => ({
+      capabilities: {
+        authorizationModes: ["server_delegated"],
+        supportsBuy: false,
+        supportsCancel: false,
+        supportsExecutionSync: false,
+        supportsOrderSync: false,
+        supportsPositionSync: false,
+        supportsSell: false,
+        supportsSetup: false,
+        venue: "limitless" as const,
+      },
+      executable: false,
+      maxExecutableBuyUsd: 2,
+      message:
+        "Limitless CLOB bot trading is disabled until slippage can be enforced by the submitted order.",
+      ready: false,
+      reasonCode: "limitless_clob_slippage_guard_unavailable",
+      setupRequired: false,
+    }),
+    quote: async (input: {
+      intent: { amount: { type: "usd"; value: string }; target: unknown };
+    }) => ({
+      action: "BUY" as const,
+      amount: input.intent.amount,
+      currentPrice: 0.5,
+      estimatedNotionalUsd: Number(input.intent.amount.value),
+      estimatedShares: Number(input.intent.amount.value) * 2,
+      expiresAt: new Date(Date.now() + 60_000),
+      fees: {},
+      maxSpendUsd: Number(input.intent.amount.value),
+      meetsVenueMinimum: true,
+      minReceiveShares: Number(input.intent.amount.value) * 1.9,
+      price: 0.52,
+      target: input.intent.target,
+      venue: "limitless" as const,
+    }),
+  } as unknown as ApiBotTradingExecutor;
+  const limitlessInitialHandoff = await captureTelegramBotTradingCallback({
+    appBaseUrl: "https://app.hunch.trade",
+    callbackQuery: {
+      data: `hbt:buy:${limitlessHandoffIntentId}`,
+      from: { id: telegramUserId as never },
+      id: `limitless-initial-handoff:${suffix}`,
+      message: {
+        chat: { id: telegramUserId, type: "private" },
+        message_id: 701,
+      },
+    },
+    db,
+    expectedIntentId: limitlessHandoffIntentId,
+    expectedType: "buy",
+    signerInspector,
+    telegramMiniAppEnabled: true,
+    trading: limitlessClobHandoffTrading,
+  });
+  assert.equal(limitlessInitialHandoff.handled, true);
+  assert.equal(limitlessInitialHandoff.intentStatus, "previewed");
+  assert.match(
+    limitlessInitialHandoff.messages.at(-1)?.text ?? "",
+    /Confirm buy/u,
+    "the initial Limitless handoff must publish its Review instead of the server readiness failure",
+  );
+  assert.equal(
+    (
+      await client.query<{ has_plan: boolean }>(
+        `select result ? 'appHandoffV2' as has_plan
+           from telegram_trade_intents
+          where id = $1::uuid`,
+        [limitlessHandoffIntentId],
+      )
+    ).rows[0]?.has_plan,
+    true,
+    "the initial preview must persist the v2 plan needed by its later Confirm callback",
+  );
   const insertMarketExitIntent = async (label: string) => {
     const result = await client.query<{ id: string }>(
       `insert into telegram_trade_intents (
