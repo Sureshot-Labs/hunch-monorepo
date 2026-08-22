@@ -457,6 +457,19 @@ type MarketMapSidebarKind =
 
 type MarketMapSidebarMoverSortBy = "percent" | "absolute";
 
+const EVENT_CHANGE24H_CURRENT_VERSION_SQL = `(
+  ec.calculation_version = 2
+  or (
+    ec.calculation_version = 1
+    and not exists (
+      select 1
+      from unified_event_change_24h v2_cache
+      where v2_cache.calculation_version = 2
+        and v2_cache.change_24h is not null
+    )
+  )
+)`;
+
 type MarketMapSidebarEventRow = MarketMapEventActivityMetricsRow & {
   event_id: string;
   title: string | null;
@@ -767,6 +780,7 @@ function sidebarSqlParts(kind: MarketMapSidebarKind): {
            and e.venue = eam.venue
           left join unified_event_change_24h ec
             on ec.event_id = e.id
+           and ${EVENT_CHANGE24H_CURRENT_VERSION_SQL}
         `,
         filterSql: `
           and eam.venue = any($1::text[])
@@ -790,6 +804,7 @@ function sidebarSqlParts(kind: MarketMapSidebarKind): {
            and e.venue = eam.venue
           left join unified_event_change_24h ec
             on ec.event_id = e.id
+           and ${EVENT_CHANGE24H_CURRENT_VERSION_SQL}
         `,
         filterSql: `
           and eam.venue = any($1::text[])
@@ -815,6 +830,7 @@ function sidebarSqlParts(kind: MarketMapSidebarKind): {
            and e.venue = eam.venue
           left join unified_event_change_24h ec
             on ec.event_id = e.id
+           and ${EVENT_CHANGE24H_CURRENT_VERSION_SQL}
         `,
         filterSql: `
           and eam.venue = any($1::text[])
@@ -838,6 +854,7 @@ function sidebarSqlParts(kind: MarketMapSidebarKind): {
            and e.venue = eam.venue
           left join unified_event_change_24h ec
             on ec.event_id = e.id
+           and ${EVENT_CHANGE24H_CURRENT_VERSION_SQL}
         `,
         filterSql: `
           and eam.venue = any($1::text[])
@@ -864,7 +881,8 @@ function sidebarSqlParts(kind: MarketMapSidebarKind): {
             on eam.event_id = e.id
            and eam.venue = e.venue
         `,
-        filterSql: "and ec.change_24h is not null",
+        filterSql: `and ${EVENT_CHANGE24H_CURRENT_VERSION_SQL}
+          and ec.change_24h is not null`,
         orderSql: "ec.change_24h desc nulls last",
       };
     case "trendingNow":
@@ -877,6 +895,7 @@ function sidebarSqlParts(kind: MarketMapSidebarKind): {
            and eam.venue = e.venue
           left join unified_event_change_24h ec
             on ec.event_id = e.id
+           and ${EVENT_CHANGE24H_CURRENT_VERSION_SQL}
         `,
         filterSql: "",
         orderSql: `

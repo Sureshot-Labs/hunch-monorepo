@@ -537,35 +537,29 @@ async function assertDirectMarketSqlShape(): Promise<void> {
   const change24hSql = await captureFastMarketSql("change24h");
   assert.match(
     change24hSql[0],
-    /change24h_history_market_candidates as materialized/,
+    /change24h_v2_ranked_market_candidates as materialized/,
   );
+  assert.match(change24hSql[0], /from unified_market_change_24h cache/);
+  assert.match(change24hSql[0], /cache\.calculation_version = 2/);
+  assert.match(change24hSql[0], /cache\.change_24h is not null/);
   assert.match(
     change24hSql[0],
-    /from unified_token_change_24h cached[\s\S]*join unified_market_tokens mapping/,
-  );
-  assert.match(change24hSql[0], /mapping\.outcome_side = 'YES'/);
-  assert.doesNotMatch(change24hSql[0], /select distinct mapping\.market_id/);
-  assert.match(
-    change24hSql[0],
-    /from unified_markets m\s+join change24h_history_market_candidates candidate_filter on candidate_filter\.market_id = m\.id/s,
+    /from unified_markets m\s+join change24h_v2_ranked_market_candidates candidate_filter on candidate_filter\.market_id = m\.id/s,
   );
   assert.match(change24hSql[0], /orderable_market_candidates as materialized/);
-  assert.match(change24hSql[0], /observed_market_change_24h as materialized/);
-  assert.match(change24hSql[0], /join unified_token_change_24h cached/);
-  assert.doesNotMatch(change24hSql[0], /from unified_book_top_1h book/);
   assert.match(
     change24hSql[0],
-    /history_token_set as materialized[\s\S]*?from current_probabilities[\s\S]*?current_probability is not null/,
+    /join change24h_v2_ranked_market_candidates ranked_cache\s+on ranked_cache\.market_id = m\.id/s,
   );
-  assert.match(change24hSql[0], /current_yes_top/);
-  assert.match(change24hSql[0], /current_no_top/);
-  assert.match(change24hSql[0], /historical_yes_top/);
-  assert.match(change24hSql[0], /historical_no_top/);
   assert.match(
     change24hSql[0],
-    /order by market_change\.change_24h desc nulls last/,
+    /order by ranked_cache\.change_24h desc, ranked_cache\.market_id/,
   );
-  assert.doesNotMatch(change24hSql[0], /unified_market_change_24h/);
+  assert.doesNotMatch(change24hSql[0], /observed_market_change_24h/);
+  assert.doesNotMatch(change24hSql[0], /unified_token_change_24h/);
+  assert.doesNotMatch(change24hSql[0], /change24h_history_market_candidates/);
+  assert.match(change24hSql[1], /cached_change\.calculation_version = 2/);
+  assert.doesNotMatch(change24hSql[1], /observed_market_change_24h/);
 
   const trendingV2Sql = await captureFastMarketSql("trending_v2");
   assert.match(trendingV2Sql[0], /from unified_market_trade_24h metric/);
@@ -685,28 +679,19 @@ async function assertEventFeedSqlShape(): Promise<void> {
       baseInputs.limit,
     );
     const [sql] = capturedSql;
-    assert.match(sql, /change24h_history_market_candidates as materialized/);
+    assert.match(sql, /change24h_v2_ranked_events as materialized/);
+    assert.match(sql, /from unified_event_change_24h cache/);
+    assert.match(sql, /cache\.calculation_version = 2/);
+    assert.match(sql, /cache\.change_24h is not null/);
     assert.match(
       sql,
-      /from unified_token_change_24h cached[\s\S]*join unified_market_tokens mapping/,
+      /from unified_events e\s+join change24h_v2_ranked_events ranked_event\s+on ranked_event\.event_id = e\.id/s,
     );
-    assert.match(sql, /mapping\.outcome_side = 'YES'/);
-    assert.doesNotMatch(sql, /select distinct mapping\.market_id/);
-    assert.match(
-      sql,
-      /from unified_markets m\s+join change24h_history_market_candidates candidate_filter on candidate_filter\.market_id = m\.id/s,
-    );
-    assert.match(sql, /orderable_market_candidates as materialized/);
-    assert.match(sql, /observed_market_change_24h as materialized/);
-    assert.match(sql, /join unified_token_change_24h cached/);
-    assert.doesNotMatch(sql, /from unified_book_top_1h book/);
-    assert.match(
-      sql,
-      /history_token_set as materialized[\s\S]*?from current_probabilities[\s\S]*?current_probability is not null/,
-    );
-    assert.match(sql, /avg\(market_change\.change_24h\) desc nulls last/);
-    assert.doesNotMatch(sql, /unified_event_change_24h/);
-    assert.doesNotMatch(sql, /unified_market_change_24h/);
+    assert.match(sql, /order by ranked_event\.change_24h desc, ranked_event\.event_id/);
+    assert.doesNotMatch(sql, /orderable_market_candidates/);
+    assert.doesNotMatch(sql, /observed_market_change_24h/);
+    assert.doesNotMatch(sql, /unified_token_change_24h/);
+    assert.doesNotMatch(sql, /change24h_history_market_candidates/);
   }
 
   {
@@ -808,9 +793,209 @@ async function assertEventFeedSqlShape(): Promise<void> {
   }
 }
 
+async function assertChange24hV2FastPath(): Promise<void> {
+  const now = Date.now();
+  const nowIso = new Date(now).toISOString();
+  const suffix = crypto.randomUUID().slice(0, 8);
+  const category = `change24-v2-${suffix}`;
+  const events: SeededEvent[] = [
+    {
+      id: makeId("change24-v2:event"),
+      venue: "polymarket",
+      venueEventId: makeId("change24-v2:venue-event"),
+      category,
+      title: `Change24 v2 first ${suffix}`,
+      startDate: new Date(now - 60 * 60 * 1000),
+      endDate: new Date(now + 24 * 60 * 60 * 1000),
+    },
+    {
+      id: makeId("change24-v2:event"),
+      venue: "polymarket",
+      venueEventId: makeId("change24-v2:venue-event"),
+      category,
+      title: `Change24 v2 second ${suffix}`,
+      startDate: new Date(now - 60 * 60 * 1000),
+      endDate: new Date(now + 24 * 60 * 60 * 1000),
+    },
+    {
+      id: makeId("change24-v2:event"),
+      venue: "polymarket",
+      venueEventId: makeId("change24-v2:venue-event"),
+      category,
+      title: `Change24 v2 uncached ${suffix}`,
+      startDate: new Date(now - 60 * 60 * 1000),
+      endDate: new Date(now + 24 * 60 * 60 * 1000),
+    },
+  ];
+  const markets: SeededMarket[] = [
+    {
+      id: makeId("change24-v2:market"),
+      venue: "polymarket",
+      venueMarketId: makeId("change24-v2:venue-market"),
+      eventId: events[0].id,
+      title: `Change24 v2 first ${suffix}`,
+      closeTime: new Date(now + 24 * 60 * 60 * 1000),
+      expirationTime: new Date(now + 24 * 60 * 60 * 1000),
+      bestBid: 0.59,
+      bestAsk: 0.61,
+    },
+    {
+      id: makeId("change24-v2:market"),
+      venue: "polymarket",
+      venueMarketId: makeId("change24-v2:venue-market"),
+      eventId: events[1].id,
+      title: `Change24 v2 second ${suffix}`,
+      closeTime: new Date(now + 24 * 60 * 60 * 1000),
+      expirationTime: new Date(now + 24 * 60 * 60 * 1000),
+      bestBid: 0.54,
+      bestAsk: 0.56,
+    },
+    {
+      id: makeId("change24-v2:market"),
+      venue: "polymarket",
+      venueMarketId: makeId("change24-v2:venue-market"),
+      eventId: events[2].id,
+      title: `Change24 v2 uncached ${suffix}`,
+      closeTime: new Date(now + 24 * 60 * 60 * 1000),
+      expirationTime: new Date(now + 24 * 60 * 60 * 1000),
+      bestBid: 0.89,
+      bestAsk: 0.91,
+    },
+  ];
+  const tokenIds: string[] = [];
+
+  try {
+    for (const event of events) await insertEvent(event);
+    for (const market of markets) {
+      await insertMarket(market);
+      tokenIds.push(...(await insertCanonicalMarketTop(market)));
+    }
+
+    for (let index = 0; index < markets.length; index += 1) {
+      const yesTokenId = tokenIds[index * 2];
+      const noTokenId = tokenIds[index * 2 + 1];
+      await pool.query(
+        `
+          insert into unified_token_change_24h (
+            token_id,
+            avg_mid_now,
+            avg_mid_24h,
+            change_24h,
+            bucket_now,
+            bucket_24h,
+            updated_at
+          )
+          values
+            ($1, 0.5, 0.5, 0, now(), now() - interval '24 hours', now()),
+            ($2, 0.5, 0.5, 0, now(), now() - interval '24 hours', now())
+        `,
+        [yesTokenId, noTokenId],
+      );
+    }
+
+    const feedInputs = {
+      limit: 2,
+      offset: 0,
+      minVol: 0,
+      minLiquidity: 0,
+      category,
+      sort: "change24h",
+      sortDir: "desc",
+      nowParam: nowIso,
+      sevenDaysAgo: new Date(now - 7 * 24 * 60 * 60 * 1000).toISOString(),
+      sevenDaysFromNow: new Date(now + 7 * 24 * 60 * 60 * 1000).toISOString(),
+    } satisfies Parameters<typeof fetchFeedMarketsDirect>[1];
+    const fallbackMarkets = await fetchFeedMarketsDirect(pool, feedInputs);
+    assert.equal(
+      fallbackMarkets[0]?.market_uuid,
+      markets[2].id,
+      "change24h falls back to the exact query until the v2 cache is populated",
+    );
+    assert.equal(
+      Number(fallbackMarkets[0]?.change_24h),
+      0.8,
+      "the rollout fallback retains the exact observed change24h value",
+    );
+
+    await pool.query(
+      `
+        insert into unified_market_change_24h (
+          market_id,
+          change_24h,
+          calculation_version,
+          updated_at
+        )
+        values
+          ($1, 0.2, 2, now()),
+          ($2, 0.1, 2, now()),
+          ($3, 0.8, 2, now())
+      `,
+      [markets[0].id, markets[1].id, markets[2].id],
+    );
+    await pool.query(
+      `
+        insert into unified_event_change_24h (
+          event_id,
+          change_24h,
+          calculation_version,
+          updated_at
+        )
+        values
+          ($1, 0.2, 2, now()),
+          ($2, 0.1, 2, now()),
+          ($3, 0.8, 2, now())
+      `,
+      [events[0].id, events[1].id, events[2].id],
+    );
+
+    const fastMarkets = await fetchFeedMarketsDirect(pool, feedInputs);
+    assert.deepEqual(
+      fastMarkets.map((market) => market.market_uuid),
+      [markets[2].id, markets[0].id],
+      "v2 market cache is the complete ranking source for the fast path",
+    );
+    assert.deepEqual(
+      fastMarkets.map((market) => Number(market.change_24h)),
+      [0.8, 0.2],
+      "fast market output uses the same v2 values that selected its rank",
+    );
+
+    const fastEvents = await fetchFeedEventIds(pool, feedInputs);
+    assert.deepEqual(
+      fastEvents.map((event) => event.id),
+      [events[2].id, events[0].id],
+      "v2 event cache is the complete ranking source for the fast path",
+    );
+  } finally {
+    await pool.query(
+      "delete from unified_event_change_24h where event_id = any($1::text[])",
+      [events.map((event) => event.id)],
+    );
+    await pool.query(
+      "delete from unified_market_change_24h where market_id = any($1::text[])",
+      [markets.map((market) => market.id)],
+    );
+    await pool.query(
+      "delete from unified_token_change_24h where token_id = any($1::text[])",
+      [tokenIds],
+    );
+    await pool.query(
+      "delete from unified_token_top_latest where token_id = any($1::text[])",
+      [tokenIds],
+    );
+    await pool.query("delete from unified_markets where id = any($1::text[])", [
+      markets.map((market) => market.id),
+    ]);
+    await pool.query("delete from unified_events where id = any($1::text[])", [
+      events.map((event) => event.id),
+    ]);
+  }
+}
+
 async function main() {
   await assertDirectMarketSqlShape();
   await assertEventFeedSqlShape();
+  await assertChange24hV2FastPath();
 
   const app = await buildApp();
   const previousFeedTtl = env.feedTtlSec;

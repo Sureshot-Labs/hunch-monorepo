@@ -63,6 +63,7 @@ const FEED_EVENT_FAST_MIN_CANDIDATES = 1000;
 const FEED_EVENT_FAST_CANDIDATE_FACTOR = 20;
 const FEED_EVENT_FAST_MAX_CANDIDATES = 10000;
 const FEED_CANDIDATE_EXPANSION_FACTOR = 4;
+const FEED_CHANGE24H_V2_CANDIDATE_LIMITS = [500, 2000, 8000] as const;
 const FEED_SEARCH_PREFIX_MIN_CHARS = 3;
 const FEED_SEARCH_PREFIX_MAX_CHARS = 6;
 const FEED_SEARCH_STOP_WORDS = new Set([
@@ -505,26 +506,6 @@ function buildHistoricalCanonicalBookSql(args: {
     from ${args.tokenSetName} token
     join unified_token_change_24h cached on cached.token_id = token.token_id
     where cached.avg_mid_24h is not null
-  `;
-}
-
-function buildChange24hHistoryMarketCandidatesCte(args: {
-  cteName: string;
-}): string {
-  assertSafeSqlIdentifier(args.cteName, "change24h history CTE");
-  return `
-    ${args.cteName} as materialized (
-      -- unified_token_change_24h is refreshed only for canonical YES tokens
-      -- and unified_market_tokens.token_id is unique. Consequently
-      -- each source row maps to at most one market: avoiding the redundant
-      -- DISTINCT keeps the change24h fast path a small, index-backed join.
-      select mapping.market_id
-      from unified_token_change_24h cached
-      join unified_market_tokens mapping
-        on mapping.token_id = cached.token_id
-       and mapping.outcome_side = 'YES'
-      where cached.avg_mid_24h is not null
-    )
   `;
 }
 
@@ -1533,10 +1514,15 @@ function isFeedEventFastPathSort(
   return inputs.filter === "newest" || inputs.filter === "endingsoon";
 }
 
+type FeedEventIdRow = {
+  id: string;
+  cached_change_24h?: boolean;
+};
+
 async function fetchFeedChange24hEventIdsFast(
   pool: Pool,
   inputs: FeedInputs,
-): Promise<Array<{ id: string }> | null> {
+): Promise<FeedEventIdRow[] | null> {
   if (
     inputs.sort !== "change24h" ||
     inputs.marketIds?.length ||
@@ -1552,67 +1538,58 @@ async function fetchFeedChange24hEventIdsFast(
     return null;
   }
 
-  const { params, add } = createParamBuilder();
-  const expressions = buildFeedSqlExpressions();
-  const nowParam = add(inputs.nowParam);
   const sortDir = inputs.sortDir === "asc" ? "asc" : "desc";
-  const limitParam = add(inputs.limit);
-  const offsetParam = add(inputs.offset);
-  const candidateCteName = "change24h_history_market_candidates";
-  const eventWhere = buildFeedEventWhere({
-    add,
-    inputs,
-    nowParam,
-    hasSearch: false,
-    includeOrderableExists: false,
-    includeDurationExists: false,
-  });
-  const orderableCandidates = buildBroadOrderableMarketCandidatesCte({
-    candidateMarketIdsCte: candidateCteName,
-    materialized: true,
-    nowParam,
-    extraMarketSql: buildFeedMarketCandidateExtraSql({
+  const pageTarget = inputs.limit + inputs.offset;
+
+  for (const candidateLimit of FEED_CHANGE24H_V2_CANDIDATE_LIMITS) {
+    if (candidateLimit < pageTarget) continue;
+
+    const { params, add } = createParamBuilder();
+    const nowParam = add(inputs.nowParam);
+    const limitParam = add(inputs.limit);
+    const offsetParam = add(inputs.offset);
+    const candidateLimitParam = add(candidateLimit);
+    const eventWhere = buildFeedEventWhere({
       add,
       inputs,
       nowParam,
-      venueTarget: "event",
-      renderableMarketExpr: expressions.renderableMarketExpr,
-      supportedLimitlessMarketExpr: expressions.supportedLimitlessMarketExpr,
-    }),
-  });
-  const rows = await queryRowsWithLocalSettings<{ id: string }>(
-    pool,
-    `
-      with ${buildChange24hHistoryMarketCandidatesCte({ cteName: candidateCteName })},
-      ${orderableCandidates},
-      ${buildObservedCanonicalMarketChange24hCte({
-        cteName: "observed_market_change_24h",
-        sourceSql: "select market_id from orderable_market_candidates",
-        nowParam,
-      })}
-      select e.id
-      from unified_events e
-      join orderable_market_candidates omc on omc.event_id = e.id
-      join unified_markets m on m.id = omc.market_id
-      join observed_market_change_24h market_change
-        on market_change.market_id = m.id
-       and market_change.change_24h is not null
-      where ${eventWhere.join(" and ")}
-      group by e.id
-      order by avg(market_change.change_24h) ${sortDir} nulls last, e.id
-      limit ${limitParam} offset ${offsetParam}
-    `,
-    params,
-    { workMem: FEED_HEAVY_QUERY_WORK_MEM, jitOff: true },
-  );
+      hasSearch: false,
+      includeOrderableExists: false,
+      includeDurationExists: false,
+    });
+    const rows = await queryRowsWithLocalSettings<FeedEventIdRow>(
+      pool,
+      `
+        with change24h_v2_ranked_events as materialized (
+          select cache.event_id, cache.change_24h
+          from unified_event_change_24h cache
+          where cache.calculation_version = 2
+            and cache.change_24h is not null
+          order by cache.change_24h ${sortDir}, cache.event_id
+          limit ${candidateLimitParam}
+        )
+        select ranked_event.event_id as id, true as cached_change_24h
+        from unified_events e
+        join change24h_v2_ranked_events ranked_event
+          on ranked_event.event_id = e.id
+        where ${[...eventWhere, `${nowParam}::timestamptz is not null`].join(" and ")}
+        order by ranked_event.change_24h ${sortDir}, ranked_event.event_id
+        limit ${limitParam} offset ${offsetParam}
+      `,
+      params,
+      { workMem: FEED_HEAVY_QUERY_WORK_MEM, jitOff: true },
+    );
 
-  return rows.length < inputs.limit ? null : rows;
+    if (rows.length >= inputs.limit) return rows;
+  }
+
+  return null;
 }
 
 async function fetchFeedEventIdsFast(
   pool: Pool,
   inputs: FeedInputs,
-): Promise<Array<{ id: string }> | null> {
+): Promise<FeedEventIdRow[] | null> {
   if (inputs.sort === "change24h") {
     return fetchFeedChange24hEventIdsFast(pool, inputs);
   }
@@ -2338,7 +2315,7 @@ export async function fetchFeedCategoryFacetRows(
 async function fetchFeedEventIdsExact(
   pool: Pool,
   inputs: FeedInputs,
-): Promise<Array<{ id: string }>> {
+): Promise<FeedEventIdRow[]> {
   const { params, add } = createParamBuilder();
   const expressions = buildFeedSqlExpressions();
   const {
@@ -2436,7 +2413,7 @@ async function fetchFeedEventIdsExact(
       limit ${inputs.limit} offset ${inputs.offset}
     `;
 
-    return await queryRowsWithSearchHint<{ id: string }>(
+    return await queryRowsWithSearchHint<FeedEventIdRow>(
       pool,
       eventOnlySql,
       params,
@@ -2549,7 +2526,7 @@ async function fetchFeedEventIdsExact(
     limit ${inputs.limit} offset ${inputs.offset}
   `;
 
-  return await queryRowsWithSearchHint<{ id: string }>(
+  return await queryRowsWithSearchHint<FeedEventIdRow>(
     pool,
     eventSql,
     params,
@@ -2563,7 +2540,7 @@ async function fetchFeedEventIdsExact(
 export async function fetchFeedEventIds(
   pool: Pool,
   inputs: FeedInputs,
-): Promise<Array<{ id: string }>> {
+): Promise<FeedEventIdRow[]> {
   const fastRows = await fetchFeedEventIdsFast(pool, inputs);
   if (fastRows) return fastRows;
   return fetchFeedEventIdsExact(pool, inputs);
@@ -2636,7 +2613,10 @@ export async function fetchFeedMarkets(
   pool: Pool,
   inputs: FeedInputs,
   eventIds: string[],
+  options?: { useCachedChange24h?: boolean },
 ): Promise<FeedMarketRow[]> {
+  const useCachedChange24h =
+    inputs.sort === "change24h" && options?.useCachedChange24h === true;
   const { params, add } = createParamBuilder();
   // Cap markets per event in feed responses to avoid timeouts on large events.
   const perEventMarketLimit = 100;
@@ -2984,6 +2964,13 @@ export async function fetchFeedMarkets(
   const marketBestBidExpr = `case when ${limitlessAmmFallbackAllowedExpr} then m.best_bid else null end`;
   const marketBestAskExpr = `case when ${limitlessAmmFallbackAllowedExpr} then m.best_ask else null end`;
   const marketLastPriceExpr = `case when ${limitlessAmmFallbackAllowedExpr} then m.last_price else null end`;
+  const change24hCacheJoin = useCachedChange24h
+    ? `
+      left join unified_market_change_24h cached_change
+        on cached_change.market_id = m.id
+       and cached_change.calculation_version = 2
+    `
+    : "";
   const withParts: string[] = [];
   if (directMarketSearchCtes.length) withParts.push(...directMarketSearchCtes);
   withParts.push(`event_order as (${eventOrderSql})`);
@@ -3036,7 +3023,7 @@ export async function fetchFeedMarkets(
       ${marketLastPriceExpr} as last_price,
       m.resolved_outcome,
       m.resolved_outcome_pct,
-      (${change24hExpr}) as change_24h,
+      ${useCachedChange24h ? "cached_change.change_24h" : `(${change24hExpr})`} as change_24h,
       m.outcomes,
       m.resolved_token_yes as token_yes,
       m.resolved_token_no as token_no,
@@ -3062,6 +3049,7 @@ export async function fetchFeedMarkets(
     ${bookSnapshot.yes24hJoin}
     ${bookSnapshot.noTopJoin}
     ${bookSnapshot.no24hJoin}
+    ${change24hCacheJoin}
     ${marketOrder ? `order by ${marketOrder}` : ""}
   `;
 
@@ -3108,49 +3096,65 @@ async function fetchFeedChange24hMarketIdsFast(
     return null;
   }
 
-  const { params, add } = createParamBuilder();
-  const expressions = buildFeedSqlExpressions();
-  const nowParam = add(inputs.nowParam);
-  const nowCloseParam = add(inputs.nowParam);
-  const candidateCteName = "change24h_history_market_candidates";
-  const marketContext = buildFeedMarketViewContext({
-    add,
-    candidateMarketIdsCte: candidateCteName,
-    inputs,
-    nowParam,
-    nowCloseParam,
-    expressions,
-    venueFilterTarget: "market",
-  });
-  const limitParam = add(inputs.limit);
-  const offsetParam = add(inputs.offset);
   const sortDir = inputs.sortDir === "asc" ? "asc" : "desc";
-  const rows = await queryRowsWithLocalSettings<{ id: string }>(
-    pool,
-    `
-      with ${buildChange24hHistoryMarketCandidatesCte({ cteName: candidateCteName })},
-      ${marketContext.orderableMarketCandidatesCte},
-      ${buildObservedCanonicalMarketChange24hCte({
-        cteName: "observed_market_change_24h",
-        sourceSql: `select market_id from ${marketContext.orderableMarketCandidateSource}`,
-        nowParam,
-      })}
-      select m.id
-      from ${marketContext.orderableMarketCandidateSource} omc
-      join unified_markets m on m.id = omc.market_id
-      join unified_events e on e.id = omc.event_id
-      join observed_market_change_24h market_change
-        on market_change.market_id = m.id
-       and market_change.change_24h is not null
-      where ${marketContext.where.join(" and ")}
-      order by market_change.change_24h ${sortDir} nulls last, m.venue_market_id
-      limit ${limitParam} offset ${offsetParam}
-    `,
-    params,
-    { workMem: FEED_HEAVY_QUERY_WORK_MEM, jitOff: true },
-  );
+  const pageTarget = inputs.limit + inputs.offset;
 
-  return rows.length < inputs.limit ? null : rows.map((row) => row.id);
+  for (const candidateLimit of FEED_CHANGE24H_V2_CANDIDATE_LIMITS) {
+    if (candidateLimit < pageTarget) continue;
+
+    const { params, add } = createParamBuilder();
+    const expressions = buildFeedSqlExpressions();
+    const nowParam = add(inputs.nowParam);
+    const nowCloseParam = add(inputs.nowParam);
+    const candidateCteName = "change24h_v2_ranked_market_candidates";
+    const marketContext = buildFeedMarketViewContext({
+      add,
+      candidateMarketIdsCte: candidateCteName,
+      inputs,
+      nowParam,
+      nowCloseParam,
+      expressions,
+      venueFilterTarget: "market",
+    });
+    const marketCandidateCtes = [
+      marketContext.orderableMarketCandidatesCte,
+      marketContext.scopedOrderableMarketCandidatesCte,
+    ]
+      .filter(Boolean)
+      .join(",\n");
+    const limitParam = add(inputs.limit);
+    const offsetParam = add(inputs.offset);
+    const candidateLimitParam = add(candidateLimit);
+    const rows = await queryRowsWithLocalSettings<{ id: string }>(
+      pool,
+      `
+        with ${candidateCteName} as materialized (
+          select cache.market_id, cache.change_24h
+          from unified_market_change_24h cache
+          where cache.calculation_version = 2
+            and cache.change_24h is not null
+          order by cache.change_24h ${sortDir}, cache.market_id
+          limit ${candidateLimitParam}
+        ),
+        ${marketCandidateCtes}
+        select m.id
+        from ${marketContext.orderableMarketCandidateSource} candidate_market
+        join unified_markets m on m.id = candidate_market.market_id
+        join unified_events e on e.id = candidate_market.event_id
+        join ${candidateCteName} ranked_cache
+          on ranked_cache.market_id = m.id
+        where ${marketContext.where.join(" and ")}
+        order by ranked_cache.change_24h ${sortDir}, ranked_cache.market_id
+        limit ${limitParam} offset ${offsetParam}
+      `,
+      params,
+      { workMem: FEED_HEAVY_QUERY_WORK_MEM, jitOff: true },
+    );
+
+    if (rows.length >= inputs.limit) return rows.map((row) => row.id);
+  }
+
+  return null;
 }
 
 async function fetchFeedMarketIdsFast(
@@ -3557,6 +3561,7 @@ export async function fetchFeedMarketsDirect(
   pool: Pool,
   inputs: FeedInputs,
   preselectedMarketIds?: string[],
+  options?: { useCachedChange24h?: boolean },
 ): Promise<FeedMarketRow[]> {
   if (!preselectedMarketIds) {
     const fastMarketIds = await fetchFeedMarketIdsFast(pool, inputs);
@@ -3583,9 +3588,12 @@ export async function fetchFeedMarketsDirect(
           maxSpread: undefined,
         },
         fastMarketIds,
+        { useCachedChange24h: true },
       );
     }
   }
+  const useCachedChange24h =
+    inputs.sort === "change24h" && options?.useCachedChange24h === true;
   const { params, add } = createParamBuilder();
   const expressions = buildFeedSqlExpressions();
   const {
@@ -3976,21 +3984,30 @@ export async function fetchFeedMarketsDirect(
     ];
   }
 
+  const preselectedChange24hJoin =
+    inputs.sort === "change24h"
+      ? useCachedChange24h
+        ? `
+          left join unified_market_change_24h cached_change
+            on cached_change.market_id = m.id
+           and cached_change.calculation_version = 2
+        `
+        : "left join observed_market_change_24h observed_change on observed_change.market_id = m.id"
+      : "";
+  const preselectedChange24hExpr = useCachedChange24h
+    ? "cached_change.change_24h"
+    : "observed_change.change_24h";
   const preselectedMarketCandidatesSql = preselectedMarketIdsParam
     ? `
       select
         m.id,
         m.event_id
-        ${inputs.sort === "change24h" ? ", observed_change.change_24h" : ""},
+        ${inputs.sort === "change24h" ? `, ${preselectedChange24hExpr} as change_24h` : ""},
         selected.ord::bigint as ord
       from unnest(${preselectedMarketIdsParam}::text[])
         with ordinality selected(id, ord)
       join unified_markets m on m.id = selected.id
-      ${
-        inputs.sort === "change24h"
-          ? "left join observed_market_change_24h observed_change on observed_change.market_id = m.id"
-          : ""
-      }
+      ${preselectedChange24hJoin}
       where ${limitParam}::integer >= 0
         and ${offsetParam}::integer >= 0
         and ${nowParam}::timestamptz is not null
@@ -4042,7 +4059,11 @@ export async function fetchFeedMarketsDirect(
   const marketLastPriceExpr = `case when ${limitlessAmmFallbackAllowedExpr} then m.last_price else null end`;
   const withParts: string[] = [];
   if (preselectedMarketCandidatesSql) {
-    if (inputs.sort === "change24h" && preselectedMarketIdsParam) {
+    if (
+      inputs.sort === "change24h" &&
+      preselectedMarketIdsParam &&
+      !useCachedChange24h
+    ) {
       withParts.push(
         buildObservedCanonicalMarketChange24hCte({
           cteName: "observed_market_change_24h",
@@ -4127,7 +4148,7 @@ export async function fetchFeedMarketsDirect(
       ${marketLastPriceExpr} as last_price,
       m.resolved_outcome,
       m.resolved_outcome_pct,
-      (${change24hExpr}) as change_24h,
+      ${useCachedChange24h ? "m.change_24h" : `(${change24hExpr})`} as change_24h,
       m.outcomes,
       m.resolved_token_yes as token_yes,
       m.resolved_token_no as token_no,

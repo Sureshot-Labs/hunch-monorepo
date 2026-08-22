@@ -606,8 +606,13 @@ async function main() {
       if (seed.change24h != null) {
         await pool.query(
           `
-            insert into unified_event_change_24h (event_id, change_24h, updated_at)
-            values ($1, $2, $3::timestamptz)
+            insert into unified_event_change_24h (
+              event_id,
+              change_24h,
+              calculation_version,
+              updated_at
+            )
+            values ($1, $2, 1, $3::timestamptz)
           `,
           [eventId, seed.change24h, updatedAt],
         );

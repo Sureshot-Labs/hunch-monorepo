@@ -574,8 +574,13 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
         } else {
           const eventRows = await fetchFeedEventIds(pool, databaseInputs);
           const eventIds = eventRows.map((row) => row.id);
+          const useCachedChange24h = eventRows.some(
+            (row) => row.cached_change_24h === true,
+          );
           const rows = eventIds.length
-            ? await fetchFeedMarkets(pool, databaseInputs, eventIds)
+            ? await fetchFeedMarkets(pool, databaseInputs, eventIds, {
+                useCachedChange24h,
+              })
             : [];
           data = buildFeedData({ rows, eventIds, view });
         }
