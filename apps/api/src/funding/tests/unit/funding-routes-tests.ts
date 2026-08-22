@@ -20,6 +20,7 @@ import type { FundingOperationRow } from "../../persistence/funding-operation-re
 import { buildFundingTradeConsumerIntent } from "../../persistence/funding-trade-consumer-intent.js";
 import { WithdrawalDestinationError } from "../../execution/withdrawal-destination-runtime.js";
 import { FundingPlannerError } from "../../planner/money.js";
+import { FundingReceiveSessionSelectionConflictError } from "../../receive/receive-session-service.js";
 import { PreparationContractError } from "../../preparation/core-adapter.js";
 import {
   fundingRequestsPerMinute,
@@ -774,6 +775,7 @@ await test("receive channel conflicts use HTTP 409", async () => {
     });
     assert.equal(response.statusCode, 409);
     assert.equal(response.json().code, "receive_channel_conflict");
+    assert.equal("activeReceiveSessionId" in response.json(), false);
   } finally {
     await app.close();
   }
@@ -805,6 +807,36 @@ for (const code of [
     }
   });
 }
+
+await test("exact receive selection conflicts return only the owned active session ID", async () => {
+  const activeReceiveSessionId = "20000000-0000-4000-8000-000000000099";
+  const app = await buildApp({
+    openReceiveSession: async () => {
+      throw new FundingReceiveSessionSelectionConflictError(
+        activeReceiveSessionId,
+        "another selected asset is already receiving funds for this destination",
+      );
+    },
+  });
+  try {
+    const response = await app.inject({
+      method: "POST",
+      url: "/funding/receive-sessions",
+      payload: {
+        receiveOptionId: "receive_option_12345678",
+        idempotencyKey: "receive_option_open_12345678",
+      },
+    });
+    assert.equal(response.statusCode, 409);
+    assert.deepEqual(response.json(), {
+      error: "Receive options could not be prepared",
+      code: "receive_session_selection_conflict",
+      activeReceiveSessionId,
+    });
+  } finally {
+    await app.close();
+  }
+});
 
 await test("disabled receive destinations use HTTP 409", async () => {
   const app = await buildApp({

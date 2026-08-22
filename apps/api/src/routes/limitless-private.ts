@@ -64,6 +64,8 @@ import {
   limitlessAmmFundingOutcomeBodySchema,
   limitlessAmmFundingStartBodySchema,
   limitlessAmmHandoffBroadcastBodySchema,
+  limitlessAmmHandoffBroadcastErrorResponseSchema,
+  limitlessAmmHandoffBroadcastResponseSchema,
   limitlessAmmOrderBodySchema,
   limitlessCancelBatchBodySchema,
   limitlessClobQuoteQuerySchema,
@@ -1053,7 +1055,16 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
     "/orders/amm/handoff-broadcast",
     {
       preHandler: createAuthMiddleware(),
-      schema: { body: limitlessAmmHandoffBroadcastBodySchema },
+      schema: {
+        body: limitlessAmmHandoffBroadcastBodySchema,
+        response: {
+          200: limitlessAmmHandoffBroadcastResponseSchema,
+          400: limitlessAmmHandoffBroadcastErrorResponseSchema,
+          401: limitlessAmmHandoffBroadcastErrorResponseSchema,
+          403: limitlessAmmHandoffBroadcastErrorResponseSchema,
+          409: limitlessAmmHandoffBroadcastErrorResponseSchema,
+        },
+      },
     },
     async (request, reply) => {
       const user = request.user;

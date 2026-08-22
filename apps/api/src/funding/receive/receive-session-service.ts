@@ -71,6 +71,40 @@ import {
 
 type JsonRecord = Readonly<Record<string, JsonValue>>;
 
+/**
+ * The generic web receive flow may resume this exact, user-owned session via
+ * its normal authenticated read endpoint. This is intentionally distinct from
+ * a channel conflict, which must not disclose a Telegram-owned session.
+ */
+export class FundingReceiveSessionSelectionConflictError extends FundingPlannerError {
+  constructor(
+    readonly activeReceiveSessionId: string,
+    message: string,
+  ) {
+    super("receive_session_selection_conflict", message);
+    this.name = "FundingReceiveSessionSelectionConflictError";
+  }
+}
+
+function rethrowFundingReceiveSessionOpenError(error: unknown): never {
+  if (error instanceof FundingReceiveSessionChannelConflictError) {
+    throw new FundingPlannerError("receive_channel_conflict", error.message);
+  }
+  if (error instanceof FundingReceiveSessionExactScopeConflictError) {
+    throw new FundingReceiveSessionSelectionConflictError(
+      error.activeReceiveSessionId,
+      error.message,
+    );
+  }
+  if (error instanceof FundingReceiveSessionOpenIdempotencyConflictError) {
+    throw new FundingPlannerError(
+      "receive_session_idempotency_conflict",
+      error.message,
+    );
+  }
+  throw error;
+}
+
 function reviewCommitScope(input: {
   ownerChannel: FundingReceiveSessionChannel;
   receiveSessionId: string;
@@ -457,24 +491,7 @@ export class FundingReceiveSessionService {
           };
         }
       } catch (error) {
-        if (error instanceof FundingReceiveSessionChannelConflictError) {
-          throw new FundingPlannerError("receive_channel_conflict", error.message);
-        }
-        if (error instanceof FundingReceiveSessionExactScopeConflictError) {
-          throw new FundingPlannerError(
-            "receive_session_selection_conflict",
-            error.message,
-          );
-        }
-        if (
-          error instanceof FundingReceiveSessionOpenIdempotencyConflictError
-        ) {
-          throw new FundingPlannerError(
-            "receive_session_idempotency_conflict",
-            error.message,
-          );
-        }
-        throw error;
+        rethrowFundingReceiveSessionOpenError(error);
       }
     }
     const resolvedRequest = await this.resolveOpenRequest(userId, request, now);
@@ -833,25 +850,7 @@ export class FundingReceiveSessionService {
         preparePersistence,
       );
     } catch (error) {
-      if (error instanceof FundingReceiveSessionChannelConflictError) {
-        throw new FundingPlannerError(
-          "receive_channel_conflict",
-          error.message,
-        );
-      }
-      if (error instanceof FundingReceiveSessionExactScopeConflictError) {
-        throw new FundingPlannerError(
-          "receive_session_selection_conflict",
-          error.message,
-        );
-      }
-      if (error instanceof FundingReceiveSessionOpenIdempotencyConflictError) {
-        throw new FundingPlannerError(
-          "receive_session_idempotency_conflict",
-          error.message,
-        );
-      }
-      throw error;
+      rethrowFundingReceiveSessionOpenError(error);
     }
     const receipts = await listFundingReceiveReceiptsForUser(this.db, {
       userId,

@@ -23,7 +23,10 @@ import {
   isTelegramAppHandoffV2TradeVenue,
 } from "./services/telegram-app-handoff-v2-contract.js";
 import { requiresTelegramAppHandoffV2MinimumReceive } from "./repos/telegram-app-handoff-v2-direct-trade-repository.js";
-import { limitlessAmmHandoffBroadcastBodySchema } from "./schemas/limitless-private.js";
+import {
+  limitlessAmmHandoffBroadcastBodySchema,
+  limitlessAmmHandoffBroadcastResponseSchema,
+} from "./schemas/limitless-private.js";
 
 const POLYGON_PUSD = {
   assetId: "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB",
@@ -369,6 +372,33 @@ assert.equal(
   }).success,
   false,
   "AMM handoff must not reinterpret an EVM bytes32 as a Telegram fingerprint",
+);
+for (const response of [
+  {
+    ok: true,
+    status: "submitted",
+    txHash: `0x${"a".repeat(64)}`,
+  },
+  {
+    ok: true,
+    status: "reconciling",
+    txHash: `0x${"b".repeat(64)}`,
+    retrySameSignedTransaction: true,
+  },
+] as const) {
+  assert.equal(
+    limitlessAmmHandoffBroadcastResponseSchema.safeParse(response).success,
+    true,
+    `AMM handoff ${response.status} response must be public-contract valid`,
+  );
+}
+assert.equal(
+  limitlessAmmHandoffBroadcastResponseSchema.safeParse({
+    ok: true,
+    status: "submitted",
+  }).success,
+  false,
+  "AMM handoff response must always include its deterministic transaction hash",
 );
 assert.equal(directTrade.kind, "direct_trade");
 assert.equal(isTelegramAppHandoffV2Plan(directTrade), true);
