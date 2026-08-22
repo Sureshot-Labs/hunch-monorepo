@@ -13357,7 +13357,7 @@ export async function loadTelegramAppHandoffProjection(
           where handoff_row.trade_intent_id = intent.id
             and handoff_row.user_id = intent.user_id
             and handoff_row.plan_snapshot ->> 'version' = '2'
-          order by handoff_row.created_at desc, handoff_row.id desc
+          order by handoff_row.issued_at desc, handoff_row.id desc
           limit 1
        ) handoff on true
       where intent.id = $1::uuid

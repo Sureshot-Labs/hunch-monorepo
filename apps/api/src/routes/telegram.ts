@@ -128,6 +128,13 @@ function readTelegramAppHandoffV2RouteScope(
   return { action, venue };
 }
 
+function telegramAppHandoffFailureCode(error: unknown): string {
+  return error instanceof TelegramAppHandoffV2Error ||
+    error instanceof TelegramAppHandoffError
+    ? error.code
+    : "unexpected_error";
+}
+
 async function registerTelegramRoutes(
   app: Parameters<FastifyPluginAsync>[0],
   dependencies: TelegramRoutesDependencies,
@@ -505,16 +512,28 @@ async function registerTelegramRoutes(
           ) {
             throw new TelegramAppHandoffError("policy_changed");
           }
-          return materializeTelegramAppHandoffV2Funding({
-            currentAuthorityFingerprint: scope.authorityFingerprint,
-            currentPolicyRevision: scope.policyRevision,
-            db: pool,
-            planFingerprint: request.body.planFingerprint,
-            runtime: appHandoffV2Runtime,
-            telegramUserId: identity.telegramUserId,
-            token: request.body.token,
-            userId: identity.userId,
-          });
+          try {
+            return await materializeTelegramAppHandoffV2Funding({
+              currentAuthorityFingerprint: scope.authorityFingerprint,
+              currentPolicyRevision: scope.policyRevision,
+              db: pool,
+              planFingerprint: request.body.planFingerprint,
+              runtime: appHandoffV2Runtime,
+              telegramUserId: identity.telegramUserId,
+              token: request.body.token,
+              userId: identity.userId,
+            });
+          } catch (error) {
+            request.log.warn(
+              {
+                code: telegramAppHandoffFailureCode(error),
+                handoffId: handoff.id,
+                tradeIntentId: handoff.tradeIntentId,
+              },
+              "Telegram Mini App handoff commit failed",
+            );
+            throw error;
+          }
         }
         const venue = telegramVenueFromSealedHandoffSnapshot(
           handoff.planSnapshot,
@@ -530,7 +549,7 @@ async function registerTelegramRoutes(
         if (!scope) {
           throw new TelegramAppHandoffError("policy_changed");
         }
-        const committed = await commitTelegramAppHandoff({
+        return commitTelegramAppHandoff({
           currentAuthorityFingerprint: scope.authorityFingerprint,
           currentPolicyRevision: scope.policyRevision,
           db: pool,
@@ -539,7 +558,6 @@ async function registerTelegramRoutes(
           token: request.body.token,
           userId: identity.userId,
         });
-        return committed;
       });
     },
   );
@@ -567,8 +585,9 @@ async function registerTelegramRoutes(
         request.body.token,
       );
       if (!identity) return;
+      let handoff: TelegramAppHandoff | null = null;
       try {
-        const handoff = await resolveTelegramAppHandoff({
+        handoff = await resolveTelegramAppHandoff({
           db: pool,
           telegramUserId: identity.telegramUserId,
           token: request.body.token,
@@ -590,6 +609,14 @@ async function registerTelegramRoutes(
         reply.header("Cache-Control", "private, no-store");
         return reply.send({ projection });
       } catch (error) {
+        request.log.warn(
+          {
+            code: telegramAppHandoffFailureCode(error),
+            handoffId: handoff?.id ?? null,
+            tradeIntentId: handoff?.tradeIntentId ?? null,
+          },
+          "Telegram Mini App handoff projection failed",
+        );
         return sendHandoffError(reply, error);
       }
     },
