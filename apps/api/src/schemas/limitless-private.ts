@@ -36,6 +36,9 @@ const zLimitlessSlug = z
   .min(1, "slug is required")
   .max(128, "slug is too long")
   .regex(LIMITLESS_SLUG_RE, "slug must use letters, numbers, and dashes only");
+const zLimitlessTransactionHash = z
+  .string()
+  .regex(/^0x[a-fA-F0-9]{64}$/, "Invalid tx hash format");
 
 const limitlessOrderSchema = z
   .object({
@@ -163,10 +166,7 @@ export const limitlessAmmOrderBodySchema = z
     price: z.number().positive().optional(),
     amountUsd: z.number().positive().optional(),
     marketSlug: zLimitlessSlug.optional(),
-    txHash: z
-      .string()
-      .min(1, "txHash is required")
-      .regex(/^0x[a-fA-F0-9]{64}$/, "Invalid tx hash format"),
+    txHash: zLimitlessTransactionHash,
     fundingOperationId: z.string().uuid().optional(),
     fundingReservationId: z.string().uuid().optional(),
     fundingTradeAttemptId: z.string().uuid().optional(),
@@ -243,6 +243,19 @@ export const limitlessAmmHandoffBroadcastBodySchema = z.object({
     .max(65_536, "signedTransaction is too large"),
 });
 
+export const limitlessAmmHandoffBroadcastResponseSchema = z
+  .object({
+    ok: z.literal(true),
+    status: z.enum(["submitted", "reconciling"]),
+    txHash: zLimitlessTransactionHash,
+    retrySameSignedTransaction: z.literal(true).optional(),
+  })
+  .strict();
+
+export const limitlessAmmHandoffBroadcastErrorResponseSchema = z
+  .object({ error: z.string() })
+  .strict();
+
 export const limitlessAmmFundingStartBodySchema = z.object({
   attemptId: z.string().uuid(),
   claimToken: z.string().uuid(),
@@ -254,10 +267,7 @@ export const limitlessAmmFundingOutcomeBodySchema = z
   .object({
     attemptId: z.string().uuid(),
     outcome: z.enum(["ambiguous", "not_broadcast"]),
-    txHash: z
-      .string()
-      .regex(/^0x[a-fA-F0-9]{64}$/, "Invalid tx hash format")
-      .optional(),
+    txHash: zLimitlessTransactionHash.optional(),
     errorCode: z.string().trim().min(1).max(128).optional(),
   })
   .superRefine((value, context) => {

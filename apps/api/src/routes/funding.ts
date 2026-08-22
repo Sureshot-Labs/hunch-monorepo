@@ -30,6 +30,7 @@ import {
 } from "../funding/planner/runtime-service.js";
 import { preflightTrustedTradeShortfall } from "../funding/planner/trade-shortfall-preflight.js";
 import {
+  FundingReceiveSessionSelectionConflictError,
   FundingReceiveSessionService,
   type FundingReceiveSessionResponse,
   type OpenFundingReceiveSessionRequest,
@@ -81,6 +82,7 @@ import {
   fundingPreparationRunParamsSchema,
   fundingPreparationRunResponseSchema,
   fundingReceiveSessionOpenRequestSchema,
+  fundingReceiveSessionSelectionConflictResponseSchema,
   fundingReceiveOptionsResponseSchema,
   fundingReceiveReceiptParamsSchema,
   fundingReceiveReceiptReviewQuoteResponseSchema,
@@ -524,10 +526,14 @@ async function handleFundingRequest<T>(
     return await execute(userId);
   } catch (error) {
     request.log.error({ err: error, userId }, input.logMessage);
-    reply.code(errorStatus(error)).send({
+    const response = {
       error: input.publicError,
       code: errorCode(error),
-    });
+      ...(error instanceof FundingReceiveSessionSelectionConflictError
+        ? { activeReceiveSessionId: error.activeReceiveSessionId }
+        : {}),
+    };
+    reply.code(errorStatus(error)).send(response);
     return;
   }
 }
@@ -547,6 +553,12 @@ export function registerFundingRoutes(
     429: fundingApiErrorResponseSchema,
     500: fundingApiErrorResponseSchema,
     503: fundingApiErrorResponseSchema,
+  };
+  const receiveSessionOpenErrors = {
+    ...errors,
+    409: fundingReceiveSessionSelectionConflictResponseSchema.or(
+      fundingApiErrorResponseSchema,
+    ),
   };
 
   z.get(
@@ -720,7 +732,10 @@ export function registerFundingRoutes(
       preHandler: dependencies.authenticate,
       schema: {
         body: fundingReceiveSessionOpenRequestSchema,
-        response: { 200: fundingReceiveSessionResponseSchema, ...errors },
+        response: {
+          200: fundingReceiveSessionResponseSchema,
+          ...receiveSessionOpenErrors,
+        },
       },
     },
     (request, reply) =>

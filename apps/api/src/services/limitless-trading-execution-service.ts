@@ -424,7 +424,7 @@ export type LimitlessAmmRecordRouteResult =
   | {
       ok: false;
       payload: { error: string };
-      statusCode: number;
+      statusCode: 400 | 409;
     };
 
 export type LimitlessRouteOperationResult =
@@ -4846,7 +4846,7 @@ export async function broadcastLimitlessAmmTelegramAppHandoffTrade(input: {
         txHash: string;
       };
     }
-  | { ok: false; statusCode: number; payload: { error: string } }
+  | { ok: false; statusCode: 400 | 409; payload: { error: string } }
 > {
   const signer = toChecksumAddress(input.signer);
   const binding: TelegramAppHandoffV2DirectTradeBinding = {

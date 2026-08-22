@@ -274,7 +274,9 @@ try {
         },
       }),
     (error: unknown) =>
-      error instanceof FundingReceiveSessionExactScopeConflictError,
+      error instanceof FundingReceiveSessionExactScopeConflictError &&
+      error.activeReceiveSessionId ===
+        alternateGeneric.snapshot.session.receiveSessionId,
   );
   await assert.rejects(
     () =>
@@ -286,7 +288,9 @@ try {
         now: postMoneyExpiry,
       }),
     (error: unknown) =>
-      error instanceof FundingReceiveSessionExactScopeConflictError,
+      error instanceof FundingReceiveSessionExactScopeConflictError &&
+      error.activeReceiveSessionId ===
+        alternateGeneric.snapshot.session.receiveSessionId,
     "an expired exact-option retry must not surface a replaced asset after its receipt boundary",
   );
   // The synthetic recovery state above exists only to exercise the

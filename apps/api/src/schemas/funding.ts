@@ -1083,6 +1083,14 @@ export const fundingApiErrorResponseSchema = z
   })
   .strict();
 
+export const fundingReceiveSessionSelectionConflictResponseSchema = z
+  .object({
+    error: z.string(),
+    code: z.literal("receive_session_selection_conflict"),
+    activeReceiveSessionId: z.string().uuid(),
+  })
+  .strict();
+
 export const fundingValidationErrorResponseSchema = z.union([
   fundingApiErrorResponseSchema,
   z

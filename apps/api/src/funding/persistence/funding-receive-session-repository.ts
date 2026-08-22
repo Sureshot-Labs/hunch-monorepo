@@ -40,7 +40,7 @@ export class FundingReceiveSessionChannelConflictError extends Error {
 export class FundingReceiveSessionExactScopeConflictError extends Error {
   readonly code = "receive_session_selection_conflict";
 
-  constructor() {
+  constructor(readonly activeReceiveSessionId: string) {
     super(
       "another selected asset is already receiving funds for this destination",
     );
@@ -589,7 +589,9 @@ function assertReplayDoesNotConflictWithCurrentSelection(
       }),
   );
   if (differentPostMoneySession) {
-    throw new FundingReceiveSessionExactScopeConflictError();
+    throw new FundingReceiveSessionExactScopeConflictError(
+      differentPostMoneySession.id,
+    );
   }
 }
 
@@ -764,7 +766,9 @@ export async function createOrReuseFundingReceiveSession(
         !matchesExactReceiveScope(session, input),
     );
     if (differentPostMoneySession) {
-      throw new FundingReceiveSessionExactScopeConflictError();
+      throw new FundingReceiveSessionExactScopeConflictError(
+        differentPostMoneySession.id,
+      );
     }
     const current = currentSessions[0] ?? null;
     if (
