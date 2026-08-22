@@ -15,6 +15,8 @@ import { isRawAmount } from "../funding/domain/raw-amount.js";
 import {
   addUnsignedDecimals,
   compareUnsignedDecimals,
+  formatUnsignedDecimal,
+  multiplyUnsignedDecimals,
 } from "../account-value/decimal.js";
 import { rawAmount } from "../funding/planner/money.js";
 import {
@@ -306,17 +308,23 @@ function sourceIdentity(
 function sourceScope(input: {
   actions: SourceOption["requiredActions"];
   amount: Money;
+  maximumSourceDebitSlippageBps: number;
   source: SourceOption["source"] | SourceOptionLeg["source"];
 }): SourceDebitScope | null {
   const identity = sourceIdentity(input.source);
   if (!identity) return null;
+  const maximumRaw =
+    (rawAmount(input.amount.raw) *
+      BigInt(10_000 + input.maximumSourceDebitSlippageBps) +
+      9_999n) /
+    10_000n;
   return {
     asset: input.amount.asset,
     locationId:
       input.source.kind === "owned_location"
         ? input.source.location.locationId
         : null,
-    maximumRaw: input.amount.raw,
+    maximumRaw: maximumRaw.toString(),
     sourceFingerprint: canonicalJsonHash({
       actions: actionShape(input.actions),
       source: identity,
@@ -342,6 +350,7 @@ function quotedOptionSourceAmount(option: SourceOption): Money | null {
 
 function optionSourceScopes(
   option: SourceOption,
+  maximumSourceDebitSlippageBps = 0,
 ): readonly SourceDebitScope[] | null {
   if (option.source.kind === "composite") {
     const legs = option.sourceLegs;
@@ -350,6 +359,7 @@ function optionSourceScopes(
       sourceScope({
         actions: leg.requiredActions,
         amount: leg.sourceAmount,
+        maximumSourceDebitSlippageBps,
         source: leg.source,
       }),
     );
@@ -359,10 +369,17 @@ function optionSourceScopes(
   }
   const amount = quotedOptionSourceAmount(option);
   if (!amount) return null;
+  // `maximumSourceRaw` is already a capacity boundary when an adapter has no
+  // exact quote. Only a genuine quoted debit may move inside the confirmed
+  // re-quote tolerance; inflating capacity would authorize unavailable funds.
+  const quotedDebitSlippageBps = option.quotedSourceAmount
+    ? maximumSourceDebitSlippageBps
+    : 0;
   const scopes = [
     sourceScope({
       actions: option.requiredActions,
       amount,
+      maximumSourceDebitSlippageBps: quotedDebitSlippageBps,
       source: option.source,
     }),
   ].filter((scope): scope is SourceDebitScope => scope != null);
@@ -450,6 +467,7 @@ function isSealableClientFundingOption(option: SourceOption): boolean {
 
 function maximumSealedFundingFeeUsd(
   options: readonly SourceOption[],
+  maximumSlippageBps: number,
 ): string | null {
   let maximum: string | null = null;
   for (const option of options) {
@@ -459,7 +477,12 @@ function maximumSealedFundingFeeUsd(
       maximum = cap;
     }
   }
-  return maximum;
+  return maximum == null
+    ? null
+    : multiplyUnsignedDecimals(
+        maximum,
+        formatUnsignedDecimal(BigInt(10_000 + maximumSlippageBps), 4),
+      );
 }
 
 function destinationScope(option: FundingDestinationOption): DestinationScope {
@@ -542,8 +565,12 @@ export function buildTelegramAppHandoffV2Plan(input: {
   const selectableSources = input.projection.sourceOptions.filter(
     (option) => option.selectable && isSealableClientFundingOption(option),
   );
+  const maximumSlippageBps = input.discoveryRequest.maxSlippageBps ?? 0;
   const sourceDebits = dedupeSourceScopes(
-    selectableSources.flatMap((option) => optionSourceScopes(option) ?? []),
+    selectableSources.flatMap(
+      (option) =>
+        optionSourceScopes(option, maximumSlippageBps) ?? [],
+    ),
   );
   if (sourceDebits.length === 0) {
     throw new TelegramAppHandoffV2Error(
@@ -551,7 +578,10 @@ export function buildTelegramAppHandoffV2Plan(input: {
       "sealed handoff lacks a supported owned source",
     );
   }
-  const quotedFundingFeeCap = maximumSealedFundingFeeUsd(selectableSources);
+  const quotedFundingFeeCap = maximumSealedFundingFeeUsd(
+    selectableSources,
+    maximumSlippageBps,
+  );
   if (quotedFundingFeeCap == null) {
     throw new TelegramAppHandoffV2Error(
       "source_scope_changed",
