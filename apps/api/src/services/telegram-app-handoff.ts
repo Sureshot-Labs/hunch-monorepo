@@ -687,6 +687,19 @@ export async function commitTelegramAppHandoffWithExecution<T>(
                       'version', 2
                     )
                   ),
+                -- This code is a pre-commit routing marker, not an execution
+                -- failure. Once the sealed handoff has committed, retaining it
+                -- makes the Mini App stop before its first client action.
+                error_code = case
+                  when intent.error_code = 'external_handoff_required'
+                    then null
+                  else intent.error_code
+                end,
+                error_message = case
+                  when intent.error_code = 'external_handoff_required'
+                    then null
+                  else intent.error_message
+                end,
                 updated_at = clock_timestamp()
           where intent.id = $1::uuid
             and intent.delivery_mode = 'app_handoff'

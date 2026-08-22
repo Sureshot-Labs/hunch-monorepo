@@ -1929,7 +1929,29 @@ export async function materializeTelegramAppHandoffV2Funding(input: {
     tradeIntentId: handoff.tradeIntentId,
     userId: input.userId,
   });
-  if (existing) return { execution: existing, handoff };
+  const commitFundingExecution = (
+    commitExecution: (
+      context: Readonly<{ client: PoolClient }>,
+    ) => Promise<MaterializedTelegramAppHandoffV2>,
+  ) =>
+    commitTelegramAppHandoffWithExecution({
+      allowedIntentStatuses: ["funding"],
+      commitExecution,
+      currentAuthorityFingerprint: input.currentAuthorityFingerprint,
+      executionKind: "funding",
+      currentPolicyRevision: input.currentPolicyRevision,
+      db: input.db,
+      planFingerprint: input.planFingerprint,
+      telegramUserId: input.telegramUserId,
+      token: input.token,
+      userId: input.userId,
+    });
+  if (existing) {
+    // Retries still pass through the common commit boundary. Besides keeping
+    // the handoff idempotent, this repairs intents created before that boundary
+    // started clearing the obsolete `external_handoff_required` marker.
+    return commitFundingExecution(async () => existing);
+  }
   const prepared = await prepareTelegramAppHandoffV2Funding({
     handoffId: handoff.id,
     planSnapshot: handoff.planSnapshot,
@@ -1937,25 +1959,16 @@ export async function materializeTelegramAppHandoffV2Funding(input: {
     tradeIntentId: handoff.tradeIntentId,
     userId: input.userId,
   });
-  return commitTelegramAppHandoffWithExecution({
-    commitExecution: ({ client }) =>
-      attachTelegramAppHandoffV2FundingInTransaction(client, {
-        handoffId: handoff.id,
-        prepared,
-        runtime: input.runtime,
-        sealedPlan,
-        tradeIntentId: handoff.tradeIntentId,
-        userId: input.userId,
-      }),
-    currentAuthorityFingerprint: input.currentAuthorityFingerprint,
-    executionKind: "funding",
-    currentPolicyRevision: input.currentPolicyRevision,
-    db: input.db,
-    planFingerprint: input.planFingerprint,
-    telegramUserId: input.telegramUserId,
-    token: input.token,
-    userId: input.userId,
-  });
+  return commitFundingExecution(({ client }) =>
+    attachTelegramAppHandoffV2FundingInTransaction(client, {
+      handoffId: handoff.id,
+      prepared,
+      runtime: input.runtime,
+      sealedPlan,
+      tradeIntentId: handoff.tradeIntentId,
+      userId: input.userId,
+    }),
+  );
 }
 
 /** Used by tests and callers to assert the exact public v2 action surface. */
