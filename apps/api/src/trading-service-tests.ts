@@ -3385,7 +3385,7 @@ const tests: TestCase[] = [
       assert.equal(
         (limitlessFundingSubmit.match(/toPublicFundingTradeError\(/g) ?? [])
           .length,
-        3,
+        4,
       );
       assert.equal(
         (limitlessAmmFunding.match(/toPublicFundingTradeError\(/g) ?? [])

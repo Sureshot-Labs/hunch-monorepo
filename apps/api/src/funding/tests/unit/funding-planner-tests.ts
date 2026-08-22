@@ -2719,6 +2719,80 @@ await test("one liquidity discovery resolves market context and destination cand
   );
 });
 
+await test("temporary destination unavailability does not invalidate a resolved market context", async () => {
+  const policy = mutablePolicy();
+  policy.creationMode = "on";
+  const store = new MemoryPlanningStore();
+  const destination = candidate({
+    destinationLocationPatternId: "venue_limitless",
+    option: destinationOption({
+      preparationPurpose: "buy",
+      selectable: false,
+      venueId: "limitless",
+      destinationOptionId: "destination_limitless_12345678",
+      venueBindingOptionId: "binding_limitless_12345678",
+      requiredAsset: BASE_USDC,
+      networkLabel: "Base",
+      topology: "embedded_eoa",
+    }),
+    bindingOption: bindingOption({
+      preparationPurpose: "buy",
+      selectable: false,
+      venueBindingOptionId: "binding_limitless_12345678",
+      topology: "embedded_eoa",
+    }),
+    target: target(BASE_USDC, "limitless"),
+    availableNow: { asset: BASE_USDC, raw: "0" },
+    completeness: "partial",
+  });
+  const request = intent("trade_shortfall", "1000000", {
+    consumerIntent: {
+      venueId: "limitless",
+      marketId: "limitless:market_12345678",
+      marketContextId: "marketctx_12345678",
+      side: "BUY",
+      spend: { asset: BASE_USDC, raw: "1000000" },
+    },
+    destinationOptionId: null,
+    requestedDestinationAmount: { asset: BASE_USDC, raw: "1000000" },
+  });
+
+  const projection = await new FundingPlanner({
+    resolveMarketContext: async ({ marketContextId }) => ({
+      marketContextId,
+      venueId: "limitless",
+      marketId: "limitless:market_12345678",
+      side: "YES",
+      executionProfileId: "profile_limitless",
+      marketPriceRevision: "marketprice_12345678",
+      collateralAsset: BASE_USDC,
+      requestedCollateralRaw: "1000000",
+      compatibleVenueBindingOptionIds: [],
+      expiresAt: "2026-07-24T12:01:00.000Z",
+    }),
+    listDestinations: async () => [destination],
+    listSources: async () => {
+      throw new Error("an unavailable destination must not quote sources");
+    },
+    store,
+    now: () => NOW,
+  }).discover({
+    accountId: USER_ID,
+    request,
+    policy,
+    policyRevision: "policy_revision_12345678",
+    ownershipRevision: "ownership_revision_12345678",
+  });
+
+  assert.equal(projection.mode, "unavailable");
+  assert.equal(projection.marketContextId, request.marketContextId);
+  assert.deepEqual(
+    store.rows.get(projection.liquidityProjectionId)?.plannerSnapshot
+      .marketContext?.compatibleVenueBindingOptionIds,
+    [destination.bindingOption.venueBindingOptionId],
+  );
+});
+
 await test("planner keeps the true tiny shortfall while quoting one executable trade refill", async () => {
   const policy = mutablePolicy();
   policy.creationMode = "on";

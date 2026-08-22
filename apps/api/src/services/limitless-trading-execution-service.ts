@@ -5695,7 +5695,10 @@ async function observeLimitlessWalletUsdcBalance(input: {
   } catch (error) {
     input.ctx.logger?.warn?.(
       {
-        error,
+        err: error,
+        errorMessage:
+          error instanceof Error ? error.message : "unknown_error",
+        errorName: error instanceof Error ? error.name : typeof error,
         walletAddress: input.walletAddress,
       },
       "Limitless app-handoff balance observation failed",
