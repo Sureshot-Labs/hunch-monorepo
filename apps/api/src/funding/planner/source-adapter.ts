@@ -49,6 +49,45 @@ export interface FundingSourceAdapter {
   ): Promise<void>;
 }
 
+/**
+ * An execution wrapper may name its signing wallet while accounting reserves
+ * the underlying balance component. The planner freezes that exact alias in
+ * `balanceLocationId`; no other location is part of the owned source.
+ */
+export function fundingOwnedSourceIncludesLocation(
+  source: Readonly<{
+    kind: string;
+    location?: Readonly<{
+      details: Readonly<Record<string, unknown>>;
+      locationId: string;
+    }>;
+  }>,
+  locationId: string,
+): boolean {
+  if (source.kind !== "owned_location" || !source.location) return false;
+  const balanceLocationId = source.location.details.balanceLocationId;
+  return (
+    source.location.locationId === locationId ||
+    (typeof balanceLocationId === "string" && balanceLocationId === locationId)
+  );
+}
+
+export function fundingOwnedSourceReservationLocationId(
+  source: Readonly<{
+    kind: string;
+    location?: Readonly<{
+      details: Readonly<Record<string, unknown>>;
+      locationId: string;
+    }>;
+  }>,
+): string | null {
+  if (source.kind !== "owned_location" || !source.location) return null;
+  const balanceLocationId = source.location.details.balanceLocationId;
+  return typeof balanceLocationId === "string"
+    ? balanceLocationId
+    : source.location.locationId;
+}
+
 export function findExactFundingWalletProfile(input: {
   account: AccountValueReadModel;
   walletId: string;

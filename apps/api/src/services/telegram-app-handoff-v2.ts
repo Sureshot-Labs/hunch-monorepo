@@ -20,6 +20,10 @@ import {
 } from "../account-value/decimal.js";
 import { rawAmount } from "../funding/planner/money.js";
 import {
+  fundingOwnedSourceIncludesLocation,
+  fundingOwnedSourceReservationLocationId,
+} from "../funding/planner/source-adapter.js";
+import {
   FundingPlanningRuntime,
   type PreparedFundingRuntimeCommit,
 } from "../funding/planner/runtime-service.js";
@@ -568,8 +572,7 @@ export function buildTelegramAppHandoffV2Plan(input: {
   const maximumSlippageBps = input.discoveryRequest.maxSlippageBps ?? 0;
   const sourceDebits = dedupeSourceScopes(
     selectableSources.flatMap(
-      (option) =>
-        optionSourceScopes(option, maximumSlippageBps) ?? [],
+      (option) => optionSourceScopes(option, maximumSlippageBps) ?? [],
     ),
   );
   if (sourceDebits.length === 0) {
@@ -936,20 +939,96 @@ export function telegramAppHandoffV2SourceOptionWithinScope(
   const current = optionSourceScopes(option);
   if (!current || current.length === 0) return false;
   return current.every((entry) =>
-    sealed.some(
-      (candidate) => {
-        if (!sameAsset(candidate.asset, entry.asset)) return false;
-        if (candidate.locationId !== null || entry.locationId !== null) {
-          return (
-            candidate.locationId !== null &&
-            entry.locationId !== null &&
-            candidate.locationId === entry.locationId
-          );
-        }
-        return candidate.sourceFingerprint === entry.sourceFingerprint;
-      },
-    ),
+    sealed.some((candidate) => {
+      if (!sameAsset(candidate.asset, entry.asset)) return false;
+      if (candidate.locationId !== null || entry.locationId !== null) {
+        return (
+          candidate.locationId !== null &&
+          entry.locationId !== null &&
+          candidate.locationId === entry.locationId
+        );
+      }
+      return candidate.sourceFingerprint === entry.sourceFingerprint;
+    }),
   );
+}
+
+type PreparedOwnedSource = Readonly<{
+  kind: "owned_location";
+  location: Readonly<{
+    asset: Money["asset"];
+    details: Readonly<Record<string, unknown>>;
+    locationId: string;
+  }>;
+}>;
+
+function preparedOwnedSource(value: unknown): PreparedOwnedSource | null {
+  if (!isRecord(value) || value.kind !== "owned_location") return null;
+  const location = isRecord(value.location) ? value.location : null;
+  const asset = location ? exactAsset(location.asset) : null;
+  const details =
+    location && isRecord(location.details) ? location.details : null;
+  return location && asset && details && typeof location.locationId === "string"
+    ? {
+        kind: "owned_location",
+        location: { asset, details, locationId: location.locationId },
+      }
+    : null;
+}
+
+function preparedOwnedSources(
+  value: unknown,
+): readonly PreparedOwnedSource[] | null {
+  if (!isRecord(value) || !isRecord(value.source)) return null;
+  const composite = value.kind === "composite";
+  const compositeSource = value.source.kind === "composite";
+  const legs = Array.isArray(value.sourceLegs) ? value.sourceLegs : null;
+  if (composite || compositeSource || legs) {
+    if (
+      !composite ||
+      !compositeSource ||
+      !legs ||
+      !Number.isInteger(value.source.legCount) ||
+      value.source.legCount !== legs.length
+    ) {
+      return null;
+    }
+    const owned: PreparedOwnedSource[] = [];
+    for (const leg of legs) {
+      if (!isRecord(leg) || !isRecord(leg.source)) return null;
+      if (leg.source.kind === "owned_location") {
+        const source = preparedOwnedSource(leg.source);
+        if (!source) return null;
+        owned.push(source);
+      } else if (
+        leg.source.kind !== "external_ingress" &&
+        leg.source.kind !== "venue_preparation"
+      ) {
+        return null;
+      }
+    }
+    return owned;
+  }
+  if (value.source.kind === "owned_location") {
+    const source = preparedOwnedSource(value.source);
+    return source ? [source] : null;
+  }
+  return value.source.kind === "external_ingress" ||
+    value.source.kind === "venue_preparation"
+    ? []
+    : null;
+}
+
+function preparedOwnedSourceKey(
+  asset: Money["asset"],
+  reservationLocationId: string,
+): string {
+  return [
+    asset.networkId,
+    asset.assetId.toLowerCase(),
+    String(asset.decimals),
+    reservationLocationId,
+  ].join(":");
 }
 
 function preparedPlanWithinSourceScope(
@@ -984,7 +1063,12 @@ function preparedPlanWithinSourceScope(
       )
     );
   }
+  const ownedSources = preparedOwnedSources(
+    input.prepared.operation.quote.selectedSourceOptionSnapshot,
+  );
+  if (!ownedSources || ownedSources.length === 0) return false;
   const totals = new Map<string, bigint>();
+  const maximums = new Map<string, bigint>();
   for (const debit of debits) {
     const asset = {
       assetId: debit.assetId,
@@ -994,22 +1078,42 @@ function preparedPlanWithinSourceScope(
     // A debit reservation must name its physical location. A null scoped
     // source is an exact external handoff and is allowed only in the zero-
     // reservation branch above; it must never authorize an arbitrary debit.
-    const source = input.sealedSources.find(
+    const matchingOwnedSources = ownedSources.filter(
+      (ownedSource) =>
+        sameAsset(ownedSource.location.asset, asset) &&
+        fundingOwnedSourceIncludesLocation(ownedSource, debit.locationId),
+    );
+    const reservationLocationIds = [
+      ...new Set(
+        matchingOwnedSources
+          .map(fundingOwnedSourceReservationLocationId)
+          .filter((locationId): locationId is string => locationId != null),
+      ),
+    ];
+    if (reservationLocationIds.length !== 1) return false;
+    const matchingSealedSources = input.sealedSources.filter(
       (candidate) =>
         candidate.locationId !== null &&
-        candidate.locationId === debit.locationId &&
-        sameAsset(candidate.asset, asset),
+        sameAsset(candidate.asset, asset) &&
+        matchingOwnedSources.some((ownedSource) =>
+          fundingOwnedSourceIncludesLocation(
+            ownedSource,
+            candidate.locationId as string,
+          ),
+        ),
     );
-    if (!source) return false;
-    const key = sourceScopeKey(source);
+    if (matchingSealedSources.length === 0) return false;
+    const maximumRaw = matchingSealedSources.reduce((maximum, source) => {
+      const candidate = rawAmount(source.maximumRaw);
+      return candidate > maximum ? candidate : maximum;
+    }, 0n);
+    const key = preparedOwnedSourceKey(asset, reservationLocationIds[0]);
     totals.set(key, (totals.get(key) ?? 0n) + rawAmount(debit.rawAmount));
+    maximums.set(key, maximumRaw);
   }
-  return [...totals.entries()].every(([key, total]) => {
-    const source = input.sealedSources.find(
-      (candidate) => sourceScopeKey(candidate) === key,
-    );
-    return source != null && total <= rawAmount(source.maximumRaw);
-  });
+  return [...totals.entries()].every(
+    ([key, total]) => total <= (maximums.get(key) ?? -1n),
+  );
 }
 
 function preparedPlanMatchesDestinationScope(
