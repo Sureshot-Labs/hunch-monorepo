@@ -892,7 +892,14 @@ export function parseTelegramAppHandoffV2Plan(
   return parseV2Plan(snapshot);
 }
 
-function sourceScopeMatches(
+/**
+ * A v2 handoff scopes an owned source by its stable reservation location and
+ * exact asset.  Old snapshots included the then-current action shape in their
+ * fingerprint, so matching that field would turn a harmless fresh-plan setup
+ * change into a false `source_scope_changed`.  Null-location ingress remains
+ * fingerprint-bound because it has no durable reservation location.
+ */
+export function telegramAppHandoffV2SourceOptionWithinScope(
   sealed: readonly SourceDebitScope[],
   option: SourceOption,
 ): boolean {
@@ -900,9 +907,17 @@ function sourceScopeMatches(
   if (!current || current.length === 0) return false;
   return current.every((entry) =>
     sealed.some(
-      (candidate) =>
-        candidate.sourceFingerprint === entry.sourceFingerprint &&
-        sameAsset(candidate.asset, entry.asset),
+      (candidate) => {
+        if (!sameAsset(candidate.asset, entry.asset)) return false;
+        if (candidate.locationId !== null || entry.locationId !== null) {
+          return (
+            candidate.locationId !== null &&
+            entry.locationId !== null &&
+            candidate.locationId === entry.locationId
+          );
+        }
+        return candidate.sourceFingerprint === entry.sourceFingerprint;
+      },
     ),
   );
 }
@@ -1001,14 +1016,14 @@ function selectScopedSource(
       (option) =>
         option.selectable &&
         isSealableClientFundingOption(option) &&
-        sourceScopeMatches(sourceDebits, option) &&
+        telegramAppHandoffV2SourceOptionWithinScope(sourceDebits, option) &&
         option.recommended,
     ) ??
     projection.sourceOptions.find(
       (option) =>
         option.selectable &&
         isSealableClientFundingOption(option) &&
-        sourceScopeMatches(sourceDebits, option),
+        telegramAppHandoffV2SourceOptionWithinScope(sourceDebits, option),
     ) ??
     null
   );

@@ -16,6 +16,7 @@ import {
   resolveTelegramAppHandoffV2Execution,
   telegramAppHandoffPlanGeneration,
   telegramAppHandoffV2FundingIdempotencyKey,
+  telegramAppHandoffV2SourceOptionWithinScope,
   telegramAppHandoffV2SupportsActionKind,
 } from "./services/telegram-app-handoff-v2.js";
 import {
@@ -27,6 +28,7 @@ import {
   limitlessAmmHandoffBroadcastBodySchema,
   limitlessAmmHandoffBroadcastResponseSchema,
 } from "./schemas/limitless-private.js";
+import { canonicalJsonHash } from "./funding/persistence/canonical.js";
 
 const POLYGON_PUSD = {
   assetId: "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB",
@@ -327,6 +329,59 @@ assert.equal(
   "100000",
   "a v2 handoff seals the quoted debit, never the wallet's full capacity",
 );
+const legacyActionBoundBaseScope = sealed.funding.sourceDebits.map((scope) =>
+  scope.locationId === "wallet-base-usdc"
+    ? {
+        ...scope,
+        sourceFingerprint: canonicalJsonHash({
+          actions: [
+            { actor: "user", kind: "evm_transaction", valueMoving: true },
+          ],
+          source: {
+            asset: BASE_USDC,
+            kind: "owned_location",
+            locationId: "wallet-base-usdc",
+          },
+        }),
+      }
+    : scope,
+);
+assert.equal(
+  telegramAppHandoffV2SourceOptionWithinScope(
+    legacyActionBoundBaseScope,
+    {
+      ...evmSource,
+      requiredActions: [
+        {
+          actor: "user",
+          kind: "evm_transaction_batch",
+          safeLabel: "Approve and send USDC",
+          sponsorship: "requested",
+          valueMoving: true,
+        },
+      ],
+    },
+  ),
+  true,
+  "a legacy action-bound scope accepts a fresh setup change on its owned source",
+);
+assert.equal(
+  telegramAppHandoffV2SourceOptionWithinScope(
+    sealed.funding.sourceDebits,
+    {
+      ...evmSource,
+      source: {
+        kind: "owned_location",
+        location: {
+          ...baseOwnedSource.location,
+          locationId: "wallet-other-usdc",
+        },
+      },
+    },
+  ),
+  false,
+  "a matching asset on another owned location is never inside the sealed scope",
+);
 assert.equal(isTelegramAppHandoffV2Plan(sealed), true);
 assert.equal(
   isTelegramAppHandoffV2Plan({
@@ -588,6 +643,60 @@ assert.equal(
   ownedExternalHandoff.funding.sourceDebits[0]?.locationId,
   "wallet-base-usdc",
   "an external handoff from an owned wallet remains source-bound and capped",
+);
+
+const controlledIngressSource: SourceOption = {
+  ...evmSource,
+  requiredActions: [
+    {
+      actor: "user",
+      kind: "external_handoff",
+      safeLabel: "Continue with connected wallet",
+      sponsorship: "none",
+      valueMoving: true,
+    },
+  ],
+  source: {
+    asset: BASE_USDC,
+    controlledSender: true,
+    ingressKind: "controlled_wallet",
+    kind: "external_ingress",
+    networkId: "evm:8453",
+  },
+  sourceOptionId: "source-controlled-ingress",
+};
+const controlledIngressHandoff = buildTelegramAppHandoffV2Plan({
+  discoveryRequest: request,
+  fundingPolicyRevision: "funding-policy-1",
+  projection: projection([controlledIngressSource]),
+  trade,
+});
+assert.equal(
+  telegramAppHandoffV2SourceOptionWithinScope(
+    controlledIngressHandoff.funding.sourceDebits,
+    controlledIngressSource,
+  ),
+  true,
+  "a legacy null-location scope remains compatible when its action shape is unchanged",
+);
+assert.equal(
+  telegramAppHandoffV2SourceOptionWithinScope(
+    controlledIngressHandoff.funding.sourceDebits,
+    {
+      ...controlledIngressSource,
+      requiredActions: [
+        {
+          actor: "user",
+          kind: "evm_transaction",
+          safeLabel: "Send USDC",
+          sponsorship: "requested",
+          valueMoving: true,
+        },
+      ],
+    },
+  ),
+  false,
+  "a null-location ingress cannot change its action shape inside a sealed handoff",
 );
 
 const exactShortfallPlan = buildTelegramAppHandoffV2Plan({
