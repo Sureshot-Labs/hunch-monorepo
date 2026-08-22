@@ -7,6 +7,7 @@ import {
   resolveTelegramBuyIntentMaximumAmountUsd,
   resolveTelegramBuyPresetDeliveryModes,
   resolveTelegramBuyExecutionCapability,
+  isInitialTelegramAppHandoffProposal,
   telegramVenueFromSealedHandoffSnapshot,
 } from "./services/telegram-bot-trading.js";
 import { isTelegramAppHandoffV2EnabledForVenue } from "./services/telegram-app-handoff-v2-contract.js";
@@ -24,6 +25,25 @@ const kalshiSolana = resolveTelegramBuyExecutionCapability({
   venue: "kalshi",
   walletChain: "solana",
 });
+
+assert.equal(
+  isInitialTelegramAppHandoffProposal({
+    deliveryMode: "app_handoff",
+    status: "draft",
+  }),
+  true,
+  "a fresh Mini App intent must reach the preview that creates its sealed plan",
+);
+for (const status of ["previewed", "external_handoff", "confirming"]) {
+  assert.equal(
+    isInitialTelegramAppHandoffProposal({
+      deliveryMode: "app_handoff",
+      status,
+    }),
+    false,
+    `a ${status} Mini App intent must already carry its sealed plan`,
+  );
+}
 
 for (const venue of ["polymarket", "limitless"]) {
   assert.equal(
