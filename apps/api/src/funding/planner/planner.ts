@@ -774,7 +774,6 @@ export class FundingPlanner {
           allCandidates
             .filter(
               (candidate) =>
-                candidate.option.selectable &&
                 candidate.option.venueId === marketContext?.venueId &&
                 sameAsset(
                   candidate.option.requiredAsset,
@@ -784,6 +783,10 @@ export class FundingPlanner {
             .map((candidate) => candidate.bindingOption.venueBindingOptionId),
         ),
       ];
+      // Compatibility is structural (venue + collateral), not a live
+      // readiness decision. A transient RPC/credential inspection may make a
+      // destination non-selectable, but it must not erase an otherwise valid
+      // market context and misreport the market as absent or expired.
       marketContext =
         compatibleVenueBindingOptionIds.length > 0
           ? { ...marketContext, compatibleVenueBindingOptionIds }
