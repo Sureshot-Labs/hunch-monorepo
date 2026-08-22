@@ -110,6 +110,18 @@ function createFakePool() {
         if (normalized.includes("set status = 'cancelled'")) {
           return { rowCount: 1, rows: [] };
         }
+        if (normalized.includes("'version', 2")) {
+          assert.match(
+            normalized,
+            /error_code = case when intent\.error_code = 'external_handoff_required' then null else intent\.error_code end/u,
+            "committing v2 must clear the obsolete pre-commit routing marker",
+          );
+          assert.match(
+            normalized,
+            /error_message = case when intent\.error_code = 'external_handoff_required' then null else intent\.error_message end/u,
+            "the marker message must not stop the committed Mini App execution",
+          );
+        }
         assert.equal(params[2], HANDOFF_ID);
         return { rowCount: 1, rows: [] };
       }
