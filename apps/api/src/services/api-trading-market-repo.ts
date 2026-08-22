@@ -166,11 +166,24 @@ export function venueScopedMarketContextCandidates(
   marketContextId: string,
 ): readonly string[] {
   const prefix = `${venue}:`;
-  const localId = marketContextId.startsWith(prefix)
-    ? marketContextId.slice(prefix.length)
-    : marketContextId;
+  const localId = venueLocalMarketContextId(venue, marketContextId);
   if (!venue || !localId) return [];
   return [...new Set([localId, `${prefix}${localId}`])];
+}
+
+/**
+ * Funding contracts carry venue-local outcome IDs, while the unified index
+ * may retain the same outcome with its venue prefix. Normalize only that
+ * known representation; arbitrary token contents remain unchanged.
+ */
+export function venueLocalMarketContextId(
+  venue: string,
+  marketContextId: string,
+): string {
+  const prefix = `${venue}:`;
+  return marketContextId.startsWith(prefix)
+    ? marketContextId.slice(prefix.length)
+    : marketContextId;
 }
 
 export async function resolveTradeMarketOutcomeIdentity(

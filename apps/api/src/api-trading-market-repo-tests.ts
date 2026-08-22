@@ -10,6 +10,7 @@ import {
   findTradeMarketByRefForVenue,
   resolveTradeMarketByRef,
   resolveTradeMarketOutcomeIdentity,
+  venueLocalMarketContextId,
   type ApiTradeMarket,
   venueScopedMarketContextCandidates,
 } from "./services/api-trading-market-repo.js";
@@ -225,5 +226,15 @@ await test("venue-scoped outcome candidates are generic and case-sensitive", asy
       "future-venue:Case:Sensitive/Token",
     ),
     ["Case:Sensitive/Token", "future-venue:Case:Sensitive/Token"],
+  );
+  assert.equal(
+    venueLocalMarketContextId("limitless", "limitless:123456"),
+    "123456",
+    "a unified Limitless outcome ID becomes the local funding context",
+  );
+  assert.equal(
+    venueLocalMarketContextId("polymarket", "0xoutcome"),
+    "0xoutcome",
+    "an already-local outcome ID remains byte-for-byte unchanged",
   );
 });

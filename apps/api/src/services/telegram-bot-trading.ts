@@ -20,6 +20,7 @@ import {
   findTradeMarketByRef,
   isOrderable,
   type ApiTradeMarket,
+  venueLocalMarketContextId,
 } from "./api-trading-market-repo.js";
 import {
   resolveSignalBotTradingPolicyFromDb,
@@ -1584,7 +1585,10 @@ function telegramTradeMarketContextId(
   market: TelegramBotMarketRow,
   side: TelegramBotTradingSide,
 ): string | null {
-  return side === "YES" ? market.token_yes : market.token_no;
+  const outcomeTokenId = side === "YES" ? market.token_yes : market.token_no;
+  return outcomeTokenId
+    ? venueLocalMarketContextId(market.venue, outcomeTokenId)
+    : null;
 }
 
 function telegramShortfallVenue(
