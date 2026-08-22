@@ -527,6 +527,7 @@ async function registerTelegramRoutes(
             request.log.warn(
               {
                 code: telegramAppHandoffFailureCode(error),
+                err: error,
                 handoffId: handoff.id,
                 tradeIntentId: handoff.tradeIntentId,
               },
