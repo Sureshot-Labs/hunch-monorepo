@@ -201,6 +201,7 @@ export function buildEventDurationExistsSql(args: {
 
 function buildBroadOrderableMarketCandidatesCte(args: {
   candidateMarketIdsCte?: string | null;
+  candidateEventIdsCte?: string | null;
   candidateMarketIdsParam?: string | null;
   cteName?: string;
   materialized?: boolean;
@@ -219,8 +220,15 @@ function buildBroadOrderableMarketCandidatesCte(args: {
   if (candidateMarketIdsCte) {
     assertSafeSqlIdentifier(candidateMarketIdsCte, "candidate market ids CTE");
   }
+  const candidateEventIdsCte = args.candidateEventIdsCte ?? null;
+  if (candidateEventIdsCte) {
+    assertSafeSqlIdentifier(candidateEventIdsCte, "candidate event ids CTE");
+  }
   const candidateMarketJoin = candidateMarketIdsCte
     ? `join ${candidateMarketIdsCte} candidate_filter on candidate_filter.market_id = m.id`
+    : "";
+  const candidateEventJoin = candidateEventIdsCte
+    ? `join ${candidateEventIdsCte} candidate_event_filter on candidate_event_filter.id = m.event_id`
     : "";
   const candidateMarketSql = args.candidateMarketIdsParam
     ? `and m.id = ANY(${args.candidateMarketIdsParam}::text[])`
@@ -236,6 +244,7 @@ function buildBroadOrderableMarketCandidatesCte(args: {
         m.event_id
       from unified_markets m
       ${candidateMarketJoin}
+      ${candidateEventJoin}
       where ${buildStrictIndexedMarketSql({
         marketAlias: "m",
         nowParam: args.nowParam,
@@ -261,6 +270,7 @@ function buildBroadOrderableMarketCandidatesCte(args: {
         m.venue_market_id
       from unified_markets m
       ${candidateMarketJoin}
+      ${candidateEventJoin}
       where m.status = 'ACTIVE'
         and m.venue = 'polymarket'
         and m.close_time is not null
@@ -274,6 +284,7 @@ function buildBroadOrderableMarketCandidatesCte(args: {
         m.venue_market_id
       from unified_markets m
       ${candidateMarketJoin}
+      ${candidateEventJoin}
       where m.status = 'ACTIVE'
         and m.venue = 'polymarket'
         and m.expiration_time is not null
@@ -288,6 +299,7 @@ function buildBroadOrderableMarketCandidatesCte(args: {
       from unified_events e
       join unified_markets m on m.event_id = e.id
       ${candidateMarketJoin}
+      ${candidateEventJoin}
       where e.status = 'ACTIVE'
         and e.end_date is not null
         and e.end_date <= ${args.nowParam}::timestamptz
@@ -899,7 +911,7 @@ function buildFeedDirectMarketRelaxedQueryText(q?: string): string | null {
 
 function buildFeedSearchQueryCte(searchParam: string, prefixParam: string) {
   return `
-      search_query as materialized (
+      search_query as not materialized (
         select
           prepared.query,
           prepared.prefix_query,
@@ -1097,81 +1109,90 @@ function buildFeedSearchMatchesSql(args: {
     const marketEarlyWhere = marketEarlyClauses?.length
       ? `and ${marketEarlyClauses.join(" and ")}`
       : "";
+    const eventRank = (queryExpr: "sq.query" | "sq.prefix_query") =>
+      mode === "ranked"
+        ? `ts_rank_cd((${eventSearchDocExpr}), ${queryExpr})${eventRankFactor}`
+        : eventMembershipScore;
+    const marketRank = (queryExpr: "sq.query" | "sq.prefix_query") =>
+      mode === "ranked"
+        ? `ts_rank_cd((${marketSearchDocExpr}), ${queryExpr})${marketRankFactor}`
+        : marketMembershipScore;
+    const eventMatchesSql = (args: {
+      queryExpr: "sq.query" | "sq.prefix_query";
+      prefix: boolean;
+    }) => `
+      select e.id, ${eventRank(args.queryExpr)} as rank
+      from unified_events e
+      cross join search_query sq
+      where ${
+        args.prefix
+          ? `${args.queryExpr} is not null and querytree(${args.queryExpr}) <> ''`
+          : `querytree(${args.queryExpr}) <> ''`
+      }
+        ${profileGate}
+        and e.status = 'ACTIVE'
+        ${eventEarlyWhere}
+        and (${eventSearchDocExpr}) @@ ${args.queryExpr}
+    `;
+    const marketFtsMatchesCte = (args: {
+      cteName: string;
+      queryExpr: "sq.query" | "sq.prefix_query";
+      prefix: boolean;
+    }) => `
+      ${args.cteName} as materialized (
+        select
+          m.id as market_id,
+          m.event_id,
+          ${marketRank(args.queryExpr)} as rank
+        from unified_markets m
+        cross join search_query sq
+        where ${
+          args.prefix
+            ? `${args.queryExpr} is not null and querytree(${args.queryExpr}) <> ''`
+            : `querytree(${args.queryExpr}) <> ''`
+        }
+          and m.status = 'ACTIVE'
+          and (${marketSearchDocExpr}) @@ ${args.queryExpr}
+      )
+    `;
+    const marketMatchesSql = (cteName: string) => `
+      select matched.event_id as id, matched.rank
+      from ${cteName} matched
+      join unified_markets m on m.id = matched.market_id
+      join unified_events e on e.id = m.event_id
+      left join polymarket_markets pm_search
+        on pm_search.id = m.venue_market_id
+       and m.venue = 'polymarket'
+      where true
+        ${profileGate}
+        and ${orderableMarketExpr}
+        ${marketEarlyWhere}
+        and ${renderableMarketExpr}
+    `;
+    const exactMarketMatchesCte = `${profile}_market_exact_fts_matches`;
+    const prefixMarketMatchesCte = `${profile}_market_prefix_fts_matches`;
 
     return `
+      with
+      ${marketFtsMatchesCte({
+        cteName: exactMarketMatchesCte,
+        queryExpr: "sq.query",
+        prefix: false,
+      })},
+      ${marketFtsMatchesCte({
+        cteName: prefixMarketMatchesCte,
+        queryExpr: "sq.prefix_query",
+        prefix: true,
+      })}
       select id, max(rank) as rank, ${sourcePriority}::int as search_priority
       from (
-        select
-          e.id,
-          ${
-            mode === "ranked"
-              ? `ts_rank_cd((${eventSearchDocExpr}), sq.query)${eventRankFactor}`
-              : eventMembershipScore
-          } as rank
-        from unified_events e
-        cross join search_query sq
-        where querytree(sq.query) <> ''
-          ${profileGate}
-          and e.status = 'ACTIVE'
-          ${eventEarlyWhere}
-          and (${eventSearchDocExpr}) @@ sq.query
+        ${eventMatchesSql({ queryExpr: "sq.query", prefix: false })}
         union all
-        select
-          e.id,
-          ${
-            mode === "ranked"
-              ? `ts_rank_cd((${eventSearchDocExpr}), sq.prefix_query)`
-              : eventMembershipScore
-          } as rank
-        from unified_events e
-        cross join search_query sq
-        where sq.prefix_query is not null
-          and querytree(sq.prefix_query) <> ''
-          ${profileGate}
-          and e.status = 'ACTIVE'
-          ${eventEarlyWhere}
-          and (${eventSearchDocExpr}) @@ sq.prefix_query
+        ${eventMatchesSql({ queryExpr: "sq.prefix_query", prefix: true })}
         union all
-        select
-          m.event_id as id,
-          ${
-            mode === "ranked"
-              ? `ts_rank_cd((${marketSearchDocExpr}), sq.query)${marketRankFactor}`
-              : marketMembershipScore
-          } as rank
-        from unified_markets m
-        join unified_events e on e.id = m.event_id
-        left join polymarket_markets pm_search
-          on pm_search.id = m.venue_market_id
-         and m.venue = 'polymarket'
-        cross join search_query sq
-        where querytree(sq.query) <> ''
-          ${profileGate}
-          and ${orderableMarketExpr}
-          ${marketEarlyWhere}
-          and ${renderableMarketExpr}
-          and (${marketSearchDocExpr}) @@ sq.query
+        ${marketMatchesSql(exactMarketMatchesCte)}
         union all
-        select
-          m.event_id as id,
-          ${
-            mode === "ranked"
-              ? `ts_rank_cd((${marketSearchDocExpr}), sq.prefix_query)`
-              : marketMembershipScore
-          } as rank
-        from unified_markets m
-        join unified_events e on e.id = m.event_id
-        left join polymarket_markets pm_search
-          on pm_search.id = m.venue_market_id
-         and m.venue = 'polymarket'
-        cross join search_query sq
-        where sq.prefix_query is not null
-          and querytree(sq.prefix_query) <> ''
-          ${profileGate}
-          and ${orderableMarketExpr}
-          ${marketEarlyWhere}
-          and ${renderableMarketExpr}
-          and (${marketSearchDocExpr}) @@ sq.prefix_query
+        ${marketMatchesSql(prefixMarketMatchesCte)}
       ) matches
       group by id
       order by search_priority desc, rank desc nulls last, id
@@ -1821,8 +1842,10 @@ function buildFeedMarketViewContext(args: {
   });
   const needsMarketCount =
     inputs.eventScope === "grouped" || inputs.eventScope === "single";
+  const candidateEventIdsCte = search.hasSearch ? "search_events" : null;
   const orderableMarketCandidatesCte = buildBroadOrderableMarketCandidatesCte({
     candidateMarketIdsCte: args.candidateMarketIdsCte,
+    candidateEventIdsCte,
     candidateMarketIdsParam: marketIdsParam,
     materialized: true,
     nowParam,
@@ -1835,7 +1858,7 @@ function buildFeedMarketViewContext(args: {
       renderableMarketExpr,
       supportedLimitlessMarketExpr,
       marketIdsParam,
-      hasSearch: search.hasSearch,
+      hasSearch: false,
       requireNamedCategory,
     }),
   });
@@ -2190,6 +2213,7 @@ export async function fetchFeedCategoryFacetRows(
     if (search.searchCte) withParts.push(search.searchCte);
     withParts.push(
       buildBroadOrderableMarketCandidatesCte({
+        candidateEventIdsCte: search.hasSearch ? "search_events" : null,
         candidateMarketIdsParam: marketIdsParam,
         materialized: true,
         nowParam,
@@ -2202,7 +2226,7 @@ export async function fetchFeedCategoryFacetRows(
             renderableMarketExpr,
             supportedLimitlessMarketExpr,
             marketIdsParam,
-            hasSearch: search.hasSearch,
+            hasSearch: false,
             requireNamedCategory: true,
           }),
         ],
@@ -2251,6 +2275,7 @@ export async function fetchFeedCategoryFacetRows(
   if (search.searchCte) withParts.push(search.searchCte);
   withParts.push(
     buildBroadOrderableMarketCandidatesCte({
+      candidateEventIdsCte: search.hasSearch ? "search_events" : null,
       candidateMarketIdsParam: marketIdsParam,
       materialized: true,
       nowParam,
@@ -2263,7 +2288,7 @@ export async function fetchFeedCategoryFacetRows(
           renderableMarketExpr,
           supportedLimitlessMarketExpr,
           marketIdsParam,
-          hasSearch: search.hasSearch,
+          hasSearch: false,
           requireNamedCategory: true,
         }),
       ],
@@ -2481,6 +2506,7 @@ async function fetchFeedEventIdsExact(
   if (search.searchCte) withParts.push(search.searchCte);
   withParts.push(
     buildBroadOrderableMarketCandidatesCte({
+      candidateEventIdsCte: search.hasSearch ? "search_events" : null,
       candidateMarketIdsParam: marketIdsParam,
       materialized: true,
       nowParam,
@@ -2493,7 +2519,7 @@ async function fetchFeedEventIdsExact(
           renderableMarketExpr,
           supportedLimitlessMarketExpr,
           marketIdsParam,
-          hasSearch: search.hasSearch,
+          hasSearch: false,
         }),
       ],
     }),

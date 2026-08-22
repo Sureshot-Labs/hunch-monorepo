@@ -34,6 +34,8 @@ type SeededMarket = {
   expirationTime: Date;
   volumeTotal: number;
   liquidity?: number;
+  bestBid?: number;
+  bestAsk?: number;
   dflowNativeAcceptingOrders?: boolean;
 };
 
@@ -146,10 +148,10 @@ async function insertMarket(market: SeededMarket): Promise<void> {
       values (
         $1, $2, $3, $4, $5, $6, $7, 'ACTIVE', 'binary',
         now() - interval '1 hour', $8, $9,
-        0.45, 0.55, 0.5, $10, 10, $11, 50,
-        $12, $13,
+        $10, $11, 0.5, $12, 10, $13, 50,
+        $14, $15,
         case
-          when $2 = 'kalshi' then jsonb_build_object('dflowNativeAcceptingOrders', $14::boolean)
+          when $2 = 'kalshi' then jsonb_build_object('dflowNativeAcceptingOrders', $16::boolean)
           else '{}'::jsonb
         end,
         now(), now()
@@ -165,6 +167,8 @@ async function insertMarket(market: SeededMarket): Promise<void> {
       market.category ?? null,
       market.closeTime.toISOString(),
       market.expirationTime.toISOString(),
+      market.bestBid ?? 0.45,
+      market.bestAsk ?? 0.55,
       market.volumeTotal,
       market.liquidity ?? 100,
       market.outcomes ?? '["Yes","No"]',
@@ -233,6 +237,19 @@ async function main() {
     );
     const searchEventsSql = searchFilter.searchCte.slice(
       searchFilter.searchCte.indexOf("search_events as materialized"),
+    );
+    assert.match(searchFilter.searchCte, /search_query as not materialized/);
+    assert.match(
+      primarySql,
+      /primary_market_exact_fts_matches as materialized/,
+    );
+    assert.match(
+      primarySql,
+      /primary_market_prefix_fts_matches as materialized/,
+    );
+    assert.match(
+      primarySql,
+      /join unified_markets m on m.id = matched.market_id/,
     );
     assert.match(primarySql, /lower\(e\.category\)/);
     assert.match(primarySql, /polymarket_markets pm_search/);
@@ -408,6 +425,26 @@ async function main() {
       startDate: new Date(now - 60 * 60 * 1000),
       endDate: new Date(now + 30 * 24 * 60 * 60 * 1000),
       volumeTotal: 600,
+    },
+    {
+      id: makeId("polymarket:event"),
+      venue: "polymarket",
+      venueEventId: makeId("venue-event"),
+      title: `Pres exact low-volume ${needle}`,
+      category,
+      startDate: new Date(now - 60 * 60 * 1000),
+      endDate: new Date(now + 30 * 24 * 60 * 60 * 1000),
+      volumeTotal: 1,
+    },
+    {
+      id: makeId("polymarket:event"),
+      venue: "polymarket",
+      venueEventId: makeId("venue-event"),
+      title: `President prefix high-volume ${needle}`,
+      category,
+      startDate: new Date(now - 60 * 60 * 1000),
+      endDate: new Date(now + 30 * 24 * 60 * 60 * 1000),
+      volumeTotal: 500,
     },
     ...outOfCategoryFallbackEvents,
   ];
@@ -587,6 +624,30 @@ async function main() {
       volumeTotal: 10_000_000,
     },
     {
+      id: makeId("polymarket:market"),
+      venue: "polymarket",
+      venueMarketId: makeId("venue-market"),
+      eventId: events[16].id,
+      title: `Pres exact low-volume market ${needle}`,
+      closeTime: events[16].endDate,
+      expirationTime: events[16].endDate,
+      volumeTotal: 1,
+      bestBid: 0.45,
+      bestAsk: 0.55,
+    },
+    {
+      id: makeId("polymarket:market"),
+      venue: "polymarket",
+      venueMarketId: makeId("venue-market"),
+      eventId: events[17].id,
+      title: `President prefix high-volume market ${needle}`,
+      closeTime: events[17].endDate,
+      expirationTime: events[17].endDate,
+      volumeTotal: 500,
+      bestBid: 0.49,
+      bestAsk: 0.5,
+    },
+    {
       id: makeId("kalshi:market"),
       venue: "kalshi",
       venueMarketId: makeId("venue-market"),
@@ -741,6 +802,27 @@ async function main() {
           `expected ${q} to match bitcoin event`,
         );
       }
+    }
+
+    {
+      const response = await app.inject({
+        method: "GET",
+        url: `/feed?${buildQuery({
+          q: "pres",
+          view: "events",
+          category,
+          max_spread: 0.02,
+          limit: 10,
+        })}`,
+      });
+      assert.equal(response.statusCode, 200);
+      const payload = response.json<FeedPayload>();
+      const eventIds = payload.data.map((event) => event.eventId);
+      assert.ok(
+        eventIds.includes(events[17].id),
+        "prefix matches must remain available when exact matches fail a final feed filter",
+      );
+      assert.ok(!eventIds.includes(events[16].id));
     }
 
     {
