@@ -4074,7 +4074,20 @@ async function loadHolderResearchCandidateMarketsFromPositionSource(
         on no_credential.market_id = um.id and no_credential.side = 'NO'
       left join recent_activity ra on ra.market_id = um.id
       left join event_bridge eb on eb.event_id = um.event_id
-      left join unified_market_change_24h mc on mc.market_id = um.id
+      left join unified_market_change_24h mc
+        on mc.market_id = um.id
+       and (
+         mc.calculation_version = 2
+         or (
+           mc.calculation_version = 1
+           and not exists (
+             select 1
+             from unified_market_change_24h v2_cache
+             where v2_cache.calculation_version = 2
+               and v2_cache.change_24h is not null
+           )
+         )
+       )
       left join unified_market_activity_metrics_24h mam on mam.market_id = um.id
       where ${trackableSql}
         and (coalesce(yes.usd, 0) + coalesce(no.usd, 0)) >= $9::numeric

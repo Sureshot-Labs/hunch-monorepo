@@ -4,6 +4,19 @@ import { buildOrderableMarketSql } from "../lib/market-availability.js";
 import { buildRenderableMarketSql } from "../lib/market-renderability.js";
 import { canonicalMarketTokenIdSql } from "../repos/canonical-market-token-sql.js";
 
+const MARKET_CHANGE24H_CURRENT_VERSION_SQL = `(
+  mc.calculation_version = 2
+  or (
+    mc.calculation_version = 1
+    and not exists (
+      select 1
+      from unified_market_change_24h v2_cache
+      where v2_cache.calculation_version = 2
+        and v2_cache.change_24h is not null
+    )
+  )
+)`;
+
 type SelectionRow = {
   event_id: string;
   event_venue: string;
@@ -368,6 +381,7 @@ export async function selectPreferredRepresentativeMarketsForEvents(
       on m.venue = 'kalshi' and km.id = m.venue_market_id
     left join unified_market_change_24h mc
       on mc.market_id = m.id
+     and ${MARKET_CHANGE24H_CURRENT_VERSION_SQL}
     left join unified_market_activity_metrics_24h mam
       on mam.market_id = m.id
     cross join lateral (
@@ -735,6 +749,7 @@ export async function selectRankedRepresentativeMarketsForEvents(
         on m.venue = 'kalshi' and km.id = m.venue_market_id
       left join unified_market_change_24h mc
         on mc.market_id = m.id
+       and ${MARKET_CHANGE24H_CURRENT_VERSION_SQL}
       left join unified_market_activity_metrics_24h mam
         on mam.market_id = m.id
       cross join lateral (
