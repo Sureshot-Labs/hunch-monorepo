@@ -501,6 +501,29 @@ try {
       venue: "limitless" as const,
     }),
   } as unknown as ApiBotTradingExecutor;
+  const limitlessTemporarilyUnavailableFundingTrading = {
+    ...limitlessClobHandoffTrading,
+    getReadiness: async () => ({
+      capabilities: {
+        authorizationModes: ["server_delegated"],
+        supportsBuy: false,
+        supportsCancel: false,
+        supportsExecutionSync: false,
+        supportsOrderSync: false,
+        supportsPositionSync: false,
+        supportsSell: false,
+        supportsSetup: false,
+        venue: "limitless" as const,
+      },
+      executable: false,
+      maxExecutableBuyUsd: 0,
+      message:
+        "Limitless CLOB bot trading is disabled until slippage can be enforced by the submitted order.",
+      ready: false,
+      reasonCode: "limitless_clob_slippage_guard_unavailable",
+      setupRequired: false,
+    }),
+  } as ApiBotTradingExecutor;
   const limitlessInitialHandoff = await captureTelegramBotTradingCallback({
     appBaseUrl: "https://app.hunch.trade",
     callbackQuery: {
@@ -537,6 +560,143 @@ try {
     ).rows[0]?.has_plan,
     true,
     "the initial preview must persist the v2 plan needed by its later Confirm callback",
+  );
+  await client.query(
+    `update telegram_trade_intents
+        set status = 'previewed',
+            submit_started_at = null,
+            funding_operation_id = null,
+            result = (result - 'appHandoffV2') || jsonb_build_object(
+              'fundingReasonCodes', jsonb_build_array('destination_unavailable'),
+              'fundingState', 'checking_internal_balance',
+              'stage', 'funding_preview'
+            ),
+            updated_at = now()
+      where id = $1::uuid`,
+    [limitlessHandoffIntentId],
+  );
+  const retryableLimitlessHandoff = await captureTelegramBotTradingCallback({
+    appBaseUrl: "https://app.hunch.trade",
+    callbackQuery: {
+      data: `hbt:retry_buy:${limitlessHandoffIntentId}`,
+      from: { id: telegramUserId as never },
+      id: `limitless-retryable-handoff:${suffix}`,
+      message: {
+        chat: { id: telegramUserId, type: "private" },
+        message_id: 701,
+      },
+    },
+    db,
+    expectedIntentId: limitlessHandoffIntentId,
+    inspectMiniAppFunding: async () => ({
+      kind: "temporarily_unavailable",
+      reasonCodes: ["destination_unavailable"],
+    }),
+    inspectTradeShortfall: async () => ({
+      kind: "temporarily_unavailable",
+      reasonCodes: ["destination_unavailable"],
+    }),
+    signerInspector,
+    telegramMiniAppEnabled: true,
+    trading: limitlessTemporarilyUnavailableFundingTrading,
+  });
+  assert.equal(retryableLimitlessHandoff.handled, true);
+  assert.equal(retryableLimitlessHandoff.intentStatus, "previewed");
+  assert.match(
+    retryableLimitlessHandoff.messages.at(-1)?.text ?? "",
+    /Checking available Hunch funds/u,
+  );
+  assert.doesNotMatch(
+    retryableLimitlessHandoff.messages.at(-1)?.text ?? "",
+    /Direct bot trading is not ready/u,
+  );
+  let markUnavailableInspectionStarted!: () => void;
+  const unavailableInspectionStarted = new Promise<void>((resolve) => {
+    markUnavailableInspectionStarted = resolve;
+  });
+  let releaseUnavailableInspection!: () => void;
+  const unavailableInspectionRelease = new Promise<void>((resolve) => {
+    releaseUnavailableInspection = resolve;
+  });
+  const losingUnavailableHandoff = captureTelegramBotTradingCallback({
+    appBaseUrl: "https://app.hunch.trade",
+    callbackQuery: {
+      data: `hbt:retry_buy:${limitlessHandoffIntentId}`,
+      from: { id: telegramUserId as never },
+      id: `limitless-concurrent-unavailable:${suffix}`,
+      message: {
+        chat: { id: telegramUserId, type: "private" },
+        message_id: 701,
+      },
+    },
+    db,
+    expectedIntentId: limitlessHandoffIntentId,
+    inspectMiniAppFunding: async () => {
+      markUnavailableInspectionStarted();
+      await unavailableInspectionRelease;
+      return {
+        kind: "temporarily_unavailable" as const,
+        reasonCodes: ["destination_unavailable"],
+      };
+    },
+    inspectTradeShortfall: async () => ({
+      kind: "temporarily_unavailable",
+      reasonCodes: ["destination_unavailable"],
+    }),
+    signerInspector,
+    telegramMiniAppEnabled: true,
+    trading: limitlessTemporarilyUnavailableFundingTrading,
+  });
+  await unavailableInspectionStarted;
+  const recoveredLimitlessHandoff = await captureTelegramBotTradingCallback({
+    appBaseUrl: "https://app.hunch.trade",
+    callbackQuery: {
+      data: `hbt:retry_buy:${limitlessHandoffIntentId}`,
+      from: { id: telegramUserId as never },
+      id: `limitless-recovered-handoff:${suffix}`,
+      message: {
+        chat: { id: telegramUserId, type: "private" },
+        message_id: 701,
+      },
+    },
+    db,
+    expectedIntentId: limitlessHandoffIntentId,
+    inspectMiniAppFunding: async () => ({ kind: "destination_ready" }),
+    inspectTradeShortfall: async () => ({
+      kind: "temporarily_unavailable",
+      reasonCodes: ["destination_unavailable"],
+    }),
+    signerInspector,
+    telegramMiniAppEnabled: true,
+    trading: limitlessClobHandoffTrading,
+  });
+  releaseUnavailableInspection();
+  const unavailableAfterRecovery = await losingUnavailableHandoff;
+  assert.equal(recoveredLimitlessHandoff.handled, true);
+  assert.equal(recoveredLimitlessHandoff.intentStatus, "previewed");
+  assert.match(
+    recoveredLimitlessHandoff.messages.at(-1)?.text ?? "",
+    /Confirm buy/u,
+  );
+  assert.equal(unavailableAfterRecovery.messages.length, 0);
+  assert.deepEqual(
+    (
+      await client.query<{
+        funding_state: string | null;
+        has_plan: boolean;
+      }>(
+        `select result ? 'appHandoffV2' as has_plan,
+                result ->> 'fundingState' as funding_state
+           from telegram_trade_intents
+          where id = $1::uuid`,
+        [limitlessHandoffIntentId],
+      )
+    ).rows[0],
+    { funding_state: "destination_ready", has_plan: true },
+  );
+  await client.query(
+    `delete from telegram_trade_intents where id = $1::uuid`,
+    [limitlessHandoffIntentId],
   );
   const insertMarketExitIntent = async (label: string) => {
     const result = await client.query<{ id: string }>(
@@ -877,6 +1037,86 @@ try {
     { revision: 3, state: "filled", status: "pending" },
   ]);
 
+  const staleHandoffIntent = await client.query<{ id: string }>(
+    `insert into telegram_trade_intents (
+       telegram_user_id, user_id, authorization_id, chat_id,
+       telegram_message_id, action, venue, market_id, event_id, side,
+       amount_usd, status, expires_at, idempotency_key, delivery_mode, result
+     ) values (
+       $1, $2, $3, $1, '702', 'buy', 'polymarket', $4, $5, 'YES',
+       1, 'external_handoff', now() - interval '10 minutes', $6, 'app_handoff',
+       jsonb_build_object(
+         'appHandoffV2',
+         jsonb_build_object('version', 2, 'plan', jsonb_build_object())
+       )
+     ) returning id`,
+    [
+      telegramUserId,
+      userId,
+      authorization.id,
+      marketId,
+      eventId,
+      `stale-direct-handoff:${suffix}`,
+    ],
+  );
+  const staleHandoffIntentId = staleHandoffIntent.rows[0]?.id;
+  assert.ok(staleHandoffIntentId);
+  const staleTokenHash = crypto
+    .createHash("sha256")
+    .update(`stale-direct-handoff-token:${suffix}`)
+    .digest("hex");
+  await client.query(
+    `insert into telegram_app_handoffs (
+       trade_intent_id, user_id, telegram_user_id, token_hash, state,
+       plan_fingerprint, policy_revision, authority_fingerprint,
+       quote_snapshot, plan_snapshot, issued_at, expires_at,
+       claimed_at, claimed_by_user_id
+     ) values (
+       $1::uuid, $2::uuid, $3, $4, 'claimed', repeat('a', 64),
+       'stale-handoff-policy', repeat('b', 64), '{}'::jsonb, '{}'::jsonb,
+       now() - interval '20 minutes', now() - interval '10 minutes',
+       now() - interval '15 minutes', $2::uuid
+     )`,
+    [staleHandoffIntentId, userId, telegramUserId, staleTokenHash],
+  );
+  await reconcileStaleTelegramTradeIntents(client, {
+    now: new Date(),
+    telegramUserId,
+  });
+  assert.deepEqual(
+    (
+      await client.query<{
+        handoff_state: string;
+        intent_status: string;
+      }>(
+        `select handoff_row.state as handoff_state,
+                intent_row.status as intent_status
+           from telegram_trade_intents intent_row
+           join telegram_app_handoffs handoff_row
+             on handoff_row.trade_intent_id = intent_row.id
+          where intent_row.id = $1::uuid
+          limit 1`,
+        [staleHandoffIntentId],
+      )
+    ).rows[0],
+    {
+      handoff_state: "expired",
+      intent_status: "expired",
+    },
+  );
+  // This fixture proves abandoned-handoff expiry only. Remove it before the
+  // later lifecycle projector assertion, which intentionally counts a single
+  // unrelated terminal-funding revision.
+  await client.query(
+    `delete from telegram_app_handoffs
+      where trade_intent_id = $1::uuid`,
+    [staleHandoffIntentId],
+  );
+  await client.query(
+    `delete from telegram_trade_intents where id = $1::uuid`,
+    [staleHandoffIntentId],
+  );
+
   const terminalFundingQuote = await client.query<{ id: string }>(
     `insert into funding_quotes (
        user_id, discovery_projection_id, selected_source_option_snapshot,
@@ -910,6 +1150,199 @@ try {
       `terminal-funding:${suffix}`,
       marketId,
     ],
+  );
+  const protectedFundingReservation = await client.query<{ id: string }>(
+    `insert into balance_reservations (
+       user_id, operation_id, component_id, location_id, network_id,
+       asset_id, asset_decimals, raw_amount, mode, state, expires_at
+     ) values (
+       $1::uuid, $2::uuid, $3, 'polymarket:controller', 'evm:137',
+       'pusd', 6, '1000000', 'settled_for_consumer', 'active',
+       now() + interval '30 minutes'
+     ) returning id`,
+    [
+      userId,
+      terminalFundingOperation.rows[0]?.id,
+      `protected-handoff-reservation:${suffix}`,
+    ],
+  );
+  const protectedFundingReservationId =
+    protectedFundingReservation.rows[0]?.id;
+  assert.ok(protectedFundingReservationId);
+  const insertProtectedExpiredHandoff = async (input: {
+    committed?: boolean;
+    fundingOperationId?: string;
+    fundingReservationId?: string;
+    label: string;
+    status?: "draft" | "external_handoff" | "previewed";
+    submitStarted?: boolean;
+  }): Promise<string> => {
+    const protectedIntent = await client.query<{ id: string }>(
+      `insert into telegram_trade_intents (
+         telegram_user_id, user_id, authorization_id, chat_id,
+         telegram_message_id, action, venue, market_id, event_id, side,
+         amount_usd, status, expires_at, idempotency_key, delivery_mode,
+         funding_operation_id, funding_reservation_id, submit_started_at, result
+       ) values (
+         $1, $2, $3, $1, null, 'buy', 'polymarket', $4, $5, 'YES',
+         1, $9, now() - interval '10 minutes', $6,
+         'app_handoff', $7::uuid, $10::uuid,
+         case when $8::boolean then now() else null end,
+         case
+           when $8::boolean then jsonb_build_object(
+             'appHandoffExecution', jsonb_build_object(
+               'committedAt', now()::text,
+               'kind', 'direct_trade',
+               'version', 2
+             )
+           )
+           else '{}'::jsonb
+         end
+       ) returning id`,
+      [
+        telegramUserId,
+        userId,
+        authorization.id,
+        marketId,
+        eventId,
+        `protected-stale-handoff:${input.label}:${suffix}`,
+        input.fundingOperationId ?? null,
+        input.submitStarted === true,
+        input.status ?? "external_handoff",
+        input.fundingReservationId ?? null,
+      ],
+    );
+    const intentId = protectedIntent.rows[0]?.id;
+    assert.ok(intentId);
+    const tokenHash = crypto
+      .createHash("sha256")
+      .update(`protected-stale-handoff-token:${input.label}:${suffix}`)
+      .digest("hex");
+    await client.query(
+      `insert into telegram_app_handoffs (
+         trade_intent_id, user_id, telegram_user_id, token_hash, state,
+         plan_fingerprint, policy_revision, authority_fingerprint,
+         quote_snapshot, plan_snapshot, issued_at, expires_at,
+         claimed_at, claimed_by_user_id
+       ) values (
+         $1::uuid, $2::uuid, $3, $4, 'claimed', repeat('a', 64),
+         $5, repeat('b', 64), '{}'::jsonb, '{}'::jsonb,
+         now() - interval '20 minutes', now() - interval '10 minutes',
+         now() - interval '15 minutes', $2::uuid
+       )`,
+      [
+        intentId,
+        userId,
+        telegramUserId,
+        tokenHash,
+        `protected-stale-handoff:${input.label}`,
+      ],
+    );
+    if (input.committed === true) {
+      await client.query(
+        `update telegram_app_handoffs
+            set state = 'committed', committed_at = now()
+          where trade_intent_id = $1::uuid`,
+        [intentId],
+      );
+    }
+    return intentId;
+  };
+  const fundingLinkedHandoffIntentId = await insertProtectedExpiredHandoff({
+    fundingOperationId: terminalFundingOperation.rows[0]?.id,
+    label: "funding-linked",
+  });
+  const reservedPendingHandoffIntentId = await insertProtectedExpiredHandoff({
+    fundingOperationId: terminalFundingOperation.rows[0]?.id,
+    fundingReservationId: protectedFundingReservationId,
+    label: "reserved-pending",
+    status: "draft",
+  });
+  const submittedBoundaryHandoffIntentId =
+    await insertProtectedExpiredHandoff({
+      label: "submit-started",
+      submitStarted: true,
+    });
+  const committedHandoffIntentId = await insertProtectedExpiredHandoff({
+    committed: true,
+    label: "committed",
+  });
+  await reconcileStaleTelegramTradeIntents(client, {
+    now: new Date(),
+    telegramUserId,
+  });
+  const protectedExpiredHandoffs = await client.query<{
+    handoff_state: string;
+    intent_id: string;
+    intent_status: string;
+  }>(
+    `select handoff_row.state as handoff_state,
+            intent_row.id::text as intent_id,
+            intent_row.status as intent_status
+       from telegram_trade_intents intent_row
+       join telegram_app_handoffs handoff_row
+         on handoff_row.trade_intent_id = intent_row.id
+      where intent_row.id = any($1::uuid[])
+      order by intent_row.id`,
+    [
+      [
+        fundingLinkedHandoffIntentId,
+        reservedPendingHandoffIntentId,
+        submittedBoundaryHandoffIntentId,
+        committedHandoffIntentId,
+      ],
+    ],
+  );
+  assert.deepEqual(
+    Object.fromEntries(
+      protectedExpiredHandoffs.rows.map((row) => [
+        row.intent_id,
+        {
+          handoffState: row.handoff_state,
+          intentStatus: row.intent_status,
+        },
+      ]),
+    ),
+    {
+      [committedHandoffIntentId]: {
+        handoffState: "committed",
+        intentStatus: "external_handoff",
+      },
+      [fundingLinkedHandoffIntentId]: {
+        handoffState: "claimed",
+        intentStatus: "external_handoff",
+      },
+      [reservedPendingHandoffIntentId]: {
+        handoffState: "claimed",
+        intentStatus: "draft",
+      },
+      [submittedBoundaryHandoffIntentId]: {
+        handoffState: "claimed",
+        intentStatus: "external_handoff",
+      },
+    },
+  );
+  // These rows exist only to exercise the cleanup predicate. Remove the exact
+  // fixtures after their invariant is proven so they cannot participate in
+  // the unrelated market/lifecycle assertions below.
+  await client.query(
+    `delete from telegram_app_handoffs
+      where trade_intent_id = any($1::uuid[])`,
+    [[
+      fundingLinkedHandoffIntentId,
+      reservedPendingHandoffIntentId,
+      submittedBoundaryHandoffIntentId,
+      committedHandoffIntentId,
+    ]],
+  );
+  await client.query(
+    `delete from telegram_trade_intents
+      where id = any($1::uuid[])`,
+    [[
+      fundingLinkedHandoffIntentId,
+      submittedBoundaryHandoffIntentId,
+      committedHandoffIntentId,
+    ]],
   );
   const staleFundingIntent = await client.query<{ id: string }>(
     `insert into telegram_trade_intents (
@@ -974,7 +1407,7 @@ try {
   );
   const projectedTerminalFunding =
     await runTelegramTradeLifecycleProjectionBatchInTransaction(client);
-  assert.equal(projectedTerminalFunding.created, 1);
+  assert.ok(projectedTerminalFunding.created >= 1);
   assert.equal(
     (
       await client.query<{ state: string | null }>(

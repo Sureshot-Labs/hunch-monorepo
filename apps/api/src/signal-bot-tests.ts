@@ -3988,9 +3988,12 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           timeoutMs: 1,
           token: "token",
         });
+        const answers: Array<{ text?: string }> = [];
         const messages: Array<{ text: string }> = [];
         const handled = await client.handleCallback({
-          answerCallbackQuery: async () => undefined,
+          answerCallbackQuery: async (input) => {
+            answers.push(input);
+          },
           appBaseUrl: "https://app.hunch.trade",
           callbackQuery: {
             data: "hbt:buy:00000000-0000-4000-8000-000000000001",
@@ -4003,9 +4006,9 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           },
         });
         assert.equal(handled, true);
-        assert.match(messages[0]?.text ?? "", /Still preparing/u);
-        assert.match(messages[0]?.text ?? "", /latest card/u);
-        assert.match(messages[0]?.text ?? "", /No trade was submitted/u);
+        assert.equal(messages.length, 0);
+        assert.match(answers[0]?.text ?? "", /Still checking/u);
+        assert.match(answers[0]?.text ?? "", /latest card/u);
       } finally {
         globalThis.fetch = originalFetch;
       }
@@ -5755,37 +5758,46 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.match(statements[0] ?? "", /funding_no_longer_active/);
       assert.match(statements[0] ?? "", /funding_operation\.status <> ALL/);
       assert.match(statements[1] ?? "", /expires_at <=/);
-      assert.match(statements[2] ?? "", /FROM orders o/);
-      assert.match(statements[2] ?? "", /telegramIntentId/);
-      assert.match(
-        statements[2] ?? "",
-        /order_payload->'history'->>'telegramIntentId'/,
-      );
-      assert.match(
-        statements[2] ?? "",
-        /prepared_snapshot->'reconcileKeys'->>'clientOrderId'/,
-      );
-      assert.match(
-        statements[2] ?? "",
-        /order_payload->'submitted'->'payload'->'reconcileKeys'->>'clientOrderId'/,
-      );
-      assert.match(statements[3] ?? "", /FROM executions e/);
+      assert.match(statements[1] ?? "", /funding_operation_id IS NULL/);
+      assert.match(statements[1] ?? "", /funding_reservation_id IS NULL/);
+      assert.match(statements[1] ?? "", /appHandoffExecution/);
+      assert.match(statements[1] ?? "", /committed_handoff\.state = 'committed'/);
+      assert.match(statements[2] ?? "", /telegram_app_handoffs/);
+      assert.match(statements[2] ?? "", /funding_operation_id is null/);
+      assert.match(statements[2] ?? "", /funding_reservation_id is null/);
+      assert.match(statements[2] ?? "", /submit_started_at is null/);
+      assert.match(statements[2] ?? "", /appHandoffExecution/);
+      assert.match(statements[3] ?? "", /FROM orders o/);
       assert.match(statements[3] ?? "", /telegramIntentId/);
       assert.match(
         statements[3] ?? "",
-        /e\.raw->'history'->'reconcileKeys'->>'intentId'/,
+        /order_payload->'history'->>'telegramIntentId'/,
       );
       assert.match(
         statements[3] ?? "",
+        /prepared_snapshot->'reconcileKeys'->>'clientOrderId'/,
+      );
+      assert.match(
+        statements[3] ?? "",
+        /order_payload->'submitted'->'payload'->'reconcileKeys'->>'clientOrderId'/,
+      );
+      assert.match(statements[4] ?? "", /FROM executions e/);
+      assert.match(statements[4] ?? "", /telegramIntentId/);
+      assert.match(
+        statements[4] ?? "",
+        /e\.raw->'history'->'reconcileKeys'->>'intentId'/,
+      );
+      assert.match(
+        statements[4] ?? "",
         /prepared_snapshot->'reconcileKeys'->>'txSignature'/,
       );
-      assert.match(statements[4] ?? "", /venue_order_id IS NULL/);
-      assert.match(statements[4] ?? "", /submit_started_at IS NULL/);
-      assert.match(statements[5] ?? "", /status = 'reconcile_required'/);
-      assert.match(statements[5] ?? "", /submit_started_at IS NOT NULL/);
-      assert.match(statements[6] ?? "", /venue_order_id IS NOT NULL/);
-      assert.match(statements[6] ?? "", /status = 'submitted'/);
-      assert.match(statements[6] ?? "", /error_code = 'reconcile_required'/);
+      assert.match(statements[5] ?? "", /venue_order_id IS NULL/);
+      assert.match(statements[5] ?? "", /submit_started_at IS NULL/);
+      assert.match(statements[6] ?? "", /status = 'reconcile_required'/);
+      assert.match(statements[6] ?? "", /submit_started_at IS NOT NULL/);
+      assert.match(statements[7] ?? "", /venue_order_id IS NOT NULL/);
+      assert.match(statements[7] ?? "", /status = 'submitted'/);
+      assert.match(statements[7] ?? "", /error_code = 'reconcile_required'/);
     },
   },
   {

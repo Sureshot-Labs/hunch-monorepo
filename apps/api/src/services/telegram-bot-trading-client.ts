@@ -864,22 +864,13 @@ export function createTelegramBotTradingInternalApiClient(input: {
           parsed.type !== "confirm" &&
           error instanceof TelegramBotTradingInternalApiTimeoutError
         ) {
-          const chatId = callbackInput.callbackQuery.message?.chat?.id;
-          if (chatId != null) {
-            await callbackInput.sendMessage({
-              chat_id: String(chatId),
-              ...withTelegramPrivateNavigation({
-                parse_mode: "MarkdownV2",
-                text: formatTelegramCalloutMarkdownV2({
-                  bodyMarkdownV2: formatTelegramTextWithCommandsMarkdownV2(
-                    "The request may already be updating the trade or funding card. Wait a moment and use the latest card before retrying. No trade was submitted.",
-                  ),
-                  icon: "⏳",
-                  title: "Still preparing",
-                }),
-              }),
-            });
-          }
+          // The API request may still finish and publish the authoritative
+          // card. A second persistent timeout card races that result and can
+          // leave two contradictory screens for one callback.
+          await callbackInput.answerCallbackQuery({
+            callbackQueryId: callbackInput.callbackQuery.id,
+            text: "⏳ Still checking. Wait for the latest card.",
+          });
           return true;
         }
         if (
