@@ -115,6 +115,7 @@ import {
   buildHunchMiniAppWebButton,
 } from "./telegram-mini-app-buttons.js";
 import {
+  expireStaleTelegramAppHandoffs,
   issueTelegramAppHandoff,
   TelegramAppHandoffError,
 } from "./telegram-app-handoff.js";
@@ -322,6 +323,27 @@ export function isInitialTelegramAppHandoffProposal(input: Readonly<{
   status: string;
 }>): boolean {
   return input.deliveryMode === "app_handoff" && input.status === "draft";
+}
+
+/**
+ * A transient funding inspection may record a Review-shaped snapshot before
+ * it can seal a v2 plan. Retrying that exact pre-submit state must rebuild the
+ * plan; treating every non-draft handoff without a plan as corrupt instead
+ * routes the retry through unrelated server-executor readiness.
+ */
+function isRetryableTelegramAppHandoffFundingInspection(
+  intent: TelegramTradeIntentRow,
+): boolean {
+  return (
+    intent.delivery_mode === "app_handoff" &&
+    intent.action === "buy" &&
+    intent.status === "previewed" &&
+    intent.submit_started_at == null &&
+    intent.funding_operation_id == null &&
+    !isRecord(intent.result.appHandoffV2) &&
+    intent.result.stage === "funding_preview" &&
+    intent.result.fundingState === "checking_internal_balance"
+  );
 }
 
 const EXISTING_TRADE_RESOLVING_MESSAGE =
@@ -6425,6 +6447,7 @@ async function updateIntentStatus(input: {
   deliveryMode?: StoredTelegramBuyDeliveryMode;
   errorCode?: string;
   errorMessage?: string;
+  requireRetryableAppHandoffFundingInspection?: boolean;
   executionId?: string | null;
   intentId: string;
   orderId?: string | null;
@@ -6465,6 +6488,18 @@ async function updateIntentStatus(input: {
             updated_at = now()
       WHERE id = $1
         AND (
+          NOT $18::boolean
+          OR (
+            delivery_mode = 'app_handoff'
+            AND status = 'previewed'
+            AND submit_started_at IS NULL
+            AND funding_operation_id IS NULL
+            AND result ->> 'stage' = 'funding_preview'
+            AND result ->> 'fundingState' = 'checking_internal_balance'
+            AND NOT (result ? 'appHandoffV2')
+          )
+        )
+        AND (
           $6::text[] IS NULL
           OR status = ANY($6::text[])
           OR (
@@ -6494,6 +6529,7 @@ async function updateIntentStatus(input: {
       input.quoteSnapshot ? JSON.stringify(input.quoteSnapshot) : null,
       input.deliveryMode ?? null,
       input.authorizationId ?? null,
+      Boolean(input.requireRetryableAppHandoffFundingInspection),
     ],
   );
   return (result.rowCount ?? 0) > 0;
@@ -6582,17 +6618,47 @@ export async function reconcileStaleTelegramTradeIntents(
     [telegramUserId, TERMINAL_FUNDING_OPERATION_STATUSES],
   );
   const expiredPending = await db.query(
-    `UPDATE telegram_trade_intents
+    `UPDATE telegram_trade_intents pending_intent
         SET status = 'expired',
             error_code = coalesce(error_code, 'intent_expired'),
             error_message = coalesce(error_message, 'Trade intent expired before confirmation.'),
             updated_at = now()
-      WHERE status = ANY($1::text[])
-        AND expires_at <= $2
-        AND ($3::text IS NULL OR telegram_user_id = $3)
+      WHERE pending_intent.status = ANY($1::text[])
+        AND pending_intent.expires_at <= $2
+        AND ($3::text IS NULL OR pending_intent.telegram_user_id = $3)
+        AND (
+          pending_intent.delivery_mode <> 'app_handoff'
+          OR (
+            pending_intent.submit_started_at IS NULL
+            AND pending_intent.submitted_at IS NULL
+            AND pending_intent.funding_operation_id IS NULL
+            AND pending_intent.funding_reservation_id IS NULL
+            AND pending_intent.order_id IS NULL
+            AND pending_intent.execution_id IS NULL
+            AND pending_intent.venue_order_id IS NULL
+            AND pending_intent.tx_signature IS NULL
+            AND jsonb_typeof(
+              pending_intent.result -> 'appHandoffExecution'
+            ) IS NULL
+            AND NOT EXISTS (
+              SELECT 1
+                FROM telegram_app_handoffs committed_handoff
+               WHERE committed_handoff.trade_intent_id = pending_intent.id
+                 AND committed_handoff.state = 'committed'
+            )
+          )
+        )
       RETURNING id`,
     [PENDING_INTENT_STATUSES, now, telegramUserId],
   );
+  // Handoff tokens are passive DB rows and never need the one-second funding
+  // worker cadence. The global job calls this stale-intent reconcile every 60
+  // seconds; user-scoped calls clean only that Telegram account on demand.
+  await expireStaleTelegramAppHandoffs(db, {
+    limit: telegramUserId == null ? 100 : 25,
+    now,
+    telegramUserId,
+  });
   const backfilledOrderRefs = await db.query(
     `UPDATE telegram_trade_intents ti
         SET status = CASE
@@ -9222,6 +9288,23 @@ async function previewTelegramTradeIntent(input: {
   telegramMiniAppEnabled?: boolean;
   trading: ApiBotTradingExecutor;
 }): Promise<void> {
+  const replacingRetryableFundingInspection =
+    isRetryableTelegramAppHandoffFundingInspection(input.intent);
+  const updatePreviewIntentStatus = (
+    update: Omit<
+      Parameters<typeof updateIntentStatus>[0],
+      | "db"
+      | "intentId"
+      | "requireRetryableAppHandoffFundingInspection"
+    >,
+  ): Promise<boolean> =>
+    updateIntentStatus({
+      ...update,
+      db: input.db,
+      intentId: input.intent.id,
+      requireRetryableAppHandoffFundingInspection:
+        replacingRetryableFundingInspection,
+    });
   const sendCurrentConfirmation = async (): Promise<boolean> => {
     let current = await loadIntent(input.db, input.intent.id);
     let stored = current
@@ -9258,12 +9341,10 @@ async function previewTelegramTradeIntent(input: {
   );
   const side = input.intent.side;
   if (!side || (action === "BUY" ? !amountUsd : !sharesRaw)) {
-    await updateIntentStatus({
+    await updatePreviewIntentStatus({
       allowedStatuses: PENDING_INTENT_STATUSES,
-      db: input.db,
       errorCode: "invalid_trade_request",
       errorMessage: "Trade amount is invalid.",
-      intentId: input.intent.id,
       status: "failed",
     });
     return;
@@ -9324,17 +9405,21 @@ async function previewTelegramTradeIntent(input: {
       (await input.trading.quote({ intent: previewIntent }));
   } catch (error) {
     const normalized = input.trading.normalizeError(input.intent.venue, error);
-    const failed = await updateIntentStatus({
+    const failed = await updatePreviewIntentStatus({
       allowedStatuses: ["draft", "previewed"],
-      db: input.db,
       errorCode: normalized.code,
       errorMessage: normalized.message,
-      intentId: input.intent.id,
       result: { error: normalized, stage: "preview_quote" },
       status: "failed",
     });
-    if (!failed && (await sendCurrentConfirmation())) return;
+    if (
+      !failed &&
+      !replacingRetryableFundingInspection &&
+      (await sendCurrentConfirmation())
+    )
+      return;
     if (!failed) {
+      if (replacingRetryableFundingInspection) return;
       const current = await loadIntent(input.db, input.intent.id);
       if (current?.status !== "failed") {
         await input.sendMessage({
@@ -9378,18 +9463,22 @@ async function previewTelegramTradeIntent(input: {
         maxSpendUsd == null ||
         maxSpendUsd > input.maxAmountUsd))
   ) {
-    await updateIntentStatus({
+    const failed = await updatePreviewIntentStatus({
       allowedStatuses: ["draft", "previewed"],
-      db: input.db,
       errorCode: minimumBlocking ? "quote_changed" : "max_spend_exceeded",
       errorMessage: minimumBlocking
         ? "Price moved and the order no longer meets venue minimum."
         : "Preview quote exceeds the Telegram bot max buy.",
-      intentId: input.intent.id,
       quoteSnapshot: buildTelegramTradeQuotePreview(quote),
       result: { maxAmountUsd: input.maxAmountUsd, previewQuote: quote },
       status: "failed",
     });
+    if (!failed) {
+      if (!replacingRetryableFundingInspection) {
+        await sendCurrentConfirmation();
+      }
+      return;
+    }
     await input.sendMessage({
       chat_id: input.chatId,
       parse_mode: "MarkdownV2",
@@ -9420,13 +9509,11 @@ async function previewTelegramTradeIntent(input: {
     });
     if (fundingPreview.state !== "ready") {
       if (input.fundingReturnResume) {
-        const previewRecorded = await updateIntentStatus({
+        const previewRecorded = await updatePreviewIntentStatus({
           allowedStatuses: ["draft", "previewed"],
-          db: input.db,
           errorCode: "funding_continuation_shortfall_changed",
           errorMessage:
             "Available destination funds no longer cover the fresh quote.",
-          intentId: input.intent.id,
           quoteSnapshot: buildTelegramTradeQuotePreview(quote),
           result: {
             fundingState: fundingPreview.state,
@@ -9553,13 +9640,11 @@ async function previewTelegramTradeIntent(input: {
           },
         );
         if (!handoffAuthority) {
-          await updateIntentStatus({
+          const previewRecorded = await updatePreviewIntentStatus({
             allowedStatuses: ["draft", "previewed"],
-            db: input.db,
             errorCode: "handoff_authority_unavailable",
             errorMessage:
               "The Mini App wallet authority is unavailable for this funding route.",
-            intentId: input.intent.id,
             quoteSnapshot: buildTelegramTradeQuotePreview(quote),
             result: {
               fundingState: "checking_internal_balance",
@@ -9568,6 +9653,7 @@ async function previewTelegramTradeIntent(input: {
             },
             status: "previewed",
           });
+          if (!previewRecorded) return;
           await input.sendMessage({
             chat_id: input.chatId,
             parse_mode: "MarkdownV2",
@@ -9581,12 +9667,10 @@ async function previewTelegramTradeIntent(input: {
           });
           return;
         }
-        const previewRecorded = await updateIntentStatus({
+        const previewRecorded = await updatePreviewIntentStatus({
           allowedStatuses: ["draft", "previewed"],
           authorizationId: handoffAuthority.authorization.id,
-          db: input.db,
           deliveryMode: "app_handoff",
-          intentId: input.intent.id,
           quoteSnapshot: buildTelegramTradeQuotePreview(quote),
           result: {
             appHandoffV2: { plan: miniAppFunding.plan, version: 2 },
@@ -9671,11 +9755,9 @@ async function previewTelegramTradeIntent(input: {
           });
           return;
         }
-        const previewRecorded = await updateIntentStatus({
+        const previewRecorded = await updatePreviewIntentStatus({
           allowedStatuses: ["draft", "previewed"],
           authorizationId: handoffAuthority?.authorization.id,
-          db: input.db,
-          intentId: input.intent.id,
           quoteSnapshot: buildTelegramTradeQuotePreview(quote),
           result: {
             ...(handoffAuthority
@@ -9766,10 +9848,8 @@ async function previewTelegramTradeIntent(input: {
         };
       }
       if (internalFunding?.kind === "temporarily_unavailable") {
-        await updateIntentStatus({
+        const previewRecorded = await updatePreviewIntentStatus({
           allowedStatuses: ["draft", "previewed"],
-          db: input.db,
-          intentId: input.intent.id,
           quoteSnapshot: buildTelegramTradeQuotePreview(quote),
           result: {
             fundingReasonCodes: internalFunding.reasonCodes,
@@ -9779,6 +9859,7 @@ async function previewTelegramTradeIntent(input: {
           },
           status: "previewed",
         });
+        if (!previewRecorded) return;
         await input.sendMessage({
           chat_id: input.chatId,
           parse_mode: "MarkdownV2",
@@ -9809,11 +9890,9 @@ async function previewTelegramTradeIntent(input: {
           input.intent.delivery_mode === "app_handoff"
             ? "bot_submit"
             : undefined;
-        const previewRecorded = await updateIntentStatus({
+        const previewRecorded = await updatePreviewIntentStatus({
           allowedStatuses: ["draft", "previewed"],
-          db: input.db,
           deliveryMode,
-          intentId: input.intent.id,
           quoteSnapshot: buildTelegramTradeQuotePreview(quote),
           result: {
             fundingProposal: internalFunding.proposal,
@@ -9846,10 +9925,8 @@ async function previewTelegramTradeIntent(input: {
         });
         return;
       }
-      await updateIntentStatus({
+      const previewRecorded = await updatePreviewIntentStatus({
         allowedStatuses: ["draft", "previewed"],
-        db: input.db,
-        intentId: input.intent.id,
         quoteSnapshot: buildTelegramTradeQuotePreview(quote),
         result: {
           fundingState: fundingPreview.state,
@@ -9858,6 +9935,7 @@ async function previewTelegramTradeIntent(input: {
         },
         status: "previewed",
       });
+      if (!previewRecorded) return;
       if (
         internalFunding?.kind !== "external_deposit_required" &&
         input.inspectTradeShortfall
@@ -10139,21 +10217,32 @@ async function previewTelegramTradeIntent(input: {
         };
       })()
     : {};
-  const previewRecorded = await updateIntentStatus({
+  const previewRecorded = await updatePreviewIntentStatus({
     // A quote is the immutable Review snapshot. Concurrent callbacks can each
-    // obtain a live quote, but only the draft CAS may publish one; every loser
-    // below reloads and renders that single stored Review instead of replacing
-    // its price/expiry under the user's feet.
-    allowedStatuses: ["draft"],
+    // obtain a live quote, but only the draft/status CAS or the exact retry
+    // state CAS may publish one; a loser cannot replace the winning plan/quote.
+    allowedStatuses: replacingRetryableFundingInspection
+      ? ["previewed"]
+      : ["draft"],
     authorizationId: previewAuthorization.id,
-    db: input.db,
-    intentId: input.intent.id,
     quoteSnapshot: buildTelegramTradeQuotePreview(quote),
-    result: { ...directHandoffResult, previewQuote: quote },
+    result: {
+      ...directHandoffResult,
+      ...(replacingRetryableFundingInspection
+        ? {
+            fundingReasonCodes: [],
+            fundingState: "destination_ready",
+            stage: "funding_preview",
+          }
+        : {}),
+      previewQuote: quote,
+    },
     status: "previewed",
   });
   if (!previewRecorded) {
-    await sendCurrentConfirmation();
+    if (!replacingRetryableFundingInspection) {
+      await sendCurrentConfirmation();
+    }
     return;
   }
   if (input.intent.delivery_mode === "app_handoff") {
@@ -11428,6 +11517,8 @@ export async function handleTelegramBotTradingCallback(
     deliveryMode: intent.delivery_mode,
     status: intent.status,
   });
+  const retryableAppHandoffFundingInspection =
+    isRetryableTelegramAppHandoffFundingInspection(intent);
   const tradeAmountLabel =
     action === "SELL" && sharesRaw != null
       ? `${ethers.formatUnits(sharesRaw, 6)} shares`
@@ -11548,6 +11639,7 @@ export async function handleTelegramBotTradingCallback(
       !isVenueAllowed(intent.venue, policy, authorizationVenues)) ||
     (intent.delivery_mode === "app_handoff" &&
       !initialAppHandoffProposal &&
+      !retryableAppHandoffFundingInspection &&
       appHandoffV2Plan == null) ||
     (action === "BUY"
       ? !resumingDurableFunding &&

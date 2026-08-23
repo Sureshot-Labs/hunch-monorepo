@@ -267,6 +267,100 @@ async function expireIfNeeded(
   );
 }
 
+/**
+ * Expire abandoned pre-submit handoffs even when the user never presents the
+ * opaque token again. This is a bounded, DB-only lifecycle sweep: committed
+ * handoffs and intents that crossed the submit boundary are never selected.
+ */
+export async function expireStaleTelegramAppHandoffs(
+  client: Pick<PoolClient, "query">,
+  input: Readonly<{
+    limit?: number;
+    now?: Date;
+    telegramUserId?: string | null;
+  }> = {},
+): Promise<Readonly<{ handoffsExpired: number; intentsExpired: number }>> {
+  const limit = Math.max(1, Math.min(input.limit ?? 25, 100));
+  const { rows } = await client.query<{
+    handoffs_expired: number;
+    intents_expired: number;
+  }>(
+    `with candidate_handoff as materialized (
+       select handoff_row.id, handoff_row.trade_intent_id
+         from telegram_app_handoffs handoff_row
+         join telegram_trade_intents intent_row
+           on intent_row.id = handoff_row.trade_intent_id
+        where handoff_row.expires_at <= $2::timestamptz
+          and ($3::text is null or intent_row.telegram_user_id = $3::text)
+          and intent_row.delivery_mode = 'app_handoff'
+          and intent_row.submit_started_at is null
+          and intent_row.submitted_at is null
+          and intent_row.funding_operation_id is null
+          and intent_row.funding_reservation_id is null
+          and intent_row.order_id is null
+          and intent_row.execution_id is null
+          and intent_row.venue_order_id is null
+          and intent_row.tx_signature is null
+          and jsonb_typeof(intent_row.result -> 'appHandoffExecution') is null
+          and intent_row.status in (
+            'draft', 'previewed', 'confirming', 'external_handoff',
+            'failed', 'cancelled', 'expired'
+          )
+          and (
+            handoff_row.state in ('issued', 'claimed')
+            or (
+              handoff_row.state = 'expired'
+              and intent_row.status in (
+                'draft', 'previewed', 'confirming', 'external_handoff'
+              )
+            )
+          )
+        order by handoff_row.expires_at, handoff_row.id
+        limit $1
+        for update of handoff_row, intent_row skip locked
+     ),
+     expired_handoff as (
+       update telegram_app_handoffs handoff_row
+          set state = 'expired',
+              expired_at = coalesce(handoff_row.expired_at, $2::timestamptz)
+         from candidate_handoff candidate_row
+        where handoff_row.id = candidate_row.id
+          and handoff_row.state in ('issued', 'claimed')
+       returning handoff_row.id
+     ),
+     expired_intent as (
+       update telegram_trade_intents intent_row
+          set status = 'expired',
+              error_code = 'intent_expired',
+              error_message = 'The Mini App handoff expired before trade submission.',
+              updated_at = $2::timestamptz
+         from candidate_handoff candidate_row
+        where intent_row.id = candidate_row.trade_intent_id
+          and intent_row.delivery_mode = 'app_handoff'
+          and intent_row.submit_started_at is null
+          and intent_row.submitted_at is null
+          and intent_row.funding_operation_id is null
+          and intent_row.funding_reservation_id is null
+          and intent_row.order_id is null
+          and intent_row.execution_id is null
+          and intent_row.venue_order_id is null
+          and intent_row.tx_signature is null
+          and jsonb_typeof(intent_row.result -> 'appHandoffExecution') is null
+          and intent_row.status in (
+            'draft', 'previewed', 'confirming', 'external_handoff'
+          )
+       returning intent_row.id
+     )
+     select (select count(*)::int from expired_handoff) as handoffs_expired,
+            (select count(*)::int from expired_intent) as intents_expired`,
+    [limit, input.now ?? new Date(), input.telegramUserId ?? null],
+  );
+  return {
+    handoffsExpired: rows[0]?.handoffs_expired ?? 0,
+    intentsExpired: rows[0]?.intents_expired ?? 0,
+  };
+}
+
 async function loadBoundHandoff(
   client: PoolClient,
   input: {
