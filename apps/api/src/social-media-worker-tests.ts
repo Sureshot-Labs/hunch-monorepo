@@ -15,12 +15,42 @@ import {
 } from "./services/signal-bot-editorial-media-jobs.js";
 import { sendTelegramMediaGroupRequest } from "./services/telegram-api-media.js";
 import {
+  editorialMediaSectionScrollTop,
   editorialMediaScrollPosition,
   X_EDITORIAL_MEDIA_PROFILE_SPECS,
   X_EDITORIAL_MEDIA_TIMELINE,
 } from "./services/x-editorial-media-renderer.js";
 
 const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
+  {
+    name: "mobile section anchors clear the measured shell header and preserve a gap",
+    run: () => {
+      assert.equal(
+        editorialMediaSectionScrollTop({
+          documentTop: 300,
+          maxScroll: 1_000,
+          topOcclusion: 52,
+        }),
+        236,
+      );
+      assert.equal(
+        editorialMediaSectionScrollTop({
+          documentTop: 10,
+          maxScroll: 1_000,
+          topOcclusion: 52,
+        }),
+        0,
+      );
+      assert.equal(
+        editorialMediaSectionScrollTop({
+          documentTop: 1_500,
+          maxScroll: 1_000,
+          topOcclusion: 52,
+        }),
+        1_000,
+      );
+    },
+  },
   {
     name: "local preview CLI accepts a tracking-wallet URL and bounded profiles",
     run: () => {

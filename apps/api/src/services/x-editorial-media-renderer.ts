@@ -164,6 +164,21 @@ export function editorialMediaScrollPosition(input: {
   return position;
 }
 
+export function editorialMediaSectionScrollTop(input: {
+  documentTop: number;
+  maxScroll: number;
+  topOcclusion: number;
+}): number {
+  const captureGap = 12;
+  return Math.max(
+    0,
+    Math.min(
+      input.maxScroll,
+      input.documentTop - Math.max(0, input.topOcclusion) - captureGap,
+    ),
+  );
+}
+
 function captureUrl(input: {
   profile: XEditorialMediaProfile;
   url: string;
@@ -236,7 +251,9 @@ async function preparePage(input: {
     "mix",
     "entry-distribution",
     "ledger",
-    ...(input.profile === "mobile" ? ["wallet-stats-button"] : []),
+    ...(input.profile === "mobile"
+      ? ["ledger-toolbar", "wallet-stats-button"]
+      : []),
   ];
   for (const captureId of requiredCaptureIds) {
     await page
@@ -387,7 +404,7 @@ async function writeFrame(
 async function captureSectionScrollPositions(
   page: Page,
 ): Promise<XEditorialMediaScrollPositions> {
-  return page.evaluate(() => {
+  const geometry = await page.evaluate(() => {
     const maxScroll = Math.max(
       0,
       document.documentElement.scrollHeight - window.innerHeight,
@@ -399,17 +416,47 @@ async function captureSectionScrollPositions(
       "mix",
       "performance",
     ] as const;
-    const positions: Partial<XEditorialMediaScrollPositions> = { profile: 0 };
+    const documentTops: Partial<Record<XEditorialMediaCaptureSection, number>> =
+      {};
     for (const captureId of captureIds) {
       const element = document.querySelector(
         `[data-social-capture-id="${captureId}"]`,
       );
       if (!element) throw new Error(`Missing capture section ${captureId}`);
-      const target = element.getBoundingClientRect().top + window.scrollY - 12;
-      positions[captureId] = Math.max(0, Math.min(maxScroll, target));
+      documentTops[captureId] =
+        element.getBoundingClientRect().top + window.scrollY;
     }
-    return positions as XEditorialMediaScrollPositions;
+    let topOcclusion = 0;
+    const topOccluders = document.querySelectorAll(
+      '[data-social-capture-occluder="top"], header',
+    );
+    for (const occluder of topOccluders) {
+      const rect = occluder.getBoundingClientRect();
+      const position = window.getComputedStyle(occluder).position;
+      if (
+        (position === "fixed" || position === "sticky") &&
+        rect.top <= 0.5 &&
+        rect.bottom > 0 &&
+        rect.height < window.innerHeight * 0.35
+      ) {
+        topOcclusion = Math.max(topOcclusion, rect.bottom);
+      }
+    }
+    return { documentTops, maxScroll, topOcclusion };
   });
+  const positions: Partial<XEditorialMediaScrollPositions> = { profile: 0 };
+  for (const [captureId, documentTop] of Object.entries(
+    geometry.documentTops,
+  )) {
+    if (documentTop == null) continue;
+    positions[captureId as XEditorialMediaCaptureSection] =
+      editorialMediaSectionScrollTop({
+        documentTop,
+        maxScroll: geometry.maxScroll,
+        topOcclusion: geometry.topOcclusion,
+      });
+  }
+  return positions as XEditorialMediaScrollPositions;
 }
 
 async function openWalletStats(page: Page): Promise<void> {

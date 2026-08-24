@@ -229,7 +229,9 @@ Production rendering uses a small explicit capture contract in `Hunch_App`:
 - `capture=social-v1` query mode;
 - `data-social-capture-ready=true` only after required public data settles;
 - stable capture IDs for profile, chart, mix, entry distribution, ledger,
-  signal-focused row, stats button, and stats sheet;
+  mobile ledger toolbar, signal-focused row, stats button, and stats sheet;
+- an explicit top-occluder marker on the sticky mobile shell header so section
+  anchors preserve the actual header height and a readable gap;
 - capture-mode suppression of transient toasts, onboarding overlays, analytics,
   and live refresh that can move content during a render;
 - consistent mobile and desktop signal-focus behavior.
