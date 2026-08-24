@@ -318,10 +318,12 @@ type StoredTelegramBuyDeliveryMode = Exclude<
  * before the quote and plan can be recorded. Any later app-handoff state must
  * already carry the plan it asks the Mini App to execute.
  */
-export function isInitialTelegramAppHandoffProposal(input: Readonly<{
-  deliveryMode: TelegramBuyDeliveryMode;
-  status: string;
-}>): boolean {
+export function isInitialTelegramAppHandoffProposal(
+  input: Readonly<{
+    deliveryMode: TelegramBuyDeliveryMode;
+    status: string;
+  }>,
+): boolean {
   return input.deliveryMode === "app_handoff" && input.status === "draft";
 }
 
@@ -9293,9 +9295,7 @@ async function previewTelegramTradeIntent(input: {
   const updatePreviewIntentStatus = (
     update: Omit<
       Parameters<typeof updateIntentStatus>[0],
-      | "db"
-      | "intentId"
-      | "requireRetryableAppHandoffFundingInspection"
+      "db" | "intentId" | "requireRetryableAppHandoffFundingInspection"
     >,
   ): Promise<boolean> =>
     updateIntentStatus({

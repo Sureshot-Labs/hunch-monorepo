@@ -5761,7 +5761,10 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.match(statements[1] ?? "", /funding_operation_id IS NULL/);
       assert.match(statements[1] ?? "", /funding_reservation_id IS NULL/);
       assert.match(statements[1] ?? "", /appHandoffExecution/);
-      assert.match(statements[1] ?? "", /committed_handoff\.state = 'committed'/);
+      assert.match(
+        statements[1] ?? "",
+        /committed_handoff\.state = 'committed'/,
+      );
       assert.match(statements[2] ?? "", /telegram_app_handoffs/);
       assert.match(statements[2] ?? "", /funding_operation_id is null/);
       assert.match(statements[2] ?? "", /funding_reservation_id is null/);

@@ -3,11 +3,7 @@ import {
   sameAccountAddress,
 } from "../domain/asset-identity.js";
 import { isPositiveRawAmount } from "../domain/raw-amount.js";
-import type {
-  JsonValue,
-  Money,
-  NormalizedAction,
-} from "../domain/types.js";
+import type { JsonValue, Money, NormalizedAction } from "../domain/types.js";
 import { RELAY_DEPOSITORY_V2 } from "../../funding-providers/relay/rehearsal.js";
 import { RELAY_EVM_FUNDING_PROFILE_SPECS } from "./relay-evm-profile-specs.js";
 
@@ -24,9 +20,7 @@ export type RelayClientSourceDebitPostcondition = Readonly<{
 
 const RELAY_EVM_ROUTE_SOURCE_ASSETS = new Map(
   Object.values(RELAY_EVM_FUNDING_PROFILE_SPECS).flatMap((profile) =>
-    profile.routeIds.map(
-      (routeId) => [routeId, profile.sourceAsset] as const,
-    ),
+    profile.routeIds.map((routeId) => [routeId, profile.sourceAsset] as const),
   ),
 );
 
@@ -47,12 +41,14 @@ function relayDepositRecipient(action: NormalizedAction): string | null {
  * records its source debit. Attach the exact receipt postcondition here so a
  * canonical client receipt can produce that durable debit evidence.
  */
-export function withRelayClientSourceDebitPostcondition(input: Readonly<{
-  action: NormalizedAction;
-  actionValidationResult: JsonRecord;
-  routeId: string | null | undefined;
-  sourceAmount: Money | null | undefined;
-}>): JsonRecord {
+export function withRelayClientSourceDebitPostcondition(
+  input: Readonly<{
+    action: NormalizedAction;
+    actionValidationResult: JsonRecord;
+    routeId: string | null | undefined;
+    sourceAmount: Money | null | undefined;
+  }>,
+): JsonRecord {
   if (relayClientSourceDebitPostcondition(input.actionValidationResult)) {
     return input.actionValidationResult;
   }
@@ -71,11 +67,7 @@ export function withRelayClientSourceDebitPostcondition(input: Readonly<{
     input.action.networkId !== sourceAmount.asset.networkId ||
     typeof signerAddress !== "string" ||
     !recipient ||
-    !sameAccountAddress(
-      input.action.networkId,
-      recipient,
-      RELAY_DEPOSITORY_V2,
-    )
+    !sameAccountAddress(input.action.networkId, recipient, RELAY_DEPOSITORY_V2)
   ) {
     return input.actionValidationResult;
   }
@@ -95,8 +87,7 @@ export function relayClientSourceDebitPostcondition(
 ): RelayClientSourceDebitPostcondition | null {
   const decimals = validation.expectedSourceAssetDecimals;
   if (
-    validation.postconditionEvidenceKind !==
-      "exact_erc20_source_debit_v1" ||
+    validation.postconditionEvidenceKind !== "exact_erc20_source_debit_v1" ||
     typeof validation.expectedSourceAssetId !== "string" ||
     typeof decimals !== "number" ||
     !Number.isInteger(decimals) ||

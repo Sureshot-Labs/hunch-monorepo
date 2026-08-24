@@ -64,19 +64,24 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
             ...progress,
           } as never).inline_keyboard;
         assert.equal(
-          keyboard.flat().some(
-            (button) =>
-              "callback_data" in button &&
-              button.callback_data === `hbt:open_market:${intentId}`,
-          ),
+          keyboard
+            .flat()
+            .some(
+              (button) =>
+                "callback_data" in button &&
+                button.callback_data === `hbt:open_market:${intentId}`,
+            ),
           true,
           `${progress.action}/${progress.state} must expose Open market`,
         );
         assert.equal(
-          keyboard.flat().some(
-            (button) =>
-              "callback_data" in button && button.callback_data === "hm:v1:home",
-          ),
+          keyboard
+            .flat()
+            .some(
+              (button) =>
+                "callback_data" in button &&
+                button.callback_data === "hm:v1:home",
+            ),
           true,
           `${progress.action}/${progress.state} must expose Home`,
         );

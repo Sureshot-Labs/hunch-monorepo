@@ -64,10 +64,7 @@ function executionRecord(payload: unknown): Record<string, unknown> | null {
   }
   if (isRecord(root.data)) {
     if (isRecord(root.data.execution)) return root.data.execution;
-    if (
-      isRecord(root.data.order) &&
-      isRecord(root.data.order.execution)
-    ) {
+    if (isRecord(root.data.order) && isRecord(root.data.order.execution)) {
       return root.data.order.execution;
     }
   }

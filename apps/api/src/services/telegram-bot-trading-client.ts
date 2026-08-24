@@ -350,10 +350,10 @@ function withoutMessageScopedTradeInputButtons<
     .map((row) =>
       row.filter((button) => {
         if (!("callback_data" in button)) return true;
-        const parsed = parseTelegramBotTradingCallbackData(button.callback_data);
-        return (
-          parsed?.type !== "buy_input" && parsed?.type !== "sell_input"
+        const parsed = parseTelegramBotTradingCallbackData(
+          button.callback_data,
         );
+        return parsed?.type !== "buy_input" && parsed?.type !== "sell_input";
       }),
     )
     .filter((row) => row.length > 0);
@@ -937,11 +937,12 @@ export function createTelegramBotTradingInternalApiClient(input: {
       const terminalMessageRaw = confirmAcknowledged
         ? result.messages.at(-1)
         : null;
-      const marketCallbackData = "intentId" in parsed
-        ? isFinalTelegramTradeIntentStatus(result.intentStatus)
-          ? `${TELEGRAM_BOT_TRADING_CALLBACK_PREFIX}:open_market:${parsed.intentId}`
-          : undefined
-        : undefined;
+      const marketCallbackData =
+        "intentId" in parsed
+          ? isFinalTelegramTradeIntentStatus(result.intentStatus)
+            ? `${TELEGRAM_BOT_TRADING_CALLBACK_PREFIX}:open_market:${parsed.intentId}`
+            : undefined
+          : undefined;
       const terminalMessage = terminalMessageRaw
         ? withTelegramPrivateNavigation(terminalMessageRaw, {
             marketCallbackData,
@@ -1022,7 +1023,9 @@ export function createTelegramBotTradingInternalApiClient(input: {
           !previewEdited
             ? withoutMessageScopedTradeInputButtons(deliveredMessage)
             : deliveredMessage;
-        const sendResult = await callbackInput.sendMessage(fallbackPreviewMessage);
+        const sendResult = await callbackInput.sendMessage(
+          fallbackPreviewMessage,
+        );
         if (confirmAcknowledged && index === result.messages.length - 1) {
           const successfulSend = readSuccessfulTelegramResult(sendResult);
           if (successfulSend.ok) {

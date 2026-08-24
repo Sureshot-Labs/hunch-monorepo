@@ -111,17 +111,15 @@ const tests: TestCase[] = [
       } as const;
       const app = Fastify({ logger: false });
       app.setSerializerCompiler(serializerCompiler);
-      app
-        .withTypeProvider<ZodTypeProvider>()
-        .get(
-          "/handoff-commit-serialization",
-          {
-            schema: {
-              response: { 200: telegramAppHandoffCommitResponseSchema },
-            },
+      app.withTypeProvider<ZodTypeProvider>().get(
+        "/handoff-commit-serialization",
+        {
+          schema: {
+            response: { 200: telegramAppHandoffCommitResponseSchema },
           },
-          async () => payload,
-        );
+        },
+        async () => payload,
+      );
 
       try {
         const response = await app.inject({

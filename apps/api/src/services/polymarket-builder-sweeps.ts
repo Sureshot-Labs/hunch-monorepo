@@ -112,7 +112,7 @@ export async function runPolymarketBuilderSweep(
     };
   }
 
-  const provider = createEvmRpcProvider(env.polygonRpcUrl);
+  const provider = createEvmRpcProvider(env.polygonRpcUrl, 137);
   const token = new ethers.Contract(
     configured.tokenAddress,
     ERC20_ABI,

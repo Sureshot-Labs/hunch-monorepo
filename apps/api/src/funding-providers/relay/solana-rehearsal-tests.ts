@@ -12,11 +12,7 @@ import {
   resolveRelaySolanaDirectDestinationContract,
   type RelayRouteSpec,
 } from "./mappings.js";
-import {
-  RELAY_SOLVER,
-  SOLANA_NATIVE,
-  SOLANA_USDC,
-} from "./rehearsal.js";
+import { RELAY_SOLVER, SOLANA_NATIVE, SOLANA_USDC } from "./rehearsal.js";
 import {
   RELAY_SOLANA_DEPOSITORY,
   SOLANA_SYSTEM_PROGRAM,
@@ -51,7 +47,9 @@ function routeSourceCurrency(route: RelayRouteSpec) {
   throw new Error("test route source is not allowlisted");
 }
 
-function sourceAmount(sourceCurrency: typeof SOLANA_NATIVE | typeof SOLANA_USDC): bigint {
+function sourceAmount(
+  sourceCurrency: typeof SOLANA_NATIVE | typeof SOLANA_USDC,
+): bigint {
   return sourceCurrency === SOLANA_NATIVE ? 14_000_000n : 1_031_000n;
 }
 
@@ -232,8 +230,16 @@ for (const routeId of routeIds) {
   const validated = validate(route);
   assert.equal(validated.expectedOutputRaw, 1_010_102n, routeId);
   assert.equal(validated.minimumOutputRaw, 1_000_000n, routeId);
-  assert.equal(validated.instruction.programId, RELAY_SOLANA_DEPOSITORY, routeId);
-  assert.equal(validated.instruction.addressLookupTableAddresses.length, 1, routeId);
+  assert.equal(
+    validated.instruction.programId,
+    RELAY_SOLANA_DEPOSITORY,
+    routeId,
+  );
+  assert.equal(
+    validated.instruction.addressLookupTableAddresses.length,
+    1,
+    routeId,
+  );
   assert.equal(validated.instruction.data.byteLength, 48, routeId);
 }
 
@@ -255,7 +261,10 @@ for (const mutation of [
   {
     name: "refund asset",
     apply: (candidate: ReturnType<typeof directQuote>) => {
-      const input = required(candidate.protocol.v2.orderData.inputs[0], "input");
+      const input = required(
+        candidate.protocol.v2.orderData.inputs[0],
+        "input",
+      );
       const refund = required(input.refunds[1], "destination refund");
       refund.currency = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913";
     },

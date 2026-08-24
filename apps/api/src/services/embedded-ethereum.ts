@@ -230,7 +230,7 @@ function evmProviderForChain(chainId: number): ethers.JsonRpcProvider {
   if (!rpcUrl) {
     throw new Error(`No RPC URL configured for EVM chain ${chainId}.`);
   }
-  return createEvmRpcProvider(rpcUrl);
+  return createEvmRpcProvider(rpcUrl, chainId);
 }
 
 async function executePreparedPrivyAuthorizationRequest(

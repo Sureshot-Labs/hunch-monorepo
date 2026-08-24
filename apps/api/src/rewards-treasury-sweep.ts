@@ -355,7 +355,7 @@ async function executeEvmSweep(
   preColdBalance: bigint;
   postColdBalance: bigint;
 }> {
-  const provider = createEvmRpcProvider(config.rpcUrl);
+  const provider = createEvmRpcProvider(config.rpcUrl, Number(config.chainId));
   const wallet = new ethers.Wallet(config.privateKey, provider);
   const token = new ethers.Contract(
     config.usdcAddress,

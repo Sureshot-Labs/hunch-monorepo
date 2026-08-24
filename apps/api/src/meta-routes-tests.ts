@@ -687,7 +687,10 @@ async function assertEventFeedSqlShape(): Promise<void> {
       sql,
       /from unified_events e\s+join change24h_v2_ranked_events ranked_event\s+on ranked_event\.event_id = e\.id/s,
     );
-    assert.match(sql, /order by ranked_event\.change_24h desc, ranked_event\.event_id/);
+    assert.match(
+      sql,
+      /order by ranked_event\.change_24h desc, ranked_event\.event_id/,
+    );
     assert.doesNotMatch(sql, /orderable_market_candidates/);
     assert.doesNotMatch(sql, /observed_market_change_24h/);
     assert.doesNotMatch(sql, /unified_token_change_24h/);

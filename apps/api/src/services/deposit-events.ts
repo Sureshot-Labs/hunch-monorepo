@@ -435,8 +435,7 @@ async function findRelayFundingOutput(
   ) {
     return null;
   }
-  const lookupHmacKey =
-    process.env.FUNDING_REFERENCE_LOOKUP_HMAC_KEY?.trim();
+  const lookupHmacKey = process.env.FUNDING_REFERENCE_LOOKUP_HMAC_KEY?.trim();
   let referenceFingerprint: string | null = null;
   if (lookupHmacKey && input.event.transaction_hash?.trim()) {
     try {

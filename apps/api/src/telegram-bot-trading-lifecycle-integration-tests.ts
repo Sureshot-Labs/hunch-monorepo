@@ -694,10 +694,9 @@ try {
     ).rows[0],
     { funding_state: "destination_ready", has_plan: true },
   );
-  await client.query(
-    `delete from telegram_trade_intents where id = $1::uuid`,
-    [limitlessHandoffIntentId],
-  );
+  await client.query(`delete from telegram_trade_intents where id = $1::uuid`, [
+    limitlessHandoffIntentId,
+  ]);
   const insertMarketExitIntent = async (label: string) => {
     const result = await client.query<{ id: string }>(
       `insert into telegram_trade_intents (
@@ -846,7 +845,10 @@ try {
       trading,
     });
   for (const action of ["buy", "sell", "redeem"] as const) {
-    const expiredIntentId = await insertExpiredIntent(`expired-${action}`, action);
+    const expiredIntentId = await insertExpiredIntent(
+      `expired-${action}`,
+      action,
+    );
     const expiredExit = await invokeIntentNavigation(expiredIntentId, "cancel");
     assert.equal(expiredExit.handled, true);
     assert.equal(
@@ -860,9 +862,11 @@ try {
       `expired ${action} exits without reviving its intent`,
     );
     assert.ok(
-      expiredExit.messages.at(-1)?.reply_markup?.inline_keyboard.some((row) =>
-        row.some((button) => button.text === "🏠 Home"),
-      ),
+      expiredExit.messages
+        .at(-1)
+        ?.reply_markup?.inline_keyboard.some((row) =>
+          row.some((button) => button.text === "🏠 Home"),
+        ),
       `expired ${action} returns a navigable market card`,
     );
   }
@@ -910,7 +914,10 @@ try {
   );
   const appHandoffExitId = appHandoffExit.rows[0]?.id;
   assert.ok(appHandoffExitId);
-  const cancelledHandoff = await invokeIntentNavigation(appHandoffExitId, "cancel");
+  const cancelledHandoff = await invokeIntentNavigation(
+    appHandoffExitId,
+    "cancel",
+  );
   assert.equal(cancelledHandoff.handled, true);
   assert.equal(
     (
@@ -1112,10 +1119,9 @@ try {
       where trade_intent_id = $1::uuid`,
     [staleHandoffIntentId],
   );
-  await client.query(
-    `delete from telegram_trade_intents where id = $1::uuid`,
-    [staleHandoffIntentId],
-  );
+  await client.query(`delete from telegram_trade_intents where id = $1::uuid`, [
+    staleHandoffIntentId,
+  ]);
 
   const terminalFundingQuote = await client.query<{ id: string }>(
     `insert into funding_quotes (
@@ -1166,8 +1172,7 @@ try {
       `protected-handoff-reservation:${suffix}`,
     ],
   );
-  const protectedFundingReservationId =
-    protectedFundingReservation.rows[0]?.id;
+  const protectedFundingReservationId = protectedFundingReservation.rows[0]?.id;
   assert.ok(protectedFundingReservationId);
   const insertProtectedExpiredHandoff = async (input: {
     committed?: boolean;
@@ -1258,11 +1263,10 @@ try {
     label: "reserved-pending",
     status: "draft",
   });
-  const submittedBoundaryHandoffIntentId =
-    await insertProtectedExpiredHandoff({
-      label: "submit-started",
-      submitStarted: true,
-    });
+  const submittedBoundaryHandoffIntentId = await insertProtectedExpiredHandoff({
+    label: "submit-started",
+    submitStarted: true,
+  });
   const committedHandoffIntentId = await insertProtectedExpiredHandoff({
     committed: true,
     label: "committed",
@@ -1328,21 +1332,25 @@ try {
   await client.query(
     `delete from telegram_app_handoffs
       where trade_intent_id = any($1::uuid[])`,
-    [[
-      fundingLinkedHandoffIntentId,
-      reservedPendingHandoffIntentId,
-      submittedBoundaryHandoffIntentId,
-      committedHandoffIntentId,
-    ]],
+    [
+      [
+        fundingLinkedHandoffIntentId,
+        reservedPendingHandoffIntentId,
+        submittedBoundaryHandoffIntentId,
+        committedHandoffIntentId,
+      ],
+    ],
   );
   await client.query(
     `delete from telegram_trade_intents
       where id = any($1::uuid[])`,
-    [[
-      fundingLinkedHandoffIntentId,
-      submittedBoundaryHandoffIntentId,
-      committedHandoffIntentId,
-    ]],
+    [
+      [
+        fundingLinkedHandoffIntentId,
+        submittedBoundaryHandoffIntentId,
+        committedHandoffIntentId,
+      ],
+    ],
   );
   const staleFundingIntent = await client.query<{ id: string }>(
     `insert into telegram_trade_intents (

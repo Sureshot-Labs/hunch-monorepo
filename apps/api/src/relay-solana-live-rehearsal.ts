@@ -48,7 +48,8 @@ const relayBaseUrl = "https://api.relay.link";
 const scenarioId = "solana-usdc-to-polygon-pusd";
 const directRoute = RELAY_ROUTE_SPECS[scenarioId];
 if (!directRoute) throw new Error("direct Solana rehearsal route is missing");
-const directDestination = resolveRelaySolanaDirectDestinationContract(directRoute);
+const directDestination =
+  resolveRelaySolanaDirectDestinationContract(directRoute);
 const erc20 = new Interface([
   "function balanceOf(address owner) view returns (uint256)",
 ]);
