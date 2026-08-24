@@ -33,6 +33,7 @@ import { fetchFundingConsumerReservationForUser } from "../funding/persistence/f
 import {
   commitTelegramAppHandoffWithExecution,
   resolveTelegramAppHandoff,
+  TelegramAppHandoffError,
   type TelegramAppHandoff,
 } from "./telegram-app-handoff.js";
 import {
@@ -1871,6 +1872,9 @@ export async function materializeTelegramAppHandoffV2Funding(input: {
     token: input.token,
     userId: input.userId,
   });
+  if (handoff.state === "cancelled") {
+    throw new TelegramAppHandoffError("not_committable");
+  }
   const sealedPlan = parseV2Plan(handoff.planSnapshot);
   if (handoff.state !== "claimed" && handoff.state !== "committed") {
     throw new TelegramAppHandoffV2Error(

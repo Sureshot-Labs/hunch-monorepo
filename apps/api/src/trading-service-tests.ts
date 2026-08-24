@@ -3454,9 +3454,13 @@ const tests: TestCase[] = [
       assert.match(confirmLifecycleBlock, /trading\.prepareTrade/);
       assert.match(confirmLifecycleBlock, /trading\.executePreparedTrade/);
       assert.match(confirmLifecycleBlock, /onSubmitted/);
-      assert.match(
-        previewBlock,
-        /fundingReturnResume[\s\S]*?allowedStatuses: \["draft", "previewed"\]/,
+      assert.match(previewBlock, /resolveFundingReturnPreviewAllowedStatuses/);
+      assert.equal(
+        previewBlock.match(
+          /allowedStatuses: fundingReturnPreviewAllowedStatuses/g,
+        )?.length,
+        2,
+        "both server funding-return branches must use the action-aware CAS helper",
       );
       assert.match(
         confirmLifecycleBlock,

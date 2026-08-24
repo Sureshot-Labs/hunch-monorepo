@@ -99,6 +99,7 @@ import {
 } from "../services/telegram-funding-presentation.js";
 import {
   readTelegramBotTradeInputContext,
+  readTelegramBotTradeInputContextForNavigation,
   telegramBotTradeInputMessageScopeMatches,
   type TelegramBotTradeInputContext,
   writeTelegramBotTradeInputContext,
@@ -1745,61 +1746,75 @@ async function registerTelegramBotTradingRoutes(
     },
   );
 
-  api.post(
-    "/internal/telegram-bot/trading/input-contexts/:id/cancel",
-    {
-      preHandler: [requireInternal, requirePrivateTelegramChat],
-      schema: {
-        body: internalTradeInputCancelBodySchema,
-        params: internalTradeInputParamsSchema,
+  const openTradeInputMarket = async (
+    request: FastifyRequest<{
+      Body: z.infer<typeof internalTradeInputCancelBodySchema>;
+      Params: z.infer<typeof internalTradeInputParamsSchema>;
+    }>,
+    reply: FastifyReply,
+  ) => {
+    const chatId = String(request.body.chatId);
+    const telegramUserId = String(request.body.telegramUserId);
+    const redis = await getRedis().catch(() => null);
+    if (!redis) {
+      return reply.code(503).send({ error: "input_context_unavailable" });
+    }
+    const [context, link] = await Promise.all([
+      readTelegramBotTradeInputContextForNavigation({
+        id: request.params.id,
+        redis,
+      }),
+      resolveActiveTelegramAccountLink({ db, telegramUserId }),
+    ]);
+    if (!context) {
+      return reply.code(410).send({ error: "input_context_expired" });
+    }
+    // This route only rebuilds a current market card. It deliberately does not
+    // revive the expired input or submit a trade, so authority drift does not
+    // make navigation from the old private card unsafe.
+    if (
+      !link ||
+      context.telegramUserId !== telegramUserId ||
+      context.chatId !== chatId ||
+      !telegramBotTradeInputMessageScopeMatches(
+        context.messageScope,
+        request.body.telegramMessageId,
+      )
+    ) {
+      return reply.code(403).send({ error: "input_context_mismatch" });
+    }
+    return reply.send(
+      await buildTelegramBotTradingMarketMessage({
+        appBaseUrl: request.body.appBaseUrl,
+        chatId,
+        context: { focusSide: context.side, origin: "direct" },
+        db,
+        marketRef: context.marketId,
+        telegramMessageId: request.body.telegramMessageId,
+        telegramMiniAppEnabled: request.body.telegramMiniAppEnabled,
+        telegramUserId,
+        trading: createTradingForRequest(request),
+        writeTradeInputContext,
+      }),
+    );
+  };
+
+  for (const action of ["market", "cancel"] as const) {
+    api.post<{
+      Body: z.infer<typeof internalTradeInputCancelBodySchema>;
+      Params: z.infer<typeof internalTradeInputParamsSchema>;
+    }>(
+      `/internal/telegram-bot/trading/input-contexts/:id/${action}`,
+      {
+        preHandler: [requireInternal, requirePrivateTelegramChat],
+        schema: {
+          body: internalTradeInputCancelBodySchema,
+          params: internalTradeInputParamsSchema,
+        },
       },
-    },
-    async (request, reply) => {
-      const chatId = String(request.body.chatId);
-      const telegramUserId = String(request.body.telegramUserId);
-      const redis = await getRedis().catch(() => null);
-      if (!redis) {
-        return reply.code(503).send({ error: "input_context_unavailable" });
-      }
-      const [context, link] = await Promise.all([
-        readTelegramBotTradeInputContext({ id: request.params.id, redis }),
-        resolveActiveTelegramAccountLink({ db, telegramUserId }),
-      ]);
-      if (!context) {
-        return reply.code(410).send({ error: "input_context_expired" });
-      }
-      if (
-        !link ||
-        context.telegramUserId !== telegramUserId ||
-        context.chatId !== chatId ||
-        !telegramBotTradeInputMessageScopeMatches(
-          context.messageScope,
-          request.body.telegramMessageId,
-        ) ||
-        !(await isTelegramBotTradeInputContextAuthorityCurrent({
-          context,
-          db,
-          telegramUserId,
-        }))
-      ) {
-        return reply.code(403).send({ error: "input_context_mismatch" });
-      }
-      return reply.send(
-        await buildTelegramBotTradingMarketMessage({
-          appBaseUrl: request.body.appBaseUrl,
-          chatId,
-          context: { focusSide: context.side, origin: "direct" },
-          db,
-          marketRef: context.marketId,
-          telegramMessageId: request.body.telegramMessageId,
-          telegramMiniAppEnabled: request.body.telegramMiniAppEnabled,
-          telegramUserId,
-          trading: createTradingForRequest(request),
-          writeTradeInputContext,
-        }),
-      );
-    },
-  );
+      openTradeInputMarket,
+    );
+  }
 
   api.post(
     "/internal/telegram-bot/trading/input-contexts/:id/complete",

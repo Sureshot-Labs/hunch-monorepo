@@ -16,6 +16,7 @@ import {
 } from "./services/telegram-bot-menu-state.js";
 import {
   readTelegramBotTradeInputContext,
+  readTelegramBotTradeInputContextForNavigation,
   telegramBotTradeInputMessageScopeMatches,
   writeTelegramBotTradeInputContext,
   type TelegramBotTradeInputContext,
@@ -93,6 +94,30 @@ assert.equal(
 assert.equal(
   telegramBotTradingTestHooks.isTelegramSellProceedsDisplayable(0.01),
   true,
+);
+assert.deepEqual(
+  telegramBotTradingTestHooks.resolveFundingReturnPreviewAllowedStatuses({
+    deliveryMode: "bot_submit",
+    replacingRetryableFundingInspection: false,
+  }),
+  ["draft", "previewed"],
+  "server funding-return may refresh the previously previewed intent",
+);
+assert.deepEqual(
+  telegramBotTradingTestHooks.resolveFundingReturnPreviewAllowedStatuses({
+    deliveryMode: "app_handoff",
+    replacingRetryableFundingInspection: false,
+  }),
+  ["draft"],
+  "a new one-click Review publishes its immutable snapshot once",
+);
+assert.deepEqual(
+  telegramBotTradingTestHooks.resolveFundingReturnPreviewAllowedStatuses({
+    deliveryMode: "app_handoff",
+    replacingRetryableFundingInspection: true,
+  }),
+  ["previewed"],
+  "only the explicit retryable handoff inspection may replace its preview",
 );
 for (const value of ["0", "-1", "+1", "1.001", "1e2", "1,25", "1 usd"]) {
   assert.equal(parseTelegramCustomBuyAmount(value), null, value);
@@ -314,6 +339,98 @@ for (const [text, path] of [
   }
 }
 
+const serverConfirmButton =
+  telegramBotTradingTestHooks.buildTelegramTradeConfirmButton({
+    action: "BUY",
+    intentId: "00000000-0000-4000-8000-000000000011",
+    venue: "polymarket",
+  });
+assert.ok("callback_data" in serverConfirmButton);
+if ("callback_data" in serverConfirmButton) {
+  assert.equal(
+    serverConfirmButton.callback_data,
+    "hbt:confirm:00000000-0000-4000-8000-000000000011",
+    "server execution retains its callback Confirm boundary",
+  );
+}
+const handoffConfirmButton =
+  telegramBotTradingTestHooks.buildTelegramTradeConfirmButton({
+    action: "SELL",
+    intentId: "00000000-0000-4000-8000-000000000012",
+    override: {
+      text: "Confirm sell",
+      url: "https://t.me/hunch_bot/app?startapp=handoff_th1_example",
+    },
+    venue: "limitless",
+  });
+assert.deepEqual(
+  handoffConfirmButton,
+  {
+    text: "Confirm sell",
+    url: "https://t.me/hunch_bot/app?startapp=handoff_th1_example",
+  },
+  "an app-handoff Review uses its sealed Mini App link instead of a callback",
+);
+
+let unresolvedLookupSql = "";
+const claimedHandoffIntent =
+  await telegramBotTradingTestHooks.loadUnresolvedTelegramTradeIntent(
+    {
+      query: async (sql: string) => {
+        unresolvedLookupSql = sql.toLowerCase();
+        return {
+          rows: [
+            {
+              action: "buy",
+              app_handoff_state: "claimed",
+              can_resume_app_handoff: true,
+              delivery_mode: "app_handoff",
+              error_code: null,
+              id: "00000000-0000-4000-8000-000000000013",
+              side: "YES",
+              status: "previewed",
+              user_id: "00000000-0000-4000-8000-000000000014",
+            },
+          ],
+        };
+      },
+    } as never,
+    {
+      marketId: "limitless:market:one-click",
+      telegramUserId: "42",
+    },
+  );
+assert.equal(claimedHandoffIntent?.can_resume_app_handoff, true);
+assert.equal(claimedHandoffIntent?.app_handoff_state, "claimed");
+assert.equal(
+  telegramBotTradingTestHooks.canContinueTelegramAppHandoffFromMarket({
+    app_handoff_state: "issued",
+    can_resume_app_handoff: true,
+    delivery_mode: "app_handoff",
+  }),
+  false,
+  "an issued token cannot become a generic Continue button before the exact Review is restored",
+);
+assert.equal(
+  telegramBotTradingTestHooks.canContinueTelegramAppHandoffFromMarket({
+    app_handoff_state: "claimed",
+    can_resume_app_handoff: true,
+    delivery_mode: "app_handoff",
+  }),
+  true,
+  "a claimed handoff remains resumable after consent",
+);
+assert.match(
+  unresolvedLookupSql,
+  /resumable_handoff\.state in \('claimed', 'committed'\)/u,
+  "claimed handoffs remain discoverable and resumable after the short Review TTL",
+);
+assert.match(
+  unresolvedLookupSql,
+  /tti\.status = 'external_handoff'\s+or tti\.expires_at > now\(\)/u,
+  "callback-confirmed compatibility handoffs remain redeliverable after the old quote TTL",
+);
+
 const redis = new FakeRedis();
 const context: TelegramBotTradeInputContext = {
   action: "sell",
@@ -390,6 +507,28 @@ assert.deepEqual(
   await readTelegramBotTradeInputContext({ id: contextId, redis }),
   context,
 );
+const limitlessSellContext: TelegramBotTradeInputContext = {
+  ...context,
+  deliveryMode: "app_handoff",
+  id: "07f23418-e28f-4d4e-88d2-995f142220dc",
+  marketId: "limitless:market-1",
+  venue: "limitless",
+};
+assert.equal(
+  await writeTelegramBotTradeInputContext({
+    context: limitlessSellContext,
+    redis,
+  }),
+  true,
+);
+assert.deepEqual(
+  await readTelegramBotTradeInputContext({
+    id: limitlessSellContext.id,
+    redis,
+  }),
+  limitlessSellContext,
+  "Limitless Sell is a valid app-handoff custom input context",
+);
 redis.values.set(
   `tg:signal_bot:v2:trade_input_context:${contextId}`,
   JSON.stringify({ ...context, version: 1 }),
@@ -415,6 +554,14 @@ assert.equal(
     redis,
   }),
   null,
+);
+assert.deepEqual(
+  await readTelegramBotTradeInputContextForNavigation({
+    id: expiredContext.id,
+    redis,
+  }),
+  expiredContext,
+  "an expired input keeps a short read-only path back to its market",
 );
 redis.values.set(
   "tg:signal_bot:v2:trade_input_context:64ab553e-1b1d-4ae2-9083-bdeac5c5241c",
@@ -464,6 +611,7 @@ assert.equal(
 await clearSignalBotMenuInput({ chatId: "42", redis, telegramUserId: 42 });
 let staleGuardCompletionCalls = 0;
 let staleGuardEditedText = "";
+let staleGuardKeyboard: TelegramInlineKeyboard["inline_keyboard"] | undefined;
 assert.equal(
   await handleSignalBotTradeInput({
     chatId: "42",
@@ -477,6 +625,7 @@ assert.equal(
     transport: {
       editMessageText: async (message) => {
         staleGuardEditedText = message.text;
+        staleGuardKeyboard = message.reply_markup?.inline_keyboard;
         return { message: "ok", messageId: 22, ok: true as const };
       },
       sendMessage: async () => ({
@@ -494,6 +643,17 @@ assert.match(
   staleGuardEditedText,
   /active\\\./u,
   "stale input copy must remain valid MarkdownV2",
+);
+assert.equal(
+  staleGuardKeyboard
+    ?.flat()
+    .some(
+      (button) =>
+        "callback_data" in button &&
+        button.callback_data === `hbt:open_input_market:${contextId}`,
+    ),
+  true,
+  "the expired input must navigate by input context rather than trade intent",
 );
 assert.equal(
   redis.values.has("tg:signal_bot:v1:trade_input_guard:42:42"),
@@ -881,10 +1041,15 @@ assert.deepEqual(
   parseTelegramBotTradingCallbackData(`hbt:cancel_input:${contextId}`),
   { inputContextId: contextId, type: "cancel_input" },
 );
+assert.deepEqual(
+  parseTelegramBotTradingCallbackData(`hbt:open_input_market:${contextId}`),
+  { inputContextId: contextId, type: "open_input_market" },
+);
 assert.equal(
   await cancelSignalBotTradeInput({
     chatId: "42",
     contextId,
+    menuMessageId: 12,
     message: { text: "Back to the market" },
     redis,
     telegramUserId: 42,
@@ -927,6 +1092,7 @@ assert.equal(
   await cancelSignalBotTradeInput({
     chatId: "42",
     contextId,
+    menuMessageId: 12,
     message: { text: "Back to the market" },
     redis: {
       eval: async () => {
@@ -965,6 +1131,7 @@ assert.equal(
   await cancelSignalBotTradeInput({
     chatId: "42",
     contextId,
+    menuMessageId: 12,
     message: { text: "Back to the market" },
     redis,
     telegramUserId: 42,
@@ -995,21 +1162,28 @@ assert.equal(
   await readSignalBotMenuInput({ chatId: "42", redis, telegramUserId: 42 }),
   null,
 );
+let staleNavigationMessageId: number | undefined;
 assert.equal(
   await cancelSignalBotTradeInput({
     chatId: "42",
     contextId,
-    message: { text: "must not deliver" },
+    menuMessageId: 12,
+    message: { text: "Back to the market" },
     redis,
     telegramUserId: 42,
     transport: {
+      editMessageText: async (message) => {
+        staleNavigationMessageId = message.message_id;
+        return { message: "ok", messageId: 12, ok: true as const };
+      },
       sendMessage: async () => {
-        throw new Error("stale cancel must not send");
+        throw new Error("stale navigation must edit its original card");
       },
     },
   }),
-  false,
+  true,
 );
+assert.equal(staleNavigationMessageId, 12);
 
 const expiredInputContextId = "9330c377-ebbf-4fab-927a-df4afc91bffc";
 const expiredInputIntentId = "ee7e9ee3-481d-457d-8a7e-67a1ec69ac75";

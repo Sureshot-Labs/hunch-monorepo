@@ -816,13 +816,16 @@ export async function runSignalBotRunner(): Promise<void> {
               )
                 ? parsedTradeCallback.intentId
                 : null;
+            const inputMarketNavigation =
+              parsedTradeCallback?.type === "open_input_market";
             // Confirm/execution callbacks hand the card back to the lifecycle
             // projector after their immediate Processing edit. Navigation
             // callbacks keep a user-owned token so background work cannot
             // overwrite the screen the user explicitly opened.
-            const renderToken = navigationIntentId
-              ? `trade-callback:${callbackQuery.id}`
-              : `trade-lifecycle:callback:${callbackQuery.id}`;
+            const renderToken =
+              navigationIntentId || inputMarketNavigation
+                ? `trade-callback:${callbackQuery.id}`
+                : `trade-lifecycle:callback:${callbackQuery.id}`;
             const callbackTransport =
               callbackChatId != null && callbackMessageId != null
                 ? createTelegramBotCallbackMenuTransport({
@@ -880,10 +883,13 @@ export async function runSignalBotRunner(): Promise<void> {
                       ? null
                       : String(callbackQuery.message.chat.id);
                   const telegramUserId = callbackQuery.from?.id;
-                  if (!chatId || !telegramUserId) return Promise.resolve(false);
+                  const menuMessageId = callbackQuery.message?.message_id;
+                  if (!chatId || !telegramUserId || menuMessageId == null)
+                    return Promise.resolve(false);
                   return cancelSignalBotTradeInput({
                     chatId,
                     contextId: cancel.contextId,
+                    menuMessageId,
                     message: cancel.message,
                     redis,
                     telegramUserId,

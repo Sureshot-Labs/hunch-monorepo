@@ -12,6 +12,7 @@ import {
 import "./integration-test-database-guard.js";
 import type { User } from "./auth.js";
 import { pool, type DbQuery } from "./db.js";
+import { env } from "./env.js";
 import { createTelegramBotTradingRoutes } from "./routes/telegram-bot-trading.js";
 import type { PrivyServerSignerStatus } from "./services/api-trading-wallet-signing.js";
 import type { ApiBotTradingExecutor } from "./services/api-trading-service.js";
@@ -28,6 +29,11 @@ import {
 } from "./services/telegram-trade-lifecycle-progress.js";
 import { fenceTelegramTradeLifecycleNavigation } from "./services/telegram-trade-delivery-contract.js";
 import { telegramNotificationDeliveryTestHooks } from "./services/telegram-notification-delivery.js";
+
+const originalTelegramMiniAppLinkBase = env.telegramMiniAppLinkBase;
+const originalTelegramBotToken = env.telegramBotToken;
+env.telegramMiniAppLinkBase = "https://t.me/hunch_bot/hunch";
+env.telegramBotToken = "integration-telegram-bot-token";
 
 const client = await pool.connect();
 
@@ -63,7 +69,9 @@ try {
   const suffix = crypto.randomUUID();
   const userId = crypto.randomUUID();
   const privyUserId = `did:privy:telegram-trading-${suffix}`;
-  const telegramUserId = `telegram-trading-${suffix}`;
+  const telegramUserId = String(
+    9_000_000_000 + crypto.randomInt(1_000_000_000),
+  );
   const walletAddress = "0x0000000000000000000000000000000000000137";
   const walletId = `wallet-${suffix}`;
   const signerId = `signer-${suffix}`;
@@ -591,6 +599,11 @@ try {
       where id = $1::uuid`,
     [limitlessHandoffIntentId],
   );
+  await client.query(
+    `delete from telegram_app_handoffs
+      where trade_intent_id = $1::uuid`,
+    [limitlessHandoffIntentId],
+  );
   const retryableLimitlessHandoff = await captureTelegramBotTradingCallback({
     appBaseUrl: "https://app.hunch.trade",
     callbackQuery: {
@@ -709,6 +722,11 @@ try {
       )
     ).rows[0],
     { funding_state: "destination_ready", has_plan: true },
+  );
+  await client.query(
+    `delete from telegram_app_handoffs
+      where trade_intent_id = $1::uuid`,
+    [limitlessHandoffIntentId],
   );
   await client.query(`delete from telegram_trade_intents where id = $1::uuid`, [
     limitlessHandoffIntentId,
@@ -958,11 +976,8 @@ try {
          status, expires_at, idempotency_key, delivery_mode, result
        ) values (
          $1, $2, $3, $1, '700', 'buy', 'polymarket', $4, 'YES', 1,
-         'confirming', now() - interval '1 minute', $5, 'app_handoff',
-         jsonb_build_object(
-           'appHandoffExecution',
-           jsonb_build_object('version', 2, 'committedAt', now()::text)
-         )
+         'previewed', now() - interval '1 minute', $5, 'app_handoff',
+         '{}'::jsonb
        ) returning id::text`,
       [
         telegramUserId,
@@ -974,6 +989,23 @@ try {
     )
   ).rows[0]?.id;
   assert.ok(expiringDirectHandoffId);
+  assert.deepEqual(
+    (
+      await client.query<{
+        expired: boolean;
+        has_consent: boolean;
+        has_execution: boolean;
+      }>(
+        `select expires_at <= now() as expired,
+                coalesce(result #>> '{appHandoffConsent,version}' = '2', false) as has_consent,
+                coalesce(result #>> '{appHandoffExecution,version}' = '2', false) as has_execution
+           from telegram_trade_intents
+          where id = $1::uuid`,
+        [expiringDirectHandoffId],
+      )
+    ).rows[0],
+    { expired: true, has_consent: false, has_execution: false },
+  );
   const expiredDirectHandoff = await captureTelegramBotTradingCallback({
     appBaseUrl: "https://app.hunch.trade",
     callbackQuery: {
@@ -991,7 +1023,11 @@ try {
     signerInspector,
     trading,
   });
-  assert.equal(expiredDirectHandoff.intentStatus, "expired");
+  assert.equal(
+    expiredDirectHandoff.intentStatus,
+    "expired",
+    JSON.stringify(expiredDirectHandoff),
+  );
   assert.equal(
     expiredDirectHandoff.lifecycleOwnsTerminalDelivery,
     false,
@@ -3575,4 +3611,6 @@ try {
 } finally {
   await client.query("rollback");
   client.release();
+  env.telegramMiniAppLinkBase = originalTelegramMiniAppLinkBase;
+  env.telegramBotToken = originalTelegramBotToken;
 }

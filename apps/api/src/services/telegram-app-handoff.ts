@@ -138,14 +138,20 @@ function asJsonObject(value: unknown, field: string): JsonObject {
   return value as JsonObject;
 }
 
-/** A direct v2 handoff is sealed for exactly one trade action. */
-function directV2PlanAction(planSnapshot: JsonObject): "buy" | "sell" | null {
-  if (planSnapshot.version !== 2 || planSnapshot.kind !== "direct_trade") {
+/** A v2 handoff is sealed for exactly one trade action. */
+function v2PlanAction(planSnapshot: JsonObject): "buy" | "sell" | null {
+  if (
+    planSnapshot.version !== 2 ||
+    (planSnapshot.kind !== "direct_trade" && planSnapshot.kind !== "funding")
+  ) {
     return null;
   }
   const trade = asJsonObject(planSnapshot.trade, "planSnapshot.trade");
   if (trade.action !== "buy" && trade.action !== "sell") {
     throw new TypeError("planSnapshot.trade.action must be buy or sell");
+  }
+  if (planSnapshot.kind === "funding" && trade.action !== "buy") {
+    throw new TypeError("a funding handoff must contain a Buy trade");
   }
   return trade.action;
 }
@@ -279,14 +285,77 @@ async function expireIfNeeded(
   client: PoolClient,
   input: { telegramUserId: string; tokenHash: string; userId: string },
 ): Promise<void> {
+  // The handoff may intentionally outlive the short Review quote after claim,
+  // but an unclaimed Review cannot. Reconcile the linked intent first so an
+  // old Mini App tab observes a terminal handoff instead of looping on an
+  // `issued` token that can no longer be claimed.
   await client.query(
-    `update telegram_app_handoffs handoff_row
-        set state = 'expired', expired_at = clock_timestamp()
+    `update telegram_trade_intents trade_intent
+        set status = 'expired',
+            error_code = 'intent_expired',
+            error_message = 'The Mini App handoff expired before trade submission.',
+            updated_at = clock_timestamp()
+       from telegram_app_handoffs handoff_row
       where handoff_row.token_hash = $1
         and handoff_row.user_id = $2::uuid
         and handoff_row.telegram_user_id = $3
         and handoff_row.state in ('issued', 'claimed')
-        and handoff_row.expires_at <= clock_timestamp()`,
+        and handoff_row.trade_intent_id = trade_intent.id
+        and trade_intent.delivery_mode = 'app_handoff'
+        and trade_intent.status in ('draft', 'previewed', 'confirming', 'external_handoff')
+        and (
+          (
+            handoff_row.state = 'issued'
+            and
+            trade_intent.status in ('draft', 'previewed', 'confirming')
+            and trade_intent.expires_at <= clock_timestamp()
+          )
+          or handoff_row.expires_at <= clock_timestamp()
+        )
+        and trade_intent.submit_started_at is null
+        and trade_intent.submitted_at is null
+        and trade_intent.funding_operation_id is null
+        and trade_intent.funding_reservation_id is null
+        and trade_intent.order_id is null
+        and trade_intent.execution_id is null
+        and trade_intent.venue_order_id is null
+        and trade_intent.tx_signature is null
+        and jsonb_typeof(trade_intent.result -> 'appHandoffExecution') is null`,
+    [input.tokenHash, input.userId, input.telegramUserId],
+  );
+  await client.query(
+    `update telegram_app_handoffs handoff_row
+        set state = case
+              when trade_intent.status = 'cancelled' then 'cancelled'
+              else 'expired'
+            end,
+            cancelled_at = case
+              when trade_intent.status = 'cancelled'
+                then coalesce(handoff_row.cancelled_at, clock_timestamp())
+              else handoff_row.cancelled_at
+            end,
+            expired_at = case
+              when trade_intent.status = 'cancelled'
+                then handoff_row.expired_at
+              else coalesce(handoff_row.expired_at, clock_timestamp())
+            end
+       from telegram_trade_intents trade_intent
+      where handoff_row.token_hash = $1
+        and handoff_row.user_id = $2::uuid
+        and handoff_row.telegram_user_id = $3
+        and handoff_row.state in ('issued', 'claimed')
+        and handoff_row.trade_intent_id = trade_intent.id
+        and trade_intent.delivery_mode = 'app_handoff'
+        and trade_intent.status in ('failed', 'cancelled', 'expired')
+        and trade_intent.submit_started_at is null
+        and trade_intent.submitted_at is null
+        and trade_intent.funding_operation_id is null
+        and trade_intent.funding_reservation_id is null
+        and trade_intent.order_id is null
+        and trade_intent.execution_id is null
+        and trade_intent.venue_order_id is null
+        and trade_intent.tx_signature is null
+        and jsonb_typeof(trade_intent.result -> 'appHandoffExecution') is null`,
     [input.tokenHash, input.userId, input.telegramUserId],
   );
 }
@@ -429,7 +498,10 @@ async function loadBoundHandoff(
 
 async function withCurrentTelegramAppHandoff<T>(
   input: TelegramAppHandoffAccessInput,
-  options: { forUpdate?: boolean },
+  options: {
+    cancelledError?: "not_cancellable" | "not_claimable" | "not_committable";
+    forUpdate?: boolean;
+  },
   handler: (input: {
     access: TelegramAppHandoffAccess;
     client: PoolClient;
@@ -437,25 +509,59 @@ async function withCurrentTelegramAppHandoff<T>(
   }) => Promise<T>,
 ): Promise<T> {
   const access = parseHandoffAccess(input);
-  return tx(input.db, async (client) => {
+  const outcome = await tx(input.db, async (client) => {
+    // Every access path may reconcile the bound intent. Lock the handoff first
+    // so claim/commit/cancel and TTL reconciliation share one lock order:
+    // handoff -> intent. Loading the intent first can deadlock a commit at TTL.
+    const lockedRow = await loadBoundHandoff(client, {
+      forUpdate: true,
+      ...access,
+    });
+    if (!lockedRow) throw new TelegramAppHandoffError("not_found");
     await expireIfNeeded(client, access);
     const row = await loadBoundHandoff(client, {
       forUpdate: options.forUpdate,
       ...access,
     });
     if (!row) throw new TelegramAppHandoffError("not_found");
-    if (row.state === "expired") throw new TelegramAppHandoffError("expired");
-    return handler({ access, client, row });
+    // Returning the terminal observation lets the lifecycle updates above
+    // commit. Throwing `expired` inside this transaction would roll them back
+    // and leave every subsequent resolve stuck on the same issued row.
+    if (row.state === "expired") return { kind: "expired" as const };
+    if (row.state === "cancelled" && options.cancelledError) {
+      return {
+        code: options.cancelledError,
+        kind: "terminal_error" as const,
+      };
+    }
+    return {
+      kind: "value" as const,
+      value: await handler({ access, client, row }),
+    };
   });
+  if (outcome.kind === "expired") {
+    throw new TelegramAppHandoffError("expired");
+  }
+  if (outcome.kind === "terminal_error") {
+    throw new TelegramAppHandoffError(outcome.code);
+  }
+  return outcome.value;
 }
 
 /**
- * Creates one one-time, opaque Mini App token for a confirmed app-handoff
- * intent. The raw token is returned only here; the database receives its hash.
+ * Creates one one-time, opaque Mini App token for a reviewed app-handoff
+ * intent. Issuing the link does not record consent; the bound user's claim
+ * does that atomically. The raw token is returned only here; the database
+ * receives its hash.
  */
 export async function issueTelegramAppHandoff(input: {
   authorityFingerprint: string;
-  db: Pool;
+  /**
+   * A Pool starts the atomic issue transaction here. A transaction client is
+   * accepted only so the Telegram Review selector can issue while holding its
+   * existing market/authority lock instead of opening a nested transaction.
+   */
+  db: Pool | Pick<PoolClient, "query">;
   expiresAt?: Date;
   planSnapshot: JsonObject;
   policyRevision: string;
@@ -509,10 +615,10 @@ export async function issueTelegramAppHandoff(input: {
   });
   // V1 and v2 funding stay Buy-only. A direct v2 handoff can be either
   // action, but its durable trade intent must match the one exact sealed plan.
-  const directAction = directV2PlanAction(planSnapshot);
-  const allowedIntentActions = directAction ? [directAction] : ["buy"];
+  const v2Action = v2PlanAction(planSnapshot);
+  const allowedIntentActions = v2Action ? [v2Action] : ["buy"];
 
-  const handoff = await tx(input.db, async (client) => {
+  const issueInTransaction = async (client: Pick<PoolClient, "query">) => {
     const inserted = await client.query<TelegramAppHandoffRow>(
       `insert into telegram_app_handoffs (
          trade_intent_id,
@@ -547,6 +653,13 @@ export async function issueTelegramAppHandoff(input: {
          and intent.action = any($11::text[])
          and intent.delivery_mode = 'app_handoff'
          and intent.status in ('previewed', 'confirming', 'funding', 'external_handoff')
+         and (
+           not $12::boolean
+           or (
+             intent.result -> 'appHandoffV2' -> 'plan' = $9::jsonb
+             and intent.quote_snapshot = $8::jsonb
+           )
+         )
        on conflict do nothing
        returning ${handoffReturningColumns}`,
       [
@@ -561,6 +674,7 @@ export async function issueTelegramAppHandoff(input: {
         JSON.stringify(planSnapshot),
         expiresAt,
         allowedIntentActions,
+        v2Action != null,
       ],
     );
     if (inserted.rows[0]) return mapRow(inserted.rows[0]);
@@ -575,7 +689,17 @@ export async function issueTelegramAppHandoff(input: {
         [tradeIntentId, tokenHash],
       );
       if (existingDeterministic.rows[0]) {
-        return mapRow(existingDeterministic.rows[0]);
+        const existingRow = existingDeterministic.rows[0];
+        if (
+          existingRow.policy_revision !== policyRevision ||
+          existingRow.authority_fingerprint !== authorityFingerprint
+        ) {
+          throw new TelegramAppHandoffError("policy_changed");
+        }
+        if (existingRow.plan_fingerprint !== planFingerprint) {
+          throw new TelegramAppHandoffError("plan_changed");
+        }
+        return mapRow(existingRow);
       }
     }
     const existing = await client.query<{ exists: boolean }>(
@@ -590,7 +714,11 @@ export async function issueTelegramAppHandoff(input: {
       throw new TelegramAppHandoffError("already_issued");
     }
     throw new TelegramAppHandoffError("unauthorized");
-  });
+  };
+  const handoff =
+    typeof (input.db as Pool).connect === "function"
+      ? await tx(input.db as Pool, issueInTransaction)
+      : await issueInTransaction(input.db);
 
   return { handoff, startParam: startParam ?? handoffStartParam(token), token };
 }
@@ -615,12 +743,73 @@ export async function claimTelegramAppHandoff(input: {
 }): Promise<TelegramAppHandoff> {
   return withCurrentTelegramAppHandoff(
     input,
-    { forUpdate: true },
+    { cancelledError: "not_claimable", forUpdate: true },
     async ({ access, client, row }) => {
       if (row.state === "cancelled" || row.state === "committed") {
         throw new TelegramAppHandoffError("not_claimable");
       }
       if (row.state === "issued") {
+        const action = v2PlanAction(row.plan_snapshot);
+        if (action) {
+          // Claiming the exact sealed Mini App link is the user's Confirm.
+          // Bind that consent to the immutable plan and quote in the same
+          // transaction as issued -> claimed; no callback card is required.
+          // A compatibility callback already delivered by an older bot build
+          // may claim the same token after its own explicit Confirm.
+          // Do not change the trade status until commit attaches the v2
+          // execution marker. The delivery-authority constraint deliberately
+          // rejects half-committed direct Buy and Sell states.
+          const consented = await client.query(
+            `update telegram_trade_intents trade_intent
+                set result = coalesce(trade_intent.result, '{}'::jsonb)
+                      || jsonb_build_object(
+                        'appHandoffConsent', jsonb_build_object(
+                          'action', $3::text,
+                          'claimedAt', clock_timestamp(),
+                          'handoffId', $4::uuid,
+                          'version', 2
+                        )
+                      ),
+                    error_code = case
+                      when trade_intent.error_code = 'external_handoff_required'
+                        then null
+                      else trade_intent.error_code
+                    end,
+                    error_message = case
+                      when trade_intent.error_code = 'external_handoff_required'
+                        then null
+                      else trade_intent.error_message
+                    end,
+                    updated_at = clock_timestamp()
+              where trade_intent.id = $1::uuid
+                and trade_intent.user_id = $2::uuid
+                and trade_intent.action = $3::text
+                and trade_intent.telegram_user_id = $5::text
+                and trade_intent.delivery_mode = 'app_handoff'
+                and trade_intent.status in (
+                  'previewed', 'confirming', 'external_handoff'
+                )
+                and (
+                  trade_intent.status = 'external_handoff'
+                  or trade_intent.expires_at > clock_timestamp()
+                )
+                and trade_intent.submit_started_at is null
+                and trade_intent.result -> 'appHandoffV2' -> 'plan' = $6::jsonb
+                and trade_intent.quote_snapshot = $7::jsonb`,
+            [
+              row.trade_intent_id,
+              row.user_id,
+              action,
+              row.id,
+              row.telegram_user_id,
+              JSON.stringify(row.plan_snapshot),
+              JSON.stringify(row.quote_snapshot),
+            ],
+          );
+          if ((consented.rowCount ?? 0) !== 1) {
+            throw new TelegramAppHandoffError("not_claimable");
+          }
+        }
         const claimed = await client.query<TelegramAppHandoffRow>(
           `update telegram_app_handoffs handoff_row
             set state = 'claimed',
@@ -653,7 +842,7 @@ export async function cancelTelegramAppHandoff(input: {
 }): Promise<TelegramAppHandoff> {
   return withCurrentTelegramAppHandoff(
     input,
-    { forUpdate: true },
+    { cancelledError: "not_cancellable", forUpdate: true },
     async ({ client, row }) => {
       const v2TradePlan = isV2TradePlan(row.plan_snapshot);
       const cancellableHandoffStates = v2TradePlan
@@ -761,7 +950,7 @@ export async function commitTelegramAppHandoffWithExecution<T>(
   );
   return withCurrentTelegramAppHandoff(
     input,
-    { forUpdate: true },
+    { cancelledError: "not_committable", forUpdate: true },
     async ({ client, row }) => {
       if (row.state !== "claimed" && row.state !== "committed") {
         throw new TelegramAppHandoffError("not_committable");
@@ -872,7 +1061,7 @@ export async function commitTelegramAppHandoff(
   );
   return withCurrentTelegramAppHandoff(
     input,
-    { forUpdate: true },
+    { cancelledError: "not_committable", forUpdate: true },
     async ({ client, row }) => {
       if (row.state !== "claimed" && row.state !== "committed") {
         throw new TelegramAppHandoffError("not_committable");
