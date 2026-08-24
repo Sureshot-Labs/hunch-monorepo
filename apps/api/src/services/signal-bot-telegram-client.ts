@@ -6,6 +6,12 @@ import {
   isValidTelegramMessageId,
   sendTelegramPhotoRequest,
 } from "./telegram-api-photo.js";
+import {
+  sendTelegramMediaGroupRequest,
+  sendTelegramVideoRequest,
+  type TelegramMediaGroupSendResult,
+  type TelegramVideoSendResult,
+} from "./telegram-api-media.js";
 
 import type {
   SignalBotTelegramClient,
@@ -22,6 +28,7 @@ import type {
 } from "./signal-bot.js";
 
 export const TELEGRAM_MUTATION_TIMEOUT_MS = 20_000;
+export const TELEGRAM_MEDIA_TIMEOUT_MS = 120_000;
 
 function telegramMutationSignal(): AbortSignal {
   return AbortSignal.timeout(TELEGRAM_MUTATION_TIMEOUT_MS);
@@ -355,6 +362,58 @@ export class TelegramBotApiClient implements SignalBotTelegramClient {
       });
     } catch (error) {
       return telegramTransportFailure(error);
+    }
+  }
+
+  async sendVideo(input: {
+    caption?: string;
+    chat_id: string;
+    filename: string;
+    parse_mode?: "MarkdownV2";
+    video: Uint8Array;
+  }): Promise<TelegramVideoSendResult> {
+    try {
+      return await sendTelegramVideoRequest({
+        baseUrl: this.baseUrl,
+        caption: input.caption,
+        chatId: input.chat_id,
+        filename: input.filename,
+        parseMode: input.parse_mode,
+        signal: AbortSignal.timeout(TELEGRAM_MEDIA_TIMEOUT_MS),
+        video: input.video,
+      });
+    } catch (error) {
+      return {
+        error: "ambiguous",
+        message:
+          error instanceof Error ? error.message : "telegram_transport_error",
+        ok: false,
+      };
+    }
+  }
+
+  async sendMediaGroup(input: {
+    caption?: string;
+    chat_id: string;
+    parse_mode?: "MarkdownV2";
+    videos: Array<{ bytes: Uint8Array; filename: string }>;
+  }): Promise<TelegramMediaGroupSendResult> {
+    try {
+      return await sendTelegramMediaGroupRequest({
+        baseUrl: this.baseUrl,
+        caption: input.caption,
+        chatId: input.chat_id,
+        parseMode: input.parse_mode,
+        signal: AbortSignal.timeout(TELEGRAM_MEDIA_TIMEOUT_MS),
+        videos: input.videos,
+      });
+    } catch (error) {
+      return {
+        error: "ambiguous",
+        message:
+          error instanceof Error ? error.message : "telegram_transport_error",
+        ok: false,
+      };
     }
   }
 

@@ -5,6 +5,10 @@ import type {
   TelegramMarketIdentityV1,
 } from "./signal-publication-contract.js";
 import type { TelegramInputRichMessage } from "./telegram-rich-message.js";
+import type {
+  TelegramMediaGroupSendResult,
+  TelegramVideoSendResult,
+} from "./telegram-api-media.js";
 
 export type TelegramInlineKeyboardButton = (
   | {
@@ -105,10 +109,23 @@ export type SignalBotTelegramClient = {
     photo: Uint8Array;
     reply_markup?: TelegramInlineKeyboard;
   }): Promise<TelegramSendResult>;
+  sendMediaGroup?(input: {
+    caption?: string;
+    chat_id: string;
+    parse_mode?: "MarkdownV2";
+    videos: Array<{ bytes: Uint8Array; filename: string }>;
+  }): Promise<TelegramMediaGroupSendResult>;
   sendRichMessage?(
     input: TelegramSendRichMessageInput,
   ): Promise<TelegramSendResult>;
   sendMessage(input: TelegramSendMessageInput): Promise<TelegramSendResult>;
+  sendVideo?(input: {
+    caption?: string;
+    chat_id: string;
+    filename: string;
+    parse_mode?: "MarkdownV2";
+    video: Uint8Array;
+  }): Promise<TelegramVideoSendResult>;
 };
 
 export type TelegramBotUpdate = {

@@ -14,6 +14,7 @@ PREBUILT_BUILD_ONLY="${PREBUILT_BUILD_ONLY:-0}"
 
 GIT_SHA="${GIT_SHA:-$(git -C "${ROOT_DIR}" rev-parse --short "${GIT_REF}")}" 
 HUNCH_BACKEND_IMAGE="${HUNCH_BACKEND_IMAGE:-hunch-backend:${GIT_SHA}}"
+HUNCH_SOCIAL_MEDIA_WORKER_IMAGE="${HUNCH_SOCIAL_MEDIA_WORKER_IMAGE:-hunch-social-media-worker:${GIT_SHA}}"
 
 ARCHIVE_NAME="${REPO_NAME}-$(date +%Y%m%d%H%M%S).tar.gz"
 ARCHIVE_PATH="${ARCHIVE_PATH:-/tmp/${ARCHIVE_NAME}}"
@@ -40,12 +41,19 @@ docker buildx build --platform "${PLATFORM}" \
   -t "${HUNCH_BACKEND_IMAGE}" \
   --load \
   "${ROOT_DIR}"
+echo "Building ${HUNCH_SOCIAL_MEDIA_WORKER_IMAGE} for ${PLATFORM}"
+docker buildx build --platform "${PLATFORM}" \
+  -f "${ROOT_DIR}/ops/Dockerfile.app" \
+  --target social-media-runtime \
+  -t "${HUNCH_SOCIAL_MEDIA_WORKER_IMAGE}" \
+  --load \
+  "${ROOT_DIR}"
 build_finished_at="$(date +%s)"
 echo "Timing: Docker build completed in $((build_finished_at - build_started_at))s"
 
 echo "Saving image to ${IMAGE_ARCHIVE_PATH}"
 export_started_at="$(date +%s)"
-docker save "${HUNCH_BACKEND_IMAGE}" | gzip > "${IMAGE_ARCHIVE_PATH}"
+docker save "${HUNCH_BACKEND_IMAGE}" "${HUNCH_SOCIAL_MEDIA_WORKER_IMAGE}" | gzip > "${IMAGE_ARCHIVE_PATH}"
 export_finished_at="$(date +%s)"
 image_archive_size="$(du -h "${IMAGE_ARCHIVE_PATH}" | awk '{print $1}')"
 echo "Timing: image export/compression completed in $((export_finished_at - export_started_at))s"
@@ -69,7 +77,7 @@ else
 
   echo "Running remote deploy"
   ssh "${REMOTE_HOST}" \
-    "chmod +x '${REMOTE_SCRIPT}' && ARCHIVE='${REMOTE_ARCHIVE}' IMAGE_ARCHIVE='${REMOTE_IMAGE_ARCHIVE}' HUNCH_BACKEND_IMAGE='${HUNCH_BACKEND_IMAGE}' APP_DIR='${APP_DIR}' ENV_FILE='${ENV_FILE}' '${REMOTE_SCRIPT}'"
+    "chmod +x '${REMOTE_SCRIPT}' && ARCHIVE='${REMOTE_ARCHIVE}' IMAGE_ARCHIVE='${REMOTE_IMAGE_ARCHIVE}' HUNCH_BACKEND_IMAGE='${HUNCH_BACKEND_IMAGE}' HUNCH_SOCIAL_MEDIA_WORKER_IMAGE='${HUNCH_SOCIAL_MEDIA_WORKER_IMAGE}' APP_DIR='${APP_DIR}' ENV_FILE='${ENV_FILE}' '${REMOTE_SCRIPT}'"
 
   echo "Cleaning up remote archives"
   if ! ssh "${REMOTE_HOST}" "rm -f '${REMOTE_ARCHIVE}' '${REMOTE_IMAGE_ARCHIVE}' '${REMOTE_SCRIPT}'"; then
@@ -80,6 +88,7 @@ fi
 # Optional local cleanup (remove the image we just built).
 if [[ "${LOCAL_IMAGE_CLEANUP:-1}" == "1" ]]; then
   docker image rm "${HUNCH_BACKEND_IMAGE}" >/dev/null 2>&1 || true
+  docker image rm "${HUNCH_SOCIAL_MEDIA_WORKER_IMAGE}" >/dev/null 2>&1 || true
 fi
 if [[ "${LOCAL_BUILDER_PRUNE:-0}" == "1" ]]; then
   docker builder prune -f >/dev/null 2>&1 || true

@@ -39,6 +39,7 @@ application_services=(
   ai-worker
   finance-worker
   signal-bot
+  social-media-worker
   nginx
 )
 
@@ -53,6 +54,15 @@ fi
 # Build the new application image while the current stack and infra remain up.
 "${compose[@]}" up -d postgres redis
 "${compose[@]}" build
+
+# Fail before touching live application containers if Compose built the worker
+# from the generic backend runtime instead of the Chromium/FFmpeg target.
+if ! "${compose[@]}" run --rm --no-deps --entrypoint /bin/sh \
+  social-media-worker -c \
+  'test -x /usr/bin/chromium && test -x /usr/bin/ffmpeg && test -x /usr/bin/ffprobe'; then
+  echo "social-media-worker image is missing Chromium, FFmpeg, or FFprobe; existing application containers were left running." >&2
+  exit 1
+fi
 
 # Migrate before touching live application containers. A rejected migration
 # leaves the current application image online.
@@ -69,6 +79,23 @@ fi
 "${compose[@]}" rm -f "${application_services[@]}" || true
 "${compose[@]}" up -d --no-build --no-deps --remove-orphans \
   "${application_services[@]}"
+
+# Give the secret loader and worker entrypoint enough time to fail before we
+# accept the deployment. A container caught in a restart loop is not healthy.
+sleep 3
+social_media_worker_id="$("${compose[@]}" ps -q social-media-worker)"
+if [[ -z "${social_media_worker_id}" ]] || \
+  [[ "$(docker inspect -f '{{.State.Running}}' "${social_media_worker_id}" 2>/dev/null || true)" != "true" ]] || \
+  [[ "$(docker inspect -f '{{.RestartCount}}' "${social_media_worker_id}" 2>/dev/null || true)" != "0" ]]; then
+  echo "social-media-worker did not start after deployment." >&2
+  "${compose[@]}" logs --tail 120 social-media-worker >&2 || true
+  exit 1
+fi
+if ! docker exec "${social_media_worker_id}" /bin/sh -c \
+  'test -x /usr/bin/chromium && test -x /usr/bin/ffmpeg && test -x /usr/bin/ffprobe'; then
+  echo "social-media-worker is not using the specialized Chromium/FFmpeg runtime." >&2
+  exit 1
+fi
 if [[ -n "${ARCHIVE}" ]]; then
   rm -f "${ARCHIVE}" || true
 fi

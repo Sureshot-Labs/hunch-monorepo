@@ -5,6 +5,10 @@ import {
   finishSignalBotMessageDelivery,
   reserveSignalBotMessageDelivery,
 } from "./signal-bot-message-delivery-ledger.js";
+import {
+  enqueueXEditorialMediaJob,
+  type XEditorialMediaDeliveryConfig,
+} from "./signal-bot-editorial-media-jobs.js";
 import type {
   SignalBotDeliveryPreparationReason,
   SignalBotFollowthroughCandidateRow,
@@ -45,7 +49,7 @@ type XEditorialComposerOutcome =
   | "ready";
 
 export type SignalBotXEditorialPublicationResult =
-  | { status: "already_sent" | "delivery_unknown" | "sent" }
+  | { status: "already_sent" | "delivery_unknown" | "queued" | "sent" }
   | {
       blockedChat: boolean;
       composerOutcome?: XEditorialComposerOutcome;
@@ -508,6 +512,22 @@ function buildInitialHolderLink(input: {
   });
 }
 
+function buildInitialMediaCaptureUrl(input: {
+  appBaseUrl: string;
+  note: SignalBotNote;
+}): string | null {
+  if (input.note.holderActorMode !== "single_holder") return null;
+  return buildSignalBotHolderTrackingUrl({
+    address: input.note.holderAddress,
+    appBaseUrl: input.appBaseUrl,
+    chain: input.note.holderChain,
+    eventId: input.note.eventId,
+    marketId: input.note.marketId,
+    noteId: input.note.id,
+    side: input.note.holderSide,
+  });
+}
+
 function buildFollowthroughHolderLink(input: {
   appBaseUrl: string;
   candidate: SignalBotFollowthroughCandidateRow;
@@ -522,6 +542,24 @@ function buildFollowthroughHolderLink(input: {
       asTrimmedString(holderMeta.identityDisplayName),
       asTrimmedString(holderMeta.holderDescriptor),
     ],
+    eventId: input.candidate.event_id,
+    marketId: input.candidate.market_id,
+    noteId: input.candidate.thread_root_note_id,
+    side: input.signalSide,
+  });
+}
+
+function buildFollowthroughMediaCaptureUrl(input: {
+  appBaseUrl: string;
+  candidate: SignalBotFollowthroughCandidateRow;
+  signalSide: "NO" | "YES" | null;
+}): string | null {
+  const holderMeta = asObject(input.candidate.holder_target_meta);
+  if (holderMeta.actorMode !== "single_holder") return null;
+  return buildSignalBotHolderTrackingUrl({
+    address: input.candidate.holder_address,
+    appBaseUrl: input.appBaseUrl,
+    chain: input.candidate.holder_chain,
     eventId: input.candidate.event_id,
     marketId: input.candidate.market_id,
     noteId: input.candidate.thread_root_note_id,
@@ -1166,6 +1204,8 @@ async function deliverDraft(input: {
   composer: XEditorialDraftComposer;
   db: DbQuery;
   holderLink?: XEditorialHolderLink | null;
+  media?: XEditorialMediaDeliveryConfig;
+  mediaCaptureUrl?: string | null;
   messageKind: XEditorialMessageKind;
   noteId: string;
   source: XEditorialDraftSource;
@@ -1360,6 +1400,45 @@ async function deliverDraft(input: {
       status: "blocked",
     };
   }
+  const telegramDraft = buildXEditorialTelegramDraftMessage({
+    draft,
+    holderLink: input.holderLink,
+  });
+  if (
+    input.media?.enabled === true &&
+    input.media.profiles.length > 0 &&
+    input.mediaCaptureUrl
+  ) {
+    try {
+      const queued = await enqueueXEditorialMediaJob({
+        attemptId: reservation.attemptId,
+        captionMarkdownV2: telegramDraft,
+        captureUrl: input.mediaCaptureUrl,
+        chatId: input.chatId,
+        db: input.db,
+        deliveryRef: reservation.deliveryRef,
+        profiles: input.media.profiles,
+      });
+      if (queued) return { status: "queued" };
+    } catch (error) {
+      console.error("[signal-bot:x-editorial] media_enqueue_failed", {
+        chatId: input.chatId,
+        error: error instanceof Error ? error.message : String(error),
+        noteId: input.noteId,
+      });
+    }
+    await finishSignalBotMessageDelivery({
+      attemptId: reservation.attemptId,
+      db: input.db,
+      deliveryRef: reservation.deliveryRef,
+      errorCode: "editorial_media_enqueue_failed",
+      expectedStatus: "reserved",
+      metrics: baseMetrics,
+      nextAttemptAt: new Date(Date.now() + 60_000),
+      status: "retry",
+    });
+    return { blockedChat: false, status: "retry" };
+  }
   const began = await beginSignalBotMessageDelivery({
     attemptId: reservation.attemptId,
     db: input.db,
@@ -1370,10 +1449,7 @@ async function deliverDraft(input: {
     chat_id: input.chatId,
     disable_web_page_preview: true,
     parse_mode: "MarkdownV2",
-    text: buildXEditorialTelegramDraftMessage({
-      draft,
-      holderLink: input.holderLink,
-    }),
+    text: telegramDraft,
   });
   if (!result.ok) {
     const status =
@@ -1418,6 +1494,7 @@ export async function publishXEditorialNote(input: {
   composer?: XEditorialDraftComposer;
   db: DbQuery;
   kind: "initial" | "research_update";
+  media?: XEditorialMediaDeliveryConfig;
   note: SignalBotNote;
   selectedSide: "NO" | "YES";
   telegram: SignalBotTelegramClient;
@@ -1433,6 +1510,10 @@ export async function publishXEditorialNote(input: {
     ...input,
     composer,
     holderLink: buildInitialHolderLink({
+      appBaseUrl: input.appBaseUrl,
+      note: input.note,
+    }),
+    mediaCaptureUrl: buildInitialMediaCaptureUrl({
       appBaseUrl: input.appBaseUrl,
       note: input.note,
     }),
@@ -1452,6 +1533,7 @@ export async function publishXEditorialFollowthrough(input: {
     XEditorialMessageKind,
     "followthrough_stats" | "resolved_loss" | "resolved_win"
   >;
+  media?: XEditorialMediaDeliveryConfig;
   stats: SignalBotFollowthroughStats;
   telegram: SignalBotTelegramClient;
   telegramMiniAppLinkBase: string | null;
@@ -1472,6 +1554,12 @@ export async function publishXEditorialFollowthrough(input: {
     composer,
     db: input.db,
     holderLink: buildFollowthroughHolderLink({
+      appBaseUrl: input.appBaseUrl,
+      candidate: input.candidate,
+      signalSide: input.stats.signalSide,
+    }),
+    media: input.media,
+    mediaCaptureUrl: buildFollowthroughMediaCaptureUrl({
       appBaseUrl: input.appBaseUrl,
       candidate: input.candidate,
       signalSide: input.stats.signalSide,
