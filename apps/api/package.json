@@ -109,6 +109,7 @@
     "ai:holder-research:runner": "tsx src/ai-holder-research-runner.ts",
     "signal:bot": "tsx src/signal-bot-runner.ts",
     "social:media": "tsx src/social-media-worker-entry.ts",
+    "social:media:preview": "tsx src/social-media-preview.ts",
     "signal:post-copy:audit": "tsx src/signal-post-copy-audit.ts"
   },
   "dependencies": {

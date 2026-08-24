@@ -439,6 +439,31 @@ the existing signal-bot log policy.
 
 ## Test Strategy
 
+### Local video preview
+
+The renderer can be exercised without Postgres or Telegram. Start the matching
+`Hunch_App` branch over HTTP, then invoke the API preview command with any
+public tracking-wallet URL rewritten to the local origin. The host needs Google
+Chrome or Chromium plus FFmpeg/FFprobe (`brew install ffmpeg` on macOS):
+
+```bash
+# Hunch_App terminal
+bun run dev:http
+
+# hunch-monorepo terminal
+pnpm --filter api social:media:preview -- \
+  --url 'http://localhost:3000/tracking/wallet/<address>?chain=polygon' \
+  --profiles mobile,desktop \
+  --output /tmp/hunch-social-previews
+```
+
+Every invocation creates a unique directory below `--output` and prints the
+absolute MP4 paths, dimensions, duration, byte size, and any per-profile
+failure. Omitting `--output` uses the operating-system temp directory. Use
+`--fps 12` for a faster composition smoke test; use the default 30 fps for
+editorial review. The preview path has no database or Telegram dependency and
+does not delete its output files.
+
 ### Deterministic unit tests
 
 - media eligibility and cluster exclusion;

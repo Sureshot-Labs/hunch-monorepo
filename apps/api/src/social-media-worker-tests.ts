@@ -5,6 +5,7 @@ import {
   parseSocialMediaWorkerConfig,
   processXEditorialMediaJob,
 } from "./social-media-worker-entry.js";
+import { parseXEditorialMediaPreviewOptions } from "./social-media-preview.js";
 import {
   claimXEditorialMediaJob,
   enqueueXEditorialMediaJob,
@@ -19,6 +20,57 @@ import {
 } from "./services/x-editorial-media-renderer.js";
 
 const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
+  {
+    name: "local preview CLI accepts a tracking-wallet URL and bounded profiles",
+    run: () => {
+      const options = parseXEditorialMediaPreviewOptions([
+        "--url",
+        "http://localhost:3000/tracking/wallet/0x123?chain=polygon",
+        "--profiles=desktop,mobile,desktop",
+        "--fps",
+        "12",
+        "--output",
+        "/tmp/hunch-preview",
+      ]);
+      assert.deepEqual(options, {
+        fps: 12,
+        outputRoot: "/tmp/hunch-preview",
+        profiles: ["desktop", "mobile"],
+        url: "http://localhost:3000/tracking/wallet/0x123?chain=polygon",
+      });
+    },
+  },
+  {
+    name: "local preview CLI rejects unrelated pages and out-of-range FPS",
+    run: () => {
+      assert.throws(
+        () =>
+          parseXEditorialMediaPreviewOptions([
+            "--url",
+            "https://app.hunch.trade/admin",
+          ]),
+        /tracking\/wallet/,
+      );
+      assert.throws(
+        () =>
+          parseXEditorialMediaPreviewOptions([
+            "--url",
+            "https://app.hunch.trade/tracking/wallet/0x123",
+            "--fps=60",
+          ]),
+        /12 through 30/,
+      );
+      assert.throws(
+        () =>
+          parseXEditorialMediaPreviewOptions([
+            "--url",
+            "https://app.hunch.trade/tracking/wallet/0x123",
+            "--profiles",
+          ]),
+        /requires at least one profile/,
+      );
+    },
+  },
   {
     name: "consumer stays enabled independently of the producer and keeps safe bounds",
     run: () => {

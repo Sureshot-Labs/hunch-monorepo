@@ -261,7 +261,7 @@ function startFfmpeg(input: {
       "pipe:0",
       "-an",
       "-vf",
-      `scale=${input.spec.outputWidth}:${input.spec.outputHeight}:flags=lanczos`,
+      `scale=${input.spec.outputWidth}:${input.spec.outputHeight}:flags=lanczos:in_range=pc:out_range=tv,format=yuv420p`,
       "-c:v",
       "libx264",
       "-preset",
@@ -270,6 +270,8 @@ function startFfmpeg(input: {
       "23",
       "-pix_fmt",
       "yuv420p",
+      "-color_range",
+      "tv",
       "-movflags",
       "+faststart",
       input.outputPath,
@@ -493,7 +495,7 @@ async function verifyRenderedVideo(input: {
       "-select_streams",
       "v:0",
       "-show_entries",
-      "stream=codec_name,width,height,pix_fmt,nb_frames:format=duration",
+      "stream=codec_name,width,height,pix_fmt,color_range,nb_frames:format=duration",
       "-of",
       "json",
       input.outputPath,
@@ -504,6 +506,7 @@ async function verifyRenderedVideo(input: {
     format?: { duration?: string };
     streams?: Array<{
       codec_name?: string;
+      color_range?: string;
       height?: number;
       nb_frames?: string;
       pix_fmt?: string;
@@ -515,6 +518,7 @@ async function verifyRenderedVideo(input: {
   const frameCount = Number(stream?.nb_frames);
   if (
     stream?.codec_name !== "h264" ||
+    stream.color_range !== "tv" ||
     stream.pix_fmt !== "yuv420p" ||
     stream.width !== input.expectedWidth ||
     stream.height !== input.expectedHeight ||
