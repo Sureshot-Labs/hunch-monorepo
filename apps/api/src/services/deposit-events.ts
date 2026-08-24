@@ -435,8 +435,7 @@ async function findRelayFundingOutput(
   ) {
     return null;
   }
-  const lookupHmacKey =
-    process.env.FUNDING_REFERENCE_LOOKUP_HMAC_KEY?.trim();
+  const lookupHmacKey = process.env.FUNDING_REFERENCE_LOOKUP_HMAC_KEY?.trim();
   let referenceFingerprint: string | null = null;
   if (lookupHmacKey && input.event.transaction_hash?.trim()) {
     try {
@@ -484,12 +483,18 @@ async function findRelayFundingOutput(
             from telegram_trade_intents trade_intent
             where trade_intent.funding_operation_id = operation_row.id
               and trade_intent.user_id = operation_row.user_id
+              -- The trade may leave funding after the Relay boundary while
+              -- the exact linked operation is still settling. Its output is
+              -- still internal funding, even if the later trade was stopped.
               and trade_intent.status in (
                 'funding',
+                'external_handoff',
                 'executing',
                 'submitted',
                 'reconcile_required',
-                'filled'
+                'filled',
+                'failed',
+                'cancelled'
               )
           )
         )

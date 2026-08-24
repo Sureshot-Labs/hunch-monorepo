@@ -666,9 +666,7 @@ export async function verifyPolymarketBuilderFeeAccruals(
     return { checked: 0, verified: 0, failed: 0, skipped: 0 };
   }
 
-  const provider = createEvmRpcProvider(env.polygonRpcUrl, undefined, {
-    staticNetwork: true,
-  });
+  const provider = createEvmRpcProvider(env.polygonRpcUrl, 137);
   let checked = 0;
   let verified = 0;
   let failed = 0;

@@ -115,6 +115,7 @@ import {
   buildHunchMiniAppWebButton,
 } from "./telegram-mini-app-buttons.js";
 import {
+  buildTelegramAppHandoffStartParamForIntent,
   expireStaleTelegramAppHandoffs,
   issueTelegramAppHandoff,
   TelegramAppHandoffError,
@@ -318,10 +319,12 @@ type StoredTelegramBuyDeliveryMode = Exclude<
  * before the quote and plan can be recorded. Any later app-handoff state must
  * already carry the plan it asks the Mini App to execute.
  */
-export function isInitialTelegramAppHandoffProposal(input: Readonly<{
-  deliveryMode: TelegramBuyDeliveryMode;
-  status: string;
-}>): boolean {
+export function isInitialTelegramAppHandoffProposal(
+  input: Readonly<{
+    deliveryMode: TelegramBuyDeliveryMode;
+    status: string;
+  }>,
+): boolean {
   return input.deliveryMode === "app_handoff" && input.status === "draft";
 }
 
@@ -347,9 +350,9 @@ function isRetryableTelegramAppHandoffFundingInspection(
 }
 
 const EXISTING_TRADE_RESOLVING_MESSAGE =
-  "Existing trade is still resolving. The bot is checking the venue automatically; no action is needed. Check /trade_status before retrying.";
+  "Existing trade is still resolving. The bot is checking it automatically. Use the current card to check status or continue.";
 const UNKNOWN_TRADE_RESOLVING_MESSAGE =
-  "Trade status is unknown. The bot is checking the venue automatically; no action is needed. Check /trade_status before retrying.";
+  "Trade status is unknown. The bot is checking it automatically. Use Check status on the current card.";
 
 function buildTelegramTradeShortfallUnavailableReplyMarkup(
   intentId: string,
@@ -722,10 +725,14 @@ type TelegramTradeIntentRow = {
 };
 
 type UnresolvedTelegramTradeIntentRow = {
+  action: TelegramBotTradingAction;
+  can_resume_app_handoff: boolean;
+  delivery_mode: StoredTelegramBuyDeliveryMode;
   id: string;
   error_code: string | null;
   side: TelegramBotTradingSide | null;
   status: string;
+  user_id: string | null;
 };
 
 export type TelegramBotTradingStatus = {
@@ -1009,6 +1016,7 @@ const TERMINAL_INTENT_STATUSES = new Set([
 ]);
 const PENDING_INTENT_STATUSES = ["draft", "previewed", "confirming"];
 const RESOLVING_NON_FUNDING_INTENT_STATUSES = [
+  "external_handoff",
   "executing",
   "reconcile_required",
   "submitted",
@@ -4818,7 +4826,22 @@ async function loadUnresolvedTelegramTradeIntent(
   },
 ): Promise<UnresolvedTelegramTradeIntentRow | null> {
   const result = await db.query<UnresolvedTelegramTradeIntentRow>(
-    `SELECT id, side, status, error_code
+    `SELECT
+       tti.action,
+       exists (
+         select 1
+           from telegram_app_handoffs handoff_row
+          where handoff_row.trade_intent_id = tti.id
+            and handoff_row.user_id = tti.user_id
+            and handoff_row.state = 'committed'
+            and handoff_row.plan_snapshot ->> 'version' = '2'
+       ) as can_resume_app_handoff,
+       tti.delivery_mode,
+       tti.id,
+       tti.side,
+       tti.status,
+       tti.error_code,
+       tti.user_id::text
        FROM telegram_trade_intents tti
 	     WHERE telegram_user_id = $1
 	        AND market_id = $2
@@ -5740,6 +5763,7 @@ export async function buildTelegramBotTradingMarketMessage(input: {
       ? handoffAuthorityBinding
       : authorityBinding;
   const canBuildCustomBuy =
+    !unresolvedIntent &&
     customBuyAuthority != null &&
     customBuyDeliveryMode != null &&
     policy.customTradeInputEnabled;
@@ -5776,31 +5800,34 @@ export async function buildTelegramBotTradingMarketMessage(input: {
     deliveryMode: StoredTelegramBuyDeliveryMode;
     side: TelegramBotTradingSide;
   }>;
-  const buyButtonOptions: readonly BuyButtonOption[] = [
-    ...buyOptions.map((option) => ({
-      amountUsd: option.amountUsd,
-      authority: authorityBinding as TelegramBotTradeAuthorityBinding,
-      deliveryMode: "bot_submit" as const,
-      side: option.side,
-    })),
-    ...(handoffAuthorityBinding
-      ? handoffPresetAmountsUsd.flatMap((amountUsd) =>
-          (["YES", "NO"] as const)
-            .filter((side) => !focusedSide || side === focusedSide)
-            .map((side) => ({
-              amountUsd,
-              authority: handoffAuthorityBinding,
-              deliveryMode: "app_handoff" as const,
-              side,
-            })),
-        )
-      : []),
-  ];
+  const buyButtonOptions: readonly BuyButtonOption[] = unresolvedIntent
+    ? []
+    : [
+        ...buyOptions.map((option) => ({
+          amountUsd: option.amountUsd,
+          authority: authorityBinding as TelegramBotTradeAuthorityBinding,
+          deliveryMode: "bot_submit" as const,
+          side: option.side,
+        })),
+        ...(handoffAuthorityBinding
+          ? handoffPresetAmountsUsd.flatMap((amountUsd) =>
+              (["YES", "NO"] as const)
+                .filter((side) => !focusedSide || side === focusedSide)
+                .map((side) => ({
+                  amountUsd,
+                  authority: handoffAuthorityBinding,
+                  deliveryMode: "app_handoff" as const,
+                  side,
+                })),
+            )
+          : []),
+      ];
   const sellIntentAuthority =
     sellDeliveryMode === "app_handoff"
       ? handoffAuthorityBinding
       : authorityBinding;
   const canBuildSellOptions =
+    !unresolvedIntent &&
     canAttemptSell &&
     sellIntentAuthority != null &&
     (sellDeliveryMode === "app_handoff" ||
@@ -5937,7 +5964,14 @@ export async function buildTelegramBotTradingMarketMessage(input: {
   if (input.isAdminTest) {
     lines.push("", "Preview only - trade buttons are not created.");
   } else if (unresolvedIntent) {
-    lines.push("", EXISTING_TRADE_RESOLVING_MESSAGE);
+    lines.push(
+      "",
+      unresolvedIntent.status === "funding"
+        ? "An existing Buy is still preparing funds. Continue, check its status, or cancel the Buy below."
+        : unresolvedIntent.status === "external_handoff"
+          ? "A confirmed trade is waiting in Hunch. Continue it or cancel it below."
+          : EXISTING_TRADE_RESOLVING_MESSAGE,
+    );
   }
   const hunchFallbackCopy = canTradeInHunch
     ? "You can still trade in Hunch."
@@ -6233,6 +6267,43 @@ export async function buildTelegramBotTradingMarketMessage(input: {
     const button = buildMiniAppButton(buttonInput);
     if (button) keyboard.push([button]);
   };
+  if (!input.isAdminTest && unresolvedIntent) {
+    if (
+      unresolvedIntent.delivery_mode === "app_handoff" &&
+      unresolvedIntent.can_resume_app_handoff &&
+      unresolvedIntent.user_id &&
+      env.telegramBotToken
+    ) {
+      const startParam = buildTelegramAppHandoffStartParamForIntent({
+        telegramUserId,
+        tokenSecret: env.telegramBotToken,
+        tradeIntentId: unresolvedIntent.id,
+        userId: unresolvedIntent.user_id,
+      });
+      const continueButton = buildMiniAppButton({
+        startParam,
+        text: `Continue ${unresolvedIntent.action === "sell" ? "Sell" : "Buy"} in Hunch`,
+      });
+      if (continueButton) keyboard.push([continueButton]);
+    }
+    keyboard.push([
+      {
+        callback_data: `${TELEGRAM_BOT_TRADING_CALLBACK_PREFIX}:retry_buy:${unresolvedIntent.id}`,
+        text: "🔄 Check status",
+      },
+    ]);
+    if (
+      unresolvedIntent.status === "funding" ||
+      unresolvedIntent.status === "external_handoff"
+    ) {
+      keyboard.push([
+        {
+          callback_data: `${TELEGRAM_BOT_TRADING_CALLBACK_PREFIX}:cancel:${unresolvedIntent.id}`,
+          text: `❌ Cancel ${unresolvedIntent.action === "sell" ? "Sell" : "Buy"}`,
+        },
+      ]);
+    }
+  }
   const marketStartParam = market.event_id
     ? buildSignalBotMarketStartParam({
         eventId: market.event_id,
@@ -8843,21 +8914,21 @@ async function answerIntentAlreadyProcessed(
         case "reconcile_required":
           return `⏳ ${UNKNOWN_TRADE_RESOLVING_MESSAGE}`;
         case "expired":
-          return "⚠️ These buttons expired. Send /market again.";
+          return "⚠️ These buttons expired. Use Open market on the latest card.";
         case "failed":
           return intent.submit_started_at
-            ? "⚠️ The submitted trade did not fill. Check /trade_status."
-            : "⚠️ Trade failed before submission. Nothing was sent. Send /market again.";
+            ? "⚠️ The submitted trade did not fill. Use Open market to try again."
+            : "⚠️ Trade failed before submission. Nothing was sent. Use Open market to try again.";
         case "cancelled":
           return intent.error_message?.trim()
             ? `⚠️ Trade cancelled: ${intent.error_message.trim()}`
             : "✅ Trade was cancelled. Nothing was submitted.";
         case "submitted":
-          return "✅ Trade was submitted. Check /trade_status for the result.";
+          return "✅ Trade was submitted. Use Check status on the current card for the result.";
         case "filled":
-          return "✅ Trade already filled. Check /trade_status for details.";
+          return "✅ Trade already filled. Open My positions for details.";
         default:
-          return "⚠️ This trade action is no longer active. Send /market again.";
+          return "⚠️ This trade action is no longer active. Use Open market on the latest card.";
       }
     })(),
   });
@@ -9293,9 +9364,7 @@ async function previewTelegramTradeIntent(input: {
   const updatePreviewIntentStatus = (
     update: Omit<
       Parameters<typeof updateIntentStatus>[0],
-      | "db"
-      | "intentId"
-      | "requireRetryableAppHandoffFundingInspection"
+      "db" | "intentId" | "requireRetryableAppHandoffFundingInspection"
     >,
   ): Promise<boolean> =>
     updateIntentStatus({
@@ -11234,6 +11303,20 @@ export async function handleTelegramBotTradingCallback(
   const isV2DirectHandoff =
     intent.funding_operation_id == null &&
     readTelegramAppHandoffV2Plan(intent)?.kind === "direct_trade";
+  const appHandoffExecutionMarker = isRecord(intent.result.appHandoffExecution)
+    ? intent.result.appHandoffExecution
+    : null;
+  const committedFundedAppHandoffId =
+    intent.delivery_mode === "app_handoff" &&
+    intent.action === "buy" &&
+    intent.funding_operation_id != null &&
+    appHandoffExecutionMarker?.version === 2 &&
+    (appHandoffExecutionMarker.kind == null ||
+      appHandoffExecutionMarker.kind === "funding") &&
+    typeof appHandoffExecutionMarker.handoffId === "string"
+      ? appHandoffExecutionMarker.handoffId
+      : null;
+  const committedFundedAppHandoff = committedFundedAppHandoffId != null;
   if (
     parsed.type === "retry_buy" &&
     intent.status === "cancelled" &&
@@ -11358,6 +11441,12 @@ export async function handleTelegramBotTradingCallback(
     intent.status === "external_handoff" &&
     intent.delivery_mode === "app_handoff" &&
     intent.submit_started_at == null;
+  if (canExitExternalHandoff && committedFundedAppHandoff) {
+    // The transfer is already durable, but no venue order crossed its submit
+    // boundary. Cancel only the Buy; lifecycle reconciliation releases the
+    // consumer reservation and leaves the prepared venue cash available.
+    cancellingBuyContinuation = true;
+  }
   const canDeliverExternalHandoff =
     (parsed.type === "confirm" || parsed.type === "retry_buy") &&
     intent.status === "external_handoff" &&
@@ -11381,6 +11470,7 @@ export async function handleTelegramBotTradingCallback(
     const expiredExitIntent =
       (PENDING_INTENT_STATUSES.includes(intent.status) ||
         canExitExternalHandoff) &&
+      !committedFundedAppHandoff &&
       intent.expires_at.getTime() <= Date.now();
     if (
       intent.status === "expired" ||
@@ -11468,6 +11558,7 @@ export async function handleTelegramBotTradingCallback(
   // actually ready.
   if (
     intent.status !== "funding" &&
+    !committedFundedAppHandoff &&
     intent.expires_at.getTime() <= Date.now()
   ) {
     const expired = await updateIntentStatus({
@@ -11939,8 +12030,85 @@ export async function handleTelegramBotTradingCallback(
       });
       return true;
     }
-    const resumeStatus =
-      intent.delivery_mode === "bot_submit" ? "confirming" : "draft";
+    if (intent.delivery_mode === "app_handoff") {
+      if (!committedFundedAppHandoff) {
+        await input.answerCallbackQuery({
+          callbackQueryId: input.callbackQuery.id,
+          showAlert: true,
+          text: "⚠️ The protected funding continuation is unavailable. Open the market again.",
+        });
+        return true;
+      }
+      if (
+        intent.funding_reservation_id != null &&
+        intent.funding_reservation_id !== funding.reservation_id
+      ) {
+        await input.answerCallbackQuery({
+          callbackQueryId: input.callbackQuery.id,
+          showAlert: true,
+          text: "⚠️ Funding is linked to a different continuation. Reopen the market.",
+        });
+        return true;
+      }
+      if (intent.funding_reservation_id == null) {
+        const attached = await input.db.query(
+          `update telegram_trade_intents intent
+              set funding_reservation_id = $2::uuid,
+                  error_code = null,
+                  error_message = null,
+                  result = coalesce(intent.result, '{}'::jsonb)
+                    || jsonb_build_object(
+                      'appHandoffFundingReady', jsonb_build_object(
+                        'handoffId', $3::uuid,
+                        'operationId', intent.funding_operation_id,
+                        'reservationId', $2::uuid,
+                        'version', 2
+                      ),
+                      'fundingReadyAt', clock_timestamp(),
+                      'stage', 'funding_ready'
+                    ),
+                  updated_at = clock_timestamp()
+            where intent.id = $1::uuid
+              and intent.status = 'funding'
+              and intent.delivery_mode = 'app_handoff'
+              and intent.funding_operation_id is not null
+              and intent.funding_reservation_id is null`,
+          [intent.id, funding.reservation_id, committedFundedAppHandoffId],
+        );
+        if ((attached.rowCount ?? 0) !== 1) {
+          await answerIntentAlreadyProcessed(input, intent);
+          return true;
+        }
+      }
+      const current = await loadIntent(input.db, intent.id);
+      const confirmedQuote = readTelegramTradeQuotePreview(
+        current?.quote_snapshot ?? intent.quote_snapshot,
+      );
+      if (!current || !confirmedQuote || !appHandoffV2Plan) {
+        await input.answerCallbackQuery({
+          callbackQueryId: input.callbackQuery.id,
+          showAlert: true,
+          text: "⚠️ The protected continuation is unavailable. Open the market again.",
+        });
+        return true;
+      }
+      const handoffMessage = await issueTelegramTradeAppHandoffMessage({
+        authorization,
+        db: input.db,
+        intent: current,
+        market,
+        policy,
+        quote: confirmedQuote,
+        v2Plan: appHandoffV2Plan,
+      });
+      await input.answerCallbackQuery({
+        callbackQueryId: input.callbackQuery.id,
+        text: "✅ Funding is ready. Continue the confirmed Buy in Hunch.",
+      });
+      await input.sendMessage({ chat_id: chatId, ...handoffMessage });
+      return true;
+    }
+    const resumeStatus = "confirming";
     const resumed = await input.db.query(
       `update telegram_trade_intents
           set status = $3,
@@ -11965,7 +12133,7 @@ export async function handleTelegramBotTradingCallback(
     }
     intent.status = resumeStatus;
     intent.funding_reservation_id = funding.reservation_id;
-    fundingResumedForExecution = resumeStatus === "confirming";
+    fundingResumedForExecution = true;
     // The readiness above was read before the durable funding operation became
     // ready. Re-read it for presentation/repair, but do not use its old
     // available-balance snapshot to reject the amount just reserved for this
@@ -11979,10 +12147,7 @@ export async function handleTelegramBotTradingCallback(
     });
     await input.answerCallbackQuery({
       callbackQueryId: input.callbackQuery.id,
-      text:
-        resumeStatus === "confirming"
-          ? "✅ Funding ready. Rechecking the confirmed Buy…"
-          : "✅ Funding ready. Building the Hunch handoff…",
+      text: "✅ Funding ready. Rechecking the confirmed Buy…",
     });
   }
   if (
@@ -12002,19 +12167,10 @@ export async function handleTelegramBotTradingCallback(
         showAlert: true,
         text,
       });
-      await input.sendMessage({
-        chat_id: chatId,
-        parse_mode: "MarkdownV2",
-        text: formatTelegramTradeLifecycleMessageMarkdownV2({
-          heading: "Trade is still resolving.",
-          tone: "working",
-          lines: [
-            "The bot is checking the venue automatically; no action is needed. Check /trade_status before retrying.",
-          ],
-          marketTitle: intent.market_title,
-          venue: intent.venue,
-        }),
-      });
+      // Rebuild the market card so the active intent's own Continue, status,
+      // cancellation and market-navigation buttons are visible. Never leave a
+      // user with a command-only "still resolving" message.
+      await sendCurrentMarketCard();
       return true;
     }
     const trading = input.trading;
@@ -13413,8 +13569,18 @@ export async function loadTelegramAppHandoffProjection(
   }>(
     `select intent.action,
             intent.amount_usd,
-            intent.error_code,
-            intent.error_message,
+            case
+              when intent.error_code = 'external_handoff_required'
+                and intent.result -> 'appHandoffExecution' ->> 'version' = '2'
+                then null
+              else intent.error_code
+            end as error_code,
+            case
+              when intent.error_code = 'external_handoff_required'
+                and intent.result -> 'appHandoffExecution' ->> 'version' = '2'
+                then null
+              else intent.error_message
+            end as error_message,
             event_row.title as event_title,
             intent.execution_id::text,
             intent.funding_operation_id::text,

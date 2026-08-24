@@ -847,8 +847,15 @@ export async function claimTelegramAppHandoffV2FundedTradeAttemptInTransaction(
     handoffId: input.binding.handoffId.trim(),
     userId: input.userId,
   });
+  // `external_handoff` is accepted only with the same exact committed funding
+  // operation, reservation, plan fingerprint and funding execution marker
+  // checked below. Older status callbacks could relabel a ready funded intent
+  // while rebuilding its Mini App link; accepting that label here repairs the
+  // state without widening the sealed source or trade scope.
   if (
-    !["funding", "executing"].includes(locked.intentStatus) ||
+    !["funding", "external_handoff", "executing"].includes(
+      locked.intentStatus,
+    ) ||
     locked.fundingOperationId !== input.operationId ||
     locked.fundingReservationId !== input.reservationId ||
     locked.planFingerprint !==
@@ -883,6 +890,14 @@ export async function claimTelegramAppHandoffV2FundedTradeAttemptInTransaction(
     `update telegram_trade_intents intent
           set status = 'executing',
               submit_started_at = coalesce(intent.submit_started_at, clock_timestamp()),
+              error_code = case
+                when intent.error_code = 'external_handoff_required' then null
+                else intent.error_code
+              end,
+              error_message = case
+                when intent.error_code = 'external_handoff_required' then null
+                else intent.error_message
+              end,
               result = coalesce(intent.result, '{}'::jsonb)
                 || jsonb_build_object(
                   'appHandoffTradeExecution',
@@ -895,7 +910,7 @@ export async function claimTelegramAppHandoffV2FundedTradeAttemptInTransaction(
                 ),
               updated_at = clock_timestamp()
         where intent.id = $1::uuid
-          and intent.status in ('funding', 'executing')
+          and intent.status in ('funding', 'external_handoff', 'executing')
           and intent.funding_operation_id = $5::uuid
           and intent.funding_reservation_id = $6::uuid`,
     [

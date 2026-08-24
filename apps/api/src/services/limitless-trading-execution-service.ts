@@ -70,6 +70,7 @@ import { isLimitlessAmmMarketMetadata } from "./limitless-market-mode.js";
 import { buildLimitlessRedemptionPlan } from "./limitless-redemption-plan.js";
 import { fetchConditionalTokensPayouts } from "./limitless-redemption.js";
 import { recomputePositionMetricsForWallet } from "./positions-metrics.js";
+import { createEvmRpcProvider } from "./rpc-client-factory.js";
 import { venueLifecycleAllowsTradingAction } from "./venue-lifecycle.js";
 import {
   amountUsd,
@@ -5064,7 +5065,7 @@ export async function broadcastLimitlessAmmTelegramAppHandoffTrade(input: {
   }
 
   try {
-    const provider = new ethers.JsonRpcProvider(env.baseRpcUrl);
+    const provider = createEvmRpcProvider(env.baseRpcUrl, 8453);
     const broadcast = await provider.broadcastTransaction(
       input.body.signedTransaction,
     );
@@ -5696,8 +5697,7 @@ async function observeLimitlessWalletUsdcBalance(input: {
     input.ctx.logger?.warn?.(
       {
         err: error,
-        errorMessage:
-          error instanceof Error ? error.message : "unknown_error",
+        errorMessage: error instanceof Error ? error.message : "unknown_error",
         errorName: error instanceof Error ? error.name : typeof error,
         walletAddress: input.walletAddress,
       },

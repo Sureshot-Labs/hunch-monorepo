@@ -107,11 +107,12 @@ function loadSolanaKeypair(secret: string): Keypair {
 }
 
 async function fetchEvmHotBalanceMicro(params: {
+  chainId: number;
   rpcUrl: string;
   usdcAddress: string;
   privateKey: string;
 }): Promise<bigint> {
-  const provider = createEvmRpcProvider(params.rpcUrl);
+  const provider = createEvmRpcProvider(params.rpcUrl, params.chainId);
   const wallet = new ethers.Wallet(params.privateKey, provider);
   const token = new ethers.Contract(
     params.usdcAddress,
@@ -169,6 +170,7 @@ async function fetchControlledHotBalance(
         };
       }
       const balanceMicro = await fetchEvmHotBalanceMicro({
+        chainId: 137,
         rpcUrl: env.polygonRpcUrl,
         usdcAddress,
         privateKey,
@@ -197,6 +199,7 @@ async function fetchControlledHotBalance(
         };
       }
       const balanceMicro = await fetchEvmHotBalanceMicro({
+        chainId: 8453,
         rpcUrl: env.baseRpcUrl,
         usdcAddress,
         privateKey,

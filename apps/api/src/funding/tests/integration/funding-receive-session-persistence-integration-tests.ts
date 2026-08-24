@@ -415,16 +415,14 @@ try {
     "a recoverable session must remain observable instead of becoming a permanent active shell",
   );
 
-  const legacyAfterPresentationExpiry = await createOrReuseFundingReceiveSession(
-    pool,
-    {
+  const legacyAfterPresentationExpiry =
+    await createOrReuseFundingReceiveSession(pool, {
       ...genericInput,
       policyRevision: "policy_revision_legacy_expiry_12345678",
       now: postMoneyExpiry,
       expiresAt: new Date(postMoneyExpiry.getTime() + 86_400_000),
       observeUntil: new Date(postMoneyExpiry.getTime() + 8 * 86_400_000),
-    },
-  );
+    });
   assert.equal(
     legacyAfterPresentationExpiry.replayed,
     false,
@@ -445,13 +443,16 @@ try {
     evidence: { test: "legacy_open_receipt" },
     now: postMoneyExpiry,
   });
-  const legacyAfterOpenReceipt = await createOrReuseFundingReceiveSession(pool, {
-    ...genericInput,
-    policyRevision: "policy_revision_legacy_receipt_12345678",
-    now: new Date(postMoneyExpiry.getTime() + 1_000),
-    expiresAt: new Date(postMoneyExpiry.getTime() + 86_401_000),
-    observeUntil: new Date(postMoneyExpiry.getTime() + 8 * 86_400_000),
-  });
+  const legacyAfterOpenReceipt = await createOrReuseFundingReceiveSession(
+    pool,
+    {
+      ...genericInput,
+      policyRevision: "policy_revision_legacy_receipt_12345678",
+      now: new Date(postMoneyExpiry.getTime() + 1_000),
+      expiresAt: new Date(postMoneyExpiry.getTime() + 86_401_000),
+      observeUntil: new Date(postMoneyExpiry.getTime() + 8 * 86_400_000),
+    },
+  );
   assert.equal(
     legacyAfterOpenReceipt.replayed,
     false,

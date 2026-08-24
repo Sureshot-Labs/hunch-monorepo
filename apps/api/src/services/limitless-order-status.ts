@@ -1,5 +1,8 @@
 import { isRecord } from "../lib/type-guards.js";
-import { extractLimitlessMessage, limitlessRequest } from "./limitless-client.js";
+import {
+  extractLimitlessMessage,
+  limitlessRequest,
+} from "./limitless-client.js";
 
 const LIMITLESS_STATUS_BATCH_MAX_ITEMS = 50;
 

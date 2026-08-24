@@ -723,7 +723,8 @@ export async function createOrReuseFundingReceiveSession(
       includeRecovery: input.requireExactReceiveScope === true,
       now: input.now,
     });
-    const preserveObservedMoneyBoundary = input.requireExactReceiveScope === true;
+    const preserveObservedMoneyBoundary =
+      input.requireExactReceiveScope === true;
     for (const staleSession of existing) {
       if (
         receiveSessionIsCurrentForSelection(

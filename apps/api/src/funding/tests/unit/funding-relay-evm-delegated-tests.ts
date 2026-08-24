@@ -562,16 +562,15 @@ const clientRelayBatch = groupRelayExecutableActions({
   profile: atomicWalletProfile,
 })[0]?.action;
 assert.ok(clientRelayBatch);
-const clientSourceDebitValidation =
-  withRelayClientSourceDebitPostcondition({
-    action: clientRelayBatch,
-    actionValidationResult: { signerAddress: WALLET },
-    routeId: "base-usdc-to-polygon-pusd",
-    sourceAmount: {
-      asset: { networkId: "evm:8453", assetId: BASE_USDC, decimals: 6 },
-      raw: RAW,
-    },
-  });
+const clientSourceDebitValidation = withRelayClientSourceDebitPostcondition({
+  action: clientRelayBatch,
+  actionValidationResult: { signerAddress: WALLET },
+  routeId: "base-usdc-to-polygon-pusd",
+  sourceAmount: {
+    asset: { networkId: "evm:8453", assetId: BASE_USDC, decimals: 6 },
+    raw: RAW,
+  },
+});
 assert.deepEqual(
   relayClientSourceDebitPostcondition(clientSourceDebitValidation),
   {

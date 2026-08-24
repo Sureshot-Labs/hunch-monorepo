@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 
 import {
+  buildTelegramAppHandoffStartParamForIntent,
   cancelTelegramAppHandoff,
   claimTelegramAppHandoff,
   commitTelegramAppHandoff,
@@ -220,6 +221,16 @@ assert.equal(
   deterministicRetry.token,
   deterministicFirst.token,
   "delivery retries recover the same opaque token without storing it raw",
+);
+assert.equal(
+  buildTelegramAppHandoffStartParamForIntent({
+    telegramUserId: TELEGRAM_USER_ID,
+    tokenSecret: "test-delivery-secret",
+    tradeIntentId: INTENT_ID,
+    userId: USER_ID,
+  }),
+  deterministicFirst.startParam,
+  "a later Telegram card can rebuild the exact existing handoff link without storing the raw token",
 );
 await assert.rejects(
   resolveTelegramAppHandoff({

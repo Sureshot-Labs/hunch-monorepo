@@ -347,12 +347,10 @@ export function resolveRelaySolanaDirectDestinationContract(
   route: RelayRouteSpec,
 ): RelaySolanaDirectDestinationContract {
   const direct = route.solanaDirectDestination;
-  if (
-    route.sourceVm !== "svm" ||
-    route.destinationVm !== "evm" ||
-    !direct
-  ) {
-    throw new Error("Relay SVM route does not have a direct Depository contract");
+  if (route.sourceVm !== "svm" || route.destinationVm !== "evm" || !direct) {
+    throw new Error(
+      "Relay SVM route does not have a direct Depository contract",
+    );
   }
   const expectedChain =
     route.destination.networkId === "evm:137"

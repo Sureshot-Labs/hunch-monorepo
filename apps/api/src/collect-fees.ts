@@ -671,7 +671,7 @@ export async function runCollectFees(
     throw new Error("Missing HUNCH_FEE_COLLECTOR_PRIVATE_KEY");
   }
 
-  const provider = createEvmRpcProvider(env.polygonRpcUrl);
+  const provider = createEvmRpcProvider(env.polygonRpcUrl, 137);
   const wallet = privateKey ? new ethers.Wallet(privateKey, provider) : null;
   const collector = new ethers.Contract(
     feeCollectorAddress,

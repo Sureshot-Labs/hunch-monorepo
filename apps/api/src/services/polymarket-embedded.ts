@@ -323,7 +323,7 @@ function signatureToBytes(signature: string): `0x${string}` {
 }
 
 function polygonProvider() {
-  return createEvmRpcProvider(env.polygonRpcUrl);
+  return createEvmRpcProvider(env.polygonRpcUrl, 137);
 }
 
 function buildPrivyWalletRpcUrl(walletId: string): string {

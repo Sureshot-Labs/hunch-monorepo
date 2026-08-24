@@ -15,7 +15,11 @@ import type {
   Money,
   SourceOption,
 } from "../domain/types.js";
-import { canonicalJson, canonicalJsonHash, lookupHmac } from "../persistence/canonical.js";
+import {
+  canonicalJson,
+  canonicalJsonHash,
+  lookupHmac,
+} from "../persistence/canonical.js";
 import type { FundingPlanningRuntime } from "../planner/runtime-service.js";
 
 /** The opaque selection and its policy snapshot stay fresh for five minutes. */

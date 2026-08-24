@@ -210,7 +210,7 @@ function isValidClaimAmount(value: string): boolean {
 }
 
 function buildProvider(config: EvmChainConfig): ethers.JsonRpcProvider {
-  return createEvmRpcProvider(config.rpcUrl);
+  return createEvmRpcProvider(config.rpcUrl, Number(config.chainId));
 }
 
 function buildSolanaConnection(config: SolanaChainConfig): Connection {

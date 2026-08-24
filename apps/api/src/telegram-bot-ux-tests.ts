@@ -64,23 +64,59 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
             ...progress,
           } as never).inline_keyboard;
         assert.equal(
-          keyboard.flat().some(
-            (button) =>
-              "callback_data" in button &&
-              button.callback_data === `hbt:open_market:${intentId}`,
-          ),
+          keyboard
+            .flat()
+            .some(
+              (button) =>
+                "callback_data" in button &&
+                button.callback_data === `hbt:open_market:${intentId}`,
+            ),
           true,
           `${progress.action}/${progress.state} must expose Open market`,
         );
         assert.equal(
-          keyboard.flat().some(
-            (button) =>
-              "callback_data" in button && button.callback_data === "hm:v1:home",
-          ),
+          keyboard
+            .flat()
+            .some(
+              (button) =>
+                "callback_data" in button &&
+                button.callback_data === "hm:v1:home",
+            ),
           true,
           `${progress.action}/${progress.state} must expose Home`,
         );
       }
+    },
+  },
+  {
+    name: "ready funded handoff exposes Continue and Cancel Buy",
+    run: () => {
+      const intentId = "00000000-0000-4000-8000-000000000001";
+      const keyboard = telegramTradeLifecycleProgressTestHooks.progressKeyboard(
+        {
+          action: "buy",
+          amountUsd: "5",
+          canCancel: false,
+          canCancelBuy: true,
+          intentId,
+          isDirectHandoff: false,
+          marketTitle: "Market",
+          requiresMiniAppContinuation: true,
+          sideLabel: "YES",
+          state: "ready",
+          venue: "limitless",
+        } as never,
+      ).inline_keyboard;
+      assert.equal(
+        keyboard
+          .flat()
+          .some((button) => button.text === "▶️ Continue in Hunch"),
+        true,
+      );
+      assert.equal(
+        keyboard.flat().some((button) => button.text === "❌ Cancel Buy"),
+        true,
+      );
     },
   },
   {

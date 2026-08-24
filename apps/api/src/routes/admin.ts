@@ -2179,7 +2179,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
         try {
           const signer = new ethers.Wallet(feeCollectorPrivateKey);
           feeCollectorSignerAddress = signer.address;
-          const provider = createEvmRpcProvider(env.polygonRpcUrl);
+          const provider = createEvmRpcProvider(env.polygonRpcUrl, 137);
           feeCollectorSignerBalance = await provider.getBalance(signer.address);
         } catch (error) {
           feeCollectorSignerError =
@@ -2194,7 +2194,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
           polymarketBuilderChecksumAddress = ethers.getAddress(
             polymarketBuilderAddress,
           );
-          const provider = createEvmRpcProvider(env.polygonRpcUrl);
+          const provider = createEvmRpcProvider(env.polygonRpcUrl, 137);
           const [pusdBalance, nativeBalance] = await Promise.all([
             fetchErc20Balance({
               tokenAddress: env.polymarketPusdAddress,
@@ -2242,7 +2242,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
       if (rewardsPayoutKeyPolygon) {
         rewardsHotWallets.polygon.configured = true;
         try {
-          const provider = createEvmRpcProvider(env.polygonRpcUrl);
+          const provider = createEvmRpcProvider(env.polygonRpcUrl, 137);
           const wallet = new ethers.Wallet(rewardsPayoutKeyPolygon, provider);
           const usdcAddress =
             env.rewardsPayoutTokenAddressPolygon?.trim() ||
@@ -2292,7 +2292,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
       if (rewardsPayoutKeyBase) {
         rewardsHotWallets.base.configured = true;
         try {
-          const provider = createEvmRpcProvider(env.baseRpcUrl);
+          const provider = createEvmRpcProvider(env.baseRpcUrl, 8453);
           const wallet = new ethers.Wallet(rewardsPayoutKeyBase, provider);
           const usdcAddress =
             env.rewardsUsdcAddressBase?.trim() || env.limitlessUsdcAddress;
@@ -2366,7 +2366,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
         (async () => {
           if (!rewardsHotWallets.polygon.coldAddress) return;
           try {
-            const provider = createEvmRpcProvider(env.polygonRpcUrl);
+            const provider = createEvmRpcProvider(env.polygonRpcUrl, 137);
             const usdcAddress =
               env.rewardsPayoutTokenAddressPolygon?.trim() ||
               env.polymarketPusdAddress;
@@ -2412,7 +2412,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
         (async () => {
           if (!rewardsHotWallets.base.coldAddress) return;
           try {
-            const provider = createEvmRpcProvider(env.baseRpcUrl);
+            const provider = createEvmRpcProvider(env.baseRpcUrl, 8453);
             const usdcAddress =
               env.rewardsUsdcAddressBase?.trim() || env.limitlessUsdcAddress;
             const [nativeBalance, usdcBalance] = await Promise.all([

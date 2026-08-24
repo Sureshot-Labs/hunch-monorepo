@@ -5468,9 +5468,7 @@ try {
   const clientReceiptTransactionHash = `0x${crypto
     .randomBytes(32)
     .toString("hex")}`;
-  const clientReceiptBlockHash = `0x${crypto
-    .randomBytes(32)
-    .toString("hex")}`;
+  const clientReceiptBlockHash = `0x${crypto.randomBytes(32).toString("hex")}`;
   const clientReceiptAttempt = await tx(pool, async (client) => {
     const attempt = await startFundingStepAttemptInTransaction(client, {
       operationId: clientReceiptOperation.operation.id,

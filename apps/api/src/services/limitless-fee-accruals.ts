@@ -1027,9 +1027,7 @@ export async function backfillLimitlessVenueShareAccruals(
   ): Promise<LimitlessAccrualBuildResult | null> => {
     const txHash = extractTxHashFromLimitlessStatus(status);
     if (!txHash) return null;
-    baseProvider ??= createEvmRpcProvider(env.baseRpcUrl, undefined, {
-      staticNetwork: true,
-    });
+    baseProvider ??= createEvmRpcProvider(env.baseRpcUrl, 8453);
     return buildLimitlessVenueShareAccrualResultFromReceipt({
       provider: baseProvider,
       order: {
@@ -1136,9 +1134,7 @@ export async function backfillLimitlessVenueShareAccruals(
     if (!status) {
       const shareBps = clampShareBps(row.fee_share_bps);
       if (isFilledOrderWithKnownTx(row) && shareBps > 0) {
-        baseProvider ??= createEvmRpcProvider(env.baseRpcUrl, undefined, {
-          staticNetwork: true,
-        });
+        baseProvider ??= createEvmRpcProvider(env.baseRpcUrl, 8453);
         const onchainResult =
           await buildLimitlessVenueShareAccrualResultFromReceipt({
             provider: baseProvider,
@@ -1383,9 +1379,7 @@ export async function verifyLimitlessVenueShareAccruals(
     const receiptTxHash =
       normalizeHash(row.tx_hash) ?? normalizeHash(row.order_hash);
     if (receiptTxHash && row.side) {
-      baseProvider ??= createEvmRpcProvider(env.baseRpcUrl, undefined, {
-        staticNetwork: true,
-      });
+      baseProvider ??= createEvmRpcProvider(env.baseRpcUrl, 8453);
       const receiptResult =
         await buildLimitlessVenueShareAccrualResultFromReceipt({
           provider: baseProvider,

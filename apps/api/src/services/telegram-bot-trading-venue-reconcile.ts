@@ -244,7 +244,9 @@ function reconstructPreparedTrade(
 function limitlessTxHash(row: VenueReconcileIntentRow): string | null {
   const direct = readString(row.tx_signature);
   if (direct) return direct;
-  const preparedHash = readString(preparedKeys(row.prepared_snapshot)?.orderHash);
+  const preparedHash = readString(
+    preparedKeys(row.prepared_snapshot)?.orderHash,
+  );
   if (/^0x[0-9a-f]{64}$/iu.test(preparedHash ?? "")) {
     return preparedHash;
   }
@@ -440,9 +442,12 @@ async function inspectVenueSubmit(
       }
       const parsed = parseLimitlessOrderResult(matched.payload);
       const venueOrderId = parsed.venueOrderId ?? matched.providerOrderId;
-      const explicitTerminalFailure = ["cancelled", "expired", "failed", "rejected"].includes(
-        parsed.status ?? "",
-      );
+      const explicitTerminalFailure = [
+        "cancelled",
+        "expired",
+        "failed",
+        "rejected",
+      ].includes(parsed.status ?? "");
       return {
         state: parsed.terminalFill
           ? "limitless_clob_filled"

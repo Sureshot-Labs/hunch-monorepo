@@ -4,12 +4,7 @@ import {
   type ConnectionConfig,
   type FetchFn,
 } from "@solana/web3.js";
-import {
-  FetchRequest,
-  JsonRpcProvider,
-  type JsonRpcApiProviderOptions,
-  type Networkish,
-} from "ethers";
+import { FetchRequest, JsonRpcProvider } from "ethers";
 import { isRpcRateLimit } from "@hunch/shared";
 
 import {
@@ -129,8 +124,7 @@ function rpcMethodLabel(body: unknown): string {
 
 export function createEvmRpcProvider(
   rpcUrl: string,
-  network?: Networkish,
-  options?: JsonRpcApiProviderOptions,
+  chainId: number,
   source = captureRpcDiagnosticSource(),
 ): JsonRpcProvider {
   const request = new FetchRequest(rpcUrl);
@@ -161,7 +155,7 @@ export function createEvmRpcProvider(
       throw error;
     }
   };
-  return new JsonRpcProvider(request, network, options);
+  return new JsonRpcProvider(request, chainId, { staticNetwork: true });
 }
 
 function requestBody(init: RequestInit | undefined): unknown {

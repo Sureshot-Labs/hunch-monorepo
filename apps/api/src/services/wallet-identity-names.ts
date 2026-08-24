@@ -596,11 +596,7 @@ export async function resolveEnsIdentityName(input: {
   if (!rpcCheck.ok) return { status: "skipped", reason: rpcCheck.reason };
 
   try {
-    const client =
-      input.client ??
-      createEvmRpcProvider(rpcUrl, 1, {
-        staticNetwork: true,
-      });
+    const client = input.client ?? createEvmRpcProvider(rpcUrl, 1);
     const name = await Promise.race([
       client.lookupAddress(address),
       new Promise<null>((resolve) =>
