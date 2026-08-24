@@ -104,6 +104,7 @@ export async function beginSignalBotTradeInput(input: {
 export async function cancelSignalBotTradeInput(input: {
   chatId: string;
   contextId: string;
+  menuMessageId: number;
   message: TelegramBotTradingClientMessage;
   redis: TradeInputRedis;
   telegramUserId: number;
@@ -114,35 +115,40 @@ export async function cancelSignalBotTradeInput(input: {
     redis: input.redis,
     telegramUserId: input.telegramUserId,
   });
-  if (
-    !state ||
-    (state.kind !== "awaiting_custom_buy_amount" &&
-      state.kind !== "awaiting_custom_sell_amount") ||
-    state.contextId !== input.contextId ||
-    state.menuMessageId == null
-  ) {
-    return false;
-  }
+  const activeState =
+    state &&
+    state.kind !== "awaiting_custom_buy_amount" &&
+    state.kind !== "awaiting_custom_sell_amount"
+      ? null
+      : state?.contextId === input.contextId && state.menuMessageId != null
+        ? state
+        : null;
+  // A stale/expired prompt may already have consumed its Redis state. Its
+  // context-scoped Open market button is still safe. Never let an old card
+  // displace a different active input generation.
+  if (state != null && activeState == null) return false;
   const delivered = await sendOrEditTelegramBotMenuMessage({
     chatId: input.chatId,
     message: input.message,
-    messageId: state.menuMessageId,
+    messageId: activeState?.menuMessageId ?? input.menuMessageId,
     transport: input.transport,
   });
   const outcome = classifyTelegramBotMenuDeliveryResult(delivered).outcome;
   if (outcome === "ambiguous") {
+    if (!activeState) return false;
     return clearSignalBotPrimaryMenuInputIfCurrent({
       chatId: input.chatId,
       redis: input.redis,
-      stateToken: state.stateToken,
+      stateToken: activeState.stateToken,
       telegramUserId: input.telegramUserId,
     }).catch(() => false);
   }
   if (outcome !== "success") return false;
+  if (!activeState) return true;
   return clearSignalBotMenuInputIfCurrent({
     chatId: input.chatId,
     redis: input.redis,
-    stateToken: state.stateToken,
+    stateToken: activeState.stateToken,
     telegramUserId: input.telegramUserId,
   }).catch(() => false);
 }
@@ -184,7 +190,7 @@ export async function handleSignalBotTradeInput(input: {
         ),
       },
       {
-        marketCallbackData: `${TELEGRAM_BOT_TRADING_CALLBACK_PREFIX}:open_market:${staleTradeInput.contextId}`,
+        marketCallbackData: `${TELEGRAM_BOT_TRADING_CALLBACK_PREFIX}:open_input_market:${staleTradeInput.contextId}`,
       },
     );
     const delivered =

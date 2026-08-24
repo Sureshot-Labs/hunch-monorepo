@@ -16,6 +16,7 @@ import {
 } from "./services/telegram-bot-menu-state.js";
 import {
   readTelegramBotTradeInputContext,
+  readTelegramBotTradeInputContextForNavigation,
   telegramBotTradeInputMessageScopeMatches,
   writeTelegramBotTradeInputContext,
   type TelegramBotTradeInputContext,
@@ -390,6 +391,28 @@ assert.deepEqual(
   await readTelegramBotTradeInputContext({ id: contextId, redis }),
   context,
 );
+const limitlessSellContext: TelegramBotTradeInputContext = {
+  ...context,
+  deliveryMode: "app_handoff",
+  id: "07f23418-e28f-4d4e-88d2-995f142220dc",
+  marketId: "limitless:market-1",
+  venue: "limitless",
+};
+assert.equal(
+  await writeTelegramBotTradeInputContext({
+    context: limitlessSellContext,
+    redis,
+  }),
+  true,
+);
+assert.deepEqual(
+  await readTelegramBotTradeInputContext({
+    id: limitlessSellContext.id,
+    redis,
+  }),
+  limitlessSellContext,
+  "Limitless Sell is a valid app-handoff custom input context",
+);
 redis.values.set(
   `tg:signal_bot:v2:trade_input_context:${contextId}`,
   JSON.stringify({ ...context, version: 1 }),
@@ -415,6 +438,14 @@ assert.equal(
     redis,
   }),
   null,
+);
+assert.deepEqual(
+  await readTelegramBotTradeInputContextForNavigation({
+    id: expiredContext.id,
+    redis,
+  }),
+  expiredContext,
+  "an expired input keeps a short read-only path back to its market",
 );
 redis.values.set(
   "tg:signal_bot:v2:trade_input_context:64ab553e-1b1d-4ae2-9083-bdeac5c5241c",
@@ -464,6 +495,7 @@ assert.equal(
 await clearSignalBotMenuInput({ chatId: "42", redis, telegramUserId: 42 });
 let staleGuardCompletionCalls = 0;
 let staleGuardEditedText = "";
+let staleGuardKeyboard: TelegramInlineKeyboard["inline_keyboard"] | undefined;
 assert.equal(
   await handleSignalBotTradeInput({
     chatId: "42",
@@ -477,6 +509,7 @@ assert.equal(
     transport: {
       editMessageText: async (message) => {
         staleGuardEditedText = message.text;
+        staleGuardKeyboard = message.reply_markup?.inline_keyboard;
         return { message: "ok", messageId: 22, ok: true as const };
       },
       sendMessage: async () => ({
@@ -494,6 +527,17 @@ assert.match(
   staleGuardEditedText,
   /active\\\./u,
   "stale input copy must remain valid MarkdownV2",
+);
+assert.equal(
+  staleGuardKeyboard
+    ?.flat()
+    .some(
+      (button) =>
+        "callback_data" in button &&
+        button.callback_data === `hbt:open_input_market:${contextId}`,
+    ),
+  true,
+  "the expired input must navigate by input context rather than trade intent",
 );
 assert.equal(
   redis.values.has("tg:signal_bot:v1:trade_input_guard:42:42"),
@@ -881,10 +925,15 @@ assert.deepEqual(
   parseTelegramBotTradingCallbackData(`hbt:cancel_input:${contextId}`),
   { inputContextId: contextId, type: "cancel_input" },
 );
+assert.deepEqual(
+  parseTelegramBotTradingCallbackData(`hbt:open_input_market:${contextId}`),
+  { inputContextId: contextId, type: "open_input_market" },
+);
 assert.equal(
   await cancelSignalBotTradeInput({
     chatId: "42",
     contextId,
+    menuMessageId: 12,
     message: { text: "Back to the market" },
     redis,
     telegramUserId: 42,
@@ -927,6 +976,7 @@ assert.equal(
   await cancelSignalBotTradeInput({
     chatId: "42",
     contextId,
+    menuMessageId: 12,
     message: { text: "Back to the market" },
     redis: {
       eval: async () => {
@@ -965,6 +1015,7 @@ assert.equal(
   await cancelSignalBotTradeInput({
     chatId: "42",
     contextId,
+    menuMessageId: 12,
     message: { text: "Back to the market" },
     redis,
     telegramUserId: 42,
@@ -995,21 +1046,28 @@ assert.equal(
   await readSignalBotMenuInput({ chatId: "42", redis, telegramUserId: 42 }),
   null,
 );
+let staleNavigationMessageId: number | undefined;
 assert.equal(
   await cancelSignalBotTradeInput({
     chatId: "42",
     contextId,
-    message: { text: "must not deliver" },
+    menuMessageId: 12,
+    message: { text: "Back to the market" },
     redis,
     telegramUserId: 42,
     transport: {
+      editMessageText: async (message) => {
+        staleNavigationMessageId = message.message_id;
+        return { message: "ok", messageId: 12, ok: true as const };
+      },
       sendMessage: async () => {
-        throw new Error("stale cancel must not send");
+        throw new Error("stale navigation must edit its original card");
       },
     },
   }),
-  false,
+  true,
 );
+assert.equal(staleNavigationMessageId, 12);
 
 const expiredInputContextId = "9330c377-ebbf-4fab-927a-df4afc91bffc";
 const expiredInputIntentId = "ee7e9ee3-481d-457d-8a7e-67a1ec69ac75";

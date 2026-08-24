@@ -62,6 +62,7 @@ export type TelegramBotTradingClientCallbackInput = {
   }) => Promise<boolean>;
   cancelTradeInput?: (input: {
     contextId: string;
+    menuMessageId: number;
     message: TelegramBotTradingClientMessage;
   }) => Promise<boolean>;
   telegramMiniAppEnabled?: boolean;
@@ -290,7 +291,7 @@ export type ParsedTelegramBotTradingCallback =
     }
   | {
       inputContextId: string;
-      type: "buy_input" | "sell_input" | "cancel_input";
+      type: "buy_input" | "sell_input" | "cancel_input" | "open_input_market";
     };
 
 export function parseTelegramBotTradingCallbackData(
@@ -310,6 +311,7 @@ export function parseTelegramBotTradingCallbackData(
     type !== "buy_input" &&
     type !== "sell_input" &&
     type !== "cancel_input" &&
+    type !== "open_input_market" &&
     type !== "confirm" &&
     type !== "change_amount" &&
     type !== "cancel"
@@ -318,7 +320,8 @@ export function parseTelegramBotTradingCallbackData(
   if (!EXACT_UUID_RE.test(intentId ?? "")) return null;
   return type === "buy_input" ||
     type === "sell_input" ||
-    type === "cancel_input"
+    type === "cancel_input" ||
+    type === "open_input_market"
     ? { inputContextId: intentId, type }
     : { type, intentId };
 }
@@ -724,7 +727,8 @@ export function createTelegramBotTradingInternalApiClient(input: {
       if (
         parsed.type === "buy_input" ||
         parsed.type === "sell_input" ||
-        parsed.type === "cancel_input"
+        parsed.type === "cancel_input" ||
+        parsed.type === "open_input_market"
       ) {
         const chat = callbackInput.callbackQuery.message?.chat;
         const telegramUserId = callbackInput.callbackQuery.from?.id;
@@ -736,7 +740,7 @@ export function createTelegramBotTradingInternalApiClient(input: {
           telegramUserId == null ||
           telegramMessageId == null ||
           String(chat.id) !== String(telegramUserId) ||
-          (parsed.type === "cancel_input"
+          (parsed.type === "cancel_input" || parsed.type === "open_input_market"
             ? !callbackInput.cancelTradeInput
             : !callbackInput.beginTradeInput)
         ) {
@@ -747,11 +751,16 @@ export function createTelegramBotTradingInternalApiClient(input: {
           });
           return true;
         }
-        if (parsed.type === "cancel_input") {
+        if (
+          parsed.type === "cancel_input" ||
+          parsed.type === "open_input_market"
+        ) {
           const cancelled = await post<{
             message: TelegramBotTradingClientMessage;
           }>(
-            `/internal/telegram-bot/trading/input-contexts/${parsed.inputContextId}/cancel`,
+            `/internal/telegram-bot/trading/input-contexts/${parsed.inputContextId}/${
+              parsed.type === "open_input_market" ? "market" : "cancel"
+            }`,
             {
               appBaseUrl: callbackInput.appBaseUrl,
               chatId: String(chat.id),
@@ -764,6 +773,7 @@ export function createTelegramBotTradingInternalApiClient(input: {
             cancelled != null && callbackInput.cancelTradeInput
               ? await callbackInput.cancelTradeInput({
                   contextId: parsed.inputContextId,
+                  menuMessageId: telegramMessageId,
                   message: cancelled.message,
                 })
               : false;
@@ -771,7 +781,9 @@ export function createTelegramBotTradingInternalApiClient(input: {
             callbackQueryId: callbackInput.callbackQuery.id,
             showAlert: !completed,
             text: completed
-              ? "Cancelled. Back to the market."
+              ? parsed.type === "open_input_market"
+                ? "Opening the current market card…"
+                : "Cancelled. Back to the market."
               : "⚠️ Custom input is unavailable or expired.",
           });
           return true;

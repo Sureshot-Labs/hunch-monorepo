@@ -2893,7 +2893,7 @@ function buildTelegramTradeConfirmationMessage(input: {
                 fundingProposal.minimumDestination.asset.decimals,
               )}`,
             )
-          : appHandoffV2Plan
+          : appHandoffV2Plan && action === "BUY"
             ? `🔄 ${formatTelegramFieldMarkdownV2(
                 "Funding",
                 "Hunch will prepare only the sealed eligible balances in the Mini App",
@@ -2921,7 +2921,9 @@ function buildTelegramTradeConfirmationMessage(input: {
             fundingProposal
               ? "Confirm authorizes the shown internal funding route and this Buy within the displayed limits. No external Deposit is required."
               : appHandoffV2Plan
-                ? "Confirm authorizes the sealed eligible funding scope and this Buy within the displayed limits. Hunch will not use a new wallet, network, asset, or amount outside that scope."
+                ? action === "SELL"
+                  ? "Confirm authorizes this exact Sell within the displayed limits. Hunch will not sell more than the sealed quantity."
+                  : "Confirm authorizes the sealed eligible funding scope and this Buy within the displayed limits. Hunch will not use a new wallet, network, asset, or amount outside that scope."
                 : input.intent.delivery_mode === "app_handoff"
                   ? "Confirm authorizes this Buy within the displayed limits. Hunch will open only as a protected processing window; no second Buy click is required."
                   : "This is a real trade. Confirm only if you want the bot to submit it now.",

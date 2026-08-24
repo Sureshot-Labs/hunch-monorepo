@@ -2,6 +2,7 @@ import { canonicalJsonHash } from "../funding/persistence/canonical.js";
 import { canonicalWalletIdentity } from "../lib/wallet-address.js";
 
 const TRADE_INPUT_CONTEXT_KEY_PREFIX = "tg:signal_bot:v2:trade_input_context";
+const TRADE_INPUT_CONTEXT_NAVIGATION_GRACE_SEC = 5 * 60;
 
 const EXACT_UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -141,7 +142,6 @@ export function isTelegramBotTradeInputContext(
     (context.deliveryMode == null ||
       context.deliveryMode === "bot_submit" ||
       context.deliveryMode === "app_handoff") &&
-    (context.action !== "sell" || context.venue === "polymarket") &&
     (context.side === "YES" || context.side === "NO") &&
     typeof context.marketId === "string" &&
     context.marketId.length > 0 &&
@@ -172,12 +172,13 @@ export async function writeTelegramBotTradeInputContext(input: {
   await input.redis.set(
     contextKey(input.context.id),
     JSON.stringify(input.context),
-    { EX: ttlSec },
+    { EX: ttlSec + TRADE_INPUT_CONTEXT_NAVIGATION_GRACE_SEC },
   );
   return true;
 }
 
-export async function readTelegramBotTradeInputContext(input: {
+async function readStoredTelegramBotTradeInputContext(input: {
+  allowExpiredForNavigation: boolean;
   id: string;
   redis: Pick<TradeInputContextRedis, "get">;
 }): Promise<TelegramBotTradeInputContext | null> {
@@ -187,9 +188,34 @@ export async function readTelegramBotTradeInputContext(input: {
   try {
     const parsed: unknown = JSON.parse(raw);
     if (!isTelegramBotTradeInputContext(parsed)) return null;
-    if (Date.parse(parsed.expiresAt) <= Date.now()) return null;
+    const expiresAtMs = Date.parse(parsed.expiresAt);
+    const latestAcceptedAtMs = input.allowExpiredForNavigation
+      ? expiresAtMs + TRADE_INPUT_CONTEXT_NAVIGATION_GRACE_SEC * 1_000
+      : expiresAtMs;
+    if (latestAcceptedAtMs <= Date.now()) return null;
     return parsed;
   } catch {
     return null;
   }
+}
+
+export function readTelegramBotTradeInputContext(input: {
+  id: string;
+  redis: Pick<TradeInputContextRedis, "get">;
+}): Promise<TelegramBotTradeInputContext | null> {
+  return readStoredTelegramBotTradeInputContext({
+    ...input,
+    allowExpiredForNavigation: false,
+  });
+}
+
+/** Read-only market navigation remains available briefly after input expiry. */
+export function readTelegramBotTradeInputContextForNavigation(input: {
+  id: string;
+  redis: Pick<TradeInputContextRedis, "get">;
+}): Promise<TelegramBotTradeInputContext | null> {
+  return readStoredTelegramBotTradeInputContext({
+    ...input,
+    allowExpiredForNavigation: true,
+  });
 }
