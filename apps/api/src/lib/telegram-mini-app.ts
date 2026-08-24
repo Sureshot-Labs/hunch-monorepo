@@ -28,6 +28,7 @@ export type TelegramMiniAppContext = {
 };
 
 export type TelegramInitDataValidationOptions = {
+  allowStaleAuthDate?: boolean;
   botToken: string;
   initDataMaxAgeSeconds: number;
   maxPayloadBytes?: number;
@@ -152,7 +153,7 @@ function parseAuthDate(
   if (authDateMs > nowMs + 60_000) {
     throw new TelegramInitDataValidationError("future_auth_date");
   }
-  if (nowMs - authDateMs > maxAgeMs) {
+  if (!options.allowStaleAuthDate && nowMs - authDateMs > maxAgeMs) {
     throw new TelegramInitDataValidationError("stale_auth_date");
   }
   return new Date(authDateMs);

@@ -170,6 +170,7 @@ async function registerTelegramRoutes(
     reply: FastifyReply,
     initDataRaw: string,
     token: string,
+    options: Readonly<{ allowClaimedStale?: boolean }> = {},
   ): Promise<{ telegramUserId: string; userId: string } | null> => {
     const user = request.user;
     if (!user) {
@@ -181,10 +182,32 @@ async function registerTelegramRoutes(
       return null;
     }
     try {
-      const context = validateTelegramInitData(initDataRaw, {
-        botToken: env.telegramBotToken,
-        initDataMaxAgeSeconds: env.telegramInitDataMaxAgeSeconds,
-      });
+      let staleClaimedSession = false;
+      let context;
+      try {
+        context = validateTelegramInitData(initDataRaw, {
+          botToken: env.telegramBotToken,
+          initDataMaxAgeSeconds: env.telegramInitDataMaxAgeSeconds,
+        });
+      } catch (error) {
+        if (
+          !options.allowClaimedStale ||
+          !(error instanceof TelegramInitDataValidationError) ||
+          error.code !== "stale_auth_date"
+        ) {
+          throw error;
+        }
+        // Telegram does not rotate initData while an already-open Mini App is
+        // running. Re-verify its signature and immutable identity, then bind
+        // the stale session to an existing claimed handoff below. New issued
+        // handoffs still require a fresh auth_date.
+        context = validateTelegramInitData(initDataRaw, {
+          allowStaleAuthDate: true,
+          botToken: env.telegramBotToken,
+          initDataMaxAgeSeconds: env.telegramInitDataMaxAgeSeconds,
+        });
+        staleClaimedSession = true;
+      }
       const link = await resolveActiveTelegramAccountLink({
         db: pool,
         telegramUserId: context.user.id,
@@ -198,6 +221,17 @@ async function registerTelegramRoutes(
           .code(403)
           .send({ error: "telegram_handoff_start_param_mismatch" });
         return null;
+      }
+      if (staleClaimedSession) {
+        const handoff = await resolveTelegramAppHandoff({
+          db: pool,
+          telegramUserId: context.user.id,
+          token,
+          userId: user.id,
+        });
+        if (!handoff.claimedAt || handoff.state === "issued") {
+          throw new TelegramInitDataValidationError("stale_auth_date");
+        }
       }
       return { telegramUserId: context.user.id, userId: user.id };
     } catch (error) {
@@ -438,6 +472,7 @@ async function registerTelegramRoutes(
           reply,
           request.body.initDataRaw,
           request.body.token,
+          { allowClaimedStale: action !== "claim" },
         );
         if (!identity) return;
         return sendHandoffResponse(reply, async () =>
@@ -484,6 +519,7 @@ async function registerTelegramRoutes(
         reply,
         request.body.initDataRaw,
         request.body.token,
+        { allowClaimedStale: true },
       );
       if (!identity) return;
       return sendHandoffResponse(reply, async () => {
@@ -581,6 +617,7 @@ async function registerTelegramRoutes(
         reply,
         request.body.initDataRaw,
         request.body.token,
+        { allowClaimedStale: true },
       );
       if (!identity) return;
       let handoff: TelegramAppHandoff | null = null;
@@ -638,6 +675,7 @@ async function registerTelegramRoutes(
         reply,
         request.body.initDataRaw,
         request.body.token,
+        { allowClaimedStale: true },
       );
       if (!identity) return;
       try {
