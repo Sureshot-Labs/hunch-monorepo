@@ -5,6 +5,7 @@ import crypto from "node:crypto";
 import Fastify from "fastify";
 import {
   serializerCompiler,
+  type ZodTypeProvider,
   validatorCompiler,
 } from "fastify-type-provider-zod";
 import {
@@ -16,6 +17,7 @@ import {
   buildHunchMiniAppDeepLinkButton,
   buildHunchMiniAppWebButton,
 } from "./services/telegram-mini-app-buttons.js";
+import { telegramAppHandoffCommitResponseSchema } from "./schemas/telegram.js";
 import { TELEGRAM_CUSTOM_EMOJI } from "./services/telegram-custom-emoji.js";
 
 type TestCase = {
@@ -80,6 +82,63 @@ async function assertValidationError(
 }
 
 const tests: TestCase[] = [
+  {
+    name: "v2 handoff commit serialization retains its execution contract",
+    run: async () => {
+      const handoff = {
+        authorityFingerprint: "a".repeat(64),
+        cancelledAt: null,
+        claimedAt: "2026-07-03T12:00:01.000Z",
+        committedAt: "2026-07-03T12:00:02.000Z",
+        expiresAt: "2026-07-03T12:30:00.000Z",
+        expiredAt: null,
+        id: "759b37ca-26a0-4f6a-ae21-632973f0dcf4",
+        planFingerprint: "b".repeat(64),
+        planSnapshot: { executionContractVersion: 2, version: 2 },
+        policyRevision: "policy-revision",
+        quoteSnapshot: {},
+        state: "committed" as const,
+        tradeIntentId: "0002e929-a595-44f5-84ca-885b60b6a60b",
+      };
+      const payload = {
+        execution: {
+          fundingOperationId: "297ab1d4-0328-4313-b884-0039d46b3116",
+          handoffId: handoff.id,
+          kind: "client_execution_required",
+          requiredContractVersion: 2,
+        },
+        handoff,
+      } as const;
+      const app = Fastify({ logger: false });
+      app.setSerializerCompiler(serializerCompiler);
+      app
+        .withTypeProvider<ZodTypeProvider>()
+        .get(
+          "/handoff-commit-serialization",
+          {
+            schema: {
+              response: { 200: telegramAppHandoffCommitResponseSchema },
+            },
+          },
+          async () => payload,
+        );
+
+      try {
+        const response = await app.inject({
+          method: "GET",
+          url: "/handoff-commit-serialization",
+        });
+        assert.equal(response.statusCode, 200);
+        const parsed = response.json();
+
+        assert.ok("execution" in parsed);
+        assert.equal(parsed.execution.kind, "client_execution_required");
+        assert.equal(parsed.execution.requiredContractVersion, 2);
+      } finally {
+        await app.close();
+      }
+    },
+  },
   {
     name: "valid Telegram init data returns safe context",
     run: () => {
