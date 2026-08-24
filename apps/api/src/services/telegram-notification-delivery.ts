@@ -23,6 +23,7 @@ import {
 import { formatTelegramVenueLabel } from "./telegram-market-identity.js";
 import {
   formatTelegramBoldMarkdownV2,
+  formatTelegramCodeMarkdownV2,
   formatTelegramFieldMarkdownV2,
   formatTelegramFieldWithMarkdownV2,
 } from "./telegram-bot-trading-presentation.js";
@@ -242,6 +243,7 @@ export function buildTelegramActivityNotificationMessage(input: {
   const network = readString(data, "network");
   const amountLabel = readString(data, "amountLabel");
   const amountUsd = readNumber(data, "amountUsd");
+  const orderId = readString(data, "orderId");
   const lines: string[] = [];
   let actionText: string | null = null;
 
@@ -400,6 +402,14 @@ export function buildTelegramActivityNotificationMessage(input: {
         `${telegramCustomEmojiMarkdownV2("usdc")} ${formatTelegramFieldMarkdownV2(
           valueLabel,
           formatUsd(size * price),
+        )}`,
+      );
+    }
+    if (orderId) {
+      lines.push(
+        `🔗 ${formatTelegramFieldWithMarkdownV2(
+          "Order ID",
+          formatTelegramCodeMarkdownV2(orderId),
         )}`,
       );
     }

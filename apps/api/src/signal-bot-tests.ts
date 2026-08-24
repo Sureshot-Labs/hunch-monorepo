@@ -5882,6 +5882,110 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
+    name: "venue reconciliation finishes an exact linked local handoff order without preview keys",
+    run: async () => {
+      const intentId = "00000000-0000-4000-8000-000000000001";
+      const orderId = "00000000-0000-4000-8000-000000000002";
+      const updates: Array<{ params: unknown[]; sql: string }> = [];
+      let storedOrderStatus = "submitted";
+      const db = {
+        query: async () => ({ rows: [{ ready: true }] }),
+        connect: async () => ({
+          query: async (sql: string, params: unknown[] = []) => {
+            if (sql.includes("pg_try_advisory_xact_lock")) {
+              return { rows: [{ locked: true }] };
+            }
+            if (sql.includes("FROM telegram_trade_intents ti")) {
+              return {
+                rows: [
+                  {
+                    action: "buy",
+                    amount_usd: "2",
+                    authorization_id: "authorization-1",
+                    event_id: "event-1",
+                    funding_operation_id:
+                      "00000000-0000-4000-8000-000000000003",
+                    funding_reservation_id:
+                      "00000000-0000-4000-8000-000000000004",
+                    id: intentId,
+                    market_id: "limitless:october-meeting",
+                    order_id: orderId,
+                    prepared_snapshot: null,
+                    quote_snapshot: {},
+                    result: {},
+                    side: "NO",
+                    status: "submitted",
+                    telegram_user_id: "999",
+                    tx_signature: null,
+                    updated_at: new Date(),
+                    user_id: "00000000-0000-4000-8000-000000000006",
+                    venue: "limitless",
+                    venue_order_id: "0xsubmission-reference",
+                  },
+                ],
+              };
+            }
+            if (sql.includes("from orders stored_order")) {
+              return {
+                rowCount: 1,
+                rows: [
+                  {
+                    filled_size: "2.070393",
+                    order_hash:
+                      "0xb11ba3da000000000000000000000000000000000000000000000000c9ae0479",
+                    price: "0.966",
+                    size: "2.070393",
+                    status: storedOrderStatus,
+                    venue_order_id: "provider-order-1",
+                  },
+                ],
+              };
+            }
+            if (sql.includes("UPDATE telegram_trade_intents")) {
+              updates.push({ params, sql });
+            }
+            return { rowCount: 1, rows: [] };
+          },
+          release: () => undefined,
+        }),
+      };
+      const dependencies = {
+        inspectVenueSubmit: async () => {
+          throw new Error("provider inspection must not run");
+        },
+      } as never;
+      const pendingResult = await reconcileTelegramVenueIntents(
+        db as never,
+        {} as never,
+        { dryRun: false },
+        dependencies,
+      );
+      assert.equal(pendingResult.recovered, 0);
+      assert.equal(pendingResult.items[0]?.result, "pending");
+      assert.equal(
+        pendingResult.items[0]?.venueState,
+        "linked_local_order_submitted",
+      );
+
+      storedOrderStatus = "filled";
+      const result = await reconcileTelegramVenueIntents(
+        db as never,
+        {} as never,
+        { dryRun: false },
+        dependencies,
+      );
+      assert.equal(result.recovered, 1);
+      assert.equal(result.items[0]?.localOrderId, orderId);
+      assert.equal(result.items[0]?.venueState, "linked_local_order_filled");
+      const terminalUpdate = updates.find((entry) =>
+        entry.sql.includes("SET status = $2"),
+      );
+      assert.ok(terminalUpdate);
+      assert.equal(terminalUpdate.params[1], "filled");
+      assert.equal(terminalUpdate.params[4], orderId);
+    },
+  },
+  {
     name: "venue reconciliation audits a ref-less unknown without failing it",
     run: async () => {
       const statements: string[] = [];

@@ -1,4 +1,5 @@
 import { Interface } from "ethers";
+import { isPositiveRawAmount } from "../../funding/domain/raw-amount.js";
 
 import { stableOpaqueId } from "../../account-value/canonical.js";
 import { multiplyRawByUnitPrice } from "../../account-value/decimal.js";
@@ -282,7 +283,7 @@ export function relayDelegatedCommitSteps(
     !usesExistingAllowance && persistentApprovalCapRaw != null;
   if (
     usesPersistentApproval &&
-    (!/^[1-9][0-9]*$/u.test(persistentApprovalCapRaw) ||
+    (!isPositiveRawAmount(persistentApprovalCapRaw) ||
       BigInt(input.sourceAmount.raw) > BigInt(persistentApprovalCapRaw))
   ) {
     throw new Error("delegated Relay persistent approval cap is invalid");

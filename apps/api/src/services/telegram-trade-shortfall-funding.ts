@@ -14,6 +14,7 @@ import {
   parsePositiveRawAmount,
 } from "../funding/domain/raw-amount.js";
 import { FundingPlannerError } from "../funding/planner/money.js";
+import { fundingDestinationAmountForRequest } from "../funding/planner/trade-shortfall-amount.js";
 import { FundingPlanningRuntime } from "../funding/planner/runtime-service.js";
 import {
   buildTelegramAppHandoffV2Plan,
@@ -291,7 +292,7 @@ export function resolveTelegramTradeShortfallCommitAmounts(
 }> {
   const request = buildTelegramTradeShortfallCommitRequest(input, proposal);
   const tradeDestinationAmount = request.requestedDestinationAmount;
-  const fundingDestinationAmount = request.serverAdditionalDestinationAmount;
+  const fundingDestinationAmount = fundingDestinationAmountForRequest(request);
   if (!tradeDestinationAmount || !fundingDestinationAmount) {
     throw new Error("trade funding proposal lacks its exact shortfall");
   }

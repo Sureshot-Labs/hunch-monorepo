@@ -2649,6 +2649,15 @@ async function testTransactionalPersistenceContracts(): Promise<void> {
       marketSide: "NO",
       requestedCollateralRaw: "1000000",
     });
+    const marketContextId = String(
+      planB.operation.marketContextSnapshot?.marketContextId ?? "",
+    );
+    assert.ok(marketContextId);
+    await client.query(
+      `insert into unified_tokens (token_id, venue, market_id, side)
+       values ($1, 'polymarket', $2, 'YES')`,
+      [marketContextId, marketId],
+    );
     const tokenB = opaque("consent");
     const quoteB = await createFundingQuoteInTransaction(
       client,
@@ -3654,11 +3663,6 @@ async function testTransactionalPersistenceContracts(): Promise<void> {
     );
     const handoffIntentId = handoffIntent.rows[0]?.id;
     assert.ok(handoffIntentId);
-    const marketContextId = String(
-      committedB.operation.supportMetadata.test
-        ? planB.operation.marketContextSnapshot?.marketContextId
-        : "",
-    );
     await client.query(
       `insert into telegram_app_handoffs (
          id, trade_intent_id, user_id, telegram_user_id, token_hash, state,
@@ -3948,6 +3952,44 @@ async function testTransactionalPersistenceContracts(): Promise<void> {
     const fundingResolvedAfterExpiry = new Date(
       reservationBRow.expires_at.getTime() + 1_000,
     );
+    await client.query("savepoint funded_handoff_immediate_fill");
+    const fundedOrder = await storeOrderInTransaction(client, {
+      userId: userB,
+      walletAddress: "0x00000000000000000000000000000000000000b1",
+      venue: "polymarket",
+      venueOrderId: opaque("funded-handoff-order"),
+      tokenId: marketContextId,
+      side: "BUY",
+      orderType: "FOK",
+      price: 0.5,
+      size: 2,
+      status: "filled",
+      errorMessage: null,
+      rawError: null,
+      orderHash: opaque("funded-handoff-order-hash"),
+      fundingReservation: {
+        operationId: committedB.operation.id,
+        reservationId: reservationBId,
+      },
+      fundingTradeAttemptId: tradeClaim.attempt.id,
+      filledAt: fundingResolvedAfterExpiry,
+    });
+    const filledHandoffIntent = await client.query<{
+      order_id: string | null;
+      status: string;
+      venue_order_id: string | null;
+    }>(
+      `select order_id::text, status, venue_order_id
+         from telegram_trade_intents
+        where id = $1::uuid`,
+      [handoffIntentId],
+    );
+    assert.deepEqual(filledHandoffIntent.rows[0], {
+      order_id: fundedOrder.order.id,
+      status: "filled",
+      venue_order_id: fundedOrder.order.venue_order_id,
+    });
+    await client.query("rollback to savepoint funded_handoff_immediate_fill");
     const executionInput = {
       userId: userB,
       walletAddress: "0x00000000000000000000000000000000000000b1",
