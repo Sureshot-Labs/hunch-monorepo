@@ -375,6 +375,7 @@ Initial non-secret configuration:
 ```text
 HUNCH_SIGNAL_BOT_X_EDITORIAL_MEDIA_ENABLED=false
 HUNCH_SIGNAL_BOT_X_EDITORIAL_MEDIA_PROFILES=mobile,desktop
+HUNCH_SECRET_BUNDLES_SOCIAL_MEDIA_WORKER=aws-sm:/hunch/prod/social-media-worker
 HUNCH_SOCIAL_MEDIA_WORKER_ENABLED=true
 HUNCH_SOCIAL_MEDIA_ALLOWED_ORIGINS=https://app.hunch.trade
 HUNCH_SOCIAL_MEDIA_CHROMIUM_PATH=
@@ -404,8 +405,19 @@ Startup also removes stale directories with the exact
 `hunch-social-media-` prefix. The container temp filesystem and memory are
 bounded independently of durable Postgres state.
 
-The worker receives the existing signal-bot Telegram credential through its
-own bounded secret bundle. It does not receive editor/browser credentials.
+The worker receives the existing signal-bot Telegram credential through
+`HUNCH_SECRET_BUNDLES_SOCIAL_MEDIA_WORKER`. Its default bundle set contains
+only `DATABASE_URL` and `HUNCH_SIGNAL_BOT_TOKEN`; it deliberately excludes the
+rest of the shared, signal-bot, ops, and AI credentials and receives no
+editor/browser credentials. Chromium, FFmpeg, and FFprobe receive a small
+allowlisted process environment rather than the secret-loaded worker
+environment.
+
+Before the first production deployment, publish the generated
+`/hunch/prod/social-media-worker` AWS Secrets Manager bundle. The existing
+`packages/config/dist/build-secret-bundles.js` builder now emits that bundle
+from the two allowlisted keys. Compose also declares both keys as required, so
+the worker fails closed when either value is unavailable.
 
 ## Deployment
 
@@ -423,6 +435,13 @@ finance worker, and signal-bot service merely to support this one process.
 Production starts at render concurrency `1`. Concurrency can increase only
 after memory, CPU, page-load latency, Telegram upload size, and signal volume
 are measured.
+
+The server-build deployment starts `social-media-worker` from the dedicated
+`social-media-runtime` target and verifies Chromium, FFmpeg, and FFprobe before
+replacing live application containers. The no-build recreation path includes
+the worker by default, reuses its existing specialized image (or an explicit
+`HUNCH_SOCIAL_MEDIA_WORKER_IMAGE`), and never retags the generic backend image
+as the media runtime.
 
 ## Observability
 

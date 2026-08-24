@@ -298,7 +298,8 @@ services:
       - /opt/hunch/.env
     environment:
       HUNCH_JS_RUNTIME: node
-      HUNCH_SECRET_BUNDLES: ${HUNCH_SECRET_BUNDLES_SIGNAL_BOT:-aws-sm:/hunch/prod/shared,aws-sm:/hunch/prod/signal-bot,aws-sm:/hunch/prod/ops}
+      HUNCH_SECRET_BUNDLES: ${HUNCH_SECRET_BUNDLES_SOCIAL_MEDIA_WORKER:-aws-sm:/hunch/prod/social-media-worker}
+      HUNCH_SECRET_REQUIRED_KEYS: DATABASE_URL,HUNCH_SIGNAL_BOT_TOKEN
     volumes:
       - /opt/hunch/.env:/app/.env:ro
     shm_size: ${HUNCH_SOCIAL_MEDIA_SHM_SIZE:-1gb}

@@ -46,7 +46,8 @@ type BundleName =
   | "indexer-limitless"
   | "content"
   | "ops"
-  | "signal-bot";
+  | "signal-bot"
+  | "social-media-worker";
 
 export const SECRET_BUNDLE_KEYS: Record<BundleName, readonly string[]> = {
   shared: [
@@ -136,6 +137,7 @@ export const SECRET_BUNDLE_KEYS: Record<BundleName, readonly string[]> = {
     "HUNCH_SIGNAL_BOT_INTERNAL_API_TOKEN",
     "HUNCH_SIGNAL_BOT_TOKEN",
   ],
+  "social-media-worker": ["DATABASE_URL", "HUNCH_SIGNAL_BOT_TOKEN"],
 };
 
 const DEFAULT_SECRET_PREFIX = "/hunch/prod";
@@ -615,6 +617,7 @@ export function buildSecretBundles(
     content: {},
     ops: {},
     "signal-bot": {},
+    "social-media-worker": {},
   };
 
   for (const [key, value] of Object.entries(parsed)) {

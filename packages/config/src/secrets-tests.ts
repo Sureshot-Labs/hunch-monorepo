@@ -311,6 +311,10 @@ test("bundle builder writes only allowlisted secret keys", () => {
     "HUNCH_SIGNAL_BOT_INTERNAL_API_TOKEN",
     "HUNCH_SIGNAL_BOT_TOKEN",
   ]);
+  assert.deepEqual(result.bundles["social-media-worker"].sort(), [
+    "DATABASE_URL",
+    "HUNCH_SIGNAL_BOT_TOKEN",
+  ]);
   const sanitized = fs.readFileSync(result.sanitizedEnvPath, "utf8");
   assert.equal(sanitized.includes("HUNCH_SIGNAL_BOT_ADMIN_USER_IDS="), false);
   assert.equal(

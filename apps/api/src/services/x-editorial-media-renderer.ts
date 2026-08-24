@@ -65,6 +65,39 @@ const DEFAULT_BROWSER_EXECUTABLES = [
   "/Applications/Chromium.app/Contents/MacOS/Chromium",
 ];
 
+const EDITORIAL_MEDIA_CHILD_ENV_KEYS = [
+  "FONTCONFIG_FILE",
+  "FONTCONFIG_PATH",
+  "HOME",
+  "LANG",
+  "LC_ALL",
+  "LC_CTYPE",
+  "LOGNAME",
+  "PATH",
+  "SSL_CERT_DIR",
+  "SSL_CERT_FILE",
+  "TEMP",
+  "TMP",
+  "TMPDIR",
+  "TZ",
+  "USER",
+  "XDG_CACHE_HOME",
+  "XDG_CONFIG_HOME",
+  "XDG_DATA_HOME",
+  "XDG_RUNTIME_DIR",
+] as const;
+
+export function editorialMediaChildProcessEnv(
+  source: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  const sanitized: NodeJS.ProcessEnv = {};
+  for (const key of EDITORIAL_MEDIA_CHILD_ENV_KEYS) {
+    const value = source[key];
+    if (value != null && value.length > 0) sanitized[key] = value;
+  }
+  return sanitized;
+}
+
 async function firstExecutable(candidates: string[]): Promise<string | null> {
   for (const candidate of candidates) {
     if (!candidate) continue;
@@ -313,6 +346,7 @@ async function preparePage(input: {
 }
 
 function startFfmpeg(input: {
+  childProcessEnv: NodeJS.ProcessEnv;
   ffmpegPath: string;
   fps: number;
   outputPath: string;
@@ -354,7 +388,7 @@ function startFfmpeg(input: {
       "+faststart",
       input.outputPath,
     ],
-    { stdio: ["pipe", "pipe", "pipe"] },
+    { env: input.childProcessEnv, stdio: ["pipe", "pipe", "pipe"] },
   );
   const completion = new Promise<void>((resolve, reject) => {
     let stderr = "";
@@ -532,6 +566,7 @@ async function scrollWalletStats(page: Page, progress: number): Promise<void> {
 
 async function renderProfile(input: {
   browser: Browser;
+  childProcessEnv: NodeJS.ProcessEnv;
   ffmpegPath: string;
   ffprobePath: string;
   fps: number;
@@ -555,6 +590,7 @@ async function renderProfile(input: {
     url: input.url,
   });
   const { completion, process: ffmpeg } = startFfmpeg({
+    childProcessEnv: input.childProcessEnv,
     ffmpegPath: input.ffmpegPath,
     fps: input.fps,
     outputPath,
@@ -640,6 +676,7 @@ async function renderProfile(input: {
     );
   }
   const verification = await verifyRenderedVideo({
+    childProcessEnv: input.childProcessEnv,
     expectedDurationSec: spec.durationSec,
     expectedFrameCount: Math.round(spec.durationSec * input.fps),
     expectedHeight: spec.outputHeight,
@@ -660,6 +697,7 @@ async function renderProfile(input: {
 }
 
 async function verifyRenderedVideo(input: {
+  childProcessEnv: NodeJS.ProcessEnv;
   expectedDurationSec: number;
   expectedFrameCount: number;
   expectedHeight: number;
@@ -681,7 +719,11 @@ async function verifyRenderedVideo(input: {
       "json",
       input.outputPath,
     ],
-    { maxBuffer: 1_000_000, signal: input.signal },
+    {
+      env: input.childProcessEnv,
+      maxBuffer: 1_000_000,
+      signal: input.signal,
+    },
   );
   const payload = JSON.parse(stdout) as {
     format?: { duration?: string };
@@ -741,6 +783,7 @@ export async function renderXEditorialMedia(input: {
   const executablePath = await resolveEditorialMediaBrowserExecutable(
     input.browserExecutablePath,
   );
+  const childProcessEnv = editorialMediaChildProcessEnv();
   const browser = await chromium.launch({
     args: [
       "--disable-dev-shm-usage",
@@ -749,6 +792,7 @@ export async function renderXEditorialMedia(input: {
       "--no-default-browser-check",
       "--no-first-run",
     ],
+    env: childProcessEnv,
     executablePath,
     headless: true,
   });
@@ -762,6 +806,7 @@ export async function renderXEditorialMedia(input: {
         rendered.push(
           await renderProfile({
             browser,
+            childProcessEnv,
             ffmpegPath: input.ffmpegPath?.trim() || "ffmpeg",
             ffprobePath: input.ffprobePath?.trim() || "ffprobe",
             fps: Math.max(12, Math.min(30, input.fps ?? 30)),

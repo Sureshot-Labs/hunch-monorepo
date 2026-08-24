@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
   isAllowedXEditorialCaptureUrl,
@@ -15,6 +18,7 @@ import {
 } from "./services/signal-bot-editorial-media-jobs.js";
 import { sendTelegramMediaGroupRequest } from "./services/telegram-api-media.js";
 import {
+  editorialMediaChildProcessEnv,
   editorialMediaSectionScrollTop,
   editorialMediaScrollPosition,
   X_EDITORIAL_MEDIA_PROFILE_SPECS,
@@ -22,6 +26,90 @@ import {
 } from "./services/x-editorial-media-renderer.js";
 
 const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
+  {
+    name: "renderer child processes receive runtime paths but no application secrets",
+    run: () => {
+      assert.deepEqual(
+        editorialMediaChildProcessEnv({
+          AWS_SECRET_ACCESS_KEY: "aws-secret",
+          DATABASE_URL: "postgres://secret",
+          HOME: "/home/hunch",
+          HUNCH_SIGNAL_BOT_TOKEN: "telegram-secret",
+          LANG: "C.UTF-8",
+          NODE_OPTIONS: "--require=/tmp/inject.js",
+          OPENROUTER_API_KEY: "ai-secret",
+          PATH: "/usr/local/bin:/usr/bin:/bin",
+          TMPDIR: "/tmp",
+        }),
+        {
+          HOME: "/home/hunch",
+          LANG: "C.UTF-8",
+          PATH: "/usr/local/bin:/usr/bin:/bin",
+          TMPDIR: "/tmp",
+        },
+      );
+    },
+  },
+  {
+    name: "deployment paths start and safely recreate the specialized media worker",
+    run: () => {
+      const repoRoot = fileURLToPath(new URL("../../..", import.meta.url));
+      const deploy = readFileSync(
+        path.join(repoRoot, "ops", "deploy-ec2.sh"),
+        "utf8",
+      );
+      const recreate = readFileSync(
+        path.join(repoRoot, "ops", "recreate-services-no-build.sh"),
+        "utf8",
+      );
+      const compose = readFileSync(
+        path.join(repoRoot, "ops", "docker-compose.prod.yml"),
+        "utf8",
+      );
+      assert.match(
+        deploy,
+        /application_services=\([\s\S]*social-media-worker[\s\S]*\)/,
+      );
+      assert.match(deploy, /social-media-worker did not start/);
+      assert.match(deploy, /run --rm --no-deps --entrypoint \/bin\/sh/);
+      assert.match(deploy, /test -x \/usr\/bin\/chromium/);
+      assert.match(
+        recreate,
+        /SERVICES="\$\{SERVICES:-[^"\n]*social-media-worker[^"\n]*\}"/,
+      );
+      assert.match(recreate, /find_social_media_worker_image/);
+      assert.match(recreate, /HUNCH_SOCIAL_MEDIA_WORKER_IMAGE/);
+      assert.match(
+        recreate,
+        /docker run --rm --network none --entrypoint \/bin\/sh/,
+      );
+      assert.match(recreate, /docker image inspect/);
+      assert.match(
+        recreate,
+        /social-media-worker did not start after no-build recreation/,
+      );
+      assert.match(recreate, /\.RestartCount/);
+      assert.match(
+        recreate,
+        /if \[ "\$\{service\}" = "social-media-worker" \]; then[\s\S]*continue/,
+      );
+      const workerCompose = compose.match(
+        / {2}social-media-worker:[\s\S]*?\n {2}nginx:/,
+      )?.[0];
+      assert.ok(workerCompose);
+      assert.match(workerCompose, /HUNCH_SECRET_BUNDLES_SOCIAL_MEDIA_WORKER/);
+      assert.match(workerCompose, /\/hunch\/prod\/social-media-worker/);
+      assert.match(
+        workerCompose,
+        /HUNCH_SECRET_REQUIRED_KEYS: DATABASE_URL,HUNCH_SIGNAL_BOT_TOKEN/,
+      );
+      assert.doesNotMatch(workerCompose, /HUNCH_SECRET_BUNDLES_SIGNAL_BOT/);
+      assert.doesNotMatch(
+        workerCompose,
+        /\/hunch\/prod\/(?:ai|ops|shared|signal-bot)/,
+      );
+    },
+  },
   {
     name: "mobile section anchors clear the measured shell header and preserve a gap",
     run: () => {
