@@ -955,10 +955,28 @@ assert.equal(
   const values = new Map<string, string>();
   const redis = {
     eval: async (
-      _script: string,
+      script: string,
       options: { arguments: string[]; keys: string[] },
     ) => {
       const key = options.keys[0] ?? "";
+      if (script.includes("string.sub(current")) {
+        const current = values.get(key);
+        if (
+          current &&
+          !current.startsWith("funding:") &&
+          !current.startsWith("trade-lifecycle:")
+        ) {
+          return 0;
+        }
+        if (
+          current?.startsWith("trade-lifecycle:") &&
+          options.arguments[0]?.startsWith("funding:")
+        ) {
+          return 0;
+        }
+        values.set(key, options.arguments[0] ?? "");
+        return 1;
+      }
       if (values.get(key) !== options.arguments[0]) return 0;
       values.delete(key);
       return 1;
@@ -976,6 +994,39 @@ assert.equal(
     redis,
     renderToken: "callback",
   });
+  assert.equal(
+    await createTelegramFundingRenderCoordinator(redis).claimBackground?.({
+      chatId: "42",
+      messageId: 100,
+      renderToken: "funding:newer-background",
+    }),
+    false,
+    "background delivery must not replace a user-owned menu generation",
+  );
+  await claimSignalBotMenuRender({
+    chatId: "42",
+    messageId: 102,
+    redis,
+    renderToken: "trade-lifecycle:callback:confirm",
+  });
+  assert.equal(
+    await createTelegramFundingRenderCoordinator(redis).claimBackground?.({
+      chatId: "42",
+      messageId: 102,
+      renderToken: "funding:older-projection",
+    }),
+    false,
+    "funding delivery cannot replace a lifecycle-owned trade card",
+  );
+  assert.equal(
+    await createTelegramFundingRenderCoordinator(redis).claimBackground?.({
+      chatId: "42",
+      messageId: 102,
+      renderToken: "trade-lifecycle:projected-state",
+    }),
+    true,
+    "a confirm callback hands its Processing card back to lifecycle delivery",
+  );
   const callbackGuard = createSignalBotMenuRenderGuard({
     chatId: "42",
     messageId: 100,
@@ -985,12 +1036,12 @@ assert.equal(
   await createTelegramFundingRenderCoordinator(redis).claim({
     chatId: "42",
     messageId: 100,
-    renderToken: "background",
+    renderToken: "newer-user-render",
   });
   assert.equal(
     await callbackGuard(),
     false,
-    "background funding delivery must supersede a stale callback render",
+    "a newer explicit render must supersede a stale callback render",
   );
 
   let markBackgroundEntered: () => void = () => undefined;
@@ -4168,6 +4219,7 @@ for (const closedDestination of [
   const result = await deliverTelegramFundingActions({
     pool: fake.pool,
     renderCoordinator: {
+      claimBackground: async () => true,
       claim: async () => {},
       isCurrent: async () => false,
       runExclusive: async () => ({ status: "superseded" as const }),

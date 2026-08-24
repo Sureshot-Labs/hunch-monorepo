@@ -3750,6 +3750,120 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
+    name: "internal trading client leaves lifecycle-owned terminal delivery to the projector",
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      const requests: string[] = [];
+      const edits: string[] = [];
+      let standaloneSends = 0;
+      globalThis.fetch = (async (input) => {
+        requests.push(String(input));
+        return new Response(
+          JSON.stringify({
+            answers: [],
+            handled: true,
+            intentStatus: "filled",
+            lifecycleOwnsTerminalDelivery: true,
+            messages: [
+              {
+                chat_id: "999",
+                parse_mode: "MarkdownV2",
+                text: "Trade filled\\.",
+              },
+            ],
+          }),
+          {
+            headers: { "Content-Type": "application/json" },
+            status: 200,
+          },
+        );
+      }) as typeof fetch;
+      try {
+        const client = createTelegramBotTradingInternalApiClient({
+          baseUrl: "https://api.hunch.trade",
+          token: "token",
+        });
+        const handled = await client.handleCallback({
+          answerCallbackQuery: async () => ({ ok: true }),
+          appBaseUrl: "https://app.hunch.trade",
+          callbackQuery: {
+            data: "hbt:confirm:00000000-0000-4000-8000-000000000001",
+            from: { id: 999 },
+            id: "callback-lifecycle-owner",
+            message: {
+              chat: { id: 999, type: "private" },
+              message_id: 77,
+            },
+          },
+          editMessageText: async (message) => {
+            edits.push(message.text);
+            return { messageId: 77, ok: true };
+          },
+          sendMessage: async () => {
+            standaloneSends += 1;
+            return { messageId: 78, ok: true };
+          },
+        });
+        assert.equal(handled, true);
+        assert.equal(requests.length, 1, "no callback receipt is recorded");
+        assert.equal(standaloneSends, 0);
+        assert.equal(edits.length, 1);
+        assert.match(edits[0] ?? "", /Processing trade/u);
+        assert.doesNotMatch(edits[0] ?? "", /Trade filled/u);
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    },
+  },
+  {
+    name: "internal trading client never suppresses an explicit market navigation card",
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      const edits: string[] = [];
+      globalThis.fetch = (async () =>
+        new Response(
+          JSON.stringify({
+            answers: [],
+            handled: true,
+            intentStatus: "filled",
+            lifecycleOwnsTerminalDelivery: true,
+            messages: [{ chat_id: "999", text: "Fresh market card" }],
+          }),
+          {
+            headers: { "Content-Type": "application/json" },
+            status: 200,
+          },
+        )) as typeof fetch;
+      try {
+        const client = createTelegramBotTradingInternalApiClient({
+          baseUrl: "https://api.hunch.trade",
+          token: "token",
+        });
+        await client.handleCallback({
+          answerCallbackQuery: async () => ({ ok: true }),
+          appBaseUrl: "https://app.hunch.trade",
+          callbackQuery: {
+            data: "hbt:open_market:00000000-0000-4000-8000-000000000001",
+            from: { id: 999 },
+            id: "callback-market-navigation",
+            message: {
+              chat: { id: 999, type: "private" },
+              message_id: 77,
+            },
+          },
+          editMessageText: async (message) => {
+            edits.push(message.text);
+            return { messageId: 77, ok: true };
+          },
+          sendMessage: async () => ({ messageId: 78, ok: true }),
+        });
+        assert.deepEqual(edits, ["Fresh market card"]);
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    },
+  },
+  {
     name: "internal trading client keeps active confirmation controls free of terminal market escape",
     run: async () => {
       const originalFetch = globalThis.fetch;

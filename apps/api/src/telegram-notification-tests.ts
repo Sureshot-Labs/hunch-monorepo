@@ -290,6 +290,18 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
             if (sql.includes("with claimed_notification")) {
               return { rows: [{ resolution: "skipped_for_lifecycle" }] };
             }
+            if (sql.includes("case outbox.topic")) {
+              return {
+                rows: [
+                  {
+                    enabled: true,
+                    enabled_since_event: true,
+                    reachable: true,
+                    telegram_user_id: "99",
+                  },
+                ],
+              };
+            }
             return { rowCount: 1, rows: [] };
           },
         } as never,
@@ -346,6 +358,18 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
             }
             if (sql.includes("with claimed_notification")) {
               return { rows: [{ resolution: "skipped_for_lifecycle" }] };
+            }
+            if (sql.includes("case outbox.topic")) {
+              return {
+                rows: [
+                  {
+                    enabled: true,
+                    enabled_since_event: true,
+                    reachable: true,
+                    telegram_user_id: "99",
+                  },
+                ],
+              };
             }
             return { rowCount: 1, rows: [] };
           },

@@ -3,12 +3,43 @@ import assert from "node:assert/strict";
 import { TelegramBotApiClient } from "./services/signal-bot-telegram-client.js";
 import type { TelegramInlineKeyboard } from "./services/signal-bot-contracts.js";
 import {
+  claimTelegramBotCallbackMenuRender,
   classifyTelegramBotMenuDeliveryResult,
   sendOrEditTelegramBotMenuMessage,
 } from "./services/telegram-bot-menu-delivery.js";
 import { sendTelegramMessageWithReplyFallback } from "./services/telegram-delivery-safety.js";
 
 const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
+  {
+    name: "non-lifecycle trade navigation remains valid when the lifecycle fence is not applicable",
+    run: async () => {
+      let renderClaims = 0;
+      let callbackAnswers = 0;
+      const claimed = await claimTelegramBotCallbackMenuRender({
+        callbackQueryId: "ordinary-trade-navigation",
+        chatId: "99",
+        db: {
+          query: async () => ({ fields: [], rowCount: 0, rows: [] }) as never,
+        },
+        intentId: "00000000-0000-4000-8000-000000000001",
+        messageId: 7,
+        redis: {
+          set: async () => {
+            renderClaims += 1;
+          },
+        },
+        telegram: {
+          answerCallbackQuery: async () => {
+            callbackAnswers += 1;
+          },
+        },
+        telegramUserId: "99",
+      });
+      assert.equal(claimed, true);
+      assert.equal(renderClaims, 1);
+      assert.equal(callbackAnswers, 0);
+    },
+  },
   {
     name: "menu delivery telemetry exposes only normalized safe outcomes",
     run: () => {

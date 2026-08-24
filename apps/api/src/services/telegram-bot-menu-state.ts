@@ -17,6 +17,21 @@ const RELEASE_MENU_RENDER_LOCK_SCRIPT = `
   end
   return 0
 `;
+const CLAIM_BACKGROUND_MENU_RENDER_SCRIPT = `
+  local current = redis.call('GET', KEYS[1])
+  if current
+    and string.sub(current, 1, 8) ~= 'funding:'
+    and string.sub(current, 1, 16) ~= 'trade-lifecycle:' then
+    return 0
+  end
+  if current
+    and string.sub(current, 1, 16) == 'trade-lifecycle:'
+    and string.sub(ARGV[1], 1, 8) == 'funding:' then
+    return 0
+  end
+  redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[2])
+  return 1
+`;
 const CLEAR_CURRENT_MENU_INPUT_SCRIPT = `
   local cleared = 0
   for index = 1, 2 do
@@ -30,6 +45,15 @@ const CLEAR_CURRENT_MENU_INPUT_SCRIPT = `
     end
   end
   return cleared
+`;
+const CLEAR_CURRENT_PRIMARY_MENU_INPUT_SCRIPT = `
+  local raw = redis.call('GET', KEYS[1])
+  if not raw then return 0 end
+  local ok, state = pcall(cjson.decode, raw)
+  if ok and state['stateToken'] == ARGV[1] then
+    return redis.call('DEL', KEYS[1])
+  end
+  return 0
 `;
 const WRITE_TRADE_MENU_INPUT_SCRIPT = `
   redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[2])
@@ -150,6 +174,21 @@ export async function claimSignalBotMenuRender(input: {
   );
 }
 
+/** Background projectors may replace older background work, never a newer
+ * user-selected render; trade lifecycle also outranks its funding precursor. */
+export async function claimSignalBotBackgroundMenuRender(input: {
+  chatId: string;
+  messageId: number;
+  redis: Pick<MenuStateRedis, "eval">;
+  renderToken: string;
+}): Promise<boolean> {
+  const claimed = await input.redis.eval(CLAIM_BACKGROUND_MENU_RENDER_SCRIPT, {
+    arguments: [input.renderToken, String(MENU_RENDER_TTL_SEC)],
+    keys: [menuRenderKey(input.chatId, input.messageId)],
+  });
+  return claimed === 1 || claimed === "1";
+}
+
 export async function isSignalBotMenuRenderCurrent(input: {
   chatId: string;
   messageId: number;
@@ -196,6 +235,27 @@ export async function clearSignalBotMenuInputIfCurrent(input: {
       tradeInputGuardKey(input.chatId, input.telegramUserId),
     ],
   });
+  return cleared === 1 || cleared === "1";
+}
+
+/**
+ * Stop accepting an active prompt while retaining its bounded stale guard.
+ * Use this when the edit that closes the visible prompt may or may not have
+ * reached Telegram.
+ */
+export async function clearSignalBotPrimaryMenuInputIfCurrent(input: {
+  chatId: string;
+  redis: Pick<MenuStateRedis, "eval">;
+  stateToken: string;
+  telegramUserId: number;
+}): Promise<boolean> {
+  const cleared = await input.redis.eval(
+    CLEAR_CURRENT_PRIMARY_MENU_INPUT_SCRIPT,
+    {
+      arguments: [input.stateToken],
+      keys: [menuInputKey(input.chatId, input.telegramUserId)],
+    },
+  );
   return cleared === 1 || cleared === "1";
 }
 

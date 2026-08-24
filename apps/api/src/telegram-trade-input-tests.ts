@@ -881,6 +881,85 @@ assert.deepEqual(
   parseTelegramBotTradingCallbackData(`hbt:cancel_input:${contextId}`),
   { inputContextId: contextId, type: "cancel_input" },
 );
+assert.equal(
+  await cancelSignalBotTradeInput({
+    chatId: "42",
+    contextId,
+    message: { text: "Back to the market" },
+    redis,
+    telegramUserId: 42,
+    transport: {
+      editMessageText: async () => ({
+        error: "ambiguous" as const,
+        message: "timeout",
+        ok: false as const,
+      }),
+      sendMessage: async () => {
+        throw new Error("an ambiguous edit must not create a second card");
+      },
+    },
+  }),
+  true,
+);
+assert.equal(
+  await readSignalBotMenuInput({ chatId: "42", redis, telegramUserId: 42 }),
+  null,
+  "an ambiguous close must stop consuming new free-text as trade input",
+);
+assert.equal(
+  JSON.parse(
+    redis.values.get("tg:signal_bot:v1:trade_input_guard:42:42") ?? "{}",
+  ).stateToken,
+  replacedState.stateToken,
+  "an ambiguous close must preserve the bounded stale-card guard",
+);
+const unclearedState = await writeSignalBotTradeMenuInput({
+  action: "sell",
+  chatId: "42",
+  contextId,
+  expiresAt: context.expiresAt,
+  menuMessageId: 12,
+  redis,
+  telegramUserId: 42,
+});
+assert.ok(unclearedState);
+assert.equal(
+  await cancelSignalBotTradeInput({
+    chatId: "42",
+    contextId,
+    message: { text: "Back to the market" },
+    redis: {
+      eval: async () => {
+        throw new Error("Redis unavailable");
+      },
+      get: redis.get.bind(redis),
+      set: redis.set.bind(redis),
+    },
+    telegramUserId: 42,
+    transport: {
+      editMessageText: async () => ({
+        error: "ambiguous" as const,
+        message: "timeout",
+        ok: false as const,
+      }),
+      sendMessage: async () => {
+        throw new Error("an ambiguous edit must not create a second card");
+      },
+    },
+  }),
+  false,
+  "an ambiguous cancel cannot report success when its Redis state was not cleared",
+);
+const stateAfterFailedClear = await readSignalBotMenuInput({
+  chatId: "42",
+  redis,
+  telegramUserId: 42,
+});
+assert.ok(
+  stateAfterFailedClear?.kind === "awaiting_custom_sell_amount" ||
+    stateAfterFailedClear?.kind === "awaiting_custom_buy_amount",
+);
+assert.equal(stateAfterFailedClear.stateToken, unclearedState.stateToken);
 let cancelledKeyboard: TelegramInlineKeyboard["inline_keyboard"] | undefined;
 assert.equal(
   await cancelSignalBotTradeInput({

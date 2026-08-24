@@ -34,6 +34,7 @@ import {
 import { sendTelegramMessageWithReplyFallback } from "./telegram-delivery-safety.js";
 import {
   TELEGRAM_TRADE_GENERIC_NOTIFICATION_OWNER,
+  TELEGRAM_TRADE_LIFECYCLE_DELIVERY_UNKNOWN_ERROR,
   TELEGRAM_TRADE_LIFECYCLE_OUTBOX_ACTION,
   TELEGRAM_TRADE_TERMINAL_DELIVERY_OWNER_RESULT_KEY,
 } from "./telegram-trade-delivery-contract.js";
@@ -901,6 +902,7 @@ async function quarantineStaleTelegramNotificationOutbox(input: {
 type TelegramOrderFilledDeliveryOwnership =
   | "deferred_to_lifecycle"
   | "generic_fallback"
+  | "lifecycle_delivery_unknown"
   | "skipped_for_lifecycle"
   | "stale_claim"
   | "unmanaged";
@@ -945,6 +947,7 @@ async function resolveTelegramOrderFilledDeliveryOwnership(input: {
       matched_intent as materialized (
         select intent_row.id,
                intent_row.result,
+               intent_row.status,
                (
                  intent_row.chat_id is not null
                  and intent_row.telegram_message_id is not null
@@ -957,12 +960,12 @@ async function resolveTelegramOrderFilledDeliveryOwnership(input: {
                  )
                ) as lifecycle_eligible
           from telegram_trade_intents intent_row
-         where intent_row.status = 'filled'
-           and intent_row.user_id = $2::uuid
+         where intent_row.user_id = $2::uuid
            and (
              ($1::uuid is not null and intent_row.id = $1::uuid)
              or (
                $1::uuid is null
+               and intent_row.status = 'filled'
                and intent_row.venue = $3::text
                and intent_row.venue_order_id = $4::text
                and intent_row.delivery_mode = 'app_handoff'
@@ -974,6 +977,8 @@ async function resolveTelegramOrderFilledDeliveryOwnership(input: {
       ),
       current_lifecycle as materialized (
         select lifecycle_outbox.id,
+               lifecycle_outbox.last_error,
+               lifecycle_outbox.payload,
                lifecycle_outbox.status,
                lifecycle_outbox.next_attempt_at
           from telegram_bot_action_outbox lifecycle_outbox
@@ -993,22 +998,40 @@ async function resolveTelegramOrderFilledDeliveryOwnership(input: {
             then 'unmanaged'
           when (select result ->> $7::text from matched_intent) = $8::text
             then 'generic_fallback'
+          when (select status from matched_intent) in (
+                 'cancelled', 'expired', 'failed'
+               )
+            then 'lifecycle_delivery_unknown'
+          when (select status from matched_intent) <> 'filled'
+            then 'deferred_to_lifecycle'
           when (select result #>> '{telegramReceipt,intentStatus}' from matched_intent)
                  = 'filled'
-            or (
-              (select result #>> '{telegramReceipt,deliveredAt}' from matched_intent)
-                is not null
-              and (select result #>> '{telegramReceipt,intentStatus}' from matched_intent)
-                    is null
-              and (select status from current_lifecycle) = 'sent'
-            )
             then 'skipped_for_lifecycle'
+          when (select status from current_lifecycle) = 'sent'
+            and (select payload ->> 'state' from current_lifecycle) = 'filled'
+            then 'skipped_for_lifecycle'
+          when (select status from current_lifecycle) = 'dead'
+            and (select payload ->> 'state' from current_lifecycle) = 'filled'
+            and (
+              (select last_error from current_lifecycle) =
+                $9::text
+              or (select last_error from current_lifecycle) in (
+                'telegram_trade_lifecycle_edit_terminal:ambiguous',
+                'telegram_trade_lifecycle_edit_terminal:unknown'
+              )
+            )
+            then 'lifecycle_delivery_unknown'
           when (select status from current_lifecycle)
                  in ('pending', 'retry', 'sending', 'sent')
             then 'deferred_to_lifecycle'
           when (select lifecycle_eligible from matched_intent)
             and not exists (select 1 from current_lifecycle)
             then 'deferred_to_lifecycle'
+          when (select result #>> '{telegramReceipt,deliveredAt}' from matched_intent)
+                 is not null
+            and (select result #>> '{telegramReceipt,intentStatus}' from matched_intent)
+                 is null
+            then 'lifecycle_delivery_unknown'
           else 'generic_fallback'
         end as resolution
       ),
@@ -1022,25 +1045,11 @@ async function resolveTelegramOrderFilledDeliveryOwnership(input: {
            and intent_row.result ->> $7::text is distinct from $8::text
         returning intent_row.id
       ),
-      historical_lifecycle_rearm as (
-        update telegram_bot_action_outbox lifecycle_outbox
-           set status = 'retry',
-               attempt_count = 0,
-               next_attempt_at = clock_timestamp(),
-               last_error = 'Historical lifecycle delivery needs receipt verification.',
-               delivery_attempt_id = null,
-               delivery_started_at = null,
-               updated_at = clock_timestamp()
-          from current_lifecycle, ownership_resolution
-         where lifecycle_outbox.id = current_lifecycle.id
-           and current_lifecycle.status = 'sent'
-           and ownership_resolution.resolution = 'deferred_to_lifecycle'
-        returning lifecycle_outbox.id
-      ),
       notification_resolution as (
         update telegram_notification_outbox notification_outbox
            set status = case ownership_resolution.resolution
                  when 'skipped_for_lifecycle' then 'skipped'
+                 when 'lifecycle_delivery_unknown' then 'delivery_unknown'
                  else 'retry'
                end,
                attempt_count = case ownership_resolution.resolution
@@ -1051,6 +1060,8 @@ async function resolveTelegramOrderFilledDeliveryOwnership(input: {
                last_error = case ownership_resolution.resolution
                  when 'skipped_for_lifecycle'
                    then 'Terminal trade already belongs to the lifecycle card.'
+                 when 'lifecycle_delivery_unknown'
+                   then 'Terminal lifecycle edit may already have been delivered.'
                  else 'Terminal trade is waiting for the lifecycle card.'
                end,
                next_attempt_at = case ownership_resolution.resolution
@@ -1067,14 +1078,14 @@ async function resolveTelegramOrderFilledDeliveryOwnership(input: {
           from claimed_notification, ownership_resolution
          where notification_outbox.id = claimed_notification.id
            and ownership_resolution.resolution in (
-             'deferred_to_lifecycle', 'skipped_for_lifecycle'
+             'deferred_to_lifecycle', 'lifecycle_delivery_unknown',
+             'skipped_for_lifecycle'
            )
         returning notification_outbox.id
       )
       select ownership_resolution.resolution
         from ownership_resolution
         left join fallback_owner on true
-        left join historical_lifecycle_rearm on true
         left join notification_resolution on true
        limit 1
     `,
@@ -1087,6 +1098,7 @@ async function resolveTelegramOrderFilledDeliveryOwnership(input: {
       TELEGRAM_TRADE_LIFECYCLE_OUTBOX_ACTION,
       TELEGRAM_TRADE_TERMINAL_DELIVERY_OWNER_RESULT_KEY,
       TELEGRAM_TRADE_GENERIC_NOTIFICATION_OWNER,
+      TELEGRAM_TRADE_LIFECYCLE_DELIVERY_UNKNOWN_ERROR,
     ],
   );
   return rows[0]?.resolution ?? "stale_claim";
@@ -1376,7 +1388,7 @@ export async function deliverTelegramNotificationOutbox(input: {
   sent: number;
   skipped: number;
 }> {
-  const quarantined = await quarantineStaleTelegramNotificationOutbox({
+  let quarantined = await quarantineStaleTelegramNotificationOutbox({
     db: input.db,
   });
   const rows = await claimTelegramNotificationOutbox({
@@ -1391,23 +1403,9 @@ export async function deliverTelegramNotificationOutbox(input: {
   const attemptedChats = new Set<string>();
 
   for (const row of rows) {
-    if (row.topic === "order_filled") {
-      const ownership = await resolveTelegramOrderFilledDeliveryOwnership({
-        db: input.db,
-        outboxId: row.id,
-        payload: row.payload,
-        userId: row.user_id,
-      });
-      if (ownership === "skipped_for_lifecycle") {
-        skipped += 1;
-        continue;
-      }
-      if (ownership === "deferred_to_lifecycle") {
-        deferred += 1;
-        continue;
-      }
-      if (ownership === "stale_claim") continue;
-    }
+    // Destination and topic preference are part of generic-delivery
+    // eligibility. Never transfer a terminal trade away from its lifecycle
+    // card to an outbox row that is about to be skipped.
     const destination = await loadTelegramNotificationDestination({
       db: input.db,
       outboxId: row.id,
@@ -1431,6 +1429,27 @@ export async function deliverTelegramNotificationOutbox(input: {
       )
         skipped += 1;
       continue;
+    }
+    if (row.topic === "order_filled") {
+      const ownership = await resolveTelegramOrderFilledDeliveryOwnership({
+        db: input.db,
+        outboxId: row.id,
+        payload: row.payload,
+        userId: row.user_id,
+      });
+      if (ownership === "skipped_for_lifecycle") {
+        skipped += 1;
+        continue;
+      }
+      if (ownership === "deferred_to_lifecycle") {
+        deferred += 1;
+        continue;
+      }
+      if (ownership === "lifecycle_delivery_unknown") {
+        quarantined += 1;
+        continue;
+      }
+      if (ownership === "stale_claim") continue;
     }
     if (attemptedChats.has(destination.telegram_user_id)) {
       if (await deferOutboxForChatRate({ db: input.db, id: row.id })) {

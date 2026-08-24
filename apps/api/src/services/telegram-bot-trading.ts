@@ -45,6 +45,10 @@ import {
   TELEGRAM_BOT_TRADING_CALLBACK_PREFIX,
   type TelegramBotTradingClientReplyMarkup,
 } from "./telegram-bot-trading-client.js";
+import {
+  fenceTelegramTradeLifecycleNavigation,
+  isTelegramTradeLifecycleDeliveryEligible,
+} from "./telegram-trade-delivery-contract.js";
 import { normalizeKalshiTradeEligibility } from "./kalshi-trade-eligibility.js";
 import {
   inspectServerEvmWalletAuthorization,
@@ -1002,6 +1006,7 @@ type CapturedTelegramBotTradingCallbackResult = {
   }>;
   handled: boolean;
   intentStatus: string | null;
+  lifecycleOwnsTerminalDelivery: boolean;
   messages: Array<TelegramBotTradingMessage & { chat_id: string }>;
 };
 
@@ -11248,6 +11253,27 @@ export async function handleTelegramBotTradingCallback(
     return true;
   }
   const chatId = messageChat.id;
+  const sourceMessageId = input.callbackQuery.message?.message_id ?? null;
+  const lifecycleDeliveryEligible = isTelegramTradeLifecycleDeliveryEligible({
+    chatId: intent.chat_id,
+    deliveryMode: intent.delivery_mode,
+    fundingOperationId: intent.funding_operation_id,
+    result: intent.result,
+    telegramMessageId: intent.telegram_message_id,
+  });
+  if (
+    sourceMessageId != null &&
+    intent.telegram_message_id != null &&
+    String(sourceMessageId) !== intent.telegram_message_id &&
+    lifecycleDeliveryEligible
+  ) {
+    await input.answerCallbackQuery({
+      callbackQueryId: input.callbackQuery.id,
+      showAlert: true,
+      text: "⚠️ This trade card is no longer current. Use the latest card.",
+    });
+    return true;
+  }
   const callbackMessageId = resolveTelegramCallbackMessageId(
     intent.telegram_message_id,
     input.callbackQuery.message?.message_id,
@@ -11265,7 +11291,21 @@ export async function handleTelegramBotTradingCallback(
   } satisfies TelegramBotTradingReplyMarkup;
   const sendCurrentMarketCard = async (
     focusSide: TelegramBotTradingSide | null = null,
-  ) => {
+  ): Promise<boolean> => {
+    // The user explicitly chose a different screen. Fence the old Telegram
+    // message before building it so a pending lifecycle revision cannot later
+    // overwrite the fresh market card. The next lifecycle state, if any, is
+    // sent as a new message and safely establishes a new editable generation.
+    if (callbackMessageId != null) {
+      const fenced = await fenceTelegramTradeLifecycleNavigation({
+        chatId,
+        db: input.db,
+        intentId: intent.id,
+        messageId: callbackMessageId,
+        telegramUserId: intent.telegram_user_id,
+      });
+      if (lifecycleDeliveryEligible && fenced !== 1) return false;
+    }
     const marketMessage = await buildTelegramBotTradingMarketMessage({
       appBaseUrl: input.appBaseUrl,
       chatId,
@@ -11296,31 +11336,46 @@ export async function handleTelegramBotTradingCallback(
         }),
       }),
     });
+    return true;
   };
   if (parsed.type === "open_market") {
     // This callback is navigation only. It deliberately works for expired and
     // terminal intents and never changes a trade, funding operation, or quote.
+    const opened = await sendCurrentMarketCard();
     await input.answerCallbackQuery({
       callbackQueryId: input.callbackQuery.id,
-      text: "Opening the current market card…",
+      ...(opened
+        ? { text: "Opening the current market card…" }
+        : {
+            showAlert: true,
+            text: "⚠️ This trade card is no longer current. Use the latest card.",
+          }),
     });
-    await sendCurrentMarketCard();
     return true;
   }
-  if (input.callbackQuery.message?.message_id != null) {
-    await input.db.query(
+  if (sourceMessageId != null) {
+    const rebound = await input.db.query(
       `UPDATE telegram_trade_intents
           SET telegram_message_id = $2,
               callback_query_id = $3,
               updated_at = now()
-        WHERE id = $1`,
-      [
-        intent.id,
-        input.callbackQuery.message.message_id,
-        input.callbackQuery.id,
-      ],
+        WHERE id = $1
+          AND (
+            telegram_message_id IS NULL
+            OR telegram_message_id = $2::bigint
+          )
+        RETURNING id`,
+      [intent.id, sourceMessageId, input.callbackQuery.id],
     );
-    intent.telegram_message_id = String(input.callbackQuery.message.message_id);
+    if ((rebound.rowCount ?? 0) !== 1) {
+      await input.answerCallbackQuery({
+        callbackQueryId: input.callbackQuery.id,
+        showAlert: true,
+        text: "⚠️ This trade card is no longer current. Use the latest card.",
+      });
+      return true;
+    }
+    intent.telegram_message_id = String(sourceMessageId);
   }
   const restoredFundingVenue = telegramShortfallVenue(intent.venue);
   const isV2DirectHandoff =
@@ -13492,6 +13547,11 @@ export async function captureTelegramBotTradingCallback(input: {
 }): Promise<CapturedTelegramBotTradingCallbackResult> {
   const answers: CapturedTelegramBotTradingCallbackResult["answers"] = [];
   const messages: CapturedTelegramBotTradingCallbackResult["messages"] = [];
+  const parsed = parseTelegramBotTradingCallbackData(input.callbackQuery.data);
+  const initialIntent =
+    parsed?.type === "retry_buy" && "intentId" in parsed
+      ? await loadIntent(input.db, parsed.intentId).catch(() => null)
+      : null;
   const handled = await handleTelegramBotTradingCallback({
     answerCallbackQuery: async (answer) => {
       answers.push(answer);
@@ -13517,7 +13577,6 @@ export async function captureTelegramBotTradingCallback(input: {
     trading: input.trading,
     writeTradeInputContext: input.writeTradeInputContext,
   });
-  const parsed = parseTelegramBotTradingCallbackData(input.callbackQuery.data);
   const currentIntent =
     parsed && "intentId" in parsed
       ? await loadIntent(input.db, parsed.intentId).catch(() => null)
@@ -13526,6 +13585,20 @@ export async function captureTelegramBotTradingCallback(input: {
     answers,
     handled,
     intentStatus: currentIntent?.status ?? null,
+    lifecycleOwnsTerminalDelivery:
+      currentIntent != null &&
+      currentIntent.status !== "expired" &&
+      (parsed?.type === "confirm" ||
+        (parsed?.type === "retry_buy" &&
+          initialIntent != null &&
+          !isTerminalIntentStatus(initialIntent.status))) &&
+      isTelegramTradeLifecycleDeliveryEligible({
+        chatId: currentIntent.chat_id,
+        deliveryMode: currentIntent.delivery_mode,
+        fundingOperationId: currentIntent.funding_operation_id,
+        result: currentIntent.result,
+        telegramMessageId: currentIntent.telegram_message_id,
+      }),
     messages,
   };
 }

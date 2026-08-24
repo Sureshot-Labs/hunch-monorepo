@@ -4,6 +4,7 @@ import {
   type TelegramFundingClientMessage,
 } from "./telegram-bot-trading-client.js";
 import {
+  clearSignalBotPrimaryMenuInputIfCurrent,
   clearSignalBotMenuInputIfCurrent,
   readSignalBotMenuInput,
   readSignalBotTradeInputGuard,
@@ -129,14 +130,21 @@ export async function cancelSignalBotTradeInput(input: {
     transport: input.transport,
   });
   const outcome = classifyTelegramBotMenuDeliveryResult(delivered).outcome;
-  if (outcome !== "success" && outcome !== "ambiguous") return false;
-  await clearSignalBotMenuInputIfCurrent({
+  if (outcome === "ambiguous") {
+    return clearSignalBotPrimaryMenuInputIfCurrent({
+      chatId: input.chatId,
+      redis: input.redis,
+      stateToken: state.stateToken,
+      telegramUserId: input.telegramUserId,
+    }).catch(() => false);
+  }
+  if (outcome !== "success") return false;
+  return clearSignalBotMenuInputIfCurrent({
     chatId: input.chatId,
     redis: input.redis,
     stateToken: state.stateToken,
     telegramUserId: input.telegramUserId,
   }).catch(() => false);
-  return true;
 }
 
 export async function handleSignalBotTradeInput(input: {

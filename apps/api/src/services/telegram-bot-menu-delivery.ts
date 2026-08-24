@@ -1,13 +1,17 @@
+import type { Pool } from "@hunch/infra";
+
 import type {
   SignalBotTelegramClient,
   TelegramInlineKeyboard,
   TelegramSendResult,
 } from "./signal-bot-contracts.js";
 import {
+  claimSignalBotMenuRender,
   isSignalBotMenuRenderCurrent,
   withSignalBotMenuRenderLock,
   type SignalBotMenuStateRedis,
 } from "./telegram-bot-menu-state.js";
+import { fenceTelegramTradeLifecycleNavigation } from "./telegram-trade-delivery-contract.js";
 
 export type TelegramBotMenuMessage = {
   fundingContextId?: string;
@@ -31,6 +35,45 @@ export type TelegramBotMenuDeliveryOutcome =
   | "render_superseded"
   | "render_unavailable"
   | "other";
+
+/** Claim a user-selected render and fence any lifecycle card on its message. */
+export async function claimTelegramBotCallbackMenuRender(input: {
+  callbackQueryId: string;
+  chatId: string;
+  db?: Pick<Pool, "query">;
+  intentId?: string | null;
+  messageId: number;
+  redis: Pick<SignalBotMenuStateRedis, "set">;
+  renderToken?: string;
+  telegram: Pick<SignalBotTelegramClient, "answerCallbackQuery">;
+  telegramUserId: string;
+}): Promise<boolean> {
+  try {
+    if (input.db) {
+      await fenceTelegramTradeLifecycleNavigation({
+        chatId: input.chatId,
+        db: input.db,
+        intentId: input.intentId,
+        messageId: input.messageId,
+        telegramUserId: input.telegramUserId,
+      });
+    }
+    await claimSignalBotMenuRender({
+      chatId: input.chatId,
+      messageId: input.messageId,
+      redis: input.redis,
+      renderToken: input.renderToken ?? input.callbackQueryId,
+    });
+    return true;
+  } catch {
+    await input.telegram.answerCallbackQuery({
+      callbackQueryId: input.callbackQueryId,
+      showAlert: true,
+      text: "⚠️ This screen is busy. Try again.",
+    });
+    return false;
+  }
+}
 
 const HOME_CALLBACK_DATA = "hm:v1:home";
 

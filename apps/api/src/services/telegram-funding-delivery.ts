@@ -25,6 +25,7 @@ import {
 import type { TelegramFundingSessionContext } from "./telegram-funding-sessions.js";
 import { resolveTelegramFundingAutomaticCapability } from "./telegram-funding-route.js";
 import {
+  claimSignalBotBackgroundMenuRender,
   claimSignalBotMenuRender,
   isSignalBotMenuRenderCurrent,
   withSignalBotMenuRenderLock,
@@ -205,6 +206,13 @@ export async function rearmTelegramFundingCurrentAddressDelivery(input: {
 }
 
 export type TelegramFundingRenderCoordinator = Readonly<{
+  claimBackground?(
+    input: Readonly<{
+      chatId: string;
+      messageId: number;
+      renderToken: string;
+    }>,
+  ): Promise<boolean>;
   claim(
     input: Readonly<{
       chatId: string;
@@ -233,6 +241,8 @@ export function createTelegramFundingRenderCoordinator(
   redis: Pick<SignalBotMenuStateRedis, "eval" | "get" | "set">,
 ): TelegramFundingRenderCoordinator {
   return {
+    claimBackground: (input) =>
+      claimSignalBotBackgroundMenuRender({ ...input, redis }),
     claim: (input) => claimSignalBotMenuRender({ ...input, redis }),
     isCurrent: (input) => isSignalBotMenuRenderCurrent({ ...input, redis }),
     runExclusive: (input) =>
@@ -1342,7 +1352,21 @@ export async function deliverTelegramFundingActions(input: {
         };
         let guarded: SignalBotMenuRenderLockResult<TelegramSendResult>;
         try {
-          await input.renderCoordinator.claim(renderAttempt);
+          const claimed = input.renderCoordinator.claimBackground
+            ? await input.renderCoordinator.claimBackground(renderAttempt)
+            : (await input.renderCoordinator.claim(renderAttempt), true);
+          if (!claimed) {
+            await finishAttempt({
+              pool: input.pool,
+              row,
+              status: safeAddressRedaction ? "retry" : "skipped",
+              reason: "funding_render_superseded",
+              persistentRetry: safeAddressRedaction,
+            });
+            if (safeAddressRedaction) failed += 1;
+            else skipped += 1;
+            continue;
+          }
           guarded = await input.renderCoordinator.runExclusive({
             ...renderAttempt,
             deliver: () =>
