@@ -9,6 +9,7 @@ const STALE_DELIVERY_MS = 5 * 60_000;
 type DeliveryLedgerStatus =
   | "blocked"
   | "delivery_unknown"
+  | "queued"
   | "reserved"
   | "retry"
   | "sending"
@@ -219,9 +220,11 @@ export async function beginSignalBotMessageDelivery(input: {
   attemptId: string;
   db: DbQuery;
   deliveryRef: string;
+  expectedStatus?: "queued" | "reserved";
   now?: Date;
 }): Promise<boolean> {
   const now = input.now ?? new Date();
+  const expectedStatus = input.expectedStatus ?? "reserved";
   const result = await input.db.query(
     `
       update signal_bot_messages
@@ -229,7 +232,7 @@ export async function beginSignalBotMessageDelivery(input: {
           sent_at = $4::timestamptz
       where id = $1::uuid
         and metrics #>> '{deliveryStateV2,version}' = '2'
-        and metrics #>> '{deliveryStateV2,status}' = 'reserved'
+        and metrics #>> '{deliveryStateV2,status}' = $5
         and metrics #>> '{deliveryStateV2,attemptId}' = $2
     `,
     [
@@ -243,6 +246,7 @@ export async function beginSignalBotMessageDelivery(input: {
         }),
       ),
       now.toISOString(),
+      expectedStatus,
     ],
   );
   return result.rowCount !== 0;
@@ -253,7 +257,7 @@ export async function finishSignalBotMessageDelivery(input: {
   db: DbQuery;
   deliveryRef: string;
   errorCode?: string | null;
-  expectedStatus: "reserved" | "sending";
+  expectedStatus: "queued" | "reserved" | "sending";
   messageId?: number | null;
   metrics?: Record<string, unknown>;
   nextAttemptAt?: Date | null;

@@ -115,6 +115,7 @@ import {
   type XEditorialComposerConfig,
   type XEditorialDraftComposer,
 } from "./x-editorial-draft.js";
+import * as editorialMediaJobs from "./signal-bot-editorial-media-jobs.js";
 import {
   loadXEditorialInitialRecoveryNoteIds,
   publishXEditorialFollowthrough,
@@ -308,6 +309,7 @@ export type SignalBotConfig = {
   tradingInternalApiBaseUrl: string | null;
   tradingInternalApiToken: string | null;
   xEditorial: XEditorialComposerConfig;
+  xEditorialMedia: editorialMediaJobs.XEditorialMediaDeliveryConfig;
 };
 export type SignalBotContentProfile =
   | "telegram_signal_v11"
@@ -534,13 +536,10 @@ end
 return 0
 `;
 
-export function signalBotChatKey(chatId: string): string {
-  return `tg:signal_bot:v1:chat:${chatId}`;
-}
+export const signalBotChatKey = (chatId: string): string =>
+  `tg:signal_bot:v1:chat:${chatId}`;
 
-export function signalBotLockKey(): string {
-  return LOCK_KEY;
-}
+export const signalBotLockKey = (): string => LOCK_KEY;
 
 function signalBotPriceGuardDeferKey(chatId: string, noteId: string): string {
   return `${PRICE_GUARD_DEFER_KEY_PREFIX}:${chatId}:${noteId}`;
@@ -613,6 +612,7 @@ export function parseSignalBotConfig(
       ),
       model: env.HUNCH_SIGNAL_BOT_X_EDITORIAL_MODEL?.trim() || "openai/gpt-5.5",
     },
+    xEditorialMedia: editorialMediaJobs.parseXEditorialMediaDeliveryConfig(env),
   };
   if (
     config.enabled &&
@@ -5813,6 +5813,7 @@ export async function publishSignalBotTick(input: {
             : undefined,
           db: input.db,
           kind: messageKind,
+          media: input.config.xEditorialMedia,
           note,
           selectedSide: buySide,
           telegram: input.telegram,
@@ -7867,6 +7868,7 @@ export async function publishSignalBotFollowthroughTick(input: {
           : undefined,
         db: input.db,
         kind,
+        media: input.config.xEditorialMedia,
         stats,
         telegram: input.telegram,
         telegramMiniAppLinkBase: input.config.telegramMiniAppLinkBase,

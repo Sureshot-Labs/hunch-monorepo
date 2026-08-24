@@ -61,6 +61,7 @@ delivery was not device-tested during this work.
 | P1       | [Resolved-position accounting](backend-position-resolution-accounting.md)     | Verified payout and realized PnL snapshot with safe fallback copy                                        | Venue settlement semantics                                    |
 | P1       | [Trusted market mappings](backend-trusted-market-mappings.md)                 | Reviewed persistent cross-venue equivalence and side orientation                                         | Market ingestion / AGG candidates                             |
 | P1       | [Signal subscription expansion](backend-telegram-signal-subscriptions.md)     | Tracked-wallet rules, per-market controls, noise policy, and trusted cross-venue fan-out                 | Existing exact fan-out; trusted mappings only for cross-venue |
+| P1       | [X editorial social video](backend-x-editorial-social-video.md)               | Mobile and desktop tracking-wallet videos delivered with the ready X draft in Telegram                   | Implemented `x_editorial_draft_v1` delivery                   |
 | P2       | [Security event producers](backend-security-notification-events.md)           | Durable, deduped security events before exposing a Security Telegram toggle                              | Domain owners and approved event semantics                    |
 
 Recommended order:

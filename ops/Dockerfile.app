@@ -44,7 +44,7 @@ RUN pnpm --filter @hunch/config build \
 # instead of running the installer script inside the production runtime image.
 FROM oven/bun:${BUN_VERSION} AS bun-runtime
 
-FROM node:24-bookworm-slim AS runtime
+FROM node:24-bookworm-slim AS runtime-base
 
 ARG BUN_VERSION=1.3.14
 WORKDIR /app
@@ -68,3 +68,23 @@ COPY --chown=10001:10001 --from=builder /app/ops/run-js-runtime.sh /app/ops/run-
 COPY --chown=10001:10001 --from=builder /app/ops/market-maintenance.sh /app/ops/market-maintenance.sh
 
 USER hunch
+
+FROM runtime-base AS social-media-runtime
+
+USER root
+
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends \
+    chromium \
+    ffmpeg \
+    fonts-liberation \
+    fonts-noto-color-emoji \
+  && rm -rf /var/lib/apt/lists/*
+
+ENV HUNCH_SOCIAL_MEDIA_CHROMIUM_PATH=/usr/bin/chromium
+ENV HUNCH_SOCIAL_MEDIA_FFMPEG_PATH=/usr/bin/ffmpeg
+ENV HUNCH_SOCIAL_MEDIA_FFPROBE_PATH=/usr/bin/ffprobe
+
+USER hunch
+
+FROM runtime-base AS runtime

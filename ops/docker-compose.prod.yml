@@ -285,6 +285,32 @@ services:
       - packages/config/dist/run-with-secrets.js
       - apps/api/dist/signal-bot-runner.js
 
+  social-media-worker:
+    build:
+      context: .
+      dockerfile: ops/Dockerfile.app
+      target: social-media-runtime
+    container_name: hunch-social-media-worker
+    restart: unless-stopped
+    networks:
+      - hunch-net
+    env_file:
+      - /opt/hunch/.env
+    environment:
+      HUNCH_JS_RUNTIME: node
+      HUNCH_SECRET_BUNDLES: ${HUNCH_SECRET_BUNDLES_SIGNAL_BOT:-aws-sm:/hunch/prod/shared,aws-sm:/hunch/prod/signal-bot,aws-sm:/hunch/prod/ops}
+    volumes:
+      - /opt/hunch/.env:/app/.env:ro
+    shm_size: ${HUNCH_SOCIAL_MEDIA_SHM_SIZE:-1gb}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command:
+      - /bin/sh
+      - /app/ops/run-js-runtime.sh
+      - packages/config/dist/run-with-secrets.js
+      - apps/api/dist/social-media-worker-entry.js
+
   nginx:
     image: nginx:1.27-alpine
     container_name: hunch-nginx

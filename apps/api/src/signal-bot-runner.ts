@@ -236,6 +236,8 @@ export async function runSignalBotRunner(): Promise<void> {
     publishIntervalSec: config.publishIntervalSec,
     xEditorialEnabled: config.xEditorial.enabled,
     xEditorialMaxCharacters: config.xEditorial.maxCharacters,
+    xEditorialMediaEnabled: config.xEditorialMedia.enabled,
+    xEditorialMediaProfiles: config.xEditorialMedia.profiles,
     xEditorialModel: config.xEditorial.model,
   });
 

@@ -6,9 +6,14 @@ ENV_FILE="${ENV_FILE:-/opt/hunch/.env}"
 ARCHIVE="${ARCHIVE:-}"
 IMAGE_ARCHIVE="${IMAGE_ARCHIVE:-}"
 HUNCH_BACKEND_IMAGE="${HUNCH_BACKEND_IMAGE:-}"
+HUNCH_SOCIAL_MEDIA_WORKER_IMAGE="${HUNCH_SOCIAL_MEDIA_WORKER_IMAGE:-}"
 
 if [[ -z "${HUNCH_BACKEND_IMAGE}" ]]; then
   echo "HUNCH_BACKEND_IMAGE is required" >&2
+  exit 1
+fi
+if [[ -z "${HUNCH_SOCIAL_MEDIA_WORKER_IMAGE}" ]]; then
+  echo "HUNCH_SOCIAL_MEDIA_WORKER_IMAGE is required" >&2
   exit 1
 fi
 
@@ -56,6 +61,7 @@ application_services=(
   ai-worker
   finance-worker
   signal-bot
+  social-media-worker
   nginx
 )
 
@@ -68,6 +74,7 @@ if ! docker network inspect hunch-internal >/dev/null 2>&1; then
 fi
 
 export HUNCH_BACKEND_IMAGE
+export HUNCH_SOCIAL_MEDIA_WORKER_IMAGE
 
 # Start or retain infra and migrate before touching the live application
 # containers. If migration fails, the currently deployed API and workers stay

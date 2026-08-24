@@ -164,6 +164,9 @@ importers:
       pg:
         specifier: ^8.22.0
         version: 8.22.0
+      playwright-core:
+        specifier: ^1.62.1
+        version: 1.62.1
       qrcode:
         specifier: ^1.5.4
         version: 1.5.4
@@ -3407,6 +3410,11 @@ packages:
 
   pino@9.9.4:
     resolution: {integrity: sha512-d1XorUQ7sSKqVcYdXuEYs2h1LKxejSorMEJ76XoZ0pPDf8VzJMe7GlPXpMBZeQ9gE4ZPIp5uGD+5Nw7scxiigg==}
+    hasBin: true
+
+  playwright-core@1.62.1:
+    resolution: {integrity: sha512-wPYSwEBJY9GHraISXqyqtx0na0LpO3XEX7jNDhntbex7tzUS7kLnZsOlFruFJB4Hi/rhDMjXGqHewDZ68nYZVw==}
+    engines: {node: '>=20'}
     hasBin: true
 
   pngjs@5.0.0:
@@ -7696,6 +7704,8 @@ snapshots:
       safe-stable-stringify: 2.5.0
       sonic-boom: 4.2.0
       thread-stream: 3.1.0
+
+  playwright-core@1.62.1: {}
 
   pngjs@5.0.0: {}
 
