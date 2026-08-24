@@ -25,6 +25,7 @@ import type { FundingRuntimePolicy } from "../../funding/policies/funding-policy
 import { canonicalJsonHash } from "../../funding/persistence/canonical.js";
 import type { FundingCommitStep } from "../../funding/persistence/funding-operation-repository.js";
 import { resolveActionSponsorship } from "../../funding/execution/sponsorship-policy.js";
+import { withRelayClientSourceDebitPostcondition } from "../../funding/execution/relay-client-source-debit.js";
 import { RelayPinnedActionValidator } from "./action-validator.js";
 import { isRelayPinnedStableAsset } from "./mappings.js";
 import {
@@ -141,6 +142,17 @@ async function validatedSteps(input: {
               validatedAt: entry.validatedAt,
             })),
           };
+    const actionValidationResult = withRelayClientSourceDebitPostcondition({
+      action,
+      actionValidationResult: jsonRecord({
+        ...validation,
+        signerAddress: input.profile.address,
+        sponsorshipPolicyId: sponsorship.policyId,
+        signingMode: sponsorship.signingMode,
+      }),
+      routeId: input.route.routeId,
+      sourceAmount: input.sourceAmount,
+    });
     return {
       ordinal,
       segmentOrdinal: 0,
@@ -151,12 +163,7 @@ async function validatedSteps(input: {
       payerRequirement: sponsorship.payerRequirement,
       dependsOnOrdinal: ordinal === 0 ? null : ordinal - 1,
       normalizedAction: jsonRecord(action),
-      actionValidationResult: jsonRecord({
-        ...validation,
-        signerAddress: input.profile.address,
-        sponsorshipPolicyId: sponsorship.policyId,
-        signingMode: sponsorship.signingMode,
-      }),
+      actionValidationResult,
     };
   });
 }
@@ -380,6 +387,7 @@ export function relayDelegatedCommitSteps(
         ? {
             postconditionEvidenceKind: "exact_erc20_source_debit_v1",
             expectedSourceAssetId: input.sourceAmount.asset.assetId,
+            expectedSourceAssetDecimals: input.sourceAmount.asset.decimals,
             expectedSourceAddress: input.profile.address,
             expectedSourceRecipient:
               typeof step.normalizedAction.to === "string"

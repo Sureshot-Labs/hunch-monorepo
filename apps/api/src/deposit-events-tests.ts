@@ -455,6 +455,15 @@ const tests: TestCase[] = [
           db.depositUpdates.map((update) => update.status),
           [],
         );
+        const relayMatchQuery = db.calls.find(({ sql }) =>
+          /from funding_operations operation_row/i.test(sql),
+        );
+        assert.ok(relayMatchQuery);
+        assert.match(relayMatchQuery.sql, /from telegram_trade_intents/i);
+        assert.match(
+          relayMatchQuery.sql,
+          /trade_intent\.funding_operation_id = operation_row\.id/i,
+        );
       });
     },
   },

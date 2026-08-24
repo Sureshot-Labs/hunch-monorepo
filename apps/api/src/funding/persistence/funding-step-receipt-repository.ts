@@ -1,11 +1,19 @@
 import { tx, type Pool, type PoolClient } from "@hunch/infra";
 
 import { activateTelegramTradeShortfallRouterDependentFundInTransaction } from "../execution/telegram-trade-shortfall-activation.js";
+import {
+  relayClientSourceDebitPostcondition,
+  withRelayClientSourceDebitPostcondition,
+} from "../execution/relay-client-source-debit.js";
 
 import { isReceiptBearingFundingActionKind } from "../domain/action-kinds.js";
+import { isRawAmount } from "../domain/raw-amount.js";
 import type { JsonValue, NormalizedAction } from "../domain/types.js";
-import { normalizedActionSchema } from "../domain/schemas.js";
-import { FundingPersistenceError } from "./funding-operation-repository.js";
+import { moneySchema, normalizedActionSchema } from "../domain/schemas.js";
+import {
+  allocateFundingObservationInTransaction,
+  FundingPersistenceError,
+} from "./funding-operation-repository.js";
 
 type JsonRecord = Readonly<Record<string, JsonValue>>;
 
@@ -132,10 +140,13 @@ export async function listFundingStepReceiptTargets(
     segment_id: string | null;
     attempt_id: string;
     step_kind: FundingStepReceiptTarget["stepKind"];
+    executor_id: string;
     payer_requirement: FundingStepReceiptTarget["payerRequirement"];
     step_state: FundingStepReceiptTarget["stepState"];
     normalized_action: JsonRecord;
     action_validation_result: JsonRecord;
+    requested_source_amount: JsonRecord | null;
+    operation_support_metadata: JsonRecord;
     receipt_ref_ciphertext: string;
     receipt_ref_lookup_hmac: string;
     lookup_key_version: number;
@@ -162,6 +173,7 @@ export async function listFundingStepReceiptTargets(
         step.segment_id,
         attempt.id as attempt_id,
         step.step_kind,
+        step.executor_id,
         step.payer_requirement,
         step.state as step_state,
         step.normalized_action,
@@ -185,6 +197,8 @@ export async function listFundingStepReceiptTargets(
           )
           else step.action_validation_result
         end as action_validation_result,
+        operation.requested_source_amount,
+        operation.support_metadata as operation_support_metadata,
         attempt.receipt_ref_ciphertext,
         attempt.receipt_ref_lookup_hmac,
         attempt.lookup_key_version,
@@ -290,6 +304,19 @@ export async function listFundingStepReceiptTargets(
             reorged_at: row.receipt_reorged_at,
           })
         : null;
+    const sourceAmount = moneySchema.safeParse(row.requested_source_amount);
+    const actionValidationResult =
+      row.executor_id === "wallet_profile_evm_v1" && sourceAmount.success
+        ? withRelayClientSourceDebitPostcondition({
+            action,
+            actionValidationResult: row.action_validation_result,
+            routeId:
+              typeof row.operation_support_metadata.routeId === "string"
+                ? row.operation_support_metadata.routeId
+                : null,
+            sourceAmount: sourceAmount.data,
+          })
+        : row.action_validation_result;
     return {
       operationId: row.operation_id,
       stepId: row.step_id,
@@ -300,7 +327,7 @@ export async function listFundingStepReceiptTargets(
       stepState: row.step_state,
       networkId: action.networkId,
       action,
-      actionValidationResult: row.action_validation_result,
+      actionValidationResult,
       receiptRefCiphertext: row.receipt_ref_ciphertext,
       receiptRefLookupHmac: row.receipt_ref_lookup_hmac,
       lookupKeyVersion: row.lookup_key_version,
@@ -385,13 +412,27 @@ export async function applyFundingStepReceiptEvidenceInTransaction(
   const scope = await client.query<{
     step_state: FundingStepReceiptTarget["stepState"];
     step_kind: FundingStepReceiptTarget["stepKind"];
+    executor_id: string;
+    segment_id: string | null;
+    normalized_action: JsonRecord;
+    action_validation_result: JsonRecord;
+    requested_source_amount: JsonRecord | null;
+    operation_support_metadata: JsonRecord;
   }>(
     `
       select step.state as step_state,
-             step.step_kind
+             step.step_kind,
+             step.executor_id,
+             step.segment_id,
+             step.normalized_action,
+             step.action_validation_result,
+             operation.requested_source_amount,
+             operation.support_metadata as operation_support_metadata
       from funding_operation_steps step
       join funding_operation_step_attempts attempt
         on attempt.step_id = step.id
+      join funding_operations operation
+        on operation.id = step.operation_id
       where step.operation_id = $1
         and step.id = $2
         and attempt.id = $3
@@ -492,6 +533,68 @@ export async function applyFundingStepReceiptEvidenceInTransaction(
   );
   const row = stored.rows[0];
   if (!row) throw new Error("funding step receipt upsert returned no row");
+
+  if (
+    scoped.executor_id === "wallet_profile_evm_v1" &&
+    row.status === "finalized" &&
+    row.action_match === true &&
+    row.canonical
+  ) {
+    const action = normalizedActionSchema.parse(
+      scoped.normalized_action,
+    ) as unknown as NormalizedAction;
+    const sourceAmount = moneySchema.safeParse(scoped.requested_source_amount);
+    const actionValidationResult = sourceAmount.success
+      ? withRelayClientSourceDebitPostcondition({
+          action,
+          actionValidationResult: scoped.action_validation_result,
+          routeId:
+            typeof scoped.operation_support_metadata.routeId === "string"
+              ? scoped.operation_support_metadata.routeId
+              : null,
+          sourceAmount: sourceAmount.data,
+        })
+      : scoped.action_validation_result;
+    const postcondition = relayClientSourceDebitPostcondition(
+      actionValidationResult,
+    );
+    const attributedSourceRaw = row.evidence.attributedSourceRaw;
+    const sourceDebitEventIndex = row.evidence.sourceDebitEventIndex;
+    const transactionHash = row.evidence.transactionHash;
+    if (
+      postcondition &&
+      attributedSourceRaw === postcondition.expectedSourceRaw &&
+      isRawAmount(sourceDebitEventIndex) &&
+      typeof transactionHash === "string" &&
+      /^0x[0-9a-fA-F]{64}$/u.test(transactionHash) &&
+      row.ledger_height &&
+      row.block_hash &&
+      row.finalized_at
+    ) {
+      await allocateFundingObservationInTransaction(client, {
+        operationId: input.operationId,
+        segmentId: scoped.segment_id,
+        kind: "source_debit",
+        networkId: input.networkId,
+        assetId: postcondition.expectedSourceAssetId,
+        assetDecimals: postcondition.expectedSourceAssetDecimals,
+        txHash: transactionHash.toLowerCase(),
+        eventIndex: sourceDebitEventIndex,
+        fromAddress: postcondition.expectedSourceAddress,
+        toAddress: postcondition.expectedSourceRecipient,
+        rawAmount: postcondition.expectedSourceRaw,
+        observedAt: row.observed_at,
+        ledgerHeight: row.ledger_height,
+        blockHash: row.block_hash,
+        finalityStatus: "finalized",
+        finalizedAt: row.finalized_at,
+        metadata: {
+          observerId: "relay_client_receipt_source_debit_v1",
+          receiptAttemptId: input.attemptId,
+        },
+      });
+    }
+  }
 
   if (input.receipt.status === "reorged") {
     await client.query(
