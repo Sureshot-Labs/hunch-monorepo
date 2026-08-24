@@ -2161,7 +2161,16 @@ async function testCompositePreparationAndRelayCommit(): Promise<void> {
         executorId: "wallet_profile_evm_v1",
         payerRequirement: "privy_sponsor",
         dependsOnOrdinal: null,
-        normalizedAction: { kind: "polymarket_funding_router" },
+        normalizedAction: {
+          actionId: opaque("preparation-action"),
+          data: "0x",
+          gasLimitRaw: null,
+          kind: "evm_transaction",
+          networkId: ASSET.networkId,
+          senderWalletId: userId,
+          to: "0x0000000000000000000000000000000000000001",
+          valueRaw: "0",
+        },
         actionValidationResult: { valid: true },
       },
       {
@@ -2173,7 +2182,16 @@ async function testCompositePreparationAndRelayCommit(): Promise<void> {
         executorId: "wallet_profile_evm_v1",
         payerRequirement: "privy_sponsor",
         dependsOnOrdinal: null,
-        normalizedAction: { kind: "relay_transaction" },
+        normalizedAction: {
+          actionId: opaque("relay-action"),
+          data: "0x",
+          gasLimitRaw: null,
+          kind: "evm_transaction",
+          networkId: ASSET.networkId,
+          senderWalletId: userId,
+          to: "0x0000000000000000000000000000000000000002",
+          valueRaw: "0",
+        },
         actionValidationResult: { valid: true },
       },
     ],
@@ -3821,6 +3839,14 @@ async function testTransactionalPersistenceContracts(): Promise<void> {
       "a cancelled sealed handoff must keep its reservation fenced until cleanup",
     );
     await client.query("rollback to savepoint cancelled_handoff_claim_fence");
+    await client.query(
+      `update telegram_trade_intents
+          set status = 'external_handoff',
+              error_code = 'external_handoff_required',
+              error_message = 'The confirmed Buy continues in the Hunch Mini App.'
+        where id = $1::uuid`,
+      [handoffIntentId],
+    );
     const tradeClaim =
       await claimTelegramAppHandoffV2FundedTradeAttemptInTransaction(
         client,
@@ -3828,15 +3854,19 @@ async function testTransactionalPersistenceContracts(): Promise<void> {
       );
     assert.equal(tradeClaim.claimed, true);
     const intentAtClaim = await client.query<{
+      error_code: string | null;
+      error_message: string | null;
       status: string;
       submit_started_at: Date | null;
     }>(
-      `select status, submit_started_at
+      `select error_code, error_message, status, submit_started_at
        from telegram_trade_intents
        where id = $1::uuid`,
       [handoffIntentId],
     );
     assert.equal(intentAtClaim.rows[0]?.status, "executing");
+    assert.equal(intentAtClaim.rows[0]?.error_code, null);
+    assert.equal(intentAtClaim.rows[0]?.error_message, null);
     assert.ok(
       intentAtClaim.rows[0]?.submit_started_at,
       "the funded handoff claim must close Telegram cancellation before provider submission",

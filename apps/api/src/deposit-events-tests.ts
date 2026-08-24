@@ -464,6 +464,11 @@ const tests: TestCase[] = [
           relayMatchQuery.sql,
           /trade_intent\.funding_operation_id = operation_row\.id/i,
         );
+        assert.match(
+          relayMatchQuery.sql,
+          /trade_intent\.status in \([\s\S]*?'external_handoff'[\s\S]*?'cancelled'[\s\S]*?\)/i,
+          "an internal Relay output stays suppressed after handoff or Buy cancellation",
+        );
       });
     },
   },

@@ -209,6 +209,30 @@ function createOpaqueToken(
   return `${TELEGRAM_APP_HANDOFF_TOKEN_PREFIX}${bytes.toString("base64url")}`;
 }
 
+/**
+ * Rebuild the opaque start parameter for an already-issued deterministic
+ * handoff. This is navigation only: callers must still prove the bound user
+ * and committed handoff through the normal resolve endpoint.
+ */
+export function buildTelegramAppHandoffStartParamForIntent(input: {
+  telegramUserId: string;
+  tokenSecret: string;
+  tradeIntentId: string;
+  userId: string;
+}): string {
+  const tradeIntentId = normalizeUuid(input.tradeIntentId, "tradeIntentId");
+  const telegramUserId = normalizeTelegramUserId(input.telegramUserId);
+  const userId = normalizeUuid(input.userId, "userId");
+  const tokenSecret = input.tokenSecret.trim();
+  if (!tokenSecret) throw new TypeError("tokenSecret is required");
+  return handoffStartParam(
+    createOpaqueToken({
+      payload: [tradeIntentId, userId, telegramUserId].join(":"),
+      secret: tokenSecret,
+    }),
+  );
+}
+
 function handoffStartParam(token: string): string {
   return `${TELEGRAM_APP_HANDOFF_START_PARAM_PREFIX}${token}`;
 }
@@ -464,14 +488,17 @@ export async function issueTelegramAppHandoff(input: {
   const telegramUserId = normalizeTelegramUserId(input.telegramUserId);
   const userId = normalizeUuid(input.userId, "userId");
   const tokenSecret = input.tokenSecret?.trim() || null;
-  const token = createOpaqueToken(
-    tokenSecret
-      ? {
-          payload: [tradeIntentId, userId, telegramUserId].join(":"),
-          secret: tokenSecret,
-        }
-      : undefined,
-  );
+  const startParam = tokenSecret
+    ? buildTelegramAppHandoffStartParamForIntent({
+        telegramUserId,
+        tokenSecret,
+        tradeIntentId,
+        userId,
+      })
+    : null;
+  const token = startParam
+    ? startParam.slice(TELEGRAM_APP_HANDOFF_START_PARAM_PREFIX.length)
+    : createOpaqueToken();
   const tokenHash = hashOpaqueToken(token);
   const planFingerprint = canonicalJsonHash({
     authorityFingerprint,
@@ -565,7 +592,7 @@ export async function issueTelegramAppHandoff(input: {
     throw new TelegramAppHandoffError("unauthorized");
   });
 
-  return { handoff, startParam: handoffStartParam(token), token };
+  return { handoff, startParam: startParam ?? handoffStartParam(token), token };
 }
 
 export async function resolveTelegramAppHandoff(input: {

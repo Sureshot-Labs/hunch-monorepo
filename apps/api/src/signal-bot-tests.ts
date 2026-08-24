@@ -5149,10 +5149,14 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
               rowCount: 1,
               rows: [
                 {
-                  id: "intent-existing",
+                  action: "buy",
+                  can_resume_app_handoff: false,
+                  delivery_mode: "app_handoff",
+                  id: "00000000-0000-4000-8000-000000000002",
                   side: "YES",
-                  status: "executing",
+                  status: "external_handoff",
                   error_code: null,
+                  user_id: "00000000-0000-4000-8000-000000000003",
                 },
               ],
             };
@@ -5194,15 +5198,36 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         } as never,
       });
       assert.equal(insertCount, 0);
-      assert.match(message.text, /Existing trade is still resolving/);
+      assert.match(message.text, /confirmed trade is waiting in Hunch/);
       const buttons = message.reply_markup?.inline_keyboard.flat() ?? [];
       assert.equal(
         buttons.some(
           (button) =>
             "callback_data" in button &&
-            button.callback_data?.startsWith("hbt:"),
+            (button.callback_data?.startsWith("hbt:buy:") ||
+              button.callback_data?.startsWith("hbt:sell:")),
         ),
         false,
+      );
+      assert.equal(
+        buttons.some(
+          (button) =>
+            "callback_data" in button &&
+            button.callback_data ===
+              "hbt:retry_buy:00000000-0000-4000-8000-000000000002",
+        ),
+        true,
+        "the active trade must expose a status button instead of a command-only dead end",
+      );
+      assert.equal(
+        buttons.some(
+          (button) =>
+            "callback_data" in button &&
+            button.callback_data ===
+              "hbt:cancel:00000000-0000-4000-8000-000000000002",
+        ),
+        true,
+        "a pre-submit handoff must expose a real Cancel Buy action",
       );
     },
   },
@@ -6456,9 +6481,19 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         telegram.callbackAnswers[0]?.text ?? "",
         /Existing trade is still resolving/,
       );
-      assert.match(
-        telegram.messages[0]?.text ?? "",
-        /Trade is still resolving/,
+      assert.match(telegram.messages[0]?.text ?? "", /Trade still resolving/);
+      assert.doesNotMatch(telegram.messages[0]?.text ?? "", /trade_status/);
+      assert.equal(
+        telegram.messages[0]?.reply_markup?.inline_keyboard
+          .flat()
+          .some(
+            (button) =>
+              "callback_data" in button &&
+              button.callback_data ===
+                "hbt:retry_buy:00000000-0000-4000-8000-000000000002",
+          ),
+        true,
+        "the rebuilt market card exposes status navigation for the active intent",
       );
       assert.match(
         telegram.messages[0]?.text ?? "",

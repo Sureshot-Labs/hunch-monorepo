@@ -1429,6 +1429,121 @@ try {
     "A terminal funded shortfall keeps the existing Funding stopped renderer",
   );
 
+  const cancellableFundingQuote = await client.query<{ id: string }>(
+    `insert into funding_quotes (
+       user_id, discovery_projection_id, selected_source_option_snapshot,
+       destination_option_snapshot, plan_snapshot, policy_version,
+       policy_revision, canonical_request_hash, plan_hash, consent_token_hash,
+       expires_at, consumed_at
+     ) values (
+       $1, 'telegram-cancellable-handoff', '{}'::jsonb, '{}'::jsonb,
+       '{}'::jsonb, 1, 'telegram-cancellable-handoff', repeat('1', 64),
+       repeat('2', 64), repeat('3', 64), now() + interval '1 hour', now()
+     ) returning id`,
+    [userId],
+  );
+  const cancellableFundingOperation = await client.query<{ id: string }>(
+    `insert into funding_operations (
+       user_id, quote_id, purpose, status, progress_stage, experience_mode,
+       plan_kind, idempotency_key, commit_request_hash, plan_hash,
+       policy_version, policy_revision, destination_target_snapshot, market_id,
+       placement_snapshot, quote_snapshot, consent_snapshot,
+       original_subject_lookup_hmac, subject_lookup_key_version, expires_at
+     ) values (
+       $1, $2, 'trade_shortfall', 'ready', 'ready_for_consumer', 'instant',
+       'already_available', $3, repeat('4', 64), repeat('2', 64), 1,
+       'telegram-cancellable-handoff', '{}'::jsonb, $4, '{}'::jsonb,
+       '{}'::jsonb, '{}'::jsonb, repeat('5', 64), 1,
+       now() + interval '1 hour'
+     ) returning id`,
+    [
+      userId,
+      cancellableFundingQuote.rows[0]?.id,
+      `cancellable-handoff-funding:${suffix}`,
+      marketId,
+    ],
+  );
+  const cancellableFundingReservation = await client.query<{ id: string }>(
+    `insert into balance_reservations (
+       user_id, operation_id, component_id, location_id, network_id,
+       asset_id, asset_decimals, raw_amount, mode, state, expires_at
+     ) values (
+       $1::uuid, $2::uuid, $3, 'polymarket:controller', 'evm:137',
+       'pusd', 6, '1000000', 'settled_for_consumer', 'active',
+       now() + interval '30 minutes'
+     ) returning id`,
+    [
+      userId,
+      cancellableFundingOperation.rows[0]?.id,
+      `cancellable-handoff-reservation:${suffix}`,
+    ],
+  );
+  const cancellableHandoffId = crypto.randomUUID();
+  const cancellableFundedIntent = await client.query<{ id: string }>(
+    `insert into telegram_trade_intents (
+       telegram_user_id, user_id, authorization_id, chat_id,
+       telegram_message_id, action, venue, market_id, event_id, side,
+       amount_usd, status, expires_at, idempotency_key, delivery_mode,
+       funding_operation_id, funding_reservation_id, result
+     ) values (
+       $1, $2, $3, $1, '700', 'buy', 'polymarket', $4, $5, 'YES',
+       1, 'external_handoff', now() - interval '10 minutes', $6,
+       'app_handoff', $7::uuid, $8::uuid,
+       jsonb_build_object(
+         'appHandoffExecution', jsonb_build_object(
+           'committedAt', now()::text,
+           'handoffId', $9::uuid,
+           'kind', 'funding',
+           'version', 2
+         )
+       )
+     ) returning id`,
+    [
+      telegramUserId,
+      userId,
+      authorization.id,
+      marketId,
+      eventId,
+      `cancellable-funded-handoff:${suffix}`,
+      cancellableFundingOperation.rows[0]?.id,
+      cancellableFundingReservation.rows[0]?.id,
+      cancellableHandoffId,
+    ],
+  );
+  const cancellableFundedIntentId = cancellableFundedIntent.rows[0]?.id;
+  assert.ok(cancellableFundedIntentId);
+  const cancelledFundedHandoff = await invokeIntentNavigation(
+    cancellableFundedIntentId,
+    "cancel",
+  );
+  assert.match(
+    cancelledFundedHandoff.answers[0]?.text ?? "",
+    /Buy cancelled.*Funding will settle safely/u,
+  );
+  assert.equal(
+    (
+      await client.query<{ status: string }>(
+        `select status from telegram_trade_intents where id = $1::uuid`,
+        [cancellableFundedIntentId],
+      )
+    ).rows[0]?.status,
+    "cancelled",
+    "an expired quote cannot turn cancellation of a committed funded handoff into an orphaned expired intent",
+  );
+  await runTelegramTradeLifecycleProjectionBatchInTransaction(client, {
+    limit: 100,
+  });
+  assert.equal(
+    (
+      await client.query<{ state: string }>(
+        `select state from balance_reservations where id = $1::uuid`,
+        [cancellableFundingReservation.rows[0]?.id],
+      )
+    ).rows[0]?.state,
+    "released",
+    "Cancel Buy releases the ready consumer reservation while leaving settled venue cash untouched",
+  );
+
   const actionRows = await client.query<{ action: string }>(
     `insert into telegram_trade_intents (
        telegram_user_id, user_id, authorization_id, action, venue, market_id,

@@ -392,9 +392,12 @@ function liveProgressFor(
     // Funding already broadcast cannot be reversed safely. Its linked Buy can
     // still be cancelled before any venue order is submitted.
     canCancelBuy:
-      candidate.status === "funding" &&
+      candidate.action === "buy" &&
+      candidate.submit_started_at == null &&
+      (candidate.status === "funding" ||
+        candidate.status === "external_handoff") &&
       !terminal &&
-      candidate.has_broadcast_boundary,
+      (candidate.has_broadcast_boundary || ready),
     failureMessage: null,
     fundingAmountLabel: fundingAmountLabel(candidate),
     intentId: candidate.id,

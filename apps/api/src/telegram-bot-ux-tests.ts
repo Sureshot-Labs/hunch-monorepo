@@ -89,6 +89,37 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
+    name: "ready funded handoff exposes Continue and Cancel Buy",
+    run: () => {
+      const intentId = "00000000-0000-4000-8000-000000000001";
+      const keyboard = telegramTradeLifecycleProgressTestHooks.progressKeyboard(
+        {
+          action: "buy",
+          amountUsd: "5",
+          canCancel: false,
+          canCancelBuy: true,
+          intentId,
+          isDirectHandoff: false,
+          marketTitle: "Market",
+          requiresMiniAppContinuation: true,
+          sideLabel: "YES",
+          state: "ready",
+          venue: "limitless",
+        } as never,
+      ).inline_keyboard;
+      assert.equal(
+        keyboard
+          .flat()
+          .some((button) => button.text === "▶️ Continue in Hunch"),
+        true,
+      );
+      assert.equal(
+        keyboard.flat().some((button) => button.text === "❌ Cancel Buy"),
+        true,
+      );
+    },
+  },
+  {
     name: "change amount callback remains valid and bounded",
     run: () => {
       const intentId = "00000000-0000-4000-8000-000000000001";

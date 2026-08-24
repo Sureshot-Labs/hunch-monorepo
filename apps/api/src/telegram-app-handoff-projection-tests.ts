@@ -39,6 +39,22 @@ const identity = {
   userId: "00000000-0000-4000-8000-000000000001",
 };
 
+let projectionSql = "";
+await loadTelegramAppHandoffProjection(
+  {
+    query: async (sql: string) => {
+      projectionSql = sql;
+      return { rows: [] };
+    },
+  } as never,
+  identity,
+);
+assert.match(
+  projectionSql,
+  /error_code = 'external_handoff_required'[\s\S]*?appHandoffExecution'[\s\S]*?'version' = '2'[\s\S]*?then null/u,
+  "a committed v2 handoff must not project its obsolete routing marker as a trade failure",
+);
+
 const filled = await loadTelegramAppHandoffProjection(
   dbWithStatus("filled") as never,
   identity,
