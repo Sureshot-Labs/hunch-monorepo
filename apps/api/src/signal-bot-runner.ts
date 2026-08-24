@@ -52,7 +52,10 @@ import {
 } from "./services/telegram-funding-delivery.js";
 import { deliverTelegramTradeLifecycleProgress } from "./services/telegram-trade-lifecycle-progress.js";
 import { claimTelegramTradeShortfallAutoResume } from "./services/telegram-trade-shortfall-auto-resume.js";
-import { TELEGRAM_BOT_TRADING_CALLBACK_PREFIX } from "./services/telegram-bot-trading-client.js";
+import {
+  parseTelegramBotTradingCallbackData,
+  TELEGRAM_BOT_TRADING_CALLBACK_PREFIX,
+} from "./services/telegram-bot-trading-client.js";
 import { resolveTelegramNotificationsPolicy } from "./services/telegram-notification-policy.js";
 import {
   createTelegramBotTradingInternalApiClient,
@@ -63,6 +66,10 @@ import {
   beginSignalBotTradeInput,
   cancelSignalBotTradeInput,
 } from "./services/telegram-bot-trade-input.js";
+import {
+  claimTelegramBotCallbackMenuRender,
+  createTelegramBotCallbackMenuTransport,
+} from "./services/telegram-bot-menu-delivery.js";
 import { withTelegramPrivateNavigation } from "./services/telegram-bot-private-navigation.js";
 import { formatTelegramCalloutMarkdownV2 } from "./services/telegram-bot-trading-presentation.js";
 import { buildHunchMiniAppWebButton } from "./services/telegram-mini-app-buttons.js";
@@ -283,6 +290,8 @@ export async function runSignalBotRunner(): Promise<void> {
     const drainFundingDelivery = (): Promise<void> => {
       fundingDeliveryInFlight ??= (async () => {
         try {
+          const renderCoordinator =
+            createTelegramFundingRenderCoordinator(redis);
           if (tradingInternalApi) {
             const candidate = await claimTelegramTradeShortfallAutoResume(db);
             if (candidate) {
@@ -328,7 +337,7 @@ export async function runSignalBotRunner(): Promise<void> {
           const fundingDelivery = await deliverTelegramFundingActions({
             pool: db,
             limit: 25,
-            renderCoordinator: createTelegramFundingRenderCoordinator(redis),
+            renderCoordinator,
             ...(tradingInternalApi
               ? {
                   resolveMessage: ({ contextId, projection, telegramUserId }) =>
@@ -350,6 +359,7 @@ export async function runSignalBotRunner(): Promise<void> {
             {
               pool: db,
               limit: 25,
+              renderCoordinator,
               telegram,
             },
           );
@@ -781,86 +791,138 @@ export async function runSignalBotRunner(): Promise<void> {
             });
             return result.ok;
           },
-          handleCallback: (callbackQuery) =>
-            tradingInternalApi
-              ? tradingInternalApi
-                  .handleCallback({
-                    answerCallbackQuery: (answer) =>
-                      telegram.answerCallbackQuery(answer),
-                    appBaseUrl: config.appBaseUrl,
-                    beginTradeInput: (begin) => {
-                      const chatId =
-                        callbackQuery.message?.chat?.id == null
-                          ? null
-                          : String(callbackQuery.message.chat.id);
-                      const telegramUserId = callbackQuery.from?.id;
-                      const menuMessageId = callbackQuery.message?.message_id;
-                      if (!chatId || !telegramUserId || menuMessageId == null)
-                        return Promise.resolve(false);
-                      return beginSignalBotTradeInput({
-                        action: begin.action,
-                        chatId,
-                        contextId: begin.contextId,
-                        expiresAt: begin.expiresAt,
-                        menuMessageId,
-                        message: begin.message,
-                        redis,
-                        telegramUserId,
-                        transport: telegram,
-                      });
-                    },
-                    cancelTradeInput: (cancel) => {
-                      const chatId =
-                        callbackQuery.message?.chat?.id == null
-                          ? null
-                          : String(callbackQuery.message.chat.id);
-                      const telegramUserId = callbackQuery.from?.id;
-                      if (!chatId || !telegramUserId)
-                        return Promise.resolve(false);
-                      return cancelSignalBotTradeInput({
-                        chatId,
-                        contextId: cancel.contextId,
-                        message: cancel.message,
-                        redis,
-                        telegramUserId,
-                        transport: telegram,
-                      });
-                    },
-                    callbackQuery,
-                    editMessageText: (message) =>
-                      telegram.editMessageText({
-                        ...message,
-                        disable_web_page_preview: true,
-                        parse_mode: message.parse_mode ?? "MarkdownV2",
-                      }),
-                    sendMessage: (message) => {
-                      const navigableMessage =
-                        withTelegramPrivateNavigation(message);
-                      return telegram.sendMessage({
-                        ...navigableMessage,
-                        disable_web_page_preview: true,
-                        parse_mode: navigableMessage.parse_mode ?? "MarkdownV2",
-                      });
-                    },
-                    telegramMiniAppEnabled:
-                      config.telegramMiniAppLinkBase != null,
+          handleCallback: async (callbackQuery) => {
+            if (!tradingInternalApi) {
+              await telegram.answerCallbackQuery({
+                callbackQueryId: callbackQuery.id,
+                showAlert: true,
+                text: "⚠️ Trading is unavailable. Open Hunch to trade.",
+              });
+              return true;
+            }
+            const callbackChatId =
+              callbackQuery.message?.chat?.id == null
+                ? null
+                : String(callbackQuery.message.chat.id);
+            const callbackMessageId = callbackQuery.message?.message_id;
+            const parsedTradeCallback = parseTelegramBotTradingCallbackData(
+              callbackQuery.data,
+            );
+            const navigationIntentId =
+              parsedTradeCallback &&
+              "intentId" in parsedTradeCallback &&
+              ["cancel", "change_amount", "open_market", "retry_buy"].includes(
+                parsedTradeCallback.type,
+              )
+                ? parsedTradeCallback.intentId
+                : null;
+            // Confirm/execution callbacks hand the card back to the lifecycle
+            // projector after their immediate Processing edit. Navigation
+            // callbacks keep a user-owned token so background work cannot
+            // overwrite the screen the user explicitly opened.
+            const renderToken = navigationIntentId
+              ? `trade-callback:${callbackQuery.id}`
+              : `trade-lifecycle:callback:${callbackQuery.id}`;
+            const callbackTransport =
+              callbackChatId != null && callbackMessageId != null
+                ? createTelegramBotCallbackMenuTransport({
+                    chatId: callbackChatId,
+                    messageId: callbackMessageId,
+                    redis,
+                    renderToken,
+                    transport: telegram,
                   })
-                  .catch(async (error: unknown) => {
-                    logTradingInternalApiFailure("callback", error);
-                    await telegram.answerCallbackQuery({
-                      callbackQueryId: callbackQuery.id,
-                      showAlert: true,
-                      text: "⚠️ Trading is unavailable. Open Hunch to trade.",
-                    });
-                    return true;
-                  })
-              : telegram
-                  .answerCallbackQuery({
-                    callbackQueryId: callbackQuery.id,
-                    showAlert: true,
-                    text: "⚠️ Trading is unavailable. Open Hunch to trade.",
-                  })
-                  .then(() => true),
+                : telegram;
+            if (callbackChatId != null && callbackMessageId != null) {
+              const claimed = await claimTelegramBotCallbackMenuRender({
+                callbackQueryId: callbackQuery.id,
+                chatId: callbackChatId,
+                messageId: callbackMessageId,
+                ...(navigationIntentId
+                  ? { db, intentId: navigationIntentId }
+                  : {}),
+                redis,
+                renderToken,
+                telegram,
+                telegramUserId: String(callbackQuery.from?.id ?? ""),
+              });
+              if (!claimed) return true;
+            }
+            return tradingInternalApi
+              .handleCallback({
+                answerCallbackQuery: (answer) =>
+                  telegram.answerCallbackQuery(answer),
+                appBaseUrl: config.appBaseUrl,
+                beginTradeInput: (begin) => {
+                  const chatId =
+                    callbackQuery.message?.chat?.id == null
+                      ? null
+                      : String(callbackQuery.message.chat.id);
+                  const telegramUserId = callbackQuery.from?.id;
+                  const menuMessageId = callbackQuery.message?.message_id;
+                  if (!chatId || !telegramUserId || menuMessageId == null)
+                    return Promise.resolve(false);
+                  return beginSignalBotTradeInput({
+                    action: begin.action,
+                    chatId,
+                    contextId: begin.contextId,
+                    expiresAt: begin.expiresAt,
+                    menuMessageId,
+                    message: begin.message,
+                    redis,
+                    telegramUserId,
+                    transport: callbackTransport,
+                  });
+                },
+                cancelTradeInput: (cancel) => {
+                  const chatId =
+                    callbackQuery.message?.chat?.id == null
+                      ? null
+                      : String(callbackQuery.message.chat.id);
+                  const telegramUserId = callbackQuery.from?.id;
+                  if (!chatId || !telegramUserId) return Promise.resolve(false);
+                  return cancelSignalBotTradeInput({
+                    chatId,
+                    contextId: cancel.contextId,
+                    message: cancel.message,
+                    redis,
+                    telegramUserId,
+                    transport: callbackTransport,
+                  });
+                },
+                callbackQuery,
+                editMessageText: (message) =>
+                  callbackTransport.editMessageText?.({
+                    ...message,
+                    disable_web_page_preview: true,
+                    parse_mode: message.parse_mode ?? "MarkdownV2",
+                  }) ??
+                  Promise.resolve({
+                    error: "other" as const,
+                    message: "message_not_editable",
+                    ok: false as const,
+                  }),
+                sendMessage: (message) => {
+                  const navigableMessage =
+                    withTelegramPrivateNavigation(message);
+                  return callbackTransport.sendMessage({
+                    ...navigableMessage,
+                    disable_web_page_preview: true,
+                    parse_mode: navigableMessage.parse_mode ?? "MarkdownV2",
+                  });
+                },
+                telegramMiniAppEnabled: config.telegramMiniAppLinkBase != null,
+              })
+              .catch(async (error: unknown) => {
+                logTradingInternalApiFailure("callback", error);
+                await telegram.answerCallbackQuery({
+                  callbackQueryId: callbackQuery.id,
+                  showAlert: true,
+                  text: "⚠️ Trading is unavailable. Open Hunch to trade.",
+                });
+                return true;
+              });
+          },
           telegram,
         });
         if (handledCommands > 0) {

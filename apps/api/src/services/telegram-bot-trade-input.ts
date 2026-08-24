@@ -1,18 +1,23 @@
-import type {
-  TelegramBotTradingClientMessage,
-  TelegramFundingClientMessage,
+import {
+  TELEGRAM_BOT_TRADING_CALLBACK_PREFIX,
+  type TelegramBotTradingClientMessage,
+  type TelegramFundingClientMessage,
 } from "./telegram-bot-trading-client.js";
 import {
+  clearSignalBotPrimaryMenuInputIfCurrent,
   clearSignalBotMenuInputIfCurrent,
   readSignalBotMenuInput,
+  readSignalBotTradeInputGuard,
   type SignalBotMenuStateRedis,
   writeSignalBotTradeMenuInput,
 } from "./telegram-bot-menu-state.js";
+import { withTelegramPrivateNavigation } from "./telegram-bot-private-navigation.js";
 import {
   classifyTelegramBotMenuDeliveryResult,
   sendOrEditTelegramBotMenuMessage,
   type TelegramBotMenuTransport,
 } from "./telegram-bot-menu-delivery.js";
+import { escapeTelegramMarkdownV2 } from "./telegram-bot-trading-presentation.js";
 
 type TradeInputRedis = Pick<SignalBotMenuStateRedis, "eval" | "get" | "set">;
 
@@ -27,6 +32,24 @@ export async function beginSignalBotTradeInput(input: {
   telegramUserId: number;
   transport: TelegramBotMenuTransport;
 }): Promise<boolean> {
+  const activePreviousState = await readSignalBotMenuInput({
+    chatId: input.chatId,
+    redis: input.redis,
+    telegramUserId: input.telegramUserId,
+  });
+  // The primary state expires with the economic input, while the short guard
+  // deliberately survives a little longer so text sent to an old card cannot
+  // become a market search. Read that guard before replacing it so the old
+  // visible card is also made inert when a new custom input is opened.
+  const previousState =
+    activePreviousState?.kind === "awaiting_custom_buy_amount" ||
+    activePreviousState?.kind === "awaiting_custom_sell_amount"
+      ? activePreviousState
+      : await readSignalBotTradeInputGuard({
+          chatId: input.chatId,
+          redis: input.redis,
+          telegramUserId: input.telegramUserId,
+        });
   const state = await writeSignalBotTradeMenuInput({
     action: input.action,
     chatId: input.chatId,
@@ -44,6 +67,29 @@ export async function beginSignalBotTradeInput(input: {
     transport: input.transport,
   });
   const outcome = classifyTelegramBotMenuDeliveryResult(delivered).outcome;
+  if (
+    previousState &&
+    (previousState.kind === "awaiting_custom_buy_amount" ||
+      previousState.kind === "awaiting_custom_sell_amount") &&
+    previousState.menuMessageId != null &&
+    previousState.menuMessageId !== input.menuMessageId
+  ) {
+    await sendOrEditTelegramBotMenuMessage({
+      chatId: input.chatId,
+      message: withTelegramPrivateNavigation(
+        {
+          text: escapeTelegramMarkdownV2(
+            "This custom input was replaced by a newer trade card. Use the latest card or reopen this market.",
+          ),
+        },
+        {
+          marketCallbackData: `${TELEGRAM_BOT_TRADING_CALLBACK_PREFIX}:open_market:${previousState.contextId}`,
+        },
+      ),
+      messageId: previousState.menuMessageId,
+      transport: input.transport,
+    }).catch(() => undefined);
+  }
   if (outcome === "success" || outcome === "ambiguous") return true;
   await clearSignalBotMenuInputIfCurrent({
     chatId: input.chatId,
@@ -84,14 +130,21 @@ export async function cancelSignalBotTradeInput(input: {
     transport: input.transport,
   });
   const outcome = classifyTelegramBotMenuDeliveryResult(delivered).outcome;
-  if (outcome !== "success" && outcome !== "ambiguous") return false;
-  await clearSignalBotMenuInputIfCurrent({
+  if (outcome === "ambiguous") {
+    return clearSignalBotPrimaryMenuInputIfCurrent({
+      chatId: input.chatId,
+      redis: input.redis,
+      stateToken: state.stateToken,
+      telegramUserId: input.telegramUserId,
+    }).catch(() => false);
+  }
+  if (outcome !== "success") return false;
+  return clearSignalBotMenuInputIfCurrent({
     chatId: input.chatId,
     redis: input.redis,
     stateToken: state.stateToken,
     telegramUserId: input.telegramUserId,
   }).catch(() => false);
-  return true;
 }
 
 export async function handleSignalBotTradeInput(input: {
@@ -119,7 +172,46 @@ export async function handleSignalBotTradeInput(input: {
     (state.kind !== "awaiting_custom_buy_amount" &&
       state.kind !== "awaiting_custom_sell_amount")
   ) {
-    return false;
+    // An explicit newer Search/Rewards input owns the next free-text message.
+    // The guard is only a fallback when no primary menu state remains.
+    if (state) return false;
+    const staleTradeInput = await readSignalBotTradeInputGuard(input);
+    if (!staleTradeInput) return false;
+    const expiredMessage = withTelegramPrivateNavigation(
+      {
+        text: escapeTelegramMarkdownV2(
+          "This custom input is no longer active. Reopen the market to enter a new amount.",
+        ),
+      },
+      {
+        marketCallbackData: `${TELEGRAM_BOT_TRADING_CALLBACK_PREFIX}:open_market:${staleTradeInput.contextId}`,
+      },
+    );
+    const delivered =
+      staleTradeInput.menuMessageId != null
+        ? await sendOrEditTelegramBotMenuMessage({
+            chatId: input.chatId,
+            message: expiredMessage,
+            messageId: staleTradeInput.menuMessageId,
+            transport: input.transport,
+          })
+        : await input.transport.sendMessage({
+            chat_id: input.chatId,
+            disable_web_page_preview: true,
+            reply_markup: expiredMessage.reply_markup,
+            text: expiredMessage.text,
+          });
+    if (
+      classifyTelegramBotMenuDeliveryResult(delivered).outcome === "success"
+    ) {
+      await clearSignalBotMenuInputIfCurrent({
+        chatId: input.chatId,
+        redis: input.redis,
+        stateToken: staleTradeInput.stateToken,
+        telegramUserId: input.telegramUserId,
+      }).catch(() => false);
+    }
+    return true;
   }
   if (state.menuMessageId == null) {
     await clearSignalBotMenuInputIfCurrent({

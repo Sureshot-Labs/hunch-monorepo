@@ -21,7 +21,13 @@ import {
   captureTelegramBotTradingCallback,
   reconcileStaleTelegramTradeIntents,
 } from "./services/telegram-bot-trading.js";
-import { runTelegramTradeLifecycleProjectionBatchInTransaction } from "./services/telegram-trade-lifecycle-progress.js";
+import {
+  deliverTelegramTradeLifecycleProgress,
+  runTelegramTradeLifecycleProjectionBatchInTransaction,
+  telegramTradeLifecycleProgressTestHooks,
+} from "./services/telegram-trade-lifecycle-progress.js";
+import { fenceTelegramTradeLifecycleNavigation } from "./services/telegram-trade-delivery-contract.js";
+import { telegramNotificationDeliveryTestHooks } from "./services/telegram-notification-delivery.js";
 
 const client = await pool.connect();
 
@@ -43,6 +49,15 @@ try {
       );
       return result;
     }) as DbQuery["query"],
+  };
+  const renderCoordinator = {
+    claim: async () => undefined,
+    claimBackground: async () => true,
+    isCurrent: async () => true,
+    runExclusive: async <T>(input: { deliver: () => Promise<T> }) => ({
+      status: "completed" as const,
+      value: await input.deliver(),
+    }),
   };
 
   const suffix = crypto.randomUUID();
@@ -276,6 +291,7 @@ try {
       },
       createTrading: () => trading,
       db,
+      internalPreHandler: async () => undefined,
       reconciliationEnabled: true,
       resolveInternalWallets: async () => [
         {
@@ -826,6 +842,7 @@ try {
   const invokeIntentNavigation = async (
     intentId: string,
     type: "cancel" | "open_market" | "retry_buy",
+    messageId = 700,
   ) =>
     captureTelegramBotTradingCallback({
       appBaseUrl: "https://app.hunch.trade",
@@ -835,7 +852,7 @@ try {
         id: `${type}-navigation-${suffix}`,
         message: {
           chat: { id: telegramUserId, type: "private" },
-          message_id: 700,
+          message_id: messageId,
         },
       },
       db,
@@ -933,6 +950,58 @@ try {
     appHandoffExitId,
   ]);
 
+  const expiringDirectHandoffId = (
+    await client.query<{ id: string }>(
+      `insert into telegram_trade_intents (
+         telegram_user_id, user_id, authorization_id, chat_id,
+         telegram_message_id, action, venue, market_id, side, amount_usd,
+         status, expires_at, idempotency_key, delivery_mode, result
+       ) values (
+         $1, $2, $3, $1, '700', 'buy', 'polymarket', $4, 'YES', 1,
+         'confirming', now() - interval '1 minute', $5, 'app_handoff',
+         jsonb_build_object(
+           'appHandoffExecution',
+           jsonb_build_object('version', 2, 'committedAt', now()::text)
+         )
+       ) returning id::text`,
+      [
+        telegramUserId,
+        userId,
+        authorization.id,
+        marketId,
+        `expiring-direct-handoff:${suffix}`,
+      ],
+    )
+  ).rows[0]?.id;
+  assert.ok(expiringDirectHandoffId);
+  const expiredDirectHandoff = await captureTelegramBotTradingCallback({
+    appBaseUrl: "https://app.hunch.trade",
+    callbackQuery: {
+      data: `hbt:confirm:${expiringDirectHandoffId}`,
+      from: { id: telegramUserId as never },
+      id: `expired-direct-confirm-${suffix}`,
+      message: {
+        chat: { id: telegramUserId, type: "private" },
+        message_id: 700,
+      },
+    },
+    db,
+    expectedIntentId: expiringDirectHandoffId,
+    expectedType: "confirm",
+    signerInspector,
+    trading,
+  });
+  assert.equal(expiredDirectHandoff.intentStatus, "expired");
+  assert.equal(
+    expiredDirectHandoff.lifecycleOwnsTerminalDelivery,
+    false,
+    "expired has no lifecycle projection and must retain its callback-rendered market card",
+  );
+  assert.ok(expiredDirectHandoff.messages.at(-1));
+  await client.query(`delete from telegram_trade_intents where id = $1::uuid`, [
+    expiringDirectHandoffId,
+  ]);
+
   const insertTerminalSellIntent = async (label: string, status: string) => {
     const result = await client.query<{ id: string }>(
       `insert into telegram_trade_intents (
@@ -1021,6 +1090,30 @@ try {
   const filledDirect =
     await runTelegramTradeLifecycleProjectionBatchInTransaction(client);
   assert.equal(filledDirect.created, 1);
+  const reopenedDirectHandoff = await captureTelegramBotTradingCallback({
+    appBaseUrl: "https://app.hunch.trade",
+    callbackQuery: {
+      data: `hbt:retry_buy:${directLifecycleIntentId}`,
+      from: { id: telegramUserId as never },
+      id: `reopen-direct-handoff-${suffix}`,
+      message: {
+        chat: { id: telegramUserId, type: "private" },
+        message_id: 701,
+      },
+    },
+    db,
+    signerInspector,
+    trading,
+  });
+  assert.equal(reopenedDirectHandoff.lifecycleOwnsTerminalDelivery, false);
+  assert.match(
+    reopenedDirectHandoff.answers[0]?.text ?? "",
+    /Opening a fresh market card/u,
+  );
+  assert.ok(
+    reopenedDirectHandoff.messages.at(-1),
+    "a terminal retry_buy compatibility button must still render its market navigation",
+  );
   const unchangedDirect =
     await runTelegramTradeLifecycleProjectionBatchInTransaction(client);
   assert.equal(unchangedDirect.created, 0);
@@ -1042,6 +1135,985 @@ try {
     { revision: 1, state: "awaiting_client", status: "dead" },
     { revision: 2, state: "submitting_trade", status: "dead" },
     { revision: 3, state: "filled", status: "pending" },
+  ]);
+  const pendingTerminalOutbox = await client.query<{
+    delivery_attempt_id: string;
+    id: string;
+  }>(
+    `update telegram_bot_action_outbox
+        set status = 'sending',
+            delivery_attempt_id = gen_random_uuid(),
+            delivery_started_at = clock_timestamp() - interval '30 seconds'
+      where trade_intent_id = $1::uuid
+        and state_revision = 3
+      returning id::text, delivery_attempt_id::text`,
+    [directLifecycleIntentId],
+  );
+  let pendingTerminalRow = pendingTerminalOutbox.rows[0];
+  assert.ok(pendingTerminalRow);
+  assert.equal(
+    await telegramTradeLifecycleProgressTestHooks.recoverStaleTelegramTradeLifecycleDeliveries(
+      { pool: client },
+    ),
+    1,
+    "a crashed lifecycle edit must be quarantined at its unknown Telegram boundary",
+  );
+  assert.deepEqual(
+    (
+      await client.query<{
+        delivery_attempt_id: string | null;
+        delivery_started_at: Date | null;
+        last_error: string | null;
+        status: string;
+      }>(
+        `select status, delivery_attempt_id::text, delivery_started_at,
+                last_error
+           from telegram_bot_action_outbox
+          where id = $1::uuid`,
+        [pendingTerminalRow.id],
+      )
+    ).rows[0],
+    {
+      delivery_attempt_id: null,
+      delivery_started_at: null,
+      last_error: "telegram_trade_lifecycle_edit_delivery_unknown",
+      status: "dead",
+    },
+  );
+  pendingTerminalRow = (
+    await client.query<{
+      delivery_attempt_id: string;
+      id: string;
+    }>(
+      `update telegram_bot_action_outbox
+          set status = 'sending',
+              delivery_attempt_id = gen_random_uuid(),
+              delivery_started_at = clock_timestamp()
+        where id = $1::uuid
+        returning id::text, delivery_attempt_id::text`,
+      [pendingTerminalRow.id],
+    )
+  ).rows[0];
+  assert.ok(pendingTerminalRow);
+  await telegramTradeLifecycleProgressTestHooks.markTelegramTradeLifecycleDelivered(
+    {
+      delivery: "edit",
+      deliveryAttemptId: pendingTerminalRow.delivery_attempt_id,
+      messageId: 701,
+      outboxId: pendingTerminalRow.id,
+      pool: client,
+      sourceMessageId: 701,
+      terminalFill: true,
+    },
+  );
+  assert.equal(
+    telegramTradeLifecycleProgressTestHooks.telegramLifecycleEditSucceeded({
+      ok: false,
+    }),
+    false,
+    "a resolved Telegram API error must not be marked delivered",
+  );
+  assert.deepEqual(
+    telegramTradeLifecycleProgressTestHooks.resolveTelegramLifecycleEditFailure(
+      {
+        error: "message_not_editable",
+        message: "message to edit not found",
+        ok: false,
+      },
+      1,
+    ),
+    {
+      code: "message_not_editable",
+      disposition: "dead",
+      retryAfterSec: 3,
+    },
+    "a deleted lifecycle card must not retry forever",
+  );
+  assert.deepEqual(
+    telegramTradeLifecycleProgressTestHooks.resolveTelegramLifecycleEditFailure(
+      { error: "ambiguous", message: "timeout", ok: false },
+      1,
+    ),
+    { code: "ambiguous", disposition: "dead", retryAfterSec: 3 },
+    "an ambiguous edit crosses an unknowable delivery boundary and must not overwrite a newer card",
+  );
+  assert.deepEqual(
+    telegramTradeLifecycleProgressTestHooks.resolveTelegramLifecycleEditFailure(
+      { error: "ambiguous", message: "timeout", ok: false },
+      5,
+    ),
+    { code: "ambiguous", disposition: "dead", retryAfterSec: 3 },
+    "ambiguous lifecycle edits remain terminal at the old retry ceiling",
+  );
+  assert.deepEqual(
+    telegramTradeLifecycleProgressTestHooks.resolveTelegramLifecycleEditFailure(
+      {
+        error: "other",
+        message: "Too Many Requests",
+        ok: false,
+        retryAfterSec: 600,
+      },
+      1,
+    ),
+    { code: "other", disposition: "retry", retryAfterSec: 600 },
+    "Telegram retry_after must never be shortened into the provider's 429 window",
+  );
+  assert.deepEqual(
+    (
+      await client.query<{
+        delivery: string | null;
+        delivered_at: string | null;
+        intent_status: string | null;
+        message_id: string | null;
+        outbox_status: string;
+      }>(
+        `select intent_row.result #>> '{telegramReceipt,delivery}' as delivery,
+                intent_row.result #>> '{telegramReceipt,deliveredAt}' as delivered_at,
+                intent_row.result #>> '{telegramReceipt,intentStatus}' as intent_status,
+                intent_row.result #>> '{telegramReceipt,messageId}' as message_id,
+                outbox.status as outbox_status
+           from telegram_trade_intents intent_row
+           join telegram_bot_action_outbox outbox
+             on outbox.trade_intent_id = intent_row.id
+            and outbox.state_revision = 3
+          where intent_row.id = $1::uuid`,
+        [directLifecycleIntentId],
+      )
+    ).rows.map((row) => ({
+      delivery: row.delivery,
+      hasDeliveredAt: row.delivered_at != null,
+      intentStatus: row.intent_status,
+      messageId: row.message_id,
+      outboxStatus: row.outbox_status,
+    })),
+    [
+      {
+        delivery: "edit",
+        hasDeliveredAt: true,
+        intentStatus: "filled",
+        messageId: "701",
+        outboxStatus: "sent",
+      },
+    ],
+    "a filled lifecycle edit must suppress the later generic Order filled notification",
+  );
+  await client.query(
+    `update telegram_bot_action_outbox
+        set status = 'retry',
+            attempt_count = 1,
+            last_error = 'telegram_trade_lifecycle_edit_failed:ambiguous',
+            delivery_attempt_id = null,
+            delivery_started_at = null
+      where id = $1::uuid`,
+    [pendingTerminalRow.id],
+  );
+  assert.equal(
+    await telegramTradeLifecycleProgressTestHooks.recoverStaleTelegramTradeLifecycleDeliveries(
+      { pool: client },
+    ),
+    1,
+    "a retry row created by an older ambiguous-delivery worker must be quarantined",
+  );
+  assert.deepEqual(
+    (
+      await client.query<{ last_error: string | null; status: string }>(
+        `select status, last_error
+           from telegram_bot_action_outbox
+          where id = $1::uuid`,
+        [pendingTerminalRow.id],
+      )
+    ).rows[0],
+    {
+      last_error: "telegram_trade_lifecycle_edit_delivery_unknown",
+      status: "dead",
+    },
+  );
+  await client.query(
+    `update telegram_bot_action_outbox
+        set status = 'retry',
+            attempt_count = 1,
+            last_error = 'telegram_trade_lifecycle_stale_sending_retry'
+      where id = $1::uuid`,
+    [pendingTerminalRow.id],
+  );
+  assert.equal(
+    await telegramTradeLifecycleProgressTestHooks.recoverStaleTelegramTradeLifecycleDeliveries(
+      { pool: client },
+    ),
+    1,
+    "the deployed stale-sending retry marker must retain its unknown delivery boundary",
+  );
+  assert.deepEqual(
+    (
+      await client.query<{ last_error: string | null; status: string }>(
+        `select status, last_error
+           from telegram_bot_action_outbox
+          where id = $1::uuid`,
+        [pendingTerminalRow.id],
+      )
+    ).rows[0],
+    {
+      last_error: "telegram_trade_lifecycle_edit_delivery_unknown",
+      status: "dead",
+    },
+  );
+  await client.query(
+    `update telegram_bot_action_outbox
+        set status = 'retry',
+            attempt_count = 0,
+            last_error = 'Historical lifecycle delivery needs receipt verification.'
+      where id = $1::uuid`,
+    [pendingTerminalRow.id],
+  );
+  assert.equal(
+    await telegramTradeLifecycleProgressTestHooks.recoverStaleTelegramTradeLifecycleDeliveries(
+      { pool: client },
+    ),
+    1,
+    "a deployed historical rearm marker must restore its already-sent evidence",
+  );
+  assert.deepEqual(
+    (
+      await client.query<{ last_error: string | null; status: string }>(
+        `select status, last_error
+           from telegram_bot_action_outbox
+          where id = $1::uuid`,
+        [pendingTerminalRow.id],
+      )
+    ).rows[0],
+    {
+      last_error: "telegram_trade_lifecycle_historical_sent_restored",
+      status: "sent",
+    },
+  );
+  await client.query(
+    `update telegram_bot_action_outbox
+        set status = 'sending',
+            attempt_count = 5,
+            delivery_attempt_id = gen_random_uuid(),
+            delivery_started_at = clock_timestamp() - interval '30 seconds'
+      where id = $1::uuid`,
+    [pendingTerminalRow.id],
+  );
+  assert.equal(
+    await telegramTradeLifecycleProgressTestHooks.recoverStaleTelegramTradeLifecycleDeliveries(
+      { pool: client },
+    ),
+    1,
+    "a crashed lifecycle edit at the attempt limit must be recovered terminally",
+  );
+  assert.deepEqual(
+    (
+      await client.query<{
+        last_error: string | null;
+        status: string;
+      }>(
+        `select status, last_error
+           from telegram_bot_action_outbox
+          where id = $1::uuid`,
+        [pendingTerminalRow.id],
+      )
+    ).rows[0],
+    {
+      last_error: "telegram_trade_lifecycle_edit_delivery_unknown",
+      status: "dead",
+    },
+    "a stale terminal claim at the attempt limit has an unknown delivery boundary",
+  );
+  await client.query(
+    `update telegram_bot_action_outbox
+        set status = 'retry',
+            last_error = null,
+            delivery_attempt_id = null,
+            delivery_started_at = null
+      where id = $1::uuid`,
+    [pendingTerminalRow.id],
+  );
+  assert.equal(
+    await telegramTradeLifecycleProgressTestHooks.recoverStaleTelegramTradeLifecycleDeliveries(
+      { pool: client },
+    ),
+    1,
+    "an exhausted retry row from an older worker must be quarantined before claim",
+  );
+  assert.deepEqual(
+    (
+      await client.query<{
+        last_error: string | null;
+        status: string;
+      }>(
+        `select status, last_error
+           from telegram_bot_action_outbox
+          where id = $1::uuid`,
+        [pendingTerminalRow.id],
+      )
+    ).rows[0],
+    {
+      last_error: "telegram_trade_lifecycle_edit_attempts_exhausted",
+      status: "dead",
+    },
+  );
+
+  const genericFillNotificationId = (
+    await client.query<{ id: string }>(
+      `insert into telegram_notification_outbox (
+         user_id, event_key, topic, event_occurred_at, payload, status
+       ) values (
+         $1::uuid, $2::text, 'order_filled', now() - interval '1 minute',
+         jsonb_build_object(
+           'type', 'order_filled',
+           'data', jsonb_build_object(
+             'source', 'telegram_bot',
+             'sourceIntentId', $3::text,
+             'venue', 'polymarket',
+             'orderId', 'direct-lifecycle-order'
+           )
+         ),
+         'sending'
+       )
+       returning id::text`,
+      [
+        userId,
+        `terminal-delivery-ownership:${suffix}`,
+        directLifecycleIntentId,
+      ],
+    )
+  ).rows[0]?.id;
+  assert.ok(genericFillNotificationId);
+
+  await client.query(
+    `update telegram_trade_intents
+        set status = 'submitted', updated_at = clock_timestamp()
+      where id = $1::uuid`,
+    [directLifecycleIntentId],
+  );
+  assert.equal(
+    await telegramNotificationDeliveryTestHooks.resolveTelegramOrderFilledDeliveryOwnership(
+      {
+        db: client,
+        outboxId: genericFillNotificationId,
+        payload: {
+          data: {
+            orderId: "direct-lifecycle-order",
+            source: "telegram_bot",
+            sourceIntentId: directLifecycleIntentId,
+            venue: "polymarket",
+          },
+        },
+        userId,
+      },
+    ),
+    "deferred_to_lifecycle",
+    "an exact fill notification cannot bypass lifecycle ownership before intent finalization",
+  );
+  assert.equal(
+    (
+      await client.query<{ status: string }>(
+        `select status
+           from telegram_notification_outbox
+          where id = $1::uuid`,
+        [genericFillNotificationId],
+      )
+    ).rows[0]?.status,
+    "retry",
+  );
+  await client.query(
+    `update telegram_trade_intents
+        set status = 'filled', updated_at = clock_timestamp()
+      where id = $1::uuid`,
+    [directLifecycleIntentId],
+  );
+  await client.query(
+    `update telegram_notification_outbox
+        set status = 'sending', attempt_count = 1
+      where id = $1::uuid`,
+    [genericFillNotificationId],
+  );
+  assert.equal(
+    await telegramNotificationDeliveryTestHooks.resolveTelegramOrderFilledDeliveryOwnership(
+      {
+        db: client,
+        outboxId: genericFillNotificationId,
+        payload: {
+          data: {
+            orderId: "direct-lifecycle-order",
+            source: "telegram_bot",
+            sourceIntentId: directLifecycleIntentId,
+            venue: "polymarket",
+          },
+        },
+        userId,
+      },
+    ),
+    "skipped_for_lifecycle",
+    "a durable lifecycle receipt owns terminal delivery",
+  );
+  assert.equal(
+    (
+      await client.query<{ status: string }>(
+        `select status
+           from telegram_notification_outbox
+          where id = $1::uuid`,
+        [genericFillNotificationId],
+      )
+    ).rows[0]?.status,
+    "skipped",
+  );
+
+  await client.query(
+    `update telegram_trade_intents
+        set result = (result - 'telegramReceipt') || jsonb_build_object(
+              'telegramReceipt',
+              jsonb_build_object(
+                'deliveredAt', clock_timestamp(),
+                'delivery', 'edit',
+                'messageId', 701
+              )
+            )
+      where id = $1::uuid`,
+    [directLifecycleIntentId],
+  );
+  await client.query(
+    `update telegram_bot_action_outbox
+        set status = 'sent',
+            attempt_count = 5,
+            payload = jsonb_set(payload, '{state}', '"confirming_trade"'::jsonb)
+      where id = $1::uuid`,
+    [pendingTerminalRow.id],
+  );
+  await client.query(
+    `update telegram_notification_outbox
+        set status = 'sending', attempt_count = 1
+      where id = $1::uuid`,
+    [genericFillNotificationId],
+  );
+  assert.equal(
+    await telegramNotificationDeliveryTestHooks.resolveTelegramOrderFilledDeliveryOwnership(
+      {
+        db: client,
+        outboxId: genericFillNotificationId,
+        payload: {
+          data: {
+            orderId: "direct-lifecycle-order",
+            source: "telegram_bot",
+            sourceIntentId: directLifecycleIntentId,
+            venue: "polymarket",
+          },
+        },
+        userId,
+      },
+    ),
+    "deferred_to_lifecycle",
+    "a delivered nonterminal card cannot suppress the later terminal fill",
+  );
+  assert.deepEqual(
+    (
+      await client.query<{ attempt_count: number; status: string }>(
+        `select status, attempt_count
+           from telegram_bot_action_outbox
+          where id = $1::uuid`,
+        [pendingTerminalRow.id],
+      )
+    ).rows[0],
+    { attempt_count: 5, status: "sent" },
+    "delivery ownership inspection must not rearm a historical edit",
+  );
+  await client.query(
+    `update telegram_bot_action_outbox
+        set payload = jsonb_set(payload, '{state}', '"filled"'::jsonb)
+      where id = $1::uuid`,
+    [pendingTerminalRow.id],
+  );
+  await client.query(
+    `update telegram_notification_outbox
+        set status = 'sending', attempt_count = 1
+      where id = $1::uuid`,
+    [genericFillNotificationId],
+  );
+  assert.equal(
+    await telegramNotificationDeliveryTestHooks.resolveTelegramOrderFilledDeliveryOwnership(
+      {
+        db: client,
+        outboxId: genericFillNotificationId,
+        payload: {
+          data: {
+            orderId: "direct-lifecycle-order",
+            source: "telegram_bot",
+            sourceIntentId: directLifecycleIntentId,
+            venue: "polymarket",
+          },
+        },
+        userId,
+      },
+    ),
+    "skipped_for_lifecycle",
+    "a sent filled payload is durable proof of terminal lifecycle delivery",
+  );
+  assert.equal(
+    (
+      await client.query<{ status: string }>(
+        `select status
+           from telegram_notification_outbox
+          where id = $1::uuid`,
+        [genericFillNotificationId],
+      )
+    ).rows[0]?.status,
+    "skipped",
+  );
+  await client.query(
+    `update telegram_bot_action_outbox
+        set status = 'retry',
+            attempt_count = 1,
+            next_attempt_at = clock_timestamp() + interval '10 minutes'
+      where id = $1::uuid`,
+    [pendingTerminalRow.id],
+  );
+  await client.query(
+    `update telegram_notification_outbox
+        set status = 'sending', attempt_count = 1
+      where id = $1::uuid`,
+    [genericFillNotificationId],
+  );
+  assert.equal(
+    await telegramNotificationDeliveryTestHooks.resolveTelegramOrderFilledDeliveryOwnership(
+      {
+        db: client,
+        outboxId: genericFillNotificationId,
+        payload: {
+          data: {
+            orderId: "direct-lifecycle-order",
+            source: "telegram_bot",
+            sourceIntentId: directLifecycleIntentId,
+            venue: "polymarket",
+          },
+        },
+        userId,
+      },
+    ),
+    "deferred_to_lifecycle",
+    "a provider retry_after on the lifecycle edit must defer the generic fill instead of duplicating it",
+  );
+  const deferredGenericFill = (
+    await client.query<{
+      attempt_count: number;
+      delayed: boolean;
+      status: string;
+    }>(
+      `select status,
+              attempt_count,
+              next_attempt_at >= clock_timestamp() + interval '9 minutes'
+                as delayed
+         from telegram_notification_outbox
+        where id = $1::uuid`,
+      [genericFillNotificationId],
+    )
+  ).rows[0];
+  assert.deepEqual(deferredGenericFill, {
+    attempt_count: 0,
+    delayed: true,
+    status: "retry",
+  });
+
+  await client.query(
+    `update telegram_bot_action_outbox
+        set status = 'dead',
+            last_error = 'telegram_trade_lifecycle_edit_terminal:ambiguous'
+      where id = $1::uuid`,
+    [pendingTerminalRow.id],
+  );
+  await client.query(
+    `update telegram_notification_outbox
+        set status = 'sending', attempt_count = 1
+      where id = $1::uuid`,
+    [genericFillNotificationId],
+  );
+  assert.equal(
+    await telegramNotificationDeliveryTestHooks.resolveTelegramOrderFilledDeliveryOwnership(
+      {
+        db: client,
+        outboxId: genericFillNotificationId,
+        payload: {
+          data: {
+            orderId: "direct-lifecycle-order",
+            source: "telegram_bot",
+            sourceIntentId: directLifecycleIntentId,
+            venue: "polymarket",
+          },
+        },
+        userId,
+      },
+    ),
+    "lifecycle_delivery_unknown",
+    "an ambiguously exhausted terminal edit must never create a duplicate generic fill",
+  );
+  assert.equal(
+    (
+      await client.query<{ status: string }>(
+        `select status
+           from telegram_notification_outbox
+          where id = $1::uuid`,
+        [genericFillNotificationId],
+      )
+    ).rows[0]?.status,
+    "delivery_unknown",
+  );
+  assert.equal(
+    (
+      await client.query<{ owner: string | null }>(
+        `select result ->> 'telegramTerminalDeliveryOwner' as owner
+           from telegram_trade_intents
+          where id = $1::uuid`,
+        [directLifecycleIntentId],
+      )
+    ).rows[0]?.owner,
+    null,
+    "an unknown delivery boundary must not assign generic ownership",
+  );
+
+  await client.query(
+    `update telegram_trade_intents
+        set result = result - 'telegramReceipt',
+            updated_at = clock_timestamp()
+      where id = $1::uuid`,
+    [directLifecycleIntentId],
+  );
+  await client.query(
+    `update telegram_bot_action_outbox
+        set last_error = 'telegram_trade_lifecycle_edit_terminal:message_not_editable'
+      where id = $1::uuid`,
+    [pendingTerminalRow.id],
+  );
+  await client.query(
+    `update telegram_notification_outbox
+        set status = 'sending', attempt_count = 1
+      where id = $1::uuid`,
+    [genericFillNotificationId],
+  );
+  assert.equal(
+    await telegramNotificationDeliveryTestHooks.resolveTelegramOrderFilledDeliveryOwnership(
+      {
+        db: client,
+        outboxId: genericFillNotificationId,
+        payload: {
+          data: {
+            orderId: "direct-lifecycle-order",
+            source: "telegram_bot",
+            sourceIntentId: directLifecycleIntentId,
+            venue: "polymarket",
+          },
+        },
+        userId,
+      },
+    ),
+    "generic_fallback",
+    "a definitively undeliverable lifecycle edit must hand terminal delivery to the standalone notification",
+  );
+  assert.equal(
+    (
+      await client.query<{ owner: string | null }>(
+        `select result ->> 'telegramTerminalDeliveryOwner' as owner
+           from telegram_trade_intents
+          where id = $1::uuid`,
+        [directLifecycleIntentId],
+      )
+    ).rows[0]?.owner,
+    "generic_notification",
+  );
+  await client.query(
+    `update telegram_trade_intents
+        set venue_order_id = 'generic-owner-order', updated_at = clock_timestamp()
+      where id = $1::uuid`,
+    [directLifecycleIntentId],
+  );
+  assert.equal(
+    (
+      await runTelegramTradeLifecycleProjectionBatchInTransaction(client, {
+        limit: 100,
+      })
+    ).created,
+    0,
+    "a generic-owned terminal intent must never recreate a lifecycle edit",
+  );
+
+  const backloggedLifecycleIntentId = (
+    await client.query<{ id: string }>(
+      `insert into telegram_trade_intents (
+         telegram_user_id, user_id, authorization_id, chat_id,
+         telegram_message_id, action, venue, market_id, event_id, side,
+         amount_usd, status, venue_order_id, expires_at, idempotency_key,
+         delivery_mode, result
+       ) values (
+         $1, $2::uuid, $3::uuid, $1, '705', 'buy', 'polymarket', $4, $5,
+         'YES', 1, 'filled', 'backlogged-lifecycle-order',
+         now() + interval '2 minutes', $6, 'app_handoff',
+         jsonb_build_object(
+           'appHandoffExecution',
+           jsonb_build_object('version', 2, 'committedAt', now()::text)
+         )
+       ) returning id::text`,
+      [
+        telegramUserId,
+        userId,
+        authorization.id,
+        marketId,
+        eventId,
+        `backlogged-lifecycle:${suffix}`,
+      ],
+    )
+  ).rows[0]?.id;
+  assert.ok(backloggedLifecycleIntentId);
+  const backloggedNotificationId = (
+    await client.query<{ id: string }>(
+      `insert into telegram_notification_outbox (
+         user_id, event_key, topic, event_occurred_at, payload, status
+       ) values (
+         $1::uuid, $2, 'order_filled', now() - interval '1 minute',
+         jsonb_build_object(
+           'type', 'order_filled',
+           'data', jsonb_build_object(
+             'source', 'telegram_bot',
+             'sourceIntentId', $3::text,
+             'venue', 'polymarket',
+             'orderId', 'backlogged-lifecycle-order'
+           )
+         ),
+         'sending'
+       ) returning id::text`,
+      [
+        userId,
+        `backlogged-terminal-delivery:${suffix}`,
+        backloggedLifecycleIntentId,
+      ],
+    )
+  ).rows[0]?.id;
+  assert.ok(backloggedNotificationId);
+  assert.equal(
+    await telegramNotificationDeliveryTestHooks.resolveTelegramOrderFilledDeliveryOwnership(
+      {
+        db: client,
+        outboxId: backloggedNotificationId,
+        payload: {
+          data: {
+            orderId: "backlogged-lifecycle-order",
+            source: "telegram_bot",
+            sourceIntentId: backloggedLifecycleIntentId,
+            venue: "polymarket",
+          },
+        },
+        userId,
+      },
+    ),
+    "deferred_to_lifecycle",
+    "projector backlog must not let the generic notification steal lifecycle ownership",
+  );
+  assert.equal(
+    (
+      await client.query<{ owner: string | null }>(
+        `select result ->> 'telegramTerminalDeliveryOwner' as owner
+           from telegram_trade_intents
+          where id = $1::uuid`,
+        [backloggedLifecycleIntentId],
+      )
+    ).rows[0]?.owner,
+    null,
+  );
+  assert.equal(
+    (
+      await runTelegramTradeLifecycleProjectionBatchInTransaction(client, {
+        limit: 100,
+      })
+    ).created,
+    1,
+    "the normal projector remains authoritative after a generic notification defers",
+  );
+  await client.query(
+    `delete from telegram_notification_outbox where id = $1::uuid`,
+    [backloggedNotificationId],
+  );
+  await client.query(`delete from telegram_trade_intents where id = $1::uuid`, [
+    backloggedLifecycleIntentId,
+  ]);
+
+  const submittedReceiptIntentId = (
+    await client.query<{ id: string }>(
+      `insert into telegram_trade_intents (
+         telegram_user_id, user_id, authorization_id, chat_id,
+         telegram_message_id, action, venue, market_id, event_id, side,
+         amount_usd, status, venue_order_id, expires_at, idempotency_key,
+         delivery_mode, result
+       ) values (
+         $1, $2::uuid, $3::uuid, $1, '706', 'buy', 'polymarket', $4, $5,
+         'YES', 1, 'filled', 'submitted-receipt-order',
+         now() + interval '2 minutes', $6, 'bot_submit',
+         jsonb_build_object(
+           'telegramReceipt', jsonb_build_object(
+             'deliveredAt', now()::text,
+             'delivery', 'edit',
+             'messageId', 706,
+             'intentStatus', 'submitted'
+           )
+         )
+       ) returning id::text`,
+      [
+        telegramUserId,
+        userId,
+        authorization.id,
+        marketId,
+        eventId,
+        `submitted-receipt:${suffix}`,
+      ],
+    )
+  ).rows[0]?.id;
+  assert.ok(submittedReceiptIntentId);
+  const submittedReceiptNotificationId = (
+    await client.query<{ id: string }>(
+      `insert into telegram_notification_outbox (
+         user_id, event_key, topic, event_occurred_at, payload, status
+       ) values (
+         $1::uuid, $2, 'order_filled', now() - interval '1 minute',
+         jsonb_build_object(
+           'type', 'order_filled',
+           'data', jsonb_build_object(
+             'source', 'telegram_bot',
+             'sourceIntentId', $3::text,
+             'venue', 'polymarket',
+             'orderId', 'submitted-receipt-order'
+           )
+         ),
+         'sending'
+       ) returning id::text`,
+      [
+        userId,
+        `submitted-receipt-terminal:${suffix}`,
+        submittedReceiptIntentId,
+      ],
+    )
+  ).rows[0]?.id;
+  assert.ok(submittedReceiptNotificationId);
+  assert.equal(
+    await telegramNotificationDeliveryTestHooks.resolveTelegramOrderFilledDeliveryOwnership(
+      {
+        db: client,
+        outboxId: submittedReceiptNotificationId,
+        payload: {
+          data: {
+            orderId: "submitted-receipt-order",
+            source: "telegram_bot",
+            sourceIntentId: submittedReceiptIntentId,
+            venue: "polymarket",
+          },
+        },
+        userId,
+      },
+    ),
+    "generic_fallback",
+    "a submitted-card receipt must not suppress the later terminal fill",
+  );
+  await client.query(
+    `update telegram_trade_intents
+        set result = jsonb_build_object(
+              'telegramReceipt',
+              jsonb_build_object(
+                'deliveredAt', now()::text,
+                'delivery', 'edit',
+                'messageId', 706
+              )
+            ),
+            updated_at = clock_timestamp()
+      where id = $1::uuid`,
+    [submittedReceiptIntentId],
+  );
+  await client.query(
+    `update telegram_notification_outbox
+        set status = 'sending', attempt_count = 1
+      where id = $1::uuid`,
+    [submittedReceiptNotificationId],
+  );
+  assert.equal(
+    await telegramNotificationDeliveryTestHooks.resolveTelegramOrderFilledDeliveryOwnership(
+      {
+        db: client,
+        outboxId: submittedReceiptNotificationId,
+        payload: {
+          data: {
+            orderId: "submitted-receipt-order",
+            source: "telegram_bot",
+            sourceIntentId: submittedReceiptIntentId,
+            venue: "polymarket",
+          },
+        },
+        userId,
+      },
+    ),
+    "lifecycle_delivery_unknown",
+    "a legacy status-less receipt cannot prove that a terminal fill was or was not delivered",
+  );
+  assert.equal(
+    (
+      await client.query<{ status: string }>(
+        `select status
+           from telegram_notification_outbox
+          where id = $1::uuid`,
+        [submittedReceiptNotificationId],
+      )
+    ).rows[0]?.status,
+    "delivery_unknown",
+  );
+  await client.query(
+    `delete from telegram_notification_outbox where id = $1::uuid`,
+    [submittedReceiptNotificationId],
+  );
+  await client.query(`delete from telegram_trade_intents where id = $1::uuid`, [
+    submittedReceiptIntentId,
+  ]);
+
+  const routeReceiptIntentId = (
+    await client.query<{ id: string }>(
+      `insert into telegram_trade_intents (
+         telegram_user_id, user_id, authorization_id, action, venue,
+         market_id, event_id, side, amount_usd, status, venue_order_id,
+         expires_at, idempotency_key, delivery_mode
+       ) values (
+         $1, $2::uuid, $3::uuid, 'buy', 'polymarket', $4, $5, 'YES', 1,
+         'filled', 'route-receipt-order', now() + interval '2 minutes', $6,
+         'bot_submit'
+       ) returning id::text`,
+      [
+        telegramUserId,
+        userId,
+        authorization.id,
+        marketId,
+        eventId,
+        `route-receipt:${suffix}`,
+      ],
+    )
+  ).rows[0]?.id;
+  assert.ok(routeReceiptIntentId);
+  const recordedTerminalReceipt = await app.inject({
+    method: "POST",
+    payload: {
+      delivery: "edit",
+      messageId: 707,
+      telegramUserId,
+    },
+    url: `/internal/telegram-bot/trading/intents/${routeReceiptIntentId}/receipt`,
+  });
+  assert.equal(recordedTerminalReceipt.statusCode, 200);
+  assert.equal(recordedTerminalReceipt.json().marked, true);
+  assert.equal(
+    (
+      await client.query<{ intent_status: string | null }>(
+        `select result #>> '{telegramReceipt,intentStatus}' as intent_status
+           from telegram_trade_intents
+          where id = $1::uuid`,
+        [routeReceiptIntentId],
+      )
+    ).rows[0]?.intent_status,
+    "filled",
+    "the receipt endpoint records the status of the card it actually delivered",
+  );
+  await client.query(`delete from telegram_trade_intents where id = $1::uuid`, [
+    routeReceiptIntentId,
   ]);
 
   // More than one bounded batch of old, unchanged projections must not starve
@@ -1286,6 +2358,74 @@ try {
       marketId,
     ],
   );
+  // A funding operation becomes terminal when its reservation is consumed.
+  // The linked intent may already be submitting or reconciling a venue order;
+  // that trade boundary must remain authoritative over the funding status.
+  const fundedSubmittingIntent = await client.query<{ id: string }>(
+    `insert into telegram_trade_intents (
+       telegram_user_id, user_id, authorization_id, chat_id,
+       telegram_message_id, action, venue, market_id, event_id, side,
+       amount_usd, status, expires_at, idempotency_key, delivery_mode,
+       funding_operation_id, submit_started_at
+     ) values (
+       $1, $2, $3, $1, '702', 'buy', 'polymarket', $4, $5, 'YES',
+       1, 'executing', now() + interval '2 minutes', $6, 'bot_submit',
+       $7::uuid, now()
+     ) returning id`,
+    [
+      telegramUserId,
+      userId,
+      authorization.id,
+      marketId,
+      eventId,
+      `funded-submitting:${suffix}`,
+      terminalFundingOperation.rows[0]?.id,
+    ],
+  );
+  const fundedSubmittingIntentId = fundedSubmittingIntent.rows[0]?.id;
+  assert.ok(fundedSubmittingIntentId);
+  await runTelegramTradeLifecycleProjectionBatchInTransaction(client);
+  assert.deepEqual(
+    (
+      await client.query<{ can_cancel: boolean; state: string }>(
+        `select (result -> 'shortfallProgress' ->> 'canCancel')::boolean as can_cancel,
+                result -> 'shortfallProgress' ->> 'state' as state
+           from telegram_trade_intents
+          where id = $1::uuid`,
+        [fundedSubmittingIntentId],
+      )
+    ).rows[0],
+    { can_cancel: false, state: "submitting_trade" },
+  );
+  await client.query(
+    `update telegram_trade_intents
+        set status = 'submitted',
+            venue_order_id = 'funded-submitting-order',
+            updated_at = now()
+      where id = $1::uuid`,
+    [fundedSubmittingIntentId],
+  );
+  await runTelegramTradeLifecycleProjectionBatchInTransaction(client);
+  assert.deepEqual(
+    (
+      await client.query<{ can_cancel: boolean; state: string }>(
+        `select (result -> 'shortfallProgress' ->> 'canCancel')::boolean as can_cancel,
+                result -> 'shortfallProgress' ->> 'state' as state
+           from telegram_trade_intents
+          where id = $1::uuid`,
+        [fundedSubmittingIntentId],
+      )
+    ).rows[0],
+    { can_cancel: false, state: "confirming_trade" },
+  );
+  await client.query(
+    `delete from telegram_bot_action_outbox
+      where trade_intent_id = $1::uuid`,
+    [fundedSubmittingIntentId],
+  );
+  await client.query(`delete from telegram_trade_intents where id = $1::uuid`, [
+    fundedSubmittingIntentId,
+  ]);
   const protectedFundingReservation = await client.query<{ id: string }>(
     `insert into balance_reservations (
        user_id, operation_id, component_id, location_id, network_id,
@@ -1804,6 +2944,628 @@ try {
       )
     ).rows[0]?.enabled,
     false,
+  );
+
+  const standaloneIntent = await client.query<{ id: string }>(
+    `insert into telegram_trade_intents (
+       telegram_user_id, user_id, authorization_id, chat_id,
+       telegram_message_id, action, venue, market_id, event_id, side,
+       amount_usd, status, venue_order_id, expires_at, idempotency_key,
+       delivery_mode, result
+     ) values (
+       $1, $2, $3, $1, '1701', 'buy', 'polymarket', $4, $5, 'YES',
+       1, 'filled', 'standalone-order', now() + interval '2 minutes', $6,
+       'app_handoff',
+       jsonb_build_object(
+         'appHandoffExecution',
+         jsonb_build_object('version', 2, 'committedAt', now()::text)
+       )
+     ) returning id`,
+    [
+      telegramUserId,
+      userId,
+      authorization.id,
+      marketId,
+      eventId,
+      `standalone-lifecycle:${suffix}`,
+    ],
+  );
+  const standaloneIntentId = standaloneIntent.rows[0]?.id;
+  assert.ok(standaloneIntentId);
+  assert.equal(
+    (
+      await runTelegramTradeLifecycleProjectionBatchInTransaction(client, {
+        limit: 100,
+      })
+    ).created >= 1,
+    true,
+  );
+  await client.query(
+    `update telegram_bot_action_outbox
+        set next_attempt_at = '2000-01-01T00:00:00Z'::timestamptz
+      where trade_intent_id = $1::uuid
+        and action = 'trade_funding_edit'
+        and status in ('pending', 'retry')`,
+    [standaloneIntentId],
+  );
+  const standaloneNavigation = await invokeIntentNavigation(
+    standaloneIntentId,
+    "open_market",
+    1701,
+  );
+  assert.equal(standaloneNavigation.handled, true);
+  assert.equal(
+    (
+      await client.query<{ reason: string | null }>(
+        `select result #>> '{telegramLifecycleMessageBoundary,reason}' as reason
+           from telegram_trade_intents
+          where id = $1::uuid`,
+        [standaloneIntentId],
+      )
+    ).rows[0]?.reason,
+    "navigation",
+    "market navigation fences the old editable Telegram generation",
+  );
+  const transactionBoundPool = {
+    connect: async () => ({
+      query: (async (statement: unknown, values?: readonly unknown[]) => {
+        if (
+          typeof statement === "string" &&
+          /^(?:begin|commit|rollback)$/iu.test(statement.trim())
+        ) {
+          return {
+            command: statement.trim().toUpperCase(),
+            fields: [],
+            oid: 0,
+            rowCount: null,
+            rows: [],
+          };
+        }
+        return client.query(statement as string, values as unknown[]);
+      }) as typeof client.query,
+      release: () => undefined,
+    }),
+    query: client.query.bind(client),
+  } as unknown as typeof pool;
+  let standaloneEdits = 0;
+  let standaloneSends = 0;
+  assert.deepEqual(
+    await deliverTelegramTradeLifecycleProgress({
+      limit: 1,
+      pool: transactionBoundPool,
+      renderCoordinator,
+      telegram: {
+        editMessageText: async () => {
+          standaloneEdits += 1;
+          return { messageId: 1701, ok: true };
+        },
+        sendMessage: async () => {
+          standaloneSends += 1;
+          assert.equal(
+            await fenceTelegramTradeLifecycleNavigation({
+              chatId: telegramUserId,
+              db,
+              intentId: standaloneIntentId,
+              messageId: 1701,
+              telegramUserId,
+            }),
+            1,
+            "navigation during a standalone send must not rearm that send",
+          );
+          return { messageId: 1702, ok: true };
+        },
+      },
+    }),
+    { claimed: 1, delivered: 1, retried: 0 },
+    "a navigation fence moves the authoritative terminal lifecycle to a new message",
+  );
+  assert.equal(standaloneEdits, 0);
+  assert.equal(standaloneSends, 1);
+  assert.deepEqual(
+    (
+      await client.query<{
+        boundary: unknown;
+        delivery: string | null;
+        message_id: string | null;
+      }>(
+        `select result -> 'telegramLifecycleMessageBoundary' as boundary,
+                result #>> '{telegramReceipt,delivery}' as delivery,
+                telegram_message_id::text as message_id
+           from telegram_trade_intents
+          where id = $1::uuid`,
+        [standaloneIntentId],
+      )
+    ).rows[0],
+    { boundary: null, delivery: "send", message_id: "1702" },
+    "a successful standalone delivery establishes the next editable generation",
+  );
+  const staleStandaloneNavigation = await invokeIntentNavigation(
+    standaloneIntentId,
+    "open_market",
+    1701,
+  );
+  assert.match(
+    staleStandaloneNavigation.answers[0]?.text ?? "",
+    /no longer current/iu,
+  );
+  assert.equal(
+    (
+      await client.query<{ message_id: string | null }>(
+        `select telegram_message_id::text as message_id
+           from telegram_trade_intents
+          where id = $1::uuid`,
+        [standaloneIntentId],
+      )
+    ).rows[0]?.message_id,
+    "1702",
+    "a callback from the old card cannot regress a successful standalone rebind",
+  );
+  await client.query(
+    `update telegram_trade_intents
+        set venue_order_id = 'standalone-order-reconciled',
+            updated_at = clock_timestamp()
+      where id = $1::uuid`,
+    [standaloneIntentId],
+  );
+  assert.equal(
+    (
+      await runTelegramTradeLifecycleProjectionBatchInTransaction(client, {
+        limit: 100,
+      })
+    ).created >= 1,
+    true,
+  );
+  await client.query(
+    `update telegram_bot_action_outbox
+        set next_attempt_at = '2000-01-01T00:00:00Z'::timestamptz
+      where trade_intent_id = $1::uuid
+        and action = 'trade_funding_edit'
+        and status in ('pending', 'retry')`,
+    [standaloneIntentId],
+  );
+  let fallbackEdits = 0;
+  let fallbackSends = 0;
+  assert.deepEqual(
+    await deliverTelegramTradeLifecycleProgress({
+      limit: 1,
+      pool: transactionBoundPool,
+      renderCoordinator,
+      telegram: {
+        editMessageText: async () => {
+          fallbackEdits += 1;
+          return {
+            error: "message_not_editable",
+            message: "message cannot be edited",
+            ok: false,
+          };
+        },
+        sendMessage: async () => {
+          fallbackSends += 1;
+          return { messageId: 1703, ok: true };
+        },
+      },
+    }),
+    { claimed: 1, delivered: 1, retried: 0 },
+    "a definite edit failure falls back to a preference-independent terminal send",
+  );
+  assert.equal(fallbackEdits, 1);
+  assert.equal(fallbackSends, 1);
+  assert.equal(
+    (
+      await client.query<{ message_id: string | null }>(
+        `select telegram_message_id::text as message_id
+           from telegram_trade_intents
+          where id = $1::uuid`,
+        [standaloneIntentId],
+      )
+    ).rows[0]?.message_id,
+    "1703",
+  );
+
+  const orderedIntent = await client.query<{ id: string }>(
+    `insert into telegram_trade_intents (
+       telegram_user_id, user_id, authorization_id, chat_id,
+       telegram_message_id, action, venue, market_id, event_id, side,
+       amount_usd, status, expires_at, idempotency_key, delivery_mode, result
+     ) values (
+       $1, $2, $3, $1, '1801', 'buy', 'polymarket', $4, $5, 'YES',
+       1, 'executing', now() + interval '2 minutes', $6, 'app_handoff',
+       jsonb_build_object(
+         'appHandoffExecution',
+         jsonb_build_object('version', 2, 'committedAt', now()::text)
+       )
+     ) returning id`,
+    [
+      telegramUserId,
+      userId,
+      authorization.id,
+      marketId,
+      eventId,
+      `ordered-lifecycle:${suffix}`,
+    ],
+  );
+  const orderedIntentId = orderedIntent.rows[0]?.id;
+  assert.ok(orderedIntentId);
+  await runTelegramTradeLifecycleProjectionBatchInTransaction(client, {
+    limit: 100,
+  });
+  const orderedRevision = Number(
+    (
+      await client.query<{ revision: string }>(
+        `select result ->> 'shortfallProgressRevision' as revision
+           from telegram_trade_intents
+          where id = $1::uuid`,
+        [orderedIntentId],
+      )
+    ).rows[0]?.revision,
+  );
+  await client.query(
+    `update telegram_bot_action_outbox
+        set status = 'sending',
+            delivery_attempt_id = gen_random_uuid(),
+            delivery_started_at = clock_timestamp()
+      where trade_intent_id = $1::uuid
+        and action = 'trade_funding_edit'
+        and state_revision = $2::int`,
+    [orderedIntentId, orderedRevision],
+  );
+  await client.query(
+    `update telegram_trade_intents
+        set status = 'filled', venue_order_id = 'ordered-fill',
+            updated_at = clock_timestamp()
+      where id = $1::uuid`,
+    [orderedIntentId],
+  );
+  await runTelegramTradeLifecycleProjectionBatchInTransaction(client, {
+    limit: 100,
+  });
+  assert.equal(
+    Number(
+      (
+        await client.query<{ revision: string }>(
+          `select result ->> 'shortfallProgressRevision' as revision
+             from telegram_trade_intents
+            where id = $1::uuid`,
+          [orderedIntentId],
+        )
+      ).rows[0]?.revision,
+    ),
+    orderedRevision,
+    "a newer durable state waits until the older Telegram mutation leaves sending",
+  );
+  await client.query(
+    `update telegram_bot_action_outbox
+        set status = 'sent', delivery_attempt_id = null,
+            delivery_started_at = null
+      where trade_intent_id = $1::uuid
+        and action = 'trade_funding_edit'
+        and state_revision = $2::int`,
+    [orderedIntentId, orderedRevision],
+  );
+  await runTelegramTradeLifecycleProjectionBatchInTransaction(client, {
+    limit: 100,
+  });
+  assert.equal(
+    Number(
+      (
+        await client.query<{ revision: string }>(
+          `select result ->> 'shortfallProgressRevision' as revision
+             from telegram_trade_intents
+            where id = $1::uuid`,
+          [orderedIntentId],
+        )
+      ).rows[0]?.revision,
+    ),
+    orderedRevision + 1,
+    "the latest state is projected immediately after the previous mutation settles",
+  );
+
+  const lateNavigationIntent = await client.query<{ id: string }>(
+    `insert into telegram_trade_intents (
+       telegram_user_id, user_id, authorization_id, chat_id,
+       telegram_message_id, action, venue, market_id, event_id, side,
+       amount_usd, status, venue_order_id, expires_at, idempotency_key,
+       delivery_mode, result
+     ) values (
+       $1, $2, $3, $1, '1901', 'buy', 'polymarket', $4, $5, 'YES',
+       1, 'filled', 'late-navigation-fill', now() + interval '2 minutes', $6,
+       'app_handoff',
+       jsonb_build_object(
+         'appHandoffExecution',
+         jsonb_build_object('version', 2, 'committedAt', now()::text)
+       )
+     ) returning id`,
+    [
+      telegramUserId,
+      userId,
+      authorization.id,
+      marketId,
+      eventId,
+      `late-navigation-lifecycle:${suffix}`,
+    ],
+  );
+  const lateNavigationIntentId = lateNavigationIntent.rows[0]?.id;
+  assert.ok(lateNavigationIntentId);
+  await runTelegramTradeLifecycleProjectionBatchInTransaction(client, {
+    limit: 100,
+  });
+  await client.query(
+    `update telegram_bot_action_outbox
+        set status = 'dead', last_error = 'test_isolation'
+      where action = 'trade_funding_edit'
+        and trade_intent_id <> $1::uuid
+        and status in ('pending', 'retry')`,
+    [lateNavigationIntentId],
+  );
+  await client.query(
+    `update telegram_bot_action_outbox
+        set next_attempt_at = '2000-01-01T00:00:00Z'::timestamptz
+      where trade_intent_id = $1::uuid
+        and action = 'trade_funding_edit'
+        and status in ('pending', 'retry')`,
+    [lateNavigationIntentId],
+  );
+  let lateNavigationEdits = 0;
+  let lateNavigationSends = 0;
+  assert.deepEqual(
+    await deliverTelegramTradeLifecycleProgress({
+      limit: 1,
+      pool: transactionBoundPool,
+      renderCoordinator: {
+        claim: async () => undefined,
+        claimBackground: async () => true,
+        isCurrent: async () => true,
+        runExclusive: async <T>(input: { deliver: () => Promise<T> }) => {
+          await client.query(
+            `update telegram_trade_intents
+                set result = result || jsonb_build_object(
+                      'telegramLifecycleMessageBoundary',
+                      jsonb_build_object(
+                        'messageId', telegram_message_id,
+                        'reason', 'navigation',
+                        'mutation', 'navigation'
+                      )
+                    )
+              where id = $1::uuid`,
+            [lateNavigationIntentId],
+          );
+          return { status: "completed" as const, value: await input.deliver() };
+        },
+      },
+      telegram: {
+        editMessageText: async () => {
+          lateNavigationEdits += 1;
+          return { messageId: 1901, ok: true };
+        },
+        sendMessage: async () => {
+          lateNavigationSends += 1;
+          return { messageId: 1902, ok: true };
+        },
+      },
+    }),
+    { claimed: 1, delivered: 1, retried: 0 },
+    "a navigation fence written after claim is revalidated before Telegram mutation",
+  );
+  assert.equal(lateNavigationEdits, 0);
+  assert.equal(lateNavigationSends, 1);
+
+  await client.query(
+    `update telegram_trade_intents
+        set venue_order_id = 'late-navigation-fill-reconciled',
+            updated_at = clock_timestamp()
+      where id = $1::uuid`,
+    [lateNavigationIntentId],
+  );
+  await runTelegramTradeLifecycleProjectionBatchInTransaction(client, {
+    limit: 100,
+  });
+  await client.query(
+    `update telegram_bot_action_outbox
+        set next_attempt_at = '2000-01-01T00:00:00Z'::timestamptz
+      where trade_intent_id = $1::uuid
+        and action = 'trade_funding_edit'
+        and status in ('pending', 'retry')`,
+    [lateNavigationIntentId],
+  );
+  let navigationDuringEditSends = 0;
+  assert.deepEqual(
+    await deliverTelegramTradeLifecycleProgress({
+      limit: 1,
+      pool: transactionBoundPool,
+      renderCoordinator,
+      telegram: {
+        editMessageText: async () => {
+          assert.equal(
+            await fenceTelegramTradeLifecycleNavigation({
+              chatId: telegramUserId,
+              db,
+              intentId: lateNavigationIntentId,
+              messageId: 1902,
+              telegramUserId,
+            }),
+            1,
+          );
+          return { messageId: 1902, ok: true };
+        },
+        sendMessage: async () => {
+          navigationDuringEditSends += 1;
+          return { messageId: 1903, ok: true };
+        },
+      },
+    }),
+    { claimed: 1, delivered: 0, retried: 0 },
+    "navigation during an edit rearms that revision instead of losing it",
+  );
+  assert.deepEqual(
+    await deliverTelegramTradeLifecycleProgress({
+      limit: 1,
+      pool: transactionBoundPool,
+      renderCoordinator,
+      telegram: {
+        editMessageText: async () => {
+          assert.fail(
+            "the rearmed lifecycle revision must not edit the market card",
+          );
+        },
+        sendMessage: async () => {
+          navigationDuringEditSends += 1;
+          return { messageId: 1903, ok: true };
+        },
+      },
+    }),
+    { claimed: 1, delivered: 1, retried: 0 },
+    "the rearmed revision is delivered once as the next standalone generation",
+  );
+  assert.equal(navigationDuringEditSends, 1);
+
+  const ambiguousSendIntent = await client.query<{ id: string }>(
+    `insert into telegram_trade_intents (
+       telegram_user_id, user_id, authorization_id, chat_id,
+       telegram_message_id, action, venue, market_id, event_id, side,
+       amount_usd, status, venue_order_id, expires_at, idempotency_key,
+       delivery_mode, result
+     ) values (
+       $1, $2, $3, $1, '2001', 'buy', 'polymarket', $4, $5, 'YES',
+       1, 'filled', 'ambiguous-send-fill', now() + interval '2 minutes', $6,
+       'app_handoff',
+       jsonb_build_object(
+         'appHandoffExecution',
+         jsonb_build_object('version', 2, 'committedAt', now()::text),
+         'telegramLifecycleMessageBoundary',
+         jsonb_build_object(
+           'messageId', 2001,
+           'reason', 'navigation',
+           'mutation', 'navigation'
+         )
+       )
+     ) returning id`,
+    [
+      telegramUserId,
+      userId,
+      authorization.id,
+      marketId,
+      eventId,
+      `ambiguous-send-lifecycle:${suffix}`,
+    ],
+  );
+  const ambiguousSendIntentId = ambiguousSendIntent.rows[0]?.id;
+  assert.ok(ambiguousSendIntentId);
+  await runTelegramTradeLifecycleProjectionBatchInTransaction(client, {
+    limit: 100,
+  });
+  await client.query(
+    `update telegram_bot_action_outbox
+        set next_attempt_at = '2000-01-01T00:00:00Z'::timestamptz
+      where trade_intent_id = $1::uuid
+        and action = 'trade_funding_edit'
+        and status in ('pending', 'retry')`,
+    [ambiguousSendIntentId],
+  );
+  assert.deepEqual(
+    await deliverTelegramTradeLifecycleProgress({
+      limit: 1,
+      pool: transactionBoundPool,
+      renderCoordinator,
+      telegram: {
+        editMessageText: async () => {
+          assert.fail("a fenced lifecycle revision must not edit the old card");
+        },
+        sendMessage: async () => ({
+          error: "ambiguous",
+          message: "request timeout after send",
+          ok: false,
+        }),
+      },
+    }),
+    { claimed: 1, delivered: 0, retried: 0 },
+  );
+  assert.equal(
+    (
+      await client.query<{ mutation: string | null }>(
+        `select result #>> '{telegramLifecycleMessageBoundary,mutation}' as mutation
+           from telegram_trade_intents
+          where id = $1::uuid`,
+        [ambiguousSendIntentId],
+      )
+    ).rows[0]?.mutation,
+    "send",
+    "an ambiguous standalone send quarantines that message generation",
+  );
+  const ambiguousSendNavigation = await invokeIntentNavigation(
+    ambiguousSendIntentId,
+    "open_market",
+    2001,
+  );
+  assert.equal(ambiguousSendNavigation.handled, true);
+  assert.equal(
+    (
+      await client.query<{ mutation: string | null }>(
+        `select result #>> '{telegramLifecycleMessageBoundary,mutation}' as mutation
+           from telegram_trade_intents
+          where id = $1::uuid`,
+        [ambiguousSendIntentId],
+      )
+    ).rows[0]?.mutation,
+    "send",
+    "navigation cannot clear an ambiguous standalone-send quarantine",
+  );
+  await client.query(
+    `update telegram_trade_intents
+        set venue_order_id = 'ambiguous-send-fill-reconciled',
+            updated_at = clock_timestamp()
+      where id = $1::uuid`,
+    [ambiguousSendIntentId],
+  );
+  await runTelegramTradeLifecycleProjectionBatchInTransaction(client, {
+    limit: 100,
+  });
+  await client.query(
+    `update telegram_bot_action_outbox
+        set next_attempt_at = '2000-01-01T00:00:00Z'::timestamptz
+      where trade_intent_id = $1::uuid
+        and action = 'trade_funding_edit'
+        and status in ('pending', 'retry')`,
+    [ambiguousSendIntentId],
+  );
+  assert.deepEqual(
+    await deliverTelegramTradeLifecycleProgress({
+      limit: 1,
+      pool: transactionBoundPool,
+      renderCoordinator,
+      telegram: {
+        editMessageText: async () => {
+          assert.fail("a quarantined generation must not edit");
+        },
+        sendMessage: async () => {
+          assert.fail("a quarantined generation must not send twice");
+        },
+      },
+    }),
+    { claimed: 0, delivered: 0, retried: 0 },
+    "later revisions cannot cross an ambiguous standalone-send boundary",
+  );
+
+  const emptyLifecycleDelivery = await deliverTelegramTradeLifecycleProgress({
+    limit: 1,
+    pool,
+    renderCoordinator,
+    telegram: {
+      editMessageText: async () => {
+        throw new Error(
+          "the uncommitted fixture must not be externally visible",
+        );
+      },
+      sendMessage: async () => {
+        throw new Error(
+          "the uncommitted fixture must not be externally visible",
+        );
+      },
+    },
+  });
+  assert.deepEqual(
+    emptyLifecycleDelivery,
+    { claimed: 0, delivered: 0, retried: 0 },
+    "the production lifecycle claim query must parse and remain idle without a committed row",
   );
 
   await app.close();

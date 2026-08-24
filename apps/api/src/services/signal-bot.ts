@@ -215,7 +215,6 @@ import {
   joinTelegramMarkdownV2Lines,
 } from "./telegram-bot-trading-presentation.js";
 import {
-  claimSignalBotMenuRender,
   clearSignalBotMenuInput,
   createSignalBotMenuRenderGuard,
   type SignalBotMenuStateRedis,
@@ -223,6 +222,7 @@ import {
 } from "./telegram-bot-menu-state.js";
 import { handleTelegramAccountValueMenu } from "./telegram-account-value-menu.js";
 import {
+  claimTelegramBotCallbackMenuRender,
   classifyTelegramBotMenuDeliveryResult,
   createTelegramBotCallbackMenuTransport,
   sendOrEditTelegramBotMenuMessage as sendOrEditSignalBotMenuMessage,
@@ -2766,12 +2766,16 @@ export async function handleSignalBotMenuCallback(
           renderToken,
         });
   if (messageId != null) {
-    await claimSignalBotMenuRender({
+    const claimed = await claimTelegramBotCallbackMenuRender({
+      callbackQueryId: input.callbackQuery.id,
       chatId,
+      db: input.db,
       messageId,
       redis: input.redis,
-      renderToken,
+      telegram: input.telegram,
+      telegramUserId: String(telegramUserId),
     });
+    if (!claimed) return true;
   }
   const menuTransport =
     messageId == null

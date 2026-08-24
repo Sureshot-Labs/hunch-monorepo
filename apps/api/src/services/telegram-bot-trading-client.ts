@@ -261,6 +261,7 @@ type CapturedTelegramBotTradingCallbackResult = {
   }>;
   handled: boolean;
   intentStatus?: string | null;
+  lifecycleOwnsTerminalDelivery?: boolean;
   messages: Array<TelegramFundingClientMessage & { chat_id: string }>;
 };
 
@@ -934,8 +935,14 @@ export function createTelegramBotTradingInternalApiClient(input: {
           await callbackInput.answerCallbackQuery(answer);
         }
       }
+      const lifecycleOwnsTerminalDelivery =
+        result.lifecycleOwnsTerminalDelivery === true &&
+        isFinalTelegramTradeIntentStatus(result.intentStatus) &&
+        (parsed.type === "confirm" || parsed.type === "retry_buy");
       const terminalMessageRaw = confirmAcknowledged
-        ? result.messages.at(-1)
+        ? lifecycleOwnsTerminalDelivery
+          ? null
+          : result.messages.at(-1)
         : null;
       const marketCallbackData =
         "intentId" in parsed
@@ -953,7 +960,9 @@ export function createTelegramBotTradingInternalApiClient(input: {
       // card, including its own navigation. Only a terminal execution reply
       // needs the generic private-card escape row here.
       const previewMessage = !confirmAcknowledged
-        ? (result.messages.at(-1) ?? null)
+        ? lifecycleOwnsTerminalDelivery
+          ? null
+          : (result.messages.at(-1) ?? null)
         : null;
       const chatId = callbackInput.callbackQuery.message?.chat?.id;
       const messageId = callbackInput.callbackQuery.message?.message_id;
@@ -991,6 +1000,11 @@ export function createTelegramBotTradingInternalApiClient(input: {
         }
       }
       for (const [index, message] of result.messages.entries()) {
+        // Funding-linked and sealed-v2 trades use the revisioned lifecycle
+        // projector as their sole terminal renderer. The callback already
+        // replaced the controls with Processing; rendering this captured
+        // terminal reply would race or duplicate the authoritative edit.
+        if (lifecycleOwnsTerminalDelivery) continue;
         const deliveredMessage =
           confirmAcknowledged && index === result.messages.length - 1
             ? (terminalMessage ?? message)
@@ -1034,7 +1048,11 @@ export function createTelegramBotTradingInternalApiClient(input: {
           }
         }
       }
-      if (confirmAcknowledged && receiptDelivery) {
+      if (
+        confirmAcknowledged &&
+        receiptDelivery &&
+        isFinalTelegramTradeIntentStatus(result.intentStatus)
+      ) {
         await post(
           `/internal/telegram-bot/trading/intents/${parsed.intentId}/receipt`,
           {

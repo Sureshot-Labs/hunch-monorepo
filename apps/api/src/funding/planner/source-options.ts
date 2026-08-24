@@ -40,6 +40,26 @@ export const RELAY_QUOTE_TIMEOUT_MS = 5_000;
 export const TOTAL_FUNDING_PLANNER_TIMEOUT_MS = 7_000;
 export const MAX_RELAY_SOURCE_QUOTES = 16;
 
+/**
+ * The generic destination floor keeps automatic refills out of dust-sized
+ * routes. An internal serverAdditionalDestinationAmount is different: it is
+ * the exact shortfall already bound to a confirmed trade. Placement keeps
+ * that amount exact, so source economics must not reapply the generic floor
+ * and incorrectly replace a usable owned route with external Deposit.
+ */
+export function minimumDestinationUsdForFundingRequest(
+  request: Pick<
+    FundingDiscoveryRequest,
+    "purpose" | "serverAdditionalDestinationAmount"
+  >,
+  configuredMinimumDestinationUsd: string,
+): string {
+  return request.purpose === "trade_shortfall" &&
+    request.serverAdditionalDestinationAmount != null
+    ? "0"
+    : configuredMinimumDestinationUsd;
+}
+
 export type RelayFirstCandidate = Readonly<{
   routeId: string;
   providerId: string;
@@ -753,7 +773,10 @@ export class RelayFirstSourcePlanner {
             maximumFeeBps: limits.maximumFeeBps,
             warningFeeUsd: limits.warningFeeUsd,
             warningFeeBps: limits.warningFeeBps,
-            minimumDestinationUsd: limits.minimumDestinationUsd,
+            minimumDestinationUsd: minimumDestinationUsdForFundingRequest(
+              input.request,
+              limits.minimumDestinationUsd,
+            ),
             maximumSlippageBps: limits.maximumSlippageBps,
             minimumDestinationEstimatedUsd:
               plannedQuote.minimumDestinationEstimatedUsd,
