@@ -1248,7 +1248,11 @@ export async function prepareTelegramAppHandoffV2Funding(input: {
   const quoteRequest: FundingQuoteRequest = {
     confirmedSourceAmount: null,
     liquidityProjectionId: projection.liquidityProjectionId,
-    requestedDestinationAmount: currentRequest.requestedDestinationAmount,
+    // The sealed trade amount remains the later Buy ceiling. Funding quotes
+    // cover only the exact additional destination credit still required now.
+    requestedDestinationAmount:
+      currentRequest.serverAdditionalDestinationAmount ??
+      currentRequest.requestedDestinationAmount,
     selectedSourceOptionId: selected.sourceOptionId,
   };
   const quote = await input.runtime.quoteForCommitScope(

@@ -191,6 +191,22 @@ const tests: TestCase[] = [
     },
   },
   {
+    name: "a caller may reverify the signed identity of an already-claimed stale session",
+    run: () => {
+      const initData = makeValidInitData({
+        auth_date: Math.floor((NOW.getTime() - 3_600_000) / 1_000).toString(),
+      });
+      const result = validateTelegramInitData(initData, {
+        allowStaleAuthDate: true,
+        botToken: BOT_TOKEN,
+        initDataMaxAgeSeconds: 300,
+        now: NOW,
+      });
+      assert.equal(result.user.id, "279058397");
+      assert.equal(result.authDate.toISOString(), "2026-07-03T11:00:00.000Z");
+    },
+  },
+  {
     name: "missing Telegram user is rejected",
     run: async () => {
       const params = new URLSearchParams(makeValidInitData());

@@ -444,6 +444,7 @@ assert.equal(
 );
 const materialized = {
   expectedSourceOptionId: null as string | null,
+  requestedDestinationRaw: null as string | null,
   request: null as FundingDiscoveryRequest | null,
   sourceOptionId: null as string | null,
 };
@@ -522,8 +523,13 @@ async function materializeLimitlessPlan(
         }) as never,
       quoteForCommitScope: async (
         _userId: string,
-        quoteRequest: { selectedSourceOptionId: string },
+        quoteRequest: {
+          requestedDestinationAmount: { raw: string } | null;
+          selectedSourceOptionId: string;
+        },
       ) => {
+        materialized.requestedDestinationRaw =
+          quoteRequest.requestedDestinationAmount?.raw ?? null;
         materialized.sourceOptionId = quoteRequest.selectedSourceOptionId;
         return { consentToken: "consent-token", quoteId: "quote-id" } as never;
       },
@@ -542,6 +548,27 @@ assert.equal(
   materialized.sourceOptionId,
   materialized.expectedSourceOptionId,
   "the production re-quote remains inside the sealed source scope",
+);
+const partialShortfallPlan = buildTelegramAppHandoffV2Plan({
+  discoveryRequest: {
+    ...limitlessRequest,
+    requestedDestinationAmount: { asset: BASE_USDC, raw: "2000000" },
+    serverAdditionalDestinationAmount: {
+      asset: BASE_USDC,
+      raw: "989897",
+    },
+  },
+  fundingPolicyRevision: "funding-policy-1",
+  projection: limitlessProjection([
+    limitlessSource("1042227", "22333", "0.022333"),
+  ]),
+  trade: { ...limitlessTrade, amountUsd: 2, maxSpendUsd: 2 },
+});
+await materializeLimitlessPlan(partialShortfallPlan, "1042322");
+assert.equal(
+  materialized.requestedDestinationRaw,
+  "989897",
+  "materialization quotes only the sealed shortfall, not the full Buy ceiling",
 );
 const sealedLimitlessSource = movingFeePlan.funding.sourceDebits[0];
 assert.ok(sealedLimitlessSource);
