@@ -7808,9 +7808,10 @@ export async function publishSignalBotFollowthroughTick(input: {
   let sentResolvedLoss = 0;
   let sentResolvedWin = 0;
   let sentStats = 0;
+  let queued = 0;
   let skipped = 0;
   for (const candidate of candidates) {
-    if (sent >= policy.maxPerTick) break;
+    if (sent + queued >= policy.maxPerTick) break;
     const stats = await buildSignalBotFollowthroughStats({
       asOf: now,
       candidate,
@@ -7899,6 +7900,7 @@ export async function publishSignalBotFollowthroughTick(input: {
         else if (kind === "resolved_win") sentResolvedWin += 1;
         else if (kind === "resolved_loss") sentResolvedLoss += 1;
       }
+      if (editorial.status === "queued") queued += 1;
       continue;
     }
     const reservation = await reserveSignalBotMessageDelivery({

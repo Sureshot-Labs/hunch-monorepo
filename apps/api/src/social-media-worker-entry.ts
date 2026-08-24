@@ -1,7 +1,7 @@
 #!/usr/bin/env tsx
 
 import { createHash, randomUUID } from "node:crypto";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -10,11 +10,13 @@ import { createPgPool, type Pool } from "@hunch/infra";
 import {
   beginSignalBotMessageDelivery,
   finishSignalBotMessageDelivery,
+  getSignalBotMessageDeliverySnapshot,
 } from "./services/signal-bot-message-delivery-ledger.js";
 import {
   claimXEditorialMediaJob,
   finishXEditorialMediaJob,
   requeueXEditorialMediaDelivery,
+  renewXEditorialMediaJobLease,
   retryXEditorialMediaJob,
   type XEditorialMediaJob,
 } from "./services/signal-bot-editorial-media-jobs.js";
@@ -32,7 +34,9 @@ type SocialMediaWorkerConfig = {
   ffmpegPath: string;
   ffprobePath: string;
   fps: number;
+  jobTimeoutMs: number;
   leaseMs: number;
+  maxVideoBytes: number;
   navigationTimeoutMs: number;
   pollIntervalMs: number;
   retryDelayMs: number;
@@ -65,7 +69,7 @@ export function isAllowedXEditorialCaptureUrl(input: {
     const url = new URL(input.captureUrl);
     return (
       input.allowedOrigins.includes(url.origin) &&
-      url.pathname.startsWith("/tracking/wallet/")
+      /^\/tracking\/wallet\/[^/]+\/?$/.test(url.pathname)
     );
   } catch {
     return false;
@@ -88,20 +92,31 @@ function positiveInt(
     : fallback;
 }
 
+function boundedInt(
+  value: string | undefined,
+  fallback: number,
+  minimum: number,
+  maximum: number,
+): number {
+  return Math.max(minimum, positiveInt(value, fallback, maximum));
+}
+
 export function parseSocialMediaWorkerConfig(
   env: NodeJS.ProcessEnv = process.env,
 ): SocialMediaWorkerConfig {
   return {
     allowedOrigins: parseAllowedOrigins(env.HUNCH_SOCIAL_MEDIA_ALLOWED_ORIGINS),
     browserExecutablePath: env.HUNCH_SOCIAL_MEDIA_CHROMIUM_PATH?.trim() || null,
-    enabled: parseBoolean(
-      env.HUNCH_SIGNAL_BOT_X_EDITORIAL_MEDIA_ENABLED,
-      false,
-    ),
+    enabled: parseBoolean(env.HUNCH_SOCIAL_MEDIA_WORKER_ENABLED, true),
     ffmpegPath: env.HUNCH_SOCIAL_MEDIA_FFMPEG_PATH?.trim() || "ffmpeg",
     ffprobePath: env.HUNCH_SOCIAL_MEDIA_FFPROBE_PATH?.trim() || "ffprobe",
     fps: positiveInt(env.HUNCH_SOCIAL_MEDIA_FPS, 30, 30),
-    leaseMs: positiveInt(env.HUNCH_SOCIAL_MEDIA_LEASE_SEC, 600, 3_600) * 1_000,
+    jobTimeoutMs:
+      boundedInt(env.HUNCH_SOCIAL_MEDIA_JOB_TIMEOUT_SEC, 300, 60, 900) * 1_000,
+    leaseMs:
+      boundedInt(env.HUNCH_SOCIAL_MEDIA_LEASE_SEC, 600, 180, 3_600) * 1_000,
+    maxVideoBytes:
+      boundedInt(env.HUNCH_SOCIAL_MEDIA_MAX_VIDEO_MB, 45, 1, 49) * 1024 * 1024,
     navigationTimeoutMs:
       positiveInt(env.HUNCH_SOCIAL_MEDIA_NAVIGATION_TIMEOUT_SEC, 45, 180) *
       1_000,
@@ -132,6 +147,21 @@ function log(event: string, fields?: Record<string, unknown>): void {
       ts: new Date().toISOString(),
     }),
   );
+}
+
+type XEditorialMediaJobOutcome =
+  | "blocked"
+  | "delivery_unknown"
+  | "failed"
+  | "lease_lost"
+  | "retry"
+  | "sent";
+
+class LeaseLostError extends Error {
+  constructor() {
+    super("The editorial media job lease is no longer owned by this worker");
+    this.name = "LeaseLostError";
+  }
 }
 
 async function markDeliveryResult(input: {
@@ -176,27 +206,149 @@ async function finishJobAsUnknown(input: {
     db: input.db,
     errorCode: input.errorCode,
     errorMessage: input.errorMessage,
-    jobId: input.job.id,
+    job: input.job,
     status: "delivery_unknown",
+  });
+}
+
+async function terminalizeStartedDeliveryAsUnknown(input: {
+  db: Parameters<typeof finishSignalBotMessageDelivery>[0]["db"];
+  errorCode: string;
+  errorMessage: string;
+  job: XEditorialMediaJob;
+  metrics: Record<string, unknown>;
+}): Promise<void> {
+  await markDeliveryResult({
+    db: input.db,
+    errorCode: input.errorCode,
+    job: input.job,
+    metrics: input.metrics,
+    status: "delivery_unknown",
+  }).catch(() => false);
+  await finishJobAsUnknown(input).catch(() => undefined);
+}
+
+async function ensureJobLease(input: {
+  db: Parameters<typeof renewXEditorialMediaJobLease>[0]["db"];
+  job: XEditorialMediaJob;
+  leaseMs: number;
+}): Promise<void> {
+  const renewed = await renewXEditorialMediaJobLease(input);
+  if (!renewed) throw new LeaseLostError();
+}
+
+async function reconcileDeliveryLedger(input: {
+  db: Parameters<typeof finishSignalBotMessageDelivery>[0]["db"];
+  job: XEditorialMediaJob;
+}): Promise<XEditorialMediaJobOutcome | null> {
+  const snapshot = await getSignalBotMessageDeliverySnapshot({
+    db: input.db,
+    deliveryRef: input.job.deliveryRef,
+  });
+  if (
+    snapshot?.status === "queued" &&
+    snapshot.attemptId === input.job.deliveryAttemptId
+  ) {
+    return null;
+  }
+  if (snapshot?.status === "sending") {
+    const persisted = await markDeliveryResult({
+      db: input.db,
+      errorCode: "delivery_recovered_from_sending",
+      job: input.job,
+      metrics: {
+        editorialMediaV1: {
+          status: "delivery_unknown",
+          version: 1,
+        },
+      },
+      status: "delivery_unknown",
+    });
+    await finishJobAsUnknown({
+      db: input.db,
+      errorCode: "delivery_recovered_from_sending",
+      errorMessage: persisted
+        ? "Recovered a job whose prior delivery outcome was ambiguous"
+        : "Could not reconcile a job whose delivery ledger was sending",
+      job: input.job,
+    });
+    return "delivery_unknown";
+  }
+  if (
+    snapshot?.status === "sent" ||
+    snapshot?.status === "blocked" ||
+    snapshot?.status === "delivery_unknown" ||
+    snapshot?.status === "skipped"
+  ) {
+    const outcome = snapshot.status === "skipped" ? "failed" : snapshot.status;
+    await finishXEditorialMediaJob({
+      db: input.db,
+      errorCode:
+        snapshot.status === "sent" ? null : `ledger_${snapshot.status}`,
+      errorMessage: "Reconciled terminal delivery ledger state after recovery",
+      job: input.job,
+      result: { reconciledFromLedger: true },
+      status: outcome,
+    });
+    return outcome;
+  }
+  await finishJobAsUnknown({
+    db: input.db,
+    errorCode: "delivery_ledger_inconsistent",
+    errorMessage: `Expected queued delivery ledger, found ${snapshot?.status ?? "missing"}`,
+    job: input.job,
+  });
+  return "delivery_unknown";
+}
+
+async function beginDeliveryOrReconcile(input: {
+  db: Parameters<typeof finishSignalBotMessageDelivery>[0]["db"];
+  job: XEditorialMediaJob;
+  leaseMs: number;
+}): Promise<true | XEditorialMediaJobOutcome> {
+  await ensureJobLease(input);
+  if (await beginDelivery(input)) return true;
+  const reconciled = await reconcileDeliveryLedger(input);
+  if (reconciled) return reconciled;
+  await ensureJobLease(input);
+  await finishJobAsUnknown({
+    db: input.db,
+    errorCode: "delivery_ledger_not_acquired",
+    errorMessage: "The queued delivery ledger could not be acquired",
+    job: input.job,
+  });
+  return "delivery_unknown";
+}
+
+async function finishQueuedDeliveryAsSkipped(input: {
+  db: Parameters<typeof finishSignalBotMessageDelivery>[0]["db"];
+  errorCode: string;
+  job: XEditorialMediaJob;
+  metrics: Record<string, unknown>;
+}): Promise<boolean> {
+  return finishSignalBotMessageDelivery({
+    attemptId: input.job.deliveryAttemptId,
+    db: input.db,
+    deliveryRef: input.job.deliveryRef,
+    errorCode: input.errorCode,
+    expectedStatus: "queued",
+    metrics: input.metrics,
+    status: "skipped",
   });
 }
 
 async function deliverTextFallback(input: {
   db: Parameters<typeof finishSignalBotMessageDelivery>[0]["db"];
   job: XEditorialMediaJob;
+  leaseMs: number;
   reason: string;
+  retryDelayMs: number;
   telegram: SignalBotTelegramClient;
-}): Promise<"blocked" | "delivery_unknown" | "failed" | "sent"> {
+}): Promise<XEditorialMediaJobOutcome> {
   let deliveryStarted = false;
   try {
-    if (!(await beginDelivery(input))) {
-      await finishJobAsUnknown({
-        ...input,
-        errorCode: "delivery_ledger_not_queued",
-        errorMessage: "Could not acquire the queued delivery ledger row",
-      });
-      return "delivery_unknown";
-    }
+    const acquired = await beginDeliveryOrReconcile(input);
+    if (acquired !== true) return acquired;
     deliveryStarted = true;
     const result = await input.telegram.sendMessage({
       chat_id: input.job.chatId,
@@ -222,11 +374,65 @@ async function deliverTextFallback(input: {
       });
       await finishXEditorialMediaJob({
         db: input.db,
-        jobId: input.job.id,
+        job: input.job,
         result: { fallback: "text", messageId: result.messageId },
         status: persisted ? "sent" : "delivery_unknown",
       });
       return persisted ? "sent" : "delivery_unknown";
+    }
+    if (result.error === "other" && result.retryAfterSec) {
+      const requeued = await requeueXEditorialMediaDelivery({
+        db: input.db,
+        job: input.job,
+      });
+      if (!requeued) {
+        await finishJobAsUnknown({
+          db: input.db,
+          errorCode: "text_delivery_requeue_failed",
+          errorMessage: result.message,
+          job: input.job,
+        });
+        return "delivery_unknown";
+      }
+      deliveryStarted = false;
+      const retryStatus = await retryXEditorialMediaJob({
+        db: input.db,
+        deliveryMode: "text",
+        errorCode: "telegram_text_rate_limited",
+        errorMessage: result.message,
+        extendForDeliveryRetry: true,
+        job: input.job,
+        retryAfterMs: Math.max(
+          input.retryDelayMs,
+          result.retryAfterSec * 1_000,
+        ),
+      });
+      if (retryStatus === "retry" || retryStatus === "lease_lost") {
+        return retryStatus;
+      }
+      const persisted = await finishQueuedDeliveryAsSkipped({
+        db: input.db,
+        errorCode: "telegram_text_retry_exhausted",
+        job: input.job,
+        metrics: {
+          editorialMediaV1: {
+            fallback: "text",
+            reason: input.reason,
+            status: "retry_exhausted",
+            version: 1,
+          },
+        },
+      });
+      await finishXEditorialMediaJob({
+        db: input.db,
+        errorCode: persisted
+          ? "telegram_text_retry_exhausted"
+          : "telegram_text_terminal_persist_failed",
+        errorMessage: result.message,
+        job: input.job,
+        status: persisted ? "failed" : "delivery_unknown",
+      });
+      return persisted ? "failed" : "delivery_unknown";
     }
     const status =
       result.error === "ambiguous"
@@ -234,7 +440,7 @@ async function deliverTextFallback(input: {
         : result.error === "blocked_or_missing"
           ? "blocked"
           : "skipped";
-    await markDeliveryResult({
+    const persisted = await markDeliveryResult({
       db: input.db,
       errorCode: result.error,
       job: input.job,
@@ -245,21 +451,27 @@ async function deliverTextFallback(input: {
       db: input.db,
       errorCode: result.error,
       errorMessage: result.message,
-      jobId: input.job.id,
-      status:
-        status === "skipped"
+      job: input.job,
+      status: !persisted
+        ? "delivery_unknown"
+        : status === "skipped"
           ? "failed"
           : status === "blocked"
             ? "blocked"
             : "delivery_unknown",
     });
-    return status === "skipped" ? "failed" : status;
+    return !persisted
+      ? "delivery_unknown"
+      : status === "skipped"
+        ? "failed"
+        : status;
   } catch (error) {
     if (!deliveryStarted) throw error;
     const message = error instanceof Error ? error.message : String(error);
-    await markDeliveryResult({
+    await terminalizeStartedDeliveryAsUnknown({
       db: input.db,
       errorCode: "text_fallback_failed_after_delivery_started",
+      errorMessage: message,
       job: input.job,
       metrics: {
         editorialMediaV1: {
@@ -269,19 +481,15 @@ async function deliverTextFallback(input: {
           version: 1,
         },
       },
-      status: "delivery_unknown",
-    }).catch(() => false);
-    await finishJobAsUnknown({
-      db: input.db,
-      errorCode: "text_fallback_failed_after_delivery_started",
-      errorMessage: message,
-      job: input.job,
-    }).catch(() => undefined);
+    });
     return "delivery_unknown";
   }
 }
 
-async function readRenderedVideos(rendered: RenderedXEditorialMedia[]): Promise<
+async function readRenderedVideos(
+  rendered: RenderedXEditorialMedia[],
+  maxVideoBytes: number,
+): Promise<
   Array<
     RenderedXEditorialMedia & {
       bytes: Uint8Array;
@@ -292,6 +500,11 @@ async function readRenderedVideos(rendered: RenderedXEditorialMedia[]): Promise<
 > {
   const videos = [];
   for (const media of rendered) {
+    if (media.byteSize > maxVideoBytes) {
+      throw new Error(
+        `${media.profile} video exceeds the configured byte limit`,
+      );
+    }
     const bytes = await readFile(media.path);
     videos.push({
       ...media,
@@ -311,16 +524,30 @@ export async function processXEditorialMediaJob(input: {
   ffprobePath: string;
   fps: number;
   job: XEditorialMediaJob;
+  leaseMs: number;
+  maxVideoBytes: number;
   navigationTimeoutMs: number;
   retryDelayMs: number;
+  signal?: AbortSignal;
   telegram: SignalBotTelegramClient;
-}): Promise<"blocked" | "delivery_unknown" | "failed" | "retry" | "sent"> {
+}): Promise<XEditorialMediaJobOutcome> {
   let temporaryDirectory: string | null = null;
   let deliveryStarted = false;
   try {
-    temporaryDirectory = await mkdtemp(
-      path.join(tmpdir(), "hunch-social-media-"),
-    );
+    input.signal?.throwIfAborted();
+    await ensureJobLease(input);
+    const reconciled = await reconcileDeliveryLedger(input);
+    if (reconciled) return reconciled;
+    if (input.job.deliveryMode === "text") {
+      return deliverTextFallback({
+        db: input.db,
+        job: input.job,
+        leaseMs: input.leaseMs,
+        reason: "text_delivery_retry",
+        retryDelayMs: input.retryDelayMs,
+        telegram: input.telegram,
+      });
+    }
     if (
       !isAllowedXEditorialCaptureUrl({
         allowedOrigins: input.allowedOrigins,
@@ -330,38 +557,47 @@ export async function processXEditorialMediaJob(input: {
       return deliverTextFallback({
         db: input.db,
         job: input.job,
+        leaseMs: input.leaseMs,
         reason: "capture_url_not_allowed",
+        retryDelayMs: input.retryDelayMs,
         telegram: input.telegram,
       });
     }
+    temporaryDirectory = await mkdtemp(
+      path.join(tmpdir(), "hunch-social-media-"),
+    );
     const render = await renderXEditorialMedia({
       browserExecutablePath: input.browserExecutablePath,
       ffmpegPath: input.ffmpegPath,
       ffprobePath: input.ffprobePath,
       fps: input.fps,
       navigationTimeoutMs: input.navigationTimeoutMs,
+      maxOutputBytes: input.maxVideoBytes,
       outputDirectory: temporaryDirectory,
       profiles: input.job.payload.profiles,
+      signal: input.signal,
       url: input.job.payload.captureUrl,
     });
     if (render.rendered.length === 0) {
       const errorMessage = Object.entries(render.errors)
         .map(([profile, message]) => `${profile}: ${message}`)
         .join("; ");
-      if (input.job.attemptCount < input.job.maxAttempts) {
-        await retryXEditorialMediaJob({
-          db: input.db,
-          errorCode: "render_failed",
-          errorMessage: errorMessage || "No media profile rendered",
-          job: input.job,
-          retryAfterMs: input.retryDelayMs,
-        });
-        return "retry";
+      const retryStatus = await retryXEditorialMediaJob({
+        db: input.db,
+        errorCode: "render_failed",
+        errorMessage: errorMessage || "No media profile rendered",
+        job: input.job,
+        retryAfterMs: input.retryDelayMs,
+      });
+      if (retryStatus === "retry" || retryStatus === "lease_lost") {
+        return retryStatus;
       }
       return deliverTextFallback({
         db: input.db,
         job: input.job,
+        leaseMs: input.leaseMs,
         reason: "render_attempts_exhausted",
+        retryDelayMs: input.retryDelayMs,
         telegram: input.telegram,
       });
     }
@@ -369,19 +605,19 @@ export async function processXEditorialMediaJob(input: {
       return deliverTextFallback({
         db: input.db,
         job: input.job,
+        leaseMs: input.leaseMs,
         reason: "telegram_media_methods_unavailable",
+        retryDelayMs: input.retryDelayMs,
         telegram: input.telegram,
       });
     }
-    const videos = await readRenderedVideos(render.rendered);
-    if (!(await beginDelivery(input))) {
-      await finishJobAsUnknown({
-        ...input,
-        errorCode: "delivery_ledger_not_queued",
-        errorMessage: "Could not acquire the queued delivery ledger row",
-      });
-      return "delivery_unknown";
-    }
+    const videos = await readRenderedVideos(
+      render.rendered,
+      input.maxVideoBytes,
+    );
+    input.signal?.throwIfAborted();
+    const acquired = await beginDeliveryOrReconcile(input);
+    if (acquired !== true) return acquired;
     deliveryStarted = true;
     const telegramResult =
       videos.length === 1
@@ -443,7 +679,7 @@ export async function processXEditorialMediaJob(input: {
       });
       await finishXEditorialMediaJob({
         db: input.db,
-        jobId: input.job.id,
+        job: input.job,
         result: mediaMetrics.editorialMediaV1,
         status: persisted ? "sent" : "delivery_unknown",
       });
@@ -472,12 +708,16 @@ export async function processXEditorialMediaJob(input: {
           job: input.job,
           retryAfterMs: telegramResult.retryAfterSec * 1_000,
         });
-        return retryStatus;
+        if (retryStatus === "retry" || retryStatus === "lease_lost") {
+          return retryStatus;
+        }
       }
       return deliverTextFallback({
         db: input.db,
         job: input.job,
+        leaseMs: input.leaseMs,
         reason: "telegram_media_rejected",
+        retryDelayMs: input.retryDelayMs,
         telegram: input.telegram,
       });
     }
@@ -485,7 +725,7 @@ export async function processXEditorialMediaJob(input: {
       telegramResult.error === "blocked_or_missing"
         ? "blocked"
         : "delivery_unknown";
-    await markDeliveryResult({
+    const persisted = await markDeliveryResult({
       db: input.db,
       errorCode: telegramResult.error,
       job: input.job,
@@ -500,18 +740,27 @@ export async function processXEditorialMediaJob(input: {
     });
     await finishXEditorialMediaJob({
       db: input.db,
-      errorCode: telegramResult.error,
+      errorCode: persisted
+        ? telegramResult.error
+        : "telegram_terminal_persist_failed",
       errorMessage: telegramResult.message,
-      jobId: input.job.id,
-      status: terminalStatus,
+      job: input.job,
+      status: persisted ? terminalStatus : "delivery_unknown",
     });
-    return terminalStatus;
+    return persisted ? terminalStatus : "delivery_unknown";
   } catch (error) {
+    if (
+      error instanceof LeaseLostError ||
+      input.signal?.reason instanceof LeaseLostError
+    ) {
+      return "lease_lost";
+    }
     const message = error instanceof Error ? error.message : String(error);
     if (deliveryStarted) {
-      await markDeliveryResult({
+      await terminalizeStartedDeliveryAsUnknown({
         db: input.db,
         errorCode: "worker_failed_after_delivery_started",
+        errorMessage: message,
         job: input.job,
         metrics: {
           editorialMediaV1: {
@@ -520,21 +769,16 @@ export async function processXEditorialMediaJob(input: {
             version: 1,
           },
         },
-        status: "delivery_unknown",
-      }).catch(() => false);
-      await finishJobAsUnknown({
-        db: input.db,
-        errorCode: "worker_failed_after_delivery_started",
-        errorMessage: message,
-        job: input.job,
-      }).catch(() => undefined);
+      });
       return "delivery_unknown";
     }
     if (input.job.attemptCount >= input.job.maxAttempts) {
       return deliverTextFallback({
         db: input.db,
         job: input.job,
+        leaseMs: input.leaseMs,
         reason: "worker_attempts_exhausted",
+        retryDelayMs: input.retryDelayMs,
         telegram: input.telegram,
       });
     }
@@ -545,12 +789,84 @@ export async function processXEditorialMediaJob(input: {
       job: input.job,
       retryAfterMs: input.retryDelayMs,
     });
+    if (retryStatus === "exhausted") {
+      return deliverTextFallback({
+        db: input.db,
+        job: input.job,
+        leaseMs: input.leaseMs,
+        reason: "worker_attempts_exhausted",
+        retryDelayMs: input.retryDelayMs,
+        telegram: input.telegram,
+      });
+    }
     return retryStatus;
   } finally {
     if (temporaryDirectory) {
       await rm(temporaryDirectory, { force: true, recursive: true });
     }
   }
+}
+
+async function processWithLeaseHeartbeat(
+  input: Parameters<typeof processXEditorialMediaJob>[0] & {
+    jobTimeoutMs: number;
+  },
+): Promise<XEditorialMediaJobOutcome> {
+  const controller = new AbortController();
+  const timeout = setTimeout(
+    () => controller.abort(new Error("Editorial media job timed out")),
+    input.jobTimeoutMs,
+  );
+  timeout.unref();
+  let heartbeatPromise = Promise.resolve();
+  const heartbeat = setInterval(
+    () => {
+      heartbeatPromise = heartbeatPromise
+        .then(async () => {
+          if (controller.signal.aborted) return;
+          const renewed = await renewXEditorialMediaJobLease({
+            db: input.db,
+            job: input.job,
+            leaseMs: input.leaseMs,
+          });
+          if (!renewed) controller.abort(new LeaseLostError());
+        })
+        .catch((error: unknown) => controller.abort(error));
+    },
+    Math.max(10_000, Math.floor(input.leaseMs / 3)),
+  );
+  heartbeat.unref();
+  try {
+    return await processXEditorialMediaJob({
+      ...input,
+      signal: controller.signal,
+    });
+  } finally {
+    clearInterval(heartbeat);
+    clearTimeout(timeout);
+    await heartbeatPromise;
+  }
+}
+
+export async function cleanupStaleSocialMediaDirectories(input?: {
+  maxAgeMs?: number;
+  now?: Date;
+}): Promise<number> {
+  const maxAgeMs = input?.maxAgeMs ?? 60 * 60_000;
+  const now = input?.now ?? new Date();
+  const entries = await readdir(tmpdir(), { withFileTypes: true });
+  let removed = 0;
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !entry.name.startsWith("hunch-social-media-")) {
+      continue;
+    }
+    const directory = path.join(tmpdir(), entry.name);
+    const metadata = await stat(directory).catch(() => null);
+    if (!metadata || now.getTime() - metadata.mtimeMs < maxAgeMs) continue;
+    await rm(directory, { force: true, recursive: true });
+    removed += 1;
+  }
+  return removed;
 }
 
 function createWorkerPool(): Pool {
@@ -571,14 +887,26 @@ export async function runSocialMediaWorker(): Promise<void> {
   const config = parseSocialMediaWorkerConfig();
   if (!config.enabled) {
     log("social_media_worker_disabled");
-    while (true) await delay(60_000);
+    await new Promise<void>((resolve) => {
+      process.once("SIGINT", resolve);
+      process.once("SIGTERM", resolve);
+    });
+    return;
   }
   if (!config.token) {
     throw new Error(
-      "HUNCH_SIGNAL_BOT_TOKEN is required when social media rendering is enabled",
+      "HUNCH_SIGNAL_BOT_TOKEN is required when the social media worker is enabled",
     );
   }
   const owner = `${process.pid}:${randomUUID()}`;
+  const cleanedDirectories = await cleanupStaleSocialMediaDirectories().catch(
+    (error: unknown) => {
+      log("social_media_tmp_cleanup_failed", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return 0;
+    },
+  );
   const db = createWorkerPool();
   const telegram = new TelegramBotApiClient(config.token);
   let stopping = false;
@@ -589,7 +917,10 @@ export async function runSocialMediaWorker(): Promise<void> {
   process.once("SIGTERM", stop);
   log("social_media_worker_started", {
     fps: config.fps,
+    cleanedDirectories,
+    jobTimeoutMs: config.jobTimeoutMs,
     leaseMs: config.leaseMs,
+    maxVideoBytes: config.maxVideoBytes,
   });
   try {
     while (!stopping) {
@@ -608,7 +939,7 @@ export async function runSocialMediaWorker(): Promise<void> {
         continue;
       }
       try {
-        const outcome = await processXEditorialMediaJob({
+        const outcome = await processWithLeaseHeartbeat({
           allowedOrigins: config.allowedOrigins,
           browserExecutablePath: config.browserExecutablePath,
           db,
@@ -616,6 +947,9 @@ export async function runSocialMediaWorker(): Promise<void> {
           ffprobePath: config.ffprobePath,
           fps: config.fps,
           job,
+          jobTimeoutMs: config.jobTimeoutMs,
+          leaseMs: config.leaseMs,
+          maxVideoBytes: config.maxVideoBytes,
           navigationTimeoutMs: config.navigationTimeoutMs,
           retryDelayMs: config.retryDelayMs,
           telegram,

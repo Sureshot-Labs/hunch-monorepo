@@ -37,9 +37,11 @@ export type XEditorialMediaJobPayloadV1 = {
 export type XEditorialMediaJob = {
   attemptCount: number;
   chatId: string;
+  deliveryMode: "media" | "text";
   deliveryAttemptId: string;
   deliveryRef: string;
   id: string;
+  leaseOwner: string;
   maxAttempts: number;
   payload: XEditorialMediaJobPayloadV1;
 };
@@ -51,7 +53,9 @@ type EditorialMediaJobRow = {
   id: string;
   max_attempts: number;
   payload: unknown;
+  result: unknown;
   signal_bot_message_id: string;
+  lease_owner: string;
 };
 
 function asObject(value: unknown): Record<string, unknown> {
@@ -98,11 +102,35 @@ function mapJob(row: EditorialMediaJobRow): XEditorialMediaJob | null {
   return {
     attemptCount: row.attempt_count,
     chatId: row.chat_id,
+    deliveryMode:
+      asObject(row.result).deliveryMode === "text" ? "text" : "media",
     deliveryAttemptId: row.delivery_attempt_id,
     deliveryRef: row.signal_bot_message_id,
     id: row.id,
+    leaseOwner: row.lease_owner,
     maxAttempts: row.max_attempts,
     payload,
+  };
+}
+
+function invalidPayloadDeliveryState(input: {
+  at: Date;
+}): Record<string, unknown> {
+  return {
+    deliveryStateV2: {
+      attemptId: null,
+      errorCode: "invalid_editorial_media_payload",
+      nextAttemptAt: null,
+      status: "delivery_unknown",
+      updatedAt: input.at.toISOString(),
+      version: 2,
+    },
+    editorialMediaV1: {
+      error: "The queued editorial media payload is invalid",
+      status: "delivery_unknown",
+      version: 1,
+    },
+    status: "delivery_unknown",
   };
 }
 
@@ -181,6 +209,18 @@ export async function enqueueXEditorialMediaJob(input: {
           ) then signal_bot_editorial_media_jobs.status
           else 'queued'
         end,
+        result = case
+          when signal_bot_editorial_media_jobs.status in (
+            'sent', 'blocked', 'delivery_unknown'
+          ) then signal_bot_editorial_media_jobs.result
+          else '{}'::jsonb
+        end,
+        attempt_count = case
+          when signal_bot_editorial_media_jobs.status in (
+            'sent', 'blocked', 'delivery_unknown'
+          ) then signal_bot_editorial_media_jobs.attempt_count
+          else 0
+        end,
         available_at = excluded.available_at,
         lease_owner = null,
         lease_expires_at = null,
@@ -239,8 +279,10 @@ export async function claimXEditorialMediaJob(input: {
                 jobs.delivery_attempt_id::text,
                 jobs.chat_id,
                 jobs.payload,
+                jobs.result,
                 jobs.attempt_count,
-                jobs.max_attempts
+                jobs.max_attempts,
+                jobs.lease_owner
     `,
     [
       now.toISOString(),
@@ -249,7 +291,74 @@ export async function claimXEditorialMediaJob(input: {
     ],
   );
   const row = result.rows[0];
-  return row ? mapJob(row) : null;
+  if (!row) return null;
+  const job = mapJob(row);
+  if (job) return job;
+  await input.db.query(
+    `
+      with failed_job as (
+        update signal_bot_editorial_media_jobs
+        set status = 'failed',
+            result = '{"reason":"invalid_payload"}'::jsonb,
+            lease_owner = null,
+            lease_expires_at = null,
+            last_error_code = 'invalid_payload',
+            last_error_message = 'The queued editorial media payload is invalid',
+            completed_at = $4::timestamptz,
+            updated_at = $4::timestamptz
+        where id = $1::uuid
+          and status = 'rendering'
+          and lease_owner = $2
+          and attempt_count = $3::integer
+        returning signal_bot_message_id, delivery_attempt_id
+      )
+      update signal_bot_messages messages
+      set metrics = (metrics - 'deliveryStateV2' - 'status') || $5::jsonb,
+          sent_at = $4::timestamptz
+      from failed_job
+      where messages.id = failed_job.signal_bot_message_id
+        and messages.metrics #>> '{deliveryStateV2,version}' = '2'
+        and messages.metrics #>> '{deliveryStateV2,status}' = 'queued'
+        and messages.metrics #>> '{deliveryStateV2,attemptId}' =
+          failed_job.delivery_attempt_id::text
+    `,
+    [
+      row.id,
+      row.lease_owner,
+      row.attempt_count,
+      now.toISOString(),
+      JSON.stringify(invalidPayloadDeliveryState({ at: now })),
+    ],
+  );
+  return null;
+}
+
+export async function renewXEditorialMediaJobLease(input: {
+  db: DbQuery;
+  job: XEditorialMediaJob;
+  leaseMs: number;
+  now?: Date;
+}): Promise<boolean> {
+  const now = input.now ?? new Date();
+  const result = await input.db.query(
+    `
+      update signal_bot_editorial_media_jobs
+      set lease_expires_at = $4::timestamptz,
+          updated_at = $5::timestamptz
+      where id = $1::uuid
+        and status = 'rendering'
+        and lease_owner = $2
+        and attempt_count = $3::integer
+    `,
+    [
+      input.job.id,
+      input.job.leaseOwner,
+      input.job.attemptCount,
+      new Date(now.getTime() + input.leaseMs).toISOString(),
+      now.toISOString(),
+    ],
+  );
+  return result.rowCount !== 0;
 }
 
 export async function requeueXEditorialMediaDelivery(input: {
@@ -285,47 +394,70 @@ export async function requeueXEditorialMediaDelivery(input: {
 
 export async function retryXEditorialMediaJob(input: {
   db: DbQuery;
+  deliveryMode?: "media" | "text";
   errorCode: string;
   errorMessage: string;
   extendForDeliveryRetry?: boolean;
   job: XEditorialMediaJob;
   now?: Date;
   retryAfterMs: number;
-}): Promise<"failed" | "retry"> {
+}): Promise<"exhausted" | "lease_lost" | "retry"> {
   const now = input.now ?? new Date();
   const attemptLimit =
     input.job.maxAttempts + (input.extendForDeliveryRetry ? 3 : 0);
   const exhausted = input.job.attemptCount >= attemptLimit;
-  await input.db.query(
+  if (exhausted) {
+    const owned = await input.db.query<{ id: string }>(
+      `
+        select id::text
+        from signal_bot_editorial_media_jobs
+        where id = $1::uuid
+          and status = 'rendering'
+          and lease_owner = $2
+          and attempt_count = $3::integer
+      `,
+      [input.job.id, input.job.leaseOwner, input.job.attemptCount],
+    );
+    return owned.rows[0] ? "exhausted" : "lease_lost";
+  }
+  const result = await input.db.query(
     `
       update signal_bot_editorial_media_jobs
-      set status = $3,
+      set status = 'retry',
           available_at = $4::timestamptz,
           lease_owner = null,
           lease_expires_at = null,
           last_error_code = $5,
           last_error_message = $6,
-          completed_at = case when $3 = 'failed' then $2::timestamptz else null end,
+          result = result || $7::jsonb,
+          completed_at = null,
           updated_at = $2::timestamptz
-      where id = $1::uuid and status = 'rendering'
+      where id = $1::uuid
+        and status = 'rendering'
+        and lease_owner = $3
+        and attempt_count = $8::integer
     `,
     [
       input.job.id,
       now.toISOString(),
-      exhausted ? "failed" : "retry",
+      input.job.leaseOwner,
       new Date(now.getTime() + input.retryAfterMs).toISOString(),
       input.errorCode.slice(0, 120),
       input.errorMessage.slice(0, 1_000),
+      JSON.stringify(
+        input.deliveryMode ? { deliveryMode: input.deliveryMode } : {},
+      ),
+      input.job.attemptCount,
     ],
   );
-  return exhausted ? "failed" : "retry";
+  return result.rowCount !== 0 ? "retry" : "lease_lost";
 }
 
 export async function finishXEditorialMediaJob(input: {
   db: DbQuery;
   errorCode?: string | null;
   errorMessage?: string | null;
-  jobId: string;
+  job: XEditorialMediaJob;
   now?: Date;
   result?: Record<string, unknown>;
   status: "blocked" | "delivery_unknown" | "failed" | "sent";
@@ -342,15 +474,20 @@ export async function finishXEditorialMediaJob(input: {
           last_error_message = $6,
           completed_at = $2::timestamptz,
           updated_at = $2::timestamptz
-      where id = $1::uuid and status = 'rendering'
+      where id = $1::uuid
+        and status = 'rendering'
+        and lease_owner = $7
+        and attempt_count = $8::integer
     `,
     [
-      input.jobId,
+      input.job.id,
       now.toISOString(),
       input.status,
       JSON.stringify(input.result ?? {}),
       input.errorCode?.slice(0, 120) ?? null,
       input.errorMessage?.slice(0, 1_000) ?? null,
+      input.job.leaseOwner,
+      input.job.attemptCount,
     ],
   );
   return result.rowCount !== 0;

@@ -3,10 +3,14 @@ import assert from "node:assert/strict";
 import {
   isAllowedXEditorialCaptureUrl,
   parseSocialMediaWorkerConfig,
+  processXEditorialMediaJob,
 } from "./social-media-worker-entry.js";
 import {
   claimXEditorialMediaJob,
   enqueueXEditorialMediaJob,
+  finishXEditorialMediaJob,
+  retryXEditorialMediaJob,
+  type XEditorialMediaJob,
 } from "./services/signal-bot-editorial-media-jobs.js";
 import { sendTelegramMediaGroupRequest } from "./services/telegram-api-media.js";
 import {
@@ -16,12 +20,32 @@ import {
 
 const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
   {
-    name: "worker configuration is disabled by default and keeps canonical output settings",
+    name: "consumer stays enabled independently of the producer and keeps safe bounds",
     run: () => {
       const config = parseSocialMediaWorkerConfig({});
-      assert.equal(config.enabled, false);
+      assert.equal(config.enabled, true);
       assert.equal(config.fps, 30);
       assert.equal(config.leaseMs, 600_000);
+      assert.equal(config.jobTimeoutMs, 300_000);
+      assert.equal(config.maxVideoBytes, 45 * 1024 * 1024);
+      assert.equal(
+        parseSocialMediaWorkerConfig({
+          HUNCH_SIGNAL_BOT_X_EDITORIAL_MEDIA_ENABLED: "false",
+        }).enabled,
+        true,
+      );
+      assert.equal(
+        parseSocialMediaWorkerConfig({
+          HUNCH_SOCIAL_MEDIA_WORKER_ENABLED: "false",
+        }).enabled,
+        false,
+      );
+      assert.equal(
+        parseSocialMediaWorkerConfig({
+          HUNCH_SOCIAL_MEDIA_LEASE_SEC: "2",
+        }).leaseMs,
+        180_000,
+      );
       assert.deepEqual(config.allowedOrigins, ["https://app.hunch.trade"]);
       assert.deepEqual(
         {
@@ -62,6 +86,14 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         isAllowedXEditorialCaptureUrl({
           allowedOrigins,
           captureUrl: "https://app.hunch.trade/admin",
+        }),
+        false,
+      );
+      assert.equal(
+        isAllowedXEditorialCaptureUrl({
+          allowedOrigins,
+          captureUrl:
+            "https://app.hunch.trade/tracking/wallet/0x123/private-notes",
         }),
         false,
       );
@@ -130,6 +162,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
                 chat_id: "-1001",
                 delivery_attempt_id: "00000000-0000-4000-8000-000000000002",
                 id: "00000000-0000-4000-8000-000000000004",
+                lease_owner: "test-worker",
                 max_attempts: 3,
                 payload: {
                   captionMarkdownV2: "Draft",
@@ -137,6 +170,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
                   profiles: ["mobile", "desktop"],
                   version: 1,
                 },
+                result: {},
                 signal_bot_message_id: "00000000-0000-4000-8000-000000000003",
               },
             ],
@@ -150,6 +184,393 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         "00000000-0000-4000-8000-000000000002",
       );
       assert.deepEqual(job?.payload.profiles, ["mobile", "desktop"]);
+      assert.equal(job?.leaseOwner, "test-worker");
+    },
+  },
+  {
+    name: "claim quarantines an invalid payload instead of leaving a poison lease",
+    run: async () => {
+      const sqlCalls: string[] = [];
+      const job = await claimXEditorialMediaJob({
+        db: {
+          query: async (sql: string) => {
+            sqlCalls.push(sql);
+            if (sqlCalls.length > 1) return { rowCount: 1, rows: [] };
+            return {
+              rowCount: 1,
+              rows: [
+                {
+                  attempt_count: 1,
+                  chat_id: "-1001",
+                  delivery_attempt_id: "00000000-0000-4000-8000-000000000002",
+                  id: "00000000-0000-4000-8000-000000000004",
+                  lease_owner: "test-worker",
+                  max_attempts: 3,
+                  payload: { version: 999 },
+                  result: {},
+                  signal_bot_message_id: "00000000-0000-4000-8000-000000000003",
+                },
+              ],
+            };
+          },
+        } as never,
+        leaseMs: 600_000,
+        owner: "test-worker",
+      });
+      assert.equal(job, null);
+      assert.equal(sqlCalls.length, 2);
+      assert.match(sqlCalls[1] ?? "", /set status = 'failed'/);
+      assert.match(sqlCalls[1] ?? "", /lease_owner = \$2/);
+      assert.match(sqlCalls[1] ?? "", /attempt_count = \$3::integer/);
+    },
+  },
+  {
+    name: "job transitions are fenced by lease owner and attempt count",
+    run: async () => {
+      const sqlCalls: string[] = [];
+      const paramsCalls: unknown[][] = [];
+      const job: XEditorialMediaJob = {
+        attemptCount: 2,
+        chatId: "-1001",
+        deliveryAttemptId: "00000000-0000-4000-8000-000000000002",
+        deliveryMode: "media",
+        deliveryRef: "00000000-0000-4000-8000-000000000003",
+        id: "00000000-0000-4000-8000-000000000004",
+        leaseOwner: "worker-a",
+        maxAttempts: 3,
+        payload: {
+          captionMarkdownV2: "Draft",
+          captureUrl: "https://app.hunch.trade/tracking/wallet/0x123",
+          profiles: ["mobile"],
+          version: 1,
+        },
+      };
+      const db = {
+        query: async (sql: string, params?: unknown[]) => {
+          sqlCalls.push(sql);
+          paramsCalls.push(params ?? []);
+          return { rowCount: 1, rows: [] };
+        },
+      } as never;
+      assert.equal(
+        await retryXEditorialMediaJob({
+          db,
+          errorCode: "render_failed",
+          errorMessage: "failed",
+          job,
+          retryAfterMs: 1_000,
+        }),
+        "retry",
+      );
+      assert.equal(
+        await finishXEditorialMediaJob({ db, job, status: "sent" }),
+        true,
+      );
+      assert.match(sqlCalls[0] ?? "", /lease_owner = \$3/);
+      assert.match(sqlCalls[0] ?? "", /attempt_count = \$8::integer/);
+      assert.match(sqlCalls[1] ?? "", /lease_owner = \$7/);
+      assert.match(sqlCalls[1] ?? "", /attempt_count = \$8::integer/);
+      assert.equal(paramsCalls[0]?.[2], "worker-a");
+      assert.equal(paramsCalls[0]?.[7], 2);
+    },
+  },
+  {
+    name: "an exhausted retry distinguishes an owned job from a lost lease",
+    run: async () => {
+      const job: XEditorialMediaJob = {
+        attemptCount: 3,
+        chatId: "-1001",
+        deliveryAttemptId: "00000000-0000-4000-8000-000000000002",
+        deliveryMode: "media",
+        deliveryRef: "00000000-0000-4000-8000-000000000003",
+        id: "00000000-0000-4000-8000-000000000004",
+        leaseOwner: "worker-a",
+        maxAttempts: 3,
+        payload: {
+          captionMarkdownV2: "Draft",
+          captureUrl: "https://app.hunch.trade/tracking/wallet/0x123",
+          profiles: ["mobile"],
+          version: 1,
+        },
+      };
+      const retry = (owned: boolean) =>
+        retryXEditorialMediaJob({
+          db: {
+            query: async () => ({
+              rowCount: owned ? 1 : 0,
+              rows: owned ? [{ id: job.id }] : [],
+            }),
+          } as never,
+          errorCode: "render_failed",
+          errorMessage: "failed",
+          job,
+          retryAfterMs: 1_000,
+        });
+      assert.equal(await retry(true), "exhausted");
+      assert.equal(await retry(false), "lease_lost");
+    },
+  },
+  {
+    name: "text fallback preserves a rate-limited draft as a text retry",
+    run: async () => {
+      const job: XEditorialMediaJob = {
+        attemptCount: 3,
+        chatId: "-1001",
+        deliveryAttemptId: "00000000-0000-4000-8000-000000000002",
+        deliveryMode: "text",
+        deliveryRef: "00000000-0000-4000-8000-000000000003",
+        id: "00000000-0000-4000-8000-000000000004",
+        leaseOwner: "worker-a",
+        maxAttempts: 3,
+        payload: {
+          captionMarkdownV2: "Draft",
+          captureUrl: "https://app.hunch.trade/tracking/wallet/0x123",
+          profiles: ["mobile"],
+          version: 1,
+        },
+      };
+      const paramsCalls: unknown[][] = [];
+      let sendCalls = 0;
+      const outcome = await processXEditorialMediaJob({
+        allowedOrigins: ["https://app.hunch.trade"],
+        browserExecutablePath: null,
+        db: {
+          query: async (sql: string, params?: unknown[]) => {
+            paramsCalls.push(params ?? []);
+            if (/select id::text, telegram_message_id, metrics/.test(sql)) {
+              return {
+                rowCount: 1,
+                rows: [
+                  {
+                    id: job.deliveryRef,
+                    metrics: {
+                      deliveryStateV2: {
+                        attemptId: job.deliveryAttemptId,
+                        status: "queued",
+                      },
+                    },
+                    telegram_message_id: null,
+                  },
+                ],
+              };
+            }
+            return { rowCount: 1, rows: [] };
+          },
+        } as never,
+        ffmpegPath: "ffmpeg",
+        ffprobePath: "ffprobe",
+        fps: 30,
+        job,
+        leaseMs: 600_000,
+        maxVideoBytes: 45 * 1024 * 1024,
+        navigationTimeoutMs: 45_000,
+        retryDelayMs: 60_000,
+        telegram: {
+          sendMessage: async () => {
+            sendCalls += 1;
+            return {
+              error: "other" as const,
+              message: "Too Many Requests",
+              ok: false as const,
+              retryAfterSec: 30,
+            };
+          },
+        } as never,
+      });
+      assert.equal(outcome, "retry");
+      assert.equal(sendCalls, 1);
+      assert.ok(
+        paramsCalls.some((params) =>
+          params.some((value) =>
+            String(value).includes('"deliveryMode":"text"'),
+          ),
+        ),
+      );
+    },
+  },
+  {
+    name: "the final text rate limit terminalizes both ledgers without an orphan",
+    run: async () => {
+      const sqlCalls: string[] = [];
+      const job: XEditorialMediaJob = {
+        attemptCount: 6,
+        chatId: "-1001",
+        deliveryAttemptId: "00000000-0000-4000-8000-000000000002",
+        deliveryMode: "text",
+        deliveryRef: "00000000-0000-4000-8000-000000000003",
+        id: "00000000-0000-4000-8000-000000000004",
+        leaseOwner: "worker-a",
+        maxAttempts: 3,
+        payload: {
+          captionMarkdownV2: "Draft",
+          captureUrl: "https://app.hunch.trade/tracking/wallet/0x123",
+          profiles: ["mobile"],
+          version: 1,
+        },
+      };
+      const outcome = await processXEditorialMediaJob({
+        allowedOrigins: ["https://app.hunch.trade"],
+        browserExecutablePath: null,
+        db: {
+          query: async (sql: string) => {
+            sqlCalls.push(sql);
+            if (/select id::text, telegram_message_id, metrics/.test(sql)) {
+              return {
+                rowCount: 1,
+                rows: [
+                  {
+                    id: job.deliveryRef,
+                    metrics: {
+                      deliveryStateV2: {
+                        attemptId: job.deliveryAttemptId,
+                        status: "queued",
+                      },
+                    },
+                    telegram_message_id: null,
+                  },
+                ],
+              };
+            }
+            if (
+              /select id::text\s+from signal_bot_editorial_media_jobs/.test(sql)
+            ) {
+              return { rowCount: 1, rows: [{ id: job.id }] };
+            }
+            return { rowCount: 1, rows: [] };
+          },
+        } as never,
+        ffmpegPath: "ffmpeg",
+        ffprobePath: "ffprobe",
+        fps: 30,
+        job,
+        leaseMs: 600_000,
+        maxVideoBytes: 45 * 1024 * 1024,
+        navigationTimeoutMs: 45_000,
+        retryDelayMs: 60_000,
+        telegram: {
+          sendMessage: async () => ({
+            error: "other" as const,
+            message: "Too Many Requests",
+            ok: false as const,
+            retryAfterSec: 30,
+          }),
+        } as never,
+      });
+      assert.equal(outcome, "failed");
+      assert.ok(
+        sqlCalls.some(
+          (sql) =>
+            /update signal_bot_messages/.test(sql) &&
+            /metrics #>> '\{deliveryStateV2,status\}' = \$2/.test(sql),
+        ),
+      );
+      assert.ok(
+        sqlCalls.some(
+          (sql) =>
+            /update signal_bot_editorial_media_jobs/.test(sql) &&
+            /lease_owner = \$7/.test(sql),
+        ),
+      );
+    },
+  },
+  {
+    name: "a terminal delivery ledger is reconciled without resending",
+    run: async () => {
+      let sendCalls = 0;
+      const outcome = await processXEditorialMediaJob({
+        allowedOrigins: ["https://app.hunch.trade"],
+        browserExecutablePath: null,
+        db: {
+          query: async (sql: string) =>
+            /select id::text, telegram_message_id, metrics/.test(sql)
+              ? {
+                  rowCount: 1,
+                  rows: [
+                    {
+                      id: "00000000-0000-4000-8000-000000000003",
+                      metrics: {},
+                      telegram_message_id: 123,
+                    },
+                  ],
+                }
+              : { rowCount: 1, rows: [] },
+        } as never,
+        ffmpegPath: "ffmpeg",
+        ffprobePath: "ffprobe",
+        fps: 30,
+        job: {
+          attemptCount: 2,
+          chatId: "-1001",
+          deliveryAttemptId: "00000000-0000-4000-8000-000000000002",
+          deliveryMode: "media",
+          deliveryRef: "00000000-0000-4000-8000-000000000003",
+          id: "00000000-0000-4000-8000-000000000004",
+          leaseOwner: "worker-a",
+          maxAttempts: 3,
+          payload: {
+            captionMarkdownV2: "Draft",
+            captureUrl: "https://app.hunch.trade/tracking/wallet/0x123",
+            profiles: ["mobile"],
+            version: 1,
+          },
+        },
+        leaseMs: 600_000,
+        maxVideoBytes: 45 * 1024 * 1024,
+        navigationTimeoutMs: 45_000,
+        retryDelayMs: 60_000,
+        telegram: {
+          sendMessage: async () => {
+            sendCalls += 1;
+            return { messageId: 124, ok: true as const };
+          },
+        } as never,
+      });
+      assert.equal(outcome, "sent");
+      assert.equal(sendCalls, 0);
+    },
+  },
+  {
+    name: "a lost lease prevents any Telegram mutation",
+    run: async () => {
+      let sendCalls = 0;
+      const outcome = await processXEditorialMediaJob({
+        allowedOrigins: ["https://app.hunch.trade"],
+        browserExecutablePath: null,
+        db: {
+          query: async () => ({ rowCount: 0, rows: [] }),
+        } as never,
+        ffmpegPath: "ffmpeg",
+        ffprobePath: "ffprobe",
+        fps: 30,
+        job: {
+          attemptCount: 1,
+          chatId: "-1001",
+          deliveryAttemptId: "00000000-0000-4000-8000-000000000002",
+          deliveryMode: "text",
+          deliveryRef: "00000000-0000-4000-8000-000000000003",
+          id: "00000000-0000-4000-8000-000000000004",
+          leaseOwner: "worker-a",
+          maxAttempts: 3,
+          payload: {
+            captionMarkdownV2: "Draft",
+            captureUrl: "https://app.hunch.trade/tracking/wallet/0x123",
+            profiles: ["mobile"],
+            version: 1,
+          },
+        },
+        leaseMs: 600_000,
+        maxVideoBytes: 45 * 1024 * 1024,
+        navigationTimeoutMs: 45_000,
+        retryDelayMs: 60_000,
+        telegram: {
+          sendMessage: async () => {
+            sendCalls += 1;
+            return { messageId: 1, ok: true as const };
+          },
+        } as never,
+      });
+      assert.equal(outcome, "lease_lost");
+      assert.equal(sendCalls, 0);
     },
   },
   {

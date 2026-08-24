@@ -1,6 +1,6 @@
 # Backend Design: Automated Social Video for X Editorial Drafts
 
-Status: implemented behind a disabled feature flag; production rollout pending
+Status: implemented behind a disabled producer flag; production rollout pending
 Owner: backend / growth infrastructure
 Decision date: 2026-08-24
 Depends on: `backend-x-editorial-draft-channel.md`
@@ -221,8 +221,7 @@ does not provide one.
 
 ## Hunch App Capture Contract
 
-V1 may begin with existing semantic labels, but production hardening should add
-a small explicit capture contract in `Hunch_App`:
+Production rendering uses a small explicit capture contract in `Hunch_App`:
 
 - `capture=social-v1` query mode;
 - `data-social-capture-ready=true` only after required public data settles;
@@ -235,8 +234,9 @@ a small explicit capture contract in `Hunch_App`:
 Capture mode may alter presentation timing only. It must not bypass
 authorization, expose private data, or substitute synthetic business data.
 
-Until that contract ships, the worker must fail visibly when required semantic
-elements cannot be located rather than clicking by screen coordinates.
+The worker accepts only a root in terminal `ready` state and verifies the
+profile-specific capture IDs before rendering. A missing, loading, or errored
+contract is a render failure; the worker never clicks by screen coordinates.
 
 ## Render Method
 
@@ -348,12 +348,18 @@ or advance a production delivery row.
 
 - enqueue uses the existing X delivery row as its idempotency key;
 - only one worker may hold an unexpired lease for a job;
+- every job transition is fenced by both `lease_owner` and `attempt_count`;
+- a heartbeat renews the lease during rendering, and the worker renews it again
+  immediately before acquiring the Telegram delivery ledger;
 - profile output paths are derived from the job ID and profile name inside the
   job-specific temporary directory;
 - Telegram send begins only after the existing delivery ledger transitions to
   `sending`;
 - a sent or `delivery_unknown` delivery is terminal for automatic sends;
 - worker restart reclaims only expired render leases;
+- recovery reconciles a terminal delivery ledger before rendering or sending;
+- a Telegram rate limit requeues both ledgers, preserves text-fallback mode,
+  and never leaves a queued delivery attached to a terminal media job;
 - cursor advancement occurs after durable enqueue, not after video rendering,
   so slow media work cannot stall future signal discovery.
 
@@ -364,6 +370,7 @@ Initial non-secret configuration:
 ```text
 HUNCH_SIGNAL_BOT_X_EDITORIAL_MEDIA_ENABLED=false
 HUNCH_SIGNAL_BOT_X_EDITORIAL_MEDIA_PROFILES=mobile,desktop
+HUNCH_SOCIAL_MEDIA_WORKER_ENABLED=true
 HUNCH_SOCIAL_MEDIA_ALLOWED_ORIGINS=https://app.hunch.trade
 HUNCH_SOCIAL_MEDIA_CHROMIUM_PATH=
 HUNCH_SOCIAL_MEDIA_FFMPEG_PATH=ffmpeg
@@ -372,13 +379,25 @@ HUNCH_SOCIAL_MEDIA_FPS=30
 HUNCH_SOCIAL_MEDIA_NAVIGATION_TIMEOUT_SEC=45
 HUNCH_SOCIAL_MEDIA_POLL_INTERVAL_SEC=5
 HUNCH_SOCIAL_MEDIA_LEASE_SEC=600
+HUNCH_SOCIAL_MEDIA_JOB_TIMEOUT_SEC=300
+HUNCH_SOCIAL_MEDIA_MAX_VIDEO_MB=45
 HUNCH_SOCIAL_MEDIA_RETRY_DELAY_SEC=60
 HUNCH_SOCIAL_MEDIA_SHM_SIZE=1gb
+HUNCH_SOCIAL_MEDIA_TMPFS_SIZE=512m
+HUNCH_SOCIAL_MEDIA_MEMORY_LIMIT=2g
 ```
+
+The producer and consumer flags are intentionally separate. Rollback disables
+`HUNCH_SIGNAL_BOT_X_EDITORIAL_MEDIA_ENABLED` first; the worker remains enabled
+until the durable queue is empty. Disabling the worker is an operational stop,
+not the normal feature rollback.
 
 V1 runs one render job at a time per worker process. Jobs default to three
 render attempts, create a unique directory below the operating system temp
 directory, and delete that directory in a `finally` block after every outcome.
+Startup also removes stale directories with the exact
+`hunch-social-media-` prefix. The container temp filesystem and memory are
+bounded independently of durable Postgres state.
 
 The worker receives the existing signal-bot Telegram credential through its
 own bounded secret bundle. It does not receive editor/browser credentials.

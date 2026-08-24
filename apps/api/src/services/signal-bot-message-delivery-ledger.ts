@@ -16,6 +16,11 @@ type DeliveryLedgerStatus =
   | "sent"
   | "skipped";
 
+export type SignalBotMessageDeliverySnapshot = {
+  attemptId: string | null;
+  status: DeliveryLedgerStatus;
+};
+
 type DeliveryLedgerRow = {
   id: string;
   metrics: unknown;
@@ -72,6 +77,44 @@ function rowStatus(row: DeliveryLedgerRow): SignalBotDeliveryReservation {
     return { outcome: status, status: "terminal" };
   }
   return { status: "active" };
+}
+
+export async function getSignalBotMessageDeliverySnapshot(input: {
+  db: DbQuery;
+  deliveryRef: string;
+}): Promise<SignalBotMessageDeliverySnapshot | null> {
+  const result = await input.db.query<DeliveryLedgerRow>(
+    `
+      select id::text, telegram_message_id, metrics
+      from signal_bot_messages
+      where id = $1::uuid
+      limit 1
+    `,
+    [input.deliveryRef],
+  );
+  const row = result.rows[0];
+  if (!row) return null;
+  if (row.telegram_message_id != null) {
+    return { attemptId: null, status: "sent" };
+  }
+  const metrics = record(row.metrics);
+  const state = record(metrics.deliveryStateV2);
+  const status = state.status ?? metrics.status;
+  const validStatuses: DeliveryLedgerStatus[] = [
+    "blocked",
+    "delivery_unknown",
+    "queued",
+    "reserved",
+    "retry",
+    "sending",
+    "sent",
+    "skipped",
+  ];
+  if (!validStatuses.includes(status as DeliveryLedgerStatus)) return null;
+  return {
+    attemptId: typeof state.attemptId === "string" ? state.attemptId : null,
+    status: status as DeliveryLedgerStatus,
+  };
 }
 
 export async function reserveSignalBotMessageDelivery(input: {

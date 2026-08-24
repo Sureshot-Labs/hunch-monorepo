@@ -125,10 +125,13 @@ async function preparePage(input: {
   browser: Browser;
   navigationTimeoutMs: number;
   profile: XEditorialMediaProfile;
+  signal?: AbortSignal;
   url: string;
 }): Promise<Page> {
+  input.signal?.throwIfAborted();
   const spec = X_EDITORIAL_MEDIA_PROFILE_SPECS[input.profile];
   const context = await input.browser.newContext({
+    colorScheme: "dark",
     deviceScaleFactor: spec.deviceScaleFactor,
     hasTouch: input.profile === "mobile",
     isMobile: input.profile === "mobile",
@@ -139,6 +142,11 @@ async function preparePage(input: {
       width: spec.authoringWidth,
     },
     serviceWorkers: "block",
+    timezoneId: "UTC",
+    userAgent:
+      input.profile === "mobile"
+        ? "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1"
+        : "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
     viewport: {
       height: spec.authoringHeight,
       width: spec.authoringWidth,
@@ -154,8 +162,36 @@ async function preparePage(input: {
   await page.goto(captureUrl({ profile: input.profile, url: input.url }), {
     waitUntil: "domcontentloaded",
   });
-  await page.locator("main").first().waitFor({ state: "visible" });
-  await page.waitForFunction(() => document.body.innerText.trim().length > 80);
+  const captureRoot = page.locator('[data-social-capture="social-v1"]').first();
+  await captureRoot.waitFor({ state: "visible" });
+  await page.waitForFunction(() => {
+    const root = document.querySelector('[data-social-capture="social-v1"]');
+    const state = root?.getAttribute("data-social-capture-state");
+    return state === "ready" || state === "error";
+  });
+  const captureState = await captureRoot.getAttribute(
+    "data-social-capture-state",
+  );
+  if (captureState !== "ready") {
+    throw new Error(
+      `Tracking wallet capture contract reported ${captureState}`,
+    );
+  }
+  const requiredCaptureIds = [
+    "profile",
+    "performance",
+    "mix",
+    "entry-distribution",
+    "ledger",
+    ...(input.profile === "mobile" ? ["wallet-stats-button"] : []),
+  ];
+  for (const captureId of requiredCaptureIds) {
+    await page
+      .locator(`[data-social-capture-id="${captureId}"]`)
+      .first()
+      .waitFor({ state: "visible" });
+  }
+  input.signal?.throwIfAborted();
   await page.evaluate(async () => {
     const assetsReady = (async () => {
       await document.fonts.ready;
@@ -194,20 +230,6 @@ async function preparePage(input: {
       [data-testid="support-widget"] { display: none !important; }
     `,
   });
-  const bodyText = (await page.locator("body").innerText()).toLowerCase();
-  if (
-    /wallet (?:was )?not found|invalid wallet|failed to load wallet/.test(
-      bodyText,
-    )
-  ) {
-    throw new Error("Tracking wallet page did not resolve to a public wallet");
-  }
-  if (input.profile === "mobile") {
-    await page
-      .getByRole("button", { name: /wallet stats/i })
-      .first()
-      .waitFor({ state: "visible" });
-  }
   await page.evaluate(() => window.scrollTo(0, 0));
   return page;
 }
@@ -216,6 +238,7 @@ function startFfmpeg(input: {
   ffmpegPath: string;
   fps: number;
   outputPath: string;
+  signal?: AbortSignal;
   spec: XEditorialMediaProfileSpec;
 }): {
   completion: Promise<void>;
@@ -265,6 +288,13 @@ function startFfmpeg(input: {
       else reject(new Error(`FFmpeg exited with code ${code}: ${stderr}`));
     });
   });
+  const abort = () => {
+    child.stdin.destroy();
+    child.kill("SIGKILL");
+  };
+  if (input.signal?.aborted) abort();
+  else input.signal?.addEventListener("abort", abort, { once: true });
+  child.once("close", () => input.signal?.removeEventListener("abort", abort));
   return { completion, process: child };
 }
 
@@ -302,10 +332,12 @@ async function maxScrollFor(page: Page): Promise<number> {
 }
 
 async function openWalletStats(page: Page): Promise<void> {
-  const button = page.getByRole("button", { name: /wallet stats/i }).first();
+  const button = page
+    .locator('[data-social-capture-id="wallet-stats-button"]')
+    .first();
   await button.evaluate((element) => (element as HTMLElement).click());
   await page
-    .locator('[role="dialog"], [data-vaul-drawer]')
+    .locator('[data-social-capture-id="wallet-stats-sheet"]')
     .first()
     .waitFor({ state: "visible" });
 }
@@ -313,7 +345,7 @@ async function openWalletStats(page: Page): Promise<void> {
 async function scrollWalletStats(page: Page, progress: number): Promise<void> {
   await page.evaluate((value) => {
     const dialog = document.querySelector(
-      '[role="dialog"], [data-vaul-drawer]',
+      '[data-social-capture-id="wallet-stats-sheet"]',
     );
     if (!dialog) return;
     const candidates = [dialog, ...dialog.querySelectorAll("*")];
@@ -338,8 +370,10 @@ async function renderProfile(input: {
   ffprobePath: string;
   fps: number;
   navigationTimeoutMs: number;
+  maxOutputBytes: number;
   outputDirectory: string;
   profile: XEditorialMediaProfile;
+  signal?: AbortSignal;
   url: string;
 }): Promise<RenderedXEditorialMedia> {
   const spec = X_EDITORIAL_MEDIA_PROFILE_SPECS[input.profile];
@@ -351,12 +385,14 @@ async function renderProfile(input: {
     browser: input.browser,
     navigationTimeoutMs: input.navigationTimeoutMs,
     profile: input.profile,
+    signal: input.signal,
     url: input.url,
   });
   const { completion, process: ffmpeg } = startFfmpeg({
     ffmpegPath: input.ffmpegPath,
     fps: input.fps,
     outputPath,
+    signal: input.signal,
     spec,
   });
   let sheetOpened = false;
@@ -365,6 +401,7 @@ async function renderProfile(input: {
     const scrollTarget = maxScroll * (input.profile === "mobile" ? 0.72 : 0.82);
     const frameCount = Math.round(spec.durationSec * input.fps);
     for (let frameIndex = 0; frameIndex < frameCount; frameIndex += 1) {
+      input.signal?.throwIfAborted();
       const elapsedSec = frameIndex / input.fps;
       if (input.profile === "mobile" && !sheetOpened && elapsedSec >= 8.2) {
         await openWalletStats(page);
@@ -414,6 +451,11 @@ async function renderProfile(input: {
   }
   const outputStat = await stat(outputPath);
   if (outputStat.size <= 0) throw new Error("FFmpeg produced an empty MP4");
+  if (outputStat.size > input.maxOutputBytes) {
+    throw new Error(
+      `Rendered MP4 exceeds ${input.maxOutputBytes} bytes: ${outputStat.size}`,
+    );
+  }
   const verification = await verifyRenderedVideo({
     expectedDurationSec: spec.durationSec,
     expectedFrameCount: Math.round(spec.durationSec * input.fps),
@@ -421,6 +463,7 @@ async function renderProfile(input: {
     expectedWidth: spec.outputWidth,
     ffprobePath: input.ffprobePath,
     outputPath,
+    signal: input.signal,
   });
   return {
     byteSize: outputStat.size,
@@ -440,6 +483,7 @@ async function verifyRenderedVideo(input: {
   expectedWidth: number;
   ffprobePath: string;
   outputPath: string;
+  signal?: AbortSignal;
 }): Promise<{ durationSec: number; frameCount: number }> {
   const { stdout } = await execFileAsync(
     input.ffprobePath,
@@ -454,7 +498,7 @@ async function verifyRenderedVideo(input: {
       "json",
       input.outputPath,
     ],
-    { maxBuffer: 1_000_000 },
+    { maxBuffer: 1_000_000, signal: input.signal },
   );
   const payload = JSON.parse(stdout) as {
     format?: { duration?: string };
@@ -498,14 +542,17 @@ export async function renderXEditorialMedia(input: {
   ffmpegPath?: string;
   ffprobePath?: string;
   fps?: number;
+  maxOutputBytes?: number;
   navigationTimeoutMs?: number;
   outputDirectory: string;
   profiles: XEditorialMediaProfile[];
+  signal?: AbortSignal;
   url: string;
 }): Promise<{
   errors: Partial<Record<XEditorialMediaProfile, string>>;
   rendered: RenderedXEditorialMedia[];
 }> {
+  input.signal?.throwIfAborted();
   const executablePath = await resolveEditorialMediaBrowserExecutable(
     input.browserExecutablePath,
   );
@@ -522,6 +569,8 @@ export async function renderXEditorialMedia(input: {
   });
   const rendered: RenderedXEditorialMedia[] = [];
   const errors: Partial<Record<XEditorialMediaProfile, string>> = {};
+  const abort = () => void browser.close().catch(() => undefined);
+  input.signal?.addEventListener("abort", abort, { once: true });
   try {
     for (const profile of [...new Set(input.profiles)]) {
       try {
@@ -535,17 +584,24 @@ export async function renderXEditorialMedia(input: {
               10_000,
               input.navigationTimeoutMs ?? 45_000,
             ),
+            maxOutputBytes: Math.max(
+              1_000_000,
+              input.maxOutputBytes ?? 45 * 1024 * 1024,
+            ),
             outputDirectory: input.outputDirectory,
             profile,
+            signal: input.signal,
             url: input.url,
           }),
         );
       } catch (error) {
+        input.signal?.throwIfAborted();
         errors[profile] =
           error instanceof Error ? error.message : String(error);
       }
     }
   } finally {
+    input.signal?.removeEventListener("abort", abort);
     await browser.close().catch(() => undefined);
   }
   return { errors, rendered };

@@ -302,6 +302,9 @@ services:
     volumes:
       - /opt/hunch/.env:/app/.env:ro
     shm_size: ${HUNCH_SOCIAL_MEDIA_SHM_SIZE:-1gb}
+    mem_limit: ${HUNCH_SOCIAL_MEDIA_MEMORY_LIMIT:-2g}
+    tmpfs:
+      - /tmp:size=${HUNCH_SOCIAL_MEDIA_TMPFS_SIZE:-512m},mode=1777
     depends_on:
       postgres:
         condition: service_healthy
