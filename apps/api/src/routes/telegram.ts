@@ -15,8 +15,8 @@ import {
   telegramContextBodySchema,
   telegramContextErrorResponseSchema,
   telegramContextSuccessResponseSchema,
+  telegramAppHandoffCommitResponseSchema,
   telegramAppHandoffCommitRequestSchema,
-  telegramAppHandoffClientExecutionSchema,
   telegramAppHandoffExecuteResponseSchema,
   telegramAppHandoffProjectionResponseSchema,
   telegramAppHandoffRequestSchema,
@@ -474,10 +474,7 @@ async function registerTelegramRoutes(
         body: telegramAppHandoffCommitRequestSchema,
         response: {
           ...telegramAppHandoffResponses,
-          200: zod.union([
-            telegramAppHandoffResponseSchema,
-            telegramAppHandoffClientExecutionSchema,
-          ]),
+          200: telegramAppHandoffCommitResponseSchema,
         },
       },
     },

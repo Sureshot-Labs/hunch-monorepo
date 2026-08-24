@@ -127,6 +127,14 @@ export const telegramAppHandoffClientExecutionSchema = z.object({
   handoff: telegramAppHandoffResponseSchema.shape.handoff,
 });
 
+// The execution-bearing branch must stay first. Zod object schemas strip
+// unknown keys, so parsing it after the handoff-only branch would silently
+// remove `execution` from a successful v2 commit response.
+export const telegramAppHandoffCommitResponseSchema = z.union([
+  telegramAppHandoffClientExecutionSchema,
+  telegramAppHandoffResponseSchema,
+]);
+
 export const telegramAppHandoffProjectionSchema = z.object({
   action: z.enum(["buy", "sell"]),
   amountUsd: z.number().nullable(),
