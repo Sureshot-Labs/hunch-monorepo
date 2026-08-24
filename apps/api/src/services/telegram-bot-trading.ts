@@ -13571,13 +13571,19 @@ export async function loadTelegramAppHandoffProjection(
             intent.amount_usd,
             case
               when intent.error_code = 'external_handoff_required'
-                and intent.result -> 'appHandoffExecution' ->> 'version' = '2'
+                and (
+                  intent.result -> 'appHandoffExecution' ->> 'version' = '2'
+                  or handoff.plan_snapshot ->> 'version' = '2'
+                )
                 then null
               else intent.error_code
             end as error_code,
             case
               when intent.error_code = 'external_handoff_required'
-                and intent.result -> 'appHandoffExecution' ->> 'version' = '2'
+                and (
+                  intent.result -> 'appHandoffExecution' ->> 'version' = '2'
+                  or handoff.plan_snapshot ->> 'version' = '2'
+                )
                 then null
               else intent.error_message
             end as error_message,

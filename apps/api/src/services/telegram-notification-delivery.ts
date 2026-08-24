@@ -896,22 +896,44 @@ async function quarantineStaleTelegramNotificationOutbox(input: {
 async function hasTelegramTradeReceipt(input: {
   db: DbQuery;
   payload: unknown;
+  userId: string;
 }): Promise<boolean> {
   if (!isRecord(input.payload)) return false;
   const data = isRecord(input.payload.data) ? input.payload.data : null;
-  if (!data || readString(data, "source") !== "telegram_bot") return false;
+  if (!data) return false;
   const intentId = readString(data, "sourceIntentId");
-  if (!intentId || !UUID_RE.test(intentId)) return false;
+  const telegramSource = readString(data, "source") === "telegram_bot";
+  const hasExactIntentId =
+    telegramSource && intentId != null && UUID_RE.test(intentId);
+  const venue = readString(data, "venue");
+  const venueOrderId = readString(data, "orderId");
+  if (
+    !hasExactIntentId &&
+    (!UUID_RE.test(input.userId) || !venue || !venueOrderId)
+  ) {
+    return false;
+  }
   const { rows } = await input.db.query<{ delivered: boolean }>(
     `
       select exists (
         select 1
         from telegram_trade_intents
-        where id = $1::uuid
+        where (
+            (
+              $1::uuid is not null
+              and id = $1::uuid
+            ) or (
+              $1::uuid is null
+              and user_id = $2::uuid
+              and venue = $3::text
+              and venue_order_id = $4::text
+              and delivery_mode = 'app_handoff'
+            )
+          )
           and result #>> '{telegramReceipt,deliveredAt}' is not null
       ) as delivered
     `,
-    [intentId],
+    [hasExactIntentId ? intentId : null, input.userId, venue, venueOrderId],
   );
   return rows[0]?.delivered === true;
 }
@@ -1217,7 +1239,11 @@ export async function deliverTelegramNotificationOutbox(input: {
   for (const row of rows) {
     if (
       row.topic === "order_filled" &&
-      (await hasTelegramTradeReceipt({ db: input.db, payload: row.payload }))
+      (await hasTelegramTradeReceipt({
+        db: input.db,
+        payload: row.payload,
+        userId: row.user_id,
+      }))
     ) {
       if (
         await markOutboxSkipped({

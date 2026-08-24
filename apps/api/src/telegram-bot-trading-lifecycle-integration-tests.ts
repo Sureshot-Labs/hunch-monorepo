@@ -1044,6 +1044,135 @@ try {
     { revision: 3, state: "filled", status: "pending" },
   ]);
 
+  // More than one bounded batch of old, unchanged projections must not starve
+  // a newly confirmed Mini App Sell. Production accumulated terminal funding
+  // rows here and the old oldest-first ordering never reached the live card.
+  const projectedDirect = await client.query<{
+    progress: Record<string, unknown>;
+  }>(
+    `select result -> 'shortfallProgress' as progress
+       from telegram_trade_intents
+      where id = $1::uuid`,
+    [directLifecycleIntentId],
+  );
+  const blockerIds: string[] = [];
+  for (let index = 0; index < 30; index += 1) {
+    const blockerId = crypto.randomUUID();
+    blockerIds.push(blockerId);
+    const blockerProgress = {
+      ...projectedDirect.rows[0]?.progress,
+      intentId: blockerId,
+      venueOrderId: `historical-order-${index}`,
+    };
+    await client.query(
+      `insert into telegram_trade_intents (
+         id, telegram_user_id, user_id, authorization_id, chat_id,
+         telegram_message_id, action, venue, market_id, event_id, side,
+         amount_usd, status, venue_order_id, expires_at, idempotency_key,
+         delivery_mode, result, updated_at
+       ) values (
+         $1::uuid, $2, $3::uuid, $4::uuid, $2, '703', 'buy',
+         'polymarket', $5, $6, 'YES', 1, 'filled', $7,
+         now() + interval '2 minutes', $8, 'app_handoff',
+         jsonb_build_object(
+           'appHandoffExecution', jsonb_build_object(
+             'committedAt', now()::text,
+             'kind', 'direct_trade',
+             'version', 2
+           ),
+           'shortfallProgress', $9::jsonb,
+           'shortfallProgressRevision', 1
+         ),
+         now() - interval '1 day'
+       )`,
+      [
+        blockerId,
+        telegramUserId,
+        userId,
+        authorization.id,
+        marketId,
+        eventId,
+        `historical-order-${index}`,
+        `historical-lifecycle:${index}:${suffix}`,
+        JSON.stringify(blockerProgress),
+      ],
+    );
+  }
+  const liveSellIntentId = crypto.randomUUID();
+  await client.query(
+    `insert into telegram_trade_intents (
+       id, telegram_user_id, user_id, authorization_id, chat_id,
+       telegram_message_id, action, venue, market_id, event_id, side,
+       shares_raw, status, expires_at, idempotency_key, delivery_mode, result
+     ) values (
+       $1::uuid, $2, $3::uuid, $4::uuid, $2, '704', 'sell',
+       'polymarket', $5, $6, 'YES', '1000000', 'external_handoff',
+       now() + interval '2 minutes', $7, 'app_handoff',
+       jsonb_build_object(
+         'appHandoffExecution', jsonb_build_object(
+           'committedAt', now()::text,
+           'kind', 'direct_trade',
+           'version', 2
+         )
+       )
+     )`,
+    [
+      liveSellIntentId,
+      telegramUserId,
+      userId,
+      authorization.id,
+      marketId,
+      eventId,
+      `live-sell-lifecycle:${suffix}`,
+    ],
+  );
+  await runTelegramTradeLifecycleProjectionBatchInTransaction(client, {
+    limit: 25,
+  });
+  assert.deepEqual(
+    (
+      await client.query<{ action: string; state: string }>(
+        `select result -> 'shortfallProgress' ->> 'action' as action,
+                result -> 'shortfallProgress' ->> 'state' as state
+           from telegram_trade_intents
+          where id = $1::uuid`,
+        [liveSellIntentId],
+      )
+    ).rows[0],
+    { action: "sell", state: "awaiting_client" },
+    "a live Mini App Sell must be projected despite a full batch of unchanged historical cards",
+  );
+  assert.deepEqual(
+    (
+      await client.query<{
+        action: string;
+        payload_state: string;
+        state_revision: number;
+      }>(
+        `select action,
+                state_revision,
+                payload ->> 'state' as payload_state
+           from telegram_bot_action_outbox
+          where trade_intent_id = $1::uuid
+          order by state_revision`,
+        [liveSellIntentId],
+      )
+    ).rows,
+    [
+      {
+        action: "trade_funding_edit",
+        payload_state: "awaiting_client",
+        state_revision: 1,
+      },
+    ],
+    "the live Sell projection must enqueue the source-card edit",
+  );
+  await client.query(
+    `delete from telegram_trade_intents
+      where id = any($1::uuid[])`,
+    [[...blockerIds, liveSellIntentId]],
+  );
+
   const staleHandoffIntent = await client.query<{ id: string }>(
     `insert into telegram_trade_intents (
        telegram_user_id, user_id, authorization_id, chat_id,
