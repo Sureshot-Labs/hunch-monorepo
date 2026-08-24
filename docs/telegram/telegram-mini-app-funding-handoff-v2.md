@@ -7,8 +7,8 @@ handoffs use one generic contract (v2). A Buy may enter the existing funding
 flow; a Sell is always a direct, client-signed venue trade:
 
 ```text
-Telegram Confirm
-  → sealed trade bounds
+Telegram Review with sealed Confirm link
+  → opening Mini App atomically claims the exact trade consent
   ├─ Buy with shortfall
   │   → bounded funding-source scope → generic FundingPlanningRuntime
   │   → Mini App action prepare/report loop → consumer reservation
@@ -28,9 +28,11 @@ client protocol:
 - `miniAppHandoffContractVersion`: `1 | 2` (default `1`).
 
 - A v2 handoff requires both version `2` and a non-`off` mode at each
-  materialization boundary. `resolve` and `projection` are read-only; `claim`
-  performs only the durable `issued → claimed` transition. A policy below
-  version `2` emits no new handoff.
+  materialization boundary. The backend issues it while rendering the exact
+  Review. `resolve` and `projection` are read-only; opening the Confirm link
+  leads to `claim`, which atomically records consent on the bound trade intent
+  and performs `issued → claimed`. A policy below version `2` emits no new
+  handoff.
 - The old v1 API is retained only to read and safely finish rows issued before
   v2 existed. It is not a frontend integration target and the bot never mints
   a new v1 token.
@@ -132,6 +134,23 @@ Telegram user must agree.
 1. `POST /telegram/app-handoffs/resolve`
 2. `POST /telegram/app-handoffs/claim`
 3. `POST /telegram/app-handoffs/commit` with the sealed `planFingerprint`
+
+The Review's `Confirm Buy` or `Confirm Sell` button opens this handoff
+directly. There is no intermediate Telegram callback or `Continue in Hunch`
+card. For v2, `claim` is the consent boundary: in one transaction it verifies
+the immutable plan/quote against the still-current Review, records the consent
+without changing the trade status, and changes the handoff from `issued` to
+`claimed`. The following idempotent commit attaches the execution marker and
+moves the intent to `funding` or `external_handoff`; there is no half-committed
+Buy or Sell state. Server-executed trades keep their existing Telegram callback
+Confirm and never enter this path.
+
+If Telegram delivery is interrupted after issuance, a reopened bot market card
+must not expose the `issued` token behind a generic Continue button: opening it
+would itself record consent without displaying the sealed economics. The card
+shows `Restore Review`, and that callback rebuilds the exact Review from the
+persisted plan and quote. Generic Continue/resume links are valid only after
+the handoff is already `claimed` or `committed`.
 
 For v2, `commit` atomically commits the generic funding operation and returns:
 
@@ -260,13 +279,13 @@ nor v2 has been accepted as a production user flow yet.
 `resolve`, then branch by the returned handoff state instead of blindly
 repeating `claim → commit`:
 
-| Resolved state      | Next request                         | Safe retry / resume behavior                                                        |
-| ------------------- | ------------------------------------ | ----------------------------------------------------------------------------------- |
-| `issued`            | `claim`, then `commit`               | A second tab that gets a claim conflict re-resolves and follows the returned state. |
-| `claimed`           | `commit` with the sealed fingerprint | Commit is idempotent; it returns the existing operation or direct continuation.     |
-| `committed`         | `execute` and/or `projection`        | Never claim or commit again; resume the existing operation or direct trade.         |
-| `cancelled`         | `projection` / `execute` read-only   | Show the terminal result; never create another operation or order.                  |
-| expired-token error | No state-changing request            | Show expiry and return to a fresh Telegram Review.                                  |
+| Resolved state      | Next request                         | Safe retry / resume behavior                                                                |
+| ------------------- | ------------------------------------ | ------------------------------------------------------------------------------------------- |
+| `issued`            | `claim`, then `commit`               | Claim is the exact Review consent; a second tab re-resolves and follows the returned state. |
+| `claimed`           | `commit` with the sealed fingerprint | Commit is idempotent; it returns the existing operation or direct continuation.             |
+| `committed`         | `execute` and/or `projection`        | Never claim or commit again; resume the existing operation or direct trade.                 |
+| `cancelled`         | `projection` / `execute` read-only   | Show the terminal result; never create another operation or order.                          |
+| expired-token error | No state-changing request            | Show expiry and return to a fresh Telegram Review.                                          |
 
 An `execute` result of `trade_terminal` is likewise read-only regardless of
 the sealed handoff state.

@@ -1800,7 +1800,10 @@ async function registerTelegramBotTradingRoutes(
   };
 
   for (const action of ["market", "cancel"] as const) {
-    api.post(
+    api.post<{
+      Body: z.infer<typeof internalTradeInputCancelBodySchema>;
+      Params: z.infer<typeof internalTradeInputParamsSchema>;
+    }>(
       `/internal/telegram-bot/trading/input-contexts/:id/${action}`,
       {
         preHandler: [requireInternal, requirePrivateTelegramChat],

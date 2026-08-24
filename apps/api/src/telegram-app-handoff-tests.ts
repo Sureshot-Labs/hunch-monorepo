@@ -23,11 +23,17 @@ function createFakePool() {
     "issued";
   let hadClaim = false;
   let handoffIssued = false;
+  let authorityFingerprint = AUTHORITY_FINGERPRINT;
   let planSnapshot: Record<string, unknown> = { destination: "polymarket" };
+  let planFingerprint = "b".repeat(64);
+  let policyRevision = "policy-1";
+  let quoteSnapshot: Record<string, unknown> = { maxSpendUsd: "2.50" };
   let tokenHash: string | null = null;
+  let v2ConsentClaims = 0;
+  const queries: string[] = [];
   const queryParams: unknown[][] = [];
   const row = () => ({
-    authority_fingerprint: AUTHORITY_FINGERPRINT,
+    authority_fingerprint: authorityFingerprint,
     cancelled_at:
       state === "cancelled" ? new Date("2026-08-17T00:01:00Z") : null,
     claimed_at: hadClaim ? new Date("2026-08-17T00:00:10Z") : null,
@@ -37,10 +43,10 @@ function createFakePool() {
     expires_at: new Date("2026-08-17T00:10:00Z"),
     expired_at: state === "expired" ? new Date("2026-08-17T00:10:01Z") : null,
     id: HANDOFF_ID,
-    plan_fingerprint: "b".repeat(64),
+    plan_fingerprint: planFingerprint,
     plan_snapshot: planSnapshot,
-    policy_revision: "policy-1",
-    quote_snapshot: { maxSpendUsd: "2.50" },
+    policy_revision: policyRevision,
+    quote_snapshot: quoteSnapshot,
     state,
     telegram_user_id: TELEGRAM_USER_ID,
     trade_intent_id: INTENT_ID,
@@ -50,6 +56,7 @@ function createFakePool() {
     query: async (sql: string, params: unknown[] = []) => {
       queryParams.push(params);
       const normalized = sql.replace(/\s+/g, " ").trim().toLowerCase();
+      queries.push(normalized);
       if (["begin", "commit", "rollback"].includes(normalized))
         return { rows: [] };
       if (normalized.startsWith("insert into telegram_app_handoffs")) {
@@ -58,9 +65,28 @@ function createFakePool() {
           /on conflict do nothing/u,
           "real PostgreSQL retries must remain readable after a uniqueness conflict",
         );
+        if (params[11] === true) {
+          assert.match(
+            normalized,
+            /intent\.result -> 'apphandoffv2' -> 'plan' = \$9::jsonb/u,
+            "v2 issue must seal only the plan stored on the trade intent",
+          );
+          assert.match(
+            normalized,
+            /intent\.quote_snapshot = \$8::jsonb/u,
+            "v2 issue must seal only the quote stored on the trade intent",
+          );
+        }
         if (handoffIssued) return { rows: [] };
         handoffIssued = true;
         tokenHash = String(params[3]);
+        planFingerprint = String(params[4]);
+        policyRevision = String(params[5]);
+        authorityFingerprint = String(params[6]);
+        quoteSnapshot = JSON.parse(String(params[7])) as Record<
+          string,
+          unknown
+        >;
         planSnapshot = JSON.parse(String(params[8])) as Record<string, unknown>;
         return { rows: [row()] };
       }
@@ -81,6 +107,16 @@ function createFakePool() {
         )
       ) {
         return { rows: [] };
+      }
+      if (
+        normalized.startsWith(
+          "update telegram_trade_intents trade_intent set status = 'expired'",
+        ) ||
+        normalized.startsWith(
+          "update telegram_app_handoffs handoff_row set state = case",
+        )
+      ) {
+        return { rowCount: 0, rows: [] };
       }
       if (normalized.includes("from telegram_app_handoffs handoff_row")) {
         const requestedHash = params[0];
@@ -126,6 +162,24 @@ function createFakePool() {
         assert.equal(params[2], HANDOFF_ID);
         return { rowCount: 1, rows: [] };
       }
+      if (
+        normalized.startsWith("update telegram_trade_intents trade_intent") &&
+        normalized.includes("'apphandoffconsent'")
+      ) {
+        assert.doesNotMatch(
+          normalized,
+          /set status\s*=/u,
+          "claim cannot change trade status before its v2 execution marker exists",
+        );
+        assert.equal(params[0], INTENT_ID);
+        assert.equal(params[1], USER_ID);
+        assert.equal(params[3], HANDOFF_ID);
+        assert.equal(params[4], TELEGRAM_USER_ID);
+        assert.deepEqual(JSON.parse(String(params[5])), planSnapshot);
+        assert.deepEqual(JSON.parse(String(params[6])), quoteSnapshot);
+        v2ConsentClaims += 1;
+        return { rowCount: 1, rows: [] };
+      }
       if (normalized.includes("set state = 'cancelled'")) {
         assert.ok(
           state === "issued" || state === "claimed" || state === "committed",
@@ -138,6 +192,8 @@ function createFakePool() {
     release: () => undefined,
   };
   return {
+    getV2ConsentClaims: () => v2ConsentClaims,
+    getQueries: () => queries,
     pool: { connect: async () => client },
     queryParams,
     setState: (nextState: typeof state) => {
@@ -222,6 +278,22 @@ assert.equal(
   deterministicFirst.token,
   "delivery retries recover the same opaque token without storing it raw",
 );
+await assert.rejects(
+  issueTelegramAppHandoff({
+    authorityFingerprint: AUTHORITY_FINGERPRINT,
+    db: deterministic.pool as never,
+    planSnapshot: { destination: "polymarket" },
+    policyRevision: "policy-1",
+    quoteSnapshot: { maxSpendUsd: "2.75" },
+    telegramUserId: TELEGRAM_USER_ID,
+    tokenSecret: "test-delivery-secret",
+    tradeIntentId: INTENT_ID,
+    userId: USER_ID,
+  }),
+  (error: unknown) =>
+    error instanceof TelegramAppHandoffError && error.code === "plan_changed",
+  "an already-issued Review token cannot silently adopt a newer quote",
+);
 assert.equal(
   buildTelegramAppHandoffStartParamForIntent({
     telegramUserId: TELEGRAM_USER_ID,
@@ -253,6 +325,7 @@ await assert.rejects(
     error instanceof TelegramAppHandoffError && error.code === "not_found",
 );
 
+const resolveQueryStart = fixture.getQueries().length;
 assert.equal(
   (
     await resolveTelegramAppHandoff({
@@ -263,6 +336,13 @@ assert.equal(
     })
   ).state,
   "issued",
+);
+const resolveQueries = fixture.getQueries().slice(resolveQueryStart);
+assert.match(resolveQueries[1] ?? "", /for update of handoff_row/u);
+assert.match(
+  resolveQueries[2] ?? "",
+  /^update telegram_trade_intents trade_intent/u,
+  "handoff access must lock the handoff before reconciling its intent",
 );
 assert.equal(
   (
@@ -347,7 +427,11 @@ const v2Commit = createFakePool();
 const v2Issued = await issueTelegramAppHandoff({
   authorityFingerprint: AUTHORITY_FINGERPRINT,
   db: v2Commit.pool as never,
-  planSnapshot: { version: 2 },
+  planSnapshot: {
+    kind: "funding",
+    trade: { action: "buy" },
+    version: 2,
+  },
   policyRevision: "policy-1",
   quoteSnapshot: { maxSpendUsd: "2.50" },
   telegramUserId: TELEGRAM_USER_ID,
@@ -360,6 +444,11 @@ await claimTelegramAppHandoff({
   token: v2Issued.token,
   userId: USER_ID,
 });
+assert.equal(
+  v2Commit.getV2ConsentClaims(),
+  1,
+  "opening a v2 funding link atomically confirms its Buy intent",
+);
 let v2ExecutionCalls = 0;
 const commitV2 = async () =>
   commitTelegramAppHandoffWithExecution({
@@ -411,9 +500,14 @@ await claimTelegramAppHandoff({
   token: v2SellIssued.token,
   userId: USER_ID,
 });
+assert.equal(
+  v2SellIssue.getV2ConsentClaims(),
+  1,
+  "opening a v2 Sell link atomically records consent on its trade intent",
+);
 await commitTelegramAppHandoffWithExecution({
   allowedIntentActions: ["sell"],
-  allowedIntentStatuses: ["external_handoff"],
+  allowedIntentStatuses: ["previewed", "confirming", "external_handoff"],
   commitExecution: async () => ({ directTrade: true }),
   committedIntentStatus: "external_handoff",
   currentAuthorityFingerprint: AUTHORITY_FINGERPRINT,

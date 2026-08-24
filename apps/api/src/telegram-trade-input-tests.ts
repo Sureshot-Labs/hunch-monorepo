@@ -95,6 +95,30 @@ assert.equal(
   telegramBotTradingTestHooks.isTelegramSellProceedsDisplayable(0.01),
   true,
 );
+assert.deepEqual(
+  telegramBotTradingTestHooks.resolveFundingReturnPreviewAllowedStatuses({
+    deliveryMode: "bot_submit",
+    replacingRetryableFundingInspection: false,
+  }),
+  ["draft", "previewed"],
+  "server funding-return may refresh the previously previewed intent",
+);
+assert.deepEqual(
+  telegramBotTradingTestHooks.resolveFundingReturnPreviewAllowedStatuses({
+    deliveryMode: "app_handoff",
+    replacingRetryableFundingInspection: false,
+  }),
+  ["draft"],
+  "a new one-click Review publishes its immutable snapshot once",
+);
+assert.deepEqual(
+  telegramBotTradingTestHooks.resolveFundingReturnPreviewAllowedStatuses({
+    deliveryMode: "app_handoff",
+    replacingRetryableFundingInspection: true,
+  }),
+  ["previewed"],
+  "only the explicit retryable handoff inspection may replace its preview",
+);
 for (const value of ["0", "-1", "+1", "1.001", "1e2", "1,25", "1 usd"]) {
   assert.equal(parseTelegramCustomBuyAmount(value), null, value);
 }
@@ -314,6 +338,98 @@ for (const [text, path] of [
     assert.doesNotMatch(button.web_app.url, /app\.hunch\.trade/u);
   }
 }
+
+const serverConfirmButton =
+  telegramBotTradingTestHooks.buildTelegramTradeConfirmButton({
+    action: "BUY",
+    intentId: "00000000-0000-4000-8000-000000000011",
+    venue: "polymarket",
+  });
+assert.ok("callback_data" in serverConfirmButton);
+if ("callback_data" in serverConfirmButton) {
+  assert.equal(
+    serverConfirmButton.callback_data,
+    "hbt:confirm:00000000-0000-4000-8000-000000000011",
+    "server execution retains its callback Confirm boundary",
+  );
+}
+const handoffConfirmButton =
+  telegramBotTradingTestHooks.buildTelegramTradeConfirmButton({
+    action: "SELL",
+    intentId: "00000000-0000-4000-8000-000000000012",
+    override: {
+      text: "Confirm sell",
+      url: "https://t.me/hunch_bot/app?startapp=handoff_th1_example",
+    },
+    venue: "limitless",
+  });
+assert.deepEqual(
+  handoffConfirmButton,
+  {
+    text: "Confirm sell",
+    url: "https://t.me/hunch_bot/app?startapp=handoff_th1_example",
+  },
+  "an app-handoff Review uses its sealed Mini App link instead of a callback",
+);
+
+let unresolvedLookupSql = "";
+const claimedHandoffIntent =
+  await telegramBotTradingTestHooks.loadUnresolvedTelegramTradeIntent(
+    {
+      query: async (sql: string) => {
+        unresolvedLookupSql = sql.toLowerCase();
+        return {
+          rows: [
+            {
+              action: "buy",
+              app_handoff_state: "claimed",
+              can_resume_app_handoff: true,
+              delivery_mode: "app_handoff",
+              error_code: null,
+              id: "00000000-0000-4000-8000-000000000013",
+              side: "YES",
+              status: "previewed",
+              user_id: "00000000-0000-4000-8000-000000000014",
+            },
+          ],
+        };
+      },
+    } as never,
+    {
+      marketId: "limitless:market:one-click",
+      telegramUserId: "42",
+    },
+  );
+assert.equal(claimedHandoffIntent?.can_resume_app_handoff, true);
+assert.equal(claimedHandoffIntent?.app_handoff_state, "claimed");
+assert.equal(
+  telegramBotTradingTestHooks.canContinueTelegramAppHandoffFromMarket({
+    app_handoff_state: "issued",
+    can_resume_app_handoff: true,
+    delivery_mode: "app_handoff",
+  }),
+  false,
+  "an issued token cannot become a generic Continue button before the exact Review is restored",
+);
+assert.equal(
+  telegramBotTradingTestHooks.canContinueTelegramAppHandoffFromMarket({
+    app_handoff_state: "claimed",
+    can_resume_app_handoff: true,
+    delivery_mode: "app_handoff",
+  }),
+  true,
+  "a claimed handoff remains resumable after consent",
+);
+assert.match(
+  unresolvedLookupSql,
+  /resumable_handoff\.state in \('claimed', 'committed'\)/u,
+  "claimed handoffs remain discoverable and resumable after the short Review TTL",
+);
+assert.match(
+  unresolvedLookupSql,
+  /tti\.status = 'external_handoff'\s+or tti\.expires_at > now\(\)/u,
+  "callback-confirmed compatibility handoffs remain redeliverable after the old quote TTL",
+);
 
 const redis = new FakeRedis();
 const context: TelegramBotTradeInputContext = {
