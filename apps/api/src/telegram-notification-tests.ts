@@ -287,8 +287,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
                 ],
               };
             }
-            if (sql.includes("from telegram_trade_intents")) {
-              return { rows: [{ delivered: true }] };
+            if (sql.includes("with claimed_notification")) {
+              return { rows: [{ resolution: "skipped_for_lifecycle" }] };
             }
             return { rowCount: 1, rows: [] };
           },
@@ -309,8 +309,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(
         queries.some(
           (sql) =>
-            sql.includes("status = 'skipped'") &&
-            sql.includes("last_error = $2"),
+            sql.includes("then 'skipped_for_lifecycle'") &&
+            sql.includes("then 'skipped'"),
         ),
         true,
       );
@@ -344,8 +344,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
                 ],
               };
             }
-            if (sql.includes("from telegram_trade_intents")) {
-              return { rows: [{ delivered: true }] };
+            if (sql.includes("with claimed_notification")) {
+              return { rows: [{ resolution: "skipped_for_lifecycle" }] };
             }
             return { rowCount: 1, rows: [] };
           },
@@ -360,8 +360,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(result.skipped, 1);
       assert.equal(result.sent, 0);
       assert.match(
-        queries.find((sql) => sql.includes("from telegram_trade_intents")) ??
-          "",
+        queries.find((sql) => sql.includes("with claimed_notification")) ?? "",
         /user_id = \$2::uuid[\s\S]+venue_order_id = \$4::text[\s\S]+delivery_mode = 'app_handoff'/,
       );
     },

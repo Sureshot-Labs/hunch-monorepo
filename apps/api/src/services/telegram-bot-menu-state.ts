@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 
 const MENU_INPUT_KEY_PREFIX = "tg:signal_bot:v1:menu_input";
 const MENU_INPUT_TTL_SEC = 10 * 60;
+const TRADE_INPUT_GUARD_KEY_PREFIX = "tg:signal_bot:v1:trade_input_guard";
+const TRADE_INPUT_GUARD_GRACE_SEC = 5 * 60;
 const MENU_RENDER_KEY_PREFIX = "tg:signal_bot:v1:menu_render";
 const MENU_RENDER_TTL_SEC = 10 * 60;
 const MENU_RENDER_LOCK_KEY_PREFIX = "tg:signal_bot:v1:menu_render_lock";
@@ -16,13 +18,23 @@ const RELEASE_MENU_RENDER_LOCK_SCRIPT = `
   return 0
 `;
 const CLEAR_CURRENT_MENU_INPUT_SCRIPT = `
-  local raw = redis.call('GET', KEYS[1])
-  if not raw then return 0 end
-  local ok, state = pcall(cjson.decode, raw)
-  if ok and state['stateToken'] == ARGV[1] then
-    return redis.call('DEL', KEYS[1])
+  local cleared = 0
+  for index = 1, 2 do
+    local raw = redis.call('GET', KEYS[index])
+    if raw then
+      local ok, state = pcall(cjson.decode, raw)
+      if ok and state['stateToken'] == ARGV[1] then
+        redis.call('DEL', KEYS[index])
+        cleared = 1
+      end
+    end
   end
-  return 0
+  return cleared
+`;
+const WRITE_TRADE_MENU_INPUT_SCRIPT = `
+  redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[2])
+  redis.call('SET', KEYS[2], ARGV[1], 'EX', ARGV[3])
+  return 1
 `;
 
 export type SignalBotMenuStateRedis = {
@@ -72,6 +84,10 @@ export type SignalBotMenuInputState =
 
 function menuInputKey(chatId: string, telegramUserId: number): string {
   return `${MENU_INPUT_KEY_PREFIX}:${chatId}:${telegramUserId}`;
+}
+
+function tradeInputGuardKey(chatId: string, telegramUserId: number): string {
+  return `${TRADE_INPUT_GUARD_KEY_PREFIX}:${chatId}:${telegramUserId}`;
 }
 
 function menuRenderKey(chatId: string, messageId: number): string {
@@ -161,6 +177,9 @@ export async function clearSignalBotMenuInput(input: {
   telegramUserId: number | null | undefined;
 }): Promise<void> {
   if (!input.telegramUserId) return;
+  // Keep the bounded trade guard when another menu replaces an input state.
+  // The old trade card may still be visible; its next free-text message must
+  // be rejected as stale instead of silently becoming a market search.
   await input.redis.del(menuInputKey(input.chatId, input.telegramUserId));
 }
 
@@ -172,7 +191,10 @@ export async function clearSignalBotMenuInputIfCurrent(input: {
 }): Promise<boolean> {
   const cleared = await input.redis.eval(CLEAR_CURRENT_MENU_INPUT_SCRIPT, {
     arguments: [input.stateToken],
-    keys: [menuInputKey(input.chatId, input.telegramUserId)],
+    keys: [
+      menuInputKey(input.chatId, input.telegramUserId),
+      tradeInputGuardKey(input.chatId, input.telegramUserId),
+    ],
   });
   return cleared === 1 || cleared === "1";
 }
@@ -186,6 +208,13 @@ export async function readSignalBotMenuInput(input: {
     menuInputKey(input.chatId, input.telegramUserId),
   );
   if (!raw) return null;
+  return parseSignalBotMenuInput(raw, false);
+}
+
+function parseSignalBotMenuInput(
+  raw: string,
+  allowExpiredTrade: boolean,
+): SignalBotMenuInputState | null {
   try {
     const parsed = JSON.parse(raw) as Partial<SignalBotMenuInputState>;
     const validKinds: SignalBotMenuInputState["kind"][] = [
@@ -223,7 +252,9 @@ export async function readSignalBotMenuInput(input: {
         !Number.isFinite(
           Date.parse((parsed as { expiresAt: string }).expiresAt),
         ) ||
-        Date.parse((parsed as { expiresAt: string }).expiresAt) <= Date.now())
+        (!allowExpiredTrade &&
+          Date.parse((parsed as { expiresAt: string }).expiresAt) <=
+            Date.now()))
     ) {
       return null;
     }
@@ -256,13 +287,36 @@ export async function readSignalBotMenuInput(input: {
   }
 }
 
+export async function readSignalBotTradeInputGuard(input: {
+  chatId: string;
+  redis: Pick<MenuStateRedis, "get">;
+  telegramUserId: number;
+}): Promise<Extract<
+  SignalBotMenuInputState,
+  { kind: "awaiting_custom_buy_amount" | "awaiting_custom_sell_amount" }
+> | null> {
+  const raw = await input.redis.get(
+    tradeInputGuardKey(input.chatId, input.telegramUserId),
+  );
+  if (!raw) return null;
+  const state = parseSignalBotMenuInput(raw, true);
+  if (
+    !state ||
+    (state.kind !== "awaiting_custom_buy_amount" &&
+      state.kind !== "awaiting_custom_sell_amount")
+  ) {
+    return null;
+  }
+  return state;
+}
+
 export async function writeSignalBotTradeMenuInput(input: {
   action: "buy" | "sell";
   chatId: string;
   contextId: string;
   expiresAt: string;
   menuMessageId: number;
-  redis: Pick<MenuStateRedis, "set">;
+  redis: Pick<MenuStateRedis, "eval">;
   telegramUserId: number;
 }): Promise<{ stateToken: string } | null> {
   const ttlSec = Math.ceil((Date.parse(input.expiresAt) - Date.now()) / 1_000);
@@ -279,11 +333,24 @@ export async function writeSignalBotTradeMenuInput(input: {
     menuMessageId: input.menuMessageId,
     stateToken,
   };
-  await input.redis.set(
-    menuInputKey(input.chatId, input.telegramUserId),
-    JSON.stringify(state),
-    { EX: Math.min(MENU_INPUT_TTL_SEC, ttlSec) },
+  const primaryTtlSec = Math.min(MENU_INPUT_TTL_SEC, ttlSec);
+  const guardTtlSec = Math.min(
+    MENU_INPUT_TTL_SEC + TRADE_INPUT_GUARD_GRACE_SEC,
+    ttlSec + TRADE_INPUT_GUARD_GRACE_SEC,
   );
+  // One generation must win both keys. Separate SETs can interleave under
+  // duplicate callbacks and pair a new primary state with an old guard.
+  await input.redis.eval(WRITE_TRADE_MENU_INPUT_SCRIPT, {
+    arguments: [
+      JSON.stringify(state),
+      String(primaryTtlSec),
+      String(guardTtlSec),
+    ],
+    keys: [
+      menuInputKey(input.chatId, input.telegramUserId),
+      tradeInputGuardKey(input.chatId, input.telegramUserId),
+    ],
+  });
   return { stateToken };
 }
 

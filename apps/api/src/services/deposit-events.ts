@@ -65,7 +65,7 @@ type InternalDepositMatch = {
 type RelayFundingOutputMatch = {
   operationId: string;
   referenceMatched: boolean;
-  referencesKnown: boolean;
+  destinationReferencesKnown: boolean;
 };
 
 type PolymarketFunderMovementMatch = {
@@ -410,8 +410,9 @@ async function findInternalDepositMovement(
 /**
  * Keep normal funding ingress visible. Only suppress an output that is proven
  * to be from a recent Relay operation owned by this user and addressed to its
- * exact destination. The sender predicate makes a same-asset user deposit
- * fail open instead of being hidden.
+ * exact destination. An exact transaction fingerprint is authoritative. The
+ * known Relay sender is only a narrow fallback while destination references
+ * have not reached reconciliation metadata yet.
  */
 async function findRelayFundingOutput(
   db: DbQuery,
@@ -426,15 +427,10 @@ async function findRelayFundingOutput(
   const assetId = normalizeEvmAddress(resolveDepositAssetAddress(input.event));
   const sender = normalizeEvmAddress(input.event.sender);
   const recipient = normalizeEvmAddress(input.recipient);
-  if (
-    !networkId?.startsWith("evm:") ||
-    !assetId ||
-    !sender ||
-    !recipient ||
-    sender !== RELAY_SOLVER.toLowerCase()
-  ) {
+  if (!networkId?.startsWith("evm:") || !assetId || !recipient) {
     return null;
   }
+  const isKnownRelaySender = sender === RELAY_SOLVER.toLowerCase();
   const lookupHmacKey = process.env.FUNDING_REFERENCE_LOOKUP_HMAC_KEY?.trim();
   let referenceFingerprint: string | null = null;
   if (lookupHmacKey && input.event.transaction_hash?.trim()) {
@@ -456,13 +452,18 @@ async function findRelayFundingOutput(
                  'relayTransactionReferenceFingerprints' ? $5::text,
                false
              ) as "referenceMatched",
-             coalesce(
-               jsonb_array_length(
-                 segment_row.support_metadata ->
-                   'relayTransactionReferenceFingerprints'
-               ),
-               0
-             ) > 0 as "referencesKnown"
+             case
+               when coalesce(
+                      segment_row.support_metadata ->>
+                        'destinationTransactionReferenceCount',
+                      ''
+                    ) ~ '^[0-9]+$'
+               then (
+                 segment_row.support_metadata ->>
+                   'destinationTransactionReferenceCount'
+               )::integer > 0
+               else false
+             end as "destinationReferencesKnown"
       from funding_operations operation_row
       join funding_operation_segments segment_row
         on segment_row.operation_id = operation_row.id
@@ -505,18 +506,6 @@ async function findRelayFundingOutput(
           '{location,asset,networkId}' = $3::text
         and lower(operation_row.destination_target_snapshot #>>
           '{location,asset,assetId}') = $4::text
-        and (
-          $5::text is null
-          or coalesce(
-               jsonb_array_length(
-                 segment_row.support_metadata ->
-                   'relayTransactionReferenceFingerprints'
-               ),
-               0
-             ) = 0
-          or segment_row.support_metadata ->
-               'relayTransactionReferenceFingerprints' ? $5::text
-        )
       order by "referenceMatched" desc, operation_row.created_at desc
       limit 2
     `,
@@ -525,7 +514,10 @@ async function findRelayFundingOutput(
   const exactMatches = rows.filter((row) => row.referenceMatched);
   if (exactMatches.length === 1) return exactMatches[0] ?? null;
   if (exactMatches.length > 1) return null;
-  const unreferencedMatches = rows.filter((row) => !row.referencesKnown);
+  if (!isKnownRelaySender) return null;
+  const unreferencedMatches = rows.filter(
+    (row) => !row.destinationReferencesKnown,
+  );
   return unreferencedMatches.length === 1
     ? (unreferencedMatches[0] ?? null)
     : null;

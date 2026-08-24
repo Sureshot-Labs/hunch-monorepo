@@ -1879,7 +1879,8 @@ async function registerTelegramBotTradingRoutes(
                 jsonb_build_object(
                   'deliveredAt', now(),
                   'delivery', $3::text,
-                  'messageId', $4::bigint
+                  'messageId', $4::bigint,
+                  'intentStatus', status
                 )
               ),
               updated_at = now()

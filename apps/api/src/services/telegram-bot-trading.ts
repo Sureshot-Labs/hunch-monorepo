@@ -1833,6 +1833,7 @@ export const telegramBotTradingTestHooks = {
   formatTelegramUsdcLineMarkdownV2,
   isDefinitiveSubmitRejection,
   isTelegramEstimatedSellProceeds,
+  isTelegramSellProceedsDisplayable,
   isTelegramVenueMinimumBlocking,
   loadEnabledAuthorization,
   marketForCallbackReadiness,
@@ -2452,6 +2453,18 @@ type TelegramExecutableSellResolution = {
   side: TelegramBotTradingSide;
 };
 
+const MIN_TELEGRAM_SELL_PROCEEDS_USD = 0.01;
+
+function isTelegramSellProceedsDisplayable(
+  value: number | null | undefined,
+): value is number {
+  return (
+    value != null &&
+    Number.isFinite(value) &&
+    value >= MIN_TELEGRAM_SELL_PROCEEDS_USD
+  );
+}
+
 export function resolveTelegramCustomSellSides(
   resolutions: readonly Pick<
     TelegramExecutableSellResolution,
@@ -2612,8 +2625,7 @@ async function resolveTelegramExecutableSellOptions(input: {
         sharesRaw <= 0n ||
         currentPrice == null ||
         currentPrice <= 0 ||
-        minimumReceiveUsd == null ||
-        minimumReceiveUsd <= 0
+        !isTelegramSellProceedsDisplayable(minimumReceiveUsd)
       ) {
         continue;
       }
@@ -9524,8 +9536,12 @@ async function previewTelegramTradeIntent(input: {
       intent: previewIntent,
       quote,
     });
+  const sellProceedsBlocking =
+    action === "SELL" &&
+    !isTelegramSellProceedsDisplayable(quote.minimumReceiveUsd);
   if (
     minimumBlocking ||
+    sellProceedsBlocking ||
     (action === "BUY" &&
       (amountUsd == null ||
         amountUsd > input.maxAmountUsd ||
@@ -9534,10 +9550,15 @@ async function previewTelegramTradeIntent(input: {
   ) {
     const failed = await updatePreviewIntentStatus({
       allowedStatuses: ["draft", "previewed"],
-      errorCode: minimumBlocking ? "quote_changed" : "max_spend_exceeded",
+      errorCode:
+        minimumBlocking || sellProceedsBlocking
+          ? "quote_changed"
+          : "max_spend_exceeded",
       errorMessage: minimumBlocking
         ? "Price moved and the order no longer meets venue minimum."
-        : "Preview quote exceeds the Telegram bot max buy.",
+        : sellProceedsBlocking
+          ? "The current Sell proceeds are below the minimum displayable amount."
+          : "Preview quote exceeds the Telegram bot max buy.",
       quoteSnapshot: buildTelegramTradeQuotePreview(quote),
       result: { maxAmountUsd: input.maxAmountUsd, previewQuote: quote },
       status: "failed",
@@ -9557,7 +9578,9 @@ async function previewTelegramTradeIntent(input: {
         lines: [
           minimumBlocking
             ? "The current quote does not meet venue requirements."
-            : `Maximum total spend is outside your ${formatUsd(input.maxAmountUsd)} limit.`,
+            : sellProceedsBlocking
+              ? "The current Sell would return less than $0.01."
+              : `Maximum total spend is outside your ${formatUsd(input.maxAmountUsd)} limit.`,
           "Nothing was submitted.",
         ],
         marketTitle: input.intent.market_title,
@@ -12248,20 +12271,23 @@ export async function handleTelegramBotTradingCallback(
     }
     const previewMaxSpendUsd =
       action === "BUY" ? (previewQuote.maxSpendUsd ?? amountUsd) : null;
-    if (
-      isTelegramVenueMinimumBlocking({
-        action: previewIntent.action,
-        meetsVenueMinimum: previewQuote.meetsVenueMinimum,
-        orderType: previewIntent.orderType,
-        venue: previewIntent.venue,
-      })
-    ) {
+    const venueMinimumBlocking = isTelegramVenueMinimumBlocking({
+      action: previewIntent.action,
+      meetsVenueMinimum: previewQuote.meetsVenueMinimum,
+      orderType: previewIntent.orderType,
+      venue: previewIntent.venue,
+    });
+    const sellProceedsBlocking =
+      action === "SELL" &&
+      !isTelegramSellProceedsDisplayable(previewQuote.minimumReceiveUsd);
+    if (venueMinimumBlocking || sellProceedsBlocking) {
       await updateIntentStatus({
         allowedStatuses: ["draft", "previewed"],
         db: input.db,
         errorCode: "quote_changed",
-        errorMessage:
-          "Price moved and the order no longer meets venue minimum.",
+        errorMessage: venueMinimumBlocking
+          ? "Price moved and the order no longer meets venue minimum."
+          : "The current Sell proceeds are below the minimum displayable amount.",
         intentId: intent.id,
         quoteSnapshot: buildTelegramTradeQuotePreview(previewQuote),
         result: { previewQuote },
@@ -12271,9 +12297,15 @@ export async function handleTelegramBotTradingCallback(
         chat_id: chatId,
         parse_mode: "MarkdownV2",
         text: formatTelegramTradeLifecycleMessageMarkdownV2({
-          heading: "Price moved.",
+          heading: venueMinimumBlocking
+            ? "Price moved."
+            : "Sell amount is too small.",
           tone: "warn",
-          lines: ["Nothing was submitted. Send /market again."],
+          lines: [
+            sellProceedsBlocking
+              ? "The current Sell would return less than $0.01. Nothing was submitted."
+              : "Nothing was submitted. Send /market again.",
+          ],
           marketTitle: intent.market_title,
           venue: intent.venue,
         }),

@@ -55,6 +55,11 @@ type MockDbOptions = {
   existingDepositUserId?: string | null;
   existingNotificationId?: string | null;
   relayFundingOperationId?: string | null;
+  relayFundingMatches?: Array<{
+    operationId: string;
+    referenceMatched: boolean;
+    destinationReferencesKnown: boolean;
+  }>;
 };
 
 type MockDb = DbQuery & {
@@ -188,11 +193,19 @@ function createMockDb(options: MockDbOptions): MockDb {
     }
 
     if (/from funding_operations operation_row/i.test(sql)) {
-      const relayFundingOperationId = options.relayFundingOperationId;
+      const relayFundingMatches =
+        options.relayFundingMatches ??
+        (options.relayFundingOperationId
+          ? [
+              {
+                operationId: options.relayFundingOperationId,
+                referenceMatched: false,
+                destinationReferencesKnown: false,
+              },
+            ]
+          : []);
       return {
-        rows: relayFundingOperationId
-          ? ([{ operationId: relayFundingOperationId }] as unknown as T[])
-          : [],
+        rows: relayFundingMatches as unknown as T[],
       };
     }
 
@@ -469,6 +482,127 @@ const tests: TestCase[] = [
           /trade_intent\.status in \([\s\S]*?'external_handoff'[\s\S]*?'cancelled'[\s\S]*?\)/i,
           "an internal Relay output stays suppressed after handoff or Buy cancellation",
         );
+      });
+    },
+  },
+  {
+    name: "Relay output exact transaction match suppresses notification regardless of sender shape",
+    run: async () => {
+      await withRedisDisabled(async () => {
+        const previousLookupKey = process.env.FUNDING_REFERENCE_LOOKUP_HMAC_KEY;
+        process.env.FUNDING_REFERENCE_LOOKUP_HMAC_KEY =
+          "test-relay-reference-key";
+        try {
+          const db = createMockDb({
+            wallet: {
+              userId: "user-1",
+              walletAddress: basePayload.recipient,
+              walletType: "ethereum",
+            },
+            relayFundingMatches: [
+              {
+                operationId: "relay-operation-exact",
+                referenceMatched: true,
+                destinationReferencesKnown: true,
+              },
+            ],
+          });
+
+          const result = await handlePrivyDepositWebhook(db, basePayload);
+
+          assert.equal(result.status, "ignored_funding");
+          assert.deepEqual(db.notificationInserts, []);
+        } finally {
+          if (previousLookupKey === undefined) {
+            delete process.env.FUNDING_REFERENCE_LOOKUP_HMAC_KEY;
+          } else {
+            process.env.FUNDING_REFERENCE_LOOKUP_HMAC_KEY = previousLookupKey;
+          }
+        }
+      });
+    },
+  },
+  {
+    name: "Relay output with only origin references uses the unique sender-bound destination shape",
+    run: async () => {
+      await withRedisDisabled(async () => {
+        const db = createMockDb({
+          wallet: {
+            userId: "user-1",
+            walletAddress: basePayload.recipient,
+            walletType: "ethereum",
+          },
+          relayFundingMatches: [
+            {
+              operationId: "relay-operation-origin-only",
+              referenceMatched: false,
+              destinationReferencesKnown: false,
+            },
+          ],
+        });
+
+        const result = await handlePrivyDepositWebhook(db, {
+          ...basePayload,
+          sender: "0xf70da97812CB96acDF810712Aa562db8dfA3dbEF",
+        });
+
+        assert.equal(result.status, "ignored_funding");
+        assert.deepEqual(db.notificationInserts, []);
+      });
+    },
+  },
+  {
+    name: "an unreferenced Relay-shaped operation never hides a deposit from another sender",
+    run: async () => {
+      await withRedisDisabled(async () => {
+        const db = createMockDb({
+          wallet: {
+            userId: "user-1",
+            walletAddress: basePayload.recipient,
+            walletType: "ethereum",
+          },
+          relayFundingMatches: [
+            {
+              operationId: "relay-operation-unreferenced",
+              referenceMatched: false,
+              destinationReferencesKnown: false,
+            },
+          ],
+        });
+
+        const result = await handlePrivyDepositWebhook(db, basePayload);
+
+        assert.equal(result.status, "notified");
+        assert.equal(db.notificationInserts[0]?.type, "deposit_received");
+      });
+    },
+  },
+  {
+    name: "Relay-shaped deposit with a different finalized destination reference remains visible",
+    run: async () => {
+      await withRedisDisabled(async () => {
+        const db = createMockDb({
+          wallet: {
+            userId: "user-1",
+            walletAddress: basePayload.recipient,
+            walletType: "ethereum",
+          },
+          relayFundingMatches: [
+            {
+              operationId: "relay-operation-other-output",
+              referenceMatched: false,
+              destinationReferencesKnown: true,
+            },
+          ],
+        });
+
+        const result = await handlePrivyDepositWebhook(db, {
+          ...basePayload,
+          sender: "0xf70da97812CB96acDF810712Aa562db8dfA3dbEF",
+        });
+
+        assert.equal(result.status, "notified");
+        assert.equal(db.notificationInserts[0]?.type, "deposit_received");
       });
     },
   },

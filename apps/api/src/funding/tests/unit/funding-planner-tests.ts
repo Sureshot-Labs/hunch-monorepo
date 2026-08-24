@@ -48,6 +48,7 @@ import {
   RelayFirstSourcePlanner,
   assertSingleSegmentExecutionPlan,
   buildRelayWalletSourceOption,
+  minimumDestinationUsdForFundingRequest,
   selectRelayFirstSourceOptions,
 } from "../../planner/source-options.js";
 import { FundingPlanner } from "../../planner/planner.js";
@@ -81,6 +82,34 @@ const POLYGON_OTHER_TOKEN: AssetRef = {
   assetId: "0x0000000000000000000000000000000000000003",
   decimals: 18,
 };
+
+assert.equal(
+  minimumDestinationUsdForFundingRequest(
+    {
+      purpose: "trade_shortfall",
+      serverAdditionalDestinationAmount: {
+        asset: BASE_USDC,
+        raw: "80000",
+      },
+    },
+    "0.5",
+  ),
+  "0",
+);
+assert.equal(
+  minimumDestinationUsdForFundingRequest(
+    { purpose: "trade_shortfall", serverAdditionalDestinationAmount: null },
+    "0.5",
+  ),
+  "0.5",
+);
+assert.equal(
+  minimumDestinationUsdForFundingRequest(
+    { purpose: "add_funds", serverAdditionalDestinationAmount: null },
+    "0.5",
+  ),
+  "0.5",
+);
 
 async function test(name: string, run: () => void | Promise<void>) {
   await run();

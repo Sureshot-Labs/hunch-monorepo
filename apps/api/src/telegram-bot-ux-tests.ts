@@ -120,6 +120,54 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
+    name: "submitted funded trade never renders as stopped or cancellable",
+    run: () => {
+      const intentId = "00000000-0000-4000-8000-000000000001";
+      const progress = {
+        action: "buy",
+        amountUsd: "5",
+        canCancel: false,
+        canCancelBuy: false,
+        intentId,
+        isDirectHandoff: false,
+        marketTitle: "Market",
+        requiresMiniAppContinuation: false,
+        sideLabel: "YES",
+        state: "confirming_trade",
+        venue: "polymarket",
+      } as never;
+      const text =
+        telegramTradeLifecycleProgressTestHooks.progressText(progress);
+      assert.match(text, /Checking order/u);
+      assert.doesNotMatch(text, /No trade was submitted/u);
+      const keyboard =
+        telegramTradeLifecycleProgressTestHooks.progressKeyboard(
+          progress,
+        ).inline_keyboard;
+      assert.equal(
+        keyboard
+          .flat()
+          .some(
+            (button) =>
+              "callback_data" in button &&
+              (button.callback_data.includes(":cancel:") ||
+                button.callback_data.includes(":open_market:")),
+          ),
+        false,
+      );
+      assert.equal(
+        keyboard
+          .flat()
+          .some(
+            (button) =>
+              "callback_data" in button &&
+              button.callback_data === "hm:v1:home",
+          ),
+        true,
+      );
+    },
+  },
+  {
     name: "change amount callback remains valid and bounded",
     run: () => {
       const intentId = "00000000-0000-4000-8000-000000000001";

@@ -9,6 +9,7 @@ import {
 } from "./services/telegram-bot-trading.js";
 import { parseTelegramBotTradingCallbackData } from "./services/telegram-bot-trading-client.js";
 import {
+  clearSignalBotMenuInput,
   clearSignalBotMenuInputIfCurrent,
   readSignalBotMenuInput,
   writeSignalBotTradeMenuInput,
@@ -43,17 +44,23 @@ class FakeRedis {
     return "OK";
   }
 
-  async eval(
-    _script: string,
-    options: { arguments: string[]; keys: string[] },
-  ) {
-    const key = options.keys[0] ?? "";
-    const raw = this.values.get(key);
-    if (!raw) return 0;
-    const state = JSON.parse(raw) as { stateToken?: string };
-    if (state.stateToken !== options.arguments[0]) return 0;
-    this.values.delete(key);
-    return 1;
+  async eval(script: string, options: { arguments: string[]; keys: string[] }) {
+    if (script.includes("redis.call('SET'")) {
+      for (const key of options.keys) {
+        this.values.set(key, options.arguments[0] ?? "");
+      }
+      return 1;
+    }
+    let cleared = false;
+    for (const key of options.keys) {
+      const raw = this.values.get(key);
+      if (!raw) continue;
+      const state = JSON.parse(raw) as { stateToken?: string };
+      if (state.stateToken !== options.arguments[0]) continue;
+      this.values.delete(key);
+      cleared = true;
+    }
+    return cleared ? 1 : 0;
   }
 }
 
@@ -77,6 +84,15 @@ assert.equal(
   } as never),
   false,
   "the exact AMM Sell transaction retains its sealed minimum receive",
+);
+assert.equal(
+  telegramBotTradingTestHooks.isTelegramSellProceedsDisplayable(0.009),
+  false,
+  "a Sell that renders as $0.00 must not be advertised",
+);
+assert.equal(
+  telegramBotTradingTestHooks.isTelegramSellProceedsDisplayable(0.01),
+  true,
 );
 for (const value of ["0", "-1", "+1", "1.001", "1e2", "1,25", "1 usd"]) {
   assert.equal(parseTelegramCustomBuyAmount(value), null, value);
@@ -427,6 +443,238 @@ assert.equal(
   null,
 );
 
+const staleGuardState = await writeSignalBotTradeMenuInput({
+  action: "buy",
+  chatId: "42",
+  contextId,
+  expiresAt: context.expiresAt,
+  menuMessageId: 22,
+  redis,
+  telegramUserId: 42,
+});
+assert.ok(staleGuardState);
+assert.equal(
+  JSON.parse(redis.values.get("tg:signal_bot:v1:menu_input:42:42") ?? "{}")
+    .stateToken,
+  JSON.parse(
+    redis.values.get("tg:signal_bot:v1:trade_input_guard:42:42") ?? "{}",
+  ).stateToken,
+  "the atomic write must publish one generation to primary and guard keys",
+);
+await clearSignalBotMenuInput({ chatId: "42", redis, telegramUserId: 42 });
+let staleGuardCompletionCalls = 0;
+let staleGuardEditedText = "";
+assert.equal(
+  await handleSignalBotTradeInput({
+    chatId: "42",
+    complete: async () => {
+      staleGuardCompletionCalls += 1;
+      return { completed: true, message: { text: "must not complete" } };
+    },
+    redis,
+    telegramUserId: 42,
+    text: "5",
+    transport: {
+      editMessageText: async (message) => {
+        staleGuardEditedText = message.text;
+        return { message: "ok", messageId: 22, ok: true as const };
+      },
+      sendMessage: async () => ({
+        message: "unexpected standalone send",
+        messageId: 23,
+        ok: true as const,
+      }),
+    },
+  }),
+  true,
+);
+assert.equal(staleGuardCompletionCalls, 0);
+assert.match(staleGuardEditedText, /no longer active/u);
+assert.match(
+  staleGuardEditedText,
+  /active\\\./u,
+  "stale input copy must remain valid MarkdownV2",
+);
+assert.equal(
+  redis.values.has("tg:signal_bot:v1:trade_input_guard:42:42"),
+  false,
+  "an expired custom amount must be consumed instead of becoming a market search",
+);
+
+const displacedBySearchState = await writeSignalBotTradeMenuInput({
+  action: "buy",
+  chatId: "42",
+  contextId,
+  expiresAt: context.expiresAt,
+  menuMessageId: 20,
+  redis,
+  telegramUserId: 42,
+});
+assert.ok(displacedBySearchState);
+await clearSignalBotMenuInput({ chatId: "42", redis, telegramUserId: 42 });
+redis.values.set(
+  "tg:signal_bot:v1:menu_input:42:42",
+  JSON.stringify({ kind: "awaiting_market_query", menuMessageId: 30 }),
+);
+assert.equal(
+  await handleSignalBotTradeInput({
+    chatId: "42",
+    complete: async () => {
+      throw new Error("a displaced trade input must not complete");
+    },
+    redis,
+    telegramUserId: 42,
+    text: "5",
+    transport: {
+      editMessageText: async (message) => {
+        void message;
+        return { message: "ok", messageId: 20, ok: true as const };
+      },
+      sendMessage: async () => ({
+        message: "unexpected standalone send",
+        messageId: 31,
+        ok: true as const,
+      }),
+    },
+  }),
+  false,
+  "the explicit newer search input must take precedence over a stale trade guard",
+);
+assert.equal(
+  (
+    await readSignalBotMenuInput({
+      chatId: "42",
+      redis,
+      telegramUserId: 42,
+    })
+  )?.kind,
+  "awaiting_market_query",
+  "the trade handler must preserve the newer search state",
+);
+assert.equal(
+  redis.values.has("tg:signal_bot:v1:trade_input_guard:42:42"),
+  true,
+  "the newer search input must not destroy the bounded stale trade guard",
+);
+await clearSignalBotMenuInput({ chatId: "42", redis, telegramUserId: 42 });
+
+const failedStaleDeliveryState = await writeSignalBotTradeMenuInput({
+  action: "buy",
+  chatId: "42",
+  contextId,
+  expiresAt: context.expiresAt,
+  menuMessageId: 19,
+  redis,
+  telegramUserId: 42,
+});
+assert.ok(failedStaleDeliveryState);
+await clearSignalBotMenuInput({ chatId: "42", redis, telegramUserId: 42 });
+assert.equal(
+  await handleSignalBotTradeInput({
+    chatId: "42",
+    complete: async () => {
+      throw new Error("a stale trade input must not complete");
+    },
+    redis,
+    telegramUserId: 42,
+    text: "5",
+    transport: {
+      editMessageText: async () => ({
+        error: "other" as const,
+        message: "edit failed",
+        ok: false as const,
+      }),
+      sendMessage: async () => ({
+        message: "unexpected standalone send",
+        messageId: 33,
+        ok: true as const,
+      }),
+    },
+  }),
+  true,
+);
+assert.equal(
+  redis.values.has("tg:signal_bot:v1:trade_input_guard:42:42"),
+  true,
+  "a failed stale-card edit must retain the guard",
+);
+assert.equal(
+  await clearSignalBotMenuInputIfCurrent({
+    chatId: "42",
+    redis,
+    stateToken: failedStaleDeliveryState.stateToken,
+    telegramUserId: 42,
+  }),
+  true,
+);
+
+const expiredVisibleState = await writeSignalBotTradeMenuInput({
+  action: "buy",
+  chatId: "42",
+  contextId,
+  expiresAt: context.expiresAt,
+  menuMessageId: 21,
+  redis,
+  telegramUserId: 42,
+});
+assert.ok(expiredVisibleState);
+await clearSignalBotMenuInput({ chatId: "42", redis, telegramUserId: 42 });
+const expiredVisibleGuardKey = "tg:signal_bot:v1:trade_input_guard:42:42";
+const expiredVisibleGuard = JSON.parse(
+  redis.values.get(expiredVisibleGuardKey) ?? "{}",
+) as Record<string, unknown>;
+redis.values.set(
+  expiredVisibleGuardKey,
+  JSON.stringify({
+    ...expiredVisibleGuard,
+    expiresAt: new Date(Date.now() - 1_000).toISOString(),
+  }),
+);
+redis.values.set(
+  "tg:signal_bot:v1:menu_input:42:42",
+  JSON.stringify({ kind: "awaiting_market_query", menuMessageId: 32 }),
+);
+let replacedExpiredMessage = "";
+assert.equal(
+  await beginSignalBotTradeInput({
+    action: "sell",
+    chatId: "42",
+    contextId,
+    expiresAt: context.expiresAt,
+    menuMessageId: 22,
+    message: { text: "enter shares" },
+    redis,
+    telegramUserId: 42,
+    transport: {
+      editMessageText: async (message) => {
+        if (message.message_id === 21) replacedExpiredMessage = message.text;
+        return {
+          message: "ok",
+          messageId: message.message_id,
+          ok: true as const,
+        };
+      },
+      sendMessage: async () => ({
+        message: "unexpected standalone send",
+        messageId: 23,
+        ok: true as const,
+      }),
+    },
+  }),
+  true,
+);
+assert.match(
+  replacedExpiredMessage,
+  /replaced by a newer trade card/u,
+  "a new custom input must also disable an expired card retained by the guard",
+);
+assert.match(
+  replacedExpiredMessage,
+  /card\\\./u,
+  "replacement copy must remain valid MarkdownV2",
+);
+await clearSignalBotMenuInput({ chatId: "42", redis, telegramUserId: 42 });
+
 let standaloneSends = 0;
 assert.equal(
   await beginSignalBotTradeInput({
@@ -462,6 +710,46 @@ assert.equal(
     })
   )?.kind,
   "awaiting_custom_sell_amount",
+);
+
+// Reopening the same custom-input card is an idempotent success. Telegram
+// reports an unchanged edit as HTTP 400; the prompt must retain the fresh
+// primary state and guard so the next amount is still consumed as trade input.
+assert.equal(
+  await beginSignalBotTradeInput({
+    action: "sell",
+    chatId: "42",
+    contextId,
+    expiresAt: context.expiresAt,
+    menuMessageId: 12,
+    message: { text: "enter shares" },
+    redis,
+    telegramUserId: 42,
+    transport: {
+      editMessageText: async () => ({
+        error: "other" as const,
+        message: "Bad Request: message is not modified",
+        ok: false as const,
+      }),
+      sendMessage: async () => {
+        throw new Error("an unchanged edit must not create another prompt");
+      },
+    },
+  }),
+  true,
+);
+const unchangedPromptState = await readSignalBotMenuInput({
+  chatId: "42",
+  redis,
+  telegramUserId: 42,
+});
+assert.equal(unchangedPromptState?.kind, "awaiting_custom_sell_amount");
+assert.equal(
+  JSON.parse(
+    redis.values.get("tg:signal_bot:v1:trade_input_guard:42:42") ?? "{}",
+  ).stateToken,
+  unchangedPromptState?.stateToken,
+  "the unchanged prompt keeps its matching guard generation",
 );
 
 assert.equal(

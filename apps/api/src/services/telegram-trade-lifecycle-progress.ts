@@ -23,15 +23,22 @@ import {
   type TelegramBotTradingClientButton,
   type TelegramBotTradingClientReplyMarkup,
 } from "./telegram-bot-trading-client.js";
+import {
+  TELEGRAM_TRADE_GENERIC_NOTIFICATION_OWNER,
+  TELEGRAM_TRADE_LIFECYCLE_OUTBOX_ACTION,
+  TELEGRAM_TRADE_TERMINAL_DELIVERY_OWNER_RESULT_KEY,
+} from "./telegram-trade-delivery-contract.js";
 
 const CALLBACK_PREFIX = TELEGRAM_BOT_TRADING_CALLBACK_PREFIX;
-
-/**
- * `trade_funding_edit` is the persisted outbox identifier introduced for the
- * original shortfall card. Its constraint is already deployed, so keep that
- * identifier while the payload now represents the whole trade lifecycle.
- */
-const TELEGRAM_TRADE_LIFECYCLE_OUTBOX_ACTION = "trade_funding_edit";
+// Telegram mutations abort after 20 seconds. A row still marked `sending`
+// beyond this bound belongs to a crashed worker, not a live request.
+const TELEGRAM_TRADE_LIFECYCLE_STALE_SENDING_SEC = 25;
+const TELEGRAM_TRADE_LIFECYCLE_MAX_EDIT_ATTEMPTS = 5;
+const TELEGRAM_TRADE_LIFECYCLE_DEFAULT_RETRY_SEC = 3;
+// Preserve Telegram's retry_after. This cap only protects the PostgreSQL int
+// boundary; shortening a valid provider delay would retry inside the 429
+// window and consume the bounded edit attempts without a real delivery try.
+const TELEGRAM_TRADE_LIFECYCLE_MAX_PERSISTABLE_RETRY_SEC = 2_147_483_647;
 
 function formatRawShares(raw: string): string {
   if (!isRawAmount(raw)) return raw;
@@ -208,6 +215,173 @@ function parseProgress(value: unknown): TelegramTradeLifecycleProgress | null {
   } as TelegramTradeLifecycleProgress;
 }
 
+type TelegramLifecycleEditFailureResolution = Readonly<{
+  code: string;
+  disposition: "dead" | "retry";
+  retryAfterSec: number;
+}>;
+
+function telegramLifecycleEditFailureCode(error: unknown): string {
+  const explicitCode =
+    isRecord(error) && typeof error.error === "string" ? error.error : null;
+  const message =
+    error instanceof Error
+      ? error.message
+      : isRecord(error) && typeof error.description === "string"
+        ? error.description
+        : isRecord(error) && typeof error.message === "string"
+          ? error.message
+          : "";
+  const normalized = message.toLowerCase();
+  if (normalized.includes("message is not modified")) {
+    return "already_applied";
+  }
+  if (
+    explicitCode === "message_not_editable" ||
+    normalized.includes("message to edit not found") ||
+    normalized.includes("message can't be edited")
+  ) {
+    return "message_not_editable";
+  }
+  if (
+    explicitCode === "blocked_or_missing" ||
+    normalized.includes("bot was blocked")
+  ) {
+    return "blocked_or_missing";
+  }
+  if (explicitCode === "ambiguous" || explicitCode === "other") {
+    return explicitCode;
+  }
+  return "unknown";
+}
+
+function resolveTelegramLifecycleEditFailure(
+  error: unknown,
+  attemptCount: number,
+): TelegramLifecycleEditFailureResolution {
+  const code = telegramLifecycleEditFailureCode(error);
+  const explicitRetryAfterSec =
+    isRecord(error) &&
+    typeof error.retryAfterSec === "number" &&
+    Number.isFinite(error.retryAfterSec) &&
+    error.retryAfterSec > 0
+      ? Math.min(
+          TELEGRAM_TRADE_LIFECYCLE_MAX_PERSISTABLE_RETRY_SEC,
+          Math.max(1, Math.trunc(error.retryAfterSec)),
+        )
+      : null;
+  const permanent =
+    code === "blocked_or_missing" ||
+    code === "message_not_editable" ||
+    (code === "other" && explicitRetryAfterSec == null);
+  return {
+    code,
+    disposition:
+      permanent || attemptCount >= TELEGRAM_TRADE_LIFECYCLE_MAX_EDIT_ATTEMPTS
+        ? "dead"
+        : "retry",
+    retryAfterSec:
+      explicitRetryAfterSec ?? TELEGRAM_TRADE_LIFECYCLE_DEFAULT_RETRY_SEC,
+  };
+}
+
+function telegramLifecycleEditSucceeded(result: unknown): boolean {
+  return isRecord(result) && result.ok === true;
+}
+
+async function markTelegramTradeLifecycleDelivered(input: {
+  deliveryAttemptId: string;
+  messageId: number;
+  outboxId: string;
+  pool: Pick<Pool, "query">;
+  terminalFill: boolean;
+}): Promise<void> {
+  await input.pool.query(
+    `with sent_outbox as (
+       update telegram_bot_action_outbox
+          set status = 'sent', sent_at = clock_timestamp(), last_error = null,
+              updated_at = clock_timestamp()
+        where id = $1::uuid
+          and status = 'sending'
+          and delivery_attempt_id = $2::uuid
+        returning trade_intent_id
+     )
+     update telegram_trade_intents intent_row
+        set result = coalesce(intent_row.result, '{}'::jsonb) ||
+              jsonb_build_object(
+                'telegramReceipt',
+                jsonb_build_object(
+                  'deliveredAt', clock_timestamp(),
+                  'delivery', 'edit',
+                  'messageId', $3::bigint,
+                  'intentStatus', 'filled'
+                )
+              ),
+            updated_at = clock_timestamp()
+       from sent_outbox
+      where $4::boolean
+        and intent_row.id = sent_outbox.trade_intent_id`,
+    [
+      input.outboxId,
+      input.deliveryAttemptId,
+      input.messageId,
+      input.terminalFill,
+    ],
+  );
+}
+
+async function recoverStaleTelegramTradeLifecycleDeliveries(input: {
+  pool: Pick<Pool, "query">;
+}): Promise<number> {
+  // Repair crashed claims and quarantine any retry row left at the ceiling by
+  // an older worker before the next claim query can see it.
+  const result = await input.pool.query(
+    `update telegram_bot_action_outbox outbox
+        set status = case
+              when intent_row.result ->> 'shortfallProgressRevision' =
+                    outbox.state_revision::text
+               and outbox.attempt_count < $3::integer
+                then 'retry'
+              else 'dead'
+            end,
+            next_attempt_at = clock_timestamp(),
+            last_error = case
+              when intent_row.result ->> 'shortfallProgressRevision' =
+                    outbox.state_revision::text
+               and outbox.attempt_count < $3::integer
+                then 'telegram_trade_lifecycle_stale_sending_retry'
+              when intent_row.result ->> 'shortfallProgressRevision' =
+                    outbox.state_revision::text
+                then 'telegram_trade_lifecycle_edit_attempts_exhausted'
+              else 'telegram_trade_lifecycle_edit_superseded'
+            end,
+            delivery_attempt_id = null,
+            delivery_started_at = null,
+            updated_at = clock_timestamp()
+       from telegram_trade_intents intent_row
+      where outbox.trade_intent_id = intent_row.id
+        and outbox.action = $1::text
+        and (
+          (
+            outbox.status = 'sending'
+            and outbox.delivery_started_at <=
+                  clock_timestamp() -
+                    ($2::double precision * interval '1 second')
+          )
+          or (
+            outbox.status in ('pending', 'retry')
+            and outbox.attempt_count >= $3::integer
+          )
+        )`,
+    [
+      TELEGRAM_TRADE_LIFECYCLE_OUTBOX_ACTION,
+      TELEGRAM_TRADE_LIFECYCLE_STALE_SENDING_SEC,
+      TELEGRAM_TRADE_LIFECYCLE_MAX_EDIT_ATTEMPTS,
+    ],
+  );
+  return result.rowCount ?? 0;
+}
+
 function sideLabel(candidate: ProjectionCandidate): string {
   const stored = candidate.result.shortfallSideLabel;
   return typeof stored === "string" && stored.trim()
@@ -360,28 +534,42 @@ function liveProgressFor(
     candidate.delivery_mode === "app_handoff" &&
     isRecord(candidate.result.appHandoffExecution) &&
     candidate.result.appHandoffExecution.version === 2;
-  const state: TelegramTradeLifecycleState = routerContinuationPending
-    ? routerContinuationNeedsAttention
-      ? "needs_attention"
-      : "preparing"
-    : venueBalancePending
-      ? "preparing"
-      : ready
-        ? "ready"
-        : terminal
-          ? "stopped"
-          : awaitingReconciliation && !automaticProviderReferenceWait
-            ? "needs_attention"
-            : candidate.has_broadcast_boundary
-              ? "submitted"
-              : candidate.has_started_attempt
-                ? "preparing"
-                : "starting";
+  // Once the intent crosses the venue submission boundary, the intent—not the
+  // completed funding operation—owns the card. Otherwise consuming the funding
+  // reservation would turn a submitted order into the false and unsafe
+  // "Funding stopped / No trade was submitted" state.
+  const tradeSubmissionState: TelegramTradeLifecycleState | null =
+    candidate.status === "executing"
+      ? "submitting_trade"
+      : candidate.status === "submitted" ||
+          candidate.status === "reconcile_required"
+        ? "confirming_trade"
+        : null;
+  const state: TelegramTradeLifecycleState =
+    tradeSubmissionState ??
+    (routerContinuationPending
+      ? routerContinuationNeedsAttention
+        ? "needs_attention"
+        : "preparing"
+      : venueBalancePending
+        ? "preparing"
+        : ready
+          ? "ready"
+          : terminal
+            ? "stopped"
+            : awaitingReconciliation && !automaticProviderReferenceWait
+              ? "needs_attention"
+              : candidate.has_broadcast_boundary
+                ? "submitted"
+                : candidate.has_started_attempt
+                  ? "preparing"
+                  : "starting");
   return {
     action: candidate.action === "sell" ? "sell" : "buy",
     amountUsd: candidate.amount_usd ?? "0",
     attemptStateFingerprint: candidate.attempt_state_fingerprint,
     canCancel:
+      tradeSubmissionState == null &&
       !terminal &&
       !awaitingReconciliation &&
       !candidate.has_broadcast_boundary &&
@@ -404,7 +592,7 @@ function liveProgressFor(
     operationStatus: candidate.operation_status,
     progressStage: candidate.progress_stage,
     receiptStateFingerprint: candidate.receipt_state_fingerprint,
-    reasonCode,
+    reasonCode: tradeSubmissionState == null ? reasonCode : null,
     requiresMiniAppContinuation,
     sideLabel: sideLabel(candidate),
     sharesRaw: candidate.shares_raw,
@@ -657,6 +845,7 @@ async function listCandidates(
             and intent.result -> 'appHandoffExecution' ->> 'version' = '2'
           )
         )
+        and intent.result ->> $2::text is distinct from $3::text
       -- Never let already-projected historical rows monopolize a bounded
       -- worker batch. Unprojected cards go first; afterwards the newest intent
       -- or funding transition wins, regardless of whether execution is server
@@ -670,7 +859,11 @@ async function listCandidates(
                intent.id
       limit $1
       for update of intent skip locked`,
-    [limit],
+    [
+      limit,
+      TELEGRAM_TRADE_TERMINAL_DELIVERY_OWNER_RESULT_KEY,
+      TELEGRAM_TRADE_GENERIC_NOTIFICATION_OWNER,
+    ],
   );
   return rows;
 }
@@ -918,6 +1111,7 @@ function progressText(progress: TelegramTradeLifecycleProgress): string {
     );
   }
   const clientExecution = progress.requiresMiniAppContinuation;
+  const trade = progress.action === "sell" ? "Sell" : "Buy";
   const status = {
     starting: [
       "ℹ️",
@@ -946,6 +1140,16 @@ function progressText(progress: TelegramTradeLifecycleProgress): string {
       clientExecution
         ? "Funding is confirmed. Continue in Hunch to use the reserved funds for the Buy within your confirmed limits."
         : "Funding is confirmed. Hunch is checking a fresh quote and will Buy automatically within your confirmed limits.",
+    ],
+    submitting_trade: [
+      "⏳",
+      `Submitting ${trade}`,
+      `Funding is confirmed. Hunch is submitting the ${trade} within your confirmed limits.`,
+    ],
+    confirming_trade: [
+      "⏳",
+      "Checking order",
+      "The order may already have been submitted. Hunch is checking the venue automatically; do not retry it.",
     ],
     needs_attention: [
       "⚠️",
@@ -1080,7 +1284,12 @@ function progressKeyboard(
 }
 
 export const telegramTradeLifecycleProgressTestHooks = {
+  markTelegramTradeLifecycleDelivered,
   progressKeyboard,
+  progressText,
+  recoverStaleTelegramTradeLifecycleDeliveries,
+  resolveTelegramLifecycleEditFailure,
+  telegramLifecycleEditSucceeded,
 };
 
 async function claimTelegramTradeLifecycleOutbox(
@@ -1101,19 +1310,29 @@ async function claimTelegramTradeLifecycleOutbox(
          join telegram_trade_intents intent on intent.id = outbox.trade_intent_id
         where outbox.action = $1::text
           and outbox.status in ('pending', 'retry')
+          and outbox.attempt_count < $2::integer
           and outbox.next_attempt_at <= clock_timestamp()
           and intent.chat_id is not null
           and intent.telegram_message_id is not null
           and intent.result ->> 'shortfallProgressRevision' =
                 outbox.state_revision::text
+          and intent.result ->> $3::text is distinct from $4::text
         order by outbox.next_attempt_at, outbox.created_at
         for update of outbox, intent skip locked
         limit 1`,
-      [TELEGRAM_TRADE_LIFECYCLE_OUTBOX_ACTION],
+      [
+        TELEGRAM_TRADE_LIFECYCLE_OUTBOX_ACTION,
+        TELEGRAM_TRADE_LIFECYCLE_MAX_EDIT_ATTEMPTS,
+        TELEGRAM_TRADE_TERMINAL_DELIVERY_OWNER_RESULT_KEY,
+        TELEGRAM_TRADE_GENERIC_NOTIFICATION_OWNER,
+      ],
     );
     const row = rows[0];
     if (!row) return null;
-    const claimed = await client.query(
+    const claimed = await client.query<{
+      attempt_count: number;
+      delivery_attempt_id: string;
+    }>(
       `update telegram_bot_action_outbox
           set status = 'sending',
               attempt_count = attempt_count + 1,
@@ -1122,12 +1341,17 @@ async function claimTelegramTradeLifecycleOutbox(
               updated_at = clock_timestamp()
         where id = $1::uuid
           and status in ('pending', 'retry')
-        returning delivery_attempt_id::text`,
-      [row.id],
+          and attempt_count < $2::integer
+        returning delivery_attempt_id::text, attempt_count`,
+      [row.id, TELEGRAM_TRADE_LIFECYCLE_MAX_EDIT_ATTEMPTS],
     );
-    const deliveryAttemptId = claimed.rows[0]?.delivery_attempt_id;
-    return deliveryAttemptId
-      ? { ...row, delivery_attempt_id: deliveryAttemptId }
+    const claimedRow = claimed.rows[0];
+    return claimedRow?.delivery_attempt_id
+      ? {
+          ...row,
+          attempt_count: claimedRow.attempt_count,
+          delivery_attempt_id: claimedRow.delivery_attempt_id,
+        }
       : null;
   });
 }
@@ -1149,6 +1373,7 @@ export async function deliverTelegramTradeLifecycleProgress(
   }>,
 ): Promise<Readonly<{ claimed: number; delivered: number; retried: number }>> {
   const limit = Math.max(1, Math.min(input.limit ?? 25, 100));
+  await recoverStaleTelegramTradeLifecycleDeliveries({ pool: input.pool });
   let claimed = 0;
   let delivered = 0;
   let retried = 0;
@@ -1173,7 +1398,7 @@ export async function deliverTelegramTradeLifecycleProgress(
       continue;
     }
     try {
-      await input.telegram.editMessageText({
+      const editResult = await input.telegram.editMessageText({
         chat_id: row.chat_id,
         disable_web_page_preview: false,
         message_id: messageId,
@@ -1181,29 +1406,61 @@ export async function deliverTelegramTradeLifecycleProgress(
         reply_markup: progressKeyboard(progress),
         text: progressText(progress),
       });
-      await input.pool.query(
-        `update telegram_bot_action_outbox
-            set status = 'sent', sent_at = clock_timestamp(), last_error = null,
-                updated_at = clock_timestamp()
-          where id = $1::uuid
-            and status = 'sending'
-            and delivery_attempt_id = $2::uuid`,
-        [row.id, row.delivery_attempt_id],
-      );
+      if (!telegramLifecycleEditSucceeded(editResult)) throw editResult;
+      await markTelegramTradeLifecycleDelivered({
+        deliveryAttemptId: row.delivery_attempt_id,
+        messageId,
+        outboxId: row.id,
+        pool: input.pool,
+        terminalFill: progress.state === "filled",
+      });
       delivered += 1;
-    } catch {
+    } catch (error) {
+      const failure = resolveTelegramLifecycleEditFailure(
+        error,
+        row.attempt_count,
+      );
+      // Telegram returns this after an applied edit whose response was lost.
+      // Treating the exact same rendered message as delivered is idempotent.
+      if (failure.code === "already_applied") {
+        await markTelegramTradeLifecycleDelivered({
+          deliveryAttemptId: row.delivery_attempt_id,
+          messageId,
+          outboxId: row.id,
+          pool: input.pool,
+          terminalFill: progress.state === "filled",
+        });
+        delivered += 1;
+        continue;
+      }
+      if (failure.disposition === "dead") {
+        await input.pool.query(
+          `update telegram_bot_action_outbox
+              set status = 'dead',
+                  last_error = 'telegram_trade_lifecycle_edit_terminal:' || $3::text,
+                  delivery_attempt_id = null,
+                  delivery_started_at = null,
+                  updated_at = clock_timestamp()
+            where id = $1::uuid
+              and status = 'sending'
+              and delivery_attempt_id = $2::uuid`,
+          [row.id, row.delivery_attempt_id, failure.code],
+        );
+        continue;
+      }
       await input.pool.query(
         `update telegram_bot_action_outbox
             set status = 'retry',
-                next_attempt_at = clock_timestamp() + interval '3 seconds',
-                last_error = 'telegram_trade_lifecycle_edit_failed',
+                next_attempt_at = clock_timestamp() +
+                  ($3::integer * interval '1 second'),
+                last_error = 'telegram_trade_lifecycle_edit_failed:' || $4::text,
                 delivery_attempt_id = null,
                 delivery_started_at = null,
                 updated_at = clock_timestamp()
           where id = $1::uuid
             and status = 'sending'
             and delivery_attempt_id = $2::uuid`,
-        [row.id, row.delivery_attempt_id],
+        [row.id, row.delivery_attempt_id, failure.retryAfterSec, failure.code],
       );
       retried += 1;
     }

@@ -1034,7 +1034,11 @@ export function createTelegramBotTradingInternalApiClient(input: {
           }
         }
       }
-      if (confirmAcknowledged && receiptDelivery) {
+      if (
+        confirmAcknowledged &&
+        receiptDelivery &&
+        isFinalTelegramTradeIntentStatus(result.intentStatus)
+      ) {
         await post(
           `/internal/telegram-bot/trading/intents/${parsed.intentId}/receipt`,
           {

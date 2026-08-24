@@ -68,7 +68,14 @@ export function classifyTelegramBotMenuDeliveryResult(
   outcome: TelegramBotMenuDeliveryOutcome;
   retryAfterSec?: number;
 }> {
-  if (result.ok) return { outcome: "success" };
+  // Telegram returns HTTP 400 when an edit already matches the visible card.
+  // That is successful delivery, not a reason to tear down the Redis state
+  // owned by the unchanged prompt. The production transport normally
+  // normalises this first; keeping the rule at this shared boundary also
+  // protects injected transports and future callers.
+  if (result.ok || /message is not modified/i.test(result.message)) {
+    return { outcome: "success" };
+  }
   if (result.retryAfterSec != null) {
     return { outcome: "rate_limited", retryAfterSec: result.retryAfterSec };
   }
