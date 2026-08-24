@@ -174,7 +174,7 @@ Delivery output:
 - 30 fps;
 - H.264 MP4, `yuv420p`, fast-start;
 - no audio;
-- target duration: 12-15 seconds.
+- target duration: 20-24 seconds.
 
 The authoring aspect ratio intentionally matches the delivery output so the
 video is scaled without cropping or letterboxing.
@@ -188,7 +188,7 @@ Authoring and delivery output:
 - 30 fps;
 - H.264 MP4, `yuv420p`, fast-start;
 - no audio;
-- target duration: 10-15 seconds.
+- target duration: 14-18 seconds.
 
 `1440x900` is the approved canonical MacBook-Air-like desktop workspace. V1
 does not render a 2560x1440 master or retain a second high-resolution copy.
@@ -200,11 +200,12 @@ The exact timings are versioned content, not hard-coded incidental waits.
 ### Mobile timeline
 
 1. Hold the trader profile hero long enough to identify the wallet.
-2. Slowly ease-scroll through the performance chart and summary metrics.
-3. Pause briefly on the `Mix` and `Entry Distribution` sections when present.
-4. Open the public `Wallet Stats` sheet without changing the background scroll
-   position.
-5. Hold and optionally scroll inside the stats sheet.
+2. Ease-scroll to Performance and hold it for about two seconds.
+3. Ease-scroll to `Mix` and hold it for about two seconds.
+4. Ease-scroll to `Entry Distribution` and hold it for about two seconds.
+5. Ease-scroll to the wallet ledger and hold it for about two seconds.
+6. Open the public `Wallet Stats` sheet with its normal entrance animation,
+   hold the initial stats, then ease-scroll and hold the lower stats.
 
 The scenario may shorten or skip an empty optional section. It must not scroll
 through skeleton placeholders just to preserve a fixed duration.
@@ -212,9 +213,11 @@ through skeleton placeholders just to preserve a fixed duration.
 ### Desktop timeline
 
 1. Hold the desktop wallet header/profile composition.
-2. Slowly ease-scroll through observed performance and positioning.
-3. Continue to the wallet ledger or signal-focused row when it is available.
-4. Hold on a useful final state rather than ending mid-scroll.
+2. Ease-scroll to Performance and hold it for about two seconds.
+3. Ease-scroll to `Mix` and hold it for about two seconds.
+4. Ease-scroll to `Entry Distribution` and hold it for about two seconds.
+5. Ease-scroll to the wallet ledger or signal-focused row and hold the final
+   state rather than ending mid-scroll.
 
 Desktop does not invent a mobile-style sheet when the desktop product surface
 does not provide one.

@@ -29,7 +29,7 @@ export const X_EDITORIAL_MEDIA_PROFILE_SPECS: Record<
     authoringHeight: 686,
     authoringWidth: 390,
     deviceScaleFactor: 3,
-    durationSec: 13,
+    durationSec: 22,
     outputHeight: 1_900,
     outputWidth: 1_080,
     profile: "mobile",
@@ -38,7 +38,7 @@ export const X_EDITORIAL_MEDIA_PROFILE_SPECS: Record<
     authoringHeight: 900,
     authoringWidth: 1_440,
     deviceScaleFactor: 1,
-    durationSec: 11,
+    durationSec: 16,
     outputHeight: 900,
     outputWidth: 1_440,
     profile: "desktop",
@@ -100,15 +100,68 @@ export function easeInOutCubic(progress: number): number {
     : 1 - Math.pow(-2 * value + 2, 3) / 2;
 }
 
-export function editorialMediaScrollProgress(input: {
+type XEditorialMediaCaptureSection =
+  | "entry-distribution"
+  | "ledger"
+  | "mix"
+  | "performance"
+  | "profile";
+
+export type XEditorialMediaScrollPositions = Record<
+  XEditorialMediaCaptureSection,
+  number
+>;
+
+type XEditorialMediaScrollTransition = {
+  endSec: number;
+  from: XEditorialMediaCaptureSection;
+  startSec: number;
+  to: XEditorialMediaCaptureSection;
+};
+
+export const X_EDITORIAL_MEDIA_TIMELINE = {
+  mobile: {
+    sheetOpenSec: 15.4,
+    sheetScrollEndSec: 19.4,
+    sheetScrollStartSec: 18.2,
+  },
+  scrollTransitions: [
+    { endSec: 3, from: "profile", startSec: 1.8, to: "performance" },
+    { endSec: 6.4, from: "performance", startSec: 5.2, to: "mix" },
+    {
+      endSec: 9.8,
+      from: "mix",
+      startSec: 8.6,
+      to: "entry-distribution",
+    },
+    {
+      endSec: 13.2,
+      from: "entry-distribution",
+      startSec: 12,
+      to: "ledger",
+    },
+  ] satisfies XEditorialMediaScrollTransition[],
+} as const;
+
+export function editorialMediaScrollPosition(input: {
   elapsedSec: number;
-  profile: XEditorialMediaProfile;
+  positions: XEditorialMediaScrollPositions;
 }): number {
-  const startSec = 1.2;
-  const endSec = input.profile === "mobile" ? 7.4 : 8.5;
-  return easeInOutCubic(
-    (input.elapsedSec - startSec) / Math.max(0.1, endSec - startSec),
-  );
+  let position = input.positions.profile;
+  for (const transition of X_EDITORIAL_MEDIA_TIMELINE.scrollTransitions) {
+    if (input.elapsedSec < transition.startSec) return position;
+    if (input.elapsedSec <= transition.endSec) {
+      const progress = easeInOutCubic(
+        (input.elapsedSec - transition.startSec) /
+          (transition.endSec - transition.startSec),
+      );
+      const from = input.positions[transition.from];
+      const to = input.positions[transition.to];
+      return from + (to - from) * progress;
+    }
+    position = input.positions[transition.to];
+  }
+  return position;
 }
 
 function captureUrl(input: {
@@ -136,7 +189,7 @@ async function preparePage(input: {
     hasTouch: input.profile === "mobile",
     isMobile: input.profile === "mobile",
     locale: "en-US",
-    reducedMotion: "reduce",
+    reducedMotion: "no-preference",
     screen: {
       height: spec.authoringHeight,
       width: spec.authoringWidth,
@@ -222,6 +275,14 @@ async function preparePage(input: {
         caret-color: transparent !important;
         transition-delay: 0s !important;
         transition-duration: 0s !important;
+      }
+      [data-slot="sheet-overlay"] {
+        animation-duration: 250ms !important;
+        transition-duration: 250ms !important;
+      }
+      [data-slot="sheet-content"] {
+        animation-duration: 350ms !important;
+        transition-duration: 350ms !important;
       }
       html { scroll-behavior: auto !important; }
       body { cursor: none !important; }
@@ -323,25 +384,81 @@ async function writeFrame(
   });
 }
 
-async function maxScrollFor(page: Page): Promise<number> {
-  return page.evaluate(() =>
-    Math.max(
+async function captureSectionScrollPositions(
+  page: Page,
+): Promise<XEditorialMediaScrollPositions> {
+  return page.evaluate(() => {
+    const maxScroll = Math.max(
       0,
       document.documentElement.scrollHeight - window.innerHeight,
       document.body.scrollHeight - window.innerHeight,
-    ),
-  );
+    );
+    const captureIds = [
+      "entry-distribution",
+      "ledger",
+      "mix",
+      "performance",
+    ] as const;
+    const positions: Partial<XEditorialMediaScrollPositions> = { profile: 0 };
+    for (const captureId of captureIds) {
+      const element = document.querySelector(
+        `[data-social-capture-id="${captureId}"]`,
+      );
+      if (!element) throw new Error(`Missing capture section ${captureId}`);
+      const target = element.getBoundingClientRect().top + window.scrollY - 12;
+      positions[captureId] = Math.max(0, Math.min(maxScroll, target));
+    }
+    return positions as XEditorialMediaScrollPositions;
+  });
 }
 
 async function openWalletStats(page: Page): Promise<void> {
   const button = page
     .locator('[data-social-capture-id="wallet-stats-button"]')
     .first();
-  await button.evaluate((element) => (element as HTMLElement).click());
+  await button.evaluate(async (element) => {
+    (element as HTMLElement).click();
+    await new Promise<void>((resolve) =>
+      requestAnimationFrame(() => resolve()),
+    );
+    const animatedElements = document.querySelectorAll(
+      '[data-slot="sheet-overlay"], [data-slot="sheet-content"]',
+    );
+    for (const animatedElement of animatedElements) {
+      for (const animation of animatedElement.getAnimations()) {
+        animation.pause();
+        animation.currentTime = 0;
+      }
+    }
+  });
   await page
     .locator('[data-social-capture-id="wallet-stats-sheet"]')
     .first()
     .waitFor({ state: "visible" });
+}
+
+async function seekWalletStatsAnimation(
+  page: Page,
+  elapsedSec: number,
+): Promise<void> {
+  await page.evaluate(
+    (elapsedMs) => {
+      const animatedElements = document.querySelectorAll(
+        '[data-slot="sheet-overlay"], [data-slot="sheet-content"]',
+      );
+      for (const animatedElement of animatedElements) {
+        for (const animation of animatedElement.getAnimations()) {
+          animation.pause();
+          const endTime = Number(animation.effect?.getComputedTiming().endTime);
+          animation.currentTime = Math.min(
+            elapsedMs,
+            Number.isFinite(endTime) ? endTime : elapsedMs,
+          );
+        }
+      }
+    },
+    Math.max(0, elapsedSec) * 1_000,
+  );
 }
 
 async function scrollWalletStats(page: Page, progress: number): Promise<void> {
@@ -399,29 +516,46 @@ async function renderProfile(input: {
   });
   let sheetOpened = false;
   try {
-    const maxScroll = await maxScrollFor(page);
-    const scrollTarget = maxScroll * (input.profile === "mobile" ? 0.72 : 0.82);
+    const scrollPositions = await captureSectionScrollPositions(page);
     const frameCount = Math.round(spec.durationSec * input.fps);
     for (let frameIndex = 0; frameIndex < frameCount; frameIndex += 1) {
       input.signal?.throwIfAborted();
       const elapsedSec = frameIndex / input.fps;
-      if (input.profile === "mobile" && !sheetOpened && elapsedSec >= 8.2) {
+      if (
+        input.profile === "mobile" &&
+        !sheetOpened &&
+        elapsedSec >= X_EDITORIAL_MEDIA_TIMELINE.mobile.sheetOpenSec
+      ) {
         await openWalletStats(page);
         sheetOpened = true;
       }
       if (!sheetOpened) {
-        const progress = editorialMediaScrollProgress({
+        const scrollPosition = editorialMediaScrollPosition({
           elapsedSec,
-          profile: input.profile,
+          positions: scrollPositions,
         });
         await page.evaluate(
-          ({ target, value }) => window.scrollTo(0, target * value),
-          { target: scrollTarget, value: progress },
+          (position) => window.scrollTo(0, position),
+          scrollPosition,
         );
-      } else if (elapsedSec >= 10.2) {
+      } else {
+        await seekWalletStatsAnimation(
+          page,
+          elapsedSec - X_EDITORIAL_MEDIA_TIMELINE.mobile.sheetOpenSec,
+        );
+      }
+      if (
+        sheetOpened &&
+        elapsedSec >= X_EDITORIAL_MEDIA_TIMELINE.mobile.sheetScrollStartSec
+      ) {
         await scrollWalletStats(
           page,
-          easeInOutCubic((elapsedSec - 10.2) / 2.2) * 0.45,
+          easeInOutCubic(
+            (elapsedSec -
+              X_EDITORIAL_MEDIA_TIMELINE.mobile.sheetScrollStartSec) /
+              (X_EDITORIAL_MEDIA_TIMELINE.mobile.sheetScrollEndSec -
+                X_EDITORIAL_MEDIA_TIMELINE.mobile.sheetScrollStartSec),
+          ) * 0.45,
         );
       }
       await page.evaluate(
@@ -431,7 +565,7 @@ async function renderProfile(input: {
           ),
       );
       const screenshot = await page.screenshot({
-        animations: "disabled",
+        animations: "allow",
         fullPage: false,
         quality: 88,
         type: "jpeg",

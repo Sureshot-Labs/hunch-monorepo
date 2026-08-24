@@ -15,8 +15,9 @@ import {
 } from "./services/signal-bot-editorial-media-jobs.js";
 import { sendTelegramMediaGroupRequest } from "./services/telegram-api-media.js";
 import {
-  editorialMediaScrollProgress,
+  editorialMediaScrollPosition,
   X_EDITORIAL_MEDIA_PROFILE_SPECS,
+  X_EDITORIAL_MEDIA_TIMELINE,
 } from "./services/x-editorial-media-renderer.js";
 
 const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
@@ -113,6 +114,12 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         },
         { height: 900, width: 1_440 },
       );
+      assert.equal(X_EDITORIAL_MEDIA_PROFILE_SPECS.mobile.durationSec, 22);
+      assert.equal(X_EDITORIAL_MEDIA_PROFILE_SPECS.desktop.durationSec, 16);
+      assert.ok(
+        X_EDITORIAL_MEDIA_TIMELINE.mobile.sheetScrollEndSec <
+          X_EDITORIAL_MEDIA_PROFILE_SPECS.mobile.durationSec,
+      );
     },
   },
   {
@@ -152,20 +159,52 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
-    name: "scroll timeline holds, eases forward, and reaches its target",
+    name: "scroll timeline pauses on each editorial section between eased moves",
     run: () => {
+      const positions = {
+        "entry-distribution": 300,
+        ledger: 400,
+        mix: 200,
+        performance: 100,
+        profile: 0,
+      };
       assert.equal(
-        editorialMediaScrollProgress({ elapsedSec: 0, profile: "mobile" }),
+        editorialMediaScrollPosition({ elapsedSec: 1, positions }),
         0,
       );
-      const middle = editorialMediaScrollProgress({
-        elapsedSec: 4.3,
-        profile: "mobile",
+      const firstMove = editorialMediaScrollPosition({
+        elapsedSec: 2.4,
+        positions,
       });
-      assert.ok(middle > 0 && middle < 1);
+      assert.ok(firstMove > 0 && firstMove < 100);
       assert.equal(
-        editorialMediaScrollProgress({ elapsedSec: 8, profile: "mobile" }),
-        1,
+        editorialMediaScrollPosition({ elapsedSec: 4, positions }),
+        100,
+      );
+      assert.equal(
+        editorialMediaScrollPosition({ elapsedSec: 7.5, positions }),
+        200,
+      );
+      assert.equal(
+        editorialMediaScrollPosition({ elapsedSec: 11, positions }),
+        300,
+      );
+      assert.equal(
+        editorialMediaScrollPosition({ elapsedSec: 14, positions }),
+        400,
+      );
+      const transitions = X_EDITORIAL_MEDIA_TIMELINE.scrollTransitions;
+      for (let index = 0; index < transitions.length - 1; index += 1) {
+        const current = transitions[index];
+        const next = transitions[index + 1];
+        assert.ok(next.startSec - current.endSec >= 2);
+      }
+      const finalTransition = transitions.at(-1);
+      assert.ok(finalTransition);
+      assert.ok(
+        X_EDITORIAL_MEDIA_TIMELINE.mobile.sheetOpenSec -
+          finalTransition.endSec >=
+          2,
       );
     },
   },
