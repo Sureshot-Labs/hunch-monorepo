@@ -27,6 +27,10 @@ import {
   type RelayEvmFundingProfileSpec,
 } from "../../execution/relay-evm-profile-specs.js";
 import {
+  relayClientSourceDebitPostcondition,
+  withRelayClientSourceDebitPostcondition,
+} from "../../execution/relay-client-source-debit.js";
+import {
   classifyRelayCleanupAllowance,
   parseRelayEvmAllowanceObservation,
 } from "../../execution/relay-evm-allowance-state.js";
@@ -551,6 +555,47 @@ assert.equal(
   }).length,
   1,
   "ordinary client execution may atomically batch the Relay calls",
+);
+const clientRelayBatch = groupRelayExecutableActions({
+  actions: quotedRelayActions,
+  preserveActionBoundaries: false,
+  profile: atomicWalletProfile,
+})[0]?.action;
+assert.ok(clientRelayBatch);
+const clientSourceDebitValidation =
+  withRelayClientSourceDebitPostcondition({
+    action: clientRelayBatch,
+    actionValidationResult: { signerAddress: WALLET },
+    routeId: "base-usdc-to-polygon-pusd",
+    sourceAmount: {
+      asset: { networkId: "evm:8453", assetId: BASE_USDC, decimals: 6 },
+      raw: RAW,
+    },
+  });
+assert.deepEqual(
+  relayClientSourceDebitPostcondition(clientSourceDebitValidation),
+  {
+    postconditionEvidenceKind: "exact_erc20_source_debit_v1",
+    expectedSourceAssetId: BASE_USDC,
+    expectedSourceAssetDecimals: 6,
+    expectedSourceAddress: WALLET,
+    expectedSourceRecipient: RELAY_DEPOSITORY_V2,
+    expectedSourceRaw: RAW,
+  },
+  "client Relay batches preserve exact source-debit receipt evidence",
+);
+assert.equal(
+  withRelayClientSourceDebitPostcondition({
+    action: clientRelayBatch,
+    actionValidationResult: { signerAddress: WALLET },
+    routeId: "unknown-route",
+    sourceAmount: {
+      asset: { networkId: "evm:8453", assetId: BASE_USDC, decimals: 6 },
+      raw: RAW,
+    },
+  }).postconditionEvidenceKind,
+  undefined,
+  "unknown routes do not gain Relay source-debit authority",
 );
 assert.deepEqual(
   groupRelayExecutableActions({

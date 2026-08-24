@@ -78,6 +78,10 @@ import {
   type FundingCommitPlan,
 } from "../../persistence/funding-operation-repository.js";
 import {
+  finishFundingStepAttemptInTransaction,
+  startFundingStepAttemptInTransaction,
+} from "../../persistence/funding-evidence-repository.js";
+import {
   applyFundingStepReceiptEvidenceInTransaction,
   listFundingStepReceiptTargets,
 } from "../../persistence/funding-step-receipt-repository.js";
@@ -5387,6 +5391,186 @@ try {
   assert.deepEqual(exactReceiptReduction.finalState, {
     status: "completed",
     stage: "terminal",
+  });
+
+  const clientReceiptRelay = exactReceiptRelay;
+  const clientDepositStep = clientReceiptRelay.plan.steps[1];
+  assert.ok(clientDepositStep);
+  const clientReceiptPlan: FundingCommitPlan = {
+    operation: {
+      ...clientReceiptRelay.plan.operation,
+      initialState: { status: "in_progress", stage: "committed" },
+    },
+    segments: clientReceiptRelay.plan.segments,
+    reservations: clientReceiptRelay.plan.reservations.map((reservation) => ({
+      ...reservation,
+      componentId: opaque("client-relay-component"),
+      locationId: opaque("client-relay-location"),
+    })),
+    steps: [
+      {
+        ...clientDepositStep,
+        ordinal: 0,
+        state: "action_required",
+        executorId: "wallet_profile_evm_v1",
+        payerRequirement: "user",
+        dependsOnOrdinal: null,
+        actionValidationResult: {
+          relayStepKind: "deposit",
+          signerAddress: clientReceiptRelay.walletAddress,
+        },
+      },
+    ],
+  };
+  const clientReceiptPolicy = await resolveFundingPolicy(pool);
+  const clientReceiptConsentToken = opaque("client_relay_consent");
+  const clientReceiptQuote = await createFundingQuote(pool, {
+    userId: clientReceiptRelay.base.userId,
+    discoveryProjectionId: opaque("client_relay_projection"),
+    selectedSourceOptionSnapshot:
+      clientReceiptPlan.operation.sourceSnapshot ?? {},
+    marketContextSnapshot: null,
+    destinationOptionSnapshot:
+      clientReceiptPlan.operation.destinationTargetSnapshot,
+    venueBindingSnapshot:
+      clientReceiptPlan.operation.venueBindingSnapshot ?? {},
+    planSnapshot: clientReceiptPlan,
+    policyVersion: clientReceiptPolicy.runtime.contractVersion,
+    policyRevision: clientReceiptPolicy.revision,
+    canonicalRequest: { clientRelayReceipt: true },
+    consentToken: clientReceiptConsentToken,
+    expiresAt: new Date(exactReceiptAt.getTime() + 40 * 60_000),
+  });
+  relayArtifactQuoteIds.push(clientReceiptQuote.id);
+  const clientReceiptOperation = await commitFundingOperation(pool, {
+    userId: clientReceiptRelay.base.userId,
+    quoteId: clientReceiptQuote.id,
+    consentToken: clientReceiptConsentToken,
+    idempotencyKey: opaque("client_relay_operation"),
+    plan: clientReceiptPlan,
+    subjectLookupHmac: crypto
+      .createHash("sha256")
+      .update(`${clientReceiptRelay.base.userId}:client-relay-receipt`)
+      .digest("hex"),
+    subjectLookupKeyVersion: 1,
+    now: exactReceiptAt,
+  });
+  relayArtifactOperationIds.push(clientReceiptOperation.operation.id);
+  const clientReceiptStep = await pool.query<{ id: string }>(
+    `select id
+       from funding_operation_steps
+      where operation_id = $1::uuid
+        and ordinal = 0`,
+    [clientReceiptOperation.operation.id],
+  );
+  const clientReceiptStepId = clientReceiptStep.rows[0]?.id;
+  assert.ok(clientReceiptStepId);
+  const clientReceiptTransactionHash = `0x${crypto
+    .randomBytes(32)
+    .toString("hex")}`;
+  const clientReceiptBlockHash = `0x${crypto
+    .randomBytes(32)
+    .toString("hex")}`;
+  const clientReceiptAttempt = await tx(pool, async (client) => {
+    const attempt = await startFundingStepAttemptInTransaction(client, {
+      operationId: clientReceiptOperation.operation.id,
+      stepId: clientReceiptStepId,
+      canonicalActionFingerprint: canonicalJsonHash(
+        clientDepositStep.normalizedAction,
+      ),
+      executorId: "wallet_profile_evm_v1",
+      now: exactReceiptAt,
+    });
+    await finishFundingStepAttemptInTransaction(client, {
+      attemptId: attempt.id,
+      outcome: "submitted",
+      broadcastMayHaveOccurred: true,
+      referenceKind: "transaction",
+      receiptRefCiphertext: "cipher:client-relay-receipt",
+      receiptRefLookupHmac: crypto
+        .createHash("sha256")
+        .update(clientReceiptTransactionHash)
+        .digest("hex"),
+      lookupKeyVersion: 1,
+      actualCosts: {},
+      now: exactReceiptAt,
+    });
+    await client.query(
+      `update funding_operation_steps
+          set state = 'submitted',
+              updated_at = $2
+        where id = $1::uuid
+          and state = 'action_required'`,
+      [clientReceiptStepId, exactReceiptAt],
+    );
+    return attempt;
+  });
+  const clientReceiptTargets = await listFundingStepReceiptTargets(
+    pool,
+    clientReceiptOperation.operation.id,
+    exactReceiptAt,
+  );
+  const clientReceiptTarget = clientReceiptTargets.find(
+    (target) => target.attemptId === clientReceiptAttempt.id,
+  );
+  assert.ok(clientReceiptTarget);
+  assert.deepEqual(
+    clientReceiptTarget.actionValidationResult,
+    {
+      relayStepKind: "deposit",
+      signerAddress: clientReceiptRelay.walletAddress,
+      postconditionEvidenceKind: "exact_erc20_source_debit_v1",
+      expectedSourceAssetId: BASE_USDC,
+      expectedSourceAssetDecimals: 6,
+      expectedSourceAddress: clientReceiptRelay.walletAddress,
+      expectedSourceRecipient: RELAY_DEPOSITORY_V2,
+      expectedSourceRaw: "2000000",
+    },
+    "a pre-fix client Relay operation must recover its exact receipt postcondition",
+  );
+  const applyClientRelayReceipt = () =>
+    tx(pool, (client) =>
+      applyFundingStepReceiptEvidenceInTransaction(client, {
+        operationId: clientReceiptOperation.operation.id,
+        stepId: clientReceiptStepId,
+        attemptId: clientReceiptAttempt.id,
+        networkId: "evm:8453",
+        receipt: {
+          status: "finalized",
+          actionMatch: true,
+          ledgerHeight: "260",
+          blockHash: clientReceiptBlockHash,
+          canonical: true,
+          failureCode: null,
+          evidence: {
+            attributedSourceRaw: "2000000",
+            sourceDebitEventIndex: "7",
+            transactionHash: clientReceiptTransactionHash,
+          },
+        },
+        now: exactReceiptAt,
+      }),
+    );
+  await applyClientRelayReceipt();
+  await applyClientRelayReceipt();
+  const clientSourceDebit = await pool.query<{
+    canonical: boolean;
+    count: string;
+    raw_amount: string;
+  }>(
+    `select count(*)::text as count,
+            min(raw_amount)::text as raw_amount,
+            bool_and(canonical) as canonical
+       from funding_observations
+      where operation_id = $1::uuid
+        and kind = 'source_debit'
+        and metadata ->> 'receiptAttemptId' = $2::text`,
+    [clientReceiptOperation.operation.id, clientReceiptAttempt.id],
+  );
+  assert.deepEqual(clientSourceDebit.rows[0], {
+    canonical: true,
+    count: "1",
+    raw_amount: "2000000",
   });
 
   const relayPolicyRace = await createRelayFixture();

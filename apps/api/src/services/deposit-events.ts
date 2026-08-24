@@ -8,6 +8,7 @@ import {
 } from "./notifications.js";
 import { canonicalizeBridgeOrderStatus } from "./bridge-status.js";
 import { RELAY_SOLVER } from "../funding-providers/relay/rehearsal.js";
+import { relayReferenceFingerprint } from "../funding-providers/relay/reference-codec.js";
 
 type Logger = {
   info?: (...args: unknown[]) => void;
@@ -63,6 +64,8 @@ type InternalDepositMatch = {
 
 type RelayFundingOutputMatch = {
   operationId: string;
+  referenceMatched: boolean;
+  referencesKnown: boolean;
 };
 
 type PolymarketFunderMovementMatch = {
@@ -432,21 +435,64 @@ async function findRelayFundingOutput(
   ) {
     return null;
   }
+  const lookupHmacKey =
+    process.env.FUNDING_REFERENCE_LOOKUP_HMAC_KEY?.trim();
+  let referenceFingerprint: string | null = null;
+  if (lookupHmacKey && input.event.transaction_hash?.trim()) {
+    try {
+      referenceFingerprint = relayReferenceFingerprint(
+        input.event.transaction_hash,
+        lookupHmacKey,
+      );
+    } catch {
+      // Fall back to the unique route shape for malformed/legacy references.
+    }
+  }
 
   const { rows } = await db.query<RelayFundingOutputMatch>(
     `
-      select operation_row.id as "operationId"
+      select operation_row.id as "operationId",
+             coalesce(
+               segment_row.support_metadata ->
+                 'relayTransactionReferenceFingerprints' ? $5::text,
+               false
+             ) as "referenceMatched",
+             coalesce(
+               jsonb_array_length(
+                 segment_row.support_metadata ->
+                   'relayTransactionReferenceFingerprints'
+               ),
+               0
+             ) > 0 as "referencesKnown"
       from funding_operations operation_row
       join funding_operation_segments segment_row
         on segment_row.operation_id = operation_row.id
        and segment_row.ordinal = 0
        and segment_row.provider_id = 'relay'
-      join funding_receive_receipts source_receipt
-        on source_receipt.child_funding_operation_id = operation_row.id
-       and source_receipt.user_id = operation_row.user_id
       where operation_row.user_id = $1::uuid
         and operation_row.created_at > now() - interval '30 minutes'
         and operation_row.status not in ('failed', 'cancelled')
+        and (
+          exists (
+            select 1
+            from funding_receive_receipts source_receipt
+            where source_receipt.child_funding_operation_id = operation_row.id
+              and source_receipt.user_id = operation_row.user_id
+          )
+          or exists (
+            select 1
+            from telegram_trade_intents trade_intent
+            where trade_intent.funding_operation_id = operation_row.id
+              and trade_intent.user_id = operation_row.user_id
+              and trade_intent.status in (
+                'funding',
+                'executing',
+                'submitted',
+                'reconcile_required',
+                'filled'
+              )
+          )
+        )
         and lower(
           operation_row.destination_target_snapshot #>> '{location,details,address}'
         ) = $2::text
@@ -454,12 +500,30 @@ async function findRelayFundingOutput(
           '{location,asset,networkId}' = $3::text
         and lower(operation_row.destination_target_snapshot #>>
           '{location,asset,assetId}') = $4::text
-      order by operation_row.created_at desc
+        and (
+          $5::text is null
+          or coalesce(
+               jsonb_array_length(
+                 segment_row.support_metadata ->
+                   'relayTransactionReferenceFingerprints'
+               ),
+               0
+             ) = 0
+          or segment_row.support_metadata ->
+               'relayTransactionReferenceFingerprints' ? $5::text
+        )
+      order by "referenceMatched" desc, operation_row.created_at desc
       limit 2
     `,
-    [input.userId, recipient, networkId, assetId],
+    [input.userId, recipient, networkId, assetId, referenceFingerprint],
   );
-  return rows.length === 1 ? (rows[0] ?? null) : null;
+  const exactMatches = rows.filter((row) => row.referenceMatched);
+  if (exactMatches.length === 1) return exactMatches[0] ?? null;
+  if (exactMatches.length > 1) return null;
+  const unreferencedMatches = rows.filter((row) => !row.referencesKnown);
+  return unreferencedMatches.length === 1
+    ? (unreferencedMatches[0] ?? null)
+    : null;
 }
 
 async function findBridgeOrderByTxHash(
