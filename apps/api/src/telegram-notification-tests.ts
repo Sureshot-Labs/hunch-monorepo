@@ -385,6 +385,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         payload: {
           data: {
             action: "SELL",
+            orderId: "order-123",
             outcomeSide: "YES",
             price: 0.4,
             size: 2,
@@ -397,6 +398,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.match(sell?.text ?? "", /SELL · YES/);
       assert.ok((sell?.text ?? "").includes("*Estimated proceeds:* $0\\.80"));
       assert.doesNotMatch(sell?.text ?? "", /cost/i);
+      assert.match(sell?.text ?? "", /Order ID.*order-123/);
       assert.match(
         sell?.text ?? "",
         new RegExp(TELEGRAM_CUSTOM_EMOJI.polymarket.id),

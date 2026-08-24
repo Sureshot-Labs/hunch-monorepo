@@ -1,6 +1,7 @@
 import type { DbQuery } from "../db.js";
 import { sumErc20TransfersTo } from "../funding/execution/evm-erc20-receipt.js";
 import { isRecord } from "../lib/type-guards.js";
+import { persistedTradeTerminalOutcome } from "../funding/persistence/funding-trade-consumer-status.js";
 import {
   fetchEmbeddedEthereumPrivyTransaction,
   fetchEmbeddedEthereumPrivyTransactionByReference,
@@ -25,6 +26,7 @@ import { isDefinitiveSubmitRejection } from "./telegram-bot-trading-submit-error
 import type {
   PreparedTradeAuthorizationMode,
   PreparedTrade,
+  PersistedTrade,
   SubmitResult,
   TradeIntent,
 } from "./trading-types.js";
@@ -59,6 +61,7 @@ type VenueReconcileIntentRow = {
   prepared_snapshot: Record<string, unknown> | null;
   quote_snapshot: Record<string, unknown> | null;
   result: Record<string, unknown> | null;
+  order_id: string | null;
   venue_order_id: string | null;
   tx_signature: string | null;
   funding_operation_id: string | null;
@@ -112,6 +115,11 @@ const RECONCILE_LOCK_KEY = "telegram-bot-trading:venue-reconcile:v1";
 
 function readString(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function readFiniteNumber(value: unknown): number | null {
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 function formatMicroShares(raw: string): string {
@@ -538,6 +546,113 @@ async function inspectVenueSubmit(
   };
 }
 
+type LinkedLocalOrderInspection = Readonly<{
+  persisted: PersistedTrade | null;
+  state: string;
+  submitResult: SubmitResult | null;
+}>;
+
+/**
+ * An ordinary web venue endpoint may have already persisted the exact order
+ * before the Telegram intent projector observes it. Prefer that authenticated
+ * local fact over rebuilding provider-specific reconcile keys that a generic
+ * Mini App handoff never stored in the Telegram preview snapshot. A linked
+ * non-terminal row remains pending until the ordinary order writer advances
+ * it; it must not be relabelled as an unsupported venue reconciliation.
+ */
+async function inspectLinkedLocalOrder(
+  db: DbQuery,
+  row: VenueReconcileIntentRow,
+): Promise<LinkedLocalOrderInspection | null> {
+  if (!row.order_id || !row.user_id || row.action === "redeem") return null;
+  const result = await db.query<{
+    filled_size: string | number | null;
+    order_hash: string | null;
+    price: string | number | null;
+    size: string | number | null;
+    status: string;
+    venue_order_id: string;
+  }>(
+    `select stored_order.status,
+            stored_order.venue_order_id,
+            stored_order.order_hash,
+            stored_order.price,
+            stored_order.size,
+            stored_order.filled_size
+       from orders stored_order
+      where stored_order.id = $1::uuid
+        and stored_order.user_id = $2::uuid
+        and stored_order.venue = $3::text
+        and stored_order.side = $4::text
+        and ($6::uuid is null or stored_order.funding_operation_id = $6::uuid)
+        and ($7::uuid is null or stored_order.funding_reservation_id = $7::uuid)
+        and exists (
+          select 1
+            from unified_tokens market_token
+           where market_token.market_id = $5::text
+             and market_token.venue = stored_order.venue
+             and market_token.token_id = stored_order.token_id
+        )
+      limit 1`,
+    [
+      row.order_id,
+      row.user_id,
+      row.venue,
+      row.action.toUpperCase(),
+      row.market_id,
+      row.funding_operation_id,
+      row.funding_reservation_id,
+    ],
+  );
+  const storedOrder = result.rows[0];
+  if (!storedOrder) return null;
+  const normalizedStatus = storedOrder.status.trim().toLowerCase();
+  const terminalOutcome = persistedTradeTerminalOutcome(
+    "web_order",
+    normalizedStatus,
+  );
+  if (!terminalOutcome) {
+    return {
+      persisted: null,
+      state: `linked_local_order_${normalizedStatus}`,
+      submitResult: null,
+    };
+  }
+  const price = readFiniteNumber(storedOrder.price);
+  const filledSize = readFiniteNumber(storedOrder.filled_size);
+  const size =
+    filledSize != null && filledSize > 0
+      ? filledSize
+      : readFiniteNumber(storedOrder.size);
+  const submitStatus: SubmitResult["status"] =
+    terminalOutcome === "filled"
+      ? "filled"
+      : terminalOutcome === "no_fill"
+        ? "no_fill"
+        : "failed";
+  return {
+    persisted: {
+      executionId: null,
+      orderId: row.order_id,
+      raw: { recoveredFromLinkedLocalOrder: true },
+      status: storedOrder.status,
+      venue: row.venue,
+      venueOrderId: storedOrder.venue_order_id,
+    },
+    state: `linked_local_order_${normalizedStatus}`,
+    submitResult: {
+      orderHash: storedOrder.order_hash,
+      price,
+      raw: { recoveredFromLinkedLocalOrder: true },
+      size,
+      status: submitStatus,
+      txSignature: storedOrder.order_hash,
+      venue: row.venue,
+      venueOrderId: storedOrder.venue_order_id,
+    },
+  };
+}
+
 type TelegramVenueReconcileDependencies = {
   inspectVenueSubmit: typeof inspectVenueSubmit;
 };
@@ -688,7 +803,7 @@ async function finalizeRecoveredIntent(input: {
             error_message = $4,
             order_id = coalesce(order_id, $5::uuid),
             execution_id = coalesce(execution_id, $6::uuid),
-            venue_order_id = coalesce(venue_order_id, $7),
+            venue_order_id = coalesce($7, venue_order_id),
             tx_signature = coalesce(tx_signature, $8),
             submitted_at = coalesce(submitted_at, now()),
             result = coalesce(result, '{}'::jsonb) || $9::jsonb,
@@ -742,6 +857,7 @@ async function loadCandidates(
        ti.prepared_snapshot,
        ti.quote_snapshot,
        ti.result,
+       ti.order_id,
        ti.venue_order_id,
        ti.tx_signature,
        ti.funding_operation_id,
@@ -845,8 +961,11 @@ export async function reconcileTelegramVenueIntents(
     for (const row of rows) {
       summary.inspected += 1;
       let inspection: Awaited<ReturnType<typeof inspectVenueSubmit>>;
+      let linkedLocalOrder: LinkedLocalOrderInspection | null = null;
       try {
-        inspection = await dependencies.inspectVenueSubmit(row);
+        linkedLocalOrder = await inspectLinkedLocalOrder(client, row);
+        inspection =
+          linkedLocalOrder ?? (await dependencies.inspectVenueSubmit(row));
       } catch (error) {
         inspection = {
           state: error instanceof Error ? error.message : "inspection_failed",
@@ -861,7 +980,7 @@ export async function reconcileTelegramVenueIntents(
             : null,
         intentId: row.id,
         localExecutionId: null,
-        localOrderId: null,
+        localOrderId: linkedLocalOrder?.persisted?.orderId ?? row.order_id,
         preparedKeys: preparedKeys(row.prepared_snapshot),
         refs: {
           txSignature: inspection.submitResult?.txSignature ?? row.tx_signature,
@@ -924,6 +1043,21 @@ export async function reconcileTelegramVenueIntents(
       }
       item.result = "verified";
       if (summary.dryRun) {
+        summary.items.push(item);
+        continue;
+      }
+      if (linkedLocalOrder?.persisted && linkedLocalOrder.submitResult) {
+        await finalizeRecoveredIntent({
+          db: client,
+          intentId: row.id,
+          persisted: linkedLocalOrder.persisted,
+          state: linkedLocalOrder.state,
+          submitResult: linkedLocalOrder.submitResult,
+        });
+        const failed = linkedLocalOrder.submitResult.status !== "filled";
+        item.result = failed ? "failed" : "recovered";
+        if (failed) summary.failedVerified += 1;
+        else summary.recovered += 1;
         summary.items.push(item);
         continue;
       }

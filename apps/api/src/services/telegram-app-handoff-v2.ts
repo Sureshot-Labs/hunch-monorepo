@@ -19,6 +19,7 @@ import {
   multiplyUnsignedDecimals,
 } from "../account-value/decimal.js";
 import { rawAmount } from "../funding/planner/money.js";
+import { fundingDestinationAmountForRequest } from "../funding/planner/trade-shortfall-amount.js";
 import {
   fundingOwnedSourceIncludesLocation,
   fundingOwnedSourceReservationLocationId,
@@ -1251,8 +1252,7 @@ export async function prepareTelegramAppHandoffV2Funding(input: {
     // The sealed trade amount remains the later Buy ceiling. Funding quotes
     // cover only the exact additional destination credit still required now.
     requestedDestinationAmount:
-      currentRequest.serverAdditionalDestinationAmount ??
-      currentRequest.requestedDestinationAmount,
+      fundingDestinationAmountForRequest(currentRequest),
     selectedSourceOptionId: selected.sourceOptionId,
   };
   const quote = await input.runtime.quoteForCommitScope(

@@ -2,6 +2,7 @@ import type { AccountValueReadModel } from "../../account-value/runtime-service.
 import type { ApiBotTradingExecutor } from "../../services/api-trading-service.js";
 import type { TradingReadiness } from "../../services/trading-types.js";
 import { sameAsset } from "../domain/asset-identity.js";
+import { isRawAmount } from "../domain/raw-amount.js";
 import type {
   FundingDiscoveryRequest,
   IntentLiquidityProjection,
@@ -51,7 +52,7 @@ function controlledPolymarketFundsRaw(
     return null;
   }
   const raw = readiness.raw.controlledFundsRaw;
-  return typeof raw === "string" && /^\d+$/u.test(raw) ? raw : null;
+  return isRawAmount(raw) ? raw : null;
 }
 
 function selectedControllerProfile(

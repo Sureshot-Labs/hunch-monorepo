@@ -12,6 +12,7 @@ import {
   deriveTrustedTradeShortfallRequest,
   preflightTrustedTradeShortfall,
 } from "../../planner/trade-shortfall-preflight.js";
+import { fundingDestinationAmountForRequest } from "../../planner/trade-shortfall-amount.js";
 
 const USER_ID = "10000000-0000-4000-8000-000000000001";
 const CONTROLLER_WALLET_ID = "20000000-0000-4000-8000-000000000002";
@@ -148,6 +149,16 @@ const derived = deriveTrustedTradeShortfallRequest({
 assert.equal(derived.fundingRequired, true);
 assert.equal(derived.additionalDestinationAmount?.raw, "500000");
 assert.equal(derived.request.serverAdditionalDestinationAmount?.raw, "500000");
+assert.equal(
+  fundingDestinationAmountForRequest(derived.request)?.raw,
+  "500000",
+  "funding commits must quote the exact shortfall, not the later Buy ceiling",
+);
+assert.equal(
+  fundingDestinationAmountForRequest(REQUEST)?.raw,
+  REQUESTED_DESTINATION_AMOUNT.raw,
+  "requests without a derived shortfall retain their destination amount",
+);
 
 const alreadyCovered = deriveTrustedTradeShortfallRequest({
   readiness: readiness("14201601"),

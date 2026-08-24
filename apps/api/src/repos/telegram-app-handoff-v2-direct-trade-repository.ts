@@ -5,6 +5,7 @@ import {
   type FundingTradeExecutionPath,
 } from "../funding/persistence/funding-trade-attempt-repository.js";
 import type { FundingTradeConsumerIntent } from "../funding/persistence/funding-trade-consumer-intent.js";
+import { isRawAmount } from "../funding/domain/raw-amount.js";
 import type { TelegramAppHandoffV2TradeVenue } from "../services/telegram-app-handoff-v2-contract.js";
 
 /**
@@ -101,7 +102,6 @@ export type TelegramAppHandoffV2ScopeAssertion = (
 const SHA256_HEX_RE = /^[0-9a-f]{64}$/iu;
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
-const RAW_RE = /^(?:0|[1-9][0-9]*)$/u;
 
 type SealedBuyDirectTradeScope = Readonly<{
   action: "buy";
@@ -236,8 +236,8 @@ function parseSealedTradeScope(
       !/^0x[0-9a-f]{40}$/iu.test(controllerWalletAddress) ||
       !maximumSharesRaw ||
       !minimumReceiveRaw ||
-      !RAW_RE.test(maximumSharesRaw) ||
-      !RAW_RE.test(minimumReceiveRaw) ||
+      !isRawAmount(maximumSharesRaw) ||
+      !isRawAmount(minimumReceiveRaw) ||
       BigInt(maximumSharesRaw) <= 0n ||
       BigInt(minimumReceiveRaw) <= 0n
     ) {
@@ -376,7 +376,7 @@ async function reserveUnpersistedDirectSellCapacityInTransaction(input: {
   scope: SealedSellDirectTradeScope;
   requestedRaw: string;
 }): Promise<void> {
-  if (!RAW_RE.test(input.availableRaw) || BigInt(input.availableRaw) < 0n) {
+  if (!isRawAmount(input.availableRaw)) {
     throw new TelegramAppHandoffV2DirectTradeError("plan_changed");
   }
   const pending = await input.client.query<{ reserved_raw: string }>(
@@ -447,8 +447,8 @@ function validateSubmission(
     scope.outcomeTokenId !== submission.outcomeTokenId ||
     scope.controllerWalletAddress !== submission.signer.trim().toLowerCase() ||
     !/^0x[0-9a-f]{40}$/iu.test(submission.signer) ||
-    !RAW_RE.test(submission.spendRaw) ||
-    !RAW_RE.test(submission.receiveRaw) ||
+    !isRawAmount(submission.spendRaw) ||
+    !isRawAmount(submission.receiveRaw) ||
     BigInt(submission.spendRaw) <= 0n ||
     BigInt(submission.receiveRaw) <= 0n
   ) {

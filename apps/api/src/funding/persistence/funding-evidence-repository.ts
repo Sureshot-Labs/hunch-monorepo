@@ -17,6 +17,7 @@ import {
   recordFundingTradeAttemptOutcomeInTransaction,
   type FundingTradeAttempt,
 } from "./funding-trade-attempt-repository.js";
+import { persistedTradeTerminalOutcome } from "./funding-trade-consumer-status.js";
 import {
   sameFundingTradeConsumerIntent,
   storedFundingTradeConsumerIntentFromRow,
@@ -1612,8 +1613,10 @@ async function advanceTelegramAppHandoffV2ConsumerInTransaction(
   input: Readonly<{
     attempt: FundingTradeAttempt;
     consumer: FundingReservationConsumer;
+    consumerStatus: string | null;
     externalReference: string;
     now: Date;
+    venueOrderId: string | null;
   }>,
 ): Promise<void> {
   const orderId =
@@ -1634,12 +1637,12 @@ async function advanceTelegramAppHandoffV2ConsumerInTransaction(
         : input.consumer.intentId;
   await client.query(
     `update telegram_trade_intents intent
-        set status = 'submitted',
+        set status = $11::text,
             submit_started_at = coalesce(intent.submit_started_at, $7),
             submitted_at = coalesce(intent.submitted_at, $7),
             order_id = coalesce(intent.order_id, $5::uuid),
             execution_id = coalesce(intent.execution_id, $6::uuid),
-            venue_order_id = coalesce(intent.venue_order_id, $4),
+            venue_order_id = coalesce(intent.venue_order_id, $12),
             result = coalesce(intent.result, '{}'::jsonb) || jsonb_build_object(
               'appHandoffTradeExecution',
               jsonb_build_object(
@@ -1674,6 +1677,13 @@ async function advanceTelegramAppHandoffV2ConsumerInTransaction(
       consumerKind,
       consumerRef,
       input.attempt.userId,
+      persistedTradeTerminalOutcome(
+        input.consumer.kind === "execution" ? "execution" : "web_order",
+        input.consumerStatus,
+      ) === "filled"
+        ? "filled"
+        : "submitted",
+      input.venueOrderId,
     ],
   );
 }
@@ -1747,14 +1757,22 @@ export async function consumeFundingReservationForLinkedConsumerInTransaction(
 
   let consumerKind: string;
   let consumerRef: string;
+  let consumerStatus: string | null = null;
+  let consumerVenueOrderId: string | null = null;
   let externalReference: string;
   let linked = false;
   if (input.consumer.kind === "web_order") {
     consumerKind = "web_order";
     consumerRef = input.consumer.orderId;
-    const result = await client.query<{ external_reference: string }>(
+    const result = await client.query<{
+      external_reference: string;
+      status: string | null;
+      venue_order_id: string | null;
+    }>(
       `
-        select coalesce(order_hash, venue_order_id, id::text) as external_reference
+        select coalesce(order_hash, venue_order_id, id::text) as external_reference,
+               status,
+               venue_order_id
         from orders
         where id = $1
           and user_id = $2
@@ -1781,12 +1799,20 @@ export async function consumeFundingReservationForLinkedConsumerInTransaction(
     );
     linked = result.rowCount === 1;
     externalReference = result.rows[0]?.external_reference ?? consumerRef;
+    consumerStatus = result.rows[0]?.status ?? null;
+    consumerVenueOrderId = result.rows[0]?.venue_order_id ?? null;
   } else if (input.consumer.kind === "execution") {
     consumerKind = "execution";
     consumerRef = input.consumer.executionId;
-    const result = await client.query<{ external_reference: string }>(
+    const result = await client.query<{
+      external_reference: string;
+      status: string | null;
+      venue_order_id: string | null;
+    }>(
       `
-        select coalesce(tx_signature, venue_order_id, id::text) as external_reference
+        select coalesce(tx_signature, venue_order_id, id::text) as external_reference,
+               status,
+               venue_order_id
         from executions
         where id = $1
           and user_id = $2
@@ -1807,6 +1833,8 @@ export async function consumeFundingReservationForLinkedConsumerInTransaction(
     );
     linked = result.rowCount === 1;
     externalReference = result.rows[0]?.external_reference ?? consumerRef;
+    consumerStatus = result.rows[0]?.status ?? null;
+    consumerVenueOrderId = result.rows[0]?.venue_order_id ?? null;
   } else {
     consumerKind = "telegram_trade_intent";
     consumerRef = input.consumer.intentId;
@@ -1877,8 +1905,10 @@ export async function consumeFundingReservationForLinkedConsumerInTransaction(
   await advanceTelegramAppHandoffV2ConsumerInTransaction(client, {
     attempt,
     consumer: input.consumer,
+    consumerStatus,
     externalReference,
     now,
+    venueOrderId: consumerVenueOrderId ?? externalReference,
   });
   await completeReadyFundingOperation(client, {
     userId: input.userId,
