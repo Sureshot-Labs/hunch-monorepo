@@ -70,7 +70,7 @@ function memoryLedgerDb(initial?: StoredDelivery) {
           | undefined;
         const expectedStatus = sql.includes("set telegram_message_id = $4")
           ? params[1]
-          : "reserved";
+          : (params[4] ?? "reserved");
         const attemptId = sql.includes("set telegram_message_id = $4")
           ? params[2]
           : params[1];
@@ -201,6 +201,37 @@ const tests: Array<{ name: string; run: () => Promise<void> }> = [
       assert.equal(
         reservations.filter((value) => value.status === "active").length,
         1,
+      );
+    },
+  },
+  {
+    name: "queued media delivery preserves the attempt fence until send begins",
+    run: async () => {
+      const attemptId = "00000000-0000-4000-8000-000000000088";
+      const memory = memoryLedgerDb({
+        id: "00000000-0000-4000-8000-000000000099",
+        messageId: null,
+        metrics: {
+          deliveryStateV2: { attemptId, status: "queued", version: 2 },
+          status: "queued",
+        },
+      });
+      assert.equal(
+        await beginSignalBotMessageDelivery({
+          attemptId,
+          db: memory.db,
+          deliveryRef: "00000000-0000-4000-8000-000000000099",
+          expectedStatus: "queued",
+        }),
+        true,
+      );
+      assert.equal(
+        (
+          memory.getStored()?.metrics.deliveryStateV2 as
+            | { status?: unknown }
+            | undefined
+        )?.status,
+        "sending",
       );
     },
   },
