@@ -51,8 +51,8 @@ await loadTelegramAppHandoffProjection(
 );
 assert.match(
   projectionSql,
-  /error_code = 'external_handoff_required'[\s\S]*?appHandoffExecution'[\s\S]*?'version' = '2'[\s\S]*?then null/u,
-  "a committed v2 handoff must not project its obsolete routing marker as a trade failure",
+  /error_code = 'external_handoff_required'[\s\S]*?appHandoffExecution'[\s\S]*?'version' = '2'[\s\S]*?or handoff\.plan_snapshot ->> 'version' = '2'[\s\S]*?then null/u,
+  "a v2 handoff must not project its routing marker as a failure before or after commit",
 );
 
 const filled = await loadTelegramAppHandoffProjection(
