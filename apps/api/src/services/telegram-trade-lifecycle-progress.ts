@@ -1,6 +1,7 @@
 import { tx, type Pool, type PoolClient } from "@hunch/infra";
 
 import { resolveKnownAccountAssetSymbol } from "../account-value/known-asset-catalog.js";
+import { isRawAmount } from "../funding/domain/raw-amount.js";
 import {
   isTelegramPolymarketRouterContinuationPending,
   isTelegramRouterContinuationHardReason,
@@ -33,7 +34,7 @@ const CALLBACK_PREFIX = TELEGRAM_BOT_TRADING_CALLBACK_PREFIX;
 const TELEGRAM_TRADE_LIFECYCLE_OUTBOX_ACTION = "trade_funding_edit";
 
 function formatRawShares(raw: string): string {
-  if (!/^\d+$/u.test(raw)) return raw;
+  if (!isRawAmount(raw)) return raw;
   const padded = raw.padStart(7, "0");
   const whole = padded.slice(0, -6);
   const fraction = padded.slice(-6).replace(/0+$/u, "");
@@ -191,10 +192,7 @@ function parseProgress(value: unknown): TelegramTradeLifecycleProgress | null {
   return {
     ...value,
     action: value.action === "sell" ? "sell" : "buy",
-    sharesRaw:
-      typeof value.sharesRaw === "string" && /^\d+$/u.test(value.sharesRaw)
-        ? value.sharesRaw
-        : null,
+    sharesRaw: isRawAmount(value.sharesRaw) ? value.sharesRaw : null,
     // Older cards were all server-executed. Missing is therefore safely
     // normalised to false while version 5 forces one authoritative edit.
     requiresMiniAppContinuation: value.requiresMiniAppContinuation === true,
@@ -233,7 +231,7 @@ function fundingDestinationAsset(venue: string): string {
 function fundingAmountLabel(candidate: ProjectionCandidate): string | null {
   const raw = candidate.funding_destination_raw;
   const decimals = Number(candidate.funding_destination_decimals);
-  if (!raw || !/^\d+$/.test(raw) || !Number.isSafeInteger(decimals)) {
+  if (!isRawAmount(raw) || !Number.isSafeInteger(decimals)) {
     return null;
   }
   const symbol = resolveKnownAccountAssetSymbol({
@@ -659,10 +657,17 @@ async function listCandidates(
             and intent.result -> 'appHandoffExecution' ->> 'version' = '2'
           )
         )
-      -- Keep the existing funded-card path first. Direct handoff projections
-      -- are additive and must not consume a whole worker batch while a live
-      -- FundingOperation is waiting to render its next durable transition.
-      order by (intent.funding_operation_id is null), intent.updated_at, intent.id
+      -- Never let already-projected historical rows monopolize a bounded
+      -- worker batch. Unprojected cards go first; afterwards the newest intent
+      -- or funding transition wins, regardless of whether execution is server
+      -- or Mini App owned. This preserves one shared lifecycle for Buy/Sell.
+      order by (intent.result -> 'shortfallProgress' is not null),
+               greatest(
+                 intent.updated_at,
+                 coalesce(operation.updated_at, '-infinity'::timestamptz),
+                 coalesce(continuation.updated_at, '-infinity'::timestamptz)
+               ) desc,
+               intent.id
       limit $1
       for update of intent skip locked`,
     [limit],

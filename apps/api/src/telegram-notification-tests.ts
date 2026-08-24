@@ -317,6 +317,56 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
+    name: "Mini App handoff fill is correlated to its Telegram source card",
+    run: async () => {
+      const queries: string[] = [];
+      const result = await deliverTelegramNotificationOutbox({
+        db: {
+          query: async (sql: string) => {
+            queries.push(sql);
+            if (sql.includes("with candidates")) {
+              return {
+                rows: [
+                  {
+                    attempt_count: 1,
+                    id: "outbox-handoff-trade",
+                    payload: {
+                      data: {
+                        orderId: "venue-order-1",
+                        venue: "limitless",
+                      },
+                      title: "Order filled",
+                      type: "order_filled",
+                    },
+                    topic: "order_filled",
+                    user_id: "11111111-1111-4111-8111-111111111111",
+                  },
+                ],
+              };
+            }
+            if (sql.includes("from telegram_trade_intents")) {
+              return { rows: [{ delivered: true }] };
+            }
+            return { rowCount: 1, rows: [] };
+          },
+        } as never,
+        miniAppLinkBase: null,
+        telegram: {
+          sendMessage: async () => {
+            throw new Error("handoff fill must edit its source card");
+          },
+        },
+      });
+      assert.equal(result.skipped, 1);
+      assert.equal(result.sent, 0);
+      assert.match(
+        queries.find((sql) => sql.includes("from telegram_trade_intents")) ??
+          "",
+        /user_id = \$2::uuid[\s\S]+venue_order_id = \$4::text[\s\S]+delivery_mode = 'app_handoff'/,
+      );
+    },
+  },
+  {
     name: "delivery recheck skips events older than a re-enabled topic",
     run: async () => {
       const updates: string[] = [];
