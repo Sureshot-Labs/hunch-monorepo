@@ -15,6 +15,7 @@ import type {
   SignalBotFollowthroughStats,
   SignalBotMessageKind,
   SignalBotNote,
+  SignalBotTestSignalHandlerResult,
   SignalBotTestSignalOutcome,
   SignalBotTelegramClient,
   TelegramBotCallbackQuery,
@@ -43,7 +44,10 @@ import {
   resolveStrictClusterNativeOffer,
 } from "./cluster-execution.js";
 import { loadClusterMarketNativeQuotes } from "./cluster-execution-quotes.js";
-import { SIGNAL_BOT_QUOTE_MAX_AGE_MS } from "./signal-bot-delivery-policy.js";
+import {
+  normalizeTestSignalOutcome,
+  SIGNAL_BOT_QUOTE_MAX_AGE_MS,
+} from "./signal-bot-delivery-policy.js";
 import {
   HOLDER_RESEARCH_PUBLICATION_DECISION_V1_METRICS_JSON,
   parseHolderResearchUpdateV1,
@@ -2679,16 +2683,6 @@ async function sendOrEditSignalBotMenuScreen(input: {
   });
 }
 
-type SignalBotTestSignalHandlerResult = boolean | SignalBotTestSignalOutcome;
-
-function normalizeSignalBotTestSignalOutcome(
-  value: SignalBotTestSignalHandlerResult,
-): SignalBotTestSignalOutcome {
-  return typeof value === "boolean"
-    ? { reason: value ? null : "no_eligible_note", sent: value }
-    : value;
-}
-
 export async function handleSignalBotMenuCallback(
   input: SignalBotMenuLoaders & {
     callbackQuery: TelegramBotCallbackQuery;
@@ -2713,6 +2707,7 @@ export async function handleSignalBotMenuCallback(
 ): Promise<boolean> {
   const route = parseSignalBotMenuCallback(input.callbackQuery.data);
   if (!route) return false;
+  const callbackId = input.callbackQuery.id;
   const message = input.callbackQuery.message;
   const telegramUserId = input.callbackQuery.from?.id;
   const isAdmin = isSignalBotAdmin(input.config, telegramUserId);
@@ -2755,7 +2750,7 @@ export async function handleSignalBotMenuCallback(
       telegramUserId,
     });
   }
-  const renderToken = input.callbackQuery.id;
+  const renderToken = TelegramBotMenuActions.menuRenderToken(route, callbackId);
   const shouldDeliver =
     messageId == null
       ? undefined
@@ -2767,11 +2762,12 @@ export async function handleSignalBotMenuCallback(
         });
   if (messageId != null) {
     const claimed = await claimTelegramBotCallbackMenuRender({
-      callbackQueryId: input.callbackQuery.id,
+      callbackQueryId: callbackId,
       chatId,
       db: input.db,
       messageId,
       redis: input.redis,
+      renderToken,
       telegram: input.telegram,
       telegramUserId: String(telegramUserId),
     });
@@ -3176,9 +3172,7 @@ export async function handleSignalBotMenuCallback(
       sent: false,
     };
     try {
-      outcome = normalizeSignalBotTestSignalOutcome(
-        await input.sendTestSignal(chatId),
-      );
+      outcome = normalizeTestSignalOutcome(await input.sendTestSignal(chatId));
     } catch {
       outcome = { reason: "no_eligible_note", sent: false };
     }
@@ -4031,7 +4025,7 @@ export async function handleSignalBotCommand(input: {
   }
   if (command === "test_signal") {
     const request = parseSignalBotTestSignalRequest(input.message.text);
-    const outcome = normalizeSignalBotTestSignalOutcome(
+    const outcome = normalizeTestSignalOutcome(
       await input.sendTestSignal(
         request.targetChatId ?? chatId,
         request.selector,

@@ -58,7 +58,7 @@ import {
   fundingReceiveAssetEnabled,
   fundingVenueReceiveEnabled,
 } from "../funding/policies/funding-policy-v2.js";
-import { resolveFundingPolicy } from "../funding/policies/funding-policy-service.js";
+import { resolveFundingControlPlaneSnapshot } from "../funding/policies/funding-policy-sidecar.js";
 import {
   RELAY_RECEIVE_OPERATION_ADAPTER_KEY,
   relayReceiveQuotePlan,
@@ -2075,7 +2075,7 @@ function createSolanaRetainedFundingAdapter(
       ) {
         return null;
       }
-      const fundingPolicy = await resolveFundingPolicy(db);
+      const fundingPolicy = await resolveFundingControlPlaneSnapshot(db);
       return fundingPolicyAllowsSolanaRetainedRoute(fundingPolicy.runtime, spec)
         ? {
             authorization: null,
