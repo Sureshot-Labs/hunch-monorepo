@@ -570,7 +570,10 @@ export function projectTelegramFundingProgress(input: {
       target.acceptedAssets.some(
         (accepted) =>
           (accepted.handling === "direct" &&
-            sameAsset(accepted.asset, route.destinationAsset)) ||
+            (sameAsset(accepted.asset, route.destinationAsset) ||
+              (isTelegramSolanaRetainedFundingMode(route.mode) &&
+                route.automaticSourceAsset != null &&
+                sameAsset(accepted.asset, route.automaticSourceAsset)))) ||
           (accepted.handling === "automatic_conversion" &&
             route.automaticSourceAsset != null &&
             sameAsset(accepted.asset, route.automaticSourceAsset)),

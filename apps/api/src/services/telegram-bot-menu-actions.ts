@@ -127,6 +127,22 @@ export function isSignalBotFundingMenuRoute(
   return signalBotFundingMenuAction(route) != null;
 }
 
+/** Only callbacks whose response is owned by the durable funding outbox hand
+ * over their message generation. Navigation/cancel callbacks keep ownership. */
+export function menuRenderToken(
+  route: Readonly<{ kind: string; venue?: string }>,
+  callbackQueryId: string,
+): string {
+  return route.kind === "deposit" ||
+    route.kind === "deposit_route" ||
+    route.kind === "select" ||
+    route.kind === "refresh" ||
+    route.kind === "qr" ||
+    route.kind === "confirm_conversion"
+    ? `funding:callback:${callbackQueryId}`
+    : callbackQueryId;
+}
+
 export async function hideSignalBotFundingQr(
   callbackQuery: TelegramBotCallbackQuery,
   telegram: SignalBotTelegramClient,

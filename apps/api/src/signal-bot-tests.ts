@@ -107,7 +107,10 @@ import {
   formatTelegramTtl,
 } from "./services/telegram-bot-trading-presentation.js";
 import { normalizeSignalBotPolicy } from "./services/signal-bot-trading-policy.js";
-import { drainSignalBotFundingOpenTasks } from "./services/telegram-bot-menu-actions.js";
+import {
+  drainSignalBotFundingOpenTasks,
+  menuRenderToken,
+} from "./services/telegram-bot-menu-actions.js";
 import {
   readSignalBotMenuInput,
   writeSignalBotTradeMenuInput,
@@ -10580,6 +10583,67 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.doesNotMatch(serialized, /callback-token-secret/u);
       assert.doesNotMatch(serialized, /raw Telegram timeout/u);
       assert.doesNotMatch(serialized, /999|50/u);
+    },
+  },
+  {
+    name: "durable funding selection hands the menu generation to the outbox",
+    run: async () => {
+      const redis = new FakeRedis();
+      const telegram = new FakeTelegram();
+      const handled = await handleSignalBotMenuCallback({
+        callbackQuery: {
+          data: "hm:v1:deposit_route:pd",
+          from: { id: 999 },
+          id: "funding-route-callback",
+          message: {
+            chat: { id: 999, type: "private" },
+            message_id: 54,
+          },
+        },
+        config: parseSignalBotConfig({
+          HUNCH_SIGNAL_BOT_TOKEN: "token",
+        }),
+        db: {
+          query: async () => ({
+            rows: [{ link_id: "link-1", user_id: "user-1" }],
+          }),
+        } as never,
+        loadFunding: async (input) => {
+          assert.equal(input.action, "open_route");
+          assert.equal(input.fundingRoute, "polymarket_polygon_pusd_direct_v1");
+          return {
+            durableFundingDeliveryRequired: true,
+            fundingContextId: "123e4567-e89b-42d3-a456-426614174000",
+            text: "Queued for durable delivery",
+          };
+        },
+        redis,
+        sendTestSignal: async () => false,
+        telegram,
+      });
+      assert.equal(handled, true);
+      assert.equal(telegram.edits.length, 0);
+      assert.equal(
+        redis.strings.get("tg:signal_bot:v1:menu_render:999:54"),
+        "funding:callback:funding-route-callback",
+        "the verified address outbox must be allowed to replace the callback generation",
+      );
+      assert.equal(
+        menuRenderToken({ kind: "select" }, "funding-selection"),
+        "funding:callback:funding-selection",
+      );
+      assert.equal(
+        menuRenderToken({ kind: "deposit" }, "active-funding"),
+        "funding:callback:active-funding",
+      );
+      assert.equal(
+        menuRenderToken({ kind: "back_to_market" }, "market-navigation"),
+        "market-navigation",
+      );
+      assert.equal(
+        menuRenderToken({ kind: "cancel" }, "cancel-navigation"),
+        "cancel-navigation",
+      );
     },
   },
   {

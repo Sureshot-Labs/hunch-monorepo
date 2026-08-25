@@ -2321,6 +2321,42 @@ const solanaRetainedReceipt = receipt({
   status: "ready",
   variantId: solanaRetainedVariant.variantId,
 });
+const waitingForSolanaRetained = projectTelegramFundingProgress({
+  consent: solanaRetainedConsent,
+  context,
+  now: new Date("2026-08-05T12:03:00.000Z"),
+  receipts: [],
+  session: { ...polymarketSolanaRetainedSession, status: "open", version: 2 },
+});
+assert.equal(waitingForSolanaRetained?.state, "waiting_for_transfer");
+assert.equal(waitingForSolanaRetained?.receiveAddress, solanaAddress);
+assert.ok(waitingForSolanaRetained);
+const waitingForSolanaRetainedMessage = buildTelegramFundingProgressMessage(
+  waitingForSolanaRetained,
+);
+assert.match(
+  waitingForSolanaRetainedMessage.text,
+  new RegExp(solanaAddress, "u"),
+);
+assert.equal(
+  waitingForSolanaRetainedMessage.reply_markup?.inline_keyboard
+    .flat()
+    .some(
+      (button) =>
+        "copy_text" in button && button.copy_text.text === solanaAddress,
+    ),
+  true,
+);
+assert.equal(
+  waitingForSolanaRetainedMessage.reply_markup?.inline_keyboard
+    .flat()
+    .some(
+      (button) =>
+        "callback_data" in button &&
+        button.callback_data === `hm:v1:fund:qr:${contextId}`,
+    ),
+  true,
+);
 const genericSolanaRetained = projectTelegramFundingProgress({
   consent: solanaRetainedConsent,
   context,

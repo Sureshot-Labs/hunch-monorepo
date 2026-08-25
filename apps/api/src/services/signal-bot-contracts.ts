@@ -309,3 +309,7 @@ export type SignalBotTestSignalOutcome = {
   reason: SignalBotDeliveryPreparationReason | "no_eligible_note" | null;
   sent: boolean;
 };
+
+export type SignalBotTestSignalHandlerResult =
+  | boolean
+  | SignalBotTestSignalOutcome;

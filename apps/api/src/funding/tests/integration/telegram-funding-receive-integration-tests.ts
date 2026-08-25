@@ -34,6 +34,10 @@ import {
 } from "../../../services/telegram-funding-sessions.js";
 import { runTelegramFundingProgressProjectionBatch } from "../../../services/telegram-funding-progress-projector.js";
 import {
+  projectTelegramFundingProgress,
+  telegramFundingProgressFingerprint,
+} from "../../../services/telegram-funding-progress.js";
+import {
   cleanupTelegramFundingContexts,
   deliverTelegramFundingActions,
   rearmTelegramFundingCurrentAddressDelivery,
@@ -45,6 +49,7 @@ import {
   TelegramFundingService,
 } from "../../../services/telegram-funding.js";
 import { telegramPolygonFundingPresentation } from "../../../services/telegram-funding-route.js";
+import { isTelegramFundingReceiveDisclosureTargetCurrent } from "../../../services/telegram-funding-disclosure-target.js";
 
 const now = new Date();
 const suffix = crypto.randomUUID();
@@ -1279,6 +1284,19 @@ try {
   assert.deepEqual(replayedConsent.mutationResponse, {
     text: "verified pUSD address",
   });
+  assert.equal(
+    await isTelegramFundingReceiveDisclosureTargetCurrent(pool, {
+      expectedReceiveAddress: destinationAddress,
+      fundingContextId,
+      receiveSessionId,
+      retainedSolanaTarget: true,
+      telegramAccountId,
+      telegramUserId,
+      userId,
+    }),
+    false,
+    "a retained-SOL projection cannot be authorized by a non-SOL active consent",
+  );
   const guardedRetainedReceive = await createOrReuseFundingReceiveSession(
     pool,
     {
@@ -1445,7 +1463,9 @@ try {
     policySnapshot: {
       mode: "direct",
       presentationMode: "polymarket_solana_sol_retained",
-      presentation: { routeKey: "polymarket_solana_sol_retained_v1" },
+      presentation: telegramPolygonFundingPresentation(
+        "polymarket_solana_sol_retained",
+      ),
     },
     fingerprint: hash("retained-sol-consent-current-wallet"),
     now: new Date(now.getTime() + 1_006),
@@ -1455,6 +1475,86 @@ try {
     retainedSolConsentInput,
   );
   assert.equal(retainedSolConsent.consent.asset.networkId, "solana:mainnet");
+  const retainedDisclosureScope = {
+    expectedReceiveAddress: retainedSolWalletAddress,
+    fundingContextId: retainedSolContext.context.id,
+    receiveSessionId: retainedSolReceive.snapshot.session.receiveSessionId,
+    retainedSolanaTarget: true,
+    telegramAccountId,
+    telegramUserId,
+    userId,
+  } as const;
+  assert.equal(
+    await isTelegramFundingReceiveDisclosureTargetCurrent(
+      pool,
+      retainedDisclosureScope,
+    ),
+    true,
+    "the exact retained SOL target is safe to disclose while its managed wallet remains current",
+  );
+  assert.equal(
+    await isTelegramFundingReceiveDisclosureTargetCurrent(pool, {
+      ...retainedDisclosureScope,
+      expectedReceiveAddress: Keypair.generate().publicKey.toBase58(),
+    }),
+    false,
+    "a retained SOL projection cannot substitute a different receive address",
+  );
+  const currentRetainedSolContext = await fetchTelegramFundingSessionContext(
+    pool,
+    {
+      chatId: telegramUserId,
+      contextId: retainedSolContext.context.id,
+      telegramUserId,
+      userId,
+    },
+  );
+  assert.ok(currentRetainedSolContext);
+  const retainedSolProjection = projectTelegramFundingProgress({
+    consent: retainedSolConsent.consent,
+    context: currentRetainedSolContext,
+    receipts: [],
+    session: retainedSolReceive.snapshot.session,
+    now: new Date(now.getTime() + 1_007),
+  });
+  assert.ok(retainedSolProjection);
+  await pool.query(
+    `with updated_context as (
+       update telegram_funding_sessions
+          set progress_revision = 1,
+              progress_fingerprint = $4,
+              latest_progress_projection = $2::jsonb,
+              projection_checked_at = $3
+        where id = $1
+        returning id, telegram_account_id, user_id, telegram_user_id
+     )
+     insert into telegram_bot_action_outbox (
+       action, telegram_account_id, user_id, telegram_user_id,
+       funding_session_id, state_revision, payload
+     )
+     select 'funding_edit', telegram_account_id, user_id, telegram_user_id,
+            id, 1, $2::jsonb
+       from updated_context`,
+    [
+      retainedSolContext.context.id,
+      JSON.stringify(retainedSolProjection),
+      new Date(now.getTime() + 1_007),
+      telegramFundingProgressFingerprint(retainedSolProjection),
+    ],
+  );
+  const retainedSolProjectedAddress = await pool.query<{
+    receive_address: string | null;
+  }>(
+    `select latest_progress_projection ->> 'receiveAddress' as receive_address
+       from telegram_funding_sessions
+      where id = $1`,
+    [retainedSolContext.context.id],
+  );
+  assert.equal(
+    retainedSolProjectedAddress.rows[0]?.receive_address,
+    retainedSolWalletAddress,
+    "the verified retained SOL wallet is durably projected before delivery",
+  );
   await pool.query(
     `update user_wallets
         set is_verified = false, updated_at = now()
@@ -1463,6 +1563,52 @@ try {
         and wallet_address = $2`,
     [userId, retainedSolWalletAddress],
   );
+  assert.equal(
+    await isTelegramFundingReceiveDisclosureTargetCurrent(
+      pool,
+      retainedDisclosureScope,
+    ),
+    false,
+    "a retained SOL address must stop being deliverable after its managed wallet is revoked",
+  );
+  let staleSolDisclosureCount = 0;
+  await deliverTelegramFundingActions({
+    pool,
+    renderCoordinator,
+    telegram: {
+      editMessageText: async (message) => {
+        if (message.text.includes(retainedSolWalletAddress)) {
+          staleSolDisclosureCount += 1;
+        }
+        return { ok: true, messageId: message.message_id };
+      },
+      sendMessage: async (message) => {
+        if (message.text.includes(retainedSolWalletAddress)) {
+          staleSolDisclosureCount += 1;
+        }
+        return { ok: true, messageId: 3334 };
+      },
+      sendPhoto: async (message) => {
+        if (message.caption?.includes(retainedSolWalletAddress)) {
+          staleSolDisclosureCount += 1;
+        }
+        return { ok: true, messageId: 3335 };
+      },
+    },
+  });
+  assert.equal(
+    staleSolDisclosureCount,
+    0,
+    "delivery must recheck ownership and never disclose a revoked retained SOL target",
+  );
+  const retainedSolDeliveredRows = await pool.query<{ count: string }>(
+    `select count(*)::text as count
+       from telegram_bot_action_outbox
+      where funding_session_id = $1
+        and status = 'sent'`,
+    [retainedSolContext.context.id],
+  );
+  assert.equal(retainedSolDeliveredRows.rows[0]?.count, "0");
   await assert.rejects(
     appendTelegramFundingConsent(pool, {
       ...retainedSolConsentInput,
@@ -1481,6 +1627,14 @@ try {
         and wallet_type = 'solana'
         and wallet_address = $2`,
     [userId, retainedSolWalletAddress],
+  );
+  assert.equal(
+    await isTelegramFundingReceiveDisclosureTargetCurrent(
+      pool,
+      retainedDisclosureScope,
+    ),
+    true,
+    "restoring the exact managed SOL wallet restores only that frozen disclosure target",
   );
   await cancelTelegramFundingSessionContext(pool, {
     contextId: retainedSolContext.context.id,

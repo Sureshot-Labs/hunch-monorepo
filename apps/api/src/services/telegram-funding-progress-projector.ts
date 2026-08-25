@@ -7,7 +7,7 @@ import {
   listFundingReceiveReceiptsForUser,
 } from "../funding/persistence/funding-receive-session-repository.js";
 import { lockTelegramFundingLinkLifecycle } from "../funding/execution/telegram-funding-link-lifecycle-lock.js";
-import { isTelegramFundingReceiveControllerCurrent } from "../funding/execution/telegram-funding-managed-wallet.js";
+import { isTelegramFundingReceiveDisclosureTargetCurrent } from "./telegram-funding-disclosure-target.js";
 import {
   parseTelegramFundingProgressProjection,
   projectTelegramFundingProgress,
@@ -16,6 +16,7 @@ import {
   telegramFundingProgressFingerprint,
 } from "./telegram-funding-progress.js";
 import {
+  isTelegramSolanaRetainedFundingRouteKey,
   resolveTelegramFundingConsentCapability,
   resolveTelegramFundingConsentRoute,
 } from "./telegram-funding-route.js";
@@ -156,27 +157,38 @@ async function projectCandidate(
       receiveSessionId: context.receiveSessionId,
     });
     if (!receive) return "skipped";
-    const controllerIsCurrent =
+    const latestProjection = parseTelegramFundingProgressProjection(
+      context.latestProgressProjection,
+    );
+    const consent = await fetchActiveTelegramFundingConsent(client, context.id);
+    const consentRoute = consent
+      ? resolveTelegramFundingConsentRoute(consent)
+      : null;
+    const disclosureTargetIsCurrent =
       context.telegramAccountId != null &&
-      (await isTelegramFundingReceiveControllerCurrent(client, {
+      (await isTelegramFundingReceiveDisclosureTargetCurrent(client, {
+        expectedReceiveAddress: latestProjection?.receiveAddress ?? null,
+        fundingContextId: context.id,
         receiveSessionId: context.receiveSessionId,
+        retainedSolanaTarget:
+          (latestProjection != null &&
+            isTelegramSolanaRetainedFundingRouteKey(
+              latestProjection.presentation.routeKey,
+            )) ||
+          (consentRoute != null &&
+            isTelegramSolanaRetainedFundingRouteKey(
+              consentRoute.presentation.routeKey,
+            )),
         telegramAccountId: context.telegramAccountId,
         telegramUserId: context.telegramUserId,
         userId: context.userId,
       }));
-    const latestProjection = parseTelegramFundingProgressProjection(
-      context.latestProgressProjection,
-    );
     const retainedTerminal = resolveTelegramFundingRetainedTerminal(
       context.latestTerminalProjection,
       context.id,
     );
-    const consent = await fetchActiveTelegramFundingConsent(client, context.id);
     const redactionPresentation =
-      latestProjection?.presentation ??
-      (consent
-        ? resolveTelegramFundingConsentRoute(consent)?.presentation
-        : null);
+      latestProjection?.presentation ?? consentRoute?.presentation ?? null;
     const qrPhoto = await client.query<{ exists: boolean }>(
       `
         select exists (
@@ -192,15 +204,15 @@ async function projectCandidate(
       [context.id, context.telegramMessageId],
     );
     const shouldDeleteQrPhoto =
-      !controllerIsCurrent && qrPhoto.rows[0]?.exists === true;
+      !disclosureTargetIsCurrent && qrPhoto.rows[0]?.exists === true;
     const shouldRedactDeliveredAddress =
-      !controllerIsCurrent &&
+      !disclosureTargetIsCurrent &&
       context.addressDisclosureAttemptRevision >
         context.addressRedactedRevision &&
       redactionPresentation != null &&
       latestProjection?.state !== "unavailable";
     if (
-      !controllerIsCurrent &&
+      !disclosureTargetIsCurrent &&
       !shouldRedactDeliveredAddress &&
       !shouldDeleteQrPhoto
     ) {
@@ -208,7 +220,7 @@ async function projectCandidate(
         `
           update telegram_bot_action_outbox
           set status = 'skipped',
-              last_error = 'funding_controller_changed',
+              last_error = 'funding_disclosure_target_changed',
               updated_at = $2
           where funding_session_id = $1
             and action in (
@@ -236,7 +248,7 @@ async function projectCandidate(
       redactionPresentation
         ? projectTelegramFundingUnavailable(context, redactionPresentation)
         : null;
-    if (controllerIsCurrent) {
+    if (disclosureTargetIsCurrent) {
       const receipts = await listFundingReceiveReceiptsForUser(client, {
         userId: context.userId,
         receiveSessionId: context.receiveSessionId,

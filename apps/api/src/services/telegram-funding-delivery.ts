@@ -11,7 +11,7 @@ import {
   type TelegramFundingProgressProjection,
 } from "./telegram-funding-contracts.js";
 import { lockTelegramFundingLinkLifecycle } from "../funding/execution/telegram-funding-link-lifecycle-lock.js";
-import { isTelegramFundingReceiveControllerCurrent } from "../funding/execution/telegram-funding-managed-wallet.js";
+import { isTelegramFundingReceiveDisclosureTargetCurrent } from "./telegram-funding-disclosure-target.js";
 import { canonicalJsonEqual } from "../funding/persistence/canonical.js";
 import { lockFundingPolicyForTransaction } from "../funding/policies/funding-policy-sidecar.js";
 import {
@@ -23,7 +23,10 @@ import {
   resolveTelegramFundingRetainedTerminal,
 } from "./telegram-funding-progress.js";
 import type { TelegramFundingSessionContext } from "./telegram-funding-sessions.js";
-import { resolveTelegramFundingAutomaticCapability } from "./telegram-funding-route.js";
+import {
+  isTelegramSolanaRetainedFundingRouteKey,
+  resolveTelegramFundingAutomaticCapability,
+} from "./telegram-funding-route.js";
 import {
   claimSignalBotBackgroundMenuRender,
   claimSignalBotMenuRender,
@@ -564,16 +567,19 @@ async function loadCurrentDestination(
   if (!destination.telegram_account_id) {
     return safeAddressRedaction || deletesQrPhoto ? destination : null;
   }
-  const controllerIsCurrent = await isTelegramFundingReceiveControllerCurrent(
-    pool,
-    {
+  const disclosureTargetIsCurrent =
+    await isTelegramFundingReceiveDisclosureTargetCurrent(pool, {
+      expectedReceiveAddress: projection.receiveAddress,
+      fundingContextId: row.funding_session_id,
       receiveSessionId: destination.receive_session_id,
+      retainedSolanaTarget: isTelegramSolanaRetainedFundingRouteKey(
+        projection.presentation.routeKey,
+      ),
       telegramAccountId: destination.telegram_account_id,
       telegramUserId: destination.telegram_user_id,
       userId: destination.user_id,
-    },
-  );
-  if (!controllerIsCurrent) {
+    });
+  if (!disclosureTargetIsCurrent) {
     return safeAddressRedaction || deletesQrPhoto ? destination : null;
   }
   if (projection.receiveAddress === null) return destination;
