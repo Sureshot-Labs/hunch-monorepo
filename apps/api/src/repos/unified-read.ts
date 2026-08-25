@@ -367,7 +367,7 @@ type FeedSearchContext = {
 
 type FeedSearchMode = "ranked" | "membership";
 type FeedSearchProfile = "primary" | "full";
-type FeedSearchStrategy = "primary_with_fallback" | "full";
+type FeedSearchStrategy = "primary" | "primary_with_fallback" | "full";
 type FeedSearchVenueFilterTarget = "event" | "market";
 
 type FeedSearchPlan = {
@@ -1158,7 +1158,16 @@ function buildFeedSearchMatchesSql(args: {
     const marketMatchesSql = (cteName: string) => `
       select matched.event_id as id, matched.rank
       from ${cteName} matched
-      join unified_markets m on m.id = matched.market_id
+      -- Keep the FTS matches as the outer side. PostgreSQL substantially
+      -- overestimates some short prefix searches (for example, nba:*); without
+      -- this lateral fence it can reverse the join and scan every market in a
+      -- category before applying the handful of matched market IDs.
+      join lateral (
+        select m.*
+        from unified_markets m
+        where m.id = matched.market_id
+        offset 0
+      ) m on true
       join unified_events e on e.id = m.event_id
       left join polymarket_markets pm_search
         on pm_search.id = m.venue_market_id
@@ -1209,6 +1218,13 @@ function buildFeedSearchMatchesSql(args: {
   }
 
   const primarySql = buildProfileSql("primary", 1, finalLimitClause);
+  if (strategy === "primary") {
+    return `
+      search_events as materialized (
+        ${primarySql}
+      )
+    `;
+  }
   const fallbackSql = buildProfileSql("full", 0, fallbackLimitClause);
   return `
     primary_search_events as materialized (
@@ -1246,6 +1262,7 @@ function buildFeedSearchContext(args: {
   nowParam: string;
   renderableMarketExpr: string;
   mode?: FeedSearchMode;
+  strategy?: FeedSearchStrategy;
   matchLimit?: number | null;
   fallbackThreshold?: number | null;
   earlyFilterInputs?: FeedSearchEarlyFilterInputs;
@@ -1257,6 +1274,7 @@ function buildFeedSearchContext(args: {
     nowParam,
     renderableMarketExpr,
     mode = "ranked",
+    strategy: requestedStrategy,
     matchLimit = null,
     fallbackThreshold = null,
     earlyFilterInputs,
@@ -1297,7 +1315,7 @@ function buildFeedSearchContext(args: {
         fullMarketSearchDocExpr,
         renderableMarketExpr,
         orderableMarketExpr,
-        strategy: plan.strategy,
+        strategy: requestedStrategy ?? plan.strategy,
         earlyFilters,
       })
     : "";
@@ -2340,6 +2358,7 @@ export async function fetchFeedCategoryFacetRows(
 async function fetchFeedEventIdsExact(
   pool: Pool,
   inputs: FeedInputs,
+  options?: { searchStrategy?: FeedSearchStrategy },
 ): Promise<FeedEventIdRow[]> {
   const { params, add } = createParamBuilder();
   const expressions = buildFeedSqlExpressions();
@@ -2367,6 +2386,7 @@ async function fetchFeedEventIdsExact(
     q: inputs.q,
     nowParam,
     renderableMarketExpr,
+    strategy: options?.searchStrategy,
     matchLimit: feedSearchResultMatchLimitForInputs(inputs),
     fallbackThreshold: feedSearchFallbackThresholdForInputs(inputs),
     earlyFilterInputs: inputs,
@@ -2569,6 +2589,14 @@ export async function fetchFeedEventIds(
 ): Promise<FeedEventIdRow[]> {
   const fastRows = await fetchFeedEventIdsFast(pool, inputs);
   if (fastRows) return fastRows;
+
+  if (buildFeedSearchPlan(inputs.q).strategy === "primary_with_fallback") {
+    const primaryRows = await fetchFeedEventIdsExact(pool, inputs, {
+      searchStrategy: "primary",
+    });
+    if (primaryRows.length === inputs.limit) return primaryRows;
+  }
+
   return fetchFeedEventIdsExact(pool, inputs);
 }
 

@@ -13,7 +13,10 @@ import {
 import { checkRateLimit } from "../lib/rate-limit.js";
 import { resolveSecurityClientIp } from "../lib/request-ip.js";
 import { markHotTokens } from "../lib/hot-tokens.js";
-import { extractLimitlessMetadata } from "../lib/limitless-metadata.js";
+import {
+  extractLimitlessMetadata,
+  isLimitlessNegRiskMetadata,
+} from "../lib/limitless-metadata.js";
 import { requestPriceRefreshForTokens } from "../lib/price-refresh.js";
 import { isRecord } from "../lib/type-guards.js";
 import {
@@ -273,12 +276,7 @@ export const marketRoutes: FastifyPluginAsync<MarketRoutesOptions> = async (
           market.venue === "limitless"
             ? extractLimitlessMetadata(marketMetadata, eventMetadata)
             : null;
-        const isLimitlessNegRisk = Boolean(
-          limitlessMeta?.negRiskRequestId ||
-          limitlessMeta?.negRiskMarketId ||
-          limitlessMeta?.venueAdapter ||
-          limitlessMeta?.venueExchange,
-        );
+        const isLimitlessNegRisk = isLimitlessNegRiskMetadata(limitlessMeta);
         const sportsFixtureResult = await fetchFifa2026SportsFixtureForEvent(
           pool,
           {

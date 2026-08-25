@@ -794,6 +794,88 @@ async function assertEventFeedSqlShape(): Promise<void> {
     assert.ok(capturedParams[0]?.includes(1_000));
     assert.ok(capturedParams[1]?.includes(4_000));
   }
+
+  {
+    const capturedSql: string[] = [];
+    const rows = Array.from({ length: baseInputs.limit }, (_, index) => ({
+      id: `primary-event-${index}`,
+    }));
+    const fakePool = createSqlCapturePool(
+      capturedSql,
+      rows,
+    ) as unknown as Parameters<typeof fetchFeedEventIds>[0];
+
+    const result = await fetchFeedEventIds(fakePool, {
+      ...baseInputs,
+      q: "nba",
+      eventScope: "grouped",
+      venues: ["polymarket", "limitless"],
+      categories: ["sports"],
+      sort: "trending",
+    });
+
+    assert.equal(result.length, baseInputs.limit);
+    assert.equal(capturedSql.length, 1);
+    assert.match(capturedSql[0], /search_events as materialized/);
+    assert.match(
+      capturedSql[0],
+      /join lateral \(\s*select m\.\*\s*from unified_markets m\s*where m\.id = matched\.market_id\s*offset 0\s*\) m on true/s,
+    );
+    assert.doesNotMatch(
+      capturedSql[0],
+      /fallback_search_events as materialized/,
+    );
+    assert.doesNotMatch(capturedSql[0], /full_market_prefix_fts_matches/);
+  }
+
+  {
+    const capturedSql: string[] = [];
+    let queryCount = 0;
+    const runQuery = async (sql: string) => {
+      const normalized = sql.trim().toLowerCase();
+      if (
+        normalized === "begin" ||
+        normalized === "commit" ||
+        normalized === "rollback" ||
+        normalized.startsWith("set local ")
+      ) {
+        return { rows: [] };
+      }
+      capturedSql.push(sql);
+      queryCount += 1;
+      return {
+        rows:
+          queryCount === 1
+            ? []
+            : Array.from({ length: baseInputs.limit }, (_, index) => ({
+                id: `fallback-event-${index}`,
+              })),
+      };
+    };
+    const fakePool = {
+      query: runQuery,
+      async connect() {
+        return { query: runQuery, release() {} };
+      },
+    } as unknown as Parameters<typeof fetchFeedEventIds>[0];
+
+    const result = await fetchFeedEventIds(fakePool, {
+      ...baseInputs,
+      q: "nba",
+      eventScope: "grouped",
+      venues: ["polymarket", "limitless"],
+      categories: ["sports"],
+      sort: "trending",
+    });
+
+    assert.equal(result.length, baseInputs.limit);
+    assert.equal(capturedSql.length, 2);
+    assert.doesNotMatch(
+      capturedSql[0],
+      /fallback_search_events as materialized/,
+    );
+    assert.match(capturedSql[1], /fallback_search_events as materialized/);
+  }
 }
 
 async function assertChange24hV2FastPath(): Promise<void> {

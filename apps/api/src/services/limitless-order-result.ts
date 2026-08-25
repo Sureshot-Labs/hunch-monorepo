@@ -184,7 +184,12 @@ export function parseLimitlessOrderResult(
   );
 
   return {
-    explicitNoFill: matched === false || isLimitlessUnmatchedStatus(status),
+    // `matched: false` is also emitted while a Limitless FOK order is still
+    // queued with settlementStatus=DELAYED. Only an explicit terminal status
+    // proves no fill; otherwise keep the order on the reconciliation path.
+    explicitNoFill:
+      isLimitlessUnmatchedStatus(status) ||
+      isLimitlessUnmatchedStatus(settlementStatus),
     matched,
     order,
     settlementStatus,

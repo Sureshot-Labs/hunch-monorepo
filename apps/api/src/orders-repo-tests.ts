@@ -292,6 +292,123 @@ await test("storeOrder reads nested position delta markers on existing orders", 
   assert.equal(result.order.position_delta_applied, true);
 });
 
+await test("only non-terminal orders may recover a funding attempt", async () => {
+  const storeAndCapture = async (status: "delayed" | "expired") => {
+    const capturedSql: string[] = [];
+    const venueOrderId = `venue-${status}`;
+    const client = {
+      query: async (sql: string) => {
+        capturedSql.push(sql);
+        if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") {
+          return { rows: [], rowCount: 0 };
+        }
+        if (/insert into orders/i.test(sql)) {
+          return {
+            rows: [
+              {
+                id: `order-${status}`,
+                venue_order_id: venueOrderId,
+                status,
+                posted_at: new Date("2026-08-25T00:00:00.000Z"),
+              },
+            ],
+            rowCount: 1,
+          };
+        }
+        if (/from orders/i.test(sql)) return { rows: [], rowCount: 0 };
+        return { rows: [], rowCount: 0 };
+      },
+      release: () => {},
+    };
+    const pool = { connect: async () => client } as unknown as Pool;
+
+    await storeOrder(pool, {
+      userId: "1844db1a-b1a0-4f93-b12c-5c5ea960687e",
+      walletAddress: "0x0000000000000000000000000000000000000001",
+      signerAddress: "0x0000000000000000000000000000000000000001",
+      venue: "limitless",
+      venueOrderId,
+      tokenId: "token-1",
+      side: "BUY",
+      orderType: "FOK",
+      price: 0.5,
+      size: 2,
+      status,
+      errorMessage:
+        status === "expired" ? "Limitless market order was not filled." : null,
+      rawError: null,
+    });
+    return capturedSql.join("\n");
+  };
+
+  const noFillSql = await storeAndCapture("expired");
+  const delayedSql = await storeAndCapture("delayed");
+
+  assert.doesNotMatch(
+    noFillSql,
+    /funding_trade_attempts|funding_trade_consumer_intent/i,
+  );
+  assert.match(delayedSql, /funding_trade_attempts/i);
+});
+
+await test("a stale delayed replay cannot recover funding for an existing terminal order", async () => {
+  const capturedSql: string[] = [];
+  const client = {
+    query: async (sql: string) => {
+      capturedSql.push(sql);
+      if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") {
+        return { rows: [], rowCount: 0 };
+      }
+      if (/from orders/i.test(sql)) {
+        return {
+          rowCount: 1,
+          rows: [
+            {
+              id: "terminal-order-1",
+              wallet_address: "0x0000000000000000000000000000000000000001",
+              signer_address: "0x0000000000000000000000000000000000000001",
+              price: 0.5,
+              size: 2,
+              status: "expired",
+              posted_at: new Date("2026-08-25T00:00:00.000Z"),
+              order_payload: null,
+              order_payload_version: null,
+              fee_policy_snapshot: null,
+              funding_operation_id: null,
+              funding_reservation_id: null,
+              funding_trade_attempt_id: null,
+            },
+          ],
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    },
+    release: () => {},
+  };
+  const pool = { connect: async () => client } as unknown as Pool;
+
+  await storeOrder(pool, {
+    userId: "1844db1a-b1a0-4f93-b12c-5c5ea960687e",
+    walletAddress: "0x0000000000000000000000000000000000000001",
+    signerAddress: "0x0000000000000000000000000000000000000001",
+    venue: "limitless",
+    venueOrderId: "terminal-order-reference",
+    tokenId: "token-1",
+    side: "BUY",
+    orderType: "FOK",
+    price: 0.5,
+    size: 2,
+    status: "delayed",
+    errorMessage: null,
+    rawError: null,
+  });
+
+  assert.doesNotMatch(
+    capturedSql.join("\n"),
+    /funding_trade_attempts|funding_trade_consumer_intent/i,
+  );
+});
+
 await test("storeOrder locks and marker-preserves existing order payload updates", async () => {
   let selectSql = "";
   let updateSql = "";

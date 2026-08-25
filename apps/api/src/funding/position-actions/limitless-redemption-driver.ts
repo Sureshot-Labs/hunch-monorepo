@@ -1,5 +1,8 @@
 import { env } from "../../env.js";
-import { extractLimitlessMetadata } from "../../lib/limitless-metadata.js";
+import {
+  extractLimitlessMetadata,
+  isLimitlessNegRiskMetadata,
+} from "../../lib/limitless-metadata.js";
 import { isRecord } from "../../lib/type-guards.js";
 import type { MarketByTokenRow } from "../../repos/unified-read.js";
 import { buildLimitlessRedemptionPlan } from "../../services/limitless-redemption-plan.js";
@@ -23,17 +26,6 @@ function readBoolean(value: unknown, path: readonly string[]): boolean | null {
     cursor = cursor[key];
   }
   return typeof cursor === "boolean" ? cursor : null;
-}
-
-function isNegRisk(
-  metadata: ReturnType<typeof extractLimitlessMetadata>,
-): boolean {
-  return Boolean(
-    metadata.negRiskRequestId ||
-    metadata.negRiskMarketId ||
-    metadata.venueAdapter ||
-    metadata.venueExchange,
-  );
 }
 
 function unavailablePlan(input: {
@@ -60,7 +52,7 @@ function marketContext(
     row.market_metadata,
     row.event_metadata,
   );
-  const negRisk = isNegRisk(metadata);
+  const negRisk = isLimitlessNegRiskMetadata(metadata);
   const tradeType =
     metadata.tradeType?.toLowerCase() === "amm" ? "amm" : "clob";
   return {

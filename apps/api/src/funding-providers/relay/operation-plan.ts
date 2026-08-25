@@ -62,6 +62,17 @@ function jsonRecord(value: unknown): Readonly<Record<string, JsonValue>> {
   return value as Readonly<Record<string, JsonValue>>;
 }
 
+function relayStepKindForSourceActions(
+  actions: readonly NormalizedAction[],
+): "approve" | "deposit" | null {
+  if (actions.some((action) => action.actionId.endsWith(":deposit"))) {
+    return "deposit";
+  }
+  return actions.some((action) => action.actionId.endsWith(":approve"))
+    ? "approve"
+    : null;
+}
+
 function stableUsdValue(amount: Money): string | null {
   return isRelayPinnedStableAsset(amount.asset)
     ? multiplyRawByUnitPrice({
@@ -123,6 +134,7 @@ async function validatedSteps(input: {
       action,
       profile: input.profile,
     });
+    const relayStepKind = relayStepKindForSourceActions(sourceActions);
     const validation =
       validations.length === 1
         ? validations[0]
@@ -150,6 +162,7 @@ async function validatedSteps(input: {
         signerAddress: input.profile.address,
         sponsorshipPolicyId: sponsorship.policyId,
         signingMode: sponsorship.signingMode,
+        ...(relayStepKind ? { relayStepKind } : {}),
       }),
       routeId: input.route.routeId,
       sourceAmount: input.sourceAmount,

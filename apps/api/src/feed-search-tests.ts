@@ -249,7 +249,7 @@ async function main() {
     );
     assert.match(
       primarySql,
-      /join unified_markets m on m.id = matched.market_id/,
+      /join lateral \(\s*select m\.\*\s*from unified_markets m\s*where m\.id = matched\.market_id\s*offset 0\s*\) m on true/s,
     );
     assert.match(primarySql, /lower\(e\.category\)/);
     assert.match(primarySql, /polymarket_markets pm_search/);

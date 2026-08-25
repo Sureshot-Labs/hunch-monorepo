@@ -69,6 +69,7 @@ type RelayFundingOutputMatch = {
   operationId: string;
   referenceMatched: boolean;
   destinationReferencesKnown: boolean;
+  amountMatched: boolean;
 };
 
 type TelegramRetainedFundingMatch = {
@@ -453,6 +454,7 @@ async function findRelayFundingOutput(
 
   const { rows } = await db.query<RelayFundingOutputMatch>(
     `
+      with relay_candidate as (
       select operation_row.id as "operationId",
              coalesce(
                segment_row.support_metadata ->
@@ -470,7 +472,13 @@ async function findRelayFundingOutput(
                    'destinationTransactionReferenceCount'
                )::integer > 0
                else false
-             end as "destinationReferencesKnown"
+             end as "destinationReferencesKnown",
+             coalesce((
+               coalesce(segment_row.actual_output ->> 'raw', '') = $6::text
+               or segment_row.quoted_expected_output ->> 'raw' = $6::text
+               or segment_row.quoted_min_output ->> 'raw' = $6::text
+             ), false) as "amountMatched",
+             operation_row.created_at as operation_created_at
       from funding_operations operation_row
       join funding_operation_segments segment_row
         on segment_row.operation_id = operation_row.id
@@ -479,8 +487,40 @@ async function findRelayFundingOutput(
       where operation_row.user_id = $1::uuid
         and operation_row.created_at > now() - interval '30 minutes'
         and operation_row.status not in ('failed', 'cancelled')
+        and exists (
+          select 1
+          from funding_operation_steps funding_step
+          join funding_operation_step_attempts funding_attempt
+            on funding_attempt.step_id = funding_step.id
+           and funding_attempt.broadcast_may_have_occurred
+          where funding_step.segment_id = segment_row.id
+            and (
+              funding_step.action_validation_result ->>
+                'relayStepKind' = 'deposit'
+              or (
+                not (
+                  funding_step.action_validation_result ? 'relayStepKind'
+                )
+                and (
+                  funding_step.normalized_action ->> 'actionId'
+                    like '%:deposit'
+                  or exists (
+                    select 1
+                    from jsonb_array_elements(
+                      coalesce(
+                        funding_step.normalized_action -> 'calls',
+                        '[]'::jsonb
+                      )
+                    ) relay_call
+                    where relay_call ->> 'actionId' like '%:deposit'
+                  )
+                )
+              )
+            )
+        )
         and (
-          exists (
+          operation_row.purpose = 'trade_shortfall'
+          or exists (
             select 1
             from funding_receive_receipts source_receipt
             where source_receipt.child_funding_operation_id = operation_row.id
@@ -513,17 +553,37 @@ async function findRelayFundingOutput(
           '{location,asset,networkId}' = $3::text
         and lower(operation_row.destination_target_snapshot #>>
           '{location,asset,assetId}') = $4::text
-      order by "referenceMatched" desc, operation_row.created_at desc
+      )
+      select "operationId",
+             "referenceMatched",
+             "destinationReferencesKnown",
+             "amountMatched"
+      from relay_candidate
+      where "referenceMatched"
+         or (
+           $7::boolean
+           and not "destinationReferencesKnown"
+           and "amountMatched"
+         )
+      order by "referenceMatched" desc, operation_created_at desc
       limit 2
     `,
-    [input.userId, recipient, networkId, assetId, referenceFingerprint],
+    [
+      input.userId,
+      recipient,
+      networkId,
+      assetId,
+      referenceFingerprint,
+      input.event.amount.trim(),
+      isKnownRelaySender,
+    ],
   );
   const exactMatches = rows.filter((row) => row.referenceMatched);
   if (exactMatches.length === 1) return exactMatches[0] ?? null;
   if (exactMatches.length > 1) return null;
   if (!isKnownRelaySender) return null;
   const unreferencedMatches = rows.filter(
-    (row) => !row.destinationReferencesKnown,
+    (row) => !row.destinationReferencesKnown && row.amountMatched,
   );
   return unreferencedMatches.length === 1
     ? (unreferencedMatches[0] ?? null)
