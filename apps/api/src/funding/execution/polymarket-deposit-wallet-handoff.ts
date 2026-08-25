@@ -8,6 +8,9 @@ const ERC20_TRANSFER_INTERFACE = new ethers.Interface([
   "function transfer(address recipient,uint256 amount)",
 ]);
 const EVM_TRANSACTION_HASH_PATTERN = /^0x[0-9a-fA-F]{64}$/;
+const POLYMARKET_RELAYER_TRANSACTION_REFERENCE_PREFIX =
+  "polymarket-relayer:v1:";
+const POLYMARKET_RELAYER_TRANSACTION_ID_PATTERN = /^[A-Za-z0-9_-]{8,160}$/u;
 
 export type PolymarketDepositWalletHandoffExpectation = Readonly<{
   tokenAddress: string;
@@ -89,14 +92,48 @@ export function polymarketDepositWalletHandoffExpectation(
   }
 }
 
+export type PolymarketDepositWalletTransactionReference = Readonly<{
+  kind: "external_handoff" | "transaction";
+  reference: string;
+}>;
+
+export function polymarketRelayerTransactionReference(
+  transactionId: string,
+): string {
+  const trimmed = transactionId.trim();
+  if (!POLYMARKET_RELAYER_TRANSACTION_ID_PATTERN.test(trimmed)) {
+    throw new Error("Polymarket relayer transaction ID is invalid");
+  }
+  return `${POLYMARKET_RELAYER_TRANSACTION_REFERENCE_PREFIX}${trimmed}`;
+}
+
+export function parsePolymarketRelayerTransactionReference(
+  reference: string,
+): string | null {
+  const trimmed = reference.trim();
+  if (!trimmed.startsWith(POLYMARKET_RELAYER_TRANSACTION_REFERENCE_PREFIX)) {
+    return null;
+  }
+  const transactionId = trimmed.slice(
+    POLYMARKET_RELAYER_TRANSACTION_REFERENCE_PREFIX.length,
+  );
+  return POLYMARKET_RELAYER_TRANSACTION_ID_PATTERN.test(transactionId)
+    ? transactionId
+    : null;
+}
+
 export function normalizePolymarketDepositWalletTransactionReference(
   action: NormalizedAction,
   validation: JsonRecord,
   reference: string,
-): string {
+): PolymarketDepositWalletTransactionReference {
   const trimmed = reference.trim();
-  return polymarketDepositWalletHandoffExpectation(action, validation) &&
-    EVM_TRANSACTION_HASH_PATTERN.test(trimmed)
-    ? trimmed.toLowerCase()
-    : reference;
+  const handoff = polymarketDepositWalletHandoffExpectation(action, validation);
+  if (handoff && EVM_TRANSACTION_HASH_PATTERN.test(trimmed)) {
+    return { kind: "transaction", reference: trimmed.toLowerCase() };
+  }
+  if (handoff && parsePolymarketRelayerTransactionReference(trimmed)) {
+    return { kind: "external_handoff", reference: trimmed };
+  }
+  return { kind: "transaction", reference };
 }

@@ -13,6 +13,10 @@ import {
   fetchSolanaReceiptTransaction,
   fetchSolanaSignatureReceiptStatus,
 } from "../../services/solana-rpc.js";
+import {
+  fetchPolymarketRelayerTransaction,
+  POLYMARKET_RELAYER_FAILED_STATES,
+} from "../../services/polymarket-deposit-wallet-relayer.js";
 
 import type {
   EvmTransactionAction,
@@ -30,7 +34,10 @@ import {
   type FundingStepReceiptTarget,
 } from "../persistence/funding-step-receipt-repository.js";
 import { fundingSidecarRuntimeConfig } from "../runtime/sidecar-runtime-config.js";
-import { polymarketDepositWalletHandoffExpectation } from "./polymarket-deposit-wallet-handoff.js";
+import {
+  parsePolymarketRelayerTransactionReference,
+  polymarketDepositWalletHandoffExpectation,
+} from "./polymarket-deposit-wallet-handoff.js";
 import type { FundingTransactionReferenceCodec } from "./transaction-reference-codec.js";
 
 type JsonRecord = Readonly<Record<string, JsonValue>>;
@@ -43,6 +50,7 @@ export const EVM_FUNDING_ACTION_FINALITY_CONFIRMATIONS = 12;
 export const FAST_EVM_FUNDING_ACTION_FINALITY_CONFIRMATIONS = 1;
 
 const FAST_FINALITY_EVM_CHAIN_IDS = new Set([137n, 8453n]);
+const POLYMARKET_RELAYER_LOOKUP_TIMEOUT_MS = 10_000;
 
 export function evmFundingActionFinalityConfirmations(chainId: bigint): number {
   return FAST_FINALITY_EVM_CHAIN_IDS.has(chainId)
@@ -1113,6 +1121,126 @@ function canonicalEvmBlockHash(
   return pending;
 }
 
+export async function resolvePolymarketRelayerFundingReference(
+  reference: string,
+  fetchTransaction: (
+    transactionId: string,
+    signal: AbortSignal,
+  ) => ReturnType<typeof fetchPolymarketRelayerTransaction> = (
+    transactionId,
+    signal,
+  ) =>
+    fetchPolymarketRelayerTransaction(transactionId, (url, init) =>
+      fetch(url, { ...init, signal }),
+    ),
+): Promise<
+  | Readonly<{ kind: "transaction"; reference: string }>
+  | Readonly<{ evidence: FundingStepReceiptEvidence; kind: "evidence" }>
+> {
+  const relayerTransactionId =
+    parsePolymarketRelayerTransactionReference(reference);
+  if (!relayerTransactionId) {
+    return { kind: "transaction", reference };
+  }
+  const relayerTransaction = await fetchTransaction(
+    relayerTransactionId,
+    AbortSignal.timeout(POLYMARKET_RELAYER_LOOKUP_TIMEOUT_MS),
+  );
+  const relayerState = relayerTransaction?.state?.trim() || null;
+  if (
+    relayerTransaction?.transactionID &&
+    relayerTransaction.transactionID !== relayerTransactionId
+  ) {
+    return {
+      kind: "evidence",
+      evidence: {
+        status: "mismatch",
+        actionMatch: false,
+        ledgerHeight: null,
+        blockHash: null,
+        canonical: true,
+        failureCode: "polymarket_relayer_reference_mismatch",
+        evidence: evidence({
+          providerReferenceMatches: false,
+          relayerState,
+        }),
+      },
+    };
+  }
+  if (POLYMARKET_RELAYER_FAILED_STATES.has(relayerState ?? "")) {
+    return {
+      kind: "evidence",
+      evidence: {
+        status: "failed",
+        actionMatch: null,
+        ledgerHeight: null,
+        blockHash: null,
+        canonical: true,
+        failureCode: "polymarket_relayer_transaction_failed",
+        evidence: evidence({
+          failureFinalized: true,
+          providerReferenceMatches: true,
+          relayerState,
+        }),
+      },
+    };
+  }
+  const transactionHash = relayerTransaction?.transactionHash?.trim();
+  if (!transactionHash) {
+    return {
+      kind: "evidence",
+      evidence: {
+        status: "pending",
+        actionMatch: null,
+        ledgerHeight: null,
+        blockHash: null,
+        canonical: true,
+        failureCode: null,
+        evidence: evidence({
+          providerReferenceMatches: true,
+          relayerState,
+        }),
+      },
+    };
+  }
+  return { kind: "transaction", reference: transactionHash };
+}
+
+export function bindPolymarketRelayerTransactionHash(input: {
+  evaluated: FundingStepReceiptEvidence;
+  previous: FundingStepReceiptObservation | null;
+  transactionHash: string;
+}): FundingStepReceiptEvidence {
+  const transactionHash = input.transactionHash.toLowerCase();
+  const previousHashRaw =
+    input.previous?.evidence.previousTransactionHash ??
+    input.previous?.evidence.transactionHash;
+  const previousHash =
+    typeof previousHashRaw === "string" ? previousHashRaw.toLowerCase() : null;
+  if (previousHash && previousHash !== transactionHash) {
+    const finalized = isReorgWatchReceipt(input.previous);
+    return {
+      status: finalized ? "reorged" : "mismatch",
+      actionMatch: false,
+      ledgerHeight: input.previous?.ledgerHeight ?? null,
+      blockHash: input.previous?.blockHash ?? null,
+      canonical: !finalized,
+      failureCode: "polymarket_relayer_transaction_hash_changed",
+      evidence: evidence({
+        previousTransactionHash: previousHash,
+        transactionHash,
+      }),
+    };
+  }
+  return {
+    ...input.evaluated,
+    evidence: {
+      ...input.evaluated.evidence,
+      transactionHash,
+    },
+  };
+}
+
 async function inspectEvmTarget(
   target: FundingStepReceiptTarget,
   reference: string,
@@ -1125,7 +1253,16 @@ async function inspectEvmTarget(
   ) {
     throw new Error("EVM receipt inspector received a non-EVM action");
   }
-  if (!/^0x[0-9a-fA-F]{64}$/u.test(reference)) {
+  let transactionReference = reference;
+  if (target.action.kind === "external_handoff") {
+    const resolvedReference =
+      await resolvePolymarketRelayerFundingReference(reference);
+    if (resolvedReference.kind === "evidence") {
+      return resolvedReference.evidence;
+    }
+    transactionReference = resolvedReference.reference;
+  }
+  if (!/^0x[0-9a-fA-F]{64}$/u.test(transactionReference)) {
     return {
       status: "mismatch",
       actionMatch: false,
@@ -1156,12 +1293,12 @@ async function inspectEvmTarget(
     fetchEvmTransactionByHash({
       rpcUrl,
       timeoutMs,
-      transactionHash: reference,
+      transactionHash: transactionReference,
     }),
     fetchEvmTransactionReceipt({
       rpcUrl,
       timeoutMs,
-      transactionHash: reference,
+      transactionHash: transactionReference,
     }),
   ]);
   let receiptRecord: EvmReceiptRecord | null = null;
@@ -1203,12 +1340,16 @@ async function inspectEvmTarget(
       }
     : null;
   if (target.action.kind === "external_handoff") {
-    return evaluatePolymarketDepositWalletHandoffReceipt({
-      action: target.action,
-      actionValidationResult: target.actionValidationResult,
-      transaction: transactionRecord,
-      receipt: receiptRecord,
+    return bindPolymarketRelayerTransactionHash({
+      evaluated: evaluatePolymarketDepositWalletHandoffReceipt({
+        action: target.action,
+        actionValidationResult: target.actionValidationResult,
+        transaction: transactionRecord,
+        receipt: receiptRecord,
+        previous: target.previousReceipt,
+      }),
       previous: target.previousReceipt,
+      transactionHash: transactionReference,
     });
   }
   if (!expectedSignerAddress) {

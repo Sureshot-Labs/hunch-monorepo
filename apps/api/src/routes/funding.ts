@@ -37,6 +37,7 @@ import {
 } from "../funding/receive/receive-session-service.js";
 import type { FundingReceiveOptionsResponse } from "../funding/receive/receive-option-catalog.js";
 import { PreparationContractError } from "../funding/preparation/core-adapter.js";
+import type { FundingActionFailureCode } from "../funding/execution/action-report.js";
 import { WithdrawalDestinationError } from "../funding/execution/withdrawal-destination-runtime.js";
 import { cancelFundingOperationForUser } from "../funding/reconciliation/funding-operation-cancellation.js";
 import {
@@ -277,6 +278,7 @@ export type FundingRouteDependencies = Readonly<{
       attemptId: string;
       outcome: "submitted" | "ambiguous" | "failed" | "cancelled";
       transactionReference: string | null;
+      failureCode: FundingActionFailureCode | null;
       actualCosts: Readonly<{ networkFeeRaw: string | null }>;
     }>,
   ): Promise<
@@ -985,7 +987,11 @@ export function registerFundingRoutes(
           const reported = await dependencies.reportOperationAction(userId, {
             operationId: request.params.id,
             stepId: request.params.stepId,
-            ...request.body,
+            attemptId: request.body.attemptId,
+            outcome: request.body.outcome,
+            transactionReference: request.body.transactionReference,
+            failureCode: request.body.failureCode ?? null,
+            actualCosts: request.body.actualCosts,
           });
           return reply.send(
             fundingOperationActionReportResponseSchema.parse({

@@ -2,6 +2,11 @@ import { z } from "zod";
 
 import { FUNDING_REASON_CODES } from "../funding/domain/types.js";
 import {
+  FUNDING_ACTION_FAILURE_CODES,
+  isFundingActionFailureReportConsistent,
+  isUnreferencedFundingActionAmbiguity,
+} from "../funding/execution/action-report.js";
+import {
   assetLocationSchema,
   assetRefSchema,
   canonicalIdSchema,
@@ -1029,6 +1034,7 @@ export const fundingOperationActionReportRequestSchema = z
     attemptId: opaqueIdSchema,
     outcome: z.enum(["submitted", "ambiguous", "failed", "cancelled"]),
     transactionReference: z.string().trim().min(8).max(512).nullable(),
+    failureCode: z.enum(FUNDING_ACTION_FAILURE_CODES).nullable().optional(),
     actualCosts: z
       .object({
         networkFeeRaw: rawAmountSchema.nullable(),
@@ -1037,14 +1043,32 @@ export const fundingOperationActionReportRequestSchema = z
   })
   .strict()
   .superRefine((report, context) => {
+    const normalizedReport = {
+      ...report,
+      failureCode: report.failureCode ?? null,
+    };
     const mayHaveBroadcast =
       report.outcome === "submitted" || report.outcome === "ambiguous";
-    if (mayHaveBroadcast !== Boolean(report.transactionReference)) {
+    const unreferencedAmbiguity =
+      isUnreferencedFundingActionAmbiguity(normalizedReport);
+    if (
+      (mayHaveBroadcast &&
+        !report.transactionReference &&
+        !unreferencedAmbiguity) ||
+      (!mayHaveBroadcast && report.transactionReference)
+    ) {
       context.addIssue({
         code: "custom",
         path: ["transactionReference"],
         message:
-          "submitted or ambiguous report requires one transaction reference",
+          "broadcast reports require a transaction reference unless provider submission is explicitly unknown",
+      });
+    }
+    if (!isFundingActionFailureReportConsistent(normalizedReport)) {
+      context.addIssue({
+        code: "custom",
+        path: ["failureCode"],
+        message: "failure code contradicts the reported broadcast boundary",
       });
     }
   });

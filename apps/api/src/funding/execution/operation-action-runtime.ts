@@ -29,10 +29,19 @@ import {
   resolveActionSponsorship,
   type ResolvedActionSponsorship,
 } from "./sponsorship-policy.js";
-import { normalizePolymarketDepositWalletTransactionReference } from "./polymarket-deposit-wallet-handoff.js";
+import {
+  normalizePolymarketDepositWalletTransactionReference,
+  polymarketDepositWalletHandoffExpectation,
+} from "./polymarket-deposit-wallet-handoff.js";
 import { createFundingTransactionReferenceCodec } from "./transaction-reference-codec.js";
 import { WithdrawalDestinationRuntime } from "./withdrawal-destination-runtime.js";
 import { lockFundingControllerWallet } from "./funding-controller-wallet-lock.js";
+import {
+  isExternalHandoffFailureCode,
+  isFundingActionFailureReportConsistent,
+  isUnreferencedFundingActionAmbiguity,
+  type FundingActionFailureCode,
+} from "./action-report.js";
 
 const EXECUTOR_BY_ACTION_KIND = {
   evm_transaction: "wallet_profile_evm_v1",
@@ -356,6 +365,7 @@ export class FundingOperationActionRuntime {
       attemptId: string;
       outcome: FundingActionReportOutcome;
       transactionReference: string | null;
+      failureCode: FundingActionFailureCode | null;
       actualCosts: Readonly<{ networkFeeRaw: string | null }>;
     }>,
   ): Promise<
@@ -386,10 +396,34 @@ export class FundingOperationActionRuntime {
     }
     const mayHaveBroadcast =
       input.outcome === "submitted" || input.outcome === "ambiguous";
-    if (mayHaveBroadcast !== Boolean(input.transactionReference)) {
+    if (!isFundingActionFailureReportConsistent(input)) {
       throw new FundingPersistenceError(
         "quote_mismatch",
-        "possible broadcast requires exactly one transaction reference",
+        "funding action diagnostic contradicts its broadcast boundary",
+      );
+    }
+    if (
+      isExternalHandoffFailureCode(input.failureCode) &&
+      !polymarketDepositWalletHandoffExpectation(
+        action,
+        step.actionValidationResult,
+      )
+    ) {
+      throw new FundingPersistenceError(
+        "quote_mismatch",
+        "external handoff diagnostic requires the exact committed handoff action",
+      );
+    }
+    const unreferencedAmbiguity = isUnreferencedFundingActionAmbiguity(input);
+    if (
+      (mayHaveBroadcast &&
+        !input.transactionReference &&
+        !unreferencedAmbiguity) ||
+      (!mayHaveBroadcast && input.transactionReference)
+    ) {
+      throw new FundingPersistenceError(
+        "quote_mismatch",
+        "possible broadcast requires a transaction reference unless provider submission is explicitly unknown",
       );
     }
     const lookupKey = process.env.FUNDING_REFERENCE_LOOKUP_HMAC_KEY?.trim();
@@ -407,13 +441,18 @@ export class FundingOperationActionRuntime {
       lookupHmacKey: lookupKey,
       keyVersion,
     });
-    const reference = input.transactionReference
+    const normalizedReference = input.transactionReference
       ? normalizePolymarketDepositWalletTransactionReference(
           action,
           step.actionValidationResult,
           input.transactionReference,
         )
       : null;
+    const reference = normalizedReference?.reference ?? null;
+    const actualCosts = {
+      ...input.actualCosts,
+      ...(input.failureCode ? { reasonCode: input.failureCode } : {}),
+    };
     const finished = await finishFundingStepAttemptForUser(this.db, {
       userId,
       operationId: input.operationId,
@@ -421,15 +460,15 @@ export class FundingOperationActionRuntime {
       attemptId: input.attemptId,
       outcome: input.outcome,
       broadcastMayHaveOccurred: mayHaveBroadcast,
-      referenceKind: reference
+      referenceKind: normalizedReference
         ? action.kind === "svm_transaction"
           ? "signature"
-          : "transaction"
+          : normalizedReference.kind
         : null,
       receiptRefCiphertext: reference ? codec.encrypt(reference) : null,
       receiptRefLookupHmac: reference ? codec.fingerprint(reference) : null,
       lookupKeyVersion: reference ? codec.keyVersion : null,
-      actualCosts: input.actualCosts,
+      actualCosts,
     });
     return {
       accepted: true,

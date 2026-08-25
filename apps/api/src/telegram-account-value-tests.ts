@@ -294,16 +294,18 @@ await test("Telegram Account Value presenter preserves accounting groups and deg
   assert.match(rendered.text, /Known portfolio value.*\$64\\\.00/u);
   assert.match(rendered.text, /Polymarket.*\$9\\\.00 known routable/u);
   assert.match(rendered.text, /Limitless.*\$20\\\.00 known routable/u);
-  assert.match(rendered.text, /Base wallet.*20 USDC.*20 available/u);
+  assert.match(rendered.text, /Base wallet.*20 USDC/u);
+  assert.doesNotMatch(rendered.text, /Base wallet.*20 USDC.*20 available/u);
   assert.doesNotMatch(rendered.text, /Base wallet.*≈/u);
   assert.match(rendered.text, /Polygon wallet.*5 USDC\\\.e.*stale/u);
-  assert.match(rendered.text, /Solana wallet.*3 USDC.*3 available/u);
+  assert.match(rendered.text, /Solana wallet.*3 USDC/u);
+  assert.doesNotMatch(rendered.text, /Solana wallet.*3 USDC.*3 available/u);
   assert.match(rendered.text, /Polymarket pUSD.*2 locked.*1 reserved/u);
   assert.match(rendered.text, /In transit/u);
   assert.match(rendered.text, /Estimated value.*\$4\\\.00/u);
   assert.match(rendered.text, /Base USDC.*4.*stale/u);
   assert.match(rendered.text, /Partial and stale data/u);
-  assert.match(rendered.text, /Only currently known balances are shown/u);
+  assert.match(rendered.text, /Some available balances could not be verified/u);
   assert.match(rendered.text, /Some values are stale/u);
   assert.doesNotMatch(rendered.text, /secret-operation-id/u);
   assert.doesNotMatch(rendered.text, /wallet_balance_collection_failed/u);
@@ -495,7 +497,7 @@ await test("Telegram Account Value preserves degraded zero balances and position
 });
 
 await test("Telegram Account Value shows the existing SOL USD estimate", () => {
-  const account = buildAccountFixture();
+  const account = accountWithoutCollectorErrors();
   const pricedSol = component({
     assetId: "11111111111111111111111111111111",
     componentId: "priced-sol",
@@ -504,16 +506,66 @@ await test("Telegram Account Value shows the existing SOL USD estimate", () => {
     networkId: "solana:mainnet",
     raw: "52000000",
   });
+  const projection = projectAccountValue({
+    accountId: "user-1",
+    asOf: AS_OF,
+    components: [pricedSol],
+    headlineMode: "liquid_only",
+    positionComponents: [],
+  });
+  const cashAvailability = projectCashAvailability({
+    adjustments: [],
+    asOf: AS_OF,
+    components: [pricedSol],
+  });
   const rendered = buildTelegramAccountValueMessage({
     account: {
       ...account,
-      projection: {
-        ...account.projection,
-        components: [...account.projection.components, pricedSol],
-      },
+      cashAvailability,
+      headline: resolveEffectiveHeadline(projection),
+      projection,
     },
   });
   assert.match(rendered.text, /Solana wallet.*0\\\.052 SOL.*≈ \$5\\\.13/u);
+  assert.doesNotMatch(rendered.text, /0\\\.052 available/u);
+});
+
+await test("Telegram Account Value explains an unavailable SOL estimate precisely", () => {
+  const account = accountWithoutCollectorErrors();
+  const unpricedSol = component({
+    assetId: "11111111111111111111111111111111",
+    componentId: "unpriced-sol",
+    decimals: 9,
+    estimatedUsd: null,
+    networkId: "solana:mainnet",
+    raw: "30000000",
+    valuationEligibility: "unpriced",
+  });
+  const projection = projectAccountValue({
+    accountId: "user-1",
+    asOf: AS_OF,
+    components: [unpricedSol],
+    headlineMode: "liquid_only",
+    positionComponents: [],
+  });
+  const cashAvailability = projectCashAvailability({
+    adjustments: [],
+    asOf: AS_OF,
+    components: [unpricedSol],
+  });
+  const rendered = buildTelegramAccountValueMessage({
+    account: {
+      ...account,
+      cashAvailability,
+      headline: resolveEffectiveHeadline(projection),
+      projection,
+    },
+  });
+  assert.match(rendered.text, /Solana wallet.*0\\\.03 SOL/u);
+  assert.doesNotMatch(rendered.text, /0\\\.03 available/u);
+  assert.match(rendered.text, /Partial USD estimate/u);
+  assert.match(rendered.text, /SOL is shown without a current USD estimate/u);
+  assert.doesNotMatch(rendered.text, /Only currently known balances/u);
 });
 
 await test("Telegram Account Value does not add a zero SOL estimate", () => {

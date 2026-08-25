@@ -1697,6 +1697,7 @@ await test("operation action reports accept transaction references but no replac
       operationId: string;
       stepId: string;
       attemptId: string;
+      failureCode: string | null;
       outcome: string;
       transactionReference: string | null;
     }>
@@ -1722,6 +1723,64 @@ await test("operation action reports accept transaction references but no replac
     assert.equal(rejected.statusCode, 400);
     assert.equal(observed.length, 0);
 
+    const ambiguousWithoutReason = await app.inject({
+      method: "POST",
+      url: "/funding/operations/operation_id_12345678/actions/step_id_12345678/report",
+      payload: {
+        attemptId: "attempt_id_12345678",
+        outcome: "ambiguous",
+        transactionReference: null,
+        actualCosts: { networkFeeRaw: null },
+      },
+    });
+    assert.equal(ambiguousWithoutReason.statusCode, 400);
+    assert.equal(observed.length, 0);
+
+    const falseDefinitiveFailure = await app.inject({
+      method: "POST",
+      url: "/funding/operations/operation_id_12345678/actions/step_id_12345678/report",
+      payload: {
+        attemptId: "attempt_id_12345678",
+        outcome: "failed",
+        transactionReference: null,
+        failureCode: "external_handoff_submission_unknown",
+        actualCosts: { networkFeeRaw: null },
+      },
+    });
+    assert.equal(falseDefinitiveFailure.statusCode, 400);
+    assert.equal(observed.length, 0);
+
+    const failureWithReference = await app.inject({
+      method: "POST",
+      url: "/funding/operations/operation_id_12345678/actions/step_id_12345678/report",
+      payload: {
+        attemptId: "attempt_id_12345678",
+        outcome: "ambiguous",
+        transactionReference: `0x${"c".repeat(64)}`,
+        failureCode: "external_handoff_submission_unknown",
+        actualCosts: { networkFeeRaw: null },
+      },
+    });
+    assert.equal(failureWithReference.statusCode, 400);
+    assert.equal(observed.length, 0);
+
+    const acceptedUnknownSubmission = await app.inject({
+      method: "POST",
+      url: "/funding/operations/operation_id_12345678/actions/step_id_12345678/report",
+      payload: {
+        attemptId: "attempt_id_12345678",
+        outcome: "ambiguous",
+        transactionReference: null,
+        failureCode: "external_handoff_submission_unknown",
+        actualCosts: { networkFeeRaw: null },
+      },
+    });
+    assert.equal(acceptedUnknownSubmission.statusCode, 200);
+    assert.equal(
+      observed[0]?.failureCode,
+      "external_handoff_submission_unknown",
+    );
+
     const accepted = await app.inject({
       method: "POST",
       url: "/funding/operations/operation_id_12345678/actions/step_id_12345678/report",
@@ -1733,11 +1792,12 @@ await test("operation action reports accept transaction references but no replac
       },
     });
     assert.equal(accepted.statusCode, 200);
-    assert.equal(observed[0]?.userId, USER_ID);
-    assert.equal(observed[0]?.operationId, "operation_id_12345678");
-    assert.equal(observed[0]?.stepId, "step_id_12345678");
-    assert.equal(observed[0]?.attemptId, "attempt_id_12345678");
-    assert.equal(observed[0]?.outcome, "submitted");
+    assert.equal(observed[1]?.userId, USER_ID);
+    assert.equal(observed[1]?.operationId, "operation_id_12345678");
+    assert.equal(observed[1]?.stepId, "step_id_12345678");
+    assert.equal(observed[1]?.attemptId, "attempt_id_12345678");
+    assert.equal(observed[1]?.outcome, "submitted");
+    assert.equal(observed[1]?.failureCode, null);
   } finally {
     await app.close();
   }

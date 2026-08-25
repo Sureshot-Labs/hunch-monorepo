@@ -24,6 +24,7 @@ export const PYTH_SOL_USD_FEED_ID =
 const PYTH_SOL_USD_CACHE_TTL_MS = 20_000;
 const PYTH_SOL_USD_MAX_PUBLISH_AGE_MS = 60_000;
 const PYTH_SAFE_EXPONENT_ABS = 18;
+const PYTH_UNAVAILABLE_DIAGNOSTIC_THROTTLE_MS = 20_000;
 const receiverAccountCoder = new BorshAccountsCoder(PYTH_SOLANA_RECEIVER_IDL);
 
 type DecodedSolUsdPrice = Readonly<{
@@ -36,6 +37,48 @@ type PythSolUsdAccountLoader = () => Promise<Readonly<{
   data: Buffer;
   owner: string;
 }> | null>;
+
+export type PythSolUsdUnavailableCode =
+  | "account_unavailable"
+  | "confidence_too_wide"
+  | "feed_contract_changed"
+  | "price_invalid"
+  | "price_stale"
+  | "rpc_unavailable"
+  | "unexpected";
+
+function pythUnavailableCode(error: unknown): PythSolUsdUnavailableCode {
+  const message = error instanceof Error ? error.message.toLowerCase() : "";
+  if (message.includes("account is unavailable")) return "account_unavailable";
+  if (message.includes("confidence is too wide")) return "confidence_too_wide";
+  if (
+    message.includes("owner changed") ||
+    message.includes("feed id changed") ||
+    message.includes("write authority changed") ||
+    message.includes("layout is invalid") ||
+    message.includes("not fully verified")
+  ) {
+    return "feed_contract_changed";
+  }
+  if (message.includes("stale or from the future")) return "price_stale";
+  if (
+    message.includes("price is not positive") ||
+    message.includes("exponent") ||
+    message.includes("confidence is not positive") ||
+    message.includes("publish time")
+  ) {
+    return "price_invalid";
+  }
+  if (
+    message.includes("rpc") ||
+    message.includes("fetch") ||
+    message.includes("timeout") ||
+    message.includes("network")
+  ) {
+    return "rpc_unavailable";
+  }
+  return "unexpected";
+}
 
 function bigintField(value: unknown, field: string): bigint {
   if (typeof value !== "object" || value === null || !("toString" in value)) {
@@ -155,12 +198,24 @@ export class PythSolUsdPriceAdapter implements PriceAdapter {
   readonly #cacheKey: string;
   readonly #loadAccount: PythSolUsdAccountLoader;
   readonly #now: () => Date;
+  readonly #onUnavailable:
+    | ((input: Readonly<{ code: PythSolUsdUnavailableCode }>) => void)
+    | undefined;
+  #lastUnavailableNotice: Readonly<{
+    atMs: number;
+    code: PythSolUsdUnavailableCode;
+  }> | null = null;
 
   constructor(
     input?: Readonly<{
       cacheKey?: string;
       loadAccount?: PythSolUsdAccountLoader;
       now?: () => Date;
+      onUnavailable?: (
+        input: Readonly<{
+          code: PythSolUsdUnavailableCode;
+        }>,
+      ) => void;
     }>,
   ) {
     this.#cacheKey = input?.cacheKey ?? "pyth:sol-usd:v1";
@@ -173,6 +228,7 @@ export class PythSolUsdPriceAdapter implements PriceAdapter {
           address: PYTH_SOL_USD_ACCOUNT,
         }));
     this.#now = input?.now ?? (() => new Date());
+    this.#onUnavailable = input?.onUnavailable;
   }
 
   async value(
@@ -215,9 +271,26 @@ export class PythSolUsdPriceAdapter implements PriceAdapter {
         confidence: price.confidence,
         policyId: input.policyId,
       };
-    } catch {
+    } catch (error) {
       // Valuation is optional. A Pyth/RPC failure must not hide the owned SOL
       // balance or make Account Value unavailable.
+      const code = pythUnavailableCode(error);
+      const nowMs = this.#now().getTime();
+      const prior = this.#lastUnavailableNotice;
+      if (
+        this.#onUnavailable &&
+        Number.isFinite(nowMs) &&
+        (prior == null ||
+          prior.code !== code ||
+          nowMs - prior.atMs >= PYTH_UNAVAILABLE_DIAGNOSTIC_THROTTLE_MS)
+      ) {
+        this.#lastUnavailableNotice = { atMs: nowMs, code };
+        try {
+          this.#onUnavailable({ code });
+        } catch {
+          // Diagnostics must never become a valuation dependency.
+        }
+      }
       return null;
     }
   }
