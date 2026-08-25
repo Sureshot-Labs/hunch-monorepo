@@ -94,7 +94,13 @@ const step = (
     | "recovery_required"
     | "failed"
     | "cancelled",
-) => ({ id, segment_id: segmentId, state, action_validation_result: {} });
+) => ({
+  id,
+  segment_id: segmentId,
+  state,
+  executor_id: "wallet_profile_evm_v1",
+  action_validation_result: {},
+});
 const destinationObservation = (
   segmentId: string | null,
   rawAmount: string,
@@ -299,6 +305,7 @@ assert.deepEqual(
     [
       {
         ...step("00000000-0000-4000-8000-000000000051", null, "succeeded"),
+        executor_id: "telegram_relay_evm_funding_v1",
         action_validation_result: {
           relayStepKind: "deposit",
           relayAllowanceMode: "preexisting",
@@ -308,6 +315,41 @@ assert.deepEqual(
   ).target,
   { status: "ready", stage: "ready_for_consumer" },
   "a canonical deposit-only Relay source debit is sufficient for a preexisting allowance route",
+);
+
+const clientAtomicRelayOperation = {
+  ...operation,
+  planKind: "wallet_route" as const,
+  supportMetadata: { routeId: "polygon-pusd-to-base-usdc" },
+};
+const clientAtomicRelayDestination = {
+  ...destinationObservation(segments[0].id, "10000000", "52"),
+  operationId: clientAtomicRelayOperation.id,
+};
+assert.deepEqual(
+  deriveTargetState(
+    clientAtomicRelayOperation,
+    [clientAtomicRelayDestination],
+    [{ ...segments[0], status: "succeeded" as const }],
+    [
+      {
+        ...step(
+          "00000000-0000-4000-8000-000000000052",
+          segments[0].id,
+          "succeeded",
+        ),
+        action_validation_result: {
+          relayStepKind: "deposit",
+          sourceActionValidations: [
+            { actionId: "relay:quote:approve" },
+            { actionId: "relay:quote:deposit" },
+          ],
+        },
+      },
+    ],
+  ).target,
+  { status: "ready", stage: "ready_for_consumer" },
+  "a client-signed atomic approve/deposit Relay step is not gated by delegated allowance shape",
 );
 
 console.log(

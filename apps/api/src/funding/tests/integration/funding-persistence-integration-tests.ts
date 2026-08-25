@@ -852,6 +852,10 @@ async function testAutomaticRecoveryAcceptsLateDestinationEvidence(): Promise<vo
         venueBindingOptionId: opaque("recovery-binding"),
       },
       supportMetadata: {
+        // Relay route IDs are shared by client-signed and delegated plans.
+        // This fixture deliberately keeps the synthetic client executor so
+        // late destination evidence must recover without delegated gating.
+        routeId: "polygon-pusd-to-base-usdc",
         destinationObservation: {
           observerId: "relay_owned_destination_observation_v1",
           locationId: destinationLocationId,
