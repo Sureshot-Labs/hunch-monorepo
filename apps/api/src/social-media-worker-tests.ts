@@ -21,6 +21,7 @@ import {
   editorialMediaChildProcessEnv,
   editorialMediaSectionScrollTop,
   editorialMediaScrollPosition,
+  startEditorialMediaFfmpeg,
   X_EDITORIAL_MEDIA_PROFILE_SPECS,
   X_EDITORIAL_MEDIA_TIMELINE,
 } from "./services/x-editorial-media-renderer.js";
@@ -157,6 +158,13 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         profiles: ["desktop", "mobile"],
         url: "http://localhost:3000/tracking/wallet/0x123?chain=polygon",
       });
+      assert.equal(
+        parseXEditorialMediaPreviewOptions([
+          "--url",
+          "http://localhost:3000/tracking/wallet/0x123?chain=polygon",
+        ]).fps,
+        15,
+      );
     },
   },
   {
@@ -195,9 +203,9 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     run: () => {
       const config = parseSocialMediaWorkerConfig({});
       assert.equal(config.enabled, true);
-      assert.equal(config.fps, 30);
+      assert.equal(config.fps, 15);
       assert.equal(config.leaseMs, 600_000);
-      assert.equal(config.jobTimeoutMs, 300_000);
+      assert.equal(config.jobTimeoutMs, 900_000);
       assert.equal(config.maxVideoBytes, 45 * 1024 * 1024);
       assert.equal(
         parseSocialMediaWorkerConfig({
@@ -216,6 +224,12 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           HUNCH_SOCIAL_MEDIA_LEASE_SEC: "2",
         }).leaseMs,
         180_000,
+      );
+      assert.equal(
+        parseSocialMediaWorkerConfig({
+          HUNCH_SOCIAL_MEDIA_JOB_TIMEOUT_SEC: "7200",
+        }).jobTimeoutMs,
+        3_600_000,
       );
       assert.deepEqual(config.allowedOrigins, ["https://app.hunch.trade"]);
       assert.deepEqual(
@@ -238,6 +252,32 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         X_EDITORIAL_MEDIA_TIMELINE.mobile.sheetScrollEndSec <
           X_EDITORIAL_MEDIA_PROFILE_SPECS.mobile.durationSec,
       );
+    },
+  },
+  {
+    name: "aborting FFmpeg cannot create an unhandled Promise rejection",
+    run: async () => {
+      const controller = new AbortController();
+      const unhandled: unknown[] = [];
+      const onUnhandled = (reason: unknown) => unhandled.push(reason);
+      process.on("unhandledRejection", onUnhandled);
+      try {
+        const { completion } = startEditorialMediaFfmpeg({
+          childProcessEnv: editorialMediaChildProcessEnv(),
+          ffmpegPath: process.execPath,
+          fps: 15,
+          outputPath: "/tmp/hunch-unused-ffmpeg-output.mp4",
+          signal: controller.signal,
+          spec: X_EDITORIAL_MEDIA_PROFILE_SPECS.mobile,
+        });
+        controller.abort(new Error("Editorial media job timed out"));
+        await new Promise<void>((resolve) => setTimeout(resolve, 50));
+        const completionError = await completion;
+        assert.ok(completionError instanceof Error);
+        assert.deepEqual(unhandled, []);
+      } finally {
+        process.off("unhandledRejection", onUnhandled);
+      }
     },
   },
   {
