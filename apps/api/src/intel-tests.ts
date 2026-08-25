@@ -58,6 +58,7 @@ import {
   resolveWalletSecondaryLabels,
   resolveWalletPositionHistoryInitialSeed,
   expandWalletPositionHistorySeed,
+  runWalletPositionHistorySingleflight,
   resolveWalletHeadlineTag,
   resolveWalletTopLabelVariant,
   signalItemToTopChange,
@@ -4200,6 +4201,76 @@ const tests: TestCase[] = [
         17_984,
       );
       assert.equal(expandWalletPositionHistorySeed(5_000), 20_000);
+    },
+  },
+  {
+    name: "wallet position history fetches metadata only after terminal-row selection",
+    run: () => {
+      const routeSource = readFileSync(
+        new URL("./routes/wallet-intel.ts", import.meta.url),
+        "utf8",
+      );
+      const historyRouteStart = routeSource.indexOf(
+        '"/wallets/positions/history"',
+      );
+      assert.ok(historyRouteStart >= 0);
+      const historyRouteSource = routeSource.slice(historyRouteStart);
+      const seedRowsStart = historyRouteSource.indexOf(
+        "with seed_rows as materialized (",
+      );
+      const seedRowsEnd = historyRouteSource.indexOf(
+        "seed_market_ids as materialized (",
+        seedRowsStart,
+      );
+      assert.ok(seedRowsStart >= 0);
+      assert.ok(seedRowsEnd > seedRowsStart);
+      const seedRowsSource = historyRouteSource.slice(
+        seedRowsStart,
+        seedRowsEnd,
+      );
+
+      assert.doesNotMatch(seedRowsSource, /ws\.metadata/);
+      assert.match(historyRouteSource, /snapshot_payload\.metadata/);
+      assert.match(
+        historyRouteSource,
+        /snapshot_payload\.snapshot_at = tr\.snapshot_at/,
+      );
+    },
+  },
+  {
+    name: "wallet position history coalesces identical in-flight loads",
+    run: async () => {
+      let calls = 0;
+      let release!: (value: string) => void;
+      const key = `intel-test:${Date.now()}:${Math.random()}`;
+      const first = runWalletPositionHistorySingleflight(key, async () => {
+        calls += 1;
+        return new Promise<string>((resolve) => {
+          release = resolve;
+        });
+      });
+      const second = runWalletPositionHistorySingleflight(key, async () => {
+        calls += 1;
+        return "unexpected";
+      });
+
+      await Promise.resolve();
+      assert.equal(calls, 1);
+      release("shared");
+
+      const [firstResult, secondResult] = await Promise.all([first, second]);
+      assert.deepEqual(firstResult, { joined: false, value: "shared" });
+      assert.deepEqual(secondResult, { joined: true, value: "shared" });
+
+      const afterCompletion = await runWalletPositionHistorySingleflight(
+        key,
+        async () => {
+          calls += 1;
+          return "fresh";
+        },
+      );
+      assert.deepEqual(afterCompletion, { joined: false, value: "fresh" });
+      assert.equal(calls, 2);
     },
   },
   {

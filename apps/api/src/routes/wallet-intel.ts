@@ -8,6 +8,7 @@ import { createHash } from "node:crypto";
 import { createAuthMiddleware } from "../auth.js";
 import { pool } from "../db.js";
 import { env } from "../env.js";
+import { isPgStatementTimeoutError } from "../lib/postgres-errors.js";
 import { isRecord } from "../lib/type-guards.js";
 import {
   collectMarketRefreshMarketIdsFromPayload,
@@ -4052,6 +4053,39 @@ type WalletIntelLocalCacheEntry = {
 const walletIntelLocalCache = new Map<string, WalletIntelLocalCacheEntry>();
 let walletIntelLocalCachePruneAt = 0;
 
+type WalletPositionHistorySingleflightResult<T> = {
+  joined: boolean;
+  value: T;
+};
+
+const walletPositionHistoryInflight = new Map<string, Promise<unknown>>();
+
+export async function runWalletPositionHistorySingleflight<T>(
+  cacheKey: string,
+  task: () => Promise<T>,
+): Promise<WalletPositionHistorySingleflightResult<T>> {
+  const inflight = walletPositionHistoryInflight.get(cacheKey);
+  if (inflight) {
+    return {
+      joined: true,
+      value: await (inflight as Promise<T>),
+    };
+  }
+
+  const pending = Promise.resolve().then(task);
+  walletPositionHistoryInflight.set(cacheKey, pending);
+  try {
+    return {
+      joined: false,
+      value: await pending,
+    };
+  } finally {
+    if (walletPositionHistoryInflight.get(cacheKey) === pending) {
+      walletPositionHistoryInflight.delete(cacheKey);
+    }
+  }
+}
+
 function pruneWalletIntelLocalCache(now = Date.now()) {
   if (walletIntelLocalCachePruneAt > now) return;
   walletIntelLocalCachePruneAt = now + 30_000;
@@ -4938,12 +4972,14 @@ async function withWalletIntelQuerySettings<T>(
   options: {
     workMem?: string | null;
     disableJit?: boolean;
+    statementTimeoutMs?: number | null;
   },
   task: () => Promise<T>,
 ): Promise<T> {
   const workMem = options.workMem ?? null;
   const disableJit = options.disableJit ?? true;
-  if (!workMem && !disableJit) {
+  const statementTimeoutMs = options.statementTimeoutMs ?? null;
+  if (!workMem && !disableJit && !statementTimeoutMs) {
     return task();
   }
 
@@ -4957,6 +4993,19 @@ async function withWalletIntelQuerySettings<T>(
         throw new Error(`Unsafe local work_mem value: ${workMem}`);
       }
       await client.query(`SET LOCAL work_mem = '${workMem}'`);
+    }
+    if (statementTimeoutMs) {
+      if (
+        !Number.isSafeInteger(statementTimeoutMs) ||
+        statementTimeoutMs <= 0
+      ) {
+        throw new Error(
+          `Unsafe local statement_timeout value: ${statementTimeoutMs}`,
+        );
+      }
+      await client.query("select set_config('statement_timeout', $1, true)", [
+        `${statementTimeoutMs}ms`,
+      ]);
     }
     const result = await task();
     await client.query("COMMIT");
@@ -4991,6 +5040,11 @@ export const walletPositionRouteQuerySettings = {
   disableJit: true,
 } as const;
 
+const walletPositionHistoryRouteQuerySettings = {
+  ...walletPositionRouteQuerySettings,
+  statementTimeoutMs: env.walletPositionHistoryStatementTimeoutMs,
+} as const;
+
 type WalletIntelCacheStatusResult = Awaited<ReturnType<typeof getRedisStatus>>;
 
 async function resolveWalletIntelCacheContext(
@@ -5005,7 +5059,7 @@ async function resolveWalletIntelCacheContext(
 function applyWalletIntelCacheHeaders(input: {
   reply: FastifyReply;
   hit: boolean;
-  layer?: WalletIntelCacheLayer | "none";
+  layer?: WalletIntelCacheLayer | "none" | "singleflight";
   cacheStatus: WalletIntelCacheStatusResult["status"];
 }) {
   input.reply.header("x-cache", input.hit ? "hit" : "miss");
@@ -12007,7 +12061,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           })();
       const historyHiddenPositionSuppressionSql =
         buildHiddenOwnPositionSnapshotSuppressionSql({
-          snapshotAlias: "tr",
+          snapshotAlias: "snapshot_payload",
           walletAlias: "w",
         });
 
@@ -12056,25 +12110,40 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
       const targetRowCount = query.limit + query.offset + 1;
       const initialSeed = resolveWalletPositionHistoryInitialSeed(query);
 
-      const client = await pool.connect();
       try {
-        const payload = await withWalletIntelQuerySettings(
-          client,
-          walletPositionRouteQuerySettings,
-          async () => {
-            let seedLimit = initialSeed;
-            let selectedRows: WalletPositionRouteRow[] = [];
+        const { joined, value: body } =
+          await runWalletPositionHistorySingleflight(cacheKey, async () => {
+            const startedAt = Date.now();
+            const attempts: Array<{
+              boundaryMs: number;
+              historyExhausted: boolean;
+              iteration: number;
+              queryMs: number;
+              seedLimit: number;
+              selectedRows: number;
+            }> = [];
+            const client = await pool.connect();
+            try {
+              const payload = await withWalletIntelQuerySettings(
+                client,
+                walletPositionHistoryRouteQuerySettings,
+                async () => {
+                  let seedLimit = initialSeed;
+                  let selectedRows: WalletPositionRouteRow[] = [];
+                  let iteration = 0;
 
-            for (;;) {
-              const seedBoundaryParams: PgParams = [
-                ...historyScopeValues,
-                seedLimit - 1,
-              ];
-              const seedOffsetParam = seedBoundaryParams.length;
-              const seedBoundaryResult = await client.query<{
-                snapshot_at: Date;
-              }>(
-                `
+                  for (;;) {
+                    iteration += 1;
+                    const seedBoundaryParams: PgParams = [
+                      ...historyScopeValues,
+                      seedLimit - 1,
+                    ];
+                    const seedOffsetParam = seedBoundaryParams.length;
+                    const boundaryStartedAt = Date.now();
+                    const seedBoundaryResult = await client.query<{
+                      snapshot_at: Date;
+                    }>(
+                      `
                   select ws.snapshot_at
                   from wallet_position_snapshots ws
                   where ${seedHistoryWhere}
@@ -12083,25 +12152,28 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                   limit 1
                   offset $${seedOffsetParam}::integer
                 `,
-                seedBoundaryParams,
-              );
-              const seedBoundary =
-                seedBoundaryResult.rows[0]?.snapshot_at ?? null;
-              const historyExhausted = seedBoundary == null;
-              const attemptParams: PgParams = [
-                ...params,
-                seedBoundary,
-                targetRowCount,
-              ];
-              const seedBoundaryParam = idx;
-              const targetParam = idx + 1;
-              const rows = await client.query<WalletPositionRouteRow>(
-                `
+                      seedBoundaryParams,
+                    );
+                    const boundaryMs = Date.now() - boundaryStartedAt;
+                    const seedBoundary =
+                      seedBoundaryResult.rows[0]?.snapshot_at ?? null;
+                    const historyExhausted = seedBoundary == null;
+                    const attemptParams: PgParams = [
+                      ...params,
+                      seedBoundary,
+                      targetRowCount,
+                    ];
+                    const seedBoundaryParam = idx;
+                    const targetParam = idx + 1;
+                    const queryStartedAt = Date.now();
+                    const rows = await client.query<WalletPositionRouteRow>(
+                      `
             with seed_rows as materialized (
               select
                 ws.wallet_id,
                 ws.venue,
                 ws.market_id,
+                ws.outcome_side as stored_outcome_side,
                 case
                   when ws.outcome_side in ('YES', 'NO')
                     then ws.outcome_side
@@ -12110,8 +12182,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                 ws.shares,
                 ws.size_usd,
                 ws.price,
-                ws.snapshot_at,
-                ws.metadata
+                ws.snapshot_at
               from wallet_position_snapshots ws
               where ${historyWhere}
                 and ${buildPositiveWalletPositionSnapshotSql("ws")}
@@ -12201,8 +12272,14 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               tr.size_usd,
               tr.price,
               tr.snapshot_at,
-              tr.metadata
+              snapshot_payload.metadata
             from terminal_rows tr
+            join wallet_position_snapshots snapshot_payload
+              on snapshot_payload.wallet_id = tr.wallet_id
+             and snapshot_payload.venue = tr.venue
+             and snapshot_payload.market_id = tr.market_id
+             and snapshot_payload.outcome_side = tr.stored_outcome_side
+             and snapshot_payload.snapshot_at = tr.snapshot_at
             join wallets w on w.id = tr.wallet_id
             left join wallet_user_labels wl
               on wl.wallet_id = w.id
@@ -12221,56 +12298,106 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               coalesce(um.title, tr.market_id) asc
             limit $${targetParam}::integer
           `,
-                attemptParams,
+                      attemptParams,
+                    );
+                    const queryMs = Date.now() - queryStartedAt;
+
+                    selectedRows = rows.rows;
+                    attempts.push({
+                      boundaryMs,
+                      historyExhausted,
+                      iteration,
+                      queryMs,
+                      seedLimit,
+                      selectedRows: selectedRows.length,
+                    });
+                    if (
+                      selectedRows.length >= targetRowCount ||
+                      historyExhausted
+                    ) {
+                      break;
+                    }
+                    seedLimit = expandWalletPositionHistorySeed(seedLimit);
+                  }
+
+                  const offsetRows = selectedRows.slice(query.offset);
+                  const hasMore = offsetRows.length > query.limit;
+                  const pageRows = hasMore
+                    ? offsetRows.slice(0, query.limit)
+                    : offsetRows;
+                  const items = await buildWalletPositionRouteItems(
+                    client,
+                    pageRows,
+                  );
+
+                  return {
+                    ok: true,
+                    items,
+                    hasMore,
+                  };
+                },
               );
-
-              selectedRows = rows.rows;
-              if (selectedRows.length >= targetRowCount || historyExhausted) {
-                break;
+              const body = JSON.stringify(payload);
+              if (cacheTtlSec > 0) {
+                await writeWalletIntelCachedBody(
+                  cacheClient,
+                  cacheKey,
+                  body,
+                  cacheTtlSec,
+                );
               }
-              seedLimit = expandWalletPositionHistorySeed(seedLimit);
+              request.log.info(
+                {
+                  attempts,
+                  durationMs: Date.now() - startedAt,
+                  initialSeed,
+                  targetRowCount,
+                  walletId: query.walletId,
+                },
+                "Loaded wallet position history",
+              );
+              return body;
+            } catch (error) {
+              const context = {
+                attempts,
+                durationMs: Date.now() - startedAt,
+                error,
+                initialSeed,
+                query,
+                targetRowCount,
+                userId,
+              };
+              if (isPgStatementTimeoutError(error)) {
+                request.log.warn(
+                  context,
+                  "Wallet position history query timed out",
+                );
+              } else {
+                request.log.error(
+                  context,
+                  "Failed to load wallet position history",
+                );
+              }
+              throw error;
+            } finally {
+              client.release();
             }
-
-            const offsetRows = selectedRows.slice(query.offset);
-            const hasMore = offsetRows.length > query.limit;
-            const pageRows = hasMore
-              ? offsetRows.slice(0, query.limit)
-              : offsetRows;
-            const items = await buildWalletPositionRouteItems(client, pageRows);
-
-            return {
-              ok: true,
-              items,
-              hasMore,
-            };
-          },
-        );
-        const body = JSON.stringify(payload);
-        if (cacheTtlSec > 0) {
-          await writeWalletIntelCachedBody(
-            cacheClient,
-            cacheKey,
-            body,
-            cacheTtlSec,
-          );
-        }
+          });
         applyWalletIntelCacheHeaders({
           reply,
           hit: false,
-          layer: "none",
+          layer: joined ? "singleflight" : "none",
           cacheStatus: cacheContext.status,
         });
         reply.header("Content-Type", "application/json; charset=utf-8");
         return reply.send(body);
       } catch (error) {
-        app.log.error(
-          { error, userId, query },
-          "Failed to load wallet position history",
-        );
+        if (isPgStatementTimeoutError(error)) {
+          reply.code(504);
+          return reply.send({ error: "Wallet position history timed out" });
+        }
         reply.code(500);
         return reply.send({ error: "Failed to load wallet position history" });
-      } finally {
-        client.release();
       }
     },
   );
