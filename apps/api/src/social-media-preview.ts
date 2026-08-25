@@ -7,7 +7,12 @@ import { pathToFileURL } from "node:url";
 
 import { hasCliFlag, readCliValues } from "./lib/cli-args.js";
 import type { XEditorialMediaProfile } from "./services/signal-bot-editorial-media-jobs.js";
-import { renderXEditorialMedia } from "./services/x-editorial-media-renderer.js";
+import {
+  renderXEditorialMedia,
+  X_EDITORIAL_MEDIA_DEFAULT_FPS,
+  X_EDITORIAL_MEDIA_MAX_FPS,
+  X_EDITORIAL_MEDIA_MIN_FPS,
+} from "./services/x-editorial-media-renderer.js";
 
 const DEFAULT_PROFILES: XEditorialMediaProfile[] = ["mobile", "desktop"];
 
@@ -24,7 +29,7 @@ const USAGE = `Usage:
 Options:
   --profiles mobile,desktop  Profiles to render (default: mobile,desktop)
   --output <directory>       Root for a unique preview directory (default: OS temp)
-  --fps <12-30>              Frames per second (default: 30)
+  --fps <${X_EDITORIAL_MEDIA_MIN_FPS}-${X_EDITORIAL_MEDIA_MAX_FPS}>              Frames per second (default: ${X_EDITORIAL_MEDIA_DEFAULT_FPS})
   --help                     Show this help
 
 Optional environment:
@@ -84,10 +89,16 @@ function parseProfiles(argv: string[]): XEditorialMediaProfile[] {
 
 function parseFps(argv: string[]): number {
   const raw = readSingleValue(argv, "fps");
-  if (!raw) return 30;
+  if (!raw) return X_EDITORIAL_MEDIA_DEFAULT_FPS;
   const fps = Number(raw);
-  if (!Number.isSafeInteger(fps) || fps < 12 || fps > 30) {
-    throw new Error("--fps must be an integer from 12 through 30");
+  if (
+    !Number.isSafeInteger(fps) ||
+    fps < X_EDITORIAL_MEDIA_MIN_FPS ||
+    fps > X_EDITORIAL_MEDIA_MAX_FPS
+  ) {
+    throw new Error(
+      `--fps must be an integer from ${X_EDITORIAL_MEDIA_MIN_FPS} through ${X_EDITORIAL_MEDIA_MAX_FPS}`,
+    );
   }
   return fps;
 }

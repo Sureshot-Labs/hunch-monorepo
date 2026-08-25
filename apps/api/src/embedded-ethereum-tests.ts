@@ -38,6 +38,8 @@ const walletContext: EmbeddedEthereumWalletContext = {
 const denyDynamicDependencies: EmbeddedEvmSponsorshipDependencies = {
   isAuthorizedDestination: async () => false,
   isKnownLimitlessMarket: async () => false,
+  isKnownLimitlessNegRiskAdapter: async () => false,
+  isKnownLimitlessNegRiskRedemption: async () => false,
   isSupportedBridgeToken: async () => false,
   matchesBridgeOrder: async () => false,
   matchesFundingAction: async () => false,
@@ -465,6 +467,107 @@ const tests: TestCase[] = [
           }),
         /not an allowed Hunch operation/,
       );
+    },
+  },
+  {
+    name: "Limitless neg-risk redemption requires the exact adapter and condition",
+    run: async () => {
+      const adapter = "0x3333333333333333333333333333333333333333";
+      const conditionId = `0x${"ab".repeat(32)}`;
+      const approvalData = new ethers.Interface([
+        "function setApprovalForAll(address operator,bool approved)",
+      ]).encodeFunctionData("setApprovalForAll", [adapter, true]);
+      const data = new ethers.Interface([
+        "function redeemPositions(bytes32 conditionId,uint256[] amounts)",
+      ]).encodeFunctionData("redeemPositions", [conditionId, [6_305_257n, 0n]]);
+      const allowedDependencies: EmbeddedEvmSponsorshipDependencies = {
+        ...denyDynamicDependencies,
+        isKnownLimitlessNegRiskAdapter: async (candidateAdapter) =>
+          candidateAdapter.toLowerCase() === adapter.toLowerCase(),
+        isKnownLimitlessNegRiskRedemption: async (
+          candidateAdapter,
+          candidateConditionId,
+        ) =>
+          candidateAdapter.toLowerCase() === adapter.toLowerCase() &&
+          candidateConditionId.toLowerCase() === conditionId.toLowerCase(),
+      };
+
+      await assert.doesNotReject(() =>
+        assertEmbeddedEvmSponsorshipAllowed({
+          userId: TEST_USER_ID,
+          signer: walletContext.signer,
+          chainId: 8453,
+          transactions: [
+            {
+              id: "approve-limitless-neg-risk-redemption",
+              label: "Approve Limitless redemption",
+              to: env.limitlessConditionalTokensAddress,
+              data: approvalData,
+            },
+            {
+              id: "limitless-neg-risk-redeem",
+              label: "Limitless redemption",
+              to: adapter,
+              data,
+            },
+          ],
+          dependencies: allowedDependencies,
+        }),
+      );
+      await assert.rejects(
+        () =>
+          assertEmbeddedEvmSponsorshipAllowed({
+            userId: TEST_USER_ID,
+            signer: walletContext.signer,
+            chainId: 8453,
+            transactions: [
+              {
+                id: "approve-unknown-limitless-neg-risk-redemption",
+                label: "Approve Limitless redemption",
+                to: env.limitlessConditionalTokensAddress,
+                data: new ethers.Interface([
+                  "function setApprovalForAll(address operator,bool approved)",
+                ]).encodeFunctionData("setApprovalForAll", [
+                  "0x4444444444444444444444444444444444444444",
+                  true,
+                ]),
+              },
+            ],
+            dependencies: allowedDependencies,
+          }),
+        /not an allowed Hunch operation/,
+      );
+      for (const transaction of [
+        {
+          id: "limitless-neg-risk-redeem-wrong-adapter",
+          label: "Limitless redemption",
+          to: "0x4444444444444444444444444444444444444444",
+          data,
+        },
+        {
+          id: "limitless-neg-risk-redeem-wrong-condition",
+          label: "Limitless redemption",
+          to: adapter,
+          data: new ethers.Interface([
+            "function redeemPositions(bytes32 conditionId,uint256[] amounts)",
+          ]).encodeFunctionData("redeemPositions", [
+            `0x${"cd".repeat(32)}`,
+            [6_305_257n, 0n],
+          ]),
+        },
+      ]) {
+        await assert.rejects(
+          () =>
+            assertEmbeddedEvmSponsorshipAllowed({
+              userId: TEST_USER_ID,
+              signer: walletContext.signer,
+              chainId: 8453,
+              transactions: [transaction],
+              dependencies: allowedDependencies,
+            }),
+          /not an allowed Hunch operation/,
+        );
+      }
     },
   },
   {

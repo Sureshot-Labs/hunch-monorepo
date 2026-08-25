@@ -2525,7 +2525,7 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
       } catch (error) {
         app.log.error(
           {
-            error,
+            err: error,
             userId: user.id,
             signer: normalizeEvmAddress(signer),
           },
@@ -2621,7 +2621,7 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
       } catch (error) {
         app.log.error(
           {
-            error,
+            err: error,
             userId: user.id,
             signer: normalizeEvmAddress(signer),
           },

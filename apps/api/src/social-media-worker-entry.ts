@@ -25,6 +25,8 @@ import type { SignalBotTelegramClient } from "./services/signal-bot-contracts.js
 import {
   renderXEditorialMedia,
   type RenderedXEditorialMedia,
+  X_EDITORIAL_MEDIA_DEFAULT_FPS,
+  X_EDITORIAL_MEDIA_MAX_FPS,
 } from "./services/x-editorial-media-renderer.js";
 
 type SocialMediaWorkerConfig = {
@@ -110,9 +112,14 @@ export function parseSocialMediaWorkerConfig(
     enabled: parseBoolean(env.HUNCH_SOCIAL_MEDIA_WORKER_ENABLED, true),
     ffmpegPath: env.HUNCH_SOCIAL_MEDIA_FFMPEG_PATH?.trim() || "ffmpeg",
     ffprobePath: env.HUNCH_SOCIAL_MEDIA_FFPROBE_PATH?.trim() || "ffprobe",
-    fps: positiveInt(env.HUNCH_SOCIAL_MEDIA_FPS, 30, 30),
+    fps: positiveInt(
+      env.HUNCH_SOCIAL_MEDIA_FPS,
+      X_EDITORIAL_MEDIA_DEFAULT_FPS,
+      X_EDITORIAL_MEDIA_MAX_FPS,
+    ),
     jobTimeoutMs:
-      boundedInt(env.HUNCH_SOCIAL_MEDIA_JOB_TIMEOUT_SEC, 300, 60, 900) * 1_000,
+      boundedInt(env.HUNCH_SOCIAL_MEDIA_JOB_TIMEOUT_SEC, 900, 60, 3_600) *
+      1_000,
     leaseMs:
       boundedInt(env.HUNCH_SOCIAL_MEDIA_LEASE_SEC, 600, 180, 3_600) * 1_000,
     maxVideoBytes:
@@ -161,6 +168,13 @@ class LeaseLostError extends Error {
   constructor() {
     super("The editorial media job lease is no longer owned by this worker");
     this.name = "LeaseLostError";
+  }
+}
+
+class EditorialMediaJobTimeoutError extends Error {
+  constructor() {
+    super("Editorial media job timed out");
+    this.name = "EditorialMediaJobTimeoutError";
   }
 }
 
@@ -566,17 +580,39 @@ export async function processXEditorialMediaJob(input: {
     temporaryDirectory = await mkdtemp(
       path.join(tmpdir(), "hunch-social-media-"),
     );
-    const render = await renderXEditorialMedia({
-      browserExecutablePath: input.browserExecutablePath,
-      ffmpegPath: input.ffmpegPath,
-      ffprobePath: input.ffprobePath,
+    const renderStartedAt = Date.now();
+    let render: Awaited<ReturnType<typeof renderXEditorialMedia>>;
+    try {
+      render = await renderXEditorialMedia({
+        browserExecutablePath: input.browserExecutablePath,
+        ffmpegPath: input.ffmpegPath,
+        ffprobePath: input.ffprobePath,
+        fps: input.fps,
+        navigationTimeoutMs: input.navigationTimeoutMs,
+        maxOutputBytes: input.maxVideoBytes,
+        outputDirectory: temporaryDirectory,
+        profiles: input.job.payload.profiles,
+        signal: input.signal,
+        url: input.job.payload.captureUrl,
+      });
+    } catch (error) {
+      log("social_media_render_failed", {
+        attempt: input.job.attemptCount,
+        elapsedMs: Date.now() - renderStartedAt,
+        error: error instanceof Error ? error.message : String(error),
+        fps: input.fps,
+        jobId: input.job.id,
+        profiles: input.job.payload.profiles,
+      });
+      throw error;
+    }
+    log("social_media_render_finished", {
+      attempt: input.job.attemptCount,
+      elapsedMs: Date.now() - renderStartedAt,
+      failedProfiles: Object.keys(render.errors),
       fps: input.fps,
-      navigationTimeoutMs: input.navigationTimeoutMs,
-      maxOutputBytes: input.maxVideoBytes,
-      outputDirectory: temporaryDirectory,
-      profiles: input.job.payload.profiles,
-      signal: input.signal,
-      url: input.job.payload.captureUrl,
+      jobId: input.job.id,
+      renderedProfiles: render.rendered.map((media) => media.profile),
     });
     if (render.rendered.length === 0) {
       const errorMessage = Object.entries(render.errors)
@@ -755,7 +791,13 @@ export async function processXEditorialMediaJob(input: {
     ) {
       return "lease_lost";
     }
-    const message = error instanceof Error ? error.message : String(error);
+    const failure = input.signal?.reason ?? error;
+    const message =
+      failure instanceof Error ? failure.message : String(failure);
+    const errorCode =
+      failure instanceof EditorialMediaJobTimeoutError
+        ? "job_timeout"
+        : "worker_failed";
     if (deliveryStarted) {
       await terminalizeStartedDeliveryAsUnknown({
         db: input.db,
@@ -784,7 +826,7 @@ export async function processXEditorialMediaJob(input: {
     }
     const retryStatus = await retryXEditorialMediaJob({
       db: input.db,
-      errorCode: "worker_failed",
+      errorCode,
       errorMessage: message,
       job: input.job,
       retryAfterMs: input.retryDelayMs,
@@ -814,7 +856,7 @@ async function processWithLeaseHeartbeat(
 ): Promise<XEditorialMediaJobOutcome> {
   const controller = new AbortController();
   const timeout = setTimeout(
-    () => controller.abort(new Error("Editorial media job timed out")),
+    () => controller.abort(new EditorialMediaJobTimeoutError()),
     input.jobTimeoutMs,
   );
   timeout.unref();

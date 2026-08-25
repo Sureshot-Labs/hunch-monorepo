@@ -385,7 +385,7 @@ HUNCH_SOCIAL_MEDIA_FPS=30
 HUNCH_SOCIAL_MEDIA_NAVIGATION_TIMEOUT_SEC=45
 HUNCH_SOCIAL_MEDIA_POLL_INTERVAL_SEC=5
 HUNCH_SOCIAL_MEDIA_LEASE_SEC=600
-HUNCH_SOCIAL_MEDIA_JOB_TIMEOUT_SEC=300
+HUNCH_SOCIAL_MEDIA_JOB_TIMEOUT_SEC=900
 HUNCH_SOCIAL_MEDIA_MAX_VIDEO_MB=45
 HUNCH_SOCIAL_MEDIA_RETRY_DELAY_SEC=60
 HUNCH_SOCIAL_MEDIA_SHM_SIZE=1gb
@@ -397,6 +397,13 @@ The producer and consumer flags are intentionally separate. Rollback disables
 `HUNCH_SIGNAL_BOT_X_EDITORIAL_MEDIA_ENABLED` first; the worker remains enabled
 until the durable queue is empty. Disabling the worker is an operational stop,
 not the normal feature rollback.
+
+The production baseline is 30 fps: the 22-second mobile and 16-second desktop
+profiles require 1,140 sequential browser screenshots in total. The 900-second
+job timeout is an operational guard, not an expected render duration or SLA;
+render-duration telemetry must drive any future reduction. Values up to 3600
+seconds are accepted so operators can respond to slower production hosts
+without a code change.
 
 V1 runs one render job at a time per worker process. Jobs default to three
 render attempts, create a unique directory below the operating system temp
