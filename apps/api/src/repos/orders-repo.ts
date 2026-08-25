@@ -5,6 +5,7 @@ import {
   normalizeWalletForStorage,
 } from "../lib/wallet-address.js";
 import { consumeFundingReservationForLinkedConsumerInTransaction } from "../funding/persistence/funding-evidence-repository.js";
+import { persistedTradeTerminalOutcome } from "../funding/persistence/funding-trade-consumer-status.js";
 import { recoverFundingTradeAttemptForOrderInTransaction } from "../funding/persistence/funding-trade-attempt-repository.js";
 import {
   linkTelegramAppHandoffV2DirectTradeOrderInTransaction,
@@ -350,34 +351,6 @@ export async function storeOrderInTransaction(
       "A direct Telegram handoff order side does not match its sealed action",
     );
   }
-  if (
-    !resolvedFundingReservation &&
-    !resolvedFundingTradeAttemptId &&
-    !directHandoffTrade &&
-    inputs.side === "BUY" &&
-    inputs.tokenId
-  ) {
-    const recovered = await recoverFundingTradeAttemptForOrderInTransaction(
-      client,
-      {
-        userId: inputs.userId,
-        venueId: inputs.venue,
-        tokenId: inputs.tokenId,
-        externalReferences: [
-          inputs.orderHash ?? "",
-          inputs.venueOrderId,
-          ...collectPayloadClientOrderIds(inputs.orderPayload),
-        ],
-      },
-    );
-    if (recovered) {
-      resolvedFundingReservation = {
-        operationId: recovered.operationId,
-        reservationId: recovered.reservationId,
-      };
-      resolvedFundingTradeAttemptId = recovered.attemptId;
-    }
-  }
   await client.query("select pg_advisory_xact_lock(hashtextextended($1, 0))", [
     `orders:${inputs.userId}:${inputs.venue}:${inputs.venueOrderId}`,
   ]);
@@ -412,8 +385,47 @@ export async function storeOrderInTransaction(
     [inputs.venue, inputs.venueOrderId, inputs.userId],
   );
 
-  if (existingOrder.rows.length > 0) {
-    const existing = existingOrder.rows[0];
+  const existing = existingOrder.rows[0] ?? null;
+  const persistedOutcome = persistedTradeTerminalOutcome(
+    "web_order",
+    existing?.status ?? inputs.status,
+  );
+  // Lock and inspect the durable order before implicit lost-response recovery.
+  // A stale open-status replay must never consume funding for an order that is
+  // already terminal no-fill/failed in the database.
+  const canRecoverFundingTradeAttempt =
+    persistedOutcome == null || persistedOutcome === "filled";
+  if (
+    !resolvedFundingReservation &&
+    !resolvedFundingTradeAttemptId &&
+    !directHandoffTrade &&
+    canRecoverFundingTradeAttempt &&
+    inputs.side === "BUY" &&
+    inputs.tokenId
+  ) {
+    const recovered = await recoverFundingTradeAttemptForOrderInTransaction(
+      client,
+      {
+        userId: inputs.userId,
+        venueId: inputs.venue,
+        tokenId: inputs.tokenId,
+        externalReferences: [
+          inputs.orderHash ?? "",
+          inputs.venueOrderId,
+          ...collectPayloadClientOrderIds(inputs.orderPayload),
+        ],
+      },
+    );
+    if (recovered) {
+      resolvedFundingReservation = {
+        operationId: recovered.operationId,
+        reservationId: recovered.reservationId,
+      };
+      resolvedFundingTradeAttemptId = recovered.attemptId;
+    }
+  }
+
+  if (existing) {
     const updates: string[] = [];
     const params: PgParams = [];
     let paramCount = 0;

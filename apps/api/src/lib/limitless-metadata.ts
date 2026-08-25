@@ -10,6 +10,21 @@ export type LimitlessMetadata = {
   venueExchange?: string;
 };
 
+/**
+ * A Limitless exchange address identifies the trading venue for both regular
+ * and neg-risk markets. Only neg-risk-specific grouping/adapter metadata may
+ * select the adapter redemption path.
+ */
+export function isLimitlessNegRiskMetadata(
+  metadata: LimitlessMetadata | null | undefined,
+): boolean {
+  return Boolean(
+    metadata?.negRiskRequestId ||
+    metadata?.negRiskMarketId ||
+    metadata?.venueAdapter,
+  );
+}
+
 function pickFirstString(
   obj: Record<string, unknown> | null,
   keys: readonly string[],

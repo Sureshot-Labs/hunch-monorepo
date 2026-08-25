@@ -59,6 +59,7 @@ type MockDbOptions = {
     operationId: string;
     referenceMatched: boolean;
     destinationReferencesKnown: boolean;
+    amountMatched?: boolean;
   }>;
   retainedFundingContextId?: string | null;
   retainedFundingContinuationMode?: "app_handoff" | "bot_submit";
@@ -210,7 +211,10 @@ function createMockDb(options: MockDbOptions): MockDb {
             ]
           : []);
       return {
-        rows: relayFundingMatches as unknown as T[],
+        rows: relayFundingMatches.map((row) => ({
+          amountMatched: row.amountMatched ?? true,
+          ...row,
+        })) as unknown as T[],
       };
     }
 
@@ -514,6 +518,32 @@ const tests: TestCase[] = [
           /trade_intent\.status in \([\s\S]*?'external_handoff'[\s\S]*?'cancelled'[\s\S]*?\)/i,
           "an internal Relay output stays suppressed after handoff or Buy cancellation",
         );
+        assert.match(
+          relayMatchQuery.sql,
+          /operation_row\.purpose = 'trade_shortfall'/i,
+          "ordinary in-app trade shortfalls must suppress their own Relay output notification",
+        );
+        assert.match(
+          relayMatchQuery.sql,
+          /funding_attempt\.broadcast_may_have_occurred/i,
+          "a planned route cannot suppress a real deposit before broadcast",
+        );
+        assert.match(
+          relayMatchQuery.sql,
+          /action_validation_result\s*->>\s*'relayStepKind'\s*=\s*'deposit'/i,
+          "an approval broadcast is not evidence that Relay submitted the deposit step",
+        );
+        assert.match(
+          relayMatchQuery.sql,
+          /not \([\s\S]*?action_validation_result \? 'relayStepKind'[\s\S]*?normalized_action ->> 'actionId'[\s\S]*?like '%:deposit'[\s\S]*?jsonb_array_elements[\s\S]*?relay_call ->> 'actionId' like '%:deposit'/i,
+          "legacy client Relay steps remain identifiable without treating approval-only attempts as deposits",
+        );
+        assert.match(
+          relayMatchQuery.sql,
+          /from relay_candidate[\s\S]*?where "referenceMatched"[\s\S]*?not "destinationReferencesKnown"[\s\S]*?"amountMatched"/i,
+          "candidate limiting happens only after exact or safe fallback provenance is established",
+        );
+        assert.equal(relayMatchQuery.params?.[6], true);
       });
     },
   },
@@ -762,6 +792,36 @@ const tests: TestCase[] = [
               operationId: "relay-operation-other-output",
               referenceMatched: false,
               destinationReferencesKnown: true,
+            },
+          ],
+        });
+
+        const result = await handlePrivyDepositWebhook(db, {
+          ...basePayload,
+          sender: "0xf70da97812CB96acDF810712Aa562db8dfA3dbEF",
+        });
+
+        assert.equal(result.status, "notified");
+        assert.equal(db.notificationInserts[0]?.type, "deposit_received");
+      });
+    },
+  },
+  {
+    name: "Relay-shaped deposit with a different amount remains visible",
+    run: async () => {
+      await withRedisDisabled(async () => {
+        const db = createMockDb({
+          wallet: {
+            userId: "user-1",
+            walletAddress: basePayload.recipient,
+            walletType: "ethereum",
+          },
+          relayFundingMatches: [
+            {
+              operationId: "relay-operation-other-amount",
+              referenceMatched: false,
+              destinationReferencesKnown: false,
+              amountMatched: false,
             },
           ],
         });

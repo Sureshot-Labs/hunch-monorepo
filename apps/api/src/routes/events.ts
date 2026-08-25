@@ -14,7 +14,10 @@ import { requestPriceRefreshForTokens } from "../lib/price-refresh.js";
 import { checkRateLimit } from "../lib/rate-limit.js";
 import { resolveSecurityClientIp } from "../lib/request-ip.js";
 import { isRecord } from "../lib/type-guards.js";
-import { extractLimitlessMetadata } from "../lib/limitless-metadata.js";
+import {
+  extractLimitlessMetadata,
+  isLimitlessNegRiskMetadata,
+} from "../lib/limitless-metadata.js";
 import {
   parseMetadata,
   resolveEventDescription,
@@ -479,12 +482,7 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
             row.market_venue === "limitless"
               ? extractLimitlessMetadata(marketMeta, eventMetadata)
               : null;
-          const isLimitlessNegRisk = Boolean(
-            limitlessMeta?.negRiskRequestId ||
-            limitlessMeta?.negRiskMarketId ||
-            limitlessMeta?.venueAdapter ||
-            limitlessMeta?.venueExchange,
-          );
+          const isLimitlessNegRisk = isLimitlessNegRiskMetadata(limitlessMeta);
           const tradeType =
             row.market_venue === "limitless"
               ? (limitlessMeta?.tradeType ?? null)

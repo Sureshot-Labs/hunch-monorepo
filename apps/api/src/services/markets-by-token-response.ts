@@ -9,7 +9,10 @@ import {
   resolveEventDescription,
   resolveMarketDescription,
 } from "../lib/metadata-description.js";
-import { extractLimitlessMetadata } from "../lib/limitless-metadata.js";
+import {
+  extractLimitlessMetadata,
+  isLimitlessNegRiskMetadata,
+} from "../lib/limitless-metadata.js";
 import type { MarketByTokenRow } from "../repos/unified-read.js";
 import { normalizeRedemptionStatus } from "./redemption-status.js";
 
@@ -29,12 +32,7 @@ export function mapMarketsByTokenRows(
       row.venue === "limitless"
         ? extractLimitlessMetadata(marketMetadata, eventMetadata)
         : null;
-    const isLimitlessNegRisk = Boolean(
-      limitlessMeta?.negRiskRequestId ||
-      limitlessMeta?.negRiskMarketId ||
-      limitlessMeta?.venueAdapter ||
-      limitlessMeta?.venueExchange,
-    );
+    const isLimitlessNegRisk = isLimitlessNegRiskMetadata(limitlessMeta);
 
     let tokens = {
       yes: null as string | null,

@@ -180,14 +180,15 @@ test("quote distinguishes depth and price-filtered liquidity", () => {
   );
 });
 
-test("HTTP 200 nested matched=false is an explicit no-fill", () => {
+test("HTTP 200 matched=false with delayed settlement remains non-terminal", () => {
   const result = parseLimitlessOrderResult({
     data: {
       order: { id: "order-1", status: "submitted" },
       execution: { matched: false, settlementStatus: "DELAYED" },
     },
   });
-  assert.equal(result.explicitNoFill, true);
+  assert.equal(result.explicitNoFill, false);
+  assert.equal(result.status, "submitted");
   assert.equal(result.venueOrderId, "order-1");
 });
 
@@ -204,6 +205,15 @@ test("status-batch envelope unwraps the exact nested order and execution", () =>
   assert.equal(result.explicitNoFill, true);
   assert.equal(result.status, "unmatched");
   assert.equal(result.venueOrderId, "status-order-1");
+});
+
+test("an explicit unmatched settlement remains a terminal no-fill", () => {
+  const result = parseLimitlessOrderResult({
+    order: { id: "order-unmatched", status: "submitted" },
+    execution: { matched: false, settlementStatus: "UNMATCHED" },
+  });
+  assert.equal(result.explicitNoFill, true);
+  assert.equal(result.venueOrderId, "order-unmatched");
 });
 
 test("matched=true with delayed settlement remains non-terminal", () => {

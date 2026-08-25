@@ -3903,6 +3903,38 @@ async function testTransactionalPersistenceContracts(): Promise<void> {
         claimToken: reclaimedTradeClaim.attempt.claimToken,
       });
     assert.equal(startedTrade.state, "submission_started");
+    await client.query("savepoint terminal_no_fill_order");
+    await storeOrderInTransaction(client, {
+      userId: userB,
+      walletAddress: "0x00000000000000000000000000000000000000b1",
+      venue: "limitless",
+      venueOrderId: tradeExecutionReference,
+      tokenId: marketContextId,
+      side: "BUY",
+      orderType: "FOK",
+      price: 0.5,
+      size: 2,
+      status: "expired",
+      errorMessage: "Limitless market order was not filled.",
+      rawError: null,
+    });
+    const noFillFundingState = await client.query<{
+      attempt_state: string;
+      reservation_state: string;
+    }>(
+      `select trade_attempt.state as attempt_state,
+              funding_reservation.state as reservation_state
+         from funding_trade_attempts trade_attempt
+         join balance_reservations funding_reservation
+           on funding_reservation.id = trade_attempt.reservation_id
+        where trade_attempt.id = $1::uuid`,
+      [tradeClaim.attempt.id],
+    );
+    assert.deepEqual(noFillFundingState.rows[0], {
+      attempt_state: "submission_started",
+      reservation_state: "active",
+    });
+    await client.query("rollback to savepoint terminal_no_fill_order");
     await client.query("savepoint handoff_funding_definitive_failure");
     await recordFundingTradeAttemptOutcomeInTransaction(client, {
       userId: userB,

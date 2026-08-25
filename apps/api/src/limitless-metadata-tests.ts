@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 
-import { extractLimitlessMetadata } from "./lib/limitless-metadata.js";
+import {
+  extractLimitlessMetadata,
+  isLimitlessNegRiskMetadata,
+} from "./lib/limitless-metadata.js";
 
 function test(name: string, fn: () => void) {
   try {
@@ -89,6 +92,21 @@ test("Limitless exchange supports nested venue fallbacks", () => {
       venue: { exchange: "nested-event-exchange" },
     }).venueExchange,
     "nested-event-exchange",
+  );
+});
+
+test("Limitless exchange alone does not classify a regular market as neg-risk", () => {
+  assert.equal(
+    isLimitlessNegRiskMetadata({ venueExchange: "regular-exchange" }),
+    false,
+  );
+  assert.equal(
+    isLimitlessNegRiskMetadata({ venueAdapter: "neg-risk-adapter" }),
+    true,
+  );
+  assert.equal(
+    isLimitlessNegRiskMetadata({ negRiskMarketId: "neg-risk-group" }),
+    true,
   );
 });
 
