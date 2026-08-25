@@ -30,10 +30,11 @@ import {
 import { failTelegramAppHandoffV2FundedIntentWithoutConsumerInTransaction } from "../persistence/funding-evidence-repository.js";
 
 type JsonRecord = Readonly<Record<string, JsonValue>>;
-const DELEGATED_RELAY_EVM_ROUTE_IDS = new Set(
-  Object.values(RELAY_EVM_FUNDING_PROFILE_SPECS).flatMap(
-    (profile) => profile.routeIds,
-  ),
+const DELEGATED_RELAY_EVM_PROFILE_ID_LIST = Object.freeze(
+  Object.keys(RELAY_EVM_FUNDING_PROFILE_SPECS),
+);
+const DELEGATED_RELAY_EVM_PROFILE_IDS = new Set(
+  DELEGATED_RELAY_EVM_PROFILE_ID_LIST,
 );
 
 export type FundingReductionResult = Readonly<{
@@ -62,6 +63,7 @@ type StoredFundingSegmentRow = {
 
 type StoredFundingStepStateRow = {
   action_validation_result: JsonRecord;
+  executor_id: string;
   id: string;
   segment_id: string | null;
   state:
@@ -285,10 +287,15 @@ export function deriveTargetState(
       steps[0]?.state === "succeeded" &&
       steps[0].action_validation_result.relayStepKind === "deposit" &&
       steps[0].action_validation_result.relayAllowanceMode === "preexisting");
+  // Route IDs are shared by server-delegated and client-signed Relay plans.
+  // The stricter allowance/source-debit gate belongs only to the delegated
+  // executor profiles; a client atomic approve+deposit batch is one succeeded
+  // step and must not be mistaken for a delegated deposit-only operation.
+  const delegatedRelayExecution = steps.some((step) =>
+    DELEGATED_RELAY_EVM_PROFILE_IDS.has(step.executor_id),
+  );
   const delegatedRelayReady =
-    !DELEGATED_RELAY_EVM_ROUTE_IDS.has(
-      String(operation.supportMetadata.routeId ?? ""),
-    ) ||
+    !delegatedRelayExecution ||
     (delegatedRelayStepsSucceeded &&
       hasFinalObservation(observations, "source_debit"));
   const recoveryTarget = (): FundingOperationState => {
@@ -1102,7 +1109,7 @@ export async function reduceFundingOperationInTransaction(
   });
   const stepResult = await client.query<StoredFundingStepStateRow>(
     `
-      select id, segment_id, state, action_validation_result
+      select id, segment_id, state, executor_id, action_validation_result
       from funding_operation_steps
       where operation_id = $1
       order by ordinal
@@ -1849,16 +1856,25 @@ async function loadFundingOperationState(
       client,
       operation.id,
     );
+    const terminal = ["completed", "refunded", "failed", "cancelled"].includes(
+      operation.status,
+    );
+    const delegatedRelayReceiptWatch = terminal
+      ? await client.query<{ watching: boolean }>(
+          `select exists (
+             select 1
+             from funding_operation_steps step
+             where step.operation_id = $1::uuid
+               and step.executor_id = any($2::text[])
+           ) as watching`,
+          [operation.id, DELEGATED_RELAY_EVM_PROFILE_ID_LIST],
+        )
+      : null;
     return {
       state: operationState(operation),
       recoveryMode: operation.recoveryMode,
       terminalRelayReceiptWatch:
-        ["completed", "refunded", "failed", "cancelled"].includes(
-          operation.status,
-        ) &&
-        DELEGATED_RELAY_EVM_ROUTE_IDS.has(
-          String(operation.supportMetadata.routeId ?? ""),
-        ),
+        delegatedRelayReceiptWatch?.rows[0]?.watching === true,
       awaitingProviderReference: waitState.awaitingProviderReference,
       awaitingUnbroadcastActionReport:
         waitState.awaitingUnbroadcastActionReport,
@@ -2090,12 +2106,16 @@ async function processLease(
                  from funding_step_receipt_observations receipt
                  join funding_operation_steps step on step.id = receipt.step_id
                 where receipt.operation_id = $1::uuid
-                  and step.executor_id = 'telegram_relay_evm_funding_v1'
+                  and step.executor_id = any($3::text[])
                   and receipt.status = 'reorged'
                   and receipt.reorged_at <=
                         $2::timestamptz - interval '15 minutes'
              ) as incident`,
-            [lease.operationId, options.now],
+            [
+              lease.operationId,
+              options.now,
+              DELEGATED_RELAY_EVM_PROFILE_ID_LIST,
+            ],
           )
         : null;
     if (terminalRelayEvidenceReorgIncident?.rows[0]?.incident === true) {
@@ -2125,7 +2145,7 @@ async function processLease(
                    join funding_step_receipt_observations receipt
                      on receipt.step_id = step.id
                   where step.operation_id = $1::uuid
-                    and step.executor_id = 'telegram_relay_evm_funding_v1'
+                    and step.executor_id = any($3::text[])
                     and receipt.status in ('finalized', 'failed')
                     and receipt.canonical
                     and receipt.finalized_at <=
@@ -2137,13 +2157,13 @@ async function processLease(
                    join funding_step_receipt_observations receipt
                      on receipt.step_id = step.id
                   where step.operation_id = $1::uuid
-                    and step.executor_id = 'telegram_relay_evm_funding_v1'
+                    and step.executor_id = any($3::text[])
                     and receipt.status in ('finalized', 'failed')
                     and receipt.canonical
                     and receipt.finalized_at >
                           $2::timestamptz - interval '15 minutes'
                ) as expired`,
-        [lease.operationId, options.now],
+        [lease.operationId, options.now, DELEGATED_RELAY_EVM_PROFILE_ID_LIST],
       );
       const deadLetter =
         terminalReceiptVerificationWindow.rows[0]?.expired === true;
@@ -2175,7 +2195,7 @@ async function processLease(
                join funding_step_receipt_observations receipt
                  on receipt.step_id = step.id
               where step.operation_id = $1::uuid
-                and step.executor_id = 'telegram_relay_evm_funding_v1'
+                and step.executor_id = any($3::text[])
                 and receipt.status in ('finalized', 'failed')
                 and receipt.finalized_at > $2::timestamptz - interval '15 minutes'
              union all
@@ -2198,7 +2218,7 @@ async function processLease(
                   )
                 )
            ) as watching`,
-          [lease.operationId, options.now],
+          [lease.operationId, options.now, DELEGATED_RELAY_EVM_PROFILE_ID_LIST],
         )
       : null;
     const reductionCompleted =
