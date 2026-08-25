@@ -496,6 +496,51 @@ await test("Telegram Account Value preserves degraded zero balances and position
   assert.doesNotMatch(rendered.text, /Partial data/u);
 });
 
+await test("Telegram Account Value scopes position-only degradation to portfolio value", () => {
+  const account = accountWithoutCollectorErrors();
+  const freshCash = component({
+    assetId: fundingSidecarRuntimeConfig.limitlessUsdcAddress,
+    componentId: "fresh-cash",
+    estimatedUsd: "8.11",
+    networkId: "evm:8453",
+    raw: "8110000",
+  });
+  const degradedPosition = position({
+    componentId: "degraded-position",
+    estimatedUsd: "0.98",
+    freshness: "stale",
+    valuationEligibility: "unpriced",
+  });
+  const projection = projectAccountValue({
+    accountId: "user-1",
+    asOf: AS_OF,
+    components: [freshCash],
+    headlineMode: "liquid_only",
+    positionComponents: [degradedPosition],
+  });
+  const cashAvailability = projectCashAvailability({
+    adjustments: [],
+    asOf: AS_OF,
+    components: [freshCash],
+  });
+  const rendered = buildTelegramAccountValueMessage({
+    account: {
+      ...account,
+      cashAvailability,
+      headline: resolveEffectiveHeadline(projection),
+      projection,
+    },
+  });
+
+  assert.match(rendered.text, /Estimated assets.*\$8\\\.11/u);
+  assert.match(
+    rendered.text,
+    /Known portfolio value.*positions incomplete\/stale/u,
+  );
+  assert.doesNotMatch(rendered.text, /⚠️/u);
+  assert.doesNotMatch(rendered.text, /Partial and stale data/u);
+});
+
 await test("Telegram Account Value shows the existing SOL USD estimate", () => {
   const account = accountWithoutCollectorErrors();
   const pricedSol = component({

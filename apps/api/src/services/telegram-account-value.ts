@@ -390,14 +390,9 @@ function buildInTransitBalances(
 function buildStatusLines(account: AccountValueReadModel): string[] {
   const assetValuationPartial =
     account.projection.valuationCompleteness === "partial";
-  const positionValuationPartial =
-    account.projection.positionValuationCompleteness === "partial";
   const cashAvailabilityPartial =
     account.cashAvailability.completeness === "partial";
-  const partial =
-    assetValuationPartial ||
-    positionValuationPartial ||
-    cashAvailabilityPartial;
+  const partial = assetValuationPartial || cashAvailabilityPartial;
   const missingNativeSolUsd = account.projection.components.some(
     (component) =>
       isPublicComponent(component) &&
@@ -424,7 +419,6 @@ function buildStatusLines(account: AccountValueReadModel): string[] {
   );
   const stale =
     account.projection.valuationFreshness === "stale" ||
-    account.projection.positionValuationFreshness === "stale" ||
     account.projection.components.some((component) => {
       if (!isPublicComponent(component)) return false;
       return (
@@ -459,9 +453,6 @@ function buildStatusLines(account: AccountValueReadModel): string[] {
   ) {
     details.push("Some asset values are unavailable.");
   }
-  if (positionValuationPartial) {
-    details.push("Some position values are unavailable.");
-  }
   if (cashAvailabilityUnknown) {
     details.push("Some available balances could not be verified.");
   }
@@ -475,7 +466,6 @@ function buildStatusLines(account: AccountValueReadModel): string[] {
     assetValuationPartial &&
     missingNativeSolUsd &&
     !otherUnpricedAsset &&
-    !positionValuationPartial &&
     !cashAvailabilityUnknown &&
     !stale &&
     collectorErrorCount === 0;
@@ -494,6 +484,15 @@ function buildStatusLines(account: AccountValueReadModel): string[] {
       title,
     }),
   ];
+}
+
+function portfolioQualitySuffix(account: AccountValueReadModel): string {
+  const incomplete =
+    account.projection.positionValuationCompleteness === "partial";
+  const stale = account.projection.positionValuationFreshness === "stale";
+  if (incomplete && stale) return " · positions incomplete/stale";
+  if (incomplete) return " · positions incomplete";
+  return stale ? " · positions stale" : "";
 }
 
 function appendBoundedSection(lines: string[], section: BoundedSection): void {
@@ -556,13 +555,14 @@ export function buildTelegramAccountValueMessage(input: {
   const portfolioPartial =
     account.projection.valuationCompleteness === "partial" ||
     account.projection.positionValuationCompleteness === "partial";
+  const portfolioSuffix = portfolioQualitySuffix(account);
+  const headlineValue = `${formatTelegramAccountValueUsd(
+    account.headline.estimatedUsd,
+  )}${account.headline.mode === "liquid_plus_positions" ? portfolioSuffix : ""}`;
   const lines: string[] = [
     `💰 ${formatTelegramBoldMarkdownV2("Balance")}`,
     "",
-    formatTelegramFieldMarkdownV2(
-      headlineLabel,
-      formatTelegramAccountValueUsd(account.headline.estimatedUsd),
-    ),
+    formatTelegramFieldMarkdownV2(headlineLabel, headlineValue),
     formatTelegramFieldMarkdownV2(
       cashLabel,
       formatTelegramAccountValueUsd(
@@ -574,9 +574,9 @@ export function buildTelegramAccountValueMessage(input: {
     lines.push(
       formatTelegramFieldMarkdownV2(
         portfolioPartial ? "Known portfolio value" : "Portfolio value",
-        formatTelegramAccountValueUsd(
+        `${formatTelegramAccountValueUsd(
           account.projection.totalPortfolioEstimatedUsd,
-        ),
+        )}${portfolioSuffix}`,
       ),
     );
   }
