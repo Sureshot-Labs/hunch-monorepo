@@ -55,6 +55,10 @@ export type RenderedXEditorialMedia = {
   width: number;
 };
 
+export const X_EDITORIAL_MEDIA_DEFAULT_FPS = 30;
+export const X_EDITORIAL_MEDIA_MIN_FPS = 12;
+export const X_EDITORIAL_MEDIA_MAX_FPS = 30;
+
 const execFileAsync = promisify(execFile);
 
 const DEFAULT_BROWSER_EXECUTABLES = [
@@ -345,7 +349,7 @@ async function preparePage(input: {
   return page;
 }
 
-function startFfmpeg(input: {
+export function startEditorialMediaFfmpeg(input: {
   childProcessEnv: NodeJS.ProcessEnv;
   ffmpegPath: string;
   fps: number;
@@ -353,7 +357,7 @@ function startFfmpeg(input: {
   signal?: AbortSignal;
   spec: XEditorialMediaProfileSpec;
 }): {
-  completion: Promise<void>;
+  completion: Promise<Error | null>;
   process: ChildProcessWithoutNullStreams;
 } {
   const child = spawn(
@@ -390,16 +394,23 @@ function startFfmpeg(input: {
     ],
     { env: input.childProcessEnv, stdio: ["pipe", "pipe", "pipe"] },
   );
-  const completion = new Promise<void>((resolve, reject) => {
+  // Child termination is represented as data rather than a rejected Promise.
+  // The renderer may still be blocked in a browser screenshot when an abort
+  // kills FFmpeg, so a rejection here could otherwise become unhandled before
+  // the render loop reaches its cleanup path.
+  const completion = new Promise<Error | null>((resolve) => {
     let stderr = "";
     child.stderr.setEncoding("utf8");
     child.stderr.on("data", (chunk: string) => {
       stderr = `${stderr}${chunk}`.slice(-8_000);
     });
-    child.once("error", reject);
+    child.once("error", (error) => resolve(error));
     child.once("close", (code) => {
-      if (code === 0) resolve();
-      else reject(new Error(`FFmpeg exited with code ${code}: ${stderr}`));
+      resolve(
+        code === 0
+          ? null
+          : new Error(`FFmpeg exited with code ${code}: ${stderr}`),
+      );
     });
   });
   const abort = () => {
@@ -416,6 +427,9 @@ async function writeFrame(
   ffmpeg: ChildProcessWithoutNullStreams,
   frame: Buffer,
 ): Promise<void> {
+  if (ffmpeg.stdin.destroyed || !ffmpeg.stdin.writable) {
+    throw new Error("FFmpeg input closed before the next frame");
+  }
   if (ffmpeg.stdin.write(frame)) return;
   await new Promise<void>((resolve, reject) => {
     const onDrain = () => {
@@ -426,12 +440,18 @@ async function writeFrame(
       cleanup();
       reject(error);
     };
+    const onClose = () => {
+      cleanup();
+      reject(new Error("FFmpeg input closed while waiting for backpressure"));
+    };
     const cleanup = () => {
       ffmpeg.stdin.off("drain", onDrain);
       ffmpeg.stdin.off("error", onError);
+      ffmpeg.stdin.off("close", onClose);
     };
     ffmpeg.stdin.once("drain", onDrain);
     ffmpeg.stdin.once("error", onError);
+    ffmpeg.stdin.once("close", onClose);
   });
 }
 
@@ -589,7 +609,7 @@ async function renderProfile(input: {
     signal: input.signal,
     url: input.url,
   });
-  const { completion, process: ffmpeg } = startFfmpeg({
+  const { completion, process: ffmpeg } = startEditorialMediaFfmpeg({
     childProcessEnv: input.childProcessEnv,
     ffmpegPath: input.ffmpegPath,
     fps: input.fps,
@@ -656,11 +676,13 @@ async function renderProfile(input: {
       await writeFrame(ffmpeg, screenshot);
     }
     ffmpeg.stdin.end();
-    await completion;
+    const completionError = await completion;
+    if (completionError) throw completionError;
   } catch (error) {
     ffmpeg.stdin.destroy();
     ffmpeg.kill("SIGKILL");
-    await completion.catch(() => undefined);
+    await completion;
+    input.signal?.throwIfAborted();
     throw error;
   } finally {
     await page
@@ -809,7 +831,13 @@ export async function renderXEditorialMedia(input: {
             childProcessEnv,
             ffmpegPath: input.ffmpegPath?.trim() || "ffmpeg",
             ffprobePath: input.ffprobePath?.trim() || "ffprobe",
-            fps: Math.max(12, Math.min(30, input.fps ?? 30)),
+            fps: Math.max(
+              X_EDITORIAL_MEDIA_MIN_FPS,
+              Math.min(
+                X_EDITORIAL_MEDIA_MAX_FPS,
+                input.fps ?? X_EDITORIAL_MEDIA_DEFAULT_FPS,
+              ),
+            ),
             navigationTimeoutMs: Math.max(
               10_000,
               input.navigationTimeoutMs ?? 45_000,
