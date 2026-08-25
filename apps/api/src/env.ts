@@ -941,6 +941,10 @@ export const env = {
   adminServiceCredentialMaxTtlDays,
   marketMapTtlSec: optionalNonNegativeInt("API_MARKET_MAP_TTL_SEC", 10),
   walletIntelTtlSec: optionalNonNegativeInt("API_WALLET_INTEL_TTL_SEC", 30),
+  walletPositionHistoryStatementTimeoutMs: optionalPositiveInt(
+    "API_WALLET_POSITION_HISTORY_STATEMENT_TIMEOUT_MS",
+    30_000,
+  ),
   holdersTtlSec: Number(process.env.API_HOLDERS_TTL_SEC ?? "300"),
   holdersTtlSecPolymarket: Number(
     process.env.API_HOLDERS_TTL_SEC_POLYMARKET ?? "60",
