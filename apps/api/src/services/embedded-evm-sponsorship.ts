@@ -54,6 +54,11 @@ type SponsoredTransaction = Readonly<{
 export type EmbeddedEvmSponsorshipDependencies = Readonly<{
   isAuthorizedDestination: (address: string) => Promise<boolean>;
   isKnownLimitlessMarket: (address: string) => Promise<boolean>;
+  isKnownLimitlessNegRiskAdapter: (address: string) => Promise<boolean>;
+  isKnownLimitlessNegRiskRedemption: (
+    adapterAddress: string,
+    conditionId: string,
+  ) => Promise<boolean>;
   isSupportedBridgeToken: (
     chainId: number,
     address: string,
@@ -281,11 +286,13 @@ async function validateApprovalForAll(input: {
     input.chainId === BASE_CHAIN_ID &&
     addressesEqual(target, env.limitlessConditionalTokensAddress)
   ) {
-    return isAllowedOperator({
-      address: operator,
-      staticOperators: limitlessOperators(),
-      dependencies: input.dependencies,
-    });
+    return (
+      (await isAllowedOperator({
+        address: operator,
+        staticOperators: limitlessOperators(),
+        dependencies: input.dependencies,
+      })) || (await input.dependencies.isKnownLimitlessNegRiskAdapter(operator))
+    );
   }
   return false;
 }
@@ -402,11 +409,15 @@ async function validateLimitlessProtocolCall(input: {
     input.transaction,
   );
   if (negRiskRedemption?.name === "redeemPositions") {
+    const conditionId = String(negRiskRedemption.args[0] ?? "");
     const amounts = Array.from(negRiskRedemption.args[1] ?? []) as bigint[];
     return (
-      limitlessOperators().has(target.toLowerCase()) &&
       amounts.length === 2 &&
-      amounts.some((entry) => entry > 0n)
+      amounts.some((entry) => entry > 0n) &&
+      (await input.dependencies.isKnownLimitlessNegRiskRedemption(
+        target,
+        conditionId,
+      ))
     );
   }
 
@@ -722,6 +733,61 @@ async function isKnownLimitlessMarket(
   return Boolean(rowCount);
 }
 
+const LIMITLESS_EFFECTIVE_VENUE_ADAPTER_SQL = `coalesce(
+  nullif(btrim(market_row.metadata->>'venueAdapter'), ''),
+  nullif(btrim(event_row.metadata->>'venueAdapter'), '')
+)`;
+
+async function isKnownLimitlessNegRiskAdapter(
+  db: SponsorshipDb,
+  adapterAddress: string,
+): Promise<boolean> {
+  const normalizedAdapter = normalizedAddress(adapterAddress);
+  if (!normalizedAdapter) return false;
+  const { rowCount } = await db.query(
+    `
+      select 1
+      from unified_markets market_row
+      join unified_events event_row
+        on event_row.id = market_row.event_id
+       and event_row.venue = 'limitless'
+      where market_row.venue = 'limitless'
+        and nullif(btrim(market_row.condition_id), '') is not null
+        and lower(${LIMITLESS_EFFECTIVE_VENUE_ADAPTER_SQL}) = lower($1)
+      limit 1
+    `,
+    [normalizedAdapter],
+  );
+  return Boolean(rowCount);
+}
+
+async function isKnownLimitlessNegRiskRedemption(
+  db: SponsorshipDb,
+  adapterAddress: string,
+  conditionId: string,
+): Promise<boolean> {
+  const normalizedAdapter = normalizedAddress(adapterAddress);
+  const normalizedConditionId = conditionId.trim().toLowerCase();
+  if (!normalizedAdapter || !/^0x[0-9a-f]{64}$/u.test(normalizedConditionId)) {
+    return false;
+  }
+  const { rowCount } = await db.query(
+    `
+      select 1
+      from unified_markets market_row
+      join unified_events event_row
+        on event_row.id = market_row.event_id
+       and event_row.venue = 'limitless'
+      where market_row.venue = 'limitless'
+        and lower(market_row.condition_id) = $2
+        and lower(${LIMITLESS_EFFECTIVE_VENUE_ADAPTER_SQL}) = lower($1)
+      limit 1
+    `,
+    [normalizedAdapter, normalizedConditionId],
+  );
+  return Boolean(rowCount);
+}
+
 async function isSupportedBridgeToken(
   db: SponsorshipDb,
   chainId: number,
@@ -782,6 +848,10 @@ function defaultDependencies(
     isAuthorizedDestination: (address) =>
       isAuthorizedDestination(userId, address),
     isKnownLimitlessMarket: (address) => isKnownLimitlessMarket(db, address),
+    isKnownLimitlessNegRiskAdapter: (address) =>
+      isKnownLimitlessNegRiskAdapter(db, address),
+    isKnownLimitlessNegRiskRedemption: (adapterAddress, conditionId) =>
+      isKnownLimitlessNegRiskRedemption(db, adapterAddress, conditionId),
     isSupportedBridgeToken: (chainId, address) =>
       isSupportedBridgeToken(db, chainId, address),
     matchesBridgeOrder: (transaction) => matchesBridgeOrder(db, transaction),
@@ -895,5 +965,7 @@ export async function assertEmbeddedEvmSponsorshipAllowed(input: {
 export const embeddedEvmSponsorshipTestHooks = {
   exactTransactionMatches,
   fundingActionMatchesTransaction,
+  isKnownLimitlessNegRiskAdapter,
+  isKnownLimitlessNegRiskRedemption,
   validateLegacySponsoredWithdrawal,
 };

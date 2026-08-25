@@ -904,7 +904,7 @@ export async function deleteHistoryOrder(
 }
 
 export async function updateOrderFromHistory(
-  pool: Pool,
+  pool: Pick<Pool, "query">,
   inputs: {
     id: string;
     status: string;
@@ -922,6 +922,11 @@ export async function updateOrderFromHistory(
       update orders
       set
         status = $2,
+        error_message = case
+          when lower($2) in ('filled', 'matched')
+            then null
+          else error_message
+        end,
         price = coalesce($3, price),
         size = coalesce($4, size),
         filled_size = coalesce($5, filled_size),

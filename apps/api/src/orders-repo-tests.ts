@@ -207,6 +207,9 @@ await test("updateOrderFromHistory preserves position marker when wrapping paylo
   assert.match(capturedSql, /jsonb_build_object\('submitted'/);
   assert.match(capturedSql, /'_hunchPositionDeltaAppliedAt'/);
   assert.match(capturedSql, /order_payload->'submitted'->'payload'/);
+  assert.match(capturedSql, /error_message = case/);
+  assert.match(capturedSql, /'filled', 'matched'/);
+  assert.doesNotMatch(capturedSql, /'matched', 'partially_filled'/);
 });
 
 await test("stale FOK expiry excludes stored matched terminal executions", async () => {
