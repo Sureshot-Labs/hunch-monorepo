@@ -2,6 +2,7 @@ import { tx, type Pool, type PoolClient } from "@hunch/infra";
 
 import { resolveKnownAccountAssetSymbol } from "../account-value/known-asset-catalog.js";
 import { isRawAmount } from "../funding/domain/raw-amount.js";
+import { isFundingActionFailureCode } from "../funding/execution/action-report.js";
 import {
   isTelegramPolymarketRouterContinuationPending,
   isTelegramRouterContinuationHardReason,
@@ -108,12 +109,14 @@ type TelegramTradeLifecycleProgress = Readonly<{
 type ProjectionCandidate = Readonly<{
   action: string;
   amount_usd: string | null;
+  attempt_reason_code: string | null;
   attempt_state_fingerprint: string;
   chat_id: string | null;
   continuation_id: string | null;
   consumer_reservation_id: string | null;
   delivery_mode: string;
   error_code: string | null;
+  external_handoff_receipt_reason_code: string | null;
   error_message: string | null;
   funding_operation_id: string | null;
   funding_destination_asset_id: string | null;
@@ -142,6 +145,7 @@ type ProjectionCandidate = Readonly<{
   venue_order_id: string | null;
   has_automatic_provider_reference_wait: boolean;
   has_broadcast_boundary: boolean;
+  has_terminal_external_handoff_receipt: boolean;
   has_started_attempt: boolean;
   is_direct_v2_handoff: boolean;
   submit_started_at: Date | null;
@@ -724,6 +728,8 @@ function liveProgressFor(
     candidate.operation_status === "reconcile_required";
   const automaticProviderReferenceWait =
     candidate.has_automatic_provider_reference_wait;
+  const externalHandoffReceiptNeedsAttention =
+    candidate.has_terminal_external_handoff_receipt;
   // A Relay root only makes pUSD available at the controller. It is not ready
   // for a Polymarket Buy until its exact Router continuation exists and has
   // reached the consumer-ready state. Keeping this as preparing prevents a
@@ -738,6 +744,11 @@ function liveProgressFor(
       venue: candidate.venue,
     });
   const continuationReason = candidate.result.fundingContinuationReasonCode;
+  const actionFailureReason = isFundingActionFailureCode(
+    candidate.attempt_reason_code,
+  )
+    ? candidate.attempt_reason_code
+    : null;
   const routerContinuationNeedsAttention =
     routerContinuationPending &&
     isTelegramRouterContinuationHardReason(continuationReason);
@@ -745,7 +756,10 @@ function liveProgressFor(
     ? typeof continuationReason === "string"
       ? continuationReason
       : "router_continuation_pending"
-    : (candidate.operation_error_code ?? candidate.error_code);
+    : (actionFailureReason ??
+      candidate.external_handoff_receipt_reason_code ??
+      candidate.operation_error_code ??
+      candidate.error_code);
   const venueBalancePending =
     ready &&
     candidate.status === "funding" &&
@@ -777,7 +791,9 @@ function liveProgressFor(
           ? "ready"
           : terminal
             ? "stopped"
-            : awaitingReconciliation && !automaticProviderReferenceWait
+            : (awaitingReconciliation ||
+                  externalHandoffReceiptNeedsAttention) &&
+                !automaticProviderReferenceWait
               ? "needs_attention"
               : candidate.has_broadcast_boundary
                 ? "submitted"
@@ -854,7 +870,9 @@ function progressFor(
     reasonCode:
       candidate.status === "filled"
         ? null
-        : (candidate.error_code ?? live.reasonCode),
+        : candidate.error_code === "funding_no_longer_active"
+          ? (live.reasonCode ?? candidate.error_code)
+          : (candidate.error_code ?? live.reasonCode),
     receiptStateFingerprint: "",
     failureMessage:
       candidate.status === "failed"
@@ -958,6 +976,15 @@ async function listCandidates(
             tracked_operation.status as operation_status,
             tracked_operation.progress_stage,
             tracked_operation.error_code as operation_error_code,
+            (
+              select attempt.actual_costs ->> 'reasonCode'
+                from funding_operation_step_attempts attempt
+                join funding_operation_steps step on step.id = attempt.step_id
+               where step.operation_id = tracked_operation.id
+                 and attempt.actual_costs ->> 'reasonCode' is not null
+               order by step.ordinal desc, attempt.attempt_number desc
+               limit 1
+            ) as attempt_reason_code,
             coalesce((
               select string_agg(
                        step.ordinal::text || ':' || step.state,
@@ -975,6 +1002,27 @@ async function listCandidates(
                 join funding_operation_steps step on step.id = receipt.step_id
                where step.operation_id = tracked_operation.id
             ), '') as receipt_state_fingerprint,
+            (
+              select receipt.failure_code
+                from funding_step_receipt_observations receipt
+                join funding_operation_step_attempts attempt
+                  on attempt.id = receipt.attempt_id
+                join funding_operation_steps step on step.id = attempt.step_id
+               where step.operation_id = tracked_operation.id
+                 and attempt.reference_kind = 'external_handoff'
+                 and attempt.attempt_number = (
+                   select max(latest_attempt.attempt_number)
+                     from funding_operation_step_attempts latest_attempt
+                    where latest_attempt.step_id = attempt.step_id
+                 )
+                 and receipt.failure_code is not null
+               order by
+                 step.ordinal desc,
+                 attempt.attempt_number desc,
+                 receipt.observed_at desc,
+                 receipt.id desc
+               limit 1
+            ) as external_handoff_receipt_reason_code,
             coalesce((
               select string_agg(
                        step.ordinal::text || ':' ||
@@ -1002,16 +1050,53 @@ async function listCandidates(
                where step.operation_id = tracked_operation.id
                  and attempt.outcome = 'ambiguous'
                  and attempt.broadcast_may_have_occurred
-                 and attempt.reference_kind = 'provider_receipt'
-                 and not exists (
-                   select 1
-                     from funding_step_receipt_observations receipt
-                    where receipt.attempt_id = attempt.id
-                      and receipt.status = 'finalized'
-                      and receipt.canonical
-                      and receipt.action_match
+                 and (
+                   (
+                     attempt.reference_kind = 'provider_receipt'
+                     and not exists (
+                       select 1
+                         from funding_step_receipt_observations receipt
+                        where receipt.attempt_id = attempt.id
+                          and receipt.status = 'finalized'
+                          and receipt.canonical
+                          and receipt.action_match
+                     )
+                   )
+                   or (
+                     attempt.reference_kind = 'external_handoff'
+                     and step.state in ('submitted', 'reconcile_required')
+                     and not exists (
+                       select 1
+                         from funding_step_receipt_observations receipt
+                        where receipt.attempt_id = attempt.id
+                          and (
+                            receipt.status not in ('pending', 'confirmed')
+                            or not receipt.canonical
+                            or receipt.action_match is false
+                          )
+                     )
+                   )
                  )
             ) as has_automatic_provider_reference_wait,
+            exists (
+              select 1
+                from funding_operation_step_attempts attempt
+                join funding_operation_steps step on step.id = attempt.step_id
+                join funding_step_receipt_observations receipt
+                  on receipt.attempt_id = attempt.id
+               where step.operation_id = tracked_operation.id
+                 and attempt.reference_kind = 'external_handoff'
+                 and attempt.attempt_number = (
+                   select max(latest_attempt.attempt_number)
+                     from funding_operation_step_attempts latest_attempt
+                    where latest_attempt.step_id = attempt.step_id
+                 )
+                 and (
+                   receipt.status in ('failed', 'mismatch', 'reorged')
+                   or not receipt.canonical
+                   or receipt.action_match is false
+                 )
+            ) as has_terminal_external_handoff_receipt,
             exists (
               select 1
                 from funding_operation_step_attempts attempt
@@ -1291,6 +1376,48 @@ function progressText(progress: TelegramTradeLifecycleProgress): string {
           progress.requiresMiniAppContinuation
             ? "Funding is confirmed. Polymarket is still reflecting the deposit in its trading balance. Continue in Hunch when it is ready; the Buy has not been submitted."
             : "Funding is confirmed. Polymarket is still reflecting the deposit in its trading balance; Hunch will retry the fresh Buy review automatically. The Buy has not been submitted yet.",
+        ),
+      ].filter((line): line is string => line != null),
+    );
+  }
+  if (
+    progress.reasonCode === "external_handoff_submission_unknown" ||
+    progress.reasonCode === "external_handoff_provider_response_invalid" ||
+    progress.reasonCode === "external_handoff_provider_rejected" ||
+    progress.reasonCode === "client_execution_failed"
+  ) {
+    const uncertain =
+      progress.reasonCode === "external_handoff_submission_unknown" ||
+      progress.reasonCode === "external_handoff_provider_response_invalid";
+    const providerRejected =
+      progress.reasonCode === "external_handoff_provider_rejected";
+    return joinTelegramMarkdownV2Lines(
+      [
+        `${uncertain ? "⏳" : "⚠️"} ${formatTelegramBoldMarkdownV2(
+          uncertain
+            ? "Checking Polymarket funding"
+            : providerRejected
+              ? "Polymarket funding was declined"
+              : "Funding action stopped",
+        )}`,
+        "",
+        `🔵 ${formatTelegramFieldMarkdownV2("Venue", formatTelegramVenueLabel(progress.venue))}`,
+        `🎯 ${formatTelegramFieldMarkdownV2("Market", progress.marketTitle)}`,
+        `↔️ ${formatTelegramFieldMarkdownV2("Side", progress.sideLabel)}`,
+        `🛒 ${formatTelegramFieldMarkdownV2("Buy target", `$${progress.amountUsd}`)}`,
+        progress.fundingAmountLabel
+          ? `💸 ${formatTelegramFieldMarkdownV2("Funding", progress.fundingAmountLabel)}`
+          : null,
+        progress.sourceRoute
+          ? `🔄 ${formatTelegramFieldMarkdownV2("Funding route", progress.sourceRoute)}`
+          : null,
+        "",
+        escapeTelegramMarkdownV2(
+          uncertain
+            ? "The relayer submission result is uncertain. Hunch will not send it again blindly and is checking durable evidence. The Buy has not been submitted."
+            : providerRejected
+              ? "Polymarket did not accept the funding transfer. Nothing was submitted. Open the market for a fresh Review."
+              : "The wallet action did not start. Nothing was submitted. Open the market for a fresh Review.",
         ),
       ].filter((line): line is string => line != null),
     );

@@ -3,7 +3,10 @@ import {
   parseUnsignedDecimal,
 } from "../account-value/decimal.js";
 import type { AccountValueReadModel } from "../account-value/runtime-service.js";
-import { resolveKnownAccountAssetSymbol } from "../account-value/known-asset-catalog.js";
+import {
+  isKnownNativeSolAsset,
+  resolveKnownAccountAssetSymbol,
+} from "../account-value/known-asset-catalog.js";
 import {
   buildTelegramAccountValueKeyboard,
   buildTelegramAccountValueUnavailableMessage,
@@ -28,6 +31,7 @@ type GroupedWalletBalance = {
   availableKnownCount: number;
   availableRaw: bigint;
   availableUnknownCount: number;
+  cashAmountRaw: bigint;
   cashComponentCount: number;
   decimals: number;
   estimatedKnownCount: number;
@@ -260,6 +264,7 @@ function buildWalletGroups(account: AccountValueReadModel): {
       availableKnownCount: 0,
       availableRaw: 0n,
       availableUnknownCount: 0,
+      cashAmountRaw: 0n,
       cashComponentCount: 0,
       decimals,
       estimatedKnownCount: 0,
@@ -280,6 +285,7 @@ function buildWalletGroups(account: AccountValueReadModel): {
       current.estimatedUnknownCount += 1;
     }
     if (cashAvailabilityApplies) {
+      current.cashAmountRaw += raw;
       current.cashComponentCount += 1;
       if (availabilityIsKnown(available)) {
         current.availableKnownCount += 1;
@@ -382,15 +388,39 @@ function buildInTransitBalances(
 }
 
 function buildStatusLines(account: AccountValueReadModel): string[] {
-  const partial =
-    account.projection.valuationCompleteness === "partial" ||
-    account.projection.positionValuationCompleteness === "partial" ||
+  const assetValuationPartial =
+    account.projection.valuationCompleteness === "partial";
+  const positionValuationPartial =
+    account.projection.positionValuationCompleteness === "partial";
+  const cashAvailabilityPartial =
     account.cashAvailability.completeness === "partial";
+  const partial =
+    assetValuationPartial ||
+    positionValuationPartial ||
+    cashAvailabilityPartial;
+  const missingNativeSolUsd = account.projection.components.some(
+    (component) =>
+      isPublicComponent(component) &&
+      isKnownNativeSolAsset(component.amount.asset) &&
+      parseRaw(component.amount.raw) > 0n &&
+      component.estimatedUsd == null &&
+      component.valuationEligibility === "unpriced",
+  );
+  const otherUnpricedAsset = account.projection.components.some(
+    (component) =>
+      isPublicComponent(component) &&
+      !isKnownNativeSolAsset(component.amount.asset) &&
+      parseRaw(component.amount.raw) > 0n &&
+      component.valuationEligibility === "unpriced",
+  );
   const availabilityByComponent = new Map(
     account.cashAvailability.components.map((component) => [
       component.componentId,
       component,
     ]),
+  );
+  const cashAvailabilityUnknown = account.cashAvailability.components.some(
+    (component) => component.reasonCodes.includes("cash_availability_unknown"),
   );
   const stale =
     account.projection.valuationFreshness === "stale" ||
@@ -415,18 +445,47 @@ function buildStatusLines(account: AccountValueReadModel): string[] {
   ]).size;
   if (!partial && !stale && collectorErrorCount === 0) return [];
   const details: string[] = [];
-  if (partial) details.push("Only currently known balances are shown.");
+  if (missingNativeSolUsd) {
+    details.push("SOL is shown without a current USD estimate.");
+  }
+  if (otherUnpricedAsset) {
+    details.push("Some assets are shown without a current USD estimate.");
+  }
+  if (
+    assetValuationPartial &&
+    !missingNativeSolUsd &&
+    !otherUnpricedAsset &&
+    collectorErrorCount === 0
+  ) {
+    details.push("Some asset values are unavailable.");
+  }
+  if (positionValuationPartial) {
+    details.push("Some position values are unavailable.");
+  }
+  if (cashAvailabilityUnknown) {
+    details.push("Some available balances could not be verified.");
+  }
   if (stale) details.push("Some values are stale.");
   if (collectorErrorCount > 0) {
     details.push(
       `${collectorErrorCount} balance source${collectorErrorCount === 1 ? "" : "s"} could not refresh.`,
     );
   }
-  const title = partial
-    ? stale
-      ? "Partial and stale data"
-      : "Partial data"
-    : "Stale data";
+  const onlySolEstimateMissing =
+    assetValuationPartial &&
+    missingNativeSolUsd &&
+    !otherUnpricedAsset &&
+    !positionValuationPartial &&
+    !cashAvailabilityUnknown &&
+    !stale &&
+    collectorErrorCount === 0;
+  const title = onlySolEstimateMissing
+    ? "Partial USD estimate"
+    : partial
+      ? stale
+        ? "Partial and stale data"
+        : "Partial data"
+      : "Stale data";
   return [
     "",
     formatTelegramCalloutMarkdownV2({
@@ -603,7 +662,10 @@ export function buildTelegramAccountValueMessage(input: {
           ? group.availableKnownCount > 0
             ? ` · ${formatRaw(group.availableRaw, group.decimals)} known available · partial`
             : " · availability unknown"
-          : ` · ${formatRaw(group.availableRaw, group.decimals)} available`;
+          : group.cashAmountRaw === group.amountRaw &&
+              group.availableRaw === group.amountRaw
+            ? ""
+            : ` · ${formatRaw(group.availableRaw, group.decimals)} available`;
     const stale = group.freshness === "stale" ? " · stale" : "";
     return escapeTelegramMarkdownV2(
       `• ${group.network} wallet — ${formatRaw(

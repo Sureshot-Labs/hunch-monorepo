@@ -168,6 +168,30 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
+    name: "unknown Polymarket relayer submission stays non-rebroadcast and diagnostic",
+    run: () => {
+      const text = telegramTradeLifecycleProgressTestHooks.progressText({
+        action: "buy",
+        amountUsd: "5",
+        canCancel: false,
+        canCancelBuy: false,
+        fundingAmountLabel: "1.02 pUSD",
+        intentId: "00000000-0000-4000-8000-000000000001",
+        isDirectHandoff: false,
+        marketTitle: "Market",
+        reasonCode: "external_handoff_submission_unknown",
+        requiresMiniAppContinuation: false,
+        sideLabel: "YES",
+        sourceRoute: "Polymarket pUSD → controller pUSD",
+        state: "needs_attention",
+        venue: "polymarket",
+      } as never);
+      assert.match(text, /Checking Polymarket funding/u);
+      assert.match(text, /will not send it again blindly/u);
+      assert.doesNotMatch(text, /Funding stopped/u);
+    },
+  },
+  {
     name: "change amount callback remains valid and bounded",
     run: () => {
       const intentId = "00000000-0000-4000-8000-000000000001";

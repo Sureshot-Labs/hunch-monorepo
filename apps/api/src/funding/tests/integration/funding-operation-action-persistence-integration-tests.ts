@@ -621,6 +621,29 @@ try {
   });
   assert.equal(storedStep?.state, "reconcile_required");
 
+  const unknownProviderSubmission =
+    await finishFundingStepAttemptForUserInTransaction(client, {
+      userId,
+      operationId: committed.operation.id,
+      stepId: independentStepId,
+      attemptId: independentlyStarted.attempt.id,
+      outcome: "ambiguous",
+      broadcastMayHaveOccurred: true,
+      referenceKind: null,
+      receiptRefCiphertext: null,
+      receiptRefLookupHmac: null,
+      lookupKeyVersion: null,
+      actualCosts: {
+        networkFeeRaw: null,
+        reasonCode: "external_handoff_submission_unknown",
+      },
+    });
+  assert.equal(unknownProviderSubmission.stepState, "reconcile_required");
+  assert.equal(
+    unknownProviderSubmission.attempt.actualCosts.reasonCode,
+    "external_handoff_submission_unknown",
+  );
+
   const matchingHandoffs =
     await listPotentialPolymarketHandoffsForCanonicalEvents(client, {
       userId,

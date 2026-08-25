@@ -1,3 +1,5 @@
+import { logger } from "@hunch/shared";
+
 import { pool } from "../db.js";
 import type { UsdEstimate } from "../funding/domain/types.js";
 import { SOLANA_NATIVE_ASSET } from "../funding/domain/network-fees.js";
@@ -6,7 +8,14 @@ import { createAccountValueSnapshotLoader } from "./snapshot-loader.js";
 import { PythSolUsdPriceAdapter } from "./pyth-sol-usd-price-adapter.js";
 import { PYTH_SOL_USD_PRICE_POLICY_ID } from "./valuation-service.js";
 
-const pythSolUsdPriceAdapter = new PythSolUsdPriceAdapter();
+const pythSolUsdPriceAdapter = new PythSolUsdPriceAdapter({
+  onUnavailable: ({ code }) => {
+    logger.warn(
+      { reasonCode: code },
+      "Pyth SOL/USD display valuation is unavailable",
+    );
+  },
+});
 const accountValuePriceAdapters = [pythSolUsdPriceAdapter] as const;
 
 /** API-only display estimate; execution never consumes this price. */

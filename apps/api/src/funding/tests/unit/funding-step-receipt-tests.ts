@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { ethers } from "ethers";
 
 import {
+  bindPolymarketRelayerTransactionHash,
   EVM_FUNDING_ACTION_FINALITY_CONFIRMATIONS,
   FAST_EVM_FUNDING_ACTION_FINALITY_CONFIRMATIONS,
   evmFundingActionFinalityConfirmations,
@@ -11,10 +12,12 @@ import {
   evaluatePolymarketDepositWalletHandoffReceipt,
   evaluateSvmActionReceipt,
   FundingStepReceiptReconciliationDriver,
+  resolvePolymarketRelayerFundingReference,
 } from "../../execution/step-receipt-reconciler.js";
 import {
   normalizePolymarketDepositWalletTransactionReference,
   polymarketDepositWalletHandoffExpectation,
+  polymarketRelayerTransactionReference,
 } from "../../execution/polymarket-deposit-wallet-handoff.js";
 import type {
   FundingStepReceiptEvidence,
@@ -717,23 +720,100 @@ const uppercaseHandoffHash = `0x${"AB".repeat(32)}`;
 assert.ok(
   polymarketDepositWalletHandoffExpectation(handoffAction, handoffValidation),
 );
-assert.equal(
+assert.deepEqual(
   normalizePolymarketDepositWalletTransactionReference(
     handoffAction,
     handoffValidation,
     uppercaseHandoffHash,
   ),
-  uppercaseHandoffHash.toLowerCase(),
+  {
+    kind: "transaction",
+    reference: uppercaseHandoffHash.toLowerCase(),
+  },
   "a valid Polymarket handoff EVM hash must share the scanner's lowercase form",
 );
-assert.equal(
+assert.deepEqual(
   normalizePolymarketDepositWalletTransactionReference(
     handoffAction,
     { ...handoffValidation, amountRaw: "1" },
     uppercaseHandoffHash,
   ),
-  uppercaseHandoffHash,
+  { kind: "transaction", reference: uppercaseHandoffHash },
   "an invalid handoff envelope must not change transaction reference semantics",
+);
+const relayerReference = polymarketRelayerTransactionReference(
+  "relayer_tx_12345678",
+);
+assert.deepEqual(
+  normalizePolymarketDepositWalletTransactionReference(
+    handoffAction,
+    handoffValidation,
+    relayerReference,
+  ),
+  { kind: "external_handoff", reference: relayerReference },
+);
+assert.deepEqual(
+  await resolvePolymarketRelayerFundingReference(
+    relayerReference,
+    async (_transactionId, signal) => {
+      assert.equal(signal.aborted, false);
+      return {
+        transactionID: "relayer_tx_12345678",
+        state: "STATE_EXECUTED",
+      };
+    },
+  ),
+  {
+    kind: "evidence",
+    evidence: {
+      status: "pending",
+      actionMatch: null,
+      ledgerHeight: null,
+      blockHash: null,
+      canonical: true,
+      failureCode: null,
+      evidence: {
+        providerReferenceMatches: true,
+        relayerState: "STATE_EXECUTED",
+      },
+    },
+  },
+);
+const resolvedRelayerHash = `0x${"cd".repeat(32)}`;
+assert.deepEqual(
+  await resolvePolymarketRelayerFundingReference(
+    relayerReference,
+    async () => ({
+      transactionID: "relayer_tx_12345678",
+      transactionHash: resolvedRelayerHash,
+      state: "STATE_MINED",
+    }),
+  ),
+  { kind: "transaction", reference: resolvedRelayerHash },
+);
+assert.equal(
+  (
+    await resolvePolymarketRelayerFundingReference(
+      relayerReference,
+      async () => ({
+        transactionID: "relayer_tx_12345678",
+        state: "STATE_FAILED",
+      }),
+    )
+  ).kind,
+  "evidence",
+);
+assert.equal(
+  (
+    await resolvePolymarketRelayerFundingReference(
+      relayerReference,
+      async () => ({
+        transactionID: "different_tx_12345678",
+        state: "STATE_MINED",
+      }),
+    )
+  ).kind,
+  "evidence",
 );
 const transferEvent = transferInterface.getEvent("Transfer");
 if (!transferEvent) throw new Error("Transfer event ABI is unavailable");
@@ -798,6 +878,46 @@ const finalizedHandoffObservation: FundingStepReceiptObservation = {
   finalizedAt: new Date("2026-07-31T10:00:01.000Z"),
   reorgedAt: null,
 };
+const boundHandoffReceipt = bindPolymarketRelayerTransactionHash({
+  evaluated: evaluatePolymarketDepositWalletHandoffReceipt({
+    action: handoffAction,
+    actionValidationResult: handoffValidation,
+    transaction: handoffTransaction,
+    receipt: handoffReceipt,
+    previous: null,
+  }),
+  previous: null,
+  transactionHash: resolvedRelayerHash.toUpperCase().replace("0X", "0x"),
+});
+assert.equal(boundHandoffReceipt.evidence.transactionHash, resolvedRelayerHash);
+const remappedHandoffReceipt = bindPolymarketRelayerTransactionHash({
+  evaluated: boundHandoffReceipt,
+  previous: {
+    ...finalizedHandoffObservation,
+    evidence: { transactionHash: resolvedRelayerHash },
+  },
+  transactionHash: `0x${"ef".repeat(32)}`,
+});
+assert.equal(remappedHandoffReceipt.status, "reorged");
+assert.equal(remappedHandoffReceipt.actionMatch, false);
+assert.equal(
+  remappedHandoffReceipt.failureCode,
+  "polymarket_relayer_transaction_hash_changed",
+);
+const repeatedRemapReceipt = bindPolymarketRelayerTransactionHash({
+  evaluated: boundHandoffReceipt,
+  previous: {
+    ...finalizedHandoffObservation,
+    status: "mismatch",
+    evidence: remappedHandoffReceipt.evidence,
+  },
+  transactionHash: `0x${"ef".repeat(32)}`,
+});
+assert.equal(repeatedRemapReceipt.status, "mismatch");
+assert.equal(
+  repeatedRemapReceipt.failureCode,
+  "polymarket_relayer_transaction_hash_changed",
+);
 assert.deepEqual(
   evaluatePolymarketDepositWalletHandoffReceipt({
     action: handoffAction,

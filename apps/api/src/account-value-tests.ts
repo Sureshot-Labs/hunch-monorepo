@@ -299,6 +299,7 @@ await test("Pyth SOL/USD reads are single-flight cached and failures retry", asy
   assert.equal(reads, 1);
 
   let retryReads = 0;
+  const unavailableCodes: string[] = [];
   const retrying = new PythSolUsdPriceAdapter({
     cacheKey: `test:pyth:retry:${crypto.randomUUID()}`,
     loadAccount: async () => {
@@ -310,10 +311,35 @@ await test("Pyth SOL/USD reads are single-flight cached and failures retry", asy
       };
     },
     now: () => PYTH_FIXTURE_NOW,
+    onUnavailable: ({ code }) => unavailableCodes.push(code),
   });
   assert.equal(await retrying.value(request), null);
+  assert.deepEqual(unavailableCodes, ["rpc_unavailable"]);
   assert.equal((await retrying.value(request))?.value, "5.12640349624");
   assert.equal(retryReads, 2);
+
+  let diagnosticReads = 0;
+  const diagnosticCodes: string[] = [];
+  const diagnostics = new PythSolUsdPriceAdapter({
+    cacheKey: `test:pyth:diagnostics:${crypto.randomUUID()}`,
+    loadAccount: async () => {
+      diagnosticReads += 1;
+      throw new Error(
+        diagnosticReads < 3
+          ? "temporary RPC error"
+          : "Pyth SOL/USD account owner changed",
+      );
+    },
+    now: () => PYTH_FIXTURE_NOW,
+    onUnavailable: ({ code }) => diagnosticCodes.push(code),
+  });
+  assert.equal(await diagnostics.value(request), null);
+  assert.equal(await diagnostics.value(request), null);
+  assert.equal(await diagnostics.value(request), null);
+  assert.deepEqual(diagnosticCodes, [
+    "rpc_unavailable",
+    "feed_contract_changed",
+  ]);
 });
 
 await test("SOL valuation contributes exact totals and degrades to partial", async () => {

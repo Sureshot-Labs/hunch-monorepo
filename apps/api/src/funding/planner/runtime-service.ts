@@ -48,6 +48,7 @@ import type {
   WalletExecutionProfile,
 } from "../domain/types.js";
 import type { PreparationResult } from "../domain/contracts.js";
+import type { FundingActionFailureCode } from "../execution/action-report.js";
 import { FundingPlanner } from "./planner.js";
 import { FundingQuoteService } from "./quote-service.js";
 import {
@@ -632,6 +633,7 @@ export class FundingPlanningRuntime {
       attemptId: string;
       outcome: FundingActionReportOutcome;
       transactionReference: string | null;
+      failureCode: FundingActionFailureCode | null;
       actualCosts: Readonly<{ networkFeeRaw: string | null }>;
     }>,
   ) {
