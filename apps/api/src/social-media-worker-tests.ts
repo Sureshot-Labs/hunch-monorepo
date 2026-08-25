@@ -163,7 +163,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           "--url",
           "http://localhost:3000/tracking/wallet/0x123?chain=polygon",
         ]).fps,
-        15,
+        30,
       );
     },
   },
@@ -203,7 +203,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     run: () => {
       const config = parseSocialMediaWorkerConfig({});
       assert.equal(config.enabled, true);
-      assert.equal(config.fps, 15);
+      assert.equal(config.fps, 30);
       assert.equal(config.leaseMs, 600_000);
       assert.equal(config.jobTimeoutMs, 900_000);
       assert.equal(config.maxVideoBytes, 45 * 1024 * 1024);
@@ -265,7 +265,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         const { completion } = startEditorialMediaFfmpeg({
           childProcessEnv: editorialMediaChildProcessEnv(),
           ffmpegPath: process.execPath,
-          fps: 15,
+          fps: 30,
           outputPath: "/tmp/hunch-unused-ffmpeg-output.mp4",
           signal: controller.signal,
           spec: X_EDITORIAL_MEDIA_PROFILE_SPECS.mobile,

@@ -55,7 +55,7 @@ export type RenderedXEditorialMedia = {
   width: number;
 };
 
-export const X_EDITORIAL_MEDIA_DEFAULT_FPS = 15;
+export const X_EDITORIAL_MEDIA_DEFAULT_FPS = 30;
 export const X_EDITORIAL_MEDIA_MIN_FPS = 12;
 export const X_EDITORIAL_MEDIA_MAX_FPS = 30;
 
