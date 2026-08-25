@@ -17,10 +17,17 @@ export type ReceiveTargetVariant = Readonly<{
   completion: Readonly<{ kind: string }>;
 }>;
 
+export function isDirectReceiveCompletionKind(kind: string): boolean {
+  return (
+    kind === "direct_destination_credit" ||
+    kind === "retained_owned_source_credit"
+  );
+}
+
 export function fundingReceiveVariantHandling(
   variant: ReceiveTargetVariant,
 ): FundingReceiveHandling {
-  if (variant.completion.kind === "direct_destination_credit") {
+  if (isDirectReceiveCompletionKind(variant.completion.kind)) {
     return "direct";
   }
   return isRelayPinnedStableAsset(variant.asset)

@@ -19,6 +19,8 @@ import {
 import { FUNDING_RECEIVE_SESSION_TTL_HOURS } from "../funding/receive/receive-session-constants.js";
 import QRCode from "qrcode";
 import {
+  isTelegramSolanaRetainedFundingRouteKey,
+  telegramFundingRouteDescriptorForRouteKey,
   type TelegramFundingRoutePresentation,
   type TelegramFundingTargetCapability,
 } from "./telegram-funding-route.js";
@@ -69,21 +71,8 @@ function fundingTargetChoiceToken(input: {
   automaticConversion: boolean;
   routeKey: string;
 }): string {
-  const tokenByRouteKey: Readonly<Record<string, string>> = {
-    limitless_base_usdc_direct_v1: "ld",
-    limitless_polygon_pusd_relay_v1: "lp",
-    limitless_polygon_usdc_relay_v1: "ln",
-    limitless_polygon_usdce_relay_v1: "le",
-    polymarket_base_usdc_relay_v1: "pb",
-    polymarket_polygon_pusd_direct_v1: "pd",
-    polymarket_polygon_usdc_relay_v1: "pn",
-    polymarket_polygon_usdce_wrap_v1: "pw",
-    // Existing frozen sessions keep their original route identity.
-    polymarket_polygon_pusd_usdce_v1: "a",
-  };
-  return (
-    tokenByRouteKey[input.routeKey] ?? (input.automaticConversion ? "a" : "d")
-  );
+  const descriptor = telegramFundingRouteDescriptorForRouteKey(input.routeKey);
+  return descriptor?.choiceToken ?? (input.automaticConversion ? "a" : "d");
 }
 
 export function buildTelegramFundingReviewQuoteMessage(input: {
@@ -260,7 +249,11 @@ export function buildTelegramFundingTargetChoicesMessage(input: {
   );
   if (targets.length === 1 && targets[0]) {
     return buildTelegramFundingTargetMessage({
-      automaticConversion: targets[0].automaticSourceAsset !== null,
+      automaticConversion:
+        targets[0].automaticSourceAsset !== null &&
+        !isTelegramSolanaRetainedFundingRouteKey(
+          targets[0].presentation.routeKey,
+        ),
       contextId: input.contextId,
       expiresAt: input.expiresAt,
       presentation: targets[0].presentation,
@@ -270,7 +263,11 @@ export function buildTelegramFundingTargetChoicesMessage(input: {
     {
       callback_data: telegramFundingCallbackData({
         choiceToken: fundingTargetChoiceToken({
-          automaticConversion: target.automaticSourceAsset !== null,
+          automaticConversion:
+            target.automaticSourceAsset !== null &&
+            !isTelegramSolanaRetainedFundingRouteKey(
+              target.presentation.routeKey,
+            ),
           routeKey: target.presentation.routeKey,
         }),
         contextId: input.contextId,
@@ -697,6 +694,9 @@ function buildTelegramFundingProgressMessageInternal(
   const conversionOutputDetected =
     projection.state === "converting" &&
     (projection.receiptBreakdown?.destinationReceiptCount ?? 0) > 0;
+  const retainedSol = isTelegramSolanaRetainedFundingRouteKey(
+    projection.presentation.routeKey,
+  );
   const stateCopy: Record<
     TelegramFundingProgressProjection["state"],
     { icon: string; title: string; body: string }
@@ -712,8 +712,16 @@ function buildTelegramFundingProgressMessageInternal(
     },
     funds_received: {
       icon: "📥",
-      title: `${projection.assetSymbol} detected`,
-      body: amount ? `${amount} was detected.` : "The transfer was detected.",
+      title: retainedSol
+        ? "SOL received"
+        : `${projection.assetSymbol} detected`,
+      body: retainedSol
+        ? amount
+          ? `${amount} is kept in your Solana wallet. Hunch is preparing the Mini App funding route.`
+          : "SOL is kept in your Solana wallet. Hunch is preparing the Mini App funding route."
+        : amount
+          ? `${amount} was detected.`
+          : "The transfer was detected.",
     },
     waiting_for_routing: {
       icon: "⏸️",
@@ -735,10 +743,14 @@ function buildTelegramFundingProgressMessageInternal(
     },
     ready: {
       icon: "✅",
-      title: `${destinationAsset} ready`,
-      body: amount
-        ? `${amount} is now available at ${presentation.venueLabel}.`
-        : `The received ${destinationAsset} is now available at ${presentation.venueLabel}.`,
+      title: retainedSol ? "SOL received" : `${destinationAsset} ready`,
+      body: retainedSol
+        ? amount
+          ? `${amount} was received and kept in your Solana wallet.`
+          : "SOL was received and kept in your Solana wallet."
+        : amount
+          ? `${amount} is now available at ${presentation.venueLabel}.`
+          : `The received ${destinationAsset} is now available at ${presentation.venueLabel}.`,
     },
     expired: {
       icon: "⌛",

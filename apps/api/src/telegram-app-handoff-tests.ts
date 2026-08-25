@@ -59,6 +59,7 @@ function createFakePool() {
       queries.push(normalized);
       if (["begin", "commit", "rollback"].includes(normalized))
         return { rows: [] };
+      if (normalized === "select 'live_fence'") return { rows: [] };
       if (normalized.startsWith("insert into telegram_app_handoffs")) {
         assert.match(
           normalized,
@@ -205,6 +206,10 @@ function createFakePool() {
 
 const fixture = createFakePool();
 const issued = await issueTelegramAppHandoff({
+  assertCurrentIntent: async (client) => {
+    await client.query("select 'live_fence'");
+    return true;
+  },
   authorityFingerprint: AUTHORITY_FINGERPRINT,
   db: fixture.pool as never,
   planSnapshot: { destination: "polymarket" },
@@ -214,6 +219,15 @@ const issued = await issueTelegramAppHandoff({
   tradeIntentId: INTENT_ID,
   userId: USER_ID,
 });
+assert.ok(
+  fixture.getQueries().indexOf("select 'live_fence'") <
+    fixture
+      .getQueries()
+      .findIndex((query) =>
+        query.startsWith("insert into telegram_app_handoffs"),
+      ),
+  "the current-intent fence runs inside the issue transaction before INSERT",
+);
 assert.equal(issued.handoff.state, "issued");
 assert.equal(issued.startParam, `handoff_${issued.token}`);
 assert.equal(
@@ -234,6 +248,29 @@ assert.equal(
   fixture.queryParams.flat().some((value) => value === issued.token),
   false,
   "the raw startapp token must never reach SQL parameters",
+);
+const staleAtIssue = createFakePool();
+await assert.rejects(
+  issueTelegramAppHandoff({
+    assertCurrentIntent: async () => false,
+    authorityFingerprint: AUTHORITY_FINGERPRINT,
+    db: staleAtIssue.pool as never,
+    planSnapshot: { destination: "polymarket" },
+    policyRevision: "policy-1",
+    quoteSnapshot: { maxSpendUsd: "2.50" },
+    telegramUserId: TELEGRAM_USER_ID,
+    tradeIntentId: INTENT_ID,
+    userId: USER_ID,
+  }),
+  (error: unknown) =>
+    error instanceof TelegramAppHandoffError && error.code === "policy_changed",
+);
+assert.equal(
+  staleAtIssue
+    .getQueries()
+    .some((query) => query.startsWith("insert into telegram_app_handoffs")),
+  false,
+  "a stale product intent cannot mint or reuse a handoff token",
 );
 await assert.rejects(
   issueTelegramAppHandoff({

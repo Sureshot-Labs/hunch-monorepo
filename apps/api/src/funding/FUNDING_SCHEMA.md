@@ -7,7 +7,7 @@ on the target database. Never invent an event table: funding has no
 `funding_operation_events` relation.
 
 The lists below were generated from the local PostgreSQL schema after migration
-`0231`; migrations under `packages/db/migrations/` remain the authoritative
+`0234`; migrations under `packages/db/migrations/` remain the authoritative
 history. When a migration changes one of these relations, update this file in
 the same change.
 

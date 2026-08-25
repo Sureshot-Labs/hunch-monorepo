@@ -79,7 +79,10 @@ import {
 import { buildTelegramAccountValueMessage } from "../services/telegram-account-value.js";
 import { buildTelegramAccountValueUnavailableMessage } from "../services/telegram-account-value-contract.js";
 import type { AccountValueReadModel } from "../account-value/runtime-service.js";
-import { accountValueReadService } from "../account-value/runtime-read-service.js";
+import {
+  accountValueReadService,
+  estimateNativeSolUsd,
+} from "../account-value/runtime-read-service.js";
 import {
   resolveActiveTelegramAccountLink,
   sameActiveTelegramAccountLink,
@@ -239,8 +242,10 @@ const internalFundingOpenRouteBodySchema = internalFundingOpenBodySchema
   .extend({
     fundingRoute: z.enum([
       "limitless_base_usdc_direct_v1",
+      "limitless_solana_sol_retained_v1",
       "polymarket_polygon_pusd_direct_v1",
       "polymarket_polygon_usdce_wrap_v1",
+      "polymarket_solana_sol_retained_v1",
     ]),
   })
   .strict();
@@ -618,6 +623,11 @@ async function registerTelegramBotTradingRoutes(
   ) =>
     createTelegramFundingBuyContinuationDecorator({
       appBaseUrl,
+      inspectMiniAppFunding: (input, trade) =>
+        tradeShortfallFundingService.inspectMiniAppFunding(input, trade),
+      estimateRetainedSolUsd: async (raw) =>
+        (await estimateNativeSolUsd(raw))?.value ?? null,
+      invalidateAccountValue: accountValueReadService.invalidate,
       pool: routePool,
       trading: createTradingForRequest(request),
     });
@@ -899,8 +909,10 @@ async function registerTelegramBotTradingRoutes(
           chatId: request.body.chatId,
           choiceToken: {
             limitless_base_usdc_direct_v1: "ld",
+            limitless_solana_sol_retained_v1: "ls",
             polymarket_polygon_pusd_direct_v1: "pd",
             polymarket_polygon_usdce_wrap_v1: "pw",
+            polymarket_solana_sol_retained_v1: "ps",
           }[request.body.fundingRoute],
           contextId: opened.fundingContextId,
           idempotencyKey: `${request.body.idempotencyKey.slice(0, 177)}:route`,
@@ -1192,6 +1204,8 @@ async function registerTelegramBotTradingRoutes(
         appBaseUrl: request.body.appBaseUrl,
         chatId: String(request.body.chatId),
         db,
+        estimateRetainedSolUsd: async (raw) =>
+          (await estimateNativeSolUsd(raw))?.value ?? null,
         idempotencyKey: request.body.idempotencyKey,
         telegramMessageId: request.body.telegramMessageId,
         telegramMiniAppEnabled: request.body.telegramMiniAppEnabled,
@@ -1580,6 +1594,8 @@ async function registerTelegramBotTradingRoutes(
       appBaseUrl: request.body.appBaseUrl,
       callbackQuery: request.body.callbackQuery,
       db,
+      estimateRetainedSolUsd: async (raw) =>
+        (await estimateNativeSolUsd(raw))?.value ?? null,
       expectedIntentId: request.params?.id ?? null,
       expectedType: expectedType ?? null,
       log: app.log,
@@ -1614,6 +1630,8 @@ async function registerTelegramBotTradingRoutes(
       appBaseUrl: request.body.appBaseUrl,
       callbackQuery: request.body.callbackQuery,
       db,
+      estimateRetainedSolUsd: async (raw) =>
+        (await estimateNativeSolUsd(raw))?.value ?? null,
       expectedType: null,
       log: app.log,
       openFundingBuyReturn: (input) =>
@@ -1840,6 +1858,8 @@ async function registerTelegramBotTradingRoutes(
         chatId,
         contextId: request.params.id,
         db,
+        estimateRetainedSolUsd: async (raw) =>
+          (await estimateNativeSolUsd(raw))?.value ?? null,
         isLinkCurrent: async () =>
           sameActiveTelegramAccountLink(
             initialLink,

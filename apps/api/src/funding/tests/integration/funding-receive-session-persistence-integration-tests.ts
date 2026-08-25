@@ -128,10 +128,128 @@ function sessionInput(userId: string) {
   } as const;
 }
 
+function retainedSolSessionInput(userId: string) {
+  const destinationAsset = {
+    networkId: "evm:8453",
+    assetId: "0x2222222222222222222222222222222222222222",
+    decimals: 6,
+  } as const;
+  const solAsset = {
+    networkId: "solana:mainnet",
+    assetId: "11111111111111111111111111111111",
+    decimals: 9,
+  } as const;
+  const receiveTarget = {
+    receiveTargetId: "receive_target_retained_sol_12345678",
+    networkId: solAsset.networkId,
+    destinationAddress: "9xQeWvG816bUx9EPjHmaT23yvVMZq4XFmYdWkP3vZC8V",
+    acceptedAssets: [{ asset: solAsset, handling: "direct" as const }],
+    safeInstructions: ["Send only native SOL."],
+  } as const;
+  return {
+    userId,
+    venueId: "limitless",
+    destinationOptionId: "destination_retained_sol_12345678",
+    venueBindingOptionId: "binding_retained_sol_12345678",
+    destinationAsset,
+    destinationTargetSnapshot: {
+      locationId: "location_retained_destination_12345678",
+    },
+    venueBindingSnapshot: { bindingId: "binding_retained_sol_12345678" },
+    methods: [
+      {
+        methodId: "receive_method_retained_sol_12345678",
+        kind: "manual" as const,
+        safeLabel: "Send SOL",
+        ingress: {
+          ingressKind: "manual" as const,
+          sourceNetworkId: null,
+          sourceAsset: null,
+          receiveTargets: [receiveTarget],
+          recommendedReceiveTargetId: receiveTarget.receiveTargetId,
+          destinationOptionId: "destination_retained_sol_12345678",
+          destinationAddress: receiveTarget.destinationAddress,
+          requestedAmount: null,
+          amountSemantics: "minimum" as const,
+          expiresAt: new Date(NOW.getTime() + 86_400_000).toISOString(),
+          safeInstructions: ["Send only native SOL."],
+        },
+      },
+    ],
+    receiveTargets: [receiveTarget],
+    observationVariants: [
+      {
+        variantId: "ingress_variant_retained_sol_12345678",
+        networkId: solAsset.networkId,
+        asset: solAsset,
+        destinationAddress: receiveTarget.destinationAddress,
+        destinationLocationId: "location_retained_sol_12345678",
+        baselineRaw: "0",
+        baselineRevision: "baseline_revision_retained_sol_12345678",
+        observation: {
+          adapterId: "owned_wallet_liquid_balances_v1",
+          payload: { eventIdentity: "solana_native_transfer_v1" },
+        },
+        completion: { kind: "retained_owned_source_credit" as const },
+      },
+    ],
+    selectedReceiveTargetId: receiveTarget.receiveTargetId,
+    automationPolicy: {
+      stableConversion: "automatic_within_caps" as const,
+      volatileConversion: "review_required" as const,
+      maximumFeeUsd: "1",
+      maximumFeeBps: 500,
+      maximumSlippageBps: 100,
+    },
+    policyVersion: 1,
+    policyRevision: "policy_revision_retained_sol_12345678",
+    ownershipRevision: "ownership_revision_retained_sol_12345678",
+    expiresAt: new Date(NOW.getTime() + 86_400_000),
+    observeUntil: new Date(NOW.getTime() + 8 * 86_400_000),
+    now: NOW,
+  } as const;
+}
+
 const userId = await insertUser();
 let mergeTargetId: string | null = null;
 let genericOptionUserId: string | null = null;
+let retainedSolUserId: string | null = null;
 try {
+  retainedSolUserId = await insertUser();
+  const retainedInput = retainedSolSessionInput(retainedSolUserId);
+  const retainedSession = await createOrReuseFundingReceiveSession(
+    pool,
+    retainedInput,
+  );
+  const retainedReceipt = await insertFundingReceiveReceipt(pool, {
+    receiveSessionId: retainedSession.snapshot.session.receiveSessionId,
+    userId: retainedSolUserId,
+    variantId: retainedInput.observationVariants[0].variantId,
+    asset: retainedInput.observationVariants[0].asset,
+    destinationAddress: retainedInput.observationVariants[0].destinationAddress,
+    rawAmount: "52000000",
+    observationRevision: "retained_sol_observation_12345678",
+    observedAt: new Date(NOW.getTime() + 1_000),
+    status: "ready",
+    handling: "direct",
+    evidence: { test: "retained_owned_source_credit" },
+    now: new Date(NOW.getTime() + 1_000),
+  });
+  assert.equal(retainedReceipt.receipt.status, "ready");
+  assert.equal(retainedReceipt.receipt.childFundingOperationId, null);
+  const retainedPersistence = await pool.query<{
+    receipt_matches: boolean;
+  }>(
+    `select funding_receive_receipt_matches_frozen_variant(receipt)
+       as receipt_matches
+     from funding_receive_receipts receipt
+     where receipt.id = $1`,
+    [retainedReceipt.receipt.receiptId],
+  );
+  assert.deepEqual(retainedPersistence.rows[0], {
+    receipt_matches: true,
+  });
+
   genericOptionUserId = await insertUser();
   const genericInput = sessionInput(genericOptionUserId);
   const genericOpen = {
@@ -1044,6 +1162,19 @@ try {
       );
       await cleanup.query("delete from users where id = $1", [
         genericOptionUserId,
+      ]);
+    }
+    if (retainedSolUserId) {
+      await cleanup.query(
+        "delete from funding_receive_receipts where user_id = $1",
+        [retainedSolUserId],
+      );
+      await cleanup.query(
+        "delete from funding_receive_sessions where user_id = $1",
+        [retainedSolUserId],
+      );
+      await cleanup.query("delete from users where id = $1", [
+        retainedSolUserId,
       ]);
     }
     if (mergeTargetId) {

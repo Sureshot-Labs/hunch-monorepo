@@ -52,6 +52,7 @@ import {
   isTelegramAppHandoffV2TradeVenue,
   isTelegramSealedAppHandoffVenue,
   loadTelegramAppHandoffProjection,
+  matchesTelegramAppHandoffV2CurrentScope,
   resolveTelegramAppHandoffCurrentScope,
   telegramVenueFromSealedHandoffSnapshot,
 } from "../services/telegram-bot-trading.js";
@@ -547,6 +548,11 @@ async function registerTelegramRoutes(
           }
           try {
             return await materializeTelegramAppHandoffV2Funding({
+              assertCurrentScope: async (sealed) =>
+                matchesTelegramAppHandoffV2CurrentScope({
+                  db: sealed.db,
+                  sealed,
+                }),
               currentAuthorityFingerprint: scope.authorityFingerprint,
               currentPolicyRevision: scope.policyRevision,
               db: pool,

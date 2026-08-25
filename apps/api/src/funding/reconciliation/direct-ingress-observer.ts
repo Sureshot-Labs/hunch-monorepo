@@ -1,6 +1,7 @@
 import { tx, type Pool, type PoolClient } from "@hunch/infra";
 
 import { isRecord } from "../../lib/type-guards.js";
+import { SOLANA_NATIVE_ASSET } from "../domain/network-fees.js";
 import { canonicalJsonHash } from "../persistence/canonical.js";
 import type { AssetRef, FundingPurpose, JsonValue } from "../domain/types.js";
 import type { FundingOperationState } from "../domain/transitions.js";
@@ -28,6 +29,7 @@ export type DirectIngressObservationVariant = Readonly<{
   }>;
   completion:
     | Readonly<{ kind: "direct_destination_credit" }>
+    | Readonly<{ kind: "retained_owned_source_credit" }>
     | Readonly<{ kind: "child_funding_operation" }>
     | Readonly<{
         kind: "committed_venue_preparation";
@@ -125,6 +127,14 @@ export function parseDirectIngressObservationVariant(
   const completionKind = value.completion.kind;
   let completion: DirectIngressObservationVariant["completion"];
   if (completionKind === "direct_destination_credit") {
+    completion = { kind: completionKind };
+  } else if (completionKind === "retained_owned_source_credit") {
+    if (!sameAsset(asset, SOLANA_NATIVE_ASSET)) {
+      throw new FundingPersistenceError(
+        "quote_mismatch",
+        "retained owned source credit is limited to native SOL",
+      );
+    }
     completion = { kind: completionKind };
   } else if (completionKind === "child_funding_operation") {
     completion = { kind: completionKind };

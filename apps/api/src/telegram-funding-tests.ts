@@ -6,6 +6,8 @@ import { readFileSync } from "node:fs";
 import { stableWalletOpaqueId } from "./account-value/canonical.js";
 import { listFundingReceiveReceiptsForRouting } from "./funding/persistence/funding-receive-session-repository.js";
 import { fundingSidecarRuntimeConfig } from "./funding/runtime/sidecar-runtime-config.js";
+import { compileFundingIntentPolicy } from "./funding/policies/funding-policy-v2.js";
+import { RELAY_PINNED_ASSETS } from "./funding-providers/relay/mappings.js";
 import { isFundingReconciliationSchemaReady } from "./funding/worker/funding-reconciliation-worker.js";
 import { isTelegramFundingReceiveControllerCurrent } from "./funding/execution/telegram-funding-managed-wallet.js";
 import { parseTelegramRelayEvmAutomationPolicyV3 } from "./funding/execution/telegram-funding-automation-policy.js";
@@ -61,6 +63,9 @@ import {
   classifyTelegramRelayFrozenCapability,
   relayEvmFrozenConsentConfiguration,
   resolveTelegramFundingReceiptDisposition,
+  telegramFundingRouteDescriptorForChoiceToken,
+  telegramFundingRouteDescriptorForRouteKey,
+  telegramSolanaRetainedDepositRouteForPolicy,
   telegramPolygonFundingPresentation,
 } from "./services/telegram-funding-route.js";
 import {
@@ -715,7 +720,13 @@ const baseUsdc = {
   assetId: fundingSidecarRuntimeConfig.limitlessUsdcAddress,
   decimals: 6,
 } as const;
+const sol = {
+  networkId: "solana:mainnet",
+  assetId: RELAY_PINNED_ASSETS.solanaNative,
+  decimals: 9,
+} as const;
 const address = "0x1111111111111111111111111111111111111111";
+const solanaAddress = "9xQeWvG816bUx9EPjHmaT23yvVMX2wQ3a4K8Z2ZXyvN8";
 const expiresAt = "2026-08-06T12:00:00.000Z";
 const renderCoordinator = {
   claim: async () => {},
@@ -1226,6 +1237,41 @@ const limitlessVariant: DirectIngressObservationVariant = {
   completion: { kind: "direct_destination_credit" },
 };
 
+const solanaRetainedVariant: DirectIngressObservationVariant = {
+  variantId: "variant-solana-native-sol-retained",
+  networkId: "solana:mainnet",
+  asset: sol,
+  destinationAddress: solanaAddress,
+  destinationLocationId: "location-solana-native-sol",
+  baselineRaw: "0",
+  baselineRevision: "baseline-solana-native-sol",
+  observation: {
+    adapterId: "owned_wallet_liquid_balances_v1",
+    payload: { eventIdentity: "solana_native_transfer_v1" },
+  },
+  completion: { kind: "retained_owned_source_credit" },
+};
+
+const polymarketSolanaRetainedSession: FundingReceiveSession = {
+  ...session,
+  receiveTargets: [
+    ...session.receiveTargets,
+    {
+      receiveTargetId: "receive-target-polymarket-solana-sol",
+      networkId: "solana:mainnet",
+      destinationAddress: solanaAddress,
+      acceptedAssets: [
+        {
+          asset: sol,
+          handling: "direct",
+          senderNativeFeeRequirement: null,
+        },
+      ],
+      safeInstructions: [],
+    },
+  ],
+};
+
 const relayBaseReceiveTargetId = "receive-target-polymarket-base-usdc";
 const relayBaseSession: FundingReceiveSession = {
   ...session,
@@ -1297,6 +1343,59 @@ const limitlessChoice = resolveTelegramFundingTargetChoice({
 assert.equal(limitlessChoice?.mode, "limitless_base_usdc_direct");
 assert.equal(limitlessChoice?.automaticConversion, false);
 assert.deepEqual(limitlessChoice?.variantIds, [limitlessVariant.variantId]);
+const polymarketSolanaRetainedChoice = resolveTelegramFundingTargetChoice({
+  automaticConversionEnabled: false,
+  session: polymarketSolanaRetainedSession,
+  observationVariants: [solanaRetainedVariant],
+  routeKey: "polymarket_solana_sol_retained_v1",
+});
+assert.equal(
+  polymarketSolanaRetainedChoice?.mode,
+  "polymarket_solana_sol_retained",
+);
+assert.equal(polymarketSolanaRetainedChoice?.automaticConversion, false);
+assert.deepEqual(polymarketSolanaRetainedChoice?.asset, sol);
+assert.deepEqual(polymarketSolanaRetainedChoice?.variantIds, [
+  solanaRetainedVariant.variantId,
+]);
+assert.equal(
+  telegramFundingRouteDescriptorForChoiceToken("ps")?.routeKey,
+  "polymarket_solana_sol_retained_v1",
+);
+assert.equal(
+  telegramFundingRouteDescriptorForRouteKey("polymarket_solana_sol_retained_v1")
+    ?.choiceToken,
+  "ps",
+);
+const solReceivePolicy = (venues: readonly ("limitless" | "polymarket")[]) =>
+  compileFundingIntentPolicy({
+    version: 2,
+    venues: [...venues],
+    receive: { assets: ["solana:sol"], privy: false },
+    paused: false,
+  });
+assert.equal(
+  telegramSolanaRetainedDepositRouteForPolicy(
+    solReceivePolicy(["polymarket", "limitless"]),
+  )?.choiceToken,
+  "ps",
+);
+assert.equal(
+  telegramSolanaRetainedDepositRouteForPolicy(solReceivePolicy(["limitless"]))
+    ?.choiceToken,
+  "ls",
+);
+assert.equal(
+  telegramSolanaRetainedDepositRouteForPolicy(
+    compileFundingIntentPolicy({
+      version: 2,
+      venues: ["polymarket"],
+      receive: { assets: [], privy: false },
+      paused: false,
+    }),
+  ),
+  null,
+);
 const limitlessTargetMessage = buildTelegramFundingTargetMessageForSession({
   contextId,
   expiresAt,
@@ -1605,7 +1704,7 @@ const receipt = (
   receiveSessionId,
   variantId: input.variantId ?? "variant-pusd",
   asset: input.asset,
-  destinationAddress: address,
+  destinationAddress: input.destinationAddress ?? address,
   rawAmount: input.rawAmount ?? "2500000",
   observationRevision: "observation-1",
   observedAt: input.observedAt ?? "2026-08-05T12:02:00.000Z",
@@ -2194,6 +2293,235 @@ const sufficientBuyReady = projectTelegramFundingProgress({
 assert.equal(sufficientBuyReady?.state, "ready");
 assert.equal(sufficientBuyReady?.terminal, true);
 assert.equal(sufficientBuyReady?.rawAmount, "3000000");
+
+const solanaRetainedConsent: TelegramFundingConsent = {
+  ...consent,
+  id: "consent-solana-native-sol-retained",
+  receiveTargetId: "receive-target-polymarket-solana-sol",
+  asset: sol,
+  variantIds: [solanaRetainedVariant.variantId],
+  policySnapshot: {
+    version: 1,
+    mode: "direct",
+    automationEnabled: false,
+    telegramPolicyRevision: "telegram-policy-sol-retained",
+    receiveAutomationPolicy:
+      polymarketSolanaRetainedSession.automationPolicy as never,
+    presentationMode: "polymarket_solana_sol_retained",
+    presentation: telegramPolygonFundingPresentation(
+      "polymarket_solana_sol_retained",
+    ),
+  },
+};
+const solanaRetainedReceipt = receipt({
+  asset: sol,
+  destinationAddress: solanaAddress,
+  handling: "direct",
+  rawAmount: "52000000",
+  status: "ready",
+  variantId: solanaRetainedVariant.variantId,
+});
+const genericSolanaRetained = projectTelegramFundingProgress({
+  consent: solanaRetainedConsent,
+  context,
+  receipts: [solanaRetainedReceipt],
+  session: { ...polymarketSolanaRetainedSession, status: "open", version: 2 },
+});
+assert.equal(genericSolanaRetained?.state, "ready");
+assert.equal(genericSolanaRetained?.terminal, true);
+assert.equal(genericSolanaRetained?.assetSymbol, "SOL");
+assert.ok(genericSolanaRetained);
+const genericSolanaRetainedMessage = buildTelegramFundingProgressMessage(
+  genericSolanaRetained,
+);
+assert.match(genericSolanaRetainedMessage.text, /SOL received/u);
+assert.match(genericSolanaRetainedMessage.text, /kept in your Solana wallet/u);
+assert.doesNotMatch(
+  genericSolanaRetainedMessage.text,
+  /available at Polymarket/u,
+);
+const retainedSolTestNow = new Date("2026-08-05T12:03:00.000Z");
+const retainedSolPresentation = {
+  consent: solanaRetainedConsent,
+  context,
+  message: genericSolanaRetainedMessage,
+  now: retainedSolTestNow,
+  presentationMode: "polymarket_solana_sol_retained" as const,
+  progress: genericSolanaRetained,
+  session: polymarketSolanaRetainedSession,
+};
+let retainedSolEstimateRaw: string | null = null;
+const retainedSolEstimatedMessage =
+  await telegramBotTradingTestHooks.decorateRetainedSolReceiptEstimate({
+    estimateRetainedSolUsd: async (raw) => {
+      retainedSolEstimateRaw = raw;
+      return "5.2";
+    },
+    invalidateAccountValue: (userId) => assert.equal(userId, context.userId),
+    presentation: retainedSolPresentation,
+  });
+assert.equal(retainedSolEstimateRaw, "52000000");
+assert.match(retainedSolEstimatedMessage.text, /Approximate value/u);
+assert.match(retainedSolEstimatedMessage.text.replaceAll("\\", ""), /\$5\.20/u);
+const retainedSolHandoffPlan = {
+  executionContractVersion: 2,
+  funding: {
+    discoveryRequest: {
+      deadline: "2026-08-05T12:05:00.000Z",
+      destinationOptionId: "destination-pm",
+      marketContextId: "market-context",
+      maxFeeUsd: "0.15",
+      maxSlippageBps: 500,
+      purpose: "trade_shortfall",
+      requestedDestinationAmount: { asset: pUsd, raw: "5000000" },
+      serverAdditionalDestinationAmount: { asset: pUsd, raw: "1200000" },
+      venueBindingOptionId: "binding-pm",
+      withdrawalRecipientId: null,
+      confirmedSourceAmount: null,
+    },
+    destination: {
+      controllerWalletId: "controller-pm",
+      destinationOptionId: "destination-pm",
+      requiredAsset: pUsd,
+      topology: "solana_relay_polygon_pusd",
+      venueBindingId: "venue-binding-pm",
+      venueBindingOptionId: "binding-pm",
+      venueId: "polymarket",
+    },
+    fundingPolicyRevision: "funding-policy-test",
+    sourceDebits: [
+      {
+        asset: sol,
+        locationId: "location-solana",
+        maximumRaw: "52000000",
+        sourceFingerprint: "a".repeat(64),
+      },
+    ],
+  },
+  kind: "funding",
+  trade: {},
+  version: 2,
+} as never;
+const retainedSolHandoffReview = (
+  await telegramBotTradingTestHooks.buildTelegramAppHandoffFundingReviewLines({
+    estimateRetainedSolUsd: async (raw) => {
+      assert.equal(raw, "52000000");
+      return "5.2";
+    },
+    plan: retainedSolHandoffPlan,
+  })
+)
+  .join("\n")
+  .replaceAll("\\", "");
+assert.match(retainedSolHandoffReview, /0\.052 SOL on Solana/u);
+assert.match(retainedSolHandoffReview, /≈ \$5\.20/u);
+assert.match(retainedSolHandoffReview, /≈ \$100\.00\/SOL/u);
+assert.match(retainedSolHandoffReview, /at least 1\.2 pUSD on Polygon/u);
+assert.match(retainedSolHandoffReview, /Maximum funding fees/u);
+const unpricedSolHandoffReview = (
+  await telegramBotTradingTestHooks.buildTelegramAppHandoffFundingReviewLines({
+    estimateRetainedSolUsd: async () => null,
+    plan: retainedSolHandoffPlan,
+  })
+)
+  .join("\n")
+  .replaceAll("\\", "");
+assert.match(unpricedSolHandoffReview, /0\.052 SOL on Solana/u);
+assert.doesNotMatch(unpricedSolHandoffReview, /\/SOL/u);
+
+const buySolanaRetained = projectTelegramFundingProgress({
+  consent: solanaRetainedConsent,
+  context: buyContext,
+  receipts: [solanaRetainedReceipt],
+  session: { ...polymarketSolanaRetainedSession, status: "open", version: 2 },
+});
+assert.equal(buySolanaRetained?.state, "funds_received");
+assert.equal(buySolanaRetained?.terminal, false);
+assert.equal(buySolanaRetained?.rawAmount, "52000000");
+assert.deepEqual(
+  buySolanaRetained &&
+    parseTelegramFundingProgressProjection(buySolanaRetained),
+  buySolanaRetained,
+);
+assert.ok(buySolanaRetained);
+assert.match(
+  buildTelegramFundingProgressMessage(buySolanaRetained).text,
+  /preparing the Mini App funding route/u,
+);
+const buySolanaRetainedMessage =
+  buildTelegramFundingProgressMessage(buySolanaRetained);
+for (const closedPresentation of [
+  {
+    consent: solanaRetainedConsent,
+    context: {
+      ...buyContext,
+      cancelledAt: retainedSolTestNow.toISOString(),
+    },
+    message: buySolanaRetainedMessage,
+    now: retainedSolTestNow,
+    presentationMode: "polymarket_solana_sol_retained" as const,
+    progress: buySolanaRetained,
+    session: {
+      ...polymarketSolanaRetainedSession,
+      status: "cancelled" as const,
+    },
+  },
+  {
+    consent: solanaRetainedConsent,
+    context: {
+      ...buyContext,
+      expiresAt: retainedSolTestNow.toISOString(),
+    },
+    message: buySolanaRetainedMessage,
+    now: retainedSolTestNow,
+    presentationMode: "polymarket_solana_sol_retained" as const,
+    progress: buySolanaRetained,
+    session: { ...polymarketSolanaRetainedSession, status: "expired" as const },
+  },
+]) {
+  let closedContextQueries = 0;
+  const closedMessage = await createTelegramFundingBuyContinuationDecorator({
+    pool: {
+      query: async () => {
+        closedContextQueries += 1;
+        throw new Error("closed funding must not inspect a Buy continuation");
+      },
+    } as never,
+    trading: {} as never,
+  })(closedPresentation);
+  assert.equal(closedContextQueries, 0);
+  assert.deepEqual(closedMessage, buySolanaRetainedMessage);
+}
+
+const solanaRetainedTargetMessage = buildTelegramFundingTargetMessageForSession(
+  {
+    contextId,
+    expiresAt,
+    session: polymarketSolanaRetainedSession,
+    targets: polymarketSolanaRetainedChoice
+      ? [
+          {
+            address: polymarketSolanaRetainedChoice.address,
+            destinationAsset: pUsd,
+            automaticSourceAsset: sol,
+            mode: polymarketSolanaRetainedChoice.mode,
+            presentation: polymarketSolanaRetainedChoice.presentation,
+            receiveTargetId: polymarketSolanaRetainedChoice.receiveTargetId,
+          },
+        ]
+      : [],
+  },
+);
+assert.equal(
+  solanaRetainedTargetMessage.reply_markup?.inline_keyboard
+    .flat()
+    .some(
+      (button) =>
+        "callback_data" in button &&
+        button.callback_data === `hm:v1:fund:select:${contextId}:ps`,
+    ),
+  true,
+);
 assert.ok(ready);
 assert.deepEqual(parseTelegramFundingProgressProjection(ready), ready);
 for (const malformed of [

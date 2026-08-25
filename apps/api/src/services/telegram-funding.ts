@@ -44,6 +44,7 @@ import { rearmTelegramFundingCurrentAddressDelivery } from "./telegram-funding-d
 import { runTelegramFundingProgressProjectionForContext } from "./telegram-funding-progress-projector.js";
 import {
   appendTelegramFundingBuyReturnInTransaction,
+  fetchActiveTelegramFundingBuyReturn,
   type TelegramFundingBuyContinuationMode,
 } from "./telegram-funding-buy-continuation.js";
 import {
@@ -98,6 +99,7 @@ import {
 import { venueLifecycleAllowsTradingAction } from "./venue-lifecycle.js";
 import {
   buildTelegramFundingAutomaticPolicyForRoute,
+  isTelegramSolanaRetainedFundingRouteKey,
   prepareTelegramFundingAutomaticVariantsForRoute,
   resolveTelegramFundingConsentRoute,
   resolveTelegramFundingConsentCapability,
@@ -108,6 +110,7 @@ import {
   resolveTelegramFundingTarget,
   resolveTelegramFundingTargets,
   resolveTelegramFundingTargetChoice,
+  telegramFundingRouteDescriptorForChoiceToken,
   type TelegramFundingReceivePresentationMode,
   type TelegramFundingTargetCapability,
 } from "./telegram-funding-route.js";
@@ -456,6 +459,18 @@ function rethrowTelegramFundingPersistenceError(error: unknown): never {
   throw error;
 }
 
+function canSelectRetainedSourceReceive(
+  input: Readonly<{
+    origin: "buy_return_context" | "generic_add_funds";
+    continuationMode: "app_handoff" | "bot_submit" | null;
+  }>,
+): boolean {
+  return (
+    input.origin === "generic_add_funds" ||
+    input.continuationMode === "app_handoff"
+  );
+}
+
 export function telegramFundingConsentPresentationMode(
   consent: TelegramFundingConsent,
   liveMode: TelegramFundingReceivePresentationMode | null,
@@ -503,10 +518,39 @@ export function canDiscloseTelegramFundingAddress(
   }>,
 ): boolean {
   return (
+    isTelegramFundingSessionActive(input) && input.projection?.terminal !== true
+  );
+}
+
+/** Financial continuation is allowed only while the receive context is open. */
+export function isTelegramFundingSessionActive(
+  input: Readonly<{
+    context: Pick<TelegramFundingSessionContext, "cancelledAt" | "expiresAt">;
+    now: Date;
+    session: Pick<FundingReceiveSession, "status">;
+  }>,
+): boolean {
+  return (
     !input.context.cancelledAt &&
     new Date(input.context.expiresAt).getTime() > input.now.getTime() &&
-    ["open", "processing", "review_required"].includes(input.session.status) &&
-    input.projection?.terminal !== true
+    ["open", "processing", "review_required"].includes(input.session.status)
+  );
+}
+
+/** A completed receive session may continue its Buy; closed/error states may not. */
+export function canContinueTelegramFundingBuyReturn(
+  input: Readonly<{
+    context: Pick<TelegramFundingSessionContext, "cancelledAt" | "expiresAt">;
+    now: Date;
+    session: Pick<FundingReceiveSession, "status">;
+  }>,
+): boolean {
+  return (
+    !input.context.cancelledAt &&
+    new Date(input.context.expiresAt).getTime() > input.now.getTime() &&
+    ["open", "processing", "review_required", "completed"].includes(
+      input.session.status,
+    )
   );
 }
 
@@ -2036,6 +2080,14 @@ export class TelegramFundingService {
       session: owned.receive.session,
       telegramUserId: owned.identity.telegramUserId,
     });
+    const activeBuyReturn =
+      owned.context.origin === "buy_return_context"
+        ? await fetchActiveTelegramFundingBuyReturn(this.pool, owned.context.id)
+        : null;
+    const retainedSourceReceiveAllowed = canSelectRetainedSourceReceive({
+      origin: owned.context.origin,
+      continuationMode: activeBuyReturn?.continuationMode ?? null,
+    });
     const liveCapability =
       owned.consent && consentRoute
         ? await this.resolveTargetCapability({
@@ -2135,7 +2187,11 @@ export class TelegramFundingService {
       ),
       targets: liveCapabilities.flatMap((candidate) =>
         candidate.authorization ||
-        candidate.target.automaticSourceAsset === null
+        candidate.target.automaticSourceAsset === null ||
+        (retainedSourceReceiveAllowed &&
+          isTelegramSolanaRetainedFundingRouteKey(
+            candidate.target.presentation.routeKey,
+          ))
           ? [candidate.target]
           : [],
       ),
@@ -2202,27 +2258,15 @@ export class TelegramFundingService {
     } catch (error) {
       rethrowTelegramFundingPersistenceError(error);
     }
-    const routeKeyByChoiceToken: Readonly<Record<string, string>> = {
-      a: "polymarket_polygon_pusd_usdce_v1",
-      b: "polymarket_base_usdc_relay_v1",
-      d: "polymarket_polygon_pusd_direct_v1",
-      l: "limitless_base_usdc_direct_v1",
-      p: "polymarket_polygon_pusd_direct_v1",
-      ld: "limitless_base_usdc_direct_v1",
-      le: "limitless_polygon_usdce_relay_v1",
-      ln: "limitless_polygon_usdc_relay_v1",
-      lp: "limitless_polygon_pusd_relay_v1",
-      pb: "polymarket_base_usdc_relay_v1",
-      pd: "polymarket_polygon_pusd_direct_v1",
-      pn: "polymarket_polygon_usdc_relay_v1",
-      pw: "polymarket_polygon_usdce_wrap_v1",
-    };
-    const selectedRouteKey = routeKeyByChoiceToken[input.choiceToken] ?? null;
-    const automaticConversionRequested =
-      selectedRouteKey != null && !selectedRouteKey.endsWith("_direct_v1");
-    if (!selectedRouteKey) {
+    const selectedDescriptor = telegramFundingRouteDescriptorForChoiceToken(
+      input.choiceToken,
+    );
+    if (!selectedDescriptor) {
       throw new TelegramFundingError("invalid_funding_choice");
     }
+    const selectedRouteKey = selectedDescriptor.routeKey;
+    const automaticConversionRequested =
+      selectedDescriptor.automaticServerExecution;
     const policy = await resolveSignalBotTradingPolicyStateFromDb(this.pool);
     if (!policy.policy.fundingReceiveEnabled) {
       throw new TelegramFundingError("funding_receive_disabled");
@@ -2242,6 +2286,23 @@ export class TelegramFundingService {
       new Date(snapshot.context.expiresAt).getTime() <= now.getTime()
     ) {
       throw new TelegramFundingError("funding_session_expired");
+    }
+    if (isTelegramSolanaRetainedFundingRouteKey(selectedRouteKey)) {
+      const activeBuyReturn =
+        snapshot.context.origin === "buy_return_context"
+          ? await fetchActiveTelegramFundingBuyReturn(
+              this.pool,
+              snapshot.context.id,
+            )
+          : null;
+      if (
+        !canSelectRetainedSourceReceive({
+          origin: snapshot.context.origin,
+          continuationMode: activeBuyReturn?.continuationMode ?? null,
+        })
+      ) {
+        throw new TelegramFundingError("invalid_funding_choice");
+      }
     }
     const receive = await loadTelegramFundingReceiveSession(
       this.receive,
@@ -2353,6 +2414,11 @@ export class TelegramFundingService {
         chatId: identity.chatId,
         telegramMessageId: input.telegramMessageId,
         controllerWalletId,
+        retainedSourceWalletAddress: isTelegramSolanaRetainedFundingRouteKey(
+          selectedRouteKey,
+        )
+          ? choice.address
+          : undefined,
         receiveTargetId: choice.receiveTargetId,
         asset: choice.asset,
         variantIds: consentVariants.map((variant) => variant.variantId).sort(),

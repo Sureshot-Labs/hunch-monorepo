@@ -1,5 +1,7 @@
 import type { DbQuery } from "../db.js";
+import { resolveFundingPolicy } from "../funding/policies/funding-policy-service.js";
 import type { TelegramBotTradingClientMessage } from "./telegram-bot-trading-client.js";
+import { telegramSolanaRetainedDepositRouteForPolicy } from "./telegram-funding-route.js";
 import {
   escapeTelegramMarkdownV2,
   formatTelegramCalloutMarkdownV2,
@@ -209,7 +211,38 @@ function buildDepositVenueMenu(
   };
 }
 
-function buildJustDepositMenu(): TelegramDepositMessage {
+async function managedSolReceiveChoiceToken(input: {
+  db: DbQuery;
+  telegramUserId?: string | number;
+}): Promise<string | null> {
+  if (input.telegramUserId == null) return null;
+  const [resolvedPolicy, managedWallet] = await Promise.all([
+    resolveFundingPolicy(input.db),
+    input.db.query<{ available: boolean }>(
+      `select exists (
+         select 1
+         from user_telegram_accounts telegram_account
+         join user_wallets managed_wallet
+           on managed_wallet.user_id = telegram_account.user_id
+          and managed_wallet.wallet_type = 'solana'
+          and managed_wallet.is_verified = true
+          and managed_wallet.is_internal_wallet = true
+          and managed_wallet.privy_wallet_id is not null
+         where telegram_account.telegram_user_id = $1
+       ) as available`,
+      [String(input.telegramUserId)],
+    ),
+  ]);
+  if (managedWallet.rows[0]?.available !== true) return null;
+  return (
+    telegramSolanaRetainedDepositRouteForPolicy(resolvedPolicy.runtime)
+      ?.choiceToken ?? null
+  );
+}
+
+function buildJustDepositMenu(input: {
+  solReceiveChoiceToken: string | null;
+}): TelegramDepositMessage {
   return {
     parse_mode: "MarkdownV2",
     reply_markup: {
@@ -224,6 +257,16 @@ function buildJustDepositMenu(): TelegramDepositMessage {
             text: "USDC.e · Polygon",
           },
         ],
+        ...(input.solReceiveChoiceToken
+          ? [
+              [
+                {
+                  callback_data: `hm:v1:deposit_route:${input.solReceiveChoiceToken}`,
+                  text: "SOL · Solana",
+                },
+              ],
+            ]
+          : []),
         [
           {
             callback_data: "hm:v1:deposit_route:ld",
@@ -246,6 +289,11 @@ function buildJustDepositMenu(): TelegramDepositMessage {
       "",
       `${telegramCustomEmojiMarkdownV2ForNetwork("Polygon")} ${formatTelegramFieldMarkdownV2("Polygon", "pUSD direct · USDC.e → pUSD")}`,
       `${telegramCustomEmojiMarkdownV2ForNetwork("Base")} ${formatTelegramFieldMarkdownV2("Base", "USDC direct to Limitless")}`,
+      ...(input.solReceiveChoiceToken
+        ? [
+            `${telegramCustomEmojiMarkdownV2ForNetwork("Solana")} ${formatTelegramFieldMarkdownV2("Solana", "SOL kept in your managed wallet")}`,
+          ]
+        : []),
       "",
       escapeTelegramMarkdownV2(
         "Relay routes that require a target venue are available after choosing that venue, not from Just Deposit.",
@@ -302,7 +350,14 @@ export async function buildTelegramDepositMessage(input: {
     ]);
     return buildDepositVenueMenu(venues, activeDeposit);
   }
-  if (requestedVenue === "any") return buildJustDepositMenu();
+  if (requestedVenue === "any") {
+    return buildJustDepositMenu({
+      solReceiveChoiceToken: await managedSolReceiveChoiceToken({
+        db: input.pool,
+        telegramUserId: input.telegramUserId,
+      }),
+    });
+  }
   // Financial addresses have one egress gateway: the durable funding outbox.
   // Explicit legacy callbacks (including future Relay venues) fail closed here.
   return buildLegacyDepositUnavailableMessage(requestedVenue);

@@ -3891,6 +3891,18 @@ const tests: TestCase[] = [
         false,
         "funding projection must not import API trading execution",
       );
+      assert.equal(
+        graph.has(
+          resolve(apiSrcDir, "account-value/pyth-sol-usd-price-adapter.ts"),
+        ),
+        false,
+        "finance-worker funding must not import the API-only Pyth reader",
+      );
+      assert.equal(
+        graph.has(resolve(apiSrcDir, "account-value/runtime-read-service.ts")),
+        false,
+        "finance-worker funding must not import the API snapshot runtime",
+      );
     },
   },
 ];

@@ -10,6 +10,7 @@ import { canonicalAssetKey } from "./canonical.js";
 
 export const EXACT_STABLE_PRICE_POLICY_ID = "exact-stable-policy-v1";
 export const STABLE_IMPAIRED_PRICE_POLICY_ID = "stable-impaired-v1";
+export const PYTH_SOL_USD_PRICE_POLICY_ID = "pyth-sol-usd-v1";
 
 export type StableImpairmentState =
   | Readonly<{ status: "healthy" }>

@@ -871,6 +871,11 @@ const solanaNative: DirectIngressObservationVariant = {
     decimals: 9,
   },
 };
+const retainedSolanaNative: DirectIngressObservationVariant = {
+  ...solanaNative,
+  variantId: "ingress_variant_solana_native_retained_12345678",
+  completion: { kind: "retained_owned_source_credit" },
+};
 const baseUsdc: DirectIngressObservationVariant = {
   ...direct,
   variantId: "ingress_variant_base_usdc_12345678",
@@ -905,6 +910,19 @@ assert.deepEqual(
     sessionStatus: "open",
     late: true,
   },
+);
+assert.deepEqual(
+  fundingReceiveObservationDisposition({
+    sessionStatus: "cancelled",
+    completion: retainedSolanaNative.completion,
+    handling: "direct",
+  }),
+  {
+    receiptStatus: "ready",
+    sessionStatus: "open",
+    late: true,
+  },
+  "late retained SOL remains an owned ready balance instead of a recovery incident",
 );
 assert.deepEqual(
   fundingReceiveObservationDisposition({

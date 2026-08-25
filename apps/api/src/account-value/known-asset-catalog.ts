@@ -1,5 +1,6 @@
 import type { AssetRef } from "../funding/domain/types.js";
 import { canonicalAssetKey } from "../funding/domain/asset-identity.js";
+import { SOLANA_NATIVE_ASSET } from "../funding/domain/network-fees.js";
 import { fundingSidecarRuntimeConfig } from "../funding/runtime/sidecar-runtime-config.js";
 
 export const POLYGON_NATIVE_USDC_ADDRESS =
@@ -70,11 +71,7 @@ const KNOWN_ACCOUNT_ASSETS: readonly KnownAccountAsset[] = [
     venueId: "kalshi",
   },
   {
-    asset: {
-      assetId: "11111111111111111111111111111111",
-      decimals: 9,
-      networkId: "solana:mainnet",
-    },
+    asset: SOLANA_NATIVE_ASSET,
     category: "cash",
     exactStable: false,
     symbol: "SOL",
@@ -100,4 +97,12 @@ export function resolveKnownAccountAssetSymbol(
   asset: AssetRef,
 ): KnownAccountAsset["symbol"] | null {
   return resolveKnownAccountAsset(asset)?.symbol ?? null;
+}
+
+export function isKnownNativeSolAsset(asset: AssetRef): boolean {
+  return (
+    asset.networkId === SOLANA_NATIVE_ASSET.networkId &&
+    asset.assetId === SOLANA_NATIVE_ASSET.assetId &&
+    asset.decimals === SOLANA_NATIVE_ASSET.decimals
+  );
 }

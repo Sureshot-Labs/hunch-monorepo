@@ -39,7 +39,10 @@ import {
   type FundingReceiveCanonicalEvent,
   type FundingReceiveEventScan,
 } from "./canonical-receive-event-scanner.js";
-import { fundingReceiveVariantHandling } from "../planner/receive-targets.js";
+import {
+  fundingReceiveVariantHandling,
+  isDirectReceiveCompletionKind,
+} from "../planner/receive-targets.js";
 
 type JsonRecord = Readonly<Record<string, JsonValue>>;
 
@@ -465,7 +468,7 @@ export function fundingReceiveObservationDisposition(
 }> {
   const late =
     input.sessionStatus === "expired" || input.sessionStatus === "cancelled";
-  const direct = input.completion.kind === "direct_destination_credit";
+  const direct = isDirectReceiveCompletionKind(input.completion.kind);
   const reviewRequired = input.handling === "review_required";
   if (late && !direct) {
     return {

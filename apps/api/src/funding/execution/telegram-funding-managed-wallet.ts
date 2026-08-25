@@ -133,6 +133,50 @@ export function resolveTelegramFundingManagedWalletIdentity(
   return resolveTelegramFundingManagedWallet(pool, input, false);
 }
 
+export async function isTelegramFundingManagedSolanaWalletCurrent(
+  pool: Pick<Pool, "query">,
+  input: Readonly<{
+    lock?: boolean;
+    telegramAccountId: string;
+    telegramUserId: string;
+    userId: string;
+    walletAddress: string;
+  }>,
+): Promise<boolean> {
+  const { rows } = await pool.query<{ user_wallet_id: string }>(
+    `
+      select managed_wallet.id as user_wallet_id
+      from users app_user
+      join user_telegram_accounts telegram_account
+        on telegram_account.id = $2::uuid
+       and telegram_account.user_id = app_user.id
+       and telegram_account.telegram_user_id = $3
+      join user_wallets managed_wallet
+        on managed_wallet.user_id = app_user.id
+       and managed_wallet.wallet_type = 'solana'
+       and managed_wallet.is_verified = true
+       and managed_wallet.is_internal_wallet = true
+       and managed_wallet.privy_wallet_id is not null
+       and funding_account_identifier_equal(
+             'solana:mainnet',
+             managed_wallet.wallet_address,
+             $4
+           )
+      where app_user.id = $1::uuid
+        and coalesce(app_user.is_active, true) = true
+      limit 2
+      ${input.lock ? "for share of app_user, telegram_account, managed_wallet" : ""}
+    `,
+    [
+      input.userId,
+      input.telegramAccountId,
+      input.telegramUserId,
+      input.walletAddress,
+    ],
+  );
+  return rows.length === 1;
+}
+
 export function resolveTelegramFundingProvisionWallet(
   pool: Pick<Pool, "query">,
   input: Readonly<{

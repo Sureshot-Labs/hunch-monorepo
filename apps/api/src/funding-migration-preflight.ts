@@ -1046,6 +1046,11 @@ export async function inspectFundingMigrationPreflight(
     ));
   const hasFundingReceiptVariantMatcher =
     hasTelegramFundingBuyReturns &&
+    (await functionDefinitionIncludes(
+      db,
+      "funding_receive_receipt_matches_frozen_variant",
+      ["retained_owned_source_credit"],
+    )) &&
     ((await functionDefinitionIncludes(
       db,
       "funding_receive_receipt_matches_frozen_variant",

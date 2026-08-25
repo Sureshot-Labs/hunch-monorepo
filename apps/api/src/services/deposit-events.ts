@@ -7,7 +7,10 @@ import {
   createNotificationSafe,
 } from "./notifications.js";
 import { canonicalizeBridgeOrderStatus } from "./bridge-status.js";
-import { RELAY_SOLVER } from "../funding-providers/relay/rehearsal.js";
+import {
+  RELAY_SOLVER,
+  SOLANA_NATIVE,
+} from "../funding-providers/relay/rehearsal.js";
 import { relayReferenceFingerprint } from "../funding-providers/relay/reference-codec.js";
 
 type Logger = {
@@ -66,6 +69,10 @@ type RelayFundingOutputMatch = {
   operationId: string;
   referenceMatched: boolean;
   destinationReferencesKnown: boolean;
+};
+
+type TelegramRetainedFundingMatch = {
+  fundingContextId: string;
 };
 
 type PolymarketFunderMovementMatch = {
@@ -521,6 +528,84 @@ async function findRelayFundingOutput(
   return unreferencedMatches.length === 1
     ? (unreferencedMatches[0] ?? null)
     : null;
+}
+
+async function findTelegramRetainedFundingInput(
+  db: DbQuery,
+  input: Readonly<{
+    event: PrivyFundsDepositedWebhook;
+    recipient: string | null;
+    userId: string;
+  }>,
+): Promise<TelegramRetainedFundingMatch | null> {
+  if (
+    resolveFundingNetworkId(input.event.caip2) !== "solana:mainnet" ||
+    input.event.asset.type !== "native-token" ||
+    !input.recipient ||
+    !input.event.transaction_hash?.trim()
+  ) {
+    return null;
+  }
+  const { rows } = await db.query<TelegramRetainedFundingMatch>(
+    `
+      select funding_context.id as "fundingContextId"
+      from telegram_funding_sessions funding_context
+      join telegram_funding_buy_return_revisions buy_return
+        on buy_return.telegram_funding_session_id = funding_context.id
+       and buy_return.revision = funding_context.active_buy_return_revision
+       and buy_return.continuation_mode = 'app_handoff'
+      join telegram_funding_consents funding_consent
+        on funding_consent.telegram_funding_session_id = funding_context.id
+       and funding_consent.revision = funding_context.active_consent_revision
+       and funding_consent.selected_asset_network_id = 'solana:mainnet'
+       and funding_consent.selected_asset_id = $2::text
+       and funding_consent.selected_asset_decimals = 9
+      join funding_receive_sessions receive_session
+        on receive_session.id = funding_context.receive_session_id
+       and receive_session.user_id = funding_context.user_id
+      join funding_receive_receipts receive_receipt
+        on receive_receipt.receive_session_id = receive_session.id
+       and receive_receipt.user_id = funding_context.user_id
+       and receive_receipt.variant_id =
+         any(funding_consent.consented_variant_ids)
+       and receive_receipt.status = 'ready'
+       and receive_receipt.handling = 'direct'
+       and receive_receipt.network_id = 'solana:mainnet'
+       and receive_receipt.asset_id = $2::text
+       and receive_receipt.asset_decimals = 9
+       and receive_receipt.destination_address = $3::text
+       and receive_receipt.evidence ->> 'transactionHash' = $4::text
+      cross join lateral jsonb_array_elements(
+        receive_session.observation_variants
+      ) receive_variant
+      where funding_context.user_id = $1::uuid
+        and funding_context.origin = 'buy_return_context'
+        and funding_context.active_buy_return_revision is not null
+        and funding_context.cancelled_at is null
+        and funding_context.expires_at > now()
+        and receive_session.status in (
+          'open', 'processing', 'review_required', 'recovery_required',
+          'completed'
+        )
+        and receive_variant -> 'completion' ->> 'kind' =
+          'retained_owned_source_credit'
+        and receive_variant ->> 'networkId' = 'solana:mainnet'
+        and receive_variant -> 'asset' ->> 'networkId' = 'solana:mainnet'
+        and receive_variant -> 'asset' ->> 'assetId' = $2::text
+        and receive_variant ->> 'variantId' =
+          any(funding_consent.consented_variant_ids)
+        and receive_variant ->> 'destinationAddress' = $3::text
+      order by funding_context.created_at desc, funding_context.id
+      limit 2
+    `,
+    [
+      input.userId,
+      SOLANA_NATIVE,
+      input.recipient,
+      input.event.transaction_hash.trim(),
+    ],
+  );
+  return rows.length === 1 ? (rows[0] ?? null) : null;
 }
 
 async function findBridgeOrderByTxHash(
@@ -1051,12 +1136,25 @@ export async function handlePrivyDepositWebhook(
           userId: wallet.user_id,
         })
       : null;
+  const retainedFundingInput =
+    !bridgeOrder &&
+    !knownAcrossBridgeDeposit &&
+    !venueCashDeposit &&
+    !internalMovement &&
+    !relayFundingOutput &&
+    wallet
+      ? await findTelegramRetainedFundingInput(db, {
+          event,
+          recipient,
+          userId: wallet.user_id,
+        })
+      : null;
   const status: DepositEventStatus =
     bridgeOrder || knownAcrossBridgeDeposit
       ? "ignored_bridge"
       : venueCashDeposit
         ? "ignored_venue"
-        : relayFundingOutput
+        : relayFundingOutput || retainedFundingInput
           ? "ignored_funding"
           : internalMovement
             ? "ignored_internal"
@@ -1198,6 +1296,28 @@ export async function handlePrivyDepositWebhook(
         txHash: event.transaction_hash ?? null,
       },
       "Privy deposit webhook suppressed because it matched a Relay funding output",
+    );
+    return { ok: true, duplicate, ignored: true, status: "ignored_funding" };
+  }
+
+  if (retainedFundingInput) {
+    if (row.status !== "ignored_funding") {
+      await updateDepositEventStatus(db, {
+        eventId: row.id,
+        status: "ignored_funding",
+        userId: wallet?.user_id ?? null,
+        walletAddress: wallet?.wallet_address ?? recipient,
+        walletType: wallet?.wallet_type ?? walletType,
+      });
+    }
+    logger?.info?.(
+      {
+        depositEventId: row.id,
+        fundingContextId: retainedFundingInput.fundingContextId,
+        recipient,
+        txHash: event.transaction_hash ?? null,
+      },
+      "Privy deposit webhook suppressed because its retained SOL receipt belongs to the Telegram Buy lifecycle",
     );
     return { ok: true, duplicate, ignored: true, status: "ignored_funding" };
   }

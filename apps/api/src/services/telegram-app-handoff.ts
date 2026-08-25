@@ -555,6 +555,8 @@ async function withCurrentTelegramAppHandoff<T>(
  * receives its hash.
  */
 export async function issueTelegramAppHandoff(input: {
+  /** Optional product-specific live fence, evaluated inside the issue tx. */
+  assertCurrentIntent?: (client: Pick<PoolClient, "query">) => Promise<boolean>;
   authorityFingerprint: string;
   /**
    * A Pool starts the atomic issue transaction here. A transaction client is
@@ -619,6 +621,12 @@ export async function issueTelegramAppHandoff(input: {
   const allowedIntentActions = v2Action ? [v2Action] : ["buy"];
 
   const issueInTransaction = async (client: Pick<PoolClient, "query">) => {
+    if (
+      input.assertCurrentIntent &&
+      !(await input.assertCurrentIntent(client))
+    ) {
+      throw new TelegramAppHandoffError("policy_changed");
+    }
     const inserted = await client.query<TelegramAppHandoffRow>(
       `insert into telegram_app_handoffs (
          trade_intent_id,

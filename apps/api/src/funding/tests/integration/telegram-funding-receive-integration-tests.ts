@@ -4,12 +4,14 @@
 
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
+import { Keypair } from "@solana/web3.js";
 
 import "../../../integration-test-database-guard.js";
 import { stableWalletOpaqueId } from "../../../account-value/canonical.js";
 import { AuthService } from "../../../auth.js";
 import { pool } from "../../../db.js";
 import { fundingSidecarRuntimeConfig } from "../../runtime/sidecar-runtime-config.js";
+import { SOLANA_NATIVE_ASSET } from "../../domain/network-fees.js";
 import { canonicalJsonHash } from "../../persistence/canonical.js";
 import { resolveTelegramFundingManagedWalletIdentity } from "../../execution/telegram-funding-managed-wallet.js";
 import { lockTelegramFundingLinkLifecycle } from "../../execution/telegram-funding-link-lifecycle-lock.js";
@@ -1277,6 +1279,250 @@ try {
   assert.deepEqual(replayedConsent.mutationResponse, {
     text: "verified pUSD address",
   });
+  const guardedRetainedReceive = await createOrReuseFundingReceiveSession(
+    pool,
+    {
+      ...canonicalInput,
+      destinationOptionId: `retained-guard-destination-${suffix}`,
+      venueBindingOptionId: `retained-guard-binding-${suffix}`,
+      ownershipRevision: `retained-guard-owner-${suffix}`,
+      policyRevision: `retained-guard-policy-${suffix}`,
+      now: new Date(now.getTime() + 1_000),
+    },
+  );
+  const guardedRetainedContext = await createOrReuseTelegramFundingSession(
+    pool,
+    {
+      userId,
+      telegramAccountId,
+      telegramUserId,
+      chatId: telegramUserId,
+      telegramMessageId: 3333,
+      receiveSessionId:
+        guardedRetainedReceive.snapshot.session.receiveSessionId,
+      idempotencyKey: `retained-guard-open-${suffix}`,
+      expiresAt: new Date(guardedRetainedReceive.snapshot.session.expiresAt),
+      initialBuyReturn: {
+        eventId: null,
+        marketId: `retained-guard-market-${suffix}`,
+        minimumFundingUsd: "1",
+        requestedSpendUsd: "1",
+        side: "YES",
+      },
+      now: new Date(now.getTime() + 1_001),
+    },
+  );
+  await assert.rejects(
+    appendTelegramFundingConsent(pool, {
+      contextId: guardedRetainedContext.context.id,
+      userId,
+      telegramAccountId,
+      telegramUserId,
+      chatId: telegramUserId,
+      telegramMessageId: 3333,
+      controllerWalletId,
+      receiveTargetId,
+      asset: SOLANA_NATIVE_ASSET,
+      variantIds: ["crafted-retained-sol-variant"],
+      automationEnabled: false,
+      policySnapshot: {
+        mode: "polymarket_solana_sol_retained",
+      },
+      fingerprint: hash("crafted-retained-sol-consent"),
+      now: new Date(now.getTime() + 1_002),
+    }),
+    (error: unknown) =>
+      error instanceof TelegramFundingPersistenceError &&
+      error.code === "telegram_funding_session_unavailable",
+    "native SOL consent must fail at the transaction boundary without an active app-handoff Buy return",
+  );
+  await cancelTelegramFundingSessionContext(pool, {
+    contextId: guardedRetainedContext.context.id,
+    userId,
+    telegramAccountId,
+    telegramUserId,
+    chatId: telegramUserId,
+    telegramMessageId: 3333,
+    idempotencyKey: `retained-guard-cancel-${suffix}`,
+    requestFingerprint: hash("retained-guard-cancel"),
+    responsePayload: { text: "cancelled" },
+    now: new Date(now.getTime() + 1_003),
+  });
+  const retainedSolWalletAddress = Keypair.generate().publicKey.toBase58();
+  const retainedSolTargetId = `retained-sol-target-${suffix}`;
+  const retainedSolVariantId = `retained-sol-variant-${suffix}`;
+  const canonicalMethod = canonicalInput.methods[0];
+  assert.ok(canonicalMethod);
+  await pool.query(
+    `insert into user_wallets (
+       user_id, wallet_address, wallet_type, is_primary, is_verified,
+       privy_wallet_id, wallet_source, is_internal_wallet,
+       privy_profile_updated_at
+     ) values ($1, $2, 'solana', false, true, $3, 'embedded', true, $4)`,
+    [userId, retainedSolWalletAddress, `solana-${suffix}`, now],
+  );
+  const retainedSolReceive = await createOrReuseFundingReceiveSession(pool, {
+    ...canonicalInput,
+    destinationOptionId: `retained-sol-destination-${suffix}`,
+    venueBindingOptionId: `retained-sol-binding-${suffix}`,
+    ownershipRevision: `retained-sol-owner-${suffix}`,
+    policyRevision: `retained-sol-policy-${suffix}`,
+    methods: [
+      {
+        ...canonicalMethod,
+        methodId: `retained-sol-method-${suffix}`,
+        ingress: {
+          ...canonicalMethod.ingress,
+          destinationOptionId: `retained-sol-destination-${suffix}`,
+          receiveTargets: [
+            {
+              acceptedAssets: [
+                { asset: SOLANA_NATIVE_ASSET, handling: "direct" as const },
+              ],
+              destinationAddress: retainedSolWalletAddress,
+              networkId: SOLANA_NATIVE_ASSET.networkId,
+              receiveTargetId: retainedSolTargetId,
+              safeInstructions: [],
+            },
+          ],
+          recommendedReceiveTargetId: retainedSolTargetId,
+        },
+      },
+    ],
+    receiveTargets: [
+      {
+        acceptedAssets: [
+          { asset: SOLANA_NATIVE_ASSET, handling: "direct" as const },
+        ],
+        destinationAddress: retainedSolWalletAddress,
+        networkId: SOLANA_NATIVE_ASSET.networkId,
+        receiveTargetId: retainedSolTargetId,
+        safeInstructions: [],
+      },
+    ],
+    observationVariants: [
+      {
+        asset: SOLANA_NATIVE_ASSET,
+        baselineRaw: "0",
+        baselineRevision: `retained-sol-baseline-${suffix}`,
+        completion: { kind: "retained_owned_source_credit" as const },
+        destinationAddress: retainedSolWalletAddress,
+        destinationLocationId: `retained-sol-location-${suffix}`,
+        networkId: SOLANA_NATIVE_ASSET.networkId,
+        observation: {
+          adapterId: "owned_destination_spendability_v1",
+          payload: {},
+        },
+        variantId: retainedSolVariantId,
+      },
+    ],
+    now: new Date(now.getTime() + 1_004),
+  });
+  const retainedSolContext = await createOrReuseTelegramFundingSession(pool, {
+    userId,
+    telegramAccountId,
+    telegramUserId,
+    chatId: telegramUserId,
+    telegramMessageId: 3334,
+    receiveSessionId: retainedSolReceive.snapshot.session.receiveSessionId,
+    idempotencyKey: `retained-sol-open-${suffix}`,
+    expiresAt: new Date(retainedSolReceive.snapshot.session.expiresAt),
+    now: new Date(now.getTime() + 1_005),
+  });
+  const retainedSolConsentInput = {
+    contextId: retainedSolContext.context.id,
+    userId,
+    telegramAccountId,
+    telegramUserId,
+    chatId: telegramUserId,
+    telegramMessageId: 3334,
+    controllerWalletId,
+    retainedSourceWalletAddress: retainedSolWalletAddress,
+    receiveTargetId: retainedSolTargetId,
+    asset: SOLANA_NATIVE_ASSET,
+    variantIds: [retainedSolVariantId],
+    automationEnabled: false,
+    policySnapshot: {
+      mode: "direct",
+      presentationMode: "polymarket_solana_sol_retained",
+      presentation: { routeKey: "polymarket_solana_sol_retained_v1" },
+    },
+    fingerprint: hash("retained-sol-consent-current-wallet"),
+    now: new Date(now.getTime() + 1_006),
+  } as const;
+  const retainedSolConsent = await appendTelegramFundingConsent(
+    pool,
+    retainedSolConsentInput,
+  );
+  assert.equal(retainedSolConsent.consent.asset.networkId, "solana:mainnet");
+  await pool.query(
+    `update user_wallets
+        set is_verified = false, updated_at = now()
+      where user_id = $1::uuid
+        and wallet_type = 'solana'
+        and wallet_address = $2`,
+    [userId, retainedSolWalletAddress],
+  );
+  await assert.rejects(
+    appendTelegramFundingConsent(pool, {
+      ...retainedSolConsentInput,
+      fingerprint: hash("retained-sol-consent-stale-wallet"),
+      now: new Date(now.getTime() + 1_007),
+    }),
+    (error: unknown) =>
+      error instanceof TelegramFundingPersistenceError &&
+      error.code === "telegram_funding_session_unavailable",
+    "retained SOL consent must recheck the exact current managed Solana wallet under lock",
+  );
+  await pool.query(
+    `update user_wallets
+        set is_verified = true, updated_at = now()
+      where user_id = $1::uuid
+        and wallet_type = 'solana'
+        and wallet_address = $2`,
+    [userId, retainedSolWalletAddress],
+  );
+  await cancelTelegramFundingSessionContext(pool, {
+    contextId: retainedSolContext.context.id,
+    userId,
+    telegramAccountId,
+    telegramUserId,
+    chatId: telegramUserId,
+    telegramMessageId: 3334,
+    idempotencyKey: `retained-sol-cancel-${suffix}`,
+    requestFingerprint: hash("retained-sol-cancel"),
+    responsePayload: { text: "cancelled" },
+    now: new Date(now.getTime() + 1_008),
+  });
+  const retainedSolCleanup = await pool.connect();
+  try {
+    await retainedSolCleanup.query("begin");
+    await retainedSolCleanup.query(
+      "set local session_replication_role = replica",
+    );
+    await retainedSolCleanup.query(
+      "delete from telegram_funding_mutations where funding_context_id = $1",
+      [retainedSolContext.context.id],
+    );
+    await retainedSolCleanup.query(
+      "delete from telegram_funding_consents where telegram_funding_session_id = $1",
+      [retainedSolContext.context.id],
+    );
+    await retainedSolCleanup.query(
+      "delete from telegram_funding_sessions where id = $1",
+      [retainedSolContext.context.id],
+    );
+    await retainedSolCleanup.query(
+      "delete from funding_receive_sessions where id = $1",
+      [retainedSolReceive.snapshot.session.receiveSessionId],
+    );
+    await retainedSolCleanup.query("commit");
+  } catch (error) {
+    await retainedSolCleanup.query("rollback");
+    throw error;
+  } finally {
+    retainedSolCleanup.release();
+  }
   const buyAttachmentClient = await pool.connect();
   try {
     await buyAttachmentClient.query("begin");

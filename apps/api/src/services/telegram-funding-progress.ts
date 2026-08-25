@@ -24,6 +24,7 @@ import type {
   TelegramFundingSessionContext,
 } from "./telegram-funding-sessions.js";
 import {
+  isTelegramSolanaRetainedFundingMode,
   parseTelegramFundingRoutePresentation,
   resolveTelegramFundingConsentRoute,
   type TelegramFundingRoute,
@@ -443,6 +444,25 @@ export function projectTelegramFundingProgress(input: {
   const allSourceReady =
     sourceReceipts.length > 0 &&
     sourceReceipts.every((receipt) => receipt.status === "ready");
+  if (allSourceReady && isTelegramSolanaRetainedFundingMode(route.mode)) {
+    // A canonical SOL receipt proves only that the owned Solana wallet now
+    // holds the source asset. It is terminal for generic Add Funds, but it is
+    // never venue-readiness evidence for a Buy. The API decorator may now
+    // build the ordinary client-executed funding plan from this fresh source.
+    return projection({
+      assetSymbol:
+        presentation.automaticSourceAssetSymbol ??
+        presentation.destinationAssetSymbol,
+      context: input.context,
+      presentation,
+      receipts: sourceReceipts,
+      state:
+        input.context.origin === "buy_return_context"
+          ? "funds_received"
+          : "ready",
+      terminal: input.context.origin !== "buy_return_context",
+    });
+  }
   if (readyDestination.length > 0 || allSourceReady) {
     const readyReceipts =
       readyDestination.length > 0 ? readyDestination : sourceReceipts;

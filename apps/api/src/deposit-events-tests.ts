@@ -60,6 +60,11 @@ type MockDbOptions = {
     referenceMatched: boolean;
     destinationReferencesKnown: boolean;
   }>;
+  retainedFundingContextId?: string | null;
+  retainedFundingContinuationMode?: "app_handoff" | "bot_submit";
+  retainedFundingConsentAssetId?: string | null;
+  retainedFundingTransactionHash?: string | null;
+  retainedFundingVariantConsented?: boolean;
 };
 
 type MockDb = DbQuery & {
@@ -206,6 +211,33 @@ function createMockDb(options: MockDbOptions): MockDb {
           : []);
       return {
         rows: relayFundingMatches as unknown as T[],
+      };
+    }
+
+    if (/from telegram_funding_sessions funding_context/i.test(sql)) {
+      const selectedAssetId =
+        options.retainedFundingConsentAssetId === undefined
+          ? params?.[1]
+          : options.retainedFundingConsentAssetId;
+      const retainedTransactionHash =
+        options.retainedFundingTransactionHash === undefined
+          ? params?.[3]
+          : options.retainedFundingTransactionHash;
+      const eligible =
+        options.retainedFundingContinuationMode !== "bot_submit" &&
+        selectedAssetId != null &&
+        selectedAssetId === params?.[1] &&
+        retainedTransactionHash === params?.[3] &&
+        options.retainedFundingVariantConsented !== false;
+      return {
+        rows:
+          options.retainedFundingContextId && eligible
+            ? ([
+                {
+                  fundingContextId: options.retainedFundingContextId,
+                },
+              ] as unknown as T[])
+            : [],
       };
     }
 
@@ -483,6 +515,144 @@ const tests: TestCase[] = [
           "an internal Relay output stays suppressed after handoff or Buy cancellation",
         );
       });
+    },
+  },
+  {
+    name: "Telegram retained SOL input updates the Buy lifecycle without a duplicate deposit notification",
+    run: async () => {
+      await withRedisDisabled(async () => {
+        const solanaWallet = "F7RnPp1GebLJkGspGCct38QqyRVxgoYWpkzUSXUDaYay";
+        const db = createMockDb({
+          wallet: {
+            userId: "user-1",
+            walletAddress: solanaWallet,
+            walletType: "solana",
+          },
+          retainedFundingContextId: "retained-funding-context-1",
+        });
+
+        const result = await handlePrivyDepositWebhook(db, {
+          ...basePayload,
+          asset: { type: "native-token" },
+          amount: "52000000",
+          caip2: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+          idempotency_key: "deposit-key-retained-sol",
+          recipient: solanaWallet,
+          sender: "solana-external-sender",
+          transaction_hash: "solana-retained-sol-transaction",
+        });
+
+        assert.deepEqual(result, {
+          ok: true,
+          duplicate: false,
+          ignored: true,
+          status: "ignored_funding",
+        });
+        assert.deepEqual(db.notificationInserts, []);
+        const retainedMatchQuery = db.calls.find(({ sql }) =>
+          /from telegram_funding_sessions funding_context/i.test(sql),
+        );
+        assert.ok(retainedMatchQuery);
+        assert.match(retainedMatchQuery.sql, /retained_owned_source_credit/u);
+        assert.match(retainedMatchQuery.sql, /buy_return_context/u);
+        assert.match(
+          retainedMatchQuery.sql,
+          /buy_return\.continuation_mode = 'app_handoff'/u,
+        );
+        assert.match(
+          retainedMatchQuery.sql,
+          /funding_consent\.revision = funding_context\.active_consent_revision/u,
+        );
+        assert.match(
+          retainedMatchQuery.sql,
+          /any\(funding_consent\.consented_variant_ids\)/u,
+        );
+        assert.match(
+          retainedMatchQuery.sql,
+          /receive_session\.status in \([\s\S]*?'completed'[\s\S]*?\)/u,
+          "a delayed webhook stays deduplicated after the retained receipt completes",
+        );
+        assert.match(
+          retainedMatchQuery.sql,
+          /receive_receipt\.evidence ->> 'transactionHash' = \$4::text/u,
+          "dedupe must bind the webhook to the exact canonical receipt",
+        );
+      });
+    },
+  },
+  {
+    name: "a later native SOL deposit to the same wallet is not swallowed by an old retained session",
+    run: async () => {
+      await withRedisDisabled(async () => {
+        const solanaWallet = "F7RnPp1GebLJkGspGCct38QqyRVxgoYWpkzUSXUDaYay";
+        const db = createMockDb({
+          wallet: {
+            userId: "user-1",
+            walletAddress: solanaWallet,
+            walletType: "solana",
+          },
+          retainedFundingContextId: "completed-retained-funding-context",
+          retainedFundingTransactionHash: "old-retained-sol-transaction",
+        });
+        const result = await handlePrivyDepositWebhook(db, {
+          ...basePayload,
+          asset: { type: "native-token" },
+          amount: "1000000",
+          caip2: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+          idempotency_key: "deposit-key-later-sol",
+          recipient: solanaWallet,
+          sender: "another-solana-sender",
+          transaction_hash: "later-unrelated-sol-transaction",
+        });
+        assert.equal(result.status, "notified");
+        assert.equal(db.notificationInserts[0]?.type, "deposit_received");
+      });
+    },
+  },
+  {
+    name: "unselected retained SOL variants keep ordinary deposit notifications",
+    run: async () => {
+      const solanaWallet = "F7RnPp1GebLJkGspGCct38QqyRVxgoYWpkzUSXUDaYay";
+      const ineligibleContexts = [
+        {
+          retainedFundingContinuationMode: "bot_submit" as const,
+        },
+        {
+          retainedFundingConsentAssetId: null,
+        },
+        {
+          retainedFundingConsentAssetId:
+            "So11111111111111111111111111111111111111112",
+        },
+        {
+          retainedFundingVariantConsented: false,
+        },
+      ];
+      for (const [index, retainedContext] of ineligibleContexts.entries()) {
+        await withRedisDisabled(async () => {
+          const db = createMockDb({
+            wallet: {
+              userId: "user-1",
+              walletAddress: solanaWallet,
+              walletType: "solana",
+            },
+            retainedFundingContextId: `ineligible-retained-context-${index}`,
+            ...retainedContext,
+          });
+          const result = await handlePrivyDepositWebhook(db, {
+            ...basePayload,
+            asset: { type: "native-token" },
+            amount: "52000000",
+            caip2: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+            idempotency_key: `deposit-key-unselected-sol-${index}`,
+            recipient: solanaWallet,
+            sender: "solana-external-sender",
+            transaction_hash: `solana-unselected-sol-transaction-${index}`,
+          });
+          assert.equal(result.status, "notified");
+          assert.equal(db.notificationInserts[0]?.type, "deposit_received");
+        });
+      }
     },
   },
   {

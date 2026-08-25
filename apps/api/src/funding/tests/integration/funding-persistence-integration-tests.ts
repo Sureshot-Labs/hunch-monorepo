@@ -21,6 +21,7 @@ import {
   claimTelegramAppHandoffV2FundedTradeAttemptInTransaction,
   claimTelegramAppHandoffV2DirectTradeSubmissionInTransaction,
   failTelegramAppHandoffV2DirectTradeSubmissionInTransaction,
+  type TelegramAppHandoffV2ScopeAssertion,
 } from "../../../repos/telegram-app-handoff-v2-direct-trade-repository.js";
 import {
   cancelTelegramAppHandoff,
@@ -4536,7 +4537,21 @@ async function testTelegramAppHandoffV2DirectTradeBinding(): Promise<void> {
       "v2 projection query must parse against the real handoff schema",
     );
     const binding = { handoffId, planFingerprint: fingerprint } as const;
-    const assertCurrentScope = async () => true;
+    const assertCurrentScope: TelegramAppHandoffV2ScopeAssertion = async (
+      sealed,
+    ) => {
+      assert.notEqual(
+        sealed.db,
+        client,
+        "the scope fence receives a query-only view, not reconnectable PoolClient",
+      );
+      const scopedIntent = await sealed.db.query<{ id: string }>(
+        "select id::text from telegram_trade_intents where id = $1::uuid",
+        [sealed.tradeIntentId],
+      );
+      assert.equal(scopedIntent.rows[0]?.id, sealed.tradeIntentId);
+      return true;
+    };
     const reconcileKeys = {
       orderHash: `0x${"ab".repeat(32)}`,
       tradeType: "clob" as const,

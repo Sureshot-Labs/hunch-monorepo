@@ -5,6 +5,7 @@ import type { Pool } from "@hunch/infra";
 import {
   directIngressSatisfiedAmount,
   DirectIngressDestinationObserver,
+  parseDirectIngressObservationVariant,
   selectDirectIngressVariant,
   type DirectIngressObservationTarget,
 } from "../../reconciliation/direct-ingress-observer.js";
@@ -47,6 +48,34 @@ const target: DirectIngressObservationTarget = {
     },
   ],
 };
+
+const retainedSolVariant = {
+  ...target.variants[0],
+  networkId: "solana:mainnet",
+  asset: {
+    networkId: "solana:mainnet",
+    assetId: "11111111111111111111111111111111",
+    decimals: 9,
+  },
+  destinationAddress: "11111111111111111111111111111111",
+  completion: { kind: "retained_owned_source_credit" },
+};
+assert.equal(
+  parseDirectIngressObservationVariant(retainedSolVariant).completion.kind,
+  "retained_owned_source_credit",
+);
+assert.throws(
+  () =>
+    parseDirectIngressObservationVariant({
+      ...retainedSolVariant,
+      asset: {
+        networkId: "solana:mainnet",
+        assetId: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+        decimals: 6,
+      },
+    }),
+  /limited to native SOL/u,
+);
 
 assert.equal(
   directIngressSatisfiedAmount({

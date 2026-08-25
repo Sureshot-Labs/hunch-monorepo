@@ -30,6 +30,7 @@ import {
 } from "../funding/planner/runtime-service.js";
 import { canonicalJsonHash } from "../funding/persistence/canonical.js";
 import { fetchFundingConsumerReservationForUser } from "../funding/persistence/funding-evidence-repository.js";
+import type { TelegramAppHandoffV2ScopeAssertion } from "../repos/telegram-app-handoff-v2-direct-trade-repository.js";
 import {
   commitTelegramAppHandoffWithExecution,
   resolveTelegramAppHandoff,
@@ -1847,6 +1848,7 @@ export async function resolveTelegramAppHandoffV2Execution(input: {
  * or release the sealed direct-Buy continuation to its web consumer.
  */
 export async function materializeTelegramAppHandoffV2Funding(input: {
+  assertCurrentScope: TelegramAppHandoffV2ScopeAssertion;
   currentAuthorityFingerprint: string;
   currentPolicyRevision: string;
   db: Pool;
@@ -1876,6 +1878,33 @@ export async function materializeTelegramAppHandoffV2Funding(input: {
     throw new TelegramAppHandoffError("not_committable");
   }
   const sealedPlan = parseV2Plan(handoff.planSnapshot);
+  const sealedAction = sealedPlan.trade.action === "sell" ? "sell" : "buy";
+  const sealedVenue = sealedPlan.trade.venue;
+  if (!isTelegramAppHandoffV2TradeVenue(sealedVenue)) {
+    throw new TelegramAppHandoffV2Error(
+      "plan_invalid",
+      "sealed handoff venue is unsupported",
+    );
+  }
+  const assertCurrentIntentScope = async (client: PoolClient) => {
+    const current = await input.assertCurrentScope({
+      action: sealedAction,
+      authorityFingerprint: handoff.authorityFingerprint,
+      // Keep the current commit transaction; exposing PoolClient.connect()
+      // would let a generic transaction helper misclassify it as a Pool.
+      db: { query: client.query.bind(client) },
+      policyRevision: handoff.policyRevision,
+      telegramUserId: input.telegramUserId,
+      tradeIntentId: handoff.tradeIntentId,
+      venue: sealedVenue,
+    });
+    if (!current) {
+      throw new TelegramAppHandoffV2Error(
+        "funding_policy_changed",
+        "wallet, funding context, or policy changed after Telegram confirmation",
+      );
+    }
+  };
   if (handoff.state !== "claimed" && handoff.state !== "committed") {
     throw new TelegramAppHandoffV2Error(
       "handoff_not_claimed",
@@ -1901,6 +1930,7 @@ export async function materializeTelegramAppHandoffV2Funding(input: {
   if (sealedPlan.kind === "direct_trade") {
     return commitTelegramAppHandoffWithExecution({
       commitExecution: async ({ client }) => {
+        await assertCurrentIntentScope(client);
         await assertTelegramAppHandoffV2DirectTradeInTransaction({
           client,
           sealedPlan,
@@ -1944,7 +1974,10 @@ export async function materializeTelegramAppHandoffV2Funding(input: {
   ) =>
     commitTelegramAppHandoffWithExecution({
       allowedIntentStatuses: ["funding"],
-      commitExecution,
+      commitExecution: async (context) => {
+        await assertCurrentIntentScope(context.client);
+        return commitExecution(context);
+      },
       currentAuthorityFingerprint: input.currentAuthorityFingerprint,
       executionKind: "funding",
       currentPolicyRevision: input.currentPolicyRevision,

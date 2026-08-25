@@ -136,6 +136,37 @@ export function scaleUnsignedDecimalByRawRatio(inputs: {
   return formatUnsignedDecimal(scaled, value.scale + additionalScale);
 }
 
+/**
+ * Derives a display-only unit value from an exact aggregate estimate without
+ * converting either monetary input through JavaScript `number`.
+ */
+export function unitPriceFromRawEstimate(inputs: {
+  decimals: number;
+  estimatedValue: string;
+  outputScale?: number;
+  raw: string;
+}): string {
+  if (
+    !Number.isInteger(inputs.decimals) ||
+    inputs.decimals < 0 ||
+    inputs.decimals > 36
+  ) {
+    throw new Error(`decimal scale is out of range: ${inputs.decimals}`);
+  }
+  if (!/^[1-9]\d*$/.test(inputs.raw)) {
+    throw new Error(`invalid positive raw amount: ${inputs.raw}`);
+  }
+  const outputScale = inputs.outputScale ?? 4;
+  if (!Number.isInteger(outputScale) || outputScale < 0 || outputScale > 18) {
+    throw new Error(`decimal output scale is out of range: ${outputScale}`);
+  }
+  const estimated = parseUnsignedDecimal(inputs.estimatedValue);
+  const numerator =
+    estimated.coefficient * powerOfTen(inputs.decimals + outputScale);
+  const denominator = BigInt(inputs.raw) * powerOfTen(estimated.scale);
+  return formatUnsignedDecimal(numerator / denominator, outputScale);
+}
+
 export function subtractUnsignedDecimals(
   minuend: string,
   subtrahend: string,

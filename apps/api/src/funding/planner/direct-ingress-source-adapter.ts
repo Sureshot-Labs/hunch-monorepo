@@ -87,6 +87,7 @@ type DirectIngressVariant = Readonly<{
   }>;
   completion:
     | Readonly<{ kind: "direct_destination_credit" }>
+    | Readonly<{ kind: "retained_owned_source_credit" }>
     | Readonly<{ kind: "child_funding_operation" }>
     | Readonly<{
         kind: "committed_venue_preparation";
@@ -405,6 +406,10 @@ function buildRoutedReceiveVariants(input: {
     ) {
       return [];
     }
+    const completionKind: DirectIngressVariant["completion"]["kind"] =
+      isNativeSolAsset(component.amount.asset)
+        ? "retained_owned_source_credit"
+        : "child_funding_operation";
     const destinationAddress = canonicalAccountAddress(
       component.amount.asset.networkId,
       address,
@@ -419,7 +424,7 @@ function buildRoutedReceiveVariants(input: {
           canonicalJsonHash({
             destinationAddress,
             asset: component.amount.asset,
-            completion: "child_funding_operation",
+            completion: completionKind,
             routeId: route.routeId,
           }),
         ),
@@ -446,7 +451,7 @@ function buildRoutedReceiveVariants(input: {
             walletExecutionProfile: profile,
           },
         },
-        completion: { kind: "child_funding_operation" as const },
+        completion: { kind: completionKind },
       },
     ];
   });
@@ -487,6 +492,10 @@ function buildRoutedReceiveVariants(input: {
       if (profiles.length !== 1) return [];
       const profile = profiles[0];
       if (!profile) return [];
+      const completionKind: DirectIngressVariant["completion"]["kind"] =
+        isNativeSolAsset(route.sourceAsset)
+          ? "retained_owned_source_credit"
+          : "child_funding_operation";
       const destinationAddress = canonicalAccountAddress(
         route.sourceAsset.networkId,
         profile.address,
@@ -519,7 +528,7 @@ function buildRoutedReceiveVariants(input: {
             canonicalJsonHash({
               destinationAddress,
               asset: route.sourceAsset,
-              completion: "child_funding_operation",
+              completion: completionKind,
               routeId: route.routeId,
             }),
           ),
@@ -546,7 +555,7 @@ function buildRoutedReceiveVariants(input: {
               walletExecutionProfile: profile,
             },
           },
-          completion: { kind: "child_funding_operation" as const },
+          completion: { kind: completionKind },
         },
       ];
     },

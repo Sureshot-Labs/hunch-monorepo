@@ -8,7 +8,10 @@ import type {
   ValuedAssetComponent,
   ValuedPositionComponent,
 } from "../funding/domain/types.js";
-import type { OwnershipGraph } from "../funding/domain/contracts.js";
+import type {
+  OwnershipGraph,
+  PriceAdapter,
+} from "../funding/domain/contracts.js";
 import type {
   FundingCreationMode,
   FundingRuntimePolicy,
@@ -52,6 +55,7 @@ import {
 import {
   EXACT_STABLE_PRICE_POLICY_ID,
   ExactStablePriceAdapter,
+  PYTH_SOL_USD_PRICE_POLICY_ID,
   resolveStableImpairmentState,
   STABLE_IMPAIRED_PRICE_POLICY_ID,
   ValuationService,
@@ -69,6 +73,7 @@ import {
   type FundingAccountValueFacts,
 } from "./funding-movement-feed.js";
 import {
+  isKnownNativeSolAsset,
   knownAccountAssets,
   resolveKnownAccountAsset,
 } from "./known-asset-catalog.js";
@@ -116,7 +121,9 @@ function knownAssetCatalog(): AccountAssetCatalogEntry[] {
     category: entry.category,
     pricePolicyId: entry.exactStable
       ? EXACT_STABLE_PRICE_POLICY_ID
-      : UNPRICED_POLICY_ID,
+      : isKnownNativeSolAsset(entry.asset)
+        ? PYTH_SOL_USD_PRICE_POLICY_ID
+        : UNPRICED_POLICY_ID,
     symbol: entry.symbol,
     venueId: entry.venueId,
     verified: true,
@@ -411,6 +418,7 @@ export async function buildAccountValueReadModel(inputs: {
   pool: Pool;
   userId: string;
   now?: Date;
+  additionalPriceAdapters?: readonly PriceAdapter[];
 }): Promise<AccountValueReadModel> {
   const now = inputs.now ?? new Date();
   const asOf = now.toISOString();
@@ -567,7 +575,10 @@ export async function buildAccountValueReadModel(inputs: {
   }));
   const valuationService = new ValuationService({
     policies: valuationPolicies,
-    adapters: [new ExactStablePriceAdapter(stableStates)],
+    adapters: [
+      new ExactStablePriceAdapter(stableStates),
+      ...(inputs.additionalPriceAdapters ?? []),
+    ],
     stableStates,
   });
   const valuedAssets = await valuationService.value(
@@ -602,7 +613,10 @@ export async function buildAccountValueReadModel(inputs: {
   );
   const movementValuationService = new ValuationService({
     policies: movementPolicies,
-    adapters: [new ExactStablePriceAdapter(stableStates)],
+    adapters: [
+      new ExactStablePriceAdapter(stableStates),
+      ...(inputs.additionalPriceAdapters ?? []),
+    ],
     stableStates,
   });
   const inTransitAssets = await movementValuationService.value(

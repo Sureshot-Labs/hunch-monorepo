@@ -16,6 +16,9 @@ import { env } from "./env.js";
 import { createTelegramBotTradingRoutes } from "./routes/telegram-bot-trading.js";
 import type { PrivyServerSignerStatus } from "./services/api-trading-wallet-signing.js";
 import type { ApiBotTradingExecutor } from "./services/api-trading-service.js";
+import { SOLANA_NATIVE_ASSET } from "./funding/domain/network-fees.js";
+import { fundingSidecarRuntimeConfig } from "./funding/runtime/sidecar-runtime-config.js";
+import { parseTelegramAppHandoffV2Plan } from "./services/telegram-app-handoff-v2.js";
 import {
   buildTelegramBotTradingMarketMessage,
   buildTelegramBotTradingStatusMessage,
@@ -585,6 +588,73 @@ try {
     true,
     "the initial preview must persist the v2 plan needed by its later Confirm callback",
   );
+  const initialDirectPlanResult = await client.query<{ plan: unknown }>(
+    `select result #> '{appHandoffV2,plan}' as plan
+       from telegram_trade_intents
+      where id = $1::uuid`,
+    [limitlessHandoffIntentId],
+  );
+  const initialDirectPlan = parseTelegramAppHandoffV2Plan(
+    initialDirectPlanResult.rows[0]?.plan as never,
+  );
+  assert.equal(initialDirectPlan.kind, "direct_trade");
+  const limitlessUsdc = {
+    assetId: fundingSidecarRuntimeConfig.limitlessUsdcAddress,
+    decimals: 6,
+    networkId: "evm:8453",
+  } as const;
+  const recoveredFundingPlan = parseTelegramAppHandoffV2Plan({
+    executionContractVersion: 2,
+    funding: {
+      discoveryRequest: {
+        confirmedSourceAmount: null,
+        consumerIntent: {
+          marketContextId: "limitless-yes",
+          marketId: limitlessMarketId,
+          side: "BUY",
+          spend: { asset: limitlessUsdc, raw: "1000000" },
+          venueId: "limitless",
+        },
+        deadline: new Date(Date.now() + 60_000).toISOString(),
+        destinationOptionId: "limitless-controller-usdc",
+        marketContextId: "limitless-yes",
+        maxFeeUsd: "1",
+        maxSlippageBps: 500,
+        purpose: "trade_shortfall",
+        requestedDestinationAmount: {
+          asset: limitlessUsdc,
+          raw: "1000000",
+        },
+        serverAdditionalDestinationAmount: {
+          asset: limitlessUsdc,
+          raw: "500000",
+        },
+        venueBindingOptionId: "limitless-controller-binding",
+        withdrawalRecipientId: null,
+      },
+      destination: {
+        controllerWalletId: `limitless-controller-${suffix}`,
+        destinationOptionId: "limitless-controller-usdc",
+        requiredAsset: limitlessUsdc,
+        topology: "solana_relay_base_usdc",
+        venueBindingId: "limitless-controller-binding",
+        venueBindingOptionId: "limitless-controller-binding",
+        venueId: "limitless",
+      },
+      fundingPolicyRevision: `funding-policy-${suffix}`,
+      sourceDebits: [
+        {
+          asset: SOLANA_NATIVE_ASSET,
+          locationId: `solana-wallet-${suffix}`,
+          maximumRaw: "52000000",
+          sourceFingerprint: "a".repeat(64),
+        },
+      ],
+    },
+    kind: "funding",
+    trade: initialDirectPlan.trade,
+    version: 2,
+  });
   await client.query(
     `update telegram_trade_intents
         set status = 'previewed',
@@ -722,6 +792,89 @@ try {
       )
     ).rows[0],
     { funding_state: "destination_ready", has_plan: true },
+  );
+  await client.query(
+    `delete from telegram_app_handoffs
+      where trade_intent_id = $1::uuid`,
+    [limitlessHandoffIntentId],
+  );
+  await client.query(
+    `update telegram_trade_intents
+        set status = 'previewed',
+            submit_started_at = null,
+            funding_operation_id = null,
+            result = (result - 'appHandoffV2') || jsonb_build_object(
+              'fundingState', 'deposit',
+              'stage', 'funding_preview'
+            ),
+            updated_at = now()
+      where id = $1::uuid`,
+    [limitlessHandoffIntentId],
+  );
+  const recoveredFromDeposit = await captureTelegramBotTradingCallback({
+    appBaseUrl: "https://app.hunch.trade",
+    callbackQuery: {
+      data: `hbt:retry_buy:${limitlessHandoffIntentId}`,
+      from: { id: telegramUserId as never },
+      id: `limitless-deposit-to-plan:${suffix}`,
+      message: {
+        chat: { id: telegramUserId, type: "private" },
+        message_id: 701,
+      },
+    },
+    db,
+    expectedIntentId: limitlessHandoffIntentId,
+    inspectMiniAppFunding: async () => ({
+      kind: "web_funding_plan",
+      plan: recoveredFundingPlan,
+    }),
+    inspectTradeShortfall: async () => ({
+      kind: "temporarily_unavailable",
+      reasonCodes: ["destination_unavailable"],
+    }),
+    signerInspector,
+    telegramMiniAppEnabled: true,
+    trading: limitlessTemporarilyUnavailableFundingTrading,
+  });
+  assert.equal(recoveredFromDeposit.handled, true);
+  assert.equal(
+    recoveredFromDeposit.intentStatus,
+    "confirming",
+    "a safe deposit preview must be replaceable by the exact sealed funding plan",
+  );
+  assert.match(
+    recoveredFromDeposit.messages.at(-1)?.text ?? "",
+    /Confirm buy/u,
+    "the replacement plan must immediately publish its one-click Review",
+  );
+  assert.equal(
+    recoveredFromDeposit.messages
+      .at(-1)
+      ?.reply_markup?.inline_keyboard.flat()
+      .some((button) => button.text === "Confirm buy" && "url" in button),
+    true,
+    "the Review must carry the pre-issued Mini App handoff instead of another callback",
+  );
+  assert.deepEqual(
+    (
+      await client.query<{
+        funding_state: string | null;
+        handoffs: string;
+        has_plan: boolean;
+      }>(
+        `select intent.result ? 'appHandoffV2' as has_plan,
+                intent.result ->> 'fundingState' as funding_state,
+                count(handoff.*)::text as handoffs
+           from telegram_trade_intents intent
+           left join telegram_app_handoffs handoff
+             on handoff.trade_intent_id = intent.id
+          where intent.id = $1::uuid
+          group by intent.id`,
+        [limitlessHandoffIntentId],
+      )
+    ).rows[0],
+    { funding_state: "web_funding_plan", handoffs: "1", has_plan: true },
+    "same-key recovery must create one durable plan and one handoff",
   );
   await client.query(
     `delete from telegram_app_handoffs

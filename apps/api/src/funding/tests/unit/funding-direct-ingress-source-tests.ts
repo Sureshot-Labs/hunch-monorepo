@@ -766,6 +766,7 @@ assert.deepEqual(
         adapterId: string;
         payload: Readonly<Record<string, unknown>>;
       };
+      completion: Readonly<{ kind: string }>;
     }>[]
   )
     .filter((variant) => variant.networkId === "solana:mainnet")
@@ -773,17 +774,20 @@ assert.deepEqual(
       assetId: variant.asset.assetId,
       adapterId: variant.observation.adapterId,
       balanceKey: variant.observation.payload.balanceKey,
+      completionKind: variant.completion.kind,
     })),
   [
     {
       assetId: SOLANA_USDC.assetId,
       adapterId: "owned_wallet_liquid_balances_v1",
       balanceKey: `solana:mainnet:${SOLANA_USDC.assetId}:6`,
+      completionKind: "child_funding_operation",
     },
     {
       assetId: SOLANA_NATIVE.assetId,
       adapterId: "owned_wallet_liquid_balances_v1",
       balanceKey: `solana:mainnet:${SOLANA_NATIVE.assetId}:9`,
+      completionKind: "retained_owned_source_credit",
     },
   ],
   "positive routed inventory must be re-read from its owned source wallet instead of destination spendability",
@@ -802,7 +806,7 @@ assert.deepEqual(
     },
     {
       assetId: SOLANA_NATIVE.assetId,
-      handling: "review_required",
+      handling: "direct",
     },
   ],
 );
