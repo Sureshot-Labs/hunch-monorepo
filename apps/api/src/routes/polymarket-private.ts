@@ -780,7 +780,7 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
       const result = await submitPolymarketClientSignedOrder({
         assertTelegramAppHandoffV2Scope: async (sealed) => {
           return matchesTelegramAppHandoffV2CurrentScope({
-            db: pool,
+            db: sealed.db,
             sealed,
           });
         },

@@ -30,6 +30,9 @@ type GroupedWalletBalance = {
   availableUnknownCount: number;
   cashComponentCount: number;
   decimals: number;
+  estimatedKnownCount: number;
+  estimatedUnknownCount: number;
+  estimatedUsd: string;
   freshness: "fresh" | "stale";
   network: string;
   symbol: string;
@@ -157,7 +160,7 @@ function parseRaw(value: string): bigint {
   return /^(0|[1-9]\d*)$/u.test(value) ? BigInt(value) : 0n;
 }
 
-function formatUsd(value: string): string {
+export function formatTelegramAccountValueUsd(value: string): string {
   try {
     if (value.length > 256) return "$—";
     const parsed = parseUnsignedDecimal(value);
@@ -259,11 +262,23 @@ function buildWalletGroups(account: AccountValueReadModel): {
       availableUnknownCount: 0,
       cashComponentCount: 0,
       decimals,
+      estimatedKnownCount: 0,
+      estimatedUnknownCount: 0,
+      estimatedUsd: "0",
       freshness: "fresh",
       network,
       symbol,
     };
     current.amountRaw += raw;
+    if (component.estimatedUsd) {
+      current.estimatedKnownCount += 1;
+      current.estimatedUsd = addUnsignedDecimals([
+        current.estimatedUsd,
+        component.estimatedUsd.value,
+      ]);
+    } else {
+      current.estimatedUnknownCount += 1;
+    }
     if (cashAvailabilityApplies) {
       current.cashComponentCount += 1;
       if (availabilityIsKnown(available)) {
@@ -487,18 +502,22 @@ export function buildTelegramAccountValueMessage(input: {
     "",
     formatTelegramFieldMarkdownV2(
       headlineLabel,
-      formatUsd(account.headline.estimatedUsd),
+      formatTelegramAccountValueUsd(account.headline.estimatedUsd),
     ),
     formatTelegramFieldMarkdownV2(
       cashLabel,
-      formatUsd(account.cashAvailability.cashAvailableEstimatedUsd),
+      formatTelegramAccountValueUsd(
+        account.cashAvailability.cashAvailableEstimatedUsd,
+      ),
     ),
   ];
   if (account.headline.mode !== "liquid_plus_positions") {
     lines.push(
       formatTelegramFieldMarkdownV2(
         portfolioPartial ? "Known portfolio value" : "Portfolio value",
-        formatUsd(account.projection.totalPortfolioEstimatedUsd),
+        formatTelegramAccountValueUsd(
+          account.projection.totalPortfolioEstimatedUsd,
+        ),
       ),
     );
   }
@@ -513,7 +532,7 @@ export function buildTelegramAccountValueMessage(input: {
   for (const venueId of ["polymarket", "limitless"] as const) {
     const venue = account.venues[venueId];
     const trading = venueTradingBalance({ account, venueId });
-    const routable = `${formatUsd(trading.routableUsd)} ${
+    const routable = `${formatTelegramAccountValueUsd(trading.routableUsd)} ${
       account.cashAvailability.completeness === "partial"
         ? "known routable · partial"
         : "routable"
@@ -521,8 +540,8 @@ export function buildTelegramAccountValueMessage(input: {
     const legacy =
       trading.legacyUsd === "0"
         ? null
-        : `${formatUsd(trading.legacyUsd)} legacy wallet`;
-    const portfolio = `${formatUsd(
+        : `${formatTelegramAccountValueUsd(trading.legacyUsd)} legacy wallet`;
+    const portfolio = `${formatTelegramAccountValueUsd(
       venue?.totalPortfolioEstimatedUsd ?? "0",
     )} ${portfolioPartial ? "known portfolio" : "portfolio"}`;
     lines.push(
@@ -538,7 +557,7 @@ export function buildTelegramAccountValueMessage(input: {
     prelude: [
       formatTelegramFieldMarkdownV2(
         "Estimated value",
-        formatUsd(account.projection.inTransitEstimatedUsd),
+        formatTelegramAccountValueUsd(account.projection.inTransitEstimatedUsd),
       ),
     ],
     rows: inTransit.map((item) => item.label),
@@ -569,6 +588,14 @@ export function buildTelegramAccountValueMessage(input: {
   });
 
   const walletRows = walletGroups.known.map((group) => {
+    const estimate =
+      group.symbol !== "SOL" ||
+      group.amountRaw === 0n ||
+      group.estimatedKnownCount === 0
+        ? ""
+        : group.estimatedUnknownCount > 0
+          ? ` · known ≈ ${formatTelegramAccountValueUsd(group.estimatedUsd)}`
+          : ` · ≈ ${formatTelegramAccountValueUsd(group.estimatedUsd)}`;
     const available =
       group.cashComponentCount === 0
         ? ""
@@ -582,7 +609,7 @@ export function buildTelegramAccountValueMessage(input: {
       `• ${group.network} wallet — ${formatRaw(
         group.amountRaw,
         group.decimals,
-      )} ${group.symbol}${available}${stale}`,
+      )} ${group.symbol}${estimate}${available}${stale}`,
     );
   });
   walletRows.push(
@@ -609,7 +636,7 @@ export function buildTelegramAccountValueMessage(input: {
 export const telegramAccountValueTestHooks = {
   assetSymbol,
   formatRaw,
-  formatUsd,
+  formatUsd: formatTelegramAccountValueUsd,
   networkLabel,
   textBudget: TELEGRAM_ACCOUNT_VALUE_TEXT_BUDGET,
 };

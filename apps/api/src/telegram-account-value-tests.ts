@@ -295,6 +295,7 @@ await test("Telegram Account Value presenter preserves accounting groups and deg
   assert.match(rendered.text, /Polymarket.*\$9\\\.00 known routable/u);
   assert.match(rendered.text, /Limitless.*\$20\\\.00 known routable/u);
   assert.match(rendered.text, /Base wallet.*20 USDC.*20 available/u);
+  assert.doesNotMatch(rendered.text, /Base wallet.*≈/u);
   assert.match(rendered.text, /Polygon wallet.*5 USDC\\\.e.*stale/u);
   assert.match(rendered.text, /Solana wallet.*3 USDC.*3 available/u);
   assert.match(rendered.text, /Polymarket pUSD.*2 locked.*1 reserved/u);
@@ -491,6 +492,51 @@ await test("Telegram Account Value preserves degraded zero balances and position
   );
   assert.match(rendered.text, /Stale data/u);
   assert.doesNotMatch(rendered.text, /Partial data/u);
+});
+
+await test("Telegram Account Value shows the existing SOL USD estimate", () => {
+  const account = buildAccountFixture();
+  const pricedSol = component({
+    assetId: "11111111111111111111111111111111",
+    componentId: "priced-sol",
+    decimals: 9,
+    estimatedUsd: "5.12640349624",
+    networkId: "solana:mainnet",
+    raw: "52000000",
+  });
+  const rendered = buildTelegramAccountValueMessage({
+    account: {
+      ...account,
+      projection: {
+        ...account.projection,
+        components: [...account.projection.components, pricedSol],
+      },
+    },
+  });
+  assert.match(rendered.text, /Solana wallet.*0\\\.052 SOL.*≈ \$5\\\.13/u);
+});
+
+await test("Telegram Account Value does not add a zero SOL estimate", () => {
+  const account = buildAccountFixture();
+  const pricedZeroSol = component({
+    assetId: "11111111111111111111111111111111",
+    componentId: "priced-zero-sol",
+    decimals: 9,
+    estimatedUsd: "0",
+    networkId: "solana:mainnet",
+    raw: "0",
+  });
+  const rendered = buildTelegramAccountValueMessage({
+    account: {
+      ...account,
+      projection: {
+        ...account.projection,
+        components: [...account.projection.components, pricedZeroSol],
+      },
+    },
+  });
+  assert.match(rendered.text, /Solana wallet.*0 SOL/u);
+  assert.doesNotMatch(rendered.text, /Solana wallet.*≈ \$0\\\.00/u);
 });
 
 await test("Telegram Account Value labels only exact canonical asset identities", () => {
@@ -951,7 +997,9 @@ await test("Balance callback loads and edits the Account Value card in the match
   assert.equal(await handleSignalBotMenuCallback(state.handlerInput), true);
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(loads, [{ chatId: "123", telegramUserId: 123 }]);
-  assert.equal(state.dbQueries(), 1);
+  // One query durably claims the callback revision and one resolves the
+  // linked audience before the asynchronous Account Value loader starts.
+  assert.equal(state.dbQueries(), 2);
   assert.equal(state.edits.at(-1)?.text, "Account Value card");
   assert.equal(state.answers[0]?.text, "⏳ Working…");
 });

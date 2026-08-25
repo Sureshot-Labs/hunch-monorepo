@@ -93,8 +93,11 @@ export type TelegramAppHandoffV2ScopeAssertion = (
   input: Readonly<{
     action: "buy" | "sell";
     authorityFingerprint: string;
+    /** Query-only view of the caller's existing transaction. */
+    db: Pick<PoolClient, "query">;
     policyRevision: string;
     telegramUserId: string;
+    tradeIntentId: string;
     venue: TelegramAppHandoffV2TradeVenue;
   }>,
 ) => Promise<boolean>;
@@ -606,6 +609,7 @@ async function lockDirectTrade(
 
 async function assertLiveScope(input: {
   assertion?: TelegramAppHandoffV2ScopeAssertion;
+  client: PoolClient;
   locked: LockedDirectTrade;
   scope: SealedDirectTradeScope;
 }): Promise<void> {
@@ -615,8 +619,12 @@ async function assertLiveScope(input: {
   const valid = await input.assertion({
     action: input.scope.action,
     authorityFingerprint: input.locked.authorityFingerprint,
+    // Strip PoolClient.connect(): the scope helper must participate in this
+    // transaction, never mistake an acquired client for a Pool and nest BEGIN.
+    db: { query: input.client.query.bind(input.client) },
     policyRevision: input.locked.policyRevision,
     telegramUserId: input.locked.telegramUserId,
+    tradeIntentId: input.locked.intentId,
     venue: input.scope.venue,
   });
   if (!valid) throw new TelegramAppHandoffV2DirectTradeError("plan_changed");
@@ -711,6 +719,7 @@ export async function claimTelegramAppHandoffV2DirectTradeSubmissionInTransactio
   }
   await assertLiveScope({
     assertion: input.assertCurrentScope,
+    client,
     locked,
     scope,
   });
@@ -868,6 +877,7 @@ export async function claimTelegramAppHandoffV2FundedTradeAttemptInTransaction(
   validateSubmission(scope, input.submission);
   await assertLiveScope({
     assertion: input.assertCurrentScope,
+    client,
     locked,
     scope,
   });

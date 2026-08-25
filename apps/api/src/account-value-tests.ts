@@ -1,6 +1,8 @@
 #!/usr/bin/env tsx
 
 import assert from "node:assert/strict";
+import { BN, BorshAccountsCoder } from "@coral-xyz/anchor";
+import { IDL as PYTH_SOLANA_RECEIVER_IDL } from "@pythnetwork/pyth-solana-receiver/idl/pyth_solana_receiver";
 import Fastify from "fastify";
 import {
   serializerCompiler,
@@ -29,6 +31,7 @@ import {
 } from "./account-value/decimal.js";
 import {
   ExactStablePriceAdapter,
+  PYTH_SOL_USD_PRICE_POLICY_ID,
   resolveStableImpairmentState,
   ValuationService,
 } from "./account-value/valuation-service.js";
@@ -38,6 +41,11 @@ import {
 } from "./account-value/position-value-collectors.js";
 import { ExistingFactsOwnershipResolver } from "./account-value/ownership-resolver.js";
 import { createAccountValueSnapshotLoader } from "./account-value/snapshot-loader.js";
+import {
+  decodePythSolUsdPrice,
+  PythSolUsdPriceAdapter,
+  PYTH_SOLANA_RECEIVER_PROGRAM_ID,
+} from "./account-value/pyth-sol-usd-price-adapter.js";
 import type { PriceAdapter } from "./funding/domain/contracts.js";
 import type {
   AssetLocation,
@@ -53,6 +61,25 @@ import {
 } from "./routes/account-value.js";
 
 const NOW = new Date("2026-07-23T12:00:00.000Z");
+const PYTH_FIXTURE_NOW = new Date("2026-08-24T23:48:00.000Z");
+const PYTH_SOL_USD_FIXTURE = Buffer.from(
+  "IvEjY51+9M1gMUcENA3t3zcf1CRyFI8kjp0abRpesqw6zYt/1dayQwHvDYtv2izrpB2hXUCV0do5Kg0vjtDGx7wPTPrIwoC1baZJnEsCAAAAX/FdAAAAAAD4////H9iMagAAAAAe2IxqAAAAAJDdWEYCAAAABqdDAAAAAABH11AaAAAAAAA=",
+  "base64",
+);
+const pythFixtureCoder = new BorshAccountsCoder(PYTH_SOLANA_RECEIVER_IDL);
+
+async function mutatePythFixture(
+  mutate: (priceMessage: { conf: BN; exponent: number; price: BN }) => void,
+): Promise<Buffer> {
+  const decoded = pythFixtureCoder.decode(
+    "priceUpdateV2",
+    PYTH_SOL_USD_FIXTURE,
+  ) as {
+    priceMessage: { conf: BN; exponent: number; price: BN };
+  };
+  mutate(decoded.priceMessage);
+  return pythFixtureCoder.encode("priceUpdateV2", decoded);
+}
 const USDC: AssetRef = {
   networkId: "evm:137",
   assetId: "0x0000000000000000000000000000000000000001",
@@ -163,6 +190,200 @@ await test("decimal arithmetic never depends on JavaScript floating point", () =
     }),
     "20",
   );
+});
+
+await test("official Pyth decoder validates the pinned SOL/USD contract", async () => {
+  const decoded = decodePythSolUsdPrice({
+    data: PYTH_SOL_USD_FIXTURE,
+    owner: PYTH_SOLANA_RECEIVER_PROGRAM_ID,
+    now: PYTH_FIXTURE_NOW,
+  });
+  assert.deepEqual(decoded, {
+    unitPriceUsd: "98.58468262",
+    asOf: "2026-08-24T23:47:43.000Z",
+    confidence: "high",
+  });
+  assert.throws(() =>
+    decodePythSolUsdPrice({
+      data: PYTH_SOL_USD_FIXTURE,
+      owner: "11111111111111111111111111111111",
+      now: PYTH_FIXTURE_NOW,
+    }),
+  );
+  assert.throws(() =>
+    decodePythSolUsdPrice({
+      data: PYTH_SOL_USD_FIXTURE,
+      owner: PYTH_SOLANA_RECEIVER_PROGRAM_ID,
+      now: new Date("2026-08-24T23:49:00.000Z"),
+    }),
+  );
+  assert.throws(() =>
+    decodePythSolUsdPrice({
+      data: PYTH_SOL_USD_FIXTURE,
+      owner: PYTH_SOLANA_RECEIVER_PROGRAM_ID,
+      now: new Date("2026-08-24T23:47:00.000Z"),
+    }),
+  );
+  assert.throws(() =>
+    decodePythSolUsdPrice({
+      data: Buffer.from([1, 2, 3]),
+      owner: PYTH_SOLANA_RECEIVER_PROGRAM_ID,
+      now: PYTH_FIXTURE_NOW,
+    }),
+  );
+  for (const data of [
+    await mutatePythFixture((message) => {
+      message.price = new BN(0);
+    }),
+    await mutatePythFixture((message) => {
+      message.price = new BN(-1);
+    }),
+    await mutatePythFixture((message) => {
+      message.exponent = -19;
+    }),
+    await mutatePythFixture((message) => {
+      message.conf = message.price.div(new BN(10));
+    }),
+  ]) {
+    assert.throws(() =>
+      decodePythSolUsdPrice({
+        data,
+        owner: PYTH_SOLANA_RECEIVER_PROGRAM_ID,
+        now: PYTH_FIXTURE_NOW,
+      }),
+    );
+  }
+});
+
+await test("Pyth SOL/USD reads are single-flight cached and failures retry", async () => {
+  let reads = 0;
+  let valuationNow = PYTH_FIXTURE_NOW;
+  const adapter = new PythSolUsdPriceAdapter({
+    cacheKey: `test:pyth:success:${crypto.randomUUID()}`,
+    loadAccount: async () => {
+      reads += 1;
+      await Promise.resolve();
+      return {
+        data: PYTH_SOL_USD_FIXTURE,
+        owner: PYTH_SOLANA_RECEIVER_PROGRAM_ID,
+      };
+    },
+    now: () => valuationNow,
+  });
+  const request = {
+    amount: {
+      asset: {
+        networkId: "solana:mainnet",
+        assetId: "11111111111111111111111111111111",
+        decimals: 9,
+      },
+      raw: "52000000",
+    },
+    observedAt: PYTH_FIXTURE_NOW.toISOString(),
+    policyId: PYTH_SOL_USD_PRICE_POLICY_ID,
+  } as const;
+  const estimates = await Promise.all([
+    adapter.value(request),
+    adapter.value(request),
+    adapter.value(request),
+  ]);
+  assert.equal(reads, 1);
+  assert.equal(estimates[0]?.value, "5.12640349624");
+  assert.deepEqual(estimates[1], estimates[0]);
+  valuationNow = new Date("2026-08-24T23:49:00.000Z");
+  assert.equal(
+    await adapter.value(request),
+    null,
+    "a cached quote must stop valuing once its publish age exceeds the contract",
+  );
+  assert.equal(reads, 1);
+
+  let retryReads = 0;
+  const retrying = new PythSolUsdPriceAdapter({
+    cacheKey: `test:pyth:retry:${crypto.randomUUID()}`,
+    loadAccount: async () => {
+      retryReads += 1;
+      if (retryReads === 1) throw new Error("temporary RPC error");
+      return {
+        data: PYTH_SOL_USD_FIXTURE,
+        owner: PYTH_SOLANA_RECEIVER_PROGRAM_ID,
+      };
+    },
+    now: () => PYTH_FIXTURE_NOW,
+  });
+  assert.equal(await retrying.value(request), null);
+  assert.equal((await retrying.value(request))?.value, "5.12640349624");
+  assert.equal(retryReads, 2);
+});
+
+await test("SOL valuation contributes exact totals and degrades to partial", async () => {
+  const sol: AssetRef = {
+    networkId: "solana:mainnet",
+    assetId: "11111111111111111111111111111111",
+    decimals: 9,
+  };
+  const solObservation: ObservedAsset = {
+    componentId: "asset_sol_00000001",
+    location: {
+      kind: "wallet",
+      locationId: "location_sol_00000001",
+      accountId: "account_00000001",
+      asset: sol,
+      details: { address: "11111111111111111111111111111111" },
+    },
+    amount: { asset: sol, raw: "52000000" },
+    ownershipEvidenceId: "evidence_sol_00000001",
+    observedAt: PYTH_FIXTURE_NOW.toISOString(),
+    observationFreshness: "fresh",
+    observationError: null,
+    metadataRisk: "verified",
+  };
+  const policy = {
+    asset: sol,
+    category: "cash" as const,
+    pricePolicyId: PYTH_SOL_USD_PRICE_POLICY_ID,
+    maximumObservationAgeMs: 60_000,
+    executionEligibility: "eligible" as const,
+  };
+  const pricedAdapter = new PythSolUsdPriceAdapter({
+    cacheKey: `test:pyth:projection:${crypto.randomUUID()}`,
+    loadAccount: async () => ({
+      data: PYTH_SOL_USD_FIXTURE,
+      owner: PYTH_SOLANA_RECEIVER_PROGRAM_ID,
+    }),
+    now: () => PYTH_FIXTURE_NOW,
+  });
+  const [priced] = await new ValuationService({
+    policies: [policy],
+    adapters: [pricedAdapter],
+  }).value([solObservation], PYTH_FIXTURE_NOW);
+  if (!priced) throw new Error("priced SOL fixture missing");
+  const complete = projectAccountValue({
+    accountId: "account_00000001",
+    headlineMode: "liquid_only",
+    components: [priced],
+    positionComponents: [],
+    asOf: PYTH_FIXTURE_NOW.toISOString(),
+  });
+  assert.equal(complete.liquidAssetsEstimatedUsd, "5.12640349624");
+  assert.equal(complete.valuationCompleteness, "complete");
+
+  const [unpriced] = await new ValuationService({
+    policies: [policy],
+    adapters: [],
+  }).value([solObservation], PYTH_FIXTURE_NOW);
+  if (!unpriced) throw new Error("unpriced SOL fixture missing");
+  assert.equal(unpriced.amount.raw, "52000000");
+  assert.equal(unpriced.estimatedUsd, null);
+  assert.equal(unpriced.executionEligibility, "eligible");
+  const partial = projectAccountValue({
+    accountId: "account_00000001",
+    headlineMode: "liquid_only",
+    components: [unpriced],
+    positionComponents: [],
+    asOf: PYTH_FIXTURE_NOW.toISOString(),
+  });
+  assert.equal(partial.valuationCompleteness, "partial");
 });
 
 await test("duplicate ownership evidence counts one canonical balance", () => {

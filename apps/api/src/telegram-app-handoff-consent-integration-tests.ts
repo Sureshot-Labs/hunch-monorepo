@@ -344,6 +344,7 @@ try {
   );
   await assert.rejects(
     materializeTelegramAppHandoffV2Funding({
+      assertCurrentScope: async () => true,
       currentAuthorityFingerprint: "a".repeat(64),
       currentPolicyRevision: `policy-${suffix}`,
       db: savepointPool as never,

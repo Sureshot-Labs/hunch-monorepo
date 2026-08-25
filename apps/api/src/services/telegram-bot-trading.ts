@@ -4,14 +4,24 @@ import { ethers } from "ethers";
 import { AuthService } from "../auth.js";
 import type { Pool } from "@hunch/infra";
 import type { DbQuery } from "../db.js";
-import { resolveKnownAccountAssetSymbol } from "../account-value/known-asset-catalog.js";
+import {
+  isKnownNativeSolAsset,
+  resolveKnownAccountAssetSymbol,
+} from "../account-value/known-asset-catalog.js";
+import {
+  compareUnsignedDecimals,
+  unitPriceFromRawEstimate,
+} from "../account-value/decimal.js";
 import { canonicalJsonHash } from "../funding/persistence/canonical.js";
 import { sameAccountAddress } from "../funding/domain/asset-identity.js";
+import { SOLANA_NATIVE_ASSET } from "../funding/domain/network-fees.js";
+import { isRawAmount } from "../funding/domain/raw-amount.js";
 import {
   isTelegramPolymarketRouterContinuationPending,
   telegramPolymarketRootRequiresRouterContinuationSql,
 } from "../funding/reconciliation/telegram-router-continuation-state.js";
 import { lockTelegramFundingLinkLifecycle } from "../funding/execution/telegram-funding-link-lifecycle-lock.js";
+import { isTelegramFundingManagedSolanaWalletCurrent } from "../funding/execution/telegram-funding-managed-wallet.js";
 import { env } from "../env.js";
 import { isRecord } from "../lib/type-guards.js";
 import { canonicalWalletIdentity } from "../lib/wallet-address.js";
@@ -135,6 +145,7 @@ import {
   formatTelegramVenueLabel,
   formatTelegramVenueLabelMarkdownV2,
 } from "./telegram-market-identity.js";
+import { formatTelegramAccountValueUsd } from "./telegram-account-value.js";
 import {
   telegramCustomEmojiId,
   telegramCustomEmojiMarkdownV2,
@@ -169,8 +180,12 @@ import {
   issueTelegramFundingBuyContinuation,
   resolveTelegramFundingBuyContinuationAdapter,
 } from "./telegram-funding-buy-continuation.js";
-import type { TelegramFundingProgressDecorator } from "./telegram-funding.js";
+import {
+  canContinueTelegramFundingBuyReturn,
+  type TelegramFundingProgressDecorator,
+} from "./telegram-funding.js";
 import { isTelegramFundingReadyTerminalProjection } from "./telegram-funding-progress.js";
+import { isTelegramSolanaRetainedFundingRouteKey } from "./telegram-funding-route.js";
 import {
   isTelegramAppHandoffV2EnabledForVenue,
   isTelegramAppHandoffV2DirectTradeVenue,
@@ -350,7 +365,27 @@ function isRetryableTelegramAppHandoffFundingInspection(
     intent.funding_operation_id == null &&
     !isRecord(intent.result.appHandoffV2) &&
     intent.result.stage === "funding_preview" &&
-    intent.result.fundingState === "checking_internal_balance"
+    isRetryableTelegramAppHandoffFundingState(intent.result.fundingState)
+  );
+}
+
+/**
+ * These are planner previews, not financial boundaries: no operation, client
+ * action, or submit attempt exists yet. A later balance/route observation may
+ * therefore replace any of them with the exact sealed Mini App plan.
+ *
+ * The same code-owned list is passed to the guarded SQL update below so the
+ * in-memory classifier and its transactional compare-and-set cannot drift.
+ */
+const RETRYABLE_TELEGRAM_APP_HANDOFF_FUNDING_STATES = [
+  "checking_internal_balance",
+  "convert",
+  "deposit",
+] as const;
+
+function isRetryableTelegramAppHandoffFundingState(value: unknown): boolean {
+  return RETRYABLE_TELEGRAM_APP_HANDOFF_FUNDING_STATES.some(
+    (state) => state === value,
   );
 }
 
@@ -989,6 +1024,8 @@ export type TelegramBotTradingCallbackInput = {
     input: TelegramTradeShortfallIdentity,
     trade: JsonObject,
   ) => Promise<TelegramTradeMiniAppFundingInspection>;
+  /** Optional API-owned display valuation; never used for execution bounds. */
+  estimateRetainedSolUsd?: (raw: string) => Promise<string | null>;
   commitTradeShortfall?: (
     input: TelegramTradeShortfallIdentity & {
       proposal: TelegramTradeShortfallProposal;
@@ -1763,6 +1800,88 @@ function telegramFundingSourceLabel(
   return network && symbol ? `${network} ${symbol}` : "Hunch wallet balance";
 }
 
+function telegramFundingNetworkLabel(networkId: string): string {
+  if (networkId === "evm:8453") return "Base";
+  if (networkId === "evm:137") return "Polygon";
+  if (networkId === "solana:mainnet") return "Solana";
+  return "supported network";
+}
+
+function telegramFundingMoneyLabel(amount: {
+  asset: { assetId: string; decimals: number; networkId: string };
+  raw: string;
+}): string {
+  const symbol = resolveKnownAccountAssetSymbol(amount.asset) ?? "asset";
+  return `${ethers.formatUnits(amount.raw, amount.asset.decimals)} ${symbol} on ${telegramFundingNetworkLabel(amount.asset.networkId)}`;
+}
+
+async function buildTelegramAppHandoffFundingReviewLines(input: {
+  estimateRetainedSolUsd?: (raw: string) => Promise<string | null>;
+  plan: TelegramAppHandoffV2Plan | null;
+}): Promise<string[]> {
+  if (input.plan?.kind !== "funding") return [];
+  const sourceLabels = await Promise.all(
+    input.plan.funding.sourceDebits.map(async (source) => {
+      const exact = telegramFundingMoneyLabel({
+        asset: source.asset,
+        raw: source.maximumRaw,
+      });
+      if (
+        !isKnownNativeSolAsset(source.asset) ||
+        source.maximumRaw === "0" ||
+        !input.estimateRetainedSolUsd
+      ) {
+        return exact;
+      }
+      try {
+        const estimatedUsd = await input.estimateRetainedSolUsd(
+          source.maximumRaw,
+        );
+        if (!estimatedUsd || compareUnsignedDecimals(estimatedUsd, "0") <= 0) {
+          return exact;
+        }
+        const unitPriceUsd = unitPriceFromRawEstimate({
+          decimals: source.asset.decimals,
+          estimatedValue: estimatedUsd,
+          raw: source.maximumRaw,
+        });
+        if (compareUnsignedDecimals(unitPriceUsd, "0") <= 0) return exact;
+        return `${exact} (≈ ${formatTelegramAccountValueUsd(estimatedUsd)} at ≈ ${formatTelegramAccountValueUsd(unitPriceUsd)}/SOL)`;
+      } catch {
+        // Valuation is presentation-only. Exact sealed source/debit bounds are
+        // still useful when Pyth is unavailable or its estimate is unusable.
+        return exact;
+      }
+    }),
+  );
+  const request = input.plan.funding.discoveryRequest;
+  const destinationAmount =
+    request.serverAdditionalDestinationAmount ??
+    request.requestedDestinationAmount;
+  const feeCap = request.maxFeeUsd;
+  return [
+    `🔄 ${formatTelegramFieldMarkdownV2(
+      "Mini App may use up to",
+      sourceLabels.join(" + "),
+    )}`,
+    destinationAmount
+      ? `🎯 ${formatTelegramFieldMarkdownV2(
+          "Funding target",
+          `at least ${telegramFundingMoneyLabel(destinationAmount)} for ${formatTelegramVenueLabel(input.plan.funding.destination.venueId)}`,
+        )}`
+      : "",
+    feeCap && feeCap !== "0"
+      ? formatTelegramUsdcLineMarkdownV2(
+          `Maximum funding fees: ${formatTelegramAccountValueUsd(feeCap)}`,
+        )
+      : "",
+    `✍️ ${formatTelegramFieldMarkdownV2(
+      "In Hunch",
+      "review and sign the bounded funding actions; the Buy continues automatically",
+    )}`,
+  ].filter(Boolean);
+}
+
 export function resolveTelegramFundingBuyDepositRequirement(input: {
   executableFundsUsd: number;
   maximumSpendUsd: number;
@@ -1869,6 +1988,7 @@ function venueStatusFromReadiness(input: {
 }
 
 export const telegramBotTradingTestHooks = {
+  buildTelegramAppHandoffFundingReviewLines,
   buildTelegramTradeConfirmButton,
   buildTelegramTradeShortfallUnavailableReplyMarkup,
   buildTelegramTradeAuthorityBinding,
@@ -1900,6 +2020,7 @@ export const telegramBotTradingTestHooks = {
   lockTelegramFundingReturnBeforeMarket,
   parseTelegramCustomBuyAmount,
   parseTelegramCustomSellAmount,
+  decorateRetainedSolReceiptEstimate,
   telegramTradeInputFingerprint,
   venueStatusFromReadiness,
 };
@@ -2800,6 +2921,7 @@ function buildTelegramTradeConfirmButton(input: {
 }
 
 function buildTelegramTradeConfirmationMessage(input: {
+  appHandoffFundingReviewLines?: readonly string[];
   authorization: TelegramBotTradingAuthorizationRow;
   confirmButton?: TelegramBotTradingButton;
   intent: TelegramTradeIntentRow;
@@ -2959,12 +3081,15 @@ function buildTelegramTradeConfirmationMessage(input: {
                 fundingProposal.minimumDestination.asset.decimals,
               )}`,
             )
-          : appHandoffV2Plan && action === "BUY"
+          : appHandoffV2Plan &&
+              action === "BUY" &&
+              !input.appHandoffFundingReviewLines?.length
             ? `🔄 ${formatTelegramFieldMarkdownV2(
                 "Funding",
                 "Hunch will prepare only the sealed eligible balances in the Mini App",
               )}`
             : null,
+        ...(input.appHandoffFundingReviewLines ?? []),
         `🎚️ ${formatTelegramFieldMarkdownV2(
           "Price tolerance",
           `${input.policy.maxSlippageBps / 100}%`,
@@ -3261,14 +3386,15 @@ async function issueTelegramTradeAppHandoff(input: {
    */
   v2Plan: TelegramAppHandoffV2Plan;
 }) {
-  if (!isTelegramAppHandoffV2TradeVenue(input.intent.venue)) {
+  const handoffVenue = input.intent.venue;
+  if (!isTelegramAppHandoffV2TradeVenue(handoffVenue)) {
     throw new TelegramAppHandoffError("venue_unsupported");
   }
   const scope = await resolveTelegramAppHandoffCurrentScope({
     action: input.intent.action === "sell" ? "sell" : "buy",
     db: input.db,
     telegramUserId: input.intent.telegram_user_id,
-    venue: input.intent.venue,
+    venue: handoffVenue,
     executionContractVersion: 2,
   });
   const authority = buildTelegramTradeAuthorityBinding(input.authorization);
@@ -3282,6 +3408,20 @@ async function issueTelegramTradeAppHandoff(input: {
   }
   const quoteSnapshot = asTelegramTradeQuotePreview(input.quote);
   return issueTelegramAppHandoff({
+    assertCurrentIntent: (client) =>
+      matchesTelegramAppHandoffV2CurrentScope({
+        // The handoff service already owns this transaction. Pass only its
+        // query capability so the live fence cannot try to nest BEGIN.
+        db: { query: client.query.bind(client) },
+        sealed: {
+          action: input.intent.action === "sell" ? "sell" : "buy",
+          authorityFingerprint: scope.authorityFingerprint,
+          policyRevision: scope.policyRevision,
+          telegramUserId: input.intent.telegram_user_id,
+          tradeIntentId: input.intent.id,
+          venue: handoffVenue,
+        },
+      }),
     authorityFingerprint: scope.authorityFingerprint,
     db: input.db,
     // A committed token is deterministic and remains the same durable
@@ -3336,6 +3476,7 @@ async function buildTelegramTradeReviewMessage(input: {
   preissuedHandoff?: Awaited<ReturnType<typeof issueTelegramTradeAppHandoff>>;
   quote: TradeQuote | TelegramTradeQuotePreview;
   readiness: TradingReadiness | null;
+  estimateRetainedSolUsd?: (raw: string) => Promise<string | null>;
 }): Promise<TelegramBotTradingMessage> {
   if (input.intent.delivery_mode !== "app_handoff") {
     return buildTelegramTradeConfirmationMessage(input);
@@ -3356,8 +3497,14 @@ async function buildTelegramTradeReviewMessage(input: {
   if (!confirmButton) {
     throw new TelegramAppHandoffError("unauthorized");
   }
+  const appHandoffFundingReviewLines =
+    await buildTelegramAppHandoffFundingReviewLines({
+      estimateRetainedSolUsd: input.estimateRetainedSolUsd,
+      plan: v2Plan,
+    });
   return buildTelegramTradeConfirmationMessage({
     ...input,
+    appHandoffFundingReviewLines,
     confirmButton,
   });
 }
@@ -5262,8 +5409,8 @@ async function loadCurrentTelegramIntentAuthorityLocked(input: {
   }
   if (
     input.validateFundingReturn &&
-    readTelegramFundingReturnIntentMarker(input.intent) &&
-    !(await isTelegramFundingReturnIntentCurrent(
+    readTelegramFundingIntentContextMarker(input.intent) &&
+    !(await isTelegramFundingIntentSourceCurrent(
       input.db,
       input.intent,
       currentAuthorization,
@@ -5286,7 +5433,7 @@ async function withLockedTelegramIntentAuthority<T>(input: {
   validateFundingReturn?: boolean;
 }): Promise<T> {
   return withOptionalTransaction(input.db, async (client) => {
-    const fundingMarker = readTelegramFundingReturnIntentMarker(input.intent);
+    const fundingMarker = readTelegramFundingIntentContextMarker(input.intent);
     let fundingLocked = true;
     if (fundingMarker) {
       fundingLocked = await lockTelegramFundingReturnBeforeMarket(client, {
@@ -5480,8 +5627,10 @@ async function markTelegramIntentSubmitBoundary(input: {
           authorization: currentAuthorization,
           intent: currentIntent,
         }) ||
-        JSON.stringify(readTelegramFundingReturnIntentMarker(currentIntent)) !==
-          JSON.stringify(readTelegramFundingReturnIntentMarker(input.intent))
+        JSON.stringify(
+          readTelegramFundingIntentContextMarker(currentIntent),
+        ) !==
+          JSON.stringify(readTelegramFundingIntentContextMarker(input.intent))
       ) {
         return false;
       }
@@ -6741,7 +6890,7 @@ async function updateIntentStatus(input: {
             AND submit_started_at IS NULL
             AND funding_operation_id IS NULL
             AND result ->> 'stage' = 'funding_preview'
-            AND result ->> 'fundingState' = 'checking_internal_balance'
+            AND result ->> 'fundingState' = ANY($20::text[])
             AND NOT (result ? 'appHandoffV2')
           )
         )
@@ -6777,6 +6926,7 @@ async function updateIntentStatus(input: {
       input.authorizationId ?? null,
       Boolean(input.requireRetryableAppHandoffFundingInspection),
       Boolean(input.preserveClaimedAppHandoff),
+      [...RETRYABLE_TELEGRAM_APP_HANDOFF_FUNDING_STATES],
     ],
   );
   return (result.rowCount ?? 0) > 0;
@@ -7222,26 +7372,12 @@ export async function resolveTelegramAppHandoffCurrentScope(input: {
     : null;
   const action = input.action ?? "buy";
   if (
-    policyState.policy.miniAppHandoffMode === "off" ||
-    policyState.policy.miniAppHandoffContractVersion <
-      (input.executionContractVersion ?? 1) ||
+    !telegramAppHandoffPolicyAllows({
+      action,
+      executionContractVersion: input.executionContractVersion ?? 1,
+      policy: policyState.policy,
+    }) ||
     !authority
-  ) {
-    return null;
-  }
-  // A sealed Sell has no funding route and is client-signed.  Do not make its
-  // exact handoff depend on Buy-only receive/continuation switches.
-  if (
-    action === "buy" &&
-    (!policyState.policy.buyContinuationEnabled ||
-      !policyState.policy.fundingReceiveEnabled)
-  ) {
-    return null;
-  }
-  if (
-    action === "sell" &&
-    (!policyState.policy.tradingEnabled ||
-      !policyState.policy.tradingActions.includes("sell"))
   ) {
     return null;
   }
@@ -7249,6 +7385,25 @@ export async function resolveTelegramAppHandoffCurrentScope(input: {
     authorityFingerprint: telegramBotTradeAuthorityFingerprint(authority),
     policyRevision: policyState.policyRevision,
   };
+}
+
+function telegramAppHandoffPolicyAllows(input: {
+  action: "buy" | "sell";
+  executionContractVersion: 1 | 2;
+  policy: SignalBotPolicy;
+}): boolean {
+  if (
+    input.policy.miniAppHandoffMode === "off" ||
+    input.policy.miniAppHandoffContractVersion < input.executionContractVersion
+  ) {
+    return false;
+  }
+  // A sealed Sell has no funding route and is client-signed. Do not make its
+  // exact handoff depend on Buy-only receive/continuation switches.
+  return input.action === "buy"
+    ? input.policy.buyContinuationEnabled && input.policy.fundingReceiveEnabled
+    : input.policy.tradingEnabled &&
+        input.policy.tradingActions.includes("sell");
 }
 
 /** Shared live-scope fence for ordinary web venue consumers of a v2 handoff. */
@@ -7259,20 +7414,84 @@ export async function matchesTelegramAppHandoffV2CurrentScope(input: {
     authorityFingerprint: string;
     policyRevision: string;
     telegramUserId: string;
+    tradeIntentId: string;
     venue: TelegramAppHandoffV2TradeVenue;
   }>;
 }): Promise<boolean> {
-  const current = await resolveTelegramAppHandoffCurrentScope({
-    action: input.sealed.action,
-    db: input.db,
-    executionContractVersion: 2,
-    telegramUserId: input.sealed.telegramUserId,
-    venue: input.sealed.venue,
-  });
-  return (
-    current?.authorityFingerprint === input.sealed.authorityFingerprint &&
-    current.policyRevision === input.sealed.policyRevision
+  const intent = await loadIntent(input.db, input.sealed.tradeIntentId);
+  const plan = intent ? readTelegramAppHandoffV2Plan(intent) : null;
+  const trade = plan && isRecord(plan.trade) ? plan.trade : null;
+  if (
+    !intent ||
+    !plan ||
+    !trade ||
+    intent.delivery_mode !== "app_handoff" ||
+    intent.telegram_user_id !== input.sealed.telegramUserId ||
+    intent.action !== input.sealed.action ||
+    intent.venue !== input.sealed.venue ||
+    trade.action !== input.sealed.action ||
+    trade.venue !== input.sealed.venue ||
+    trade.marketId !== intent.market_id
+  ) {
+    return false;
+  }
+  const expectedAuthorization = await loadEnabledEvmAuthorization(
+    input.db,
+    input.sealed.telegramUserId,
+    { allowInactiveForV2: true },
   );
+  const expectedAuthority = expectedAuthorization
+    ? buildTelegramTradeAuthorityBinding(expectedAuthorization)
+    : null;
+  if (
+    !expectedAuthorization ||
+    !expectedAuthority ||
+    telegramBotTradeAuthorityFingerprint(expectedAuthority) !==
+      input.sealed.authorityFingerprint ||
+    !intentMatchesTelegramTradeAuthority({
+      authorization: expectedAuthorization,
+      intent,
+    })
+  ) {
+    return false;
+  }
+  return withLockedTelegramIntentAuthority({
+    callback: async (client, currentAuthorization) => {
+      if (!currentAuthorization) return false;
+      const currentIntent = await loadIntent(client, intent.id, { lock: true });
+      if (
+        !currentIntent ||
+        currentIntent.delivery_mode !== "app_handoff" ||
+        currentIntent.action !== input.sealed.action ||
+        currentIntent.venue !== input.sealed.venue ||
+        currentIntent.telegram_user_id !== input.sealed.telegramUserId ||
+        JSON.stringify(
+          readTelegramFundingIntentContextMarker(currentIntent),
+        ) !== JSON.stringify(readTelegramFundingIntentContextMarker(intent))
+      ) {
+        return false;
+      }
+      const policyState =
+        await resolveSignalBotTradingPolicyStateFromDb(client);
+      const currentAuthority =
+        buildTelegramTradeAuthorityBinding(currentAuthorization);
+      return Boolean(
+        currentAuthority &&
+        telegramAppHandoffPolicyAllows({
+          action: input.sealed.action,
+          executionContractVersion: 2,
+          policy: policyState.policy,
+        }) &&
+        policyState.policyRevision === input.sealed.policyRevision &&
+        telegramBotTradeAuthorityFingerprint(currentAuthority) ===
+          input.sealed.authorityFingerprint,
+      );
+    },
+    db: input.db,
+    expectedAuthorization,
+    intent,
+    validateFundingReturn: true,
+  });
 }
 
 export function telegramVenueFromSealedHandoffSnapshot(
@@ -7510,12 +7729,78 @@ async function loadEnabledEvmAuthorization(
   return result.rows[0] ?? null;
 }
 
+type TelegramFundingProgressPresentation =
+  Parameters<TelegramFundingProgressDecorator>[0];
+
+function isRetainedSolFundingProgress(
+  progress: TelegramFundingProgressPresentation["progress"],
+): boolean {
+  const routeKey = progress?.presentation?.routeKey;
+  return (
+    typeof routeKey === "string" &&
+    isTelegramSolanaRetainedFundingRouteKey(routeKey)
+  );
+}
+
+async function decorateRetainedSolReceiptEstimate(input: {
+  estimateRetainedSolUsd?: (raw: string) => Promise<string | null>;
+  invalidateAccountValue?: (userId: string) => void;
+  presentation: TelegramFundingProgressPresentation;
+}): Promise<TelegramFundingProgressPresentation["message"]> {
+  const progress = input.presentation.progress;
+  if (
+    !progress ||
+    !["funds_received", "ready"].includes(progress.state) ||
+    !isRetainedSolFundingProgress(progress) ||
+    !progress.rawAmount ||
+    !isRawAmount(progress.rawAmount) ||
+    progress.rawAmount === "0" ||
+    !input.estimateRetainedSolUsd
+  ) {
+    return input.presentation.message;
+  }
+  try {
+    input.invalidateAccountValue?.(input.presentation.context.userId);
+    const estimatedUsd = await input.estimateRetainedSolUsd(progress.rawAmount);
+    return estimatedUsd
+      ? {
+          ...input.presentation.message,
+          text: joinTelegramMarkdownV2Lines([
+            input.presentation.message.text,
+            "",
+            formatTelegramFieldMarkdownV2(
+              "Approximate value",
+              `≈ ${formatTelegramAccountValueUsd(estimatedUsd)}`,
+            ),
+          ]),
+        }
+      : input.presentation.message;
+  } catch {
+    // The canonical receipt is authoritative. Optional valuation must never
+    // hide it or delay the retained-source continuation.
+    return input.presentation.message;
+  }
+}
+
 export function createTelegramFundingBuyContinuationDecorator(input: {
   appBaseUrl?: string;
+  estimateRetainedSolUsd?: (raw: string) => Promise<string | null>;
+  inspectMiniAppFunding?: TelegramBotTradingCallbackInput["inspectMiniAppFunding"];
+  invalidateAccountValue?: (userId: string) => void;
   pool: Pool;
   trading: ApiBotTradingExecutor;
 }): TelegramFundingProgressDecorator {
   return async (presentation) => {
+    const fundingSurfaceMessage = await decorateRetainedSolReceiptEstimate({
+      estimateRetainedSolUsd: input.estimateRetainedSolUsd,
+      invalidateAccountValue: input.invalidateAccountValue,
+      presentation,
+    });
+    // Late direct receipts remain visible and owned after cancellation or
+    // expiry, but a closed receive context must never create a new Buy plan.
+    if (!canContinueTelegramFundingBuyReturn(presentation)) {
+      return fundingSurfaceMessage;
+    }
     const buyReturn = await fetchActiveTelegramFundingBuyReturn(
       input.pool,
       presentation.context.id,
@@ -7544,7 +7829,7 @@ export function createTelegramFundingBuyContinuationDecorator(input: {
       buyReturn.telegramAccountIdSnapshot !==
         presentation.context.telegramAccountId
     ) {
-      return presentation.message;
+      return fundingSurfaceMessage;
     }
     if (
       presentation.progress?.state === "cancelled" ||
@@ -7552,7 +7837,7 @@ export function createTelegramFundingBuyContinuationDecorator(input: {
       presentation.progress?.state === "unavailable" ||
       presentation.progress?.state === "needs_attention"
     ) {
-      return presentation.message;
+      return fundingSurfaceMessage;
     }
     const [policyState, authorization, market] = await Promise.all([
       resolveSignalBotTradingPolicyStateFromDb(input.pool),
@@ -7560,6 +7845,12 @@ export function createTelegramFundingBuyContinuationDecorator(input: {
         ? loadEnabledEvmAuthorization(
             input.pool,
             presentation.context.telegramUserId,
+            {
+              // The user signs a sealed v2 plan in the Mini App. Keep the
+              // exact linked controller binding, but do not hide that plan
+              // merely because unattended bot execution is disabled.
+              allowInactiveForV2: true,
+            },
           )
         : loadEnabledAuthorization(
             input.pool,
@@ -7601,19 +7892,21 @@ export function createTelegramFundingBuyContinuationDecorator(input: {
       (buyReturn.continuationMode === "app_handoff" &&
         !isTelegramSealedAppHandoffVenue(continuationVenue))
     ) {
-      return presentation.message;
+      return fundingSurfaceMessage;
     }
-    const maxAmountUsd = effectiveMaxTradeAmountUsd(
+    const maxAmountUsd = resolveTelegramBuyIntentMaximumAmountUsd({
+      authorizationMaxAmountUsd: authorization.max_amount_usd,
+      deliveryMode: buyReturn.continuationMode,
       policy,
-      authorization.max_amount_usd,
-    );
+      venue: continuationVenue,
+    });
     const requestedSpendUsd = Number(buyReturn.requestedSpendUsd);
     if (
       !Number.isFinite(requestedSpendUsd) ||
       requestedSpendUsd <= 0 ||
       requestedSpendUsd > maxAmountUsd
     ) {
-      return presentation.message;
+      return fundingSurfaceMessage;
     }
     const quoteIntent = buildTelegramTradeIntent({
       amountUsd: requestedSpendUsd,
@@ -7651,10 +7944,12 @@ export function createTelegramFundingBuyContinuationDecorator(input: {
       ? new Date(quote.expiresAt).getTime()
       : Number.NaN;
     const progressState = presentation.progress?.state ?? null;
+    const retainedSolSourceReady =
+      progressState === "funds_received" &&
+      isRetainedSolFundingProgress(presentation.progress);
     const destinationSymbol =
       continuationVenue === "polymarket" ? "pUSD" : "USDC";
     const continuationVenueLabel = formatTelegramVenueLabel(continuationVenue);
-    const fundingSurfaceMessage = presentation.message;
     const withFundingCallout = (callout: {
       bodyMarkdownV2: string | string[];
       icon: string;
@@ -7686,7 +7981,11 @@ export function createTelegramFundingBuyContinuationDecorator(input: {
               readiness,
             }),
     );
-    if (!liveQuoteUsable && progressState !== "ready") {
+    if (
+      !liveQuoteUsable &&
+      progressState !== "ready" &&
+      !retainedSolSourceReady
+    ) {
       return withFundingCallout({
         bodyMarkdownV2: [
           formatTelegramUsdcLineMarkdownV2(
@@ -7712,7 +8011,11 @@ export function createTelegramFundingBuyContinuationDecorator(input: {
             maximumSpendUsd: requiredUsd,
           })
         : null;
-    if (fundingRequirement?.state === "deposit" && progressState !== "ready") {
+    if (
+      fundingRequirement?.state === "deposit" &&
+      progressState !== "ready" &&
+      !retainedSolSourceReady
+    ) {
       return withFundingCallout({
         bodyMarkdownV2: [
           formatTelegramUsdcLineMarkdownV2(
@@ -7743,7 +8046,11 @@ export function createTelegramFundingBuyContinuationDecorator(input: {
         title: "Funding for this Buy",
       });
     }
-    if (progressState !== "ready" && fundingRequirement?.state === "ready") {
+    if (
+      progressState !== "ready" &&
+      fundingRequirement?.state === "ready" &&
+      !retainedSolSourceReady
+    ) {
       return withFundingCallout({
         bodyMarkdownV2: [
           formatTelegramUsdcLineMarkdownV2(
@@ -7770,19 +8077,20 @@ export function createTelegramFundingBuyContinuationDecorator(input: {
       });
     }
     if (
+      !retainedSolSourceReady &&
       !(await hasReadyTelegramFundingDestinationReceipt(
         input.pool,
         presentation.context.id,
       ))
     ) {
-      return presentation.message;
+      return fundingSurfaceMessage;
     }
     if (buyReturn.continuationMode === "app_handoff") {
       if (
         !quote ||
         !readiness ||
         !liveQuoteUsable ||
-        fundingRequirement?.state !== "ready"
+        (!retainedSolSourceReady && fundingRequirement?.state !== "ready")
       ) {
         return withFundingCallout({
           bodyMarkdownV2: escapeMarkdown(
@@ -7796,7 +8104,6 @@ export function createTelegramFundingBuyContinuationDecorator(input: {
         "telegram-funding-handoff",
         presentation.context.id,
         buyReturn.revision,
-        presentation.context.progressRevision,
       ].join(":");
       const handoffIntentId = crypto.randomUUID();
       await input.pool.query(
@@ -7855,7 +8162,7 @@ export function createTelegramFundingBuyContinuationDecorator(input: {
         input.pool,
         handoffIdempotencyKey,
       );
-      if (!handoffIntent) return presentation.message;
+      if (!handoffIntent) return fundingSurfaceMessage;
       let handoffMessage: TelegramBotTradingMessage | null = null;
       if (handoffIntent.status === "external_handoff") {
         const storedQuote = readTelegramTradeQuotePreview(
@@ -7873,16 +8180,28 @@ export function createTelegramFundingBuyContinuationDecorator(input: {
             v2Plan,
           });
         }
-      } else if (["draft", "previewed"].includes(handoffIntent.status)) {
+      } else if (
+        ["draft", "previewed", "confirming"].includes(handoffIntent.status)
+      ) {
         const messages: TelegramBotTradingMessage[] = [];
         await previewTelegramTradeIntent({
           appBaseUrl: normalizeBaseUrl(
             input.appBaseUrl ?? "https://app.hunch.trade",
           ),
           authorization,
+          beforeConfirmLocked: (client, currentAuthorization) =>
+            isTelegramFundingHandoffIntentCurrent(
+              client,
+              handoffIntent,
+              currentAuthorization,
+            ),
           chatId: presentation.context.chatId,
           db: input.pool,
-          fundingReturnResume: true,
+          estimateRetainedSolUsd: input.estimateRetainedSolUsd,
+          fundingReturnResume: !retainedSolSourceReady,
+          inspectMiniAppFunding: retainedSolSourceReady
+            ? input.inspectMiniAppFunding
+            : undefined,
           intent: handoffIntent,
           market,
           maxAmountUsd,
@@ -7896,7 +8215,39 @@ export function createTelegramFundingBuyContinuationDecorator(input: {
           telegramMiniAppEnabled: true,
           trading: input.trading,
         });
-        handoffMessage = messages.at(-1) ?? null;
+        const refreshedIntent = retainedSolSourceReady
+          ? await loadIntentByIdempotencyKey(input.pool, handoffIdempotencyKey)
+          : null;
+        const refreshedPlan = refreshedIntent
+          ? readTelegramAppHandoffV2Plan(refreshedIntent)
+          : null;
+        const sealedFundingHandoffReady =
+          refreshedPlan?.kind === "funding" &&
+          (refreshedIntent?.status === "confirming" ||
+            refreshedIntent?.status === "external_handoff");
+        const sealedDirectHandoffReady =
+          refreshedPlan?.kind === "direct_trade" &&
+          refreshedIntent?.status === "previewed";
+        const safePlannerOutcome =
+          refreshedIntent?.status === "previewed" &&
+          refreshedIntent.submit_started_at == null &&
+          refreshedIntent.result.stage === "funding_preview" &&
+          isRetryableTelegramAppHandoffFundingState(
+            refreshedIntent.result.fundingState,
+          ) &&
+          !isRecord(refreshedIntent.result.appHandoffV2);
+        // A retained source receipt is not sufficient by itself. Only expose
+        // Continue in Hunch after the normal generic planner has durably
+        // sealed a v2 plan for this exact intent. Insufficient and retryable
+        // planner outcomes are also authoritative copy for this same card;
+        // hiding them behind stale "preparing" text would be misleading.
+        handoffMessage =
+          !retainedSolSourceReady ||
+          sealedFundingHandoffReady ||
+          sealedDirectHandoffReady ||
+          safePlannerOutcome
+            ? (messages.at(-1) ?? null)
+            : null;
       }
       if (!handoffMessage) return presentation.message;
       return {
@@ -8095,6 +8446,7 @@ export async function resumeTelegramFundingBuyContinuation(input: {
   appBaseUrl: string;
   chatId: string;
   db: DbQuery;
+  estimateRetainedSolUsd?: (raw: string) => Promise<string | null>;
   idempotencyKey: string;
   telegramMessageId: number;
   telegramMiniAppEnabled?: boolean;
@@ -8754,6 +9106,7 @@ export async function resumeTelegramFundingBuyContinuation(input: {
       ),
     chatId: input.chatId,
     db: input.db,
+    estimateRetainedSolUsd: input.estimateRetainedSolUsd,
     fundingReturnResume: true,
     intent,
     market,
@@ -8881,6 +9234,12 @@ type TelegramFundingReturnIntentMarker = Readonly<{
   returnRevision: number;
 }>;
 
+type TelegramFundingHandoffIntentMarker = Readonly<{
+  fundingContextId: string;
+  policyRevision: string;
+  returnRevision: number;
+}>;
+
 function readTelegramFundingReturnIntentMarker(
   intent: TelegramTradeIntentRow,
 ): TelegramFundingReturnIntentMarker | null {
@@ -8910,6 +9269,41 @@ function readTelegramFundingReturnIntentMarker(
     policyRevision: marker.policyRevision,
     returnRevision: marker.returnRevision,
   };
+}
+
+function readTelegramFundingHandoffIntentMarker(
+  intent: TelegramTradeIntentRow,
+): TelegramFundingHandoffIntentMarker | null {
+  const marker =
+    isRecord(intent.result) && isRecord(intent.result.telegramFundingHandoff)
+      ? intent.result.telegramFundingHandoff
+      : null;
+  if (
+    marker?.version !== 1 ||
+    typeof marker.fundingContextId !== "string" ||
+    marker.fundingContextId.trim().length === 0 ||
+    typeof marker.policyRevision !== "string" ||
+    marker.policyRevision.trim().length === 0 ||
+    typeof marker.returnRevision !== "number" ||
+    !Number.isInteger(marker.returnRevision) ||
+    marker.returnRevision <= 0
+  ) {
+    return null;
+  }
+  return {
+    fundingContextId: marker.fundingContextId,
+    policyRevision: marker.policyRevision,
+    returnRevision: marker.returnRevision,
+  };
+}
+
+function readTelegramFundingIntentContextMarker(
+  intent: TelegramTradeIntentRow,
+): Readonly<{ fundingContextId: string }> | null {
+  return (
+    readTelegramFundingReturnIntentMarker(intent) ??
+    readTelegramFundingHandoffIntentMarker(intent)
+  );
 }
 
 async function isTelegramFundingReturnIntentCurrent(
@@ -9069,6 +9463,203 @@ async function isTelegramFundingReturnIntentCurrent(
     automationAllowed &&
     increaseExposureAllowed,
   );
+}
+
+async function isTelegramFundingHandoffIntentCurrent(
+  db: DbQuery,
+  intent: TelegramTradeIntentRow,
+  authorization: TelegramBotTradingAuthorizationRow,
+): Promise<boolean> {
+  const marker = readTelegramFundingHandoffIntentMarker(intent);
+  const currentAuthority = buildTelegramTradeAuthorityBinding(authorization);
+  const userId = intent.user_id;
+  const chatId = intent.chat_id;
+  if (
+    !marker ||
+    !currentAuthority ||
+    !userId ||
+    !chatId ||
+    intent.action !== "buy" ||
+    intent.delivery_mode !== "app_handoff" ||
+    !intentMatchesTelegramTradeAuthority({ authorization, intent })
+  ) {
+    return false;
+  }
+  const { rows } = await db.query<{
+    destination_asset: Record<string, unknown>;
+    market_id: string;
+    requested_spend_usd: string;
+    side: string;
+    source_authority_fingerprint: string;
+    source_wallet_address: string;
+    telegram_account_id: string;
+    venue_id: string;
+  }>(
+    `
+      select
+        receive_session.destination_asset,
+        buy_return.market_id,
+        buy_return.requested_spend_usd::text,
+        buy_return.side,
+        buy_return.source_authority_fingerprint,
+        retained_receipt.destination_address as source_wallet_address,
+        funding_context.telegram_account_id,
+        buy_return.venue_id
+      from telegram_funding_sessions funding_context
+      join telegram_funding_buy_return_revisions buy_return
+        on buy_return.telegram_funding_session_id = funding_context.id
+       and buy_return.revision = funding_context.active_buy_return_revision
+      join funding_receive_sessions receive_session
+        on receive_session.id = funding_context.receive_session_id
+       and receive_session.user_id = funding_context.user_id
+       and receive_session.owner_channel = funding_context.receive_owner_channel
+      join telegram_funding_consents funding_consent
+        on funding_consent.telegram_funding_session_id = funding_context.id
+       and funding_consent.revision = funding_context.active_consent_revision
+      join lateral (
+        select receive_receipt.destination_address
+        from funding_receive_receipts receive_receipt
+        where receive_receipt.receive_session_id = receive_session.id
+          and receive_receipt.user_id = funding_context.user_id
+          and receive_receipt.variant_id = any(funding_consent.consented_variant_ids)
+          and receive_receipt.status = 'ready'
+          and receive_receipt.handling = 'direct'
+          and receive_receipt.network_id = $8
+          and receive_receipt.asset_id = $9
+          and receive_receipt.asset_decimals = $10
+          and receive_receipt.raw_amount <> '0'
+          and exists (
+            select 1
+            from jsonb_array_elements(receive_session.observation_variants) frozen_variant
+            where frozen_variant ->> 'variantId' = receive_receipt.variant_id
+              and frozen_variant #>> '{completion,kind}' = 'retained_owned_source_credit'
+              and frozen_variant ->> 'networkId' = receive_receipt.network_id
+              and frozen_variant #>> '{asset,networkId}' = receive_receipt.network_id
+              and frozen_variant #>> '{asset,assetId}' = receive_receipt.asset_id
+              and (frozen_variant #>> '{asset,decimals}')::int = receive_receipt.asset_decimals
+              and funding_account_identifier_equal(
+                    receive_receipt.network_id,
+                    frozen_variant ->> 'destinationAddress',
+                    receive_receipt.destination_address
+                  )
+          )
+        order by receive_receipt.observed_at desc, receive_receipt.id desc
+        limit 1
+      ) retained_receipt on true
+      where funding_context.id = $1::uuid
+        and funding_context.active_buy_return_revision = $2
+        and funding_context.user_id = $3::uuid
+        and funding_context.telegram_user_id = $4
+        and funding_context.chat_id = $5
+        and funding_context.telegram_message_id is not distinct from $6::bigint
+        and funding_context.telegram_account_id = $7::uuid
+        and funding_context.cancelled_at is null
+        and funding_context.expires_at > now()
+        and receive_session.status in ('open', 'processing', 'review_required', 'completed')
+        and receive_session.selected_receive_target_id = funding_consent.selected_receive_target_id
+        and buy_return.continuation_mode = 'app_handoff'
+        and funding_consent.automation_enabled = false
+        and funding_consent.selected_asset_network_id = $8
+        and funding_consent.selected_asset_id = $9
+        and funding_consent.selected_asset_decimals = $10
+      limit 1
+    `,
+    [
+      marker.fundingContextId,
+      marker.returnRevision,
+      userId,
+      intent.telegram_user_id,
+      chatId,
+      intent.telegram_message_id,
+      authorization.telegram_account_link_id,
+      SOLANA_NATIVE_ASSET.networkId,
+      SOLANA_NATIVE_ASSET.assetId,
+      SOLANA_NATIVE_ASSET.decimals,
+    ],
+  );
+  const current = rows[0];
+  if (
+    !current ||
+    current.telegram_account_id !== authorization.telegram_account_link_id ||
+    current.market_id !== intent.market_id ||
+    current.side !== intent.side ||
+    current.venue_id !== intent.venue ||
+    Number(current.requested_spend_usd) !== Number(intent.amount_usd) ||
+    telegramBotTradeAuthorityFingerprint(currentAuthority) !==
+      current.source_authority_fingerprint ||
+    !(await isTelegramFundingManagedSolanaWalletCurrent(db, {
+      lock: true,
+      telegramAccountId: current.telegram_account_id,
+      telegramUserId: intent.telegram_user_id,
+      userId,
+      walletAddress: current.source_wallet_address,
+    })) ||
+    !isRecord(current.destination_asset) ||
+    typeof current.destination_asset.networkId !== "string" ||
+    typeof current.destination_asset.assetId !== "string" ||
+    typeof current.destination_asset.decimals !== "number" ||
+    !resolveTelegramFundingBuyContinuationAdapter({
+      destinationAsset: {
+        assetId: current.destination_asset.assetId,
+        decimals: current.destination_asset.decimals,
+        networkId: current.destination_asset.networkId,
+      },
+      venueId: current.venue_id,
+    })
+  ) {
+    return false;
+  }
+  await db.query("select id from unified_markets where id = $1 for share", [
+    intent.market_id,
+  ]);
+  const policyState = await resolveSignalBotTradingPolicyStateFromDb(db);
+  const policy = policyState.policy;
+  const market = await loadMarketById(db, intent.market_id);
+  const requestedSpendUsd = Number(intent.amount_usd);
+  return Boolean(
+    policyState.policyRevision === marker.policyRevision &&
+    policy.buyContinuationEnabled &&
+    policy.fundingReceiveEnabled &&
+    policy.tradingEnabled &&
+    policy.tradingActions.includes("buy") &&
+    isTelegramAppHandoffV2EnabledForVenue({
+      contractVersion: policy.miniAppHandoffContractVersion,
+      mode: policy.miniAppHandoffMode,
+      venue: intent.venue,
+    }) &&
+    Number.isFinite(requestedSpendUsd) &&
+    requestedSpendUsd > 0 &&
+    requestedSpendUsd <=
+      resolveTelegramBuyIntentMaximumAmountUsd({
+        authorizationMaxAmountUsd: authorization.max_amount_usd,
+        deliveryMode: "app_handoff",
+        policy,
+        venue: intent.venue,
+      }) &&
+    market &&
+    market.venue === intent.venue &&
+    isMarketOrderable(market),
+  );
+}
+
+async function isTelegramFundingIntentSourceCurrent(
+  db: DbQuery,
+  intent: TelegramTradeIntentRow,
+  authorization: TelegramBotTradingAuthorizationRow,
+  options: Readonly<{ lockGeneration?: boolean }> = {},
+): Promise<boolean> {
+  if (readTelegramFundingReturnIntentMarker(intent)) {
+    return isTelegramFundingReturnIntentCurrent(
+      db,
+      intent,
+      authorization,
+      options,
+    );
+  }
+  if (readTelegramFundingHandoffIntentMarker(intent)) {
+    return isTelegramFundingHandoffIntentCurrent(db, intent, authorization);
+  }
+  return true;
 }
 
 async function answerIntentAlreadyProcessed(
@@ -9523,6 +10114,7 @@ async function previewTelegramTradeIntent(input: {
   ) => Promise<boolean>;
   chatId: string;
   db: DbQuery;
+  estimateRetainedSolUsd?: (raw: string) => Promise<string | null>;
   intent: TelegramTradeIntentRow;
   log?: TelegramBotTradingCallbackInput["log"];
   market: TelegramBotMarketRow;
@@ -9594,6 +10186,36 @@ async function previewTelegramTradeIntent(input: {
         currentHandoffPlan?.kind === "direct_trade");
     if (!reviewable || !current || !stored) return false;
     let selectedAuthorization = reviewAuthorization;
+    if (current.status === "confirming" && input.beforeConfirmLocked) {
+      const validatedAuthorization = await withLockedTelegramIntentAuthority({
+        callback: async (client, currentAuthorization) => {
+          const fundingCurrent =
+            currentAuthorization &&
+            (await input.beforeConfirmLocked?.(client, currentAuthorization));
+          if (!fundingCurrent) {
+            await updateIntentStatus({
+              allowedStatuses: ["confirming"],
+              db: client,
+              errorCode: currentAuthorization
+                ? "funding_continuation_stale"
+                : "authority_changed",
+              errorMessage: currentAuthorization
+                ? "Funding continuation changed before confirmation."
+                : "Telegram trade authority changed before confirmation.",
+              intentId: current.id,
+              status: "failed",
+            });
+            return null;
+          }
+          return currentAuthorization;
+        },
+        db: input.db,
+        expectedAuthorization: reviewAuthorization,
+        intent: current,
+      });
+      if (!validatedAuthorization) return false;
+      selectedAuthorization = validatedAuthorization;
+    }
     let preissuedHandoff:
       | Awaited<ReturnType<typeof issueTelegramTradeAppHandoff>>
       | undefined;
@@ -9628,6 +10250,7 @@ async function previewTelegramTradeIntent(input: {
       ...(await buildTelegramTradeReviewMessage({
         authorization: selectedAuthorization,
         db: input.db,
+        estimateRetainedSolUsd: input.estimateRetainedSolUsd,
         intent: current,
         market: input.market,
         policy: input.policy,
@@ -10718,6 +11341,7 @@ export async function completeTelegramBotTradeInput(input: {
   chatId: string;
   contextId: string;
   db: DbQuery;
+  estimateRetainedSolUsd?: (raw: string) => Promise<string | null>;
   isLinkCurrent: () => Promise<boolean>;
   loadContext: () => Promise<TelegramBotTradeInputContext | null>;
   openFundingBuyReturn?: TelegramFundingBuyReturnOpener;
@@ -11313,6 +11937,7 @@ export async function completeTelegramBotTradeInput(input: {
     authorization,
     chatId: input.chatId,
     db: input.db,
+    estimateRetainedSolUsd: input.estimateRetainedSolUsd,
     intent,
     market,
     maxAmountUsd: resolveTelegramBuyIntentMaximumAmountUsd({
@@ -12520,6 +13145,7 @@ export async function handleTelegramBotTradingCallback(
         authorization,
         chatId,
         db: input.db,
+        estimateRetainedSolUsd: input.estimateRetainedSolUsd,
         intent,
         market,
         maxAmountUsd,
@@ -13097,6 +13723,7 @@ export async function handleTelegramBotTradingCallback(
             authorization: await loadEnabledEvmAuthorization(
               input.db,
               authorization.telegram_user_id,
+              { allowInactiveForV2: true },
             ),
             intent,
           })
@@ -13769,6 +14396,7 @@ export async function captureTelegramBotTradingCallback(input: {
   appBaseUrl: string;
   callbackQuery: TelegramBotTradingCallbackInput["callbackQuery"];
   db: DbQuery;
+  estimateRetainedSolUsd?: TelegramBotTradingCallbackInput["estimateRetainedSolUsd"];
   expectedIntentId?: string | null;
   expectedType?:
     | "buy"
@@ -13807,6 +14435,7 @@ export async function captureTelegramBotTradingCallback(input: {
     appBaseUrl: input.appBaseUrl,
     callbackQuery: input.callbackQuery,
     db: input.db,
+    estimateRetainedSolUsd: input.estimateRetainedSolUsd,
     expectedIntentId: input.expectedIntentId,
     expectedType: input.expectedType,
     log: input.log,

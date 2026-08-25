@@ -1023,7 +1023,7 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
       const result = await submitLimitlessClientSignedOrder({
         assertTelegramAppHandoffV2Scope: async (sealed) => {
           return matchesTelegramAppHandoffV2CurrentScope({
-            db: pool,
+            db: sealed.db,
             sealed,
           });
         },
@@ -1076,7 +1076,7 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
       const result = await broadcastLimitlessAmmTelegramAppHandoffTrade({
         assertTelegramAppHandoffV2Scope: async (sealed) => {
           return matchesTelegramAppHandoffV2CurrentScope({
-            db: pool,
+            db: sealed.db,
             sealed,
           });
         },
@@ -1111,7 +1111,7 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
       const result = await claimLimitlessAmmFundingTrade({
         assertTelegramAppHandoffV2Scope: async (sealed) =>
           matchesTelegramAppHandoffV2CurrentScope({
-            db: pool,
+            db: sealed.db,
             sealed,
           }),
         body: request.body,

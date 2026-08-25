@@ -270,6 +270,64 @@ export const SOLANA_SPL_TOKEN_PROGRAM_ID =
 export const SOLANA_TOKEN_2022_PROGRAM_ID =
   "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
 
+export type SolanaRawAccountInfo = Readonly<{
+  owner: string;
+  data: Buffer;
+  space: number;
+  slot: bigint;
+}>;
+
+/**
+ * Reads a finalized raw Solana account through the shared RPC path, retaining
+ * its timeout, failover, diagnostics, and request single-flight behavior.
+ */
+export async function fetchSolanaRawAccountInfo(inputs: {
+  rpcUrls: readonly string[];
+  timeoutMs: number;
+  address: string;
+}): Promise<SolanaRawAccountInfo | null> {
+  const result = await solanaRpcRequest<unknown>({
+    rpcUrls: [...inputs.rpcUrls],
+    timeoutMs: inputs.timeoutMs,
+    method: "getAccountInfo",
+    params: [inputs.address, { commitment: "finalized", encoding: "base64" }],
+  });
+  if (!isRecord(result)) {
+    throw new Error("Solana RPC: invalid raw account response");
+  }
+  const context = result.context;
+  const value = result.value;
+  if (value === null) return null;
+  if (!isRecord(context) || !isRecord(value)) {
+    throw new Error("Solana RPC: invalid raw account fields");
+  }
+  const slot = context.slot;
+  const owner = value.owner;
+  const space = value.space;
+  const data = value.data;
+  if (
+    typeof slot !== "number" ||
+    !Number.isSafeInteger(slot) ||
+    slot < 0 ||
+    typeof owner !== "string" ||
+    owner.length === 0 ||
+    typeof space !== "number" ||
+    !Number.isSafeInteger(space) ||
+    space < 0 ||
+    !Array.isArray(data) ||
+    data.length !== 2 ||
+    typeof data[0] !== "string" ||
+    data[1] !== "base64"
+  ) {
+    throw new Error("Solana RPC: invalid raw account value");
+  }
+  const decoded = Buffer.from(data[0], "base64");
+  if (decoded.byteLength !== space) {
+    throw new Error("Solana RPC: raw account size mismatch");
+  }
+  return { owner, data: decoded, space, slot: BigInt(slot) };
+}
+
 export type SolanaAddressSignature = Readonly<{
   signature: string;
   slot: bigint;

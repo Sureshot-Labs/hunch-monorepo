@@ -6,15 +6,24 @@ import type {
   FundingReceiveAutomationPolicy,
   JsonValue,
 } from "../funding/domain/types.js";
+import {
+  sameAccountAddress,
+  sameAsset,
+} from "../funding/domain/asset-identity.js";
+import { SOLANA_NATIVE_ASSET } from "../funding/domain/network-fees.js";
 import { lockTelegramFundingLinkLifecycle } from "../funding/execution/telegram-funding-link-lifecycle-lock.js";
 import {
+  isTelegramFundingManagedSolanaWalletCurrent,
   resolveTelegramFundingManagedWalletIdentity,
   telegramFundingManagedWalletControllerId,
   telegramFundingVenueNetworkId,
 } from "../funding/execution/telegram-funding-managed-wallet.js";
 import { hashOpaqueToken } from "../funding/persistence/canonical.js";
 import { lockFundingReceiveSessionScope } from "../funding/persistence/funding-receive-session-repository.js";
-import type { DirectIngressObservationVariant } from "../funding/reconciliation/direct-ingress-observer.js";
+import {
+  parseDirectIngressObservationVariant,
+  type DirectIngressObservationVariant,
+} from "../funding/reconciliation/direct-ingress-observer.js";
 import { resolveTelegramFundingAutomaticCapability } from "./telegram-funding-route.js";
 
 type JsonRecord = Readonly<Record<string, JsonValue>>;
@@ -1417,6 +1426,7 @@ export async function appendTelegramFundingConsent(
     chatId: string;
     telegramMessageId: number | null;
     controllerWalletId: string;
+    retainedSourceWalletAddress?: string;
     receiveTargetId: string;
     asset: AssetRef;
     variantIds: readonly string[];
@@ -1555,11 +1565,39 @@ export async function appendTelegramFundingConsent(
         "telegram_funding_session_unavailable",
       );
     }
+    if (
+      sameAsset(input.asset, SOLANA_NATIVE_ASSET) &&
+      contextRow.origin !== "generic_add_funds"
+    ) {
+      const retainedSourceCapability = await client.query<{
+        app_handoff_active: boolean;
+      }>(
+        `
+          select exists (
+            select 1
+            from telegram_funding_sessions funding_context
+            join telegram_funding_buy_return_revisions buy_return
+              on buy_return.telegram_funding_session_id = funding_context.id
+             and buy_return.revision = funding_context.active_buy_return_revision
+            where funding_context.id = $1
+              and funding_context.origin = 'buy_return_context'
+              and buy_return.continuation_mode = 'app_handoff'
+          ) as app_handoff_active
+        `,
+        [input.contextId],
+      );
+      if (retainedSourceCapability.rows[0]?.app_handoff_active !== true) {
+        throw new TelegramFundingPersistenceError(
+          "telegram_funding_session_unavailable",
+        );
+      }
+    }
     const canonical = await client.query<{
       controller_wallet_id: string | null;
       destination_network_id: string | null;
       destination_option_id: string;
       id: string;
+      observation_variants: readonly unknown[];
       venue_binding_option_id: string;
     }>(
       `
@@ -1569,6 +1607,7 @@ export async function appendTelegramFundingConsent(
             '{location,details,controllerWalletId}' as controller_wallet_id,
           receive.destination_asset ->> 'networkId' as destination_network_id,
           receive.destination_option_id,
+          receive.observation_variants,
           receive.venue_binding_option_id
         from funding_receive_sessions receive
         where receive.id = $1
@@ -1613,6 +1652,49 @@ export async function appendTelegramFundingConsent(
       throw new TelegramFundingPersistenceError(
         "telegram_funding_session_unavailable",
       );
+    }
+    if (sameAsset(input.asset, SOLANA_NATIVE_ASSET)) {
+      const retainedSourceWalletAddress =
+        input.retainedSourceWalletAddress?.trim() ?? "";
+      let selectedVariant: DirectIngressObservationVariant | null = null;
+      try {
+        const variants = Array.isArray(canonicalReceive.observation_variants)
+          ? canonicalReceive.observation_variants.map(
+              parseDirectIngressObservationVariant,
+            )
+          : [];
+        selectedVariant =
+          input.variantIds.length === 1
+            ? (variants.find(
+                (variant) => variant.variantId === input.variantIds[0],
+              ) ?? null)
+            : null;
+      } catch {
+        selectedVariant = null;
+      }
+      if (
+        !retainedSourceWalletAddress ||
+        !selectedVariant ||
+        selectedVariant.completion.kind !== "retained_owned_source_credit" ||
+        !sameAsset(selectedVariant.asset, SOLANA_NATIVE_ASSET) ||
+        selectedVariant.networkId !== SOLANA_NATIVE_ASSET.networkId ||
+        !sameAccountAddress(
+          SOLANA_NATIVE_ASSET.networkId,
+          selectedVariant.destinationAddress,
+          retainedSourceWalletAddress,
+        ) ||
+        !(await isTelegramFundingManagedSolanaWalletCurrent(client, {
+          lock: true,
+          telegramAccountId: input.telegramAccountId,
+          telegramUserId: input.telegramUserId,
+          userId: input.userId,
+          walletAddress: retainedSourceWalletAddress,
+        }))
+      ) {
+        throw new TelegramFundingPersistenceError(
+          "telegram_funding_session_unavailable",
+        );
+      }
     }
     if (input.automationEnabled) {
       const capability = await resolveTelegramFundingAutomaticCapability(

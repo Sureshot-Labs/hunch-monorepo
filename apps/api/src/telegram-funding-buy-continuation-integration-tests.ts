@@ -2,10 +2,13 @@
 
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
+import { Keypair } from "@solana/web3.js";
 
 import { tx } from "@hunch/infra";
 
 import { stableWalletOpaqueId } from "./account-value/canonical.js";
+import { env } from "./env.js";
+import { SOLANA_NATIVE_ASSET } from "./funding/domain/network-fees.js";
 import { canonicalJsonHash } from "./funding/persistence/canonical.js";
 import { fundingSidecarRuntimeConfig } from "./funding/runtime/sidecar-runtime-config.js";
 import type { ApiBotTradingExecutor } from "./services/api-trading-service.js";
@@ -29,6 +32,8 @@ import {
   TelegramFundingService,
 } from "./services/telegram-funding.js";
 import { telegramPolygonFundingPresentation } from "./services/telegram-funding-route.js";
+import { parseTelegramAppHandoffV2Plan } from "./services/telegram-app-handoff-v2.js";
+import { resolveSignalBotTradingPolicyStateFromDb } from "./services/signal-bot-trading-policy.js";
 import { createIntegrationTestPool } from "./test-database-target.js";
 
 const pool = await createIntegrationTestPool({
@@ -60,6 +65,8 @@ const controllerWalletId = stableWalletOpaqueId({
 const destinationAddress = "0x1111111111111111111111111111111111111111";
 const sourceShortfallIntentId = crypto.randomUUID();
 const readyVariantId = `slice-b-ready-${suffix}`;
+const yesTokenId = `slice-b-yes-token-${suffix}`;
+const noTokenId = `slice-b-no-token-${suffix}`;
 const sourceAuthorityFingerprint = telegramBotTradeAuthorityFingerprint({
   authorizationId,
   privyWalletId: `wallet-${suffix}`,
@@ -162,6 +169,13 @@ try {
        '{}'::jsonb
      )`,
     [marketId, `market-${suffix}`, eventId],
+  );
+  await pool.query(
+    `insert into unified_market_tokens (market_id, token_id, venue, outcome_side)
+     values
+       ($1, $2, 'polymarket', 'YES'),
+       ($1, $3, 'polymarket', 'NO')`,
+    [marketId, yesTokenId, noTokenId],
   );
   await pool.query(
     `insert into funding_receive_sessions (
@@ -989,11 +1003,583 @@ try {
           safeInstructions: [],
         },
       ],
+      status: "open",
       venueBindingOptionId,
       venueId: "polymarket",
       version: 7,
     } as never,
   };
+  const retainedSolPlan = parseTelegramAppHandoffV2Plan({
+    executionContractVersion: 2,
+    funding: {
+      discoveryRequest: {
+        confirmedSourceAmount: null,
+        consumerIntent: {
+          marketContextId: yesTokenId,
+          marketId,
+          side: "BUY",
+          spend: {
+            asset: {
+              assetId: fundingSidecarRuntimeConfig.polymarketPusdAddress,
+              decimals: 6,
+              networkId: "evm:137",
+            },
+            raw: "503000",
+          },
+          venueId: "polymarket",
+        },
+        deadline: new Date(Date.now() + 60_000).toISOString(),
+        destinationOptionId,
+        marketContextId: yesTokenId,
+        maxFeeUsd: "1",
+        maxSlippageBps: 500,
+        purpose: "trade_shortfall",
+        requestedDestinationAmount: {
+          asset: {
+            assetId: fundingSidecarRuntimeConfig.polymarketPusdAddress,
+            decimals: 6,
+            networkId: "evm:137",
+          },
+          raw: "503000",
+        },
+        serverAdditionalDestinationAmount: {
+          asset: {
+            assetId: fundingSidecarRuntimeConfig.polymarketPusdAddress,
+            decimals: 6,
+            networkId: "evm:137",
+          },
+          raw: "403000",
+        },
+        venueBindingOptionId,
+        withdrawalRecipientId: null,
+      },
+      destination: {
+        controllerWalletId,
+        destinationOptionId,
+        requiredAsset: {
+          assetId: fundingSidecarRuntimeConfig.polymarketPusdAddress,
+          decimals: 6,
+          networkId: "evm:137",
+        },
+        topology: "solana_relay_polygon_pusd",
+        venueBindingId: venueBindingOptionId,
+        venueBindingOptionId,
+        venueId: "polymarket",
+      },
+      fundingPolicyRevision: `retained-sol-funding-policy-${suffix}`,
+      sourceDebits: [
+        {
+          asset: SOLANA_NATIVE_ASSET,
+          locationId: `retained-sol-location-${suffix}`,
+          maximumRaw: "52000000",
+          sourceFingerprint: "b".repeat(64),
+        },
+      ],
+    },
+    kind: "funding",
+    trade: {
+      action: "buy",
+      amountUsd: 0.3,
+      controllerWalletAddress: walletAddress,
+      eventId,
+      marketId,
+      maxSlippageBps: 500,
+      maxSpendUsd: 0.503,
+      minReceiveShares: 0.95,
+      outcomeTokenId: yesTokenId,
+      side: "YES",
+      venue: "polymarket",
+    },
+    version: 2,
+  });
+  const retainedSolPolicy = await pool.query<{ id: string }>(
+    `insert into runtime_policies (
+       policy_key, effective_at, payload, created_by
+     ) values ('signal_bot', now(), $1::jsonb, $2::uuid)
+     returning id`,
+    [
+      JSON.stringify({
+        buyContinuationEnabled: true,
+        fundingReceiveEnabled: true,
+        intentTtlSec: 120,
+        maxSlippageBps: 500,
+        maxTradeAmountUsd: 50,
+        miniAppHandoffContractVersion: 2,
+        miniAppHandoffMode: "fallback",
+        tradingActions: ["buy"],
+        tradingEnabled: true,
+        tradingVenues: ["polymarket"],
+      }),
+      userId,
+    ],
+  );
+  const retainedSolPolicyId = retainedSolPolicy.rows[0]?.id;
+  assert.ok(retainedSolPolicyId);
+  const retainedSolReturn = await tx(pool, (client) =>
+    appendTelegramFundingBuyReturnInTransaction(client, {
+      ...attachInput,
+      continuationMode: "app_handoff",
+      idempotencyKey: `slice-b-retained-sol-return-${suffix}`,
+      requestFingerprint: fingerprint("retained-sol-return"),
+      sourceShortfallIntentId: crypto.randomUUID(),
+    }),
+  );
+  const retainedSolReturnRevision = retainedSolReturn.revision.revision;
+  const retainedSolWalletAddress = Keypair.generate().publicKey.toBase58();
+  const retainedSolTargetId = `slice-b-sol-target-${suffix}`;
+  const retainedSolVariantId = `slice-b-sol-variant-${suffix}`;
+  await pool.query(
+    `insert into user_wallets (
+       user_id, wallet_address, wallet_type, is_primary, is_verified,
+       is_internal_wallet, privy_wallet_id, wallet_source,
+       privy_profile_updated_at
+     ) values (
+       $1::uuid, $2, 'solana', false, true, true, $3, 'embedded', now()
+     )`,
+    [userId, retainedSolWalletAddress, `solana-wallet-${suffix}`],
+  );
+  await pool.query(
+    `update funding_receive_sessions
+        set receive_targets = receive_targets || $2::jsonb,
+            observation_variants = observation_variants || $3::jsonb,
+            selected_receive_target_id = $4,
+            updated_at = now()
+      where id = $1::uuid`,
+    [
+      receiveSessionId,
+      JSON.stringify([
+        {
+          acceptedAssets: [{ asset: SOLANA_NATIVE_ASSET, handling: "direct" }],
+          destinationAddress: retainedSolWalletAddress,
+          networkId: "solana:mainnet",
+          receiveTargetId: retainedSolTargetId,
+          safeInstructions: [],
+        },
+      ]),
+      JSON.stringify([
+        {
+          asset: SOLANA_NATIVE_ASSET,
+          baselineRaw: "0",
+          baselineRevision: `slice-b-sol-baseline-${suffix}`,
+          completion: { kind: "retained_owned_source_credit" },
+          destinationAddress: retainedSolWalletAddress,
+          destinationLocationId: `slice-b-sol-location-${suffix}`,
+          networkId: "solana:mainnet",
+          observation: {
+            adapterId: "owned_destination_spendability_v1",
+            payload: {},
+          },
+          variantId: retainedSolVariantId,
+        },
+      ]),
+      retainedSolTargetId,
+    ],
+  );
+  await pool.query(
+    `insert into telegram_funding_consents (
+       telegram_funding_session_id, revision, selected_receive_target_id,
+       selected_asset_network_id, selected_asset_id, selected_asset_decimals,
+       consented_variant_ids, automation_enabled,
+       max_auto_execute_source_raw, automation_policy_snapshot,
+       consent_fingerprint, consented_at
+     ) values (
+       $1::uuid, 3, $2, $3, $4, $5, array[$6]::text[], false,
+       null, $7::jsonb, $8, now()
+     )`,
+    [
+      contextId,
+      retainedSolTargetId,
+      SOLANA_NATIVE_ASSET.networkId,
+      SOLANA_NATIVE_ASSET.assetId,
+      SOLANA_NATIVE_ASSET.decimals,
+      retainedSolVariantId,
+      JSON.stringify({
+        automationEnabled: false,
+        mode: "direct",
+        presentation: { routeKey: "polymarket_solana_sol_retained_v1" },
+        presentationMode: "polymarket_solana_sol_retained",
+        version: 1,
+      }),
+      fingerprint("retained-sol-consent"),
+    ],
+  );
+  await pool.query(
+    `insert into funding_receive_receipts (
+       receive_session_id, user_id, variant_id, network_id, asset_id,
+       asset_decimals, destination_address, raw_amount,
+       observation_revision, observed_at, status, handling, evidence
+     ) values (
+       $1::uuid, $2::uuid, $3, $4, $5, $6, $7, 52000000,
+       $8, now(), 'ready', 'direct', '{}'::jsonb
+     )`,
+    [
+      receiveSessionId,
+      userId,
+      retainedSolVariantId,
+      SOLANA_NATIVE_ASSET.networkId,
+      SOLANA_NATIVE_ASSET.assetId,
+      SOLANA_NATIVE_ASSET.decimals,
+      retainedSolWalletAddress,
+      `slice-b-sol-observation-${suffix}`,
+    ],
+  );
+  await pool.query(
+    `update telegram_funding_sessions
+        set active_consent_revision = 3,
+            updated_at = now()
+      where id = $1::uuid`,
+    [contextId],
+  );
+  const retainedSolIntentKey = `telegram-funding-handoff:${contextId}:${retainedSolReturnRevision}`;
+  assert.equal(retainedSolReturn.revision.continuationMode, "app_handoff");
+  const retainedSolSignalPolicy =
+    await resolveSignalBotTradingPolicyStateFromDb(pool);
+  assert.equal(retainedSolSignalPolicy.policy.miniAppHandoffMode, "fallback");
+  assert.equal(retainedSolSignalPolicy.policy.miniAppHandoffContractVersion, 2);
+  await pool.query(
+    `update telegram_bot_trading_authorizations
+        set enabled = false, max_amount_usd = 0.1, updated_at = now()
+      where id = $1::uuid`,
+    [authorizationId],
+  );
+  await pool.query(
+    `update telegram_bot_trading_preferences
+        set desired_enabled = false, updated_at = now()
+      where user_id = $1::uuid`,
+    [userId],
+  );
+  const originalMiniAppLinkBase = env.telegramMiniAppLinkBase;
+  env.telegramMiniAppLinkBase = "https://t.me/hunch_bot/hunch";
+  try {
+    let retainedSolEstimateCalls = 0;
+    let retainedSolInspectionCalls = 0;
+    const retainedSolReview =
+      await createTelegramFundingBuyContinuationDecorator({
+        estimateRetainedSolUsd: async (raw) => {
+          retainedSolEstimateCalls += 1;
+          assert.equal(raw, "52000000");
+          return "5.2";
+        },
+        inspectMiniAppFunding: async () => {
+          retainedSolInspectionCalls += 1;
+          return {
+            kind: "web_funding_plan",
+            plan: retainedSolPlan,
+          };
+        },
+        pool,
+        trading: partialTrading,
+      })({
+        ...partialFundingPresentation,
+        consent: {
+          asset: SOLANA_NATIVE_ASSET,
+        } as never,
+        message: { text: "SOL received and kept in your Solana wallet" },
+        progress: {
+          presentation: {
+            routeKey: "polymarket_solana_sol_retained_v1",
+          },
+          rawAmount: "52000000",
+          state: "funds_received",
+        } as never,
+      });
+    const retainedIntentDebug = await pool.query<{
+      delivery_mode: string;
+      error_code: string | null;
+      funding_state: string | null;
+      intent_status: string;
+      policy_snapshot: unknown;
+      result: unknown;
+    }>(
+      `select delivery_mode,
+              status as intent_status,
+              error_code,
+              result ->> 'fundingState' as funding_state,
+              policy_snapshot,
+              result
+         from telegram_trade_intents
+        where idempotency_key = $1`,
+      [retainedSolIntentKey],
+    );
+    const retainedBoundaryDebug = await pool.query(
+      `select
+         funding_context.active_buy_return_revision,
+         funding_context.active_consent_revision,
+         funding_context.cancelled_at,
+         funding_context.expires_at > now() as context_current,
+         funding_context.telegram_account_id,
+         funding_context.telegram_message_id,
+         buy_return.continuation_mode,
+         buy_return.requested_spend_usd::text,
+         receive_session.status as receive_status,
+         receive_session.selected_receive_target_id,
+         funding_consent.selected_receive_target_id as consent_target_id,
+         funding_consent.selected_asset_network_id,
+         funding_consent.selected_asset_id,
+         funding_consent.selected_asset_decimals,
+         (
+           select count(*)::int
+           from funding_receive_receipts receive_receipt
+           where receive_receipt.receive_session_id = receive_session.id
+             and receive_receipt.variant_id = any(funding_consent.consented_variant_ids)
+             and receive_receipt.status = 'ready'
+         ) as ready_receipts,
+         (
+           select count(*)::int
+           from jsonb_array_elements(receive_session.observation_variants) frozen_variant
+           where frozen_variant ->> 'variantId' = $2
+             and frozen_variant #>> '{completion,kind}' = 'retained_owned_source_credit'
+         ) as retained_variants,
+         (
+           select count(*)::int
+           from user_wallets managed_wallet
+           where managed_wallet.user_id = funding_context.user_id
+             and managed_wallet.wallet_type = 'solana'
+             and managed_wallet.is_verified = true
+             and managed_wallet.is_internal_wallet = true
+             and managed_wallet.privy_wallet_id is not null
+             and funding_account_identifier_equal(
+                   'solana:mainnet',
+                   managed_wallet.wallet_address,
+                   $3
+                 )
+         ) as managed_sol_wallets
+       from telegram_funding_sessions funding_context
+       join telegram_funding_buy_return_revisions buy_return
+         on buy_return.telegram_funding_session_id = funding_context.id
+        and buy_return.revision = funding_context.active_buy_return_revision
+       join funding_receive_sessions receive_session
+         on receive_session.id = funding_context.receive_session_id
+       join telegram_funding_consents funding_consent
+         on funding_consent.telegram_funding_session_id = funding_context.id
+        and funding_consent.revision = funding_context.active_consent_revision
+       where funding_context.id = $1::uuid`,
+      [contextId, retainedSolVariantId, retainedSolWalletAddress],
+    );
+    assert.equal(
+      retainedSolEstimateCalls,
+      2,
+      `the same optional SOL price decorates both the receipt and sealed Review economics: ${JSON.stringify({ intent: retainedIntentDebug.rows[0], boundary: retainedBoundaryDebug.rows[0] })}`,
+    );
+    assert.equal(
+      retainedSolInspectionCalls,
+      1,
+      JSON.stringify(retainedIntentDebug.rows[0]),
+    );
+    assert.match(
+      retainedSolReview.text.replaceAll("\\", ""),
+      /Confirm buy/u,
+      "a canonical retained SOL receipt must expose its sealed one-click Review",
+    );
+    assert.match(retainedSolReview.text.replaceAll("\\", ""), /0\.052 SOL/u);
+    assert.equal(
+      retainedSolReview.reply_markup?.inline_keyboard
+        .flat()
+        .some((button) => button.text === "Confirm buy" && "url" in button),
+      true,
+      "the retained receipt Review must keep the user-signed Mini App handoff when unattended bot execution is off",
+    );
+    const retainedHandoffState = await pool.query<{
+      handoffs: string;
+      intent_status: string;
+    }>(
+      `select intent.status as intent_status,
+              count(handoff.*)::text as handoffs
+         from telegram_trade_intents intent
+         left join telegram_app_handoffs handoff
+           on handoff.trade_intent_id = intent.id
+        where intent.idempotency_key = $1
+        group by intent.id`,
+      [retainedSolIntentKey],
+    );
+    assert.deepEqual(retainedHandoffState.rows[0], {
+      handoffs: "1",
+      intent_status: "confirming",
+    });
+    await pool.query(
+      `delete from telegram_app_handoffs
+        where trade_intent_id in (
+          select id from telegram_trade_intents where idempotency_key = $1
+        )`,
+      [retainedSolIntentKey],
+    );
+    await pool.query(
+      `delete from telegram_trade_intents where idempotency_key = $1`,
+      [retainedSolIntentKey],
+    );
+    const directRetainedSolReview =
+      await createTelegramFundingBuyContinuationDecorator({
+        inspectMiniAppFunding: async () => ({ kind: "destination_ready" }),
+        pool,
+        trading: partialTrading,
+      })({
+        ...partialFundingPresentation,
+        consent: { asset: SOLANA_NATIVE_ASSET } as never,
+        message: { text: "SOL received and kept in your Solana wallet" },
+        progress: {
+          presentation: {
+            routeKey: "polymarket_solana_sol_retained_v1",
+          },
+          rawAmount: "52000000",
+          state: "funds_received",
+        } as never,
+      });
+    assert.equal(
+      directRetainedSolReview.reply_markup?.inline_keyboard
+        .flat()
+        .some((button) => button.text === "Confirm buy" && "url" in button),
+      true,
+      "destination-ready retained SOL must expose its sealed direct-trade Review",
+    );
+    const directHandoffState = await pool.query<{
+      handoffs: string;
+      intent_status: string;
+    }>(
+      `select intent.status as intent_status,
+              count(handoff.*)::text as handoffs
+         from telegram_trade_intents intent
+         left join telegram_app_handoffs handoff
+           on handoff.trade_intent_id = intent.id
+        where intent.idempotency_key = $1
+        group by intent.id`,
+      [retainedSolIntentKey],
+    );
+    assert.deepEqual(directHandoffState.rows[0], {
+      handoffs: "1",
+      intent_status: "previewed",
+    });
+    await pool.query(
+      `delete from telegram_app_handoffs
+        where trade_intent_id in (
+          select id from telegram_trade_intents where idempotency_key = $1
+        )`,
+      [retainedSolIntentKey],
+    );
+    await pool.query(
+      `delete from telegram_trade_intents where idempotency_key = $1`,
+      [retainedSolIntentKey],
+    );
+    await createTelegramFundingBuyContinuationDecorator({
+      inspectMiniAppFunding: async () => {
+        await pool.query(
+          `update telegram_funding_sessions
+              set cancelled_at = now(), updated_at = now()
+            where id = $1::uuid`,
+          [contextId],
+        );
+        return { kind: "web_funding_plan", plan: retainedSolPlan };
+      },
+      pool,
+      trading: partialTrading,
+    })({
+      ...partialFundingPresentation,
+      consent: { asset: SOLANA_NATIVE_ASSET } as never,
+      message: { text: "SOL received and kept in your Solana wallet" },
+      progress: {
+        presentation: {
+          routeKey: "polymarket_solana_sol_retained_v1",
+        },
+        rawAmount: "52000000",
+        state: "funds_received",
+      } as never,
+    });
+    const cancelledDuringPlanning = await pool.query<{
+      handoffs: string;
+      intent_status: string;
+    }>(
+      `select intent.status as intent_status,
+              count(handoff.*)::text as handoffs
+         from telegram_trade_intents intent
+         left join telegram_app_handoffs handoff
+           on handoff.trade_intent_id = intent.id
+        where intent.idempotency_key = $1
+        group by intent.id`,
+      [retainedSolIntentKey],
+    );
+    assert.deepEqual(cancelledDuringPlanning.rows[0], {
+      handoffs: "0",
+      intent_status: "failed",
+    });
+    await pool.query(
+      `update telegram_funding_sessions
+          set cancelled_at = null, updated_at = now()
+        where id = $1::uuid`,
+      [contextId],
+    );
+  } finally {
+    env.telegramMiniAppLinkBase = originalMiniAppLinkBase;
+    await pool.query(
+      `update telegram_bot_trading_authorizations
+          set enabled = true, max_amount_usd = 50, updated_at = now()
+        where id = $1::uuid`,
+      [authorizationId],
+    );
+    await pool.query(
+      `update telegram_bot_trading_preferences
+          set desired_enabled = true, updated_at = now()
+        where user_id = $1::uuid`,
+      [userId],
+    );
+    await pool.query(
+      `delete from telegram_app_handoffs
+        where trade_intent_id in (
+          select id from telegram_trade_intents where idempotency_key = $1
+        )`,
+      [retainedSolIntentKey],
+    );
+    await pool.query(
+      `delete from telegram_trade_intents where idempotency_key = $1`,
+      [retainedSolIntentKey],
+    );
+    await pool.query(
+      `update telegram_funding_sessions
+          set active_consent_revision = 1,
+              updated_at = now()
+        where id = $1::uuid`,
+      [contextId],
+    );
+    await pool.query(
+      `update funding_receive_sessions
+          set selected_receive_target_id = $2,
+              updated_at = now()
+        where id = $1::uuid`,
+      [receiveSessionId, `slice-b-target-${suffix}`],
+    );
+    await tx(pool, async (client) => {
+      await client.query(
+        "set local hunch.telegram_funding_retention_cleanup = 'on'",
+      );
+      await client.query(
+        `delete from telegram_funding_consents
+          where telegram_funding_session_id = $1::uuid and revision = 3`,
+        [contextId],
+      );
+      await client.query(
+        `delete from telegram_funding_mutations
+          where funding_context_id = $1::uuid
+            and action = 'set_buy_return'
+            and buy_return_revision = $2`,
+        [contextId, retainedSolReturnRevision],
+      );
+      await client.query(
+        `update telegram_funding_sessions
+            set active_buy_return_revision = $2,
+                updated_at = now()
+          where id = $1::uuid
+            and active_buy_return_revision = $3`,
+        [contextId, retainedSolReturnRevision - 1, retainedSolReturnRevision],
+      );
+      await client.query(
+        `delete from telegram_funding_buy_return_revisions
+          where telegram_funding_session_id = $1::uuid
+            and revision = $2`,
+        [contextId, retainedSolReturnRevision],
+      );
+    });
+    await pool.query(`delete from runtime_policies where id = $1::uuid`, [
+      retainedSolPolicyId,
+    ]);
+  }
   const waitingFundingMessage = await decoratePartialFunding({
     ...partialFundingPresentation,
     message: { qrText: destinationAddress, text: "Waiting for transfer" },
@@ -1399,6 +1985,8 @@ try {
   )({
     consent: {} as never,
     context: {
+      cancelledAt: null,
+      expiresAt: new Date(Date.now() + 60_000),
       id: contextId,
       chatId: telegramUserId,
       progressRevision: 1,
@@ -1416,6 +2004,7 @@ try {
         networkId: "evm:137",
       },
       destinationOptionId,
+      status: "open",
       venueBindingOptionId,
       venueId: "polymarket",
       version: 7,
@@ -2024,6 +2613,8 @@ try {
   })({
     consent: null,
     context: {
+      cancelledAt: null,
+      expiresAt: new Date(Date.now() + 60_000),
       id: contextId,
       progressRevision: 1,
       telegramAccountId: relinkedTelegramAccountId,
@@ -2040,6 +2631,7 @@ try {
         networkId: "evm:137",
       },
       destinationOptionId,
+      status: "open",
       venueBindingOptionId,
       venueId: "polymarket",
     } as never,
@@ -2281,6 +2873,10 @@ try {
     await cleanup.query(
       `delete from funding_receive_sessions where id = $1::uuid`,
       [receiveSessionId],
+    );
+    await cleanup.query(
+      `delete from unified_market_tokens where market_id = $1`,
+      [marketId],
     );
     await cleanup.query(`delete from unified_markets where id = $1`, [
       marketId,

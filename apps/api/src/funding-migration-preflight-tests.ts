@@ -722,6 +722,7 @@ function buildTelegram0203Db(
                          and candidate.user_id is not null
                          and candidate.variant_id is not null
                          and candidate.destination_address is not null
+                         and 'retained_owned_source_credit' is not null
                          ${
                            input.strictMatcher === false
                              ? ""

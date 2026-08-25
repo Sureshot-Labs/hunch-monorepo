@@ -1,5 +1,6 @@
 import { z } from "zod";
 
+import { PYTH_SOL_USD_PRICE_POLICY_ID } from "../../account-value/valuation-service.js";
 import {
   RELAY_PINNED_ASSETS,
   RELAY_ROUTE_SPECS,
@@ -179,8 +180,8 @@ const FUNDING_ASSET_CATALOG: Readonly<
       assetId: RELAY_PINNED_ASSETS.solanaNative,
       decimals: 9,
     },
-    pricePolicyId: null,
-    valuationEnabled: false,
+    pricePolicyId: PYTH_SOL_USD_PRICE_POLICY_ID,
+    valuationEnabled: true,
     walletLocationPatternId: walletLocationPatternId({
       networkId: "solana:mainnet",
       assetId: RELAY_PINNED_ASSETS.solanaNative,

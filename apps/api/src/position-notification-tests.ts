@@ -179,6 +179,9 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         config,
         db: {
           query: async (sql: string, params: unknown[] = []) => {
+            if (/update telegram_trade_intents intent_row/.test(sql)) {
+              return { rowCount: 0, rows: [] };
+            }
             assert.match(sql, /from user_telegram_accounts/);
             assert.deepEqual(params, ["99"]);
             return {

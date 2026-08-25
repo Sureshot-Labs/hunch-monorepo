@@ -14,15 +14,16 @@ import {
   parseTelegramFundingCallbackRoute,
   type TelegramFundingCallbackRoute,
 } from "./telegram-funding-contracts.js";
+import {
+  telegramFundingDepositRouteDescriptorForChoiceToken,
+  type TelegramFundingDepositRouteKey,
+} from "./telegram-funding-route.js";
 
 export type SignalBotFundingMenuRoute =
   | { kind: "deposit"; showQr: boolean; venue: string }
   | {
       kind: "deposit_route";
-      route:
-        | "limitless_base_usdc_direct_v1"
-        | "polymarket_polygon_pusd_direct_v1"
-        | "polymarket_polygon_usdce_wrap_v1";
+      route: TelegramFundingDepositRouteKey;
       venue: "limitless" | "polymarket";
     }
   | { kind: "deposit_cancel_active" }
@@ -99,25 +100,17 @@ export function parseSignalBotInteractiveMenuRoute(
     return { kind: "deposit_cancel_active" };
   }
   const depositMatch = route.match(/^(deposit|deposit_qr):([a-z0-9_-]+)$/i);
-  const depositRouteMatch = route.match(/^deposit_route:(pd|pw|ld)$/i);
+  const depositRouteMatch = route.match(/^deposit_route:([a-z0-9]{1,8})$/i);
   if (depositRouteMatch) {
     const token = depositRouteMatch[1]?.toLowerCase();
-    const routeByToken = {
-      ld: "limitless_base_usdc_direct_v1",
-      pd: "polymarket_polygon_pusd_direct_v1",
-      pw: "polymarket_polygon_usdce_wrap_v1",
-    } as const;
-    const fundingRoute = token
-      ? routeByToken[token as keyof typeof routeByToken]
+    const descriptor = token
+      ? telegramFundingDepositRouteDescriptorForChoiceToken(token)
       : null;
-    if (!fundingRoute) return null;
-    const venue = fundingRoute.startsWith("limitless_")
-      ? "limitless"
-      : "polymarket";
+    if (!descriptor) return null;
     return {
       kind: "deposit_route",
-      route: fundingRoute,
-      venue,
+      route: descriptor.routeKey,
+      venue: descriptor.venueId,
     };
   }
   if (!depositMatch) return null;
@@ -255,8 +248,10 @@ export type SignalBotInteractiveMenuLoaders = {
     continuationToken?: string;
     fundingRoute?:
       | "limitless_base_usdc_direct_v1"
+      | "limitless_solana_sol_retained_v1"
       | "polymarket_polygon_pusd_direct_v1"
-      | "polymarket_polygon_usdce_wrap_v1";
+      | "polymarket_polygon_usdce_wrap_v1"
+      | "polymarket_solana_sol_retained_v1";
     idempotencyKey: string;
     receiptId?: string;
     requestObservation?: boolean;
