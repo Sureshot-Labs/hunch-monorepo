@@ -15,8 +15,9 @@ import type {
   VenueAccountBinding,
 } from "../domain/types.js";
 import {
+  materializePreparationAction,
   PreparationContractError,
-  type PreparationActionTemplate,
+  uniquePreparationValuesBy,
   type PreparationFactCheck,
 } from "./core-adapter.js";
 
@@ -38,45 +39,6 @@ export type PositionActionFactsInspector = (
 export type PositionActionReconciler = (
   input: PositionActionReconcileInput,
 ) => Promise<PositionActionResult>;
-
-function uniqueBy<Key, Value>(
-  values: readonly Value[],
-  key: (value: Value) => Key,
-): Value[] {
-  const seen = new Set<Key>();
-  const output: Value[] = [];
-  for (const value of values) {
-    const itemKey = key(value);
-    if (seen.has(itemKey)) continue;
-    seen.add(itemKey);
-    output.push(value);
-  }
-  return output;
-}
-
-function materializeAction(
-  template: PreparationActionTemplate,
-  input: {
-    actionOperationId: string;
-    adapterId: string;
-    inspectionRevision: string;
-  },
-): NormalizedAction {
-  if (!template.action) {
-    throw new PreparationContractError(
-      "evidence_invalid",
-      `position action ${template.actionKey} was not materialized`,
-    );
-  }
-  const actionId = `action_${canonicalJsonHash({
-    action: template.action,
-    actionKey: template.actionKey,
-    actionOperationId: input.actionOperationId,
-    adapterId: input.adapterId,
-    inspectionRevision: input.inspectionRevision,
-  }).slice(0, 32)}`;
-  return { ...template.action, actionId } as NormalizedAction;
-}
 
 function revision(input: {
   adapterId: string;
@@ -160,7 +122,8 @@ export class OwnerBoundPositionActionExecutor implements PositionActionExecutor 
           );
         }
         const signerWalletId =
-          action.action.kind === "evm_transaction"
+          action.action.kind === "evm_transaction" ||
+          action.action.kind === "evm_transaction_batch"
             ? action.action.senderWalletId
             : action.action.kind === "external_handoff"
               ? action.action.actorWalletId
@@ -180,7 +143,7 @@ export class OwnerBoundPositionActionExecutor implements PositionActionExecutor 
         check.status === "unavailable" ||
         check.status === "unsupported",
     );
-    const reasonCodes = uniqueBy(
+    const reasonCodes = uniquePreparationValuesBy(
       checks.flatMap((check) =>
         check.status !== "satisfied" && check.reasonCode
           ? [check.reasonCode]
@@ -188,11 +151,11 @@ export class OwnerBoundPositionActionExecutor implements PositionActionExecutor 
       ),
       (code) => code,
     );
-    const actionTemplates = uniqueBy(
+    const actionTemplates = uniquePreparationValuesBy(
       checks.flatMap((check) => check.actions),
       (action) => action.actionKey,
     );
-    const postconditions = uniqueBy(
+    const postconditions = uniquePreparationValuesBy(
       checks.flatMap((check) =>
         check.postcondition ? [check.postcondition] : [],
       ),
@@ -223,7 +186,7 @@ export class OwnerBoundPositionActionExecutor implements PositionActionExecutor 
         postconditions,
         reasonCodes:
           expiresAt <= this.clock().getTime()
-            ? uniqueBy(
+            ? uniquePreparationValuesBy(
                 [...reasonCodes, "preparation_evidence_stale" as const],
                 (code: FundingReasonCode) => code,
               )
@@ -278,11 +241,11 @@ export class OwnerBoundPositionActionExecutor implements PositionActionExecutor 
         "position action is unavailable for the exact owner binding",
       );
     }
-    return uniqueBy(
+    return uniquePreparationValuesBy(
       resolved.checks.flatMap((check) => check.actions),
       (action) => action.actionKey,
     ).map((template) =>
-      materializeAction(template, {
+      materializePreparationAction(template, {
         actionOperationId: input.actionOperationId,
         adapterId: this.adapterId,
         inspectionRevision: resolved.readiness.inspectionRevision,

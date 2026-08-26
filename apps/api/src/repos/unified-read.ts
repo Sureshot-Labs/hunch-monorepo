@@ -691,8 +691,16 @@ type ProbabilityMarketFilterInputs = Pick<
 >;
 
 type ProbabilityMarketCacheState = {
-  values: Map<string, { expiresAt: number; marketIds: string[] }>;
-  inFlight: Map<string, Promise<string[]>>;
+  values: Map<
+    string,
+    { expiresAt: number; rows: ObservedProbabilityMarketRow[] }
+  >;
+  inFlight: Map<string, Promise<ObservedProbabilityMarketRow[]>>;
+};
+
+type ObservedProbabilityMarketRow = {
+  market_id: string;
+  probability: number | string;
 };
 
 const probabilityMarketCacheByPool = new WeakMap<
@@ -725,10 +733,7 @@ function relativeBoundaryMinutes(
 function probabilityMarketCacheKey(
   inputs: ProbabilityMarketFilterInputs,
 ): string {
-  const nowMs = Date.parse(inputs.nowParam);
   return JSON.stringify({
-    minProb: inputs.minProb ?? null,
-    maxProb: inputs.maxProb ?? null,
     view: inputs.view ?? "events",
     venues: inputs.venues ? [...inputs.venues].sort() : null,
     category: inputs.category?.toLowerCase() ?? null,
@@ -744,10 +749,22 @@ function probabilityMarketCacheKey(
       inputs.nowParam,
     ),
     ageSinceMinutes: relativeBoundaryMinutes(inputs.ageSince, inputs.nowParam),
-    timeBucket: Number.isFinite(nowMs)
-      ? Math.floor(nowMs / FEED_PROBABILITY_CACHE_TTL_MS)
-      : inputs.nowParam,
   });
+}
+
+function filterObservedProbabilityMarketRows(
+  rows: ObservedProbabilityMarketRow[],
+  inputs: Pick<ProbabilityMarketFilterInputs, "minProb" | "maxProb">,
+): string[] {
+  const marketIds: string[] = [];
+  for (const row of rows) {
+    const probability = Number(row.probability);
+    if (!Number.isFinite(probability)) continue;
+    if (inputs.minProb != null && probability < inputs.minProb) continue;
+    if (inputs.maxProb != null && probability > inputs.maxProb) continue;
+    marketIds.push(row.market_id);
+  }
+  return marketIds;
 }
 
 function pruneProbabilityMarketCache(
@@ -764,10 +781,10 @@ function pruneProbabilityMarketCache(
   }
 }
 
-async function fetchObservedCanonicalProbabilityMarketIdsUncached(
+async function fetchObservedCanonicalProbabilityMarketsUncached(
   pool: Pool,
   inputs: ProbabilityMarketFilterInputs,
-): Promise<string[]> {
+): Promise<ObservedProbabilityMarketRow[]> {
   const { params, add } = createParamBuilder();
   const nowParam = add(inputs.nowParam);
   const expressions = buildFeedSqlExpressions();
@@ -808,15 +825,7 @@ async function fetchObservedCanonicalProbabilityMarketIdsUncached(
     yesAlias: "canonical_yes_top",
     noAlias: "canonical_no_top",
   });
-  const probabilityWhere: string[] = ["probability is not null"];
-  if (inputs.minProb != null) {
-    probabilityWhere.push(`probability >= ${add(inputs.minProb)}`);
-  }
-  if (inputs.maxProb != null) {
-    probabilityWhere.push(`probability <= ${add(inputs.maxProb)}`);
-  }
-
-  const rows = await queryRowsWithLocalSettings<{ market_id: string }>(
+  return await queryRowsWithLocalSettings<ObservedProbabilityMarketRow>(
     pool,
     `
       with ${probabilityCandidateEventsCte},
@@ -879,9 +888,9 @@ async function fetchObservedCanonicalProbabilityMarketIdsUncached(
         left join canonical_top_rows canonical_no_top
           on canonical_no_top.token_id = token_pair.token_no
       )
-      select market_id
+      select market_id, probability
       from canonical_probabilities
-      where ${probabilityWhere.join(" and ")}
+      where probability is not null
     `,
     params,
     {
@@ -890,7 +899,6 @@ async function fetchObservedCanonicalProbabilityMarketIdsUncached(
       workMem: FEED_HEAVY_QUERY_WORK_MEM,
     },
   );
-  return rows.map((row) => row.market_id);
 }
 
 export async function fetchObservedCanonicalProbabilityMarketIds(
@@ -902,28 +910,28 @@ export async function fetchObservedCanonicalProbabilityMarketIds(
   const state = probabilityMarketCacheState(pool);
   const nowMs = Date.now();
   const cached = state.values.get(key);
-  if (cached && cached.expiresAt > nowMs) return cached.marketIds;
+  if (cached && cached.expiresAt > nowMs) {
+    return filterObservedProbabilityMarketRows(cached.rows, inputs);
+  }
 
-  const active = state.inFlight.get(key);
-  if (active) return active;
-
-  const pending = fetchObservedCanonicalProbabilityMarketIdsUncached(
-    pool,
-    inputs,
-  )
-    .then((marketIds) => {
-      pruneProbabilityMarketCache(state, Date.now());
-      state.values.set(key, {
-        expiresAt: Date.now() + FEED_PROBABILITY_CACHE_TTL_MS,
-        marketIds,
+  let pending = state.inFlight.get(key);
+  if (!pending) {
+    pending = fetchObservedCanonicalProbabilityMarketsUncached(pool, inputs)
+      .then((rows) => {
+        pruneProbabilityMarketCache(state, Date.now());
+        state.values.set(key, {
+          expiresAt: Date.now() + FEED_PROBABILITY_CACHE_TTL_MS,
+          rows,
+        });
+        return rows;
+      })
+      .finally(() => {
+        state.inFlight.delete(key);
       });
-      return marketIds;
-    })
-    .finally(() => {
-      state.inFlight.delete(key);
-    });
-  state.inFlight.set(key, pending);
-  return pending;
+    state.inFlight.set(key, pending);
+  }
+  const rows = await pending;
+  return filterObservedProbabilityMarketRows(rows, inputs);
 }
 
 function buildFeedMarketCandidateExtraSql(args: {

@@ -11,6 +11,8 @@ import type {
 import type {
   ActionSummary,
   EvmTransactionAction,
+  EvmTransactionBatchAction,
+  EvmTransactionBatchCall,
   ExternalHandoffAction,
   FundingReasonCode,
   JsonObject,
@@ -28,10 +30,21 @@ type WithoutActionId<Action extends NormalizedAction> = Omit<
   "actionId"
 >;
 
+type EvmTransactionBatchTemplateAction = Readonly<
+  Omit<EvmTransactionBatchAction, "actionId" | "calls"> & {
+    calls: readonly Omit<EvmTransactionBatchCall, "actionId">[];
+  }
+>;
+
 export type PreparationActionTemplate =
   | Readonly<{
       actionKey: string;
       action: WithoutActionId<EvmTransactionAction> | null;
+      summary: ActionSummary;
+    }>
+  | Readonly<{
+      actionKey: string;
+      action: EvmTransactionBatchTemplateAction | null;
       summary: ActionSummary;
     }>
   | Readonly<{
@@ -163,7 +176,7 @@ function sameBinding(
   );
 }
 
-function uniqueBy<Key, Value>(
+export function uniquePreparationValuesBy<Key, Value>(
   values: readonly Value[],
   key: (value: Value) => Key,
 ): Value[] {
@@ -181,7 +194,12 @@ function uniqueBy<Key, Value>(
 function actionSignerWalletId(
   action: Exclude<PreparationActionTemplate["action"], null>,
 ): string {
-  if (action.kind === "evm_transaction") return action.senderWalletId;
+  if (
+    action.kind === "evm_transaction" ||
+    action.kind === "evm_transaction_batch"
+  ) {
+    return action.senderWalletId;
+  }
   if (action.kind === "external_handoff") return action.actorWalletId;
   return action.signerWalletId;
 }
@@ -283,13 +301,9 @@ function statusFor(
   return "ready";
 }
 
-function materializeAction(
+export function materializePreparationAction(
   template: PreparationActionTemplate,
-  input: {
-    adapterId: string;
-    operationId: string;
-    inspectionRevision: string;
-  },
+  identity: JsonObject,
 ): NormalizedAction {
   if (!template.action) {
     throw new PreparationContractError(
@@ -300,10 +314,18 @@ function materializeAction(
   const actionId = `action_${canonicalJsonHash({
     action: template.action,
     actionKey: template.actionKey,
-    adapterId: input.adapterId,
-    inspectionRevision: input.inspectionRevision,
-    operationId: input.operationId,
+    ...identity,
   }).slice(0, 32)}`;
+  if (template.action.kind === "evm_transaction_batch") {
+    return {
+      ...template.action,
+      actionId,
+      calls: template.action.calls.map((call, index) => ({
+        ...call,
+        actionId: `${actionId}:call:${index}`,
+      })),
+    };
+  }
   return { ...template.action, actionId } as NormalizedAction;
 }
 
@@ -384,11 +406,11 @@ export class PurposeAwareWalletPreparationAdapter implements WalletPreparationAd
       facts,
       requiredChecks,
     });
-    const actionTemplates = uniqueBy(
+    const actionTemplates = uniquePreparationValuesBy(
       requiredChecks.flatMap((check) => check.actions),
       (action) => action.actionKey,
     );
-    const reasonCodes = uniqueBy(
+    const reasonCodes = uniquePreparationValuesBy(
       requiredChecks.flatMap((check) =>
         check.status === "satisfied" || !check.reasonCode
           ? []
@@ -396,7 +418,7 @@ export class PurposeAwareWalletPreparationAdapter implements WalletPreparationAd
       ),
       (reason) => reason,
     );
-    const postconditions = uniqueBy(
+    const postconditions = uniquePreparationValuesBy(
       requiredChecks.flatMap((check) =>
         check.postcondition ? [check.postcondition] : [],
       ),
@@ -421,7 +443,7 @@ export class PurposeAwareWalletPreparationAdapter implements WalletPreparationAd
       postconditions,
       reasonCodes:
         expiresAt <= this.clock().getTime()
-          ? uniqueBy(
+          ? uniquePreparationValuesBy(
               [...reasonCodes, "preparation_evidence_stale" as const],
               (reason) => reason,
             )
@@ -468,7 +490,7 @@ export class PurposeAwareWalletPreparationAdapter implements WalletPreparationAd
       );
     }
     if (resolved.result.status === "ready") return [];
-    const requiredActions = uniqueBy(
+    const requiredActions = uniquePreparationValuesBy(
       resolved.requiredChecks.flatMap((check) => check.actions),
       (action) => action.actionKey,
     );
@@ -476,7 +498,7 @@ export class PurposeAwareWalletPreparationAdapter implements WalletPreparationAd
       ? requiredActions
       : await this.materializeActions(input, resolved, requiredActions);
     return templates.map((template) =>
-      materializeAction(template, {
+      materializePreparationAction(template, {
         adapterId: this.adapterId,
         operationId: input.operationId,
         inspectionRevision: resolved.result.inspectionRevision,

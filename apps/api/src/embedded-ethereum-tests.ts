@@ -43,6 +43,7 @@ const denyDynamicDependencies: EmbeddedEvmSponsorshipDependencies = {
   isSupportedBridgeToken: async () => false,
   matchesBridgeOrder: async () => false,
   matchesFundingAction: async () => false,
+  matchesPositionAction: async () => false,
 };
 
 const TEST_USER_ID = "00000000-0000-0000-0000-000000000001";
@@ -418,6 +419,65 @@ const tests: TestCase[] = [
           }),
         /not an allowed Hunch operation/,
       );
+    },
+  },
+  {
+    name: "Polymarket standard redemption pins the adapter and legacy USDC.e collateral",
+    run: async () => {
+      const redemptionInterface = new ethers.Interface([
+        "function redeemPositions(address collateralToken,bytes32 parentCollectionId,bytes32 conditionId,uint256[] indexSets)",
+      ]);
+      const conditionId = `0x${"ab".repeat(32)}`;
+      const redemption = (collateralToken: string) =>
+        redemptionInterface.encodeFunctionData("redeemPositions", [
+          collateralToken,
+          ethers.ZeroHash,
+          conditionId,
+          [1n, 2n],
+        ]);
+
+      await assert.doesNotReject(() =>
+        assertEmbeddedEvmSponsorshipAllowed({
+          userId: TEST_USER_ID,
+          signer: walletContext.signer,
+          chainId: 137,
+          transactions: [
+            {
+              id: "polymarket-standard-redemption",
+              label: "Redeem Polymarket position",
+              to: env.polymarketCtfCollateralAdapterAddress,
+              data: redemption(env.polymarketUsdceAddress),
+            },
+          ],
+          dependencies: denyDynamicDependencies,
+        }),
+      );
+      for (const transaction of [
+        {
+          id: "polymarket-standard-redemption-wrong-collateral",
+          label: "Redeem Polymarket position",
+          to: env.polymarketCtfCollateralAdapterAddress,
+          data: redemption(env.polymarketPusdAddress),
+        },
+        {
+          id: "polymarket-standard-redemption-wrong-target",
+          label: "Redeem Polymarket position",
+          to: env.polymarketNegRiskCollateralAdapterAddress,
+          data: redemption(env.polymarketUsdceAddress),
+        },
+      ]) {
+        await assert.rejects(
+          () =>
+            assertEmbeddedEvmSponsorshipAllowed({
+              userId: TEST_USER_ID,
+              signer: walletContext.signer,
+              chainId: 137,
+              transactions: [transaction],
+              dependencies: denyDynamicDependencies,
+            }),
+          /not an allowed Hunch operation/,
+        );
+      }
     },
   },
   {

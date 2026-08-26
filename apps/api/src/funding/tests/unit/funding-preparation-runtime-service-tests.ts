@@ -203,6 +203,76 @@ await test("one destination discovery resolves and shares one immutable market c
   assert.equal(contexts[0]?.market, market);
 });
 
+await test("owner-bound redemption inspects the canonical historical owner", async () => {
+  const inspected: RuntimeVenueInspectionInput[] = [];
+  const exactOwner = wallets[0].walletAddress;
+  const service = new WalletPreparationRuntimeService(
+    {} as Pool,
+    () => NOW,
+    [
+      {
+        venueId: "polymarket",
+        supportedMarketClasses: ["standard", "neg_risk"],
+        supportsWallet: () => true,
+        ownerCandidates: async () => ({
+          candidateWallets: [wallets[0]],
+          ownershipHinted: true,
+        }),
+        matchesAccountRef: (accountRef, ownerAddress) =>
+          accountRef.toLowerCase() === ownerAddress.toLowerCase(),
+        inspect: async (input) => {
+          inspected.push(input);
+          const binding = {
+            bindingId: "binding_historical_owner_12345678",
+            accountRef: exactOwner,
+          };
+          return {
+            frozen: {
+              preparation: { binding },
+            },
+            wallet: input.wallet,
+          } as unknown as PreparedRuntimeDestination;
+        },
+      },
+    ],
+    async () => wallets,
+  );
+
+  const resolved = await service.resolveOwnerPreparation({
+    accountId: ACCOUNT_ID,
+    venueId: "polymarket",
+    ownerAddress: exactOwner,
+    marketContextId: market.id,
+    marketClass: "standard",
+  });
+
+  assert.equal(inspected.length, 1);
+  assert.equal(inspected[0]?.requiredOwnerAccountRef, exactOwner);
+  assert.equal(resolved.frozen.preparation.binding.accountRef, exactOwner);
+});
+
+await test("Polymarket inspection preserves an exact signer-held position owner", () => {
+  const signer = wallets[0].walletAddress;
+  const deposit = wallets[1].walletAddress;
+  assert.equal(
+    walletPreparationRuntimeTestHooks.polymarketInspectionAccountRef({
+      walletAddress: signer,
+      storedFunderAddress: null,
+      derivedDepositAddress: deposit,
+      requiredOwnerAccountRef: signer,
+    }),
+    signer,
+  );
+  assert.throws(() =>
+    walletPreparationRuntimeTestHooks.polymarketInspectionAccountRef({
+      walletAddress: signer,
+      storedFunderAddress: null,
+      derivedDepositAddress: deposit,
+      requiredOwnerAccountRef: wallets[2].walletAddress,
+    }),
+  );
+});
+
 await test("an exact successful binding is not blocked by an unrelated venue inspection failure", async () => {
   const inspected: RuntimeVenueInspectionInput[] = [];
   const service = new WalletPreparationRuntimeService(

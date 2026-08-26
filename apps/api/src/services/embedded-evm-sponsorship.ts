@@ -65,6 +65,9 @@ export type EmbeddedEvmSponsorshipDependencies = Readonly<{
   ) => Promise<boolean>;
   matchesBridgeOrder: (transaction: SponsoredTransaction) => Promise<boolean>;
   matchesFundingAction: (transaction: SponsoredTransaction) => Promise<boolean>;
+  matchesPositionAction: (
+    transaction: SponsoredTransaction,
+  ) => Promise<boolean>;
 }>;
 
 function normalizedAddress(value: string | null | undefined): string | null {
@@ -343,16 +346,12 @@ async function validatePolymarketProtocolCall(input: {
     input.transaction,
   );
   if (redemption?.name === "redeemPositions") {
-    const adapters = addressSet([
-      env.polymarketCtfCollateralAdapterAddress,
-      env.polymarketNegRiskCollateralAdapterAddress,
-    ]);
     const collateral = normalizedAddress(String(redemption.args[0] ?? ""));
     const parentCollectionId = String(redemption.args[1] ?? "").toLowerCase();
     const indexSets = Array.from(redemption.args[3] ?? []) as bigint[];
     return (
-      adapters.has(target.toLowerCase()) &&
-      addressesEqual(collateral, env.polymarketPusdAddress) &&
+      addressesEqual(target, env.polymarketCtfCollateralAdapterAddress) &&
+      addressesEqual(collateral, env.polymarketUsdceAddress) &&
       parentCollectionId === ZERO_BYTES32 &&
       indexSets.length > 0 &&
       indexSets.every((entry) => entry === 1n || entry === 2n || entry === 3n)
@@ -664,6 +663,57 @@ async function matchesFundingAction(
   return false;
 }
 
+/**
+ * Position actions have their own durable claim boundary. Sponsorship trusts
+ * only the exact normalized call saved for the claimed operation; it does not
+ * independently re-infer redemption collateral or adapter semantics.
+ */
+async function matchesPositionAction(
+  db: SponsorshipDb,
+  input: SponsoredTransaction,
+): Promise<boolean> {
+  const { rows } = await db.query<{
+    execution_address: string;
+    normalized_action: Record<string, unknown>;
+  }>(
+    `
+      select
+        position_action.execution_address,
+        normalized_action.value as normalized_action
+      from position_action_operations position_action
+      cross join lateral jsonb_array_elements(
+        position_action.normalized_actions
+      ) as normalized_action(value)
+      where position_action.user_id = $1
+        and position_action.status = 'submitting'
+        and position_action.execution_mode = 'privy_authorization'
+        and position_action.broadcast_may_have_occurred = false
+        and (
+          normalized_action.value->>'actionId' = $2
+          or exists (
+            select 1
+            from jsonb_array_elements(
+              case
+                when jsonb_typeof(normalized_action.value->'calls') = 'array'
+                  then normalized_action.value->'calls'
+                else '[]'::jsonb
+              end
+            ) as child_call
+            where child_call->>'actionId' = $2
+          )
+        )
+      order by position_action.updated_at desc
+      limit 5
+    `,
+    [input.userId, input.transaction.id],
+  );
+  return rows.some(
+    (row) =>
+      addressesEqual(row.execution_address, input.signer) &&
+      fundingActionMatchesTransaction(row.normalized_action, input),
+  );
+}
+
 function fundingActionMatchesTransaction(
   action: Record<string, unknown>,
   input: SponsoredTransaction,
@@ -857,6 +907,8 @@ function defaultDependencies(
     matchesBridgeOrder: (transaction) => matchesBridgeOrder(db, transaction),
     matchesFundingAction: (transaction) =>
       matchesFundingAction(db, transaction),
+    matchesPositionAction: (transaction) =>
+      matchesPositionAction(db, transaction),
   };
 }
 
@@ -921,6 +973,7 @@ export async function assertEmbeddedEvmSponsorshipAllowed(input: {
     };
     if (
       (await dependencies.matchesFundingAction(sponsoredTransaction)) ||
+      (await dependencies.matchesPositionAction(sponsoredTransaction)) ||
       (await dependencies.matchesBridgeOrder(sponsoredTransaction))
     ) {
       continue;
@@ -965,6 +1018,7 @@ export async function assertEmbeddedEvmSponsorshipAllowed(input: {
 export const embeddedEvmSponsorshipTestHooks = {
   exactTransactionMatches,
   fundingActionMatchesTransaction,
+  matchesPositionAction,
   isKnownLimitlessNegRiskAdapter,
   isKnownLimitlessNegRiskRedemption,
   validateLegacySponsoredWithdrawal,

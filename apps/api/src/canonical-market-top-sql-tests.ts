@@ -64,7 +64,13 @@ const client = {
     localStatements.push(sql);
     if (/canonical_probabilities as materialized/i.test(sql)) {
       candidateSql = sql;
-      return { rows: [{ market_id: "market-1" }], rowCount: 1 };
+      return {
+        rows: [
+          { market_id: "market-1", probability: "0.8" },
+          { market_id: "market-2", probability: "0.5" },
+        ],
+        rowCount: 2,
+      };
     }
     if (/orderable_market_candidates as materialized/i.test(sql)) {
       eventSql = sql;
@@ -125,7 +131,7 @@ assert.match(candidateSql, /canonical_token_rows as materialized/i);
 assert.match(candidateSql, /canonical_top_rows as materialized/i);
 assert.match(candidateSql, /top_row\.token_id = any/i);
 assert.match(candidateSql, /canonical_probabilities as materialized/i);
-assert.match(candidateSql, /probability >= \$\d+/i);
+assert.doesNotMatch(candidateSql, /probability\s*[<>]=\s*\$\d+/i);
 assert.ok(
   localStatements.some((sql) =>
     /SET LOCAL statement_timeout = '\d+ms'/i.test(sql),
@@ -136,24 +142,34 @@ console.log("ok - feed probability candidates are scoped and time-bounded");
 const probabilityQueryCountBeforeSingleFlight = localStatements.filter((sql) =>
   /canonical_probabilities as materialized/i.test(sql),
 ).length;
-const singleFlightInputs = {
+const sharedScopeInputs = {
   ...commonInputs,
-  minProb: 0.71,
-  maxProb: 0.91,
   venues: ["polymarket", "limitless"],
   endWithin: new Date(now.getTime() + 24 * 60 * 60 * 1000).toISOString(),
 };
-await Promise.all([
-  fetchObservedCanonicalProbabilityMarketIds(pool, singleFlightInputs),
-  fetchObservedCanonicalProbabilityMarketIds(pool, singleFlightInputs),
+const [highRangeIds, middleRangeIds] = await Promise.all([
+  fetchObservedCanonicalProbabilityMarketIds(pool, {
+    ...sharedScopeInputs,
+    minProb: 0.71,
+    maxProb: 0.91,
+  }),
+  fetchObservedCanonicalProbabilityMarketIds(pool, {
+    ...sharedScopeInputs,
+    minProb: 0.4,
+    maxProb: 0.6,
+  }),
 ]);
+assert.deepEqual(highRangeIds, ["market-1"]);
+assert.deepEqual(middleRangeIds, ["market-2"]);
 assert.equal(
   localStatements.filter((sql) =>
     /canonical_probabilities as materialized/i.test(sql),
   ).length,
   probabilityQueryCountBeforeSingleFlight + 1,
 );
-console.log("ok - identical probability filters share one in-flight SQL query");
+console.log(
+  "ok - probability ranges share one scope SQL and filter cached rows",
+);
 
 assert.deepEqual(
   await fetchFeedEventIds(pool, {

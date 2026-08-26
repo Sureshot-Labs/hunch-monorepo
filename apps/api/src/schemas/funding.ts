@@ -101,6 +101,7 @@ export const actionSummarySchema = z
   .object({
     kind: z.enum([
       "evm_transaction",
+      "evm_transaction_batch",
       "svm_transaction",
       "signature",
       "external_handoff",

@@ -118,6 +118,7 @@ try {
     isSupportedBridgeToken: async () => false,
     matchesBridgeOrder: async () => false,
     matchesFundingAction: async () => false,
+    matchesPositionAction: async () => false,
   };
   await assert.doesNotReject(() =>
     assertEmbeddedEvmSponsorshipAllowed({
