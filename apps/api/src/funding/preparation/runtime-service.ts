@@ -94,7 +94,11 @@ import {
   type RuntimePositionEvidence,
   type RuntimeWalletAuthority,
 } from "./runtime-facts.js";
-import { classifyPolymarketClobCollateralResponse } from "./polymarket-clob-collateral.js";
+import {
+  classifyPolymarketClobCollateralResponse,
+  polymarketClobCollateralIsVisible,
+  readPolymarketClobBalance,
+} from "./polymarket-clob-collateral.js";
 import {
   createLimitlessRuntimeActionMaterializer,
   createPolymarketRuntimeActionMaterializer,
@@ -394,6 +398,27 @@ function polymarketInspectionAccountRef(
   );
 }
 
+function shouldInspectPolymarketDepositWallet(
+  input: Readonly<{
+    internalWallet: boolean;
+    requiredOwnerAccountRef: string | null;
+    storedFunderAddress: string | null;
+    walletAddress: string;
+  }>,
+): boolean {
+  if (
+    input.requiredOwnerAccountRef &&
+    sameAddress(input.requiredOwnerAccountRef, input.walletAddress)
+  ) {
+    return false;
+  }
+  if (input.internalWallet) return true;
+  return Boolean(
+    input.storedFunderAddress &&
+    !sameAddress(input.storedFunderAddress, input.walletAddress),
+  );
+}
+
 function metadataBoolean(
   metadata: unknown,
   ...keys: readonly string[]
@@ -673,14 +698,9 @@ function polymarketTopology(input: {
       executionMode: "web_client",
     };
   }
-  if (candidate.signatureType === 3) {
-    return {
-      topology: "deposit_wallet",
-      deployed: candidate.deployed,
-      ownerVerified: true,
-      executionMode: "venue_relayer",
-    };
-  }
+  // Signature type 3 describes order signing; it does not prove that an
+  // arbitrary stored address is this owner's factory-derived Deposit Wallet.
+  // Only the exact derived-address branch above is deployable by Hunch.
   return {
     topology: "unknown_contract",
     deployed: candidate.deployed,
@@ -750,7 +770,9 @@ async function inspectPolymarketClob(input: {
       requestPath: `/balance-allowance?${params.toString()}`,
     });
     const classified = classifyPolymarketClobCollateralResponse({
-      balanceRaw: response.ok ? rawAt(response.payload, ["balance"]) : null,
+      balance: response.ok
+        ? readPolymarketClobBalance(response.payload)
+        : { kind: "absent", raw: null },
       responseOk: response.ok,
       responseStatus: response.ok ? null : response.status,
       signatureType: input.signatureType,
@@ -1181,10 +1203,12 @@ export class WalletPreparationRuntimeService {
       input.requiredOwnerAccountRef?.trim() || null;
     let deposit: PolymarketDepositWalletDerivation | null = null;
     if (
-      !credentials?.funderAddress &&
-      input.wallet.isInternalWallet &&
-      (!requiredOwnerAccountRef ||
-        !sameAddress(requiredOwnerAccountRef, input.wallet.walletAddress))
+      shouldInspectPolymarketDepositWallet({
+        internalWallet: input.wallet.isInternalWallet,
+        requiredOwnerAccountRef,
+        storedFunderAddress: credentials?.funderAddress ?? null,
+        walletAddress: input.wallet.walletAddress,
+      })
     ) {
       try {
         deposit = await inspectPolymarketDepositWallet({
@@ -1410,12 +1434,13 @@ export class WalletPreparationRuntimeService {
               ]),
             }
           : null,
-      clobCollateralVisible: Boolean(
-        clob.collateralVisible &&
-        collateralRaw != null &&
-        clob.safeBalanceRaw != null &&
-        BigInt(clob.safeBalanceRaw) >= BigInt(collateralRaw),
-      ),
+      clobCollateralVisible: polymarketClobCollateralIsVisible({
+        classified: clob,
+        observedWalletBalanceRaw: collateralRaw,
+        signatureType,
+        walletDeployed: topology.deployed,
+        walletTopology: topology.topology,
+      }),
       standardExchangeAllowance: allowanceEnough(
         rawAt(payload, ["pusd", "allowance", "exchange", "allowanceRaw"]),
       ),
@@ -2000,6 +2025,8 @@ export class WalletPreparationRuntimeService {
 export const walletPreparationRuntimeTestHooks = {
   availableRaw,
   polymarketInspectionAccountRef,
+  polymarketTopology,
+  shouldInspectPolymarketDepositWallet,
 };
 
 export const RUNTIME_PREPARATION_MAX_APPROVAL_RAW = MAX_APPROVAL;

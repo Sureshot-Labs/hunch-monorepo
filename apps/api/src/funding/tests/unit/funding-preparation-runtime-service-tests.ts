@@ -273,6 +273,115 @@ await test("Polymarket inspection preserves an exact signer-held position owner"
   );
 });
 
+await test("only the canonical derived Deposit Wallet is owner verified", () => {
+  const signer = wallets[0].walletAddress;
+  const canonicalDeposit = wallets[1].walletAddress;
+  const arbitraryStoredFunder = wallets[2].walletAddress;
+  const signatureTypeThreeCandidate = {
+    funder: arbitraryStoredFunder,
+    signatureType: 3 as const,
+    source: "stored" as const,
+    expectedContract: true,
+    deployed: false,
+    contractKind: "NOT_DEPLOYED" as const,
+  };
+
+  assert.deepEqual(
+    walletPreparationRuntimeTestHooks.polymarketTopology({
+      signer,
+      funder: canonicalDeposit,
+      candidate: null,
+      deposit: {
+        address: canonicalDeposit,
+        deployed: false,
+        generation: "beacon",
+        factory: wallets[0].walletAddress,
+        implementation: wallets[1].walletAddress,
+        beacon: wallets[2].walletAddress,
+      },
+    }),
+    {
+      topology: "deposit_wallet",
+      deployed: false,
+      ownerVerified: true,
+      executionMode: "venue_relayer",
+    },
+  );
+  assert.deepEqual(
+    walletPreparationRuntimeTestHooks.polymarketTopology({
+      signer,
+      funder: arbitraryStoredFunder,
+      candidate: signatureTypeThreeCandidate,
+      deposit: {
+        address: canonicalDeposit,
+        deployed: false,
+        generation: "beacon",
+        factory: wallets[0].walletAddress,
+        implementation: wallets[1].walletAddress,
+        beacon: wallets[2].walletAddress,
+      },
+    }),
+    {
+      topology: "unknown_contract",
+      deployed: false,
+      ownerVerified: false,
+      executionMode: "web_client",
+    },
+  );
+});
+
+await test("external wallets verify a distinct stored Deposit Wallet canonically", () => {
+  const signer = wallets[0].walletAddress;
+  const storedFunder = wallets[1].walletAddress;
+
+  assert.equal(
+    walletPreparationRuntimeTestHooks.shouldInspectPolymarketDepositWallet({
+      internalWallet: false,
+      requiredOwnerAccountRef: null,
+      storedFunderAddress: storedFunder,
+      walletAddress: signer,
+    }),
+    true,
+  );
+  assert.equal(
+    walletPreparationRuntimeTestHooks.shouldInspectPolymarketDepositWallet({
+      internalWallet: false,
+      requiredOwnerAccountRef: null,
+      storedFunderAddress: signer,
+      walletAddress: signer,
+    }),
+    false,
+  );
+  assert.deepEqual(
+    walletPreparationRuntimeTestHooks.polymarketTopology({
+      signer,
+      funder: storedFunder,
+      candidate: {
+        funder: storedFunder,
+        signatureType: 3,
+        source: "stored",
+        expectedContract: true,
+        deployed: true,
+        contractKind: "CONTRACT",
+      },
+      deposit: {
+        address: storedFunder,
+        deployed: true,
+        generation: "beacon",
+        factory: wallets[0].walletAddress,
+        implementation: wallets[1].walletAddress,
+        beacon: wallets[2].walletAddress,
+      },
+    }),
+    {
+      topology: "deposit_wallet",
+      deployed: true,
+      ownerVerified: true,
+      executionMode: "venue_relayer",
+    },
+  );
+});
+
 await test("an exact successful binding is not blocked by an unrelated venue inspection failure", async () => {
   const inspected: RuntimeVenueInspectionInput[] = [];
   const service = new WalletPreparationRuntimeService(

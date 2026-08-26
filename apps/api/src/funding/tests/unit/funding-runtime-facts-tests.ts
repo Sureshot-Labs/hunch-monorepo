@@ -14,7 +14,11 @@ import {
   type PolymarketRuntimeEvidence,
 } from "../../preparation/runtime-facts.js";
 import type { PreparationActionTemplate } from "../../preparation/core-adapter.js";
-import { classifyPolymarketClobCollateralResponse } from "../../preparation/polymarket-clob-collateral.js";
+import {
+  classifyPolymarketClobCollateralResponse,
+  polymarketClobCollateralIsVisible,
+  readPolymarketClobBalance,
+} from "../../preparation/polymarket-clob-collateral.js";
 
 const NOW = new Date("2026-07-24T12:00:00.000Z");
 const OBSERVED_AT = NOW.toISOString();
@@ -115,7 +119,23 @@ await test("stored credentials stay valid regardless of record age", () => {
 await test("undeployed Deposit Wallet CLOB absence is known zero only before deployment", () => {
   assert.deepEqual(
     classifyPolymarketClobCollateralResponse({
-      balanceRaw: null,
+      balance: { kind: "absent", raw: null },
+      responseOk: true,
+      responseStatus: null,
+      signatureType: 3,
+      walletDeployed: false,
+      walletTopology: "deposit_wallet",
+    }),
+    {
+      collateralVisible: true,
+      safeBalanceRaw: "0",
+      staleCredentials: false,
+      verifiedCredentials: true,
+    },
+  );
+  assert.deepEqual(
+    classifyPolymarketClobCollateralResponse({
+      balance: { kind: "absent", raw: null },
       responseOk: false,
       responseStatus: 404,
       signatureType: 3,
@@ -131,7 +151,23 @@ await test("undeployed Deposit Wallet CLOB absence is known zero only before dep
   );
   assert.deepEqual(
     classifyPolymarketClobCollateralResponse({
-      balanceRaw: null,
+      balance: { kind: "absent", raw: null },
+      responseOk: true,
+      responseStatus: null,
+      signatureType: 3,
+      walletDeployed: true,
+      walletTopology: "deposit_wallet",
+    }),
+    {
+      collateralVisible: false,
+      safeBalanceRaw: null,
+      staleCredentials: false,
+      verifiedCredentials: true,
+    },
+  );
+  assert.deepEqual(
+    classifyPolymarketClobCollateralResponse({
+      balance: { kind: "absent", raw: null },
       responseOk: false,
       responseStatus: 404,
       signatureType: 3,
@@ -147,7 +183,7 @@ await test("undeployed Deposit Wallet CLOB absence is known zero only before dep
   );
   assert.deepEqual(
     classifyPolymarketClobCollateralResponse({
-      balanceRaw: null,
+      balance: { kind: "absent", raw: null },
       responseOk: false,
       responseStatus: 401,
       signatureType: 3,
@@ -167,7 +203,7 @@ await test("undeployed Deposit Wallet CLOB absence is known zero only before dep
   ]) {
     assert.equal(
       classifyPolymarketClobCollateralResponse({
-        balanceRaw: null,
+        balance: { kind: "absent", raw: null },
         responseOk: false,
         responseStatus: 404,
         signatureType: mismatch.signatureType,
@@ -177,6 +213,74 @@ await test("undeployed Deposit Wallet CLOB absence is known zero only before dep
       false,
     );
   }
+});
+
+await test("malformed CLOB balances are not normalized into predeploy zero", () => {
+  assert.deepEqual(readPolymarketClobBalance({}), {
+    kind: "absent",
+    raw: null,
+  });
+  for (const payload of [
+    null,
+    { balance: "invalid" },
+    { balance: "-1" },
+    { balance: 1.5 },
+  ]) {
+    const balance = readPolymarketClobBalance(payload);
+    assert.equal(balance.kind, "invalid");
+    assert.equal(
+      classifyPolymarketClobCollateralResponse({
+        balance,
+        responseOk: true,
+        responseStatus: null,
+        signatureType: 3,
+        walletDeployed: false,
+        walletTopology: "deposit_wallet",
+      }).collateralVisible,
+      false,
+    );
+  }
+});
+
+await test("undeployed Deposit Wallet may be deployed after pUSD arrives at its counterfactual address", () => {
+  const classified = classifyPolymarketClobCollateralResponse({
+    balance: { kind: "absent", raw: null },
+    responseOk: true,
+    responseStatus: null,
+    signatureType: 3,
+    walletDeployed: false,
+    walletTopology: "deposit_wallet",
+  });
+  assert.equal(
+    polymarketClobCollateralIsVisible({
+      classified,
+      observedWalletBalanceRaw: "1000000",
+      signatureType: 3,
+      walletDeployed: false,
+      walletTopology: "deposit_wallet",
+    }),
+    true,
+  );
+  assert.equal(
+    polymarketClobCollateralIsVisible({
+      classified: { collateralVisible: true, safeBalanceRaw: "0" },
+      observedWalletBalanceRaw: "1000000",
+      signatureType: 3,
+      walletDeployed: true,
+      walletTopology: "deposit_wallet",
+    }),
+    false,
+  );
+  assert.equal(
+    polymarketClobCollateralIsVisible({
+      classified: { collateralVisible: true, safeBalanceRaw: "invalid" },
+      observedWalletBalanceRaw: "1000000",
+      signatureType: 3,
+      walletDeployed: false,
+      walletTopology: "deposit_wallet",
+    }),
+    false,
+  );
 });
 
 function polymarketEvidence(
@@ -572,7 +676,9 @@ await test("undeployed Polymarket Deposit Wallet requests setup instead of RPC r
         polymarketEvidence({
           binding: exactBinding,
           walletDeployed: false,
-          collateralRaw: "0",
+          // Funds may arrive at the counterfactual address before the relayer
+          // deploys it; that must make deployment more urgent, not unavailable.
+          collateralRaw: "1000000",
           collateralLockedRaw: "0",
           clobCollateralVisible: true,
         }),
