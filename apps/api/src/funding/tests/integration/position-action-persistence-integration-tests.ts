@@ -18,6 +18,7 @@ import {
   recordPositionActionSubmission,
   type PositionActionCreateInput,
 } from "../../position-actions/position-action-repository.js";
+import { embeddedEvmSponsorshipTestHooks } from "../../../services/embedded-evm-sponsorship.js";
 
 async function insertUser(label: string): Promise<string> {
   const { rows } = await pool.query<{ id: string }>(
@@ -218,6 +219,77 @@ try {
   assert.equal(noDuplicateBroadcast.claimed, false);
   assert.equal(noDuplicateBroadcast.reason, "already_broadcast");
 
+  const sponsoredInput: PositionActionCreateInput = {
+    ...createInput(userId, "sponsored"),
+    executionMode: "privy_authorization",
+    normalizedActions: [
+      {
+        kind: "evm_transaction_batch",
+        actionId: "action_sponsored_batch_12345678",
+        networkId: "evm:137",
+        senderWalletId: "wallet_sponsored_12345678",
+        calls: [
+          {
+            actionId: "action_sponsored_batch_12345678:call:0",
+            to: "0x00000000000000000000000000000000000000b1",
+            data: "0x1234",
+            valueRaw: "0",
+          },
+          {
+            actionId: "action_sponsored_batch_12345678:call:1",
+            to: "0x00000000000000000000000000000000000000b2",
+            data: "0x5678",
+            valueRaw: "0",
+          },
+        ],
+      },
+    ],
+  };
+  const sponsoredCreated = await createOrReplayPositionAction(
+    pool,
+    sponsoredInput,
+  );
+  operationIds.push(sponsoredCreated.operation.id);
+  const sponsoredClaim = await claimPositionActionSubmission(pool, {
+    userId,
+    operationId: sponsoredCreated.operation.id,
+    canonicalActionFingerprint: "d".repeat(64),
+    executorId: "privy-authorization-evm-v1",
+  });
+  assert.equal(sponsoredClaim.claimed, true);
+  const exactSponsoredCall = {
+    chainId: 137,
+    signer: sponsoredInput.executionAddress,
+    transaction: {
+      id: "action_sponsored_batch_12345678:call:1",
+      label: "Redeem position",
+      to: "0x00000000000000000000000000000000000000b2",
+      data: "0x5678",
+    },
+    userId,
+  };
+  assert.equal(
+    await embeddedEvmSponsorshipTestHooks.matchesPositionAction(
+      pool,
+      exactSponsoredCall,
+    ),
+    true,
+  );
+  assert.equal(
+    await embeddedEvmSponsorshipTestHooks.matchesPositionAction(pool, {
+      ...exactSponsoredCall,
+      signer: "0x00000000000000000000000000000000000000ff",
+    }),
+    false,
+  );
+  assert.equal(
+    await embeddedEvmSponsorshipTestHooks.matchesPositionAction(pool, {
+      ...exactSponsoredCall,
+      transaction: { ...exactSponsoredCall.transaction, data: "0xabcd" },
+    }),
+    false,
+  );
+
   await completePositionActionEffect(pool, {
     userId,
     operationId: successCreated.operation.id,
@@ -253,7 +325,7 @@ try {
   );
 
   console.log(
-    "[position-action-persistence-integration-tests] ok generic venue IDs, idempotency, owner binding, ambiguous submit, receipt, postconditions, marker recovery",
+    "[position-action-persistence-integration-tests] ok generic venue IDs, idempotency, owner binding, exact sponsored action binding, ambiguous submit, receipt, postconditions, marker recovery",
   );
 } finally {
   if (operationIds.length > 0) {

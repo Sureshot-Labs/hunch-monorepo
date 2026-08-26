@@ -12,6 +12,7 @@ import type {
 } from "../preparation/core-adapter.js";
 import type { PositionActionFacts } from "../preparation/position-action-executor.js";
 import { canonicalJsonHash } from "../persistence/canonical.js";
+import { parsePositiveRawAmount } from "../domain/raw-amount.js";
 
 const ERC1155 = new Interface([
   "function setApprovalForAll(address operator,bool approved)",
@@ -93,22 +94,54 @@ function required(input: {
   };
 }
 
-function directEvmAction(input: {
-  actionKey: string;
+type RedemptionExecutionCall = Readonly<{
   data: string;
-  evidence: RedemptionRuntimeEvidence;
-  safeLabel: string;
   target: string;
   valueMoving: boolean;
+}>;
+
+function directEvmAction(input: {
+  actionKey: string;
+  calls: readonly RedemptionExecutionCall[];
+  evidence: RedemptionRuntimeEvidence;
+  safeLabel: string;
 }): PreparationActionTemplate {
+  const [call] = input.calls;
+  if (!call) throw new Error("redemption action requires at least one call");
+  const networkId =
+    input.evidence.ownerBinding.settlementLocation.asset.networkId;
+  const senderWalletId = input.evidence.ownerBinding.executionWalletId;
+  const valueMoving = input.calls.some((entry) => entry.valueMoving);
+  if (input.calls.length > 1) {
+    return {
+      actionKey: input.actionKey,
+      action: {
+        kind: "evm_transaction_batch",
+        networkId,
+        senderWalletId,
+        calls: input.calls.map((entry) => ({
+          to: ethers.getAddress(entry.target),
+          data: ethers.hexlify(entry.data),
+          valueRaw: "0",
+        })),
+      },
+      summary: {
+        kind: "evm_transaction_batch",
+        safeLabel: input.safeLabel,
+        actor: "user",
+        valueMoving,
+        sponsorship: input.evidence.walletInternal ? "requested" : "none",
+      },
+    };
+  }
   return {
     actionKey: input.actionKey,
     action: {
       kind: "evm_transaction",
-      networkId: input.evidence.ownerBinding.settlementLocation.asset.networkId,
-      senderWalletId: input.evidence.ownerBinding.executionWalletId,
-      to: ethers.getAddress(input.target),
-      data: ethers.hexlify(input.data),
+      networkId,
+      senderWalletId,
+      to: ethers.getAddress(call.target),
+      data: ethers.hexlify(call.data),
       valueRaw: "0",
       gasLimitRaw: null,
     },
@@ -116,7 +149,7 @@ function directEvmAction(input: {
       kind: "evm_transaction",
       safeLabel: input.safeLabel,
       actor: "user",
-      valueMoving: input.valueMoving,
+      valueMoving,
       sponsorship: input.evidence.walletInternal ? "requested" : "none",
     },
   };
@@ -124,11 +157,9 @@ function directEvmAction(input: {
 
 function proxyAction(input: {
   actionKey: string;
-  data: string;
+  calls: readonly RedemptionExecutionCall[];
   evidence: RedemptionRuntimeEvidence;
   safeLabel: string;
-  target: string;
-  valueMoving: boolean;
 }): PreparationActionTemplate {
   const handoff = input.evidence.externalHandoff;
   if (!handoff) {
@@ -143,20 +174,18 @@ function proxyAction(input: {
       handoffKind: handoff.handoffKind,
       payload: {
         ...handoff.payload,
-        calls: [
-          {
-            target: ethers.getAddress(input.target),
-            data: ethers.hexlify(input.data),
-            value: "0",
-          },
-        ],
+        calls: input.calls.map((call) => ({
+          target: ethers.getAddress(call.target),
+          data: ethers.hexlify(call.data),
+          value: "0",
+        })),
       },
     },
     summary: {
       kind: "external_handoff",
       safeLabel: input.safeLabel,
       actor: "user",
-      valueMoving: input.valueMoving,
+      valueMoving: input.calls.some((call) => call.valueMoving),
       sponsorship: input.evidence.walletInternal ? "requested" : "none",
     },
   };
@@ -164,11 +193,9 @@ function proxyAction(input: {
 
 function executionAction(input: {
   actionKey: string;
-  data: string;
+  calls: readonly RedemptionExecutionCall[];
   evidence: RedemptionRuntimeEvidence;
   safeLabel: string;
-  target: string;
-  valueMoving: boolean;
 }): PreparationActionTemplate {
   return input.evidence.externalHandoff
     ? proxyAction(input)
@@ -183,16 +210,48 @@ function reasonForPlan(plan: RedemptionPlan): FundingReasonCode {
 
 function positivePlanBalance(plan: RedemptionPlan): boolean {
   const values = [plan.yesBalanceRaw, plan.noBalanceRaw];
-  return values.some(
-    (value) =>
-      typeof value === "string" &&
-      /^(0|[1-9][0-9]*)$/.test(value) &&
-      BigInt(value) > 0n,
-  );
+  return values.some((value) => parsePositiveRawAmount(value) != null);
+}
+
+function redemptionExecutionAction(
+  evidence: RedemptionRuntimeEvidence,
+): PreparationActionTemplate | null {
+  if (
+    !evidence.plan.redeemable ||
+    !evidence.plan.targetAddress ||
+    !evidence.plan.data ||
+    evidence.operatorApproved == null
+  ) {
+    return null;
+  }
+  const calls: RedemptionExecutionCall[] = [];
+  const operator = evidence.plan.operatorApprovalAddress ?? null;
+  if (operator && evidence.operatorApproved === false) {
+    calls.push({
+      data: ERC1155.encodeFunctionData("setApprovalForAll", [operator, true]),
+      target: evidence.conditionalTokensAddress,
+      valueMoving: false,
+    });
+  }
+  calls.push({
+    data: evidence.plan.data,
+    target: evidence.plan.targetAddress,
+    valueMoving: true,
+  });
+  return executionAction({
+    actionKey: "redeem-position",
+    calls,
+    evidence,
+    safeLabel:
+      calls.length > 1
+        ? "Approve and redeem resolved position"
+        : "Redeem resolved position",
+  });
 }
 
 function operatorCheck(
   evidence: RedemptionRuntimeEvidence,
+  action: PreparationActionTemplate | null,
 ): PreparationFactCheck {
   const operator = evidence.plan.operatorApprovalAddress ?? null;
   if (!operator) {
@@ -214,28 +273,25 @@ function operatorCheck(
       "rpc_unavailable",
     );
   }
-  const data = ERC1155.encodeFunctionData("setApprovalForAll", [
-    operator,
-    true,
-  ]);
+  if (!action) {
+    return unavailable(
+      "redemption_operator_approval",
+      "Canonical redemption action could not be prepared",
+      "market_evidence_unavailable",
+    );
+  }
   return required({
     checkId: "redemption_operator_approval",
     safeLabel: "Approve the canonical redemption operator",
     reasonCode: "operator_approval_required",
     userAction: !evidence.walletInternal,
-    action: executionAction({
-      actionKey: "approve-redemption-operator",
-      data,
-      evidence,
-      safeLabel: "Approve redemption operator",
-      target: evidence.conditionalTokensAddress,
-      valueMoving: false,
-    }),
+    action,
   });
 }
 
 function canonicalPlanCheck(
   evidence: RedemptionRuntimeEvidence,
+  action: PreparationActionTemplate | null,
 ): PreparationFactCheck {
   if (
     !evidence.plan.redeemable ||
@@ -248,19 +304,19 @@ function canonicalPlanCheck(
       reasonForPlan(evidence.plan),
     );
   }
+  if (!action) {
+    return unavailable(
+      "canonical_redemption_plan",
+      "Canonical redemption action could not be prepared",
+      "market_evidence_unavailable",
+    );
+  }
   return required({
     checkId: "canonical_redemption_plan",
     safeLabel: "Submit the canonical owner-bound redemption",
     reasonCode: "position_action_required",
     userAction: !evidence.walletInternal,
-    action: executionAction({
-      actionKey: "redeem-position",
-      data: evidence.plan.data,
-      evidence,
-      safeLabel: "Redeem resolved position",
-      target: evidence.plan.targetAddress,
-      valueMoving: true,
-    }),
+    action,
   });
 }
 
@@ -268,6 +324,7 @@ export function buildRedemptionPositionFacts(
   evidence: RedemptionRuntimeEvidence,
 ): PositionActionFacts {
   const rpcFresh = evidence.plan.reason !== "preflight_unavailable";
+  const execution = redemptionExecutionAction(evidence);
   const checks: PreparationFactCheck[] = [
     evidence.ownerMatchesBinding
       ? satisfied("position_owner", "Position belongs to the exact binding")
@@ -307,8 +364,8 @@ export function buildRedemptionPositionFacts(
           "No redeemable owner balance is available",
           "market_evidence_unavailable",
         ),
-    operatorCheck(evidence),
-    canonicalPlanCheck(evidence),
+    operatorCheck(evidence, execution),
+    canonicalPlanCheck(evidence, execution),
   ];
   const planDigest = canonicalJsonHash(evidence.plan);
   return {

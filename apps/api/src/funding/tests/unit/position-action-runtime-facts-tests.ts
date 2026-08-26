@@ -166,7 +166,7 @@ await test("Polymarket Safe keeps approval and redemption inside owner proxy", a
       },
     }),
   );
-  assert.equal(result.actions.length, 2);
+  assert.equal(result.actions.length, 1);
   for (const action of result.actions) {
     assert.equal(action.kind, "external_handoff");
     if (action.kind !== "external_handoff") continue;
@@ -174,12 +174,13 @@ await test("Polymarket Safe keeps approval and redemption inside owner proxy", a
     assert.equal(action.actorWalletId, binding("polymarket").executionWalletId);
     assert.equal(action.payload.funder, OWNER);
   }
-  const approvalAction = result.actions[0];
-  if (approvalAction?.kind !== "external_handoff") {
+  const redemptionAction = result.actions[0];
+  if (redemptionAction?.kind !== "external_handoff") {
     throw new Error("approval did not use owner proxy");
   }
-  const calls = approvalAction.payload.calls;
+  const calls = redemptionAction.payload.calls;
   assert.ok(Array.isArray(calls));
+  assert.equal(calls.length, 2);
   const first = calls[0] as { data?: string; target?: string };
   assert.equal(first.target, CTF);
   const decoded = approval.decodeFunctionData(
@@ -188,6 +189,37 @@ await test("Polymarket Safe keeps approval and redemption inside owner proxy", a
   );
   assert.equal(decoded[0], TARGET);
   assert.equal(decoded[1], true);
+  assert.equal(
+    (calls[1] as { target?: string }).target,
+    "0x0000000000000000000000000000000000000066",
+  );
+});
+
+await test("internal Polymarket signer batches approval and redemption once", async () => {
+  const result = await prepare(
+    evidence("polymarket", {
+      operatorApproved: false,
+      walletInternal: true,
+      plan: {
+        ...evidence("polymarket").plan,
+        operatorApprovalAddress: TARGET,
+        targetAddress: "0x0000000000000000000000000000000000000066",
+      },
+    }),
+  );
+  assert.equal(result.actions.length, 1);
+  const action = result.actions[0];
+  assert.equal(action?.kind, "evm_transaction_batch");
+  if (action?.kind !== "evm_transaction_batch") {
+    throw new Error("redemption did not use one atomic batch");
+  }
+  assert.equal(action.calls.length, 2);
+  assert.equal(action.calls[0]?.to, CTF);
+  assert.equal(
+    action.calls[1]?.to,
+    "0x0000000000000000000000000000000000000066",
+  );
+  assert.notEqual(action.calls[0]?.actionId, action.calls[1]?.actionId);
 });
 
 await test("unsupported topology and RPC uncertainty are fail-closed", async () => {

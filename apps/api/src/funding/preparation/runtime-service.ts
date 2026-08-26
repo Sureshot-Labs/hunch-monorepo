@@ -136,6 +136,8 @@ export type RuntimeVenueInspectionInput = Readonly<{
   marketContextId: string | null;
   marketClass: string | null;
   positionActionRef: string | null;
+  /** Exact canonical position owner for owner-bound actions such as redeem. */
+  requiredOwnerAccountRef?: string;
   resolvedMarketContext?: RuntimeMarketContext;
 }>;
 
@@ -362,6 +364,34 @@ function bindingFor(input: {
       ? "privy_authorization"
       : "web_client",
   };
+}
+
+function polymarketInspectionAccountRef(
+  input: Readonly<{
+    walletAddress: string;
+    storedFunderAddress: string | null;
+    derivedDepositAddress: string | null;
+    requiredOwnerAccountRef: string | null;
+  }>,
+): string {
+  const required = input.requiredOwnerAccountRef?.trim() ?? "";
+  const supported = [
+    input.walletAddress,
+    input.storedFunderAddress,
+    input.derivedDepositAddress,
+  ].filter((value): value is string => Boolean(value?.trim()));
+  if (required && !supported.some((value) => sameAddress(value, required))) {
+    throw new PreparationContractError(
+      "binding_mismatch",
+      "canonical position owner is not controlled by the selected wallet",
+    );
+  }
+  return (
+    required ||
+    input.storedFunderAddress ||
+    input.derivedDepositAddress ||
+    input.walletAddress
+  );
 }
 
 function metadataBoolean(
@@ -1147,8 +1177,15 @@ export class WalletPreparationRuntimeService {
       "polymarket",
       input.wallet.walletAddress,
     );
+    const requiredOwnerAccountRef =
+      input.requiredOwnerAccountRef?.trim() || null;
     let deposit: PolymarketDepositWalletDerivation | null = null;
-    if (!credentials?.funderAddress && input.wallet.isInternalWallet) {
+    if (
+      !credentials?.funderAddress &&
+      input.wallet.isInternalWallet &&
+      (!requiredOwnerAccountRef ||
+        !sameAddress(requiredOwnerAccountRef, input.wallet.walletAddress))
+    ) {
       try {
         deposit = await inspectPolymarketDepositWallet({
           owner: input.wallet.walletAddress,
@@ -1159,10 +1196,12 @@ export class WalletPreparationRuntimeService {
         deposit = null;
       }
     }
-    const funder =
-      credentials?.funderAddress ??
-      deposit?.address ??
-      input.wallet.walletAddress;
+    const funder = polymarketInspectionAccountRef({
+      walletAddress: input.wallet.walletAddress,
+      storedFunderAddress: credentials?.funderAddress ?? null,
+      derivedDepositAddress: deposit?.address ?? null,
+      requiredOwnerAccountRef,
+    });
     const storedL2Credentials =
       credentials?.apiKey &&
       credentials.apiSecret &&
@@ -1803,6 +1842,7 @@ export class WalletPreparationRuntimeService {
           marketContextId: input.marketContextId,
           marketClass: input.marketClass,
           positionActionRef: null,
+          requiredOwnerAccountRef: input.ownerAddress,
         }),
       ),
     );
@@ -1959,6 +1999,7 @@ export class WalletPreparationRuntimeService {
 
 export const walletPreparationRuntimeTestHooks = {
   availableRaw,
+  polymarketInspectionAccountRef,
 };
 
 export const RUNTIME_PREPARATION_MAX_APPROVAL_RAW = MAX_APPROVAL;
