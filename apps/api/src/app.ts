@@ -13,6 +13,7 @@ import { closeRedis } from "./redis.js";
 import { registerRoutes } from "./routes/index.js";
 import { enforceGlobalRateLimit } from "./lib/global-rate-limit.js";
 import { flushPendingMarketRefreshes } from "./lib/market-refresh.js";
+import { isPgStatementTimeoutError } from "./lib/postgres-errors.js";
 import { isRecord } from "./lib/type-guards.js";
 import { env } from "./env.js";
 import { pool } from "./db.js";
@@ -126,6 +127,12 @@ export async function buildApp() {
           ? zodIssues[0].message
           : "Invalid request";
       reply.code(400).send({ error: message });
+      return;
+    }
+
+    if (isPgStatementTimeoutError(error)) {
+      request.log.warn({ err: error }, "Database query timed out");
+      reply.code(504).send({ error: "Request timed out" });
       return;
     }
 

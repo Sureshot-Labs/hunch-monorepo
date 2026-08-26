@@ -211,6 +211,7 @@ function assertHardBudgets(options: CliOptions): void {
   const limits: Record<RelayRehearsalScenarioId, bigint> = {
     "polygon-pol-to-base-eth": 10_000_000_000_000_000_000n,
     "polygon-pusd-to-base-usdc": 3_000_000n,
+    "polygon-usdc-to-base-usdc": 1_000_000n,
     "base-usdc-to-polygon-pusd": 1_000_000n,
     "polygon-usdc-to-polygon-pusd": 1_000_000n,
     "polygon-usdce-to-base-usdc": 1_000_000n,

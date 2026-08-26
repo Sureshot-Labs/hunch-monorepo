@@ -409,6 +409,23 @@ function v2Erc20Quote(
 }
 
 {
+  const scenario = relayRehearsalScenarios["polygon-usdc-to-base-usdc"];
+  const validated = validateRelayRehearsalQuote({
+    amount: 500_000n,
+    amountMode: "expected_output",
+    minimumOutputFloor: 400_000n,
+    quote: v2Erc20Quote(scenario),
+    scenario,
+    user,
+  });
+  assert.equal(validated.routeShape, "relay-depository-v2-erc20");
+  assert.deepEqual(
+    validated.actions.map((action) => action.stepId),
+    ["approve", "deposit"],
+  );
+}
+
+{
   const scenario = relayRehearsalScenarios["polygon-usdc-to-polygon-pusd"];
   const validated = validateRelayRehearsalQuote({
     amount: 500_000n,

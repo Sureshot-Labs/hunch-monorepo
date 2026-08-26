@@ -94,6 +94,7 @@ import {
   type RuntimePositionEvidence,
   type RuntimeWalletAuthority,
 } from "./runtime-facts.js";
+import { classifyPolymarketClobCollateralResponse } from "./polymarket-clob-collateral.js";
 import {
   createLimitlessRuntimeActionMaterializer,
   createPolymarketRuntimeActionMaterializer,
@@ -663,6 +664,8 @@ async function inspectPolymarketClob(input: {
   userId: string;
   walletAddress: string;
   signatureType: number;
+  walletDeployed: boolean;
+  walletTopology: PolymarketRuntimeEvidence["topology"];
 }): Promise<{
   credentials: RuntimeCredentialEvidence;
   l2Credentials: PolymarketL2Credentials | null;
@@ -716,20 +719,25 @@ async function inspectPolymarketClob(input: {
       method: "GET",
       requestPath: `/balance-allowance?${params.toString()}`,
     });
-    const safeBalanceRaw = response.ok
-      ? rawAt(response.payload, ["balance"])
-      : null;
+    const classified = classifyPolymarketClobCollateralResponse({
+      balanceRaw: response.ok ? rawAt(response.payload, ["balance"]) : null,
+      responseOk: response.ok,
+      responseStatus: response.ok ? null : response.status,
+      signatureType: input.signatureType,
+      walletDeployed: input.walletDeployed,
+      walletTopology: input.walletTopology,
+    });
     return {
       credentials: {
         present: true,
         boundToExactWallet: bound,
-        verified: response.ok,
+        verified: classified.verifiedCredentials,
         observedAt: new Date().toISOString(),
-        stale: !response.ok && response.status === 401,
+        stale: classified.staleCredentials,
       },
       l2Credentials: response.ok && bound ? l2Credentials : null,
-      collateralVisible: response.ok && safeBalanceRaw != null,
-      safeBalanceRaw,
+      collateralVisible: classified.collateralVisible,
+      safeBalanceRaw: classified.safeBalanceRaw,
     };
   } catch {
     return {
@@ -968,6 +976,8 @@ export async function observePolymarketFundingRuntime(
       userId: input.userId,
       walletAddress: input.signerAddress,
       signatureType: 3,
+      walletDeployed: true,
+      walletTopology: "deposit_wallet",
     }),
   ]);
   if (!account.ok) return null;
@@ -1215,6 +1225,8 @@ export class WalletPreparationRuntimeService {
       userId: input.accountId,
       walletAddress: input.wallet.walletAddress,
       signatureType,
+      walletDeployed: topology.deployed,
+      walletTopology: topology.topology,
     });
     /*
      * Account/RPC evidence and CLOB credential evidence are independent once

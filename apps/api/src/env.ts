@@ -895,6 +895,12 @@ export const env = {
     1_000,
     120_000,
   ),
+  feedFilterTimeoutMs: optionalIntInRange(
+    "FEED_FILTER_TIMEOUT_MS",
+    15_000,
+    1_000,
+    120_000,
+  ),
   feedSearchResultMatchLimit: optionalIntInRange(
     "FEED_SEARCH_RESULT_MATCH_LIMIT",
     500,
@@ -941,6 +947,10 @@ export const env = {
   adminServiceCredentialMaxTtlDays,
   marketMapTtlSec: optionalNonNegativeInt("API_MARKET_MAP_TTL_SEC", 10),
   walletIntelTtlSec: optionalNonNegativeInt("API_WALLET_INTEL_TTL_SEC", 30),
+  walletIntelStatementTimeoutMs: optionalPositiveInt(
+    "API_WALLET_INTEL_STATEMENT_TIMEOUT_MS",
+    30_000,
+  ),
   walletPositionHistoryStatementTimeoutMs: optionalPositiveInt(
     "API_WALLET_POSITION_HISTORY_STATEMENT_TIMEOUT_MS",
     30_000,
