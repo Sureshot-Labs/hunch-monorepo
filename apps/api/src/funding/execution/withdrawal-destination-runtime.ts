@@ -47,10 +47,21 @@ export type WithdrawalAddressInspection = Readonly<{
   normalizedAddress: string;
   addressKind:
     | "evm_eoa"
+    | "evm_contract"
     | "solana_system_wallet"
     | "solana_uninitialized_wallet";
   evidenceRevision: string;
 }>;
+
+export function classifyEvmWithdrawalAddressCode(
+  code: string,
+): Pick<WithdrawalAddressInspection, "addressKind" | "evidenceRevision"> {
+  const normalizedCode = code === "0x0" ? "0x" : code;
+  return {
+    addressKind: normalizedCode === "0x" ? "evm_eoa" : "evm_contract",
+    evidenceRevision: ethers.keccak256(normalizedCode),
+  };
+}
 
 export function assertWithdrawalRecipientContract(asset: AssetRef): void {
   if (!supportsWithdrawalDestinationAsset(asset)) {
@@ -124,16 +135,10 @@ export async function inspectWithdrawalAddress(
         "withdrawal destination contract evidence is unavailable",
       );
     }
-    if (code !== "0x" && code !== "0x0") {
-      throw new WithdrawalDestinationError(
-        "withdrawal_destination_invalid",
-        "contract withdrawal destinations are blocked in the initial policy",
-      );
-    }
+    const inspectedCode = classifyEvmWithdrawalAddressCode(code);
     return {
       normalizedAddress,
-      addressKind: "evm_eoa",
-      evidenceRevision: ethers.keccak256(code === "0x0" ? "0x" : code),
+      ...inspectedCode,
     };
   }
 
@@ -251,7 +256,7 @@ export class WithdrawalDestinationRuntime {
       lookupKeyVersion: codec.keyVersion,
       validationEvidence: {
         addressKind: inspected.addressKind,
-        blockedContractCheck: "passed",
+        addressCodeCheck: "passed",
         evidenceRevision: inspected.evidenceRevision,
         policyRevision: WITHDRAWAL_DESTINATION_CONTRACT_REVISION,
         validatedAt: now.toISOString(),
