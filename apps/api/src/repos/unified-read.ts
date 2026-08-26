@@ -228,12 +228,11 @@ function buildBroadOrderableMarketCandidatesCte(args: {
   }
   const candidateMarketJoin = candidateMarketIdsCte
     ? `join ${candidateMarketIdsCte} candidate_filter on candidate_filter.market_id = m.id`
-    : "";
+    : args.candidateMarketIdsParam
+      ? `join unnest(${args.candidateMarketIdsParam}::text[]) as candidate_filter(market_id) on candidate_filter.market_id = m.id`
+      : "";
   const candidateEventJoin = candidateEventIdsCte
     ? `join ${candidateEventIdsCte} candidate_event_filter on candidate_event_filter.id = m.event_id`
-    : "";
-  const candidateMarketSql = args.candidateMarketIdsParam
-    ? `and m.id = ANY(${args.candidateMarketIdsParam}::text[])`
     : "";
   const extraSql = (args.extraMarketSql ?? [])
     .filter(Boolean)
@@ -252,7 +251,6 @@ function buildBroadOrderableMarketCandidatesCte(args: {
         nowParam: args.nowParam,
         nowCloseParam: args.nowCloseParam,
       })}
-        ${candidateMarketSql}
     ),
     ${strictCandidatesCte} as materialized (
       select
@@ -278,7 +276,6 @@ function buildBroadOrderableMarketCandidatesCte(args: {
         and m.close_time is not null
         and m.close_time <= ${args.nowParam}::timestamptz
         and m.close_time > (${args.nowParam}::timestamptz - ${POLYMARKET_ACCEPTING_ORDERS_GRACE_INTERVAL_SQL})
-        ${candidateMarketSql}
       union all
       select
         m.id as market_id,
@@ -292,7 +289,6 @@ function buildBroadOrderableMarketCandidatesCte(args: {
         and m.expiration_time is not null
         and m.expiration_time <= ${args.nowParam}::timestamptz
         and m.expiration_time > (${args.nowParam}::timestamptz - ${POLYMARKET_ACCEPTING_ORDERS_GRACE_INTERVAL_SQL})
-        ${candidateMarketSql}
       union all
       select
         m.id as market_id,
@@ -308,7 +304,6 @@ function buildBroadOrderableMarketCandidatesCte(args: {
         and e.end_date > (${args.nowParam}::timestamptz - ${POLYMARKET_ACCEPTING_ORDERS_GRACE_INTERVAL_SQL})
         and m.status = 'ACTIVE'
         and m.venue = 'polymarket'
-        ${candidateMarketSql}
     ),
     ${pmGraceCandidatesCte} as materialized (
       select distinct
@@ -776,7 +771,27 @@ async function fetchObservedCanonicalProbabilityMarketIdsUncached(
   const { params, add } = createParamBuilder();
   const nowParam = add(inputs.nowParam);
   const expressions = buildFeedSqlExpressions();
+  const probabilityEventInputs =
+    inputs.view === "markets" && inputs.venues
+      ? { ...inputs, venues: undefined }
+      : inputs;
+  const probabilityEventWhere = buildFeedEventWhere({
+    add,
+    inputs: probabilityEventInputs,
+    nowParam,
+    hasSearch: false,
+    includeOrderableExists: false,
+    includeDurationExists: false,
+  });
+  const probabilityCandidateEventsCte = `
+    probability_candidate_events as materialized (
+      select e.id
+      from unified_events e
+      where ${probabilityEventWhere.join(" and ")}
+    )
+  `;
   const candidateCte = buildBroadOrderableMarketCandidatesCte({
+    candidateEventIdsCte: "probability_candidate_events",
     cteName: "probability_market_candidates",
     materialized: true,
     nowParam,
@@ -804,7 +819,8 @@ async function fetchObservedCanonicalProbabilityMarketIdsUncached(
   const rows = await queryRowsWithLocalSettings<{ market_id: string }>(
     pool,
     `
-      with ${candidateCte},
+      with ${probabilityCandidateEventsCte},
+      ${candidateCte},
       canonical_token_pairs as materialized (
         select
           probability_candidate.market_id,
@@ -2035,7 +2051,6 @@ function buildFeedMarketViewContext(args: {
       venueTarget: venueFilterTarget,
       renderableMarketExpr,
       supportedLimitlessMarketExpr,
-      marketIdsParam,
       hasSearch: false,
       requireNamedCategory,
     }),
@@ -2407,7 +2422,6 @@ export async function fetchFeedCategoryFacetRows(
             venueTarget: "event",
             renderableMarketExpr,
             supportedLimitlessMarketExpr,
-            marketIdsParam,
             hasSearch: false,
             requireNamedCategory: true,
           }),
@@ -2469,7 +2483,6 @@ export async function fetchFeedCategoryFacetRows(
           venueTarget: "event",
           renderableMarketExpr,
           supportedLimitlessMarketExpr,
-          marketIdsParam,
           hasSearch: false,
           requireNamedCategory: true,
         }),
@@ -2702,7 +2715,6 @@ async function fetchFeedEventIdsExact(
           venueTarget: "event",
           renderableMarketExpr,
           supportedLimitlessMarketExpr,
-          marketIdsParam,
           hasSearch: false,
         }),
       ],

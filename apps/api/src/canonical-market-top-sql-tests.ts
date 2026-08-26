@@ -97,6 +97,7 @@ assert.deepEqual(
     minProb: 0.7,
     maxProb: undefined,
     venues: ["polymarket", "limitless"],
+    categories: ["sports"],
     endWithin: new Date(now.getTime() + 24 * 60 * 60 * 1000).toISOString(),
   }),
   ["market-1"],
@@ -105,6 +106,14 @@ assert.doesNotMatch(candidateSql, /interval '10 minutes'|\.ts\s*[<>]=?/i);
 assert.match(
   candidateSql,
   /probability_market_candidates_strict_market_base as materialized/i,
+);
+assert.match(
+  candidateSql,
+  /probability_candidate_events as materialized[\s\S]*?lower\(e\.category\)/i,
+);
+assert.match(
+  candidateSql,
+  /probability_market_candidates_strict_market_base as materialized[\s\S]*?join probability_candidate_events candidate_event_filter on candidate_event_filter\.id = m\.event_id/i,
 );
 assert.match(candidateSql, /m\.status = 'ACTIVE'/i);
 assert.match(candidateSql, /e\.status = 'ACTIVE'/i);
@@ -153,15 +162,15 @@ assert.deepEqual(
   }),
   [],
 );
-assert.match(eventSql, /m\.id = ANY\(\$\d+::text\[\]\)/i);
 assert.match(
   eventSql,
-  /orderable_market_candidates_strict_market_base as materialized[\s\S]*?where[\s\S]*?m\.id = ANY\(\$\d+::text\[\]\)/i,
+  /orderable_market_candidates_strict_market_base as materialized[\s\S]*?from unified_markets m[\s\S]*?join unnest\(\$\d+::text\[\]\) as candidate_filter\(market_id\) on candidate_filter\.market_id = m\.id/i,
 );
 assert.match(
   eventSql,
-  /orderable_market_candidates_pm_recent_candidates as materialized[\s\S]*?m\.close_time[\s\S]*?m\.id = ANY\(\$\d+::text\[\]\)[\s\S]*?union all[\s\S]*?m\.expiration_time[\s\S]*?m\.id = ANY\(\$\d+::text\[\]\)[\s\S]*?union all[\s\S]*?e\.end_date[\s\S]*?m\.id = ANY\(\$\d+::text\[\]\)/i,
+  /orderable_market_candidates_pm_recent_candidates as materialized[\s\S]*?join unnest\(\$\d+::text\[\]\) as candidate_filter\(market_id\)[\s\S]*?m\.close_time[\s\S]*?union all[\s\S]*?join unnest\(\$\d+::text\[\]\) as candidate_filter\(market_id\)[\s\S]*?m\.expiration_time[\s\S]*?union all[\s\S]*?join unnest\(\$\d+::text\[\]\) as candidate_filter\(market_id\)[\s\S]*?e\.end_date/i,
 );
+assert.doesNotMatch(eventSql, /m\.id = ANY\(\$\d+::text\[\]\)/i);
 console.log(
   "ok - event pagination drives every orderable branch from preselected market ids",
 );
