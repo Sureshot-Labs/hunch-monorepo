@@ -17,6 +17,7 @@ import {
 import { createWithdrawalDestinationCodec } from "../../execution/withdrawal-destination-codec.js";
 import {
   assertWithdrawalRecipientContract,
+  classifyEvmWithdrawalAddressCode,
   inspectWithdrawalAddress,
   WithdrawalDestinationError,
   WithdrawalDestinationRuntime,
@@ -149,6 +150,21 @@ await assert.rejects(
     error instanceof WithdrawalDestinationError &&
     error.code === "withdrawal_destination_invalid",
 );
+assert.deepEqual(classifyEvmWithdrawalAddressCode("0x"), {
+  addressKind: "evm_eoa",
+  evidenceRevision:
+    "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+});
+assert.deepEqual(classifyEvmWithdrawalAddressCode("0x0"), {
+  addressKind: "evm_eoa",
+  evidenceRevision:
+    "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+});
+assert.deepEqual(classifyEvmWithdrawalAddressCode("0x6000"), {
+  addressKind: "evm_contract",
+  evidenceRevision:
+    "0x07ad118d6cc8642c86c03827f276d8b791a65e5c99a3845faf186be720a1455d",
+});
 await assert.rejects(
   inspectWithdrawalAddress({
     networkId: "solana:mainnet",
