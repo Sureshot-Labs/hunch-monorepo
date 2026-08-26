@@ -12,6 +12,7 @@ import type {
 import type { FundingCommitPlan } from "../../persistence/funding-operation-repository.js";
 import { buildCompositeSourceOption } from "../../planner/composite-source-options.js";
 import {
+  planProductionFundingSourceBoundaries,
   remainingFundingRequirementAfterVenuePreparation,
   restrictResidualSourcesToCompositeContribution,
 } from "../../planner/production-source-planner.js";
@@ -225,6 +226,18 @@ function partialPreparation(): PlannedSourceOption {
     venueId: "venue_fixture",
     venueBindingId: "binding_account_composite_12345678",
     inputCount: 2,
+    inputs: [
+      {
+        asset: DESTINATION_ASSET,
+        locationId: "location_preparation_a_12345678",
+        rawAmount: "2000000",
+      },
+      {
+        asset: DESTINATION_ASSET,
+        locationId: "location_preparation_b_12345678",
+        rawAmount: "1569075",
+      },
+    ],
   };
   const option: SourceOption = {
     sourceOptionId: "source_preparation_12345678",
@@ -493,6 +506,14 @@ assert.equal(
   )?.raw,
   "4227649",
 );
+assert.equal(
+  remainingFundingRequirementAfterVenuePreparation(
+    [partialUserPaidPreparation],
+    money(DESTINATION_ASSET, "4227649"),
+    "client_handoff",
+  )?.raw,
+  "658574",
+);
 const residualRelay = partialSource({
   id: "residual",
   location: sourceLocation(
@@ -611,6 +632,129 @@ assert.deepEqual(
   DESTINATION_OBSERVATION,
 );
 sourceOptionSchema.parse(preparationAndRelay.option);
+
+const exactClientPreparation = partialPreparation();
+if (exactClientPreparation.option.source.kind !== "venue_preparation") {
+  throw new Error("client preparation fixture changed kind");
+}
+const exactClientPreparationInput =
+  exactClientPreparation.option.source.inputs?.[0];
+const exactClientPreparationReservation =
+  exactClientPreparation.commitPlan.reservations[0];
+assert.ok(exactClientPreparationInput);
+assert.ok(exactClientPreparationReservation);
+const clientPreparation = {
+  ...exactClientPreparation,
+  option: {
+    ...exactClientPreparation.option,
+    maximumSourceRaw: "180000",
+    expectedDestination: money(DESTINATION_ASSET, "180000"),
+    minimumDestination: money(DESTINATION_ASSET, "180000"),
+    estimatedUsd: "0.18",
+    source: {
+      ...exactClientPreparation.option.source,
+      inputCount: 1,
+      inputs: [
+        {
+          ...exactClientPreparationInput,
+          rawAmount: "180000",
+        },
+      ],
+    },
+  },
+  commitPlan: {
+    ...exactClientPreparation.commitPlan,
+    steps: exactClientPreparation.commitPlan.steps.map((step) => ({
+      ...step,
+      payerRequirement: "user" as const,
+    })),
+    reservations: [
+      {
+        ...exactClientPreparationReservation,
+        rawAmount: "180000",
+      },
+    ],
+  },
+};
+const clientSolana = partialSource({
+  id: "client_solana",
+  location: sourceLocation(
+    "client_solana",
+    "solana:mainnet",
+    "So11111111111111111111111111111111111111117",
+  ),
+  sourceRaw: "27000000",
+  expectedRaw: "2102018",
+  minimumRaw: "2102018",
+  feeUsd: "0.01",
+  payerRequirement: "user",
+});
+const clientHandoffComposite = buildCompositeSourceOption({
+  candidates: [clientPreparation, clientSolana],
+  requiredDestination: money(DESTINATION_ASSET, "2282018"),
+  destinationUnitPriceUsd: "1",
+  maximumFeeUsd: "1",
+  maximumFeeBps: 2_000,
+  executionBoundary: "client_handoff",
+});
+assert.ok(clientHandoffComposite);
+assert.deepEqual(
+  clientHandoffComposite.option.requiredActions.map((action) => action.kind),
+  ["evm_transaction", "svm_transaction"],
+  "a client handoff may combine exact Polygon preparation with a Solana leg",
+);
+assert.equal(clientHandoffComposite.option.minimumDestination?.raw, "2282018");
+assert.equal(
+  buildCompositeSourceOption({
+    candidates: [clientPreparation, clientSolana],
+    requiredDestination: money(DESTINATION_ASSET, "2282018"),
+    destinationUnitPriceUsd: "1",
+    maximumFeeUsd: "1",
+    maximumFeeBps: 2_000,
+  }),
+  null,
+  "the same user-signed Solana plan is never promoted to server automation",
+);
+
+const productionRequirements: string[] = [];
+const productionBoundaryPlan = await planProductionFundingSourceBoundaries({
+  adapted: [clientPreparation],
+  requiredAmount: money(DESTINATION_ASSET, "2282018"),
+  destinationUnitPriceUsd: "1",
+  maximumFeeUsd: "1",
+  maximumFeeBps: 2_000,
+  discoverRelay: async (requiredAmount) => {
+    productionRequirements.push(requiredAmount.raw);
+    return {
+      sources: requiredAmount.raw === "2102018" ? [clientSolana] : [],
+      reasonCodes: [],
+    };
+  },
+});
+assert.deepEqual(
+  productionRequirements.sort(),
+  ["2102018", "2282018"],
+  "production discovery must quote automatic and client residuals separately",
+);
+const productionClientComposite = productionBoundaryPlan.sources.find(
+  (source) => source.option.kind === "composite",
+);
+assert.ok(productionClientComposite);
+assert.deepEqual(
+  productionClientComposite.option.requiredActions.map((action) => action.kind),
+  ["evm_transaction", "svm_transaction"],
+  "production planning must emit the reachable Polygon preparation + SOL handoff",
+);
+assert.equal(
+  productionBoundaryPlan.sources.filter(
+    (source) =>
+      source.option.kind === "composite" &&
+      source.compositeEligible === true &&
+      source.commitPlan.steps.every((step) => step.payerRequirement !== "user"),
+  ).length,
+  0,
+  "the client composite must not create an automatic/server-SVM alternative",
+);
 
 const insufficientResidualRelay = partialSource({
   id: "insufficient_residual",

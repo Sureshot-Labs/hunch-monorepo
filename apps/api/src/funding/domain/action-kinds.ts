@@ -8,7 +8,7 @@ const RECEIPT_BEARING_ACTION_KINDS = new Set<NormalizedAction["kind"]>([
 ]);
 
 export function isReceiptBearingFundingActionKind(
-  kind: NormalizedAction["kind"],
-): boolean {
-  return RECEIPT_BEARING_ACTION_KINDS.has(kind);
+  kind: string,
+): kind is Exclude<NormalizedAction["kind"], "signature"> {
+  return RECEIPT_BEARING_ACTION_KINDS.has(kind as NormalizedAction["kind"]);
 }

@@ -64,6 +64,7 @@ import { WalletPreparationRuntimeService } from "../preparation/runtime-service.
 import { ProductionFundingSourcePlanner } from "./production-source-planner.js";
 import { PolymarketFundingSourceAdapter } from "../preparation/polymarket-funding-source-adapter.js";
 import { DirectIngressFundingSourceAdapter } from "./direct-ingress-source-adapter.js";
+import { DirectWithdrawalSourceAdapter } from "./direct-withdrawal-source-adapter.js";
 import { parsePositiveInteger } from "../runtime/positive-integer.js";
 import {
   FundingOperationActionRuntime,
@@ -84,6 +85,7 @@ function productionFundingSourceAdapters(
 ): readonly FundingSourceAdapter[] {
   return [
     new PolymarketFundingSourceAdapter(account),
+    new DirectWithdrawalSourceAdapter(account),
     new DirectIngressFundingSourceAdapter(account),
   ];
 }

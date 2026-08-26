@@ -201,6 +201,47 @@ const compositeWithVenuePreparation: SourceOption = {
   sourceOptionId: "source-composite-router-preparation",
 };
 
+const scopedCompositeWithVenuePreparation: SourceOption = {
+  ...compositeWithVenuePreparation,
+  requiredActions: [
+    {
+      actor: "user",
+      kind: "evm_transaction",
+      safeLabel: "Prepare Polymarket funding",
+      sponsorship: "requested",
+      valueMoving: true,
+    },
+    ...evmSource.requiredActions,
+  ],
+  sourceLegs: compositeWithVenuePreparation.sourceLegs?.map((leg, index) =>
+    index === 0 && leg.source.kind === "venue_preparation"
+      ? {
+          ...leg,
+          requiredActions: [
+            {
+              actor: "user" as const,
+              kind: "evm_transaction" as const,
+              safeLabel: "Prepare Polymarket funding",
+              sponsorship: "requested" as const,
+              valueMoving: true,
+            },
+          ],
+          source: {
+            ...leg.source,
+            inputs: [
+              {
+                asset: POLYGON_PUSD,
+                locationId: "wallet-polygon-pusd",
+                rawAmount: "500000",
+              },
+            ],
+          },
+        }
+      : leg,
+  ),
+  sourceOptionId: "source-composite-scoped-router-preparation",
+};
+
 const projection = (
   sourceOptions: readonly SourceOption[],
 ): IntentLiquidityProjection => ({
@@ -403,6 +444,84 @@ assert.deepEqual(
   { kind: "unavailable", reason: "no_supported_owned_source" },
   "V2 never advertises a composite that includes an unscoped venue-preparation debit",
 );
+assert.deepEqual(
+  resolveTelegramAppHandoffFundingCapability({
+    projection: projection([scopedCompositeWithVenuePreparation]),
+    serverBotExact: false,
+  }),
+  {
+    kind: "web_funding_plan",
+    requiredContractVersion: 2,
+  },
+  "an exact owned venue preparation plus wallet route is sealable for Mini App execution",
+);
+const sealedScopedComposite = buildTelegramAppHandoffV2Plan({
+  discoveryRequest: request,
+  fundingPolicyRevision: "funding-policy-1",
+  projection: projection([scopedCompositeWithVenuePreparation]),
+  trade,
+});
+assert.deepEqual(
+  sealedScopedComposite.funding.sourceDebits.map((source) => source.locationId),
+  ["wallet-polygon-pusd", "wallet-base-usdc"],
+  "the handoff seals both the preparation balance and routed wallet debit",
+);
+await prepareTelegramAppHandoffV2Funding({
+  handoffId: "00000000-0000-4000-8000-000000000020",
+  planSnapshot: sealedScopedComposite,
+  runtime: {
+    currentPolicyRevision: async () => "funding-policy-1",
+    liquidity: async () => projection([scopedCompositeWithVenuePreparation]),
+    quoteForCommitScope: async () =>
+      ({ consentToken: "consent-token", quoteId: "quote-id" }) as never,
+    prepareCommit: async () =>
+      ({
+        operation: {
+          quote: {
+            selectedSourceOptionSnapshot:
+              scopedCompositeWithVenuePreparation,
+            planSnapshot: {
+              operation: {
+                destinationTargetSnapshot: {
+                  kind: "owned_location",
+                  location: {
+                    asset: POLYGON_PUSD,
+                    details: { controllerWalletId: "wallet-polygon" },
+                  },
+                },
+                planKind: "composite_route",
+                venueBindingSnapshot: {
+                  venueBindingOptionId: "polymarket-binding-option",
+                },
+                venueId: "polymarket",
+              },
+              reservations: [
+                {
+                  assetDecimals: POLYGON_PUSD.decimals,
+                  assetId: POLYGON_PUSD.assetId,
+                  locationId: "wallet-polygon-pusd",
+                  mode: "subtract_available",
+                  networkId: POLYGON_PUSD.networkId,
+                  rawAmount: "500000",
+                },
+                {
+                  assetDecimals: BASE_USDC.decimals,
+                  assetId: BASE_USDC.assetId,
+                  locationId: "wallet-base-usdc",
+                  mode: "subtract_available",
+                  networkId: BASE_USDC.networkId,
+                  rawAmount: "100000",
+                },
+              ],
+              steps: [],
+            },
+          },
+        },
+      }) as never,
+  } as unknown as FundingPlanningRuntime,
+  tradeIntentId: "00000000-0000-4000-8000-000000000021",
+  userId: "00000000-0000-4000-8000-000000000001",
+});
 
 const sealed = buildTelegramAppHandoffV2Plan({
   discoveryRequest: request,

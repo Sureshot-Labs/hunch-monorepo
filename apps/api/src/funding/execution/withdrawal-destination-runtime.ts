@@ -1,10 +1,8 @@
-import { Connection, PublicKey, SystemProgram } from "@solana/web3.js";
+import { PublicKey, SystemProgram } from "@solana/web3.js";
 import type { Pool } from "@hunch/infra";
 import { ethers } from "ethers";
 
 import { getCredentialsEncryptionKey } from "../../lib/credentials-encryption.js";
-import { fetchEvmCode } from "../../services/polygon-rpc.js";
-import { createSolanaRpcConnection } from "../../services/rpc-client-factory.js";
 import type { AssetRef, ResolvedExternalRecipient } from "../domain/types.js";
 import {
   supportsWithdrawalDestinationAsset,
@@ -16,7 +14,6 @@ import {
   registerFundingWithdrawalDestination,
   revokeFundingWithdrawalDestinationInTransaction,
 } from "../persistence/funding-evidence-repository.js";
-import { fundingSidecarRuntimeConfig } from "../runtime/sidecar-runtime-config.js";
 import { parsePositiveInteger } from "../runtime/positive-integer.js";
 import {
   createWithdrawalDestinationCodec,
@@ -45,23 +42,9 @@ export class WithdrawalDestinationError extends Error {
 
 export type WithdrawalAddressInspection = Readonly<{
   normalizedAddress: string;
-  addressKind:
-    | "evm_eoa"
-    | "evm_contract"
-    | "solana_system_wallet"
-    | "solana_uninitialized_wallet";
+  addressKind: "evm_address" | "evm_eoa" | "evm_contract" | "solana_address";
   evidenceRevision: string;
 }>;
-
-export function classifyEvmWithdrawalAddressCode(
-  code: string,
-): Pick<WithdrawalAddressInspection, "addressKind" | "evidenceRevision"> {
-  const normalizedCode = code === "0x0" ? "0x" : code;
-  return {
-    addressKind: normalizedCode === "0x" ? "evm_eoa" : "evm_contract",
-    evidenceRevision: ethers.keccak256(normalizedCode),
-  };
-}
 
 export function assertWithdrawalRecipientContract(asset: AssetRef): void {
   if (!supportsWithdrawalDestinationAsset(asset)) {
@@ -70,25 +53,6 @@ export function assertWithdrawalRecipientContract(asset: AssetRef): void {
       "withdrawal recipient asset is outside the code-owned contract",
     );
   }
-}
-
-function evmRpc(networkId: string): Readonly<{
-  rpcUrl: string;
-  timeoutMs: number;
-}> | null {
-  if (networkId === "evm:137") {
-    return {
-      rpcUrl: fundingSidecarRuntimeConfig.polygonRpcUrl,
-      timeoutMs: fundingSidecarRuntimeConfig.polygonRpcTimeoutMs,
-    };
-  }
-  if (networkId === "evm:8453") {
-    return {
-      rpcUrl: fundingSidecarRuntimeConfig.baseRpcUrl,
-      timeoutMs: fundingSidecarRuntimeConfig.baseRpcTimeoutMs,
-    };
-  }
-  return null;
 }
 
 export async function inspectWithdrawalAddress(
@@ -116,29 +80,15 @@ export async function inspectWithdrawalAddress(
         "zero and burn addresses are not valid withdrawal destinations",
       );
     }
-    const rpc = evmRpc(input.networkId);
-    if (!rpc) {
-      throw new WithdrawalDestinationError(
-        "withdrawal_destination_unsupported",
-        "withdrawal destination network has no pinned address inspector",
-      );
-    }
-    let code: string;
-    try {
-      code = await fetchEvmCode({
-        ...rpc,
-        address: normalizedAddress,
-      });
-    } catch {
-      throw new WithdrawalDestinationError(
-        "withdrawal_destination_invalid",
-        "withdrawal destination contract evidence is unavailable",
-      );
-    }
-    const inspectedCode = classifyEvmWithdrawalAddressCode(code);
+    // ERC-20 transfers support both EOAs and contracts (including exchange
+    // deposit addresses). A code lookup did not reject either kind, so making
+    // registration depend on RPC availability only created a false blocker.
+    // The encrypted fingerprint and action preparation still bind the exact
+    // recipient selected by the authenticated user.
     return {
       normalizedAddress,
-      ...inspectedCode,
+      addressKind: "evm_address",
+      evidenceRevision: "evm-address-syntax-v1",
     };
   }
 
@@ -152,41 +102,21 @@ export async function inspectWithdrawalAddress(
         "withdrawal destination is not a valid Solana public key",
       );
     }
-    if (
-      publicKey.equals(SystemProgram.programId) ||
-      !PublicKey.isOnCurve(publicKey.toBytes())
-    ) {
+    if (publicKey.equals(SystemProgram.programId)) {
       throw new WithdrawalDestinationError(
         "withdrawal_destination_invalid",
-        "Solana program and PDA addresses are blocked as withdrawal owners",
+        "the Solana system program is not a valid withdrawal destination",
       );
     }
-    let account: Awaited<ReturnType<Connection["getAccountInfo"]>>;
-    try {
-      account = await createSolanaRpcConnection(
-        fundingSidecarRuntimeConfig.solanaRpcUrl,
-        "confirmed",
-      ).getAccountInfo(publicKey, "confirmed");
-    } catch {
-      throw new WithdrawalDestinationError(
-        "withdrawal_destination_invalid",
-        "withdrawal destination ownership evidence is unavailable",
-      );
-    }
-    if (account && !account.owner.equals(SystemProgram.programId)) {
-      throw new WithdrawalDestinationError(
-        "withdrawal_destination_invalid",
-        "program-owned Solana accounts are blocked as withdrawal owners",
-      );
-    }
+    // Native SOL can be transferred to any valid public key, including an
+    // exchange deposit address. The exact encrypted recipient remains bound
+    // to the user-confirmed action; an RPC ownership lookup would not make the
+    // transfer safer and would turn provider availability into a withdrawal
+    // blocker.
     return {
       normalizedAddress: publicKey.toBase58(),
-      addressKind: account
-        ? "solana_system_wallet"
-        : "solana_uninitialized_wallet",
-      evidenceRevision: account
-        ? `${account.owner.toBase58()}:${account.lamports}:${account.executable}`
-        : "uninitialized",
+      addressKind: "solana_address",
+      evidenceRevision: "solana-address-syntax-v1",
     };
   }
 
@@ -256,7 +186,7 @@ export class WithdrawalDestinationRuntime {
       lookupKeyVersion: codec.keyVersion,
       validationEvidence: {
         addressKind: inspected.addressKind,
-        addressCodeCheck: "passed",
+        addressValidation: "syntax_and_network",
         evidenceRevision: inspected.evidenceRevision,
         policyRevision: WITHDRAWAL_DESTINATION_CONTRACT_REVISION,
         validatedAt: now.toISOString(),

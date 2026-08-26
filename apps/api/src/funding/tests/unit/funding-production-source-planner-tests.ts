@@ -5,6 +5,11 @@ import assert from "node:assert/strict";
 import type { AccountValueReadModel } from "../../../account-value/runtime-service.js";
 import { RELAY_PINNED_ASSETS } from "../../../funding-providers/relay/mappings.js";
 import type { FundingRuntimePolicy } from "../../policies/funding-policy.js";
+import type {
+  AssetRef,
+  EvmTransactionAction,
+  SvmTransactionAction,
+} from "../../domain/types.js";
 import { withWithdrawalPlanningContract } from "../../domain/withdrawal-contract.js";
 import { compileFundingIntentPolicy } from "../../policies/funding-policy-v2.js";
 import { PRIVY_USER_AUTHORIZED_EVM_SPONSORSHIP_POLICY_ID } from "../../execution/sponsorship-policy.js";
@@ -17,6 +22,8 @@ import {
   restrictRelayRoutesToExecutionProfile,
 } from "../../planner/production-source-planner.js";
 import { groupWalletExecutableActions } from "../../planner/evm-action-batching.js";
+import { DirectWithdrawalSourceAdapter } from "../../planner/direct-withdrawal-source-adapter.js";
+import { assertDirectWithdrawalActionMatchesRecipient } from "../../execution/direct-withdrawal-transfer.js";
 
 const NOW = "2026-07-24T12:00:00.000Z";
 const ACCOUNT_ID = "account_source_planner_12345678";
@@ -28,6 +35,16 @@ const BASE_USDC = {
 const POLYGON_PUSD = {
   networkId: "evm:137",
   assetId: RELAY_PINNED_ASSETS.polygonPusd,
+  decimals: 6,
+} as const;
+const POLYGON_USDC = {
+  networkId: "evm:137",
+  assetId: RELAY_PINNED_ASSETS.polygonUsdc,
+  decimals: 6,
+} as const;
+const POLYGON_USDCE = {
+  networkId: "evm:137",
+  assetId: RELAY_PINNED_ASSETS.polygonUsdce,
   decimals: 6,
 } as const;
 const SOLANA_NATIVE = {
@@ -339,6 +356,175 @@ function account(
   } as unknown as AccountValueReadModel;
 }
 
+function accountForExactAsset(asset: AssetRef): AccountValueReadModel {
+  const base = account();
+  const component = base.projection.components[0];
+  const availability = base.cashAvailability.components[0];
+  const wallet = base.ownership?.wallets[0];
+  assert.ok(component);
+  assert.ok(availability);
+  assert.ok(wallet);
+  const sourceAddress =
+    asset.networkId === "solana:mainnet"
+      ? "78Hpb2CbmvW2Gp2aJGZec8nphXdqtRdfjPwwLfxKgo6t"
+      : component.location.details.address;
+  return {
+    ...base,
+    projection: {
+      ...base.projection,
+      components: [
+        {
+          ...component,
+          location: {
+            ...component.location,
+            asset,
+            details: { ...component.location.details, address: sourceAddress },
+          },
+          amount: { asset, raw: component.amount.raw },
+        },
+      ],
+    },
+    cashAvailability: {
+      ...base.cashAvailability,
+      components: [
+        {
+          ...availability,
+          amount: { asset, raw: availability.amount.raw },
+        },
+      ],
+    },
+    ownership: {
+      ...base.ownership,
+      wallets: [
+        { ...wallet, networkId: asset.networkId, address: sourceAddress },
+      ],
+    },
+  } as unknown as AccountValueReadModel;
+}
+
+async function directWithdrawalOptionsForAsset(
+  asset: AssetRef,
+  raw = "1000000",
+) {
+  const recipient = {
+    recipientId: `recipient_${asset.networkId.replace(":", "_")}_${asset.assetId.slice(-8)}`,
+    accountId: ACCOUNT_ID,
+    networkId: asset.networkId,
+    asset,
+    addressFingerprint: "recipient_fingerprint_12345678",
+    validatedAt: NOW,
+    expiresAt: "2026-07-24T12:15:00.000Z",
+    validationPolicyVersion: 1,
+  } as const;
+  const amount = { asset, raw } as const;
+  const recipientAddress =
+    asset.networkId === "solana:mainnet"
+      ? "F7RnPpFGLzY2r17MLTrxgJXDWiHF5etiEaLNn11GebLJ"
+      : "0x1a9ec8b3c44a748f7fad6623fd79332ce683ceb0";
+  return new DirectWithdrawalSourceAdapter(accountForExactAsset(asset)).list({
+    accountId: ACCOUNT_ID,
+    request: {
+      purpose: "withdrawal",
+      requestedDestinationAmount: amount,
+      confirmedSourceAmount: null,
+      marketContextId: null,
+      destinationOptionId: null,
+      withdrawalRecipientId: recipient.recipientId,
+      venueBindingOptionId: null,
+      maxFeeUsd: null,
+      maxSlippageBps: null,
+      deadline: null,
+    },
+    marketContext: null,
+    destinationFacts: null,
+    destination: {
+      destinationId: recipient.recipientId,
+      destinationLocationPatternId: "withdrawal-exact-evm-test-v1",
+      target: { kind: "external_recipient", recipient },
+      requiredAsset: asset,
+      spendability: null,
+      venueId: null,
+      venueBindingOption: null,
+      externalRecipientId: recipient.recipientId,
+      recipientAddress,
+    },
+    placement: {
+      mode: "confirmed_withdrawal_amount",
+      sourceAmount: amount,
+      destinationRequirement: amount,
+      targetVenueId: null,
+      target: { kind: "external_recipient", recipient },
+      boundedBuffer: null,
+      reason: "explicit",
+      policyVersion: 1,
+    },
+    requiredAmount: amount,
+    policy: policy(),
+    policyRevision: "policy_withdrawal_12345678",
+    now: new Date(NOW),
+  });
+}
+
+for (const asset of [BASE_USDC, POLYGON_USDC, POLYGON_USDCE, SOLANA_NATIVE]) {
+  const options = await directWithdrawalOptionsForAsset(asset);
+  assert.equal(options.length, 1);
+  const plan = options[0]?.commitPlan;
+  assert.ok(plan);
+  assert.equal(plan.steps.length, 1);
+  assert.equal(plan.steps[0]?.stepKind, "transaction");
+  assert.equal(plan.steps[0]?.normalizedAction.networkId, asset.networkId);
+  assert.equal(
+    plan.steps[0]?.normalizedAction.kind,
+    asset.networkId === "solana:mainnet"
+      ? "svm_transaction"
+      : "evm_transaction",
+  );
+  assert.equal(
+    plan.steps[0]?.executorId,
+    asset.networkId === "solana:mainnet"
+      ? "wallet_profile_svm_v1"
+      : "wallet_profile_evm_v1",
+  );
+  assert.equal(
+    options[0]?.option.maximumSourceRaw,
+    asset.networkId === "solana:mainnet" ? "1000000" : "4000000",
+  );
+  const expectedSourceAssetId =
+    plan.steps[0]?.actionValidationResult.expectedSourceAssetId;
+  assert.equal(typeof expectedSourceAssetId, "string");
+  assert.equal(
+    typeof expectedSourceAssetId === "string"
+      ? expectedSourceAssetId.toLowerCase()
+      : null,
+    asset.assetId.toLowerCase(),
+  );
+  if (asset.networkId === "solana:mainnet") {
+    const action = plan.steps[0]?.normalizedAction;
+    assert.equal(action?.kind, "svm_transaction");
+    assertDirectWithdrawalActionMatchesRecipient({
+      action: action as SvmTransactionAction,
+      actionValidationResult: plan.steps[0]?.actionValidationResult ?? {},
+      recipient: {
+        recipientId: "recipient_solana_mainnet_11111111",
+        accountId: ACCOUNT_ID,
+        networkId: asset.networkId,
+        asset,
+        addressFingerprint: "recipient_fingerprint_12345678",
+        validatedAt: NOW,
+        expiresAt: "2026-07-24T12:15:00.000Z",
+        validationPolicyVersion: 1,
+        address: "F7RnPpFGLzY2r17MLTrxgJXDWiHF5etiEaLNn11GebLJ",
+      },
+      required: true,
+    });
+  }
+}
+
+assert.equal(
+  (await directWithdrawalOptionsForAsset(SOLANA_NATIVE, "1000001")).length,
+  0,
+);
+
 const sponsored = deriveProductionRelayEligibleSourceFacts({
   accountId: ACCOUNT_ID,
   account: account(),
@@ -630,16 +816,137 @@ assert.equal(
     handoffSteps[0]?.normalizedAction.handoffKind,
     "polymarket_deposit_wallet_transfer",
   );
+  const withdrawalHandoffFacts = deriveProductionRelayEligibleSourceFacts({
+    accountId: ACCOUNT_ID,
+    account: handoffAccount,
+    policy: withWithdrawalPlanningContract(handoffPolicy, BASE_USDC),
+    destinationLocationPatternId: "withdrawal-base-usdc-v1",
+    requiredAmount: { asset: BASE_USDC, raw: "1000000" },
+    purpose: "withdrawal",
+  });
+  assert.equal(withdrawalHandoffFacts.length, 1);
   assert.equal(
-    deriveProductionRelayEligibleSourceFacts({
-      accountId: ACCOUNT_ID,
-      account: handoffAccount,
-      policy: handoffPolicy,
-      destinationLocationPatternId: "venue_limitless_usdc",
-      requiredAmount: { asset: BASE_USDC, raw: "1000000" },
+    withdrawalHandoffFacts[0]?.preRouteHandoff?.kind,
+    "polymarket_deposit_wallet_to_controller_v1",
+  );
+
+  const withdrawalAmount = { asset: POLYGON_PUSD, raw: "1000000" } as const;
+  const withdrawalRecipient = {
+    recipientId: "recipient_withdrawal_12345678",
+    accountId: ACCOUNT_ID,
+    networkId: "evm:137",
+    asset: POLYGON_PUSD,
+    addressFingerprint: "recipient_fingerprint_12345678",
+    validatedAt: NOW,
+    expiresAt: "2026-07-24T12:15:00.000Z",
+    validationPolicyVersion: 1,
+  } as const;
+  const withdrawalOptions = await new DirectWithdrawalSourceAdapter(
+    handoffAccount,
+  ).list({
+    accountId: ACCOUNT_ID,
+    request: {
       purpose: "withdrawal",
-    }).length,
-    0,
+      requestedDestinationAmount: withdrawalAmount,
+      confirmedSourceAmount: null,
+      marketContextId: null,
+      destinationOptionId: null,
+      withdrawalRecipientId: withdrawalRecipient.recipientId,
+      venueBindingOptionId: null,
+      maxFeeUsd: null,
+      maxSlippageBps: null,
+      deadline: null,
+    },
+    marketContext: null,
+    destinationFacts: null,
+    destination: {
+      destinationId: withdrawalRecipient.recipientId,
+      destinationLocationPatternId: "withdrawal-polygon-pusd-v1",
+      target: {
+        kind: "external_recipient",
+        recipient: withdrawalRecipient,
+      },
+      requiredAsset: POLYGON_PUSD,
+      spendability: null,
+      venueId: null,
+      venueBindingOption: null,
+      externalRecipientId: withdrawalRecipient.recipientId,
+      recipientAddress: "0x1a9ec8b3c44a748f7fad6623fd79332ce683ceb0",
+    },
+    placement: {
+      mode: "confirmed_withdrawal_amount",
+      sourceAmount: withdrawalAmount,
+      destinationRequirement: withdrawalAmount,
+      targetVenueId: null,
+      target: {
+        kind: "external_recipient",
+        recipient: withdrawalRecipient,
+      },
+      boundedBuffer: null,
+      reason: "explicit",
+      policyVersion: 1,
+    },
+    requiredAmount: withdrawalAmount,
+    policy: handoffPolicy,
+    policyRevision: "policy_withdrawal_12345678",
+    now: new Date(NOW),
+  });
+  assert.equal(withdrawalOptions.length, 1);
+  const withdrawalPlan = withdrawalOptions[0]?.commitPlan;
+  assert.ok(withdrawalPlan);
+  assert.equal(withdrawalPlan.operation.planKind, "wallet_route");
+  assert.equal(withdrawalPlan.segments[0]?.providerId, "direct_wallet");
+  assert.equal(withdrawalPlan.steps.length, 2);
+  assert.equal(withdrawalPlan.steps[0]?.stepKind, "external_handoff");
+  assert.equal(withdrawalPlan.steps[0]?.segmentOrdinal, null);
+  assert.equal(withdrawalPlan.steps[1]?.stepKind, "transaction");
+  assert.equal(withdrawalPlan.steps[1]?.segmentOrdinal, 0);
+  assert.equal(withdrawalPlan.steps[1]?.dependsOnOrdinal, 0);
+  assert.equal(
+    withdrawalPlan.steps[1]?.actionValidationResult.recipientAddress,
+    "0x1a9eC8B3C44A748F7fAd6623Fd79332cE683cEb0",
+  );
+  assert.equal(withdrawalPlan.reservations[0]?.locationId, location.locationId);
+  const withdrawalAction = withdrawalPlan.steps[1]?.normalizedAction;
+  assert.equal(withdrawalAction?.kind, "evm_transaction");
+  if (withdrawalAction?.kind !== "evm_transaction") {
+    throw new Error("withdrawal action fixture is not an EVM transaction");
+  }
+  assertDirectWithdrawalActionMatchesRecipient({
+    action: withdrawalAction as unknown as EvmTransactionAction,
+    actionValidationResult:
+      withdrawalPlan.steps[1]?.actionValidationResult ?? {},
+    recipient: {
+      ...withdrawalRecipient,
+      address: "0x1a9ec8b3c44a748f7fad6623fd79332ce683ceb0",
+    },
+    required: true,
+  });
+  assert.throws(
+    () =>
+      assertDirectWithdrawalActionMatchesRecipient({
+        action: withdrawalAction as unknown as EvmTransactionAction,
+        actionValidationResult: {},
+        recipient: {
+          ...withdrawalRecipient,
+          address: "0x1a9ec8b3c44a748f7fad6623fd79332ce683ceb0",
+        },
+        required: true,
+      }),
+    /validation is invalid/,
+  );
+  assert.throws(
+    () =>
+      assertDirectWithdrawalActionMatchesRecipient({
+        action: withdrawalAction as unknown as EvmTransactionAction,
+        actionValidationResult:
+          withdrawalPlan.steps[1]?.actionValidationResult ?? {},
+        recipient: {
+          ...withdrawalRecipient,
+          address: "0x1111111111111111111111111111111111111111",
+        },
+      }),
+    /differs from frozen recipient/,
   );
   const unsupportedSafeAccount = {
     ...handoffAccount,

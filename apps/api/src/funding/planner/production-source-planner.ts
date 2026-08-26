@@ -62,6 +62,7 @@ import {
 import type { ResolvedRouteDestination } from "./destination-adapters.js";
 import {
   commitPlanRunsWithoutUserWalletAction,
+  plannedSourceRunsWithClientWalletActions,
   type PlannedSourceOption,
 } from "./planning-types.js";
 import type {
@@ -189,13 +190,92 @@ function linkedControllerExecutionLocation(
   };
 }
 
+export type ProductionOwnedSourceExecution = Readonly<{
+  executionLocation: AssetLocation;
+  preRouteHandoff?: RelayEligibleSourceFact["preRouteHandoff"];
+  profile: WalletExecutionProfile;
+  safeLabel?: string;
+}>;
+
+/**
+ * Resolves accounting ownership separately from the wallet that can execute
+ * an action. A Polymarket Deposit Wallet is observable cash, but only its
+ * linked controller is a general-purpose signer; callers may prepend the
+ * exact relayer handoff returned here before their ordinary wallet action.
+ */
+export function resolveProductionOwnedSourceExecution(input: {
+  account: AccountValueReadModel;
+  component: AccountValueReadModel["projection"]["components"][number];
+}): ProductionOwnedSourceExecution | null {
+  const { account, component } = input;
+  const directProfile = profileForLocation(account, component.location);
+  const funderAddress = detail(component.location, "address");
+  const linkedAddress = detail(component.location, "linkedAddress");
+  const isPolymarketDepositWalletSource =
+    component.location.kind === "venue_account" &&
+    detail(component.location, "venueId") === "polymarket" &&
+    detail(component.location, "polymarketFunderKind") === "deposit_wallet" &&
+    component.amount.asset.networkId === "evm:137" &&
+    canonicalAssetId(component.amount.asset) ===
+      RELAY_PINNED_ASSETS.polygonPusd.toLowerCase() &&
+    Boolean(funderAddress) &&
+    Boolean(linkedAddress) &&
+    Boolean(
+      funderAddress &&
+      linkedAddress &&
+      !sameAccountAddress("evm:137", funderAddress, linkedAddress),
+    ) &&
+    directProfile?.source === "smart" &&
+    directProfile.signingModes.length === 0;
+  const handoffControllerProfile =
+    isPolymarketDepositWalletSource && linkedAddress
+      ? profileForExactAddress(
+          account,
+          component.amount.asset.networkId,
+          linkedAddress,
+        )
+      : null;
+  const usesPolymarketHandoff =
+    Boolean(handoffControllerProfile) &&
+    handoffControllerProfile?.source !== "external" &&
+    Boolean(handoffControllerProfile?.controllerWalletRef) &&
+    (handoffControllerProfile?.signingModes.includes("web_client") ||
+      handoffControllerProfile?.signingModes.includes("privy_authorization"));
+  const profile = usesPolymarketHandoff
+    ? handoffControllerProfile
+    : directProfile;
+  const executionLocation =
+    usesPolymarketHandoff && profile
+      ? linkedControllerExecutionLocation(component.location, profile)
+      : profile
+        ? walletExecutionLocation(component.location, profile)
+        : null;
+  if (!profile || !executionLocation) return null;
+  return {
+    profile,
+    executionLocation,
+    ...(usesPolymarketHandoff && funderAddress && linkedAddress
+      ? {
+          safeLabel: "Polymarket balance",
+          preRouteHandoff: {
+            kind: "polymarket_deposit_wallet_to_controller_v1" as const,
+            sourceLocation: component.location,
+            funderAddress,
+            controllerAddress: profile.address,
+            tokenAddress: component.amount.asset.assetId,
+          },
+        }
+      : {}),
+  };
+}
+
 function nativeAssetId(asset: AssetRef): string {
   return asset.networkId === "solana:mainnet"
     ? RELAY_PINNED_ASSETS.solanaNative
     : ZeroAddress;
 }
 
-function hasNativeGas(
+export function productionFundingProfileHasNativeGas(
   account: AccountValueReadModel,
   profile: WalletExecutionProfile,
 ): boolean {
@@ -427,7 +507,7 @@ function sourceFactsForComponent(input: {
           input.profile.signingModes.includes("privy_authorization"),
         nativeGasReady: nativeSolSource
           ? spendableRaw > 0n
-          : hasNativeGas(input.account, input.profile),
+          : productionFundingProfileHasNativeGas(input.account, input.profile),
         suggestionPreferred: input.suggestionPreferred,
         freshness: "fresh" as const,
         ...(input.preRouteHandoff
@@ -461,49 +541,12 @@ export function deriveProductionRelayEligibleSourceFacts(input: {
   const facts: RelayEligibleSourceFact[] = [];
   for (const component of input.account.projection.components) {
     const availability = availabilityByComponent.get(component.componentId);
-    const directProfile = profileForLocation(input.account, component.location);
-    const funderAddress = detail(component.location, "address");
-    const linkedAddress = detail(component.location, "linkedAddress");
-    const isPolymarketDepositWalletSource =
-      input.purpose !== "withdrawal" &&
-      component.location.kind === "venue_account" &&
-      detail(component.location, "venueId") === "polymarket" &&
-      detail(component.location, "polymarketFunderKind") === "deposit_wallet" &&
-      component.amount.asset.networkId === "evm:137" &&
-      canonicalAssetId(component.amount.asset) ===
-        RELAY_PINNED_ASSETS.polygonPusd.toLowerCase() &&
-      Boolean(funderAddress) &&
-      Boolean(linkedAddress) &&
-      Boolean(
-        funderAddress &&
-        linkedAddress &&
-        !sameAccountAddress("evm:137", funderAddress, linkedAddress),
-      ) &&
-      directProfile?.source === "smart" &&
-      directProfile.signingModes.length === 0;
-    const handoffControllerProfile =
-      isPolymarketDepositWalletSource && linkedAddress
-        ? profileForExactAddress(
-            input.account,
-            component.amount.asset.networkId,
-            linkedAddress,
-          )
-        : null;
-    const usesPolymarketHandoff =
-      Boolean(handoffControllerProfile) &&
-      handoffControllerProfile?.source !== "external" &&
-      Boolean(handoffControllerProfile?.controllerWalletRef) &&
-      (handoffControllerProfile?.signingModes.includes("web_client") ||
-        handoffControllerProfile?.signingModes.includes("privy_authorization"));
-    const profile = usesPolymarketHandoff
-      ? handoffControllerProfile
-      : directProfile;
-    const executionLocation =
-      usesPolymarketHandoff && profile
-        ? linkedControllerExecutionLocation(component.location, profile)
-        : profile
-          ? walletExecutionLocation(component.location, profile)
-          : null;
+    const execution = resolveProductionOwnedSourceExecution({
+      account: input.account,
+      component,
+    });
+    const profile = execution?.profile ?? null;
+    const executionLocation = execution?.executionLocation ?? null;
     const nativeSolSource = isSolanaNativeAsset(component.amount.asset);
     if (
       component.location.accountId !== input.accountId ||
@@ -534,17 +577,9 @@ export function deriveProductionRelayEligibleSourceFacts(input: {
         component,
         executionLocation,
         profile,
-        ...(usesPolymarketHandoff && funderAddress && linkedAddress && profile
-          ? {
-              safeLabel: "Polymarket balance",
-              preRouteHandoff: {
-                kind: "polymarket_deposit_wallet_to_controller_v1" as const,
-                sourceLocation: component.location,
-                funderAddress,
-                controllerAddress: profile.address,
-                tokenAddress: component.amount.asset.assetId,
-              },
-            }
+        ...(execution?.safeLabel ? { safeLabel: execution.safeLabel } : {}),
+        ...(execution?.preRouteHandoff
+          ? { preRouteHandoff: execution.preRouteHandoff }
           : {}),
         availableRaw: availability.availableRaw,
         requiredAmount: input.requiredAmount,
@@ -603,16 +638,29 @@ export function restrictRelayRoutesToExecutionProfile(
   };
 }
 
+type FundingExecutionBoundary = "automatic" | "client_handoff";
+
+function venuePreparationSupportsBoundary(
+  source: PlannedSourceOption,
+  executionBoundary: FundingExecutionBoundary,
+  requiresCompositeEligibility: boolean,
+): boolean {
+  return executionBoundary === "client_handoff"
+    ? plannedSourceRunsWithClientWalletActions(source)
+    : (!requiresCompositeEligibility || source.compositeEligible === true) &&
+        commitPlanRunsWithoutUserWalletAction(source.commitPlan);
+}
+
 function maximumVenuePreparationContributionRaw(
   sources: readonly PlannedSourceOption[],
   requiredAmount: Money,
+  executionBoundary: FundingExecutionBoundary,
 ): bigint {
   return sources.reduce((maximum, source) => {
     const minimum = source.option.minimumDestination;
     if (
-      !source.compositeEligible ||
       source.option.source.kind !== "venue_preparation" ||
-      !commitPlanRunsWithoutUserWalletAction(source.commitPlan) ||
+      !venuePreparationSupportsBoundary(source, executionBoundary, true) ||
       !minimum
     ) {
       return maximum;
@@ -634,6 +682,7 @@ function maximumVenuePreparationContributionRaw(
 export function remainingFundingRequirementAfterVenuePreparation(
   sources: readonly PlannedSourceOption[],
   requiredAmount: Money,
+  executionBoundary: FundingExecutionBoundary = "automatic",
 ): Money | null {
   const requiredRaw = rawAmount(requiredAmount.raw);
   const fullyCovered = sources.some((source) => {
@@ -642,7 +691,7 @@ export function remainingFundingRequirementAfterVenuePreparation(
       !source.option.selectable ||
       source.option.source.kind !== "venue_preparation" ||
       !minimum ||
-      !commitPlanRunsWithoutUserWalletAction(source.commitPlan)
+      !venuePreparationSupportsBoundary(source, executionBoundary, false)
     ) {
       return false;
     }
@@ -657,6 +706,7 @@ export function remainingFundingRequirementAfterVenuePreparation(
   const contributedRaw = maximumVenuePreparationContributionRaw(
     sources,
     requiredAmount,
+    executionBoundary,
   );
   return contributedRaw >= requiredRaw
     ? null
@@ -707,6 +757,115 @@ export function restrictResidualSourcesToCompositeContribution(
   });
 }
 
+type ProductionRelayDiscovery = Readonly<{
+  sources: readonly PlannedSourceOption[];
+  reasonCodes: readonly FundingReasonCode[];
+}>;
+
+/**
+ * Automatic and Mini App composites have different execution boundaries.
+ * Discover each Relay residual against only the venue preparation that the
+ * same boundary can execute; otherwise a user-signed Polygon contribution can
+ * leave a native-SOL quote incorrectly asking for the full shortfall.
+ */
+export async function planProductionFundingSourceBoundaries(
+  input: Readonly<{
+    adapted: readonly PlannedSourceOption[];
+    requiredAmount: Money;
+    destinationUnitPriceUsd: string | null;
+    maximumFeeUsd: string;
+    maximumFeeBps: number;
+    discoverRelay: (requiredAmount: Money) => Promise<ProductionRelayDiscovery>;
+  }>,
+): Promise<FundingSourcePlanningResult> {
+  const requirements = {
+    automatic: remainingFundingRequirementAfterVenuePreparation(
+      input.adapted,
+      input.requiredAmount,
+      "automatic",
+    ),
+    client_handoff: remainingFundingRequirementAfterVenuePreparation(
+      input.adapted,
+      input.requiredAmount,
+      "client_handoff",
+    ),
+  } as const;
+  const discoveries = new Map<string, Promise<ProductionRelayDiscovery>>();
+  const discover = (
+    requirement: Money | null,
+  ): Promise<ProductionRelayDiscovery> => {
+    if (!requirement) {
+      return Promise.resolve({ sources: [], reasonCodes: [] });
+    }
+    const key = `${requirement.asset.networkId}:${requirement.asset.assetId}:${requirement.asset.decimals}:${requirement.raw}`;
+    const existing = discoveries.get(key);
+    if (existing) return existing;
+    const pending = input.discoverRelay(requirement);
+    discoveries.set(key, pending);
+    return pending;
+  };
+  const [automaticDiscovery, clientDiscovery] = await Promise.all([
+    discover(requirements.automatic),
+    discover(requirements.client_handoff),
+  ]);
+  const residualSources = (
+    discovery: ProductionRelayDiscovery,
+    requirement: Money | null,
+  ) =>
+    requirement
+      ? restrictResidualSourcesToCompositeContribution(discovery.sources, {
+          plannedRequirement: requirement,
+          fullRequirement: input.requiredAmount,
+        })
+      : [];
+  const automaticRelay = residualSources(
+    automaticDiscovery,
+    requirements.automatic,
+  );
+  const clientRelay = residualSources(
+    clientDiscovery,
+    requirements.client_handoff,
+  );
+  const compositeInput = {
+    requiredDestination: input.requiredAmount,
+    destinationUnitPriceUsd: input.destinationUnitPriceUsd,
+    maximumFeeUsd: input.maximumFeeUsd,
+    maximumFeeBps: input.maximumFeeBps,
+  } as const;
+  const automaticComposite = buildCompositeSourceOption({
+    ...compositeInput,
+    candidates: [...input.adapted, ...automaticRelay],
+  });
+  const clientComposite = buildCompositeSourceOption({
+    ...compositeInput,
+    candidates: [...input.adapted, ...clientRelay],
+    executionBoundary: "client_handoff",
+  });
+  const sources = [
+    ...input.adapted,
+    ...automaticRelay,
+    ...clientRelay,
+    automaticComposite,
+    clientComposite,
+  ].filter(
+    (candidate, index, all): candidate is PlannedSourceOption =>
+      candidate != null &&
+      all.findIndex(
+        (entry) =>
+          entry?.option.sourceOptionId === candidate.option.sourceOptionId,
+      ) === index,
+  );
+  return {
+    sources,
+    reasonCodes: [
+      ...new Set<FundingReasonCode>([
+        ...automaticDiscovery.reasonCodes,
+        ...clientDiscovery.reasonCodes,
+      ]),
+    ],
+  };
+}
+
 export class ProductionFundingSourcePlanner {
   constructor(
     private readonly db: Pool,
@@ -727,45 +886,34 @@ export class ProductionFundingSourcePlanner {
       listAdaptedFundingSources(this.sourceAdapters, input),
       this.listBlockingReasonCodes(input),
     ]);
-    const relayRequirement = remainingFundingRequirementAfterVenuePreparation(
+    const limits = effectiveFundingEconomicsLimits(input.policy, {
+      maximumFeeUsd: input.request.maxFeeUsd,
+      maximumSlippageBps: input.request.maxSlippageBps,
+    });
+    const relayPlanner = this.relayPlanner();
+    const planned = await planProductionFundingSourceBoundaries({
       adapted,
-      input.requiredAmount,
-    );
-    const relayDiscovery = relayRequirement
-      ? await this.relayPlanner().discover({
+      requiredAmount: input.requiredAmount,
+      destinationUnitPriceUsd:
+        input.destinationFacts?.collateralValuation?.unitPriceUsd ?? null,
+      maximumFeeUsd: limits.maximumFeeUsd,
+      maximumFeeBps: limits.maximumFeeBps,
+      discoverRelay: (requiredAmount) =>
+        relayPlanner.discover({
           ...input,
           policy: restrictRelayRoutesToExecutionProfile(
             input.policy,
             input.request.serverExecutionProfileId,
           ),
-          requiredAmount: relayRequirement,
-        })
-      : { sources: [], reasonCodes: [] };
-    const relay = relayRequirement
-      ? restrictResidualSourcesToCompositeContribution(relayDiscovery.sources, {
-          plannedRequirement: relayRequirement,
-          fullRequirement: input.requiredAmount,
-        })
-      : [];
-    const candidates = [...adapted, ...relay];
-    const limits = effectiveFundingEconomicsLimits(input.policy, {
-      maximumFeeUsd: input.request.maxFeeUsd,
-      maximumSlippageBps: input.request.maxSlippageBps,
-    });
-    const composite = buildCompositeSourceOption({
-      candidates,
-      requiredDestination: input.requiredAmount,
-      destinationUnitPriceUsd:
-        input.destinationFacts?.collateralValuation?.unitPriceUsd ?? null,
-      maximumFeeUsd: limits.maximumFeeUsd,
-      maximumFeeBps: limits.maximumFeeBps,
+          requiredAmount,
+        }),
     });
     return {
-      sources: composite ? [...candidates, composite] : candidates,
+      sources: planned.sources,
       reasonCodes: [
         ...new Set<FundingReasonCode>([
           ...inventoryReasonCodes,
-          ...relayDiscovery.reasonCodes,
+          ...planned.reasonCodes,
         ]),
       ],
     };

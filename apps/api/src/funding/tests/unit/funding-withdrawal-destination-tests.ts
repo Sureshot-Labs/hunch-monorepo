@@ -17,7 +17,6 @@ import {
 import { createWithdrawalDestinationCodec } from "../../execution/withdrawal-destination-codec.js";
 import {
   assertWithdrawalRecipientContract,
-  classifyEvmWithdrawalAddressCode,
   inspectWithdrawalAddress,
   WithdrawalDestinationError,
   WithdrawalDestinationRuntime,
@@ -26,7 +25,9 @@ import {
   WITHDRAWAL_DESTINATION_CONTRACT_REVISION,
   WITHDRAWAL_DESTINATION_CONTRACT_VERSION,
   withWithdrawalPlanningContract,
+  withdrawalRecipientLocationPatternId,
 } from "../../domain/withdrawal-contract.js";
+import { SOLANA_NATIVE_ASSET } from "../../domain/network-fees.js";
 
 const NOW = new Date("2026-07-24T12:00:00.000Z");
 const ASSET = {
@@ -57,22 +58,63 @@ assert.notEqual(
 );
 
 assert.doesNotThrow(() => assertWithdrawalRecipientContract(ASSET));
+assert.doesNotThrow(() =>
+  assertWithdrawalRecipientContract({
+    networkId: "evm:137",
+    assetId: RELAY_PINNED_ASSETS.polygonUsdc,
+    decimals: 6,
+  }),
+);
+assert.doesNotThrow(() =>
+  assertWithdrawalRecipientContract(SOLANA_NATIVE_ASSET),
+);
+assert.equal(
+  withdrawalRecipientLocationPatternId(SOLANA_NATIVE_ASSET),
+  "withdrawal-solana-sol-v1",
+);
+assert.equal(
+  withdrawalRecipientLocationPatternId({
+    networkId: "evm:137",
+    assetId: RELAY_PINNED_ASSETS.polygonUsdc,
+    decimals: 6,
+  }),
+  "withdrawal-polygon-usdc-v1",
+);
+assert.equal(
+  withdrawalRecipientLocationPatternId({
+    networkId: "evm:137",
+    assetId: RELAY_PINNED_ASSETS.polygonUsdce,
+    decimals: 6,
+  }),
+  "withdrawal-polygon-usdce-v1",
+);
+assert.equal(
+  withdrawalRecipientLocationPatternId({
+    networkId: "evm:8453",
+    assetId: RELAY_PINNED_ASSETS.baseUsdc,
+    decimals: 6,
+  }),
+  "withdrawal-base-usdc-v1",
+);
+assert.doesNotThrow(() =>
+  assertWithdrawalRecipientContract({
+    networkId: "evm:137",
+    assetId: RELAY_PINNED_ASSETS.polygonUsdce,
+    decimals: 6,
+  }),
+);
+assert.doesNotThrow(() =>
+  assertWithdrawalRecipientContract({
+    networkId: "evm:8453",
+    assetId: RELAY_PINNED_ASSETS.baseUsdc,
+    decimals: 6,
+  }),
+);
 assert.throws(
   () =>
     assertWithdrawalRecipientContract({
       ...ASSET,
       assetId: "0x00000000000000000000000000000000000000a3",
-    }),
-  (error: unknown) =>
-    error instanceof WithdrawalDestinationError &&
-    error.code === "withdrawal_destination_unsupported",
-);
-assert.throws(
-  () =>
-    assertWithdrawalRecipientContract({
-      networkId: "evm:137",
-      assetId: RELAY_PINNED_ASSETS.polygonUsdc,
-      decimals: 6,
     }),
   (error: unknown) =>
     error instanceof WithdrawalDestinationError &&
@@ -150,21 +192,17 @@ await assert.rejects(
     error instanceof WithdrawalDestinationError &&
     error.code === "withdrawal_destination_invalid",
 );
-assert.deepEqual(classifyEvmWithdrawalAddressCode("0x"), {
-  addressKind: "evm_eoa",
-  evidenceRevision:
-    "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
-});
-assert.deepEqual(classifyEvmWithdrawalAddressCode("0x0"), {
-  addressKind: "evm_eoa",
-  evidenceRevision:
-    "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
-});
-assert.deepEqual(classifyEvmWithdrawalAddressCode("0x6000"), {
-  addressKind: "evm_contract",
-  evidenceRevision:
-    "0x07ad118d6cc8642c86c03827f276d8b791a65e5c99a3845faf186be720a1455d",
-});
+assert.deepEqual(
+  await inspectWithdrawalAddress({
+    networkId: "evm:137",
+    address: ADDRESS,
+  }),
+  {
+    normalizedAddress: ADDRESS,
+    addressKind: "evm_address",
+    evidenceRevision: "evm-address-syntax-v1",
+  },
+);
 await assert.rejects(
   inspectWithdrawalAddress({
     networkId: "solana:mainnet",
@@ -173,6 +211,17 @@ await assert.rejects(
   (error: unknown) =>
     error instanceof WithdrawalDestinationError &&
     error.code === "withdrawal_destination_invalid",
+);
+assert.deepEqual(
+  await inspectWithdrawalAddress({
+    networkId: "solana:mainnet",
+    address: "F7RnPpFGLzY2r17MLTrxgJXDWiHF5etiEaLNn11GebLJ",
+  }),
+  {
+    normalizedAddress: "F7RnPpFGLzY2r17MLTrxgJXDWiHF5etiEaLNn11GebLJ",
+    addressKind: "solana_address",
+    evidenceRevision: "solana-address-syntax-v1",
+  },
 );
 
 let persistedUserId: string | null = null;

@@ -24,6 +24,7 @@ import type {
 import { assertSameAsset, rawAmount } from "./money.js";
 import {
   commitPlanRunsWithoutUserWalletAction,
+  plannedSourceRunsWithClientWalletActions,
   type PlannedSourceOption,
 } from "./planning-types.js";
 import { fundingOwnedSourceIncludesLocation } from "./source-adapter.js";
@@ -122,6 +123,10 @@ function venuePreparationCandidate(
   source: PlannedSourceOption,
 ): CompositeCandidate {
   const economics = positiveEconomics(source);
+  const preparationInputs =
+    source.option.source.kind === "venue_preparation"
+      ? source.option.source.inputs
+      : undefined;
   if (
     source.option.kind !== "venue_preparation" ||
     source.option.source.kind !== "venue_preparation" ||
@@ -137,7 +142,21 @@ function venuePreparationCandidate(
       (reservation) =>
         reservation.segmentOrdinal !== null ||
         reservation.mode !== "subtract_available",
-    )
+    ) ||
+    (preparationInputs != null &&
+      (preparationInputs.length !== source.commitPlan.reservations.length ||
+        preparationInputs.some((input) => {
+          const matches = source.commitPlan.reservations.filter(
+            (reservation) =>
+              reservation.locationId === input.locationId &&
+              reservation.networkId === input.asset.networkId &&
+              reservation.assetId.toLowerCase() ===
+                input.asset.assetId.toLowerCase() &&
+              reservation.assetDecimals === input.asset.decimals &&
+              reservation.rawAmount === input.rawAmount,
+          );
+          return matches.length !== 1;
+        })))
   ) {
     throw new Error(
       "composite venue preparation candidate has an invalid frozen plan",
@@ -566,14 +585,18 @@ export function buildCompositeSourceOption(
     destinationUnitPriceUsd: string | null;
     maximumFeeUsd: string;
     maximumFeeBps: number;
+    executionBoundary?: "automatic" | "client_handoff";
   }>,
 ): PlannedSourceOption | null {
   if (input.destinationUnitPriceUsd == null) return null;
+  const executionBoundary = input.executionBoundary ?? "automatic";
   const eligible = input.candidates
     .filter(
       (source) =>
-        source.compositeEligible === true &&
-        commitPlanRunsWithoutUserWalletAction(source.commitPlan) &&
+        (executionBoundary === "client_handoff"
+          ? plannedSourceRunsWithClientWalletActions(source)
+          : source.compositeEligible === true &&
+            commitPlanRunsWithoutUserWalletAction(source.commitPlan)) &&
         source.option.minimumDestination != null &&
         rawAmount(source.option.minimumDestination.raw) > 0n &&
         rawAmount(source.option.minimumDestination.raw) <

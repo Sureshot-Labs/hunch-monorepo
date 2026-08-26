@@ -60,7 +60,7 @@ const terminalRefundCalls: string[] = [];
 await pollFundingReconciliationEvidence({
   operationId: "00000000-0000-4000-8000-000000000008",
   state: { status: "refunded", stage: "terminal" },
-  terminalRelayReceiptWatch: true,
+  terminalReceiptWatch: true,
   now: new Date("2026-07-29T13:24:01.250Z"),
   providerPoll: async () => {
     terminalRefundCalls.push("provider");
@@ -77,7 +77,7 @@ const terminalRefundProviderFailureCalls: string[] = [];
 await pollFundingReconciliationEvidence({
   operationId: "00000000-0000-4000-8000-000000000009",
   state: { status: "refunded", stage: "terminal" },
-  terminalRelayReceiptWatch: true,
+  terminalReceiptWatch: true,
   now: new Date("2026-07-29T13:24:01.375Z"),
   providerPoll: async () => {
     terminalRefundProviderFailureCalls.push("provider");
@@ -97,7 +97,7 @@ const terminalRefundReceiptFailureCalls: string[] = [];
 const terminalReceiptFailure = await pollFundingReconciliationEvidence({
   operationId: "00000000-0000-4000-8000-000000000010",
   state: { status: "refunded", stage: "terminal" },
-  terminalRelayReceiptWatch: true,
+  terminalReceiptWatch: true,
   now: new Date("2026-07-29T13:24:01.437Z"),
   receiptPoll: async () => {
     terminalRefundReceiptFailureCalls.push("receipt");
@@ -123,7 +123,7 @@ for (const terminalStatus of ["completed", "failed", "cancelled"] as const) {
   const terminalReceiptFailureResult = await pollFundingReconciliationEvidence({
     operationId: "00000000-0000-4000-8000-000000000011",
     state: { status: terminalStatus, stage: "terminal" },
-    terminalRelayReceiptWatch: true,
+    terminalReceiptWatch: true,
     now: new Date("2026-07-29T13:24:01.500Z"),
     receiptPoll: async () => {
       throw new Error(`${terminalStatus} receipt RPC is unavailable`);

@@ -125,6 +125,14 @@ committed reservation is rechecked against its sealed source asset, location
 when applicable, and raw cap. A new wallet, asset, network, destination
 topology, policy revision, or cap needs a fresh Telegram Review.
 
+A client-executed composite may combine exact venue preparation with another
+owned route, for example controller pUSD plus SOL → Polygon pUSD. The public
+plan exposes only each preparation input's opaque location ID, asset, and raw
+cap; the Mini App receives the ordinary `evm_transaction`/`svm_transaction`
+actions after commit. The same composite is not eligible for bot automation.
+Legacy venue-preparation projections without exact input scopes remain valid
+for their original server path but cannot be issued as a v2 handoff.
+
 ## Backend endpoints
 
 All requests include the existing authenticated `initDataRaw` and `th1_`

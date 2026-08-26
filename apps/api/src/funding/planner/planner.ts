@@ -48,6 +48,7 @@ import {
   type PlannedSourceOption,
 } from "./planning-types.js";
 import { POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID } from "../execution/delegated-funding-profile-ids.js";
+import { DIRECT_WITHDRAWAL_PROVIDER_ID } from "../execution/direct-withdrawal-transfer.js";
 
 export type FundingSourcePlanningRequest = Readonly<{
   accountId: string;
@@ -233,7 +234,13 @@ function validatePlannedSources(
     if (
       ((planKind === "wallet_route" || planKind === "relay_deposit_address") &&
         (segmentCount !== 1 ||
-          source.commitPlan.segments[0]?.providerId !== "relay")) ||
+          (source.commitPlan.segments[0]?.providerId !== "relay" &&
+            !(
+              purpose === "withdrawal" &&
+              planKind === "wallet_route" &&
+              source.commitPlan.segments[0]?.providerId ===
+                DIRECT_WITHDRAWAL_PROVIDER_ID
+            )))) ||
       ((planKind === "already_available" ||
         planKind === "direct_external_handoff" ||
         planKind === "venue_preparation") &&

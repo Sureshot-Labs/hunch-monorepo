@@ -8,6 +8,7 @@ import type {
   SourceOption,
   ValidatedExternalRecipient,
 } from "../domain/types.js";
+import { isReceiptBearingFundingActionKind } from "../domain/action-kinds.js";
 import type { ResolvedDestinationCandidate } from "./destination-adapters.js";
 
 export type PlannedSourceOption = Readonly<{
@@ -26,6 +27,32 @@ export function commitPlanRunsWithoutUserWalletAction(
   plan: FundingCommitPlan,
 ): boolean {
   return plan.steps.every((step) => step.payerRequirement !== "user");
+}
+
+/**
+ * Client composites are deliberately separate from automatic composites.
+ * Every public action and every durable step must be a receipt-bearing action
+ * that the existing web funding executor can submit; server/planned steps and
+ * bare signatures are never pulled into this boundary.
+ */
+export function plannedSourceRunsWithClientWalletActions(
+  source: PlannedSourceOption,
+): boolean {
+  return (
+    source.option.requiredActions.length > 0 &&
+    source.option.requiredActions.every(
+      (action) =>
+        action.actor === "user" &&
+        isReceiptBearingFundingActionKind(action.kind),
+    ) &&
+    source.commitPlan.steps.length > 0 &&
+    source.commitPlan.steps.every(
+      (step) =>
+        step.state === "action_required" &&
+        typeof step.normalizedAction.kind === "string" &&
+        isReceiptBearingFundingActionKind(step.normalizedAction.kind),
+    )
+  );
 }
 
 export type FundingPlanningSnapshot = Readonly<{

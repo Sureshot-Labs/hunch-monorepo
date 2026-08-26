@@ -42,6 +42,7 @@ import {
   isUnreferencedFundingActionAmbiguity,
   type FundingActionFailureCode,
 } from "./action-report.js";
+import { assertDirectWithdrawalActionMatchesRecipient } from "./direct-withdrawal-transfer.js";
 
 const EXECUTOR_BY_ACTION_KIND = {
   evm_transaction: "wallet_profile_evm_v1",
@@ -294,10 +295,39 @@ export class FundingOperationActionRuntime {
       if (externalRecipientId) {
         // The share lock makes revocation/crypto-shredding serialize with the
         // durable attempt start; validation outside this transaction can race.
-        await this.withdrawalRuntime.resolve(userId, externalRecipientId, {
-          db: client,
-          lockForShare: true,
-        });
+        const recipient = await this.withdrawalRuntime.resolve(
+          userId,
+          externalRecipientId,
+          {
+            db: client,
+            lockForShare: true,
+          },
+        );
+        const directWithdrawal =
+          operation.supportMetadata.withdrawalExecutionKind ===
+          "exact_same_asset_transfer";
+        if (
+          directWithdrawal &&
+          action.kind !== "evm_transaction" &&
+          action.kind !== "svm_transaction" &&
+          action.kind !== "external_handoff"
+        ) {
+          throw new FundingPersistenceError(
+            "quote_mismatch",
+            "direct withdrawal contains an unsupported action",
+          );
+        }
+        if (
+          action.kind === "evm_transaction" ||
+          action.kind === "svm_transaction"
+        ) {
+          assertDirectWithdrawalActionMatchesRecipient({
+            action,
+            actionValidationResult: step.actionValidationResult,
+            recipient,
+            required: directWithdrawal,
+          });
+        }
         await this.dependencies.revalidateWithdrawalRecipient?.(
           userId,
           externalRecipientId,

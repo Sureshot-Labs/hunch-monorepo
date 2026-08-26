@@ -1130,15 +1130,19 @@ export async function reduceFundingOperationInTransaction(
     );
   }
 
-  const actualSourceAmount = effectiveSourceAmount(
-    observations,
-    initial.requestedSourceAmount,
-  );
   const actualDestinationAmount = sumObservationAmount(
     observations,
     destinationObservationKinds(initial),
     initial.requestedDestinationAmount,
   );
+  const directWithdrawalCompleted =
+    initial.purpose === "withdrawal" &&
+    initial.supportMetadata.withdrawalExecutionKind ===
+      "exact_same_asset_transfer" &&
+    actualDestinationAmount != null;
+  const actualSourceAmount = directWithdrawalCompleted
+    ? initial.requestedSourceAmount
+    : effectiveSourceAmount(observations, initial.requestedSourceAmount);
   const sourceObserved =
     hasFinalObservation(observations, "source_debit") ||
     hasFinalObservation(observations, "source_credit");
@@ -1756,7 +1760,7 @@ export async function pollFundingReconciliationEvidence(
     operationId: string;
     state: FundingOperationState;
     recoveryMode?: FundingRecoveryMode | null;
-    terminalRelayReceiptWatch?: boolean;
+    terminalReceiptWatch?: boolean;
     awaitingUnbroadcastActionReport?: boolean;
     now: Date;
     providerPoll?: FundingReconciliationBatchOptions["providerPoll"];
@@ -1765,14 +1769,14 @@ export async function pollFundingReconciliationEvidence(
     destinationPoll?: FundingReconciliationBatchOptions["destinationPoll"];
   }>,
 ): Promise<Readonly<{ terminalReceiptPollFailed: boolean }>> {
-  const terminalRelayReceiptWatch =
-    input.terminalRelayReceiptWatch === true &&
+  const terminalReceiptWatch =
+    input.terminalReceiptWatch === true &&
     ["completed", "refunded", "failed", "cancelled"].includes(
       input.state.status,
     );
   const terminalRelayRefundWatch =
-    terminalRelayReceiptWatch && input.state.status === "refunded";
-  if (input.awaitingUnbroadcastActionReport && !terminalRelayReceiptWatch)
+    terminalReceiptWatch && input.state.status === "refunded";
+  if (input.awaitingUnbroadcastActionReport && !terminalReceiptWatch)
     return { terminalReceiptPollFailed: false };
   if (
     input.state.status === "recovery_required" &&
@@ -1781,7 +1785,7 @@ export async function pollFundingReconciliationEvidence(
     return { terminalReceiptPollFailed: false };
   }
   let terminalReceiptPollFailed = false;
-  if (terminalRelayReceiptWatch) {
+  if (terminalReceiptWatch) {
     try {
       await input.receiptPoll?.(input.operationId, input.now);
     } catch {
@@ -1837,7 +1841,7 @@ async function loadFundingOperationState(
   Readonly<{
     state: FundingOperationState;
     recoveryMode: FundingRecoveryMode | null;
-    terminalRelayReceiptWatch: boolean;
+    terminalReceiptWatch: boolean;
     awaitingProviderReference: boolean;
     awaitingUnbroadcastActionReport: boolean;
     providerReferenceRecoveryAt: Date | null;
@@ -1873,8 +1877,10 @@ async function loadFundingOperationState(
     return {
       state: operationState(operation),
       recoveryMode: operation.recoveryMode,
-      terminalRelayReceiptWatch:
-        delegatedRelayReceiptWatch?.rows[0]?.watching === true,
+      terminalReceiptWatch:
+        delegatedRelayReceiptWatch?.rows[0]?.watching === true ||
+        operation.supportMetadata.withdrawalExecutionKind ===
+          "exact_same_asset_transfer",
       awaitingProviderReference: waitState.awaitingProviderReference,
       awaitingUnbroadcastActionReport:
         waitState.awaitingUnbroadcastActionReport,
@@ -2089,7 +2095,7 @@ async function processLease(
       operationId: lease.operationId,
       state: operationBeforePoll.state,
       recoveryMode: operationBeforePoll.recoveryMode,
-      terminalRelayReceiptWatch: operationBeforePoll.terminalRelayReceiptWatch,
+      terminalReceiptWatch: operationBeforePoll.terminalReceiptWatch,
       awaitingUnbroadcastActionReport:
         operationBeforePoll.awaitingUnbroadcastActionReport,
       now: options.now,
@@ -2098,15 +2104,20 @@ async function processLease(
       postconditionPoll,
       destinationPoll,
     });
-    const terminalRelayEvidenceReorgIncident =
-      operationBeforePoll.terminalRelayReceiptWatch
+    const terminalActionEvidenceReorgIncident =
+      operationBeforePoll.terminalReceiptWatch
         ? await pool.query<{ incident: boolean }>(
             `select exists (
                select 1
                  from funding_step_receipt_observations receipt
                  join funding_operation_steps step on step.id = receipt.step_id
+                 join funding_operations operation on operation.id = step.operation_id
                 where receipt.operation_id = $1::uuid
-                  and step.executor_id = any($3::text[])
+                  and (
+                    step.executor_id = any($3::text[])
+                    or operation.support_metadata ->> 'withdrawalExecutionKind' =
+                         'exact_same_asset_transfer'
+                  )
                   and receipt.status = 'reorged'
                   and receipt.reorged_at <=
                         $2::timestamptz - interval '15 minutes'
@@ -2118,7 +2129,7 @@ async function processLease(
             ],
           )
         : null;
-    if (terminalRelayEvidenceReorgIncident?.rows[0]?.incident === true) {
+    if (terminalActionEvidenceReorgIncident?.rows[0]?.incident === true) {
       await finishFundingReconciliationLease(pool, {
         jobId: lease.jobId,
         leaseOwner: lease.leaseOwner,
@@ -2128,7 +2139,7 @@ async function processLease(
           dueAt: options.now,
           errorCode: TERMINAL_RELAY_EVIDENCE_REORG_UNRESOLVED_ERROR_CODE,
           errorSummary:
-            "terminal Relay receipt reorg remained unresolved after its canonical watch window",
+            "terminal action receipt reorg remained unresolved after its canonical watch window",
           deadLetter: true,
         },
         now: options.now,
@@ -2144,8 +2155,13 @@ async function processLease(
                    from funding_operation_steps step
                    join funding_step_receipt_observations receipt
                      on receipt.step_id = step.id
+                   join funding_operations operation on operation.id = step.operation_id
                   where step.operation_id = $1::uuid
-                    and step.executor_id = any($3::text[])
+                    and (
+                      step.executor_id = any($3::text[])
+                      or operation.support_metadata ->> 'withdrawalExecutionKind' =
+                           'exact_same_asset_transfer'
+                    )
                     and receipt.status in ('finalized', 'failed')
                     and receipt.canonical
                     and receipt.finalized_at <=
@@ -2156,8 +2172,13 @@ async function processLease(
                    from funding_operation_steps step
                    join funding_step_receipt_observations receipt
                      on receipt.step_id = step.id
+                   join funding_operations operation on operation.id = step.operation_id
                   where step.operation_id = $1::uuid
-                    and step.executor_id = any($3::text[])
+                    and (
+                      step.executor_id = any($3::text[])
+                      or operation.support_metadata ->> 'withdrawalExecutionKind' =
+                           'exact_same_asset_transfer'
+                    )
                     and receipt.status in ('finalized', 'failed')
                     and receipt.canonical
                     and receipt.finalized_at >
@@ -2176,7 +2197,7 @@ async function processLease(
           dueAt: new Date(options.now.getTime() + options.retryDelayMs),
           errorCode: "terminal_relay_receipt_verification_unavailable",
           errorSummary:
-            "terminal Relay receipt canonicality verification was unavailable",
+            "terminal action receipt canonicality verification was unavailable",
           deadLetter,
         },
         now: options.now,
@@ -2187,15 +2208,20 @@ async function processLease(
       operationId: lease.operationId,
       now: options.now,
     });
-    const relayReceiptReorgWatch = reduction.terminal
+    const actionReceiptReorgWatch = reduction.terminal
       ? await pool.query<{ watching: boolean }>(
           `select exists (
              select 1
                from funding_operation_steps step
                join funding_step_receipt_observations receipt
                  on receipt.step_id = step.id
+               join funding_operations operation on operation.id = step.operation_id
               where step.operation_id = $1::uuid
-                and step.executor_id = any($3::text[])
+                and (
+                  step.executor_id = any($3::text[])
+                  or operation.support_metadata ->> 'withdrawalExecutionKind' =
+                       'exact_same_asset_transfer'
+                )
                 and receipt.status in ('finalized', 'failed')
                 and receipt.finalized_at > $2::timestamptz - interval '15 minutes'
              union all
@@ -2224,7 +2250,7 @@ async function processLease(
     const reductionCompleted =
       reduction.terminal &&
       !reduction.reorgBlockedByTerminalState &&
-      relayReceiptReorgWatch?.rows[0]?.watching !== true;
+      actionReceiptReorgWatch?.rows[0]?.watching !== true;
     const canonicalFinalizedStepEvidencePendingReduction = reductionCompleted
       ? false
       : await hasCanonicalFinalizedStepEvidencePendingReduction(
