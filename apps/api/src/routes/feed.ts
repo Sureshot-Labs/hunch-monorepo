@@ -13,7 +13,7 @@ import {
 } from "../lib/market-availability.js";
 import { markHotTokens } from "../lib/hot-tokens.js";
 import { requestPriceRefreshForTokens } from "../lib/price-refresh.js";
-import { isSearchStatementTimeout } from "../lib/postgres-errors.js";
+import { isPgStatementTimeoutError } from "../lib/postgres-errors.js";
 import type { FeedEvent, TokenPair } from "../server-types.js";
 import {
   feedQuerySchema,
@@ -585,12 +585,14 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
           data = buildFeedData({ rows, eventIds, view });
         }
       } catch (error) {
-        if (isSearchStatementTimeout(error, search)) {
+        if (isPgStatementTimeoutError(error)) {
           req.log.warn(
             { error, q: search, view, sort, limit, offset },
-            "Feed search timed out",
+            search ? "Feed search timed out" : "Feed filter timed out",
           );
-          return reply.code(504).send({ error: "Search timed out" });
+          return reply
+            .code(504)
+            .send({ error: search ? "Search timed out" : "Feed timed out" });
         }
         throw error;
       }

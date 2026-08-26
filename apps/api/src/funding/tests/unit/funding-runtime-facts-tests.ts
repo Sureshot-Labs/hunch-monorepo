@@ -14,6 +14,7 @@ import {
   type PolymarketRuntimeEvidence,
 } from "../../preparation/runtime-facts.js";
 import type { PreparationActionTemplate } from "../../preparation/core-adapter.js";
+import { classifyPolymarketClobCollateralResponse } from "../../preparation/polymarket-clob-collateral.js";
 
 const NOW = new Date("2026-07-24T12:00:00.000Z");
 const OBSERVED_AT = NOW.toISOString();
@@ -109,6 +110,73 @@ await test("stored credentials stay valid regardless of record age", () => {
       stale: false,
     },
   );
+});
+
+await test("undeployed Deposit Wallet CLOB absence is known zero only before deployment", () => {
+  assert.deepEqual(
+    classifyPolymarketClobCollateralResponse({
+      balanceRaw: null,
+      responseOk: false,
+      responseStatus: 404,
+      signatureType: 3,
+      walletDeployed: false,
+      walletTopology: "deposit_wallet",
+    }),
+    {
+      collateralVisible: true,
+      safeBalanceRaw: "0",
+      staleCredentials: false,
+      verifiedCredentials: true,
+    },
+  );
+  assert.deepEqual(
+    classifyPolymarketClobCollateralResponse({
+      balanceRaw: null,
+      responseOk: false,
+      responseStatus: 404,
+      signatureType: 3,
+      walletDeployed: true,
+      walletTopology: "deposit_wallet",
+    }),
+    {
+      collateralVisible: false,
+      safeBalanceRaw: null,
+      staleCredentials: false,
+      verifiedCredentials: false,
+    },
+  );
+  assert.deepEqual(
+    classifyPolymarketClobCollateralResponse({
+      balanceRaw: null,
+      responseOk: false,
+      responseStatus: 401,
+      signatureType: 3,
+      walletDeployed: false,
+      walletTopology: "deposit_wallet",
+    }),
+    {
+      collateralVisible: false,
+      safeBalanceRaw: null,
+      staleCredentials: true,
+      verifiedCredentials: false,
+    },
+  );
+  for (const mismatch of [
+    { signatureType: 0, walletTopology: "deposit_wallet" as const },
+    { signatureType: 3, walletTopology: "signer" as const },
+  ]) {
+    assert.equal(
+      classifyPolymarketClobCollateralResponse({
+        balanceRaw: null,
+        responseOk: false,
+        responseStatus: 404,
+        signatureType: mismatch.signatureType,
+        walletDeployed: false,
+        walletTopology: mismatch.walletTopology,
+      }).collateralVisible,
+      false,
+    );
+  }
 });
 
 function polymarketEvidence(
@@ -493,6 +561,31 @@ await test("known zero venue cash remains a selectable Buy destination", async (
   );
   assert.equal(polymarketBuy.status, "ready");
   assert.ok(!polymarketBuy.reasonCodes.includes("cash_availability_unknown"));
+});
+
+await test("undeployed Polymarket Deposit Wallet requests setup instead of RPC recovery", async () => {
+  const exactBinding = binding("polymarket");
+  const adapter = new PolymarketWalletPreparationAdapter(
+    async (request) =>
+      buildPolymarketRuntimeFacts(
+        request,
+        polymarketEvidence({
+          binding: exactBinding,
+          walletDeployed: false,
+          collateralRaw: "0",
+          collateralLockedRaw: "0",
+          clobCollateralVisible: true,
+        }),
+      ),
+    () => NOW,
+  );
+
+  const result = await adapter.inspect(input(exactBinding, "buy", "standard"));
+
+  assert.equal(result.status, "setup_required");
+  assert.deepEqual(result.reasonCodes, ["wallet_not_deployed"]);
+  assert.ok(!result.reasonCodes.includes("rpc_unavailable"));
+  assert.ok(!result.reasonCodes.includes("clob_collateral_not_visible"));
 });
 
 await test("Limitless funding target does not depend on current RPC cash observation", async () => {

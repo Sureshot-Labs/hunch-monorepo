@@ -4978,7 +4978,8 @@ async function withWalletIntelQuerySettings<T>(
 ): Promise<T> {
   const workMem = options.workMem ?? null;
   const disableJit = options.disableJit ?? true;
-  const statementTimeoutMs = options.statementTimeoutMs ?? null;
+  const statementTimeoutMs =
+    options.statementTimeoutMs ?? env.walletIntelStatementTimeoutMs;
   if (!workMem && !disableJit && !statementTimeoutMs) {
     return task();
   }

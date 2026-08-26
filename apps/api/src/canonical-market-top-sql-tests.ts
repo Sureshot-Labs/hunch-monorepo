@@ -58,9 +58,11 @@ console.log(
 
 let candidateSql = "";
 let eventSql = "";
+const localStatements: string[] = [];
 const client = {
   query: async (sql: string) => {
-    if (/observed_top_candidate_markets as materialized/i.test(sql)) {
+    localStatements.push(sql);
+    if (/canonical_probabilities as materialized/i.test(sql)) {
       candidateSql = sql;
       return { rows: [{ market_id: "market-1" }], rowCount: 1 };
     }
@@ -91,18 +93,58 @@ const commonInputs = {
 
 assert.deepEqual(
   await fetchObservedCanonicalProbabilityMarketIds(pool, {
+    ...commonInputs,
     minProb: 0.7,
     maxProb: undefined,
+    venues: ["polymarket", "limitless"],
+    endWithin: new Date(now.getTime() + 24 * 60 * 60 * 1000).toISOString(),
   }),
   ["market-1"],
 );
 assert.doesNotMatch(candidateSql, /interval '10 minutes'|\.ts\s*[<>]=?/i);
-assert.match(candidateSql, /market\.status = 'ACTIVE'/i);
-assert.match(candidateSql, /event\.status = 'ACTIVE'/i);
-assert.match(candidateSql, /observed_top\.best_bid between 0 and 1/i);
+assert.match(
+  candidateSql,
+  /probability_market_candidates_strict_market_base as materialized/i,
+);
+assert.match(candidateSql, /m\.status = 'ACTIVE'/i);
+assert.match(candidateSql, /e\.status = 'ACTIVE'/i);
+assert.match(candidateSql, /e\.venue = ANY\(\$\d+::text\[\]\)/i);
+assert.match(candidateSql, /e\.end_date is not null/i);
+assert.doesNotMatch(candidateSql, /observed_top_candidate_markets/i);
+assert.match(candidateSql, /canonical_token_pairs as materialized/i);
+assert.match(candidateSql, /canonical_token_rows as materialized/i);
+assert.match(candidateSql, /canonical_top_rows as materialized/i);
+assert.match(candidateSql, /top_row\.token_id = any/i);
 assert.match(candidateSql, /canonical_probabilities as materialized/i);
-assert.match(candidateSql, /probability >= \$1/i);
-console.log("ok - feed probability candidates retain old coherent tops");
+assert.match(candidateSql, /probability >= \$\d+/i);
+assert.ok(
+  localStatements.some((sql) =>
+    /SET LOCAL statement_timeout = '\d+ms'/i.test(sql),
+  ),
+);
+console.log("ok - feed probability candidates are scoped and time-bounded");
+
+const probabilityQueryCountBeforeSingleFlight = localStatements.filter((sql) =>
+  /canonical_probabilities as materialized/i.test(sql),
+).length;
+const singleFlightInputs = {
+  ...commonInputs,
+  minProb: 0.71,
+  maxProb: 0.91,
+  venues: ["polymarket", "limitless"],
+  endWithin: new Date(now.getTime() + 24 * 60 * 60 * 1000).toISOString(),
+};
+await Promise.all([
+  fetchObservedCanonicalProbabilityMarketIds(pool, singleFlightInputs),
+  fetchObservedCanonicalProbabilityMarketIds(pool, singleFlightInputs),
+]);
+assert.equal(
+  localStatements.filter((sql) =>
+    /canonical_probabilities as materialized/i.test(sql),
+  ).length,
+  probabilityQueryCountBeforeSingleFlight + 1,
+);
+console.log("ok - identical probability filters share one in-flight SQL query");
 
 assert.deepEqual(
   await fetchFeedEventIds(pool, {

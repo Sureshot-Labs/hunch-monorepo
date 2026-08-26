@@ -9,10 +9,11 @@ import {
 
 import { pool } from "../db.js";
 import { env } from "../env.js";
-import { isSearchStatementTimeout } from "../lib/postgres-errors.js";
+import { isPgStatementTimeoutError } from "../lib/postgres-errors.js";
 import {
   fetchFeedCategoryFacetRows,
   fetchObservedCanonicalProbabilityMarketIds,
+  queryRowsWithLocalSettings,
 } from "../repos/unified-read.js";
 import { getRedis } from "../redis.js";
 import {
@@ -59,7 +60,8 @@ export const metaRoutes: FastifyPluginAsync = async (app) => {
       }
     }
 
-    const { rows } = await pool.query<CategoryRow>(
+    const rows = await queryRowsWithLocalSettings<CategoryRow>(
+      pool,
       `
       select
         venue,
@@ -74,6 +76,7 @@ export const metaRoutes: FastifyPluginAsync = async (app) => {
       order by events desc, venue asc, category asc
     `,
       [discoverableVenues],
+      { statementTimeoutMs: env.feedFilterTimeoutMs },
     );
 
     const byCategory = new Map<
@@ -196,6 +199,15 @@ export const metaRoutes: FastifyPluginAsync = async (app) => {
           ? await fetchObservedCanonicalProbabilityMarketIds(pool, {
               minProb,
               maxProb,
+              view,
+              venues,
+              filter,
+              durationMinutes,
+              endWithin,
+              ageSince,
+              nowParam,
+              sevenDaysAgo,
+              sevenDaysFromNow,
             })
           : null;
         const facetInputs = {
@@ -218,11 +230,12 @@ export const metaRoutes: FastifyPluginAsync = async (app) => {
           sevenDaysFromNow,
         };
 
-        const [facetRowsResult, universeRowsResult] = await Promise.all([
+        const [facetRowsResult, universeRows] = await Promise.all([
           observedProbabilityMarketIds?.length === 0
             ? Promise.resolve([])
             : fetchFeedCategoryFacetRows(pool, facetInputs),
-          pool.query<{ category: string }>(
+          queryRowsWithLocalSettings<{ category: string }>(
+            pool,
             `
               select distinct lower(category) as category
               from unified_events
@@ -233,6 +246,7 @@ export const metaRoutes: FastifyPluginAsync = async (app) => {
               order by category asc
             `,
             [venues],
+            { statementTimeoutMs: env.feedFilterTimeoutMs },
           ),
         ]);
 
@@ -241,7 +255,7 @@ export const metaRoutes: FastifyPluginAsync = async (app) => {
           { category: string; events: number; venues: Record<string, number> }
         >();
 
-        for (const row of universeRowsResult.rows) {
+        for (const row of universeRows) {
           const category = row.category;
           categoriesMap.set(category, {
             category,
@@ -328,12 +342,16 @@ export const metaRoutes: FastifyPluginAsync = async (app) => {
       try {
         body = await computeBody();
       } catch (error) {
-        if (isSearchStatementTimeout(error, search)) {
+        if (isPgStatementTimeoutError(error)) {
           req.log.warn(
             { error, q: search, view },
-            "Category facet search timed out",
+            search
+              ? "Category facet search timed out"
+              : "Category facet filter timed out",
           );
-          return reply.code(504).send({ error: "Search timed out" });
+          return reply
+            .code(504)
+            .send({ error: search ? "Search timed out" : "Feed timed out" });
         }
         throw error;
       }
@@ -372,7 +390,8 @@ export const metaRoutes: FastifyPluginAsync = async (app) => {
     const discoverableVenues = HUNCH_VENUES.filter((venue) =>
       venueHasLifecycleCapability(lifecycle.effective, venue, "discovery"),
     );
-    const { rows } = await pool.query<VenueCoverageRow>(
+    const rows = await queryRowsWithLocalSettings<VenueCoverageRow>(
+      pool,
       `
         with requested_venues as (
           select unnest($1::text[]) as venue
@@ -408,6 +427,7 @@ export const metaRoutes: FastifyPluginAsync = async (app) => {
         order by requested.venue asc
       `,
       [discoverableVenues],
+      { statementTimeoutMs: env.feedFilterTimeoutMs },
     );
 
     const venues = rows.flatMap((row) => {

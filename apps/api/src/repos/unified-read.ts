@@ -66,6 +66,8 @@ const FEED_CANDIDATE_EXPANSION_FACTOR = 4;
 const FEED_CHANGE24H_V2_CANDIDATE_LIMITS = [500, 2000, 8000] as const;
 const FEED_SEARCH_PREFIX_MIN_CHARS = 3;
 const FEED_SEARCH_PREFIX_MAX_CHARS = 6;
+const FEED_PROBABILITY_CACHE_TTL_MS = 30_000;
+const FEED_PROBABILITY_CACHE_MAX_ENTRIES = 16;
 const FEED_SEARCH_STOP_WORDS = new Set([
   "a",
   "an",
@@ -676,13 +678,117 @@ function addObservedCanonicalMarketProbabilityPredicate(args: {
   });
 }
 
-export async function fetchObservedCanonicalProbabilityMarketIds(
-  pool: Pool,
-  inputs: Pick<FeedInputs, "minProb" | "maxProb">,
-): Promise<string[]> {
-  if (inputs.minProb == null && inputs.maxProb == null) return [];
+type ProbabilityMarketFilterInputs = Pick<
+  FeedInputs,
+  | "minProb"
+  | "maxProb"
+  | "view"
+  | "venues"
+  | "category"
+  | "categories"
+  | "filter"
+  | "durationMinutes"
+  | "endWithin"
+  | "ageSince"
+  | "nowParam"
+  | "sevenDaysAgo"
+  | "sevenDaysFromNow"
+>;
 
+type ProbabilityMarketCacheState = {
+  values: Map<string, { expiresAt: number; marketIds: string[] }>;
+  inFlight: Map<string, Promise<string[]>>;
+};
+
+const probabilityMarketCacheByPool = new WeakMap<
+  Pool,
+  ProbabilityMarketCacheState
+>();
+
+function probabilityMarketCacheState(pool: Pool): ProbabilityMarketCacheState {
+  const existing = probabilityMarketCacheByPool.get(pool);
+  if (existing) return existing;
+  const created: ProbabilityMarketCacheState = {
+    values: new Map(),
+    inFlight: new Map(),
+  };
+  probabilityMarketCacheByPool.set(pool, created);
+  return created;
+}
+
+function relativeBoundaryMinutes(
+  boundary: string | undefined,
+  nowParam: string,
+): number | null {
+  if (!boundary) return null;
+  const boundaryMs = Date.parse(boundary);
+  const nowMs = Date.parse(nowParam);
+  if (!Number.isFinite(boundaryMs) || !Number.isFinite(nowMs)) return null;
+  return Math.round((boundaryMs - nowMs) / 60_000);
+}
+
+function probabilityMarketCacheKey(
+  inputs: ProbabilityMarketFilterInputs,
+): string {
+  const nowMs = Date.parse(inputs.nowParam);
+  return JSON.stringify({
+    minProb: inputs.minProb ?? null,
+    maxProb: inputs.maxProb ?? null,
+    view: inputs.view ?? "events",
+    venues: inputs.venues ? [...inputs.venues].sort() : null,
+    category: inputs.category?.toLowerCase() ?? null,
+    categories: inputs.categories
+      ? [...inputs.categories].map((value) => value.toLowerCase()).sort()
+      : null,
+    filter: inputs.filter ?? null,
+    durationMinutes: inputs.durationMinutes
+      ? [...inputs.durationMinutes].sort((left, right) => left - right)
+      : null,
+    endWithinMinutes: relativeBoundaryMinutes(
+      inputs.endWithin,
+      inputs.nowParam,
+    ),
+    ageSinceMinutes: relativeBoundaryMinutes(inputs.ageSince, inputs.nowParam),
+    timeBucket: Number.isFinite(nowMs)
+      ? Math.floor(nowMs / FEED_PROBABILITY_CACHE_TTL_MS)
+      : inputs.nowParam,
+  });
+}
+
+function pruneProbabilityMarketCache(
+  state: ProbabilityMarketCacheState,
+  nowMs: number,
+): void {
+  for (const [key, cached] of state.values) {
+    if (cached.expiresAt <= nowMs) state.values.delete(key);
+  }
+  while (state.values.size >= FEED_PROBABILITY_CACHE_MAX_ENTRIES) {
+    const oldestKey = state.values.keys().next().value as string | undefined;
+    if (!oldestKey) break;
+    state.values.delete(oldestKey);
+  }
+}
+
+async function fetchObservedCanonicalProbabilityMarketIdsUncached(
+  pool: Pool,
+  inputs: ProbabilityMarketFilterInputs,
+): Promise<string[]> {
   const { params, add } = createParamBuilder();
+  const nowParam = add(inputs.nowParam);
+  const expressions = buildFeedSqlExpressions();
+  const candidateCte = buildBroadOrderableMarketCandidatesCte({
+    cteName: "probability_market_candidates",
+    materialized: true,
+    nowParam,
+    extraMarketSql: buildFeedMarketCandidateExtraSql({
+      add,
+      inputs,
+      nowParam,
+      venueTarget: inputs.view === "markets" ? "market" : "event",
+      renderableMarketExpr: expressions.renderableMarketExpr,
+      supportedLimitlessMarketExpr: expressions.supportedLimitlessMarketExpr,
+    }),
+  });
   const probability = buildObservedCanonicalProbabilityFromTopSql({
     yesAlias: "canonical_yes_top",
     noAlias: "canonical_no_top",
@@ -698,60 +804,110 @@ export async function fetchObservedCanonicalProbabilityMarketIds(
   const rows = await queryRowsWithLocalSettings<{ market_id: string }>(
     pool,
     `
-      with observed_top_candidate_markets as materialized (
-        select distinct mapping.market_id
-        from unified_events event
-        join unified_markets market
-          on market.event_id = event.id
-         and market.status = 'ACTIVE'
-        join unified_market_tokens mapping
-          on mapping.market_id = market.id
-         and mapping.outcome_side in ('YES', 'NO')
-        join unified_token_top_latest observed_top
-          on observed_top.token_id = mapping.token_id
-        where event.status = 'ACTIVE'
-          and (
-            event.end_date is null
-            or event.end_date > (now() - ${POLYMARKET_ACCEPTING_ORDERS_GRACE_INTERVAL_SQL})
-          )
-          and observed_top.best_bid between 0 and 1
-          and observed_top.best_ask between 0 and 1
-          and observed_top.best_bid <= observed_top.best_ask
-      ),
-      canonical_probabilities as materialized (
+      with ${candidateCte},
+      canonical_token_pairs as materialized (
         select
-          candidate.market_id,
-          ${probability} as probability
-        from observed_top_candidate_markets candidate
+          probability_candidate.market_id,
+          canonical_yes_token.token_id as token_yes,
+          canonical_no_token.token_id as token_no
+        from probability_market_candidates probability_candidate
         left join lateral (
-          select mapping.token_id
-          from unified_market_tokens mapping
-          where mapping.market_id = candidate.market_id
-            and mapping.outcome_side = 'YES'
-          order by mapping.updated_at desc nulls last, mapping.token_id asc
+          select token_mapping.token_id
+          from unified_market_tokens token_mapping
+          where token_mapping.market_id = probability_candidate.market_id
+            and token_mapping.outcome_side = 'YES'
+          order by token_mapping.updated_at desc nulls last, token_mapping.token_id asc
           limit 1
         ) canonical_yes_token on true
         left join lateral (
-          select mapping.token_id
-          from unified_market_tokens mapping
-          where mapping.market_id = candidate.market_id
-            and mapping.outcome_side = 'NO'
-          order by mapping.updated_at desc nulls last, mapping.token_id asc
+          select token_mapping.token_id
+          from unified_market_tokens token_mapping
+          where token_mapping.market_id = probability_candidate.market_id
+            and token_mapping.outcome_side = 'NO'
+          order by token_mapping.updated_at desc nulls last, token_mapping.token_id asc
           limit 1
         ) canonical_no_token on true
-        left join unified_token_top_latest canonical_yes_top
-          on canonical_yes_top.token_id = canonical_yes_token.token_id
-        left join unified_token_top_latest canonical_no_top
-          on canonical_no_top.token_id = canonical_no_token.token_id
+      ),
+      canonical_token_rows as materialized (
+        select token_pair.token_yes as token_id
+        from canonical_token_pairs token_pair
+        where token_pair.token_yes is not null
+        union
+        select token_pair.token_no as token_id
+        from canonical_token_pairs token_pair
+        where token_pair.token_no is not null
+      ),
+      canonical_top_rows as materialized (
+        select
+          top_row.token_id,
+          top_row.best_bid,
+          top_row.best_ask
+        from unified_token_top_latest top_row
+        where top_row.token_id = any(
+          coalesce(
+            (
+              select array_agg(token_row.token_id order by token_row.token_id)
+              from canonical_token_rows token_row
+            ),
+            '{}'::text[]
+          )
+        )
+      ),
+      canonical_probabilities as materialized (
+        select
+          token_pair.market_id,
+          ${probability} as probability
+        from canonical_token_pairs token_pair
+        left join canonical_top_rows canonical_yes_top
+          on canonical_yes_top.token_id = token_pair.token_yes
+        left join canonical_top_rows canonical_no_top
+          on canonical_no_top.token_id = token_pair.token_no
       )
       select market_id
       from canonical_probabilities
       where ${probabilityWhere.join(" and ")}
     `,
     params,
-    { jitOff: true },
+    {
+      jitOff: true,
+      statementTimeoutMs: env.feedFilterTimeoutMs,
+      workMem: FEED_HEAVY_QUERY_WORK_MEM,
+    },
   );
   return rows.map((row) => row.market_id);
+}
+
+export async function fetchObservedCanonicalProbabilityMarketIds(
+  pool: Pool,
+  inputs: ProbabilityMarketFilterInputs,
+): Promise<string[]> {
+  if (inputs.minProb == null && inputs.maxProb == null) return [];
+  const key = probabilityMarketCacheKey(inputs);
+  const state = probabilityMarketCacheState(pool);
+  const nowMs = Date.now();
+  const cached = state.values.get(key);
+  if (cached && cached.expiresAt > nowMs) return cached.marketIds;
+
+  const active = state.inFlight.get(key);
+  if (active) return active;
+
+  const pending = fetchObservedCanonicalProbabilityMarketIdsUncached(
+    pool,
+    inputs,
+  )
+    .then((marketIds) => {
+      pruneProbabilityMarketCache(state, Date.now());
+      state.values.set(key, {
+        expiresAt: Date.now() + FEED_PROBABILITY_CACHE_TTL_MS,
+        marketIds,
+      });
+      return marketIds;
+    })
+    .finally(() => {
+      state.inFlight.delete(key);
+    });
+  state.inFlight.set(key, pending);
+  return pending;
 }
 
 function buildFeedMarketCandidateExtraSql(args: {
@@ -1616,7 +1772,11 @@ async function fetchFeedChange24hEventIdsFast(
         limit ${limitParam} offset ${offsetParam}
       `,
       params,
-      { workMem: FEED_HEAVY_QUERY_WORK_MEM, jitOff: true },
+      {
+        workMem: FEED_HEAVY_QUERY_WORK_MEM,
+        statementTimeoutMs: feedFilterStatementTimeoutMs(),
+        jitOff: true,
+      },
     );
 
     if (rows.length >= inputs.limit) return rows;
@@ -1938,6 +2098,10 @@ function feedSearchStatementTimeoutMs(): number {
   return env.feedSearchTimeoutMs;
 }
 
+function feedFilterStatementTimeoutMs(): number {
+  return env.feedFilterTimeoutMs;
+}
+
 function feedSearchResultMatchLimit(): number {
   return env.feedSearchResultMatchLimit;
 }
@@ -2054,7 +2218,7 @@ async function queryRowsWithSearchHint<T extends QueryResultRow>(
   return queryRowsWithLocalSettings<T>(pool, sql, params, {
     useSearchHint,
     workMem,
-    statementTimeoutMs,
+    statementTimeoutMs: statementTimeoutMs ?? feedFilterStatementTimeoutMs(),
     jitOff,
   });
 }
@@ -3113,6 +3277,7 @@ export async function fetchFeedMarkets(
     params,
     {
       workMem: FEED_HEAVY_QUERY_WORK_MEM,
+      statementTimeoutMs: feedFilterStatementTimeoutMs(),
       jitOff: true,
     },
   );
@@ -3202,7 +3367,11 @@ async function fetchFeedChange24hMarketIdsFast(
         limit ${limitParam} offset ${offsetParam}
       `,
       params,
-      { workMem: FEED_HEAVY_QUERY_WORK_MEM, jitOff: true },
+      {
+        workMem: FEED_HEAVY_QUERY_WORK_MEM,
+        statementTimeoutMs: feedFilterStatementTimeoutMs(),
+        jitOff: true,
+      },
     );
 
     if (rows.length >= inputs.limit) return rows.map((row) => row.id);
@@ -3281,7 +3450,10 @@ async function fetchFeedMarketIdsFast(
         where m.id = any($1::text[])
       `,
       [candidateIds],
-      { jitOff: true },
+      {
+        statementTimeoutMs: feedFilterStatementTimeoutMs(),
+        jitOff: true,
+      },
     );
     const ids = scoreRows
       .sort((left, right) => {
@@ -3497,7 +3669,11 @@ async function fetchFeedMarketIdsFast(
           pool,
           sql,
           params,
-          { workMem: FEED_HEAVY_QUERY_WORK_MEM, jitOff: true },
+          {
+            workMem: FEED_HEAVY_QUERY_WORK_MEM,
+            statementTimeoutMs: feedFilterStatementTimeoutMs(),
+            jitOff: true,
+          },
         );
       const state = rows[0];
       const ids = state?.ids ?? [];
@@ -3600,7 +3776,11 @@ async function fetchFeedMarketIdsFast(
       pool,
       sql,
       params,
-      { workMem: FEED_HEAVY_QUERY_WORK_MEM, jitOff: true },
+      {
+        workMem: FEED_HEAVY_QUERY_WORK_MEM,
+        statementTimeoutMs: feedFilterStatementTimeoutMs(),
+        jitOff: true,
+      },
     );
     const ids = rows[0]?.ids ?? [];
     const candidateCount = Number(rows[0]?.candidate_count ?? 0);
@@ -4241,7 +4421,7 @@ export async function fetchFeedMarketsDirect(
         : FEED_HEAVY_QUERY_WORK_MEM,
       statementTimeoutMs: marketContext.hasSearch
         ? feedSearchStatementTimeoutMs()
-        : null,
+        : feedFilterStatementTimeoutMs(),
       jitOff: true,
     },
   );
