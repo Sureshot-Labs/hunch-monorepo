@@ -1,5 +1,9 @@
 import { Interface, ethers } from "ethers";
 import { env } from "../env.js";
+import {
+  inspectPolymarketDepositWallet,
+  type PolymarketDepositWalletDerivation,
+} from "./polymarket-deposit-wallet-derivation.js";
 import { fetchEvmCall, fetchEvmCode } from "./polygon-rpc.js";
 
 type FunderSource = "signer" | "stored" | "magic_proxy" | "safe_proxy";
@@ -585,21 +589,64 @@ export async function validatePolymarketFunderSelection(inputs: {
     bypassCodeCache: true,
   });
   const candidate = findCandidateByAddress(result.candidates, funderAddress);
-  if (
-    !candidate ||
-    candidate.signatureType === 0 ||
-    candidate.signatureType === 1
-  ) {
+  if (!candidate) {
     throw new Error(
       "Polymarket requires a deposit wallet or deployed legacy Safe funder.",
     );
   }
-  if (candidate?.expectedContract && candidate.deployed === false) {
-    throw new Error("Polymarket wallet is not deployed yet.");
+  const canonicalDepositWallet =
+    candidate.signatureType === 3
+      ? await inspectPolymarketDepositWallet({
+          owner: signer,
+          rpcUrl: env.polygonRpcUrl,
+          timeoutMs: env.polygonRpcTimeoutMs,
+        })
+      : null;
+  if (
+    !isCanonicalPolymarketFunderCandidate({
+      candidate,
+      canonicalDepositWallet,
+      signer,
+    })
+  ) {
+    throw new Error(
+      candidate.expectedContract && !candidate.deployed
+        ? "Polymarket wallet is not deployed yet."
+        : "Polymarket funder is not the canonical Deposit Wallet or derived Safe for this signer.",
+    );
   }
 
   return {
     funderAddress: candidate?.funder ?? funderAddress,
     candidate,
   };
+}
+
+/**
+ * Only signer-derived execution wallets may become the durable Polymarket
+ * funder. Generic stored-funder discovery remains useful for diagnostics, but
+ * a deployed arbitrary contract is not proof of ownership or authority.
+ */
+export function isCanonicalPolymarketFunderCandidate(input: {
+  candidate: PolymarketFunderCandidate;
+  canonicalDepositWallet: PolymarketDepositWalletDerivation | null;
+  signer: string;
+}): boolean {
+  if (!input.candidate.deployed) return false;
+  if (
+    input.candidate.source === "safe_proxy" &&
+    input.candidate.signatureType === 2 &&
+    input.candidate.safeOwners?.some(
+      (owner) =>
+        normalizeEthAddress(owner) === normalizeEthAddress(input.signer),
+    )
+  ) {
+    return true;
+  }
+  return Boolean(
+    input.candidate.signatureType === 3 &&
+    input.canonicalDepositWallet?.deployed &&
+    normalizeEthAddress(input.canonicalDepositWallet.address) ===
+      normalizeEthAddress(input.candidate.funder),
+  );
 }

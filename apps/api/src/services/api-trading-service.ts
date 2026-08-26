@@ -12,9 +12,9 @@ import {
 import { canonicalJsonHash } from "../funding/persistence/canonical.js";
 import {
   buildFundingTradeConsumerIntent,
+  compareFundingTradeConsumerIntentToConfirmedBound,
   type FundingTradeConsumerIntent,
 } from "../funding/persistence/funding-trade-consumer-intent.js";
-import { sameAsset } from "../funding/domain/asset-identity.js";
 import { isPositiveRawAmount } from "../funding/domain/raw-amount.js";
 import {
   claimFundingTradeAttempt,
@@ -255,12 +255,11 @@ export function createApiTradingApplicationService(
       });
     }
     const confirmed = reservation.consumerIntent;
-    if (
-      confirmed.venueId !== actual.venueId ||
-      confirmed.marketId !== actual.marketId ||
-      confirmed.marketContextId !== actual.marketContextId ||
-      !sameAsset(confirmed.spend.asset, actual.spend.asset)
-    ) {
+    const match = compareFundingTradeConsumerIntentToConfirmedBound(
+      confirmed,
+      actual,
+    );
+    if (match === "scope_mismatch") {
       throw new TradingServiceError({
         code: "insufficient_readiness",
         message: "Funding reservation does not match this market and outcome.",
@@ -268,7 +267,7 @@ export function createApiTradingApplicationService(
         venue: "polymarket",
       });
     }
-    if (BigInt(actual.spend.raw) > BigInt(confirmed.spend.raw)) {
+    if (match === "spend_exceeded") {
       throw new TradingServiceError({
         code: "quote_unavailable",
         message:

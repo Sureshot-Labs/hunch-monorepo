@@ -79,6 +79,31 @@ export function sameFundingTradeConsumerIntent(
   );
 }
 
+/**
+ * Compare a freshly normalized fee-inclusive Buy spend with the immutable
+ * consumer scope that funded it. The fresh required spend may be lower than
+ * the confirmed maximum, but every other identity field remains exact and
+ * the confirmed spend cap may never be exceeded. Callers must not pass a
+ * venue's nominal order amount when fees are charged separately.
+ */
+export function compareFundingTradeConsumerIntentToConfirmedBound(
+  confirmed: FundingTradeConsumerIntent,
+  actual: FundingTradeConsumerIntent,
+): "matched" | "scope_mismatch" | "spend_exceeded" {
+  if (
+    confirmed.venueId !== actual.venueId ||
+    confirmed.marketId !== actual.marketId ||
+    confirmed.marketContextId !== actual.marketContextId ||
+    confirmed.side !== actual.side ||
+    !sameAsset(confirmed.spend.asset, actual.spend.asset)
+  ) {
+    return "scope_mismatch";
+  }
+  return BigInt(actual.spend.raw) <= BigInt(confirmed.spend.raw)
+    ? "matched"
+    : "spend_exceeded";
+}
+
 type StoredTradeFundingIntent = Readonly<{
   operationVenueId: string | null;
   operationMarketId: string | null;

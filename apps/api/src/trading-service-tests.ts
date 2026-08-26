@@ -756,6 +756,120 @@ const tests: TestCase[] = [
     },
   },
   {
+    name: "embedded Polymarket readiness commits a newly deployed funder to existing credentials",
+    run: () => {
+      const depositWallet = "0x586F49fD5f9816ee9032A4dD4c0e904BA68F93a6";
+      assert.equal(
+        polymarketTradingExecutionTestHooks.shouldPersistFunderBinding({
+          hasCredentials: true,
+          storedFunder: null,
+          effectiveDistinctFunder: depositWallet,
+        }),
+        true,
+      );
+      assert.equal(
+        polymarketTradingExecutionTestHooks.shouldPersistFunderBinding({
+          hasCredentials: true,
+          storedFunder: depositWallet.toLowerCase(),
+          effectiveDistinctFunder: depositWallet,
+        }),
+        false,
+      );
+      assert.equal(
+        polymarketTradingExecutionTestHooks.shouldPersistFunderBinding({
+          hasCredentials: false,
+          storedFunder: null,
+          effectiveDistinctFunder: depositWallet,
+        }),
+        false,
+      );
+    },
+  },
+  {
+    name: "embedded Polymarket readiness persists only canonical distinct funders",
+    run: () => {
+      const canonicalAddress = "0x586F49fD5f9816ee9032A4dD4c0e904BA68F93a6";
+      const candidate = {
+        funder: canonicalAddress,
+        signatureType: 3 as const,
+        source: "stored" as const,
+        expectedContract: true,
+        deployed: true,
+        contractKind: "CONTRACT" as const,
+      };
+      const canonicalDepositWallet = {
+        address: canonicalAddress,
+        deployed: true,
+        generation: "uups" as const,
+        factory: "0x00000000000Fb5C9ADea0298D729A0CB3823Cc07",
+        implementation: "0x58CA52ebe0DadfdF531Cde7062e76746de4Db1eB",
+        beacon: null,
+      };
+      assert.equal(
+        polymarketTradingExecutionTestHooks.isCanonicalDistinctFunder({
+          candidate,
+          canonicalDepositWallet,
+          signer: "0x0000000000000000000000000000000000000011",
+        }),
+        true,
+      );
+      assert.equal(
+        polymarketTradingExecutionTestHooks.isCanonicalDistinctFunder({
+          candidate: {
+            ...candidate,
+            funder: "0x0000000000000000000000000000000000000042",
+          },
+          canonicalDepositWallet,
+          signer: "0x0000000000000000000000000000000000000011",
+        }),
+        false,
+      );
+      assert.equal(
+        polymarketTradingExecutionTestHooks.isCanonicalDistinctFunder({
+          candidate: {
+            ...candidate,
+            signatureType: 2,
+            source: "stored",
+            contractKind: "SAFE_LIKE",
+          },
+          canonicalDepositWallet: null,
+          signer: "0x0000000000000000000000000000000000000011",
+        }),
+        false,
+      );
+      assert.equal(
+        polymarketTradingExecutionTestHooks.isCanonicalDistinctFunder({
+          candidate: {
+            ...candidate,
+            funder: "0x0000000000000000000000000000000000000043",
+            signatureType: 2,
+            source: "safe_proxy",
+            contractKind: "SAFE_LIKE",
+            safeOwners: ["0x0000000000000000000000000000000000000011"],
+          },
+          canonicalDepositWallet: null,
+          signer: "0x0000000000000000000000000000000000000011",
+        }),
+        true,
+      );
+      assert.equal(
+        polymarketTradingExecutionTestHooks.isCanonicalDistinctFunder({
+          candidate: {
+            ...candidate,
+            funder: "0x0000000000000000000000000000000000000043",
+            signatureType: 2,
+            source: "safe_proxy",
+            contractKind: "SAFE_LIKE",
+            safeOwners: ["0x0000000000000000000000000000000000000099"],
+          },
+          canonicalDepositWallet: null,
+          signer: "0x0000000000000000000000000000000000000011",
+        }),
+        false,
+      );
+    },
+  },
+  {
     name: "Limitless AMM quote retries HTTP 429 and coalesces identical reads",
     run: async () => {
       const originalFetch = globalThis.fetch;

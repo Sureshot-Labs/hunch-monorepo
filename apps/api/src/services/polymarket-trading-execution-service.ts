@@ -13,14 +13,19 @@ import { env } from "../env.js";
 import { markHotTokens } from "../lib/hot-tokens.js";
 import {
   assertFundingReservationReadyForTrade,
+  fetchFundingConsumerReservationForUser,
   releaseFundingReservationForDefinitiveTradeFailure,
 } from "../funding/persistence/funding-evidence-repository.js";
 import { canonicalJsonHash } from "../funding/persistence/canonical.js";
-import { buildFundingTradeConsumerIntent } from "../funding/persistence/funding-trade-consumer-intent.js";
+import {
+  buildFundingTradeConsumerIntent,
+  compareFundingTradeConsumerIntentToConfirmedBound,
+} from "../funding/persistence/funding-trade-consumer-intent.js";
 import {
   markFundingTradeAttemptSubmissionStarted,
   recordFundingTradeAttemptOutcome,
 } from "../funding/persistence/funding-trade-attempt-repository.js";
+import { FundingPersistenceError } from "../funding/persistence/funding-operation-repository.js";
 import { requestPriceRefreshForTokens } from "../lib/price-refresh.js";
 import { isRecord } from "../lib/type-guards.js";
 import { fetchPolymarketMarketInfo } from "../repos/polymarket-markets.js";
@@ -97,6 +102,7 @@ import {
 } from "./polymarket-signing-schema.js";
 import {
   derivePolymarketFunders,
+  isCanonicalPolymarketFunderCandidate,
   type PolymarketFunderCandidate,
 } from "./polymarket-funder.js";
 import {
@@ -128,6 +134,10 @@ import {
   type EmbeddedPolymarketWalletReference,
   type PolymarketOrderPayload,
 } from "./polymarket-embedded.js";
+import {
+  inspectPolymarketDepositWallet,
+  type PolymarketDepositWalletDerivation,
+} from "./polymarket-deposit-wallet-derivation.js";
 import {
   findMaxPolymarketMarketBuyUsdForFunds,
   quotePolymarketOrder,
@@ -168,6 +178,7 @@ import {
 } from "./open-order-collateral.js";
 import {
   calculatePolymarketQuote,
+  calculatePolymarketSignedFokBuyRequiredSpendRaw,
   loadPolymarketQuoteContext,
   PolymarketQuoteError,
   type PolymarketQuoteResult,
@@ -640,11 +651,32 @@ export async function resolveEmbeddedPolymarketEnsureReadyState(
     normalizeEvmAddress(storedCandidate.funder) !== signerNormalized
       ? storedCandidate
       : null);
+  let canonicalDepositWallet: PolymarketDepositWalletDerivation | null = null;
+  if (desiredDistinctCandidate?.signatureType === 3) {
+    canonicalDepositWallet = await inspectPolymarketDepositWallet({
+      owner: input.signer,
+      rpcUrl: env.polygonRpcUrl,
+      timeoutMs: env.polygonRpcTimeoutMs,
+    });
+    if (
+      !isCanonicalPolymarketFunderCandidate({
+        candidate: desiredDistinctCandidate,
+        canonicalDepositWallet,
+        signer: input.signer,
+      })
+    ) {
+      throw new Error(
+        "Polymarket funder is not the canonical deployed Deposit Wallet for this signer.",
+      );
+    }
+  }
   const canPreserveDistinctCandidate = Boolean(
-    desiredDistinctCandidate?.deployed &&
-    (desiredDistinctCandidate.signatureType === 2 ||
-      desiredDistinctCandidate.signatureType === 3 ||
-      desiredDistinctCandidate.contractKind === "SAFE_LIKE"),
+    desiredDistinctCandidate &&
+    isCanonicalPolymarketFunderCandidate({
+      candidate: desiredDistinctCandidate,
+      canonicalDepositWallet,
+      signer: input.signer,
+    }),
   );
   const effectiveDistinctFunder = canPreserveDistinctCandidate
     ? (desiredDistinctCandidate?.funder ?? null)
@@ -746,6 +778,19 @@ export function buildEmbeddedPolymarketEnsureReadyResponse(args: {
     approvalsApplied: args.approvalsApplied ?? false,
     approvalExecution: args.approvalExecution ?? null,
   };
+}
+
+export function shouldPersistEmbeddedPolymarketFunderBinding(input: {
+  hasCredentials: boolean;
+  storedFunder: string | null | undefined;
+  effectiveDistinctFunder: string | null | undefined;
+}): boolean {
+  const effectiveFunder = normalizeEvmAddress(input.effectiveDistinctFunder);
+  return Boolean(
+    input.hasCredentials &&
+    effectiveFunder &&
+    normalizeEvmAddress(input.storedFunder) !== effectiveFunder,
+  );
 }
 
 function embeddedPolymarketPreparationFailure(
@@ -956,6 +1001,23 @@ export async function executeEmbeddedPolymarketEnsureReadyRoute(input: {
           requests: approvalRequests,
           signatures: approvalSignatures,
         });
+
+        const funderToPersist = state.effectiveDistinctFunder;
+        if (
+          funderToPersist &&
+          shouldPersistEmbeddedPolymarketFunderBinding({
+            hasCredentials: Boolean(state.credsInfo),
+            storedFunder: state.credsInfo?.funderAddress,
+            effectiveDistinctFunder: funderToPersist,
+          })
+        ) {
+          await AuthService.updateVenueFunderAddress(
+            input.user.id,
+            input.signer,
+            "polymarket",
+            funderToPersist,
+          );
+        }
 
         return buildEmbeddedPolymarketEnsureReadyResponse({
           signer: input.signer,
@@ -6006,6 +6068,8 @@ export const polymarketTradingExecutionTestHooks = {
   evaluateCredentialReadiness: evaluatePolymarketCredentialReadiness,
   evaluateFundsReadiness: evaluatePolymarketFundsReadiness,
   embeddedPreparationFailure: embeddedPolymarketPreparationFailure,
+  isCanonicalDistinctFunder: isCanonicalPolymarketFunderCandidate,
+  shouldPersistFunderBinding: shouldPersistEmbeddedPolymarketFunderBinding,
   inspectPreparedQuote: inspectPolymarketPreparedQuote,
   inspectFunderReadiness: inspectPolymarketFunderReadiness,
   normalizeOrderForPayload,
@@ -7180,24 +7244,11 @@ export async function submitPolymarketClientSignedOrder(input: {
       };
     }
   }
-  const fundingConsumerIntent =
-    fundingReservation && fundingMarketId
-      ? buildFundingTradeConsumerIntent({
-          venueId: "polymarket",
-          marketId: fundingMarketId,
-          marketContextId: normalizedForHash.tokenId,
-          spend: {
-            asset: {
-              networkId: "evm:137",
-              assetId: env.polymarketUsdcAddress,
-              decimals: POLY_DECIMALS,
-            },
-            raw: normalizedForHash.makerAmount,
-          },
-        })
-      : null;
+  let fundingConsumerIntent: ReturnType<
+    typeof buildFundingTradeConsumerIntent
+  > | null = null;
   if (fundingReservation) {
-    if (!fundingConsumerIntent) {
+    if (!fundingMarketId) {
       return {
         ok: false,
         statusCode: 409,
@@ -7205,6 +7256,75 @@ export async function submitPolymarketClientSignedOrder(input: {
       };
     }
     try {
+      const makerAmountRaw = parseBigIntValue(normalizedForHash.makerAmount);
+      const takerAmountRaw = parseBigIntValue(normalizedForHash.takerAmount);
+      const fundingQuoteContext = await loadPolymarketQuoteContext(input.pool, {
+        tokenId: normalizedForHash.tokenId,
+        logWarn: (details) =>
+          input.log?.warn?.(
+            details,
+            "Failed to load Polymarket platform fee curve for funded order",
+          ),
+      });
+      const currentBuilderValidation =
+        validatePolymarketOrderBuilderCodeForConfig(normalizedForHash.builder, {
+          active:
+            fundingQuoteContext.feePolicySnapshot.collectionMode === "builder",
+          builderCode: fundingQuoteContext.feePolicySnapshot.builderCode,
+          takerFeeBps: fundingQuoteContext.feePolicySnapshot.builderTakerFeeBps,
+          makerFeeBps: fundingQuoteContext.feePolicySnapshot.builderMakerFeeBps,
+        });
+      const requiredSpendRaw =
+        makerAmountRaw && takerAmountRaw && currentBuilderValidation.ok
+          ? calculatePolymarketSignedFokBuyRequiredSpendRaw({
+              context: fundingQuoteContext,
+              makerAmountRaw,
+              takerAmountRaw,
+            })
+          : null;
+      if (!requiredSpendRaw) {
+        throw new FundingPersistenceError(
+          "invalid_state_transition",
+          "funded Polymarket order fee-inclusive spend is unavailable",
+        );
+      }
+      const submittedFundingConsumerIntent = buildFundingTradeConsumerIntent({
+        venueId: "polymarket",
+        marketId: fundingMarketId,
+        marketContextId: normalizedForHash.tokenId,
+        spend: {
+          asset: {
+            networkId: "evm:137",
+            assetId: env.polymarketUsdcAddress,
+            decimals: POLY_DECIMALS,
+          },
+          raw: requiredSpendRaw.toString(),
+        },
+      });
+      const reservation = await fetchFundingConsumerReservationForUser(
+        input.pool,
+        {
+          userId: input.userId,
+          operationId: fundingReservation.operationId,
+        },
+      );
+      if (
+        !reservation ||
+        reservation.reservationId !== fundingReservation.reservationId ||
+        compareFundingTradeConsumerIntentToConfirmedBound(
+          reservation.consumerIntent,
+          submittedFundingConsumerIntent,
+        ) !== "matched"
+      ) {
+        throw new FundingPersistenceError(
+          "invalid_state_transition",
+          "funding reservation does not cover submitted spend",
+        );
+      }
+      // Claim the immutable fee-inclusive consumer identity that created the
+      // reservation. The signed FOK order is separately constrained to the
+      // same market/outcome and may spend less than that confirmed maximum.
+      fundingConsumerIntent = reservation.consumerIntent;
       if (!directHandoffBinding || !directHandoffSubmission) {
         await assertFundingReservationReadyForTrade(input.pool, {
           userId: input.userId,
