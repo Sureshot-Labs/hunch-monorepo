@@ -1067,9 +1067,7 @@ function preparedOwnedSources(
         const sources = preparedVenuePreparationSources(leg.source);
         if (!sources) return null;
         owned.push(...sources);
-      } else if (
-        leg.source.kind !== "external_ingress"
-      ) {
+      } else if (leg.source.kind !== "external_ingress") {
         return null;
       }
     }
@@ -1191,16 +1189,29 @@ function preparedPlanMatchesDestinationScope(
   const operation = input.prepared.operation.quote.planSnapshot.operation;
   const target = operation.destinationTargetSnapshot;
   const binding = operation.venueBindingSnapshot;
+  const supportMetadata = operation.supportMetadata;
   if (!isRecord(target) || !isRecord(target.location) || !isRecord(binding)) {
     return false;
   }
   const location = target.location;
   const details = isRecord(location.details) ? location.details : null;
   const asset = exactAsset(location.asset);
+  // Ordinary planner routes freeze the selectable binding option directly.
+  // Venue-preparation/composite routes freeze the exact account binding and
+  // carry the originating option ID in support metadata. Both are produced by
+  // the same projection and must match the two sealed identifiers.
+  const bindingOptionId =
+    typeof binding.venueBindingOptionId === "string"
+      ? binding.venueBindingOptionId
+      : isRecord(supportMetadata) &&
+          typeof supportMetadata.venueBindingOptionId === "string"
+        ? supportMetadata.venueBindingOptionId
+        : null;
   return (
     target.kind === "owned_location" &&
     operation.venueId === input.destination.venueId &&
-    binding.venueBindingOptionId === input.destination.venueBindingOptionId &&
+    binding.bindingId === input.destination.venueBindingId &&
+    bindingOptionId === input.destination.venueBindingOptionId &&
     details?.controllerWalletId === input.destination.controllerWalletId &&
     asset != null &&
     sameAsset(asset, input.destination.requiredAsset)

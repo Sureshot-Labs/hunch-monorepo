@@ -478,8 +478,7 @@ await prepareTelegramAppHandoffV2Funding({
       ({
         operation: {
           quote: {
-            selectedSourceOptionSnapshot:
-              scopedCompositeWithVenuePreparation,
+            selectedSourceOptionSnapshot: scopedCompositeWithVenuePreparation,
             planSnapshot: {
               operation: {
                 destinationTargetSnapshot: {
@@ -490,8 +489,11 @@ await prepareTelegramAppHandoffV2Funding({
                   },
                 },
                 planKind: "composite_route",
-                venueBindingSnapshot: {
+                supportMetadata: {
                   venueBindingOptionId: "polymarket-binding-option",
+                },
+                venueBindingSnapshot: {
+                  bindingId: "polymarket-binding",
                 },
                 venueId: "polymarket",
               },
@@ -571,6 +573,7 @@ async function materializeLimitlessPlan(
   planSnapshot: typeof movingFeePlan,
   reservationRaw: string,
   transformSnapshot?: (snapshot: SourceOption) => unknown,
+  bindingOptionInSupportMetadata = false,
 ): Promise<void> {
   const currentLimitlessProjection = limitlessProjection([
     {
@@ -620,9 +623,17 @@ async function materializeLimitlessPlan(
                     },
                   },
                   planKind: "wallet_route",
-                  venueBindingSnapshot: {
-                    venueBindingOptionId: LIMITLESS_BINDING_OPTION_ID,
-                  },
+                  supportMetadata: bindingOptionInSupportMetadata
+                    ? {
+                        venueBindingOptionId: LIMITLESS_BINDING_OPTION_ID,
+                      }
+                    : null,
+                  venueBindingSnapshot: bindingOptionInSupportMetadata
+                    ? { bindingId: "limitless-binding" }
+                    : {
+                        bindingId: "limitless-binding",
+                        venueBindingOptionId: LIMITLESS_BINDING_OPTION_ID,
+                      },
                   venueId: "limitless",
                 },
                 reservations: [
@@ -658,6 +669,7 @@ async function materializeLimitlessPlan(
   });
 }
 await materializeLimitlessPlan(movingFeePlan, "1042322");
+await materializeLimitlessPlan(movingFeePlan, "1042322", undefined, true);
 assert.equal(
   materialized.request?.maxFeeUsd,
   "0.02344965",
