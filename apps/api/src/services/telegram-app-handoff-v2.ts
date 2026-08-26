@@ -11,6 +11,7 @@ import type {
   SourceOptionLeg,
 } from "../funding/domain/types.js";
 import { fundingDiscoveryRequestSchema } from "../funding/domain/schemas.js";
+import { isReceiptBearingFundingActionKind } from "../funding/domain/action-kinds.js";
 import { isRawAmount } from "../funding/domain/raw-amount.js";
 import {
   addUnsignedDecimals,
@@ -50,13 +51,6 @@ import {
  */
 export const TELEGRAM_APP_HANDOFF_V2_PLAN_VERSION = 2 as const;
 export const TELEGRAM_APP_HANDOFF_V2_EXECUTION_CONTRACT_VERSION = 2 as const;
-
-const SUPPORTED_CLIENT_ACTION_KINDS = new Set([
-  "evm_transaction",
-  "evm_transaction_batch",
-  "svm_transaction",
-  "external_handoff",
-] as const);
 
 export type TelegramAppHandoffFundingCapability =
   | Readonly<{ kind: "server_bot_exact" }>
@@ -359,20 +353,71 @@ function optionSourceScopes(
   option: SourceOption,
   maximumSourceDebitSlippageBps = 0,
 ): readonly SourceDebitScope[] | null {
+  const venuePreparationScopes = (
+    source: Extract<
+      SourceOption["source"] | SourceOptionLeg["source"],
+      Readonly<{ kind: "venue_preparation" }>
+    >,
+    actions: SourceOption["requiredActions"],
+  ): readonly SourceDebitScope[] | null => {
+    const inputs = source.inputs;
+    if (!inputs || inputs.length !== source.inputCount) return null;
+    const keys = new Set<string>();
+    const scopes: SourceDebitScope[] = [];
+    for (const input of inputs) {
+      const key = `${input.asset.networkId}:${input.asset.assetId.toLowerCase()}:${input.asset.decimals}:${input.locationId}`;
+      if (
+        keys.has(key) ||
+        !isRawAmount(input.rawAmount) ||
+        rawAmount(input.rawAmount) === 0n
+      ) {
+        return null;
+      }
+      keys.add(key);
+      scopes.push({
+        asset: input.asset,
+        locationId: input.locationId,
+        maximumRaw: input.rawAmount,
+        sourceFingerprint: canonicalJsonHash({
+          actions: actionShape(actions),
+          input,
+          source: {
+            kind: source.kind,
+            venueBindingId: source.venueBindingId,
+            venueId: source.venueId,
+          },
+        }),
+      });
+    }
+    return scopes;
+  };
   if (option.source.kind === "composite") {
     const legs = option.sourceLegs;
     if (!legs || legs.length === 0) return null;
-    const scopes = legs.map((leg) =>
-      sourceScope({
+    const scopes: SourceDebitScope[] = [];
+    for (const leg of legs) {
+      if (leg.source.kind === "venue_preparation") {
+        const preparation = venuePreparationScopes(
+          leg.source,
+          leg.requiredActions,
+        );
+        if (!preparation) return null;
+        scopes.push(...preparation);
+        continue;
+      }
+      const scope = sourceScope({
         actions: leg.requiredActions,
         amount: leg.sourceAmount,
         maximumSourceDebitSlippageBps,
         source: leg.source,
-      }),
-    );
-    return scopes.every((scope): scope is SourceDebitScope => scope != null)
-      ? scopes
-      : null;
+      });
+      if (!scope) return null;
+      scopes.push(scope);
+    }
+    return scopes;
+  }
+  if (option.source.kind === "venue_preparation") {
+    return venuePreparationScopes(option.source, option.requiredActions);
   }
   const amount = quotedOptionSourceAmount(option);
   if (!amount) return null;
@@ -428,21 +473,7 @@ function hasUnsupportedClientAction(option: SourceOption): boolean {
       // action would need a second, implicit authority path, so reject it
       // rather than treating its kind as something the Mini App can execute.
       action.actor !== "user" ||
-      action.kind === "signature" ||
-      !SUPPORTED_CLIENT_ACTION_KINDS.has(
-        action.kind as typeof SUPPORTED_CLIENT_ACTION_KINDS extends Set<infer T>
-          ? T
-          : never,
-      ),
-  );
-}
-
-function hasVenuePreparationSource(option: SourceOption): boolean {
-  return (
-    option.source.kind === "venue_preparation" ||
-    option.sourceLegs?.some(
-      (leg) => leg.source.kind === "venue_preparation",
-    ) === true
+      !isReceiptBearingFundingActionKind(action.kind),
   );
 }
 
@@ -461,12 +492,11 @@ function sourceOptionFeeCapUsd(option: SourceOption): string | null {
 
 function isSealableClientFundingOption(option: SourceOption): boolean {
   return (
-    // A venue-preparation option owns several physical input reservations but
-    // exposes no one client-debit identity. Do not seal it until its adapter
-    // can provide the same exact locations a generic materialized plan uses.
-    !hasVenuePreparationSource(option) &&
     !hasUnsupportedClientAction(option) &&
     !isInteractiveExternalDeposit(option) &&
+    // Venue preparation is sealable only when its source reference exposes
+    // every exact owned reservation. Legacy unscoped projections therefore
+    // remain valid for server execution but fail this client boundary.
     optionSourceScopes(option) != null &&
     sourceOptionFeeCapUsd(option) != null
   );
@@ -979,6 +1009,36 @@ function preparedOwnedSource(value: unknown): PreparedOwnedSource | null {
     : null;
 }
 
+function preparedVenuePreparationSources(
+  value: unknown,
+): readonly PreparedOwnedSource[] | null {
+  if (!isRecord(value) || value.kind !== "venue_preparation") return null;
+  const inputCount = value.inputCount;
+  const inputs = Array.isArray(value.inputs) ? value.inputs : null;
+  if (
+    !Number.isInteger(inputCount) ||
+    !inputs ||
+    inputs.length !== inputCount
+  ) {
+    return null;
+  }
+  const sources: PreparedOwnedSource[] = [];
+  for (const input of inputs) {
+    if (!isRecord(input)) return null;
+    const asset = exactAsset(input.asset);
+    if (!asset || typeof input.locationId !== "string") return null;
+    sources.push({
+      kind: "owned_location",
+      location: {
+        asset,
+        details: {},
+        locationId: input.locationId,
+      },
+    });
+  }
+  return sources;
+}
+
 function preparedOwnedSources(
   value: unknown,
 ): readonly PreparedOwnedSource[] | null {
@@ -1003,9 +1063,12 @@ function preparedOwnedSources(
         const source = preparedOwnedSource(leg.source);
         if (!source) return null;
         owned.push(source);
+      } else if (leg.source.kind === "venue_preparation") {
+        const sources = preparedVenuePreparationSources(leg.source);
+        if (!sources) return null;
+        owned.push(...sources);
       } else if (
-        leg.source.kind !== "external_ingress" &&
-        leg.source.kind !== "venue_preparation"
+        leg.source.kind !== "external_ingress"
       ) {
         return null;
       }
@@ -1016,10 +1079,10 @@ function preparedOwnedSources(
     const source = preparedOwnedSource(value.source);
     return source ? [source] : null;
   }
-  return value.source.kind === "external_ingress" ||
-    value.source.kind === "venue_preparation"
-    ? []
-    : null;
+  if (value.source.kind === "venue_preparation") {
+    return preparedVenuePreparationSources(value.source);
+  }
+  return value.source.kind === "external_ingress" ? [] : null;
 }
 
 function preparedOwnedSourceKey(
@@ -2014,9 +2077,5 @@ export async function materializeTelegramAppHandoffV2Funding(input: {
 
 /** Used by tests and callers to assert the exact public v2 action surface. */
 export function telegramAppHandoffV2SupportsActionKind(kind: string): boolean {
-  return SUPPORTED_CLIENT_ACTION_KINDS.has(
-    kind as typeof SUPPORTED_CLIENT_ACTION_KINDS extends Set<infer T>
-      ? T
-      : never,
-  );
+  return isReceiptBearingFundingActionKind(kind);
 }

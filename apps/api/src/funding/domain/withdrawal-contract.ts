@@ -12,6 +12,7 @@ import {
   type FundingRuntimePolicy,
 } from "../policies/funding-policy.js";
 import { canonicalAssetId, sameAsset } from "./asset-identity.js";
+import { SOLANA_NATIVE_ASSET } from "./network-fees.js";
 import type { AssetRef } from "./types.js";
 
 export const WITHDRAWAL_DESTINATION_CONTRACT_VERSION = 1;
@@ -28,6 +29,15 @@ function isSupportedWithdrawalSource(asset: AssetRef): boolean {
 }
 
 export function supportsWithdrawalDestinationAsset(asset: AssetRef): boolean {
+  // Code-owned EVM stables and native SOL use an exact same-asset transfer.
+  // Relay destination coverage is needed only for assets that cannot use that
+  // identity route (currently Solana USDC).
+  if (
+    (asset.networkId.startsWith("evm:") && isRelayPinnedStableAsset(asset)) ||
+    sameAsset(asset, SOLANA_NATIVE_ASSET)
+  ) {
+    return true;
+  }
   return (
     isRelayPinnedStableAsset(asset) &&
     Object.values(RELAY_ROUTE_SPECS).some(
@@ -46,12 +56,19 @@ export function withdrawalRecipientLocationPatternId(
     const id = canonicalAssetId(asset);
     if (id === RELAY_PINNED_ASSETS.polygonPusd)
       return "withdrawal-polygon-pusd-v1";
+    if (id === RELAY_PINNED_ASSETS.polygonUsdc)
+      return "withdrawal-polygon-usdc-v1";
+    if (id === RELAY_PINNED_ASSETS.polygonUsdce)
+      return "withdrawal-polygon-usdce-v1";
   }
   if (
     asset.networkId === "evm:8453" &&
     canonicalAssetId(asset) === RELAY_PINNED_ASSETS.baseUsdc
   ) {
     return "withdrawal-base-usdc-v1";
+  }
+  if (sameAsset(asset, SOLANA_NATIVE_ASSET)) {
+    return "withdrawal-solana-sol-v1";
   }
   if (
     asset.networkId === "solana:mainnet" &&

@@ -1422,13 +1422,24 @@ async function inspectSvmTarget(
     signature: reference,
     timeoutMs: fundingSidecarRuntimeConfig.solanaRpcTimeoutMs,
   });
+  const withTransactionSignature = (
+    result: FundingStepReceiptEvidence,
+  ): FundingStepReceiptEvidence => ({
+    ...result,
+    evidence: {
+      ...result.evidence,
+      transactionSignature: reference,
+    },
+  });
   if (!status) {
-    return evaluateSvmActionReceipt({
-      action: target.action,
-      expectedSignerAddress,
-      transaction: null,
-      previous: target.previousReceipt,
-    });
+    return withTransactionSignature(
+      evaluateSvmActionReceipt({
+        action: target.action,
+        expectedSignerAddress,
+        transaction: null,
+        previous: target.previousReceipt,
+      }),
+    );
   }
   const commitment =
     status.confirmationStatus === "finalized" ? "finalized" : "confirmed";
@@ -1439,12 +1450,14 @@ async function inspectSvmTarget(
     commitment,
   });
   if (!transaction) {
-    return evaluateSvmActionReceipt({
-      action: target.action,
-      expectedSignerAddress,
-      transaction: null,
-      previous: target.previousReceipt,
-    });
+    return withTransactionSignature(
+      evaluateSvmActionReceipt({
+        action: target.action,
+        expectedSignerAddress,
+        transaction: null,
+        previous: target.previousReceipt,
+      }),
+    );
   }
   const keyAt = (index: number): string | undefined =>
     transaction.accountKeys[index];
@@ -1478,24 +1491,26 @@ async function inspectSvmTarget(
     0,
     transaction.numRequiredSignatures,
   );
-  return evaluateSvmActionReceipt({
-    action: target.action,
-    expectedSignerAddress,
-    transaction: {
-      confirmationStatus:
-        status.confirmationStatus === "finalized"
-          ? "finalized"
-          : status.confirmationStatus === "confirmed"
-            ? "confirmed"
-            : "processed",
-      failed: status.failed || transaction.failed,
-      slot: transaction.slot,
-      signers,
-      instructions,
-      addressLookupTables: transaction.addressLookupTables,
-    },
-    previous: target.previousReceipt,
-  });
+  return withTransactionSignature(
+    evaluateSvmActionReceipt({
+      action: target.action,
+      expectedSignerAddress,
+      transaction: {
+        confirmationStatus:
+          status.confirmationStatus === "finalized"
+            ? "finalized"
+            : status.confirmationStatus === "confirmed"
+              ? "confirmed"
+              : "processed",
+        failed: status.failed || transaction.failed,
+        slot: transaction.slot,
+        signers,
+        instructions,
+        addressLookupTables: transaction.addressLookupTables,
+      },
+      previous: target.previousReceipt,
+    }),
+  );
 }
 
 export type FundingStepReceiptInspector = (

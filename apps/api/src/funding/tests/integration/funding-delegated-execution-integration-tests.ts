@@ -8073,7 +8073,7 @@ try {
     {
       job_error_code: "terminal_relay_evidence_reorg_unresolved",
       job_error_summary:
-        "terminal Relay receipt reorg remained unresolved after its canonical watch window",
+        "terminal action receipt reorg remained unresolved after its canonical watch window",
       job_status: "dead_letter",
       operation_status: "refunded",
     },

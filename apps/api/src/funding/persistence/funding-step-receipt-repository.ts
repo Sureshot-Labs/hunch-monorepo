@@ -1,10 +1,12 @@
 import { tx, type Pool, type PoolClient } from "@hunch/infra";
+import bs58 from "bs58";
 
 import { activateTelegramTradeShortfallRouterDependentFundInTransaction } from "../execution/telegram-trade-shortfall-activation.js";
 import {
   relayClientSourceDebitPostcondition,
   withRelayClientSourceDebitPostcondition,
 } from "../execution/relay-client-source-debit.js";
+import { directWithdrawalActionValidation } from "../execution/direct-withdrawal-transfer.js";
 
 import { isReceiptBearingFundingActionKind } from "../domain/action-kinds.js";
 import { isRawAmount } from "../domain/raw-amount.js";
@@ -234,7 +236,11 @@ export async function listFundingStepReceiptTargets(
         and (
           operation.status not in ('completed', 'refunded', 'failed', 'cancelled')
           or (
-            step.executor_id = 'telegram_relay_evm_funding_v1'
+            (
+              step.executor_id = 'telegram_relay_evm_funding_v1'
+              or operation.support_metadata ->> 'withdrawalExecutionKind' =
+                   'exact_same_asset_transfer'
+            )
             and receipt.status in ('finalized', 'failed')
             and receipt.canonical
             and receipt.finalized_at >= $2::timestamptz - interval '15 minutes'
@@ -558,6 +564,11 @@ export async function applyFundingStepReceiptEvidenceInTransaction(
     const postcondition = relayClientSourceDebitPostcondition(
       actionValidationResult,
     );
+    const observationKind = directWithdrawalActionValidation(
+      actionValidationResult,
+    )
+      ? "destination_credit"
+      : "source_debit";
     const attributedSourceRaw = row.evidence.attributedSourceRaw;
     const sourceDebitEventIndex = row.evidence.sourceDebitEventIndex;
     const transactionHash = row.evidence.transactionHash;
@@ -574,7 +585,7 @@ export async function applyFundingStepReceiptEvidenceInTransaction(
       await allocateFundingObservationInTransaction(client, {
         operationId: input.operationId,
         segmentId: scoped.segment_id,
-        kind: "source_debit",
+        kind: observationKind,
         networkId: input.networkId,
         assetId: postcondition.expectedSourceAssetId,
         assetDecimals: postcondition.expectedSourceAssetDecimals,
@@ -589,7 +600,60 @@ export async function applyFundingStepReceiptEvidenceInTransaction(
         finalityStatus: "finalized",
         finalizedAt: row.finalized_at,
         metadata: {
-          observerId: "relay_client_receipt_source_debit_v1",
+          observerId:
+            observationKind === "destination_credit"
+              ? "direct_withdrawal_receipt_destination_credit_v1"
+              : "relay_client_receipt_source_debit_v1",
+          receiptAttemptId: input.attemptId,
+        },
+      });
+    }
+  }
+
+  if (
+    scoped.executor_id === "wallet_profile_svm_v1" &&
+    row.status === "finalized" &&
+    row.action_match === true &&
+    row.canonical
+  ) {
+    const validation = directWithdrawalActionValidation(
+      scoped.action_validation_result,
+    );
+    const transactionSignature = row.evidence.transactionSignature;
+    let signatureLength = 0;
+    if (typeof transactionSignature === "string") {
+      try {
+        signatureLength = bs58.decode(transactionSignature).length;
+      } catch {
+        signatureLength = 0;
+      }
+    }
+    if (
+      validation?.kind === "exact_sol_withdrawal" &&
+      typeof transactionSignature === "string" &&
+      signatureLength === 64 &&
+      row.ledger_height &&
+      row.finalized_at
+    ) {
+      await allocateFundingObservationInTransaction(client, {
+        operationId: input.operationId,
+        segmentId: scoped.segment_id,
+        kind: "destination_credit",
+        networkId: input.networkId,
+        assetId: validation.expectedSourceAssetId,
+        assetDecimals: validation.expectedSourceAssetDecimals,
+        txHash: transactionSignature,
+        eventIndex: "0",
+        fromAddress: validation.expectedSourceAddress,
+        toAddress: validation.expectedSourceRecipient,
+        rawAmount: validation.expectedSourceRaw,
+        observedAt: row.observed_at,
+        ledgerHeight: row.ledger_height,
+        blockHash: row.block_hash,
+        finalityStatus: "finalized",
+        finalizedAt: row.finalized_at,
+        metadata: {
+          observerId: "direct_sol_withdrawal_receipt_destination_credit_v1",
           receiptAttemptId: input.attemptId,
         },
       });
@@ -611,7 +675,10 @@ export async function applyFundingStepReceiptEvidenceInTransaction(
         where operation_id = $1
           and (
             (kind = 'venue_readiness' and $4 = 'venue_preparation')
-            or (kind = 'source_debit' and $4 = 'transaction')
+            or (
+              kind in ('source_debit', 'destination_credit')
+              and $4 = 'transaction'
+            )
           )
           and metadata->>'receiptAttemptId' = $3
           and canonical

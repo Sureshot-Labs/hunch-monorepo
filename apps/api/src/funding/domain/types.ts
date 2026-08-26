@@ -124,6 +124,16 @@ export type FundingSourceRef =
       venueId: VenueId;
       venueBindingId: string;
       inputCount: number;
+      /**
+       * Exact owned balances consumed by this preparation. Older persisted
+       * projections may omit the field; such an unscoped preparation remains
+       * valid for server execution but cannot be sealed into a Mini App plan.
+       */
+      inputs?: readonly Readonly<{
+        asset: AssetRef;
+        locationId: string;
+        rawAmount: string;
+      }>[];
     }>;
 
 export const LOCATION_CAPABILITIES = [

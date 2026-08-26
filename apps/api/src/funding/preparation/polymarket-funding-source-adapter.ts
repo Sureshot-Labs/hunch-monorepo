@@ -445,6 +445,11 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
       venueId: "polymarket",
       venueBindingId: facts.venueBinding.bindingId,
       inputCount: resolvedInputs.length,
+      inputs: resolvedInputs.map((entry) => ({
+        asset: entry.asset,
+        locationId: entry.resolved.component.location.locationId,
+        rawAmount: entry.rawAmount,
+      })),
     };
     const option: SourceOption = {
       sourceOptionId: stableOpaqueId(

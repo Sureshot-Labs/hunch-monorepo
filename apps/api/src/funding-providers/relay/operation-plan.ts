@@ -183,11 +183,11 @@ async function validatedSteps(input: {
 }
 
 export function buildPolymarketPreRouteHandoffSteps(input: {
-  source: RelayEligibleSourceFact;
+  source: Pick<RelayEligibleSourceFact, "preRouteHandoff">;
   sourceAmount: Money;
   profile: WalletExecutionProfile;
-  steps: Awaited<ReturnType<typeof validatedSteps>>;
-}) {
+  steps: readonly FundingCommitStep[];
+}): readonly FundingCommitStep[] {
   const handoff = input.source.preRouteHandoff;
   if (!handoff) return input.steps;
   if (

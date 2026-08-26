@@ -140,8 +140,30 @@ const fundingSourceRefSchema = z.discriminatedUnion("kind", [
       venueId: z.string().trim().min(2).max(160),
       venueBindingId: opaqueIdSchema,
       inputCount: z.number().int().min(1).max(16),
+      inputs: z
+        .array(
+          z
+            .object({
+              asset: assetRefSchema,
+              locationId: opaqueIdSchema,
+              rawAmount: rawAmountSchema.refine((raw) => BigInt(raw) > 0n),
+            })
+            .strict(),
+        )
+        .min(1)
+        .max(16)
+        .optional(),
     })
-    .strict(),
+    .strict()
+    .superRefine((source, context) => {
+      if (source.inputs && source.inputs.length !== source.inputCount) {
+        context.addIssue({
+          code: "custom",
+          path: ["inputs"],
+          message: "venue preparation input count differs from exact inputs",
+        });
+      }
+    }),
 ]);
 
 const feeSchema = z
