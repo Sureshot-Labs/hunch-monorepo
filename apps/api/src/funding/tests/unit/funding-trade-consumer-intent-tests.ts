@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 
 import {
   buildFundingTradeConsumerIntent,
+  compareFundingTradeConsumerIntentToConfirmedBound,
   sameFundingTradeConsumerIntent,
   storedFundingTradeConsumerIntent,
 } from "../../persistence/funding-trade-consumer-intent.js";
@@ -82,6 +83,54 @@ for (const changed of [
   assert.equal(sameFundingTradeConsumerIntent(exact, changed), false);
 }
 
+const feeInclusivePolymarketBound = buildFundingTradeConsumerIntent({
+  venueId: "polymarket",
+  marketId: "polymarket:market-1",
+  marketContextId: "outcome-token-yes",
+  spend: { asset, raw: "5172501" },
+});
+const lowerFeeInclusivePolymarketSpend = buildFundingTradeConsumerIntent({
+  venueId: "polymarket",
+  marketId: "polymarket:market-1",
+  marketContextId: "outcome-token-yes",
+  spend: { asset, raw: "5100000" },
+});
+assert.equal(
+  compareFundingTradeConsumerIntentToConfirmedBound(
+    feeInclusivePolymarketBound,
+    lowerFeeInclusivePolymarketSpend,
+  ),
+  "matched",
+  "a fresh fee-inclusive spend may be lower than its confirmed funding bound",
+);
+const excessiveFeeInclusivePolymarketSpend = buildFundingTradeConsumerIntent({
+  venueId: "polymarket",
+  marketId: "polymarket:market-1",
+  marketContextId: "outcome-token-yes",
+  spend: { asset, raw: "5172502" },
+});
+assert.equal(
+  compareFundingTradeConsumerIntentToConfirmedBound(
+    feeInclusivePolymarketBound,
+    excessiveFeeInclusivePolymarketSpend,
+  ),
+  "spend_exceeded",
+  "the fresh fee-inclusive spend may never exceed the confirmed funding bound",
+);
+assert.equal(
+  compareFundingTradeConsumerIntentToConfirmedBound(
+    feeInclusivePolymarketBound,
+    buildFundingTradeConsumerIntent({
+      venueId: "polymarket",
+      marketId: "polymarket:market-1",
+      marketContextId: "outcome-token-no",
+      spend: { asset, raw: "5000000" },
+    }),
+  ),
+  "scope_mismatch",
+  "a lower spend cannot widen the funded market/outcome scope",
+);
+
 assert.throws(
   () =>
     buildFundingTradeConsumerIntent({
@@ -118,5 +167,5 @@ assert.deepEqual(
 );
 
 console.log(
-  "[funding-trade-consumer-intent-tests] spend, outcome, asset, and decimals are exact while route over-delivery remains valid for the frozen order",
+  "[funding-trade-consumer-intent-tests] consumer scope stays exact while fresh fee-inclusive spend may remain within its confirmed bound",
 );

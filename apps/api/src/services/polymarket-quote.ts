@@ -32,6 +32,7 @@ export type PolymarketQuoteContext = {
   marketInfo: PolymarketMarketInfoRow | null;
   feePolicySnapshot: PolymarketFeePolicySnapshot;
   platformFeeCurve: PlatformFeeCurve;
+  platformFeeCurveUnavailable?: boolean;
 };
 
 export type PolymarketQuoteResult = {
@@ -91,7 +92,8 @@ export class PolymarketQuoteError extends Error {
       | "quote_timeout"
       | "invalid_price"
       | "missing_amount"
-      | "amount_too_small",
+      | "amount_too_small"
+      | "fee_unavailable",
   ) {
     super(publicMessage);
     this.name = "PolymarketQuoteError";
@@ -336,6 +338,195 @@ function feeBaseRawForSide(
   return side === "BUY" ? makerAmountRaw : takerAmountRaw;
 }
 
+function calculateMaximumPolymarketMarketBuyFeeRaw(input: {
+  feeExponent: number;
+  feeRate: number;
+  makerAmountRaw: bigint;
+  maximumPrice: number;
+  priceTick: number;
+}): bigint | null {
+  const minimumPrice = input.priceTick;
+  const maximumPrice = input.maximumPrice;
+  if (
+    input.makerAmountRaw <= 0n ||
+    !Number.isFinite(input.feeRate) ||
+    input.feeRate < 0 ||
+    !Number.isFinite(input.feeExponent) ||
+    input.feeExponent < 0 ||
+    !Number.isFinite(minimumPrice) ||
+    !Number.isFinite(maximumPrice) ||
+    minimumPrice <= 0 ||
+    maximumPrice < minimumPrice ||
+    maximumPrice >= 1
+  ) {
+    return null;
+  }
+  if (input.feeRate === 0) return 0n;
+  const makerAmount = Number(input.makerAmountRaw);
+  if (!Number.isSafeInteger(makerAmount)) return null;
+
+  const maximumPowerProduct = (alpha: number, beta: number): number => {
+    const evaluate = (price: number) =>
+      Math.pow(price, alpha) * Math.pow(1 - price, beta);
+    const candidates = [minimumPrice, maximumPrice];
+    if (alpha > 0 && beta > 0) {
+      const stationaryPrice = alpha / (alpha + beta);
+      if (stationaryPrice >= minimumPrice && stationaryPrice <= maximumPrice) {
+        candidates.push(stationaryPrice);
+      }
+    }
+    return Math.max(...candidates.map(evaluate));
+  };
+
+  // A FOK market Buy signs a maximum price, not its eventual match price.
+  // At any better price q, the venue may fill up to maker/q shares. The first
+  // term is the continuous maximum of that fee curve; the second covers the
+  // single raw share introduced by integer ceiling. One final raw unit covers
+  // floating-point evaluation error, so this is an upper bound rather than a
+  // mutable top-of-book estimate.
+  const mainFeeUpperBound =
+    makerAmount *
+    input.feeRate *
+    maximumPowerProduct(input.feeExponent - 1, input.feeExponent);
+  const sizeRoundingUpperBound =
+    input.feeRate * maximumPowerProduct(input.feeExponent, input.feeExponent);
+  const feeUpperBound = mainFeeUpperBound + sizeRoundingUpperBound;
+  if (
+    !Number.isFinite(feeUpperBound) ||
+    feeUpperBound <= 0 ||
+    feeUpperBound > Number.MAX_SAFE_INTEGER
+  ) {
+    return null;
+  }
+  return BigInt(Math.ceil(feeUpperBound)) + 1n;
+}
+
+function calculatePolymarketFeeEstimateRaw(input: {
+  bestAsk: number | null;
+  feePolicySnapshot: PolymarketFeePolicySnapshot;
+  isLimitOrder: boolean;
+  makerAmountRaw: bigint;
+  marketInfo: PolymarketMarketInfoRow | null;
+  platformFeeCurve: PlatformFeeCurve;
+  price: number;
+  priceTick: number;
+  side: PolymarketSide;
+  sizeRaw: bigint;
+  takerAmountRaw: bigint;
+}): Readonly<{
+  builderFeeRaw: bigint;
+  platformFeeRaw: bigint;
+  totalFeeRaw: bigint;
+}> | null {
+  const platformFeeRawValue = input.isLimitOrder
+    ? input.marketInfo?.maker_fee_bps
+    : input.marketInfo?.taker_fee_bps;
+  const platformFeeBps =
+    platformFeeRawValue != null && platformFeeRawValue !== ""
+      ? Math.max(0, Number(platformFeeRawValue))
+      : 0;
+  const builderFeeBps =
+    input.feePolicySnapshot.collectionMode === "builder"
+      ? input.isLimitOrder
+        ? input.feePolicySnapshot.builderMakerFeeBps
+        : input.feePolicySnapshot.builderTakerFeeBps
+      : 0;
+  const effectivePlatformFeeCurve =
+    input.platformFeeCurve ??
+    (platformFeeBps > 0
+      ? { rate: platformFeeBps / 10_000, exponent: 1 }
+      : null);
+  let platformFeeRaw = 0n;
+  if (effectivePlatformFeeCurve) {
+    if (input.side === "BUY" && !input.isLimitOrder) {
+      const maximumPlatformFeeRaw = calculateMaximumPolymarketMarketBuyFeeRaw({
+        feeExponent: effectivePlatformFeeCurve.exponent,
+        feeRate: effectivePlatformFeeCurve.rate,
+        makerAmountRaw: input.makerAmountRaw,
+        maximumPrice: input.price,
+        priceTick: input.priceTick,
+      });
+      if (maximumPlatformFeeRaw == null) return null;
+      platformFeeRaw = maximumPlatformFeeRaw;
+    } else {
+      let platformFeePrice = input.price;
+      let platformFeeSizeRaw = input.sizeRaw;
+      if (
+        input.side === "BUY" &&
+        input.bestAsk != null &&
+        Number.isFinite(input.bestAsk) &&
+        input.bestAsk > 0 &&
+        input.bestAsk < 1
+      ) {
+        platformFeePrice = Math.min(input.price, input.bestAsk);
+        const platformFeePriceMicro = BigInt(
+          Math.round(platformFeePrice * 1_000_000),
+        );
+        if (platformFeePriceMicro > 0n) {
+          platformFeeSizeRaw = ceilDivRaw(
+            input.makerAmountRaw * USDC_SCALE,
+            platformFeePriceMicro,
+          );
+        }
+      }
+      platformFeeRaw = calculatePolymarketPlatformFeeRaw({
+        sizeRaw: platformFeeSizeRaw,
+        price: platformFeePrice,
+        feeRate: effectivePlatformFeeCurve.rate,
+        feeExponent: effectivePlatformFeeCurve.exponent,
+      });
+    }
+  }
+  const builderFeeRaw = calculatePolymarketBuilderFeeRaw(
+    feeBaseRawForSide(input.side, input.makerAmountRaw, input.takerAmountRaw),
+    builderFeeBps,
+  );
+  return {
+    builderFeeRaw,
+    platformFeeRaw,
+    totalFeeRaw: platformFeeRaw + builderFeeRaw,
+  };
+}
+
+/**
+ * Recompute the maximum collateral debit represented by one signed FOK Buy.
+ * The order signs nominal maker/taker amounts; venue and builder fees are
+ * additional. Recover the signed price tick, then apply the same fee model as
+ * the quote path against fresh, server-owned market and policy context.
+ */
+export function calculatePolymarketSignedFokBuyRequiredSpendRaw(input: {
+  context: PolymarketQuoteContext;
+  makerAmountRaw: bigint;
+  takerAmountRaw: bigint;
+}): bigint | null {
+  if (input.makerAmountRaw <= 0n || input.takerAmountRaw <= 0n) return null;
+  if (input.context.platformFeeCurveUnavailable === true) return null;
+  const priceTick = resolvePolymarketPriceTick(
+    input.context.orderbook.tickSize ??
+      (input.context.marketInfo?.order_price_min_tick_size != null
+        ? Number(input.context.marketInfo.order_price_min_tick_size)
+        : null),
+  );
+  const rawPrice = Number(input.makerAmountRaw) / Number(input.takerAmountRaw);
+  const price = roundLimitPriceToTick(rawPrice, priceTick, "BUY");
+  if (!Number.isFinite(price) || price <= 0 || price >= 1) return null;
+  const fees = calculatePolymarketFeeEstimateRaw({
+    bestAsk: findBestAsk(input.context.orderbook.asks),
+    feePolicySnapshot: input.context.feePolicySnapshot,
+    isLimitOrder: false,
+    makerAmountRaw: input.makerAmountRaw,
+    marketInfo: input.context.marketInfo,
+    platformFeeCurve: input.context.platformFeeCurve,
+    price,
+    priceTick,
+    side: "BUY",
+    sizeRaw: input.takerAmountRaw,
+    takerAmountRaw: input.takerAmountRaw,
+  });
+  if (!fees) return null;
+  return input.makerAmountRaw + fees.totalFeeRaw;
+}
+
 function hasAvailableAskDepthForBuy(
   orderbook: PolymarketOrderbookSummary,
   quote: PolymarketQuoteResult,
@@ -376,10 +567,18 @@ async function fetchPolymarketPlatformFeeCurve(
 ): Promise<PlatformFeeCurve> {
   if (!conditionId) return null;
   const payload = await polymarketClient.getClobMarketInfo(conditionId);
-  if (!isRecord(payload) || !isRecord(payload.fd)) return null;
+  if (!isRecord(payload)) {
+    throw new Error("Invalid Polymarket fee metadata response");
+  }
+  if (payload.fd == null) return null;
+  if (!isRecord(payload.fd)) {
+    throw new Error("Invalid Polymarket fee curve response");
+  }
   const rate = readFiniteNumber(payload.fd.r);
   const exponent = readFiniteNumber(payload.fd.e);
-  if (rate == null || exponent == null) return null;
+  if (rate == null || rate < 0 || exponent == null || exponent < 0) {
+    throw new Error("Invalid Polymarket fee curve parameters");
+  }
   return { rate, exponent };
 }
 
@@ -410,19 +609,28 @@ export async function loadPolymarketQuoteContext(
   }
 
   let platformFeeCurve: PlatformFeeCurve = null;
-  try {
-    platformFeeCurve = await fetchPolymarketPlatformFeeCurve(
-      marketInfo?.condition_id,
-    );
-  } catch (error) {
-    inputs.logWarn?.({
-      error,
-      tokenId: inputs.tokenId,
-      conditionId: marketInfo?.condition_id,
-    });
+  const conditionId = marketInfo?.condition_id;
+  let platformFeeCurveUnavailable = !conditionId;
+  if (conditionId) {
+    try {
+      platformFeeCurve = await fetchPolymarketPlatformFeeCurve(conditionId);
+    } catch (error) {
+      platformFeeCurveUnavailable = true;
+      inputs.logWarn?.({
+        error,
+        tokenId: inputs.tokenId,
+        conditionId,
+      });
+    }
   }
 
-  return { orderbook, marketInfo, feePolicySnapshot, platformFeeCurve };
+  return {
+    orderbook,
+    marketInfo,
+    feePolicySnapshot,
+    platformFeeCurve,
+    platformFeeCurveUnavailable,
+  };
 }
 
 export function calculatePolymarketQuote(inputs: {
@@ -687,66 +895,29 @@ export function calculatePolymarketQuote(inputs: {
       : null;
   const violatesMinOrderSize =
     minOrderSizeRaw != null ? sizeMicro < minOrderSizeRaw : null;
-  const takerFeeRaw = marketInfo?.taker_fee_bps ?? null;
-  const makerFeeRaw = marketInfo?.maker_fee_bps ?? null;
-  const takerFeeBps =
-    takerFeeRaw != null && takerFeeRaw !== ""
-      ? Math.max(0, Number(takerFeeRaw))
-      : 0;
-  const makerFeeBps =
-    makerFeeRaw != null && makerFeeRaw !== ""
-      ? Math.max(0, Number(makerFeeRaw))
-      : 0;
-  const platformFeeBps = isLimitOrder ? makerFeeBps : takerFeeBps;
-  const builderFeeBps =
-    feePolicySnapshot.collectionMode === "builder"
-      ? isLimitOrder
-        ? feePolicySnapshot.builderMakerFeeBps
-        : feePolicySnapshot.builderTakerFeeBps
-      : 0;
-  const effectivePlatformFeeCurve =
-    platformFeeCurve ??
-    (platformFeeBps > 0
-      ? { rate: platformFeeBps / 10_000, exponent: 1 }
-      : null);
-  const feeBaseRaw = feeBaseRawForSide(
-    inputs.side,
-    makerAmountMicro,
-    takerAmountMicro,
-  );
-  let platformFeePrice = price;
-  let platformFeeSizeRaw = sizeMicro;
-  if (
-    inputs.side === "BUY" &&
-    bestAsk != null &&
-    Number.isFinite(bestAsk) &&
-    bestAsk > 0 &&
-    bestAsk < 1
-  ) {
-    platformFeePrice = Math.min(price, bestAsk);
-    const platformFeePriceMicro = BigInt(
-      Math.round(platformFeePrice * 1_000_000),
+  const feeEstimate = calculatePolymarketFeeEstimateRaw({
+    bestAsk,
+    feePolicySnapshot,
+    isLimitOrder,
+    makerAmountRaw: makerAmountMicro,
+    marketInfo,
+    platformFeeCurve,
+    price,
+    priceTick,
+    side: inputs.side,
+    sizeRaw: sizeMicro,
+    takerAmountRaw: takerAmountMicro,
+  });
+  if (!feeEstimate) {
+    throw new PolymarketQuoteError(
+      502,
+      "Polymarket fee estimate is unavailable",
+      "fee_unavailable",
     );
-    if (platformFeePriceMicro > 0n) {
-      platformFeeSizeRaw = ceilDivRaw(
-        makerAmountMicro * USDC_SCALE,
-        platformFeePriceMicro,
-      );
-    }
   }
-  const platformFeeEstimateRaw = effectivePlatformFeeCurve
-    ? calculatePolymarketPlatformFeeRaw({
-        sizeRaw: platformFeeSizeRaw,
-        price: platformFeePrice,
-        feeRate: effectivePlatformFeeCurve.rate,
-        feeExponent: effectivePlatformFeeCurve.exponent,
-      })
-    : 0n;
-  const builderFeeEstimateRaw = calculatePolymarketBuilderFeeRaw(
-    feeBaseRaw,
-    builderFeeBps,
-  );
-  const totalFeeEstimateRaw = platformFeeEstimateRaw + builderFeeEstimateRaw;
+  const platformFeeEstimateRaw = feeEstimate.platformFeeRaw;
+  const builderFeeEstimateRaw = feeEstimate.builderFeeRaw;
+  const totalFeeEstimateRaw = feeEstimate.totalFeeRaw;
   const totalRequiredUsdcRaw =
     inputs.side === "BUY" ? makerAmountMicro + totalFeeEstimateRaw : null;
 

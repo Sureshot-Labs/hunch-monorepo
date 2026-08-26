@@ -3,6 +3,7 @@
 import assert from "node:assert/strict";
 import {
   calculatePolymarketQuote,
+  calculatePolymarketSignedFokBuyRequiredSpendRaw,
   findMaxPolymarketMarketBuyUsd,
   PolymarketQuoteError,
   type PolymarketQuoteContext,
@@ -110,6 +111,118 @@ function noFeeNoMinContext(): PolymarketQuoteContext {
 }
 
 const tests: TestCase[] = [
+  {
+    name: "signed FOK Buy recomputes the same fee-inclusive collateral bound",
+    run: () => {
+      const context = quoteContext({
+        orderbook: {
+          bids: [{ price: 0.5, size: 10_000 }],
+          asks: [{ price: 0.51, size: 10_000 }],
+          tickSize: 0.01,
+          minOrderSize: 5,
+          negRisk: false,
+        },
+        feePolicySnapshot: builderFeePolicy(100),
+      });
+      const quote = calculatePolymarketQuote({
+        amountType: "usd",
+        amountUsdRawInput: 5_000_000n,
+        context,
+        orderType: "FOK",
+        side: "BUY",
+        slippageBps: 500,
+        tokenId: "token-yes",
+      });
+      const requiredSpendRaw = calculatePolymarketSignedFokBuyRequiredSpendRaw({
+        context,
+        makerAmountRaw: BigInt(quote.makerAmount),
+        takerAmountRaw: BigInt(quote.takerAmount),
+      });
+      assert.equal(requiredSpendRaw?.toString(), quote.totalRequiredUsdcRaw);
+      assert.ok((requiredSpendRaw ?? 0n) > BigInt(quote.makerAmount));
+    },
+  },
+  {
+    name: "signed FOK Buy reserves the maximum fee over every allowed execution price",
+    run: () => {
+      const context = quoteContext({
+        orderbook: {
+          bids: [{ price: 0.09, size: 10_000 }],
+          asks: [{ price: 0.1, size: 10_000 }],
+          tickSize: 0.01,
+          minOrderSize: 5,
+          negRisk: false,
+        },
+        marketInfo: { ...baseMarketInfo, taker_fee_bps: "0" },
+        platformFeeCurve: { rate: 0.25, exponent: 2 },
+      });
+      const quote = calculatePolymarketQuote({
+        amountType: "usd",
+        amountUsdRawInput: 5_000_000n,
+        context,
+        orderType: "FOK",
+        side: "BUY",
+        slippageBps: 500,
+        tokenId: "token-yes",
+      });
+      const requiredSpendRaw = calculatePolymarketSignedFokBuyRequiredSpendRaw({
+        context,
+        makerAmountRaw: BigInt(quote.makerAmount),
+        takerAmountRaw: BigInt(quote.takerAmount),
+      });
+      assert.equal(requiredSpendRaw?.toString(), quote.totalRequiredUsdcRaw);
+      const reservedFeeRaw =
+        (requiredSpendRaw ?? 0n) - BigInt(quote.makerAmount);
+      const maximumPriceCents = Math.round(quote.price * 100);
+      let feeAtCurrentAskRaw = 0n;
+      for (
+        let priceCents = 1;
+        priceCents <= maximumPriceCents;
+        priceCents += 1
+      ) {
+        const priceRaw = BigInt(priceCents * 10_000);
+        const sizeRaw =
+          (BigInt(quote.makerAmount) * 1_000_000n + priceRaw - 1n) / priceRaw;
+        const price = priceCents / 100;
+        const actualFeeRaw = BigInt(
+          Math.ceil(
+            (Number(sizeRaw) / 1_000_000) *
+              0.25 *
+              Math.pow(price * (1 - price), 2) *
+              1_000_000,
+          ),
+        );
+        assert.ok(reservedFeeRaw >= actualFeeRaw);
+        if (priceCents === 10) feeAtCurrentAskRaw = actualFeeRaw;
+      }
+      assert.ok(reservedFeeRaw > feeAtCurrentAskRaw);
+    },
+  },
+  {
+    name: "signed FOK Buy fails closed when authoritative fee context is unavailable",
+    run: () => {
+      const requiredSpendRaw = calculatePolymarketSignedFokBuyRequiredSpendRaw({
+        context: quoteContext({ platformFeeCurveUnavailable: true }),
+        makerAmountRaw: 5_000_000n,
+        takerAmountRaw: 10_000_000n,
+      });
+      assert.equal(requiredSpendRaw, null);
+    },
+  },
+  {
+    name: "signed FOK Buy rejects non-computable finite fee curves",
+    run: () => {
+      const requiredSpendRaw = calculatePolymarketSignedFokBuyRequiredSpendRaw({
+        context: quoteContext({
+          marketInfo: { ...baseMarketInfo, taker_fee_bps: "0" },
+          platformFeeCurve: { rate: Number.MAX_VALUE, exponent: 2 },
+        }),
+        makerAmountRaw: 5_000_000n,
+        takerAmountRaw: 10_000_000n,
+      });
+      assert.equal(requiredSpendRaw, null);
+    },
+  },
   {
     name: "max spend preserves exact cent raw amounts without float drift",
     run: () => {

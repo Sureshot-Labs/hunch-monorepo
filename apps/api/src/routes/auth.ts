@@ -16,6 +16,7 @@ import {
   createAuthMiddleware,
 } from "../auth.js";
 import { checkRateLimitForSecurityClientIp } from "../lib/request-ip.js";
+import { isRecord } from "../lib/type-guards.js";
 import { normalizeWalletNameInput } from "../lib/wallet-name.js";
 import {
   canonicalWalletIdentity,
@@ -757,13 +758,40 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
       const venue = body.venue;
 
       try {
+        let additionalData = body.additionalData;
+        if (venue === "polymarket" && isRecord(additionalData)) {
+          const requestedFunder =
+            additionalData.funderAddress ??
+            additionalData.funder_address ??
+            additionalData.funder;
+          if (requestedFunder != null) {
+            if (typeof requestedFunder !== "string") {
+              throw new Error("Polymarket funder address must be a string.");
+            }
+            const validatedFunder = await validatePolymarketFunderSelection({
+              signer: walletAddress,
+              funderAddress: requestedFunder,
+              includeMagicProxy: true,
+            });
+            const {
+              funderAddress: _funderAddress,
+              funder_address: _funderAddressSnake,
+              funder: _funder,
+              ...additionalDataWithoutFunder
+            } = additionalData;
+            additionalData = {
+              ...additionalDataWithoutFunder,
+              funderAddress: validatedFunder.funderAddress,
+            };
+          }
+        }
         const credentials = await AuthService.createOrUpdateVenueCredentials(
           user.id,
           walletAddress,
           venue,
           body.apiKey,
           body.apiSecret,
-          body.additionalData,
+          additionalData,
         );
 
         reply.header("Content-Type", "application/json; charset=utf-8");
