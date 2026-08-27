@@ -1,16 +1,13 @@
-export const POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID =
-  "polymarket_deposit_usdce_wrap_v1";
 /**
- * Controller-wallet pUSD can be funded into the canonical Polymarket Deposit
- * Wallet by the same immutable Funding Router.  It is deliberately a
- * different authority envelope from the USDC.e-only wrap: the server checks
- * that both fund amounts are the one exact confirmed shortfall.
+ * Controller-wallet pUSD, optionally combined with controller-wallet USDC.e,
+ * can be funded into the canonical Polymarket Deposit Wallet by the immutable
+ * Funding Router. The server checks that both fund amounts compose the one
+ * exact confirmed shortfall. A Deposit Wallet itself is never a Router source.
  */
 export const POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID =
   "polymarket_deposit_pusd_fund_v1";
 
 export const POLYMARKET_DEPOSIT_ROUTER_PROFILE_IDS = Object.freeze([
-  POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
   POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
 ]);
 

@@ -40,7 +40,6 @@ import {
 import {
   isPolymarketDepositRouterProfileId,
   POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
-  POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
 } from "../funding/execution/delegated-funding-profile-ids.js";
 import { activateTelegramTradeShortfallInitialStepInTransaction } from "../funding/execution/telegram-trade-shortfall-activation.js";
 import {
@@ -402,39 +401,32 @@ export function resolveTelegramTradeShortfallExecutionProfile(
     })
   ) {
     const sources = optionSourceAssets(option);
+    const pUsdAsset: AssetRef = {
+      networkId: "evm:137",
+      assetId:
+        fundingSidecarRuntimeConfig.polymarketPusdAddress || POLYGON_PUSD,
+      decimals: 6,
+    };
+    const usdceAsset: AssetRef = {
+      networkId: "evm:137",
+      assetId: POLYGON_USDCE_LEGACY,
+      decimals: 6,
+    };
     if (
-      sources.length === 1 &&
-      sameAsset(sources[0] as AssetRef, {
-        networkId: "evm:137",
-        assetId:
-          fundingSidecarRuntimeConfig.polymarketPusdAddress || POLYGON_PUSD,
-        decimals: 6,
-      })
+      sources.length > 0 &&
+      sources.some((source) => sameAsset(source, pUsdAsset)) &&
+      sources.every(
+        (source) => sameAsset(source, pUsdAsset) || sameAsset(source, usdceAsset),
+      )
     ) {
       return POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID;
     }
-    return POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID;
+    return null;
   }
   const sources = optionSourceAssets(option);
   if (sources.length !== 1) return null;
   const source = sources[0];
   if (!source) return null;
-  if (
-    venue === "polymarket" &&
-    sameAsset(source, {
-      networkId: "evm:137",
-      assetId: POLYGON_USDCE_LEGACY,
-      decimals: 6,
-    }) &&
-    sameAsset(destination, {
-      networkId: "evm:137",
-      assetId:
-        fundingSidecarRuntimeConfig.polymarketPusdAddress || POLYGON_PUSD,
-      decimals: 6,
-    })
-  ) {
-    return POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID;
-  }
   const matches = Object.values(RELAY_EVM_FUNDING_PROFILE_SPECS).filter(
     (profile) =>
       profile.venueIds.includes(venue) &&
@@ -469,7 +461,6 @@ export function telegramTradeShortfallExecutionProfiles(
     .map((profile) => profile.profileId);
   if (venue !== "polymarket") return profiles;
   return [
-    POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
     POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
     ...profiles,
   ];
@@ -634,14 +625,7 @@ function proposalSourceAmounts(
       {
         safeLabel: option.safeLabel,
         amount: {
-          asset:
-            profileId === POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID
-              ? {
-                  networkId: "evm:137",
-                  assetId: POLYGON_USDCE_LEGACY,
-                  decimals: 6,
-                }
-              : destination.asset,
+          asset: destination.asset,
           raw: option.maximumSourceRaw,
         },
       },
@@ -977,9 +961,8 @@ export class TelegramTradeShortfallFundingService {
       )
         ? await ensureTelegramFundingAuthorization(this.pool, {
             ...authorizationInput,
-            profileId: plannedCandidate.profileId as
-              | typeof POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID
-              | typeof POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
+            profileId:
+              plannedCandidate.profileId as typeof POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
           })
         : await ensureTelegramRelayEvmFundingAuthorization(this.pool, {
             ...authorizationInput,

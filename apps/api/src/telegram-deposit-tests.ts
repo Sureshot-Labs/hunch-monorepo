@@ -27,11 +27,7 @@ function authorizationDb(walletAddress: string | null) {
 const owner = "0x1111111111111111111111111111111111111111";
 const deposit = "0x3333333333333333333333333333333333333333";
 
-assert.deepEqual(parseSignalBotInteractiveMenuRoute("deposit_route:pw"), {
-  kind: "deposit_route",
-  route: "polymarket_polygon_usdce_wrap_v1",
-  venue: "polymarket",
-});
+assert.equal(parseSignalBotInteractiveMenuRoute("deposit_route:pw"), null);
 assert.deepEqual(parseSignalBotInteractiveMenuRoute("deposit_route:pd"), {
   kind: "deposit_route",
   route: "polymarket_polygon_pusd_direct_v1",
@@ -207,13 +203,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           },
           url: "/internal/telegram-bot/funding/open-route",
         });
-        assert.equal(direct.statusCode, 200);
-        assert.equal(direct.json().text, "direct selected");
-        assert.equal(directSelections[0]?.choiceToken, "pw");
-        assert.equal(
-          directSelections[0]?.contextId,
-          "123e4567-e89b-42d3-a456-426614174000",
-        );
+        assert.equal(direct.statusCode, 400);
+        assert.equal(directSelections.length, 0);
         const cancelActive = await app.inject({
           method: "POST",
           payload: {

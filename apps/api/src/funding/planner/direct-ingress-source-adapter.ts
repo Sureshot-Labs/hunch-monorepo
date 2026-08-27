@@ -4,7 +4,6 @@ import {
   canonicalLocationKey,
   stableOpaqueId,
 } from "../../account-value/canonical.js";
-import { PolymarketFundingPlanError } from "../../services/polymarket-funding-router.js";
 import {
   isRelayPinnedStableAsset,
   RELAY_PINNED_ASSETS,
@@ -19,21 +18,13 @@ import type {
 import {
   canonicalAccountAddress,
   canonicalAssetKey,
-  sameAccountAddress,
 } from "../domain/asset-identity.js";
-import { resolveActionSponsorship } from "../execution/sponsorship-policy.js";
 import { canonicalJsonHash } from "../persistence/canonical.js";
 import { fundingReceiveAssetEnabled } from "../policies/funding-policy-v2.js";
 import type {
   FundingCommitPlan,
   FundingCommitReservation,
 } from "../persistence/funding-operation-repository.js";
-import {
-  buildExactPolymarketDepositUsdceWrapPlan,
-  buildPolymarketFundingActionValidation,
-  buildPolymarketFundingFollowupAction,
-} from "../preparation/polymarket-funding-followup.js";
-import { parsePolymarketFundingEvidence } from "../preparation/polymarket-funding-snapshot.js";
 import {
   findExactFundingWalletProfile,
   type FundingSourceAdapter,
@@ -43,8 +34,6 @@ import type { PlannedSourceOption } from "./planning-types.js";
 import { buildFundingReceiveTargets } from "./receive-targets.js";
 import { sameAsset } from "./money.js";
 import { supportsCanonicalFundingReceiveEvents } from "../receive/canonical-receive-capabilities.js";
-import { fundingSidecarRuntimeConfig } from "../runtime/sidecar-runtime-config.js";
-import { POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID } from "../execution/delegated-funding-profile-ids.js";
 
 function jsonRecord(value: unknown): Readonly<Record<string, JsonValue>> {
   return value as Readonly<Record<string, JsonValue>>;
@@ -135,195 +124,6 @@ function exactIngressVariant(
       payload: {},
     },
     completion: { kind: "direct_destination_credit" },
-  };
-}
-
-function buildPolymarketIngressCompletion(input: {
-  account: AccountValueReadModel;
-  planning: FundingSourcePlanningInput;
-  canonicalRouterAddress: string | null;
-  usdceAsset: AssetRef;
-}): DirectIngressCompletion | null {
-  const facts = input.planning.destinationFacts;
-  const usdcePolicy = input.planning.policy.assets.find((candidate) =>
-    sameAsset(candidate.asset, input.usdceAsset),
-  );
-  const snapshot = parsePolymarketFundingEvidence(
-    facts?.sourcePlanningEvidence ?? null,
-  );
-  const destinationAddress = detail(input.planning, "address");
-  if (
-    facts?.option.venueId !== "polymarket" ||
-    facts.target.kind !== "owned_location" ||
-    !snapshot ||
-    !destinationAddress ||
-    !sameAccountAddress(
-      "evm:137",
-      destinationAddress,
-      snapshot.depositWallet,
-    ) ||
-    !input.canonicalRouterAddress ||
-    !sameAccountAddress(
-      "evm:137",
-      snapshot.routerAddress,
-      input.canonicalRouterAddress,
-    ) ||
-    !sameAsset(
-      input.planning.requiredAmount.asset,
-      facts.option.requiredAsset,
-    ) ||
-    input.planning.requiredAmount.asset.networkId !== "evm:137" ||
-    input.usdceAsset.networkId !== "evm:137" ||
-    input.usdceAsset.decimals !==
-      input.planning.requiredAmount.asset.decimals ||
-    !input.planning.policy.automation.stagedContinuation ||
-    !usdcePolicy?.enabled ||
-    !usdcePolicy.observationEnabled ||
-    BigInt(input.planning.requiredAmount.raw) <= 0n
-  ) {
-    return null;
-  }
-  const profile = findExactFundingWalletProfile({
-    account: input.account,
-    walletId: facts.venueBinding.executionWalletId,
-    networkId: "evm:137",
-    address: snapshot.signerAddress,
-  });
-  if (
-    !profile ||
-    (!profile.signingModes.includes("web_client") &&
-      !profile.signingModes.includes("privy_authorization"))
-  ) {
-    return null;
-  }
-  let plan;
-  try {
-    plan = buildExactPolymarketDepositUsdceWrapPlan({
-      receiptRaw: input.planning.requiredAmount.raw,
-      snapshot,
-    });
-  } catch (error) {
-    if (error instanceof PolymarketFundingPlanError) return null;
-    throw error;
-  }
-  if (!plan) return null;
-  const quoteCorrelationId = stableOpaqueId(
-    "funding_quote",
-    canonicalJsonHash({
-      accountId: input.planning.accountId,
-      adapterId: "direct_owned_multi_asset_receive_v1",
-      destinationOptionId: facts.option.destinationOptionId,
-      fundingPlan: plan,
-      policyRevision: input.planning.policyRevision,
-      requiredAmount: input.planning.requiredAmount,
-    }),
-  );
-  const action = buildPolymarketFundingFollowupAction({
-    binding: facts.venueBinding,
-    canonicalRouterAddress: snapshot.routerAddress,
-    inspectionRevision: facts.bindingOption.inspectionRevision,
-    operationId: quoteCorrelationId,
-    plan,
-  });
-  const sponsorship = resolveActionSponsorship({ action, profile });
-  const baselineRevision = canonicalJsonHash({
-    schema: "polymarket_ingress_baseline_v1",
-    snapshot,
-  });
-  const common = {
-    networkId: "evm:137",
-    destinationAddress: snapshot.depositWallet,
-    destinationLocationId: facts.target.location.locationId,
-    baselineRevision,
-  } as const;
-  const variants: readonly DirectIngressVariant[] = [
-    {
-      ...common,
-      variantId: stableOpaqueId(
-        "ingress_variant",
-        canonicalJsonHash({
-          destinationAddress: canonicalAccountAddress(
-            input.planning.requiredAmount.asset.networkId,
-            snapshot.depositWallet,
-          ),
-          asset: input.planning.requiredAmount.asset,
-          completion: "direct_destination_credit",
-        }),
-      ),
-      asset: input.planning.requiredAmount.asset,
-      baselineRaw: snapshot.depositPusdRaw,
-      observation: {
-        adapterId: "polymarket_deposit_wallet_assets_v1",
-        payload: { field: "depositPusdRaw" },
-      },
-      completion: { kind: "direct_destination_credit" },
-    },
-    {
-      ...common,
-      variantId: stableOpaqueId(
-        "ingress_variant",
-        canonicalJsonHash({
-          destinationAddress: canonicalAccountAddress(
-            input.usdceAsset.networkId,
-            snapshot.depositWallet,
-          ),
-          asset: input.usdceAsset,
-          completion: "committed_venue_preparation",
-        }),
-      ),
-      asset: input.usdceAsset,
-      baselineRaw: snapshot.depositUsdceRaw,
-      observation: {
-        adapterId: "polymarket_deposit_wallet_assets_v1",
-        payload: { field: "depositUsdceRaw" },
-      },
-      completion: {
-        kind: "committed_venue_preparation",
-        stepOrdinal: 0,
-      },
-    },
-  ];
-  const delegatedWrap =
-    input.planning.request.serverExecutionProfileId ===
-    POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID;
-  return {
-    variants,
-    step: {
-      ordinal: 0,
-      segmentOrdinal: null,
-      stepKind: "venue_preparation",
-      state: "planned",
-      actionFingerprint: canonicalJsonHash(action),
-      executorId: delegatedWrap
-        ? POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID
-        : "wallet_profile_evm_v1",
-      payerRequirement: sponsorship.payerRequirement,
-      dependsOnOrdinal: null,
-      normalizedAction: jsonRecord(action),
-      actionValidationResult: {
-        ...buildPolymarketFundingActionValidation({
-          destinationAssetId: input.planning.requiredAmount.asset.assetId,
-          plan,
-          profileAddress: profile.address,
-          routerAddress: snapshot.routerAddress,
-          sponsorship,
-        }),
-        activation: "after_verified_ingress",
-      },
-    },
-    walletExecutionSnapshot: jsonRecord(profile),
-    supportMetadata: {
-      preparationKind: "polymarket_funding_router",
-      venueBindingOptionId: facts.option.venueBindingOptionId,
-      venueBinding: jsonRecord(facts.venueBinding),
-      fundingPlan: jsonRecord(plan),
-      before: {
-        routerNonceRaw: snapshot.routerNonceRaw,
-        depositPusdRaw: snapshot.depositPusdRaw,
-        clobPusdRaw: snapshot.clobPusdRaw,
-        observedAt: snapshot.observedAt,
-      },
-    },
   };
 }
 
@@ -766,21 +566,7 @@ function plannedSource(
 export class DirectIngressFundingSourceAdapter implements FundingSourceAdapter {
   readonly adapterId = "direct_owned_receive_v1";
 
-  constructor(
-    private readonly account: AccountValueReadModel | null = null,
-    private readonly config: Readonly<{
-      canonicalRouterAddress: string | null;
-      usdceAsset: AssetRef;
-    }> = {
-      canonicalRouterAddress:
-        fundingSidecarRuntimeConfig.polymarketFundingRouterAddress || null,
-      usdceAsset: {
-        networkId: "evm:137",
-        assetId: fundingSidecarRuntimeConfig.polymarketUsdceAddress,
-        decimals: 6,
-      },
-    },
-  ) {}
+  constructor(private readonly account: AccountValueReadModel | null = null) {}
 
   async list(
     input: FundingSourcePlanningInput,
@@ -805,25 +591,10 @@ export class DirectIngressFundingSourceAdapter implements FundingSourceAdapter {
     const expiresAt = new Date(
       input.now.getTime() + input.policy.ttl.quoteMs,
     ).toISOString();
-    const completion = this.account
-      ? buildPolymarketIngressCompletion({
-          account: this.account,
-          planning: input,
-          canonicalRouterAddress: this.config.canonicalRouterAddress,
-          usdceAsset: this.config.usdceAsset,
-        })
-      : null;
-    const candidateVariants = completion?.variants ?? [
-      exactIngressVariant(input),
-    ];
+    const candidateVariants = [exactIngressVariant(input)];
     const directVariants = candidateVariants.filter((variant) =>
       fundingReceiveAssetEnabled(input.policy, variant.asset),
     );
-    const completionForSelectedAsset = directVariants.some(
-      (variant) => variant.completion.kind === "committed_venue_preparation",
-    )
-      ? completion
-      : null;
     // Receive targets are limited to networks with an exact canonical event
     // observer. Polygon and Base share the EVM Transfer scanner. Solana SPL
     // and native SOL use exact finalized instruction identity. A Relay quote
@@ -857,7 +628,7 @@ export class DirectIngressFundingSourceAdapter implements FundingSourceAdapter {
           input,
           manual,
           directVariants,
-          completionForSelectedAsset,
+          null,
           receiveSessionVariants,
         ),
       );

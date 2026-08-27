@@ -64,10 +64,7 @@ export async function activateTelegramTradeShortfallInitialStepInTransaction(
         and root_step.depends_on_step_id is null
         and root_step.state = 'planned'
         and (
-          $3 in (
-            'polymarket_deposit_pusd_fund_v1',
-            'polymarket_deposit_usdce_wrap_v1'
-          )
+          $3 = 'polymarket_deposit_pusd_fund_v1'
           or reservation_row.id is not null
         )
         and not exists (
@@ -118,10 +115,7 @@ export async function activateStalledTelegramTradeShortfallInitialStepsInTransac
           and root_step.depends_on_step_id is null
           and root_step.state = 'planned'
           and (
-            $1 in (
-              'polymarket_deposit_pusd_fund_v1',
-              'polymarket_deposit_usdce_wrap_v1'
-            )
+            $1 = 'polymarket_deposit_pusd_fund_v1'
             or reservation_row.id is not null
           )
           and not exists (

@@ -3,16 +3,20 @@
 import assert from "node:assert/strict";
 
 import type { AccountValueReadModel } from "../../../account-value/runtime-service.js";
+import { stableWalletAssetLocationIdentity } from "../../../account-value/canonical.js";
 import type { FundingPurpose } from "../../domain/types.js";
 import {
   POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
-  POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
   TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
 } from "../../execution/delegated-funding-profile-ids.js";
 import { PRIVY_USER_AUTHORIZED_EVM_SPONSORSHIP_POLICY_ID } from "../../execution/sponsorship-policy.js";
 import { PolymarketFundingSourceAdapter } from "../../preparation/polymarket-funding-source-adapter.js";
 import { polymarketFundingEvidence } from "../../preparation/polymarket-funding-snapshot.js";
 import type { FundingSourcePlanningInput } from "../../planner/source-adapter.js";
+import {
+  FUNDING_OPERATION_RECONCILIATION_TTL_MS,
+  fundingEconomicSourceReservations,
+} from "../../persistence/funding-operation-repository.js";
 
 const ACCOUNT_ID = "account_pm_router_source_12345678";
 const SIGNER = "0x00000000000000000000000000000000000000a1";
@@ -35,15 +39,19 @@ function component(
   address: string,
   asset: typeof PUSD | typeof USDCE,
   raw: string,
+  details: Readonly<Record<string, string>> = {},
 ) {
   return {
     componentId: id,
     location: {
-      kind: "wallet",
+      kind:
+        details.polymarketFunderKind === "deposit_wallet"
+          ? ("venue_account" as const)
+          : ("wallet" as const),
       locationId: `location_${id}`,
       accountId: ACCOUNT_ID,
       asset,
-      details: { address },
+      details: { address, ...details },
     },
     amount: { asset, raw },
     category: "cash",
@@ -61,9 +69,22 @@ function account(
   includeSignerUsdce = true,
   signerUsdceRaw = "1500000",
   executionMode: "automatic" | "user_wallet" = "automatic",
+  includeDepositWalletTopology = false,
 ): AccountValueReadModel {
   const components = [
-    component("deposit_usdce_12345678", DEPOSIT, USDCE, "1000000"),
+    component(
+      "deposit_usdce_12345678",
+      DEPOSIT,
+      USDCE,
+      "1000000",
+      includeDepositWalletTopology
+        ? {
+            linkedAddress: SIGNER,
+            polymarketFunderKind: "deposit_wallet",
+            venueId: "polymarket",
+          }
+        : {},
+    ),
     component("signer_pusd_12345678", SIGNER, PUSD, "1500000"),
     ...(includeSignerUsdce
       ? [component("signer_usdce_12345678", SIGNER, USDCE, signerUsdceRaw)]
@@ -171,7 +192,6 @@ function planningInput(
         fundingCapRaw,
         routerAddress: ROUTER,
         routerNonceRaw: "7",
-        depositRouterUsdceAllowanceRaw: "1000000",
         routerPusdAllowanceRaw,
         routerUsdceAllowanceRaw,
         clobPusdRaw: "1500000",
@@ -198,17 +218,6 @@ function planningInput(
   } as unknown as FundingSourcePlanningInput;
 }
 
-function delegatedPlanningInput(): FundingSourcePlanningInput {
-  const input = planningInput("1000000", "1000000", "0", "add_funds");
-  return {
-    ...input,
-    request: {
-      ...input.request,
-      serverExecutionProfileId: POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
-    },
-  };
-}
-
 function delegatedPusdPlanningInput(
   routerPusdAllowanceRaw = "1500000",
 ): FundingSourcePlanningInput {
@@ -233,7 +242,15 @@ const adapter = new PolymarketFundingSourceAdapter(account(), {
   canonicalRouterAddress: ROUTER,
   usdceAsset: USDCE,
 });
-const [planned] = await adapter.list(planningInput());
+const fullControllerAdapter = new PolymarketFundingSourceAdapter(
+  account(true, "2500000"),
+  {
+    canonicalRouterAddress: ROUTER,
+    usdceAsset: USDCE,
+  },
+);
+const fullControllerInput = planningInput("4000000", "4000000", "2500000");
+const [planned] = await fullControllerAdapter.list(fullControllerInput);
 assert.ok(planned);
 assert.equal(planned.option.kind, "venue_preparation");
 assert.equal(planned.option.selectable, true);
@@ -244,11 +261,12 @@ assert.equal(planned.commitPlan.steps[0]?.stepKind, "venue_preparation");
 assert.equal(planned.commitPlan.steps[0]?.payerRequirement, "privy_sponsor");
 assert.deepEqual(
   planned.commitPlan.operation.venueBindingSnapshot,
-  planningInput().destinationFacts?.venueBinding,
+  fullControllerInput.destinationFacts?.venueBinding,
 );
 assert.deepEqual(
   planned.commitPlan.reservations.map((entry) => entry.rawAmount),
-  ["1000000", "1500000", "1500000"],
+  ["1500000", "2500000"],
+  "ordinary planning must ignore historical Deposit Wallet USDC.e allowances",
 );
 assert.ok(
   planned.commitPlan.reservations.every(
@@ -256,30 +274,233 @@ assert.ok(
       entry.segmentOrdinal === null && entry.mode === "subtract_available",
   ),
 );
+assert.equal(
+  (
+    await adapter.list(
+      planningInput(
+        "1000000",
+        "1000000",
+        "0",
+        "trade_shortfall",
+        "1500000",
+        "0",
+        "0",
+      ),
+    )
+  ).length,
+  1,
+  "the marker is irrelevant to controller pUSD-only funding",
+);
 
-const delegatedAdapter = new PolymarketFundingSourceAdapter(
-  account(false, "0"),
+const clientHandoffAdapter = new PolymarketFundingSourceAdapter(
+  account(true, "500000", "automatic", true),
   {
     canonicalRouterAddress: ROUTER,
     usdceAsset: USDCE,
   },
 );
-const [delegated] = await delegatedAdapter.list(delegatedPlanningInput());
-assert.ok(delegated);
-assert.deepEqual(delegated.commitPlan.operation.requestedSourceAmount, {
-  asset: USDCE,
-  raw: "1000000",
-});
-assert.equal(delegated.commitPlan.steps[0]?.state, "planned");
-assert.equal(
-  delegated.commitPlan.steps[0]?.executorId,
-  POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
+const clientHandoffInput = planningInput(
+  "3000000",
+  "3000000",
+  "500000",
+  "trade_shortfall",
+  "0",
+  "0",
+  "0",
 );
-assert.equal(delegated.option.requiredActions[0]?.actor, "server");
+const [clientHandoff] = await clientHandoffAdapter.list(clientHandoffInput);
+assert.ok(clientHandoff);
 assert.deepEqual(
-  delegated.commitPlan.reservations.map((entry) => entry.rawAmount),
-  ["1000000"],
-  "delegated wrap must bind only the exact received USDC.e amount",
+  clientHandoff.commitPlan.reservations.map((reservation) => ({
+    componentId: reservation.componentId,
+    rawAmount: reservation.rawAmount,
+  })),
+  [
+    { componentId: "signer_pusd_12345678", rawAmount: "1500000" },
+    { componentId: "deposit_usdce_12345678", rawAmount: "1000000" },
+    { componentId: "signer_usdce_12345678", rawAmount: "1500000" },
+  ],
+  "client preparation must fence both the Deposit Wallet debit and the controller balance after the exact transfer",
+);
+assert.deepEqual(
+  fundingEconomicSourceReservations(clientHandoff.commitPlan.reservations).map(
+    ({ reservation, rawAmount }) => ({
+      componentId: reservation.componentId,
+      rawAmount,
+    }),
+  ),
+  [
+    { componentId: "signer_pusd_12345678", rawAmount: "1500000" },
+    { componentId: "deposit_usdce_12345678", rawAmount: "1000000" },
+    { componentId: "signer_usdce_12345678", rawAmount: "500000" },
+  ],
+  "the controller fence may include the incoming credit without double-counting it as source economics",
+);
+assert.ok(
+  clientHandoff.commitPlan.reservations.every(
+    (reservation) =>
+      reservation.expiresAt ===
+      new Date(
+        Date.parse(EXPIRES_AT) +
+          FUNDING_OPERATION_RECONCILIATION_TTL_MS,
+      ).toISOString(),
+  ),
+  "committed reservations must outlive the short inspection and remain active for reconciliation",
+);
+assert.deepEqual(
+  clientHandoff.commitPlan.steps.map((step) => ({
+    dependsOnOrdinal: step.dependsOnOrdinal,
+    executorId: step.executorId,
+    kind: step.actionValidationResult.kind,
+    ordinal: step.ordinal,
+    state: step.state,
+    stepKind: step.stepKind,
+  })),
+  [
+    {
+      dependsOnOrdinal: null,
+      executorId: "polymarket_deposit_wallet_relayer_v1",
+      kind: undefined,
+      ordinal: 0,
+      state: "action_required",
+      stepKind: "external_handoff",
+    },
+    {
+      dependsOnOrdinal: 0,
+      executorId: "wallet_profile_evm_v1",
+      kind: "controller_usdce_router_approval",
+      ordinal: 1,
+      state: "action_required",
+      stepKind: "transaction",
+    },
+    {
+      dependsOnOrdinal: 1,
+      executorId: "wallet_profile_evm_v1",
+      kind: "controller_pusd_router_approval",
+      ordinal: 2,
+      state: "action_required",
+      stepKind: "transaction",
+    },
+    {
+      dependsOnOrdinal: 2,
+      executorId: "wallet_profile_evm_v1",
+      kind: undefined,
+      ordinal: 3,
+      state: "action_required",
+      stepKind: "venue_preparation",
+    },
+  ],
+  "the exact Deposit Wallet transfer must gate controller approvals and Router v2 fund",
+);
+for (const approvalStep of clientHandoff.commitPlan.steps.filter(
+  (step) =>
+    step.actionValidationResult.kind === "controller_usdce_router_approval" ||
+    step.actionValidationResult.kind === "controller_pusd_router_approval",
+)) {
+  assert.equal(
+    approvalStep.actionValidationResult.signerAddress,
+    SIGNER,
+    "every controller approval must persist the signer required by receipt reconciliation",
+  );
+  assert.equal(
+    approvalStep.actionValidationResult.validatorId,
+    "polymarket_funding_router_v1",
+    "every controller approval must carry the Router validator identity",
+  );
+}
+assert.equal(
+  clientHandoff.commitPlan.steps.at(-1)?.actionValidationResult.validatorId,
+  "polymarket_funding_router_v1",
+  "the produced Router fund step must carry its exact validator identity",
+);
+assert.ok(
+  clientHandoff.option.requiredActions.every(
+    (requiredAction) => requiredAction.actor === "user",
+  ),
+  "the Deposit Wallet composition must remain client-executed",
+);
+const handoffAction = clientHandoff.commitPlan.steps[0]?.normalizedAction;
+assert.equal(handoffAction?.kind, "external_handoff");
+assert.equal(handoffAction?.handoffKind, "polymarket_deposit_wallet_transfer");
+assert.equal(
+  (handoffAction?.payload as Readonly<Record<string, unknown>> | undefined)
+    ?.amountRaw,
+  "1000000",
+);
+
+assert.deepEqual(
+  await clientHandoffAdapter.list({
+    ...clientHandoffInput,
+    request: {
+      ...clientHandoffInput.request,
+      serverExecutionProfileId: POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
+    },
+  }),
+  [],
+  "unattended Telegram funding must not consume Deposit Wallet USDC.e",
+);
+
+const depositOnlyHandoffAdapter = new PolymarketFundingSourceAdapter(
+  account(false, "0", "automatic", true),
+  {
+    canonicalRouterAddress: ROUTER,
+    usdceAsset: USDCE,
+  },
+);
+const [depositOnlyHandoff] = await depositOnlyHandoffAdapter.list(
+  planningInput("2500000", "2500000", "0", "trade_shortfall", "0", "0", "0"),
+);
+assert.ok(depositOnlyHandoff);
+const futureControllerIdentity = stableWalletAssetLocationIdentity({
+  accountId: ACCOUNT_ID,
+  address: SIGNER,
+  asset: USDCE,
+  balanceClass: "polymarket",
+});
+assert.deepEqual(
+  depositOnlyHandoff.commitPlan.reservations.map((reservation) => ({
+    componentId: reservation.componentId,
+    economicRole: reservation.economicRole ?? "source_input",
+    locationId: reservation.locationId,
+    rawAmount: reservation.rawAmount,
+    sourceInputRawAmount: reservation.sourceInputRawAmount ?? null,
+  })),
+  [
+    {
+      componentId: "signer_pusd_12345678",
+      economicRole: "source_input",
+      locationId: "location_signer_pusd_12345678",
+      rawAmount: "1500000",
+      sourceInputRawAmount: null,
+    },
+    {
+      componentId: "deposit_usdce_12345678",
+      economicRole: "source_input",
+      locationId: "location_deposit_usdce_12345678",
+      rawAmount: "1000000",
+      sourceInputRawAmount: null,
+    },
+    {
+      ...futureControllerIdentity,
+      economicRole: "future_credit_fence",
+      rawAmount: "1000000",
+      sourceInputRawAmount: null,
+    },
+  ],
+  "a zero-balance controller must still receive the exact canonical future-credit fence",
+);
+assert.deepEqual(
+  fundingEconomicSourceReservations(
+    depositOnlyHandoff.commitPlan.reservations,
+  ).map(({ reservation, rawAmount }) => ({
+    componentId: reservation.componentId,
+    rawAmount,
+  })),
+  [
+    { componentId: "signer_pusd_12345678", rawAmount: "1500000" },
+    { componentId: "deposit_usdce_12345678", rawAmount: "1000000" },
+  ],
+  "future controller credit must not become a third economic source input",
 );
 
 const [delegatedPusd] = await adapter.list(delegatedPusdPlanningInput());
@@ -420,9 +641,20 @@ const missingExactInput = new PolymarketFundingSourceAdapter(account(false), {
   canonicalRouterAddress: ROUTER,
   usdceAsset: USDCE,
 });
-assert.deepEqual(await missingExactInput.list(planningInput()), []);
+const [pUsdOnlyPartial] = await missingExactInput.list(planningInput());
+assert.ok(pUsdOnlyPartial);
+assert.equal(pUsdOnlyPartial.option.selectable, false);
+assert.deepEqual(
+  pUsdOnlyPartial.commitPlan.reservations.map((entry) => entry.rawAmount),
+  ["1500000"],
+  "a missing USDC.e component must not discard a valid partial pUSD contribution",
+);
 
-assert.deepEqual(await adapter.list(planningInput("0")), []);
+assert.equal(
+  (await adapter.list(planningInput("0")))[0]?.option.selectable,
+  false,
+  "a zero allowance-derived snapshot cap must not hide a client route that can prepare its controller approvals",
+);
 
 const partialAdapter = new PolymarketFundingSourceAdapter(
   account(true, "1069075"),
@@ -437,15 +669,15 @@ const [partial] = await partialAdapter.list(
 assert.ok(partial);
 assert.equal(partial.option.selectable, false);
 assert.equal(partial.compositeEligible, true);
-assert.equal(partial.option.expectedDestination?.raw, "3569075");
-assert.equal(partial.option.minimumDestination?.raw, "3569075");
+assert.equal(partial.option.expectedDestination?.raw, "2569075");
+assert.equal(partial.option.minimumDestination?.raw, "2569075");
 assert.equal(
   partial.commitPlan.operation.requestedDestinationAmount?.raw,
-  "3569075",
+  "2569075",
 );
 assert.deepEqual(
   partial.commitPlan.reservations.map((entry) => entry.rawAmount),
-  ["1000000", "1500000", "1069075"],
+  ["1500000", "1069075"],
 );
 
 const relayFloorAdapter = new PolymarketFundingSourceAdapter(
@@ -455,22 +687,36 @@ const relayFloorAdapter = new PolymarketFundingSourceAdapter(
     usdceAsset: USDCE,
   },
 );
-for (const purpose of [
-  "add_funds",
-  "trade_shortfall",
-  "manual_rebalance",
-] as const) {
+for (const purpose of ["add_funds", "manual_rebalance"] as const) {
   const [relayFloorPartial] = await relayFloorAdapter.list(
     planningInput("5000000", "4000000", "1400000", purpose),
   );
   assert.ok(relayFloorPartial);
-  assert.equal(relayFloorPartial.option.expectedDestination?.raw, "3500000");
-  assert.equal(relayFloorPartial.option.minimumDestination?.raw, "3500000");
+  assert.equal(relayFloorPartial.option.expectedDestination?.raw, "2900000");
+  assert.equal(relayFloorPartial.option.minimumDestination?.raw, "2900000");
   assert.deepEqual(
     relayFloorPartial.commitPlan.reservations.map((entry) => entry.rawAmount),
-    ["1000000", "1500000", "1000000"],
+    ["1500000", "1400000"],
   );
 }
+
+const exactShortfallAdapter = new PolymarketFundingSourceAdapter(
+  account(true, "2400000"),
+  {
+    canonicalRouterAddress: ROUTER,
+    usdceAsset: USDCE,
+  },
+);
+const [exactShortfallPartial] = await exactShortfallAdapter.list(
+  planningInput("5000000", "4000000", "2400000", "trade_shortfall"),
+);
+assert.ok(exactShortfallPartial);
+assert.equal(exactShortfallPartial.option.expectedDestination?.raw, "3900000");
+assert.equal(exactShortfallPartial.option.minimumDestination?.raw, "3900000");
+assert.deepEqual(
+  exactShortfallPartial.commitPlan.reservations.map((entry) => entry.rawAmount),
+  ["1500000", "2400000"],
+);
 
 const userWalletPartialAdapter = new PolymarketFundingSourceAdapter(
   account(true, "1069075", "user_wallet"),

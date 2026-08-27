@@ -627,8 +627,6 @@ const tests: TestCase[] = [
         routerNonce: 7n,
         requiredRaw: 1_060_000n,
         depositPusdRaw: 100_000n,
-        depositUsdceRaw: 0n,
-        depositRouterUsdceAllowanceRaw: 0n,
         depositLockedRaw: 20_000n,
         signerPusdRaw: 400_000n,
         signerLockedRaw: 50_000n,
@@ -660,8 +658,6 @@ const tests: TestCase[] = [
           routerNonce: 0n,
           requiredRaw: 1_000_000n,
           depositPusdRaw: 1_200_000n,
-          depositUsdceRaw: 0n,
-          depositRouterUsdceAllowanceRaw: 0n,
           depositLockedRaw: 100_000n,
           signerPusdRaw: 0n,
           signerUsdceRaw: 0n,
@@ -674,7 +670,7 @@ const tests: TestCase[] = [
     },
   },
   {
-    name: "funding planner uses deposit USDC.e before signer collateral",
+    name: "funding planner sources Router collateral only from the controller",
     run: () => {
       const plan = buildPolymarketFundingPlan({
         signer: SIGNER,
@@ -683,19 +679,16 @@ const tests: TestCase[] = [
         routerNonce: 3n,
         requiredRaw: 1_060_000n,
         depositPusdRaw: 60_000n,
-        depositUsdceRaw: 700_000n,
-        depositRouterUsdceAllowanceRaw: 700_000n,
         signerPusdRaw: 200_000n,
-        signerUsdceRaw: 100_000n,
+        signerUsdceRaw: 800_000n,
         routerPusdAllowanceRaw: 200_000n,
-        routerUsdceAllowanceRaw: 100_000n,
+        routerUsdceAllowanceRaw: 800_000n,
         fundingCapRaw: 2_200_000n,
       });
       assert.ok(plan);
       assert.equal(plan.totalAmountRaw, "1000000");
-      assert.equal(plan.depositUsdceAmountRaw, "700000");
       assert.equal(plan.pUsdAmountRaw, "200000");
-      assert.equal(plan.signerUsdceAmountRaw, "100000");
+      assert.equal(plan.signerUsdceAmountRaw, "800000");
       assert.equal(plan.usdceAmountRaw, "800000");
     },
   },
@@ -709,8 +702,6 @@ const tests: TestCase[] = [
         routerNonce: 0n,
         requiredRaw: 1_060_000n,
         depositPusdRaw: 0n,
-        depositUsdceRaw: 0n,
-        depositRouterUsdceAllowanceRaw: 0n,
         signerPusdRaw: 500_000n,
         signerUsdceRaw: 560_000n,
         routerPusdAllowanceRaw: 500_000n,

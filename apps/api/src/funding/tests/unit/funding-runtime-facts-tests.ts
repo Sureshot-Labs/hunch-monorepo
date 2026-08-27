@@ -337,7 +337,6 @@ function polymarketEvidence(
       configured: true,
       routerAddress: "0x00000000000000000000000000000000000000d1",
       nonceRaw: "7",
-      depositUsdceAllowanceRaw: "1000000",
       pUsdAllowanceRaw: "1000000",
       usdceAllowanceRaw: "1000000",
     },

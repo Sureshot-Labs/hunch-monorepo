@@ -47,12 +47,10 @@ const plan = buildPolymarketFundingPlan({
   requiredRaw: 5_000_000n,
   depositPusdRaw: 1_500_000n,
   depositLockedRaw: 500_000n,
-  depositUsdceRaw: 1_000_000n,
-  depositRouterUsdceAllowanceRaw: 1_000_000n,
-  signerPusdRaw: 2_000_000n,
+  signerPusdRaw: 3_000_000n,
   signerLockedRaw: 500_000n,
   signerUsdceRaw: 1_500_000n,
-  routerPusdAllowanceRaw: 2_000_000n,
+  routerPusdAllowanceRaw: 3_000_000n,
   routerUsdceAllowanceRaw: 2_000_000n,
   fundingCapRaw: 4_000_000n,
 });
@@ -113,7 +111,7 @@ const oversizedDelta = verifyPolymarketFundingPostconditions({
 assert.equal(
   oversizedDelta.status,
   "satisfied",
-  "a concurrent positive credit must not obscure an exactly attributed wrap",
+  "a concurrent positive credit must not obscure an exactly attributed funding transfer",
 );
 
 const wrongAttributedAmount = verifyPolymarketFundingPostconditions({

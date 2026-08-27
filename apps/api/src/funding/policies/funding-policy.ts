@@ -13,7 +13,6 @@ import {
 import {
   delegatedFundingProfileRequiresAmountCap,
   POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
-  POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
 } from "../execution/delegated-funding-profile-ids.js";
 
 export const FUNDING_POLICY_KEY = "funding_control_plane";
@@ -68,10 +67,6 @@ export const PRODUCTION_FUNDING_REGISTRY: FundingStaticRegistry = deepFreeze({
   networkExecutors: [
     { id: "wallet_profile_evm_v1", runtimeKind: "production" },
     { id: "wallet_profile_svm_v1", runtimeKind: "production" },
-    {
-      id: POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
-      runtimeKind: "production",
-    },
     {
       id: POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
       runtimeKind: "production",

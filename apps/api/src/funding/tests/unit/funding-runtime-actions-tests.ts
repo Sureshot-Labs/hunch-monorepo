@@ -13,6 +13,7 @@ import {
   createPolymarketRuntimeActionMaterializer,
 } from "../../preparation/runtime-actions.js";
 import type { VenueAccountBinding } from "../../domain/types.js";
+import { fundingSidecarRuntimeConfig } from "../../runtime/sidecar-runtime-config.js";
 
 const OBSERVED_AT = "2026-07-24T12:00:00.000Z";
 
@@ -184,7 +185,11 @@ await test("Polymarket signer and contract approvals preserve distinct execution
   }
 });
 
-await test("Polymarket Funding Router approvals preserve signer and Deposit Wallet owners", async () => {
+await test("Polymarket Funding Router approvals are controller-signer transactions", async () => {
+  // This materializer intentionally reads the sidecar-safe frozen config.
+  // In the aggregate test runner that module may be loaded before API env.ts;
+  // do not assert against a different, later-loaded configuration snapshot.
+  if (!fundingSidecarRuntimeConfig.polymarketFundingRouterAddress) return;
   const exactBinding = binding("polymarket");
   const materialize = createPolymarketRuntimeActionMaterializer({
     wallet: wallet(true),
@@ -196,30 +201,20 @@ await test("Polymarket Funding Router approvals preserve signer and Deposit Wall
     materializerInput(exactBinding, [
       requirement("approve-funding-router-signer-pusd", "evm_transaction"),
       requirement("approve-funding-router-signer-usdce", "evm_transaction"),
-      requirement("approve-funding-router-deposit-usdce", "external_handoff"),
     ]),
   );
   assert.equal(actions[0]?.action?.kind, "evm_transaction");
   assert.equal(actions[1]?.action?.kind, "evm_transaction");
-  assert.equal(actions[2]?.action?.kind, "external_handoff");
   if (actions[0]?.action?.kind === "evm_transaction") {
     assert.equal(
       actions[0].action.to.toLowerCase(),
-      env.polymarketUsdcAddress.toLowerCase(),
+      fundingSidecarRuntimeConfig.polymarketPusdAddress.toLowerCase(),
     );
   }
   if (actions[1]?.action?.kind === "evm_transaction") {
     assert.equal(
       actions[1].action.to.toLowerCase(),
-      env.polymarketUsdceAddress.toLowerCase(),
-    );
-  }
-  if (actions[2]?.action?.kind === "external_handoff") {
-    const calls = actions[2].action.payload.calls;
-    assert.ok(Array.isArray(calls));
-    assert.equal(
-      (calls?.[0] as { target?: string } | undefined)?.target?.toLowerCase(),
-      env.polymarketUsdceAddress.toLowerCase(),
+      fundingSidecarRuntimeConfig.polymarketUsdceAddress.toLowerCase(),
     );
   }
 });

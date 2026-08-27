@@ -9,7 +9,7 @@ import type {
   DelegatedFundingProviderLookupResult,
   DelegatedFundingRecoveryClaim,
 } from "./delegated-funding-executor.js";
-import type { PolymarketWrapExecutionConfiguration } from "./delegated-funding-config.js";
+import type { PolymarketRouterExecutionConfiguration } from "./delegated-funding-config.js";
 import { derivePrivyAuthorizationPublicKey } from "./privy-authorization-key.js";
 import {
   knownPrivyPolicyFingerprint,
@@ -30,7 +30,7 @@ export type PrivyDelegatedFundingDriverConfig = Readonly<{
   appSecret: string;
   authorizationPrivateKey: string;
   configuration: Pick<
-    PolymarketWrapExecutionConfiguration,
+    PolymarketRouterExecutionConfiguration,
     "signerId" | "signerFingerprint" | "policyId" | "policyFingerprint"
   > &
     Readonly<{
@@ -294,7 +294,7 @@ export class PrivyDelegatedFundingDriver implements DelegatedFundingNetworkDrive
       requiredProfileId?: string;
     }>,
     authority: Pick<
-      PolymarketWrapExecutionConfiguration,
+      PolymarketRouterExecutionConfiguration,
       "signerId" | "signerFingerprint" | "policyId" | "policyFingerprint"
     > = this.input.configuration,
     registry: "current" | "persisted_recovery" = "current",

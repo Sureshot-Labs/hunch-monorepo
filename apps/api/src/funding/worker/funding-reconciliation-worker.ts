@@ -17,7 +17,6 @@ import { FundingStepReceiptReconciliationDriver } from "../execution/step-receip
 import { createFundingTransactionReferenceCodec } from "../execution/transaction-reference-codec.js";
 import { PolymarketFundingPostconditionDriver } from "../preparation/polymarket-funding-reconciler.js";
 import { observePolymarketFundingRuntimeSidecar } from "../preparation/polymarket-funding-observer.js";
-import { createPolymarketReceiptOperationPreparer } from "../preparation/polymarket-receipt-operation.js";
 import { pollFundingPostconditions } from "../preparation/postcondition-driver.js";
 import { DirectIngressDestinationObserver } from "../reconciliation/direct-ingress-observer.js";
 import { OwnedRouteDestinationObserver } from "../reconciliation/owned-route-destination-observer.js";
@@ -31,14 +30,11 @@ import {
 import { runTelegramFundingProgressProjectionBatch } from "../../services/telegram-funding-progress-projector.js";
 import { runTelegramTradeLifecycleProjectionBatch } from "../../services/telegram-trade-lifecycle-progress.js";
 import {
-  createPolymarketWrapDelegatedFundingProfile,
+  createPolymarketRouterDelegatedFundingProfile,
   DelegatedFundingExecutor,
 } from "../execution/delegated-funding-executor.js";
-import type { PolymarketWrapExecutionConfiguration } from "../execution/delegated-funding-config.js";
-import {
-  loadPolymarketPusdFundExecutionConfiguration,
-  loadRelayEvmExecutionConfiguration,
-} from "../execution/delegated-funding-config.js";
+import type { PolymarketRouterExecutionConfiguration } from "../execution/delegated-funding-config.js";
+import { loadRelayEvmExecutionConfiguration } from "../execution/delegated-funding-config.js";
 import { createPrivyDelegatedFundingDriver } from "../execution/privy-delegated-funding-driver.js";
 import {
   createRelayEvmDelegatedFundingProfile,
@@ -47,7 +43,6 @@ import {
 import { RELAY_EVM_FUNDING_PROFILE_SPECS } from "../execution/relay-evm-profile-specs.js";
 import {
   resolveTelegramFundingReceiptDisposition,
-  TELEGRAM_POLYMARKET_FUNDING_ADAPTER_KEY,
   type TelegramFundingReceiptOperationPreparer,
 } from "../../services/telegram-funding-route.js";
 
@@ -133,7 +128,7 @@ export type FundingReconciliationJobOptions =
       relay?: RelayFundingWorkerConfig;
       receivePollDelayMs?: number;
       delegatedExecution?: Readonly<{
-        configuration: PolymarketWrapExecutionConfiguration;
+        configuration: PolymarketRouterExecutionConfiguration;
         privy: Readonly<{
           appId: string;
           appSecret: string;
@@ -394,17 +389,10 @@ export async function runFundingReconciliationJob(
         },
       })
     : null;
-  const polymarketWrapProfile =
-    options.delegatedExecution && delegatedDriver
-      ? createPolymarketWrapDelegatedFundingProfile({
-          configuration: options.delegatedExecution.configuration,
-          driver: delegatedDriver,
-        })
-      : null;
   const polymarketPusdFundProfile =
     options.delegatedExecution && delegatedDriver
-      ? createPolymarketWrapDelegatedFundingProfile({
-          configuration: loadPolymarketPusdFundExecutionConfiguration(),
+      ? createPolymarketRouterDelegatedFundingProfile({
+          configuration: options.delegatedExecution.configuration,
           driver: delegatedDriver,
         })
       : null;
@@ -426,15 +414,6 @@ export async function runFundingReconciliationJob(
     string,
     TelegramFundingReceiptOperationPreparer
   >();
-  if (referenceProtection) {
-    operationPreparers.set(
-      TELEGRAM_POLYMARKET_FUNDING_ADAPTER_KEY,
-      createPolymarketReceiptOperationPreparer({
-        subjectLookupHmacKey: referenceProtection.referenceLookupHmacKey,
-        subjectLookupKeyVersion: referenceProtection.referenceKeyVersion,
-      }),
-    );
-  }
   const relayReceiptDisposition =
     relay && referenceProtection && codecConfig
       ? createRelayReceiveReceiptDispositionResolver({
@@ -484,13 +463,10 @@ export async function runFundingReconciliationJob(
         }).catch(() => ({ candidates: 0, created: 0, skipped: 0 }))
       : { candidates: 0, created: 0, skipped: 0 };
     const delegatedFundingExecution =
-      (polymarketWrapProfile ||
-        polymarketPusdFundProfile ||
-        relayEvmProfiles.length > 0) &&
+      (polymarketPusdFundProfile || relayEvmProfiles.length > 0) &&
       transactionCodec
         ? await new DelegatedFundingExecutor(pool, {
             profiles: [
-              polymarketWrapProfile,
               polymarketPusdFundProfile,
               ...relayEvmProfiles,
             ].filter(

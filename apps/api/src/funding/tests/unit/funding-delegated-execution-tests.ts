@@ -10,34 +10,25 @@ import {
 import { POLYMARKET_FUNDING_ROUTER } from "@hunch/contracts";
 import { Interface } from "ethers";
 
-import {
-  canonicalAssetKey,
-  stableOpaqueId,
-  stableWalletOpaqueId,
-} from "../../../account-value/canonical.js";
-import { RELAY_PINNED_ASSETS } from "../../../funding-providers/relay/mappings.js";
 import type { NormalizedAction } from "../../domain/types.js";
 import {
-  createPolymarketWrapDelegatedFundingProfile,
+  createPolymarketRouterDelegatedFundingProfile,
   delegatedFundingProfileOrder,
   polymarketRouterAuthorityScope,
 } from "../../execution/delegated-funding-executor.js";
 import {
-  loadPolymarketWrapExecutionConfiguration,
-  polymarketWrapExecutorEnvironmentReady,
+  loadPolymarketPusdFundExecutionConfiguration,
+  polymarketRouterExecutorEnvironmentReady,
 } from "../../execution/delegated-funding-config.js";
 import {
-  classifyPolymarketWrapControlPlane,
+  classifyPolymarketRouterControlPlane,
   combineDelegatedFundingDecisions,
   fundingPolicyRevisionMayResume,
 } from "../../execution/delegated-funding-capability.js";
 import {
   POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
-  POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
   delegatedFundingProfile,
-  validatePolymarketDepositUsdceWrapAction,
   validatePolymarketDepositPusdFundAction,
-  validatePolymarketDepositUsdceWrapPolicy,
 } from "../../execution/delegated-funding-profiles.js";
 import {
   createPrivyDelegatedFundingDriver,
@@ -60,11 +51,6 @@ import {
 } from "../../execution/known-privy-wallet-signers.js";
 import { derivePrivyAuthorizationPublicKey } from "../../execution/privy-authorization-key.js";
 import { lockTelegramFundingLinkLifecycle } from "../../execution/telegram-funding-link-lifecycle-lock.js";
-import {
-  parseTelegramFundingAutomationPolicyV2,
-  telegramFundingReceiptIsProspectivelyAuthorized,
-} from "../../execution/telegram-funding-automation-policy.js";
-import { resolvePolymarketReceiptVenueBinding } from "../../preparation/polymarket-receipt-operation.js";
 import type { ResolvedFundingPolicy } from "../../policies/funding-policy-service.js";
 import {
   claimFundingReceiveReceiptOperationLinkInTransaction,
@@ -79,7 +65,7 @@ import {
 } from "../../policies/funding-policy-v2.js";
 
 const ROUTER = "0x1111111111111111111111111111111111111111";
-const WALLET_ID = "wallet_pm_wrap_12345678";
+const WALLET_ID = "wallet_pm_router_12345678";
 const AUTHORIZATION_PRIVATE_KEY = crypto
   .generateKeyPairSync("ec", { namedCurve: "P-256" })
   .privateKey.export({ format: "der", type: "pkcs8" })
@@ -98,89 +84,6 @@ const FUND_ABI = [
   },
 ] as const;
 const fundInterface = new Interface(FUND_ABI);
-
-{
-  const userId = "11111111-1111-4111-8111-111111111111";
-  const signerAddress = "0x1111111111111111111111111111111111111111";
-  const depositAddress = "0x2222222222222222222222222222222222222222";
-  const sourceAsset = {
-    networkId: "evm:137",
-    assetId: RELAY_PINNED_ASSETS.polygonUsdce,
-    decimals: 6,
-  } as const;
-  const destinationAsset = {
-    networkId: "evm:137",
-    assetId: RELAY_PINNED_ASSETS.polygonPusd,
-    decimals: 6,
-  } as const;
-  const controllerWalletId = stableWalletOpaqueId({
-    walletType: "ethereum",
-    networkId: "evm:137",
-    address: signerAddress,
-  });
-  const venueBindingOptionId = "binding_option_polymarket_receipt_12345678";
-  const bindingId = stableOpaqueId(
-    "binding",
-    `${userId}:polymarket:${depositAddress}`,
-  );
-  const target = (frozenControllerWalletId = controllerWalletId) => ({
-    userId,
-    venueId: "polymarket",
-    destinationOptionId: "destination_polymarket_receipt_12345678",
-    venueBindingOptionId,
-    destinationAsset,
-    destinationTargetSnapshot: {
-      kind: "owned_location",
-      location: {
-        kind: "venue_account",
-        locationId: stableOpaqueId(
-          "location",
-          `${bindingId}:${canonicalAssetKey(destinationAsset)}`,
-        ),
-        accountId: userId,
-        asset: destinationAsset,
-        details: {
-          venueId: "polymarket",
-          accountRef: depositAddress,
-          controllerWalletId: frozenControllerWalletId,
-          address: depositAddress,
-        },
-      },
-    },
-    // Production stores a VenueBindingOption here, not VenueAccountBinding.
-    venueBindingSnapshot: { venueBindingOptionId },
-    receipt: {
-      asset: sourceAsset,
-      destinationAddress: depositAddress,
-    },
-  });
-  const authorization = {
-    walletAddress: signerAddress,
-    walletChain: "ethereum" as const,
-    venueId: "polymarket",
-    destinationOptionId: "destination_polymarket_receipt_12345678",
-    venueBindingOptionId,
-    sourceAsset,
-    destinationAsset,
-  };
-  const binding = resolvePolymarketReceiptVenueBinding(target(), authorization);
-  assert.deepEqual(binding, {
-    bindingId,
-    venueId: "polymarket",
-    controllerWalletId,
-    executionWalletId: controllerWalletId,
-    accountRef: depositAddress,
-    settlementLocation: target().destinationTargetSnapshot.location,
-    signingMode: "privy_authorization",
-  });
-  assert.equal(
-    resolvePolymarketReceiptVenueBinding(
-      target("wallet_wrong_controller_12345678"),
-      authorization,
-    ),
-    null,
-  );
-}
 
 {
   const queries: Array<{ params: readonly unknown[]; sql: string }> = [];
@@ -347,7 +250,7 @@ const fundInterface = new Interface(FUND_ABI);
         authorizationFingerprint: "a".repeat(64),
         telegramFundingConsentId: "consent-link-1",
         telegramFundingConsentFingerprint: "b".repeat(64),
-        serverExecutionProfileId: POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
+        serverExecutionProfileId: POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
         now: new Date(),
       },
     ),
@@ -363,62 +266,13 @@ const fundInterface = new Interface(FUND_ABI);
   assert.match(evidenceUpdateQuery ?? "", /version = version \+ 1/u);
 }
 
-function condition(
-  field: string,
-  fieldSource: string,
-  value: string,
-  abi = false,
-) {
-  return {
-    ...(abi ? { abi: FUND_ABI } : {}),
-    field,
-    field_source: fieldSource,
-    operator: "eq",
-    value,
-  };
-}
-
-function wrapPolicy() {
-  return {
-    chainType: "ethereum" as const,
-    id: "policy_pm_wrap_v1",
-    rules: [
-      {
-        id: "allow_exact_pm_wrap",
-        name: "Hunch Polymarket Deposit USDC.e Wrap v1",
-        action: "ALLOW",
-        method: "eth_sendTransaction",
-        conditions: [
-          condition("chain_id", "ethereum_transaction", "137"),
-          condition("to", "ethereum_transaction", ROUTER),
-          condition("value", "ethereum_transaction", "0x0"),
-          condition("function_name", "ethereum_calldata", "fund", true),
-          condition("fund.pUsdAmount", "ethereum_calldata", "0", true),
-        ],
-      },
-    ],
-  };
-}
-
-function setPolicyConditionValue(
-  policy: ReturnType<typeof wrapPolicy>,
-  index: number,
-  value: string,
-): void {
-  const rule = policy.rules[0];
-  assert.ok(rule, "wrap policy must contain its single allow rule");
-  const selectedCondition = rule.conditions[index];
-  assert.ok(selectedCondition, `wrap policy condition ${index} must exist`);
-  selectedCondition.value = value;
-}
-
 function action(
   totalAmount: bigint,
   pUsdAmount = 0n,
 ): Extract<NormalizedAction, { kind: "evm_transaction" }> {
   return {
     kind: "evm_transaction",
-    actionId: "wrap_full_receipt",
+    actionId: "fund_controller_balance",
     networkId: "evm:137",
     senderWalletId: WALLET_ID,
     to: ROUTER,
@@ -431,115 +285,6 @@ function action(
     gasLimitRaw: null,
   };
 }
-
-const validatedPolicy = validatePolymarketDepositUsdceWrapPolicy({
-  policy: wrapPolicy(),
-  policyId: "policy_pm_wrap_v1",
-  routerAddress: ROUTER,
-});
-assert.equal(validatedPolicy.valid, true, validatedPolicy.issues.join("; "));
-const combinedPolicy = wrapPolicy();
-combinedPolicy.rules.unshift({
-  id: "canonical_trading_rule",
-  name: "Canonical trading rule",
-  action: "ALLOW",
-  method: "eth_signTypedData_v4",
-  conditions: [],
-});
-assert.equal(
-  validatePolymarketDepositUsdceWrapPolicy({
-    policy: combinedPolicy,
-    policyId: combinedPolicy.id,
-    routerAddress: ROUTER,
-  }).valid,
-  true,
-  "the exact wrap rule may coexist with canonical trading rules in one policy",
-);
-
-for (const [label, mutate] of [
-  [
-    "chain",
-    (policy: ReturnType<typeof wrapPolicy>) => {
-      setPolicyConditionValue(policy, 0, "1");
-    },
-  ],
-  [
-    "router",
-    (policy: ReturnType<typeof wrapPolicy>) => {
-      setPolicyConditionValue(
-        policy,
-        1,
-        "0x2222222222222222222222222222222222222222",
-      );
-    },
-  ],
-  [
-    "native value",
-    (policy: ReturnType<typeof wrapPolicy>) => {
-      setPolicyConditionValue(policy, 2, "0x1");
-    },
-  ],
-  [
-    "function",
-    (policy: ReturnType<typeof wrapPolicy>) => {
-      setPolicyConditionValue(policy, 3, "transfer");
-    },
-  ],
-  [
-    "pUSD input",
-    (policy: ReturnType<typeof wrapPolicy>) => {
-      setPolicyConditionValue(policy, 4, "1");
-    },
-  ],
-] as const) {
-  const candidate = wrapPolicy();
-  mutate(candidate);
-  assert.equal(
-    validatePolymarketDepositUsdceWrapPolicy({
-      policy: candidate,
-      policyId: candidate.id,
-      routerAddress: ROUTER,
-    }).valid,
-    false,
-    `${label} must remain exact`,
-  );
-}
-
-const cappedPolicy = wrapPolicy();
-cappedPolicy.rules[0]?.conditions.push({
-  ...condition("fund.totalAmount", "ethereum_calldata", "1000000", true),
-  operator: "lte",
-});
-assert.equal(
-  validatePolymarketDepositUsdceWrapPolicy({
-    policy: cappedPolicy,
-    policyId: cappedPolicy.id,
-    routerAddress: ROUTER,
-  }).valid,
-  false,
-  "the wrap-only policy must leave totalAmount unrestricted",
-);
-
-const veryLargeRaw = (2n ** 255n).toString();
-assert.deepEqual(
-  validatePolymarketDepositUsdceWrapAction({
-    action: action(BigInt(veryLargeRaw)),
-    expectedRaw: veryLargeRaw,
-    routerAddress: ROUTER,
-    walletId: WALLET_ID,
-  }),
-  { expectedNonce: 77n, totalAmount: BigInt(veryLargeRaw) },
-);
-assert.throws(
-  () =>
-    validatePolymarketDepositUsdceWrapAction({
-      action: action(BigInt(veryLargeRaw) - 1n),
-      expectedRaw: veryLargeRaw,
-      routerAddress: ROUTER,
-      walletId: WALLET_ID,
-    }),
-  /full USDC\.e receipt/u,
-);
 
 assert.deepEqual(
   validatePolymarketDepositPusdFundAction({
@@ -580,114 +325,6 @@ assert.throws(
       walletId: WALLET_ID,
     }),
   /confirmed controller pUSD amount/u,
-);
-assert.throws(
-  () =>
-    validatePolymarketDepositUsdceWrapAction({
-      action: { ...action(1n), networkId: "evm:1" },
-      expectedRaw: "1",
-      routerAddress: ROUTER,
-      walletId: WALLET_ID,
-    }),
-  /closed-destination profile/u,
-);
-assert.throws(
-  () =>
-    validatePolymarketDepositUsdceWrapAction({
-      action: {
-        ...action(1n),
-        to: "0x2222222222222222222222222222222222222222",
-      },
-      expectedRaw: "1",
-      routerAddress: ROUTER,
-      walletId: WALLET_ID,
-    }),
-  /closed-destination profile/u,
-);
-assert.throws(
-  () =>
-    validatePolymarketDepositUsdceWrapAction({
-      action: action(BigInt(veryLargeRaw), 1n),
-      expectedRaw: veryLargeRaw,
-      routerAddress: ROUTER,
-      walletId: WALLET_ID,
-    }),
-  /full USDC\.e receipt/u,
-);
-
-const snapshot = parseTelegramFundingAutomationPolicyV2({
-  version: 2,
-  kind: "polymarket_usdce_full_receipt_wrap",
-  profileId: POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
-  fullReceipt: true,
-  authorizationId: "authorization_12345678",
-  authorizationFingerprint: "a".repeat(64),
-  signerId: "signer_12345678",
-  signerFingerprint: "b".repeat(64),
-  policyId: "policy_12345678",
-  policyFingerprint: "c".repeat(64),
-  fundingPolicyRevision: "funding_policy_revision_12345678",
-  venueId: "polymarket",
-  destinationOptionId: "destination_pm_12345678",
-  venueBindingOptionId: "binding_pm_12345678",
-  sourceAsset: {
-    networkId: "evm:137",
-    assetId: RELAY_PINNED_ASSETS.polygonUsdce,
-    decimals: 6,
-  },
-  destinationAsset: {
-    networkId: "evm:137",
-    assetId: RELAY_PINNED_ASSETS.polygonPusd,
-    decimals: 6,
-  },
-  variantCursors: [
-    {
-      variantId: "variant_usdce_12345678",
-      networkId: "evm:137",
-      ledgerHeightExclusive: "123456789",
-    },
-  ],
-});
-assert.ok(snapshot);
-assert.equal(
-  snapshot.fundingPolicyRevision,
-  "funding_policy_revision_12345678",
-);
-assert.equal(
-  parseTelegramFundingAutomationPolicyV2({
-    ...snapshot,
-    fundingPolicyRevision: undefined,
-  }),
-  null,
-  "automatic consent without its frozen Funding Policy revision must fail closed",
-);
-assert.equal(
-  telegramFundingReceiptIsProspectivelyAuthorized({
-    policy: snapshot,
-    variantId: "variant_usdce_12345678",
-    ledgerHeight: "123456789",
-  }),
-  false,
-  "a transfer at the frozen consent cursor is never prospective",
-);
-assert.equal(
-  telegramFundingReceiptIsProspectivelyAuthorized({
-    policy: snapshot,
-    variantId: "variant_usdce_12345678",
-    ledgerHeight: "123456790",
-  }),
-  true,
-);
-
-assert.deepEqual(
-  delegatedFundingProfile(POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID),
-  {
-    profileId: POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
-    securityClass: "closed_destination_transform",
-    networkId: "evm:137",
-    venueId: "polymarket",
-    executorId: POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
-  },
 );
 assert.equal(delegatedFundingProfile("future_unknown_profile"), null);
 assert.deepEqual(
@@ -954,7 +591,7 @@ assert.equal(
 
 const configuredProfile = {
   enabled: true,
-  profileId: POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
+  profileId: POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
   signerId: "signer_12345678",
   signerFingerprint: "a".repeat(64),
   policyId: "policy_12345678",
@@ -987,21 +624,21 @@ const resolvedFundingPolicy = (input: {
   };
 };
 assert.deepEqual(
-  classifyPolymarketWrapControlPlane({
+  classifyPolymarketRouterControlPlane({
     configuration: configuredProfile,
     policy: resolvedFundingPolicy({}),
   }),
   { kind: "allowed" },
 );
 assert.deepEqual(
-  classifyPolymarketWrapControlPlane({
+  classifyPolymarketRouterControlPlane({
     configuration: { ...configuredProfile, enabled: false },
     policy: resolvedFundingPolicy({}),
   }),
   { kind: "soft_paused", reasonCode: "delegated_execution_paused" },
 );
 assert.deepEqual(
-  classifyPolymarketWrapControlPlane({
+  classifyPolymarketRouterControlPlane({
     configuration: configuredProfile,
     policy: resolvedFundingPolicy({
       policy: { ...activeFundingPolicy, paused: true },
@@ -1010,7 +647,7 @@ assert.deepEqual(
   { kind: "soft_paused", reasonCode: "funding_policy_paused" },
 );
 assert.deepEqual(
-  classifyPolymarketWrapControlPlane({
+  classifyPolymarketRouterControlPlane({
     configuration: configuredProfile,
     policy: resolvedFundingPolicy({
       policy: { ...activeFundingPolicy, venues: [], paused: true },
@@ -1034,7 +671,7 @@ assert.equal(
   "an enabled replacement revision must not inherit old consent",
 );
 assert.deepEqual(
-  classifyPolymarketWrapControlPlane({
+  classifyPolymarketRouterControlPlane({
     configuration: configuredProfile,
     policy: resolvedFundingPolicy({
       policy: { ...activeFundingPolicy, venues: [] },
@@ -1051,21 +688,21 @@ assert.deepEqual(
   "hard-invalid authority must win over a simultaneous soft pause",
 );
 assert.equal(
-  loadPolymarketWrapExecutionConfiguration({
+  loadPolymarketPusdFundExecutionConfiguration({
     HUNCH_FINANCE_EXECUTE: "false",
     HUNCH_FUNDING_PM_WRAP_EXECUTE: "true",
   }).enabled,
   false,
 );
 assert.equal(
-  loadPolymarketWrapExecutionConfiguration({
+  loadPolymarketPusdFundExecutionConfiguration({
     HUNCH_FINANCE_EXECUTE: "true",
     HUNCH_FUNDING_PM_WRAP_EXECUTE: "true",
   }).enabled,
   true,
 );
 assert.equal(
-  polymarketWrapExecutorEnvironmentReady({
+  polymarketRouterExecutorEnvironmentReady({
     PRIVY_APP_ID: "app",
     PRIVY_APP_SECRET: "secret",
     PRIVY_WALLET_AUTHORIZATION_KEY: AUTHORIZATION_PRIVATE_KEY,
@@ -1076,7 +713,7 @@ assert.equal(
   true,
 );
 assert.equal(
-  polymarketWrapExecutorEnvironmentReady({
+  polymarketRouterExecutorEnvironmentReady({
     PRIVY_APP_ID: "app",
     PRIVY_APP_SECRET: "secret",
     PRIVY_WALLET_AUTHORIZATION_KEY: AUTHORIZATION_PRIVATE_KEY,
@@ -1087,7 +724,7 @@ assert.equal(
   "a missing Funding Router address must soft-pause delegated routing",
 );
 assert.equal(
-  polymarketWrapExecutorEnvironmentReady({
+  polymarketRouterExecutorEnvironmentReady({
     PRIVY_APP_ID: "app",
     PRIVY_APP_SECRET: "secret",
     PRIVY_WALLET_AUTHORIZATION_KEY: AUTHORIZATION_PRIVATE_KEY,
@@ -1100,7 +737,7 @@ assert.equal(
   "delegated routing requires the exact immutable Funding Router",
 );
 assert.equal(
-  polymarketWrapExecutorEnvironmentReady({
+  polymarketRouterExecutorEnvironmentReady({
     PRIVY_APP_ID: "app",
     PRIVY_APP_SECRET: "secret",
     PRIVY_WALLET_AUTHORIZATION_KEY: "malformed",
@@ -1263,14 +900,14 @@ assert.equal(
   "a malformed sidecar key must disable delegated execution without crashing the worker",
 );
 assert.equal(
-  polymarketWrapExecutorEnvironmentReady({
+  polymarketRouterExecutorEnvironmentReady({
     PRIVY_APP_ID: "app",
     PRIVY_APP_SECRET: "secret",
   }),
   false,
 );
 assert.equal(
-  createPolymarketWrapDelegatedFundingProfile({
+  createPolymarketRouterDelegatedFundingProfile({
     configuration: { ...configuredProfile, enabled: false, signerId: "" },
     driver: {
       execute: async () => ({ kind: "ambiguous" }),
@@ -1278,11 +915,11 @@ assert.equal(
       lookupProviderReference: async () => ({ kind: "pending" }),
     },
   }).profileId,
-  POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
+  POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
   "execution OFF and a profile-ID rollback must leave recovery mounted",
 );
 assert.equal(
-  createPolymarketWrapDelegatedFundingProfile({
+  createPolymarketRouterDelegatedFundingProfile({
     configuration: configuredProfile,
     driver: {
       execute: async () => ({ kind: "ambiguous" }),
@@ -1290,26 +927,18 @@ assert.equal(
       lookupProviderReference: async () => ({ kind: "pending" }),
     },
   })?.profileId,
-  POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
+  POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
 );
 
 {
   const pUsdScope = polymarketRouterAuthorityScope(
     POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
   );
-  const usdceScope = polymarketRouterAuthorityScope(
-    POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
-  );
   assert.equal(pUsdScope.profileId, POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID);
   assert.equal(
     pUsdScope.sourceAsset.assetId,
     pUsdScope.destinationAsset.assetId,
-    "pUSD Router funding must re-check the pUSD authority, not the USDC.e wrapper default",
-  );
-  assert.notEqual(
-    usdceScope.sourceAsset.assetId,
-    pUsdScope.sourceAsset.assetId,
-    "the two Router profiles intentionally have distinct source authority scopes",
+    "pUSD Router funding must use the controller pUSD authority scope",
   );
 }
 
@@ -1325,11 +954,10 @@ const polymarket = compiled.venues.find(
 assert.ok(polymarket);
 assert.equal(polymarket.delegatedExecutionEnabled, true);
 assert.deepEqual(polymarket.delegatedPolicyIds, [
-  POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
   POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
 ]);
 assert.equal(polymarket.delegatedDailyCapUsd, null);
 
 console.log(
-  "[funding-delegated-execution-tests] unlimited policy, exact full-receipt action, cursor authority, and V2 registry passed",
+  "[funding-delegated-execution-tests] controller Router authority and V2 registry passed",
 );

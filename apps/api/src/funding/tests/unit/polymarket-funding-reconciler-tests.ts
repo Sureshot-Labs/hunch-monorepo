@@ -25,11 +25,9 @@ const plan = buildPolymarketFundingPlan({
   requiredRaw: 5_000_000n,
   depositPusdRaw: 1_500_000n,
   depositLockedRaw: 500_000n,
-  depositUsdceRaw: 1_000_000n,
-  depositRouterUsdceAllowanceRaw: 1_000_000n,
-  signerPusdRaw: 1_500_000n,
+  signerPusdRaw: 2_500_000n,
   signerUsdceRaw: 1_500_000n,
-  routerPusdAllowanceRaw: 1_500_000n,
+  routerPusdAllowanceRaw: 2_500_000n,
   routerUsdceAllowanceRaw: 1_500_000n,
   fundingCapRaw: 4_000_000n,
 });

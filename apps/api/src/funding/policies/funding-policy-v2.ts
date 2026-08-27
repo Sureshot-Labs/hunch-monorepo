@@ -20,10 +20,7 @@ import {
   type FundingPolicyValidationIssue,
   type FundingRuntimePolicy,
 } from "./funding-policy.js";
-import {
-  POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
-  POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
-} from "../execution/delegated-funding-profile-ids.js";
+import { POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID } from "../execution/delegated-funding-profile-ids.js";
 import { RELAY_EVM_FUNDING_PROFILE_SPECS } from "../execution/relay-evm-profile-specs.js";
 
 export const FUNDING_VENUE_IDS = deepFreeze([
@@ -206,7 +203,10 @@ const FUNDING_VENUE_CATALOG: Readonly<Record<FundingVenueId, CatalogVenue>> =
     polymarket: {
       settlementAsset: "polygon:pusd",
       settlementLocationPatternId: "polymarket-venue-cash-v1",
-      directReceiveAssets: ["polygon:pusd", "polygon:usdce"],
+      // A Polymarket Deposit Wallet may receive pUSD directly. USDC.e must
+      // first arrive at an owned controller wallet and use an ordinary Relay
+      // route; the Deposit Wallet cannot authorize Hunch's Funding Router.
+      directReceiveAssets: ["polygon:pusd"],
       cardReceiveAssets: ["polygon:pusd", "polygon:usdc"],
       privyMethodId: "privy-polymarket-pusd-v1",
     },
@@ -408,10 +408,6 @@ export function compileFundingIntentPolicy(
     }),
     locations: [...locations.values()],
     venues: policy.venues.map((venueId) => {
-      const delegatedWrap =
-        venueId === "polymarket" &&
-        !policy.paused &&
-        policy.receive.assets.includes("polygon:usdce");
       const delegatedPusdFund =
         venueId === "polymarket" &&
         !policy.paused &&
@@ -440,10 +436,8 @@ export function compileFundingIntentPolicy(
         fundingEnabled: venueActive(policy, venueId),
         tradingEnabled: false,
         withdrawalEnabled: false,
-        delegatedExecutionEnabled:
-          delegatedWrap || delegatedPusdFund || delegatedRelayEvm,
+        delegatedExecutionEnabled: delegatedPusdFund || delegatedRelayEvm,
         delegatedPolicyIds: [
-          ...(delegatedWrap ? [POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID] : []),
           ...(delegatedPusdFund
             ? [POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID]
             : []),

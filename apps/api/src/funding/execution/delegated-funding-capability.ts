@@ -1,7 +1,6 @@
 import type { FundingControlPlaneSnapshot } from "../policies/funding-policy-sidecar.js";
-import type { PolymarketWrapExecutionConfiguration } from "./delegated-funding-config.js";
-import { polymarketWrapProfileConfigured } from "./delegated-funding-config.js";
-import { POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID } from "./delegated-funding-profile-ids.js";
+import type { PolymarketRouterExecutionConfiguration } from "./delegated-funding-config.js";
+import { polymarketRouterProfileConfigured } from "./delegated-funding-config.js";
 
 export type DelegatedFundingCapabilityDecision =
   | Readonly<{ kind: "allowed" }>
@@ -62,8 +61,8 @@ export function fundingPolicyRevisionMayResume(
  * separate DB decision because its rows must be locked at the broadcast
  * boundary.
  */
-export function classifyPolymarketWrapControlPlane(input: {
-  configuration: PolymarketWrapExecutionConfiguration;
+export function classifyPolymarketRouterControlPlane(input: {
+  configuration: PolymarketRouterExecutionConfiguration;
   policy: FundingControlPlaneSnapshot;
 }): DelegatedFundingPreBroadcastDecision {
   if (input.policy.invalidStoredPolicy) {
@@ -80,11 +79,7 @@ export function classifyPolymarketWrapControlPlane(input: {
   }
   if (
     !input.policy.policy.venues.includes("polymarket") ||
-    !input.policy.policy.receive.assets.includes(
-      input.configuration.profileId === POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID
-        ? "polygon:pusd"
-        : "polygon:usdce",
-    )
+    !input.policy.policy.receive.assets.includes("polygon:pusd")
   ) {
     return {
       kind: "hard_invalid",
@@ -97,7 +92,7 @@ export function classifyPolymarketWrapControlPlane(input: {
       reasonCode: "delegated_execution_paused",
     };
   }
-  if (!polymarketWrapProfileConfigured(input.configuration)) {
+  if (!polymarketRouterProfileConfigured(input.configuration)) {
     return {
       kind: "soft_paused",
       reasonCode: "delegated_profile_unavailable",

@@ -8,12 +8,12 @@ import {
   loadRelayEvmExecutionConfiguration,
   relayEvmProfileConfigured,
   type RelayEvmExecutionConfiguration,
-  loadPolymarketWrapExecutionConfiguration,
-  polymarketWrapExecutorEnvironmentReady,
-  type PolymarketWrapExecutionConfiguration,
+  loadPolymarketPusdFundExecutionConfiguration,
+  polymarketRouterExecutorEnvironmentReady,
+  type PolymarketRouterExecutionConfiguration,
 } from "./delegated-funding-config.js";
 import {
-  classifyPolymarketWrapControlPlane,
+  classifyPolymarketRouterControlPlane,
   combineDelegatedFundingDecisions,
   fundingPolicyRevisionMayResume,
   type DelegatedFundingPreBroadcastDecision,
@@ -29,9 +29,9 @@ import {
 } from "../../funding-providers/relay/rehearsal.js";
 import { parseUsdcToMicro } from "../../lib/usdc.js";
 
-export type ResolvedTelegramPolymarketWrapCapability = Readonly<{
+export type ResolvedTelegramPolymarketRouterCapability = Readonly<{
   authorization: TelegramFundingAuthorization | null;
-  configuration: PolymarketWrapExecutionConfiguration;
+  configuration: PolymarketRouterExecutionConfiguration;
   decision: DelegatedFundingPreBroadcastDecision;
   fundingPolicyRevision: string;
 }>;
@@ -45,7 +45,7 @@ export function relayEvmUsdCapMatchesRaw(
   );
 }
 
-export async function resolveTelegramPolymarketWrapCapability(
+export async function resolveTelegramPolymarketRouterCapability(
   db: Pick<Pool, "query">,
   input: Readonly<{
     userId: string;
@@ -53,16 +53,16 @@ export async function resolveTelegramPolymarketWrapCapability(
     telegramUserId: string;
     destinationOptionId: string;
     venueBindingOptionId: string;
-    configuration?: PolymarketWrapExecutionConfiguration;
+    configuration?: PolymarketRouterExecutionConfiguration;
     expectedAuthorizationId?: string;
     expectedAuthorizationFingerprint?: string;
     expectedFundingPolicyRevision?: string;
     now?: Date;
     lock?: boolean;
   }>,
-): Promise<ResolvedTelegramPolymarketWrapCapability> {
+): Promise<ResolvedTelegramPolymarketRouterCapability> {
   const configuration =
-    input.configuration ?? loadPolymarketWrapExecutionConfiguration();
+    input.configuration ?? loadPolymarketPusdFundExecutionConfiguration();
   if (input.lock) await lockFundingPolicyForTransaction(db);
   const policy = await resolveFundingControlPlaneSnapshot(db);
   const authority = await resolveCurrentTelegramFundingAuthority(db, {
@@ -78,7 +78,7 @@ export async function resolveTelegramPolymarketWrapCapability(
     lock: input.lock,
   });
   const decision = combineDelegatedFundingDecisions(
-    classifyPolymarketWrapControlPlane({ configuration, policy }),
+    classifyPolymarketRouterControlPlane({ configuration, policy }),
     input.expectedFundingPolicyRevision === undefined ||
       input.expectedFundingPolicyRevision === policy.revision ||
       fundingPolicyRevisionMayResume(policy)
@@ -87,7 +87,7 @@ export async function resolveTelegramPolymarketWrapCapability(
           kind: "hard_invalid",
           reasonCode: "funding_policy_changed",
         },
-    polymarketWrapExecutorEnvironmentReady()
+    polymarketRouterExecutorEnvironmentReady()
       ? { kind: "allowed" }
       : {
           kind: "soft_paused",

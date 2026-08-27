@@ -157,6 +157,8 @@ const candidate: FundingPolymarketHandoffCandidate = {
   stepId: opaque("step"),
   attemptId: opaque("attempt"),
   attemptOutcome: "submitted",
+  referenceKind: "transaction",
+  resolvedTransactionHash: null,
   receiptRefCiphertext: "encrypted_internal_handoff_reference",
   receiptRefLookupHmac: LOOKUP_HMAC,
   lookupKeyVersion: 1,

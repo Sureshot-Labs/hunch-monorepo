@@ -984,7 +984,6 @@ function validateDepositWalletBatchCall(
     const collateralOnramp = normalizeAddress(
       env.polymarketCollateralOnrampAddress,
     );
-    const fundingRouter = normalizeAddress(env.polymarketFundingRouterAddress);
     const spender = normalizeAddress(String(decoded.args[0] ?? ""));
     const approvesPusdOperator =
       addressesEqual(target, pusdToken) &&
@@ -992,15 +991,7 @@ function validateDepositWalletBatchCall(
     const approvesUsdceWrap =
       addressesEqual(target, usdceToken) &&
       (spender ? addressesEqual(spender, collateralOnramp) : false);
-    const approvesUsdceFundingRouter =
-      addressesEqual(target, usdceToken) &&
-      Boolean(fundingRouter) &&
-      addressesEqual(spender, fundingRouter);
-    if (
-      !approvesPusdOperator &&
-      !approvesUsdceWrap &&
-      !approvesUsdceFundingRouter
-    ) {
+    if (!approvesPusdOperator && !approvesUsdceWrap) {
       throw new Error("Unsupported deposit wallet ERC20 approval target.");
     }
     return;

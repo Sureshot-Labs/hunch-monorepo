@@ -7,7 +7,6 @@ import {
   type FundingReceiveSession,
 } from "../funding/domain/types.js";
 import {
-  parseTelegramFundingAutomationPolicyV2,
   parseTelegramRelayEvmAutomationPolicyV3,
 } from "../funding/execution/telegram-funding-automation-policy.js";
 import {
@@ -262,10 +261,8 @@ export function projectTelegramFundingProgress(input: {
   const automaticConversionConsented =
     input.consent.automationEnabled === true &&
     route.automaticSourceAsset != null &&
-    (parseTelegramFundingAutomationPolicyV2(input.consent.policySnapshot) !=
-      null ||
-      parseTelegramRelayEvmAutomationPolicyV3(input.consent.policySnapshot) !=
-        null);
+    parseTelegramRelayEvmAutomationPolicyV3(input.consent.policySnapshot) !=
+      null;
   const automaticConversionMode =
     input.automaticConversionMode ??
     (input.automaticConversionAvailable === true

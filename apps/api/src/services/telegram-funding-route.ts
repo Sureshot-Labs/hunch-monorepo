@@ -9,7 +9,6 @@ import {
   parseFundingReceiveReviewContinuation,
   type AssetRef,
   type FundingDestinationOption,
-  type FundingQuoteSummary,
   type FundingReceiveQuotePlan,
   type FundingReceiveReviewContinuation,
   type FundingReceiveSession,
@@ -17,14 +16,11 @@ import {
 } from "../funding/domain/types.js";
 import type { DelegatedFundingPreBroadcastDecision } from "../funding/execution/delegated-funding-capability.js";
 import { SOLANA_NATIVE_ASSET } from "../funding/domain/network-fees.js";
-import { resolveTelegramPolymarketWrapCapability } from "../funding/execution/delegated-funding-capability-resolver.js";
 import { resolveTelegramRelayEvmCapability } from "../funding/execution/delegated-funding-capability-resolver.js";
 import {
-  loadPolymarketWrapExecutionConfiguration,
   loadRelayEvmExecutionConfiguration,
   type RelayEvmExecutionConfiguration,
 } from "../funding/execution/delegated-funding-config.js";
-import { POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID } from "../funding/execution/delegated-funding-profile-ids.js";
 import {
   TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
   TELEGRAM_RELAY_POLYGON_PUSD_PROFILE_ID,
@@ -34,13 +30,8 @@ import {
 import type { TelegramFundingAuthorization } from "../funding/execution/telegram-funding-authorization.js";
 import { isTelegramFundingManagedSolanaWalletCurrent } from "../funding/execution/telegram-funding-managed-wallet.js";
 import {
-  buildTelegramFundingAutomationPolicyV2,
   buildTelegramRelayEvmAutomationPolicyV3,
   parseTelegramRelayEvmAutomationPolicyV3,
-  parseTelegramFundingAutomationPolicyV2,
-  telegramFundingAutomationPolicyJson,
-  telegramFundingAutomationPolicyMatchesAuthorization,
-  telegramFundingReceiptIsProspectivelyAuthorized,
   telegramRelayEvmPolicyMatchesAuthorization,
   telegramRelayEvmReceiptIsAuthorized,
   type TelegramRelayEvmAutomationPolicyV3,
@@ -68,15 +59,14 @@ import {
   POLYGON_USDC,
   POLYGON_PUSD,
 } from "../funding-providers/relay/rehearsal.js";
-import {
-  classifyPolymarketFundingRoutingError,
-  hasReadyPolymarketFundingDestinationReceipt,
-  validatePolymarketFundingOperationLink,
-} from "./telegram-funding-polymarket-evidence.js";
 import type { TelegramFundingConsent } from "./telegram-funding-sessions.js";
+import { hasReadyPolymarketDirectDestinationReceipt } from "./telegram-funding-polymarket-evidence.js";
 
 export type TelegramFundingReceivePresentationMode =
   | "pusd_direct"
+  // Historical presentation values remain parseable so an already-sent card
+  // can render an honest terminal state. No registered adapter can select,
+  // authorize, or execute these removed Deposit Wallet source routes.
   | "pusd_or_usdce_automatic"
   | "usdce_wrap_automatic"
   | "relay_evm_automatic"
@@ -148,7 +138,6 @@ export type TelegramFundingDepositRouteKey =
   | "limitless_base_usdc_direct_v1"
   | "limitless_solana_sol_retained_v1"
   | "polymarket_polygon_pusd_direct_v1"
-  | "polymarket_polygon_usdce_wrap_v1"
   | "polymarket_solana_sol_retained_v1";
 
 type TelegramFundingRouteDescriptor = Readonly<{
@@ -218,13 +207,6 @@ const TELEGRAM_FUNDING_ROUTE_DESCRIPTORS = Object.freeze([
     venueId: "polymarket",
   },
   {
-    automaticServerExecution: true,
-    choiceToken: "pw",
-    depositMenu: true,
-    routeKey: "polymarket_polygon_usdce_wrap_v1",
-    venueId: "polymarket",
-  },
-  {
     automaticServerExecution: false,
     choiceToken: "ps",
     depositMenu: true,
@@ -237,14 +219,6 @@ const TELEGRAM_FUNDING_ROUTE_DESCRIPTORS = Object.freeze([
     depositMenu: true,
     routeKey: "limitless_solana_sol_retained_v1",
     venueId: "limitless",
-  },
-  // Existing frozen sessions keep this original composite route identity.
-  {
-    automaticServerExecution: true,
-    choiceToken: "a",
-    depositMenu: false,
-    routeKey: "polymarket_polygon_pusd_usdce_v1",
-    venueId: "polymarket",
   },
 ] as const satisfies readonly TelegramFundingRouteDescriptor[]);
 
@@ -403,10 +377,10 @@ const POLYMARKET_POLYGON_PUSD_DIRECT_PRESENTATION = {
   decimals: 6,
 } as const satisfies TelegramFundingRoutePresentation;
 
-// Provider/network rules stay in adapters like this one. The durable progress
-// and Telegram delivery state machines consume only the frozen generic
-// presentation, so adding Base/Solana must not add branches to those cores.
-
+// These two presentations are decode-only compatibility for frozen consents
+// and cards created before Deposit Wallet conversion was retired. They are not
+// registered in TELEGRAM_FUNDING_ROUTE_DESCRIPTORS, so no new callback,
+// consent, receipt execution, or funding operation can select either route.
 const POLYMARKET_POLYGON_PUSD_USDCE_PRESENTATION = {
   version: 1,
   routeKey: "polymarket_polygon_pusd_usdce_v1",
@@ -418,11 +392,9 @@ const POLYMARKET_POLYGON_PUSD_USDCE_PRESENTATION = {
   acceptedAssetSymbols: ["pUSD", "USDC.e"],
   automaticSourceAssetSymbol: "USDC.e",
   selectionButtonLabel: "pUSD / USDC.e · Polygon",
-  settlementLabel: "Direct / automatic 1:1 conversion",
+  settlementLabel: "Unavailable legacy route",
   instructions: [
-    "Send pUSD or USDC.e on Polygon.",
-    "pUSD is credited directly.",
-    "USDC.e is automatically converted 1:1 to pUSD.",
+    "This older Deposit Wallet conversion route is no longer executable.",
   ],
   decimals: 6,
 } as const satisfies TelegramFundingRoutePresentation;
@@ -438,13 +410,16 @@ const POLYMARKET_POLYGON_USDCE_WRAP_PRESENTATION = {
   acceptedAssetSymbols: ["USDC.e"],
   automaticSourceAssetSymbol: "USDC.e",
   selectionButtonLabel: "USDC.e · Polygon",
-  settlementLabel: "Automatic 1:1 conversion to pUSD",
+  settlementLabel: "Unavailable legacy route",
   instructions: [
-    "Send only USDC.e on Polygon.",
-    "It is automatically converted 1:1 to pUSD.",
+    "This older Deposit Wallet conversion route is no longer executable.",
   ],
   decimals: 6,
 } as const satisfies TelegramFundingRoutePresentation;
+
+// Provider/network rules stay in adapters like this one. The durable progress
+// and Telegram delivery state machines consume only the frozen generic
+// presentation, so adding Base/Solana must not add branches to those cores.
 
 const POLYMARKET_BASE_USDC_PRESENTATION = {
   version: 1,
@@ -585,9 +560,6 @@ const LIMITLESS_SOLANA_SOL_RETAINED_PRESENTATION = {
   routeKey: "limitless_solana_sol_retained_v1",
   venueId: "limitless",
 } as const satisfies TelegramFundingRoutePresentation;
-
-export const TELEGRAM_POLYMARKET_FUNDING_ADAPTER_KEY =
-  "polymarket_polygon_funding_v1";
 
 function exactPolygonPusd(asset: AssetRef): boolean {
   const configured = fundingSidecarRuntimeConfig.polymarketPusdAddress;
@@ -774,88 +746,13 @@ export function telegramPolygonFundingPresentation(
   if (mode === "limitless_solana_sol_retained") {
     return LIMITLESS_SOLANA_SOL_RETAINED_PRESENTATION;
   }
-  return mode === "pusd_or_usdce_automatic"
-    ? POLYMARKET_POLYGON_PUSD_USDCE_PRESENTATION
-    : POLYMARKET_POLYGON_PUSD_DIRECT_PRESENTATION;
-}
-
-function consentPresentation(
-  consent: TelegramFundingConsent,
-  mode: TelegramFundingReceivePresentationMode,
-): TelegramFundingRoutePresentation | null {
-  const stored = parseTelegramFundingRoutePresentation(
-    consent.policySnapshot.presentation,
-  );
-  if (!stored) return null;
-  const expected = telegramPolygonFundingPresentation(mode);
-  // Route identity is adapter-owned, but user-visible labels are frozen by the
-  // consent. Never relabel an existing consent from today's live constants.
-  // The consent asset and automation snapshot independently prove exact asset
-  // identity; symbols below are presentation only and may be renamed later.
-  const identityMatches =
-    stored.routeKey === expected.routeKey &&
-    stored.venueId === expected.venueId &&
-    stored.networkId === expected.networkId &&
-    stored.decimals === expected.decimals;
-  return identityMatches ? stored : null;
-}
-
-function resolvePolymarketFundingConsentRoute(
-  consent: TelegramFundingConsent,
-): TelegramFundingRoute | null {
-  const storedMode = consent.policySnapshot.presentationMode;
-  if (storedMode === "pusd_direct") {
-    const presentation = consentPresentation(consent, storedMode);
-    return !consent.automationEnabled &&
-      !parseTelegramFundingAutomationPolicyV2(consent.policySnapshot) &&
-      exactPolygonPusd(consent.asset) &&
-      presentation
-      ? {
-          destinationAsset: consent.asset,
-          automaticSourceAsset: null,
-          mode: storedMode,
-          presentation,
-        }
-      : null;
+  if (mode === "pusd_or_usdce_automatic") {
+    return POLYMARKET_POLYGON_PUSD_USDCE_PRESENTATION;
   }
-  if (storedMode !== "pusd_or_usdce_automatic") return null;
-  const automation = parseTelegramFundingAutomationPolicyV2(
-    consent.policySnapshot,
-  );
-  const presentation = consentPresentation(consent, storedMode);
-  if (
-    !consent.automationEnabled ||
-    !automation ||
-    !presentation ||
-    !exactPolygonUsdce(automation.sourceAsset) ||
-    !exactPolygonPusd(automation.destinationAsset) ||
-    !sameAsset(consent.asset, automation.destinationAsset)
-  ) {
-    return null;
+  if (mode === "usdce_wrap_automatic") {
+    return POLYMARKET_POLYGON_USDCE_WRAP_PRESENTATION;
   }
-  const automaticVariantIds = new Set(
-    automation.variantCursors.map((cursor) => cursor.variantId),
-  );
-  const consentVariantIds = new Set(consent.variantIds);
-  if (
-    automaticVariantIds.size !== automation.variantCursors.length ||
-    consentVariantIds.size !== consent.variantIds.length ||
-    consent.variantIds.some((variantId) => variantId.trim().length === 0) ||
-    [...automaticVariantIds].some(
-      (variantId) => !consentVariantIds.has(variantId),
-    ) ||
-    ![...consentVariantIds].some(
-      (variantId) => !automaticVariantIds.has(variantId),
-    )
-  ) {
-    return null;
-  }
-  return {
-    destinationAsset: automation.destinationAsset,
-    automaticSourceAsset: automation.sourceAsset,
-    mode: storedMode,
-    presentation,
-  };
+  return POLYMARKET_POLYGON_PUSD_DIRECT_PRESENTATION;
 }
 
 function resolvePolymarketDirectConsentRoute(
@@ -865,7 +762,6 @@ function resolvePolymarketDirectConsentRoute(
     consent.policySnapshot.presentation,
   );
   return !consent.automationEnabled &&
-    !parseTelegramFundingAutomationPolicyV2(consent.policySnapshot) &&
     exactPolygonPusd(consent.asset) &&
     consent.policySnapshot.presentationMode === "pusd_direct" &&
     presentation?.routeKey ===
@@ -879,52 +775,7 @@ function resolvePolymarketDirectConsentRoute(
     : null;
 }
 
-function resolvePolymarketWrapConsentRoute(
-  consent: TelegramFundingConsent,
-): TelegramFundingRoute | null {
-  const automation = parseTelegramFundingAutomationPolicyV2(
-    consent.policySnapshot,
-  );
-  const presentation = parseTelegramFundingRoutePresentation(
-    consent.policySnapshot.presentation,
-  );
-  if (
-    !consent.automationEnabled ||
-    !automation ||
-    !presentation ||
-    consent.policySnapshot.presentationMode !== "usdce_wrap_automatic" ||
-    presentation.routeKey !==
-      POLYMARKET_POLYGON_USDCE_WRAP_PRESENTATION.routeKey ||
-    !exactPolygonUsdce(automation.sourceAsset) ||
-    !exactPolygonPusd(automation.destinationAsset) ||
-    !sameAsset(consent.asset, automation.destinationAsset)
-  ) {
-    return null;
-  }
-  const policyVariantIds = automation.variantCursors.map(
-    (cursor) => cursor.variantId,
-  );
-  if (
-    policyVariantIds.length === 0 ||
-    new Set(policyVariantIds).size !== policyVariantIds.length ||
-    new Set(consent.variantIds).size !== consent.variantIds.length ||
-    consent.variantIds.length !== policyVariantIds.length ||
-    consent.variantIds.some(
-      (variantId) => !policyVariantIds.includes(variantId),
-    )
-  ) {
-    return null;
-  }
-  return {
-    destinationAsset: automation.destinationAsset,
-    automaticSourceAsset: automation.sourceAsset,
-    mode: "usdce_wrap_automatic",
-    presentation,
-  };
-}
-
-function resolvePolymarketPolygonFundingTarget(input: {
-  automaticConversionEnabled: boolean;
+function resolvePolymarketPolygonDirectTarget(input: {
   session: FundingReceiveSession;
 }): TelegramFundingTargetCapability | null {
   const matches = input.session.receiveTargets.flatMap((target) => {
@@ -933,66 +784,20 @@ function resolvePolymarketPolygonFundingTarget(input: {
       (accepted) =>
         accepted.handling === "direct" && exactPolygonPusd(accepted.asset),
     );
-    const usdce = target.acceptedAssets.filter(
-      (accepted) =>
-        accepted.handling === "automatic_conversion" &&
-        exactPolygonUsdce(accepted.asset),
-    );
-    const nativeUsdc = target.acceptedAssets.filter(
-      (accepted) =>
-        accepted.handling === "automatic_conversion" &&
-        exactPolygonUsdc(accepted.asset),
-    );
-    if (pusd.length > 1 || usdce.length > 1 || nativeUsdc.length > 1) return [];
-    if (
-      pusd.length + usdce.length + nativeUsdc.length !==
-      target.acceptedAssets.length
-    )
-      return [];
+    if (pusd.length !== 1) return [];
     const destinationAsset = pusd[0]?.asset ?? null;
-    const automaticSourceAsset = input.automaticConversionEnabled
-      ? (usdce[0]?.asset ?? null)
-      : null;
     if (!destinationAsset) return [];
-    return [{ target, destinationAsset, automaticSourceAsset }];
+    return [{ target, destinationAsset }];
   });
   if (matches.length !== 1 || !matches[0]) return null;
   const match = matches[0];
-  const mode: TelegramFundingReceivePresentationMode =
-    match.automaticSourceAsset ? "pusd_or_usdce_automatic" : "pusd_direct";
   return {
     address: match.target.destinationAddress,
     destinationAsset: match.destinationAsset,
-    automaticSourceAsset: match.automaticSourceAsset,
-    mode,
-    presentation: telegramPolygonFundingPresentation(mode),
+    automaticSourceAsset: null,
+    mode: "pusd_direct",
+    presentation: POLYMARKET_POLYGON_PUSD_DIRECT_PRESENTATION,
     receiveTargetId: match.target.receiveTargetId,
-  };
-}
-
-function resolvePolymarketPolygonDirectTarget(input: {
-  session: FundingReceiveSession;
-}): TelegramFundingTargetCapability | null {
-  return resolvePolymarketPolygonFundingTarget({
-    automaticConversionEnabled: false,
-    session: input.session,
-  });
-}
-
-function resolvePolymarketPolygonWrapTarget(input: {
-  automaticConversionEnabled: boolean;
-  session: FundingReceiveSession;
-}): TelegramFundingTargetCapability | null {
-  if (!input.automaticConversionEnabled) return null;
-  const target = resolvePolymarketPolygonFundingTarget({
-    automaticConversionEnabled: true,
-    session: input.session,
-  });
-  if (!target?.automaticSourceAsset) return null;
-  return {
-    ...target,
-    mode: "usdce_wrap_automatic",
-    presentation: POLYMARKET_POLYGON_USDCE_WRAP_PRESENTATION,
   };
 }
 
@@ -1000,94 +805,30 @@ function resolvePolymarketPolygonDirectChoice(input: {
   session: FundingReceiveSession;
   observationVariants: readonly DirectIngressObservationVariant[];
 }): TelegramFundingTargetChoice | null {
-  return resolvePolymarketFundingTargetChoice({
-    ...input,
-    automaticConversionEnabled: false,
-  });
-}
-
-function resolvePolymarketPolygonWrapChoice(input: {
-  automaticConversionEnabled: boolean;
-  session: FundingReceiveSession;
-  observationVariants: readonly DirectIngressObservationVariant[];
-}): TelegramFundingTargetChoice | null {
-  const target = resolvePolymarketPolygonWrapTarget(input);
-  if (!target?.automaticSourceAsset) return null;
-  const variants = input.observationVariants
-    .filter(
-      (variant) =>
-        sameAsset(variant.asset, target.automaticSourceAsset as AssetRef) &&
-        sameAccountAddress(
-          variant.networkId,
-          variant.destinationAddress,
-          target.address,
-        ) &&
-        variant.completion.kind === "committed_venue_preparation",
-    )
-    .sort((left, right) => left.variantId.localeCompare(right.variantId));
-  if (!variants.length) return null;
-  return {
-    address: target.address,
-    asset: target.destinationAsset,
-    automaticConversion: true,
-    mode: target.mode,
-    presentation: target.presentation,
-    receiveTargetId: target.receiveTargetId,
-    automaticVariants: variants,
-    variantIds: variants.map((variant) => variant.variantId),
-  };
-}
-
-function resolvePolymarketFundingTargetChoice(input: {
-  automaticConversionEnabled: boolean;
-  session: FundingReceiveSession;
-  observationVariants: readonly DirectIngressObservationVariant[];
-}): TelegramFundingTargetChoice | null {
-  const target = resolvePolymarketPolygonFundingTarget(input);
+  const target = resolvePolymarketPolygonDirectTarget(input);
   if (!target) return null;
-  const acceptedAssets = [
-    target.destinationAsset,
-    target.automaticSourceAsset,
-  ].filter((asset): asset is AssetRef => asset != null);
   const variants = input.observationVariants
     .filter(
       (variant) =>
-        acceptedAssets.some((asset) => sameAsset(variant.asset, asset)) &&
+        sameAsset(variant.asset, target.destinationAsset) &&
         sameAccountAddress(
           variant.networkId,
           variant.destinationAddress,
           target.address,
         ) &&
-        ((sameAsset(variant.asset, target.destinationAsset) &&
-          variant.completion.kind === "direct_destination_credit") ||
-          (target.automaticSourceAsset != null &&
-            sameAsset(variant.asset, target.automaticSourceAsset) &&
-            variant.completion.kind === "committed_venue_preparation")),
+        variant.completion.kind === "direct_destination_credit",
     )
     .sort((left, right) => left.variantId.localeCompare(right.variantId));
   const variantIds = variants.map((variant) => variant.variantId);
-  const automaticVariants = target.automaticSourceAsset
-    ? variants.filter((variant) =>
-        sameAsset(variant.asset, target.automaticSourceAsset as AssetRef),
-      )
-    : [];
-  if (
-    variantIds.length === 0 ||
-    !variants.some((variant) =>
-      sameAsset(variant.asset, target.destinationAsset),
-    ) ||
-    (target.automaticSourceAsset && automaticVariants.length === 0)
-  ) {
-    return null;
-  }
+  if (variantIds.length === 0) return null;
   return {
     address: target.address,
     asset: target.destinationAsset,
-    automaticConversion: target.automaticSourceAsset != null,
+    automaticConversion: false,
     mode: target.mode,
     presentation: target.presentation,
     receiveTargetId: target.receiveTargetId,
-    automaticVariants,
+    automaticVariants: [],
     variantIds,
   };
 }
@@ -2115,55 +1856,9 @@ function resolvePolymarketPusdDestination(input: {
   return matches.length === 1 ? (matches[0] ?? null) : null;
 }
 
-const POLYMARKET_POLYGON_FUNDING_ADAPTER = Object.freeze({
-  adapterKey: TELEGRAM_POLYMARKET_FUNDING_ADAPTER_KEY,
-  listedByDefault: true,
-  profileId: POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
-  venueId: "polymarket",
-  routeKeys: new Set<string>([
-    POLYMARKET_POLYGON_PUSD_USDCE_PRESENTATION.routeKey,
-  ]),
-  resolveConsentRoute: resolvePolymarketFundingConsentRoute,
-  resolveDestination: () => null,
-  resolveCurrentController: ({
-    currentControllerWalletId,
-    frozenControllerWalletId,
-  }) =>
-    currentControllerWalletId === frozenControllerWalletId
-      ? frozenControllerWalletId
-      : null,
-  resolveTarget: resolvePolymarketPolygonFundingTarget,
-  resolveTargetChoice: resolvePolymarketFundingTargetChoice,
-  resolveCapability: resolvePolymarketRouteCapability,
-  resolveAutomaticCapability: resolvePolymarketAutomaticCapability,
-  buildAutomaticPolicy: buildPolymarketAutomaticPolicy,
-  prepareAutomaticVariants: initializeCanonicalFundingReceiveEventCursors,
-  hasReadyDestinationReceipt: hasReadyPolymarketFundingDestinationReceipt,
-  reviewQuotePlan: (target) =>
-    relayReceiveQuotePlan({
-      receiptAsset: target.receipt.asset,
-      destinationAsset: target.destinationAsset,
-      rawAmount: target.receipt.rawAmount,
-    }),
-  resolveReceiptDisposition: (target) => {
-    if (target.receipt.handling === "direct") return { kind: "direct" };
-    const execution = resolvePolymarketReceiptExecution(target);
-    return execution
-      ? {
-          kind: "automatic_execution",
-          execution,
-          quotePlan: execution.quotePlan(target),
-        }
-      : {
-          kind: "hard_invalid",
-          reasonCode: "delegated_authority_invalid",
-        };
-  },
-}) satisfies TelegramFundingRouteAdapter;
-
 const POLYMARKET_POLYGON_DIRECT_FUNDING_ADAPTER = Object.freeze({
   adapterKey: "polymarket_polygon_pusd_direct_v1",
-  listedByDefault: false,
+  listedByDefault: true,
   profileId: "polymarket_polygon_pusd_direct_v1",
   venueId: "polymarket",
   routeKeys: new Set<string>([
@@ -2171,44 +1866,25 @@ const POLYMARKET_POLYGON_DIRECT_FUNDING_ADAPTER = Object.freeze({
   ]),
   resolveConsentRoute: resolvePolymarketDirectConsentRoute,
   resolveDestination: resolvePolymarketPusdDestination,
-  resolveCurrentController:
-    POLYMARKET_POLYGON_FUNDING_ADAPTER.resolveCurrentController,
+  resolveCurrentController: ({
+    currentControllerWalletId,
+    frozenControllerWalletId,
+  }) =>
+    currentControllerWalletId === frozenControllerWalletId
+      ? frozenControllerWalletId
+      : null,
   resolveTarget: resolvePolymarketPolygonDirectTarget,
   resolveTargetChoice: resolvePolymarketPolygonDirectChoice,
   resolveCapability: resolvePolymarketDirectRouteCapability,
   resolveAutomaticCapability: async () => null,
   buildAutomaticPolicy: () => null,
   prepareAutomaticVariants: async (variants) => variants,
-  hasReadyDestinationReceipt: hasReadyPolymarketFundingDestinationReceipt,
+  hasReadyDestinationReceipt: hasReadyPolymarketDirectDestinationReceipt,
   reviewQuotePlan: () => null,
   resolveReceiptDisposition: (target) =>
     target.receipt.handling === "direct"
       ? { kind: "direct" }
       : { kind: "hard_invalid", reasonCode: "unsupported_asset" },
-}) satisfies TelegramFundingRouteAdapter;
-
-const POLYMARKET_POLYGON_WRAP_FUNDING_ADAPTER = Object.freeze({
-  adapterKey: TELEGRAM_POLYMARKET_FUNDING_ADAPTER_KEY,
-  listedByDefault: false,
-  profileId: POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
-  venueId: "polymarket",
-  routeKeys: new Set<string>([
-    POLYMARKET_POLYGON_USDCE_WRAP_PRESENTATION.routeKey,
-  ]),
-  resolveConsentRoute: resolvePolymarketWrapConsentRoute,
-  resolveDestination: () => null,
-  resolveCurrentController:
-    POLYMARKET_POLYGON_FUNDING_ADAPTER.resolveCurrentController,
-  resolveTarget: resolvePolymarketPolygonWrapTarget,
-  resolveTargetChoice: resolvePolymarketPolygonWrapChoice,
-  resolveCapability: resolvePolymarketWrapRouteCapability,
-  resolveAutomaticCapability: resolvePolymarketAutomaticCapability,
-  buildAutomaticPolicy: buildPolymarketAutomaticPolicy,
-  prepareAutomaticVariants: initializeCanonicalFundingReceiveEventCursors,
-  hasReadyDestinationReceipt: hasReadyPolymarketFundingDestinationReceipt,
-  reviewQuotePlan: POLYMARKET_POLYGON_FUNDING_ADAPTER.reviewQuotePlan,
-  resolveReceiptDisposition:
-    POLYMARKET_POLYGON_FUNDING_ADAPTER.resolveReceiptDisposition,
 }) satisfies TelegramFundingRouteAdapter;
 
 const POLYMARKET_BASE_RELAY_FUNDING_ADAPTER = Object.freeze({
@@ -2319,11 +1995,7 @@ const SOLANA_RETAINED_FUNDING_ADAPTERS = Object.freeze(
 // delivery, and receipt state machines select it by immutable route/profile
 // identity and never branch on Polygon, Polymarket, or asset symbols.
 const TELEGRAM_FUNDING_ROUTE_ADAPTERS = Object.freeze([
-  // Hidden from new grids; retained as the established Slice C projection and
-  // execution parser. New sessions still select one explicit route below.
-  POLYMARKET_POLYGON_FUNDING_ADAPTER,
   POLYMARKET_POLYGON_DIRECT_FUNDING_ADAPTER,
-  POLYMARKET_POLYGON_WRAP_FUNDING_ADAPTER,
   POLYMARKET_BASE_RELAY_FUNDING_ADAPTER,
   LIMITLESS_BASE_DIRECT_FUNDING_ADAPTER,
   ...POLYGON_RELAY_FUNDING_ADAPTERS,
@@ -2367,10 +2039,8 @@ export function resolveTelegramPolygonFundingTarget(input: {
   automaticUsdceEnabled: boolean;
   session: FundingReceiveSession;
 }): TelegramFundingTargetCapability | null {
-  return POLYMARKET_POLYGON_FUNDING_ADAPTER.resolveTarget({
-    automaticConversionEnabled: input.automaticUsdceEnabled,
-    session: input.session,
-  });
+  void input.automaticUsdceEnabled;
+  return POLYMARKET_POLYGON_DIRECT_FUNDING_ADAPTER.resolveTarget(input);
 }
 
 export function resolveTelegramFundingTarget(input: {
@@ -2448,44 +2118,6 @@ export function resolveTelegramFundingTargetChoice(input: {
   return choices.length === 1 ? (choices[0] ?? null) : null;
 }
 
-async function resolvePolymarketRouteCapability(
-  db: Pick<Pool, "query">,
-  input: TelegramFundingRouteCapabilityInput,
-): Promise<TelegramFundingRouteCapability | null> {
-  if (
-    !resolvePolymarketPolygonFundingTarget({
-      automaticConversionEnabled: false,
-      session: input.session,
-    })
-  ) {
-    return null;
-  }
-  const capability = await resolveTelegramPolymarketWrapCapability(db, {
-    userId: input.userId,
-    telegramAccountId: input.telegramAccountId,
-    telegramUserId: input.telegramUserId,
-    destinationOptionId: input.session.destinationOptionId,
-    venueBindingOptionId: input.session.venueBindingOptionId,
-    expectedAuthorizationId: input.expectedAuthorizationId,
-    expectedAuthorizationFingerprint: input.expectedAuthorizationFingerprint,
-    expectedFundingPolicyRevision: input.expectedFundingPolicyRevision,
-    now: input.now,
-    lock: input.lock,
-  });
-  const target = resolvePolymarketPolygonFundingTarget({
-    automaticConversionEnabled: capability.authorization !== null,
-    session: input.session,
-  });
-  return target
-    ? {
-        authorization: capability.authorization,
-        decision: capability.decision,
-        fundingPolicyRevision: capability.fundingPolicyRevision,
-        target,
-      }
-    : null;
-}
-
 async function resolvePolymarketDirectRouteCapability(
   db: Pick<Pool, "query">,
   input: TelegramFundingRouteCapabilityInput,
@@ -2494,51 +2126,13 @@ async function resolvePolymarketDirectRouteCapability(
     session: input.session,
   });
   if (!target) return null;
-  const capability = await resolveTelegramPolymarketWrapCapability(db, {
-    userId: input.userId,
-    telegramAccountId: input.telegramAccountId,
-    telegramUserId: input.telegramUserId,
-    destinationOptionId: input.session.destinationOptionId,
-    venueBindingOptionId: input.session.venueBindingOptionId,
-    now: input.now,
-    lock: input.lock,
-  });
+  const fundingPolicy = await resolveFundingControlPlaneSnapshot(db);
   return {
     authorization: null,
     decision: { kind: "allowed" },
-    fundingPolicyRevision: capability.fundingPolicyRevision,
+    fundingPolicyRevision: fundingPolicy.revision,
     target,
   };
-}
-
-async function resolvePolymarketWrapRouteCapability(
-  db: Pick<Pool, "query">,
-  input: TelegramFundingRouteCapabilityInput,
-): Promise<TelegramFundingRouteCapability | null> {
-  const capability = await resolveTelegramPolymarketWrapCapability(db, {
-    userId: input.userId,
-    telegramAccountId: input.telegramAccountId,
-    telegramUserId: input.telegramUserId,
-    destinationOptionId: input.session.destinationOptionId,
-    venueBindingOptionId: input.session.venueBindingOptionId,
-    expectedAuthorizationId: input.expectedAuthorizationId,
-    expectedAuthorizationFingerprint: input.expectedAuthorizationFingerprint,
-    expectedFundingPolicyRevision: input.expectedFundingPolicyRevision,
-    now: input.now,
-    lock: input.lock,
-  });
-  const target = resolvePolymarketPolygonWrapTarget({
-    automaticConversionEnabled: capability.authorization !== null,
-    session: input.session,
-  });
-  return target
-    ? {
-        authorization: capability.authorization,
-        decision: capability.decision,
-        fundingPolicyRevision: capability.fundingPolicyRevision,
-        target,
-      }
-    : null;
 }
 
 export async function resolveTelegramFundingRouteCapability(
@@ -2591,58 +2185,6 @@ export async function resolveTelegramFundingConsentCapability(
   });
 }
 
-async function resolvePolymarketAutomaticCapability(
-  db: Pick<Pool, "query">,
-  input: TelegramFundingAutomaticCapabilityInput,
-): Promise<TelegramFundingAutomaticCapability | null> {
-  const automation = parseTelegramFundingAutomationPolicyV2(
-    input.policySnapshot,
-  );
-  if (
-    !automation ||
-    POLYMARKET_POLYGON_FUNDING_ADAPTER.profileId !== automation.profileId ||
-    automation.destinationOptionId !== input.destinationOptionId ||
-    automation.venueBindingOptionId !== input.venueBindingOptionId
-  ) {
-    return null;
-  }
-  const capability = await resolveTelegramPolymarketWrapCapability(db, {
-    userId: input.userId,
-    telegramAccountId: input.telegramAccountId,
-    telegramUserId: input.telegramUserId,
-    destinationOptionId: input.destinationOptionId,
-    venueBindingOptionId: input.venueBindingOptionId,
-    expectedAuthorizationId: automation.authorizationId,
-    expectedAuthorizationFingerprint: automation.authorizationFingerprint,
-    expectedFundingPolicyRevision: automation.fundingPolicyRevision,
-    now: input.now,
-    lock: input.lock,
-  });
-  if (
-    capability.authorization &&
-    !telegramFundingAutomationPolicyMatchesAuthorization(
-      automation,
-      capability.authorization,
-    )
-  ) {
-    return {
-      authorization: null,
-      decision: {
-        kind: "hard_invalid",
-        reasonCode: "delegated_authority_invalid",
-      },
-      expectedFundingPolicyRevision: automation.fundingPolicyRevision,
-      fundingPolicyRevision: capability.fundingPolicyRevision,
-    };
-  }
-  return {
-    authorization: capability.authorization,
-    decision: capability.decision,
-    expectedFundingPolicyRevision: automation.fundingPolicyRevision,
-    fundingPolicyRevision: capability.fundingPolicyRevision,
-  };
-}
-
 export async function resolveTelegramFundingAutomaticCapability(
   db: Pick<Pool, "query">,
   input: TelegramFundingAutomaticCapabilityInput,
@@ -2651,24 +2193,6 @@ export async function resolveTelegramFundingAutomaticCapability(
     (await adapterForPolicySnapshot(
       input.policySnapshot,
     )?.resolveAutomaticCapability(db, input)) ?? null
-  );
-}
-
-function buildPolymarketAutomaticPolicy(
-  input: TelegramFundingAutomaticPolicyInput,
-): JsonRecord | null {
-  const primarySourceVariant = input.choice.automaticVariants[0];
-  if (!primarySourceVariant) {
-    return null;
-  }
-  return telegramFundingAutomationPolicyJson(
-    buildTelegramFundingAutomationPolicyV2({
-      authorization: input.authorization,
-      sourceAsset: primarySourceVariant.asset,
-      destinationAsset: input.destinationAsset,
-      fundingPolicyRevision: input.fundingPolicyRevision,
-      variants: input.choice.automaticVariants,
-    }),
   );
 }
 
@@ -2689,138 +2213,6 @@ export async function prepareTelegramFundingAutomaticVariantsForRoute(input: {
   const adapter = adapterForRouteKey(input.presentation.routeKey);
   if (!adapter) return null;
   return adapter.prepareAutomaticVariants(input.variants);
-}
-
-async function polymarketReceiptRoutingDecision(
-  db: Pick<Pool, "query">,
-  target: FundingReceiveReceiptRoutingTarget,
-): Promise<DelegatedFundingPreBroadcastDecision> {
-  const snapshot = parseTelegramFundingAutomationPolicyV2(
-    target.telegramAutomationPolicy,
-  );
-  if (
-    !snapshot ||
-    !target.telegramAccountId ||
-    target.telegramFundingAuthorizationId !== snapshot.authorizationId ||
-    !target.telegramUserId ||
-    snapshot.profileId !== POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID ||
-    snapshot.destinationOptionId !== target.destinationOptionId ||
-    snapshot.venueBindingOptionId !== target.venueBindingOptionId ||
-    !sameAsset(snapshot.sourceAsset, target.receipt.asset) ||
-    !sameAsset(snapshot.destinationAsset, target.destinationAsset) ||
-    !telegramFundingReceiptIsProspectivelyAuthorized({
-      policy: snapshot,
-      variantId: target.receipt.variantId,
-      ledgerHeight: target.receipt.ledgerHeight ?? null,
-    })
-  ) {
-    return {
-      kind: "hard_invalid",
-      reasonCode: "delegated_authority_invalid",
-    };
-  }
-  const capability = await resolveTelegramPolymarketWrapCapability(db, {
-    userId: target.userId,
-    telegramAccountId: target.telegramAccountId,
-    telegramUserId: target.telegramUserId,
-    destinationOptionId: target.destinationOptionId,
-    venueBindingOptionId: target.venueBindingOptionId,
-    configuration: loadPolymarketWrapExecutionConfiguration(),
-    expectedAuthorizationId: snapshot.authorizationId,
-    expectedAuthorizationFingerprint: snapshot.authorizationFingerprint,
-    expectedFundingPolicyRevision: snapshot.fundingPolicyRevision,
-  });
-  if (
-    capability.authorization &&
-    !telegramFundingAutomationPolicyMatchesAuthorization(
-      snapshot,
-      capability.authorization,
-    )
-  ) {
-    return {
-      kind: "hard_invalid",
-      reasonCode: "delegated_authority_invalid",
-    };
-  }
-  return capability.decision;
-}
-
-function exactPolymarketReceiptQuote(
-  quote: FundingQuoteSummary,
-  target: FundingReceiveReceiptRoutingTarget,
-): boolean {
-  return (
-    quote.planKind === "venue_preparation" &&
-    quote.destinationOptionId === target.destinationOptionId &&
-    quote.venueBindingOptionId === target.venueBindingOptionId &&
-    quote.sourceAmounts.length === 1 &&
-    quote.sourceAmounts[0]?.amount.raw === target.receipt.rawAmount &&
-    sameAsset(quote.sourceAmounts[0]?.amount.asset, target.receipt.asset) &&
-    quote.expectedDestination.raw === target.receipt.rawAmount &&
-    quote.minimumDestination.raw === target.receipt.rawAmount &&
-    sameAsset(quote.expectedDestination.asset, target.destinationAsset) &&
-    sameAsset(quote.minimumDestination.asset, target.destinationAsset) &&
-    quote.fees.length === 0
-  );
-}
-
-function resolvePolymarketReceiptExecution(
-  target: FundingReceiveReceiptRoutingTarget,
-): TelegramFundingReceiptExecution | null {
-  const snapshot = parseTelegramFundingAutomationPolicyV2(
-    target.telegramAutomationPolicy,
-  );
-  const presentation = parseTelegramFundingRoutePresentation(
-    target.telegramAutomationPolicy?.presentation,
-  );
-  if (
-    !snapshot ||
-    !presentation ||
-    !(
-      POLYMARKET_POLYGON_WRAP_FUNDING_ADAPTER.routeKeys.has(
-        presentation.routeKey,
-      ) ||
-      POLYMARKET_POLYGON_FUNDING_ADAPTER.routeKeys.has(presentation.routeKey)
-    ) ||
-    POLYMARKET_POLYGON_WRAP_FUNDING_ADAPTER.profileId !== snapshot.profileId
-  ) {
-    return null;
-  }
-  const receiptBinding =
-    target.telegramFundingConsentId && target.telegramFundingConsentFingerprint
-      ? {
-          consentId: target.telegramFundingConsentId,
-          consentFingerprint: target.telegramFundingConsentFingerprint,
-        }
-      : null;
-  return {
-    adapterKey: POLYMARKET_POLYGON_WRAP_FUNDING_ADAPTER.adapterKey,
-    authorizationId: snapshot.authorizationId,
-    authorizationFingerprint: snapshot.authorizationFingerprint,
-    ...(receiptBinding ? { receiptBinding } : {}),
-    serverExecutionProfileId: POLYMARKET_POLYGON_WRAP_FUNDING_ADAPTER.profileId,
-    quotePlan: (receiptTarget) => ({
-      version: 1,
-      confirmedSourceAmount: null,
-      requestedDestinationAmount: {
-        asset: receiptTarget.destinationAsset,
-        raw: receiptTarget.receipt.rawAmount,
-      },
-      venuePreparation: true,
-    }),
-    decision: polymarketReceiptRoutingDecision,
-    classifyError: classifyPolymarketFundingRoutingError,
-    quoteMatches: exactPolymarketReceiptQuote,
-    validateOperationLink: (client, input) =>
-      receiptBinding
-        ? validatePolymarketFundingOperationLink(client, {
-            ...input,
-            ...receiptBinding,
-            authorizationId: snapshot.authorizationId,
-            authorizationFingerprint: snapshot.authorizationFingerprint,
-          })
-        : Promise.resolve(false),
-  };
 }
 
 export async function hasReadyTelegramFundingDestinationReceipt(
@@ -2911,26 +2303,6 @@ export function resolveTelegramFundingReceiptDisposition(
         execution: { ...disposition.execution, prepareOperation },
       }
     : disposition;
-}
-
-/** Narrow compatibility helpers; the generic receipt router stays provider-free. */
-export async function telegramUsdceWrapRoutingDecision(
-  db: Pool,
-  target: FundingReceiveReceiptRoutingTarget,
-): Promise<DelegatedFundingPreBroadcastDecision> {
-  const execution = resolveTelegramFundingReceiptExecution(target);
-  return execution
-    ? execution.decision(db, target)
-    : { kind: "hard_invalid", reasonCode: "delegated_authority_invalid" };
-}
-
-export async function telegramUsdceWrapRoutingAuthorized(
-  db: Pool,
-  target: FundingReceiveReceiptRoutingTarget,
-): Promise<boolean> {
-  return (
-    (await telegramUsdceWrapRoutingDecision(db, target)).kind === "allowed"
-  );
 }
 
 /** Compatibility name for pUSD-only callers and tests. */

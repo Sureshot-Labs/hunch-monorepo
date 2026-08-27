@@ -179,7 +179,42 @@ export type FundingCommitReservation = Readonly<{
   rawAmount: string;
   mode: "subtract_available" | "advisory_destination" | "settled_for_consumer";
   expiresAt: string;
+  /**
+   * Most subtract reservations are also exact economic inputs and therefore
+   * omit these fields. A pre-route may additionally fence balance that will
+   * arrive at a later step. That fence remains durable for conflict and
+   * availability accounting, but must not be reported as another source of
+   * money by the planner or quote.
+   */
+  economicRole?: "source_input" | "future_credit_fence";
+  /** Exact source amount when one reservation also fences a later credit. */
+  sourceInputRawAmount?: string;
 }>;
+
+export type FundingEconomicSourceReservation = Readonly<{
+  reservation: FundingCommitReservation;
+  rawAmount: string;
+}>;
+
+/**
+ * Returns only the economic inputs represented by durable reservations.
+ * Persistence deliberately keeps every reservation, including future-credit
+ * fences; callers that describe source economics must use this projection.
+ */
+export function fundingEconomicSourceReservations(
+  reservations: readonly FundingCommitReservation[],
+): readonly FundingEconomicSourceReservation[] {
+  return reservations.flatMap((reservation) => {
+    if (reservation.economicRole === "future_credit_fence") return [];
+    return [
+      {
+        reservation,
+        rawAmount:
+          reservation.sourceInputRawAmount ?? reservation.rawAmount,
+      },
+    ];
+  });
+}
 
 export type FundingCommitPlan = Readonly<{
   operation: Readonly<{
@@ -868,9 +903,23 @@ function commitReservations(
   const keys = new Set<string>();
   for (const reservation of reservations) {
     const key = `${reservation.componentId}\u0000${reservation.mode}`;
+    const validReservationRawAmount = isPositiveRawAmount(
+      reservation.rawAmount,
+    );
+    const sourceInputRawAmount = reservation.sourceInputRawAmount;
+    const invalidEconomicMetadata =
+      (reservation.economicRole === "future_credit_fence" &&
+        (reservation.mode !== "subtract_available" ||
+          reservation.segmentOrdinal !== null ||
+          sourceInputRawAmount !== undefined)) ||
+      (sourceInputRawAmount !== undefined &&
+        (!isPositiveRawAmount(sourceInputRawAmount) ||
+          !validReservationRawAmount ||
+          BigInt(sourceInputRawAmount) > BigInt(reservation.rawAmount)));
     if (
       keys.has(key) ||
-      !isPositiveRawAmount(reservation.rawAmount) ||
+      !validReservationRawAmount ||
+      invalidEconomicMetadata ||
       (reservation.segmentOrdinal !== null &&
         (!Number.isInteger(reservation.segmentOrdinal) ||
           reservation.segmentOrdinal < 0)) ||

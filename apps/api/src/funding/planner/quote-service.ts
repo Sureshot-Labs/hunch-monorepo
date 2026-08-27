@@ -20,8 +20,8 @@ import {
 import {
   FundingPersistenceError,
   createFundingQuote,
+  fundingEconomicSourceReservations,
   type FundingCommitPlan,
-  type FundingCommitReservation,
   type FundingQuoteCommitScope,
 } from "../persistence/funding-operation-repository.js";
 import {
@@ -65,14 +65,17 @@ function usesVenuePreparation(
 
 type QuoteSourceAmount = FundingQuoteSummary["sourceAmounts"][number];
 
-function reservationAmount(reservation: FundingCommitReservation): Money {
+function reservationAmount(
+  input: ReturnType<typeof fundingEconomicSourceReservations>[number],
+): Money {
+  const { reservation } = input;
   return {
     asset: {
       networkId: reservation.networkId,
       assetId: reservation.assetId,
       decimals: reservation.assetDecimals,
     },
-    raw: reservation.rawAmount,
+    raw: input.rawAmount,
   };
 }
 
@@ -81,10 +84,12 @@ function venuePreparationSourceAmounts(
   safeLabel: string,
   expectedInputCount: number,
 ): readonly QuoteSourceAmount[] {
-  const reservations = plan.reservations.filter(
-    (reservation) =>
-      reservation.segmentOrdinal === null &&
-      reservation.mode === "subtract_available",
+  const reservations = fundingEconomicSourceReservations(
+    plan.reservations.filter(
+      (reservation) =>
+        reservation.segmentOrdinal === null &&
+        reservation.mode === "subtract_available",
+    ),
   );
   if (reservations.length === 0 || reservations.length !== expectedInputCount) {
     throw new FundingPersistenceError(

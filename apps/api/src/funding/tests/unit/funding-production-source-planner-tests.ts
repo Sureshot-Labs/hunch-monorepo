@@ -1264,6 +1264,50 @@ assert.equal(excludedByPreference.length, 0);
   assert.equal(atReserveFacts.length, 1);
   assert.equal(atReserveFacts[0]?.nativeGasReady, true);
 
+  const unpricedGasAccount = {
+    ...atReserveAccount,
+    projection: {
+      ...atReserveAccount.projection,
+      components: [
+        sourceComponent,
+        {
+          ...fundedNativeComponent,
+          estimatedUsd: null,
+          valuationEligibility: "unpriced" as const,
+          executionEligibility: "unknown" as const,
+          reasonCodes: ["trusted_price_unavailable" as const],
+        },
+      ],
+    },
+    cashAvailability: {
+      ...atReserveAccount.cashAvailability,
+      freshness: "stale" as const,
+      components: atReserveAccount.cashAvailability.components.map(
+        (component) =>
+          component.componentId === fundedNativeComponent.componentId
+            ? {
+                ...component,
+                freshness: "stale" as const,
+                availableEstimatedUsd: null,
+                reasonCodes: ["trusted_price_unavailable" as const],
+              }
+            : component,
+      ),
+    },
+  } as AccountValueReadModel;
+  const unpricedGasFacts = deriveProductionRelayEligibleSourceFacts({
+    accountId: ACCOUNT_ID,
+    account: unpricedGasAccount,
+    policy: tokenPolicy,
+    requiredAmount: { asset: POLYGON_PUSD, raw: "1000000" },
+  });
+  assert.equal(unpricedGasFacts.length, 1);
+  assert.equal(
+    unpricedGasFacts[0]?.nativeGasReady,
+    true,
+    "a fresh raw SOL balance must remain usable for fees when USD valuation is unavailable",
+  );
+
   const splitWalletPolicy = policy({
     locations: [
       ...tokenPolicy.locations,

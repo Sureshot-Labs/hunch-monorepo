@@ -23,13 +23,13 @@ import {
   resolveFundingPolicy,
 } from "../policies/funding-policy-service.js";
 import type { FundingTransactionReferenceCodec } from "./transaction-reference-codec.js";
-import type { PolymarketWrapExecutionConfiguration } from "./delegated-funding-config.js";
+import type { PolymarketRouterExecutionConfiguration } from "./delegated-funding-config.js";
 import {
-  polymarketWrapExecutorEnvironmentReady,
-  polymarketWrapProfileConfigured,
+  polymarketRouterExecutorEnvironmentReady,
+  polymarketRouterProfileConfigured,
 } from "./delegated-funding-config.js";
 import {
-  classifyPolymarketWrapControlPlane,
+  classifyPolymarketRouterControlPlane,
   combineDelegatedFundingDecisions,
   fundingPolicyRevisionMayResume,
   type DelegatedFundingPreBroadcastDecision,
@@ -37,9 +37,7 @@ import {
 import {
   delegatedFundingProfile,
   POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
-  POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
   validatePolymarketDepositPusdFundAction,
-  validatePolymarketDepositUsdceWrapAction,
 } from "./delegated-funding-profiles.js";
 import {
   telegramFundingAuthorizationFingerprint,
@@ -78,10 +76,6 @@ function validatePolymarketDepositRouterAction(
     routerAddress: POLYMARKET_FUNDING_ROUTER.polygon,
     walletId: input.walletId,
   };
-  if (input.profileId === POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID) {
-    validatePolymarketDepositUsdceWrapAction(shared);
-    return;
-  }
   if (input.profileId === POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID) {
     const action = input.action;
     if (action.kind === "evm_transaction") {
@@ -125,7 +119,7 @@ function validatePolymarketDepositRouterAction(
  * profile that was committed, rather than silently falling back to USDC.e.
  */
 export function polymarketRouterAuthorityScope(
-  profileId: PolymarketWrapExecutionConfiguration["profileId"],
+  profileId: PolymarketRouterExecutionConfiguration["profileId"],
 ) {
   const sourceAssetId =
     profileId === POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID
@@ -479,10 +473,10 @@ async function finishDelegatedFundingNonbroadcastFailure(
   });
 }
 
-async function rejectInvalidPolymarketWrapInTransaction(
+async function rejectInvalidPolymarketRouterInTransaction(
   client: PoolClient,
   input: Readonly<{
-    configuration: PolymarketWrapExecutionConfiguration;
+    configuration: PolymarketRouterExecutionConfiguration;
     controlDecision: DelegatedFundingPreBroadcastDecision;
     now: Date;
   }>,
@@ -621,7 +615,7 @@ async function rejectInvalidPolymarketWrapInTransaction(
       input.configuration.policyId,
       input.configuration.policyFingerprint,
       input.now,
-      polymarketWrapProfileConfigured(input.configuration),
+      polymarketRouterProfileConfigured(input.configuration),
     ],
   );
   const row = invalid.rows[0];
@@ -646,10 +640,10 @@ async function rejectInvalidPolymarketWrapInTransaction(
   return { operationId: row.operation_id };
 }
 
-async function claimPolymarketWrapInTransaction(
+async function claimPolymarketRouterInTransaction(
   client: PoolClient,
   input: Readonly<{
-    configuration: PolymarketWrapExecutionConfiguration;
+    configuration: PolymarketRouterExecutionConfiguration;
     policy: ResolvedFundingPolicy;
     now: Date;
   }>,
@@ -876,10 +870,10 @@ async function claimPolymarketWrapInTransaction(
   };
 }
 
-async function recoverPolymarketWrapInTransaction(
+async function recoverPolymarketRouterInTransaction(
   client: PoolClient,
   input: Readonly<{
-    configuration: PolymarketWrapExecutionConfiguration;
+    configuration: PolymarketRouterExecutionConfiguration;
     recoverProviderReplayBefore: Date;
     recoverUnbroadcastRetryBefore: Date;
     now: Date;
@@ -1144,23 +1138,23 @@ export function delegatedFundingProfileOrder<T>(
   return [...profiles.slice(normalized), ...profiles.slice(0, normalized)];
 }
 
-async function polymarketWrapPreBroadcastDecisionInTransaction(
+async function polymarketRouterPreBroadcastDecisionInTransaction(
   client: PoolClient,
   input: Readonly<{
     claim: DelegatedFundingExecutionClaim;
-    configuration: PolymarketWrapExecutionConfiguration;
+    configuration: PolymarketRouterExecutionConfiguration;
     now: Date;
   }>,
 ): Promise<DelegatedFundingPreBroadcastDecision> {
   await lockTelegramFundingLinkLifecycle(client, input.claim.userId);
   await lockFundingPolicyForTransaction(client);
   const policy = await resolveFundingPolicy(client);
-  const controlDecision = classifyPolymarketWrapControlPlane({
+  const controlDecision = classifyPolymarketRouterControlPlane({
     configuration: input.configuration,
     policy,
   });
   const environmentDecision: DelegatedFundingPreBroadcastDecision =
-    polymarketWrapExecutorEnvironmentReady()
+    polymarketRouterExecutorEnvironmentReady()
       ? { kind: "allowed" }
       : {
           kind: "soft_paused",
@@ -1340,36 +1334,36 @@ async function polymarketWrapPreBroadcastDecisionInTransaction(
   return decision;
 }
 
-export function createPolymarketWrapDelegatedFundingProfile(
+export function createPolymarketRouterDelegatedFundingProfile(
   input: Readonly<{
-    configuration: PolymarketWrapExecutionConfiguration;
+    configuration: PolymarketRouterExecutionConfiguration;
     driver: DelegatedFundingNetworkDriver;
   }>,
 ): DelegatedFundingRuntimeProfile {
   return {
     profileId: input.configuration.profileId,
     controlPlaneDecision: (policy) =>
-      classifyPolymarketWrapControlPlane({
+      classifyPolymarketRouterControlPlane({
         configuration: input.configuration,
         policy,
       }),
     rejectInvalidInTransaction: (client, rejectionInput) =>
-      rejectInvalidPolymarketWrapInTransaction(client, {
+      rejectInvalidPolymarketRouterInTransaction(client, {
         configuration: input.configuration,
         ...rejectionInput,
       }),
     claimInTransaction: (client, claimInput) =>
-      claimPolymarketWrapInTransaction(client, {
+      claimPolymarketRouterInTransaction(client, {
         configuration: input.configuration,
         ...claimInput,
       }),
     recoverInTransaction: (client, recoveryInput) =>
-      recoverPolymarketWrapInTransaction(client, {
+      recoverPolymarketRouterInTransaction(client, {
         configuration: input.configuration,
         ...recoveryInput,
       }),
     preBroadcastDecisionInTransaction: (client, boundaryInput) =>
-      polymarketWrapPreBroadcastDecisionInTransaction(client, {
+      polymarketRouterPreBroadcastDecisionInTransaction(client, {
         configuration: input.configuration,
         ...boundaryInput,
       }),

@@ -134,29 +134,19 @@ function approvalCalldata(input: {
 }
 
 function polymarketFundingRouterApproval(actionKey: string): {
-  owner: "deposit_wallet" | "signer";
   token: string;
   spender: string;
 } | null {
   const spender = fundingSidecarRuntimeConfig.polymarketFundingRouterAddress;
   if (!spender) return null;
-  if (actionKey === "approve-funding-router-deposit-usdce") {
-    return {
-      owner: "deposit_wallet",
-      token: fundingSidecarRuntimeConfig.polymarketUsdceAddress,
-      spender,
-    };
-  }
   if (actionKey === "approve-funding-router-signer-pusd") {
     return {
-      owner: "signer",
       token: fundingSidecarRuntimeConfig.polymarketUsdcAddress,
       spender,
     };
   }
   if (actionKey === "approve-funding-router-signer-usdce") {
     return {
-      owner: "signer",
       token: fundingSidecarRuntimeConfig.polymarketUsdceAddress,
       spender,
     };
@@ -240,38 +230,14 @@ export function createPolymarketRuntimeActionMaterializer(input: {
           kind: "erc20",
           spender: fundingRouterApproval.spender,
         });
-        if (fundingRouterApproval.owner === "signer") {
-          return requirement(source, {
-            kind: "evm_transaction",
-            networkId: facts.binding.settlementLocation.asset.networkId,
-            senderWalletId: facts.binding.executionWalletId,
-            to: fundingRouterApproval.token,
-            data,
-            valueRaw: "0",
-            gasLimitRaw: null,
-          });
-        }
-        if (input.topology !== "deposit_wallet") {
-          throw new Error(
-            "Deposit Wallet Funding Router approval requires deposit-wallet topology",
-          );
-        }
         return requirement(source, {
-          kind: "external_handoff",
+          kind: "evm_transaction",
           networkId: facts.binding.settlementLocation.asset.networkId,
-          actorWalletId: facts.binding.executionWalletId,
-          handoffKind: "polymarket_proxy_execute",
-          payload: {
-            topology: input.topology,
-            funder: input.funder,
-            calls: [
-              {
-                target: fundingRouterApproval.token,
-                data,
-                value: "0",
-              },
-            ],
-          },
+          senderWalletId: facts.binding.executionWalletId,
+          to: fundingRouterApproval.token,
+          data,
+          valueRaw: "0",
+          gasLimitRaw: null,
         });
       }
       const checkId = source.actionKey.replace(/^approve-/, "");

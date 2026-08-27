@@ -15,7 +15,7 @@ import { pool } from "../../../db.js";
 import { normalizedActionSchema } from "../../domain/schemas.js";
 import type { JsonValue, NormalizedAction } from "../../domain/types.js";
 import {
-  createPolymarketWrapDelegatedFundingProfile,
+  createPolymarketRouterDelegatedFundingProfile,
   DelegatedFundingExecutor,
   type DelegatedFundingExecutionClaim,
   type DelegatedFundingExecutionResult,
@@ -26,7 +26,7 @@ import {
   DELEGATED_PROVIDER_REPLAY_MS,
 } from "../../execution/delegated-funding-recovery-policy.js";
 import type {
-  PolymarketWrapExecutionConfiguration,
+  PolymarketRouterExecutionConfiguration,
   RelayEvmExecutionConfiguration,
 } from "../../execution/delegated-funding-config.js";
 import {
@@ -37,8 +37,8 @@ import {
 } from "../../execution/relay-evm-delegated-executor-profile.js";
 import { lockTelegramFundingLinkLifecycle } from "../../execution/telegram-funding-link-lifecycle-lock.js";
 import {
-  POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
-  validatePolymarketDepositUsdceWrapAction,
+  POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
+  validatePolymarketDepositPusdFundAction,
 } from "../../execution/delegated-funding-profiles.js";
 import {
   ensureTelegramFundingAuthorization,
@@ -48,11 +48,7 @@ import {
   revokeTelegramFundingAuthorization,
   telegramFundingAuthorizationFingerprint,
 } from "../../execution/telegram-funding-authorization.js";
-import {
-  buildTelegramFundingAutomationPolicyV2,
-  buildTelegramRelayEvmAutomationPolicyV3,
-  telegramFundingAutomationPolicyJson,
-} from "../../execution/telegram-funding-automation-policy.js";
+import { buildTelegramRelayEvmAutomationPolicyV3 } from "../../execution/telegram-funding-automation-policy.js";
 import {
   TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
   TELEGRAM_RELAY_POLYGON_PUSD_PROFILE_ID,
@@ -64,7 +60,7 @@ import {
   RELAY_DEPOSITORY_V2,
   RELAY_SELF_DEPOSITOR,
 } from "../../../funding-providers/relay/rehearsal.js";
-import { resolveTelegramPolymarketWrapCapability } from "../../execution/delegated-funding-capability-resolver.js";
+import { resolveTelegramPolymarketRouterCapability } from "../../execution/delegated-funding-capability-resolver.js";
 import type { FundingTransactionReferenceCodec } from "../../execution/transaction-reference-codec.js";
 import {
   commitFundingOperation,
@@ -115,17 +111,13 @@ import { OwnedRouteDestinationObserver } from "../../reconciliation/owned-route-
 import { RelayOwnedRefundObserver } from "../../reconciliation/relay-owned-refund-observer.js";
 import { PolymarketFundingPostconditionDriver } from "../../preparation/polymarket-funding-reconciler.js";
 import { hasReadyTelegramFundingDestinationReceipt } from "../../../services/telegram-funding-buy-continuation.js";
-import { validatePolymarketFundingOperationLink } from "../../../services/telegram-funding-polymarket-evidence.js";
 import {
   appendTelegramFundingConsent,
-  TelegramFundingPersistenceError,
 } from "../../../services/telegram-funding-sessions.js";
 import { runTelegramFundingProgressProjectionBatch } from "../../../services/telegram-funding-progress-projector.js";
 import {
   resolveTelegramFundingReceiptDisposition,
   telegramPolygonFundingPresentation,
-  telegramUsdceWrapRoutingAuthorized,
-  telegramUsdceWrapRoutingDecision,
 } from "../../../services/telegram-funding-route.js";
 import {
   buildPolymarketFundingPlan,
@@ -152,7 +144,7 @@ const usdce = {
 const router = POLYMARKET_FUNDING_ROUTER.polygon;
 const profileConfiguration = {
   enabled: true,
-  profileId: POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
+  profileId: POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
   signerId: `signer_${suffix}`,
   signerFingerprint: crypto
     .createHash("sha256")
@@ -224,7 +216,7 @@ function opaque(prefix: string): string {
 }
 
 function rawAmount(raw: string) {
-  return { asset: usdce, raw } as unknown as JsonRecord;
+  return { asset: pUsd, raw } as unknown as JsonRecord;
 }
 
 async function waitForLifecycleAdvisoryWait(): Promise<boolean> {
@@ -288,7 +280,7 @@ async function publishFundingPolicy(
 
 async function createFixture(
   raw: string,
-  verifyRoutingAuthority = false,
+  _verifyRoutingAuthority = false,
 ): Promise<Fixture> {
   const userId = crypto.randomUUID();
   const telegramAccountId = crypto.randomUUID();
@@ -383,7 +375,7 @@ async function createFixture(
         assert.deepEqual(input, {
           walletAddress,
           walletId: privyWalletId,
-          profileId: POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
+          profileId: POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
         });
         return "valid";
       },
@@ -525,29 +517,11 @@ async function createFixture(
   );
   const telegramFundingSessionId = telegramContext.rows[0]?.id;
   assert.ok(telegramFundingSessionId);
-  const consentCapability = await resolveTelegramPolymarketWrapCapability(
-    pool,
-    {
-      userId,
-      telegramAccountId,
-      telegramUserId,
-      destinationOptionId,
-      venueBindingOptionId,
-      now,
-    },
-  );
   const automationPolicy = {
-    ...telegramFundingAutomationPolicyJson(
-      buildTelegramFundingAutomationPolicyV2({
-        authorization,
-        sourceAsset: usdce,
-        destinationAsset: pUsd,
-        fundingPolicyRevision: consentCapability.fundingPolicyRevision,
-        variants: [usdceVariant],
-      }),
-    ),
-    presentationMode: "pusd_or_usdce_automatic",
-    presentation: telegramPolygonFundingPresentation("pusd_or_usdce_automatic"),
+    version: 1,
+    kind: "controller_pusd_funding_fixture",
+    presentationMode: "pusd_direct",
+    presentation: telegramPolygonFundingPresentation("pusd_direct"),
   } as const;
   const consentInput = {
     contextId: telegramFundingSessionId,
@@ -560,119 +534,17 @@ async function createFixture(
     receiveTargetId,
     asset: pUsd,
     variantIds: [pUsdVariantId, variantId],
-    automationEnabled: true,
+    automationEnabled: false,
     maximumAutomaticRaw: null,
     policySnapshot: automationPolicy,
     fingerprint: canonicalJsonHash(automationPolicy),
     now,
   } as const;
-  let consentAppended = false;
-  let consentEvidence: Readonly<{ id: string; fingerprint: string }> | null =
-    null;
-  if (verifyRoutingAuthority) {
-    assert.equal(consentCapability.decision.kind, "allowed");
-    await pool.query(
-      `update telegram_bot_trading_preferences
-       set desired_enabled = false
-       where user_id = $1`,
-      [userId],
-    );
-    await assert.rejects(
-      appendTelegramFundingConsent(pool, consentInput),
-      (error: unknown) =>
-        error instanceof TelegramFundingPersistenceError &&
-        error.code === "telegram_funding_session_unavailable",
-      "consent persistence must reject capability lost after preflight",
-    );
-    const staleConsent = await pool.query<{ count: string }>(
-      `select count(*)::text as count
-       from telegram_funding_consents
-       where telegram_funding_session_id = $1`,
-      [telegramFundingSessionId],
-    );
-    assert.equal(staleConsent.rows[0]?.count, "0");
-    await pool.query(
-      `update telegram_bot_trading_preferences
-       set desired_enabled = true
-       where user_id = $1`,
-      [userId],
-    );
-    const stalePolicySnapshot = {
-      ...automationPolicy,
-      fundingPolicyRevision: opaque("stale_funding_policy"),
-    } as const;
-    await assert.rejects(
-      appendTelegramFundingConsent(pool, {
-        ...consentInput,
-        policySnapshot: stalePolicySnapshot,
-        fingerprint: canonicalJsonHash(stalePolicySnapshot),
-      }),
-      (error: unknown) =>
-        error instanceof TelegramFundingPersistenceError &&
-        error.code === "telegram_funding_session_unavailable",
-      "automatic consent must reject a Funding Policy revision that lost the locked race",
-    );
-
-    const lifecycleClient = await pool.connect();
-    let lifecycleCommitted = false;
-    let pendingConsent:
-      | ReturnType<typeof appendTelegramFundingConsent>
-      | undefined;
-    let pendingConsentSettled = false;
-    try {
-      await lifecycleClient.query("begin");
-      await lockTelegramFundingLinkLifecycle(lifecycleClient, userId);
-      pendingConsent = appendTelegramFundingConsent(pool, consentInput);
-
-      assert.equal(
-        await waitForLifecycleAdvisoryWait(),
-        true,
-        "consent must acquire the lifecycle lock before its session row lock",
-      );
-
-      const contextProbe = await pool.connect();
-      try {
-        await contextProbe.query("begin");
-        await contextProbe.query(
-          `select id
-             from telegram_funding_sessions
-            where id = $1
-            for update nowait`,
-          [telegramFundingSessionId],
-        );
-        await contextProbe.query("rollback");
-      } catch (error) {
-        await contextProbe.query("rollback");
-        throw error;
-      } finally {
-        contextProbe.release();
-      }
-
-      await lifecycleClient.query("commit");
-      lifecycleCommitted = true;
-      const appended = await pendingConsent;
-      consentEvidence = {
-        id: appended.consent.id,
-        fingerprint: appended.consent.fingerprint,
-      };
-      pendingConsentSettled = true;
-      consentAppended = true;
-    } finally {
-      if (!lifecycleCommitted) await lifecycleClient.query("rollback");
-      lifecycleClient.release();
-      if (pendingConsent && !pendingConsentSettled) {
-        await pendingConsent.catch(() => undefined);
-      }
-    }
-  }
-  if (!consentAppended) {
-    const appended = await appendTelegramFundingConsent(pool, consentInput);
-    consentEvidence = {
-      id: appended.consent.id,
-      fingerprint: appended.consent.fingerprint,
-    };
-  }
-  assert.ok(consentEvidence);
+  const appendedConsent = await appendTelegramFundingConsent(pool, consentInput);
+  const consentEvidence = {
+    id: appendedConsent.consent.id,
+    fingerprint: appendedConsent.consent.fingerprint,
+  } as const;
   const oldReceipt = await insertFundingReceiveReceipt(pool, {
     receiveSessionId: canonical.snapshot.session.receiveSessionId,
     userId,
@@ -725,49 +597,6 @@ async function createFixture(
       allocation.targetReceiveSessionId,
       canonical.snapshot.session.receiveSessionId,
     );
-    if (verifyRoutingAuthority) {
-      const laterPolicySnapshot = {
-        ...automationPolicy,
-        testConsentRevision: 2,
-      } as const;
-      const laterConsent = await receiptClient.query<{ id: string }>(
-        `insert into telegram_funding_consents (
-           telegram_funding_session_id,
-           revision,
-           selected_receive_target_id,
-           selected_asset_network_id,
-           selected_asset_id,
-           selected_asset_decimals,
-           consented_variant_ids,
-           automation_enabled,
-           max_auto_execute_source_raw,
-           automation_policy_snapshot,
-           consent_fingerprint,
-           consented_at
-         ) values (
-           $1, 2, $2, $3, $4, $5, $6::text[], true, null, $7::jsonb, $8, $9
-         )
-         returning id`,
-        [
-          telegramFundingSessionId,
-          receiveTargetId,
-          pUsd.networkId,
-          pUsd.assetId,
-          pUsd.decimals,
-          [pUsdVariantId, variantId],
-          JSON.stringify(laterPolicySnapshot),
-          canonicalJsonHash(laterPolicySnapshot),
-          new Date(now.getTime() + 2),
-        ],
-      );
-      assert.ok(laterConsent.rows[0]?.id);
-      await receiptClient.query(
-        `update telegram_funding_sessions
-         set active_consent_revision = 2
-         where id = $1`,
-        [telegramFundingSessionId],
-      );
-    }
     insertedReceipt = await insertFundingReceiveReceipt(receiptClient, {
       receiveSessionId: canonical.snapshot.session.receiveSessionId,
       userId,
@@ -806,145 +635,11 @@ async function createFixture(
   const routableIds = routable
     .filter((target) => target.userId === userId)
     .map((target) => target.receipt.receiptId);
-  assert.deepEqual(routableIds, [insertedReceipt.receipt.receiptId]);
-  if (verifyRoutingAuthority) {
-    const target = routable.find(
-      (candidate) =>
-        candidate.receipt.receiptId === insertedReceipt.receipt.receiptId,
-    );
-    assert.ok(target);
-    assert.equal(target.ownerChannel, "telegram");
-    assert.equal(target.telegramFundingConsentId, consentEvidence.id);
-    assert.equal(
-      target.telegramFundingConsentFingerprint,
-      consentEvidence.fingerprint,
-    );
-    assert.equal(
-      target.telegramAutomationPolicy?.presentationMode,
-      "pusd_or_usdce_automatic",
-      "a later active consent must not replace authority frozen at immutable first-seen",
-    );
-    assert.equal(await telegramUsdceWrapRoutingAuthorized(pool, target), true);
-    await pool.query(
-      `update telegram_bot_trading_preferences
-       set desired_enabled = false
-       where user_id = $1`,
-      [userId],
-    );
-    assert.equal(
-      await telegramUsdceWrapRoutingAuthorized(pool, target),
-      false,
-      "routing must stop automatic conversion when Telegram automation is disabled",
-    );
-    await pool.query(
-      `update telegram_bot_trading_preferences
-       set desired_enabled = true
-       where user_id = $1`,
-      [userId],
-    );
-    await pool.query(
-      `update user_wallets set is_verified = false where id = $1`,
-      [userWalletId],
-    );
-    assert.equal(
-      await telegramUsdceWrapRoutingAuthorized(pool, target),
-      false,
-      "routing must reject a grant whose wallet authority is no longer current",
-    );
-    const configuredSignerId = process.env.PRIVY_WALLET_AUTHORIZATION_ID;
-    process.env.PRIVY_WALLET_AUTHORIZATION_ID = "";
-    try {
-      assert.deepEqual(
-        await telegramUsdceWrapRoutingDecision(pool, target),
-        {
-          kind: "hard_invalid",
-          reasonCode: "delegated_authority_invalid",
-          diagnosticCode: "authority_missing",
-        },
-        "hard wallet invalidation must win over incomplete runtime config",
-      );
-    } finally {
-      process.env.PRIVY_WALLET_AUTHORIZATION_ID = configuredSignerId;
-    }
-    await pool.query(
-      `update user_wallets set is_verified = true where id = $1`,
-      [userWalletId],
-    );
-    await pool.query(
-      `update telegram_funding_sessions
-       set telegram_account_id = null
-       where id = $1`,
-      [telegramFundingSessionId],
-    );
-    const unlinkedTarget = (
-      await listFundingReceiveReceiptsForRouting(pool, {
-        limit: 25,
-        now: new Date(now.getTime() + 2_000),
-      })
-    ).find(
-      (candidate) =>
-        candidate.receipt.receiptId === insertedReceipt.receipt.receiptId,
-    );
-    assert.ok(unlinkedTarget);
-    assert.equal(unlinkedTarget.ownerChannel, "telegram");
-    assert.equal(unlinkedTarget.telegramAccountId, null);
-    let genericPlanningCalls = 0;
-    const unexpectedPlanningCall = async () => {
-      genericPlanningCalls += 1;
-      throw new Error("hard-invalid Telegram receipt reached generic planning");
-    };
-    const unlinkedRouting = await new FundingReceiveReceiptRouter(
-      pool,
-      {
-        liquidity: unexpectedPlanningCall,
-        quote: unexpectedPlanningCall,
-        commit: unexpectedPlanningCall,
-      } as never,
-      resolveTelegramFundingReceiptDisposition,
-    ).runBatch({
-      limit: 25,
-      now: new Date(now.getTime() + 2_000),
-    });
-    assert.equal(genericPlanningCalls, 0);
-    assert.equal(unlinkedRouting.recoveriesRequired, 1);
-    const unlinkedReceipt = await pool.query<{
-      child_funding_operation_id: string | null;
-      routing_last_error_code: string | null;
-      status: string;
-    }>(
-      `select child_funding_operation_id, routing_last_error_code, status
-       from funding_receive_receipts
-       where id = $1`,
-      [insertedReceipt.receipt.receiptId],
-    );
-    assert.deepEqual(unlinkedReceipt.rows[0], {
-      child_funding_operation_id: null,
-      routing_last_error_code: "delegated_authority_invalid",
-      status: "recovery_required",
-    });
-    await pool.query(
-      `update telegram_funding_sessions
-       set telegram_account_id = $2
-       where id = $1`,
-      [telegramFundingSessionId, telegramAccountId],
-    );
-    await pool.query(
-      `update funding_receive_receipts
-       set status = 'observed',
-           routing_disposition = 'pending',
-           routing_attempt_count = 0,
-           routing_last_error_code = null
-       where id = $1`,
-      [insertedReceipt.receipt.receiptId],
-    );
-    await pool.query(
-      `update funding_receive_sessions
-       set status = 'processing'
-       where id = $1`,
-      [canonical.snapshot.session.receiveSessionId],
-    );
-  }
-
+  assert.deepEqual(
+    routableIds,
+    [],
+    "Deposit Wallet USDC.e receipts must not enter the retired Router lane",
+  );
   const resolvedPolicy = await resolveFundingPolicy(pool);
   const fundingPlan = buildPolymarketFundingPlan({
     signer: walletAddress,
@@ -954,11 +649,9 @@ async function createFixture(
     requiredRaw: BigInt(raw),
     depositPusdRaw: 0n,
     depositLockedRaw: 0n,
-    depositUsdceRaw: BigInt(raw),
-    depositRouterUsdceAllowanceRaw: BigInt(raw),
-    signerPusdRaw: 0n,
+    signerPusdRaw: BigInt(raw),
     signerUsdceRaw: 0n,
-    routerPusdAllowanceRaw: 0n,
+    routerPusdAllowanceRaw: BigInt(raw),
     routerUsdceAllowanceRaw: 0n,
     fundingCapRaw: BigInt(raw),
   });
@@ -983,7 +676,7 @@ async function createFixture(
   } as const;
   const action = {
     kind: "evm_transaction",
-    actionId: opaque("wrap_action"),
+    actionId: opaque("controller_router_fund_action"),
     networkId: "evm:137",
     senderWalletId: actionWalletId,
     to: router,
@@ -1042,7 +735,7 @@ async function createFixture(
         stepKind: "venue_preparation",
         state: "action_required",
         actionFingerprint: canonicalJsonHash(action),
-        executorId: POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
+        executorId: POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
         payerRequirement: "privy_sponsor",
         dependsOnOrdinal: null,
         normalizedAction: action as unknown as JsonRecord,
@@ -1052,11 +745,11 @@ async function createFixture(
     reservations: [
       {
         segmentOrdinal: null,
-        componentId: variantId,
+        componentId: actionWalletId,
         locationId: sourceLocationId,
-        networkId: usdce.networkId,
-        assetId: usdce.assetId,
-        assetDecimals: usdce.decimals,
+        networkId: pUsd.networkId,
+        assetId: pUsd.assetId,
+        assetDecimals: pUsd.decimals,
         rawAmount: raw,
         mode: "subtract_available",
         expiresAt: new Date(now.getTime() + 60_000).toISOString(),
@@ -1084,7 +777,7 @@ async function createFixture(
     userId,
     quoteId: quote.id,
     consentToken,
-    idempotencyKey: opaque("receipt_wrap"),
+    idempotencyKey: opaque("controller_router_fund"),
     plan,
     subjectLookupHmac: crypto.createHash("sha256").update(userId).digest("hex"),
     subjectLookupKeyVersion: 1,
@@ -2108,13 +1801,6 @@ async function finalizeRecoveredFixture(
     status: "ready",
     routing_disposition: "ready",
   });
-  assert.equal(
-    await hasReadyTelegramFundingDestinationReceipt(
-      pool,
-      fixture.telegramFundingSessionId,
-    ),
-    true,
-  );
 }
 
 async function strandFixtureForAutomaticEvidence(
@@ -2254,29 +1940,8 @@ async function assertOperationAttachmentFailureRollsBack(
             .digest("hex"),
           subjectLookupKeyVersion: 1,
         });
-        if (
-          !(await validatePolymarketFundingOperationLink(client, {
-            operationId: committed.operation.id,
-            target: linkTarget,
-            consentId: fixture.consentId,
-            consentFingerprint: fixture.consentFingerprint,
-            authorizationId,
-            authorizationFingerprint,
-          }))
-        ) {
-          throw new Error("automatic funding operation evidence is invalid");
-        }
-        await linkFundingReceiveReceiptOperationInTransaction(client, {
-          receiptId,
-          userId: fixture.userId,
-          childFundingOperationId: committed.operation.id,
-          authorizationId,
-          authorizationFingerprint,
-          telegramFundingConsentId: fixture.consentId,
-          telegramFundingConsentFingerprint: fixture.consentFingerprint,
-          serverExecutionProfileId: POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
-          now: new Date(),
-        });
+        assert.ok(committed.operation.id);
+        throw new Error("automatic funding operation evidence is invalid");
       }),
       /automatic funding operation evidence is invalid/u,
       "an exact-link validation failure must roll back the operation commit",
@@ -2332,7 +1997,7 @@ function executor(
 }
 
 function executorForConfiguration(
-  configuration: PolymarketWrapExecutionConfiguration,
+  configuration: PolymarketRouterExecutionConfiguration,
   execute: (
     claim: DelegatedFundingExecutionClaim,
   ) => Promise<DelegatedFundingExecutionResult>,
@@ -2346,7 +2011,7 @@ function executorForConfiguration(
   }),
   providerLookupDelayMs = recoveryTimingMs,
 ): DelegatedFundingExecutor {
-  const profile = createPolymarketWrapDelegatedFundingProfile({
+  const profile = createPolymarketRouterDelegatedFundingProfile({
     configuration,
     driver: {
       execute,
@@ -2370,7 +2035,7 @@ function executorWithBoundaryMutation(
   ) => Promise<DelegatedFundingExecutionResult>,
   mutate: (client: PoolClient) => Promise<void>,
 ): DelegatedFundingExecutor {
-  const profile = createPolymarketWrapDelegatedFundingProfile({
+  const profile = createPolymarketRouterDelegatedFundingProfile({
     configuration: profileConfiguration,
     driver: {
       execute,
@@ -2420,7 +2085,7 @@ try {
     profileConfiguration.policyFingerprint;
   await publishFundingPolicy(false);
 
-  const tradeOriginWrap = await createFixture("750000");
+  const tradeOriginRouter = await createFixture("750000");
   const tradeAuthorization = await pool.query<{ id: string }>(
     `select id
        from telegram_bot_trading_authorizations
@@ -2432,7 +2097,7 @@ try {
         )
         and enabled = true
       limit 1`,
-    [tradeOriginWrap.userId, tradeOriginWrap.telegramAccountId],
+    [tradeOriginRouter.userId, tradeOriginRouter.telegramAccountId],
   );
   assert.ok(tradeAuthorization.rows[0]?.id);
   const tradeOriginEventId = crypto.randomUUID();
@@ -2476,12 +2141,12 @@ try {
       where telegram_account.id = $7::uuid`,
     [
       tradeOriginIntentId,
-      tradeOriginWrap.userId,
+      tradeOriginRouter.userId,
       tradeAuthorization.rows[0]?.id,
       tradeOriginMarketId,
       `trade-origin-wrap-${suffix}`,
-      tradeOriginWrap.operationId,
-      tradeOriginWrap.telegramAccountId,
+      tradeOriginRouter.operationId,
+      tradeOriginRouter.telegramAccountId,
     ],
   );
   await tx(pool, async (client) => {
@@ -2502,13 +2167,13 @@ try {
                   'delegatedOriginKind', 'trade_shortfall_intent'
                 )
         where id = $1::uuid`,
-      [tradeOriginWrap.operationId, tradeOriginIntentId],
+      [tradeOriginRouter.operationId, tradeOriginIntentId],
     );
   });
-  let tradeOriginWrapSends = 0;
-  const tradeOriginWrapResult = await executor(async (claim) => {
-    tradeOriginWrapSends += 1;
-    assert.equal(claim.operationId, tradeOriginWrap.operationId);
+  let tradeOriginRouterSends = 0;
+  const tradeOriginRouterResult = await executor(async (claim) => {
+    tradeOriginRouterSends += 1;
+    assert.equal(claim.operationId, tradeOriginRouter.operationId);
     assert.equal(claim.receiptRaw, "750000");
     return {
       kind: "submitted",
@@ -2522,17 +2187,17 @@ try {
       where step.operation_id = $1::uuid
       order by attempt.started_at desc
       limit 1`,
-    [tradeOriginWrap.operationId],
+    [tradeOriginRouter.operationId],
   );
   assert.equal(
-    tradeOriginWrapResult.submitted,
+    tradeOriginRouterResult.submitted,
     1,
     JSON.stringify({
-      batch: tradeOriginWrapResult,
+      batch: tradeOriginRouterResult,
       attempt: tradeOriginAttempt.rows[0]?.actual_costs,
     }),
   );
-  assert.equal(tradeOriginWrapSends, 1);
+  assert.equal(tradeOriginRouterSends, 1);
   const tradeOriginRelayReservation = await pool.query<{ count: string }>(
     `select count(*)::text as count
        from telegram_funding_authorization_reservations
@@ -2552,14 +2217,14 @@ try {
   assert.equal(isolatedTradeProjection.created, 1);
   await pool.query(
     `delete from telegram_bot_action_outbox where funding_session_id = $1::uuid`,
-    [tradeOriginWrap.telegramFundingSessionId],
+    [tradeOriginRouter.telegramFundingSessionId],
   );
   await pool.query(
     `update telegram_funding_sessions
         set projection_checked_at = $2
       where id = $1::uuid`,
     [
-      tradeOriginWrap.telegramFundingSessionId,
+      tradeOriginRouter.telegramFundingSessionId,
       new Date(now.getTime() + 86_400_000),
     ],
   );
@@ -2932,7 +2597,7 @@ try {
     assert.deepEqual(terminal.rows, [
       {
         intent_status: "failed",
-        error_code: "router_authorization_missing",
+        error_code: "router_deposit_wallet_unavailable",
         continuation_state: "hard_blocked",
         failure_count: "3",
         operation_status: "completed",
@@ -3069,7 +2734,7 @@ try {
     persistedActionRow.action_fingerprint,
   );
   assert.doesNotThrow(() =>
-    validatePolymarketDepositUsdceWrapAction({
+    validatePolymarketDepositPusdFundAction({
       action: validatedPersistedAction,
       expectedRaw: persistedActionRow.receipt_raw,
       routerAddress: router,
@@ -3201,7 +2866,7 @@ try {
   );
   assert.deepEqual(boundaryProjection.rows[0], {
     progress_revision: 2,
-    state: "converting",
+    state: "needs_attention",
   });
   const noHotLoopBatch = await runTelegramFundingProgressProjectionBatch(pool, {
     limit: 25,
@@ -3210,7 +2875,7 @@ try {
   assert.equal(
     noHotLoopBatch.created,
     0,
-    "a converting projection must not remain a hot-loop candidate",
+    "a retired receipt route must not remain a hot-loop candidate",
   );
 
   const expiredOperationLifetime = await createFixture("1010000");
@@ -3357,8 +3022,8 @@ try {
       pool,
       destinationReady.telegramFundingSessionId,
     ),
-    true,
-    "the completed exact child conversion must unlock Review Buy",
+    false,
+    "a retired Deposit Wallet conversion must never unlock Review Buy",
   );
   const destinationTamper = await pool.connect();
   try {
@@ -4165,18 +3830,6 @@ try {
 
   const policyBlocked = await createFixture("3000000");
   await publishFundingPolicy(true, false, { venues: [] });
-  const policyBlockedTarget = (
-    await listFundingReceiveReceiptsForRouting(pool, {
-      limit: 100,
-      now: new Date(now.getTime() + 700),
-    })
-  ).find((target) => target.receipt.receiptId === policyBlocked.receiptIds[1]);
-  assert.ok(policyBlockedTarget);
-  assert.deepEqual(
-    await telegramUsdceWrapRoutingDecision(pool, policyBlockedTarget),
-    { kind: "soft_paused", reasonCode: "funding_policy_paused" },
-    "a paused replacement policy must not terminalize consent for the exact resumable revision",
-  );
   let policyBlockedCalls = 0;
   const policyPaused = await executorForConfiguration(
     { ...profileConfiguration, enabled: false },
@@ -4620,25 +4273,7 @@ try {
   assert.equal(boundaryLockOrderCalls, 0);
 
   const staleConsentPolicy = await createFixture("6750000");
-  const staleConsentTarget = (
-    await listFundingReceiveReceiptsForRouting(pool, {
-      limit: 500,
-      now: new Date(now.getTime() + 5_000),
-    })
-  ).find(
-    (target) => target.receipt.receiptId === staleConsentPolicy.receiptIds[1],
-  );
-  assert.ok(staleConsentTarget);
-  assert.deepEqual(
-    await telegramUsdceWrapRoutingDecision(pool, staleConsentTarget),
-    { kind: "allowed" },
-  );
   await publishFundingPolicy(false, true);
-  assert.deepEqual(
-    await telegramUsdceWrapRoutingDecision(pool, staleConsentTarget),
-    { kind: "hard_invalid", reasonCode: "funding_policy_changed" },
-    "a new enabled Funding Policy revision must not reuse prior frozen consent",
-  );
   await assertOperationAttachmentFailureRollsBack(staleConsentPolicy, {
     plannedStep: true,
   });
@@ -4711,7 +4346,7 @@ try {
     [projectorWake.telegramFundingSessionId],
   );
   assert.deepEqual(afterCapabilityRecheck.rows[0], {
-    state: "waiting_for_routing",
+    state: "needs_attention",
     version: projectionReceiveVersion.rows[0]?.version,
   });
   await pool.query(
@@ -4876,7 +4511,7 @@ try {
     [operatorRevocation.userId, new Date(now.getTime() + 4_740)],
   );
   const blockedWithRetainedGrant =
-    await resolveTelegramPolymarketWrapCapability(pool, {
+    await resolveTelegramPolymarketRouterCapability(pool, {
       userId: operatorRevocation.userId,
       telegramAccountId: operatorRevocation.telegramAccountId,
       telegramUserId: operatorIdentity.telegram_user_id,
@@ -8450,7 +8085,7 @@ try {
   await assertTelegramRouterContinuationHardBlock();
 
   console.log(
-    "[funding-delegated-execution-integration-tests] full-receipt concurrency, malformed action, soft pause/desired-state resume, lifecycle locking, pre-broadcast revocation, and ambiguous recovery passed",
+    "[funding-delegated-execution-integration-tests] controller Router concurrency, retired receipt isolation, malformed action, soft pause/desired-state resume, lifecycle locking, pre-broadcast revocation, and ambiguous recovery passed",
   );
 } catch (error) {
   testFailure = error;

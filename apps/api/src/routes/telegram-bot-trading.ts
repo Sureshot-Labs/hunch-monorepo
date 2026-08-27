@@ -244,7 +244,6 @@ const internalFundingOpenRouteBodySchema = internalFundingOpenBodySchema
       "limitless_base_usdc_direct_v1",
       "limitless_solana_sol_retained_v1",
       "polymarket_polygon_pusd_direct_v1",
-      "polymarket_polygon_usdce_wrap_v1",
       "polymarket_solana_sol_retained_v1",
     ]),
   })
@@ -911,7 +910,6 @@ async function registerTelegramBotTradingRoutes(
             limitless_base_usdc_direct_v1: "ld",
             limitless_solana_sol_retained_v1: "ls",
             polymarket_polygon_pusd_direct_v1: "pd",
-            polymarket_polygon_usdce_wrap_v1: "pw",
             polymarket_solana_sol_retained_v1: "ps",
           }[request.body.fundingRoute],
           contextId: opened.fundingContextId,

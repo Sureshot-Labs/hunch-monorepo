@@ -11,18 +11,14 @@ import {
 import { fundingSidecarRuntimeConfig } from "../runtime/sidecar-runtime-config.js";
 import {
   loadPolymarketPusdFundExecutionConfiguration,
-  loadPolymarketWrapExecutionConfiguration,
-  polymarketWrapExecutionConfigurationReady,
-  polymarketWrapExecutorEnvironmentReady,
-  type PolymarketWrapExecutionConfiguration,
+  polymarketRouterExecutionConfigurationReady,
+  polymarketRouterExecutorEnvironmentReady,
+  type PolymarketRouterExecutionConfiguration,
   loadRelayEvmExecutionConfiguration,
   relayEvmExecutionConfigurationReady,
   type RelayEvmExecutionConfiguration,
 } from "./delegated-funding-config.js";
-import {
-  POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
-  POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
-} from "./delegated-funding-profile-ids.js";
+import { POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID } from "./delegated-funding-profile-ids.js";
 import type { DelegatedFundingSecurityClass } from "./delegated-funding-profile-ids.js";
 import type { DelegatedFundingPreBroadcastDecision } from "./delegated-funding-capability.js";
 import {
@@ -261,12 +257,12 @@ export async function loadActiveTelegramFundingAuthorization(
       input.userId,
       input.telegramAccountId,
       input.telegramUserId,
-      input.profileId ?? POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
+      input.profileId ?? POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
       input.expectedAuthorizationId ?? null,
       input.destinationOptionId,
       input.venueBindingOptionId,
       input.sourceAsset?.assetId ??
-        fundingSidecarRuntimeConfig.polymarketUsdceAddress,
+        fundingSidecarRuntimeConfig.polymarketPusdAddress,
       input.destinationAsset?.assetId ??
         fundingSidecarRuntimeConfig.polymarketPusdAddress,
       input.now ?? new Date(),
@@ -335,7 +331,7 @@ export async function resolveCurrentTelegramFundingAuthority(
     destinationOptionId: string;
     venueBindingOptionId: string;
     configuration: Pick<
-      PolymarketWrapExecutionConfiguration,
+      PolymarketRouterExecutionConfiguration,
       "signerId" | "signerFingerprint" | "policyId" | "policyFingerprint"
     >;
     profileId?: string;
@@ -487,7 +483,7 @@ export async function grantTelegramFundingAuthorization(
     destinationOptionId: string;
     venueBindingOptionId: string;
     configuration: Pick<
-      PolymarketWrapExecutionConfiguration,
+      PolymarketRouterExecutionConfiguration,
       "signerId" | "signerFingerprint" | "policyId" | "policyFingerprint"
     >;
     profileId?: string;
@@ -514,11 +510,11 @@ export async function grantTelegramFundingAuthorization(
   if (!/^0x[0-9a-fA-F]{40}$/u.test(input.walletAddress)) {
     throw new Error("funding authorization wallet address is invalid");
   }
-  const profileId = input.profileId ?? POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID;
+  const profileId = input.profileId ?? POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID;
   const securityClass = input.securityClass ?? "closed_destination_transform";
   const sourceAsset = input.sourceAsset ?? {
     networkId: "evm:137",
-    assetId: fundingSidecarRuntimeConfig.polymarketUsdceAddress,
+    assetId: fundingSidecarRuntimeConfig.polymarketPusdAddress,
     decimals: 6,
   };
   const destinationAsset = input.destinationAsset ?? {
@@ -867,7 +863,7 @@ async function loadTelegramFundingAuthorizationGeneration(
 }
 
 export type EnsureTelegramFundingAuthorizationDependencies = Readonly<{
-  configuration?: PolymarketWrapExecutionConfiguration;
+  configuration?: PolymarketRouterExecutionConfiguration;
   environment?: Readonly<Record<string, string | undefined>>;
   environmentReady?: boolean;
   inspectWalletProfile?: (input: {
@@ -893,9 +889,7 @@ export async function ensureTelegramFundingAuthorization(
     destinationOptionId: string;
     venueBindingOptionId: string;
     venueId?: "limitless" | "polymarket";
-    profileId?:
-      | typeof POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID
-      | typeof POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID;
+    profileId?: typeof POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID;
     now?: Date;
   }>,
   dependencies: EnsureTelegramFundingAuthorizationDependencies = {},
@@ -903,20 +897,18 @@ export async function ensureTelegramFundingAuthorization(
   const environment = dependencies.environment ?? process.env;
   const configuration =
     dependencies.configuration ??
-    (input.profileId === POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID
-      ? loadPolymarketPusdFundExecutionConfiguration(environment)
-      : loadPolymarketWrapExecutionConfiguration(environment));
+    loadPolymarketPusdFundExecutionConfiguration(environment);
   if (
-    !polymarketWrapExecutionConfigurationReady(configuration) ||
+    !polymarketRouterExecutionConfigurationReady(configuration) ||
     !(
       dependencies.environmentReady ??
-      polymarketWrapExecutorEnvironmentReady(environment)
+      polymarketRouterExecutorEnvironmentReady(environment)
     )
   ) {
     console.warn(
       "[telegram-funding-authority] profile configuration unavailable",
       {
-        profileId: input.profileId ?? POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
+        profileId: input.profileId ?? POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
         venueId: input.venueId ?? "polymarket",
       },
     );
@@ -929,7 +921,7 @@ export async function ensureTelegramFundingAuthorization(
       {
         userId: input.userId,
         venueBindingOptionId: input.venueBindingOptionId,
-        profileId: input.profileId ?? POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
+        profileId: input.profileId ?? POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
       },
     );
     const candidate = await resolveTelegramFundingProvisionWallet(client, {
@@ -940,7 +932,7 @@ export async function ensureTelegramFundingAuthorization(
   });
   if (provisioningState.generation.operatorRevoked) {
     console.warn("[telegram-funding-authority] authority generation revoked", {
-      profileId: input.profileId ?? POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
+      profileId: input.profileId ?? POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
       venueId: input.venueId ?? "polymarket",
     });
     return null;
@@ -948,7 +940,7 @@ export async function ensureTelegramFundingAuthorization(
   const candidate = provisioningState.candidate;
   if (!candidate) {
     console.warn("[telegram-funding-authority] managed wallet unavailable", {
-      profileId: input.profileId ?? POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
+      profileId: input.profileId ?? POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
       venueId: input.venueId ?? "polymarket",
     });
     return null;
@@ -958,7 +950,7 @@ export async function ensureTelegramFundingAuthorization(
       authorizationIds: provisioningState.generation.routeIds,
       userId: input.userId,
       venueBindingOptionId: input.venueBindingOptionId,
-      profileId: input.profileId ?? POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
+      profileId: input.profileId ?? POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
       now: input.now ?? new Date(),
     });
     return null;
@@ -984,7 +976,7 @@ export async function ensureTelegramFundingAuthorization(
     inspection = await inspectWalletProfile({
       walletId: candidate.privyWalletId,
       walletAddress: candidate.walletAddress,
-      profileId: input.profileId ?? POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
+      profileId: input.profileId ?? POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
     });
   } catch {
     inspection = "unavailable";
@@ -993,7 +985,7 @@ export async function ensureTelegramFundingAuthorization(
     console.warn(
       "[telegram-funding-authority] Privy profile inspection unavailable",
       {
-        profileId: input.profileId ?? POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
+        profileId: input.profileId ?? POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
         venueId: input.venueId ?? "polymarket",
       },
     );
@@ -1001,7 +993,7 @@ export async function ensureTelegramFundingAuthorization(
   }
   if (inspection === "invalid") {
     console.warn("[telegram-funding-authority] Privy profile is invalid", {
-      profileId: input.profileId ?? POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
+      profileId: input.profileId ?? POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
       venueId: input.venueId ?? "polymarket",
     });
     // An invalid alternative profile is not evidence that a different exact
@@ -1016,14 +1008,11 @@ export async function ensureTelegramFundingAuthorization(
       ...candidate,
       configuration,
       profileId: input.profileId,
-      sourceAsset:
-        input.profileId === POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID
-          ? {
-              networkId: "evm:137",
-              assetId: fundingSidecarRuntimeConfig.polymarketPusdAddress,
-              decimals: 6,
-            }
-          : undefined,
+      sourceAsset: {
+        networkId: "evm:137",
+        assetId: fundingSidecarRuntimeConfig.polymarketPusdAddress,
+        decimals: 6,
+      },
       expectedActiveAuthorizationIds: provisioningState.generation.activeIds,
       replaceExisting: true,
     });

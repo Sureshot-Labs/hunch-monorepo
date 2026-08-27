@@ -84,7 +84,6 @@ function parseFundingPlan(value: unknown): PolymarketFundingPlan {
     routerNonce: stringField(value, "routerNonce"),
     requiredRaw: stringField(value, "requiredRaw"),
     depositAvailableRaw: stringField(value, "depositAvailableRaw"),
-    depositUsdceAmountRaw: stringField(value, "depositUsdceAmountRaw"),
     totalAmountRaw: stringField(value, "totalAmountRaw"),
     pUsdAmountRaw: stringField(value, "pUsdAmountRaw"),
     signerUsdceAmountRaw: stringField(value, "signerUsdceAmountRaw"),

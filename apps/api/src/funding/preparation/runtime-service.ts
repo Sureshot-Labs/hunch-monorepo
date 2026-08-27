@@ -869,10 +869,6 @@ function polymarketMaxSpendSnapshotFromAccount(
       "fundingRouter",
       "nonce",
     ]),
-    fundingRouterDepositUsdceAllowance: nonNegativeBigIntAt(payload, [
-      "fundingRouter",
-      "depositUsdceAllowanceRaw",
-    ]),
     fundingRouterPusdAllowance: nonNegativeBigIntAt(payload, [
       "fundingRouter",
       "pUsdAllowanceRaw",
@@ -1358,7 +1354,6 @@ export class WalletPreparationRuntimeService {
               });
               if (
                 funds.fundingRouterNonce == null ||
-                funds.fundingRouterDepositUsdceAllowance == null ||
                 funds.fundingRouterPusdAllowance == null ||
                 funds.fundingRouterUsdceAllowance == null
               ) {
@@ -1376,8 +1371,6 @@ export class WalletPreparationRuntimeService {
                 routerAddress:
                   fundingSidecarRuntimeConfig.polymarketFundingRouterAddress,
                 routerNonceRaw: funds.fundingRouterNonce.toString(),
-                depositRouterUsdceAllowanceRaw:
-                  funds.fundingRouterDepositUsdceAllowance.toString(),
                 routerPusdAllowanceRaw:
                   funds.fundingRouterPusdAllowance.toString(),
                 routerUsdceAllowanceRaw:
@@ -1420,10 +1413,6 @@ export class WalletPreparationRuntimeService {
                 fundingSidecarRuntimeConfig.polymarketFundingRouterAddress,
               ),
               nonceRaw: rawAt(payload, ["fundingRouter", "nonce"]),
-              depositUsdceAllowanceRaw: rawAt(payload, [
-                "fundingRouter",
-                "depositUsdceAllowanceRaw",
-              ]),
               pUsdAllowanceRaw: rawAt(payload, [
                 "fundingRouter",
                 "pUsdAllowanceRaw",

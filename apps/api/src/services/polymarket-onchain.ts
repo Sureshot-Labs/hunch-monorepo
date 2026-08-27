@@ -48,7 +48,6 @@ type Snapshot = {
   operatorApprovals: Record<string, boolean>;
   feeCollectorNonce: bigint | null;
   fundingRouterNonce: bigint | null;
-  fundingRouterDepositUsdceAllowance: bigint | null;
   fundingRouterPusdAllowance: bigint | null;
   fundingRouterUsdceAllowance: bigint | null;
 };
@@ -276,15 +275,6 @@ export async function fetchPolymarketOnchainSnapshot(inputs: {
         decode: (data) => decodeBigInt(erc20Iface, "allowance", data),
         fallback: 0n,
       },
-      {
-        target: env.polymarketUsdceAddress,
-        callData: erc20Iface.encodeFunctionData("allowance", [
-          funder,
-          fundingRouterAddress,
-        ]),
-        decode: (data) => decodeBigInt(erc20Iface, "allowance", data),
-        fallback: 0n,
-      },
     );
   }
 
@@ -356,9 +346,6 @@ export async function fetchPolymarketOnchainSnapshot(inputs: {
   const fundingRouterUsdceAllowance = fundingRouterAddress
     ? (decoded[cursor++] as bigint)
     : null;
-  const fundingRouterDepositUsdceAllowance = fundingRouterAddress
-    ? (decoded[cursor++] as bigint)
-    : null;
 
   return {
     pusdBalance,
@@ -403,7 +390,6 @@ export async function fetchPolymarketOnchainSnapshot(inputs: {
     },
     feeCollectorNonce,
     fundingRouterNonce,
-    fundingRouterDepositUsdceAllowance,
     fundingRouterPusdAllowance,
     fundingRouterUsdceAllowance,
   };

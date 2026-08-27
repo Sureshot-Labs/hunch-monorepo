@@ -399,46 +399,6 @@ function buildValidPolymarketBuySellPolicy(): PrivyPolicyMetadata {
       fundingRouterControllerApprovalRule(),
       fundingRouterControllerApprovalRule(policyUsdceAddress, "USDC.e"),
       structuredClone(sell.rules[1] as never),
-      {
-        action: "ALLOW",
-        conditions: [
-          {
-            field: "chain_id",
-            field_source: "ethereum_transaction",
-            operator: "eq",
-            value: "137",
-          },
-          {
-            field: "to",
-            field_source: "ethereum_transaction",
-            operator: "eq",
-            value: policyFundingRouterAddress,
-          },
-          {
-            field: "value",
-            field_source: "ethereum_transaction",
-            operator: "eq",
-            value: "0x0",
-          },
-          {
-            abi: policyFundingAbi,
-            field: "function_name",
-            field_source: "ethereum_calldata",
-            operator: "eq",
-            value: "fund",
-          },
-          {
-            abi: policyFundingAbi,
-            field: "fund.pUsdAmount",
-            field_source: "ethereum_calldata",
-            operator: "eq",
-            value: "0",
-          },
-        ],
-        id: "funding-router-full-receipt-wrap",
-        method: "eth_sendTransaction",
-        name: "Funding router full receipt wrap",
-      },
     ],
   };
 }
