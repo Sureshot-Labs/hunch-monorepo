@@ -529,6 +529,30 @@ assert.deepEqual(
   limitlessSellContext,
   "Limitless Sell is a valid app-handoff custom input context",
 );
+assert.equal(
+  telegramBotTradingTestHooks.shouldLoadInactiveTelegramAppHandoffAuthority({
+    deliveryMode: "app_handoff",
+    executionContractVersion: 2,
+  }),
+  true,
+  "an initial client-signed handoff must load its verified authority before the v2 plan exists",
+);
+assert.equal(
+  telegramBotTradingTestHooks.shouldLoadInactiveTelegramAppHandoffAuthority({
+    deliveryMode: "bot_submit",
+    executionContractVersion: 2,
+  }),
+  false,
+  "server execution must still require an active bot authorization",
+);
+assert.equal(
+  telegramBotTradingTestHooks.shouldLoadInactiveTelegramAppHandoffAuthority({
+    deliveryMode: "app_handoff",
+    executionContractVersion: 1,
+  }),
+  false,
+  "legacy handoff keeps its active bot authorization requirement",
+);
 redis.values.set(
   `tg:signal_bot:v2:trade_input_context:${contextId}`,
   JSON.stringify({ ...context, version: 1 }),
