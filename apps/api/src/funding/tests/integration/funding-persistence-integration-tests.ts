@@ -1194,7 +1194,7 @@ async function testAutomaticRecoveryAcceptsLateDestinationEvidence(): Promise<vo
   }
 }
 
-async function testUnexposedRecoveryRouteDoesNotBlockDestinationObservation(): Promise<void> {
+async function testHistoricalReadyAndUnexposedRecoveryRoutesDoNotBlockDestinationObservation(): Promise<void> {
   const client = await pool.connect();
   await client.query("begin");
   try {
@@ -1260,6 +1260,7 @@ async function testUnexposedRecoveryRouteDoesNotBlockDestinationObservation(): P
       );
     };
     const competingCommit = await commit("competing");
+    const settledReadyCommit = await commit("settled-ready");
     const currentCommit = await commit("current");
 
     await client.query(
@@ -1292,6 +1293,99 @@ async function testUnexposedRecoveryRouteDoesNotBlockDestinationObservation(): P
       [currentCommit.operation.id],
     );
 
+    const settledStep = await client.query<{
+      id: string;
+      segment_id: string;
+    }>(
+      `
+        select id, segment_id
+        from funding_operation_steps
+        where operation_id = $1 and ordinal = 0
+      `,
+      [settledReadyCommit.operation.id],
+    );
+    const settledStepId = settledStep.rows[0]?.id;
+    const settledSegmentId = settledStep.rows[0]?.segment_id;
+    assert.ok(settledStepId);
+    assert.ok(settledSegmentId);
+    const settledAttempt = await startFundingStepAttemptInTransaction(client, {
+      operationId: settledReadyCommit.operation.id,
+      stepId: settledStepId,
+      canonicalActionFingerprint: hash("b"),
+      executorId: "synthetic-executor",
+    });
+    await finishFundingStepAttemptInTransaction(client, {
+      attemptId: settledAttempt.id,
+      outcome: "submitted",
+      broadcastMayHaveOccurred: true,
+      referenceKind: "transaction",
+      receiptRefCiphertext: "ciphertext:settled-ready",
+      receiptRefLookupHmac: hash("7"),
+      lookupKeyVersion: 1,
+      actualCosts: {},
+    });
+    await client.query(
+      `
+        update funding_operation_steps
+        set state = 'submitted'
+        where id = $1
+      `,
+      [settledStepId],
+    );
+    await client.query(
+      `
+        update funding_operation_steps
+        set state = 'succeeded'
+        where id = $1
+      `,
+      [settledStepId],
+    );
+    const settledObservedAt = new Date("2026-07-29T22:35:00.000Z");
+    await ingestFundingObservationInTransaction(client, {
+      discoverySource: "chain_rpc",
+      observation: {
+        operationId: settledReadyCommit.operation.id,
+        segmentId: settledSegmentId,
+        kind: "destination_credit",
+        networkId: ASSET.networkId,
+        assetId: ASSET.assetId,
+        assetDecimals: ASSET.decimals,
+        txHash: opaque("settled-ready-destination"),
+        eventIndex: "0",
+        fromAddress: "0xrouter",
+        toAddress: "0x00000000000000000000000000000000000000d1",
+        rawAmount: "980000",
+        observedAt: settledObservedAt,
+        ledgerHeight: "300",
+        blockHash: opaque("settled-ready-block"),
+        finalityStatus: "finalized",
+        finalizedAt: settledObservedAt,
+      },
+    });
+    await client.query(
+      `
+        update funding_operation_segments
+        set status = 'succeeded',
+            actual_output = $2::jsonb,
+            submitted_at = created_at,
+            settled_at = now()
+        where operation_id = $1
+      `,
+      [settledReadyCommit.operation.id, money("980000")],
+    );
+    await client.query(
+      `
+        update funding_operations
+        set status = 'ready',
+            progress_stage = 'ready_for_consumer',
+            actual_destination_amount = $2::jsonb,
+            version = version + 1,
+            updated_at = now()
+        where id = $1
+      `,
+      [settledReadyCommit.operation.id, money("980000")],
+    );
+
     const observer = new OwnedRouteDestinationObserver({
       observe: async () => ({
         observedRaw: "1990000",
@@ -1308,7 +1402,7 @@ async function testUnexposedRecoveryRouteDoesNotBlockDestinationObservation(): P
         currentCommit.operation.id,
       ),
       { destinationsPolled: 1, destinationSatisfied: true },
-      "an unbroadcast action_required route must not block a delivered route",
+      "an unbroadcast route and a ready route credited before the immutable baseline must not block a later delivered route",
     );
 
     let competingOperation = await transitionFundingOperationInTransaction(
@@ -5199,9 +5293,9 @@ await testAutomaticRecoveryAcceptsLateDestinationEvidence();
 console.log(
   "[funding-persistence-integration-tests] ok automatic recovery accepts late owned-destination evidence idempotently",
 );
-await testUnexposedRecoveryRouteDoesNotBlockDestinationObservation();
+await testHistoricalReadyAndUnexposedRecoveryRoutesDoNotBlockDestinationObservation();
 console.log(
-  "[funding-persistence-integration-tests] ok unexposed recovery route does not block destination observation",
+  "[funding-persistence-integration-tests] ok historical ready and unexposed recovery routes do not block destination observation",
 );
 await testActionWaitUsesIdleReconciliationWithoutExternalPolling();
 console.log(

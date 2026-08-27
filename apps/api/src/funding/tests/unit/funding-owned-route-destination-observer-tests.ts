@@ -264,6 +264,14 @@ assert.deepEqual(
         assert.match(sql, /to_timestamp/);
         assert.match(sql, /competing_preparation\.kind = 'venue_readiness'/);
         assert.match(sql, /competing_credit\.kind = 'destination_credit'/);
+        assert.match(
+          sql,
+          /competing\.status = 'ready'[\s\S]+settled_competing_credit\.observed_at <=[\s\S]+destination_baseline\.baseline_as_of/,
+        );
+        assert.match(
+          sql,
+          /not exists \([\s\S]+unsettled_competing_credit\.observed_at >[\s\S]+destination_baseline\.baseline_as_of/,
+        );
         assert.match(sql, /'reconcile_required'/);
         assert.match(sql, /'recovery_required'/);
         assert.match(
