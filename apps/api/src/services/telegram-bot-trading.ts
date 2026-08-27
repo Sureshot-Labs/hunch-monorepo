@@ -2016,6 +2016,7 @@ export const telegramBotTradingTestHooks = {
   resolveTelegramExecutableBuyOption,
   resolveTelegramCallbackMessageId,
   sameTelegramTradeAuthorityBinding,
+  shouldLoadInactiveTelegramAppHandoffAuthority,
   shouldOpenTelegramFundingBuyReturn,
   lockTelegramFundingReturnBeforeMarket,
   parseTelegramCustomBuyAmount,
@@ -7620,6 +7621,22 @@ function intentMatchesTelegramTradeAuthority(input: {
   );
 }
 
+function shouldLoadInactiveTelegramAppHandoffAuthority(
+  input: Readonly<{
+    deliveryMode: TelegramTradeIntentRow["delivery_mode"];
+    executionContractVersion: number;
+  }>,
+): boolean {
+  // The initial Review callback runs before the v2 plan is written. Requiring
+  // that plan as proof here creates a cycle: a client-signed handoff can never
+  // reach the code that seals it when unattended bot execution is disabled.
+  // The exact verified wallet/link binding is still checked below, and policy
+  // plus venue capability are validated before the handoff is issued.
+  return (
+    input.deliveryMode === "app_handoff" && input.executionContractVersion >= 2
+  );
+}
+
 async function loadEnabledAuthorization(
   db: DbQuery,
   telegramUserId: string,
@@ -12497,17 +12514,24 @@ export async function handleTelegramBotTradingCallback(
     }
   }
 
+  const policyPromise = resolveTelegramBotTradingPolicy(input.db);
   const [policy, authorization, market] = await Promise.all([
-    resolveTelegramBotTradingPolicy(input.db),
-    intent.delivery_mode === "app_handoff"
-      ? loadEnabledEvmAuthorization(input.db, intent.telegram_user_id, {
-          allowInactiveForV2: readTelegramAppHandoffV2Plan(intent) != null,
-        })
-      : loadEnabledAuthorization(
-          input.db,
-          intent.telegram_user_id,
-          intent.venue,
-        ),
+    policyPromise,
+    policyPromise.then((resolvedPolicy) =>
+      intent.delivery_mode === "app_handoff"
+        ? loadEnabledEvmAuthorization(input.db, intent.telegram_user_id, {
+            allowInactiveForV2: shouldLoadInactiveTelegramAppHandoffAuthority({
+              deliveryMode: intent.delivery_mode,
+              executionContractVersion:
+                resolvedPolicy.miniAppHandoffContractVersion,
+            }),
+          })
+        : loadEnabledAuthorization(
+            input.db,
+            intent.telegram_user_id,
+            intent.venue,
+          ),
+    ),
     loadMarketById(input.db, intent.market_id),
   ]);
   const amountUsd = parseNumber(intent.amount_usd);
