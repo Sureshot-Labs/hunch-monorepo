@@ -1196,10 +1196,12 @@ function preparedPlanMatchesDestinationScope(
   const location = target.location;
   const details = isRecord(location.details) ? location.details : null;
   const asset = exactAsset(location.asset);
-  // Ordinary planner routes freeze the selectable binding option directly.
-  // Venue-preparation/composite routes freeze the exact account binding and
-  // carry the originating option ID in support metadata. Both are produced by
-  // the same projection and must match the two sealed identifiers.
+  // Do not require `bindingId` here. RelayFirstSourcePlanner intentionally
+  // freezes a VenueBindingOption in `venueBindingSnapshot`, and that production
+  // shape contains only `venueBindingOptionId`. The fresh destination projection
+  // above has already matched the exact binding ID against the sealed scope
+  // before this quote is prepared. Some venue-preparation/composite plans do
+  // expose the stronger account binding; when present, it must still match.
   const bindingOptionId =
     typeof binding.venueBindingOptionId === "string"
       ? binding.venueBindingOptionId
@@ -1207,10 +1209,21 @@ function preparedPlanMatchesDestinationScope(
           typeof supportMetadata.venueBindingOptionId === "string"
         ? supportMetadata.venueBindingOptionId
         : null;
+  const bindingIdPresent =
+    Object.prototype.hasOwnProperty.call(binding, "bindingId") ||
+    (isRecord(supportMetadata) &&
+      Object.prototype.hasOwnProperty.call(supportMetadata, "venueBindingId"));
+  const bindingId =
+    typeof binding.bindingId === "string"
+      ? binding.bindingId
+      : isRecord(supportMetadata) &&
+          typeof supportMetadata.venueBindingId === "string"
+        ? supportMetadata.venueBindingId
+        : null;
   return (
     target.kind === "owned_location" &&
     operation.venueId === input.destination.venueId &&
-    binding.bindingId === input.destination.venueBindingId &&
+    (!bindingIdPresent || bindingId === input.destination.venueBindingId) &&
     bindingOptionId === input.destination.venueBindingOptionId &&
     details?.controllerWalletId === input.destination.controllerWalletId &&
     asset != null &&
