@@ -647,6 +647,7 @@ async function materializeLimitlessPlan(
   reservationRaw: string,
   transformSnapshot?: (snapshot: SourceOption) => unknown,
   bindingOptionInSupportMetadata = false,
+  preparedBindingId: string | null = "limitless-binding",
 ): Promise<void> {
   const currentLimitlessProjection = limitlessProjection([
     {
@@ -701,12 +702,16 @@ async function materializeLimitlessPlan(
                         venueBindingOptionId: LIMITLESS_BINDING_OPTION_ID,
                       }
                     : null,
-                  venueBindingSnapshot: bindingOptionInSupportMetadata
-                    ? { bindingId: "limitless-binding" }
-                    : {
-                        bindingId: "limitless-binding",
-                        venueBindingOptionId: LIMITLESS_BINDING_OPTION_ID,
-                      },
+                  venueBindingSnapshot: {
+                    ...(preparedBindingId == null
+                      ? {}
+                      : { bindingId: preparedBindingId }),
+                    ...(bindingOptionInSupportMetadata
+                      ? {}
+                      : {
+                          venueBindingOptionId: LIMITLESS_BINDING_OPTION_ID,
+                        }),
+                  },
                   venueId: "limitless",
                 },
                 reservations: [
@@ -743,6 +748,24 @@ async function materializeLimitlessPlan(
 }
 await materializeLimitlessPlan(movingFeePlan, "1042322");
 await materializeLimitlessPlan(movingFeePlan, "1042322", undefined, true);
+await materializeLimitlessPlan(
+  movingFeePlan,
+  "1042322",
+  undefined,
+  false,
+  null,
+);
+await assert.rejects(
+  materializeLimitlessPlan(
+    movingFeePlan,
+    "1042322",
+    undefined,
+    false,
+    "different-limitless-binding",
+  ),
+  /fresh funding plan differs from the sealed destination scope/u,
+  "an explicit prepared binding must still match the sealed venue account",
+);
 assert.equal(
   materialized.request?.maxFeeUsd,
   "0.02344965",
