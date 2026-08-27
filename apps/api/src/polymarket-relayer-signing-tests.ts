@@ -3,6 +3,7 @@ import {
   createPolymarketRelayerHeaderPayload,
   normalizePolymarketRelayerBody,
   parsePolymarketRelayerSubmitBody,
+  validatePolymarketRelayerReadAddressForLinkedWallets,
   validatePolymarketRelayerSignRequestForLinkedWallets,
   validatePolymarketRelayerSignRequestForWallet,
 } from "./services/polymarket-relayer-signing.js";
@@ -61,6 +62,21 @@ assert.equal(
     ],
   }),
   walletAddress,
+);
+assert.equal(
+  validatePolymarketRelayerReadAddressForLinkedWallets({
+    address: walletAddress.toLowerCase(),
+    walletAddresses: [walletAddress],
+  }),
+  walletAddress,
+);
+assert.throws(
+  () =>
+    validatePolymarketRelayerReadAddressForLinkedWallets({
+      address: "0x0000000000000000000000000000000000000001",
+      walletAddresses: [walletAddress],
+    }),
+  /does not match an authenticated user wallet/,
 );
 assert.throws(
   () =>

@@ -166,6 +166,14 @@ export const polymarketRelayerSignBodySchema = z.object({
   timestamp: z.number().int().positive().optional(),
 });
 
+export const polymarketRelayerNonceQuerySchema = z.object({
+  address: zEthAddress,
+});
+
+export const polymarketRelayerNonceResponseSchema = z.object({
+  nonce: z.string().regex(/^\d+$/),
+});
+
 export const polymarketRelayerStatusResponseSchema = z.object({
   enabled: z.boolean(),
   reason: z.string().optional(),

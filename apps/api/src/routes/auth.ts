@@ -45,6 +45,8 @@ import {
   polymarketCredentialsBodySchema,
   polymarketFunderBodySchema,
   polymarketRelayerStatusResponseSchema,
+  polymarketRelayerNonceQuerySchema,
+  polymarketRelayerNonceResponseSchema,
   polymarketRelayerSignBodySchema,
   removeWalletBodySchema,
   updateWalletNameBodySchema,
@@ -54,8 +56,10 @@ import { validatePolymarketFunderSelection } from "../services/polymarket-funder
 import { requestPolymarketCredentials } from "../services/polymarket-credentials.js";
 import {
   createPolymarketRelayerHeaderPayload,
+  validatePolymarketRelayerReadAddressForLinkedWallets,
   validatePolymarketRelayerSignRequestForLinkedWallets,
 } from "../services/polymarket-relayer-signing.js";
+import { fetchPolymarketRelayerNonce } from "../services/polymarket-deposit-wallet-relayer.js";
 import {
   buildEmbeddedPolymarketConnectRequest,
   executeEmbeddedPolymarketConnectRequest,
@@ -1130,6 +1134,69 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
         enabled,
         reason: enabled ? undefined : "Builder credentials not configured.",
       });
+    },
+  );
+
+  /**
+   * GET /auth/polymarket/relayer-nonce
+   * Same-origin fallback for browsers that cannot reach the relayer nonce
+   * endpoint directly. The requested owner must belong to the current user.
+   */
+  z.get(
+    "/auth/polymarket/relayer-nonce",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: {
+        querystring: polymarketRelayerNonceQuerySchema,
+        response: {
+          200: polymarketRelayerNonceResponseSchema,
+          400: authErrorResponseSchema,
+          401: authErrorResponseSchema,
+          502: authErrorResponseSchema,
+        },
+      },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      if (!user) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+
+      const wallets = await AuthService.getUserWallets(user.id);
+      let ownerAddress: string;
+      try {
+        ownerAddress = validatePolymarketRelayerReadAddressForLinkedWallets({
+          address: request.query.address,
+          walletAddresses: wallets.map((wallet) => wallet.walletAddress),
+        });
+      } catch (error) {
+        reply.code(400);
+        return reply.send({
+          error:
+            error instanceof Error
+              ? error.message
+              : "Invalid Polymarket relayer address",
+        });
+      }
+
+      try {
+        const nonce = await fetchPolymarketRelayerNonce(ownerAddress);
+        reply.header("Cache-Control", "private, no-store");
+        return reply.send({ nonce });
+      } catch (error) {
+        app.log.warn(
+          { error, userId: user.id },
+          "Polymarket relayer nonce fallback failed",
+        );
+        reply.code(502);
+        return reply.send({
+          error:
+            error instanceof Error
+              ? error.message
+              : "Polymarket relayer nonce is unavailable",
+        });
+      }
     },
   );
 
