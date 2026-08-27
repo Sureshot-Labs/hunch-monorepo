@@ -8,6 +8,7 @@ import {
 export const POLYMARKET_DEPOSIT_WALLET_FACTORY_ADDRESS =
   "0x00000000000Fb5C9ADea0298D729A0CB3823Cc07";
 export const POLYMARKET_RELAYER_BASE_URL = "https://relayer-v2.polymarket.com";
+const POLYMARKET_RELAYER_REQUEST_TIMEOUT_MS = 15_000;
 export const POLYMARKET_DEPOSIT_WALLET_BATCH_TYPES = {
   Call: [
     { name: "target", type: "address" },
@@ -217,7 +218,11 @@ async function fetchRelayerJson<T>(
   init: RequestInit,
   fetchImpl: typeof fetch,
 ): Promise<T> {
-  const response = await fetchImpl(url, init);
+  const timeout = AbortSignal.timeout(POLYMARKET_RELAYER_REQUEST_TIMEOUT_MS);
+  const response = await fetchImpl(url, {
+    ...init,
+    signal: init.signal ? AbortSignal.any([init.signal, timeout]) : timeout,
+  });
   const text = await response.text();
   let payload: unknown = null;
   if (text) {

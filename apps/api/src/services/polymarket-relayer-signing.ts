@@ -114,6 +114,31 @@ export function validatePolymarketRelayerSignRequestForLinkedWallets(input: {
   return normalizedFrom;
 }
 
+export function validatePolymarketRelayerReadAddressForLinkedWallets(input: {
+  address: string;
+  walletAddresses: readonly string[];
+}): string {
+  let normalizedAddress: string;
+  try {
+    normalizedAddress = ethers.getAddress(input.address);
+  } catch {
+    throw new Error("Polymarket relayer address is invalid");
+  }
+  const ownsAddress = input.walletAddresses.some((walletAddress) => {
+    try {
+      return ethers.getAddress(walletAddress) === normalizedAddress;
+    } catch {
+      return false;
+    }
+  });
+  if (!ownsAddress) {
+    throw new Error(
+      "Polymarket relayer address does not match an authenticated user wallet",
+    );
+  }
+  return normalizedAddress;
+}
+
 export function normalizePolymarketRelayerBody(body: unknown): string {
   return typeof body === "string"
     ? body
