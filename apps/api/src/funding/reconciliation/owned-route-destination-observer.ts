@@ -385,6 +385,33 @@ async function loadTarget(
                   '{location,locationId}' =
                 operation.destination_target_snapshot #>>
                   '{location,locationId}'
+            and not (
+              competing.status = 'ready'
+              -- A ready route with finalized credit at or before this
+              -- operation's immutable baseline is already included in that
+              -- baseline. It can keep its consumer reservation alive, but it
+              -- must not make a later Relay credit ambiguous forever.
+              and exists (
+                select 1
+                from funding_observations settled_competing_credit
+                where settled_competing_credit.operation_id = competing.id
+                  and settled_competing_credit.kind = 'destination_credit'
+                  and settled_competing_credit.canonical
+                  and settled_competing_credit.finality_status = 'finalized'
+                  and settled_competing_credit.observed_at <=
+                    destination_baseline.baseline_as_of
+              )
+              and not exists (
+                select 1
+                from funding_observations unsettled_competing_credit
+                where unsettled_competing_credit.operation_id = competing.id
+                  and unsettled_competing_credit.kind = 'destination_credit'
+                  and unsettled_competing_credit.canonical
+                  and unsettled_competing_credit.finality_status = 'finalized'
+                  and unsettled_competing_credit.observed_at >
+                    destination_baseline.baseline_as_of
+              )
+            )
             and (
               exists (
                 select 1
