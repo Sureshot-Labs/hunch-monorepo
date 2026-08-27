@@ -2,11 +2,11 @@ import { ethers } from "ethers";
 
 import {
   createPolymarketRelayerHeaderPayload,
+  POLYMARKET_DEPOSIT_WALLET_FACTORY_ADDRESS,
   type PolymarketRelayerCredentials,
 } from "./polymarket-relayer-signing.js";
 
-export const POLYMARKET_DEPOSIT_WALLET_FACTORY_ADDRESS =
-  "0x00000000000Fb5C9ADea0298D729A0CB3823Cc07";
+export { POLYMARKET_DEPOSIT_WALLET_FACTORY_ADDRESS };
 export const POLYMARKET_RELAYER_BASE_URL = "https://relayer-v2.polymarket.com";
 const POLYMARKET_RELAYER_REQUEST_TIMEOUT_MS = 15_000;
 export const POLYMARKET_DEPOSIT_WALLET_BATCH_TYPES = {

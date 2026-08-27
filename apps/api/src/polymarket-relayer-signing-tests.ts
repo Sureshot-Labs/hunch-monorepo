@@ -124,5 +124,34 @@ assert.throws(
     }),
   /submit type is not allowed/,
 );
+assert.throws(
+  () =>
+    validatePolymarketRelayerSignRequestForWallet({
+      method: "POST",
+      path: "/submit",
+      body: {
+        type: "WALLET-CREATE",
+        from: walletAddress,
+        to: "0x0000000000000000000000000000000000000001",
+      },
+      walletAddress,
+    }),
+  /canonical factory/,
+);
+assert.throws(
+  () =>
+    validatePolymarketRelayerSignRequestForWallet({
+      method: "POST",
+      path: "/submit",
+      body: {
+        type: "WALLET-CREATE",
+        from: walletAddress,
+        to: "0x00000000000Fb5C9ADea0298D729A0CB3823Cc07",
+        metadata: "unexpected",
+      },
+      walletAddress,
+    }),
+  /canonical factory/,
+);
 
 console.log("[polymarket-relayer-signing-tests] passed");

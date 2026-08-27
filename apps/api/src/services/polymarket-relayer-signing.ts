@@ -24,6 +24,8 @@ const ALLOWED_POLYMARKET_RELAYER_SUBMIT_TYPES = new Set([
   "WALLET",
   "WALLET-CREATE",
 ]);
+export const POLYMARKET_DEPOSIT_WALLET_FACTORY_ADDRESS =
+  "0x00000000000Fb5C9ADea0298D729A0CB3823Cc07";
 
 export function parsePolymarketRelayerSubmitBody(
   body: unknown,
@@ -80,6 +82,27 @@ export function validatePolymarketRelayerSignRequestForWallet(input: {
   const type = typeof body.type === "string" ? body.type : "";
   if (!ALLOWED_POLYMARKET_RELAYER_SUBMIT_TYPES.has(type)) {
     throw new Error("Polymarket relayer submit type is not allowed");
+  }
+  if (type === "WALLET-CREATE") {
+    const keys = Object.keys(body).sort();
+    const to = typeof body.to === "string" ? body.to : "";
+    let normalizedTo: string;
+    try {
+      normalizedTo = ethers.getAddress(to);
+    } catch {
+      throw new Error("Polymarket Deposit Wallet create target is invalid");
+    }
+    if (
+      keys.length !== 3 ||
+      keys[0] !== "from" ||
+      keys[1] !== "to" ||
+      keys[2] !== "type" ||
+      normalizedTo !== POLYMARKET_DEPOSIT_WALLET_FACTORY_ADDRESS
+    ) {
+      throw new Error(
+        "Polymarket Deposit Wallet creation must use the canonical factory",
+      );
+    }
   }
 }
 
