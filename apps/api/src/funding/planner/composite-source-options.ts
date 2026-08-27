@@ -17,9 +17,10 @@ import {
   canonicalJsonEqual,
   canonicalJsonHash,
 } from "../persistence/canonical.js";
-import type {
-  FundingCommitReservation,
-  FundingCommitStep,
+import {
+  fundingEconomicSourceReservations,
+  type FundingCommitReservation,
+  type FundingCommitStep,
 } from "../persistence/funding-operation-repository.js";
 import { assertSameAsset, rawAmount } from "./money.js";
 import {
@@ -123,6 +124,9 @@ function venuePreparationCandidate(
   source: PlannedSourceOption,
 ): CompositeCandidate {
   const economics = positiveEconomics(source);
+  const economicReservations = fundingEconomicSourceReservations(
+    source.commitPlan.reservations,
+  );
   const preparationInputs =
     source.option.source.kind === "venue_preparation"
       ? source.option.source.inputs
@@ -137,23 +141,23 @@ function venuePreparationCandidate(
       (step) =>
         step.stepKind !== "venue_preparation" || step.segmentOrdinal !== null,
     ) ||
-    source.commitPlan.reservations.length !== source.option.source.inputCount ||
+    economicReservations.length !== source.option.source.inputCount ||
     source.commitPlan.reservations.some(
       (reservation) =>
         reservation.segmentOrdinal !== null ||
         reservation.mode !== "subtract_available",
     ) ||
     (preparationInputs != null &&
-      (preparationInputs.length !== source.commitPlan.reservations.length ||
+      (preparationInputs.length !== economicReservations.length ||
         preparationInputs.some((input) => {
-          const matches = source.commitPlan.reservations.filter(
-            (reservation) =>
+          const matches = economicReservations.filter(
+            ({ reservation, rawAmount }) =>
               reservation.locationId === input.locationId &&
               reservation.networkId === input.asset.networkId &&
               reservation.assetId.toLowerCase() ===
                 input.asset.assetId.toLowerCase() &&
               reservation.assetDecimals === input.asset.decimals &&
-              reservation.rawAmount === input.rawAmount,
+              rawAmount === input.rawAmount,
           );
           return matches.length !== 1;
         })))

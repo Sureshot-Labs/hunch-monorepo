@@ -16,7 +16,7 @@ import type {
 } from "../../domain/types.js";
 import { SOLANA_NATIVE_EXECUTION_RESERVE_LAMPORTS } from "../../domain/network-fees.js";
 import {
-  POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
+  POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
   TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
 } from "../../execution/delegated-funding-profile-ids.js";
 import {
@@ -62,7 +62,6 @@ import {
 } from "../../receive/receive-session-observer.js";
 import { RELAY_PINNED_ASSETS } from "../../../funding-providers/relay/mappings.js";
 import { relayReceiveQuotePlan } from "../../../funding-providers/relay/receive-routing.js";
-import { classifyPolymarketFundingRoutingError } from "../../../services/telegram-funding-polymarket-evidence.js";
 import {
   lockPolymarketFundingOperationPredecessor,
   PolymarketFundingPredecessorUnresolvedError,
@@ -119,6 +118,8 @@ const internalHandoffCandidate = {
   stepId: "step_internal_handoff_12345678",
   attemptId: "attempt_internal_handoff_12345678",
   attemptOutcome: "submitted" as const,
+  referenceKind: "transaction" as const,
+  resolvedTransactionHash: null,
   receiptRefCiphertext: "encrypted_internal_handoff_reference",
   receiptRefLookupHmac: "lookup_internal_handoff_12345678",
   lookupKeyVersion: 1,
@@ -219,6 +220,49 @@ assert.equal(
   ).get(`evm:137:${internalHandoffHash}:1`)?.kind,
   "internal",
   "a durable started attempt must close the broadcast-to-report gap",
+);
+assert.equal(
+  classifyPolymarketHandoffEvents(
+    [internalHandoffEvent("1", internalHandoffAmount)],
+    [
+      {
+        ...internalHandoffCandidate,
+        referenceKind: "external_handoff",
+        receiptRefLookupHmac: "relayer_reference_lookup_hmac",
+      },
+    ],
+    { decrypt: () => "polymarket-relayer:v1:relayer_reference_12345678" },
+  ).get(`evm:137:${internalHandoffHash}:1`)?.kind,
+  "internal",
+  "an exact reported relayer handoff must stay internal until its transaction hash resolves",
+);
+assert.equal(
+  classifyPolymarketHandoffEvents(
+    [internalHandoffEvent("1", internalHandoffAmount)],
+    [
+      {
+        ...internalHandoffCandidate,
+        referenceKind: "external_handoff",
+        resolvedTransactionHash: internalHandoffHash,
+      },
+    ],
+  ).get(`evm:137:${internalHandoffHash}:1`)?.kind,
+  "internal",
+  "a resolved relayer handoff must bind suppression to its durable transaction hash",
+);
+assert.equal(
+  classifyPolymarketHandoffEvents(
+    [internalHandoffEvent("1", internalHandoffAmount)],
+    [
+      {
+        ...internalHandoffCandidate,
+        referenceKind: "external_handoff",
+        resolvedTransactionHash: `0x${"ef".repeat(32)}`,
+      },
+    ],
+  ).get(`evm:137:${internalHandoffHash}:1`)?.kind,
+  "external",
+  "a resolved relayer handoff must not suppress a later identical transfer with another hash",
 );
 assert.equal(
   classifyPolymarketHandoffEvents(
@@ -403,10 +447,10 @@ assert.equal(
 );
 assert.equal(
   fundingReceiveExecutionUsesReservationScope({
-    serverExecutionProfileId: POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
+    serverExecutionProfileId: POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
   }),
   false,
-  "the existing closed-destination Slice C path must not acquire the Relay reservation lane",
+  "controller-funded Polymarket preparation must not acquire the Relay reservation lane",
 );
 assert.equal(
   fundingReceiveExecutionUsesReservationScope({
@@ -444,16 +488,6 @@ assert.equal(
   }),
   "routing_invalid_operation_state",
   "generic routing must not classify a provider's message text",
-);
-assert.deepEqual(
-  classifyPolymarketFundingRoutingError(
-    new PolymarketFundingPredecessorUnresolvedError(),
-  ),
-  {
-    errorCode: "routing_predecessor_unresolved",
-    retryAfterMs: 60_000,
-    retryMode: "defer_without_budget",
-  },
 );
 {
   const queries: string[] = [];
@@ -676,7 +710,7 @@ await quoteFundingReceiveReceipt(
   },
   routedReceiptTarget,
   {
-    serverExecutionProfileId: POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
+    serverExecutionProfileId: POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
     quotePlan: {
       version: 1,
       confirmedSourceAmount: null,
@@ -691,12 +725,12 @@ await quoteFundingReceiveReceipt(
 assert.equal(
   delegatedDiscoveryRequest?.maxFeeUsd,
   null,
-  "closed-destination wrap must not inherit the generic conversion fee cap",
+  "controller-funded Router preparation must not inherit the generic conversion fee cap",
 );
 assert.equal(
   delegatedDiscoveryRequest?.maxSlippageBps,
   null,
-  "closed-destination wrap must not inherit generic slippage economics",
+  "controller-funded Router preparation must not inherit generic slippage economics",
 );
 await quoteFundingReceiveReceipt(
   {

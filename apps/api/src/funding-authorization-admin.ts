@@ -5,9 +5,9 @@ import { pathToFileURL } from "node:url";
 import { pool } from "./db.js";
 import { env } from "./env.js";
 import {
-  loadPolymarketWrapExecutionConfiguration,
+  loadPolymarketPusdFundExecutionConfiguration,
   loadRelayEvmExecutionConfiguration,
-  polymarketWrapProfileConfigured,
+  polymarketRouterProfileConfigured,
 } from "./funding/execution/delegated-funding-config.js";
 import { PrivyDelegatedFundingDriver } from "./funding/execution/privy-delegated-funding-driver.js";
 import {
@@ -15,8 +15,8 @@ import {
   revokeTelegramFundingAuthorization,
 } from "./funding/execution/telegram-funding-authorization.js";
 
-const GRANT_CONFIRMATION = "GRANT POLYMARKET USDC.E WRAP";
-const REVOKE_CONFIRMATION = "REVOKE POLYMARKET USDC.E WRAP";
+const GRANT_CONFIRMATION = "GRANT POLYMARKET PUSD FUNDING";
+const REVOKE_CONFIRMATION = "REVOKE POLYMARKET PUSD FUNDING";
 
 function argument(name: string): string {
   const index = process.argv.indexOf(`--${name}`);
@@ -57,8 +57,8 @@ async function main(): Promise<void> {
     );
     return;
   }
-  const configuration = loadPolymarketWrapExecutionConfiguration();
-  if (!polymarketWrapProfileConfigured(configuration)) {
+  const configuration = loadPolymarketPusdFundExecutionConfiguration();
+  if (!polymarketRouterProfileConfigured(configuration)) {
     throw new Error(
       "Polymarket automation signer/policy fingerprints are incomplete",
     );

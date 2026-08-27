@@ -13,7 +13,7 @@ import { isPositiveRawAmount } from "../domain/raw-amount.js";
 import { sameAsset } from "../domain/asset-identity.js";
 import {
   loadPolymarketPusdFundExecutionConfiguration,
-  polymarketWrapExecutionConfigurationReady,
+  polymarketRouterExecutionConfigurationReady,
 } from "../execution/delegated-funding-config.js";
 import { POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID } from "../execution/delegated-funding-profile-ids.js";
 import {
@@ -37,6 +37,7 @@ import {
 } from "../persistence/funding-operation-repository.js";
 import { resolveFundingPolicy } from "../policies/funding-policy-service.js";
 import {
+  buildPolymarketControllerApprovalActionValidation,
   buildPolymarketFundingActionValidation,
   buildPolymarketFundingFollowupAction,
 } from "../preparation/polymarket-funding-followup.js";
@@ -278,8 +279,6 @@ function buildPlan(
     requiredRaw: live.depositPusdRaw + BigInt(input.amount.raw),
     depositPusdRaw: live.depositPusdRaw,
     depositLockedRaw: live.depositPusdRaw,
-    depositUsdceRaw: 0n,
-    depositRouterUsdceAllowanceRaw: 0n,
     fundingCapRaw: BigInt(input.amount.raw),
     signerPusdRaw: live.controllerPusdRaw,
     signerLockedRaw: live.controllerPusdRaw - BigInt(input.amount.raw),
@@ -314,6 +313,10 @@ function buildPlan(
   const sponsorship = resolveActionSponsorship({ action: fundAction, profile });
   const approvalAction = {
     kind: "evm_transaction" as const,
+    actionId: `action_${canonicalJsonHash({
+      kind: "controller_pusd_router_approval",
+      operationIdentity,
+    }).slice(0, 32)}`,
     networkId: "evm:137",
     senderWalletId: input.authorization.userWalletId,
     to: fundingSidecarRuntimeConfig.polymarketPusdAddress,
@@ -324,6 +327,10 @@ function buildPlan(
     valueRaw: "0",
     gasLimitRaw: null,
   };
+  const approvalSponsorship = resolveActionSponsorship({
+    action: approvalAction,
+    profile,
+  });
   const pUsd = input.amount.asset;
   const reservationExpiresAt = new Date(
     input.now.getTime() + FUNDING_OPERATION_RECONCILIATION_TTL_MS,
@@ -391,10 +398,13 @@ function buildPlan(
               payerRequirement: "privy_sponsor" as const,
               dependsOnOrdinal: null,
               normalizedAction: jsonRecord(approvalAction),
-              actionValidationResult: {
-                kind: "controller_pusd_router_approval",
-                routerAddress: POLYMARKET_FUNDING_ROUTER.polygon,
-              },
+              actionValidationResult:
+                buildPolymarketControllerApprovalActionValidation({
+                  kind: "controller_pusd_router_approval",
+                  profileAddress: profile.address,
+                  routerAddress: POLYMARKET_FUNDING_ROUTER.polygon,
+                  sponsorship: approvalSponsorship,
+                }),
               actionExpiresAt: null,
             },
           ]
@@ -736,7 +746,7 @@ export async function runTelegramRouterContinuationCommitter(
   ]);
   let created = 0;
   let skipped = 0;
-  if (!polymarketWrapExecutionConfigurationReady(configuration)) {
+  if (!polymarketRouterExecutionConfigurationReady(configuration)) {
     for (const row of rows.rows) {
       await recordRouterContinuationWait(pool, {
         intentId: row.trade_intent_id,

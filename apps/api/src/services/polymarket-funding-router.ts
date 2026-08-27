@@ -13,7 +13,6 @@ export type PolymarketFundingPlan = {
   routerNonce: string;
   requiredRaw: string;
   depositAvailableRaw: string;
-  depositUsdceAmountRaw: string;
   totalAmountRaw: string;
   pUsdAmountRaw: string;
   signerUsdceAmountRaw: string;
@@ -39,9 +38,7 @@ export class PolymarketFundingPlanError extends Error {
 export type PolymarketFundingPlanInput = Readonly<{
   depositWallet: string;
   depositPusdRaw: bigint;
-  depositRouterUsdceAllowanceRaw: bigint;
   depositLockedRaw?: bigint | null;
-  depositUsdceRaw: bigint;
   fundingCapRaw: bigint;
   requiredRaw: bigint;
   routerAddress: string;
@@ -100,31 +97,16 @@ export function buildPolymarketFundingPlan(
     );
   }
 
-  const depositUsdceAmountRaw =
-    positive(input.depositUsdceRaw) < totalAmountRaw
-      ? positive(input.depositUsdceRaw)
-      : totalAmountRaw;
-  if (
-    depositUsdceAmountRaw > 0n &&
-    positive(input.depositRouterUsdceAllowanceRaw) < depositUsdceAmountRaw
-  ) {
-    throw new PolymarketFundingPlanError(
-      "allowance_missing",
-      "Deposit wallet USDC.e funding-router approval is missing.",
-    );
-  }
-
-  const remainingAfterDepositUsdce = totalAmountRaw - depositUsdceAmountRaw;
   const signerPusdAvailableRaw = available(
     positive(input.signerPusdRaw),
     positive(input.signerLockedRaw),
   );
   const pUsdAmountRaw =
-    signerPusdAvailableRaw < remainingAfterDepositUsdce
+    signerPusdAvailableRaw < totalAmountRaw
       ? signerPusdAvailableRaw
-      : remainingAfterDepositUsdce;
-  const signerUsdceAmountRaw = remainingAfterDepositUsdce - pUsdAmountRaw;
-  const usdceAmountRaw = depositUsdceAmountRaw + signerUsdceAmountRaw;
+      : totalAmountRaw;
+  const signerUsdceAmountRaw = totalAmountRaw - pUsdAmountRaw;
+  const usdceAmountRaw = signerUsdceAmountRaw;
   if (positive(input.signerUsdceRaw) < signerUsdceAmountRaw) {
     throw new PolymarketFundingPlanError(
       "insufficient_balance",
@@ -147,7 +129,6 @@ export function buildPolymarketFundingPlan(
     routerNonce: input.routerNonce.toString(),
     requiredRaw: requiredRaw.toString(),
     depositAvailableRaw: depositAvailableRaw.toString(),
-    depositUsdceAmountRaw: depositUsdceAmountRaw.toString(),
     totalAmountRaw: totalAmountRaw.toString(),
     pUsdAmountRaw: pUsdAmountRaw.toString(),
     signerUsdceAmountRaw: signerUsdceAmountRaw.toString(),

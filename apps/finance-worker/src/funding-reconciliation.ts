@@ -26,7 +26,7 @@ type FundingReconciliationOptions = {
   delegatedExecution?: Readonly<{
     configuration: Readonly<{
       enabled: boolean;
-      profileId: "polymarket_deposit_usdce_wrap_v1";
+      profileId: "polymarket_deposit_pusd_fund_v1";
       signerId: string;
       signerFingerprint: string;
       policyId: string;
@@ -158,7 +158,7 @@ export function delegatedFundingWorkerConfig(
   return {
     configuration: {
       enabled: input.fundingPolymarketWrapExecute,
-      profileId: "polymarket_deposit_usdce_wrap_v1",
+      profileId: "polymarket_deposit_pusd_fund_v1",
       signerId: input.privyWalletAuthorizationId ?? "",
       signerFingerprint: input.privyWalletAuthorizationFingerprint ?? "",
       policyId: input.privyPolymarketBotBuySellPolicyId ?? "",

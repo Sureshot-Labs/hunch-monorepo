@@ -3,7 +3,6 @@ import { POLYMARKET_FUNDING_ROUTER } from "@hunch/contracts";
 import { isPositiveRawAmount } from "../domain/raw-amount.js";
 import {
   POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
-  POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
   TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
 } from "./delegated-funding-profile-ids.js";
 import { DELEGATED_PROVIDER_REPLAY_MS } from "./delegated-funding-recovery-policy.js";
@@ -21,18 +20,12 @@ function enabled(source: Environment, key: string): boolean {
 
 export type PolymarketRouterExecutionConfiguration = Readonly<{
   enabled: boolean;
-  profileId:
-    | typeof POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID
-    | typeof POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID;
+  profileId: typeof POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID;
   signerId: string;
   signerFingerprint: string;
   policyId: string;
   policyFingerprint: string;
 }>;
-
-/** Kept as a source-compatible alias for the inbound USDC.e route. */
-export type PolymarketWrapExecutionConfiguration =
-  PolymarketRouterExecutionConfiguration;
 
 export type RelayEvmExecutionConfiguration = Readonly<{
   enabled: boolean;
@@ -100,24 +93,6 @@ export function relayEvmExecutionConfigurationReady(
   return config.enabled && relayEvmProfileConfigured(config);
 }
 
-export function loadPolymarketWrapExecutionConfiguration(
-  source: Environment = process.env,
-): PolymarketWrapExecutionConfiguration {
-  return {
-    enabled:
-      enabled(source, "HUNCH_FINANCE_EXECUTE") &&
-      enabled(source, "HUNCH_FUNDING_PM_WRAP_EXECUTE"),
-    profileId: POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
-    signerId: value(source, "PRIVY_WALLET_AUTHORIZATION_ID"),
-    signerFingerprint: value(source, "PRIVY_WALLET_AUTHORIZATION_FINGERPRINT"),
-    policyId: value(source, "PRIVY_POLYMARKET_BOT_BUY_SELL_POLICY_ID"),
-    policyFingerprint: value(
-      source,
-      "PRIVY_POLYMARKET_BOT_BUY_SELL_POLICY_FINGERPRINT",
-    ),
-  };
-}
-
 export function loadPolymarketPusdFundExecutionConfiguration(
   source: Environment = process.env,
 ): PolymarketRouterExecutionConfiguration {
@@ -136,14 +111,14 @@ export function loadPolymarketPusdFundExecutionConfiguration(
   };
 }
 
-export function polymarketWrapExecutionConfigurationReady(
-  config: PolymarketWrapExecutionConfiguration,
+export function polymarketRouterExecutionConfigurationReady(
+  config: PolymarketRouterExecutionConfiguration,
 ): boolean {
-  return config.enabled && polymarketWrapProfileConfigured(config);
+  return config.enabled && polymarketRouterProfileConfigured(config);
 }
 
-export function polymarketWrapProfileConfigured(
-  config: PolymarketWrapExecutionConfiguration,
+export function polymarketRouterProfileConfigured(
+  config: PolymarketRouterExecutionConfiguration,
 ): boolean {
   return (
     config.signerId.length >= 3 &&
@@ -153,7 +128,7 @@ export function polymarketWrapProfileConfigured(
   );
 }
 
-export function polymarketWrapExecutorEnvironmentReady(
+export function polymarketRouterExecutorEnvironmentReady(
   source: Environment = process.env,
 ): boolean {
   const required = [

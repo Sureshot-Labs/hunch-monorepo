@@ -42,9 +42,10 @@ export const MAX_RELAY_SOURCE_QUOTES = 16;
 
 /**
  * The generic destination floor keeps automatic refills out of dust-sized
- * routes. An internal serverAdditionalDestinationAmount is different: it is
- * the exact shortfall already bound to a confirmed trade. Placement keeps
- * that amount exact, so source economics must not reapply the generic floor
+ * routes. A trade shortfall is different: it is already an exact,
+ * consumer-bound deficit, regardless of whether the caller supplied the
+ * optional internal amount hint. Placement and provider economics still
+ * bound the route, but source discovery must not reapply the generic floor
  * and incorrectly replace a usable owned route with external Deposit.
  */
 export function minimumDestinationUsdForFundingRequest(
@@ -54,8 +55,7 @@ export function minimumDestinationUsdForFundingRequest(
   >,
   configuredMinimumDestinationUsd: string,
 ): string {
-  return request.purpose === "trade_shortfall" &&
-    request.serverAdditionalDestinationAmount != null
+  return request.purpose === "trade_shortfall"
     ? "0"
     : configuredMinimumDestinationUsd;
 }

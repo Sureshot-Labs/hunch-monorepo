@@ -17,7 +17,6 @@ export type PolymarketRouterFundingSnapshot = Readonly<{
   fundingCapRaw: string;
   routerAddress: string;
   routerNonceRaw: string;
-  depositRouterUsdceAllowanceRaw: string;
   routerPusdAllowanceRaw: string;
   routerUsdceAllowanceRaw: string;
   clobPusdRaw: string | null;
@@ -35,7 +34,6 @@ const STRING_FIELDS = [
   "fundingCapRaw",
   "routerAddress",
   "routerNonceRaw",
-  "depositRouterUsdceAllowanceRaw",
   "routerPusdAllowanceRaw",
   "routerUsdceAllowanceRaw",
   "observedAt",

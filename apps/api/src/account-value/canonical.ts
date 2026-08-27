@@ -70,6 +70,39 @@ export function stableWalletOpaqueId(
   );
 }
 
+/**
+ * Reproduce the durable identity used by Account Value for one wallet asset,
+ * including an asset that currently has a zero balance and is therefore
+ * absent from the projection. Funding plans use this to fence a known future
+ * credit without inventing a second component namespace.
+ */
+export function stableWalletAssetLocationIdentity(input: {
+  accountId: string;
+  address: string;
+  asset: AssetRef;
+  balanceClass: string;
+}): Readonly<{ componentId: string; locationId: string }> {
+  const address = canonicalAccountAddress(input.asset.networkId, input.address);
+  const locationId = stableOpaqueId(
+    "location",
+    `${input.accountId}:wallet:${address}:${canonicalAssetKey(input.asset)}`,
+  );
+  const location: AssetLocation = {
+    kind: "wallet",
+    locationId,
+    accountId: input.accountId,
+    asset: input.asset,
+    details: {
+      address,
+      balanceClass: input.balanceClass,
+    },
+  };
+  return {
+    componentId: stableOpaqueId("asset", canonicalLocationKey(location)),
+    locationId,
+  };
+}
+
 export type DeduplicatedInventory = Readonly<{
   observations: readonly ObservedAsset[];
   duplicateCount: number;

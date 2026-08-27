@@ -297,6 +297,16 @@ export function productionFundingProfileHasNativeGas(
   return account.projection.components.some((component) => {
     const address = detail(component.location, "address");
     const available = availableByComponent.get(component.componentId);
+    // Gas eligibility is an execution fact, not a USD-valuation fact. The
+    // cash projector marks an unpriced native token as stale even when its raw
+    // on-chain balance is fresh and fully available. Requiring that aggregate
+    // freshness made a temporary Pyth/SOL price gap disable otherwise valid
+    // Solana funding routes.
+    const rawAvailabilityIsFresh =
+      component.observationFreshness === "fresh" &&
+      !component.observationError &&
+      available != null &&
+      !available.reasonCodes.includes("cash_availability_unknown");
     return (
       component.location.kind === "wallet" &&
       component.amount.asset.networkId === profile.networkId &&
@@ -309,7 +319,7 @@ export function productionFundingProfileHasNativeGas(
         address &&
         sameAccountAddress(profile.networkId, address, profile.address),
       ) &&
-      available?.freshness === "fresh" &&
+      rawAvailabilityIsFresh &&
       BigInt(available.availableRaw) >=
         (profile.networkId === "solana:mainnet"
           ? SOLANA_NATIVE_EXECUTION_RESERVE_LAMPORTS

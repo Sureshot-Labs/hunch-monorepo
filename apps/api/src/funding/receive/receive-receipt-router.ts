@@ -324,8 +324,8 @@ export async function quoteFundingReceiveReceipt(
     ...(input.serverExecutionProfileId
       ? { serverExecutionProfileId: input.serverExecutionProfileId }
       : {}),
-    // The closed-destination wrap is an exact 1:1 protocol transform, not an
-    // economic route. Its boundary is the full receipt and exact calldata.
+    // Adapter-owned venue preparation has frozen exact action economics. Its
+    // boundary is the full receipt and exact calldata, not a market quote.
     maxFeeUsd: adapterOwnedPreparation
       ? null
       : target.automationPolicy.maximumFeeUsd,

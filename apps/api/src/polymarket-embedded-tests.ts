@@ -29,6 +29,8 @@ const walletContext: EmbeddedPolymarketWalletContext = {
     isInternalWallet: true,
   },
 };
+const retiredFundingRouter =
+  "0x0fEF62E1CD0600C132070855A45443852940EE72";
 
 const tokenInterface = new Interface([
   "function approve(address spender,uint256 value) returns (bool)",
@@ -245,20 +247,23 @@ const tests: TestCase[] = [
     },
   },
   {
-    name: "embedded deposit wallet batch allows USDC.e funding-router approval",
+    name: "embedded deposit wallet batch rejects USDC.e funding-router approval",
     run: () => {
-      const request = buildEmbeddedPolymarketTypedDataRequest({
-        context: walletContext,
-        typedData: buildDepositWalletBatchTypedData({
-          target: env.polymarketUsdceAddress,
-          value: "0",
-          data: tokenInterface.encodeFunctionData("approve", [
-            env.polymarketFundingRouterAddress,
-            (BigInt(1) << BigInt(256)) - BigInt(1),
-          ]),
-        }),
-      });
-      assert.equal(request.id, "polymarket-typed-data-signature");
+      assert.throws(
+        () =>
+          buildEmbeddedPolymarketTypedDataRequest({
+            context: walletContext,
+            typedData: buildDepositWalletBatchTypedData({
+              target: env.polymarketUsdceAddress,
+              value: "0",
+              data: tokenInterface.encodeFunctionData("approve", [
+                retiredFundingRouter,
+                (BigInt(1) << BigInt(256)) - BigInt(1),
+              ]),
+            }),
+          }),
+        /Unsupported deposit wallet ERC20 approval target/,
+      );
     },
   },
   {
@@ -546,14 +551,9 @@ const tests: TestCase[] = [
   },
 ];
 
-const originalFundingRouter = env.polymarketFundingRouterAddress;
-env.polymarketFundingRouterAddress ||=
-  "0x0fEF62E1CD0600C132070855A45443852940EE72";
 let passed = 0;
 for (const test of tests) {
   await test.run();
   passed += 1;
 }
-env.polymarketFundingRouterAddress = originalFundingRouter;
-
 console.log(`[polymarket-embedded-tests] passed ${passed}/${tests.length}`);

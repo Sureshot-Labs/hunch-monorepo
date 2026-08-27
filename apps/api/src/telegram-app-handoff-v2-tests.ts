@@ -242,6 +242,55 @@ const scopedCompositeWithVenuePreparation: SourceOption = {
   sourceOptionId: "source-composite-scoped-router-preparation",
 };
 
+const depositWalletUsdcePreparation: SourceOption = {
+  ...evmSource,
+  amountMode: "exact_output",
+  expectedDestination: { asset: POLYGON_PUSD, raw: "1000000" },
+  maximumSourceRaw: "1000000",
+  minimumDestination: { asset: POLYGON_PUSD, raw: "1000000" },
+  quotedSourceAmount: undefined,
+  requiredActions: [
+    {
+      actor: "user",
+      kind: "external_handoff",
+      safeLabel: "Move Polymarket USDC.e to the Trading Wallet",
+      sponsorship: "none",
+      valueMoving: true,
+    },
+    {
+      actor: "user",
+      kind: "evm_transaction",
+      safeLabel: "Fund Polymarket Deposit Wallet",
+      sponsorship: "requested",
+      valueMoving: true,
+    },
+  ],
+  safeLabel: "Prepare Polymarket Deposit Wallet funds",
+  source: {
+    inputCount: 2,
+    inputs: [
+      {
+        asset: POLYGON_PUSD,
+        locationId: "wallet-polygon-controller-pusd",
+        rawAmount: "400000",
+      },
+      {
+        asset: {
+          assetId: "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
+          decimals: 6,
+          networkId: "evm:137",
+        },
+        locationId: "polymarket-deposit-wallet-usdce",
+        rawAmount: "600000",
+      },
+    ],
+    kind: "venue_preparation",
+    venueBindingId: "polymarket-binding",
+    venueId: "polymarket",
+  },
+  sourceOptionId: "source-polymarket-deposit-wallet-usdce-preparation",
+};
+
 const projection = (
   sourceOptions: readonly SourceOption[],
 ): IntentLiquidityProjection => ({
@@ -454,6 +503,30 @@ assert.deepEqual(
     requiredContractVersion: 2,
   },
   "an exact owned venue preparation plus wallet route is sealable for Mini App execution",
+);
+assert.deepEqual(
+  resolveTelegramAppHandoffFundingCapability({
+    projection: projection([depositWalletUsdcePreparation]),
+    serverBotExact: false,
+  }),
+  {
+    kind: "web_funding_plan",
+    requiredContractVersion: 2,
+  },
+  "Deposit Wallet USDC.e preparation is offered only as a sealed client funding plan",
+);
+const sealedDepositWalletUsdcePreparation = buildTelegramAppHandoffV2Plan({
+  discoveryRequest: request,
+  fundingPolicyRevision: "funding-policy-1",
+  projection: projection([depositWalletUsdcePreparation]),
+  trade,
+});
+assert.deepEqual(
+  sealedDepositWalletUsdcePreparation.funding.sourceDebits.map(
+    (source) => source.locationId,
+  ),
+  ["wallet-polygon-controller-pusd", "polymarket-deposit-wallet-usdce"],
+  "the Mini App seal binds both controller and Deposit Wallet debits",
 );
 const sealedScopedComposite = buildTelegramAppHandoffV2Plan({
   discoveryRequest: request,

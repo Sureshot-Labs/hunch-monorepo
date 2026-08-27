@@ -79,7 +79,6 @@ export type RuntimeWithdrawalEvidence = Readonly<{
 export type RuntimePolymarketFundingRouterEvidence = Readonly<{
   canonical: boolean;
   configured: boolean;
-  depositUsdceAllowanceRaw: string | null;
   nonceRaw: string | null;
   pUsdAllowanceRaw: string | null;
   routerAddress: string | null;
@@ -414,10 +413,6 @@ function polymarketFundingRouterChecks(
         "Polymarket Funding Router is not required for this topology",
       ),
       satisfied(
-        "funding_router_deposit_usdce_allowance",
-        "Deposit Wallet Funding Router allowance is not required",
-      ),
-      satisfied(
         "funding_router_signer_pusd_allowance",
         "Signer pUSD Funding Router allowance is not required",
       ),
@@ -488,13 +483,6 @@ function polymarketFundingRouterChecks(
             ? "rpc_unavailable"
             : "binding_not_ready",
         ),
-    allowance({
-      actionKey: "approve-funding-router-deposit-usdce",
-      checkId: "funding_router_deposit_usdce_allowance",
-      kind: "external_handoff",
-      raw: router?.depositUsdceAllowanceRaw,
-      safeLabel: "Approve Deposit Wallet USDC.e for the Funding Router",
-    }),
     allowance({
       actionKey: "approve-funding-router-signer-pusd",
       checkId: "funding_router_signer_pusd_allowance",

@@ -1,15 +1,11 @@
-import type { AssetRef, JsonValue } from "../domain/types.js";
-import { isPositiveRawAmount } from "../domain/raw-amount.js";
+import type { AssetRef } from "../domain/types.js";
+import { isPositiveRawAmount, isRawAmount } from "../domain/raw-amount.js";
 import type { DirectIngressObservationVariant } from "../reconciliation/direct-ingress-observer.js";
 import { sameAsset } from "../domain/asset-identity.js";
 import type { TelegramFundingAuthorization } from "./telegram-funding-authorization.js";
 import { telegramFundingAuthorizationFingerprint } from "./telegram-funding-authorization.js";
-import { POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID } from "./delegated-funding-profile-ids.js";
 import { TELEGRAM_RELAY_EVM_FUNDING_PROFILE_IDS } from "./delegated-funding-profile-ids.js";
 
-type JsonRecord = Readonly<Record<string, JsonValue>>;
-
-export const TELEGRAM_FUNDING_AUTOMATION_POLICY_VERSION = 2;
 export const TELEGRAM_RELAY_EVM_AUTOMATION_POLICY_VERSION = 3;
 
 type TelegramRelayEvmFundingProfileId =
@@ -38,111 +34,9 @@ function isTelegramRelayVenueId(value: unknown): value is TelegramRelayVenueId {
   return value === "limitless" || value === "polymarket";
 }
 
-export type TelegramFundingVariantCursor = Readonly<{
-  variantId: string;
-  networkId: "evm:137";
-  ledgerHeightExclusive: string;
-}>;
-
-export type TelegramFundingAutomationPolicyV2 = Readonly<{
-  version: 2;
-  kind: "polymarket_usdce_full_receipt_wrap";
-  profileId: typeof POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID;
-  fullReceipt: true;
-  authorizationId: string;
-  authorizationFingerprint: string;
-  signerId: string;
-  signerFingerprint: string;
-  policyId: string;
-  policyFingerprint: string;
-  fundingPolicyRevision: string;
-  venueId: "polymarket";
-  destinationOptionId: string;
-  venueBindingOptionId: string;
-  sourceAsset: AssetRef;
-  destinationAsset: AssetRef;
-  variantCursors: readonly TelegramFundingVariantCursor[];
-}>;
-
 function cursor(variant: DirectIngressObservationVariant): string | null {
   const raw = variant.observation.payload.eventCursorBlock;
-  return typeof raw === "string" && /^(0|[1-9][0-9]*)$/u.test(raw) ? raw : null;
-}
-
-export function buildTelegramFundingAutomationPolicyV2(
-  input: Readonly<{
-    authorization: TelegramFundingAuthorization;
-    destinationAsset: AssetRef;
-    fundingPolicyRevision: string;
-    sourceAsset: AssetRef;
-    variants: readonly DirectIngressObservationVariant[];
-  }>,
-): TelegramFundingAutomationPolicyV2 {
-  const variantCursors = input.variants
-    .filter(
-      (variant) =>
-        sameAsset(variant.asset, input.sourceAsset) &&
-        variant.networkId === "evm:137",
-    )
-    .map((variant) => {
-      const ledgerHeightExclusive = cursor(variant);
-      if (!ledgerHeightExclusive) {
-        throw new Error(
-          "automatic funding consent requires a current chain cursor",
-        );
-      }
-      return {
-        variantId: variant.variantId,
-        networkId: "evm:137" as const,
-        ledgerHeightExclusive,
-      };
-    })
-    .sort((left, right) => left.variantId.localeCompare(right.variantId));
-  if (variantCursors.length === 0) {
-    throw new Error(
-      "automatic funding consent requires an exact USDC.e variant",
-    );
-  }
-  return {
-    version: TELEGRAM_FUNDING_AUTOMATION_POLICY_VERSION,
-    kind: "polymarket_usdce_full_receipt_wrap",
-    profileId: POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
-    fullReceipt: true,
-    authorizationId: input.authorization.id,
-    authorizationFingerprint: telegramFundingAuthorizationFingerprint(
-      input.authorization,
-    ),
-    signerId: input.authorization.signerId,
-    signerFingerprint: input.authorization.signerFingerprint,
-    policyId: input.authorization.policyId,
-    policyFingerprint: input.authorization.policyFingerprint,
-    fundingPolicyRevision: input.fundingPolicyRevision,
-    venueId: "polymarket",
-    destinationOptionId: input.authorization.destinationOptionId,
-    venueBindingOptionId: input.authorization.venueBindingOptionId,
-    sourceAsset: input.sourceAsset,
-    destinationAsset: input.destinationAsset,
-    variantCursors,
-  };
-}
-
-export function telegramFundingAutomationPolicyMatchesAuthorization(
-  policy: TelegramFundingAutomationPolicyV2,
-  authorization: TelegramFundingAuthorization,
-): boolean {
-  return (
-    policy.authorizationId === authorization.id &&
-    policy.authorizationFingerprint ===
-      telegramFundingAuthorizationFingerprint(authorization) &&
-    policy.signerId === authorization.signerId &&
-    policy.signerFingerprint === authorization.signerFingerprint &&
-    policy.policyId === authorization.policyId &&
-    policy.policyFingerprint === authorization.policyFingerprint &&
-    policy.destinationOptionId === authorization.destinationOptionId &&
-    policy.venueBindingOptionId === authorization.venueBindingOptionId &&
-    sameAsset(policy.sourceAsset, authorization.sourceAsset) &&
-    sameAsset(policy.destinationAsset, authorization.destinationAsset)
-  );
+  return isRawAmount(raw) ? raw : null;
 }
 
 function record(value: unknown): Record<string, unknown> | null {
@@ -168,116 +62,6 @@ function asset(value: unknown): AssetRef | null {
     assetId: candidate.assetId,
     decimals: Number(candidate.decimals),
   };
-}
-
-export function parseTelegramFundingAutomationPolicyV2(
-  value: unknown,
-): TelegramFundingAutomationPolicyV2 | null {
-  const candidate = record(value);
-  if (
-    !candidate ||
-    candidate.version !== TELEGRAM_FUNDING_AUTOMATION_POLICY_VERSION ||
-    candidate.kind !== "polymarket_usdce_full_receipt_wrap" ||
-    candidate.profileId !== POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID ||
-    candidate.fullReceipt !== true ||
-    candidate.venueId !== "polymarket"
-  ) {
-    return null;
-  }
-  const sourceAsset = asset(candidate.sourceAsset);
-  const destinationAsset = asset(candidate.destinationAsset);
-  const requiredStrings = [
-    "authorizationId",
-    "authorizationFingerprint",
-    "signerId",
-    "signerFingerprint",
-    "policyId",
-    "policyFingerprint",
-    "fundingPolicyRevision",
-    "destinationOptionId",
-    "venueBindingOptionId",
-  ] as const;
-  if (
-    !sourceAsset ||
-    !destinationAsset ||
-    requiredStrings.some(
-      (key) =>
-        typeof candidate[key] !== "string" ||
-        String(candidate[key]).trim().length === 0,
-    ) ||
-    !Array.isArray(candidate.variantCursors)
-  ) {
-    return null;
-  }
-  const variantCursors = candidate.variantCursors.flatMap((entry) => {
-    const item = record(entry);
-    if (
-      !item ||
-      typeof item.variantId !== "string" ||
-      item.networkId !== "evm:137" ||
-      typeof item.ledgerHeightExclusive !== "string" ||
-      !/^(0|[1-9][0-9]*)$/u.test(item.ledgerHeightExclusive)
-    ) {
-      return [];
-    }
-    return [
-      {
-        variantId: item.variantId,
-        networkId: "evm:137" as const,
-        ledgerHeightExclusive: item.ledgerHeightExclusive,
-      },
-    ];
-  });
-  if (
-    variantCursors.length === 0 ||
-    variantCursors.length !== candidate.variantCursors.length
-  ) {
-    return null;
-  }
-  return {
-    version: 2,
-    kind: "polymarket_usdce_full_receipt_wrap",
-    profileId: POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
-    fullReceipt: true,
-    authorizationId: String(candidate.authorizationId),
-    authorizationFingerprint: String(candidate.authorizationFingerprint),
-    signerId: String(candidate.signerId),
-    signerFingerprint: String(candidate.signerFingerprint),
-    policyId: String(candidate.policyId),
-    policyFingerprint: String(candidate.policyFingerprint),
-    fundingPolicyRevision: String(candidate.fundingPolicyRevision),
-    venueId: "polymarket",
-    destinationOptionId: String(candidate.destinationOptionId),
-    venueBindingOptionId: String(candidate.venueBindingOptionId),
-    sourceAsset,
-    destinationAsset,
-    variantCursors,
-  };
-}
-
-export function telegramFundingReceiptIsProspectivelyAuthorized(
-  input: Readonly<{
-    policy: TelegramFundingAutomationPolicyV2;
-    variantId: string;
-    ledgerHeight: string | null;
-  }>,
-): boolean {
-  if (!input.ledgerHeight || !/^(0|[1-9][0-9]*)$/u.test(input.ledgerHeight)) {
-    return false;
-  }
-  const cursorEntry = input.policy.variantCursors.find(
-    (entry) => entry.variantId === input.variantId,
-  );
-  return (
-    cursorEntry != null &&
-    BigInt(input.ledgerHeight) > BigInt(cursorEntry.ledgerHeightExclusive)
-  );
-}
-
-export function telegramFundingAutomationPolicyJson(
-  policy: TelegramFundingAutomationPolicyV2,
-): JsonRecord {
-  return policy as unknown as JsonRecord;
 }
 
 export type TelegramRelayEvmAutomationPolicyV3 = Readonly<{
@@ -416,7 +200,7 @@ export function parseTelegramRelayEvmAutomationPolicyV3(
       typeof item.variantId === "string" &&
       isTelegramRelayIngressNetworkId(networkId) &&
       typeof item.ledgerHeightExclusive === "string" &&
-      /^(0|[1-9][0-9]*)$/u.test(item.ledgerHeightExclusive)
+      isRawAmount(item.ledgerHeightExclusive)
       ? [
           {
             variantId: item.variantId,
@@ -489,8 +273,8 @@ export function telegramRelayEvmReceiptIsAuthorized(
   return Boolean(
     cursorEntry &&
     input.ledgerHeight &&
-    /^(0|[1-9][0-9]*)$/u.test(input.ledgerHeight) &&
-    /^(0|[1-9][0-9]*)$/u.test(input.rawAmount) &&
+    isRawAmount(input.ledgerHeight) &&
+    isPositiveRawAmount(input.rawAmount) &&
     BigInt(input.ledgerHeight) > BigInt(cursorEntry.ledgerHeightExclusive) &&
     BigInt(input.rawAmount) > 0n &&
     BigInt(input.rawAmount) <= BigInt(input.policy.maxSourceRaw),

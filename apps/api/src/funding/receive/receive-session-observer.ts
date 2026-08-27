@@ -151,6 +151,12 @@ function candidateReferenceMatch(
   event: FingerprintedFundingReceiveCanonicalEvent,
   codec: Pick<FundingTransactionReferenceCodec, "decrypt"> | null,
 ): "match" | "mismatch" | "unavailable" {
+  if (candidate.resolvedTransactionHash) {
+    return candidate.resolvedTransactionHash ===
+      event.event.transactionHash.toLowerCase()
+      ? "match"
+      : "mismatch";
+  }
   if (
     candidate.receiptRefLookupHmac &&
     event.receiptRefLookupHmac &&
@@ -198,7 +204,11 @@ export function classifyPolymarketHandoffEvents(
   };
 
   for (const candidate of candidates) {
-    if (candidate.attemptOutcome === "started") {
+    if (
+      candidate.attemptOutcome === "started" ||
+      (candidate.referenceKind === "external_handoff" &&
+        candidate.resolvedTransactionHash === null)
+    ) {
       for (const event of events) {
         const eventIdentity = canonicalEventIdentity(event.event);
         const relation = handoffCanonicalEventRelation(candidate, event.event);

@@ -173,6 +173,8 @@ export type FundingPolymarketHandoffCandidate = Readonly<{
   stepId: string;
   attemptId: string;
   attemptOutcome: "started" | "submitted" | "ambiguous";
+  referenceKind: FundingStepAttempt["referenceKind"];
+  resolvedTransactionHash: string | null;
   receiptRefCiphertext: string | null;
   receiptRefLookupHmac: string | null;
   lookupKeyVersion: number | null;
@@ -185,6 +187,8 @@ type FundingPolymarketHandoffCandidateDbRow = {
   step_id: string;
   attempt_id: string;
   attempt_outcome: FundingPolymarketHandoffCandidate["attemptOutcome"];
+  reference_kind: FundingPolymarketHandoffCandidate["referenceKind"];
+  resolved_transaction_hash: string | null;
   receipt_ref_ciphertext: string | null;
   receipt_ref_lookup_hmac: string | null;
   lookup_key_version: number | null;
@@ -233,6 +237,13 @@ export async function listPotentialPolymarketHandoffsForCanonicalEvents(
           step.id as step_id,
           attempt.id as attempt_id,
           attempt.outcome as attempt_outcome,
+          attempt.reference_kind,
+          case
+            when receipt.evidence ->> 'transactionHash'
+                   ~ '^0x[0-9a-fA-F]{64}$'
+            then lower(receipt.evidence ->> 'transactionHash')
+            else null
+          end as resolved_transaction_hash,
           attempt.receipt_ref_ciphertext,
           attempt.receipt_ref_lookup_hmac,
           attempt.lookup_key_version,
@@ -241,6 +252,8 @@ export async function listPotentialPolymarketHandoffsForCanonicalEvents(
         from funding_operation_step_attempts attempt
         join funding_operation_steps step on step.id = attempt.step_id
         join funding_operations operation on operation.id = step.operation_id
+        left join funding_step_receipt_observations receipt
+          on receipt.attempt_id = attempt.id
         left join lateral (
           select true as matches_event
           from candidate_event candidate
@@ -280,7 +293,7 @@ export async function listPotentialPolymarketHandoffsForCanonicalEvents(
             or (
               attempt.outcome in ('submitted', 'ambiguous')
               and attempt.broadcast_may_have_occurred = true
-              and attempt.reference_kind = 'transaction'
+              and attempt.reference_kind in ('transaction', 'external_handoff')
               and (
                 semantic_match.matches_event
                 or attempt.receipt_ref_lookup_hmac = any($3::text[])
@@ -310,6 +323,8 @@ export async function listPotentialPolymarketHandoffsForCanonicalEvents(
     stepId: row.step_id,
     attemptId: row.attempt_id,
     attemptOutcome: row.attempt_outcome,
+    referenceKind: row.reference_kind,
+    resolvedTransactionHash: row.resolved_transaction_hash,
     receiptRefCiphertext: row.receipt_ref_ciphertext,
     receiptRefLookupHmac: row.receipt_ref_lookup_hmac,
     lookupKeyVersion: row.lookup_key_version,

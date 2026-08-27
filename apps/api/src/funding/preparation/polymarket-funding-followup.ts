@@ -1,7 +1,6 @@
 import { ethers } from "ethers";
 
 import {
-  buildPolymarketFundingPlan,
   decodePolymarketFundingCalldata,
   type PolymarketFundingPlan,
 } from "../../services/polymarket-funding-router.js";
@@ -12,8 +11,9 @@ import type {
 } from "../domain/types.js";
 import type { ResolvedActionSponsorship } from "../execution/sponsorship-policy.js";
 import { canonicalJsonHash } from "../persistence/canonical.js";
+import { isRawAmount } from "../domain/raw-amount.js";
 import { PreparationContractError } from "./core-adapter.js";
-import type { PolymarketRouterFundingSnapshot } from "./polymarket-funding-snapshot.js";
+import { POLYMARKET_FUNDING_SOURCE_ADAPTER_ID } from "./polymarket-funding-snapshot.js";
 
 export type PolymarketFundingObservation = Readonly<{
   clobPusdRaw: string | null;
@@ -42,41 +42,25 @@ export type PolymarketFundingPostconditionResult = Readonly<{
   expectedDepositPusdRaw: string | null;
 }>;
 
-export function buildExactPolymarketDepositUsdceWrapPlan(input: {
-  receiptRaw: string;
-  snapshot: PolymarketRouterFundingSnapshot;
-}): PolymarketFundingPlan | null {
-  const receiptRaw = BigInt(input.receiptRaw);
-  if (receiptRaw <= 0n) return null;
-  const depositPusdRaw = BigInt(input.snapshot.depositPusdRaw);
-  const depositLockedRaw = BigInt(input.snapshot.depositLockedRaw);
-  const depositAvailableRaw =
-    depositPusdRaw > depositLockedRaw ? depositPusdRaw - depositLockedRaw : 0n;
-  const plan = buildPolymarketFundingPlan({
-    signer: input.snapshot.signerAddress,
-    depositWallet: input.snapshot.depositWallet,
-    routerAddress: input.snapshot.routerAddress,
-    routerNonce: BigInt(input.snapshot.routerNonceRaw),
-    requiredRaw: depositAvailableRaw + receiptRaw,
-    depositPusdRaw,
-    depositLockedRaw,
-    depositUsdceRaw: receiptRaw,
-    depositRouterUsdceAllowanceRaw: BigInt(
-      input.snapshot.depositRouterUsdceAllowanceRaw,
-    ),
-    signerPusdRaw: 0n,
-    signerLockedRaw: 0n,
-    signerUsdceRaw: 0n,
-    routerPusdAllowanceRaw: 0n,
-    routerUsdceAllowanceRaw: 0n,
-    fundingCapRaw: receiptRaw,
-  });
-  return plan?.totalAmountRaw === input.receiptRaw &&
-    plan.depositUsdceAmountRaw === input.receiptRaw &&
-    plan.pUsdAmountRaw === "0" &&
-    plan.signerUsdceAmountRaw === "0"
-    ? plan
-    : null;
+export type PolymarketControllerRouterApprovalKind =
+  | "controller_pusd_router_approval"
+  | "controller_usdce_router_approval";
+
+export function buildPolymarketControllerApprovalActionValidation(input: {
+  kind: PolymarketControllerRouterApprovalKind;
+  profileAddress: string;
+  routerAddress: string;
+  sponsorship: ResolvedActionSponsorship;
+}) {
+  return {
+    valid: true as const,
+    validatorId: POLYMARKET_FUNDING_SOURCE_ADAPTER_ID,
+    kind: input.kind,
+    signerAddress: input.profileAddress,
+    routerAddress: input.routerAddress,
+    sponsorshipPolicyId: input.sponsorship.policyId,
+    signingMode: input.sponsorship.signingMode,
+  };
 }
 
 export function buildPolymarketFundingActionValidation(input: {
@@ -88,6 +72,7 @@ export function buildPolymarketFundingActionValidation(input: {
 }) {
   return {
     valid: true as const,
+    validatorId: POLYMARKET_FUNDING_SOURCE_ADAPTER_ID,
     signerAddress: input.profileAddress,
     canonicalRouterAddress: input.routerAddress,
     expectedNonceRaw: input.plan.routerNonce,
@@ -103,9 +88,7 @@ export function buildPolymarketFundingActionValidation(input: {
 }
 
 function raw(value: string | null | undefined): bigint | null {
-  return value != null && /^(0|[1-9][0-9]*)$/.test(value)
-    ? BigInt(value)
-    : null;
+  return isRawAmount(value) ? BigInt(value) : null;
 }
 
 function normalizedAddress(value: string): string {
@@ -158,7 +141,6 @@ function validatePlan(input: {
   const depositAvailableRaw = raw(input.plan.depositAvailableRaw);
   const totalAmountRaw = raw(input.plan.totalAmountRaw);
   const pUsdAmountRaw = raw(input.plan.pUsdAmountRaw);
-  const depositUsdceAmountRaw = raw(input.plan.depositUsdceAmountRaw);
   const signerUsdceAmountRaw = raw(input.plan.signerUsdceAmountRaw);
   const usdceAmountRaw = raw(input.plan.usdceAmountRaw);
   const routerNonce = raw(input.plan.routerNonce);
@@ -167,7 +149,6 @@ function validatePlan(input: {
     depositAvailableRaw == null ||
     totalAmountRaw == null ||
     pUsdAmountRaw == null ||
-    depositUsdceAmountRaw == null ||
     signerUsdceAmountRaw == null ||
     usdceAmountRaw == null ||
     routerNonce == null ||
@@ -176,7 +157,7 @@ function validatePlan(input: {
     requiredRaw - depositAvailableRaw !== totalAmountRaw ||
     pUsdAmountRaw > totalAmountRaw ||
     totalAmountRaw - pUsdAmountRaw !== usdceAmountRaw ||
-    depositUsdceAmountRaw + signerUsdceAmountRaw !== usdceAmountRaw
+    signerUsdceAmountRaw !== usdceAmountRaw
   ) {
     throw new PreparationContractError(
       "evidence_invalid",

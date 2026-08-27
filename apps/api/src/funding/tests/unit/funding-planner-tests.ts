@@ -3,7 +3,10 @@
 import assert from "node:assert/strict";
 
 import { RELAY_PINNED_ASSETS } from "../../../funding-providers/relay/mappings.js";
-import { TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID } from "../../execution/delegated-funding-profile-ids.js";
+import {
+  POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
+  TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
+} from "../../execution/delegated-funding-profile-ids.js";
 
 import {
   FundingPersistenceError,
@@ -101,7 +104,7 @@ assert.equal(
     { purpose: "trade_shortfall", serverAdditionalDestinationAmount: null },
     "0.5",
   ),
-  "0.5",
+  "0",
 );
 assert.equal(
   minimumDestinationUsdForFundingRequest(
@@ -525,6 +528,127 @@ function plannedVenuePreparationSource(
     },
     routeId: null,
     providerId: null,
+  };
+}
+
+function plannedControllerRouterPreparationSource(
+  requiredRaw: string,
+  approvalKinds: readonly (
+    | "controller_pusd_router_approval"
+    | "controller_usdce_router_approval"
+  )[],
+): PlannedSourceOption {
+  const prepared = plannedVenuePreparationSource(requiredRaw, "privy_sponsor");
+  return {
+    ...prepared,
+    commitPlan: {
+      ...prepared.commitPlan,
+      operation: {
+        ...prepared.commitPlan.operation,
+        venueId: "polymarket",
+        supportMetadata: {
+          preparationKind: "polymarket_funding_router",
+          adapterId: "polymarket_funding_router_v1",
+        },
+      },
+      steps: [
+        ...approvalKinds.map((kind, ordinal) => ({
+          ordinal,
+          segmentOrdinal: null,
+          stepKind: "transaction" as const,
+          state: "planned" as const,
+          actionFingerprint: `fingerprint_${kind}_${ordinal}`,
+          executorId: POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
+          payerRequirement: "privy_sponsor" as const,
+          dependsOnOrdinal: ordinal === 0 ? null : ordinal - 1,
+          normalizedAction: { kind: "evm_transaction" },
+          actionValidationResult: { kind },
+          actionExpiresAt: null,
+        })),
+        {
+          ordinal: approvalKinds.length,
+          segmentOrdinal: null,
+          stepKind: "venue_preparation" as const,
+          state: "planned" as const,
+          actionFingerprint: "fingerprint_controller_router_fund_12345678",
+          executorId: POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
+          payerRequirement: "privy_sponsor" as const,
+          dependsOnOrdinal: approvalKinds.length - 1,
+          normalizedAction: { kind: "evm_transaction" },
+          actionValidationResult: {
+            validatorId: "polymarket_funding_router_v1",
+          },
+          actionExpiresAt: null,
+        },
+      ],
+    },
+  };
+}
+
+function plannedClientPolymarketHandoffPreparationSource(
+  requiredRaw: string,
+): PlannedSourceOption {
+  const prepared = plannedVenuePreparationSource(requiredRaw, "privy_sponsor");
+  return {
+    ...prepared,
+    commitPlan: {
+      ...prepared.commitPlan,
+      operation: {
+        ...prepared.commitPlan.operation,
+        venueId: "polymarket",
+        supportMetadata: {
+          preparationKind: "polymarket_funding_router",
+          adapterId: "polymarket_funding_router_v1",
+        },
+      },
+      steps: [
+        {
+          ordinal: 0,
+          segmentOrdinal: null,
+          stepKind: "external_handoff",
+          state: "action_required",
+          actionFingerprint: "fingerprint_pm_deposit_handoff_12345678",
+          executorId: "polymarket_deposit_wallet_relayer_v1",
+          payerRequirement: "provider",
+          dependsOnOrdinal: null,
+          normalizedAction: {
+            kind: "external_handoff",
+            handoffKind: "polymarket_deposit_wallet_transfer",
+          },
+          actionValidationResult: {
+            executionEnvelope: "polymarket_deposit_wallet_to_controller_v1",
+          },
+        },
+        {
+          ordinal: 1,
+          segmentOrdinal: null,
+          stepKind: "transaction",
+          state: "action_required",
+          actionFingerprint: "fingerprint_controller_usdce_approval_12345678",
+          executorId: "wallet_profile_evm_v1",
+          payerRequirement: "privy_sponsor",
+          dependsOnOrdinal: 0,
+          normalizedAction: { kind: "evm_transaction" },
+          actionValidationResult: {
+            kind: "controller_usdce_router_approval",
+          },
+        },
+        {
+          ordinal: 2,
+          segmentOrdinal: null,
+          stepKind: "venue_preparation",
+          state: "action_required",
+          actionFingerprint: "fingerprint_controller_router_fund_12345678",
+          executorId: "wallet_profile_evm_v1",
+          payerRequirement: "privy_sponsor",
+          dependsOnOrdinal: 1,
+          normalizedAction: { kind: "evm_transaction" },
+          actionValidationResult: {
+            validatorId: "polymarket_funding_router_v1",
+          },
+        },
+      ],
+    },
   };
 }
 
@@ -2113,6 +2237,219 @@ await test("automatic venue preparation is executable while user-paid preparatio
   assert.equal(userPaid.sourceOptions[0]?.selectable, true);
 });
 
+await test("controller Router preparation accepts every canonical approval prefix", async () => {
+  for (const approvalKinds of [
+    ["controller_pusd_router_approval"],
+    ["controller_usdce_router_approval"],
+    ["controller_usdce_router_approval", "controller_pusd_router_approval"],
+  ] as const) {
+    const projection = await new FundingPlanner({
+      listDestinations: async () => [candidate()],
+      resolveMarketContext: async () => null,
+      listSources: async ({ requiredAmount }) => [
+        plannedControllerRouterPreparationSource(
+          requiredAmount.raw,
+          approvalKinds,
+        ),
+      ],
+      store: new MemoryPlanningStore(),
+      now: () => NOW,
+    }).discover({
+      accountId: USER_ID,
+      request: intent("add_funds", "1000000"),
+      policy: {
+        ...mutablePolicy(),
+        creationMode: "on",
+      },
+      policyRevision: "policy_revision_12345678",
+      ownershipRevision: "ownership_revision_12345678",
+    });
+    assert.equal(projection.convertibleRaw, "1000000");
+    assert.equal(projection.sourceOptions[0]?.selectable, true);
+  }
+});
+
+await test("client Polymarket preparation accepts only the exact handoff to Router chain", async () => {
+  const exactDestination = candidate();
+  const discoveryRequest = intent("add_funds", "1000000");
+  const placement = decidePlacement({
+    intent: discoveryRequest,
+    target: exactDestination.target,
+    targetVenueId: "polymarket",
+    targetRequirement: { asset: POLYGON_PUSD, raw: "1000000" },
+    availableNow: exactDestination.availableNow,
+    selectionReason: "explicit",
+    policy: DEFAULT_FUNDING_RUNTIME_POLICY,
+  });
+  const sourceFixture =
+    plannedClientPolymarketHandoffPreparationSource("1000000");
+  const source: PlannedSourceOption = {
+    ...sourceFixture,
+    commitPlan: {
+      ...sourceFixture.commitPlan,
+      operation: {
+        ...sourceFixture.commitPlan.operation,
+        destinationTargetSnapshot: exactDestination.target as never,
+        venueBindingSnapshot: exactDestination.venueBinding as never,
+        placementSnapshot: placement as never,
+      },
+    },
+  };
+  const discover = (
+    candidateSource: PlannedSourceOption,
+    store: FundingPlanningStore = new MemoryPlanningStore(),
+  ) =>
+    new FundingPlanner({
+      listDestinations: async () => [exactDestination],
+      resolveMarketContext: async () => null,
+      listSources: async () => [candidateSource],
+      store,
+      now: () => NOW,
+    }).discover({
+      accountId: USER_ID,
+      request: discoveryRequest,
+      policy: { ...mutablePolicy(), creationMode: "on" },
+      policyRevision: "policy_revision_12345678",
+      ownershipRevision: "ownership_revision_12345678",
+    });
+
+  const projection = await discover(source);
+  assert.equal(projection.sourceOptions[0]?.selectable, true);
+
+  const sourceReservation = source.commitPlan.reservations[0];
+  assert.ok(sourceReservation);
+  const sourceWithFutureCreditFence: PlannedSourceOption = {
+    ...source,
+    commitPlan: {
+      ...source.commitPlan,
+      reservations: [
+        ...source.commitPlan.reservations,
+        {
+          ...sourceReservation,
+          componentId: "component_future_controller_credit_12345678",
+          locationId: "location_future_controller_credit_12345678",
+          economicRole: "future_credit_fence",
+        },
+      ],
+    },
+  };
+  const futureFencedStore = new MemoryPlanningStore();
+  const futureFencedProjection = await discover(
+    sourceWithFutureCreditFence,
+    futureFencedStore,
+  );
+  assert.equal(
+    futureFencedProjection.sourceOptions[0]?.selectable,
+    true,
+    "a durable future-credit fence must not become a second economic input",
+  );
+  const capturedPlans: FundingCommitPlan[] = [];
+  const futureFencedPolicy = mutablePolicy();
+  futureFencedPolicy.creationMode = "on";
+  futureFencedPolicy.gates.quoteCreation = true;
+  const futureFencedQuote = await new FundingQuoteService({
+    db: {} as never,
+    planningStore: futureFencedStore,
+    now: () => NOW,
+    createQuote: async (_db, input) => {
+      capturedPlans.push(input.planSnapshot);
+      return {
+        id: "quote_future_fence_12345678",
+        userId: input.userId,
+        discoveryProjectionId: input.discoveryProjectionId,
+        selectedSourceOptionSnapshot: input.selectedSourceOptionSnapshot,
+        marketContextSnapshot: input.marketContextSnapshot,
+        destinationOptionSnapshot: input.destinationOptionSnapshot,
+        venueBindingSnapshot: input.venueBindingSnapshot,
+        planSnapshot: input.planSnapshot,
+        policyVersion: input.policyVersion,
+        policyRevision: input.policyRevision,
+        canonicalRequestHash: "b".repeat(64),
+        planHash: canonicalJsonHash(input.planSnapshot),
+        consentTokenHash: "c".repeat(64),
+        commitScope: input.commitScope ?? null,
+        expiresAt: input.expiresAt,
+        consumedAt: null,
+        invalidatedAt: null,
+      };
+    },
+  }).quote({
+    userId: USER_ID,
+    request: {
+      liquidityProjectionId: futureFencedProjection.liquidityProjectionId,
+      selectedSourceOptionId:
+        sourceWithFutureCreditFence.option.sourceOptionId,
+      confirmedSourceAmount: null,
+      requestedDestinationAmount: {
+        asset: POLYGON_PUSD,
+        raw: "1000000",
+      },
+    },
+    policy: futureFencedPolicy,
+    policyRevision: "policy_revision_12345678",
+    ownershipRevision: "ownership_revision_12345678",
+  });
+  assert.deepEqual(futureFencedQuote.sourceAmounts, [
+    {
+      safeLabel: sourceWithFutureCreditFence.option.safeLabel,
+      amount: { asset: POLYGON_PUSD, raw: "1000000" },
+    },
+  ]);
+  assert.equal(
+    capturedPlans[0]?.reservations.length,
+    2,
+    "quote persistence must retain both the economic reservation and future-credit fence",
+  );
+
+  const brokenDependency: PlannedSourceOption = {
+    ...source,
+    commitPlan: {
+      ...source.commitPlan,
+      steps: source.commitPlan.steps.map((step) =>
+        step.ordinal === 2 ? { ...step, dependsOnOrdinal: 0 } : step,
+      ),
+    },
+  };
+  await assert.rejects(
+    () => discover(brokenDependency),
+    /venue preparation source, action, and exact inputs differ/,
+  );
+
+  const unrelatedVenue: PlannedSourceOption = {
+    ...source,
+    commitPlan: {
+      ...source.commitPlan,
+      operation: {
+        ...source.commitPlan.operation,
+        venueId: "limitless",
+      },
+    },
+  };
+  await assert.rejects(
+    () => discover(unrelatedVenue),
+    /venue preparation source, action, and exact inputs differ/,
+  );
+
+  const wrongFundValidator: PlannedSourceOption = {
+    ...source,
+    commitPlan: {
+      ...source.commitPlan,
+      steps: source.commitPlan.steps.map((step) =>
+        step.stepKind === "venue_preparation"
+          ? {
+              ...step,
+              actionValidationResult: { validatorId: "other_adapter_v1" },
+            }
+          : step,
+      ),
+    },
+  };
+  await assert.rejects(
+    () => discover(wrongFundValidator),
+    /venue preparation source, action, and exact inputs differ/,
+  );
+});
+
 await test("retryable source inventory failure is not reported as insufficient liquidity", async () => {
   const policy = mutablePolicy();
   policy.creationMode = "on";
@@ -3139,7 +3476,7 @@ await test("withdrawal stays independent of funding pause through discovery, quo
   assert.equal(currentRecipientChecks, 2);
 });
 
-await test("quote preserves a venue-preparation runtime binding and rejects changed raw amounts", async () => {
+await test("quote reports venue-preparation inputs without counting a future-credit fence", async () => {
   const store = new MemoryPlanningStore();
   const exactDestination = candidate();
   const request = intent("add_funds", "1000000");
@@ -3153,8 +3490,22 @@ await test("quote preserves a venue-preparation runtime binding and rejects chan
     policy: DEFAULT_FUNDING_RUNTIME_POLICY,
   });
   const prepared = plannedVenuePreparationSource("1000000", "privy_sponsor");
-  const option = prepared.option;
+  assert.equal(prepared.option.source.kind, "venue_preparation");
+  if (prepared.option.source.kind !== "venue_preparation") {
+    throw new Error("venue-preparation fixture changed kind");
+  }
+  const option = {
+    ...prepared.option,
+    source: { ...prepared.option.source, inputCount: 3 },
+  };
   const basePlan = prepared.commitPlan;
+  const baseReservation = basePlan.reservations[0];
+  assert.ok(baseReservation);
+  const polygonUsdce = {
+    networkId: "evm:137",
+    assetId: "0x00000000000000000000000000000000000000ce",
+    decimals: 6,
+  } as const;
   const exactPlan: FundingCommitPlan = {
     ...basePlan,
     operation: {
@@ -3166,6 +3517,32 @@ await test("quote preserves a venue-preparation runtime binding and rejects chan
       placementSnapshot: placement as never,
       requestedSourceAmount: null,
     },
+    reservations: [
+      {
+        ...baseReservation,
+        rawAmount: "400000",
+      },
+      {
+        ...baseReservation,
+        componentId: "component_deposit_usdce_12345678",
+        locationId: "location_deposit_usdce_12345678",
+        networkId: polygonUsdce.networkId,
+        assetId: polygonUsdce.assetId,
+        assetDecimals: polygonUsdce.decimals,
+        rawAmount: "400000",
+      },
+      {
+        ...baseReservation,
+        componentId: "component_controller_usdce_12345678",
+        locationId: "location_controller_usdce_12345678",
+        networkId: polygonUsdce.networkId,
+        assetId: polygonUsdce.assetId,
+        assetDecimals: polygonUsdce.decimals,
+        rawAmount: "600000",
+        economicRole: "source_input",
+        sourceInputRawAmount: "200000",
+      },
+    ],
   };
   const projection = {
     ...liquidityProjectionFixture(),
@@ -3251,7 +3628,15 @@ await test("quote preserves a venue-preparation runtime binding and rejects chan
   assert.deepEqual(summary.sourceAmounts, [
     {
       safeLabel: option.safeLabel,
-      amount: { asset: POLYGON_PUSD, raw: "1000000" },
+      amount: { asset: POLYGON_PUSD, raw: "400000" },
+    },
+    {
+      safeLabel: option.safeLabel,
+      amount: { asset: polygonUsdce, raw: "400000" },
+    },
+    {
+      safeLabel: option.safeLabel,
+      amount: { asset: polygonUsdce, raw: "200000" },
     },
   ]);
   assert.equal(

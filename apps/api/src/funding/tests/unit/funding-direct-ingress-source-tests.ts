@@ -5,7 +5,6 @@ import assert from "node:assert/strict";
 import type { AccountValueReadModel } from "../../../account-value/runtime-service.js";
 import { RELAY_PINNED_ASSETS } from "../../../funding-providers/relay/mappings.js";
 import { sourceOptionSchema } from "../../../schemas/funding.js";
-import { POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID } from "../../execution/delegated-funding-profile-ids.js";
 import { PRIVY_USER_AUTHORIZED_EVM_SPONSORSHIP_POLICY_ID } from "../../execution/sponsorship-policy.js";
 import { DirectIngressFundingSourceAdapter } from "../../planner/direct-ingress-source-adapter.js";
 import type { FundingSourcePlanningInput } from "../../planner/source-adapter.js";
@@ -207,7 +206,6 @@ function input(
             fundingCapRaw: "0",
             routerAddress: ROUTER,
             routerNonceRaw: "7",
-            depositRouterUsdceAllowanceRaw: "5000000",
             routerPusdAllowanceRaw: "0",
             routerUsdceAllowanceRaw: "0",
             clobPusdRaw: "1000000",
@@ -310,10 +308,7 @@ const account = {
     ],
   },
 } as unknown as AccountValueReadModel;
-const multiAssetAdapter = new DirectIngressFundingSourceAdapter(account, {
-  canonicalRouterAddress: ROUTER,
-  usdceAsset: USDCE,
-});
+const multiAssetAdapter = new DirectIngressFundingSourceAdapter(account);
 const [multiAsset] = await multiAssetAdapter.list(
   input(false, "add_funds", true),
 );
@@ -325,37 +320,11 @@ assert.deepEqual(
       handling: accepted.handling,
     }),
   ),
-  [
-    { assetId: ASSET.assetId, handling: "direct" },
-    { assetId: USDCE.assetId, handling: "automatic_conversion" },
-  ],
+  [{ assetId: ASSET.assetId, handling: "direct" }],
 );
-assert.equal(multiAsset.commitPlan.steps[0]?.state, "planned");
-assert.equal(multiAsset.commitPlan.steps[0]?.stepKind, "venue_preparation");
-assert.equal(
-  multiAsset.commitPlan.steps[0]?.executorId,
-  "wallet_profile_evm_v1",
-  "the existing web USDC.e flow must keep its user-authorized executor",
-);
-assert.equal(multiAsset.commitPlan.reservations.length, 2);
-assert.equal(
-  multiAsset.commitPlan.operation.supportMetadata?.preparationKind,
-  "polymarket_funding_router",
-);
+assert.equal(multiAsset.commitPlan.steps.length, 0);
+assert.equal(multiAsset.commitPlan.reservations.length, 1);
 sourceOptionSchema.parse(multiAsset.option);
-
-const [delegatedTelegramIngress] = await multiAssetAdapter.list({
-  ...input(false, "add_funds", true),
-  request: {
-    ...input(false, "add_funds", true).request,
-    serverExecutionProfileId: POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
-  },
-});
-assert.equal(
-  delegatedTelegramIngress?.commitPlan.steps[0]?.executorId,
-  POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
-  "only the trusted internal Telegram receipt path selects delegated wrap",
-);
 
 const v2Input = input(false, "add_funds", true);
 const [nativePolygonOnly] = await multiAssetAdapter.list({
@@ -506,10 +475,6 @@ const inputWithUnprovenBaseRoute = {
 } as FundingSourcePlanningInput;
 const [failClosedIngress] = await new DirectIngressFundingSourceAdapter(
   unprovenCrossNetworkAccount,
-  {
-    canonicalRouterAddress: ROUTER,
-    usdceAsset: USDCE,
-  },
 ).list(inputWithUnprovenBaseRoute);
 assert.ok(failClosedIngress);
 assert.deepEqual(
@@ -541,10 +506,6 @@ const provenBaseRouteInput = {
 } as FundingSourcePlanningInput;
 const [provenBaseIngress] = await new DirectIngressFundingSourceAdapter(
   unprovenCrossNetworkAccount,
-  {
-    canonicalRouterAddress: ROUTER,
-    usdceAsset: USDCE,
-  },
 ).list(provenBaseRouteInput);
 assert.ok(provenBaseIngress);
 assert.deepEqual(
@@ -558,10 +519,7 @@ assert.deepEqual(
   [
     {
       networkId: "evm:137",
-      assets: [
-        { assetId: ASSET.assetId, handling: "direct" },
-        { assetId: USDCE.assetId, handling: "automatic_conversion" },
-      ],
+      assets: [{ assetId: ASSET.assetId, handling: "direct" }],
     },
     {
       networkId: "evm:8453",
@@ -579,15 +537,15 @@ assert.deepEqual(
     provenBaseIngress.commitPlan.operation.supportMetadata
       ?.ingressVariants as readonly Readonly<{ networkId: string }>[]
   ).map((variant) => variant.networkId),
-  ["evm:137", "evm:137"],
-  "the exact legacy funding operation must not absorb amount-free child-operation variants",
+  ["evm:137"],
+  "the direct operation contains only the exact destination receipt",
 );
 assert.deepEqual(
   (
     provenBaseIngress.commitPlan.operation.supportMetadata
       ?.receiveSessionVariants as readonly Readonly<{ networkId: string }>[]
   ).map((variant) => variant.networkId),
-  ["evm:137", "evm:137", "evm:8453"],
+  ["evm:137", "evm:8453"],
 );
 
 const solanaAddress = "9xQeWvG816bUx9EPfB1G6QxgXLKWMuD5YpLQwJwN6JY";
@@ -728,10 +686,6 @@ const provenSolanaRouteInput = {
 } as FundingSourcePlanningInput;
 const [stableOnlySolanaIngress] = await new DirectIngressFundingSourceAdapter(
   provenSolanaAccount,
-  {
-    canonicalRouterAddress: ROUTER,
-    usdceAsset: USDCE,
-  },
 ).list({
   ...provenSolanaRouteInput,
   policy: {
@@ -750,10 +704,6 @@ assert.deepEqual(
 );
 const [provenSolanaIngress] = await new DirectIngressFundingSourceAdapter(
   provenSolanaAccount,
-  {
-    canonicalRouterAddress: ROUTER,
-    usdceAsset: USDCE,
-  },
 ).list(provenSolanaRouteInput);
 assert.ok(provenSolanaIngress);
 assert.deepEqual(

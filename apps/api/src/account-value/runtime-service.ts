@@ -34,6 +34,7 @@ import {
   canonicalAssetKey,
   canonicalLocationKey,
   deduplicateObservedAssets,
+  stableWalletAssetLocationIdentity,
   stableOpaqueId,
   stableWalletOpaqueId,
 } from "./canonical.js";
@@ -215,12 +216,23 @@ function buildObservation(inputs: {
   const address = normalizeAddress(inputs.resolution.walletAddress);
   const locationKind =
     inputs.resolution.source === "derived_funder" ? "venue_account" : "wallet";
+  const walletAssetIdentity =
+    locationKind === "wallet"
+      ? stableWalletAssetLocationIdentity({
+          accountId: inputs.accountId,
+          address,
+          asset: inputs.entry.asset,
+          balanceClass: inputs.entry.venueId ?? "wallet",
+        })
+      : null;
   const location = {
     kind: locationKind,
-    locationId: stableOpaqueId(
-      "location",
-      `${inputs.accountId}:${locationKind}:${address}:${canonicalAssetKey(inputs.entry.asset)}`,
-    ),
+    locationId:
+      walletAssetIdentity?.locationId ??
+      stableOpaqueId(
+        "location",
+        `${inputs.accountId}:${locationKind}:${address}:${canonicalAssetKey(inputs.entry.asset)}`,
+      ),
     accountId: inputs.accountId,
     asset: inputs.entry.asset,
     details: {
@@ -242,7 +254,9 @@ function buildObservation(inputs: {
     },
   } as const;
   return {
-    componentId: stableOpaqueId("asset", canonicalLocationKey(location)),
+    componentId:
+      walletAssetIdentity?.componentId ??
+      stableOpaqueId("asset", canonicalLocationKey(location)),
     location,
     amount: {
       asset: inputs.entry.asset,

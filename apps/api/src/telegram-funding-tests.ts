@@ -1622,8 +1622,8 @@ assert.equal(
     },
     "pusd_or_usdce_automatic",
   ),
-  "pusd_or_usdce_automatic",
-  "a soft pause must preserve the exact frozen automatic presentation",
+  null,
+  "a retired Deposit Wallet conversion consent must not remain executable",
 );
 assert.equal(
   telegramFundingConsentPresentationMode(
@@ -2170,7 +2170,8 @@ const combinedTargetMessage = buildTelegramFundingTargetMessageForSession({
   session,
   automaticConversionEnabled: true,
 });
-assert.ok(combinedTargetMessage.text.includes("pUSD / USDC\\.e"));
+assert.match(combinedTargetMessage.text, /pUSD/u);
+assert.doesNotMatch(combinedTargetMessage.text, /USDC\\\.e/u);
 assert.doesNotMatch(
   combinedTargetMessage.text,
   /Choose the network and asset/u,
@@ -2186,9 +2187,9 @@ const combinedChoice = resolveTelegramFundingTargetChoice({
 });
 assert.ok(combinedChoice);
 assert.equal(combinedChoice.address, address);
-assert.equal(combinedChoice.mode, "pusd_or_usdce_automatic");
-assert.equal(combinedChoice.automaticConversion, true);
-assert.deepEqual(combinedChoice.variantIds, ["variant-pusd", "variant-usdce"]);
+assert.equal(combinedChoice.mode, "pusd_direct");
+assert.equal(combinedChoice.automaticConversion, false);
+assert.deepEqual(combinedChoice.variantIds, ["variant-pusd"]);
 assert.equal(
   resolveTelegramDirectPusdChoice({
     session: {
@@ -2732,13 +2733,8 @@ assert.notEqual(
   telegramFundingProgressFingerprint(unexpectedUsdce),
 );
 const automaticConsent: TelegramFundingConsent = {
-  ...consent,
+  ...relayBaseConsent,
   revision: 2,
-  variantIds: ["variant-pusd", "variant-usdce"],
-  automationEnabled: true,
-  policySnapshot: {
-    ...automaticPolicySnapshot,
-  },
 };
 const waitingAfterCapabilityLoss = projectTelegramFundingProgress({
   automaticConversionAvailable: false,
@@ -2753,7 +2749,7 @@ assert.equal(waitingAfterCapabilityLoss.automaticConversionEnabled, true);
 assert.equal(waitingAfterCapabilityLoss.automaticConversionPaused, true);
 assert.match(
   buildTelegramFundingProgressMessage(waitingAfterCapabilityLoss).text,
-  /Asset.*pUSD.*USDC/u,
+  /Asset.*USDC/u,
 );
 assert.match(
   buildTelegramFundingProgressMessage(waitingAfterCapabilityLoss).text,
@@ -2801,10 +2797,10 @@ const detectedAfterReady = projectTelegramFundingProgress({
     }),
     receipt({
       receiptId: "receipt-detected-usdce",
-      asset: usdce,
+      asset: baseUsdc,
       handling: "automatic_conversion",
       status: "observed",
-      variantId: "variant-usdce",
+      variantId: relayBaseVariant.variantId,
     }),
   ],
   session: { ...session, status: "processing" },
@@ -2814,17 +2810,17 @@ assert.equal(
   "funds_received",
   "new USDC.e evidence must not be hidden by an older ready pUSD receipt",
 );
-assert.equal(detectedAfterReady?.assetSymbol, "USDC.e");
+assert.equal(detectedAfterReady?.assetSymbol, "USDC");
 const detectedWhilePaused = projectTelegramFundingProgress({
   automaticConversionMode: "soft_paused",
   consent: automaticConsent,
   context,
   receipts: [
     receipt({
-      asset: usdce,
+      asset: baseUsdc,
       handling: "automatic_conversion",
       status: "observed",
-      variantId: "variant-usdce",
+      variantId: relayBaseVariant.variantId,
     }),
   ],
   session: { ...session, status: "processing" },
@@ -2842,10 +2838,10 @@ const detectedAfterHardInvalidation = projectTelegramFundingProgress({
   context,
   receipts: [
     receipt({
-      asset: usdce,
+      asset: baseUsdc,
       handling: "automatic_conversion",
       status: "observed",
-      variantId: "variant-usdce",
+      variantId: relayBaseVariant.variantId,
     }),
   ],
   session: { ...session, status: "processing" },
@@ -2857,10 +2853,10 @@ const convertingUsdce = projectTelegramFundingProgress({
   context,
   receipts: [
     receipt({
-      asset: usdce,
+      asset: baseUsdc,
       handling: "automatic_conversion",
       status: "routing",
-      variantId: "variant-usdce",
+      variantId: relayBaseVariant.variantId,
     }),
   ],
   session: { ...session, status: "processing" },
@@ -2876,11 +2872,11 @@ const finalizingUsdce = projectTelegramFundingProgress({
   context,
   receipts: [
     receipt({
-      asset: usdce,
+      asset: baseUsdc,
       handling: "automatic_conversion",
       rawAmount: "10000",
       status: "routing",
-      variantId: "variant-usdce",
+      variantId: relayBaseVariant.variantId,
     }),
     receipt({
       asset: pUsd,
@@ -2898,7 +2894,7 @@ const finalizingUsdceMessage =
   buildTelegramFundingProgressMessage(finalizingUsdce).text;
 assert.match(finalizingUsdceMessage, /Finalizing pUSD funding/u);
 assert.match(finalizingUsdceMessage, /pUSD was detected/u);
-assert.match(finalizingUsdceMessage, /Converting.*0\\\.01 USDC\\\.e/u);
+assert.match(finalizingUsdceMessage, /Converting.*0\\\.01 USDC/u);
 assert.doesNotMatch(finalizingUsdceMessage, /original transfer/u);
 const routingWhilePaused = projectTelegramFundingProgress({
   automaticConversionMode: "soft_paused",
@@ -2906,10 +2902,10 @@ const routingWhilePaused = projectTelegramFundingProgress({
   context,
   receipts: [
     receipt({
-      asset: usdce,
+      asset: baseUsdc,
       handling: "automatic_conversion",
       status: "routing",
-      variantId: "variant-usdce",
+      variantId: relayBaseVariant.variantId,
     }),
   ],
   session: { ...session, status: "processing" },
@@ -2926,10 +2922,10 @@ const routingAfterHardInvalidation = projectTelegramFundingProgress({
   context,
   receipts: [
     receipt({
-      asset: usdce,
+      asset: baseUsdc,
       handling: "automatic_conversion",
       status: "routing",
-      variantId: "variant-usdce",
+      variantId: relayBaseVariant.variantId,
     }),
   ],
   session: { ...session, status: "processing" },
@@ -2938,10 +2934,10 @@ assert.equal(routingAfterHardInvalidation?.state, "needs_attention");
 assert.equal(routingAfterHardInvalidation?.terminal, true);
 const routingReceiptAfterBoundary = receipt({
   receiptId: "receipt-routing-after-boundary",
-  asset: usdce,
+  asset: baseUsdc,
   handling: "automatic_conversion",
   status: "routing",
-  variantId: "variant-usdce",
+  variantId: relayBaseVariant.variantId,
 });
 for (const automaticConversionMode of [
   "soft_paused",
@@ -2991,17 +2987,17 @@ const sequentialUsdce = projectTelegramFundingProgress({
   receipts: [
     receipt({
       receiptId: "receipt-ready-usdce",
-      asset: usdce,
+      asset: baseUsdc,
       handling: "automatic_conversion",
       status: "ready",
-      variantId: "variant-usdce",
+      variantId: relayBaseVariant.variantId,
     }),
     receipt({
       receiptId: "receipt-routing-usdce",
-      asset: usdce,
+      asset: baseUsdc,
       handling: "automatic_conversion",
       status: "routing",
-      variantId: "variant-usdce",
+      variantId: relayBaseVariant.variantId,
     }),
   ],
   session: { ...session, status: "processing" },
@@ -3009,7 +3005,7 @@ const sequentialUsdce = projectTelegramFundingProgress({
 assert.equal(
   sequentialUsdce?.state,
   "converting",
-  "a later receipt keeps progress nonterminal until its own wrap completes",
+  "a later receipt keeps progress nonterminal until its own route completes",
 );
 const sourceReceiptInputs = [
   {
@@ -3034,24 +3030,24 @@ const partialMultiReceipt = projectTelegramFundingProgress({
   receipts: [
     receipt({
       ...sourceReceiptInputs[0],
-      asset: usdce,
+      asset: baseUsdc,
       handling: "automatic_conversion",
       status: "ready",
-      variantId: "variant-usdce",
+      variantId: relayBaseVariant.variantId,
     }),
     receipt({
       ...sourceReceiptInputs[1],
-      asset: usdce,
+      asset: baseUsdc,
       handling: "automatic_conversion",
       status: "routing",
-      variantId: "variant-usdce",
+      variantId: relayBaseVariant.variantId,
     }),
     receipt({
       ...sourceReceiptInputs[2],
-      asset: usdce,
+      asset: baseUsdc,
       handling: "automatic_conversion",
       status: "observed",
-      variantId: "variant-usdce",
+      variantId: relayBaseVariant.variantId,
     }),
     receipt({
       receiptId: "receipt-destination-001",
@@ -3066,7 +3062,7 @@ const partialMultiReceipt = projectTelegramFundingProgress({
 });
 assert.equal(partialMultiReceipt?.state, "converting");
 assert.deepEqual(partialMultiReceipt?.receiptBreakdown, {
-  sourceAssetSymbol: "USDC.e",
+  sourceAssetSymbol: "USDC",
   sourceDecimals: 6,
   totalSourceRaw: "100000",
   queuedSourceRaw: "50000",
@@ -3090,11 +3086,11 @@ const partialMultiReceiptMessage =
   buildTelegramFundingProgressMessage(partialMultiReceipt);
 assert.match(
   partialMultiReceiptMessage.text,
-  /Total received.*0\\\.1 USDC\\\.e/u,
+  /Total received.*0\\\.1 USDC/u,
 );
 assert.match(partialMultiReceiptMessage.text, /Ready.*0\\\.01 pUSD/u);
-assert.match(partialMultiReceiptMessage.text, /Converting.*0\\\.04 USDC\\\.e/u);
-assert.match(partialMultiReceiptMessage.text, /Queued.*0\\\.05 USDC\\\.e/u);
+assert.match(partialMultiReceiptMessage.text, /Converting.*0\\\.04 USDC/u);
+assert.match(partialMultiReceiptMessage.text, /Queued.*0\\\.05 USDC/u);
 assert.match(partialMultiReceiptMessage.text, /Transfers.*3/u);
 
 const completedMultiReceipt = projectTelegramFundingProgress({
@@ -3104,10 +3100,10 @@ const completedMultiReceipt = projectTelegramFundingProgress({
     ...sourceReceiptInputs.map((source) =>
       receipt({
         ...source,
-        asset: usdce,
+        asset: baseUsdc,
         handling: "automatic_conversion",
         status: "ready",
-        variantId: "variant-usdce",
+        variantId: relayBaseVariant.variantId,
       }),
     ),
     ...sourceReceiptInputs.map((destination, index) =>
@@ -3128,7 +3124,7 @@ assert.equal(completedMultiReceipt.state, "ready");
 assert.equal(
   completedMultiReceipt.rawAmount,
   "100000",
-  "ready totals must never add source USDC.e and destination pUSD together",
+  "ready totals must never add source USDC and destination pUSD together",
 );
 assert.equal(completedMultiReceipt.sourceRawAmount, "100000");
 assert.equal(
@@ -3171,10 +3167,10 @@ const mixedRecovery = projectTelegramFundingProgress({
     }),
     receipt({
       receiptId: "receipt-recovery-usdce",
-      asset: usdce,
+      asset: baseUsdc,
       handling: "automatic_conversion",
       status: "recovery_required",
-      variantId: "variant-usdce",
+      variantId: relayBaseVariant.variantId,
     }),
   ],
   session: { ...session, status: "recovery_required" },
@@ -4492,7 +4488,7 @@ for (const closedDestination of [
         policy_snapshot: automaticPolicySnapshot,
       },
     ],
-    projection: waitingWithLiveCapability,
+    projection: relayBaseWaiting,
   });
   const telegram = successfulTelegramCounter();
   const result = await deliverTelegramFundingActions({
@@ -4904,7 +4900,7 @@ for (const closedDestination of [
     pool: fake.pool,
     renderCoordinator,
     resolveMessage: async () =>
-      buildTelegramFundingProgressMessage(waitingWithLiveCapability),
+      buildTelegramFundingProgressMessage(relayBaseWaiting),
     telegram: telegram.client,
   });
   assert.equal(result.failed, 1);
@@ -4920,7 +4916,7 @@ for (const closedDestination of [
 {
   const fake = deliveryPool({
     destinations: [{ ...destination, latest_terminal_projection: unavailable }],
-    projection: waitingWithLiveCapability,
+    projection: relayBaseWaiting,
   });
   const telegram = successfulTelegramCounter();
   const result = await deliverTelegramFundingActions({

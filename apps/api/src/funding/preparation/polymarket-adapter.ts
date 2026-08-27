@@ -18,7 +18,6 @@ const FUND = [
   ...COMMON,
   "collateral_observed",
   "funding_router_ready",
-  "funding_router_deposit_usdce_allowance",
   "funding_router_signer_pusd_allowance",
   "funding_router_signer_usdce_allowance",
   "clob_collateral_visible",

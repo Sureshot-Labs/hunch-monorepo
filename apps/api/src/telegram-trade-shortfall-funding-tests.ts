@@ -5,7 +5,6 @@ import assert from "node:assert/strict";
 import type { AssetRef, SourceOption } from "./funding/domain/types.js";
 import {
   POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
-  POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
   TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
   TELEGRAM_RELAY_POLYGON_PUSD_PROFILE_ID,
   TELEGRAM_RELAY_POLYGON_USDC_PROFILE_ID,
@@ -372,8 +371,8 @@ assert.equal(
     "polymarket",
     polygonPusd,
   ),
-  POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
-  "Polygon USDC.e preparation must use Slice C instead of Relay",
+  null,
+  "a Deposit Wallet USDC.e venue-preparation source is never executable",
 );
 
 assert.equal(
@@ -420,7 +419,6 @@ assert.equal(
 assert.deepEqual(
   telegramTradeShortfallExecutionProfiles("polymarket", polygonPusd),
   [
-    POLYMARKET_DEPOSIT_USDCE_WRAP_PROFILE_ID,
     POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
     TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
     TELEGRAM_RELAY_POLYGON_USDC_PROFILE_ID,

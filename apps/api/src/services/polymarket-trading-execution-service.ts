@@ -4426,8 +4426,6 @@ export async function fetchPolymarketAccountRoute(input: {
                 snapshot.fundingRouterPusdAllowance?.toString() ?? null,
               usdceAllowanceRaw:
                 snapshot.fundingRouterUsdceAllowance?.toString() ?? null,
-              depositUsdceAllowanceRaw:
-                snapshot.fundingRouterDepositUsdceAllowance?.toString() ?? null,
             }
           : null,
         conditionalTokens: {
@@ -6230,7 +6228,6 @@ export type PolymarketMaxSpendOnchainSnapshot = Readonly<{
   allowanceNegRisk: bigint;
   allowanceNegRiskAdapter: bigint | null;
   fundingRouterNonce: bigint | null;
-  fundingRouterDepositUsdceAllowance: bigint | null;
   fundingRouterPusdAllowance: bigint | null;
   fundingRouterUsdceAllowance: bigint | null;
 }>;
@@ -6265,7 +6262,6 @@ export async function resolvePolymarketMaxSpendFunds(inputs: {
   buyApproval: { missing: string[]; ok: boolean };
   fundingCapRaw: bigint;
   fundingRouterNonce: bigint | null;
-  fundingRouterDepositUsdceAllowance: bigint | null;
   fundingRouterPusdAllowance: bigint | null;
   fundingRouterUsdceAllowance: bigint | null;
 }> {
@@ -6347,16 +6343,8 @@ export async function resolvePolymarketMaxSpendFunds(inputs: {
       : funds.signerUsdceTopUpRaw < snapshot.fundingRouterUsdceAllowance
         ? funds.signerUsdceTopUpRaw
         : snapshot.fundingRouterUsdceAllowance;
-  const routerDepositUsdceAvailableRaw =
-    snapshot.fundingRouterDepositUsdceAllowance == null
-      ? 0n
-      : snapshot.usdceBalance < snapshot.fundingRouterDepositUsdceAllowance
-        ? snapshot.usdceBalance
-        : snapshot.fundingRouterDepositUsdceAllowance;
   const routerTopUpAvailableRaw =
-    routerDepositUsdceAvailableRaw +
-    routerPusdAvailableRaw +
-    routerUsdceAvailableRaw;
+    routerPusdAvailableRaw + routerUsdceAvailableRaw;
   const fundingCapRaw =
     inputs.fundingCapRaw == null
       ? routerTopUpAvailableRaw
@@ -6369,6 +6357,10 @@ export async function resolvePolymarketMaxSpendFunds(inputs: {
       : fundingCapRaw;
   return {
     ...funds,
+    // Deposit Wallet USDC.e is observable owned cash, but it is not directly
+    // executable by the Router. Client planning may first move an exact amount
+    // back to the controller through the Polymarket relayer; unattended server
+    // funding must continue to exclude it from executableFundsRaw below.
     funderUsdceRaw: snapshot.usdceBalance,
     executableFundsRaw:
       funds.funderPusdAvailableRaw +
@@ -6381,8 +6373,6 @@ export async function resolvePolymarketMaxSpendFunds(inputs: {
       negRiskAdapterConfigured: Boolean(negRiskAdapterAddress),
     }),
     fundingRouterNonce: snapshot.fundingRouterNonce,
-    fundingRouterDepositUsdceAllowance:
-      snapshot.fundingRouterDepositUsdceAllowance,
     fundingCapRaw,
     fundingRouterPusdAllowance: snapshot.fundingRouterPusdAllowance,
     fundingRouterUsdceAllowance: snapshot.fundingRouterUsdceAllowance,
@@ -6393,7 +6383,6 @@ type PreparedPolymarketFundingRouterFunds = Awaited<
   ReturnType<typeof resolvePolymarketMaxSpendFunds>
 > &
   Readonly<{
-    fundingRouterDepositUsdceAllowance: bigint;
     fundingRouterNonce: bigint;
     fundingRouterPusdAllowance: bigint;
     fundingRouterUsdceAllowance: bigint;
@@ -6414,9 +6403,6 @@ function buildPolymarketFundingPlanFromPreparedFunds(input: {
     routerNonce: input.funds.fundingRouterNonce,
     requiredRaw: input.requiredSpendRaw,
     depositPusdRaw: input.funds.funderPusdRaw,
-    depositUsdceRaw: input.funds.funderUsdceRaw,
-    depositRouterUsdceAllowanceRaw:
-      input.funds.fundingRouterDepositUsdceAllowance,
     depositLockedRaw: input.funds.funderLockedRaw,
     signerPusdRaw: input.funds.signerPusdTopUpRaw,
     signerLockedRaw: 0n,
@@ -6445,7 +6431,6 @@ export function buildPreparedPolymarketFundingPlan(input: {
   if (
     !env.polymarketFundingRouterAddress ||
     input.funds.fundingRouterNonce == null ||
-    input.funds.fundingRouterDepositUsdceAllowance == null ||
     input.funds.fundingRouterPusdAllowance == null ||
     input.funds.fundingRouterUsdceAllowance == null
   ) {
@@ -6488,7 +6473,6 @@ function requiresPolymarketFundingRouterControllerPusdApproval(input: {
     input.funderExecutionKind !== "deposit_wallet" ||
     input.requiredSpendRaw <= input.funds.funderPusdAvailableRaw ||
     input.funds.fundingRouterNonce == null ||
-    input.funds.fundingRouterDepositUsdceAllowance == null ||
     input.funds.fundingRouterPusdAllowance == null ||
     input.funds.fundingRouterUsdceAllowance == null ||
     !env.polymarketFundingRouterAddress

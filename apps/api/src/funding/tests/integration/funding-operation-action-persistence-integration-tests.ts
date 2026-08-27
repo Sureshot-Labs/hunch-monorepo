@@ -19,9 +19,11 @@ import {
 import {
   commitFundingOperationInTransaction,
   createFundingQuoteInTransaction,
+  FUNDING_OPERATION_RECONCILIATION_TTL_MS,
   FundingPersistenceError,
   type FundingCommitPlan,
 } from "../../persistence/funding-operation-repository.js";
+import { applyFundingStepReceiptEvidenceInTransaction } from "../../persistence/funding-step-receipt-repository.js";
 
 const ASSET = {
   networkId: "evm:137",
@@ -462,9 +464,315 @@ try {
   });
   await assert.rejects(
     client.query("set constraints all immediate"),
-    /only exact venue preparation or Polymarket pre-route handoff steps may be unbound/u,
+    /only exact venue preparation.*Polymarket pre-route handoff steps may be unbound/u,
   );
   await client.query("rollback to savepoint invalid_pre_route_shape");
+  await client.query("set constraints all deferred");
+
+  const routerApprovalAction = {
+    ...secondAction,
+    actionId: opaque("action"),
+    senderWalletId: sourceLocation.details.walletId,
+    to: handoffToken,
+  } as const;
+  const routerFundAction = {
+    ...secondAction,
+    actionId: opaque("action"),
+    senderWalletId: sourceLocation.details.walletId,
+    to: "0x4444444444444444444444444444444444444444",
+  } as const;
+  const controllerHandoffQuoteExpiresAt = new Date(Date.now() + 60_000);
+  const durableReservationExpiresAt = new Date(
+    controllerHandoffQuoteExpiresAt.getTime() +
+      FUNDING_OPERATION_RECONCILIATION_TTL_MS,
+  ).toISOString();
+  const depositSourceComponentId = opaque("component");
+  const futureControllerComponentId = opaque("component");
+  const controllerHandoffPlan: FundingCommitPlan = {
+    operation: {
+      ...preRoutePlan.operation,
+      planKind: "venue_preparation",
+      sourceSnapshot: {
+        kind: "venue_preparation",
+        inputCount: 2,
+      },
+      supportMetadata: {
+        test: true,
+        preparationKind: "polymarket_funding_router",
+        adapterId: "polymarket_funding_router_v1",
+        preRouteHandoff: true,
+      },
+    },
+    segments: [],
+    steps: [
+      {
+        ...storedHandoffStep,
+        segmentOrdinal: null,
+      },
+      {
+        ordinal: 1,
+        segmentOrdinal: null,
+        stepKind: "transaction",
+        state: "action_required",
+        actionFingerprint: canonicalJsonHash(routerApprovalAction),
+        executorId: "wallet_profile_evm_v1",
+        payerRequirement: "user",
+        dependsOnOrdinal: 0,
+        normalizedAction: routerApprovalAction,
+        actionValidationResult: {
+          kind: "controller_usdce_router_approval",
+        },
+      },
+      {
+        ordinal: 2,
+        segmentOrdinal: null,
+        stepKind: "venue_preparation",
+        state: "action_required",
+        actionFingerprint: canonicalJsonHash(routerFundAction),
+        executorId: "wallet_profile_evm_v1",
+        payerRequirement: "user",
+        dependsOnOrdinal: 1,
+        normalizedAction: routerFundAction,
+        actionValidationResult: {
+          validatorId: "polymarket_funding_router_v1",
+        },
+      },
+    ],
+    reservations: [
+      {
+        ...storedReservation,
+        segmentOrdinal: null,
+        componentId: depositSourceComponentId,
+        expiresAt: durableReservationExpiresAt,
+      },
+      {
+        ...storedReservation,
+        segmentOrdinal: null,
+        componentId: futureControllerComponentId,
+        locationId: secondSourceLocation.locationId,
+        economicRole: "future_credit_fence",
+        expiresAt: durableReservationExpiresAt,
+      },
+    ],
+  };
+  const controllerHandoffConsentToken = opaque("consent");
+  const controllerHandoffQuote = await createFundingQuoteInTransaction(client, {
+    userId,
+    discoveryProjectionId: opaque("projection"),
+    selectedSourceOptionSnapshot:
+      controllerHandoffPlan.operation.sourceSnapshot ?? {},
+    marketContextSnapshot: null,
+    destinationOptionSnapshot:
+      controllerHandoffPlan.operation.destinationTargetSnapshot,
+    venueBindingSnapshot: null,
+    planSnapshot: controllerHandoffPlan,
+    policyVersion: 1,
+    policyRevision: "policy_revision_controller_handoff",
+    canonicalRequest: {
+      source: controllerHandoffPlan.operation.sourceSnapshot,
+    },
+    consentToken: controllerHandoffConsentToken,
+    expiresAt: controllerHandoffQuoteExpiresAt,
+  });
+  const controllerHandoffCommitted = await commitFundingOperationInTransaction(
+    client,
+    {
+      userId,
+      quoteId: controllerHandoffQuote.id,
+      consentToken: controllerHandoffConsentToken,
+      idempotencyKey: opaque("idempotency"),
+      plan: controllerHandoffPlan,
+      subjectLookupHmac: hash("controller-handoff-user"),
+      subjectLookupKeyVersion: 1,
+    },
+  );
+  await client.query("set constraints all immediate");
+  const controllerHandoffShape = await client.query<{
+    action_expires_at: Date | null;
+    executor_id: string;
+    ordinal: number;
+    step_kind: string;
+  }>(
+    `
+      select ordinal, step_kind, executor_id, action_expires_at
+      from funding_operation_steps
+      where operation_id = $1
+      order by ordinal
+    `,
+    [controllerHandoffCommitted.operation.id],
+  );
+  assert.deepEqual(controllerHandoffShape.rows, [
+    {
+      action_expires_at: controllerHandoffShape.rows[0]?.action_expires_at,
+      executor_id: "polymarket_deposit_wallet_relayer_v1",
+      ordinal: 0,
+      step_kind: "external_handoff",
+    },
+    {
+      action_expires_at: controllerHandoffShape.rows[1]?.action_expires_at,
+      executor_id: "wallet_profile_evm_v1",
+      ordinal: 1,
+      step_kind: "transaction",
+    },
+    {
+      action_expires_at: controllerHandoffShape.rows[2]?.action_expires_at,
+      executor_id: "wallet_profile_evm_v1",
+      ordinal: 2,
+      step_kind: "venue_preparation",
+    },
+  ]);
+  assert.ok(
+    controllerHandoffShape.rows.every(
+      (step) =>
+        step.action_expires_at != null &&
+        step.action_expires_at.getTime() > Date.now() + 14 * 60_000,
+    ),
+    "the committed handoff, approvals, and Router fund must all outlive the 45-second inspection",
+  );
+  const durableReservations = await client.query<{
+    component_id: string;
+    expires_at: Date;
+    operation_expires_at: Date;
+  }>(
+    `
+      select
+        reservation_row.component_id,
+        reservation_row.expires_at,
+        operation_row.expires_at as operation_expires_at
+      from balance_reservations reservation_row
+      join funding_operations operation_row
+        on operation_row.id = reservation_row.operation_id
+      where reservation_row.operation_id = $1
+      order by reservation_row.component_id
+    `,
+    [controllerHandoffCommitted.operation.id],
+  );
+  assert.deepEqual(
+    durableReservations.rows.map((reservation) => reservation.component_id),
+    [depositSourceComponentId, futureControllerComponentId].sort(),
+  );
+  assert.ok(
+    durableReservations.rows.every(
+      (reservation) =>
+        reservation.expires_at.getTime() >=
+        reservation.operation_expires_at.getTime(),
+    ),
+    "both sides of the Deposit Wallet handoff must stay fenced through the full operation lifetime",
+  );
+  await client.query("set constraints all deferred");
+
+  await client.query("savepoint controller_future_credit_conflict");
+  const controllerFundStep = controllerHandoffPlan.steps[2];
+  const controllerFutureReservation = controllerHandoffPlan.reservations[1];
+  assert.ok(controllerFundStep);
+  assert.ok(controllerFutureReservation);
+  const competingControllerPlan: FundingCommitPlan = {
+    ...controllerHandoffPlan,
+    operation: {
+      ...controllerHandoffPlan.operation,
+      sourceSnapshot: {
+        kind: "venue_preparation",
+        inputCount: 1,
+      },
+      supportMetadata: {
+        test: true,
+        preparationKind: "polymarket_funding_router",
+        adapterId: "polymarket_funding_router_v1",
+      },
+    },
+    steps: [
+      {
+        ...controllerFundStep,
+        ordinal: 0,
+        dependsOnOrdinal: null,
+      },
+    ],
+    reservations: [
+      {
+        ...controllerFutureReservation,
+        componentId: futureControllerComponentId,
+      },
+    ],
+  };
+  const competingConsentToken = opaque("consent");
+  const competingQuote = await createFundingQuoteInTransaction(client, {
+    userId,
+    discoveryProjectionId: opaque("projection"),
+    selectedSourceOptionSnapshot:
+      competingControllerPlan.operation.sourceSnapshot ?? {},
+    marketContextSnapshot: null,
+    destinationOptionSnapshot:
+      competingControllerPlan.operation.destinationTargetSnapshot,
+    venueBindingSnapshot: null,
+    planSnapshot: competingControllerPlan,
+    policyVersion: 1,
+    policyRevision: "policy_revision_controller_future_credit_conflict",
+    canonicalRequest: {
+      source: competingControllerPlan.operation.sourceSnapshot,
+    },
+    consentToken: competingConsentToken,
+    expiresAt: new Date(Date.now() + 60_000),
+  });
+  await expectFundingError(
+    commitFundingOperationInTransaction(client, {
+      userId,
+      quoteId: competingQuote.id,
+      consentToken: competingConsentToken,
+      idempotencyKey: opaque("idempotency"),
+      plan: competingControllerPlan,
+      subjectLookupHmac: hash("controller-future-credit-conflict-user"),
+      subjectLookupKeyVersion: 1,
+    }),
+    "quote_invalidated",
+  );
+  await client.query("rollback to savepoint controller_future_credit_conflict");
+
+  await client.query("savepoint unrelated_venue_router_shape");
+  const unrelatedVenuePlan: FundingCommitPlan = {
+    ...controllerHandoffPlan,
+    operation: {
+      ...controllerHandoffPlan.operation,
+      venueId: "limitless",
+    },
+    reservations: controllerHandoffPlan.reservations.map((reservation) => ({
+      ...reservation,
+      componentId: opaque("component"),
+      locationId: opaque("location"),
+    })),
+  };
+  const unrelatedVenueConsentToken = opaque("consent");
+  const unrelatedVenueQuote = await createFundingQuoteInTransaction(client, {
+    userId,
+    discoveryProjectionId: opaque("projection"),
+    selectedSourceOptionSnapshot:
+      unrelatedVenuePlan.operation.sourceSnapshot ?? {},
+    marketContextSnapshot: null,
+    destinationOptionSnapshot:
+      unrelatedVenuePlan.operation.destinationTargetSnapshot,
+    venueBindingSnapshot: null,
+    planSnapshot: unrelatedVenuePlan,
+    policyVersion: 1,
+    policyRevision: "policy_revision_unrelated_venue_router_shape",
+    canonicalRequest: {
+      source: unrelatedVenuePlan.operation.sourceSnapshot,
+    },
+    consentToken: unrelatedVenueConsentToken,
+    expiresAt: new Date(Date.now() + 60_000),
+  });
+  await commitFundingOperationInTransaction(client, {
+    userId,
+    quoteId: unrelatedVenueQuote.id,
+    consentToken: unrelatedVenueConsentToken,
+    idempotencyKey: opaque("idempotency"),
+    plan: unrelatedVenuePlan,
+    subjectLookupHmac: hash("unrelated-venue-router-shape-user"),
+    subjectLookupKeyVersion: 1,
+  });
+  await assert.rejects(
+    client.query("set constraints all immediate"),
+    /only the exact Polymarket Funding Router may use multi-step venue preparation/u,
+  );
+  await client.query("rollback to savepoint unrelated_venue_router_shape");
   await client.query("set constraints all deferred");
 
   const stepResult = await client.query<{
@@ -590,9 +898,9 @@ try {
     attemptId: started.attempt.id,
     outcome: "ambiguous",
     broadcastMayHaveOccurred: true,
-    referenceKind: "transaction",
-    receiptRefCiphertext: "ciphertext:transaction",
-    receiptRefLookupHmac: hash("transaction"),
+    referenceKind: "external_handoff",
+    receiptRefCiphertext: "ciphertext:polymarket-relayer:v1:handoff-report",
+    receiptRefLookupHmac: hash("polymarket-relayer:v1:handoff-report"),
     lookupKeyVersion: 1,
     actualCosts: { networkFeeRaw: "21000" },
   } as const;
@@ -648,15 +956,38 @@ try {
     await listPotentialPolymarketHandoffsForCanonicalEvents(client, {
       userId,
       currentLookupKeyVersion: 1,
-      events: [
-        {
-          ...canonicalHandoffEvent,
-          receiptRefLookupHmac: reportInput.receiptRefLookupHmac,
-        },
-      ],
+      events: [canonicalHandoffEvent],
     });
   assert.equal(matchingHandoffs.length, 1);
   assert.equal(matchingHandoffs[0]?.attemptId, started.attempt.id);
+  assert.equal(matchingHandoffs[0]?.referenceKind, "external_handoff");
+  const resolvedHandoffTransactionHash = `0x${"ab".repeat(32)}`;
+  await applyFundingStepReceiptEvidenceInTransaction(client, {
+    operationId: committed.operation.id,
+    stepId,
+    attemptId: started.attempt.id,
+    networkId: ASSET.networkId,
+    receipt: {
+      status: "pending",
+      actionMatch: null,
+      ledgerHeight: null,
+      blockHash: null,
+      canonical: true,
+      failureCode: null,
+      evidence: { transactionHash: resolvedHandoffTransactionHash },
+    },
+  });
+  const resolvedHandoffs =
+    await listPotentialPolymarketHandoffsForCanonicalEvents(client, {
+      userId,
+      currentLookupKeyVersion: 1,
+      events: [canonicalHandoffEvent],
+    });
+  assert.equal(
+    resolvedHandoffs[0]?.resolvedTransactionHash,
+    resolvedHandoffTransactionHash,
+    "the resolved relayer transaction hash must become durable receive-session correlation evidence",
+  );
   assert.equal(
     (
       await listPotentialPolymarketHandoffsForCanonicalEvents(client, {

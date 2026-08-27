@@ -1,9 +1,6 @@
 import type { PrivyPolicyMetadata } from "../privy-service.js";
 import { isRecord } from "../lib/type-guards.js";
-import {
-  isExactPolymarketDepositPusdFundRule,
-  isExactPolymarketDepositUsdceWrapRule,
-} from "../funding/execution/delegated-funding-profiles.js";
+import { isExactPolymarketDepositPusdFundRule } from "../funding/execution/delegated-funding-profiles.js";
 import {
   canonicalAccountAddress,
   isEvmAddress,
@@ -768,7 +765,6 @@ type PolymarketPolicyRuleKind =
   | "funding"
   | "funding_controller_approval"
   | "funding_controller_usdce_approval"
-  | "funding_wrap"
   | "direct_buy"
   | "deposit_buy"
   | "deposit_sell"
@@ -797,12 +793,7 @@ function classifyPolymarketPolicyAllowRule(
     ) {
       return "funding_controller_usdce_approval";
     }
-    return isExactPolymarketDepositUsdceWrapRule({
-      routerAddress: fundingRouterAddress,
-      rule,
-    })
-      ? "funding_wrap"
-      : "funding";
+    return "funding";
   }
   if (rule.method !== "eth_signTypedData_v4") return "unknown";
   const conditions = readPolicyConditions(rule);
@@ -858,7 +849,6 @@ export function validatePolymarketBotPolicyProfile(input: {
       "funding",
       "funding_controller_approval",
       "funding_controller_usdce_approval",
-      "funding_wrap",
       "direct_buy",
       "deposit_buy",
       "deposit_sell",
