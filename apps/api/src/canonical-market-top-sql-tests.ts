@@ -57,19 +57,38 @@ console.log(
 );
 
 let candidateSql = "";
+let topSql = "";
+let topParams: unknown[] = [];
 let eventSql = "";
 const localStatements: string[] = [];
 const client = {
-  query: async (sql: string) => {
+  query: async (sql: string, params: unknown[] = []) => {
     localStatements.push(sql);
-    if (/canonical_probabilities as materialized/i.test(sql)) {
+    if (
+      /select market_id, token_yes, token_no\s+from canonical_token_pairs/i.test(
+        sql,
+      )
+    ) {
       candidateSql = sql;
       return {
         rows: [
-          { market_id: "market-1", probability: "0.8" },
-          { market_id: "market-2", probability: "0.5" },
+          { market_id: "market-1", token_yes: "yes-1", token_no: "no-1" },
+          { market_id: "market-2", token_yes: "yes-2", token_no: "no-2" },
         ],
         rowCount: 2,
+      };
+    }
+    if (/from unified_token_top_latest\s+where token_id = any/i.test(sql)) {
+      topSql = sql;
+      topParams = params;
+      return {
+        rows: [
+          { token_id: "yes-1", best_bid: "0.79", best_ask: "0.81" },
+          { token_id: "no-1", best_bid: "0.19", best_ask: "0.21" },
+          { token_id: "yes-2", best_bid: "0.49", best_ask: "0.51" },
+          { token_id: "no-2", best_bid: "0.49", best_ask: "0.51" },
+        ],
+        rowCount: 4,
       };
     }
     if (/orderable_market_candidates as materialized/i.test(sql)) {
@@ -144,11 +163,14 @@ assert.doesNotMatch(
   /left join lateral\s*\([\s\S]*?from unified_market_tokens token_mapping/i,
 );
 assert.match(candidateSql, /canonical_token_pairs as materialized/i);
-assert.match(candidateSql, /canonical_token_rows as materialized/i);
-assert.match(candidateSql, /canonical_top_rows as materialized/i);
-assert.match(candidateSql, /top_row\.token_id = any/i);
-assert.match(candidateSql, /canonical_probabilities as materialized/i);
+assert.doesNotMatch(candidateSql, /canonical_token_rows as materialized/i);
+assert.doesNotMatch(candidateSql, /canonical_top_rows as materialized/i);
+assert.doesNotMatch(candidateSql, /canonical_probabilities as materialized/i);
 assert.doesNotMatch(candidateSql, /probability\s*[<>]=\s*\$\d+/i);
+assert.match(topSql, /from unified_token_top_latest/i);
+assert.match(topSql, /where token_id = any\(\$1::text\[\]\)/i);
+assert.doesNotMatch(topSql, /canonical_token_pairs|array_agg|initplan/i);
+assert.deepEqual(topParams, [["yes-1", "no-1", "yes-2", "no-2"]]);
 assert.ok(
   localStatements.some((sql) =>
     /SET LOCAL statement_timeout = '\d+ms'/i.test(sql),
@@ -157,7 +179,9 @@ assert.ok(
 console.log("ok - feed probability candidates are scoped and time-bounded");
 
 const probabilityQueryCountBeforeSingleFlight = localStatements.filter((sql) =>
-  /canonical_probabilities as materialized/i.test(sql),
+  /select market_id, token_yes, token_no\s+from canonical_token_pairs/i.test(
+    sql,
+  ),
 ).length;
 const sharedScopeInputs = {
   ...commonInputs,
@@ -180,7 +204,9 @@ assert.deepEqual(highRangeIds, ["market-1"]);
 assert.deepEqual(middleRangeIds, ["market-2"]);
 assert.equal(
   localStatements.filter((sql) =>
-    /canonical_probabilities as materialized/i.test(sql),
+    /select market_id, token_yes, token_no\s+from canonical_token_pairs/i.test(
+      sql,
+    ),
   ).length,
   probabilityQueryCountBeforeSingleFlight + 1,
 );

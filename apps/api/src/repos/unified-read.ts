@@ -1,4 +1,5 @@
 import type { Pool } from "@hunch/infra";
+import { buildObservedCanonicalMarketTop } from "@hunch/shared";
 import type { QueryResultRow } from "pg";
 import { env } from "../env.js";
 import {
@@ -703,6 +704,18 @@ type ObservedProbabilityMarketRow = {
   probability: number | string;
 };
 
+type CanonicalProbabilityTokenPairRow = {
+  market_id: string;
+  token_yes: string | null;
+  token_no: string | null;
+};
+
+type CanonicalProbabilityTopRow = {
+  token_id: string;
+  best_bid: number | string | null;
+  best_ask: number | string | null;
+};
+
 const probabilityMarketCacheByPool = new WeakMap<
   Pool,
   ProbabilityMarketCacheState
@@ -821,13 +834,10 @@ async function fetchObservedCanonicalProbabilityMarketsUncached(
       supportedLimitlessMarketExpr: expressions.supportedLimitlessMarketExpr,
     }),
   });
-  const probability = buildObservedCanonicalProbabilityFromTopSql({
-    yesAlias: "canonical_yes_top",
-    noAlias: "canonical_no_top",
-  });
-  return await queryRowsWithLocalSettings<ObservedProbabilityMarketRow>(
-    pool,
-    `
+  const tokenPairs =
+    await queryRowsWithLocalSettings<CanonicalProbabilityTokenPairRow>(
+      pool,
+      `
       with ${probabilityCandidateEventsCte},
       ${candidateCte},
       canonical_token_mappings as materialized (
@@ -858,53 +868,70 @@ async function fetchObservedCanonicalProbabilityMarketsUncached(
         left join canonical_token_mappings token_mapping
           on token_mapping.market_id = probability_candidate.market_id
         group by probability_candidate.market_id
-      ),
-      canonical_token_rows as materialized (
-        select token_pair.token_yes as token_id
-        from canonical_token_pairs token_pair
-        where token_pair.token_yes is not null
-        union
-        select token_pair.token_no as token_id
-        from canonical_token_pairs token_pair
-        where token_pair.token_no is not null
-      ),
-      canonical_top_rows as materialized (
-        select
-          top_row.token_id,
-          top_row.best_bid,
-          top_row.best_ask
-        from unified_token_top_latest top_row
-        where top_row.token_id = any(
-          coalesce(
-            (
-              select array_agg(token_row.token_id order by token_row.token_id)
-              from canonical_token_rows token_row
-            ),
-            '{}'::text[]
-          )
-        )
-      ),
-      canonical_probabilities as materialized (
-        select
-          token_pair.market_id,
-          ${probability} as probability
-        from canonical_token_pairs token_pair
-        left join canonical_top_rows canonical_yes_top
-          on canonical_yes_top.token_id = token_pair.token_yes
-        left join canonical_top_rows canonical_no_top
-          on canonical_no_top.token_id = token_pair.token_no
       )
-      select market_id, probability
-      from canonical_probabilities
-      where probability is not null
+      select market_id, token_yes, token_no
+      from canonical_token_pairs
     `,
-    params,
+      params,
+      {
+        jitOff: true,
+        statementTimeoutMs: env.feedFilterTimeoutMs,
+        workMem: FEED_HEAVY_QUERY_WORK_MEM,
+      },
+    );
+
+  const tokenIds = Array.from(
+    new Set(
+      tokenPairs.flatMap((tokenPair) =>
+        [tokenPair.token_yes, tokenPair.token_no].filter(
+          (tokenId): tokenId is string => tokenId != null,
+        ),
+      ),
+    ),
+  );
+  if (!tokenIds.length) return [];
+
+  // Keep this as a separate query with the token array as a direct parameter.
+  // PostgreSQL can then see its real cardinality and choose a bitmap heap scan;
+  // hiding the same array behind an InitPlan makes it assume only a handful of
+  // rows and perform tens of thousands of random primary-key probes instead.
+  const topRows = await queryRowsWithLocalSettings<CanonicalProbabilityTopRow>(
+    pool,
+    `
+      select token_id, best_bid, best_ask
+      from unified_token_top_latest
+      where token_id = any($1::text[])
+    `,
+    [tokenIds],
     {
       jitOff: true,
       statementTimeoutMs: env.feedFilterTimeoutMs,
       workMem: FEED_HEAVY_QUERY_WORK_MEM,
     },
   );
+  const topByTokenId = new Map(
+    topRows.map((topRow) => [topRow.token_id, topRow]),
+  );
+
+  return tokenPairs.flatMap((tokenPair): ObservedProbabilityMarketRow[] => {
+    const yesTop = tokenPair.token_yes
+      ? topByTokenId.get(tokenPair.token_yes)
+      : undefined;
+    const noTop = tokenPair.token_no
+      ? topByTokenId.get(tokenPair.token_no)
+      : undefined;
+    const probability = buildObservedCanonicalMarketTop({
+      yesTop: yesTop
+        ? { bestBid: yesTop.best_bid, bestAsk: yesTop.best_ask }
+        : undefined,
+      noTop: noTop
+        ? { bestBid: noTop.best_bid, bestAsk: noTop.best_ask }
+        : undefined,
+    }).probability;
+    return probability == null
+      ? []
+      : [{ market_id: tokenPair.market_id, probability }];
+  });
 }
 
 export async function fetchObservedCanonicalProbabilityMarketIds(

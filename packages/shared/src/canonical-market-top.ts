@@ -122,6 +122,15 @@ function observedMidpoint(top: NormalizedObservedSideTop): number | null {
   return top.bid != null && top.ask != null ? (top.bid + top.ask) / 2 : null;
 }
 
+function exceedsProbabilityTolerance(
+  difference: number,
+  tolerance: number,
+): boolean {
+  const roundingSlack =
+    Number.EPSILON * Math.max(1, Math.abs(difference), Math.abs(tolerance)) * 4;
+  return difference - tolerance > roundingSlack;
+}
+
 /**
  * Builds a presentation-only snapshot from the latest observed canonical
  * token tops. Unlike buildCanonicalMarketTop, quote age does not erase a
@@ -155,7 +164,7 @@ export function buildObservedCanonicalMarketTop(
   } else if (
     yesMid != null &&
     yesFromNo != null &&
-    Math.abs(yesMid - yesFromNo) > tolerance
+    exceedsProbabilityTolerance(Math.abs(yesMid - yesFromNo), tolerance)
   ) {
     probability = null;
     blockers.push("inconsistent_probability");
@@ -210,7 +219,7 @@ export function buildCanonicalMarketTop(
   } else if (
     yesMid != null &&
     yesFromNo != null &&
-    Math.abs(yesMid - yesFromNo) > tolerance
+    exceedsProbabilityTolerance(Math.abs(yesMid - yesFromNo), tolerance)
   ) {
     probability = null;
     blockers.push("inconsistent_probability");
