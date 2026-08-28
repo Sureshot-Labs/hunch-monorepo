@@ -482,7 +482,13 @@ console.log("ok - change24h event filters stay on the cached candidate path");
 }
 console.log("ok - change24h event volume uses the exact fallback sum");
 
-for (const sort of ["trending_v2", "openinterest"] as const) {
+for (const sort of [
+  "trending_v2",
+  "totalvol",
+  "liquidity",
+  "openinterest",
+  "time",
+] as const) {
   const capturedSql: string[] = [];
   const capturedParams: unknown[][] = [];
   const pool = createCapturePool({
@@ -524,7 +530,7 @@ for (const sort of ["trending_v2", "openinterest"] as const) {
   );
   assert.ok(capturedParams[0]?.includes(0.1));
 }
-console.log("ok - trending v2 and open interest spread use ranked candidates");
+console.log("ok - event spread sorts use ranked candidates");
 
 {
   const capturedSql: string[] = [];

@@ -2060,7 +2060,10 @@ function canUseFeedEventMaxSpreadFastPath(inputs: FeedInputs): boolean {
     (inputs.sort == null ||
       inputs.sort === "trending" ||
       inputs.sort === "trending_v2" ||
-      inputs.sort === "openinterest")
+      inputs.sort === "totalvol" ||
+      inputs.sort === "liquidity" ||
+      inputs.sort === "openinterest" ||
+      inputs.sort === "time")
   );
 }
 
