@@ -1031,6 +1031,10 @@ const destination: FundingTarget = {
     RELAY_ROUTE_SPECS["solana-usdc-to-base-usdc"]?.quoteMode,
     "expected_output",
   );
+  assert.equal(
+    RELAY_ROUTE_SPECS["solana-usdc-to-polygon-pusd"]?.quoteMode,
+    "expected_output",
+  );
   assert.deepEqual(
     PRODUCTION_FUNDING_REGISTRY.networkExecutors.map(({ id }) => id).sort(),
     [

@@ -536,6 +536,19 @@ assert.equal(sponsored[0]?.quoteInputAmount.raw, "3030304");
 assert.equal(sponsored[0]?.quoteMinimumOutput?.raw, "3000000");
 assert.equal(sponsored[0]?.maximumSourceRaw, "4000000");
 assert.equal(sponsored[0]?.nativeGasReady, true);
+assert.equal(sponsored[0]?.quoteModeOverride, undefined);
+
+const balanceCappedStableSource = deriveProductionRelayEligibleSourceFacts({
+  accountId: ACCOUNT_ID,
+  account: account(),
+  policy: policy(),
+  requiredAmount: { asset: POLYGON_PUSD, raw: "5000000" },
+});
+assert.equal(balanceCappedStableSource.length, 1);
+assert.equal(balanceCappedStableSource[0]?.quoteInputAmount.raw, "4000000");
+assert.equal(balanceCappedStableSource[0]?.quoteMinimumOutput?.raw, "1");
+assert.equal(balanceCappedStableSource[0]?.quoteModeOverride, "exact_input");
+assert.equal(balanceCappedStableSource[0]?.maximumSourceRaw, "4000000");
 
 const exactReceivedSource = deriveProductionRelayEligibleSourceFacts({
   accountId: ACCOUNT_ID,

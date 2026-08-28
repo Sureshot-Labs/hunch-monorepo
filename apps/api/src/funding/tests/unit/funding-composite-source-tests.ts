@@ -552,12 +552,35 @@ assert.equal(
   true,
 );
 assert.equal(compositeOnlyResidualRelay.compositeEligible, true);
-assert.equal(
+const [fullRequirementPartialRelay] =
   restrictResidualSourcesToCompositeContribution([productionResidualRelay], {
     plannedRequirement: money(DESTINATION_ASSET, "4227649"),
     fullRequirement: money(DESTINATION_ASSET, "4227649"),
+  });
+assert.ok(fullRequirementPartialRelay);
+assert.equal(fullRequirementPartialRelay.option.selectable, false);
+assert.equal(fullRequirementPartialRelay.option.recommended, false);
+assert.equal(fullRequirementPartialRelay.compositeEligible, true);
+assert.equal(
+  fullRequirementPartialRelay.option.reasonCodes.includes(
+    "minimum_output_not_met",
+  ),
+  true,
+);
+const fullCoverageRelay = {
+  ...productionResidualRelay,
+  option: {
+    ...productionResidualRelay.option,
+    expectedDestination: money(DESTINATION_ASSET, "4227649"),
+    minimumDestination: money(DESTINATION_ASSET, "4227649"),
+  },
+};
+assert.equal(
+  restrictResidualSourcesToCompositeContribution([fullCoverageRelay], {
+    plannedRequirement: money(DESTINATION_ASSET, "4227649"),
+    fullRequirement: money(DESTINATION_ASSET, "4227649"),
   })[0],
-  productionResidualRelay,
+  fullCoverageRelay,
 );
 const gasBlockedSolanaCandidate = partialSource({
   id: "gas_blocked_solana",
@@ -754,6 +777,76 @@ assert.equal(
   ).length,
   0,
   "the client composite must not create an automatic/server-SVM alternative",
+);
+
+const firstCappedClientSource = partialSource({
+  id: "capped_polygon",
+  location: sourceLocation(
+    "capped_polygon",
+    "evm:137",
+    "0x00000000000000000000000000000000000000b6",
+  ),
+  sourceRaw: "923066",
+  expectedRaw: "910000",
+  minimumRaw: "880000",
+  feeUsd: "0.01",
+  payerRequirement: "user",
+});
+const secondCappedClientSource = partialSource({
+  id: "capped_solana_usdc",
+  location: sourceLocation(
+    "capped_solana_usdc",
+    "solana:mainnet",
+    "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+  ),
+  sourceRaw: "9414875",
+  expectedRaw: "9300000",
+  minimumRaw: "9100000",
+  feeUsd: "0.02",
+  payerRequirement: "user",
+});
+const selectableCappedSources = [
+  firstCappedClientSource,
+  secondCappedClientSource,
+].map((source) => ({
+  ...source,
+  option: {
+    ...source.option,
+    experienceMode: "inline_funding" as const,
+    recommended: true,
+    selectable: true,
+    reasonCodes: [],
+  },
+}));
+const cappedClientBoundaryPlan = await planProductionFundingSourceBoundaries({
+  adapted: [],
+  requiredAmount: money(DESTINATION_ASSET, "9976299"),
+  destinationUnitPriceUsd: "1",
+  maximumFeeUsd: "1",
+  maximumFeeBps: 2_000,
+  discoverRelay: async () => ({
+    sources: selectableCappedSources,
+    reasonCodes: [],
+  }),
+});
+assert.equal(
+  cappedClientBoundaryPlan.sources.filter(
+    (source) =>
+      source.option.kind === "wallet_asset" && source.option.selectable,
+  ).length,
+  0,
+  "a capped contribution must not masquerade as full single-source coverage",
+);
+const cappedClientComposite = cappedClientBoundaryPlan.sources.find(
+  (source) => source.option.kind === "composite",
+);
+assert.ok(cappedClientComposite);
+assert.equal(cappedClientComposite.option.selectable, true);
+assert.equal(cappedClientComposite.option.minimumDestination?.raw, "9980000");
+assert.deepEqual(
+  cappedClientComposite.option.requiredActions.map((action) => action.kind),
+  ["evm_transaction", "svm_transaction"],
+  "two bounded wallet contributions must remain executable as one client handoff",
 );
 
 const insufficientResidualRelay = partialSource({
