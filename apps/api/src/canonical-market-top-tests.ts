@@ -80,6 +80,26 @@ test("observed probability can invert a coherent NO book", () => {
   assert.equal(observed.noAsk, 0.21);
 });
 
+test("decimal tolerance boundary is not rejected by floating-point noise", () => {
+  const observed = buildObservedCanonicalMarketTop({
+    yesTop: top(0, 0.5, 0.51),
+    noTop: top(0, 0.51, 0.52),
+  });
+
+  assert.equal(observed.probability, 0.505);
+  assert.ok(!observed.blockers.includes("inconsistent_probability"));
+});
+
+test("a real probability difference above tolerance is still rejected", () => {
+  const observed = buildObservedCanonicalMarketTop({
+    yesTop: top(0, 0.5, 0.512),
+    noTop: top(0, 0.51, 0.52),
+  });
+
+  assert.equal(observed.probability, null);
+  assert.ok(observed.blockers.includes("inconsistent_probability"));
+});
+
 test("observed probability rejects a bid-only historical shape", () => {
   const observed = buildObservedCanonicalMarketTop({
     yesTop: top(22 * 60 * 60, 0.8, null),
