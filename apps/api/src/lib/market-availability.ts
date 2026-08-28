@@ -235,7 +235,23 @@ export function buildPolymarketGraceMarketSql(args: {
   nowParam: string;
   pmAlias: string;
 }): string {
-  const { marketAlias: m, pmAlias: pm } = args;
+  const { pmAlias: pm } = args;
+  return `(
+    ${buildPolymarketGraceCandidateSql(args)}
+    and ${pm}.id is not null
+    and ${pm}.accepting_orders = true
+    and coalesce(${pm}.active, true) = true
+    and coalesce(${pm}.closed, false) = false
+    and coalesce(${pm}.archived, false) = false
+  )`;
+}
+
+export function buildPolymarketGraceCandidateSql(args: {
+  marketAlias: string;
+  eventAlias?: string;
+  nowParam: string;
+}): string {
+  const { marketAlias: m } = args;
   const strictTimeSql = `(
     ${buildEventTimeSql(args)}
     and ${buildMarketTimeSql(args)}
@@ -244,11 +260,6 @@ export function buildPolymarketGraceMarketSql(args: {
     ${m}.venue = 'polymarket'
     and ${m}.status = 'ACTIVE'
     and ${buildActiveEventSql(args.eventAlias)}
-    and ${pm}.id is not null
-    and ${pm}.accepting_orders = true
-    and coalesce(${pm}.active, true) = true
-    and coalesce(${pm}.closed, false) = false
-    and coalesce(${pm}.archived, false) = false
     and ${buildPolymarketFreshnessSql(args)}
     and not ${strictTimeSql}
   )`;

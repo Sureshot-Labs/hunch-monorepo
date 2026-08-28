@@ -7,6 +7,7 @@ import {
   buildEventHasBroadOrderableMarketSql,
   buildOrderableEventFreshnessSql,
   buildOrderableMarketSql,
+  buildPolymarketGraceCandidateSql,
   buildPolymarketGraceMarketSql,
   POLYMARKET_ACCEPTING_ORDERS_GRACE_INTERVAL_SQL,
   buildStrictIndexedMarketSql,
@@ -63,6 +64,7 @@ const FEED_HEAVY_QUERY_WORK_MEM = "32MB";
 const FEED_EVENT_FAST_MIN_CANDIDATES = 1000;
 const FEED_EVENT_FAST_CANDIDATE_FACTOR = 20;
 const FEED_EVENT_FAST_MAX_CANDIDATES = 10000;
+const FEED_MARKET_GRACE_MIN_CANDIDATES = 100;
 const FEED_CANDIDATE_EXPANSION_FACTOR = 4;
 const FEED_CHANGE24H_V2_CANDIDATE_LIMITS = [500, 2000, 8000] as const;
 const FEED_SEARCH_PREFIX_MIN_CHARS = 3;
@@ -207,17 +209,29 @@ function buildBroadOrderableMarketCandidatesCte(args: {
   candidateEventIdsCte?: string | null;
   candidateMarketIdsParam?: string | null;
   cteName?: string;
+  includeRankingColumns?: boolean;
   materialized?: boolean;
   nowParam: string;
   nowCloseParam?: string;
   extraMarketSql?: string[];
+  ranking?: {
+    graceLimitParam: string;
+    sortDir: "asc" | "desc";
+    sortValueSql: string;
+    targetParam: string;
+  };
 }): string {
   const cteName = args.cteName ?? "orderable_market_candidates";
   const materialized = args.materialized ? " as materialized" : " as";
   const safeCtePrefix = cteName.replace(/[^a-zA-Z0-9_]/g, "_");
   const strictMarketBaseCte = `${safeCtePrefix}_strict_market_base`;
   const strictCandidatesCte = `${safeCtePrefix}_strict_candidates`;
+  const strictRankedCandidatesCte = `${safeCtePrefix}_strict_ranked_candidates`;
   const pmRecentCandidatesCte = `${safeCtePrefix}_pm_recent_candidates`;
+  const pmUnvalidatedCandidatesCte = `${safeCtePrefix}_pm_unvalidated_candidates`;
+  const pmRankedCandidatesCte = `${safeCtePrefix}_pm_ranked_candidates`;
+  const pmCandidateIdsCte = `${safeCtePrefix}_pm_candidate_ids`;
+  const pmAvailabilityCte = `${safeCtePrefix}_pm_availability`;
   const pmGraceCandidatesCte = `${safeCtePrefix}_pm_grace_candidates`;
   const candidateMarketIdsCte = args.candidateMarketIdsCte ?? null;
   if (candidateMarketIdsCte) {
@@ -239,11 +253,197 @@ function buildBroadOrderableMarketCandidatesCte(args: {
     .filter(Boolean)
     .map((clause) => `and ${clause}`)
     .join("\n        ");
+  const marketCandidateColumns = (marketAlias: string) => `
+        ${marketAlias}.id,
+        ${marketAlias}.event_id,
+        ${marketAlias}.venue_market_id,
+        ${marketAlias}.venue,
+        ${marketAlias}.volume_total,
+        ${marketAlias}.volume_24h,
+        ${marketAlias}.liquidity,
+        ${marketAlias}.open_interest,
+        ${marketAlias}.best_bid,
+        ${marketAlias}.best_ask,
+        ${marketAlias}.last_price,
+        ${marketAlias}.close_time,
+        ${marketAlias}.expiration_time,
+        ${marketAlias}.duration_minutes
+  `;
+  const rankedCandidateColumns = (marketAlias: string, eventAlias: string) => `
+        ${marketAlias}.id as market_id,
+        ${marketAlias}.event_id,
+        ${marketAlias}.venue_market_id,
+        ${marketAlias}.venue,
+        ${marketAlias}.volume_total,
+        ${marketAlias}.volume_24h,
+        ${marketAlias}.liquidity,
+        ${marketAlias}.open_interest,
+        ${marketAlias}.best_bid,
+        ${marketAlias}.best_ask,
+        ${marketAlias}.last_price,
+        ${marketAlias}.close_time,
+        ${marketAlias}.expiration_time,
+        ${marketAlias}.duration_minutes,
+        ${eventAlias}.start_date as event_start_date,
+        ${eventAlias}.end_date as event_end_date
+  `;
+  const finalCandidateColumns = `
+        market_id,
+        event_id,
+        venue_market_id,
+        venue,
+        volume_total,
+        volume_24h,
+        liquidity,
+        open_interest,
+        best_bid,
+        best_ask,
+        last_price,
+        close_time,
+        expiration_time,
+        duration_minutes,
+        event_start_date,
+        event_end_date
+  `;
+  const includeRankingColumns = args.includeRankingColumns ?? false;
+  const strictMarketBaseColumns = includeRankingColumns
+    ? marketCandidateColumns("m")
+    : `
+        m.id as market_id,
+        m.event_id
+      `;
+  const strictCandidateColumns = includeRankingColumns
+    ? rankedCandidateColumns("m", "e")
+    : `
+        m.id as market_id,
+        m.event_id
+      `;
+  const strictCandidateSource = includeRankingColumns
+    ? `
+      from ${strictMarketBaseCte} m
+      join unified_events e on e.id = m.event_id
+    `
+    : `
+      from ${strictMarketBaseCte} c
+      join unified_markets m on m.id = c.market_id
+      join unified_events e on e.id = c.event_id
+    `;
+  const graceCandidateColumns = includeRankingColumns
+    ? rankedCandidateColumns("m", "e")
+    : `
+        m.id as market_id,
+        m.event_id
+      `;
+  const selectedFinalCandidateColumns = includeRankingColumns
+    ? finalCandidateColumns
+    : `
+        market_id,
+        event_id
+      `;
+  if (args.ranking && !includeRankingColumns) {
+    throw new Error("Market candidate ranking requires ranking columns");
+  }
+  const candidateTailSql = args.ranking
+    ? `
+    ${strictRankedCandidatesCte} as materialized (
+      select ${finalCandidateColumns}
+      from ${strictCandidatesCte} candidate_market
+      order by (${args.ranking.sortValueSql}) ${args.ranking.sortDir} nulls last,
+        candidate_market.venue_market_id
+      limit ${args.ranking.targetParam}
+    ),
+    ${pmUnvalidatedCandidatesCte} as materialized (
+      select
+        ${rankedCandidateColumns("m", "e")}
+      from ${pmRecentCandidatesCte} c
+      join unified_markets m on m.id = c.market_id
+      join unified_events e on e.id = m.event_id
+      where ${buildPolymarketGraceCandidateSql({
+        marketAlias: "m",
+        eventAlias: "e",
+        nowParam: args.nowParam,
+      })}
+        ${extraSql}
+    ),
+    ${pmRankedCandidatesCte} as materialized (
+      select ${finalCandidateColumns}
+      from ${pmUnvalidatedCandidatesCte} candidate_market
+      order by (${args.ranking.sortValueSql}) ${args.ranking.sortDir} nulls last,
+        candidate_market.venue_market_id
+      limit ${args.ranking.graceLimitParam}
+    ),
+    ${pmCandidateIdsCte} as materialized (
+      select array_agg(distinct venue_market_id) as venue_market_ids
+      from ${pmRankedCandidatesCte}
+    ),
+    ${pmAvailabilityCte} as materialized (
+      select pm.id
+      from polymarket_markets pm
+      cross join ${pmCandidateIdsCte} candidate_ids
+      where pm.id = any(candidate_ids.venue_market_ids)
+        and pm.accepting_orders = true
+        and coalesce(pm.active, true) = true
+        and coalesce(pm.closed, false) = false
+        and coalesce(pm.archived, false) = false
+    ),
+    ${pmGraceCandidatesCte} as materialized (
+      select ${finalCandidateColumns}
+      from ${pmRankedCandidatesCte} candidate_market
+      join ${pmAvailabilityCte} pm_filter
+        on pm_filter.id = candidate_market.venue_market_id
+    ),
+    ${cteName}${materialized} (
+      select ${selectedFinalCandidateColumns}
+      from ${strictRankedCandidatesCte}
+      union all
+      select ${selectedFinalCandidateColumns}
+      from ${pmGraceCandidatesCte}
+    )
+  `
+    : `
+    ${pmCandidateIdsCte} as materialized (
+      select array_agg(distinct venue_market_id) as venue_market_ids
+      from ${pmRecentCandidatesCte}
+    ),
+    ${pmAvailabilityCte} as materialized (
+      select
+        pm.id,
+        pm.accepting_orders,
+        pm.active,
+        pm.closed,
+        pm.archived
+      from polymarket_markets pm
+      cross join ${pmCandidateIdsCte} candidate_ids
+      where pm.id = any(candidate_ids.venue_market_ids)
+    ),
+    ${pmGraceCandidatesCte} as materialized (
+      select
+        ${graceCandidateColumns}
+      from ${pmRecentCandidatesCte} c
+      join unified_markets m on m.id = c.market_id
+      join unified_events e on e.id = m.event_id
+      join ${pmAvailabilityCte} pm_filter
+        on pm_filter.id = c.venue_market_id
+      where ${buildPolymarketGraceMarketSql({
+        marketAlias: "m",
+        eventAlias: "e",
+        nowParam: args.nowParam,
+        pmAlias: "pm_filter",
+      })}
+        ${extraSql}
+    ),
+    ${cteName}${materialized} (
+      select ${selectedFinalCandidateColumns}
+      from ${strictCandidatesCte}
+      union all
+      select ${selectedFinalCandidateColumns}
+      from ${pmGraceCandidatesCte}
+    )
+  `;
   return `
     ${strictMarketBaseCte} as materialized (
       select
-        m.id as market_id,
-        m.event_id
+        ${strictMarketBaseColumns}
       from unified_markets m
       ${candidateMarketJoin}
       ${candidateEventJoin}
@@ -255,11 +455,8 @@ function buildBroadOrderableMarketCandidatesCte(args: {
     ),
     ${strictCandidatesCte} as materialized (
       select
-        c.market_id,
-        c.event_id
-      from ${strictMarketBaseCte} c
-      join unified_markets m on m.id = c.market_id
-      join unified_events e on e.id = c.event_id
+        ${strictCandidateColumns}
+      ${strictCandidateSource}
       where e.status = 'ACTIVE'
         and (e.end_date is null or e.end_date > ${args.nowParam}::timestamptz)
         ${extraSql}
@@ -277,7 +474,7 @@ function buildBroadOrderableMarketCandidatesCte(args: {
         and m.close_time is not null
         and m.close_time <= ${args.nowParam}::timestamptz
         and m.close_time > (${args.nowParam}::timestamptz - ${POLYMARKET_ACCEPTING_ORDERS_GRACE_INTERVAL_SQL})
-      union all
+      union
       select
         m.id as market_id,
         m.event_id,
@@ -290,7 +487,7 @@ function buildBroadOrderableMarketCandidatesCte(args: {
         and m.expiration_time is not null
         and m.expiration_time <= ${args.nowParam}::timestamptz
         and m.expiration_time > (${args.nowParam}::timestamptz - ${POLYMARKET_ACCEPTING_ORDERS_GRACE_INTERVAL_SQL})
-      union all
+      union
       select
         m.id as market_id,
         m.event_id,
@@ -306,39 +503,7 @@ function buildBroadOrderableMarketCandidatesCte(args: {
         and m.status = 'ACTIVE'
         and m.venue = 'polymarket'
     ),
-    ${pmGraceCandidatesCte} as materialized (
-      select distinct
-        m.id as market_id,
-        m.event_id
-      from ${pmRecentCandidatesCte} c
-      join unified_markets m on m.id = c.market_id
-      join unified_events e on e.id = m.event_id
-      join lateral (
-        select
-          pm.id,
-          pm.accepting_orders,
-          pm.active,
-          pm.closed,
-          pm.archived
-        from polymarket_markets pm
-        where pm.id = c.venue_market_id
-        limit 1
-      ) pm_filter on true
-      where ${buildPolymarketGraceMarketSql({
-        marketAlias: "m",
-        eventAlias: "e",
-        nowParam: args.nowParam,
-        pmAlias: "pm_filter",
-      })}
-        ${extraSql}
-    ),
-    ${cteName}${materialized} (
-      select market_id, event_id
-      from ${strictCandidatesCte}
-      union all
-      select market_id, event_id
-      from ${pmGraceCandidatesCte}
-    )
+    ${candidateTailSql}
   `;
 }
 
@@ -3379,14 +3544,17 @@ export async function fetchFeedMarkets(
   );
 }
 
-type FeedMarketCandidateStateRow = {
+type FeedMarketIdPageRow = {
   ids: string[];
-  candidate_count: number;
+};
+
+type FeedProjectedMarketCandidateStateRow = FeedMarketIdPageRow & {
+  pm_prefix_count: number;
 };
 
 type FeedTrendingV2CandidateStateRow = {
   ids: string[];
-  non_limitless_candidate_count: number;
+  non_limitless_prefix_count: number;
   non_limitless_valid_count: number;
   limitless_candidate_count: number;
   limitless_valid_count: number;
@@ -3489,7 +3657,13 @@ async function fetchFeedMarketIdsFast(
 
   const isMetricSort = inputs.sort === "trending_v2";
   const isLegacyTrending = inputs.sort == null || inputs.sort === "trending";
-  if (!isMetricSort && !isLegacyTrending) return null;
+  const isProjectedSort =
+    isLegacyTrending ||
+    inputs.sort === "totalvol" ||
+    inputs.sort === "liquidity" ||
+    inputs.sort === "openinterest" ||
+    inputs.sort === "time";
+  if (!isMetricSort && !isProjectedSort) return null;
   if (isMetricSort && inputs.sortDir === "asc") return null;
   if (
     isLegacyTrending &&
@@ -3636,20 +3810,36 @@ async function fetchFeedMarketIdsFast(
     const streamCandidateLimitParam = add(streamCandidateLimit);
     const streamCandidateLimitParamIndex = params.length - 1;
     const sql = `
-        with non_limitless_ranked_candidates as materialized (
+        with non_limitless_metric_prefix as materialized (
           ${
             includeNonLimitless
               ? `
           select
-            metric.market_id as id,
-            metric.volume_24h as trend_score,
-            row_number() over (
-              order by metric.volume_24h desc nulls last, metric.market_id
-            ) as full_ord
+            metric.market_id,
+            metric.volume_24h
           from unified_market_trade_24h metric
-          join unified_markets metric_market on metric_market.id = metric.market_id
           where metric.volume_24h > 0
-            and metric_market.venue <> 'limitless'
+          order by metric.volume_24h desc nulls last, metric.market_id
+          limit ${streamCandidateLimitParam}
+          `
+              : `
+          select
+            null::text as market_id,
+            null::numeric as volume_24h
+          where ${streamCandidateLimitParam}::integer >= 0 and false
+          `
+          }
+        ),
+        non_limitless_ranked_candidates as materialized (
+          select
+            metric_prefix.market_id as id,
+            metric_prefix.volume_24h as trend_score,
+            row_number() over (
+              order by metric_prefix.volume_24h desc nulls last, metric_prefix.market_id
+            ) as full_ord
+          from non_limitless_metric_prefix metric_prefix
+          join unified_markets metric_market on metric_market.id = metric_prefix.market_id
+          where metric_market.venue <> 'limitless'
             and metric_market.status = 'ACTIVE'
             and ${metricRenderableMarketExpr}
             ${
@@ -3657,17 +3847,8 @@ async function fetchFeedMarketIdsFast(
                 ? `and metric_market.venue = ANY(${nonLimitlessVenuesParam}::text[])`
                 : ""
             }
-          order by metric.volume_24h desc nulls last, metric.market_id
+          order by metric_prefix.volume_24h desc nulls last, metric_prefix.market_id
           limit ${streamCandidateLimitParam}
-          `
-              : `
-          select
-            null::text as id,
-            null::numeric as trend_score,
-            null::bigint as full_ord
-          where ${streamCandidateLimitParam}::integer >= 0 and false
-          `
-          }
         ),
         non_limitless_candidates as materialized (
           select
@@ -3750,7 +3931,7 @@ async function fetchFeedMarketIdsFast(
             (select array_agg(id order by trend_score desc nulls last, venue_market_id) from combined_page),
             '{}'::text[]
           ) as ids,
-          (select count(*)::int from non_limitless_ranked_candidates) as non_limitless_candidate_count,
+          (select count(*)::int from non_limitless_metric_prefix) as non_limitless_prefix_count,
           (select count(*)::int from non_limitless_candidates) as non_limitless_valid_count,
           (select count(*)::int from limitless_ranked_candidates) as limitless_candidate_count,
           (select count(*)::int from limitless_candidates) as limitless_valid_count,
@@ -3773,8 +3954,8 @@ async function fetchFeedMarketIdsFast(
         );
       const state = rows[0];
       const ids = state?.ids ?? [];
-      const nonLimitlessCandidateCount = Number(
-        state?.non_limitless_candidate_count ?? 0,
+      const nonLimitlessPrefixCount = Number(
+        state?.non_limitless_prefix_count ?? 0,
       );
       const nonLimitlessValidCount = Number(
         state?.non_limitless_valid_count ?? 0,
@@ -3786,7 +3967,7 @@ async function fetchFeedMarketIdsFast(
       if (
         (includeNonLimitless &&
           nonLimitlessValidCount < pageTarget &&
-          nonLimitlessCandidateCount >= streamCandidateLimit) ||
+          nonLimitlessPrefixCount >= streamCandidateLimit) ||
         (includeLimitless &&
           limitlessValidCount < pageTarget &&
           limitlessCandidateCount >= streamCandidateLimit)
@@ -3801,89 +3982,132 @@ async function fetchFeedMarketIdsFast(
     }
   }
 
+  if (probabilityPredicate) return null;
+
   const sortDir = inputs.sortDir === "asc" ? "asc" : "desc";
-  const sevenDaysAgoParam = add(inputs.sevenDaysAgo);
-  const sevenDaysFromNowParam = add(inputs.sevenDaysFromNow);
-  const trendScoreExpr = `(
-    coalesce(${marketVolumeDisplayExpr}, 0) * 0.4
-    + coalesce(${marketLiquidityDisplayExpr}, 0) * 0.3
-    + case when e.start_date >= ${sevenDaysAgoParam}::timestamptz then 1000 else 0 end * 0.2
-    + case
-        when e.end_date > ${nowParam}::timestamptz
-         and e.end_date <= ${sevenDaysFromNowParam}::timestamptz
-          then 500
-        else 0
-      end * 0.1
-  )`;
-  let candidateLimit = Math.max(
-    FEED_EVENT_FAST_MIN_CANDIDATES,
-    pageTarget * FEED_EVENT_FAST_CANDIDATE_FACTOR,
+  const projectedVolumeDisplayExpr = `
+    case
+      when candidate_market.volume_total is not null
+       and candidate_market.volume_total > 0
+        then candidate_market.volume_total
+      else null
+    end
+  `;
+  const projectedLiquidityDisplayExpr = `
+    coalesce(
+      nullif(candidate_market.liquidity, 0),
+      nullif(candidate_market.open_interest, 0)
+    )
+  `;
+  let projectedSortValue: string;
+  if (inputs.sort === "totalvol") {
+    projectedSortValue = projectedVolumeDisplayExpr;
+  } else if (inputs.sort === "liquidity") {
+    projectedSortValue = projectedLiquidityDisplayExpr;
+  } else if (inputs.sort === "openinterest") {
+    projectedSortValue = "candidate_market.open_interest";
+  } else if (inputs.sort === "time") {
+    const projectedEndTime = `coalesce(
+      candidate_market.close_time,
+      candidate_market.expiration_time,
+      candidate_market.event_end_date
+    )`;
+    projectedSortValue = `case
+      when ${projectedEndTime} is not null
+       and ${projectedEndTime} > ${nowParam}::timestamptz
+        then ${projectedEndTime}
+      else null
+    end`;
+  } else {
+    const sevenDaysAgoParam = add(inputs.sevenDaysAgo);
+    const sevenDaysFromNowParam = add(inputs.sevenDaysFromNow);
+    projectedSortValue = `(
+      coalesce(${projectedVolumeDisplayExpr}, 0) * 0.4
+      + coalesce(${projectedLiquidityDisplayExpr}, 0) * 0.3
+      + case
+          when candidate_market.event_start_date >= ${sevenDaysAgoParam}::timestamptz
+            then 1000
+          else 0
+        end * 0.2
+      + case
+          when candidate_market.event_end_date > ${nowParam}::timestamptz
+           and candidate_market.event_end_date <= ${sevenDaysFromNowParam}::timestamptz
+            then 500
+          else 0
+        end * 0.1
+    )`;
+  }
+  const rankingTargetParam = add(pageTarget);
+  let graceCandidateLimit = Math.max(
+    FEED_MARKET_GRACE_MIN_CANDIDATES,
+    pageTarget,
   );
-  const candidateLimitParam = add(candidateLimit);
-  const candidateLimitParamIndex = params.length - 1;
-  const targetParam = add(pageTarget);
+  const graceCandidateLimitParam = add(graceCandidateLimit);
+  const graceCandidateLimitParamIndex = params.length - 1;
+  const orderableCandidateCte = buildBroadOrderableMarketCandidatesCte({
+    includeRankingColumns: true,
+    materialized: true,
+    nowParam,
+    nowCloseParam,
+    extraMarketSql: candidateWhere,
+    ranking: {
+      graceLimitParam: graceCandidateLimitParam,
+      sortDir,
+      sortValueSql: projectedSortValue,
+      targetParam: rankingTargetParam,
+    },
+  });
   const sql = `
-    with ranked_market_candidates as materialized (
+    with ${orderableCandidateCte},
+    ranked_market_page as materialized (
       select
-        m.id,
-        m.venue_market_id,
-        row_number() over (
-          order by ${trendScoreExpr} ${sortDir} nulls last, m.venue_market_id
-        ) as full_ord
-      from unified_markets m
-      join unified_events e on e.id = m.event_id
-      where m.status = 'ACTIVE'
-        and e.status = 'ACTIVE'
-        and ${candidateWhereSql}
-        and ${limitParam}::integer >= 0
+        candidate_market.market_id,
+        candidate_market.venue_market_id,
+        (${projectedSortValue}) as sort_value
+      from orderable_market_candidates candidate_market
+      where ${limitParam}::integer >= 0
         and ${offsetParam}::integer >= 0
-      order by ${trendScoreExpr} ${sortDir} nulls last, m.venue_market_id
-      limit ${candidateLimitParam}
-    ),
-    valid_ranked_markets as materialized (
-      select ranked.id, ranked.full_ord
-      from ranked_market_candidates ranked
-      join unified_markets m on m.id = ranked.id
-      join unified_events e on e.id = m.event_id
-      left join polymarket_markets pm_filter
-        on pm_filter.id = m.venue_market_id
-       and m.venue = 'polymarket'
-      where ${availabilitySql}
+      order by sort_value ${sortDir} nulls last,
+        candidate_market.venue_market_id
+      limit ${limitParam}
+      offset ${offsetParam}
     )
     select
       coalesce(
-        (
-          select array_agg(page.id order by page.full_ord)
-          from (
-            select id, full_ord
-            from valid_ranked_markets
-            order by full_ord
-            limit ${targetParam}
-          ) page
+        array_agg(
+          market_id
+          order by sort_value ${sortDir} nulls last, venue_market_id
         ),
         '{}'::text[]
       ) as ids,
-      (select count(*)::int from ranked_market_candidates) as candidate_count
+      (
+        select count(*)::int
+        from orderable_market_candidates_pm_ranked_candidates
+      ) as pm_prefix_count
+    from ranked_market_page
   `;
 
   for (;;) {
-    params[candidateLimitParamIndex] = candidateLimit;
-    const rows = await queryRowsWithLocalSettings<FeedMarketCandidateStateRow>(
-      pool,
-      sql,
-      params,
-      {
-        workMem: FEED_HEAVY_QUERY_WORK_MEM,
-        statementTimeoutMs: feedFilterStatementTimeoutMs(),
-        jitOff: true,
-      },
-    );
-    const ids = rows[0]?.ids ?? [];
-    const candidateCount = Number(rows[0]?.candidate_count ?? 0);
-    if (ids.length >= pageTarget || candidateCount < candidateLimit) {
-      return ids.slice(inputs.offset, inputs.offset + inputs.limit);
+    params[graceCandidateLimitParamIndex] = graceCandidateLimit;
+    const rows =
+      await queryRowsWithLocalSettings<FeedProjectedMarketCandidateStateRow>(
+        pool,
+        sql,
+        params,
+        {
+          workMem: FEED_HEAVY_QUERY_WORK_MEM,
+          statementTimeoutMs: feedFilterStatementTimeoutMs(),
+          jitOff: true,
+        },
+      );
+    const state = rows[0];
+    const ids = state?.ids ?? [];
+    const pmPrefixCount = Number(state?.pm_prefix_count ?? 0);
+    if (ids.length < inputs.limit && pmPrefixCount >= graceCandidateLimit) {
+      graceCandidateLimit = expandFeedCandidateLimit(graceCandidateLimit);
+      continue;
     }
-    candidateLimit = expandFeedCandidateLimit(candidateLimit);
+    return ids;
   }
 }
 
