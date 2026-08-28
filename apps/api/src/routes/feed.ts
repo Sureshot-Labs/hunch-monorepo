@@ -589,8 +589,6 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
                 minProb: undefined,
                 maxProb: undefined,
               }),
-            fetchAllProbabilityMarketIds: () =>
-              fetchObservedCanonicalProbabilityMarketIds(pool, inputs),
           });
           probabilityEventRows = probabilityPage.eventRows;
           observedProbabilityMarketIds = probabilityPage.marketIds;

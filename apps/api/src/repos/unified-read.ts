@@ -159,11 +159,44 @@ function buildEventHasOrderableMarketSql(args: {
   eventAlias?: string;
   nowParam: string;
   nowCloseParam?: string;
+  extraMarketSql?: string[];
 }): string {
   return buildEventHasBroadOrderableMarketSql({
     ...args,
     renderableMarketSql: buildRenderableMarketSql({ alias: "om" }),
   });
+}
+
+function buildExactEventVolumeSortSql(args: {
+  eventVolumeDisplayExpr: string;
+  nowParam: string;
+}): string {
+  const marketAlias = "fallback_volume_market";
+  const polymarketAlias = "fallback_volume_polymarket";
+  const marketVolumeExpr = `case
+    when ${marketAlias}.volume_total is not null
+     and ${marketAlias}.volume_total > 0
+      then ${marketAlias}.volume_total
+    else null
+  end`;
+  return `coalesce(
+    ${args.eventVolumeDisplayExpr},
+    (
+      select sum(coalesce(${marketVolumeExpr}, 0))
+      from unified_markets ${marketAlias}
+      left join polymarket_markets ${polymarketAlias}
+        on ${polymarketAlias}.id = ${marketAlias}.venue_market_id
+       and ${marketAlias}.venue = 'polymarket'
+      where ${marketAlias}.event_id = e.id
+        and ${buildRenderableMarketSql({ alias: marketAlias })}
+        and ${buildBroadOrderableMarketSql({
+          marketAlias,
+          eventAlias: "e",
+          nowParam: args.nowParam,
+          pmAlias: polymarketAlias,
+        })}
+    )
+  )`;
 }
 
 export function buildEventDurationExistsSql(args: {
@@ -930,6 +963,8 @@ function probabilityMarketCacheKey(
       inputs.nowParam,
     ),
     ageSinceMinutes: relativeBoundaryMinutes(inputs.ageSince, inputs.nowParam),
+    minProb: inputs.minProb ?? null,
+    maxProb: inputs.maxProb ?? null,
     candidateEventIdsHash: inputs.candidateEventIds
       ? createHash("sha1")
           .update([...inputs.candidateEventIds].sort().join("\0"))
@@ -1061,58 +1096,89 @@ async function fetchObservedCanonicalProbabilityMarketsUncached(
       },
     );
 
-  const tokenIds = Array.from(
+  const fetchTopRows = async (
+    tokenIds: string[],
+  ): Promise<Map<string, CanonicalProbabilityTopRow>> => {
+    if (!tokenIds.length) return new Map();
+
+    // Keep the token array as a direct parameter so PostgreSQL sees its real
+    // cardinality and can choose a bitmap heap scan instead of thousands of
+    // underestimated random primary-key probes.
+    const topRows =
+      await queryRowsWithLocalSettings<CanonicalProbabilityTopRow>(
+        pool,
+        `
+          select token_id, best_bid, best_ask
+          from unified_token_top_latest
+          where token_id = any($1::text[])
+        `,
+        [tokenIds],
+        {
+          jitOff: true,
+          statementTimeoutMs: env.feedFilterTimeoutMs,
+          workMem: FEED_HEAVY_QUERY_WORK_MEM,
+        },
+      );
+    return new Map(topRows.map((topRow) => [topRow.token_id, topRow]));
+  };
+
+  const yesTokenIds = Array.from(
     new Set(
-      tokenPairs.flatMap((tokenPair) =>
-        [tokenPair.token_yes, tokenPair.token_no].filter(
-          (tokenId): tokenId is string => tokenId != null,
-        ),
-      ),
+      tokenPairs
+        .map((tokenPair) => tokenPair.token_yes)
+        .filter((tokenId): tokenId is string => tokenId != null),
     ),
   );
-  if (!tokenIds.length) return [];
-
-  // Keep this as a separate query with the token array as a direct parameter.
-  // PostgreSQL can then see its real cardinality and choose a bitmap heap scan;
-  // hiding the same array behind an InitPlan makes it assume only a handful of
-  // rows and perform tens of thousands of random primary-key probes instead.
-  const topRows = await queryRowsWithLocalSettings<CanonicalProbabilityTopRow>(
-    pool,
-    `
-      select token_id, best_bid, best_ask
-      from unified_token_top_latest
-      where token_id = any($1::text[])
-    `,
-    [tokenIds],
-    {
-      jitOff: true,
-      statementTimeoutMs: env.feedFilterTimeoutMs,
-      workMem: FEED_HEAVY_QUERY_WORK_MEM,
-    },
-  );
-  const topByTokenId = new Map(
-    topRows.map((topRow) => [topRow.token_id, topRow]),
-  );
-
-  return tokenPairs.flatMap((tokenPair): ObservedProbabilityMarketRow[] => {
+  const yesTopByTokenId = await fetchTopRows(yesTokenIds);
+  const narrowedTokenPairs = tokenPairs.filter((tokenPair) => {
     const yesTop = tokenPair.token_yes
-      ? topByTokenId.get(tokenPair.token_yes)
+      ? yesTopByTokenId.get(tokenPair.token_yes)
       : undefined;
-    const noTop = tokenPair.token_no
-      ? topByTokenId.get(tokenPair.token_no)
-      : undefined;
-    const probability = buildObservedCanonicalMarketTop({
+    const observedYes = buildObservedCanonicalMarketTop({
       yesTop: yesTop
         ? { bestBid: yesTop.best_bid, bestAsk: yesTop.best_ask }
         : undefined,
-      noTop: noTop
-        ? { bestBid: noTop.best_bid, bestAsk: noTop.best_ask }
-        : undefined,
-    }).probability;
-    return probability == null
-      ? []
-      : [{ market_id: tokenPair.market_id, probability }];
+    });
+    if (observedYes.blockers.includes("crossed_book")) return false;
+    if (observedYes.probability == null) return true;
+    if (inputs.minProb != null && observedYes.probability < inputs.minProb) {
+      return false;
+    }
+    return !(
+      inputs.maxProb != null && observedYes.probability > inputs.maxProb
+    );
   });
+  const noTokenIds = Array.from(
+    new Set(
+      narrowedTokenPairs
+        .map((tokenPair) => tokenPair.token_no)
+        .filter((tokenId): tokenId is string => tokenId != null),
+    ),
+  );
+  const noTopByTokenId = await fetchTopRows(noTokenIds);
+
+  return narrowedTokenPairs.flatMap(
+    (tokenPair): ObservedProbabilityMarketRow[] => {
+      const yesTop = tokenPair.token_yes
+        ? yesTopByTokenId.get(tokenPair.token_yes)
+        : undefined;
+      const noTop = tokenPair.token_no
+        ? noTopByTokenId.get(tokenPair.token_no)
+        : undefined;
+      const probability = buildObservedCanonicalMarketTop({
+        yesTop: yesTop
+          ? { bestBid: yesTop.best_bid, bestAsk: yesTop.best_ask }
+          : undefined,
+        noTop: noTop
+          ? { bestBid: noTop.best_bid, bestAsk: noTop.best_ask }
+          : undefined,
+      }).probability;
+      if (probability == null) return [];
+      if (inputs.minProb != null && probability < inputs.minProb) return [];
+      if (inputs.maxProb != null && probability > inputs.maxProb) return [];
+      return [{ market_id: tokenPair.market_id, probability }];
+    },
+  );
 }
 
 export async function fetchObservedCanonicalProbabilityMarketIds(
@@ -1860,6 +1926,20 @@ function requiresFeedEventMarketJoin(
   );
 }
 
+function canUseFeedEventMaxSpreadFastPath(inputs: FeedInputs): boolean {
+  return (
+    inputs.maxSpread != null &&
+    !inputs.marketIds?.length &&
+    inputs.minProb == null &&
+    inputs.maxProb == null &&
+    inputs.eventScope == null &&
+    inputs.minVol <= 1e-9 &&
+    inputs.minLiquidity <= 0 &&
+    !inputs.durationMinutes?.length &&
+    (inputs.sort == null || inputs.sort === "trending")
+  );
+}
+
 function buildFeedEventJoinHaving(args: {
   add: PgParamAdder;
   inputs: Pick<
@@ -2031,7 +2111,8 @@ async function fetchFeedEventIdsFast(
     return fetchFeedChange24hEventIdsFast(pool, inputs);
   }
   if (!isFeedEventFastPathSort(inputs)) return null;
-  if (requiresFeedEventMarketJoin(inputs)) return null;
+  const useMaxSpreadFastPath = canUseFeedEventMaxSpreadFastPath(inputs);
+  if (requiresFeedEventMarketJoin(inputs) && !useMaxSpreadFastPath) return null;
   if (buildFeedSearchPlan(inputs.q).hasSearch) return null;
 
   const pageTarget = inputs.limit + inputs.offset;
@@ -2060,12 +2141,16 @@ async function fetchFeedEventIdsFast(
       `${eventLiquidityDisplayExpr} >= ${add(inputs.minLiquidity)}`,
     );
   }
+  const maxSpreadParam = useMaxSpreadFastPath
+    ? add(inputs.maxSpread as number)
+    : null;
   const eventWhereSql = eventWhere.length ? eventWhere.join(" and ") : "true";
   const candidateLimitParam = add(candidateLimit);
   const candidateLimitParamIndex = params.length - 1;
   const targetParam = add(pageTarget);
 
   const eventOpenInterestSortExpr = "coalesce(nullif(e.open_interest, 0), 0)";
+  let filteredEventSortValue: string | null = null;
   let candidateSourceSql: string | null = null;
 
   if (inputs.sort === "trending_v2") {
@@ -2085,6 +2170,10 @@ async function fetchFeedEventIdsFast(
         where ${eventWhereSql}
           and e.venue <> 'limitless'
           and et.volume_24h > 0
+          and et.updated_at = (
+            select max(event_metric_generation.updated_at)
+            from unified_event_trade_24h event_metric_generation
+          )
         union all
         select
           e.id,
@@ -2114,13 +2203,20 @@ async function fetchFeedEventIdsFast(
     else if (inputs.sort == null || inputs.sort === "trending") {
       const sevenDaysAgo = add(inputs.sevenDaysAgo);
       const sevenDaysFromNow = add(inputs.sevenDaysFromNow);
-      eventOrder = `
-        (coalesce(${eventVolumeDisplayExpr}, 0) * 0.4 +
+      const buildTrendingSortValue = (volumeSql: string) => `
+        (coalesce(${volumeSql}, 0) * 0.4 +
          coalesce(${eventLiquidityDisplayExpr}, 0) * 0.3 +
          case when e.start_date >= ${sevenDaysAgo}::timestamptz then 1000 else 0 end * 0.2 +
          case when e.end_date > ${nowParam}::timestamptz and e.end_date <= ${sevenDaysFromNow}::timestamptz then 500 else 0 end * 0.1
-        ) ${sortDir} nulls last, e.id
+        )
       `;
+      const candidateSortValue = buildTrendingSortValue(eventVolumeDisplayExpr);
+      eventOrder = `${candidateSortValue} ${sortDir} nulls last, e.id`;
+      if (useMaxSpreadFastPath) {
+        filteredEventSortValue = buildTrendingSortValue(
+          buildExactEventVolumeSortSql({ eventVolumeDisplayExpr, nowParam }),
+        );
+      }
     }
 
     if (eventOrder) {
@@ -2145,19 +2241,45 @@ async function fetchFeedEventIdsFast(
     valid_ranked_events as materialized (
       select
         c.id,
-        c.full_ord
+        c.full_ord,
+        ${
+          filteredEventSortValue
+            ? `${filteredEventSortValue} as filtered_sort_value`
+            : "null::numeric as filtered_sort_value"
+        }
       from ranked_event_candidates c
       join unified_events e on e.id = c.id
-      where ${buildEventHasOrderableMarketSql({ eventAlias: "e", nowParam })}
+      where ${buildEventHasOrderableMarketSql({
+        eventAlias: "e",
+        nowParam,
+        extraMarketSql: maxSpreadParam
+          ? [
+              `om.best_bid is not null`,
+              `om.best_ask is not null`,
+              `(om.best_ask - om.best_bid) <= ${maxSpreadParam}`,
+            ]
+          : [],
+      })}
     )
     select
       coalesce(
         (
-          select array_agg(page.id order by page.full_ord)
+          select array_agg(
+            page.id
+            order by ${
+              filteredEventSortValue
+                ? `page.filtered_sort_value ${sortDir} nulls last, page.id`
+                : "page.full_ord"
+            }
+          )
           from (
-            select id, full_ord
+            select id, full_ord, filtered_sort_value
             from valid_ranked_events
-            order by full_ord
+            order by ${
+              filteredEventSortValue
+                ? `filtered_sort_value ${sortDir} nulls last, id`
+                : "full_ord"
+            }
             limit ${targetParam}
           ) page
         ),
@@ -3828,7 +3950,11 @@ async function fetchFeedMarketIdsFast(
     const streamCandidateLimitParam = add(streamCandidateLimit);
     const streamCandidateLimitParamIndex = params.length - 1;
     const sql = `
-        with non_limitless_metric_prefix as materialized (
+        with non_limitless_metric_generation as materialized (
+          select max(metric_generation.updated_at) as updated_at
+          from unified_market_trade_24h metric_generation
+        ),
+        non_limitless_metric_prefix as materialized (
           ${
             includeNonLimitless
               ? `
@@ -3837,6 +3963,10 @@ async function fetchFeedMarketIdsFast(
             metric.volume_24h
           from unified_market_trade_24h metric
           where metric.volume_24h > 0
+            and metric.updated_at = (
+              select metric_generation.updated_at
+              from non_limitless_metric_generation metric_generation
+            )
           order by metric.volume_24h desc nulls last, metric.market_id
           limit ${streamCandidateLimitParam}
           `
