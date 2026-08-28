@@ -121,6 +121,7 @@ assert.deepEqual(
     ...commonInputs,
     minProb: 0.7,
     maxProb: undefined,
+    candidateEventIds: ["event-1", "event-2"],
     venues: ["polymarket", "limitless"],
     categories: ["sports"],
     endWithin: new Date(now.getTime() + 24 * 60 * 60 * 1000).toISOString(),
@@ -135,6 +136,10 @@ assert.match(
 assert.match(
   candidateSql,
   /probability_candidate_events as materialized[\s\S]*?lower\(e\.category\)/i,
+);
+assert.match(
+  candidateSql,
+  /unnest\(\$\d+::text\[\]\) as selected_event\(event_id\)[\s\S]*?join unified_events e on e\.id = selected_event\.event_id/i,
 );
 assert.match(
   candidateSql,
@@ -158,10 +163,7 @@ assert.match(
   candidateSql,
   /canonical_token_pairs as materialized[\s\S]*?left join canonical_token_mappings token_mapping[\s\S]*?group by probability_candidate\.market_id/i,
 );
-assert.doesNotMatch(
-  candidateSql,
-  /left join lateral\s*\([\s\S]*?from unified_market_tokens token_mapping/i,
-);
+assert.doesNotMatch(candidateSql, /left join lateral/i);
 assert.match(candidateSql, /canonical_token_pairs as materialized/i);
 assert.doesNotMatch(candidateSql, /canonical_token_rows as materialized/i);
 assert.doesNotMatch(candidateSql, /canonical_top_rows as materialized/i);
@@ -176,6 +178,32 @@ assert.ok(
     /SET LOCAL statement_timeout = '\d+ms'/i.test(sql),
   ),
 );
+const candidateBatchQueryCount = localStatements.filter((sql) =>
+  /select market_id, token_yes, token_no\s+from canonical_token_pairs/i.test(
+    sql,
+  ),
+).length;
+assert.deepEqual(
+  await fetchObservedCanonicalProbabilityMarketIds(pool, {
+    ...commonInputs,
+    minProb: 0.4,
+    maxProb: 0.6,
+    candidateEventIds: ["event-2", "event-1"],
+    venues: ["polymarket", "limitless"],
+    categories: ["sports"],
+    endWithin: new Date(now.getTime() + 24 * 60 * 60 * 1000).toISOString(),
+  }),
+  ["market-2"],
+);
+assert.equal(
+  localStatements.filter((sql) =>
+    /select market_id, token_yes, token_no\s+from canonical_token_pairs/i.test(
+      sql,
+    ),
+  ).length,
+  candidateBatchQueryCount,
+);
+console.log("ok - candidate event batches share cached canonical tops");
 console.log("ok - feed probability candidates are scoped and time-bounded");
 
 const probabilityQueryCountBeforeSingleFlight = localStatements.filter((sql) =>

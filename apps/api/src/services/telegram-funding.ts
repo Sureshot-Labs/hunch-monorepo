@@ -221,10 +221,13 @@ export async function loadTelegramFundingBuyReturnSourceIntentForUpdate(
         on auth.id = intent.authorization_id
        and auth.user_id = intent.user_id
        and auth.telegram_user_id = intent.telegram_user_id
-       and auth.enabled = true
        and (
          (intent.delivery_mode = 'bot_submit'
+           and auth.enabled = true
            and intent.venue = any(auth.enabled_venues))
+         -- A v2 app handoff is signed by the user in the Mini App. Server-bot
+         -- enablement may be safety-disabled independently; the joins below
+         -- still pin the sealed Telegram identity and current owned wallet.
          or (intent.delivery_mode = 'app_handoff'
            and auth.wallet_chain = 'ethereum')
        )

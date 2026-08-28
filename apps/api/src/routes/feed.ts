@@ -14,6 +14,7 @@ import {
 import { markHotTokens } from "../lib/hot-tokens.js";
 import { requestPriceRefreshForTokens } from "../lib/price-refresh.js";
 import { isPgStatementTimeoutError } from "../lib/postgres-errors.js";
+import { fetchProbabilityFeedEventPage } from "../probability-feed-page.js";
 import type { FeedEvent, TokenPair } from "../server-types.js";
 import {
   feedQuerySchema,
@@ -40,6 +41,9 @@ const FOR_YOU_KNN_PAD = 50;
 const FOR_YOU_KNN_MULTIPLIER = 8;
 const FOR_YOU_MAX_KNN = 300;
 const FOR_YOU_RECENT_CLOSE_HOURS = 24;
+const PROBABILITY_EVENT_PROBE_WINDOW = 300;
+const PROBABILITY_EVENT_PROBE_BATCH = 100;
+const PROBABILITY_EVENT_PROBE_MAX = 8000;
 
 function applyFeedCacheHeaders(input: {
   reply: FastifyReply;
@@ -554,9 +558,46 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
 
       let data: FeedEvent[] = [];
       try {
-        const observedProbabilityMarketIds = hasProbabilityFilter
-          ? await fetchObservedCanonicalProbabilityMarketIds(pool, inputs)
-          : null;
+        let probabilityEventRows: Awaited<
+          ReturnType<typeof fetchFeedEventIds>
+        > | null = null;
+        let observedProbabilityMarketIds: string[] | null = null;
+
+        if (hasProbabilityFilter && view !== "markets") {
+          const probabilityPage = await fetchProbabilityFeedEventPage({
+            requestedLimit: limit,
+            candidateWindowSize: PROBABILITY_EVENT_PROBE_WINDOW,
+            probabilityBatchSize: PROBABILITY_EVENT_PROBE_BATCH,
+            maxCandidates: PROBABILITY_EVENT_PROBE_MAX,
+            fetchCandidateEvents: ({ limit: candidateLimit, offset }) =>
+              fetchFeedEventIds(pool, {
+                ...inputs,
+                limit: candidateLimit,
+                offset,
+                minProb: undefined,
+                maxProb: undefined,
+              }),
+            fetchBatchProbabilityMarketIds: (candidateEventIds) =>
+              fetchObservedCanonicalProbabilityMarketIds(pool, {
+                ...inputs,
+                candidateEventIds,
+              }),
+            fetchFilteredEvents: (marketIds) =>
+              fetchFeedEventIds(pool, {
+                ...inputs,
+                marketIds,
+                minProb: undefined,
+                maxProb: undefined,
+              }),
+            fetchAllProbabilityMarketIds: () =>
+              fetchObservedCanonicalProbabilityMarketIds(pool, inputs),
+          });
+          probabilityEventRows = probabilityPage.eventRows;
+          observedProbabilityMarketIds = probabilityPage.marketIds;
+        } else if (hasProbabilityFilter) {
+          observedProbabilityMarketIds =
+            await fetchObservedCanonicalProbabilityMarketIds(pool, inputs);
+        }
         const databaseInputs = hasProbabilityFilter
           ? {
               ...inputs,
@@ -572,7 +613,9 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
           const rows = await fetchFeedMarketsDirect(pool, databaseInputs);
           data = buildFeedData({ rows, eventIds: [], view });
         } else {
-          const eventRows = await fetchFeedEventIds(pool, databaseInputs);
+          const eventRows =
+            probabilityEventRows ??
+            (await fetchFeedEventIds(pool, databaseInputs));
           const eventIds = eventRows.map((row) => row.id);
           const useCachedChange24h = eventRows.some(
             (row) => row.cached_change_24h === true,

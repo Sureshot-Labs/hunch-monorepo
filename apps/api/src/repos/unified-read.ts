@@ -1,5 +1,6 @@
 import type { Pool } from "@hunch/infra";
 import { buildObservedCanonicalMarketTop } from "@hunch/shared";
+import { createHash } from "node:crypto";
 import type { QueryResultRow } from "pg";
 import { env } from "../env.js";
 import {
@@ -854,7 +855,9 @@ type ProbabilityMarketFilterInputs = Pick<
   | "nowParam"
   | "sevenDaysAgo"
   | "sevenDaysFromNow"
->;
+> & {
+  candidateEventIds?: string[];
+};
 
 type ProbabilityMarketCacheState = {
   values: Map<
@@ -927,6 +930,11 @@ function probabilityMarketCacheKey(
       inputs.nowParam,
     ),
     ageSinceMinutes: relativeBoundaryMinutes(inputs.ageSince, inputs.nowParam),
+    candidateEventIdsHash: inputs.candidateEventIds
+      ? createHash("sha1")
+          .update([...inputs.candidateEventIds].sort().join("\0"))
+          .digest("hex")
+      : null,
   });
 }
 
@@ -978,10 +986,18 @@ async function fetchObservedCanonicalProbabilityMarketsUncached(
     includeOrderableExists: false,
     includeDurationExists: false,
   });
+  const candidateEventIdsParam = inputs.candidateEventIds?.length
+    ? add(inputs.candidateEventIds)
+    : null;
   const probabilityCandidateEventsCte = `
     probability_candidate_events as materialized (
       select e.id
-      from unified_events e
+      from ${
+        candidateEventIdsParam
+          ? `unnest(${candidateEventIdsParam}::text[]) as selected_event(event_id)
+      join unified_events e on e.id = selected_event.event_id`
+          : "unified_events e"
+      }
       where ${probabilityEventWhere.join(" and ")}
     )
   `;
@@ -3554,7 +3570,9 @@ type FeedProjectedMarketCandidateStateRow = FeedMarketIdPageRow & {
 
 type FeedTrendingV2CandidateStateRow = {
   ids: string[];
+  limitless_remainder_below_page: boolean | null;
   non_limitless_prefix_count: number;
+  non_limitless_remainder_below_page: boolean | null;
   non_limitless_valid_count: number;
   limitless_candidate_count: number;
   limitless_valid_count: number;
@@ -3879,6 +3897,7 @@ async function fetchFeedMarketIdsFast(
           select
             m.id,
             m.venue_market_id,
+            ${limitlessTrendExpr} as trend_score,
             row_number() over (
               order by ${limitlessTrendExpr} desc nulls last, m.venue_market_id
             ) as full_ord
@@ -3894,6 +3913,7 @@ async function fetchFeedMarketIdsFast(
           select
             null::text as id,
             null::text as venue_market_id,
+            null::numeric as trend_score,
             null::bigint as full_ord
           where ${streamCandidateLimitParam}::integer >= 0 and false
           `
@@ -3903,7 +3923,7 @@ async function fetchFeedMarketIdsFast(
           select
             m.id,
             m.venue_market_id,
-            ${limitlessTrendExpr} as trend_score
+            ranked.trend_score
           from limitless_ranked_candidates ranked
           join unified_markets m on m.id = ranked.id
           join unified_events e on e.id = m.event_id
@@ -3935,6 +3955,14 @@ async function fetchFeedMarketIdsFast(
           (select count(*)::int from non_limitless_candidates) as non_limitless_valid_count,
           (select count(*)::int from limitless_ranked_candidates) as limitless_candidate_count,
           (select count(*)::int from limitless_candidates) as limitless_valid_count,
+          (
+            (select min(trend_score) from combined_page)
+            > (select min(volume_24h) from non_limitless_metric_prefix)
+          ) as non_limitless_remainder_below_page,
+          (
+            (select min(trend_score) from combined_page)
+            > (select min(trend_score) from limitless_ranked_candidates)
+          ) as limitless_remainder_below_page,
           ${limitParam}::integer as requested_limit,
           ${offsetParam}::integer as requested_offset
       `;
@@ -3964,13 +3992,20 @@ async function fetchFeedMarketIdsFast(
         state?.limitless_candidate_count ?? 0,
       );
       const limitlessValidCount = Number(state?.limitless_valid_count ?? 0);
+      const pageIsFull = ids.length >= pageTarget;
+      const nonLimitlessRemainderBelowPage =
+        pageIsFull && state?.non_limitless_remainder_below_page === true;
+      const limitlessRemainderBelowPage =
+        pageIsFull && state?.limitless_remainder_below_page === true;
       if (
         (includeNonLimitless &&
           nonLimitlessValidCount < pageTarget &&
-          nonLimitlessPrefixCount >= streamCandidateLimit) ||
+          nonLimitlessPrefixCount >= streamCandidateLimit &&
+          !nonLimitlessRemainderBelowPage) ||
         (includeLimitless &&
           limitlessValidCount < pageTarget &&
-          limitlessCandidateCount >= streamCandidateLimit)
+          limitlessCandidateCount >= streamCandidateLimit &&
+          !limitlessRemainderBelowPage)
       ) {
         streamCandidateLimit = expandFeedCandidateLimit(streamCandidateLimit);
         continue;

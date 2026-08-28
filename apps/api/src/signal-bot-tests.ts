@@ -7667,6 +7667,35 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
+    name: "funding return setup failure offers a safe market escape and Home",
+    run: () => {
+      const intentId = "11111111-1111-4111-8111-111111111111";
+      const message =
+        telegramBotTradingTestHooks.buildTelegramFundingBuyReturnOpenFailureMessage(
+          {
+            intentId,
+            marketTitle: "Test market",
+            venue: "limitless",
+          },
+        );
+      assert.match(message.text, /No order was submitted/u);
+      assert.doesNotMatch(message.text, /existing trade/u);
+      assert.deepEqual(
+        message.reply_markup?.inline_keyboard
+          .flat()
+          .map((button) =>
+            "callback_data" in button
+              ? [button.text, button.callback_data]
+              : [button.text, null],
+          ),
+        [
+          ["🎯 Open market", `hbt:open_market:${intentId}`],
+          ["🏠 Home", "hm:v1:home"],
+        ],
+      );
+    },
+  },
+  {
     name: "Telegram venue status serializes ready, setup, funding and unavailable states",
     run: () => {
       const authorization = {

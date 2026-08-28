@@ -171,6 +171,34 @@ try {
     ],
   );
   await client.query(
+    `update telegram_bot_trading_authorizations
+        set enabled = false,
+            disabled_at = now(),
+            updated_at = now()
+      where id = $1::uuid`,
+    [authorizationId],
+  );
+  const inactiveServerAppHandoffSource =
+    await loadTelegramFundingBuyReturnSourceIntentForUpdate(client, {
+      sourceIntentId: appHandoffIntentId,
+      telegramAccountId,
+    });
+  assert.equal(
+    inactiveServerAppHandoffSource?.authorization_id,
+    authorizationId,
+    "a client-signed app handoff keeps its exact owned-wallet authority when unattended bot execution is disabled",
+  );
+  const inactiveServerBotSubmitSource =
+    await loadTelegramFundingBuyReturnSourceIntentForUpdate(client, {
+      sourceIntentId,
+      telegramAccountId,
+    });
+  assert.equal(
+    inactiveServerBotSubmitSource,
+    null,
+    "a server-submitted Buy must still require an enabled bot authorization",
+  );
+  await client.query(
     `update telegram_trade_intents
         set status = 'confirming'
       where id = $1::uuid`,
