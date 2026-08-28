@@ -376,6 +376,7 @@ function sourceFactsForComponent(input: {
   availableRaw: string;
   requiredAmount: Money;
   confirmedSourceAmount?: Money | null;
+  quoteAvailableSourceCapacity?: boolean;
   purpose?: FundingDiscoveryRequest["purpose"];
   destinationLocationPatternId?: string;
   maximumSlippageBps: number;
@@ -429,7 +430,15 @@ function sourceFactsForComponent(input: {
         )
           ? BigInt(input.confirmedSourceAmount.raw)
           : null;
-      if (confirmedSourceRaw != null) {
+      if (input.quoteAvailableSourceCapacity === true) {
+        raw = spendableRaw.toString();
+        // This server-only discovery mode measures the maximum executable
+        // output of the owned balance. Quote the full input instead of asking
+        // Relay for an unattainable expected output (especially for native
+        // SOL), then retain Relay's validated minimum output as the capacity.
+        minimumDestinationRaw = "1";
+        quoteModeOverride = "exact_input";
+      } else if (confirmedSourceRaw != null) {
         raw =
           confirmedSourceRaw > 0n && confirmedSourceRaw <= spendableRaw
             ? confirmedSourceRaw.toString()
@@ -548,6 +557,7 @@ export function deriveProductionRelayEligibleSourceFacts(input: {
   policy: FundingRuntimePolicy;
   requiredAmount: Money;
   confirmedSourceAmount?: Money | null;
+  quoteAvailableSourceCapacity?: boolean;
   destinationLocationPatternId?: string;
   purpose?: FundingDiscoveryRequest["purpose"];
   maximumSlippageBps?: number;
@@ -604,6 +614,8 @@ export function deriveProductionRelayEligibleSourceFacts(input: {
         availableRaw: availability.availableRaw,
         requiredAmount: input.requiredAmount,
         confirmedSourceAmount: input.confirmedSourceAmount,
+        quoteAvailableSourceCapacity:
+          input.quoteAvailableSourceCapacity === true,
         purpose: input.purpose,
         destinationLocationPatternId: input.destinationLocationPatternId,
         maximumSlippageBps:
@@ -1091,6 +1103,8 @@ export class ProductionFundingSourcePlanner {
         policy,
         requiredAmount: input.requiredAmount,
         confirmedSourceAmount: input.request.confirmedSourceAmount,
+        quoteAvailableSourceCapacity:
+          input.request.serverQuoteAvailableSourceCapacity === true,
         destinationLocationPatternId:
           input.destination.destinationLocationPatternId,
         purpose: input.request.purpose,

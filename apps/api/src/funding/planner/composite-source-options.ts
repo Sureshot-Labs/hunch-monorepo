@@ -359,6 +359,125 @@ function selectSubset(
   return viable[0]?.legs ?? null;
 }
 
+function candidateFeeWithinLimits(input: {
+  legs: readonly CompositeCandidate[];
+  destinationAsset: Money["asset"];
+  destinationUnitPriceUsd: string;
+  maximumFeeUsd: string;
+  maximumFeeBps: number;
+  maximumSlippageBps: number;
+}): Readonly<{ feeUsd: string; minimumRaw: bigint }> | null {
+  let minimumRaw = 0n;
+  for (const item of input.legs) {
+    assertSameAsset(
+      item.leg.minimumDestination.asset,
+      input.destinationAsset,
+      "account funding capacity destination",
+    );
+    const legMinimumRaw = rawAmount(item.leg.minimumDestination.raw);
+    const legExpectedRaw = rawAmount(item.leg.expectedDestination.raw);
+    if (
+      legExpectedRaw < legMinimumRaw ||
+      legMinimumRaw * 10_000n <
+        legExpectedRaw * BigInt(10_000 - input.maximumSlippageBps)
+    ) {
+      return null;
+    }
+    minimumRaw += legMinimumRaw;
+  }
+  if (minimumRaw <= 0n) return null;
+  const feeValues = input.legs.map((item) => estimatedFeeUsd(item.source));
+  const feeUsd = feeValues.some((value) => value == null)
+    ? null
+    : addUnsignedDecimals(feeValues as string[]);
+  if (feeUsd == null) return null;
+  const minimumUsd = multiplyRawByUnitPrice({
+    raw: minimumRaw.toString(),
+    decimals: input.destinationAsset.decimals,
+    unitPriceUsd: input.destinationUnitPriceUsd,
+  });
+  if (
+    compareUnsignedDecimals(feeUsd, input.maximumFeeUsd) > 0 ||
+    compareUnsignedDecimals(
+      multiplyUnsignedDecimals(feeUsd, "10000"),
+      multiplyUnsignedDecimals(minimumUsd, input.maximumFeeBps.toString()),
+    ) > 0
+  ) {
+    return null;
+  }
+  return { feeUsd, minimumRaw };
+}
+
+/**
+ * Returns the largest destination minimum that the already-validated owned
+ * source quotes can produce without external ingress. Capacity discovery
+ * quotes every owned source at exact input; this bounded subset search then
+ * applies the same compatibility and aggregate fee rules as a real composite
+ * plan. A null result is fail-closed (including candidate overflow).
+ */
+export function maximumInternalFundingDestinationRaw(
+  input: Readonly<{
+    candidates: readonly PlannedSourceOption[];
+    destinationAsset: Money["asset"];
+    destinationUnitPriceUsd: string;
+    maximumFeeUsd: string;
+    maximumFeeBps: number;
+    maximumSlippageBps: number;
+    executionBoundary?: "automatic" | "client_handoff";
+    excludedSourceLocationIds?: readonly string[];
+  }>,
+): bigint | null {
+  const executionBoundary = input.executionBoundary ?? "automatic";
+  const excludedSourceLocationIds = new Set(
+    input.excludedSourceLocationIds ?? [],
+  );
+  const eligible = input.candidates.filter((source) => {
+    const sourceKind = source.option.source.kind;
+    const minimum = source.option.minimumDestination;
+    const spendsExcludedLocation = fundingEconomicSourceReservations(
+      source.commitPlan.reservations,
+    ).some(({ reservation }) =>
+      excludedSourceLocationIds.has(reservation.locationId),
+    );
+    return (
+      (sourceKind === "owned_location" || sourceKind === "venue_preparation") &&
+      !spendsExcludedLocation &&
+      (executionBoundary === "client_handoff"
+        ? plannedSourceRunsWithClientWalletActions(source)
+        : source.compositeEligible === true &&
+          commitPlanRunsWithoutUserWalletAction(source.commitPlan)) &&
+      minimum != null &&
+      rawAmount(minimum.raw) > 0n
+    );
+  });
+  if (eligible.length === 0) return 0n;
+  if (eligible.length > MAX_COMPOSITE_CANDIDATES) return null;
+
+  const candidates = eligible.map(candidate);
+  const selections = [
+    ...candidates.map((entry) => [entry] as const),
+    ...candidateSubsets(candidates),
+  ];
+  let maximumRaw = 0n;
+  for (const legs of selections) {
+    if (legs.length > 1 && selectedCandidateCompatibilityIssue(legs)) {
+      continue;
+    }
+    const economics = candidateFeeWithinLimits({
+      legs,
+      destinationAsset: input.destinationAsset,
+      destinationUnitPriceUsd: input.destinationUnitPriceUsd,
+      maximumFeeUsd: input.maximumFeeUsd,
+      maximumFeeBps: input.maximumFeeBps,
+      maximumSlippageBps: input.maximumSlippageBps,
+    });
+    if (economics && economics.minimumRaw > maximumRaw) {
+      maximumRaw = economics.minimumRaw;
+    }
+  }
+  return maximumRaw;
+}
+
 function candidateOrder(
   left: CompositeCandidate,
   right: CompositeCandidate,

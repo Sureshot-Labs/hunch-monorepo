@@ -10,7 +10,10 @@ import type {
   SourceOption,
 } from "../../domain/types.js";
 import type { FundingCommitPlan } from "../../persistence/funding-operation-repository.js";
-import { buildCompositeSourceOption } from "../../planner/composite-source-options.js";
+import {
+  buildCompositeSourceOption,
+  maximumInternalFundingDestinationRaw,
+} from "../../planner/composite-source-options.js";
 import {
   planProductionFundingSourceBoundaries,
   remainingFundingRequirementAfterVenuePreparation,
@@ -1028,6 +1031,75 @@ assert.equal(
   null,
 );
 
+assert.equal(
+  maximumInternalFundingDestinationRaw({
+    candidates: [base, solana],
+    destinationAsset: DESTINATION_ASSET,
+    destinationUnitPriceUsd: "1",
+    maximumFeeUsd: "1",
+    maximumFeeBps: 2_000,
+    maximumSlippageBps: 500,
+  }),
+  10_000_000n,
+);
+assert.equal(
+  maximumInternalFundingDestinationRaw({
+    candidates: [base, solana],
+    destinationAsset: DESTINATION_ASSET,
+    destinationUnitPriceUsd: "1",
+    maximumFeeUsd: "1",
+    maximumFeeBps: 2_000,
+    maximumSlippageBps: 500,
+    excludedSourceLocationIds: [baseReservation.locationId],
+  }),
+  6_030_000n,
+);
+assert.equal(
+  maximumInternalFundingDestinationRaw({
+    candidates: [base, solana],
+    destinationAsset: DESTINATION_ASSET,
+    destinationUnitPriceUsd: "1",
+    maximumFeeUsd: "0.05",
+    maximumFeeBps: 2_000,
+    maximumSlippageBps: 500,
+  }),
+  3_970_000n,
+);
+assert.equal(
+  maximumInternalFundingDestinationRaw({
+    candidates: [base, solana],
+    destinationAsset: DESTINATION_ASSET,
+    destinationUnitPriceUsd: "1",
+    maximumFeeUsd: "1",
+    maximumFeeBps: 2_000,
+    maximumSlippageBps: 100,
+  }),
+  3_970_000n,
+);
+assert.equal(
+  maximumInternalFundingDestinationRaw({
+    candidates: [walletConfirmationSource],
+    destinationAsset: DESTINATION_ASSET,
+    destinationUnitPriceUsd: "1",
+    maximumFeeUsd: "1",
+    maximumFeeBps: 2_000,
+    maximumSlippageBps: 500,
+    executionBoundary: "client_handoff",
+  }),
+  658_574n,
+);
+assert.equal(
+  maximumInternalFundingDestinationRaw({
+    candidates: overBoundCandidates,
+    destinationAsset: DESTINATION_ASSET,
+    destinationUnitPriceUsd: "1",
+    maximumFeeUsd: "1",
+    maximumFeeBps: 2_000,
+    maximumSlippageBps: 500,
+  }),
+  null,
+);
+
 console.log(
-  "[funding-composite-source-tests] ok exact destination/required fixture, minimal-excess selection, insufficient aggregate rejection, bounded fail-closed search, automatic venue preparation plus one or two Relay sources, irrelevant gas blocker exclusion, user-wallet exclusion, exact aggregate minimum, independent dependencies, atomic multi-reservations, fee cap, duplicate rejection",
+  "[funding-composite-source-tests] ok exact destination/required fixture, minimal-excess selection, insufficient aggregate rejection, bounded fail-closed search, automatic venue preparation plus one or two Relay sources, irrelevant gas blocker exclusion, user-wallet exclusion, exact aggregate minimum, independent dependencies, atomic multi-reservations, fee cap, duplicate rejection, account capacity across automatic/client boundaries",
 );
