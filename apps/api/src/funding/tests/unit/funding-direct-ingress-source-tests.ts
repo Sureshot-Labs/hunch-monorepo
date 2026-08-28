@@ -382,7 +382,7 @@ assert.deepEqual(
   "a venue alone must not create an unselected receive target",
 );
 
-const privyOnly = await multiAssetAdapter.list({
+const unsupportedPusdCardOnly = await multiAssetAdapter.list({
   ...v2Input,
   policy: compileFundingIntentPolicy({
     version: 2,
@@ -392,14 +392,9 @@ const privyOnly = await multiAssetAdapter.list({
   }),
 });
 assert.deepEqual(
-  privyOnly.map((source) => source.option.kind),
-  ["privy_funding_method"],
-);
-assert.deepEqual(
-  privyOnly[0]?.option.ingress?.receiveTargets?.flatMap((target) =>
-    target.acceptedAssets.map((accepted) => accepted.asset),
-  ),
-  [ASSET],
+  unsupportedPusdCardOnly,
+  [],
+  "pUSD must not be advertised as Card-capable without a supported source asset",
 );
 
 const baseAddress = "0x0000000000000000000000000000000000000006";
