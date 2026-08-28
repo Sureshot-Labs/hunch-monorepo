@@ -17,6 +17,7 @@ import { isPgStatementTimeoutError } from "../lib/postgres-errors.js";
 import {
   fetchProbabilityFeedEventPage,
   fetchProbabilityFeedMarketPage,
+  PROBABILITY_EVENT_PROBE_MAX_CANDIDATES,
 } from "../probability-feed-page.js";
 import type { FeedEvent, TokenPair } from "../server-types.js";
 import {
@@ -49,7 +50,6 @@ const FOR_YOU_RECENT_CLOSE_HOURS = 24;
 const PROBABILITY_EVENT_PROBE_WINDOW = 300;
 const PROBABILITY_EVENT_PROBE_BATCH = 100;
 const PROBABILITY_EVENT_SELECTIVE_PROBE_BATCH = 300;
-const PROBABILITY_EVENT_PROBE_MAX = 8000;
 const PROBABILITY_MARKET_PROBE_WINDOW = 1200;
 const PROBABILITY_MARKET_SELECTIVE_PROBE_WINDOW = 2400;
 const PROBABILITY_MARKET_PROBE_BATCH = 1200;
@@ -602,7 +602,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
             requestedLimit: limit,
             candidateWindowSize: PROBABILITY_EVENT_PROBE_WINDOW,
             probabilityBatchSize: eventProbabilityBatchSize,
-            maxCandidates: PROBABILITY_EVENT_PROBE_MAX,
+            maxCandidates: PROBABILITY_EVENT_PROBE_MAX_CANDIDATES,
             fetchCandidateEvents: ({ limit: candidateLimit, offset }) => {
               feedQueryPhase = "candidate";
               return fetchFeedEventIds(

@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   fetchProbabilityFeedEventPage,
   fetchProbabilityFeedMarketPage,
+  PROBABILITY_EVENT_PROBE_MAX_CANDIDATES,
 } from "./probability-feed-page.js";
 
 {
@@ -137,3 +138,32 @@ console.log("ok - probability feed scans bounded ranked event batches");
   assert.equal(result.eventRows.length, 2);
 }
 console.log("ok - probability feed stays bounded at the scan cap");
+
+{
+  const candidateCalls: Array<{ limit: number; offset: number }> = [];
+  const result = await fetchProbabilityFeedEventPage({
+    requestedLimit: 25,
+    candidateWindowSize: 300,
+    probabilityBatchSize: 300,
+    maxCandidates: PROBABILITY_EVENT_PROBE_MAX_CANDIDATES,
+    fetchCandidateEvents: async (input) => {
+      candidateCalls.push(input);
+      return Array.from({ length: input.limit }, (_, index) => ({
+        id: `event-${input.offset + index}`,
+      }));
+    },
+    fetchBatchProbabilityMarketIds: async () => [],
+    fetchFilteredEvents: async () => [],
+  });
+
+  assert.deepEqual(candidateCalls, [
+    { limit: 300, offset: 0 },
+    { limit: 300, offset: 300 },
+    { limit: 300, offset: 600 },
+    { limit: 300, offset: 900 },
+  ]);
+  assert.deepEqual(result, { eventRows: [], marketIds: [] });
+}
+console.log(
+  "ok - production event probability policy stops after four windows",
+);

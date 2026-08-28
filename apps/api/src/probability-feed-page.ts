@@ -1,5 +1,10 @@
 export type ProbabilityFeedEventRow = { id: string };
 
+// Sparse filters return a bounded partial discovery page. Scanning 8k events
+// repeats candidate ranking and top-of-book reads long enough to outlive the
+// frontend timeout; four 300-event windows stay inside that budget.
+export const PROBABILITY_EVENT_PROBE_MAX_CANDIDATES = 1_200;
+
 export async function fetchProbabilityFeedMarketPage(args: {
   requestedLimit: number;
   requestedOffset: number;
