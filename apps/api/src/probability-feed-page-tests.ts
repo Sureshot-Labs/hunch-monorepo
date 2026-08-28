@@ -39,9 +39,6 @@ import { fetchProbabilityFeedEventPage } from "./probability-feed-page.js";
         id: `filtered-event-${index}`,
       }));
     },
-    fetchAllProbabilityMarketIds: async () => {
-      assert.fail("full-universe fallback must not run for a full page");
-    },
   });
 
   assert.deepEqual(candidateCalls, [{ limit: 300, offset: 0 }]);
@@ -50,31 +47,33 @@ import { fetchProbabilityFeedEventPage } from "./probability-feed-page.js";
   assert.equal(probabilityBatches[0]?.at(0), "event-0");
   assert.equal(probabilityBatches[1]?.at(0), "event-100");
   assert.equal(probabilityBatches[2]?.at(0), "event-200");
-  assert.equal(maxActiveProbabilityBatches, 3);
-  assert.deepEqual(filteredMarketIds, [["market-1", "market-2", "market-3"]]);
+  assert.equal(maxActiveProbabilityBatches, 1);
+  assert.deepEqual(filteredMarketIds, [
+    ["market-1"],
+    ["market-1", "market-2"],
+    ["market-1", "market-2", "market-3"],
+  ]);
   assert.equal(result.eventRows.length, 50);
 }
 console.log("ok - probability feed scans bounded ranked event batches");
 
 {
-  let fullUniverseCalls = 0;
   const result = await fetchProbabilityFeedEventPage({
     requestedLimit: 3,
     candidateWindowSize: 2,
     probabilityBatchSize: 1,
     maxCandidates: 2,
     fetchCandidateEvents: async () => [{ id: "event-1" }, { id: "event-2" }],
-    fetchBatchProbabilityMarketIds: async () => [],
+    fetchBatchProbabilityMarketIds: async (eventIds) =>
+      eventIds.map((eventId) => `market-for-${eventId}`),
     fetchFilteredEvents: async (marketIds) =>
       marketIds.map((marketId) => ({ id: `event-for-${marketId}` })),
-    fetchAllProbabilityMarketIds: async () => {
-      fullUniverseCalls += 1;
-      return ["market-1", "market-2", "market-3"];
-    },
   });
 
-  assert.equal(fullUniverseCalls, 1);
-  assert.deepEqual(result.marketIds, ["market-1", "market-2", "market-3"]);
-  assert.equal(result.eventRows.length, 3);
+  assert.deepEqual(result.marketIds, [
+    "market-for-event-1",
+    "market-for-event-2",
+  ]);
+  assert.equal(result.eventRows.length, 2);
 }
-console.log("ok - probability feed preserves exact fallback at the scan cap");
+console.log("ok - probability feed stays bounded at the scan cap");

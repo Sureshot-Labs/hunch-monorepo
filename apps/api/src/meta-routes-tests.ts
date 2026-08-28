@@ -806,11 +806,48 @@ async function assertEventFeedSqlShape(): Promise<void> {
     );
     const [sql] = capturedSql;
     assert.match(sql, /from unified_event_trade_24h et/s);
+    assert.match(
+      sql,
+      /et\.updated_at = \(\s*select max\(event_metric_generation\.updated_at\)\s*from unified_event_trade_24h event_metric_generation\s*\)/s,
+    );
     assert.match(sql, /union all/s);
     assert.match(sql, /valid_ranked_events as materialized/);
     assert.match(
       sql,
       /e\.end_date is null or e\.end_date > \(\$\d+::timestamptz - interval '6 hours'\)/,
+    );
+  }
+
+  {
+    const { capturedSql, capturedParams } = await runWithRows(
+      { sort: "trending", maxSpread: 0.1 },
+      baseInputs.limit,
+    );
+    const [sql] = capturedSql;
+    assert.match(sql, /ranked_event_candidates as materialized/);
+    assert.match(sql, /valid_ranked_events as materialized/);
+    assert.match(
+      sql,
+      /select sum\(coalesce\([\s\S]*?from unified_markets fallback_volume_market[\s\S]*?fallback_volume_market\.event_id = e\.id/s,
+    );
+    assert.equal(
+      sql.match(/\(om\.best_ask - om\.best_bid\) <= \$\d+/g)?.length,
+      2,
+      "max spread must constrain both strict and Polymarket-grace EXISTS branches",
+    );
+    assert.doesNotMatch(sql, /orderable_market_candidates as materialized/);
+    assert.ok(capturedParams[0]?.includes(0.1));
+  }
+
+  {
+    const { capturedSql } = await runWithRows(
+      { sort: "trending", maxSpread: 0.1, durationMinutes: [60] },
+      baseInputs.limit,
+    );
+    assert.match(
+      capturedSql[0],
+      /orderable_market_candidates as materialized/,
+      "combined market-dependent filters stay on the existing exact path",
     );
   }
 

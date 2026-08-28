@@ -58,7 +58,7 @@ console.log(
 
 let candidateSql = "";
 let topSql = "";
-let topParams: unknown[] = [];
+const topParams: unknown[][] = [];
 let eventSql = "";
 const localStatements: string[] = [];
 const client = {
@@ -80,7 +80,7 @@ const client = {
     }
     if (/from unified_token_top_latest\s+where token_id = any/i.test(sql)) {
       topSql = sql;
-      topParams = params;
+      topParams.push(params);
       return {
         rows: [
           { token_id: "yes-1", best_bid: "0.79", best_ask: "0.81" },
@@ -172,7 +172,7 @@ assert.doesNotMatch(candidateSql, /probability\s*[<>]=\s*\$\d+/i);
 assert.match(topSql, /from unified_token_top_latest/i);
 assert.match(topSql, /where token_id = any\(\$1::text\[\]\)/i);
 assert.doesNotMatch(topSql, /canonical_token_pairs|array_agg|initplan/i);
-assert.deepEqual(topParams, [["yes-1", "no-1", "yes-2", "no-2"]]);
+assert.deepEqual(topParams, [[["yes-1", "yes-2"]], [["no-1"]]]);
 assert.ok(
   localStatements.some((sql) =>
     /SET LOCAL statement_timeout = '\d+ms'/i.test(sql),
@@ -201,9 +201,10 @@ assert.equal(
       sql,
     ),
   ).length,
-  candidateBatchQueryCount,
+  candidateBatchQueryCount + 1,
 );
-console.log("ok - candidate event batches share cached canonical tops");
+assert.deepEqual(topParams.slice(-2), [[["yes-1", "yes-2"]], [["no-2"]]]);
+console.log("ok - candidate event batches narrow NO tops for each range");
 console.log("ok - feed probability candidates are scoped and time-bounded");
 
 const probabilityQueryCountBeforeSingleFlight = localStatements.filter((sql) =>
@@ -236,11 +237,9 @@ assert.equal(
       sql,
     ),
   ).length,
-  probabilityQueryCountBeforeSingleFlight + 1,
+  probabilityQueryCountBeforeSingleFlight + 2,
 );
-console.log(
-  "ok - probability ranges share one scope SQL and filter cached rows",
-);
+console.log("ok - probability ranges keep independent exact narrowed caches");
 
 assert.deepEqual(
   await fetchFeedEventIds(pool, {

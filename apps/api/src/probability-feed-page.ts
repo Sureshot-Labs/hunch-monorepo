@@ -15,9 +15,9 @@ export async function fetchProbabilityFeedEventPage<
     candidateEventIds: string[],
   ) => Promise<string[]>;
   fetchFilteredEvents: (marketIds: string[]) => Promise<EventRow[]>;
-  fetchAllProbabilityMarketIds: () => Promise<string[]>;
 }): Promise<{ eventRows: EventRow[]; marketIds: string[] }> {
   const probabilityMarketIds = new Set<string>();
+  let latestEventRows: EventRow[] = [];
   let candidateOffset = 0;
 
   for (;;) {
@@ -43,33 +43,33 @@ export async function fetchProbabilityFeedEventPage<
         ),
       );
     }
-    const batchProbabilityMarketIds = await Promise.all(
-      probabilityBatches.map(args.fetchBatchProbabilityMarketIds),
-    );
-    for (const marketIds of batchProbabilityMarketIds) {
+    for (const candidateEventBatch of probabilityBatches) {
+      const marketIds =
+        await args.fetchBatchProbabilityMarketIds(candidateEventBatch);
       for (const marketId of marketIds) {
         probabilityMarketIds.add(marketId);
       }
+
+      const accumulatedMarketIds = [...probabilityMarketIds];
+      latestEventRows = accumulatedMarketIds.length
+        ? await args.fetchFilteredEvents(accumulatedMarketIds)
+        : [];
+      if (latestEventRows.length >= args.requestedLimit) {
+        return { eventRows: latestEventRows, marketIds: accumulatedMarketIds };
+      }
     }
 
-    let marketIds = [...probabilityMarketIds];
-    let eventRows = marketIds.length
-      ? await args.fetchFilteredEvents(marketIds)
-      : [];
-    if (
-      eventRows.length >= args.requestedLimit ||
-      candidateEventRows.length < candidateLimit
-    ) {
-      return { eventRows, marketIds };
+    const marketIds = [...probabilityMarketIds];
+    if (candidateEventRows.length < candidateLimit) {
+      return { eventRows: latestEventRows, marketIds };
     }
 
     candidateOffset += candidateEventRows.length;
     if (candidateOffset >= args.maxCandidates) {
-      marketIds = await args.fetchAllProbabilityMarketIds();
-      eventRows = marketIds.length
-        ? await args.fetchFilteredEvents(marketIds)
-        : [];
-      return { eventRows, marketIds };
+      // This is deliberately a bounded discovery scan. Falling back to the
+      // full market universe reads gigabytes and deterministically turns a
+      // sparse probability page into a timeout instead of a partial page.
+      return { eventRows: latestEventRows, marketIds };
     }
   }
 }

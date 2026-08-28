@@ -283,11 +283,16 @@ export function buildEventHasBroadOrderableMarketSql(args: {
   nowParam: string;
   nowCloseParam?: string;
   renderableMarketSql?: string;
+  extraMarketSql?: string[];
 }): string {
   const eventAlias = args.eventAlias ?? "e";
   const renderable = args.renderableMarketSql
     ? `and ${args.renderableMarketSql}`
     : "";
+  const extraMarketSql = (args.extraMarketSql ?? [])
+    .filter(Boolean)
+    .map((clause) => `and (${clause})`)
+    .join("\n        ");
   return `(
     exists (
       select 1
@@ -300,6 +305,7 @@ export function buildEventHasBroadOrderableMarketSql(args: {
           nowCloseParam: args.nowCloseParam,
         })}
         ${renderable}
+        ${extraMarketSql}
     )
     or exists (
       select 1
@@ -315,6 +321,7 @@ export function buildEventHasBroadOrderableMarketSql(args: {
           pmAlias: "pm_om",
         })}
         ${renderable}
+        ${extraMarketSql}
     )
   )`;
 }

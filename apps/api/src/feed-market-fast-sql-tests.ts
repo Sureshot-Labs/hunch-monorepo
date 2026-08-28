@@ -98,6 +98,10 @@ function createCapturePool(args: {
   );
   assert.match(
     capturedSql[0],
+    /non_limitless_metric_generation as materialized[\s\S]*?max\(metric_generation\.updated_at\)[\s\S]*?metric\.updated_at = \([\s\S]*?from non_limitless_metric_generation metric_generation/i,
+  );
+  assert.match(
+    capturedSql[0],
     /non_limitless_ranked_candidates as materialized[\s\S]*?from non_limitless_metric_prefix metric_prefix[\s\S]*?join unified_markets metric_market on metric_market\.id = metric_prefix\.market_id/i,
   );
   assert.match(
