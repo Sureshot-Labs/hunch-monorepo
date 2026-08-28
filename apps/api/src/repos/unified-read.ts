@@ -890,6 +890,7 @@ type ProbabilityMarketFilterInputs = Pick<
   | "sevenDaysFromNow"
 > & {
   candidateEventIds?: string[];
+  candidateMarketIds?: string[];
 };
 
 type ProbabilityMarketCacheState = {
@@ -911,11 +912,104 @@ type CanonicalProbabilityTokenPairRow = {
   token_no: string | null;
 };
 
+type CanonicalProbabilityMarketTokenSourceRow =
+  CanonicalProbabilityTokenPairRow & {
+    clob_token_ids: string | null;
+  };
+
 type CanonicalProbabilityTopRow = {
   token_id: string;
   best_bid: number | string | null;
   best_ask: number | string | null;
 };
+
+function canonicalProbabilityTokenPairFromMarketSource(
+  marketTokenSource: CanonicalProbabilityMarketTokenSourceRow,
+): CanonicalProbabilityTokenPairRow {
+  let clobTokenIds: string[] = [];
+  if (marketTokenSource.clob_token_ids) {
+    try {
+      const parsed = JSON.parse(marketTokenSource.clob_token_ids);
+      if (Array.isArray(parsed)) {
+        clobTokenIds = parsed.filter(
+          (tokenId): tokenId is string => typeof tokenId === "string",
+        );
+      }
+    } catch {
+      clobTokenIds = [];
+    }
+  }
+  return {
+    market_id: marketTokenSource.market_id,
+    token_yes: marketTokenSource.token_yes || clobTokenIds[0] || null,
+    token_no: marketTokenSource.token_no || clobTokenIds[1] || null,
+  };
+}
+
+async function resolveCanonicalProbabilityTokenPairs(
+  pool: Pool,
+  marketTokenSources: CanonicalProbabilityMarketTokenSourceRow[],
+): Promise<CanonicalProbabilityTokenPairRow[]> {
+  // The mapping table is synchronized from these market fields. Read the
+  // authoritative source first and touch the large mapping table only for
+  // incomplete legacy rows.
+  const tokenPairs = marketTokenSources.map(
+    canonicalProbabilityTokenPairFromMarketSource,
+  );
+  const incompleteMarketIds = tokenPairs
+    .filter((tokenPair) => !tokenPair.token_yes || !tokenPair.token_no)
+    .map((tokenPair) => tokenPair.market_id);
+  if (incompleteMarketIds.length === 0) return tokenPairs;
+
+  const fallbackMappings = await queryRowsWithLocalSettings<{
+    market_id: string;
+    outcome_side: "YES" | "NO";
+    token_id: string;
+  }>(
+    pool,
+    `
+      select distinct on (
+        token_mapping.market_id,
+        token_mapping.outcome_side
+      )
+        token_mapping.market_id,
+        token_mapping.outcome_side,
+        token_mapping.token_id
+      from unnest($1::text[]) as incomplete_market(market_id)
+      join unified_market_tokens token_mapping
+        on token_mapping.market_id = incomplete_market.market_id
+      where token_mapping.outcome_side in ('YES', 'NO')
+      order by
+        token_mapping.market_id,
+        token_mapping.outcome_side,
+        token_mapping.updated_at desc nulls last,
+        token_mapping.token_id
+    `,
+    [incompleteMarketIds],
+    {
+      jitOff: true,
+      statementTimeoutMs: env.feedFilterTimeoutMs,
+      workMem: FEED_HEAVY_QUERY_WORK_MEM,
+    },
+  );
+  const fallbackByMarketAndSide = new Map(
+    fallbackMappings.map((mapping) => [
+      `${mapping.market_id}\0${mapping.outcome_side}`,
+      mapping.token_id,
+    ]),
+  );
+  return tokenPairs.map((tokenPair) => ({
+    ...tokenPair,
+    token_yes:
+      tokenPair.token_yes ??
+      fallbackByMarketAndSide.get(`${tokenPair.market_id}\0YES`) ??
+      null,
+    token_no:
+      tokenPair.token_no ??
+      fallbackByMarketAndSide.get(`${tokenPair.market_id}\0NO`) ??
+      null,
+  }));
+}
 
 const probabilityMarketCacheByPool = new WeakMap<
   Pool,
@@ -970,6 +1064,11 @@ function probabilityMarketCacheKey(
           .update([...inputs.candidateEventIds].sort().join("\0"))
           .digest("hex")
       : null,
+    candidateMarketIdsHash: inputs.candidateMarketIds
+      ? createHash("sha1")
+          .update([...inputs.candidateMarketIds].sort().join("\0"))
+          .digest("hex")
+      : null,
   });
 }
 
@@ -1006,95 +1105,104 @@ async function fetchObservedCanonicalProbabilityMarketsUncached(
   pool: Pool,
   inputs: ProbabilityMarketFilterInputs,
 ): Promise<ObservedProbabilityMarketRow[]> {
-  const { params, add } = createParamBuilder();
-  const nowParam = add(inputs.nowParam);
-  const expressions = buildFeedSqlExpressions();
-  const probabilityEventInputs =
-    inputs.view === "markets" && inputs.venues
-      ? { ...inputs, venues: undefined }
-      : inputs;
-  const probabilityEventWhere = buildFeedEventWhere({
-    add,
-    inputs: probabilityEventInputs,
-    nowParam,
-    hasSearch: false,
-    includeOrderableExists: false,
-    includeDurationExists: false,
-  });
-  const candidateEventIdsParam = inputs.candidateEventIds?.length
-    ? add(inputs.candidateEventIds)
-    : null;
-  const probabilityCandidateEventsCte = `
-    probability_candidate_events as materialized (
-      select e.id
-      from ${
-        candidateEventIdsParam
-          ? `unnest(${candidateEventIdsParam}::text[]) as selected_event(event_id)
-      join unified_events e on e.id = selected_event.event_id`
-          : "unified_events e"
-      }
-      where ${probabilityEventWhere.join(" and ")}
-    )
-  `;
-  const candidateCte = buildBroadOrderableMarketCandidatesCte({
-    candidateEventIdsCte: "probability_candidate_events",
-    cteName: "probability_market_candidates",
-    materialized: true,
-    nowParam,
-    extraMarketSql: buildFeedMarketCandidateExtraSql({
-      add,
-      inputs,
-      nowParam,
-      venueTarget: inputs.view === "markets" ? "market" : "event",
-      renderableMarketExpr: expressions.renderableMarketExpr,
-      supportedLimitlessMarketExpr: expressions.supportedLimitlessMarketExpr,
-    }),
-  });
-  const tokenPairs =
-    await queryRowsWithLocalSettings<CanonicalProbabilityTokenPairRow>(
+  let tokenPairs: CanonicalProbabilityTokenPairRow[];
+  if (inputs.candidateMarketIds != null) {
+    if (inputs.candidateMarketIds.length === 0) return [];
+    const marketTokenSources =
+      await queryRowsWithLocalSettings<CanonicalProbabilityMarketTokenSourceRow>(
+        pool,
+        `
+          select
+            selected_market.market_id,
+            m.token_yes,
+            m.token_no,
+            m.clob_token_ids
+          from unnest($1::text[]) as selected_market(market_id)
+          join unified_markets m on m.id = selected_market.market_id
+        `,
+        [inputs.candidateMarketIds],
+        {
+          jitOff: true,
+          statementTimeoutMs: env.feedFilterTimeoutMs,
+          workMem: FEED_HEAVY_QUERY_WORK_MEM,
+        },
+      );
+    tokenPairs = await resolveCanonicalProbabilityTokenPairs(
       pool,
-      `
-      with ${probabilityCandidateEventsCte},
-      ${candidateCte},
-      canonical_token_mappings as materialized (
-        select distinct on (token_mapping.market_id, token_mapping.outcome_side)
-          token_mapping.market_id,
-          token_mapping.outcome_side,
-          token_mapping.token_id
-        from probability_market_candidates probability_candidate
-        join unified_market_tokens token_mapping
-          on token_mapping.market_id = probability_candidate.market_id
-        where token_mapping.outcome_side in ('YES', 'NO')
-        order by
-          token_mapping.market_id,
-          token_mapping.outcome_side,
-          token_mapping.updated_at desc nulls last,
-          token_mapping.token_id asc
-      ),
-      canonical_token_pairs as materialized (
+      marketTokenSources,
+    );
+  } else {
+    const { params, add } = createParamBuilder();
+    const nowParam = add(inputs.nowParam);
+    const expressions = buildFeedSqlExpressions();
+    const probabilityEventInputs =
+      inputs.view === "markets" && inputs.venues
+        ? { ...inputs, venues: undefined }
+        : inputs;
+    const probabilityEventWhere = buildFeedEventWhere({
+      add,
+      inputs: probabilityEventInputs,
+      nowParam,
+      hasSearch: false,
+      includeOrderableExists: false,
+      includeDurationExists: false,
+    });
+    const candidateEventIdsParam = inputs.candidateEventIds?.length
+      ? add(inputs.candidateEventIds)
+      : null;
+    const probabilityCandidateEventsCte = `
+      probability_candidate_events as materialized (
+        select e.id
+        from ${
+          candidateEventIdsParam
+            ? `unnest(${candidateEventIdsParam}::text[]) as selected_event(event_id)
+        join unified_events e on e.id = selected_event.event_id`
+            : "unified_events e"
+        }
+        where ${probabilityEventWhere.join(" and ")}
+      )
+    `;
+    const candidateCtes = `${probabilityCandidateEventsCte},
+      ${buildBroadOrderableMarketCandidatesCte({
+        candidateEventIdsCte: "probability_candidate_events",
+        cteName: "probability_market_candidates",
+        materialized: true,
+        nowParam,
+        extraMarketSql: buildFeedMarketCandidateExtraSql({
+          add,
+          inputs,
+          nowParam,
+          venueTarget: inputs.view === "markets" ? "market" : "event",
+          renderableMarketExpr: expressions.renderableMarketExpr,
+          supportedLimitlessMarketExpr:
+            expressions.supportedLimitlessMarketExpr,
+        }),
+      })}`;
+    const marketTokenSources =
+      await queryRowsWithLocalSettings<CanonicalProbabilityMarketTokenSourceRow>(
+        pool,
+        `
+        with ${candidateCtes}
         select
           probability_candidate.market_id,
-          max(token_mapping.token_id) filter (
-            where token_mapping.outcome_side = 'YES'
-          ) as token_yes,
-          max(token_mapping.token_id) filter (
-            where token_mapping.outcome_side = 'NO'
-          ) as token_no
+          m.token_yes,
+          m.token_no,
+          m.clob_token_ids
         from probability_market_candidates probability_candidate
-        left join canonical_token_mappings token_mapping
-          on token_mapping.market_id = probability_candidate.market_id
-        group by probability_candidate.market_id
-      )
-      select market_id, token_yes, token_no
-      from canonical_token_pairs
-    `,
-      params,
-      {
-        jitOff: true,
-        statementTimeoutMs: env.feedFilterTimeoutMs,
-        workMem: FEED_HEAVY_QUERY_WORK_MEM,
-      },
+        join unified_markets m on m.id = probability_candidate.market_id
+      `,
+        params,
+        {
+          jitOff: true,
+          statementTimeoutMs: env.feedFilterTimeoutMs,
+          workMem: FEED_HEAVY_QUERY_WORK_MEM,
+        },
+      );
+    tokenPairs = await resolveCanonicalProbabilityTokenPairs(
+      pool,
+      marketTokenSources,
     );
+  }
 
   const fetchTopRows = async (
     tokenIds: string[],
@@ -1949,7 +2057,10 @@ function canUseFeedEventMaxSpreadFastPath(inputs: FeedInputs): boolean {
     inputs.minVol <= 1e-9 &&
     inputs.minLiquidity <= 0 &&
     !inputs.durationMinutes?.length &&
-    (inputs.sort == null || inputs.sort === "trending")
+    (inputs.sort == null ||
+      inputs.sort === "trending" ||
+      inputs.sort === "trending_v2" ||
+      inputs.sort === "openinterest")
   );
 }
 
@@ -2196,6 +2307,7 @@ async function fetchFeedChange24hEventIdsFast(
 async function fetchFeedEventIdsFast(
   pool: Pool,
   inputs: FeedInputs,
+  options?: { acceptPartialMetricPage?: boolean },
 ): Promise<FeedEventIdRow[] | null> {
   if (inputs.sort === "change24h") {
     return fetchFeedChange24hEventIdsFast(pool, inputs);
@@ -2394,7 +2506,7 @@ async function fetchFeedEventIdsFast(
         }));
     }
     if (candidateCount < candidateLimit) {
-      if (inputs.sort === "trending_v2") {
+      if (inputs.sort === "trending_v2" && !options?.acceptPartialMetricPage) {
         return null;
       }
       return ids
@@ -3252,8 +3364,9 @@ async function fetchFeedEventIdsExact(
 export async function fetchFeedEventIds(
   pool: Pool,
   inputs: FeedInputs,
+  options?: { acceptPartialMetricPage?: boolean },
 ): Promise<FeedEventIdRow[]> {
-  const fastRows = await fetchFeedEventIdsFast(pool, inputs);
+  const fastRows = await fetchFeedEventIdsFast(pool, inputs, options);
   if (fastRows) return fastRows;
 
   if (buildFeedSearchPlan(inputs.q).strategy === "primary_with_fallback") {
@@ -4569,6 +4682,70 @@ async function fetchFeedMarketIdsFast(
   }
 }
 
+export async function fetchFeedMarketIdsForProbabilityProbe(
+  pool: Pool,
+  inputs: FeedInputs,
+): Promise<string[]> {
+  const probabilityFreeInputs = {
+    ...inputs,
+    minProb: undefined,
+    maxProb: undefined,
+  };
+  const fastMarketIds = await fetchFeedMarketIdsFast(
+    pool,
+    probabilityFreeInputs,
+    { acceptPartialMetricPage: true },
+  );
+  if (fastMarketIds != null) return fastMarketIds;
+
+  const candidateRows = await fetchFeedMarketsDirect(
+    pool,
+    probabilityFreeInputs,
+  );
+  return candidateRows.map((candidateRow) => candidateRow.market_uuid);
+}
+
+function preselectedMarketHydrationInputs(
+  inputs: FeedInputs,
+  marketCount: number,
+): FeedInputs {
+  return {
+    ...inputs,
+    limit: marketCount,
+    offset: 0,
+    marketIds: undefined,
+    q: undefined,
+    eventScope: undefined,
+    venues: undefined,
+    category: undefined,
+    categories: undefined,
+    filter: undefined,
+    durationMinutes: undefined,
+    endWithin: undefined,
+    ageSince: undefined,
+    minVol: 0,
+    minLiquidity: 0,
+    minProb: undefined,
+    maxProb: undefined,
+    maxSpread: undefined,
+  };
+}
+
+export async function fetchFeedMarketsByIds(
+  pool: Pool,
+  inputs: FeedInputs,
+  marketIds: string[],
+  options?: { useCachedChange24h?: boolean },
+): Promise<FeedMarketRow[]> {
+  if (!marketIds.length) return [];
+  return fetchFeedMarketsDirect(
+    pool,
+    preselectedMarketHydrationInputs(inputs, marketIds.length),
+    marketIds,
+    options,
+  );
+}
+
 export async function fetchFeedMarketsDirect(
   pool: Pool,
   inputs: FeedInputs,
@@ -4578,30 +4755,9 @@ export async function fetchFeedMarketsDirect(
   if (!preselectedMarketIds) {
     const fastMarketIds = await fetchFeedMarketIdsFast(pool, inputs);
     if (fastMarketIds) {
-      if (fastMarketIds.length === 0) return [];
-      return fetchFeedMarketsDirect(
-        pool,
-        {
-          ...inputs,
-          marketIds: undefined,
-          q: undefined,
-          eventScope: undefined,
-          venues: undefined,
-          category: undefined,
-          categories: undefined,
-          filter: undefined,
-          durationMinutes: undefined,
-          endWithin: undefined,
-          ageSince: undefined,
-          minVol: 0,
-          minLiquidity: 0,
-          minProb: undefined,
-          maxProb: undefined,
-          maxSpread: undefined,
-        },
-        fastMarketIds,
-        { useCachedChange24h: true },
-      );
+      return fetchFeedMarketsByIds(pool, inputs, fastMarketIds, {
+        useCachedChange24h: true,
+      });
     }
   }
   const useCachedChange24h =

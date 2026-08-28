@@ -7,6 +7,7 @@ import type { Pool } from "@hunch/infra";
 import {
   type FeedInputs,
   fetchFeedEventIds,
+  fetchFeedMarketIdsForProbabilityProbe,
   fetchFeedMarketsDirect,
 } from "./repos/unified-read.js";
 
@@ -230,6 +231,56 @@ console.log("ok - market sorts rank projected candidates without rejoining");
   const pool = createCapturePool({
     capturedSql,
     capturedParams,
+    candidateRows: [[{ ids: ["market-1", "market-2", "market-3"] }]],
+  });
+
+  const ids = await fetchFeedMarketIdsForProbabilityProbe(pool, {
+    ...baseInputs,
+    minProb: 0.4,
+    maxProb: 0.6,
+    sort: "trending",
+  });
+
+  assert.deepEqual(ids, ["market-1", "market-2", "market-3"]);
+  assert.equal(capturedSql.length, 1);
+  assert.match(capturedSql[0], /ranked_market_page as materialized/i);
+  assert.doesNotMatch(
+    capturedSql[0],
+    /canonical_token_mappings|unified_token_top_latest canonical_yes_top/i,
+  );
+}
+console.log("ok - probability market probe ranks before canonical top mapping");
+
+{
+  const capturedSql: string[] = [];
+  const capturedParams: unknown[][] = [];
+  const pool = createCapturePool({
+    capturedSql,
+    capturedParams,
+    candidateRows: [[{ market_uuid: "market-search-1" }]],
+  });
+
+  const ids = await fetchFeedMarketIdsForProbabilityProbe(pool, {
+    ...baseInputs,
+    minProb: 0.4,
+    maxProb: 0.6,
+    q: "needle",
+    sort: "trending",
+  });
+
+  assert.deepEqual(ids, ["market-search-1"]);
+  assert.equal(capturedSql.length, 1);
+  assert.match(capturedSql[0], /primary_search_events as materialized/i);
+  assert.doesNotMatch(capturedSql[0], /canonical_token_mappings/i);
+}
+console.log("ok - unsupported market ranks use a bounded candidate fallback");
+
+{
+  const capturedSql: string[] = [];
+  const capturedParams: unknown[][] = [];
+  const pool = createCapturePool({
+    capturedSql,
+    capturedParams,
     candidateRows: [
       [{ ids: [], pm_prefix_count: 100 }],
       [{ ids: ["market-1"], pm_prefix_count: 101 }],
@@ -430,3 +481,76 @@ console.log("ok - change24h event filters stay on the cached candidate path");
   );
 }
 console.log("ok - change24h event volume uses the exact fallback sum");
+
+for (const sort of ["trending_v2", "openinterest"] as const) {
+  const capturedSql: string[] = [];
+  const capturedParams: unknown[][] = [];
+  const pool = createCapturePool({
+    capturedSql,
+    capturedParams,
+    candidateRows: [
+      [
+        {
+          ids: ["event-1", "event-2", "event-3"],
+          candidate_count: 3,
+        },
+      ],
+    ],
+  });
+
+  const rows = await fetchFeedEventIds(pool, {
+    ...baseInputs,
+    view: "events",
+    sort,
+    maxSpread: 0.1,
+  });
+
+  assert.deepEqual(rows, [
+    { id: "event-1" },
+    { id: "event-2" },
+    { id: "event-3" },
+  ]);
+  assert.equal(capturedSql.length, 1);
+  assert.match(capturedSql[0], /ranked_event_candidates as materialized/i);
+  assert.match(capturedSql[0], /valid_ranked_events as materialized/i);
+  assert.equal(
+    capturedSql[0]?.match(/\(om\.best_ask - om\.best_bid\) <= \$\d+/g)?.length,
+    2,
+    `${sort} max spread must constrain both orderable market branches`,
+  );
+  assert.doesNotMatch(
+    capturedSql[0],
+    /orderable_market_candidates as materialized/i,
+  );
+  assert.ok(capturedParams[0]?.includes(0.1));
+}
+console.log("ok - trending v2 and open interest spread use ranked candidates");
+
+{
+  const capturedSql: string[] = [];
+  const capturedParams: unknown[][] = [];
+  const pool = createCapturePool({
+    capturedSql,
+    capturedParams,
+    candidateRows: [[{ ids: ["event-1"], candidate_count: 1 }]],
+  });
+
+  const rows = await fetchFeedEventIds(
+    pool,
+    {
+      ...baseInputs,
+      limit: 5,
+      view: "events",
+      sort: "trending_v2",
+    },
+    { acceptPartialMetricPage: true },
+  );
+
+  assert.deepEqual(rows, [{ id: "event-1" }]);
+  assert.equal(capturedSql.length, 1);
+  assert.doesNotMatch(
+    capturedSql[0],
+    /orderable_market_candidates as materialized/i,
+  );
+}
+console.log("ok - bounded trending v2 probes keep exhausted partial results");
