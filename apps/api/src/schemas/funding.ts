@@ -391,6 +391,10 @@ export const fundingReceiveReceiptPublicSchema = z
     destinationAddress: z.string().trim().min(16).max(256),
     rawAmount: rawAmountSchema,
     observationRevision: z.string().trim().min(8).max(256),
+    // The canonical ledger identity is returned by the receipt repository as
+    // soon as a transfer is observed. Keep it in the public contract so a
+    // newly populated receipt cannot make the strict response schema fail.
+    ledgerHeight: rawAmountSchema.nullable().optional(),
     observedAt: z.string().datetime(),
     status: z.enum([
       "observed",
@@ -401,6 +405,24 @@ export const fundingReceiveReceiptPublicSchema = z
     ]),
     handling: z.enum(["direct", "automatic_conversion", "review_required"]),
     childFundingOperationId: z.string().uuid().nullable(),
+    reviewContinuation: z
+      .object({
+        version: z.literal(1),
+        kind: z.literal("convert"),
+        label: z.string().trim().min(1).max(64),
+        confirmation: z.literal("fresh_quote"),
+      })
+      .strict()
+      .optional(),
+    reviewQuotePlan: z
+      .object({
+        version: z.literal(1),
+        confirmedSourceAmount: moneySchema.nullable(),
+        requestedDestinationAmount: moneySchema,
+        venuePreparation: z.boolean(),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 

@@ -356,9 +356,49 @@ function receiveReceipt() {
     destinationAddress: "9xQeWvG816bUx9EPfB1G6QxgXLKWMuD5YpLQwJwN6JY",
     rawAmount: "10000000",
     observationRevision: "solana_transfer_review_12345678",
+    ledgerHeight: "92814235",
     observedAt: NOW.toISOString(),
     status: "review_required" as const,
     handling: "review_required" as const,
+    childFundingOperationId: null,
+    reviewContinuation: {
+      version: 1 as const,
+      kind: "convert" as const,
+      label: "Review conversion",
+      confirmation: "fresh_quote" as const,
+    },
+    reviewQuotePlan: {
+      version: 1 as const,
+      confirmedSourceAmount: {
+        asset: {
+          networkId: "solana:mainnet",
+          assetId: "11111111111111111111111111111111",
+          decimals: 9,
+        },
+        raw: "10000000",
+      },
+      requestedDestinationAmount: {
+        asset: ASSET,
+        raw: "900000",
+      },
+      venuePreparation: false,
+    },
+  };
+}
+
+function readyReceiveReceipt() {
+  return {
+    receiptId: "00000000-0000-4000-8000-000000000052",
+    receiveSessionId: receiveSession().receiveSessionId,
+    variantId: "ingress_variant_direct_12345678",
+    asset: ASSET,
+    destinationAddress: "0x0000000000000000000000000000000000000002",
+    rawAmount: "2000000",
+    observationRevision: "evm_transfer_ready_12345678",
+    ledgerHeight: "92814236",
+    observedAt: NOW.toISOString(),
+    status: "ready" as const,
+    handling: "direct" as const,
     childFundingOperationId: null,
   };
 }
@@ -614,6 +654,33 @@ await test("receive session opens without a requested amount", async () => {
     );
     assert.deepEqual(response.json().session.methods, receiveSession().methods);
     assert.equal("amount" in (observedBody as object), false);
+  } finally {
+    await app.close();
+  }
+});
+
+await test("replayed receive session returns its existing canonical receipt", async () => {
+  const app = await buildApp({
+    openReceiveSession: async () => ({
+      session: receiveSession(),
+      receipts: [readyReceiveReceipt()],
+      replayed: true,
+    }),
+  });
+  try {
+    const response = await app.inject({
+      method: "POST",
+      url: "/funding/receive-sessions",
+      payload: {
+        destinationOptionId: destination().destinationOptionId,
+        venueBindingOptionId: destination().venueBindingOptionId,
+        selectedReceiveTargetId: null,
+      },
+    });
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.json().replayed, true);
+    assert.equal(response.json().receipts[0].status, "ready");
+    assert.equal(response.json().receipts[0].ledgerHeight, "92814236");
   } finally {
     await app.close();
   }
@@ -888,6 +955,27 @@ await test("receive session reads only through the authenticated owner", async (
   }
 });
 
+await test("receive session read returns a ready receipt with ledger identity", async () => {
+  const app = await buildApp({
+    receiveSession: async () => ({
+      session: receiveSession(),
+      receipts: [readyReceiveReceipt()],
+      replayed: true,
+    }),
+  });
+  try {
+    const response = await app.inject({
+      method: "GET",
+      url: `/funding/receive-sessions/${receiveSession().receiveSessionId}`,
+    });
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.json().receipts[0].status, "ready");
+    assert.equal(response.json().receipts[0].ledgerHeight, "92814236");
+  } finally {
+    await app.close();
+  }
+});
+
 await test("volatile receive receipt review uses the authenticated receipt identity", async () => {
   let observed: Readonly<{
     userId: string;
@@ -916,6 +1004,15 @@ await test("volatile receive receipt review uses the authenticated receipt ident
     });
     assert.equal(response.json().quote.consentMode, "explicit_economic_review");
     assert.equal(response.json().receipt.handling, "review_required");
+    assert.equal(response.json().receipt.ledgerHeight, "92814235");
+    assert.equal(
+      response.json().receipt.reviewContinuation.confirmation,
+      "fresh_quote",
+    );
+    assert.equal(
+      response.json().receipt.reviewQuotePlan.requestedDestinationAmount.raw,
+      "900000",
+    );
   } finally {
     await app.close();
   }
