@@ -77,6 +77,11 @@ import {
   type FundingSourceAdapter,
 } from "./source-adapter.js";
 import { lockFundingControllerWallet } from "../execution/funding-controller-wallet-lock.js";
+import type {
+  FundingPlanningSnapshot,
+  FundingPlanningStore,
+  PersistedFundingPlanningSnapshot,
+} from "./planning-types.js";
 
 const PREPARATION_RUN_TTL_MS = 15 * 60_000;
 
@@ -112,6 +117,11 @@ function durableControllerProfiles(
 export type PreparedFundingRuntimeCommit = Readonly<{
   operation: PreparedFundingOperationCommit;
   service: FundingOperationService;
+}>;
+
+export type FundingLiquidityPreview = Readonly<{
+  projection: IntentLiquidityProjection;
+  plannerSnapshot: FundingPlanningSnapshot;
 }>;
 
 export type FundingDestinationQuery = Readonly<{
@@ -150,6 +160,34 @@ export class FundingLiquiditySingleflight {
       });
     this.inflight.set(key, started);
     return started;
+  }
+}
+
+class CapturingFundingPlanningStore implements FundingPlanningStore {
+  latest: PersistedFundingPlanningSnapshot | null = null;
+
+  async create(
+    input: Parameters<FundingPlanningStore["create"]>[0],
+  ): Promise<PersistedFundingPlanningSnapshot> {
+    const createdAt = new Date();
+    const stored: PersistedFundingPlanningSnapshot = {
+      id: input.projection.liquidityProjectionId,
+      userId: input.userId,
+      request: input.request,
+      projection: input.projection,
+      plannerSnapshot: input.plannerSnapshot,
+      policyVersion: input.policyVersion,
+      policyRevision: input.policyRevision,
+      ownershipRevision: input.ownershipRevision,
+      expiresAt: input.expiresAt,
+      createdAt,
+    };
+    this.latest = stored;
+    return stored;
+  }
+
+  async fetchOwnedCurrent(): Promise<PersistedFundingPlanningSnapshot | null> {
+    return null;
   }
 }
 
@@ -376,21 +414,62 @@ export class FundingPlanningRuntime {
     );
   }
 
+  /**
+   * Runs authoritative discovery without persisting a client-quotable
+   * projection. Internal capacity checks need the frozen planned sources, but
+   * must not fill funding_liquidity_projections with probes that can never be
+   * committed.
+   */
+  async previewLiquidity(
+    userId: string,
+    request: FundingDiscoveryRequest,
+    account: AccountValueReadModel,
+  ): Promise<FundingLiquidityPreview> {
+    if (
+      account.projection.accountId !== userId ||
+      account.ownership?.accountId !== userId
+    ) {
+      throw new Error("funding liquidity preview account ownership mismatch");
+    }
+    const store = new CapturingFundingPlanningStore();
+    const projection = await this.discoverLiquidity(userId, request, {
+      account,
+      store,
+    });
+    const plannerSnapshot = store.latest?.plannerSnapshot;
+    if (!plannerSnapshot) {
+      throw new Error("funding liquidity preview did not capture its plan");
+    }
+    return { projection, plannerSnapshot };
+  }
+
   private async discoverLiquidity(
     userId: string,
     request: FundingDiscoveryRequest,
+    preview?: Readonly<{
+      account: AccountValueReadModel;
+      store: FundingPlanningStore;
+    }>,
   ): Promise<IntentLiquidityProjection> {
     let resolvedMarketForPreparation: ApiTradeMarket | null = null;
-    const accountPromise = buildAccountValueReadModel({
-      pool: this.db,
-      userId,
-    });
+    const accountPromise = preview
+      ? Promise.resolve(preview.account)
+      : buildAccountValueReadModel({ pool: this.db, userId });
     // Discovery can resolve the market and inspect its exact destination while
     // the authoritative owned-source inventory is being collected. Keep the
     // same account snapshot for source selection and ownership persistence;
     // only remove the former sequential wait between these independent reads.
     void accountPromise.catch(() => undefined);
-    const resolvedPolicy = await resolveFundingPolicy(this.db);
+    const previewRuntimePolicy = preview?.account.runtimePolicy;
+    if (preview && !previewRuntimePolicy) {
+      throw new Error("account value runtime policy snapshot is unavailable");
+    }
+    const resolvedPolicy = previewRuntimePolicy
+      ? {
+          runtime: previewRuntimePolicy,
+          revision: preview?.account.policy.revision ?? "",
+        }
+      : await resolveFundingPolicy(this.db);
     const sourcePlannerPromise = accountPromise.then(
       (account) =>
         new ProductionFundingSourcePlanner(
@@ -493,7 +572,7 @@ export class FundingPlanningRuntime {
         (await sourcePlannerPromise).discover(sourceInput),
       listSourceBlockers: async (sourceInput) =>
         (await sourcePlannerPromise).listBlockingReasonCodes(sourceInput),
-      store: this.planningStore,
+      store: preview?.store ?? this.planningStore,
     });
     return planner.discover({
       accountId: userId,

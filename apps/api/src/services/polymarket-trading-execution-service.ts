@@ -138,6 +138,7 @@ import {
   inspectPolymarketDepositWallet,
   type PolymarketDepositWalletDerivation,
 } from "./polymarket-deposit-wallet-derivation.js";
+import { computePolymarketAccountMaxSpend } from "./polymarket-account-max-spend.js";
 import {
   findMaxPolymarketMarketBuyUsdForFunds,
   quotePolymarketOrder,
@@ -322,6 +323,7 @@ type PolymarketOrderHashBody = {
 type PolymarketMaxSpendBody = {
   amountType?: string | null;
   funderAddress?: string | null;
+  fundingScope?: "account" | null;
   orderType?: string | null;
   slippageBps?: number | null;
   tokenId: string;
@@ -4108,6 +4110,22 @@ export async function computePolymarketMaxSpendRoute(input: {
         "balance_unavailable",
         "Polymarket balances are unavailable.",
       ),
+    };
+  }
+
+  if (body.fundingScope === "account") {
+    return {
+      ok: true,
+      payload: await computePolymarketAccountMaxSpend({
+        funder,
+        funds,
+        log: input.log,
+        pool: input.pool,
+        signer,
+        slippageBps: body.slippageBps ?? null,
+        tokenId,
+        userId: input.userId,
+      }),
     };
   }
 

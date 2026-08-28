@@ -264,6 +264,7 @@ export const polymarketMaxSpendBodySchema = z.object({
   amountType: zAmountType.optional(),
   slippageBps: z.coerce.number().int().min(0).max(10_000).optional(),
   funderAddress: zEthAddress.optional(),
+  fundingScope: z.enum(["account"]).optional(),
   executableFundsRaw: z.string().regex(/^\d+$/).optional(),
 });
 

@@ -1106,6 +1106,18 @@ assert.equal(excludedByPreference.length, 0);
   assert.equal(nativeFacts[0]?.safeLabel, "SOL on Solana");
   assert.equal(nativeFacts[0]?.nativeGasReady, true);
 
+  const nativeCapacityFacts = deriveProductionRelayEligibleSourceFacts({
+    accountId: ACCOUNT_ID,
+    account: nativeAccount,
+    policy: nativePolicy,
+    requiredAmount: { asset: POLYGON_PUSD, raw: "1000000000000000" },
+    quoteAvailableSourceCapacity: true,
+  });
+  assert.equal(nativeCapacityFacts.length, 1);
+  assert.equal(nativeCapacityFacts[0]?.quoteInputAmount.raw, "17000000");
+  assert.equal(nativeCapacityFacts[0]?.quoteMinimumOutput?.raw, "1");
+  assert.equal(nativeCapacityFacts[0]?.quoteModeOverride, "exact_input");
+
   const directNativePolicy = policy({
     ...nativePolicy,
     routes: [

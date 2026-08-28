@@ -340,6 +340,12 @@ export type FundingIntent = Readonly<{
    * Public request schemas intentionally omit this field.
    */
   serverAdditionalDestinationAmount?: Money | null;
+  /**
+   * Internal only: quote each eligible owned source at its exact currently
+   * available input so an authoritative consumer can measure account-wide
+   * route capacity. Public request schemas intentionally omit this field.
+   */
+  serverQuoteAvailableSourceCapacity?: boolean;
   maxFeeUsd: string | null;
   maxSlippageBps: number | null;
   deadline: string | null;

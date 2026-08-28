@@ -22,6 +22,7 @@ import {
   decodePolymarketFundingCalldata,
   PolymarketFundingPlanError,
 } from "./services/polymarket-funding-router.js";
+import { polymarketMaxSpendBodySchema } from "./schemas/polymarket-private.js";
 
 type TestCase = {
   name: string;
@@ -111,6 +112,25 @@ function noFeeNoMinContext(): PolymarketQuoteContext {
 }
 
 const tests: TestCase[] = [
+  {
+    name: "max-spend accepts the explicit account funding scope without changing legacy requests",
+    run: () => {
+      const account = polymarketMaxSpendBodySchema.parse({
+        tokenId: "token-yes",
+        side: "BUY",
+        orderType: "FOK",
+        amountType: "usd",
+        fundingScope: "account",
+        executableFundsRaw: "999999999999",
+      });
+      assert.equal(account.fundingScope, "account");
+      const legacy = polymarketMaxSpendBodySchema.parse({
+        tokenId: "token-yes",
+        side: "BUY",
+      });
+      assert.equal(legacy.fundingScope, undefined);
+    },
+  },
   {
     name: "signed FOK Buy recomputes the same fee-inclusive collateral bound",
     run: () => {
@@ -267,6 +287,26 @@ const tests: TestCase[] = [
       });
       assert.ok(max);
       assert.ok(Number(max.maxAmountUsdRaw) < Number(executableFundsRaw));
+      assert.ok(
+        BigInt(max.quote.totalRequiredUsdcRaw ?? "0") <= executableFundsRaw,
+      );
+    },
+  },
+  {
+    name: "account max converts 0.43 direct plus 4.43 routed into one fee-aware nominal",
+    run: () => {
+      const context = quoteContext();
+      const directRaw = 430_000n;
+      const routedMinimumRaw = 4_430_000n;
+      const executableFundsRaw = directRaw + routedMinimumRaw;
+      const max = findMaxPolymarketMarketBuyUsd({
+        context,
+        tokenId: "token-yes",
+        executableFundsRaw,
+      });
+
+      assert.ok(max);
+      assert.ok(BigInt(max.maxAmountUsdRaw) < executableFundsRaw);
       assert.ok(
         BigInt(max.quote.totalRequiredUsdcRaw ?? "0") <= executableFundsRaw,
       );
