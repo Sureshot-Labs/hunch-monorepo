@@ -227,7 +227,7 @@ assert.match(
 );
 assert.match(
   eventSql,
-  /orderable_market_candidates_pm_recent_candidates as materialized[\s\S]*?join unnest\(\$\d+::text\[\]\) as candidate_filter\(market_id\)[\s\S]*?m\.close_time[\s\S]*?union all[\s\S]*?join unnest\(\$\d+::text\[\]\) as candidate_filter\(market_id\)[\s\S]*?m\.expiration_time[\s\S]*?union all[\s\S]*?join unnest\(\$\d+::text\[\]\) as candidate_filter\(market_id\)[\s\S]*?e\.end_date/i,
+  /orderable_market_candidates_pm_recent_candidates as materialized[\s\S]*?join unnest\(\$\d+::text\[\]\) as candidate_filter\(market_id\)[\s\S]*?m\.close_time[\s\S]*?union[\s\S]*?join unnest\(\$\d+::text\[\]\) as candidate_filter\(market_id\)[\s\S]*?m\.expiration_time[\s\S]*?union[\s\S]*?join unnest\(\$\d+::text\[\]\) as candidate_filter\(market_id\)[\s\S]*?e\.end_date/i,
 );
 assert.doesNotMatch(eventSql, /m\.id = ANY\(\$\d+::text\[\]\)/i);
 console.log(

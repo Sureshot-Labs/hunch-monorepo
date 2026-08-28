@@ -425,6 +425,71 @@ async function assertEventFeed(args: {
   assert.equal(actualEventIds, [...expectedEventIds].sort().join(","));
 }
 
+async function assertFastMarketSortPagination(args: {
+  category: string;
+  now: Date;
+}): Promise<void> {
+  const baseInputs = {
+    minVol: 0,
+    minLiquidity: 0,
+    view: "markets",
+    category: args.category,
+    sortDir: "desc",
+    nowParam: args.now.toISOString(),
+    sevenDaysAgo: new Date(
+      args.now.getTime() - 7 * 24 * 60 * 60 * 1000,
+    ).toISOString(),
+    sevenDaysFromNow: new Date(
+      args.now.getTime() + 7 * 24 * 60 * 60 * 1000,
+    ).toISOString(),
+  } as const;
+
+  for (const sort of [
+    "trending",
+    "totalvol",
+    "liquidity",
+    "openinterest",
+    "time",
+    "trending_v2",
+  ]) {
+    const sortDirections: readonly ("asc" | "desc")[] =
+      sort === "trending_v2" ? ["desc"] : ["asc", "desc"];
+    for (const sortDir of sortDirections) {
+      const fullPage = await fetchFeedMarketsDirect(pool, {
+        ...baseInputs,
+        limit: 2,
+        offset: 0,
+        sort,
+        sortDir,
+      });
+      const firstPage = await fetchFeedMarketsDirect(pool, {
+        ...baseInputs,
+        limit: 1,
+        offset: 0,
+        sort,
+        sortDir,
+      });
+      const secondPage = await fetchFeedMarketsDirect(pool, {
+        ...baseInputs,
+        limit: 1,
+        offset: 1,
+        sort,
+        sortDir,
+      });
+      assert.equal(
+        fullPage.length,
+        2,
+        `${sort} ${sortDir} should fill the requested page`,
+      );
+      assert.deepEqual(
+        [...firstPage, ...secondPage].map((market) => market.market_uuid),
+        fullPage.map((market) => market.market_uuid),
+        `${sort} ${sortDir} offset pagination should preserve the full-page ordering`,
+      );
+    }
+  }
+}
+
 async function assertDirectMarketSqlShape(): Promise<void> {
   const now = new Date("2026-06-16T12:00:00.000Z");
   const captureMarketSql = async (
@@ -463,7 +528,14 @@ async function assertDirectMarketSqlShape(): Promise<void> {
     sql,
     /orderable_market_candidates_pm_recent_candidates as materialized/,
   );
-  assert.match(sql, /join lateral \(/);
+  assert.match(
+    sql,
+    /orderable_market_candidates_pm_candidate_ids as materialized[\s\S]*array_agg\(distinct venue_market_id\)/,
+  );
+  assert.match(
+    sql,
+    /orderable_market_candidates_pm_availability as materialized[\s\S]*pm\.id = any\(candidate_ids\.venue_market_ids\)/,
+  );
   assert.match(
     sql,
     /scoped_orderable_market_candidates as materialized \([\s\S]*count\(\*\) over \(partition by omc\.event_id\) as market_count[\s\S]*from orderable_market_candidates omc/s,
@@ -562,20 +634,42 @@ async function assertDirectMarketSqlShape(): Promise<void> {
   assert.doesNotMatch(change24hSql[1], /observed_market_change_24h/);
 
   const trendingV2Sql = await captureFastMarketSql("trending_v2");
+  assert.match(trendingV2Sql[0], /non_limitless_metric_prefix as materialized/);
   assert.match(trendingV2Sql[0], /from unified_market_trade_24h metric/);
+  assert.match(
+    trendingV2Sql[0],
+    /from non_limitless_metric_prefix metric_prefix\s+join unified_markets metric_market on metric_market\.id = metric_prefix\.market_id/s,
+  );
   assert.match(trendingV2Sql[0], /limitless_candidates as materialized/);
   assert.match(trendingV2Sql[0], /union all/);
 
   const legacyTrendingSql = await captureFastMarketSql("trending");
   assert.match(
     legacyTrendingSql[0],
-    /ranked_market_candidates as materialized/,
-  );
-  assert.match(legacyTrendingSql[0], /valid_ranked_markets as materialized/);
-  assert.doesNotMatch(
-    legacyTrendingSql[0],
     /orderable_market_candidates as materialized/,
   );
+  assert.match(legacyTrendingSql[0], /ranked_market_page as materialized/);
+  assert.match(
+    legacyTrendingSql[0],
+    /from orderable_market_candidates candidate_market/,
+  );
+  assert.doesNotMatch(
+    legacyTrendingSql[0],
+    /ranked_market_candidates as materialized|valid_ranked_markets as materialized/,
+  );
+
+  for (const sort of ["totalvol", "liquidity", "openinterest", "time"]) {
+    const projectedSql = await captureFastMarketSql(sort);
+    assert.match(
+      projectedSql[0],
+      /orderable_market_candidates as materialized/,
+    );
+    assert.match(projectedSql[0], /ranked_market_page as materialized/);
+    assert.match(
+      projectedSql[0],
+      /from orderable_market_candidates candidate_market/,
+    );
+  }
 
   {
     const capturedSql: string[] = [];
@@ -1396,6 +1490,10 @@ async function main() {
     await insertEventTradeRows(events);
     await insertEventChangeRows(events);
     await pool.query("select refresh_unified_event_active_categories()");
+    await assertFastMarketSortPagination({
+      category: categoryAlpha,
+      now: new Date(now),
+    });
 
     await assertFacetParity({
       app,
