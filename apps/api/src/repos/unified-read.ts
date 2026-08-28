@@ -830,28 +830,34 @@ async function fetchObservedCanonicalProbabilityMarketsUncached(
     `
       with ${probabilityCandidateEventsCte},
       ${candidateCte},
+      canonical_token_mappings as materialized (
+        select distinct on (token_mapping.market_id, token_mapping.outcome_side)
+          token_mapping.market_id,
+          token_mapping.outcome_side,
+          token_mapping.token_id
+        from probability_market_candidates probability_candidate
+        join unified_market_tokens token_mapping
+          on token_mapping.market_id = probability_candidate.market_id
+        where token_mapping.outcome_side in ('YES', 'NO')
+        order by
+          token_mapping.market_id,
+          token_mapping.outcome_side,
+          token_mapping.updated_at desc nulls last,
+          token_mapping.token_id asc
+      ),
       canonical_token_pairs as materialized (
         select
           probability_candidate.market_id,
-          canonical_yes_token.token_id as token_yes,
-          canonical_no_token.token_id as token_no
+          max(token_mapping.token_id) filter (
+            where token_mapping.outcome_side = 'YES'
+          ) as token_yes,
+          max(token_mapping.token_id) filter (
+            where token_mapping.outcome_side = 'NO'
+          ) as token_no
         from probability_market_candidates probability_candidate
-        left join lateral (
-          select token_mapping.token_id
-          from unified_market_tokens token_mapping
-          where token_mapping.market_id = probability_candidate.market_id
-            and token_mapping.outcome_side = 'YES'
-          order by token_mapping.updated_at desc nulls last, token_mapping.token_id asc
-          limit 1
-        ) canonical_yes_token on true
-        left join lateral (
-          select token_mapping.token_id
-          from unified_market_tokens token_mapping
-          where token_mapping.market_id = probability_candidate.market_id
-            and token_mapping.outcome_side = 'NO'
-          order by token_mapping.updated_at desc nulls last, token_mapping.token_id asc
-          limit 1
-        ) canonical_no_token on true
+        left join canonical_token_mappings token_mapping
+          on token_mapping.market_id = probability_candidate.market_id
+        group by probability_candidate.market_id
       ),
       canonical_token_rows as materialized (
         select token_pair.token_yes as token_id
@@ -2392,6 +2398,49 @@ export async function fetchFeedCategoryFacetRows(
     venueFilterTarget: "event",
   });
   const requiresMarketJoin = requiresFeedEventMarketJoin(inputs);
+
+  if (
+    !requiresMarketJoin &&
+    !search.hasSearch &&
+    !inputs.durationMinutes?.length
+  ) {
+    const eventOnlyWhere = buildFeedEventWhere({
+      add,
+      inputs,
+      nowParam,
+      hasSearch: false,
+      requireNamedCategory: true,
+      includeOrderableExists: true,
+      includeDurationExists: true,
+    });
+    if (inputs.minVol > 1e-9) {
+      eventOnlyWhere.push(`${eventVolumeDisplayExpr} >= ${add(inputs.minVol)}`);
+    }
+    if (inputs.minLiquidity > 0) {
+      eventOnlyWhere.push(
+        `${eventLiquidityDisplayExpr} >= ${add(inputs.minLiquidity)}`,
+      );
+    }
+
+    return await queryRowsWithSearchHint<FeedCategoryFacetRow>(
+      pool,
+      `
+        select
+          e.venue as venue,
+          lower(e.category) as category,
+          count(*)::int as events
+        from unified_events e
+        where ${eventOnlyWhere.join(" and ")}
+        group by e.venue, lower(e.category)
+      `,
+      params,
+      false,
+      FEED_HEAVY_QUERY_WORK_MEM,
+      null,
+      true,
+    );
+  }
+
   const eventWhere = buildFeedEventWhere({
     add,
     inputs,

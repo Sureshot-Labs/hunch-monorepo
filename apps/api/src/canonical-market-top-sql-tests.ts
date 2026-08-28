@@ -126,6 +126,23 @@ assert.match(candidateSql, /e\.status = 'ACTIVE'/i);
 assert.match(candidateSql, /e\.venue = ANY\(\$\d+::text\[\]\)/i);
 assert.match(candidateSql, /e\.end_date is not null/i);
 assert.doesNotMatch(candidateSql, /observed_top_candidate_markets/i);
+assert.match(candidateSql, /canonical_token_mappings as materialized/i);
+assert.match(
+  candidateSql,
+  /select distinct on \(token_mapping\.market_id, token_mapping\.outcome_side\)/i,
+);
+assert.match(
+  candidateSql,
+  /canonical_token_mappings as materialized[\s\S]*?join unified_market_tokens token_mapping[\s\S]*?order by[\s\S]*?token_mapping\.updated_at desc nulls last/i,
+);
+assert.match(
+  candidateSql,
+  /canonical_token_pairs as materialized[\s\S]*?left join canonical_token_mappings token_mapping[\s\S]*?group by probability_candidate\.market_id/i,
+);
+assert.doesNotMatch(
+  candidateSql,
+  /left join lateral\s*\([\s\S]*?from unified_market_tokens token_mapping/i,
+);
 assert.match(candidateSql, /canonical_token_pairs as materialized/i);
 assert.match(candidateSql, /canonical_token_rows as materialized/i);
 assert.match(candidateSql, /canonical_top_rows as materialized/i);
