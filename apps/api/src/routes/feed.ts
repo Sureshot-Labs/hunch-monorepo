@@ -48,6 +48,7 @@ const FOR_YOU_KNN_MULTIPLIER = 8;
 const FOR_YOU_MAX_KNN = 300;
 const FOR_YOU_RECENT_CLOSE_HOURS = 24;
 const PROBABILITY_EVENT_PROBE_WINDOW = 300;
+const PROBABILITY_EVENT_SELECTIVE_PROBE_WINDOW = 1200;
 const PROBABILITY_EVENT_PROBE_BATCH = 100;
 const PROBABILITY_EVENT_SELECTIVE_PROBE_BATCH = 300;
 const PROBABILITY_MARKET_PROBE_WINDOW = 1200;
@@ -592,15 +593,19 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
         let usedProgressiveProbabilityMarketPage = false;
 
         if (hasProbabilityFilter && view !== "markets") {
-          const eventProbabilityBatchSize = isSelectiveProbabilityFilter(
+          const selectiveProbabilityFilter = isSelectiveProbabilityFilter(
             minProb,
             maxProb,
-          )
+          );
+          const eventProbabilityBatchSize = selectiveProbabilityFilter
             ? PROBABILITY_EVENT_SELECTIVE_PROBE_BATCH
             : PROBABILITY_EVENT_PROBE_BATCH;
+          const eventProbabilityWindowSize = selectiveProbabilityFilter
+            ? PROBABILITY_EVENT_SELECTIVE_PROBE_WINDOW
+            : PROBABILITY_EVENT_PROBE_WINDOW;
           const probabilityPage = await fetchProbabilityFeedEventPage({
             requestedLimit: limit,
-            candidateWindowSize: PROBABILITY_EVENT_PROBE_WINDOW,
+            candidateWindowSize: eventProbabilityWindowSize,
             probabilityBatchSize: eventProbabilityBatchSize,
             maxCandidates: PROBABILITY_EVENT_PROBE_MAX_CANDIDATES,
             fetchCandidateEvents: ({ limit: candidateLimit, offset }) => {
@@ -613,6 +618,10 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
                   offset,
                   minProb: undefined,
                   maxProb: undefined,
+                  // Scope is an exact result filter, not a ranking predicate.
+                  // Applying it here counts siblings across the full market
+                  // universe for every probe window and dominates the request.
+                  eventScope: undefined,
                 },
                 { acceptPartialMetricPage: true },
               );

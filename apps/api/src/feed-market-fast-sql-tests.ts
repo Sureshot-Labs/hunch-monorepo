@@ -257,6 +257,63 @@ console.log("ok - probability market probe ranks before canonical top mapping");
   const pool = createCapturePool({
     capturedSql,
     capturedParams,
+    candidateRows: [
+      [
+        {
+          ids: ["market-1", "market-2", "market-3", "market-4"],
+          pm_prefix_count: 4,
+        },
+      ],
+      [
+        { id: "market-1" },
+        { id: "market-2" },
+        { id: "market-3" },
+        { id: "market-4" },
+      ],
+    ],
+  });
+
+  const ids = await fetchFeedMarketIdsForProbabilityProbe(pool, {
+    ...baseInputs,
+    limit: 2,
+    offset: 1,
+    category: "crypto",
+    eventScope: "grouped",
+    minProb: 0.4,
+    maxProb: 0.6,
+    sort: "trending",
+  });
+
+  assert.deepEqual(ids, ["market-2", "market-3"]);
+  assert.equal(capturedSql.length, 2);
+  assert.doesNotMatch(capturedSql[0], /lower\(e\.category\)/i);
+  assert.doesNotMatch(capturedSql[0], /count\(\*\) over \(partition by/i);
+  assert.ok(capturedParams[0]?.includes(1200));
+  assert.match(
+    capturedSql[1],
+    /selected_market_candidates as materialized[\s\S]*?with ordinality selected_market\(market_id, candidate_ordinal\)/i,
+  );
+  assert.match(
+    capturedSql[1],
+    /selected_event_orderable_market_candidates_strict_market_base as materialized[\s\S]*?join selected_event_candidates candidate_event_filter/i,
+  );
+  assert.match(
+    capturedSql[1],
+    /selected_event_scope as materialized[\s\S]*?having count\(\*\) > 1/i,
+  );
+  assert.match(capturedSql[1], /lower\(candidate_event\.category\) = \$\d+/i);
+  assert.match(capturedSql[1], /order by selected_market\.candidate_ordinal/i);
+}
+console.log(
+  "ok - category and event scope filter a bounded ranked market prefix",
+);
+
+{
+  const capturedSql: string[] = [];
+  const capturedParams: unknown[][] = [];
+  const pool = createCapturePool({
+    capturedSql,
+    capturedParams,
     candidateRows: [[{ market_uuid: "market-search-1" }]],
   });
 
@@ -531,6 +588,46 @@ for (const sort of [
   assert.ok(capturedParams[0]?.includes(0.1));
 }
 console.log("ok - event spread sorts use ranked candidates");
+
+{
+  const capturedSql: string[] = [];
+  const capturedParams: unknown[][] = [];
+  const pool = createCapturePool({
+    capturedSql,
+    capturedParams,
+    candidateRows: [[{ ids: ["event-1"], candidate_count: 1 }]],
+  });
+
+  const rows = await fetchFeedEventIds(pool, {
+    ...baseInputs,
+    limit: 1,
+    view: "events",
+    eventScope: "grouped",
+    sort: "totalvol",
+    maxSpread: 0.1,
+  });
+
+  assert.deepEqual(rows, [{ id: "event-1" }]);
+  assert.equal(capturedSql.length, 1);
+  assert.match(capturedSql[0], /ranked_event_candidates as materialized/i);
+  assert.match(
+    capturedSql[0],
+    /ranked_event_orderable_market_candidates_strict_market_base as materialized[\s\S]*?join ranked_event_candidates candidate_event_filter/i,
+  );
+  assert.match(
+    capturedSql[0],
+    /ranked_event_scope as materialized[\s\S]*?having count\(\*\) > 1/i,
+  );
+  assert.match(
+    capturedSql[0],
+    /join ranked_event_scope matched_event_scope[\s\S]*?on matched_event_scope\.event_id = c\.id/i,
+  );
+  assert.equal(
+    capturedSql[0]?.match(/\(om\.best_ask - om\.best_bid\) <= \$\d+/g)?.length,
+    2,
+  );
+}
+console.log("ok - grouped event spread scopes only ranked candidates");
 
 {
   const capturedSql: string[] = [];
