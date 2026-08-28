@@ -61,19 +61,27 @@ let topSql = "";
 const topParams: unknown[][] = [];
 let eventSql = "";
 const localStatements: string[] = [];
+const probabilityMarketSourceQuery =
+  /from probability_market_candidates probability_candidate\s+join unified_markets m on m\.id = probability_candidate\.market_id/i;
 const client = {
   query: async (sql: string, params: unknown[] = []) => {
     localStatements.push(sql);
-    if (
-      /select market_id, token_yes, token_no\s+from canonical_token_pairs/i.test(
-        sql,
-      )
-    ) {
+    if (probabilityMarketSourceQuery.test(sql)) {
       candidateSql = sql;
       return {
         rows: [
-          { market_id: "market-1", token_yes: "yes-1", token_no: "no-1" },
-          { market_id: "market-2", token_yes: "yes-2", token_no: "no-2" },
+          {
+            market_id: "market-1",
+            token_yes: "yes-1",
+            token_no: "no-1",
+            clob_token_ids: null,
+          },
+          {
+            market_id: "market-2",
+            token_yes: null,
+            token_no: null,
+            clob_token_ids: JSON.stringify(["yes-2", "no-2"]),
+          },
         ],
         rowCount: 2,
       };
@@ -150,21 +158,13 @@ assert.match(candidateSql, /e\.status = 'ACTIVE'/i);
 assert.match(candidateSql, /e\.venue = ANY\(\$\d+::text\[\]\)/i);
 assert.match(candidateSql, /e\.end_date is not null/i);
 assert.doesNotMatch(candidateSql, /observed_top_candidate_markets/i);
-assert.match(candidateSql, /canonical_token_mappings as materialized/i);
 assert.match(
   candidateSql,
-  /select distinct on \(token_mapping\.market_id, token_mapping\.outcome_side\)/i,
+  /select\s+probability_candidate\.market_id,\s+m\.token_yes,\s+m\.token_no,\s+m\.clob_token_ids/i,
 );
-assert.match(
-  candidateSql,
-  /canonical_token_mappings as materialized[\s\S]*?join unified_market_tokens token_mapping[\s\S]*?order by[\s\S]*?token_mapping\.updated_at desc nulls last/i,
-);
-assert.match(
-  candidateSql,
-  /canonical_token_pairs as materialized[\s\S]*?left join canonical_token_mappings token_mapping[\s\S]*?group by probability_candidate\.market_id/i,
-);
+assert.match(candidateSql, probabilityMarketSourceQuery);
+assert.doesNotMatch(candidateSql, /unified_market_tokens/i);
 assert.doesNotMatch(candidateSql, /left join lateral/i);
-assert.match(candidateSql, /canonical_token_pairs as materialized/i);
 assert.doesNotMatch(candidateSql, /canonical_token_rows as materialized/i);
 assert.doesNotMatch(candidateSql, /canonical_top_rows as materialized/i);
 assert.doesNotMatch(candidateSql, /canonical_probabilities as materialized/i);
@@ -179,9 +179,7 @@ assert.ok(
   ),
 );
 const candidateBatchQueryCount = localStatements.filter((sql) =>
-  /select market_id, token_yes, token_no\s+from canonical_token_pairs/i.test(
-    sql,
-  ),
+  probabilityMarketSourceQuery.test(sql),
 ).length;
 assert.deepEqual(
   await fetchObservedCanonicalProbabilityMarketIds(pool, {
@@ -196,21 +194,110 @@ assert.deepEqual(
   ["market-2"],
 );
 assert.equal(
-  localStatements.filter((sql) =>
-    /select market_id, token_yes, token_no\s+from canonical_token_pairs/i.test(
-      sql,
-    ),
-  ).length,
+  localStatements.filter((sql) => probabilityMarketSourceQuery.test(sql))
+    .length,
   candidateBatchQueryCount + 1,
 );
 assert.deepEqual(topParams.slice(-2), [[["yes-1", "yes-2"]], [["no-2"]]]);
 console.log("ok - candidate event batches narrow NO tops for each range");
 console.log("ok - feed probability candidates are scoped and time-bounded");
 
+{
+  let scopedCandidateSql = "";
+  let scopedCandidateParams: unknown[] = [];
+  const scopedTopParams: unknown[][] = [];
+  const scopedClient = {
+    query: async (sql: string, params: unknown[] = []) => {
+      if (
+        /select\s+selected_market\.market_id,\s+m\.token_yes,\s+m\.token_no,\s+m\.clob_token_ids/i.test(
+          sql,
+        )
+      ) {
+        scopedCandidateSql = sql;
+        scopedCandidateParams = [...params];
+        return {
+          rows: [
+            {
+              market_id: "scoped-market-1",
+              token_yes: "scoped-yes-1",
+              token_no: "scoped-no-1",
+              clob_token_ids: null,
+            },
+            {
+              market_id: "scoped-market-2",
+              token_yes: null,
+              token_no: null,
+              clob_token_ids: JSON.stringify(["scoped-yes-2", "scoped-no-2"]),
+            },
+          ],
+          rowCount: 2,
+        };
+      }
+      if (/from unified_token_top_latest\s+where token_id = any/i.test(sql)) {
+        scopedTopParams.push(params);
+        return {
+          rows: [
+            {
+              token_id: "scoped-yes-1",
+              best_bid: "0.79",
+              best_ask: "0.81",
+            },
+            {
+              token_id: "scoped-no-1",
+              best_bid: "0.19",
+              best_ask: "0.21",
+            },
+            {
+              token_id: "scoped-yes-2",
+              best_bid: "0.49",
+              best_ask: "0.51",
+            },
+            {
+              token_id: "scoped-no-2",
+              best_bid: "0.49",
+              best_ask: "0.51",
+            },
+          ],
+          rowCount: 4,
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    },
+    release: () => undefined,
+  };
+  const scopedPool = {
+    connect: async () => scopedClient,
+  } as unknown as Pool;
+
+  assert.deepEqual(
+    await fetchObservedCanonicalProbabilityMarketIds(scopedPool, {
+      ...commonInputs,
+      minProb: 0.4,
+      maxProb: 0.6,
+      candidateMarketIds: ["scoped-market-1", "scoped-market-2"],
+    }),
+    ["scoped-market-2"],
+  );
+  assert.match(
+    scopedCandidateSql,
+    /from unnest\(\$1::text\[\]\)\s+as selected_market\(market_id\)\s+join unified_markets m on m\.id = selected_market\.market_id/i,
+  );
+  assert.doesNotMatch(
+    scopedCandidateSql,
+    /unified_market_tokens|probability_candidate_events|probability_market_candidates_strict_market_base|orderable_market_candidates/i,
+  );
+  assert.deepEqual(scopedCandidateParams, [
+    ["scoped-market-1", "scoped-market-2"],
+  ]);
+  assert.deepEqual(scopedTopParams, [
+    [["scoped-yes-1", "scoped-yes-2"]],
+    [["scoped-no-2"]],
+  ]);
+}
+console.log("ok - market probability maps only the ranked candidate batch");
+
 const probabilityQueryCountBeforeSingleFlight = localStatements.filter((sql) =>
-  /select market_id, token_yes, token_no\s+from canonical_token_pairs/i.test(
-    sql,
-  ),
+  probabilityMarketSourceQuery.test(sql),
 ).length;
 const sharedScopeInputs = {
   ...commonInputs,
@@ -232,11 +319,8 @@ const [highRangeIds, middleRangeIds] = await Promise.all([
 assert.deepEqual(highRangeIds, ["market-1"]);
 assert.deepEqual(middleRangeIds, ["market-2"]);
 assert.equal(
-  localStatements.filter((sql) =>
-    /select market_id, token_yes, token_no\s+from canonical_token_pairs/i.test(
-      sql,
-    ),
-  ).length,
+  localStatements.filter((sql) => probabilityMarketSourceQuery.test(sql))
+    .length,
   probabilityQueryCountBeforeSingleFlight + 2,
 );
 console.log("ok - probability ranges keep independent exact narrowed caches");

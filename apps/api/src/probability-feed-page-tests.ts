@@ -1,6 +1,66 @@
 import assert from "node:assert/strict";
 
-import { fetchProbabilityFeedEventPage } from "./probability-feed-page.js";
+import {
+  fetchProbabilityFeedEventPage,
+  fetchProbabilityFeedMarketPage,
+} from "./probability-feed-page.js";
+
+{
+  const candidateCalls: Array<{ limit: number; offset: number }> = [];
+  const probabilityBatches: string[][] = [];
+  const result = await fetchProbabilityFeedMarketPage({
+    requestedLimit: 2,
+    requestedOffset: 1,
+    candidateWindowSize: 4,
+    probabilityBatchSize: 2,
+    maxCandidates: 8,
+    fetchCandidateMarketIds: async (input) => {
+      candidateCalls.push(input);
+      return Array.from(
+        { length: input.limit },
+        (_, index) => `market-${input.offset + index}`,
+      );
+    },
+    fetchBatchProbabilityMarketIds: async (marketIds) => {
+      probabilityBatches.push(marketIds);
+      return marketIds.filter((marketId) => Number(marketId.split("-")[1]) % 2);
+    },
+  });
+
+  assert.deepEqual(candidateCalls, [
+    { limit: 4, offset: 0 },
+    { limit: 4, offset: 4 },
+  ]);
+  assert.deepEqual(probabilityBatches, [
+    ["market-0", "market-1"],
+    ["market-2", "market-3"],
+    ["market-4", "market-5"],
+  ]);
+  assert.deepEqual(result, { marketIds: ["market-3", "market-5"] });
+}
+console.log("ok - probability market page preserves ranked order and offset");
+
+{
+  let probabilityCalls = 0;
+  const result = await fetchProbabilityFeedMarketPage({
+    requestedLimit: 25,
+    requestedOffset: 0,
+    candidateWindowSize: 300,
+    probabilityBatchSize: 300,
+    maxCandidates: 8_000,
+    fetchCandidateMarketIds: async () => null,
+    fetchBatchProbabilityMarketIds: async () => {
+      probabilityCalls += 1;
+      return [];
+    },
+  });
+
+  assert.equal(result, null);
+  assert.equal(probabilityCalls, 0);
+}
+console.log(
+  "ok - unsupported probability market ranking falls back explicitly",
+);
 
 {
   const candidateCalls: Array<{ limit: number; offset: number }> = [];

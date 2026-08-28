@@ -14,7 +14,10 @@ import {
 import { markHotTokens } from "../lib/hot-tokens.js";
 import { requestPriceRefreshForTokens } from "../lib/price-refresh.js";
 import { isPgStatementTimeoutError } from "../lib/postgres-errors.js";
-import { fetchProbabilityFeedEventPage } from "../probability-feed-page.js";
+import {
+  fetchProbabilityFeedEventPage,
+  fetchProbabilityFeedMarketPage,
+} from "../probability-feed-page.js";
 import type { FeedEvent, TokenPair } from "../server-types.js";
 import {
   feedQuerySchema,
@@ -27,7 +30,9 @@ import {
   buildFeedSearchResultWindow,
   fetchFavoriteFeedEventPage,
   fetchFeedEventIds,
+  fetchFeedMarketIdsForProbabilityProbe,
   fetchFeedMarkets,
+  fetchFeedMarketsByIds,
   fetchFeedMarketsDirect,
   fetchObservedCanonicalProbabilityMarketIds,
   type FeedMarketRow,
@@ -43,7 +48,28 @@ const FOR_YOU_MAX_KNN = 300;
 const FOR_YOU_RECENT_CLOSE_HOURS = 24;
 const PROBABILITY_EVENT_PROBE_WINDOW = 300;
 const PROBABILITY_EVENT_PROBE_BATCH = 100;
+const PROBABILITY_EVENT_SELECTIVE_PROBE_BATCH = 300;
 const PROBABILITY_EVENT_PROBE_MAX = 8000;
+const PROBABILITY_MARKET_PROBE_WINDOW = 1200;
+const PROBABILITY_MARKET_SELECTIVE_PROBE_WINDOW = 2400;
+const PROBABILITY_MARKET_PROBE_BATCH = 1200;
+const PROBABILITY_MARKET_PROBE_MAX = 2400;
+
+type FeedQueryPhase =
+  | "candidate"
+  | "probability_mapping"
+  | "filtered_events"
+  | "hydration";
+
+function isSelectiveProbabilityFilter(
+  minProbability: number | undefined,
+  maxProbability: number | undefined,
+): boolean {
+  return (
+    (minProbability != null && minProbability >= 0.7) ||
+    (maxProbability != null && maxProbability <= 0.3)
+  );
+}
 
 function applyFeedCacheHeaders(input: {
   reply: FastifyReply;
@@ -557,44 +583,99 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
       const hasProbabilityFilter = minProb != null || maxProb != null;
 
       let data: FeedEvent[] = [];
+      let feedQueryPhase: FeedQueryPhase = "candidate";
       try {
         let probabilityEventRows: Awaited<
           ReturnType<typeof fetchFeedEventIds>
         > | null = null;
         let observedProbabilityMarketIds: string[] | null = null;
+        let usedProgressiveProbabilityMarketPage = false;
 
         if (hasProbabilityFilter && view !== "markets") {
+          const eventProbabilityBatchSize = isSelectiveProbabilityFilter(
+            minProb,
+            maxProb,
+          )
+            ? PROBABILITY_EVENT_SELECTIVE_PROBE_BATCH
+            : PROBABILITY_EVENT_PROBE_BATCH;
           const probabilityPage = await fetchProbabilityFeedEventPage({
             requestedLimit: limit,
             candidateWindowSize: PROBABILITY_EVENT_PROBE_WINDOW,
-            probabilityBatchSize: PROBABILITY_EVENT_PROBE_BATCH,
+            probabilityBatchSize: eventProbabilityBatchSize,
             maxCandidates: PROBABILITY_EVENT_PROBE_MAX,
-            fetchCandidateEvents: ({ limit: candidateLimit, offset }) =>
-              fetchFeedEventIds(pool, {
-                ...inputs,
-                limit: candidateLimit,
-                offset,
-                minProb: undefined,
-                maxProb: undefined,
-              }),
-            fetchBatchProbabilityMarketIds: (candidateEventIds) =>
-              fetchObservedCanonicalProbabilityMarketIds(pool, {
+            fetchCandidateEvents: ({ limit: candidateLimit, offset }) => {
+              feedQueryPhase = "candidate";
+              return fetchFeedEventIds(
+                pool,
+                {
+                  ...inputs,
+                  limit: candidateLimit,
+                  offset,
+                  minProb: undefined,
+                  maxProb: undefined,
+                },
+                { acceptPartialMetricPage: true },
+              );
+            },
+            fetchBatchProbabilityMarketIds: (candidateEventIds) => {
+              feedQueryPhase = "probability_mapping";
+              return fetchObservedCanonicalProbabilityMarketIds(pool, {
                 ...inputs,
                 candidateEventIds,
-              }),
-            fetchFilteredEvents: (marketIds) =>
-              fetchFeedEventIds(pool, {
+              });
+            },
+            fetchFilteredEvents: (marketIds) => {
+              feedQueryPhase = "filtered_events";
+              return fetchFeedEventIds(pool, {
                 ...inputs,
                 marketIds,
                 minProb: undefined,
                 maxProb: undefined,
-              }),
+              });
+            },
           });
           probabilityEventRows = probabilityPage.eventRows;
           observedProbabilityMarketIds = probabilityPage.marketIds;
         } else if (hasProbabilityFilter) {
-          observedProbabilityMarketIds =
-            await fetchObservedCanonicalProbabilityMarketIds(pool, inputs);
+          const marketProbeWindow = isSelectiveProbabilityFilter(
+            minProb,
+            maxProb,
+          )
+            ? PROBABILITY_MARKET_SELECTIVE_PROBE_WINDOW
+            : PROBABILITY_MARKET_PROBE_WINDOW;
+          const probabilityPage = await fetchProbabilityFeedMarketPage({
+            requestedLimit: limit,
+            requestedOffset: offset,
+            candidateWindowSize: marketProbeWindow,
+            probabilityBatchSize: PROBABILITY_MARKET_PROBE_BATCH,
+            maxCandidates: PROBABILITY_MARKET_PROBE_MAX,
+            fetchCandidateMarketIds: ({
+              limit: candidateLimit,
+              offset: candidateOffset,
+            }) => {
+              feedQueryPhase = "candidate";
+              return fetchFeedMarketIdsForProbabilityProbe(pool, {
+                ...inputs,
+                limit: candidateLimit,
+                offset: candidateOffset,
+              });
+            },
+            fetchBatchProbabilityMarketIds: (candidateMarketIds) => {
+              feedQueryPhase = "probability_mapping";
+              return fetchObservedCanonicalProbabilityMarketIds(pool, {
+                ...inputs,
+                candidateMarketIds,
+              });
+            },
+          });
+          if (probabilityPage) {
+            usedProgressiveProbabilityMarketPage = true;
+            observedProbabilityMarketIds = probabilityPage.marketIds;
+          } else {
+            feedQueryPhase = "probability_mapping";
+            observedProbabilityMarketIds =
+              await fetchObservedCanonicalProbabilityMarketIds(pool, inputs);
+          }
         }
         const databaseInputs = hasProbabilityFilter
           ? {
@@ -608,9 +689,20 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
         if (observedProbabilityMarketIds?.length === 0) {
           data = [];
         } else if (view === "markets") {
-          const rows = await fetchFeedMarketsDirect(pool, databaseInputs);
+          feedQueryPhase = usedProgressiveProbabilityMarketPage
+            ? "hydration"
+            : "candidate";
+          const rows = usedProgressiveProbabilityMarketPage
+            ? await fetchFeedMarketsByIds(
+                pool,
+                inputs,
+                observedProbabilityMarketIds ?? [],
+                { useCachedChange24h: true },
+              )
+            : await fetchFeedMarketsDirect(pool, databaseInputs);
           data = buildFeedData({ rows, eventIds: [], view });
         } else {
+          feedQueryPhase = "candidate";
           const eventRows =
             probabilityEventRows ??
             (await fetchFeedEventIds(pool, databaseInputs));
@@ -618,6 +710,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
           const useCachedChange24h = eventRows.some(
             (row) => row.cached_change_24h === true,
           );
+          feedQueryPhase = "hydration";
           const rows = eventIds.length
             ? await fetchFeedMarkets(pool, databaseInputs, eventIds, {
                 useCachedChange24h,
@@ -628,7 +721,15 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
       } catch (error) {
         if (isPgStatementTimeoutError(error)) {
           req.log.warn(
-            { error, q: search, view, sort, limit, offset },
+            {
+              error,
+              phase: feedQueryPhase,
+              q: search,
+              view,
+              sort,
+              limit,
+              offset,
+            },
             search ? "Feed search timed out" : "Feed filter timed out",
           );
           return reply

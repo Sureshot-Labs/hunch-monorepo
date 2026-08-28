@@ -1,5 +1,73 @@
 export type ProbabilityFeedEventRow = { id: string };
 
+export async function fetchProbabilityFeedMarketPage(args: {
+  requestedLimit: number;
+  requestedOffset: number;
+  candidateWindowSize: number;
+  probabilityBatchSize: number;
+  maxCandidates: number;
+  fetchCandidateMarketIds: (input: {
+    limit: number;
+    offset: number;
+  }) => Promise<string[] | null>;
+  fetchBatchProbabilityMarketIds: (
+    candidateMarketIds: string[],
+  ) => Promise<string[]>;
+}): Promise<{ marketIds: string[] } | null> {
+  const qualifiedMarketIds: string[] = [];
+  const seenQualifiedMarketIds = new Set<string>();
+  const pageTarget = args.requestedOffset + args.requestedLimit;
+  let candidateOffset = 0;
+
+  while (candidateOffset < args.maxCandidates) {
+    const candidateLimit = Math.min(
+      args.candidateWindowSize,
+      args.maxCandidates - candidateOffset,
+    );
+    const candidateMarketIds = await args.fetchCandidateMarketIds({
+      limit: candidateLimit,
+      offset: candidateOffset,
+    });
+    if (candidateMarketIds == null) return null;
+
+    for (
+      let batchOffset = 0;
+      batchOffset < candidateMarketIds.length;
+      batchOffset += args.probabilityBatchSize
+    ) {
+      const candidateBatch = candidateMarketIds.slice(
+        batchOffset,
+        batchOffset + args.probabilityBatchSize,
+      );
+      const qualifiedBatch = new Set(
+        await args.fetchBatchProbabilityMarketIds(candidateBatch),
+      );
+      for (const marketId of candidateBatch) {
+        if (
+          !qualifiedBatch.has(marketId) ||
+          seenQualifiedMarketIds.has(marketId)
+        ) {
+          continue;
+        }
+        seenQualifiedMarketIds.add(marketId);
+        qualifiedMarketIds.push(marketId);
+      }
+      if (qualifiedMarketIds.length >= pageTarget) {
+        return {
+          marketIds: qualifiedMarketIds.slice(args.requestedOffset, pageTarget),
+        };
+      }
+    }
+
+    if (candidateMarketIds.length < candidateLimit) break;
+    candidateOffset += candidateMarketIds.length;
+  }
+
+  return {
+    marketIds: qualifiedMarketIds.slice(args.requestedOffset, pageTarget),
+  };
+}
+
 export async function fetchProbabilityFeedEventPage<
   EventRow extends ProbabilityFeedEventRow,
 >(args: {
