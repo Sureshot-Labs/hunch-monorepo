@@ -504,9 +504,17 @@ async function assertDirectMarketSqlShape(): Promise<void> {
     eventScope: "grouped" | "single",
   ): Promise<string> => {
     const capturedSql: string[] = [];
+    const candidateMarketIds = Array.from(
+      { length: 25 },
+      (_, index) => `market-${index + 1}`,
+    );
     const fakePool = createSqlCapturePool(
       capturedSql,
-      [],
+      candidateMarketIds.map((id, index) => ({
+        id,
+        ids: index === 0 ? candidateMarketIds : undefined,
+        pm_prefix_count: 25,
+      })),
     ) as unknown as Parameters<typeof fetchFeedMarketsDirect>[0];
 
     await fetchFeedMarketsDirect(fakePool, {
@@ -544,28 +552,31 @@ async function assertDirectMarketSqlShape(): Promise<void> {
     sql,
     /orderable_market_candidates_pm_availability as materialized[\s\S]*pm\.id = any\(candidate_ids\.venue_market_ids\)/,
   );
+  assert.match(sql, /selected_market_candidates as materialized/);
   assert.match(
     sql,
-    /scoped_orderable_market_candidates as materialized \([\s\S]*count\(\*\) over \(partition by omc\.event_id\) as market_count[\s\S]*from orderable_market_candidates omc/s,
+    /with ordinality selected_market\(market_id, candidate_ordinal\)/,
   );
-  assert.match(sql, /where market_count > 1/);
   assert.match(
     sql,
-    /from scoped_orderable_market_candidates omc\s+join unified_markets m on m\.id = omc\.market_id/s,
+    /selected_event_orderable_market_candidates_strict_market_base as materialized[\s\S]*join selected_event_candidates candidate_event_filter/s,
   );
-  assert.doesNotMatch(sql, /join market_count emc/s);
-  assert.doesNotMatch(sql, /market_count as materialized/s);
-  assert.doesNotMatch(
+  assert.match(
     sql,
-    /market_count as[\s\S]{0,300}from unified_markets m/s,
+    /selected_event_scope as materialized[\s\S]*having count\(\*\) > 1/s,
   );
+  assert.match(
+    sql,
+    /join selected_event_scope matched_event_scope[\s\S]*order by selected_market\.candidate_ordinal/s,
+  );
+  assert.doesNotMatch(sql, /count\(\*\) over \(partition by/);
   assert.doesNotMatch(
     sql,
     /join polymarket_markets pm_filter\s+on pm_filter\.id = m\.venue_market_id\s+and m\.venue = 'polymarket'/s,
   );
 
   const singleSql = await captureMarketSql("single");
-  assert.match(singleSql, /where market_count = 1/);
+  assert.match(singleSql, /having count\(\*\) = 1/);
 
   const captureFastMarketSql = async (sort: string): Promise<string[]> => {
     const capturedSql: string[] = [];
@@ -1568,7 +1579,8 @@ async function main() {
       await insertMarket(market);
       seededMarketIds.push(market.id);
     }
-    for (const market of markets.slice(8, 10)) {
+    for (const market of [markets[5], markets[6], ...markets.slice(8, 10)]) {
+      if (!market) continue;
       seededTokenIds.push(...(await insertCanonicalMarketTop(market)));
     }
     await pool.query(
@@ -1599,6 +1611,39 @@ async function main() {
       expectedVenues: {
         polymarket: 1,
       },
+    });
+
+    await assertEventFeed({
+      app,
+      query: {
+        category: categoryProb,
+        event_scope: "single",
+        min_prob: 0.7,
+        sort: "time",
+      },
+      expectedEventIds: [events[8].id],
+    });
+
+    await assertEventFeed({
+      app,
+      query: {
+        category: categoryScope,
+        event_scope: "grouped",
+        min_prob: 0.2,
+        sort: "totalvol",
+      },
+      expectedEventIds: [events[5].id],
+    });
+
+    await assertEventFeed({
+      app,
+      query: {
+        category: categoryScope,
+        event_scope: "grouped",
+        max_spread: 0.1,
+        sort: "liquidity",
+      },
+      expectedEventIds: [events[5].id],
     });
 
     await assertFacetParity({

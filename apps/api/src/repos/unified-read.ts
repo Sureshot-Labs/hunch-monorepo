@@ -66,6 +66,9 @@ const FEED_EVENT_FAST_MIN_CANDIDATES = 1000;
 const FEED_EVENT_FAST_CANDIDATE_FACTOR = 20;
 const FEED_EVENT_FAST_MAX_CANDIDATES = 10000;
 const FEED_MARKET_GRACE_MIN_CANDIDATES = 100;
+const FEED_MARKET_FILTER_MIN_CANDIDATES = 300;
+const FEED_MARKET_CATEGORY_FILTER_MIN_CANDIDATES = 1200;
+const FEED_MARKET_FILTER_MAX_CANDIDATES = 10000;
 const FEED_CANDIDATE_EXPANSION_FACTOR = 4;
 const FEED_CHANGE24H_V2_CANDIDATE_LIMITS = [500, 2000, 8000] as const;
 const FEED_SEARCH_PREFIX_MIN_CHARS = 3;
@@ -2053,7 +2056,6 @@ function canUseFeedEventMaxSpreadFastPath(inputs: FeedInputs): boolean {
     !inputs.marketIds?.length &&
     inputs.minProb == null &&
     inputs.maxProb == null &&
-    inputs.eventScope == null &&
     inputs.minVol <= 1e-9 &&
     inputs.minLiquidity <= 0 &&
     !inputs.durationMinutes?.length &&
@@ -2354,6 +2356,42 @@ async function fetchFeedEventIdsFast(
   const candidateLimitParamIndex = params.length - 1;
   const targetParam = add(pageTarget);
 
+  let eventScopeCtes = "";
+  let eventScopeJoin = "";
+  if (useMaxSpreadFastPath && inputs.eventScope) {
+    const nowCloseParam = add(inputs.nowParam);
+    const eventScopeMarketCandidatesCte =
+      buildBroadOrderableMarketCandidatesCte({
+        candidateEventIdsCte: "ranked_event_candidates",
+        cteName: "ranked_event_orderable_market_candidates",
+        materialized: true,
+        nowParam,
+        nowCloseParam,
+        extraMarketSql: buildFeedMarketCandidateExtraSql({
+          add,
+          inputs,
+          nowParam,
+          venueTarget: "event",
+          renderableMarketExpr: expressions.renderableMarketExpr,
+          supportedLimitlessMarketExpr:
+            expressions.supportedLimitlessMarketExpr,
+        }),
+      });
+    eventScopeCtes = `,
+      ${eventScopeMarketCandidatesCte},
+      ranked_event_scope as materialized (
+        select scoped_market.event_id
+        from ranked_event_orderable_market_candidates scoped_market
+        group by scoped_market.event_id
+        having count(*) ${inputs.eventScope === "grouped" ? "> 1" : "= 1"}
+      )
+    `;
+    eventScopeJoin = `
+      join ranked_event_scope matched_event_scope
+        on matched_event_scope.event_id = c.id
+    `;
+  }
+
   const eventOpenInterestSortExpr = "coalesce(nullif(e.open_interest, 0), 0)";
   let filteredEventSortValue: string | null = null;
   let candidateSourceSql: string | null = null;
@@ -2442,7 +2480,8 @@ async function fetchFeedEventIdsFast(
   const sql = `
     with ranked_event_candidates as materialized (
       ${candidateSourceSql}
-    ),
+    )
+    ${eventScopeCtes},
     valid_ranked_events as materialized (
       select
         c.id,
@@ -2454,6 +2493,7 @@ async function fetchFeedEventIdsFast(
         }
       from ranked_event_candidates c
       join unified_events e on e.id = c.id
+      ${eventScopeJoin}
       where ${buildEventHasOrderableMarketSql({
         eventAlias: "e",
         nowParam,
@@ -4190,6 +4230,164 @@ async function fetchFeedChange24hMarketIdsFast(
   return null;
 }
 
+function hasFeedMarketCategoryFilter(
+  inputs: Pick<FeedInputs, "category" | "categories">,
+): boolean {
+  return Boolean(inputs.category || inputs.categories?.length);
+}
+
+async function filterRankedFeedMarketCandidates(
+  pool: Pool,
+  inputs: FeedInputs,
+  candidateMarketIds: string[],
+): Promise<string[]> {
+  if (!candidateMarketIds.length) return [];
+
+  const { params, add } = createParamBuilder();
+  const candidateMarketIdsParam = add(candidateMarketIds);
+  const selectedMarketCte = `
+    selected_market_candidates as materialized (
+      select selected_market.market_id, selected_market.candidate_ordinal
+      from unnest(${candidateMarketIdsParam}::text[])
+        with ordinality selected_market(market_id, candidate_ordinal)
+    )
+  `;
+  const selectedEventCte = `
+    selected_event_candidates as materialized (
+      select distinct candidate_market.event_id as id
+      from selected_market_candidates selected_market
+      join unified_markets candidate_market
+        on candidate_market.id = selected_market.market_id
+    )
+  `;
+  const categoryWhere: string[] = [];
+  if (inputs.categories?.length) {
+    categoryWhere.push(
+      `lower(candidate_event.category) = ANY(${add(inputs.categories)}::text[])`,
+    );
+  } else if (inputs.category) {
+    categoryWhere.push(
+      `lower(candidate_event.category) = ${add(inputs.category.toLowerCase())}`,
+    );
+  }
+
+  let eventScopeCtes = "";
+  let eventScopeJoin = "";
+  if (inputs.eventScope) {
+    const expressions = buildFeedSqlExpressions();
+    const nowParam = add(inputs.nowParam);
+    const nowCloseParam = add(inputs.nowParam);
+    const scopeMarketCandidatesCte = buildBroadOrderableMarketCandidatesCte({
+      candidateEventIdsCte: "selected_event_candidates",
+      cteName: "selected_event_orderable_market_candidates",
+      materialized: true,
+      nowParam,
+      nowCloseParam,
+      extraMarketSql: buildFeedMarketCandidateExtraSql({
+        add,
+        inputs,
+        nowParam,
+        venueTarget: "market",
+        renderableMarketExpr: expressions.renderableMarketExpr,
+        supportedLimitlessMarketExpr: expressions.supportedLimitlessMarketExpr,
+      }),
+    });
+    eventScopeCtes = `,
+      ${scopeMarketCandidatesCte},
+      selected_event_scope as materialized (
+        select scoped_market.event_id
+        from selected_event_orderable_market_candidates scoped_market
+        group by scoped_market.event_id
+        having count(*) ${inputs.eventScope === "grouped" ? "> 1" : "= 1"}
+      )
+    `;
+    eventScopeJoin = `
+      join selected_event_scope matched_event_scope
+        on matched_event_scope.event_id = candidate_market.event_id
+    `;
+  }
+
+  const rows = await queryRowsWithLocalSettings<{ id: string }>(
+    pool,
+    `
+      with ${selectedMarketCte},
+      ${selectedEventCte}
+      ${eventScopeCtes}
+      select selected_market.market_id as id
+      from selected_market_candidates selected_market
+      join unified_markets candidate_market
+        on candidate_market.id = selected_market.market_id
+      join unified_events candidate_event
+        on candidate_event.id = candidate_market.event_id
+      ${eventScopeJoin}
+      ${categoryWhere.length ? `where ${categoryWhere.join(" and ")}` : ""}
+      order by selected_market.candidate_ordinal
+    `,
+    params,
+    {
+      workMem: FEED_HEAVY_QUERY_WORK_MEM,
+      statementTimeoutMs: feedFilterStatementTimeoutMs(),
+      jitOff: true,
+    },
+  );
+  return rows.map((row) => row.id);
+}
+
+async function fetchProgressivelyFilteredFeedMarketIds(
+  pool: Pool,
+  inputs: FeedInputs,
+  options?: { acceptPartialMetricPage?: boolean },
+): Promise<string[] | null> {
+  const pageTarget = inputs.limit + inputs.offset;
+  const hasCategoryFilter = hasFeedMarketCategoryFilter(inputs);
+  let candidateLimit = Math.min(
+    FEED_MARKET_FILTER_MAX_CANDIDATES,
+    Math.max(
+      hasCategoryFilter
+        ? FEED_MARKET_CATEGORY_FILTER_MIN_CANDIDATES
+        : FEED_MARKET_FILTER_MIN_CANDIDATES,
+      pageTarget * (hasCategoryFilter ? FEED_EVENT_FAST_CANDIDATE_FACTOR : 4),
+    ),
+  );
+
+  for (;;) {
+    const candidateMarketIds = await fetchFeedMarketIdsFast(
+      pool,
+      {
+        ...inputs,
+        limit: candidateLimit,
+        offset: 0,
+        eventScope: undefined,
+        category: undefined,
+        categories: undefined,
+      },
+      { acceptPartialMetricPage: true },
+    );
+    if (candidateMarketIds == null) return null;
+
+    const filteredMarketIds = await filterRankedFeedMarketCandidates(
+      pool,
+      inputs,
+      candidateMarketIds,
+    );
+    const pageIds = filteredMarketIds.slice(
+      inputs.offset,
+      inputs.offset + inputs.limit,
+    );
+    if (pageIds.length >= inputs.limit) return pageIds;
+
+    if (options?.acceptPartialMetricPage) {
+      return pageIds;
+    }
+    if (candidateMarketIds.length < candidateLimit) return null;
+    if (candidateLimit >= FEED_MARKET_FILTER_MAX_CANDIDATES) return null;
+    candidateLimit = Math.min(
+      FEED_MARKET_FILTER_MAX_CANDIDATES,
+      expandFeedCandidateLimit(candidateLimit),
+    );
+  }
+}
+
 async function fetchFeedMarketIdsFast(
   pool: Pool,
   inputs: FeedInputs,
@@ -4202,7 +4400,9 @@ async function fetchFeedMarketIdsFast(
   if (inputs.sort === "change24h") {
     return fetchFeedChange24hMarketIdsFast(pool, inputs);
   }
-  if (inputs.eventScope) return null;
+  if (inputs.eventScope || hasFeedMarketCategoryFilter(inputs)) {
+    return fetchProgressivelyFilteredFeedMarketIds(pool, inputs, options);
+  }
 
   const isMetricSort = inputs.sort === "trending_v2";
   const isLegacyTrending = inputs.sort == null || inputs.sort === "trending";
