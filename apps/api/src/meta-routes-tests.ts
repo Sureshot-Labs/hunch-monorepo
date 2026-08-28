@@ -738,10 +738,9 @@ async function assertEventFeedSqlShape(): Promise<void> {
       { length: rowCount },
       (_, index) => `event-${index}`,
     );
-    const rows: Array<Record<string, unknown>> =
-      inputs.sort === "change24h"
-        ? ids.map((id) => ({ id }))
-        : [{ ids, candidate_count: rowCount }];
+    const rows: Array<Record<string, unknown>> = [
+      { ids, candidate_count: rowCount },
+    ];
     const fakePool = createSqlCapturePool(
       capturedSql,
       rows,
@@ -791,7 +790,11 @@ async function assertEventFeedSqlShape(): Promise<void> {
     );
     assert.match(
       sql,
-      /order by ranked_event\.change_24h desc, ranked_event\.event_id/,
+      /array_agg\(\s*page\.event_id\s+order by page\.change_24h desc, page\.event_id\s*\)/s,
+    );
+    assert.match(
+      sql,
+      /select count\(\*\)::int from change24h_v2_ranked_events/,
     );
     assert.doesNotMatch(sql, /orderable_market_candidates/);
     assert.doesNotMatch(sql, /observed_market_change_24h/);
@@ -1085,6 +1088,28 @@ async function assertChange24hV2FastPath(): Promise<void> {
       bestBid: 0.89,
       bestAsk: 0.91,
     },
+    {
+      id: makeId("change24-v2:market"),
+      venue: "polymarket",
+      venueMarketId: makeId("change24-v2:venue-market"),
+      eventId: events[0].id,
+      title: `Change24 v2 first grouped companion ${suffix}`,
+      closeTime: new Date(now + 24 * 60 * 60 * 1000),
+      expirationTime: new Date(now + 24 * 60 * 60 * 1000),
+      bestBid: 0.49,
+      bestAsk: 0.51,
+    },
+    {
+      id: makeId("change24-v2:market"),
+      venue: "polymarket",
+      venueMarketId: makeId("change24-v2:venue-market"),
+      eventId: events[2].id,
+      title: `Change24 v2 uncached grouped companion ${suffix}`,
+      closeTime: new Date(now + 24 * 60 * 60 * 1000),
+      expirationTime: new Date(now + 24 * 60 * 60 * 1000),
+      bestBid: 0.49,
+      bestAsk: 0.51,
+    },
   ];
   const tokenIds: string[] = [];
 
@@ -1182,6 +1207,29 @@ async function assertChange24hV2FastPath(): Promise<void> {
       fastMarkets.map((market) => Number(market.change_24h)),
       [0.8, 0.2],
       "fast market output uses the same v2 values that selected its rank",
+    );
+
+    const groupedMarkets = await fetchFeedMarketsDirect(pool, {
+      ...feedInputs,
+      eventScope: "grouped",
+      maxSpread: 0.1,
+    });
+    assert.deepEqual(
+      groupedMarkets.map((market) => market.market_uuid),
+      [markets[2].id, markets[0].id],
+      "grouped change24h counts every orderable market before applying the cached rank",
+    );
+
+    const singleMarkets = await fetchFeedMarketsDirect(pool, {
+      ...feedInputs,
+      eventScope: "single",
+      limit: 1,
+      maxSpread: 0.1,
+    });
+    assert.deepEqual(
+      singleMarkets.map((market) => market.market_uuid),
+      [markets[1].id],
+      "single change24h excludes events with an uncached companion market",
     );
 
     const fastEvents = await fetchFeedEventIds(pool, feedInputs);
