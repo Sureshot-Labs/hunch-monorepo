@@ -209,8 +209,7 @@ export function fundingEconomicSourceReservations(
     return [
       {
         reservation,
-        rawAmount:
-          reservation.sourceInputRawAmount ?? reservation.rawAmount,
+        rawAmount: reservation.sourceInputRawAmount ?? reservation.rawAmount,
       },
     ];
   });

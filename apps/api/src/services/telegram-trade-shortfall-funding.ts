@@ -416,7 +416,8 @@ export function resolveTelegramTradeShortfallExecutionProfile(
       sources.length > 0 &&
       sources.some((source) => sameAsset(source, pUsdAsset)) &&
       sources.every(
-        (source) => sameAsset(source, pUsdAsset) || sameAsset(source, usdceAsset),
+        (source) =>
+          sameAsset(source, pUsdAsset) || sameAsset(source, usdceAsset),
       )
     ) {
       return POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID;
@@ -460,10 +461,7 @@ export function telegramTradeShortfallExecutionProfiles(
     )
     .map((profile) => profile.profileId);
   if (venue !== "polymarket") return profiles;
-  return [
-    POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
-    ...profiles,
-  ];
+  return [POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID, ...profiles];
 }
 
 function requiresPolymarketPusdRouterContinuation(
