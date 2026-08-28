@@ -113,6 +113,46 @@ function createCapturePool(args: {
 }
 console.log("ok - trending v2 bounds metric rows before market lookups");
 
+{
+  const capturedSql: string[] = [];
+  const capturedParams: unknown[][] = [];
+  const pool = createCapturePool({
+    capturedSql,
+    capturedParams,
+    candidateRows: [
+      [
+        {
+          ids: ["market-1", "market-2", "market-3"],
+          non_limitless_prefix_count: 1_000,
+          non_limitless_valid_count: 2,
+          limitless_candidate_count: 449,
+          limitless_valid_count: 3,
+          non_limitless_remainder_below_page: true,
+          limitless_remainder_below_page: false,
+        },
+      ],
+      [],
+    ],
+  });
+
+  await fetchFeedMarketsDirect(pool, {
+    ...baseInputs,
+    sort: "trending_v2",
+  });
+
+  assert.equal(capturedSql.length, 2);
+  assert.match(
+    capturedSql[0],
+    /min\(trend_score\) from combined_page[\s\S]*?> \(select min\(volume_24h\) from non_limitless_metric_prefix\)[\s\S]*?as non_limitless_remainder_below_page/i,
+  );
+  assert.ok(capturedParams[0]?.includes(1_000));
+  assert.equal(
+    capturedParams.some((params) => params.includes(4_000)),
+    false,
+  );
+}
+console.log("ok - trending v2 stops when a full page dominates the remainder");
+
 const projectedSortPatterns: Record<string, RegExp> = {
   trending:
     /candidate_market\.volume_total[\s\S]*?\* 0\.4[\s\S]*?candidate_market\.event_start_date/i,

@@ -55,6 +55,7 @@ import {
   TELEGRAM_BOT_TRADING_CALLBACK_PREFIX,
   type TelegramBotTradingClientReplyMarkup,
 } from "./telegram-bot-trading-client.js";
+import { withTelegramPrivateNavigation } from "./telegram-bot-private-navigation.js";
 import {
   fenceTelegramTradeLifecycleNavigation,
   isTelegramTradeLifecycleDeliveryEligible,
@@ -419,6 +420,30 @@ function buildTelegramTradeShortfallUnavailableReplyMarkup(
       [{ callback_data: "hm:v1:home", text: "🏠 Home" }],
     ],
   };
+}
+
+function buildTelegramFundingBuyReturnOpenFailureMessage(input: {
+  intentId: string;
+  marketTitle: string;
+  venue: TelegramBotTradingVenue;
+}): TelegramBotTradingMessage {
+  return withTelegramPrivateNavigation(
+    {
+      parse_mode: "MarkdownV2",
+      text: formatTelegramTradeLifecycleMessageMarkdownV2({
+        heading: "Funding setup is temporarily unavailable.",
+        tone: "warn",
+        lines: [
+          "No order was submitted. Open the market to try a fresh Review.",
+        ],
+        marketTitle: input.marketTitle,
+        venue: input.venue,
+      }),
+    },
+    {
+      marketCallbackData: `${TELEGRAM_BOT_TRADING_CALLBACK_PREFIX}:open_market:${input.intentId}`,
+    },
+  );
 }
 
 function formatTelegramVenueFieldMarkdownV2(venue: string): string {
@@ -1989,6 +2014,7 @@ function venueStatusFromReadiness(input: {
 
 export const telegramBotTradingTestHooks = {
   buildTelegramAppHandoffFundingReviewLines,
+  buildTelegramFundingBuyReturnOpenFailureMessage,
   buildTelegramTradeConfirmButton,
   buildTelegramTradeShortfallUnavailableReplyMarkup,
   buildTelegramTradeAuthorityBinding,
@@ -10924,13 +10950,8 @@ async function previewTelegramTradeIntent(input: {
           );
           await input.sendMessage({
             chat_id: input.chatId,
-            parse_mode: "MarkdownV2",
-            text: formatTelegramTradeLifecycleMessageMarkdownV2({
-              heading: "Receive setup is temporarily unavailable.",
-              tone: "warn",
-              lines: [
-                "The existing trade was not submitted or replaced. Try again shortly.",
-              ],
+            ...buildTelegramFundingBuyReturnOpenFailureMessage({
+              intentId: input.intent.id,
               marketTitle: input.intent.market_title,
               venue: input.intent.venue,
             }),

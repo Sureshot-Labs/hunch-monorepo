@@ -299,15 +299,6 @@ function buildQuery(
   return search.toString();
 }
 
-function findCategory(
-  payload: CategoriesFacetPayload,
-  category: string,
-): { category: string; events: number; venues: Record<string, number> } {
-  const match = payload.categories.find((entry) => entry.category === category);
-  assert.ok(match, `expected category ${category} in facet payload`);
-  return match;
-}
-
 function distinctFeedEventCount(payload: FeedPayload): number {
   return new Set(payload.data.map((item) => item.eventId)).size;
 }
@@ -348,19 +339,36 @@ async function assertFacetParity(args: {
   query: Record<string, string | number | undefined>;
   category: string;
   expectedEvents: number;
+  expectedFeedEvents?: number;
   expectedVenues: Record<string, number>;
 }) {
-  const { app, query, category, expectedEvents, expectedVenues } = args;
+  const {
+    app,
+    query,
+    category,
+    expectedEvents,
+    expectedFeedEvents = expectedEvents,
+  } = args;
+  const defaultResponse = await app.inject({
+    method: "GET",
+    url: "/meta/categories",
+  });
+  assert.equal(defaultResponse.statusCode, 200);
+  const defaultPayload = defaultResponse.json<CategoriesFacetPayload>();
   const facetResponse = await app.inject({
     method: "GET",
     url: `/meta/categories/facets?${buildQuery(query)}`,
   });
   assert.equal(facetResponse.statusCode, 200);
+  assert.equal(
+    facetResponse.headers["x-facets-probability-filter"],
+    query.min_prob != null || query.max_prob != null ? "ignored" : "none",
+  );
+  assert.equal(facetResponse.headers["x-facets-mode"], "default");
+  assert.equal(facetResponse.headers["x-facets-filters-ignored"], "all");
   const facetPayload = facetResponse.json<CategoriesFacetPayload>();
-  const facetCategory = findCategory(facetPayload, category);
-
-  assert.equal(facetCategory.events, expectedEvents);
-  assert.deepEqual(facetCategory.venues, expectedVenues);
+  assert.equal(facetPayload.total, defaultPayload.total);
+  assert.deepEqual(facetPayload.categories, defaultPayload.categories);
 
   const feedResponse = await app.inject({
     method: "GET",
@@ -371,7 +379,7 @@ async function assertFacetParity(args: {
   });
   assert.equal(feedResponse.statusCode, 200);
   const feedPayload = feedResponse.json<FeedPayload>();
-  assert.equal(distinctFeedEventCount(feedPayload), expectedEvents);
+  assert.equal(distinctFeedEventCount(feedPayload), expectedFeedEvents);
 }
 
 async function assertMarketScopeFeed(args: {
@@ -1599,18 +1607,16 @@ async function main() {
     }
 
     {
-      const facetResponse = await app.inject({
-        method: "GET",
-        url: `/meta/categories/facets?${buildQuery({
+      await assertFacetParity({
+        app,
+        query: {
           end_within_hours: 24,
           age_within_hours: 24,
-        })}`,
+        },
+        category: categoryAlpha,
+        expectedEvents: 1,
+        expectedVenues: { polymarket: 1 },
       });
-      assert.equal(facetResponse.statusCode, 200);
-      const facetPayload = facetResponse.json<CategoriesFacetPayload>();
-      const facetGamma = findCategory(facetPayload, categoryGamma);
-      assert.equal(facetGamma.events, 0);
-      assert.deepEqual(facetGamma.venues, {});
     }
 
     await assertFacetParity({
@@ -1639,14 +1645,13 @@ async function main() {
     });
 
     {
-      const facetResponse = await app.inject({
-        method: "GET",
-        url: `/meta/categories/facets?${buildQuery({ q: "2026" })}`,
+      await assertFacetParity({
+        app,
+        query: { q: "2026" },
+        category: categoryYear,
+        expectedEvents: 1,
+        expectedVenues: { polymarket: 1 },
       });
-      assert.equal(facetResponse.statusCode, 200);
-      const facetPayload = facetResponse.json<CategoriesFacetPayload>();
-      assert.equal(findCategory(facetPayload, categoryYear).events, 1);
-      assert.equal(findCategory(facetPayload, categoryYearPrefix).events, 0);
     }
 
     await assertFacetParity({
@@ -1662,25 +1667,24 @@ async function main() {
     });
 
     {
-      const facetResponse = await app.inject({
-        method: "GET",
-        url: `/meta/categories/facets?${buildQuery({ q: "x" })}`,
+      await assertFacetParity({
+        app,
+        query: { q: "x" },
+        category: categorySingleChar,
+        expectedEvents: 1,
+        expectedVenues: { polymarket: 1 },
       });
-      assert.equal(facetResponse.statusCode, 200);
-      const facetPayload = facetResponse.json<CategoriesFacetPayload>();
-      assert.equal(findCategory(facetPayload, categorySingleChar).events, 1);
-      assert.equal(findCategory(facetPayload, categoryAlpha).events, 0);
     }
 
     {
       for (const q of ["will", "this"]) {
-        const facetResponse = await app.inject({
-          method: "GET",
-          url: `/meta/categories/facets?${buildQuery({ q })}`,
+        await assertFacetParity({
+          app,
+          query: { q },
+          category: categoryAlpha,
+          expectedEvents: 2,
+          expectedVenues: { polymarket: 2 },
         });
-        assert.equal(facetResponse.statusCode, 200);
-        const facetPayload = facetResponse.json<CategoriesFacetPayload>();
-        assert.equal(findCategory(facetPayload, categoryAlpha).events, 2);
       }
     }
 
@@ -1690,9 +1694,10 @@ async function main() {
         min_prob: 0.7,
       },
       category: categoryProb,
-      expectedEvents: 1,
+      expectedEvents: 2,
+      expectedFeedEvents: 1,
       expectedVenues: {
-        polymarket: 1,
+        polymarket: 2,
       },
     });
 
@@ -1702,9 +1707,10 @@ async function main() {
         max_prob: 0.3,
       },
       category: categoryProb,
-      expectedEvents: 1,
+      expectedEvents: 2,
+      expectedFeedEvents: 1,
       expectedVenues: {
-        polymarket: 1,
+        polymarket: 2,
       },
     });
 

@@ -1,4 +1,4 @@
-import type { FastifyPluginAsync } from "fastify";
+import type { FastifyPluginAsync, FastifyReply } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import {
   getVenueLifecycleCapabilities,
@@ -12,7 +12,6 @@ import { env } from "../env.js";
 import { isPgStatementTimeoutError } from "../lib/postgres-errors.js";
 import {
   fetchFeedCategoryFacetRows,
-  fetchObservedCanonicalProbabilityMarketIds,
   queryRowsWithLocalSettings,
 } from "../repos/unified-read.js";
 import { getRedis } from "../redis.js";
@@ -36,33 +35,22 @@ type VenueCoverageRow = {
   markets_with_price: number;
 };
 
-export const metaRoutes: FastifyPluginAsync = async (app) => {
-  const z = app.withTypeProvider<ZodTypeProvider>();
+const DYNAMIC_CATEGORY_FACETS_ENABLED = false;
 
-  z.get("/meta/categories", async (_req, reply) => {
-    const lifecycle = await resolveVenueLifecyclePolicy(pool);
-    const discoverableVenues = HUNCH_VENUES.filter((venue) =>
-      venueHasLifecycleCapability(lifecycle.effective, venue, "discovery"),
-    );
-    const cacheKey = `meta:categories:v2:${lifecycle.revision}`;
-    const r = await getRedis();
+async function loadDefaultCategoriesBody(args: {
+  lifecycleRevision: string;
+  venues: string[];
+}): Promise<{ body: string; cacheStatus: "disabled" | "hit" | "miss" }> {
+  const cacheKey = `meta:categories:v2:${args.lifecycleRevision}`;
+  const r = await getRedis();
+  if (r) {
+    const cached = await r.get(cacheKey);
+    if (cached) return { body: cached, cacheStatus: "hit" };
+  }
 
-    if (r) {
-      const cached = await r.get(cacheKey);
-      if (cached) {
-        reply.header("x-cache", "hit");
-        reply.header("Content-Type", "application/json; charset=utf-8");
-        reply.header(
-          "Cache-Control",
-          "public, max-age=600, stale-while-revalidate=1200",
-        );
-        return reply.send(cached);
-      }
-    }
-
-    const rows = await queryRowsWithLocalSettings<CategoryRow>(
-      pool,
-      `
+  const rows = await queryRowsWithLocalSettings<CategoryRow>(
+    pool,
+    `
       select
         venue,
         lower(category) as category,
@@ -75,57 +63,66 @@ export const metaRoutes: FastifyPluginAsync = async (app) => {
       group by venue, lower(category)
       order by events desc, venue asc, category asc
     `,
-      [discoverableVenues],
-      { statementTimeoutMs: env.feedFilterTimeoutMs },
-    );
+    [args.venues],
+    { statementTimeoutMs: env.feedFilterTimeoutMs },
+  );
 
-    const byCategory = new Map<
-      string,
-      { category: string; events: number; venues: Record<string, number> }
-    >();
-
-    for (const row of rows) {
-      const category = row.category;
-      const entry =
-        byCategory.get(category) ??
-        (() => {
-          const init = {
-            category,
-            events: 0,
-            venues: {} as Record<string, number>,
-          };
-          byCategory.set(category, init);
-          return init;
-        })();
-
-      entry.events += Number(row.events) || 0;
-      entry.venues[row.venue] =
-        (entry.venues[row.venue] ?? 0) + (row.events || 0);
-    }
-
-    const categories = Array.from(byCategory.values()).sort((a, b) => {
-      if (b.events !== a.events) return b.events - a.events;
-      return a.category.localeCompare(b.category);
-    });
-
-    const payload = {
-      total: categories.length,
-      generatedAt: new Date().toISOString(),
-      categories,
+  const byCategory = new Map<
+    string,
+    { category: string; events: number; venues: Record<string, number> }
+  >();
+  for (const row of rows) {
+    const entry = byCategory.get(row.category) ?? {
+      category: row.category,
+      events: 0,
+      venues: {},
     };
-    const body = JSON.stringify(payload);
+    entry.events += Number(row.events) || 0;
+    entry.venues[row.venue] =
+      (entry.venues[row.venue] ?? 0) + (row.events || 0);
+    byCategory.set(row.category, entry);
+  }
 
-    if (r) {
-      await r.set(cacheKey, body, { EX: 600 });
-      reply.header("x-cache", "miss");
-    }
+  const categories = Array.from(byCategory.values()).sort((a, b) => {
+    if (b.events !== a.events) return b.events - a.events;
+    return a.category.localeCompare(b.category);
+  });
+  const body = JSON.stringify({
+    total: categories.length,
+    generatedAt: new Date().toISOString(),
+    categories,
+  });
 
-    reply.header("Content-Type", "application/json; charset=utf-8");
-    reply.header(
-      "Cache-Control",
-      "public, max-age=600, stale-while-revalidate=1200",
+  if (r) await r.set(cacheKey, body, { EX: 600 });
+  return { body, cacheStatus: r ? "miss" : "disabled" };
+}
+
+function applyDefaultCategoryHeaders(
+  reply: FastifyReply,
+  cacheStatus: "disabled" | "hit" | "miss",
+): void {
+  if (cacheStatus !== "disabled") reply.header("x-cache", cacheStatus);
+  reply.header("Content-Type", "application/json; charset=utf-8");
+  reply.header(
+    "Cache-Control",
+    "public, max-age=600, stale-while-revalidate=1200",
+  );
+}
+
+export const metaRoutes: FastifyPluginAsync = async (app) => {
+  const z = app.withTypeProvider<ZodTypeProvider>();
+
+  z.get("/meta/categories", async (_req, reply) => {
+    const lifecycle = await resolveVenueLifecyclePolicy(pool);
+    const discoverableVenues = HUNCH_VENUES.filter((venue) =>
+      venueHasLifecycleCapability(lifecycle.effective, venue, "discovery"),
     );
-    return reply.send(body);
+    const result = await loadDefaultCategoriesBody({
+      lifecycleRevision: lifecycle.revision,
+      venues: discoverableVenues,
+    });
+    applyDefaultCategoryHeaders(reply, result.cacheStatus);
+    return reply.send(result.body);
   });
 
   z.get(
@@ -137,6 +134,9 @@ export const metaRoutes: FastifyPluginAsync = async (app) => {
     },
     async (req, reply) => {
       const q = req.query;
+      const minProb = q.min_prob;
+      const maxProb = q.max_prob;
+      const hasProbabilityFilter = minProb != null || maxProb != null;
       const minVol = resolveMinTotalVolumeFilter(q);
       const minLiquidity = q.min_liquidity;
       const search = q.q;
@@ -149,18 +149,37 @@ export const metaRoutes: FastifyPluginAsync = async (app) => {
             ? "single"
             : undefined;
       const lifecycle = await resolveVenueLifecyclePolicy(pool);
+      if (!DYNAMIC_CATEGORY_FACETS_ENABLED) {
+        // Workaround: fuck scanning 20+ GB of market/token tables for category
+        // facets. That shit is far too slow, so users intentionally get the
+        // default cached facets while the actual feed keeps every requested filter.
+        const discoverableVenues = HUNCH_VENUES.filter((venue) =>
+          venueHasLifecycleCapability(lifecycle.effective, venue, "discovery"),
+        );
+        const result = await loadDefaultCategoriesBody({
+          lifecycleRevision: lifecycle.revision,
+          venues: discoverableVenues,
+        });
+        reply.header(
+          "x-facets-probability-filter",
+          hasProbabilityFilter ? "ignored" : "none",
+        );
+        reply.header("x-facets-mode", "default");
+        reply.header("x-facets-filters-ignored", "all");
+        applyDefaultCategoryHeaders(reply, result.cacheStatus);
+        return reply.send(result.body);
+      }
       const requestedVenues = q.venue ?? HUNCH_VENUES;
       const venues = requestedVenues.filter((venue) =>
         venueHasLifecycleCapability(lifecycle.effective, venue, "discovery"),
       );
       const filter = q.filter;
-      const minProb = q.min_prob;
-      const maxProb = q.max_prob;
       const maxSpread = q.max_spread;
       const durationMinutes = q.duration_minutes;
       const durationKey = durationMinutes?.join(",") ?? "";
       const endWithinHours = q.end_within_hours;
       const ageWithinHours = q.age_within_hours;
+      reply.header("x-facets-probability-filter", "none");
 
       const venueKey = venues?.length ? venues.join(",") : "";
       const cacheKey = `meta:categories:facets:v7:${lifecycle.revision}:${view}:${eventScope ?? ""}:${minVol}:${minLiquidity}:${search ?? ""}:${venueKey}:${minProb ?? ""}:${maxProb ?? ""}:${maxSpread ?? ""}:${durationKey}:${endWithinHours ?? ""}:${ageWithinHours ?? ""}:${filter ?? ""}`;
@@ -194,22 +213,6 @@ export const metaRoutes: FastifyPluginAsync = async (app) => {
               ).toISOString()
             : undefined;
 
-        const hasProbabilityFilter = minProb != null || maxProb != null;
-        const observedProbabilityMarketIds = hasProbabilityFilter
-          ? await fetchObservedCanonicalProbabilityMarketIds(pool, {
-              minProb,
-              maxProb,
-              view,
-              venues,
-              filter,
-              durationMinutes,
-              endWithin,
-              ageSince,
-              nowParam,
-              sevenDaysAgo,
-              sevenDaysFromNow,
-            })
-          : null;
         const facetInputs = {
           minVol,
           minLiquidity,
@@ -218,9 +221,8 @@ export const metaRoutes: FastifyPluginAsync = async (app) => {
           eventScope,
           venues,
           filter,
-          marketIds: observedProbabilityMarketIds ?? undefined,
-          minProb: hasProbabilityFilter ? undefined : minProb,
-          maxProb: hasProbabilityFilter ? undefined : maxProb,
+          minProb: undefined,
+          maxProb: undefined,
           maxSpread,
           durationMinutes,
           endWithin,
@@ -231,9 +233,7 @@ export const metaRoutes: FastifyPluginAsync = async (app) => {
         };
 
         const [facetRowsResult, universeRows] = await Promise.all([
-          observedProbabilityMarketIds?.length === 0
-            ? Promise.resolve([])
-            : fetchFeedCategoryFacetRows(pool, facetInputs),
+          fetchFeedCategoryFacetRows(pool, facetInputs),
           queryRowsWithLocalSettings<{ category: string }>(
             pool,
             `
