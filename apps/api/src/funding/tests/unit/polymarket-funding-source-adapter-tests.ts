@@ -341,8 +341,7 @@ assert.ok(
     (reservation) =>
       reservation.expiresAt ===
       new Date(
-        Date.parse(EXPIRES_AT) +
-          FUNDING_OPERATION_RECONCILIATION_TTL_MS,
+        Date.parse(EXPIRES_AT) + FUNDING_OPERATION_RECONCILIATION_TTL_MS,
       ).toISOString(),
   ),
   "committed reservations must outlive the short inspection and remain active for reconciliation",

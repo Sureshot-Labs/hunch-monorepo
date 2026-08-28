@@ -3084,10 +3084,7 @@ assert.deepEqual(partialMultiReceipt?.receiptBreakdown, {
 assert.ok(partialMultiReceipt);
 const partialMultiReceiptMessage =
   buildTelegramFundingProgressMessage(partialMultiReceipt);
-assert.match(
-  partialMultiReceiptMessage.text,
-  /Total received.*0\\\.1 USDC/u,
-);
+assert.match(partialMultiReceiptMessage.text, /Total received.*0\\\.1 USDC/u);
 assert.match(partialMultiReceiptMessage.text, /Ready.*0\\\.01 pUSD/u);
 assert.match(partialMultiReceiptMessage.text, /Converting.*0\\\.04 USDC/u);
 assert.match(partialMultiReceiptMessage.text, /Queued.*0\\\.05 USDC/u);

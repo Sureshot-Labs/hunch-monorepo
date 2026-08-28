@@ -29,8 +29,7 @@ const walletContext: EmbeddedPolymarketWalletContext = {
     isInternalWallet: true,
   },
 };
-const retiredFundingRouter =
-  "0x0fEF62E1CD0600C132070855A45443852940EE72";
+const retiredFundingRouter = "0x0fEF62E1CD0600C132070855A45443852940EE72";
 
 const tokenInterface = new Interface([
   "function approve(address spender,uint256 value) returns (bool)",

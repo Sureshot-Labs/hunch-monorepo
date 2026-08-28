@@ -2377,8 +2377,7 @@ await test("client Polymarket preparation accepts only the exact handoff to Rout
     userId: USER_ID,
     request: {
       liquidityProjectionId: futureFencedProjection.liquidityProjectionId,
-      selectedSourceOptionId:
-        sourceWithFutureCreditFence.option.sourceOptionId,
+      selectedSourceOptionId: sourceWithFutureCreditFence.option.sourceOptionId,
       confirmedSourceAmount: null,
       requestedDestinationAmount: {
         asset: POLYGON_PUSD,

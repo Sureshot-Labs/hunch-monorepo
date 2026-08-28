@@ -6,9 +6,7 @@ import {
   type FundingReceiveReceipt,
   type FundingReceiveSession,
 } from "../funding/domain/types.js";
-import {
-  parseTelegramRelayEvmAutomationPolicyV3,
-} from "../funding/execution/telegram-funding-automation-policy.js";
+import { parseTelegramRelayEvmAutomationPolicyV3 } from "../funding/execution/telegram-funding-automation-policy.js";
 import {
   canonicalJsonEqual,
   canonicalJsonHash,

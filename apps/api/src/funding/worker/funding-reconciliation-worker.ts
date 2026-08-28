@@ -466,10 +466,7 @@ export async function runFundingReconciliationJob(
       (polymarketPusdFundProfile || relayEvmProfiles.length > 0) &&
       transactionCodec
         ? await new DelegatedFundingExecutor(pool, {
-            profiles: [
-              polymarketPusdFundProfile,
-              ...relayEvmProfiles,
-            ].filter(
+            profiles: [polymarketPusdFundProfile, ...relayEvmProfiles].filter(
               (profile): profile is NonNullable<typeof profile> =>
                 profile != null,
             ),

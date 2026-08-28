@@ -113,6 +113,11 @@ const baseUsdc = {
   assetId: "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
   decimals: 6,
 };
+const polygonUsdc = {
+  networkId: "evm:137",
+  assetId: "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359",
+  decimals: 6,
+};
 
 function productionTestRegistry(
   locationKinds: readonly string[] = [
@@ -1016,7 +1021,7 @@ await test("compiles full V2 intent to the reviewed runtime catalog", () => {
       locations: 8,
       venues: 2,
       routes: 9,
-      privy: 3,
+      privy: 2,
       preparation: 4,
       positionActions: 0,
       recommendationOrder: ["polymarket", "limitless"],
@@ -1038,6 +1043,25 @@ await test("compiles full V2 intent to the reviewed runtime catalog", () => {
     policy.routes.some(
       (route) => route.routeId === "polygon-usdc-to-polygon-pusd",
     ),
+  );
+  assert.deepEqual(
+    policy.privyFundingMethods.map((method) => ({
+      methodId: method.methodId,
+      destinationLocationPatternId: method.destinationLocationPatternId,
+      asset: method.asset,
+    })),
+    [
+      {
+        methodId: "privy-polymarket-polygon-usdc-v1",
+        destinationLocationPatternId: "polymarket-venue-cash-v1",
+        asset: polygonUsdc,
+      },
+      {
+        methodId: "privy-limitless-usdc-v1",
+        destinationLocationPatternId: "limitless-venue-cash-v1",
+        asset: baseUsdc,
+      },
+    ],
   );
   const delegated = compileFundingIntentPolicy({
     ...FULL_POLICY,

@@ -6,6 +6,7 @@ import type { Pool } from "@hunch/infra";
 
 import {
   type FeedInputs,
+  fetchFeedEventIds,
   fetchFeedMarketsDirect,
 } from "./repos/unified-read.js";
 
@@ -247,3 +248,185 @@ console.log("ok - market sorts rank projected candidates without rejoining");
   assert.ok(capturedParams[1]?.includes(400));
 }
 console.log("ok - market sort expands an exhausted Polymarket grace prefix");
+
+{
+  const capturedSql: string[] = [];
+  const capturedParams: unknown[][] = [];
+  const pool = createCapturePool({
+    capturedSql,
+    capturedParams,
+    candidateRows: [[{ id: "market-2" }, { id: "market-1" }], []],
+  });
+
+  await fetchFeedMarketsDirect(pool, {
+    ...baseInputs,
+    marketIds: ["market-1", "market-2", "market-3"],
+    eventScope: "grouped",
+    maxSpread: 0.1,
+    sort: "trending",
+  });
+
+  assert.equal(capturedSql.length, 2);
+  assert.match(
+    capturedSql[0],
+    /join unnest\(\$\d+::text\[\]\) as candidate_filter\(market_id\)/i,
+  );
+  assert.match(
+    capturedSql[0],
+    /scoped_orderable_market_candidates as materialized[\s\S]*?count\(\*\) over \(partition by omc\.event_id\)[\s\S]*?market_count > 1/i,
+  );
+  assert.match(capturedSql[0], /m\.best_ask - m\.best_bid\) <= \$\d+/i);
+  assert.match(capturedSql[0], /limit \$\d+ offset \$\d+/i);
+  assert.match(
+    capturedSql[1],
+    /market_candidates as materialized[\s\S]*?from unnest\(\$\d+::text\[\]\)[\s\S]*?with ordinality selected\(id, ord\)/i,
+  );
+  assert.deepEqual(capturedParams[0]?.[2], [
+    "market-1",
+    "market-2",
+    "market-3",
+  ]);
+}
+console.log("ok - probability market ids are ranked before page hydration");
+
+{
+  const capturedSql: string[] = [];
+  const capturedParams: unknown[][] = [];
+  const pool = createCapturePool({
+    capturedSql,
+    capturedParams,
+    candidateRows: [
+      [{ id: "market-1" }, { id: "market-2" }, { id: "market-3" }],
+      [],
+    ],
+  });
+
+  await fetchFeedMarketsDirect(pool, {
+    ...baseInputs,
+    marketIds: ["market-1", "market-2"],
+    sort: "change24h",
+  });
+
+  assert.match(
+    capturedSql[0],
+    /join unified_market_change_24h cached_change[\s\S]*?cached_change\.calculation_version = 2[\s\S]*?cached_change\.change_24h is not null/i,
+  );
+  assert.match(capturedSql[0], /order by cached_change\.change_24h desc/i);
+  assert.match(
+    capturedSql[1],
+    /left join unified_market_change_24h cached_change[\s\S]*?cached_change\.calculation_version = 2/i,
+  );
+  assert.doesNotMatch(capturedSql[1], /observed_market_change_24h/i);
+}
+console.log("ok - probability change24h ranks and hydrates from the v2 cache");
+
+{
+  const capturedSql: string[] = [];
+  const capturedParams: unknown[][] = [];
+  const pool = createCapturePool({
+    capturedSql,
+    capturedParams,
+    candidateRows: [
+      [{ id: "market-1" }, { id: "market-2" }, { id: "market-3" }],
+      [],
+    ],
+  });
+
+  await fetchFeedMarketsDirect(pool, {
+    ...baseInputs,
+    eventScope: "grouped",
+    maxSpread: 0.1,
+    sort: "change24h",
+  });
+
+  assert.equal(capturedSql.length, 2);
+  assert.match(
+    capturedSql[0],
+    /change24h_v2_candidate_event_scope as materialized[\s\S]*?scope_market\.event_id = candidate_event\.id[\s\S]*?limit 2/i,
+  );
+  assert.match(
+    capturedSql[0],
+    /from\s+change24h_v2_ranked_market_candidates ranked_cache[\s\S]*?join unified_markets m on m\.id = ranked_cache\.market_id/i,
+  );
+  assert.match(
+    capturedSql[0],
+    /change24h_v2_candidate_events as materialized[\s\S]*?select distinct candidate_market\.event_id as id[\s\S]*?join unified_markets candidate_market/i,
+  );
+  assert.doesNotMatch(capturedSql[0], /count\(\*\) over \(partition by/i);
+  assert.match(
+    capturedSql[0],
+    /change24h_v2_valid_candidate_events as materialized[\s\S]*?candidate_event_scope\.market_count > 1/i,
+  );
+  assert.match(capturedSql[0], /m\.best_ask - m\.best_bid\) <= \$\d+/i);
+}
+console.log(
+  "ok - grouped change24h scopes all orderable markets before cache rank",
+);
+
+{
+  const capturedSql: string[] = [];
+  const capturedParams: unknown[][] = [];
+  const pool = createCapturePool({
+    capturedSql,
+    capturedParams,
+    candidateRows: [[{ ids: ["event-1"], candidate_count: 1 }]],
+  });
+
+  const rows = await fetchFeedEventIds(pool, {
+    ...baseInputs,
+    limit: 1,
+    view: "events",
+    marketIds: ["market-1", "market-2"],
+    minLiquidity: 1_000,
+    maxSpread: 0.1,
+    durationMinutes: [60],
+    sort: "change24h",
+  });
+
+  assert.deepEqual(rows, [{ id: "event-1", cached_change_24h: true }]);
+  assert.equal(capturedSql.length, 1);
+  assert.match(
+    capturedSql[0],
+    /selected_market_ids as materialized[\s\S]*?from unnest\(\$\d+::text\[\]\)/i,
+  );
+  assert.match(
+    capturedSql[0],
+    /from unified_event_change_24h cache[\s\S]*?cache\.calculation_version = 2/i,
+  );
+  assert.match(
+    capturedSql[0],
+    /om\.id in \(select market_id from selected_market_ids\)/i,
+  );
+  assert.match(
+    capturedSql[0],
+    /coalesce\(nullif\(om\.liquidity, 0\), nullif\(om\.open_interest, 0\)\) >= \$\d+/i,
+  );
+  assert.match(capturedSql[0], /\(om\.best_ask - om\.best_bid\) <= \$\d+/i);
+  assert.match(capturedSql[0], /om\.duration_minutes = ANY\(\$\d+::int\[\]\)/i);
+}
+console.log("ok - change24h event filters stay on the cached candidate path");
+
+{
+  const capturedSql: string[] = [];
+  const capturedParams: unknown[][] = [];
+  const pool = createCapturePool({
+    capturedSql,
+    capturedParams,
+    candidateRows: [[{ ids: ["event-1"], candidate_count: 1 }]],
+  });
+
+  await fetchFeedEventIds(pool, {
+    ...baseInputs,
+    limit: 1,
+    view: "events",
+    minVol: 1_000,
+    sort: "change24h",
+  });
+
+  assert.equal(capturedSql.length, 1);
+  assert.match(
+    capturedSql[0],
+    /coalesce\([\s\S]*?fallback_volume_market[\s\S]*?\) >= \$\d+/i,
+  );
+}
+console.log("ok - change24h event volume uses the exact fallback sum");

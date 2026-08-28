@@ -36,18 +36,36 @@ type VenueCoverageRow = {
 };
 
 const DYNAMIC_CATEGORY_FACETS_ENABLED = false;
+const DEFAULT_CATEGORIES_CACHE_TTL_SEC = 600;
+const DEFAULT_CATEGORIES_STALE_TTL_SEC = 24 * 60 * 60;
+const DEFAULT_CATEGORY_NAMES = [
+  "politics",
+  "crypto",
+  "sports",
+  "economics",
+  "technology",
+  "entertainment",
+  "weather",
+  "health",
+  "mentions",
+  "other",
+] as const;
+const defaultCategoriesRefreshes = new Map<string, Promise<string>>();
+let lastDefaultCategoriesBody: string | null = null;
 
-async function loadDefaultCategoriesBody(args: {
-  lifecycleRevision: string;
-  venues: string[];
-}): Promise<{ body: string; cacheStatus: "disabled" | "hit" | "miss" }> {
-  const cacheKey = `meta:categories:v2:${args.lifecycleRevision}`;
-  const r = await getRedis();
-  if (r) {
-    const cached = await r.get(cacheKey);
-    if (cached) return { body: cached, cacheStatus: "hit" };
-  }
+function buildFallbackDefaultCategoriesBody(): string {
+  return JSON.stringify({
+    total: DEFAULT_CATEGORY_NAMES.length,
+    generatedAt: new Date().toISOString(),
+    categories: DEFAULT_CATEGORY_NAMES.map((category) => ({
+      category,
+      events: 0,
+      venues: {},
+    })),
+  });
+}
 
+async function computeDefaultCategoriesBody(venues: string[]): Promise<string> {
   const rows = await queryRowsWithLocalSettings<CategoryRow>(
     pool,
     `
@@ -63,7 +81,7 @@ async function loadDefaultCategoriesBody(args: {
       group by venue, lower(category)
       order by events desc, venue asc, category asc
     `,
-    [args.venues],
+    [venues],
     { statementTimeoutMs: env.feedFilterTimeoutMs },
   );
 
@@ -87,19 +105,88 @@ async function loadDefaultCategoriesBody(args: {
     if (b.events !== a.events) return b.events - a.events;
     return a.category.localeCompare(b.category);
   });
-  const body = JSON.stringify({
+  return JSON.stringify({
     total: categories.length,
     generatedAt: new Date().toISOString(),
     categories,
   });
+}
 
-  if (r) await r.set(cacheKey, body, { EX: 600 });
-  return { body, cacheStatus: r ? "miss" : "disabled" };
+async function loadDefaultCategoriesBody(args: {
+  lifecycleRevision: string;
+  venues: string[];
+}): Promise<{
+  body: string;
+  cacheStatus: "disabled" | "fallback" | "hit" | "miss" | "stale";
+}> {
+  const cacheKey = `meta:categories:v2:${args.lifecycleRevision}`;
+  const staleCacheKey = `${cacheKey}:stale`;
+  const r = await getRedis();
+  if (r) {
+    const cached = await r.get(cacheKey);
+    if (cached) {
+      lastDefaultCategoriesBody = cached;
+      await r.set(staleCacheKey, cached, {
+        EX: DEFAULT_CATEGORIES_STALE_TTL_SEC,
+      });
+      return { body: cached, cacheStatus: "hit" };
+    }
+
+    const stale = await r.get(staleCacheKey);
+    if (stale) {
+      lastDefaultCategoriesBody = stale;
+      let pending = defaultCategoriesRefreshes.get(cacheKey);
+      if (!pending) {
+        pending = computeDefaultCategoriesBody(args.venues)
+          .then(async (body) => {
+            lastDefaultCategoriesBody = body;
+            await Promise.all([
+              r.set(cacheKey, body, { EX: DEFAULT_CATEGORIES_CACHE_TTL_SEC }),
+              r.set(staleCacheKey, body, {
+                EX: DEFAULT_CATEGORIES_STALE_TTL_SEC,
+              }),
+            ]);
+            return body;
+          })
+          .finally(() => defaultCategoriesRefreshes.delete(cacheKey));
+        defaultCategoriesRefreshes.set(cacheKey, pending);
+      }
+      void pending.catch(() => undefined);
+      return { body: stale, cacheStatus: "stale" };
+    }
+  }
+
+  let pending = defaultCategoriesRefreshes.get(cacheKey);
+  if (!pending) {
+    pending = computeDefaultCategoriesBody(args.venues).finally(() =>
+      defaultCategoriesRefreshes.delete(cacheKey),
+    );
+    defaultCategoriesRefreshes.set(cacheKey, pending);
+  }
+  try {
+    const body = await pending;
+    lastDefaultCategoriesBody = body;
+    if (r) {
+      await Promise.all([
+        r.set(cacheKey, body, { EX: DEFAULT_CATEGORIES_CACHE_TTL_SEC }),
+        r.set(staleCacheKey, body, {
+          EX: DEFAULT_CATEGORIES_STALE_TTL_SEC,
+        }),
+      ]);
+    }
+    return { body, cacheStatus: r ? "miss" : "disabled" };
+  } catch (error) {
+    if (!isPgStatementTimeoutError(error)) throw error;
+    return {
+      body: lastDefaultCategoriesBody ?? buildFallbackDefaultCategoriesBody(),
+      cacheStatus: "fallback",
+    };
+  }
 }
 
 function applyDefaultCategoryHeaders(
   reply: FastifyReply,
-  cacheStatus: "disabled" | "hit" | "miss",
+  cacheStatus: "disabled" | "fallback" | "hit" | "miss" | "stale",
 ): void {
   if (cacheStatus !== "disabled") reply.header("x-cache", cacheStatus);
   reply.header("Content-Type", "application/json; charset=utf-8");

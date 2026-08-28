@@ -207,7 +207,10 @@ const FUNDING_VENUE_CATALOG: Readonly<Record<FundingVenueId, CatalogVenue>> =
       // first arrive at an owned controller wallet and use an ordinary Relay
       // route; the Deposit Wallet cannot authorize Hunch's Funding Router.
       directReceiveAssets: ["polygon:pusd"],
-      cardReceiveAssets: ["polygon:pusd", "polygon:usdc"],
+      // Privy Card providers document native Polygon USDC, not Polymarket
+      // pUSD. Card funding therefore enters through the existing exact USDC
+      // route and converts to pUSD; pUSD remains a crypto-receive asset only.
+      cardReceiveAssets: ["polygon:usdc"],
       privyMethodId: "privy-polymarket-pusd-v1",
     },
     limitless: {

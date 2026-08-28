@@ -111,9 +111,7 @@ import { OwnedRouteDestinationObserver } from "../../reconciliation/owned-route-
 import { RelayOwnedRefundObserver } from "../../reconciliation/relay-owned-refund-observer.js";
 import { PolymarketFundingPostconditionDriver } from "../../preparation/polymarket-funding-reconciler.js";
 import { hasReadyTelegramFundingDestinationReceipt } from "../../../services/telegram-funding-buy-continuation.js";
-import {
-  appendTelegramFundingConsent,
-} from "../../../services/telegram-funding-sessions.js";
+import { appendTelegramFundingConsent } from "../../../services/telegram-funding-sessions.js";
 import { runTelegramFundingProgressProjectionBatch } from "../../../services/telegram-funding-progress-projector.js";
 import {
   resolveTelegramFundingReceiptDisposition,
@@ -540,7 +538,10 @@ async function createFixture(
     fingerprint: canonicalJsonHash(automationPolicy),
     now,
   } as const;
-  const appendedConsent = await appendTelegramFundingConsent(pool, consentInput);
+  const appendedConsent = await appendTelegramFundingConsent(
+    pool,
+    consentInput,
+  );
   const consentEvidence = {
     id: appendedConsent.consent.id,
     fingerprint: appendedConsent.consent.fingerprint,
