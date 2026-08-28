@@ -231,7 +231,7 @@ export const RELAY_ROUTE_SPECS: Readonly<Record<string, RelayRouteSpec>> = {
     },
     sourceVm: "svm",
     destinationVm: "evm",
-    quoteMode: "exact_input",
+    quoteMode: "expected_output",
     rehearsalScenario: null,
     solanaDirectDestination: {
       destinationChain: "polygon",

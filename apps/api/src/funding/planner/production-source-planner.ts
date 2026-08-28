@@ -420,6 +420,7 @@ function sourceFactsForComponent(input: {
         : availableRaw;
       let raw: string;
       let minimumDestinationRaw: string;
+      let quoteModeOverride: RelayEligibleSourceFact["quoteModeOverride"];
       const confirmedSourceRaw =
         input.confirmedSourceAmount &&
         sameAsset(
@@ -439,6 +440,7 @@ function sourceFactsForComponent(input: {
         // output; the pre-quote floor only proves that the route cannot return
         // zero and must never turn received funds into an exact-output spend.
         minimumDestinationRaw = "1";
+        quoteModeOverride = "exact_input";
       } else if (nativeSolSource) {
         raw = spendableRaw.toString();
         minimumDestinationRaw = input.requiredAmount.raw;
@@ -454,20 +456,30 @@ function sourceFactsForComponent(input: {
             BigInt(slippageDenominator) -
             1n) /
           BigInt(slippageDenominator);
-        raw =
-          spendableRaw < sourceRawWithSlippage
-            ? spendableRaw.toString()
-            : sourceRawWithSlippage.toString();
-        const grossDestinationRaw = rescaleStableRaw(
-          raw,
-          input.requiredAmount.asset.decimals,
-          input.component.amount.asset.decimals,
-        );
-        minimumDestinationRaw = (
-          (BigInt(grossDestinationRaw) *
-            BigInt(10_000 - input.maximumSlippageBps)) /
-          10_000n
-        ).toString();
+        const balanceCapped = spendableRaw <= sourceRawWithSlippage;
+        raw = balanceCapped
+          ? spendableRaw.toString()
+          : sourceRawWithSlippage.toString();
+        if (balanceCapped) {
+          // A capped wallet cannot authorize the full expected-output debit.
+          // Quote its exact available input instead, then let Relay's validated
+          // minimum output become a partial contribution for the existing
+          // composite planner. The public fee/slippage checks still decide
+          // whether that contribution is economically usable.
+          minimumDestinationRaw = "1";
+          quoteModeOverride = "exact_input";
+        } else {
+          const grossDestinationRaw = rescaleStableRaw(
+            raw,
+            input.requiredAmount.asset.decimals,
+            input.component.amount.asset.decimals,
+          );
+          minimumDestinationRaw = (
+            (BigInt(grossDestinationRaw) *
+              BigInt(10_000 - input.maximumSlippageBps)) /
+            10_000n
+          ).toString();
+        }
       }
       const estimatedUsd =
         !nativeSolSource &&
@@ -504,9 +516,7 @@ function sourceFactsForComponent(input: {
           asset: input.requiredAmount.asset,
           raw: minimumDestinationRaw,
         },
-        ...(confirmedSourceRaw != null
-          ? { quoteModeOverride: "exact_input" as const }
-          : {}),
+        ...(quoteModeOverride ? { quoteModeOverride } : {}),
         maximumSourceRaw: spendableRaw.toString(),
         maximumSlippageBps: input.maximumSlippageBps,
         estimatedUsd,
@@ -738,14 +748,19 @@ export function restrictResidualSourcesToCompositeContribution(
     input.fullRequirement.asset,
     "residual funding requirement",
   );
-  if (
-    rawAmount(input.plannedRequirement.raw) >=
-    rawAmount(input.fullRequirement.raw)
-  ) {
-    return sources;
-  }
+  // Exact-input quotes may intentionally spend a capped source. Keep a leg
+  // independently selectable only when its validated minimum really covers
+  // the full destination requirement; otherwise it is a contribution that
+  // only the bounded composite planner may select.
   return sources.map((source) => {
-    if (!source.option.selectable) return source;
+    const minimum = source.option.minimumDestination;
+    if (
+      !source.option.selectable ||
+      !minimum ||
+      rawAmount(minimum.raw) >= rawAmount(input.fullRequirement.raw)
+    ) {
+      return source;
+    }
     return {
       ...source,
       option: {
