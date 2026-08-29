@@ -4,8 +4,19 @@ import {
   fetchProbabilityFeedEventPage,
   fetchProbabilityFeedMarketPage,
   PROBABILITY_EVENT_PROBE_MAX_CANDIDATES,
+  PROBABILITY_MARKET_PROBE_BATCH,
+  PROBABILITY_MARKET_PROBE_MAX_CANDIDATES,
+  PROBABILITY_MARKET_PROBE_WINDOW,
   resolveProbabilityEventProbePolicy,
 } from "./probability-feed-page.js";
+
+assert.equal(PROBABILITY_MARKET_PROBE_WINDOW, 1_200);
+assert.equal(PROBABILITY_MARKET_PROBE_BATCH, PROBABILITY_MARKET_PROBE_WINDOW);
+assert.equal(
+  PROBABILITY_MARKET_PROBE_MAX_CANDIDATES,
+  PROBABILITY_MARKET_PROBE_WINDOW,
+);
+console.log("ok - probability market discovery is capped at one rank window");
 
 assert.deepEqual(resolveProbabilityEventProbePolicy(undefined, undefined), {
   candidateWindowSize: 300,

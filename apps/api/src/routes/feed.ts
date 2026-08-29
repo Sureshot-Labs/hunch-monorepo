@@ -18,6 +18,9 @@ import {
   fetchProbabilityFeedEventPage,
   fetchProbabilityFeedMarketPage,
   PROBABILITY_EVENT_PROBE_MAX_CANDIDATES,
+  PROBABILITY_MARKET_PROBE_BATCH,
+  PROBABILITY_MARKET_PROBE_MAX_CANDIDATES,
+  PROBABILITY_MARKET_PROBE_WINDOW,
   resolveProbabilityEventProbePolicy,
 } from "../probability-feed-page.js";
 import type { FeedEvent, TokenPair } from "../server-types.js";
@@ -48,10 +51,6 @@ const FOR_YOU_KNN_PAD = 50;
 const FOR_YOU_KNN_MULTIPLIER = 8;
 const FOR_YOU_MAX_KNN = 300;
 const FOR_YOU_RECENT_CLOSE_HOURS = 24;
-const PROBABILITY_MARKET_PROBE_WINDOW = 1200;
-const PROBABILITY_MARKET_PROBE_BATCH = 1200;
-const PROBABILITY_MARKET_PROBE_MAX = 2400;
-
 type FeedQueryPhase =
   | "candidate"
   | "market_rank_prefix"
@@ -634,7 +633,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
             requestedOffset: offset,
             candidateWindowSize: PROBABILITY_MARKET_PROBE_WINDOW,
             probabilityBatchSize: PROBABILITY_MARKET_PROBE_BATCH,
-            maxCandidates: PROBABILITY_MARKET_PROBE_MAX,
+            maxCandidates: PROBABILITY_MARKET_PROBE_MAX_CANDIDATES,
             fetchCandidateMarketIds: ({
               limit: candidateLimit,
               offset: candidateOffset,
