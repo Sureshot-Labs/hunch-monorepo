@@ -65,10 +65,11 @@ const LIMITLESS_AMM_STALE_FALLBACK_INTERVAL = "interval '15 minutes'";
 const FEED_HEAVY_QUERY_WORK_MEM = "32MB";
 const FEED_EVENT_FAST_MIN_CANDIDATES = 1000;
 const FEED_EVENT_FAST_CANDIDATE_FACTOR = 20;
+const FEED_EVENT_BOUNDED_CANDIDATE_FACTOR = 2;
 const FEED_EVENT_FAST_MAX_CANDIDATES = 10000;
 const FEED_MARKET_GRACE_MIN_CANDIDATES = 100;
 const FEED_MARKET_FILTER_MIN_CANDIDATES = 300;
-const FEED_MARKET_SCOPE_FILTER_MIN_CANDIDATES = 1000;
+const FEED_MARKET_SCOPE_FILTER_MIN_CANDIDATES = 300;
 const FEED_MARKET_CATEGORY_FILTER_MIN_CANDIDATES = 1200;
 const FEED_MARKET_CATEGORY_EXACT_MAX_EVENTS = 5000;
 const FEED_MARKET_CATEGORY_EXACT_MAX_CANDIDATES = 20000;
@@ -259,8 +260,10 @@ function buildBroadOrderableMarketCandidatesCte(args: {
   nowParam: string;
   nowCloseParam?: string;
   extraMarketSql?: string[];
+  preRankMarketSql?: string[];
   ranking?: {
     graceLimitParam: string;
+    rankStrictBeforeEvent?: boolean;
     sortDir: "asc" | "desc";
     sortValueSql: string;
     targetParam: string;
@@ -295,6 +298,10 @@ function buildBroadOrderableMarketCandidatesCte(args: {
     ? `join ${candidateEventIdsCte} candidate_event_filter on candidate_event_filter.id = m.event_id`
     : "";
   const extraSql = (args.extraMarketSql ?? [])
+    .filter(Boolean)
+    .map((clause) => `and ${clause}`)
+    .join("\n        ");
+  const preRankMarketSql = (args.preRankMarketSql ?? [])
     .filter(Boolean)
     .map((clause) => `and ${clause}`)
     .join("\n        ");
@@ -388,6 +395,30 @@ function buildBroadOrderableMarketCandidatesCte(args: {
   if (args.ranking && !includeRankingColumns) {
     throw new Error("Market candidate ranking requires ranking columns");
   }
+  const strictMarketBaseSql = `
+      select
+        ${strictMarketBaseColumns}
+      from unified_markets m
+      ${candidateMarketJoin}
+      ${candidateEventJoin}
+      where ${buildStrictIndexedMarketSql({
+        marketAlias: "m",
+        nowParam: args.nowParam,
+        nowCloseParam: args.nowCloseParam,
+      })}
+        ${preRankMarketSql}
+  `;
+  const boundedStrictMarketBaseSql = args.ranking?.rankStrictBeforeEvent
+    ? `
+      select candidate_market.*
+      from (
+        ${strictMarketBaseSql}
+      ) candidate_market
+      order by (${args.ranking.sortValueSql}) ${args.ranking.sortDir} nulls last,
+        candidate_market.venue_market_id
+      limit ${args.ranking.targetParam}
+    `
+    : strictMarketBaseSql;
   const candidateTailSql = args.ranking
     ? `
     ${strictRankedCandidatesCte} as materialized (
@@ -487,16 +518,7 @@ function buildBroadOrderableMarketCandidatesCte(args: {
   `;
   return `
     ${strictMarketBaseCte} as materialized (
-      select
-        ${strictMarketBaseColumns}
-      from unified_markets m
-      ${candidateMarketJoin}
-      ${candidateEventJoin}
-      where ${buildStrictIndexedMarketSql({
-        marketAlias: "m",
-        nowParam: args.nowParam,
-        nowCloseParam: args.nowCloseParam,
-      })}
+      ${boundedStrictMarketBaseSql}
     ),
     ${strictCandidatesCte} as materialized (
       select
@@ -516,22 +538,18 @@ function buildBroadOrderableMarketCandidatesCte(args: {
       ${candidateEventJoin}
       where m.status = 'ACTIVE'
         and m.venue = 'polymarket'
-        and m.close_time is not null
-        and m.close_time <= ${args.nowParam}::timestamptz
-        and m.close_time > (${args.nowParam}::timestamptz - ${POLYMARKET_ACCEPTING_ORDERS_GRACE_INTERVAL_SQL})
-      union
-      select
-        m.id as market_id,
-        m.event_id,
-        m.venue_market_id
-      from unified_markets m
-      ${candidateMarketJoin}
-      ${candidateEventJoin}
-      where m.status = 'ACTIVE'
-        and m.venue = 'polymarket'
-        and m.expiration_time is not null
-        and m.expiration_time <= ${args.nowParam}::timestamptz
-        and m.expiration_time > (${args.nowParam}::timestamptz - ${POLYMARKET_ACCEPTING_ORDERS_GRACE_INTERVAL_SQL})
+        and (
+          (
+            m.close_time is not null
+            and m.close_time <= ${args.nowParam}::timestamptz
+            and m.close_time > (${args.nowParam}::timestamptz - ${POLYMARKET_ACCEPTING_ORDERS_GRACE_INTERVAL_SQL})
+          )
+          or (
+            m.expiration_time is not null
+            and m.expiration_time <= ${args.nowParam}::timestamptz
+            and m.expiration_time > (${args.nowParam}::timestamptz - ${POLYMARKET_ACCEPTING_ORDERS_GRACE_INTERVAL_SQL})
+          )
+        )
       union
       select
         m.id as market_id,
@@ -1348,6 +1366,7 @@ function buildFeedMarketCandidateExtraSql(args: {
   marketAlias?: string;
   marketIdsParam?: string | null;
   hasSearch?: boolean;
+  marketOnly?: boolean;
   requireNamedCategory?: boolean;
 }): string[] {
   const {
@@ -1359,16 +1378,16 @@ function buildFeedMarketCandidateExtraSql(args: {
     supportedLimitlessMarketExpr,
     marketIdsParam = null,
     hasSearch = false,
+    marketOnly = false,
     requireNamedCategory = false,
   } = args;
   const eventAlias = args.eventAlias ?? "e";
   const marketAlias = args.marketAlias ?? "m";
-  const clauses: string[] = [
-    supportedLimitlessMarketExpr,
-    renderableMarketExpr,
-  ];
+  const clauses: string[] = marketOnly
+    ? []
+    : [supportedLimitlessMarketExpr, renderableMarketExpr];
 
-  if (requireNamedCategory) {
+  if (!marketOnly && requireNamedCategory) {
     clauses.push(
       `${eventAlias}.category is not null`,
       `btrim(${eventAlias}.category) <> ''`,
@@ -1381,39 +1400,43 @@ function buildFeedMarketCandidateExtraSql(args: {
     clauses.push(`${marketAlias}.event_id in (select id from search_events)`);
   }
   if (inputs.venues) {
-    clauses.push(
-      inputs.venues.length
-        ? `${venueTarget === "market" ? marketAlias : eventAlias}.venue = ANY(${add(inputs.venues)}::text[])`
-        : "false",
-    );
+    if (!marketOnly || venueTarget === "market") {
+      clauses.push(
+        inputs.venues.length
+          ? `${venueTarget === "market" ? marketAlias : eventAlias}.venue = ANY(${add(inputs.venues)}::text[])`
+          : "false",
+      );
+    }
   }
-  if (inputs.categories?.length) {
-    clauses.push(
-      `lower(${eventAlias}.category) = ANY(${add(inputs.categories)}::text[])`,
-    );
-  } else if (inputs.category) {
-    clauses.push(
-      `lower(${eventAlias}.category) = ${add(inputs.category.toLowerCase())}`,
-    );
-  }
-  if (inputs.filter === "newest") {
-    clauses.push(
-      `${eventAlias}.start_date >= ${add(inputs.sevenDaysAgo)}::timestamptz`,
-    );
-  } else if (inputs.filter === "endingsoon") {
-    clauses.push(
-      `${eventAlias}.end_date is not null and ${eventAlias}.end_date > ${nowParam}::timestamptz and ${eventAlias}.end_date <= ${add(inputs.sevenDaysFromNow)}::timestamptz`,
-    );
-  }
-  if (inputs.endWithin) {
-    clauses.push(
-      `${eventAlias}.end_date is not null and ${eventAlias}.end_date > ${nowParam}::timestamptz and ${eventAlias}.end_date <= ${add(inputs.endWithin)}::timestamptz`,
-    );
-  }
-  if (inputs.ageSince) {
-    clauses.push(
-      `${eventAlias}.start_date is not null and ${eventAlias}.start_date >= ${add(inputs.ageSince)}::timestamptz`,
-    );
+  if (!marketOnly) {
+    if (inputs.categories?.length) {
+      clauses.push(
+        `lower(${eventAlias}.category) = ANY(${add(inputs.categories)}::text[])`,
+      );
+    } else if (inputs.category) {
+      clauses.push(
+        `lower(${eventAlias}.category) = ${add(inputs.category.toLowerCase())}`,
+      );
+    }
+    if (inputs.filter === "newest") {
+      clauses.push(
+        `${eventAlias}.start_date >= ${add(inputs.sevenDaysAgo)}::timestamptz`,
+      );
+    } else if (inputs.filter === "endingsoon") {
+      clauses.push(
+        `${eventAlias}.end_date is not null and ${eventAlias}.end_date > ${nowParam}::timestamptz and ${eventAlias}.end_date <= ${add(inputs.sevenDaysFromNow)}::timestamptz`,
+      );
+    }
+    if (inputs.endWithin) {
+      clauses.push(
+        `${eventAlias}.end_date is not null and ${eventAlias}.end_date > ${nowParam}::timestamptz and ${eventAlias}.end_date <= ${add(inputs.endWithin)}::timestamptz`,
+      );
+    }
+    if (inputs.ageSince) {
+      clauses.push(
+        `${eventAlias}.start_date is not null and ${eventAlias}.start_date >= ${add(inputs.ageSince)}::timestamptz`,
+      );
+    }
   }
   const durationSql = buildMarketDurationSql(inputs, add, marketAlias);
   if (durationSql) {
@@ -2335,7 +2358,10 @@ async function fetchFeedEventIdsFast(
   if (buildFeedSearchPlan(inputs.q).hasSearch) return null;
 
   const pageTarget = inputs.limit + inputs.offset;
-  let candidateLimit = feedEventFastCandidateLimit(inputs);
+  const boundedPartialMetricPage = options?.acceptPartialMetricPage === true;
+  let candidateLimit = boundedPartialMetricPage
+    ? pageTarget * FEED_EVENT_BOUNDED_CANDIDATE_FACTOR
+    : feedEventFastCandidateLimit(inputs);
 
   const { params, add } = createParamBuilder();
   const expressions = buildFeedSqlExpressions();
@@ -2569,6 +2595,11 @@ async function fetchFeedEventIdsFast(
         .map((id) => ({
           id,
         }));
+    }
+    if (boundedPartialMetricPage) {
+      return ids
+        .slice(inputs.offset, inputs.offset + inputs.limit)
+        .map((id) => ({ id }));
     }
     candidateLimit = expandFeedCandidateLimit(candidateLimit);
   }
@@ -4616,7 +4647,10 @@ async function fetchProgressivelyFilteredFeedMarketIds(
       category: undefined,
       categories: undefined,
     },
-    { acceptPartialMetricPage: true },
+    {
+      acceptPartialMetricPage: true,
+      preRankEventFilterInputs: hasCategoryFilter ? inputs : undefined,
+    },
   );
   if (candidateMarketIds == null) return null;
 
@@ -4655,7 +4689,10 @@ async function fetchProgressivelyFilteredFeedMarketIds(
 async function fetchFeedMarketIdsFast(
   pool: Pool,
   inputs: FeedInputs,
-  options?: { acceptPartialMetricPage?: boolean },
+  options?: {
+    acceptPartialMetricPage?: boolean;
+    preRankEventFilterInputs?: FeedEventFilterInputs;
+  },
 ): Promise<string[] | null> {
   if (inputs.marketIds?.length) {
     return fetchFeedPreselectedMarketIdsFast(pool, inputs, options);
@@ -4816,10 +4853,13 @@ async function fetchFeedMarketIdsFast(
     const metricRenderableMarketExpr = buildRenderableMarketSql({
       alias: "metric_market",
     });
-    let streamCandidateLimit = Math.max(
-      FEED_EVENT_FAST_MIN_CANDIDATES,
-      pageTarget * FEED_EVENT_FAST_CANDIDATE_FACTOR,
-    );
+    const boundedPartialMetricPage = options?.acceptPartialMetricPage === true;
+    let streamCandidateLimit = boundedPartialMetricPage
+      ? pageTarget
+      : Math.max(
+          FEED_EVENT_FAST_MIN_CANDIDATES,
+          pageTarget * FEED_EVENT_FAST_CANDIDATE_FACTOR,
+        );
     const streamCandidateLimitParam = add(streamCandidateLimit);
     const streamCandidateLimitParamIndex = params.length - 1;
     const sql = `
@@ -5001,14 +5041,15 @@ async function fetchFeedMarketIdsFast(
       const limitlessRemainderBelowPage =
         pageIsFull && state?.limitless_remainder_below_page === true;
       if (
-        (includeNonLimitless &&
+        !boundedPartialMetricPage &&
+        ((includeNonLimitless &&
           nonLimitlessValidCount < pageTarget &&
           nonLimitlessPrefixCount >= streamCandidateLimit &&
           !nonLimitlessRemainderBelowPage) ||
-        (includeLimitless &&
-          limitlessValidCount < pageTarget &&
-          limitlessCandidateCount >= streamCandidateLimit &&
-          !limitlessRemainderBelowPage)
+          (includeLimitless &&
+            limitlessValidCount < pageTarget &&
+            limitlessCandidateCount >= streamCandidateLimit &&
+            !limitlessRemainderBelowPage))
       ) {
         streamCandidateLimit = expandFeedCandidateLimit(streamCandidateLimit);
         continue;
@@ -5076,6 +5117,75 @@ async function fetchFeedMarketIdsFast(
     )`;
   }
   const rankingTargetParam = add(pageTarget);
+  const rankStrictBeforeEvent = Boolean(
+    options?.acceptPartialMetricPage &&
+    (inputs.sort === "totalvol" ||
+      inputs.sort === "liquidity" ||
+      inputs.sort === "openinterest"),
+  );
+  const preRankMarketWhere = rankStrictBeforeEvent
+    ? buildFeedMarketCandidateExtraSql({
+        add,
+        inputs,
+        nowParam,
+        venueTarget: "market",
+        renderableMarketExpr,
+        supportedLimitlessMarketExpr,
+        marketOnly: true,
+      })
+    : [];
+  if (rankStrictBeforeEvent && inputs.minLiquidity > 0) {
+    preRankMarketWhere.push(
+      `${marketLiquidityDisplayExpr} >= ${add(inputs.minLiquidity)}`,
+    );
+  }
+  if (rankStrictBeforeEvent && inputs.minVol > 1e-9) {
+    preRankMarketWhere.push(
+      `${marketVolumeDisplayExpr} >= ${add(inputs.minVol)}`,
+    );
+  }
+  if (rankStrictBeforeEvent && inputs.maxSpread != null) {
+    preRankMarketWhere.push(
+      `m.best_bid is not null and m.best_ask is not null and (m.best_ask - m.best_bid) <= ${add(inputs.maxSpread)}`,
+    );
+  }
+  const preRankEventFilterInputs = options?.preRankEventFilterInputs ?? inputs;
+  const needsPreRankEventFilter = Boolean(
+    preRankEventFilterInputs.category ||
+    preRankEventFilterInputs.categories?.length ||
+    preRankEventFilterInputs.filter ||
+    preRankEventFilterInputs.endWithin ||
+    preRankEventFilterInputs.ageSince,
+  );
+  const preRankEventCteName = "projected_rank_event_candidates";
+  const preRankEventCte =
+    rankStrictBeforeEvent && needsPreRankEventFilter
+      ? (() => {
+          const eventWhere = buildFeedEventWhere({
+            add,
+            inputs: {
+              ...preRankEventFilterInputs,
+              durationMinutes: undefined,
+              venues: undefined,
+            },
+            nowParam,
+            hasSearch: false,
+            includeOrderableExists: false,
+            includeDurationExists: false,
+          });
+          eventWhere.push(
+            buildOrderableEventFreshnessSql({
+              eventAlias: "e",
+              nowParam,
+            }),
+          );
+          return `${preRankEventCteName} as materialized (
+            select e.id
+            from unified_events e
+            where ${eventWhere.join(" and ")}
+          )`;
+        })()
+      : null;
   let graceCandidateLimit = Math.max(
     FEED_MARKET_GRACE_MIN_CANDIDATES,
     pageTarget,
@@ -5083,20 +5193,24 @@ async function fetchFeedMarketIdsFast(
   const graceCandidateLimitParam = add(graceCandidateLimit);
   const graceCandidateLimitParamIndex = params.length - 1;
   const orderableCandidateCte = buildBroadOrderableMarketCandidatesCte({
+    candidateEventIdsCte: preRankEventCte ? preRankEventCteName : null,
     includeRankingColumns: true,
     materialized: true,
     nowParam,
     nowCloseParam,
     extraMarketSql: candidateWhere,
+    preRankMarketSql: preRankMarketWhere,
     ranking: {
       graceLimitParam: graceCandidateLimitParam,
+      rankStrictBeforeEvent,
       sortDir,
       sortValueSql: projectedSortValue,
       targetParam: rankingTargetParam,
     },
   });
   const sql = `
-    with ${orderableCandidateCte},
+    with ${preRankEventCte ? `${preRankEventCte},` : ""}
+    ${orderableCandidateCte},
     ranked_market_page as materialized (
       select
         candidate_market.market_id,
@@ -5185,6 +5299,10 @@ export async function fetchFeedMarketIdsForProbabilityProbe(
       : probabilityFreeInputs;
   const fastMarketIds = await fetchFeedMarketIdsFast(pool, rankedInputs, {
     acceptPartialMetricPage: true,
+    preRankEventFilterInputs:
+      needsBoundedPostFilter && hasCategoryFilter
+        ? probabilityFreeInputs
+        : undefined,
   });
   const rankedMarketIds =
     fastMarketIds ??

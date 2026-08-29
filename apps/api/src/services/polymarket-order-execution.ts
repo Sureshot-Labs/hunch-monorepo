@@ -44,6 +44,156 @@ function readPositiveNumber(value: unknown): number | null {
   return null;
 }
 
+function isUnknownRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function readFirstRecordField(
+  records: Array<Record<string, unknown> | null>,
+  keys: readonly string[],
+): unknown {
+  for (const record of records) {
+    if (!record) continue;
+    for (const key of keys) {
+      if (key in record) return record[key];
+    }
+  }
+  return undefined;
+}
+
+function readPositiveMicroAmount(value: unknown): number | null {
+  const raw = readPositiveNumber(value);
+  if (raw == null) return null;
+  const amount = raw / 1_000_000;
+  return Number.isFinite(amount) && amount > 0 ? amount : null;
+}
+
+function normalizeImmediateFillSide(value: unknown): "BUY" | "SELL" | null {
+  if (value === 0 || value === "0") return "BUY";
+  if (value === 1 || value === "1") return "SELL";
+  if (typeof value !== "string") return null;
+  const normalized = value.trim().toUpperCase();
+  if (normalized === "BUY" || normalized === "SELL") return normalized;
+  return null;
+}
+
+/**
+ * Extracts the actual immediate fill from a CLOB response before falling back
+ * to the signed order. In the V2 response, makingAmount/takingAmount are raw
+ * 6-decimal asset amounts: BUY makes USDC and takes shares, while SELL makes
+ * shares and takes USDC. FAK may return status=matched for a partial fill, so
+ * treating missing aliases as the full signed size would overstate positions.
+ */
+export function extractPolymarketImmediateFill(inputs: {
+  fallbackPrice: number | null;
+  fallbackSize: number | null;
+  payload: unknown;
+  side: "BUY" | "SELL";
+  status: string;
+}): { fromPayload: boolean; notionalUsd: number; shares: number } | null {
+  const payloadRecord = isUnknownRecord(inputs.payload) ? inputs.payload : null;
+  const orderRecord =
+    payloadRecord && isUnknownRecord(payloadRecord.order)
+      ? payloadRecord.order
+      : null;
+  const records = [orderRecord, payloadRecord];
+
+  const statusNormalized = inputs.status.trim().toLowerCase();
+  const side =
+    normalizeImmediateFillSide(
+      readFirstRecordField(records, ["side", "orderSide", "order_side"]),
+    ) ?? inputs.side;
+
+  const officialMakingAmount = readPositiveMicroAmount(
+    readFirstRecordField(records, ["makingAmount", "making_amount"]),
+  );
+  const officialTakingAmount = readPositiveMicroAmount(
+    readFirstRecordField(records, ["takingAmount", "taking_amount"]),
+  );
+  if (officialMakingAmount != null && officialTakingAmount != null) {
+    return side === "BUY"
+      ? {
+          shares: officialTakingAmount,
+          notionalUsd: officialMakingAmount,
+          fromPayload: true,
+        }
+      : {
+          shares: officialMakingAmount,
+          notionalUsd: officialTakingAmount,
+          fromPayload: true,
+        };
+  }
+
+  const payloadShares =
+    readPositiveNumber(
+      readFirstRecordField(records, [
+        "filled_size",
+        "filledSize",
+        "size_matched",
+        "sizeMatched",
+        "matched_amount",
+        "matchedAmount",
+      ]),
+    ) ??
+    readPositiveMicroAmount(
+      readFirstRecordField(
+        records,
+        side === "BUY"
+          ? ["filled_taker_amount", "filledTakerAmount"]
+          : ["filled_maker_amount", "filledMakerAmount"],
+      ),
+    );
+
+  const payloadPrice = readPositiveNumber(
+    readFirstRecordField(records, [
+      "average_fill_price",
+      "averageFillPrice",
+      "fill_price",
+      "fillPrice",
+      "price",
+    ]),
+  );
+  const payloadNotional =
+    readPositiveMicroAmount(
+      readFirstRecordField(
+        records,
+        side === "BUY"
+          ? ["filled_maker_amount", "filledMakerAmount"]
+          : ["filled_taker_amount", "filledTakerAmount"],
+      ),
+    ) ??
+    (payloadShares != null && payloadPrice != null
+      ? payloadShares * payloadPrice
+      : null);
+
+  if (payloadShares != null && payloadNotional != null) {
+    return {
+      shares: payloadShares,
+      notionalUsd: payloadNotional,
+      fromPayload: true,
+    };
+  }
+
+  if (statusNormalized === "partially_filled") return null;
+
+  if (
+    inputs.fallbackPrice != null &&
+    inputs.fallbackSize != null &&
+    Number.isFinite(inputs.fallbackPrice) &&
+    Number.isFinite(inputs.fallbackSize) &&
+    inputs.fallbackPrice > 0 &&
+    inputs.fallbackSize > 0
+  ) {
+    return {
+      shares: inputs.fallbackSize,
+      notionalUsd: inputs.fallbackPrice * inputs.fallbackSize,
+      fromPayload: false,
+    };
+  }
+
+  return null;
+}
+
 export function summarizePolymarketOnchainOrderExecution(inputs: {
   makerAmount: bigint;
   remaining: bigint;

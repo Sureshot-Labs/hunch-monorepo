@@ -231,6 +231,145 @@ console.log("ok - market sorts rank projected candidates without rejoining");
   const pool = createCapturePool({
     capturedSql,
     capturedParams,
+    candidateRows: [
+      [{ ids: ["market-1", "market-2"], pm_prefix_count: 2 }],
+      [{ id: "market-1" }],
+      [],
+    ],
+  });
+
+  await fetchFeedMarketsDirect(pool, {
+    ...baseInputs,
+    limit: 1,
+    eventScope: "grouped",
+    sort: "totalvol",
+  });
+
+  assert.equal(capturedSql.length, 3);
+  assert.match(
+    capturedSql[0],
+    /strict_market_base as materialized\s*\(\s*select candidate_market\.\*/i,
+  );
+  assert.match(
+    capturedSql[0],
+    /select candidate_market\.\*[\s\S]*?order by[\s\S]*?candidate_market\.volume_total[\s\S]*?limit \$\d+/i,
+  );
+  assert.ok(capturedParams[0]?.includes(300));
+  assert.match(capturedSql[1], /selected_event_scope as materialized/i);
+}
+console.log("ok - grouped projected sorts rank a bounded strict prefix");
+
+{
+  const capturedSql: string[] = [];
+  const capturedParams: unknown[][] = [];
+  const pool = createCapturePool({
+    capturedSql,
+    capturedParams,
+    candidateRows: [
+      [{ ids: ["market-1"], pm_prefix_count: 1 }],
+      [{ id: "market-1" }],
+      [],
+    ],
+  });
+
+  await fetchFeedMarketsDirect(pool, {
+    ...baseInputs,
+    durationMinutes: [60],
+    eventScope: "grouped",
+    filter: "newest",
+    limit: 1,
+    maxSpread: 0.1,
+    minLiquidity: 1_000,
+    sort: "totalvol",
+    venues: ["polymarket"],
+  });
+
+  assert.equal(capturedSql.length, 3);
+  assert.match(
+    capturedSql[0],
+    /projected_rank_event_candidates as materialized[\s\S]*?e\.start_date >= \$\d+[\s\S]*?orderable_market_candidates_strict_market_base as materialized/i,
+  );
+  assert.match(
+    capturedSql[0],
+    /strict_market_base as materialized[\s\S]*?join projected_rank_event_candidates candidate_event_filter[\s\S]*?m\.venue = ANY\(\$\d+::text\[\]\)[\s\S]*?m\.duration_minutes = ANY\(\$\d+::int\[\]\)[\s\S]*?\(m\.best_ask - m\.best_bid\) <= \$\d+[\s\S]*?order by/i,
+  );
+  assert.ok(capturedParams[0]?.includes(300));
+}
+console.log("ok - projected sorts push safe filters before bounded ranking");
+
+{
+  const capturedSql: string[] = [];
+  const capturedParams: unknown[][] = [];
+  const pool = createCapturePool({
+    capturedSql,
+    capturedParams,
+    candidateRows: [
+      [{ ids: ["market-1", "market-2"], pm_prefix_count: 0 }],
+      [{ id: "market-1" }],
+      [],
+    ],
+  });
+
+  await fetchFeedMarketsDirect(pool, {
+    ...baseInputs,
+    categories: ["crypto"],
+    eventScope: "grouped",
+    limit: 1,
+    sort: "totalvol",
+  });
+
+  assert.equal(capturedSql.length, 3);
+  assert.ok(capturedParams[0]?.includes(1_200));
+  assert.match(
+    capturedSql[0],
+    /projected_rank_event_candidates as materialized[\s\S]*?lower\(e\.category\) = ANY\(\$\d+::text\[\]\)[\s\S]*?join projected_rank_event_candidates candidate_event_filter/i,
+  );
+}
+console.log("ok - projected category sorts rank only matching events");
+
+{
+  const capturedSql: string[] = [];
+  const capturedParams: unknown[][] = [];
+  const pool = createCapturePool({
+    capturedSql,
+    capturedParams,
+    candidateRows: [
+      [
+        {
+          ids: ["market-1", "market-2"],
+          non_limitless_prefix_count: 300,
+          non_limitless_valid_count: 2,
+          limitless_candidate_count: 300,
+          limitless_valid_count: 0,
+          non_limitless_remainder_below_page: false,
+          limitless_remainder_below_page: false,
+        },
+      ],
+      [{ id: "market-1" }],
+      [],
+    ],
+  });
+
+  await fetchFeedMarketsDirect(pool, {
+    ...baseInputs,
+    limit: 1,
+    eventScope: "grouped",
+    sort: "trending_v2",
+  });
+
+  assert.equal(capturedSql.length, 3);
+  assert.ok(capturedParams[0]?.includes(300));
+  assert.equal(capturedParams[0]?.includes(6_000), false);
+  assert.match(capturedSql[1], /selected_event_scope as materialized/i);
+}
+console.log("ok - grouped trending v2 keeps one bounded candidate prefix");
+
+{
+  const capturedSql: string[] = [];
+  const capturedParams: unknown[][] = [];
+  const pool = createCapturePool({
+    capturedSql,
+    capturedParams,
     candidateRows: [[{ ids: ["market-1", "market-2", "market-3"] }]],
   });
 
@@ -855,3 +994,37 @@ console.log("ok - grouped event spread scopes only ranked candidates");
   );
 }
 console.log("ok - bounded trending v2 probes keep exhausted partial results");
+
+{
+  const capturedSql: string[] = [];
+  const capturedParams: unknown[][] = [];
+  const pool = createCapturePool({
+    capturedSql,
+    capturedParams,
+    candidateRows: [
+      [
+        {
+          ids: ["event-1"],
+          candidate_count: 2_400,
+        },
+      ],
+    ],
+  });
+
+  const rows = await fetchFeedEventIds(
+    pool,
+    {
+      ...baseInputs,
+      limit: 1_200,
+      view: "events",
+      sort: "totalvol",
+    },
+    { acceptPartialMetricPage: true },
+  );
+
+  assert.deepEqual(rows, [{ id: "event-1" }]);
+  assert.equal(capturedSql.length, 1);
+  assert.ok(capturedParams[0]?.includes(2_400));
+  assert.equal(capturedParams[0]?.includes(24_000), false);
+}
+console.log("ok - bounded event probes do not expand past their page target");

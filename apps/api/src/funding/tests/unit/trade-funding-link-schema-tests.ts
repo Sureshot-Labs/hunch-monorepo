@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 
 import {
   limitlessAmmOrderBodySchema,
@@ -52,10 +53,41 @@ assert.equal(
 assert.equal(
   polymarketPlaceOrderBodySchema.safeParse({
     order: polymarketOrder,
+    orderType: "FAK",
+  }).success,
+  true,
+);
+assert.equal(
+  polymarketPlaceOrderBodySchema.safeParse({
+    order: polymarketOrder,
+    orderType: "FAK",
+    postOnly: true,
+  }).success,
+  false,
+);
+assert.equal(
+  polymarketPlaceOrderBodySchema.safeParse({
+    order: polymarketOrder,
     fundingOperationId: OPERATION_ID,
     fundingReservationId: RESERVATION_ID,
   }).success,
   true,
+);
+assert.equal(
+  polymarketPlaceOrderBodySchema.safeParse({
+    order: polymarketOrder,
+    orderType: "GTC",
+    postOnly: true,
+  }).success,
+  true,
+);
+assert.equal(
+  polymarketPlaceOrderBodySchema.safeParse({
+    order: polymarketOrder,
+    orderType: "FOK",
+    postOnly: true,
+  }).success,
+  false,
 );
 
 assert.equal(
@@ -76,6 +108,24 @@ assert.equal(
     fundingReservationId: RESERVATION_ID,
   }).success,
   true,
+);
+assert.equal(
+  limitlessOrderBodySchema.safeParse({
+    order: limitlessOrder,
+    orderType: "GTC",
+    postOnly: true,
+    marketSlug: "market-one",
+  }).success,
+  true,
+);
+assert.equal(
+  limitlessOrderBodySchema.safeParse({
+    order: limitlessOrder,
+    orderType: "FOK",
+    postOnly: true,
+    marketSlug: "market-one",
+  }).success,
+  false,
 );
 
 assert.equal(
@@ -101,6 +151,29 @@ assert.equal(
   true,
 );
 
+const limitlessExecutionSource = readFileSync(
+  new URL(
+    "../../../services/limitless-trading-execution-service.ts",
+    import.meta.url,
+  ),
+  "utf8",
+);
+assert.match(
+  limitlessExecutionSource,
+  /input\.body\.postOnly === true \? \{ postOnly: true \} : \{\}/,
+  "Limitless GTC postOnly must reach the venue payload",
+);
+assert.match(
+  limitlessExecutionSource,
+  /venueId: "limitless",[\s\S]*?raw: makerAmount\.toString\(\)/,
+  "Limitless BUY reservations must stay bounded by signed makerAmount without a synthetic USDC fee buffer",
+);
+assert.match(
+  limitlessExecutionSource,
+  /canonicalFingerprint = canonicalJsonHash\(\{[\s\S]*?orderType: input\.body\.orderType,[\s\S]*?postOnly: input\.body\.postOnly === true,/,
+  "postOnly must be part of the exact funded Limitless trade identity",
+);
+
 console.log(
-  "[trade-funding-link-schema-tests] paired opaque funding linkage passed",
+  "[trade-funding-link-schema-tests] funding linkage and limit-order contracts passed",
 );

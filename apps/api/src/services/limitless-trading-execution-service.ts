@@ -223,6 +223,7 @@ type LimitlessClientOrderBody = {
   marketSlug: string;
   order: Record<string, unknown>;
   orderType: "FOK" | "GTC";
+  postOnly?: boolean;
   ownerId?: number | null;
   fundingOperationId?: string;
   fundingReservationId?: string;
@@ -3404,6 +3405,13 @@ export async function submitLimitlessClientSignedOrder(input: {
       payload: { error: "A sealed Telegram handoff requires a FOK trade." },
     };
   }
+  if (input.body.postOnly === true && input.body.orderType !== "GTC") {
+    return {
+      ok: false,
+      statusCode: 400,
+      payload: { error: "postOnly is only supported for GTC orders" },
+    };
+  }
   if (fundingReservation && side !== "BUY") {
     return {
       ok: false,
@@ -3745,6 +3753,7 @@ export async function submitLimitlessClientSignedOrder(input: {
   const orderPayload = {
     order: orderForUpstream,
     orderType: input.body.orderType,
+    ...(input.body.postOnly === true ? { postOnly: true } : {}),
     marketSlug: input.body.marketSlug,
     ownerId,
     onBehalfOf: ownerId,
@@ -3844,6 +3853,7 @@ export async function submitLimitlessClientSignedOrder(input: {
       marketSlug: input.body.marketSlug,
       order: orderForUpstream,
       orderType: input.body.orderType,
+      postOnly: input.body.postOnly === true,
       signer: signer.toLowerCase(),
     });
     return claimFundingTradeAttemptForVenueConsumer(input.pool, {

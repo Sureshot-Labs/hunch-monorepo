@@ -165,6 +165,7 @@ import {
   type PolymarketTerminalReconcileStatus,
   POLYMARKET_UNCONFIRMED_STATUS,
   canApplyPolymarketNoFillTerminalStatus,
+  extractPolymarketImmediateFill,
   isPolymarketUnconfirmedStatus,
   resolvePolymarketTerminalReconcileStatus,
   resolvePolymarketUnconfirmedReconcileDecision,
@@ -179,7 +180,7 @@ import {
 } from "./open-order-collateral.js";
 import {
   calculatePolymarketQuote,
-  calculatePolymarketSignedFokBuyRequiredSpendRaw,
+  calculatePolymarketSignedBuyRequiredSpendRaw,
   loadPolymarketQuoteContext,
   PolymarketQuoteError,
   type PolymarketQuoteResult,
@@ -257,7 +258,7 @@ type PolymarketBotQuoteRaw = PolymarketQuoteResult & {
 
 type PolymarketSide = "BUY" | "SELL";
 type PolymarketOrderType = "FAK" | "FOK" | "GTC" | "GTD";
-type PolymarketClobOrderType = "FOK" | "GTC" | "GTD";
+type PolymarketClobOrderType = "FAK" | "FOK" | "GTC" | "GTD";
 
 type PolymarketRouteLogger = {
   error?: (input: unknown, message?: string) => void;
@@ -290,6 +291,7 @@ type PolymarketClientOrderBody = {
   negRisk?: boolean | null;
   order: Record<string, unknown>;
   orderType?: unknown;
+  postOnly?: boolean;
   positionWalletAddress?: string | null;
   fundingOperationId?: string;
   fundingReservationId?: string;
@@ -348,6 +350,7 @@ type PolymarketQuoteBody = {
   includeFundingPlan?: boolean | null;
   limitPrice?: number | null;
   orderType?: PolymarketOrderType | null;
+  postOnly?: boolean | null;
   side: PolymarketSide;
   slippageBps?: number | null;
   tokenId: string;
@@ -3421,6 +3424,7 @@ export async function quotePolymarketOrderRoute(input: {
         amountUsdInput,
         amountSharesInput,
         limitPrice: body.limitPrice,
+        postOnly: body.postOnly === true,
         slippageBps: body.slippageBps,
         logWarn: ({ error, tokenId: warningTokenId, conditionId }) =>
           input.log?.warn?.(
@@ -5452,8 +5456,12 @@ function normalizeOrderType(value: unknown): PolymarketOrderType | null {
 
 function normalizeOrderTypeForClob(value: unknown): PolymarketClobOrderType {
   const normalized = normalizeOrderType(value);
-  if (normalized === "FAK") return "FOK";
-  if (normalized === "GTC" || normalized === "GTD" || normalized === "FOK") {
+  if (
+    normalized === "GTC" ||
+    normalized === "GTD" ||
+    normalized === "FAK" ||
+    normalized === "FOK"
+  ) {
     return normalized;
   }
   return "GTC";
@@ -5478,127 +5486,10 @@ function isImmediateExecutionStatus(
   return normalized === "matched" || normalized === "filled";
 }
 
-function readRecordField(
-  record: Record<string, unknown> | null,
-  keys: string[],
-): unknown {
-  if (!record) return undefined;
-  for (const key of keys) {
-    if (key in record) return record[key];
-  }
-  return undefined;
-}
-
 function parsePositiveNumber(value: unknown): number | null {
   const numeric = parseNumberish(value);
   if (numeric == null || !Number.isFinite(numeric) || numeric <= 0) return null;
   return numeric;
-}
-
-function parsePositiveMicroToUi(value: unknown): number | null {
-  const numeric = parsePositiveNumber(value);
-  if (numeric == null) return null;
-  const ui = numeric / 1_000_000;
-  if (!Number.isFinite(ui) || ui <= 0) return null;
-  return ui;
-}
-
-function extractPolymarketImmediateFill(inputs: {
-  fallbackPrice: number | null;
-  fallbackSize: number | null;
-  payload: unknown;
-  side: PolymarketSide;
-  status: string;
-}): { fromPayload: boolean; notionalUsd: number; shares: number } | null {
-  const payloadRecord = isRecord(inputs.payload) ? inputs.payload : null;
-  const orderRecord = payloadRecord
-    ? isRecord(payloadRecord.order)
-      ? payloadRecord.order
-      : payloadRecord
-    : null;
-
-  const statusNormalized = inputs.status.trim().toLowerCase();
-  const side =
-    normalizeOrderSide(
-      readRecordField(orderRecord, ["side", "orderSide", "order_side"]),
-    ) ?? inputs.side;
-
-  const payloadShares =
-    parsePositiveNumber(
-      readRecordField(orderRecord, [
-        "filled_size",
-        "filledSize",
-        "size_matched",
-        "sizeMatched",
-        "matched_amount",
-        "matchedAmount",
-      ]),
-    ) ??
-    parsePositiveMicroToUi(
-      readRecordField(
-        orderRecord,
-        side === "BUY"
-          ? ["filled_taker_amount", "filledTakerAmount"]
-          : ["filled_maker_amount", "filledMakerAmount"],
-      ),
-    );
-
-  const payloadPrice = parsePositiveNumber(
-    readRecordField(orderRecord, [
-      "average_fill_price",
-      "averageFillPrice",
-      "fill_price",
-      "fillPrice",
-      "price",
-    ]),
-  );
-
-  const payloadNotional =
-    parsePositiveMicroToUi(
-      readRecordField(
-        orderRecord,
-        side === "BUY"
-          ? ["filled_maker_amount", "filledMakerAmount"]
-          : ["filled_taker_amount", "filledTakerAmount"],
-      ),
-    ) ??
-    (payloadShares != null && payloadPrice != null
-      ? payloadShares * payloadPrice
-      : null);
-
-  if (
-    payloadShares != null &&
-    payloadNotional != null &&
-    Number.isFinite(payloadShares) &&
-    payloadShares > 0 &&
-    Number.isFinite(payloadNotional) &&
-    payloadNotional > 0
-  ) {
-    return {
-      shares: payloadShares,
-      notionalUsd: payloadNotional,
-      fromPayload: true,
-    };
-  }
-
-  if (statusNormalized === "partially_filled") return null;
-
-  if (
-    inputs.fallbackPrice != null &&
-    inputs.fallbackSize != null &&
-    Number.isFinite(inputs.fallbackPrice) &&
-    Number.isFinite(inputs.fallbackSize) &&
-    inputs.fallbackPrice > 0 &&
-    inputs.fallbackSize > 0
-  ) {
-    return {
-      shares: inputs.fallbackSize,
-      notionalUsd: inputs.fallbackPrice * inputs.fallbackSize,
-      fromPayload: false,
-    };
-  }
-
-  return null;
 }
 
 function isPolymarketServiceNotReadyResponse(inputs: {
@@ -7047,6 +6938,16 @@ export async function submitPolymarketClientSignedOrder(input: {
   }
 
   const orderType = normalizeOrderTypeForClob(input.body.orderType);
+  if (
+    input.body.postOnly === true &&
+    (orderType === "FOK" || orderType === "FAK")
+  ) {
+    return {
+      ok: false,
+      statusCode: 400,
+      payload: { error: "postOnly is only supported for GTC/GTD orders" },
+    };
+  }
   const orderTokenId = extractTokenId(order);
   if (!isPolymarketOrderPayloadV2(order)) {
     return {
@@ -7162,6 +7063,7 @@ export async function submitPolymarketClientSignedOrder(input: {
     order: normalizedOrder,
     owner: creds.apiKey,
     orderType,
+    ...(input.body.postOnly === true ? { postOnly: true } : {}),
     ...(input.body.deferExec !== undefined
       ? { deferExec: input.body.deferExec }
       : {}),
@@ -7278,9 +7180,11 @@ export async function submitPolymarketClientSignedOrder(input: {
         });
       const requiredSpendRaw =
         makerAmountRaw && takerAmountRaw && currentBuilderValidation.ok
-          ? calculatePolymarketSignedFokBuyRequiredSpendRaw({
+          ? calculatePolymarketSignedBuyRequiredSpendRaw({
               context: fundingQuoteContext,
               makerAmountRaw,
+              orderType,
+              postOnly: input.body.postOnly === true,
               takerAmountRaw,
             })
           : null;
@@ -7370,6 +7274,7 @@ export async function submitPolymarketClientSignedOrder(input: {
       order: normalizedForHash,
       orderHash,
       orderType,
+      postOnly: input.body.postOnly === true,
       signer: signer.toLowerCase(),
     });
     try {
@@ -7657,7 +7562,7 @@ export async function submitPolymarketClientSignedOrder(input: {
     fallbackSize: size,
   });
   const shouldConfirmImmediateExecution =
-    orderType === "FOK" &&
+    (orderType === "FOK" || orderType === "FAK") &&
     (isImmediateExecutionStatus(statusRaw) ||
       immediateFill?.fromPayload === true);
 

@@ -7,6 +7,7 @@ import {
 } from "../repos/polymarket-markets.js";
 import {
   calculatePolymarketBuilderFeeRaw,
+  resolvePolymarketBuilderFeeBoundBps,
   resolvePolymarketFeePolicySnapshot,
   type PolymarketFeePolicySnapshot,
 } from "./polymarket-builder-fees.js";
@@ -14,10 +15,17 @@ import { polymarketClient } from "./polymarket-client.js";
 
 export type PolymarketSide = "BUY" | "SELL";
 export type PolymarketOrderType = "GTC" | "GTD" | "FAK" | "FOK";
-export type PolymarketClobOrderType = "GTC" | "GTD" | "FOK";
+export type PolymarketClobOrderType = "GTC" | "GTD" | "FAK" | "FOK";
 export type PolymarketAmountType = "usd" | "shares";
+export type PolymarketFeeRoleAssumption = "maker" | "taker" | "maker_or_taker";
 
-type PlatformFeeCurve = { rate: number; exponent: number } | null;
+export type PlatformFeeCurve = {
+  rate: number;
+  exponent: number;
+  takerOnly: boolean;
+  makerBaseFeeBps: number;
+  takerBaseFeeBps: number;
+} | null;
 
 export type PolymarketOrderbookSummary = {
   bids: Array<{ price: number; size: number }>;
@@ -52,8 +60,11 @@ export type PolymarketQuoteResult = {
   takerAmount: string;
   platformFeeEstimateRaw: string;
   builderFeeEstimateRaw: string;
+  builderFeeBoundBps: number;
   totalFeeEstimateRaw: string;
   totalRequiredUsdcRaw: string | null;
+  postOnly: boolean;
+  feeRoleAssumption: PolymarketFeeRoleAssumption;
   builderRateSource: string;
   builderEnabled: boolean;
   builderTakerFeeBps: number;
@@ -91,6 +102,7 @@ export class PolymarketQuoteError extends Error {
       | "market_not_accepting_orders"
       | "quote_timeout"
       | "invalid_price"
+      | "invalid_order_options"
       | "missing_amount"
       | "amount_too_small"
       | "fee_unavailable",
@@ -108,6 +120,8 @@ const MARKET_SHARES_MICRO_STEP_2_DEC = 10_000n;
 const LIMIT_USD_MICRO_STEP = 100n;
 const LIMIT_SHARES_MICRO_STEP = 10_000n;
 const DEFAULT_POLYMARKET_PRICE_TICK = 0.01;
+const MAX_POLYMARKET_PLATFORM_FEE_RATE = 1;
+const MAX_POLYMARKET_BASE_FEE_BPS = 10_000;
 
 function floorNumberToRaw(value: number, scale: bigint): bigint | null {
   if (!Number.isFinite(value) || value <= 0) return null;
@@ -140,7 +154,7 @@ function calculatePolymarketPlatformFeeRaw(inputs: {
   price: number;
   feeRate: number;
   feeExponent: number;
-}): bigint {
+}): bigint | null {
   const { sizeRaw, price, feeRate, feeExponent } = inputs;
   if (
     sizeRaw <= 0n ||
@@ -148,16 +162,18 @@ function calculatePolymarketPlatformFeeRaw(inputs: {
     price <= 0 ||
     price >= 1 ||
     !Number.isFinite(feeRate) ||
-    feeRate <= 0 ||
+    feeRate < 0 ||
     !Number.isFinite(feeExponent) ||
     feeExponent < 0
   ) {
-    return 0n;
+    return null;
   }
+  if (feeRate === 0) return 0n;
   const size = Number(sizeRaw) / 1_000_000;
   const term = Math.pow(price * (1 - price), feeExponent);
   const feeMicro = Math.ceil(size * feeRate * term * 1_000_000);
-  return Number.isFinite(feeMicro) && feeMicro > 0 ? BigInt(feeMicro) : 0n;
+  if (!Number.isFinite(feeMicro) || feeMicro < 0) return null;
+  return feeMicro > 0 ? BigInt(feeMicro) : 0n;
 }
 
 function parseOrderbookSide(
@@ -248,8 +264,12 @@ export function normalizeOrderTypeForClob(
   value: unknown,
 ): PolymarketClobOrderType {
   const normalized = normalizeOrderType(value);
-  if (normalized === "FAK") return "FOK";
-  if (normalized === "GTC" || normalized === "GTD" || normalized === "FOK") {
+  if (
+    normalized === "GTC" ||
+    normalized === "GTD" ||
+    normalized === "FAK" ||
+    normalized === "FOK"
+  ) {
     return normalized;
   }
   return "GTC";
@@ -325,11 +345,6 @@ function lcm(a: bigint, b: bigint): bigint {
   return (a / gcd(a, b)) * b;
 }
 
-function ceilDivRaw(numerator: bigint, denominator: bigint): bigint {
-  if (denominator <= 0n) return 0n;
-  return (numerator + denominator - 1n) / denominator;
-}
-
 function feeBaseRawForSide(
   side: PolymarketSide,
   makerAmountRaw: bigint,
@@ -402,12 +417,12 @@ function calculateMaximumPolymarketMarketBuyFeeRaw(input: {
 }
 
 function calculatePolymarketFeeEstimateRaw(input: {
-  bestAsk: number | null;
+  feeRoleAssumption: PolymarketFeeRoleAssumption;
   feePolicySnapshot: PolymarketFeePolicySnapshot;
-  isLimitOrder: boolean;
   makerAmountRaw: bigint;
   marketInfo: PolymarketMarketInfoRow | null;
   platformFeeCurve: PlatformFeeCurve;
+  platformFeeCurveUnavailable: boolean;
   price: number;
   priceTick: number;
   side: PolymarketSide;
@@ -415,92 +430,115 @@ function calculatePolymarketFeeEstimateRaw(input: {
   takerAmountRaw: bigint;
 }): Readonly<{
   builderFeeRaw: bigint;
+  builderFeeBps: number;
   platformFeeRaw: bigint;
   totalFeeRaw: bigint;
 }> | null {
-  const platformFeeRawValue = input.isLimitOrder
-    ? input.marketInfo?.maker_fee_bps
-    : input.marketInfo?.taker_fee_bps;
-  const platformFeeBps =
-    platformFeeRawValue != null && platformFeeRawValue !== ""
-      ? Math.max(0, Number(platformFeeRawValue))
-      : 0;
-  const builderFeeBps =
-    input.feePolicySnapshot.collectionMode === "builder"
-      ? input.isLimitOrder
-        ? input.feePolicySnapshot.builderMakerFeeBps
-        : input.feePolicySnapshot.builderTakerFeeBps
-      : 0;
-  const effectivePlatformFeeCurve =
-    input.platformFeeCurve ??
-    (platformFeeBps > 0
-      ? { rate: platformFeeBps / 10_000, exponent: 1 }
-      : null);
-  let platformFeeRaw = 0n;
-  if (effectivePlatformFeeCurve) {
-    if (input.side === "BUY" && !input.isLimitOrder) {
-      const maximumPlatformFeeRaw = calculateMaximumPolymarketMarketBuyFeeRaw({
-        feeExponent: effectivePlatformFeeCurve.exponent,
-        feeRate: effectivePlatformFeeCurve.rate,
-        makerAmountRaw: input.makerAmountRaw,
-        maximumPrice: input.price,
-        priceTick: input.priceTick,
-      });
-      if (maximumPlatformFeeRaw == null) return null;
-      platformFeeRaw = maximumPlatformFeeRaw;
-    } else {
-      let platformFeePrice = input.price;
-      let platformFeeSizeRaw = input.sizeRaw;
-      if (
-        input.side === "BUY" &&
-        input.bestAsk != null &&
-        Number.isFinite(input.bestAsk) &&
-        input.bestAsk > 0 &&
-        input.bestAsk < 1
-      ) {
-        platformFeePrice = Math.min(input.price, input.bestAsk);
-        const platformFeePriceMicro = BigInt(
-          Math.round(platformFeePrice * 1_000_000),
+  const calculateForRole = (
+    role: Exclude<PolymarketFeeRoleAssumption, "maker_or_taker">,
+  ) => {
+    // Without the live market metadata we do not know whether the fd curve is
+    // taker-only or applies to both roles. Never infer a zero maker debit from
+    // cached Gamma fields when the authoritative CLOB role metadata is absent.
+    if (input.platformFeeCurveUnavailable) return null;
+
+    const liveRoleBaseFeeBps =
+      role === "taker"
+        ? input.platformFeeCurve?.takerBaseFeeBps
+        : input.platformFeeCurve?.makerBaseFeeBps;
+    const platformFeeRawValue =
+      liveRoleBaseFeeBps ??
+      (role === "taker"
+        ? input.marketInfo?.taker_fee_bps
+        : input.marketInfo?.maker_fee_bps);
+    const platformFeeBps =
+      platformFeeRawValue != null && platformFeeRawValue !== ""
+        ? Math.max(0, Number(platformFeeRawValue))
+        : 0;
+    const builderFeeBps = resolvePolymarketBuilderFeeBoundBps(
+      input.feePolicySnapshot,
+      role,
+    );
+    // fd.to=true is authoritative that the curve is taker-only. The SDK
+    // contract says the flag is omitted when false, so an absent/false flag
+    // means the curve also applies to makers. mbf/tbf are role-specific static
+    // fallbacks when no dynamic curve applies to that role.
+    const dynamicCurveApplies =
+      input.platformFeeCurve != null &&
+      input.platformFeeCurve.rate > 0 &&
+      (role === "taker" || input.platformFeeCurve.takerOnly !== true);
+    const effectivePlatformFeeCurve =
+      dynamicCurveApplies && input.platformFeeCurve
+        ? input.platformFeeCurve
+        : platformFeeBps > 0
+          ? { rate: platformFeeBps / 10_000, exponent: 1 }
+          : null;
+    let platformFeeRaw = 0n;
+    if (effectivePlatformFeeCurve) {
+      if (input.side === "BUY" && role === "taker") {
+        const maximumPlatformFeeRaw = calculateMaximumPolymarketMarketBuyFeeRaw(
+          {
+            feeExponent: effectivePlatformFeeCurve.exponent,
+            feeRate: effectivePlatformFeeCurve.rate,
+            makerAmountRaw: input.makerAmountRaw,
+            maximumPrice: input.price,
+            priceTick: input.priceTick,
+          },
         );
-        if (platformFeePriceMicro > 0n) {
-          platformFeeSizeRaw = ceilDivRaw(
-            input.makerAmountRaw * USDC_SCALE,
-            platformFeePriceMicro,
-          );
-        }
+        if (maximumPlatformFeeRaw == null) return null;
+        platformFeeRaw = maximumPlatformFeeRaw;
+      } else {
+        const calculatedPlatformFeeRaw = calculatePolymarketPlatformFeeRaw({
+          sizeRaw: input.sizeRaw,
+          price: input.price,
+          feeRate: effectivePlatformFeeCurve.rate,
+          feeExponent: effectivePlatformFeeCurve.exponent,
+        });
+        if (calculatedPlatformFeeRaw == null) return null;
+        platformFeeRaw = calculatedPlatformFeeRaw;
       }
-      platformFeeRaw = calculatePolymarketPlatformFeeRaw({
-        sizeRaw: platformFeeSizeRaw,
-        price: platformFeePrice,
-        feeRate: effectivePlatformFeeCurve.rate,
-        feeExponent: effectivePlatformFeeCurve.exponent,
-      });
     }
-  }
-  const builderFeeRaw = calculatePolymarketBuilderFeeRaw(
-    feeBaseRawForSide(input.side, input.makerAmountRaw, input.takerAmountRaw),
-    builderFeeBps,
-  );
-  return {
-    builderFeeRaw,
-    platformFeeRaw,
-    totalFeeRaw: platformFeeRaw + builderFeeRaw,
+    const builderFeeRaw = calculatePolymarketBuilderFeeRaw(
+      feeBaseRawForSide(input.side, input.makerAmountRaw, input.takerAmountRaw),
+      builderFeeBps,
+    );
+    return {
+      builderFeeRaw,
+      builderFeeBps,
+      platformFeeRaw,
+      totalFeeRaw: platformFeeRaw + builderFeeRaw,
+    };
   };
+
+  if (input.feeRoleAssumption === "maker") return calculateForRole("maker");
+  if (input.feeRoleAssumption === "taker") return calculateForRole("taker");
+  const maker = calculateForRole("maker");
+  const taker = calculateForRole("taker");
+  if (!maker || !taker) return null;
+  return taker.totalFeeRaw > maker.totalFeeRaw ? taker : maker;
 }
 
 /**
- * Recompute the maximum collateral debit represented by one signed FOK Buy.
+ * Recompute the maximum collateral debit represented by one signed Buy.
  * The order signs nominal maker/taker amounts; venue and builder fees are
- * additional. Recover the signed price tick, then apply the same fee model as
- * the quote path against fresh, server-owned market and policy context.
+ * additional. GTC/GTD without postOnly can execute immediately or rest, so the
+ * bound covers both roles. This is the canonical calculator used by quote,
+ * max-spend, funding reservation, and final submission validation.
  */
-export function calculatePolymarketSignedFokBuyRequiredSpendRaw(input: {
+export function calculatePolymarketSignedBuyRequiredSpendRaw(input: {
   context: PolymarketQuoteContext;
   makerAmountRaw: bigint;
+  orderType: PolymarketClobOrderType;
+  postOnly?: boolean;
   takerAmountRaw: bigint;
 }): bigint | null {
   if (input.makerAmountRaw <= 0n || input.takerAmountRaw <= 0n) return null;
-  if (input.context.platformFeeCurveUnavailable === true) return null;
+  if (
+    input.postOnly === true &&
+    (input.orderType === "FOK" || input.orderType === "FAK")
+  ) {
+    return null;
+  }
   const priceTick = resolvePolymarketPriceTick(
     input.context.orderbook.tickSize ??
       (input.context.marketInfo?.order_price_min_tick_size != null
@@ -510,13 +548,20 @@ export function calculatePolymarketSignedFokBuyRequiredSpendRaw(input: {
   const rawPrice = Number(input.makerAmountRaw) / Number(input.takerAmountRaw);
   const price = roundLimitPriceToTick(rawPrice, priceTick, "BUY");
   if (!Number.isFinite(price) || price <= 0 || price >= 1) return null;
+  const feeRoleAssumption: PolymarketFeeRoleAssumption =
+    input.orderType === "FOK" || input.orderType === "FAK"
+      ? "taker"
+      : input.postOnly === true
+        ? "maker"
+        : "maker_or_taker";
   const fees = calculatePolymarketFeeEstimateRaw({
-    bestAsk: findBestAsk(input.context.orderbook.asks),
+    feeRoleAssumption,
     feePolicySnapshot: input.context.feePolicySnapshot,
-    isLimitOrder: false,
     makerAmountRaw: input.makerAmountRaw,
     marketInfo: input.context.marketInfo,
     platformFeeCurve: input.context.platformFeeCurve,
+    platformFeeCurveUnavailable:
+      input.context.platformFeeCurveUnavailable === true,
     price,
     priceTick,
     side: "BUY",
@@ -525,6 +570,19 @@ export function calculatePolymarketSignedFokBuyRequiredSpendRaw(input: {
   });
   if (!fees) return null;
   return input.makerAmountRaw + fees.totalFeeRaw;
+}
+
+/** Backward-compatible alias for existing FOK callers. */
+export function calculatePolymarketSignedFokBuyRequiredSpendRaw(input: {
+  context: PolymarketQuoteContext;
+  makerAmountRaw: bigint;
+  takerAmountRaw: bigint;
+}): bigint | null {
+  return calculatePolymarketSignedBuyRequiredSpendRaw({
+    ...input,
+    orderType: "FOK",
+    postOnly: false,
+  });
 }
 
 function hasAvailableAskDepthForBuy(
@@ -562,24 +620,63 @@ function exchangeAddressForNegRisk(negRisk: boolean | null): string | null {
     : env.polymarketExchangeAddress;
 }
 
-async function fetchPolymarketPlatformFeeCurve(
-  conditionId: string | null | undefined,
-): Promise<PlatformFeeCurve> {
-  if (!conditionId) return null;
-  const payload = await polymarketClient.getClobMarketInfo(conditionId);
+export function parsePolymarketPlatformFeeCurve(
+  payload: unknown,
+): NonNullable<PlatformFeeCurve> {
   if (!isRecord(payload)) {
     throw new Error("Invalid Polymarket fee metadata response");
   }
-  if (payload.fd == null) return null;
+  const readBaseFeeBps = (value: unknown): number => {
+    if (value == null) return 0;
+    const parsed = readFiniteNumber(value);
+    if (parsed == null || parsed < 0 || parsed > MAX_POLYMARKET_BASE_FEE_BPS) {
+      throw new Error("Invalid Polymarket base fee parameters");
+    }
+    return parsed;
+  };
+  const makerBaseFeeBps = readBaseFeeBps(payload.mbf ?? payload.makerBaseFee);
+  const takerBaseFeeBps = readBaseFeeBps(payload.tbf ?? payload.takerBaseFee);
+  if (payload.fd == null) {
+    return {
+      rate: 0,
+      exponent: 1,
+      takerOnly: true,
+      makerBaseFeeBps,
+      takerBaseFeeBps,
+    };
+  }
   if (!isRecord(payload.fd)) {
     throw new Error("Invalid Polymarket fee curve response");
   }
   const rate = readFiniteNumber(payload.fd.r);
   const exponent = readFiniteNumber(payload.fd.e);
-  if (rate == null || rate < 0 || exponent == null || exponent < 0) {
+  if (
+    rate == null ||
+    rate < 0 ||
+    rate > MAX_POLYMARKET_PLATFORM_FEE_RATE ||
+    exponent == null ||
+    exponent < 0
+  ) {
     throw new Error("Invalid Polymarket fee curve parameters");
   }
-  return { rate, exponent };
+  if (payload.fd.to != null && typeof payload.fd.to !== "boolean") {
+    throw new Error("Invalid Polymarket fee role metadata");
+  }
+  return {
+    rate,
+    exponent,
+    takerOnly: payload.fd.to === true,
+    makerBaseFeeBps,
+    takerBaseFeeBps,
+  };
+}
+
+async function fetchPolymarketPlatformFeeCurve(
+  conditionId: string | null | undefined,
+): Promise<PlatformFeeCurve> {
+  if (!conditionId) return null;
+  const payload = await polymarketClient.getClobMarketInfo(conditionId);
+  return parsePolymarketPlatformFeeCurve(payload);
 }
 
 export async function loadPolymarketQuoteContext(
@@ -643,6 +740,7 @@ export function calculatePolymarketQuote(inputs: {
   amountSharesInput?: number | null;
   amountSharesRawInput?: bigint | null;
   limitPrice?: number | null;
+  postOnly?: boolean;
   slippageBps?: number | null;
   context: PolymarketQuoteContext;
 }): PolymarketQuoteResult {
@@ -652,6 +750,19 @@ export function calculatePolymarketQuote(inputs: {
   const bestAsk = findBestAsk(orderbook.asks);
   const bestPrice = inputs.side === "BUY" ? bestAsk : bestBid;
   const isLimitOrder = inputs.orderType === "GTC" || inputs.orderType === "GTD";
+  const postOnly = inputs.postOnly === true;
+  if (postOnly && !isLimitOrder) {
+    throw new PolymarketQuoteError(
+      400,
+      "postOnly is only supported for GTC/GTD orders",
+      "invalid_order_options",
+    );
+  }
+  const feeRoleAssumption: PolymarketFeeRoleAssumption = !isLimitOrder
+    ? "taker"
+    : postOnly
+      ? "maker"
+      : "maker_or_taker";
 
   if (!isLimitOrder && (bestPrice == null || !Number.isFinite(bestPrice))) {
     throw new PolymarketQuoteError(
@@ -723,7 +834,7 @@ export function calculatePolymarketQuote(inputs: {
   let makerAmountMicro: bigint;
   let takerAmountMicro: bigint;
 
-  if (inputs.orderType === "FOK") {
+  if (inputs.orderType === "FOK" || inputs.orderType === "FAK") {
     const shareStep =
       inputs.side === "SELL"
         ? MARKET_SHARES_MICRO_STEP_2_DEC
@@ -896,12 +1007,13 @@ export function calculatePolymarketQuote(inputs: {
   const violatesMinOrderSize =
     minOrderSizeRaw != null ? sizeMicro < minOrderSizeRaw : null;
   const feeEstimate = calculatePolymarketFeeEstimateRaw({
-    bestAsk,
+    feeRoleAssumption,
     feePolicySnapshot,
-    isLimitOrder,
     makerAmountRaw: makerAmountMicro,
     marketInfo,
     platformFeeCurve,
+    platformFeeCurveUnavailable:
+      inputs.context.platformFeeCurveUnavailable === true,
     price,
     priceTick,
     side: inputs.side,
@@ -953,8 +1065,11 @@ export function calculatePolymarketQuote(inputs: {
     takerAmount: takerAmountMicro.toString(),
     platformFeeEstimateRaw: platformFeeEstimateRaw.toString(),
     builderFeeEstimateRaw: builderFeeEstimateRaw.toString(),
+    builderFeeBoundBps: feeEstimate.builderFeeBps,
     totalFeeEstimateRaw: totalFeeEstimateRaw.toString(),
     totalRequiredUsdcRaw: totalRequiredUsdcRaw?.toString() ?? null,
+    postOnly,
+    feeRoleAssumption,
     builderRateSource: feePolicySnapshot.builderRateSource,
     builderEnabled: feePolicySnapshot.builderEnabled,
     builderTakerFeeBps: feePolicySnapshot.builderTakerFeeBps,

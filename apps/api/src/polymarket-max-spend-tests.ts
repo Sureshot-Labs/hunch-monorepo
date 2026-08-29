@@ -3,8 +3,11 @@
 import assert from "node:assert/strict";
 import {
   calculatePolymarketQuote,
+  calculatePolymarketSignedBuyRequiredSpendRaw,
   calculatePolymarketSignedFokBuyRequiredSpendRaw,
   findMaxPolymarketMarketBuyUsd,
+  normalizeOrderTypeForClob,
+  parsePolymarketPlatformFeeCurve,
   PolymarketQuoteError,
   type PolymarketQuoteContext,
 } from "./services/polymarket-quote.js";
@@ -93,6 +96,16 @@ function quoteContext(
   };
 }
 
+function takerOnlyPlatformFeeCurve(rate: number, exponent: number) {
+  return {
+    rate,
+    exponent,
+    takerOnly: true,
+    makerBaseFeeBps: 0,
+    takerBaseFeeBps: 0,
+  } as const;
+}
+
 function noFeeNoMinContext(): PolymarketQuoteContext {
   return quoteContext({
     orderbook: {
@@ -163,6 +176,225 @@ const tests: TestCase[] = [
     },
   },
   {
+    name: "FAK remains partial-fill and uses the immediate taker debit bound",
+    run: () => {
+      const context = quoteContext({
+        feePolicySnapshot: builderFeePolicy(100),
+        platformFeeCurve: takerOnlyPlatformFeeCurve(0.25, 2),
+      });
+      const quote = calculatePolymarketQuote({
+        amountType: "usd",
+        amountUsdRawInput: 5_000_000n,
+        context,
+        orderType: "FAK",
+        side: "BUY",
+        slippageBps: 500,
+        tokenId: "token-yes",
+      });
+
+      assert.equal(normalizeOrderTypeForClob("FAK"), "FAK");
+      assert.equal(quote.orderType, "FAK");
+      assert.equal(quote.feeRoleAssumption, "taker");
+      assert.equal(quote.postOnly, false);
+      assert.equal(
+        calculatePolymarketSignedBuyRequiredSpendRaw({
+          context,
+          makerAmountRaw: BigInt(quote.makerAmount),
+          orderType: "FAK",
+          postOnly: false,
+          takerAmountRaw: BigInt(quote.takerAmount),
+        })?.toString(),
+        quote.totalRequiredUsdcRaw,
+      );
+      assert.throws(
+        () =>
+          calculatePolymarketQuote({
+            amountType: "usd",
+            amountUsdRawInput: 5_000_000n,
+            context,
+            orderType: "FAK",
+            postOnly: true,
+            side: "BUY",
+            tokenId: "token-yes",
+          }),
+        (error) =>
+          error instanceof PolymarketQuoteError &&
+          error.reason === "invalid_order_options",
+      );
+    },
+  },
+  {
+    name: "ordinary GTC Buy reserves the larger maker-or-taker debit",
+    run: () => {
+      const context = quoteContext({
+        feePolicySnapshot: {
+          ...builderFeePolicy(100),
+          builderMakerFeeBps: 25,
+          builderRateSource: "polymarket",
+        },
+        platformFeeCurve: takerOnlyPlatformFeeCurve(0.25, 2),
+      });
+      const postOnly = calculatePolymarketQuote({
+        amountType: "usd",
+        amountUsdRawInput: 5_000_000n,
+        context,
+        limitPrice: 0.6,
+        orderType: "GTC",
+        postOnly: true,
+        side: "BUY",
+        tokenId: "token-yes",
+      });
+      const marketable = calculatePolymarketQuote({
+        amountType: "usd",
+        amountUsdRawInput: 5_000_000n,
+        context,
+        limitPrice: 0.6,
+        orderType: "GTC",
+        postOnly: false,
+        side: "BUY",
+        tokenId: "token-yes",
+      });
+
+      assert.equal(postOnly.feeRoleAssumption, "maker");
+      assert.equal(postOnly.postOnly, true);
+      assert.equal(postOnly.platformFeeEstimateRaw, "0");
+      assert.equal(postOnly.builderFeeBoundBps, 25);
+      assert.equal(marketable.feeRoleAssumption, "maker_or_taker");
+      assert.equal(marketable.postOnly, false);
+      assert.equal(marketable.builderFeeBoundBps, 100);
+      assert.ok(
+        BigInt(marketable.totalRequiredUsdcRaw ?? "0") >
+          BigInt(postOnly.totalRequiredUsdcRaw ?? "0"),
+      );
+
+      for (const quote of [postOnly, marketable]) {
+        const recomputed = calculatePolymarketSignedBuyRequiredSpendRaw({
+          context,
+          makerAmountRaw: BigInt(quote.makerAmount),
+          orderType: "GTC",
+          postOnly: quote.postOnly,
+          takerAmountRaw: BigInt(quote.takerAmount),
+        });
+        assert.equal(recomputed?.toString(), quote.totalRequiredUsdcRaw);
+      }
+    },
+  },
+  {
+    name: "post-only GTC fails closed when live fee role metadata is unavailable",
+    run: () => {
+      const context = quoteContext({
+        marketInfo: { ...baseMarketInfo, maker_fee_bps: "900" },
+        platformFeeCurveUnavailable: true,
+      });
+      assert.throws(
+        () =>
+          calculatePolymarketQuote({
+            amountType: "usd",
+            amountUsdRawInput: 5_000_000n,
+            context,
+            limitPrice: 0.4,
+            orderType: "GTC",
+            postOnly: true,
+            side: "BUY",
+            tokenId: "token-yes",
+          }),
+        (error) =>
+          error instanceof PolymarketQuoteError &&
+          error.reason === "fee_unavailable",
+      );
+      assert.throws(
+        () =>
+          calculatePolymarketQuote({
+            amountType: "usd",
+            amountUsdRawInput: 5_000_000n,
+            context,
+            orderType: "FOK",
+            side: "BUY",
+            tokenId: "token-yes",
+          }),
+        (error) =>
+          error instanceof PolymarketQuoteError &&
+          error.reason === "fee_unavailable",
+      );
+    },
+  },
+  {
+    name: "post-only GTC honors authoritative CLOB fee role metadata",
+    run: () => {
+      const sharedCurve = parsePolymarketPlatformFeeCurve({
+        fd: { r: 0.25, e: 2 },
+        mbf: 0,
+        tbf: 0,
+      });
+      assert.equal(sharedCurve.takerOnly, false);
+      const sharedCurveQuote = calculatePolymarketQuote({
+        amountType: "usd",
+        amountUsdRawInput: 5_000_000n,
+        context: quoteContext({ platformFeeCurve: sharedCurve }),
+        limitPrice: 0.6,
+        orderType: "GTC",
+        postOnly: true,
+        side: "BUY",
+        tokenId: "token-yes",
+      });
+      assert.ok(BigInt(sharedCurveQuote.platformFeeEstimateRaw) > 0n);
+
+      const takerOnlyWithMakerBase = parsePolymarketPlatformFeeCurve({
+        fd: { r: 0.25, e: 2, to: true },
+        mbf: 900,
+        tbf: 0,
+      });
+      assert.equal(takerOnlyWithMakerBase.takerOnly, true);
+      const makerBaseQuote = calculatePolymarketQuote({
+        amountType: "usd",
+        amountUsdRawInput: 5_000_000n,
+        context: quoteContext({
+          platformFeeCurve: takerOnlyWithMakerBase,
+        }),
+        limitPrice: 0.6,
+        orderType: "GTC",
+        postOnly: true,
+        side: "BUY",
+        tokenId: "token-yes",
+      });
+      assert.ok(BigInt(makerBaseQuote.platformFeeEstimateRaw) > 0n);
+
+      assert.throws(
+        () =>
+          parsePolymarketPlatformFeeCurve({
+            fd: { r: 0.25, e: 2, to: true },
+            mbf: Number.MAX_VALUE,
+            tbf: 0,
+          }),
+        /Invalid Polymarket base fee parameters/,
+      );
+      assert.throws(
+        () =>
+          calculatePolymarketQuote({
+            amountType: "usd",
+            amountUsdRawInput: 5_000_000n,
+            context: quoteContext({
+              platformFeeCurve: {
+                rate: Number.MAX_VALUE,
+                exponent: 2,
+                takerOnly: false,
+                makerBaseFeeBps: 0,
+                takerBaseFeeBps: 0,
+              },
+            }),
+            limitPrice: 0.6,
+            orderType: "GTC",
+            postOnly: true,
+            side: "BUY",
+            tokenId: "token-yes",
+          }),
+        (error) =>
+          error instanceof PolymarketQuoteError &&
+          error.reason === "fee_unavailable",
+      );
+    },
+  },
+  {
     name: "signed FOK Buy reserves the maximum fee over every allowed execution price",
     run: () => {
       const context = quoteContext({
@@ -174,7 +406,7 @@ const tests: TestCase[] = [
           negRisk: false,
         },
         marketInfo: { ...baseMarketInfo, taker_fee_bps: "0" },
-        platformFeeCurve: { rate: 0.25, exponent: 2 },
+        platformFeeCurve: takerOnlyPlatformFeeCurve(0.25, 2),
       });
       const quote = calculatePolymarketQuote({
         amountType: "usd",
@@ -235,7 +467,7 @@ const tests: TestCase[] = [
       const requiredSpendRaw = calculatePolymarketSignedFokBuyRequiredSpendRaw({
         context: quoteContext({
           marketInfo: { ...baseMarketInfo, taker_fee_bps: "0" },
-          platformFeeCurve: { rate: Number.MAX_VALUE, exponent: 2 },
+          platformFeeCurve: takerOnlyPlatformFeeCurve(Number.MAX_VALUE, 2),
         }),
         makerAmountRaw: 5_000_000n,
         takerAmountRaw: 10_000_000n,
