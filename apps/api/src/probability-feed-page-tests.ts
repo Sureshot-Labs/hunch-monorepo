@@ -3,7 +3,6 @@ import assert from "node:assert/strict";
 import {
   fetchProbabilityFeedEventPage,
   fetchProbabilityFeedMarketPage,
-  PROBABILITY_EVENT_PROBE_MAX_CANDIDATES,
   PROBABILITY_MARKET_PROBE_BATCH,
   PROBABILITY_MARKET_PROBE_MAX_CANDIDATES,
   PROBABILITY_MARKET_PROBE_WINDOW,
@@ -21,32 +20,39 @@ console.log("ok - probability market discovery is capped at one rank window");
 assert.deepEqual(resolveProbabilityEventProbePolicy(undefined, undefined), {
   candidateWindowSize: 300,
   probabilityBatchSize: 100,
+  maxCandidates: 1_200,
 });
 assert.deepEqual(resolveProbabilityEventProbePolicy(0.7, undefined), {
-  candidateWindowSize: 1_200,
-  probabilityBatchSize: 300,
+  candidateWindowSize: 300,
+  probabilityBatchSize: 100,
+  maxCandidates: 300,
+});
+assert.deepEqual(resolveProbabilityEventProbePolicy(0.4, 0.6), {
+  candidateWindowSize: 300,
+  probabilityBatchSize: 100,
+  maxCandidates: 1_200,
 });
 assert.deepEqual(resolveProbabilityEventProbePolicy(0.8, undefined), {
-  candidateWindowSize: 1_200,
-  probabilityBatchSize: 300,
+  candidateWindowSize: 300,
+  probabilityBatchSize: 100,
+  maxCandidates: 300,
 });
-assert.deepEqual(resolveProbabilityEventProbePolicy(0.8, undefined, 50), {
-  candidateWindowSize: 1_200,
-  probabilityBatchSize: 1_200,
-});
-assert.deepEqual(resolveProbabilityEventProbePolicy(undefined, 0.2, 25), {
-  candidateWindowSize: 1_200,
-  probabilityBatchSize: 1_200,
+assert.deepEqual(resolveProbabilityEventProbePolicy(undefined, 0.2), {
+  candidateWindowSize: 300,
+  probabilityBatchSize: 100,
+  maxCandidates: 300,
 });
 assert.deepEqual(resolveProbabilityEventProbePolicy(0.95, undefined), {
-  candidateWindowSize: 1_200,
-  probabilityBatchSize: 1_200,
+  candidateWindowSize: 100,
+  probabilityBatchSize: 50,
+  maxCandidates: 100,
 });
 assert.deepEqual(resolveProbabilityEventProbePolicy(undefined, 0.05), {
-  candidateWindowSize: 1_200,
-  probabilityBatchSize: 1_200,
+  candidateWindowSize: 100,
+  probabilityBatchSize: 50,
+  maxCandidates: 100,
 });
-console.log("ok - probability event probe policy isolates extreme filters");
+console.log("ok - probability event probe policy bounds selective token work");
 
 {
   const candidateCalls: Array<{ limit: number; offset: number }> = [];
@@ -190,17 +196,19 @@ console.log("ok - probability market page advances by raw scanned candidates");
 console.log("ok - probability feed scans bounded ranked event batches");
 
 {
+  const extremePolicy = resolveProbabilityEventProbePolicy(0.95, undefined);
+  const candidateCalls: Array<{ limit: number; offset: number }> = [];
   let probabilityCalls = 0;
   let filteredCalls = 0;
   const result = await fetchProbabilityFeedEventPage({
     requestedLimit: 25,
-    candidateWindowSize: 1_200,
-    probabilityBatchSize: 1_200,
-    maxCandidates: PROBABILITY_EVENT_PROBE_MAX_CANDIDATES,
-    fetchCandidateEvents: async (input) =>
-      Array.from({ length: input.limit }, (_, index) => ({
+    ...extremePolicy,
+    fetchCandidateEvents: async (input) => {
+      candidateCalls.push(input);
+      return Array.from({ length: input.limit }, (_, index) => ({
         id: `selective-event-${index}`,
-      })),
+      }));
+    },
     fetchBatchProbabilityMarketIds: async () => {
       probabilityCalls += 1;
       return ["selective-market"];
@@ -211,14 +219,17 @@ console.log("ok - probability feed scans bounded ranked event batches");
     },
   });
 
-  assert.equal(probabilityCalls, 1);
-  assert.equal(filteredCalls, 1);
+  assert.deepEqual(candidateCalls, [{ limit: 100, offset: 0 }]);
+  assert.equal(probabilityCalls, 2);
+  assert.equal(filteredCalls, 2);
   assert.deepEqual(result, {
     eventRows: [],
     marketIds: ["selective-market"],
   });
 }
-console.log("ok - selective event probability maps one full bounded window");
+console.log(
+  "ok - extreme event probability returns two capped partial batches",
+);
 
 {
   const result = await fetchProbabilityFeedEventPage({
@@ -242,12 +253,14 @@ console.log("ok - selective event probability maps one full bounded window");
 console.log("ok - probability feed stays bounded at the scan cap");
 
 {
+  const defaultPolicy = resolveProbabilityEventProbePolicy(
+    undefined,
+    undefined,
+  );
   const candidateCalls: Array<{ limit: number; offset: number }> = [];
   const result = await fetchProbabilityFeedEventPage({
     requestedLimit: 25,
-    candidateWindowSize: 300,
-    probabilityBatchSize: 300,
-    maxCandidates: PROBABILITY_EVENT_PROBE_MAX_CANDIDATES,
+    ...defaultPolicy,
     fetchCandidateEvents: async (input) => {
       candidateCalls.push(input);
       return Array.from({ length: input.limit }, (_, index) => ({
@@ -266,6 +279,4 @@ console.log("ok - probability feed stays bounded at the scan cap");
   ]);
   assert.deepEqual(result, { eventRows: [], marketIds: [] });
 }
-console.log(
-  "ok - production event probability policy stops after four windows",
-);
+console.log("ok - default event probability policy stops after four windows");
