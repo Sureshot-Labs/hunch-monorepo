@@ -18,6 +18,7 @@ import {
   fetchProbabilityFeedEventPage,
   fetchProbabilityFeedMarketPage,
   PROBABILITY_EVENT_PROBE_MAX_CANDIDATES,
+  resolveProbabilityEventProbePolicy,
 } from "../probability-feed-page.js";
 import type { FeedEvent, TokenPair } from "../server-types.js";
 import {
@@ -47,10 +48,6 @@ const FOR_YOU_KNN_PAD = 50;
 const FOR_YOU_KNN_MULTIPLIER = 8;
 const FOR_YOU_MAX_KNN = 300;
 const FOR_YOU_RECENT_CLOSE_HOURS = 24;
-const PROBABILITY_EVENT_PROBE_WINDOW = 300;
-const PROBABILITY_EVENT_SELECTIVE_PROBE_WINDOW = 1200;
-const PROBABILITY_EVENT_PROBE_BATCH = 100;
-const PROBABILITY_EVENT_SELECTIVE_PROBE_BATCH = 300;
 const PROBABILITY_MARKET_PROBE_WINDOW = 1200;
 const PROBABILITY_MARKET_PROBE_BATCH = 1200;
 const PROBABILITY_MARKET_PROBE_MAX = 2400;
@@ -60,16 +57,6 @@ type FeedQueryPhase =
   | "probability_mapping"
   | "filtered_events"
   | "hydration";
-
-function isSelectiveProbabilityFilter(
-  minProbability: number | undefined,
-  maxProbability: number | undefined,
-): boolean {
-  return (
-    (minProbability != null && minProbability >= 0.7) ||
-    (maxProbability != null && maxProbability <= 0.3)
-  );
-}
 
 function applyFeedCacheHeaders(input: {
   reply: FastifyReply;
@@ -592,20 +579,14 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
         let usedProgressiveProbabilityMarketPage = false;
 
         if (hasProbabilityFilter && view !== "markets") {
-          const selectiveProbabilityFilter = isSelectiveProbabilityFilter(
+          const eventProbabilityPolicy = resolveProbabilityEventProbePolicy(
             minProb,
             maxProb,
           );
-          const eventProbabilityBatchSize = selectiveProbabilityFilter
-            ? PROBABILITY_EVENT_SELECTIVE_PROBE_BATCH
-            : PROBABILITY_EVENT_PROBE_BATCH;
-          const eventProbabilityWindowSize = selectiveProbabilityFilter
-            ? PROBABILITY_EVENT_SELECTIVE_PROBE_WINDOW
-            : PROBABILITY_EVENT_PROBE_WINDOW;
           const probabilityPage = await fetchProbabilityFeedEventPage({
             requestedLimit: limit,
-            candidateWindowSize: eventProbabilityWindowSize,
-            probabilityBatchSize: eventProbabilityBatchSize,
+            candidateWindowSize: eventProbabilityPolicy.candidateWindowSize,
+            probabilityBatchSize: eventProbabilityPolicy.probabilityBatchSize,
             maxCandidates: PROBABILITY_EVENT_PROBE_MAX_CANDIDATES,
             fetchCandidateEvents: ({ limit: candidateLimit, offset }) => {
               feedQueryPhase = "candidate";

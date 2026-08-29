@@ -292,7 +292,7 @@ console.log("ok - probability market probe ranks before canonical top mapping");
     capturedSql[0],
     /from unified_events candidate_event[\s\S]*?lower\(candidate_event\.category\) = any/i,
   );
-  assert.ok(capturedParams[0]?.includes(1001));
+  assert.ok(capturedParams[0]?.includes(5001));
   assert.match(
     capturedSql[1],
     /from unnest\(\$1::text\[\]\) candidate_event\(event_id\)[\s\S]*?join lateral/i,
@@ -350,7 +350,7 @@ console.log(
   assert.match(capturedSql[1], /having count\(\*\) = 1/i);
   assert.match(capturedSql[1], /lower\(candidate_event\.category\) = any/i);
   assert.match(capturedSql[2], /from unified_events candidate_event/i);
-  assert.ok(capturedParams[2]?.includes(1001));
+  assert.ok(capturedParams[2]?.includes(5001));
   assert.match(capturedSql[3], /join lateral/i);
   assert.ok(capturedParams[3]?.includes(20_001));
   assert.match(
@@ -373,7 +373,7 @@ console.log("ok - sparse category pages fall back to exact indexed candidates");
     candidateRows: [
       [{ ids: rankedIds, pm_prefix_count: 0 }],
       [{ id: "broad-ranked-market-1199" }],
-      Array.from({ length: 1001 }, (_, index) => ({
+      Array.from({ length: 5001 }, (_, index) => ({
         id: `broad-category-event-${index}`,
       })),
       [],
@@ -389,13 +389,52 @@ console.log("ok - sparse category pages fall back to exact indexed candidates");
 
   assert.equal(capturedSql.length, 4);
   assert.match(capturedSql[2], /from unified_events candidate_event/i);
-  assert.ok(capturedParams[2]?.includes(1001));
+  assert.ok(capturedParams[2]?.includes(5001));
   assert.equal(
     capturedSql.some((sql) => /category_market[\s\S]*?join lateral/i.test(sql)),
     false,
   );
 }
 console.log("ok - broad categories stop before exact market enumeration");
+
+{
+  const capturedSql: string[] = [];
+  const capturedParams: unknown[][] = [];
+  const rankedIds = Array.from(
+    { length: 1200 },
+    (_, index) => `sports-ranked-market-${index}`,
+  );
+  const pool = createCapturePool({
+    capturedSql,
+    capturedParams,
+    candidateRows: [
+      Array.from({ length: 5001 }, (_, index) => ({
+        id: `sports-event-${index}`,
+      })),
+      [{ ids: rankedIds, pm_prefix_count: 0 }],
+      [{ id: "sports-ranked-market-7" }],
+    ],
+  });
+
+  const ids = await fetchFeedMarketIdsForProbabilityProbe(pool, {
+    ...baseInputs,
+    limit: 1200,
+    categories: ["sports"],
+    minProb: 0.4,
+    maxProb: 0.6,
+    sort: "trending",
+  });
+
+  assert.deepEqual(ids, {
+    marketIds: ["sports-ranked-market-7"],
+    scannedCandidateCount: 0,
+  });
+  assert.equal(capturedSql.length, 3);
+  assert.match(capturedSql[0], /from unified_events candidate_event/i);
+  assert.match(capturedSql[1], /ranked_market_page as materialized/i);
+  assert.match(capturedSql[2], /selected_market_candidates as materialized/i);
+}
+console.log("ok - broad probability categories stop after one rank window");
 
 {
   const capturedSql: string[] = [];

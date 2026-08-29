@@ -4,7 +4,26 @@ import {
   fetchProbabilityFeedEventPage,
   fetchProbabilityFeedMarketPage,
   PROBABILITY_EVENT_PROBE_MAX_CANDIDATES,
+  resolveProbabilityEventProbePolicy,
 } from "./probability-feed-page.js";
+
+assert.deepEqual(resolveProbabilityEventProbePolicy(undefined, undefined), {
+  candidateWindowSize: 300,
+  probabilityBatchSize: 100,
+});
+assert.deepEqual(resolveProbabilityEventProbePolicy(0.7, undefined), {
+  candidateWindowSize: 1_200,
+  probabilityBatchSize: 300,
+});
+assert.deepEqual(resolveProbabilityEventProbePolicy(0.95, undefined), {
+  candidateWindowSize: 1_200,
+  probabilityBatchSize: 1_200,
+});
+assert.deepEqual(resolveProbabilityEventProbePolicy(undefined, 0.05), {
+  candidateWindowSize: 1_200,
+  probabilityBatchSize: 1_200,
+});
+console.log("ok - probability event probe policy isolates extreme filters");
 
 {
   const candidateCalls: Array<{ limit: number; offset: number }> = [];
@@ -146,6 +165,37 @@ console.log("ok - probability market page advances by raw scanned candidates");
   assert.equal(result.eventRows.length, 50);
 }
 console.log("ok - probability feed scans bounded ranked event batches");
+
+{
+  let probabilityCalls = 0;
+  let filteredCalls = 0;
+  const result = await fetchProbabilityFeedEventPage({
+    requestedLimit: 25,
+    candidateWindowSize: 1_200,
+    probabilityBatchSize: 1_200,
+    maxCandidates: PROBABILITY_EVENT_PROBE_MAX_CANDIDATES,
+    fetchCandidateEvents: async (input) =>
+      Array.from({ length: input.limit }, (_, index) => ({
+        id: `selective-event-${index}`,
+      })),
+    fetchBatchProbabilityMarketIds: async () => {
+      probabilityCalls += 1;
+      return ["selective-market"];
+    },
+    fetchFilteredEvents: async () => {
+      filteredCalls += 1;
+      return [];
+    },
+  });
+
+  assert.equal(probabilityCalls, 1);
+  assert.equal(filteredCalls, 1);
+  assert.deepEqual(result, {
+    eventRows: [],
+    marketIds: ["selective-market"],
+  });
+}
+console.log("ok - selective event probability maps one full bounded window");
 
 {
   const result = await fetchProbabilityFeedEventPage({
