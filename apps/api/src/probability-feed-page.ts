@@ -12,6 +12,7 @@ const PROBABILITY_EVENT_SELECTIVE_PROBE_BATCH = 300;
 export function resolveProbabilityEventProbePolicy(
   minProbability: number | undefined,
   maxProbability: number | undefined,
+  requestedOffset = 0,
 ): { candidateWindowSize: number; probabilityBatchSize: number } {
   const selectiveFilter =
     (minProbability != null && minProbability >= 0.7) ||
@@ -26,14 +27,20 @@ export function resolveProbabilityEventProbePolicy(
   const extremeFilter =
     (minProbability != null && minProbability >= 0.9) ||
     (maxProbability != null && maxProbability <= 0.1);
+  const deepSelectivePage =
+    requestedOffset > 0 &&
+    ((minProbability != null && minProbability >= 0.8) ||
+      (maxProbability != null && maxProbability <= 0.2));
   return {
     candidateWindowSize: PROBABILITY_EVENT_SELECTIVE_PROBE_WINDOW,
     // Extreme filters usually exhaust the full bounded window. Mapping it in
-    // one query avoids four sequential mapping/filter rounds. Less sparse
-    // selective filters retain 300-row batches and their useful early exit.
-    probabilityBatchSize: extremeFilter
-      ? PROBABILITY_EVENT_SELECTIVE_PROBE_WINDOW
-      : PROBABILITY_EVENT_SELECTIVE_PROBE_BATCH,
+    // one query avoids four sequential mapping/filter rounds. Deep pages of
+    // 80/20 filters need enough matches to satisfy the SQL offset and have the
+    // same failure mode. First pages retain 300-row early exit behavior.
+    probabilityBatchSize:
+      extremeFilter || deepSelectivePage
+        ? PROBABILITY_EVENT_SELECTIVE_PROBE_WINDOW
+        : PROBABILITY_EVENT_SELECTIVE_PROBE_BATCH,
   };
 }
 

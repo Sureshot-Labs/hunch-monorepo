@@ -15,6 +15,18 @@ assert.deepEqual(resolveProbabilityEventProbePolicy(0.7, undefined), {
   candidateWindowSize: 1_200,
   probabilityBatchSize: 300,
 });
+assert.deepEqual(resolveProbabilityEventProbePolicy(0.8, undefined), {
+  candidateWindowSize: 1_200,
+  probabilityBatchSize: 300,
+});
+assert.deepEqual(resolveProbabilityEventProbePolicy(0.8, undefined, 50), {
+  candidateWindowSize: 1_200,
+  probabilityBatchSize: 1_200,
+});
+assert.deepEqual(resolveProbabilityEventProbePolicy(undefined, 0.2, 25), {
+  candidateWindowSize: 1_200,
+  probabilityBatchSize: 1_200,
+});
 assert.deepEqual(resolveProbabilityEventProbePolicy(0.95, undefined), {
   candidateWindowSize: 1_200,
   probabilityBatchSize: 1_200,
