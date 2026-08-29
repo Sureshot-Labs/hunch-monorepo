@@ -52,7 +52,6 @@ const PROBABILITY_EVENT_SELECTIVE_PROBE_WINDOW = 1200;
 const PROBABILITY_EVENT_PROBE_BATCH = 100;
 const PROBABILITY_EVENT_SELECTIVE_PROBE_BATCH = 300;
 const PROBABILITY_MARKET_PROBE_WINDOW = 1200;
-const PROBABILITY_MARKET_SELECTIVE_PROBE_WINDOW = 2400;
 const PROBABILITY_MARKET_PROBE_BATCH = 1200;
 const PROBABILITY_MARKET_PROBE_MAX = 2400;
 
@@ -646,16 +645,10 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
           probabilityEventRows = probabilityPage.eventRows;
           observedProbabilityMarketIds = probabilityPage.marketIds;
         } else if (hasProbabilityFilter) {
-          const marketProbeWindow = isSelectiveProbabilityFilter(
-            minProb,
-            maxProb,
-          )
-            ? PROBABILITY_MARKET_SELECTIVE_PROBE_WINDOW
-            : PROBABILITY_MARKET_PROBE_WINDOW;
           const probabilityPage = await fetchProbabilityFeedMarketPage({
             requestedLimit: limit,
             requestedOffset: offset,
-            candidateWindowSize: marketProbeWindow,
+            candidateWindowSize: PROBABILITY_MARKET_PROBE_WINDOW,
             probabilityBatchSize: PROBABILITY_MARKET_PROBE_BATCH,
             maxCandidates: PROBABILITY_MARKET_PROBE_MAX,
             fetchCandidateMarketIds: ({
