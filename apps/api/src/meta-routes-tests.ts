@@ -559,11 +559,7 @@ async function assertDirectMarketSqlShape(): Promise<void> {
   );
   assert.match(
     sql,
-    /selected_event_orderable_market_candidates_strict_market_base as materialized[\s\S]*join selected_event_candidates candidate_event_filter/s,
-  );
-  assert.match(
-    sql,
-    /selected_event_scope as materialized[\s\S]*having count\(\*\) > 1/s,
+    /selected_event_scope as materialized[\s\S]*join lateral[\s\S]*limit 2[\s\S]*matched_event_scope\.market_count > 1/s,
   );
   assert.match(
     sql,
@@ -572,11 +568,15 @@ async function assertDirectMarketSqlShape(): Promise<void> {
   assert.doesNotMatch(sql, /count\(\*\) over \(partition by/);
   assert.doesNotMatch(
     sql,
+    /selected_event_orderable_market_candidates_strict_market_base/,
+  );
+  assert.doesNotMatch(
+    sql,
     /join polymarket_markets pm_filter\s+on pm_filter\.id = m\.venue_market_id\s+and m\.venue = 'polymarket'/s,
   );
 
   const singleSql = await captureMarketSql("single");
-  assert.match(singleSql, /having count\(\*\) = 1/);
+  assert.match(singleSql, /matched_event_scope\.market_count = 1/);
 
   const captureFastMarketSql = async (sort: string): Promise<string[]> => {
     const capturedSql: string[] = [];

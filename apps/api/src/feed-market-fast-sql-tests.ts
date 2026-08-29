@@ -255,7 +255,14 @@ console.log("ok - market sorts rank projected candidates without rejoining");
     /select candidate_market\.\*[\s\S]*?order by[\s\S]*?candidate_market\.volume_total[\s\S]*?limit \$\d+/i,
   );
   assert.ok(capturedParams[0]?.includes(300));
-  assert.match(capturedSql[1], /selected_event_scope as materialized/i);
+  assert.match(
+    capturedSql[1],
+    /selected_event_scope as materialized[\s\S]*?join lateral[\s\S]*?limit 2[\s\S]*?matched_event_scope\.market_count > 1/i,
+  );
+  assert.doesNotMatch(
+    capturedSql[1],
+    /selected_event_orderable_market_candidates/i,
+  );
 }
 console.log("ok - grouped projected sorts rank a bounded strict prefix");
 
@@ -296,6 +303,80 @@ console.log("ok - grouped projected sorts rank a bounded strict prefix");
   assert.ok(capturedParams[0]?.includes(300));
 }
 console.log("ok - projected sorts push safe filters before bounded ranking");
+
+{
+  const capturedSql: string[] = [];
+  const capturedParams: unknown[][] = [];
+  const phases: string[] = [];
+  const pool = createCapturePool({
+    capturedSql,
+    capturedParams,
+    candidateRows: [
+      [{ ids: ["market-1", "market-2"], pm_prefix_count: 300 }],
+      [{ id: "market-1" }],
+      [],
+    ],
+  });
+
+  await fetchFeedMarketsDirect(
+    pool,
+    {
+      ...baseInputs,
+      eventScope: "grouped",
+      filter: "newest",
+      limit: 1,
+      sort: undefined,
+    },
+    undefined,
+    { onPhase: (phase) => phases.push(phase) },
+  );
+
+  assert.equal(capturedSql.length, 3);
+  assert.match(
+    capturedSql[0],
+    /projected_rank_event_candidates as materialized[\s\S]*?e\.start_date >= \$\d+[\s\S]*?join projected_rank_event_candidates candidate_event_filter/i,
+  );
+  assert.match(
+    capturedSql[0],
+    /candidate_market\.event_start_date[\s\S]*?desc nulls last/i,
+  );
+  assert.ok(capturedParams[0]?.includes(300));
+  assert.equal(capturedParams[0]?.includes(1_200), false);
+  assert.match(
+    capturedSql[1],
+    /join lateral[\s\S]*?limit 2[\s\S]*?matched_event_scope\.market_count > 1/i,
+  );
+  assert.deepEqual(phases, ["market_rank_prefix", "market_scope_filter"]);
+}
+console.log("ok - newest scope stays bounded and reports rank/scope phases");
+
+{
+  const capturedSql: string[] = [];
+  const capturedParams: unknown[][] = [];
+  const phases: string[] = [];
+  const pool = createCapturePool({
+    capturedSql,
+    capturedParams,
+    candidateRows: [],
+  });
+
+  const rows = await fetchFeedMarketsDirect(
+    pool,
+    {
+      ...baseInputs,
+      eventScope: "grouped",
+      sort: "trending_v2",
+      sortDir: "asc",
+    },
+    undefined,
+    { onPhase: (phase) => phases.push(phase) },
+  );
+
+  assert.deepEqual(rows, []);
+  assert.equal(capturedSql.length, 0);
+  assert.deepEqual(phases, ["market_rank_prefix"]);
+}
+console.log("ok - unsupported progressive ranks never fall into exact SQL");
 
 {
   const capturedSql: string[] = [];
@@ -360,7 +441,10 @@ console.log("ok - projected category sorts rank only matching events");
   assert.equal(capturedSql.length, 3);
   assert.ok(capturedParams[0]?.includes(300));
   assert.equal(capturedParams[0]?.includes(6_000), false);
-  assert.match(capturedSql[1], /selected_event_scope as materialized/i);
+  assert.match(
+    capturedSql[1],
+    /selected_event_scope as materialized[\s\S]*?join lateral[\s\S]*?limit 2[\s\S]*?matched_event_scope\.market_count > 1/i,
+  );
 }
 console.log("ok - grouped trending v2 keeps one bounded candidate prefix");
 
@@ -486,7 +570,7 @@ console.log(
     false,
   );
   assert.doesNotMatch(capturedSql[0], /lower\(e\.category\)/i);
-  assert.match(capturedSql[1], /having count\(\*\) = 1/i);
+  assert.match(capturedSql[1], /matched_event_scope\.market_count = 1/i);
   assert.match(capturedSql[1], /lower\(candidate_event\.category\) = any/i);
   assert.match(capturedSql[2], /from unified_events candidate_event/i);
   assert.ok(capturedParams[2]?.includes(5001));
@@ -759,7 +843,7 @@ console.log("ok - change24h age filters stop after exact lifecycle prefilter");
   );
   assert.match(
     capturedSql[1],
-    /selected_event_scope as materialized[\s\S]*?having count\(\*\) > 1/i,
+    /selected_event_scope as materialized[\s\S]*?join lateral[\s\S]*?limit 2[\s\S]*?matched_event_scope\.market_count > 1/i,
   );
   assert.match(
     capturedSql[2],
@@ -798,7 +882,7 @@ console.log("ok - grouped change24h reuses exact lifecycle candidates");
   assert.doesNotMatch(capturedSql[0], /change24h_v2_candidate_event_scope/i);
   assert.match(
     capturedSql[1],
-    /selected_event_scope as materialized[\s\S]*?having count\(\*\) > 1/i,
+    /selected_event_scope as materialized[\s\S]*?join lateral[\s\S]*?limit 2[\s\S]*?matched_event_scope\.market_count > 1/i,
   );
   assert.match(capturedSql[0], /m\.best_ask - m\.best_bid\) <= \$\d+/i);
   assert.match(

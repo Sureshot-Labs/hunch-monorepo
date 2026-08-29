@@ -54,6 +54,8 @@ const PROBABILITY_MARKET_PROBE_MAX = 2400;
 
 type FeedQueryPhase =
   | "candidate"
+  | "market_rank_prefix"
+  | "market_scope_filter"
   | "probability_mapping"
   | "filtered_events"
   | "hydration";
@@ -638,11 +640,19 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
               offset: candidateOffset,
             }) => {
               feedQueryPhase = "candidate";
-              return fetchFeedMarketIdsForProbabilityProbe(pool, {
-                ...inputs,
-                limit: candidateLimit,
-                offset: candidateOffset,
-              });
+              return fetchFeedMarketIdsForProbabilityProbe(
+                pool,
+                {
+                  ...inputs,
+                  limit: candidateLimit,
+                  offset: candidateOffset,
+                },
+                {
+                  onPhase: (phase) => {
+                    feedQueryPhase = phase;
+                  },
+                },
+              );
             },
             fetchBatchProbabilityMarketIds: (candidateMarketIds) => {
               feedQueryPhase = "probability_mapping";
@@ -683,7 +693,11 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
                 observedProbabilityMarketIds ?? [],
                 { useCachedChange24h: true },
               )
-            : await fetchFeedMarketsDirect(pool, databaseInputs);
+            : await fetchFeedMarketsDirect(pool, databaseInputs, undefined, {
+                onPhase: (phase) => {
+                  feedQueryPhase = phase;
+                },
+              });
           data = buildFeedData({ rows, eventIds: [], view });
         } else {
           feedQueryPhase = "candidate";
