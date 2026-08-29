@@ -2,12 +2,13 @@ export type ProbabilityFeedEventRow = { id: string };
 
 // Sparse filters return a bounded partial discovery page. Scanning 8k events
 // repeats candidate ranking and top-of-book reads long enough to outlive the
-// frontend timeout; cap every policy at the same 1.2k-event budget.
+// frontend timeout; the policy below narrows that budget for selective ranges.
 export const PROBABILITY_EVENT_PROBE_MAX_CANDIDATES = 1_200;
 const PROBABILITY_EVENT_PROBE_WINDOW = 300;
-const PROBABILITY_EVENT_SELECTIVE_PROBE_WINDOW = 1_200;
 const PROBABILITY_EVENT_PROBE_BATCH = 100;
-const PROBABILITY_EVENT_SELECTIVE_PROBE_BATCH = 300;
+const PROBABILITY_EVENT_SELECTIVE_MAX_CANDIDATES = 300;
+const PROBABILITY_EVENT_EXTREME_MAX_CANDIDATES = 100;
+const PROBABILITY_EVENT_EXTREME_PROBE_BATCH = 50;
 
 // Market probability discovery is deliberately one bounded rank window.
 // Re-ranking a second window scans the same large market relations again and
@@ -21,8 +22,11 @@ export const PROBABILITY_MARKET_PROBE_MAX_CANDIDATES =
 export function resolveProbabilityEventProbePolicy(
   minProbability: number | undefined,
   maxProbability: number | undefined,
-  requestedOffset = 0,
-): { candidateWindowSize: number; probabilityBatchSize: number } {
+): {
+  candidateWindowSize: number;
+  probabilityBatchSize: number;
+  maxCandidates: number;
+} {
   const selectiveFilter =
     (minProbability != null && minProbability >= 0.7) ||
     (maxProbability != null && maxProbability <= 0.3);
@@ -30,26 +34,27 @@ export function resolveProbabilityEventProbePolicy(
     return {
       candidateWindowSize: PROBABILITY_EVENT_PROBE_WINDOW,
       probabilityBatchSize: PROBABILITY_EVENT_PROBE_BATCH,
+      maxCandidates: PROBABILITY_EVENT_PROBE_MAX_CANDIDATES,
     };
   }
 
   const extremeFilter =
     (minProbability != null && minProbability >= 0.9) ||
     (maxProbability != null && maxProbability <= 0.1);
-  const deepSelectivePage =
-    requestedOffset > 0 &&
-    ((minProbability != null && minProbability >= 0.8) ||
-      (maxProbability != null && maxProbability <= 0.2));
+  // Selective discovery is bounded by token-top work, not only by event
+  // count. The highest-ranked 300 production events can expand into more than
+  // 6k markets and a cold lookup of their token books takes 12-17 seconds.
+  // Extreme filters therefore return a smaller partial page, while 70/80
+  // filters may inspect three incremental 100-event batches.
+  const maxCandidates = extremeFilter
+    ? PROBABILITY_EVENT_EXTREME_MAX_CANDIDATES
+    : PROBABILITY_EVENT_SELECTIVE_MAX_CANDIDATES;
   return {
-    candidateWindowSize: PROBABILITY_EVENT_SELECTIVE_PROBE_WINDOW,
-    // Extreme filters usually exhaust the full bounded window. Mapping it in
-    // one query avoids four sequential mapping/filter rounds. Deep pages of
-    // 80/20 filters need enough matches to satisfy the SQL offset and have the
-    // same failure mode. First pages retain 300-row early exit behavior.
-    probabilityBatchSize:
-      extremeFilter || deepSelectivePage
-        ? PROBABILITY_EVENT_SELECTIVE_PROBE_WINDOW
-        : PROBABILITY_EVENT_SELECTIVE_PROBE_BATCH,
+    candidateWindowSize: maxCandidates,
+    probabilityBatchSize: extremeFilter
+      ? PROBABILITY_EVENT_EXTREME_PROBE_BATCH
+      : PROBABILITY_EVENT_PROBE_BATCH,
+    maxCandidates,
   };
 }
 

@@ -17,7 +17,6 @@ import { isPgStatementTimeoutError } from "../lib/postgres-errors.js";
 import {
   fetchProbabilityFeedEventPage,
   fetchProbabilityFeedMarketPage,
-  PROBABILITY_EVENT_PROBE_MAX_CANDIDATES,
   PROBABILITY_MARKET_PROBE_BATCH,
   PROBABILITY_MARKET_PROBE_MAX_CANDIDATES,
   PROBABILITY_MARKET_PROBE_WINDOW,
@@ -583,13 +582,12 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
           const eventProbabilityPolicy = resolveProbabilityEventProbePolicy(
             minProb,
             maxProb,
-            offset,
           );
           const probabilityPage = await fetchProbabilityFeedEventPage({
             requestedLimit: limit,
             candidateWindowSize: eventProbabilityPolicy.candidateWindowSize,
             probabilityBatchSize: eventProbabilityPolicy.probabilityBatchSize,
-            maxCandidates: PROBABILITY_EVENT_PROBE_MAX_CANDIDATES,
+            maxCandidates: eventProbabilityPolicy.maxCandidates,
             fetchCandidateEvents: ({ limit: candidateLimit, offset }) => {
               feedQueryPhase = "candidate";
               return fetchFeedEventIds(
