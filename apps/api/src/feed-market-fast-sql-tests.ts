@@ -565,6 +565,76 @@ console.log("ok - probability change24h ranks and hydrates from the v2 cache");
   const pool = createCapturePool({
     capturedSql,
     capturedParams,
+    candidateRows: [[]],
+  });
+
+  const rows = await fetchFeedMarketsDirect(pool, {
+    ...baseInputs,
+    ageSince: new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString(),
+    sort: "change24h",
+  });
+
+  assert.deepEqual(rows, []);
+  assert.equal(capturedSql.length, 1);
+  assert.match(
+    capturedSql[0],
+    /lifecycle_change_candidates as materialized[\s\S]*?from unified_market_change_24h cached_change[\s\S]*?from lifecycle_change_candidates cached_candidate[\s\S]*?join lateral[\s\S]*?from unified_markets candidate_market[\s\S]*?join unified_events candidate_event/i,
+  );
+  assert.match(
+    capturedSql[0],
+    /candidate_event\.start_date is not null and candidate_event\.start_date >= \$\d+::timestamptz/i,
+  );
+  assert.doesNotMatch(capturedSql[0], /observed_market_change_24h/i);
+}
+console.log("ok - change24h age filters stop after exact lifecycle prefilter");
+
+{
+  const capturedSql: string[] = [];
+  const capturedParams: unknown[][] = [];
+  const pool = createCapturePool({
+    capturedSql,
+    capturedParams,
+    candidateRows: [
+      [{ id: "market-1" }, { id: "market-2" }],
+      [{ id: "market-1" }, { id: "market-2" }],
+      [],
+    ],
+  });
+
+  await fetchFeedMarketsDirect(pool, {
+    ...baseInputs,
+    limit: 1,
+    endWithin: new Date(now.getTime() + 24 * 60 * 60 * 1000).toISOString(),
+    eventScope: "grouped",
+    sort: "change24h",
+  });
+
+  assert.equal(capturedSql.length, 3);
+  assert.match(
+    capturedSql[0],
+    /candidate_event\.end_date is not null[\s\S]*?candidate_event\.end_date <= \$\d+::timestamptz/i,
+  );
+  assert.match(
+    capturedSql[0],
+    /lifecycle_change_candidates as materialized[\s\S]*?lifecycle_strict_candidates as materialized[\s\S]*?lifecycle_grace_candidates as materialized[\s\S]*?order by orderable_candidate\.change_24h desc/i,
+  );
+  assert.match(
+    capturedSql[1],
+    /selected_event_scope as materialized[\s\S]*?having count\(\*\) > 1/i,
+  );
+  assert.match(
+    capturedSql[2],
+    /left join unified_market_change_24h cached_change[\s\S]*?cached_change\.calculation_version = 2/i,
+  );
+}
+console.log("ok - grouped change24h reuses exact lifecycle candidates");
+
+{
+  const capturedSql: string[] = [];
+  const capturedParams: unknown[][] = [];
+  const pool = createCapturePool({
+    capturedSql,
+    capturedParams,
     candidateRows: [
       Array.from({ length: 1000 }, (_, index) => ({
         id: `ranked-market-${index}`,

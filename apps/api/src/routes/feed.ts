@@ -582,6 +582,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
           const eventProbabilityPolicy = resolveProbabilityEventProbePolicy(
             minProb,
             maxProb,
+            offset,
           );
           const probabilityPage = await fetchProbabilityFeedEventPage({
             requestedLimit: limit,

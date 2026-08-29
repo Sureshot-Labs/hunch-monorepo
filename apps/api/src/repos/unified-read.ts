@@ -624,35 +624,39 @@ type FeedEventFilterInputs = Pick<
   | "sevenDaysFromNow"
 >;
 
-function buildFeedSqlExpressions(): FeedSqlExpressions {
-  const safeEventLiquidityExpr =
-    "case when e.liquidity >= 9e16 then null else e.liquidity end";
+function buildFeedSqlExpressions(
+  marketAlias = "m",
+  eventAlias = "e",
+): FeedSqlExpressions {
+  const safeEventLiquidityExpr = `case when ${eventAlias}.liquidity >= 9e16 then null else ${eventAlias}.liquidity end`;
   const eventVolumeDisplayExpr = `
     case
-      when e.volume_total is not null and e.volume_total > 0 then e.volume_total
+      when ${eventAlias}.volume_total is not null and ${eventAlias}.volume_total > 0 then ${eventAlias}.volume_total
       else null
     end
   `;
   const marketVolumeDisplayExpr = `
     case
-      when m.volume_total is not null and m.volume_total > 0 then m.volume_total
+      when ${marketAlias}.volume_total is not null and ${marketAlias}.volume_total > 0 then ${marketAlias}.volume_total
       else null
     end
   `;
   const eventLiquidityDisplayExpr = `
-    coalesce(nullif(${safeEventLiquidityExpr}, 0), nullif(e.open_interest, 0))
+    coalesce(nullif(${safeEventLiquidityExpr}, 0), nullif(${eventAlias}.open_interest, 0))
   `;
   const marketLiquidityDisplayExpr = `
-    coalesce(nullif(m.liquidity, 0), nullif(m.open_interest, 0))
+    coalesce(nullif(${marketAlias}.liquidity, 0), nullif(${marketAlias}.open_interest, 0))
   `;
   const eventOpenInterestExpr = `
-    coalesce(nullif(e.open_interest, 0), nullif(sum(coalesce(m.open_interest, 0)), 0))
+    coalesce(nullif(${eventAlias}.open_interest, 0), nullif(sum(coalesce(${marketAlias}.open_interest, 0)), 0))
   `;
   const eventVolumeSortExpr = `
     coalesce(${eventVolumeDisplayExpr}, sum(coalesce(${marketVolumeDisplayExpr}, 0)))
   `;
   const supportedLimitlessMarketExpr = "true";
-  const renderableMarketExpr = buildRenderableMarketSql({ alias: "m" });
+  const renderableMarketExpr = buildRenderableMarketSql({
+    alias: marketAlias,
+  });
   return {
     safeEventLiquidityExpr,
     eventVolumeDisplayExpr,
@@ -4087,6 +4091,154 @@ async function fetchFeedChange24hMarketIdsFast(
     buildFeedSearchPlan(inputs.q).hasSearch
   ) {
     return null;
+  }
+
+  const hasSelectiveLifecycleFilter = Boolean(
+    inputs.endWithin ||
+    inputs.ageSince ||
+    inputs.filter === "newest" ||
+    inputs.filter === "endingsoon",
+  );
+  if (hasSelectiveLifecycleFilter) {
+    const { params, add } = createParamBuilder();
+    const expressions = buildFeedSqlExpressions(
+      "candidate_market",
+      "candidate_event",
+    );
+    const nowParam = add(inputs.nowParam);
+    const nowCloseParam = add(inputs.nowParam);
+    const candidateWhere = buildFeedMarketCandidateExtraSql({
+      add,
+      inputs,
+      nowParam,
+      venueTarget: "market",
+      eventAlias: "candidate_event",
+      marketAlias: "candidate_market",
+      renderableMarketExpr: buildRenderableMarketSql({
+        alias: "candidate_market",
+      }),
+      supportedLimitlessMarketExpr: "true",
+    });
+    if (inputs.minLiquidity > 0) {
+      candidateWhere.push(
+        `${expressions.marketLiquidityDisplayExpr} >= ${add(inputs.minLiquidity)}`,
+      );
+    }
+    if (inputs.minVol > 1e-9) {
+      candidateWhere.push(
+        `${expressions.marketVolumeDisplayExpr} >= ${add(inputs.minVol)}`,
+      );
+    }
+    if (inputs.maxSpread != null) {
+      candidateWhere.push(
+        `candidate_market.best_bid is not null and candidate_market.best_ask is not null and (candidate_market.best_ask - candidate_market.best_bid) <= ${add(inputs.maxSpread)}`,
+      );
+    }
+    const limitParam = add(inputs.limit);
+    const offsetParam = add(inputs.offset);
+    const sortDir = inputs.sortDir === "asc" ? "asc" : "desc";
+    const baseQualificationSql = `
+      candidate_event.status = 'ACTIVE'
+      and candidate_market.status = 'ACTIVE'
+      and ${candidateWhere.join(" and ")}
+    `;
+    const useCacheDrivenLifecycle =
+      Boolean(inputs.ageSince || inputs.filter === "newest") &&
+      !inputs.endWithin &&
+      inputs.filter !== "endingsoon";
+    const lifecycleFilteredCandidatesCte = useCacheDrivenLifecycle
+      ? `
+          select cached_candidate.market_id, cached_candidate.change_24h
+          from lifecycle_change_candidates cached_candidate
+          join lateral (
+            select candidate_market.id
+            from unified_markets candidate_market
+            join unified_events candidate_event
+              on candidate_event.id = candidate_market.event_id
+            where candidate_market.id = cached_candidate.market_id
+              and ${baseQualificationSql}
+            offset 0
+          ) qualified_market on true
+      `
+      : `
+        select cached_candidate.market_id, cached_candidate.change_24h
+        from unified_events candidate_event
+        join unified_markets candidate_market
+          on candidate_market.event_id = candidate_event.id
+        join lifecycle_change_candidates cached_candidate
+          on cached_candidate.market_id = candidate_market.id
+        where ${baseQualificationSql}
+      `;
+    const strictAvailabilitySql = buildStrictIndexedMarketSql({
+      marketAlias: "strict_market",
+      eventAlias: "strict_event",
+      nowParam,
+      nowCloseParam,
+    });
+    const graceCandidateSql = buildPolymarketGraceCandidateSql({
+      marketAlias: "grace_market",
+      eventAlias: "grace_event",
+      nowParam,
+    });
+    const candidateRows = await queryRowsWithLocalSettings<{ id: string }>(
+      pool,
+      `
+        with lifecycle_change_candidates as materialized (
+          select cached_change.market_id, cached_change.change_24h
+          from unified_market_change_24h cached_change
+          where cached_change.calculation_version = 2
+            and cached_change.change_24h is not null
+        ),
+        lifecycle_filtered_candidates as materialized (
+          ${lifecycleFilteredCandidatesCte}
+        ),
+        lifecycle_strict_candidates as materialized (
+          select filtered_candidate.market_id, filtered_candidate.change_24h
+          from lifecycle_filtered_candidates filtered_candidate
+          join unified_markets strict_market
+            on strict_market.id = filtered_candidate.market_id
+          join unified_events strict_event
+            on strict_event.id = strict_market.event_id
+          where ${strictAvailabilitySql}
+        ),
+        lifecycle_grace_candidates as materialized (
+          select
+            filtered_candidate.market_id,
+            filtered_candidate.change_24h,
+            grace_market.venue_market_id
+          from lifecycle_filtered_candidates filtered_candidate
+          join unified_markets grace_market
+            on grace_market.id = filtered_candidate.market_id
+          join unified_events grace_event
+            on grace_event.id = grace_market.event_id
+          where ${graceCandidateSql}
+        ),
+        lifecycle_orderable_candidates as materialized (
+          select strict_candidate.market_id, strict_candidate.change_24h
+          from lifecycle_strict_candidates strict_candidate
+          union all
+          select grace_candidate.market_id, grace_candidate.change_24h
+          from lifecycle_grace_candidates grace_candidate
+          join polymarket_markets grace_pm
+            on grace_pm.id = grace_candidate.venue_market_id
+          where grace_pm.accepting_orders = true
+            and coalesce(grace_pm.active, true) = true
+            and coalesce(grace_pm.closed, false) = false
+            and coalesce(grace_pm.archived, false) = false
+        )
+        select orderable_candidate.market_id as id
+        from lifecycle_orderable_candidates orderable_candidate
+        order by orderable_candidate.change_24h ${sortDir}, orderable_candidate.market_id
+        limit ${limitParam} offset ${offsetParam}
+      `,
+      params,
+      {
+        workMem: FEED_HEAVY_QUERY_WORK_MEM,
+        statementTimeoutMs: feedFilterStatementTimeoutMs(),
+        jitOff: true,
+      },
+    );
+    return candidateRows.map((row) => row.id);
   }
 
   const sortDir = inputs.sortDir === "asc" ? "asc" : "desc";
