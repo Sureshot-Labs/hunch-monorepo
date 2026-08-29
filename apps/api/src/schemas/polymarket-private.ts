@@ -89,6 +89,7 @@ export const polymarketPlaceOrderBodySchema = z
   .object({
     order: polymarketOrderSchema,
     orderType: zOrderType.default("GTC"),
+    postOnly: z.boolean().optional(),
     deferExec: z.boolean().optional(),
     exchangeAddress: zEthAddress.optional(),
     negRisk: z.boolean().optional(),
@@ -102,6 +103,17 @@ export const polymarketPlaceOrderBodySchema = z
       .optional(),
   })
   .superRefine((value, context) => {
+    if (
+      value.postOnly === true &&
+      value.orderType !== "GTC" &&
+      value.orderType !== "GTD"
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["postOnly"],
+        message: "postOnly is only supported for GTC/GTD orders",
+      });
+    }
     if (
       Boolean(value.fundingOperationId) !== Boolean(value.fundingReservationId)
     ) {
@@ -222,6 +234,7 @@ export const polymarketQuoteBodySchema = z
     amount: z.coerce.number().positive("amount must be > 0").optional(),
     amountType: zAmountType.optional(),
     orderType: zOrderType.optional(),
+    postOnly: z.boolean().optional(),
     limitPrice: z.coerce.number().positive("limitPrice must be > 0").optional(),
     slippageBps: z.coerce.number().int().min(0).max(10_000).optional(),
     // Legacy clients receive the same response shape as before. Unified
@@ -252,6 +265,17 @@ export const polymarketQuoteBodySchema = z
     },
     {
       message: "limitPrice is required for limit orders",
+    },
+  )
+  .refine(
+    (value) => {
+      if (value.postOnly !== true) return true;
+      const orderType = value.orderType ?? "FOK";
+      return orderType === "GTC" || orderType === "GTD";
+    },
+    {
+      path: ["postOnly"],
+      message: "postOnly is only supported for GTC/GTD orders",
     },
   );
 

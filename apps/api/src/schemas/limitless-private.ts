@@ -91,6 +91,7 @@ export const limitlessOrderBodySchema = z
   .object({
     order: limitlessOrderSchema,
     orderType: zOrderType.default("GTC"),
+    postOnly: z.boolean().optional(),
     marketSlug: zLimitlessSlug,
     ownerId: z.coerce.number().int().optional(),
     fundingOperationId: z.string().uuid().optional(),
@@ -102,6 +103,13 @@ export const limitlessOrderBodySchema = z
       .optional(),
   })
   .superRefine((value, context) => {
+    if (value.postOnly === true && value.orderType !== "GTC") {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["postOnly"],
+        message: "postOnly is only supported for GTC orders",
+      });
+    }
     if (
       Boolean(value.fundingOperationId) !== Boolean(value.fundingReservationId)
     ) {

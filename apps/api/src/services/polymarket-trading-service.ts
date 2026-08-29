@@ -26,6 +26,7 @@ export async function quotePolymarketOrder(
     amountUsdInput?: number | null;
     amountSharesInput?: number | null;
     limitPrice?: number | null;
+    postOnly?: boolean;
     slippageBps?: number | null;
     logWarn?: PolymarketQuoteWarnLogger;
   },
@@ -42,6 +43,7 @@ export async function quotePolymarketOrder(
     amountUsdInput: input.amountUsdInput,
     amountSharesInput: input.amountSharesInput,
     limitPrice: input.limitPrice,
+    postOnly: input.postOnly,
     slippageBps: input.slippageBps,
     context,
   });

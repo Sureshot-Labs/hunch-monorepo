@@ -9,6 +9,7 @@ import {
   calculatePolymarketBuilderFeeRaw,
   clearPolymarketBuilderRateCacheForTests,
   resolvePolymarketBuilderFeeConfig,
+  resolvePolymarketBuilderFeeBoundBps,
   resolvePolymarketFeePolicySnapshot,
   type PolymarketBuilderFeeConfig,
   type PolymarketFeePolicySnapshot,
@@ -143,6 +144,31 @@ await test("builder fee math floors instead of over-accruing", () => {
   assert.equal(
     calculatePolymarketBuilderFeeRaw(996_000n, 50).toString(),
     "4980",
+  );
+});
+
+await test("fallback builder rates reserve against protocol program caps", () => {
+  const fallbackSnapshot: PolymarketFeePolicySnapshot = {
+    ...builderSnapshot,
+    builderMakerFeeBps: 15,
+    builderTakerFeeBps: 25,
+    builderRateSource: "fallback",
+  };
+  assert.equal(
+    resolvePolymarketBuilderFeeBoundBps(fallbackSnapshot, "maker"),
+    50,
+  );
+  assert.equal(
+    resolvePolymarketBuilderFeeBoundBps(fallbackSnapshot, "taker"),
+    100,
+  );
+  assert.equal(
+    resolvePolymarketBuilderFeeBoundBps(builderSnapshot, "maker"),
+    25,
+  );
+  assert.equal(
+    resolvePolymarketBuilderFeeBoundBps(builderSnapshot, "taker"),
+    50,
   );
 });
 

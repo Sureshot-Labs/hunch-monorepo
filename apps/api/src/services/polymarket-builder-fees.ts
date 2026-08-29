@@ -16,8 +16,8 @@ const ZERO_BYTES32 =
 const POLYGON_CHAIN_ID = "137";
 const POLYMARKET_VENUE = "polymarket";
 const POLYMARKET_BUILDER_FEE_PROGRAM = "builder";
-const MAX_TAKER_BUILDER_FEE_BPS = 100;
-const MAX_MAKER_BUILDER_FEE_BPS = 50;
+export const MAX_TAKER_BUILDER_FEE_BPS = 100;
+export const MAX_MAKER_BUILDER_FEE_BPS = 50;
 const DECIMAL_SCALE = 1_000_000_000_000n;
 const DECIMAL_SCALE_DIGITS = 12;
 const USDC_SCALE = 1_000_000n;
@@ -75,6 +75,27 @@ export type PolymarketBuilderFeeAccrualInput = {
   orderBuilderCode: string | null;
   feePolicySnapshot: unknown | null;
 };
+
+/**
+ * Returns a collateral-safe builder fee rate for pre-trade bounds. A live
+ * Polymarket rate is exact; a local fallback is not authoritative, so reserve
+ * against the program maximum instead of pretending the stale value is a cap.
+ * Accrual accounting continues to use the frozen policy snapshot separately.
+ */
+export function resolvePolymarketBuilderFeeBoundBps(
+  snapshot: PolymarketFeePolicySnapshot,
+  role: "maker" | "taker",
+): number {
+  if (snapshot.collectionMode !== "builder") return 0;
+  if (snapshot.builderRateSource === "fallback") {
+    return role === "maker"
+      ? MAX_MAKER_BUILDER_FEE_BPS
+      : MAX_TAKER_BUILDER_FEE_BPS;
+  }
+  return role === "maker"
+    ? clampBps(snapshot.builderMakerFeeBps, MAX_MAKER_BUILDER_FEE_BPS)
+    : clampBps(snapshot.builderTakerFeeBps, MAX_TAKER_BUILDER_FEE_BPS);
+}
 
 function clampBps(value: number, max: number): number {
   if (!Number.isFinite(value)) return 0;
