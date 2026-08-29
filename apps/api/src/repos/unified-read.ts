@@ -70,9 +70,9 @@ const FEED_MARKET_GRACE_MIN_CANDIDATES = 100;
 const FEED_MARKET_FILTER_MIN_CANDIDATES = 300;
 const FEED_MARKET_SCOPE_FILTER_MIN_CANDIDATES = 1000;
 const FEED_MARKET_CATEGORY_FILTER_MIN_CANDIDATES = 1200;
-const FEED_MARKET_CATEGORY_EXACT_MAX_EVENTS = 1000;
+const FEED_MARKET_CATEGORY_EXACT_MAX_EVENTS = 5000;
 const FEED_MARKET_CATEGORY_EXACT_MAX_CANDIDATES = 20000;
-const FEED_MARKET_CATEGORY_EXACT_TIMEOUT_MS = 1000;
+const FEED_MARKET_CATEGORY_EXACT_TIMEOUT_MS = 2000;
 // Category/scope filtering is deliberately capped at one bounded rank prefix.
 // Larger prefixes re-scan the multi-gigabyte market relations long enough to
 // cross the request timeout; a partial page is safer than a 504.
@@ -5048,7 +5048,11 @@ export async function fetchFeedMarketIdsForProbabilityProbe(
     : rankedMarketIds;
   return {
     marketIds,
-    scannedCandidateCount: rankedMarketIds.length,
+    // Broad category/scope filters deliberately inspect one bounded global
+    // rank window. Reporting that stream as exhausted prevents the
+    // probability pager from repeating the same multi-gigabyte rank scan for
+    // a second window after a sparse first result.
+    scannedCandidateCount: needsBoundedPostFilter ? 0 : rankedMarketIds.length,
   };
 }
 

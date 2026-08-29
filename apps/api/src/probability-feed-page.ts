@@ -2,8 +2,40 @@ export type ProbabilityFeedEventRow = { id: string };
 
 // Sparse filters return a bounded partial discovery page. Scanning 8k events
 // repeats candidate ranking and top-of-book reads long enough to outlive the
-// frontend timeout; four 300-event windows stay inside that budget.
+// frontend timeout; cap every policy at the same 1.2k-event budget.
 export const PROBABILITY_EVENT_PROBE_MAX_CANDIDATES = 1_200;
+const PROBABILITY_EVENT_PROBE_WINDOW = 300;
+const PROBABILITY_EVENT_SELECTIVE_PROBE_WINDOW = 1_200;
+const PROBABILITY_EVENT_PROBE_BATCH = 100;
+const PROBABILITY_EVENT_SELECTIVE_PROBE_BATCH = 300;
+
+export function resolveProbabilityEventProbePolicy(
+  minProbability: number | undefined,
+  maxProbability: number | undefined,
+): { candidateWindowSize: number; probabilityBatchSize: number } {
+  const selectiveFilter =
+    (minProbability != null && minProbability >= 0.7) ||
+    (maxProbability != null && maxProbability <= 0.3);
+  if (!selectiveFilter) {
+    return {
+      candidateWindowSize: PROBABILITY_EVENT_PROBE_WINDOW,
+      probabilityBatchSize: PROBABILITY_EVENT_PROBE_BATCH,
+    };
+  }
+
+  const extremeFilter =
+    (minProbability != null && minProbability >= 0.9) ||
+    (maxProbability != null && maxProbability <= 0.1);
+  return {
+    candidateWindowSize: PROBABILITY_EVENT_SELECTIVE_PROBE_WINDOW,
+    // Extreme filters usually exhaust the full bounded window. Mapping it in
+    // one query avoids four sequential mapping/filter rounds. Less sparse
+    // selective filters retain 300-row batches and their useful early exit.
+    probabilityBatchSize: extremeFilter
+      ? PROBABILITY_EVENT_SELECTIVE_PROBE_WINDOW
+      : PROBABILITY_EVENT_SELECTIVE_PROBE_BATCH,
+  };
+}
 
 export async function fetchProbabilityFeedMarketPage(args: {
   requestedLimit: number;
