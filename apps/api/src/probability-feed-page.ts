@@ -9,6 +9,15 @@ const PROBABILITY_EVENT_SELECTIVE_PROBE_WINDOW = 1_200;
 const PROBABILITY_EVENT_PROBE_BATCH = 100;
 const PROBABILITY_EVENT_SELECTIVE_PROBE_BATCH = 300;
 
+// Market probability discovery is deliberately one bounded rank window.
+// Re-ranking a second window scans the same large market relations again and
+// turns sparse 80/95 pages into deterministic timeouts. A partial page from
+// the first window is preferable to a 504 that discards its useful results.
+export const PROBABILITY_MARKET_PROBE_WINDOW = 1_200;
+export const PROBABILITY_MARKET_PROBE_BATCH = PROBABILITY_MARKET_PROBE_WINDOW;
+export const PROBABILITY_MARKET_PROBE_MAX_CANDIDATES =
+  PROBABILITY_MARKET_PROBE_WINDOW;
+
 export function resolveProbabilityEventProbePolicy(
   minProbability: number | undefined,
   maxProbability: number | undefined,

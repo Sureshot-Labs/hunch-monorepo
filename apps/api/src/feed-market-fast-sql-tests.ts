@@ -184,7 +184,42 @@ for (const [sort, sortPattern] of Object.entries(projectedSortPatterns)) {
     sort,
   });
 
-  const candidateSql = capturedSql[0];
+  const usesMetricRank =
+    sort === "totalvol" || sort === "liquidity" || sort === "openinterest";
+  if (usesMetricRank) {
+    assert.match(
+      capturedSql[0],
+      /from unified_market_activity_metrics_24h metric/i,
+    );
+    assert.doesNotMatch(
+      capturedSql[0],
+      /join projected_metric_events candidate_event/i,
+    );
+    if (sort === "totalvol") {
+      assert.match(capturedSql[0], /metric\.volume_total_now > 0/i);
+    }
+    assert.ok(capturedParams[0]?.includes(4_000));
+  }
+  const candidateIndex = usesMetricRank ? 1 : 0;
+  const candidateSql = capturedSql[candidateIndex];
+  if (usesMetricRank) {
+    assert.match(
+      candidateSql,
+      /join unnest\(\$\d+::text\[\]\) as candidate_filter\(market_id\)/i,
+    );
+    assert.match(candidateSql, /orderable_market_candidates as materialized/i);
+    assert.match(
+      candidateSql,
+      /from orderable_market_candidates candidate_market[\s\S]*?join unified_markets m/i,
+    );
+    assert.match(
+      candidateSql,
+      /order by[\s\S]*?m\.(?:volume_total|liquidity|open_interest)/i,
+    );
+    assert.ok(capturedParams[candidateIndex]?.includes(3));
+    assert.ok(capturedParams[candidateIndex]?.includes(25));
+    continue;
+  }
   assert.match(candidateSql, /orderable_market_candidates as materialized/i);
   assert.match(
     candidateSql,
@@ -220,8 +255,8 @@ for (const [sort, sortPattern] of Object.entries(projectedSortPatterns)) {
     /ranked_market_page as materialized[\s\S]*?join unified_(?:markets|events)/i,
   );
   assert.match(candidateSql, sortPattern);
-  assert.ok(capturedParams[0]?.includes(3));
-  assert.ok(capturedParams[0]?.includes(25));
+  assert.ok(capturedParams[candidateIndex]?.includes(3));
+  assert.ok(capturedParams[candidateIndex]?.includes(25));
 }
 console.log("ok - market sorts rank projected candidates without rejoining");
 
@@ -246,21 +281,22 @@ console.log("ok - market sorts rank projected candidates without rejoining");
   });
 
   assert.equal(capturedSql.length, 3);
-  assert.match(
-    capturedSql[0],
-    /strict_market_base as materialized\s*\(\s*select candidate_market\.\*/i,
-  );
-  assert.match(
-    capturedSql[0],
-    /select candidate_market\.\*[\s\S]*?order by[\s\S]*?candidate_market\.volume_total[\s\S]*?limit \$\d+/i,
-  );
-  assert.ok(capturedParams[0]?.includes(300));
+  assert.match(capturedSql[0], /unified_market_activity_metrics_24h/i);
   assert.match(
     capturedSql[1],
+    /join unnest\(\$\d+::text\[\]\) as candidate_filter\(market_id\)/i,
+  );
+  assert.match(
+    capturedSql[1],
+    /order by[\s\S]*?m\.volume_total[\s\S]*?limit \$\d+ offset \$\d+/i,
+  );
+  assert.ok(capturedParams[1]?.includes(300));
+  assert.match(
+    capturedSql[2],
     /selected_event_scope as materialized[\s\S]*?join lateral[\s\S]*?limit 2[\s\S]*?matched_event_scope\.market_count > 1/i,
   );
   assert.doesNotMatch(
-    capturedSql[1],
+    capturedSql[2],
     /selected_event_orderable_market_candidates/i,
   );
 }
@@ -1078,6 +1114,62 @@ console.log("ok - grouped event spread scopes only ranked candidates");
   );
 }
 console.log("ok - bounded trending v2 probes keep exhausted partial results");
+
+{
+  const capturedSql: string[] = [];
+  const capturedParams: unknown[][] = [];
+  const pool = createCapturePool({
+    capturedSql,
+    capturedParams,
+    candidateRows: [[{ ids: ["event-1"], candidate_count: 1 }]],
+  });
+
+  const rows = await fetchFeedEventIds(pool, {
+    ...baseInputs,
+    limit: 5,
+    view: "events",
+    sort: "trending_v2",
+  });
+
+  assert.deepEqual(rows, [{ id: "event-1" }]);
+  assert.equal(capturedSql.length, 1);
+}
+console.log(
+  "ok - exhausted trending v2 event pages never enter exact fallback",
+);
+
+{
+  const capturedSql: string[] = [];
+  const capturedParams: unknown[][] = [];
+  const pool = createCapturePool({
+    capturedSql,
+    capturedParams,
+    candidateRows: [
+      [
+        {
+          ids: ["market-1"],
+          non_limitless_prefix_count: 1,
+          non_limitless_valid_count: 1,
+          limitless_candidate_count: 0,
+          limitless_valid_count: 0,
+        },
+      ],
+      [{ id: "market-1" }],
+      [],
+    ],
+  });
+
+  await fetchFeedMarketsDirect(pool, {
+    ...baseInputs,
+    limit: 5,
+    venues: ["polymarket"],
+    sort: "trending_v2",
+  });
+
+  assert.equal(capturedSql.length, 2);
+  assert.match(capturedSql[1], /unnest\(\$\d+::text\[\]\)/i);
+}
+console.log("ok - exhausted trending v2 market pages hydrate partial results");
 
 {
   const capturedSql: string[] = [];

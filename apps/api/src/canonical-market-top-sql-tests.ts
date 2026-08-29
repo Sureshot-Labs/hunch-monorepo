@@ -62,7 +62,7 @@ const topParams: unknown[][] = [];
 let eventSql = "";
 const localStatements: string[] = [];
 const probabilityMarketSourceQuery =
-  /from probability_market_candidates probability_candidate\s+join unified_markets m on m\.id = probability_candidate\.market_id/i;
+  /from probability_candidate_events candidate_event\s+join lateral|from probability_market_candidates probability_candidate\s+join unified_markets m on m\.id = probability_candidate\.market_id/i;
 const client = {
   query: async (sql: string, params: unknown[] = []) => {
     localStatements.push(sql);
@@ -137,9 +137,9 @@ assert.deepEqual(
   ["market-1"],
 );
 assert.doesNotMatch(candidateSql, /interval '10 minutes'|\.ts\s*[<>]=?/i);
-assert.match(
+assert.doesNotMatch(
   candidateSql,
-  /probability_market_candidates_strict_market_base as materialized/i,
+  /probability_market_candidates_strict_market_base/i,
 );
 assert.match(
   candidateSql,
@@ -151,20 +151,28 @@ assert.match(
 );
 assert.match(
   candidateSql,
-  /probability_market_candidates_strict_market_base as materialized[\s\S]*?join probability_candidate_events candidate_event_filter on candidate_event_filter\.id = m\.event_id/i,
+  /from probability_candidate_events candidate_event[\s\S]*?join lateral[\s\S]*?where m\.event_id = candidate_event\.id/i,
 );
 assert.match(candidateSql, /m\.status = 'ACTIVE'/i);
-assert.match(candidateSql, /e\.status = 'ACTIVE'/i);
+assert.match(candidateSql, /candidate_event\.status = 'ACTIVE'/i);
 assert.match(candidateSql, /e\.venue = ANY\(\$\d+::text\[\]\)/i);
 assert.match(candidateSql, /e\.end_date is not null/i);
 assert.doesNotMatch(candidateSql, /observed_top_candidate_markets/i);
 assert.match(
   candidateSql,
-  /select\s+probability_candidate\.market_id,\s+m\.token_yes,\s+m\.token_no,\s+m\.clob_token_ids/i,
+  /select\s+strict_market\.market_id,\s+strict_market\.token_yes,\s+strict_market\.token_no,\s+strict_market\.clob_token_ids/i,
+);
+assert.match(
+  candidateSql,
+  /probability_grace_market_ids as materialized[\s\S]*?pm_filter\.id = any\(grace_market_ids\.venue_market_ids\)/i,
 );
 assert.match(candidateSql, probabilityMarketSourceQuery);
 assert.doesNotMatch(candidateSql, /unified_market_tokens/i);
 assert.doesNotMatch(candidateSql, /left join lateral/i);
+assert.match(
+  candidateSql,
+  /idx_unified_markets_active_event_id|m\.event_id = candidate_event\.id/i,
+);
 assert.doesNotMatch(candidateSql, /canonical_token_rows as materialized/i);
 assert.doesNotMatch(candidateSql, /canonical_top_rows as materialized/i);
 assert.doesNotMatch(candidateSql, /canonical_probabilities as materialized/i);
