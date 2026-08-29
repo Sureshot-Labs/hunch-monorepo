@@ -17,10 +17,13 @@ import {
     maxCandidates: 8,
     fetchCandidateMarketIds: async (input) => {
       candidateCalls.push(input);
-      return Array.from(
-        { length: input.limit },
-        (_, index) => `market-${input.offset + index}`,
-      );
+      return {
+        marketIds: Array.from(
+          { length: input.limit },
+          (_, index) => `market-${input.offset + index}`,
+        ),
+        scannedCandidateCount: input.limit,
+      };
     },
     fetchBatchProbabilityMarketIds: async (marketIds) => {
       probabilityBatches.push(marketIds);
@@ -62,6 +65,32 @@ console.log("ok - probability market page preserves ranked order and offset");
 console.log(
   "ok - unsupported probability market ranking falls back explicitly",
 );
+
+{
+  const candidateCalls: Array<{ limit: number; offset: number }> = [];
+  const result = await fetchProbabilityFeedMarketPage({
+    requestedLimit: 2,
+    requestedOffset: 0,
+    candidateWindowSize: 4,
+    probabilityBatchSize: 2,
+    maxCandidates: 8,
+    fetchCandidateMarketIds: async (input) => {
+      candidateCalls.push(input);
+      return {
+        marketIds: input.offset === 0 ? ["market-1"] : ["market-5", "market-7"],
+        scannedCandidateCount: input.limit,
+      };
+    },
+    fetchBatchProbabilityMarketIds: async (marketIds) => marketIds,
+  });
+
+  assert.deepEqual(candidateCalls, [
+    { limit: 4, offset: 0 },
+    { limit: 4, offset: 4 },
+  ]);
+  assert.deepEqual(result, { marketIds: ["market-1", "market-5"] });
+}
+console.log("ok - probability market page advances by raw scanned candidates");
 
 {
   const candidateCalls: Array<{ limit: number; offset: number }> = [];

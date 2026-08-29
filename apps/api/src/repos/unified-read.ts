@@ -3,6 +3,7 @@ import { buildObservedCanonicalMarketTop } from "@hunch/shared";
 import { createHash } from "node:crypto";
 import type { QueryResultRow } from "pg";
 import { env } from "../env.js";
+import { isPgStatementTimeoutError } from "../lib/postgres-errors.js";
 import {
   buildBroadOrderableMarketSql,
   buildEventHasBroadOrderableMarketSql,
@@ -67,8 +68,15 @@ const FEED_EVENT_FAST_CANDIDATE_FACTOR = 20;
 const FEED_EVENT_FAST_MAX_CANDIDATES = 10000;
 const FEED_MARKET_GRACE_MIN_CANDIDATES = 100;
 const FEED_MARKET_FILTER_MIN_CANDIDATES = 300;
+const FEED_MARKET_SCOPE_FILTER_MIN_CANDIDATES = 1000;
 const FEED_MARKET_CATEGORY_FILTER_MIN_CANDIDATES = 1200;
-const FEED_MARKET_FILTER_MAX_CANDIDATES = 10000;
+const FEED_MARKET_CATEGORY_EXACT_MAX_EVENTS = 1000;
+const FEED_MARKET_CATEGORY_EXACT_MAX_CANDIDATES = 20000;
+const FEED_MARKET_CATEGORY_EXACT_TIMEOUT_MS = 1000;
+// Category/scope filtering is deliberately capped at one bounded rank prefix.
+// Larger prefixes re-scan the multi-gigabyte market relations long enough to
+// cross the request timeout; a partial page is safer than a 504.
+const FEED_MARKET_FILTER_MAX_CANDIDATES = 1200;
 const FEED_CANDIDATE_EXPANSION_FACTOR = 4;
 const FEED_CHANGE24H_V2_CANDIDATE_LIMITS = [500, 2000, 8000] as const;
 const FEED_SEARCH_PREFIX_MIN_CHARS = 3;
@@ -3968,6 +3976,7 @@ type FeedTrendingV2ScoreRow = {
 async function fetchFeedPreselectedMarketIdsFast(
   pool: Pool,
   inputs: FeedInputs,
+  options?: { acceptPartialMetricPage?: boolean },
 ): Promise<string[] | null> {
   if (!inputs.marketIds?.length || buildFeedSearchPlan(inputs.q).hasSearch) {
     return null;
@@ -4058,7 +4067,13 @@ async function fetchFeedPreselectedMarketIdsFast(
       jitOff: true,
     },
   );
-  if (inputs.sort === "change24h" && rows.length < inputs.limit) return null;
+  if (
+    inputs.sort === "change24h" &&
+    rows.length < inputs.limit &&
+    !options?.acceptPartialMetricPage
+  ) {
+    return null;
+  }
   return rows.map((row) => row.id);
 }
 
@@ -4236,6 +4251,95 @@ function hasFeedMarketCategoryFilter(
   return Boolean(inputs.category || inputs.categories?.length);
 }
 
+async function fetchCategoryFeedMarketCandidateIds(
+  pool: Pool,
+  inputs: FeedInputs,
+): Promise<string[] | null> {
+  const normalizedCategories = inputs.categories?.length
+    ? inputs.categories.map((category) => category.toLowerCase())
+    : inputs.category
+      ? [inputs.category.toLowerCase()]
+      : [];
+  if (normalizedCategories.length === 0) return null;
+
+  const { params, add } = createParamBuilder();
+  const categoriesParam = add(normalizedCategories);
+  const nowParam = add(inputs.nowParam);
+  const eventLimitParam = add(FEED_MARKET_CATEGORY_EXACT_MAX_EVENTS + 1);
+
+  try {
+    const eventRows = await queryRowsWithLocalSettings<{ id: string }>(
+      pool,
+      `
+        select candidate_event.id
+        from unified_events candidate_event
+        where candidate_event.status = 'ACTIVE'
+          and candidate_event.category is not null
+          and lower(candidate_event.category) = ANY(${categoriesParam}::text[])
+          and (
+            candidate_event.end_date is null
+            or candidate_event.end_date > (
+              ${nowParam}::timestamptz
+              - ${POLYMARKET_ACCEPTING_ORDERS_GRACE_INTERVAL_SQL}
+            )
+          )
+        limit ${eventLimitParam}
+      `,
+      params,
+      {
+        statementTimeoutMs: Math.min(
+          FEED_MARKET_CATEGORY_EXACT_TIMEOUT_MS,
+          feedFilterStatementTimeoutMs(),
+        ),
+        jitOff: true,
+      },
+    );
+    if (eventRows.length > FEED_MARKET_CATEGORY_EXACT_MAX_EVENTS) return null;
+    if (eventRows.length === 0) return [];
+
+    const marketParams: PgParams = [eventRows.map((row) => row.id)];
+    const venueSql = inputs.venues
+      ? inputs.venues.length
+        ? `and candidate_market.venue = ANY($2::text[])`
+        : "and false"
+      : "";
+    if (inputs.venues?.length) marketParams.push(inputs.venues);
+    marketParams.push(FEED_MARKET_CATEGORY_EXACT_MAX_CANDIDATES + 1);
+    const candidateLimitParam = `$${marketParams.length}`;
+    const marketRows = await queryRowsWithLocalSettings<{ id: string }>(
+      pool,
+      `
+        select category_market.id
+        from unnest($1::text[]) candidate_event(event_id)
+        join lateral (
+          select candidate_market.id
+          from unified_markets candidate_market
+          where candidate_market.event_id = candidate_event.event_id
+            and candidate_market.status = 'ACTIVE'
+            ${venueSql}
+          offset 0
+        ) category_market on true
+        limit ${candidateLimitParam}
+      `,
+      marketParams,
+      {
+        statementTimeoutMs: Math.min(
+          FEED_MARKET_CATEGORY_EXACT_TIMEOUT_MS,
+          feedFilterStatementTimeoutMs(),
+        ),
+        jitOff: true,
+      },
+    );
+    if (marketRows.length > FEED_MARKET_CATEGORY_EXACT_MAX_CANDIDATES) {
+      return null;
+    }
+    return marketRows.map((row) => row.id);
+  } catch (error) {
+    if (isPgStatementTimeoutError(error)) return null;
+    throw error;
+  }
+}
+
 async function filterRankedFeedMarketCandidates(
   pool: Pool,
   inputs: FeedInputs,
@@ -4336,56 +4440,64 @@ async function filterRankedFeedMarketCandidates(
 async function fetchProgressivelyFilteredFeedMarketIds(
   pool: Pool,
   inputs: FeedInputs,
-  options?: { acceptPartialMetricPage?: boolean },
 ): Promise<string[] | null> {
   const pageTarget = inputs.limit + inputs.offset;
   const hasCategoryFilter = hasFeedMarketCategoryFilter(inputs);
-  let candidateLimit = Math.min(
+  const candidateLimit = Math.min(
     FEED_MARKET_FILTER_MAX_CANDIDATES,
     Math.max(
       hasCategoryFilter
         ? FEED_MARKET_CATEGORY_FILTER_MIN_CANDIDATES
-        : FEED_MARKET_FILTER_MIN_CANDIDATES,
+        : inputs.eventScope
+          ? FEED_MARKET_SCOPE_FILTER_MIN_CANDIDATES
+          : FEED_MARKET_FILTER_MIN_CANDIDATES,
       pageTarget * (hasCategoryFilter ? FEED_EVENT_FAST_CANDIDATE_FACTOR : 4),
     ),
   );
+  const candidateMarketIds = await fetchFeedMarketIdsFast(
+    pool,
+    {
+      ...inputs,
+      limit: candidateLimit,
+      offset: 0,
+      eventScope: undefined,
+      category: undefined,
+      categories: undefined,
+    },
+    { acceptPartialMetricPage: true },
+  );
+  if (candidateMarketIds == null) return null;
 
-  for (;;) {
-    const candidateMarketIds = await fetchFeedMarketIdsFast(
+  const filteredMarketIds = await filterRankedFeedMarketCandidates(
+    pool,
+    inputs,
+    candidateMarketIds,
+  );
+  const pageIds = filteredMarketIds.slice(
+    inputs.offset,
+    inputs.offset + inputs.limit,
+  );
+  if (pageIds.length >= inputs.limit || !hasCategoryFilter) return pageIds;
+
+  const categoryCandidateIds = await fetchCategoryFeedMarketCandidateIds(
+    pool,
+    inputs,
+  );
+  if (categoryCandidateIds != null) {
+    if (categoryCandidateIds.length === 0) return [];
+    const exactCategoryPage = await fetchFeedMarketIdsFast(
       pool,
-      {
-        ...inputs,
-        limit: candidateLimit,
-        offset: 0,
-        eventScope: undefined,
-        category: undefined,
-        categories: undefined,
-      },
+      { ...inputs, marketIds: categoryCandidateIds },
       { acceptPartialMetricPage: true },
     );
-    if (candidateMarketIds == null) return null;
-
-    const filteredMarketIds = await filterRankedFeedMarketCandidates(
-      pool,
-      inputs,
-      candidateMarketIds,
-    );
-    const pageIds = filteredMarketIds.slice(
-      inputs.offset,
-      inputs.offset + inputs.limit,
-    );
-    if (pageIds.length >= inputs.limit) return pageIds;
-
-    if (options?.acceptPartialMetricPage) {
-      return pageIds;
-    }
-    if (candidateMarketIds.length < candidateLimit) return null;
-    if (candidateLimit >= FEED_MARKET_FILTER_MAX_CANDIDATES) return null;
-    candidateLimit = Math.min(
-      FEED_MARKET_FILTER_MAX_CANDIDATES,
-      expandFeedCandidateLimit(candidateLimit),
-    );
+    if (exactCategoryPage != null) return exactCategoryPage;
   }
+
+  // Category/scope filters are intentionally bounded. Re-running the same
+  // ranking at 4x/16x prefixes scans the multi-gigabyte market tables and can
+  // exceed the request timeout. Rare categories use the exact indexed path
+  // above; broad categories keep a stable partial page instead of a 504.
+  return pageIds;
 }
 
 async function fetchFeedMarketIdsFast(
@@ -4394,14 +4506,14 @@ async function fetchFeedMarketIdsFast(
   options?: { acceptPartialMetricPage?: boolean },
 ): Promise<string[] | null> {
   if (inputs.marketIds?.length) {
-    return fetchFeedPreselectedMarketIdsFast(pool, inputs);
+    return fetchFeedPreselectedMarketIdsFast(pool, inputs, options);
   }
   if (buildFeedSearchPlan(inputs.q).hasSearch) return null;
+  if (inputs.eventScope || hasFeedMarketCategoryFilter(inputs)) {
+    return fetchProgressivelyFilteredFeedMarketIds(pool, inputs);
+  }
   if (inputs.sort === "change24h") {
     return fetchFeedChange24hMarketIdsFast(pool, inputs);
-  }
-  if (inputs.eventScope || hasFeedMarketCategoryFilter(inputs)) {
-    return fetchProgressivelyFilteredFeedMarketIds(pool, inputs, options);
   }
 
   const isMetricSort = inputs.sort === "trending_v2";
@@ -4888,24 +5000,56 @@ async function fetchFeedMarketIdsFast(
 export async function fetchFeedMarketIdsForProbabilityProbe(
   pool: Pool,
   inputs: FeedInputs,
-): Promise<string[]> {
+): Promise<{ marketIds: string[]; scannedCandidateCount: number }> {
   const probabilityFreeInputs = {
     ...inputs,
     minProb: undefined,
     maxProb: undefined,
   };
-  const fastMarketIds = await fetchFeedMarketIdsFast(
-    pool,
-    probabilityFreeInputs,
-    { acceptPartialMetricPage: true },
+  const hasCategoryFilter = hasFeedMarketCategoryFilter(probabilityFreeInputs);
+  const canUseExactCategoryCandidates =
+    hasCategoryFilter &&
+    !buildFeedSearchPlan(probabilityFreeInputs.q).hasSearch;
+  const categoryCandidateIds = canUseExactCategoryCandidates
+    ? await fetchCategoryFeedMarketCandidateIds(pool, probabilityFreeInputs)
+    : null;
+  if (categoryCandidateIds?.length === 0) {
+    return { marketIds: [], scannedCandidateCount: 0 };
+  }
+  const hasExactCategoryCandidates = categoryCandidateIds != null;
+  const needsBoundedPostFilter = Boolean(
+    !hasExactCategoryCandidates &&
+    (probabilityFreeInputs.eventScope || hasCategoryFilter),
   );
-  if (fastMarketIds != null) return fastMarketIds;
-
-  const candidateRows = await fetchFeedMarketsDirect(
-    pool,
-    probabilityFreeInputs,
-  );
-  return candidateRows.map((candidateRow) => candidateRow.market_uuid);
+  const rankedInputs = hasExactCategoryCandidates
+    ? { ...probabilityFreeInputs, marketIds: categoryCandidateIds }
+    : needsBoundedPostFilter
+      ? {
+          ...probabilityFreeInputs,
+          eventScope: undefined,
+          category: undefined,
+          categories: undefined,
+        }
+      : probabilityFreeInputs;
+  const fastMarketIds = await fetchFeedMarketIdsFast(pool, rankedInputs, {
+    acceptPartialMetricPage: true,
+  });
+  const rankedMarketIds =
+    fastMarketIds ??
+    (await fetchFeedMarketsDirect(pool, rankedInputs)).map(
+      (candidateRow) => candidateRow.market_uuid,
+    );
+  const marketIds = needsBoundedPostFilter
+    ? await filterRankedFeedMarketCandidates(
+        pool,
+        probabilityFreeInputs,
+        rankedMarketIds,
+      )
+    : rankedMarketIds;
+  return {
+    marketIds,
+    scannedCandidateCount: rankedMarketIds.length,
+  };
 }
 
 function preselectedMarketHydrationInputs(

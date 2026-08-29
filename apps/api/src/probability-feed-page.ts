@@ -14,7 +14,10 @@ export async function fetchProbabilityFeedMarketPage(args: {
   fetchCandidateMarketIds: (input: {
     limit: number;
     offset: number;
-  }) => Promise<string[] | null>;
+  }) => Promise<{
+    marketIds: string[];
+    scannedCandidateCount: number;
+  } | null>;
   fetchBatchProbabilityMarketIds: (
     candidateMarketIds: string[],
   ) => Promise<string[]>;
@@ -29,11 +32,12 @@ export async function fetchProbabilityFeedMarketPage(args: {
       args.candidateWindowSize,
       args.maxCandidates - candidateOffset,
     );
-    const candidateMarketIds = await args.fetchCandidateMarketIds({
+    const candidatePage = await args.fetchCandidateMarketIds({
       limit: candidateLimit,
       offset: candidateOffset,
     });
-    if (candidateMarketIds == null) return null;
+    if (candidatePage == null) return null;
+    const candidateMarketIds = candidatePage.marketIds;
 
     for (
       let batchOffset = 0;
@@ -64,8 +68,9 @@ export async function fetchProbabilityFeedMarketPage(args: {
       }
     }
 
-    if (candidateMarketIds.length < candidateLimit) break;
-    candidateOffset += candidateMarketIds.length;
+    if (candidatePage.scannedCandidateCount < candidateLimit) break;
+    if (candidatePage.scannedCandidateCount <= 0) break;
+    candidateOffset += candidatePage.scannedCandidateCount;
   }
 
   return {

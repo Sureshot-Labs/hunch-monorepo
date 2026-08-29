@@ -241,7 +241,10 @@ console.log("ok - market sorts rank projected candidates without rejoining");
     sort: "trending",
   });
 
-  assert.deepEqual(ids, ["market-1", "market-2", "market-3"]);
+  assert.deepEqual(ids, {
+    marketIds: ["market-1", "market-2", "market-3"],
+    scannedCandidateCount: 3,
+  });
   assert.equal(capturedSql.length, 1);
   assert.match(capturedSql[0], /ranked_market_page as materialized/i);
   assert.doesNotMatch(
@@ -258,18 +261,14 @@ console.log("ok - probability market probe ranks before canonical top mapping");
     capturedSql,
     capturedParams,
     candidateRows: [
-      [
-        {
-          ids: ["market-1", "market-2", "market-3", "market-4"],
-          pm_prefix_count: 4,
-        },
-      ],
+      [{ id: "event-1" }, { id: "event-2" }],
       [
         { id: "market-1" },
         { id: "market-2" },
         { id: "market-3" },
         { id: "market-4" },
       ],
+      [{ id: "market-2" }, { id: "market-3" }],
     ],
   });
 
@@ -284,29 +283,119 @@ console.log("ok - probability market probe ranks before canonical top mapping");
     sort: "trending",
   });
 
-  assert.deepEqual(ids, ["market-2", "market-3"]);
-  assert.equal(capturedSql.length, 2);
-  assert.doesNotMatch(capturedSql[0], /lower\(e\.category\)/i);
-  assert.doesNotMatch(capturedSql[0], /count\(\*\) over \(partition by/i);
-  assert.ok(capturedParams[0]?.includes(1200));
+  assert.deepEqual(ids, {
+    marketIds: ["market-2", "market-3"],
+    scannedCandidateCount: 2,
+  });
+  assert.equal(capturedSql.length, 3);
+  assert.match(
+    capturedSql[0],
+    /from unified_events candidate_event[\s\S]*?lower\(candidate_event\.category\) = any/i,
+  );
+  assert.ok(capturedParams[0]?.includes(1001));
   assert.match(
     capturedSql[1],
-    /selected_market_candidates as materialized[\s\S]*?with ordinality selected_market\(market_id, candidate_ordinal\)/i,
+    /from unnest\(\$1::text\[\]\) candidate_event\(event_id\)[\s\S]*?join lateral/i,
+  );
+  assert.ok(capturedParams[1]?.includes(20_001));
+  assert.match(
+    capturedSql[2],
+    /join unnest\(\$\d+::text\[\]\) as candidate_filter\(market_id\)/i,
   );
   assert.match(
-    capturedSql[1],
-    /selected_event_orderable_market_candidates_strict_market_base as materialized[\s\S]*?join selected_event_candidates candidate_event_filter/i,
+    capturedSql[2],
+    /scoped_orderable_market_candidates as materialized[\s\S]*?market_count > 1/i,
   );
-  assert.match(
-    capturedSql[1],
-    /selected_event_scope as materialized[\s\S]*?having count\(\*\) > 1/i,
-  );
-  assert.match(capturedSql[1], /lower\(candidate_event\.category\) = \$\d+/i);
-  assert.match(capturedSql[1], /order by selected_market\.candidate_ordinal/i);
+  assert.match(capturedSql[2], /lower\(e\.category\) = \$\d+/i);
 }
 console.log(
-  "ok - category and event scope filter a bounded ranked market prefix",
+  "ok - probability category scope ranks an exact indexed candidate set",
 );
+
+{
+  const capturedSql: string[] = [];
+  const capturedParams: unknown[][] = [];
+  const rankedIds = Array.from(
+    { length: 1200 },
+    (_, index) => `ranked-market-${index}`,
+  );
+  const pool = createCapturePool({
+    capturedSql,
+    capturedParams,
+    candidateRows: [
+      [{ ids: rankedIds, pm_prefix_count: 0 }],
+      [{ id: "ranked-market-1199" }],
+      [{ id: "category-event-1" }],
+      [{ id: "category-market-1" }, { id: "category-market-2" }],
+      [{ id: "category-market-1" }, { id: "category-market-2" }],
+      [],
+    ],
+  });
+
+  await fetchFeedMarketsDirect(pool, {
+    ...baseInputs,
+    limit: 3,
+    categories: ["crypto"],
+    eventScope: "single",
+    sort: "time",
+  });
+
+  assert.equal(capturedSql.length, 6);
+  assert.ok(capturedParams[0]?.includes(1200));
+  assert.equal(
+    capturedParams.some((params) => params.includes(4800)),
+    false,
+  );
+  assert.doesNotMatch(capturedSql[0], /lower\(e\.category\)/i);
+  assert.match(capturedSql[1], /having count\(\*\) = 1/i);
+  assert.match(capturedSql[1], /lower\(candidate_event\.category\) = any/i);
+  assert.match(capturedSql[2], /from unified_events candidate_event/i);
+  assert.ok(capturedParams[2]?.includes(1001));
+  assert.match(capturedSql[3], /join lateral/i);
+  assert.ok(capturedParams[3]?.includes(20_001));
+  assert.match(
+    capturedSql[4],
+    /join unnest\(\$\d+::text\[\]\) as candidate_filter\(market_id\)/i,
+  );
+}
+console.log("ok - sparse category pages fall back to exact indexed candidates");
+
+{
+  const capturedSql: string[] = [];
+  const capturedParams: unknown[][] = [];
+  const rankedIds = Array.from(
+    { length: 1200 },
+    (_, index) => `broad-ranked-market-${index}`,
+  );
+  const pool = createCapturePool({
+    capturedSql,
+    capturedParams,
+    candidateRows: [
+      [{ ids: rankedIds, pm_prefix_count: 0 }],
+      [{ id: "broad-ranked-market-1199" }],
+      Array.from({ length: 1001 }, (_, index) => ({
+        id: `broad-category-event-${index}`,
+      })),
+      [],
+    ],
+  });
+
+  await fetchFeedMarketsDirect(pool, {
+    ...baseInputs,
+    categories: ["sports"],
+    eventScope: "single",
+    sort: "time",
+  });
+
+  assert.equal(capturedSql.length, 4);
+  assert.match(capturedSql[2], /from unified_events candidate_event/i);
+  assert.ok(capturedParams[2]?.includes(1001));
+  assert.equal(
+    capturedSql.some((sql) => /category_market[\s\S]*?join lateral/i.test(sql)),
+    false,
+  );
+}
+console.log("ok - broad categories stop before exact market enumeration");
 
 {
   const capturedSql: string[] = [];
@@ -325,7 +414,10 @@ console.log(
     sort: "trending",
   });
 
-  assert.deepEqual(ids, ["market-search-1"]);
+  assert.deepEqual(ids, {
+    marketIds: ["market-search-1"],
+    scannedCandidateCount: 1,
+  });
   assert.equal(capturedSql.length, 1);
   assert.match(capturedSql[0], /primary_search_events as materialized/i);
   assert.doesNotMatch(capturedSql[0], /canonical_token_mappings/i);
@@ -435,6 +527,9 @@ console.log("ok - probability change24h ranks and hydrates from the v2 cache");
     capturedSql,
     capturedParams,
     candidateRows: [
+      Array.from({ length: 1000 }, (_, index) => ({
+        id: `ranked-market-${index}`,
+      })),
       [{ id: "market-1" }, { id: "market-2" }, { id: "market-3" }],
       [],
     ],
@@ -447,29 +542,23 @@ console.log("ok - probability change24h ranks and hydrates from the v2 cache");
     sort: "change24h",
   });
 
-  assert.equal(capturedSql.length, 2);
+  assert.equal(capturedSql.length, 3);
   assert.match(
     capturedSql[0],
-    /change24h_v2_candidate_event_scope as materialized[\s\S]*?scope_market\.event_id = candidate_event\.id[\s\S]*?limit 2/i,
+    /change24h_v2_ranked_market_candidates as materialized[\s\S]*?from unified_market_change_24h cache/i,
   );
+  assert.doesNotMatch(capturedSql[0], /change24h_v2_candidate_event_scope/i);
   assert.match(
-    capturedSql[0],
-    /from\s+change24h_v2_ranked_market_candidates ranked_cache[\s\S]*?join unified_markets m on m\.id = ranked_cache\.market_id/i,
-  );
-  assert.match(
-    capturedSql[0],
-    /change24h_v2_candidate_events as materialized[\s\S]*?select distinct candidate_market\.event_id as id[\s\S]*?join unified_markets candidate_market/i,
-  );
-  assert.doesNotMatch(capturedSql[0], /count\(\*\) over \(partition by/i);
-  assert.match(
-    capturedSql[0],
-    /change24h_v2_valid_candidate_events as materialized[\s\S]*?candidate_event_scope\.market_count > 1/i,
+    capturedSql[1],
+    /selected_event_scope as materialized[\s\S]*?having count\(\*\) > 1/i,
   );
   assert.match(capturedSql[0], /m\.best_ask - m\.best_bid\) <= \$\d+/i);
+  assert.match(
+    capturedSql[2],
+    /left join unified_market_change_24h cached_change[\s\S]*?cached_change\.calculation_version = 2/i,
+  );
 }
-console.log(
-  "ok - grouped change24h scopes all orderable markets before cache rank",
-);
+console.log("ok - grouped change24h filters a bounded cache-ranked prefix");
 
 {
   const capturedSql: string[] = [];
