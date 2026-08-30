@@ -9,6 +9,7 @@ import {
 } from "./schemas/polymarket-private.js";
 import {
   extractPolymarketImmediateFill,
+  isPolymarketTradingPausedResponse,
   resolvePolymarketStoredFillSyncStatus,
 } from "./services/polymarket-order-execution.js";
 
@@ -179,6 +180,32 @@ assert.deepEqual(
 
 console.log("ok - CLOB V2 immediate fills use actual making/taking amounts");
 
+assert.equal(
+  isPolymarketTradingPausedResponse({
+    status: 503,
+    message: "trading is disabled",
+  }),
+  true,
+);
+assert.equal(
+  isPolymarketTradingPausedResponse({
+    status: 503,
+    message: "upstream timeout",
+  }),
+  false,
+  "an unknown 503 must retain ambiguous submission handling",
+);
+assert.equal(
+  isPolymarketTradingPausedResponse({
+    status: 502,
+    message: "trading is disabled",
+  }),
+  false,
+  "the semantic exception is intentionally scoped to Polymarket's 503 contract",
+);
+
+console.log("ok - explicit trading pause is distinct from an unknown 5xx");
+
 const clientSource = readFileSync(
   new URL("./services/polymarket-client.ts", import.meta.url),
   "utf8",
@@ -200,6 +227,21 @@ assert.match(
   executionSource,
   /withinPolymarketInteractiveQuoteDeadline\(\s*quotePolymarketOrder\(/,
   "interactive quote timeout must remain inside the handled route contract",
+);
+assert.match(
+  executionSource,
+  /const definitiveRejection = tradingPaused \|\| upstream\.status < 500/,
+  "an explicit trading pause must take the definitive rejection path",
+);
+assert.match(
+  executionSource,
+  /errorCode: tradingPaused[\s\S]*?POLYMARKET_TRADING_PAUSED_CODE[\s\S]*?broadcastMayHaveOccurred: !tradingPaused/,
+  "a paused venue must release funded orders without recording an ambiguous broadcast",
+);
+assert.match(
+  executionSource,
+  /handoffFailure:[\s\S]*?code: POLYMARKET_TRADING_PAUSED_CODE[\s\S]*?message: POLYMARKET_TRADING_PAUSED_MESSAGE/,
+  "a funded Telegram handoff must receive the same definitive pause reason",
 );
 assert.match(
   executionSource,

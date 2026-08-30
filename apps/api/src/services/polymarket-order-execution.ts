@@ -1,4 +1,6 @@
 export const POLYMARKET_UNCONFIRMED_STATUS = "unconfirmed" as const;
+export const POLYMARKET_TRADING_PAUSED_CODE =
+  "polymarket_trading_paused" as const;
 
 export type PolymarketUnconfirmedResolution =
   | "unmatched"
@@ -46,6 +48,25 @@ function readPositiveNumber(value: unknown): number | null {
 
 function isUnknownRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Polymarket uses HTTP 503 both for failures whose submission state is unknown
+ * and for an explicit venue-wide trading rejection. Only the latter proves
+ * that the signed order was not accepted and may safely release a linked
+ * funding reservation.
+ */
+export function isPolymarketTradingPausedResponse(inputs: {
+  message: string | null | undefined;
+  status: number;
+}): boolean {
+  if (inputs.status !== 503) return false;
+  const message = inputs.message?.trim().toLowerCase() ?? "";
+  return (
+    message === "trading is disabled" ||
+    message === "trading disabled" ||
+    message === "trading is temporarily disabled"
+  );
 }
 
 function readFirstRecordField(
