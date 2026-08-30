@@ -809,6 +809,11 @@ export async function upsertPolymarketMarkets(
           or metrics_changed
           or relevant_raw_changed
           as is_changed,
+        not inserted
+          and metrics_changed
+          and not structural_changed
+          and not relevant_raw_changed
+          as is_metrics_only,
         case
           when inserted then 'inserted'
           when structural_changed then 'structural'
@@ -822,7 +827,12 @@ export async function upsertPolymarketMarkets(
         end as primary_reason
       from classified
     ),
-    changed as (
+    metrics_only_rows as (
+      select reasoned.*, existing_raw as raw_to_store
+      from reasoned
+      where is_metrics_only
+    ),
+    wide_rows as (
       select
         reasoned.*,
         case
@@ -832,8 +842,53 @@ export async function upsertPolymarketMarkets(
         end as raw_to_store
       from reasoned
       where is_changed
+        and not is_metrics_only
     ),
-    upserted as (
+    metrics_updated_rows as (
+      update polymarket_markets existing
+      set liquidity = metrics_row.liquidity,
+          outcome_prices = metrics_row.outcome_prices,
+          volume = metrics_row.volume,
+          updated_at = metrics_row.updated_at,
+          volume_num = metrics_row.volume_num,
+          liquidity_num = metrics_row.liquidity_num,
+          volume24hr = metrics_row.volume24hr,
+          volume1wk = metrics_row.volume1wk,
+          volume1mo = metrics_row.volume1mo,
+          volume1yr = metrics_row.volume1yr,
+          volume24hr_clob = metrics_row.volume24hr_clob,
+          volume1wk_clob = metrics_row.volume1wk_clob,
+          volume1mo_clob = metrics_row.volume1mo_clob,
+          volume1yr_clob = metrics_row.volume1yr_clob,
+          volume_clob = metrics_row.volume_clob,
+          liquidity_clob = metrics_row.liquidity_clob,
+          competitive = metrics_row.competitive,
+          spread = metrics_row.spread,
+          one_day_price_change = metrics_row.one_day_price_change,
+          one_hour_price_change = metrics_row.one_hour_price_change,
+          one_week_price_change = metrics_row.one_week_price_change,
+          one_month_price_change = metrics_row.one_month_price_change,
+          last_trade_price = metrics_row.last_trade_price,
+          best_bid = metrics_row.best_bid,
+          best_ask = metrics_row.best_ask,
+          updated_at_db = now()
+      from metrics_only_rows metrics_row
+      where existing.id = metrics_row.id
+      returning existing.id
+    ),
+    rows_for_wide_upsert as (
+      select wide_row.*
+      from wide_rows wide_row
+      union all
+      select metrics_row.*
+      from metrics_only_rows metrics_row
+      where not exists (
+        select 1
+        from metrics_updated_rows updated_row
+        where updated_row.id = metrics_row.id
+      )
+    ),
+    wide_upserted_rows as (
       insert into polymarket_markets(
         id, event_id, question, condition_id, slug, resolution_source, end_date, category, liquidity, start_date,
         image, icon, description, outcomes, outcome_prices, volume, active, closed, market_maker_address,
@@ -865,7 +920,7 @@ export async function upsertPolymarketMarkets(
         automatically_active, clear_book_on_start, series_color, show_gmp_series, show_gmp_outcome,
         manual_activation, neg_risk_other, uma_resolution_statuses, pending_deployment, deploying,
         deploying_timestamp, rfq_enabled, holding_rewards_enabled, fees_enabled, raw_to_store
-      from changed
+      from rows_for_wide_upsert
       on conflict (id) do update set
         question=excluded.question,
         condition_id=excluded.condition_id,
@@ -958,8 +1013,11 @@ export async function upsertPolymarketMarkets(
     )
     select
       (select count(*) from input)::int as input_count,
-      (select count(*) from changed)::int as changed_count,
-      (select count(*) from upserted)::int as upserted_count,
+      (select count(*) from reasoned where is_changed)::int as changed_count,
+      (
+        (select count(*) from metrics_updated_rows)
+        + (select count(*) from wide_upserted_rows)
+      )::int as upserted_count,
       (
         select jsonb_object_agg(primary_reason, reason_count)
         from (

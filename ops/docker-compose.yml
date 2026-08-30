@@ -68,7 +68,7 @@ services:
       - hunch-net
     restart: unless-stopped
     environment:
-      REDIS_ARGS: "--save 60 1 --loglevel warning"
+      REDIS_ARGS: "--save 300 1 --loglevel warning"
     ports:
       # Override REDIS_BIND_HOST=0.0.0.0 only when you explicitly need remote access.
       - "${REDIS_BIND_HOST:-127.0.0.1}:${REDIS_PORT:-6379}:6379"
