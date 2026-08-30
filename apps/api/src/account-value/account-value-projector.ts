@@ -12,10 +12,18 @@ export type CollectorError = Readonly<{
   retryable: boolean;
 }>;
 
-function includedValue(
+export function displayValuation(
   component: ValuedAssetComponent | ValuedPositionComponent,
 ): string | null {
-  if (component.valuationEligibility !== "included") return null;
+  if (
+    component.valuationEligibility !== "included" &&
+    !(
+      component.valuationEligibility === "stale" &&
+      component.reasonCodes.includes("trusted_price_stale")
+    )
+  ) {
+    return null;
+  }
   return component.estimatedUsd?.value ?? null;
 }
 
@@ -74,10 +82,10 @@ export function projectAccountValue(inputs: {
     inputs.components,
   );
   const liquidValues = canonicalComponents
-    .map(includedValue)
+    .map(displayValuation)
     .filter((value): value is string => value != null);
   const positionValues = inputs.positionComponents
-    .map(includedValue)
+    .map(displayValuation)
     .filter((value): value is string => value != null);
   const liquidAssetsEstimatedUsd = addUnsignedDecimals(liquidValues);
   const positionsEstimatedUsd = addUnsignedDecimals(positionValues);
@@ -85,7 +93,8 @@ export function projectAccountValue(inputs: {
   const assetIncomplete = canonicalComponents.some(
     (component) =>
       component.valuationEligibility !== "included" &&
-      component.valuationEligibility !== "excluded",
+      component.valuationEligibility !== "excluded" &&
+      displayValuation(component) == null,
   );
   const positionIncomplete = inputs.positionComponents.some(
     (component) => component.valuationEligibility !== "included",
@@ -93,7 +102,8 @@ export function projectAccountValue(inputs: {
   const assetStale = canonicalComponents.some(
     (component) =>
       component.observationFreshness !== "fresh" ||
-      component.valuationEligibility === "stale",
+      component.valuationEligibility === "stale" ||
+      component.reasonCodes.includes("trusted_price_stale"),
   );
   const positionStale = inputs.positionComponents.some(
     (component) =>
@@ -119,19 +129,19 @@ export function projectAccountValue(inputs: {
     cashEstimatedUsd: addUnsignedDecimals(
       canonicalComponents
         .filter((component) => component.category === "cash")
-        .map(includedValue)
+        .map(displayValuation)
         .filter((value): value is string => value != null),
     ),
     tokenEstimatedUsd: addUnsignedDecimals(
       canonicalComponents
         .filter((component) => component.category === "token")
-        .map(includedValue)
+        .map(displayValuation)
         .filter((value): value is string => value != null),
     ),
     inTransitEstimatedUsd: addUnsignedDecimals(
       canonicalComponents
         .filter((component) => component.category === "in_transit")
-        .map(includedValue)
+        .map(displayValuation)
         .filter((value): value is string => value != null),
     ),
     valuationCompleteness:

@@ -187,6 +187,7 @@ export const accountAssetsResponseSchema = z
     ok: z.literal(true),
     asOf: z.string().datetime(),
     valuationCompleteness: z.enum(["complete", "partial"]),
+    valuationFreshness: z.enum(["fresh", "stale"]),
     collectorErrors: z.array(collectorErrorSchema),
     items: z.array(
       z.union([valuedAssetComponentSchema, valuedPositionComponentSchema]),

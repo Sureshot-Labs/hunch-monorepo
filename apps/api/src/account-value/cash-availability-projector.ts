@@ -5,7 +5,10 @@ import type {
   VenueId,
 } from "../funding/domain/types.js";
 import type { CollectorError } from "./account-value-projector.js";
-import { suppressReplacedMovementRepresentations } from "./account-value-projector.js";
+import {
+  displayValuation,
+  suppressReplacedMovementRepresentations,
+} from "./account-value-projector.js";
 import {
   addUnsignedDecimals,
   scaleUnsignedDecimalByRawRatio,
@@ -79,8 +82,8 @@ export function projectCashAvailability(inputs: {
       const estimate = component.estimatedUsd;
       const availableEstimatedUsd =
         availabilityKnown &&
-        component.valuationEligibility === "included" &&
-        estimate
+        displayValuation(component) != null &&
+        estimate != null
           ? component.amount.raw === "0"
             ? "0"
             : scaleUnsignedDecimalByRawRatio({
@@ -103,7 +106,8 @@ export function projectCashAvailability(inputs: {
         freshness:
           availabilityKnown &&
           component.observationFreshness === "fresh" &&
-          component.valuationEligibility === "included"
+          component.valuationEligibility === "included" &&
+          !component.reasonCodes.includes("trusted_price_stale")
             ? "fresh"
             : "stale",
         reasonCodes: availabilityKnown
@@ -139,7 +143,11 @@ export function projectCashAvailability(inputs: {
         : "complete",
     freshness:
       collectorErrors.length > 0 ||
-      components.some((component) => component.freshness === "stale")
+      components.some(
+        (component) =>
+          component.freshness === "stale" ||
+          component.reasonCodes.includes("trusted_price_stale"),
+      )
         ? "stale"
         : "fresh",
     collectorErrors,

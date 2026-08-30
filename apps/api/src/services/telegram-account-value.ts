@@ -197,14 +197,16 @@ function isPublicComponent(component: AccountComponent): boolean {
 function componentNeedsVisibility(component: AccountComponent): boolean {
   return (
     component.observationFreshness !== "fresh" ||
-    component.valuationEligibility !== "included"
+    component.valuationEligibility !== "included" ||
+    component.reasonCodes.includes("trusted_price_stale")
   );
 }
 
 function componentIsStale(component: AccountComponent): boolean {
   return (
     component.observationFreshness !== "fresh" ||
-    component.valuationEligibility === "stale"
+    component.valuationEligibility === "stale" ||
+    component.reasonCodes.includes("trusted_price_stale")
   );
 }
 

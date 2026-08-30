@@ -882,7 +882,7 @@ export const env = {
     "API_GLOBAL_RATE_LIMIT_WINDOW_MS",
     60_000,
   ),
-  feedTtlSec: Number(process.env.API_FEED_TTL_SEC ?? "30"), // Default 30 seconds cache for feed API
+  feedTtlSec: Number(process.env.API_FEED_TTL_SEC ?? "60"),
   feedSearchWorkMemMb: optionalIntInRange(
     "FEED_SEARCH_WORK_MEM_MB",
     64,
@@ -945,8 +945,8 @@ export const env = {
   adminTotpIssuer,
   adminServiceTokenPepper,
   adminServiceCredentialMaxTtlDays,
-  marketMapTtlSec: optionalNonNegativeInt("API_MARKET_MAP_TTL_SEC", 10),
-  walletIntelTtlSec: optionalNonNegativeInt("API_WALLET_INTEL_TTL_SEC", 30),
+  marketMapTtlSec: optionalNonNegativeInt("API_MARKET_MAP_TTL_SEC", 60),
+  walletIntelTtlSec: optionalNonNegativeInt("API_WALLET_INTEL_TTL_SEC", 300),
   walletIntelStatementTimeoutMs: optionalPositiveInt(
     "API_WALLET_INTEL_STATEMENT_TIMEOUT_MS",
     30_000,
