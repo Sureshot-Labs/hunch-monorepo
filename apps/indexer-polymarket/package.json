@@ -12,6 +12,8 @@
     "start": "node dist/main.js",
     "start:bun": "bun dist/main.js",
     "test": "pnpm run build && node dist/mappers-tests.js && node dist/gammaClient-tests.js && node dist/bootstrap-tests.js",
+    "test:upsert-telemetry:integration": "tsx src/upsert-telemetry-integration-tests.ts",
+    "telemetry:upserts:report": "tsx src/upsert-telemetry-report.ts",
     "category:backfill": "tsx src/category-backfill.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint .",

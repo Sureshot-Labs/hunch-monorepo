@@ -1,4 +1,5 @@
 import { chunkArray } from "@hunch/shared";
+import type { ChangeReasonTelemetry } from "@hunch/db";
 import { pool } from "./db.js";
 import type {
   mapPolymarketEventRow,
@@ -15,7 +16,24 @@ export type PolymarketUpsertStats = {
   skippedRows: number;
   batches: number;
   upsertedRows: number;
+  changeReasons: ChangeReasonTelemetry;
 };
+
+function emptyChangeReasonTelemetry(): ChangeReasonTelemetry {
+  return { primary: {} };
+}
+
+function incrementReasonCounts(
+  target: Record<string, number>,
+  source: unknown,
+): void {
+  if (!source || typeof source !== "object" || Array.isArray(source)) return;
+  for (const [reason, rawCount] of Object.entries(source)) {
+    const count = Number(rawCount);
+    if (!Number.isFinite(count) || count <= 0) continue;
+    target[reason] = (target[reason] ?? 0) + count;
+  }
+}
 
 function dedupeById<T extends { id: string }>(items: readonly T[]): T[] {
   const map = new Map<string, T>();
@@ -31,7 +49,57 @@ function emptyPolymarketUpsertStats(inputRows = 0): PolymarketUpsertStats {
     skippedRows: 0,
     batches: 0,
     upsertedRows: 0,
+    changeReasons: emptyChangeReasonTelemetry(),
   };
+}
+
+function rawWithoutSourceTimestampSql(alias: string): string {
+  return `(coalesce(${alias}.raw, '{}'::jsonb) - 'updatedAt' - 'updated_at')`;
+}
+
+// Raw fields that still feed normalized data, maintenance, or trading reads.
+// They must remain distinguishable from payload noise before raw writes can be
+// safely narrowed in a later optimization.
+function relevantEventRawSql(alias: string): string {
+  return `jsonb_build_object(
+    'category', ${alias}.raw->'category',
+    'tags', ${alias}.raw->'tags',
+    'series', ${alias}.raw->'series',
+    'seriesSlug', ${alias}.raw->'seriesSlug',
+    'seriesTitle', ${alias}.raw->'seriesTitle',
+    'series_slug', ${alias}.raw->'series_slug',
+    'series_title', ${alias}.raw->'series_title',
+    'sponsorName', ${alias}.raw->'sponsorName',
+    'sponsorImage', ${alias}.raw->'sponsorImage',
+    'twitterCardImage', ${alias}.raw->'twitterCardImage'
+  )`;
+}
+
+function relevantMarketRawSql(alias: string): string {
+  return `jsonb_build_object(
+    'makerBaseFee', ${alias}.raw->'makerBaseFee',
+    'takerBaseFee', ${alias}.raw->'takerBaseFee',
+    'maker_fee_bps', ${alias}.raw->'maker_fee_bps',
+    'taker_fee_bps', ${alias}.raw->'taker_fee_bps',
+    'negRiskMarketID', ${alias}.raw->'negRiskMarketID',
+    'fee', ${alias}.raw->'fee',
+    'openInterest', ${alias}.raw->'openInterest',
+    'volumeAmm', ${alias}.raw->'volumeAmm',
+    'liquidityAmm', ${alias}.raw->'liquidityAmm',
+    'ammType', ${alias}.raw->'ammType',
+    'denominationToken', ${alias}.raw->'denominationToken',
+    'lowerBound', ${alias}.raw->'lowerBound',
+    'upperBound', ${alias}.raw->'upperBound',
+    'lowerBoundDate', ${alias}.raw->'lowerBoundDate',
+    'upperBoundDate', ${alias}.raw->'upperBoundDate',
+    'marketType', ${alias}.raw->'marketType',
+    'formatType', ${alias}.raw->'formatType',
+    'category', ${alias}.raw->'category',
+    'tags', ${alias}.raw->'tags',
+    'question', ${alias}.raw->'question',
+    'title', ${alias}.raw->'title',
+    'description', ${alias}.raw->'description'
+  )`;
 }
 
 // Upsert Polymarket event to polymarket_events table
@@ -168,38 +236,72 @@ export async function upsertPolymarketEvents(
         raw jsonb
       )
     ),
-    changed as (
-      select input.*
+    classified as (
+      select
+        input.*,
+        existing.id is null as inserted,
+        (existing.ticker, existing.slug, existing.title,
+         existing.description, existing.resolution_source,
+         existing.start_date, existing.creation_date, existing.end_date,
+         existing.category, existing.image, existing.icon,
+         existing.active, existing.closed, existing.archived, existing.new,
+         existing.featured, existing.restricted, existing.created_by,
+         existing.created_at, existing.enable_order_book, existing.neg_risk)
+          is distinct from
+        (input.ticker, input.slug, input.title,
+         input.description, input.resolution_source,
+         input.start_date, input.creation_date, input.end_date,
+         input.category, input.image, input.icon,
+         input.active, input.closed, input.archived, input.new,
+         input.featured, input.restricted, input.created_by,
+         input.created_at, input.enable_order_book, input.neg_risk)
+          as structural_changed,
+        (existing.liquidity, existing.volume, existing.open_interest,
+         existing.competitive, existing.volume24hr, existing.volume1wk,
+         existing.volume1mo, existing.volume1yr, existing.liquidity_clob,
+         existing.comment_count)
+          is distinct from
+        (input.liquidity, input.volume, input.open_interest,
+         input.competitive, input.volume24hr, input.volume1wk,
+         input.volume1mo, input.volume1yr, input.liquidity_clob,
+         input.comment_count)
+          as metrics_changed,
+        existing.updated_at is distinct from input.updated_at
+          as source_timestamp_changed,
+        existing.raw is distinct from input.raw as raw_changed,
+        ${rawWithoutSourceTimestampSql("existing")} is distinct from
+          ${rawWithoutSourceTimestampSql("input")} as raw_content_changed,
+        ${relevantEventRawSql("existing")} is distinct from
+          ${relevantEventRawSql("input")} as relevant_raw_changed
       from input
       left join polymarket_events existing on existing.id = input.id
-      where existing.id is null
-         or (
-          existing.ticker, existing.slug, existing.title,
-          existing.description, existing.resolution_source,
-          existing.start_date, existing.creation_date,
-          existing.end_date, existing.category, existing.image,
-          existing.icon, existing.active, existing.closed,
-          existing.archived, existing.new, existing.featured,
-          existing.restricted, existing.liquidity, existing.volume,
-          existing.open_interest, existing.created_by, existing.created_at,
-          existing.updated_at, existing.competitive, existing.volume24hr,
-          existing.volume1wk, existing.volume1mo, existing.volume1yr,
-          existing.enable_order_book, existing.liquidity_clob, existing.neg_risk,
-          existing.comment_count, existing.raw
-        ) is distinct from (
-          input.ticker, input.slug, input.title,
-          input.description, input.resolution_source,
-          input.start_date, input.creation_date,
-          input.end_date, input.category, input.image,
-          input.icon, input.active, input.closed,
-          input.archived, input.new, input.featured,
-          input.restricted, input.liquidity, input.volume,
-          input.open_interest, input.created_by, input.created_at,
-          input.updated_at, input.competitive, input.volume24hr,
-          input.volume1wk, input.volume1mo, input.volume1yr,
-          input.enable_order_book, input.liquidity_clob, input.neg_risk,
-          input.comment_count, input.raw
-        )
+    ),
+    reasoned as (
+      select
+        classified.*,
+        inserted
+          or structural_changed
+          or metrics_changed
+          or source_timestamp_changed
+          or raw_changed
+          as is_changed,
+        case
+          when inserted then 'inserted'
+          when structural_changed then 'structural'
+          when metrics_changed then 'metrics'
+          when (source_timestamp_changed or raw_changed)
+            and not raw_content_changed
+          then 'source_timestamp_only'
+          when relevant_raw_changed then 'relevant_raw'
+          when raw_content_changed then 'raw_only'
+          else 'unchanged'
+        end as primary_reason
+      from classified
+    ),
+    changed as (
+      select *
+      from reasoned
+      where is_changed
     ),
     upserted as (
       insert into polymarket_events(
@@ -284,21 +386,32 @@ export async function upsertPolymarketEvents(
     select
       (select count(*) from input)::int as input_count,
       (select count(*) from changed)::int as changed_count,
-      (select count(*) from upserted)::int as upserted_count
+      (select count(*) from upserted)::int as upserted_count,
+      (
+        select jsonb_object_agg(primary_reason, reason_count)
+        from (
+          select primary_reason, count(*)::int as reason_count
+          from reasoned
+          group by primary_reason
+        ) primary_counts
+      ) as primary_reasons
   `;
 
   const batches = chunkArray(rows, 1000);
   let changedRows = 0;
   let upsertedRows = 0;
+  const changeReasons = emptyChangeReasonTelemetry();
   for (const batch of batches) {
     const result = await pool.query<{
       input_count: number;
       changed_count: number;
       upserted_count: number;
+      primary_reasons: unknown;
     }>(query, [JSON.stringify(batch)]);
     const row = result.rows[0];
     changedRows += row?.changed_count ?? batch.length;
     upsertedRows += row?.upserted_count ?? 0;
+    incrementReasonCounts(changeReasons.primary, row?.primary_reasons ?? null);
   }
   return {
     inputRows: eventRows.length,
@@ -307,6 +420,7 @@ export async function upsertPolymarketEvents(
     skippedRows: rows.length - changedRows,
     batches: batches.length,
     upsertedRows,
+    changeReasons,
   };
 }
 
@@ -613,72 +727,122 @@ export async function upsertPolymarketMarkets(
         raw jsonb
       )
     ),
-    changed as (
-      select input.*
+    classified as (
+      select
+        input.*,
+        existing.id is null as inserted,
+        (existing.question, existing.condition_id, existing.slug,
+         existing.resolution_source, existing.end_date, existing.category,
+         existing.start_date, existing.image, existing.icon,
+         existing.description, existing.outcomes, existing.active,
+         existing.closed, existing.market_maker_address, existing.created_at,
+         existing.new, existing.featured, existing.submitted_by,
+         existing.archived, existing.resolved_by, existing.restricted,
+         existing.group_item_title, existing.group_item_threshold,
+         existing.question_id, existing.enable_order_book,
+         existing.order_price_min_tick_size, existing.order_min_size,
+         existing.end_date_iso, existing.start_date_iso,
+         existing.has_reviewed_dates, existing.clob_token_ids,
+         existing.uma_bond, existing.uma_reward, existing.custom_liveness,
+         existing.accepting_orders, existing.neg_risk,
+         existing.neg_risk_market_id, existing.neg_risk_request_id,
+         existing.ready, existing.funded,
+         existing.accepting_orders_timestamp, existing.cyom,
+         existing.pager_duty_notification_enabled, existing.approved,
+         existing.rewards_min_size, existing.rewards_max_spread,
+         existing.automatically_active, existing.clear_book_on_start,
+         existing.series_color, existing.show_gmp_series,
+         existing.show_gmp_outcome, existing.manual_activation,
+         existing.neg_risk_other, existing.uma_resolution_statuses,
+         existing.pending_deployment, existing.deploying,
+         existing.deploying_timestamp, existing.rfq_enabled,
+         existing.holding_rewards_enabled, existing.fees_enabled)
+          is distinct from
+        (input.question, input.condition_id, input.slug,
+         input.resolution_source, input.end_date, input.category,
+         input.start_date, input.image, input.icon,
+         input.description, input.outcomes, input.active,
+         input.closed, input.market_maker_address, input.created_at,
+         input.new, input.featured, input.submitted_by,
+         input.archived, input.resolved_by, input.restricted,
+         input.group_item_title, input.group_item_threshold,
+         input.question_id, input.enable_order_book,
+         input.order_price_min_tick_size, input.order_min_size,
+         input.end_date_iso, input.start_date_iso,
+         input.has_reviewed_dates, input.clob_token_ids,
+         input.uma_bond, input.uma_reward, input.custom_liveness,
+         input.accepting_orders, input.neg_risk,
+         input.neg_risk_market_id, input.neg_risk_request_id,
+         input.ready, input.funded,
+         input.accepting_orders_timestamp, input.cyom,
+         input.pager_duty_notification_enabled, input.approved,
+         input.rewards_min_size, input.rewards_max_spread,
+         input.automatically_active, input.clear_book_on_start,
+         input.series_color, input.show_gmp_series,
+         input.show_gmp_outcome, input.manual_activation,
+         input.neg_risk_other, input.uma_resolution_statuses,
+         input.pending_deployment, input.deploying,
+         input.deploying_timestamp, input.rfq_enabled,
+         input.holding_rewards_enabled, input.fees_enabled)
+          as structural_changed,
+        (existing.liquidity, existing.outcome_prices, existing.volume,
+         existing.volume_num, existing.liquidity_num, existing.volume24hr,
+         existing.volume1wk, existing.volume1mo, existing.volume1yr,
+         existing.volume24hr_clob, existing.volume1wk_clob,
+         existing.volume1mo_clob, existing.volume1yr_clob,
+         existing.volume_clob, existing.liquidity_clob,
+         existing.competitive, existing.spread,
+         existing.one_day_price_change, existing.one_hour_price_change,
+         existing.one_week_price_change, existing.one_month_price_change,
+         existing.last_trade_price, existing.best_bid, existing.best_ask)
+          is distinct from
+        (input.liquidity, input.outcome_prices, input.volume,
+         input.volume_num, input.liquidity_num, input.volume24hr,
+         input.volume1wk, input.volume1mo, input.volume1yr,
+         input.volume24hr_clob, input.volume1wk_clob,
+         input.volume1mo_clob, input.volume1yr_clob,
+         input.volume_clob, input.liquidity_clob,
+         input.competitive, input.spread,
+         input.one_day_price_change, input.one_hour_price_change,
+         input.one_week_price_change, input.one_month_price_change,
+         input.last_trade_price, input.best_bid, input.best_ask)
+          as metrics_changed,
+        existing.updated_at is distinct from input.updated_at
+          as source_timestamp_changed,
+        existing.raw is distinct from input.raw as raw_changed,
+        ${rawWithoutSourceTimestampSql("existing")} is distinct from
+          ${rawWithoutSourceTimestampSql("input")} as raw_content_changed,
+        ${relevantMarketRawSql("existing")} is distinct from
+          ${relevantMarketRawSql("input")} as relevant_raw_changed
       from input
       left join polymarket_markets existing on existing.id = input.id
-      where existing.id is null
-         or (
-          existing.question, existing.condition_id, existing.slug,
-          existing.resolution_source, existing.end_date, existing.category,
-          existing.liquidity, existing.start_date, existing.image, existing.icon,
-          existing.description, existing.outcomes, existing.outcome_prices,
-          existing.volume, existing.active, existing.closed,
-          existing.market_maker_address, existing.created_at, existing.updated_at,
-          existing.new, existing.featured, existing.submitted_by, existing.archived,
-          existing.resolved_by, existing.restricted, existing.group_item_title,
-          existing.group_item_threshold, existing.question_id, existing.enable_order_book,
-          existing.order_price_min_tick_size, existing.order_min_size, existing.volume_num,
-          existing.liquidity_num, existing.end_date_iso, existing.start_date_iso,
-          existing.has_reviewed_dates, existing.volume24hr, existing.volume1wk,
-          existing.volume1mo, existing.volume1yr, existing.clob_token_ids, existing.uma_bond,
-          existing.uma_reward, existing.volume24hr_clob, existing.volume1wk_clob,
-          existing.volume1mo_clob, existing.volume1yr_clob, existing.volume_clob,
-          existing.liquidity_clob, existing.custom_liveness, existing.accepting_orders,
-          existing.neg_risk, existing.neg_risk_market_id, existing.neg_risk_request_id,
-          existing.ready, existing.funded, existing.accepting_orders_timestamp, existing.cyom,
-          existing.competitive, existing.pager_duty_notification_enabled, existing.approved,
-          existing.rewards_min_size, existing.rewards_max_spread, existing.spread,
-          existing.one_day_price_change, existing.one_hour_price_change,
-          existing.one_week_price_change, existing.one_month_price_change,
-          existing.last_trade_price, existing.best_bid, existing.best_ask,
-          existing.automatically_active, existing.clear_book_on_start, existing.series_color,
-          existing.show_gmp_series, existing.show_gmp_outcome, existing.manual_activation,
-          existing.neg_risk_other, existing.uma_resolution_statuses,
-          existing.pending_deployment, existing.deploying, existing.deploying_timestamp,
-          existing.rfq_enabled, existing.holding_rewards_enabled, existing.fees_enabled,
-          existing.raw
-        ) is distinct from (
-          input.question, input.condition_id, input.slug,
-          input.resolution_source, input.end_date, input.category,
-          input.liquidity, input.start_date, input.image, input.icon,
-          input.description, input.outcomes, input.outcome_prices,
-          input.volume, input.active, input.closed,
-          input.market_maker_address, input.created_at, input.updated_at,
-          input.new, input.featured, input.submitted_by, input.archived,
-          input.resolved_by, input.restricted, input.group_item_title,
-          input.group_item_threshold, input.question_id, input.enable_order_book,
-          input.order_price_min_tick_size, input.order_min_size, input.volume_num,
-          input.liquidity_num, input.end_date_iso, input.start_date_iso,
-          input.has_reviewed_dates, input.volume24hr, input.volume1wk,
-          input.volume1mo, input.volume1yr, input.clob_token_ids, input.uma_bond,
-          input.uma_reward, input.volume24hr_clob, input.volume1wk_clob,
-          input.volume1mo_clob, input.volume1yr_clob, input.volume_clob,
-          input.liquidity_clob, input.custom_liveness, input.accepting_orders,
-          input.neg_risk, input.neg_risk_market_id, input.neg_risk_request_id,
-          input.ready, input.funded, input.accepting_orders_timestamp, input.cyom,
-          input.competitive, input.pager_duty_notification_enabled, input.approved,
-          input.rewards_min_size, input.rewards_max_spread, input.spread,
-          input.one_day_price_change, input.one_hour_price_change,
-          input.one_week_price_change, input.one_month_price_change,
-          input.last_trade_price, input.best_bid, input.best_ask,
-          input.automatically_active, input.clear_book_on_start, input.series_color,
-          input.show_gmp_series, input.show_gmp_outcome, input.manual_activation,
-          input.neg_risk_other, input.uma_resolution_statuses,
-          input.pending_deployment, input.deploying, input.deploying_timestamp,
-          input.rfq_enabled, input.holding_rewards_enabled, input.fees_enabled,
-          input.raw
-        )
+    ),
+    reasoned as (
+      select
+        classified.*,
+        inserted
+          or structural_changed
+          or metrics_changed
+          or source_timestamp_changed
+          or raw_changed
+          as is_changed,
+        case
+          when inserted then 'inserted'
+          when structural_changed then 'structural'
+          when metrics_changed then 'metrics'
+          when (source_timestamp_changed or raw_changed)
+            and not raw_content_changed
+          then 'source_timestamp_only'
+          when relevant_raw_changed then 'relevant_raw'
+          when raw_content_changed then 'raw_only'
+          else 'unchanged'
+        end as primary_reason
+      from classified
+    ),
+    changed as (
+      select *
+      from reasoned
+      where is_changed
     ),
     upserted as (
       insert into polymarket_markets(
@@ -862,21 +1026,32 @@ export async function upsertPolymarketMarkets(
     select
       (select count(*) from input)::int as input_count,
       (select count(*) from changed)::int as changed_count,
-      (select count(*) from upserted)::int as upserted_count
+      (select count(*) from upserted)::int as upserted_count,
+      (
+        select jsonb_object_agg(primary_reason, reason_count)
+        from (
+          select primary_reason, count(*)::int as reason_count
+          from reasoned
+          group by primary_reason
+        ) primary_counts
+      ) as primary_reasons
   `;
 
   const batches = chunkArray(rows, 250);
   let changedRows = 0;
   let upsertedRows = 0;
+  const changeReasons = emptyChangeReasonTelemetry();
   for (const batch of batches) {
     const result = await pool.query<{
       input_count: number;
       changed_count: number;
       upserted_count: number;
+      primary_reasons: unknown;
     }>(query, [JSON.stringify(batch)]);
     const row = result.rows[0];
     changedRows += row?.changed_count ?? batch.length;
     upsertedRows += row?.upserted_count ?? 0;
+    incrementReasonCounts(changeReasons.primary, row?.primary_reasons ?? null);
   }
   return {
     inputRows: marketRows.length,
@@ -885,5 +1060,6 @@ export async function upsertPolymarketMarkets(
     skippedRows: rows.length - changedRows,
     batches: batches.length,
     upsertedRows,
+    changeReasons,
   };
 }

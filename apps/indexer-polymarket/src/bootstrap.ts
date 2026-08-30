@@ -23,6 +23,8 @@ import {
   type UnifiedMarketRow,
 } from "@hunch/db";
 import {
+  type UpsertEventsConsistentlyResult,
+  type UpsertMarketsConsistentlyResult,
   upsertEventsConsistently,
   upsertMarketsConsistently,
 } from "./consistentUpserts.js";
@@ -121,6 +123,74 @@ type MarketUpdateEventMetrics = Pick<
   UnifiedEventRow,
   "volume_total" | "volume_24h" | "liquidity" | "open_interest"
 >;
+
+function logEventUpsertStats(
+  context: "processEvents" | "refreshMarketRefs",
+  events: number,
+  result: UpsertEventsConsistentlyResult,
+): void {
+  const stats = {
+    telemetryVersion: 1,
+    observedAt: new Date().toISOString(),
+    kind: "events",
+    context,
+    events,
+    unifiedInputRows: result.unified.inputRows,
+    unifiedDedupedRows: result.unified.dedupedRows,
+    unifiedChangedRows: result.unified.changedRows,
+    unifiedSkippedRows: result.unified.skippedRows,
+    unifiedUpsertedRows: result.unified.upsertedRows,
+    unifiedBatches: result.unified.batches,
+    unifiedChangeReasons: result.unified.changeReasons,
+    polymarketInputRows: result.polymarket.inputRows,
+    polymarketDedupedRows: result.polymarket.dedupedRows,
+    polymarketChangedRows: result.polymarket.changedRows,
+    polymarketSkippedRows: result.polymarket.skippedRows,
+    polymarketUpsertedRows: result.polymarket.upsertedRows,
+    polymarketBatches: result.polymarket.batches,
+    polymarketChangeReasons: result.polymarket.changeReasons,
+    ...result.timings,
+    unifiedPayloadBytes: result.payloadBytes.unified,
+    polymarketPayloadBytes: result.payloadBytes.polymarket,
+    totalPayloadBytes: result.payloadBytes.total,
+  };
+  log.info("Polymarket event upsert stats", JSON.stringify(stats));
+}
+
+function logMarketUpsertStats(
+  context: "processEvents" | "refreshMarketRefs",
+  markets: number,
+  result: UpsertMarketsConsistentlyResult,
+): void {
+  const stats = {
+    telemetryVersion: 1,
+    observedAt: new Date().toISOString(),
+    kind: "markets",
+    context,
+    markets,
+    polymarketInputRows: result.polymarket.inputRows,
+    polymarketDedupedRows: result.polymarket.dedupedRows,
+    polymarketChangedRows: result.polymarket.changedRows,
+    polymarketSkippedRows: result.polymarket.skippedRows,
+    polymarketUpsertedRows: result.polymarket.upsertedRows,
+    polymarketBatches: result.polymarket.batches,
+    polymarketChangeReasons: result.polymarket.changeReasons,
+    unifiedInputRows: result.unified.inputRows,
+    unifiedDedupedRows: result.unified.dedupedRows,
+    unifiedChangedRows: result.unified.changedRows,
+    unifiedSkippedRows: result.unified.skippedRows,
+    unifiedUpsertedRows: result.unified.upsertedRows,
+    unifiedBatches: result.unified.batches,
+    unifiedTokenSyncMarketCount: result.unified.tokenSyncMarketCount,
+    unifiedChangeReasons: result.unified.changeReasons,
+    unifiedTimings: result.unified.timings,
+    ...result.timings,
+    unifiedPayloadBytes: result.payloadBytes.unified,
+    polymarketPayloadBytes: result.payloadBytes.polymarket,
+    totalPayloadBytes: result.payloadBytes.total,
+  };
+  log.info("Polymarket market upsert stats", JSON.stringify(stats));
+}
 
 async function publishPolymarketMarketUpdates(
   rows: Array<{
@@ -316,29 +386,7 @@ async function processEvents(events: unknown[]): Promise<ProcessResult> {
       }),
     { events: parsedEvents.length },
   );
-  log.info("Polymarket event upsert stats", {
-    events: parsedEvents.length,
-    unifiedInputRows: eventUpsertResult.unified.inputRows,
-    unifiedDedupedRows: eventUpsertResult.unified.dedupedRows,
-    unifiedChangedRows: eventUpsertResult.unified.changedRows,
-    unifiedSkippedRows: eventUpsertResult.unified.skippedRows,
-    unifiedUpsertedRows: eventUpsertResult.unified.upsertedRows,
-    unifiedBatches: eventUpsertResult.unified.batches,
-    polymarketInputRows: eventUpsertResult.polymarket.inputRows,
-    polymarketDedupedRows: eventUpsertResult.polymarket.dedupedRows,
-    polymarketChangedRows: eventUpsertResult.polymarket.changedRows,
-    polymarketSkippedRows: eventUpsertResult.polymarket.skippedRows,
-    polymarketUpsertedRows: eventUpsertResult.polymarket.upsertedRows,
-    polymarketBatches: eventUpsertResult.polymarket.batches,
-    queueWaitMs: eventUpsertResult.timings.queueWaitMs,
-    unifiedEventsMs: eventUpsertResult.timings.unifiedEventsMs,
-    polymarketEventsMs: eventUpsertResult.timings.polymarketEventsMs,
-    writeMs: eventUpsertResult.timings.writeMs,
-    totalMs: eventUpsertResult.timings.totalMs,
-    unifiedPayloadBytes: eventUpsertResult.payloadBytes.unified,
-    polymarketPayloadBytes: eventUpsertResult.payloadBytes.polymarket,
-    totalPayloadBytes: eventUpsertResult.payloadBytes.total,
-  });
+  logEventUpsertStats("processEvents", parsedEvents.length, eventUpsertResult);
   recordPhaseDuration(
     timings,
     "processEvents.eventUpsert.queueWait",
@@ -384,31 +432,11 @@ async function processEvents(events: unknown[]): Promise<ProcessResult> {
       ),
     { markets: unifiedMarketRows.length },
   );
-  const slowProcessEventUnifiedTimings =
-    marketUpsertResult.unified.timings &&
-    marketUpsertResult.unified.timings.totalMs >= env.slowPhaseWarnMs
-      ? marketUpsertResult.unified.timings
-      : undefined;
-  log.info("Polymarket market upsert stats", {
-    markets: unifiedMarketRows.length,
-    polymarketInputRows: marketUpsertResult.polymarket.inputRows,
-    polymarketDedupedRows: marketUpsertResult.polymarket.dedupedRows,
-    polymarketChangedRows: marketUpsertResult.polymarket.changedRows,
-    polymarketSkippedRows: marketUpsertResult.polymarket.skippedRows,
-    polymarketUpsertedRows: marketUpsertResult.polymarket.upsertedRows,
-    polymarketBatches: marketUpsertResult.polymarket.batches,
-    unifiedInputRows: marketUpsertResult.unified.inputRows,
-    unifiedDedupedRows: marketUpsertResult.unified.dedupedRows,
-    unifiedChangedRows: marketUpsertResult.unified.changedRows,
-    unifiedSkippedRows: marketUpsertResult.unified.skippedRows,
-    unifiedUpsertedRows: marketUpsertResult.unified.upsertedRows,
-    unifiedBatches: marketUpsertResult.unified.batches,
-    unifiedTokenSyncMarketCount:
-      marketUpsertResult.unified.tokenSyncMarketCount,
-    ...(slowProcessEventUnifiedTimings
-      ? { unifiedTimings: slowProcessEventUnifiedTimings }
-      : {}),
-  });
+  logMarketUpsertStats(
+    "processEvents",
+    unifiedMarketRows.length,
+    marketUpsertResult,
+  );
 
   if (unifiedTokenRows.length) {
     const tokenUpsertResult = await timedPhase(
@@ -1188,7 +1216,7 @@ async function refreshMarketRefs(
 
   const eventsToUpsert = Array.from(eventsToUpsertById.values());
   if (eventsToUpsert.length) {
-    await timedPhase(
+    const eventUpsertResult = await timedPhase(
       timings,
       "refreshMarketRefs.eventUpsert",
       () =>
@@ -1197,6 +1225,11 @@ async function refreshMarketRefs(
           polymarket: eventsToUpsert.map(mapPolymarketEventRow),
         }),
       { events: eventsToUpsert.length },
+    );
+    logEventUpsertStats(
+      "refreshMarketRefs",
+      eventsToUpsert.length,
+      eventUpsertResult,
     );
   }
 
@@ -1273,32 +1306,11 @@ async function refreshMarketRefs(
       ),
     { markets: unifiedMarketRows.length },
   );
-  const slowRefreshMarketRefsUnifiedTimings =
-    marketUpsertResult.unified.timings &&
-    marketUpsertResult.unified.timings.totalMs >= env.slowPhaseWarnMs
-      ? marketUpsertResult.unified.timings
-      : undefined;
-  log.info("Polymarket market upsert stats", {
-    context: "refreshMarketRefs",
-    markets: unifiedMarketRows.length,
-    polymarketInputRows: marketUpsertResult.polymarket.inputRows,
-    polymarketDedupedRows: marketUpsertResult.polymarket.dedupedRows,
-    polymarketChangedRows: marketUpsertResult.polymarket.changedRows,
-    polymarketSkippedRows: marketUpsertResult.polymarket.skippedRows,
-    polymarketUpsertedRows: marketUpsertResult.polymarket.upsertedRows,
-    polymarketBatches: marketUpsertResult.polymarket.batches,
-    unifiedInputRows: marketUpsertResult.unified.inputRows,
-    unifiedDedupedRows: marketUpsertResult.unified.dedupedRows,
-    unifiedChangedRows: marketUpsertResult.unified.changedRows,
-    unifiedSkippedRows: marketUpsertResult.unified.skippedRows,
-    unifiedUpsertedRows: marketUpsertResult.unified.upsertedRows,
-    unifiedBatches: marketUpsertResult.unified.batches,
-    unifiedTokenSyncMarketCount:
-      marketUpsertResult.unified.tokenSyncMarketCount,
-    ...(slowRefreshMarketRefsUnifiedTimings
-      ? { unifiedTimings: slowRefreshMarketRefsUnifiedTimings }
-      : {}),
-  });
+  logMarketUpsertStats(
+    "refreshMarketRefs",
+    unifiedMarketRows.length,
+    marketUpsertResult,
+  );
 
   if (unifiedTokenRows.length) {
     const tokenUpsertResult = await timedPhase(

@@ -334,6 +334,35 @@ export interface UnifiedEventRow {
   updated_at?: Date;
 }
 
+export type ChangeReasonTelemetry = {
+  // Mutually exclusive reasons. Counts sum to the deduped input row count.
+  primary: Record<string, number>;
+};
+
+function emptyChangeReasonTelemetry(): ChangeReasonTelemetry {
+  return { primary: {} };
+}
+
+function incrementChangeReason(
+  target: Record<string, number>,
+  reason: string,
+  amount = 1,
+): void {
+  target[reason] = (target[reason] ?? 0) + amount;
+}
+
+function mergeChangeReasonCounts(
+  target: Record<string, number>,
+  source: unknown,
+): void {
+  if (!source || typeof source !== "object" || Array.isArray(source)) return;
+  for (const [reason, rawCount] of Object.entries(source)) {
+    const count = Number(rawCount);
+    if (!Number.isFinite(count) || count <= 0) continue;
+    incrementChangeReason(target, reason, count);
+  }
+}
+
 export type UpsertUnifiedMarketsResult = {
   inputRows: number;
   dedupedRows: number;
@@ -342,6 +371,7 @@ export type UpsertUnifiedMarketsResult = {
   batches: number;
   upsertedRows: number;
   tokenSyncMarketCount: number;
+  changeReasons?: ChangeReasonTelemetry;
   timings?: {
     filterChangedMs: number;
     loadTokenSourcesMs: number;
@@ -360,6 +390,7 @@ export type UpsertUnifiedEventsResult = {
   skippedRows: number;
   batches: number;
   upsertedRows: number;
+  changeReasons: ChangeReasonTelemetry;
 };
 
 export type UpsertUnifiedTokensResult = {
@@ -600,6 +631,7 @@ export async function upsertUnifiedEvents(
       skippedRows: 0,
       batches: 0,
       upsertedRows: 0,
+      changeReasons: emptyChangeReasonTelemetry(),
     };
   }
 
@@ -633,30 +665,68 @@ export async function upsertUnifiedEvents(
         updated_at timestamptz
       )
     ),
-    changed as (
-      select input.*
+    classified as (
+      select
+        input.*,
+        existing.id is null as inserted,
+        (existing.status, existing.start_date, existing.end_date)
+          is distinct from
+        (input.status, input.start_date, input.end_date)
+          as lifecycle_changed,
+        (existing.title, existing.description, existing.category,
+         existing.slug, existing.image, existing.icon)
+          is distinct from
+        (input.title, input.description, input.category,
+         input.slug, input.image, input.icon)
+          as presentation_changed,
+        (existing.series_key, existing.series_title, existing.duration_minutes)
+          is distinct from
+        (input.series_key, input.series_title, input.duration_minutes)
+          as series_changed,
+        (existing.volume_total, existing.volume_24h, existing.open_interest,
+         existing.liquidity)
+          is distinct from
+        (input.volume_total, input.volume_24h, input.open_interest,
+         input.liquidity)
+          as metrics_changed,
+        existing.metadata is distinct from input.metadata as metadata_changed,
+        existing.created_at is distinct from input.created_at as provenance_changed,
+        existing.updated_at is distinct from input.updated_at
+          as source_timestamp_changed
       from input
       left join unified_events existing
         on existing.venue = input.venue
        and existing.venue_event_id = input.venue_event_id
-      where existing.id is null
-         or (
-          existing.title, existing.description, existing.category,
-          existing.status, existing.series_key, existing.series_title,
-          existing.duration_minutes,
-          existing.start_date, existing.end_date,
-          existing.volume_total, existing.volume_24h, existing.open_interest,
-          existing.liquidity, existing.metadata, existing.slug, existing.image,
-          existing.icon, existing.created_at, existing.updated_at
-        ) is distinct from (
-          input.title, input.description, input.category,
-          input.status, input.series_key, input.series_title,
-          input.duration_minutes,
-          input.start_date, input.end_date,
-          input.volume_total, input.volume_24h, input.open_interest,
-          input.liquidity, input.metadata, input.slug, input.image,
-          input.icon, input.created_at, input.updated_at
-        )
+    ),
+    reasoned as (
+      select
+        classified.*,
+        inserted
+          or lifecycle_changed
+          or presentation_changed
+          or series_changed
+          or metrics_changed
+          or metadata_changed
+          or provenance_changed
+          or source_timestamp_changed
+          as is_changed,
+        case
+          when inserted then 'inserted'
+          when lifecycle_changed then 'lifecycle'
+          when presentation_changed then 'presentation'
+          when series_changed then 'series'
+          when metrics_changed then 'metrics'
+          when metadata_changed then 'metadata'
+          when provenance_changed then 'provenance'
+          when source_timestamp_changed then 'source_timestamp_only'
+          else 'unchanged'
+        end as primary_reason
+      from classified
+    ),
+    changed as (
+      select *
+      from reasoned
+      where is_changed
     ),
     upserted as (
       insert into unified_events (
@@ -711,21 +781,35 @@ export async function upsertUnifiedEvents(
     select
       (select count(*) from input)::int as input_count,
       (select count(*) from changed)::int as changed_count,
-      (select count(*) from upserted)::int as upserted_count
+      (select count(*) from upserted)::int as upserted_count,
+      (
+        select jsonb_object_agg(primary_reason, reason_count)
+        from (
+          select primary_reason, count(*)::int as reason_count
+          from reasoned
+          group by primary_reason
+        ) primary_counts
+      ) as primary_reasons
   `;
 
   const batches = chunkArray(rows, 1000);
   let changedRows = 0;
   let upsertedRows = 0;
+  const changeReasons = emptyChangeReasonTelemetry();
   for (const batch of batches) {
     const result = await pool.query<{
       input_count: number;
       changed_count: number;
       upserted_count: number;
+      primary_reasons: unknown;
     }>(query, [JSON.stringify(batch)]);
     const row = result.rows[0];
     changedRows += row?.changed_count ?? batch.length;
     upsertedRows += row?.upserted_count ?? 0;
+    mergeChangeReasonCounts(
+      changeReasons.primary,
+      row?.primary_reasons ?? null,
+    );
   }
 
   return {
@@ -735,6 +819,7 @@ export async function upsertUnifiedEvents(
     skippedRows: rows.length - changedRows,
     batches: batches.length,
     upsertedRows,
+    changeReasons,
   };
 }
 
@@ -900,6 +985,9 @@ export async function upsertUnifiedMarkets(
       batches: 0,
       upsertedRows: 0,
       tokenSyncMarketCount: 0,
+      changeReasons: options.filterUnchanged
+        ? emptyChangeReasonTelemetry()
+        : undefined,
       timings,
     };
   }
@@ -1252,6 +1340,9 @@ export async function upsertUnifiedMarkets(
   let skippedRows = 0;
   let upsertedRows = 0;
   let tokenSyncMarketCount = 0;
+  const changeReasons = options.filterUnchanged
+    ? emptyChangeReasonTelemetry()
+    : undefined;
 
   for (const batch of batches) {
     const filterStartedAt = Date.now();
@@ -1261,11 +1352,18 @@ export async function upsertUnifiedMarkets(
           changedRows: batch,
           existingChangedRows: [],
           newRows: batch,
+          changeReasons: undefined,
         };
     timings.filterChangedMs += Date.now() - filterStartedAt;
     const changedBatch = changedBatchResult.changedRows;
     changedRows += changedBatch.length;
     skippedRows += batch.length - changedBatch.length;
+    if (changeReasons && changedBatchResult.changeReasons) {
+      mergeChangeReasonCounts(
+        changeReasons.primary,
+        changedBatchResult.changeReasons.primary,
+      );
+    }
     if (changedBatch.length === 0) continue;
 
     const loadTokenSourcesStartedAt = Date.now();
@@ -1326,6 +1424,7 @@ export async function upsertUnifiedMarkets(
     batches: batches.length,
     upsertedRows,
     tokenSyncMarketCount,
+    changeReasons,
     timings,
   };
 }
@@ -1334,6 +1433,7 @@ type ChangedUnifiedMarketRows = {
   changedRows: UnifiedMarketRow[];
   existingChangedRows: UnifiedMarketRow[];
   newRows: UnifiedMarketRow[];
+  changeReasons?: ChangeReasonTelemetry;
 };
 
 async function filterChangedUnifiedMarketRows(
@@ -1345,12 +1445,17 @@ async function filterChangedUnifiedMarketRows(
       changedRows: [],
       existingChangedRows: [],
       newRows: [],
+      changeReasons: emptyChangeReasonTelemetry(),
     };
   }
 
+  // Keep these reason partitions exhaustive and aligned with updateQuery's
+  // effective target values; the final UPDATE predicate still rechecks every
+  // candidate before writing.
   const { rows: changedRows } = await pool.query<{
     id: string;
     exists_in_db: boolean;
+    primary_reason: string;
   }>(
     `
       with input as (
@@ -1395,83 +1500,137 @@ async function filterChangedUnifiedMarketRows(
           updated_at timestamptz
         )
       )
+      , classified as (
+        select
+          input.*,
+          unified_markets.id as existing_id,
+          (unified_markets.event_id, unified_markets.category,
+           unified_markets.duration_minutes)
+            is distinct from
+          (input.event_id, input.category, input.duration_minutes)
+            as event_context_changed,
+          (unified_markets.status, unified_markets.open_time,
+           unified_markets.close_time, unified_markets.expiration_time,
+           unified_markets.condition_id)
+            is distinct from
+          (${mergedMarketStatusSql("input")}, input.open_time,
+           input.close_time, input.expiration_time, input.condition_id)
+            as lifecycle_changed,
+          (unified_markets.title, unified_markets.description,
+           unified_markets.market_type, unified_markets.slug,
+           unified_markets.image, unified_markets.icon,
+           unified_markets.created_at)
+            is distinct from
+          (input.title, input.description, input.market_type, input.slug,
+           input.image, input.icon, input.created_at)
+            as presentation_changed,
+          (unified_markets.best_bid, unified_markets.best_ask,
+           unified_markets.last_price, unified_markets.volume_total,
+           unified_markets.volume_24h, unified_markets.open_interest,
+           unified_markets.liquidity)
+            is distinct from
+          (
+            case
+              when unified_markets.venue = 'limitless'
+                and coalesce(input.metadata->>'tradeType', '') = 'amm'
+                and input.best_bid is null
+              then unified_markets.best_bid
+              else input.best_bid
+            end,
+            case
+              when unified_markets.venue = 'limitless'
+                and coalesce(input.metadata->>'tradeType', '') = 'amm'
+                and input.best_ask is null
+              then unified_markets.best_ask
+              else input.best_ask
+            end,
+            case
+              when unified_markets.venue = 'limitless'
+                and coalesce(input.metadata->>'tradeType', '') = 'amm'
+                and input.last_price is null
+              then unified_markets.last_price
+              else input.last_price
+            end,
+            input.volume_total, input.volume_24h, input.open_interest,
+            input.liquidity
+          ) as metrics_changed,
+          (unified_markets.metadata, unified_markets.outcomes)
+            is distinct from
+          (${mergedMarketMetadataSql("input")}, input.outcomes)
+            as metadata_changed,
+          (unified_markets.token_yes, unified_markets.token_no,
+           unified_markets.clob_token_ids)
+            is distinct from
+          (
+            case
+              when unified_markets.venue = 'kalshi'
+                and unified_markets.token_yes like 'sol:%'
+                and input.token_yes like 'kalshi:%'
+              then unified_markets.token_yes
+              else input.token_yes
+            end,
+            case
+              when unified_markets.venue = 'kalshi'
+                and unified_markets.token_no like 'sol:%'
+                and input.token_no like 'kalshi:%'
+              then unified_markets.token_no
+              else input.token_no
+            end,
+            input.clob_token_ids
+          ) as tokens_changed,
+          (unified_markets.market_ledger, unified_markets.settlement_mint,
+           unified_markets.is_initialized, unified_markets.redemption_status,
+           unified_markets.resolved_outcome,
+           unified_markets.resolved_outcome_pct)
+            is distinct from
+          (coalesce(input.market_ledger, unified_markets.market_ledger),
+           coalesce(input.settlement_mint, unified_markets.settlement_mint),
+           coalesce(input.is_initialized, unified_markets.is_initialized),
+           coalesce(input.redemption_status, unified_markets.redemption_status),
+           coalesce(input.resolved_outcome, unified_markets.resolved_outcome),
+           coalesce(input.resolved_outcome_pct,
+                    unified_markets.resolved_outcome_pct))
+            as operational_changed,
+          unified_markets.updated_at is distinct from input.updated_at
+            as source_timestamp_changed
+        from input
+        left join unified_markets
+          on unified_markets.venue = input.venue
+         and unified_markets.venue_market_id = input.venue_market_id
+      ), reasoned as (
+        select
+          classified.*,
+          existing_id is null
+            or event_context_changed
+            or lifecycle_changed
+            or presentation_changed
+            or metrics_changed
+            or metadata_changed
+            or tokens_changed
+            or operational_changed
+            or source_timestamp_changed
+            as is_changed,
+          case
+            when existing_id is null then 'inserted'
+            when event_context_changed then 'event_context'
+            when lifecycle_changed then 'lifecycle'
+            when presentation_changed then 'presentation'
+            when metrics_changed then 'metrics'
+            when metadata_changed then 'metadata'
+            when tokens_changed then 'tokens'
+            when operational_changed then 'operational'
+            when source_timestamp_changed then 'source_timestamp_only'
+            else 'unchanged'
+          end as primary_reason
+        from classified
+      )
       select
-        input.id,
-        (unified_markets.id is not null) as exists_in_db
-      from input
-      left join unified_markets
-        on unified_markets.venue = input.venue
-       and unified_markets.venue_market_id = input.venue_market_id
-      where unified_markets.id is null
-         or (
-          unified_markets.event_id, unified_markets.title, unified_markets.description,
-          unified_markets.category, unified_markets.status, unified_markets.market_type,
-          unified_markets.duration_minutes,
-          unified_markets.open_time, unified_markets.close_time, unified_markets.expiration_time,
-          unified_markets.best_bid, unified_markets.best_ask, unified_markets.last_price,
-          unified_markets.volume_total, unified_markets.volume_24h, unified_markets.open_interest,
-          unified_markets.liquidity, unified_markets.metadata, unified_markets.outcomes, unified_markets.token_yes,
-          unified_markets.token_no, unified_markets.clob_token_ids, unified_markets.condition_id,
-          unified_markets.market_ledger, unified_markets.settlement_mint,
-          unified_markets.is_initialized, unified_markets.redemption_status,
-          unified_markets.resolved_outcome, unified_markets.resolved_outcome_pct,
-          unified_markets.slug, unified_markets.image, unified_markets.icon,
-          unified_markets.created_at, unified_markets.updated_at
-        ) is distinct from (
-          input.event_id, input.title, input.description,
-          input.category,
-          ${mergedMarketStatusSql("input")},
-          input.market_type,
-          input.duration_minutes,
-          input.open_time, input.close_time, input.expiration_time,
-          CASE
-            WHEN unified_markets.venue = 'limitless'
-              AND coalesce(input.metadata->>'tradeType', '') = 'amm'
-              AND input.best_bid IS NULL
-            THEN unified_markets.best_bid
-            ELSE input.best_bid
-          END,
-          CASE
-            WHEN unified_markets.venue = 'limitless'
-              AND coalesce(input.metadata->>'tradeType', '') = 'amm'
-              AND input.best_ask IS NULL
-            THEN unified_markets.best_ask
-            ELSE input.best_ask
-          END,
-          CASE
-            WHEN unified_markets.venue = 'limitless'
-              AND coalesce(input.metadata->>'tradeType', '') = 'amm'
-              AND input.last_price IS NULL
-            THEN unified_markets.last_price
-            ELSE input.last_price
-          END,
-          input.volume_total, input.volume_24h, input.open_interest,
-          input.liquidity, ${mergedMarketMetadataSql("input")}, input.outcomes,
-          CASE
-            WHEN unified_markets.venue = 'kalshi'
-              AND unified_markets.token_yes like 'sol:%'
-              AND input.token_yes like 'kalshi:%'
-            THEN unified_markets.token_yes
-            ELSE input.token_yes
-          END,
-          CASE
-            WHEN unified_markets.venue = 'kalshi'
-              AND unified_markets.token_no like 'sol:%'
-              AND input.token_no like 'kalshi:%'
-            THEN unified_markets.token_no
-            ELSE input.token_no
-          END,
-          input.clob_token_ids, input.condition_id,
-          COALESCE(input.market_ledger, unified_markets.market_ledger),
-          COALESCE(input.settlement_mint, unified_markets.settlement_mint),
-          COALESCE(input.is_initialized, unified_markets.is_initialized),
-          COALESCE(input.redemption_status, unified_markets.redemption_status),
-          COALESCE(input.resolved_outcome, unified_markets.resolved_outcome),
-          COALESCE(input.resolved_outcome_pct, unified_markets.resolved_outcome_pct),
-          input.slug, input.image, input.icon,
-          input.created_at, input.updated_at
-        )
-      order by input.venue, input.venue_market_id, input.id
+        id,
+        existing_id is not null as exists_in_db,
+        primary_reason
+      from reasoned
+      where is_changed
+      order by venue, venue_market_id, id
     `,
     [JSON.stringify(rows)],
   );
@@ -1483,11 +1642,21 @@ async function filterChangedUnifiedMarketRows(
   const newChangedIds = new Set(
     changedRows.filter((row) => !row.exists_in_db).map((row) => row.id),
   );
+  const changeReasons = emptyChangeReasonTelemetry();
+  incrementChangeReason(
+    changeReasons.primary,
+    "unchanged",
+    rows.length - changedRows.length,
+  );
+  for (const row of changedRows) {
+    incrementChangeReason(changeReasons.primary, row.primary_reason);
+  }
 
   return {
     changedRows: rows.filter((row) => changedIds.has(row.id)),
     existingChangedRows: rows.filter((row) => existingChangedIds.has(row.id)),
     newRows: rows.filter((row) => newChangedIds.has(row.id)),
+    changeReasons,
   };
 }
 
