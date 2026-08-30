@@ -6,10 +6,15 @@ import {
   API_CACHE_WARM_LOCK_KEY,
   API_CACHE_WARM_STATUS_KEY,
   API_CACHE_WARM_STATUS_TTL_SEC,
+  apiCacheWarmCooldownSec,
   apiCacheWarmTargetStatsKey,
+  emptyApiCacheWarmGroupStats,
   readApiCacheWarmStatus,
   resolveApiCacheWarmBaseUrlCandidates,
+  runApiCacheWarmTargetsSequentially,
   selectApiCacheWarmTargets,
+  summarizeApiCacheWarmGroups,
+  type ApiCacheWarmGroupStatsByGroup,
   type ApiCacheWarmTarget,
 } from "./services/api-cache-warm.js";
 import { resolveApiCacheWarmPolicy } from "./services/runtime-policies.js";
@@ -28,6 +33,7 @@ type ApiCacheWarmRunResult = {
   targetsAttempted: number;
   targetsSucceeded: number;
   targetsFailed: number;
+  groups: ApiCacheWarmGroupStatsByGroup;
   baseUrl: string | null;
   error: string | null;
   policyEnabled: boolean;
@@ -241,6 +247,7 @@ export async function runApiCacheWarm(
       targetsAttempted: 0,
       targetsSucceeded: 0,
       targetsFailed: 0,
+      groups: emptyApiCacheWarmGroupStats(),
       baseUrl: null,
       error: null,
       policyEnabled: false,
@@ -254,6 +261,7 @@ export async function runApiCacheWarm(
       targetsAttempted: 0,
       targetsSucceeded: 0,
       targetsFailed: 0,
+      groups: emptyApiCacheWarmGroupStats(),
       baseUrl: null,
       error: redisError ?? `Redis unavailable (${redisStatus})`,
       policyEnabled: effective.enabled,
@@ -266,8 +274,11 @@ export async function runApiCacheWarm(
       ? Date.parse(previous.runner.lastCompletedAt)
       : NaN;
     if (Number.isFinite(lastCompletedAtMs)) {
-      const nextEligibleAt =
-        lastCompletedAtMs + effective.pollIntervalSec * 1000;
+      const cooldownSec = apiCacheWarmCooldownSec({
+        pollIntervalSec: effective.pollIntervalSec,
+        previousResult: previous.runner.lastResult,
+      });
+      const nextEligibleAt = lastCompletedAtMs + cooldownSec * 1000;
       if (Date.now() < nextEligibleAt) {
         return {
           result: "skipped_rate",
@@ -275,6 +286,7 @@ export async function runApiCacheWarm(
           targetsAttempted: 0,
           targetsSucceeded: 0,
           targetsFailed: 0,
+          groups: emptyApiCacheWarmGroupStats(),
           baseUrl: previous.runner.baseUrl,
           error: null,
           policyEnabled: effective.enabled,
@@ -299,6 +311,7 @@ export async function runApiCacheWarm(
       targetsAttempted: 0,
       targetsSucceeded: 0,
       targetsFailed: 0,
+      groups: emptyApiCacheWarmGroupStats(),
       baseUrl: null,
       error: null,
       policyEnabled: effective.enabled,
@@ -313,6 +326,7 @@ export async function runApiCacheWarm(
       targetsAttempted: 0,
       targetsSucceeded: 0,
       targetsFailed: 0,
+      groups: JSON.stringify(emptyApiCacheWarmGroupStats()),
       baseUrl: null,
       error: null,
     });
@@ -327,6 +341,7 @@ export async function runApiCacheWarm(
         targetsAttempted: 0,
         targetsSucceeded: 0,
         targetsFailed: 0,
+        groups: JSON.stringify(emptyApiCacheWarmGroupStats()),
         baseUrl: null,
         error: null,
       });
@@ -336,6 +351,7 @@ export async function runApiCacheWarm(
         targetsAttempted: 0,
         targetsSucceeded: 0,
         targetsFailed: 0,
+        groups: emptyApiCacheWarmGroupStats(),
         baseUrl: null,
         error: null,
         policyEnabled: effective.enabled,
@@ -355,6 +371,7 @@ export async function runApiCacheWarm(
         targetsAttempted: 0,
         targetsSucceeded: 0,
         targetsFailed: 0,
+        groups: JSON.stringify(emptyApiCacheWarmGroupStats()),
         baseUrl: null,
         error: baseUrlResult.error,
       });
@@ -364,24 +381,29 @@ export async function runApiCacheWarm(
         targetsAttempted: 0,
         targetsSucceeded: 0,
         targetsFailed: 0,
+        groups: emptyApiCacheWarmGroupStats(),
         baseUrl: null,
         error: baseUrlResult.error,
         policyEnabled: effective.enabled,
       };
     }
 
-    let targetsSucceeded = 0;
-    let targetsFailed = 0;
-    for (const target of selectedTargets) {
-      const targetResult = await runTarget(
-        baseUrlResult.baseUrl,
-        target,
-        effective.requestTimeoutMs,
-      );
-      await updateTargetStats(redis, target, targetResult);
-      if (targetResult.ok) targetsSucceeded += 1;
-      else targetsFailed += 1;
-    }
+    const baseUrl = baseUrlResult.baseUrl;
+    const targetRuns = await runApiCacheWarmTargetsSequentially(
+      selectedTargets,
+      async (target) => {
+        const targetResult = await runTarget(
+          baseUrl,
+          target,
+          effective.requestTimeoutMs,
+        );
+        await updateTargetStats(redis, target, targetResult);
+        return targetResult;
+      },
+    );
+    const groups = summarizeApiCacheWarmGroups(targetRuns);
+    const targetsSucceeded = targetRuns.filter((run) => run.result.ok).length;
+    const targetsFailed = targetRuns.length - targetsSucceeded;
 
     const durationMs = Date.now() - startedAt;
     const result: ApiCacheWarmRunnerResult =
@@ -399,7 +421,8 @@ export async function runApiCacheWarm(
       targetsAttempted: selectedTargets.length,
       targetsSucceeded,
       targetsFailed,
-      baseUrl: baseUrlResult.baseUrl,
+      groups: JSON.stringify(groups),
+      baseUrl,
       error,
     });
 
@@ -409,7 +432,8 @@ export async function runApiCacheWarm(
       targetsAttempted: selectedTargets.length,
       targetsSucceeded,
       targetsFailed,
-      baseUrl: baseUrlResult.baseUrl,
+      groups,
+      baseUrl,
       error,
       policyEnabled: effective.enabled,
     };

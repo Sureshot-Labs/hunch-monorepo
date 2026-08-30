@@ -11,6 +11,8 @@ import { canonicalAssetKey } from "./canonical.js";
 export const EXACT_STABLE_PRICE_POLICY_ID = "exact-stable-policy-v1";
 export const STABLE_IMPAIRED_PRICE_POLICY_ID = "stable-impaired-v1";
 export const PYTH_SOL_USD_PRICE_POLICY_ID = "pyth-sol-usd-v1";
+export const PYTH_SOL_USD_LAST_KNOWN_PRICE_SOURCE =
+  "pyth-sol-usd-v1:last-known";
 
 export type StableImpairmentState =
   | Readonly<{ status: "healthy" }>
@@ -192,14 +194,20 @@ export class ValuationService {
         }
 
         const priceAt = Date.parse(estimate.asOf);
+        const lastKnownDisplayPrice =
+          estimate.priceSource === PYTH_SOL_USD_LAST_KNOWN_PRICE_SOURCE;
         const priceStale =
           !Number.isFinite(priceAt) ||
           now.getTime() - priceAt > policy.maximumObservationAgeMs;
-        if (priceStale) {
+        if (priceStale || lastKnownDisplayPrice) {
           return {
             ...base,
             category: policy.category,
             estimatedUsd: estimate,
+            // The last-known SOL quote is display-only. Projectors preserve
+            // its estimate in display totals, while stale eligibility and
+            // temporarily_unavailable prevent it from becoming execution
+            // evidence. Strict funding builds do not install this adapter.
             valuationEligibility: "stale",
             executionEligibility: "temporarily_unavailable",
             reasonCodes: ["trusted_price_stale"],

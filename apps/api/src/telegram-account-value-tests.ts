@@ -78,6 +78,7 @@ function component(input: {
   kind?: string;
   networkId: string;
   raw: string;
+  reasonCodes?: ValuedAssetComponent["reasonCodes"];
   valuationEligibility?: ValuedAssetComponent["valuationEligibility"];
   venueId?: string;
 }): ValuedAssetComponent {
@@ -105,7 +106,7 @@ function component(input: {
     observationError: null,
     observationFreshness: input.freshness ?? "fresh",
     observedAt: AS_OF,
-    reasonCodes: [],
+    reasonCodes: input.reasonCodes ?? [],
     valuationEligibility:
       input.valuationEligibility ??
       (input.freshness === "stale" ? "stale" : "included"),
@@ -573,6 +574,45 @@ await test("Telegram Account Value shows the existing SOL USD estimate", () => {
   });
   assert.match(rendered.text, /Solana wallet.*0\\\.052 SOL.*≈ \$5\\\.13/u);
   assert.doesNotMatch(rendered.text, /0\\\.052 available/u);
+});
+
+await test("Telegram Account Value labels a last-known SOL estimate stale", () => {
+  const account = accountWithoutCollectorErrors();
+  const stalePricedSol = component({
+    assetId: "11111111111111111111111111111111",
+    componentId: "stale-priced-sol",
+    decimals: 9,
+    estimatedUsd: "5.12640349624",
+    networkId: "solana:mainnet",
+    raw: "52000000",
+    reasonCodes: ["trusted_price_stale"],
+    valuationEligibility: "stale",
+  });
+  const projection = projectAccountValue({
+    accountId: "user-1",
+    asOf: AS_OF,
+    components: [stalePricedSol],
+    headlineMode: "liquid_only",
+    positionComponents: [],
+  });
+  const cashAvailability = projectCashAvailability({
+    adjustments: [],
+    asOf: AS_OF,
+    components: [stalePricedSol],
+  });
+  const rendered = buildTelegramAccountValueMessage({
+    account: {
+      ...account,
+      cashAvailability,
+      headline: resolveEffectiveHeadline(projection),
+      projection,
+    },
+  });
+  assert.match(
+    rendered.text,
+    /Solana wallet.*0\\\.052 SOL.*≈ \$5\\\.13.*stale/u,
+  );
+  assert.match(rendered.text, /Stale data/u);
 });
 
 await test("Telegram Account Value explains an unavailable SOL estimate precisely", () => {

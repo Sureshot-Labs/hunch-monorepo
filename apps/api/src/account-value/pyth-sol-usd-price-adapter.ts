@@ -1,4 +1,5 @@
 import { BorshAccountsCoder } from "@coral-xyz/anchor";
+import { isAbortError } from "@hunch/shared";
 // Importing only the official IDL avoids the SDK root's transport/runtime
 // dependencies in this API-only valuation path.
 import { IDL as PYTH_SOLANA_RECEIVER_IDL } from "@pythnetwork/pyth-solana-receiver/idl/pyth_solana_receiver";
@@ -12,7 +13,10 @@ import { fetchSolanaRawAccountInfo } from "../services/solana-rpc.js";
 import { rpcReadCoordinator } from "../services/rpc-read-coordinator.js";
 import { formatUnsignedDecimal, multiplyRawByUnitPrice } from "./decimal.js";
 import { isKnownNativeSolAsset } from "./known-asset-catalog.js";
-import { PYTH_SOL_USD_PRICE_POLICY_ID } from "./valuation-service.js";
+import {
+  PYTH_SOL_USD_LAST_KNOWN_PRICE_SOURCE,
+  PYTH_SOL_USD_PRICE_POLICY_ID,
+} from "./valuation-service.js";
 
 export const PYTH_SOL_USD_ACCOUNT =
   "7UVimffxr9ow1uXYxsr4LHAcV58mLzhmwaeKvJ1pjLiE";
@@ -21,16 +25,39 @@ export const PYTH_SOLANA_RECEIVER_PROGRAM_ID =
 export const PYTH_SOL_USD_FEED_ID =
   "ef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d";
 
-const PYTH_SOL_USD_CACHE_TTL_MS = 20_000;
 const PYTH_SOL_USD_MAX_PUBLISH_AGE_MS = 60_000;
 const PYTH_SAFE_EXPONENT_ABS = 18;
 const PYTH_UNAVAILABLE_DIAGNOSTIC_THROTTLE_MS = 20_000;
 const receiverAccountCoder = new BorshAccountsCoder(PYTH_SOLANA_RECEIVER_IDL);
 
-type DecodedSolUsdPrice = Readonly<{
+export type PythSolUsdPriceRecord = Readonly<{
   unitPriceUsd: string;
   asOf: string;
   confidence: UsdEstimate["confidence"];
+}>;
+
+export type PythSolUsdCacheFence = Readonly<{
+  generation: string;
+  state: "empty" | "price" | "quarantine";
+  barrierSeconds: string | null;
+  price: PythSolUsdPriceRecord | null;
+}>;
+
+export type PythSolUsdCacheWriteResult =
+  | "accepted"
+  | "rejected"
+  | "unavailable";
+
+export type PythSolUsdLastKnownStore = Readonly<{
+  readFence: () => Promise<PythSolUsdCacheFence | null>;
+  commitPrice: (input: {
+    expectedGeneration: string;
+    price: PythSolUsdPriceRecord;
+  }) => Promise<PythSolUsdCacheWriteResult>;
+  quarantine: (input: {
+    reason: PythSolUsdUnavailableCode;
+    trustedPublishBarrierSeconds: string;
+  }) => Promise<PythSolUsdCacheWriteResult>;
 }>;
 
 type PythSolUsdAccountLoader = () => Promise<Readonly<{
@@ -48,6 +75,7 @@ export type PythSolUsdUnavailableCode =
   | "unexpected";
 
 function pythUnavailableCode(error: unknown): PythSolUsdUnavailableCode {
+  if (isAbortError(error)) return "rpc_unavailable";
   const message = error instanceof Error ? error.message.toLowerCase() : "";
   if (message.includes("account is unavailable")) return "account_unavailable";
   if (message.includes("confidence is too wide")) return "confidence_too_wide";
@@ -78,6 +106,16 @@ function pythUnavailableCode(error: unknown): PythSolUsdUnavailableCode {
     return "rpc_unavailable";
   }
   return "unexpected";
+}
+
+const TEMPORARY_PYTH_UNAVAILABLE_CODES = new Set<PythSolUsdUnavailableCode>([
+  "account_unavailable",
+  "price_stale",
+  "rpc_unavailable",
+]);
+
+function publishTimeSeconds(asOf: string): string {
+  return Math.floor(Date.parse(asOf) / 1_000).toString();
 }
 
 function bigintField(value: unknown, field: string): bigint {
@@ -145,7 +183,7 @@ export function decodePythSolUsdPrice(input: {
   data: Buffer;
   owner: string;
   now: Date;
-}): DecodedSolUsdPrice {
+}): PythSolUsdPriceRecord {
   if (input.owner !== PYTH_SOLANA_RECEIVER_PROGRAM_ID) {
     throw new Error("Pyth SOL/USD account owner changed");
   }
@@ -197,6 +235,7 @@ export class PythSolUsdPriceAdapter implements PriceAdapter {
   readonly adapterId = PYTH_SOL_USD_PRICE_POLICY_ID;
   readonly #cacheKey: string;
   readonly #loadAccount: PythSolUsdAccountLoader;
+  readonly #lastKnownStore: PythSolUsdLastKnownStore | undefined;
   readonly #now: () => Date;
   readonly #onUnavailable:
     | ((input: Readonly<{ code: PythSolUsdUnavailableCode }>) => void)
@@ -205,10 +244,20 @@ export class PythSolUsdPriceAdapter implements PriceAdapter {
     atMs: number;
     code: PythSolUsdUnavailableCode;
   }> | null = null;
+  #lastKnownPrice: PythSolUsdPriceRecord | null = null;
+  #lastKnownQuarantined = false;
+  #sharedQuarantineEstablished = false;
+  #unsafeValidationGeneration: string | null = null;
+  #quarantineAttemptEpoch = 0;
+  #pendingSharedQuarantine: Readonly<{
+    reason: PythSolUsdUnavailableCode;
+    trustedPublishBarrierSeconds: string;
+  }> | null = null;
 
   constructor(
     input?: Readonly<{
       cacheKey?: string;
+      lastKnownStore?: PythSolUsdLastKnownStore;
       loadAccount?: PythSolUsdAccountLoader;
       now?: () => Date;
       onUnavailable?: (
@@ -219,6 +268,7 @@ export class PythSolUsdPriceAdapter implements PriceAdapter {
     }>,
   ) {
     this.#cacheKey = input?.cacheKey ?? "pyth:sol-usd:v1";
+    this.#lastKnownStore = input?.lastKnownStore;
     this.#loadAccount =
       input?.loadAccount ??
       (() =>
@@ -240,10 +290,41 @@ export class PythSolUsdPriceAdapter implements PriceAdapter {
     ) {
       return null;
     }
+    let fence: PythSolUsdCacheFence | null = null;
+    if (this.#lastKnownStore) {
+      try {
+        fence = await this.#lastKnownStore.readFence();
+      } catch {
+        fence = null;
+      }
+    }
+    // A shared last-known store is the cross-process safety fence. When it is
+    // configured but unavailable, do not publish or remember a price that was
+    // never accepted by that fence.
+    if (this.#lastKnownStore && !fence) {
+      // Quarantine uses an independent Redis lane. A stalled primary
+      // read/price lane must not prevent an already-known unsafe observation
+      // from advancing the shared quarantine generation.
+      if (this.#lastKnownQuarantined && !this.#sharedQuarantineEstablished) {
+        await this.#retrySharedQuarantine();
+      }
+      return null;
+    }
+    if (this.#lastKnownQuarantined && !this.#sharedQuarantineEstablished) {
+      if (
+        fence?.state !== "quarantine" ||
+        fence.generation === this.#unsafeValidationGeneration
+      ) {
+        await this.#retrySharedQuarantine();
+        return null;
+      }
+      this.#sharedQuarantineEstablished = true;
+      this.#pendingSharedQuarantine = null;
+    }
+    const validationEpoch = this.#quarantineAttemptEpoch;
     try {
-      const price = await rpcReadCoordinator.memo(
-        this.#cacheKey,
-        { ttlMs: PYTH_SOL_USD_CACHE_TTL_MS },
+      const price = await rpcReadCoordinator.singleFlight(
+        `${this.#cacheKey}:${fence?.generation ?? "local"}`,
         async () => {
           const account = await this.#loadAccount();
           if (!account) throw new Error("Pyth SOL/USD account is unavailable");
@@ -254,6 +335,15 @@ export class PythSolUsdPriceAdapter implements PriceAdapter {
           });
         },
       );
+      if (this.#lastKnownStore && fence) {
+        const committed = await this.#lastKnownStore.commitPrice({
+          expectedGeneration: fence.generation,
+          price,
+        });
+        if (committed !== "accepted") return null;
+      }
+      if (validationEpoch !== this.#quarantineAttemptEpoch) return null;
+      this.#rememberLastKnownPrice(price);
       const nowMs = this.#now().getTime();
       const asOfMs = new Date(price.asOf).getTime();
       if (
@@ -262,7 +352,7 @@ export class PythSolUsdPriceAdapter implements PriceAdapter {
         asOfMs > nowMs ||
         nowMs - asOfMs > PYTH_SOL_USD_MAX_PUBLISH_AGE_MS
       ) {
-        return null;
+        return this.#lastKnownEstimate(input, this.#quarantineAttemptEpoch);
       }
       return {
         value: formatSolUsdValue(input.amount.raw, price.unitPriceUsd),
@@ -291,8 +381,145 @@ export class PythSolUsdPriceAdapter implements PriceAdapter {
           // Diagnostics must never become a valuation dependency.
         }
       }
+      if (TEMPORARY_PYTH_UNAVAILABLE_CODES.has(code)) {
+        return this.#lastKnownEstimate(input, validationEpoch);
+      }
+      await this.#quarantineLastKnownPrice(code, fence?.generation ?? null);
       return null;
     }
+  }
+
+  async freshValue(
+    input: Parameters<PriceAdapter["value"]>[0],
+  ): Promise<UsdEstimate | null> {
+    const estimate = await this.value(input);
+    return estimate?.priceSource === PYTH_SOL_USD_LAST_KNOWN_PRICE_SOURCE
+      ? null
+      : estimate;
+  }
+
+  #rememberLastKnownPrice(price: PythSolUsdPriceRecord): void {
+    if (this.#lastKnownQuarantined) {
+      this.#quarantineAttemptEpoch += 1;
+    }
+    this.#lastKnownQuarantined = false;
+    this.#sharedQuarantineEstablished = false;
+    this.#unsafeValidationGeneration = null;
+    this.#pendingSharedQuarantine = null;
+    this.#lastKnownPrice = price;
+  }
+
+  async #quarantineLastKnownPrice(
+    reason: PythSolUsdUnavailableCode,
+    unsafeValidationGeneration: string | null,
+  ): Promise<void> {
+    const attemptEpoch = this.#quarantineAttemptEpoch + 1;
+    this.#quarantineAttemptEpoch = attemptEpoch;
+    const trustedPublishBarrierSeconds = this.#lastKnownPrice
+      ? publishTimeSeconds(this.#lastKnownPrice.asOf)
+      : "0";
+    this.#lastKnownPrice = null;
+    this.#lastKnownQuarantined = true;
+    this.#sharedQuarantineEstablished = false;
+    this.#unsafeValidationGeneration = unsafeValidationGeneration;
+    const pendingSharedQuarantine = {
+      reason,
+      trustedPublishBarrierSeconds,
+    };
+    this.#pendingSharedQuarantine = pendingSharedQuarantine;
+    await this.#publishSharedQuarantine(pendingSharedQuarantine, attemptEpoch);
+  }
+
+  async #retrySharedQuarantine(): Promise<void> {
+    const pendingSharedQuarantine = this.#pendingSharedQuarantine;
+    if (!this.#lastKnownStore || !pendingSharedQuarantine) return;
+    const attemptEpoch = this.#quarantineAttemptEpoch + 1;
+    this.#quarantineAttemptEpoch = attemptEpoch;
+    await this.#publishSharedQuarantine(pendingSharedQuarantine, attemptEpoch);
+  }
+
+  async #publishSharedQuarantine(
+    pendingSharedQuarantine: Readonly<{
+      reason: PythSolUsdUnavailableCode;
+      trustedPublishBarrierSeconds: string;
+    }>,
+    attemptEpoch: number,
+  ): Promise<void> {
+    if (!this.#lastKnownStore) return;
+    try {
+      const result = await this.#lastKnownStore.quarantine({
+        reason: pendingSharedQuarantine.reason,
+        trustedPublishBarrierSeconds:
+          pendingSharedQuarantine.trustedPublishBarrierSeconds,
+      });
+      if (
+        attemptEpoch === this.#quarantineAttemptEpoch &&
+        this.#pendingSharedQuarantine === pendingSharedQuarantine
+      ) {
+        this.#sharedQuarantineEstablished = result === "accepted";
+        if (result === "accepted") {
+          this.#pendingSharedQuarantine = null;
+        }
+      }
+    } catch {
+      // The in-process quarantine remains authoritative even if the shared
+      // display cache is unavailable.
+    }
+  }
+
+  async #lastKnownEstimate(
+    input: Parameters<PriceAdapter["value"]>[0],
+    expectedQuarantineEpoch: number,
+  ): Promise<UsdEstimate | null> {
+    if (expectedQuarantineEpoch !== this.#quarantineAttemptEpoch) return null;
+    if (
+      this.#lastKnownQuarantined &&
+      (!this.#lastKnownStore || !this.#sharedQuarantineEstablished)
+    ) {
+      return null;
+    }
+    let price = this.#lastKnownPrice;
+    if (this.#lastKnownStore) {
+      try {
+        const fence = await this.#lastKnownStore.readFence();
+        if (expectedQuarantineEpoch !== this.#quarantineAttemptEpoch) {
+          return null;
+        }
+        if (!fence) return null;
+        if (fence.state === "quarantine") {
+          this.#lastKnownQuarantined = true;
+          this.#sharedQuarantineEstablished = true;
+          this.#lastKnownPrice = null;
+          return null;
+        }
+        price = fence.state === "price" ? fence.price : null;
+        if (price) {
+          // A price observed after this process successfully established a
+          // shared quarantine can only have crossed that generation via a
+          // freshly validated publish strictly above the barrier.
+          this.#rememberLastKnownPrice(price);
+        } else {
+          this.#lastKnownPrice = null;
+        }
+      } catch {
+        // Persistent display cache is best-effort and must not become an
+        // Account Value availability dependency.
+        return null;
+      }
+    }
+    if (!price) return null;
+    const nowMs = this.#now().getTime();
+    const asOfMs = Date.parse(price.asOf);
+    if (!Number.isFinite(nowMs) || !Number.isFinite(asOfMs) || asOfMs > nowMs) {
+      return null;
+    }
+    return {
+      value: formatSolUsdValue(input.amount.raw, price.unitPriceUsd),
+      asOf: price.asOf,
+      priceSource: PYTH_SOL_USD_LAST_KNOWN_PRICE_SOURCE,
+      confidence: price.confidence,
+      policyId: input.policyId,
+    };
   }
 }
 

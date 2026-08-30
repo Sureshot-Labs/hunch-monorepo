@@ -4,6 +4,23 @@ import type { RedisClientType as RedisClient } from "redis";
 
 export type ApiCacheWarmGroup = "feed" | "market_map" | "wallet_intel";
 
+export const API_CACHE_WARM_FAILURE_BACKOFF_SEC = 120;
+
+export type ApiCacheWarmGroupStats = {
+  targetsAttempted: number;
+  targetsSucceeded: number;
+  targetsFailed: number;
+  cacheHits: number;
+  cacheMisses: number;
+  cacheOther: number;
+  durationMs: number;
+};
+
+export type ApiCacheWarmGroupStatsByGroup = Record<
+  ApiCacheWarmGroup,
+  ApiCacheWarmGroupStats
+>;
+
 export type ApiCacheWarmTarget = {
   id: string;
   label: string;
@@ -19,6 +36,7 @@ export type ApiCacheWarmRunnerState = {
   targetsAttempted: number;
   targetsSucceeded: number;
   targetsFailed: number;
+  groups: ApiCacheWarmGroupStatsByGroup;
   baseUrl: string | null;
   error: string | null;
 };
@@ -105,6 +123,68 @@ export const API_CACHE_WARM_LOCK_KEY = `${KEY_PREFIX}:lock`;
 export const API_CACHE_WARM_STATUS_KEY = `${KEY_PREFIX}:status:last`;
 export const API_CACHE_WARM_STATUS_TTL_SEC = 60 * 60 * 24 * 30;
 
+function emptyGroupStats(): ApiCacheWarmGroupStats {
+  return {
+    targetsAttempted: 0,
+    targetsSucceeded: 0,
+    targetsFailed: 0,
+    cacheHits: 0,
+    cacheMisses: 0,
+    cacheOther: 0,
+    durationMs: 0,
+  };
+}
+
+export function emptyApiCacheWarmGroupStats(): ApiCacheWarmGroupStatsByGroup {
+  return {
+    feed: emptyGroupStats(),
+    market_map: emptyGroupStats(),
+    wallet_intel: emptyGroupStats(),
+  };
+}
+
+export function apiCacheWarmCooldownSec(input: {
+  pollIntervalSec: number;
+  previousResult: string | null | undefined;
+}): number {
+  return input.previousResult === "partial" || input.previousResult === "error"
+    ? Math.max(input.pollIntervalSec, API_CACHE_WARM_FAILURE_BACKOFF_SEC)
+    : input.pollIntervalSec;
+}
+
+export async function runApiCacheWarmTargetsSequentially<TResult>(
+  targets: readonly ApiCacheWarmTarget[],
+  runTarget: (target: ApiCacheWarmTarget) => Promise<TResult>,
+): Promise<Array<{ target: ApiCacheWarmTarget; result: TResult }>> {
+  const runs: Array<{ target: ApiCacheWarmTarget; result: TResult }> = [];
+  for (const target of targets) {
+    runs.push({ target, result: await runTarget(target) });
+  }
+  return runs;
+}
+
+export function summarizeApiCacheWarmGroups(
+  runs: ReadonlyArray<{
+    target: ApiCacheWarmTarget;
+    result: { ok: boolean; durationMs: number; cache: string | null };
+  }>,
+): ApiCacheWarmGroupStatsByGroup {
+  const groups = emptyApiCacheWarmGroupStats();
+  for (const run of runs) {
+    const group = groups[run.target.group];
+    group.targetsAttempted += 1;
+    if (run.result.ok) group.targetsSucceeded += 1;
+    else group.targetsFailed += 1;
+    group.durationMs += run.result.durationMs;
+
+    const cache = run.result.cache?.trim().toLowerCase();
+    if (cache === "hit") group.cacheHits += 1;
+    else if (cache === "miss") group.cacheMisses += 1;
+    else group.cacheOther += 1;
+  }
+  return groups;
+}
+
 export function apiCacheWarmTargetStatsKey(targetId: string): string {
   return `${KEY_PREFIX}:target:${targetId}`;
 }
@@ -118,6 +198,29 @@ function parseOptionalNumber(value: string | undefined): number | null {
 function parseString(value: string | undefined): string | null {
   if (!value) return null;
   return value;
+}
+
+function parseGroupStats(
+  value: string | undefined,
+): ApiCacheWarmGroupStatsByGroup {
+  if (!value) return emptyApiCacheWarmGroupStats();
+  try {
+    const parsed = JSON.parse(value) as Partial<ApiCacheWarmGroupStatsByGroup>;
+    const groups = emptyApiCacheWarmGroupStats();
+    for (const group of Object.keys(groups) as ApiCacheWarmGroup[]) {
+      const candidate = parsed[group];
+      if (!candidate) continue;
+      for (const key of Object.keys(groups[group]) as Array<
+        keyof ApiCacheWarmGroupStats
+      >) {
+        const number = Number(candidate[key]);
+        if (Number.isFinite(number) && number >= 0) groups[group][key] = number;
+      }
+    }
+    return groups;
+  } catch {
+    return emptyApiCacheWarmGroupStats();
+  }
 }
 
 function parseTargetStats(
@@ -167,6 +270,7 @@ export async function readApiCacheWarmStatus(redis: RedisClient): Promise<{
       targetsAttempted: parseOptionalNumber(statusHash.targetsAttempted) ?? 0,
       targetsSucceeded: parseOptionalNumber(statusHash.targetsSucceeded) ?? 0,
       targetsFailed: parseOptionalNumber(statusHash.targetsFailed) ?? 0,
+      groups: parseGroupStats(statusHash.groups),
       baseUrl: parseString(statusHash.baseUrl),
       error: parseString(statusHash.error),
     },

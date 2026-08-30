@@ -149,6 +149,7 @@ export function registerAccountValueRoutes(
             ok: true,
             asOf: account.projection.asOf,
             valuationCompleteness: account.projection.valuationCompleteness,
+            valuationFreshness: account.projection.valuationFreshness,
             collectorErrors: account.projection.collectorErrors,
             items,
             total: filteredItems.length,
